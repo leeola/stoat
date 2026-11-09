@@ -60,6 +60,12 @@ const FACE_STYLES: usize = 4;
 /// so a variable face rasterizes the glyph along its weight axis. Italic
 /// reaches it as a style, which resolves the family's italic face, or a skew of
 /// the upright face where the family has no italic one.
+///
+/// A family with no face at the bold weight shapes a bold cell at the regular
+/// weight. The shaper takes a family's face only at the requested weight or
+/// along a variable weight axis, so a bold request on a regular-only family
+/// leaves that family. Another font's bold face then draws the character, such
+/// as a system bold face's private-use glyph in place of a Nerd Font icon.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub(super) struct FaceStyle {
     pub(super) bold: bool,
@@ -112,6 +118,7 @@ pub(super) fn shape_char(
     covered: &mut Option<CoveredSet>,
 ) -> Option<CacheKey> {
     let (family, any_face_covers) = glyph_family(font_system, ch, primary, covered);
+    let style = shaping_style(font_system, family, style);
     // Nothing in the database maps this character, so a fallback walk would
     // load and shape every face only to end on the symbols face's glyph zero.
     // The basic path maps through that face's own charmap and reaches the same
@@ -583,6 +590,7 @@ pub(super) fn shape_run(
         scratch.shaped_chars += text.chars().count();
     }
 
+    let style = shaping_style(font_system, family, style);
     let attrs = AttrsList::new(&style.attrs(family));
     let line = match &mut scratch.line {
         Some(line) => {
@@ -941,6 +949,50 @@ fn family_covers(font_system: &mut FontSystem, family: Family<'_>, ch: char) -> 
         .is_some_and(|font| font_covers(&font, ch))
 }
 
+/// The style that `family` shapes `style` in, which drops bold when the family
+/// has no face at the bold weight.
+///
+/// Italic stays, because the shaper's fallback filter reads the weight alone,
+/// and an italic request on a family with no italic face still takes its
+/// upright face.
+fn shaping_style(font_system: &FontSystem, family: Family<'_>, style: FaceStyle) -> FaceStyle {
+    match style.bold && !weight_available(font_system, family, Weight::BOLD) {
+        true => FaceStyle {
+            bold: false,
+            ..style
+        },
+        false => style,
+    }
+}
+
+/// Whether the face that `family` resolves to draws at `weight`, by its own
+/// weight or along a variable weight axis that spans it.
+fn weight_available(font_system: &FontSystem, family: Family<'_>, weight: Weight) -> bool {
+    let db = font_system.db();
+    let Some(id) = db.query(&Query {
+        families: &[family],
+        weight,
+        ..Default::default()
+    }) else {
+        return false;
+    };
+    if db.face(id).is_some_and(|face| face.weight == weight) {
+        return true;
+    }
+
+    let wanted = f32::from(weight.0);
+    db.with_face_data(id, |data, index| {
+        TtfFace::parse(data, index)
+            .ok()?
+            .variation_axes()
+            .into_iter()
+            .find(|axis| axis.tag == ttf_parser::Tag::from_bytes(b"wght"))
+            .map(|axis| axis.min_value <= wanted && wanted <= axis.max_value)
+    })
+    .flatten()
+    .unwrap_or(false)
+}
+
 /// Whether `font` has a glyph for `ch`, read from its character map.
 pub(super) fn font_covers(font: &Font, ch: char) -> bool {
     font.as_swash().charmap().map(ch) != 0
@@ -1222,15 +1274,15 @@ pub(super) fn probe_cap_height(font: Option<&Font>, metrics: CellMetrics) -> f32
 mod tests {
     use super::{
         build_font_system, bundled_database, bundled_font_system_with_locale, font_covers,
-        glyph_family, resolve_primary_family, resolve_primary_font, run_text_and_columns_into,
-        shape_char, shape_family, shape_run, shape_run_cached, shape_words, substitution_rules,
-        CoveredSet, FaceStyle, RunShapeCache, ShapeScratch, BUNDLED_FAMILY, EMOJI_FAMILIES,
-        RUN_SHAPE_CACHE_CAP, SYMBOLS_FAMILY,
+        glyph_family, load_bundled_fonts, resolve_primary_family, resolve_primary_font,
+        run_text_and_columns_into, shape_char, shape_family, shape_run, shape_run_cached,
+        shape_words, substitution_rules, weight_available, CoveredSet, FaceStyle, RunShapeCache,
+        ShapeScratch, BUNDLED_FAMILY, EMOJI_FAMILIES, RUN_SHAPE_CACHE_CAP, SYMBOLS_FAMILY,
     };
     use crate::render::CellMetrics;
     use cosmic_text::{
         fontdb::{Database, Query, Weight, ID},
-        Attrs, Buffer as CosmicBuffer, Family, FontSystem, Metrics, Shaping,
+        Attrs, Buffer as CosmicBuffer, CacheKey, Family, FontSystem, Metrics, Shaping,
     };
 
     /// A bundled-only system at a fixed locale, so a test never reads the
@@ -1280,6 +1332,91 @@ mod tests {
             normal, bold,
             "the bold weight resolves a distinct face, diverging the glyph cache key",
         );
+    }
+
+    #[test]
+    fn weight_available_reads_a_face_weight_or_its_axis() {
+        let font_system = bundled();
+        let available = |name, weight| weight_available(&font_system, Family::Name(name), weight);
+
+        assert_eq!(
+            [
+                available(BUNDLED_FAMILY, Weight::BOLD),
+                available(SYMBOLS_FAMILY, Weight::BOLD),
+                available(SYMBOLS_FAMILY, Weight::NORMAL),
+            ],
+            [true, false, true],
+            "the variable text face spans bold, and the regular symbols face draws regular alone",
+        );
+    }
+
+    /// A bold icon that the symbols face maps draws from that face, though the
+    /// symbols family has no bold face and another family's bold face maps the
+    /// same code point.
+    ///
+    /// The database holds the bundled faces and a copy of the bundled DejaVu
+    /// Sans whose OS/2 weight class reads 700. The copy loads as a bold DejaVu
+    /// Sans that maps U+F432 in its private-use block, as a system's DejaVu
+    /// Sans Bold does.
+    #[test]
+    fn a_bold_icon_keeps_the_symbols_face_over_a_bold_face_that_maps_it() {
+        let mut db = Database::new();
+        load_bundled_fonts(&mut db);
+        db.load_font_data(bold_copy(include_bytes!(
+            "../../../assets/fonts/DejaVuSans/DejaVuSans.ttf"
+        )));
+        let mut font_system = FontSystem::new_with_locale_and_db("en-US".into(), db);
+        let metrics = CellMetrics::from_font_size(30, 1.0);
+        let bold = FaceStyle {
+            bold: true,
+            italic: false,
+        };
+
+        let alone = shape_char(
+            &mut font_system,
+            '\u{F432}',
+            1.0,
+            metrics,
+            Family::Name(BUNDLED_FAMILY),
+            bold,
+            &mut None,
+        )
+        .expect("the icon shapes");
+        let run = shape_run(
+            &mut ShapeScratch::default(),
+            &mut font_system,
+            "\u{F432}",
+            metrics,
+            Family::Name(SYMBOLS_FAMILY),
+            bold,
+        );
+
+        let face = |key: CacheKey| (Some(key.font_id), key.glyph_id != 0);
+        let symbols = (face_of(&font_system, Family::Name(SYMBOLS_FAMILY)), true);
+        assert_eq!(
+            (
+                face(alone),
+                run.into_iter()
+                    .map(|(_, key)| face(key))
+                    .collect::<Vec<_>>()
+            ),
+            (symbols, vec![symbols]),
+            "the icon's face and whether it has a glyph, shaped alone and as a run",
+        );
+    }
+
+    /// `font` with its OS/2 weight class set to 700, which a font database reads
+    /// as the face's weight.
+    fn bold_copy(font: &[u8]) -> Vec<u8> {
+        let os2 = ttf_parser::RawFace::parse(font, 0)
+            .expect("a font")
+            .table(ttf_parser::Tag::from_bytes(b"OS/2"))
+            .expect("an OS/2 table");
+        let weight_class = os2.as_ptr().addr() - font.as_ptr().addr() + 4;
+
+        let mut bytes = font.to_vec();
+        bytes[weight_class..weight_class + 2].copy_from_slice(&700u16.to_be_bytes());
+        bytes
     }
 
     #[test]
