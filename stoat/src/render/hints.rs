@@ -5,7 +5,7 @@ use crate::{
 use ratatui::{
     buffer::Buffer,
     layout::Rect,
-    style::Style,
+    style::{Modifier, Style},
     widgets::{Block, Borders},
 };
 use std::collections::HashMap;
@@ -249,6 +249,9 @@ pub(crate) fn render_hints_grouped(
     let inner = docked_frame(buf, help_area, modal_style, docked, theme, &mut *scene);
 
     let key_style = theme.get(crate::theme::scope::UI_KEY_LABEL);
+    // A row's keys are what the box is for, so they draw bold, and the
+    // footer's keys keep the text's weight.
+    let row_key_style = key_style.add_modifier(Modifier::BOLD);
     let toggle_on = theme.get(crate::theme::scope::UI_TOGGLE_ACTIVE);
     let toggle_off = theme.get(crate::theme::scope::UI_TOGGLE_INACTIVE);
     let action_style = theme.get(crate::theme::scope::UI_TEXT);
@@ -316,7 +319,7 @@ pub(crate) fn render_hints_grouped(
                 row,
                 end_x,
                 &cell.key,
-                key_style,
+                row_key_style,
                 run_bg,
                 row_scale,
                 &mut *scene,
@@ -698,7 +701,11 @@ mod tests {
         toggle::{Toggle, ToggleStates},
     };
     use crossterm::event::{KeyCode, KeyModifiers};
-    use ratatui::{buffer::Buffer, layout::Rect, style::Color};
+    use ratatui::{
+        buffer::Buffer,
+        layout::Rect,
+        style::{Color, Modifier},
+    };
 
     fn row_text(buf: &Buffer, y: u16) -> String {
         let area = buf.area;
@@ -1060,6 +1067,24 @@ mod tests {
             &mut scene,
         );
         buf
+    }
+
+    /// A row's key draws bold and its action at the text's weight, as the
+    /// HintBox board draws them.
+    #[test]
+    fn a_row_draws_its_key_bold() {
+        let theme = theme_t(r##"ui.key_label.fg = "#010203";"##);
+        let buf = render_cells(&plain(&[("k", "act".to_string())]), &theme);
+
+        let y = (0..buf.area.height)
+            .find(|&y| row_text(&buf, y).contains("act"))
+            .expect("the row");
+        let bold = |needle: &str| {
+            (0..buf.area.width)
+                .find(|&x| buf[(x, y)].symbol() == needle)
+                .map(|x| buf[(x, y)].modifier.contains(Modifier::BOLD))
+        };
+        assert_eq!((bold("k"), bold("a")), (Some(true), Some(false)));
     }
 
     /// A cell frame's border rules the title row off by itself, so the row's

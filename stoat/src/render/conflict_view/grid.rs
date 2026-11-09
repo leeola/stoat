@@ -425,7 +425,7 @@ impl RowPainter<'_> {
         if let Some(color) = look.bar {
             self.bar(column, y, color);
         }
-        self.number(column, y, side.line_num, self.colors.muted, bg);
+        self.number(column, y, side.line_num, self.colors.muted, bg, false);
 
         let cells = column.text_cells(column.right());
         render_side_text(
@@ -478,8 +478,16 @@ impl RowPainter<'_> {
     }
 
     /// Push `num` right-aligned in `column`'s number field on row `y`, backed
-    /// by the surface `bg`.
-    fn number(&mut self, column: Column, y: u16, num: u32, color: [u8; 3], bg: [u8; 3]) {
+    /// by the surface `bg`, in the bold face where `bold` is set.
+    fn number(
+        &mut self,
+        column: Column,
+        y: u16,
+        num: u32,
+        color: [u8; 3],
+        bg: [u8; 3],
+        bold: bool,
+    ) {
         self.scratch.clear();
         write!(self.scratch, "{num}").expect("writing to a String is infallible");
         let advance = text_run::advance_sixteenths(self.scratch.len(), self.cols.number_scale);
@@ -492,7 +500,7 @@ impl RowPainter<'_> {
                 color,
                 bg: Some(bg),
                 text: &self.scratch,
-                bold: false,
+                bold,
                 follow: 0,
                 anchor: None,
             },
@@ -729,13 +737,12 @@ pub(super) fn paint_rows(
 
         if let DiffRowKind::BufferRow { buffer_row } = row_states[index - scroll_row as usize].kind
         {
-            // FIXME: A text run carries no weight, so the cursor row's number
-            // draws at regular weight where the MergeGrid board draws it bold.
-            let color = match paint.cursor_row == Some(display_row) {
+            let at_cursor = paint.cursor_row == Some(display_row);
+            let color = match at_cursor {
                 true => colors.text,
                 false => colors.muted,
             };
-            painter.number(merged, y, buffer_row + 1, color, merged_bg);
+            painter.number(merged, y, buffer_row + 1, color, merged_bg, at_cursor);
             paint_highlighted_row(
                 snapshot,
                 display_row,
@@ -870,7 +877,7 @@ fn header_cell(cell: HeaderCell<'_>, buf: &mut Buffer, scene: &mut ApcScene) {
         scale,
     } = cell;
     let advance = |text: &str| text_run::advance_sixteenths(text.chars().count(), scale);
-    let mut run = |col: u16, text: &str, color: [u8; 3]| {
+    let mut run = |col: u16, text: &str, color: [u8; 3], bold: bool| {
         TextRun {
             col: col as i16,
             row: 0,
@@ -878,7 +885,7 @@ fn header_cell(cell: HeaderCell<'_>, buf: &mut Buffer, scene: &mut ApcScene) {
             color,
             bg: Some(bg),
             text,
-            bold: false,
+            bold,
             follow: 0,
             anchor: None,
         }
@@ -891,9 +898,7 @@ fn header_cell(cell: HeaderCell<'_>, buf: &mut Buffer, scene: &mut ApcScene) {
     if start + advance(name) > end {
         return;
     }
-    // FIXME: A text run carries no weight, so the column names draw at regular
-    // weight where the MergeGrid board draws them bold.
-    run(start, name, name_color);
+    run(start, name, name_color, true);
 
     let keys_x = end.saturating_sub(advance(keys));
     let keys_fit = !keys.is_empty() && keys_x >= label_x;
@@ -903,10 +908,10 @@ fn header_cell(cell: HeaderCell<'_>, buf: &mut Buffer, scene: &mut ApcScene) {
     };
     let label = fit(label, label_end.saturating_sub(label_x), scale);
     if !label.is_empty() {
-        run(label_x, label, muted);
+        run(label_x, label, muted, false);
     }
     if keys_fit {
-        run(keys_x, keys, muted);
+        run(keys_x, keys, muted, false);
     }
 }
 

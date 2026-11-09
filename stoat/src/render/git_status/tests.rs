@@ -1,5 +1,6 @@
 use super::{divergence_text, git_status_layout, note_text, render_git_status};
 use crate::{
+    app::DEFAULT_KEYMAP,
     git_status::{
         Divergence, FileRow, GitStatusModel, GitStatusPanel, Note, OpBanner, OpKind, RowKind,
         Section, SectionKind,
@@ -9,6 +10,7 @@ use crate::{
 use ratatui::{buffer::Buffer, layout::Rect};
 use std::path::PathBuf;
 use stoat_widgets::ApcScene;
+use stoatty_protocol::command::{decode_stream, Command};
 
 /// A model with one section of `rows` files and no banner.
 fn model(rows: usize) -> GitStatusModel {
@@ -160,4 +162,42 @@ fn the_banner_rows_come_out_of_the_body_the_scroll_keeps() {
     };
 
     assert_eq!((top(None), top(Some(banner))), (5, 8));
+}
+
+/// The banner's tag chip and each row's kind letter draw bold, as the
+/// VcsStatus board draws them, and no other run of the panel does.
+#[test]
+fn the_tag_chip_and_the_kind_letters_draw_bold() {
+    let (config, _) = stoat_config::parse(DEFAULT_KEYMAP);
+    let theme = Theme::from_config(&config.expect("the shipped config parses"), "ermine_night")
+        .expect("ermine_night loads");
+    let mut panel = GitStatusPanel::default();
+    panel.land(GitStatusModel {
+        op: Some(OpBanner {
+            kind: OpKind::Merge,
+            head: "feature".to_string(),
+            message: "merge feature".to_string(),
+            detail: String::new(),
+            keys: Vec::new(),
+        }),
+        ..model(2)
+    });
+    let area = Rect::new(0, 0, 80, 14);
+    let mut scene = ApcScene::new();
+    render_git_status(
+        &mut panel,
+        &theme,
+        area,
+        &mut Buffer::empty(area),
+        &mut scene,
+    );
+
+    let bold: Vec<String> = decode_stream(scene.buffer())
+        .into_iter()
+        .filter_map(|command| match command {
+            Command::TextRun(run) if run.bold => Some(run.text),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(bold, ["MERGE", "M", "M"]);
 }

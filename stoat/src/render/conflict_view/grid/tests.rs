@@ -332,6 +332,23 @@ fn the_cursor_row_lifts_its_merged_number() {
     );
 }
 
+/// The three column names and the cursor row's merged number draw bold, as the
+/// MergeGrid board draws them, and no other run of the grid does.
+#[test]
+fn the_column_names_and_the_cursor_row_s_number_draw_bold() {
+    let shot = grid_shot(ONE_CHUNK, &[]);
+    let bold: Vec<String> = shot
+        .commands
+        .iter()
+        .filter_map(|command| match command {
+            Command::TextRun(run) if run.bold => Some(run.text.clone()),
+            _ => None,
+        })
+        .collect();
+
+    assert_eq!(bold, ["ours", "merged", "theirs", "2"]);
+}
+
 #[test]
 fn a_taken_side_bars_the_merged_column_and_fades_the_other_side() {
     let shot = grid_shot(ONE_CHUNK, &[&ConflictPickOurs]);

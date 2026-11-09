@@ -6,7 +6,7 @@ use crate::{
 use ratatui::{
     buffer::Buffer,
     layout::Rect,
-    style::{Color, Style},
+    style::{Color, Modifier, Style},
     widgets::{Block, Borders, StatefulWidget, Widget},
 };
 use std::path::Path;
@@ -615,6 +615,7 @@ pub(crate) fn toggle_mark(
 ///
 /// `bg` is the run's own background. The renderer paints it as one opaque box
 /// behind the alpha-blended glyphs, so it need not match the surface beneath.
+/// The run draws bold where `style` adds the bold modifier, as the cells do.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn text(
     buf: &mut Buffer,
@@ -636,7 +637,7 @@ pub(crate) fn text(
                 color,
                 bg: Some(bg),
                 text: content,
-                bold: false,
+                bold: style.add_modifier.contains(Modifier::BOLD),
                 follow: 0,
                 anchor: None,
             }
@@ -664,7 +665,7 @@ mod tests {
     use ratatui::{
         buffer::Buffer,
         layout::Rect,
-        style::{Color, Style},
+        style::{Color, Modifier, Style},
     };
     use std::path::Path;
     use stoat_config::parse;
@@ -1463,6 +1464,40 @@ mod tests {
                 color: [1, 2, 3],
                 bg: Some([9, 9, 9]),
                 bold: false,
+                follow: 0,
+                anchor: None,
+                text: "hi".to_owned(),
+            })
+        );
+    }
+
+    /// A style that adds the bold modifier draws its run bold, as it draws
+    /// its cells.
+    #[test]
+    fn a_bold_style_draws_a_bold_run() {
+        let mut buf = Buffer::empty(Rect::new(0, 0, 8, 2));
+        let mut scene = ApcScene::new();
+        let bold = rgb_style().add_modifier(Modifier::BOLD);
+        text(
+            &mut buf,
+            1,
+            0,
+            5,
+            "hi",
+            bold,
+            Some([9, 9, 9]),
+            218,
+            &mut scene,
+        );
+        assert_eq!(
+            scene.buffer(),
+            &encode_text_run(&TextRunCommand {
+                col: 16,
+                row: 0,
+                scale: 218,
+                color: [1, 2, 3],
+                bg: Some([9, 9, 9]),
+                bold: true,
                 follow: 0,
                 anchor: None,
                 text: "hi".to_owned(),

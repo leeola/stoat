@@ -2657,8 +2657,11 @@ fn paint_status_fallback(buf: &mut Buffer, area: Rect, left: &[StatusSeg], right
 /// Resolve each segment's fg/bg to RGB for the rich path, defaulting a missing
 /// channel to `base`'s.
 ///
-/// Returns `None` if any resolved color is not RGB, since a theme that cannot
-/// supply RGB status colors drives the cell fallback rather than the rich bar.
+/// A segment draws bold where its style over `base` adds the bold modifier, as
+/// the cell fallback paints it over the run's fill.
+///
+/// Returns `None` if any resolved color is not RGB, since a theme without RGB
+/// status colors drives the cell fallback rather than the rich bar.
 fn resolve_rich_segments(segments: &[StatusSeg], base: Style) -> Option<Vec<StatusSegment<'_>>> {
     segments
         .iter()
@@ -2669,7 +2672,7 @@ fn resolve_rich_segments(segments: &[StatusSeg], base: Style) -> Option<Vec<Stat
                 text: text.as_str(),
                 fg,
                 bg,
-                bold: false,
+                bold: base.patch(*style).add_modifier.contains(Modifier::BOLD),
             })
         })
         .collect()
@@ -3346,8 +3349,8 @@ fn render_image_pane(
 mod tests {
     use super::{
         byte_size, diff_base_lead, focused_staged_label, paint_status_fallback, read_only_note,
-        repo_segments, split_halves, split_side_segments, status_filename, tab_mark,
-        DiffSideColors, DiffSidesColors,
+        repo_segments, resolve_rich_segments, split_halves, split_side_segments, status_filename,
+        tab_mark, DiffSideColors, DiffSidesColors,
     };
     use crate::{
         action_handlers::{dispatch, focused_editor_mut},
@@ -4208,6 +4211,36 @@ mod tests {
                 Some(" \u{2387} main \u{2193}3 \u{2502} \u{2713} clean ".to_string()),
                 Some(" \u{2387} main \u{2502} \u{2713} clean ".to_string()),
             ],
+        );
+    }
+
+    /// A rich segment draws bold where its style over the run's base adds the
+    /// bold modifier, as the cell fallback paints it. A base that adds it
+    /// makes every segment bold but one whose style takes it away.
+    #[test]
+    fn a_rich_segment_takes_its_weight_from_its_style_over_the_base() {
+        use ratatui::style::{Color, Modifier, Style};
+
+        let segments = [
+            Style::default(),
+            Style::default().add_modifier(Modifier::BOLD),
+            Style::default().remove_modifier(Modifier::BOLD),
+        ]
+        .map(|style| ("x".to_string(), style));
+        let base = Style::default()
+            .fg(Color::Rgb(1, 2, 3))
+            .bg(Color::Rgb(4, 5, 6));
+        let weights = |base: Style| {
+            resolve_rich_segments(&segments, base)
+                .expect("RGB colors")
+                .iter()
+                .map(|segment| segment.bold)
+                .collect::<Vec<_>>()
+        };
+
+        assert_eq!(
+            [weights(base), weights(base.add_modifier(Modifier::BOLD))],
+            [[false, true, false], [true, true, false]].map(Vec::from),
         );
     }
 

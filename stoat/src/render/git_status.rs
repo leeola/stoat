@@ -360,8 +360,6 @@ impl Painter<'_> {
             ROW_BAR_WIDTH,
             self.theme.get(section.kind.scope()),
         );
-        // FIXME: The kind letter and the tag chip draw at regular weight, since
-        // a text run carries no weight.
         let letter = file.kind.letter().to_string();
         let kind_style = self
             .theme
@@ -475,7 +473,8 @@ impl Painter<'_> {
         let chrome = Style {
             fg: self.theme.get(scope::UI_SURFACE_CHROME).bg,
             ..Style::default()
-        };
+        }
+        .add_modifier(Modifier::BOLD);
         self.run(chip, CHIP_PAD, self.caption, tag, chrome, Some(fill));
     }
 
@@ -519,7 +518,8 @@ impl Painter<'_> {
         .render(row, self.buf, self.scene);
     }
 
-    /// A text run at `scale`, `col` sixteenths into `row`.
+    /// A text run at `scale`, `col` sixteenths into `row`, bold where `style`
+    /// adds the bold modifier.
     fn run(
         &mut self,
         row: Rect,
@@ -536,7 +536,7 @@ impl Painter<'_> {
             color: rgb(style),
             bg,
             text,
-            bold: false,
+            bold: style.add_modifier.contains(Modifier::BOLD),
             follow: 0,
             anchor: None,
         }
