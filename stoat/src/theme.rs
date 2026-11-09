@@ -936,9 +936,15 @@ pub mod scope {
     pub const DIFF_UNAPPROVED: &str = "diff.unapproved";
     /// The fill of a changes view's fold row, the row that stands for the
     /// unchanged lines a fold hides.
+    ///
+    /// A foreground stripes the background with a 135 degree hatch in that
+    /// color under stoatty, and fills the cells solid in a plain terminal.
     pub const DIFF_FOLD: &str = "diff.fold";
     /// The fill of a split diff row's empty half, where the row holds a line
     /// on the other side alone, such as a removed line's live half.
+    ///
+    /// A foreground stripes the background with a 135 degree hatch in that
+    /// color under stoatty, and fills the cells solid in a plain terminal.
     pub const DIFF_ABSENT: &str = "diff.absent";
     /// The base half of a split diff view's status row, its text on its tint.
     ///

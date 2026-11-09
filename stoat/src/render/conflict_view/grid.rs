@@ -192,6 +192,9 @@ pub(super) struct GridColors {
     pub(super) head: Option<[u8; 3]>,
     /// The fill of a cell whose side has no line on the row.
     pub(super) absent: Option<[u8; 3]>,
+    /// The line color of the hatch over [`Self::absent`], which `diff.absent`'s
+    /// foreground gives, or `None` for a solid fill.
+    pub(super) absent_hatch: Option<[u8; 3]>,
     pub(super) ghost: Style,
     pub(super) ours: Tone,
     pub(super) theirs: Tone,
@@ -231,6 +234,7 @@ impl GridColors {
             rule: style_rgb(theme.get(s::UI_SURFACE_RAISED).bg),
             head: style_rgb(theme.get(s::VCS_CONFLICT_HEAD).bg),
             absent: style_rgb(theme.get(s::DIFF_ABSENT).bg),
+            absent_hatch: style_rgb(theme.get(s::DIFF_ABSENT).fg),
             ghost: theme.try_get(s::VCS_CONFLICT_GHOST).unwrap_or_else(|| {
                 Style::default()
                     .fg(Color::Rgb(r, g, b))
@@ -384,6 +388,9 @@ struct RowPainter<'a> {
     buf: &'a mut Buffer,
     numbers: TextRunBatch,
     bars: BarBatch,
+    /// The absent cells that take the hatch, one rect per cell run, which go
+    /// out as hatched bars after the rows.
+    hatched: Vec<Rect>,
     /// One buffer for every number the paint formats, rather than one per row.
     scratch: String,
 }
@@ -393,7 +400,8 @@ impl RowPainter<'_> {
     ///
     /// The cell takes its fill, its bar, its number, and its text with its
     /// change spans in `spans`. A side with no line on the row fills with the
-    /// absent color and draws nothing else.
+    /// absent color, under the absent hatch when the theme gives one, and draws
+    /// nothing else.
     fn side(
         &mut self,
         column: Column,
@@ -406,6 +414,9 @@ impl RowPainter<'_> {
         let Some(side) = side else {
             if let Some(absent) = self.colors.absent {
                 fill_line_tint(self.buf, column.x, y, usize::from(column.width), absent);
+                if self.colors.absent_hatch.is_some() {
+                    self.hatched.push(Rect::new(column.x, y, column.width, 1));
+                }
             }
             return;
         };
@@ -661,6 +672,7 @@ pub(super) fn paint_rows(
         buf,
         numbers: TextRunBatch::default(),
         bars: BarBatch::default(),
+        hatched: Vec::new(),
         scratch: String::new(),
     };
     let mut chips = Vec::new();
@@ -784,9 +796,22 @@ pub(super) fn paint_rows(
     let RowPainter {
         mut numbers,
         mut bars,
+        hatched,
         buf,
         ..
     } = painter;
+    if let (Some(fill), Some(hatch)) = (colors.absent, colors.absent_hatch) {
+        for cells in hatched {
+            Bar {
+                x: 0,
+                y: 0,
+                width: cells.width * 16,
+                height: 16,
+                color: fill,
+            }
+            .render_hatched(hatch, cells, paint.scene);
+        }
+    }
     bars.flush(paint.scene);
     numbers.flush(paint.scene);
     for (area, text, tone) in chips {

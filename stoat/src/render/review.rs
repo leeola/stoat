@@ -938,9 +938,10 @@ fn divider_x(inner: Rect) -> u16 {
 /// them are unchanged text, so they keep `fallback_style` and take no row
 /// tint. An unchanged row keeps `fallback_style` whole.
 ///
-/// In the two-column layout, a row that holds a line on one side alone fills
-/// the other half with `diff.absent`'s background, gutter and all. That is a
-/// removed line's live half and the base half of an added or moved line.
+/// In the two-column layout, a row that holds a line on one side alone gives
+/// the other half `diff.absent`'s surface, gutter and all, which is hatched
+/// under a rich gutter as [`HatchedSurface`] resolves it. That is a removed
+/// line's live half and the base half of an added or moved line.
 ///
 /// Shared by the live [`render_diff_view`] and the off-loop smooth-scroll page
 /// so both paint an identical grid. It takes owned parts and paints no cursor,
@@ -1036,9 +1037,9 @@ pub(crate) fn paint_diff_rows(
     let inlay_style = fallback_style.patch(theme.get(s::UI_VIRTUAL_INLAY));
     // The unified layout has no second half to fill, and a decorations-only
     // page keeps the cells the terminal holds.
-    let absent_bg = theme
-        .get(s::DIFF_ABSENT)
-        .bg
+    let absent = HatchedSurface::of(theme.get(s::DIFF_ABSENT), rich.is_some());
+    let absent_bg = absent
+        .cells
         .filter(|_| sep_x.is_some() && !decorations_only);
 
     let tints = resolve_diff_tints(theme);
@@ -1153,6 +1154,15 @@ pub(crate) fn paint_diff_rows(
                     for x in right_x..inner.x + inner.width {
                         buf[(x, y)].set_bg(bg);
                     }
+                }
+                if sep_x.is_some() {
+                    hatch_cells(
+                        &mut rich,
+                        absent.hatch,
+                        inner,
+                        (right_x, inner.x + inner.width),
+                        y,
+                    );
                 }
                 // The unified layout paints this row's bars in its one status
                 // column already, so only the two-column layout has a gap.
@@ -1449,10 +1459,13 @@ pub(crate) fn paint_diff_rows(
                     if !continuation {
                         base_line += 1;
                     }
-                } else if let (Some(bg), Some(sep)) = (absent_bg, sep_x) {
-                    for x in left_x..sep {
-                        buf[(x, y)].set_bg(bg);
+                } else if let Some(sep) = sep_x {
+                    if let Some(bg) = absent_bg {
+                        for x in left_x..sep {
+                            buf[(x, y)].set_bg(bg);
+                        }
                     }
+                    hatch_cells(&mut rich, absent.hatch, inner, (left_x, sep), y);
                 }
             },
         }
@@ -1492,11 +1505,12 @@ pub(crate) fn paint_diff_rows(
 /// Paint display row `display_row`, a fold row, across `inner` at screen row
 /// `y`.
 ///
-/// The row fills with `diff.fold`'s background across both sides, and its
-/// placeholder, which names how many lines the fold hides, centers in
-/// `ui.text.muted`. No number, mark, or base text paints, since the row stands
-/// for lines rather than showing one. A rich gutter draws the text at the scale
-/// of its numbers, and cells draw it in cells.
+/// The row takes `diff.fold`'s surface across both sides, as
+/// [`HatchedSurface`] resolves it, and its placeholder, which names how many
+/// lines the fold hides, centers in `ui.text.muted`. No number, mark, or base
+/// text paints, since the row stands for lines rather than showing one. A rich
+/// gutter draws the text at the scale of its numbers, with no box of its own
+/// over a hatch, so the stripes run on behind it. Cells draw it in cells.
 ///
 /// `text` is scratch space for the placeholder.
 #[allow(clippy::too_many_arguments)]
@@ -1513,20 +1527,36 @@ fn paint_fold_row(
 ) {
     text.clear();
     snapshot.write_display_line(text, display_row);
-    let fill = theme.get(s::DIFF_FOLD);
+    let surface = HatchedSurface::of(theme.get(s::DIFF_FOLD), rich.is_some());
+    let cells = surface
+        .cells
+        .map_or_else(Style::default, |bg| Style::default().bg(bg));
     let muted = theme.get(s::UI_TEXT_MUTED);
     if !decorations_only {
         for x in inner.x..inner.x + inner.width {
-            buf[(x, y)].set_char(' ').set_style(fill);
+            buf[(x, y)].set_char(' ').set_style(cells);
         }
     }
+    hatch_cells(
+        rich,
+        surface.hatch,
+        inner,
+        (inner.x, inner.x + inner.width),
+        y,
+    );
 
     let chars = text.chars().count();
     match rich {
         Some(rg) => {
             let advance = text_run::advance_sixteenths(chars, rg.number_scale);
             let color = style_rgb(muted.fg).unwrap_or(rg.colors.dim);
-            let bg = style_rgb(fill.bg).unwrap_or(rg.colors.bg);
+            let bg = match surface.hatch {
+                Some(_) => None,
+                None => Some(
+                    rg.colors
+                        .faded(style_rgb(surface.cells).unwrap_or(rg.colors.bg)),
+                ),
+            };
             rg.numbers.push(
                 inner,
                 TextRun {
@@ -1534,7 +1564,7 @@ fn paint_fold_row(
                     row: ((y - inner.y) * 16) as i16,
                     scale: rg.number_scale,
                     color: rg.colors.faded(color),
-                    bg: Some(rg.colors.faded(bg)),
+                    bg,
                     text,
                     follow: 0,
                     anchor: None,
@@ -1544,10 +1574,71 @@ fn paint_fold_row(
         None if !decorations_only => {
             let width = (chars as u16).min(inner.width);
             let x = inner.x + (inner.width - width) / 2;
-            write_str_clipped(buf, x, y, text, fill.patch(muted), inner.x + inner.width);
+            write_str_clipped(buf, x, y, text, cells.patch(muted), inner.x + inner.width);
         },
         None => {},
     }
+}
+
+/// The surface a split diff's absent half or a fold row takes from its theme
+/// scope.
+///
+/// A foreground in the scope is the line color of a hatch over its background,
+/// which the boards draw on these rows. A rich gutter needs both in RGB, and
+/// the cells then take the background under a hatched bar. Otherwise the cells
+/// fill solid in the foreground, the nearest a cell comes to the hatch, so a
+/// plain terminal still sets the rows apart. A scope with no foreground fills
+/// its cells in the background alone.
+struct HatchedSurface {
+    /// The cells' background.
+    cells: Option<Color>,
+    /// The hatched bar's fill and line colors, when the surface takes one.
+    hatch: Option<([u8; 3], [u8; 3])>,
+}
+
+impl HatchedSurface {
+    fn of(style: Style, rich: bool) -> Self {
+        let hatch = style_rgb(style.bg)
+            .zip(style_rgb(style.fg))
+            .filter(|_| rich);
+        match hatch {
+            Some(_) => Self {
+                cells: style.bg,
+                hatch,
+            },
+            None => Self {
+                cells: style.fg.or(style.bg),
+                hatch: None,
+            },
+        }
+    }
+}
+
+/// Stripe the cells from column `left` to before column `right` of row `y`
+/// with `hatch` as one hatched bar, faded as the rich gutter's colors are.
+///
+/// A no-op without a rich gutter, without a hatch, or over no column.
+fn hatch_cells(
+    rich: &mut Option<DiffRichGutter<'_>>,
+    hatch: Option<([u8; 3], [u8; 3])>,
+    inner: Rect,
+    (left, right): (u16, u16),
+    y: u16,
+) {
+    let (Some(rg), Some((fill, lines))) = (rich.as_mut(), hatch) else {
+        return;
+    };
+    if right <= left {
+        return;
+    }
+    Bar {
+        x: ((left - inner.x) * 16) as i16,
+        y: ((y - inner.y) * 16) as i16,
+        width: (right - left) * 16,
+        height: 16,
+        color: rg.colors.faded(fill),
+    }
+    .render_hatched(rg.colors.faded(lines), inner, rg.scene);
 }
 
 /// The runs of rows `0..rows` that no row of `breaks` cuts, each as its top
@@ -4328,14 +4419,17 @@ mod tests {
         );
     }
 
-    /// [`fold_row_editor`] painted with a rich gutter over 120 by 10, its cells
-    /// too unless `decorations_only`.
+    /// [`fold_row_editor`] painted with a rich gutter over 120 by 10 under the
+    /// settings `theme_src` adds, its cells too unless `decorations_only`.
     ///
     /// Answers the cells, the scene's commands, the scale the gutter's numbers
     /// take, and the columns the paint lays out.
-    fn rich_fold_row_paint(decorations_only: bool) -> (Buffer, Vec<Command>, u16, DiffColumns) {
+    fn rich_fold_row_paint(
+        theme_src: &str,
+        decorations_only: bool,
+    ) -> (Buffer, Vec<Command>, u16, DiffColumns) {
         let mut editor = fold_row_editor();
-        let theme = rgb_diff_theme_with(FOLD_THEME);
+        let theme = rgb_diff_theme_with(theme_src);
         let area = Rect::new(0, 0, 120, 10);
         let mut buf = Buffer::empty(area);
         let mut scene = ApcScene::new();
@@ -4382,7 +4476,7 @@ mod tests {
     /// breaks around the row.
     #[test]
     fn a_rich_fold_row_centers_one_small_run_and_breaks_the_divider() {
-        let (_, commands, scale, cols) = rich_fold_row_paint(false);
+        let (_, commands, scale, cols) = rich_fold_row_paint(FOLD_THEME, false);
         let divider = (cols.sep_x.expect("two columns") * 16 + DIVIDER_RULE_X) as i16;
         let divider_bars: Vec<(i16, u16)> = commands
             .iter()
@@ -4413,8 +4507,8 @@ mod tests {
     /// keeps the count on the cells a full paint left.
     #[test]
     fn a_decorations_only_fold_row_writes_no_cell_and_keeps_its_count() {
-        let (full_buf, full, _, _) = rich_fold_row_paint(false);
-        let (buf, decorations, _, _) = rich_fold_row_paint(true);
+        let (full_buf, full, _, _) = rich_fold_row_paint(FOLD_THEME, false);
+        let (buf, decorations, _, _) = rich_fold_row_paint(FOLD_THEME, true);
         let blank = Buffer::empty(buf.area);
         let row_blank = |buf: &Buffer| (0..120).all(|x| buf[(x, 0)] == blank[(x, 0)]);
         assert_eq!(
@@ -4424,6 +4518,83 @@ mod tests {
                 fold_runs(&decorations)
             ),
             (true, false, fold_runs(&full)),
+        );
+    }
+
+    /// A fold scope whose foreground hatches its background, and the muted text
+    /// color.
+    const HATCHED_FOLD_THEME: &str =
+        r##"diff.fold = { fg: "#1b1d22", bg: "#17191e" }; ui.text.muted.fg = "#909090";"##;
+
+    /// Under a rich gutter a hatched fold row's cells keep the fill and one
+    /// hatched bar spans the row. The count's run takes no box of its own, so
+    /// the stripes run on behind it.
+    #[test]
+    fn a_hatched_fold_row_takes_one_hatched_bar_and_an_unboxed_count() {
+        let (buf, commands, _, _) = rich_fold_row_paint(HATCHED_FOLD_THEME, false);
+        let hatched: Vec<BarCommand> = commands
+            .iter()
+            .filter_map(|command| match command {
+                Command::Bar(bar) if bar.hatch.is_some() => Some(*bar),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            (
+                hatched,
+                fold_runs(&commands)
+                    .iter()
+                    .map(|&(.., bg)| bg)
+                    .collect::<Vec<_>>(),
+                (0..120).all(|x| buf[(x, 0)].bg == Color::Rgb(0x17, 0x19, 0x1e)),
+            ),
+            (
+                vec![BarCommand {
+                    x: 0,
+                    y: 0,
+                    width: 120 * 16,
+                    height: 16,
+                    color: [0x17, 0x19, 0x1e],
+                    occludes: false,
+                    hatch: Some([0x1b, 0x1d, 0x22]),
+                }],
+                vec![None],
+                true,
+            ),
+        );
+    }
+
+    /// With no scene a hatched fold row fills its cells solid in the hatch
+    /// color, the nearest a cell comes to the stripes, and its count sits on
+    /// that fill.
+    #[test]
+    fn a_plain_hatched_fold_row_fills_solid_in_the_hatch_color() {
+        let mut editor = fold_row_editor();
+        let area = Rect::new(0, 0, 120, 10);
+        let mut buf = Buffer::empty(area);
+        render_diff_view(
+            &mut editor,
+            area,
+            Style::default(),
+            &rgb_diff_theme_with(HATCHED_FOLD_THEME),
+            &mut buf,
+            false,
+            None,
+            None,
+            false,
+            DiffDials::shipped(),
+            BufferNumbering::Absolute,
+            &[],
+            false,
+        );
+
+        let start = (120 - FOLD_TEXT.chars().count() as u16) / 2;
+        assert_eq!(
+            (
+                (0..120).all(|x| buf[(x, 0)].bg == Color::Rgb(0x1b, 0x1d, 0x22)),
+                buf[(start, 0)].fg,
+            ),
+            (true, Color::Rgb(0x90, 0x90, 0x90)),
         );
     }
 
@@ -7136,29 +7307,65 @@ mod tests {
         bgs
     }
 
-    /// A split row that holds a line on one side alone fills the other half
-    /// with the absent tint, gutter and all. A context row keeps the editor
-    /// background on both halves.
+    /// The cell rects the frame's hatched bars cover, each with its fill and its
+    /// hatch color.
+    fn hatched_rects(h: &crate::test_harness::TestHarness) -> Vec<(Rect, [u8; 3], [u8; 3])> {
+        decode_stream(&h.stoat.apc_scene.all_bytes())
+            .into_iter()
+            .filter_map(|command| match command {
+                Command::Bar(bar) => bar.hatch.map(|hatch| {
+                    let cells = Rect::new(
+                        (bar.x / 16) as u16,
+                        (bar.y / 16) as u16,
+                        bar.width / 16,
+                        bar.height / 16,
+                    );
+                    (cells, bar.color, hatch)
+                }),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// A split row that holds a line on one side alone gives the other half
+    /// the absent surface, gutter and all. Its cells take the absent fill, and
+    /// one hatched bar stripes them in the absent foreground. A context row
+    /// keeps the editor background on both halves and takes no hatch.
     #[test]
-    fn a_one_sided_row_fills_its_empty_half_with_the_absent_tint() {
+    fn a_one_sided_row_hatches_its_empty_half() {
         let h = diff_harness(ONE_SIDED.0, ONE_SIDED.1);
         let (absent, editor) = absent_and_editor_bg(&h);
+        let hatch = style_rgb(h.stoat.theme.get(crate::theme::scope::DIFF_ABSENT).fg)
+            .expect("the theme hatches an absent half");
+        let fill = style_rgb(Some(absent)).expect("an rgb absent fill");
         let buf = h.rendered_buffer();
         let cols = harness_columns(&h);
         let sep = cols.sep_x.expect("two columns");
         let (base, live) = (cols.left_x..sep, cols.right_x..buf.area.x + buf.area.width);
+        let half = |cells: &std::ops::Range<u16>, y: u16| {
+            Rect::new(cells.start, y, cells.end - cells.start, 1)
+        };
 
         let gone = row_holding(buf, left_text(&cols), "gone");
         let added = row_holding(buf, right_text(&cols), "added");
         let stay = row_holding(buf, right_text(&cols), "stay");
         assert_eq!(
-            [
-                bg_runs(buf, gone, live.clone()),
-                bg_runs(buf, added, base.clone()),
-                bg_runs(buf, stay, base),
-                bg_runs(buf, stay, live)
-            ],
-            [vec![absent], vec![absent], vec![editor], vec![editor]],
+            (
+                [
+                    bg_runs(buf, gone, live.clone()),
+                    bg_runs(buf, added, base.clone()),
+                    bg_runs(buf, stay, base.clone()),
+                    bg_runs(buf, stay, live.clone())
+                ],
+                hatched_rects(&h),
+            ),
+            (
+                [vec![absent], vec![absent], vec![editor], vec![editor]],
+                vec![
+                    (half(&live, gone), fill, hatch),
+                    (half(&base, added), fill, hatch)
+                ],
+            ),
         );
     }
 

@@ -249,6 +249,7 @@ theme ermine_night inherits default_dark {
     let wash             = "#2a3c5a";
     let cursor_secondary = "#8a909c";
     let divider          = "#22252b";
+    let hatch            = "#1b1d22";
     let tint_accent      = "#223049";
     let tint_info        = "#1e3237";
     let tint_special     = "#2a2236";
@@ -376,8 +377,8 @@ theme ermine_night inherits default_dark {
     diff.moved.fg    = accent;
     diff.staged.fg   = info;
     diff.unstaged.fg = disabled;
-    diff.fold.bg     = raised;
-    diff.absent.bg   = raised;
+    diff.fold        = { fg: hatch, bg: base };
+    diff.absent      = { fg: hatch, bg: base };
 
     diff.sides.base           = { fg: side_base_fg, bg: side_base_bg };
     diff.sides.base.name.fg   = side_base_name;

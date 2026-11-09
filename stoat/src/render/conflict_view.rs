@@ -541,10 +541,11 @@ mod tests {
     use ratatui::{
         buffer::Buffer,
         layout::Rect,
-        style::{Modifier, Style},
+        style::{Color, Modifier, Style},
     };
     use std::{path::PathBuf, sync::Arc};
     use stoat_widgets::ApcScene;
+    use stoatty_protocol::command::{decode_stream, Command};
 
     /// Open the conflict view on one three-stage file in a `width`-wide harness.
     ///
@@ -561,6 +562,75 @@ mod tests {
         crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::Conflict);
         h.settle();
         h
+    }
+
+    /// The MergeGrid fills a side with no line on the row with the absent fill
+    /// and stripes each such run of cells with one hatched bar in the absent
+    /// colors. No other cell takes a hatch.
+    ///
+    /// The theme gives the absent fill a color nothing else paints, so the
+    /// cells that take it are exactly the runs the bars must cover.
+    #[test]
+    fn the_merge_grid_hatches_each_side_with_no_line() {
+        let mut h = conflict_harness(150, "a\nb\nc\n", "a\nB\nc\n", "a\nX\nc\n");
+        let theme = {
+            let src = format!(
+                "{}\ntheme hatched inherits ermine_night {{ \
+                 diff.absent = {{ fg: \"#040506\", bg: \"#010203\" }}; }}",
+                crate::app::DEFAULT_KEYMAP,
+            );
+            let (config, _) = stoat_config::parse(&src);
+            crate::theme::Theme::from_config(&config.expect("the config parses"), "hatched")
+                .expect("the theme loads")
+        };
+        let inner = Rect::new(0, 0, 150, 20);
+        let editor =
+            crate::action_handlers::focused_editor_mut(&mut h.stoat).expect("center editor");
+        let mut buf = Buffer::empty(inner);
+        let mut scene = ApcScene::new();
+        super::render_conflict_view(
+            editor,
+            inner,
+            Style::default(),
+            &theme,
+            &mut buf,
+            Some(&mut scene),
+            true,
+        );
+
+        let absent = Color::Rgb(1, 2, 3);
+        let mut filled = Vec::new();
+        for y in inner.y..inner.bottom() {
+            let mut x = inner.x;
+            while x < inner.right() {
+                let start = x;
+                while x < inner.right() && buf[(x, y)].bg == absent {
+                    x += 1;
+                }
+                match x > start {
+                    true => filled.push((Rect::new(start, y, x - start, 1), [1, 2, 3], [4, 5, 6])),
+                    false => x += 1,
+                }
+            }
+        }
+        let hatched: Vec<_> = decode_stream(scene.buffer())
+            .into_iter()
+            .filter_map(|command| match command {
+                Command::Bar(bar) => bar.hatch.map(|hatch| {
+                    let cells = Rect::new(
+                        (bar.x / 16) as u16,
+                        (bar.y / 16) as u16,
+                        bar.width / 16,
+                        bar.height / 16,
+                    );
+                    (cells, bar.color, hatch)
+                }),
+                _ => None,
+            })
+            .collect();
+
+        assert!(!filled.is_empty(), "the marker rows leave a side empty");
+        assert_eq!(hatched, filled);
     }
 
     /// The center has no horizontal scroll, so a cursor past its column is

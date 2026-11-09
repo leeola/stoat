@@ -33,6 +33,7 @@ const CHROME: [u8; 3] = [0x12, 0x14, 0x18];
 const HOVER: [u8; 3] = [0x2c, 0x30, 0x39];
 const OVERLAY: [u8; 3] = [0x25, 0x28, 0x30];
 const RAISED: [u8; 3] = [0x1e, 0x21, 0x27];
+const HATCH: [u8; 3] = [0x1b, 0x1d, 0x22];
 const HAIRLINE: [u8; 3] = [0x2e, 0x32, 0x3b];
 const SELECT: [u8; 3] = [0x23, 0x32, 0x4a];
 const DISABLED: [u8; 3] = [0x5b, 0x61, 0x6d];
@@ -344,13 +345,15 @@ fn the_changes_view_heads_each_file_on_the_raised_surface() {
 }
 
 /// The changes view folds the unchanged lines between two hunks into a fold
-/// row on the raised surface.
+/// row under the boards' hatch.
 ///
 /// The diff-kinds stack lists hunks.txt fourth, and its fold row is row 19,
 /// under the row of its line 6 on the base surface. The fold row's count is
-/// centered, so the cells from column 2 to column 31 hold none.
+/// centered, so the cells from column 2 to column 31 hold none. They take the
+/// base surface under the hatch's lines, which the stack's resident pool
+/// composites from its pages.
 #[test]
-fn the_changes_view_folds_unchanged_lines_into_a_raised_row() {
+fn the_changes_view_folds_unchanged_lines_into_a_hatched_row() {
     let mut home = support::scratch_home();
     let shot = settled_frame(home.path(), "diff-kinds", "hunks.txt", "<Space>dc<Settle>");
 
@@ -361,11 +364,11 @@ fn the_changes_view_folds_unchanged_lines_into_a_raised_row() {
         BASE,
         "changes_row_above_fold",
     );
-    expect_region(
+    expect_hatch(
         &shot,
         &mut home,
         cell_rect(2, 19, 30, 1),
-        RAISED,
+        (BASE, HATCH),
         "changes_fold_row",
     );
 }
@@ -1212,6 +1215,58 @@ fn expect_region(shot: &Snapshot, home: &mut TempDir, rect: PixelRect, want: [u8
         "{what}: most pixels of {rect:?} are {}, not {}; the frame is {}",
         hex(found),
         hex(want),
+        frame.display(),
+    );
+}
+
+/// Panics unless `rect` of `shot` reads as the boards' hatch, the `ground` of
+/// `colors` under 1 px lines of its `lines` every 7 px at 135 degrees.
+///
+/// The lines are placed by the screen pixel, so the check takes their phase
+/// from the first line pixel. It then wants exactly the pixels on that phase's
+/// diagonals in `lines` and every other pixel in `ground`. A miss saves the
+/// frame as [`expect_region`] does.
+fn expect_hatch(
+    shot: &Snapshot,
+    home: &mut TempDir,
+    rect: PixelRect,
+    (ground, lines): ([u8; 3], [u8; 3]),
+    what: &str,
+) {
+    let (x, y, width, height) = rect;
+    let at = |px: u32, py: u32| {
+        let i = ((py * shot.width + px) * 4) as usize;
+        [shot.rgba[i], shot.rgba[i + 1], shot.rgba[i + 2]]
+    };
+    let mut phase = None;
+    'find: for py in y..y + height {
+        for px in x..x + width {
+            if at(px, py) == lines {
+                phase = Some((px + py) % 7);
+                break 'find;
+            }
+        }
+    }
+    let hatched = phase.is_some_and(|phase| {
+        (y..y + height).all(|py| {
+            (x..x + width).all(|px| {
+                let want = match (px + py) % 7 == phase {
+                    true => lines,
+                    false => ground,
+                };
+                at(px, py) == want
+            })
+        })
+    });
+    if hatched {
+        return;
+    }
+
+    let frame = keep_frame(shot, home, what);
+    panic!(
+        "{what}: {rect:?} is not {} under lines of {} every 7 px; the frame is {}",
+        hex(ground),
+        hex(lines),
         frame.display(),
     );
 }

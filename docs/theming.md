@@ -304,10 +304,12 @@ The typed UI scopes, by group (syntax scopes are open-ended):
   `diff.current_hunk` -- the diff and review views.
 - `diff.fold` -- the fill (background) of a changes view's fold row, the row
   that names how many unchanged lines a fold hides. The row's text takes
-  `ui.text.muted`.
+  `ui.text.muted`. A foreground stripes the fill with a 135 degree hatch in
+  that color under stoatty, and fills the cells solid in a plain terminal.
 - `diff.absent` -- the fill (background) of a split diff row's empty half,
   where the row holds a line on the other side alone: a removed line's live
-  half, or an added line's base half.
+  half, or an added line's base half. A foreground hatches it as
+  `diff.fold`'s does.
 - `diff.sides.base`, `diff.sides.base.name`, `diff.sides.target`,
   `diff.sides.target.name` -- the two halves of a split diff view's status
   row, its text (foreground) on its tint (background), and the color of the
