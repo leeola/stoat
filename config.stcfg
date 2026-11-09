@@ -1483,8 +1483,8 @@ on key {
     view == diff && mode == normal {
         Alt-WheelDown -> GotoNextChange();
         Alt-WheelUp -> GotoPrevChange();
-        MouseBack -> DiffBack();
-        MouseForward -> DiffForward();
+        MouseBack -> DiffBack() "next change";
+        MouseForward -> DiffForward() "prev change";
         S-MouseBack -> GotoNextGitChange() "next hunk";
         S-MouseForward -> GotoPrevGitChange() "prev hunk";
     }
@@ -1515,29 +1515,34 @@ on key {
     # hunks of the line diff, as in the diff view. q closes the view. Escape
     # is left to the normal block, as the per-file diff leaves it, so the key
     # dismisses the hints and never closes the view.
+    #
+    # A label is the key's short name in the docked hints box, which lists the
+    # keys that share a label on one row. Two keys on one action carry the
+    # same label for that reason. n and the back button share `next change`,
+    # and p and the forward button share `prev change`.
     view == diff_changes && mode == normal {
-        q -> CloseDiffChanges();
+        q -> CloseDiffChanges() "close";
         Ctrl-t -> DiffFiles() "files / changes";
-        Enter -> DiffChangesOpen();
-        j -> DiffChangesNext();
-        Down -> DiffChangesNext();
-        k -> DiffChangesPrev();
-        Up -> DiffChangesPrev();
-        n -> GotoNextChange();
-        p -> GotoPrevChange();
-        Ctrl-f -> DiffChangesPageDown();
-        PageDown -> DiffChangesPageDown();
-        Ctrl-b -> DiffChangesPageUp();
-        PageUp -> DiffChangesPageUp();
-        Ctrl-d -> DiffChangesHalfPageDown();
-        Ctrl-u -> DiffChangesHalfPageUp();
+        Enter -> DiffChangesOpen() "open";
+        j -> DiffChangesNext() "next row";
+        Down -> DiffChangesNext() "next row";
+        k -> DiffChangesPrev() "prev row";
+        Up -> DiffChangesPrev() "prev row";
+        n -> GotoNextChange() "next change";
+        p -> GotoPrevChange() "prev change";
+        Ctrl-f -> DiffChangesPageDown() "page down";
+        PageDown -> DiffChangesPageDown() "page down";
+        Ctrl-b -> DiffChangesPageUp() "page up";
+        PageUp -> DiffChangesPageUp() "page up";
+        Ctrl-d -> DiffChangesHalfPageDown() "half page down";
+        Ctrl-u -> DiffChangesHalfPageUp() "half page up";
         Alt-WheelDown -> GotoNextChange();
         Alt-WheelUp -> GotoPrevChange();
-        MouseBack -> DiffBack();
-        MouseForward -> DiffForward();
+        MouseBack -> DiffBack() "next change";
+        MouseForward -> DiffForward() "prev change";
         S-MouseBack -> GotoNextGitChange() "next hunk";
         S-MouseForward -> GotoPrevGitChange() "prev hunk";
-        : -> OpenCommandPalette();
+        : -> OpenCommandPalette() "commands";
     }
     view == conflict && mode == normal {
         Escape -> CloseConflict();

@@ -4303,12 +4303,13 @@ mod lsp_filter_tests {
         );
     }
 
-    /// The diff views' own box lists the keys their view blocks bind, grouped
-    /// by action, and none of the editor's other context keys. A wheel notch
-    /// is no key to press, so the Alt notches stay off the box.
+    /// The diff views' own box lists the keys their view blocks bind, with a
+    /// short label on each row, and none of the editor's other context keys.
+    /// Keys with one label share a row. A wheel notch is no key to press, so
+    /// the Alt notches stay off the box.
     #[test]
     fn the_diff_box_lists_the_view_s_own_keys() {
-        let box_keys = |h: &mut TestHarness| {
+        let box_rows = |h: &mut TestHarness| {
             h.render_composited();
             h.stoat
                 .hints_cache
@@ -4316,7 +4317,7 @@ mod lsp_filter_tests {
                 .expect("the view keeps its box up")
                 .rows
                 .iter()
-                .map(|row| row.keys.clone())
+                .map(|row| [row.keys.clone(), row.action.clone()])
                 .collect::<Vec<_>>()
         };
         let mut h = TestHarness::with_size(150, 50);
@@ -4327,37 +4328,52 @@ mod lsp_filter_tests {
         crate::action_handlers::focused_editor_mut(&mut h.stoat)
             .expect("focused editor")
             .set_diff_view(true);
-        let split = box_keys(&mut h);
+        let split = box_rows(&mut h);
         crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::DiffChanges);
         h.settle_diff_jobs();
-        let changes = box_keys(&mut h);
+        let changes = box_rows(&mut h);
 
-        let keys = |groups: &[&[&str]]| -> Vec<String> {
-            groups.concat().into_iter().map(str::to_owned).collect()
+        let rows = |groups: &[&[[&str; 2]]]| -> Vec<[String; 2]> {
+            groups
+                .concat()
+                .into_iter()
+                .map(|row| row.map(str::to_owned))
+                .collect()
         };
-        let dials = ["C-6", "C-7", "C-8", "C-9", "C-0"];
-        let buttons = ["MBk", "MFw", "S-MBk", "S-MFw"];
+        let dials = [
+            ["C-6", "underline changes"],
+            ["C-7", "bold changes"],
+            ["C-8", "syntax colors"],
+            ["C-9", "tint down"],
+            ["C-0", "tint up"],
+        ];
+        let hunks = [["S-MBk", "next hunk"], ["S-MFw", "prev hunk"]];
         assert_eq!(
             (split, changes),
             (
-                keys(&[&dials[..], &buttons[..], &["C-t"]]),
-                keys(&[
+                rows(&[
+                    &dials[..],
+                    &[["MBk", "next change"], ["MFw", "prev change"]],
+                    &hunks[..],
+                    &[["C-t", "files / changes"]],
+                ]),
+                rows(&[
                     &dials[..],
                     &[
-                        "q",
-                        "C-t",
-                        "Ret",
-                        "j, Dn",
-                        "k, Up",
-                        "n",
-                        "p",
-                        "C-f, PgDn",
-                        "C-b, PgUp",
-                        "C-d",
-                        "C-u",
+                        ["q", "close"],
+                        ["C-t", "files / changes"],
+                        ["Ret", "open"],
+                        ["j, Dn", "next row"],
+                        ["k, Up", "prev row"],
+                        ["n, MBk", "next change"],
+                        ["p, MFw", "prev change"],
+                        ["C-f, PgDn", "page down"],
+                        ["C-b, PgUp", "page up"],
+                        ["C-d", "half page down"],
+                        ["C-u", "half page up"],
                     ],
-                    &buttons[..],
-                    &[":"],
+                    &hunks[..],
+                    &[[":", "commands"]],
                 ]),
             ),
         );
