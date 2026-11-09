@@ -10,7 +10,7 @@ use crate::{
     pane::{Divider, DividerOrientation, FocusTarget, Pane, PaneTree, Placement, View},
     render::{
         chrome::{self, TypeTag},
-        commits, content_lane, diff_changes,
+        commits, diff_changes,
         editor::{
             editor_cursor_position, render_editor_with_overlay, split_minimap_strip,
             DIFF_OVERVIEW_COLS,
@@ -23,7 +23,6 @@ use crate::{
         },
         review::{self, FrameEdges},
         run_pane::render_run_pane,
-        status_lane,
         term_pane::render_term_pane,
         text,
         undercurl::UndercurlBatch,
@@ -118,7 +117,6 @@ pub(crate) fn render_pane(
     buf: &mut Buffer,
     scene: &mut ApcScene,
     undercurls: &mut UndercurlBatch,
-    status: &StatusRow,
 ) {
     let theme = frame.theme;
     let text_style = theme.get(crate::theme::scope::UI_TEXT);
@@ -261,18 +259,15 @@ pub(crate) fn render_pane(
                 render_term_pane(term, theme, content_area, is_focused, buf);
             }
         },
-        // The list paints a status row of its own, so the pane status and the
-        // LSP popout above it stay off this view.
+        // The window row names the commits screen in place of a pane status,
+        // so the LSP popout that sits over a pane status stays off this view.
         View::Commits(id) => {
             if let Some(state) = commit_lists.get_mut(*id) {
-                commits::render_commits(pane, is_focused, state, frame, buf, &mut *scene);
+                commits::render_commits(pane, state, frame, buf, &mut *scene);
             }
             dim_pane(split_pane_status(pane.area).0, is_focused, frame, buf);
             return;
         },
-        // The changes view paints the pane status row through its focused
-        // excerpt. The row rides the status lane, so a replay of the content
-        // keeps it.
         View::DiffChanges(id) => {
             if let Some(state) = diff_changes_views.get_mut(*id) {
                 diff_changes::render_diff_changes(
@@ -310,15 +305,11 @@ pub(crate) fn render_pane(
                 }
             }
             dim_pane(split_pane_status(pane.area).0, is_focused, frame, buf);
-            render_pane_status(pane, frame, editors, status, buf, scene);
             return;
         },
     }
 
     dim_pane(content_area, is_focused, frame, buf);
-
-    render_pane_status(pane, frame, editors, status, buf, scene);
-    scene.set_lane(content_lane(pane.index));
 
     let status_rows: u16 = if is_focused && frame.lsp_status_open {
         let mut rows: Vec<String> = frame
@@ -881,10 +872,10 @@ fn tint_color(from: Color, to: Color, amount: f32) -> Color {
 /// A pane's content and status rectangles, given where the single-minimap band
 /// sits.
 ///
-/// The band stops one row above the bottom. A status bar on that freed row,
-/// flush against the band's left edge, reclaims the band's width so it runs
-/// edge to edge. Mid-window status rows sit beside strip rows and stay
-/// pane-width.
+/// The status rect is empty, along the pane's bottom edge, where a card that
+/// anchors on the pane's status sits above the window's status row. A pane
+/// that meets the band's left edge there reaches across the band, as the
+/// window's status row does.
 ///
 /// Shared with the render site, which captures the content rectangle for the
 /// replay cache.
@@ -1143,17 +1134,10 @@ pub(crate) fn render_pane_dividers(
     }
 }
 
-/// Paint `pane`'s status row into the pane's status lane, and leave that lane
-/// open.
+/// Paint `status`, the status of `pane`, into the window's status row.
 ///
-/// The row changes with every cursor move, so it rides a lane of its own and a
-/// move leaves the content lane off the wire.
-///
-/// The replay cache holds no status row, so a pane whose content replays
-/// paints its row through here after the replay. [`render_pane`] paints the
-/// row between the content and the cards over the content. The cards touch
-/// none of the row's cells, so a replay that paints the row last gives the
-/// same frame.
+/// The row changes with every cursor move, so the caller opens a lane of its
+/// own for it, and a move leaves every pane's content lane off the wire.
 pub(crate) fn render_pane_status(
     pane: &Pane,
     frame: FrameCtx<'_>,
@@ -1162,7 +1146,6 @@ pub(crate) fn render_pane_status(
     buf: &mut Buffer,
     scene: &mut ApcScene,
 ) {
-    scene.set_lane(status_lane(pane.index));
     if status.runs.is_empty() {
         return;
     }
@@ -1181,11 +1164,10 @@ pub(crate) fn render_pane_status(
     render_status_runs(&status.runs, frame, buf, scene, cache);
 }
 
-/// The segments of one pane's status row, built once a frame before the pane
-/// paints or replays.
+/// The segments of one pane's status, laid out in the window's status row.
 ///
-/// A replay puts back the pane's content alone, so the row paints from this on
-/// every frame, and the frame reads the badge back whichever way the pane drew.
+/// The frame builds it once, after the panes paint or replay, and reads the LSP
+/// badge's hover rect back from it.
 #[derive(Default)]
 pub(crate) struct StatusRow {
     /// The row's runs from left to right, none for a pane that paints no row.
@@ -1259,13 +1241,15 @@ fn mode_chip_box(leads: bool) -> Vec<RunBox> {
     }
 }
 
-/// The status row that [`render_pane`] paints for `pane`.
+/// The status of `pane`, laid out in `area`, the window's status row.
 ///
 /// A changes view's row reads its focused excerpt, as an editor pane's row
-/// reads its editor. Empty for a commits view, which paints a status row of
-/// its own, and for a pane with no room for the row.
+/// reads its editor. Empty for a commits view, whose row names the screen
+/// through [`render_overlay_status`], and for an area with no room.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn status_row(
     pane: &Pane,
+    area: Rect,
     is_focused: bool,
     frame: FrameCtx<'_>,
     editors: &mut SlotMap<EditorId, EditorState>,
@@ -1273,11 +1257,11 @@ pub(crate) fn status_row(
     terms: &SlotMap<TermId, TermSession>,
     changes: &SlotMap<DiffChangesId, DiffChangesState>,
 ) -> StatusRow {
-    let (content, area) = pane_areas(pane.area, frame.minimap_band);
     if area.width == 0 || area.height == 0 || matches!(pane.view, View::Commits(_)) {
         return StatusRow::default();
     }
 
+    let content = pane_areas(pane.area, frame.minimap_band).0;
     let sides = sides_layout(&pane.view, content, frame, editors);
     let mut badge = None;
     let runs = status_segments(
@@ -5077,8 +5061,8 @@ mod tests {
     }
 
     /// A command that waits on a buffer ends when the buffer leaves, and a quit
-    /// over the buffer returns to a shell, so every pane that shows it names
-    /// what waits.
+    /// over the buffer returns to a shell, so the status row names what waits
+    /// while the focused pane shows the buffer.
     ///
     /// The mark has to leave with the waiter while the file stays on screen.
     #[test]
@@ -5111,13 +5095,13 @@ mod tests {
         };
         assert_eq!(
             names(&mut h),
-            (2, 2),
-            "both panes on the file name its waiter"
+            (1, 1),
+            "the row over the file names its waiter"
         );
 
         h.stoat
             .handle_agent_control(AgentControl::ClientGone { uid, client: 0 });
-        assert_eq!(names(&mut h), (2, 0), "the mark leaves with the waiter");
+        assert_eq!(names(&mut h), (1, 0), "the mark leaves with the waiter");
     }
 
     /// The search prompt is the only thing on screen that reports the query, so
@@ -5471,11 +5455,12 @@ mod tests {
         );
     }
 
-    /// A pane beside the conflict view keeps its own file's name, since only
-    /// the focused conflict pane leads with the chunk. The open widens its
-    /// pane, so the layout unwidens to show the other one.
+    /// The status row leads with the chunk while the conflict view holds focus,
+    /// and names the file once focus moves to the pane beside it, since only
+    /// the conflict pane leads with the chunk. The open widens its pane, so the
+    /// layout unwidens to show the other one.
     #[test]
-    fn a_pane_beside_the_conflict_view_keeps_its_file_name() {
+    fn the_conflict_lead_leaves_the_row_with_the_focus() {
         let mut h = crate::test_harness::TestHarness::with_size(120, 12);
         h.stoat.active_workspace_mut().git_root = PathBuf::from("/repo");
         h.fake_git()
@@ -5499,19 +5484,28 @@ mod tests {
         h.settle();
         h.stoat.active_workspace_mut().panes.unwiden();
 
-        let buf = h.render_composited();
-        let rows: Vec<String> = h
-            .stoat
-            .active_workspace()
-            .panes
-            .split_panes()
-            .map(|(_, pane)| status_row(&buf, pane.area))
-            .collect();
+        let row = |h: &mut crate::test_harness::TestHarness| {
+            let buf = h.render_composited();
+            status_row(&buf, buf.area)
+        };
+        let on_conflict = row(&mut h);
+        {
+            let panes = &mut h.stoat.active_workspace_mut().panes;
+            let focused = panes.focus();
+            let beside = panes
+                .split_pane_ids()
+                .into_iter()
+                .find(|&id| id != focused)
+                .expect("the pane beside the conflict view");
+            panes.set_focus(beside);
+        }
+        let on_file = row(&mut h);
+
         assert_eq!(
-            rows,
+            [on_conflict, on_file],
             [
-                format!("{:<52}1:1 ", " f.txt"),
-                format!("{:<56}", " NOR  repo  conflict \u{b7} chunk 1 / 1"),
+                format!("{:<116}2:1 ", " NOR  repo  conflict \u{b7} chunk 1 / 1"),
+                format!("{:<116}1:1 ", " NOR  repo f.txt"),
             ],
         );
     }
@@ -5682,25 +5676,31 @@ mod tests {
         );
     }
 
-    /// An unfocused pane keeps its cursors and shows its position, so it shows
-    /// its cursor count too.
+    /// The status row counts the cursors of the pane that holds focus. Each pane
+    /// keeps its own cursors, so the count follows the focus from pane to pane.
     #[test]
-    fn an_unfocused_pane_counts_its_cursors() {
+    fn the_status_row_counts_the_focused_pane_s_cursors() {
         let mut h = crate::test_harness::TestHarness::with_size(120, 12);
         h.seed_focused_buffer("foo\nbar\n");
         dispatch(&mut h.stoat, &MoveDown);
         dispatch(&mut h.stoat, &AddSelectionAbove);
         let counted = h.stoat.active_workspace().panes.focus();
         h.type_action("SplitRight()");
+        dispatch(&mut h.stoat, &KeepPrimarySelection);
+        let row = |h: &mut crate::test_harness::TestHarness| {
+            let buf = h.render_composited();
+            status_row(&buf, buf.area)
+        };
 
-        let buf = h.render_composited();
-        let ws = h.stoat.active_workspace();
-        let bar = status_row(&buf, ws.panes.pane(counted).area);
-        let width = bar.chars().count() - "1:1 ".len();
+        let away = row(&mut h);
+        h.stoat.active_workspace_mut().panes.set_focus(counted);
+        let back = row(&mut h);
         assert_eq!(
-            (ws.panes.focus() != counted, bar.clone()),
-            (true, format!("{:<width$}1:1 ", " scratch [+]  2 sel ")),
-            "the split moves the focus away, and the pane keeps its count",
+            [away, back],
+            [
+                format!("{:<116}1:1 ", " NOR  (unnamed) scratch [+] "),
+                format!("{:<116}1:1 ", " NOR  (unnamed) scratch [+]  2 sel "),
+            ],
         );
     }
 

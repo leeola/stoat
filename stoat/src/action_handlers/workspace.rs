@@ -34,7 +34,7 @@ fn create_workspace(stoat: &mut Stoat, parent: Option<WorkspaceUid>) -> Workspac
 
     let mut ws = Workspace::new(git_root, &stoat.executor, stoat.redraw_notify.clone());
     ws.parent = parent;
-    ws.layout(stoat.size());
+    ws.layout(stoat.layout_size());
     let id = stoat.workspaces.insert(ws);
     stoat.workspaces[id].id = id;
     log_created(&stoat.workspaces[id]);
@@ -62,7 +62,7 @@ pub(super) fn copy_workspace(stoat: &mut Stoat) -> UpdateEffect {
     ws.uid = state.uid;
     ws.name = state.name.clone();
     ws.parent = state.parent;
-    ws.layout(stoat.size());
+    ws.layout(stoat.layout_size());
     let id = stoat.workspaces.insert(ws);
     stoat.workspaces[id].id = id;
     log_created(&stoat.workspaces[id]);
@@ -130,7 +130,7 @@ pub(crate) fn switch_active_workspace(stoat: &mut Stoat, next: WorkspaceId) {
     let from_uid = stoat.workspaces.get(from).map(|ws| ws.uid);
     stoat.active_workspace = next;
     stoat.active_workspace_mut().last_active = stoat.executor.system_now();
-    let size = stoat.size();
+    let size = stoat.layout_size();
     stoat.active_workspace_mut().layout(size);
     stoat.watch_active_root();
     if from != next {
@@ -730,7 +730,7 @@ fn activate_inactive_workspace(
     ws.uid = uid;
     ws.name = name;
     ws.parent = parent;
-    ws.layout(stoat.size());
+    ws.layout(stoat.layout_size());
 
     let id = stoat.workspaces.insert(ws);
     stoat.workspaces[id].id = id;

@@ -4,7 +4,6 @@ use crate::{
     render::{
         layout::split_pane_status,
         paint::{render_empty_num, render_side_num, render_side_text},
-        pane::render_overlay_status,
         text::{truncate_to_cols, write_str},
         FrameCtx,
     },
@@ -48,7 +47,6 @@ fn conflict_list_width(total: u16) -> u16 {
 
 pub(crate) fn render_conflict(
     pane: &Pane,
-    is_focused: bool,
     active: &ActiveRebase,
     frame: FrameCtx<'_>,
     buf: &mut Buffer,
@@ -58,16 +56,7 @@ pub(crate) fn render_conflict(
 
     let theme = frame.theme;
     let workspace_root = frame.workspace_root;
-    let (inner, status_area) = split_pane_status(pane.area);
-    render_overlay_status(
-        status_area,
-        is_focused,
-        frame.screen,
-        None,
-        frame,
-        buf,
-        &mut *scene,
-    );
+    let (inner, _) = split_pane_status(pane.area);
     let Some(list_area) = conflict_list_rect(pane.area) else {
         return;
     };

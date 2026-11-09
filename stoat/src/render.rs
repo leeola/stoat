@@ -70,7 +70,7 @@ use crate::{
     },
     lsp::{progress::LspProgressMap, registry::LspRegistry},
     minimap::{emit, MinimapContent},
-    pane::{DockVisibility, FocusTarget, PaneId, View},
+    pane::{DockVisibility, FocusTarget, Pane, PaneId, View},
     rebase::RebasePause,
     run::{RunId, RunState},
     term_session::{TermId, TermSession},
@@ -119,6 +119,13 @@ pub(crate) const SINGLE_MINIMAP_STRIP_ID: u32 = u32::MAX;
 /// was declared before it. An overlay therefore has to sit in a lane above
 /// every pane's to cover them, and the highest id stays above any pane index.
 pub(crate) const OVERLAY_LANE: u32 = u32::MAX;
+
+/// The scene lane of the window's status row, which changes with every cursor
+/// move while the panes stand.
+///
+/// The row sits below every pane and covers none, so its lane only has to stay
+/// under [`OVERLAY_LANE`], where a card docked above the row draws.
+pub(crate) const STATUS_LANE: u32 = u32::MAX - 1;
 
 /// The opacity of the minimap's viewport thumb, nine percent of 255.
 ///
@@ -259,7 +266,7 @@ impl LspServerList {
 pub(crate) struct FrameCtx<'a> {
     pub(crate) workspace_name: &'a str,
     /// Whether the tab bar takes the frame's top row. The bar then leads with
-    /// the workspace name, so a pane's status row leaves the name out.
+    /// the workspace name, so the window's status row leaves the name out.
     pub(crate) tab_bar_shown: bool,
     pub(crate) workspace_root: &'a Path,
     pub(crate) mode: &'a str,
@@ -845,7 +852,7 @@ pub(crate) fn perf_label(seg: PerfSegment) -> String {
 
 pub(crate) const PRIMARY_MODES: &[&str] = &["normal", "insert", "select"];
 
-/// Reserve the bottom row for the pane status bar so the which-key hint box,
+/// Reserve the bottom row for the window's status bar so the which-key hint box,
 /// bottom-anchored over the full-window right edge, never paints over it.
 pub(crate) fn hints_overlay_area(size: Rect) -> Rect {
     Rect {
@@ -1203,6 +1210,7 @@ pub(crate) fn frame(
     let single_minimap_rect = stoat.single_minimap_rect;
     let modal_overlay = modal_overlay_open(stoat);
     let size = stoat.layout_size();
+    let status_bar = stoat.status_bar_rect();
     let inactive_dim = stoat.painted_inactive_dim();
     let modal_dim = stoat.modal_dim();
 
@@ -1290,11 +1298,12 @@ pub(crate) fn frame(
     badges::sync_walkthrough_badge(&mut ws.badges, ws.walkthrough.as_ref());
     let pinned = focused_pane_pinned(ws) || app::is_pinned_mode(mode);
     badges::sync_pinned_badge(&mut ws.badges, pinned);
-    // A top-right chip sits in the tab bar row, which the pane layout leaves
-    // out, so the badges lay out over the layout area raised to the frame top.
+    // A top-right chip sits in the tab bar row and a bottom-right one on the
+    // status row, both of which the pane layout leaves out, so the badges lay
+    // out over the layout area stretched to the frame's top and bottom.
     let badge_area = Rect {
         y: full.y,
-        height: size.bottom() - full.y,
+        height: full.height,
         ..size
     };
     let badge_cover = badges::bottom_right_cover(&ws.badges, &stoat.badges, badge_area);
@@ -1428,7 +1437,6 @@ pub(crate) fn frame(
     let tick = stoat.render_tick;
     let workspace = stoat.active_workspace;
     let split_focused = ws.panes.focus();
-    let mut lsp_badge_rect: Option<Rect> = None;
 
     // A painter writes over a blank buffer and leaves the cells it skips. So
     // before any pane paints, the frame blanks each held rect whose pane is
@@ -1474,19 +1482,6 @@ pub(crate) fn frame(
         }
         if pane.area.width == 0 || pane.area.height == 0 {
             continue;
-        }
-
-        let status_row = pane::status_row(
-            pane,
-            is_focused,
-            frame,
-            &mut ws.editors,
-            &ws.buffers,
-            &ws.terms,
-            &ws.diff_changes_views,
-        );
-        if status_row.badge.is_some() {
-            lsp_badge_rect = status_row.badge;
         }
 
         // An editor pane, a changes view pane, and a live terminal pane are
@@ -1539,7 +1534,6 @@ pub(crate) fn frame(
             {
                 diff_changes::replay_cursor(pane, state, &mut ws.editors, frame, scene.live());
             }
-            pane::render_pane_status(pane, frame, &mut ws.editors, &status_row, buf, scene);
             scene.end_lane();
             continue;
         }
@@ -1563,7 +1557,6 @@ pub(crate) fn frame(
             buf,
             scene,
             undercurls,
-            &status_row,
         );
         scene.end_lane();
         stoat.pane_paints += 1;
@@ -1579,10 +1572,6 @@ pub(crate) fn frame(
         }
     }
     scene.set_lane(OVERLAY_LANE);
-    stoat.lsp_badge_rect = lsp_badge_rect;
-    if lsp_badge_rect.is_none() {
-        stoat.lsp_badge_hovered = false;
-    }
 
     // A pane id never returns, so an entry a close left behind would hold one
     // pane's cells for the process. Every close path meets this sweep, which is
@@ -1657,7 +1646,7 @@ pub(crate) fn frame(
         }
         if screen == Some("rebase") {
             if let Some(state) = ws.rebase.as_mut() {
-                rebase::render_rebase(pane, is_focused, state, frame, buf, &mut *scene);
+                rebase::render_rebase(pane, state, frame, buf, &mut *scene);
             }
         } else if screen == Some("reword") {
             let reword_ctx = ws
@@ -1679,22 +1668,44 @@ pub(crate) fn frame(
             if let Some((sha, orig, editor_id)) = reword_ctx
                 && let Some(editor) = ws.editors.get_mut(editor_id)
             {
-                reword::render_reword(
-                    pane,
-                    is_focused,
-                    editor,
-                    &sha,
-                    &orig,
-                    frame,
-                    buf,
-                    &mut *scene,
-                );
+                reword::render_reword(pane, is_focused, editor, &sha, &orig, frame, buf);
             }
         } else if screen == Some("rebase_conflict")
             && let Some(active) = ws.rebase_active.as_ref()
         {
-            conflict::render_conflict(pane, is_focused, active, frame, buf, &mut *scene);
+            conflict::render_conflict(pane, active, frame, buf, &mut *scene);
         }
+    }
+
+    // The row shows the pane focus anchors to, which reads unfocused while a
+    // dock or a detached window holds focus.
+    let lsp_badge_rect = status_bar.and_then(|row| {
+        let id = ws.panes.focus_anchor();
+        scene.set_lane(STATUS_LANE);
+        let badge = render_window_status(
+            ws.panes.pane(id),
+            matches!(ws.focus, FocusTarget::SplitPane) && split_focused == id,
+            overlay_pane == Some(id),
+            row,
+            PaneCtx {
+                editors: &mut ws.editors,
+                buffers: &ws.buffers,
+                runs: &ws.runs,
+                terms: &ws.terms,
+                term_pool_grids: &ws.term_pool_grids,
+                commit_lists: &mut ws.commit_lists,
+                diff_changes_views: &mut ws.diff_changes_views,
+            },
+            frame,
+            buf,
+            scene,
+        );
+        scene.set_lane(OVERLAY_LANE);
+        badge
+    });
+    stoat.lsp_badge_rect = lsp_badge_rect;
+    if lsp_badge_rect.is_none() {
+        stoat.lsp_badge_hovered = false;
     }
 
     for (dock_id, dock) in &ws.docks {
@@ -2525,20 +2536,71 @@ fn single_band_narrows(ws: &Workspace) -> bool {
     single_band_overview(ws) && ws.panes.widened() == Some(ws.panes.focus())
 }
 
+/// Paint the window's status row, `row`, with the status of `pane`, and return
+/// the hover rect of the LSP badge the row shows.
+///
+/// With `screen_over` set, a rebase, reword, or conflict screen covers the
+/// pane, and the row names that screen. A commits view's row names the commits
+/// screen and its selected commit. Every other view shows its pane status.
+#[allow(clippy::too_many_arguments)]
+fn render_window_status(
+    pane: &Pane,
+    is_focused: bool,
+    screen_over: bool,
+    row: Rect,
+    ctx: PaneCtx<'_>,
+    frame: FrameCtx<'_>,
+    buf: &mut Buffer,
+    scene: &mut ApcScene,
+) -> Option<Rect> {
+    let PaneCtx {
+        editors,
+        buffers,
+        terms,
+        commit_lists,
+        diff_changes_views,
+        ..
+    } = ctx;
+    if screen_over {
+        pane::render_overlay_status(row, is_focused, frame.screen, None, frame, buf, scene);
+        return None;
+    }
+    if let View::Commits(id) = pane.view {
+        let subject = commit_lists.get(id).and_then(commits::status_subject);
+        pane::render_overlay_status(
+            row,
+            is_focused,
+            Some("commits"),
+            subject.as_ref(),
+            frame,
+            buf,
+            scene,
+        );
+        return None;
+    }
+
+    let status = pane::status_row(
+        pane,
+        row,
+        is_focused,
+        frame,
+        editors,
+        buffers,
+        terms,
+        diff_changes_views,
+    );
+    pane::render_pane_status(pane, frame, editors, &status, buf, scene);
+    status.badge
+}
+
 /// The scene lane of a pane's content, which holds its gutter, its minimap
 /// strip, and the cards it pops out.
 ///
-/// Each pane takes two lanes, so a cursor move that redraws only the status
-/// row sends only that row. Lane 0 stays below every pane for the tab bar, and
-/// [`OVERLAY_LANE`] above them.
+/// Lane 0 stays below every pane for the tab bar, and [`STATUS_LANE`] and
+/// [`OVERLAY_LANE`] above them, so a cursor move that redraws only the window's
+/// status row sends only that row.
 pub(crate) fn content_lane(pane_index: u32) -> u32 {
-    1 + 2 * pane_index
-}
-
-/// The scene lane of a pane's status row, which changes with every cursor move
-/// while the content beside it stands.
-pub(crate) fn status_lane(pane_index: u32) -> u32 {
-    2 + 2 * pane_index
+    1 + pane_index
 }
 
 /// The pane that a rebase, reword, or conflict screen paints over.

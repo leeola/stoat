@@ -1163,7 +1163,7 @@ impl PaneTree {
     /// operations anchored on the focus resolve through this to act on a real
     /// leaf rather than panicking. There is always at least one split pane, since
     /// [`Self::detach`] refuses to windowize the last one.
-    fn focus_anchor(&self) -> PaneId {
+    pub(crate) fn focus_anchor(&self) -> PaneId {
         if self.leaf_node(self.focus).is_some() {
             self.focus
         } else {

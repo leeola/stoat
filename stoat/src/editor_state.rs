@@ -192,10 +192,10 @@ pub(crate) struct EditorState {
     /// rebuilding them every frame, and a cursor move rebuild only the lines.
     /// Transient render state, not persisted.
     pub(crate) gutter_geometry_cache: Option<crate::render::editor::GutterGeometryCache>,
-    /// The APC frame this editor's pane status bar last emitted, keyed by the
-    /// segments and rect it was built from, so an unchanged repaint splices the
-    /// frame instead of encoding it again. Transient render state, not
-    /// persisted.
+    /// The APC frame the window's status bar last emitted for this editor's
+    /// pane, keyed by the segments and rect it was built from, so an unchanged
+    /// repaint splices the frame instead of encoding it again. Transient render
+    /// state, not persisted.
     pub(crate) status_scene_cache: crate::render::pane::StatusSceneCache,
     /// Diagnostic spans resolved to byte offsets, keyed by the diagnostic-set
     /// and buffer versions, so the per-frame render paths reuse one resolution.

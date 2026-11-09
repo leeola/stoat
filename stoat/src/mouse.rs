@@ -2227,8 +2227,8 @@ fn copy_status(text: &str) -> String {
 /// The buffer offset under the cell `col`, `row` of the editor pane at `area`,
 /// or `None` for a cell outside the painted text.
 ///
-/// The pane's status row paints no text, so a press on it maps to nothing
-/// rather than to the line below the last visible one.
+/// A cell past the pane's last row, such as one on the window's status row,
+/// maps to nothing rather than to the line below the last visible one.
 pub(crate) fn editor_screen_to_offset(
     stoat: &mut Stoat,
     editor_id: EditorId,
@@ -2995,12 +2995,7 @@ mod tests {
         let mut h = crate::test_harness::TestHarness::with_size(80, 24);
         h.seed_focused_buffer(&"line\n".repeat(60));
         h.snapshot();
-        let status_y = {
-            let ws = h.stoat.active_workspace();
-            crate::render::layout::split_pane_status(ws.panes.pane(ws.panes.focus()).area)
-                .1
-                .y
-        };
+        let status_y = h.stoat.status_bar_rect().expect("a status row").y;
         let heads = h.head_offsets();
 
         for button in [MouseButton::Left, MouseButton::Middle, MouseButton::Right] {

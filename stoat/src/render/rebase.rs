@@ -4,7 +4,6 @@ use crate::{
     rebase::RebaseState,
     render::{
         layout::split_pane_status,
-        pane::render_overlay_status,
         text::{truncate_to_cols, write_str},
         FrameCtx,
     },
@@ -34,23 +33,13 @@ const HELP_ROWS: u16 = 2;
 
 pub(crate) fn render_rebase(
     pane: &Pane,
-    is_focused: bool,
     state: &mut RebaseState,
     frame: FrameCtx<'_>,
     buf: &mut Buffer,
     scene: &mut stoat_widgets::ApcScene,
 ) {
     let theme = frame.theme;
-    let (inner, status_area) = split_pane_status(pane.area);
-    render_overlay_status(
-        status_area,
-        is_focused,
-        frame.screen,
-        None,
-        frame,
-        buf,
-        scene,
-    );
+    let (inner, _) = split_pane_status(pane.area);
 
     let Some(list_area) = rebase_list_rect(pane.area) else {
         return;

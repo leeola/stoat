@@ -4,7 +4,6 @@ use crate::{
     render::{
         editor::render_editor,
         layout::split_pane_status,
-        pane::render_overlay_status,
         text::{truncate_to_cols, write_str},
         FrameCtx,
     },
@@ -19,7 +18,6 @@ use ratatui::{buffer::Buffer, layout::Rect, style::Modifier};
 /// `current_mode` is the live `Stoat::mode` string and is shown in the
 /// help footer so users can see whether they're in the normal or insert
 /// sub-mode.
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn render_reword(
     pane: &Pane,
     is_focused: bool,
@@ -28,20 +26,10 @@ pub(crate) fn render_reword(
     original_message: &str,
     frame: FrameCtx<'_>,
     buf: &mut Buffer,
-    scene: &mut stoat_widgets::ApcScene,
 ) {
     let current_mode = frame.mode;
     let theme = frame.theme;
-    let (inner, status_area) = split_pane_status(pane.area);
-    render_overlay_status(
-        status_area,
-        is_focused,
-        frame.screen,
-        None,
-        frame,
-        buf,
-        scene,
-    );
+    let (inner, _) = split_pane_status(pane.area);
     if inner.width < 10 || inner.height < 4 {
         return;
     }

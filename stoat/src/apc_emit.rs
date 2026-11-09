@@ -512,7 +512,14 @@ fn emit_window_content(stoat: &mut Stoat, out: &mut Vec<u8>) -> Vec<Vec<u8>> {
     for (windowed_index, (pane_id, window)) in windowed.into_iter().enumerate() {
         let (content, status, view, index, is_focused, area) = {
             let pane = ws.panes.pane(pane_id);
-            let (content, status) = crate::render::layout::split_pane_status(pane.area);
+            // The pane stops one row above its window's last row, which is the
+            // window's status row.
+            let content = pane.area;
+            let status = Rect {
+                y: pane.area.y + pane.area.height,
+                height: 1,
+                ..pane.area
+            };
             let is_focused = matches!(focus_target, FocusTarget::SplitPane) && pane_id == focus_id;
             (
                 content,
@@ -551,15 +558,6 @@ fn emit_window_content(stoat: &mut Stoat, out: &mut Vec<u8>) -> Vec<Vec<u8>> {
                 let mut scene = ApcScene::new();
                 let mut undercurls = UndercurlBatch::default();
                 let pane = ws.panes.pane(pane_id);
-                let status_row = crate::render::pane::status_row(
-                    pane,
-                    is_focused,
-                    frame,
-                    &mut ws.editors,
-                    &ws.buffers,
-                    &ws.terms,
-                    &ws.diff_changes_views,
-                );
                 crate::render::pane::render_pane(
                     pane,
                     is_focused,
@@ -576,14 +574,12 @@ fn emit_window_content(stoat: &mut Stoat, out: &mut Vec<u8>) -> Vec<Vec<u8>> {
                     &mut buf,
                     &mut scene,
                     &mut undercurls,
-                    &status_row,
                 );
             }
 
-            // render_pane also paints the status row. The status pool below
-            // owns it, so only the content rows are copied out and shipped.
-            // A pane that sent no page yet holds an empty one, which no
-            // content area equals.
+            // The page holds the content rows alone, since the status pool below
+            // owns the window's last row. A pane that sent no page yet holds an
+            // empty one, which no content area equals.
             let held = stoat
                 .window_pages
                 .entry(index)

@@ -1463,7 +1463,7 @@ mod tests {
     }
 
     #[test]
-    fn an_unfocused_list_dims_and_names_itself() {
+    fn an_unfocused_list_dims_and_leaves_the_row_to_the_focused_pane() {
         let mut h = Stoat::test();
         h.resize(90, 16);
         seed_two_commits_on_main(&mut h);
@@ -1493,20 +1493,18 @@ mod tests {
                 .collect();
             first_rows.push(row);
         }
-        let area = h.stoat.active_workspace().panes.pane(list_pane).area;
-        let status: String = h
+        let row = h.stoat.status_bar_rect().expect("a status row").y;
+        let status = h
             .rendered_text()
             .lines()
-            .nth(usize::from(area.bottom() - 1))
-            .expect("the list's status row")
-            .chars()
-            .skip(usize::from(area.x))
-            .collect();
+            .nth(usize::from(row))
+            .expect("the status row")
+            .replace('\u{2500}', " ");
 
         assert_eq!(
-            (first_rows[0] != first_rows[1], status.contains("commits")),
-            (true, true),
-            "an unfocused list dims and names itself in its status row:\n{status}"
+            (first_rows[0] != first_rows[1], status),
+            (true, format!("{:<86}1:1", " NOR  repo scratch")),
+            "an unfocused list dims, and the status row names the focused pane"
         );
     }
 
@@ -1738,12 +1736,11 @@ mod tests {
 
         let status_row = |h: &mut crate::test_harness::TestHarness| {
             h.snapshot();
-            let ws = h.stoat.active_workspace();
-            let row = ws.panes.pane(ws.panes.focus()).area.bottom() - 1;
+            let row = h.stoat.status_bar_rect().expect("a status row").y;
             h.rendered_text()
                 .lines()
                 .nth(usize::from(row))
-                .expect("the pane's status row")
+                .expect("the status row")
                 .to_string()
         };
         let before = status_row(&mut h);

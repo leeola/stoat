@@ -10,7 +10,7 @@ use crate::{
         commit_picker::{graph_width, paint_commit_graph, tip_colors, GraphPaint},
         layout::split_pane_status,
         paint::{blend, render_empty_num, render_side_num, render_side_text, style_rgb},
-        pane::{render_overlay_status, ScreenSubject},
+        pane::ScreenSubject,
         picker::line_strong,
         review::{
             paint_base_row, resolve_diff_tints, DiffColumns, DiffDials, DiffLayout, DiffTints,
@@ -38,7 +38,6 @@ use stoat_widgets::{
 
 pub(crate) fn render_commits(
     pane: &Pane,
-    is_focused: bool,
     state: &mut CommitListState,
     frame: FrameCtx<'_>,
     buf: &mut Buffer,
@@ -46,24 +45,7 @@ pub(crate) fn render_commits(
 ) {
     let theme = frame.theme;
     let workspace_root = frame.workspace_root;
-    let (inner, status_area) = split_pane_status(pane.area);
-    let subject = state
-        .commits
-        .get(state.selected)
-        .map(|commit| ScreenSubject {
-            name: &commit.short_sha,
-            note: (commit.parents.len() >= 2)
-                .then(|| format!("merge \u{b7} {} parents", commit.parents.len())),
-        });
-    render_overlay_status(
-        status_area,
-        is_focused,
-        Some("commits"),
-        subject.as_ref(),
-        frame,
-        buf,
-        &mut *scene,
-    );
+    let (inner, _) = split_pane_status(pane.area);
 
     let Some(left_area) = commits_list_rect(pane.area, frame.commits_split) else {
         return;
@@ -91,6 +73,19 @@ pub(crate) fn render_commits(
             scene,
         );
     }
+}
+
+/// The selected commit, as the window's status row names it after the commits
+/// screen, with a merge's count of parents as a remark.
+pub(crate) fn status_subject(state: &CommitListState) -> Option<ScreenSubject<'_>> {
+    state
+        .commits
+        .get(state.selected)
+        .map(|commit| ScreenSubject {
+            name: &commit.short_sha,
+            note: (commit.parents.len() >= 2)
+                .then(|| format!("merge \u{b7} {} parents", commit.parents.len())),
+        })
 }
 
 /// Narrowest the commit list gets, however far the separator is dragged toward

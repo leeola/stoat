@@ -227,11 +227,11 @@ pub(super) fn rename_tab(stoat: &mut Stoat, name: Option<&str>) -> UpdateEffect 
     UpdateEffect::Redraw
 }
 
-/// Re-layout the newly active tab's tree to the terminal size, so the first
+/// Re-layout the newly active tab's tree to the pane layout area, so the first
 /// render after a switch shows correctly-sized panes rather than the
 /// zero-sized rects a parked tree was stored with.
 fn relayout(stoat: &mut Stoat) {
-    let size = stoat.size();
+    let size = stoat.layout_size();
     stoat.active_workspace_mut().layout(size);
 }
 
@@ -439,17 +439,18 @@ mod tests {
     fn auto_reveals_the_bar_only_once_a_second_tab_exists() {
         let mut h = Stoat::test();
         h.stoat.settings.ui_tab_bar = Some(TabBarMode::Auto);
-        let full = h.stoat.size().height;
+        // The window's last row is its status row, with the bar or without it.
+        let panes = h.stoat.size().height - 1;
 
         assert!(!h.stoat.tab_bar_visible(), "one tab needs no bar");
-        assert_eq!(h.stoat.layout_size().height, full);
+        assert_eq!(h.stoat.layout_size().height, panes);
 
         dispatch(&mut h, &stoat_action::NewTab);
 
         assert!(h.stoat.tab_bar_visible(), "a second tab reveals it");
         assert_eq!(
             h.stoat.layout_size().height,
-            full - 1,
+            panes - 1,
             "the bar costs the panes exactly one row"
         );
         assert_eq!(h.stoat.layout_size().y, 1, "and panes start below it");

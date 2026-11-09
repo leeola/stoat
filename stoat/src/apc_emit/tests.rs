@@ -199,10 +199,11 @@ fn editor_pool_pane_region_is_content_rect() {
     let panes = editor_pool_panes(&h.stoat);
     assert_eq!(panes.len(), 1, "one editor pane is pooled");
     let (_, _, region) = panes[0];
-    // Content rect is the pane area minus its one-row status bar.
+    // The content rect is the whole pane area, since the window's status row
+    // sits below the pane tree.
     assert_eq!(
         (region.top, region.left, region.width, region.height),
-        (1, 2, 76, 22)
+        (1, 2, 76, 23)
     );
 }
 
@@ -219,7 +220,7 @@ fn editor_pool_pane_region_excludes_the_minimap_strip() {
     // over it, leaving content width 76 minus the strip's 8 columns.
     assert_eq!(
         (region.top, region.left, region.width, region.height),
-        (1, 2, 68, 22)
+        (1, 2, 68, 23)
     );
 
     h.stoat.active_workspace_mut().editors[editor_id].minimap_rect = None;
@@ -747,8 +748,8 @@ fn flushed_frame(
     drain_apc(rx)
 }
 
-/// A cursor move along a line redraws only the focused pane's status row, so
-/// only that row's lane goes out, and no reset clears the rest of the scene.
+/// A cursor move along a line redraws only the window's status row, so only
+/// that row's lane goes out, and no reset clears the rest of the scene.
 #[test]
 fn a_status_only_change_flushes_its_lane_alone() {
     use stoatty_protocol::command::Command;
@@ -762,12 +763,10 @@ fn a_status_only_change_flushes_its_lane_alone() {
         .filter(|c| matches!(c, Command::Reset | Command::LaneBegin(_) | Command::LaneEnd))
         .collect();
 
-    let ws = h.stoat.active_workspace();
-    let index = ws.panes.pane(ws.panes.focus()).index;
     assert_eq!(
         structure,
         [
-            Command::LaneBegin(crate::render::status_lane(index)),
+            Command::LaneBegin(crate::render::STATUS_LANE),
             Command::LaneEnd
         ],
         "the status row's lane alone, with no reset"
@@ -7192,7 +7191,7 @@ fn buffered_relative_pool(
     h.stoat.active_workspace_mut().git_root = root;
     action_handlers::dispatch(&mut h.stoat, &OpenFile { path });
     h.settle();
-    let size = h.stoat.size();
+    let size = h.stoat.layout_size();
     h.stoat.active_workspace_mut().layout(size);
     action_handlers::focused_editor_mut(&mut h.stoat)
         .expect("focused editor")

@@ -3337,9 +3337,11 @@ impl Stoat {
                     panes.set_focus(id);
                 }
             },
+            // The window's last row is its status row, so the pane takes the rows
+            // above it.
             WindowIpcEvent::Resized { window, cols, rows } => {
                 if let Some(id) = pane_for_window(panes, window) {
-                    panes.pane_mut(id).area = Rect::new(0, 0, cols, rows);
+                    panes.pane_mut(id).area = Rect::new(0, 0, cols, rows.saturating_sub(1));
                 }
             },
             WindowIpcEvent::Closed { window } => {
@@ -3990,7 +3992,8 @@ impl Stoat {
     ///
     /// While islands are on, the area also stops [`Self::island_margin`]
     /// columns short of each side of the window, so the window ground shows
-    /// along both edges.
+    /// along both edges. It stops one row short of the bottom too, which
+    /// [`Self::status_bar_rect`] takes.
     ///
     /// Centered modals do not lay out here. They take the full [`Self::size`]
     /// and the strip yields to them, so their paint, pools, and mouse hit-tests
@@ -4009,6 +4012,13 @@ impl Stoat {
             width: size.width.saturating_sub(2 * margin),
             ..size
         };
+        let size = match self.status_bar_rect() {
+            Some(_) => Rect {
+                height: size.height - 1,
+                ..size
+            },
+            None => size,
+        };
         if !self.tab_bar_visible() {
             return size;
         }
@@ -4017,6 +4027,27 @@ impl Stoat {
             height: size.height.saturating_sub(1),
             ..size
         }
+    }
+
+    /// The window's status row, which shows the status of the pane that holds
+    /// focus.
+    ///
+    /// The row is the window's last, under the pane tree and the minimap band
+    /// alike, and stops at the island margins as the panes do. One row serves
+    /// the whole split, so a pane gives none of its own rows to a status bar.
+    /// `None` for a window under two rows tall, which keeps its one row for
+    /// the panes.
+    pub(crate) fn status_bar_rect(&self) -> Option<Rect> {
+        if self.size.height < 2 {
+            return None;
+        }
+        let margin = self.island_margin();
+        Some(Rect {
+            x: self.size.x + margin,
+            y: self.size.y + self.size.height - 1,
+            width: self.size.width.saturating_sub(2 * margin),
+            height: 1,
+        })
     }
 
     /// Whether the panes lay out as islands on the window ground.
@@ -5648,7 +5679,7 @@ impl Stoat {
         let effect = match event {
             Event::Resize(w, h) => {
                 self.size = Rect::new(0, 0, w, h);
-                let size = self.size;
+                let size = self.layout_size();
                 self.active_workspace_mut().layout(size);
                 tracing::debug!(target: "stoat::app", cols = w, rows = h, "terminal resized");
                 // A drag reports a resize per column or row it crosses, and each
@@ -7323,7 +7354,7 @@ impl Stoat {
                 }
                 // A parked tree keeps zero-sized rects, so a layout pass fits it
                 // to the screen before focus moves into it.
-                let size = self.size();
+                let size = self.layout_size();
                 let ws = self.active_workspace_mut();
                 ws.layout(size);
                 ws.panes.set_focus(pane);

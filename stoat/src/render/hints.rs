@@ -209,7 +209,7 @@ pub(crate) fn render_hints_grouped(
         return;
     }
 
-    // Reserve the bottom row for the pane status bar. Every caller passes the
+    // Reserve the bottom row for the window's status bar. Every caller passes the
     // full window, so the box lays out flush to the right edge above the bar.
     let area = super::hints_overlay_area(area);
 

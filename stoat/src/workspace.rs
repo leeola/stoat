@@ -2326,8 +2326,8 @@ impl Workspace {
     ///
     /// Runs on every [`Self::layout`], but [`TermSession::fit`] skips agents
     /// already at the right size, so a steady layout issues no PTY resizes. The
-    /// content area excludes the status row via [`split_pane_status`], matching
-    /// the rectangle the renderer composites the emulator into.
+    /// content area is the pane's whole area, through [`split_pane_status`],
+    /// matching the rectangle the renderer composites the emulator into.
     ///
     /// A term with a grid in [`Self::term_pool_grids`] takes that grid instead,
     /// since stoatty draws it at another font size than the content area's
