@@ -3809,7 +3809,7 @@ fn a_copied_cursors_start_stays_before_text_inserted_at_it() {
     {
         let ws = h.stoat.active_workspace();
         let editor_id = match ws.panes.pane(ws.panes.focus()).view {
-            crate::pane::View::Editor(id) => id,
+            View::Editor(id) => id,
             _ => panic!("focused pane is not an editor"),
         };
         let buffer_id = ws.editors[editor_id].buffer_id;
@@ -6431,7 +6431,7 @@ fn focused_buffer_dirty(h: &mut TestHarness) -> bool {
     let ws = h.stoat.active_workspace();
     let focused = ws.panes.focus();
     let editor_id = match ws.panes.pane(focused).view {
-        crate::pane::View::Editor(id) => id,
+        View::Editor(id) => id,
         _ => panic!("focused pane is not an editor"),
     };
     let buffer_id = ws.editors[editor_id].buffer_id;

@@ -707,15 +707,13 @@ impl TestHarness {
     /// Edit the focused buffer at the given byte range, replacing it with
     /// `text`. Triggers a capture so the next render reflects the edit.
     /// Test-only helper for exercising the incremental reparse path.
+    ///
+    /// In a changes view the focused buffer is the focused excerpt's file.
     pub fn edit_focused(&mut self, range: std::ops::Range<usize>, text: &str) {
         let ws = self.stoat.active_workspace_mut();
-        let focused = ws.panes.focus();
-        let editor_id = match ws.panes.pane(focused).view {
-            crate::pane::View::Editor(id) => id,
-            _ => panic!("edit_focused: focused pane is not an editor"),
-        };
-        let editor = ws.editors.get(editor_id).expect("focused editor exists");
-        let buffer = ws.buffers.get(editor.buffer_id).expect("buffer exists");
+        let (_, buffer_id) = crate::action_handlers::pane_editor_ids(ws)
+            .expect("edit_focused: the focused pane shows no editor");
+        let buffer = ws.buffers.get(buffer_id).expect("buffer exists");
         {
             let mut guard = buffer.write().expect("buffer poisoned");
             guard.edit(range, text);

@@ -1690,6 +1690,28 @@ pub(crate) fn focused_editor_mut(stoat: &mut Stoat) -> Option<&mut EditorState> 
     }
 }
 
+/// The editor that the focused split pane's editing keys act on, and the buffer
+/// it shows.
+///
+/// A plain editor pane answers its editor. A changes view answers its focused
+/// excerpt's editor, folded or not, so an edit there changes the excerpt's
+/// file. A run pane's input editor and a dock take no editing key from the
+/// handlers that read this, so they answer `None`, as every other view does.
+///
+/// See also:
+/// - [`focused_editor_mut`] for the editor that motions move, which also answers for a paused
+///   reword and a focused dock.
+pub(crate) fn pane_editor_ids(ws: &crate::workspace::Workspace) -> Option<(EditorId, BufferId)> {
+    match ws.panes.pane(ws.panes.focus()).view {
+        View::Editor(id) => Some((id, ws.editors.get(id)?.buffer_id)),
+        View::DiffChanges(id) => {
+            let excerpt = ws.diff_changes_views.get(id)?.focused_excerpt()?;
+            Some((excerpt.editor_id, excerpt.buffer_id))
+        },
+        _ => None,
+    }
+}
+
 /// Run `f` on the focused editor, or answer [`UpdateEffect::None`] when no
 /// editor has focus.
 ///

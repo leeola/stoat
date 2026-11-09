@@ -1,6 +1,8 @@
 use super::{split_selection, surround, view, LastMotion};
 use crate::{
-    action_handlers::{focused_editor_mut, input_target_editor_mut, with_focused_editor},
+    action_handlers::{
+        focused_editor_mut, input_target_editor_mut, pane_editor_ids, with_focused_editor,
+    },
     app::{Stoat, UpdateEffect},
     buffer_registry::OpenOrigin,
     diff_map,
@@ -9,7 +11,7 @@ use crate::{
     host::{FsHost, GitHost, GitRepo},
     jumplist::JumpEntry,
     multi_buffer::MultiBufferSnapshot,
-    pane::{FocusTarget, PaneId, View},
+    pane::{FocusTarget, PaneId},
     selection::{
         anchor_selection, forward_block_cursor, land_block_cursor, merge_overlapping_spans,
         ResolvedRead, SelectionsCollection, SpanLanding,
@@ -818,12 +820,8 @@ enum IndentLanding {
 /// does. An empty line lands a cursor in either mode.
 fn insert_with_indent(stoat: &mut Stoat, fallback: IndentFallback) -> UpdateEffect {
     let extend = stoat.in_select_mode();
-    let editor_id = {
-        let ws = stoat.active_workspace();
-        match ws.panes.pane(ws.panes.focus()).view {
-            View::Editor(id) => id,
-            _ => return UpdateEffect::None,
-        }
+    let Some((editor_id, _)) = pane_editor_ids(stoat.active_workspace()) else {
+        return UpdateEffect::None;
     };
 
     let (buffer_id, plans) = {
@@ -1204,10 +1202,8 @@ pub(super) fn rotate_selection_contents_backward(stoat: &mut Stoat) -> UpdateEff
 fn rotate_selection_contents(stoat: &mut Stoat, forward: bool) -> UpdateEffect {
     let count = stoat.take_pending_count().unwrap_or(1) as usize;
     let ws = stoat.active_workspace_mut();
-    let focused = ws.panes.focus();
-    let editor_id = match ws.panes.pane(focused).view {
-        View::Editor(id) => id,
-        _ => return UpdateEffect::None,
+    let Some((editor_id, _)) = pane_editor_ids(ws) else {
+        return UpdateEffect::None;
     };
 
     let (buffer_id, entries) = {
@@ -1336,12 +1332,9 @@ pub(super) fn join_selections_space(stoat: &mut Stoat) -> UpdateEffect {
 /// an editor or nothing joins.
 fn join_selections_impl(stoat: &mut Stoat, select_space: bool) -> UpdateEffect {
     let ws = stoat.active_workspace_mut();
-    let focused = ws.panes.focus();
-    let editor_id = match ws.panes.pane(focused).view {
-        View::Editor(id) => id,
-        _ => return UpdateEffect::None,
+    let Some((editor_id, buffer_id)) = pane_editor_ids(ws) else {
+        return UpdateEffect::None;
     };
-    let buffer_id = ws.editors.get(editor_id).expect("editor").buffer_id;
     let comment_tokens = ws
         .buffers
         .language_for(buffer_id)
@@ -1479,10 +1472,8 @@ fn rope_matches_at(rope: &Rope, offset: usize, limit: usize, token: &str) -> boo
 
 pub(super) fn align_selections(stoat: &mut Stoat) -> UpdateEffect {
     let ws = stoat.active_workspace_mut();
-    let focused = ws.panes.focus();
-    let editor_id = match ws.panes.pane(focused).view {
-        View::Editor(id) => id,
-        _ => return UpdateEffect::None,
+    let Some((editor_id, _)) = pane_editor_ids(ws) else {
+        return UpdateEffect::None;
     };
 
     // A selection spanning two rows has no single column to align, so one of
@@ -1711,10 +1702,8 @@ where
     F: Fn(&str) -> Option<String>,
 {
     let ws = stoat.active_workspace_mut();
-    let focused = ws.panes.focus();
-    let editor_id = match ws.panes.pane(focused).view {
-        View::Editor(id) => id,
-        _ => return false,
+    let Some((editor_id, _)) = pane_editor_ids(ws) else {
+        return false;
     };
 
     let (buffer_id, mut edits) = {
@@ -1844,10 +1833,8 @@ fn delete_selection_impl(stoat: &mut Stoat, yank: bool) -> UpdateEffect {
     }
 
     let ws = stoat.active_workspace_mut();
-    let focused = ws.panes.focus();
-    let editor_id = match ws.panes.pane(focused).view {
-        View::Editor(id) => id,
-        _ => return UpdateEffect::None,
+    let Some((editor_id, _)) = pane_editor_ids(ws) else {
+        return UpdateEffect::None;
     };
 
     let (buffer_id, mut deletions) = {
@@ -1955,8 +1942,7 @@ fn change_selection_impl(stoat: &mut Stoat, yank: bool) -> UpdateEffect {
 /// `selection_is_linewise`. False when the focused pane is not an editor.
 fn selections_are_whole_lines(stoat: &mut Stoat) -> bool {
     let ws = stoat.active_workspace_mut();
-    let focused = ws.panes.focus();
-    let View::Editor(editor_id) = ws.panes.pane(focused).view else {
+    let Some((editor_id, _)) = pane_editor_ids(ws) else {
         return false;
     };
     let editor = ws.editors.get_mut(editor_id).expect("editor");
@@ -2040,17 +2026,12 @@ pub(super) fn open_line(
 ) -> UpdateEffect {
     let count = stoat.take_pending_count().unwrap_or(1) as usize;
 
-    let editor_id = {
-        let ws = stoat.active_workspace();
-        match ws.panes.pane(ws.panes.focus()).view {
-            View::Editor(id) => id,
-            _ => return UpdateEffect::None,
-        }
+    let Some((editor_id, buffer_id)) = pane_editor_ids(stoat.active_workspace()) else {
+        return UpdateEffect::None;
     };
 
-    let (buffer_id, sites) = {
+    let sites: Vec<OpenSite> = {
         let ws = stoat.active_workspace_mut();
-        let buffer_id = ws.editors.get(editor_id).expect("editor").buffer_id;
         // No tokens means no line continues one, which is the same shape a
         // language without line comments already takes.
         let comment_tokens = match continuation {
@@ -2064,7 +2045,7 @@ pub(super) fn open_line(
         let display_snapshot = editor.display_map.snapshot();
         let buffer_snapshot = display_snapshot.buffer_snapshot();
         let rope = buffer_snapshot.rope();
-        let sites: Vec<OpenSite> = editor
+        editor
             .selections
             .all_anchors()
             .iter()
@@ -2106,8 +2087,7 @@ pub(super) fn open_line(
                     continued,
                 }
             })
-            .collect();
-        (buffer_id, sites)
+            .collect()
     };
 
     if sites.is_empty() {
@@ -2227,10 +2207,8 @@ pub(super) fn set_pending_replace(stoat: &mut Stoat) -> UpdateEffect {
 /// reaches.
 pub(crate) fn execute_replace(stoat: &mut Stoat, text: &str) -> UpdateEffect {
     let ws = stoat.active_workspace_mut();
-    let focused = ws.panes.focus();
-    let editor_id = match ws.panes.pane(focused).view {
-        View::Editor(id) => id,
-        _ => return UpdateEffect::None,
+    let Some((editor_id, _)) = pane_editor_ids(ws) else {
+        return UpdateEffect::None;
     };
 
     let (buffer_id, mut entries) = {
@@ -2345,10 +2323,8 @@ pub(super) fn later(stoat: &mut Stoat) -> UpdateEffect {
 
 pub(super) fn commit_undo_checkpoint(stoat: &mut Stoat) -> UpdateEffect {
     let ws = stoat.active_workspace_mut();
-    let focused = ws.panes.focus();
-    let editor_id = match ws.panes.pane(focused).view {
-        View::Editor(id) => id,
-        _ => return UpdateEffect::None,
+    let Some((editor_id, _)) = pane_editor_ids(ws) else {
+        return UpdateEffect::None;
     };
     let editor = ws.editors.get(editor_id).expect("editor");
     let buffer_id = editor.buffer_id;
@@ -2377,13 +2353,9 @@ where
     F: Fn(&mut crate::buffer::TextBuffer) -> Option<Arc<[Selection<Anchor>]>>,
 {
     let ws = stoat.active_workspace_mut();
-    let focused = ws.panes.focus();
-    let editor_id = match ws.panes.pane(focused).view {
-        View::Editor(id) => id,
-        _ => return UpdateEffect::None,
+    let Some((editor_id, buffer_id)) = pane_editor_ids(ws) else {
+        return UpdateEffect::None;
     };
-
-    let buffer_id = ws.editors.get(editor_id).expect("editor").buffer_id;
 
     // Each step returns the selections to restore. Keep the last so a multi-step
     // count lands on the final group's edit-time selections.
@@ -2473,13 +2445,9 @@ pub(super) fn toggle_block_comments(stoat: &mut Stoat) -> UpdateEffect {
 
 fn toggle_comments_with(stoat: &mut Stoat, style: CommentStyle) -> UpdateEffect {
     let ws = stoat.active_workspace_mut();
-    let focused = ws.panes.focus();
-    let editor_id = match ws.panes.pane(focused).view {
-        View::Editor(id) => id,
-        _ => return UpdateEffect::None,
+    let Some((editor_id, buffer_id)) = pane_editor_ids(ws) else {
+        return UpdateEffect::None;
     };
-
-    let buffer_id = ws.editors.get(editor_id).expect("editor").buffer_id;
 
     // The tokens come from the layer the cursor falls in, so a fenced block
     // comments under its own grammar rather than the file's.
@@ -2718,13 +2686,10 @@ const TAB_WIDTH: usize = 4;
 fn apply_line_indent(stoat: &mut Stoat, dir: IndentDir) -> UpdateEffect {
     let count = stoat.take_pending_count().unwrap_or(1) as usize;
     let ws = stoat.active_workspace_mut();
-    let focused = ws.panes.focus();
-    let editor_id = match ws.panes.pane(focused).view {
-        View::Editor(id) => id,
-        _ => return UpdateEffect::None,
+    let Some((editor_id, buffer_id)) = pane_editor_ids(ws) else {
+        return UpdateEffect::None;
     };
 
-    let buffer_id = ws.editors.get(editor_id).expect("editor").buffer_id;
     let style = ws
         .buffers
         .get(buffer_id)
@@ -3202,13 +3167,10 @@ pub(super) fn expand_selection(stoat: &mut Stoat) -> UpdateEffect {
 
 fn expand_selection_step(stoat: &mut Stoat) -> UpdateEffect {
     let ws = stoat.active_workspace_mut();
-    let focused = ws.panes.focus();
-    let editor_id = match ws.panes.pane(focused).view {
-        View::Editor(id) => id,
-        _ => return UpdateEffect::None,
+    let Some((editor_id, buffer_id)) = pane_editor_ids(ws) else {
+        return UpdateEffect::None;
     };
 
-    let buffer_id = ws.editors.get(editor_id).expect("editor").buffer_id;
     let Some(syntax_map) = ws.buffers.syntax_map(buffer_id) else {
         return UpdateEffect::None;
     };
@@ -3311,13 +3273,10 @@ fn deepest_containing_layer(
 pub(super) fn shrink_selection(stoat: &mut Stoat) -> UpdateEffect {
     stoat.last_motion = Some(LastMotion::ShrinkSelection);
     let ws = stoat.active_workspace_mut();
-    let focused = ws.panes.focus();
-    let editor_id = match ws.panes.pane(focused).view {
-        View::Editor(id) => id,
-        _ => return UpdateEffect::None,
+    let Some((editor_id, buffer_id)) = pane_editor_ids(ws) else {
+        return UpdateEffect::None;
     };
 
-    let buffer_id = ws.editors.get(editor_id).expect("editor").buffer_id;
     let syntax = ws.buffers.syntax_map(buffer_id).map(|sm| sm.snapshot());
     let editor = ws.editors.get_mut(editor_id).expect("editor");
 
@@ -3454,13 +3413,10 @@ pub(crate) enum SiblingDir {
 pub(super) fn select_sibling(stoat: &mut Stoat, dir: SiblingDir) -> UpdateEffect {
     stoat.last_motion = Some(LastMotion::TsSibling { dir });
     let ws = stoat.active_workspace_mut();
-    let focused = ws.panes.focus();
-    let editor_id = match ws.panes.pane(focused).view {
-        View::Editor(id) => id,
-        _ => return UpdateEffect::None,
+    let Some((editor_id, buffer_id)) = pane_editor_ids(ws) else {
+        return UpdateEffect::None;
     };
 
-    let buffer_id = ws.editors.get(editor_id).expect("editor").buffer_id;
     let Some(syntax_map) = ws.buffers.syntax_map(buffer_id) else {
         return UpdateEffect::None;
     };
@@ -3548,10 +3504,8 @@ pub(crate) fn select_all_children(stoat: &mut Stoat) -> UpdateEffect {
 
 fn fan_selections_to_children(stoat: &mut Stoat, walk_to_multichild_parent: bool) -> UpdateEffect {
     let ws = stoat.active_workspace_mut();
-    let focused = ws.panes.focus();
-    let editor_id = match ws.panes.pane(focused).view {
-        View::Editor(id) => id,
-        _ => return UpdateEffect::None,
+    let Some((editor_id, _)) = pane_editor_ids(ws) else {
+        return UpdateEffect::None;
     };
 
     let editor = ws.editors.get_mut(editor_id).expect("editor");
@@ -3622,13 +3576,9 @@ pub(super) fn move_to_parent_bound(
 ) -> UpdateEffect {
     stoat.last_motion = Some(LastMotion::ParentBound { bound, extend });
     let ws = stoat.active_workspace_mut();
-    let focused = ws.panes.focus();
-    let editor_id = match ws.panes.pane(focused).view {
-        View::Editor(id) => id,
-        _ => return UpdateEffect::None,
+    let Some((editor_id, buffer_id)) = pane_editor_ids(ws) else {
+        return UpdateEffect::None;
     };
-
-    let buffer_id = ws.editors.get(editor_id).expect("editor").buffer_id;
 
     // The snapshot outlives the editor borrow, so the rope stays readable while
     // the syntax map answers for each selection in turn.
@@ -5403,13 +5353,9 @@ fn paragraph_range(
 }
 pub(super) fn match_brackets(stoat: &mut Stoat, extend: bool) -> UpdateEffect {
     let ws = stoat.active_workspace_mut();
-    let focused = ws.panes.focus();
-    let editor_id = match ws.panes.pane(focused).view {
-        View::Editor(id) => id,
-        _ => return UpdateEffect::None,
+    let Some((editor_id, buffer_id)) = pane_editor_ids(ws) else {
+        return UpdateEffect::None;
     };
-
-    let buffer_id = ws.editors.get(editor_id).expect("editor").buffer_id;
 
     // The snapshot outlives the editor borrow, so the rope stays readable while
     // the syntax map answers for each cursor in turn.

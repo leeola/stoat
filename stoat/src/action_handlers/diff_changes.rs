@@ -1057,7 +1057,7 @@ mod tests {
     };
     use stoat_action::Action;
     use stoat_config::MinimapMode;
-    use stoat_text::Point;
+    use stoat_text::{cursor_offset, Point};
     use tokio::sync::mpsc;
 
     /// Two changed files, with `a.txt` open in the focused pane.
@@ -1542,6 +1542,66 @@ mod tests {
             (before, editor::focused_cursor_point(&mut h.stoat)),
             (Point::new(0, 0), Point::new(0, 3)),
         );
+    }
+
+    /// Each editing key acts on the changes view's focused excerpt as it acts
+    /// on a plain editor over the same file, so the file's text and the cursor
+    /// end the same.
+    #[test]
+    fn editing_keys_act_on_the_excerpt_as_in_a_plain_editor() {
+        let path = Path::new("/repo/a.txt");
+        for (keys, text) in [
+            ("i z Escape u", "one two\nthree\n"),
+            ("x d", "three\n"),
+            ("o z Escape", "one two\nz\nthree\n"),
+            ("A z Escape", "one twoz\nthree\n"),
+            ("I z Escape", "zone two\nthree\n"),
+            ("Alt-j", "one two three\n"),
+            ("r z", "zne two\nthree\n"),
+            ("c z Escape", "zne two\nthree\n"),
+            ("~", "One two\nthree\n"),
+        ] {
+            let mut plain = one_two_three();
+            plain.open_file(path);
+            plain.settle();
+            plain.type_keys(keys);
+
+            let mut stack = one_two_three();
+            stack.cover_with_diff_changes(false);
+            stack.settle();
+            stack.type_keys(keys);
+
+            let want = (text.to_string(), plain.primary_head_offset());
+            assert_eq!(
+                [
+                    (plain.focused_buffer_text(), plain.primary_head_offset()),
+                    (stack.buffer_text_at(path), excerpt_head_offset(&mut stack)),
+                ],
+                [want.clone(), want],
+                "the text and the cursor after {keys:?}, in a plain editor and in the stack",
+            );
+        }
+    }
+
+    /// One changed file, whose hunk turns the line `a` into two lines.
+    fn one_two_three() -> TestHarness {
+        let mut h = TestHarness::with_size(100, 24);
+        h.stage_review_scenario("/repo", &[("a.txt", "a\n", "one two\nthree\n")]);
+        h
+    }
+
+    /// The cursor offset of the focused excerpt's newest selection, read as
+    /// [`TestHarness::primary_head_offset`] reads a plain editor's.
+    fn excerpt_head_offset(h: &mut TestHarness) -> usize {
+        let editor = focused_editor_mut(&mut h.stoat).expect("a focused excerpt");
+        let snapshot = editor.display_map.snapshot();
+        let buffer = snapshot.buffer_snapshot();
+        let newest = editor.selections.newest_anchor();
+        cursor_offset(
+            buffer.rope(),
+            buffer.resolve_anchor(&newest.tail()),
+            buffer.resolve_anchor(&newest.head()),
+        )
     }
 
     /// A changes view with no excerpt has no focused editor, so the editor
