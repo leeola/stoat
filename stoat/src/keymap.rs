@@ -3102,6 +3102,40 @@ mod tests {
         );
     }
 
+    /// The arrows cross the changes view's excerpts in insert mode too, and a
+    /// modal open over the view keeps them, since its prompt is in insert mode
+    /// as well.
+    #[test]
+    fn the_changes_view_arrows_cross_excerpts_in_insert_mode() {
+        let config = parse_config(crate::app::DEFAULT_KEYMAP);
+        let keymap = Keymap::compile(&config);
+        let arrows = |modal: Option<&str>| {
+            let mut state = TestState::new()
+                .set("mode", StateValue::String("insert".into()))
+                .set("view", StateValue::String("diff_changes".into()))
+                .set("pane", StateValue::String("editor".into()));
+            if let Some(modal) = modal {
+                state = state.set("modal", StateValue::String(modal.into()));
+            }
+            [KeyCode::Down, KeyCode::Up].map(|code| {
+                action_names(keymap.lookup(&state, &key_event(code, KeyModifiers::NONE)))
+            })
+        };
+
+        assert_eq!(
+            [
+                arrows(None),
+                arrows(Some("finder")),
+                arrows(Some("isearch"))
+            ],
+            [
+                [only("DiffChangesNext"), only("DiffChangesPrev")],
+                [only("PickerNext"), only("PickerPrev")],
+                [only("MoveDown"), only("MoveUp")],
+            ],
+        );
+    }
+
     /// Escape in the changes view does what it does in the per-file diff, so
     /// the key never closes the view, and q alone closes it.
     #[test]

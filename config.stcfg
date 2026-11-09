@@ -1544,6 +1544,16 @@ on key {
         S-MouseForward -> GotoPrevGitChange() "prev hunk";
         : -> OpenCommandPalette() "commands";
     }
+    # In insert mode the arrows cross into the next file at an excerpt's edge,
+    # as j and k do in normal mode. The insert session crosses with the
+    # cursor. A prompt over the changes view is in insert mode too, and the
+    # modal blocks that bind the arrows come later in this file. A tie goes to
+    # the earlier block, so without the modal guard this block takes the arrows
+    # from an open finder or palette.
+    !modal && view == diff_changes && mode == insert {
+        Down -> DiffChangesNext() "next row";
+        Up -> DiffChangesPrev() "prev row";
+    }
     view == conflict && mode == normal {
         Escape -> CloseConflict();
         q -> CloseConflict();

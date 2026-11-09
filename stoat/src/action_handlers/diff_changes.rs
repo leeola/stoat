@@ -13,7 +13,7 @@ use super::{
 use crate::{
     app::{Stoat, UpdateEffect},
     buffer_lifecycle,
-    buffer_registry::OpenOrigin,
+    buffer_registry::{BufferRegistry, OpenOrigin},
     diff_changes::{self, DiffChangesState, Landing},
     display_map::{DisplayPoint, DisplaySnapshot},
     editor_state::{EditorId, EditorState},
@@ -305,6 +305,8 @@ fn hold_screen_row(stoat: &mut Stoat, screen_row: u32) {
 /// one, so the steps walk the rows the stack paints. An excerpt that waits on
 /// its diff map paints no row, so a step from it holds still and a crossing
 /// passes over it. At either end of the stack the cursor stays.
+///
+/// A crossing in insert mode carries the insert session into the entered file.
 pub(super) fn diff_changes_step(stoat: &mut Stoat, delta: i32) -> UpdateEffect {
     let down = delta > 0;
     let mut effect = UpdateEffect::None;
@@ -839,6 +841,9 @@ fn step_place(stoat: &mut Stoat) -> Option<(usize, u32)> {
 ///
 /// A spliced base row maps to no buffer position, so the cursor lands on the
 /// outermost row that maps to one.
+///
+/// An insert session crosses with the cursor, as [`carry_insert_session`]
+/// carries it.
 fn cross_excerpt(stoat: &mut Stoat, down: bool) -> bool {
     let ws = stoat.active_workspace_mut();
     let Some(id) = ws.focused_diff_changes_id() else {
@@ -847,6 +852,7 @@ fn cross_excerpt(stoat: &mut Stoat, down: bool) -> bool {
     let Workspace {
         diff_changes_views,
         editors,
+        buffers,
         ..
     } = ws;
     let Some(state) = diff_changes_views.get_mut(id) else {
@@ -871,7 +877,51 @@ fn cross_excerpt(stoat: &mut Stoat, down: bool) -> bool {
         return false;
     };
     diff_changes::place_cursor(editor, point);
+    let left = state.focused_excerpt().map(|excerpt| excerpt.editor_id);
     state.focused = index;
+
+    let entered = state.excerpts[index].editor_id;
+    if left.is_some_and(|left| carry_insert_session(editors, buffers, left, entered)) {
+        // Both record the left editor's insert entry, and the next exit from
+        // insert mode reads them against the entered editor.
+        stoat.restore_cursor = false;
+        stoat.auto_indent_cursors.clear();
+    }
+    true
+}
+
+/// Move an insert session from the editor `left` to the editor `entered`, and
+/// report whether `left` held one.
+///
+/// The entered editor takes insert mode and `left` returns to normal mode. The
+/// left buffer's undo group seals and the entered buffer opens one, as leaving
+/// and entering insert mode do, so each file's typing undoes as its own step.
+fn carry_insert_session(
+    editors: &mut SlotMap<EditorId, EditorState>,
+    buffers: &BufferRegistry,
+    left: EditorId,
+    entered: EditorId,
+) -> bool {
+    let Some(editor) = editors
+        .get_mut(left)
+        .filter(|editor| editor.mode == "insert")
+    else {
+        return false;
+    };
+    if let Some(buffer) = buffers.get(editor.buffer_id) {
+        let after = editor.selections.shared_anchors();
+        buffer.write().expect("poisoned").seal_group(after);
+    }
+    editor.mode = "normal".into();
+
+    let Some(editor) = editors.get_mut(entered) else {
+        return true;
+    };
+    editor.mode = "insert".into();
+    if let Some(buffer) = buffers.get(editor.buffer_id) {
+        let before = || editor.selections.shared_anchors();
+        buffer.write().expect("poisoned").try_begin_group(before);
+    }
     true
 }
 
@@ -1442,6 +1492,64 @@ mod tests {
                 at("a.txt", 0),
                 at("b.txt", 9),
             ),
+        );
+    }
+
+    /// Down at an excerpt's last row and Up at its first row cross into the
+    /// neighboring file, as `j` and `k` do in normal mode. The entered file
+    /// takes insert mode, and the file the cursor left returns to normal mode.
+    #[test]
+    fn insert_mode_arrows_cross_into_the_neighboring_file() {
+        let crossings = ["j j j j i Down", "j j j j j i Up"].map(|keys| {
+            let mut h = deep_files();
+            h.cover_with_diff_changes(false);
+            h.settle();
+            h.type_keys(keys);
+            (place(&mut h), excerpt_modes(&h))
+        });
+        assert_eq!(
+            crossings,
+            [
+                (
+                    at("b.txt", 0),
+                    ["normal", "insert"].map(String::from).to_vec()
+                ),
+                (
+                    at("a.txt", 9),
+                    ["insert", "normal"].map(String::from).to_vec()
+                ),
+            ],
+        );
+    }
+
+    /// The mode of each excerpt's editor, in stack order.
+    fn excerpt_modes(h: &TestHarness) -> Vec<String> {
+        let ws = h.stoat.active_workspace();
+        let state = ws.focused_diff_changes().expect("a changes view");
+        state
+            .excerpts
+            .iter()
+            .map(|excerpt| ws.editors[excerpt.editor_id].mode.clone())
+            .collect()
+    }
+
+    /// An insert session that crosses into another file leaves each file's
+    /// typing one undo step of its own. `u` in the entered file takes back all
+    /// it typed there, and an edit back in the left file undoes apart from the
+    /// typing before the crossing.
+    #[test]
+    fn each_files_typing_undoes_as_its_own_step_after_an_insert_crossing() {
+        let mut h = deep_files();
+        h.cover_with_diff_changes(false);
+        h.settle();
+
+        h.type_keys("j j j j i x y Down z w Escape u k ~ u");
+        assert_eq!(
+            ["/repo/a.txt", "/repo/b.txt"].map(|path| h.buffer_text_at(Path::new(path))),
+            [
+                "1\n2\n3\n4\n5\n6\n7\n8\nNINE\nxy",
+                "a\nb\nc\nd\ne\nf\ng\nh\nI\n"
+            ],
         );
     }
 
