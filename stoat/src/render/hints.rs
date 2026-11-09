@@ -1226,11 +1226,11 @@ mod tests {
     #[test]
     fn the_hints_box_lists_the_diff_chords_on_a_diff_surface() {
         const DIALS: [(char, &str); 5] = [
-            ('6', "toggle underline on diff change spans"),
-            ('7', "toggle bold on diff change spans"),
-            ('8', "toggle syntax colors in the diff view"),
-            ('9', "lower the diff tint"),
-            ('0', "raise the diff tint"),
+            ('6', "underline changes"),
+            ('7', "bold changes"),
+            ('8', "syntax colors"),
+            ('9', "tint down"),
+            ('0', "tint up"),
         ];
         let mut h = TestHarness::default();
         h.stoat.key_hints_visible = true;

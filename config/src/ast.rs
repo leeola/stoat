@@ -81,6 +81,11 @@ pub struct PredicateBlock {
 pub struct Binding {
     pub key: Spanned<KeyPart>,
     pub action: Spanned<ActionExpr>,
+    /// The short name a hint box gives the binding, written as a string
+    /// literal after the action, such as `p -> OpenFileFinder() "files";`.
+    ///
+    /// `None` leaves the box to name the binding by its action's description.
+    pub label: Option<Spanned<String>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]

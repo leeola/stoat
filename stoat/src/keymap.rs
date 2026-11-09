@@ -587,6 +587,9 @@ struct CompiledBinding {
     key: CompiledKey,
     predicates: Vec<Predicate>,
     actions: Arc<[ResolvedAction]>,
+    /// The short name a hint box shows for the binding, from the config's
+    /// label literal.
+    label: Option<String>,
 }
 
 pub struct Keymap {
@@ -980,9 +983,10 @@ impl Keymap {
             .collect()
     }
 
-    /// Returns the active bindings scoped to `scope_field == scope_value`. A
-    /// binding qualifies when at least one of its predicates compares
-    /// `scope_field` equal to `scope_value`.
+    /// Returns `(key_label, actions, label)` for the active bindings scoped to
+    /// `scope_field == scope_value`. A binding qualifies when at least one of
+    /// its predicates compares `scope_field` equal to `scope_value`. `label`
+    /// is the config's short name for the binding, if it gives one.
     ///
     /// Used to surface only the keybinds specific to one open modal (e.g.
     /// `modal == help`) in hint popups. The equality test excludes both the
@@ -1001,7 +1005,7 @@ impl Keymap {
         state: &dyn KeymapState,
         scope_field: &str,
         scope_value: &str,
-    ) -> Vec<(String, &[ResolvedAction])> {
+    ) -> Vec<(String, &[ResolvedAction], Option<&str>)> {
         self.effective_bindings(state)
             .into_iter()
             .filter(|binding| {
@@ -1011,12 +1015,19 @@ impl Keymap {
                     .any(|p| predicate_eq_matches(p, scope_field, scope_value))
             })
             .filter(|binding| binding.key.wheel.is_none())
-            .map(|binding| (binding.key.display_label(), binding.actions.as_ref()))
+            .map(|binding| {
+                (
+                    binding.key.display_label(),
+                    binding.actions.as_ref(),
+                    binding.label.as_deref(),
+                )
+            })
             .collect()
     }
 
-    /// Returns `(key, actions)` for the chord entries and the context keys a
-    /// press reaches in `state`.
+    /// Returns `(key, actions, label)` for the chord entries and the context
+    /// keys a press reaches in `state`, with each binding's short name if the
+    /// config gives one.
     ///
     /// This is the hint list for a primary mode, where [`Self::active_keys`]
     /// lists the whole editor keymap. A chord entry runs `SetMode` into a mode
@@ -1030,7 +1041,7 @@ impl Keymap {
         &self,
         state: &dyn KeymapState,
         primary_modes: &[&str],
-    ) -> Vec<(&CompiledKey, &[ResolvedAction])> {
+    ) -> Vec<(&CompiledKey, &[ResolvedAction], Option<&str>)> {
         self.effective_bindings(state)
             .into_iter()
             .filter(|binding| {
@@ -1048,7 +1059,13 @@ impl Keymap {
                 });
                 scoped || enters_chord
             })
-            .map(|binding| (&binding.key, binding.actions.as_ref()))
+            .map(|binding| {
+                (
+                    &binding.key,
+                    binding.actions.as_ref(),
+                    binding.label.as_deref(),
+                )
+            })
             .collect()
     }
 }
@@ -1230,6 +1247,7 @@ fn compile_binding(binding: &Binding, predicates: &[Predicate], out: &mut Vec<Co
         key,
         predicates: predicates.to_vec(),
         actions: actions.into(),
+        label: binding.label.as_ref().map(|label| label.node.clone()),
     });
 }
 
@@ -4597,7 +4615,7 @@ mod tests {
         let scoped: Vec<_> = keymap
             .scoped_bindings(&state, "modal", "help")
             .iter()
-            .map(|(k, a)| (k.clone(), a[0].name.clone()))
+            .map(|(k, a, _)| (k.clone(), a[0].name.clone()))
             .collect();
         assert_eq!(
             scoped,
@@ -4656,7 +4674,7 @@ mod tests {
         let scoped: Vec<_> = keymap
             .scoped_bindings(&state, "modal", "help")
             .iter()
-            .map(|(_, a)| a[0].name.clone())
+            .map(|(_, a, _)| a[0].name.clone())
             .collect();
         assert_eq!(scoped, vec!["CloseHelp".to_string()]);
     }
@@ -4672,7 +4690,7 @@ mod tests {
                     i -> SetMode(insert);
                 }
                 view == "diff" && mode == "normal" {
-                    n -> GotoNextChange();
+                    n -> GotoNextChange() "next change";
                 }
                 token && mode == "normal" {
                     d -> GotoDefinition();
@@ -4689,16 +4707,56 @@ mod tests {
         let listed: Vec<_> = keymap
             .context_bindings(&state, &["normal", "insert"])
             .iter()
-            .map(|(k, a)| (k.display_label(), a[0].name.clone()))
+            .map(|(k, a, label)| {
+                (
+                    k.display_label(),
+                    a[0].name.clone(),
+                    label.map(str::to_owned),
+                )
+            })
             .collect();
         assert_eq!(
             listed,
             vec![
-                ("Spc".to_string(), "SetMode".to_string()),
-                ("n".to_string(), "GotoNextChange".to_string()),
-                ("d".to_string(), "GotoDefinition".to_string()),
+                ("Spc".to_string(), "SetMode".to_string(), None),
+                (
+                    "n".to_string(),
+                    "GotoNextChange".to_string(),
+                    Some("next change".to_string())
+                ),
+                ("d".to_string(), "GotoDefinition".to_string(), None),
             ],
-            "the editor key, the primary-mode entry, and the unguarded toggle stay out",
+            "the editor key, the primary-mode entry, and the unguarded toggle stay out, \
+             and a labelled key carries its label",
+        );
+    }
+
+    /// A scoped binding's label rides beside its actions, and a binding with
+    /// none carries none.
+    #[test]
+    fn a_scoped_binding_carries_its_config_label() {
+        let config = parse_config(
+            r#"on key {
+                mode == "space" {
+                    p -> OpenFileFinder() "files";
+                    q -> Quit();
+                }
+            }"#,
+        );
+        let keymap = Keymap::compile(&config);
+        let state = TestState::new().set("mode", StateValue::String("space".into()));
+
+        let labels: Vec<_> = keymap
+            .scoped_bindings(&state, "mode", "space")
+            .into_iter()
+            .map(|(key, _, label)| (key, label.map(str::to_owned)))
+            .collect();
+        assert_eq!(
+            labels,
+            [
+                ("p".to_string(), Some("files".to_string())),
+                ("q".to_string(), None)
+            ],
         );
     }
 

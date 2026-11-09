@@ -1118,6 +1118,9 @@ pub(crate) fn action_display_desc(action: &ResolvedAction) -> String {
 
 /// The hint label for a whole binding, naming what the key actually does.
 ///
+/// A binding the config labels reads its `label`, the short name a hint box
+/// gives it. The rest of this describes a binding without one.
+///
 /// A chord binding leads with `SetMode(normal)` so the origin editor's mode
 /// resets before the action runs, which means the first action describes the
 /// mode reset rather than the key's purpose. The label therefore names the
@@ -1128,7 +1131,10 @@ pub(crate) fn action_display_desc(action: &ResolvedAction) -> String {
 /// is not a primary one, so it reads `+name`, the mode's name less its
 /// `space_` prefix and with spaces for underscores, such as `+pane nav`. A
 /// switch back to a primary mode keeps its `normal mode` label.
-pub(crate) fn binding_display_desc(actions: &[ResolvedAction]) -> String {
+pub(crate) fn binding_display_desc(actions: &[ResolvedAction], label: Option<&str>) -> String {
+    if let Some(label) = label {
+        return label.to_string();
+    }
     if let Some(action) = actions.iter().find(|action| action.name != "SetMode") {
         return action_display_desc(action);
     }
@@ -2024,7 +2030,7 @@ mod tests {
     fn binding_desc_names_the_action_behind_a_mode_reset() {
         let actions = [set_mode("normal"), resolved("PrevTab", vec![])];
         assert_eq!(
-            binding_display_desc(&actions),
+            binding_display_desc(&actions, None),
             "switch to the previous tab",
             "the leading mode reset is not what the key does"
         );
@@ -2036,23 +2042,44 @@ mod tests {
             set_mode("normal"),
             resolved("GotoTab", vec![Value::Number(3.0)]),
         ];
-        assert_eq!(binding_display_desc(&actions), "switch to tab by number");
+        assert_eq!(
+            binding_display_desc(&actions, None),
+            "switch to tab by number"
+        );
     }
 
     #[test]
     fn binding_desc_of_a_bare_mode_switch_names_the_mode() {
-        assert_eq!(binding_display_desc(&[set_mode("normal")]), "normal mode");
+        assert_eq!(
+            binding_display_desc(&[set_mode("normal")], None),
+            "normal mode"
+        );
     }
 
     #[test]
     fn a_submenu_binding_reads_plus_name() {
         assert_eq!(
             [
-                binding_display_desc(&[set_mode("space_buffer")]),
-                binding_display_desc(&[set_mode("space_pane_nav")]),
-                binding_display_desc(&[set_mode("prefix_tab")]),
+                binding_display_desc(&[set_mode("space_buffer")], None),
+                binding_display_desc(&[set_mode("space_pane_nav")], None),
+                binding_display_desc(&[set_mode("prefix_tab")], None),
             ],
             ["+buffer", "+pane nav", "+prefix tab"],
+        );
+    }
+
+    /// A label names the binding in place of its action's description, its
+    /// submenu name, and its mode's name alike.
+    #[test]
+    fn a_label_names_the_binding_in_place_of_its_actions() {
+        let reset = [set_mode("normal"), resolved("PrevTab", vec![])];
+        assert_eq!(
+            [
+                binding_display_desc(&reset, Some("prev tab")),
+                binding_display_desc(&[set_mode("space_buffer")], Some("buffers")),
+                binding_display_desc(&[set_mode("normal")], Some("back")),
+            ],
+            ["prev tab", "buffers", "back"],
         );
     }
 

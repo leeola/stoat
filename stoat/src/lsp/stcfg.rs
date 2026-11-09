@@ -697,6 +697,9 @@ fn walk_binding(binding: &Binding, out: &mut Vec<(Span, u32)>) {
             }
         },
     }
+    if let Some(label) = &binding.label {
+        out.push((label.span.clone(), TK_STRING));
+    }
 }
 
 fn walk_arg(arg: &Spanned<Arg>, out: &mut Vec<(Span, u32)>) {
@@ -1201,7 +1204,7 @@ mod tests {
             "  # note",
             "}",
             "on key {",
-            "  Ctrl-x -> Jump(count: 7);",
+            "  Ctrl-x -> Jump(count: 7) \"jump\";",
             "}",
         ]
         .join("\n");
@@ -1225,6 +1228,7 @@ mod tests {
                 tok(&text, "Jump", TK_FUNCTION),
                 tok(&text, "count", TK_PARAMETER),
                 tok(&text, "7", TK_NUMBER),
+                tok(&text, "\"jump\"", TK_STRING),
             ],
         );
     }

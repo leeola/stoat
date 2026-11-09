@@ -2376,8 +2376,8 @@ fn hint_rows(
         let keys = keymap
             .context_bindings(state, PRIMARY_MODES)
             .into_iter()
-            .filter(|(key, _)| key.wheel.is_none())
-            .map(|(key, actions)| (key.display_label(), actions))
+            .filter(|(key, ..)| key.wheel.is_none())
+            .map(|(key, actions, label)| (key.display_label(), actions, label))
             .collect();
         (keys, false)
     } else {
@@ -2385,11 +2385,11 @@ fn hint_rows(
     };
     let bindings: Vec<(&str, String, Option<Toggle>)> = raw
         .iter()
-        .filter(|(_, actions)| !(chord && only_enters_primary_mode(actions)))
-        .map(|(key, actions)| {
+        .filter(|(_, actions, _)| !(chord && only_enters_primary_mode(actions)))
+        .map(|(key, actions, label)| {
             (
                 key.as_str(),
-                binding_display_desc(actions),
+                binding_display_desc(actions, *label),
                 toggle::binding_toggle(actions),
             )
         })
@@ -2703,10 +2703,10 @@ fn cached_modal_hints(
         let raw = keymap.scoped_bindings(&state, "modal", modal);
         let bindings: Vec<(&str, String, Option<Toggle>)> = raw
             .iter()
-            .map(|(key, actions)| {
+            .map(|(key, actions, label)| {
                 (
                     key.as_str(),
-                    binding_display_desc(actions),
+                    binding_display_desc(actions, *label),
                     toggle::binding_toggle(actions),
                 )
             })
@@ -3806,7 +3806,7 @@ mod lsp_filter_tests {
             "+match",
         ];
         let menu_rows = [
-            ("space", short_desc("SaveSelection")),
+            ("space", "save selection"),
             ("space", "+clipboard"),
             ("space b", short_desc("CloseBuffer")),
             ("space l", short_desc("GotoReferences")),
@@ -4611,7 +4611,7 @@ mod lsp_filter_tests {
     #[test]
     fn the_space_box_lists_the_recall_only_after_a_picker_opened() {
         let mut h = TestHarness::with_size(150, 50);
-        let recall = short_desc("OpenLastPicker");
+        let recall = "last picker";
         let lists_recall = |rows: Vec<String>| rows.iter().any(|row| row == recall);
         let fresh = lists_recall(chord_rows(&mut h, "space"));
 
@@ -4620,6 +4620,50 @@ mod lsp_filter_tests {
         assert_eq!(
             (fresh, lists_recall(chord_rows(&mut h, "space"))),
             (false, true),
+        );
+    }
+
+    /// The space box names each key with the config's short label, and a key
+    /// that enters a submenu with the submenu's name, as the HintBox board
+    /// lists them.
+    #[test]
+    fn the_space_box_names_its_keys_with_their_short_labels() {
+        let mut h = TestHarness::with_size(150, 50);
+        h.type_keys("space");
+        h.render_composited();
+        let rows: Vec<(String, String)> = h
+            .stoat
+            .hints_cache
+            .as_ref()
+            .expect("the space chord laid out its box")
+            .rows
+            .iter()
+            .map(|row| (row.keys.clone(), row.action.clone()))
+            .collect();
+
+        let expected = [
+            ("q", "quit"),
+            ("a", "+pane nav"),
+            ("t", "run"),
+            ("c", "claude"),
+            ("w", "+workspace"),
+            ("b", "+buffer"),
+            ("l", "+lsp"),
+            ("\"", "+clipboard"),
+            ("C", "block comment"),
+            ("A-c", "line comment"),
+            ("p", "files"),
+            ("r", "reload all"),
+            ("g", "+goto"),
+            ("h", "+git"),
+            ("W", "walkthroughs"),
+            ("s", "save selection"),
+            ("/", "code search"),
+            ("?", "toggle hints"),
+        ];
+        assert_eq!(
+            rows,
+            expected.map(|(keys, label)| (keys.to_string(), label.to_string())),
         );
     }
 

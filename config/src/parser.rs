@@ -516,7 +516,8 @@ fn binding<'src, E: ConfigExtra<'src>>() -> impl Parser<'src, &'src str, Binding
         .then_ignore(just("->"))
         .then_ignore(ws())
         .then(spanned_action_expr())
-        .map(|(key, action)| Binding { key, action })
+        .then(ws().ignore_then(spanned_string_literal()).or_not())
+        .map(|((key, action), label)| Binding { key, action, label })
 }
 
 fn let_stmt<'src, E: ConfigExtra<'src>>() -> impl Parser<'src, &'src str, LetBinding, E> + Clone {

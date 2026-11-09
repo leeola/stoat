@@ -1938,8 +1938,7 @@ mod tests {
         open(&mut h.stoat, "tour");
         assert_eq!(
             [before, w_row(&mut h)],
-            [Some("open the walkthrough picker"), Some("+walkthrough")]
-                .map(|action| action.map(str::to_owned)),
+            [Some("walkthroughs"), Some("+walkthrough")].map(|action| action.map(str::to_owned)),
             "W picks a tour with none open, and enters the mode with one",
         );
     }

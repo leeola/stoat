@@ -1466,11 +1466,11 @@ on key {
     # on macOS, as super, which a Cmd binding names, so one binding serves each
     # platform. No mode guard, because a dial acts on the screen in any mode.
     view == diff {
-        Cmd-6 -> DiffUnderline();
-        Cmd-7 -> DiffBold();
-        Cmd-8 -> DiffSyntax();
-        Cmd-9 -> DiffTintDown();
-        Cmd-0 -> DiffTintUp();
+        Cmd-6 -> DiffUnderline() "underline changes";
+        Cmd-7 -> DiffBold() "bold changes";
+        Cmd-8 -> DiffSyntax() "syntax colors";
+        Cmd-9 -> DiffTintDown() "tint down";
+        Cmd-0 -> DiffTintUp() "tint up";
     }
     # Two atoms against the normal block's one, so the diff view walks changes
     # where a plain buffer walks functions.
@@ -1485,8 +1485,8 @@ on key {
         Alt-WheelUp -> GotoPrevChange();
         MouseBack -> DiffBack();
         MouseForward -> DiffForward();
-        S-MouseBack -> GotoNextGitChange();
-        S-MouseForward -> GotoPrevGitChange();
+        S-MouseBack -> GotoNextGitChange() "next hunk";
+        S-MouseForward -> GotoPrevGitChange() "prev hunk";
     }
     view == diff && rebase_exec {
         C -> RebaseContinue();
@@ -1496,16 +1496,16 @@ on key {
     # on the changes view it runs DiffFiles onto the cursor's hunk. DiffChanges
     # on the changes view closes it, so space d c opens and closes the view.
     view == diff {
-        Ctrl-t -> DiffChanges();
+        Ctrl-t -> DiffChanges() "files / changes";
     }
     # The changes view paints each excerpt with the per-file diff's painter, so
     # the diff styling dials act on it as they act on the per-file diff.
     view == diff_changes {
-        Cmd-6 -> DiffUnderline();
-        Cmd-7 -> DiffBold();
-        Cmd-8 -> DiffSyntax();
-        Cmd-9 -> DiffTintDown();
-        Cmd-0 -> DiffTintUp();
+        Cmd-6 -> DiffUnderline() "underline changes";
+        Cmd-7 -> DiffBold() "bold changes";
+        Cmd-8 -> DiffSyntax() "syntax colors";
+        Cmd-9 -> DiffTintDown() "tint down";
+        Cmd-0 -> DiffTintUp() "tint up";
     }
     # The focused excerpt is an editor, so a normal-mode key that this block
     # leaves out acts on the excerpt's file. j, k, and the pages cross into the
@@ -1517,7 +1517,7 @@ on key {
     # dismisses the hints and never closes the view.
     view == diff_changes && mode == normal {
         q -> CloseDiffChanges();
-        Ctrl-t -> DiffFiles();
+        Ctrl-t -> DiffFiles() "files / changes";
         Enter -> DiffChangesOpen();
         j -> DiffChangesNext();
         Down -> DiffChangesNext();
@@ -1535,8 +1535,8 @@ on key {
         Alt-WheelUp -> GotoPrevChange();
         MouseBack -> DiffBack();
         MouseForward -> DiffForward();
-        S-MouseBack -> GotoNextGitChange();
-        S-MouseForward -> GotoPrevGitChange();
+        S-MouseBack -> GotoNextGitChange() "next hunk";
+        S-MouseForward -> GotoPrevGitChange() "prev hunk";
         : -> OpenCommandPalette();
     }
     view == conflict && mode == normal {
@@ -1715,24 +1715,27 @@ on key {
     pane == run {
         Ctrl-c -> RunInterrupt();
     }
+    # A string after an action is the short name the hint box shows for the
+    # key. A key that enters a submenu reads the submenu's name, such as
+    # `+buffer`, and needs none.
     mode == space {
         Escape -> SetMode(normal);
-        q -> Quit();
+        q -> Quit() "quit";
         a -> SetMode(space_pane_nav);
-        t -> [OpenRun()];
-        c -> [SpawnClaude(), SetMode(normal)];
+        t -> [OpenRun()] "run";
+        c -> [SpawnClaude(), SetMode(normal)] "claude";
         w -> SetMode(space_workspace);
         b -> SetMode(space_buffer);
         l -> SetMode(space_lsp);
 
         pane == editor {
             " -> SetMode(space_clipboard);
-            C -> [ToggleBlockComments(), SetMode(normal)];
-            Alt-c -> [ToggleLineComments(), SetMode(normal)];
+            C -> [ToggleBlockComments(), SetMode(normal)] "block comment";
+            Alt-c -> [ToggleLineComments(), SetMode(normal)] "line comment";
         }
 
-        p -> OpenFileFinder();
-        r -> [ForceReloadAll(), SetMode(normal)];
+        p -> OpenFileFinder() "files";
+        r -> [ForceReloadAll(), SetMode(normal)] "reload all";
         g -> SetMode(space_goto);
         h -> SetMode(space_git);
 
@@ -1741,7 +1744,7 @@ on key {
         }
 
         !walkthrough {
-            W -> [SetMode(normal), OpenWalkthroughPicker()];
+            W -> [SetMode(normal), OpenWalkthroughPicker()] "walkthroughs";
         }
 
         git || changes {
@@ -1753,27 +1756,27 @@ on key {
         }
 
         pane == editor {
-            s -> [SaveSelection(), SetMode(normal)];
+            s -> [SaveSelection(), SetMode(normal)] "save selection";
         }
 
         jump_back {
-            j -> [JumpBackward(), SetMode(normal)];
+            j -> [JumpBackward(), SetMode(normal)] "jump back";
         }
 
         jump_forward {
-            k -> [JumpForward(), SetMode(normal)];
+            k -> [JumpForward(), SetMode(normal)] "jump forward";
         }
 
-        / -> OpenCodeSearch();
+        / -> OpenCodeSearch() "code search";
 
         last_picker {
             # The mode switch leads, as in the goto menus' `?` arms. The
             # recalled picker takes focus with its own input, so a switch after
             # the re-open lands there and leaves the picker unable to take keys.
-            ' -> [SetMode(normal), OpenLastPicker()];
+            ' -> [SetMode(normal), OpenLastPicker()] "last picker";
         }
 
-        ? -> [ToggleKeyHints(), SetMode(normal)];
+        ? -> [ToggleKeyHints(), SetMode(normal)] "toggle hints";
     }
     mode == space_clipboard {
         Escape -> SetMode(normal);

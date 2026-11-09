@@ -161,10 +161,11 @@ impl FromIterator<Toggle> for ToggleStates {
     }
 }
 
-/// The toggle a binding flips, read off the action that names its hint row.
+/// The toggle a binding flips, read off its first action that is not a mode
+/// switch.
 ///
-/// That action is the first one that is not a mode switch, as in
-/// [`crate::keymap_state::binding_display_desc`]. An action called with an
+/// That action names the hint row of a binding the config does not label, as
+/// in [`crate::keymap_state::binding_display_desc`]. An action called with an
 /// argument answers `None`, because an argument names a target instead of
 /// flipping a state.
 pub(crate) fn binding_toggle(actions: &[ResolvedAction]) -> Option<Toggle> {

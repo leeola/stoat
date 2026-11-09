@@ -129,6 +129,30 @@ mod tests {
         assert_eq!(binding.key.node.keys, vec![key_char('h')]);
     }
 
+    /// A string literal after the action names the binding, after one action
+    /// or a sequence. A binding without one has no label, and the quote key
+    /// still binds, since a label only follows an action.
+    #[test]
+    fn a_trailing_string_labels_the_binding() {
+        let config = parse_ok(
+            r#"on key {
+                p -> OpenFileFinder() "files";
+                r -> [ForceReloadAll(), SetMode(normal)]  "reload all";
+                " -> SetMode(space_clipboard);
+            }"#,
+        );
+        let labels: Vec<_> = config.blocks[0]
+            .node
+            .statements
+            .iter()
+            .map(|stmt| {
+                let binding = assert_binding(stmt);
+                binding.label.as_ref().map(|label| label.node.as_str())
+            })
+            .collect();
+        assert_eq!(labels, [Some("files"), Some("reload all"), None]);
+    }
+
     #[test]
     fn uppercase_char_keys() {
         let config = parse_ok("on key { G -> MoveToFileEnd(); }");
