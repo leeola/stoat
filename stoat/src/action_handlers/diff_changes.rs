@@ -1560,6 +1560,9 @@ mod tests {
             ("r z", "zne two\nthree\n"),
             ("c z Escape", "zne two\nthree\n"),
             ("~", "One two\nthree\n"),
+            ("m s (", "(o)ne two\nthree\n"),
+            ("m i w d", " two\nthree\n"),
+            ("/ t h r Enter", "one two\nthree\n"),
         ] {
             let mut plain = one_two_three();
             plain.open_file(path);

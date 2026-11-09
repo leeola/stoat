@@ -1,4 +1,4 @@
-use super::focused_pane_jumplist;
+use super::{focused_pane_jumplist, pane_editor_ids};
 use crate::{
     app::{Stoat, UpdateEffect},
     buffer_registry::OpenOrigin,
@@ -799,21 +799,18 @@ fn build_diagnostics_picker(
 
 /// Drive [`ActionKind::OpenDiagnosticsPicker`]. Snapshots the
 /// focused buffer's diagnostic list from `Stoat::diagnostics`
-/// and stores the picker on `Stoat::diagnostics_picker`. No-op
-/// when the focused pane is not an editor, the buffer has no
+/// and stores the picker on `Stoat::diagnostics_picker`. A
+/// changes view snapshots its focused excerpt's file. No-op
+/// when the focused pane shows no editor, the buffer has no
 /// path on disk, or the path has no diagnostics.
 pub(super) fn open_diagnostics_picker(stoat: &mut Stoat) -> UpdateEffect {
     let ws = stoat.active_workspace_mut();
-    let editor_id = match ws.focus {
-        FocusTarget::SplitPane => match ws.panes.pane(ws.panes.focus()).view {
-            View::Editor(id) => id,
-            _ => return UpdateEffect::None,
+    let buffer_id = match ws.focus {
+        FocusTarget::SplitPane => match pane_editor_ids(ws) {
+            Some((_, buffer_id)) => buffer_id,
+            None => return UpdateEffect::None,
         },
         FocusTarget::Dock(_) => return UpdateEffect::None,
-    };
-    let buffer_id = match ws.editors.get(editor_id) {
-        Some(e) => e.buffer_id,
-        None => return UpdateEffect::None,
     };
     let path = match ws.buffers.path_for(buffer_id) {
         Some(p) => p.to_path_buf(),

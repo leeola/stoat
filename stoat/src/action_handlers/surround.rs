@@ -1,8 +1,10 @@
 use crate::{
-    action_handlers::movement::{window_around, PairScan, BRACKET_PAIRS},
+    action_handlers::{
+        movement::{window_around, PairScan, BRACKET_PAIRS},
+        pane_editor_ids,
+    },
     app::{Stoat, UpdateEffect},
     buffer::TextBuffer,
-    pane::View,
     render::hints::ChordHints,
 };
 use std::{cmp::Reverse, ops::Range, sync::Arc};
@@ -137,10 +139,8 @@ pub(crate) fn execute_surround_add_pair(
     close: &str,
 ) -> UpdateEffect {
     let ws = stoat.active_workspace_mut();
-    let focused = ws.panes.focus();
-    let editor_id = match ws.panes.pane(focused).view {
-        View::Editor(id) => id,
-        _ => return UpdateEffect::None,
+    let Some((editor_id, _)) = pane_editor_ids(ws) else {
+        return UpdateEffect::None;
     };
 
     let (buffer_id, mut entries) = {
@@ -440,11 +440,7 @@ fn collect_surround_pairs(
 ) -> Option<Vec<(usize, usize, char, char)>> {
     let (buffer_id, cursors) = {
         let ws = stoat.active_workspace_mut();
-        let focused = ws.panes.focus();
-        let editor_id = match ws.panes.pane(focused).view {
-            View::Editor(id) => id,
-            _ => return None,
-        };
+        let (editor_id, _) = pane_editor_ids(ws)?;
         let editor = ws.editors.get_mut(editor_id).expect("editor");
         let buffer_id = editor.buffer_id;
         let snapshot = editor.display_map.snapshot();
@@ -835,12 +831,7 @@ fn scan_right_for_closes(
 }
 
 fn focused_buffer_id(stoat: &Stoat) -> Option<crate::buffer::BufferId> {
-    let ws = stoat.active_workspace();
-    let focused = ws.panes.focus();
-    match ws.panes.pane(focused).view {
-        View::Editor(id) => Some(ws.editors.get(id).expect("editor").buffer_id),
-        _ => None,
-    }
+    pane_editor_ids(stoat.active_workspace()).map(|(_, buffer_id)| buffer_id)
 }
 
 /// The nearest enclosing `(open, close)` pair around `cursor`, as the byte

@@ -1,4 +1,5 @@
 use crate::{
+    action_handlers::pane_editor_ids,
     app::{Stoat, UpdateEffect},
     code_search::{
         ast::{self, ast_scan_file, AstLang},
@@ -9,7 +10,6 @@ use crate::{
     file_finder::FinderPathCache,
     host::FsHost,
     input_history::InputHistory,
-    pane::View,
     picker::PreviewSource,
 };
 use ast_grep_core::Pattern;
@@ -65,11 +65,8 @@ pub(crate) fn open_code_search(stoat: &mut Stoat) -> UpdateEffect {
 /// path-bound editor. Resolves the AST-mode target language at finder open.
 fn focused_buffer_language(stoat: &Stoat) -> Option<Arc<stoat_language::Language>> {
     let ws = stoat.active_workspace();
-    let View::Editor(editor_id) = &ws.panes.pane(ws.panes.focus()).view else {
-        return None;
-    };
-    let editor = ws.editors.get(*editor_id)?;
-    ws.buffers.language_for(editor.buffer_id)
+    let (_, buffer_id) = pane_editor_ids(ws)?;
+    ws.buffers.language_for(buffer_id)
 }
 
 /// Flip between regex and AST search, clearing the current results and re-arming

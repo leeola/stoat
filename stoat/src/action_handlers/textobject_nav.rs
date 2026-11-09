@@ -11,10 +11,9 @@
 //! directional cousin (jump rather than expand-around).
 
 use crate::{
-    action_handlers::movement,
+    action_handlers::{movement, pane_editor_ids},
     app::{Stoat, UpdateEffect},
     buffer::BufferId,
-    pane::View,
     workspace::Workspace,
 };
 use std::{cmp::Reverse, collections::HashMap, ops::Range, ptr};
@@ -81,13 +80,10 @@ pub(crate) fn goto_textobject_impl(
     });
     let extend = stoat.in_select_mode();
     let ws = stoat.active_workspace_mut();
-    let focused = ws.panes.focus();
-    let editor_id = match ws.panes.pane(focused).view {
-        View::Editor(id) => id,
-        _ => return UpdateEffect::None,
+    let Some((editor_id, buffer_id)) = pane_editor_ids(ws) else {
+        return UpdateEffect::None;
     };
 
-    let buffer_id = ws.editors.get(editor_id).expect("editor").buffer_id;
     if ws.buffers.syntax_map(buffer_id).is_none() {
         stoat.set_status("Syntax-tree is not available in current buffer");
         return UpdateEffect::Redraw;

@@ -15,9 +15,8 @@
 //! and does not require tree-sitter.
 
 use crate::{
-    action_handlers::movement::BlankRows,
+    action_handlers::{movement::BlankRows, pane_editor_ids},
     app::{Stoat, UpdateEffect},
-    pane::View,
 };
 use std::collections::HashMap;
 use stoat_text::{Bias, CharCategory, Point, Rope, SelectionGoal};
@@ -131,10 +130,8 @@ pub(crate) fn execute_select_textobject(
 ) -> UpdateEffect {
     stoat.last_motion = Some(crate::action_handlers::LastMotion::TextObject { mode, ch, count });
     let ws = stoat.active_workspace_mut();
-    let focused = ws.panes.focus();
-    let editor_id = match ws.panes.pane(focused).view {
-        View::Editor(id) => id,
-        _ => return UpdateEffect::None,
+    let Some((editor_id, _)) = pane_editor_ids(ws) else {
+        return UpdateEffect::None;
     };
 
     let (buffer_id, cursors, change_hunks) = {

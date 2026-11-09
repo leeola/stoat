@@ -1,5 +1,5 @@
 use crate::{
-    action_handlers::split_selection::RegexSelectKind,
+    action_handlers::{pane_editor_ids, split_selection::RegexSelectKind},
     app::{Stoat, UpdateEffect},
     buffer::BufferId,
     editor_state::{EditorState, ScrollGlide},
@@ -7,7 +7,6 @@ use crate::{
     input_view::{InputView, SubmitTarget},
     jumplist::JumpEntry,
     multi_buffer::MultiBufferSnapshot,
-    pane::View,
 };
 use regex_cursor::{engines::meta, regex_automata::util::syntax, Input};
 use serde::{Deserialize, Serialize};
@@ -257,17 +256,17 @@ fn open_input(stoat: &mut Stoat, direction: SearchDirection) -> UpdateEffect {
     UpdateEffect::Redraw
 }
 
-/// The focused pane's editor, or `None` when that pane shows something else.
+/// The focused pane's editor, or `None` when that pane shows no editor.
+///
+/// A changes view answers its focused excerpt's editor, so a search there walks
+/// the excerpt's file.
 ///
 /// The search and regex prompt paths reach the editor this way rather than
 /// through [`super::focused_editor_mut`], because while a prompt is open focus
 /// sits on the prompt's own input view, which that one answers with instead.
 pub(super) fn pane_editor(stoat: &mut Stoat) -> Option<&mut EditorState> {
     let ws = stoat.active_workspace_mut();
-    let focused = ws.panes.focus();
-    let View::Editor(editor_id) = ws.panes.pane(focused).view else {
-        return None;
-    };
+    let (editor_id, _) = pane_editor_ids(ws)?;
     ws.editors.get_mut(editor_id)
 }
 
