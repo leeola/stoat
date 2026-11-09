@@ -98,11 +98,6 @@ pub(crate) const MIN_LIST_COLUMNS: u16 = 22;
 /// the one-column separator.
 pub(crate) const MIN_DETAIL_COLUMNS: u16 = 11;
 
-/// Widest the list grows on its own. A dragged share overrides it, because a
-/// reader who asks for a wider list has said the summaries are what they came
-/// for.
-const DEFAULT_LIST_MAX: u16 = 48;
-
 /// Cells a row's summary keeps beside its badges and its author and age
 /// columns, enough for a few words of it.
 const MIN_SUMMARY_COLUMNS: u16 = 8;
@@ -245,16 +240,19 @@ pub(crate) fn commits_separator(pane_area: Rect, split: Option<u16>) -> Option<S
 /// Columns the list takes out of `total`, floored and capped so both panes
 /// keep their minimum whatever `split` asks for.
 ///
+/// With no dragged share the list takes four sevenths, the share the Commits
+/// board gives its graph island, so a summary reads whole beside its graph.
+///
 /// The percentage divides truncating, which is what [`SplitSeparator::share_at`]
 /// rounds up against, so a dragged separator lands on the cell the pointer left
 /// it on rather than a column short.
 fn commit_list_width(total: u16, split: Option<u16>) -> u16 {
     let widest = total.saturating_sub(MIN_DETAIL_COLUMNS + 1);
     let target = match split {
-        Some(pct) => ((total as u32 * pct as u32 / 100) as u16).max(MIN_LIST_COLUMNS),
-        None => ((total as u32 * 2 / 5) as u16).clamp(MIN_LIST_COLUMNS, DEFAULT_LIST_MAX),
+        Some(pct) => (total as u32 * pct as u32 / 100) as u16,
+        None => (total as u32 * 4 / 7) as u16,
     };
-    target.min(widest)
+    target.max(MIN_LIST_COLUMNS).min(widest)
 }
 
 fn render_commit_list_pane(
@@ -2732,7 +2730,7 @@ mod tests {
     }
 
     #[test]
-    fn an_undragged_list_takes_two_fifths_between_its_own_bounds() {
+    fn an_undragged_list_takes_four_sevenths_between_both_floors() {
         assert_eq!(
             [
                 commit_list_width(60, None),
@@ -2740,8 +2738,8 @@ mod tests {
                 commit_list_width(40, None),
                 commit_list_width(30, None),
             ],
-            [24, 48, MIN_LIST_COLUMNS, 30 - (MIN_DETAIL_COLUMNS + 1)],
-            "two fifths, capped, floored, then held off the detail floor",
+            [34, 80, MIN_LIST_COLUMNS, 30 - (MIN_DETAIL_COLUMNS + 1)],
+            "four sevenths, floored, then held off the detail floor",
         );
     }
 
