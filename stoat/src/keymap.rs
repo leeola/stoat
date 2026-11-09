@@ -2072,6 +2072,55 @@ mod tests {
         );
     }
 
+    /// `c` in the LSP menu takes the comment arm on a comment row and the
+    /// caller arm elsewhere. The `comment` guard keeps the arms apart, because
+    /// the caller arm also holds on a comment row while no token index exists.
+    /// The guarded config lists the caller arm first, so the guard and not the
+    /// order picks the arm. The shipped config keeps `C` on `GotoCallee` there.
+    #[test]
+    fn space_lsp_c_goes_to_the_comment_arm_on_a_comment_row() {
+        let config = parse_config(
+            r#"on key {
+                mode == space_lsp {
+                    !comment {
+                        !token_known || token == function { c -> GotoCaller(); }
+                    }
+                    comment { c -> ReflowComment(); }
+                }
+            }"#,
+        );
+        let guarded = Keymap::compile(&config);
+        let shipped = Keymap::compile(&parse_config(crate::app::DEFAULT_KEYMAP));
+        let pressed = |keymap: &Keymap, comment: bool, key: char| {
+            let state = TestState::new()
+                .set("mode", StateValue::String("space_lsp".into()))
+                .set("pane", StateValue::String("editor".into()))
+                .set("lsp", StateValue::Bool(true))
+                .set("token_known", StateValue::Bool(false))
+                .set("comment", StateValue::Bool(comment));
+            let event = key_event(KeyCode::Char(key), KeyModifiers::NONE);
+            action_names(keymap.lookup(&state, &event))
+        };
+        let then_normal = |name: &str| Some(vec![name.to_string(), "SetMode".to_string()]);
+
+        assert_eq!(
+            [
+                pressed(&guarded, true, 'c'),
+                pressed(&guarded, false, 'c'),
+                pressed(&shipped, true, 'c'),
+                pressed(&shipped, false, 'c'),
+                pressed(&shipped, true, 'C'),
+            ],
+            [
+                only("ReflowComment"),
+                only("GotoCaller"),
+                then_normal("ReflowComment"),
+                then_normal("GotoCaller"),
+                then_normal("GotoCallee"),
+            ],
+        );
+    }
+
     #[test]
     fn lookup_falls_through() {
         let config = parse_config(

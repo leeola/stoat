@@ -1,7 +1,7 @@
 use crate::{
     action_handlers,
     app::{ModalKind, Stoat},
-    buffer::BufferId,
+    buffer::{BufferId, TextBufferSnapshot},
     diagnostics::DiagnosticSet,
     editor_state::EditorState,
     keymap::{self, KeymapState, ResolvedAction, ResolvedArg, StateValue},
@@ -48,6 +48,7 @@ pub(crate) const BUILTIN_FIELDS: &[&str] = &[
     "modified",
     "changes",
     "pair_diff",
+    "comment",
 ];
 
 /// The keymap predicate values that the active [`Workspace`] and the app
@@ -242,6 +243,9 @@ pub(crate) struct StoatKeymapState<'a> {
     /// `DiffPair` installs. No index or HEAD stands behind such a diff, so the
     /// git base arms stay unbound over it.
     pair_diff: StateValue,
+    /// Whether the focused editor's cursor row opens with a line comment token
+    /// of the buffer's language.
+    comment: StateValue,
     /// Config-defined session variables, read only after the built-in fields so
     /// a variable can never shadow one. Borrowed from the owning [`Stoat`];
     /// `None` for the flag-built states that carry no user vars.
@@ -286,6 +290,7 @@ impl<'a> StoatKeymapState<'a> {
             modified: StateValue::Bool(false),
             changes: StateValue::Bool(false),
             pair_diff: StateValue::Bool(false),
+            comment: StateValue::Bool(false),
             user_vars: None,
         }
     }
@@ -361,8 +366,8 @@ impl<'a> StoatKeymapState<'a> {
     }
 
     /// Set the `lsp`/`lang`/`diags`/`has_selection`/`modified`/`changes`/
-    /// `pair_diff` predicate values from a focused-buffer derivation (see
-    /// [`focus_flags`]).
+    /// `pair_diff`/`comment` predicate values from a focused-buffer derivation
+    /// (see [`focus_flags`]).
     pub(crate) fn with_focus_flags(mut self, flags: FocusFlags) -> Self {
         self.lsp = StateValue::Bool(flags.lsp);
         self.lang = flags.lang.map(|l| StateValue::String(l.into()));
@@ -371,6 +376,7 @@ impl<'a> StoatKeymapState<'a> {
         self.modified = StateValue::Bool(flags.modified);
         self.changes = StateValue::Bool(flags.changes);
         self.pair_diff = StateValue::Bool(flags.pair_diff);
+        self.comment = StateValue::Bool(flags.comment);
         self
     }
 
@@ -423,6 +429,7 @@ impl KeymapState for StoatKeymapState<'_> {
             "modified" => Some(&self.modified),
             "changes" => Some(&self.changes),
             "pair_diff" => Some(&self.pair_diff),
+            "comment" => Some(&self.comment),
             other => self.user_vars.and_then(|m| m.get(other)),
         }
     }
@@ -507,6 +514,7 @@ pub(crate) struct FocusFlags {
     modified: bool,
     changes: bool,
     pair_diff: bool,
+    comment: bool,
 }
 
 /// Derive [`FocusFlags`] for the focused buffer, sharing [`resolve_focus`] with
@@ -519,10 +527,9 @@ pub(crate) fn focus_flags(
     let Some((editor, buffer_id)) = resolve_focus(ws) else {
         return FocusFlags::default();
     };
-    let lang = ws
-        .buffers
-        .language_for(buffer_id)
-        .map(|l| l.name.to_string());
+    let language = ws.buffers.language_for(buffer_id);
+    let lang = language.as_ref().map(|l| l.name.to_string());
+    let comment_tokens = language.as_ref().map_or(&[][..], |l| l.line_comments);
     let lsp = crate::lsp::session::lsp_language_name(&ws.buffers, buffer_id)
         .is_some_and(|name| registry.has_host_for_language(&name));
     let diags = ws
@@ -530,7 +537,7 @@ pub(crate) fn focus_flags(
         .path_for(buffer_id)
         .is_some_and(|path| !diagnostics.get(path).is_empty());
     let has_selection = !editor.selections.newest_anchor().is_empty();
-    let (modified, changes) = ws
+    let (modified, changes, comment) = ws
         .buffers
         .get(buffer_id)
         .and_then(|b| {
@@ -539,7 +546,8 @@ pub(crate) fn focus_flags(
                 .diff_map
                 .as_ref()
                 .is_some_and(|map| map.staged_counts() != (0, 0));
-            Some((g.dirty, changes))
+            let comment = cursor_row_opens_comment(&g.snapshot, editor, comment_tokens);
+            Some((g.dirty, changes, comment))
         })
         .unwrap_or_default();
     let pair_diff = ws
@@ -554,7 +562,26 @@ pub(crate) fn focus_flags(
         modified,
         changes,
         pair_diff,
+        comment,
     }
+}
+
+/// Whether the row of `editor`'s cursor opens with one of `tokens`, read
+/// against the buffer's own `snapshot`.
+fn cursor_row_opens_comment(
+    snapshot: &TextBufferSnapshot,
+    editor: &EditorState,
+    tokens: &[&'static str],
+) -> bool {
+    let rope = &snapshot.visible_text;
+    let sel = editor.selections.newest_anchor();
+    let cursor = stoat_text::cursor_offset(
+        rope,
+        snapshot.resolve_anchor(&sel.tail()),
+        snapshot.resolve_anchor(&sel.head()),
+    );
+    let row = rope.row_byte_range(rope.offset_to_point(cursor).row);
+    action_handlers::movement::line_comment_continues(rope, row.start, row.end, tokens).is_some()
 }
 
 /// The `View` of the active workspace's focused pane or dock.
@@ -1649,9 +1676,15 @@ mod tests {
     }
 
     fn open_foo_bar(h: &mut crate::test_harness::TestHarness) -> BufferId {
+        open_rust(h, b"Foo bar")
+    }
+
+    /// Open `/lsp/a.rs` holding `text` in the focused pane, and answer its
+    /// buffer.
+    fn open_rust(h: &mut crate::test_harness::TestHarness, text: &[u8]) -> BufferId {
         let root = std::path::PathBuf::from("/lsp");
         let path = root.join("a.rs");
-        h.fake_fs().insert_file(&path, b"Foo bar");
+        h.fake_fs().insert_file(&path, text);
         h.stoat.active_workspace_mut().git_root = root;
         action_handlers::dispatch(&mut h.stoat, &stoat_action::OpenFile { path });
         h.settle();
@@ -1704,6 +1737,26 @@ mod tests {
             state.get("token"),
             None,
             "the space between tokens is untyped"
+        );
+    }
+
+    /// `comment` holds while the cursor row opens with a line comment token,
+    /// and a row of code below it reads false.
+    #[test]
+    fn comment_predicate_follows_the_cursor_row() {
+        let mut h = Stoat::test();
+        open_rust(&mut h, b"// a\nfn f() {}\n");
+
+        let on_comment = StoatKeymapState::from_stoat(&h.stoat)
+            .get("comment")
+            .cloned();
+        h.type_keys("j");
+        let on_code = StoatKeymapState::from_stoat(&h.stoat)
+            .get("comment")
+            .cloned();
+        assert_eq!(
+            [on_comment, on_code],
+            [Some(StateValue::Bool(true)), Some(StateValue::Bool(false))],
         );
     }
 

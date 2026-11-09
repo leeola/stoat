@@ -3797,6 +3797,16 @@ fn reflow_of_a_compact_comment_sends_no_format() {
     assert_eq!(h.fake_lsp().observed_formatting().len(), 0);
 }
 
+/// `space l c` on a comment row reflows the comment.
+#[test]
+fn space_l_c_reflows_the_comment() {
+    let (mut h, path) = comment_buffer("// foo bar\n// bang boom\n", true);
+
+    h.type_keys("space l c");
+    h.settle();
+    assert_eq!(h.buffer_text_at(&path), "// foo bar bang boom\n");
+}
+
 fn enable_inlay_hints(h: &TestHarness) {
     use lsp_types::{OneOf, ServerCapabilities};
     h.fake_lsp().set_capabilities(ServerCapabilities {

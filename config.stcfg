@@ -612,6 +612,8 @@ on init {
 #                  or not
 #   pair_diff      the focused file diffs against another file, the pair
 #                  space h D set
+#   comment        the cursor row opens with a line comment token of the
+#                  buffer's language
 #   pair           exactly two split panes show two different files
 #   git            the workspace root is inside a git repository
 #   walkthrough    a walkthrough tour is open
@@ -2084,6 +2086,10 @@ on key {
             s -> OpenSymbolPicker();
             S -> OpenWorkspaceSymbolPicker();
 
+            comment {
+                c -> [ReflowComment(), SetMode(normal)];
+            }
+
             !token_known || token {
                 j -> [GotoDefinition(), SetMode(normal)];
                 J -> [GotoDeclaration(), SetMode(normal)];
@@ -2102,7 +2108,12 @@ on key {
                 T -> [GotoImplementors(), SetMode(normal)];
             }
             !token_known || token == function {
-                c -> [GotoCaller(), SetMode(normal)];
+                # On a comment row c reflows the comment, from the lsp block
+                # above. This arm also holds there while no token index
+                # exists, so the guard keeps the two arms apart.
+                !comment {
+                    c -> [GotoCaller(), SetMode(normal)];
+                }
                 C -> [GotoCallee(), SetMode(normal)];
 
                 git {
