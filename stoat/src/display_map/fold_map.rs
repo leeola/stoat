@@ -103,6 +103,25 @@ pub struct FoldScope {
     pub split: Option<Vec<ScopeSegment>>,
     /// Whether the fold runs to the end of the file, with no hunk below it.
     pub end_of_file: bool,
+    /// Whether the hunk adds, removes, or renames the item the chain ends on.
+    pub mark: ScopeMark,
+}
+
+/// How a fold row's Scope marks a hunk that adds, removes, or renames a whole
+/// item, so the reader sees that the change is the item itself.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub enum ScopeMark {
+    /// The hunk changes lines inside its items, or none of them whole.
+    #[default]
+    None,
+    /// The hunk adds the item the chain ends on.
+    Added,
+    /// The hunk removes the item the chain ends on, which the chain names
+    /// from the base text.
+    Removed,
+    /// The hunk renames the item the chain ends on, which the base text
+    /// names with this name.
+    Renamed(String),
 }
 
 /// The tag of a fold row's placeholder.

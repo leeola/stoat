@@ -1917,8 +1917,10 @@ fn paint_fold_controls(
 ///
 /// The chip names the items that [`diff_changes::scope_parts`] fits to the
 /// room, in `diff.scope.keyword`, `diff.scope.name`, and
-/// `diff.scope.separator`, on `diff.fold`'s background. It centers on the row,
-/// and moves into the room where the center puts it past an edge of the room.
+/// `diff.scope.separator`, on `diff.fold`'s background. The mark of a whole
+/// added or removed item takes `diff.added`'s or `diff.deleted`'s foreground.
+/// The chip centers on the row, and moves into the room where the center puts
+/// it past an edge of the room.
 ///
 /// A rich gutter draws the chip as a bar [`SCOPE_CHIP_HEIGHT`] sixteenths tall
 /// with [`SCOPE_CHIP_PAD`] sixteenths of space at each side, and each run over
@@ -1943,6 +1945,8 @@ fn paint_scope_chip(
             ScopeRole::Keyword => s::DIFF_SCOPE_KEYWORD,
             ScopeRole::Name => s::DIFF_SCOPE_NAME,
             ScopeRole::Separator => s::DIFF_SCOPE_SEPARATOR,
+            ScopeRole::Added => s::DIFF_ADDED,
+            ScopeRole::Removed => s::DIFF_DELETED,
         };
         theme.get(scope).fg.or(muted)
     };
@@ -3757,7 +3761,7 @@ mod tests {
     use crate::{
         buffer::{BufferId, TextBuffer},
         diff_map::{self, ChangeSpan, DiffHunk, DiffHunkStatus, DiffMap, MarkKind, TokenDetail},
-        display_map::InlayKind,
+        display_map::{InlayKind, ScopeMark},
         render::paint::FAINT_CONTRAST_FLOOR,
         theme::{scope::UI_SELECTION_EDITOR, Theme, FULL_CELL_SCALE},
         workspace::diff::WorktreeBase,
@@ -4926,6 +4930,7 @@ mod tests {
             segments: vec![item("impl", "Theme"), item("fn", "panel")],
             split: None,
             end_of_file: false,
+            mark: ScopeMark::None,
         }
     }
 
@@ -5052,9 +5057,37 @@ mod tests {
         assert_eq!(painted, expected);
     }
 
-    /// A fold row paints across both sides on the fold fill, its count centered
-    /// in muted text with no number beside it, and the rows below number their
-    /// base and buffer lines past the twelve lines it stands for.
+    /// The mark of a whole added item takes `diff.added`'s color on the chip,
+    /// and the mark of a whole removed item takes `diff.deleted`'s.
+    #[test]
+    fn a_scope_mark_takes_its_diff_color() {
+        let mark_color = |mark: ScopeMark, text: &str| {
+            let scope = FoldScope {
+                mark,
+                ..panel_scope()
+            };
+            let (_, commands, _, _) = rich_paint(
+                &mut fold_row_editor_with(Some(scope)),
+                &format!("{FOLD_THEME} {SCOPE_COLORS}"),
+                false,
+            );
+            commands.iter().find_map(|command| match command {
+                Command::TextRun(run) if run.text == text => Some(run.color),
+                _ => None,
+            })
+        };
+        assert_eq!(
+            [
+                mark_color(ScopeMark::Added, "+ "),
+                mark_color(ScopeMark::Removed, "\u{2212} "),
+            ],
+            [Some([0x00, 0xff, 0x00]), Some([0xff, 0x00, 0x00])],
+        );
+    }
+
+    /// A fold row paints across both sides on the fold fill, its count past the
+    /// Fold Buttons in muted text with no number beside it, and the rows below
+    /// number their base and buffer lines past the twelve lines it stands for.
     #[test]
     fn a_fold_row_spans_both_sides_and_the_numbers_resume_below_it() {
         let mut editor = fold_row_editor();

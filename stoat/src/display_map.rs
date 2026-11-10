@@ -26,6 +26,7 @@ pub use crease_map::{
 };
 pub use fold_map::{
     FoldMap, FoldMetadata, FoldOffset, FoldPlaceholder, FoldPoint, FoldScope, FoldSnapshot,
+    ScopeMark,
 };
 use highlights::{AnchorResolver, HighlightVersions};
 pub use highlights::{

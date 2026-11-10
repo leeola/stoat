@@ -21,10 +21,10 @@ use crate::{
     buffer::{BufferId, SharedBuffer},
     buffer_lifecycle,
     buffer_registry::{BufferRegistry, OpenOrigin},
-    diff_map::{DiffHunkStatus, DiffMap},
+    diff_map::{DiffHunk, DiffHunkStatus, DiffMap},
     display_map::{
         BlockRowKind, DisplaySnapshot, FoldPlaceholder, FoldScope, FoldSnapshot, InlayPoint,
-        InlaySnapshot,
+        InlaySnapshot, ScopeMark,
     },
     editor_state::{EditorId, EditorState},
     multi_buffer::MultiBufferSnapshot,
@@ -35,13 +35,18 @@ use crate::{
 use ratatui::layout::Rect;
 use slotmap::{new_key_type, SlotMap};
 use std::{
+    cell::OnceCell,
     collections::BTreeMap,
     mem,
     ops::Range,
     path::{Path, PathBuf},
     sync::Arc,
 };
-use stoat_language::{scope_chain, Language, ScopeSegment, SyntaxState};
+use stoat_language::{
+    scope_chain,
+    structural_diff::{parse_memoized, TreeCache},
+    Language, Query, ScopeSegment, SyntaxState, Tree,
+};
 use stoat_text::{Anchor, Bias, Point, Rope};
 use stoat_widgets::text_run;
 
@@ -354,6 +359,10 @@ pub(crate) enum ScopeRole {
     Name,
     /// A mark between items or a label, in `diff.scope.separator`.
     Separator,
+    /// The mark of an added item, in `diff.added`.
+    Added,
+    /// The mark of a removed item, in `diff.deleted`.
+    Removed,
 }
 
 impl ScopePart {
@@ -365,24 +374,206 @@ impl ScopePart {
     }
 }
 
-/// A buffer's parse and its language, which a fold row reads its Scope from.
+/// A buffer's parse and its language, which a fold row reads its Scope from,
+/// with the memo of trees that a parse of the diff's base text reads through.
 pub(crate) struct ScopeParse {
     syntax: SyntaxState,
     language: Arc<Language>,
+    cache: TreeCache,
 }
 
 impl ScopeParse {
     /// The parse of buffer `id`, or `None` while the buffer has no parse and
-    /// for a language with no outline query.
+    /// for a language with no outline query. A base parse reads through
+    /// `cache`, the memo the workspace's diffs share.
     ///
     /// The parse is a clone, which bumps a refcount and copies no tree.
-    pub(crate) fn of(buffers: &BufferRegistry, id: BufferId) -> Option<Self> {
+    pub(crate) fn of(buffers: &BufferRegistry, id: BufferId, cache: &TreeCache) -> Option<Self> {
         let language = buffers.language_for(id)?;
         language.outline_query()?;
         Some(Self {
             syntax: buffers.syntax(id)?.clone(),
             language,
+            cache: cache.clone(),
         })
+    }
+}
+
+/// The reader of one cut's Scopes, from the buffer's parse and, on the first
+/// change that needs it, a parse of the diff's base text.
+struct ScopeReader<'a> {
+    parse: &'a ScopeParse,
+    query: &'a Query,
+    map: &'a DiffMap,
+    rope: &'a Rope,
+    /// The rows of each change with its hunk, in buffer order.
+    changes: Vec<(Range<u32>, &'a DiffHunk)>,
+    /// The base text's tree and rope once a change reads them, holding `None`
+    /// when the diff has no base text or the base does not parse.
+    base: OnceCell<Option<(Tree, Rope)>>,
+}
+
+impl<'a> ScopeReader<'a> {
+    /// The reader of `map`'s changes over `rope`, which `parse` parsed, or
+    /// `None` for a language with no outline query.
+    fn new(parse: &'a ScopeParse, map: &'a DiffMap, rope: &'a Rope) -> Option<Self> {
+        Some(Self {
+            parse,
+            query: parse.language.outline_query()?,
+            map,
+            rope,
+            changes: changed_rows(map),
+            base: OnceCell::new(),
+        })
+    }
+
+    /// The Scope of the fold over `gap` in a buffer of `line_count` rows, the
+    /// items that hold the first change below the gap, or the end of the file
+    /// for a gap that reaches it.
+    ///
+    /// `None` for a gap with no change below it that still ends before the file
+    /// does, such as a gap above a row that the cursor holds open.
+    fn gap_scope(&self, gap: &Range<u32>, line_count: u32) -> Option<FoldScope> {
+        if gap.end >= line_count {
+            return Some(FoldScope {
+                segments: Vec::new(),
+                split: None,
+                end_of_file: true,
+                mark: ScopeMark::None,
+            });
+        }
+        let (rows, hunk) = self
+            .changes
+            .iter()
+            .find(|(rows, _)| rows.start >= gap.end)?;
+        Some(self.change_scope(rows, hunk))
+    }
+
+    /// The Scope of a change over buffer `rows` of `hunk`.
+    ///
+    /// The chain is the one at the first character of the first row. A last row
+    /// in another innermost item keeps its own chain as the split. When one
+    /// chain holds the other, the change lies inside the shorter chain's
+    /// innermost item, so the Scope is the shorter chain.
+    ///
+    /// A deletion reads its chain from the base text, and takes the removed
+    /// mark when it removes the innermost item whole. An added hunk that adds
+    /// an item of its chain whole takes the added mark, and its chain ends at
+    /// the outermost such item. A modified hunk whose first row holds the
+    /// innermost item's name takes the renamed mark when the base names that
+    /// item otherwise.
+    fn change_scope(&self, rows: &Range<u32>, hunk: &DiffHunk) -> FoldScope {
+        let scope = |segments, split, mark| FoldScope {
+            segments,
+            split,
+            end_of_file: false,
+            mark,
+        };
+        if hunk.buffer_line_range.is_empty()
+            && let Some(segments) = self.base_chain(hunk.base_byte_range.start)
+        {
+            let whole = segments
+                .last()
+                .is_some_and(|item| covers(&hunk.base_byte_range, &item.item_range));
+            let mark = match whole {
+                true => ScopeMark::Removed,
+                false => ScopeMark::None,
+            };
+            return scope(segments, None, mark);
+        }
+
+        let (first, last) = (rows.start, rows.end - 1);
+        let mut segments = self.live_chain(first);
+        if hunk.status == DiffHunkStatus::Added {
+            let bytes = row_bytes(self.rope, first..last + 1);
+            if let Some(whole) = segments
+                .iter()
+                .position(|item| covers(&bytes, &item.item_range))
+            {
+                segments.truncate(whole + 1);
+                return scope(segments, None, ScopeMark::Added);
+            }
+        }
+
+        let split = match last == first {
+            true => None,
+            false => {
+                let tail = self.live_chain(last);
+                let common = segments
+                    .iter()
+                    .zip(&tail)
+                    .take_while(|(head, tail)| head.item_range == tail.item_range)
+                    .count();
+                match common == segments.len().min(tail.len()) {
+                    true => {
+                        segments.truncate(common);
+                        None
+                    },
+                    false => Some(tail),
+                }
+            },
+        };
+        let mark = match hunk.status == DiffHunkStatus::Modified
+            && first == hunk.buffer_line_range.start
+        {
+            true => self.renamed(&segments, first, hunk),
+            false => ScopeMark::None,
+        };
+        scope(segments, split, mark)
+    }
+
+    /// The renamed mark of `hunk`, a modified hunk from buffer row `first`,
+    /// when that row holds the name of the innermost item of `segments` and
+    /// the base chain at the hunk's base start ends on an item of the same
+    /// keyword with another name.
+    fn renamed(&self, segments: &[ScopeSegment], first: u32, hunk: &DiffHunk) -> ScopeMark {
+        let Some(item) = segments
+            .last()
+            .filter(|item| self.rope.offset_to_point(item.name_range.start).row == first)
+        else {
+            return ScopeMark::None;
+        };
+        let base = self.base_chain(hunk.base_byte_range.start);
+        match base.as_ref().and_then(|base| base.last()) {
+            Some(old) if old.keyword == item.keyword && old.name != item.name => {
+                ScopeMark::Renamed(old.name.clone())
+            },
+            _ => ScopeMark::None,
+        }
+    }
+
+    /// The chain at the first character of buffer row `row`.
+    fn live_chain(&self, row: u32) -> Vec<ScopeSegment> {
+        scope_chain(
+            self.query,
+            self.parse.syntax.tree.root_node(),
+            self.rope,
+            first_text_byte(self.rope, row),
+        )
+    }
+
+    /// The chain at the first character of the base line that holds base byte
+    /// `byte`, or `None` when the diff has no base text or the base does not
+    /// parse.
+    ///
+    /// The first call parses the base text through the memo the workspace's
+    /// diffs share, and later calls read that parse.
+    fn base_chain(&self, byte: usize) -> Option<Vec<ScopeSegment>> {
+        let (tree, rope) = self
+            .base
+            .get_or_init(|| {
+                let text = self.map.base_text()?;
+                let tree = parse_memoized(&self.parse.language, text, Some(&self.parse.cache))?;
+                Some((tree, Rope::from(text.as_str())))
+            })
+            .as_ref()?;
+        let row = rope.offset_to_point(byte.min(rope.len())).row;
+        Some(scope_chain(
+            self.query,
+            tree.root_node(),
+            rope,
+            first_text_byte(rope, row),
+        ))
     }
 }
 
@@ -817,6 +1008,7 @@ pub(crate) fn reveal_cursor(stoat: &mut Stoat) -> bool {
     let Some(id) = ws.focused_diff_changes_id() else {
         return false;
     };
+    let cache = ws.diff_tree_cache();
     let Workspace {
         diff_changes_views,
         editors,
@@ -850,8 +1042,8 @@ pub(crate) fn reveal_cursor(stoat: &mut Stoat) -> bool {
     };
     let insert = editor.mode == "insert";
     let row = reveal_row(editor, insert, &revealed);
-    let parse = ScopeParse::of(buffers, buffer_id);
-    let Some((_, _, changed)) = fold_excerpt(editor, row, &revealed, parse.as_ref()) else {
+    let parse = ScopeParse::of(buffers, buffer_id, &cache);
+    let Some((_, _, changed)) = fold_excerpt(editor, row, &revealed, parse.as_ref(), false) else {
         return false;
     };
     if changed && screen_row.is_some() {
@@ -886,7 +1078,7 @@ fn reveal_row(
     let line_count = rope.max_point().row + 1;
     let fold = gaps(&shown_runs(map, buffer, None, revealed), line_count)
         .into_iter()
-        .map(|gap| gap_fold(rope, gap, None))
+        .map(|gap| gap_fold(rope, gap))
         .filter(|(_, placeholder)| !placeholder.text.is_empty())
         .map(|(range, _)| range)
         .find(|fold| fold.start <= cursor && cursor < fold.end)?;
@@ -908,6 +1100,7 @@ pub(crate) fn expand_from_cursor(stoat: &mut Stoat, dir: ExpandDir) -> Result<()
     let Some(id) = ws.focused_diff_changes_id() else {
         return Err("no fold to open");
     };
+    let cache = ws.diff_tree_cache();
     let Workspace {
         diff_changes_views,
         editors,
@@ -956,8 +1149,9 @@ pub(crate) fn expand_from_cursor(stoat: &mut Stoat, dir: ExpandDir) -> Result<()
     }
 
     let index = state.focused;
+    let parse = ScopeParse::of(buffers, state.excerpts[index].buffer_id, &cache);
     for (gap, edge) in targets {
-        expand(state, editors, buffers, index, gap, edge);
+        expand(state, editors, parse.as_ref(), index, gap, edge);
     }
     Ok(())
 }
@@ -974,6 +1168,7 @@ pub(crate) fn collapse_at_cursor(stoat: &mut Stoat) -> bool {
     let Some(id) = ws.focused_diff_changes_id() else {
         return false;
     };
+    let cache = ws.diff_tree_cache();
     let Workspace {
         diff_changes_views,
         editors,
@@ -1031,8 +1226,8 @@ pub(crate) fn collapse_at_cursor(stoat: &mut Stoat) -> bool {
     excerpt
         .revealed
         .retain(|_| !dropped.next().unwrap_or(false));
-    let parse = ScopeParse::of(buffers, excerpt.buffer_id);
-    fold_excerpt(editor, None, &excerpt.revealed, parse.as_ref());
+    let parse = ScopeParse::of(buffers, excerpt.buffer_id, &cache);
+    fold_excerpt(editor, None, &excerpt.revealed, parse.as_ref(), false);
     let hidden_by = fold_gap(&editor.display_map.snapshot(), cursor);
     if let Some(gap) = hidden_by {
         place_cursor(editor, Point::new(gap.start, 0));
@@ -1536,6 +1731,7 @@ fn drop_excerpt(stoat: &mut Stoat, excerpt: Excerpt) {
 /// [`landing_row`], unless a landing waits on its file. A later cut keeps the
 /// cursor's row open where [`reveal_row`] holds it.
 fn refold(ws: &mut Workspace) -> bool {
+    let cache = ws.diff_tree_cache();
     let Workspace {
         diff_changes_views,
         editors,
@@ -1565,9 +1761,9 @@ fn refold(ws: &mut Workspace) -> bool {
                     reveal_row(editor, insert, &excerpt.revealed)
                 },
             };
-            let parse = ScopeParse::of(buffers, excerpt.buffer_id);
+            let parse = ScopeParse::of(buffers, excerpt.buffer_id, &cache);
             let Some((folded, kept, _)) =
-                fold_excerpt(editor, cursor, &excerpt.revealed, parse.as_ref())
+                fold_excerpt(editor, cursor, &excerpt.revealed, parse.as_ref(), true)
             else {
                 continue;
             };
@@ -1685,9 +1881,11 @@ fn land(
 /// [`kept_runs`] keeps it, and each revealed span stays open as it is.
 ///
 /// Each fold row takes the Scope of the change below it, read from `parse`
-/// while `parse` is a parse of the buffer's text. A held fold whose Scope
-/// differs from that is cut again. With no such parse the held folds keep
-/// their Scopes, and a new fold takes none.
+/// while `parse` is a parse of the buffer's text. A held fold keeps its Scope
+/// unless `rescope` asks for every Scope again, which a cut after the text,
+/// the diff, or the parse moved does. A held fold whose Scope differs from the
+/// Scope read again is cut again. With no such parse the held folds keep their
+/// Scopes, and a new fold takes none.
 ///
 /// `None`, with nothing folded, while the buffer has no diff map.
 fn fold_excerpt(
@@ -1695,6 +1893,7 @@ fn fold_excerpt(
     cursor: Option<u32>,
     revealed: &[(Anchor, Anchor)],
     parse: Option<&ScopeParse>,
+    rescope: bool,
 ) -> Option<(usize, Vec<Range<u32>>, bool)> {
     let (version, kept, stale, fresh) = {
         let snapshot = editor.display_map.snapshot();
@@ -1704,16 +1903,30 @@ fn fold_excerpt(
         let line_count = rope.max_point().row + 1;
         let kept = shown_runs(map, buffer, cursor, revealed);
 
+        // The folds sit where their anchors carried them across every edit
+        // since their cut, so a gap whose rows moved still finds its fold.
+        let held = held_folds(snapshot.fold_snapshot());
         // A parse of older text puts its items at the wrong bytes.
-        let parse = parse.filter(|parse| parse.syntax.version == buffer.version());
-        let changes = parse.map(|_| changed_rows(map)).unwrap_or_default();
+        let reader = parse
+            .filter(|parse| parse.syntax.version == buffer.version())
+            .and_then(|parse| ScopeReader::new(parse, map, rope));
+        let reread = rescope && reader.is_some();
         let wanted: Vec<(Range<Point>, FoldPlaceholder)> = gaps(&kept, line_count)
             .into_iter()
             .map(|gap| {
-                let scope = parse
-                    .and_then(|parse| gap_scope(&changes, &gap, line_count, parse, rope))
-                    .map(Arc::new);
-                gap_fold(rope, gap, scope)
+                let (range, mut placeholder) = gap_fold(rope, gap.clone());
+                if placeholder.is_fold_row() {
+                    let kept_scope = held_scope(&held, &range)
+                        .filter(|scope| !reread && (scope.is_some() || reader.is_none()));
+                    placeholder.scope = match kept_scope {
+                        Some(scope) => scope.clone(),
+                        None => reader
+                            .as_ref()
+                            .and_then(|reader| reader.gap_scope(&gap, line_count))
+                            .map(Arc::new),
+                    };
+                }
+                (range, placeholder)
             })
             .collect();
         let wanted_keys: Vec<HeldFold> = wanted
@@ -1721,19 +1934,15 @@ fn fold_excerpt(
             .map(|(range, placeholder)| (range.clone(), placeholder.scope.clone()))
             .collect();
 
-        // The folds sit where their anchors carried them across every edit
-        // since their cut, so a gap whose rows moved still finds its fold.
-        let held = held_folds(snapshot.fold_snapshot());
-        let scoped = parse.is_some();
         let stale: Vec<Range<Point>> = held
             .iter()
-            .filter(|fold| !holds(&wanted_keys, fold, scoped))
+            .filter(|fold| !holds(&wanted_keys, fold))
             .map(|(range, _)| range.clone())
             .collect();
         let fresh: Vec<(Range<Point>, FoldPlaceholder)> = wanted
             .into_iter()
             .zip(&wanted_keys)
-            .filter(|(_, key)| !holds(&held, key, scoped))
+            .filter(|(_, key)| !holds(&held, key))
             .map(|(fold, _)| fold)
             .collect();
         (map.version(), kept, stale, fresh)
@@ -1766,14 +1975,24 @@ fn held_folds(folds: &FoldSnapshot) -> Vec<HeldFold> {
     held
 }
 
-/// Whether `folds`, sorted by start and then end, holds `fold`'s range, with
-/// the same Scope when `scoped`.
-fn holds(folds: &[HeldFold], (range, scope): &HeldFold, scoped: bool) -> bool {
-    folds
+/// Whether `folds`, sorted by start and then end, holds `fold`'s range with the
+/// same Scope.
+fn holds(folds: &[HeldFold], fold: &HeldFold) -> bool {
+    held_scope(folds, &fold.0).is_some_and(|scope| *scope == fold.1)
+}
+
+/// The Scope of the fold of `folds`, sorted by start and then end, that hides
+/// `range`, or `None` when no fold hides it.
+fn held_scope<'a>(
+    folds: &'a [HeldFold],
+    range: &Range<Point>,
+) -> Option<&'a Option<Arc<FoldScope>>> {
+    let index = folds
         .binary_search_by_key(&(range.start, range.end), |(probe, _)| {
             (probe.start, probe.end)
         })
-        .is_ok_and(|index| !scoped || folds[index].1 == *scope)
+        .ok()?;
+    Some(&folds[index].1)
 }
 
 /// The rows an excerpt shows, as runs in buffer order.
@@ -1905,13 +2124,7 @@ fn gaps(kept: &[Range<u32>], line_count: u32) -> Vec<Range<u32>> {
 /// A gap of that empty row alone folds from the end of the row above under an
 /// empty placeholder instead, so it takes no row, and the excerpt's last line
 /// ends as it reads.
-///
-/// A fold row carries `scope`, which the row centers.
-fn gap_fold(
-    rope: &Rope,
-    gap: Range<u32>,
-    scope: Option<Arc<FoldScope>>,
-) -> (Range<Point>, FoldPlaceholder) {
+fn gap_fold(rope: &Rope, gap: Range<u32>) -> (Range<Point>, FoldPlaceholder) {
     let end = Point::new(gap.end - 1, rope.line_len(gap.end - 1));
     match fold_lines(rope, &gap) {
         0 => {
@@ -1927,98 +2140,45 @@ fn gap_fold(
         },
         lines => (
             Point::new(gap.start, 0)..end,
-            FoldPlaceholder {
-                scope,
-                ..render::review::fold_row_placeholder(lines)
-            },
+            render::review::fold_row_placeholder(lines),
         ),
     }
 }
 
-/// The rows each change of `map` marks, in buffer order.
+/// The rows each change of `map` marks, with the change's hunk, in buffer
+/// order.
 ///
 /// A deletion marks the row it sits on, and a refined modified hunk marks the
 /// runs the tree pass found, as [`kept_runs`] reads them.
-fn changed_rows(map: &DiffMap) -> Vec<Range<u32>> {
-    let mut rows: Vec<Range<u32>> = Vec::new();
+fn changed_rows(map: &DiffMap) -> Vec<(Range<u32>, &DiffHunk)> {
+    let mut rows: Vec<(Range<u32>, &DiffHunk)> = Vec::new();
     for hunk in map.hunks() {
         let range = &hunk.buffer_line_range;
         if range.is_empty() {
-            rows.push(hunk.buffer_start_line..hunk.buffer_start_line + 1);
+            rows.push((hunk.buffer_start_line..hunk.buffer_start_line + 1, hunk));
         } else if hunk.status == DiffHunkStatus::Modified && hunk.refined() {
-            rows.extend(hunk.marked_rows.iter().cloned());
+            rows.extend(hunk.marked_rows.iter().map(|run| (run.clone(), hunk)));
         } else {
-            rows.push(range.clone());
+            rows.push((range.clone(), hunk));
         }
     }
-    rows.sort_by_key(|rows| rows.start);
+    rows.sort_by_key(|(rows, _)| rows.start);
     rows
 }
 
-/// The Scope of the fold over `gap`, the items that hold the first run of
-/// `changes` below it, or the end of the file for a gap that reaches it.
-///
-/// `None` for a gap with no change below it that still ends before the file
-/// does, such as a gap above a row that the cursor holds open.
-fn gap_scope(
-    changes: &[Range<u32>],
-    gap: &Range<u32>,
-    line_count: u32,
-    parse: &ScopeParse,
-    rope: &Rope,
-) -> Option<FoldScope> {
-    if gap.end >= line_count {
-        return Some(FoldScope {
-            segments: Vec::new(),
-            split: None,
-            end_of_file: true,
-        });
-    }
-    let below = changes.iter().find(|rows| rows.start >= gap.end)?;
-    Some(rows_scope(below.start, below.end - 1, parse, rope))
+/// The bytes of buffer `rows` of `rope`, from the first row's start to the
+/// start of the row after the last, or to the end of the text.
+fn row_bytes(rope: &Rope, rows: Range<u32>) -> Range<usize> {
+    let end = match rows.end > rope.max_point().row {
+        true => rope.len(),
+        false => rope.point_to_offset(Point::new(rows.end, 0)),
+    };
+    rope.point_to_offset(Point::new(rows.start, 0))..end
 }
 
-/// The Scope of a change from row `first` to row `last` of `rope`, read from
-/// `parse`, a parse of `rope`.
-///
-/// The chain is the one at the first character of the first row. A last row in
-/// another innermost item keeps its own chain as the split. When one chain
-/// holds the other, the change lies inside the shorter chain's innermost item,
-/// so the Scope is the shorter chain.
-fn rows_scope(first: u32, last: u32, parse: &ScopeParse, rope: &Rope) -> FoldScope {
-    let chain_at = |row: u32| match parse.language.outline_query() {
-        Some(query) => scope_chain(
-            query,
-            parse.syntax.tree.root_node(),
-            rope,
-            first_text_byte(rope, row),
-        ),
-        None => Vec::new(),
-    };
-    let mut segments = chain_at(first);
-    let split = match last == first {
-        true => None,
-        false => {
-            let tail = chain_at(last);
-            let common = segments
-                .iter()
-                .zip(&tail)
-                .take_while(|(head, tail)| head.item_range == tail.item_range)
-                .count();
-            match common == segments.len().min(tail.len()) {
-                true => {
-                    segments.truncate(common);
-                    None
-                },
-                false => Some(tail),
-            }
-        },
-    };
-    FoldScope {
-        segments,
-        split,
-        end_of_file: false,
-    }
+/// Whether `outer` holds every byte of `inner`.
+fn covers(outer: &Range<usize>, inner: &Range<usize>) -> bool {
+    outer.start <= inner.start && inner.end <= outer.end
 }
 
 /// The byte of the first character on `row` of `rope` that is not whitespace,
@@ -2045,8 +2205,13 @@ fn first_text_byte(rope: &Rope, row: u32) -> usize {
 /// innermost items after their common containers, joined with `+`. An empty
 /// chain reads `top level`, and a fold with no change below it reads
 /// `end of file`.
+///
+/// A whole added item takes `+` before the chain, and a whole removed item
+/// takes `U+2212`. A renamed item reads its old name, `U+2192`, and its new
+/// name.
 pub(crate) fn scope_parts(scope: &FoldScope, room: u16, scale: u16) -> Vec<ScopePart> {
     let items = scope_items(scope);
+    let mark = mark_part(&scope.mark);
     let last = items.len() - 1;
     let mut shapes: Vec<Vec<Option<usize>>> = vec![(0..=last).map(Some).collect()];
     for cut in 2..=last {
@@ -2062,9 +2227,24 @@ pub(crate) fn scope_parts(scope: &FoldScope, room: u16, scale: u16) -> Vec<Scope
     }
     shapes
         .iter()
-        .map(|shape| join_items(&items, shape))
+        .map(|shape| {
+            mark.iter()
+                .cloned()
+                .chain(join_items(&items, shape))
+                .collect::<Vec<_>>()
+        })
         .find(|parts| parts_advance(parts, scale) <= room)
         .unwrap_or_default()
+}
+
+/// The run before the chain that marks a whole added or removed item, with the
+/// space after it.
+fn mark_part(mark: &ScopeMark) -> Option<ScopePart> {
+    match mark {
+        ScopeMark::Added => Some(ScopePart::new("+ ", ScopeRole::Added)),
+        ScopeMark::Removed => Some(ScopePart::new("\u{2212} ", ScopeRole::Removed)),
+        ScopeMark::None | ScopeMark::Renamed(_) => None,
+    }
 }
 
 /// The sixteenths that `parts` advance at text `scale`.
@@ -2084,6 +2264,17 @@ fn scope_items(scope: &FoldScope) -> Vec<Vec<ScopePart>> {
     if scope.end_of_file {
         return label("end of file");
     }
+    let old_name = match &scope.mark {
+        ScopeMark::Renamed(old) => Some(old.as_str()),
+        _ => None,
+    };
+    let innermost = scope.segments.len().checked_sub(1);
+    let item = |index: usize| {
+        segment_parts(
+            &scope.segments[index],
+            old_name.filter(|_| Some(index) == innermost),
+        )
+    };
     let items: Vec<Vec<ScopePart>> = match &scope.split {
         Some(tail) => {
             let common = scope
@@ -2092,15 +2283,18 @@ fn scope_items(scope: &FoldScope) -> Vec<Vec<ScopePart>> {
                 .zip(tail)
                 .take_while(|(head, tail)| head.item_range == tail.item_range)
                 .count();
-            let mut items: Vec<Vec<ScopePart>> =
-                scope.segments[..common].iter().map(segment_parts).collect();
-            let mut pair = scope.segments.last().map(segment_parts).unwrap_or_default();
+            let mut items: Vec<Vec<ScopePart>> = (0..common).map(item).collect();
+            let mut pair = innermost.map(item).unwrap_or_default();
             pair.push(ScopePart::new(" + ", ScopeRole::Separator));
-            pair.extend(tail.last().map(segment_parts).unwrap_or_default());
+            pair.extend(
+                tail.last()
+                    .map(|segment| segment_parts(segment, None))
+                    .unwrap_or_default(),
+            );
             items.push(pair);
             items
         },
-        None => scope.segments.iter().map(segment_parts).collect(),
+        None => (0..scope.segments.len()).map(item).collect(),
     };
     match items.is_empty() {
         true => label("top level"),
@@ -2108,14 +2302,20 @@ fn scope_items(scope: &FoldScope) -> Vec<Vec<ScopePart>> {
     }
 }
 
-/// The runs of one item, its keyword with a space and then its name.
-fn segment_parts(segment: &ScopeSegment) -> Vec<ScopePart> {
-    segment
+/// The runs of one item, its keyword with a space and then its name. An
+/// `old_name` comes before the name with `U+2192`, for an item a hunk renamed.
+fn segment_parts(segment: &ScopeSegment, old_name: Option<&str>) -> Vec<ScopePart> {
+    let mut parts: Vec<ScopePart> = segment
         .keyword
         .iter()
         .map(|keyword| ScopePart::new(format!("{keyword} "), ScopeRole::Keyword))
-        .chain([ScopePart::new(segment.name.clone(), ScopeRole::Name)])
-        .collect()
+        .collect();
+    if let Some(old_name) = old_name {
+        parts.push(ScopePart::new(old_name, ScopeRole::Name));
+        parts.push(ScopePart::new(" \u{2192} ", ScopeRole::Separator));
+    }
+    parts.push(ScopePart::new(segment.name.clone(), ScopeRole::Name));
+    parts
 }
 
 /// The runs of the items `shape` names, joined with `U+203A`. Each entry of
@@ -2155,7 +2355,7 @@ pub(crate) fn fold_lines(rope: &Rope, gap: &Range<u32>) -> u32 {
 pub(crate) fn expand(
     state: &mut DiffChangesState,
     editors: &mut SlotMap<EditorId, EditorState>,
-    buffers: &BufferRegistry,
+    parse: Option<&ScopeParse>,
     index: usize,
     gap: Range<u32>,
     edge: FoldEdge,
@@ -2183,8 +2383,7 @@ pub(crate) fn expand(
     };
     let insert = editor.mode == "insert";
     let held = reveal_row(editor, insert, &excerpt.revealed);
-    let parse = ScopeParse::of(buffers, excerpt.buffer_id);
-    fold_excerpt(editor, held, &excerpt.revealed, parse.as_ref());
+    fold_excerpt(editor, held, &excerpt.revealed, parse, false);
     editor.reveal_flashes.push(RevealFlash {
         rows: rows.clone(),
         age: 0.0,
@@ -2326,7 +2525,7 @@ mod tests {
         action_handlers::dispatch,
         buffer::{BufferId, TextBuffer},
         diff_map::{DiffHunk, DiffHunkStatus, DiffMap, TokenDetail},
-        display_map::{DisplayPoint, FoldScope, InlayPoint},
+        display_map::{DisplayPoint, FoldScope, InlayPoint, ScopeMark},
         editor_state::EditorState,
         host::FakeRepoBuilder,
         test_harness::TestHarness,
@@ -2343,7 +2542,9 @@ mod tests {
     };
     use stoat_action::{CloseDiffChanges, DiffChanges, DiffChangesPrev};
     use stoat_language::{
-        parse_rope, structural_diff, LanguageRegistry, ScopeSegment, SyntaxState,
+        parse_rope,
+        structural_diff::{self, TreeCache},
+        LanguageRegistry, ScopeSegment, SyntaxState,
     };
     use stoat_scheduler::{Executor, TestScheduler};
     use stoat_text::{Point, Rope};
@@ -2509,7 +2710,7 @@ mod tests {
     fn a_gap_folds_from_its_first_row_under_a_count_of_its_lines() {
         let rope = Rope::from("one\ntwo\nthree\nfour\n");
         let fold = |rope: &Rope, gap: Range<u32>| {
-            let (range, placeholder) = gap_fold(rope, gap, None);
+            let (range, placeholder) = gap_fold(rope, gap);
             (
                 range,
                 placeholder.text.to_string(),
@@ -2613,7 +2814,7 @@ mod tests {
         buffer.diff_map = Some(map);
         let shared = Arc::new(RwLock::new(buffer));
         let mut editor = EditorState::new(BufferId::new(0), shared, executor, crate::test_notify());
-        fold_excerpt(&mut editor, None, &[], None);
+        fold_excerpt(&mut editor, None, &[], None, false);
 
         let snapshot = editor.display_map.snapshot();
         let folds = snapshot.fold_snapshot();
@@ -2680,16 +2881,60 @@ fn hint_width() -> u32 {
             anchor_range: None,
             token_detail: None,
         };
+        let map = DiffMap::from_hunks([modified(5..6), modified(13..17)], None);
+        assert_eq!(
+            rust_fold_scopes(SCOPED, map),
+            [
+                (0, "impl Theme \u{203a} fn panel"),
+                (9, "fn palette_title + fn hint_width"),
+                (20, "end of file"),
+            ]
+            .map(|(row, text)| (row, text.to_string())),
+        );
+    }
+
+    /// A hunk that adds a whole function marks it with `+`. A hunk that removes
+    /// a whole struct marks it with `U+2212` and names it from the base text,
+    /// and a hunk that renames a function names it by its old and new names.
+    #[test]
+    fn a_whole_added_removed_or_renamed_item_takes_its_mark() {
+        let around = |middle: &str| {
+            format!("fn first() -> u32 {{\n    1\n}}\n// a\n// b\n// c\n// d\n{middle}// e\n// f\n// g\n// h\n")
+        };
+        let first_fold = |base: &str, text: &str| {
+            rust_fold_scopes(text, map_of(base, text))
+                .into_iter()
+                .next()
+        };
+        let renamed = |name: &str| around(&format!("fn {name}() -> u32 {{\n    2\n}}\n"));
+        assert_eq!(
+            [
+                first_fold(&around(""), &around("fn panel_role() -> u32 {\n    3\n}\n")),
+                first_fold(
+                    &around("struct OldPanel {\n    width: u32,\n}\n"),
+                    &around("")
+                ),
+                first_fold(&renamed("modal_box"), &renamed("modal_frame")),
+            ],
+            [
+                "+ fn panel_role",
+                "\u{2212} struct OldPanel",
+                "fn modal_box \u{2192} modal_frame",
+            ]
+            .map(|text| Some((0, text.to_string()))),
+        );
+    }
+
+    /// Each fold row's first buffer row and Scope text after a cut of `text`
+    /// under `map`, with `text` parsed as Rust.
+    fn rust_fold_scopes(text: &str, map: DiffMap) -> Vec<(u32, String)> {
         let executor = Executor::new(Arc::new(TestScheduler::new()));
-        let mut buffer = TextBuffer::with_text(BufferId::new(0), SCOPED);
-        buffer.diff_map = Some(DiffMap::from_hunks(
-            [modified(5..6), modified(13..17)],
-            None,
-        ));
+        let mut buffer = TextBuffer::with_text(BufferId::new(0), text);
+        buffer.diff_map = Some(map);
         let shared = Arc::new(RwLock::new(buffer));
         let mut editor = EditorState::new(BufferId::new(0), shared, executor, crate::test_notify());
 
-        let rope = Rope::from(SCOPED);
+        let rope = Rope::from(text);
         let language = LanguageRegistry::standard()
             .for_path(Path::new("a.rs"))
             .expect("the rust language");
@@ -2700,18 +2945,20 @@ fn hint_width() -> u32 {
                 rope_snapshot: rope,
             },
             language,
+            cache: TreeCache::default(),
         };
-        fold_excerpt(&mut editor, None, &[], Some(&parse));
+        fold_excerpt(&mut editor, None, &[], Some(&parse), true);
 
         let snapshot = editor.display_map.snapshot();
         let folds = snapshot.fold_snapshot();
         let inlays = folds.inlay_snapshot();
-        let scopes: Vec<(Point, String)> = folds
+        folds
             .folds_in_range(InlayPoint::default()..folds.to_inlay_point(folds.max_point()))
             .into_iter()
+            .filter(|fold| fold.placeholder.is_fold_row())
             .map(|fold| {
                 (
-                    inlays.to_buffer_point(fold.range.start),
+                    inlays.to_buffer_point(fold.range.start).row,
                     fold.placeholder
                         .scope
                         .as_deref()
@@ -2719,18 +2966,7 @@ fn hint_width() -> u32 {
                         .unwrap_or_default(),
                 )
             })
-            .collect();
-        assert_eq!(
-            scopes,
-            [
-                (Point::new(0, 0), "impl Theme \u{203a} fn panel".to_string()),
-                (
-                    Point::new(9, 0),
-                    "fn palette_title + fn hint_width".to_string()
-                ),
-                (Point::new(20, 0), "end of file".to_string()),
-            ],
-        );
+            .collect()
     }
 
     /// A chain too wide for its room drops items from its middle for one
@@ -2749,6 +2985,7 @@ fn hint_width() -> u32 {
             segments,
             split: None,
             end_of_file,
+            mark: ScopeMark::None,
         };
         let chain = scope(
             vec![item("mod", "a"), item("impl", "B"), item("fn", "c")],

@@ -67,7 +67,7 @@ use std::{
     task::{Context, Poll},
     time::{Instant, SystemTime, UNIX_EPOCH},
 };
-use stoat_language::{LanguageRegistry, Tree};
+use stoat_language::{structural_diff::TreeCache, LanguageRegistry, Tree};
 use stoat_scheduler::{Executor, Task};
 use tokio::sync::{
     mpsc::{self, UnboundedReceiver, UnboundedSender},
@@ -1358,6 +1358,12 @@ impl Workspace {
     /// workspace's buffers. See [`DiffState::maps_epoch`].
     pub(crate) fn diff_maps_epoch(&self) -> u64 {
         self.diff.maps_epoch
+    }
+
+    /// The memo of parsed trees that the workspace's diffs share, so a reader
+    /// of a base text's parse finds the tree a diff already built.
+    pub(crate) fn diff_tree_cache(&self) -> TreeCache {
+        self.diff.tree_cache.clone()
     }
 
     /// Whether `id`'s installed map holds the hunks for the buffer's current

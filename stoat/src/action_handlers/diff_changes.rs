@@ -14,7 +14,7 @@ use crate::{
     app::{Stoat, UpdateEffect},
     buffer_lifecycle,
     buffer_registry::{BufferRegistry, OpenOrigin},
-    diff_changes::{self, DiffChangesState, ExpandDir, Landing},
+    diff_changes::{self, DiffChangesState, ExpandDir, Landing, ScopeParse},
     display_map::{DisplayPoint, DisplaySnapshot},
     editor_state::{EditorId, EditorState},
     pane::{PaneId, View},
@@ -512,6 +512,7 @@ pub(crate) fn diff_changes_press(stoat: &mut Stoat, row: usize, column: u16) -> 
     let Some(id) = ws.focused_diff_changes_id() else {
         return StackPress::Missed;
     };
+    let cache = ws.diff_tree_cache();
     let Workspace {
         diff_changes_views,
         editors,
@@ -524,7 +525,8 @@ pub(crate) fn diff_changes_press(stoat: &mut Stoat, row: usize, column: u16) -> 
     diff_changes::layout_stack(state, editors);
 
     if let Some((index, gap, edge)) = diff_changes::fold_button_at(state, editors, row, column) {
-        diff_changes::expand(state, editors, buffers, index, gap, edge);
+        let parse = ScopeParse::of(buffers, state.excerpts[index].buffer_id, &cache);
+        diff_changes::expand(state, editors, parse.as_ref(), index, gap, edge);
         return StackPress::Opened;
     }
     match diff_changes::press_cell(state, editors, row, column) {
