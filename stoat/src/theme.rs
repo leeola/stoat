@@ -800,6 +800,14 @@ pub mod scope {
     /// A theme that leaves it unset draws no ring and no label, so the status
     /// row is the pane's only read-only mark.
     pub const UI_READONLY_FRAME: &str = "ui.readonly.frame";
+    /// The badge the Pane Picker draws on each pane its digits reach. The
+    /// background is the badge's fill, and the foreground is its digit and
+    /// its border.
+    ///
+    /// A theme that leaves it unset fills the badge with
+    /// [`UI_STATUSBAR_FOCUSED`]'s background and inks it with
+    /// [`UI_BACKGROUND`]'s.
+    pub const UI_PANE_PICKER_BADGE: &str = "ui.pane_picker.badge";
     /// The faint track a meter fills over, such as the stat bar of a file row
     /// in the commits view.
     pub const UI_DIVIDER: &str = "ui.divider";
@@ -1097,6 +1105,7 @@ pub mod scope {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::render;
     use stoat_config::parse;
 
     fn load(source: &str, name: &str) -> Theme {
@@ -1571,6 +1580,29 @@ mod tests {
                 208,
                 232,
             )
+        );
+    }
+
+    /// The ermine Pane Picker badge fills with the accent and inks its digit
+    /// and border in the chrome ground, as the PanePicker board draws it.
+    #[test]
+    fn the_ermine_badge_fills_with_the_accent() {
+        let theme = load(crate::app::DEFAULT_KEYMAP, "ermine_night");
+        assert_eq!(
+            render::pane_badge_colors(&theme),
+            ([0x7f, 0xb0, 0xff], [0x12, 0x14, 0x18]),
+        );
+    }
+
+    /// A theme that sets no badge scope fills the badge with the focused
+    /// status bar's background and inks it with the editor background, which
+    /// default_dark sets to #636d83 and #282c34.
+    #[test]
+    fn a_theme_without_the_badge_scope_keeps_the_status_bar_fill() {
+        let theme = load(crate::app::DEFAULT_KEYMAP, "default_dark");
+        assert_eq!(
+            render::pane_badge_colors(&theme),
+            ([0x63, 0x6d, 0x83], [0x28, 0x2c, 0x34]),
         );
     }
 

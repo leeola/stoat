@@ -366,6 +366,8 @@ theme ermine_night inherits default_dark {
     ui.readonly.label.fg = readonly;
     ui.readonly.frame.fg = readonly_line;
 
+    ui.pane_picker.badge = { fg: chrome, bg: accent };
+
     ui.statusline.conflict.fg = conflict;
     vcs.conflict.ours      = { fg: success, bg: tint_ours };
     vcs.conflict.theirs    = { fg: special, bg: tint_theirs };

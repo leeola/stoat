@@ -248,6 +248,11 @@ The typed UI scopes, by group (syntax scopes are open-ended):
 - `ui.readonly.label`, `ui.readonly.frame` -- the label and the dashed ring
   a read-only editor pane draws inside stoatty. default_dark leaves both
   unset, so its read-only panes draw neither.
+- `ui.pane_picker.badge` -- the digit badge the Pane Picker draws on each
+  pane it reaches: the background is the fill, and the foreground is the
+  digit and the border. A theme that leaves it unset fills the badge with the
+  `ui.statusbar.focused` background and inks it with the `ui.background`
+  background.
 - `ui.divider` -- the faint track a meter fills over, such as the stat bar of
   a file row in the commits view.
 - `ui.modal.help`, `ui.modal.hints`, `ui.modal.palette`, `ui.modal.picker`,

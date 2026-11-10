@@ -2871,26 +2871,24 @@ fn pane_badges(ws: &Workspace) -> Vec<PaneBadge> {
 /// number.
 ///
 /// The focused pane gets no badge, since it is where the chord started, and
-/// every other badge paints in the accent fill so the reachable panes stand
-/// out. Each badge is a bold [`Popover`], so a plain terminal draws the
-/// cell-fallback box and stoatty floats the scaled bold glyph.
+/// every other badge paints in the fill [`pane_badge_colors`] picks, so the
+/// reachable panes stand out. Each badge is a bold [`Popover`], so a plain
+/// terminal draws the cell-fallback box and stoatty floats the scaled bold
+/// glyph.
 fn render_pane_id_badges(
     theme: &crate::theme::Theme,
     ws: &Workspace,
     buf: &mut Buffer,
     scene: &mut ApcScene,
 ) {
-    let accent = paint::style_rgb(theme.get(crate::theme::scope::UI_STATUSBAR_FOCUSED).bg)
-        .unwrap_or([90, 90, 110]);
-    let background =
-        paint::style_rgb(theme.get(crate::theme::scope::UI_BACKGROUND).bg).unwrap_or([40, 44, 52]);
+    let (fill, ink) = pane_badge_colors(theme);
 
     for badge in pane_badges(ws) {
         let digit = badge.digit.to_string();
         let popover = Popover {
-            fill: accent,
-            border: background,
-            content_fg: background,
+            fill,
+            border: ink,
+            content_fg: ink,
             scale: badge.scale,
             offset: [0, 0],
             bold: true,
@@ -2905,6 +2903,27 @@ fn render_pane_id_badges(
             popover.draw_fallback(badge.rect, buf);
         }
     }
+}
+
+/// The fill of a Pane Picker badge and the ink of its digit and border.
+///
+/// The theme's `ui.pane_picker.badge` scope gives both, its background the
+/// fill and its foreground the ink. A theme that sets no RGB pair there fills
+/// the badge with the focused status bar's background and inks it with the
+/// editor background.
+pub(crate) fn pane_badge_colors(theme: &crate::theme::Theme) -> ([u8; 3], [u8; 3]) {
+    let themed = theme
+        .try_get(crate::theme::scope::UI_PANE_PICKER_BADGE)
+        .map(|style| (paint::style_rgb(style.bg), paint::style_rgb(style.fg)));
+    if let Some((Some(fill), Some(ink))) = themed {
+        return (fill, ink);
+    }
+
+    let fill = paint::style_rgb(theme.get(crate::theme::scope::UI_STATUSBAR_FOCUSED).bg)
+        .unwrap_or([90, 90, 110]);
+    let ink =
+        paint::style_rgb(theme.get(crate::theme::scope::UI_BACKGROUND).bg).unwrap_or([40, 44, 52]);
+    (fill, ink)
 }
 
 #[cfg(all(test, feature = "perf"))]
@@ -3153,7 +3172,7 @@ mod themed_blank_tests {
 
 #[cfg(test)]
 mod pane_badge_tests {
-    use super::{paint, pane_badges};
+    use super::{paint, pane_badge_colors, pane_badges};
     use crate::test_harness::TestHarness;
     use ratatui::{layout::Rect, style::Color};
     use stoatty_protocol::command::{self, Command, PopoverCommand};
@@ -3270,12 +3289,10 @@ mod pane_badge_tests {
         h
     }
 
-    /// The background of the accent style, which a badge fills with.
+    /// The fill a badge takes under the theme the harness loads.
     fn accent_bg(h: &TestHarness) -> Option<Color> {
-        h.stoat
-            .theme
-            .get(crate::theme::scope::UI_STATUSBAR_FOCUSED)
-            .bg
+        let [r, g, b] = pane_badge_colors(&h.stoat.theme).0;
+        Some(Color::Rgb(r, g, b))
     }
 
     /// The popovers the last frame sent to the host.
