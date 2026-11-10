@@ -161,7 +161,9 @@ that reaches a cell edge would otherwise break the line around it.
 A frame compositing pools defers the panel strokes along with the cursor, since
 the composites paint over the cells a frame sits on. That leaves those strokes
 above the overlays and icons the frame recorded earlier, an asymmetry the cursor
-has carried since pools existed.
+has carried since pools existed. The panels' exterior shadows draw again over
+each grid pane pool's composite, outside every panel's box that the composite
+leaves to the live grid.
 
 A sketch anchored to a pool defers the same way, for the same reason, and draws
 clipped to its host's region so it stops at the pane edge. A sketch is never

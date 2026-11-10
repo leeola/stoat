@@ -33,6 +33,9 @@ const INSTANCE_STRIDE: u32 = 28u;
 // corner that a fillet joins to the surface below.
 const FILLET_BOTTOM_LEFT: u32 = 16u;
 const FILLET_BOTTOM_RIGHT: u32 = 32u;
+// The bit of a panel that no pane pool takes as an occluder: a backdrop, or a
+// panel that rides a pool this frame. A pool's composite paints over its box.
+const PASSES_POOLS: u32 = 64u;
 
 // The hatch's line pitch in logical pixels, measured along x plus y.
 const HATCH_PITCH: f32 = 7.0;
@@ -383,6 +386,43 @@ fn occluded(frag: vec2<f32>, instance: u32) -> bool {
     return false;
 }
 
+/// Whether `frag` lies inside the box of a panel that a pane pool's composite
+/// leaves to the live grid, which is every panel but the ones that pass pools.
+///
+/// The walk covers every instance, earlier and later alike, since a composite
+/// leaves each such box whichever panel declared it first.
+fn boxed(frag: vec2<f32>) -> bool {
+    for (var j = 0u; j < globals.count; j = j + 1u) {
+        let base = j * INSTANCE_STRIDE;
+        let shape_j = bitcast<u32>(instances[base + 17u]);
+        if (shape_j & PASSES_POOLS) != 0u {
+            continue;
+        }
+        let cell_j = vec2<f32>(instances[base], instances[base + 1u]);
+        let size_j = vec2<f32>(instances[base + 2u], instances[base + 3u]);
+        let edge_px_j = vec4<f32>(
+            instances[base + 22u],
+            instances[base + 23u],
+            instances[base + 24u],
+            instances[base + 25u]
+        );
+        let sdf = occluder_sdf(
+            frag,
+            cell_j,
+            size_j,
+            globals.cell_size,
+            instances[base + 13u],
+            edge_px_j,
+            bitcast<u32>(instances[base + 26u]),
+            shape_j & 15u
+        );
+        if sdf < -0.5 {
+            return true;
+        }
+    }
+    return false;
+}
+
 /// The panel's signed distance field and the coverages derived from it, shared
 /// by both fragment stages so each measures the same box.
 struct Coverage {
@@ -585,6 +625,25 @@ fn fs_under(in: VsOut) -> @location(0) vec4<f32> {
     acc = over(acc, fill_color(in), c.fill);
     acc = over(acc, SHADOW_COLOR, c.band);
     return unpremultiply(acc);
+}
+
+/// The panel's exterior shadow alone, drawn again over a pane pool's composite.
+///
+/// A composite repaints its region opaque outside the boxes it leaves to the
+/// live grid. Inside such a box the live grid still holds the shadow the under
+/// pass drew, so this draw passes it and nothing darkens twice. A later box
+/// hides the shadow here as it hides it in the under pass, which keeps the
+/// shadow off a later box that a pool paints over.
+@fragment
+fn fs_shadow(in: VsOut) -> @location(0) vec4<f32> {
+    if occluded(in.clip.xy, in.instance) || boxed(in.clip.xy) {
+        discard;
+    }
+    let shadow = coverage_of(in).shadow;
+    if shadow <= 0.0 {
+        discard;
+    }
+    return vec4<f32>(SHADOW_COLOR, shadow);
 }
 
 /// The panel's frame stroke alone, so it can be recorded above the text the

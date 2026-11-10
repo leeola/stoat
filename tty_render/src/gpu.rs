@@ -628,6 +628,7 @@ impl Renderer {
                     self.record_pool(&mut render_pass, scissor, pool.id, slot);
                 }
             }
+            self.record_pool_shadows(&mut render_pass, pools);
             self.record_riding_panels(&mut render_pass);
             for (slot, pool) in pools.iter().enumerate() {
                 if !pool.occludable
@@ -823,6 +824,31 @@ impl Renderer {
         self.panel.draw_riding_under(render_pass);
         self.sketch.draw_riding(render_pass);
         self.text.draw_riding_text_runs(render_pass);
+        render_pass.set_scissor_rect(0, 0, self.width, self.height);
+    }
+
+    /// Record the panels' exterior shadows again over each grid pane pool's
+    /// composite in `pools`, outside every box the composite leaves to the live
+    /// grid.
+    ///
+    /// [`Self::record_frame`] drew every shadow beneath the composites, which
+    /// repaint their regions opaque. A terminal pool leaves its cells of the
+    /// clear color undrawn, where the first shadow still shows, so it takes no
+    /// second draw. Run after the pane composites and before the riding panels,
+    /// which land over these shadows. Leaves the full-surface scissor set.
+    pub(crate) fn record_pool_shadows(
+        &self,
+        render_pass: &mut RenderPass<'_>,
+        pools: &[PoolComposite<'_>],
+    ) {
+        for pool in pools
+            .iter()
+            .filter(|pool| pool.occludable && !pool.skip_clear)
+        {
+            if let Some(scissor) = self.pool_scissor(pool.scissor) {
+                self.panel.draw_shadows_over(render_pass, scissor);
+            }
+        }
         render_pass.set_scissor_rect(0, 0, self.width, self.height);
     }
 
@@ -2417,6 +2443,7 @@ impl GpuContext {
                         .record_pool(&mut render_pass, scissor, pool.id, slot);
                 }
             }
+            self.renderer.record_pool_shadows(&mut render_pass, pools);
             self.renderer.record_riding_panels(&mut render_pass);
             for (slot, pool) in pools.iter().enumerate() {
                 if !pool.occludable

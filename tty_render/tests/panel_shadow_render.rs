@@ -9,6 +9,7 @@
 
 use stoatty_protocol::command::Edge;
 use stoatty_render::{
+    gpu::{HostRide, PoolComposite},
     render::cell_size,
     test_support::{
         self, offscreen_target, pixel, read_back, require_headless_device, still_frame,
@@ -50,6 +51,20 @@ fn render_panel(build: impl FnOnce(usize, usize) -> Panel) -> Rendered {
 /// Render the chrome `build` puts on the grid over the clear at `scale_factor`,
 /// and read the pixels back.
 fn render_scene(scale_factor: f32, build: impl FnOnce(&mut Grid, usize, usize)) -> Rendered {
+    render_scene_over(scale_factor, None, build)
+}
+
+/// [`render_scene`] with `pool` composited over the live grid.
+///
+/// A pool is one grid pane pool across the whole surface, of cells in the
+/// color it names. With its flag set, its composite leaves the cells of the
+/// clear color undrawn, as a terminal pool's does. A panel anchored to host 0
+/// rides the pool with no shift.
+fn render_scene_over(
+    scale_factor: f32,
+    pool: Option<(Rgb, bool)>,
+    build: impl FnOnce(&mut Grid, usize, usize),
+) -> Rendered {
     let (device, queue) = require_headless_device();
 
     let font_size = 24;
@@ -65,21 +80,46 @@ fn render_scene(scale_factor: f32, build: impl FnOnce(&mut Grid, usize, usize)) 
     let (rows, cols) = renderer.grid_size();
     assert!(rows >= 5 && cols >= 6, "grid too small: {rows}x{cols}");
 
-    let mut grid = Grid::new(rows, cols);
-    for r in 0..rows {
-        for c in 0..cols {
-            grid.get_mut(r, c).bg = surface;
+    let filled = |color: Rgb| {
+        let mut grid = Grid::new(rows, cols);
+        for r in 0..rows {
+            for c in 0..cols {
+                grid.get_mut(r, c).bg = color;
+            }
         }
-    }
+        grid
+    };
+    let mut grid = filled(surface);
     build(&mut grid, rows, cols);
 
-    renderer.render_into(
-        &device,
-        &queue,
-        &view,
-        &grid,
-        still_frame(&Damage::Full, &Damage::Partial(Vec::new())),
-    );
+    let (full, partial) = (Damage::Full, Damage::Partial(Vec::new()));
+    let frame = still_frame(&full, &partial);
+    match pool {
+        None => renderer.render_into(&device, &queue, &view, &grid, frame),
+        Some((color, skip_clear)) => {
+            let pool_grid = filled(color);
+            let pool = PoolComposite {
+                id: 0,
+                grid: &pool_grid,
+                font_size: None,
+                origin_cells: [0.0; 2],
+                scissor: [0, 0, width, height],
+                shift_rows: 0.0,
+                content_changed: true,
+                scrolled_rows: None,
+                occludable: true,
+                skip_clear,
+                changed_rows: None,
+                dim: 0.0,
+            };
+            let ride = HostRide {
+                host: 0,
+                top_rows: 0.0,
+                scissor: [0, 0, width, height],
+            };
+            renderer.render_pools_into(&device, &queue, &view, &grid, frame, &[pool], &[ride]);
+        },
+    }
 
     let pixels = read_back(&device, &queue, &target, width, height);
     Rendered {
@@ -166,26 +206,7 @@ fn unfilled_panel_shadow_stays_outside_the_box() {
 /// ground shows over the box and beside its sides.
 #[test]
 fn a_cast_shadow_falls_under_the_box_alone() {
-    let r = render_panel(|_, cols| Panel {
-        top: 1,
-        left: 1,
-        width: cols as u16 - 3,
-        height: 2,
-        style: BorderStyle::None_,
-        border: Rgb::new(200, 100, 50),
-        corner_radius: 0,
-        fill: None,
-        shadow: PanelShadow::Cast,
-        edges: Edge::symmetric(0, 0),
-        corners: 0,
-        fillets: 0,
-        fillet_radius: 2,
-        hatch: None,
-        above_pools: false,
-        backdrop: false,
-        anchor: None,
-        seq: 0,
-    });
+    let r = render_panel(|_, cols| unframed(cols as u16 - 3, PanelShadow::Cast));
     let [left, right] = [1.0, r.cols as f32 - 2.0].map(|col| (col * r.cell[0]) as u32);
     let [top, bottom] = [1.0, 3.0].map(|row| (row * r.cell[1]) as u32);
     let middle = (left + right) / 2;
@@ -210,6 +231,120 @@ fn a_cast_shadow_falls_under_the_box_alone() {
             .all(|(&got, &ground)| got.abs_diff(ground) <= 1),
         "far under the box, over it, and beside its sides the ground shows, got {grounds:?}"
     );
+}
+
+/// A panel's exterior shadow falls on a pane pool's composite as it falls on
+/// the live grid.
+///
+/// The shadowless box comes first in the list, so the drop shadow beside it is
+/// not occluded inside it. The live grid there holds one shadow, which the
+/// composite leaves in place, and the pooled frame matches the frame with no
+/// pool there, one shadow and not two. A pool paints over the box of a
+/// backdrop and of a panel that rides it, so the shadow falls inside an
+/// earlier one of each, and a later backdrop hides it as it does on the live
+/// grid. A terminal pool leaves its cells of the clear color to the live grid,
+/// so its frame takes no second shadow.
+#[test]
+fn a_panel_shadow_falls_on_a_pane_pool_composite() {
+    let pool = Rgb::new(60, 140, 200);
+    let surface = Rgb::new(SURFACE[0], SURFACE[1], SURFACE[2]);
+    let backdrop = |left| Panel {
+        top: 3,
+        left,
+        height: 1,
+        backdrop: true,
+        ..unframed(1, PanelShadow::None_)
+    };
+    let panels = [
+        Panel {
+            anchor: Some((0, 0.0)),
+            backdrop: false,
+            ..backdrop(4)
+        },
+        backdrop(1),
+        Panel {
+            left: 4,
+            ..unframed(2, PanelShadow::None_)
+        },
+        unframed(3, PanelShadow::Drop),
+        backdrop(3),
+    ];
+    let build = |grid: &mut Grid, _: usize, _: usize| grid.set_panels(panels.to_vec());
+    let [plain, pooled, terminal] = [None, Some((pool, false)), Some((surface, true))]
+        .map(|pool| render_scene_over(1.0, pool, build));
+
+    let [cell_w, cell_h] = plain.cell;
+    let under_at = |col: f32| ((col * cell_w) as u32, (3.0 * cell_h) as u32 + 4);
+    let (early, under, late, riding) = (under_at(1.5), under_at(2.5), under_at(3.5), under_at(4.2));
+    let inside = ((4.0 * cell_w) as u32 + 3, (2.0 * cell_h) as u32);
+    let away = (plain.width - 20, (6.0 * cell_h) as u32);
+    let at = |r: &Rendered, (x, y): (u32, u32)| r.px(x, y);
+    let darker = |got: [u8; 3], than: [u8; 3]| got.iter().zip(than).all(|(&c, t)| c < t);
+    let near = |got: [u8; 3], want: [u8; 3]| got.iter().zip(want).all(|(&c, w)| c.abs_diff(w) <= 1);
+    let pool_rgb = [pool.r, pool.g, pool.b];
+
+    assert!(
+        darker(at(&pooled, under), pool_rgb),
+        "the shadow darkens the composite under the box, got {:?}",
+        at(&pooled, under)
+    );
+    assert!(
+        near(at(&pooled, away), pool_rgb),
+        "far from both boxes the composite shows, got {:?}",
+        at(&pooled, away)
+    );
+    assert!(
+        darker(at(&plain, inside), SURFACE),
+        "the shadow reaches inside the shadowless box, got {:?}",
+        at(&plain, inside)
+    );
+    assert!(
+        near(at(&pooled, inside), at(&plain, inside)),
+        "inside the shadowless box one shadow shows and not two, got {:?} over {:?}",
+        at(&pooled, inside),
+        at(&plain, inside)
+    );
+    assert!(
+        darker(at(&pooled, early), pool_rgb)
+            && darker(at(&pooled, riding), pool_rgb)
+            && near(at(&pooled, late), pool_rgb),
+        "the shadow falls in the earlier backdrop and the riding box and not in the later \
+         backdrop, got {:?}, {:?}, and {:?}",
+        at(&pooled, early),
+        at(&pooled, riding),
+        at(&pooled, late)
+    );
+    assert!(
+        near(at(&terminal, under), at(&plain, under)),
+        "a terminal pool takes no second shadow, got {:?} over {:?}",
+        at(&terminal, under),
+        at(&plain, under)
+    );
+}
+
+/// An unfilled, unframed panel two rows tall at row 1 and column 1, `width`
+/// cells wide, that casts `shadow`.
+fn unframed(width: u16, shadow: PanelShadow) -> Panel {
+    Panel {
+        top: 1,
+        left: 1,
+        width,
+        height: 2,
+        style: BorderStyle::None_,
+        border: Rgb::new(200, 100, 50),
+        corner_radius: 0,
+        fill: None,
+        shadow,
+        edges: Edge::symmetric(0, 0),
+        corners: 0,
+        fillets: 0,
+        fillet_radius: 2,
+        hatch: None,
+        above_pools: false,
+        backdrop: false,
+        anchor: None,
+        seq: 0,
+    }
 }
 
 #[test]

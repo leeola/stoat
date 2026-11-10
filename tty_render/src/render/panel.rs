@@ -72,13 +72,22 @@ const SHADOW_OFFSET_CAST: [f32; 2] = [0.0, 4.0];
 /// logical pixel sigma that the boards' 8 px CSS blur stands for.
 const SHADOW_MARGIN_CAST: f32 = 12.0;
 
+/// The bit of an instance's shape word that marks a panel no pane pool takes
+/// as an occluder, which a backdrop and a panel riding a pool this frame are.
+///
+/// A pool's composite paints over such a panel's box, so the shadow drawn
+/// again over the composite falls inside it too. The shader's `PASSES_POOLS`
+/// reads the same bit.
+const PASSES_POOLS: u32 = 1 << 6;
+
 /// The per-panel instance data. Carries the anchor cell, the size in cells, the
 /// fill and stroke colors, the shadow displacement and blur radius, the corner
 /// radius, a flag selecting how the fill paints, the border style code, the
 /// shadow mode (0 drop, 1 tucked, 2 overhang, 3 halo, 4 cast), the shape bits
-/// (the rounded corners in bits 0-3 and the fillets in bits 4-5), the hatch
-/// color with a flag selecting whether it draws, each edge's pixels with the
-/// packed edge modes, and the fillet radius.
+/// (the rounded corners in bits 0-3, the fillets in bits 4-5, and
+/// [`PASSES_POOLS`] in bit 6), the hatch color with a flag selecting whether
+/// it draws, each edge's pixels with the packed edge modes, and the fillet
+/// radius.
 ///
 /// The fill flag is 0 for no fill and 1 for a fill. A backdrop's fill takes 2,
 /// which paints the fill only outside the panel's own cells.
@@ -128,6 +137,12 @@ pub struct PanelPass {
     pipeline_under: RenderPipeline,
     /// The frame stroke alone, so it can be recorded above that text.
     pipeline_stroke: RenderPipeline,
+    /// The exterior shadow alone, recorded again over a pane pool's composite,
+    /// which paints over the shadow the under pass drew.
+    pipeline_shadow: RenderPipeline,
+    /// Whether a panel that rides no pool casts an exterior shadow this frame,
+    /// so the shadow draw over a composite has anything to draw.
+    casts: bool,
     bind_group_layout: BindGroupLayout,
     globals: Buffer,
     bind_group: BindGroup,
@@ -251,6 +266,9 @@ impl PanelPass {
         };
         let pipeline_under = build("panel under", "vs_under", "fs_under");
         let pipeline_stroke = build("panel stroke", "vs_stroke", "fs_stroke");
+        // The stroke's vertex stage draws the four bands around the box, which
+        // hold every pixel an exterior shadow reaches.
+        let pipeline_shadow = build("panel shadow", "vs_stroke", "fs_shadow");
 
         let globals = device.create_buffer(&BufferDescriptor {
             label: Some("panel globals"),
@@ -265,6 +283,8 @@ impl PanelPass {
         PanelPass {
             pipeline_under,
             pipeline_stroke,
+            pipeline_shadow,
+            casts: false,
             bind_group_layout,
             globals,
             bind_group,
@@ -329,8 +349,20 @@ impl PanelPass {
             };
             self.built[index].cell[1] +=
                 ride.shift_px(top_rows, self.metrics.height) / self.metrics.height;
+            self.built[index].shape |= PASSES_POOLS;
             self.riding.push((index as u32, ride.scissor));
         }
+        self.casts = grid.panels().iter().enumerate().any(|(index, panel)| {
+            let exterior = matches!(
+                panel.shadow,
+                PanelShadow::Drop | PanelShadow::Halo | PanelShadow::Cast
+            );
+            exterior
+                && !self
+                    .riding
+                    .iter()
+                    .any(|&(ridden, _)| ridden == index as u32)
+        });
 
         self.count = self.built.len() as u32;
 
@@ -380,6 +412,24 @@ impl PanelPass {
     /// text the frame surrounds while the rest stays below it.
     pub fn draw_stroke(&self, render_pass: &mut RenderPass<'_>) {
         self.draw_slots(render_pass, &self.pipeline_stroke);
+    }
+
+    /// Record the exterior shadow of every non-riding panel again, clipped to
+    /// `scissor`, the region of a pane pool composited over the live grid.
+    ///
+    /// The composite repaints its region opaque, so the shadow that
+    /// [`Self::draw_under`] drew there shows nowhere in it. This draw lands
+    /// outside every box the composite leaves to the live grid, where the first
+    /// shadow still shows, and outside every later box, as the first draw does.
+    /// A no-op on a frame where no such panel casts an exterior shadow. Leaves
+    /// `scissor` set.
+    pub(crate) fn draw_shadows_over(&self, render_pass: &mut RenderPass<'_>, scissor: [u32; 4]) {
+        let [x, y, width, height] = scissor;
+        if !self.casts || width == 0 || height == 0 {
+            return;
+        }
+        render_pass.set_scissor_rect(x, y, width, height);
+        self.draw_slots(render_pass, &self.pipeline_shadow);
     }
 
     fn draw_slots(&self, render_pass: &mut RenderPass<'_>, pipeline: &RenderPipeline) {
@@ -530,7 +580,9 @@ fn build_panel_instances_into(panels: &[Panel], scale_factor: f32, out: &mut Vec
             },
             style: style_code(panel.style),
             shadow_mode,
-            shape: u32::from(corner_mask(panel.corners)) | u32::from(panel.fillets & 0b11) << 4,
+            shape: u32::from(corner_mask(panel.corners))
+                | u32::from(panel.fillets & 0b11) << 4
+                | if panel.backdrop { PASSES_POOLS } else { 0 },
             hatch: panel.hatch.map(rgb_f32).unwrap_or([0.0, 0.0, 0.0]),
             hatch_flag: if panel.hatch.is_some() { 1.0 } else { 0.0 },
             edge_px: panel.edges.map(|edge| physical(edge.px())),
