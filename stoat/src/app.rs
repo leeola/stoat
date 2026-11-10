@@ -15,6 +15,7 @@ use crate::{
     },
     command_palette::CommandPalette,
     debounce,
+    diff_changes::{REVEAL_FADE, REVEAL_HOLD},
     display_map::syntax_theme::SyntaxStyles,
     editor_state::{EditorId, ScrollGlide},
     emoji_expand,
@@ -4610,15 +4611,22 @@ impl Stoat {
     /// Whether an in-flight animation needs a per-frame tick.
     ///
     /// True while any editor of the active workspace is mid scroll-glide, and
-    /// while any workspace holds a reload flash that has not faded out. OR each
-    /// new animation source's condition in here, so that [`Self::run`]'s frame
-    /// timer covers it.
+    /// while [`Self::is_flashing`] holds. OR each new animation source's
+    /// condition in here, so that [`Self::run`]'s frame timer covers it.
     fn is_animating(&self) -> bool {
-        self.is_gliding()
-            || self
-                .workspaces
-                .values()
-                .any(|ws| !ws.reload_flashes.is_empty())
+        self.is_gliding() || self.is_flashing()
+    }
+
+    /// Whether any workspace holds a reload flash, or any editor a reveal
+    /// flash, that has not faded out.
+    fn is_flashing(&self) -> bool {
+        self.workspaces.values().any(|ws| {
+            !ws.reload_flashes.is_empty()
+                || ws
+                    .editors
+                    .values()
+                    .any(|editor| !editor.reveal_flashes.is_empty())
+        })
     }
 
     /// Whether any editor of the active workspace is mid scroll-glide.
@@ -4639,10 +4647,10 @@ impl Stoat {
     /// then merges in a repaint, so streamed output paces to one repaint per
     /// frame rather than one per PTY chunk.
     ///
-    /// A reload flash merges in a repaint on every tick until it fades out, so
-    /// its wash steps at frame rate. A stoatty glide takes that repaint too,
-    /// because the wash paints on the live grid alone, and the flash resumes
-    /// there once the glide settles.
+    /// A reload flash or a reveal flash merges in a repaint on every tick until
+    /// it fades out, so its wash or mark steps at frame rate. A stoatty glide
+    /// takes that repaint too, because the wash paints on the live grid alone,
+    /// and the flash resumes there once the glide settles.
     fn frame_tick(&mut self, dt: f32) -> UpdateEffect {
         let gliding = self.is_gliding();
         let building = self.minimap_build_pending;
@@ -4668,7 +4676,7 @@ impl Stoat {
             UpdateEffect::None
         };
 
-        let effect = match self.tick_reload_flashes(dt) {
+        let effect = match self.tick_flashes(dt) {
             true => effect.merge(UpdateEffect::Redraw),
             false => effect,
         };
@@ -4693,12 +4701,13 @@ impl Stoat {
         }
     }
 
-    /// Age every workspace's reload flashes by `dt` seconds and drop the ones
-    /// whose fade ended, answering whether any flash was live before the step.
+    /// Age every workspace's reload flashes and every editor's reveal flashes
+    /// by `dt` seconds and drop the ones whose fade ended, answering whether
+    /// any flash was live before the step.
     ///
     /// The step that drops the last flash still answers true, so the frame
-    /// after it repaints the text without the wash.
-    fn tick_reload_flashes(&mut self, dt: f32) -> bool {
+    /// after it repaints the text without the wash or the mark.
+    fn tick_flashes(&mut self, dt: f32) -> bool {
         let mut live = false;
         for ws in self.workspaces.values_mut() {
             live |= !ws.reload_flashes.is_empty();
@@ -4707,6 +4716,16 @@ impl Stoat {
             }
             ws.reload_flashes
                 .retain(|flash| flash.age < FLASH_HOLD + FLASH_FADE);
+
+            for editor in ws.editors.values_mut() {
+                live |= !editor.reveal_flashes.is_empty();
+                for flash in &mut editor.reveal_flashes {
+                    flash.age += dt;
+                }
+                editor
+                    .reveal_flashes
+                    .retain(|flash| flash.age < REVEAL_HOLD + REVEAL_FADE);
+            }
         }
         live
     }
@@ -10080,20 +10099,16 @@ pub(crate) fn deliver_window_event(stoat: &mut Stoat, event: WindowIpcEvent) -> 
     stoat.handle_window_ipc(WindowIpc::Event(event))
 }
 
-/// Step the scroll glides and the reload flashes by `dt` seconds, reporting
-/// whether either still runs.
+/// Step the scroll glides and the flashes by `dt` seconds, reporting whether
+/// any still runs.
 #[cfg(test)]
 pub(crate) fn tick_animation(stoat: &mut Stoat, dt: f32) -> bool {
     let gliding = stoat.tick_scroll_anim(dt);
-    stoat.tick_reload_flashes(dt);
-    gliding
-        || stoat
-            .workspaces
-            .values()
-            .any(|ws| !ws.reload_flashes.is_empty())
+    stoat.tick_flashes(dt);
+    gliding || stoat.is_flashing()
 }
 
-/// Whether any scroll glide or reload flash is still running.
+/// Whether any scroll glide, reload flash, or reveal flash is still running.
 #[cfg(test)]
 pub(crate) fn animating(stoat: &Stoat) -> bool {
     stoat.is_animating()

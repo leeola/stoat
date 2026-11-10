@@ -209,6 +209,7 @@ pub(crate) fn render_page_decorations(
             gutter
                 .current_line
                 .map_or(BufferNumbering::Absolute, BufferNumbering::FromLine),
+            &[],
             None,
             None,
             false,
@@ -305,6 +306,7 @@ pub(crate) fn render_page_from_snapshot(
             gutter
                 .current_line
                 .map_or(BufferNumbering::Absolute, BufferNumbering::FromLine),
+            &[],
             None,
             None,
             false,
@@ -1578,6 +1580,7 @@ mod tests {
             0.0,
             DiffDials::shipped(),
             BufferNumbering::Absolute,
+            &[],
             None,
             None,
             false,

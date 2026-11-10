@@ -1172,7 +1172,7 @@ mod tests {
         app::UpdateEffect,
         buffer::BufferId,
         buffer_lifecycle,
-        diff_changes::{self, DiffChangesId, DiffChangesState, StackStamp},
+        diff_changes::{self, DiffChangesId, DiffChangesState, RevealFlash, StackStamp},
         diff_map::{DiffHunk, DiffHunkStatus, DiffMap, TokenDetail},
         display_map::{DisplayPoint, InlayPoint},
         editor_state::EditorId,
@@ -2058,6 +2058,22 @@ mod tests {
         assert_eq!(
             (shown_rows(&mut h), h.stoat.focused_mode()),
             (rows_of(&[0..=0, 27..=43, 44..=44]), "normal"),
+        );
+    }
+
+    /// An expand marks the rows it opened on the excerpt's editor, so they
+    /// stand out for a moment.
+    #[test]
+    fn an_expand_marks_the_opened_rows_for_a_moment() {
+        let mut h = folded_long_files();
+        act(&mut h, &stoat_action::DiffChangesExpandUp);
+        let editor = focused_editor_mut(&mut h.stoat).expect("a focused excerpt");
+        assert_eq!(
+            editor.reveal_flashes,
+            vec![RevealFlash {
+                rows: 27..37,
+                age: 0.0
+            }],
         );
     }
 

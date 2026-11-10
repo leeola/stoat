@@ -606,7 +606,8 @@ fn terminal_cache_key(
 /// paint leaves. An empty stack paints one line of text, and goto-word labels
 /// over the focused excerpt last a jump's few frames, so neither gets a key.
 /// Nor does a window that shows an excerpt a reload flash washes, as in
-/// [`pane_cache_key`].
+/// [`pane_cache_key`], or an excerpt whose expand still marks the rows it
+/// opened.
 ///
 /// A bare cursor that the terminal draws paints no cell, so its key leaves the
 /// selections out, and a move of it inside the window replays the pane. The
@@ -672,6 +673,9 @@ fn stack_cache_key(
             return None;
         }
         let shown = editors.get_mut(excerpt.editor_id)?;
+        if !shown.reveal_flashes.is_empty() {
+            return None;
+        }
         (
             excerpt.buffer_id,
             excerpt.top,

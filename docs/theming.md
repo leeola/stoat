@@ -311,6 +311,9 @@ The typed UI scopes, by group (syntax scopes are open-ended):
   `diff.fold`'s colors.
 - `diff.fold.range` -- the foreground of a fold row's line range at the row's
   right, the first and the last line the fold hides.
+- `diff.reveal` -- the mark on the rows an expand just opened in the changes
+  view: a lane at each side's left edge (foreground) over a tint across the
+  row (background). The mark holds for 0.6 s and then fades out over 0.4 s.
 - `diff.absent` -- the fill (background) of a split diff row's empty half,
   where the row holds a line on the other side alone: a removed line's live
   half, or an added line's base half. A foreground hatches it as

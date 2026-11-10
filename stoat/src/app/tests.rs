@@ -10,7 +10,7 @@ use crate::{
     badge::{Anchor as BadgeAnchor, Badge, BadgeSource, BadgeState},
     commit_list::CommitListState,
     debounce::{FS_WATCH_DEBOUNCE, INDEX_EDIT_DEBOUNCE},
-    diff_changes::{DiffChangesState, Excerpt},
+    diff_changes::{DiffChangesState, Excerpt, RevealFlash},
     display_map::{DisplayPoint, PaintVersion},
     editor_state::EditorState,
     host::{FsEventKind, LspNotification},
@@ -4563,6 +4563,37 @@ fn a_reload_flash_repaints_each_tick_until_it_clears() {
             UpdateEffect::Redraw,
             UpdateEffect::None
         ],
+    );
+}
+
+/// A reveal flash keeps the frame timer running and repaints on every tick,
+/// the tick that drops it included, so its mark clears. The tick after it
+/// repaints nothing, and the timer stops.
+#[test]
+fn a_reveal_flash_repaints_each_tick_until_its_mark_clears() {
+    let mut h = Stoat::test();
+    action_handlers::focused_editor_mut(&mut h.stoat)
+        .expect("a focused editor")
+        .reveal_flashes
+        .push(RevealFlash {
+            rows: 0..1,
+            age: 0.0,
+        });
+
+    let before = h.stoat.is_animating();
+    let ticks = [0.5, 0.25, 0.25, 0.1].map(|dt| h.stoat.frame_tick(dt));
+    assert_eq!(
+        (before, ticks, h.stoat.is_animating()),
+        (
+            true,
+            [
+                UpdateEffect::Redraw,
+                UpdateEffect::Redraw,
+                UpdateEffect::Redraw,
+                UpdateEffect::None
+            ],
+            false,
+        ),
     );
 }
 

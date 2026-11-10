@@ -1,6 +1,7 @@
 use crate::{
     buffer::{BufferId, SharedBuffer},
     conflict_session::ConflictViewState,
+    diff_changes::RevealFlash,
     display_map::{CachedHighlightEndpoints, DisplayMap},
     multi_buffer::MultiBuffer,
     selection::SelectionsCollection,
@@ -214,6 +215,10 @@ pub(crate) struct EditorState {
     /// of shares, so the text column lines up down the stack. `None` for an
     /// editor that sizes its diff gutter from its own buffer.
     pub(crate) stack_gutter_digits: Option<u16>,
+    /// The marks on the rows the expands of a changes view opened in this
+    /// excerpt editor, each until its fade ends. Empty for any other editor.
+    /// Transient render state, not persisted.
+    pub(crate) reveal_flashes: Vec<RevealFlash>,
     /// Screen rect of the right-edge minimap strip the last render reserved,
     /// so pointer handlers can map a click inside it back to a buffer line.
     ///
@@ -305,6 +310,7 @@ impl EditorState {
             diagnostic_paint_scratch: Default::default(),
             gutter_width: 0,
             stack_gutter_digits: None,
+            reveal_flashes: Vec::new(),
             minimap_rect: None,
             text_rect: None,
             cursor_screen_cell: None,

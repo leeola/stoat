@@ -3508,9 +3508,11 @@ pub(crate) fn editor_page_content_version(
 /// The cells version of every page of a changes view's pool.
 ///
 /// It folds in the frame's inputs, and each excerpt's place in the stack and
-/// the versions of its text, folds, and diff. Which excerpt holds the focus,
-/// its selections, and its goto labels stay out, since a change of them reaches
-/// the pages it touches as row patches.
+/// the versions of its text, folds, and diff. It also folds in the rows and
+/// the strength of each reveal mark, so a fading mark refills its pages at
+/// each step. Which excerpt holds the focus, its selections, and its goto
+/// labels stay out, since a change of them reaches the pages it touches as row
+/// patches.
 ///
 /// See also:
 /// - [`painted_selection`] for the stamp those patches follow.
@@ -3545,6 +3547,9 @@ fn stack_page_version(
             editor.display_map.diff_version(),
         )
             .hash(&mut hasher);
+        for flash in &editor.reveal_flashes {
+            (&flash.rows, (flash.strength() * 255.0) as u8).hash(&mut hasher);
+        }
     }
     hasher.finish()
 }

@@ -949,6 +949,10 @@ pub mod scope {
     /// The foreground of a fold row's line range, the first and the last line
     /// the fold hides, at the row's right.
     pub const DIFF_FOLD_RANGE: &str = "diff.fold.range";
+    /// The mark on the rows an expand just opened, a lane at each side's left
+    /// edge (foreground) over a tint across the row (background). Both fade
+    /// out together.
+    pub const DIFF_REVEAL: &str = "diff.reveal";
     /// The fill of a split diff row's empty half, where the row holds a line
     /// on the other side alone, such as a removed line's live half.
     ///

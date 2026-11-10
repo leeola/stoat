@@ -6,7 +6,7 @@ use super::{
 use crate::{
     app::Stoat,
     auto_reload::ReloadFlash,
-    diff_changes::{self, FOLD_BUTTON_GAP, FOLD_BUTTON_MARGIN, FOLD_BUTTON_WIDTH},
+    diff_changes::{self, RevealFlash, FOLD_BUTTON_GAP, FOLD_BUTTON_MARGIN, FOLD_BUTTON_WIDTH},
     diff_map::{ChangeKind, DiffHunk, DiffHunkStatus, DiffMap, GutterMark, MarkState, ProseChange},
     display_map::{
         highlights::HighlightStyle, syntax_theme::DiffTheme, tab_map, BaseLineLayout, Block,
@@ -129,6 +129,11 @@ const BASE_FRAME_RULE_GAP: u16 = 1;
 /// column's middle, in sixteenths of a cell from its left edge.
 const DIVIDER_RULE_X: u16 = 8;
 
+/// Width of the lane that marks a row an expand just opened, in sixteenths of
+/// a cell. One board px is two sixteenths across, so the ExpandFlow board's
+/// 2 px lane takes 4.
+const REVEAL_LANE_WIDTH: u16 = 4;
+
 /// Fraction a changed char's foreground shifts toward its status color at
 /// `level`.
 ///
@@ -239,7 +244,9 @@ impl DiffDials {
 /// the primary cursor, so the paint leaves that cell to it.
 ///
 /// Focused or not, the right column washes the buffer's entries of
-/// `reload_flashes` over the text they changed, under the selections.
+/// `reload_flashes` over the text they changed, under the selections. The rows
+/// an expand just opened carry the editor's reveal marks, as
+/// [`paint_diff_rows`] paints them.
 ///
 /// With `decorations_only` the paint fills `scene` with the rich gutter alone,
 /// as [`paint_diff_rows`] describes, and paints no flash, selection, or label.
@@ -295,6 +302,7 @@ pub(crate) fn render_diff_view(
         0.0,
         dials,
         numbering,
+        &editor.reveal_flashes,
         Some(&mut editor.highlight_endpoint_cache),
         Some(&mut editor.diff_row_cache),
         decorations_only,
@@ -1049,6 +1057,10 @@ fn divider_x(inner: Rect) -> u16 {
 /// behind it. A pooled page has no editor at all and passes `None` for both,
 /// resolving its endpoints and row state fresh.
 ///
+/// `reveals` are the marks of a changes view excerpt's recent expands. A row
+/// whose buffer row a mark holds takes the mark, as [`paint_reveal_mark`]
+/// paints it, at the strongest of the marks that hold it.
+///
 /// With `decorations_only`, the paint puts the rich gutter's numbers, status
 /// bars, and rules into `scene` and paints no text, for a page whose cells the
 /// terminal keeps. It resolves no highlight endpoints then. An ASCII gutter
@@ -1066,6 +1078,7 @@ pub(crate) fn paint_diff_rows(
     dim: f32,
     dials: DiffDials,
     numbering: BufferNumbering,
+    reveals: &[RevealFlash],
     endpoint_cache: Option<&mut Option<CachedHighlightEndpoints>>,
     row_cache: Option<&mut Option<DiffRowCache>>,
     decorations_only: bool,
@@ -1133,6 +1146,14 @@ pub(crate) fn paint_diff_rows(
         .filter(|_| sep_x.is_some() && !decorations_only);
 
     let tints = resolve_diff_tints(theme);
+    // A cell with no background of its own blends the mark against the row
+    // background the rich gutter resolves.
+    let reveal_colors = (!reveals.is_empty()).then(|| {
+        let row_bg = fallback_style
+            .bg
+            .or_else(|| theme.try_get(s::UI_BACKGROUND).and_then(|st| st.bg));
+        (theme.get(s::DIFF_REVEAL), style_rgb(row_bg))
+    });
     let base_changes = snapshot
         .diff_map()
         .map(|dm| dm.base_change_spans())
@@ -1563,6 +1584,24 @@ pub(crate) fn paint_diff_rows(
                     }
                     hatch_cells(&mut rich, absent.hatch, inner, (left_x, sep), y);
                 }
+
+                let strength = reveals
+                    .iter()
+                    .filter(|flash| flash.rows.contains(&buffer_row))
+                    .map(RevealFlash::strength)
+                    .fold(0.0, f32::max);
+                if let Some(colors) = reveal_colors.filter(|_| strength > 0.0) {
+                    paint_reveal_mark(
+                        &mut rich,
+                        buf,
+                        inner,
+                        [Some(left_x), sep_x.map(|_| right_x)],
+                        y,
+                        strength,
+                        colors,
+                        decorations_only,
+                    );
+                }
             },
         }
     }
@@ -1827,6 +1866,69 @@ fn paint_fold_controls(
             }
         },
         None => {},
+    }
+}
+
+/// Mark screen row `y` of `inner` as a row an expand just opened, at
+/// `strength` of the mark's full color.
+///
+/// Unless `decorations_only`, every cell's background blends toward `reveal`'s
+/// background. A cell with no background of its own blends against the row
+/// background `row_bg`, and a cell with neither keeps its own.
+///
+/// Each side whose left column `sides` names takes a lane in `reveal`'s
+/// foreground. The lane blends toward the tinted row as the mark fades, so it
+/// leaves with the tint. A rich gutter draws it as a bar
+/// [`REVEAL_LANE_WIDTH`] sixteenths wide, faded as the gutter's colors are. In
+/// cells the side's first cell takes it as its background.
+#[allow(clippy::too_many_arguments)]
+fn paint_reveal_mark(
+    rich: &mut Option<DiffRichGutter<'_>>,
+    buf: &mut Buffer,
+    inner: Rect,
+    sides: [Option<u16>; 2],
+    y: u16,
+    strength: f32,
+    (reveal, row_bg): (Style, Option<[u8; 3]>),
+    decorations_only: bool,
+) {
+    let tint = style_rgb(reveal.bg);
+    if let Some(tint) = tint.filter(|_| !decorations_only) {
+        for x in inner.x..inner.x + inner.width {
+            let cell = &mut buf[(x, y)];
+            if let Some(bg) = style_rgb(cell.style().bg).or(row_bg) {
+                let [r, g, b] = dim_rgb(bg, tint, strength);
+                cell.set_bg(Color::Rgb(r, g, b));
+            }
+        }
+    }
+
+    let Some(lane) = style_rgb(reveal.fg) else {
+        return;
+    };
+    let ground = match (row_bg, tint) {
+        (Some(bg), Some(tint)) => dim_rgb(bg, tint, strength),
+        (bg, tint) => bg.or(tint).unwrap_or(lane),
+    };
+    let lane = dim_rgb(lane, ground, 1.0 - strength);
+    for x in sides.into_iter().flatten() {
+        match rich {
+            Some(rg) => rg.bars.push(
+                inner,
+                Bar {
+                    x: ((x - inner.x) * 16) as i16,
+                    y: ((y - inner.y) * 16) as i16,
+                    width: REVEAL_LANE_WIDTH,
+                    height: 16,
+                    color: rg.colors.faded(lane),
+                },
+            ),
+            None if !decorations_only => {
+                let [r, g, b] = lane;
+                buf[(x, y)].set_bg(Color::Rgb(r, g, b));
+            },
+            None => {},
+        }
     }
 }
 
@@ -4681,22 +4783,30 @@ mod tests {
         row.into_iter().collect()
     }
 
-    /// [`fold_row_editor`] painted with a rich gutter over 120 by 10 under the
-    /// settings `theme_src` adds, its cells too unless `decorations_only`.
-    ///
-    /// Answers the cells, the scene's commands, the scale the gutter's numbers
-    /// take, and the columns the paint lays out.
+    /// [`fold_row_editor`] painted as [`rich_paint`] paints an editor.
     fn rich_fold_row_paint(
         theme_src: &str,
         decorations_only: bool,
     ) -> (Buffer, Vec<Command>, u16, DiffColumns) {
-        let mut editor = fold_row_editor();
+        rich_paint(&mut fold_row_editor(), theme_src, decorations_only)
+    }
+
+    /// `editor` painted with a rich gutter over 120 by 10 under the settings
+    /// `theme_src` adds, its cells too unless `decorations_only`.
+    ///
+    /// Answers the cells, the scene's commands, the scale the gutter's numbers
+    /// take, and the columns the paint lays out.
+    fn rich_paint(
+        editor: &mut EditorState,
+        theme_src: &str,
+        decorations_only: bool,
+    ) -> (Buffer, Vec<Command>, u16, DiffColumns) {
         let theme = rgb_diff_theme_with(theme_src);
         let area = Rect::new(0, 0, 120, 10);
         let mut buf = Buffer::empty(area);
         let mut scene = ApcScene::new();
         render_diff_view(
-            &mut editor,
+            editor,
             area,
             Style::default(),
             &theme,
@@ -4978,6 +5088,94 @@ mod tests {
                     ),
                 ],
             ),
+        );
+    }
+
+    /// The colors of the reveal mark in the reveal tests.
+    const REVEAL_THEME: &str = r##"diff.reveal = { fg: "#6cc7d6", bg: "#1a2226" };"##;
+
+    /// The lane color [`REVEAL_THEME`] gives a revealed row at full strength.
+    const REVEAL_LANE: [u8; 3] = [0x6c, 0xc7, 0xd6];
+
+    /// In cells a row an expand just opened takes the reveal tint across both
+    /// sides and the lane on each side's first cell. Once the mark fades, every
+    /// row keeps the backgrounds a paint with no mark gives it.
+    #[test]
+    fn a_revealed_row_takes_the_tint_and_its_lanes_until_the_mark_fades() {
+        let backgrounds = |flashes: Vec<RevealFlash>| {
+            let mut editor = fold_row_editor();
+            editor.reveal_flashes = flashes;
+            let buf = plain_fold_paint(&mut editor, REVEAL_THEME);
+            (0..5)
+                .map(|y| (0..120).map(|x| buf[(x, y)].bg).collect())
+                .collect::<Vec<Vec<Color>>>()
+        };
+        let right = {
+            let mut editor = fold_row_editor();
+            let digits = diff_gutter_digits(&editor.display_map.snapshot());
+            DiffColumns::compute(
+                Rect::new(0, 0, 120, 10),
+                DiffLayout::diff_view(digits, None),
+            )
+            .right_x
+        };
+        let marked: Vec<Color> = (0..120)
+            .map(|x| match x == 0 || x == right {
+                true => Color::Rgb(REVEAL_LANE[0], REVEAL_LANE[1], REVEAL_LANE[2]),
+                false => Color::Rgb(0x1a, 0x22, 0x26),
+            })
+            .collect();
+        let flash = |age| vec![RevealFlash { rows: 12..15, age }];
+
+        let plain = backgrounds(Vec::new());
+        assert_eq!(
+            (backgrounds(flash(0.0)), backgrounds(flash(1.0))),
+            (
+                vec![
+                    plain[0].clone(),
+                    marked.clone(),
+                    marked.clone(),
+                    marked,
+                    plain[4].clone()
+                ],
+                plain,
+            ),
+        );
+    }
+
+    /// Under a rich gutter a revealed row draws each side's lane as a plain bar
+    /// at the side's left edge, in the lane color at full strength.
+    #[test]
+    fn a_rich_revealed_row_draws_a_lane_bar_on_each_side() {
+        let mut editor = fold_row_editor();
+        editor.reveal_flashes = vec![RevealFlash {
+            rows: 12..15,
+            age: 0.0,
+        }];
+        let (_, commands, _, cols) = rich_paint(&mut editor, REVEAL_THEME, false);
+        let lanes: Vec<BarCommand> = commands
+            .iter()
+            .filter_map(|command| match command {
+                Command::Bar(bar) if bar.color == REVEAL_LANE => Some(*bar),
+                _ => None,
+            })
+            .collect();
+
+        let lane = |x: u16, row: i16| BarCommand {
+            x: (x * 16) as i16,
+            y: row * 16,
+            width: 4,
+            height: 16,
+            color: REVEAL_LANE,
+            occludes: false,
+            hatch: None,
+        };
+        assert_eq!(
+            lanes,
+            [1, 2, 3]
+                .into_iter()
+                .flat_map(|row| [lane(0, row), lane(cols.right_x, row)])
+                .collect::<Vec<_>>(),
         );
     }
 

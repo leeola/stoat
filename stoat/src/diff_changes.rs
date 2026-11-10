@@ -61,6 +61,12 @@ pub(crate) const FOLD_BUTTON_WIDTH: u16 = 36;
 /// The space between two Fold Buttons, in sixteenths of a cell.
 pub(crate) const FOLD_BUTTON_GAP: u16 = 2;
 
+/// The seconds a revealed row's mark holds at full strength, as the
+/// ExpandFlow board times it.
+pub(crate) const REVEAL_HOLD: f32 = 0.6;
+/// The seconds a revealed row's mark takes to fade out after its hold.
+pub(crate) const REVEAL_FADE: f32 = 0.4;
+
 new_key_type! {
     /// Key for one changes view pane's [`DiffChangesState`].
     pub struct DiffChangesId;
@@ -285,6 +291,40 @@ impl FoldButtons {
             Self::Both => &[('\u{2193}', FoldEdge::Top), ('\u{2191}', FoldEdge::Bottom)],
             Self::Whole => &[('\u{2195}', FoldEdge::Whole)],
         }
+    }
+}
+
+/// The mark on the rows an expand just opened, which fades out so the opened
+/// lines then read as plain context.
+///
+/// An excerpt's editor holds one per expand. The frame timer ages it and drops
+/// it once its fade ends, at [`REVEAL_HOLD`] plus [`REVEAL_FADE`].
+#[derive(Debug, PartialEq)]
+pub(crate) struct RevealFlash {
+    /// The buffer rows the expand opened.
+    pub rows: Range<u32>,
+    /// Seconds since the expand.
+    pub age: f32,
+}
+
+impl RevealFlash {
+    /// The share of the mark's full color the rows take at the flash's age.
+    ///
+    /// The full mark holds through [`REVEAL_HOLD`], so the eye finds the
+    /// opened rows. It then eases out over [`REVEAL_FADE`] on the curve a
+    /// reload flash fades on, so the mark leaves no hard edge as it ends.
+    pub(crate) fn strength(&self) -> f32 {
+        // The end reads the whole age, the sum the frame timer drops a flash
+        // at. At that age `age - REVEAL_HOLD` rounds below `REVEAL_FADE` in
+        // f32, which leaves a sliver of strength.
+        if self.age >= REVEAL_HOLD + REVEAL_FADE {
+            return 0.0;
+        }
+        let fading = self.age - REVEAL_HOLD;
+        if fading <= 0.0 {
+            return 1.0;
+        }
+        (1.0 - fading / REVEAL_FADE).powi(2)
     }
 }
 
@@ -1797,6 +1837,9 @@ pub(crate) fn fold_lines(rope: &Rope, gap: &Range<u32>) -> u32 {
 /// The scroll first shows the far edge of the opened rows, the first row of a
 /// fold above the cursor or the last row of a fold below it. Then it shows the
 /// cursor, so a short view keeps the cursor in sight.
+///
+/// The opened rows carry a [`RevealFlash`] on the excerpt's editor until its
+/// fade ends.
 pub(crate) fn expand(
     state: &mut DiffChangesState,
     editors: &mut SlotMap<EditorId, EditorState>,
@@ -1828,6 +1871,10 @@ pub(crate) fn expand(
     let insert = editor.mode == "insert";
     let held = reveal_row(editor, insert, &excerpt.revealed);
     fold_excerpt(editor, held, &excerpt.revealed);
+    editor.reveal_flashes.push(RevealFlash {
+        rows: rows.clone(),
+        age: 0.0,
+    });
 
     let far = match gap.start >= cursor {
         true => rows.end - 1,
