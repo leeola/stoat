@@ -1683,23 +1683,8 @@ fn paint_fold_row(
 ) {
     text.clear();
     snapshot.write_display_line(text, display_row);
-    let surface = HatchedSurface::of(theme.get(s::DIFF_FOLD), rich.is_some());
-    let cells = surface
-        .cells
-        .map_or_else(Style::default, |bg| Style::default().bg(bg));
+    let (surface, cells) = paint_fold_surface(inner, y, theme, rich, buf, decorations_only);
     let muted = theme.get(s::UI_TEXT_MUTED);
-    if !decorations_only {
-        for x in inner.x..inner.x + inner.width {
-            buf[(x, y)].set_char(' ').set_style(cells);
-        }
-    }
-    hatch_cells(
-        rich,
-        surface.hatch,
-        inner,
-        (inner.x, inner.x + inner.width),
-        y,
-    );
 
     let chars = text.chars().count();
     let count = match rich {
@@ -1780,6 +1765,97 @@ fn paint_fold_row(
             decorations_only,
         );
     }
+}
+
+/// Fill row `y` of `inner` with `diff.fold`'s surface, as [`HatchedSurface`]
+/// resolves it, and answer the surface with the style its cells take.
+///
+/// With `decorations_only` the cells stay as they are, and a rich gutter still
+/// stripes the row.
+fn paint_fold_surface(
+    inner: Rect,
+    y: u16,
+    theme: &crate::theme::Theme,
+    rich: &mut Option<DiffRichGutter<'_>>,
+    buf: &mut Buffer,
+    decorations_only: bool,
+) -> (HatchedSurface, Style) {
+    let surface = HatchedSurface::of(theme.get(s::DIFF_FOLD), rich.is_some());
+    let cells = surface
+        .cells
+        .map_or_else(Style::default, |bg| Style::default().bg(bg));
+    if !decorations_only {
+        for x in inner.x..inner.x + inner.width {
+            buf[(x, y)].set_char(' ').set_style(cells);
+        }
+    }
+    hatch_cells(
+        rich,
+        surface.hatch,
+        inner,
+        (inner.x, inner.x + inner.width),
+        y,
+    );
+    (surface, cells)
+}
+
+/// Paint `scope` alone on `row`, the row under a changes view excerpt's header
+/// when no fold lies above the excerpt's first change.
+///
+/// The row takes `diff.fold`'s surface, as a fold row does, and centers the
+/// Scope's chip as [`paint_scope_chip`] paints it, with no count, no Fold
+/// Buttons, and no line range. With a `scene` whose gutter colors resolve the
+/// row draws rich, as [`paint_diff_rows`] draws its gutter, and with
+/// `decorations_only` it sends the scene's bars and runs alone.
+pub(crate) fn paint_scope_row(
+    scope: &FoldScope,
+    row: Rect,
+    theme: &crate::theme::Theme,
+    fallback_style: Style,
+    buf: &mut Buffer,
+    scene: Option<&mut ApcScene>,
+    decorations_only: bool,
+) {
+    let mut rich = chip_gutter(scene, theme, fallback_style);
+    let (_, cells) = paint_fold_surface(row, row.y, theme, &mut rich, buf, decorations_only);
+    paint_scope_chip(
+        scope,
+        16..(row.width * 16).saturating_sub(16),
+        row,
+        row.y,
+        theme,
+        &mut rich,
+        buf,
+        cells,
+        decorations_only,
+    );
+    if let Some(rg) = rich.as_mut() {
+        rg.numbers.flush(rg.scene);
+        rg.bars.flush(rg.scene);
+    }
+}
+
+/// The rich gutter of a row that draws no number, bar, or rule, such as a
+/// Scope row, or `None` without a `scene` and where the gutter colors do not
+/// resolve.
+///
+/// Its offsets lay out the narrowest number column, since the row reads none
+/// of them.
+fn chip_gutter<'a>(
+    scene: Option<&'a mut ApcScene>,
+    theme: &crate::theme::Theme,
+    fallback_style: Style,
+) -> Option<DiffRichGutter<'a>> {
+    let number_scale = diff_rich_gutter_scale(scene.is_some(), theme, fallback_style)?;
+    let offsets = DiffLayout::diff_view(editor::gutter_digits(0), Some(number_scale)).rich?;
+    Some(DiffRichGutter {
+        scene: scene?,
+        colors: resolve_diff_rich_colors(theme, fallback_style, 0.0)?,
+        offsets,
+        number_scale,
+        numbers: TextRunBatch::default(),
+        bars: BarBatch::default(),
+    })
 }
 
 /// Paint the Fold Buttons and the line range of the fold row at screen row `y`.
@@ -5082,6 +5158,111 @@ mod tests {
                 mark_color(ScopeMark::Removed, "\u{2212} "),
             ],
             [Some([0x00, 0xff, 0x00]), Some([0xff, 0x00, 0x00])],
+        );
+    }
+
+    /// Under a rich gutter a Scope row stripes its whole row, as a fold row
+    /// does, and centers its chip over the stripes. It draws no count, no Fold
+    /// Buttons, and no line range.
+    #[test]
+    fn a_rich_scope_row_carries_its_chip_alone() {
+        let theme = rgb_diff_theme_with(&format!("{HATCHED_FOLD_THEME} {SCOPE_COLORS}"));
+        let row = Rect::new(0, 0, 120, 1);
+        let mut buf = Buffer::empty(row);
+        let mut scene = ApcScene::new();
+        paint_scope_row(
+            &panel_scope(),
+            row,
+            &theme,
+            Style::default(),
+            &mut buf,
+            Some(&mut scene),
+            false,
+        );
+        let commands = decode_stream(scene.buffer());
+        let bars: Vec<(i16, i16, u16, u16, bool)> = commands
+            .iter()
+            .filter_map(|command| match command {
+                Command::Bar(bar) => {
+                    Some((bar.x, bar.y, bar.width, bar.height, bar.hatch.is_some()))
+                },
+                _ => None,
+            })
+            .collect();
+        let mut texts: Vec<String> = commands
+            .iter()
+            .filter_map(|command| match command {
+                Command::TextRun(run) => Some(run.text.to_string()),
+                _ => None,
+            })
+            .collect();
+        texts.sort();
+
+        let scale = theme.type_scale(TypeRole::Small);
+        let width = PANEL_PARTS
+            .iter()
+            .map(|(text, _)| text_run::advance_sixteenths(text.chars().count(), scale))
+            .sum::<u16>()
+            + 2 * SCOPE_CHIP_PAD;
+        let mut parts: Vec<String> = PANEL_PARTS
+            .iter()
+            .map(|(text, _)| text.to_string())
+            .collect();
+        parts.sort();
+        assert_eq!(
+            (bars, texts),
+            (
+                vec![
+                    (0, 0, 1920, 16, true),
+                    (
+                        ((1920 - width) / 2) as i16,
+                        1,
+                        width,
+                        SCOPE_CHIP_HEIGHT,
+                        false
+                    ),
+                ],
+                parts,
+            ),
+        );
+    }
+
+    /// In cells a Scope row fills in the hatch color and centers its chip on the
+    /// fold's background, with no count, no Fold Buttons, and no line range.
+    #[test]
+    fn a_plain_scope_row_centers_its_chip_on_the_fill() {
+        let theme = rgb_diff_theme_with(&format!("{HATCHED_FOLD_THEME} {SCOPE_COLORS}"));
+        let row = Rect::new(0, 0, 120, 1);
+        let mut buf = Buffer::empty(row);
+        paint_scope_row(
+            &panel_scope(),
+            row,
+            &theme,
+            Style::default(),
+            &mut buf,
+            None,
+            false,
+        );
+
+        let text: String = PANEL_PARTS.iter().map(|(text, _)| *text).collect();
+        let len = text.chars().count() as u16;
+        let chip = (120 - len) / 2..(120 + len) / 2;
+        let backgrounds: Vec<Color> = (0..120).map(|x| buf[(x, 0)].bg).collect();
+        assert_eq!(
+            (line_text(&buf, 0, 0..120), backgrounds),
+            (
+                format!(
+                    "{}{text}{}",
+                    " ".repeat(usize::from(chip.start)),
+                    " ".repeat(usize::from(120 - chip.end))
+                ),
+                (0..120)
+                    .map(|x| match chip.contains(&x) {
+                        true => Color::Rgb(0x17, 0x19, 0x1e),
+                        false => Color::Rgb(0x1b, 0x1d, 0x22),
+                    })
+                    .collect(),
+            ),
         );
     }
 

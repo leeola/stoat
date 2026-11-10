@@ -123,7 +123,7 @@ pub enum RefKind {
 ///
 /// `item_range` spans the whole item, and `name_range` spans its name. Both
 /// are byte ranges of the source.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ScopeSegment {
     pub keyword: Option<String>,
     pub name: String,

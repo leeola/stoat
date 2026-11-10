@@ -687,6 +687,7 @@ fn stack_cache_key(
             diff_version(buffers, excerpt.buffer_id)?,
             diagnostics_version(buffers, excerpt.buffer_id, frame),
             origins.as_ref().map(|origins| origins[index]),
+            excerpt.scope_row.as_deref(),
         )
             .hash(&mut stack);
     }

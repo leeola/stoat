@@ -185,6 +185,12 @@ pub(crate) struct Excerpt {
     /// the end of its last row, so an edit above a span carries the span with
     /// its lines.
     pub revealed: Vec<(Anchor, Anchor)>,
+    /// The Scope of the first change when no fold lies above it, which a row
+    /// under the header shows.
+    ///
+    /// `None` when a fold row names the first change, and for a language with
+    /// no outline query, which names no Scope.
+    pub scope_row: Option<Arc<FoldScope>>,
 }
 
 /// The size of one excerpt's diff, which its header row counts out.
@@ -694,9 +700,15 @@ pub(crate) fn layout_stack(
     let mut row = 0;
     for excerpt in &mut state.excerpts {
         excerpt.top = row;
-        row += 1 + excerpt_rows(excerpt, editors);
+        row += header_rows(excerpt) + excerpt_rows(excerpt, editors);
     }
     row
+}
+
+/// The stack rows above `excerpt`'s first display row, its header row and the
+/// row that [`Excerpt::scope_row`] holds a Scope for.
+pub(crate) fn header_rows(excerpt: &Excerpt) -> usize {
+    1 + usize::from(excerpt.scope_row.is_some())
 }
 
 /// The display rows of `excerpt`'s editor that the stack's window shows, as of
@@ -709,7 +721,7 @@ pub(crate) fn shown_excerpt_rows(
     excerpt: &Excerpt,
     rows: usize,
 ) -> Option<Range<u32>> {
-    let first = excerpt.top + 1;
+    let first = excerpt.top + header_rows(excerpt);
     let start = state.scroll.max(first);
     let end = (state.scroll + state.viewport_rows).min(first + rows);
     (start < end).then(|| (start - first) as u32..(end - first) as u32)
@@ -756,7 +768,7 @@ pub(crate) fn cursor_stack_row(
     let excerpt = state.focused_excerpt()?;
     excerpt.folded_version?;
     let editor = editors.get_mut(excerpt.editor_id)?;
-    Some(excerpt.top + 1 + view::cursor_display_row(editor) as usize)
+    Some(excerpt.top + header_rows(excerpt) + view::cursor_display_row(editor) as usize)
 }
 
 /// The signed `j` or `k` steps from the focused excerpt's cursor to the row
@@ -843,10 +855,10 @@ pub(crate) fn select_row(
 /// and report whether the row held one.
 ///
 /// The column maps against the excerpt's text column as of its last paint, so
-/// a press left of the text lands at the start of the row. A header row puts
-/// the cursor at the start of its excerpt's first row, and a row that shows
-/// no buffer line, as a base row spliced in for a removal, at the start of the
-/// first row below it that does.
+/// a press left of the text lands at the start of the row. A header row or a
+/// Scope row puts the cursor at the start of its excerpt's first row, and a
+/// row that shows no buffer line, as a base row spliced in for a removal, at
+/// the start of the first row below it that does.
 pub(crate) fn press_cell(
     state: &mut DiffChangesState,
     editors: &mut SlotMap<EditorId, EditorState>,
@@ -856,7 +868,8 @@ pub(crate) fn press_cell(
     let Some((index, display_row)) = excerpt_at(state, editors, row) else {
         return false;
     };
-    let header = row == state.excerpts[index].top;
+    let excerpt = &state.excerpts[index];
+    let header = row < excerpt.top + header_rows(excerpt);
     let Some(editor) = editors.get_mut(state.excerpts[index].editor_id) else {
         return false;
     };
@@ -896,7 +909,7 @@ pub(crate) fn fold_button_at(
     let cell = column.checked_sub(state.content_rect?.x)?;
     let (index, display_row) = excerpt_at(state, editors, row)?;
     let excerpt = &state.excerpts[index];
-    if excerpt.top + 1 + display_row as usize != row {
+    if excerpt.top + header_rows(excerpt) + display_row as usize != row {
         return None;
     }
 
@@ -952,7 +965,9 @@ fn excerpt_at(
     if rows == 0 {
         return None;
     }
-    let display_row = row.saturating_sub(excerpt.top + 1).min(rows - 1);
+    let display_row = row
+        .saturating_sub(excerpt.top + header_rows(excerpt))
+        .min(rows - 1);
     Some((index, display_row as u32))
 }
 
@@ -1043,7 +1058,14 @@ pub(crate) fn reveal_cursor(stoat: &mut Stoat) -> bool {
     let insert = editor.mode == "insert";
     let row = reveal_row(editor, insert, &revealed);
     let parse = ScopeParse::of(buffers, buffer_id, &cache);
-    let Some((_, _, changed)) = fold_excerpt(editor, row, &revealed, parse.as_ref(), false) else {
+    let Some((_, _, changed)) = fold_excerpt(
+        editor,
+        row,
+        &revealed,
+        &mut state.excerpts[state.focused].scope_row,
+        parse.as_ref(),
+        false,
+    ) else {
         return false;
     };
     if changed && screen_row.is_some() {
@@ -1227,7 +1249,14 @@ pub(crate) fn collapse_at_cursor(stoat: &mut Stoat) -> bool {
         .revealed
         .retain(|_| !dropped.next().unwrap_or(false));
     let parse = ScopeParse::of(buffers, excerpt.buffer_id, &cache);
-    fold_excerpt(editor, None, &excerpt.revealed, parse.as_ref(), false);
+    fold_excerpt(
+        editor,
+        None,
+        &excerpt.revealed,
+        &mut excerpt.scope_row,
+        parse.as_ref(),
+        false,
+    );
     let hidden_by = fold_gap(&editor.display_map.snapshot(), cursor);
     if let Some(gap) = hidden_by {
         place_cursor(editor, Point::new(gap.start, 0));
@@ -1269,7 +1298,9 @@ pub(crate) fn center_jump(
     let total = layout_stack(state, editors);
     let viewport = state.viewport_rows;
     let top = match state.focused_excerpt() {
-        Some(excerpt) if viewport > 0 && excerpt.folded_version.is_some() => excerpt.top + 1,
+        Some(excerpt) if viewport > 0 && excerpt.folded_version.is_some() => {
+            excerpt.top + header_rows(excerpt)
+        },
         _ => return false,
     };
     let rows = if span.len() > viewport {
@@ -1635,6 +1666,7 @@ fn open_excerpt(
         rel_path,
         folded_version: None,
         folded_syntax: None,
+        scope_row: None,
         top: 0,
         owns_buffer,
         opened_version,
@@ -1691,6 +1723,7 @@ pub(crate) fn adopt_excerpt(
             rel_path,
             folded_version: None,
             folded_syntax: None,
+            scope_row: None,
             top: 0,
             owns_buffer: true,
             opened_version,
@@ -1762,9 +1795,14 @@ fn refold(ws: &mut Workspace) -> bool {
                 },
             };
             let parse = ScopeParse::of(buffers, excerpt.buffer_id, &cache);
-            let Some((folded, kept, _)) =
-                fold_excerpt(editor, cursor, &excerpt.revealed, parse.as_ref(), true)
-            else {
+            let Some((folded, kept, _)) = fold_excerpt(
+                editor,
+                cursor,
+                &excerpt.revealed,
+                &mut excerpt.scope_row,
+                parse.as_ref(),
+                true,
+            ) else {
                 continue;
             };
             excerpt.folded_version = Some(folded);
@@ -1887,15 +1925,22 @@ fn land(
 /// Scope read again is cut again. With no such parse the held folds keep their
 /// Scopes, and a new fold takes none.
 ///
+/// `scope_row` takes the Scope of the first change when the first kept run
+/// starts at row 0 and holds that change, so no fold lies above it, and
+/// `None` otherwise. It keeps and rereads its Scope by the same rules. A
+/// `scope_row` that comes or goes counts as a fold change, since it moves every
+/// row of the excerpt.
+///
 /// `None`, with nothing folded, while the buffer has no diff map.
 fn fold_excerpt(
     editor: &mut EditorState,
     cursor: Option<u32>,
     revealed: &[(Anchor, Anchor)],
+    scope_row: &mut Option<Arc<FoldScope>>,
     parse: Option<&ScopeParse>,
     rescope: bool,
 ) -> Option<(usize, Vec<Range<u32>>, bool)> {
-    let (version, kept, stale, fresh) = {
+    let (version, kept, stale, fresh, next_row) = {
         let snapshot = editor.display_map.snapshot();
         let map = snapshot.diff_map()?;
         let buffer = snapshot.buffer_snapshot();
@@ -1945,9 +1990,24 @@ fn fold_excerpt(
             .filter(|(_, key)| !holds(&held, key))
             .map(|(fold, _)| fold)
             .collect();
-        (map.version(), kept, stale, fresh)
+
+        let top_open = first_change_row(map).is_some_and(|row| {
+            kept.first()
+                .is_some_and(|run| run.start == 0 && row < run.end)
+        });
+        let next_row = match top_open {
+            false => None,
+            true => match (&*scope_row, &reader) {
+                (Some(scope), _) if !reread => Some(scope.clone()),
+                (_, Some(reader)) => reader.gap_scope(&(0..0), line_count).map(Arc::new),
+                (held, None) => held.clone(),
+            },
+        };
+        (map.version(), kept, stale, fresh, next_row)
     };
-    let changed = !stale.is_empty() || !fresh.is_empty();
+    let row_changed = *scope_row != next_row;
+    *scope_row = next_row;
+    let changed = !stale.is_empty() || !fresh.is_empty() || row_changed;
     if !stale.is_empty() {
         editor.display_map.unfold(stale);
     }
@@ -2143,6 +2203,22 @@ fn gap_fold(rope: &Rope, gap: Range<u32>) -> (Range<Point>, FoldPlaceholder) {
             render::review::fold_row_placeholder(lines),
         ),
     }
+}
+
+/// The first row of `map`'s first change, as [`changed_rows`] reads it, or
+/// `None` for a map with no hunk.
+fn first_change_row(map: &DiffMap) -> Option<u32> {
+    let hunk = map.hunks().next()?;
+    let range = &hunk.buffer_line_range;
+    Some(if range.is_empty() {
+        hunk.buffer_start_line
+    } else if hunk.status == DiffHunkStatus::Modified && hunk.refined() {
+        hunk.marked_rows
+            .first()
+            .map_or(range.start, |run| run.start)
+    } else {
+        range.start
+    })
 }
 
 /// The rows each change of `map` marks, with the change's hunk, in buffer
@@ -2383,7 +2459,14 @@ pub(crate) fn expand(
     };
     let insert = editor.mode == "insert";
     let held = reveal_row(editor, insert, &excerpt.revealed);
-    fold_excerpt(editor, held, &excerpt.revealed, parse, false);
+    fold_excerpt(
+        editor,
+        held,
+        &excerpt.revealed,
+        &mut excerpt.scope_row,
+        parse,
+        false,
+    );
     editor.reveal_flashes.push(RevealFlash {
         rows: rows.clone(),
         age: 0.0,
@@ -2399,8 +2482,8 @@ pub(crate) fn expand(
         .buffer_to_display(Point::new(far, 0))
         .row as usize;
     layout_stack(state, editors);
-    let top = state.excerpts[index].top;
-    state.ensure_row_visible(top + 1 + far_row, state.viewport_rows);
+    let first = state.excerpts[index].top + header_rows(&state.excerpts[index]);
+    state.ensure_row_visible(first + far_row, state.viewport_rows);
     if let Some(row) = cursor_stack_row(state, editors) {
         state.ensure_row_visible(row, state.viewport_rows);
     }
@@ -2516,10 +2599,10 @@ fn map_version(buffers: &BufferRegistry, id: BufferId) -> Option<usize> {
 #[cfg(test)]
 mod tests {
     use super::{
-        cursor_point, excerpt_rows, expand_from_cursor, fold_edge, fold_excerpt, gap_fold, gaps,
-        kept_runs, landing_row, listed_files, place_cursor, pump_diff_changes_stack, reveal_rows,
-        scope_parts, DiffChangesState, ExcerptStats, ExpandDir, FoldEdge, Landing, ScopeParse,
-        StackStamp,
+        cursor_point, cursor_stack_row, excerpt_rows, expand_from_cursor, fold_edge, fold_excerpt,
+        gap_fold, gaps, kept_runs, landing_row, layout_stack, listed_files, place_cursor,
+        press_cell, pump_diff_changes_stack, reveal_rows, scope_parts, DiffChangesState,
+        ExcerptStats, ExpandDir, FoldEdge, Landing, ScopeParse, StackStamp,
     };
     use crate::{
         action_handlers::dispatch,
@@ -2814,7 +2897,7 @@ mod tests {
         buffer.diff_map = Some(map);
         let shared = Arc::new(RwLock::new(buffer));
         let mut editor = EditorState::new(BufferId::new(0), shared, executor, crate::test_notify());
-        fold_excerpt(&mut editor, None, &[], None, false);
+        fold_excerpt(&mut editor, None, &[], &mut None, None, false);
 
         let snapshot = editor.display_map.snapshot();
         let folds = snapshot.fold_snapshot();
@@ -2947,7 +3030,7 @@ fn hint_width() -> u32 {
             language,
             cache: TreeCache::default(),
         };
-        fold_excerpt(&mut editor, None, &[], Some(&parse), true);
+        fold_excerpt(&mut editor, None, &[], &mut None, Some(&parse), true);
 
         let snapshot = editor.display_map.snapshot();
         let folds = snapshot.fold_snapshot();
@@ -3015,6 +3098,69 @@ fn hint_width() -> u32 {
                 "top level",
                 "end of file",
             ],
+        );
+    }
+
+    /// A hunk on a file's first line has no fold above it, so its Scope takes a
+    /// row under the header. The excerpt's rows and its cursor's stack row
+    /// start past that row, and a press on the row lands as a press on the
+    /// header does.
+    #[test]
+    fn a_first_line_hunk_takes_a_scope_row_under_its_header() {
+        let base = "fn first() -> u32 {\n    1\n}\n// a\n// b\n// c\n// d\n// e\n// f\n// g\n";
+        let mut h = TestHarness::with_size(100, 24);
+        h.stage_review_scenario("/repo", &[("a.rs", base, &base.replacen("u32", "u64", 1))]);
+        stacked(&mut h);
+        // The paint asks for the excerpt's parse, and the refold after it lands
+        // reads the Scope.
+        h.render_composited();
+        for _ in 0..2 {
+            h.stoat.drive_background();
+            h.settle();
+        }
+
+        let Workspace {
+            diff_changes_views,
+            editors,
+            ..
+        } = h.stoat.active_workspace_mut();
+        let state = diff_changes_views
+            .values_mut()
+            .next()
+            .expect("a changes view");
+        let total = layout_stack(state, editors);
+        let (editor_id, scope) = {
+            let excerpt = &state.excerpts[0];
+            (
+                excerpt.editor_id,
+                excerpt.scope_row.as_deref().map(scope_text),
+            )
+        };
+        let rows = excerpt_rows(&state.excerpts[0], editors);
+        place_cursor(&mut editors[editor_id], Point::new(1, 4));
+        let display_row = editors[editor_id]
+            .display_map
+            .snapshot()
+            .buffer_to_display(Point::new(1, 4))
+            .row as usize;
+        let cursor = cursor_stack_row(state, editors);
+        let pressed = press_cell(state, editors, 1, 40);
+
+        assert_eq!(
+            (
+                scope,
+                total,
+                cursor,
+                pressed,
+                cursor_point(&mut editors[editor_id])
+            ),
+            (
+                Some("fn first".to_string()),
+                2 + rows,
+                Some(2 + display_row),
+                true,
+                Point::new(0, 0)
+            ),
         );
     }
 

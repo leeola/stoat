@@ -129,6 +129,9 @@ struct ExcerptLayout {
     /// The LSP semantic tokens that color the excerpt's rows, which report no
     /// rows they changed.
     lsp_token_version: Option<u64>,
+    /// Whether a Scope row sits under the header, which moves every display
+    /// row's line by one.
+    scope_row: bool,
 }
 
 /// One hunk as an excerpt's strip lines show it.
@@ -252,7 +255,10 @@ impl DiffChangesStrip {
         let mut at = 0;
         let targets = target.iter().zip(target_hunks).zip(&state.excerpts);
         for (held, ((key, hunks), excerpt)) in held.iter_mut().zip(targets) {
-            let first = at + 1;
+            // A splice runs only where the held layout equals the excerpt's, so
+            // the held lines start their display rows past the same header rows.
+            let header = diff_changes::header_rows(excerpt);
+            let first = at + header;
             at += held.lines;
             let Some(have) = held.key.filter(|have| {
                 have != key && have.buffer_id == key.buffer_id && have.layout == key.layout
@@ -269,10 +275,10 @@ impl DiffChangesStrip {
                 continue;
             };
 
-            let held_rows = held.lines.saturating_sub(1) as u32;
+            let held_rows = held.lines.saturating_sub(header) as u32;
             let rows = rows.start.min(held_rows)..rows.end.min(held_rows);
             if !rows.is_empty() {
-                let top = excerpt.top + 1;
+                let top = excerpt.top + header;
                 let (start, end) = (rows.start as usize, rows.end as usize);
                 splices.push((first + start, end - start, top + start..top + end));
             }
@@ -311,7 +317,8 @@ impl ParsedRows {
 /// file's text summarizes that text with its syntax tokens and the mark of its
 /// diff status. A base line spliced in for a removal summarizes its text with
 /// the deleted mark, and a fold's placeholder row summarizes the placeholder
-/// with no mark.
+/// with no mark. A Scope row under the header holds no file text, so its line
+/// is empty.
 ///
 /// With `populations` unset, every content class stays in the plain syntax
 /// block, for a terminal that reads no population blocks. With `syntax_on`
@@ -327,10 +334,13 @@ pub(crate) fn summarize_rows(
 ) -> Vec<LineRuns> {
     let mut lines = Vec::with_capacity(rows.len());
     for excerpt in &state.excerpts {
-        let first = excerpt.top + 1;
+        let first = excerpt.top + diff_changes::header_rows(excerpt);
         let end = (first + diff_changes::excerpt_rows(excerpt, editors)).min(rows.end);
-        if excerpt.top >= rows.start && excerpt.top < rows.end {
+        if rows.contains(&excerpt.top) {
             lines.push(header_bar(table));
+        }
+        if excerpt.scope_row.is_some() && rows.contains(&(excerpt.top + 1)) {
+            lines.push(LineRuns::default());
         }
         let display_rows = rows.start.max(first) - first..end.saturating_sub(first);
         if display_rows.is_empty() {
@@ -578,10 +588,12 @@ fn excerpt_keys(
                 inlay_set_version: snapshot.inlay_snapshot().inlay_set_version,
                 pairs_modified_hunks: snapshot.pairs_modified_hunks(),
                 lsp_token_version,
+                scope_row: excerpt.scope_row.is_some(),
             },
             None => ExcerptLayout {
                 rows,
                 lsp_token_version,
+                scope_row: excerpt.scope_row.is_some(),
                 ..ExcerptLayout::default()
             },
         };
@@ -1476,7 +1488,9 @@ mod tests {
     }
 
     /// A parse resends the rows it reported alone, whether it lands before its
-    /// edit's frame or after it, and after an earlier parse the strip took.
+    /// edit's frame or after it, and after an earlier parse the strip took. The
+    /// hunk has no fold above it, so the header and its Scope row take lines 0
+    /// and 1, and the edited row is line 3.
     #[test]
     fn a_parse_resends_the_rows_it_reported_alone() {
         let base = "fn a() {}\nfn b() {}\nfn c() {}\n";
@@ -1515,7 +1529,7 @@ mod tests {
         let (_, total) = layout(&mut h);
         assert_eq!(
             (spans, store),
-            (vec![vec![(2, 1, 1)]; 3], wire_lines(&mut h, 0..total)),
+            (vec![vec![(3, 1, 1)]; 3], wire_lines(&mut h, 0..total)),
         );
     }
 
@@ -1799,7 +1813,8 @@ mod tests {
 
     /// An edit and its parse while the stack is parked resend the edited row
     /// alone on the flip back, since the strip counts the parse's rows for a
-    /// parked excerpt as for a live one.
+    /// parked excerpt as for a live one. The header and the Scope row of the
+    /// hunk take lines 0 and 1, so the edited row is line 3.
     #[test]
     fn an_edit_during_a_park_resends_its_row_alone_on_the_flip_back() {
         let base = "fn a() {}\nfn b() {}\nfn c() {}\n";
@@ -1822,7 +1837,7 @@ mod tests {
         let (splices, _) = strip_frames(&frame(&mut h, &mut rx));
         assert_eq!(
             splices,
-            vec![(strip_id(&h), 2, 1, wire_lines(&mut h, 2..3))]
+            vec![(strip_id(&h), 3, 1, wire_lines(&mut h, 3..4))]
         );
     }
 

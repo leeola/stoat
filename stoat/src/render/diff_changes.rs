@@ -327,7 +327,8 @@ pub(crate) fn paint_stack_rows(
     for (index, excerpt) in state.excerpts.iter().enumerate() {
         let rows = diff_changes::excerpt_rows(excerpt, editors);
         let top = excerpt.top;
-        if top + 1 + rows <= scroll || top >= scroll + rows_on_screen {
+        let header = diff_changes::header_rows(excerpt);
+        if top + header + rows <= scroll || top >= scroll + rows_on_screen {
             continue;
         }
         if let Some(row) = header_row(top).filter(|_| paint == PagePaint::Cells) {
@@ -335,16 +336,32 @@ pub(crate) fn paint_stack_rows(
             let runs = header_runs(&excerpt.rel_path, stats, frame.theme);
             paint_header(buf, row, &runs, frame.theme);
         }
+        if let Some(scope) = &excerpt.scope_row
+            && let Some(row) = header_row(top + 1)
+        {
+            review::paint_scope_row(
+                scope,
+                row,
+                frame.theme,
+                text_style,
+                buf,
+                match scene.live() {
+                    true => Some(&mut *scene),
+                    false => None,
+                },
+                paint == PagePaint::DecorationsOnly,
+            );
+        }
 
-        // The screen row of the excerpt's first row, past its header.
-        let first = (top + 1).saturating_sub(scroll);
+        // The screen row of the excerpt's first row, past its header rows.
+        let first = (top + header).saturating_sub(scroll);
         let Some(editor) = editors.get_mut(excerpt.editor_id) else {
             continue;
         };
         if rows == 0 || first >= rows_on_screen {
             continue;
         }
-        editor.scroll_row = scroll.saturating_sub(top + 1) as u32;
+        editor.scroll_row = scroll.saturating_sub(top + header) as u32;
         let height = (rows - editor.scroll_row as usize).min(rows_on_screen - first);
         let excerpt_area = Rect {
             x: area.x,
@@ -572,8 +589,9 @@ pub(crate) fn replay_cursor(
 
     let (top, scroll, viewport) = (excerpt.top, state.scroll, state.viewport_rows);
     let rows = diff_changes::excerpt_rows(excerpt, editors);
-    let first = (top + 1).saturating_sub(scroll);
-    if rows == 0 || top + 1 + rows <= scroll || top >= scroll + viewport || first >= viewport {
+    let header = diff_changes::header_rows(excerpt);
+    let first = (top + header).saturating_sub(scroll);
+    if rows == 0 || top + header + rows <= scroll || top >= scroll + viewport || first >= viewport {
         return;
     }
     let Some(editor) = editors.get_mut(excerpt.editor_id) else {
@@ -584,7 +602,7 @@ pub(crate) fn replay_cursor(
     };
     let inner = pane.area;
     let (inner, _) = split_minimap_strip(inner, frame.minimap_enabled, DIFF_OVERVIEW_COLS);
-    let scroll_row = scroll.saturating_sub(top + 1);
+    let scroll_row = scroll.saturating_sub(top + header);
     let text = Rect {
         y: inner.y + first as u16,
         height: (rows - scroll_row).min(viewport - first) as u16,
@@ -1244,16 +1262,16 @@ mod tests {
         );
 
         let cursor = home(&mut h);
-        let tops: Vec<usize> = stack(&mut h)
+        let firsts: Vec<usize> = stack(&mut h)
             .0
             .excerpts
             .iter()
-            .map(|excerpt| excerpt.top)
+            .map(|excerpt| excerpt.top + diff_changes::header_rows(excerpt))
             .collect();
         let (mut targets, mut reached) = (Vec::new(), Vec::new());
-        for (top, rows) in tops.into_iter().zip(&numbers) {
+        for (first, rows) in firsts.into_iter().zip(&numbers) {
             for (offset, number) in rows.iter().enumerate() {
-                let row = top + 1 + offset;
+                let row = first + offset;
                 if row == cursor || number.is_empty() {
                     continue;
                 }

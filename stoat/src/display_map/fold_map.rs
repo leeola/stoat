@@ -93,7 +93,7 @@ pub struct FoldPlaceholder {
 /// A fold row stands for lines the reader does not see, so its Scope names
 /// where the next change sits, such as `impl Panel` then `fn modal_frame`. It
 /// rides on the fold's placeholder, so the paint of the row reads it.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct FoldScope {
     /// The chain at the hunk's first row, outermost first. It is empty for a
     /// hunk at the top level.
@@ -109,7 +109,7 @@ pub struct FoldScope {
 
 /// How a fold row's Scope marks a hunk that adds, removes, or renames a whole
 /// item, so the reader sees that the change is the item itself.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
 pub enum ScopeMark {
     /// The hunk changes lines inside its items, or none of them whole.
     #[default]

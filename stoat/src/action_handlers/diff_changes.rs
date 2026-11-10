@@ -2217,7 +2217,7 @@ mod tests {
             .display_map
             .snapshot()
             .buffer_to_display(Point::new(row, 0));
-        excerpt.top + 1 + display.row as usize
+        excerpt.top + diff_changes::header_rows(excerpt) + display.row as usize
     }
 
     /// The rows of `runs`, one after another.
