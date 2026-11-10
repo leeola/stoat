@@ -70,6 +70,10 @@ pub(super) const MINIMAP_LINES_PER_CELL: u8 = 6;
 /// Widest line, in minimap columns, a strip renders before clipping.
 pub(super) const MINIMAP_MAX_COLUMNS: u8 = 120;
 
+/// The corner radius of a strip's viewport band, in logical px, as the Editor
+/// and ReadOnly boards round it.
+pub(super) const MINIMAP_THUMB_RADIUS: u8 = 4;
+
 /// How far a diff half's fill moves from the status bar's toward the side's
 /// status color, for a theme that sets no `diff.sides` fill.
 const SIDE_FILL_TINT: f32 = 0.12;
@@ -595,6 +599,7 @@ fn pane_minimap<'a>(
         thumb: [thumb[0], thumb[1], thumb[2], ta],
         thumb_border: None,
         rule_class: chrome.rule_class,
+        thumb_radius: MINIMAP_THUMB_RADIUS,
         palette,
     }
 }
@@ -618,6 +623,7 @@ pub(super) fn rail_minimap<'a>(
         thumb: chrome.rail_cover,
         thumb_border: None,
         rule_class: 0,
+        thumb_radius: 0,
         palette: chrome.palette,
     }
 }

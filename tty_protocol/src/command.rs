@@ -735,6 +735,7 @@ mod tests {
                     thumb: [13, 14, 15, 16],
                     thumb_border: Some([17, 18, 19]),
                     rule_class: 23,
+                    thumb_radius: 24,
                     palette: vec![[20, 21, 22]],
                 }),
             ),
@@ -1222,6 +1223,7 @@ mod tests {
                 thumb: [200, 200, 200, 48],
                 thumb_border: Some([255, 255, 255]),
                 rule_class: 2,
+                thumb_radius: 3,
                 palette: vec![[0, 0, 0], [1, 2, 3], [4, 5, 6]],
             }),
             Command::MinimapLines(MinimapLinesCommand {

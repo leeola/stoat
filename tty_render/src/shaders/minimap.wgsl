@@ -12,6 +12,9 @@
 // with no MSAA, a run renders only where it crosses a pixel center: short runs
 // vanish, equal runs come out unequal, and the fractional y of a scrolled strip
 // pops blocks in and out.
+//
+// A quad with a corner radius, the viewport thumb the strip declares rounded,
+// takes the coverage of a rounded box at each pixel's center instead.
 
 struct Globals {
     resolution: vec2<f32>,
@@ -40,6 +43,8 @@ struct VsOut {
     // its coverage against.
     @location(2) @interpolate(flat) rect_min: vec2<f32>,
     @location(3) @interpolate(flat) rect_max: vec2<f32>,
+    // The quad's corner radius in physical pixels, 0 for a square quad.
+    @location(4) @interpolate(flat) radius: f32,
 }
 
 @vertex
@@ -49,6 +54,7 @@ fn vs_main(
     @location(1) size: vec2<f32>,
     @location(2) color: vec4<f32>,
     @location(3) seq: u32,
+    @location(4) radius: f32,
 ) -> VsOut {
     var corners = array<vec2<f32>, 6>(
         vec2<f32>(0.0, 0.0),
@@ -81,6 +87,7 @@ fn vs_main(
     out.seq = seq;
     out.rect_min = rect_min;
     out.rect_max = rect_max;
+    out.radius = radius;
     return out;
 }
 
@@ -105,6 +112,16 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
                 discard;
             }
         }
+    }
+
+    // A rounded quad's coverage is that of a rounded box at the pixel's
+    // center. The radius stops at half the shorter side, so a thumb too short
+    // for it rounds into a pill rather than past itself.
+    if in.radius > 0.0 {
+        let half = (in.rect_max - in.rect_min) * 0.5;
+        let r = min(in.radius, min(half.x, half.y));
+        let sdf = rounded_box_sdf(frag - (in.rect_min + half), half, r);
+        return vec4<f32>(in.color.rgb, in.color.a * clamp(0.5 - sdf, 0.0, 1.0));
     }
 
     // How much of the true rect this fragment's own pixel box holds. A run a

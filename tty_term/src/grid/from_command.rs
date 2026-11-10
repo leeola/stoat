@@ -169,6 +169,7 @@ pub(crate) fn minimap_strip_from_command(command: &MinimapCommand) -> MinimapStr
         ),
         thumb_border: command.thumb_border.map(|[r, g, b]| Rgb::new(r, g, b)),
         rule_class: command.rule_class,
+        thumb_radius: command.thumb_radius,
         palette: command
             .palette
             .iter()

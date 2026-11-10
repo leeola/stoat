@@ -309,6 +309,32 @@ fn the_changes_view_ends_in_the_minimap_strip_on_the_editor_surface() {
     expect_strip_band(&shot, &mut home, "changes_strip");
 }
 
+/// The single band rounds its viewport band's corners at 4 px, as the Editor
+/// board draws the band.
+///
+/// The band's first cell is column 152 on row 1, where the thumb starts at the
+/// file's top. On the thumb's top pixel row, the band's last pixel column
+/// lies past the arc and keeps the editor surface. The fifth column from the
+/// right, the first past the 4 px arc, reads the band's color, the accent at 9
+/// percent over the surface.
+#[test]
+fn the_viewport_band_rounds_its_corners() {
+    const BAND: [u8; 3] = [0x20, 0x27, 0x32];
+
+    let mut home = support::scratch_home();
+    let shot = settled_frame(home.path(), "basic-diff", "unstaged.txt", "");
+    let (x, y, _, _) = cell_rect(152, 1, 1, 1);
+
+    expect_region(&shot, &mut home, (x + 62, y, 1, 1), BASE, "band_corner");
+    expect_region(
+        &shot,
+        &mut home,
+        (x + 58, y, 1, 1),
+        BAND,
+        "band_top_past_the_arc",
+    );
+}
+
 /// The changes view heads each file with a row on the raised surface, between
 /// two hairlines.
 ///

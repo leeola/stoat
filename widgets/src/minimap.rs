@@ -30,6 +30,9 @@ pub struct Minimap<'a> {
     /// The class whose runs draw as a hairline in the gap above their row, or
     /// 0 for none.
     pub rule_class: u8,
+    /// Viewport-thumb corner radius in logical px, 0 for square corners. A
+    /// thumb with an outline stays square.
+    pub thumb_radius: u8,
     /// Run-class palette, up to 256 rgb entries a summary's classes index.
     ///
     /// Borrowed, since a strip is redeclared every frame and the palette it
@@ -56,6 +59,7 @@ impl StatefulWidget for Minimap<'_> {
                 thumb: self.thumb,
                 thumb_border: self.thumb_border,
                 rule_class: self.rule_class,
+                thumb_radius: self.thumb_radius,
                 palette: self.palette,
             },
         );
@@ -123,6 +127,7 @@ mod tests {
             thumb: [99, 109, 131, 64],
             thumb_border: Some([60, 66, 77]),
             rule_class: 5,
+            thumb_radius: 6,
             palette: &PALETTE,
         }
     }
@@ -148,6 +153,7 @@ mod tests {
             thumb: [99, 109, 131, 64],
             thumb_border: Some([60, 66, 77]),
             rule_class: 5,
+            thumb_radius: 6,
             palette: PALETTE.to_vec(),
         });
         assert_eq!(scene.buffer().as_slice(), expected.as_slice());

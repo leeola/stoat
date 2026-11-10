@@ -2221,6 +2221,9 @@ pub struct MinimapStrip {
     /// The class whose runs draw as a hairline in the gap above their row in
     /// place of a block. 0 marks no class, since class 0 is the default text.
     pub rule_class: u8,
+    /// The overlay's corner radius in logical px, 0 for square corners. An
+    /// overlay with an outline stays square.
+    pub thumb_radius: u8,
     /// Colors a run's class indexes, up to 256 entries.
     pub palette: Vec<Rgb>,
 }
@@ -2994,6 +2997,7 @@ mod tests {
                 thumb: Rgba::new(0, 0, 0, 255),
                 thumb_border: Some(Rgb::new(0, 0, 0)),
                 rule_class: 0,
+                thumb_radius: 0,
                 palette: Vec::new(),
             },
             seq: 0,

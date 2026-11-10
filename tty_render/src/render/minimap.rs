@@ -26,7 +26,8 @@ use wgpu::{
 const INITIAL_CAPACITY: usize = 256;
 
 /// The per-quad instance data. It carries an absolute-pixel rectangle, an rgba
-/// fill, and the strip's declaration-order seq the fragment shader occludes by.
+/// fill, the strip's declaration-order seq the fragment shader occludes by, and
+/// a corner radius in physical pixels, 0 for a square quad.
 #[repr(C)]
 #[derive(Clone, Copy, PartialEq, Pod, Zeroable)]
 struct MinimapInstance {
@@ -34,6 +35,7 @@ struct MinimapInstance {
     size: [f32; 2],
     color: [f32; 4],
     seq: u32,
+    radius: f32,
 }
 
 /// The uniform shared by every instance, matching the bar pass layout so the
@@ -191,6 +193,7 @@ impl MinimapPass {
                         1 => Float32x2,
                         2 => Float32x4,
                         3 => Uint32,
+                        4 => Float32,
                     ],
                 })],
             },
@@ -592,6 +595,7 @@ fn build_strip(
         size: [layout.strip_w, layout.strip_h],
         color: rgba_f32(strip.strip.bg),
         seq,
+        radius: 0.0,
     }];
 
     let total = content.len() as f32;
@@ -639,6 +643,7 @@ fn build_strip(
                 // the strip carries texture at a size too small for letters.
                 color: rgb_weighted_f32(*color, run.weight),
                 seq,
+                radius: 0.0,
             });
         }
     }
@@ -651,11 +656,17 @@ fn build_strip(
         layout.strip_h,
         layout.line_h,
     );
+    // An outline's four hairlines stay square, so a thumb under one does too.
+    let radius = match strip.strip.thumb_border {
+        Some(_) => 0.0,
+        None => f32::from(strip.strip.thumb_radius) * metrics.scale_factor,
+    };
     instances.push(MinimapInstance {
         origin: [layout.strip_x, layout.strip_y + thumb_offset],
         size: [layout.strip_w, thumb_height],
         color: rgba_f32(strip.strip.thumb),
         seq,
+        radius,
     });
 
     let Some(border) = strip.strip.thumb_border else {
@@ -679,6 +690,7 @@ fn build_strip(
             size,
             color: border,
             seq,
+            radius: 0.0,
         });
     }
 
@@ -782,6 +794,7 @@ mod tests {
             thumb: Rgba::new(200, 200, 200, 48),
             thumb_border: Some(Rgb::new(255, 255, 255)),
             rule_class: 0,
+            thumb_radius: 0,
             palette: vec![
                 Rgb::new(10, 20, 30),
                 Rgb::new(40, 50, 60),
@@ -1024,6 +1037,48 @@ mod tests {
                 [200.0 / 255.0, 200.0 / 255.0, 200.0 / 255.0, 48.0 / 255.0],
             ],
             "the background and the thumb fill, with no edge after them",
+        );
+    }
+
+    /// A borderless strip rounds its thumb at the declared radius in physical
+    /// pixels, and no other quad. A thumb under an outline stays square, as
+    /// the outline's hairlines do.
+    #[test]
+    fn the_thumb_alone_carries_the_radius() {
+        let run = MinimapRun {
+            start_col: 0,
+            len: 4,
+            class: 1,
+            weight: 255,
+        };
+        let radii = |border: Option<Rgb>, scale_factor: f32| {
+            let mut rounded = strip(None);
+            rounded.strip.thumb_border = border;
+            rounded.strip.thumb_radius = 4;
+            let metrics = CellMetrics {
+                scale_factor,
+                ..metrics()
+            };
+            let (instances, _) = build_strip(
+                &rounded,
+                &summaries(vec![vec![run]]),
+                metrics,
+                uniform_layout(),
+            );
+            instances
+                .iter()
+                .map(|instance| instance.radius)
+                .collect::<Vec<_>>()
+        };
+
+        assert_eq!(
+            [
+                radii(None, 1.0),
+                radii(None, 2.0),
+                radii(Some(Rgb::new(255, 255, 255)), 1.0),
+            ],
+            [vec![0.0, 0.0, 4.0], vec![0.0, 0.0, 8.0], vec![0.0; 7],],
+            "the background, the run, the thumb, and any outline's four edges",
         );
     }
 
@@ -1463,6 +1518,7 @@ mod tests {
             thumb: Rgba::new(0, 0, 0, 0),
             thumb_border: Some(Rgb::new(0, 0, 0)),
             rule_class: 0,
+            thumb_radius: 0,
             palette: vec![Rgb::new(255, 0, 0)],
         }
     }
@@ -1665,6 +1721,51 @@ mod tests {
             [at(2, 0), at(2, 2), at(2, 47), at(0, 24), at(5, 24)],
             [255, 0, 255, 255, 255],
             "one pixel of border on each edge, and a clear interior"
+        );
+    }
+
+    /// A rounded thumb covers each corner pixel by the share of it inside a
+    /// 4 px arc centered on (4, 4), taken at the pixel's center, so the corner
+    /// fades out along the arc. A square thumb fills its corner pixel.
+    #[test]
+    fn a_rounded_thumb_fades_out_along_its_corner_arc() {
+        let (device, queue) = require_headless_device();
+
+        // No view, so the opaque thumb spans the whole strip, 12 px wide and
+        // 48 tall from the target's top left.
+        let corner = |radius: u8| {
+            let mut strip = red_strip(2, 4, 6, 12);
+            strip.thumb = Rgba::new(255, 0, 0, 255);
+            strip.thumb_border = None;
+            strip.thumb_radius = radius;
+            let grid = red_grid(strip, vec![Vec::new(); 10], None);
+            render_red(&device, &queue, &grid, &[], metrics())
+        };
+        let rounded = corner(4);
+        let at = |x: u32, y: u32| u32::from(rounded[(y * TARGET + x) as usize]);
+        let expected = [
+            ((0, 0), 0),
+            ((1, 0), 51),
+            ((0, 1), 51),
+            ((2, 0), 176),
+            ((0, 2), 176),
+            ((3, 0), 246),
+            ((0, 3), 246),
+            ((1, 1), 246),
+            ((4, 0), 255),
+            ((0, 4), 255),
+            ((2, 1), 255),
+        ];
+        let off: Vec<((u32, u32), u32, u32)> = expected
+            .into_iter()
+            .filter(|&((x, y), want)| at(x, y).abs_diff(want) > 2)
+            .map(|((x, y), want)| ((x, y), want, at(x, y)))
+            .collect();
+
+        assert_eq!(
+            (off, corner(0)[0]),
+            (vec![], 255),
+            "every corner pixel within 2 of its arc coverage, and a square corner whole",
         );
     }
 

@@ -198,9 +198,13 @@
 /// predates it reads the height from the wrong bytes and draws a rule run as
 /// a block. This version drops a shorter argument and head.
 ///
+/// Version 30 reads a fixed 32-byte `minimap` head, which ends in the thumb's
+/// corner radius in logical px. A terminal that predates it reads the first 31
+/// bytes and draws the thumb square. This version drops a shorter head.
+///
 /// Zero is reserved for a peer whose handshake carries no version at all, which
 /// is every build from before the field existed.
-pub const PROTOCOL_VERSION: u32 = 29;
+pub const PROTOCOL_VERSION: u32 = 30;
 
 /// The first [`PROTOCOL_VERSION`] whose terminal reads the `text_runs` and
 /// `bars` batches.
@@ -229,6 +233,13 @@ pub const BACKDROP_PANEL_PROTOCOL: u32 = 20;
 /// An earlier terminal reads a `panel` head at its own byte offsets, so it
 /// misplaces every panel an emitter at this version sends it.
 pub const PANEL_EDGES_PROTOCOL: u32 = 27;
+
+/// The first [`PROTOCOL_VERSION`] whose terminal rounds a `minimap` thumb's
+/// corners at the radius its head declares.
+///
+/// An earlier terminal draws every thumb square, and a terminal at this
+/// version drops a `minimap` head that holds no radius.
+pub const MINIMAP_THUMB_RADIUS_PROTOCOL: u32 = 30;
 
 pub mod command;
 pub mod detect;

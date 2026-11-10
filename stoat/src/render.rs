@@ -1632,6 +1632,7 @@ pub(crate) fn frame(
             thumb: chrome.thumb,
             thumb_border: None,
             rule_class: chrome.rule_class,
+            thumb_radius: pane::MINIMAP_THUMB_RADIUS,
             palette,
         };
         let rail = single_band_rail(ws, chrome);
