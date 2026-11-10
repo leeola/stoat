@@ -1012,15 +1012,9 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
         ActionKind::ExtendGotoWindowBottom => {
             view::goto_window(stoat, view::WindowAlign::Bottom, true)
         },
-        ActionKind::AlignViewTop => with_focused_editor(stoat, |editor| {
-            view::align_view(editor, view::ViewAlign::Top)
-        }),
-        ActionKind::AlignViewCenter => with_focused_editor(stoat, |editor| {
-            view::align_view(editor, view::ViewAlign::Center)
-        }),
-        ActionKind::AlignViewBottom => with_focused_editor(stoat, |editor| {
-            view::align_view(editor, view::ViewAlign::Bottom)
-        }),
+        ActionKind::AlignViewTop => align_focused_view(stoat, view::ViewAlign::Top),
+        ActionKind::AlignViewCenter => align_focused_view(stoat, view::ViewAlign::Center),
+        ActionKind::AlignViewBottom => align_focused_view(stoat, view::ViewAlign::Bottom),
         ActionKind::ScrollUp => view::scroll_view(stoat, view::ScrollDir::Up),
         ActionKind::ScrollDown => view::scroll_view(stoat, view::ScrollDir::Down),
         ActionKind::SwitchCase => movement::switch_case(stoat),
@@ -1712,6 +1706,18 @@ pub(crate) fn pane_editor_ids(ws: &crate::workspace::Workspace) -> Option<(Edito
         },
         _ => None,
     }
+}
+
+/// Align the focused view on its cursor's row.
+///
+/// A changes view scrolls its stack, because the stack's paint sets each
+/// excerpt editor's scroll from the stack's own. Any other view scrolls the
+/// focused editor.
+fn align_focused_view(stoat: &mut Stoat, align: view::ViewAlign) -> UpdateEffect {
+    if stoat.active_workspace().focused_diff_changes_id().is_some() {
+        return diff_changes::align_stack(stoat, align);
+    }
+    with_focused_editor(stoat, |editor| view::align_view(editor, align))
 }
 
 /// Run `f` on the focused editor, or answer [`UpdateEffect::None`] when no

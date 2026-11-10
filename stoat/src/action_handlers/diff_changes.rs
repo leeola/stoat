@@ -8,7 +8,7 @@ use super::{
     jump,
     movement::{self, ChangeDir, ChangeUnit},
     pane, review,
-    view::{self, PageDir},
+    view::{self, PageDir, ViewAlign},
 };
 use crate::{
     app::{Stoat, UpdateEffect},
@@ -533,6 +533,45 @@ pub(crate) fn diff_changes_scroll(stoat: &mut Stoat, delta: i32) -> UpdateEffect
         .scroll
         .saturating_add_signed(delta as isize)
         .min(total.saturating_sub(state.viewport_rows));
+    if scroll == state.scroll {
+        return UpdateEffect::None;
+    }
+    state.scroll = scroll;
+    UpdateEffect::Redraw
+}
+
+/// Scroll the focused changes view's stack so its cursor's row sits at the
+/// top, the middle, or the bottom of the view, as the view keys align a plain
+/// editor's view.
+///
+/// The scroll stops at the stack's last page, and the cursor stays.
+pub(super) fn align_stack(stoat: &mut Stoat, align: ViewAlign) -> UpdateEffect {
+    let ws = stoat.active_workspace_mut();
+    let Some(id) = ws.focused_diff_changes_id() else {
+        return UpdateEffect::None;
+    };
+    let Workspace {
+        diff_changes_views,
+        editors,
+        ..
+    } = ws;
+    let Some(state) = diff_changes_views.get_mut(id) else {
+        return UpdateEffect::None;
+    };
+    let total = diff_changes::layout_stack(state, editors);
+    let Some(row) = diff_changes::cursor_stack_row(state, editors) else {
+        return UpdateEffect::None;
+    };
+
+    // Measured from the last row, as a plain editor's alignment measures, so
+    // an even view centers one row above its middle.
+    let last_row = state.viewport_rows.saturating_sub(1);
+    let scroll = match align {
+        ViewAlign::Top => row,
+        ViewAlign::Center => row.saturating_sub(last_row / 2),
+        ViewAlign::Bottom => row.saturating_sub(last_row),
+    }
+    .min(total.saturating_sub(state.viewport_rows));
     if scroll == state.scroll {
         return UpdateEffect::None;
     }
@@ -1085,7 +1124,7 @@ fn lands(snapshot: &DisplaySnapshot, row: u32) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{diff_changes_jump, diff_changes_step, respawn_diff_changes_panes};
+    use super::{diff_changes_jump, diff_changes_step, respawn_diff_changes_panes, viewport_rows};
     use crate::{
         action_handlers::{commits, dispatch, focused_editor_mut, pane, view},
         apc_emit,
@@ -2903,6 +2942,58 @@ mod tests {
                 at("a.txt", 5)
             ],
         );
+    }
+
+    /// `z t`, `z b`, and `z z` scroll the stack so the cursor's row sits at the
+    /// top, the bottom, and the middle of the view, and the cursor stays. The
+    /// select-mode menu aligns the same way.
+    #[test]
+    fn the_view_keys_align_the_stack_on_the_cursor() {
+        let mut h = stack_on_the_fifth_change();
+        let (_, row, _) = stack_view(&mut h);
+        let last = viewport_rows(&h.stoat) - 1;
+
+        let aligned: Vec<(usize, usize)> = ["z t", "z b", "z z", "v z t"]
+            .into_iter()
+            .map(|keys| {
+                h.type_keys(keys);
+                let (scroll, row, _) = stack_view(&mut h);
+                (scroll, row)
+            })
+            .collect();
+        assert_eq!(
+            aligned,
+            [
+                (row, row),
+                (row - last, row),
+                (row - last / 2, row),
+                (row, row)
+            ],
+        );
+    }
+
+    /// A changes view over a file of 200 numbered lines with a change on every
+    /// twentieth, painted once with the cursor on the fifth change.
+    ///
+    /// The ten changes fill several pages of the stack, so the cursor's row
+    /// sits far from the first and the last page, and no alignment of it
+    /// clamps.
+    fn stack_on_the_fifth_change() -> TestHarness {
+        let mut h = TestHarness::with_size(100, 24);
+        let base: String = (1..=200).map(|n| format!("{n}\n")).collect();
+        let working: String = (1..=200)
+            .map(|n| match n % 20 {
+                0 => format!("CHANGED {n}\n"),
+                _ => format!("{n}\n"),
+            })
+            .collect();
+        h.stage_review_scenario("/repo", &[("a.txt", &base, &working)]);
+        h.open_file(Path::new("/repo/a.txt"));
+        h.cover_with_diff_changes(false);
+        h.settle();
+        h.type_keys("] g ] g ] g ] g ] g");
+        h.render_composited();
+        h
     }
 
     /// A change walk centers the stack on each landing, in the file it stands
