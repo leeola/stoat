@@ -186,9 +186,14 @@
 /// predates it reads the edge bytes as insets and masks at its own head's
 /// offsets, so it misplaces every panel. This version drops a shorter head.
 ///
+/// Version 28 reads shadow code 5 in a `panel` as a cast shadow, which falls a
+/// short way under the panel's bottom edge and only between its sides. A
+/// terminal that predates it reads the code as a drop shadow, which only draws
+/// larger.
+///
 /// Zero is reserved for a peer whose handshake carries no version at all, which
 /// is every build from before the field existed.
-pub const PROTOCOL_VERSION: u32 = 27;
+pub const PROTOCOL_VERSION: u32 = 28;
 
 /// The first [`PROTOCOL_VERSION`] whose terminal reads the `text_runs` and
 /// `bars` batches.

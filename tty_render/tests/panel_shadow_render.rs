@@ -160,6 +160,58 @@ fn unfilled_panel_shadow_stays_outside_the_box() {
     );
 }
 
+/// A cast shadow falls only under the box's bottom edge and between its sides,
+/// as a pane clips the shadow of a pinned row as wide as the pane. It darkens
+/// the pixel 3 px under the bottom edge and fades out by 17 px under it. The
+/// ground shows over the box and beside its sides.
+#[test]
+fn a_cast_shadow_falls_under_the_box_alone() {
+    let r = render_panel(|_, cols| Panel {
+        top: 1,
+        left: 1,
+        width: cols as u16 - 3,
+        height: 2,
+        style: BorderStyle::None_,
+        border: Rgb::new(200, 100, 50),
+        corner_radius: 0,
+        fill: None,
+        shadow: PanelShadow::Cast,
+        edges: Edge::symmetric(0, 0),
+        corners: 0,
+        fillets: 0,
+        fillet_radius: 2,
+        hatch: None,
+        above_pools: false,
+        backdrop: false,
+        anchor: None,
+        seq: 0,
+    });
+    let [left, right] = [1.0, r.cols as f32 - 2.0].map(|col| (col * r.cell[0]) as u32);
+    let [top, bottom] = [1.0, 3.0].map(|row| (row * r.cell[1]) as u32);
+    let middle = (left + right) / 2;
+    let under = r.px(middle, bottom + 3);
+    let grounds = [
+        [middle, bottom + 17],
+        [middle, top - 3],
+        [left - 3, bottom + 3],
+        [right + 3, bottom + 3],
+    ]
+    .map(|[x, y]| r.px(x, y));
+
+    assert!(
+        under.iter().zip(SURFACE).all(|(&got, ground)| got < ground),
+        "the pixel under the bottom edge darkens, got {under:?}"
+    );
+    assert!(
+        grounds
+            .iter()
+            .flatten()
+            .zip(SURFACE.iter().cycle())
+            .all(|(&got, &ground)| got.abs_diff(ground) <= 1),
+        "far under the box, over it, and beside its sides the ground shows, got {grounds:?}"
+    );
+}
+
 #[test]
 fn a_horizontal_inset_leaves_the_cell_edge_strip_clear() {
     let inset = 6u8;

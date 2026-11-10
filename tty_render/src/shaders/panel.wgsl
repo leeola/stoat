@@ -61,6 +61,9 @@ const SHADOW_ALPHA_TUCKED: f32 = 0.6;
 // edge, falling to zero across the margin as it rises. Fainter than SHADOW_ALPHA
 // so it reads as a soft cast rather than a hard line.
 const SHADOW_ALPHA_OVERHANG: f32 = 0.14;
+// Peak opacity of a cast shadow, the alpha of the boards'
+// `box-shadow: 0 4px 8px rgba(0, 0, 0, 0.55)` under a pinned row.
+const SHADOW_ALPHA_CAST: f32 = 0.55;
 
 struct VsOut {
     @builtin(position) clip: vec4<f32>,
@@ -83,7 +86,8 @@ struct VsOut {
     @location(9) @interpolate(flat) instance: u32,
     // Shadow mode: 0.0 drop (exterior, offset), 1.0 tucked (an interior band along
     // the bottom edge), 2.0 overhang (a fainter, shorter interior band along the
-    // bottom edge), 3.0 halo (exterior, clipped at the box bottom).
+    // bottom edge), 3.0 halo (exterior, clipped at the box bottom), 4.0 cast
+    // (exterior, offset down, clipped to below the box bottom between its sides).
     @location(10) @interpolate(flat) shadow_mode: f32,
     // The rounded corners in bits 0-3, top-left clockwise, and the fillets in
     // FILLET_BOTTOM_LEFT and FILLET_BOTTOM_RIGHT.
@@ -507,19 +511,24 @@ fn coverage_of(in: VsOut) -> Coverage {
     let shadow_min = in.box_min + offset;
     let shadow_max = in.box_max + offset;
     // A halo (mode 3) paints nothing below the box's bottom edge, so the panel
-    // meets whatever sits below it with no shadow between them. The cut ends over
-    // one pixel rather than mid-pixel.
+    // meets whatever sits below it with no shadow between them. A cast (mode 4)
+    // paints only below that edge and between the box's sides, as a pane clips
+    // the shadow of a pinned row as wide as the pane. Each cut along the bottom
+    // edge ends over one pixel rather than mid-pixel.
+    let casts_down = in.shadow_mode > 3.5;
+    let beside = p.x < in.box_min.x || p.x > in.box_max.x;
     let clip = select(
-        1.0,
-        clamp(in.box_max.y - p.y + 0.5, 0.0, 1.0),
-        in.shadow_mode > 2.5
+        select(1.0, clamp(in.box_max.y - p.y + 0.5, 0.0, 1.0), in.shadow_mode > 2.5),
+        select(clamp(p.y - in.box_max.y + 0.5, 0.0, 1.0), 0.0, beside),
+        casts_down
     );
-    // Exterior shadow for drop (mode 0) and halo (mode 3), gated to the box
-    // exterior so an unfilled panel's interior is not washed by its own shadow.
-    // `interior` is 1 inside the box and 0 outside.
+    // Exterior shadow for drop (mode 0), halo (mode 3), and cast (mode 4), gated
+    // to the box exterior so an unfilled panel's interior is not washed by its
+    // own shadow. `interior` is 1 inside the box and 0 outside.
     let shadow_base = select(
         0.0,
-        SHADOW_ALPHA * shadow_alpha(p, shadow_min, shadow_max, radius, sigma),
+        select(SHADOW_ALPHA, SHADOW_ALPHA_CAST, casts_down)
+            * shadow_alpha(p, shadow_min, shadow_max, radius, sigma),
         margin > 0.0 && !casts_band(in.shadow_mode)
     ) * (1.0 - interior) * clip;
     // Tucked (mode 1) and overhang (mode 2): a band inside the box that rises

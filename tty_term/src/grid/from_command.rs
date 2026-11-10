@@ -248,5 +248,6 @@ fn grid_panel_shadow(shadow: command::PanelShadow) -> PanelShadow {
         command::PanelShadow::Tucked => PanelShadow::Tucked,
         command::PanelShadow::Overhang => PanelShadow::Overhang,
         command::PanelShadow::Halo => PanelShadow::Halo,
+        command::PanelShadow::Cast => PanelShadow::Cast,
     }
 }

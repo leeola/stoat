@@ -64,13 +64,21 @@ const SHADOW_MARGIN_OVERHANG: f32 = 5.0;
 /// panel and does not read as the panel floating.
 const SHADOW_MARGIN_HALO: f32 = 6.0;
 
+/// Cast-shadow displacement in logical pixels, straight down, the boards'
+/// `box-shadow: 0 4px 8px` under a pinned row.
+const SHADOW_OFFSET_CAST: [f32; 2] = [0.0, 4.0];
+
+/// Blur radius in logical pixels for a cast shadow, three sigma of the 4
+/// logical pixel sigma that the boards' 8 px CSS blur stands for.
+const SHADOW_MARGIN_CAST: f32 = 12.0;
+
 /// The per-panel instance data. Carries the anchor cell, the size in cells, the
 /// fill and stroke colors, the shadow displacement and blur radius, the corner
 /// radius, a flag selecting how the fill paints, the border style code, the
-/// shadow mode (0 drop, 1 tucked, 2 overhang, 3 halo), the shape bits (the
-/// rounded corners in bits 0-3 and the fillets in bits 4-5), the hatch color
-/// with a flag selecting whether it draws, each edge's pixels with the packed
-/// edge modes, and the fillet radius.
+/// shadow mode (0 drop, 1 tucked, 2 overhang, 3 halo, 4 cast), the shape bits
+/// (the rounded corners in bits 0-3 and the fillets in bits 4-5), the hatch
+/// color with a flag selecting whether it draws, each edge's pixels with the
+/// packed edge modes, and the fillet radius.
 ///
 /// The fill flag is 0 for no fill and 1 for a fill. A backdrop's fill takes 2,
 /// which paints the fill only outside the panel's own cells.
@@ -501,6 +509,7 @@ fn build_panel_instances_into(panels: &[Panel], scale_factor: f32, out: &mut Vec
             PanelShadow::Tucked => ([0.0, 0.0], SHADOW_MARGIN_TUCKED, 1.0),
             PanelShadow::Overhang => ([0.0, 0.0], SHADOW_MARGIN_OVERHANG, 2.0),
             PanelShadow::Halo => ([0.0, 0.0], SHADOW_MARGIN_HALO, 3.0),
+            PanelShadow::Cast => (SHADOW_OFFSET_CAST, SHADOW_MARGIN_CAST, 4.0),
             PanelShadow::None_ => ([0.0, 0.0], 0.0, 0.0),
         };
         PanelInstance {
@@ -1533,42 +1542,57 @@ mod tests {
     /// shadow. Each reaches the shader as its own mode and margin.
     #[test]
     fn tucked_and_halo_panels_keep_their_shadows_on_the_box() {
-        let instance = |shadow| {
-            let panels = [Panel {
-                top: 2,
-                left: 2,
-                width: 6,
-                height: 3,
-                style: BorderStyle::Light,
-                border: Rgb::new(1, 2, 3),
-                corner_radius: 0,
-                fill: Some(Rgb::new(4, 5, 6)),
-                shadow,
-                edges: Edge::symmetric(4, 0),
-                corners: 0,
-                fillets: 0,
-                fillet_radius: 2,
-                hatch: None,
-                above_pools: false,
-                backdrop: false,
-                anchor: None,
-                seq: 0,
-            }];
-            let instance = build_panel_instances(&panels)[0];
-            (
-                instance.shadow_offset,
-                instance.shadow_margin,
-                instance.shadow_mode,
-            )
-        };
-
         assert_eq!(
-            [instance(PanelShadow::Tucked), instance(PanelShadow::Halo)],
+            [
+                shadow_instance(PanelShadow::Tucked),
+                shadow_instance(PanelShadow::Halo)
+            ],
             [
                 ([0.0, 0.0], super::SHADOW_MARGIN_TUCKED, 1.0),
                 ([0.0, 0.0], super::SHADOW_MARGIN_HALO, 3.0),
             ],
         );
+    }
+
+    /// A cast shadow falls 4 logical px under the box with a 12 px margin, three
+    /// sigma of the boards' 8 px blur, and reaches the shader as mode 4.
+    #[test]
+    fn a_cast_panel_drops_its_shadow_under_the_box() {
+        assert_eq!(
+            shadow_instance(PanelShadow::Cast),
+            ([0.0, 4.0], super::SHADOW_MARGIN_CAST, 4.0),
+        );
+    }
+
+    /// The shadow displacement, margin, and mode that a filled panel with
+    /// `shadow` reaches the shader with at scale 1.
+    fn shadow_instance(shadow: PanelShadow) -> ([f32; 2], f32, f32) {
+        let panels = [Panel {
+            top: 2,
+            left: 2,
+            width: 6,
+            height: 3,
+            style: BorderStyle::Light,
+            border: Rgb::new(1, 2, 3),
+            corner_radius: 0,
+            fill: Some(Rgb::new(4, 5, 6)),
+            shadow,
+            edges: Edge::symmetric(4, 0),
+            corners: 0,
+            fillets: 0,
+            fillet_radius: 2,
+            hatch: None,
+            above_pools: false,
+            backdrop: false,
+            anchor: None,
+            seq: 0,
+        }];
+        let instance = build_panel_instances(&panels)[0];
+        (
+            instance.shadow_offset,
+            instance.shadow_margin,
+            instance.shadow_mode,
+        )
     }
 
     /// A panel that reaches the last row arrives with that row's place in its

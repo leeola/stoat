@@ -112,7 +112,9 @@ pub fn edge_modes(edges: [Edge; 4]) -> u8 {
 /// place, so the panel reads as tucked under whatever overhangs it above.
 /// [`PanelShadow::Halo`] is undisplaced with a tight halo clipped above the
 /// panel's bottom edge, so the panel reads as emerging from beneath whatever sits
-/// below it rather than floating in front.
+/// below it rather than floating in front. [`PanelShadow::Cast`] falls a short
+/// way below the panel's bottom edge and only between its sides, as a pinned
+/// row casts onto the rows that scroll under it.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum PanelShadow {
     None_,
@@ -120,6 +122,7 @@ pub enum PanelShadow {
     Tucked,
     Overhang,
     Halo,
+    Cast,
 }
 
 /// Draw off-grid modal chrome framing a cell rectangle.
@@ -315,6 +318,7 @@ fn shadow_code(shadow: PanelShadow) -> u8 {
         PanelShadow::Tucked => 2,
         PanelShadow::Overhang => 3,
         PanelShadow::Halo => 4,
+        PanelShadow::Cast => 5,
     }
 }
 
@@ -326,6 +330,7 @@ fn decode_shadow(code: u8) -> PanelShadow {
         2 => PanelShadow::Tucked,
         3 => PanelShadow::Overhang,
         4 => PanelShadow::Halo,
+        5 => PanelShadow::Cast,
         _ => PanelShadow::Drop,
     }
 }
@@ -575,13 +580,41 @@ mod tests {
     }
 
     #[test]
+    fn panel_cast_shadow_round_trips() {
+        let command = PanelCommand {
+            top: 1,
+            left: 0,
+            width: 12,
+            height: 2,
+            style: BorderStyle::None_,
+            border: [1, 2, 3],
+            corner_radius: 0,
+            fill: None,
+            shadow: PanelShadow::Cast,
+            edges: Edge::symmetric(0, 0),
+            corners: 0,
+            fillets: 0,
+            fillet_radius: 2,
+            hatch: None,
+            above_pools: false,
+            backdrop: false,
+            anchor: None,
+        };
+
+        assert_eq!(
+            decode(&encode_panel(&command)),
+            Some(Command::Panel(command))
+        );
+    }
+
+    #[test]
     fn unknown_shadow_code_falls_back_to_drop() {
         assert_eq!(
-            [decode_shadow(3), decode_shadow(4)],
-            [PanelShadow::Overhang, PanelShadow::Halo]
+            [decode_shadow(3), decode_shadow(4), decode_shadow(5)],
+            [PanelShadow::Overhang, PanelShadow::Halo, PanelShadow::Cast]
         );
         assert_eq!(
-            decode_shadow(5),
+            decode_shadow(6),
             PanelShadow::Drop,
             "unknown code is a drop shadow"
         );
