@@ -15,7 +15,7 @@ use stoatty_render::{
 use stoatty_term::{
     grid::{
         Bar, Border, BorderEdge, BorderStyle, Grid, Icon, IconKind, Overlay, Panel, PanelShadow,
-        Rgb, ScrollRegion, TextRun,
+        PopoverChrome, Rgb, ScrollRegion, TextRun,
     },
     term::Damage,
 };
@@ -74,6 +74,8 @@ fn builds_passes_and_draws_a_frame_off_screen() {
             scale: 2,
             offset: [0, 0],
             bold: true,
+            chrome: PopoverChrome::CARD,
+            center: false,
             content: "ok".to_owned(),
             spans: Vec::new(),
         },
@@ -88,6 +90,8 @@ fn builds_passes_and_draws_a_frame_off_screen() {
             scale: 1,
             offset: [3, -5],
             bold: false,
+            chrome: PopoverChrome::CARD,
+            center: false,
             content: "aa\nbb\ncc\ndd".to_owned(),
             spans: Vec::new(),
         },

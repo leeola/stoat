@@ -8,11 +8,12 @@ use crate::frame;
 /// Draw a floating popover region above the grid.
 ///
 /// A `width` by `height` cell box anchored at (`top`, `left`) in absolute grid
-/// coordinates, filled with `fill` and outlined with `border`. The region floats
-/// above the cells with its own z-order.
+/// coordinates, filled with `fill` and outlined with `border` in the shape
+/// `chrome` gives it. The region floats above the cells with its own z-order.
 ///
 /// `content` is a line of text drawn inside the box in `content_fg`, drawn at
-/// `scale` times the cell size from the box's top-left, clipped to the box.
+/// `scale` times the cell size, clipped to the box. It starts one cell in from
+/// the box's top-left, or sits centred in the box when `center` is set.
 ///
 /// The content is generic over its container so an emitter re-declaring a
 /// popover every frame can hand a borrowed slice, while a decoded command owns
@@ -41,6 +42,12 @@ pub struct PopoverCommand<S = String, P = Vec<PopoverSpan>> {
     /// Shape the content text at bold weight rather than the default. Only the
     /// content is affected. The box chrome is unchanged.
     pub bold: bool,
+    /// The box's corner radius, border width, and drop shadow.
+    pub chrome: PopoverChrome,
+    /// Centre the content block in the box by pixel, with no inset from the
+    /// box's edge. The block is the content's longest line by its line count,
+    /// at `scale`.
+    pub center: bool,
     pub content: S,
     /// Runs of the content drawn in a color and weight of their own, over
     /// `content_fg` and `bold`.
@@ -66,21 +73,61 @@ pub struct PopoverSpan {
     pub bold: bool,
 }
 
+/// The shape of a popover's box: its corner radius, its border, and the drop
+/// shadow it casts.
+///
+/// Each length is in logical px, which the terminal scales to the display. A
+/// tooltip or a hover card takes [`Self::CARD`], and a popover that a design
+/// board draws states the board's values.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct PopoverChrome {
+    /// The radius of the box's corners. The terminal clamps it to half the
+    /// box's shorter side.
+    pub corner_radius: u8,
+    /// The width of the border band inside the box's edge, at least one
+    /// physical pixel.
+    pub border_width: u8,
+    /// The `[x, y]` displacement of the shadow from the box, positive right
+    /// and down.
+    pub shadow_offset: [i8; 2],
+    /// The distance the shadow fades over past its rectangle, three sigma of
+    /// its gaussian blur.
+    pub shadow_margin: u8,
+    /// The shadow's peak alpha, of 255, where the blur covers its rectangle
+    /// whole.
+    pub shadow_alpha: u8,
+}
+
+impl PopoverChrome {
+    /// The chrome of a tooltip or a hover card.
+    ///
+    /// It rounds at 2 px with a 1 px border and casts the drop shadow of an
+    /// overlay panel, 5 px right and 7 px down, which fades over 16 px from a
+    /// peak alpha of 82.
+    pub const CARD: PopoverChrome = PopoverChrome {
+        corner_radius: 2,
+        border_width: 1,
+        shadow_offset: [5, 7],
+        shadow_margin: 16,
+        shadow_alpha: 82,
+    };
+}
+
 /// The most spans one popover carries, which its one count byte bounds.
 pub const MAX_POPOVER_SPANS: usize = u8::MAX as usize;
 
 /// Bytes the head takes before its spans.
-const HEAD_BYTES: usize = 23;
+const HEAD_BYTES: usize = 30;
 
 /// Bytes each [`PopoverSpan`] takes after the head.
 const SPAN_BYTES: usize = 10;
 
 /// Encode a [`PopoverCommand`] as a full `Gstoatty;popover` frame for an emitter.
 ///
-/// The region, colors, scale, offset, and bold flag ride in a fixed 23-byte
-/// argument on the open marker. Spans, when the popover has any, follow in the
-/// same argument as a count byte and 10 bytes a span. The content streams
-/// between the markers.
+/// The region, colors, scale, offset, bold flag, chrome, and centering flag
+/// ride in a fixed 30-byte argument on the open marker. Spans, when the
+/// popover has any, follow in the same argument as a count byte and 10 bytes a
+/// span. The content streams between the markers.
 pub fn encode_popover<S: AsRef<str>, P: AsRef<[PopoverSpan]>>(
     command: &PopoverCommand<S, P>,
 ) -> Vec<u8> {
@@ -147,6 +194,16 @@ pub fn encode_popover_scope<S, P: AsRef<[PopoverSpan]>>(
         w.write_all(&command.offset[0].to_be_bytes())?;
         w.write_all(&command.offset[1].to_be_bytes())?;
         w.write_all(&[command.bold as u8])?;
+        let chrome = command.chrome;
+        w.write_all(&[
+            chrome.corner_radius,
+            chrome.border_width,
+            chrome.shadow_offset[0] as u8,
+            chrome.shadow_offset[1] as u8,
+            chrome.shadow_margin,
+            chrome.shadow_alpha,
+            command.center as u8,
+        ])?;
 
         let spans = command.spans.as_ref();
         let spans = &spans[..spans.len().min(MAX_POPOVER_SPANS)];
@@ -206,6 +263,14 @@ pub(super) fn decode_popover(args: &[Vec<u8>]) -> Option<PopoverCommand> {
             i16::from_be_bytes([region[20], region[21]]),
         ],
         bold: region[22] != 0,
+        chrome: PopoverChrome {
+            corner_radius: region[23],
+            border_width: region[24],
+            shadow_offset: [region[25] as i8, region[26] as i8],
+            shadow_margin: region[27],
+            shadow_alpha: region[28],
+        },
+        center: region[29] != 0,
         content: String::new(),
         spans: decode_spans(&head[HEAD_BYTES..]),
     })
@@ -249,14 +314,31 @@ mod tests {
 
     #[test]
     fn rejects_wrong_length_popover_payload() {
-        // The first arg here decodes to 3 bytes, not the 23 a popover region
+        // The first arg here decodes to 3 bytes, not the 30 a popover region
         // needs, and the content arg is absent.
         assert!(decode(b"Gstoatty;popover;YWJj").is_none());
     }
 
+    /// The bold and centering flags and the chrome come back field for field,
+    /// a shadow cast up and to the left included.
     #[test]
-    fn popover_head_round_trips_bold() {
-        for bold in [true, false] {
+    fn popover_head_round_trips_its_flags_and_chrome() {
+        let badge = PopoverChrome {
+            corner_radius: 10,
+            border_width: 2,
+            shadow_offset: [0, 10],
+            shadow_margin: 36,
+            shadow_alpha: 140,
+        };
+        let raised = PopoverChrome {
+            shadow_offset: [-3, -4],
+            ..badge
+        };
+        for (bold, chrome, center) in [
+            (true, PopoverChrome::CARD, false),
+            (false, badge, true),
+            (true, raised, false),
+        ] {
             let command = PopoverCommand {
                 top: 1,
                 left: 2,
@@ -268,6 +350,8 @@ mod tests {
                 scale: 2,
                 offset: [4, -2],
                 bold,
+                chrome,
+                center,
                 content: String::new(),
                 spans: Vec::new(),
             };
@@ -295,6 +379,8 @@ mod tests {
             scale: 1,
             offset: [0, 0],
             bold: false,
+            chrome: PopoverChrome::CARD,
+            center: false,
             content: String::new(),
             spans: vec![
                 PopoverSpan {
@@ -340,6 +426,8 @@ mod tests {
             scale: 1,
             offset: [0, 0],
             bold: false,
+            chrome: PopoverChrome::CARD,
+            center: false,
             content: String::new(),
             spans: (0..300).map(span).collect::<Vec<_>>(),
         };

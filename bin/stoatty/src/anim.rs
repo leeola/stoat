@@ -1706,7 +1706,7 @@ mod tests {
         SketchBounds, SketchCommand, SketchShape, SketchStyle,
     };
     use stoatty_term::{
-        grid::{DocumentOffset, Rgb},
+        grid::{DocumentOffset, PopoverChrome, Rgb},
         theme::Theme,
     };
 
@@ -2029,6 +2029,8 @@ mod tests {
             scale,
             offset: [0, 0],
             bold: false,
+            chrome: PopoverChrome::CARD,
+            center: false,
             content: content.to_owned(),
             spans: Vec::new(),
         }

@@ -194,6 +194,8 @@ pub(crate) fn popover_overlay(command: &PopoverCommand) -> Overlay {
         scale: command.scale,
         offset: command.offset,
         bold: command.bold,
+        chrome: command.chrome,
+        center: command.center,
         content: command.content.clone(),
         spans: command
             .spans

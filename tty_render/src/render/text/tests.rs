@@ -1,11 +1,11 @@
 use super::{
     build_underline_row, cell_box, cell_box_rect, cell_glyph_scale, cell_rect_scissor, cursor_cell,
     fill_cell_box, fit_glyph_box, follow_slot, font, glyph_origin, grid_build, inset_scissor,
-    is_cell_fill, overlay_content_cells, pack_dim, pack_fg, region_split, row_len, row_slot,
-    slots_of_rows, text_run_origin, underline_rows_to_build, visible_lines, GlyphSource, GridBuild,
-    OverlayContent, PendingGlyph, RectInstance, RowRotation, RowShaping, TextGlobals, TextInstance,
-    TextPass, UnderlineInstance, DIM_FRACTION_BITS, FOLLOW_SHIFT, KIND_COLOR, KIND_MASK,
-    OVERLAY_RING_PX, STYLE_DOTTED,
+    is_cell_fill, overlay_center_px, overlay_content_cells, pack_dim, pack_fg, region_split,
+    row_len, row_slot, slots_of_rows, text_run_origin, underline_rows_to_build, visible_lines,
+    GlyphSource, GridBuild, OverlayContent, PendingGlyph, RectInstance, RowRotation, RowShaping,
+    TextGlobals, TextInstance, TextPass, UnderlineInstance, DIM_FRACTION_BITS, FOLLOW_SHIFT,
+    KIND_COLOR, KIND_MASK, OVERLAY_RING_PX, STYLE_DOTTED,
 };
 use crate::{
     atlas::{AtlasKind, GlyphInfo},
@@ -20,8 +20,8 @@ use stoatty_protocol::command::{
 };
 use stoatty_term::{
     grid::{
-        whole_row, Cell, Flags, Grid, MarkId, Overlay, OverlaySpan, Rgb, Scale, ScrollRegion,
-        Sketch, TextRun, UnderlineStyle,
+        whole_row, Cell, Flags, Grid, MarkId, Overlay, OverlaySpan, PopoverChrome, Rgb, Scale,
+        ScrollRegion, Sketch, TextRun, UnderlineStyle,
     },
     term::Damage,
 };
@@ -643,6 +643,8 @@ fn overlay_content_cells_clip_to_box_width() {
         scale: 1,
         offset: [0, 0],
         bold: false,
+        chrome: PopoverChrome::CARD,
+        center: false,
         content: "Hello".to_owned(),
         spans: Vec::new(),
     };
@@ -665,6 +667,8 @@ fn overlay_content_cells_space_and_clip_by_scale() {
         scale: 2,
         offset: [0, 0],
         bold: false,
+        chrome: PopoverChrome::CARD,
+        center: false,
         content: "abcd\nef".to_owned(),
         spans: Vec::new(),
     };
@@ -691,6 +695,8 @@ fn overlay_content_cells_emit_all_lines_clipped_to_width() {
         scale: 1,
         offset: [0, 0],
         bold: false,
+        chrome: PopoverChrome::CARD,
+        center: false,
         content: "abcd\nef\nXY".to_owned(),
         spans: Vec::new(),
     };
@@ -721,6 +727,8 @@ fn overlay_content_cells_refill_the_buffers_they_are_given() {
         scale: 1,
         offset: [0, 0],
         bold: false,
+        chrome: PopoverChrome::CARD,
+        center: false,
         content: content.to_owned(),
         spans: Vec::new(),
     };
@@ -731,6 +739,66 @@ fn overlay_content_cells_refill_the_buffers_they_are_given() {
 
     assert_eq!(cells, [(6, 3, 'x'), (7, 3, 'y')], "only the second overlay");
     assert_eq!(starts, [0, 2], "one line, so one start and the end");
+}
+
+/// A 9 by 6 overlay at column 3 and row 2 holding a digit at scale 6, with
+/// its content centred or inset.
+fn digit_overlay(center: bool) -> Overlay {
+    Overlay {
+        top: 2,
+        left: 3,
+        width: 9,
+        height: 6,
+        fill: Rgb::new(0, 0, 0),
+        border: Rgb::new(0, 0, 0),
+        content_fg: Rgb::new(255, 255, 255),
+        scale: 6,
+        offset: [0, 0],
+        bold: true,
+        chrome: PopoverChrome::CARD,
+        center,
+        content: "4".to_owned(),
+        spans: Vec::new(),
+    }
+}
+
+/// Cells 9 px wide and 18 px tall, the Ermine scenes' cell.
+const ERMINE_CELL: CellMetrics = CellMetrics {
+    font_size: 15.0,
+    width: 9.0,
+    height: 18.0,
+    scale_factor: 1.0,
+};
+
+/// A centred overlay lays its content from the box's own corner and shifts
+/// it by half the spare room. A digit 6 cells wide in a 9-cell box leaves 3
+/// columns, 13.5 px on each side, floored to 13, and fills the box's height.
+#[test]
+fn centered_content_starts_at_the_box_corner() {
+    let overlay = digit_overlay(true);
+
+    assert_eq!(
+        (
+            content_cells(&overlay, 6).0,
+            overlay_center_px(&overlay, ERMINE_CELL)
+        ),
+        (vec![(3, 2, '4')], [13.0, 0.0]),
+    );
+}
+
+/// An overlay that does not centre keeps the one-cell inset and takes no
+/// shift.
+#[test]
+fn uncentered_content_keeps_its_inset() {
+    let overlay = digit_overlay(false);
+
+    assert_eq!(
+        (
+            content_cells(&overlay, 6).0,
+            overlay_center_px(&overlay, ERMINE_CELL)
+        ),
+        (vec![(4, 3, '4')], [0.0; 2]),
+    );
 }
 
 #[test]
@@ -2546,6 +2614,8 @@ fn chrome_overlay(content: &str) -> Overlay {
         scale: 1,
         offset: [0, 0],
         bold: false,
+        chrome: PopoverChrome::CARD,
+        center: false,
         content: content.to_owned(),
         spans: Vec::new(),
     }
@@ -4302,6 +4372,8 @@ fn overlays_reshift_cached_bases_and_rebuild_on_content_change() {
         scale: 1,
         offset: [0, 0],
         bold: false,
+        chrome: PopoverChrome::CARD,
+        center: false,
         content: "ab".to_owned(),
         spans: Vec::new(),
     };
@@ -4416,6 +4488,8 @@ fn a_moved_last_row_moves_an_overlay_that_reaches_it() {
         scale: 1,
         offset: [0, 0],
         bold: false,
+        chrome: PopoverChrome::CARD,
+        center: false,
         content: "ab".to_owned(),
         spans: Vec::new(),
     }]);
@@ -4485,6 +4559,8 @@ fn an_overlay_taller_than_its_box_builds_only_the_visible_window() {
         scale: 1,
         offset: [0, 0],
         bold: false,
+        chrome: PopoverChrome::CARD,
+        center: false,
         content,
         spans: Vec::new(),
     };
@@ -4572,6 +4648,8 @@ fn a_rescrolled_overlay_holds_only_this_frame_s_instances() {
         scale: 1,
         offset: [0, 0],
         bold: false,
+        chrome: PopoverChrome::CARD,
+        center: false,
         content: "ab".to_owned(),
         spans: Vec::new(),
     }]);

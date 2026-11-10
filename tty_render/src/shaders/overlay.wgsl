@@ -1,15 +1,14 @@
 // Overlay pass. One instance per floating region draws a filled rounded box
-// outlined by a thin anti-aliased border, anchored at a cell and sized in cells,
-// plus a soft drop shadow cast down-right of the box. The box is opaque and
+// outlined by an anti-aliased border band, anchored at a cell and sized in
+// cells, plus a soft drop shadow cast where the instance's offset puts it. The box is opaque and
 // occludes the cells beneath it; its rounded corners and the shadow alpha-blend
 // over them. Drawn last, the pass sits on top of the grid.
 
 struct Globals {
     resolution: vec2<f32>,
     cell_size: vec2<f32>,
-    // Physical pixels per logical pixel. The border weight below is stated in
-    // logical pixels, so a 2x display draws it twice as wide and the box keeps
-    // its weight against the panel chrome beside it.
+    // Physical pixels per logical pixel. Each instance's lengths arrive scaled
+    // by it, so the stages below read no length through it.
     scale_factor: f32,
     pad0: f32,
 }
@@ -17,11 +16,11 @@ struct Globals {
 @group(0) @binding(0)
 var<uniform> globals: Globals;
 
-// Drop-shadow color and peak alpha. This is the opacity where the blur covers
-// the shadow rect whole, which is well inside the rect. Its own edge carries
-// half of it, and three sigma out it reaches zero.
+// Drop-shadow color. Each instance carries the shadow's peak alpha, the
+// opacity where the blur covers the shadow rect whole, which is well inside
+// the rect. Its own edge carries half of it, and three sigma out it reaches
+// zero.
 const SHADOW_COLOR: vec3<f32> = vec3<f32>(0.0, 0.0, 0.0);
-const SHADOW_ALPHA: f32 = 0.32;
 
 struct VsOut {
     @builtin(position) clip: vec4<f32>,
@@ -35,6 +34,11 @@ struct VsOut {
     @location(4) @interpolate(flat) fill: vec3<f32>,
     @location(5) @interpolate(flat) border: vec3<f32>,
     @location(6) @interpolate(flat) corner_radius: f32,
+    // The border band's width in pixels, at least one.
+    @location(7) @interpolate(flat) border_width: f32,
+    // The shadow's peak alpha. Named apart from the shadow_alpha helper that
+    // the shared shadow source defines.
+    @location(8) @interpolate(flat) shadow_peak: f32,
 }
 
 @vertex
@@ -48,6 +52,8 @@ fn vs_main(
     @location(5) shadow_margin: f32,
     @location(6) corner_radius: f32,
     @location(7) anchor_offset: vec2<f32>,
+    @location(8) border_width: f32,
+    @location(9) shadow_peak: f32,
 ) -> VsOut {
     var corners = array<vec2<f32>, 6>(
         vec2<f32>(0.0, 0.0),
@@ -84,6 +90,8 @@ fn vs_main(
     out.fill = fill;
     out.border = border;
     out.corner_radius = corner_radius;
+    out.border_width = border_width;
+    out.shadow_peak = shadow_peak;
     return out;
 }
 
@@ -110,7 +118,7 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let box_sdf = rounded_box_sdf(p - center, half, radius);
 
     let box_coverage = clamp(0.5 - box_sdf, 0.0, 1.0);
-    let border_px = max(1.0, round(globals.scale_factor));
+    let border_px = in.border_width;
     let border_factor = clamp(box_sdf + border_px + 0.5, 0.0, 1.0);
     let box_color = mix(in.fill, in.border, border_factor);
 
@@ -121,7 +129,7 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let sigma = margin / 3.0;
     let shadow_min = in.box_min + offset;
     let shadow_max = in.box_max + offset;
-    let cast_alpha = SHADOW_ALPHA * shadow_alpha(p, shadow_min, shadow_max, radius, sigma);
+    let cast_alpha = in.shadow_peak * shadow_alpha(p, shadow_min, shadow_max, radius, sigma);
 
     // Composite the rounded box over the shadow: its bulk is opaque, the rounded
     // corners fade to the shadow, and beyond the box only the shadow remains.

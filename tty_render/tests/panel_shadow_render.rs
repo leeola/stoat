@@ -16,7 +16,7 @@ use stoatty_render::{
     },
 };
 use stoatty_term::{
-    grid::{BorderStyle, Grid, Overlay, Panel, PanelShadow, Rgb},
+    grid::{BorderStyle, Grid, Overlay, Panel, PanelShadow, PopoverChrome, Rgb},
     term::Damage,
 };
 
@@ -417,6 +417,8 @@ fn a_popover_rounds_at_the_overlay_panel_radius() {
             scale: 1,
             offset: [0, 0],
             bold: false,
+            chrome: PopoverChrome::CARD,
+            center: false,
             content: String::new(),
             spans: Vec::new(),
         }]);
@@ -455,6 +457,8 @@ fn popover_chrome_scales_with_the_display() {
             scale: 1,
             offset: [0, 0],
             bold: false,
+            chrome: PopoverChrome::CARD,
+            center: false,
             content: String::new(),
             spans: Vec::new(),
         }]);
@@ -477,5 +481,56 @@ fn popover_chrome_scales_with_the_display() {
     assert!(
         below[0] + 3 < SURFACE[0],
         "the scaled blur still darkens 24 px past the box, got {below:?}"
+    );
+}
+
+/// A popover draws in the chrome it carries. A 3 px border is three opaque
+/// rows deep, and a shadow cast 10 px down at the full peak alpha darkens the
+/// ground 5 px under the box past half, where the card's peak of 82 leaves
+/// it lighter.
+#[test]
+fn a_popover_draws_in_its_own_chrome() {
+    const FILL: [u8; 3] = [20, 22, 30];
+    const BORDER: [u8; 3] = [200, 100, 50];
+
+    let r = render_scene(1.0, |grid, _rows, _cols| {
+        grid.set_overlays(vec![Overlay {
+            top: 1,
+            left: 1,
+            width: 4,
+            height: 3,
+            fill: Rgb::new(FILL[0], FILL[1], FILL[2]),
+            border: Rgb::new(BORDER[0], BORDER[1], BORDER[2]),
+            content_fg: Rgb::new(255, 255, 255),
+            scale: 1,
+            offset: [0, 0],
+            bold: false,
+            chrome: PopoverChrome {
+                corner_radius: 2,
+                border_width: 3,
+                shadow_offset: [0, 10],
+                shadow_margin: 36,
+                shadow_alpha: 255,
+            },
+            center: false,
+            content: String::new(),
+            spans: Vec::new(),
+        }]);
+    });
+
+    let box_top = r.cell[1] as u32;
+    let box_bottom = (4.0 * r.cell[1]) as u32;
+    let mid_x = (3.0 * r.cell[0]) as u32;
+    let band = [0, 1, 2, 3].map(|row| r.px(mid_x, box_top + row));
+    let below = r.px(mid_x, box_bottom + 5);
+
+    assert_eq!(
+        band,
+        [BORDER, BORDER, BORDER, FILL],
+        "the border band is three rows deep"
+    );
+    assert!(
+        below[0] < SURFACE[0] / 2,
+        "the full-alpha shadow darkens the ground past half, got {below:?}"
     );
 }

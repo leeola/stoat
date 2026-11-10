@@ -49,7 +49,7 @@ use stoat_widgets::{
     popover::Popover,
     ApcScene,
 };
-use stoatty_protocol::command::{IconKind, PopoverSpan};
+use stoatty_protocol::command::{IconKind, PopoverChrome, PopoverSpan};
 
 /// Columns reserved on a pane's right edge for the minimap strip, matching the
 /// width the terminal's GPU minimap pass paints there.
@@ -2731,6 +2731,8 @@ fn render_diagnostic_popover(
         scale: 1,
         offset: [3, 6],
         bold: false,
+        chrome: PopoverChrome::CARD,
+        center: false,
         content: &content,
         spans: &spans,
     }

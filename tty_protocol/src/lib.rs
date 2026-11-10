@@ -202,9 +202,15 @@
 /// corner radius in logical px. A terminal that predates it reads the first 31
 /// bytes and draws the thumb square. This version drops a shorter head.
 ///
+/// Version 31 reads a fixed 30-byte `popover` head, which ends in the box's
+/// chrome and a centering flag. The chrome is a corner radius, a border width,
+/// a shadow offset, a shadow margin, and a shadow peak alpha. A terminal that
+/// predates it reads the chrome bytes as a span count and draws stray spans.
+/// This version drops a shorter head.
+///
 /// Zero is reserved for a peer whose handshake carries no version at all, which
 /// is every build from before the field existed.
-pub const PROTOCOL_VERSION: u32 = 30;
+pub const PROTOCOL_VERSION: u32 = 31;
 
 /// The first [`PROTOCOL_VERSION`] whose terminal reads the `text_runs` and
 /// `bars` batches.
@@ -240,6 +246,13 @@ pub const PANEL_EDGES_PROTOCOL: u32 = 27;
 /// An earlier terminal draws every thumb square, and a terminal at this
 /// version drops a `minimap` head that holds no radius.
 pub const MINIMAP_THUMB_RADIUS_PROTOCOL: u32 = 30;
+
+/// The first [`PROTOCOL_VERSION`] whose terminal draws a `popover` in the
+/// chrome its head declares and centres its content on request.
+///
+/// An earlier terminal reads the chrome bytes as spans, and a terminal at this
+/// version drops a `popover` head that holds no chrome.
+pub const POPOVER_CHROME_PROTOCOL: u32 = 31;
 
 pub mod command;
 pub mod detect;

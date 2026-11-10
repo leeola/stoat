@@ -24,6 +24,12 @@ use stoatty_protocol::command::{
 
 pub(crate) mod from_command;
 
+/// The shape of a popover's box, re-exported so a consumer of
+/// [`Overlay::chrome`] has a name for it.
+///
+/// Kept as the wire type, since it holds only lengths and an alpha that the
+/// renderer reads as they arrive.
+pub use stoatty_protocol::command::PopoverChrome;
 /// A minimap line's run summary, re-exported so a consumer of
 /// [`Grid::minimap_content`] has a name for what it gets back.
 ///
@@ -1756,8 +1762,9 @@ pub enum Scale {
 /// [`Self::border`] outline.
 ///
 /// [`Self::content`] is a line of text drawn inside the box in
-/// [`Self::content_fg`], drawn at [`Self::scale`] times the cell size from the
-/// box's top-left, clipped to the box.
+/// [`Self::content_fg`], drawn at [`Self::scale`] times the cell size, clipped
+/// to the box. It starts one cell in from the box's top-left, or sits centred
+/// in the box when [`Self::center`] is set.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct Overlay {
     pub top: u16,
@@ -1778,6 +1785,12 @@ pub struct Overlay {
     /// Shape the content text at bold weight rather than the default. Only the
     /// content is affected. The box chrome is unchanged.
     pub bold: bool,
+    /// The box's corner radius, border width, and drop shadow, in logical px.
+    pub chrome: PopoverChrome,
+    /// Centre the content block in the box by pixel, with no inset from the
+    /// box's edge. The block is the content's longest line by its line count,
+    /// at [`Self::scale`].
+    pub center: bool,
     pub content: String,
     /// Runs of [`Self::content`] drawn in a color and weight of their own,
     /// over [`Self::content_fg`] and [`Self::bold`].
@@ -2366,7 +2379,7 @@ mod tests {
     use super::{
         intern_into, Bar, Border, BorderEdge, BorderId, BorderStyle, Borders, Cell, Flags, Grid,
         HashMap, Icon, IconKind, LineSummary, MarkId, Minimap, MinimapRun, MinimapStrip, Overlay,
-        PagePool, Polyline, Rgb, Rgba, Scale, ScrollRegion, TextRun,
+        PagePool, Polyline, PopoverChrome, Rgb, Rgba, Scale, ScrollRegion, TextRun,
     };
 
     /// The rows the slide vacates have to come back blank rather than holding
@@ -2821,6 +2834,8 @@ mod tests {
             scale: 1,
             offset: [0, 0],
             bold: false,
+            chrome: PopoverChrome::CARD,
+            center: false,
             content: "hi".to_owned(),
             spans: Vec::new(),
         };
@@ -3035,6 +3050,8 @@ mod tests {
             scale: 1,
             offset: [0, 0],
             bold: false,
+            chrome: PopoverChrome::CARD,
+            center: false,
             content: String::new(),
             spans: Vec::new(),
         }

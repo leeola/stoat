@@ -93,7 +93,7 @@ pub use pool::{
 };
 pub use popover::{
     encode_popover, encode_popover_end, encode_popover_end_into, encode_popover_into,
-    encode_popover_scope, PopoverCommand, PopoverSpan, MAX_POPOVER_SPANS,
+    encode_popover_scope, PopoverChrome, PopoverCommand, PopoverSpan, MAX_POPOVER_SPANS,
 };
 pub use scale::{encode_scale, encode_scale_into, ScaleCommand};
 pub use scroll_region::{encode_scroll_region, encode_scroll_region_into, ScrollRegionCommand};
@@ -716,6 +716,8 @@ mod tests {
                     scale: 1,
                     offset: [0, 0],
                     bold: false,
+                    chrome: PopoverChrome::CARD,
+                    center: false,
                     content: String::new(),
                     spans: Vec::new(),
                 })),
@@ -867,6 +869,8 @@ mod tests {
             scale: 2,
             offset: [4, -2],
             bold: false,
+            chrome: PopoverChrome::CARD,
+            center: false,
             content: "two\nlines".to_owned(),
             spans: Vec::new(),
         };
@@ -1057,6 +1061,8 @@ mod tests {
             scale: 2,
             offset: [4, -2],
             bold: true,
+            chrome: PopoverChrome::CARD,
+            center: false,
             content: "hover text".to_owned(),
             spans: Vec::new(),
         };
@@ -1079,6 +1085,8 @@ mod tests {
             scale: 2,
             offset: [4, -2],
             bold: true,
+            chrome: PopoverChrome::CARD,
+            center: false,
             content,
             spans: Vec::new(),
         }

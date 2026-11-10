@@ -103,7 +103,9 @@ use std::{
 };
 use stoat_config::{LineNumbers, MinimapMode, WrapMode};
 use stoat_widgets::{minimap::Minimap, popover::Popover, ApcScene};
-use stoatty_protocol::{BACKDROP_PANEL_PROTOCOL, BATCHED_DECORATIONS_PROTOCOL};
+use stoatty_protocol::{
+    command::PopoverChrome, BACKDROP_PANEL_PROTOCOL, BATCHED_DECORATIONS_PROTOCOL,
+};
 use unicode_width::UnicodeWidthStr;
 
 /// Strip id for the single-mode minimap, reserved above every pane index (which
@@ -2892,6 +2894,8 @@ fn render_pane_id_badges(
             scale: badge.scale,
             offset: [0, 0],
             bold: true,
+            chrome: PopoverChrome::CARD,
+            center: false,
             content: &digit,
             spans: &[],
         };

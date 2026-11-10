@@ -15,6 +15,7 @@
 use ratatui::{backend::CrosstermBackend, layout::Rect, style::Style, Frame, Terminal};
 use std::{io, thread};
 use stoat_widgets::{popover::Popover, ApcScene, ApcSession, SessionOptions};
+use stoatty_protocol::command::PopoverChrome;
 
 /// The static code buffer, drawn from the top-left.
 const BUFFER: [&str; 5] = [
@@ -91,6 +92,8 @@ fn draw_scene(frame: &mut Frame<'_>, scene: &mut ApcScene, content: &str) {
             scale: 2,
             offset: [6, 4],
             bold: false,
+            chrome: PopoverChrome::CARD,
+            center: false,
             content,
             spans: &[],
         },

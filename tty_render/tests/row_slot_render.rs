@@ -20,7 +20,7 @@ use stoatty_render::{
     test_support::{offscreen_target, pixel, read_back, require_headless_device},
 };
 use stoatty_term::{
-    grid::{whole_row, Grid, Overlay, Rgb, TextRun, UnderlineStyle},
+    grid::{whole_row, Grid, Overlay, PopoverChrome, Rgb, TextRun, UnderlineStyle},
     term::Damage,
 };
 use wgpu::{Device, Queue, Texture, TextureFormat};
@@ -223,6 +223,8 @@ fn overlay_content_lines_do_not_wrap_at_the_grid_height() {
         scale: 1,
         offset: [0, 0],
         bold: false,
+        chrome: PopoverChrome::CARD,
+        center: false,
         // Three lines, laid out from the row below the box's top edge.
         content: "MMM\nMMM\nMMM".to_owned(),
         spans: Vec::new(),
@@ -235,6 +237,47 @@ fn overlay_content_lines_do_not_wrap_at_the_grid_height() {
         harness.rows_painting(&pixels, content_fg),
         vec![1, 2, 3],
         "each content line must keep its own row"
+    );
+}
+
+/// A centred overlay's glyphs take the shift that puts its content block in
+/// the middle of the box. One `M` in a 10 by 5 box lands in row 2 and starts
+/// four and a half cells in, where the inset form puts it in row 1, one cell
+/// in.
+#[test]
+fn centered_overlay_content_sits_mid_box() {
+    let (device, queue) = require_headless_device();
+
+    let content_fg = Rgb::new(20, 240, 60);
+    let mut grid = Grid::new(ROWS as usize, 12);
+    grid.set_overlays(vec![Overlay {
+        top: 0,
+        left: 0,
+        width: 10,
+        height: 5,
+        fill: Rgb::new(0, 0, 0),
+        border: Rgb::new(0, 0, 0),
+        content_fg,
+        scale: 1,
+        offset: [0, 0],
+        bold: false,
+        chrome: PopoverChrome::CARD,
+        center: true,
+        content: "M".to_owned(),
+        spans: Vec::new(),
+    }]);
+
+    let mut harness = Harness::new(&device, 12);
+    let pixels = harness.render(&device, &queue, &grid, &Damage::Full, 0);
+    let cell = harness.cell_w;
+
+    assert_eq!(
+        (
+            harness.rows_matching(&pixels, content_fg, 0..4 * cell, |band| band),
+            harness.rows_matching(&pixels, content_fg, 4 * cell..6 * cell, |band| band),
+        ),
+        (vec![], vec![2]),
+        "the glyph sits in row 2, in the columns either side of the box's middle",
     );
 }
 

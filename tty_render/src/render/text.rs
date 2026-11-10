@@ -1892,11 +1892,14 @@ impl TextPass {
             for (index, (overlay, base)) in overlays.iter().zip(&self.overlay_bases).enumerate() {
                 let start = overlay_instances.len() as u32;
                 let anchor = overlay_offset(overlay, row_anchor, metrics.height);
+                // The centring shift moves the glyphs alone. The scissor keeps
+                // the anchor without it, so the clip stays the box.
+                let center = overlay_center_px(overlay, metrics);
                 let scroll_px = scroll_at(index) * metrics.height;
                 overlay_instances.extend(base.iter().map(|instance| {
                     let mut instance = *instance;
-                    instance.pos[0] += anchor[0];
-                    instance.pos[1] += anchor[1] - scroll_px;
+                    instance.pos[0] += anchor[0] + center[0];
+                    instance.pos[1] += anchor[1] + center[1] - scroll_px;
                     instance
                 }));
                 draws.push(OverlayDraw {
@@ -5409,21 +5412,25 @@ fn cursor_cell_glyphs_into(
 /// The `(col, row, char)` cells an overlay's content occupies, laid out at
 /// `scale` times the cell size.
 ///
-/// Content is laid out line by line down the box from its top-left: each
-/// The content is inset one cell from the box edge, matching the cell fallback,
+/// Content is laid out line by line down the box from its top-left. The
+/// content is inset one cell from the box edge, matching the cell fallback,
 /// so it does not jam against the border. A `\n`-separated line starts a new
 /// row, its characters running rightward from that inset left edge. Each glyph
 /// occupies a `scale` by `scale` cell block, so chars advance `scale` columns
 /// and lines advance `scale` rows, and a line fits `(width - 2) / scale` chars
 /// before the box clips it.
 ///
-/// Every line is emitted, including those past the box height, so they can
-/// scroll into view. The overlay-text draw scissors to the box to clip the
-/// vertical overflow. `scale` must be at least 1.
+/// A centred overlay starts at the box's own top-left with no inset, and a
+/// line fits `width / scale` chars. [`overlay_center_px`] then shifts the
+/// block to the middle of the box by pixel.
+///
+/// Every line is emitted, including those past the box height, so they come
+/// into view as the content scrolls. The overlay-text draw scissors to the box
+/// to clip the vertical overflow. `scale` must be at least 1.
 ///
 /// `cells` and `line_starts` are cleared and refilled, so a caller holding them
 /// across calls walks the content without allocating. `line_starts` carries where
-/// each line begins in `cells`, plus a trailing entry for the end.
+/// each line starts in `cells`, plus a trailing entry for the end.
 fn overlay_content_cells(
     overlay: &Overlay,
     scale: usize,
@@ -5433,9 +5440,18 @@ fn overlay_content_cells(
     cells.clear();
     line_starts.clear();
 
-    let left = overlay.left as usize + 1;
-    let top = overlay.top as usize + 1;
-    let cols = (overlay.width as usize).saturating_sub(2) / scale;
+    let (left, top, cols) = match overlay.center {
+        true => (
+            overlay.left as usize,
+            overlay.top as usize,
+            overlay.width as usize / scale,
+        ),
+        false => (
+            overlay.left as usize + 1,
+            overlay.top as usize + 1,
+            (overlay.width as usize).saturating_sub(2) / scale,
+        ),
+    };
 
     for (row, line) in overlay.content.lines().enumerate() {
         line_starts.push(cells.len() as u32);
@@ -5514,6 +5530,36 @@ fn overlay_offset(popover: &Overlay, row_anchor: RowAnchor, cell_h: f32) -> [f32
     [
         popover.offset[0] as f32,
         popover.offset[1] as f32 + overlay::last_row_shift(popover, row_anchor, cell_h),
+    ]
+}
+
+/// The pixel shift that puts a centred overlay's content block in the middle
+/// of its box, `[0.0; 2]` for an overlay that insets its content.
+///
+/// The block is the longest content line, capped at the chars a box row
+/// holds, by the line count, at the overlay's scale. Half the spare room on
+/// each axis is the shift, floored to a whole pixel. A block larger than the
+/// box on an axis takes no shift there, so it starts at the box's edge and the
+/// scissor clips the rest.
+fn overlay_center_px(overlay: &Overlay, metrics: CellMetrics) -> [f32; 2] {
+    if !overlay.center {
+        return [0.0; 2];
+    }
+
+    let scale = i32::from(overlay.scale.max(1));
+    let width = i32::from(overlay.width);
+    let fits = (width / scale) as usize;
+    let cols = overlay
+        .content
+        .lines()
+        .map(|line| line.chars().count().min(fits))
+        .max()
+        .unwrap_or(0) as i32;
+    let rows = overlay.content.lines().count() as i32;
+    let half_spare = |cells: i32, cell_px: f32| (cells as f32 * cell_px / 2.0).floor().max(0.0);
+    [
+        half_spare(width - cols * scale, metrics.width),
+        half_spare(i32::from(overlay.height) - rows * scale, metrics.height),
     ]
 }
 

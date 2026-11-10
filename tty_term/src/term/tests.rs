@@ -33,7 +33,7 @@ use stoatty_protocol::command::{
     MinimapDropCommand, MinimapLenCommand, MinimapLinesCommand, MinimapRun, MinimapViewCommand,
     PanelCommand, PanelShadow as ProtoPanelShadow, PolylineCommand, PoolAnchorCommand,
     PoolCursorCommand, PoolCursorReleaseCommand, PoolDropCommand, PoolKind, PoolRegionCommand,
-    PopoverCommand, PopoverSpan, RepositionCommand, ScaleCommand, ScrollCommand,
+    PopoverChrome, PopoverCommand, PopoverSpan, RepositionCommand, ScaleCommand, ScrollCommand,
     ScrollRegionCommand, SketchBounds, SketchCommand, SketchEasing, SketchPhase, SketchShape,
     SketchStyle, SketchTiming, TextRunCommand, TextRunsCommand, WindowOpenCommand,
 };
@@ -434,6 +434,8 @@ fn a_decoration_change_bumps_only_its_epoch() {
         scale: 1,
         offset: [0, 0],
         bold: false,
+        chrome: PopoverChrome::CARD,
+        center: false,
         content: "x".to_owned(),
         spans: Vec::new(),
     }));
@@ -2125,6 +2127,13 @@ fn scroll_region_apc_frame_sets_and_replaces_the_region() {
 
 #[test]
 fn popover_apc_frame_sets_a_grid_overlay() {
+    let chrome = PopoverChrome {
+        corner_radius: 10,
+        border_width: 2,
+        shadow_offset: [-3, 10],
+        shadow_margin: 36,
+        shadow_alpha: 140,
+    };
     let frame = encode_popover(&PopoverCommand {
         top: 1,
         left: 2,
@@ -2136,6 +2145,8 @@ fn popover_apc_frame_sets_a_grid_overlay() {
         scale: 2,
         offset: [4, -2],
         bold: true,
+        chrome,
+        center: true,
         content: "ok".to_owned(),
         spans: vec![PopoverSpan {
             line: 0,
@@ -2164,6 +2175,8 @@ fn popover_apc_frame_sets_a_grid_overlay() {
             scale: 2,
             offset: [4, -2],
             bold: true,
+            chrome,
+            center: true,
             content: "ok".to_owned(),
             spans: vec![OverlaySpan {
                 line: 0,
@@ -2189,6 +2202,8 @@ fn popover_content_streams_across_advance_chunks() {
         scale: 1,
         offset: [0, 0],
         bold: false,
+        chrome: PopoverChrome::CARD,
+        center: false,
         content: "streamed".to_owned(),
         spans: Vec::new(),
     });
@@ -2218,6 +2233,8 @@ fn popover_content_streams_across_advance_chunks() {
             scale: 1,
             offset: [0, 0],
             bold: false,
+            chrome: PopoverChrome::CARD,
+            center: false,
             content: "streamed".to_owned(),
             spans: Vec::new(),
         }]
@@ -2385,6 +2402,8 @@ fn a_capture_past_the_cap_commits_and_restores_live_routing() {
         scale: 1,
         offset: [0, 0],
         bold: false,
+        chrome: PopoverChrome::CARD,
+        center: false,
         content: String::new(),
         spans: Vec::new(),
     });

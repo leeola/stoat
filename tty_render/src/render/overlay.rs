@@ -1,9 +1,9 @@
 //! Instanced floating-overlay pass.
 //!
-//! Draws each [`Overlay`] as a filled box with a one-pixel border, above the
-//! grid with its own z-order. Overlays are not cell attributes: they float over
-//! the grid and occlude the cells beneath, so this pass runs last and writes
-//! opaque pixels rather than alpha-blending into the text.
+//! Draws each [`Overlay`] as a filled box in the corner radius, border width,
+//! and drop shadow its chrome states, above the grid with its own z-order. Overlays are not cell
+//! attributes: they float over the grid and occlude the cells beneath, so this pass runs last and
+//! writes opaque pixels rather than alpha-blending into the text.
 //!
 //! This is the compositing layer for popovers and completion menus; the region
 //! is the box itself, with any text inside it drawn separately.
@@ -24,26 +24,12 @@ use wgpu::{
 /// when a frame exceeds it.
 const INITIAL_CAPACITY: usize = 16;
 
-/// Drop-shadow blur radius in logical pixels: the distance over which the
-/// shadow's alpha fades to zero past the shadow rectangle.
-const SHADOW_MARGIN: f32 = 16.0;
-
-/// Drop-shadow displacement in logical pixels, down and to the right, so an
-/// overlay reads as floating above the grid rather than pasted onto it.
+/// The data one overlay hands the vertex stage, a field to each vertex
+/// attribute in order.
 ///
-/// With [`SHADOW_MARGIN`] it is the drop shadow the panel pass casts under an
-/// overlay panel, so a popover floats as high as a modal or the completion list.
-const SHADOW_OFFSET: [f32; 2] = [5.0, 7.0];
-
-/// Corner radius in logical pixels for the rounded box.
-///
-/// It is the radius the overlay panel role gives a modal or the completion
-/// list, so a popover rounds like the panels around it. The shader clamps it to
-/// the box's half-extent, so a small box rounds proportionally.
-const CORNER_RADIUS: f32 = 2.0;
-
-/// Per-overlay instance: the anchor cell, the size in cells, the two colors, the
-/// drop-shadow displacement and blur radius, and the corner radius.
+/// The cell and the size count cells. Every other length is in physical
+/// pixels, from the overlay's chrome at the display's scale factor, and the
+/// shadow's peak alpha is a fraction of 1.
 #[repr(C)]
 #[derive(Clone, Copy, PartialEq, Pod, Zeroable)]
 struct OverlayInstance {
@@ -55,17 +41,19 @@ struct OverlayInstance {
     shadow_margin: f32,
     corner_radius: f32,
     anchor_offset: [f32; 2],
+    border_width: f32,
+    shadow_alpha: f32,
 }
 
-/// Uniform shared by every instance: the surface resolution and cell size the
-/// vertex shader maps cell coordinates through, plus the display density the
-/// border weight is stated in.
+/// The uniform every instance shares, the surface resolution and cell size the
+/// vertex shader maps cell coordinates through, and the display density.
 #[repr(C)]
 #[derive(Clone, Copy, PartialEq, Pod, Zeroable)]
 struct Globals {
     resolution: [f32; 2],
     cell_size: [f32; 2],
-    /// Physical pixels per logical pixel, which the border weight scales by.
+    /// Physical pixels per logical pixel. Each instance's lengths are scaled
+    /// by it before upload, so the shader reads no length through it.
     scale_factor: f32,
     _pad: f32,
 }
@@ -139,6 +127,8 @@ impl OverlayPass {
                         5 => Float32,
                         6 => Float32,
                         7 => Float32x2,
+                        8 => Float32,
+                        9 => Float32,
                     ],
                 })],
             },
@@ -291,13 +281,15 @@ fn build_overlay_instances(overlays: &[Overlay], scale_factor: f32) -> Vec<Overl
 
 /// Build into `out` one instance per overlay, in draw order.
 ///
-/// The shadow geometry, the corner radius, and the anchor offset are all stated
-/// in logical pixels and multiplied by `scale_factor` here. Left physical, they
-/// hold their pixel count against a box that doubled, so a popover's chrome
-/// reads half weight beside the panel chrome on a 2x display.
+/// Each overlay's chrome states its shadow geometry, corner radius, and border
+/// width in logical pixels, as the anchor offset is, and all of them are
+/// multiplied by `scale_factor` here. Left physical, they hold their pixel
+/// count against a box that doubled, so a popover's chrome reads half weight
+/// beside the panel chrome on a 2x display.
 ///
 /// Each product rounds, so the box edges land on the whole pixels the cell
-/// rectangle already uses.
+/// rectangle already uses. The border keeps at least one physical pixel, and
+/// the shadow's peak alpha passes through as a fraction of 1.
 ///
 /// A box that reaches the last row takes [`last_row_shift`] in its anchor
 /// offset, for rows `cell_h` pixels tall that `anchor` places.
@@ -312,22 +304,27 @@ fn build_overlay_instances_into(
     out: &mut Vec<OverlayInstance>,
 ) {
     out.clear();
-    out.extend(overlays.iter().map(|overlay| OverlayInstance {
-        cell: [overlay.left as f32, overlay.top as f32],
-        size: [overlay.width as f32, overlay.height as f32],
-        fill: rgb_f32(overlay.fill),
-        border: rgb_f32(overlay.border),
-        shadow_offset: [
-            (SHADOW_OFFSET[0] * scale_factor).round(),
-            (SHADOW_OFFSET[1] * scale_factor).round(),
-        ],
-        shadow_margin: (SHADOW_MARGIN * scale_factor).round(),
-        corner_radius: (CORNER_RADIUS * scale_factor).round(),
-        anchor_offset: [
-            (overlay.offset[0] as f32 * scale_factor).round(),
-            (overlay.offset[1] as f32 * scale_factor).round()
-                + last_row_shift(overlay, anchor, cell_h),
-        ],
+    out.extend(overlays.iter().map(|overlay| {
+        let chrome = overlay.chrome;
+        let px = |logical: f32| (logical * scale_factor).round();
+        OverlayInstance {
+            cell: [overlay.left as f32, overlay.top as f32],
+            size: [overlay.width as f32, overlay.height as f32],
+            fill: rgb_f32(overlay.fill),
+            border: rgb_f32(overlay.border),
+            shadow_offset: [
+                px(f32::from(chrome.shadow_offset[0])),
+                px(f32::from(chrome.shadow_offset[1])),
+            ],
+            shadow_margin: px(f32::from(chrome.shadow_margin)),
+            corner_radius: px(f32::from(chrome.corner_radius)),
+            anchor_offset: [
+                px(overlay.offset[0] as f32),
+                px(overlay.offset[1] as f32) + last_row_shift(overlay, anchor, cell_h),
+            ],
+            border_width: px(f32::from(chrome.border_width)).max(1.0),
+            shadow_alpha: f32::from(chrome.shadow_alpha) / 255.0,
+        }
     }));
 }
 
@@ -347,7 +344,7 @@ pub(crate) fn last_row_shift(overlay: &Overlay, anchor: RowAnchor, cell_h: f32) 
 mod tests {
     use super::{build_overlay_instances, build_overlay_instances_into, OverlayInstance};
     use crate::render::{GridLayout, RowAnchor};
-    use stoatty_term::grid::{Overlay, Rgb};
+    use stoatty_term::grid::{Overlay, PopoverChrome, Rgb};
     use wgpu::naga::{
         front::wgsl,
         valid::{Capabilities, ValidationFlags, Validator},
@@ -377,6 +374,8 @@ mod tests {
             scale: 1,
             offset: [-4, 6],
             bold: false,
+            chrome: PopoverChrome::CARD,
+            center: false,
             content: "x".to_owned(),
             spans: Vec::new(),
         }];
@@ -405,6 +404,8 @@ mod tests {
             scale: 1,
             offset: [-4, 6],
             bold: false,
+            chrome: PopoverChrome::CARD,
+            center: false,
             content: "x".to_owned(),
             spans: Vec::new(),
         }];
@@ -416,24 +417,67 @@ mod tests {
         assert_eq!(instances[0].size, [8.0, 4.0]);
         assert_eq!(instances[0].fill, [1.0, 0.0, 0.0]);
         assert_eq!(instances[0].border, [0.0, 1.0, 0.0]);
-        assert_eq!(instances[0].shadow_offset, super::SHADOW_OFFSET);
-        assert_eq!(instances[0].shadow_margin, super::SHADOW_MARGIN);
-        assert_eq!(instances[0].corner_radius, super::CORNER_RADIUS);
+        assert_eq!(instances[0].shadow_offset, [5.0, 7.0]);
+        assert_eq!(instances[0].shadow_margin, 16.0);
+        assert_eq!(instances[0].corner_radius, 2.0);
         assert_eq!(instances[0].anchor_offset, [-4.0, 6.0]);
+        assert_eq!(instances[0].border_width, 1.0);
+        assert_eq!(instances[0].shadow_alpha, 82.0 / 255.0);
 
         // The chrome is stated in logical pixels, so a denser display draws the
         // same popover with proportionally larger chrome. The cell rectangle it
-        // sits on grew by the same factor.
+        // sits on grew by the same factor, and the alpha holds.
         let dense = build_overlay_instances(&overlays, 2.0);
 
         assert_eq!(dense[0].cell, [5.0, 3.0], "cells do not scale");
-        assert_eq!(
-            dense[0].shadow_offset,
-            [super::SHADOW_OFFSET[0] * 2.0, super::SHADOW_OFFSET[1] * 2.0]
-        );
-        assert_eq!(dense[0].shadow_margin, super::SHADOW_MARGIN * 2.0);
-        assert_eq!(dense[0].corner_radius, super::CORNER_RADIUS * 2.0);
+        assert_eq!(dense[0].shadow_offset, [10.0, 14.0]);
+        assert_eq!(dense[0].shadow_margin, 32.0);
+        assert_eq!(dense[0].corner_radius, 4.0);
         assert_eq!(dense[0].anchor_offset, [-8.0, 12.0]);
+        assert_eq!(dense[0].border_width, 2.0);
+        assert_eq!(dense[0].shadow_alpha, 82.0 / 255.0);
+    }
+
+    /// An overlay draws in the chrome it carries, the Pane Picker badge's here:
+    /// a 10 px radius, a 2 px border, and a shadow 10 px down that fades over
+    /// 36 px from a peak alpha of 140.
+    #[test]
+    fn an_overlay_takes_its_own_chrome() {
+        let overlays = [Overlay {
+            top: 0,
+            left: 0,
+            width: 9,
+            height: 6,
+            fill: Rgb::new(0, 0, 0),
+            border: Rgb::new(0, 0, 0),
+            content_fg: Rgb::new(0, 0, 0),
+            scale: 6,
+            offset: [0, 0],
+            bold: true,
+            chrome: PopoverChrome {
+                corner_radius: 10,
+                border_width: 2,
+                shadow_offset: [0, 10],
+                shadow_margin: 36,
+                shadow_alpha: 140,
+            },
+            center: true,
+            content: "4".to_owned(),
+            spans: Vec::new(),
+        }];
+
+        let instance = build_overlay_instances(&overlays, 1.0)[0];
+
+        assert_eq!(
+            (
+                instance.corner_radius,
+                instance.border_width,
+                instance.shadow_offset,
+                instance.shadow_margin,
+                instance.shadow_alpha
+            ),
+            (10.0, 2.0, [0.0, 10.0], 36.0, 140.0 / 255.0),
+        );
     }
 
     /// A popover that reaches the last row moves up onto it whole, and one that
@@ -457,6 +501,8 @@ mod tests {
             scale: 1,
             offset: [0, 6],
             bold: false,
+            chrome: PopoverChrome::CARD,
+            center: false,
             content: String::new(),
             spans: Vec::new(),
         };

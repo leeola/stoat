@@ -25,7 +25,7 @@ use std::{
     thread,
 };
 use stoat_widgets::{icon::Icon, popover::Popover, ApcScene, ApcSession, SessionOptions};
-use stoatty_protocol::command::IconKind;
+use stoatty_protocol::command::{IconKind, PopoverChrome};
 
 /// Editor background (`#282c34`) and foreground (`#abb2bf`), the One Dark colors
 /// the default theme uses, set explicitly so erased cells and body text share the
@@ -118,6 +118,8 @@ fn draw_scene(frame: &mut Frame<'_>, scene: &mut ApcScene) {
             scale: 1,
             offset: [3, 6],
             bold: false,
+            chrome: PopoverChrome::CARD,
+            center: false,
             content: TOOLTIP_CONTENT,
             spans: &[],
         },

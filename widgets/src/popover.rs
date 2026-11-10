@@ -6,7 +6,7 @@ use ratatui::{
     symbols::border,
     widgets::StatefulWidget,
 };
-use stoatty_protocol::command::{self, PopoverCommand, PopoverSpan};
+use stoatty_protocol::command::{self, PopoverChrome, PopoverCommand, PopoverSpan};
 
 /// A floating popover box drawn above the grid.
 ///
@@ -22,6 +22,11 @@ use stoatty_protocol::command::{self, PopoverCommand, PopoverSpan};
 /// fallback. Rich content is inset one cell from the border, matching the cell
 /// fallback's inset.
 ///
+/// `chrome` gives the rich box its corner radius, its border width, and its
+/// drop shadow. The cell fallback draws a plain ring whatever it holds. With
+/// `center` set, the content sits in the middle of the box in both forms, with
+/// no inset from its edge.
+///
 /// `bold` shapes the content at bold weight in both the rich rendering and the
 /// cell fallback. `spans` give runs of the content a color and weight of their
 /// own in both too. The fallback counts each character as one cell.
@@ -32,6 +37,8 @@ pub struct Popover<'a> {
     pub scale: u8,
     pub offset: [i16; 2],
     pub bold: bool,
+    pub chrome: PopoverChrome,
+    pub center: bool,
     pub content: &'a str,
     pub spans: &'a [PopoverSpan],
 }
@@ -69,6 +76,8 @@ impl Popover<'_> {
                 scale: self.scale,
                 offset: self.offset,
                 bold: self.bold,
+                chrome: self.chrome,
+                center: self.center,
                 content: self.content,
                 spans: self.spans,
             },
@@ -81,21 +90,33 @@ impl Popover<'_> {
     /// Each line of `content` takes one row. The box never grows to fit, so
     /// lines past its height and text past its width are dropped. A caller
     /// sizes the area from its own content to avoid that.
+    ///
+    /// With `center` set, the lines sit in the middle of the box with no
+    /// inset, each line centred on its own, and the spans keep the content's
+    /// color. The ring then goes only around a box wider and taller than two
+    /// cells, so a box too small for it still shows its content.
     pub fn draw_fallback(&self, area: Rect, buf: &mut Buffer) {
         let fill = cells::rgb(self.fill);
         cells::fill(buf, area, Style::default().bg(fill));
-        cells::draw_perimeter(
-            buf,
-            area,
-            border::PLAIN,
-            Style::default().fg(cells::rgb(self.border)).bg(fill),
-        );
+        let framed = area.width > 2 && area.height > 2;
+        if framed || !self.center {
+            cells::draw_perimeter(
+                buf,
+                area,
+                border::PLAIN,
+                Style::default().fg(cells::rgb(self.border)).bg(fill),
+            );
+        }
 
-        if area.width > 2 && area.height > 2 {
-            let mut content_style = Style::default().fg(cells::rgb(self.content_fg)).bg(fill);
-            if self.bold {
-                content_style = content_style.add_modifier(Modifier::BOLD);
-            }
+        let mut content_style = Style::default().fg(cells::rgb(self.content_fg)).bg(fill);
+        if self.bold {
+            content_style = content_style.add_modifier(Modifier::BOLD);
+        }
+        if self.center {
+            self.write_centered(area, buf, content_style);
+            return;
+        }
+        if framed {
             let width = (area.width - 2) as usize;
             let rows = self.content.lines().take((area.height - 2) as usize);
             for (row, line) in rows.enumerate() {
@@ -103,6 +124,19 @@ impl Popover<'_> {
                 buf.set_stringn(area.x + 1, y, line, width, content_style);
             }
             self.recolor_spans(area, buf, fill);
+        }
+    }
+
+    /// Write the content lines in the middle of `area` in `style`, each line
+    /// centred on its own, with no inset from the box's edge.
+    fn write_centered(&self, area: Rect, buf: &mut Buffer, style: Style) {
+        let lines = self.content.lines().count().min(usize::from(area.height)) as u16;
+        let top = area.y + (area.height - lines) / 2;
+        for (row, line) in self.content.lines().take(usize::from(lines)).enumerate() {
+            let chars = line.chars().count().min(usize::from(area.width)) as u16;
+            let x = area.x + (area.width - chars) / 2;
+            let room = usize::from(area.right() - x);
+            buf.set_stringn(x, top + row as u16, line, room, style);
         }
     }
 
@@ -139,7 +173,7 @@ mod tests {
         style::{Color, Modifier},
         widgets::StatefulWidget,
     };
-    use stoatty_protocol::command::{encode_popover, PopoverCommand, PopoverSpan};
+    use stoatty_protocol::command::{encode_popover, PopoverChrome, PopoverCommand, PopoverSpan};
 
     fn symbol(buf: &Buffer, x: u16, y: u16) -> &str {
         buf.cell((x, y)).expect("cell in bounds").symbol()
@@ -164,6 +198,8 @@ mod tests {
             scale: 2,
             offset: [-3, 7],
             bold: true,
+            chrome: PopoverChrome::CARD,
+            center: false,
             content: "hello",
             spans: &[],
         }
@@ -180,6 +216,8 @@ mod tests {
             scale: 2,
             offset: [-3, 7],
             bold: true,
+            chrome: PopoverChrome::CARD,
+            center: false,
             content: "hello".to_owned(),
             spans: Vec::new(),
         });
@@ -199,6 +237,8 @@ mod tests {
             scale: 1,
             offset: [0, 0],
             bold: false,
+            chrome: PopoverChrome::CARD,
+            center: false,
             content: "abcdefgh",
             spans: &[],
         }
@@ -226,6 +266,8 @@ mod tests {
             scale: 1,
             offset: [0, 0],
             bold: false,
+            chrome: PopoverChrome::CARD,
+            center: false,
             content: "one\ntwo\nthree",
             spans: &[],
         }
@@ -267,6 +309,8 @@ mod tests {
             scale: 1,
             offset: [0, 0],
             bold: false,
+            chrome: PopoverChrome::CARD,
+            center: false,
             content: "abcd",
             spans: &spans,
         }
@@ -283,6 +327,8 @@ mod tests {
             scale: 1,
             offset: [0, 0],
             bold: false,
+            chrome: PopoverChrome::CARD,
+            center: false,
             content: "abcd".to_owned(),
             spans: spans.to_vec(),
         });
@@ -313,6 +359,8 @@ mod tests {
             scale: 1,
             offset: [0, 0],
             bold: false,
+            chrome: PopoverChrome::CARD,
+            center: false,
             content: "abc",
             spans: &[],
         };
@@ -327,5 +375,43 @@ mod tests {
         popover.draw_fallback(area, &mut buf);
         assert_eq!(symbol(&buf, 1, 1), "a", "the fallback writes cells");
         assert!(scene.bytes().is_empty(), "and emits nothing");
+    }
+
+    /// A centred box writes its content in the middle with no inset. A 9 by 6
+    /// box rings a digit in its fifth column and third row, and a 2 by 1 box,
+    /// too small for a ring, holds the digit alone.
+    #[test]
+    fn a_centered_fallback_puts_the_content_mid_box() {
+        let rows = |width: u16, height: u16| {
+            let area = Rect::new(0, 0, width, height);
+            let mut buf = Buffer::empty(area);
+            Popover {
+                fill: [1, 2, 3],
+                border: [4, 5, 6],
+                content_fg: [7, 8, 9],
+                scale: 6,
+                offset: [0, 0],
+                bold: true,
+                chrome: PopoverChrome::CARD,
+                center: true,
+                content: "4",
+                spans: &[],
+            }
+            .draw_fallback(area, &mut buf);
+            (0..height).map(|y| row(&buf, y)).collect::<Vec<_>>()
+        };
+
+        assert_eq!(
+            rows(9, 6),
+            [
+                "┌───────┐",
+                "│       │",
+                "│   4   │",
+                "│       │",
+                "│       │",
+                "└───────┘"
+            ],
+        );
+        assert_eq!(rows(2, 1), ["4 "]);
     }
 }
