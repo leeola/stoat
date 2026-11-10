@@ -3273,6 +3273,41 @@ mod tests {
         assert_eq!(diff_changes_place(&mut h), (1, 0));
     }
 
+    /// A press on the pinned Scope acts as a press on the fold row it repeats.
+    /// The cursor lands on that fold row, and the stack scrolls back so the
+    /// header and the fold row show in place.
+    #[test]
+    fn a_press_on_the_pinned_scope_lands_on_its_fold_row() {
+        let mut h = crate::test_harness::TestHarness::with_size(120, 13);
+        h.stoat.settings.editor_minimap = Some(MinimapMode::Off);
+        let (base, text) = crate::test_harness::greeter_rust_file();
+        h.stage_review_scenario("/repo", &[("a.rs", &base, &text)]);
+        h.open_file(Path::new("/repo/a.rs"));
+        h.cover_with_diff_changes(false);
+        h.settle();
+        // The paint asks for the parse, and the refold after it lands reads
+        // the Scopes.
+        let _ = h.stoat.render();
+        for _ in 0..2 {
+            h.stoat.drive_background();
+            h.settle();
+        }
+        let _ = h.stoat.render();
+        diff_changes_stack(&mut h).0.scroll = 20;
+        let _ = h.stoat.render();
+        let (list, _) = diff_changes_columns(&mut h);
+
+        left_press(&mut h, list.x + 2, list.y + 1);
+        let _ = h.stoat.render();
+        assert_eq!(
+            (
+                diff_changes_cursor(&mut h).1.row,
+                diff_changes_place(&mut h)
+            ),
+            (0, (1, 0)),
+        );
+    }
+
     /// A press on a per-pane changes view's strip puts the cursor on the row
     /// under it, scrolled toward the middle of the view, and a drag follows the
     /// pointer until the release. A wheel notch over the strip scrolls the

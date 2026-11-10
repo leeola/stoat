@@ -178,18 +178,31 @@ pub(crate) struct CursorScope {
 /// row under them, and hold while the stack scrolls.
 ///
 /// The first row repeats the File Header of the excerpt under the stack's top
-/// edge, so a long excerpt always says which file it shows.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+/// edge, so a long excerpt always says which file it shows. The second row
+/// repeats the Scope of the hunk under it, so a long hunk always says which
+/// item it is in.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct PinnedHeader {
     /// The index in [`DiffChangesState::excerpts`] of the excerpt whose header
     /// the first row repeats, or `None` when the first row shows the stack.
     pub file: Option<usize>,
+    /// The Scope row that the second row repeats, or `None` when the second
+    /// row shows the stack.
+    pub scope: Option<PinnedScope>,
+}
+
+/// The Scope that a changes view's second row repeats, with the stack row of
+/// the Scope row it repeats, which a press on the pinned row acts on.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct PinnedScope {
+    pub scope: Arc<FoldScope>,
+    pub row: usize,
 }
 
 impl PinnedHeader {
     /// The rows at the top of the view that pinned rows cover.
     pub(crate) fn rows(&self) -> usize {
-        usize::from(self.file.is_some())
+        usize::from(self.file.is_some()) + usize::from(self.scope.is_some())
     }
 }
 
@@ -644,14 +657,19 @@ impl DiffChangesState {
     ///
     /// A zero-row viewport, as before the first paint, leaves the scroll as it
     /// is.
-    pub(crate) fn ensure_row_visible(&mut self, row: usize, rows: usize) {
+    pub(crate) fn ensure_row_visible(
+        &mut self,
+        editors: &mut SlotMap<EditorId, EditorState>,
+        row: usize,
+        rows: usize,
+    ) {
         if rows == 0 {
             return;
         }
         if row >= self.scroll + rows {
             self.scroll = row + 1 - rows;
         }
-        self.uncover_row(row);
+        self.uncover_row(editors, row);
     }
 
     /// Scrolls up the least distance that shows stack row `row` clear of the
@@ -659,9 +677,9 @@ impl DiffChangesState {
     ///
     /// A row above the view comes into view this way too. A row clear of the
     /// pinned rows leaves the scroll as it is.
-    pub(crate) fn uncover_row(&mut self, row: usize) {
-        if row < self.scroll + pinned_header(self, self.scroll).rows() {
-            self.scroll = clear_scroll(self, row, 0);
+    pub(crate) fn uncover_row(&mut self, editors: &mut SlotMap<EditorId, EditorState>, row: usize) {
+        if row < self.scroll + pinned_header(self, editors, self.scroll).rows() {
+            self.scroll = clear_scroll(self, editors, row, 0);
         }
     }
 
@@ -861,7 +879,17 @@ pub(crate) fn shown_excerpt_rows(
 /// row at the top shows in place. The excerpt's last row shows in place too,
 /// so the next header shows under it and two headers never stack. A view under
 /// [`PINNED_MIN_VIEWPORT`] rows pins nothing.
-pub(crate) fn pinned_header(state: &DiffChangesState, scroll: usize) -> PinnedHeader {
+///
+/// Under a pinned header, the second row pins the nearest Scope row above the
+/// stack row it covers. A Scope row on the second row itself shows in place.
+/// The stack row there shows in place too when the row under it is the next
+/// Scope row or the excerpt's end, since no row of the pinned Scope's section
+/// then shows under it.
+pub(crate) fn pinned_header(
+    state: &DiffChangesState,
+    editors: &mut SlotMap<EditorId, EditorState>,
+    scroll: usize,
+) -> PinnedHeader {
     if state.viewport_rows < PINNED_MIN_VIEWPORT {
         return PinnedHeader::default();
     }
@@ -877,9 +905,68 @@ pub(crate) fn pinned_header(state: &DiffChangesState, scroll: usize) -> PinnedHe
         .excerpts
         .get(index + 1)
         .map_or(state.rows, |next| next.top);
-    PinnedHeader {
-        file: (top < scroll && scroll + 1 < end).then_some(index),
+    if top >= scroll || scroll + 1 >= end {
+        return PinnedHeader::default();
     }
+
+    let slot = scroll + 1;
+    let scope = scope_row_at_or_above(state, editors, index, slot)
+        .filter(|&(at, _)| at < slot && slot + 1 < end)
+        .filter(|_| {
+            !matches!(
+                scope_row_at_or_above(state, editors, index, slot + 1),
+                Some((at, _)) if at == slot + 1
+            )
+        })
+        .map(|(row, scope)| PinnedScope { scope, row });
+    PinnedHeader {
+        file: Some(index),
+        scope,
+    }
+}
+
+/// The stack row and the Scope of the nearest Scope row at or above stack row
+/// `row` in excerpt `index`, as of the last [`layout_stack`].
+///
+/// A Scope row is a fold row whose placeholder carries a Scope, or the
+/// excerpt's bare Scope row under its header. `None` on the header row and
+/// where no Scope row lies at or above `row`.
+fn scope_row_at_or_above(
+    state: &DiffChangesState,
+    editors: &mut SlotMap<EditorId, EditorState>,
+    index: usize,
+    row: usize,
+) -> Option<(usize, Arc<FoldScope>)> {
+    let excerpt = state.excerpts.get(index)?;
+    let bare = excerpt
+        .scope_row
+        .clone()
+        .map(|scope| (excerpt.top + 1, scope));
+    let rows_top = excerpt.top + header_rows(excerpt);
+    if row < rows_top {
+        return bare.filter(|&(at, _)| at == row);
+    }
+
+    let display_row = (row - rows_top) as u32;
+    let editor = editors.get_mut(excerpt.editor_id)?;
+    let snapshot = editor.display_map.snapshot();
+    let folds = snapshot.fold_snapshot();
+    let inlays = folds.inlay_snapshot();
+    let point = snapshot
+        .row_start_at_or_after(display_row)
+        .unwrap_or_else(|| snapshot.buffer_snapshot().rope().max_point());
+    let inlay_row = inlays.to_inlay_point(point).row();
+    folds
+        .folds_in_range(InlayPoint::default()..InlayPoint::new(inlay_row + 1, 0))
+        .into_iter()
+        .rev()
+        .find_map(|fold| {
+            let scope = fold.placeholder.scope.clone()?;
+            let start = inlays.to_buffer_point(fold.range.start);
+            let fold_row = snapshot.buffer_to_display(start).row;
+            (fold_row <= display_row).then(|| (rows_top + fold_row as usize, scope))
+        })
+        .or(bare)
 }
 
 /// The greatest scroll that shows stack row `row` at least `margin` rows under
@@ -887,23 +974,35 @@ pub(crate) fn pinned_header(state: &DiffChangesState, scroll: usize) -> PinnedHe
 ///
 /// A scroll one row up sometimes pins a row less, so the walk steps up one row
 /// at a time.
-fn clear_scroll(state: &DiffChangesState, row: usize, margin: usize) -> usize {
+fn clear_scroll(
+    state: &DiffChangesState,
+    editors: &mut SlotMap<EditorId, EditorState>,
+    row: usize,
+    margin: usize,
+) -> usize {
     let mut scroll = row.saturating_sub(margin);
-    while scroll > 0 && row < scroll + pinned_header(state, scroll).rows() + margin {
+    while scroll > 0 && row < scroll + pinned_header(state, editors, scroll).rows() + margin {
         scroll -= 1;
     }
     scroll
 }
 
-/// The stack row that a press on stack row `row` acts on.
+/// The stack row that a press on stack row `row` acts on, and whether the
+/// press lands on a pinned row.
 ///
-/// A press on the view's first row while a header pins there acts on that
-/// header, the row that the pinned row repeats. Every other row acts on
-/// itself.
-pub(crate) fn pinned_row(state: &DiffChangesState, row: usize) -> usize {
-    match pinned_header(state, state.scroll).file {
-        Some(index) if row == state.scroll => state.excerpts[index].top,
-        _ => row,
+/// A press on a pinned row acts on the row it repeats. The pinned header
+/// repeats its excerpt's header, and the pinned Scope repeats its Scope row.
+/// Every other row acts on itself.
+pub(crate) fn pinned_row(
+    state: &DiffChangesState,
+    editors: &mut SlotMap<EditorId, EditorState>,
+    row: usize,
+) -> (usize, bool) {
+    let pinned = pinned_header(state, editors, state.scroll);
+    match (row.checked_sub(state.scroll), pinned.file, pinned.scope) {
+        (Some(0), Some(index), _) => (state.excerpts[index].top, true),
+        (Some(1), _, Some(scope)) => (scope.row, true),
+        _ => (row, false),
     }
 }
 
@@ -1177,13 +1276,13 @@ pub(crate) fn follow_cursor(stoat: &mut Stoat, scrolloff: u32) -> bool {
 
     let viewport = state.viewport_rows.max(1);
     let scrolloff = scrolloff as usize;
-    let band = pinned_header(state, state.scroll).rows();
+    let band = pinned_header(state, editors, state.scroll).rows();
     let usable = viewport.saturating_sub(band).max(1);
     let top = scrolloff.min(usable.saturating_sub(1) / 2);
     let bottom = scrolloff.min(usable / 2);
     let before = state.scroll;
     if row < state.scroll + band + top {
-        state.scroll = clear_scroll(state, row, top);
+        state.scroll = clear_scroll(state, editors, row, top);
     } else if row + bottom >= state.scroll + viewport {
         state.scroll = (row + bottom + 1)
             .saturating_sub(viewport)
@@ -2666,9 +2765,9 @@ pub(crate) fn expand(
         .row as usize;
     layout_stack(state, editors);
     let first = state.excerpts[index].top + header_rows(&state.excerpts[index]);
-    state.ensure_row_visible(first + far_row, state.viewport_rows);
+    state.ensure_row_visible(editors, first + far_row, state.viewport_rows);
     if let Some(row) = cursor_stack_row(state, editors) {
-        state.ensure_row_visible(row, state.viewport_rows);
+        state.ensure_row_visible(editors, row, state.viewport_rows);
     }
 }
 
@@ -2801,6 +2900,7 @@ mod tests {
             Workspace,
         },
     };
+    use slotmap::SlotMap;
     use std::{
         ops::{Range, RangeInclusive},
         path::{Path, PathBuf},
@@ -3480,7 +3580,7 @@ fn hint_width() -> u32 {
                 scroll: 5,
                 ..DiffChangesState::default()
             };
-            state.ensure_row_visible(row, rows);
+            state.ensure_row_visible(&mut SlotMap::with_key(), row, rows);
             state.scroll
         };
         assert_eq!(
@@ -3522,10 +3622,17 @@ fn hint_width() -> u32 {
         };
 
         let uncovered = [(5, 5), (1, 1), (15, 14)].map(|(scroll, row)| {
-            let views = &mut h.stoat.active_workspace_mut().diff_changes_views;
-            let state = views.values_mut().next().expect("a changes view");
+            let Workspace {
+                diff_changes_views,
+                editors,
+                ..
+            } = h.stoat.active_workspace_mut();
+            let state = diff_changes_views
+                .values_mut()
+                .next()
+                .expect("a changes view");
             state.scroll = scroll;
-            state.uncover_row(row);
+            state.uncover_row(editors, row);
             state.scroll
         });
         let followed = [(0, 7, 7), (0, 9, 7), (1, 2, 15)].map(|(index, buffer_row, scroll)| {

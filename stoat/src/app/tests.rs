@@ -7611,9 +7611,11 @@ fn a_cursor_follow_leaves_no_capture_under_the_scroll_it_moved() {
     );
 }
 
-/// A cursor placed under the pinned header scrolls the stack up a row inside
-/// the paint, so that frame paints and captures nothing. A later frame back
-/// at the scroll the move left shows what a repaint of that scroll shows.
+/// A cursor placed under the pinned rows scrolls the stack up inside the
+/// paint, so that frame paints and captures nothing. The cursor's row is its
+/// file's first row, so the stack scrolls back until the file's header and
+/// Scope row show in place. A later frame back at the scroll the move left
+/// shows what a repaint of that scroll shows.
 #[test]
 fn a_cursor_under_the_pinned_header_leaves_no_capture_under_the_scroll() {
     let mut h = changes_view(8, false);
@@ -7636,9 +7638,9 @@ fn a_cursor_under_the_pinned_header_leaves_no_capture_under_the_scroll() {
     let repainted = frame_output(&mut h);
     assert_eq!(
         (paints, uncovered, &replayed.0 .0, replayed.1),
-        (1, first - 1, &repainted.0, stack_cursor(&mut h)),
-        "the move painted and scrolled up a row, and the frame back at the old scroll matches a \
-         repaint, cursor included",
+        (1, 0, &repainted.0, stack_cursor(&mut h)),
+        "the move painted and scrolled to the file's header, and the frame back at the old \
+         scroll matches a repaint, cursor included",
     );
 }
 

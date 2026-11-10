@@ -214,10 +214,10 @@ pub(crate) fn render_diff_changes(
             Some(screen_row) => {
                 let last = state.viewport_rows.saturating_sub(1);
                 state.scroll = row.saturating_sub(usize::from(screen_row).min(last));
-                state.uncover_row(row);
+                state.uncover_row(editors, row);
             },
             None if cursor != state.followed_cursor => {
-                state.ensure_row_visible(row, state.viewport_rows);
+                state.ensure_row_visible(editors, row, state.viewport_rows);
             },
             None => {},
         }
@@ -230,7 +230,7 @@ pub(crate) fn render_diff_changes(
     // runs and bars show over the header's cells on a frame that no pool
     // composites, since the cover draws no fill. A cursor there is off screen,
     // as one past the view's edge is.
-    let (rows_from, rows) = pinned_split(state, inner);
+    let (rows_from, rows) = pinned_split(state, editors, inner);
     let mut covered = stack_composited(pane, frame).then(ApcScene::new);
     paint_stack_rows(
         state,
@@ -246,7 +246,9 @@ pub(crate) fn render_diff_changes(
         rows,
         PagePaint::Cells,
     );
-    paint_pinned_header(state, buffers, frame, inner, buf, scene);
+    paint_pinned_header(
+        state, editors, buffers, frame, text_style, inner, buf, scene,
+    );
 
     // The pages carry no cursor, so the ghost beside it goes to the pane's own
     // scene even while the composite covers the live rows. Its panel leaves the
@@ -425,8 +427,12 @@ pub(crate) fn paint_stack_rows(
 /// The first stack row the stack's rows paint from, and the part of `inner`
 /// they paint into, which start under the rows that pin at the top of the
 /// view.
-fn pinned_split(state: &DiffChangesState, inner: Rect) -> (usize, Rect) {
-    let pinned = diff_changes::pinned_header(state, state.scroll).rows();
+fn pinned_split(
+    state: &DiffChangesState,
+    editors: &mut SlotMap<EditorId, EditorState>,
+    inner: Rect,
+) -> (usize, Rect) {
+    let pinned = diff_changes::pinned_header(state, editors, state.scroll).rows();
     let height = inner.height.saturating_sub(pinned as u16);
     let rows = Rect {
         y: inner.y + inner.height - height,
@@ -437,27 +443,38 @@ fn pinned_split(state: &DiffChangesState, inner: Rect) -> (usize, Rect) {
 }
 
 /// Repeat the header of the excerpt under the stack's top edge on the first row
-/// of `inner`, which holds while the stack scrolls under it.
+/// of `inner`, and the Scope of the hunk under that row on the second, which
+/// hold while the stack scrolls under them.
 ///
-/// The row first declares a panel that draws nothing, so a pool's composite
-/// leaves the row to the live grid. The header's cells then fill the row. A
-/// view that pins no header, as [`diff_changes::pinned_header`] decides,
-/// paints nothing here.
+/// The rows first declare a panel that draws nothing, so a pool's composite
+/// leaves them to the live grid. The header's cells then fill the first row.
+/// The Scope paints as a fold row with its chip alone, with no Fold Button, no
+/// count, and no range, and the base frame's sides cross it as they cross a
+/// fold row. A view that pins nothing, as [`diff_changes::pinned_header`]
+/// decides, paints nothing here.
+#[allow(clippy::too_many_arguments)]
 fn paint_pinned_header(
     state: &DiffChangesState,
+    editors: &mut SlotMap<EditorId, EditorState>,
     buffers: &BufferRegistry,
     frame: FrameCtx<'_>,
+    text_style: Style,
     inner: Rect,
     buf: &mut Buffer,
     scene: &mut ApcScene,
 ) {
-    let Some(index) = diff_changes::pinned_header(state, state.scroll).file else {
+    let pinned = diff_changes::pinned_header(state, editors, state.scroll);
+    let Some(index) = pinned.file else {
         return;
     };
     let excerpt = &state.excerpts[index];
-    let row = Rect { height: 1, ..inner };
-    chrome::cover_cells(row, false, scene);
+    let cover = Rect {
+        height: pinned.rows() as u16,
+        ..inner
+    };
+    chrome::cover_cells(cover, false, scene);
 
+    let row = Rect { height: 1, ..inner };
     let stats = diff_changes::excerpt_stats(excerpt, buffers);
     let runs = header_runs(&excerpt.rel_path, stats, frame.theme);
     paint_header(buf, row, &runs, frame.theme);
@@ -465,18 +482,40 @@ fn paint_pinned_header(
     // A resting pool's composite still paints the top and bottom pixel lines
     // of the cover's rect, so a plain bar there lies under the stack's rows.
     // An occluding bar holds over the composite.
-    let Some(color) = style_rgb(frame.theme.get(scope::UI_BORDER_INACTIVE).fg) else {
+    if let Some(color) = style_rgb(frame.theme.get(scope::UI_BORDER_INACTIVE).fg) {
+        for y in HAIRLINE_Y {
+            Bar {
+                x: 0,
+                y,
+                width: row.width * 16,
+                height: 1,
+                color,
+            }
+            .render_occluding(row, scene);
+        }
+    }
+
+    let Some(pinned) = pinned.scope else {
         return;
     };
-    for y in HAIRLINE_Y {
-        Bar {
-            x: 0,
-            y,
-            width: row.width * 16,
-            height: 1,
-            color,
-        }
-        .render_occluding(row, scene);
+    let row = Rect {
+        y: inner.y + 1,
+        ..row
+    };
+    review::paint_scope_row(
+        &pinned.scope,
+        row,
+        frame.theme,
+        text_style,
+        buf,
+        match scene.live() {
+            true => Some(&mut *scene),
+            false => None,
+        },
+        false,
+    );
+    if let Some(tint) = diff_base_tint(frame.theme) {
+        review::emit_base_frame(row, tint, FrameEdges::Sides, scene);
     }
 }
 
@@ -661,7 +700,7 @@ pub(crate) fn replay_cursor(
 
     let inner = pane.area;
     let (inner, _) = split_minimap_strip(inner, frame.minimap_enabled, DIFF_OVERVIEW_COLS);
-    let (scroll, area) = pinned_split(state, inner);
+    let (scroll, area) = pinned_split(state, editors, inner);
     let (top, viewport) = (excerpt.top, usize::from(area.height));
     let rows = diff_changes::excerpt_rows(excerpt, editors);
     let header = diff_changes::header_rows(excerpt);
@@ -1154,8 +1193,9 @@ mod tests {
         let frames = [0, 3, 12, 13, 15].map(|scroll| {
             stack(&mut h).0.scroll = scroll;
             let buf = h.render_composited();
+            let (state, editors) = stack(&mut h);
             (
-                diff_changes::pinned_header(stack(&mut h).0, scroll).file,
+                diff_changes::pinned_header(state, editors, scroll).file,
                 buf,
             )
         });
@@ -1244,7 +1284,10 @@ mod tests {
 
         assert_eq!(
             (
-                diff_changes::pinned_header(stack(&mut h).0, 3).file,
+                {
+                    let (state, editors) = stack(&mut h);
+                    diff_changes::pinned_header(state, editors, 3).file
+                },
                 gutter_number(&buf, cols.right_x, cols.right_text_x, 0),
             ),
             (None, "3".to_string()),
@@ -1288,6 +1331,172 @@ mod tests {
         let cell = editors[state.excerpts[0].editor_id].cursor_screen_cell;
 
         assert_eq!((state.scroll, cell.map(|(_, y)| y)), (5, Some(1)));
+    }
+
+    /// The Greeter fixture under a changes view 13 rows tall, parsed, so its
+    /// fold rows carry their Scopes, and painted.
+    ///
+    /// The stack reads the header on row 0, Fold Row A (`impl Greeter U+203A
+    /// fn greet`) on row 1, buffer rows 5 to 25 on rows 2 to 22, Fold Row B
+    /// (`impl Greeter U+203A fn part`) on row 23, buffer rows 32 to 52 on rows
+    /// 24 to 44, and the trailing fold on row 45, in a view of twelve rows.
+    fn greeter_stack() -> TestHarness {
+        let (base, text) = crate::test_harness::greeter_rust_file();
+        parsed_stack(&[("a.rs", &base, &text)])
+    }
+
+    /// `files` under a changes view 13 rows tall, parsed, so their fold rows
+    /// carry their Scopes, and painted.
+    fn parsed_stack(files: &[(&str, &str, &str)]) -> TestHarness {
+        let mut h = changes_view(120, 13, files);
+        // The paint asks for the parse, and the refold after it lands reads
+        // the Scopes.
+        h.render_composited();
+        for _ in 0..2 {
+            h.stoat.drive_background();
+            h.settle();
+        }
+        h.render_composited();
+        h
+    }
+
+    /// An excerpt whose hunk opens under its header pins its bare Scope row's
+    /// Scope. The pinned Scope gives way on the excerpt's last row, since no
+    /// row of its section shows under that row.
+    ///
+    /// The function's whole body changes, so the excerpt takes the header, the
+    /// bare Scope row, and its 23 rows with the empty row after the final
+    /// newline, and folds nothing.
+    #[test]
+    fn a_bare_scope_row_pins_until_the_excerpt_ends() {
+        let file = |edit: bool| {
+            let body: String = (1..=20)
+                .map(|n| match edit {
+                    true => format!("    let x{n} = {n} + 1;\n"),
+                    false => format!("    let x{n} = {n};\n"),
+                })
+                .collect();
+            format!("fn greet() {{\n{body}}}\n")
+        };
+        let mut h = parsed_stack(&[("a.rs", &file(false), &file(true))]);
+        let (state, editors) = stack(&mut h);
+        let rows = state.rows;
+        let pinned = [2, rows - 3, rows - 2].map(|scroll| {
+            let pinned = diff_changes::pinned_header(state, editors, scroll);
+            (pinned.file, pinned.scope.map(|scope| scope.row))
+        });
+
+        assert_eq!(
+            (rows, pinned),
+            (
+                25,
+                [(Some(0), Some(1)), (Some(0), Some(1)), (Some(0), None)]
+            ),
+        );
+    }
+
+    /// Under the pinned header the second row pins the nearest Scope row above
+    /// the stack row it covers. A Scope row on that row, or one right under
+    /// it, shows in place, so the pinned Scope gives way to it.
+    #[test]
+    fn a_scrolled_hunk_pins_its_scope_under_the_header() {
+        let mut h = greeter_stack();
+        let (state, editors) = stack(&mut h);
+        let pinned = [0, 1, 20, 21, 22, 23].map(|scroll| {
+            let pinned = diff_changes::pinned_header(state, editors, scroll);
+            (pinned.file, pinned.scope.map(|scope| scope.row))
+        });
+
+        assert_eq!(
+            pinned,
+            [
+                (None, None),
+                (Some(0), Some(1)),
+                (Some(0), Some(1)),
+                (Some(0), None),
+                (Some(0), None),
+                (Some(0), Some(23)),
+            ],
+        );
+    }
+
+    /// A pinned Scope draws a fold row's hatched surface and its chip under the
+    /// pinned header, crossed by the base frame's sides, with no Fold Button,
+    /// count, or range. The cover spans both pinned rows.
+    #[test]
+    fn a_pinned_scope_draws_the_chip_alone() {
+        let mut h = greeter_stack();
+        let index = {
+            let ws = h.stoat.active_workspace();
+            ws.panes.pane(ws.panes.focus()).index
+        };
+        stack(&mut h).0.scroll = 20;
+        h.stoat.render();
+        let commands = decode_stream(h.stoat.apc_scene.lane_bytes(content_lane(index)));
+        let covers: Vec<(u16, u16, u16, u16)> = commands
+            .iter()
+            .filter_map(|command| match command {
+                Command::Panel(panel) => Some((panel.left, panel.top, panel.width, panel.height)),
+                _ => None,
+            })
+            .collect();
+        let bars: Vec<_> = frame_bars(commands.clone())
+            .into_iter()
+            .filter(|bar| (16..32).contains(&bar.1))
+            .collect();
+        let mut runs: Vec<(i16, String)> = commands
+            .iter()
+            .filter_map(|command| match command {
+                Command::TextRun(run) if (16..32).contains(&run.row) => {
+                    Some((run.col, run.text.clone()))
+                },
+                _ => None,
+            })
+            .collect();
+        runs.sort();
+        let text: String = runs.into_iter().map(|(_, text)| text).collect();
+        let row_cells = cells(&h.render_composited(), 0, 120, 1);
+        let fold = paint::style_rgb(h.stoat.theme.get(scope::DIFF_FOLD).bg).expect("an RGB fold");
+        let chip = bars.get(1).map_or(0, |bar| bar.2);
+
+        // The composite draws the hatched surface as rules across the row's
+        // blank cells, so the chip's text is all the row reads past them.
+        assert_eq!(
+            (covers, bars, text, row_cells.trim_matches(['└', '┘', '─'])),
+            (
+                vec![(0, 0, 120, 2)],
+                vec![
+                    (0, 16, 1920, 16, fold),
+                    (((1920 - chip) / 2) as i16, 17, chip, 14, fold),
+                    (0, 16, 6, 16, TINT),
+                    (945, 16, 6, 16, TINT),
+                ],
+                "impl Greeter \u{203a} fn greet".to_string(),
+                "impl Greeter \u{203a} fn greet",
+            ),
+        );
+    }
+
+    /// A cursor under the pinned Scope is off screen, and an uncover scrolls
+    /// the stack up until its row shows under the pinned rows.
+    #[test]
+    fn a_cursor_under_the_pinned_scope_moves_the_stack() {
+        let mut h = greeter_stack();
+        {
+            let (state, editors) = stack(&mut h);
+            diff_changes::place_cursor(
+                &mut editors[state.excerpts[0].editor_id],
+                Point::new(24, 0),
+            );
+        }
+        h.render_composited();
+        stack(&mut h).0.scroll = 20;
+        h.render_composited();
+        let (state, editors) = stack(&mut h);
+        let cell = editors[state.excerpts[0].editor_id].cursor_screen_cell;
+        state.uncover_row(editors, 21);
+
+        assert_eq!((cell, state.scroll), (None, 19));
     }
 
     /// The pair names of a frame with no pair open.

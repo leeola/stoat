@@ -1086,6 +1086,33 @@ impl Drop for TestHarness {
     }
 }
 
+/// A Rust file of 55 lines, an `impl Greeter` of the methods `greet` and
+/// `part`, as its base text and its edited text.
+///
+/// Each method's body changes lines 7 to 21 of its 24, which are buffer rows 8
+/// to 22 in `greet` and 35 to 49 in `part`. A changes view folds the rows more
+/// than three rows from a change, so a fold row naming each method's Scope
+/// sits above each hunk.
+pub(crate) fn greeter_rust_file() -> (String, String) {
+    let file = |edit: bool| {
+        let method = |name: &str| {
+            let body: String = (1..=24)
+                .map(|n| match edit && (7..=21).contains(&n) {
+                    true => format!("        let x{n} = {n} + 1;\n"),
+                    false => format!("        let x{n} = {n};\n"),
+                })
+                .collect();
+            format!("    fn {name}(&self) {{\n{body}    }}\n")
+        };
+        format!(
+            "impl Greeter {{\n{}\n{}}}\n",
+            method("greet"),
+            method("part")
+        )
+    };
+    (file(false), file(true))
+}
+
 fn buffer_to_text(buf: &Buffer) -> String {
     let area = buf.area;
     let mut lines = Vec::with_capacity(area.height as usize);

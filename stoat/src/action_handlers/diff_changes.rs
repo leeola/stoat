@@ -525,9 +525,12 @@ pub(crate) fn diff_changes_press(stoat: &mut Stoat, row: usize, column: u16) -> 
         return StackPress::Missed;
     };
     diff_changes::layout_stack(state, editors);
-    let row = diff_changes::pinned_row(state, row);
+    let (row, pinned) = diff_changes::pinned_row(state, editors, row);
 
-    if let Some((index, gap, edge)) = diff_changes::fold_button_at(state, editors, row, column) {
+    // A pinned row draws no Fold Button, so a press there opens no fold.
+    if !pinned
+        && let Some((index, gap, edge)) = diff_changes::fold_button_at(state, editors, row, column)
+    {
         let parse = ScopeParse::of(buffers, state.excerpts[index].buffer_id, &cache);
         diff_changes::expand(state, editors, parse.as_ref(), index, gap, edge);
         return StackPress::Opened;
@@ -539,7 +542,7 @@ pub(crate) fn diff_changes_press(stoat: &mut Stoat, row: usize, column: u16) -> 
     // follows only a cursor that moved, and the cursor sometimes stood on that
     // row already, so the press scrolls the row into view itself.
     if let Some(cursor) = diff_changes::cursor_stack_row(state, editors) {
-        state.ensure_row_visible(cursor, state.viewport_rows);
+        state.ensure_row_visible(editors, cursor, state.viewport_rows);
     }
     StackPress::Placed
 }
@@ -611,7 +614,7 @@ pub(super) fn align_stack(stoat: &mut Stoat, align: ViewAlign) -> UpdateEffect {
     .min(total.saturating_sub(state.viewport_rows));
     let before = state.scroll;
     state.scroll = scroll;
-    state.uncover_row(row);
+    state.uncover_row(editors, row);
     match state.scroll == before {
         true => UpdateEffect::None,
         false => UpdateEffect::Redraw,

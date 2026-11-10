@@ -641,7 +641,8 @@ fn stack_cache_key(
         return None;
     }
     let window = state.scroll..state.scroll + state.viewport_rows;
-    let clear = state.scroll + diff_changes::pinned_header(state, state.scroll).rows()..window.end;
+    let clear =
+        state.scroll + diff_changes::pinned_header(state, editors, state.scroll).rows()..window.end;
     let moved = diff_changes::focused_cursor(state, editors) != state.followed_cursor;
     if moved
         && diff_changes::cursor_stack_row(state, editors).is_some_and(|row| !clear.contains(&row))
