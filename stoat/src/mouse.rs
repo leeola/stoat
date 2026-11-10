@@ -19,7 +19,7 @@ use crate::{
     host::ClipboardKind,
     keymap::WheelDirection,
     keymap_state::{active_modal, ActiveModal, StoatKeymapState},
-    minimap::{emit::minimap_view_window, LINES_PER_CELL},
+    minimap::{density, emit::minimap_view_window, LINES_PER_CELL},
     pane::{FocusTarget, Placement, View},
     rebase::RebasePause,
     render::commit_picker::MIN_LIST_ROWS,
@@ -1214,7 +1214,12 @@ fn scrub_minimap(stoat: &mut Stoat, drag: MinimapDrag, strip: Rect, screen_row: 
 /// the strip renders with, then jumps `scroll_row` and glides the offset up
 /// to it like a page motion. `strip` is the caller-resolved band the editor
 /// scrubs against (a per-pane rect or the shared single-mode band).
+///
+/// A strip that folds a band of lines into each row maps the cell to a row,
+/// with the view in rows as the thumb ships it, and lands on the middle line
+/// of that row's band.
 fn scrub_minimap_editor(stoat: &mut Stoat, editor_id: EditorId, strip: Rect, screen_row: u16) {
+    let thumb_min_rows = stoat.minimap_thumb_min_rows();
     let ws = &mut stoat.workspaces[stoat.active_workspace];
     let Some(editor) = ws.editors.get_mut(editor_id) else {
         return;
@@ -1235,14 +1240,34 @@ fn scrub_minimap_editor(stoat: &mut Stoat, editor_id: EditorId, strip: Rect, scr
     };
     let (view_top, view_visible) = minimap_view_window(&snapshot, shown_offset, viewport);
     let buffer_lines = snapshot.buffer_line_count();
-    let target_line = minimap::click_target_line(
-        strip.height,
-        LINES_PER_CELL,
-        strip_local_row,
-        buffer_lines as f32,
-        view_top,
-        view_visible as f32,
-    );
+    let target_line = match editor.minimap_density {
+        None => minimap::click_target_line(
+            strip.height,
+            LINES_PER_CELL,
+            strip_local_row,
+            buffer_lines as f32,
+            view_top,
+            view_visible as f32,
+        ),
+        Some(fold) => {
+            let lines_per_row = fold.lines_per_row;
+            let (top_256, visible_256) = density::thumb_rows_256(
+                (view_top * 256.0) as u64,
+                u32::from(view_visible),
+                lines_per_row,
+                thumb_min_rows,
+            );
+            let row = minimap::click_target_line(
+                strip.height,
+                LINES_PER_CELL,
+                strip_local_row,
+                density::rows(buffer_lines, lines_per_row) as f32,
+                top_256 as f32 / 256.0,
+                visible_256 as f32 / 256.0,
+            );
+            density::band(row, lines_per_row, buffer_lines).start + lines_per_row / 2
+        },
+    };
 
     // A strip taller than the file resolves cells past its last line, and
     // scrolling happens in display rows, so the target converts back.

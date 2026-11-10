@@ -17,6 +17,7 @@ use crate::{
     input_parse::{self, InputStep},
     input_view::{InputView, SubmitTarget},
     keymap::KeymapState,
+    minimap::density::{Density, Tier},
     pane::{DockPanel, DockSide},
     render::{
         content_lane,
@@ -11801,6 +11802,44 @@ fn minimap_click_reads_the_declared_rest() {
             (31, 10.75, ScrollGlide::Page)
         ),
         "a stale sub-row resolves and glides from the row, a wheel rest from its fraction"
+    );
+}
+
+/// A strip that folds a band of lines into each row resolves a press to a row
+/// against the view in rows, as the thumb ships it, and centers the middle line
+/// of that row's band. A 400-line file at 4 lines a row takes 100 rows, and
+/// cell row 5 of a 10-cell strip over the view at line 100 is row 43, whose
+/// band 172..176 centers on line 174, scrolled to 164 in a 20-row viewport.
+#[test]
+fn a_click_on_a_band_row_centers_its_middle_line() {
+    let mut h = Stoat::test();
+    h.stoat.settings.editor_minimap = Some(MinimapMode::PerPane);
+    let body: String = (0..400)
+        .map(|i| format!("line {i}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    open_scratch_file(&mut h, &body);
+    let editor_id = h.stoat.focused_editor_ids().expect("editor").0;
+    {
+        let editor = &mut h.stoat.active_workspace_mut().editors[editor_id];
+        editor.minimap_rect = Some(Rect::new(72, 0, 8, 10));
+        editor.minimap_density = Some(Density {
+            lines_per_row: 4,
+            tier: Tier::Fit,
+        });
+        editor.viewport_rows = Some(20);
+        editor.scroll_row = 100;
+        editor.scroll_frac = 0.0;
+        editor.scroll_offset = 100.0;
+        editor.scroll_glide = ScrollGlide::None;
+    }
+
+    h.stoat
+        .update(mouse_event(MouseEventKind::Down(MouseButton::Left), 74, 5));
+
+    assert_eq!(
+        h.stoat.active_workspace().editors[editor_id].scroll_row,
+        164
     );
 }
 

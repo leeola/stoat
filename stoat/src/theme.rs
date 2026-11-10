@@ -967,6 +967,18 @@ pub mod scope {
     /// A foreground stripes the background with a 135 degree hatch in that
     /// color under stoatty, and fills the cells solid in a plain terminal.
     pub const DIFF_ABSENT: &str = "diff.absent";
+    /// The grey of a minimap row that draws the outline of its band of code,
+    /// for a file whose strip rows each stand for many lines.
+    pub const UI_MINIMAP_SHAPE: &str = "ui.minimap.shape";
+    /// The grey of a band outline whose lines are mostly comments.
+    pub const UI_MINIMAP_SHAPE_COMMENT: &str = "ui.minimap.shape.comment";
+    /// The hairline a minimap draws above the row where a top-level item
+    /// starts.
+    pub const UI_MINIMAP_RULE: &str = "ui.minimap.rule";
+    /// The rail beside a minimap strip whose file does not fit it, the part of
+    /// the file the strip covers as foreground on the rail's ground as
+    /// background.
+    pub const UI_MINIMAP_RAIL: &str = "ui.minimap.rail";
     /// The base half of a split diff view's status row, its text on its tint.
     ///
     /// The `name` scope colors the base's name. Each channel the theme leaves

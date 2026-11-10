@@ -20,7 +20,7 @@ use crate::{
     display_map::{highlights::HighlightEndpoints, DisplayPoint, DisplaySnapshot, PaintVersion},
     editor_state::{EditorId, EditorState, ScrollGlide},
     input_view::InputView,
-    minimap::emit::minimap_view_window,
+    minimap::{density, emit::minimap_view_window},
     pane::{FocusTarget, PaneId, Placement, View},
     render::{
         diff_changes::PagePaint,
@@ -1134,6 +1134,7 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
         .map(|(_, _, region)| region.pool);
     let focused_insert = stoat.focused_mode() == "insert";
     let single_minimap = stoat.single_minimap_rect.is_some();
+    let thumb_min_rows = stoat.minimap_thumb_min_rows();
     // The focused detached pane's pool cursor, collected during the pane loop
     // and emitted after it, past the workspace borrow.
     let mut detached_cursor: Option<(u32, u64, u16)> = None;
@@ -1360,21 +1361,39 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
             editor.minimap_rect.is_some().then_some(region.pool)
         };
         if let Some(strip_id) = view_strip {
-            // The strip is one row per buffer line while the editor scrolls in
-            // display rows, so the window converts before it ships. The
-            // conversion is deferred into the closure because an idle frame
-            // has nothing to convert that the last one did not.
+            // The strip is one row per buffer line, or per band under a fold,
+            // while the editor scrolls in display rows, so the window converts
+            // before it ships. The conversion is deferred into the closure
+            // because an idle frame has nothing to convert that the last one
+            // did not. A fold or a Thumb Minimum that moves converts again.
             let rows = region.height as u32;
-            let inputs = MinimapWindowInputs::new(
-                scroll_offset,
-                display_map_stamp(buffer_version, paint_version),
-                rows,
-            );
+            let density = editor.minimap_density;
+            let stamp = {
+                let mut hasher = DefaultHasher::new();
+                display_map_stamp(buffer_version, paint_version).hash(&mut hasher);
+                density
+                    .map(|density| density.lines_per_row)
+                    .hash(&mut hasher);
+                thumb_min_rows.hash(&mut hasher);
+                hasher.finish()
+            };
+            let inputs = MinimapWindowInputs::new(scroll_offset, stamp, rows);
             stoat
                 .smooth_scroll
                 .emit_minimap_view(&mut out, strip_id, region.pool, inputs, || {
                     let (top, visible) = minimap_view_window(&snapshot, scroll_offset, rows);
-                    (top, u32::from(visible) * 256)
+                    match density {
+                        Some(density) => {
+                            let (top_256, visible_256) = density::thumb_rows_256(
+                                (top * 256.0) as u64,
+                                u32::from(visible),
+                                density.lines_per_row,
+                                thumb_min_rows,
+                            );
+                            (top_256 as f32 / 256.0, visible_256)
+                        },
+                        None => (top, u32::from(visible) * 256),
+                    }
                 });
         }
 

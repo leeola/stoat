@@ -69,6 +69,21 @@ impl RowSet {
         }
     }
 
+    /// The set holding `rows` alone.
+    pub(super) fn of(rows: Range<u32>) -> RowSet {
+        let mut set = RowSet::default();
+        set.insert(rows);
+        set
+    }
+
+    /// The rows of this set outside `other`, ascending.
+    pub(super) fn difference(&self, other: &RowSet) -> Vec<Range<u32>> {
+        self.0
+            .iter()
+            .flat_map(|run| other.gaps(run.clone()))
+            .collect()
+    }
+
     /// The rows of `within` outside the set, ascending.
     pub(super) fn gaps(&self, within: Range<u32>) -> Vec<Range<u32>> {
         let mut gaps = Vec::new();
@@ -222,6 +237,17 @@ mod tests {
                 (rows.intersects(3..3), rows.covers(3..3)),
             ],
             [(true, false), (true, true), (false, false), (false, true)],
+        );
+    }
+
+    #[test]
+    fn a_difference_is_the_rows_outside_the_other_set() {
+        assert_eq!(
+            [
+                pairs(set(&[(0, 10), (20, 30)]).difference(&set(&[(5, 25)]))),
+                pairs(set(&[(3, 4), (8, 9)]).difference(&set(&[(0, 4)]))),
+            ],
+            [vec![(0, 5), (25, 30)], vec![(8, 9)]],
         );
     }
 }

@@ -5,17 +5,24 @@
 //! drains the changes as [`Splice`]s the emission layer turns into `minimap_lines`
 //! frames. [`summarize_line`] compresses a line into colored [`Run`] blocks, never
 //! the file text. Nothing here does IO, so the whole module is unit-tested.
+//!
+//! A file longer than its strip folds a band of lines into each strip row, as
+//! [`density`] decides. The store then sends one row per band in place of its
+//! lines.
 
 use crate::{
     display_map::{highlights::HighlightStyleId, syntax_theme::SyntaxStyles},
     theme::{scope, Theme},
 };
+use band::LineStat;
+use density::{Density, Tier};
 use ratatui::style::Color;
+use rows::RowStore;
 use std::{
     collections::{hash_map::DefaultHasher, HashMap},
     hash::{Hash, Hasher},
     ops::Range,
-    time::Duration,
+    time::{Duration, Instant},
 };
 use stoat_language::HighlightId;
 use stoat_scheduler::Executor;
@@ -24,9 +31,12 @@ use stoat_text::{
     Rope,
 };
 
+mod band;
+pub(crate) mod density;
 pub(crate) mod diff_changes;
 pub(crate) mod emit;
 mod row_set;
+mod rows;
 
 use row_set::RowSet;
 
@@ -237,13 +247,14 @@ impl LineRuns {
     }
 }
 
-/// A line's diff or diagnostic state, drawn as a colored run in the reserved
-/// left-edge lane.
+/// The kind of a mark a strip draws in a palette class of its own.
 ///
-/// The seven kinds occupy palette classes appended after the syntax scopes,
-/// resolved to a class via [`ClassTable::edge_class`]. `Removed` is reserved for
-/// palette stability but not sourced per-line yet, since a deleted line has no
-/// buffer row to mark.
+/// The diff kinds draw a row's lane and the diagnostic kinds its tick, and the
+/// shape and rule kinds draw the folded rows of a long file. The kinds occupy
+/// palette classes appended after the syntax scopes, resolved to a class via
+/// [`ClassTable::edge_class`]. A buffer line never takes `Removed`, since a
+/// deleted line has no buffer row. The changes view marks the base lines it
+/// shows with it.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum EdgeClass {
     Added,
@@ -255,6 +266,13 @@ pub enum EdgeClass {
     /// A chunk header row, in the color the commit preview and the changes view
     /// paint chunk headers in.
     Header,
+    /// The outline of a band of code in the Shape tier, which draws a band's
+    /// extent where its text is too small to summarize.
+    Shape,
+    /// The outline of a Shape tier band that is mostly comments.
+    ShapeComment,
+    /// The hairline above the row where a top-level item starts.
+    Rule,
 }
 
 /// The marks that frame a row, as the Minimap boards draw a row.
@@ -448,12 +466,42 @@ impl EdgeSource for ResolvedEdges {
     }
 }
 
+/// The marks the line store takes, which are none under a rows layer.
+///
+/// Under a layer the terminal holds rows, and a row takes the marks of its
+/// whole band when the layer frames it. So the line summaries under it hold
+/// the representative content alone, which the layer frames once.
+struct LineMarks<'a, E> {
+    source: &'a E,
+    banded: bool,
+}
+
+impl<E: EdgeSource> EdgeSource for LineMarks<'_, E> {
+    fn mark_of(&self, row: u32) -> RowMark {
+        match self.banded {
+            true => RowMark::NONE,
+            false => self.source.mark_of(row),
+        }
+    }
+
+    fn marked_rows(&self, rows: Range<u32>) -> Vec<u32> {
+        match self.banded {
+            true => Vec::new(),
+            false => self.source.marked_rows(rows),
+        }
+    }
+}
+
 /// The run summaries of one buffer, plus the incremental-sync bookkeeping.
 ///
 /// Mirrors the terminal's content store: one entry per line, spliced as the
 /// buffer changes. Retains the rope it last synced against so an edit's old byte
 /// range resolves to old rows, and the set of built rows, so a strip builds only
 /// the lines around its view and a large file costs that window.
+///
+/// A strip that folds a band of lines into each row holds rows in the terminal
+/// in place of lines. The lines stay here, and [`Self::rows`] derives each row
+/// from its band.
 pub struct MinimapContent {
     content_id: u32,
     /// Time one [`Self::sync`] spends on chunked work before it leaves the rest
@@ -481,9 +529,27 @@ pub struct MinimapContent {
     built: RowSet,
     /// The rows the last sync asked to hold built, so [`Self::build_pending`]
     /// knows whether the window still has gaps.
-    wanted: Range<u32>,
+    ///
+    /// The window's lines, or under [`Self::rows`] the representative line of
+    /// each band in the window.
+    wanted: RowSet,
+    /// The statistics of every buffer line from the first sync on, current
+    /// for the rows before [`Self::stats_built`].
+    ///
+    /// Kept for the whole file while the summaries stay windowed, so a band's
+    /// representative comes from all of its lines.
+    stats: Vec<LineStat>,
+    /// The rows from 0 whose [`Self::stats`] are current.
+    stats_built: u32,
+    /// The strip rows the terminal holds while each row stands for a band of
+    /// lines, `None` while it holds one row per line.
+    ///
+    /// Under it the line summaries carry no marks. A row takes the marks of
+    /// its whole band when the layer frames it.
+    rows: Option<RowStore>,
     /// The store length the emitter sends as `minimap_len` before the queued
-    /// splices, set by the first sync, which sizes the store.
+    /// splices, set by the first sync, which sizes the store, and again by a
+    /// change of the fold of lines into rows.
     pending_len: Option<u32>,
     disabled: bool,
     /// Combined diff and diagnostic version last synced. A change re-checks the
@@ -555,7 +621,10 @@ impl MinimapContent {
             synced_version: 0,
             synced_rope: Rope::new(),
             built: RowSet::default(),
-            wanted: 0..0,
+            wanted: RowSet::default(),
+            stats: Vec::new(),
+            stats_built: 0,
+            rows: None,
             pending_len: None,
             disabled: false,
             synced_decoration_version: 0,
@@ -593,8 +662,9 @@ impl MinimapContent {
         self.synced_version
     }
 
-    /// Whether chunked work is still outstanding, from the window's build or
-    /// either sweep.
+    /// Whether chunked work is still outstanding, from the window's build,
+    /// either sweep, the line statistics, or a row of the window that waits to
+    /// be derived.
     ///
     /// The caller ticks [`Self::sync`] on idle frames while this holds, so
     /// every cursor runs to completion instead of stalling until the next user
@@ -604,9 +674,11 @@ impl MinimapContent {
     /// some unrelated event happens to tick another sync.
     pub fn build_pending(&self) -> bool {
         !self.disabled
-            && (!self.built.covers(self.wanted.clone())
+            && (!self.wanted.difference(&self.built).is_empty()
+                || (self.stats_built as usize) < self.lines.len()
                 || self.resync_upto.is_some()
-                || self.edge_resync_upto.is_some())
+                || self.edge_resync_upto.is_some()
+                || self.rows.as_ref().is_some_and(RowStore::window_stale))
     }
 
     /// Drain the pending splices for the emission layer.
@@ -617,9 +689,10 @@ impl MinimapContent {
     /// Take the store length the emitter sends as `minimap_len` ahead of the
     /// queued splices.
     ///
-    /// Set once, by the first sync, which sizes the store to the file with
-    /// blank lines so each later splice lands at its own row. An edit's splice
-    /// carries its own length change, so no later sync sets it.
+    /// Set by the first sync, which sizes the store to the file with blank
+    /// lines so each later splice lands at its own row. An edit's splice
+    /// carries its own length change. A sync sets it again only when the
+    /// strip's fold of lines into rows or its row count changes.
     pub fn take_len(&mut self) -> Option<u32> {
         self.pending_len.take()
     }
@@ -632,6 +705,8 @@ impl MinimapContent {
     /// `marks` a row's diff/diagnostic mark. [`SyncVersions::decoration`]
     /// changing re-checks the built lines' edge marks and [`SyncVersions::syntax`]
     /// changing re-summarizes their content, each without a buffer edit.
+    /// `comment_prefixes` are the line-comment prefixes of the buffer's
+    /// language, which the line statistics read.
     ///
     /// The first sync sizes the store to the file with blank lines and sets
     /// the length [`Self::take_len`] hands over. Every edit after it queues a
@@ -645,8 +720,14 @@ impl MinimapContent {
     /// [`BuildWindow::from`] first, as far as [`Self::budget`] reaches per
     /// call. Rows outside every window a sync named stay blank. A buffer over
     /// [`MAX_LINES`] disables and queues nothing.
+    ///
+    /// A `density` past one line per row folds each band of lines into one
+    /// strip row. The store then holds and splices rows, `window` names strip
+    /// rows, and each row is the band's representative line framed under the
+    /// marks of the whole band, whose classes `table` ranks. A change of the
+    /// fold or of the row count sizes the store again.
     #[allow(clippy::too_many_arguments)]
-    pub fn sync(
+    pub(crate) fn sync(
         &mut self,
         new_rope: &Rope,
         version: u64,
@@ -654,6 +735,9 @@ impl MinimapContent {
         versions: SyncVersions,
         tokens_for: impl Fn(Range<u32>) -> HashMap<u32, Vec<LineToken>>,
         marks: impl EdgeSource,
+        comment_prefixes: &[&str],
+        table: &ClassTable,
+        density: Density,
         window: BuildWindow,
     ) {
         if self.disabled {
@@ -666,9 +750,12 @@ impl MinimapContent {
             self.disabled = true;
             self.lines.clear();
             self.edges.clear();
+            self.stats.clear();
+            self.stats_built = 0;
+            self.rows = None;
             self.queued.clear();
             self.built = RowSet::default();
-            self.wanted = 0..0;
+            self.wanted = RowSet::default();
             self.pending_len = None;
             self.synced_version = version;
             self.synced_decoration_version = versions.decoration;
@@ -677,43 +764,66 @@ impl MinimapContent {
             return;
         }
 
-        let wanted = window.rows.start.min(total)..window.rows.end.min(total);
         if self.lines.is_empty() {
             // The store starts as the file's length in blank lines, so the
             // window's splices land at their own rows, wherever the view is.
             self.lines = vec![LineRuns::default(); total as usize];
+            self.stats = vec![LineStat::default(); total as usize];
             self.pending_len = Some(total);
             self.synced_version = version;
             self.synced_rope = new_rope.clone();
         } else if version != self.synced_version {
+            // The edits land under the layer the last sync held. A layer that
+            // changes below starts the store over anyway.
+            let line_marks = LineMarks {
+                source: &marks,
+                banded: self.rows.is_some(),
+            };
+            let wanted = match self.rows {
+                Some(_) => RowSet::default(),
+                None => RowSet::of(window.rows.start.min(total)..window.rows.end.min(total)),
+            };
             if edits.edits().len() > EDIT_SUMMARIZE_MAX {
-                self.splice_edits(edits, new_rope, &marks);
+                self.splice_edits(edits, new_rope, &line_marks, comment_prefixes);
             } else {
                 for edit in edits.edits() {
-                    self.apply_edit(edit, new_rope, &tokens_for, &marks, &wanted);
+                    self.apply_edit(
+                        edit,
+                        new_rope,
+                        &tokens_for,
+                        &line_marks,
+                        &wanted,
+                        comment_prefixes,
+                    );
                 }
             }
             self.synced_version = version;
             self.synced_rope = new_rope.clone();
         }
-        self.wanted = wanted.clone();
+        self.reconcile_rows(density, total, versions);
+        let line_marks = LineMarks {
+            source: &marks,
+            banded: self.rows.is_some(),
+        };
 
         // Every stage below reads the clock after its slice rather than before
         // it, so a sync that arrives with the budget already spent still
         // advances its cursor by one slice.
-        let from = window.from.min(total);
-        while let Some(slice) = self.next_build_slice(&wanted, from) {
+        self.build_stats(new_rope, total, comment_prefixes, started);
+
+        let from = self.set_wanted(&window, total);
+        while let Some(slice) = self.next_build_slice(from) {
             let tokens = tokens_for(slice.clone());
             // Resolved once through the bulk path, since the summary below and
             // the record beside it both want every row's edge.
-            let edges = ResolvedEdges::over(&marks, slice.clone());
+            let edges = ResolvedEdges::over(&line_marks, slice.clone());
             let lines = summarize_rows(new_rope, slice.clone(), &tokens, &edges);
             self.lines[slice.start as usize..slice.end as usize].copy_from_slice(&lines);
             // An unbuilt row carries no mark, so the slice's marks go in
             // whole at the place their rows sort to.
             let at = self.edges.partition_point(|&(row, _)| row < slice.start);
             self.edges.splice(at..at, edges.marks);
-            self.queue_splice(Splice {
+            self.queue_line_splice(Splice {
                 start: slice.start,
                 removed: slice.end - slice.start,
                 lines,
@@ -843,7 +953,15 @@ impl MinimapContent {
         //
         // Sliced like the recolor sweep, since a branch switch can move a mark
         // on every row of the file at once.
-        if versions.decoration != self.synced_decoration_version
+        //
+        // Under a layer no line carries a mark, and a row takes the marks of
+        // its whole band, so a bump re-derives every row in place of the sweep.
+        if let Some(rows) = &mut self.rows {
+            if versions.decoration != self.synced_decoration_version {
+                self.synced_decoration_version = versions.decoration;
+                rows.mark_all_stale();
+            }
+        } else if versions.decoration != self.synced_decoration_version
             && (self.edge_resync_upto.is_none() || self.edge_resync_target != versions.decoration)
         {
             self.edge_resync_target = versions.decoration;
@@ -858,7 +976,7 @@ impl MinimapContent {
                     from = end;
                     break;
                 };
-                self.resync_edges(new_rope, &tokens_for, &marks, run.clone());
+                self.resync_edges(new_rope, &tokens_for, &line_marks, run.clone());
                 from = run.end;
 
                 if from >= end || self.executor.now().duration_since(started) >= self.budget {
@@ -872,6 +990,204 @@ impl MinimapContent {
             } else {
                 self.edge_resync_upto = Some(from);
             }
+        }
+
+        self.derive_rows(&marks, table, total, started);
+    }
+
+    /// Hold a layer of strip rows while `density` folds lines into rows, and
+    /// none while each row is one line.
+    ///
+    /// A switch between the two empties the line store and sizes the terminal
+    /// store again, since a line framed under its own marks is not a row
+    /// framed under its band's. A layer whose fold or row count changed comes
+    /// back with every row stale, and the lines it reads stay.
+    ///
+    /// The terminal store keeps what it held across the `minimap_len` that
+    /// sizes it, so a layer starts from what the terminal shows. A switch back
+    /// to lines blanks the layer's rows, since a line outside every window
+    /// never replaces them.
+    fn reconcile_rows(&mut self, density: Density, total: u32, versions: SyncVersions) {
+        let target = (density.tier != Tier::Line).then_some(density);
+        match (&self.rows, target) {
+            (None, None) => {},
+            (Some(rows), Some(target))
+                if rows.density == target
+                    && rows.len() == density::rows(total, target.lines_per_row) => {},
+            (Some(_), Some(target)) => {
+                let held = self.rows.take().map(|rows| rows.sent).unwrap_or_default();
+                let rows = RowStore::new(target, total, held);
+                self.pending_len = Some(rows.len());
+                self.rows = Some(rows);
+            },
+            (None, Some(target)) => {
+                let held = std::mem::take(&mut self.lines);
+                self.reset_lines(total, versions);
+                let rows = RowStore::new(target, total, held);
+                self.pending_len = Some(rows.len());
+                self.rows = Some(rows);
+            },
+            (Some(_), None) => {
+                let held = self.rows.take().map_or(0, |rows| rows.len());
+                self.reset_lines(total, versions);
+                self.pending_len = Some(total);
+                self.queue_splice(Splice {
+                    start: 0,
+                    removed: held,
+                    lines: vec![LineRuns::default(); held as usize],
+                });
+            },
+        }
+    }
+
+    /// Empty the line store for a switch between lines and rows, which leaves
+    /// every line to the build and every sweep idle at the current versions.
+    fn reset_lines(&mut self, total: u32, versions: SyncVersions) {
+        self.lines = vec![LineRuns::default(); total as usize];
+        self.edges.clear();
+        self.built = RowSet::default();
+        self.queued.clear();
+        self.resync_upto = None;
+        self.resync_end = None;
+        self.resync_extra = None;
+        self.edited_rows = None;
+        self.pending_syntax_rows = SweepRows::NONE;
+        self.edge_resync_upto = None;
+        self.synced_syntax_version = versions.syntax;
+        self.synced_syntax_other = versions.syntax_other;
+        self.synced_decoration_version = versions.decoration;
+    }
+
+    /// Bring [`Self::stats`] to `total` rows from [`Self::stats_built`], in
+    /// [`SYNC_SLICE`] steps, until the budget of the sync that `started` ends.
+    fn build_stats(
+        &mut self,
+        rope: &Rope,
+        total: u32,
+        comment_prefixes: &[&str],
+        started: Instant,
+    ) {
+        let total = total.min(self.stats.len() as u32);
+        let mut text = String::new();
+        while self.stats_built < total {
+            let rows = self.stats_built..self.stats_built.saturating_add(SYNC_SLICE).min(total);
+            let mut walk = rope.line_walk(rows.clone());
+            for row in rows.clone() {
+                text.clear();
+                walk.next_into(&mut text);
+                self.stats[row as usize] = band::line_stat(&text, comment_prefixes);
+            }
+            self.stats_built = rows.end;
+
+            if self.executor.now().duration_since(started) >= self.budget {
+                break;
+            }
+        }
+    }
+
+    /// Set [`Self::wanted`] from `window`, and answer the line the build grows
+    /// outward from.
+    ///
+    /// Under a layer `window` is in strip rows. Each band in it wants its
+    /// representative line once the band's statistics are built.
+    fn set_wanted(&mut self, window: &BuildWindow, total: u32) -> u32 {
+        let Some(rows) = &mut self.rows else {
+            self.wanted = RowSet::of(window.rows.start.min(total)..window.rows.end.min(total));
+            return window.from.min(total);
+        };
+
+        let lines_per_row = rows.density.lines_per_row;
+        rows.window = window.rows.start.min(rows.len())..window.rows.end.min(rows.len());
+        let mut wanted = RowSet::default();
+        for row in rows.window.clone() {
+            let band = density::band(row, lines_per_row, total);
+            if band.end > self.stats_built {
+                continue;
+            }
+            let stats = &self.stats[band.start as usize..band.end as usize];
+            if let Some(at) = band::representative(stats) {
+                let line = band.start + at as u32;
+                wanted.insert(line..line + 1);
+            }
+        }
+        self.wanted = wanted;
+        window.from.saturating_mul(lines_per_row).min(total)
+    }
+
+    /// Derive the stale rows of the layer's window again, in [`SYNC_SLICE`]
+    /// steps under the budget of the sync that `started`, and queue a splice
+    /// over each run of rows that came out different.
+    ///
+    /// A row whose band has no statistics yet, or whose representative line is
+    /// not built yet, stays stale for a later sync. A band whose lines are
+    /// mostly blank has no representative and draws blank.
+    fn derive_rows(
+        &mut self,
+        marks: &impl EdgeSource,
+        table: &ClassTable,
+        total: u32,
+        started: Instant,
+    ) {
+        let Some(rows) = &mut self.rows else {
+            return;
+        };
+
+        let lines_per_row = rows.density.lines_per_row;
+        let mut splices: Vec<Splice> = Vec::new();
+        let mut derived: u32 = 0;
+        for row in rows.window.clone() {
+            let at = row as usize;
+            let band = density::band(row, lines_per_row, total);
+            if !rows.stale[at] || band.end > self.stats_built {
+                continue;
+            }
+
+            let summary =
+                match band::representative(&self.stats[band.start as usize..band.end as usize]) {
+                    None => LineRuns::default(),
+                    Some(offset) => {
+                        let line = band.start + offset as u32;
+                        if !self.built.covers(line..line + 1) {
+                            continue;
+                        }
+                        let mark = band::band_mark(
+                            marks
+                                .marked_rows(band.clone())
+                                .into_iter()
+                                .filter(|line| band.contains(line))
+                                .map(|line| marks.mark_of(line)),
+                            table,
+                        );
+                        frame_row(self.lines[line as usize], mark, TINT_WEIGHT)
+                    },
+                };
+
+            rows.stale[at] = false;
+            if rows.sent[at] != summary {
+                rows.sent[at] = summary;
+                match splices.last_mut() {
+                    Some(splice) if splice.start + splice.removed == row => {
+                        splice.removed += 1;
+                        splice.lines.push(summary);
+                    },
+                    _ => splices.push(Splice {
+                        start: row,
+                        removed: 1,
+                        lines: vec![summary],
+                    }),
+                }
+            }
+
+            derived += 1;
+            if derived.is_multiple_of(SYNC_SLICE)
+                && self.executor.now().duration_since(started) >= self.budget
+            {
+                break;
+            }
+        }
+
+        for splice in splices {
+            self.queue_splice(splice);
         }
     }
 
@@ -891,9 +1207,9 @@ impl MinimapContent {
     ///
     /// The build therefore covers the view first and then grows out from it
     /// in both directions, one slice at a time.
-    fn next_build_slice(&self, wanted: &Range<u32>, from: u32) -> Option<Range<u32>> {
-        self.built
-            .gaps(wanted.clone())
+    fn next_build_slice(&self, from: u32) -> Option<Range<u32>> {
+        self.wanted
+            .difference(&self.built)
             .into_iter()
             .map(|gap| {
                 if gap.end <= from {
@@ -1017,7 +1333,8 @@ impl MinimapContent {
     /// The edit's inserted rows are summarized and join the built rows when
     /// any row it replaced was built or the inserted rows reach into `wanted`.
     /// Otherwise they splice in blank, as the rest of the unbuilt file sits in
-    /// the terminal's store, and no tokens are asked for them.
+    /// the terminal's store, and no tokens are asked for them. Their
+    /// statistics are read fresh either way.
     ///
     /// `removed` is clamped to the store for safety. The store holds every row
     /// of the file, so the clamp only matters to a patch that does not match
@@ -1028,7 +1345,8 @@ impl MinimapContent {
         new_rope: &Rope,
         tokens_for: &impl Fn(Range<u32>) -> HashMap<u32, Vec<LineToken>>,
         marks: &impl EdgeSource,
-        wanted: &Range<u32>,
+        wanted: &RowSet,
+        comment_prefixes: &[&str],
     ) {
         // The earlier edits of this patch already spliced the rows under this
         // one, so the row it replaces has moved by their line delta. The new
@@ -1049,7 +1367,7 @@ impl MinimapContent {
         let build = self
             .built
             .intersects(new_start_row..new_start_row + removed)
-            || (inserted_rows.start < wanted.end && wanted.start < inserted_rows.end);
+            || wanted.intersects(inserted_rows.clone());
 
         let (inserted, inserted_marks): (Vec<LineRuns>, Vec<RowMark>) = if build {
             let tokens = tokens_for(inserted_rows.clone());
@@ -1069,13 +1387,24 @@ impl MinimapContent {
         let end = (start + removed as usize).min(self.lines.len());
         self.lines.splice(start..end, inserted.iter().cloned());
         self.splice_edges(new_start_row..end as u32, &inserted_marks);
+        self.stats.splice(
+            start..end,
+            line_stats(new_rope, inserted_rows.clone(), comment_prefixes),
+        );
+        self.stats_built = stats_built_after(
+            self.stats_built,
+            new_start_row,
+            removed,
+            inserted.len() as u32,
+        )
+        .min(self.stats.len() as u32);
 
         let delta = inserted.len() as i64 - removed as i64;
         self.built
             .splice(new_start_row, removed, inserted.len() as u32, build);
         self.slide_sweep_bounds(new_start_row, replaced, delta);
 
-        self.queue_splice(Splice {
+        self.queue_line_splice(Splice {
             start: new_start_row,
             removed,
             lines: inserted,
@@ -1132,10 +1461,16 @@ impl MinimapContent {
     ///
     /// An edit's new rows stay built when any row it replaced was built, and
     /// stay blank otherwise, for the build to summarize when a window reaches
-    /// them. Rows, marks, and splices end where [`Self::apply_edit`] per edit
-    /// leaves them, apart from the summaries the sweep and the build have yet
-    /// to reach.
-    fn splice_edits(&mut self, edits: &Patch<usize>, new_rope: &Rope, marks: &impl EdgeSource) {
+    /// them. Rows, marks, statistics, and splices end where
+    /// [`Self::apply_edit`] per edit leaves them, apart from the summaries the
+    /// sweep and the build have yet to reach.
+    fn splice_edits(
+        &mut self,
+        edits: &Patch<usize>,
+        new_rope: &Rope,
+        marks: &impl EdgeSource,
+        comment_prefixes: &[&str],
+    ) {
         let edits = edits.edits();
         let new_points = new_rope.offsets_to_points_batch(
             &edits
@@ -1151,6 +1486,7 @@ impl MinimapContent {
         );
 
         let mut lines: Vec<LineRuns> = Vec::with_capacity(self.lines.len());
+        let mut stats: Vec<LineStat> = Vec::with_capacity(self.stats.len());
         let mut edges: Vec<(u32, RowMark)> = Vec::with_capacity(self.edges.len());
         // The first old row, and the first old mark, not yet copied or replaced.
         let mut old_row = 0;
@@ -1175,6 +1511,7 @@ impl MinimapContent {
                 let count = start - lines.len();
                 let shift = lines.len() as i64 - old_row as i64;
                 lines.extend_from_slice(&self.lines[old_row..old_row + count]);
+                stats.extend_from_slice(&self.stats[old_row..old_row + count]);
                 old_row += count;
                 while let Some(&(row, mark)) = self.edges.get(old_edge)
                     && (row as usize) < old_row
@@ -1188,6 +1525,7 @@ impl MinimapContent {
             // that row, and this edit replaces it, as the same edit in
             // `apply_edit` splices it out again.
             let reclaimed = lines.split_off(start);
+            stats.truncate(start);
             while edges.last().is_some_and(|&(row, _)| row >= new_start_row) {
                 edges.pop();
             }
@@ -1212,6 +1550,11 @@ impl MinimapContent {
             }
 
             lines.extend_from_slice(&stand_ins);
+            stats.extend(line_stats(
+                new_rope,
+                new_start_row..new_end_row + 1,
+                comment_prefixes,
+            ));
             // A blank row carries no mark until the build reaches it.
             if build {
                 edges.extend(
@@ -1224,6 +1567,8 @@ impl MinimapContent {
             let delta = inserted as i64 - removed as i64;
             store_len = (store_len as i64 + delta) as u32;
             self.built.splice(new_start_row, removed, inserted, build);
+            self.stats_built =
+                stats_built_after(self.stats_built, new_start_row, removed, inserted);
             self.slide_sweep_bounds(new_start_row, replaced, delta);
             self.edited_rows = Some(match self.edited_rows.take() {
                 Some(rows) => rows.start.min(new_start_row)..rows.end.max(new_end_row + 1),
@@ -1231,7 +1576,7 @@ impl MinimapContent {
             });
 
             if delta != 0 {
-                self.queue_splice(Splice {
+                self.queue_line_splice(Splice {
                     start: new_start_row,
                     removed,
                     lines: stand_ins,
@@ -1241,6 +1586,7 @@ impl MinimapContent {
 
         let shift = lines.len() as i64 - old_row as i64;
         lines.extend_from_slice(&self.lines[old_row..]);
+        stats.extend_from_slice(&self.stats[old_row..]);
         edges.extend(
             self.edges[old_edge..]
                 .iter()
@@ -1249,9 +1595,12 @@ impl MinimapContent {
 
         self.lines = lines;
         self.edges = edges;
+        self.stats_built = self.stats_built.min(stats.len() as u32);
+        self.stats = stats;
     }
 
-    /// Store `summary` as `row`'s and queue the one-line splice carrying it.
+    /// Store `summary` as `row`'s and queue the one-line splice carrying it,
+    /// through [`Self::queue_line_splice`].
     ///
     /// The store and the payload are two copies of the runs. The wire replay
     /// consumes the payload, while the store stays to answer the next sync's
@@ -1259,7 +1608,7 @@ impl MinimapContent {
     fn replace_line(&mut self, row: u32, summary: LineRuns) {
         self.lines[row as usize] = summary;
 
-        self.queue_splice(Splice {
+        self.queue_line_splice(Splice {
             start: row,
             removed: 1,
             lines: vec![summary],
@@ -1346,6 +1695,16 @@ impl MinimapContent {
         );
     }
 
+    /// Queue a splice of the line store for the terminal, or under a layer
+    /// mark stale the rows whose bands it touched, since the terminal then
+    /// holds rows.
+    fn queue_line_splice(&mut self, splice: Splice) {
+        match &mut self.rows {
+            Some(rows) => rows.note_lines(splice.start, splice.removed, splice.lines.len() as u32),
+            None => self.queue_splice(splice),
+        }
+    }
+
     /// Queue `splice`, folding it into the pending tail when the two describe
     /// one contiguous run.
     ///
@@ -1414,6 +1773,35 @@ fn summarize_rows(
         summarize_line(&text, row_tokens(tokens, row), marks.mark_of(row))
     })
     .collect()
+}
+
+/// The statistics of each row in `rows`, read from `rope`.
+fn line_stats(rope: &Rope, rows: Range<u32>, comment_prefixes: &[&str]) -> Vec<LineStat> {
+    let mut text = String::new();
+    let mut walk = rope.line_walk(rows.clone());
+    rows.map(|_| {
+        text.clear();
+        walk.next_into(&mut text);
+        band::line_stat(&text, comment_prefixes)
+    })
+    .collect()
+}
+
+/// Where the current statistics end after an edit that replaced `removed` rows
+/// from `start` with `inserted` rows whose statistics it read fresh, when they
+/// ended at `built` before it.
+///
+/// An edit past the current rows leaves them as they were. One inside them
+/// moves their end by the line delta. One that crosses their end ends them at
+/// its own inserted rows, since the rows after those were never current.
+fn stats_built_after(built: u32, start: u32, removed: u32, inserted: u32) -> u32 {
+    if start >= built {
+        built
+    } else if start + removed <= built {
+        (i64::from(built) + i64::from(inserted) - i64::from(removed)) as u32
+    } else {
+        start + inserted
+    }
 }
 
 /// The tokens covering `row`, empty for a row the resolver reported none for.
@@ -1624,7 +2012,7 @@ fn glyph_weight(ch: char) -> u8 {
 /// the strip holds.
 ///
 /// The palette lays out the syntax block of [`Self::stride`] classes, then the
-/// seven edge classes. The whole palette fits the 64-entry cap of a terminal
+/// ten edge classes. The whole palette fits the 64-entry cap of a terminal
 /// before protocol 13. A row's [`RowMark`] names edge classes for its lane, its
 /// tint, and its tick, and its content keeps the syntax classes.
 pub struct ClassTable {
@@ -1679,6 +2067,9 @@ impl ClassTable {
             scope::UI_DIAGNOSTIC_WARNING,
             scope::UI_DIAGNOSTIC_INFO,
             scope::VCS_COMMIT_SHA,
+            scope::UI_MINIMAP_SHAPE,
+            scope::UI_MINIMAP_SHAPE_COMMENT,
+            scope::UI_MINIMAP_RULE,
         ] {
             palette.push(color_to_rgb(theme.get(scope).fg.unwrap_or(Color::White)));
         }
@@ -1694,7 +2085,7 @@ impl ClassTable {
 
     /// The palette class the edge mark `kind` draws in.
     ///
-    /// The seven edge classes occupy the palette right after the syntax scopes,
+    /// The edge classes occupy the palette right after the syntax scopes,
     /// in [`EdgeClass`] order, so the returned class indexes the mark's declared
     /// color on the strip.
     pub fn edge_class(&self, kind: EdgeClass) -> u8 {
@@ -1760,10 +2151,14 @@ pub(crate) fn color_to_rgb(color: Color) -> [u8; 3] {
 #[cfg(test)]
 mod tests {
     use super::{
-        resolve_overlaps, summarize_line, BuildWindow, EdgeSource, LineRuns, LineToken,
-        MinimapContent, RowMark, RowSet, Run, Splice, SyncVersions, CONTENT_COL, CONTENT_RUNS,
-        EDIT_SUMMARIZE_MAX, MAX_LINES, MAX_RUNS, SYNC_BUDGET, SYNC_SLICE, TOKEN_BYTE_CAP,
+        band::{LineKind, LineStat},
+        density::{Density, Tier},
+        frame_row, resolve_overlaps, summarize_line, BuildWindow, ClassTable, EdgeClass,
+        EdgeSource, LineRuns, LineToken, MinimapContent, RowMark, RowSet, Run, Splice,
+        SyncVersions, CONTENT_COL, CONTENT_RUNS, EDIT_SUMMARIZE_MAX, MAX_LINES, MAX_RUNS,
+        SYNC_BUDGET, SYNC_SLICE, TINT_WEIGHT, TOKEN_BYTE_CAP,
     };
+    use crate::theme::Theme;
     use std::{cell::RefCell, collections::HashMap, ops::Range, sync::Arc, time::Duration};
     use stoat_scheduler::{Executor, TestScheduler};
     use stoat_text::{
@@ -1778,6 +2173,11 @@ mod tests {
         from: 0,
     };
 
+    /// The class table of an empty theme, for a sync whose marks need no ranks.
+    fn line_table() -> ClassTable {
+        ClassTable::from_theme(&Theme::empty())
+    }
+
     impl MinimapContent {
         /// [`MinimapContent::sync`] with [`ALL`] as the window, for the tests
         /// of what a sync does to the rows it builds.
@@ -1790,7 +2190,18 @@ mod tests {
             tokens_for: impl Fn(Range<u32>) -> HashMap<u32, Vec<LineToken>>,
             marks: impl EdgeSource,
         ) {
-            self.sync(new_rope, version, edits, versions, tokens_for, marks, ALL);
+            self.sync(
+                new_rope,
+                version,
+                edits,
+                versions,
+                tokens_for,
+                marks,
+                &[],
+                &line_table(),
+                Density::LINE,
+                ALL,
+            );
         }
     }
 
@@ -2804,6 +3215,9 @@ mod tests {
             versions(0, 0),
             no_tokens,
             no_edges,
+            &[],
+            &line_table(),
+            Density::LINE,
             WINDOW,
         );
         let _ = (content.take_len(), content.take_queued());
@@ -2834,6 +3248,9 @@ mod tests {
             versions(0, 0),
             no_tokens,
             no_edges,
+            &[],
+            &line_table(),
+            Density::LINE,
             WINDOW,
         );
 
@@ -2860,6 +3277,278 @@ mod tests {
         );
     }
 
+    /// The four kinds of line the line-statistics tests repeat, and the
+    /// statistics of each: code, an indented comment, a blank line, and
+    /// tab-indented code.
+    const STAT_LINES: [&str; 4] = ["code();", "    // note", "", "\tx = 1;"];
+    const STATS: [LineStat; 4] = [
+        LineStat {
+            end: 7,
+            kind: LineKind::Code,
+        },
+        LineStat {
+            end: 11,
+            kind: LineKind::Comment,
+        },
+        LineStat {
+            end: 0,
+            kind: LineKind::Blank,
+        },
+        LineStat {
+            end: 10,
+            kind: LineKind::Code,
+        },
+    ];
+
+    /// The statistics of a `// note` line.
+    const NOTE: LineStat = LineStat {
+        end: 7,
+        kind: LineKind::Comment,
+    };
+
+    /// `count` lines that cycle through [`STAT_LINES`], and their statistics.
+    fn stat_lines(count: usize) -> (String, Vec<LineStat>) {
+        let lines: Vec<&str> = (0..count).map(|i| STAT_LINES[i % 4]).collect();
+        let stats = (0..count).map(|i| STATS[i % 4]).collect();
+        (lines.join("\n"), stats)
+    }
+
+    impl MinimapContent {
+        /// [`MinimapContent::sync`] over every row for a buffer whose language
+        /// opens a line comment with `//`, for the tests of the statistics.
+        fn sync_commented(&mut self, new_rope: &Rope, version: u64, edits: &Patch<usize>) {
+            self.sync(
+                new_rope,
+                version,
+                edits,
+                versions(0, 0),
+                no_tokens,
+                no_edges,
+                &["//"],
+                &line_table(),
+                Density::LINE,
+                ALL,
+            );
+        }
+    }
+
+    /// A sync reads the statistics of every line of the file within one
+    /// budget, ahead of the summaries it builds.
+    #[test]
+    fn a_sync_keeps_a_line_stat_for_every_line() {
+        let (text, stats) = stat_lines(20);
+        let mut content = MinimapContent::new(1, test_executor());
+        content.sync_commented(&rope(&text), 1, &Patch::empty());
+
+        assert_eq!((content.stats_built, content.stats), (20, stats));
+    }
+
+    /// An edit splices the statistics as it splices the lines, so the rows
+    /// below a line it opens move down and the line itself reads fresh.
+    #[test]
+    fn an_edit_splices_the_line_stats() {
+        let (before, mut stats) = stat_lines(20);
+        let mut content = MinimapContent::new(1, test_executor());
+        content.sync_commented(&rope(&before), 1, &Patch::empty());
+
+        let at = before.match_indices('\n').nth(2).expect("a third line").0 + 1;
+        let (after, patch) = patched(&before, &[(at..at, "// note\n")]);
+        content.sync_commented(&rope(&after), 2, &patch);
+
+        stats.insert(3, NOTE);
+        assert_eq!((content.stats_built, content.stats), (21, stats));
+    }
+
+    /// A patch past [`EDIT_SUMMARIZE_MAX`] edits rebuilds the statistics with
+    /// the store, to the new rope's line count.
+    #[test]
+    fn a_bulk_edit_rebuilds_the_line_stats() {
+        let (before, stats) = stat_lines(160);
+        let mut content = MinimapContent::new(1, test_executor());
+        content.sync_commented(&rope(&before), 1, &Patch::empty());
+
+        // A `// note` line opens above every fourth row, from row 0, for one
+        // edit more than the per-edit path takes.
+        let starts: Vec<usize> = std::iter::once(0)
+            .chain(before.match_indices('\n').map(|(at, _)| at + 1))
+            .collect();
+        let edits: Vec<(Range<usize>, &str)> = (0..=EDIT_SUMMARIZE_MAX)
+            .map(|i| (starts[4 * i]..starts[4 * i], "// note\n"))
+            .collect();
+        let (after, patch) = patched(&before, &edits);
+        content.sync_commented(&rope(&after), 2, &patch);
+
+        let expected: Vec<LineStat> = stats
+            .iter()
+            .enumerate()
+            .flat_map(
+                |(row, &stat)| match row % 4 == 0 && row / 4 <= EDIT_SUMMARIZE_MAX {
+                    true => vec![NOTE, stat],
+                    false => vec![stat],
+                },
+            )
+            .collect();
+        assert_eq!(
+            (content.stats_built as usize, content.stats),
+            (expected.len(), expected),
+        );
+    }
+
+    impl MinimapContent {
+        /// [`MinimapContent::sync`] of an unchanged rope at `density` over
+        /// `window`, for the tests of a fold of lines into rows.
+        fn sync_folded(&mut self, new_rope: &Rope, density: Density, window: BuildWindow) {
+            self.sync(
+                new_rope,
+                1,
+                &Patch::empty(),
+                versions(0, 0),
+                no_tokens,
+                no_edges,
+                &[],
+                &line_table(),
+                density,
+                window,
+            );
+        }
+    }
+
+    /// A store that folds its lines into rows sends each row that differs
+    /// from what the terminal still shows there, a blank row too. One that
+    /// unfolds again blanks the rows it held, since a line outside the window
+    /// never replaces them.
+    #[test]
+    fn a_fold_and_an_unfold_leave_no_stale_entry() {
+        let text: Vec<&str> = (0..40)
+            .map(|line| match line {
+                4..8 => "",
+                _ => "code",
+            })
+            .collect();
+        let rope = rope(&text.join("\n"));
+        let fit = Density {
+            lines_per_row: 4,
+            tier: Tier::Fit,
+        };
+        let (code, blank) = (
+            summarize_line("code", &[], RowMark::NONE),
+            LineRuns::default(),
+        );
+        let mut content = MinimapContent::new(1, test_executor());
+        let mut store = Vec::new();
+
+        content.sync_folded(&rope, Density::LINE, ALL);
+        replay(&mut store, &mut content);
+        content.sync_folded(&rope, fit, ALL);
+        replay(&mut store, &mut content);
+        let folded = store.clone();
+        content.sync_folded(
+            &rope,
+            Density::LINE,
+            BuildWindow {
+                rows: 20..40,
+                from: 20,
+            },
+        );
+        replay(&mut store, &mut content);
+
+        assert_eq!(
+            (folded, store),
+            (
+                (0..10)
+                    .map(|row| if row == 1 { blank } else { code })
+                    .collect::<Vec<_>>(),
+                (0..40)
+                    .map(|line| if line < 20 { blank } else { code })
+                    .collect::<Vec<_>>(),
+            ),
+        );
+    }
+
+    /// Forty `code` lines, four to a row, and a store folded over them with
+    /// what it sent replayed, for the tests of rows that change after a fold.
+    fn folded_fixture() -> (Vec<&'static str>, MinimapContent, Vec<LineRuns>) {
+        let text = vec!["code"; 40];
+        let mut content = MinimapContent::new(1, test_executor());
+        let mut store = Vec::new();
+        content.sync_folded(&rope(&text.join("\n")), FOLD_FOUR, ALL);
+        replay(&mut store, &mut content);
+        (text, content, store)
+    }
+
+    /// Four lines to a row.
+    const FOLD_FOUR: Density = Density {
+        lines_per_row: 4,
+        tier: Tier::Fit,
+    };
+
+    /// An edit inside a band redraws the band's row. Two longer lines move the
+    /// band's median line onto one of them.
+    #[test]
+    fn an_edit_inside_a_band_redraws_its_row() {
+        let (text, mut content, mut store) = folded_fixture();
+        let before = text.join("\n");
+        let (after, patch) = patched(&before, &[(5..14, "longer one\nlonger one")]);
+        content.sync(
+            &rope(&after),
+            2,
+            &patch,
+            versions(0, 0),
+            no_tokens,
+            no_edges,
+            &[],
+            &line_table(),
+            FOLD_FOUR,
+            ALL,
+        );
+        replay(&mut store, &mut content);
+
+        assert_eq!(
+            (store.len(), store[0], store[1]),
+            (
+                10,
+                summarize_line("longer one", &[], RowMark::NONE),
+                summarize_line("code", &[], RowMark::NONE),
+            ),
+        );
+    }
+
+    /// A mark on one line of a band frames the band's row once the marks move,
+    /// so a change anywhere in a folded file shows on its strip.
+    #[test]
+    fn a_mark_on_a_band_line_frames_its_row() {
+        let (text, mut content, mut store) = folded_fixture();
+        let added = line_table().edge_class(EdgeClass::Added);
+        content.sync(
+            &rope(&text.join("\n")),
+            1,
+            &Patch::empty(),
+            versions(1, 0),
+            no_tokens,
+            move |row: u32| (row == 9).then_some(added),
+            &[],
+            &line_table(),
+            FOLD_FOUR,
+            ALL,
+        );
+        replay(&mut store, &mut content);
+
+        let code = summarize_line("code", &[], RowMark::NONE);
+        let lane = RowMark {
+            lane: Some(added),
+            tick: None,
+        };
+        assert_eq!(
+            store,
+            (0..10)
+                .map(|row| match row {
+                    2 => frame_row(code, lane, TINT_WEIGHT),
+                    _ => code,
+                })
+                .collect::<Vec<_>>(),
+        );
+    }
+
     /// A jump moves the window, and the next sync builds the rows the new
     /// window adds, at their own rows and nearest the view first. The length
     /// went with the first sync and does not go again.
@@ -2874,6 +3563,9 @@ mod tests {
             versions(0, 0),
             no_tokens,
             no_edges,
+            &[],
+            &line_table(),
+            Density::LINE,
             BuildWindow {
                 rows: 90_000..91_000,
                 from: 90_200,
@@ -2916,6 +3608,9 @@ mod tests {
             versions(0, 0),
             tokens,
             no_edges,
+            &[],
+            &line_table(),
+            Density::LINE,
             WINDOW,
         );
 
@@ -2952,6 +3647,9 @@ mod tests {
             versions(0, 0),
             tokens,
             no_edges,
+            &[],
+            &line_table(),
+            Density::LINE,
             BuildWindow {
                 rows: 50_001..52_001,
                 from: 51_001,
@@ -2994,6 +3692,9 @@ mod tests {
             versions(0, 0),
             no_tokens,
             marks,
+            &[],
+            &line_table(),
+            Density::LINE,
             WINDOW,
         );
 
@@ -3030,6 +3731,9 @@ mod tests {
             versions(0, 0),
             tokens,
             no_edges,
+            &[],
+            &line_table(),
+            Density::LINE,
             BuildWindow {
                 rows: 50_000 + shift..52_000 + shift,
                 from: 51_000 + shift,
@@ -3076,6 +3780,9 @@ mod tests {
             versions(1, 1),
             tokens,
             AskedEdges(&marks_asked),
+            &[],
+            &line_table(),
+            Density::LINE,
             WINDOW,
         );
 
@@ -3611,9 +4318,9 @@ mod tests {
         let scopes = SyntaxStyles::from_theme(&Theme::empty()).theme_keys().len();
         assert_eq!(
             table.palette().len(),
-            scopes + 1 + 7,
+            scopes + 1 + 10,
             "a syntax block of the default foreground and one color per scope, then \
-             the seven edge classes",
+             the ten edge classes",
         );
     }
 

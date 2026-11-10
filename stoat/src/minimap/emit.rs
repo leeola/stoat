@@ -16,8 +16,9 @@ use crate::{
     buffer::BufferId,
     diff_changes::DiffChangesId,
     display_map::{DisplayPoint, DisplaySnapshot},
-    editor_state::{EditorId, EditorState},
+    editor_state::EditorId,
     minimap::{
+        density::{self, Density, Tier},
         diff_changes::{self, DiffChangesStrip},
         BuildWindow, EdgeSource, RowMark, LINES_PER_CELL,
     },
@@ -298,7 +299,8 @@ fn sync_minimap_strip(
         MinimapMode::Single => Some(stoat.single_minimap_rect),
         _ => None,
     };
-    let (snapshot, diff_version, diag_version, severity_map, window) =
+    let thumb_min_rows = stoat.minimap_thumb_min_rows();
+    let (snapshot, diff_version, diag_version, severity_map, density, window) =
         match stoat.workspaces[ws_id].editors.get_mut(editor_id) {
             Some(editor) => {
                 let snapshot = editor.display_map.snapshot();
@@ -309,11 +311,35 @@ fn sync_minimap_strip(
                     .map(|cache| (cache.version, cache.map.clone()))
                     .unwrap_or_default();
                 let strip = single_strip.unwrap_or(editor.minimap_rect);
-                let window = minimap_build_window(&snapshot, editor, strip);
-                (snapshot, diff_version, diag_version, severity_map, window)
+                let viewport = editor.viewport_rows.unwrap_or(0);
+                let view = minimap_view_window(
+                    &snapshot,
+                    editor.scroll_row as f32 + editor.scroll_frac,
+                    viewport,
+                );
+                let density = strip_density(
+                    snapshot.buffer_line_count(),
+                    strip,
+                    u32::from(view.1),
+                    thumb_min_rows,
+                );
+                editor.minimap_density = (density.tier != Tier::Line).then_some(density);
+                let window = minimap_build_window(view, viewport, strip, density);
+                (
+                    snapshot,
+                    diff_version,
+                    diag_version,
+                    severity_map,
+                    density,
+                    window,
+                )
             },
             None => return,
         };
+    let comment_prefixes = stoat.workspaces[ws_id]
+        .buffers
+        .language_for(buffer_id)
+        .map_or(&[][..], |language| language.line_comments);
     let (rope, version, edits) = {
         let buf_snap = snapshot.buffer_snapshot();
         (
@@ -372,6 +398,9 @@ fn sync_minimap_strip(
         },
         tokens_for,
         marks,
+        comment_prefixes,
+        class_table,
+        density,
         window,
     );
 
@@ -405,24 +434,51 @@ fn sync_minimap_strip(
 /// a page or two of scroll lands on lines already sent. The view is read at
 /// rest rather than mid-glide, so a jump builds where it lands.
 ///
-/// `strip` is the strip's rect when known. A strip shorter than the viewport
-/// still pads by the viewport, so a first frame before the rect is laid out
-/// builds enough.
+/// `view` is the viewport's top buffer line and its height in lines, as
+/// [`minimap_view_window`] reads them at rest for a viewport of `viewport`
+/// rows. `strip` is the strip's rect when known. A strip shorter than the
+/// viewport still pads by the viewport, so a first frame before the rect is
+/// laid out builds enough.
+///
+/// Under a `density` past one line per row the window is in strip rows. It
+/// holds the row of the view's top line and the rows the view's lines take,
+/// padded by the same strip spans.
 fn minimap_build_window(
-    snapshot: &DisplaySnapshot,
-    editor: &EditorState,
+    view: (f32, u16),
+    viewport: u32,
     strip: Option<Rect>,
+    density: Density,
 ) -> BuildWindow {
-    let viewport = editor.viewport_rows.unwrap_or(0);
-    let rest = editor.scroll_row as f32 + editor.scroll_frac;
-    let (top, visible) = minimap_view_window(snapshot, rest, viewport);
-
+    let (top, visible) = view;
     let cells = strip.map_or(0, |rect| u32::from(rect.height)).max(viewport);
     let pad = 2 * cells * u32::from(LINES_PER_CELL);
-    let top = top as u32;
+    let top = density::row_of(top as u32, density.lines_per_row);
+    let visible = u32::from(visible).div_ceil(density.lines_per_row);
     BuildWindow {
-        rows: top.saturating_sub(pad)..top.saturating_add(u32::from(visible) + pad),
+        rows: top.saturating_sub(pad)..top.saturating_add(visible + pad),
         from: top,
+    }
+}
+
+/// The density of a strip of rect `strip` over a file of `file_lines` lines,
+/// under a viewport of `viewport_lines` lines.
+///
+/// A strip with no rect laid out yet holds one line per row, so a first frame
+/// before layout builds lines.
+fn strip_density(
+    file_lines: u32,
+    strip: Option<Rect>,
+    viewport_lines: u32,
+    thumb_min_rows: u32,
+) -> Density {
+    match strip.filter(|rect| rect.height > 0) {
+        Some(rect) => density::density(
+            file_lines,
+            u32::from(rect.height) * u32::from(LINES_PER_CELL),
+            viewport_lines,
+            thumb_min_rows,
+        ),
+        None => Density::LINE,
     }
 }
 
@@ -1005,6 +1061,144 @@ mod tests {
         );
     }
 
+    /// `body` open in a 120 by 24 window under a terminal that reads every
+    /// protocol, so its strip is a 23-cell band of 138 rows over a 23-line
+    /// viewport.
+    fn open_in_band(body: &str) -> (crate::test_harness::TestHarness, UnboundedReceiver<Vec<u8>>) {
+        let mut h = Stoat::test();
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+        h.stoat.set_apc_tx(tx);
+        h.stoat.stoatty_protocol = stoatty_protocol::PROTOCOL_VERSION;
+
+        let root = PathBuf::from("/minimap-bands");
+        let path = root.join("numbered.txt");
+        h.fake_fs().insert_file(&path, body.as_bytes());
+        h.stoat.active_workspace_mut().git_root = root;
+        action_handlers::dispatch(&mut h.stoat, &OpenFile { path });
+        h.settle();
+        h.resize(120, 24);
+        (h, rx)
+    }
+
+    /// Emit until the minimap build settles, replay what it sent into `store`
+    /// as the terminal applies it, and answer the store lengths it sent.
+    fn settle_store(
+        h: &mut crate::test_harness::TestHarness,
+        rx: &mut UnboundedReceiver<Vec<u8>>,
+        store: &mut Vec<Vec<stoatty_protocol::command::MinimapRun>>,
+    ) -> Vec<u32> {
+        use stoatty_protocol::command::Command;
+
+        let _ = h.stoat.render();
+        let mut lens = Vec::new();
+        for _ in 0..400 {
+            emit_minimap(&mut h.stoat);
+            for cmd in drain_apc(rx) {
+                match cmd {
+                    Command::MinimapLen(len) => {
+                        store.resize(len.lines as usize, Vec::new());
+                        lens.push(len.lines);
+                    },
+                    Command::MinimapLines(splice) => {
+                        let start = splice.start as usize;
+                        let end = (start + splice.removed as usize).min(store.len());
+                        store.splice(start..end, splice.lines.iter().map(|line| line.to_vec()));
+                    },
+                    _ => {},
+                }
+            }
+            if !h.stoat.minimap_build_pending {
+                break;
+            }
+        }
+        lens
+    }
+
+    /// The runs a strip shows for a plain line `text` that carries no mark.
+    fn plain_runs(text: &str) -> Vec<stoatty_protocol::command::MinimapRun> {
+        convert_minimap_runs(crate::minimap::summarize_line(text, &[], RowMark::NONE)).to_vec()
+    }
+
+    /// `count` numbered lines, `line 0` on, with the rows of `blank` left
+    /// empty.
+    fn numbered(count: usize, blank: Range<usize>) -> Vec<String> {
+        (0..count)
+            .map(|i| match blank.contains(&i) {
+                true => String::new(),
+                false => format!("line {i}"),
+            })
+            .collect()
+    }
+
+    /// 1,200 lines fold 9 to a row on a 138-row band under the default Thumb
+    /// Minimum's cap of 11, so the store holds 134 rows. Each row is the
+    /// summary of one line of its band from the content column, and the thumb
+    /// covers the 23-line viewport over 9 lines a row.
+    #[test]
+    fn a_medium_file_fits_the_strip_as_bands() {
+        use stoatty_protocol::command::Command;
+
+        let lines = numbered(1_200, 0..0);
+        let (mut h, mut rx) = open_in_band(&lines.join("\n"));
+        let mut store = Vec::new();
+        let lens = settle_store(&mut h, &mut rx, &mut store);
+
+        let _ = h.stoat.render();
+        apc_emit::emit_smooth_scroll(&mut h.stoat);
+        let visible = drain_apc(&mut rx)
+            .into_iter()
+            .rev()
+            .find_map(|cmd| match cmd {
+                Command::MinimapView(view) => Some(view.visible_256),
+                _ => None,
+            });
+        let rows_show_their_bands = store.iter().enumerate().all(|(row, runs)| {
+            (row * 9..(row * 9 + 9).min(1_200)).any(|line| plain_runs(&lines[line]) == *runs)
+        });
+
+        assert_eq!(
+            (lens, store.len(), rows_show_their_bands, visible),
+            (vec![134], 134, true, Some(23 * 256 / 9)),
+        );
+    }
+
+    /// Lines appended past a multiple of the fold add a row, so the store is
+    /// sized again before the rows go out. 1,207 lines at 9 a row take 135
+    /// rows, one more than 1,200 lines do.
+    #[test]
+    fn an_edit_that_crosses_a_row_multiple_rebands_the_file() {
+        let body = numbered(1_200, 0..0).join("\n");
+        let (mut h, mut rx) = open_in_band(&body);
+        let mut store = Vec::new();
+        settle_store(&mut h, &mut rx, &mut store);
+
+        h.edit_focused(body.len()..body.len(), &"\nmore".repeat(7));
+        let lens = settle_store(&mut h, &mut rx, &mut store);
+
+        assert_eq!(
+            (lens, store.len(), store.last().map(Vec::is_empty)),
+            (vec![135], 135, Some(false)),
+        );
+    }
+
+    /// A band whose lines are mostly blank draws an empty row. A twenty-line
+    /// blank gap from line 500 fills the band of row 56, and leaves the band of
+    /// row 57 two code lines of nine, under the share a row needs.
+    #[test]
+    fn a_blank_band_draws_an_empty_row() {
+        let (mut h, mut rx) = open_in_band(&numbered(1_200, 500..520).join("\n"));
+        let mut store = Vec::new();
+        settle_store(&mut h, &mut rx, &mut store);
+
+        assert_eq!(
+            (
+                store.len(),
+                store[55..59].iter().map(Vec::is_empty).collect::<Vec<_>>()
+            ),
+            (134, vec![false, true, true, false]),
+        );
+    }
+
     /// Emit until the minimap build settles, the way idle frame ticks drive
     /// it, and return the store lengths sent and the rows the splices covered.
     fn build_until_idle(
@@ -1046,6 +1240,7 @@ mod tests {
     ) -> Range<u32> {
         let single = h.stoat.single_minimap_rect;
         let single_mode = h.stoat.minimap_mode() == MinimapMode::Single;
+        let thumb_min_rows = h.stoat.minimap_thumb_min_rows();
         let editor = h
             .stoat
             .active_workspace_mut()
@@ -1058,7 +1253,19 @@ mod tests {
             editor.minimap_rect
         };
         let snapshot = editor.display_map.snapshot();
-        let window = minimap_build_window(&snapshot, editor, strip);
+        let viewport = editor.viewport_rows.unwrap_or(0);
+        let view = minimap_view_window(
+            &snapshot,
+            editor.scroll_row as f32 + editor.scroll_frac,
+            viewport,
+        );
+        let density = strip_density(
+            snapshot.buffer_line_count(),
+            strip,
+            u32::from(view.1),
+            thumb_min_rows,
+        );
+        let window = minimap_build_window(view, viewport, strip, density);
         window.rows.start..window.rows.end.min(total)
     }
 
@@ -1485,14 +1692,15 @@ mod tests {
         editor.scroll_frac = 0.0;
         editor.viewport_rows = Some(30);
         let snapshot = editor.display_map.snapshot();
+        let view = minimap_view_window(&snapshot, 1000.0, 30);
         let strip = |height| Some(Rect::new(0, 0, 8, height));
         let window = |rows| BuildWindow { rows, from: 1000 };
 
         assert_eq!(
             [
-                minimap_build_window(&snapshot, editor, None),
-                minimap_build_window(&snapshot, editor, strip(40)),
-                minimap_build_window(&snapshot, editor, strip(20)),
+                minimap_build_window(view, 30, None, Density::LINE),
+                minimap_build_window(view, 30, strip(40), Density::LINE),
+                minimap_build_window(view, 30, strip(20), Density::LINE),
             ],
             [window(640..1390), window(520..1510), window(640..1390)],
         );

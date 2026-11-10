@@ -3,6 +3,7 @@ use crate::{
     conflict_session::ConflictViewState,
     diff_changes::RevealFlash,
     display_map::{CachedHighlightEndpoints, DisplayMap},
+    minimap::density::Density,
     multi_buffer::MultiBuffer,
     selection::SelectionsCollection,
 };
@@ -226,6 +227,12 @@ pub(crate) struct EditorState {
     /// the pane is too narrow to inset. Transient render state written by
     /// `render_editor`, not persisted.
     pub(crate) minimap_rect: Option<Rect>,
+    /// The fold of the strip that the last minimap sync built, `None` while each
+    /// strip row is one buffer line.
+    ///
+    /// The thumb and a click on the strip read it, since under a fold the strip
+    /// holds rows of bands and the terminal scrolls it in those rows.
+    pub(crate) minimap_density: Option<Density>,
     /// Cells the last render painted buffer text into, so a question about
     /// where an offset sits on screen reads the paint's own geometry instead
     /// of repeating its insets.
@@ -312,6 +319,7 @@ impl EditorState {
             stack_gutter_digits: None,
             reveal_flashes: Vec::new(),
             minimap_rect: None,
+            minimap_density: None,
             text_rect: None,
             cursor_screen_cell: None,
             ghost_cursor_cell: None,

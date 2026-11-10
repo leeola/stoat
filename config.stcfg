@@ -158,6 +158,11 @@ theme default_dark {
     diff.reveal          = { fg: info, bg: subtle };
     diff.absent.bg       = subtle;
 
+    ui.minimap.shape.fg         = dim;
+    ui.minimap.shape.comment.fg = muted;
+    ui.minimap.rule.fg          = muted;
+    ui.minimap.rail             = { fg: subtle, bg: black };
+
     ui.diagnostic.error.fg   = danger;
     ui.diagnostic.warning.fg = warning;
     ui.diagnostic.info.fg    = info;
@@ -276,6 +281,8 @@ theme ermine_night inherits default_dark {
     let chip_conflict    = "#33201f";
     let tint_merge       = "#2a1d21";
     let merged_head      = "#1b1d22";
+    let shape            = "#8b919c";
+    let shape_comment    = "#6d727c";
 
     let black     = base;
     let white     = "#dfe2e8";
@@ -393,6 +400,11 @@ theme ermine_night inherits default_dark {
     diff.scope.separator.fg = disabled;
     diff.reveal      = { fg: info, bg: tint_reveal };
     diff.absent      = { fg: hatch, bg: base };
+
+    ui.minimap.shape.fg         = shape;
+    ui.minimap.shape.comment.fg = shape_comment;
+    ui.minimap.rule.fg          = disabled;
+    ui.minimap.rail             = { fg: strong, bg: base };
 
     diff.sides.base           = { fg: side_base_fg, bg: side_base_bg };
     diff.sides.base.name.fg   = side_base_name;

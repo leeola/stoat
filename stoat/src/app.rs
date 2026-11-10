@@ -3750,6 +3750,15 @@ impl Stoat {
         }
     }
 
+    /// The Thumb Minimum, the fewest strip rows the minimap's viewport thumb
+    /// takes, from the `editor.minimap.thumb_min_rows` setting or 2.
+    ///
+    /// It caps the lines one strip row stands for at the viewport's lines over
+    /// it, so a lower value fits more of a long file at a smaller thumb.
+    pub(crate) fn minimap_thumb_min_rows(&self) -> u32 {
+        self.settings.editor_minimap_thumb_min_rows.unwrap_or(2)
+    }
+
     /// Whether any minimap strip is currently shown.
     pub(crate) fn minimap_enabled(&self) -> bool {
         self.minimap_mode() != MinimapMode::Off

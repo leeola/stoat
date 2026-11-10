@@ -324,6 +324,15 @@ The typed UI scopes, by group (syntax scopes are open-ended):
   where the row holds a line on the other side alone: a removed line's live
   half, or an added line's base half. A foreground hatches it as
   `diff.fold`'s does.
+- `ui.minimap.shape`, `ui.minimap.shape.comment` -- the grey (foreground) of
+  a minimap row that draws the outline of its band of code, for a file whose
+  strip rows each stand for many lines, and of a band that is mostly
+  comments.
+- `ui.minimap.rule` -- the hairline (foreground) a minimap draws above the row
+  where a top-level item starts.
+- `ui.minimap.rail` -- the rail beside a minimap strip whose file does not fit
+  it: the part of the file the strip covers (foreground) on the rail's ground
+  (background).
 - `diff.sides.base`, `diff.sides.base.name`, `diff.sides.target`,
   `diff.sides.target.name` -- the two halves of a split diff view's status
   row, its text (foreground) on its tint (background), and the color of the
