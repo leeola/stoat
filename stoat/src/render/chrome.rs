@@ -315,13 +315,12 @@ fn modal_frame_inner(
     inner
 }
 
-/// Declare a panel over `area` that draws nothing, for a frame that the cells
-/// draw.
+/// Declare a panel over `area` that draws nothing, for cells that must show
+/// over a pool, such as a frame that the cells draw.
 ///
 /// Every pane pool's composite leaves a panel's rect to the live grid, so the
-/// frame's cells show through a glide, a terminal pool, and a resident pool
-/// alike.
-fn cover_cells(area: Rect, above_pools: bool, scene: &mut ApcScene) {
+/// cells show through a glide, a terminal pool, and a resident pool alike.
+pub(crate) fn cover_cells(area: Rect, above_pools: bool, scene: &mut ApcScene) {
     Panel {
         style: BorderStyle::None_,
         border: [0, 0, 0],

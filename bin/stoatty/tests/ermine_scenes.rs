@@ -365,6 +365,42 @@ fn the_changes_view_heads_each_file_on_the_raised_surface() {
     );
 }
 
+/// The changes view pins the File Header of the file under the stack's top
+/// edge to the stack's first row while the stack scrolls under it.
+///
+/// The scene is 20 rows tall, so the stack shows 18. Two pages put the cursor
+/// on the stack's last row and the scroll on the last page, which starts
+/// inside hunks.txt, past its header and before its last row. Row 1 then shows
+/// hunks.txt's header on the raised surface over its bottom hairline. Where
+/// the cover fails, the resident pool's composite shows a stack row there.
+#[test]
+fn the_changes_view_pins_the_file_header_over_its_scrolling_stack() {
+    let mut home = support::scratch_home();
+    let mut session = spawn_scene(Scene {
+        rows: 20,
+        ..ermine_scene("diff-kinds", "hunks.txt", home.path())
+    });
+    play(&mut session, "<Space>dc<Settle><C-f><C-f><Settle>");
+    let shot = session.snapshot().expect("a snapshot");
+    drop(session);
+
+    let (x, y, width, height) = cell_rect(2, 1, 30, 1);
+    expect_region(
+        &shot,
+        &mut home,
+        (x, y, width, height),
+        RAISED,
+        "pinned_header",
+    );
+    expect_region(
+        &shot,
+        &mut home,
+        (x, y + height - 1, width, 1),
+        HAIRLINE,
+        "pinned_header_bottom",
+    );
+}
+
 /// The changes view folds the unchanged lines between two hunks into a fold
 /// row under the boards' hatch.
 ///
@@ -1176,13 +1212,17 @@ fn settled_frame(home: &Path, fixture: &str, file: &str, keys: &str) -> Snapshot
 /// A session of the `fixture` scene with `file` open, once its first frame
 /// settles.
 fn spawn_settled(home: &Path, fixture: &str, file: &str) -> HeadlessSession {
-    let mut session =
-        HeadlessSession::spawn(ermine_scene(fixture, file, home)).unwrap_or_else(|error| {
-            panic!(
-                "{error}. With no wgpu adapter, enter the devshell with `nix develop`, which \
-                 registers lavapipe"
-            )
-        });
+    spawn_scene(ermine_scene(fixture, file, home))
+}
+
+/// A session of `scene`, once its first frame settles.
+fn spawn_scene(scene: Scene) -> HeadlessSession {
+    let mut session = HeadlessSession::spawn(scene).unwrap_or_else(|error| {
+        panic!(
+            "{error}. With no wgpu adapter, enter the devshell with `nix develop`, which \
+             registers lavapipe"
+        )
+    });
 
     session
         .wait_settled(support::SETTLE, support::STARTUP_TIMEOUT)

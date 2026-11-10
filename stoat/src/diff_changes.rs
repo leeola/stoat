@@ -76,6 +76,13 @@ pub(crate) const REVEAL_HOLD: f32 = 0.6;
 /// The seconds a revealed row's mark takes to fade out after its hold.
 pub(crate) const REVEAL_FADE: f32 = 0.4;
 
+/// The fewest rows a changes view shows for its first row to pin a File
+/// Header.
+///
+/// A pinned row hides the stack row under it. In a short view that row is too
+/// large a share of the view, so a shorter view shows the stack alone.
+const PINNED_MIN_VIEWPORT: usize = 8;
+
 /// A fold's buffer range and the Scope its fold row centers.
 type HeldFold = (Range<Point>, Option<Arc<FoldScope>>);
 
@@ -97,6 +104,8 @@ pub(crate) struct DiffChangesState {
     /// A stack row is a header row or a display row of an excerpt, in the
     /// order [`layout_stack`] lays them out.
     pub scroll: usize,
+    /// The stack's row count as of the last [`layout_stack`].
+    pub rows: usize,
     /// The workspace stamp the excerpts were listed at, or `None` before the
     /// first list.
     pub synced: Option<StackStamp>,
@@ -163,6 +172,25 @@ pub(crate) struct CursorScope {
     /// The syntax version of the parse the chain was read from.
     syntax: u64,
     scope: Arc<FoldScope>,
+}
+
+/// The rows at the top of a changes view that repeat the context of the stack
+/// row under them, and hold while the stack scrolls.
+///
+/// The first row repeats the File Header of the excerpt under the stack's top
+/// edge, so a long excerpt always says which file it shows.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct PinnedHeader {
+    /// The index in [`DiffChangesState::excerpts`] of the excerpt whose header
+    /// the first row repeats, or `None` when the first row shows the stack.
+    pub file: Option<usize>,
+}
+
+impl PinnedHeader {
+    /// The rows at the top of the view that pinned rows cover.
+    pub(crate) fn rows(&self) -> usize {
+        usize::from(self.file.is_some())
+    }
 }
 
 /// One changed file in a changes view's stack.
@@ -612,7 +640,7 @@ impl<'a> ScopeReader<'a> {
 
 impl DiffChangesState {
     /// Scrolls the least distance that keeps stack row `row` on screen in a
-    /// viewport of `rows` rows.
+    /// viewport of `rows` rows, clear of the rows that pin at its top.
     ///
     /// A zero-row viewport, as before the first paint, leaves the scroll as it
     /// is.
@@ -620,10 +648,20 @@ impl DiffChangesState {
         if rows == 0 {
             return;
         }
-        if row < self.scroll {
-            self.scroll = row;
-        } else if row >= self.scroll + rows {
+        if row >= self.scroll + rows {
             self.scroll = row + 1 - rows;
+        }
+        self.uncover_row(row);
+    }
+
+    /// Scrolls up the least distance that shows stack row `row` clear of the
+    /// rows that pin at the top of the view, as [`pinned_header`] names them.
+    ///
+    /// A row above the view comes into view this way too. A row clear of the
+    /// pinned rows leaves the scroll as it is.
+    pub(crate) fn uncover_row(&mut self, row: usize) {
+        if row < self.scroll + pinned_header(self, self.scroll).rows() {
+            self.scroll = clear_scroll(self, row, 0);
         }
     }
 
@@ -711,6 +749,7 @@ impl Default for DiffChangesState {
             excerpts: Vec::new(),
             focused: 0,
             scroll: 0,
+            rows: 0,
             synced: None,
             listed_focus: None,
             viewport_rows: 0,
@@ -788,6 +827,7 @@ pub(crate) fn layout_stack(
         excerpt.top = row;
         row += header_rows(excerpt) + excerpt_rows(excerpt, editors);
     }
+    state.rows = row;
     row
 }
 
@@ -811,6 +851,60 @@ pub(crate) fn shown_excerpt_rows(
     let start = state.scroll.max(first);
     let end = (state.scroll + state.viewport_rows).min(first + rows);
     (start < end).then(|| (start - first) as u32..(end - first) as u32)
+}
+
+/// The rows that pin at the top of `state`'s view when the stack scrolls to
+/// stack row `scroll`, as of the last [`layout_stack`].
+///
+/// The first row pins the header of the excerpt that holds row `scroll` when
+/// that row lies past the header and before the excerpt's last row. A header
+/// row at the top shows in place. The excerpt's last row shows in place too,
+/// so the next header shows under it and two headers never stack. A view under
+/// [`PINNED_MIN_VIEWPORT`] rows pins nothing.
+pub(crate) fn pinned_header(state: &DiffChangesState, scroll: usize) -> PinnedHeader {
+    if state.viewport_rows < PINNED_MIN_VIEWPORT {
+        return PinnedHeader::default();
+    }
+    let Some(index) = state
+        .excerpts
+        .iter()
+        .rposition(|excerpt| excerpt.top <= scroll)
+    else {
+        return PinnedHeader::default();
+    };
+    let top = state.excerpts[index].top;
+    let end = state
+        .excerpts
+        .get(index + 1)
+        .map_or(state.rows, |next| next.top);
+    PinnedHeader {
+        file: (top < scroll && scroll + 1 < end).then_some(index),
+    }
+}
+
+/// The greatest scroll that shows stack row `row` at least `margin` rows under
+/// the rows that pin at that scroll, or 0 where no scroll does.
+///
+/// A scroll one row up sometimes pins a row less, so the walk steps up one row
+/// at a time.
+fn clear_scroll(state: &DiffChangesState, row: usize, margin: usize) -> usize {
+    let mut scroll = row.saturating_sub(margin);
+    while scroll > 0 && row < scroll + pinned_header(state, scroll).rows() + margin {
+        scroll -= 1;
+    }
+    scroll
+}
+
+/// The stack row that a press on stack row `row` acts on.
+///
+/// A press on the view's first row while a header pins there acts on that
+/// header, the row that the pinned row repeats. Every other row acts on
+/// itself.
+pub(crate) fn pinned_row(state: &DiffChangesState, row: usize) -> usize {
+    match pinned_header(state, state.scroll).file {
+        Some(index) if row == state.scroll => state.excerpts[index].top,
+        _ => row,
+    }
 }
 
 /// The display rows `excerpt` shows, zero while it waits on its diff map.
@@ -1060,8 +1154,9 @@ fn excerpt_at(
 /// Scroll the focused changes view so its cursor sits inside the scrolloff
 /// band, as an editor follows its cursor, and report whether the scroll moved.
 ///
-/// The band is `scrolloff` rows at each edge, capped to half the viewport, and
-/// the scroll stops at the stack's last page.
+/// The band is `scrolloff` rows at each edge, capped to half the rows that the
+/// pinned rows leave. The top band starts under the pinned rows, and the
+/// scroll stops at the stack's last page.
 pub(crate) fn follow_cursor(stoat: &mut Stoat, scrolloff: u32) -> bool {
     let ws = stoat.active_workspace_mut();
     let Some(id) = ws.focused_diff_changes_id() else {
@@ -1082,11 +1177,13 @@ pub(crate) fn follow_cursor(stoat: &mut Stoat, scrolloff: u32) -> bool {
 
     let viewport = state.viewport_rows.max(1);
     let scrolloff = scrolloff as usize;
-    let top = scrolloff.min(viewport.saturating_sub(1) / 2);
-    let bottom = scrolloff.min(viewport / 2);
+    let band = pinned_header(state, state.scroll).rows();
+    let usable = viewport.saturating_sub(band).max(1);
+    let top = scrolloff.min(usable.saturating_sub(1) / 2);
+    let bottom = scrolloff.min(usable / 2);
     let before = state.scroll;
-    if row < state.scroll + top {
-        state.scroll = row.saturating_sub(top);
+    if row < state.scroll + band + top {
+        state.scroll = clear_scroll(state, row, top);
     } else if row + bottom >= state.scroll + viewport {
         state.scroll = (row + bottom + 1)
             .saturating_sub(viewport)
@@ -2686,9 +2783,9 @@ fn map_version(buffers: &BufferRegistry, id: BufferId) -> Option<usize> {
 mod tests {
     use super::{
         cursor_point, cursor_stack_row, excerpt_rows, expand_from_cursor, fold_edge, fold_excerpt,
-        gap_fold, gaps, kept_runs, landing_row, layout_stack, listed_files, place_cursor,
-        press_cell, pump_diff_changes_stack, reveal_rows, scope_parts, DiffChangesState,
-        ExcerptStats, ExpandDir, FoldEdge, Landing, ScopeParse, StackStamp,
+        follow_cursor, gap_fold, gaps, kept_runs, landing_row, layout_stack, listed_files,
+        place_cursor, press_cell, pump_diff_changes_stack, reveal_rows, scope_parts,
+        DiffChangesState, ExcerptStats, ExpandDir, FoldEdge, Landing, ScopeParse, StackStamp,
     };
     use crate::{
         action_handlers::dispatch,
@@ -2710,6 +2807,7 @@ mod tests {
         sync::{Arc, RwLock},
     };
     use stoat_action::{CloseDiffChanges, DiffChanges, DiffChangesPrev};
+    use stoat_config::MinimapMode;
     use stoat_language::{
         parse_rope,
         structural_diff::{self, TreeCache},
@@ -3394,6 +3492,63 @@ fn hint_width() -> u32 {
             ],
             [2, 6, 5, 5],
         );
+    }
+
+    /// A row under the pinned header uncovers to the first row under it, or to
+    /// its file's first row with the header in place. The follow keeps its
+    /// scrolloff band under the pinned row.
+    ///
+    /// Each file takes a header row and twelve paired rows, with no final
+    /// newline to add an empty row. So a.txt takes stack rows 0 to 12 and
+    /// b.txt rows 13 to 25, in a view of eleven rows.
+    #[test]
+    fn the_scroll_keeps_rows_clear_of_the_pinned_header() {
+        let base = (1..=12)
+            .map(|n| n.to_string())
+            .collect::<Vec<_>>()
+            .join("\n");
+        let text = (1..=12)
+            .map(|n| format!("{n}!"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let mut h = TestHarness::with_size(120, 12);
+        h.stoat.settings.editor_minimap = Some(MinimapMode::Off);
+        h.stage_review_scenario("/repo", &[("a.txt", &base, &text), ("b.txt", &base, &text)]);
+        stacked(&mut h);
+        h.render_composited();
+        let state = |h: &mut TestHarness| {
+            let views = &mut h.stoat.active_workspace_mut().diff_changes_views;
+            views.values_mut().next().expect("a changes view").scroll
+        };
+
+        let uncovered = [(5, 5), (1, 1), (15, 14)].map(|(scroll, row)| {
+            let views = &mut h.stoat.active_workspace_mut().diff_changes_views;
+            let state = views.values_mut().next().expect("a changes view");
+            state.scroll = scroll;
+            state.uncover_row(row);
+            state.scroll
+        });
+        let followed = [(0, 7, 7), (0, 9, 7), (1, 2, 15)].map(|(index, buffer_row, scroll)| {
+            {
+                let Workspace {
+                    diff_changes_views,
+                    editors,
+                    ..
+                } = h.stoat.active_workspace_mut();
+                let state = diff_changes_views
+                    .values_mut()
+                    .next()
+                    .expect("a changes view");
+                state.focused = index;
+                state.scroll = scroll;
+                let editor = &mut editors[state.excerpts[index].editor_id];
+                place_cursor(editor, Point::new(buffer_row, 0));
+            }
+            follow_cursor(&mut h.stoat, 3);
+            state(&mut h)
+        });
+
+        assert_eq!((uncovered, followed), ([4, 0, 13], [4, 6, 13]));
     }
 
     /// The repository at /repo, with the harness's fake files under it.

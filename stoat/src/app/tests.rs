@@ -7611,6 +7611,37 @@ fn a_cursor_follow_leaves_no_capture_under_the_scroll_it_moved() {
     );
 }
 
+/// A cursor placed under the pinned header scrolls the stack up a row inside
+/// the paint, so that frame paints and captures nothing. A later frame back
+/// at the scroll the move left shows what a repaint of that scroll shows.
+#[test]
+fn a_cursor_under_the_pinned_header_leaves_no_capture_under_the_scroll() {
+    let mut h = changes_view(8, false);
+    let first = {
+        let state = changes_state(&mut h);
+        state.excerpts[0].top + crate::diff_changes::header_rows(&state.excerpts[0])
+    };
+    crate::diff_changes::place_cursor(stack_editor(&mut h), Point::new(1, 0));
+    let _ = h.stoat.render();
+    changes_state(&mut h).scroll = first;
+    let _ = h.stoat.render();
+    let painted = h.stoat.pane_paints;
+
+    crate::diff_changes::place_cursor(stack_editor(&mut h), Point::new(0, 0));
+    let _ = h.stoat.render();
+    let (paints, uncovered) = (h.stoat.pane_paints - painted, changes_state(&mut h).scroll);
+    changes_state(&mut h).scroll = first;
+    let replayed = (frame_output(&mut h), stack_cursor(&mut h));
+    h.stoat.pane_cache.clear();
+    let repainted = frame_output(&mut h);
+    assert_eq!(
+        (paints, uncovered, &replayed.0 .0, replayed.1),
+        (1, first - 1, &repainted.0, stack_cursor(&mut h)),
+        "the move painted and scrolled up a row, and the frame back at the old scroll matches a \
+         repaint, cursor included",
+    );
+}
+
 /// A held screen row scrolls the stack inside the paint, so the frame that
 /// applies it captures nothing. A later frame back at the scroll the hold
 /// left shows what a repaint of that scroll shows.

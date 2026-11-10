@@ -506,7 +506,9 @@ pub(super) fn diff_changes_edge(stoat: &mut Stoat, last: bool) -> UpdateEffect {
 ///
 /// Any other press puts the cursor on the pressed cell, and the row's excerpt
 /// takes the focus, as a press in an editor does. A header row puts the cursor
-/// at the start of its excerpt's first row.
+/// at the start of its excerpt's first row. A press on a pinned header acts as
+/// a press on the header it repeats, and the stack scrolls back until the
+/// cursor's row shows.
 pub(crate) fn diff_changes_press(stoat: &mut Stoat, row: usize, column: u16) -> StackPress {
     let ws = stoat.active_workspace_mut();
     let Some(id) = ws.focused_diff_changes_id() else {
@@ -523,16 +525,23 @@ pub(crate) fn diff_changes_press(stoat: &mut Stoat, row: usize, column: u16) -> 
         return StackPress::Missed;
     };
     diff_changes::layout_stack(state, editors);
+    let row = diff_changes::pinned_row(state, row);
 
     if let Some((index, gap, edge)) = diff_changes::fold_button_at(state, editors, row, column) {
         let parse = ScopeParse::of(buffers, state.excerpts[index].buffer_id, &cache);
         diff_changes::expand(state, editors, parse.as_ref(), index, gap, edge);
         return StackPress::Opened;
     }
-    match diff_changes::press_cell(state, editors, row, column) {
-        true => StackPress::Placed,
-        false => StackPress::Missed,
+    if !diff_changes::press_cell(state, editors, row, column) {
+        return StackPress::Missed;
     }
+    // A press on a pinned header puts the cursor above the view. The paint
+    // follows only a cursor that moved, and the cursor sometimes stood on that
+    // row already, so the press scrolls the row into view itself.
+    if let Some(cursor) = diff_changes::cursor_stack_row(state, editors) {
+        state.ensure_row_visible(cursor, state.viewport_rows);
+    }
+    StackPress::Placed
 }
 
 /// Scroll the focused changes view's stack by `delta` rows and leave its
@@ -570,7 +579,9 @@ pub(crate) fn diff_changes_scroll(stoat: &mut Stoat, delta: i32) -> UpdateEffect
 /// top, the middle, or the bottom of the view, as the view keys align a plain
 /// editor's view.
 ///
-/// The scroll stops at the stack's last page, and the cursor stays.
+/// The scroll stops at the stack's last page, and the cursor stays. The top
+/// of the view is the first row under the pinned rows, so the cursor's row
+/// never aligns under them.
 pub(super) fn align_stack(stoat: &mut Stoat, align: ViewAlign) -> UpdateEffect {
     let ws = stoat.active_workspace_mut();
     let Some(id) = ws.focused_diff_changes_id() else {
@@ -598,11 +609,13 @@ pub(super) fn align_stack(stoat: &mut Stoat, align: ViewAlign) -> UpdateEffect {
         ViewAlign::Bottom => row.saturating_sub(last_row),
     }
     .min(total.saturating_sub(state.viewport_rows));
-    if scroll == state.scroll {
-        return UpdateEffect::None;
-    }
+    let before = state.scroll;
     state.scroll = scroll;
-    UpdateEffect::Redraw
+    state.uncover_row(row);
+    match state.scroll == before {
+        true => UpdateEffect::None,
+        false => UpdateEffect::Redraw,
+    }
 }
 
 /// Open unchanged lines of a fold of the focused changes view as `dir` says,
@@ -3278,7 +3291,9 @@ mod tests {
 
     /// `z t`, `z b`, and `z z` scroll the stack so the cursor's row sits at the
     /// top, the bottom, and the middle of the view, and the cursor stays. The
-    /// select-mode menu aligns the same way.
+    /// cursor's file starts above the view, so its header pins on the first row
+    /// and the top is the row under it. The select-mode menu aligns the same
+    /// way.
     #[test]
     fn the_view_keys_align_the_stack_on_the_cursor() {
         let mut h = stack_on_the_fifth_change();
@@ -3296,10 +3311,10 @@ mod tests {
         assert_eq!(
             aligned,
             [
-                (row, row),
+                (row - 1, row),
                 (row - last, row),
                 (row - last / 2, row),
-                (row, row)
+                (row - 1, row)
             ],
         );
     }

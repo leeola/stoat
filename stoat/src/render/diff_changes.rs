@@ -116,10 +116,15 @@ impl PaintLayout {
 /// viewport holds all of its rows, so the editor's own follow never scrolls an
 /// excerpt.
 ///
+/// With the stack's top edge inside an excerpt, the first row repeats that
+/// excerpt's header while the stack scrolls under it, as
+/// [`diff_changes::pinned_header`] decides. The cursor's follow keeps the
+/// cursor clear of that row.
+///
 /// The focused excerpt records the cell of its cursor in
 /// [`EditorState::cursor_screen_cell`] when the terminal draws that cursor.
 /// The record is `None` when the paint does not lay the excerpt out, such as
-/// an excerpt outside the window.
+/// an excerpt outside the window, and for a cursor under the pinned row.
 ///
 /// With no excerpt the pane says "building changes..." while the repository
 /// tally is pending, and "no changes" once it is in.
@@ -209,6 +214,7 @@ pub(crate) fn render_diff_changes(
             Some(screen_row) => {
                 let last = state.viewport_rows.saturating_sub(1);
                 state.scroll = row.saturating_sub(usize::from(screen_row).min(last));
+                state.uncover_row(row);
             },
             None if cursor != state.followed_cursor => {
                 state.ensure_row_visible(row, state.viewport_rows);
@@ -220,6 +226,11 @@ pub(crate) fn render_diff_changes(
     state.scroll = state.scroll.min(total.saturating_sub(state.viewport_rows));
 
     let first_row = state.scroll;
+    // The stack row under a pinned header paints nothing. If it painted, its
+    // runs and bars show over the header's cells on a frame that no pool
+    // composites, since the cover draws no fill. A cursor there is off screen,
+    // as one past the view's edge is.
+    let (rows_from, rows) = pinned_split(state, inner);
     let mut covered = stack_composited(pane, frame).then(ApcScene::new);
     paint_stack_rows(
         state,
@@ -231,10 +242,11 @@ pub(crate) fn render_diff_changes(
         frame,
         buf,
         covered.as_mut().unwrap_or(&mut *scene),
-        first_row,
-        inner,
+        rows_from,
+        rows,
         PagePaint::Cells,
     );
+    paint_pinned_header(state, buffers, frame, inner, buf, scene);
 
     // The pages carry no cursor, so the ghost beside it goes to the pane's own
     // scene even while the composite covers the live rows. Its panel leaves the
@@ -410,6 +422,64 @@ pub(crate) fn paint_stack_rows(
     }
 }
 
+/// The first stack row the stack's rows paint from, and the part of `inner`
+/// they paint into, which start under the rows that pin at the top of the
+/// view.
+fn pinned_split(state: &DiffChangesState, inner: Rect) -> (usize, Rect) {
+    let pinned = diff_changes::pinned_header(state, state.scroll).rows();
+    let height = inner.height.saturating_sub(pinned as u16);
+    let rows = Rect {
+        y: inner.y + inner.height - height,
+        height,
+        ..inner
+    };
+    (state.scroll + pinned, rows)
+}
+
+/// Repeat the header of the excerpt under the stack's top edge on the first row
+/// of `inner`, which holds while the stack scrolls under it.
+///
+/// The row first declares a panel that draws nothing, so a pool's composite
+/// leaves the row to the live grid. The header's cells then fill the row. A
+/// view that pins no header, as [`diff_changes::pinned_header`] decides,
+/// paints nothing here.
+fn paint_pinned_header(
+    state: &DiffChangesState,
+    buffers: &BufferRegistry,
+    frame: FrameCtx<'_>,
+    inner: Rect,
+    buf: &mut Buffer,
+    scene: &mut ApcScene,
+) {
+    let Some(index) = diff_changes::pinned_header(state, state.scroll).file else {
+        return;
+    };
+    let excerpt = &state.excerpts[index];
+    let row = Rect { height: 1, ..inner };
+    chrome::cover_cells(row, false, scene);
+
+    let stats = diff_changes::excerpt_stats(excerpt, buffers);
+    let runs = header_runs(&excerpt.rel_path, stats, frame.theme);
+    paint_header(buf, row, &runs, frame.theme);
+
+    // A resting pool's composite still paints the top and bottom pixel lines
+    // of the cover's rect, so a plain bar there lies under the stack's rows.
+    // An occluding bar holds over the composite.
+    let Some(color) = style_rgb(frame.theme.get(scope::UI_BORDER_INACTIVE).fg) else {
+        return;
+    };
+    for y in HAIRLINE_Y {
+        Bar {
+            x: 0,
+            y,
+            width: row.width * 16,
+            height: 1,
+            color,
+        }
+        .render_occluding(row, scene);
+    }
+}
+
 /// Emit a hairline along the top and the bottom edge of each header row in
 /// `rows`, in the inactive border color.
 fn emit_header_hairlines(rows: impl Iterator<Item = Rect>, theme: &Theme, scene: &mut ApcScene) {
@@ -563,10 +633,12 @@ pub(crate) fn paint_stack_page(
 /// same scroll. A paint under no key between the two leaves the excerpt laid
 /// out at the scroll that paint used, which differs when it scrolled. So the
 /// replay lays the excerpt out again from the stack's scroll and the excerpt's
-/// place in it, and records the cell there.
+/// place in it, under the pinned rows as the paint lays it, and records the
+/// cell there.
 ///
-/// When the focused excerpt is outside the window, or the terminal does not
-/// draw its cursor, a replay records no cell. The paint does the same.
+/// When the focused excerpt is outside the window, the cursor is under the
+/// pinned row, or the terminal does not draw its cursor, a replay records no
+/// cell. The paint does the same.
 pub(crate) fn replay_cursor(
     pane: &Pane,
     state: &mut DiffChangesState,
@@ -587,7 +659,10 @@ pub(crate) fn replay_cursor(
         return;
     }
 
-    let (top, scroll, viewport) = (excerpt.top, state.scroll, state.viewport_rows);
+    let inner = pane.area;
+    let (inner, _) = split_minimap_strip(inner, frame.minimap_enabled, DIFF_OVERVIEW_COLS);
+    let (scroll, area) = pinned_split(state, inner);
+    let (top, viewport) = (excerpt.top, usize::from(area.height));
     let rows = diff_changes::excerpt_rows(excerpt, editors);
     let header = diff_changes::header_rows(excerpt);
     let first = (top + header).saturating_sub(scroll);
@@ -600,11 +675,9 @@ pub(crate) fn replay_cursor(
     let Some(text) = editor.text_rect else {
         return;
     };
-    let inner = pane.area;
-    let (inner, _) = split_minimap_strip(inner, frame.minimap_enabled, DIFF_OVERVIEW_COLS);
     let scroll_row = scroll.saturating_sub(top + header);
     let text = Rect {
-        y: inner.y + first as u16,
+        y: area.y + first as u16,
         height: (rows - scroll_row).min(viewport - first) as u16,
         ..text
     };
@@ -1043,6 +1116,178 @@ mod tests {
             ),
             (3, 2, "3".to_string()),
         );
+    }
+
+    /// Two files of twelve changed lines each under a changes view `height`
+    /// rows tall, numbered absolute and painted once.
+    ///
+    /// The files end with no newline, so no empty row follows their last
+    /// lines. a.txt takes stack rows 0 to 12 and b.txt rows 13 to 25, and the
+    /// cursor stands on a.txt's first row.
+    fn two_long_files(height: u16) -> TestHarness {
+        let base = (1..=12)
+            .map(|n| n.to_string())
+            .collect::<Vec<_>>()
+            .join("\n");
+        let text = (1..=12)
+            .map(|n| format!("{n}!"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let mut h = changes_view(
+            120,
+            height,
+            &[("a.txt", &base, &text), ("b.txt", &base, &text)],
+        );
+        h.stoat.settings.editor_line_numbers = Some(LineNumbers::Absolute);
+        h.render_composited();
+        h
+    }
+
+    /// A stack scrolled into a file's rows pins that file's header on the
+    /// first row, over the stack row under it, and the rows below show the
+    /// stack. A header row at the top, or a file's last row, shows in place,
+    /// so two headers never stack.
+    #[test]
+    fn a_scrolled_stack_pins_the_header_of_the_file_under_its_top_edge() {
+        let mut h = two_long_files(12);
+        let cols = excerpt_columns(&h, Rect::new(0, 0, 120, 11), 2);
+        let frames = [0, 3, 12, 13, 15].map(|scroll| {
+            stack(&mut h).0.scroll = scroll;
+            let buf = h.render_composited();
+            (
+                diff_changes::pinned_header(stack(&mut h).0, scroll).file,
+                buf,
+            )
+        });
+        let header = |at: usize| header_text(&frames[at].1, 0, 120, 0).0;
+        let number =
+            |at: usize, y: u16| gutter_number(&frames[at].1, cols.right_x, cols.right_text_x, y);
+        let named = |file: &str| format!("{file} +12 \u{2212}12 \u{b7} 1 hunk");
+
+        assert_eq!(
+            (
+                frames.each_ref().map(|(file, _)| *file),
+                [header(0), header(1), header(3), header(4)],
+                (number(2, 0), number(1, 1)),
+            ),
+            (
+                [None, Some(0), None, None, Some(1)],
+                [
+                    named("a.txt"),
+                    named("a.txt"),
+                    named("b.txt"),
+                    named("b.txt")
+                ],
+                ("12".to_string(), "4".to_string()),
+            ),
+        );
+    }
+
+    /// A pinned header covers its row with a panel that draws nothing, so a
+    /// pool's composite leaves the row to the live grid, and lays its two
+    /// hairlines over that panel. A header in place declares no panel on its
+    /// row.
+    #[test]
+    fn a_pinned_header_covers_its_row_with_a_frameless_panel() {
+        let mut h = two_long_files(12);
+        let index = {
+            let ws = h.stoat.active_workspace();
+            ws.panes.pane(ws.panes.focus()).index
+        };
+        let mut first_row_lane = |scroll: usize| -> Vec<String> {
+            stack(&mut h).0.scroll = scroll;
+            h.stoat.render();
+            decode_stream(h.stoat.apc_scene.lane_bytes(content_lane(index)))
+                .into_iter()
+                .flat_map(|command| match command {
+                    Command::Panel(panel) if panel.top > 0 => Vec::new(),
+                    Command::Panel(panel) => vec![format!(
+                        "panel {},{} {}x{} {:?} {:?} {:?}",
+                        panel.left,
+                        panel.top,
+                        panel.width,
+                        panel.height,
+                        panel.style,
+                        panel.fill,
+                        panel.shadow
+                    )],
+                    command => frame_bars(vec![command])
+                        .into_iter()
+                        .filter(|bar| bar.4 == HAIRLINE && bar.1 < 16)
+                        .map(|bar| format!("hairline {}", bar.1))
+                        .collect(),
+                })
+                .collect()
+        };
+
+        assert_eq!(
+            (first_row_lane(3), first_row_lane(0)),
+            (
+                vec![
+                    "panel 0,0 120x1 None_ None None_".to_string(),
+                    "hairline 0".to_string(),
+                    "hairline 15".to_string(),
+                ],
+                vec!["hairline 0".to_string(), "hairline 15".to_string()],
+            ),
+        );
+    }
+
+    /// A view under eight rows pins nothing, so its first row shows the stack
+    /// row under the scroll.
+    #[test]
+    fn a_viewport_under_eight_rows_pins_nothing() {
+        let mut h = two_long_files(8);
+        stack(&mut h).0.scroll = 3;
+        let buf = h.render_composited();
+        let cols = excerpt_columns(&h, Rect::new(0, 0, 120, 7), 2);
+
+        assert_eq!(
+            (
+                diff_changes::pinned_header(stack(&mut h).0, 3).file,
+                gutter_number(&buf, cols.right_x, cols.right_text_x, 0),
+            ),
+            (None, "3".to_string()),
+        );
+    }
+
+    /// A cursor under the pinned header is off screen, so the paint records no
+    /// cell for it. One row lower it records the cell under the pinned row.
+    #[test]
+    fn a_cursor_under_the_pinned_header_records_no_cell() {
+        let mut h = two_long_files(12);
+        {
+            let (state, editors) = stack(&mut h);
+            diff_changes::place_cursor(&mut editors[state.excerpts[0].editor_id], Point::new(4, 0));
+        }
+        h.render_composited();
+        let mut cell_at = |scroll: usize| {
+            stack(&mut h).0.scroll = scroll;
+            h.render_composited();
+            let (state, editors) = stack(&mut h);
+            editors[state.excerpts[0].editor_id]
+                .cursor_screen_cell
+                .map(|(_, y)| y)
+        };
+
+        assert_eq!((cell_at(5), cell_at(4)), (None, Some(1)));
+    }
+
+    /// A held screen row under the pinned header moves to the first row under
+    /// it, so the cursor shows there.
+    #[test]
+    fn a_held_screen_row_keeps_the_cursor_clear_of_the_pinned_header() {
+        let mut h = two_long_files(12);
+        {
+            let (state, editors) = stack(&mut h);
+            diff_changes::place_cursor(&mut editors[state.excerpts[0].editor_id], Point::new(5, 0));
+            state.held_screen_row = Some(0);
+        }
+        h.render_composited();
+        let (state, editors) = stack(&mut h);
+        let cell = editors[state.excerpts[0].editor_id].cursor_screen_cell;
+
+        assert_eq!((state.scroll, cell.map(|(_, y)| y)), (5, Some(1)));
     }
 
     /// The pair names of a frame with no pair open.

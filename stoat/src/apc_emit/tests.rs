@@ -5,6 +5,7 @@ use crate::{
     debounce,
     test_fixture::fake_term_session,
 };
+use stoat_text::Point;
 
 /// The rich review gutter engages only when every color resolves to RGB, so
 /// tests need a hex theme. The default theme uses named colors.
@@ -4011,6 +4012,43 @@ fn resident_rects_name_a_held_stack_pool() {
     );
 }
 
+/// A pinned header's cover leaves the stack's first row out of the mask, so
+/// the UI thread writes the header's cells over the held pool.
+#[test]
+fn resident_rects_leave_a_pinned_header_to_the_live_grid() {
+    let base: String = (1..=30).map(|i| format!("{i}\n")).collect();
+    let text: String = (1..=30).map(|i| format!("L{i}\n")).collect();
+    let (mut h, mut rx, _) = resident_stack(&[("a.txt", &base, &text)], MinimapMode::Off);
+    emit_raw(&mut h, &mut rx);
+    {
+        let ws = h.stoat.active_workspace_mut();
+        let id = ws.focused_diff_changes_id().expect("the changes view");
+        let Workspace {
+            diff_changes_views,
+            editors,
+            ..
+        } = ws;
+        let state = &mut diff_changes_views[id];
+        state.scroll = 3;
+        let editor = &mut editors[state.excerpts[0].editor_id];
+        diff_changes::place_cursor(editor, Point::new(8, 0));
+    }
+    h.stoat.render();
+    let content = focused_content(&h);
+
+    assert_eq!(
+        resident_pool_rects(&h.stoat),
+        less_ghost(
+            &h,
+            vec![Rect {
+                y: content.y + 1,
+                height: content.height - 1,
+                ..content
+            }]
+        ),
+    );
+}
+
 /// A composited stack's paint sends the rows' runs and bars to a scene it
 /// drops, but the ghost cursor still outlines the base cell beside the cursor
 /// in the pane's own scene, riding the stack's pool from its scroll.
@@ -4607,9 +4645,10 @@ fn content_lane_bytes(h: &crate::test_harness::TestHarness, pool: u32) -> Vec<u8
 
 /// A step that scrolls a held stack leaves the stack's runs and bars, and the
 /// sides of the frame around its base column, out of the pane's content lane.
-/// The frame's top edge and the minimap strip's declaration stay. The pool's
-/// pages carry the runs and the sides, and its composite covers the live grid.
-/// The top edge occludes, so it holds over the composite.
+/// The frame's top edge and the minimap strip's declaration stay, and the
+/// pinned header's cover joins them. The pool's pages carry the runs and the
+/// sides, and its composite covers the live grid. The top edge occludes, so it
+/// holds over the composite.
 #[test]
 fn a_scrolling_step_over_a_held_stack_keeps_its_runs_out_of_its_lane() {
     use stoatty_protocol::command::Command;
@@ -4640,9 +4679,26 @@ fn a_scrolling_step_over_a_held_stack_keeps_its_runs_out_of_its_lane() {
         (state.expect("the changes view").scroll > 0).then_some(lane)
     });
     let top_edges = rest.iter().filter(|command| top_edge(command)).count();
+    // The scrolled stack pins its file's header, whose cover leaves the
+    // stack's first row to the live grid. This theme sets no RGB border
+    // color, so the header draws no hairlines.
+    let cover = {
+        let state = h.stoat.active_workspace().focused_diff_changes();
+        let content = state.expect("the changes view").content_rect;
+        let mut scene = ApcScene::new();
+        crate::render::chrome::cover_cells(
+            Rect {
+                height: 1,
+                ..content.expect("a painted stack")
+            },
+            false,
+            &mut scene,
+        );
+        command::decode_stream(scene.bytes())
+    };
     assert_eq!(
         (runs.is_empty(), top_edges, scrolled),
-        (false, 1, Some(rest))
+        (false, 1, Some([cover, rest].concat()))
     );
 }
 

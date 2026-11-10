@@ -3250,6 +3250,29 @@ mod tests {
         );
     }
 
+    /// A press on the pinned header acts as a press on the header in place. The
+    /// cursor stays on its file's first row, and the stack scrolls back so that
+    /// row shows under the header in place.
+    #[test]
+    fn a_press_on_the_pinned_header_lands_on_its_files_first_row() {
+        let mut h = crate::test_harness::TestHarness::with_size(120, 14);
+        h.stoat.settings.editor_minimap = Some(MinimapMode::Off);
+        let base: String = (1..=12).map(|n| format!("{n}\n")).collect();
+        let text: String = (1..=12).map(|n| format!("{n}!\n")).collect();
+        h.stage_review_scenario("/repo", &[("a.txt", &base, &text), ("b.txt", &base, &text)]);
+        h.open_file(Path::new("/repo/a.txt"));
+        h.cover_with_diff_changes(false);
+        h.settle();
+        let _ = h.stoat.render();
+        diff_changes_stack(&mut h).0.scroll = 3;
+        let _ = h.stoat.render();
+        let (list, _) = diff_changes_columns(&mut h);
+
+        left_press(&mut h, list.x + 2, list.y);
+        let _ = h.stoat.render();
+        assert_eq!(diff_changes_place(&mut h), (1, 0));
+    }
+
     /// A press on a per-pane changes view's strip puts the cursor on the row
     /// under it, scrolled toward the middle of the view, and a drag follows the
     /// pointer until the release. A wheel notch over the strip scrolls the
