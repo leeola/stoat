@@ -4651,7 +4651,7 @@ fn content_lane_bytes(h: &crate::test_harness::TestHarness, pool: u32) -> Vec<u8
 /// holds over the composite.
 #[test]
 fn a_scrolling_step_over_a_held_stack_keeps_its_runs_out_of_its_lane() {
-    use stoatty_protocol::command::Command;
+    use stoatty_protocol::command::{Command, PanelShadow};
 
     let base: String = (1..=30).map(|i| format!("{i}\n")).collect();
     let text: String = (1..=30).map(|i| format!("L{i}\n")).collect();
@@ -4680,8 +4680,8 @@ fn a_scrolling_step_over_a_held_stack_keeps_its_runs_out_of_its_lane() {
     });
     let top_edges = rest.iter().filter(|command| top_edge(command)).count();
     // The scrolled stack pins its file's header, whose cover leaves the
-    // stack's first row to the live grid. This theme sets no RGB border
-    // color, so the header draws no hairlines.
+    // stack's first row to the live grid and casts a shadow under it. This
+    // theme sets no RGB border color, so the header draws no hairlines.
     let cover = {
         let state = h.stoat.active_workspace().focused_diff_changes();
         let content = state.expect("the changes view").content_rect;
@@ -4692,6 +4692,7 @@ fn a_scrolling_step_over_a_held_stack_keeps_its_runs_out_of_its_lane() {
                 ..content.expect("a painted stack")
             },
             false,
+            PanelShadow::Cast,
             &mut scene,
         );
         command::decode_stream(scene.bytes())

@@ -42,6 +42,7 @@ use stoat_widgets::{
     bar::{Bar, BarBatch},
     ApcScene,
 };
+use stoatty_protocol::command::PanelShadow;
 
 /// The sixteenths down a header row at which its two hairlines lie, the row's
 /// top and bottom edges.
@@ -446,8 +447,9 @@ fn pinned_split(
 /// of `inner`, and the Scope of the hunk under that row on the second, which
 /// hold while the stack scrolls under them.
 ///
-/// The rows first declare a panel that draws nothing, so a pool's composite
-/// leaves them to the live grid. The header's cells then fill the first row.
+/// The rows first declare a panel whose body draws nothing, so a pool's
+/// composite leaves them to the live grid. The panel casts a short shadow on
+/// the rows that scroll under it. The header's cells then fill the first row.
 /// The Scope paints as a fold row with its chip alone, with no Fold Button, no
 /// count, and no range, and the base frame's sides cross it as they cross a
 /// fold row. A view that pins nothing, as [`diff_changes::pinned_header`]
@@ -468,11 +470,13 @@ fn paint_pinned_header(
         return;
     };
     let excerpt = &state.excerpts[index];
+    // The cover spans the pinned rows alone, so its cast shadow falls from the
+    // last pinned row onto the rows that scroll under it.
     let cover = Rect {
         height: pinned.rows() as u16,
         ..inner
     };
-    chrome::cover_cells(cover, false, scene);
+    chrome::cover_cells(cover, false, PanelShadow::Cast, scene);
 
     let row = Rect { height: 1, ..inner };
     let stats = diff_changes::excerpt_stats(excerpt, buffers);
@@ -1223,10 +1227,10 @@ mod tests {
         );
     }
 
-    /// A pinned header covers its row with a panel that draws nothing, so a
-    /// pool's composite leaves the row to the live grid, and lays its two
-    /// hairlines over that panel. A header in place declares no panel on its
-    /// row.
+    /// A pinned header covers its row with a panel whose body draws nothing, so
+    /// a pool's composite leaves the row to the live grid, and lays its two
+    /// hairlines over that panel. The panel casts its shadow on the rows under
+    /// it. A header in place declares no panel on its row.
     #[test]
     fn a_pinned_header_covers_its_row_with_a_frameless_panel() {
         let mut h = two_long_files(12);
@@ -1264,7 +1268,7 @@ mod tests {
             (first_row_lane(3), first_row_lane(0)),
             (
                 vec![
-                    "panel 0,0 120x1 None_ None None_".to_string(),
+                    "panel 0,0 120x1 None_ None Cast".to_string(),
                     "hairline 0".to_string(),
                     "hairline 15".to_string(),
                 ],

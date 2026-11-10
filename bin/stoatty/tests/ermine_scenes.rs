@@ -373,6 +373,11 @@ fn the_changes_view_heads_each_file_on_the_raised_surface() {
 /// inside hunks.txt, past its header and before its last row. Row 1 then shows
 /// hunks.txt's header on the raised surface over its bottom hairline. Where
 /// the cover fails, the resident pool's composite shows a stack row there.
+///
+/// The pinned header casts its shadow on row 2, which the stack's pool
+/// composites. A strip 2 px under that row's top edge takes about 0.38 of
+/// black and a strip 16 px under it none. The two strips share the row's
+/// surface, so a diff tint or a hatch there cancels out.
 #[test]
 fn the_changes_view_pins_the_file_header_over_its_scrolling_stack() {
     let mut home = support::scratch_home();
@@ -399,6 +404,19 @@ fn the_changes_view_pins_the_file_header_over_its_scrolling_stack() {
         HAIRLINE,
         "pinned_header_bottom",
     );
+
+    let (x, y, width, _) = cell_rect(20, 2, 12, 1);
+    let [near, far] = [2, 16].map(|down| dominant_color(&shot, (x, y + down, width, 1)));
+    if !near.iter().zip(far).all(|(&near, far)| near < far) {
+        let frame = keep_frame(&shot, &mut home, "pinned_header_shadow");
+        panic!(
+            "the row under the pinned header reads {} 2 px under its top edge and {} 16 px \
+             under it, not darker near the header; the frame is {}",
+            hex(near),
+            hex(far),
+            frame.display(),
+        );
+    }
 }
 
 /// The changes view folds the unchanged lines between two hunks into a fold

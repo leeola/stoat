@@ -308,25 +308,31 @@ fn modal_frame_inner(
                 block = block.title(title.to_string()).title_style(style);
             }
             block.render(area, buf);
-            cover_cells(area, above_pools, scene);
+            cover_cells(area, above_pools, PanelShadow::None_, scene);
         },
     }
 
     inner
 }
 
-/// Declare a panel over `area` that draws nothing, for cells that must show
-/// over a pool, such as a frame that the cells draw.
+/// Declare a panel over `area` whose body draws nothing, for cells that must
+/// show over a pool, such as a frame that the cells draw.
 ///
 /// Every pane pool's composite leaves a panel's rect to the live grid, so the
 /// cells show through a glide, a terminal pool, and a resident pool alike.
-pub(crate) fn cover_cells(area: Rect, above_pools: bool, scene: &mut ApcScene) {
+/// The panel casts `shadow` outside its rect.
+pub(crate) fn cover_cells(
+    area: Rect,
+    above_pools: bool,
+    shadow: PanelShadow,
+    scene: &mut ApcScene,
+) {
     Panel {
         style: BorderStyle::None_,
         border: [0, 0, 0],
         corner_radius: 0,
         fill: None,
-        shadow: PanelShadow::None_,
+        shadow,
         edges: Edge::symmetric(0, 0),
         corners: 0,
         fillets: 0,
@@ -395,7 +401,7 @@ pub(crate) fn popout_frame(
                     .border_style(Style::default().fg(border))
                     .render(area, buf);
             }
-            cover_cells(area, false, scene);
+            cover_cells(area, false, PanelShadow::None_, scene);
         },
     }
 }
