@@ -7,7 +7,7 @@ use crate::{
     diff_map::MarkKind,
     display_map::FoldScope,
     editor_state::{EditorId, EditorState},
-    minimap::LANE_WIDTH,
+    minimap::LANE_COLS,
     pane::{Divider, DividerOrientation, FocusTarget, Pane, PaneTree, Placement, View},
     render::{
         chrome::{self, TypeTag},
@@ -74,7 +74,7 @@ pub(super) const MINIMAP_MAX_COLUMNS: u8 = 120;
 
 /// Columns the scroll overview spans in its one cell, twice the mark lane, so
 /// the lane fills the cell's left half.
-const DIFF_OVERVIEW_MAX_COLUMNS: u8 = (2 * LANE_WIDTH) as u8;
+const DIFF_OVERVIEW_MAX_COLUMNS: u8 = (2 * LANE_COLS) as u8;
 
 /// Opacity of the scroll overview's viewport band, 31 of 255, about 12 percent
 /// of the thumb color over the window ground.
@@ -3519,7 +3519,7 @@ mod tests {
                 let table = &h.stoat.minimap_class_table;
                 let declared = (
                     1,
-                    4,
+                    12,
                     [ground[0], ground[1], ground[2], 255],
                     [thumb[0], thumb[1], thumb[2], 31],
                     None,

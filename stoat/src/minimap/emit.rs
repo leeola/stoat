@@ -93,12 +93,6 @@ pub(crate) fn ensure_minimap_content_ids(stoat: &mut Stoat) {
 /// the flat strength that terminal already renders.
 pub(super) const WEIGHTED_RUN_PROTOCOL: u32 = 4;
 
-/// The protocol version that reads a palette past 64 entries. An older terminal
-/// drops such a declaration whole, so a strip declares it the
-/// [`ClassTable::legacy_palette`](crate::minimap::ClassTable::legacy_palette)
-/// prefix.
-pub(crate) const POPULATION_PALETTE_PROTOCOL: u32 = 13;
-
 /// The palettes a frame's minimap strips declare beside the class table's own.
 ///
 /// A plain strip whose pane does not fade declares the class table's palette
@@ -329,14 +323,10 @@ fn sync_minimap_strip(
         )
     };
 
-    // Part of the decoration, so a terminal that changes protocol re-checks the
-    // marks it was sent.
-    let populations = stoat.stoatty_protocol >= POPULATION_PALETTE_PROTOCOL;
     let decoration_version = {
         let mut hasher = DefaultHasher::new();
         diff_version.hash(&mut hasher);
         diag_version.hash(&mut hasher);
-        populations.hash(&mut hasher);
         hasher.finish()
     };
     let classes = stoat.minimap_class_table.class_version;
@@ -365,7 +355,6 @@ fn sync_minimap_strip(
         diff: OnceCell::new(),
         severity_map: &severity_map,
         class_table,
-        populations,
     };
 
     let content = stoat
@@ -667,10 +656,6 @@ struct MinimapEdges<'a> {
     diff: OnceCell<Option<crate::diff_map::LiveHunks<'a>>>,
     severity_map: &'a crate::render::editor::RowSeverity,
     class_table: &'a crate::minimap::ClassTable,
-    /// Whether the terminal reads the population palette, so a row's content
-    /// takes its diff status block. A terminal before it reads no class past
-    /// the legacy prefix, so every row there keeps the plain syntax block.
-    populations: bool,
 }
 
 impl<'a> MinimapEdges<'a> {
@@ -687,13 +672,7 @@ impl<'a> MinimapEdges<'a> {
 
 impl EdgeSource for MinimapEdges<'_> {
     fn mark_of(&self, row: u32) -> RowMark {
-        minimap_row_mark(
-            self.live_hunks(),
-            self.severity_map,
-            self.class_table,
-            self.populations,
-            row,
-        )
+        minimap_row_mark(self.live_hunks(), self.severity_map, self.class_table, row)
     }
 
     fn marked_rows(&self, rows: Range<u32>) -> Vec<u32> {
@@ -709,45 +688,35 @@ impl EdgeSource for MinimapEdges<'_> {
     }
 }
 
-/// The minimap mark of buffer `row`, its edge-lane class and the offset its
-/// content takes.
+/// The minimap mark of buffer `row`, its change lane and its diagnostic tick.
 ///
-/// A diagnostic on the row wins the lane over its diff status, mirroring the
-/// gutter. The severity or diff status resolves to a class against
-/// `class_table`. The offset follows the diff status alone, and stays 0 unless
-/// `populations` holds.
+/// The lane follows the row's diff status and the tick its diagnostic
+/// severity, each resolved to a class against `class_table`, so a row with
+/// both shows both.
 fn minimap_row_mark(
     diff: Option<&crate::diff_map::LiveHunks<'_>>,
     severity_map: &crate::render::editor::RowSeverity,
     class_table: &crate::minimap::ClassTable,
-    populations: bool,
     row: u32,
 ) -> RowMark {
     use crate::{host::DiffStatus, minimap::EdgeClass};
     use lsp_types::DiagnosticSeverity;
 
     let status = diff.map_or(DiffStatus::Unchanged, |diff| diff.status_for_line(row));
-    let edge = match severity_map.at(row) {
-        Some(severity) => Some(class_table.edge_class(match severity {
-            DiagnosticSeverity::ERROR => EdgeClass::Error,
-            DiagnosticSeverity::WARNING => EdgeClass::Warning,
-            _ => EdgeClass::Info,
-        })),
-        None => match status {
-            DiffStatus::Added => Some(class_table.edge_class(EdgeClass::Added)),
-            DiffStatus::Modified | DiffStatus::Moved => {
-                Some(class_table.edge_class(EdgeClass::Modified))
-            },
-            DiffStatus::Unchanged => None,
-        },
+    let lane = match status {
+        DiffStatus::Added => Some(EdgeClass::Added),
+        DiffStatus::Modified | DiffStatus::Moved => Some(EdgeClass::Modified),
+        DiffStatus::Unchanged => None,
     };
+    let tick = severity_map.at(row).map(|severity| match severity {
+        DiagnosticSeverity::ERROR => EdgeClass::Error,
+        DiagnosticSeverity::WARNING => EdgeClass::Warning,
+        _ => EdgeClass::Info,
+    });
 
     RowMark {
-        edge,
-        class_base: match populations {
-            true => class_table.population_base(status),
-            false => 0,
-        },
+        lane: lane.map(|kind| class_table.edge_class(kind)),
+        tick: tick.map(|kind| class_table.edge_class(kind)),
     }
 }
 
@@ -1120,9 +1089,7 @@ mod tests {
                 .and_then(|s| s.bg),
         )
         .expect("test theme has an rgb background");
-        // The harness terminal predates the population palette, so a strip
-        // declares the legacy prefix.
-        let raw: Vec<[u8; 3]> = h.stoat.minimap_class_table.legacy_palette().to_vec();
+        let raw: Vec<[u8; 3]> = h.stoat.minimap_class_table.palette().to_vec();
         let dimmed: Vec<[u8; 3]> = raw.iter().map(|&c| dim_rgb(c, bg, dim)).collect();
         assert_ne!(raw, dimmed, "dim must actually change the palette");
 
@@ -1173,8 +1140,9 @@ mod tests {
         );
     }
 
-    /// A strip declares the whole palette to a terminal that reads it, and the
-    /// legacy prefix to one before the population palette.
+    /// A strip declares the class table's whole palette to every terminal. The
+    /// palette fits the 64-entry cap of a terminal before protocol 13, so that
+    /// terminal reads it too.
     #[test]
     fn a_strip_declares_the_palette_its_terminal_reads() {
         use stoatty_protocol::command::Command;
@@ -1199,17 +1167,15 @@ mod tests {
                     _ => None,
                 })
                 .collect();
-            let table = &h.stoat.minimap_class_table;
-            (
-                palettes,
-                table.palette().to_vec(),
-                table.legacy_palette().to_vec(),
-            )
+            (palettes, h.stoat.minimap_class_table.palette().to_vec())
         };
 
-        let (current, full, _) = declared(POPULATION_PALETTE_PROTOCOL);
-        let (older, _, legacy) = declared(POPULATION_PALETTE_PROTOCOL - 1);
-        assert_eq!((current, older), (vec![full], vec![legacy]));
+        let (current, full) = declared(stoatty_protocol::PROTOCOL_VERSION);
+        let (older, _) = declared(12);
+        assert_eq!(
+            (current, older, full.len() <= 64),
+            (vec![full.clone()], vec![full], true)
+        );
     }
 
     #[test]
@@ -1930,31 +1896,44 @@ mod tests {
             }
         }
 
-        // The leading run of buffer line `n` in the most recent emit.
-        fn line_lead(cmds: &[Command], n: u32) -> Option<MinimapRun> {
+        // The runs of buffer line `n` in the most recent emit that carries it.
+        fn line_runs(cmds: &[Command], n: u32) -> Option<Vec<MinimapRun>> {
             cmds.iter().rev().find_map(|cmd| match cmd {
                 Command::MinimapLines(l) => {
                     let idx = n.checked_sub(l.start)? as usize;
-                    l.lines.get(idx).and_then(|runs| runs.first().copied())
+                    l.lines.get(idx).map(|runs| runs.to_vec())
                 },
                 _ => None,
             })
         }
 
+        fn run(start_col: u8, len: u8, class: u8, weight: u8) -> MinimapRun {
+            MinimapRun {
+                start_col,
+                len,
+                class,
+                weight,
+            }
+        }
+
         let (mut h, mut rx, path) = modified_line_fixture();
+        h.stoat.stoatty_protocol = stoatty_protocol::PROTOCOL_VERSION;
         let buffer_id = h.stoat.focused_editor_ids().expect("editor").1;
 
         let modified = h.stoat.minimap_class_table.edge_class(EdgeClass::Modified);
         let error = h.stoat.minimap_class_table.edge_class(EdgeClass::Error);
+        let lane = [run(0, 6, modified, 255), run(8, 112, modified, 41)];
+        let tick = run(114, 6, error, 255);
+        let (keep, new, tail) = (run(8, 4, 0, 190), run(8, 3, 0, 190), run(8, 4, 0, 190));
 
         let _ = h.stoat.render();
         apc_emit::emit_apc_scene(&mut h.stoat);
         emit_minimap(&mut h.stoat);
         let first = drain_apc(&mut rx);
         assert_eq!(
-            line_lead(&first, 1).map(|r| r.class),
-            Some(modified),
-            "the modified line leads with the modified edge class, got {first:?}"
+            line_runs(&first, 1),
+            Some([&lane[..], &[new]].concat()),
+            "the modified line takes the modified lane and tint, got {first:?}"
         );
 
         h.seed_diagnostics(path.clone(), vec![diag(1, DiagnosticSeverity::ERROR)]);
@@ -1962,9 +1941,9 @@ mod tests {
         emit_minimap(&mut h.stoat);
         let errored = drain_apc(&mut rx);
         assert_eq!(
-            line_lead(&errored, 1).map(|r| r.class),
-            Some(error),
-            "an error overrides the diff mark, got {errored:?}"
+            line_runs(&errored, 1),
+            Some([&lane[..], &[new, tick]].concat()),
+            "an error ticks the right edge beside the diff lane, got {errored:?}"
         );
 
         h.seed_diagnostics(path.clone(), vec![]);
@@ -1972,9 +1951,9 @@ mod tests {
         emit_minimap(&mut h.stoat);
         let cleared = drain_apc(&mut rx);
         assert_eq!(
-            line_lead(&cleared, 1).map(|r| r.class),
-            Some(modified),
-            "clearing the diagnostic reverts to the modified mark, got {cleared:?}"
+            line_runs(&cleared, 1),
+            Some([&lane[..], &[new]].concat()),
+            "clearing the diagnostic drops the tick, got {cleared:?}"
         );
         let touched: Vec<u32> = cleared
             .iter()
@@ -2008,14 +1987,10 @@ mod tests {
         emit_minimap(&mut h.stoat);
         let moved = drain_apc(&mut rx);
         assert_eq!(
-            line_lead(&moved, 2).map(|r| r.class),
-            Some(modified),
-            "the newly-differing line takes the modified mark, got {moved:?}"
-        );
-        assert_eq!(
-            line_lead(&moved, 1).map(|r| r.start_col),
-            Some(2),
-            "line 1 matches the base again, so its lane is empty, got {moved:?}"
+            (line_runs(&moved, 2), line_runs(&moved, 1)),
+            (Some([&lane[..], &[tail]].concat()), Some(vec![new])),
+            "the newly-differing line takes the modified lane, and line 1 matches \
+             the base again, so it carries its content alone, got {moved:?}"
         );
 
         h.seed_diagnostics(path, vec![diag(0, DiagnosticSeverity::ERROR)]);
@@ -2023,9 +1998,9 @@ mod tests {
         emit_minimap(&mut h.stoat);
         let on_clean = drain_apc(&mut rx);
         assert_eq!(
-            line_lead(&on_clean, 0).map(|r| r.class),
-            Some(error),
-            "a diagnostic marks a line no hunk covers, got {on_clean:?}"
+            line_runs(&on_clean, 0),
+            Some(vec![keep, tick]),
+            "a diagnostic ticks a line no hunk covers, got {on_clean:?}"
         );
     }
 
@@ -2045,40 +2020,51 @@ mod tests {
         })
     }
 
-    /// A row's content takes its diff status block for a terminal that reads
-    /// the population palette, and the plain syntax block for one before it.
+    /// A changed row leads with its lane at full strength and a 16 percent tint
+    /// of the lane's color across its content, which keeps the plain syntax
+    /// classes. An unchanged row carries its content alone.
     #[test]
-    fn a_diff_row_carries_its_status_offset() {
-        use crate::{host::DiffStatus, minimap::EdgeClass};
+    fn a_diff_row_carries_its_tint() {
+        use crate::minimap::EdgeClass;
+        use stoatty_protocol::command::{Command, MinimapRun};
 
         let (mut h, mut rx, _) = modified_line_fixture();
-        let table = &h.stoat.minimap_class_table;
-        let (edge, base) = (
-            table.edge_class(EdgeClass::Modified),
-            table.population_base(DiffStatus::Modified),
-        );
-
-        h.stoat.stoatty_protocol = POPULATION_PALETTE_PROTOCOL;
-        let _ = h.stoat.render();
-        apc_emit::emit_apc_scene(&mut h.stoat);
-        emit_minimap(&mut h.stoat);
-        let current = drain_apc(&mut rx);
-
-        h.stoat.stoatty_protocol = POPULATION_PALETTE_PROTOCOL - 1;
-        let _ = h.stoat.render();
-        apc_emit::emit_apc_scene(&mut h.stoat);
-        emit_minimap(&mut h.stoat);
-        let older = drain_apc(&mut rx);
+        let lane = h.stoat.minimap_class_table.edge_class(EdgeClass::Modified);
+        h.stoat.stoatty_protocol = stoatty_protocol::PROTOCOL_VERSION;
+        let cmds = emit_frame(&mut h, &mut rx);
+        let runs = cmds.iter().rev().find_map(|cmd| match cmd {
+            Command::MinimapLines(l) => l.lines.get(1usize.checked_sub(l.start as usize)?).cloned(),
+            _ => None,
+        });
+        let runs = runs.expect("the modified line goes out");
 
         assert_eq!(
             (
-                line_classes(&current, 0),
-                line_classes(&current, 1),
-                line_classes(&older, 1)
+                line_classes(&cmds, 0),
+                runs[..2].to_vec(),
+                runs[2..]
+                    .iter()
+                    .all(|run| run.class == 0 && run.start_col >= 8)
             ),
-            (Some(vec![0]), Some(vec![edge, base]), Some(vec![edge, 0])),
-            "the modified line's content takes the modified block, then the plain \
-             block under the same lane once the terminal predates it",
+            (
+                Some(vec![0]),
+                vec![
+                    MinimapRun {
+                        start_col: 0,
+                        len: 6,
+                        class: lane,
+                        weight: 255,
+                    },
+                    MinimapRun {
+                        start_col: 8,
+                        len: 112,
+                        class: lane,
+                        weight: 41,
+                    },
+                ],
+                true,
+            ),
+            "the modified line takes its lane, then its tint, then its plain content",
         );
     }
 
@@ -2096,13 +2082,13 @@ mod tests {
 
     /// The single band follows its editor into the diff view. It declares the
     /// scroll overview of the class table's palette, again at a theme switch,
-    /// and the buffer's lines sync with their status blocks.
+    /// and the buffer's lines sync with their lanes and tints.
     ///
     /// A dial step sends neither the band nor a line, since neither the
     /// overview nor the summaries hold a dial.
     #[test]
     fn a_diff_view_band_declares_the_overview_palette() {
-        use crate::{host::DiffStatus, minimap::EdgeClass, render::SINGLE_MINIMAP_STRIP_ID};
+        use crate::{minimap::EdgeClass, render::SINGLE_MINIMAP_STRIP_ID};
         use stoat_action::SetTheme;
         use stoatty_protocol::command::Command;
 
@@ -2121,7 +2107,7 @@ mod tests {
         };
 
         let (mut h, mut rx, _) = modified_line_fixture();
-        h.stoat.stoatty_protocol = POPULATION_PALETTE_PROTOCOL;
+        h.stoat.stoatty_protocol = stoatty_protocol::PROTOCOL_VERSION;
         h.stoat.diff_tint = 2;
         // The diff view's hints box shares the overlay lane with the band, so a
         // toggle mark that the box repaints sends the band again.
@@ -2158,7 +2144,8 @@ mod tests {
                 Some(first_overview.clone()),
                 Some(vec![
                     table.edge_class(EdgeClass::Modified),
-                    table.population_base(DiffStatus::Modified),
+                    table.edge_class(EdgeClass::Modified),
+                    0,
                 ]),
                 None,
                 None,
@@ -2199,15 +2186,14 @@ mod tests {
     /// A strip declares the palette for its view and its focus. A diff view's
     /// overview takes the class table's palette with its text classes on the
     /// window ground, and an unfocused strip takes its palette at the inactive
-    /// dim. A terminal before the population palette receives each one cut to
-    /// the legacy prefix.
+    /// dim. A terminal before protocol 13 receives the same palettes.
     #[test]
     fn a_strip_declares_the_palette_for_its_view_and_focus() {
         use stoatty_protocol::command::Command;
 
         // A session per protocol, because a session's terminal changes protocol
         // only across a handshake, which the pane cache keys on.
-        for protocol in [POPULATION_PALETTE_PROTOCOL, POPULATION_PALETTE_PROTOCOL - 1] {
+        for protocol in [stoatty_protocol::PROTOCOL_VERSION, 12] {
             let mut h = Stoat::test();
             let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
             h.stoat.set_apc_tx(tx);
@@ -2249,10 +2235,6 @@ mod tests {
             let diff_unfocused = declared(&mut h);
 
             let table = &h.stoat.minimap_class_table;
-            let len = match protocol >= POPULATION_PALETTE_PROTOCOL {
-                true => table.palette().len(),
-                false => table.legacy_palette().len(),
-            };
             let bg = paint::style_rgb(
                 h.stoat
                     .theme
@@ -2267,7 +2249,7 @@ mod tests {
                     .map(|&c| paint::dim_rgb(c, bg, dim))
                     .collect()
             };
-            let plain = table.palette()[..len].to_vec();
+            let plain = table.palette().to_vec();
             let ground = crate::minimap::color_to_rgb(crate::render::themed_bg(&h.stoat.theme));
             let overview = review::diff_overview_palette(table, &plain, ground);
             let dimmed_overview = review::diff_overview_palette(
@@ -2367,12 +2349,12 @@ mod tests {
             })
             .expect("line 0 summary");
 
-        // The tab expands content to column 4, where the token's colored run
-        // begins. The old display-chunk mapping placed the token past the raw
-        // line's bytes, dropping the color.
+        // The tab expands content to column 12, where the token's colored run
+        // starts. A token placed by display chunk lands past the raw line's
+        // bytes and loses its color.
         assert_eq!(
             line0.first().map(|run| (run.start_col, run.class)),
-            Some((4, expected_class)),
+            Some((12, expected_class)),
             "the run starts at the tab-expanded column in the syntax class, got {line0:?}"
         );
     }

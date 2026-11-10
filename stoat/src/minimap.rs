@@ -8,7 +8,6 @@
 
 use crate::{
     display_map::{highlights::HighlightStyleId, syntax_theme::SyntaxStyles},
-    host::DiffStatus,
     theme::{scope, Theme},
 };
 use ratatui::style::Color;
@@ -97,16 +96,32 @@ const MAX_LINES: usize = 2_000_000;
 /// fills with a 2 px mark, as the boards draw the minimap's bars.
 pub const LINES_PER_CELL: u8 = 6;
 
-/// Columns reserved on a line's left edge for the diff/diagnostic mark lane, so
-/// a mark never overwrites the code silhouette. Content starts after it.
-pub(crate) const LANE_WIDTH: u32 = 2;
+/// Columns of a row's change lane at its left edge, the Minimap boards' 3 px
+/// lane over a seven-cell strip of [`MAX_COLUMNS`] columns.
+pub(crate) const LANE_COLS: u32 = 6;
+
+/// The column a row's content starts at, past the lane and the boards' 1 px gap
+/// beside it, so a mark never overwrites the code silhouette.
+pub(crate) const CONTENT_COL: u32 = 8;
+
+/// Columns of a row's diagnostic tick at its right edge, the Minimap boards'
+/// 3 px tick over a seven-cell strip.
+pub(crate) const TICK_COLS: u32 = 6;
+
+/// The weight of a changed row's tint across its content, the boards' 16
+/// percent of the lane's color, out of 255.
+pub(crate) const TINT_WEIGHT: u8 = 41;
+
+/// Runs a row's content keeps, which leaves [`frame_row`] room for the lane,
+/// the tint, and the tick.
+const CONTENT_RUNS: usize = MAX_RUNS - 3;
 
 /// Bytes of a line that [`summarize_line`] reaches.
 ///
-/// Content stops after `MAX_COLUMNS - LANE_WIDTH` columns, and each char takes
+/// Content stops after `MAX_COLUMNS - CONTENT_COL` columns, and each char takes
 /// at least one column and at most four bytes, so no token byte past this cap
 /// reaches the strip.
-const TOKEN_BYTE_CAP: usize = (MAX_COLUMNS - LANE_WIDTH) as usize * 4;
+const TOKEN_BYTE_CAP: usize = (MAX_COLUMNS - CONTENT_COL) as usize * 4;
 
 /// A single colored run on one line, `len` display columns from `start_col`
 /// drawn in palette class `class` at opacity `weight`.
@@ -176,8 +191,8 @@ impl LineRuns {
     ///
     /// [`summarize_line`] calls this once a line fills its slots. The line then
     /// trades the weight texture inside its words for the room to keep its
-    /// colors and its gaps. An edge mark's class is one that no content class
-    /// takes, so the lane run never merges.
+    /// colors and its gaps. [`frame_row`] adds the lane, the tint, and the
+    /// tick after the merge, so they never merge.
     fn merge_contiguous(&mut self) -> bool {
         let count = self.len();
         if count < 2 {
@@ -242,26 +257,26 @@ pub enum EdgeClass {
     Header,
 }
 
-/// The edge-lane mark of a row, and the offset every content class on the row
-/// takes.
+/// The marks that frame a row, as the Minimap boards draw a row.
 ///
-/// The offset is how a row's diff status reaches the palette. The class table
-/// lays out one copy of the syntax classes per status, so a token's class plus
-/// the row's offset names the token's color in that status's block.
+/// A changed row takes a lane at its left edge and a faint tint of the lane's
+/// color across its content. A row with a diagnostic takes a tick at its right
+/// edge, so a diagnostic and a change both show on one row.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub struct RowMark {
-    /// The edge-lane class, or `None` for a row with no lane mark.
-    pub edge: Option<u8>,
-    /// The offset every content class on the row takes, 0 for the plain syntax
-    /// block.
-    pub class_base: u8,
+    /// The class of the lane and the tint, from the row's diff status, or
+    /// `None` for a row with no change.
+    pub lane: Option<u8>,
+    /// The class of the tick, from the row's diagnostic severity, or `None`
+    /// for a row with no diagnostic.
+    pub tick: Option<u8>,
 }
 
 impl RowMark {
-    /// A row with no lane mark, whose content takes the plain syntax classes.
+    /// A row with no lane and no tick.
     pub const NONE: RowMark = RowMark {
-        edge: None,
-        class_base: 0,
+        lane: None,
+        tick: None,
     };
 }
 
@@ -383,8 +398,8 @@ pub trait EdgeSource {
 impl<F: Fn(u32) -> Option<u8>> EdgeSource for F {
     fn mark_of(&self, row: u32) -> RowMark {
         RowMark {
-            edge: self(row),
-            class_base: 0,
+            lane: self(row),
+            tick: None,
         }
     }
 }
@@ -1411,40 +1426,25 @@ fn line_count(rope: &Rope) -> u32 {
     rope.max_point().row + 1
 }
 
-/// Compress `line` into colored run blocks, prefixed by an optional edge mark.
+/// Compress `line` into colored run blocks, framed by `mark` as
+/// [`frame_row`] frames a row.
 ///
-/// When `mark` carries an edge, a run fills the reserved [`LANE_WIDTH`]-column
-/// lane at the left in that class, and the content summary starts after it so
-/// the mark never overwrites the code silhouette.
+/// The content starts at [`CONTENT_COL`], so a mark never overwrites the code
+/// silhouette. It walks the line by display column, a tab advancing to the next
+/// multiple of [`TAB_WIDTH`] and other chars advancing one, capped at
+/// [`MAX_COLUMNS`]. A non-whitespace char extends the current run when it is
+/// contiguous and shares both the covering token's class and the glyph weight,
+/// otherwise opens a new run. Whitespace ends the current run, so a gap breaks
+/// the blocks. A char uncovered by any token is class 0.
 ///
-/// Content walks the line by display column, a tab advancing to the next multiple
-/// of [`TAB_WIDTH`] and other chars advancing one, capped at [`MAX_COLUMNS`]. A
-/// non-whitespace char extends the current run when it is contiguous and shares
-/// both the covering token's class and the glyph weight, otherwise opens a new
-/// run. Whitespace ends the current run, so a gap breaks the blocks. A char
-/// uncovered by any token is class 0.
-///
-/// A run covers one weight until the line fills its [`MAX_RUNS`] slots. Then
-/// the contiguous runs of one class merge across the whole line and carry
-/// their mean weight, so a long line keeps its colors and its gaps. If a full
-/// line has no runs to merge, its last run swallows the rest of the line at
-/// its own weight.
-///
-/// Every content class takes the mark's `class_base`. Under an offset, class 0 is
-/// therefore the uncovered-text color of the row's population block.
+/// A run covers one weight until the content fills its slots, the
+/// [`MAX_RUNS`] less the frame's three. Then the contiguous runs of one class
+/// merge across the whole line and carry their mean weight, so a long line
+/// keeps its colors and its gaps. If a full line has no runs to merge, its last
+/// run swallows the rest of the line at its own weight.
 pub fn summarize_line(line: &str, tokens: &[LineToken], mark: RowMark) -> LineRuns {
     let mut runs = LineRuns::default();
-    if let Some(class) = mark.edge {
-        runs.push(Run {
-            start_col: 0,
-            len: LANE_WIDTH as u8,
-            class,
-            // A mark rather than a glyph, so it carries no glyph's weight and
-            // draws at full strength.
-            weight: 255,
-        });
-    }
-    let mut col: u32 = LANE_WIDTH;
+    let mut col: u32 = CONTENT_COL;
     let mut byte: usize = 0;
     let mut token_idx = 0;
     let mut overflowed = false;
@@ -1465,11 +1465,10 @@ pub fn summarize_line(line: &str, tokens: &[LineToken], mark: RowMark) -> LineRu
             while token_idx < tokens.len() && tokens[token_idx].range.end <= byte {
                 token_idx += 1;
             }
-            let class = mark.class_base
-                + match tokens.get(token_idx) {
-                    Some(token) if token.range.start <= byte => token.class,
-                    _ => 0,
-                };
+            let class = match tokens.get(token_idx) {
+                Some(token) if token.range.start <= byte => token.class,
+                _ => 0,
+            };
 
             let weight = glyph_weight(ch);
             let contiguous = runs.last().is_some_and(|last| {
@@ -1477,7 +1476,7 @@ pub fn summarize_line(line: &str, tokens: &[LineToken], mark: RowMark) -> LineRu
                     && last.weight == weight
                     && last.start_col as u32 + last.len as u32 == col
             });
-            if !overflowed && !contiguous && runs.len() == MAX_RUNS {
+            if !overflowed && !contiguous && runs.len() == CONTENT_RUNS {
                 merged = true;
                 overflowed = !runs.merge_contiguous();
             }
@@ -1503,7 +1502,47 @@ pub fn summarize_line(line: &str, tokens: &[LineToken], mark: RowMark) -> LineRu
         runs.merge_contiguous();
     }
 
-    runs
+    frame_row(runs, mark, TINT_WEIGHT)
+}
+
+/// Frame a row's `content` runs with `mark`, as the Minimap boards draw a row.
+///
+/// A lane takes the first [`LANE_COLS`] columns at full strength, and a tint of
+/// its color at `tint_weight` runs from [`CONTENT_COL`] to the row's end. The
+/// terminal draws a row's runs in order, so the tint goes before the content
+/// and lies under the text. A tick takes the last [`TICK_COLS`] columns at full
+/// strength. It goes last, so it lies over the content and the tint.
+///
+/// `content` holds at most [`MAX_RUNS`] less three runs, so the frame always
+/// fits.
+pub(crate) fn frame_row(content: LineRuns, mark: RowMark, tint_weight: u8) -> LineRuns {
+    let mut row = LineRuns::default();
+    if let Some(lane) = mark.lane {
+        row.push(Run {
+            start_col: 0,
+            len: LANE_COLS as u8,
+            class: lane,
+            weight: 255,
+        });
+        row.push(Run {
+            start_col: CONTENT_COL as u8,
+            len: (MAX_COLUMNS - CONTENT_COL) as u8,
+            class: lane,
+            weight: tint_weight,
+        });
+    }
+    for &run in content.as_slice() {
+        row.push(run);
+    }
+    if let Some(tick) = mark.tick {
+        row.push(Run {
+            start_col: (MAX_COLUMNS - TICK_COLS) as u8,
+            len: TICK_COLS as u8,
+            class: tick,
+            weight: 255,
+        });
+    }
+    row
 }
 
 /// Flatten a row's tokens so each byte keeps the class of the last token in
@@ -1585,18 +1624,14 @@ fn glyph_weight(ch: char) -> u8 {
 /// the strip holds.
 ///
 /// The palette lays out the syntax block of [`Self::stride`] classes, then the
-/// seven edge classes, then four copies of the syntax block for added,
-/// modified, moved, and deleted rows. A row's [`RowMark::class_base`] picks its
-/// block. The first `stride + 6` entries are exactly the palette a terminal
-/// before protocol 13 read, and the header class follows them inside that
-/// terminal's 64-entry cap. So [`Self::legacy_palette`] is a prefix, and the
-/// edge classes keep their numbers.
+/// seven edge classes. The whole palette fits the 64-entry cap of a terminal
+/// before protocol 13. A row's [`RowMark`] names edge classes for its lane, its
+/// tint, and its tick, and its content keeps the syntax classes.
 pub struct ClassTable {
     palette: Vec<[u8; 3]>,
     by_style: HashMap<HighlightStyleId, u8>,
     by_fg: HashMap<[u8; 3], u8>,
     edge_base: u8,
-    population_base: u8,
     /// A hash of which syntax scopes carry a class.
     ///
     /// A theme switch that gives a scope a foreground or takes one away moves
@@ -1648,19 +1683,11 @@ impl ClassTable {
             palette.push(color_to_rgb(theme.get(scope).fg.unwrap_or(Color::White)));
         }
 
-        // The population blocks repeat the syntax block, in the order
-        // `population_base` and `deleted_base` answer them.
-        let population_base = palette.len() as u8;
-        for _ in 0..4 {
-            palette.extend_from_within(..edge_base as usize);
-        }
-
         ClassTable {
             palette,
             by_style,
             by_fg,
             edge_base,
-            population_base,
             class_version: classes.finish(),
         }
     }
@@ -1674,38 +1701,10 @@ impl ClassTable {
         self.edge_base + kind as u8
     }
 
-    /// The number of classes in one syntax block, the default foreground and
-    /// one per syntax scope. Each population block repeats that many.
+    /// The number of classes in the syntax block, the default foreground and
+    /// one per syntax scope.
     pub fn stride(&self) -> u8 {
         self.edge_base
-    }
-
-    /// The offset a row in `status` gives its content classes.
-    ///
-    /// An unchanged row takes the plain syntax block at 0. An added, modified,
-    /// or moved row takes its own copy of that block after the edge classes.
-    pub fn population_base(&self, status: DiffStatus) -> u8 {
-        let stride = self.stride();
-        match status {
-            DiffStatus::Unchanged => 0,
-            DiffStatus::Added => self.population_base,
-            DiffStatus::Modified => self.population_base + stride,
-            DiffStatus::Moved => self.population_base + 2 * stride,
-        }
-    }
-
-    /// The offset a base-only row gives its content classes.
-    ///
-    /// A deleted line shown from the base has no buffer row, so [`DiffStatus`]
-    /// has no variant for it.
-    pub fn deleted_base(&self) -> u8 {
-        self.population_base + 3 * self.stride()
-    }
-
-    /// The palette a terminal before protocol 13 reads, the syntax block and the
-    /// edge classes with no population block.
-    pub fn legacy_palette(&self) -> &[[u8; 3]] {
-        &self.palette[..self.population_base as usize]
     }
 
     /// The class a token drawn in `style` maps to, or 0 when the style is not a
@@ -1762,8 +1761,8 @@ pub(crate) fn color_to_rgb(color: Color) -> [u8; 3] {
 mod tests {
     use super::{
         resolve_overlaps, summarize_line, BuildWindow, EdgeSource, LineRuns, LineToken,
-        MinimapContent, RowMark, RowSet, Run, Splice, SyncVersions, EDIT_SUMMARIZE_MAX, MAX_LINES,
-        MAX_RUNS, SYNC_BUDGET, SYNC_SLICE, TOKEN_BYTE_CAP,
+        MinimapContent, RowMark, RowSet, Run, Splice, SyncVersions, CONTENT_COL, CONTENT_RUNS,
+        EDIT_SUMMARIZE_MAX, MAX_LINES, MAX_RUNS, SYNC_BUDGET, SYNC_SLICE, TOKEN_BYTE_CAP,
     };
     use std::{cell::RefCell, collections::HashMap, ops::Range, sync::Arc, time::Duration};
     use stoat_scheduler::{Executor, TestScheduler};
@@ -1833,8 +1832,8 @@ mod tests {
         fn mark_of(&self, row: u32) -> RowMark {
             self.asked.borrow_mut().push(row);
             RowMark {
-                edge: self.marked.contains(&row).then_some(40),
-                class_base: 0,
+                lane: self.marked.contains(&row).then_some(40),
+                tick: None,
             }
         }
 
@@ -1927,7 +1926,7 @@ mod tests {
         // "ab cd" with one token over "ab" and one over "cd": a run per word,
         // broken by the space, each carrying its token's class.
         let runs = summarize_line("ab cd", &[tok(0..2, 1), tok(3..5, 2)], RowMark::NONE);
-        assert_eq!(runs.as_slice(), [run(2, 2, 1), run(5, 2, 2)]);
+        assert_eq!(runs.as_slice(), [run(8, 2, 1), run(11, 2, 2)]);
     }
 
     /// `tokens` after [`resolve_overlaps`], as `(start, end, class)` triples.
@@ -1975,21 +1974,21 @@ mod tests {
     fn summarize_line_coalesces_adjacent_same_class() {
         // Two tokens of the same class over contiguous chars merge into one run.
         let runs = summarize_line("abcd", &[tok(0..2, 1), tok(2..4, 1)], RowMark::NONE);
-        assert_eq!(runs.as_slice(), [run(2, 4, 1)]);
+        assert_eq!(runs.as_slice(), [run(8, 4, 1)]);
     }
 
     #[test]
     fn summarize_line_uncovered_is_class_zero() {
         let runs = summarize_line("ab", &[], RowMark::NONE);
-        assert_eq!(runs.as_slice(), [run(2, 2, 0)]);
+        assert_eq!(runs.as_slice(), [run(8, 2, 0)]);
     }
 
     #[test]
     fn summarize_line_expands_tabs_to_stops() {
-        // A leading tab from the col-2 lane edge still advances to the next tab
-        // stop at column 4, so the word starts at column 4.
-        let runs = summarize_line("\tab", &[tok(1..3, 1)], RowMark::NONE);
-        assert_eq!(runs.as_slice(), [run(4, 2, 1)]);
+        // A tab after the char at the col-8 content edge advances to the next
+        // tab stop at column 12, so the word starts at column 12.
+        let runs = summarize_line("x\tab", &[tok(2..4, 1)], RowMark::NONE);
+        assert_eq!(runs.as_slice(), [run(8, 1, 0), run(12, 2, 1)]);
     }
 
     #[test]
@@ -1998,8 +1997,8 @@ mod tests {
         let runs = summarize_line(&line, &[], RowMark::NONE);
         assert_eq!(
             runs.as_slice(),
-            [run(2, 118, 0)],
-            "content fills the lane edge to the 120-column cap"
+            [run(8, 112, 0)],
+            "content fills the content edge to the 120-column cap"
         );
     }
 
@@ -2013,17 +2012,22 @@ mod tests {
             .map(|i| tok(i * 2..i * 2 + 1, (i % 3 + 1) as u8))
             .collect();
         let runs = summarize_line(&line, &tokens, RowMark::NONE);
-        assert_eq!(runs.len(), MAX_RUNS, "runs cap at the maximum");
+        assert_eq!(runs.len(), CONTENT_RUNS, "runs cap at the content maximum");
 
-        // An x sits at every even column, shifted past the 2-column lane, so
-        // the last one ends at column 2 * CHARS + 1 and the last run reaches it.
-        let last = runs.as_slice()[MAX_RUNS - 1];
+        // An x sits at every second column from the content edge, so the last
+        // one ends at column CONTENT_COL + 2 * CHARS - 1 and the last run
+        // reaches it.
+        let last = runs.as_slice()[CONTENT_RUNS - 1];
+        let content_col = CONTENT_COL as usize;
         assert_eq!(
             (
                 last.start_col as usize,
                 last.start_col as usize + last.len as usize
             ),
-            (2 * MAX_RUNS, 2 * CHARS + 1)
+            (
+                content_col + 2 * (CONTENT_RUNS - 1),
+                content_col + 2 * CHARS - 1
+            )
         );
     }
 
@@ -2041,7 +2045,7 @@ mod tests {
                 .collect();
             summarize_line(&line, &tokens, RowMark::NONE)
         };
-        let pairs = |count: u8| (0..count).map(|i| weighted(2 + 3 * i, 2, 1, 150));
+        let pairs = |count: u8| (0..count).map(|i| weighted(8 + 3 * i, 2, 1, 150));
 
         assert_eq!(
             words("a_ ", 20).as_slice(),
@@ -2050,17 +2054,17 @@ mod tests {
         );
         assert_eq!(
             words("a_ ", 40).as_slice(),
-            pairs(23)
-                .chain([weighted(71, 49, 1, 190)])
+            pairs(20)
+                .chain([weighted(68, 52, 1, 190)])
                 .collect::<Vec<_>>(),
             "forty words swallow from the run after the last merge",
         );
         assert_eq!(
-            words("a_b ", 12).as_slice(),
-            (0..12)
+            words("a_b ", 10).as_slice(),
+            (0..10)
                 .flat_map(|i| [
-                    weighted(2 + 4 * i, 2, 1, 150),
-                    weighted(4 + 4 * i, 1, 0, 190)
+                    weighted(8 + 4 * i, 2, 1, 150),
+                    weighted(10 + 4 * i, 1, 0, 190)
                 ])
                 .collect::<Vec<_>>(),
             "an uncovered b keeps its own run beside the merged pair",
@@ -2078,9 +2082,9 @@ mod tests {
         assert_eq!(
             runs.as_slice(),
             [
-                weighted(2, 1, 1, 255),
-                weighted(3, 2, 1, 190),
-                weighted(5, 1, 1, 110),
+                weighted(8, 1, 1, 255),
+                weighted(9, 2, 1, 190),
+                weighted(11, 1, 1, 110),
             ]
         );
     }
@@ -2997,7 +3001,7 @@ mod tests {
             content
                 .edges
                 .iter()
-                .map(|&(row, mark)| (row, mark.edge))
+                .map(|&(row, mark)| (row, mark.lane))
                 .collect::<Vec<_>>(),
             vec![(50_900, Some(40)), (51_100, Some(40))],
         );
@@ -3607,37 +3611,50 @@ mod tests {
         let scopes = SyntaxStyles::from_theme(&Theme::empty()).theme_keys().len();
         assert_eq!(
             table.palette().len(),
-            5 * (scopes + 1) + 7,
-            "a syntax block of the default foreground and one color per scope, the \
-             seven edge classes, then one copy of the syntax block per population",
+            scopes + 1 + 7,
+            "a syntax block of the default foreground and one color per scope, then \
+             the seven edge classes",
         );
     }
 
     #[test]
-    fn summarize_line_prepends_the_edge_lane() {
-        // An edge fills the reserved cols 0-1 and content starts at col 2.
+    fn summarize_line_frames_a_changed_row_with_its_lane_and_tint() {
+        // The lane fills cols 0-5, and the tint runs from col 8 under the content.
         let runs = summarize_line(
             "ab",
             &[tok(0..2, 1)],
             RowMark {
-                edge: Some(40),
-                class_base: 0,
+                lane: Some(40),
+                tick: None,
             },
         );
-        assert_eq!(runs.as_slice(), [weighted(0, 2, 40, 255), run(2, 2, 1)]);
+        assert_eq!(
+            runs.as_slice(),
+            [
+                weighted(0, 6, 40, 255),
+                weighted(8, 112, 40, 41),
+                run(8, 2, 1)
+            ],
+        );
     }
 
     #[test]
-    fn summarize_line_offsets_content_classes_by_the_row_base() {
+    fn summarize_line_ticks_a_diagnostic_at_the_right_edge() {
         let mark = RowMark {
-            edge: Some(34),
-            class_base: 39,
+            lane: Some(34),
+            tick: Some(37),
         };
         let runs = summarize_line("ab cd", &[tok(0..2, 1), tok(3..5, 2)], mark);
         assert_eq!(
             runs.as_slice(),
-            [weighted(0, 2, 34, 255), run(2, 2, 40), run(5, 2, 41)],
-            "the content classes take the base, and the lane keeps its edge class",
+            [
+                weighted(0, 6, 34, 255),
+                weighted(8, 112, 34, 41),
+                run(8, 2, 1),
+                run(11, 2, 2),
+                weighted(114, 6, 37, 255),
+            ],
+            "the content keeps its classes, and the tick lies last over the tint",
         );
     }
 
@@ -3659,71 +3676,6 @@ mod tests {
         );
     }
 
-    /// The population blocks follow the edge classes, each a copy of the syntax
-    /// block, and the palette an older terminal reads is a prefix.
-    #[test]
-    fn status_blocks_follow_the_edge_classes() {
-        use super::{ClassTable, EdgeClass};
-        use crate::{host::DiffStatus, theme::Theme};
-
-        let theme = {
-            let (config, errors) = stoat_config::parse(
-                "theme t { syntax.keyword.fg = blue; syntax.string.fg = green; }",
-            );
-            assert!(errors.is_empty(), "parse errors: {errors:?}");
-            Theme::from_config(&config.expect("the theme parses"), "t").expect("theme t exists")
-        };
-        let table = ClassTable::from_theme(&theme);
-        let stride = table.stride();
-        let header = table.edge_class(EdgeClass::Header);
-        assert_eq!(
-            [
-                table.population_base(DiffStatus::Unchanged),
-                table.population_base(DiffStatus::Added),
-                table.population_base(DiffStatus::Modified),
-                table.population_base(DiffStatus::Moved),
-                table.deleted_base(),
-            ],
-            [
-                0,
-                header + 1,
-                header + 1 + stride,
-                header + 1 + 2 * stride,
-                header + 1 + 3 * stride,
-            ],
-        );
-
-        let palette = table.palette();
-        let syntax = &palette[..stride as usize];
-        let block = |base: u8| &palette[base as usize..(base + stride) as usize];
-        assert_ne!(
-            syntax[1], syntax[3],
-            "the syntax block holds distinct colors"
-        );
-        assert_eq!(
-            [
-                block(table.population_base(DiffStatus::Added)),
-                block(table.population_base(DiffStatus::Modified)),
-                block(table.population_base(DiffStatus::Moved)),
-                block(table.deleted_base()),
-            ],
-            [syntax; 4],
-            "each population block copies the syntax block",
-        );
-        assert_eq!(
-            (
-                palette.len(),
-                table.legacy_palette(),
-                table.edge_class(EdgeClass::Added)
-            ),
-            (
-                5 * stride as usize + 7,
-                &palette[..header as usize + 1],
-                stride
-            ),
-        );
-    }
-
     #[test]
     fn build_carries_each_line_edge() {
         let text = rope("alpha\nbravo");
@@ -3742,28 +3694,28 @@ mod tests {
         let built = &content.take_queued()[0].lines;
         assert_eq!(
             built[0].as_slice()[0],
-            run(2, 5, 0),
+            run(8, 5, 0),
             "an unmarked line starts past the lane"
         );
         assert_eq!(
             built[1].as_slice()[0],
-            weighted(0, 2, 40, 255),
-            "a marked line leads with its edge"
+            weighted(0, 6, 40, 255),
+            "a marked line leads with its lane"
         );
     }
 
-    /// A row whose diff status moves under an unchanged edge re-summarizes, so
-    /// its content takes the new block while its lane reads the same.
+    /// A row whose diagnostic moves under an unchanged lane re-summarizes, so
+    /// its tick shows while its lane reads the same.
     #[test]
-    fn a_base_change_under_a_steady_edge_resplices_the_row() {
-        struct BasedEdges<'a>(&'a std::cell::Cell<u8>);
+    fn a_tick_change_under_a_steady_lane_resplices_the_row() {
+        struct TickedEdges<'a>(&'a std::cell::Cell<Option<u8>>);
 
-        impl EdgeSource for BasedEdges<'_> {
+        impl EdgeSource for TickedEdges<'_> {
             fn mark_of(&self, row: u32) -> RowMark {
                 match row {
                     1 => RowMark {
-                        edge: Some(40),
-                        class_base: self.0.get(),
+                        lane: Some(40),
+                        tick: self.0.get(),
                     },
                     _ => RowMark::NONE,
                 }
@@ -3774,7 +3726,7 @@ mod tests {
         let tokens = |rows: Range<u32>| -> HashMap<u32, Vec<LineToken>> {
             rows.map(|row| (row, vec![tok(0..5, 1)])).collect()
         };
-        let base = std::cell::Cell::new(0);
+        let tick = std::cell::Cell::new(None);
         let mut content = MinimapContent::new(1, test_executor());
         content.sync_all(
             &text,
@@ -3782,25 +3734,25 @@ mod tests {
             &Patch::empty(),
             versions(5, 0),
             tokens,
-            BasedEdges(&base),
+            TickedEdges(&tick),
         );
         content.take_queued();
 
-        base.set(39);
+        tick.set(Some(37));
         content.sync_all(
             &text,
             1,
             &Patch::empty(),
             versions(6, 0),
             tokens,
-            BasedEdges(&base),
+            TickedEdges(&tick),
         );
         let line = summarize_line(
             "bravo",
             &[tok(0..5, 1)],
             RowMark {
-                edge: Some(40),
-                class_base: 39,
+                lane: Some(40),
+                tick: Some(37),
             },
         );
         assert_eq!(
@@ -3811,9 +3763,15 @@ mod tests {
                     removed: 1,
                     lines: vec![line],
                 }],
-                [weighted(0, 2, 40, 255), run(2, 5, 40)].as_slice()
+                [
+                    weighted(0, 6, 40, 255),
+                    weighted(8, 112, 40, 41),
+                    run(8, 5, 1),
+                    weighted(114, 6, 37, 255),
+                ]
+                .as_slice()
             ),
-            "row 1 alone resplices, and its content run takes class 40",
+            "row 1 alone resplices, and its row takes the tick",
         );
     }
 
@@ -4158,8 +4116,8 @@ mod tests {
                         (
                             row,
                             RowMark {
-                                edge: Some(c),
-                                class_base: 0,
+                                lane: Some(c),
+                                tick: None,
                             },
                         )
                     })
@@ -4525,7 +4483,7 @@ mod tests {
         );
         let _ = content.take_queued();
 
-        // The buffer is unchanged, but a diagnostic appears on line 1.
+        // The buffer is unchanged, but line 1 takes a lane.
         let edge_of = |row: u32| (row == 1).then_some(40);
         content.sync_all(
             &text,
@@ -4542,8 +4500,8 @@ mod tests {
         assert_eq!(splices[0].removed, 1);
         assert_eq!(
             splices[0].lines[0].as_slice()[0],
-            weighted(0, 2, 40, 255),
-            "the mark leads the line"
+            weighted(0, 6, 40, 255),
+            "the lane leads the line"
         );
     }
 
@@ -4579,7 +4537,7 @@ mod tests {
         assert_eq!(splices[0].start, 0);
         assert_eq!(
             splices[0].lines[0].as_slice(),
-            [run(2, 5, 0)],
+            [run(8, 5, 0)],
             "line 0 goes monochrome"
         );
     }
@@ -4625,8 +4583,8 @@ mod tests {
                     "bravo",
                     &[tok(0..4, 2)],
                     RowMark {
-                        edge: Some(40),
-                        class_base: 0
+                        lane: Some(40),
+                        tick: None
                     }
                 ),
             ],

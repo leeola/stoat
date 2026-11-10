@@ -159,10 +159,6 @@ pub(crate) struct MinimapChrome<'a> {
     pub(crate) content: &'a HashMap<(WorkspaceId, BufferId), MinimapContent>,
     /// Syntax-scope palette a plain editor's strip declares and its run
     /// summaries index.
-    ///
-    /// This and the three palettes below are cut to
-    /// [`ClassTable::legacy_palette`](crate::minimap::ClassTable::legacy_palette)'s
-    /// length for a terminal before protocol 13.
     pub(crate) palette: &'a [[u8; 3]],
     /// [`Self::palette`] pre-blended toward the background at the frame's fade,
     /// for the strip of a pane that fades.
@@ -1233,28 +1229,18 @@ pub(crate) fn frame(
             let [r, g, b] = paint::style_rgb(focused.fg).unwrap_or([90, 90, 110]);
             [r, g, b, MINIMAP_THUMB_ALPHA]
         };
-        // A terminal before the population palette drops a declaration past 64
-        // entries, so it receives the prefix it reads.
-        let table = &stoat.minimap_class_table;
-        let declared = match stoat.stoatty_protocol >= emit::POPULATION_PALETTE_PROTOCOL {
-            true => table.palette().len(),
-            false => table.legacy_palette().len(),
-        };
-        let palette = &table.palette()[..declared];
-        let overview_palette = &palettes.overview[..declared];
+        let palette = stoat.minimap_class_table.palette();
+        let overview_palette = palettes.overview.as_slice();
         MinimapChrome {
             workspace: stoat.active_workspace,
             content: &stoat.minimap_content,
             palette,
-            dimmed_palette: palettes
-                .dimmed
-                .as_deref()
-                .map_or(palette, |dimmed| &dimmed[..declared]),
+            dimmed_palette: palettes.dimmed.as_deref().unwrap_or(palette),
             overview_palette,
             dimmed_overview_palette: palettes
                 .overview_dimmed
                 .as_deref()
-                .map_or(overview_palette, |dimmed| &dimmed[..declared]),
+                .unwrap_or(overview_palette),
             diff_changes_content: stoat
                 .diff_changes_strips
                 .get(&stoat.active_workspace)

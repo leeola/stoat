@@ -14,10 +14,7 @@
 //! fills its own strip.
 
 use super::{
-    emit::{
-        convert_minimap_runs, minimap_line_tokens, POPULATION_PALETTE_PROTOCOL,
-        WEIGHTED_RUN_PROTOCOL,
-    },
+    emit::{convert_minimap_runs, minimap_line_tokens, WEIGHTED_RUN_PROTOCOL},
     summarize_line, ClassTable, EdgeClass, LineRuns, LineToken, RowMark, Run, SweepRows,
     MAX_COLUMNS, SYNC_BUDGET, SYNC_SLICE,
 };
@@ -58,9 +55,6 @@ pub(crate) struct DiffChangesStrip {
     budget: Duration,
     /// The lines the terminal holds, in stack order.
     held: Vec<HeldExcerpt>,
-    /// Whether the held lines carry population blocks, which the terminal's
-    /// protocol decides.
-    populations: bool,
     /// Whether the held lines take syntax colors.
     syntax_on: bool,
     /// The [`ClassTable::class_version`] the held lines were summarized
@@ -176,7 +170,6 @@ impl DiffChangesStrip {
             content_id,
             budget: SYNC_BUDGET,
             held: Vec::new(),
-            populations: false,
             syntax_on: false,
             classes: 0,
             pending: false,
@@ -320,16 +313,13 @@ impl ParsedRows {
 /// with no mark. A Scope row under the header holds no file text, so its line
 /// is empty.
 ///
-/// With `populations` unset, every content class stays in the plain syntax
-/// block, for a terminal that reads no population blocks. With `syntax_on`
-/// unset, no row takes syntax tokens. A range past the stack's last row yields
-/// lines up to that row only.
+/// With `syntax_on` unset, no row takes syntax tokens. A range past the
+/// stack's last row yields lines up to that row only.
 pub(crate) fn summarize_rows(
     state: &DiffChangesState,
     editors: &mut SlotMap<EditorId, EditorState>,
     rows: Range<usize>,
     table: &ClassTable,
-    populations: bool,
     syntax_on: bool,
 ) -> Vec<LineRuns> {
     let mut lines = Vec::with_capacity(rows.len());
@@ -371,8 +361,7 @@ pub(crate) fn summarize_rows(
             })
             .collect();
         lines.extend(
-            display_rows
-                .map(|row| excerpt_row_line(&snapshot, row, &kept, &tokens, table, populations)),
+            display_rows.map(|row| excerpt_row_line(&snapshot, row, &kept, &tokens, table)),
         );
     }
     lines
@@ -390,7 +379,6 @@ pub(crate) fn summarize_rows(
 /// [`SYNC_SLICE`] lines until its time budget runs out, so a long stack fills
 /// over idle frames. A stack with no rows empties the strip.
 pub(crate) fn sync_diff_changes_strip(stoat: &mut Stoat, ws_id: WorkspaceId, out: &mut Vec<u8>) {
-    let populations = stoat.stoatty_protocol >= POPULATION_PALETTE_PROTOCOL;
     let weighted = stoat.stoatty_protocol >= WEIGHTED_RUN_PROTOCOL;
     let syntax_on = stoat.syntax_highlight;
     let Stoat {
@@ -414,9 +402,8 @@ pub(crate) fn sync_diff_changes_strip(stoat: &mut Stoat, ws_id: WorkspaceId, out
     });
     strip.prune(&target);
     let classes = minimap_class_table.class_version;
-    if (strip.populations, strip.syntax_on, strip.classes) != (populations, syntax_on, classes) {
+    if (strip.syntax_on, strip.classes) != (syntax_on, classes) {
         strip.forget_held();
-        strip.populations = populations;
         strip.syntax_on = syntax_on;
         strip.classes = classes;
     }
@@ -443,14 +430,7 @@ pub(crate) fn sync_diff_changes_strip(stoat: &mut Stoat, ws_id: WorkspaceId, out
     if let Some(state) = state {
         for (start, removed, rows) in strip.touched_splices(&target, &target_hunks, state, editors)
         {
-            let lines = summarize_rows(
-                state,
-                editors,
-                rows,
-                minimap_class_table,
-                populations,
-                syntax_on,
-            );
+            let lines = summarize_rows(state, editors, rows, minimap_class_table, syntax_on);
             send(out, start, removed, lines);
         }
     }
@@ -471,14 +451,7 @@ pub(crate) fn sync_diff_changes_strip(stoat: &mut Stoat, ws_id: WorkspaceId, out
         let first = top + step.skip;
         let rows = first..first + (run - step.skip).min(SYNC_SLICE as usize);
         let lines = state.map_or_else(Vec::new, |state| {
-            summarize_rows(
-                state,
-                editors,
-                rows.clone(),
-                minimap_class_table,
-                populations,
-                syntax_on,
-            )
+            summarize_rows(state, editors, rows.clone(), minimap_class_table, syntax_on)
         });
         send(out, first, step.removed, lines);
         hold(&mut strip.held, &target, &target_hunks, &step, rows.len());
@@ -841,14 +814,9 @@ fn excerpt_row_line(
     kept: &[Range<u32>],
     tokens: &HashMap<u32, Vec<LineToken>>,
     table: &ClassTable,
-    populations: bool,
 ) -> LineRuns {
     let Some(start) = snapshot.display_to_buffer(DisplayPoint::new(row, 0)) else {
-        return summarize_line(
-            &snapshot.display_line(row),
-            &[],
-            deleted_mark(table, populations),
-        );
+        return summarize_line(&snapshot.display_line(row), &[], deleted_mark(table));
     };
     let at = kept.partition_point(|run| run.end <= start.row);
     if !kept.get(at).is_some_and(|run| run.contains(&start.row)) {
@@ -881,39 +849,31 @@ fn excerpt_row_line(
             })
             .collect()
     });
-    let mark = status_mark(snapshot.line_diff_status(start.row), table, populations);
+    let mark = status_mark(snapshot.line_diff_status(start.row), table);
     summarize_line(&line[from..end], &row_tokens, mark)
 }
 
 /// The mark of a row of diff `status`.
 ///
 /// An addition takes the added lane and a modification or a move the modified
-/// lane, each with its own population block when `populations` holds. An
-/// unchanged row takes no mark.
-fn status_mark(status: DiffStatus, table: &ClassTable, populations: bool) -> RowMark {
-    let edge = match status {
+/// lane. An unchanged row takes no mark.
+fn status_mark(status: DiffStatus, table: &ClassTable) -> RowMark {
+    let lane = match status {
         DiffStatus::Added => EdgeClass::Added,
         DiffStatus::Modified | DiffStatus::Moved => EdgeClass::Modified,
         DiffStatus::Unchanged => return RowMark::NONE,
     };
     RowMark {
-        edge: Some(table.edge_class(edge)),
-        class_base: match populations {
-            true => table.population_base(status),
-            false => 0,
-        },
+        lane: Some(table.edge_class(lane)),
+        tick: None,
     }
 }
 
-/// The mark of a base line spliced in for a removal, the removed lane with the
-/// deleted block when `populations` holds.
-fn deleted_mark(table: &ClassTable, populations: bool) -> RowMark {
+/// The mark of a base line spliced in for a removal, the removed lane.
+fn deleted_mark(table: &ClassTable) -> RowMark {
     RowMark {
-        edge: Some(table.edge_class(EdgeClass::Removed)),
-        class_base: match populations {
-            true => table.deleted_base(),
-            false => 0,
-        },
+        lane: Some(table.edge_class(EdgeClass::Removed)),
+        tick: None,
     }
 }
 
@@ -929,7 +889,7 @@ mod tests {
         display_map::highlights::{BufferSemanticTokens, SemanticTokenHighlight},
         host::DiffStatus,
         minimap::{
-            emit::{self, convert_minimap_runs, POPULATION_PALETTE_PROTOCOL},
+            emit::{self, convert_minimap_runs},
             summarize_line, ClassTable, EdgeClass, LineRuns, LineToken, RowMark, Run, MAX_COLUMNS,
             SYNC_SLICE,
         },
@@ -976,7 +936,6 @@ mod tests {
         h: &mut TestHarness,
         rows: Range<usize>,
         table: Option<&ClassTable>,
-        populations: bool,
     ) -> Vec<LineRuns> {
         let id = h
             .stoat
@@ -997,56 +956,56 @@ mod tests {
         let state = &mut diff_changes_views[id];
         diff_changes::layout_stack(state, editors);
         let table = table.unwrap_or(minimap_class_table);
-        summarize_rows(state, editors, rows, table, populations, syntax_on)
+        summarize_rows(state, editors, rows, table, syntax_on)
     }
 
     fn runs(lines: &[LineRuns]) -> Vec<Vec<Run>> {
         lines.iter().map(|line| line.as_slice().to_vec()).collect()
     }
 
-    /// The modified row and the deleted row take the lane and the content
-    /// block of their change, and the context rows take neither. Without
-    /// populations the lanes stay and every content class is plain.
+    /// The modified row and the deleted row take the lane of their change at
+    /// columns 0 to 6 and its tint from column 8 at weight 41, under content
+    /// that starts at column 8. The context rows take neither.
     #[test]
-    fn rows_take_the_lane_and_block_of_their_change() {
+    fn rows_take_the_lane_and_tint_of_their_change() {
         let table = ClassTable::from_theme(&Theme::empty());
         let mut h = one_file();
-        let expected = |populations: bool| {
-            let mark = |edge, base| RowMark {
-                edge: Some(table.edge_class(edge)),
-                class_base: if populations { base } else { 0 },
-            };
-            let line = |text, mark| summarize_line(text, &[], mark).as_slice().to_vec();
-            vec![
-                vec![Run {
-                    start_col: 0,
-                    len: MAX_COLUMNS as u8,
-                    class: table.edge_class(EdgeClass::Header),
-                    weight: 255,
-                }],
-                line("a", RowMark::NONE),
-                line(
-                    "B",
-                    mark(
-                        EdgeClass::Modified,
-                        table.population_base(DiffStatus::Modified),
-                    ),
-                ),
-                line("c", RowMark::NONE),
-                line("d", mark(EdgeClass::Removed, table.deleted_base())),
-                line("", RowMark::NONE),
+        let mark_run = |start_col, len, class, weight| Run {
+            start_col,
+            len,
+            class,
+            weight,
+        };
+        let content = |text| summarize_line(text, &[], RowMark::NONE).as_slice().to_vec();
+        let framed = |text, kind| {
+            let lane = table.edge_class(kind);
+            [
+                vec![mark_run(0, 6, lane, 255), mark_run(8, 112, lane, 41)],
+                content(text),
             ]
+            .concat()
         };
 
         let (_, total) = layout(&mut h);
+        let lines = runs(&stack_lines(&mut h, 0..total, Some(&table)));
         assert_eq!(
-            [true, false].map(|populations| runs(&stack_lines(
-                &mut h,
-                0..total,
-                Some(&table),
-                populations
-            ))),
-            [expected(true), expected(false)],
+            (lines, content("B")[0].start_col),
+            (
+                vec![
+                    vec![mark_run(
+                        0,
+                        MAX_COLUMNS as u8,
+                        table.edge_class(EdgeClass::Header),
+                        255
+                    )],
+                    content("a"),
+                    framed("B", EdgeClass::Modified),
+                    content("c"),
+                    framed("d", EdgeClass::Removed),
+                    content(""),
+                ],
+                8,
+            ),
         );
     }
 
@@ -1062,13 +1021,13 @@ mod tests {
         ]);
         let (headers, count) = layout(&mut h);
         let first = headers[1];
-        let whole = runs(&stack_lines(&mut h, 0..count, Some(&table), true));
+        let whole = runs(&stack_lines(&mut h, 0..count, Some(&table)));
 
         let ranges = [first..count, 1..3, 2..first + 2, count - 1..count + 5];
         assert_eq!(
             ranges
                 .clone()
-                .map(|rows| runs(&stack_lines(&mut h, rows, Some(&table), true))),
+                .map(|rows| runs(&stack_lines(&mut h, rows, Some(&table)))),
             ranges.map(|rows| whole[rows.start..rows.end.min(count)].to_vec()),
         );
     }
@@ -1111,16 +1070,16 @@ mod tests {
         // B is byte 2 of "a\nB\nc\n".
         let class = token_over(&mut h, 2..3);
         let (_, total) = layout(&mut h);
-        let lines = runs(&stack_lines(&mut h, 0..total, None, true));
+        let lines = runs(&stack_lines(&mut h, 0..total, None));
 
         let table = &h.stoat.minimap_class_table;
         let modified = RowMark {
-            edge: Some(table.edge_class(EdgeClass::Modified)),
-            class_base: table.population_base(DiffStatus::Modified),
+            lane: Some(table.edge_class(EdgeClass::Modified)),
+            tick: None,
         };
         let deleted = RowMark {
-            edge: Some(table.edge_class(EdgeClass::Removed)),
-            class_base: table.deleted_base(),
+            lane: Some(table.edge_class(EdgeClass::Removed)),
+            tick: None,
         };
         let token = [LineToken { range: 0..1, class }];
         assert_eq!(
@@ -1141,12 +1100,12 @@ mod tests {
     fn a_tab_indented_row_takes_its_colors_past_the_tab() {
         let mut h = files_of(&[("a.txt", "\tx\n", "\ty\n")]);
         let class = token_over(&mut h, 1..2);
-        let lines = runs(&stack_lines(&mut h, 1..2, None, true));
+        let lines = runs(&stack_lines(&mut h, 1..2, None));
 
         let table = &h.stoat.minimap_class_table;
         let modified = RowMark {
-            edge: Some(table.edge_class(EdgeClass::Modified)),
-            class_base: table.population_base(DiffStatus::Modified),
+            lane: Some(table.edge_class(EdgeClass::Modified)),
+            tick: None,
         };
         let token = [LineToken { range: 1..2, class }];
         assert_eq!(
@@ -1168,7 +1127,7 @@ mod tests {
             ws.editors[editor_id].display_map.snapshot().display_line(0)
         };
 
-        let lines = runs(&stack_lines(&mut h, 1..2, None, true));
+        let lines = runs(&stack_lines(&mut h, 1..2, None));
         assert_eq!(
             lines,
             [summarize_line(&placeholder, &[], RowMark::NONE)
@@ -1178,17 +1137,14 @@ mod tests {
     }
 
     /// An addition takes the added lane and a modification or a move the
-    /// modified lane, each with its own population block, and an unchanged
-    /// row takes no mark. Without populations every block is plain.
+    /// modified lane, and an unchanged row takes no mark. No status takes a
+    /// tick.
     #[test]
-    fn each_diff_status_takes_its_lane_and_block() {
+    fn each_diff_status_takes_its_lane() {
         let table = ClassTable::from_theme(&Theme::empty());
-        let mark = |edge, status, populations| RowMark {
-            edge: Some(table.edge_class(edge)),
-            class_base: match populations {
-                true => table.population_base(status),
-                false => 0,
-            },
+        let lane = |edge| RowMark {
+            lane: Some(table.edge_class(edge)),
+            tick: None,
         };
         let statuses = [
             DiffStatus::Added,
@@ -1197,17 +1153,13 @@ mod tests {
             DiffStatus::Unchanged,
         ];
         assert_eq!(
-            [true, false].map(|populations| {
-                statuses.map(|status| status_mark(status, &table, populations))
-            }),
-            [true, false].map(|populations| {
-                [
-                    mark(EdgeClass::Added, DiffStatus::Added, populations),
-                    mark(EdgeClass::Modified, DiffStatus::Moved, populations),
-                    mark(EdgeClass::Modified, DiffStatus::Modified, populations),
-                    RowMark::NONE,
-                ]
-            }),
+            statuses.map(|status| status_mark(status, &table)),
+            [
+                lane(EdgeClass::Added),
+                lane(EdgeClass::Modified),
+                lane(EdgeClass::Modified),
+                RowMark::NONE,
+            ],
         );
     }
 
@@ -1346,11 +1298,9 @@ mod tests {
         )
     }
 
-    /// The stack's `rows` in the wire form the strip sends, with the population
-    /// blocks the terminal's protocol reads.
+    /// The stack's `rows` in the wire form the strip sends.
     fn wire_lines(h: &mut TestHarness, rows: Range<usize>) -> Vec<LineSummary> {
-        let populations = h.stoat.stoatty_protocol >= POPULATION_PALETTE_PROTOCOL;
-        stack_lines(h, rows, None, populations)
+        stack_lines(h, rows, None)
             .into_iter()
             .map(convert_minimap_runs)
             .collect()
@@ -1871,22 +1821,6 @@ mod tests {
         ws.focus = FocusTarget::Dock(dock);
         let (_, views) = strip_frames(&frame(&mut h, &mut rx));
         assert_eq!(views, []);
-    }
-
-    /// A terminal whose protocol stops reading population blocks gets every
-    /// line again.
-    #[test]
-    fn a_protocol_change_sends_the_lines_again() {
-        let (mut h, mut rx) = strip_harness(8);
-        frame(&mut h, &mut rx);
-        let (_, held) = layout(&mut h);
-
-        h.stoat.stoatty_protocol = 12;
-        let (splices, _) = strip_frames(&frame(&mut h, &mut rx));
-        assert_eq!(
-            splices,
-            [(strip_id(&h), 0, held as u32, wire_lines(&mut h, 0..held))]
-        );
     }
 
     /// Turning syntax colors off sends every line again, since it recolors

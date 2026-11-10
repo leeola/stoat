@@ -2283,11 +2283,14 @@ pub(crate) fn resolve_diff_tints(theme: &crate::theme::Theme) -> Option<DiffTint
 /// Returns the palette of a diff screen's scroll overview, `palette` with
 /// every class but the row marks in `ground`.
 ///
-/// The overview shows each row's change or diagnostic mark and none of its
-/// text. Its strip lays the mark lane over the cell's left half and the text's
-/// first columns over the right half, so those columns take the strip's own
-/// color and vanish. `palette` is the class table's palette at some fade, and
-/// `ground` the strip's color at the same fade.
+/// The overview shows each row's change lane and none of its text. Its strip
+/// lays the lane over the cell's left half and the text's first columns over
+/// the right half. Those columns take the strip's own color and vanish. The
+/// row tint keeps the lane's class, so it shows faintly where those columns
+/// hold no text. A diagnostic's tick lies past the strip's columns.
+///
+/// `palette` is the class table's palette at some fade, and `ground` the
+/// strip's color at the same fade.
 ///
 /// The changes view's file headers take the ground as well. Each one is a bar
 /// across the whole strip, and the overview marks rows, not file boundaries.
