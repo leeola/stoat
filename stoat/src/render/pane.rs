@@ -5,6 +5,7 @@ use crate::{
     buffer_registry::{BufferRegistry, ReadOnly},
     diff_changes::{DiffChangesId, DiffChangesState},
     diff_map::MarkKind,
+    display_map::FoldScope,
     editor_state::{EditorId, EditorState},
     minimap::LANE_WIDTH,
     pane::{Divider, DividerOrientation, FocusTarget, Pane, PaneTree, Placement, View},
@@ -1252,7 +1253,7 @@ pub(crate) fn status_row(
     editors: &mut SlotMap<EditorId, EditorState>,
     buffers: &BufferRegistry,
     terms: &SlotMap<TermId, TermSession>,
-    changes: &SlotMap<DiffChangesId, DiffChangesState>,
+    changes: &mut SlotMap<DiffChangesId, DiffChangesState>,
 ) -> StatusRow {
     if area.width == 0 || area.height == 0 || matches!(pane.view, View::Commits(_)) {
         return StatusRow::default();
@@ -1341,7 +1342,7 @@ pub(crate) fn pane_status_cells(
     editors: &mut SlotMap<EditorId, EditorState>,
     buffers: &BufferRegistry,
     terms: &SlotMap<TermId, TermSession>,
-    changes: &SlotMap<DiffChangesId, DiffChangesState>,
+    changes: &mut SlotMap<DiffChangesId, DiffChangesState>,
     badge: Option<u32>,
 ) -> PaneStatusCells {
     let sides = sides_layout(view, content, frame, editors);
@@ -1986,8 +1987,12 @@ fn status_message_style(base_style: Style, theme: &crate::theme::Theme) -> Style
 /// target of a diff. A split row is two runs. The lead segments fill the base
 /// half, and the trailing ones fill the target half. A diff's row leaves out
 /// the workspace name, the file name, and the staged label, since the tab
-/// names the file, and its lead names the hunk the cursor stands in. A changes
-/// view's lead then counts its stack, as [`stack_summary`] describes.
+/// names the file, and its lead names the hunk the cursor stands in.
+///
+/// A changes view's lead names the Scope under the cursor before the hunk. The
+/// Scope takes the room that the rest of the lead and the side names in its
+/// run leave. After the hunk, the lead counts the stack, as [`stack_summary`]
+/// describes.
 #[allow(clippy::too_many_arguments)]
 fn status_segments(
     view: &View,
@@ -1998,7 +2003,7 @@ fn status_segments(
     editors: &mut SlotMap<EditorId, EditorState>,
     buffers: &BufferRegistry,
     terms: &SlotMap<TermId, TermSession>,
-    changes: &SlotMap<DiffChangesId, DiffChangesState>,
+    changes: &mut SlotMap<DiffChangesId, DiffChangesState>,
     badge_rect: &mut Option<Rect>,
 ) -> Vec<StatusRun> {
     let theme = frame.theme;
@@ -2037,6 +2042,10 @@ fn status_segments(
     let conflict = frame
         .conflict_position
         .filter(|_| is_focused && frame.screen == Some("conflict"));
+    // A changes view names the Scope under its cursor after the screen label.
+    // The Scope takes the room that the rest of the lead leaves, so it goes in
+    // at this index after the rest is in.
+    let mut scope_at = None;
     let mut chip_end = None;
     if is_focused {
         let (label, mode_bg) = frame.mode_label;
@@ -2092,6 +2101,9 @@ fn status_segments(
                     format!(" {screen_label} "),
                     lead_style.fg(screen_color),
                 );
+                if let View::DiffChanges(id) = view {
+                    scope_at = Some((*id, left.len()));
+                }
             }
             if let Some(position) = frame.hunk_position.as_ref().filter(|_| sides.is_some()) {
                 let at = position
@@ -2183,6 +2195,35 @@ fn status_segments(
     if let Some(colors) = colors {
         let path = status.buffer_id.and_then(|id| buffers.path_for(id));
         let (base_name, target_name) = diff_sides_for(path, frame);
+        let scope = scope_at.and_then(|(id, at)| {
+            let scope = changes.get_mut(id)?.cursor_scope(editors, buffers)?;
+            Some((at, scope))
+        });
+        if let Some((at, scope)) = scope {
+            let pair_width = |side: DiffSideColors, mark: char, name: &str| -> u16 {
+                side.pair(mark, name, lead_style)
+                    .iter()
+                    .map(|(text, _)| text.chars().count() as u16)
+                    .sum()
+            };
+            // A split row's target pair packs in the target half, so only the
+            // base pair shares the lead's run.
+            let names = match split {
+                Some(_) => pair_width(colors.base, '\u{2212}', base_name),
+                None => {
+                    pair_width(colors.base, '\u{2212}', base_name)
+                        + pair_width(colors.target, '+', target_name)
+                },
+            };
+            let room = lead_end.saturating_sub(cursor).saturating_sub(names);
+            let runs = scope_runs(&scope, room, lead_style, theme);
+            let width: u16 = runs
+                .iter()
+                .map(|(text, _)| text.chars().count() as u16)
+                .sum();
+            cursor = cursor.saturating_add(width).min(lead_end);
+            left.splice(at..at, runs);
+        }
         match split {
             // The trailing segments pack against the target half's lead from
             // here, since the base half's run ends at the divider.
@@ -2464,6 +2505,38 @@ fn stack_summary(state: &DiffChangesState, buffers: &BufferRegistry) -> Vec<Stri
         .collect();
     std::iter::once(format!("{files} {noun}"))
         .chain((!lines.is_empty()).then(|| lines.join(" ")))
+        .collect()
+}
+
+/// The runs that name `scope` in a changes view's status row, fitted to
+/// `room` cells with a pad cell at each side.
+///
+/// The parts are the ones a fold row's chip shows, each in `style` with its
+/// role's foreground from `theme`. No runs show where not even the innermost
+/// item fits.
+fn scope_runs(
+    scope: &FoldScope,
+    room: u16,
+    style: Style,
+    theme: &crate::theme::Theme,
+) -> Vec<StatusSeg> {
+    let parts = crate::diff_changes::scope_parts(
+        scope,
+        room.saturating_sub(2).saturating_mul(16),
+        FULL_CELL_SCALE,
+    );
+    let last = parts.len().saturating_sub(1);
+    parts
+        .into_iter()
+        .enumerate()
+        .map(|(index, part)| {
+            let lead = if index == 0 { " " } else { "" };
+            let trail = if index == last { " " } else { "" };
+            (
+                format!("{lead}{}{trail}", part.text),
+                tinted(style, theme, part.role.theme_scope()),
+            )
+        })
         .collect()
 }
 
@@ -4991,6 +5064,66 @@ mod tests {
                  tree 1:1",
                 "NOR changes hunk - / 1 \u{b7} 1 file \u{b7} +2 \u{2212} HEAD + working tree 1:1",
             ],
+        );
+    }
+
+    /// A changes view's status row names the Scope of the cursor's row after
+    /// the screen label, each part in its role's color. A row too narrow for
+    /// the whole chain drops items from the chain's middle, and the base
+    /// side's name keeps its place.
+    #[test]
+    fn the_changes_view_bar_names_the_scope_under_the_cursor() {
+        let base =
+            "mod outer {\n    impl Theme {\n        fn panel() -> u32 {\n            1\n        \
+                    }\n    }\n}\n";
+        let open = |width: u16| {
+            let mut h = crate::test_harness::TestHarness::with_size(width, 12);
+            h.stage_review_scenario("/repo", &[("a.rs", base, &base.replacen('1', "2", 1))]);
+            h.open_file(Path::new("/repo/a.rs"));
+            h.cover_with_diff_changes(false);
+            h.settle();
+            // The paint asks for the parse, and the next paint reads it.
+            h.render_composited();
+            for _ in 0..2 {
+                h.stoat.drive_background();
+                h.settle();
+            }
+            h.type_keys("] g");
+            let buf = h.render_composited();
+            (h, buf)
+        };
+        let text = |buf: &Buffer| {
+            let row = bar_row(buf).replace('─', " ");
+            row.split_whitespace().collect::<Vec<_>>().join(" ")
+        };
+
+        let (wide, buf) = open(200);
+        let y = buf.area.height - 1;
+        let symbols: Vec<&str> = (0..buf.area.width).map(|x| buf[(x, y)].symbol()).collect();
+        let fg_at = |word: &str| {
+            let x = symbols
+                .windows(word.chars().count())
+                .position(|cells| cells.concat() == word)?;
+            Some(buf[(x as u16, y)].fg)
+        };
+        let theme = |scope: &str| wide.stoat.theme.get(scope).fg;
+
+        let tail = "hunk 1 / 1 \u{b7} 1 file \u{b7} +1 \u{2212}1 \u{2212} HEAD + working tree 4:1";
+        assert_eq!(
+            (
+                text(&buf),
+                text(&open(148).1),
+                [fg_at("mod"), fg_at("outer"), fg_at("\u{203a}")],
+            ),
+            (
+                format!("NOR changes mod outer \u{203a} impl Theme \u{203a} fn panel {tail}"),
+                format!("NOR changes \u{2026} \u{203a} fn panel {tail}"),
+                [
+                    theme(crate::theme::scope::DIFF_SCOPE_KEYWORD),
+                    theme(crate::theme::scope::DIFF_SCOPE_NAME),
+                    theme(crate::theme::scope::DIFF_SCOPE_SEPARATOR),
+                ],
+            ),
         );
     }
 

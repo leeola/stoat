@@ -30,6 +30,7 @@ use crate::{
     multi_buffer::MultiBufferSnapshot,
     pane::View,
     render,
+    theme::scope,
     workspace::{diff::DiffBase, Workspace},
 };
 use ratatui::layout::Rect;
@@ -149,6 +150,19 @@ pub(crate) struct DiffChangesState {
     /// A selection step patches the page that the cursor left, so that page
     /// sheds the old selection even when no composite reads it.
     pub last_cursor_row: Option<usize>,
+    /// The Scope that [`Self::cursor_scope`] last read, which it answers again
+    /// while the cursor's row and the parse hold.
+    pub scope_cache: Option<CursorScope>,
+}
+
+/// The Scope of the cursor's row in one excerpt, with the row and the parse
+/// it was read from.
+pub(crate) struct CursorScope {
+    editor: EditorId,
+    row: u32,
+    /// The syntax version of the parse the chain was read from.
+    syntax: u64,
+    scope: Arc<FoldScope>,
 }
 
 /// One changed file in a changes view's stack.
@@ -376,6 +390,19 @@ impl ScopePart {
         Self {
             text: text.into(),
             role,
+        }
+    }
+}
+
+impl ScopeRole {
+    /// The theme scope whose foreground colors a part of this role.
+    pub(crate) fn theme_scope(self) -> &'static str {
+        match self {
+            Self::Keyword => scope::DIFF_SCOPE_KEYWORD,
+            Self::Name => scope::DIFF_SCOPE_NAME,
+            Self::Separator => scope::DIFF_SCOPE_SEPARATOR,
+            Self::Added => scope::DIFF_ADDED,
+            Self::Removed => scope::DIFF_DELETED,
         }
     }
 }
@@ -617,6 +644,64 @@ impl DiffChangesState {
                 (added + stats.added, removed + stats.removed)
             })
     }
+
+    /// The Scope of the row under the focused excerpt's cursor, which the
+    /// status row names.
+    ///
+    /// The chain is the one at the row's first character, so every column of
+    /// a row names the same items. While the parse lags an edit, the Scope read
+    /// before the edit holds. The status row thus keeps the name between a
+    /// keystroke and the parse after it.
+    ///
+    /// `None` for a language with no outline query, and while the buffer has
+    /// no parse.
+    pub(crate) fn cursor_scope(
+        &mut self,
+        editors: &mut SlotMap<EditorId, EditorState>,
+        buffers: &BufferRegistry,
+    ) -> Option<Arc<FoldScope>> {
+        let excerpt = self.focused_excerpt()?;
+        let (editor_id, buffer_id) = (excerpt.editor_id, excerpt.buffer_id);
+        let editor = editors.get_mut(editor_id)?;
+        let row = cursor_point(editor).row;
+        let language = buffers.language_for(buffer_id)?;
+        let query = language.outline_query()?;
+        let syntax = buffers.syntax(buffer_id)?;
+
+        let held = self
+            .scope_cache
+            .as_ref()
+            .filter(|held| held.editor == editor_id);
+        let snapshot = editor.display_map.snapshot();
+        let buffer = snapshot.buffer_snapshot();
+        // A parse of older text puts its items at the wrong bytes.
+        if syntax.version != buffer.version() {
+            return held.map(|held| held.scope.clone());
+        }
+        if let Some(held) = held.filter(|held| held.row == row && held.syntax == syntax.version) {
+            return Some(held.scope.clone());
+        }
+
+        let rope = buffer.rope();
+        let scope = Arc::new(FoldScope {
+            segments: scope_chain(
+                query,
+                syntax.tree.root_node(),
+                rope,
+                first_text_byte(rope, row),
+            ),
+            split: None,
+            end_of_file: false,
+            mark: ScopeMark::None,
+        });
+        self.scope_cache = Some(CursorScope {
+            editor: editor_id,
+            row,
+            syntax: syntax.version,
+            scope: scope.clone(),
+        });
+        Some(scope)
+    }
 }
 
 impl Default for DiffChangesState {
@@ -637,6 +722,7 @@ impl Default for DiffChangesState {
             held_screen_row: None,
             followed_cursor: None,
             last_cursor_row: None,
+            scope_cache: None,
         }
     }
 }
@@ -3161,6 +3247,74 @@ fn hint_width() -> u32 {
                 true,
                 Point::new(0, 0)
             ),
+        );
+    }
+
+    /// The Scope of the cursor's row follows the row. It holds while the parse
+    /// lags an edit, and reads again once a parse of the edited text lands.
+    #[test]
+    fn the_cursor_scope_holds_until_a_parse_of_the_edit_lands() {
+        let base =
+            "mod outer {\n    impl Theme {\n        fn panel() -> u32 {\n            1\n        \
+                    }\n    }\n}\n";
+        let mut h = TestHarness::with_size(100, 24);
+        h.stage_review_scenario("/repo", &[("a.rs", base, &base.replacen('1', "2", 1))]);
+        stacked(&mut h);
+        let parse = |h: &mut TestHarness| {
+            h.render_composited();
+            for _ in 0..2 {
+                h.stoat.drive_background();
+                h.settle();
+            }
+        };
+        let read = |h: &mut TestHarness, row: Option<u32>| {
+            let Workspace {
+                diff_changes_views,
+                editors,
+                buffers,
+                ..
+            } = h.stoat.active_workspace_mut();
+            let state = diff_changes_views
+                .values_mut()
+                .next()
+                .expect("a changes view");
+            if let Some(row) = row {
+                place_cursor(
+                    &mut editors[state.excerpts[0].editor_id],
+                    Point::new(row, 0),
+                );
+            }
+            state
+                .cursor_scope(editors, buffers)
+                .as_deref()
+                .map(scope_text)
+        };
+
+        parse(&mut h);
+        let body = read(&mut h, Some(3));
+        let header = read(&mut h, Some(1));
+        {
+            let ws = h.stoat.active_workspace();
+            let id = ws
+                .buffers
+                .id_for_path(Path::new("/repo/a.rs"))
+                .expect("an open buffer");
+            ws.buffers
+                .get(id)
+                .expect("buffer")
+                .write()
+                .expect("buffer poisoned")
+                .edit(0..0, "//\n");
+        }
+        let held = read(&mut h, None);
+        parse(&mut h);
+        let reread = read(&mut h, Some(4));
+
+        let function = Some("mod outer \u{203a} impl Theme \u{203a} fn panel".to_string());
+        let block = Some("mod outer \u{203a} impl Theme".to_string());
+        assert_eq!(
+            [body, header, held, reread],
+            [function.clone(), block.clone(), block, function],
         );
     }
 

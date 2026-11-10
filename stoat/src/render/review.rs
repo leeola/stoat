@@ -2016,16 +2016,7 @@ fn paint_scope_chip(
 ) {
     let chip = theme.get(s::DIFF_FOLD).bg;
     let muted = theme.get(s::UI_TEXT_MUTED).fg;
-    let fg = |role: ScopeRole| {
-        let scope = match role {
-            ScopeRole::Keyword => s::DIFF_SCOPE_KEYWORD,
-            ScopeRole::Name => s::DIFF_SCOPE_NAME,
-            ScopeRole::Separator => s::DIFF_SCOPE_SEPARATOR,
-            ScopeRole::Added => s::DIFF_ADDED,
-            ScopeRole::Removed => s::DIFF_DELETED,
-        };
-        theme.get(scope).fg.or(muted)
-    };
+    let fg = |role: ScopeRole| theme.get(role.theme_scope()).fg.or(muted);
     let room_len = room.end.saturating_sub(room.start);
 
     match rich {
