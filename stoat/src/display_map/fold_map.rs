@@ -1042,15 +1042,25 @@ fn fold_set_edits(old_folds: &SumTree<Fold>, new_folds: &SumTree<Fold>) -> Patch
     collect(&new_by_id, &old_by_id);
 
     changed.sort_by_key(|rows| rows.start);
-    let mut patch = Patch::default();
+    let mut merged: Vec<Range<u32>> = Vec::with_capacity(changed.len());
     for rows in changed {
-        patch.push(stoat_text::patch::Edit {
-            old: rows.clone(),
-            new: rows,
-        });
+        match merged.last_mut() {
+            // A fold that shrank or grew in place gives two ranges with one
+            // start, in either order. A range that meets the one before it
+            // therefore keeps the further end, not the later one.
+            Some(last) if rows.start <= last.end => last.end = last.end.max(rows.end),
+            _ => merged.push(rows),
+        }
     }
-    patch.consolidate();
-    patch
+    Patch::new(
+        merged
+            .into_iter()
+            .map(|rows| stoat_text::patch::Edit {
+                old: rows.clone(),
+                new: rows,
+            })
+            .collect(),
+    )
 }
 
 /// `rows` widened until no fold crosses either end of it.
@@ -2902,6 +2912,54 @@ mod tests {
         assert!(
             covered[0].start >= 100 && covered[0].end <= 103,
             "and it is the unfolded rows, got {covered:?}",
+        );
+    }
+
+    /// A fold that shrinks in place before one sync reports every row it gives
+    /// back.
+    ///
+    /// The unfold and the fold name the same start, so the smaller range nests
+    /// in the larger one. A merge that keeps the later end in place of the
+    /// further one reports the old fold's row alone, and every layer below the
+    /// fold map keeps the old row count.
+    #[test]
+    fn a_fold_shrunk_in_place_reports_the_rows_it_gives_back() {
+        let text: String = (0..60).map(|i| format!("line{i}\n")).collect();
+        let buffer = TextBuffer::with_text(BufferId::new(0), &text);
+        let multi_buffer = MultiBuffer::singleton(Arc::new(RwLock::new(buffer)));
+        let buffer_snapshot = multi_buffer.snapshot();
+        let (_, inlay_snapshot) = InlayMap::new(buffer_snapshot.clone());
+        let (mut fold_map, _) = FoldMap::new(inlay_snapshot.clone());
+        fold_map.sync(inlay_snapshot.clone(), &Patch::empty(), None);
+
+        let rope = buffer_snapshot.rope();
+        let through = |last_row: u32| {
+            0..rope.point_to_offset(stoat_text::Point::new(last_row, rope.line_len(last_row)))
+        };
+        let fold = |fold_map: &mut FoldMap, offsets: Range<usize>| {
+            let start = buffer_snapshot.anchor_at(offsets.start, Bias::Right);
+            let end = buffer_snapshot.anchor_at(offsets.end, Bias::Left);
+            fold_map.fold(
+                vec![start..end],
+                FoldPlaceholder::default(),
+                &buffer_snapshot,
+            );
+        };
+        fold(&mut fold_map, through(36));
+        let (old, _) = fold_map.sync(inlay_snapshot.clone(), &Patch::empty(), None);
+
+        fold_map.unfold(vec![through(36)], &buffer_snapshot);
+        fold(&mut fold_map, through(30));
+        let (new, edits) = fold_map.sync(inlay_snapshot, &Patch::empty(), None);
+        assert_eq!(
+            (edits.edits().to_vec(), new.line_count() - old.line_count()),
+            (
+                vec![stoat_text::patch::Edit {
+                    old: 0..1,
+                    new: 0..7
+                }],
+                6
+            ),
         );
     }
 
