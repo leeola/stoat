@@ -33,7 +33,7 @@ use ratatui::layout::Rect;
 use std::{path::PathBuf, sync::Arc};
 use stoat_action::OpenFile;
 use stoat_config::MinimapMode;
-use stoatty_protocol::command;
+use stoatty_protocol::command::{self, LineSummary, MinimapRun};
 use tokio::sync::mpsc::UnboundedReceiver;
 
 /// The open help modal's layout, sized from the same content and zoom the
@@ -105,6 +105,61 @@ pub(crate) fn drain_apc(rx: &mut UnboundedReceiver<Vec<u8>>) -> Vec<command::Com
         cmds.extend(command::decode_stream(&batch));
     }
     cmds
+}
+
+/// `store` with the lengths and the splices of `commands` to minimap content
+/// `content_id` applied, as the terminal applies them.
+pub(crate) fn apply_minimap(
+    store: &mut Vec<LineSummary>,
+    content_id: u32,
+    commands: &[command::Command],
+) {
+    for cmd in commands {
+        match cmd {
+            command::Command::MinimapLen(len) if len.content_id == content_id => {
+                store.resize(len.lines as usize, LineSummary::default());
+            },
+            command::Command::MinimapLines(splice) if splice.content_id == content_id => {
+                let start = splice.start as usize;
+                store.splice(start..start + splice.removed as usize, splice.lines.clone());
+            },
+            _ => {},
+        }
+    }
+}
+
+/// The minimap strips `commands` declare, as their strip id, left column,
+/// width, and content id.
+pub(crate) fn minimap_declarations(commands: &[command::Command]) -> Vec<(u32, u16, u16, u32)> {
+    commands
+        .iter()
+        .filter_map(|cmd| match cmd {
+            command::Command::Minimap(strip) => {
+                Some((strip.strip_id, strip.left, strip.width, strip.content_id))
+            },
+            _ => None,
+        })
+        .collect()
+}
+
+/// The rows of a minimap `store` that carry runs, each beside its index.
+pub(crate) fn marked_rows(store: &[LineSummary]) -> Vec<(usize, Vec<MinimapRun>)> {
+    store
+        .iter()
+        .enumerate()
+        .filter(|(_, row)| !row.is_empty())
+        .map(|(at, row)| (at, row.to_vec()))
+        .collect()
+}
+
+/// A Coverage Rail row's mark in `class`, two of the rail's three columns.
+pub(crate) fn rail_mark(class: u8) -> Vec<MinimapRun> {
+    vec![MinimapRun {
+        start_col: 0,
+        len: 2,
+        class,
+        weight: 255,
+    }]
 }
 
 /// Open a buffer long enough to fill a per-pane minimap strip, with the strip's

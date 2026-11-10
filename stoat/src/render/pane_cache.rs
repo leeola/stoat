@@ -138,6 +138,11 @@ pub(crate) struct PaneCacheKey {
     /// The minimap content published for this pane's buffer, which the strip
     /// paints from and which no display version covers.
     pub(crate) minimap_content_id: u32,
+    /// The Coverage Rail published beside the strip, which the paint declares
+    /// in the strip's last cell. The minimap emit after the paint that sized
+    /// the strip makes the rail, so no display version covers it either.
+    /// `None` while the strip shows no rail.
+    pub(crate) minimap_rail_id: Option<u32>,
     /// Whether a minimap strip is drawn at all.
     pub(crate) minimap_enabled: bool,
     /// Whether the pane holds the focus. A focused editor numbers its lines
@@ -481,11 +486,11 @@ pub(crate) fn pane_cache_key(
         false => (0, 0, false, false),
     };
 
-    let minimap_content_id = frame
+    let (minimap_content_id, minimap_rail_id) = frame
         .minimap_chrome
         .as_ref()
         .and_then(|chrome| chrome.editor_strip(editor_id, editor))
-        .map_or(0, |(content_id, _)| content_id);
+        .unwrap_or((0, None));
 
     Some(PaneCacheKey {
         buffer,
@@ -503,6 +508,7 @@ pub(crate) fn pane_cache_key(
         diff_view: editor.diff_view,
         diff_dials,
         minimap_content_id,
+        minimap_rail_id,
         minimap_enabled: frame.minimap_enabled,
         focused: is_focused,
         selections: Some(editor.selections.identity()),
@@ -577,6 +583,7 @@ fn terminal_cache_key(
         diff_view: false,
         diff_dials: (0, 0, false, false),
         minimap_content_id: 0,
+        minimap_rail_id: None,
         minimap_enabled: false,
         focused: is_focused,
         selections: None,
@@ -715,6 +722,10 @@ fn stack_cache_key(
             .as_ref()
             .and_then(|chrome| chrome.diff_changes_content)
             .unwrap_or(0),
+        minimap_rail_id: frame
+            .minimap_chrome
+            .as_ref()
+            .and_then(|chrome| chrome.diff_changes_rail),
         minimap_enabled: frame.minimap_enabled,
         focused: is_focused,
         selections: match frame.terminal_cursor_editor == Some(editor_id)
@@ -841,6 +852,7 @@ mod tests {
             diff_view: false,
             diff_dials: (0, 0, false, false),
             minimap_content_id: 0,
+            minimap_rail_id: None,
             minimap_enabled: false,
             focused: false,
             selections: Some(0),
@@ -863,7 +875,7 @@ mod tests {
     #[test]
     fn each_field_tells_two_keys_apart() {
         let base = key(PaintVersion::default());
-        let moved: [(&str, PaneCacheKey); 24] = [
+        let moved: [(&str, PaneCacheKey); 25] = [
             (
                 "buffer",
                 PaneCacheKey {
@@ -959,6 +971,13 @@ mod tests {
                 "minimap_content_id",
                 PaneCacheKey {
                     minimap_content_id: 1,
+                    ..base
+                },
+            ),
+            (
+                "minimap_rail_id",
+                PaneCacheKey {
+                    minimap_rail_id: Some(1),
                     ..base
                 },
             ),

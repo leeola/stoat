@@ -1,8 +1,9 @@
 //! The rows a strip holds when each of its rows stands for a band of lines.
 
 use super::{
-    density::{self, Density},
-    LineRuns,
+    band,
+    density::{self, Density, Tier},
+    rail_row, ClassTable, LineRuns, RowMark,
 };
 use std::ops::Range;
 
@@ -121,9 +122,163 @@ pub(super) struct RailStore {
 }
 
 /// The rail frames a sync leaves for the emitter to send on the rail's id.
+#[derive(PartialEq, Debug)]
 pub(super) enum RailUpdate {
     /// Size the rail's store to these rows and replace every one.
     Rows(Vec<LineRuns>),
     /// Retire the rail's store.
     Drop,
+}
+
+/// The Coverage Rail of a strip whose rows a pass over every row derives, as
+/// a diff view's strip and the changes view's strip derive theirs.
+///
+/// The pass reads the mark of each row it summarizes, so the rail folds those
+/// marks rather than walk the rows again. The rail goes out whole at the end
+/// of the pass, and only when its lanes differ from the held ones, so a pass
+/// that only a parse started sends no rail.
+pub(super) struct PassRail {
+    /// The content id of the rail's store on the terminal.
+    id: u32,
+    /// The lanes of the rail rows the terminal holds, or `None` while it holds
+    /// no rail store.
+    held: Option<Vec<Option<u8>>>,
+    /// The strip's rows that one rail row stands for.
+    rows_per_row: u32,
+    /// The mark of each rail row from the rows the pass in flight folded so
+    /// far, or `None` while no pass builds the rail.
+    building: Option<Vec<RowMark>>,
+}
+
+impl PassRail {
+    pub(super) fn new(id: u32) -> Self {
+        Self {
+            id,
+            held: None,
+            rows_per_row: 1,
+            building: None,
+        }
+    }
+
+    /// The rail's content id while the terminal holds its store, which the
+    /// paint declares in the strip's last cell.
+    pub(super) fn held_id(&self) -> Option<u32> {
+        self.held.as_ref().map(|_| self.id)
+    }
+
+    /// Start to fold a pass over `total` rows at `density`, and answer the
+    /// frame that drops a held rail when the density shows none.
+    ///
+    /// A density that fits its strip shows no rail, and neither does one that
+    /// keeps a row per row, since its rows carry no band marks.
+    pub(super) fn start(&mut self, density: Density, total: u32) -> Option<(u32, RailUpdate)> {
+        if density.fits || density.tier == Tier::Line {
+            return self.stop();
+        }
+        self.rows_per_row = density.whole_lines_per_row;
+        let rows = density::rows(total, self.rows_per_row) as usize;
+        self.building = Some(vec![RowMark::NONE; rows]);
+        None
+    }
+
+    /// Fold `marks`, the marks of the rows from row `first` on, into the rail
+    /// rows that hold those rows.
+    pub(super) fn note(&mut self, first: u32, marks: &[RowMark], table: &ClassTable) {
+        let Some(building) = self.building.as_mut() else {
+            return;
+        };
+        for (row, &mark) in (first..).zip(marks) {
+            if let Some(slot) = building.get_mut(density::row_of(row, self.rows_per_row) as usize) {
+                *slot = band::band_mark([*slot, mark].into_iter(), table);
+            }
+        }
+    }
+
+    /// End the pass, and answer the whole rail when its lanes differ from the
+    /// held ones.
+    pub(super) fn finish(&mut self) -> Option<(u32, RailUpdate)> {
+        let lanes: Vec<Option<u8>> = self
+            .building
+            .take()?
+            .into_iter()
+            .map(|mark| mark.lane)
+            .collect();
+        if self.held.as_ref() == Some(&lanes) {
+            return None;
+        }
+        let rows = lanes.iter().map(|&lane| rail_row(lane)).collect();
+        self.held = Some(lanes);
+        Some((self.id, RailUpdate::Rows(rows)))
+    }
+
+    /// Stop the rail, and answer the frame that drops its store when the
+    /// terminal holds one.
+    pub(super) fn stop(&mut self) -> Option<(u32, RailUpdate)> {
+        self.building = None;
+        self.held.take().map(|_| (self.id, RailUpdate::Drop))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{PassRail, RailUpdate};
+    use crate::{
+        minimap::{
+            density::{Density, Tier},
+            rail_row, ClassTable, EdgeClass, RowMark,
+        },
+        theme::Theme,
+    };
+
+    /// A pass at 4 rows a rail row folds two slices that split rail row 1
+    /// into it, the added lane over the removed one. The same pass again sends
+    /// nothing, and a density that fits drops the rail.
+    #[test]
+    fn a_pass_folds_its_slices_into_rail_rows() {
+        let table = ClassTable::from_theme(&Theme::empty());
+        let lane = |kind| RowMark {
+            lane: Some(table.edge_class(kind)),
+            tick: None,
+        };
+        let (added, removed, none) = (
+            lane(EdgeClass::Added),
+            lane(EdgeClass::Removed),
+            RowMark::NONE,
+        );
+        let railed = Density {
+            lines_per_row: 2,
+            tier: Tier::Fit,
+            fits: false,
+            whole_lines_per_row: 4,
+        };
+        let pass = |rail: &mut PassRail| {
+            rail.start(railed, 10);
+            rail.note(0, &[none, none, none, none, removed, none], &table);
+            rail.note(6, &[added, none, none, none], &table);
+            rail.finish()
+        };
+        let mut rail = PassRail::new(7);
+
+        assert_eq!(
+            (
+                pass(&mut rail),
+                pass(&mut rail),
+                rail.start(
+                    Density {
+                        fits: true,
+                        ..railed
+                    },
+                    10
+                ),
+            ),
+            (
+                Some((
+                    7,
+                    RailUpdate::Rows([None, added.lane, None].map(rail_row).to_vec())
+                )),
+                None,
+                Some((7, RailUpdate::Drop)),
+            ),
+        );
+    }
 }

@@ -186,6 +186,9 @@ pub(crate) struct MinimapChrome<'a> {
     /// every changes view pane's strip and the single band over a focused
     /// changes view show. `None` while the workspace holds no changes view.
     pub(crate) diff_changes_content: Option<u32>,
+    /// The Coverage Rail the changes view strip holds beside
+    /// [`Self::diff_changes_content`], `None` while the stack fits the strip.
+    pub(crate) diff_changes_rail: Option<u32>,
     /// Viewport-thumb fill color, rgba.
     pub(crate) thumb: [u8; 4],
     /// The class whose runs every strip draws as an Item Rule hairline, the
@@ -203,9 +206,10 @@ impl MinimapChrome<'_> {
     /// The content store that editor `editor_id`'s strip shows and the
     /// Coverage Rail beside it, or `None` before the store exists.
     ///
-    /// A diff view's strip shows the editor's display rows and takes no rail.
-    /// Any other editor's strip shows its buffer's lines, with the rail its
-    /// buffer's store holds while the file does not fit.
+    /// A diff view's strip shows the editor's display rows, with the rail its
+    /// strip holds while the display does not fit. Any other editor's strip
+    /// shows its buffer's lines, with the rail its buffer's store holds while
+    /// the file does not fit.
     pub(crate) fn editor_strip(
         &self,
         editor_id: EditorId,
@@ -215,7 +219,7 @@ impl MinimapChrome<'_> {
             true => self
                 .diff_view_strips
                 .get(&(self.workspace, editor_id))
-                .map(|strip| (strip.content_id(), None)),
+                .map(|strip| (strip.content_id(), strip.held_rail_id())),
             false => self
                 .content
                 .get(&(self.workspace, editor.buffer_id))
@@ -1283,6 +1287,10 @@ pub(crate) fn frame(
                 .diff_changes_strips
                 .get(&stoat.active_workspace)
                 .map(|strip| strip.content_id()),
+            diff_changes_rail: stoat
+                .diff_changes_strips
+                .get(&stoat.active_workspace)
+                .and_then(|strip| strip.held_rail_id()),
             thumb,
             rule_class: stoat.minimap_class_table.edge_class(EdgeClass::Rule),
             rail_ground: [gr, gg, gb, u8::MAX],
@@ -2533,14 +2541,17 @@ fn single_band_content<'a>(
 }
 
 /// The content id of the Coverage Rail the single band over `ws` shows in its
-/// last cell, `None` while the focused editor's strip fits, over a diff view,
+/// last cell, `None` while the focused editor's or changes view's strip fits,
 /// and over any other view.
 fn single_band_rail(ws: &Workspace, chrome: MinimapChrome<'_>) -> Option<u32> {
-    let View::Editor(editor_id) = ws.panes.pane(ws.panes.focus()).view else {
-        return None;
-    };
-    let editor = ws.editors.get(editor_id)?;
-    chrome.editor_strip(editor_id, editor)?.1
+    match ws.panes.pane(ws.panes.focus()).view {
+        View::Editor(editor_id) => {
+            let editor = ws.editors.get(editor_id)?;
+            chrome.editor_strip(editor_id, editor)?.1
+        },
+        View::DiffChanges(_) => chrome.diff_changes_rail,
+        _ => None,
+    }
 }
 
 /// Paint the window's status row, `row`, with the status of `pane`, and return

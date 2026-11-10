@@ -14,7 +14,7 @@ use crate::{
         WHEEL_BINDING_COOLDOWN,
     },
     buffer::BufferId,
-    diff_changes::{self, DiffChangesId},
+    diff_changes::{self, DiffChangesId, DiffChangesState},
     display_map::DisplaySnapshot,
     editor_state::{EditorId, EditorState, ScrollGlide},
     host::ClipboardKind,
@@ -36,6 +36,7 @@ use crate::{
 };
 use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
 use ratatui::layout::{Position, Rect};
+use slotmap::SlotMap;
 use std::ops::Range;
 use stoat_action::GitStatusOpen;
 use stoat_config::MinimapMode;
@@ -1123,6 +1124,9 @@ pub(crate) enum MinimapDrag {
     /// An editor's Coverage Rail, whose press eases the viewport to the line
     /// the rail shows under the pointer, at the rail's fold.
     Rail(EditorId),
+    /// A changes view's Coverage Rail, whose press lands the cursor on the
+    /// stack row the rail shows under the pointer, at the rail's fold.
+    DiffChangesRail(DiffChangesId),
 }
 
 /// Route a left press or drag over a pane's minimap strip to a scrub. Returns
@@ -1206,7 +1210,9 @@ fn minimap_strip_for(stoat: &Stoat, drag: MinimapDrag) -> Option<Rect> {
         MinimapDrag::Editor(editor_id) | MinimapDrag::Rail(editor_id) => {
             ws.editors.get(editor_id)?.minimap_rect
         },
-        MinimapDrag::DiffChanges(id) => ws.diff_changes_views.get(id)?.minimap_rect,
+        MinimapDrag::DiffChanges(id) | MinimapDrag::DiffChangesRail(id) => {
+            ws.diff_changes_views.get(id)?.minimap_rect
+        },
     }
 }
 
@@ -1217,6 +1223,9 @@ fn scrub_minimap(stoat: &mut Stoat, drag: MinimapDrag, strip: Rect, screen_row: 
         MinimapDrag::Editor(editor_id) => scrub_minimap_editor(stoat, editor_id, strip, screen_row),
         MinimapDrag::Rail(editor_id) => scrub_minimap_rail(stoat, editor_id, strip, screen_row),
         MinimapDrag::DiffChanges(id) => scrub_minimap_diff_changes(stoat, id, strip, screen_row),
+        MinimapDrag::DiffChangesRail(id) => {
+            scrub_minimap_diff_changes_rail(stoat, id, strip, screen_row)
+        },
     }
 }
 
@@ -1300,30 +1309,37 @@ fn scrub_minimap_editor(stoat: &mut Stoat, editor_id: EditorId, strip: Rect, scr
 }
 
 /// `drag` as a press on the Coverage Rail when `column` is the last of
-/// `strip`, the cell the rail takes while the editor's strip does not fit.
+/// `strip`, the cell the rail takes while the strip's rows do not fit.
 fn rail_drag(stoat: &Stoat, drag: MinimapDrag, strip: Rect, column: u16) -> MinimapDrag {
-    let MinimapDrag::Editor(editor_id) = drag else {
-        return drag;
+    let density = match drag {
+        MinimapDrag::Editor(editor_id) => stoat
+            .active_workspace()
+            .editors
+            .get(editor_id)
+            .and_then(|editor| editor.minimap_density),
+        MinimapDrag::DiffChanges(_) => stoat
+            .diff_changes_strips
+            .get(&stoat.active_workspace)
+            .map(|strip| strip.density)
+            .filter(|density| density.tier != Tier::Line),
+        MinimapDrag::Rail(_) | MinimapDrag::DiffChangesRail(_) => None,
     };
-    let railed = stoat
-        .active_workspace()
-        .editors
-        .get(editor_id)
-        .filter(|editor| !editor.diff_view)
-        .and_then(|editor| editor.minimap_density)
-        .is_some_and(|density| !density.fits);
-    match railed && strip.width > 1 && column == strip.x + strip.width - 1 {
-        true => MinimapDrag::Rail(editor_id),
-        false => drag,
+    let railed = density.is_some_and(|density| !density.fits);
+    if !railed || strip.width < 2 || column != strip.x + strip.width - 1 {
+        return drag;
+    }
+    match drag {
+        MinimapDrag::Editor(editor_id) => MinimapDrag::Rail(editor_id),
+        MinimapDrag::DiffChanges(id) => MinimapDrag::DiffChangesRail(id),
+        MinimapDrag::Rail(_) | MinimapDrag::DiffChangesRail(_) => drag,
     }
 }
 
 /// Ease `editor_id`'s viewport onto the line its Coverage Rail shows under
 /// `screen_row`, centered in the viewport.
 ///
-/// The rail holds the whole file at its own fold, so it fits its cell and
-/// never scrolls. The cell's middle rail row names a band, and the scrub lands
-/// on that band's middle line.
+/// A diff view's rail counts display rows, as its strip does, so its press
+/// lands on the display row itself.
 fn scrub_minimap_rail(stoat: &mut Stoat, editor_id: EditorId, strip: Rect, screen_row: u16) {
     let ws = &mut stoat.workspaces[stoat.active_workspace];
     let Some(editor) = ws.editors.get_mut(editor_id) else {
@@ -1335,14 +1351,26 @@ fn scrub_minimap_rail(stoat: &mut Stoat, editor_id: EditorId, strip: Rect, scree
 
     let snapshot = editor.display_map.snapshot();
     let viewport = editor.viewport_rows.unwrap_or(strip.height as u32).max(1);
+    let target = rail_target(strip, screen_row, fold.whole_lines_per_row);
+    match editor.diff_view {
+        true => scrub_to_display_row(editor, &snapshot, target, viewport),
+        false => scrub_to_line(editor, &snapshot, target, viewport),
+    }
+}
+
+/// The row a Coverage Rail in `strip` shows under `screen_row`, at
+/// `rows_per_row` of its strip's rows to a rail row.
+///
+/// The rail holds the whole file at its own fold, so it fits its cell and
+/// never scrolls. The cell's middle rail row names a band, and the target is
+/// that band's middle row.
+fn rail_target(strip: Rect, screen_row: u16, rows_per_row: u32) -> u32 {
     let cell = screen_row
         .saturating_sub(strip.y)
         .min(strip.height.saturating_sub(1));
     let lines_per_cell = u32::from(LINES_PER_CELL);
     let rail_row = u32::from(cell) * lines_per_cell + lines_per_cell / 2;
-    let rail_lines_per_row = fold.whole_lines_per_row;
-    let line = rail_row * rail_lines_per_row + rail_lines_per_row / 2;
-    scrub_to_line(editor, &snapshot, line, viewport);
+    rail_row * rows_per_row + rows_per_row / 2
 }
 
 /// Jump `editor`'s view so buffer line `line` of `snapshot` sits centered in a
@@ -1437,7 +1465,49 @@ fn scrub_minimap_diff_changes(stoat: &mut Stoat, id: DiffChangesId, strip: Rect,
             (density::band(band, per_row, total as u32).start + per_row / 2) as usize
         },
     };
-    let row = target.min(total - 1);
+    land_on_stack_row(state, editors, target.min(total - 1), total);
+}
+
+/// Put changes view `id`'s cursor on the stack row its Coverage Rail shows
+/// under `screen_row`, and scroll that row to the middle of the view.
+///
+/// The rail holds the whole stack at its own fold, as an editor's rail holds
+/// its file.
+fn scrub_minimap_diff_changes_rail(
+    stoat: &mut Stoat,
+    id: DiffChangesId,
+    strip: Rect,
+    screen_row: u16,
+) {
+    let density = stoat
+        .diff_changes_strips
+        .get(&stoat.active_workspace)
+        .map_or(Density::LINE, |strip| strip.density);
+    let Workspace {
+        diff_changes_views,
+        editors,
+        ..
+    } = &mut stoat.workspaces[stoat.active_workspace];
+    let Some(state) = diff_changes_views.get_mut(id) else {
+        return;
+    };
+    let total = diff_changes::layout_stack(state, editors);
+    if total == 0 {
+        return;
+    }
+
+    let target = rail_target(strip, screen_row, density.whole_lines_per_row) as usize;
+    land_on_stack_row(state, editors, target.min(total - 1), total);
+}
+
+/// Put `state`'s cursor on stack row `row` of its `total` rows, and scroll
+/// that row to the middle of the view, which stops at the last page.
+fn land_on_stack_row(
+    state: &mut DiffChangesState,
+    editors: &mut SlotMap<EditorId, EditorState>,
+    row: usize,
+    total: usize,
+) {
     diff_changes::select_row(state, editors, row);
     state.scroll = row
         .saturating_sub(state.viewport_rows / 2)

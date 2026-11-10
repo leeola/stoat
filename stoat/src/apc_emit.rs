@@ -47,7 +47,6 @@ use std::{
 };
 use stoat_config::{LineNumbers, WrapMode};
 use stoat_widgets::{
-    minimap,
     pool::{self, MinimapWindowInputs, PageVersions, Refill, SmoothScrollState},
     ApcScene,
 };
@@ -1407,41 +1406,38 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
 
             // A strip that does not fit scrolls, and its Coverage Rail shows
             // the whole file, so the rail's thumb covers the rows the strip
-            // shows. Those start where the terminal scrolls the strip to and
-            // run its height, converted from the strip's fold to the rail's. A
-            // diff view's strip takes no rail.
+            // shows. A diff view's rail counts display rows, as its strip does.
             let strip = match single_minimap {
                 true => single_band,
                 false => editor.minimap_rect,
             };
-            if let Some(density) = density.filter(|density| !density.fits && !diff_view)
+            if let Some(density) = density.filter(|density| !density.fits)
                 && let Some(strip) = strip
             {
                 let strip_rows = u32::from(strip.height) * u32::from(LINES_PER_CELL);
-                let file_lines = snapshot.buffer_line_count();
                 stoat.smooth_scroll.emit_minimap_view(
                     &mut out,
                     rail_strip_id(strip_id),
                     region.pool,
                     inputs,
                     || {
-                        let (top, visible) = minimap_view_window(&snapshot, scroll_offset, rows);
-                        let (top_256, visible_256) = density::thumb_rows_256(
-                            (top * 256.0) as u64,
+                        let ((top, visible), file_lines) = match diff_view {
+                            true => (
+                                diff_view_window(&snapshot, scroll_offset, rows),
+                                snapshot.line_count(),
+                            ),
+                            false => (
+                                minimap_view_window(&snapshot, scroll_offset, rows),
+                                snapshot.buffer_line_count(),
+                            ),
+                        };
+                        density::rail_window(
+                            top,
                             u32::from(visible),
-                            density.lines_per_row,
+                            file_lines,
+                            density,
+                            strip_rows,
                             thumb_min_rows,
-                        );
-                        let strip_top = minimap::minimap_top(
-                            density::rows(file_lines, density.lines_per_row) as f32,
-                            strip_rows as f32,
-                            top_256 as f32 / 256.0,
-                            visible_256 as f32 / 256.0,
-                        );
-                        (
-                            strip_top * density.lines_per_row as f32
-                                / density.whole_lines_per_row as f32,
-                            strip_rows * density.lines_per_row * 256 / density.whole_lines_per_row,
                         )
                     },
                 );

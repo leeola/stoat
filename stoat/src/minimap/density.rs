@@ -7,6 +7,7 @@
 //! rows tall, and a file past the cap scrolls on the strip.
 
 use std::ops::Range;
+use stoat_widgets::minimap;
 
 /// The most lines a row stands for in the [`Tier::Fit`] tier. Past it, a row
 /// draws the outline of its band in the [`Tier::Shape`] tier.
@@ -116,6 +117,41 @@ pub(crate) fn thumb_rows_256(
         u32::try_from(visible)
             .unwrap_or(u32::MAX)
             .max(thumb_min_rows.saturating_mul(256)),
+    )
+}
+
+/// The thumb of the Coverage Rail beside a strip that does not fit, its top
+/// in rail rows and its height in 1/256ths of a rail row, for a viewport of
+/// `view_lines` lines whose top is line `view_top` of a file of `file_lines`
+/// lines.
+///
+/// The strip scrolls to the row [`minimap::minimap_top`] places for the
+/// viewport's thumb, and the rail holds the whole file, so the rail's thumb
+/// covers the lines of the strip's rows from that row on, at the rail's fold.
+pub(crate) fn rail_window(
+    view_top: f32,
+    view_lines: u32,
+    file_lines: u32,
+    density: Density,
+    strip_rows: u32,
+    thumb_min_rows: u32,
+) -> (f32, u32) {
+    let (lines_per_row, whole) = (density.lines_per_row, density.whole_lines_per_row.max(1));
+    let (top_256, visible_256) = thumb_rows_256(
+        (view_top * 256.0) as u64,
+        view_lines,
+        lines_per_row,
+        thumb_min_rows,
+    );
+    let strip_top = minimap::minimap_top(
+        rows(file_lines, lines_per_row) as f32,
+        strip_rows as f32,
+        top_256 as f32 / 256.0,
+        visible_256 as f32 / 256.0,
+    );
+    (
+        strip_top * lines_per_row as f32 / whole as f32,
+        strip_rows * lines_per_row * 256 / whole,
     )
 }
 

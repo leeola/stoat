@@ -70,13 +70,16 @@ pub(crate) fn ensure_minimap_content_ids(stoat: &mut Stoat) {
     } = stoat;
     let ws = &workspaces[ws_id];
 
+    // Each strip takes a second id for the Coverage Rail it shows when its rows
+    // do not fit, since a sync has no way to the counter.
     for (_, pane) in ws.panes.split_panes() {
         let editor_id = match pane.view {
             View::Editor(editor_id) => editor_id,
             View::DiffChanges(_) => {
                 if let Entry::Vacant(slot) = diff_changes_strips.entry(ws_id) {
-                    slot.insert(DiffChangesStrip::new(*minimap_next_content_id));
-                    *minimap_next_content_id += 1;
+                    let id = *minimap_next_content_id;
+                    slot.insert(DiffChangesStrip::new(id, id + 1));
+                    *minimap_next_content_id += 2;
                 }
                 continue;
             },
@@ -87,13 +90,12 @@ pub(crate) fn ensure_minimap_content_ids(stoat: &mut Stoat) {
         };
         if editor.diff_view {
             if let Entry::Vacant(slot) = diff_view_strips.entry((ws_id, editor_id)) {
-                slot.insert(DiffViewStrip::new(*minimap_next_content_id));
-                *minimap_next_content_id += 1;
+                let id = *minimap_next_content_id;
+                slot.insert(DiffViewStrip::new(id, id + 1));
+                *minimap_next_content_id += 2;
             }
             continue;
         }
-        // The content takes a second id for the Coverage Rail its strip shows
-        // when the file does not fit, since a sync has no way to the counter.
         if let Entry::Vacant(slot) = minimap_content.entry((ws_id, editor.buffer_id)) {
             let mut content =
                 crate::minimap::MinimapContent::new(*minimap_next_content_id, executor.clone());
@@ -291,12 +293,15 @@ pub(crate) fn emit_minimap(stoat: &mut Stoat) {
         .collect();
     for key in retired {
         if let Some(strip) = stoat.diff_view_strips.remove(&key) {
-            stoatty_protocol::command::encode_minimap_drop_into(
-                &mut out,
-                &stoatty_protocol::command::MinimapDropCommand {
-                    content_id: strip.content_id(),
-                },
-            );
+            for content_id in [Some(strip.content_id()), strip.held_rail_id()]
+                .into_iter()
+                .flatten()
+            {
+                stoatty_protocol::command::encode_minimap_drop_into(
+                    &mut out,
+                    &stoatty_protocol::command::MinimapDropCommand { content_id },
+                );
+            }
         }
     }
     // A parked stack keeps the strip, so the flip back finds the lines of
@@ -304,12 +309,15 @@ pub(crate) fn emit_minimap(stoat: &mut Stoat) {
     let ws = &stoat.workspaces[ws_id];
     let stackless = ws.diff_changes_views.is_empty() && ws.parked_diff_changes.is_none();
     if stackless && let Some(strip) = stoat.diff_changes_strips.remove(&ws_id) {
-        stoatty_protocol::command::encode_minimap_drop_into(
-            &mut out,
-            &stoatty_protocol::command::MinimapDropCommand {
-                content_id: strip.content_id(),
-            },
-        );
+        for content_id in [Some(strip.content_id()), strip.held_rail_id()]
+            .into_iter()
+            .flatten()
+        {
+            stoatty_protocol::command::encode_minimap_drop_into(
+                &mut out,
+                &stoatty_protocol::command::MinimapDropCommand { content_id },
+            );
+        }
     }
 
     if !out.is_empty() {
@@ -463,8 +471,24 @@ fn sync_minimap_strip(
         }
     }
 
-    match content.take_rail_update() {
-        Some((rail_id, RailUpdate::Rows(rows))) => {
+    if let Some((rail_id, update)) = content.take_rail_update() {
+        encode_rail_update(out, rail_id, update, weighted);
+    }
+}
+
+/// Append the frames of `update` on the Coverage Rail store `rail_id` to
+/// `out`, its runs weighted when the terminal decodes a weighted run.
+///
+/// Rows size the store to their count and replace every row, and a drop
+/// retires the store.
+pub(super) fn encode_rail_update(
+    out: &mut Vec<u8>,
+    rail_id: u32,
+    update: RailUpdate,
+    weighted: bool,
+) {
+    match update {
+        RailUpdate::Rows(rows) => {
             let lines = rows.len() as u32;
             stoatty_protocol::command::encode_minimap_len_into(
                 out,
@@ -485,7 +509,7 @@ fn sync_minimap_strip(
                 stoatty_protocol::command::encode_minimap_lines_into(out, &command);
             }
         },
-        Some((rail_id, RailUpdate::Drop)) => {
+        RailUpdate::Drop => {
             stoatty_protocol::command::encode_minimap_drop_into(
                 out,
                 &stoatty_protocol::command::MinimapDropCommand {
@@ -493,7 +517,6 @@ fn sync_minimap_strip(
                 },
             );
         },
-        None => {},
     }
 }
 

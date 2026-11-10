@@ -1324,16 +1324,7 @@ impl MinimapContent {
                         .map(|line| marks.mark_of(line)),
                     table,
                 );
-                let mut runs = LineRuns::default();
-                if let Some(lane) = mark.lane {
-                    runs.push(Run {
-                        start_col: 0,
-                        len: RAIL_MARK_COLS,
-                        class: lane,
-                        weight: 255,
-                    });
-                }
-                runs
+                rail_row(mark.lane)
             })
             .collect();
         self.rail = Some(rail);
@@ -2079,6 +2070,21 @@ pub(crate) fn frame_row(content: LineRuns, mark: RowMark, tint_weight: u8) -> Li
             start_col: (MAX_COLUMNS - TICK_COLS) as u8,
             len: TICK_COLS as u8,
             class: tick,
+            weight: 255,
+        });
+    }
+    row
+}
+
+/// A Coverage Rail row, a mark in `lane` across the first [`RAIL_MARK_COLS`]
+/// columns, or blank for a band that holds no hunk.
+fn rail_row(lane: Option<u8>) -> LineRuns {
+    let mut row = LineRuns::default();
+    if let Some(class) = lane {
+        row.push(Run {
+            start_col: 0,
+            len: RAIL_MARK_COLS,
+            class,
             weight: 255,
         });
     }

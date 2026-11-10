@@ -15,15 +15,23 @@
 //!
 //! A stack with more rows than the strip folds its rows into bands, in the
 //! tiers an editor's strip folds its lines in. A band that holds a file's
-//! header draws the header bar, so each file still reads as one mark.
+//! header draws the header bar, so each file still reads as one mark. A stack
+//! that the Thumb Minimum's cap stops from fitting scrolls on the strip, with
+//! a Coverage Rail beside it that marks each band of stack rows holding a
+//! hunk.
 
 use super::{
     band::{self, BandSource, LineStat},
     density::{self, Density, Tier},
     diff_view::{buffer_hull, hold_rows},
-    emit::{convert_minimap_runs, minimap_line_tokens, strip_density, WEIGHTED_RUN_PROTOCOL},
-    frame_row, summarize_line, ClassTable, EdgeClass, LineRuns, LineToken, RowMark, Run, SweepRows,
-    MAX_COLUMNS, SYNC_BUDGET, SYNC_SLICE, TINT_WEIGHT,
+    emit::{
+        convert_minimap_runs, encode_rail_update, minimap_line_tokens, strip_density,
+        WEIGHTED_RUN_PROTOCOL,
+    },
+    frame_row,
+    rows::PassRail,
+    summarize_line, ClassTable, EdgeClass, LineRuns, LineToken, RowMark, Run, SweepRows,
+    LINES_PER_CELL, MAX_COLUMNS, SYNC_BUDGET, SYNC_SLICE, TINT_WEIGHT,
 };
 use crate::{
     app::Stoat,
@@ -35,6 +43,7 @@ use crate::{
     editor_state::{EditorId, EditorState},
     host::DiffStatus,
     pane::View,
+    render::rail_strip_id,
     smooth_scroll::non_pane_pool,
     workspace::{Workspace, WorkspaceId},
 };
@@ -83,6 +92,8 @@ pub(crate) struct DiffChangesStrip {
     /// The band rows the terminal holds while the density folds stack rows
     /// into bands, or `None` while it holds a line per stack row in `held`.
     bands: Option<HeldBands>,
+    /// The Coverage Rail the strip shows while the stack does not fit it.
+    rail: PassRail,
 }
 
 /// The lines the terminal holds for one excerpt of the stack.
@@ -203,9 +214,16 @@ struct HeldBands {
 ///
 /// A header row and a Scope row read blank with no mark, since a band that
 /// holds a header draws the header bar and a Scope row holds no file text.
+///
+/// The marks of the slice's rows are read once, since the band rows and the
+/// Coverage Rail both take them.
 struct StackRows<'a> {
     excerpts: Vec<ExcerptRows>,
     table: &'a ClassTable,
+    /// The slice's first stack row.
+    first: usize,
+    /// The mark of each stack row of the slice, from `first` on.
+    marks: Vec<RowMark>,
 }
 
 /// The display rows of one excerpt of a [`StackRows`].
@@ -232,7 +250,9 @@ enum RowKind {
 }
 
 impl DiffChangesStrip {
-    pub(crate) fn new(content_id: u32) -> Self {
+    /// A strip on content store `content_id`, whose Coverage Rail takes store
+    /// `rail_id` when the stack does not fit.
+    pub(crate) fn new(content_id: u32, rail_id: u32) -> Self {
         Self {
             content_id,
             budget: SYNC_BUDGET,
@@ -244,6 +264,7 @@ impl DiffChangesStrip {
             marks: HashMap::new(),
             density: Density::LINE,
             bands: None,
+            rail: PassRail::new(rail_id),
         }
     }
 
@@ -271,6 +292,12 @@ impl DiffChangesStrip {
     /// The id naming the strip's content store on the terminal.
     pub(crate) fn content_id(&self) -> u32 {
         self.content_id
+    }
+
+    /// The content id of the Coverage Rail the strip holds, `None` while the
+    /// stack fits the strip and so shows no rail.
+    pub(crate) fn held_rail_id(&self) -> Option<u32> {
+        self.rail.held_id()
     }
 
     /// Whether the last sync left lines of the followed stack unsent.
@@ -437,7 +464,21 @@ impl<'a> StackRows<'a> {
                 comment_prefixes,
             });
         }
-        Self { excerpts, table }
+
+        let mut marks = vec![RowMark::NONE; rows.len()];
+        for excerpt in &excerpts {
+            for row in rows.start.max(excerpt.first)..rows.end.min(excerpt.end) {
+                let display = (row - excerpt.first) as u32;
+                marks[row - rows.start] =
+                    display_row_mark(&excerpt.snapshot, display, &excerpt.kept, table);
+            }
+        }
+        Self {
+            excerpts,
+            table,
+            first: rows.start,
+            marks,
+        }
     }
 
     /// The excerpt whose display row stack row `row` is, and that display row,
@@ -463,10 +504,7 @@ impl BandSource for StackRows<'_> {
     }
 
     fn mark(&self, row: u32) -> RowMark {
-        self.locate(row)
-            .map_or(RowMark::NONE, |(excerpt, display)| {
-                display_row_mark(&excerpt.snapshot, display, &excerpt.kept, self.table)
-            })
+        self.marks[row as usize - self.first]
     }
 
     fn content(&self, row: u32) -> LineRuns {
@@ -551,7 +589,8 @@ pub(crate) fn summarize_rows(
 }
 
 /// The strip rows of bands `bands` of `state`'s stack under `density`, as of
-/// the last [`diff_changes::layout_stack`].
+/// the last [`diff_changes::layout_stack`], and the marks of the stack rows
+/// the bands hold, from the first band's first row on.
 ///
 /// A band that holds an excerpt's header row is the header bar, so each file
 /// of the stack still reads as one mark at any fold. Every other band is
@@ -565,7 +604,7 @@ fn band_lines(
     density: Density,
     table: &ClassTable,
     syntax_on: bool,
-) -> Vec<LineRuns> {
+) -> (Vec<LineRuns>, Vec<RowMark>) {
     let total = state.rows as u32;
     let per_row = density.lines_per_row;
     let rows = (bands.start * per_row) as usize..(bands.end * per_row).min(total) as usize;
@@ -578,7 +617,7 @@ fn band_lines(
         table,
         syntax_on,
     );
-    bands
+    let lines = bands
         .map(|at| {
             let band = density::band(at, per_row, total);
             let header = state
@@ -590,7 +629,8 @@ fn band_lines(
                 false => band::band_row(&source, band, density.tier, table, TINT_WEIGHT),
             }
         })
-        .collect()
+        .collect();
+    (lines, source.marks)
 }
 
 /// Bring the changes view strip of workspace `ws_id` in step with the stack it
@@ -610,6 +650,11 @@ fn band_lines(
 /// switch, or the class table then starts a pass over every band, which sends
 /// the bands that differ from the held ones under the same budget. A move
 /// between a line per stack row and bands replaces the whole store.
+///
+/// While the stack does not fit the strip, the band pass also folds the marks
+/// of its rows into the Coverage Rail, which goes out whole at the end of the
+/// pass when it changed. A density that fits drops the rail as its pass
+/// starts, and so does a line per stack row.
 pub(crate) fn sync_diff_changes_strip(stoat: &mut Stoat, ws_id: WorkspaceId, out: &mut Vec<u8>) {
     let weighted = stoat.stoatty_protocol >= WEIGHTED_RUN_PROTOCOL;
     let syntax_on = stoat.syntax_highlight;
@@ -695,10 +740,15 @@ pub(crate) fn sync_diff_changes_strip(stoat: &mut Stoat, ws_id: WorkspaceId, out
         }
 
         let rows = density::rows(total as u32, density.lines_per_row);
+        if bands.next == Some(0)
+            && let Some((rail_id, update)) = strip.rail.start(density, total as u32)
+        {
+            encode_rail_update(out, rail_id, update, weighted);
+        }
         let mut at = bands.next.unwrap_or(rows);
         while at < rows {
             let end = (at + SYNC_SLICE).min(rows);
-            let lines = band_lines(
+            let (lines, marks) = band_lines(
                 state,
                 editors,
                 buffers,
@@ -707,6 +757,9 @@ pub(crate) fn sync_diff_changes_strip(stoat: &mut Stoat, ws_id: WorkspaceId, out
                 minimap_class_table,
                 syntax_on,
             );
+            strip
+                .rail
+                .note(at * density.lines_per_row, &marks, minimap_class_table);
             hold_rows(&mut bands.rows, at, lines, &mut |start, removed, lines| {
                 send(out, start as usize, removed as usize, lines)
             });
@@ -721,6 +774,9 @@ pub(crate) fn sync_diff_changes_strip(stoat: &mut Stoat, ws_id: WorkspaceId, out
                 send(out, rows as usize, excess, Vec::new());
                 bands.rows.truncate(rows as usize);
             }
+            if let Some((rail_id, update)) = strip.rail.finish() {
+                encode_rail_update(out, rail_id, update, weighted);
+            }
         }
         bands.next = (at < rows).then_some(at);
         strip.pending = bands.next.is_some();
@@ -731,6 +787,9 @@ pub(crate) fn sync_diff_changes_strip(stoat: &mut Stoat, ws_id: WorkspaceId, out
         && !bands.rows.is_empty()
     {
         send(out, 0, bands.rows.len(), Vec::new());
+    }
+    if let Some((rail_id, update)) = strip.rail.stop() {
+        encode_rail_update(out, rail_id, update, weighted);
     }
 
     if let Some(state) = state {
@@ -781,6 +840,8 @@ pub(crate) fn sync_diff_changes_strip(stoat: &mut Stoat, ws_id: WorkspaceId, out
 ///
 /// Past one stack row per strip row the thumb ships in strip rows, its height
 /// floored at the Thumb Minimum, as an editor's thumb does over its bands.
+/// Past the Thumb Minimum's cap the strip scrolls, and the Coverage Rail's
+/// thumb covers the stack rows the strip shows.
 ///
 /// The thumb passes the change gate the editor thumbs pass, under a pool id of
 /// its own. A strip that shows the changes view's thumb and then an editor's
@@ -794,6 +855,8 @@ pub(crate) fn emit_diff_changes_thumb(
     out: &mut Vec<u8>,
 ) {
     let thumb_min_rows = stoat.minimap_thumb_min_rows();
+    let single = stoat.minimap_mode() == MinimapMode::Single;
+    let single_band = stoat.single_minimap_rect;
     let density = stoat
         .diff_changes_strips
         .get(&ws_id)
@@ -807,6 +870,11 @@ pub(crate) fn emit_diff_changes_thumb(
     };
     let top = state.scroll as f32;
     let rows = state.viewport_rows.max(1) as u32;
+    let total = state.rows as u32;
+    let strip = match single {
+        true => single_band,
+        false => state.minimap_rect,
+    };
     let stamp = {
         let mut hasher = DefaultHasher::new();
         density.lines_per_row.hash(&mut hasher);
@@ -830,6 +898,28 @@ pub(crate) fn emit_diff_changes_thumb(
                 (top_256 as f32 / 256.0, visible_256)
             },
         },
+    );
+
+    if density.tier == Tier::Line || density.fits {
+        return;
+    }
+    let Some(strip) = strip else {
+        return;
+    };
+    let strip_rows = u32::from(strip.height) * u32::from(LINES_PER_CELL);
+    // The rail's thumb also moves with the stack's length and the strip's
+    // height, which the strip's own thumb does not read.
+    let rail_stamp = {
+        let mut hasher = DefaultHasher::new();
+        (stamp, total, density.whole_lines_per_row, strip_rows).hash(&mut hasher);
+        hasher.finish()
+    };
+    stoat.smooth_scroll.emit_minimap_view(
+        out,
+        rail_strip_id(strip_id),
+        non_pane_pool::DIFF_CHANGES_THUMB,
+        MinimapWindowInputs::new(top, rail_stamp, rows),
+        || density::rail_window(top, rows, total, density, strip_rows, thumb_min_rows),
     );
 }
 
@@ -1274,14 +1364,18 @@ mod tests {
             summarize_line, ClassTable, EdgeClass, LineRuns, LineToken, RowMark, Run, MAX_COLUMNS,
             SYNC_SLICE,
         },
+        mouse::MinimapDrag,
         pane::{DockPanel, DockSide, DockVisibility, FocusTarget, View},
-        render::SINGLE_MINIMAP_STRIP_ID,
-        test_fixture::{drain_apc, mouse_event},
+        render::{rail_strip_id, SINGLE_MINIMAP_STRIP_ID},
+        test_fixture::{
+            apply_minimap, drain_apc, marked_rows, minimap_declarations, mouse_event, rail_mark,
+        },
         test_harness::TestHarness,
         theme::Theme,
         workspace::{diff::WorktreeBase, Workspace},
     };
     use crossterm::event::{MouseButton, MouseEventKind};
+    use ratatui::layout::Rect;
     use std::{
         ops::Range,
         path::{Path, PathBuf},
@@ -1291,7 +1385,10 @@ mod tests {
     use stoat_config::MinimapMode;
     use stoat_language::HighlightId;
     use stoat_text::Bias;
-    use stoatty_protocol::command::{Command, LineSummary};
+    use stoatty_protocol::{
+        command::{Command, LineSummary},
+        PROTOCOL_VERSION,
+    };
     use tokio::sync::mpsc::UnboundedReceiver;
 
     /// `files` staged as changes under a focused changes view, painted once at
@@ -1496,6 +1593,193 @@ mod tests {
         assert_eq!(
             (diff_changes::cursor_stack_row(state, editors), scroll),
             (Some(77), 77 - 23 / 2),
+        );
+    }
+
+    /// The banded stack on a stoatty of the current protocol under a Thumb
+    /// Minimum of 5 rows, whose cap of 4 stack rows a band stops the 560 rows
+    /// from fitting the 138-row strip. The strip scrolls at 4 rows a band
+    /// beside a Coverage Rail of 112 rows at 5 stack rows each.
+    fn railed_stack() -> (TestHarness, UnboundedReceiver<Vec<u8>>) {
+        let (mut h, rx) = banded_stack();
+        h.stoat.stoatty_protocol = PROTOCOL_VERSION;
+        h.stoat.settings.editor_minimap_thumb_min_rows = Some(5);
+        (h, rx)
+    }
+
+    /// The focused pane's index and its changes view's strip rect.
+    fn focused_strip(h: &TestHarness) -> (u32, Rect) {
+        let ws = h.stoat.active_workspace();
+        let strip = ws
+            .focused_diff_changes()
+            .and_then(|state| state.minimap_rect)
+            .expect("the paint reserved a strip");
+        (ws.panes.pane(ws.panes.focus()).index, strip)
+    }
+
+    /// The content ids `commands` drop.
+    fn drops(commands: &[Command]) -> Vec<u32> {
+        commands
+            .iter()
+            .filter_map(|command| match command {
+                Command::MinimapDrop(drop) => Some(drop.content_id),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// A stack that stops fitting its strip declares a Coverage Rail in the
+    /// strip's last cell on the frame after the rail's pass, though nothing
+    /// else on the pane moved. The rail holds the 560 stack rows at 5 a row
+    /// and marks each band of edited lines, the odd rows, and its thumb covers
+    /// the 138 rows of 4 stack rows the strip shows.
+    #[test]
+    fn a_stack_past_the_cap_declares_a_rail_over_its_rows() {
+        let (mut h, mut rx) = banded_stack();
+        h.stoat.stoatty_protocol = PROTOCOL_VERSION;
+        frame(&mut h, &mut rx);
+        frame(&mut h, &mut rx);
+        h.stoat.settings.editor_minimap_thumb_min_rows = Some(5);
+        let first = frame(&mut h, &mut rx);
+        let second = frame(&mut h, &mut rx);
+
+        let (pane, strip) = focused_strip(&h);
+        let content_id = strip_id(&h);
+        let mut rail = Vec::new();
+        apply_minimap(&mut rail, content_id + 1, &first);
+        let rail_view = strip_frames(&first)
+            .1
+            .into_iter()
+            .find(|view| view.0 == rail_strip_id(pane));
+        let modified = h.stoat.minimap_class_table.edge_class(EdgeClass::Modified);
+
+        assert_eq!(
+            (
+                minimap_declarations(&second),
+                rail.len(),
+                marked_rows(&rail),
+                rail_view
+            ),
+            (
+                vec![
+                    (pane, strip.x, strip.width - 1, content_id),
+                    (
+                        rail_strip_id(pane),
+                        strip.x + strip.width - 1,
+                        1,
+                        content_id + 1
+                    ),
+                ],
+                112,
+                (1..112)
+                    .step_by(2)
+                    .map(|row| (row, rail_mark(modified)))
+                    .collect(),
+                Some((rail_strip_id(pane), 0, 138 * 4 * 256 / 5)),
+            ),
+            "the strip and the rail declared, the rail's rows, its marks, and \
+             its view",
+        );
+    }
+
+    /// A press on the rail lands the cursor on the stack row the rail shows
+    /// under it, and scrolls that row to the middle of the view. Cell 10's
+    /// middle is rail row 63, whose band of 5 stack rows centers on row 317.
+    #[test]
+    fn a_rail_press_lands_on_its_stack_row() {
+        let (mut h, mut rx) = railed_stack();
+        frame(&mut h, &mut rx);
+        let (_, strip) = focused_strip(&h);
+        h.stoat.update(mouse_event(
+            MouseEventKind::Down(MouseButton::Left),
+            strip.x + strip.width - 1,
+            strip.y + 10,
+        ));
+
+        let drag = h.stoat.minimap_drag;
+        let Workspace {
+            diff_changes_views,
+            editors,
+            ..
+        } = h.stoat.active_workspace_mut();
+        let (id, state) = diff_changes_views
+            .iter_mut()
+            .next()
+            .expect("a changes view");
+        let scroll = state.scroll;
+        assert_eq!(
+            (diff_changes::cursor_stack_row(state, editors), scroll, drag),
+            (
+                Some(317),
+                317 - 23 / 2,
+                Some(MinimapDrag::DiffChangesRail(id))
+            ),
+        );
+    }
+
+    /// The rail drops once the strip shows none. Under the default Thumb
+    /// Minimum a band holds up to 11 stack rows, so the stack fits. Under a
+    /// Thumb Minimum of 23 the cap is one stack row a row, so the strip holds
+    /// a line per stack row.
+    #[test]
+    fn a_rail_drops_once_the_strip_shows_none() {
+        for thumb_min_rows in [2, 23] {
+            let (mut h, mut rx) = railed_stack();
+            frame(&mut h, &mut rx);
+            let held = h.stoat.diff_changes_strips[&h.stoat.active_workspace].held_rail_id();
+
+            h.stoat.settings.editor_minimap_thumb_min_rows = Some(thumb_min_rows);
+            let dropped = drops(&frame(&mut h, &mut rx));
+            let rail = strip_id(&h) + 1;
+
+            assert_eq!(
+                (
+                    held,
+                    dropped,
+                    h.stoat.diff_changes_strips[&h.stoat.active_workspace].held_rail_id()
+                ),
+                (Some(rail), vec![rail], None),
+                "under a Thumb Minimum of {thumb_min_rows}",
+            );
+        }
+    }
+
+    /// Closing the last changes view drops the strip's rail with the strip.
+    #[test]
+    fn closing_the_last_changes_view_drops_its_rail() {
+        let (mut h, mut rx) = railed_stack();
+        frame(&mut h, &mut rx);
+        let content_id = strip_id(&h);
+
+        dispatch(&mut h.stoat, &stoat_action::CloseDiffChanges);
+        assert_eq!(drops(&frame(&mut h, &mut rx)), [content_id, content_id + 1]);
+    }
+
+    /// The band over a focused changes view shows the stack's rail in its
+    /// last cell.
+    #[test]
+    fn the_band_shows_the_changes_view_rail() {
+        let (mut h, mut rx) = railed_stack();
+        h.stoat.settings.editor_minimap = Some(MinimapMode::Single);
+        frame(&mut h, &mut rx);
+        let declared = minimap_declarations(&frame(&mut h, &mut rx));
+        let band = h
+            .stoat
+            .single_minimap_rect
+            .expect("single mode reserves a band");
+        let content_id = strip_id(&h);
+
+        assert_eq!(
+            declared,
+            [
+                (SINGLE_MINIMAP_STRIP_ID, band.x, band.width - 1, content_id),
+                (
+                    rail_strip_id(SINGLE_MINIMAP_STRIP_ID),
+                    band.x + band.width - 1,
+                    1,
+                    content_id + 1
+                ),
+            ],
         );
     }
 

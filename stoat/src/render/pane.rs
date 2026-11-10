@@ -288,8 +288,13 @@ pub(crate) fn render_pane(
                 if let (Some(strip), Some(chrome)) = (state.minimap_rect, frame.minimap_chrome)
                     && let Some(content_id) = chrome.diff_changes_content
                 {
+                    let rail = chrome.diff_changes_rail;
+                    let (strip, rail_rect) = split_rail(strip, rail.is_some());
                     pane_minimap(pane, chrome, content_id, is_focused, frame)
                         .render(strip, buf, scene);
+                    if let (Some(rail_id), Some(rail_rect)) = (rail, rail_rect) {
+                        rail_minimap(pane.index, rail_id, chrome).render(rail_rect, buf, scene);
+                    }
                 }
             }
             dim_pane(pane.area, is_focused, frame, buf);
