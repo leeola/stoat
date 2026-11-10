@@ -68,7 +68,7 @@ use crate::{
         StoatKeymapState,
     },
     lsp::{progress::LspProgressMap, registry::LspRegistry},
-    minimap::{emit, MinimapContent},
+    minimap::{emit, EdgeClass, MinimapContent},
     pane::{DockVisibility, FocusTarget, Pane, PaneId, View},
     rebase::RebasePause,
     run::{RunId, RunState},
@@ -180,6 +180,9 @@ pub(crate) struct MinimapChrome<'a> {
     pub(crate) diff_changes_content: Option<u32>,
     /// Viewport-thumb fill color, rgba.
     pub(crate) thumb: [u8; 4],
+    /// The class whose runs every strip draws as an Item Rule hairline, the
+    /// class table's [`EdgeClass::Rule`].
+    pub(crate) rule_class: u8,
 }
 
 /// One language server as the status bar shows it.
@@ -1246,6 +1249,7 @@ pub(crate) fn frame(
                 .get(&stoat.active_workspace)
                 .map(|strip| strip.content_id()),
             thumb,
+            rule_class: stoat.minimap_class_table.edge_class(EdgeClass::Rule),
         }
     });
 
@@ -1590,7 +1594,7 @@ pub(crate) fn frame(
             bg: [0, 0, 0, 0],
             thumb: chrome.thumb,
             thumb_border: None,
-            rule_class: 0,
+            rule_class: chrome.rule_class,
             palette,
         };
         match single_band_overview(ws) {

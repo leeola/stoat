@@ -14,6 +14,7 @@
 use crate::{
     app::Stoat,
     buffer::BufferId,
+    buffer_registry::BufferRegistry,
     diff_changes::DiffChangesId,
     display_map::{DisplayPoint, DisplaySnapshot},
     editor_state::EditorId,
@@ -30,13 +31,15 @@ use crate::{
 use ratatui::layout::Rect;
 use std::{
     cell::OnceCell,
+    cmp::Reverse,
     collections::hash_map::{DefaultHasher, Entry},
     hash::{Hash, Hasher},
     ops::Range,
     sync::Arc,
 };
 use stoat_config::MinimapMode;
-use stoat_text::Bias;
+use stoat_language::{extract_symbols, SymbolDef};
+use stoat_text::{Bias, Rope};
 
 /// Assign a `content_id` to each visible split-editor buffer that a minimap
 /// strip renders, and to the active workspace's changes view strip while an
@@ -399,6 +402,7 @@ fn sync_minimap_strip(
         tokens_for,
         marks,
         comment_prefixes,
+        || minimap_item_lines(&stoat.workspaces[ws_id].buffers, buffer_id),
         class_table,
         density,
         window,
@@ -480,6 +484,53 @@ fn strip_density(
         ),
         None => Density::LINE,
     }
+}
+
+/// The fewest lines an item spans before its start takes an Item Rule, so a
+/// one-line declaration does not rule the strip.
+const ITEM_MIN_LINES: u32 = 5;
+
+/// The first lines of `buffer_id`'s top-level items that span at least
+/// [`ITEM_MIN_LINES`] lines, ascending, from the outline of its live parse.
+///
+/// An item that another item holds is not top-level, so an impl's methods
+/// take no rule of their own. Empty for a buffer with no parse or whose
+/// language has no outline query.
+fn minimap_item_lines(buffers: &BufferRegistry, buffer_id: BufferId) -> Vec<u32> {
+    let Some(language) = buffers.language_for(buffer_id) else {
+        return Vec::new();
+    };
+    let (Some(query), Some(syntax)) = (language.outline_query(), buffers.syntax(buffer_id)) else {
+        return Vec::new();
+    };
+
+    let rope = &syntax.rope_snapshot;
+    top_level_item_lines(
+        extract_symbols(query, syntax.tree.root_node(), rope, None),
+        rope,
+    )
+}
+
+/// The first lines of the items of `defs` that no other item holds and that
+/// span at least [`ITEM_MIN_LINES`] lines of `rope`, ascending.
+fn top_level_item_lines(mut defs: Vec<SymbolDef>, rope: &Rope) -> Vec<u32> {
+    defs.sort_by_key(|def| (def.def_range.start, Reverse(def.def_range.end)));
+
+    let mut outer_end = 0;
+    let mut lines = Vec::new();
+    for def in defs {
+        if def.def_range.start < outer_end {
+            continue;
+        }
+        outer_end = def.def_range.end;
+        let first = rope.offset_to_point(def.def_range.start).row;
+        let last_byte = def.def_range.end.saturating_sub(1).max(def.def_range.start);
+        let last = rope.offset_to_point(last_byte).row;
+        if last + 1 - first >= ITEM_MIN_LINES {
+            lines.push(first);
+        }
+    }
+    lines
 }
 
 /// Content version of a minimap strip's coloring, hashing the inputs whose
@@ -1061,17 +1112,20 @@ mod tests {
         );
     }
 
-    /// `body` open in a 120 by 24 window under a terminal that reads every
-    /// protocol, so its strip is a 23-cell band of 138 rows over a 23-line
-    /// viewport.
-    fn open_in_band(body: &str) -> (crate::test_harness::TestHarness, UnboundedReceiver<Vec<u8>>) {
+    /// `body` open as file `name` in a 120 by 24 window under a terminal that
+    /// reads every protocol, so its strip is a 23-cell band of 138 rows over a
+    /// 23-line viewport.
+    fn open_in_band(
+        name: &str,
+        body: &str,
+    ) -> (crate::test_harness::TestHarness, UnboundedReceiver<Vec<u8>>) {
         let mut h = Stoat::test();
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
         h.stoat.set_apc_tx(tx);
         h.stoat.stoatty_protocol = stoatty_protocol::PROTOCOL_VERSION;
 
         let root = PathBuf::from("/minimap-bands");
-        let path = root.join("numbered.txt");
+        let path = root.join(name);
         h.fake_fs().insert_file(&path, body.as_bytes());
         h.stoat.active_workspace_mut().git_root = root;
         action_handlers::dispatch(&mut h.stoat, &OpenFile { path });
@@ -1139,7 +1193,7 @@ mod tests {
         use stoatty_protocol::command::Command;
 
         let lines = numbered(1_200, 0..0);
-        let (mut h, mut rx) = open_in_band(&lines.join("\n"));
+        let (mut h, mut rx) = open_in_band("numbered.txt", &lines.join("\n"));
         let mut store = Vec::new();
         let lens = settle_store(&mut h, &mut rx, &mut store);
 
@@ -1168,7 +1222,7 @@ mod tests {
     #[test]
     fn an_edit_that_crosses_a_row_multiple_rebands_the_file() {
         let body = numbered(1_200, 0..0).join("\n");
-        let (mut h, mut rx) = open_in_band(&body);
+        let (mut h, mut rx) = open_in_band("numbered.txt", &body);
         let mut store = Vec::new();
         settle_store(&mut h, &mut rx, &mut store);
 
@@ -1186,7 +1240,7 @@ mod tests {
     /// row 57 two code lines of nine, under the share a row needs.
     #[test]
     fn a_blank_band_draws_an_empty_row() {
-        let (mut h, mut rx) = open_in_band(&numbered(1_200, 500..520).join("\n"));
+        let (mut h, mut rx) = open_in_band("numbered.txt", &numbered(1_200, 500..520).join("\n"));
         let mut store = Vec::new();
         settle_store(&mut h, &mut rx, &mut store);
 
@@ -1196,6 +1250,95 @@ mod tests {
                 store[55..59].iter().map(Vec::is_empty).collect::<Vec<_>>()
             ),
             (134, vec![false, true, true, false]),
+        );
+    }
+
+    /// A 3,000-line Rust file under a Thumb Minimum of 1 folds 22 lines to a
+    /// row, past the Fit tier, so each of its 137 rows draws its band's outline
+    /// and no row holds more than three runs. A 40-line `impl` every 150 lines
+    /// starts 6 or 7 rows after the last one, so the row of each start leads
+    /// with an Item Rule. One more `impl` 50 lines in starts 2 rows after the
+    /// first and shares its rule.
+    #[test]
+    fn a_very_large_file_draws_shape_rows_and_item_rules() {
+        use crate::minimap::EdgeClass;
+        use stoatty_protocol::command::{Command, MinimapRun};
+
+        let impl_line = |line: usize, start: usize| match line - start {
+            0 => format!("impl T{start} {{"),
+            39 => "}".to_string(),
+            _ => "    fn f() {}".to_string(),
+        };
+        let lines: Vec<String> = (0..3_000)
+            .map(|line| match (line % 150, line) {
+                (0..40, _) => impl_line(line, line - line % 150),
+                (_, 50..90) => impl_line(line, 50),
+                _ => "// filler".to_string(),
+            })
+            .collect();
+        let (mut h, mut rx) = open_in_band("big.rs", &lines.join("\n"));
+        h.stoat.settings.editor_minimap_thumb_min_rows = Some(1);
+        let mut store = Vec::new();
+        settle_store(&mut h, &mut rx, &mut store);
+
+        let rule = MinimapRun {
+            start_col: 8,
+            len: 112,
+            class: h.stoat.minimap_class_table.edge_class(EdgeClass::Rule),
+            weight: 255,
+        };
+        let ruled: Vec<usize> = (0..store.len())
+            .filter(|&row| store[row].first() == Some(&rule))
+            .collect();
+        let _ = h.stoat.render();
+        apc_emit::emit_apc_scene(&mut h.stoat);
+        let declared = drain_apc(&mut rx).into_iter().find_map(|cmd| match cmd {
+            Command::Minimap(strip) => Some(strip.rule_class),
+            _ => None,
+        });
+        assert_eq!(
+            (
+                store.len(),
+                store.iter().map(Vec::len).max(),
+                ruled,
+                declared
+            ),
+            (
+                137,
+                Some(2),
+                (0..3_000)
+                    .step_by(150)
+                    .map(|line| line / 22)
+                    .collect::<Vec<_>>(),
+                Some(rule.class),
+            ),
+            "the rows, the most runs a row holds, the rows a rule leads, and the \
+             rule class the strip declares",
+        );
+    }
+
+    /// An item that another item holds takes no rule of its own, and neither
+    /// does an item under five lines long.
+    #[test]
+    fn item_lines_keep_the_long_top_level_items() {
+        use stoat_language::SymbolKind;
+
+        // Every line is "line\n", so line `n` starts at byte `5 * n`.
+        let rope = Rope::from(vec!["line"; 40].join("\n").as_str());
+        let def = |first: usize, last: usize| SymbolDef {
+            name: String::new(),
+            kind: SymbolKind::Struct,
+            def_range: 5 * first..5 * last + 4,
+            name_range: 5 * first..5 * first,
+            container: Vec::new(),
+        };
+
+        assert_eq!(
+            top_level_item_lines(
+                vec![def(20, 30), def(0, 10), def(2, 8), def(12, 13), def(0, 10)],
+                &rope,
+            ),
+            vec![0, 20],
         );
     }
 

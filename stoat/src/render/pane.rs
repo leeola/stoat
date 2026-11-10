@@ -624,7 +624,7 @@ fn pane_minimap<'a>(
         bg: [0, 0, 0, 0],
         thumb: [thumb[0], thumb[1], thumb[2], ta],
         thumb_border: None,
-        rule_class: 0,
+        rule_class: chrome.rule_class,
         palette,
     };
     match kind {

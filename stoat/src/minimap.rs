@@ -547,6 +547,12 @@ pub struct MinimapContent {
     /// Under it the line summaries carry no marks. A row takes the marks of
     /// its whole band when the layer frames it.
     rows: Option<RowStore>,
+    /// The first lines of the file's top-level items, ascending, which a Shape
+    /// density leads with Item Rules.
+    item_lines: Vec<u32>,
+    /// The [`SyncVersions::syntax`] that [`Self::item_lines`] were read at, so
+    /// only a parse that moves the outline reads them again.
+    items_version: Option<u64>,
     /// The store length the emitter sends as `minimap_len` before the queued
     /// splices, set by the first sync, which sizes the store, and again by a
     /// change of the fold of lines into rows.
@@ -625,6 +631,8 @@ impl MinimapContent {
             stats: Vec::new(),
             stats_built: 0,
             rows: None,
+            item_lines: Vec::new(),
+            items_version: None,
             pending_len: None,
             disabled: false,
             synced_decoration_version: 0,
@@ -726,6 +734,11 @@ impl MinimapContent {
     /// rows, and each row is the band's representative line framed under the
     /// marks of the whole band, whose classes `table` ranks. A change of the
     /// fold or of the row count sizes the store again.
+    ///
+    /// Past [`density::FIT_MAX_LINES_PER_ROW`] lines per row each row is the
+    /// outline of its band, and the row of a top-level item leads with an Item
+    /// Rule. `items` answers the first lines of those items, and a sync calls
+    /// it only when [`SyncVersions::syntax`] moved since the last call.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn sync(
         &mut self,
@@ -736,6 +749,7 @@ impl MinimapContent {
         tokens_for: impl Fn(Range<u32>) -> HashMap<u32, Vec<LineToken>>,
         marks: impl EdgeSource,
         comment_prefixes: &[&str],
+        items: impl FnOnce() -> Vec<u32>,
         table: &ClassTable,
         density: Density,
         window: BuildWindow,
@@ -801,6 +815,20 @@ impl MinimapContent {
             self.synced_rope = new_rope.clone();
         }
         self.reconcile_rows(density, total, versions);
+        // The outline moves only with a parse, so a Shape density reads it again
+        // only when the syntax version moved, and counts its rules again then.
+        if let Some(rows) = &mut self.rows
+            && rows.density.tier == Tier::Shape
+        {
+            if self.items_version != Some(versions.syntax) {
+                self.item_lines = items();
+                self.items_version = Some(versions.syntax);
+                rows.rules = None;
+            }
+            if rows.rules.is_none() {
+                rows.count_rules(&self.item_lines);
+            }
+        }
         let line_marks = LineMarks {
             source: &marks,
             banded: self.rows.is_some(),
@@ -1089,7 +1117,9 @@ impl MinimapContent {
     /// outward from.
     ///
     /// Under a layer `window` is in strip rows. Each band in it wants its
-    /// representative line once the band's statistics are built.
+    /// representative line once the band's statistics are built. A Shape
+    /// density draws outlines from the statistics alone and wants no line, so
+    /// a very large file asks for no tokens.
     fn set_wanted(&mut self, window: &BuildWindow, total: u32) -> u32 {
         let Some(rows) = &mut self.rows else {
             self.wanted = RowSet::of(window.rows.start.min(total)..window.rows.end.min(total));
@@ -1099,7 +1129,11 @@ impl MinimapContent {
         let lines_per_row = rows.density.lines_per_row;
         rows.window = window.rows.start.min(rows.len())..window.rows.end.min(rows.len());
         let mut wanted = RowSet::default();
-        for row in rows.window.clone() {
+        let fit_rows = match rows.density.tier {
+            Tier::Shape => 0..0,
+            Tier::Line | Tier::Fit => rows.window.clone(),
+        };
+        for row in fit_rows {
             let band = density::band(row, lines_per_row, total);
             if band.end > self.stats_built {
                 continue;
@@ -1120,7 +1154,9 @@ impl MinimapContent {
     ///
     /// A row whose band has no statistics yet, or whose representative line is
     /// not built yet, stays stale for a later sync. A band whose lines are
-    /// mostly blank has no representative and draws blank.
+    /// mostly blank has no representative and draws blank. A Shape density
+    /// draws each row from its band's outline instead, led by an Item Rule
+    /// where the layer counted one.
     fn derive_rows(
         &mut self,
         marks: &impl EdgeSource,
@@ -1142,25 +1178,40 @@ impl MinimapContent {
                 continue;
             }
 
-            let summary =
-                match band::representative(&self.stats[band.start as usize..band.end as usize]) {
+            let stats = &self.stats[band.start as usize..band.end as usize];
+            let mark = || {
+                band::band_mark(
+                    marks
+                        .marked_rows(band.clone())
+                        .into_iter()
+                        .filter(|line| band.contains(line))
+                        .map(|line| marks.mark_of(line)),
+                    table,
+                )
+            };
+            let summary = match rows.density.tier {
+                Tier::Shape => {
+                    let outline = band::shape_row(band::shape(stats), mark(), table);
+                    let ruled = rows
+                        .rules
+                        .as_ref()
+                        .is_some_and(|rules| rules.binary_search(&row).is_ok());
+                    match ruled {
+                        true => band::with_rule(outline, table),
+                        false => outline,
+                    }
+                },
+                Tier::Line | Tier::Fit => match band::representative(stats) {
                     None => LineRuns::default(),
                     Some(offset) => {
                         let line = band.start + offset as u32;
                         if !self.built.covers(line..line + 1) {
                             continue;
                         }
-                        let mark = band::band_mark(
-                            marks
-                                .marked_rows(band.clone())
-                                .into_iter()
-                                .filter(|line| band.contains(line))
-                                .map(|line| marks.mark_of(line)),
-                            table,
-                        );
-                        frame_row(self.lines[line as usize], mark, TINT_WEIGHT)
+                        frame_row(self.lines[line as usize], mark(), TINT_WEIGHT)
                     },
-                };
+                },
+            };
 
             rows.stale[at] = false;
             if rows.sent[at] != summary {
@@ -2151,7 +2202,7 @@ pub(crate) fn color_to_rgb(color: Color) -> [u8; 3] {
 #[cfg(test)]
 mod tests {
     use super::{
-        band::{LineKind, LineStat},
+        band::{shape_row, LineKind, LineStat},
         density::{Density, Tier},
         frame_row, resolve_overlaps, summarize_line, BuildWindow, ClassTable, EdgeClass,
         EdgeSource, LineRuns, LineToken, MinimapContent, RowMark, RowSet, Run, Splice,
@@ -2198,6 +2249,7 @@ mod tests {
                 tokens_for,
                 marks,
                 &[],
+                Vec::new,
                 &line_table(),
                 Density::LINE,
                 ALL,
@@ -3216,6 +3268,7 @@ mod tests {
             no_tokens,
             no_edges,
             &[],
+            Vec::new,
             &line_table(),
             Density::LINE,
             WINDOW,
@@ -3249,6 +3302,7 @@ mod tests {
             no_tokens,
             no_edges,
             &[],
+            Vec::new,
             &line_table(),
             Density::LINE,
             WINDOW,
@@ -3283,18 +3337,22 @@ mod tests {
     const STAT_LINES: [&str; 4] = ["code();", "    // note", "", "\tx = 1;"];
     const STATS: [LineStat; 4] = [
         LineStat {
+            indent: 0,
             end: 7,
             kind: LineKind::Code,
         },
         LineStat {
+            indent: 4,
             end: 11,
             kind: LineKind::Comment,
         },
         LineStat {
+            indent: 0,
             end: 0,
             kind: LineKind::Blank,
         },
         LineStat {
+            indent: 4,
             end: 10,
             kind: LineKind::Code,
         },
@@ -3302,6 +3360,7 @@ mod tests {
 
     /// The statistics of a `// note` line.
     const NOTE: LineStat = LineStat {
+        indent: 0,
         end: 7,
         kind: LineKind::Comment,
     };
@@ -3325,6 +3384,7 @@ mod tests {
                 no_tokens,
                 no_edges,
                 &["//"],
+                Vec::new,
                 &line_table(),
                 Density::LINE,
                 ALL,
@@ -3406,6 +3466,7 @@ mod tests {
                 no_tokens,
                 no_edges,
                 &[],
+                Vec::new,
                 &line_table(),
                 density,
                 window,
@@ -3497,6 +3558,7 @@ mod tests {
             no_tokens,
             no_edges,
             &[],
+            Vec::new,
             &line_table(),
             FOLD_FOUR,
             ALL,
@@ -3527,6 +3589,7 @@ mod tests {
             no_tokens,
             move |row: u32| (row == 9).then_some(added),
             &[],
+            Vec::new,
             &line_table(),
             FOLD_FOUR,
             ALL,
@@ -3549,6 +3612,42 @@ mod tests {
         );
     }
 
+    /// A Shape fold draws each row from its band's line statistics alone, so it
+    /// asks for no line's tokens however long the file.
+    #[test]
+    fn a_shape_fold_asks_for_no_tokens() {
+        let asked = RefCell::new(Vec::new());
+        let shape = Density {
+            lines_per_row: 20,
+            tier: Tier::Shape,
+        };
+        let mut content = MinimapContent::new(1, test_executor());
+        let mut store = Vec::new();
+        content.sync(
+            &rope(&vec!["code"; 400].join("\n")),
+            1,
+            &Patch::empty(),
+            versions(0, 0),
+            |rows: Range<u32>| {
+                asked.borrow_mut().push(rows);
+                HashMap::new()
+            },
+            no_edges,
+            &[],
+            Vec::new,
+            &line_table(),
+            shape,
+            ALL,
+        );
+        replay(&mut store, &mut content);
+
+        let outline = shape_row(Some((0, 4, false)), RowMark::NONE, &line_table());
+        assert_eq!(
+            (asked.into_inner(), store),
+            (Vec::<Range<u32>>::new(), vec![outline; 20]),
+        );
+    }
+
     /// A jump moves the window, and the next sync builds the rows the new
     /// window adds, at their own rows and nearest the view first. The length
     /// went with the first sync and does not go again.
@@ -3564,6 +3663,7 @@ mod tests {
             no_tokens,
             no_edges,
             &[],
+            Vec::new,
             &line_table(),
             Density::LINE,
             BuildWindow {
@@ -3609,6 +3709,7 @@ mod tests {
             tokens,
             no_edges,
             &[],
+            Vec::new,
             &line_table(),
             Density::LINE,
             WINDOW,
@@ -3648,6 +3749,7 @@ mod tests {
             tokens,
             no_edges,
             &[],
+            Vec::new,
             &line_table(),
             Density::LINE,
             BuildWindow {
@@ -3693,6 +3795,7 @@ mod tests {
             no_tokens,
             marks,
             &[],
+            Vec::new,
             &line_table(),
             Density::LINE,
             WINDOW,
@@ -3732,6 +3835,7 @@ mod tests {
             tokens,
             no_edges,
             &[],
+            Vec::new,
             &line_table(),
             Density::LINE,
             BuildWindow {
@@ -3781,6 +3885,7 @@ mod tests {
             tokens,
             AskedEdges(&marks_asked),
             &[],
+            Vec::new,
             &line_table(),
             Density::LINE,
             WINDOW,
