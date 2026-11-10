@@ -7,7 +7,7 @@
 //! whatever the model currently holds.
 
 use crate::{
-    action_handlers::{self, commits::CommitStep, rebase::RebaseMove},
+    action_handlers::{self, commits::CommitStep, diff_changes::StackPress, rebase::RebaseMove},
     app::{
         modal_split_percent, modal_zoom_steps, ModalKind, PanelHit, SeparatorAxis, SplitSeparator,
         Stoat, UpdateEffect, MIN_PREVIEW_ROWS, MODAL_ZOOM_MAX, MODAL_ZOOM_MIN, PREVIEW_WHEEL_ROWS,
@@ -270,6 +270,8 @@ pub(crate) fn screen_surfaces(stoat: &mut Stoat) -> Option<ScreenSurfaces> {
 /// On the changes view, a middle press puts the cursor on the pressed cell and
 /// runs goto definition. A right press puts the cursor there and runs hover.
 /// The view's excerpts are editors, so the buttons act as they do in an editor.
+/// A left, middle, or right press on a fold row's Fold Button opens the fold
+/// and runs neither.
 fn handle_screen_mouse(stoat: &mut Stoat, mouse: MouseEvent) -> Option<UpdateEffect> {
     let surfaces = screen_surfaces(stoat).filter(|s| s.holds(mouse))?;
     if stoat.minimap_drag.is_some() || surfaces.presses_strip(mouse) {
@@ -288,10 +290,10 @@ fn handle_screen_mouse(stoat: &mut Stoat, mouse: MouseEvent) -> Option<UpdateEff
 
     Some(match surfaces.kind {
         ScreenKind::DiffChanges => {
-            let placed =
-                action_handlers::diff_changes::diff_changes_press(stoat, index, mouse.column);
-            if placed == UpdateEffect::None {
-                return Some(placed);
+            match action_handlers::diff_changes::diff_changes_press(stoat, index, mouse.column) {
+                StackPress::Missed => return Some(UpdateEffect::None),
+                StackPress::Opened => return Some(UpdateEffect::Redraw),
+                StackPress::Placed => {},
             }
             match button {
                 MouseButton::Left => {},

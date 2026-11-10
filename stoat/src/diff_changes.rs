@@ -22,7 +22,9 @@ use crate::{
     buffer_lifecycle,
     buffer_registry::{BufferRegistry, OpenOrigin},
     diff_map::{DiffHunkStatus, DiffMap},
-    display_map::{DisplaySnapshot, FoldPlaceholder, FoldSnapshot, InlayPoint, InlaySnapshot},
+    display_map::{
+        BlockRowKind, DisplaySnapshot, FoldPlaceholder, FoldSnapshot, InlayPoint, InlaySnapshot,
+    },
     editor_state::{EditorId, EditorState},
     multi_buffer::MultiBufferSnapshot,
     pane::View,
@@ -94,6 +96,12 @@ pub(crate) struct DiffChangesState {
     /// The minimap strip the most recent paint reserved at the pane's right
     /// edge, or `None` where no per-pane strip shows.
     pub minimap_rect: Option<Rect>,
+    /// The rect the most recent paint laid the stack's rows into, or `None`
+    /// before the first paint.
+    ///
+    /// Every excerpt paints from its left edge, so a press finds a fold row's
+    /// Fold Buttons by the cells it lands past that edge.
+    pub content_rect: Option<Rect>,
     /// The view the changes view replaced in its pane, which closing the
     /// changes view puts back.
     pub covered: Option<View>,
@@ -327,6 +335,7 @@ impl Default for DiffChangesState {
             listed_focus: None,
             viewport_rows: 0,
             minimap_rect: None,
+            content_rect: None,
             covered: None,
             covered_diff: false,
             pending_landing: None,
@@ -578,6 +587,49 @@ pub(crate) fn press_cell(
     place_cursor(editor, point);
     state.focused = index;
     true
+}
+
+/// The fold that a press on screen column `column` of stack row `row` opens
+/// through a Fold Button.
+///
+/// The answer holds the excerpt's index, the buffer rows the fold hides, and
+/// the edge the button opens the fold from.
+///
+/// The buttons' cells count from the stack's left edge as of the last paint,
+/// as [`fold_button_cells`] lays them. A header row, a row past the stack, a
+/// row that is no fold row, and a cell past the buttons answer `None`.
+pub(crate) fn fold_button_at(
+    state: &DiffChangesState,
+    editors: &mut SlotMap<EditorId, EditorState>,
+    row: usize,
+    column: u16,
+) -> Option<(usize, Range<u32>, FoldEdge)> {
+    let cell = column.checked_sub(state.content_rect?.x)?;
+    let (index, display_row) = excerpt_at(state, editors, row)?;
+    let excerpt = &state.excerpts[index];
+    if excerpt.top + 1 + display_row as usize != row {
+        return None;
+    }
+
+    // The press reads the row as the paint does, so a spliced base row above
+    // a fold row opens nothing.
+    let snapshot = editors.get_mut(excerpt.editor_id)?.display_map.snapshot();
+    let BlockRowKind::BufferRow { buffer_row } = snapshot.classify_row(display_row) else {
+        return None;
+    };
+    if snapshot.is_wrap_continuation(display_row) {
+        return None;
+    }
+    let gap = fold_gap(&snapshot, buffer_row)?;
+
+    let rope = snapshot.buffer_snapshot().rope();
+    let buttons = fold_buttons(&gap, fold_lines(rope, &gap), rope.max_point().row + 1);
+    let (_, &(_, edge)) = buttons
+        .glyphs()
+        .iter()
+        .enumerate()
+        .find(|(slot, _)| fold_button_cells(*slot).contains(&cell))?;
+    Some((index, gap, edge))
 }
 
 /// The focused excerpt's editor and its cursor's buffer position.
@@ -1745,7 +1797,7 @@ pub(crate) fn fold_lines(rope: &Rope, gap: &Range<u32>) -> u32 {
 /// The scroll first shows the far edge of the opened rows, the first row of a
 /// fold above the cursor or the last row of a fold below it. Then it shows the
 /// cursor, so a short view keeps the cursor in sight.
-fn expand(
+pub(crate) fn expand(
     state: &mut DiffChangesState,
     editors: &mut SlotMap<EditorId, EditorState>,
     index: usize,

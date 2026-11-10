@@ -28,6 +28,21 @@ use std::{
 use stoat_scheduler::Executor;
 use stoat_text::{cursor_offset, Anchor, Bias, BufferId, Point, Selection, SelectionGoal};
 
+/// What a press on a changes view's stack did.
+///
+/// A middle or right press acts from the cursor, so it acts only after a press
+/// that placed the cursor.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum StackPress {
+    /// The press landed on no row.
+    Missed,
+    /// The press opened a fold through one of its Fold Buttons and left the
+    /// cursor where it was.
+    Opened,
+    /// The press put the cursor on the pressed cell.
+    Placed,
+}
+
 /// Open a changes view over the focused view, or close the focused one.
 ///
 /// On a focused changes view this closes it and lands on the cursor's file.
@@ -483,16 +498,19 @@ pub(super) fn diff_changes_edge(stoat: &mut Stoat, last: bool) -> UpdateEffect {
     UpdateEffect::Redraw
 }
 
-/// Put the focused changes view's cursor on the cell a press lands on, at
-/// stack row `row` and screen column `column`.
+/// Act on a press at stack row `row` and screen column `column` of the
+/// focused changes view.
 ///
-/// The row's excerpt takes the focus, and its cursor goes to the cell, as a
-/// press in an editor puts it. A header row puts the cursor at the start of
-/// its excerpt's first row.
-pub(crate) fn diff_changes_press(stoat: &mut Stoat, row: usize, column: u16) -> UpdateEffect {
+/// A press on a fold row's Fold Button opens the fold from the button's edge,
+/// on any excerpt of the stack. The cursor and the focus stay where they were.
+///
+/// Any other press puts the cursor on the pressed cell, and the row's excerpt
+/// takes the focus, as a press in an editor does. A header row puts the cursor
+/// at the start of its excerpt's first row.
+pub(crate) fn diff_changes_press(stoat: &mut Stoat, row: usize, column: u16) -> StackPress {
     let ws = stoat.active_workspace_mut();
     let Some(id) = ws.focused_diff_changes_id() else {
-        return UpdateEffect::None;
+        return StackPress::Missed;
     };
     let Workspace {
         diff_changes_views,
@@ -500,12 +518,17 @@ pub(crate) fn diff_changes_press(stoat: &mut Stoat, row: usize, column: u16) -> 
         ..
     } = ws;
     let Some(state) = diff_changes_views.get_mut(id) else {
-        return UpdateEffect::None;
+        return StackPress::Missed;
     };
     diff_changes::layout_stack(state, editors);
+
+    if let Some((index, gap, edge)) = diff_changes::fold_button_at(state, editors, row, column) {
+        diff_changes::expand(state, editors, index, gap, edge);
+        return StackPress::Opened;
+    }
     match diff_changes::press_cell(state, editors, row, column) {
-        true => UpdateEffect::Redraw,
-        false => UpdateEffect::None,
+        true => StackPress::Placed,
+        false => StackPress::Missed,
     }
 }
 
@@ -1153,13 +1176,15 @@ mod tests {
         diff_map::{DiffHunk, DiffHunkStatus, DiffMap, TokenDetail},
         display_map::{DisplayPoint, InlayPoint},
         editor_state::EditorId,
+        host::NoopLsp,
         pane::{Axis, DockPanel, DockSide, DockVisibility, FocusTarget, View},
         run::pty::PtyNotification,
         term_session::TermId,
+        test_fixture::mouse_event,
         test_harness::{editor, keys, TestHarness},
         workspace::Workspace,
     };
-    use crossterm::event::{Event, KeyCode};
+    use crossterm::event::{Event, KeyCode, MouseButton, MouseEventKind};
     use std::{
         ops::RangeInclusive,
         path::{Path, PathBuf},
@@ -2034,6 +2059,79 @@ mod tests {
             (shown_rows(&mut h), h.stoat.focused_mode()),
             (rows_of(&[0..=0, 27..=43, 44..=44]), "normal"),
         );
+    }
+
+    /// A press on the top fold row's button opens the ten lines above the hunk
+    /// and leaves the cursor and the focus where they were.
+    #[test]
+    fn a_press_on_the_top_fold_button_opens_ten_lines() {
+        let mut h = folded_long_files();
+        let before = place(&mut h);
+        press_stack(&mut h, MouseButton::Left, 1, 1);
+        assert_eq!(
+            (shown_rows(&mut h), place(&mut h)),
+            (rows_of(&[0..=0, 27..=43, 44..=44]), before),
+        );
+    }
+
+    /// A press on a fold row past its buttons puts the cursor on the row and
+    /// opens nothing.
+    #[test]
+    fn a_press_on_a_fold_row_past_its_buttons_places_the_cursor() {
+        let mut h = folded_long_files();
+        let rows = shown_rows(&mut h);
+        press_stack(&mut h, MouseButton::Left, 1, 8);
+        assert_eq!((shown_rows(&mut h), place(&mut h)), (rows, at("a.txt", 0)));
+    }
+
+    /// A press on the second button of a fold between two hunks grows the hunk
+    /// below up by ten lines.
+    #[test]
+    fn a_press_on_the_second_button_grows_the_hunk_below_up() {
+        let mut h = two_hunk_file();
+        let before = place(&mut h);
+        let row = stack_row_of(&mut h, 24);
+        press_stack(&mut h, MouseButton::Left, row, 3);
+        assert_eq!(
+            (shown_rows(&mut h), place(&mut h)),
+            (
+                rows_of(&[0..=0, 17..=23, 24..=24, 27..=43, 44..=44]),
+                before
+            ),
+        );
+    }
+
+    /// A middle press on a Fold Button opens the fold and asks the server
+    /// nothing, since the press places no cursor to ask from.
+    #[test]
+    fn a_middle_press_on_a_fold_button_opens_the_fold_and_asks_no_server() {
+        let mut h = folded_long_files();
+        h.allow_host_swap();
+        h.stoat.set_lsp_host(Arc::new(NoopLsp));
+        h.stoat.pending_message = None;
+        press_stack(&mut h, MouseButton::Middle, 1, 1);
+        assert_eq!(
+            (shown_rows(&mut h), h.stoat.pending_message.take()),
+            (rows_of(&[0..=0, 27..=43, 44..=44]), None),
+        );
+    }
+
+    /// Press `button` on stack row `row` of the focused changes view, `column`
+    /// cells past the stack's left edge as of the last paint.
+    fn press_stack(h: &mut TestHarness, button: MouseButton, row: usize, column: u16) {
+        let (content, scroll) = {
+            let state = h
+                .stoat
+                .active_workspace()
+                .focused_diff_changes()
+                .expect("a changes view");
+            (state.content_rect.expect("a painted stack"), state.scroll)
+        };
+        h.stoat.update(mouse_event(
+            MouseEventKind::Down(button),
+            content.x + column,
+            content.y + (row - scroll) as u16,
+        ));
     }
 
     /// One changed file of sixty lines with hunks on rows 20 and 40, in a

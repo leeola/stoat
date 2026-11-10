@@ -148,6 +148,7 @@ pub(crate) fn render_diff_changes(
     let inner = pane.area;
     let (inner, strip) = split_minimap_strip(inner, frame.minimap_enabled, DIFF_OVERVIEW_COLS);
     state.minimap_rect = strip;
+    state.content_rect = Some(inner);
     if let Some(editor) = state
         .focused_excerpt()
         .and_then(|excerpt| editors.get_mut(excerpt.editor_id))
