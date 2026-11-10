@@ -285,6 +285,14 @@ pub(crate) fn retire_terminal_state(stoat: &mut Stoat) {
             },
         );
     }
+    for (_, strip) in std::mem::take(&mut stoat.diff_view_strips) {
+        encode_minimap_drop_into(
+            &mut out,
+            &MinimapDropCommand {
+                content_id: strip.content_id(),
+            },
+        );
+    }
     encode_reset_into(&mut out);
     if let Some(apc_tx) = stoat.apc_tx.clone() {
         let _ = apc_tx.send(out);

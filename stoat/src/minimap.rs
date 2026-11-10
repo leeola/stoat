@@ -34,6 +34,7 @@ use stoat_text::{
 mod band;
 pub(crate) mod density;
 pub(crate) mod diff_changes;
+pub(crate) mod diff_view;
 pub(crate) mod emit;
 mod row_set;
 mod rows;
@@ -2046,8 +2047,9 @@ pub fn summarize_line(line: &str, tokens: &[LineToken], mark: RowMark) -> LineRu
 /// A lane takes the first [`LANE_COLS`] columns at full strength, and a tint of
 /// its color at `tint_weight` runs from [`CONTENT_COL`] to the row's end. The
 /// terminal draws a row's runs in order, so the tint goes before the content
-/// and lies under the text. A tick takes the last [`TICK_COLS`] columns at full
-/// strength. It goes last, so it lies over the content and the tint.
+/// and lies under the text. A zero `tint_weight` draws no tint. A tick takes
+/// the last [`TICK_COLS`] columns at full strength. It goes last, so it lies
+/// over the content and the tint.
 ///
 /// `content` holds at most [`MAX_RUNS`] less three runs, so the frame always
 /// fits.
@@ -2060,12 +2062,14 @@ pub(crate) fn frame_row(content: LineRuns, mark: RowMark, tint_weight: u8) -> Li
             class: lane,
             weight: 255,
         });
-        row.push(Run {
-            start_col: CONTENT_COL as u8,
-            len: (MAX_COLUMNS - CONTENT_COL) as u8,
-            class: lane,
-            weight: tint_weight,
-        });
+        if tint_weight > 0 {
+            row.push(Run {
+                start_col: CONTENT_COL as u8,
+                len: (MAX_COLUMNS - CONTENT_COL) as u8,
+                class: lane,
+                weight: tint_weight,
+            });
+        }
     }
     for &run in content.as_slice() {
         row.push(run);

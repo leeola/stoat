@@ -68,7 +68,7 @@ use crate::{
         StoatKeymapState,
     },
     lsp::{progress::LspProgressMap, registry::LspRegistry},
-    minimap::{emit, EdgeClass, MinimapContent},
+    minimap::{diff_view::DiffViewStrip, emit, EdgeClass, MinimapContent},
     pane::{DockVisibility, FocusTarget, Pane, PaneId, View},
     rebase::RebasePause,
     run::{RunId, RunState},
@@ -169,6 +169,9 @@ pub(crate) struct MinimapChrome<'a> {
     pub(crate) workspace: WorkspaceId,
     /// Content stores this session declared, read for each strip's `content_id`.
     pub(crate) content: &'a HashMap<(WorkspaceId, BufferId), MinimapContent>,
+    /// The strip of each diff view editor, which a diff view's strip shows in
+    /// place of its buffer's content store.
+    pub(crate) diff_view_strips: &'a HashMap<(WorkspaceId, EditorId), DiffViewStrip>,
     /// Syntax-scope palette a plain editor's strip declares and its run
     /// summaries index.
     pub(crate) palette: &'a [[u8; 3]],
@@ -194,6 +197,31 @@ pub(crate) struct MinimapChrome<'a> {
     /// The block a Coverage Rail draws over the part of the file its strip
     /// covers, rgba, the foreground of `ui.minimap.rail` made opaque.
     pub(crate) rail_cover: [u8; 4],
+}
+
+impl MinimapChrome<'_> {
+    /// The content store that editor `editor_id`'s strip shows and the
+    /// Coverage Rail beside it, or `None` before the store exists.
+    ///
+    /// A diff view's strip shows the editor's display rows and takes no rail.
+    /// Any other editor's strip shows its buffer's lines, with the rail its
+    /// buffer's store holds while the file does not fit.
+    pub(crate) fn editor_strip(
+        &self,
+        editor_id: EditorId,
+        editor: &EditorState,
+    ) -> Option<(u32, Option<u32>)> {
+        match editor.diff_view {
+            true => self
+                .diff_view_strips
+                .get(&(self.workspace, editor_id))
+                .map(|strip| (strip.content_id(), None)),
+            false => self
+                .content
+                .get(&(self.workspace, editor.buffer_id))
+                .map(|content| (content.content_id(), content.held_rail_id())),
+        }
+    }
 }
 
 /// One language server as the status bar shows it.
@@ -1248,6 +1276,7 @@ pub(crate) fn frame(
         MinimapChrome {
             workspace: stoat.active_workspace,
             content: &stoat.minimap_content,
+            diff_view_strips: &stoat.diff_view_strips,
             palette,
             dimmed_palette: palettes.dimmed.as_deref().unwrap_or(palette),
             diff_changes_content: stoat
@@ -2484,9 +2513,9 @@ fn hints_footer_keys(
 /// split pane of `ws`, or `None` when that pane shows neither a buffer nor an
 /// changes view.
 ///
-/// An editor's strip shows its buffer, in the diff view too. A changes view's
-/// strip shows the workspace's changes view document. Both take the syntax
-/// palette.
+/// An editor's strip shows what [`MinimapChrome::editor_strip`] answers. A
+/// changes view's strip shows the workspace's changes view document. Both take
+/// the syntax palette.
 fn single_band_content<'a>(
     ws: &Workspace,
     chrome: MinimapChrome<'a>,
@@ -2494,8 +2523,8 @@ fn single_band_content<'a>(
     match ws.panes.pane(ws.panes.focus()).view {
         View::Editor(editor_id) => {
             let editor = ws.editors.get(editor_id)?;
-            let content = chrome.content.get(&(chrome.workspace, editor.buffer_id))?;
-            Some((content.content_id(), chrome.palette))
+            let (content_id, _) = chrome.editor_strip(editor_id, editor)?;
+            Some((content_id, chrome.palette))
         },
         View::DiffChanges(_) => Some((chrome.diff_changes_content?, chrome.palette)),
         _ => None,
@@ -2503,17 +2532,14 @@ fn single_band_content<'a>(
 }
 
 /// The content id of the Coverage Rail the single band over `ws` shows in its
-/// last cell, `None` while the focused editor's strip fits and over any other
-/// view.
+/// last cell, `None` while the focused editor's strip fits, over a diff view,
+/// and over any other view.
 fn single_band_rail(ws: &Workspace, chrome: MinimapChrome<'_>) -> Option<u32> {
     let View::Editor(editor_id) = ws.panes.pane(ws.panes.focus()).view else {
         return None;
     };
     let editor = ws.editors.get(editor_id)?;
-    chrome
-        .content
-        .get(&(chrome.workspace, editor.buffer_id))?
-        .held_rail_id()
+    chrome.editor_strip(editor_id, editor)?.1
 }
 
 /// Paint the window's status row, `row`, with the status of `pane`, and return

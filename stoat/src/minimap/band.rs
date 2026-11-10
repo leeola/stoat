@@ -8,9 +8,25 @@
 //! row a row draws its band's outline from the same statistics.
 
 use super::{
-    density::CODE_SHARE_MIN, ClassTable, EdgeClass, LineRuns, RowMark, Run, CONTENT_COL, LANE_COLS,
-    MAX_COLUMNS, TAB_WIDTH, TICK_COLS,
+    density::{Tier, CODE_SHARE_MIN},
+    frame_row, ClassTable, EdgeClass, LineRuns, RowMark, Run, CONTENT_COL, LANE_COLS, MAX_COLUMNS,
+    TAB_WIDTH, TICK_COLS,
 };
+use std::ops::Range;
+
+/// The rows a strip folds into bands, as a band's row reads them.
+///
+/// A band's row reads the statistics and the mark of every row in the band and
+/// the text of the one row that represents it, so a source answers each on
+/// its own. A source that keeps no rows reads each one at derivation.
+pub(crate) trait BandSource {
+    /// The statistics of row `row`.
+    fn stat(&self, row: u32) -> LineStat;
+    /// The mark of row `row`.
+    fn mark(&self, row: u32) -> RowMark;
+    /// The runs of row `row`'s text, with no frame.
+    fn content(&self, row: u32) -> LineRuns;
+}
 
 /// Where the text of one buffer line starts and ends and what the line holds.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
@@ -202,6 +218,37 @@ pub(crate) fn shape_row(
         });
     }
     row
+}
+
+/// The strip row of `source`'s rows `band` under `tier`, its change tint at
+/// `tint_weight`.
+///
+/// A Line row draws its row's text framed by its mark. A Fit row draws its
+/// representative row's text framed by the mark of the whole band, and a band
+/// with no representative keeps the mark over no text, so a change never
+/// averages away. A Shape row draws the band's outline.
+pub(crate) fn band_row(
+    source: &impl BandSource,
+    band: Range<u32>,
+    tier: Tier,
+    table: &ClassTable,
+    tint_weight: u8,
+) -> LineRuns {
+    let mark = band_mark(band.clone().map(|row| source.mark(row)), table);
+    if tier == Tier::Line {
+        return frame_row(source.content(band.start), mark, tint_weight);
+    }
+
+    let stats: Vec<LineStat> = band.clone().map(|row| source.stat(row)).collect();
+    match tier {
+        Tier::Shape => shape_row(shape(&stats), mark, table),
+        Tier::Line | Tier::Fit => {
+            let content = representative(&stats).map_or_else(LineRuns::default, |at| {
+                source.content(band.start + at as u32)
+            });
+            frame_row(content, mark, tint_weight)
+        },
+    }
 }
 
 /// `row` led by an Item Rule, a run in the rule class across the content that

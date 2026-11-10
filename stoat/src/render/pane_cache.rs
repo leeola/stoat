@@ -484,8 +484,8 @@ pub(crate) fn pane_cache_key(
     let minimap_content_id = frame
         .minimap_chrome
         .as_ref()
-        .and_then(|chrome| chrome.content.get(&(chrome.workspace, buffer)))
-        .map_or(0, |content| content.content_id());
+        .and_then(|chrome| chrome.editor_strip(editor_id, editor))
+        .map_or(0, |(content_id, _)| content_id);
 
     Some(PaneCacheKey {
         buffer,

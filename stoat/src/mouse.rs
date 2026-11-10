@@ -20,7 +20,7 @@ use crate::{
     host::ClipboardKind,
     keymap::WheelDirection,
     keymap_state::{active_modal, ActiveModal, StoatKeymapState},
-    minimap::{density, emit::minimap_view_window, LINES_PER_CELL},
+    minimap::{density, diff_view::diff_view_window, emit::minimap_view_window, LINES_PER_CELL},
     pane::{FocusTarget, Placement, View},
     rebase::RebasePause,
     render::commit_picker::MIN_LIST_ROWS,
@@ -1226,6 +1226,9 @@ fn scrub_minimap(stoat: &mut Stoat, drag: MinimapDrag, strip: Rect, screen_row: 
 /// A strip that folds a band of lines into each row maps the cell to a row,
 /// with the view in rows as the thumb ships it, and lands on the middle line
 /// of that row's band.
+///
+/// A diff view's strip holds one row per display row, so its press resolves in
+/// display rows and lands on the display row itself.
 fn scrub_minimap_editor(stoat: &mut Stoat, editor_id: EditorId, strip: Rect, screen_row: u16) {
     let thumb_min_rows = stoat.minimap_thumb_min_rows();
     let ws = &mut stoat.workspaces[stoat.active_workspace];
@@ -1236,24 +1239,32 @@ fn scrub_minimap_editor(stoat: &mut Stoat, editor_id: EditorId, strip: Rect, scr
     let snapshot = editor.display_map.snapshot();
     let viewport = editor.viewport_rows.unwrap_or(strip.height as u32).max(1);
     let strip_local_row = screen_row.saturating_sub(strip.y);
-    // The strip is drawn in buffer lines, so the click resolves against the
-    // same window the emit ships rather than the editor's display rows. The
-    // emit ships the window of the declared rest, the row plus the wheel
-    // fraction, and the window of the eased offset only while a glide is in
-    // flight.
+    // A plain editor's strip is drawn in buffer lines, so the click resolves
+    // against the same window the emit ships rather than the editor's display
+    // rows. The emit ships the window of the declared rest, the row plus the
+    // wheel fraction, and the window of the eased offset only while a glide is
+    // in flight.
     let rest = editor.scroll_row as f32 + editor.scroll_frac;
     let shown_offset = match editor.scroll_glide {
         ScrollGlide::None => rest,
         ScrollGlide::Page | ScrollGlide::Wheel => editor.scroll_offset,
     };
-    let (view_top, view_visible) = minimap_view_window(&snapshot, shown_offset, viewport);
-    let buffer_lines = snapshot.buffer_line_count();
-    let target_line = match editor.minimap_density {
+    let (view_top, view_visible, total) = match editor.diff_view {
+        true => {
+            let (top, visible) = diff_view_window(&snapshot, shown_offset, viewport);
+            (top, visible, snapshot.line_count())
+        },
+        false => {
+            let (top, visible) = minimap_view_window(&snapshot, shown_offset, viewport);
+            (top, visible, snapshot.buffer_line_count())
+        },
+    };
+    let target = match editor.minimap_density {
         None => minimap::click_target_line(
             strip.height,
             LINES_PER_CELL,
             strip_local_row,
-            buffer_lines as f32,
+            total as f32,
             view_top,
             view_visible as f32,
         ),
@@ -1269,15 +1280,18 @@ fn scrub_minimap_editor(stoat: &mut Stoat, editor_id: EditorId, strip: Rect, scr
                 strip.height,
                 LINES_PER_CELL,
                 strip_local_row,
-                density::rows(buffer_lines, lines_per_row) as f32,
+                density::rows(total, lines_per_row) as f32,
                 top_256 as f32 / 256.0,
                 visible_256 as f32 / 256.0,
             );
-            density::band(row, lines_per_row, buffer_lines).start + lines_per_row / 2
+            density::band(row, lines_per_row, total).start + lines_per_row / 2
         },
     };
 
-    scrub_to_line(editor, &snapshot, target_line, viewport);
+    match editor.diff_view {
+        true => scrub_to_display_row(editor, &snapshot, target, viewport),
+        false => scrub_to_line(editor, &snapshot, target, viewport),
+    }
 }
 
 /// `drag` as a press on the Coverage Rail when `column` is the last of
@@ -1329,20 +1343,31 @@ fn scrub_minimap_rail(stoat: &mut Stoat, editor_id: EditorId, strip: Rect, scree
 /// Jump `editor`'s view so buffer line `line` of `snapshot` sits centered in a
 /// viewport of `viewport` rows, and glide there from the declared rest.
 fn scrub_to_line(editor: &mut EditorState, snapshot: &DisplaySnapshot, line: u32, viewport: u32) {
-    let rest = editor.scroll_row as f32 + editor.scroll_frac;
-
     // A strip taller than the file resolves cells past its last line, and
     // scrolling happens in display rows, so the target converts back.
     let target_line = line.min(snapshot.buffer_line_count().saturating_sub(1));
     let target_display = snapshot
         .buffer_to_display(stoat_text::Point::new(target_line, 0))
         .row;
+    scrub_to_display_row(editor, snapshot, target_display, viewport);
+}
 
+/// Jump `editor`'s view so display row `row` of `snapshot` sits centered in a
+/// viewport of `viewport` rows, and glide there from the declared rest.
+///
+/// The view stops at the last page, so a row past the last one lands there.
+fn scrub_to_display_row(
+    editor: &mut EditorState,
+    snapshot: &DisplaySnapshot,
+    row: u32,
+    viewport: u32,
+) {
+    let rest = editor.scroll_row as f32 + editor.scroll_frac;
     let max_scroll = snapshot
         .line_count()
         .saturating_sub(1)
         .saturating_sub(viewport.saturating_sub(1));
-    let target_row = target_display.saturating_sub(viewport / 2).min(max_scroll);
+    let target_row = row.saturating_sub(viewport / 2).min(max_scroll);
 
     editor.scroll_row = target_row;
     editor.scroll_frac = 0.0;

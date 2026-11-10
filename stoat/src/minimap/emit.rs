@@ -21,6 +21,7 @@ use crate::{
     minimap::{
         density::{self, Density, Tier},
         diff_changes::{self, DiffChangesStrip},
+        diff_view::{self, DiffViewStrip},
         rows::RailUpdate,
         BuildWindow, EdgeSource, RowMark, LINES_PER_CELL,
     },
@@ -43,9 +44,9 @@ use stoat_language::{extract_symbols, SymbolDef};
 use stoat_text::{Bias, Rope};
 
 /// Assign a `content_id` to each visible split-editor buffer that a minimap
-/// strip renders, and to the active workspace's changes view strip while an
-/// changes view shows, so the declare widget reads the id while the frame
-/// paints.
+/// strip renders, to each visible diff view editor's strip, and to the active
+/// workspace's changes view strip while an changes view shows, so the declare
+/// widget reads the id while the frame paints.
 ///
 /// The summaries themselves sync afterward at the frame seam in
 /// [`emit_minimap`]. A no-op with the minimap off.
@@ -62,6 +63,7 @@ pub(crate) fn ensure_minimap_content_ids(stoat: &mut Stoat) {
         workspaces,
         minimap_content,
         diff_changes_strips,
+        diff_view_strips,
         minimap_next_content_id,
         executor,
         ..
@@ -83,6 +85,13 @@ pub(crate) fn ensure_minimap_content_ids(stoat: &mut Stoat) {
         let Some(editor) = ws.editors.get(editor_id) else {
             continue;
         };
+        if editor.diff_view {
+            if let Entry::Vacant(slot) = diff_view_strips.entry((ws_id, editor_id)) {
+                slot.insert(DiffViewStrip::new(*minimap_next_content_id));
+                *minimap_next_content_id += 1;
+            }
+            continue;
+        }
         // The content takes a second id for the Coverage Rail its strip shows
         // when the file does not fit, since a sync has no way to the counter.
         if let Entry::Vacant(slot) = minimap_content.entry((ws_id, editor.buffer_id)) {
@@ -155,7 +164,8 @@ impl MinimapPalettes {
 }
 
 /// Sync each visible minimap strip's buffer and drain its summary changes to
-/// the terminal, retiring content for buffers that closed.
+/// the terminal, retiring content for buffers that closed and the strips of
+/// editors that left the diff view or closed.
 ///
 /// Runs at the frame seam after [`Stoat::emit_smooth_scroll`], so each editor's
 /// reserved strip rect from the paint is current. The strip declaration rides
@@ -173,9 +183,9 @@ pub(crate) fn emit_minimap(stoat: &mut Stoat) {
 
     // Per-pane mode syncs a strip only where one is reserved (minimap_rect).
     // Single mode has no per-pane rects, so it syncs every visible editor's
-    // buffer, keeping all of them warm for instant focus switches.
+    // strip, keeping all of them warm for instant focus switches.
     let single = stoat.minimap_mode() == MinimapMode::Single;
-    let strips: Vec<(BufferId, EditorId)> = {
+    let strips: Vec<(BufferId, EditorId, bool)> = {
         let ws = &stoat.workspaces[ws_id];
         ws.panes
             .split_panes()
@@ -185,7 +195,7 @@ pub(crate) fn emit_minimap(stoat: &mut Stoat) {
                 };
                 let editor = ws.editors.get(editor_id)?;
                 let included = single || editor.minimap_rect.is_some();
-                included.then_some((editor.buffer_id, editor_id))
+                included.then_some((editor.buffer_id, editor_id, editor.diff_view))
             })
             .collect()
     };
@@ -213,7 +223,15 @@ pub(crate) fn emit_minimap(stoat: &mut Stoat) {
     };
 
     let mut out = Vec::new();
-    for (buffer_id, editor_id) in strips {
+    for (buffer_id, editor_id, diff_view) in strips {
+        if diff_view {
+            diff_view::sync_diff_view_strip(stoat, ws_id, editor_id, &mut out);
+            stoat.minimap_build_pending |= stoat
+                .diff_view_strips
+                .get(&(ws_id, editor_id))
+                .is_some_and(DiffViewStrip::build_pending);
+            continue;
+        }
         sync_minimap_strip(stoat, ws_id, buffer_id, editor_id, &mut out);
         stoat.minimap_build_pending |= stoat
             .minimap_content
@@ -257,6 +275,28 @@ pub(crate) fn emit_minimap(stoat: &mut Stoat) {
                     },
                 );
             }
+        }
+    }
+    let retired: Vec<(WorkspaceId, EditorId)> = stoat
+        .diff_view_strips
+        .keys()
+        .filter(|(ws, editor_id)| {
+            *ws == ws_id
+                && !stoat.workspaces[ws_id]
+                    .editors
+                    .get(*editor_id)
+                    .is_some_and(|editor| editor.diff_view)
+        })
+        .copied()
+        .collect();
+    for key in retired {
+        if let Some(strip) = stoat.diff_view_strips.remove(&key) {
+            stoatty_protocol::command::encode_minimap_drop_into(
+                &mut out,
+                &stoatty_protocol::command::MinimapDropCommand {
+                    content_id: strip.content_id(),
+                },
+            );
         }
     }
     // A parked stack keeps the strip, so the flip back finds the lines of
@@ -497,7 +537,7 @@ fn minimap_build_window(
 ///
 /// A strip with no rect laid out yet holds one line per row, so a first frame
 /// before layout builds lines.
-fn strip_density(
+pub(super) fn strip_density(
     file_lines: u32,
     strip: Option<Rect>,
     viewport_lines: u32,
@@ -2728,12 +2768,14 @@ mod tests {
         drain_apc(rx)
     }
 
-    /// The single band follows its editor into the diff view. It declares the
-    /// class table's palette, as it does over a plain editor, again at a theme
-    /// switch, and the buffer's lines sync with their lanes and tints.
+    /// The single band follows its editor into the diff view, where it
+    /// declares the editor's diff view strip in the class table's palette, as
+    /// it does over a plain editor, again at a theme switch. The strip's rows
+    /// carry their lanes and tints.
     ///
-    /// A dial step sends neither the band nor a line, since neither the
-    /// palette nor the summaries hold a dial.
+    /// A tint step resends the changed row at its new weight and sends no
+    /// band, since the palette holds no dial. A syntax toggle over a
+    /// plain-text file changes no row.
     #[test]
     fn a_diff_view_band_declares_the_syntax_palette() {
         use crate::{minimap::EdgeClass, render::SINGLE_MINIMAP_STRIP_ID};
@@ -2743,7 +2785,7 @@ mod tests {
         let band = |cmds: &[Command]| {
             cmds.iter().find_map(|c| match c {
                 Command::Minimap(m) if m.strip_id == SINGLE_MINIMAP_STRIP_ID => {
-                    Some(m.palette.clone())
+                    Some((m.content_id, m.palette.clone()))
                 },
                 _ => None,
             })
@@ -2768,6 +2810,8 @@ mod tests {
         h.stoat.diff_syntax = false;
         let flat = emit_frame(&mut h, &mut rx);
 
+        let editor_id = h.stoat.focused_editor_ids().expect("editor").0;
+        let strip = h.stoat.diff_view_strips[&(h.stoat.active_workspace, editor_id)].content_id();
         let table = &h.stoat.minimap_class_table;
         let first_palette = table.palette().to_vec();
         assert_eq!(
@@ -2779,7 +2823,7 @@ mod tests {
                 (splices(&stepped), splices(&flat)),
             ),
             (
-                Some(first_palette.clone()),
+                Some((strip, first_palette.clone())),
                 Some(vec![
                     table.edge_class(EdgeClass::Modified),
                     table.edge_class(EdgeClass::Modified),
@@ -2787,10 +2831,11 @@ mod tests {
                 ]),
                 None,
                 None,
-                (0, 0),
+                (1, 0),
             ),
-            "the band declares the class table's palette over the diff view's synced \
-             lines, and a tint step and a syntax toggle send neither the band nor a line",
+            "the band declares the diff view strip in the class table's palette over its \
+             synced rows, a tint step resends the changed row alone, and a syntax toggle \
+             sends nothing",
         );
 
         action_handlers::dispatch(
@@ -2805,7 +2850,7 @@ mod tests {
         assert_ne!(themed_palette, first_palette, "the theme moves the palette");
         assert_eq!(
             band(&themed),
-            Some(themed_palette),
+            Some((strip, themed_palette)),
             "a theme switch declares the class table's palette under the new theme",
         );
     }

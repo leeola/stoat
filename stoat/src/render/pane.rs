@@ -213,11 +213,10 @@ pub(crate) fn render_pane(
                 }
 
                 if let (Some(strip), Some(chrome)) = (editor.minimap_rect, frame.minimap_chrome)
-                    && let Some(content) = chrome.content.get(&(chrome.workspace, editor.buffer_id))
+                    && let Some((content_id, rail)) = chrome.editor_strip(*editor_id, editor)
                 {
-                    let rail = content.held_rail_id();
                     let (strip, rail_rect) = split_rail(strip, rail.is_some());
-                    pane_minimap(pane, chrome, content.content_id(), is_focused, frame)
+                    pane_minimap(pane, chrome, content_id, is_focused, frame)
                         .render(strip, buf, scene);
                     if let (Some(rail_id), Some(rail_rect)) = (rail, rail_rect) {
                         rail_minimap(pane.index, rail_id, chrome).render(rail_rect, buf, scene);

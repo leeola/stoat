@@ -2498,6 +2498,15 @@ pub struct Stoat {
     /// view or a parked stack.
     pub(crate) diff_changes_strips:
         std::collections::HashMap<WorkspaceId, crate::minimap::diff_changes::DiffChangesStrip>,
+    /// The minimap strip of each diff view editor, which shows the editor's
+    /// display rows in place of its buffer's lines.
+    ///
+    /// It exists while its editor is in the diff view, from the first frame
+    /// that shows the editor there.
+    pub(crate) diff_view_strips: std::collections::HashMap<
+        (WorkspaceId, EditorId),
+        crate::minimap::diff_view::DiffViewStrip,
+    >,
     /// Whether a visible run or terminal fed output since the last frame tick, so
     /// the tick repaints once rather than the output arm repainting per PTY chunk.
     /// A terminal that changed its title sets it too, visible or not.
@@ -2976,6 +2985,7 @@ impl Stoat {
             minimap_next_content_id: 0,
             minimap_build_pending: false,
             diff_changes_strips: std::collections::HashMap::new(),
+            diff_view_strips: std::collections::HashMap::new(),
             pty_dirty: false,
             spinner_clock: 0.0,
             minimap_class_table,

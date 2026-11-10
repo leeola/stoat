@@ -15,8 +15,8 @@
 
 use super::{
     emit::{convert_minimap_runs, minimap_line_tokens, WEIGHTED_RUN_PROTOCOL},
-    summarize_line, ClassTable, EdgeClass, LineRuns, LineToken, RowMark, Run, SweepRows,
-    MAX_COLUMNS, SYNC_BUDGET, SYNC_SLICE,
+    frame_row, summarize_line, ClassTable, EdgeClass, LineRuns, LineToken, RowMark, Run, SweepRows,
+    MAX_COLUMNS, SYNC_BUDGET, SYNC_SLICE, TINT_WEIGHT,
 };
 use crate::{
     app::Stoat,
@@ -162,6 +162,16 @@ struct Step {
     skip: usize,
     /// Held lines the splice removes.
     removed: usize,
+}
+
+/// What a display row of a diff shows.
+enum RowKind {
+    /// A base line spliced in for a removal, which no buffer row holds.
+    Base,
+    /// A fold's placeholder over buffer rows that no kept run holds.
+    Placeholder,
+    /// The buffer text from this point on.
+    Text(Point),
 }
 
 impl DiffChangesStrip {
@@ -361,7 +371,7 @@ pub(crate) fn summarize_rows(
             })
             .collect();
         lines.extend(
-            display_rows.map(|row| excerpt_row_line(&snapshot, row, &kept, &tokens, table)),
+            display_rows.map(|row| display_row_line(&snapshot, row, &kept, &tokens, table)),
         );
     }
     lines
@@ -799,28 +809,48 @@ fn shown_runs(kept: &[Range<u32>], hull: Range<u32>) -> impl Iterator<Item = Ran
         .map(move |run| run.start.max(start)..run.end.min(end))
 }
 
-/// The minimap line of display row `row` of an excerpt whose display is
-/// `snapshot`, with the buffer rows `kept` showing and `tokens` coloring them.
-///
-/// A row that shows the file's text summarizes the buffer bytes the row covers
-/// rather than its display text. The display text expands tabs while the
-/// tokens count buffer bytes, so on a tab-indented line the display text puts
-/// each color at the wrong column. A row whose buffer row no kept run holds is
-/// a fold's placeholder, which takes no tokens, since its buffer row is hidden.
-fn excerpt_row_line(
+/// The minimap line of display row `row` of a diff whose display is
+/// `snapshot`, with the buffer rows `kept` showing and `tokens` coloring them,
+/// as [`display_row`] reads the row.
+pub(super) fn display_row_line(
     snapshot: &DisplaySnapshot,
     row: u32,
     kept: &[Range<u32>],
     tokens: &HashMap<u32, Vec<LineToken>>,
     table: &ClassTable,
 ) -> LineRuns {
-    let Some(start) = snapshot.display_to_buffer(DisplayPoint::new(row, 0)) else {
-        return summarize_line(&snapshot.display_line(row), &[], deleted_mark(table));
+    let (content, mark) = display_row(snapshot, row, kept, tokens, table);
+    frame_row(content, mark, TINT_WEIGHT)
+}
+
+/// The runs of display row `row`'s text, with no frame, and the mark that
+/// frames them, for a diff whose display is `snapshot` with the buffer rows
+/// `kept` showing and `tokens` coloring them.
+///
+/// A row that shows the file's text summarizes the buffer bytes the row covers
+/// rather than its display text. The display text expands tabs while the
+/// tokens count buffer bytes, so on a tab-indented line the display text puts
+/// each color at the wrong column. A base line spliced in for a removal takes
+/// no tokens and the removed lane. A row whose buffer row no kept run holds is
+/// a fold's placeholder, which takes no tokens, since its buffer row is hidden.
+pub(super) fn display_row(
+    snapshot: &DisplaySnapshot,
+    row: u32,
+    kept: &[Range<u32>],
+    tokens: &HashMap<u32, Vec<LineToken>>,
+    table: &ClassTable,
+) -> (LineRuns, RowMark) {
+    let start = match row_kind(snapshot, row, kept) {
+        RowKind::Base => {
+            let text = summarize_line(&snapshot.display_line(row), &[], RowMark::NONE);
+            return (text, deleted_mark(table));
+        },
+        RowKind::Placeholder => {
+            let text = summarize_line(&snapshot.display_line(row), &[], RowMark::NONE);
+            return (text, RowMark::NONE);
+        },
+        RowKind::Text(start) => start,
     };
-    let at = kept.partition_point(|run| run.end <= start.row);
-    if !kept.get(at).is_some_and(|run| run.contains(&start.row)) {
-        return summarize_line(&snapshot.display_line(row), &[], RowMark::NONE);
-    }
 
     let mut line = String::new();
     snapshot
@@ -849,7 +879,38 @@ fn excerpt_row_line(
             .collect()
     });
     let mark = status_mark(snapshot.line_diff_status(start.row), table);
-    summarize_line(&line[from..end], &row_tokens, mark)
+    (
+        summarize_line(&line[from..end], &row_tokens, RowMark::NONE),
+        mark,
+    )
+}
+
+/// The mark of display row `row`, as [`display_row`] reads it, with no text
+/// read.
+pub(super) fn display_row_mark(
+    snapshot: &DisplaySnapshot,
+    row: u32,
+    kept: &[Range<u32>],
+    table: &ClassTable,
+) -> RowMark {
+    match row_kind(snapshot, row, kept) {
+        RowKind::Base => deleted_mark(table),
+        RowKind::Placeholder => RowMark::NONE,
+        RowKind::Text(start) => status_mark(snapshot.line_diff_status(start.row), table),
+    }
+}
+
+/// What display row `row` of `snapshot` shows, with the buffer rows `kept`
+/// showing.
+fn row_kind(snapshot: &DisplaySnapshot, row: u32, kept: &[Range<u32>]) -> RowKind {
+    let Some(start) = snapshot.display_to_buffer(DisplayPoint::new(row, 0)) else {
+        return RowKind::Base;
+    };
+    let at = kept.partition_point(|run| run.end <= start.row);
+    match kept.get(at).is_some_and(|run| run.contains(&start.row)) {
+        true => RowKind::Text(start),
+        false => RowKind::Placeholder,
+    }
 }
 
 /// The mark of a row of diff `status`.
@@ -1718,8 +1779,9 @@ mod tests {
     }
 
     /// The strip lives across a flip to the per-file diff and back, so the
-    /// flip back sends no line of a stack that did not move. A close after it
-    /// drops the strip, since no changes view and no parked stack remain.
+    /// flip back sends no line of a stack that did not move. The per-file
+    /// diff's own strip goes with the flip back. A close after it drops the
+    /// strip, since no changes view and no parked stack remain.
     #[test]
     fn the_strip_lives_across_a_flip_until_a_close() {
         let (mut h, mut rx) = strip_harness(8);
@@ -1749,14 +1811,25 @@ mod tests {
             (held, splices, drops)
         };
 
-        let pressed = ["Ctrl-t", "Ctrl-t", "q"].map(|key| press(&mut h, key));
+        let flipped = press(&mut h, "Ctrl-t");
+        let diff_strips: Vec<u32> = h
+            .stoat
+            .diff_view_strips
+            .values()
+            .map(|strip| strip.content_id())
+            .collect();
+        let back = press(&mut h, "Ctrl-t");
+        let closed = press(&mut h, "q");
         assert_eq!(
-            pressed,
-            [
-                (Some(content_id), vec![], vec![]),
-                (Some(content_id), vec![], vec![]),
-                (None, vec![], vec![content_id]),
-            ],
+            (diff_strips.len(), [flipped, back, closed]),
+            (
+                1,
+                [
+                    (Some(content_id), vec![], vec![]),
+                    (Some(content_id), vec![], diff_strips.clone()),
+                    (None, vec![], vec![content_id]),
+                ]
+            ),
         );
     }
 

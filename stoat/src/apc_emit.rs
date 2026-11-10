@@ -20,7 +20,7 @@ use crate::{
     display_map::{highlights::HighlightEndpoints, DisplayPoint, DisplaySnapshot, PaintVersion},
     editor_state::{EditorId, EditorState, ScrollGlide},
     input_view::InputView,
-    minimap::{density, emit::minimap_view_window, LINES_PER_CELL},
+    minimap::{density, diff_view::diff_view_window, emit::minimap_view_window, LINES_PER_CELL},
     pane::{FocusTarget, PaneId, Placement, View},
     render::{
         diff_changes::PagePaint,
@@ -1366,11 +1366,14 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
         if let Some(strip_id) = view_strip {
             // The strip is one row per buffer line, or per band under a fold,
             // while the editor scrolls in display rows, so the window converts
-            // before it ships. The conversion is deferred into the closure
-            // because an idle frame has nothing to convert that the last one
-            // did not. A fold or a Thumb Minimum that moves converts again.
+            // before it ships. A diff view's strip is one row per display row,
+            // so its window needs no conversion. The conversion is deferred
+            // into the closure because an idle frame has nothing to convert
+            // that the last one did not. A fold or a Thumb Minimum that moves
+            // converts again.
             let rows = region.height as u32;
             let density = editor.minimap_density;
+            let diff_view = editor.diff_view;
             let stamp = {
                 let mut hasher = DefaultHasher::new();
                 display_map_stamp(buffer_version, paint_version).hash(&mut hasher);
@@ -1384,7 +1387,10 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
             stoat
                 .smooth_scroll
                 .emit_minimap_view(&mut out, strip_id, region.pool, inputs, || {
-                    let (top, visible) = minimap_view_window(&snapshot, scroll_offset, rows);
+                    let (top, visible) = match diff_view {
+                        true => diff_view_window(&snapshot, scroll_offset, rows),
+                        false => minimap_view_window(&snapshot, scroll_offset, rows),
+                    };
                     match density {
                         Some(density) => {
                             let (top_256, visible_256) = density::thumb_rows_256(
@@ -1402,12 +1408,13 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
             // A strip that does not fit scrolls, and its Coverage Rail shows
             // the whole file, so the rail's thumb covers the rows the strip
             // shows. Those start where the terminal scrolls the strip to and
-            // run its height, converted from the strip's fold to the rail's.
+            // run its height, converted from the strip's fold to the rail's. A
+            // diff view's strip takes no rail.
             let strip = match single_minimap {
                 true => single_band,
                 false => editor.minimap_rect,
             };
-            if let Some(density) = density.filter(|density| !density.fits)
+            if let Some(density) = density.filter(|density| !density.fits && !diff_view)
                 && let Some(strip) = strip
             {
                 let strip_rows = u32::from(strip.height) * u32::from(LINES_PER_CELL);
