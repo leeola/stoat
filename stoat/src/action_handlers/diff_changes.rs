@@ -2025,6 +2025,17 @@ mod tests {
         );
     }
 
+    /// `z k` opens ten lines above the cursor's hunk and leaves the view menu.
+    #[test]
+    fn z_k_opens_ten_lines_above_the_hunk() {
+        let mut h = folded_long_files();
+        h.type_keys("z k");
+        assert_eq!(
+            (shown_rows(&mut h), h.stoat.focused_mode()),
+            (rows_of(&[0..=0, 27..=43, 44..=44]), "normal"),
+        );
+    }
+
     /// One changed file of sixty lines with hunks on rows 20 and 40, in a
     /// settled and painted changes view, so its excerpt folds rows 0 to 16, 24
     /// to 36, and 44 on.

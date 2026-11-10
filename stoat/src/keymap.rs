@@ -3157,6 +3157,49 @@ mod tests {
         );
     }
 
+    /// In the changes view the view menu opens and folds a fold's unchanged
+    /// lines in place of the one-row scroll, and the bracket menus grow the
+    /// cursor's hunk on Plus, in normal and in select mode. A plain editor's
+    /// `z j` still scrolls.
+    #[test]
+    fn the_changes_view_z_menu_opens_folds() {
+        let config = parse_config(crate::app::DEFAULT_KEYMAP);
+        let keymap = Keymap::compile(&config);
+        let press = |view: &str, mode: &str, c| {
+            let state = TestState::new()
+                .set("mode", StateValue::String(mode.into()))
+                .set("view", StateValue::String(view.into()))
+                .set("pane", StateValue::String("editor".into()));
+            action_names(keymap.lookup(&state, &key_event(KeyCode::Char(c), KeyModifiers::NONE)))
+        };
+        let then_mode = |name: &str| Some(vec![name.to_string(), "SetMode".to_string()]);
+
+        assert_eq!(
+            [
+                press("diff_changes", "z", 'j'),
+                press("diff_changes", "z", 'k'),
+                press("diff_changes", "z", 'o'),
+                press("diff_changes", "z", 'c'),
+                press("diff_changes", "bracket_prev", '+'),
+                press("diff_changes", "bracket_next", '+'),
+                press("diff_changes", "select_z", 'k'),
+                press("diff_changes", "select_bracket_next", '+'),
+                press("file", "z", 'j'),
+            ],
+            [
+                then_mode("DiffChangesExpandDown"),
+                then_mode("DiffChangesExpandUp"),
+                then_mode("DiffChangesExpandAll"),
+                then_mode("DiffChangesCollapse"),
+                then_mode("DiffChangesExpandUp"),
+                then_mode("DiffChangesExpandDown"),
+                then_mode("DiffChangesExpandUp"),
+                then_mode("DiffChangesExpandDown"),
+                then_mode("ScrollDown"),
+            ],
+        );
+    }
+
     /// The arrows cross the changes view's excerpts in insert mode too, and a
     /// modal open over the view keeps them, since its prompt is in insert mode
     /// as well.

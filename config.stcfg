@@ -1518,7 +1518,9 @@ on key {
     # shifted side buttons walk whole hunks of the line diff, as in the diff
     # view. q closes the view. Escape is left to the normal block, as the
     # per-file diff leaves it, so the key dismisses the hints and never closes
-    # the view.
+    # the view. The view menu's `z k`, `z j`, `z o`, and `z c` and the bracket
+    # menus' `[ Plus` and `] Plus` open and fold the unchanged lines a fold row
+    # hides, as the blocks below bind them.
     #
     # A label is the key's short name in the docked hints box, which lists the
     # keys that share a label on one row. Two keys on one action carry the
@@ -1544,6 +1546,35 @@ on key {
         S-MouseBack -> GotoNextGitChange() "next hunk";
         S-MouseForward -> GotoPrevGitChange() "prev hunk";
         : -> OpenCommandPalette() "commands";
+    }
+    # The view menu opens and folds a changes view's unchanged lines, as vim's
+    # z keys open and close folds, so `z j` and `z k` scroll no row there. The
+    # wheel keeps the one-row scroll. Each block outranks the plain view menu
+    # on the keys it binds, and the menu's other keys stay as they are.
+    view == diff_changes && mode == z {
+        j -> [DiffChangesExpandDown(), SetMode(normal)] "expand down";
+        k -> [DiffChangesExpandUp(), SetMode(normal)] "expand up";
+        o -> [DiffChangesExpandAll(), SetMode(normal)] "expand all";
+        c -> [DiffChangesCollapse(), SetMode(normal)] "collapse";
+    }
+    view == diff_changes && mode == select_z {
+        j -> [DiffChangesExpandDown(), SetMode(select)] "expand down";
+        k -> [DiffChangesExpandUp(), SetMode(select)] "expand up";
+        o -> [DiffChangesExpandAll(), SetMode(select)] "expand all";
+        c -> [DiffChangesCollapse(), SetMode(select)] "collapse";
+    }
+    # The bracket menus grow the cursor's hunk into the fold on that side.
+    view == diff_changes && mode == bracket_next {
+        Plus -> [DiffChangesExpandDown(), SetMode(normal)] "expand down";
+    }
+    view == diff_changes && mode == bracket_prev {
+        Plus -> [DiffChangesExpandUp(), SetMode(normal)] "expand up";
+    }
+    view == diff_changes && mode == select_bracket_next {
+        Plus -> [DiffChangesExpandDown(), SetMode(select)] "expand down";
+    }
+    view == diff_changes && mode == select_bracket_prev {
+        Plus -> [DiffChangesExpandUp(), SetMode(select)] "expand up";
     }
     # In insert mode the arrows cross into the next file at an excerpt's edge,
     # as j and k do in normal mode. The insert session crosses with the
