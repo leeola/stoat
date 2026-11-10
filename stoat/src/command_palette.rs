@@ -554,7 +554,11 @@ pub(crate) fn action_is_available(kind: ActionKind, ctx: &Availability) -> bool 
         | DiffChangesHalfPageUp
         | DiffChangesFirst
         | DiffChangesLast
-        | DiffChangesOpen => ctx.diff_changes_open,
+        | DiffChangesOpen
+        | DiffChangesExpandUp
+        | DiffChangesExpandDown
+        | DiffChangesExpandAll
+        | DiffChangesCollapse => ctx.diff_changes_open,
 
         ReviewNextCommit | ReviewPrevCommit | ReviewDone => ctx.review_walk_open,
 
@@ -1907,6 +1911,10 @@ mod tests {
             "EnterRebase",
             "CloseDiffChanges",
             "DiffChangesNext",
+            "DiffChangesExpandUp",
+            "DiffChangesExpandDown",
+            "DiffChangesExpandAll",
+            "DiffChangesCollapse",
         ] {
             assert!(!listed.contains(&name), "{name} unexpectedly visible");
         }
@@ -2123,6 +2131,10 @@ mod tests {
             "CloseDiffChanges",
             "DiffChangesNext",
             "DiffChangesOpen",
+            "DiffChangesExpandUp",
+            "DiffChangesExpandDown",
+            "DiffChangesExpandAll",
+            "DiffChangesCollapse",
             "DiffChanges",
         ] {
             assert!(

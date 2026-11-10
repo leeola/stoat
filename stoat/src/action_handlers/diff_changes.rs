@@ -14,7 +14,7 @@ use crate::{
     app::{Stoat, UpdateEffect},
     buffer_lifecycle,
     buffer_registry::{BufferRegistry, OpenOrigin},
-    diff_changes::{self, DiffChangesState, Landing},
+    diff_changes::{self, DiffChangesState, ExpandDir, Landing},
     display_map::{DisplayPoint, DisplaySnapshot},
     editor_state::{EditorId, EditorState},
     pane::{PaneId, View},
@@ -473,7 +473,7 @@ pub(super) fn diff_changes_edge(stoat: &mut Stoat, last: bool) -> UpdateEffect {
         return UpdateEffect::None;
     };
 
-    let kept = diff_changes::kept_rows(editor);
+    let kept = diff_changes::kept_rows(editor, &state.excerpts[index].revealed);
     let row = match last {
         true => kept.last().map_or(0, |run| run.end - 1),
         false => kept.first().map_or(0, |run| run.start),
@@ -577,6 +577,24 @@ pub(super) fn align_stack(stoat: &mut Stoat, align: ViewAlign) -> UpdateEffect {
     }
     state.scroll = scroll;
     UpdateEffect::Redraw
+}
+
+/// Open unchanged lines of a fold of the focused changes view as `dir` says,
+/// or say in the status row that no fold lies that way.
+pub(super) fn diff_changes_expand(stoat: &mut Stoat, dir: ExpandDir) -> UpdateEffect {
+    if let Err(text) = diff_changes::expand_from_cursor(stoat, dir) {
+        stoat.set_status(text);
+    }
+    UpdateEffect::Redraw
+}
+
+/// Fold again the rows that expands opened around the focused changes view's
+/// cursor.
+pub(super) fn diff_changes_collapse(stoat: &mut Stoat) -> UpdateEffect {
+    match diff_changes::collapse_at_cursor(stoat) {
+        true => UpdateEffect::Redraw,
+        false => UpdateEffect::None,
+    }
 }
 
 /// Give a fresh state to every changes view pane of the active workspace whose
@@ -1133,7 +1151,7 @@ mod tests {
         buffer_lifecycle,
         diff_changes::{self, DiffChangesId, DiffChangesState, StackStamp},
         diff_map::{DiffHunk, DiffHunkStatus, DiffMap, TokenDetail},
-        display_map::DisplayPoint,
+        display_map::{DisplayPoint, InlayPoint},
         editor_state::EditorId,
         pane::{Axis, DockPanel, DockSide, DockVisibility, FocusTarget, View},
         run::pty::PtyNotification,
@@ -1143,6 +1161,7 @@ mod tests {
     };
     use crossterm::event::{Event, KeyCode};
     use std::{
+        ops::RangeInclusive,
         path::{Path, PathBuf},
         sync::Arc,
     };
@@ -1891,6 +1910,191 @@ mod tests {
             .snapshot()
             .display_to_buffer(DisplayPoint::new(row, 0))
             .map(|point| point.row)
+    }
+
+    /// Two expands up from a hunk's first row open ten lines above it each, and
+    /// each fold row counts the lines it still hides.
+    #[test]
+    fn an_expand_up_from_a_hunk_opens_ten_lines_above_it() {
+        let mut h = folded_long_files();
+        act(&mut h, &stoat_action::DiffChangesExpandUp);
+        act(&mut h, &stoat_action::DiffChangesExpandUp);
+        assert_eq!(
+            (shown_rows(&mut h), fold_row_texts(&mut h)),
+            (
+                rows_of(&[0..=0, 17..=43, 44..=44]),
+                ["\u{22ef} 17 unchanged lines", "\u{22ef} 16 unchanged lines"]
+                    .map(String::from)
+                    .to_vec(),
+            ),
+        );
+    }
+
+    /// An expand down opens ten lines below the cursor's hunk and keeps both the
+    /// last opened line and the cursor on screen. The cursor stays.
+    #[test]
+    fn an_expand_down_opens_ten_lines_below_and_scrolls_to_them() {
+        let mut h = folded_long_files();
+        let before = place(&mut h);
+        act(&mut h, &stoat_action::DiffChangesExpandDown);
+
+        let (scroll, cursor, total) = stack_view(&mut h);
+        let viewport = viewport_rows(&h.stoat);
+        let last_opened = stack_row_of(&mut h, 53);
+        assert_eq!(
+            (
+                shown_rows(&mut h),
+                place(&mut h),
+                (scroll..scroll + viewport).contains(&last_opened),
+                (scroll..scroll + viewport).contains(&cursor),
+            ),
+            (rows_of(&[0..=0, 37..=53, 54..=54]), before, true, true),
+            "{scroll} of {total} rows",
+        );
+    }
+
+    /// An expand on the fold row above a file's first hunk grows the hunk up,
+    /// whichever way it asks, since no hunk lies above that fold.
+    #[test]
+    fn an_expand_on_the_top_fold_row_grows_it_up_only() {
+        let mut h = folded_long_files();
+        put_cursor(&mut h, 0);
+        act(&mut h, &stoat_action::DiffChangesExpandDown);
+        assert_eq!(shown_rows(&mut h), rows_of(&[0..=0, 27..=43, 44..=44]));
+    }
+
+    /// An expand on the fold row between two hunks opens the edge it asks for,
+    /// and the short fold it leaves opens whole.
+    #[test]
+    fn an_expand_on_a_middle_fold_row_opens_the_asked_edge() {
+        let mut h = two_hunk_file();
+        put_cursor(&mut h, 24);
+        act(&mut h, &stoat_action::DiffChangesExpandDown);
+        let down = shown_rows(&mut h);
+
+        put_cursor(&mut h, 34);
+        act(&mut h, &stoat_action::DiffChangesExpandUp);
+        assert_eq!(
+            (down, shown_rows(&mut h)),
+            (
+                rows_of(&[0..=0, 17..=33, 34..=34, 37..=43, 44..=44]),
+                rows_of(&[0..=0, 17..=43, 44..=44]),
+            ),
+        );
+    }
+
+    /// Expand All on the fold row of a fold of ten lines or fewer opens it
+    /// whole.
+    #[test]
+    fn an_expand_all_on_a_short_fold_opens_it_whole() {
+        let mut h = folded_long_files();
+        put_cursor(&mut h, 40);
+        act(&mut h, &stoat_action::DiffChangesExpandDown);
+        put_cursor(&mut h, 54);
+        act(&mut h, &stoat_action::DiffChangesExpandAll);
+        assert_eq!(shown_rows(&mut h), rows_of(&[0..=0, 37..=60]));
+    }
+
+    /// Collapse folds the opened rows around the cursor again, and the cursor
+    /// that the fold hides moves to the fold row.
+    #[test]
+    fn collapse_refolds_the_revealed_rows_and_lands_on_the_fold_row() {
+        let mut h = folded_long_files();
+        act(&mut h, &stoat_action::DiffChangesExpandUp);
+        put_cursor(&mut h, 30);
+        act(&mut h, &stoat_action::DiffChangesCollapse);
+        assert_eq!(
+            (shown_rows(&mut h), place(&mut h)),
+            (rows_of(&[0..=0, 37..=43, 44..=44]), at("a.txt", 0)),
+        );
+    }
+
+    /// An expand with no fold left that way says so in the status row and opens
+    /// nothing.
+    #[test]
+    fn an_expand_with_no_fold_that_way_says_so() {
+        let mut h = folded_long_files();
+        act(&mut h, &stoat_action::DiffChangesExpandDown);
+        act(&mut h, &stoat_action::DiffChangesExpandDown);
+        let opened = shown_rows(&mut h);
+
+        dispatch(&mut h.stoat, &stoat_action::DiffChangesExpandDown);
+        assert_eq!(
+            (shown_rows(&mut h), h.stoat.pending_message.as_deref()),
+            (opened, Some("no fold below")),
+        );
+    }
+
+    /// One changed file of sixty lines with hunks on rows 20 and 40, in a
+    /// settled and painted changes view, so its excerpt folds rows 0 to 16, 24
+    /// to 36, and 44 on.
+    fn two_hunk_file() -> TestHarness {
+        let mut h = TestHarness::with_size(100, 24);
+        let base: String = (1..=60).map(|n| format!("{n}\n")).collect();
+        let working = base
+            .replace("\n21\n", "\nTWENTY-ONE\n")
+            .replace("\n41\n", "\nFORTY-ONE\n");
+        h.stage_review_scenario("/repo", &[("a.txt", &base, &working)]);
+        h.cover_with_diff_changes(false);
+        h.settle();
+        h.render_composited();
+        h
+    }
+
+    /// Dispatch `action`, then press Escape, so the key epilogue runs after the
+    /// action as it runs after the Enter of a palette run.
+    fn act(h: &mut TestHarness, action: &dyn Action) {
+        dispatch(&mut h.stoat, action);
+        h.type_keys("Escape");
+    }
+
+    /// The buffer row each display row of the focused excerpt starts with, so a
+    /// fold row reads as the first row it hides.
+    fn shown_rows(h: &mut TestHarness) -> Vec<u32> {
+        let editor = focused_editor_mut(&mut h.stoat).expect("a focused excerpt");
+        let snapshot = editor.display_map.snapshot();
+        (0..snapshot.line_count())
+            .filter_map(|row| snapshot.display_to_buffer(DisplayPoint::new(row, 0)))
+            .map(|point| point.row)
+            .collect()
+    }
+
+    /// The text of each fold row of the focused excerpt, in buffer order.
+    fn fold_row_texts(h: &mut TestHarness) -> Vec<String> {
+        let editor = focused_editor_mut(&mut h.stoat).expect("a focused excerpt");
+        let snapshot = editor.display_map.snapshot();
+        let folds = snapshot.fold_snapshot();
+        folds
+            .folds_in_range(InlayPoint::default()..folds.to_inlay_point(folds.max_point()))
+            .into_iter()
+            .filter(|fold| fold.placeholder.is_fold_row())
+            .map(|fold| fold.placeholder.text.to_string())
+            .collect()
+    }
+
+    /// The stack row of the focused excerpt's buffer row `row`.
+    fn stack_row_of(h: &mut TestHarness, row: u32) -> usize {
+        let ws = h.stoat.active_workspace_mut();
+        let id = ws.focused_diff_changes_id().expect("a changes view");
+        let Workspace {
+            diff_changes_views,
+            editors,
+            ..
+        } = ws;
+        let state = &mut diff_changes_views[id];
+        diff_changes::layout_stack(state, editors);
+        let excerpt = state.focused_excerpt().expect("a focused excerpt");
+        let editor = editors.get_mut(excerpt.editor_id).expect("an editor");
+        let display = editor
+            .display_map
+            .snapshot()
+            .buffer_to_display(Point::new(row, 0));
+        excerpt.top + 1 + display.row as usize
+    }
+
+    /// The rows of `runs`, one after another.
+    fn rows_of(runs: &[RangeInclusive<u32>]) -> Vec<u32> {
+        runs.iter().flat_map(|run| run.clone()).collect()
     }
 
     /// A changes view with no excerpt has no focused editor, so the editor

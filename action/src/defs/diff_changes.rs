@@ -124,3 +124,62 @@ define_action!(
      with no file under it keeps the changes view open.",
     ActionPriority::Rare
 );
+
+define_action!(
+    DiffChangesExpandUpDef,
+    DiffChangesExpandUp,
+    "DiffChangesExpandUp",
+    ActionKind::DiffChangesExpandUp,
+    "open ten unchanged lines above the cursor's hunk",
+    "Open ten unchanged lines of the nearest fold above the cursor, from the \
+     fold's bottom edge, so the hunk below the fold grows up. On a fold row it \
+     opens ten lines of that fold the same way. A fold of ten lines or fewer \
+     opens whole, and the fold below a file's last hunk only grows down. An \
+     expand stays inside the cursor's file, and with no fold above the cursor \
+     the status row says so. Opened lines stay open through every edit until \
+     DiffChangesCollapse folds them.",
+    ActionPriority::Rare
+);
+
+define_action!(
+    DiffChangesExpandDownDef,
+    DiffChangesExpandDown,
+    "DiffChangesExpandDown",
+    ActionKind::DiffChangesExpandDown,
+    "open ten unchanged lines below the cursor's hunk",
+    "Open ten unchanged lines of the nearest fold below the cursor, from the \
+     fold's top edge, so the hunk above the fold grows down. On a fold row it \
+     opens ten lines of that fold the same way. A fold of ten lines or fewer \
+     opens whole, and the fold above a file's first hunk only grows up. An \
+     expand stays inside the cursor's file, and with no fold below the cursor \
+     the status row says so. Opened lines stay open through every edit until \
+     DiffChangesCollapse folds them.",
+    ActionPriority::Rare
+);
+
+define_action!(
+    DiffChangesExpandAllDef,
+    DiffChangesExpandAll,
+    "DiffChangesExpandAll",
+    ActionKind::DiffChangesExpandAll,
+    "open the whole fold at the cursor",
+    "Open the whole fold of the fold row under the cursor. On any other row it \
+     opens the nearest fold above and the nearest fold below the cursor, each \
+     whole. An expand stays inside the cursor's file, and with no fold to open \
+     the status row says so. Opened lines stay open through every edit until \
+     DiffChangesCollapse folds them.",
+    ActionPriority::Rare
+);
+
+define_action!(
+    DiffChangesCollapseDef,
+    DiffChangesCollapse,
+    "DiffChangesCollapse",
+    ActionKind::DiffChangesCollapse,
+    "refold the revealed lines around the cursor",
+    "Fold again the lines that an expand opened around the cursor. On an opened \
+     row it folds every opened span of the run of shown rows that holds the \
+     cursor. On a fold row it folds the opened spans that touch that fold. A \
+     cursor that the new fold hides moves to the fold row.",
+    ActionPriority::Rare
+);

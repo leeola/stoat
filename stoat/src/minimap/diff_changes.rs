@@ -340,7 +340,7 @@ pub(crate) fn summarize_rows(
             continue;
         };
 
-        let kept = diff_changes::kept_rows(editor);
+        let kept = diff_changes::kept_rows(editor, &excerpt.revealed);
         let snapshot = editor.display_map.snapshot();
         let display_rows = display_rows.start as u32..display_rows.end as u32;
         let buffer_row = |row: u32| {

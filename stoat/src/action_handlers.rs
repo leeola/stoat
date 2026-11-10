@@ -51,6 +51,7 @@ use crate::{
     auto_reload,
     buffer_registry::OpenOrigin,
     command_palette::CommandPalette,
+    diff_changes::ExpandDir,
     display_map::syntax_theme::SyntaxStyles,
     editor_state::{EditorId, EditorState},
     host::FsHost,
@@ -1244,6 +1245,14 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
         ActionKind::DiffChangesFirst => diff_changes::diff_changes_edge(stoat, false),
         ActionKind::DiffChangesLast => diff_changes::diff_changes_edge(stoat, true),
         ActionKind::DiffChangesOpen => diff_changes::diff_changes_open(stoat),
+        ActionKind::DiffChangesExpandUp => diff_changes::diff_changes_expand(stoat, ExpandDir::Up),
+        ActionKind::DiffChangesExpandDown => {
+            diff_changes::diff_changes_expand(stoat, ExpandDir::Down)
+        },
+        ActionKind::DiffChangesExpandAll => {
+            diff_changes::diff_changes_expand(stoat, ExpandDir::All)
+        },
+        ActionKind::DiffChangesCollapse => diff_changes::diff_changes_collapse(stoat),
         ActionKind::EnterRebase => rebase::enter_rebase(stoat),
         ActionKind::GitRebase => {
             let action = action

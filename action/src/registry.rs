@@ -15,7 +15,8 @@ use crate::{
             ConflictPickTheirsLine, ConflictPrevChunk, ConflictPrevFile, ConflictResetChunk,
         },
         diff_changes::{
-            CloseDiffChanges, DiffChanges, DiffChangesFirst, DiffChangesHalfPageDown,
+            CloseDiffChanges, DiffChanges, DiffChangesCollapse, DiffChangesExpandAll,
+            DiffChangesExpandDown, DiffChangesExpandUp, DiffChangesFirst, DiffChangesHalfPageDown,
             DiffChangesHalfPageUp, DiffChangesLast, DiffChangesNext, DiffChangesOpen,
             DiffChangesPageDown, DiffChangesPageUp, DiffChangesPrev,
         },
@@ -1029,6 +1030,18 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
     add(DiffChangesFirst::DEF, |_| Ok(Box::new(DiffChangesFirst)));
     add(DiffChangesLast::DEF, |_| Ok(Box::new(DiffChangesLast)));
     add(DiffChangesOpen::DEF, |_| Ok(Box::new(DiffChangesOpen)));
+    add(DiffChangesExpandUp::DEF, |_| {
+        Ok(Box::new(DiffChangesExpandUp))
+    });
+    add(DiffChangesExpandDown::DEF, |_| {
+        Ok(Box::new(DiffChangesExpandDown))
+    });
+    add(DiffChangesExpandAll::DEF, |_| {
+        Ok(Box::new(DiffChangesExpandAll))
+    });
+    add(DiffChangesCollapse::DEF, |_| {
+        Ok(Box::new(DiffChangesCollapse))
+    });
     add(GitLs::DEF, |params| {
         // The palette autospaces a submitted command, so a bare `git log`
         // arrives with an empty argument. That means HEAD, not a revision
@@ -1491,6 +1504,10 @@ mod tests {
         "DiffChangesFirst",
         "DiffChangesLast",
         "DiffChangesOpen",
+        "DiffChangesExpandUp",
+        "DiffChangesExpandDown",
+        "DiffChangesExpandAll",
+        "DiffChangesCollapse",
         "GitLs",
         "GitMergeAbort",
         "GitMergeContinue",
@@ -2163,11 +2180,11 @@ mod tests {
         // + 1 DiffBaseEdit.
         // + 1 DiffPair.
         // + 5 the diff styling dials.
-        // + 11 the changes view actions.
+        // + 15 the changes view actions.
         // + 3 the git status panel actions.
         // + 7 the git status panel's row and banner keys.
         // + 1 GitStatusSkip.
-        assert_eq!(all().count(), 491);
+        assert_eq!(all().count(), 495);
     }
 
     #[test]

@@ -22,8 +22,9 @@ use crate::{
     buffer_lifecycle,
     buffer_registry::{BufferRegistry, OpenOrigin},
     diff_map::{DiffHunkStatus, DiffMap},
-    display_map::{FoldPlaceholder, FoldSnapshot, InlayPoint},
+    display_map::{DisplaySnapshot, FoldPlaceholder, FoldSnapshot, InlayPoint, InlaySnapshot},
     editor_state::{EditorId, EditorState},
+    multi_buffer::MultiBufferSnapshot,
     pane::View,
     render,
     workspace::{diff::DiffBase, Workspace},
@@ -37,11 +38,15 @@ use std::{
     path::{Path, PathBuf},
     sync::Arc,
 };
-use stoat_text::{Point, Rope};
+use stoat_text::{Anchor, Bias, Point, Rope};
 
 /// Rows of context an excerpt shows on each side of a hunk, and on each side
 /// of a marked run of a refined hunk.
 const CONTEXT_ROWS: u32 = 3;
+
+/// Lines one expand opens of a fold. A fold of this many lines or fewer opens
+/// whole.
+const EXPAND_STEP: u32 = 10;
 
 new_key_type! {
     /// Key for one changes view pane's [`DiffChangesState`].
@@ -133,6 +138,13 @@ pub(crate) struct Excerpt {
     /// A file that a commit or a base change took off the list took no edit,
     /// so its excerpt goes though it holds the focus.
     pub opened_version: u64,
+    /// The row spans a reader opened out of the folds, which every refold keeps
+    /// open until a collapse drops them.
+    ///
+    /// Each span is an anchor at the start of its first row and an anchor at
+    /// the end of its last row, so an edit above a span carries the span with
+    /// its lines.
+    pub revealed: Vec<(Anchor, Anchor)>,
 }
 
 /// The size of one excerpt's diff, which its header row counts out.
@@ -206,6 +218,28 @@ pub(crate) struct StackStamp {
     epoch: u64,
     maps: u64,
     paths: u64,
+}
+
+/// The way an expand opens the unchanged lines of a fold.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ExpandDir {
+    /// The nearest fold above the cursor, from its bottom edge.
+    Up,
+    /// The nearest fold below the cursor, from its top edge.
+    Down,
+    /// The whole fold under the cursor, or the nearest fold each way whole.
+    All,
+}
+
+/// The edge of a fold that an expand opens lines from.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum FoldEdge {
+    /// The fold's first lines, so the hunk above the fold grows down.
+    Top,
+    /// The fold's last lines, so the hunk below the fold grows up.
+    Bottom,
+    /// The whole fold.
+    Whole,
 }
 
 impl DiffChangesState {
@@ -604,10 +638,10 @@ pub(crate) fn reveal_cursor(stoat: &mut Stoat) -> bool {
         return false;
     };
     layout_stack(state, editors);
-    let Some(editor_id) = state
+    let Some((editor_id, revealed)) = state
         .focused_excerpt()
         .filter(|excerpt| excerpt.folded_version.is_some())
-        .map(|excerpt| excerpt.editor_id)
+        .map(|excerpt| (excerpt.editor_id, excerpt.revealed.clone()))
     else {
         return false;
     };
@@ -620,8 +654,8 @@ pub(crate) fn reveal_cursor(stoat: &mut Stoat) -> bool {
         return false;
     };
     let insert = editor.mode == "insert";
-    let row = reveal_row(editor, insert);
-    let Some((_, _, changed)) = fold_excerpt(editor, row) else {
+    let row = reveal_row(editor, insert, &revealed);
+    let Some((_, _, changed)) = fold_excerpt(editor, row, &revealed) else {
         return false;
     };
     if changed && screen_row.is_some() {
@@ -639,22 +673,172 @@ pub(crate) fn reveal_cursor(stoat: &mut Stoat) -> bool {
 /// there types into the hidden line. A fold of the empty row after a final
 /// newline hides no line, so it holds nothing open.
 ///
-/// The test reads the folds the diff's own runs cut, not the folds the display
-/// holds. A row this holds open shows no fold, so a test of the display's folds
-/// releases the row on the next key and hides the cursor again.
-fn reveal_row(editor: &mut EditorState, insert: bool) -> Option<u32> {
+/// The test reads the folds the diff's own runs and the `revealed` spans cut,
+/// not the folds the display holds. A row this holds open shows no fold, so a
+/// test of the display's folds releases the row on the next key and hides the
+/// cursor again.
+fn reveal_row(
+    editor: &mut EditorState,
+    insert: bool,
+    revealed: &[(Anchor, Anchor)],
+) -> Option<u32> {
     let cursor = cursor_point(editor);
     let snapshot = editor.display_map.snapshot();
     let map = snapshot.diff_map()?;
-    let rope = snapshot.buffer_snapshot().rope();
+    let buffer = snapshot.buffer_snapshot();
+    let rope = buffer.rope();
     let line_count = rope.max_point().row + 1;
-    let fold = gaps(&kept_runs(map, line_count, None), line_count)
+    let fold = gaps(&shown_runs(map, buffer, None, revealed), line_count)
         .into_iter()
         .map(|gap| gap_fold(rope, gap))
         .filter(|(_, placeholder)| !placeholder.text.is_empty())
         .map(|(range, _)| range)
         .find(|fold| fold.start <= cursor && cursor < fold.end)?;
     (cursor > fold.start || insert).then_some(cursor.row)
+}
+
+/// Open unchanged lines of a fold of the focused changes view's focused
+/// excerpt, as `dir` says.
+///
+/// A fold row under the cursor is the fold every `dir` opens. On any other row
+/// `Up` opens the nearest fold above the cursor and `Down` the nearest below
+/// it, [`EXPAND_STEP`] lines at a time, and `All` opens the nearest fold each
+/// way whole. An expand stays inside the cursor's file, and the opened lines
+/// stay open through every refold until [`collapse_at_cursor`] folds them.
+///
+/// Fails with the status row's text when no fold lies that way.
+pub(crate) fn expand_from_cursor(stoat: &mut Stoat, dir: ExpandDir) -> Result<(), &'static str> {
+    let ws = stoat.active_workspace_mut();
+    let Some(id) = ws.focused_diff_changes_id() else {
+        return Err("no fold to open");
+    };
+    let Workspace {
+        diff_changes_views,
+        editors,
+        ..
+    } = ws;
+    let Some(state) = diff_changes_views.get_mut(id) else {
+        return Err("no fold to open");
+    };
+    let Some(editor) = state
+        .focused_excerpt()
+        .filter(|excerpt| excerpt.folded_version.is_some())
+        .and_then(|excerpt| editors.get_mut(excerpt.editor_id))
+    else {
+        return Err("no fold to open");
+    };
+
+    let targets: Vec<(Range<u32>, FoldEdge)> = {
+        let cursor = cursor_point(editor).row;
+        let snapshot = editor.display_map.snapshot();
+        let rope = snapshot.buffer_snapshot().rope();
+        let line_count = rope.max_point().row + 1;
+        let folds = fold_gaps(&snapshot);
+        let edge = |gap: &Range<u32>| fold_edge(gap, fold_lines(rope, gap), line_count, dir);
+        let above = folds.iter().rev().find(|gap| gap.end <= cursor);
+        let below = folds.iter().find(|gap| gap.start > cursor);
+        match (folds.iter().find(|gap| gap.start == cursor), dir) {
+            (Some(gap), _) => vec![(gap.clone(), edge(gap))],
+            (None, ExpandDir::Up) => {
+                let gap = above.ok_or("no fold above")?;
+                vec![(gap.clone(), edge(gap))]
+            },
+            (None, ExpandDir::Down) => {
+                let gap = below.ok_or("no fold below")?;
+                vec![(gap.clone(), edge(gap))]
+            },
+            (None, ExpandDir::All) => above
+                .into_iter()
+                .chain(below)
+                .map(|gap| (gap.clone(), FoldEdge::Whole))
+                .collect(),
+        }
+    };
+    if targets.is_empty() {
+        return Err("no fold to open");
+    }
+
+    let index = state.focused;
+    for (gap, edge) in targets {
+        expand(state, editors, index, gap, edge);
+    }
+    Ok(())
+}
+
+/// Fold again the rows that expands opened around the focused changes view's
+/// cursor, and report whether a span went.
+///
+/// On a shown row it drops every opened span that meets the run of shown rows
+/// that holds the cursor. On a fold row it drops the spans that end where the
+/// fold starts or start where the fold ends. A cursor that the new folds hide
+/// moves to the fold row that hides it.
+pub(crate) fn collapse_at_cursor(stoat: &mut Stoat) -> bool {
+    let ws = stoat.active_workspace_mut();
+    let Some(id) = ws.focused_diff_changes_id() else {
+        return false;
+    };
+    let Workspace {
+        diff_changes_views,
+        editors,
+        ..
+    } = ws;
+    let Some(state) = diff_changes_views.get_mut(id) else {
+        return false;
+    };
+    let Some(excerpt) = state
+        .excerpts
+        .get_mut(state.focused)
+        .filter(|excerpt| excerpt.folded_version.is_some())
+    else {
+        return false;
+    };
+    let Some(editor) = editors.get_mut(excerpt.editor_id) else {
+        return false;
+    };
+
+    let cursor = cursor_point(editor).row;
+    let dropped: Vec<bool> = {
+        let snapshot = editor.display_map.snapshot();
+        let Some(map) = snapshot.diff_map() else {
+            return false;
+        };
+        let buffer = snapshot.buffer_snapshot();
+        let spans = revealed_rows(buffer, &excerpt.revealed);
+        match fold_gaps(&snapshot)
+            .into_iter()
+            .find(|gap| gap.start == cursor)
+        {
+            Some(gap) => spans
+                .iter()
+                .map(|rows| rows.end == gap.start || rows.start == gap.end)
+                .collect(),
+            None => {
+                let shown = shown_runs(map, buffer, None, &excerpt.revealed);
+                let run = shown.into_iter().find(|run| run.contains(&cursor));
+                spans
+                    .iter()
+                    .map(|rows| {
+                        run.as_ref()
+                            .is_some_and(|run| rows.start < run.end && run.start < rows.end)
+                    })
+                    .collect()
+            },
+        }
+    };
+    if !dropped.contains(&true) {
+        return false;
+    }
+
+    let mut dropped = dropped.into_iter();
+    excerpt
+        .revealed
+        .retain(|_| !dropped.next().unwrap_or(false));
+    fold_excerpt(editor, None, &excerpt.revealed);
+    let hidden_by = fold_gap(&editor.display_map.snapshot(), cursor);
+    if let Some(gap) = hidden_by {
+        place_cursor(editor, Point::new(gap.start, 0));
+    }
+    true
 }
 
 /// Center the focused changes view on a change walk's landed `span`, as an
@@ -772,13 +956,16 @@ pub(crate) fn hunk_starts(editor: &mut EditorState) -> Vec<u32> {
     })
 }
 
-/// The rows `editor`'s folds leave showing, from its buffer's diff map.
-pub(crate) fn kept_rows(editor: &mut EditorState) -> Vec<Range<u32>> {
+/// The rows `editor`'s folds leave showing, from its buffer's diff map and the
+/// spans its excerpt's `revealed` opens.
+pub(crate) fn kept_rows(
+    editor: &mut EditorState,
+    revealed: &[(Anchor, Anchor)],
+) -> Vec<Range<u32>> {
     let snapshot = editor.display_map.snapshot();
-    let line_count = snapshot.buffer_snapshot().rope().max_point().row + 1;
-    snapshot
-        .diff_map()
-        .map_or_else(Vec::new, |map| kept_runs(map, line_count, None))
+    snapshot.diff_map().map_or_else(Vec::new, |map| {
+        shown_runs(map, snapshot.buffer_snapshot(), None, revealed)
+    })
 }
 
 /// The row a landing on `row` takes in an excerpt that shows `kept`.
@@ -1056,6 +1243,7 @@ fn open_excerpt(
         top: 0,
         owns_buffer,
         opened_version,
+        revealed: Vec::new(),
     })
 }
 
@@ -1110,6 +1298,7 @@ pub(crate) fn adopt_excerpt(
             top: 0,
             owns_buffer: true,
             opened_version,
+            revealed: Vec::new(),
         },
     );
     tracing::debug!(
@@ -1171,10 +1360,10 @@ fn refold(ws: &mut Workspace) -> bool {
                 true => None,
                 false => {
                     let insert = editor.mode == "insert";
-                    reveal_row(editor, insert)
+                    reveal_row(editor, insert, &excerpt.revealed)
                 },
             };
-            let Some((folded, kept, _)) = fold_excerpt(editor, cursor) else {
+            let Some((folded, kept, _)) = fold_excerpt(editor, cursor, &excerpt.revealed) else {
                 continue;
             };
             excerpt.folded_version = Some(folded);
@@ -1271,7 +1460,7 @@ fn land(
         return false;
     };
 
-    let shown = landing_row(&kept_rows(editor), row);
+    let shown = landing_row(&kept_rows(editor, &excerpt.revealed), row);
     let column = if shown == row { column } else { 0 };
     place_cursor(editor, Point::new(shown, column));
     state.focused = index;
@@ -1280,26 +1469,28 @@ fn land(
     true
 }
 
-/// Fold every run of `editor`'s buffer that [`kept_runs`] leaves out, and
-/// answer the diff map version the folds were cut from, the rows left showing,
-/// and whether a fold changed.
+/// Fold every run of `editor`'s buffer that [`kept_runs`] and the `revealed`
+/// spans leave out, and answer the diff map version the folds were cut from,
+/// the rows left showing, and whether a fold changed.
 ///
 /// A fold that already hides a wanted gap stays. Only the gaps that opened or
 /// closed since the last cut change the display map, so a landing that moves no
 /// gap changes nothing. A `cursor` row stays open with its context, as
-/// [`kept_runs`] keeps it.
+/// [`kept_runs`] keeps it, and each revealed span stays open as it is.
 ///
 /// `None`, with nothing folded, while the buffer has no diff map.
 fn fold_excerpt(
     editor: &mut EditorState,
     cursor: Option<u32>,
+    revealed: &[(Anchor, Anchor)],
 ) -> Option<(usize, Vec<Range<u32>>, bool)> {
     let (version, kept, stale, fresh) = {
         let snapshot = editor.display_map.snapshot();
         let map = snapshot.diff_map()?;
-        let rope = snapshot.buffer_snapshot().rope();
+        let buffer = snapshot.buffer_snapshot();
+        let rope = buffer.rope();
         let line_count = rope.max_point().row + 1;
-        let kept = kept_runs(map, line_count, cursor);
+        let kept = shown_runs(map, buffer, cursor, revealed);
         let wanted: Vec<(Range<Point>, FoldPlaceholder)> = gaps(&kept, line_count)
             .into_iter()
             .map(|gap| gap_fold(rope, gap))
@@ -1400,6 +1591,61 @@ fn kept_runs(map: &DiffMap, line_count: u32, cursor: Option<u32>) -> Vec<Range<u
     runs
 }
 
+/// The rows an excerpt shows, as runs in buffer order.
+///
+/// The runs are the ones [`kept_runs`] keeps for `map` and `cursor` and the
+/// rows of the `revealed` spans, merged where they touch.
+fn shown_runs(
+    map: &DiffMap,
+    buffer: &MultiBufferSnapshot,
+    cursor: Option<u32>,
+    revealed: &[(Anchor, Anchor)],
+) -> Vec<Range<u32>> {
+    let line_count = buffer.rope().max_point().row + 1;
+    let mut runs = kept_runs(map, line_count, cursor);
+    runs.extend(
+        revealed_rows(buffer, revealed)
+            .into_iter()
+            .filter(|rows| !rows.is_empty()),
+    );
+    merge_runs(runs)
+}
+
+/// The buffer rows each span of `revealed` covers, in span order.
+///
+/// A span whose end resolves above its start lost its lines to an edit, so its
+/// rows are empty.
+fn revealed_rows(buffer: &MultiBufferSnapshot, revealed: &[(Anchor, Anchor)]) -> Vec<Range<u32>> {
+    let anchors: Vec<Anchor> = revealed
+        .iter()
+        .flat_map(|&(start, end)| [start, end])
+        .collect();
+    buffer
+        .points_for_anchors_batch(&anchors)
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|[start, end]| match end.row >= start.row {
+            true => start.row..end.row + 1,
+            false => start.row..start.row,
+        })
+        .collect()
+}
+
+/// `runs` sorted by start, with each run merged into the one before it where
+/// the two touch or overlap.
+fn merge_runs(mut runs: Vec<Range<u32>>) -> Vec<Range<u32>> {
+    runs.sort_by_key(|run| run.start);
+    let mut merged: Vec<Range<u32>> = Vec::with_capacity(runs.len());
+    for run in runs {
+        match merged.last_mut() {
+            Some(last) if run.start <= last.end => last.end = last.end.max(run.end),
+            _ => merged.push(run),
+        }
+    }
+    merged
+}
+
 /// The rows of `0..line_count` that no run of `kept` holds, as runs.
 fn gaps(kept: &[Range<u32>], line_count: u32) -> Vec<Range<u32>> {
     let mut gaps = Vec::new();
@@ -1427,11 +1673,8 @@ fn gaps(kept: &[Range<u32>], line_count: u32) -> Vec<Range<u32>> {
 /// empty placeholder instead, so it takes no row, and the excerpt's last line
 /// ends as it reads.
 fn gap_fold(rope: &Rope, gap: Range<u32>) -> (Range<Point>, FoldPlaceholder) {
-    let line_count = rope.max_point().row + 1;
     let end = Point::new(gap.end - 1, rope.line_len(gap.end - 1));
-    let after_final_newline = gap.end == line_count && rope.line_len(line_count - 1) == 0;
-    let lines = gap.end - gap.start - u32::from(after_final_newline);
-    match lines {
+    match fold_lines(rope, &gap) {
         0 => {
             // An empty file's one row is the gap, so the fold starts on it.
             let above = gap.start.saturating_sub(1);
@@ -1450,6 +1693,133 @@ fn gap_fold(rope: &Rope, gap: Range<u32>) -> (Range<Point>, FoldPlaceholder) {
     }
 }
 
+/// The lines `gap` hides. The empty row after a final newline holds no line,
+/// so the count leaves it out.
+fn fold_lines(rope: &Rope, gap: &Range<u32>) -> u32 {
+    let line_count = rope.max_point().row + 1;
+    let after_final_newline = gap.end == line_count && rope.line_len(line_count - 1) == 0;
+    gap.end - gap.start - u32::from(after_final_newline)
+}
+
+/// Open the rows of `gap` that an expand from `edge` reveals in excerpt `index`
+/// of `state`, and scroll the opened rows into view.
+///
+/// The scroll first shows the far edge of the opened rows, the first row of a
+/// fold above the cursor or the last row of a fold below it. Then it shows the
+/// cursor, so a short view keeps the cursor in sight.
+fn expand(
+    state: &mut DiffChangesState,
+    editors: &mut SlotMap<EditorId, EditorState>,
+    index: usize,
+    gap: Range<u32>,
+    edge: FoldEdge,
+) {
+    let Some(excerpt) = state.excerpts.get_mut(index) else {
+        return;
+    };
+    let Some(editor) = editors.get_mut(excerpt.editor_id) else {
+        return;
+    };
+    let cursor = cursor_point(editor).row;
+    let rows = {
+        let snapshot = editor.display_map.snapshot();
+        let buffer = snapshot.buffer_snapshot();
+        let rope = buffer.rope();
+        let rows = reveal_rows(&gap, fold_lines(rope, &gap), edge);
+        let last = rows.end - 1;
+        let start = rope.point_to_offset(Point::new(rows.start, 0));
+        let end = rope.point_to_offset(Point::new(last, rope.line_len(last)));
+        excerpt.revealed.push((
+            buffer.anchor_at(start, Bias::Left),
+            buffer.anchor_at(end, Bias::Right),
+        ));
+        rows
+    };
+    let insert = editor.mode == "insert";
+    let held = reveal_row(editor, insert, &excerpt.revealed);
+    fold_excerpt(editor, held, &excerpt.revealed);
+
+    let far = match gap.start >= cursor {
+        true => rows.end - 1,
+        false => rows.start,
+    };
+    let far_row = editor
+        .display_map
+        .snapshot()
+        .buffer_to_display(Point::new(far, 0))
+        .row as usize;
+    layout_stack(state, editors);
+    let top = state.excerpts[index].top;
+    state.ensure_row_visible(top + 1 + far_row, state.viewport_rows);
+    if let Some(row) = cursor_stack_row(state, editors) {
+        state.ensure_row_visible(row, state.viewport_rows);
+    }
+}
+
+/// The edge an expand toward `dir` opens `gap` from, a fold of `lines` lines in
+/// a buffer of `line_count` rows.
+///
+/// A fold of [`EXPAND_STEP`] lines or fewer opens whole, as Expand All opens
+/// any fold. The fold above a file's first hunk only grows up and the fold
+/// below its last hunk only grows down, since each has a hunk on one side
+/// alone.
+fn fold_edge(gap: &Range<u32>, lines: u32, line_count: u32, dir: ExpandDir) -> FoldEdge {
+    if lines <= EXPAND_STEP || dir == ExpandDir::All {
+        return FoldEdge::Whole;
+    }
+    if gap.start == 0 {
+        return FoldEdge::Bottom;
+    }
+    if gap.end == line_count {
+        return FoldEdge::Top;
+    }
+    match dir {
+        ExpandDir::Up => FoldEdge::Bottom,
+        ExpandDir::Down | ExpandDir::All => FoldEdge::Top,
+    }
+}
+
+/// The rows an expand from `edge` opens of `gap`, a fold of `lines` lines.
+///
+/// A bottom reveal runs to the gap's end, so it takes the empty row after a
+/// final newline with it and leaves no gap of that row alone.
+fn reveal_rows(gap: &Range<u32>, lines: u32, edge: FoldEdge) -> Range<u32> {
+    match edge {
+        FoldEdge::Whole => gap.clone(),
+        FoldEdge::Top => gap.start..gap.start + EXPAND_STEP,
+        FoldEdge::Bottom => gap.start + lines - EXPAND_STEP..gap.end,
+    }
+}
+
+/// The buffer rows of every fold row of `snapshot`, in buffer order.
+fn fold_gaps(snapshot: &DisplaySnapshot) -> Vec<Range<u32>> {
+    let folds = snapshot.fold_snapshot();
+    folds
+        .folds_in_range(InlayPoint::default()..folds.to_inlay_point(folds.max_point()))
+        .into_iter()
+        .filter(|fold| fold.placeholder.is_fold_row())
+        .map(|fold| buffer_rows(folds.inlay_snapshot(), &fold.range))
+        .collect()
+}
+
+/// The buffer rows of the fold row whose fold holds buffer row `row`, or `None`
+/// when no fold row holds it.
+fn fold_gap(snapshot: &DisplaySnapshot, row: u32) -> Option<Range<u32>> {
+    let folds = snapshot.fold_snapshot();
+    let inlays = folds.inlay_snapshot();
+    let start = inlays.to_inlay_point(Point::new(row, 0));
+    folds
+        .folds_in_range(start..InlayPoint::new(start.row() + 1, 0))
+        .into_iter()
+        .find(|fold| fold.placeholder.is_fold_row())
+        .map(|fold| buffer_rows(inlays, &fold.range))
+}
+
+/// The buffer rows from the first row of `range` to its last.
+fn buffer_rows(inlays: &InlaySnapshot, range: &Range<InlayPoint>) -> Range<u32> {
+    inlays.to_buffer_point(range.start).row..inlays.to_buffer_point(range.end).row + 1
+}
+
 /// The version of buffer `id`'s diff map, or `None` while it has none.
 fn map_version(buffers: &BufferRegistry, id: BufferId) -> Option<usize> {
     let buffer = buffers.get(id)?;
@@ -1460,8 +1830,9 @@ fn map_version(buffers: &BufferRegistry, id: BufferId) -> Option<usize> {
 #[cfg(test)]
 mod tests {
     use super::{
-        cursor_point, excerpt_rows, fold_excerpt, gap_fold, gaps, kept_runs, landing_row,
-        listed_files, pump_diff_changes_stack, DiffChangesState, ExcerptStats, Landing, StackStamp,
+        cursor_point, excerpt_rows, expand_from_cursor, fold_edge, fold_excerpt, gap_fold, gaps,
+        kept_runs, landing_row, listed_files, place_cursor, pump_diff_changes_stack, reveal_rows,
+        DiffChangesState, ExcerptStats, ExpandDir, FoldEdge, Landing, StackStamp,
     };
     use crate::{
         action_handlers::dispatch,
@@ -1477,7 +1848,7 @@ mod tests {
         },
     };
     use std::{
-        ops::Range,
+        ops::{Range, RangeInclusive},
         path::{Path, PathBuf},
         sync::{Arc, RwLock},
     };
@@ -1686,6 +2057,45 @@ mod tests {
         );
     }
 
+    /// A fold between two hunks opens from the edge an expand asks for. The
+    /// fold above the first hunk only grows up, the fold below the last only
+    /// grows down, and a fold of ten lines or fewer opens whole.
+    #[test]
+    fn a_fold_opens_from_the_edge_its_place_allows() {
+        let edges = |gap: Range<u32>, lines| {
+            [ExpandDir::Up, ExpandDir::Down, ExpandDir::All]
+                .map(|dir| fold_edge(&gap, lines, 61, dir))
+        };
+        assert_eq!(
+            [
+                edges(24..37, 13),
+                edges(0..37, 37),
+                edges(44..61, 16),
+                edges(30..40, 10)
+            ],
+            [
+                [FoldEdge::Bottom, FoldEdge::Top, FoldEdge::Whole],
+                [FoldEdge::Bottom, FoldEdge::Bottom, FoldEdge::Whole],
+                [FoldEdge::Top, FoldEdge::Top, FoldEdge::Whole],
+                [FoldEdge::Whole; 3],
+            ],
+        );
+    }
+
+    /// A top reveal takes a fold's first ten rows, a bottom reveal its last
+    /// ten, and a whole reveal the fold.
+    #[test]
+    fn a_reveal_takes_ten_rows_from_its_edge() {
+        assert_eq!(
+            [FoldEdge::Top, FoldEdge::Bottom, FoldEdge::Whole].map(|edge| reveal_rows(
+                &(6..30),
+                24,
+                edge
+            )),
+            [6..16, 20..30, 6..30],
+        );
+    }
+
     /// A gap inside a refined hunk takes a fold row that counts its lines, as a
     /// gap of unchanged rows does.
     ///
@@ -1712,7 +2122,7 @@ mod tests {
         buffer.diff_map = Some(map);
         let shared = Arc::new(RwLock::new(buffer));
         let mut editor = EditorState::new(BufferId::new(0), shared, executor, crate::test_notify());
-        fold_excerpt(&mut editor, None);
+        fold_excerpt(&mut editor, None, &[]);
 
         let snapshot = editor.display_map.snapshot();
         let folds = snapshot.fold_snapshot();
@@ -1960,6 +2370,53 @@ mod tests {
         let edited = rows(&mut h);
         let count = folded.1;
         assert_eq!([folded, edited], [(count, count), (count + 1, count + 1)]);
+    }
+
+    /// The rows an expand opened follow their lines through an edit above them,
+    /// so the refold the edit brings keeps them open.
+    #[test]
+    fn a_reveal_follows_its_lines_through_an_edit() {
+        let mut h = TestHarness::with_size(100, 24);
+        h.stoat.set_diff_warm_auto(true);
+        let base = numbered(60);
+        let working = base.replace("\n41\n", "\nFORTY-ONE\n");
+        h.stage_review_scenario("/repo", &[("a.txt", &base, &working)]);
+        h.open_file(Path::new("/repo/a.txt"));
+        let (_, buffer_id) = h.stoat.focused_editor_ids().expect("editor");
+        stacked(&mut h);
+        h.settle_diff_jobs();
+        {
+            let ws = h.stoat.active_workspace_mut();
+            let excerpt = &ws.focused_diff_changes().expect("a changes view").excerpts[0];
+            let editor = ws.editors.get_mut(excerpt.editor_id).expect("an editor");
+            place_cursor(editor, Point::new(40, 0));
+        }
+        let opened = expand_from_cursor(&mut h.stoat, ExpandDir::Up);
+
+        prepend(&h, buffer_id, "new\n");
+        h.settle_diff_jobs();
+        assert_eq!(
+            (opened, shown_rows(&mut h)),
+            (Ok(()), rows_of(&[0..=3, 4..=4, 28..=44, 45..=45])),
+        );
+    }
+
+    /// The buffer row each display row of the focused excerpt starts with, so a
+    /// fold row reads as the first row it hides.
+    fn shown_rows(h: &mut TestHarness) -> Vec<u32> {
+        let ws = h.stoat.active_workspace_mut();
+        let excerpt = &ws.focused_diff_changes().expect("a changes view").excerpts[0];
+        let editor = ws.editors.get_mut(excerpt.editor_id).expect("an editor");
+        let snapshot = editor.display_map.snapshot();
+        (0..snapshot.line_count())
+            .filter_map(|row| snapshot.display_to_buffer(DisplayPoint::new(row, 0)))
+            .map(|point| point.row)
+            .collect()
+    }
+
+    /// The rows of `runs`, one after another.
+    fn rows_of(runs: &[RangeInclusive<u32>]) -> Vec<u32> {
+        runs.iter().flat_map(|run| run.clone()).collect()
     }
 
     /// Excerpts over long files that paint before their hunks land show the
