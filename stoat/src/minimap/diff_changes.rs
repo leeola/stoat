@@ -493,13 +493,12 @@ pub(crate) fn emit_diff_changes_thumb(
     };
     let top = state.scroll as f32;
     let rows = state.viewport_rows.max(1) as u32;
-    let visible = rows.min(u16::MAX as u32) as u16;
     stoat.smooth_scroll.emit_minimap_view(
         out,
         strip_id,
         non_pane_pool::DIFF_CHANGES_THUMB,
         MinimapWindowInputs::new(top, 0, rows),
-        || (top, visible),
+        || (top, rows.saturating_mul(256)),
     );
 }
 
@@ -1245,7 +1244,7 @@ mod tests {
     type Splice = (u32, u32, u32, Vec<LineSummary>);
 
     /// The splices and the thumbs among `commands`, each in order.
-    fn strip_frames(commands: &[Command]) -> (Vec<Splice>, Vec<(u32, u32, u16)>) {
+    fn strip_frames(commands: &[Command]) -> (Vec<Splice>, Vec<(u32, u32, u32)>) {
         let mut splices = Vec::new();
         let mut views = Vec::new();
         for command in commands {
@@ -1257,7 +1256,7 @@ mod tests {
                     splice.lines.clone(),
                 )),
                 Command::MinimapView(view) => {
-                    views.push((view.strip_id, view.top_256, view.visible_lines))
+                    views.push((view.strip_id, view.top_256, view.visible_256))
                 },
                 _ => {},
             }
@@ -1364,7 +1363,7 @@ mod tests {
             frames,
             (
                 vec![(strip_id(&h), 0, 0, wire_lines(&mut h, 0..total))],
-                vec![(SINGLE_MINIMAP_STRIP_ID, 0, rows as u16)],
+                vec![(SINGLE_MINIMAP_STRIP_ID, 0, rows as u32 * 256)],
             ),
         );
     }
@@ -1387,7 +1386,7 @@ mod tests {
                 true,
                 (
                     vec![],
-                    vec![(SINGLE_MINIMAP_STRIP_ID, top as u32 * 256, rows as u16)]
+                    vec![(SINGLE_MINIMAP_STRIP_ID, top as u32 * 256, rows as u32 * 256)]
                 ),
                 (vec![], vec![]),
             ),
@@ -1802,7 +1801,7 @@ mod tests {
         let ws = h.stoat.active_workspace();
         let index = ws.panes.pane(ws.panes.focus()).index;
         let (_, rows) = view_of(&h);
-        assert_eq!(views, [(index, 0, rows as u16)]);
+        assert_eq!(views, [(index, 0, rows as u32 * 256)]);
     }
 
     /// In single mode the band follows focus, so a changes view that a dock

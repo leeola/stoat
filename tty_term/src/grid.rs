@@ -2218,6 +2218,9 @@ pub struct MinimapStrip {
     /// The overlay's one-pixel outline. A strip with none shows the viewport by
     /// its tint alone.
     pub thumb_border: Option<Rgb>,
+    /// The class whose runs draw as a hairline in the gap above their row in
+    /// place of a block. 0 marks no class, since class 0 is the default text.
+    pub rule_class: u8,
     /// Colors a run's class indexes, up to 256 entries.
     pub palette: Vec<Rgb>,
 }
@@ -2238,12 +2241,12 @@ pub struct Minimap {
 /// A minimap's viewport thumb position.
 ///
 /// [`Self::top_256`] is the fractional top buffer line in 1/256ths of a line and
-/// [`Self::visible`] the viewport height in lines, together sizing and placing
-/// the thumb over the strip.
+/// [`Self::visible_256`] the viewport height in 1/256ths of a line, together
+/// sizing and placing the thumb over the strip.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct MinimapView {
     pub top_256: u32,
-    pub visible: u16,
+    pub visible_256: u32,
 }
 
 /// How a cell's underline is decorated, or [`UnderlineStyle::None`] for no
@@ -2990,6 +2993,7 @@ mod tests {
                 bg: Rgba::new(0, 0, 0, 255),
                 thumb: Rgba::new(0, 0, 0, 255),
                 thumb_border: Some(Rgb::new(0, 0, 0)),
+                rule_class: 0,
                 palette: Vec::new(),
             },
             seq: 0,

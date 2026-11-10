@@ -1511,7 +1511,7 @@ mod tests {
             rx: &mut UnboundedReceiver<Vec<u8>>,
             editor_id: EditorId,
             display_row: u32,
-        ) -> (u32, u16) {
+        ) -> (u32, u32) {
             let _ = drain_apc(rx);
             {
                 let editor = h
@@ -1529,7 +1529,7 @@ mod tests {
             cmds.iter()
                 .rev()
                 .find_map(|cmd| match cmd {
-                    Command::MinimapView(v) => Some((v.top_256, v.visible_lines)),
+                    Command::MinimapView(v) => Some((v.top_256, v.visible_256)),
                     _ => None,
                 })
                 .unwrap_or_else(|| panic!("a minimap view emit, got {cmds:?}"))
@@ -1609,7 +1609,7 @@ mod tests {
         let emitted = view_after_scroll(&mut h, &mut rx, editor_id, mid_row);
         assert_eq!(
             emitted,
-            (mid_line * 256, mid_visible as u16),
+            (mid_line * 256, mid_visible * 256),
             "display row {mid_row} maps to buffer line {mid_line} over {mid_visible} lines"
         );
 
@@ -1617,11 +1617,11 @@ mod tests {
         let (top_256, visible) = view_after_scroll(&mut h, &mut rx, editor_id, max_row);
         assert_eq!(
             (top_256, visible),
-            (max_line * 256, max_visible as u16),
+            (max_line * 256, max_visible * 256),
             "the bottom-scrolled top maps to buffer line {max_line} over {max_visible} lines"
         );
         assert_eq!(
-            top_256 / 256 + visible as u32,
+            (top_256 + visible) / 256,
             buffer_lines,
             "the bottom-scrolled window ends exactly at the last buffer line, so the thumb \
              stays on the strip"

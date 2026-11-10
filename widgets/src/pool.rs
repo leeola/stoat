@@ -61,7 +61,7 @@ pub struct SmoothScrollState {
 struct MinimapView {
     pool: u32,
     top_256: u32,
-    visible: u16,
+    visible_256: u32,
     from: MinimapWindowInputs,
 }
 
@@ -356,10 +356,10 @@ impl SmoothScrollState {
     ///
     /// `pool` is the scroll pool feeding the strip this frame, and `inputs` is
     /// what the window would be derived from. `window` produces the fractional
-    /// top content row and the viewport height in lines, and runs only when
-    /// `inputs` differ from the last emit's, since deriving a window costs
-    /// several display-to-content conversions and identical inputs give an
-    /// identical answer.
+    /// top content row and the viewport height in 1/256ths of a line, and runs
+    /// only when `inputs` differ from the last emit's, since deriving a window
+    /// costs several display-to-content conversions and identical inputs give
+    /// an identical answer.
     ///
     /// Inputs that moved need not mean the window did, so a fresh window is
     /// still compared before anything is sent. Either way the new inputs are
@@ -370,7 +370,7 @@ impl SmoothScrollState {
         strip_id: u32,
         pool: u32,
         inputs: MinimapWindowInputs,
-        window: impl FnOnce() -> (f32, u16),
+        window: impl FnOnce() -> (f32, u32),
     ) {
         let held = self.minimap_views.get_mut(&strip_id);
         if held
@@ -380,12 +380,12 @@ impl SmoothScrollState {
             return;
         }
 
-        let (top, visible) = window();
+        let (top, visible_256) = window();
         let top_256 = (top * 256.0) as u32;
         if let Some(view) = held
             && view.pool == pool
             && view.top_256 == top_256
-            && view.visible == visible
+            && view.visible_256 == visible_256
         {
             view.from = inputs;
             return;
@@ -396,7 +396,7 @@ impl SmoothScrollState {
             &MinimapViewCommand {
                 strip_id,
                 top_256,
-                visible_lines: visible,
+                visible_256,
             },
         );
         self.minimap_views.insert(
@@ -404,7 +404,7 @@ impl SmoothScrollState {
             MinimapView {
                 pool,
                 top_256,
-                visible,
+                visible_256,
                 from: inputs,
             },
         );
@@ -858,7 +858,7 @@ mod tests {
             state: &mut SmoothScrollState,
             derives: &mut u32,
             inputs: MinimapWindowInputs,
-            window: (f32, u16),
+            window: (f32, u32),
         ) -> usize {
             let mut out = Vec::new();
             state.emit_minimap_view(&mut out, 1, 2, inputs, || {
@@ -873,13 +873,13 @@ mod tests {
         let settled = MinimapWindowInputs::new(3.5, 7, 40);
 
         assert!(
-            emit(&mut state, &mut derives, settled, (3.5, 40)) > 0,
+            emit(&mut state, &mut derives, settled, (3.5, 40 * 256)) > 0,
             "the first frame places the thumb",
         );
         assert_eq!(derives, 1, "and derives the window to do it");
 
         assert_eq!(
-            emit(&mut state, &mut derives, settled, (3.5, 40)),
+            emit(&mut state, &mut derives, settled, (3.5, 40 * 256)),
             0,
             "an unmoved frame sends nothing",
         );
@@ -889,13 +889,13 @@ mod tests {
         // is derived, but nothing is sent.
         let nudged = MinimapWindowInputs::new(3.502, 7, 40);
         assert_eq!(
-            emit(&mut state, &mut derives, nudged, (3.5, 40)),
+            emit(&mut state, &mut derives, nudged, (3.5, 40 * 256)),
             0,
             "a window that came out the same sends nothing",
         );
         assert_eq!(derives, 2, "though it had to be derived to know that");
         assert_eq!(
-            emit(&mut state, &mut derives, nudged, (3.5, 40)),
+            emit(&mut state, &mut derives, nudged, (3.5, 40 * 256)),
             0,
             "and the frame after it is idle again",
         );
@@ -910,11 +910,11 @@ mod tests {
             (MinimapWindowInputs::new(3.502, 7, 41), "a resize"),
         ] {
             let before = derives;
-            emit(&mut state, &mut derives, moved, (9.0, 41));
+            emit(&mut state, &mut derives, moved, (9.0, 41 * 256));
             assert_eq!(derives, before + 1, "{label} must derive the window again");
             // Back to a shared baseline so each input is judged on its own.
             state = SmoothScrollState::default();
-            emit(&mut state, &mut derives, nudged, (3.5, 40));
+            emit(&mut state, &mut derives, nudged, (3.5, 40 * 256));
             derives = 0;
         }
     }
@@ -2033,8 +2033,8 @@ mod tests {
     fn drop_pool_retires_the_pool_and_the_thumbs_it_fed() {
         fn place_thumbs(state: &mut SmoothScrollState, out: &mut Vec<u8>) {
             let inputs = MinimapWindowInputs::new(0.0, 7, 20);
-            state.emit_minimap_view(out, 5, 1, inputs, || (0.0, 20));
-            state.emit_minimap_view(out, 6, 2, inputs, || (0.0, 20));
+            state.emit_minimap_view(out, 5, 1, inputs, || (0.0, 20 * 256));
+            state.emit_minimap_view(out, 6, 2, inputs, || (0.0, 20 * 256));
         }
 
         let mut state = SmoothScrollState::default();
@@ -2061,7 +2061,7 @@ mod tests {
             vec![Command::MinimapView(MinimapViewCommand {
                 strip_id: 5,
                 top_256: 0,
-                visible_lines: 20,
+                visible_256: 20 * 256,
             })],
             "the thumb of pool 1 is placed again, and the thumb of pool 2 stays"
         );

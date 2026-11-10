@@ -25,11 +25,6 @@ use wgpu::{
 /// Instance buffer capacity, in quads, allocated up front. Grows by doubling.
 const INITIAL_CAPACITY: usize = 256;
 
-/// Minimum viewport-thumb height in logical pixels, so the thumb stays grabbable
-/// on a large file where the proportional height would collapse to a sliver.
-/// Left physical, it would floor at half the size on a 2x display.
-const MIN_THUMB_PX: f32 = 12.0;
-
 /// The per-quad instance data. It carries an absolute-pixel rectangle, an rgba
 /// fill, and the strip's declaration-order seq the fragment shader occludes by.
 #[repr(C)]
@@ -545,8 +540,9 @@ fn minimap_top(total: f32, visible_lines: f32, view_top: f32, view_visible: f32)
 /// The viewport thumb's top offset from the strip top and its height, in pixels.
 ///
 /// The height floors at `min_height` so the thumb stays visible on a large file
-/// where its proportional height would collapse. The caller states that floor in
-/// physical pixels, having scaled [`MIN_THUMB_PX`] by the display density.
+/// where its proportional height would collapse. The caller passes one strip
+/// row, the least of the file the strip draws, so a viewport that covers part
+/// of a row still shows as that row.
 ///
 /// That floor is what makes the offset clamp necessary. A purely proportional
 /// thumb already ends flush with the strip at max scroll, since the offset gives
@@ -573,6 +569,9 @@ fn thumb_geometry(
 /// Walks only the visible line slice `[top, top + visible_lines)`, so the cost is
 /// bounded by the strip height, never the file size. A line index past the
 /// content is skipped. A run whose class is outside the palette is skipped.
+///
+/// A run in the strip's non-zero rule class draws as a hairline in the gap
+/// above its row, at the thumb outline's weight, in place of its block.
 fn build_strip(
     strip: &Minimap,
     content: &[LineSummary],
@@ -597,12 +596,17 @@ fn build_strip(
 
     let total = content.len() as f32;
     let (view_top, view_visible) = match strip.view {
-        Some(MinimapView { top_256, visible }) => (top_256 as f32 / 256.0, visible as f32),
+        Some(MinimapView {
+            top_256,
+            visible_256,
+        }) => (top_256 as f32 / 256.0, visible_256 as f32 / 256.0),
         None => (0.0, layout.visible_lines),
     };
     let top = minimap_top(total, layout.visible_lines, view_top, view_visible);
 
     let strip_right = layout.strip_x + layout.strip_w;
+    let hairline = metrics.scale_factor.round().max(1.0);
+    let rule_class = Some(strip.strip.rule_class).filter(|&class| class != 0);
     let last = ((top + layout.visible_lines).ceil() as usize).min(content.len());
     let first = (top.max(0.0) as usize).min(last);
     for (line, runs) in (first..last).zip(&content[first..last]) {
@@ -623,9 +627,13 @@ fn build_strip(
             if width == 0.0 {
                 continue;
             }
+            let (origin, size) = match rule_class == Some(run.class) {
+                true => ([x, y - hairline], [width, hairline]),
+                false => ([x, y], [width, layout.run_h]),
+            };
             instances.push(MinimapInstance {
-                origin: [x, y],
-                size: [width, layout.run_h],
+                origin,
+                size,
                 // The run's opacity is the weight of the glyphs under it, so a
                 // line of capitals reads heavier than one of punctuation and
                 // the strip carries texture at a size too small for letters.
@@ -641,7 +649,7 @@ fn build_strip(
         view_visible,
         layout.line_h,
         layout.strip_h,
-        MIN_THUMB_PX * metrics.scale_factor,
+        layout.line_h,
     );
     instances.push(MinimapInstance {
         origin: [layout.strip_x, layout.strip_y + thumb_offset],
@@ -657,15 +665,14 @@ fn build_strip(
     // The thumb's outline, one logical pixel wide on rounded rows so the
     // hairline stays crisp.
     let border = rgb_opaque_f32(border);
-    let weight = metrics.scale_factor.round().max(1.0);
     let top_y = (layout.strip_y + thumb_offset).round();
     let bottom_y = (top_y + thumb_height).round();
     let (x, w, h) = (layout.strip_x, layout.strip_w, bottom_y - top_y);
     for (origin, size) in [
-        ([x, top_y], [w, weight]),
-        ([x, bottom_y - weight], [w, weight]),
-        ([x, top_y], [weight, h]),
-        ([x + w - weight, top_y], [weight, h]),
+        ([x, top_y], [w, hairline]),
+        ([x, bottom_y - hairline], [w, hairline]),
+        ([x, top_y], [hairline, h]),
+        ([x + w - hairline, top_y], [hairline, h]),
     ] {
         instances.push(MinimapInstance {
             origin,
@@ -710,9 +717,7 @@ fn rgb_opaque_f32(color: Rgb) -> [f32; 4] {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        build_strip, minimap_top, strip_layout, thumb_geometry, MinimapPass, MIN_THUMB_PX,
-    };
+    use super::{build_strip, minimap_top, strip_layout, thumb_geometry, MinimapPass};
     use crate::{
         render::{panel_occluder, CellMetrics, GridLayout, Occluder},
         test_support::{read_back, require_headless_device},
@@ -776,6 +781,7 @@ mod tests {
             bg: Rgba::new(0, 0, 0, 0),
             thumb: Rgba::new(200, 200, 200, 48),
             thumb_border: Some(Rgb::new(255, 255, 255)),
+            rule_class: 0,
             palette: vec![
                 Rgb::new(10, 20, 30),
                 Rgb::new(40, 50, 60),
@@ -823,63 +829,87 @@ mod tests {
         assert_eq!(minimap_top(200.0, 80.0, 1_000.0, 30.0), 120.0);
     }
 
+    /// The thumb floors at one strip row, the least of the file the strip
+    /// draws, so a viewport that covers part of a row still shows as that row.
     #[test]
-    fn thumb_height_floors_at_the_minimum() {
-        // The strip is 10 cells of 12px, so 120px tall.
+    fn a_thumb_floors_at_one_row() {
+        // The strip is 10 cells of 12px, so 120px tall, at 1.5px a row.
         const STRIP_H: f32 = 120.0;
+        const ROW: f32 = 1.5;
 
-        // A one-line viewport at 1.5px per line would be a sliver, so it floors.
-        let (_, height) = thumb_geometry(0.0, 0.0, 1.0, 1.5, STRIP_H, MIN_THUMB_PX);
-        assert_eq!(height, MIN_THUMB_PX);
+        let floored = thumb_geometry(0.0, 0.0, 0.25, ROW, STRIP_H, ROW);
+        let tall = thumb_geometry(20.0, 10.0, 40.0, ROW, STRIP_H, ROW);
 
-        // The floor is logical pixels, so a 2x display asks for twice as many.
-        let (_, dense) = thumb_geometry(0.0, 0.0, 1.0, 1.5, STRIP_H, MIN_THUMB_PX * 2.0);
-        assert_eq!(dense, 24.0, "a denser display floors at the same size");
+        // A quarter-row viewport over a 10000-row file scrolled to the bottom
+        // floors to one row. Its unclamped offset of 119.625 puts the thumb
+        // past the strip's last row, so the clamp moves it back.
+        let top = minimap_top(10_000.0, 80.0, 9_999.75, 0.25);
+        let (offset, height) = thumb_geometry(9_999.75, top, 0.25, ROW, STRIP_H, ROW);
 
-        let (offset, height) = thumb_geometry(20.0, 10.0, 40.0, 1.5, STRIP_H, MIN_THUMB_PX);
-        assert_eq!(offset, 15.0, "thumb offset is (view_top - top) * line_h");
-        assert_eq!(
-            height, 60.0,
-            "a tall viewport keeps its proportional height"
+        let view = Some(MinimapView {
+            top_256: 0,
+            visible_256: 64,
+        });
+        let (instances, _) = build_strip(
+            &strip(view),
+            &summaries(vec![Vec::new(); 100]),
+            metrics(),
+            uniform_layout(),
         );
+        let row = strip_layout(&command(), metrics(), uniform_layout()).line_h;
 
-        // A 5-line viewport over a 10000-line file scrolled to the bottom has a
-        // 7.5px proportional thumb, which floors to 12. Its unclamped offset of
-        // 112.5 would hang 4.5px below the strip.
-        let top = minimap_top(10_000.0, 80.0, 9_995.0, 5.0);
-        let (offset, height) = thumb_geometry(9_995.0, top, 5.0, 1.5, STRIP_H, MIN_THUMB_PX);
         assert_eq!(
-            (offset, height, offset + height),
-            (108.0, MIN_THUMB_PX, STRIP_H),
-            "a bottom-scrolled floored thumb ends flush with the strip"
+            (floored, tall, offset + height, instances[1].size[1]),
+            ((0.0, ROW), (15.0, 60.0), STRIP_H, row),
+            "a part-row viewport floors at one row and a bottom-scrolled one ends \
+             flush with the strip, while a tall viewport keeps its height",
         );
     }
 
-    /// A strip states its floor in logical pixels, so the thumb a large file
-    /// collapses to stays the same apparent size on a denser display rather
-    /// than halving.
+    /// A run in the rule class draws as a hairline in the gap above its row,
+    /// in place of its block, while a run of another class keeps its block.
     #[test]
-    fn a_floored_thumb_holds_its_size_at_twice_the_density() {
-        let dense = CellMetrics {
-            scale_factor: 2.0,
-            ..metrics()
-        };
-        // A one-line viewport over a hundred is two pixels tall, well under the
-        // floor either way.
-        let view = Some(MinimapView {
-            top_256: 0,
-            visible: 1,
-        });
-        let content = summaries(vec![Vec::new(); 100]);
-        let thumb_height = |metrics| {
-            let (instances, _) = build_strip(&strip(view), &content, metrics, uniform_layout());
-            instances[1].size[1]
-        };
+    fn a_rule_run_draws_a_hairline_in_the_gap_above_its_row() {
+        let mut ruled = strip(None);
+        ruled.strip.rule_class = 2;
+        let content = vec![
+            Vec::new(),
+            vec![
+                MinimapRun {
+                    start_col: 0,
+                    len: 10,
+                    class: 2,
+                    weight: 128,
+                },
+                MinimapRun {
+                    start_col: 20,
+                    len: 4,
+                    class: 1,
+                    weight: 255,
+                },
+            ],
+        ];
+        let (instances, _) = build_strip(&ruled, &summaries(content), metrics(), uniform_layout());
 
+        // Row 1 starts at y 2 under a 2px row pitch, and its blocks are 1px
+        // tall, so the gap above it is the pixel at y 1.
         assert_eq!(
-            (thumb_height(metrics()), thumb_height(dense)),
-            (MIN_THUMB_PX, MIN_THUMB_PX * 2.0),
-            "the floor is the same twelve logical pixels at either density"
+            instances[1..3]
+                .iter()
+                .map(|instance| (instance.origin, instance.size, instance.color))
+                .collect::<Vec<_>>(),
+            [
+                (
+                    [60.0, 1.0],
+                    [10.0 * 0.4, 1.0],
+                    [70.0 / 255.0, 80.0 / 255.0, 90.0 / 255.0, 128.0 / 255.0],
+                ),
+                (
+                    [60.0 + 20.0 * 0.4, 2.0],
+                    [4.0 * 0.4, 1.0],
+                    [40.0 / 255.0, 50.0 / 255.0, 60.0 / 255.0, 1.0],
+                ),
+            ],
         );
     }
 
@@ -957,7 +987,7 @@ mod tests {
         }]];
         let view = Some(MinimapView {
             top_256: 0,
-            visible: 30,
+            visible_256: 30 * 256,
         });
         let (instances, _) = build_strip(
             &strip(view),
@@ -1254,7 +1284,7 @@ mod tests {
         grid.set_minimaps(vec![
             strip(Some(MinimapView {
                 top_256: 512,
-                visible: 3,
+                visible_256: 3 * 256,
             })),
             second_strip(None),
         ]);
@@ -1432,6 +1462,7 @@ mod tests {
             bg: Rgba::new(0, 0, 0, 0),
             thumb: Rgba::new(0, 0, 0, 0),
             thumb_border: Some(Rgb::new(0, 0, 0)),
+            rule_class: 0,
             palette: vec![Rgb::new(255, 0, 0)],
         }
     }
@@ -1557,7 +1588,7 @@ mod tests {
         let strip_at = |top_256: u32| {
             let view = MinimapView {
                 top_256,
-                visible: 24,
+                visible_256: 24 * 256,
             };
             let grid = red_grid(red_strip(1, 4, 6, 12), content.clone(), Some(view));
             let red = render_red(&device, &queue, &grid, &[], metrics());

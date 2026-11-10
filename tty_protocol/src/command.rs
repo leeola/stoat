@@ -686,7 +686,7 @@ mod tests {
                 encode_minimap_view(&MinimapViewCommand {
                     strip_id: 1,
                     top_256: 2,
-                    visible_lines: 3,
+                    visible_256: 3,
                 }),
             ),
             (
@@ -734,6 +734,7 @@ mod tests {
                     bg: [9, 10, 11, 12],
                     thumb: [13, 14, 15, 16],
                     thumb_border: Some([17, 18, 19]),
+                    rule_class: 23,
                     palette: vec![[20, 21, 22]],
                 }),
             ),
@@ -1220,6 +1221,7 @@ mod tests {
                 bg: [10, 20, 30, 0],
                 thumb: [200, 200, 200, 48],
                 thumb_border: Some([255, 255, 255]),
+                rule_class: 2,
                 palette: vec![[0, 0, 0], [1, 2, 3], [4, 5, 6]],
             }),
             Command::MinimapLines(MinimapLinesCommand {
@@ -1240,7 +1242,7 @@ mod tests {
             Command::MinimapView(MinimapViewCommand {
                 strip_id: 5,
                 top_256: 1_280,
-                visible_lines: 40,
+                visible_256: 40 * 256,
             }),
             Command::MinimapLen(MinimapLenCommand {
                 content_id: 9,

@@ -6247,6 +6247,7 @@ fn minimap_cmd(strip_id: u32, content_id: u32) -> MinimapCommand {
         bg: [0, 0, 0, 0],
         thumb: [200, 200, 200, 48],
         thumb_border: Some([255, 255, 255]),
+        rule_class: 0,
         palette: vec![[0, 0, 0], [1, 2, 3]],
     }
 }
@@ -6360,7 +6361,7 @@ fn reset_clears_minimap_strips_but_keeps_content_and_view() {
     terminal.advance(&encode_minimap_view(&MinimapViewCommand {
         strip_id: 5,
         top_256: 256,
-        visible_lines: 20,
+        visible_256: 20 * 256,
     }));
     assert_eq!(terminal.minimaps.len(), 1, "the strip is declared");
 
@@ -6389,7 +6390,7 @@ fn views_past_the_cap_are_refused_while_an_established_strip_still_advances() {
         encode_minimap_view(&MinimapViewCommand {
             strip_id,
             top_256,
-            visible_lines: 20,
+            visible_256: 20 * 256,
         })
     };
 
@@ -6421,7 +6422,7 @@ fn reset_retires_views_for_strips_the_scene_does_not_declare() {
         terminal.advance(&encode_minimap_view(&MinimapViewCommand {
             strip_id,
             top_256: 256,
-            visible_lines: 20,
+            visible_256: 20 * 256,
         }));
     }
 
@@ -6443,7 +6444,7 @@ fn a_strip_the_scene_stops_declaring_loses_its_view() {
     terminal.advance(&encode_minimap_view(&MinimapViewCommand {
         strip_id: 5,
         top_256: 256,
-        visible_lines: 20,
+        visible_256: 20 * 256,
     }));
     terminal.advance(&encode_reset());
     assert!(
@@ -6473,7 +6474,7 @@ fn a_view_sent_with_its_strip_s_first_declaration_survives_the_update() {
     terminal.advance(&encode_minimap_view(&MinimapViewCommand {
         strip_id: 5,
         top_256: 256,
-        visible_lines: 20,
+        visible_256: 20 * 256,
     }));
     terminal.advance(b"\x1b[?2026l");
 
@@ -6481,7 +6482,7 @@ fn a_view_sent_with_its_strip_s_first_declaration_survives_the_update() {
         terminal.minimap_views.get(&5).copied(),
         Some(MinimapView {
             top_256: 256,
-            visible: 20,
+            visible_256: 20 * 256,
         }),
         "the view lands after the reset that opens its update",
     );
@@ -6508,7 +6509,7 @@ fn minimap_view_advance_reprojects_the_thumb() {
     terminal.advance(&encode_minimap_view(&MinimapViewCommand {
         strip_id: 5,
         top_256: 256,
-        visible_lines: 20,
+        visible_256: 20 * 256,
     }));
 
     let mut grid = Grid::new(4, 4);
@@ -6524,7 +6525,7 @@ fn minimap_view_advance_reprojects_the_thumb() {
     terminal.advance(&encode_minimap_view(&MinimapViewCommand {
         strip_id: 5,
         top_256: 768,
-        visible_lines: 20,
+        visible_256: 20 * 256,
     }));
     terminal.project(&mut grid);
     assert_eq!(
@@ -6541,7 +6542,7 @@ fn minimap_projects_to_grid_joined_with_view_and_content() {
     terminal.advance(&encode_minimap_view(&MinimapViewCommand {
         strip_id: 5,
         top_256: 512,
-        visible_lines: 20,
+        visible_256: 20 * 256,
     }));
     terminal.advance(&splice(
         9,
@@ -6560,7 +6561,7 @@ fn minimap_projects_to_grid_joined_with_view_and_content() {
         strip.view,
         Some(MinimapView {
             top_256: 512,
-            visible: 20,
+            visible_256: 20 * 256,
         }),
     );
     assert_eq!(

@@ -1373,7 +1373,8 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
             stoat
                 .smooth_scroll
                 .emit_minimap_view(&mut out, strip_id, region.pool, inputs, || {
-                    minimap_view_window(&snapshot, scroll_offset, rows)
+                    let (top, visible) = minimap_view_window(&snapshot, scroll_offset, rows);
+                    (top, u32::from(visible) * 256)
                 });
         }
 

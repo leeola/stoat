@@ -2463,7 +2463,7 @@ impl Terminal {
                     view.strip_id,
                     MinimapView {
                         top_256: view.top_256,
-                        visible: view.visible_lines,
+                        visible_256: view.visible_256,
                     },
                 );
                 // A view-only advance still marks the strip dirty so the next

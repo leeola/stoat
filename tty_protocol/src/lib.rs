@@ -191,9 +191,16 @@
 /// terminal that predates it reads the code as a drop shadow, which only draws
 /// larger.
 ///
+/// Version 29 reads a fixed 12-byte `minimap_view` argument, whose viewport
+/// height is in 1/256ths of a line, and a fixed 31-byte `minimap` head, which
+/// ends in a rule class. A run in that class draws as a hairline in the gap
+/// above its row, and the thumb floors at one strip row. A terminal that
+/// predates it reads the height from the wrong bytes and draws a rule run as
+/// a block. This version drops a shorter argument and head.
+///
 /// Zero is reserved for a peer whose handshake carries no version at all, which
 /// is every build from before the field existed.
-pub const PROTOCOL_VERSION: u32 = 28;
+pub const PROTOCOL_VERSION: u32 = 29;
 
 /// The first [`PROTOCOL_VERSION`] whose terminal reads the `text_runs` and
 /// `bars` batches.

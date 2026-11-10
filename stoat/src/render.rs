@@ -1590,6 +1590,7 @@ pub(crate) fn frame(
             bg: [0, 0, 0, 0],
             thumb: chrome.thumb,
             thumb_border: None,
+            rule_class: 0,
             palette,
         };
         match single_band_overview(ws) {

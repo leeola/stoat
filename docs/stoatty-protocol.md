@@ -142,7 +142,7 @@ session control. "Head" is the fixed prefix of the first argument.
 | `sketch_path` | D | 22 B + 4 B per point, +8 B with anchor | Hand-drawn curve through listed points |
 | `sketch_elbow` | D | 23 B + 4 B per point, +8 B with anchor | Hand-drawn polyline through listed points, corners rounded |
 | `line_layout` | D | 2 B per line | Max 24567 lines, replaced whole |
-| `minimap` | D | 30 B + palette arg | Strip declaration; its content store is persistent |
+| `minimap` | D | 31 B + palette arg | Strip declaration, ending in the rule class; its content store is persistent |
 | `scroll_region` | D | 10 B | Eased by the change between declarations |
 | `fill` | P | 12 B | + streamed page, closed by `fill_end` |
 | `fill_rows` | P | 20 B | + streamed rows, closed by `fill_end` |
@@ -155,7 +155,7 @@ session control. "Head" is the fixed prefix of the first argument.
 | `pool_drop` | P | 4 B | Retires a pool |
 | `minimap_lines` | P | 16 B header + lines | Paginates past the payload cap; runs of 3 B |
 | `minimap_runs` | P | 16 B header + lines | As `minimap_lines`, runs of 4 B carrying glyph weight |
-| `minimap_view` | P | 10 B | Moves the viewport thumb |
+| `minimap_view` | P | 12 B | Moves the viewport thumb, its height in 1/256 lines |
 | `minimap_drop` | P | 4 B | Retires a content store |
 | `window_open` | P | 8 B + title | Aux OS window as a second render target |
 | `window_close` | P | 4 B | |

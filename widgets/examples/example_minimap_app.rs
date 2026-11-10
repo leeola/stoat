@@ -390,6 +390,7 @@ fn render_frame(frame: &mut Frame<'_>, scene: &mut ApcScene, document: &[String]
             bg: [0, 0, 0, 0],
             thumb: [99, 109, 131, 64],
             thumb_border: Some([60, 66, 77]),
+            rule_class: 0,
             palette: &PALETTE,
         },
         STRIP,
@@ -412,7 +413,7 @@ fn write_view(top: u32, total: usize) {
         &MinimapViewCommand {
             strip_id: 1,
             top_256: top.saturating_mul(256),
-            visible_lines: VIEWPORT.min(total as u32) as u16,
+            visible_256: VIEWPORT.min(total as u32) * 256,
         },
     );
     write_out(&out);
