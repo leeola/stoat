@@ -180,7 +180,7 @@ fn a_modified_row_reads_removed_on_the_base_side_and_added_on_the_live_side() {
 /// The base side of the split diff recedes as a whole behind the live side.
 ///
 /// Row 6, `6 six`, is context on both sides. The left text starts at column 6
-/// and the right at column 85. The base side paints the context color, which
+/// and the right at column 82. The base side paints the context color, which
 /// alone reaches about two thirds of the live text, so only the fade brings the
 /// left text's peak below three fifths of the right's.
 #[test]
@@ -193,7 +193,7 @@ fn the_base_side_of_the_split_diff_recedes_behind_the_live_side() {
         "<Space>df<Settle>",
     );
     let base = brightest(&shot, cell_rect(6, 6, 5, 1));
-    let live = brightest(&shot, cell_rect(85, 6, 5, 1));
+    let live = brightest(&shot, cell_rect(82, 6, 5, 1));
 
     if u16::from(base) * 5 >= u16::from(live) * 3 {
         let frame = keep_frame(&shot, &mut home, "diff_base_side");
@@ -253,15 +253,14 @@ fn the_split_diff_frames_its_base_column() {
     expect_base_frame_top(&shot, &mut home, 1, "diff_base_frame_top");
 }
 
-/// The split diff ends in a one-cell scroll overview on the window ground.
+/// The split diff ends in its buffer's minimap strip on the editor surface, as
+/// a plain editor does.
 ///
-/// The single band narrows to the overview at column 158, the last column
-/// inside the island margin, and runs from row 1 under the tab bar to row 48
-/// above the status row. Its change marks and the viewport band cover few of
-/// the column's pixels, so the column reads as chrome. A text strip reads as
-/// the editor surface.
+/// The single band keeps its seven columns over the split diff, as
+/// [`expect_strip_band`] reads them. The file's lines draw their runs on the
+/// band's first row.
 #[test]
-fn the_split_diff_ends_in_a_scroll_overview_on_chrome() {
+fn the_split_diff_ends_in_the_minimap_strip_on_the_editor_surface() {
     let mut home = support::scratch_home();
     let shot = settled_frame(
         home.path(),
@@ -269,13 +268,7 @@ fn the_split_diff_ends_in_a_scroll_overview_on_chrome() {
         "unstaged.txt",
         "<Space>df<Settle>",
     );
-    expect_region(
-        &shot,
-        &mut home,
-        cell_rect(158, 1, 1, 48),
-        CHROME,
-        "diff_overview",
-    );
+    expect_strip_band(&shot, &mut home, "diff_strip");
 }
 
 /// The changes view frames its base column once, across its file headers.
@@ -298,14 +291,14 @@ fn the_changes_view_frames_its_base_column_across_the_headers() {
     expect_base_frame_top(&shot, &mut home, 1, "changes_base_frame_top");
 }
 
-/// The changes view ends in the same one-cell scroll overview on the window
-/// ground that the split diff ends in.
+/// The changes view ends in its stack's minimap strip on the editor surface,
+/// in the band the split diff ends in.
 ///
-/// The single band narrows to the overview at column 158, between the tab
-/// bar and the status row, as it does over the split diff, so the column
-/// reads as chrome.
+/// The band keeps its seven columns, as [`expect_strip_band`] reads them. The
+/// stack's first file header draws its run across the band's first row,
+/// beside the runs of the file's lines.
 #[test]
-fn the_changes_view_ends_in_a_scroll_overview_on_chrome() {
+fn the_changes_view_ends_in_the_minimap_strip_on_the_editor_surface() {
     let mut home = support::scratch_home();
     let shot = settled_frame(
         home.path(),
@@ -313,13 +306,7 @@ fn the_changes_view_ends_in_a_scroll_overview_on_chrome() {
         "unstaged.txt",
         "<Space>dc<Settle>",
     );
-    expect_region(
-        &shot,
-        &mut home,
-        cell_rect(158, 1, 1, 48),
-        CHROME,
-        "changes_overview",
-    );
+    expect_strip_band(&shot, &mut home, "changes_strip");
 }
 
 /// The changes view heads each file with a row on the raised surface, between
@@ -1374,9 +1361,9 @@ fn expect_hatch(
 ///
 /// The left side is the first three pixel columns of the pane's first cell,
 /// column 1, the boards' 3 px border. The right one is three pixel columns of
-/// the divider column, 79, which both diff screens place beside their one-cell
-/// overview. It starts a pixel into the cell and stops a pixel short of the
-/// hairline, since the divider column is odd. A miss saves the frame as
+/// the divider column, 76, the middle of the pane's 151 cells. It starts a
+/// pixel into the cell and ends at the hairline, which the even column draws
+/// on the cell's fifth pixel column. A miss saves the frame as
 /// [`expect_region`] does.
 fn expect_base_frame_sides(shot: &Snapshot, home: &mut TempDir, row: u16, what: &str) {
     let (_, y, _, height) = cell_rect(0, row, 1, 1);
@@ -1386,7 +1373,7 @@ fn expect_base_frame_sides(shot: &Snapshot, home: &mut TempDir, row: u16, what: 
         let (x, _, width, _) = cell_rect(col, row, 1, 1);
         x..x + width
     };
-    let (left, right) = (cell(1), cell(79));
+    let (left, right) = (cell(1), cell(76));
     let sides: Vec<u32> = [0, 1, 2]
         .map(|dx| left.start + dx)
         .into_iter()
@@ -1431,6 +1418,32 @@ fn expect_base_frame_top(shot: &Snapshot, home: &mut TempDir, row: u16, what: &s
         "{what}: the top three pixel rows of row {row} hold the base tint in columns {top:?} \
          and the row under them in {below:?}, not one run across the sides {sides:?} and the \
          sides alone; the frame is {}",
+        frame.display(),
+    );
+}
+
+/// Panics unless each of the single band's seven columns, 152 to 158, reads
+/// as the editor surface from row 1 under the tab bar to row 48 above the
+/// status row, and the band draws text runs on row 1.
+///
+/// The strip's runs, its marks, and its viewport band cover few of a column's
+/// pixels, so each column reads as the surface that a text strip sits on. A
+/// short plain-text file's strip rows fill row 1 and draw their runs in grey,
+/// as [`grey_run_pixels`] counts them. A miss saves the frame as
+/// [`expect_region`] does.
+fn expect_strip_band(shot: &Snapshot, home: &mut TempDir, what: &str) {
+    for col in 152..=158 {
+        expect_region(shot, home, cell_rect(col, 1, 1, 48), BASE, what);
+    }
+
+    let runs = grey_run_pixels(shot, cell_rect(152, 1, 7, 1));
+    if runs > 0 {
+        return;
+    }
+
+    let frame = keep_frame(shot, home, what);
+    panic!(
+        "{what}: the band's first row holds no grey run pixel; the frame is {}",
         frame.display(),
     );
 }
@@ -1516,6 +1529,27 @@ fn brightest(shot: &Snapshot, (x, y, width, height): PixelRect) -> u8 {
         })
         .max()
         .expect("the rectangle holds pixels")
+}
+
+/// The pixels of `rect` in `shot` that draw a minimap text run of a plain-text
+/// file, whose class takes a grey.
+///
+/// A grey keeps its channels within `0x20` of each other, and a run's peaks
+/// above `0x70`. The blue change lane, the surface, the viewport band, a row's
+/// change tint, and a file header's bar all miss one of the two tests.
+fn grey_run_pixels(shot: &Snapshot, (x, y, width, height): PixelRect) -> usize {
+    (y..y + height)
+        .flat_map(|row| {
+            let start = ((row * shot.width + x) * 4) as usize;
+            let end = start + (width * 4) as usize;
+            shot.rgba[start..end].chunks_exact(4)
+        })
+        .filter(|pixel| {
+            let high = pixel[0].max(pixel[1]).max(pixel[2]);
+            let low = pixel[0].min(pixel[1]).min(pixel[2]);
+            high > 0x70 && high - low <= 0x20
+        })
+        .count()
 }
 
 /// Whether `cells`, row by row, form one unbroken run in one row.

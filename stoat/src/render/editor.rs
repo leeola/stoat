@@ -55,14 +55,6 @@ use stoatty_protocol::command::{IconKind, PopoverSpan};
 /// width the terminal's GPU minimap pass paints there.
 pub(super) const MINIMAP_STRIP_COLS: u16 = 7;
 
-/// Columns the scroll overview at the right edge of a split diff or a changes
-/// view takes.
-///
-/// The overview draws the diff's change marks and the viewport and no text, so
-/// one cell holds it. The diff's two sides keep the other columns that a text
-/// strip takes beside a plain editor.
-pub(super) const DIFF_OVERVIEW_COLS: u16 = 1;
-
 /// Widest display row [`WrapMode::None`] produces, in columns.
 ///
 /// Turning wrapping off asks for a display row per buffer line, which makes a
@@ -668,47 +660,32 @@ pub(crate) fn fit_diff_view(
 /// Reserve the right-edge minimap strip out of `inner`, and return the rect
 /// the text keeps.
 ///
-/// A diff view's strip is its scroll overview, [`DIFF_OVERVIEW_COLS`] wide. The
-/// strip's screen rect lands on [`EditorState::minimap_rect`] for pointer
+/// The strip's screen rect lands on [`EditorState::minimap_rect`] for pointer
 /// mapping.
 fn reserve_minimap_strip(editor: &mut EditorState, inner: Rect, minimap_enabled: bool) -> Rect {
-    let cols = strip_cols(editor.diff_view);
-    let (inner, strip) = split_minimap_strip(inner, minimap_enabled, cols);
+    let (inner, strip) = split_minimap_strip(inner, minimap_enabled);
     editor.minimap_rect = strip;
     inner
 }
 
-/// The columns a pane's minimap strip takes: a diff view's scroll overview,
-/// or the text strip of any other pane.
-pub(crate) fn strip_cols(diff_view: bool) -> u16 {
-    match diff_view {
-        true => DIFF_OVERVIEW_COLS,
-        false => MINIMAP_STRIP_COLS,
-    }
-}
-
 /// Split `inner` into the rect the pane's content keeps and the right-edge
-/// minimap strip, `cols` wide.
+/// minimap strip, [`MINIMAP_STRIP_COLS`] wide.
 ///
 /// The reserved cells stay blank, so the terminal's GPU minimap pass owns
 /// them. A pane narrower than [`MINIMAP_MIN_PANE_COLS`], or one with the
 /// minimap off, keeps all of `inner` and reserves no strip.
-pub(crate) fn split_minimap_strip(
-    inner: Rect,
-    minimap_enabled: bool,
-    cols: u16,
-) -> (Rect, Option<Rect>) {
+pub(crate) fn split_minimap_strip(inner: Rect, minimap_enabled: bool) -> (Rect, Option<Rect>) {
     if !minimap_enabled || inner.width < MINIMAP_MIN_PANE_COLS {
         return (inner, None);
     }
     let strip = Rect {
-        x: inner.x + inner.width - cols,
+        x: inner.x + inner.width - MINIMAP_STRIP_COLS,
         y: inner.y,
-        width: cols,
+        width: MINIMAP_STRIP_COLS,
         height: inner.height,
     };
     let content = Rect {
-        width: inner.width - cols,
+        width: inner.width - MINIMAP_STRIP_COLS,
         ..inner
     };
     (content, Some(strip))
@@ -5035,10 +5012,10 @@ mod tests {
         );
     }
 
-    /// A diff view reserves its scroll overview, one cell at the right edge,
-    /// in place of the text strip.
+    /// A diff view reserves the minimap strip at the right edge, as a plain
+    /// editor does.
     #[test]
-    fn diff_view_reserves_a_one_cell_overview_strip() {
+    fn diff_view_reserves_the_minimap_strip() {
         let mut h = Stoat::test();
         let root = PathBuf::from("/minimap-diff");
         let path = root.join("a.txt");
@@ -5057,10 +5034,10 @@ mod tests {
         assert_eq!(
             (rect, text_end),
             (
-                Some(Rect::new(119, 0, super::DIFF_OVERVIEW_COLS, 3)),
-                Some(119)
+                Some(Rect::new(113, 0, super::MINIMAP_STRIP_COLS, 3)),
+                Some(113)
             ),
-            "the overview pins to the right edge, and the live column ends where it starts"
+            "the strip pins to the right edge, and the live column ends where it starts"
         );
         assert!(
             strip.iter().all(|row| row.chars().all(|c| c == ' ')),

@@ -17,10 +17,7 @@ use crate::{
     pane::Pane,
     render::{
         chrome::{self, TypeTag},
-        editor::{
-            fit_diff_view, render_editor_with_overlay, screen_cell, split_minimap_strip,
-            DIFF_OVERVIEW_COLS,
-        },
+        editor::{fit_diff_view, render_editor_with_overlay, screen_cell, split_minimap_strip},
         paint::style_rgb,
         pane::diff_base_tint,
         review::{self, FrameEdges},
@@ -152,7 +149,7 @@ pub(crate) fn render_diff_changes(
     scene: &mut ApcScene,
 ) {
     let inner = pane.area;
-    let (inner, strip) = split_minimap_strip(inner, frame.minimap_enabled, DIFF_OVERVIEW_COLS);
+    let (inner, strip) = split_minimap_strip(inner, frame.minimap_enabled);
     state.minimap_rect = strip;
     state.content_rect = Some(inner);
     if let Some(editor) = state
@@ -273,7 +270,7 @@ pub(crate) fn render_diff_changes(
 /// rect, covers no part of the paint.
 pub(crate) fn stack_composited(pane: &Pane, frame: FrameCtx<'_>) -> bool {
     let inner = pane.area;
-    let (inner, _) = split_minimap_strip(inner, frame.minimap_enabled, DIFF_OVERVIEW_COLS);
+    let (inner, _) = split_minimap_strip(inner, frame.minimap_enabled);
     frame.composited_stacks.contains(&(pane.index, inner))
 }
 
@@ -703,7 +700,7 @@ pub(crate) fn replay_cursor(
     }
 
     let inner = pane.area;
-    let (inner, _) = split_minimap_strip(inner, frame.minimap_enabled, DIFF_OVERVIEW_COLS);
+    let (inner, _) = split_minimap_strip(inner, frame.minimap_enabled);
     let (scroll, area) = pinned_split(state, editors, inner);
     let (top, viewport) = (excerpt.top, usize::from(area.height));
     let rows = diff_changes::excerpt_rows(excerpt, editors);
@@ -747,13 +744,12 @@ mod tests {
         buffer_registry::BufferRegistry,
         diff_changes::{self, DiffChangesState, ExcerptStats},
         editor_state::{EditorId, EditorState},
-        minimap,
         pane::{DockPanel, DockSide, DockVisibility, FocusTarget, View},
         render::{
             commits::PreviewDials,
             content_lane, paint,
             review::{self, DiffColumns, DiffDials, DiffLayout},
-            surface_blank, themed_bg,
+            surface_blank,
             undercurl::UndercurlBatch,
             FrameCtx, SINGLE_MINIMAP_STRIP_ID,
         },
@@ -2149,25 +2145,20 @@ mod tests {
         (buf, reserved, declared)
     }
 
-    /// The workspace's changes view strip as `strip_id` declares it, the
-    /// scroll overview of the class table's palette, blended toward the
-    /// background by `dim`.
+    /// The workspace's changes view strip as `strip_id` declares it, in the
+    /// class table's palette blended toward the background by `dim`.
     fn diff_changes_strip(h: &TestHarness, strip_id: u32, dim: f32) -> Declared {
         let bg = paint::style_rgb(h.stoat.theme.get(scope::UI_BACKGROUND).bg)
             .expect("the test theme has an rgb background");
-        let table = &h.stoat.minimap_class_table;
-        let palette: Vec<_> = table
+        let palette: Vec<_> = h
+            .stoat
+            .minimap_class_table
             .palette()
             .iter()
             .map(|&color| paint::dim_rgb(color, bg, dim))
             .collect();
-        let ground = paint::dim_rgb(minimap::color_to_rgb(themed_bg(&h.stoat.theme)), bg, dim);
         let content_id = h.stoat.diff_changes_strips[&h.stoat.active_workspace].content_id();
-        (
-            strip_id,
-            content_id,
-            review::diff_overview_palette(table, &palette, ground),
-        )
+        (strip_id, content_id, palette)
     }
 
     fn focused_pane_index(h: &TestHarness) -> u32 {
@@ -2175,13 +2166,20 @@ mod tests {
         ws.panes.pane(ws.panes.focus()).index
     }
 
-    /// A per-pane changes view gives the cell at its right edge to the scroll
-    /// overview, leaves that cell blank, and declares the overview.
+    /// The width of the single band the last paint reserved, `None` with no
+    /// band.
+    fn band_width(h: &TestHarness) -> Option<u16> {
+        h.stoat.single_minimap_rect.map(|band| band.width)
+    }
+
+    /// A per-pane changes view gives the seven cells at its right edge to its
+    /// minimap strip, leaves them blank, and declares the strip in the syntax
+    /// palette.
     #[test]
-    fn a_per_pane_changes_view_declares_its_strip_as_an_overview() {
+    fn a_per_pane_changes_view_declares_a_seven_cell_strip() {
         let (mut h, mut rx) = strip_harness(MinimapMode::PerPane);
         let (buf, reserved, declared) = paint_strips(&mut h, &mut rx);
-        let strip = Rect::new(119, 0, 1, 23);
+        let strip = Rect::new(113, 0, 7, 23);
         let blank = surface_blank(&h.stoat.theme);
         let painted: Vec<_> = strip
             .positions()
@@ -2198,7 +2196,7 @@ mod tests {
     }
 
     /// A per-pane changes view that a dock took focus from declares its
-    /// overview at the inactive dim.
+    /// strip at the inactive dim.
     #[test]
     fn an_unfocused_per_pane_changes_view_dims_its_strip() {
         let (mut h, mut rx) = strip_harness(MinimapMode::PerPane);
@@ -2210,54 +2208,55 @@ mod tests {
         assert_eq!(declared, [diff_changes_strip(&h, index, dim)]);
     }
 
-    /// The single band narrows to one cell over a focused changes view and
-    /// shows its overview, and the pane reserves no strip of its own.
+    /// The single band shows a focused changes view's strip at its seven
+    /// cells, and the pane reserves no strip of its own.
     #[test]
     fn the_single_band_follows_a_focused_changes_view() {
         let (mut h, mut rx) = strip_harness(MinimapMode::Single);
         let (_, reserved, declared) = paint_strips(&mut h, &mut rx);
         assert_eq!(
-            (
-                reserved,
-                h.stoat.single_minimap_rect.map(|band| band.width),
-                declared
-            ),
+            (reserved, band_width(&h), declared),
             (
                 None,
-                Some(1),
-                vec![diff_changes_strip(&h, SINGLE_MINIMAP_STRIP_ID, 0.0)]
-            ),
-        );
-    }
-
-    /// The single band keeps its text width over a changes view that is not
-    /// the widened pane, and shows the overview across that width.
-    #[test]
-    fn the_single_band_keeps_its_width_over_an_unwidened_changes_view() {
-        let (mut h, mut rx) = strip_harness(MinimapMode::Single);
-        h.stoat.active_workspace_mut().panes.unwiden();
-        let (_, _, declared) = paint_strips(&mut h, &mut rx);
-        assert_eq!(
-            (h.stoat.single_minimap_rect.map(|band| band.width), declared),
-            (
                 Some(7),
                 vec![diff_changes_strip(&h, SINGLE_MINIMAP_STRIP_ID, 0.0)]
             ),
         );
     }
 
-    /// A dial step sends no band over a changes view. The overview keeps only
-    /// the row marks, which no dial moves.
+    /// The single band keeps its seven cells over a changes view whether the
+    /// view is the widened pane or not, so a widen never reflows the panes.
+    #[test]
+    fn the_single_band_keeps_its_width_over_a_changes_view() {
+        let (mut h, mut rx) = strip_harness(MinimapMode::Single);
+        let (_, _, declared) = paint_strips(&mut h, &mut rx);
+        let widened = band_width(&h);
+        h.stoat.active_workspace_mut().panes.unwiden();
+        paint_strips(&mut h, &mut rx);
+        assert_eq!(
+            (declared, [widened, band_width(&h)]),
+            (
+                vec![diff_changes_strip(&h, SINGLE_MINIMAP_STRIP_ID, 0.0)],
+                [Some(7), Some(7)]
+            ),
+        );
+    }
+
+    /// A dial step sends no band over a changes view and leaves the band at
+    /// its seven cells. The strip takes the syntax palette, which no dial
+    /// moves.
     #[test]
     fn a_dial_step_leaves_the_single_band_over_a_changes_view() {
         let (mut h, mut rx) = strip_harness(MinimapMode::Single);
         let (_, _, before) = paint_strips(&mut h, &mut rx);
+        let before_width = band_width(&h);
         h.stoat.diff_tint = 2;
         let (_, _, stepped) = paint_strips(&mut h, &mut rx);
         assert_eq!(
-            (before, stepped),
+            (before, [before_width, band_width(&h)], stepped),
             (
                 vec![diff_changes_strip(&h, SINGLE_MINIMAP_STRIP_ID, 0.0)],
+                [Some(7), Some(7)],
                 vec![]
             ),
         );

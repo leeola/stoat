@@ -7,15 +7,12 @@ use crate::{
     diff_map::MarkKind,
     display_map::FoldScope,
     editor_state::{EditorId, EditorState},
-    minimap::{LANE_COLS, RAIL_MAX_COLUMNS},
+    minimap::RAIL_MAX_COLUMNS,
     pane::{Divider, DividerOrientation, FocusTarget, Pane, PaneTree, Placement, View},
     render::{
         chrome::{self, TypeTag},
         commits, diff_changes,
-        editor::{
-            editor_cursor_position, render_editor_with_overlay, split_minimap_strip,
-            DIFF_OVERVIEW_COLS,
-        },
+        editor::{editor_cursor_position, render_editor_with_overlay, split_minimap_strip},
         paint::{blend, dim_rgb, style_rgb},
         popout::{
             paint_popout_card, popout_area, popout_card_bg, popout_inset, scaled_char_capacity,
@@ -72,14 +69,6 @@ pub(super) const MINIMAP_LINES_PER_CELL: u8 = 6;
 
 /// Widest line, in minimap columns, a strip renders before clipping.
 pub(super) const MINIMAP_MAX_COLUMNS: u8 = 120;
-
-/// Columns the scroll overview spans in its one cell, twice the mark lane, so
-/// the lane fills the cell's left half.
-const DIFF_OVERVIEW_MAX_COLUMNS: u8 = (2 * LANE_COLS) as u8;
-
-/// Opacity of the scroll overview's viewport band, 31 of 255, about 12 percent
-/// of the thumb color over the window ground.
-const DIFF_OVERVIEW_THUMB_ALPHA: u8 = 31;
 
 /// How far a diff half's fill moves from the status bar's toward the side's
 /// status color, for a theme that sets no `diff.sides` fill.
@@ -226,13 +215,9 @@ pub(crate) fn render_pane(
                 if let (Some(strip), Some(chrome)) = (editor.minimap_rect, frame.minimap_chrome)
                     && let Some(content) = chrome.content.get(&(chrome.workspace, editor.buffer_id))
                 {
-                    let kind = match editor.diff_view {
-                        true => StripKind::Overview,
-                        false => StripKind::Syntax,
-                    };
-                    let rail = content.held_rail_id().filter(|_| kind == StripKind::Syntax);
+                    let rail = content.held_rail_id();
                     let (strip, rail_rect) = split_rail(strip, rail.is_some());
-                    pane_minimap(pane, chrome, content.content_id(), kind, is_focused, frame)
+                    pane_minimap(pane, chrome, content.content_id(), is_focused, frame)
                         .render(strip, buf, scene);
                     if let (Some(rail_id), Some(rail_rect)) = (rail, rail_rect) {
                         rail_minimap(pane.index, rail_id, chrome).render(rail_rect, buf, scene);
@@ -300,15 +285,8 @@ pub(crate) fn render_pane(
                 if let (Some(strip), Some(chrome)) = (state.minimap_rect, frame.minimap_chrome)
                     && let Some(content_id) = chrome.diff_changes_content
                 {
-                    pane_minimap(
-                        pane,
-                        chrome,
-                        content_id,
-                        StripKind::Overview,
-                        is_focused,
-                        frame,
-                    )
-                    .render(strip, buf, scene);
+                    pane_minimap(pane, chrome, content_id, is_focused, frame)
+                        .render(strip, buf, scene);
                 }
             }
             dim_pane(pane.area, is_focused, frame, buf);
@@ -575,18 +553,8 @@ fn render_read_only_frame(
     .render(Rect::new(x + 1, ring.y, 1, 1), buf, scene);
 }
 
-/// What a pane's minimap strip shows.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-enum StripKind {
-    /// A buffer's text in the syntax palette.
-    Syntax,
-    /// The scroll overview a split diff or a changes view ends in, which shows
-    /// the row marks and the viewport on the window ground, in one cell.
-    Overview,
-}
-
 /// The per-pane minimap strip that `pane` declares over content store
-/// `content_id`, as `kind` shows it.
+/// `content_id`, in the syntax palette.
 ///
 /// A dimmed pane's palette and thumb blend toward the theme background at the
 /// pane's dim, as the rest of the pane does.
@@ -594,7 +562,6 @@ fn pane_minimap<'a>(
     pane: &Pane,
     chrome: MinimapChrome<'a>,
     content_id: u32,
-    kind: StripKind,
     is_focused: bool,
     frame: FrameCtx<'_>,
 ) -> Minimap<'a> {
@@ -616,13 +583,11 @@ fn pane_minimap<'a>(
 
     let [tr, tg, tb, ta] = chrome.thumb;
     let thumb = blend([tr, tg, tb]);
-    let palette = match (kind, dim > 0.0) {
-        (StripKind::Syntax, false) => chrome.palette,
-        (StripKind::Syntax, true) => chrome.dimmed_palette,
-        (StripKind::Overview, false) => chrome.overview_palette,
-        (StripKind::Overview, true) => chrome.dimmed_overview_palette,
+    let palette = match dim > 0.0 {
+        true => chrome.dimmed_palette,
+        false => chrome.palette,
     };
-    let strip = Minimap {
+    Minimap {
         strip_id: pane.index,
         content_id,
         lines_per_cell: MINIMAP_LINES_PER_CELL,
@@ -632,10 +597,6 @@ fn pane_minimap<'a>(
         thumb_border: None,
         rule_class: chrome.rule_class,
         palette,
-    };
-    match kind {
-        StripKind::Overview => overview_minimap(strip),
-        StripKind::Syntax => strip,
     }
 }
 
@@ -680,29 +641,6 @@ pub(super) fn split_rail(strip: Rect, rail: bool) -> (Rect, Option<Rect>) {
         },
         Some(rail),
     )
-}
-
-/// The scroll overview a split diff or a changes view declares from `strip`,
-/// its text strip over the overview palette.
-///
-/// The overview fills its cell with the window ground and shows the viewport as
-/// a band of the thumb color at [`DIFF_OVERVIEW_THUMB_ALPHA`], with no outline.
-/// Its columns end at [`DIFF_OVERVIEW_MAX_COLUMNS`]. A per-pane strip and the
-/// single band declare it alike.
-pub(super) fn overview_minimap(strip: Minimap<'_>) -> Minimap<'_> {
-    let [tr, tg, tb, _] = strip.thumb;
-    let thumb = [tr, tg, tb];
-
-    // Every class but the marks takes the ground at the palette's own fade, so
-    // the first class is the strip's fill.
-    let ground = strip.palette.first().copied().unwrap_or(thumb);
-    Minimap {
-        max_columns: DIFF_OVERVIEW_MAX_COLUMNS,
-        bg: [ground[0], ground[1], ground[2], u8::MAX],
-        thumb: [tr, tg, tb, DIFF_OVERVIEW_THUMB_ALPHA],
-        thumb_border: None,
-        ..strip
-    }
 }
 
 /// Dim `area` toward the theme background by the pane's fade.
@@ -766,7 +704,7 @@ fn sides_layout(
         return None;
     }
 
-    let (inner, _) = split_minimap_strip(content, frame.minimap_enabled, DIFF_OVERVIEW_COLS);
+    let (inner, _) = split_minimap_strip(content, frame.minimap_enabled);
     Some(review::diff_divider_x(inner).map_or(SidesLayout::Inline, SidesLayout::Split))
 }
 
@@ -887,7 +825,7 @@ pub(crate) fn diff_base_tint(theme: &crate::theme::Theme) -> Option<[u8; 3]> {
 ///
 /// A pane emits the sides ahead of its own paint and the top after it, as
 /// [`review::emit_base_frame`] orders them. The diff body leaves out the pane's
-/// scroll overview, so the frame does too. A changes view takes only the top
+/// minimap strip, so the frame does too. A changes view takes only the top
 /// edge here. Its stack rows draw the sides, so one frame spans the whole stack
 /// although each excerpt paints its own diff body.
 ///
@@ -901,7 +839,7 @@ fn emit_pane_base_frame(
     let Some(tint) = diff_base_tint(frame.theme).filter(|_| scene.live()) else {
         return;
     };
-    let (inner, _) = split_minimap_strip(content_area, frame.minimap_enabled, DIFF_OVERVIEW_COLS);
+    let (inner, _) = split_minimap_strip(content_area, frame.minimap_enabled);
     review::emit_base_frame(inner, tint, edges, scene);
 }
 
@@ -3513,14 +3451,15 @@ mod tests {
     /// screens.
     type EnterScreen = fn(&mut crate::test_harness::TestHarness);
 
-    /// A split diff and a changes view declare their strip as a scroll
-    /// overview in one cell, as a per-pane strip and as the single band alike.
+    /// A split diff and a changes view declare the strip a plain editor
+    /// declares, seven cells in the syntax palette, as a per-pane strip and as
+    /// the single band alike.
     ///
-    /// The overview fills its cell with the window ground, and its columns end
-    /// at twice the mark lane. The viewport is the thumb color at 31 of 255
-    /// with no outline, over the overview palette.
+    /// The strip fills no ground of its own, and its columns end at the text
+    /// strip's limit. The viewport is the thumb color at the plain strip's
+    /// alpha with no outline.
     #[test]
-    fn a_diff_screen_declares_its_strip_as_a_scroll_overview() {
+    fn a_diff_screen_declares_a_seven_cell_syntax_strip() {
         let screens: [(&str, EnterScreen); 2] = [
             ("split diff", |h| {
                 crate::action_handlers::review::enter_diff_view(&mut h.stoat);
@@ -3563,17 +3502,20 @@ mod tests {
                     .collect();
 
                 let theme = &h.stoat.theme;
-                let ground = crate::minimap::color_to_rgb(crate::render::themed_bg(theme));
                 let thumb = super::style_rgb(theme.get(crate::theme::scope::UI_BORDER_FOCUSED).fg)
                     .expect("an rgb thumb");
-                let table = &h.stoat.minimap_class_table;
                 let declared = (
-                    1,
-                    12,
-                    [ground[0], ground[1], ground[2], 255],
-                    [thumb[0], thumb[1], thumb[2], 31],
+                    crate::render::editor::MINIMAP_STRIP_COLS,
+                    super::MINIMAP_MAX_COLUMNS,
+                    [0, 0, 0, 0],
+                    [
+                        thumb[0],
+                        thumb[1],
+                        thumb[2],
+                        crate::render::MINIMAP_THUMB_ALPHA,
+                    ],
                     None,
-                    crate::render::review::diff_overview_palette(table, table.palette(), ground),
+                    h.stoat.minimap_class_table.palette().to_vec(),
                 );
                 assert_eq!(strips.last(), Some(&declared), "{screen} in {mode:?}");
             }

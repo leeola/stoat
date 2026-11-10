@@ -17,7 +17,6 @@ use crate::{
     },
     editor_state::EditorState,
     host::DiffStatus,
-    minimap::{ClassTable, EdgeClass},
     theme::{scope as s, TypeRole, FULL_CELL_SCALE},
 };
 use ratatui::{
@@ -2278,37 +2277,6 @@ pub(crate) fn resolve_diff_tints(theme: &crate::theme::Theme) -> Option<DiffTint
         modified: status.modified,
         moved: status.moved,
     })
-}
-
-/// Returns the palette of a diff screen's scroll overview, `palette` with
-/// every class but the row marks in `ground`.
-///
-/// The overview shows each row's change lane and none of its text. Its strip
-/// lays the lane over the cell's left half and the text's first columns over
-/// the right half. Those columns take the strip's own color and vanish. The
-/// row tint keeps the lane's class, so it shows faintly where those columns
-/// hold no text. A diagnostic's tick lies past the strip's columns.
-///
-/// `palette` is the class table's palette at some fade, and `ground` the
-/// strip's color at the same fade.
-///
-/// The changes view's file headers take the ground as well. Each one is a bar
-/// across the whole strip, and the overview marks rows, not file boundaries.
-pub(crate) fn diff_overview_palette(
-    table: &ClassTable,
-    palette: &[[u8; 3]],
-    ground: [u8; 3],
-) -> Vec<[u8; 3]> {
-    let marks = usize::from(table.edge_class(EdgeClass::Added))
-        ..usize::from(table.edge_class(EdgeClass::Header));
-    palette
-        .iter()
-        .enumerate()
-        .map(|(class, &color)| match marks.contains(&class) {
-            true => color,
-            false => ground,
-        })
-        .collect()
 }
 
 /// Mark a cell `style` as inside a change span.
@@ -7177,12 +7145,12 @@ mod tests {
         assert_eq!(fills, [expected, expected], "in both frames");
     }
 
-    /// A diff view's one-cell scroll overview narrows the diff body, so at an
-    /// odd width the body's divider sits one column left of the content's
-    /// middle, 59 of 121. The status halves meet there, and the frame's right
-    /// side ends a sixteenth short of its hairline.
+    /// A diff view's minimap strip narrows the diff body, so the body's
+    /// divider sits at column 56 of 121, left of the content's middle. The
+    /// status halves meet there, and the frame's right side ends a sixteenth
+    /// short of its hairline.
     #[test]
-    fn the_status_halves_meet_at_the_divider_beside_the_overview() {
+    fn the_status_halves_meet_at_the_divider_beside_the_strip() {
         use ratatui::style::Color;
 
         let mut h = diff_harness_sized(121, "a\nb\nc\nold\n", "a\nb\nc\nnew\n");
@@ -7204,13 +7172,13 @@ mod tests {
         assert_eq!(
             (
                 strip.map(|strip| strip.width),
-                [58, 59, 60].map(|x| buf[(x, y)].bg),
+                [55, 56, 57].map(|x| buf[(x, y)].bg),
                 frame_sides,
             ),
             (
-                Some(1),
+                Some(7),
                 [rgb(0x2a1d20), rgb(0x121418), rgb(0x1d2a1f)],
-                vec![0, 59 * 16 + 7 - 6],
+                vec![0, 56 * 16 + 7 - 6],
             ),
         );
     }
@@ -9958,32 +9926,6 @@ mod tests {
             paint(2.0),
             (Some(Color::Rgb(r, g, b)), Modifier::empty()),
             "a doubled soften blends twice as far and drops the weight",
-        );
-    }
-
-    /// The overview palette keeps the row marks of the palette it reads and
-    /// paints every other class in the ground, the file header's bar among
-    /// them, so a row shows its mark and none of its text.
-    #[test]
-    fn the_overview_palette_keeps_the_row_marks_and_grounds_the_rest() {
-        let table = ClassTable::from_theme(&Theme::empty());
-        let palette = table.palette();
-        let ground = [1, 2, 3];
-        let overview = diff_overview_palette(&table, palette, ground);
-        let first_mark = usize::from(table.edge_class(EdgeClass::Added));
-        let past_marks = usize::from(table.edge_class(EdgeClass::Header));
-
-        assert_eq!(
-            (
-                &overview[..first_mark],
-                &overview[first_mark..past_marks],
-                &overview[past_marks..]
-            ),
-            (
-                &vec![ground; first_mark][..],
-                &palette[first_mark..past_marks],
-                &vec![ground; palette.len() - past_marks][..]
-            ),
         );
     }
 
