@@ -434,6 +434,7 @@ fn run_tui(
         jump_scrolloff: None,
         editor_line_numbers: None,
         editor_minimap: None,
+        editor_minimap_thumb_min_rows: None,
         editor_auto_pairs: None,
         editor_emoji_expansion: None,
         editor_wrap: None,

@@ -4399,6 +4399,7 @@ mod tests {
                 jump_scrolloff: Some(0),
                 editor_line_numbers: Some(LineNumbers::Relative),
                 editor_minimap: None,
+                editor_minimap_thumb_min_rows: None,
                 editor_auto_pairs: Some(true),
                 editor_emoji_expansion: None,
                 editor_wrap: Some(WrapMode::EditorWidth),

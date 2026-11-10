@@ -184,6 +184,15 @@ pub fn settings_schema() -> &'static [SettingDef] {
             default: "single",
         },
         SettingDef {
+            path: &[Lit("editor"), Lit("minimap"), Lit("thumb_min_rows")],
+            shape: ValueShape::Number,
+            doc: "Smallest viewport thumb on the minimap strip, in strip rows. \
+                  The strip summarizes up to viewport lines / thumb_min_rows \
+                  lines per row, so a lower value fits more of the file at a \
+                  smaller thumb.",
+            default: "2",
+        },
+        SettingDef {
             path: &[Lit("editor"), Lit("wrap")],
             shape: ValueShape::Enum(&["none", "editor_width", "bounded"]),
             doc: "How editor panes soft-wrap long lines (none, editor_width, or \

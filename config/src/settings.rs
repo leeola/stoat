@@ -157,6 +157,14 @@ pub struct Settings {
     /// `off`, `true` means `single`). The `:minimap` command toggles visibility
     /// at runtime.
     pub editor_minimap: Option<MinimapMode>,
+    /// The Thumb Minimum, the smallest viewport thumb on the minimap strip in
+    /// strip rows. `None` falls back at the consumer to 2. Set
+    /// `editor.minimap.thumb_min_rows = N;` in stcfg. A value under 1 is
+    /// ignored, since a thumb takes at least one row.
+    ///
+    /// The strip summarizes up to viewport lines / `N` lines per row, so a
+    /// lower value fits more of the file at a smaller thumb.
+    pub editor_minimap_thumb_min_rows: Option<u32>,
     /// How editor panes soft-wrap long lines, one of `none`, `editor_width`, or
     /// `bounded`. `None` falls back at the consumer to [`WrapMode::EditorWidth`].
     /// Set `editor.wrap = none;` in stcfg to disable (`false` means `none`,
@@ -360,6 +368,9 @@ impl Settings {
             jump_scrolloff: other.jump_scrolloff.or(self.jump_scrolloff),
             editor_line_numbers: other.editor_line_numbers.or(self.editor_line_numbers),
             editor_minimap: other.editor_minimap.or(self.editor_minimap),
+            editor_minimap_thumb_min_rows: other
+                .editor_minimap_thumb_min_rows
+                .or(self.editor_minimap_thumb_min_rows),
             editor_auto_pairs: other.editor_auto_pairs.or(self.editor_auto_pairs),
             editor_emoji_expansion: other.editor_emoji_expansion.or(self.editor_emoji_expansion),
             editor_wrap: other.editor_wrap.or(self.editor_wrap),
@@ -538,6 +549,13 @@ impl Settings {
                 };
                 if let Some(m) = mode {
                     self.editor_minimap = Some(m);
+                }
+            },
+            ["editor", "minimap", "thumb_min_rows"] => {
+                if let Value::Number(n) = setting.value.node
+                    && n >= 1.0
+                {
+                    self.editor_minimap_thumb_min_rows = Some(n as u32);
                 }
             },
             ["editor", "auto_pairs"] => {
@@ -749,6 +767,7 @@ mod tests {
                 jump_scrolloff: None,
                 editor_line_numbers: None,
                 editor_minimap: None,
+                editor_minimap_thumb_min_rows: None,
                 editor_auto_pairs: None,
                 editor_emoji_expansion: None,
                 editor_wrap: None,
@@ -853,6 +872,19 @@ mod tests {
             mode("on init { }"),
             None,
             "absent falls back at the consumer"
+        );
+    }
+
+    #[test]
+    fn from_config_extracts_editor_minimap_thumb_min_rows() {
+        let rows = |src: &str| Settings::from_config(&parse_ok(src)).editor_minimap_thumb_min_rows;
+        assert_eq!(
+            (
+                rows("on init { editor.minimap.thumb_min_rows = 4; }"),
+                rows("on init { editor.minimap.thumb_min_rows = 0; }"),
+            ),
+            (Some(4), None),
+            "a thumb takes at least one row, so 0 leaves the setting unset",
         );
     }
 
@@ -1163,6 +1195,7 @@ mod tests {
                 jump_scrolloff: None,
                 editor_line_numbers: None,
                 editor_minimap: None,
+                editor_minimap_thumb_min_rows: None,
                 editor_auto_pairs: None,
                 editor_emoji_expansion: None,
                 editor_wrap: None,
@@ -1216,6 +1249,7 @@ mod tests {
                 jump_scrolloff: None,
                 editor_line_numbers: None,
                 editor_minimap: None,
+                editor_minimap_thumb_min_rows: None,
                 editor_auto_pairs: None,
                 editor_emoji_expansion: None,
                 editor_wrap: None,
@@ -1278,6 +1312,7 @@ mod tests {
             jump_scrolloff: None,
             editor_line_numbers: None,
             editor_minimap: None,
+            editor_minimap_thumb_min_rows: None,
             editor_auto_pairs: None,
             editor_emoji_expansion: None,
             editor_wrap: None,
@@ -1323,6 +1358,7 @@ mod tests {
             jump_scrolloff: None,
             editor_line_numbers: None,
             editor_minimap: None,
+            editor_minimap_thumb_min_rows: None,
             editor_auto_pairs: None,
             editor_emoji_expansion: None,
             editor_wrap: None,
@@ -1370,6 +1406,7 @@ mod tests {
                 jump_scrolloff: None,
                 editor_line_numbers: None,
                 editor_minimap: None,
+                editor_minimap_thumb_min_rows: None,
                 editor_auto_pairs: None,
                 editor_emoji_expansion: None,
                 editor_wrap: None,
@@ -1420,6 +1457,7 @@ mod tests {
             jump_scrolloff: None,
             editor_line_numbers: None,
             editor_minimap: None,
+            editor_minimap_thumb_min_rows: None,
             editor_auto_pairs: None,
             editor_emoji_expansion: None,
             editor_wrap: None,
@@ -1468,6 +1506,7 @@ mod tests {
                 jump_scrolloff: None,
                 editor_line_numbers: None,
                 editor_minimap: None,
+                editor_minimap_thumb_min_rows: None,
                 editor_auto_pairs: None,
                 editor_emoji_expansion: None,
                 editor_wrap: None,
@@ -1529,6 +1568,7 @@ mod tests {
                 jump_scrolloff: None,
                 editor_line_numbers: None,
                 editor_minimap: None,
+                editor_minimap_thumb_min_rows: None,
                 editor_auto_pairs: None,
                 editor_emoji_expansion: None,
                 editor_wrap: None,
@@ -1582,6 +1622,7 @@ mod tests {
                 jump_scrolloff: None,
                 editor_line_numbers: None,
                 editor_minimap: None,
+                editor_minimap_thumb_min_rows: None,
                 editor_auto_pairs: None,
                 editor_emoji_expansion: None,
                 editor_wrap: None,
@@ -1632,6 +1673,7 @@ mod tests {
             jump_scrolloff: None,
             editor_line_numbers: None,
             editor_minimap: None,
+            editor_minimap_thumb_min_rows: None,
             editor_auto_pairs: None,
             editor_emoji_expansion: None,
             editor_wrap: None,
@@ -1677,6 +1719,7 @@ mod tests {
             jump_scrolloff: None,
             editor_line_numbers: None,
             editor_minimap: None,
+            editor_minimap_thumb_min_rows: None,
             editor_auto_pairs: None,
             editor_emoji_expansion: None,
             editor_wrap: None,

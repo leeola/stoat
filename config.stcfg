@@ -473,6 +473,11 @@ on init {
     # Column bounded wrap mode wraps at (applies only to editor.wrap = bounded).
     # editor.wrap_column = 80;
 
+    # Smallest viewport thumb on the minimap strip, in strip rows. The strip
+    # summarizes up to viewport lines / thumb_min_rows lines per row, so a
+    # lower value fits more of the file at a smaller thumb.
+    # editor.minimap.thumb_min_rows = 2;
+
     # Whether typing a bracket or quote in insert mode writes its closing half
     # too, and typing the closer steps over the one already there.
     editor.auto_pairs = true;
