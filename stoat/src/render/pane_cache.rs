@@ -464,6 +464,10 @@ pub(crate) fn pane_cache_key(
     if editor.conflict_view.is_some()
         || editor.held_screen_row.is_some()
         || editor.pending_center.is_some()
+        || editor
+            .view_hold
+            .as_ref()
+            .is_some_and(|hold| hold.rested.is_none())
     {
         return None;
     }

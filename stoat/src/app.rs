@@ -5713,6 +5713,11 @@ impl Stoat {
             &event,
             Event::Key(key) if key.kind == KeyEventKind::Press,
         ) || matches!(&event, Event::Mouse(_) | Event::Paste(_));
+        // Before the event's own handling, so a reload key keeps the seat it
+        // takes.
+        if user_input {
+            self.drop_view_holds();
+        }
 
         let effect = match event {
             Event::Resize(w, h) => {
@@ -7422,6 +7427,14 @@ impl Stoat {
             };
         }
         self.focus_location(at)
+    }
+
+    /// Release every view of the active workspace that a reload holds, since
+    /// the reader acted and the view follows them again.
+    fn drop_view_holds(&mut self) {
+        for (_, editor) in self.active_workspace_mut().editors.iter_mut() {
+            editor.view_hold = None;
+        }
     }
 
     /// Put the view that held focus before an event back in normal mode when

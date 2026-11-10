@@ -32,6 +32,21 @@ pub(crate) enum ScrollGlide {
     Wheel,
 }
 
+/// The text position a reload pins to a row of an editor's text area, so the
+/// rows that the old and the new file share keep their screen rows.
+///
+/// Each paint resolves [`Self::anchor`] to a display row and scrolls so that
+/// row sits on [`Self::screen_row`]. The reload edit, a rewrap, and a diff map
+/// that lands later each move the anchor's display row, and the paint after
+/// each one scrolls to match. The hold ends at the reader's next input, and
+/// when another writer moved the scroll from where the last paint left it.
+pub(crate) struct ViewHold {
+    pub(crate) anchor: Anchor,
+    pub(crate) screen_row: u32,
+    /// The `scroll_row` the last paint left, `None` before the first one.
+    pub(crate) rested: Option<u32>,
+}
+
 /// A status-bar filename and the inputs it was rendered from.
 ///
 /// All three form the key. The buffer can be renamed under the editor, and the
@@ -115,6 +130,9 @@ pub(crate) struct EditorState {
     /// measured against the rows the editor paints rather than a default
     /// height. Transient, not persisted.
     pub(crate) pending_center: Option<u32>,
+    /// The text a reload keeps on a row of the text area until the reader
+    /// next acts. Transient, not persisted.
+    pub(crate) view_hold: Option<ViewHold>,
     /// Per-editor soft-wrap override, toggled by `ToggleWrap`. `Some` forces this
     /// editor's wrap mode regardless of the global `editor.wrap` setting; `None`
     /// follows the setting. Transient, not persisted.
@@ -298,6 +316,7 @@ impl EditorState {
             viewport_rows: None,
             held_screen_row: None,
             pending_center: None,
+            view_hold: None,
             wrap_override: None,
             diff_view: false,
             conflict_view: None,

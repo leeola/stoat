@@ -17,13 +17,13 @@ use super::{focused_editor_mut, movement};
 use crate::{
     app::{Stoat, UpdateEffect},
     display_map::DisplayPoint,
-    editor_state::{EditorState, ScrollGlide},
+    editor_state::{EditorState, ScrollGlide, ViewHold},
     mouse,
     run::vterm::MAX_SCROLLBACK_ROWS,
     term_session::TermId,
 };
 use std::ops::Range;
-use stoat_text::{cursor_offset, Bias, SelectionGoal};
+use stoat_text::{cursor_offset, Anchor, Bias, SelectionGoal};
 
 #[derive(Copy, Clone, Debug)]
 pub(super) enum PageDir {
@@ -759,7 +759,17 @@ pub(crate) fn centered_scroll(
 /// rewrap lands show the rows of the old wrapping. The landing moves every row
 /// below a line that wraps differently, so both stay over those paints and
 /// place the cursor again on the paint after the landing.
+///
+/// A reload's [`ViewHold`] scrolls so its text sits on its screen row again,
+/// on every paint until the reader next acts. It keeps the wheel fraction, and
+/// a held row or a pending center drops it, since each is a deliberate move.
 pub(crate) fn apply_held_screen_row(editor: &mut EditorState) {
+    if editor.held_screen_row.is_some() || editor.pending_center.is_some() {
+        editor.view_hold = None;
+    }
+    if let Some(hold) = editor.view_hold.take() {
+        editor.view_hold = apply_view_hold(editor, hold);
+    }
     if let Some(screen_row) = editor.held_screen_row {
         let viewport = editor.viewport_rows.unwrap_or(DEFAULT_VIEWPORT_ROWS).max(1);
         let cursor_row = cursor_display_row(editor);
@@ -781,6 +791,34 @@ pub(crate) fn apply_held_screen_row(editor: &mut EditorState) {
         editor.held_screen_row = None;
         editor.pending_center = None;
     }
+}
+
+/// Scroll `editor` so the text `hold` keeps sits on its screen row, and
+/// answer the hold to keep, or `None` once another writer moved the scroll
+/// away from where the last paint left it.
+///
+/// The move keeps `scroll_frac` and is a swap, so it clears a glide.
+fn apply_view_hold(editor: &mut EditorState, mut hold: ViewHold) -> Option<ViewHold> {
+    if hold.rested.is_some_and(|row| row != editor.scroll_row) {
+        return None;
+    }
+
+    let snapshot = editor.display_map.snapshot();
+    let row = {
+        let buffer_snapshot = snapshot.buffer_snapshot();
+        let offset = buffer_snapshot.resolve_anchor(&hold.anchor);
+        snapshot
+            .buffer_to_display(buffer_snapshot.rope().offset_to_point(offset))
+            .row
+    };
+    editor.scroll_row = row
+        .saturating_sub(hold.screen_row)
+        .min(snapshot.line_count().saturating_sub(1));
+    editor.scroll_offset = editor.scroll_row as f32 + editor.scroll_frac;
+    editor.scroll_glide = ScrollGlide::None;
+
+    hold.rested = Some(editor.scroll_row);
+    Some(hold)
 }
 
 /// Pull `editor`'s view back when it starts past the row that leaves the last
@@ -831,6 +869,21 @@ pub(crate) fn cursor_display_cell(editor: &mut EditorState) -> (u32, u32) {
     let cursor = cursor_offset(rope, tail_off, head_off);
     let display = snapshot.buffer_to_display(rope.offset_to_point(cursor));
     (display.row, display.column)
+}
+
+/// The anchor of the primary cursor's caret, the character
+/// [`cursor_display_cell`] places.
+///
+/// A one-char cursor on a line's last character has its head on the next
+/// line, so the caret is what keeps the cursor's own row.
+pub(crate) fn cursor_anchor(editor: &mut EditorState) -> Anchor {
+    let snapshot = editor.display_map.snapshot();
+    let buffer_snapshot = snapshot.buffer_snapshot();
+    let sel = editor.selections.newest_anchor();
+    let tail_off = buffer_snapshot.resolve_anchor(&sel.tail());
+    let head_off = buffer_snapshot.resolve_anchor(&sel.head());
+    let cursor = cursor_offset(buffer_snapshot.rope(), tail_off, head_off);
+    buffer_snapshot.anchor_at(cursor, Bias::Right)
 }
 
 /// The dual of [`ensure_cursor_in_view`]: move the cursor to the view rather

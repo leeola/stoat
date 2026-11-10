@@ -21,7 +21,7 @@ use crate::{
     action_handlers::{
         file::{display_name, open_file},
         focused_editor_mut, jump, movement, read_text_via_host, review,
-        view::ensure_cursor_in_view,
+        view::{self, ensure_cursor_in_view},
     },
     app::{Stoat, UpdateEffect},
     buffer::{BufferId, SharedBuffer},
@@ -29,7 +29,8 @@ use crate::{
     buffer_registry::{AutoReloadMode, OpenOrigin},
     debounce::{self, FS_WATCH_DEBOUNCE},
     diff_changes::{DiffChangesId, Landing},
-    editor_state::{EditorId, EditorState},
+    display_map::DisplayPoint,
+    editor_state::{EditorId, EditorState, ViewHold},
     keymap_state,
     lsp::sync,
     pane::{FocusTarget, PaneId, View},
@@ -522,6 +523,12 @@ fn install_reload(
     } else {
         Vec::new()
     };
+    // A tail follower and a followed reload move the view on purpose, so they
+    // take no seat.
+    let seats = match mode {
+        AutoReloadMode::Follow => Vec::new(),
+        _ => seat_views(stoat, id, &tail_followers),
+    };
 
     let flashed = old_span.start..old_span.start + text.len();
     {
@@ -550,6 +557,7 @@ fn install_reload(
             collapse_to_buffer_end(editor, scrolloff);
         }
     }
+    hold_views(stoat, seats);
     if mode == AutoReloadMode::Follow {
         if stoat.follow_changes && on_screen {
             show_followed_buffer(stoat, id, buffer, diff.follow_offset);
@@ -865,6 +873,7 @@ fn reload_from_disk(
         // Read before the write guard, since each editor resolves its cursor
         // through a snapshot that reads the buffer.
         let landings = item_landings(stoat, id, &old_text, &normalized, &hunks);
+        let seats = seat_views(stoat, id, &[]);
 
         let edits: Vec<(Range<usize>, &str)> = hunks
             .iter()
@@ -892,6 +901,7 @@ fn reload_from_disk(
                 collapse_to_offset(editor, offset, scrolloff);
             }
         }
+        hold_views(stoat, seats);
     }
     let buffers = &mut stoat.active_workspace_mut().buffers;
     buffers.set_disk_mtime(id, mtime);
@@ -1012,6 +1022,65 @@ fn item_landings(
             Some((editor_id, landed))
         })
         .collect()
+}
+
+/// Where each view of buffer `id` sits before a reload edits it, as the
+/// editor, the text to hold or `None` for the primary cursor, and the row of
+/// the text area to hold it on.
+///
+/// A view with its cursor on screen holds the cursor, which then never leaves
+/// the view and draws no follow. Any other view holds the first of its rows
+/// that shows buffer text. An editor in `skip`, and one no paint has sized,
+/// takes no seat.
+fn seat_views(
+    stoat: &mut Stoat,
+    id: BufferId,
+    skip: &[EditorId],
+) -> Vec<(EditorId, Option<Anchor>, u32)> {
+    stoat
+        .active_workspace_mut()
+        .editors
+        .iter_mut()
+        .filter(|(editor_id, editor)| editor.buffer_id == id && !skip.contains(editor_id))
+        .filter_map(|(editor_id, editor)| {
+            let viewport = editor.viewport_rows?;
+            let top = editor.scroll_row;
+            let rows = top..top.saturating_add(viewport);
+            let cursor_row = view::cursor_display_row(editor);
+            if rows.contains(&cursor_row) {
+                return Some((editor_id, None, cursor_row - top));
+            }
+
+            let snapshot = editor.display_map.snapshot();
+            let buffer_snapshot = snapshot.buffer_snapshot();
+            rows.clone().find_map(|row| {
+                let point = snapshot.display_to_buffer(DisplayPoint::new(row, 0))?;
+                let offset = buffer_snapshot.rope().point_to_offset(point);
+                let anchor = buffer_snapshot.anchor_at(offset, Bias::Right);
+                Some((editor_id, Some(anchor), row - top))
+            })
+        })
+        .collect()
+}
+
+/// Hold each view of `seats` on its seat from the next paint on.
+///
+/// A seat that holds the cursor reads the cursor's caret here, after the
+/// reload's landings moved it, so a landed cursor keeps the screen row the
+/// cursor held before.
+fn hold_views(stoat: &mut Stoat, seats: Vec<(EditorId, Option<Anchor>, u32)>) {
+    let ws = stoat.active_workspace_mut();
+    for (editor_id, anchor, screen_row) in seats {
+        let Some(editor) = ws.editors.get_mut(editor_id) else {
+            continue;
+        };
+        let anchor = anchor.unwrap_or_else(|| view::cursor_anchor(editor));
+        editor.view_hold = Some(ViewHold {
+            anchor,
+            screen_row,
+            rested: None,
+        });
+    }
 }
 
 /// The mtime and byte length of `path` on disk, or `None` when its metadata
@@ -1720,12 +1789,14 @@ mod tests {
         toggle_live_reload, ReloadFlash,
     };
     use crate::{
-        action_handlers::{dispatch, focused_editor_mut},
+        action_handlers::{dispatch, focused_editor_mut, view},
         app::{self, UpdateEffect},
         buffer::BufferId,
         buffer_lifecycle,
         buffer_registry::AutoReloadMode,
         debounce::{self, FS_WATCH_DEBOUNCE},
+        diff_map::DiffMap,
+        editor_state::{EditorState, ScrollGlide},
         host::{FsEventKind, FsHost},
         pane::View,
         test_harness::{self, editor, TestHarness},
@@ -1733,9 +1804,12 @@ mod tests {
     };
     use std::{
         collections::HashSet,
+        ops::Range,
         path::{Path, PathBuf},
+        sync::Arc,
     };
     use stoat_action::{LiveReload, MoveDown, OpenFile, Undo};
+    use stoat_language::structural_diff;
 
     /// Latin-1 bytes, which are not valid UTF-8.
     const NOT_UTF8: &[u8] = b"caf\xe9 au lait\n";
@@ -2395,6 +2469,303 @@ mod tests {
             (new.to_string(), 9),
             "two rows into fn b, the `y` row",
         );
+    }
+
+    /// The lines `l<n>` for each `n` of `rows`, one per line.
+    fn numbered(rows: Range<usize>) -> String {
+        rows.map(|n| format!("l{n}\n")).collect()
+    }
+
+    /// The 200 numbered lines with `count` new lines inserted before line
+    /// `row`.
+    fn with_lines_at(row: usize, count: usize) -> String {
+        let new: String = (0..count).map(|n| format!("new{n}\n")).collect();
+        numbered(0..row) + &new + &numbered(row..200)
+    }
+
+    /// Lines `l0` to `l199` in a painted editor whose view starts at row 100
+    /// with the cursor on row 105, and the file's path and buffer.
+    fn seated_file(root: &str) -> (TestHarness, PathBuf, BufferId) {
+        let mut h = Stoat::test();
+        let root = Path::new(root);
+        let id = open_plain(&mut h, root, "a.txt", numbered(0..200).as_bytes());
+        let _ = h.stoat.render();
+        place_view(&mut h, 100, 105);
+        (h, root.join("a.txt"), id)
+    }
+
+    /// Put the focused view's top on row `top` and its cursor on row
+    /// `cursor`, at rest.
+    fn place_view(h: &mut TestHarness, top: u32, cursor: u32) {
+        let editor = focused_editor_mut(&mut h.stoat).expect("editor");
+        let offset = editor
+            .display_map
+            .snapshot()
+            .buffer_snapshot()
+            .rope()
+            .point_to_offset(stoat_text::Point::new(cursor, 0));
+        collapse_to_offset(editor, offset, 0);
+        editor.scroll_row = top;
+        editor.scroll_frac = 0.0;
+        editor.scroll_offset = top as f32;
+        editor.scroll_glide = ScrollGlide::None;
+    }
+
+    /// The text on each row of the focused view, top to bottom.
+    fn screen_text(h: &mut TestHarness) -> Vec<String> {
+        let editor = focused_editor_mut(&mut h.stoat).expect("editor");
+        let rows = editor.viewport_rows.expect("a painted view");
+        let top = editor.scroll_row;
+        let snapshot = editor.display_map.snapshot();
+        (top..top + rows)
+            .map(|row| snapshot.display_line(row))
+            .collect()
+    }
+
+    /// The focused view's scroll row, wheel fraction, offset, and glide.
+    fn view_state(h: &mut TestHarness) -> (u32, f32, f32, ScrollGlide) {
+        let editor = focused_editor_mut(&mut h.stoat).expect("editor");
+        (
+            editor.scroll_row,
+            editor.scroll_frac,
+            editor.scroll_offset,
+            editor.scroll_glide,
+        )
+    }
+
+    /// Whether a reload holds the focused view.
+    fn held(h: &mut TestHarness) -> bool {
+        focused_editor_mut(&mut h.stoat)
+            .expect("editor")
+            .view_hold
+            .is_some()
+    }
+
+    /// Thirty lines that arrive above the view leave the text on its screen
+    /// rows. The cursor keeps its screen row, so the view moves down with the
+    /// thirty lines and does not glide.
+    #[test]
+    fn a_reload_holds_the_screen_text_when_lines_arrive_above_the_view() {
+        let (mut h, path, _) = seated_file("/reload-seat-arrive");
+        let before = screen_text(&mut h);
+
+        h.fake_fs()
+            .insert_file(&path, with_lines_at(10, 30).as_bytes());
+        reload_focused(&mut h.stoat, false);
+        let _ = h.stoat.render();
+
+        assert_eq!(
+            (screen_text(&mut h), view_state(&mut h)),
+            (before, (130, 0.0, 130.0, ScrollGlide::None)),
+        );
+    }
+
+    /// A selected line keeps its screen row. The selection's head sits on the
+    /// next line's start, and the seat holds the cursor's own cell, the
+    /// selected line's last one.
+    #[test]
+    fn a_reload_holds_a_selected_line_on_its_row() {
+        let (mut h, path, _) = seated_file("/reload-seat-line");
+        h.type_keys("x");
+        let before = screen_text(&mut h);
+
+        h.fake_fs()
+            .insert_file(&path, with_lines_at(10, 30).as_bytes());
+        reload_focused(&mut h.stoat, false);
+        let _ = h.stoat.render();
+
+        assert_eq!((screen_text(&mut h), view_state(&mut h).0), (before, 130),);
+    }
+
+    /// Thirty lines that leave above the view leave the text on its screen
+    /// rows, and the view moves up with them.
+    #[test]
+    fn a_reload_holds_the_screen_text_when_lines_leave_above_the_view() {
+        let (mut h, path, _) = seated_file("/reload-seat-leave");
+        let before = screen_text(&mut h);
+
+        let shorter = numbered(0..10) + &numbered(40..200);
+        h.fake_fs().insert_file(&path, shorter.as_bytes());
+        reload_focused(&mut h.stoat, false);
+        let _ = h.stoat.render();
+
+        assert_eq!(
+            (screen_text(&mut h), view_state(&mut h)),
+            (before, (70, 0.0, 70.0, ScrollGlide::None)),
+        );
+    }
+
+    /// A view that rests between two rows keeps its wheel fraction through
+    /// the reload.
+    #[test]
+    fn a_reload_keeps_the_wheel_fraction() {
+        let (mut h, path, _) = seated_file("/reload-seat-fraction");
+        {
+            let editor = focused_editor_mut(&mut h.stoat).expect("editor");
+            editor.scroll_frac = 0.5;
+            editor.scroll_offset = 100.5;
+        }
+        let before = screen_text(&mut h);
+
+        h.fake_fs()
+            .insert_file(&path, with_lines_at(10, 30).as_bytes());
+        reload_focused(&mut h.stoat, false);
+        let _ = h.stoat.render();
+
+        assert_eq!(
+            (screen_text(&mut h), view_state(&mut h)),
+            (before, (130, 0.5, 130.5, ScrollGlide::None)),
+        );
+    }
+
+    /// A reload through its key keeps the cursor on its screen row, though
+    /// sixty lines arrive between the view's top and the cursor on its last
+    /// row. The key's follow starts a glide after the moved cursor, and the
+    /// seat lands the view in place of that glide.
+    #[test]
+    fn a_reload_through_its_key_starts_no_glide() {
+        let (mut h, path, _) = seated_file("/reload-seat-key");
+        let viewport = focused_editor_mut(&mut h.stoat)
+            .expect("editor")
+            .viewport_rows
+            .expect("a painted view");
+        place_view(&mut h, 100, 100 + viewport - 1);
+
+        h.fake_fs()
+            .insert_file(&path, with_lines_at(110, 60).as_bytes());
+        h.type_keys("space r");
+        let _ = h.stoat.render();
+        let editor = focused_editor_mut(&mut h.stoat).expect("editor");
+        let screen_row = view::cursor_display_row(editor) - editor.scroll_row;
+
+        assert_eq!(
+            (screen_row, editor.scroll_glide),
+            (viewport - 1, ScrollGlide::None),
+        );
+    }
+
+    /// A view whose cursor is off screen holds its top row, so its text stays
+    /// put though the cursor above the view does not move.
+    #[test]
+    fn a_reload_seats_the_top_row_when_the_cursor_is_off_screen() {
+        let (mut h, path, _) = seated_file("/reload-seat-top");
+        place_view(&mut h, 100, 5);
+        let before = screen_text(&mut h);
+
+        h.fake_fs()
+            .insert_file(&path, with_lines_at(10, 30).as_bytes());
+        reload_focused(&mut h.stoat, false);
+        let _ = h.stoat.render();
+
+        assert_eq!(
+            (screen_text(&mut h), focused_cursor_row(&mut h)),
+            (before, 5),
+        );
+    }
+
+    /// A diff map that lands after the reload splices five removed base rows
+    /// above a diff view, and the text on the screen stays put, five rows
+    /// further down the display.
+    #[test]
+    fn a_diff_map_that_lands_after_a_reload_keeps_the_screen_text() {
+        let (mut h, path, id) = seated_file("/reload-seat-diff");
+        focused_editor_mut(&mut h.stoat)
+            .expect("editor")
+            .set_diff_view(true);
+        let _ = h.stoat.render();
+        place_view(&mut h, 100, 105);
+
+        let new = with_lines_at(10, 30);
+        h.fake_fs().insert_file(&path, new.as_bytes());
+        reload_focused(&mut h.stoat, false);
+        let _ = h.stoat.render();
+        let before = screen_text(&mut h);
+
+        let lines: Vec<&str> = new.split_inclusive('\n').collect();
+        let base =
+            lines[..20].concat() + "gone0\ngone1\ngone2\ngone3\ngone4\n" + &lines[20..].concat();
+        let map = DiffMap::from_structural_changes(
+            structural_diff::diff(&base, &new),
+            Arc::new(base.clone()),
+            &new,
+        );
+        h.stoat
+            .active_workspace_mut()
+            .install_test_diff_map(id, map);
+        let _ = h.stoat.render();
+
+        assert_eq!((screen_text(&mut h), view_state(&mut h).0), (before, 135),);
+    }
+
+    /// A deliberate move after the hold's first paint releases the view.
+    /// Another writer's scroll keeps its row, and a held screen row that a
+    /// layout flip sets puts the cursor, row 135, on screen row 3.
+    #[test]
+    fn a_deliberate_move_releases_the_view() {
+        let after = |deliberate: fn(&mut EditorState)| {
+            let (mut h, path, _) = seated_file("/reload-seat-deliberate");
+            h.fake_fs()
+                .insert_file(&path, with_lines_at(10, 30).as_bytes());
+            reload_focused(&mut h.stoat, false);
+            let _ = h.stoat.render();
+
+            deliberate(focused_editor_mut(&mut h.stoat).expect("editor"));
+            let _ = h.stoat.render();
+            (view_state(&mut h).0, held(&mut h))
+        };
+
+        assert_eq!(
+            [
+                after(|editor| editor.scroll_row = 50),
+                after(|editor| editor.held_screen_row = Some(3)),
+            ],
+            [(50, false), (132, false)],
+        );
+    }
+
+    /// The reader's next key releases the view, so a reload never fights a
+    /// move the reader makes.
+    #[test]
+    fn a_key_after_a_reload_releases_the_view() {
+        let (mut h, path, _) = seated_file("/reload-seat-release");
+        h.fake_fs()
+            .insert_file(&path, with_lines_at(10, 30).as_bytes());
+        reload_focused(&mut h.stoat, false);
+        let _ = h.stoat.render();
+        let held_after_reload = held(&mut h);
+
+        h.type_keys("j");
+
+        assert_eq!((held_after_reload, held(&mut h)), (true, false));
+    }
+
+    /// A tail follower and a followed reload move the view on purpose, so
+    /// neither takes a seat, and each cursor goes where its mode sends it.
+    #[test]
+    fn a_tail_follower_and_a_followed_reload_take_no_seat() {
+        let mut h = Stoat::test();
+        let root = PathBuf::from("/reload-seat-tail");
+        let (path, _) = open_auto_reload(&mut h, &root, "log.txt", b"aaa\nbbb\nccc");
+        dispatch(&mut h.stoat, &MoveDown);
+        dispatch(&mut h.stoat, &MoveDown);
+        let _ = h.stoat.render();
+        h.fake_fs().insert_file(&path, b"aaa\nbbb\nccc\nddd\n");
+        pump_poll(&mut h);
+        let tail = (focused_cursor_row(&mut h), held(&mut h));
+
+        let mut h = Stoat::test();
+        let root = PathBuf::from("/reload-seat-follow");
+        let (path, id) = open_auto_reload(&mut h, &root, "log.txt", b"a\nb\nc\nd\n");
+        h.stoat
+            .active_workspace_mut()
+            .buffers
+            .set_auto_reload(id, AutoReloadMode::Follow);
+        let _ = h.stoat.render();
+        h.fake_fs().insert_file(&path, b"a\nb\nCHANGED\nd\n");
+        pump_poll(&mut h);
+        let follow = (focused_cursor_row(&mut h), held(&mut h));
+
+        assert_eq!((tail, follow), ((4, false), (2, false)));
     }
 
     #[test]
