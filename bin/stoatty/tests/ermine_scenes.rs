@@ -371,9 +371,11 @@ fn the_changes_view_heads_each_file_on_the_raised_surface() {
 /// The diff-kinds stack lists hunks.txt fourth, and its fold row is row 19,
 /// under the row of its line 6 on the base surface. The fold hides seven
 /// lines, so the row carries one Fold Button, whose box covers most of columns
-/// 1 and 2. The fold row's count is centered, so the cells from column 6 to
-/// column 31 hold none. They take the base surface under the hatch's lines,
-/// which the stack's resident pool composites from its pages.
+/// 1 and 2. The count starts one cell past the buttons and ends before column
+/// 18. A text file's language has no outline query, so the row centers no
+/// Scope. The cells from column 18 to the divider, and from column 84 to
+/// column 139 right of it, hold no text. They take the base surface under the
+/// hatch's lines, which the stack's resident pool composites from its pages.
 #[test]
 fn the_changes_view_folds_unchanged_lines_into_a_hatched_row() {
     let mut home = support::scratch_home();
@@ -393,13 +395,12 @@ fn the_changes_view_folds_unchanged_lines_into_a_hatched_row() {
         FOLD_BUTTON,
         "changes_fold_button",
     );
-    expect_hatch(
-        &shot,
-        &mut home,
-        cell_rect(6, 19, 26, 1),
-        (BASE, HATCH),
-        "changes_fold_row",
-    );
+    for (rect, what) in [
+        (cell_rect(18, 19, 52, 1), "changes_fold_row"),
+        (cell_rect(84, 19, 56, 1), "changes_fold_row_center"),
+    ] {
+        expect_hatch(&shot, &mut home, rect, (BASE, HATCH), what);
+    }
 }
 
 /// The panes sit one chrome column in from each window edge, and a blank text

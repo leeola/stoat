@@ -24,7 +24,9 @@ pub use block_map::{
 pub use crease_map::{
     Crease, CreaseId, CreaseMap, CreaseMetadata, CreaseSnapshot, RenderToggleFn, RenderTrailerFn,
 };
-pub use fold_map::{FoldMap, FoldMetadata, FoldOffset, FoldPlaceholder, FoldPoint, FoldSnapshot};
+pub use fold_map::{
+    FoldMap, FoldMetadata, FoldOffset, FoldPlaceholder, FoldPoint, FoldScope, FoldSnapshot,
+};
 use highlights::{AnchorResolver, HighlightVersions};
 pub use highlights::{
     BufferSemanticTokens, CachedHighlightEndpoints, Chunk, ChunkRenderer, ChunkRendererId,

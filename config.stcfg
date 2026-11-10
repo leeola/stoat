@@ -152,6 +152,9 @@ theme default_dark {
     diff.fold.bg         = subtle;
     diff.fold.button     = { fg: accent, bg: subtle };
     diff.fold.range.fg   = muted;
+    diff.scope.keyword.fg   = primary;
+    diff.scope.name.fg      = text;
+    diff.scope.separator.fg = muted;
     diff.reveal          = { fg: info, bg: subtle };
     diff.absent.bg       = subtle;
 
@@ -385,6 +388,9 @@ theme ermine_night inherits default_dark {
     diff.fold        = { fg: hatch, bg: base };
     diff.fold.button = { fg: accent, bg: fold_button };
     diff.fold.range.fg = disabled;
+    diff.scope.keyword.fg   = magenta;
+    diff.scope.name.fg      = white;
+    diff.scope.separator.fg = disabled;
     diff.reveal      = { fg: info, bg: tint_reveal };
     diff.absent      = { fg: hatch, bg: base };
 

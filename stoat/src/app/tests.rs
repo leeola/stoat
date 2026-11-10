@@ -5520,6 +5520,7 @@ fn a_click_away_rests_a_run_commits_diff_changes_or_docked_view() {
             editor_id,
             rel_path: "a.txt".into(),
             folded_version: Some(1),
+            folded_syntax: None,
             top: 0,
             owns_buffer: false,
             opened_version: 0,

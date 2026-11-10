@@ -515,6 +515,7 @@ pub(crate) fn diff_changes_press(stoat: &mut Stoat, row: usize, column: u16) -> 
     let Workspace {
         diff_changes_views,
         editors,
+        buffers,
         ..
     } = ws;
     let Some(state) = diff_changes_views.get_mut(id) else {
@@ -523,7 +524,7 @@ pub(crate) fn diff_changes_press(stoat: &mut Stoat, row: usize, column: u16) -> 
     diff_changes::layout_stack(state, editors);
 
     if let Some((index, gap, edge)) = diff_changes::fold_button_at(state, editors, row, column) {
-        diff_changes::expand(state, editors, index, gap, edge);
+        diff_changes::expand(state, editors, buffers, index, gap, edge);
         return StackPress::Opened;
     }
     match diff_changes::press_cell(state, editors, row, column) {
@@ -1948,7 +1949,7 @@ mod tests {
             (shown_rows(&mut h), fold_row_texts(&mut h)),
             (
                 rows_of(&[0..=0, 17..=43, 44..=44]),
-                ["\u{22ef} 17 unchanged lines", "\u{22ef} 16 unchanged lines"]
+                ["\u{22ef} 17 lines", "\u{22ef} 16 lines"]
                     .map(String::from)
                     .to_vec(),
             ),

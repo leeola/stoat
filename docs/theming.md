@@ -311,6 +311,12 @@ The typed UI scopes, by group (syntax scopes are open-ended):
   `diff.fold`'s colors.
 - `diff.fold.range` -- the foreground of a fold row's line range at the row's
   right, the first and the last line the fold hides.
+- `diff.scope.keyword`, `diff.scope.name`, `diff.scope.separator` -- the
+  foregrounds of the Scope chip a changes view's fold row centers, the chain
+  of items that hold the hunk below the fold, such as `impl Panel` then
+  `fn modal_frame`. Each item's keyword and name take the first two. The
+  `U+203A` mark between items takes the third, as do the `top level` and
+  `end of file` labels. The chip itself takes `diff.fold`'s background.
 - `diff.reveal` -- the mark on the rows an expand just opened in the changes
   view: a lane at each side's left edge (foreground) over a tint across the
   row (background). The mark holds for 0.6 s and then fades out over 0.4 s.

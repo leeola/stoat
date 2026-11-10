@@ -11,6 +11,7 @@ use std::{
     ops::{Add, AddAssign, Deref, Range, Sub},
     sync::{Arc, LazyLock},
 };
+use stoat_language::ScopeSegment;
 use stoat_text::{
     patch::Patch, tree_map::TreeMap, Anchor, AnchorRangeExt, Bias, CharsAt, ContextLessSummary,
     Cursor, Dimension, Dimensions, Edit, Item, KeyedItem, MeasuredChunksInRange, Point,
@@ -81,6 +82,27 @@ pub struct FoldPlaceholder {
     pub merge_adjacent: bool,
     /// Category identifier for selective fold removal.
     pub type_tag: Option<TypeId>,
+    /// The Scope a changes view's fold row centers, the items that hold the
+    /// hunk below the fold. `None` for any other fold, and for a fold over a
+    /// language with no outline query.
+    pub scope: Option<Arc<FoldScope>>,
+}
+
+/// The Scope a fold row centers, the items that hold the hunk below its fold.
+///
+/// A fold row stands for lines the reader does not see, so its Scope names
+/// where the next change sits, such as `impl Panel` then `fn modal_frame`. It
+/// rides on the fold's placeholder, so the paint of the row reads it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FoldScope {
+    /// The chain at the hunk's first row, outermost first. It is empty for a
+    /// hunk at the top level.
+    pub segments: Vec<ScopeSegment>,
+    /// The chain at the hunk's last row, when the innermost item there differs
+    /// from the first row's, so the row names both.
+    pub split: Option<Vec<ScopeSegment>>,
+    /// Whether the fold runs to the end of the file, with no hunk below it.
+    pub end_of_file: bool,
 }
 
 /// The tag of a fold row's placeholder.
@@ -102,6 +124,7 @@ impl FoldPlaceholder {
             collapsed_text: None,
             merge_adjacent: false,
             type_tag: Some(TypeId::of::<FoldRow>()),
+            scope: None,
         }
     }
 
@@ -131,6 +154,7 @@ impl Default for FoldPlaceholder {
             collapsed_text: None,
             merge_adjacent: true,
             type_tag: None,
+            scope: None,
         }
     }
 }
@@ -1543,6 +1567,20 @@ impl FoldSnapshot {
         self.folds_in_range(start..InlayPoint::new(start.row() + 1, 0))
             .iter()
             .any(|fold| fold.placeholder.is_fold_row())
+    }
+
+    /// The placeholder of the fold row that buffer row `row` lies under, as
+    /// [`Self::under_fold_row`] reads the row, or `None` when no fold row
+    /// covers it.
+    pub fn fold_row_placeholder(&self, row: u32) -> Option<&FoldPlaceholder> {
+        if self.fold_count() == 0 {
+            return None;
+        }
+        let start = self.inlay_snapshot.to_inlay_point(Point::new(row, 0));
+        self.folds_in_range(start..InlayPoint::new(start.row() + 1, 0))
+            .into_iter()
+            .find(|fold| fold.placeholder.is_fold_row())
+            .map(|fold| &fold.placeholder)
     }
 
     /// Buffer row the earliest fold starts on, or `None` when nothing is
