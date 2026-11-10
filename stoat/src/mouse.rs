@@ -20,7 +20,12 @@ use crate::{
     host::ClipboardKind,
     keymap::WheelDirection,
     keymap_state::{active_modal, ActiveModal, StoatKeymapState},
-    minimap::{density, diff_view::diff_view_window, emit::minimap_view_window, LINES_PER_CELL},
+    minimap::{
+        density::{self, Density, Tier},
+        diff_view::diff_view_window,
+        emit::minimap_view_window,
+        LINES_PER_CELL,
+    },
     pane::{FocusTarget, Placement, View},
     rebase::RebasePause,
     render::commit_picker::MIN_LIST_ROWS,
@@ -1382,10 +1387,17 @@ fn scrub_to_display_row(
 /// Put changes view `id`'s cursor on the stack row that the `strip` cell under
 /// `screen_row` points at, and scroll that row to the middle of the view.
 ///
-/// The strip holds one line per stack row, so the row resolves with the math
-/// the strip renders with. The scroll stops at the last page, as an editor's
-/// scrub does, and a stack with no rows leaves the changes view as it is.
+/// The strip holds one line per stack row, or one per band of stack rows past
+/// the strip's fit, so the row resolves with the math the strip renders with,
+/// and a band lands on its middle stack row. The scroll stops at the last page,
+/// as an editor's scrub does, and a stack with no rows leaves the changes view
+/// as it is.
 fn scrub_minimap_diff_changes(stoat: &mut Stoat, id: DiffChangesId, strip: Rect, screen_row: u16) {
+    let thumb_min_rows = stoat.minimap_thumb_min_rows();
+    let density = stoat
+        .diff_changes_strips
+        .get(&stoat.active_workspace)
+        .map_or(Density::LINE, |strip| strip.density);
     let Workspace {
         diff_changes_views,
         editors,
@@ -1399,14 +1411,32 @@ fn scrub_minimap_diff_changes(stoat: &mut Stoat, id: DiffChangesId, strip: Rect,
         return;
     }
 
-    let target = minimap::click_target_line(
-        strip.height,
-        LINES_PER_CELL,
-        screen_row.saturating_sub(strip.y),
-        total as f32,
-        state.scroll as f32,
-        state.viewport_rows.max(1) as f32,
-    ) as usize;
+    let cell = screen_row.saturating_sub(strip.y);
+    let (top, visible) = (state.scroll as f32, state.viewport_rows.max(1) as u32);
+    let target = match density.tier {
+        Tier::Line => minimap::click_target_line(
+            strip.height,
+            LINES_PER_CELL,
+            cell,
+            total as f32,
+            top,
+            visible as f32,
+        ) as usize,
+        Tier::Fit | Tier::Shape => {
+            let per_row = density.lines_per_row;
+            let (top_256, visible_256) =
+                density::thumb_rows_256((top * 256.0) as u64, visible, per_row, thumb_min_rows);
+            let band = minimap::click_target_line(
+                strip.height,
+                LINES_PER_CELL,
+                cell,
+                density::rows(total as u32, per_row) as f32,
+                top_256 as f32 / 256.0,
+                visible_256 as f32 / 256.0,
+            );
+            (density::band(band, per_row, total as u32).start + per_row / 2) as usize
+        },
+    };
     let row = target.min(total - 1);
     diff_changes::select_row(state, editors, row);
     state.scroll = row

@@ -12,15 +12,23 @@
 //! of the rows it touched, and a layout change resends the excerpt's lines. A
 //! long stack fills over frames under a time budget, as a freshly opened file
 //! fills its own strip.
+//!
+//! A stack with more rows than the strip folds its rows into bands, in the
+//! tiers an editor's strip folds its lines in. A band that holds a file's
+//! header draws the header bar, so each file still reads as one mark.
 
 use super::{
-    emit::{convert_minimap_runs, minimap_line_tokens, WEIGHTED_RUN_PROTOCOL},
+    band::{self, BandSource, LineStat},
+    density::{self, Density, Tier},
+    diff_view::{buffer_hull, hold_rows},
+    emit::{convert_minimap_runs, minimap_line_tokens, strip_density, WEIGHTED_RUN_PROTOCOL},
     frame_row, summarize_line, ClassTable, EdgeClass, LineRuns, LineToken, RowMark, Run, SweepRows,
     MAX_COLUMNS, SYNC_BUDGET, SYNC_SLICE, TINT_WEIGHT,
 };
 use crate::{
     app::Stoat,
     buffer::BufferId,
+    buffer_registry::BufferRegistry,
     diff_changes::{self, DiffChangesId, DiffChangesState},
     diff_map::{DiffHunkStatus, DiffMap},
     display_map::{DisplayPoint, DisplaySnapshot},
@@ -38,6 +46,7 @@ use std::{
     sync::Arc,
     time::Duration,
 };
+use stoat_config::MinimapMode;
 use stoat_text::Point;
 use stoat_widgets::pool::MinimapWindowInputs;
 use stoatty_protocol::command::{self, MinimapLinesCommand};
@@ -68,6 +77,12 @@ pub(crate) struct DiffChangesStrip {
     /// Each stacked buffer's [`hunk_marks`] and the version of the diff map
     /// they come from, so a frame reads the hunks of a map that moved alone.
     marks: HashMap<BufferId, (usize, Arc<[HunkMark]>)>,
+    /// How many stack rows each strip row stands for, as of the last sync,
+    /// which the thumb and a press on the strip read.
+    pub(crate) density: Density,
+    /// The band rows the terminal holds while the density folds stack rows
+    /// into bands, or `None` while it holds a line per stack row in `held`.
+    bands: Option<HeldBands>,
 }
 
 /// The lines the terminal holds for one excerpt of the stack.
@@ -164,6 +179,48 @@ struct Step {
     removed: usize,
 }
 
+/// The band rows the terminal holds for a stack folded past one row per strip
+/// row, and the inputs they show.
+///
+/// A band crosses excerpt boundaries, so the held rows are one list rather
+/// than a list per excerpt. A change of the stack, the density, the syntax
+/// switch, or the class table starts a pass over every band, and the pass
+/// sends only the bands that come out different from the held ones.
+struct HeldBands {
+    rows: Vec<LineRuns>,
+    /// The excerpts the rows show.
+    keys: Vec<ExcerptKey>,
+    syntax_on: bool,
+    classes: u64,
+    density: Density,
+    /// The first band the pass in flight has not summarized, or `None` once
+    /// the rows show what the inputs ask for.
+    next: Option<u32>,
+}
+
+/// The stack rows of a changes view that a slice of bands crosses, as a band's
+/// row reads them.
+///
+/// A header row and a Scope row read blank with no mark, since a band that
+/// holds a header draws the header bar and a Scope row holds no file text.
+struct StackRows<'a> {
+    excerpts: Vec<ExcerptRows>,
+    table: &'a ClassTable,
+}
+
+/// The display rows of one excerpt of a [`StackRows`].
+struct ExcerptRows {
+    /// The stack row of the excerpt's first display row.
+    first: usize,
+    /// The stack row past the excerpt's last.
+    end: usize,
+    snapshot: DisplaySnapshot,
+    kept: Vec<Range<u32>>,
+    /// The syntax tokens of the buffer rows the slice's display rows show.
+    tokens: HashMap<u32, Vec<LineToken>>,
+    comment_prefixes: &'static [&'static str],
+}
+
 /// What a display row of a diff shows.
 enum RowKind {
     /// A base line spliced in for a removal, which no buffer row holds.
@@ -185,6 +242,8 @@ impl DiffChangesStrip {
             pending: false,
             parsed: HashMap::new(),
             marks: HashMap::new(),
+            density: Density::LINE,
+            bands: None,
         }
     }
 
@@ -312,6 +371,120 @@ impl ParsedRows {
     }
 }
 
+impl HeldBands {
+    /// No band held, with a pass due.
+    fn new() -> Self {
+        Self {
+            rows: Vec::new(),
+            keys: Vec::new(),
+            syntax_on: false,
+            classes: 0,
+            density: Density::LINE,
+            next: Some(0),
+        }
+    }
+}
+
+impl<'a> StackRows<'a> {
+    /// The excerpts of `state`'s stack that stack rows `rows` cross, as of the
+    /// last [`diff_changes::layout_stack`].
+    ///
+    /// Each takes the syntax tokens of the shown buffer rows under its display
+    /// rows in `rows`, unless `tier` draws outlines alone.
+    fn new(
+        state: &DiffChangesState,
+        editors: &mut SlotMap<EditorId, EditorState>,
+        buffers: &BufferRegistry,
+        rows: Range<usize>,
+        tier: Tier,
+        table: &'a ClassTable,
+        syntax_on: bool,
+    ) -> Self {
+        let mut excerpts = Vec::new();
+        for excerpt in &state.excerpts {
+            let first = excerpt.top + diff_changes::header_rows(excerpt);
+            let end = first + diff_changes::excerpt_rows(excerpt, editors);
+            if end <= rows.start || first >= rows.end {
+                continue;
+            }
+            let Some(editor) = editors.get_mut(excerpt.editor_id) else {
+                continue;
+            };
+
+            let kept = diff_changes::kept_rows(editor, &excerpt.revealed);
+            let snapshot = editor.display_map.snapshot();
+            let tokens = match tier {
+                Tier::Shape => HashMap::new(),
+                Tier::Line | Tier::Fit => {
+                    let display =
+                        (rows.start.max(first) - first) as u32..(rows.end.min(end) - first) as u32;
+                    shown_runs(&kept, buffer_hull(&snapshot, display))
+                        .flat_map(|run| {
+                            minimap_line_tokens(&snapshot, excerpt.buffer_id, syntax_on, table, run)
+                        })
+                        .collect()
+                },
+            };
+            let comment_prefixes = buffers
+                .language_for(excerpt.buffer_id)
+                .map_or(&[][..], |language| language.line_comments);
+            excerpts.push(ExcerptRows {
+                first,
+                end,
+                snapshot,
+                kept,
+                tokens,
+                comment_prefixes,
+            });
+        }
+        Self { excerpts, table }
+    }
+
+    /// The excerpt whose display row stack row `row` is, and that display row,
+    /// or `None` for a header or a Scope row.
+    fn locate(&self, row: u32) -> Option<(&ExcerptRows, u32)> {
+        let row = row as usize;
+        self.excerpts
+            .iter()
+            .find(|excerpt| (excerpt.first..excerpt.end).contains(&row))
+            .map(|excerpt| (excerpt, (row - excerpt.first) as u32))
+    }
+}
+
+impl BandSource for StackRows<'_> {
+    fn stat(&self, row: u32) -> LineStat {
+        self.locate(row)
+            .map_or_else(LineStat::default, |(excerpt, display)| {
+                band::line_stat(
+                    &excerpt.snapshot.display_line(display),
+                    excerpt.comment_prefixes,
+                )
+            })
+    }
+
+    fn mark(&self, row: u32) -> RowMark {
+        self.locate(row)
+            .map_or(RowMark::NONE, |(excerpt, display)| {
+                display_row_mark(&excerpt.snapshot, display, &excerpt.kept, self.table)
+            })
+    }
+
+    fn content(&self, row: u32) -> LineRuns {
+        self.locate(row)
+            .map_or_else(LineRuns::default, |(excerpt, display)| {
+                let kept = &excerpt.kept;
+                display_row(
+                    &excerpt.snapshot,
+                    display,
+                    kept,
+                    &excerpt.tokens,
+                    self.table,
+                )
+                .0
+            })
+    }
+}
+
 /// The minimap lines of the stack rows in `rows`, as the changes view paints
 /// those rows, as of the last [`diff_changes::layout_stack`].
 ///
@@ -377,6 +550,49 @@ pub(crate) fn summarize_rows(
     lines
 }
 
+/// The strip rows of bands `bands` of `state`'s stack under `density`, as of
+/// the last [`diff_changes::layout_stack`].
+///
+/// A band that holds an excerpt's header row is the header bar, so each file
+/// of the stack still reads as one mark at any fold. Every other band is
+/// [`band::band_row`] of its stack rows. With `syntax_on` unset, no row takes
+/// syntax tokens.
+fn band_lines(
+    state: &DiffChangesState,
+    editors: &mut SlotMap<EditorId, EditorState>,
+    buffers: &BufferRegistry,
+    bands: Range<u32>,
+    density: Density,
+    table: &ClassTable,
+    syntax_on: bool,
+) -> Vec<LineRuns> {
+    let total = state.rows as u32;
+    let per_row = density.lines_per_row;
+    let rows = (bands.start * per_row) as usize..(bands.end * per_row).min(total) as usize;
+    let source = StackRows::new(
+        state,
+        editors,
+        buffers,
+        rows,
+        density.tier,
+        table,
+        syntax_on,
+    );
+    bands
+        .map(|at| {
+            let band = density::band(at, per_row, total);
+            let header = state
+                .excerpts
+                .iter()
+                .any(|excerpt| band.contains(&(excerpt.top as u32)));
+            match header {
+                true => header_bar(table),
+                false => band::band_row(&source, band, density.tier, table, TINT_WEIGHT),
+            }
+        })
+        .collect()
+}
+
 /// Bring the changes view strip of workspace `ws_id` in step with the stack it
 /// follows, and append its splices to `out`.
 ///
@@ -388,9 +604,20 @@ pub(crate) fn summarize_rows(
 /// every line. Each call sends slices of at most
 /// [`SYNC_SLICE`] lines until its time budget runs out, so a long stack fills
 /// over idle frames. A stack with no rows empties the strip.
+///
+/// Past one stack row per strip row the strip holds a band per row, as
+/// [`band_lines`] reads it. A change of the stack, the density, the syntax
+/// switch, or the class table then starts a pass over every band, which sends
+/// the bands that differ from the held ones under the same budget. A move
+/// between a line per stack row and bands replaces the whole store.
 pub(crate) fn sync_diff_changes_strip(stoat: &mut Stoat, ws_id: WorkspaceId, out: &mut Vec<u8>) {
     let weighted = stoat.stoatty_protocol >= WEIGHTED_RUN_PROTOCOL;
     let syntax_on = stoat.syntax_highlight;
+    let thumb_min_rows = stoat.minimap_thumb_min_rows();
+    let single_band = match stoat.minimap_mode() {
+        MinimapMode::Single => Some(stoat.single_minimap_rect),
+        _ => None,
+    };
     let Stoat {
         workspaces,
         diff_changes_strips,
@@ -421,6 +648,7 @@ pub(crate) fn sync_diff_changes_strip(stoat: &mut Stoat, ws_id: WorkspaceId, out
     let Workspace {
         diff_changes_views,
         editors,
+        buffers,
         ..
     } = ws;
     let state = followed.and_then(|id| diff_changes_views.get(id));
@@ -437,6 +665,74 @@ pub(crate) fn sync_diff_changes_strip(stoat: &mut Stoat, ws_id: WorkspaceId, out
             false => command::encode_minimap_lines_into(out, &splice),
         }
     };
+
+    let total: usize = target.iter().map(|key| key.layout.rows).sum();
+    strip.density = state.map_or(Density::LINE, |state| {
+        strip_density(
+            total as u32,
+            single_band.unwrap_or(state.minimap_rect),
+            state.viewport_rows as u32,
+            thumb_min_rows,
+        )
+    });
+    if let Some(state) = state.filter(|_| strip.density.tier != Tier::Line) {
+        // The terminal holds a line per stack row, which no band matches.
+        if strip.bands.is_none() {
+            let lines = strip.held.iter().map(|held| held.lines).sum();
+            if lines > 0 {
+                send(out, 0, lines, Vec::new());
+            }
+            strip.held.clear();
+        }
+        let bands = strip.bands.get_or_insert_with(HeldBands::new);
+        let density = strip.density;
+        if (&bands.keys, bands.syntax_on, bands.classes, bands.density)
+            != (&target, syntax_on, classes, density)
+        {
+            bands.keys = target;
+            (bands.syntax_on, bands.classes, bands.density) = (syntax_on, classes, density);
+            bands.next = Some(0);
+        }
+
+        let rows = density::rows(total as u32, density.lines_per_row);
+        let mut at = bands.next.unwrap_or(rows);
+        while at < rows {
+            let end = (at + SYNC_SLICE).min(rows);
+            let lines = band_lines(
+                state,
+                editors,
+                buffers,
+                at..end,
+                density,
+                minimap_class_table,
+                syntax_on,
+            );
+            hold_rows(&mut bands.rows, at, lines, &mut |start, removed, lines| {
+                send(out, start as usize, removed as usize, lines)
+            });
+            at = end;
+            if at < rows && executor.now().duration_since(started) >= strip.budget {
+                break;
+            }
+        }
+        if at >= rows {
+            let excess = bands.rows.len().saturating_sub(rows as usize);
+            if excess > 0 {
+                send(out, rows as usize, excess, Vec::new());
+                bands.rows.truncate(rows as usize);
+            }
+        }
+        bands.next = (at < rows).then_some(at);
+        strip.pending = bands.next.is_some();
+        return;
+    }
+    // The terminal holds the lines of the bands, which no stack row matches.
+    if let Some(bands) = strip.bands.take()
+        && !bands.rows.is_empty()
+    {
+        send(out, 0, bands.rows.len(), Vec::new());
+    }
+
     if let Some(state) = state {
         for (start, removed, rows) in strip.touched_splices(&target, &target_hunks, state, editors)
         {
@@ -483,6 +779,9 @@ pub(crate) fn sync_diff_changes_strip(stoat: &mut Stoat, ws_id: WorkspaceId, out
 /// Place the thumb of changes view `id` in workspace `ws_id` on strip
 /// `strip_id`, over the rows that the changes view's last paint showed.
 ///
+/// Past one stack row per strip row the thumb ships in strip rows, its height
+/// floored at the Thumb Minimum, as an editor's thumb does over its bands.
+///
 /// The thumb passes the change gate the editor thumbs pass, under a pool id of
 /// its own. A strip that shows the changes view's thumb and then an editor's
 /// therefore gets the editor's thumb back, though the editor's view never
@@ -494,6 +793,11 @@ pub(crate) fn emit_diff_changes_thumb(
     strip_id: u32,
     out: &mut Vec<u8>,
 ) {
+    let thumb_min_rows = stoat.minimap_thumb_min_rows();
+    let density = stoat
+        .diff_changes_strips
+        .get(&ws_id)
+        .map_or(Density::LINE, |strip| strip.density);
     let Some(state) = stoat
         .workspaces
         .get(ws_id)
@@ -503,12 +807,29 @@ pub(crate) fn emit_diff_changes_thumb(
     };
     let top = state.scroll as f32;
     let rows = state.viewport_rows.max(1) as u32;
+    let stamp = {
+        let mut hasher = DefaultHasher::new();
+        density.lines_per_row.hash(&mut hasher);
+        thumb_min_rows.hash(&mut hasher);
+        hasher.finish()
+    };
     stoat.smooth_scroll.emit_minimap_view(
         out,
         strip_id,
         non_pane_pool::DIFF_CHANGES_THUMB,
-        MinimapWindowInputs::new(top, 0, rows),
-        || (top, rows.saturating_mul(256)),
+        MinimapWindowInputs::new(top, stamp, rows),
+        || match density.tier {
+            Tier::Line => (top, rows.saturating_mul(256)),
+            Tier::Fit | Tier::Shape => {
+                let (top_256, visible_256) = density::thumb_rows_256(
+                    (top * 256.0) as u64,
+                    rows,
+                    density.lines_per_row,
+                    thumb_min_rows,
+                );
+                (top_256 as f32 / 256.0, visible_256)
+            },
+        },
     );
 }
 
@@ -939,7 +1260,7 @@ fn deleted_mark(table: &ClassTable) -> RowMark {
 
 #[cfg(test)]
 mod tests {
-    use super::{shown_runs, status_mark, summarize_rows};
+    use super::{header_bar, shown_runs, status_mark, summarize_rows};
     use crate::{
         action_handlers::dispatch,
         apc_emit,
@@ -955,11 +1276,12 @@ mod tests {
         },
         pane::{DockPanel, DockSide, DockVisibility, FocusTarget, View},
         render::SINGLE_MINIMAP_STRIP_ID,
-        test_fixture::drain_apc,
+        test_fixture::{drain_apc, mouse_event},
         test_harness::TestHarness,
         theme::Theme,
         workspace::{diff::WorktreeBase, Workspace},
     };
+    use crossterm::event::{MouseButton, MouseEventKind};
     use std::{
         ops::Range,
         path::{Path, PathBuf},
@@ -1066,6 +1388,114 @@ mod tests {
                 ],
                 8,
             ),
+        );
+    }
+
+    /// Fourteen changed files of 39 lines under a focused changes view at 120
+    /// by 24 with the per-pane strip, each excerpt a header and 39 rows, so
+    /// the stack's 560 rows fold 5 to a band of the 138-row strip.
+    ///
+    /// Lines 0 to 3 hold, and then each block of five lines changes or holds
+    /// in turn, so no fold hides more than line 0. Excerpt `k`'s header is
+    /// stack row `40 * k`, and its line `n` stack row `40 * k + 1 + n`.
+    fn banded_stack() -> (TestHarness, UnboundedReceiver<Vec<u8>>) {
+        let line = |n: usize, edit: bool| match edit && n >= 4 && ((n - 4) / 5).is_multiple_of(2) {
+            true => format!("line {n} edit"),
+            false => format!("line {n}"),
+        };
+        let file = |edit: bool| {
+            (0..39)
+                .map(|n| line(n, edit))
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        let files: Vec<(String, String, String)> = (0..14)
+            .map(|k| (format!("f{k:02}.txt"), file(false), file(true)))
+            .collect();
+        let staged: Vec<(&str, &str, &str)> = files
+            .iter()
+            .map(|(path, base, text)| (path.as_str(), base.as_str(), text.as_str()))
+            .collect();
+
+        let mut h = TestHarness::with_size(120, 24);
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        h.stoat.set_apc_tx(tx);
+        h.stoat.stoatty_protocol = 13;
+        h.stoat.set_diff_warm_auto(true);
+        h.stoat.settings.editor_minimap = Some(MinimapMode::PerPane);
+        h.stage_review_scenario("/repo", &staged);
+        stack_over(&mut h, "f00.txt");
+        (h, rx)
+    }
+
+    /// A stack past the strip folds its rows into bands of 5 in the Fit tier,
+    /// 112 for 560 stack rows. Each band that holds a header draws the header
+    /// bar, and band 2, the held lines 9 to 13, draws its representative, line
+    /// 11, with no mark. The thumb ships the 23-row viewport in bands.
+    #[test]
+    fn a_stack_past_the_strip_folds_into_bands() {
+        let (mut h, mut rx) = banded_stack();
+        let commands = frame(&mut h, &mut rx);
+        let mut store = Vec::new();
+        apply(&mut store, &commands);
+
+        let header = convert_minimap_runs(header_bar(&h.stoat.minimap_class_table));
+        let headers: Vec<usize> = (0..store.len()).filter(|&at| store[at] == header).collect();
+        let context = convert_minimap_runs(summarize_line("line 11", &[], RowMark::NONE));
+        let rows = h
+            .stoat
+            .active_workspace()
+            .focused_diff_changes()
+            .map(|state| state.rows);
+        let thumb = strip_frames(&commands)
+            .1
+            .last()
+            .map(|view| (view.1, view.2));
+
+        assert_eq!(
+            (rows, store.len(), headers, store[2].clone(), thumb),
+            (
+                Some(560),
+                112,
+                (0..14).map(|k| 8 * k).collect(),
+                context,
+                Some((0, 23 * 256 / 5))
+            ),
+        );
+    }
+
+    /// A press on a strip of bands lands the cursor on the middle stack row of
+    /// the band under it, and scrolls that row to the middle of the view. The
+    /// third cell's middle is band 15, stack rows 75 to 79.
+    #[test]
+    fn a_press_on_a_band_lands_on_its_middle_stack_row() {
+        let (mut h, mut rx) = banded_stack();
+        frame(&mut h, &mut rx);
+        let strip = h
+            .stoat
+            .active_workspace()
+            .focused_diff_changes()
+            .and_then(|state| state.minimap_rect)
+            .expect("the paint reserved a strip");
+        h.stoat.update(mouse_event(
+            MouseEventKind::Down(MouseButton::Left),
+            strip.x + 3,
+            strip.y + 2,
+        ));
+
+        let Workspace {
+            diff_changes_views,
+            editors,
+            ..
+        } = h.stoat.active_workspace_mut();
+        let state = diff_changes_views
+            .values_mut()
+            .next()
+            .expect("a changes view");
+        let scroll = state.scroll;
+        assert_eq!(
+            (diff_changes::cursor_stack_row(state, editors), scroll),
+            (Some(77), 77 - 23 / 2),
         );
     }
 

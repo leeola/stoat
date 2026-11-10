@@ -305,7 +305,7 @@ fn dial_tint_weight(level: i8) -> u8 {
 /// first one's to the last one's.
 ///
 /// Spliced base rows show no buffer row and widen nothing.
-fn buffer_hull(snapshot: &DisplaySnapshot, rows: Range<u32>) -> Range<u32> {
+pub(super) fn buffer_hull(snapshot: &DisplaySnapshot, rows: Range<u32>) -> Range<u32> {
     let buffer_row = |row: u32| {
         snapshot
             .display_to_buffer(DisplayPoint::new(row, 0))
@@ -326,7 +326,7 @@ fn buffer_hull(snapshot: &DisplaySnapshot, rows: Range<u32>) -> Range<u32> {
 ///
 /// A row past the held rows extends them. `start` is never past the held
 /// rows' end, since a pass summarizes its rows in order from the first.
-fn hold_rows(
+pub(super) fn hold_rows(
     held: &mut Vec<LineRuns>,
     start: u32,
     lines: Vec<LineRuns>,
