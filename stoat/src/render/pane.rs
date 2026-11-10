@@ -7,7 +7,7 @@ use crate::{
     diff_map::MarkKind,
     display_map::FoldScope,
     editor_state::{EditorId, EditorState},
-    minimap::LANE_COLS,
+    minimap::{LANE_COLS, RAIL_MAX_COLUMNS},
     pane::{Divider, DividerOrientation, FocusTarget, Pane, PaneTree, Placement, View},
     render::{
         chrome::{self, TypeTag},
@@ -21,6 +21,7 @@ use crate::{
             paint_popout_card, popout_area, popout_card_bg, popout_inset, scaled_char_capacity,
             wrap_popout_lines,
         },
+        rail_strip_id,
         review::{self, FrameEdges},
         run_pane::render_run_pane,
         term_pane::render_term_pane,
@@ -229,8 +230,13 @@ pub(crate) fn render_pane(
                         true => StripKind::Overview,
                         false => StripKind::Syntax,
                     };
+                    let rail = content.held_rail_id().filter(|_| kind == StripKind::Syntax);
+                    let (strip, rail_rect) = split_rail(strip, rail.is_some());
                     pane_minimap(pane, chrome, content.content_id(), kind, is_focused, frame)
                         .render(strip, buf, scene);
+                    if let (Some(rail_id), Some(rail_rect)) = (rail, rail_rect) {
+                        rail_minimap(pane.index, rail_id, chrome).render(rail_rect, buf, scene);
+                    }
                 }
             }
         },
@@ -631,6 +637,49 @@ fn pane_minimap<'a>(
         StripKind::Overview => overview_minimap(strip),
         StripKind::Syntax => strip,
     }
+}
+
+/// The Coverage Rail beside strip `strip_id`, over the rail store `rail_id`.
+///
+/// The rail draws the whole file on the strip's rows in the class table's
+/// palette, on the rail's own ground, with its thumb over the part of the
+/// file the strip covers. It has no outline and no rule.
+pub(super) fn rail_minimap<'a>(
+    strip_id: u32,
+    rail_id: u32,
+    chrome: MinimapChrome<'a>,
+) -> Minimap<'a> {
+    Minimap {
+        strip_id: rail_strip_id(strip_id),
+        content_id: rail_id,
+        lines_per_cell: MINIMAP_LINES_PER_CELL,
+        max_columns: RAIL_MAX_COLUMNS,
+        bg: chrome.rail_ground,
+        thumb: chrome.rail_cover,
+        thumb_border: None,
+        rule_class: 0,
+        palette: chrome.palette,
+    }
+}
+
+/// `strip` split into the strip and the Coverage Rail in its last cell when
+/// `rail` holds, else `strip` whole with no rail.
+pub(super) fn split_rail(strip: Rect, rail: bool) -> (Rect, Option<Rect>) {
+    if !rail || strip.width < 2 {
+        return (strip, None);
+    }
+    let rail = Rect {
+        x: strip.x + strip.width - 1,
+        width: 1,
+        ..strip
+    };
+    (
+        Rect {
+            width: strip.width - 1,
+            ..strip
+        },
+        Some(rail),
+    )
 }
 
 /// The scroll overview a split diff or a changes view declares from `strip`,

@@ -17,7 +17,7 @@ use crate::{
 use band::LineStat;
 use density::{Density, Tier};
 use ratatui::style::Color;
-use rows::RowStore;
+use rows::{RailStore, RailUpdate, RowStore};
 use std::{
     collections::{hash_map::DefaultHasher, HashMap},
     hash::{Hash, Hasher},
@@ -125,6 +125,13 @@ pub(crate) const TINT_WEIGHT: u8 = 41;
 /// Runs a row's content keeps, which leaves [`frame_row`] room for the lane,
 /// the tint, and the tick.
 const CONTENT_RUNS: usize = MAX_RUNS - 3;
+
+/// Columns of a Coverage Rail's hunk mark, two of the rail's three, the
+/// boards' 6 px of its 9 px cell.
+const RAIL_MARK_COLS: u8 = 2;
+
+/// Columns a Coverage Rail declares across its one cell.
+pub(crate) const RAIL_MAX_COLUMNS: u8 = 3;
 
 /// Bytes of a line that [`summarize_line`] reaches.
 ///
@@ -553,6 +560,14 @@ pub struct MinimapContent {
     /// The [`SyncVersions::syntax`] that [`Self::item_lines`] were read at, so
     /// only a parse that moves the outline reads them again.
     items_version: Option<u64>,
+    /// The content id of this buffer's Coverage Rail, a store of its own that
+    /// the rail strip renders, or `None` for a content made without one.
+    rail_id: Option<u32>,
+    /// The rail a strip that does not fit shows beside itself, `None` while
+    /// the strip fits.
+    rail: Option<RailStore>,
+    /// The rail frames the emitter sends next, on [`Self::rail_id`].
+    rail_update: Option<RailUpdate>,
     /// The store length the emitter sends as `minimap_len` before the queued
     /// splices, set by the first sync, which sizes the store, and again by a
     /// change of the fold of lines into rows.
@@ -633,6 +648,9 @@ impl MinimapContent {
             rows: None,
             item_lines: Vec::new(),
             items_version: None,
+            rail_id: None,
+            rail: None,
+            rail_update: None,
             pending_len: None,
             disabled: false,
             synced_decoration_version: 0,
@@ -662,6 +680,23 @@ impl MinimapContent {
 
     pub fn content_id(&self) -> u32 {
         self.content_id
+    }
+
+    /// The content id of the Coverage Rail this content holds, `None` while its
+    /// strip fits and so shows no rail.
+    pub(crate) fn held_rail_id(&self) -> Option<u32> {
+        self.rail.and(self.rail_id)
+    }
+
+    /// Give this content `id` for the Coverage Rail its strip shows when the
+    /// file does not fit.
+    fn give_rail_id(&mut self, id: u32) {
+        self.rail_id = Some(id);
+    }
+
+    /// Take the rail frames to send and the rail's content id they go on.
+    fn take_rail_update(&mut self) -> Option<(u32, RailUpdate)> {
+        Some((self.rail_id?, self.rail_update.take()?))
     }
 
     /// The buffer version this content last synced against, the argument the
@@ -762,6 +797,9 @@ impl MinimapContent {
         let total = line_count(new_rope);
         if total as usize > MAX_LINES {
             self.disabled = true;
+            if self.rail.take().is_some() {
+                self.rail_update = Some(RailUpdate::Drop);
+            }
             self.lines.clear();
             self.edges.clear();
             self.stats.clear();
@@ -1021,6 +1059,7 @@ impl MinimapContent {
         }
 
         self.derive_rows(&marks, table, total, started);
+        self.sync_rail(&marks, table, versions.decoration, total, density);
     }
 
     /// Hold a layer of strip rows while `density` folds lines into rows, and
@@ -1240,6 +1279,64 @@ impl MinimapContent {
         for splice in splices {
             self.queue_splice(splice);
         }
+    }
+
+    /// Hold a Coverage Rail while `density` does not fit, and leave its frames
+    /// for the emitter.
+    ///
+    /// The frames are the whole rail when it starts or when its marks, its
+    /// fold, or the file's length moved, and a drop when it ends.
+    ///
+    /// A rail row is a mark in the lane of its band's first hunk across
+    /// [`RAIL_MARK_COLS`] columns, and blank for a band that holds no hunk.
+    fn sync_rail(
+        &mut self,
+        marks: &impl EdgeSource,
+        table: &ClassTable,
+        decoration: u64,
+        total: u32,
+        density: Density,
+    ) {
+        if self.rows.is_none() || density.fits || self.rail_id.is_none() {
+            if self.rail.take().is_some() {
+                self.rail_update = Some(RailUpdate::Drop);
+            }
+            return;
+        }
+
+        let rail = RailStore {
+            lines_per_row: density.whole_lines_per_row,
+            decoration,
+            file_lines: total,
+        };
+        if self.rail == Some(rail) {
+            return;
+        }
+        let rows = (0..density::rows(total, rail.lines_per_row))
+            .map(|row| {
+                let band = density::band(row, rail.lines_per_row, total);
+                let mark = band::band_mark(
+                    marks
+                        .marked_rows(band.clone())
+                        .into_iter()
+                        .filter(|line| band.contains(line))
+                        .map(|line| marks.mark_of(line)),
+                    table,
+                );
+                let mut runs = LineRuns::default();
+                if let Some(lane) = mark.lane {
+                    runs.push(Run {
+                        start_col: 0,
+                        len: RAIL_MARK_COLS,
+                        class: lane,
+                        weight: 255,
+                    });
+                }
+                runs
+            })
+            .collect();
+        self.rail = Some(rail);
+        self.rail_update = Some(RailUpdate::Rows(rows));
     }
 
     /// The next built run of [`Self::resync_extra`], taken off its front, or
@@ -3490,6 +3587,8 @@ mod tests {
         let fit = Density {
             lines_per_row: 4,
             tier: Tier::Fit,
+            fits: true,
+            whole_lines_per_row: 4,
         };
         let (code, blank) = (
             summarize_line("code", &[], RowMark::NONE),
@@ -3541,6 +3640,8 @@ mod tests {
     const FOLD_FOUR: Density = Density {
         lines_per_row: 4,
         tier: Tier::Fit,
+        fits: true,
+        whole_lines_per_row: 4,
     };
 
     /// An edit inside a band redraws the band's row. Two longer lines move the
@@ -3620,6 +3721,8 @@ mod tests {
         let shape = Density {
             lines_per_row: 20,
             tier: Tier::Shape,
+            fits: true,
+            whole_lines_per_row: 20,
         };
         let mut content = MinimapContent::new(1, test_executor());
         let mut store = Vec::new();

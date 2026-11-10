@@ -33,6 +33,14 @@ pub(crate) enum Tier {
 pub(crate) struct Density {
     pub lines_per_row: u32,
     pub tier: Tier,
+    /// Whether the whole file fits the strip at [`Self::lines_per_row`]. A file
+    /// the Thumb Minimum's cap stops from fitting scrolls on the strip, and a
+    /// rail beside it shows the whole file.
+    pub fits: bool,
+    /// The lines per row the whole file needs on the strip, before the cap.
+    /// It equals [`Self::lines_per_row`] while the file fits, and a rail draws
+    /// the whole file at it while the file does not.
+    pub whole_lines_per_row: u32,
 }
 
 impl Density {
@@ -40,6 +48,8 @@ impl Density {
     pub(crate) const LINE: Density = Density {
         lines_per_row: 1,
         tier: Tier::Line,
+        fits: true,
+        whole_lines_per_row: 1,
     };
 }
 
@@ -66,6 +76,8 @@ pub(crate) fn density(
     Density {
         lines_per_row,
         tier,
+        fits: wanted <= cap,
+        whole_lines_per_row: wanted,
     }
 }
 
@@ -111,17 +123,21 @@ pub(crate) fn thumb_rows_256(
 mod tests {
     use super::{density, thumb_rows_256, Density, Tier};
 
-    /// The lines per row and the tier under a 44-line viewport.
-    fn fold(file_lines: u32, strip_rows: u32, thumb_min_rows: u32) -> (u32, Tier) {
+    /// The lines per row, the tier, whether the file fits, and the fold the
+    /// whole file needs, under a 44-line viewport.
+    fn fold(file_lines: u32, strip_rows: u32, thumb_min_rows: u32) -> (u32, Tier, bool, u32) {
         let Density {
             lines_per_row,
             tier,
+            fits,
+            whole_lines_per_row,
         } = density(file_lines, strip_rows, 44, thumb_min_rows);
-        (lines_per_row, tier)
+        (lines_per_row, tier, fits, whole_lines_per_row)
     }
 
     /// The MinimapThumb board's table: 40,000 lines on 337 rows under a
-    /// 44-line viewport fold to the cap that the Thumb Minimum sets.
+    /// 44-line viewport fold to the cap that the Thumb Minimum sets. The whole
+    /// file needs 119 lines a row, so it fits at none of them.
     #[test]
     fn the_thumb_minimum_caps_the_lines_per_row() {
         assert_eq!(
@@ -132,10 +148,10 @@ mod tests {
                 fold(40_000, 337, 1),
             ],
             [
-                (22, Tier::Shape),
-                (11, Tier::Fit),
-                (5, Tier::Fit),
-                (44, Tier::Shape),
+                (22, Tier::Shape, false, 119),
+                (11, Tier::Fit, false, 119),
+                (5, Tier::Fit, false, 119),
+                (44, Tier::Shape, false, 119),
             ],
         );
     }
@@ -146,7 +162,11 @@ mod tests {
     fn a_file_under_the_cap_folds_to_fit_the_strip() {
         assert_eq!(
             [fold(2_600, 364, 2), fold(8_000, 364, 2), fold(110, 337, 2)],
-            [(8, Tier::Fit), (22, Tier::Shape), (1, Tier::Line)],
+            [
+                (8, Tier::Fit, true, 8),
+                (22, Tier::Shape, true, 22),
+                (1, Tier::Line, true, 1),
+            ],
         );
     }
 

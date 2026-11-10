@@ -11826,6 +11826,8 @@ fn a_click_on_a_band_row_centers_its_middle_line() {
         editor.minimap_density = Some(Density {
             lines_per_row: 4,
             tier: Tier::Fit,
+            fits: true,
+            whole_lines_per_row: 4,
         });
         editor.viewport_rows = Some(20);
         editor.scroll_row = 100;
@@ -11840,6 +11842,48 @@ fn a_click_on_a_band_row_centers_its_middle_line() {
     assert_eq!(
         h.stoat.active_workspace().editors[editor_id].scroll_row,
         164
+    );
+}
+
+/// A press on the Coverage Rail, the strip's last column while the file does
+/// not fit, scrubs by the rail's fold and arms a rail drag. Cell row 5 of a
+/// 10-cell strip is rail row 33, whose band of 44 lines centers on line 1,474,
+/// scrolled to 1,464 in a 20-row viewport.
+#[test]
+fn a_rail_press_scrubs_to_its_line() {
+    let mut h = Stoat::test();
+    h.stoat.settings.editor_minimap = Some(MinimapMode::PerPane);
+    let body: String = (0..6_000)
+        .map(|i| format!("line {i}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    open_scratch_file(&mut h, &body);
+    let editor_id = h.stoat.focused_editor_ids().expect("editor").0;
+    {
+        let editor = &mut h.stoat.active_workspace_mut().editors[editor_id];
+        editor.minimap_rect = Some(Rect::new(72, 0, 8, 10));
+        editor.minimap_density = Some(Density {
+            lines_per_row: 11,
+            tier: Tier::Fit,
+            fits: false,
+            whole_lines_per_row: 44,
+        });
+        editor.viewport_rows = Some(20);
+        editor.scroll_row = 0;
+        editor.scroll_frac = 0.0;
+        editor.scroll_offset = 0.0;
+        editor.scroll_glide = ScrollGlide::None;
+    }
+
+    h.stoat
+        .update(mouse_event(MouseEventKind::Down(MouseButton::Left), 79, 5));
+
+    assert_eq!(
+        (
+            h.stoat.active_workspace().editors[editor_id].scroll_row,
+            h.stoat.minimap_drag
+        ),
+        (1_464, Some(MinimapDrag::Rail(editor_id))),
     );
 }
 

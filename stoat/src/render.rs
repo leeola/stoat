@@ -111,6 +111,18 @@ use unicode_width::UnicodeWidthStr;
 /// separate from scroll pools, so `u32::MAX` never collides.
 pub(crate) const SINGLE_MINIMAP_STRIP_ID: u32 = u32::MAX;
 
+/// The bit that sets a Coverage Rail's strip id apart from its strip's.
+///
+/// Pane indexes stay far under it, so a pane's rail sets the bit. The single
+/// band's id already sets it, so its rail clears it, and [`rail_strip_id`]
+/// flips the bit rather than setting it.
+pub(crate) const RAIL_STRIP_BIT: u32 = 1 << 31;
+
+/// The strip id of the Coverage Rail beside strip `strip_id`.
+pub(crate) fn rail_strip_id(strip_id: u32) -> u32 {
+    strip_id ^ RAIL_STRIP_BIT
+}
+
 /// The scene lane for everything a frame draws after its split panes, such as
 /// the dividers, the docks, and every overlay from a hover card to a modal.
 ///
@@ -183,6 +195,12 @@ pub(crate) struct MinimapChrome<'a> {
     /// The class whose runs every strip draws as an Item Rule hairline, the
     /// class table's [`EdgeClass::Rule`].
     pub(crate) rule_class: u8,
+    /// The ground of a Coverage Rail, rgba, the background of
+    /// `ui.minimap.rail` made opaque.
+    pub(crate) rail_ground: [u8; 4],
+    /// The block a Coverage Rail draws over the part of the file its strip
+    /// covers, rgba, the foreground of `ui.minimap.rail` made opaque.
+    pub(crate) rail_cover: [u8; 4],
 }
 
 /// One language server as the status bar shows it.
@@ -1232,6 +1250,9 @@ pub(crate) fn frame(
             let [r, g, b] = paint::style_rgb(focused.fg).unwrap_or([90, 90, 110]);
             [r, g, b, MINIMAP_THUMB_ALPHA]
         };
+        let rail = stoat.theme.get(crate::theme::scope::UI_MINIMAP_RAIL);
+        let [gr, gg, gb] = paint::style_rgb(rail.bg).unwrap_or([0, 0, 0]);
+        let [cr, cg, cb] = paint::style_rgb(rail.fg).unwrap_or([90, 90, 110]);
         let palette = stoat.minimap_class_table.palette();
         let overview_palette = palettes.overview.as_slice();
         MinimapChrome {
@@ -1250,6 +1271,8 @@ pub(crate) fn frame(
                 .map(|strip| strip.content_id()),
             thumb,
             rule_class: stoat.minimap_class_table.edge_class(EdgeClass::Rule),
+            rail_ground: [gr, gg, gb, u8::MAX],
+            rail_cover: [cr, cg, cb, u8::MAX],
         }
     });
 
@@ -1597,11 +1620,17 @@ pub(crate) fn frame(
             rule_class: chrome.rule_class,
             palette,
         };
+        let rail = single_band_rail(ws, chrome);
+        let (band, rail_rect) = pane::split_rail(band, rail.is_some());
         match single_band_overview(ws) {
             true => pane::overview_minimap(strip),
             false => strip,
         }
         .render(band, buf, scene);
+        if let (Some(rail_id), Some(rail_rect)) = (rail, rail_rect) {
+            pane::rail_minimap(SINGLE_MINIMAP_STRIP_ID, rail_id, chrome)
+                .render(rail_rect, buf, scene);
+        }
     }
 
     // Record each undercurl span's cells now, after the editor panes painted but
@@ -2494,6 +2523,23 @@ fn single_band_content<'a>(
         View::DiffChanges(_) => Some((chrome.diff_changes_content?, chrome.overview_palette)),
         _ => None,
     }
+}
+
+/// The content id of the Coverage Rail the single band over `ws` shows in its
+/// last cell, `None` while the focused editor's strip fits or the band is a
+/// scroll overview.
+fn single_band_rail(ws: &Workspace, chrome: MinimapChrome<'_>) -> Option<u32> {
+    let View::Editor(editor_id) = ws.panes.pane(ws.panes.focus()).view else {
+        return None;
+    };
+    let editor = ws
+        .editors
+        .get(editor_id)
+        .filter(|editor| !editor.diff_view)?;
+    chrome
+        .content
+        .get(&(chrome.workspace, editor.buffer_id))?
+        .held_rail_id()
 }
 
 /// Reports whether the single band over `ws` is a scroll overview.

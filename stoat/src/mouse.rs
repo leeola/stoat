@@ -15,7 +15,8 @@ use crate::{
     },
     buffer::BufferId,
     diff_changes::{self, DiffChangesId},
-    editor_state::{EditorId, ScrollGlide},
+    display_map::DisplaySnapshot,
+    editor_state::{EditorId, EditorState, ScrollGlide},
     host::ClipboardKind,
     keymap::WheelDirection,
     keymap_state::{active_modal, ActiveModal, StoatKeymapState},
@@ -1114,6 +1115,9 @@ pub(crate) enum MinimapDrag {
     Editor(EditorId),
     /// A changes view, whose cursor lands on the row under the pointer.
     DiffChanges(DiffChangesId),
+    /// An editor's Coverage Rail, whose press eases the viewport to the line
+    /// the rail shows under the pointer, at the rail's fold.
+    Rail(EditorId),
 }
 
 /// Route a left press or drag over a pane's minimap strip to a scrub. Returns
@@ -1175,6 +1179,7 @@ fn handle_minimap_mouse(stoat: &mut Stoat, mouse: MouseEvent) -> Option<UpdateEf
         if let Some(drag) = hit
             && let Some(strip) = minimap_strip_for(stoat, drag)
         {
+            let drag = rail_drag(stoat, drag, strip, mouse.column);
             stoat.minimap_drag = Some(drag);
             scrub_minimap(stoat, drag, strip, mouse.row);
             return Some(UpdateEffect::Redraw);
@@ -1193,7 +1198,9 @@ fn minimap_strip_for(stoat: &Stoat, drag: MinimapDrag) -> Option<Rect> {
     }
     let ws = stoat.active_workspace();
     match drag {
-        MinimapDrag::Editor(editor_id) => ws.editors.get(editor_id)?.minimap_rect,
+        MinimapDrag::Editor(editor_id) | MinimapDrag::Rail(editor_id) => {
+            ws.editors.get(editor_id)?.minimap_rect
+        },
         MinimapDrag::DiffChanges(id) => ws.diff_changes_views.get(id)?.minimap_rect,
     }
 }
@@ -1203,6 +1210,7 @@ fn minimap_strip_for(stoat: &Stoat, drag: MinimapDrag) -> Option<Rect> {
 fn scrub_minimap(stoat: &mut Stoat, drag: MinimapDrag, strip: Rect, screen_row: u16) {
     match drag {
         MinimapDrag::Editor(editor_id) => scrub_minimap_editor(stoat, editor_id, strip, screen_row),
+        MinimapDrag::Rail(editor_id) => scrub_minimap_rail(stoat, editor_id, strip, screen_row),
         MinimapDrag::DiffChanges(id) => scrub_minimap_diff_changes(stoat, id, strip, screen_row),
     }
 }
@@ -1269,9 +1277,63 @@ fn scrub_minimap_editor(stoat: &mut Stoat, editor_id: EditorId, strip: Rect, scr
         },
     };
 
+    scrub_to_line(editor, &snapshot, target_line, viewport);
+}
+
+/// `drag` as a press on the Coverage Rail when `column` is the last of
+/// `strip`, the cell the rail takes while the editor's strip does not fit.
+fn rail_drag(stoat: &Stoat, drag: MinimapDrag, strip: Rect, column: u16) -> MinimapDrag {
+    let MinimapDrag::Editor(editor_id) = drag else {
+        return drag;
+    };
+    let railed = stoat
+        .active_workspace()
+        .editors
+        .get(editor_id)
+        .filter(|editor| !editor.diff_view)
+        .and_then(|editor| editor.minimap_density)
+        .is_some_and(|density| !density.fits);
+    match railed && strip.width > 1 && column == strip.x + strip.width - 1 {
+        true => MinimapDrag::Rail(editor_id),
+        false => drag,
+    }
+}
+
+/// Ease `editor_id`'s viewport onto the line its Coverage Rail shows under
+/// `screen_row`, centered in the viewport.
+///
+/// The rail holds the whole file at its own fold, so it fits its cell and
+/// never scrolls. The cell's middle rail row names a band, and the scrub lands
+/// on that band's middle line.
+fn scrub_minimap_rail(stoat: &mut Stoat, editor_id: EditorId, strip: Rect, screen_row: u16) {
+    let ws = &mut stoat.workspaces[stoat.active_workspace];
+    let Some(editor) = ws.editors.get_mut(editor_id) else {
+        return;
+    };
+    let Some(fold) = editor.minimap_density else {
+        return;
+    };
+
+    let snapshot = editor.display_map.snapshot();
+    let viewport = editor.viewport_rows.unwrap_or(strip.height as u32).max(1);
+    let cell = screen_row
+        .saturating_sub(strip.y)
+        .min(strip.height.saturating_sub(1));
+    let lines_per_cell = u32::from(LINES_PER_CELL);
+    let rail_row = u32::from(cell) * lines_per_cell + lines_per_cell / 2;
+    let rail_lines_per_row = fold.whole_lines_per_row;
+    let line = rail_row * rail_lines_per_row + rail_lines_per_row / 2;
+    scrub_to_line(editor, &snapshot, line, viewport);
+}
+
+/// Jump `editor`'s view so buffer line `line` of `snapshot` sits centered in a
+/// viewport of `viewport` rows, and glide there from the declared rest.
+fn scrub_to_line(editor: &mut EditorState, snapshot: &DisplaySnapshot, line: u32, viewport: u32) {
+    let rest = editor.scroll_row as f32 + editor.scroll_frac;
+
     // A strip taller than the file resolves cells past its last line, and
     // scrolling happens in display rows, so the target converts back.
-    let target_line = target_line.min(buffer_lines.saturating_sub(1));
+    let target_line = line.min(snapshot.buffer_line_count().saturating_sub(1));
     let target_display = snapshot
         .buffer_to_display(stoat_text::Point::new(target_line, 0))
         .row;

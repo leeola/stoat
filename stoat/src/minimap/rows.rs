@@ -106,3 +106,24 @@ impl RowStore {
         self.stale[start..end].contains(&true)
     }
 }
+
+/// The Coverage Rail of a strip whose file does not fit it, which shows the
+/// whole file on the strip's rows with each band that holds a hunk marked.
+///
+/// A rail has a row per strip row, so a sync sends it whole whenever the
+/// marks, its fold, or the file's length move. It keeps only what it was
+/// built from.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(super) struct RailStore {
+    pub(super) lines_per_row: u32,
+    pub(super) decoration: u64,
+    pub(super) file_lines: u32,
+}
+
+/// The rail frames a sync leaves for the emitter to send on the rail's id.
+pub(super) enum RailUpdate {
+    /// Size the rail's store to these rows and replace every one.
+    Rows(Vec<LineRuns>),
+    /// Retire the rail's store.
+    Drop,
+}

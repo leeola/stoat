@@ -21,6 +21,7 @@ use crate::{
     minimap::{
         density::{self, Density, Tier},
         diff_changes::{self, DiffChangesStrip},
+        rows::RailUpdate,
         BuildWindow, EdgeSource, RowMark, LINES_PER_CELL,
     },
     pane::View,
@@ -82,12 +83,14 @@ pub(crate) fn ensure_minimap_content_ids(stoat: &mut Stoat) {
         let Some(editor) = ws.editors.get(editor_id) else {
             continue;
         };
+        // The content takes a second id for the Coverage Rail its strip shows
+        // when the file does not fit, since a sync has no way to the counter.
         if let Entry::Vacant(slot) = minimap_content.entry((ws_id, editor.buffer_id)) {
-            slot.insert(crate::minimap::MinimapContent::new(
-                *minimap_next_content_id,
-                executor.clone(),
-            ));
-            *minimap_next_content_id += 1;
+            let mut content =
+                crate::minimap::MinimapContent::new(*minimap_next_content_id, executor.clone());
+            content.give_rail_id(*minimap_next_content_id + 1);
+            slot.insert(content);
+            *minimap_next_content_id += 2;
         }
     }
 }
@@ -262,6 +265,14 @@ pub(crate) fn emit_minimap(stoat: &mut Stoat) {
                     content_id: content.content_id(),
                 },
             );
+            if let Some(rail_id) = content.held_rail_id() {
+                stoatty_protocol::command::encode_minimap_drop_into(
+                    &mut out,
+                    &stoatty_protocol::command::MinimapDropCommand {
+                        content_id: rail_id,
+                    },
+                );
+            }
         }
     }
     // A parked stack keeps the strip, so the flip back finds the lines of
@@ -426,6 +437,39 @@ fn sync_minimap_strip(
         } else {
             stoatty_protocol::command::encode_minimap_lines_into(out, &command);
         }
+    }
+
+    match content.take_rail_update() {
+        Some((rail_id, RailUpdate::Rows(rows))) => {
+            let lines = rows.len() as u32;
+            stoatty_protocol::command::encode_minimap_len_into(
+                out,
+                &stoatty_protocol::command::MinimapLenCommand {
+                    content_id: rail_id,
+                    lines,
+                },
+            );
+            let command = stoatty_protocol::command::MinimapLinesCommand {
+                content_id: rail_id,
+                start: 0,
+                removed: lines,
+                lines: rows.into_iter().map(convert_minimap_runs).collect(),
+            };
+            if weighted {
+                stoatty_protocol::command::encode_minimap_runs_into(out, &command);
+            } else {
+                stoatty_protocol::command::encode_minimap_lines_into(out, &command);
+            }
+        },
+        Some((rail_id, RailUpdate::Drop)) => {
+            stoatty_protocol::command::encode_minimap_drop_into(
+                out,
+                &stoatty_protocol::command::MinimapDropCommand {
+                    content_id: rail_id,
+                },
+            );
+        },
+        None => {},
     }
 }
 
@@ -1339,6 +1383,275 @@ mod tests {
                 &rope,
             ),
             vec![0, 20],
+        );
+    }
+
+    /// Emit until the minimap build settles, and replay what it sent into a
+    /// store per content id, beside the store lengths each one was sent.
+    fn settle_stores(
+        h: &mut crate::test_harness::TestHarness,
+        rx: &mut UnboundedReceiver<Vec<u8>>,
+    ) -> std::collections::BTreeMap<u32, (Vec<u32>, Vec<Vec<stoatty_protocol::command::MinimapRun>>)>
+    {
+        use stoatty_protocol::command::Command;
+
+        let _ = h.stoat.render();
+        let mut stores: std::collections::BTreeMap<u32, (Vec<u32>, Vec<Vec<_>>)> =
+            std::collections::BTreeMap::new();
+        for _ in 0..400 {
+            emit_minimap(&mut h.stoat);
+            for cmd in drain_apc(rx) {
+                match cmd {
+                    Command::MinimapLen(len) => {
+                        let (lens, store) = stores.entry(len.content_id).or_default();
+                        store.resize(len.lines as usize, Vec::new());
+                        lens.push(len.lines);
+                    },
+                    Command::MinimapLines(splice) => {
+                        let (_, store) = stores.entry(splice.content_id).or_default();
+                        let start = splice.start as usize;
+                        let end = (start + splice.removed as usize).min(store.len());
+                        store.splice(start..end, splice.lines.iter().map(|line| line.to_vec()));
+                    },
+                    _ => {},
+                }
+            }
+            if !h.stoat.minimap_build_pending {
+                break;
+            }
+        }
+        stores
+    }
+
+    /// `count` numbered lines open in the band, with line `changed` unlike the
+    /// base, so the diff marks it modified.
+    fn open_changed_in_band(
+        count: usize,
+        changed: usize,
+    ) -> (crate::test_harness::TestHarness, UnboundedReceiver<Vec<u8>>) {
+        let lines = numbered(count, 0..0);
+        let text = lines.join("\n");
+        let (h, rx) = open_in_band("numbered.txt", &text);
+        let mut base = lines;
+        base[changed] = format!("base {changed}");
+        let base = base.join("\n");
+
+        let buffer_id = h.stoat.focused_editor_ids().expect("editor").1;
+        let dm = crate::diff_map::DiffMap::from_structural_changes(
+            stoat_language::structural_diff::diff(&base, &text),
+            Arc::new(base.clone()),
+            &text,
+        );
+        h.stoat
+            .active_workspace()
+            .buffers
+            .get(buffer_id)
+            .expect("buffer")
+            .write()
+            .expect("poisoned")
+            .diff_map = Some(dm);
+        (h, rx)
+    }
+
+    /// The strips the frame declares, as their strip id, left column, width,
+    /// and content id.
+    fn declared_strips(
+        h: &mut crate::test_harness::TestHarness,
+        rx: &mut UnboundedReceiver<Vec<u8>>,
+    ) -> Vec<(u32, u16, u16, u32)> {
+        use stoatty_protocol::command::Command;
+
+        let _ = h.stoat.render();
+        apc_emit::emit_apc_scene(&mut h.stoat);
+        drain_apc(rx)
+            .into_iter()
+            .filter_map(|cmd| match cmd {
+                Command::Minimap(strip) => {
+                    Some((strip.strip_id, strip.left, strip.width, strip.content_id))
+                },
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// 6,000 lines want 44 to a row on the 138-row band, past the default
+    /// Thumb Minimum's cap of 11, so the strip scrolls and a Coverage Rail
+    /// takes the band's last cell. The rail holds the whole file at 44 lines a
+    /// row, 137 rows, with the hunk at line 5,000 marked on row 113, and its
+    /// thumb covers the 138 rows of 11 lines the strip shows.
+    #[test]
+    fn a_file_past_the_cap_declares_a_rail_with_its_hunks() {
+        use crate::{minimap::EdgeClass, render::rail_strip_id};
+        use stoatty_protocol::command::{Command, MinimapRun};
+
+        let (mut h, mut rx) = open_changed_in_band(6_000, 5_000);
+        let stores = settle_stores(&mut h, &mut rx);
+        let declared = declared_strips(&mut h, &mut rx);
+
+        let band = h
+            .stoat
+            .single_minimap_rect
+            .expect("single mode reserves a band");
+        let buffer_id = h.stoat.focused_editor_ids().expect("editor").1;
+        let content = &h.stoat.minimap_content[&(h.stoat.active_workspace, buffer_id)];
+        let (strip_id, rail_id) = (content.content_id(), content.held_rail_id());
+        let modified = h.stoat.minimap_class_table.edge_class(EdgeClass::Modified);
+
+        apc_emit::emit_smooth_scroll(&mut h.stoat);
+        let rail_view = drain_apc(&mut rx).into_iter().find_map(|cmd| match cmd {
+            Command::MinimapView(view)
+                if view.strip_id == rail_strip_id(SINGLE_MINIMAP_STRIP_ID) =>
+            {
+                Some((view.top_256, view.visible_256))
+            },
+            _ => None,
+        });
+        let (rail_lens, rail_rows) = rail_id
+            .and_then(|rail_id| stores.get(&rail_id))
+            .cloned()
+            .unwrap_or_default();
+        let marked: Vec<(usize, Vec<MinimapRun>)> = rail_rows
+            .into_iter()
+            .enumerate()
+            .filter(|(_, runs)| !runs.is_empty())
+            .collect();
+
+        assert_eq!(
+            (declared, rail_lens, marked, rail_view),
+            (
+                vec![
+                    (SINGLE_MINIMAP_STRIP_ID, band.x, band.width - 1, strip_id),
+                    (
+                        rail_strip_id(SINGLE_MINIMAP_STRIP_ID),
+                        band.x + band.width - 1,
+                        1,
+                        strip_id + 1,
+                    ),
+                ],
+                vec![137],
+                vec![(
+                    113,
+                    vec![MinimapRun {
+                        start_col: 0,
+                        len: 2,
+                        class: modified,
+                        weight: 255,
+                    }],
+                )],
+                Some((0, 138 * 11 * 256 / 44)),
+            ),
+            "the strip and the rail declared, the rail's length, its marked rows, \
+             and its view",
+        );
+    }
+
+    /// A file that fits its strip declares the strip alone across the band,
+    /// and sends nothing on a rail.
+    #[test]
+    fn a_fitting_file_declares_no_rail() {
+        let (mut h, mut rx) = open_changed_in_band(1_200, 600);
+        let stores = settle_stores(&mut h, &mut rx);
+        let declared = declared_strips(&mut h, &mut rx);
+
+        let band = h
+            .stoat
+            .single_minimap_rect
+            .expect("single mode reserves a band");
+        let buffer_id = h.stoat.focused_editor_ids().expect("editor").1;
+        let strip_id = h.stoat.minimap_content[&(h.stoat.active_workspace, buffer_id)].content_id();
+
+        assert_eq!(
+            (declared, stores.keys().copied().collect::<Vec<_>>()),
+            (
+                vec![(SINGLE_MINIMAP_STRIP_ID, band.x, band.width, strip_id)],
+                vec![strip_id],
+            ),
+        );
+    }
+
+    /// Emit until the minimap build settles, and answer the content ids the
+    /// emits dropped.
+    fn settle_drops(
+        h: &mut crate::test_harness::TestHarness,
+        rx: &mut UnboundedReceiver<Vec<u8>>,
+    ) -> Vec<u32> {
+        use stoatty_protocol::command::Command;
+
+        let _ = h.stoat.render();
+        let mut dropped = Vec::new();
+        for _ in 0..400 {
+            emit_minimap(&mut h.stoat);
+            dropped.extend(drain_apc(rx).into_iter().filter_map(|cmd| match cmd {
+                Command::MinimapDrop(drop) => Some(drop.content_id),
+                _ => None,
+            }));
+            if !h.stoat.minimap_build_pending {
+                break;
+            }
+        }
+        dropped
+    }
+
+    /// A file cut down until it fits its strip drops its Coverage Rail's store,
+    /// since the band then shows the strip alone.
+    #[test]
+    fn a_rail_drops_once_its_file_fits() {
+        let (mut h, mut rx) = open_changed_in_band(6_000, 5_000);
+        settle_stores(&mut h, &mut rx);
+        let buffer_id = h.stoat.focused_editor_ids().expect("editor").1;
+        let rail_id =
+            h.stoat.minimap_content[&(h.stoat.active_workspace, buffer_id)].held_rail_id();
+
+        let text = numbered(6_000, 0..0).join("\n");
+        let cut = text
+            .match_indices('\n')
+            .nth(999)
+            .expect("a thousandth line")
+            .0;
+        h.edit_focused(cut..text.len(), "");
+        let dropped = settle_drops(&mut h, &mut rx);
+
+        assert_eq!(
+            (rail_id.is_some(), dropped),
+            (true, rail_id.into_iter().collect::<Vec<_>>()),
+        );
+    }
+
+    /// Closing a buffer whose strip shows a Coverage Rail drops the rail's
+    /// store with the buffer's own.
+    #[test]
+    fn closing_a_railed_buffer_drops_its_rail() {
+        let mut h = Stoat::test();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+        h.stoat.set_apc_tx(tx);
+        h.stoat.stoatty_protocol = stoatty_protocol::PROTOCOL_VERSION;
+
+        let root = PathBuf::from("/minimap-rail-close");
+        let small = root.join("small.txt");
+        let big = root.join("big.txt");
+        h.fake_fs().insert_file(&small, b"alpha\n");
+        h.fake_fs()
+            .insert_file(&big, numbered(6_000, 0..0).join("\n").as_bytes());
+        h.stoat.active_workspace_mut().git_root = root;
+        action_handlers::dispatch(&mut h.stoat, &OpenFile { path: small });
+        action_handlers::dispatch(&mut h.stoat, &OpenFile { path: big });
+        h.settle();
+        h.resize(120, 24);
+        settle_stores(&mut h, &mut rx);
+        let buffer_id = h.stoat.focused_editor_ids().expect("editor").1;
+        let content = &h.stoat.minimap_content[&(h.stoat.active_workspace, buffer_id)];
+        let held = (Some(content.content_id()), content.held_rail_id());
+
+        action_handlers::dispatch(&mut h.stoat, &stoat_action::CloseBuffer);
+        h.settle();
+        let dropped = settle_drops(&mut h, &mut rx);
+
+        assert_eq!(
+            (held.1.is_some(), dropped),
+            (
+                true,
+                [held.0, held.1].into_iter().flatten().collect::<Vec<_>>()
+            ),
         );
     }
 

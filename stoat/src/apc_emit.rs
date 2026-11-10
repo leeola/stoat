@@ -20,11 +20,12 @@ use crate::{
     display_map::{highlights::HighlightEndpoints, DisplayPoint, DisplaySnapshot, PaintVersion},
     editor_state::{EditorId, EditorState, ScrollGlide},
     input_view::InputView,
-    minimap::{density, emit::minimap_view_window},
+    minimap::{density, emit::minimap_view_window, LINES_PER_CELL},
     pane::{FocusTarget, PaneId, Placement, View},
     render::{
         diff_changes::PagePaint,
         hover::HoverFrame,
+        rail_strip_id,
         review::DiffDials,
         undercurl::UndercurlBatch,
         walkthrough::{self, Spotlight},
@@ -46,6 +47,7 @@ use std::{
 };
 use stoat_config::{LineNumbers, WrapMode};
 use stoat_widgets::{
+    minimap,
     pool::{self, MinimapWindowInputs, PageVersions, Refill, SmoothScrollState},
     ApcScene,
 };
@@ -1133,7 +1135,8 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
         .find(|(_, id, region)| region.window == 0 && focused_editor == Some(*id))
         .map(|(_, _, region)| region.pool);
     let focused_insert = stoat.focused_mode() == "insert";
-    let single_minimap = stoat.single_minimap_rect.is_some();
+    let single_band = stoat.single_minimap_rect;
+    let single_minimap = single_band.is_some();
     let thumb_min_rows = stoat.minimap_thumb_min_rows();
     // The focused detached pane's pool cursor, collected during the pane loop
     // and emitted after it, past the workspace borrow.
@@ -1395,6 +1398,47 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
                         None => (top, u32::from(visible) * 256),
                     }
                 });
+
+            // A strip that does not fit scrolls, and its Coverage Rail shows
+            // the whole file, so the rail's thumb covers the rows the strip
+            // shows. Those start where the terminal scrolls the strip to and
+            // run its height, converted from the strip's fold to the rail's.
+            let strip = match single_minimap {
+                true => single_band,
+                false => editor.minimap_rect,
+            };
+            if let Some(density) = density.filter(|density| !density.fits)
+                && let Some(strip) = strip
+            {
+                let strip_rows = u32::from(strip.height) * u32::from(LINES_PER_CELL);
+                let file_lines = snapshot.buffer_line_count();
+                stoat.smooth_scroll.emit_minimap_view(
+                    &mut out,
+                    rail_strip_id(strip_id),
+                    region.pool,
+                    inputs,
+                    || {
+                        let (top, visible) = minimap_view_window(&snapshot, scroll_offset, rows);
+                        let (top_256, visible_256) = density::thumb_rows_256(
+                            (top * 256.0) as u64,
+                            u32::from(visible),
+                            density.lines_per_row,
+                            thumb_min_rows,
+                        );
+                        let strip_top = minimap::minimap_top(
+                            density::rows(file_lines, density.lines_per_row) as f32,
+                            strip_rows as f32,
+                            top_256 as f32 / 256.0,
+                            visible_256 as f32 / 256.0,
+                        );
+                        (
+                            strip_top * density.lines_per_row as f32
+                                / density.whole_lines_per_row as f32,
+                            strip_rows * density.lines_per_row * 256 / density.whole_lines_per_row,
+                        )
+                    },
+                );
+            }
         }
 
         // While the focused pane glides, ship the cursor's content anchor so
