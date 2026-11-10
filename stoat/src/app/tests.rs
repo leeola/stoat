@@ -5491,6 +5491,7 @@ fn a_click_away_rests_a_run_commits_diff_changes_or_docked_view() {
             folded_version: Some(1),
             top: 0,
             owns_buffer: false,
+            opened_version: 0,
         };
         let id = ws.diff_changes_views.insert(DiffChangesState {
             excerpts: vec![excerpt],
