@@ -48,6 +48,17 @@ const CONTEXT_ROWS: u32 = 3;
 /// whole.
 const EXPAND_STEP: u32 = 10;
 
+/// The space left of a fold row's first Fold Button, in sixteenths of a cell.
+///
+/// The ExpandOptions board draws each button as an 18 px square, 3 px in from
+/// the row's left and 1 px from the next. One board px is two sixteenths
+/// across.
+pub(crate) const FOLD_BUTTON_MARGIN: u16 = 6;
+/// The width of a Fold Button's square box, in sixteenths of a cell.
+pub(crate) const FOLD_BUTTON_WIDTH: u16 = 36;
+/// The space between two Fold Buttons, in sixteenths of a cell.
+pub(crate) const FOLD_BUTTON_GAP: u16 = 2;
+
 new_key_type! {
     /// Key for one changes view pane's [`DiffChangesState`].
     pub struct DiffChangesId;
@@ -233,13 +244,40 @@ pub(crate) enum ExpandDir {
 
 /// The edge of a fold that an expand opens lines from.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum FoldEdge {
+pub(crate) enum FoldEdge {
     /// The fold's first lines, so the hunk above the fold grows down.
     Top,
     /// The fold's last lines, so the hunk below the fold grows up.
     Bottom,
     /// The whole fold.
     Whole,
+}
+
+/// The Fold Buttons a fold row carries, by the hunks on either side of its
+/// fold.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum FoldButtons {
+    /// The fold above a file's first hunk, which only grows up.
+    Up,
+    /// The fold below a file's last hunk, which only grows down.
+    Down,
+    /// A fold between two hunks, which grows from either edge.
+    Both,
+    /// A fold of [`EXPAND_STEP`] lines or fewer, which opens whole.
+    Whole,
+}
+
+impl FoldButtons {
+    /// The arrow of each button from left to right, with the edge a press on
+    /// it opens the fold from.
+    pub(crate) fn glyphs(self) -> &'static [(char, FoldEdge)] {
+        match self {
+            Self::Up => &[('\u{2191}', FoldEdge::Bottom)],
+            Self::Down => &[('\u{2193}', FoldEdge::Top)],
+            Self::Both => &[('\u{2193}', FoldEdge::Top), ('\u{2191}', FoldEdge::Bottom)],
+            Self::Whole => &[('\u{2195}', FoldEdge::Whole)],
+        }
+    }
 }
 
 impl DiffChangesState {
@@ -1695,7 +1733,7 @@ fn gap_fold(rope: &Rope, gap: Range<u32>) -> (Range<Point>, FoldPlaceholder) {
 
 /// The lines `gap` hides. The empty row after a final newline holds no line,
 /// so the count leaves it out.
-fn fold_lines(rope: &Rope, gap: &Range<u32>) -> u32 {
+pub(crate) fn fold_lines(rope: &Rope, gap: &Range<u32>) -> u32 {
     let line_count = rope.max_point().row + 1;
     let after_final_newline = gap.end == line_count && rope.line_len(line_count - 1) == 0;
     gap.end - gap.start - u32::from(after_final_newline)
@@ -1791,6 +1829,42 @@ fn reveal_rows(gap: &Range<u32>, lines: u32, edge: FoldEdge) -> Range<u32> {
     }
 }
 
+/// The Fold Buttons of `gap`, a fold of `lines` lines in a buffer of
+/// `line_count` rows.
+///
+/// A fold of [`EXPAND_STEP`] lines or fewer opens whole, and so does a fold
+/// with no hunk on either side.
+pub(crate) fn fold_buttons(gap: &Range<u32>, lines: u32, line_count: u32) -> FoldButtons {
+    let (top, bottom) = (gap.start == 0, gap.end == line_count);
+    if lines <= EXPAND_STEP || (top && bottom) {
+        return FoldButtons::Whole;
+    }
+    match (top, bottom) {
+        (true, _) => FoldButtons::Up,
+        (_, true) => FoldButtons::Down,
+        _ => FoldButtons::Both,
+    }
+}
+
+/// The cells a press on the Fold Button at `slot` lands in, counted from the
+/// fold row's first cell.
+///
+/// A box that ends partway into a cell takes that cell, and the next box's
+/// cells start after it. The first button takes cells 0 to 2, and the second
+/// takes cells 3 and 4.
+pub(crate) fn fold_button_cells(slot: usize) -> Range<u16> {
+    let end = |slot: u16| {
+        (FOLD_BUTTON_MARGIN + slot * (FOLD_BUTTON_WIDTH + FOLD_BUTTON_GAP) + FOLD_BUTTON_WIDTH)
+            .div_ceil(16)
+    };
+    let slot = slot as u16;
+    let start = match slot {
+        0 => 0,
+        slot => end(slot - 1),
+    };
+    start..end(slot)
+}
+
 /// The buffer rows of every fold row of `snapshot`, in buffer order.
 fn fold_gaps(snapshot: &DisplaySnapshot) -> Vec<Range<u32>> {
     let folds = snapshot.fold_snapshot();
@@ -1804,7 +1878,7 @@ fn fold_gaps(snapshot: &DisplaySnapshot) -> Vec<Range<u32>> {
 
 /// The buffer rows of the fold row whose fold holds buffer row `row`, or `None`
 /// when no fold row holds it.
-fn fold_gap(snapshot: &DisplaySnapshot, row: u32) -> Option<Range<u32>> {
+pub(crate) fn fold_gap(snapshot: &DisplaySnapshot, row: u32) -> Option<Range<u32>> {
     let folds = snapshot.fold_snapshot();
     let inlays = folds.inlay_snapshot();
     let start = inlays.to_inlay_point(Point::new(row, 0));

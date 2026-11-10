@@ -6,6 +6,7 @@ use super::{
 use crate::{
     app::Stoat,
     auto_reload::ReloadFlash,
+    diff_changes::{self, FOLD_BUTTON_GAP, FOLD_BUTTON_MARGIN, FOLD_BUTTON_WIDTH},
     diff_map::{ChangeKind, DiffHunk, DiffHunkStatus, DiffMap, GutterMark, MarkState, ProseChange},
     display_map::{
         highlights::HighlightStyle, syntax_theme::DiffTheme, tab_map, BaseLineLayout, Block,
@@ -21,6 +22,7 @@ use ratatui::{
     buffer::Buffer,
     layout::Rect,
     style::{Color, Modifier, Style},
+    widgets::StatefulWidget,
 };
 use std::{
     cmp::Ordering,
@@ -1272,6 +1274,7 @@ pub(crate) fn paint_diff_rows(
                     paint_fold_row(
                         snapshot,
                         display_row,
+                        diff_changes::fold_gap(snapshot, buffer_row),
                         inner,
                         y,
                         theme,
@@ -1605,11 +1608,15 @@ pub(crate) fn paint_diff_rows(
 /// gutter draws the text at the scale of its numbers, with no box of its own
 /// over a hatch, so the stripes run on behind it. Cells draw it in cells.
 ///
+/// `gap` is the buffer rows the fold hides. With it the row also carries its
+/// Fold Buttons and its line range, as [`paint_fold_controls`] paints them.
+///
 /// `text` is scratch space for the placeholder.
 #[allow(clippy::too_many_arguments)]
 fn paint_fold_row(
     snapshot: &DisplaySnapshot,
     display_row: u32,
+    gap: Option<std::ops::Range<u32>>,
     inner: Rect,
     y: u16,
     theme: &crate::theme::Theme,
@@ -1639,9 +1646,10 @@ fn paint_fold_row(
     );
 
     let chars = text.chars().count();
-    match rich {
+    let count = match rich {
         Some(rg) => {
             let advance = text_run::advance_sixteenths(chars, rg.number_scale);
+            let col = (inner.width * 16).saturating_sub(advance) / 2;
             let color = style_rgb(muted.fg).unwrap_or(rg.colors.dim);
             let bg = match surface.hatch {
                 Some(_) => None,
@@ -1653,7 +1661,7 @@ fn paint_fold_row(
             rg.numbers.push(
                 inner,
                 TextRun {
-                    col: ((inner.width * 16).saturating_sub(advance) / 2) as i16,
+                    col: col as i16,
                     row: ((y - inner.y) * 16) as i16,
                     scale: rg.number_scale,
                     color: rg.colors.faded(color),
@@ -1664,11 +1672,159 @@ fn paint_fold_row(
                     anchor: None,
                 },
             );
+            col..col + advance
+        },
+        None => {
+            let width = (chars as u16).min(inner.width);
+            let x = (inner.width - width) / 2;
+            if !decorations_only {
+                write_str_clipped(
+                    buf,
+                    inner.x + x,
+                    y,
+                    text,
+                    cells.patch(muted),
+                    inner.x + inner.width,
+                );
+            }
+            x * 16..(x + width) * 16
+        },
+    };
+
+    if let Some(gap) = gap {
+        paint_fold_controls(
+            snapshot,
+            &gap,
+            inner,
+            y,
+            theme,
+            rich,
+            buf,
+            (cells, count),
+            text,
+            decorations_only,
+        );
+    }
+}
+
+/// Paint the Fold Buttons and the line range of the fold row at screen row `y`.
+///
+/// The fold hides buffer rows `gap`. [`diff_changes::fold_buttons`] picks the
+/// buttons, each an arrow on a square box in `diff.fold.button` at the row's
+/// left. A rich gutter draws each box as a bar and its arrow as a run over the
+/// box at the gutter's number scale. Cells draw the arrow on two cells in the
+/// scope's colors.
+///
+/// The range names the first and the last line the fold hides, in
+/// `diff.fold.range` on the row's `cells` fill. It ends one cell in from the
+/// row's right edge.
+///
+/// The count, which spans `count` sixteenths from the row's left, stays
+/// readable on a narrow row. A button that reaches the count does not paint,
+/// and neither does a range that comes within a cell of it. `text` is scratch
+/// space for the range.
+#[allow(clippy::too_many_arguments)]
+fn paint_fold_controls(
+    snapshot: &DisplaySnapshot,
+    gap: &std::ops::Range<u32>,
+    inner: Rect,
+    y: u16,
+    theme: &crate::theme::Theme,
+    rich: &mut Option<DiffRichGutter<'_>>,
+    buf: &mut Buffer,
+    (cells, count): (Style, std::ops::Range<u16>),
+    text: &mut String,
+    decorations_only: bool,
+) {
+    let rope = snapshot.buffer_snapshot().rope();
+    let lines = diff_changes::fold_lines(rope, gap);
+    let buttons = diff_changes::fold_buttons(gap, lines, rope.max_point().row + 1).glyphs();
+    let button = theme.get(s::DIFF_FOLD_BUTTON);
+    let range = theme.get(s::DIFF_FOLD_RANGE);
+    text.clear();
+    let _ = write!(text, "{}\u{2013}{}", gap.start + 1, gap.start + lines);
+    let range_chars = text.chars().count() as u16;
+
+    match rich {
+        Some(rg) => {
+            let row = ((y - inner.y) * 16) as i16;
+            let fallback = style_rgb(theme.get(s::UI_TEXT_MUTED).fg).unwrap_or(rg.colors.dim);
+            let glyph_advance = text_run::advance_sixteenths(1, rg.number_scale);
+            for (slot, &(glyph, _)) in buttons.iter().enumerate() {
+                let x = FOLD_BUTTON_MARGIN + slot as u16 * (FOLD_BUTTON_WIDTH + FOLD_BUTTON_GAP);
+                if x + FOLD_BUTTON_WIDTH > count.start {
+                    break;
+                }
+                // Over a hatched surface, plain bars and runs draw in their
+                // declaration order. The runs go out after the last row, so the
+                // box goes into the scene now and lies under its arrow.
+                if let Some(bg) = style_rgb(button.bg) {
+                    Bar {
+                        x: x as i16,
+                        y: row,
+                        width: FOLD_BUTTON_WIDTH,
+                        height: 16,
+                        color: rg.colors.faded(bg),
+                    }
+                    .render(inner, buf, rg.scene);
+                }
+                let mut utf8 = [0; 4];
+                rg.numbers.push(
+                    inner,
+                    TextRun {
+                        col: (x + (FOLD_BUTTON_WIDTH - glyph_advance) / 2) as i16,
+                        row,
+                        scale: rg.number_scale,
+                        color: rg.colors.faded(style_rgb(button.fg).unwrap_or(fallback)),
+                        bg: None,
+                        text: glyph.encode_utf8(&mut utf8),
+                        bold: false,
+                        follow: 0,
+                        anchor: None,
+                    },
+                );
+            }
+
+            let advance = text_run::advance_sixteenths(usize::from(range_chars), rg.number_scale);
+            let col = (inner.width * 16).saturating_sub(advance + 16);
+            if col >= count.end + 16 {
+                rg.numbers.push(
+                    inner,
+                    TextRun {
+                        col: col as i16,
+                        row,
+                        scale: rg.number_scale,
+                        color: rg.colors.faded(style_rgb(range.fg).unwrap_or(fallback)),
+                        bg: None,
+                        text,
+                        bold: false,
+                        follow: 0,
+                        anchor: None,
+                    },
+                );
+            }
         },
         None if !decorations_only => {
-            let width = (chars as u16).min(inner.width);
-            let x = inner.x + (inner.width - width) / 2;
-            write_str_clipped(buf, x, y, text, cells.patch(muted), inner.x + inner.width);
+            for (slot, &(glyph, _)) in buttons.iter().enumerate() {
+                let x = diff_changes::fold_button_cells(slot).start;
+                if (x + 2) * 16 > count.start {
+                    break;
+                }
+                buf[(inner.x + x, y)].set_char(glyph).set_style(button);
+                buf[(inner.x + x + 1, y)].set_style(button);
+            }
+
+            let x = inner.width.saturating_sub(range_chars + 1);
+            if x * 16 >= count.end + 16 {
+                write_str_clipped(
+                    buf,
+                    inner.x + x,
+                    y,
+                    text,
+                    cells.patch(range),
+                    inner.x + inner.width,
+                );
+            }
         },
         None => {},
     }
@@ -4496,22 +4652,33 @@ mod tests {
         );
 
         let start = (120 - FOLD_TEXT.chars().count() as u16) / 2;
-        let row = buffer_text(&buf, 0);
         let fill = Color::Rgb(0x30, 0x30, 0x30);
         assert_eq!(
             (
-                (row.trim().to_string(), row.find('\u{22ef}')),
+                buffer_text(&buf, 0),
                 (0..120).all(|x| buf[(x, 0)].bg == fill),
                 buf[(start, 0)].fg,
                 number_pairs(&buf, area)[1..].to_vec(),
             ),
             (
-                (FOLD_TEXT.to_string(), Some(usize::from(start))),
+                row_of(&[(0, "\u{2191}"), (start, FOLD_TEXT), (115, "1\u{2013}12")]),
                 true,
                 Color::Rgb(0x90, 0x90, 0x90),
                 pairs(13..=21, 13..=21),
             ),
         );
+    }
+
+    /// A row 120 cells wide that holds each text of `parts` from its column and
+    /// spaces elsewhere.
+    fn row_of(parts: &[(u16, &str)]) -> String {
+        let mut row = vec![' '; 120];
+        for &(col, text) in parts {
+            for (offset, ch) in text.chars().enumerate() {
+                row[usize::from(col) + offset] = ch;
+            }
+        }
+        row.into_iter().collect()
     }
 
     /// [`fold_row_editor`] painted with a rich gutter over 120 by 10 under the
@@ -4661,17 +4828,169 @@ mod tests {
 
     /// With no scene a hatched fold row fills its cells solid in the hatch
     /// color, the nearest a cell comes to the stripes, and its count sits on
-    /// that fill.
+    /// that fill. The button's two cells take the button's box color.
     #[test]
     fn a_plain_hatched_fold_row_fills_solid_in_the_hatch_color() {
-        let mut editor = fold_row_editor();
+        let buf = plain_fold_paint(
+            &mut fold_row_editor(),
+            &format!("{HATCHED_FOLD_THEME} {BUTTON_SCOPES}"),
+        );
+        let start = (120 - FOLD_TEXT.chars().count() as u16) / 2;
+        let backgrounds: Vec<Color> = (0..120).map(|x| buf[(x, 0)].bg).collect();
+        assert_eq!(
+            (backgrounds, buf[(start, 0)].fg),
+            (
+                [vec![BUTTON_BOX; 2], vec![Color::Rgb(0x1b, 0x1d, 0x22); 118]].concat(),
+                Color::Rgb(0x90, 0x90, 0x90),
+            ),
+        );
+    }
+
+    /// The colors of a fold row's buttons and range in the button tests.
+    const BUTTON_SCOPES: &str =
+        r##"diff.fold.button = { fg: "#7fb0ff", bg: "#1f2a3d" }; diff.fold.range.fg = "#5b616d";"##;
+
+    /// The box color [`BUTTON_SCOPES`] gives a Fold Button.
+    const BUTTON_BOX: Color = Color::Rgb(0x1f, 0x2a, 0x3d);
+
+    /// In cells a fold row's button paints its arrow on two cells of the box
+    /// color, and the third cell keeps the fold fill. The range ends one cell
+    /// in from the right edge in the range color.
+    #[test]
+    fn a_fold_row_paints_its_button_and_range_in_cells() {
+        let buf = plain_fold_paint(
+            &mut fold_row_editor(),
+            &format!("{FOLD_THEME} {BUTTON_SCOPES}"),
+        );
+        let symbol = |x: u16| buf[(x, 0)].symbol().to_string();
+        let range = Color::Rgb(0x5b, 0x61, 0x6d);
+        assert_eq!(
+            (
+                [0, 1, 2].map(|x| (symbol(x), buf[(x, 0)].bg)),
+                [115, 116, 117, 118, 119].map(|x| (symbol(x), buf[(x, 0)].fg)),
+            ),
+            (
+                [
+                    ("\u{2191}".to_string(), BUTTON_BOX),
+                    (" ".to_string(), BUTTON_BOX),
+                    (" ".to_string(), Color::Rgb(0x30, 0x30, 0x30)),
+                ],
+                [
+                    ("1".to_string(), range),
+                    ("\u{2013}".to_string(), range),
+                    ("1".to_string(), range),
+                    ("2".to_string(), range),
+                    (" ".to_string(), Color::Reset),
+                ],
+            ),
+        );
+    }
+
+    /// The top fold grows up and the bottom fold grows down. A fold between two
+    /// hunks grows both ways, and a fold of ten lines or fewer opens whole.
+    #[test]
+    fn a_fold_row_carries_the_buttons_its_place_allows() {
+        let theme = format!("{FOLD_THEME} {BUTTON_SCOPES}");
+        let buttons = |mut editor: EditorState, row: u16| {
+            line_text(&plain_fold_paint(&mut editor, &theme), row, 0..5)
+        };
+        let two_folds = || {
+            fold_rows_editor(
+                40,
+                &[20],
+                &[
+                    (Point::new(0, 0)..Point::new(15, 2), 16),
+                    (Point::new(24, 0)..Point::new(40, 0), 16),
+                ],
+            )
+        };
+        let middle = fold_rows_editor(
+            60,
+            &[20, 40],
+            &[
+                (Point::new(0, 0)..Point::new(15, 2), 16),
+                (Point::new(23, 0)..Point::new(35, 2), 13),
+            ],
+        );
+        let short = fold_rows_editor(20, &[16], &[(Point::new(0, 0)..Point::new(7, 1), 8)]);
+
+        assert_eq!(
+            [
+                buttons(two_folds(), 0),
+                buttons(two_folds(), 9),
+                buttons(middle, 8),
+                buttons(short, 0),
+            ],
+            [
+                "\u{2191}    ",
+                "\u{2193}    ",
+                "\u{2193}  \u{2191} ",
+                "\u{2195}    ",
+            ]
+            .map(String::from),
+        );
+    }
+
+    /// Under a rich gutter a button is a plain bar in the box color on the
+    /// hatch, with its arrow centered over it. The range is a run that ends one
+    /// cell in from the row's right edge. Neither run takes a box of its own.
+    #[test]
+    fn a_rich_fold_row_boxes_its_button_and_right_aligns_its_range() {
+        let (_, commands, scale, _) =
+            rich_fold_row_paint(&format!("{HATCHED_FOLD_THEME} {BUTTON_SCOPES}"), false);
+        let boxes: Vec<BarCommand> = commands
+            .iter()
+            .filter_map(|command| match command {
+                Command::Bar(bar) if bar.hatch.is_none() && bar.y == 0 => Some(*bar),
+                _ => None,
+            })
+            .collect();
+        let runs: Vec<(String, i16, Option<[u8; 3]>)> = commands
+            .iter()
+            .filter_map(|command| match command {
+                Command::TextRun(run) if run.text == "\u{2191}" || run.text == "1\u{2013}12" => {
+                    Some((run.text.to_string(), run.col, run.bg))
+                },
+                _ => None,
+            })
+            .collect();
+
+        let glyph = text_run::advance_sixteenths(1, scale);
+        let range = text_run::advance_sixteenths(4, scale);
+        assert_eq!(
+            (boxes, runs),
+            (
+                vec![BarCommand {
+                    x: 6,
+                    y: 0,
+                    width: 36,
+                    height: 16,
+                    color: [0x1f, 0x2a, 0x3d],
+                    occludes: false,
+                    hatch: None,
+                }],
+                vec![
+                    ("\u{2191}".to_string(), (6 + (36 - glyph) / 2) as i16, None),
+                    (
+                        "1\u{2013}12".to_string(),
+                        (120 * 16 - 16 - range) as i16,
+                        None
+                    ),
+                ],
+            ),
+        );
+    }
+
+    /// `editor` painted over 120 by 10 in plain cells under the settings
+    /// `theme_src` adds.
+    fn plain_fold_paint(editor: &mut EditorState, theme_src: &str) -> Buffer {
         let area = Rect::new(0, 0, 120, 10);
         let mut buf = Buffer::empty(area);
         render_diff_view(
-            &mut editor,
+            editor,
             area,
             Style::default(),
-            &rgb_diff_theme_with(HATCHED_FOLD_THEME),
+            &rgb_diff_theme_with(theme_src),
             &mut buf,
             false,
             None,
@@ -4682,15 +5001,32 @@ mod tests {
             &[],
             false,
         );
+        buf
+    }
 
-        let start = (120 - FOLD_TEXT.chars().count() as u16) / 2;
-        assert_eq!(
-            (
-                (0..120).all(|x| buf[(x, 0)].bg == Color::Rgb(0x1b, 0x1d, 0x22)),
-                buf[(start, 0)].fg,
-            ),
-            (true, Color::Rgb(0x90, 0x90, 0x90)),
+    /// A diff view of `count` numbered lines with each line of `changed`
+    /// rewritten. Each of `folds` gives a fold row, as a range and the count of
+    /// lines it hides.
+    fn fold_rows_editor(
+        count: u32,
+        changed: &[u32],
+        folds: &[(std::ops::Range<Point>, u32)],
+    ) -> EditorState {
+        let base: String = (1..=count).map(|n| format!("{n}\n")).collect();
+        let text: String = (1..=count)
+            .map(|n| match changed.contains(&n) {
+                true => format!("CHANGED {n}\n"),
+                false => format!("{n}\n"),
+            })
+            .collect();
+        let mut editor = diff_editor(&base, &text);
+        editor.display_map.fold_with(
+            folds
+                .iter()
+                .map(|(range, lines)| (range.clone(), fold_row_placeholder(*lines)))
+                .collect(),
         );
+        editor
     }
 
     fn diff_editor_staged(base: &str, index: &str, text: &str) -> EditorState {

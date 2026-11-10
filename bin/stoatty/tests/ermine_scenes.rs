@@ -34,6 +34,7 @@ const HOVER: [u8; 3] = [0x2c, 0x30, 0x39];
 const OVERLAY: [u8; 3] = [0x25, 0x28, 0x30];
 const RAISED: [u8; 3] = [0x1e, 0x21, 0x27];
 const HATCH: [u8; 3] = [0x1b, 0x1d, 0x22];
+const FOLD_BUTTON: [u8; 3] = [0x1f, 0x2a, 0x3d];
 const TEXT_DIM: [u8; 3] = [0xa3, 0xa9, 0xb5];
 const HAIRLINE: [u8; 3] = [0x2e, 0x32, 0x3b];
 const SELECT: [u8; 3] = [0x23, 0x32, 0x4a];
@@ -368,10 +369,11 @@ fn the_changes_view_heads_each_file_on_the_raised_surface() {
 /// row under the boards' hatch.
 ///
 /// The diff-kinds stack lists hunks.txt fourth, and its fold row is row 19,
-/// under the row of its line 6 on the base surface. The fold row's count is
-/// centered, so the cells from column 2 to column 31 hold none. They take the
-/// base surface under the hatch's lines, which the stack's resident pool
-/// composites from its pages.
+/// under the row of its line 6 on the base surface. The fold hides seven
+/// lines, so the row carries one Fold Button, whose box covers most of columns
+/// 1 and 2. The fold row's count is centered, so the cells from column 6 to
+/// column 31 hold none. They take the base surface under the hatch's lines,
+/// which the stack's resident pool composites from its pages.
 #[test]
 fn the_changes_view_folds_unchanged_lines_into_a_hatched_row() {
     let mut home = support::scratch_home();
@@ -384,10 +386,17 @@ fn the_changes_view_folds_unchanged_lines_into_a_hatched_row() {
         BASE,
         "changes_row_above_fold",
     );
+    expect_region(
+        &shot,
+        &mut home,
+        cell_rect(1, 19, 2, 1),
+        FOLD_BUTTON,
+        "changes_fold_button",
+    );
     expect_hatch(
         &shot,
         &mut home,
-        cell_rect(2, 19, 30, 1),
+        cell_rect(6, 19, 26, 1),
         (BASE, HATCH),
         "changes_fold_row",
     );

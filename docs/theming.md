@@ -306,6 +306,11 @@ The typed UI scopes, by group (syntax scopes are open-ended):
   that names how many unchanged lines a fold hides. The row's text takes
   `ui.text.muted`. A foreground stripes the fill with a 135 degree hatch in
   that color under stoatty, and fills the cells solid in a plain terminal.
+- `diff.fold.button` -- a fold row's Fold Buttons at the row's left: the arrow
+  glyph (foreground) on its square box (background). An unset scope takes
+  `diff.fold`'s colors.
+- `diff.fold.range` -- the foreground of a fold row's line range at the row's
+  right, the first and the last line the fold hides.
 - `diff.absent` -- the fill (background) of a split diff row's empty half,
   where the row holds a line on the other side alone: a removed line's live
   half, or an added line's base half. A foreground hatches it as

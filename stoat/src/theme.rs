@@ -943,6 +943,12 @@ pub mod scope {
     /// A foreground stripes the background with a 135 degree hatch in that
     /// color under stoatty, and fills the cells solid in a plain terminal.
     pub const DIFF_FOLD: &str = "diff.fold";
+    /// A fold row's Fold Buttons, the arrow glyph (foreground) on its square
+    /// box (background) at the row's left.
+    pub const DIFF_FOLD_BUTTON: &str = "diff.fold.button";
+    /// The foreground of a fold row's line range, the first and the last line
+    /// the fold hides, at the row's right.
+    pub const DIFF_FOLD_RANGE: &str = "diff.fold.range";
     /// The fill of a split diff row's empty half, where the row holds a line
     /// on the other side alone, such as a removed line's live half.
     ///

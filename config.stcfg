@@ -150,6 +150,8 @@ theme default_dark {
     diff.approved.fg     = special;
     diff.unapproved.fg   = dim;
     diff.fold.bg         = subtle;
+    diff.fold.button     = { fg: accent, bg: subtle };
+    diff.fold.range.fg   = muted;
     diff.absent.bg       = subtle;
 
     ui.diagnostic.error.fg   = danger;
@@ -250,6 +252,7 @@ theme ermine_night inherits default_dark {
     let cursor_secondary = "#8a909c";
     let divider          = "#22252b";
     let hatch            = "#1b1d22";
+    let fold_button      = "#1f2a3d";
     let tint_accent      = "#223049";
     let tint_info        = "#1e3237";
     let tint_special     = "#2a2236";
@@ -378,6 +381,8 @@ theme ermine_night inherits default_dark {
     diff.staged.fg   = info;
     diff.unstaged.fg = disabled;
     diff.fold        = { fg: hatch, bg: base };
+    diff.fold.button = { fg: accent, bg: fold_button };
+    diff.fold.range.fg = disabled;
     diff.absent      = { fg: hatch, bg: base };
 
     diff.sides.base           = { fg: side_base_fg, bg: side_base_bg };
