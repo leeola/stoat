@@ -107,6 +107,15 @@ pub struct FoldScope {
     pub mark: ScopeMark,
 }
 
+impl FoldScope {
+    /// Whether the hunk lies outside every item, so the Scope names nothing.
+    ///
+    /// A Scope with a split names the split's item, so it is not top level.
+    pub(crate) fn is_top_level(&self) -> bool {
+        !self.end_of_file && self.segments.is_empty() && self.split.is_none()
+    }
+}
+
 /// How a fold row's Scope marks a hunk that adds, removes, or renames a whole
 /// item, so the reader sees that the change is the item itself.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]

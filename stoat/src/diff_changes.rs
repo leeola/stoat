@@ -243,8 +243,9 @@ pub(crate) struct Excerpt {
     /// The Scope of the first change when no fold lies above it, which a row
     /// under the header shows.
     ///
-    /// `None` when a fold row names the first change, and for a language with
-    /// no outline query, which names no Scope.
+    /// `None` when a fold row names the first change. It is `None` too when
+    /// the first change lies at the top level, or the language has no outline
+    /// query, since the row then has no Scope to show.
     pub scope_row: Option<Arc<FoldScope>>,
 }
 
@@ -884,7 +885,8 @@ pub(crate) fn shown_excerpt_rows(
 /// stack row it covers. A Scope row on the second row itself shows in place.
 /// The stack row there shows in place too when the row under it is the next
 /// Scope row or the excerpt's end, since no row of the pinned Scope's section
-/// then shows under it.
+/// then shows under it. A fold row over a top-level hunk names no Scope, so
+/// the second row pins nothing while that fold row is the nearest above.
 pub(crate) fn pinned_header(
     state: &DiffChangesState,
     editors: &mut SlotMap<EditorId, EditorState>,
@@ -911,6 +913,7 @@ pub(crate) fn pinned_header(
 
     let slot = scroll + 1;
     let scope = scope_row_at_or_above(state, editors, index, slot)
+        .filter(|(_, scope)| !scope.is_top_level())
         .filter(|&(at, _)| at < slot && slot + 1 < end)
         .filter(|_| {
             !matches!(
@@ -2209,7 +2212,8 @@ fn land(
 ///
 /// `scope_row` takes the Scope of the first change when the first kept run
 /// starts at row 0 and holds that change, so no fold lies above it, and
-/// `None` otherwise. It keeps and rereads its Scope by the same rules. A
+/// `None` otherwise. It is `None` too for a first change at the top level,
+/// which shows no Scope. It keeps and rereads its Scope by the same rules. A
 /// `scope_row` that comes or goes counts as a fold change, since it moves every
 /// row of the excerpt.
 ///
@@ -2283,7 +2287,8 @@ fn fold_excerpt(
                 (Some(scope), _) if !reread => Some(scope.clone()),
                 (_, Some(reader)) => reader.gap_scope(&(0..0), line_count).map(Arc::new),
                 (held, None) => held.clone(),
-            },
+            }
+            .filter(|scope| !scope.is_top_level()),
         };
         (map.version(), kept, stale, fresh, next_row)
     };
@@ -2561,13 +2566,16 @@ fn first_text_byte(rope: &Rope, row: u32) -> usize {
 /// middle for one `U+2026`, the item after the outermost first, and drops the
 /// outermost last, so the innermost item always shows. A split names the two
 /// innermost items after their common containers, joined with `+`. An empty
-/// chain reads `top level`, and a fold with no change below it reads
-/// `end of file`.
+/// chain gives no parts, since a hunk at the top level shows no Scope, and a
+/// fold with no change below it reads `end of file`.
 ///
 /// A whole added item takes `+` before the chain, and a whole removed item
 /// takes `U+2212`. A renamed item reads its old name, `U+2192`, and its new
 /// name.
 pub(crate) fn scope_parts(scope: &FoldScope, room: u16, scale: u16) -> Vec<ScopePart> {
+    if scope.is_top_level() {
+        return Vec::new();
+    }
     let items = scope_items(scope);
     let mark = mark_part(&scope.mark);
     let last = items.len() - 1;
@@ -2615,8 +2623,8 @@ pub(crate) fn parts_advance(parts: &[ScopePart], scale: u16) -> u16 {
     })
 }
 
-/// The items a Scope chip names, outermost first, each as its runs. A Scope
-/// that names no item reads as one label item.
+/// The items a Scope chip names, outermost first, each as its runs. A fold
+/// with no change below it reads as one label item.
 fn scope_items(scope: &FoldScope) -> Vec<Vec<ScopePart>> {
     let label = |text: &str| vec![vec![ScopePart::new(text, ScopeRole::Separator)]];
     if scope.end_of_file {
@@ -2633,7 +2641,7 @@ fn scope_items(scope: &FoldScope) -> Vec<Vec<ScopePart>> {
             old_name.filter(|_| Some(index) == innermost),
         )
     };
-    let items: Vec<Vec<ScopePart>> = match &scope.split {
+    match &scope.split {
         Some(tail) => {
             let common = scope
                 .segments
@@ -2653,10 +2661,6 @@ fn scope_items(scope: &FoldScope) -> Vec<Vec<ScopePart>> {
             items
         },
         None => (0..scope.segments.len()).map(item).collect(),
-    };
-    match items.is_empty() {
-        true => label("top level"),
-        false => items,
     }
 }
 
@@ -2882,8 +2886,8 @@ fn map_version(buffers: &BufferRegistry, id: BufferId) -> Option<usize> {
 mod tests {
     use super::{
         cursor_point, cursor_stack_row, excerpt_rows, expand_from_cursor, fold_edge, fold_excerpt,
-        follow_cursor, gap_fold, gaps, kept_runs, landing_row, layout_stack, listed_files,
-        place_cursor, press_cell, pump_diff_changes_stack, reveal_rows, scope_parts,
+        follow_cursor, gap_fold, gaps, header_rows, kept_runs, landing_row, layout_stack,
+        listed_files, place_cursor, press_cell, pump_diff_changes_stack, reveal_rows, scope_parts,
         DiffChangesState, ExcerptStats, ExpandDir, FoldEdge, Landing, ScopeParse, StackStamp,
     };
     use crate::{
@@ -3338,8 +3342,8 @@ fn hint_width() -> u32 {
 
     /// A chain too wide for its room drops items from its middle for one
     /// ellipsis, the outermost item last, and keeps the innermost. Nothing
-    /// shows where even the innermost does not fit, and a Scope that names no
-    /// item reads as a label.
+    /// shows where even the innermost does not fit or where a Scope names no
+    /// item, and the end of the file reads as a label.
     #[test]
     fn a_scope_drops_middle_items_until_it_fits() {
         let item = |keyword: &str, name: &str| ScopeSegment {
@@ -3379,7 +3383,7 @@ fn hint_width() -> u32 {
                 "mod a \u{203a} \u{2026} \u{203a} fn c",
                 "\u{2026} \u{203a} fn c",
                 "",
-                "top level",
+                "",
                 "end of file",
             ],
         );
@@ -3445,6 +3449,41 @@ fn hint_width() -> u32 {
                 true,
                 Point::new(0, 0)
             ),
+        );
+    }
+
+    /// A first-line hunk outside every item names no Scope, so no row shows
+    /// under the header and the excerpt's rows start right under it.
+    #[test]
+    fn a_top_level_first_line_hunk_takes_no_scope_row() {
+        let base = "use a::B;\nfn first() -> u32 {\n    1\n}\n";
+        let mut h = TestHarness::with_size(100, 24);
+        h.stage_review_scenario(
+            "/repo",
+            &[("a.rs", base, &base.replacen("a::B", "a::C", 1))],
+        );
+        stacked(&mut h);
+        h.render_composited();
+        for _ in 0..2 {
+            h.stoat.drive_background();
+            h.settle();
+        }
+
+        let Workspace {
+            diff_changes_views,
+            editors,
+            ..
+        } = h.stoat.active_workspace_mut();
+        let state = diff_changes_views
+            .values_mut()
+            .next()
+            .expect("a changes view");
+        let total = layout_stack(state, editors);
+        let excerpt = &state.excerpts[0];
+
+        assert_eq!(
+            (excerpt.scope_row.clone(), header_rows(excerpt), total),
+            (None, 1, 1 + excerpt_rows(excerpt, editors)),
         );
     }
 

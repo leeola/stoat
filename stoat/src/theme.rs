@@ -955,7 +955,7 @@ pub mod scope {
     /// The foreground of a Scope's names on the chip a fold row centers.
     pub const DIFF_SCOPE_NAME: &str = "diff.scope.name";
     /// The foreground of the marks between a Scope's segments on the chip a
-    /// fold row centers, and of its `top level` and `end of file` labels.
+    /// fold row centers, and of its `end of file` label.
     pub const DIFF_SCOPE_SEPARATOR: &str = "diff.scope.separator";
     /// The mark on the rows an expand just opened, a lane at each side's left
     /// edge (foreground) over a tint across the row (background). Both fade

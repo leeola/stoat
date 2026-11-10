@@ -1399,6 +1399,51 @@ mod tests {
         );
     }
 
+    /// A fold row over a hunk outside every item names no Scope, so it pins
+    /// nothing, and the stack rows under it show in place.
+    ///
+    /// The function's whole body changes, and so does a `use` line with 12
+    /// comment lines on each side. The bare Scope row names the function, and
+    /// the fold row above the `use` line names no item.
+    #[test]
+    fn a_top_level_fold_row_pins_no_scope() {
+        let file = |edit: bool| {
+            let body: String = (1..=20)
+                .map(|n| match edit {
+                    true => format!("    let x{n} = {n} + 1;\n"),
+                    false => format!("    let x{n} = {n};\n"),
+                })
+                .collect();
+            let comments =
+                |from: u32| -> String { (from..from + 12).map(|n| format!("// {n}\n")).collect() };
+            let path = match edit {
+                true => "a::C",
+                false => "a::B",
+            };
+            format!(
+                "fn greet() {{\n{body}}}\n{}use {path};\n{}",
+                comments(1),
+                comments(13)
+            )
+        };
+        let mut h = parsed_stack(&[("a.rs", &file(false), &file(true))]);
+        let (state, editors) = stack(&mut h);
+        let mut pinned: Vec<Option<usize>> = (0..state.rows)
+            .map(|scroll| {
+                diff_changes::pinned_header(state, editors, scroll)
+                    .scope
+                    .map(|scope| scope.row)
+            })
+            .collect();
+        pinned.dedup();
+
+        assert_eq!(
+            pinned,
+            [None, Some(1), None],
+            "only the bare Scope row pins"
+        );
+    }
+
     /// Under the pinned header the second row pins the nearest Scope row above
     /// the stack row it covers. A Scope row on that row, or one right under
     /// it, shows in place, so the pinned Scope gives way to it.
