@@ -4,14 +4,15 @@
 //! syntax tree and turns each `@item`/`@name` match into a [`SymbolDef`]:
 //! the definitions a file declares, with their byte ranges and an
 //! enclosing-container path. It is the definition half of the code graph.
-//! Call-site references are collected separately.
+//! Call-site references are collected separately. [`scope_chain`] reads the
+//! same query at one byte, for the items around a change.
 //!
 //! Pure tree-sitter logic only -- no IO -- so it stays unit-testable over
 //! fixed snippets.
 
 use crate::highlight::{QueryCursorHandle, RopeTextProvider};
 use serde::{Deserialize, Serialize};
-use std::ops::Range;
+use std::{cmp::Reverse, ops::Range};
 use stoat_text::Rope;
 use tree_sitter::{Language as TsLanguage, Node, Query, StreamingIterator};
 
@@ -109,6 +110,27 @@ pub enum RefKind {
     Implements,
 }
 
+/// One link of a Scope chain, an outline item that holds a byte.
+///
+/// A diff shows a change without the code around it, so the change's Scope,
+/// such as `impl Panel` then `fn modal_frame`, names where it sits. Each link
+/// is one outline item, read as its keyword and its name.
+///
+/// The keyword is the token that opens the item, such as `fn`, `struct`,
+/// `impl`, or a markdown heading's `##`. No token opens a struct field or an
+/// enum variant, so they read `field` and `variant` from their kinds. Any
+/// other item that no token opens has no keyword.
+///
+/// `item_range` spans the whole item, and `name_range` spans its name. Both
+/// are byte ranges of the source.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScopeSegment {
+    pub keyword: Option<String>,
+    pub name: String,
+    pub item_range: Range<usize>,
+    pub name_range: Range<usize>,
+}
+
 /// What an `@item` node kind becomes in [`SYMBOL_ITEMS`].
 #[derive(Clone, Copy)]
 enum ItemKind {
@@ -177,6 +199,53 @@ pub fn extract_symbols(
         });
     }
     out
+}
+
+/// The Scope chain at `byte`, the items of `query` (an `outline.scm`) over the
+/// tree rooted at `root` that hold it, outermost first.
+///
+/// A name made of several captures joins them with the tokens between them, so
+/// a trait impl reads `Display for Rect`. A name captured inside a string
+/// literal, such as a JSON key, reads with its quotes.
+///
+/// Returns an empty chain when no item holds `byte`, and when `query` lacks an
+/// `@item` or `@name` capture.
+pub fn scope_chain(query: &Query, root: Node<'_>, rope: &Rope, byte: usize) -> Vec<ScopeSegment> {
+    let mut chain = Vec::new();
+    let (Some(item_idx), Some(name_idx)) = (
+        query.capture_index_for_name("item"),
+        query.capture_index_for_name("name"),
+    ) else {
+        return chain;
+    };
+    let context_idx = query.capture_index_for_name("context");
+
+    let provider = RopeTextProvider { rope };
+    let mut cursor_h = QueryCursorHandle::new();
+    cursor_h.set_byte_range(byte..byte + 1);
+    let mut matches = cursor_h.matches(query, root, provider);
+    while let Some(m) = matches.next() {
+        let Some(item) = m
+            .captures()
+            .iter()
+            .find(|cap| cap.index == item_idx)
+            .map(|cap| cap.node)
+            .filter(|item| item.byte_range().contains(&byte))
+        else {
+            continue;
+        };
+
+        let mut parts: Vec<(Node<'_>, bool)> = m
+            .captures()
+            .iter()
+            .filter(|cap| cap.index == name_idx || Some(cap.index) == context_idx)
+            .map(|cap| (cap.node, cap.index == name_idx))
+            .collect();
+        parts.sort_by_key(|(node, _)| node.start_byte());
+        chain.extend(scope_segment(item, &parts, rope));
+    }
+    chain.sort_by_key(|segment| (segment.item_range.start, Reverse(segment.item_range.end)));
+    chain
 }
 
 /// Collect every reference site captured by `query` (a `tags.scm`) over the
@@ -258,6 +327,69 @@ pub fn enclosing_symbol_item(node: Node<'_>) -> Option<Node<'_>> {
     None
 }
 
+/// The segment of `item`, read from its match's `@name` and `@context`
+/// captures.
+///
+/// `parts` holds the captures in source order, each flagged true for a name.
+/// The answer is `None` when the match captures no name.
+///
+/// The keyword is the last token before the first name. A token is a leaf
+/// node, so a modifier node such as `pub` or `async`, which wraps its token,
+/// does not count. A markdown heading's marker is a named leaf, so it counts.
+fn scope_segment(item: Node<'_>, parts: &[(Node<'_>, bool)], rope: &Rope) -> Option<ScopeSegment> {
+    let first = parts.iter().position(|&(_, is_name)| is_name)?;
+    let last = parts.iter().rposition(|&(_, is_name)| is_name)?;
+    let keyword = parts[..first]
+        .iter()
+        .rev()
+        .find(|&&(node, _)| is_token(node))
+        .map(|&(node, _)| text_of(node, rope))
+        .or_else(|| kind_keyword(item).map(String::from));
+
+    let words: Vec<Node<'_>> = parts[first..=last]
+        .iter()
+        .filter(|&&(node, is_name)| is_name || is_token(node))
+        .map(|&(node, is_name)| match is_name {
+            true => name_node(node),
+            false => node,
+        })
+        .collect();
+    let name = words
+        .iter()
+        .map(|&node| text_of(node, rope))
+        .collect::<Vec<_>>()
+        .join(" ");
+    let name_range = words.first()?.start_byte()..words.last()?.end_byte();
+    Some(ScopeSegment {
+        keyword,
+        name,
+        item_range: item.byte_range(),
+        name_range,
+    })
+}
+
+/// The keyword of an item that no token opens, read from the item's kind.
+fn kind_keyword(item: Node<'_>) -> Option<&'static str> {
+    match item.kind() {
+        "field_declaration" => Some("field"),
+        "enum_variant" => Some("variant"),
+        _ => None,
+    }
+}
+
+/// The node a name captured as `node` reads from, the string literal around
+/// it when it sits inside one, so a JSON key keeps its quotes.
+fn name_node(node: Node<'_>) -> Node<'_> {
+    node.parent()
+        .filter(|parent| parent.kind() == "string")
+        .unwrap_or(node)
+}
+
+/// Whether `node` is a single token, a node with no children.
+fn is_token(node: Node<'_>) -> bool {
+    node.child_count() == 0
+}
+
 /// Map a tags-query capture name to the [`RefKind`] it records, or `None`
 /// for any capture that is not a `@reference.*`.
 fn ref_kind(capture_name: &str) -> Option<RefKind> {
@@ -323,9 +455,13 @@ fn text_of(node: Node<'_>, rope: &Rope) -> String {
 mod tests {
     use super::{
         enclosing_symbol_item, extract_references, extract_symbols, grammar_yields_symbols,
-        RefKind, SymbolDef, SymbolKind,
+        scope_chain, RefKind, ScopeSegment, SymbolDef, SymbolKind,
     };
-    use crate::{language::LanguageRegistry, parse_rope};
+    use crate::{
+        language::{Language, LanguageRegistry},
+        parse_rope,
+        test_util::{lang, parse, rust_lang},
+    };
     use stoat_text::Rope;
 
     const SNIPPET: &str = "\
@@ -611,5 +747,113 @@ fn demo() {
             (whole_defs[1..].to_vec(), whole_refs[1..].to_vec()),
             "the window over `second` drops `first` and its call to `a`"
         );
+    }
+
+    const SCOPES: &str = "\
+struct Panel {
+    pub corner_radius: f32,
+}
+
+impl Theme {
+    fn panel(&self) {
+        let lit = 1;
+    }
+}
+
+impl Display for Rect {
+    fn fmt(&self) {
+        write();
+    }
+}
+
+fn outer() {
+    let add = |a| a + 1;
+}
+";
+
+    /// A Rust byte's Scope chain names the items that hold it, outermost first,
+    /// each with the token that opens it. A closure is no outline item, and a
+    /// byte between two items lies in none.
+    #[test]
+    fn a_rust_byte_answers_the_items_that_hold_it() {
+        let rust = rust_lang();
+        let at = |text: &str| scopes(&rust, SCOPES, SCOPES.find(text).unwrap());
+        assert_eq!(
+            [
+                at("lit"),
+                at("write"),
+                at("a + 1"),
+                at("corner_radius"),
+                at("\n\nimpl Theme"),
+            ],
+            [
+                vec!["[impl] Theme", "[fn] panel"],
+                vec!["[impl] Display for Rect", "[fn] fmt"],
+                vec!["[fn] outer"],
+                vec!["[struct] Panel", "[field] corner_radius"],
+                vec![],
+            ],
+        );
+    }
+
+    /// A segment spans its whole item, and a trait impl's name spans every
+    /// capture its name joins.
+    #[test]
+    fn a_trait_impl_segment_spans_its_item_and_its_joined_name() {
+        let rust = rust_lang();
+        let tree = parse(&rust, SCOPES);
+        let chain = scope_chain(
+            rust.outline_query().unwrap(),
+            tree.root_node(),
+            &Rope::from(SCOPES),
+            SCOPES.find("write").unwrap(),
+        );
+        let start = SCOPES.find("impl Display").unwrap();
+        let name = SCOPES.find("Display for Rect").unwrap();
+        assert_eq!(
+            chain.first(),
+            Some(&ScopeSegment {
+                keyword: Some("impl".to_string()),
+                name: "Display for Rect".to_string(),
+                item_range: start..SCOPES.find("\n\nfn outer").unwrap(),
+                name_range: name..name + "Display for Rect".len(),
+            }),
+        );
+    }
+
+    /// A markdown byte's Scope chain names each heading whose section holds
+    /// it, keyed by the heading's marker.
+    #[test]
+    fn a_markdown_byte_answers_its_headings() {
+        let src = "## Design\n\nintro\n\n### Tokens\n\nbody\n";
+        assert_eq!(
+            scopes(&lang("markdown"), src, src.find("body").unwrap()),
+            ["[##] Design", "[###] Tokens"],
+        );
+    }
+
+    /// A JSON byte's Scope chain names the key of each pair that holds it,
+    /// quotes and all.
+    #[test]
+    fn a_json_byte_answers_its_quoted_keys() {
+        let src = r#"{"servers": {"rust": {"args": []}}}"#;
+        assert_eq!(
+            scopes(&lang("json"), src, src.find('[').unwrap()),
+            [r#""servers""#, r#""rust""#, r#""args""#],
+        );
+    }
+
+    /// Each segment of the Scope chain at `byte` of `src`, as `[keyword] name`,
+    /// or the name alone for a segment with no keyword.
+    fn scopes(language: &Language, src: &str, byte: usize) -> Vec<String> {
+        let tree = parse(language, src);
+        let query = language.outline_query().expect("an outline query");
+        scope_chain(query, tree.root_node(), &Rope::from(src), byte)
+            .into_iter()
+            .map(|segment| match segment.keyword {
+                Some(keyword) => format!("[{keyword}] {}", segment.name),
+                None => segment.name,
+            })
+            .collect()
     }
 }
