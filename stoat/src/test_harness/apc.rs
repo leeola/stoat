@@ -7,7 +7,7 @@
 //! cell-fallback layout on top of the rendered buffer.
 
 use ratatui::{buffer::Buffer, layout::Rect, style::Color};
-use stoatty_protocol::command::{Command, IconKind};
+use stoatty_protocol::command::{Command, IconKind, PopoverCommand};
 
 /// Draw each decoded component's cell-fallback layout onto `buf`, in `cmds`
 /// (paint) order.
@@ -46,10 +46,7 @@ pub(crate) fn composite_scene(buf: &mut Buffer, cmds: &[Command]) {
             Command::Popover(c) => {
                 fill_interior(buf, c.left, c.top, c.width, c.height, rgb(c.fill), above);
                 draw_box(buf, c.left, c.top, c.width, c.height, rgb(c.border), above);
-                let fg = rgb(c.content_fg);
-                for (i, ch) in c.content.chars().enumerate() {
-                    set_cell(buf, c.left + 1 + i as u16, c.top + 1, ch, fg, None, above);
-                }
+                write_popover_content(buf, c, above);
             },
             // A thin occluding bar is the edge of a frame drawn over a row's
             // content, such as the top of a split diff's base frame. It covers
@@ -95,6 +92,31 @@ pub(crate) fn composite_scene(buf: &mut Buffer, cmds: &[Command]) {
                 );
             },
             _ => {},
+        }
+    }
+}
+
+/// Write the content of popover `c` as its cell fallback lays it out.
+///
+/// The content starts one cell in from the box's corner. A popover that
+/// centers its content puts each line in the middle of the box instead, with
+/// no inset, as the terminal centers the scaled block.
+fn write_popover_content(buf: &mut Buffer, c: &PopoverCommand, above: &[(usize, Rect)]) {
+    let fg = rgb(c.content_fg);
+    if !c.center {
+        for (i, ch) in c.content.chars().enumerate() {
+            set_cell(buf, c.left + 1 + i as u16, c.top + 1, ch, fg, None, above);
+        }
+        return;
+    }
+
+    let lines = c.content.lines().count().min(usize::from(c.height)) as u16;
+    let top = c.top + (c.height - lines) / 2;
+    for (row, line) in c.content.lines().take(usize::from(lines)).enumerate() {
+        let chars = line.chars().count().min(usize::from(c.width)) as u16;
+        let left = c.left + (c.width - chars) / 2;
+        for (i, ch) in line.chars().take(usize::from(chars)).enumerate() {
+            set_cell(buf, left + i as u16, top + row as u16, ch, fg, None, above);
         }
     }
 }

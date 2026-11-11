@@ -146,6 +146,19 @@ pub(crate) const STATUS_LANE: u32 = u32::MAX - 1;
 /// leaves the strip's lines readable under it.
 const MINIMAP_THUMB_ALPHA: u8 = 23;
 
+/// The chrome of a Pane Picker badge, as the Ermine board draws it.
+///
+/// The board sets `border-radius: 10px`, `border: 2px solid`, and `box-shadow:
+/// 0 10px 24px rgba(0,0,0,0.55)`. A 24 px blur is a gaussian of sigma 12,
+/// which fades over 36 px, and 0.55 of 255 is 140.
+const BADGE_CHROME: PopoverChrome = PopoverChrome {
+    corner_radius: 10,
+    border_width: 2,
+    shadow_offset: [0, 10],
+    shadow_margin: 36,
+    shadow_alpha: 140,
+};
+
 pub(crate) struct PaneCtx<'a> {
     pub(crate) editors: &'a mut SlotMap<EditorId, EditorState>,
     pub(crate) buffers: &'a BufferRegistry,
@@ -2825,7 +2838,8 @@ fn cached_modal_hints(
 struct PaneBadge {
     rect: Rect,
     digit: char,
-    /// The size stoatty floats the digit at, in cells per glyph side.
+    /// The size stoatty floats the digit at, in cells per glyph side, 6 in a
+    /// pane with room.
     scale: u8,
 }
 
@@ -2834,7 +2848,13 @@ struct PaneBadge {
 /// Panes are numbered 1-9 then 0 for the tenth in `split_panes` layout order,
 /// and panes past the tenth get no badge. The focused pane gets no badge, and
 /// its number goes unused, so a digit names the same pane wherever the focus
-/// sits. A pane with no area gets no badge either.
+/// sits.
+///
+/// A badge's box sits in the center of its pane, as tall as its digit's scale
+/// and three cells wide for each two rows, so it is 9 by 6 at full size. A
+/// cell is twice as tall as it is wide, so the box keeps the board's 3:4
+/// shape. A small pane takes the largest scale whose box fits, and a pane
+/// with room for no box gets no badge.
 fn pane_badges(ws: &Workspace) -> Vec<PaneBadge> {
     let focused = ws.panes.focus();
     ws.panes
@@ -2846,18 +2866,17 @@ fn pane_badges(ws: &Workspace) -> Vec<PaneBadge> {
         })
         .filter_map(|(i, (_, pane))| {
             let digit = char::from_digit((i as u32 + 1) % 10, 10)?;
-            let scale = pane
-                .area
-                .width
-                .saturating_sub(2)
-                .min(pane.area.height.saturating_sub(2))
-                .clamp(1, 4);
-            let side = scale + 2;
+            let area = pane.area;
+            let width = |scale: u16| (3 * scale).div_ceil(2);
+            let scale = (1..=6)
+                .rev()
+                .find(|&scale| scale <= area.height && width(scale) <= area.width)?;
+
             let rect = Rect::new(
-                pane.area.x + pane.area.width.saturating_sub(side) / 2,
-                pane.area.y + pane.area.height.saturating_sub(side) / 2,
-                side,
-                side,
+                area.x + area.width.saturating_sub(width(scale)) / 2,
+                area.y + area.height.saturating_sub(scale) / 2,
+                width(scale),
+                scale,
             );
             Some(PaneBadge {
                 rect,
@@ -2876,7 +2895,8 @@ fn pane_badges(ws: &Workspace) -> Vec<PaneBadge> {
 /// every other badge paints in the fill [`pane_badge_colors`] picks, so the
 /// reachable panes stand out. Each badge is a bold [`Popover`], so a plain
 /// terminal draws the cell-fallback box and stoatty floats the scaled bold
-/// glyph.
+/// glyph in a box with [`BADGE_CHROME`]. The digit sits in the center of the
+/// box in both forms.
 fn render_pane_id_badges(
     theme: &crate::theme::Theme,
     ws: &Workspace,
@@ -2894,8 +2914,8 @@ fn render_pane_id_badges(
             scale: badge.scale,
             offset: [0, 0],
             bold: true,
-            chrome: PopoverChrome::CARD,
-            center: false,
+            chrome: BADGE_CHROME,
+            center: true,
             content: &digit,
             spans: &[],
         };
@@ -3176,7 +3196,7 @@ mod themed_blank_tests {
 
 #[cfg(test)]
 mod pane_badge_tests {
-    use super::{paint, pane_badge_colors, pane_badges};
+    use super::{paint, pane_badge_colors, pane_badges, BADGE_CHROME};
     use crate::test_harness::TestHarness;
     use ratatui::{layout::Rect, style::Color};
     use stoatty_protocol::command::{self, Command, PopoverCommand};
@@ -3221,7 +3241,10 @@ mod pane_badge_tests {
         let [badge] = badges.as_slice() else {
             panic!("one badge, on the pane without the focus");
         };
-        let digit_cell = &buf[(badge.rect.x + 1, badge.rect.y + 1)];
+        let digit_cell = &buf[(
+            badge.rect.x + (badge.rect.width - 1) / 2,
+            badge.rect.y + (badge.rect.height - 1) / 2,
+        )];
         let focused = ws.panes.pane(ws.panes.focus()).area;
         let focused_has_accent = (focused.y..focused.y + focused.height - 1)
             .flat_map(|y| (focused.x..focused.x + focused.width).map(move |x| (x, y)))
@@ -3235,7 +3258,8 @@ mod pane_badge_tests {
     }
 
     /// A live scene floats the rounded badge alone, so no square cell fill
-    /// sits under its corners.
+    /// sits under its corners. The one popover carries the board's chrome and
+    /// centers a scale 6 digit.
     #[test]
     fn a_live_scene_paints_no_badge_cells() {
         let mut h = badge_chord(true);
@@ -3246,18 +3270,63 @@ mod pane_badge_tests {
         let [badge] = badges.as_slice() else {
             panic!("one badge, on the pane without the focus");
         };
-        let fills: Vec<[u8; 3]> = popovers(&h).into_iter().map(|p| p.fill).collect();
+        let sent: Vec<_> = popovers(&h)
+            .into_iter()
+            .map(|p| (p.fill, p.chrome, p.center, p.scale))
+            .collect();
 
         assert_eq!(
             (
                 rect_cells(badge.rect).any(|cell| Some(buf[cell].bg) == accent),
-                fills
+                sent
             ),
             (
                 false,
-                vec![paint::style_rgb(accent).expect("an RGB accent")]
+                vec![(
+                    paint::style_rgb(accent).expect("an RGB accent"),
+                    BADGE_CHROME,
+                    true,
+                    6
+                )]
             ),
-            "the grid under the badge keeps its cells, and one popover carries the fill",
+            "the grid under the badge keeps its cells, and one popover carries the badge",
+        );
+    }
+
+    /// A badge's box is 9 by 6 in a pane with room, centered on the pane. A
+    /// small pane takes the largest box that fits, three cells wide for each
+    /// two rows, and a pane with room for no box gets no badge.
+    #[test]
+    fn a_badge_is_nine_by_six_in_a_pane_with_room_and_shrinks_in_a_small_one() {
+        let mut h = badge_chord(false);
+        let mut badge_in = |width: u16, height: u16| {
+            let ws = h.stoat.active_workspace_mut();
+            let focused = ws.panes.focus();
+            let unfocused = ws
+                .panes
+                .split_pane_ids()
+                .into_iter()
+                .find(|&pane| pane != focused)
+                .expect("a pane without the focus");
+            ws.panes.pane_mut(unfocused).area = Rect::new(2, 3, width, height);
+            pane_badges(ws)
+                .first()
+                .map(|badge| (badge.rect, badge.scale))
+        };
+
+        assert_eq!(
+            [
+                badge_in(40, 23),
+                badge_in(5, 3),
+                badge_in(3, 1),
+                badge_in(1, 1)
+            ],
+            [
+                Some((Rect::new(17, 11, 9, 6), 6)),
+                Some((Rect::new(2, 3, 5, 3), 3)),
+                Some((Rect::new(2, 3, 2, 1), 1)),
+                None,
+            ],
         );
     }
 

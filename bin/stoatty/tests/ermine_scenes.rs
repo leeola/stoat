@@ -657,6 +657,67 @@ fn the_file_finder_box_draws_on_the_overlay_surface() {
     );
 }
 
+/// The Pane Picker draws its badge as the board draws it.
+///
+/// The badge is an accent box of 9 by 6 cells with 10 px corners and a 2 px
+/// border in the window ground, and a shadow falls under it.
+///
+/// `<Space>as` splits the window and moves the focus to the right pane, so the
+/// one badge sits in the left pane, with its top-left cell at (34, 22). The
+/// cell one in from that corner lies inside the box and left of the digit.
+///
+/// The pixel on the box's left edge four rows down lies outside the 10 px
+/// arc, so it shows neither the fill nor the border. The pixel 40 px along the
+/// top edge and one row down lies on the border. The shadow falls 10 px down,
+/// so the blank pane 14 px under the box's middle darkens, and the pane 14 px
+/// over it keeps the base.
+#[test]
+fn the_pane_picker_badge_draws_the_accent_box() {
+    let mut home = support::scratch_home();
+    let shot = settled_frame(
+        home.path(),
+        "basic-diff",
+        "unstaged.txt",
+        "<Space>as<Settle><Space>ae<Settle>",
+    );
+    let (col, row) = (34, 22);
+
+    expect_region(
+        &shot,
+        &mut home,
+        cell_rect(col + 1, row + 1, 1, 1),
+        ACCENT,
+        "pane_badge_fill",
+    );
+
+    let (x, y, width, height) = cell_rect(col, row, 9, 6);
+    let pixel = |x: u32, y: u32| dominant_color(&shot, (x, y, 1, 1));
+    let (corner, border) = (pixel(x, y + 4), pixel(x + 40, y + 1));
+    let middle = x + width / 2;
+    let (under, over) = (pixel(middle, y + height + 14), pixel(middle, y - 14));
+    let shaded = under
+        .iter()
+        .zip(BASE)
+        .all(|(&channel, base)| channel < base);
+    if [ACCENT, CHROME].contains(&corner) || border != CHROME || !shaded || over != BASE {
+        let frame = keep_frame(&shot, &mut home, "pane_badge_chrome");
+        panic!(
+            "pane_badge_chrome: the corner pixel reads {}, the border pixel {}, and the pixels \
+             under and over the box {} and {}; want a corner on neither the fill nor the \
+             border, a {} border, a shadow darker than {} in each channel under the box, and \
+             {} over it; the frame is {}",
+            hex(corner),
+            hex(border),
+            hex(under),
+            hex(over),
+            hex(CHROME),
+            hex(BASE),
+            hex(BASE),
+            frame.display(),
+        );
+    }
+}
+
 /// The which-key box docks on the status bar as a card on the raised surface.
 ///
 /// The cell two columns left of the window's right edge, two rows above the
