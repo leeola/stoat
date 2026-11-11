@@ -269,6 +269,7 @@ theme ermine_night inherits default_dark {
     let side_base_bg     = "#2a1d20";
     let side_base_fg     = "#a3898c";
     let side_base_name   = "#f2b3b7";
+    let side_base_label  = "#e6d3d5";
     let side_target_bg   = "#1d2a1f";
     let side_target_fg   = "#8ea78b";
     let side_target_name = "#bfe6bb";
@@ -412,6 +413,7 @@ theme ermine_night inherits default_dark {
 
     diff.sides.base           = { fg: side_base_fg, bg: side_base_bg };
     diff.sides.base.name.fg   = side_base_name;
+    diff.sides.base.label.fg  = side_base_label;
     diff.sides.target         = { fg: side_target_fg, bg: side_target_bg };
     diff.sides.target.name.fg = side_target_name;
 

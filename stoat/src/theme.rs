@@ -999,6 +999,11 @@ pub mod scope {
     /// unset derives from the status bar and `diff.deleted`.
     pub const DIFF_SIDES_BASE: &str = "diff.sides.base";
     pub const DIFF_SIDES_BASE_NAME: &str = "diff.sides.base.name";
+    /// The screen label that leads the base half, such as `structural diff`.
+    ///
+    /// Where neither it nor a parent scope sets a foreground, the label takes
+    /// the base name's color.
+    pub const DIFF_SIDES_BASE_LABEL: &str = "diff.sides.base.label";
     /// The target half, as [`DIFF_SIDES_BASE`] is the base half, with
     /// `diff.added` in place of `diff.deleted`.
     pub const DIFF_SIDES_TARGET: &str = "diff.sides.target";

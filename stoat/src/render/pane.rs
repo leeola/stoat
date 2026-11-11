@@ -720,6 +720,8 @@ fn sides_layout(
 struct DiffSidesColors {
     base: DiffSideColors,
     target: DiffSideColors,
+    /// The screen label that leads the base half, such as `structural diff`.
+    label: Color,
 }
 
 impl DiffSidesColors {
@@ -727,7 +729,8 @@ impl DiffSidesColors {
     ///
     /// Each channel a `diff.sides` scope sets wins. An unset one tints the
     /// focused status bar toward the side's status color, and an unset name
-    /// lifts that color toward white.
+    /// lifts that color toward white. The label takes the base name's color
+    /// where neither its scope nor a parent sets a foreground.
     ///
     /// No color depends on the pane's focus. The frame around the base column
     /// takes the base half's fill, and a gliding pane's pages carry that frame
@@ -735,19 +738,24 @@ impl DiffSidesColors {
     fn resolve(theme: &crate::theme::Theme) -> Self {
         use crate::theme::scope;
         let bar = theme.get(scope::UI_STATUSBAR_FOCUSED);
+        let base = DiffSideColors::resolve(
+            theme,
+            bar,
+            (scope::DIFF_SIDES_BASE, scope::DIFF_SIDES_BASE_NAME),
+            scope::DIFF_DELETED,
+        );
         Self {
-            base: DiffSideColors::resolve(
-                theme,
-                bar,
-                (scope::DIFF_SIDES_BASE, scope::DIFF_SIDES_BASE_NAME),
-                scope::DIFF_DELETED,
-            ),
+            base,
             target: DiffSideColors::resolve(
                 theme,
                 bar,
                 (scope::DIFF_SIDES_TARGET, scope::DIFF_SIDES_TARGET_NAME),
                 scope::DIFF_ADDED,
             ),
+            label: theme
+                .try_get(scope::DIFF_SIDES_BASE_LABEL)
+                .and_then(|style| style.fg)
+                .unwrap_or(base.name),
         }
     }
 }
@@ -2165,7 +2173,7 @@ fn status_segments(
                     tinted(lead_style, theme, crate::theme::scope::UI_TEXT),
                 );
             } else if let Some((screen_label, screen_color)) = screen_segment(frame.screen, theme) {
-                let screen_color = split.map_or(screen_color, |(_, colors)| colors.base.name);
+                let screen_color = split.map_or(screen_color, |(_, colors)| colors.label);
                 push_left(
                     &mut left,
                     &mut cursor,
@@ -4634,6 +4642,23 @@ mod tests {
         );
     }
 
+    /// A split diff view's status row reads its screen label in the theme's
+    /// label color, #e6d3d5 in Ermine, apart from the base name beside the
+    /// divider.
+    #[test]
+    fn the_split_status_row_reads_its_screen_label_in_the_label_color() {
+        use ratatui::style::Color;
+
+        let mut h = status_halves_harness();
+        let buf = h.render_composited();
+        let row = bar_row(&buf);
+        let label = row
+            .find("structural diff")
+            .map(|at| buf[(row[..at].chars().count() as u16, buf.area.height - 1)].fg);
+
+        assert_eq!(label, Some(Color::Rgb(0xe6, 0xd3, 0xd5)));
+    }
+
     /// A 120 by 8 split diff view of one changed `a.rs`, with no minimap and
     /// its hints box hidden.
     fn status_halves_harness() -> crate::test_harness::TestHarness {
@@ -4853,6 +4878,7 @@ mod tests {
         let colors = DiffSidesColors {
             base: side,
             target: side,
+            label: Color::White,
         };
         let row = Rect::new(0, 0, 120, 1);
         let painted = |names: (&str, &str)| {
@@ -4944,10 +4970,12 @@ mod tests {
                 DiffSidesColors {
                     base: side([0x2a1d20, 0xa3898c, 0xf2b3b7, 0xf2777f]),
                     target: side([0x1d2a1f, 0x8ea78b, 0xbfe6bb, 0x8fd18a]),
+                    label: rgb(0xe6d3d5),
                 },
                 DiffSidesColors {
                     base: side([0x726d81, 0xf6e5e6, 0xeca7ac, 0xe06c75]),
                     target: side([0x697782, 0xebf2e7, 0xc1dbaf, 0x98c379]),
+                    label: rgb(0xeca7ac),
                 },
             ],
         );

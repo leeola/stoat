@@ -344,11 +344,15 @@ The typed UI scopes, by group (syntax scopes are open-ended):
 - `ui.minimap.rail` -- the rail beside a minimap strip whose file does not fit
   it: the part of the file the strip covers (foreground) on the rail's ground
   (background).
-- `diff.sides.base`, `diff.sides.base.name`, `diff.sides.target`,
-  `diff.sides.target.name` -- the two halves of a split diff view's status
-  row, its text (foreground) on its tint (background), and the color of the
-  side's name. A channel the theme leaves unset tints the status bar toward
+- `diff.sides.base`, `diff.sides.base.name`, `diff.sides.base.label`,
+  `diff.sides.target`, `diff.sides.target.name` -- the two halves of a split
+  diff view's status row, its text (foreground) on its tint (background), the
+  color of the side's name, and the color of the screen label that leads the
+  base half. A channel the theme leaves unset tints the status bar toward
   `diff.deleted` on the base half and toward `diff.added` on the target half.
+  An unset label takes the foreground of `diff.sides.base` where the theme
+  sets that scope, as every scope falls back to its parent, and the base
+  name's color where it sets neither.
 - `ui.diagnostic.error`, `ui.diagnostic.warning`, `ui.diagnostic.info`,
   `ui.diagnostic.hint` -- LSP diagnostic severities.
 - `vcs.conflict.*`, `vcs.commit.*`, `vcs.rebase.*` -- merge conflicts, the
