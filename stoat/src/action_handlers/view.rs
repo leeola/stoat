@@ -797,7 +797,8 @@ pub(crate) fn apply_held_screen_row(editor: &mut EditorState) {
 /// answer the hold to keep, or `None` once another writer moved the scroll
 /// away from where the last paint left it.
 ///
-/// The move keeps `scroll_frac` and is a swap, so it clears a glide.
+/// The move keeps `scroll_frac` and is a swap, so it clears a glide and marks
+/// the pool for one, which the terminal takes with no ease.
 fn apply_view_hold(editor: &mut EditorState, mut hold: ViewHold) -> Option<ViewHold> {
     if hold.rested.is_some_and(|row| row != editor.scroll_row) {
         return None;
@@ -816,6 +817,7 @@ fn apply_view_hold(editor: &mut EditorState, mut hold: ViewHold) -> Option<ViewH
         .min(snapshot.line_count().saturating_sub(1));
     editor.scroll_offset = editor.scroll_row as f32 + editor.scroll_frac;
     editor.scroll_glide = ScrollGlide::None;
+    editor.pool_swap = true;
 
     hold.rested = Some(editor.scroll_row);
     Some(hold)

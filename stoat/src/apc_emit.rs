@@ -1186,6 +1186,22 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
             ScrollGlide::None => editor.scroll_row as f32 + editor.scroll_frac,
             ScrollGlide::Page | ScrollGlide::Wheel => editor.scroll_offset,
         };
+        // A reload's seat moved the view with the text under it. A pool that
+        // only takes the moved target eases there, and a pool declared again
+        // starts on it, so the pool is dropped before the pages emit below.
+        if std::mem::take(&mut editor.pool_swap)
+            && stoat
+                .smooth_scroll
+                .last_target(region.pool)
+                .is_some_and(|from| from != scroll_offset)
+        {
+            drop_pane_pool(
+                &mut stoat.smooth_scroll,
+                [&mut stoat.aux_cursor, &mut stoat.stack_cursor],
+                &mut out,
+                region.pool,
+            );
+        }
         // Review rows regenerate on accept/reject and their gutter glyphs
         // change on stage/unstage, so the session version is the pool's
         // content version. Plain editors stay stable while scrolling, save
@@ -2756,22 +2772,32 @@ fn drop_reowned_pools(
         .filter(|pool| !held.contains_key(pool))
         .copied();
     for pool in lost_or_swapped.chain(gained) {
-        stoat.smooth_scroll.drop_pool(out, pool);
-        if stoat
-            .aux_cursor
-            .is_some_and(|(cursor_pool, _, _)| cursor_pool == pool)
-        {
-            stoat.aux_cursor = None;
-        }
-        if stoat
-            .stack_cursor
-            .is_some_and(|(cursor_pool, _, _)| cursor_pool == pool)
-        {
-            stoat.stack_cursor = None;
-        }
+        drop_pane_pool(
+            &mut stoat.smooth_scroll,
+            [&mut stoat.aux_cursor, &mut stoat.stack_cursor],
+            out,
+            pool,
+        );
     }
 
     stoat.pool_owners = owners;
+}
+
+/// Drop pane pool `pool` into `out`, and forget each of `cursors`, the cursor
+/// records of a focused detached pane and of a focused changes view, that
+/// names it, so the pass ships the cursor to the pool it declares again.
+fn drop_pane_pool(
+    smooth_scroll: &mut SmoothScrollState,
+    cursors: [&mut Option<(u32, u64, u16)>; 2],
+    out: &mut Vec<u8>,
+    pool: u32,
+) {
+    smooth_scroll.drop_pool(out, pool);
+    for cursor in cursors {
+        if cursor.is_some_and(|(cursor_pool, _, _)| cursor_pool == pool) {
+            *cursor = None;
+        }
+    }
 }
 
 /// Every visible split pane showing an editor, as `(pool id, editor id,

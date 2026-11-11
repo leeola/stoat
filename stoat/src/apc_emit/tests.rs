@@ -94,7 +94,7 @@ fn rgb_border_theme() -> crate::theme::Theme {
 }
 
 use crate::{
-    action_handlers, app,
+    action_handlers, app, auto_reload,
     test_fixture::{
         drain_apc, finder_layout, help_layout, open_with_minimap_strip, palette_sizing,
     },
@@ -8014,4 +8014,103 @@ fn quitting_hands_the_terminal_its_own_defaults_back() {
         b"\x1b]110\x1b\\\x1b]111\x1b\\".to_vec(),
         "OSC 110 and 111 undo the defaults the session overrode",
     );
+}
+
+/// A 300-line file in a stoatty harness whose view rests on row 100 after one
+/// settled emit, with the cursor above the view on row 0, and the file's
+/// path.
+fn rested_reload_view() -> (
+    crate::test_harness::TestHarness,
+    tokio::sync::mpsc::UnboundedReceiver<Vec<u8>>,
+    PathBuf,
+) {
+    let mut h = Stoat::test();
+    h.stoat.stoatty_protocol = stoatty_protocol::PROTOCOL_VERSION;
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+    h.stoat.set_apc_tx(tx);
+
+    let root = PathBuf::from("/reload-swap");
+    let path = root.join("a.txt");
+    h.fake_fs().insert_file(&path, reload_body(0, 0).as_bytes());
+    h.stoat.active_workspace_mut().git_root = root;
+    action_handlers::dispatch(&mut h.stoat, &OpenFile { path: path.clone() });
+    h.settle();
+    let _ = h.stoat.render();
+    {
+        let editor = action_handlers::focused_editor_mut(&mut h.stoat).expect("focused editor");
+        editor.scroll_row = 100;
+        editor.scroll_offset = 100.0;
+    }
+    let _ = h.stoat.render();
+    emit_smooth_scroll(&mut h.stoat);
+    h.settle();
+    drain_apc(&mut rx);
+    (h, rx, path)
+}
+
+/// The lines `line 0` to `line 299` with `count` new lines inserted before
+/// line `at`.
+fn reload_body(at: usize, count: usize) -> String {
+    let line = |i: usize| format!("line {i}\n");
+    let new: String = (0..count).map(|i| format!("new {i}\n")).collect();
+    (0..at).map(line).collect::<String>() + &new + &(at..300).map(line).collect::<String>()
+}
+
+/// The drop, region, scroll, and reposition frames of the pane pools among
+/// `commands`, in order, each scroll with the row it targets in the region
+/// its pass declared.
+fn pane_pool_moves(commands: Vec<command::Command>) -> Vec<(&'static str, Option<u64>)> {
+    use stoatty_protocol::command::{Command, NON_PANE_POOL_BASE};
+
+    let mut height = 0;
+    commands
+        .into_iter()
+        .filter_map(|command| match command {
+            Command::PoolDrop(drop) if drop.pool < NON_PANE_POOL_BASE => Some(("drop", None)),
+            Command::PoolRegion(region) if region.pool < NON_PANE_POOL_BASE => {
+                height = u64::from(region.height);
+                Some(("region", None))
+            },
+            Command::Scroll(scroll) if scroll.pool < NON_PANE_POOL_BASE => {
+                let within = (u64::from(scroll.fraction) * height + 32_768) / 65_536;
+                Some(("scroll", Some(scroll.page * height + within)))
+            },
+            Command::Reposition(reposition) if reposition.pool < NON_PANE_POOL_BASE => {
+                Some(("reposition", None))
+            },
+            _ => None,
+        })
+        .collect()
+}
+
+/// A reload that moves a rested view reaches the terminal as a swap. The pool
+/// drops and declares again in one pass, and its one scroll targets row 180,
+/// the view's top once 80 lines arrive above it, with no reposition.
+#[test]
+fn a_reload_that_moves_the_view_redeclares_the_pool() {
+    let (mut h, mut rx, path) = rested_reload_view();
+    h.fake_fs()
+        .insert_file(&path, reload_body(10, 80).as_bytes());
+    auto_reload::reload_focused(&mut h.stoat, false);
+    let _ = h.stoat.render();
+    emit_smooth_scroll(&mut h.stoat);
+
+    assert_eq!(
+        pane_pool_moves(drain_apc(&mut rx)),
+        [("drop", None), ("region", None), ("scroll", Some(180))],
+    );
+}
+
+/// A reload below the view leaves the pool as it rests, with no drop, no
+/// region, and no scroll.
+#[test]
+fn a_reload_below_the_view_keeps_the_pool() {
+    let (mut h, mut rx, path) = rested_reload_view();
+    h.fake_fs()
+        .insert_file(&path, reload_body(250, 80).as_bytes());
+    auto_reload::reload_focused(&mut h.stoat, false);
+    let _ = h.stoat.render();
+    emit_smooth_scroll(&mut h.stoat);
+
+    assert_eq!(pane_pool_moves(drain_apc(&mut rx)), Vec::new());
 }
