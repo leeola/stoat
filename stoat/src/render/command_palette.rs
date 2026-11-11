@@ -293,6 +293,7 @@ fn render_palette_arg_picker(
         start_row,
         theme,
         row_style,
+        true,
         buf,
         scene,
     );

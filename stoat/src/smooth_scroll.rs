@@ -868,7 +868,7 @@ pub(crate) fn render_finder_page(
         page,
         theme,
         |buf, area, start_row, scene| {
-            paint_finder_rows(finder, home, area, start_row, theme, buf, scene)
+            paint_finder_rows(finder, home, area, start_row, theme, false, buf, scene)
         },
     )
 }
@@ -1005,6 +1005,7 @@ pub(crate) fn render_arg_page(
                 start_row,
                 theme,
                 row_style,
+                false,
                 buf,
                 scene,
             )

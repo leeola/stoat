@@ -469,10 +469,13 @@ pub(crate) mod test_support {
 /// both render identical rows. Rows are read from `picklist.base`, which every
 /// caller keeps in sync with its display set on refilter.
 ///
-/// `row_style` paints every row but the selected one, which takes
-/// [`Theme::list_selected`]. A caller passes its own style to set a whole
-/// list apart, such as a list of ignored files. The selected row's accent bar
-/// goes into `scene`.
+/// `row_style` paints every row but the selected one. A caller passes its own
+/// style to set a whole list apart, such as a list of ignored files.
+///
+/// The selected row draws through [`chrome::selected_row`]. With `panels` it
+/// is a rounded box with an accent edge in a live scene. A pool page passes
+/// `panels` false, because a page captures no panel, and keeps the row's cells
+/// in [`Theme::list_selected`] with the accent bar.
 ///
 /// A path row keeps columns 1 and 2 for its [`chrome::type_tag`], so tagged and
 /// untagged rows align, and a wider tag pushes only its own row's label right.
@@ -481,6 +484,7 @@ pub(crate) mod test_support {
 /// `diff.modified` color. A relative entry, such as a branch name, gets none
 /// of these.
 ///
+/// [`chrome::selected_row`]: crate::render::chrome::selected_row
 /// [`chrome::type_tag`]: crate::render::chrome::type_tag
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn paint_path_rows(
@@ -493,6 +497,7 @@ pub(crate) fn paint_path_rows(
     start_row: usize,
     theme: &Theme,
     row_style: Style,
+    panels: bool,
     buf: &mut Buffer,
     scene: &mut stoat_widgets::ApcScene,
 ) {
@@ -500,7 +505,6 @@ pub(crate) fn paint_path_rows(
     if rows == 0 {
         return;
     }
-    let selected_style = theme.list_selected(scope::UI_SELECTION);
     let match_style = theme.list_match();
     let dir_style = theme.get(scope::UI_TEXT_MUTED);
     let mark_style = theme.get(scope::DIFF_MODIFIED);
@@ -523,18 +527,22 @@ pub(crate) fn paint_path_rows(
     {
         let indices = picklist.row_indices(start_row + row_idx, &mut derived, &mut matching);
         let row = area.y + row_idx as u16;
-        let is_selected = start_row + row_idx == picklist.selected;
-        let style = if is_selected {
-            selected_style
-        } else {
-            row_style
+        let style = match start_row + row_idx == picklist.selected {
+            true => crate::render::chrome::selected_row(
+                Rect::new(area.x, row, area.width, 1),
+                row_style,
+                panels,
+                theme,
+                buf,
+                scene,
+            ),
+            false => {
+                for col in area.x..area_end {
+                    buf[(col, row)].set_char(' ').set_style(row_style);
+                }
+                row_style
+            },
         };
-        for col in area.x..area_end {
-            buf[(col, row)].set_char(' ').set_style(style);
-        }
-        if is_selected {
-            crate::render::chrome::selection_bar(area.x, row, theme, buf, scene);
-        }
 
         let path = &picklist.base[idx];
         let is_path = path.is_absolute();
@@ -1107,6 +1115,7 @@ mod tests {
             0,
             &Theme::empty(),
             Style::default(),
+            false,
             &mut buf,
             &mut stoat_widgets::ApcScene::new(),
         );
@@ -1138,6 +1147,7 @@ mod tests {
             0,
             &match_theme(),
             Style::default(),
+            false,
             &mut buf,
             &mut stoat_widgets::ApcScene::new(),
         );
@@ -1172,6 +1182,7 @@ mod tests {
                 0,
                 &Theme::empty(),
                 Style::default(),
+                false,
                 &mut buf,
                 &mut stoat_widgets::ApcScene::new(),
             );
@@ -1202,6 +1213,7 @@ mod tests {
             0,
             &Theme::empty(),
             Style::default(),
+            false,
             &mut buf,
             &mut stoat_widgets::ApcScene::new(),
         );
@@ -1239,6 +1251,7 @@ mod tests {
             0,
             &match_theme(),
             Style::default(),
+            false,
             &mut buf,
             &mut stoat_widgets::ApcScene::new(),
         );
@@ -1285,6 +1298,7 @@ mod tests {
             deep,
             &match_theme(),
             Style::default(),
+            false,
             &mut buf,
             &mut stoat_widgets::ApcScene::new(),
         );
@@ -1329,6 +1343,7 @@ mod tests {
             550,
             &match_theme(),
             Style::default(),
+            false,
             &mut buf,
             &mut stoat_widgets::ApcScene::new(),
         );
@@ -1364,6 +1379,7 @@ mod tests {
             0,
             &Theme::empty(),
             Style::default().fg(muted),
+            false,
             &mut buf,
             &mut stoat_widgets::ApcScene::new(),
         );

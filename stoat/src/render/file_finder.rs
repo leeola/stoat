@@ -344,22 +344,25 @@ fn render_list(
     let rows = area.height as usize;
     let start_row =
         crate::render::picker::window_start(finder.active_core_ref().picklist.selected, rows);
-    paint_finder_rows(finder, home, area, start_row, theme, buf, scene);
+    paint_finder_rows(finder, home, area, start_row, theme, true, buf, scene);
 }
 
 /// Paint finder result rows into `area` starting at `start_row`.
 ///
 /// A thin adapter over [`crate::render::picker::paint_path_rows`], kept because
-/// the smooth-scroll pool paints pages through a `&FileFinder`.
+/// the smooth-scroll pool paints pages through a `&FileFinder`. A page passes
+/// `panels` false, as that function describes.
 ///
 /// The rows paint muted while a fallback of ignored files stands in for the
 /// list, so they read apart from the files the list holds.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn paint_finder_rows(
     finder: &FileFinder,
     home: Option<&Path>,
     area: Rect,
     start_row: usize,
     theme: &crate::theme::Theme,
+    panels: bool,
     buf: &mut Buffer,
     scene: &mut stoat_widgets::ApcScene,
 ) {
@@ -380,6 +383,7 @@ pub(crate) fn paint_finder_rows(
         start_row,
         theme,
         row_style,
+        panels,
         buf,
         scene,
     );

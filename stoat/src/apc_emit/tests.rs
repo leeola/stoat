@@ -5960,12 +5960,16 @@ fn typing_in_the_finder_defers_its_pool_refill_until_the_list_scrolls() {
     );
 }
 
-/// The finder's selected row carries the accent bar at its first cell, in the
-/// live frame and on the pool page that holds the row.
+/// The finder's selected row draws as a rounded box in the live frame: the
+/// accent box 6 px inside the list's sides, then the select box 2 px further
+/// in on its left, both with 6 px corners, and no accent bar. The pool page
+/// that holds the row captures no panel, so it keeps the accent bar at the
+/// row's first cell.
 #[test]
-fn the_finder_marks_its_selected_row_with_the_accent_bar() {
+fn the_finder_rounds_its_live_selected_row_and_keeps_the_bar_on_its_page() {
+    use crate::theme::scope;
     use stoat_action::OpenFileFinder;
-    use stoatty_protocol::command::{BarCommand, Command};
+    use stoatty_protocol::command::{BarCommand, Command, Edge};
 
     let mut h = Stoat::test();
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
@@ -6007,15 +6011,53 @@ fn the_finder_marks_its_selected_row_with_the_accent_bar() {
             .collect()
     };
 
+    let row_boxes = |bytes: &[u8]| -> Vec<(Option<[u8; 3]>, [Edge; 4], u8)> {
+        command::decode_stream(bytes)
+            .into_iter()
+            .filter_map(|cmd| match cmd {
+                Command::Panel(panel)
+                    if (panel.top, panel.left, panel.width, panel.height)
+                        == (list.y, list.x, list.width, 1) =>
+                {
+                    Some((panel.fill, panel.edges, panel.corner_radius))
+                },
+                _ => None,
+            })
+            .collect()
+    };
+    let select =
+        crate::render::paint::style_rgb(h.stoat.theme.list_selected(scope::UI_SELECTION).bg);
+    let row_box = |fill, left| {
+        (
+            fill,
+            [
+                Edge::Inset(0),
+                Edge::Inset(6),
+                Edge::Inset(0),
+                Edge::Inset(left),
+            ],
+            6,
+        )
+    };
+
     h.stoat.render();
-    let live = list_bars(&h.stoat.apc_scene.all_bytes(), list.x, list.y);
+    let live = h.stoat.apc_scene.all_bytes();
     let pooled = emit_raw(&mut h, &mut rx);
     let page = fill_payload(&pooled, crate::smooth_scroll::non_pane_pool::FINDER, 0);
 
     assert_eq!(
-        [live, list_bars(page, 0, 0)],
-        [vec![bar(list.x, list.y)], vec![bar(0, 0)]],
-        "one bar on the selected first row, live at the list's first cell and on the page at its origin",
+        (
+            list_bars(&live, list.x, list.y),
+            row_boxes(&live),
+            list_bars(page, 0, 0),
+        ),
+        (
+            Vec::new(),
+            vec![row_box(Some([0x7f, 0xb0, 0xff]), 6), row_box(select, 8)],
+            vec![bar(0, 0)],
+        ),
+        "the live row is the accent box under the select box with no bar, and the page keeps \
+         one bar at its origin",
     );
 }
 

@@ -1144,15 +1144,17 @@ fn the_diff_view_keeps_its_box_docked_on_the_raised_surface() {
     }
 }
 
-/// The finder's selected row fills with the select surface and carries the
-/// accent bar at its left edge.
+/// The finder's selected row fills with the select surface inside a box with
+/// rounded corners, and an accent edge runs inside the box's left side.
 ///
-/// The select cells form one run in one row. At 9-pixel cells the 3/16 bar
-/// snaps to the first two pixel columns of the run's first cell. Each column is
-/// read alone, because the renderer keeps a thinner bar one pixel wide, and a
-/// two-column read of that bar ties.
+/// The select cells form one run in one row. The box stands 6 px inside the
+/// list's sides, so the list's first cell holds 6 px of the overlay surface
+/// and the run starts at the second cell. On that first cell's middle pixel
+/// row, pixel columns 0 to 5 read the overlay, 6 and 7 the 2 px accent edge,
+/// and 8 the select fill. On its first pixel row, column 6 reads the overlay,
+/// which the 6 px arc leaves clear.
 #[test]
-fn the_finder_marks_its_selected_row_with_the_select_fill_and_the_accent_bar() {
+fn the_finder_marks_its_selected_row_with_a_rounded_fill_and_an_accent_edge() {
     let mut home = support::scratch_home();
     let shot = settled_frame(
         home.path(),
@@ -1175,10 +1177,27 @@ fn the_finder_marks_its_selected_row_with_the_select_fill_and_the_accent_bar() {
         );
     };
 
-    let (x, y, _, height) = cell_rect(col, row, 1, 1);
-    for (offset, what) in [(0, "selection_bar_left"), (1, "selection_bar_right")] {
-        expect_region(&shot, &mut home, (x + offset, y, 1, height), ACCENT, what);
+    let (x, y, _, height) = cell_rect(col - 1, row, 1, 1);
+    let middle = [
+        OVERLAY, OVERLAY, OVERLAY, OVERLAY, OVERLAY, OVERLAY, ACCENT, ACCENT, SELECT,
+    ];
+    for (offset, want) in (0..).zip(middle) {
+        let what = format!("selected_row_middle_column_{offset}");
+        expect_region(
+            &shot,
+            &mut home,
+            (x + offset, y + height / 2, 1, 1),
+            want,
+            &what,
+        );
     }
+    expect_region(
+        &shot,
+        &mut home,
+        (x + 6, y, 1, 1),
+        OVERLAY,
+        "selected_row_top_arc",
+    );
 }
 
 /// The finder's header ends in its scope chip on the hover surface.
