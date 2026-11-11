@@ -1262,6 +1262,67 @@ mod tests {
         );
     }
 
+    /// A backdrop with a fill paints its ground, its border color, over the
+    /// part of its own cells that a rounded corner leaves outside the box. The
+    /// ground draws in the stroke pass, above the text, and the rest of the
+    /// cells keep what they draw. A backdrop with no fill paints no ground.
+    ///
+    /// The cells are 9 by 18 pixels, and the panel covers columns 2 and 3 of
+    /// row 1, pixels 18 to 35 across and down, rounded at 6.
+    #[test]
+    fn a_filled_backdrop_paints_its_ground_over_the_corners_inside_its_cells() {
+        let (device, queue) = require_headless_device();
+        let metrics = CellMetrics {
+            font_size: 15.0,
+            width: 9.0,
+            height: 18.0,
+            scale_factor: 1.0,
+        };
+        let red = |fill: Option<Rgb>, halves| {
+            let mut grid = Grid::new(3, 7);
+            grid.set_panels(vec![Panel {
+                top: 1,
+                left: 2,
+                width: 2,
+                height: 1,
+                style: BorderStyle::None_,
+                border: Rgb::new(255, 0, 0),
+                corner_radius: 6,
+                fill,
+                shadow: PanelShadow::None_,
+                edges: Edge::symmetric(0, 0),
+                corners: 0,
+                fillets: 0,
+                fillet_radius: 2,
+                hatch: None,
+                above_pools: false,
+                backdrop: true,
+                anchor: None,
+                seq: 0,
+            }]);
+            render_red(&device, &queue, &grid, metrics, halves)
+        };
+        let at = |red: &[u8], (x, y): (u32, u32)| red[(y * TARGET + x) as usize];
+
+        let black = Some(Rgb::new(0, 0, 0));
+        let (both, under, unfilled) = (
+            red(black, Halves::Both),
+            red(black, Halves::Under),
+            red(None, Halves::Both),
+        );
+        assert_eq!(
+            (
+                [(18, 18), (35, 18), (18, 35), (35, 35)].map(|pixel| at(&both, pixel)),
+                [(24, 24), (27, 18), (18, 27)].map(|pixel| at(&both, pixel)),
+                at(&under, (18, 18)),
+                at(&unfilled, (18, 18)),
+            ),
+            ([255; 4], [0; 3], 0, 0),
+            "the ground at the four corners, none inside the box, none in the under pass, \
+             and none from an unfilled backdrop",
+        );
+    }
+
     /// A frame is a band inside the box edge, so it lands on the same pixels
     /// whether or not a shadow pads the quad around it.
     ///

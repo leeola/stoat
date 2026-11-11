@@ -201,6 +201,11 @@ pub struct PanelCommand {
     /// A backdrop paints its fill only outside its own cells, where its edges
     /// reach across the cells beside them. Inside, the cells keep every tint
     /// they draw, because a fill over them hides those tints.
+    ///
+    /// A backdrop with a fill also paints its `border` color over the part of
+    /// its own cells that lies outside its rounded box, above the text and the
+    /// pool composites. A rounded corner inside the cells then shows the
+    /// surface the panel stands on. A backdrop with no fill paints none.
     pub backdrop: bool,
     /// The host pool this panel rides and the document top row its layout
     /// assumed, or `None` for a panel fixed to the screen.

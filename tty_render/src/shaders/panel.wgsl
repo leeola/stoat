@@ -85,7 +85,8 @@ struct VsOut {
     @location(5) @interpolate(flat) border: vec3<f32>,
     @location(6) @interpolate(flat) corner_radius: f32,
     // 1.0 to paint the interior fill, 0.0 to leave the cells showing through,
-    // and 2.0 to paint a backdrop's fill only outside its cells.
+    // and 2.0 to paint a backdrop's fill only outside its cells, and its
+    // ground, the border color, over the part of its cells outside its box.
     @location(7) @interpolate(flat) fill_flag: f32,
     @location(8) @interpolate(flat) style: u32,
     // This panel's draw index, so the fragment shader can occlude against every
@@ -487,6 +488,18 @@ fn fill_weight(in: VsOut) -> f32 {
     return select(min(in.fill_flag, 1.0), 0.0, in.fill_flag > 1.5 && inside_cells);
 }
 
+/// The share of the ground, the border color, that a backdrop with a fill
+/// paints over the fragment.
+///
+/// Inside its cells a rounded corner leaves part of a cell outside the box, and
+/// the cell draws there square. The ground over that part shows the surface the
+/// panel stands on, so the corner reads round. Any other fragment takes none.
+fn ground_weight(in: VsOut) -> f32 {
+    let inside_cells = all(in.quad_px >= in.cells.xy) && all(in.quad_px < in.cells.zw);
+    let outside_box = clamp(0.5 + box_distance(in), 0.0, 1.0);
+    return select(0.0, outside_box, in.fill_flag > 1.5 && inside_cells);
+}
+
 /// The fill's color at the fragment.
 ///
 /// A hatched panel takes the hatch color on its lines, one logical pixel wide
@@ -661,6 +674,10 @@ fn fs_shadow(in: VsOut) -> @location(0) vec4<f32> {
 /// Drawing it separately rather than in one composite gives the same pixels:
 /// alpha compositing is associative, so blending the stroke over the result of
 /// the under draw equals compositing both and blending once.
+///
+/// A backdrop with a fill paints its ground here too, under the stroke, as
+/// ground_weight reads it. Above the text and the pool composites, the ground
+/// covers whatever its cells draw outside the rounded box.
 @fragment
 fn fs_stroke(in: VsOut) -> @location(0) vec4<f32> {
     if occluded(in.clip.xy, in.instance) {
@@ -669,6 +686,7 @@ fn fs_stroke(in: VsOut) -> @location(0) vec4<f32> {
     let c = coverage_of(in);
 
     var acc = vec4<f32>(0.0, 0.0, 0.0, 0.0);
+    acc = over(acc, in.border, ground_weight(in));
     acc = over(acc, in.border, c.stroke);
     return unpremultiply(acc);
 }
