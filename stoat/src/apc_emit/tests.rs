@@ -1041,6 +1041,44 @@ fn a_pooled_page_marks_its_diagnostic_by_the_terminal_protocol() {
     );
 }
 
+/// A pooled editor page carries the curly line under its diagnostic in the
+/// severity color, so a glide over the page keeps the line the live grid draws.
+#[test]
+fn a_glide_page_carries_the_undercurl_of_its_diagnostic() {
+    let mut h = crate::test_harness::TestHarness::with_size(80, 24);
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+    h.stoat.set_apc_tx(tx);
+    h.stoat.theme = Arc::new(rgb_diagnostic_theme());
+    let path = h.write_file("a.txt", "alpha bravo\ncharlie\n");
+    h.open_file(&path);
+    h.settle();
+    h.seed_diagnostics(
+        &path,
+        vec![lsp_types::Diagnostic {
+            range: lsp_types::Range::new(
+                lsp_types::Position::new(0, 0),
+                lsp_types::Position::new(0, 5),
+            ),
+            severity: Some(lsp_types::DiagnosticSeverity::ERROR),
+            ..Default::default()
+        }],
+    );
+    h.stoat.render();
+
+    let pool = {
+        let ws = h.stoat.active_workspace();
+        ws.panes.pane(ws.panes.focus()).index
+    };
+    let bytes = emit_raw(&mut h, &mut rx);
+    let curl = b"4:3;58:2::255:0:0m";
+    assert!(
+        fill_payload(&bytes, pool, 0)
+            .windows(curl.len())
+            .any(|window| window == curl),
+        "page 0 stamps the curly line in the theme's error color",
+    );
+}
+
 #[test]
 fn diagnostic_popover_emits_a_popover_frame_inside_stoatty() {
     use stoatty_protocol::command::Command;

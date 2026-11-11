@@ -20,6 +20,7 @@ use crate::{
     commit_list::CommitListState,
     completion::CompletionPopup,
     conflict_session::ConflictViewState,
+    diagnostic_spans::ResolvedDiag,
     display_map::{highlights::HighlightEndpoints, DisplayPoint, DisplaySnapshot},
     file_finder::FileFinder,
     help::Help,
@@ -31,7 +32,8 @@ use crate::{
         conflict_view::{render_conflict_rows, GridPaint},
         editor::{
             draw_fallback_line_numbers, gutter_component_lines, gutter_diff_marks, gutter_geometry,
-            paint_chunk_rows, rich_gutter, RichGutterColors, RowSeverity,
+            paint_chunk_rows, paint_diagnostic_spans, rich_gutter, visible_byte_range,
+            DiagnosticPaintScratch, RichGutterColors, RowSeverity, SeverityColors,
         },
         file_finder::paint_finder_rows,
         help::{paint_help_detail_rows, paint_help_list_rows},
@@ -41,6 +43,7 @@ use crate::{
         },
         serialize_buffer,
         symbol_finder::paint_symbol_rows,
+        undercurl::{self, UndercurlBatch},
         walkthrough::Spotlight,
     },
     symbol_finder::SymbolFinder,
@@ -50,7 +53,7 @@ use ratatui::{
     layout::Rect,
     style::{Color, Style},
 };
-use std::{path::Path, sync::Arc};
+use std::{ops::Range, path::Path, sync::Arc};
 use stoat_action::registry::RegistryEntry;
 use stoat_widgets::ApcScene;
 use stoatty_protocol::command::{encode_fill_decorations_scope, encode_fill_scope};
@@ -249,7 +252,8 @@ pub(crate) fn render_page_decorations(
 /// omits paints unhighlighted.
 ///
 /// Paints the line-number gutter, then the text and syntax highlights inset past
-/// it -- the same cells the unfocused live grid paints for these rows, minus the
+/// it, then the diagnostic spans of [`PageGutter::diagnostics()`] over the text.
+/// These are the cells the unfocused live grid paints for these rows, minus the
 /// cursor and selection a pooled page never carries. Rows past the document end
 /// stay blank, and the [`serialize_buffer`] bytes fully repaint the slot
 /// regardless of its prior contents.
@@ -257,6 +261,9 @@ pub(crate) fn render_page_decorations(
 /// Inside stoatty the rich gutter's sub-cell components ride as APC frames
 /// appended after the serialized cells, so the terminal captures them onto the
 /// page slot. Every other terminal gets degraded cell numbers in the buffer.
+///
+/// The curly and dotted lines under the diagnostic spans follow the cells as
+/// raw VT, ahead of those frames, since a ratatui cell holds no such line.
 ///
 /// `live` offers hunks a caller already resolved, for a run of pages over one
 /// snapshot that would otherwise each pay an anchor batch over every hunk in the
@@ -326,6 +333,7 @@ pub(crate) fn render_page_from_snapshot(
     let (gutter_w, apc) =
         paint_page_gutter(snapshot, top_row, end_row, &mut buf, area, gutter, live);
 
+    let mut undercurls = UndercurlBatch::default();
     if end_row > top_row {
         paint_chunk_rows(
             snapshot.highlighted_chunks_with_endpoints(top_row..end_row, endpoints),
@@ -337,6 +345,35 @@ pub(crate) fn render_page_from_snapshot(
             fallback_style.patch(gutter.theme().get(crate::theme::scope::UI_VIRTUAL_INLAY)),
             &mut buf,
         );
+
+        if !gutter.diagnostics.spans.is_empty() {
+            let rope = snapshot.buffer_snapshot().rope();
+            let visible = visible_byte_range(snapshot, rope, top_row, end_row);
+            let inner = Rect {
+                x: area.x + gutter_w,
+                y: area.y,
+                width: area.width.saturating_sub(gutter_w),
+                height: area.height,
+            };
+            paint_diagnostic_spans(
+                gutter.diagnostics.overlapping(&visible),
+                &mut DiagnosticPaintScratch::default(),
+                visible,
+                rope,
+                snapshot,
+                gutter.theme(),
+                fallback_style,
+                top_row,
+                end_row,
+                inner,
+                area.x + area.width,
+                area.y + area.height,
+                &mut buf,
+                Some(&mut undercurls),
+                gutter.diagnostics.colors.as_ref(),
+                dim,
+            );
+        }
     }
 
     dim_page(&mut buf, area, gutter.theme(), dim);
@@ -344,7 +381,9 @@ pub(crate) fn render_page_from_snapshot(
         dim_page(&mut buf, area, gutter.theme(), spotlight.dim);
         light_page_range(&mut buf, area, gutter_w, top_row, snapshot, spotlight);
     }
+    undercurl::snapshot_cells(&buf, undercurls.spans_mut());
     let mut bytes = serialize_buffer(&buf);
+    bytes.extend(undercurl::build(&buf, undercurls.spans()));
     bytes.extend_from_slice(&apc);
     bytes
 }
@@ -442,6 +481,8 @@ pub(crate) struct PageGutter {
     /// The color of the frame around a split diff's base column, which a
     /// diff page draws down the column's two sides. `None` draws no frame.
     frame: Option<[u8; 3]>,
+    /// The diagnostics a plain editor page paints over its text.
+    diagnostics: PageDiagnostics,
 }
 
 impl PageGutter {
@@ -466,6 +507,7 @@ impl PageGutter {
             batch: false,
             icons: false,
             frame: None,
+            diagnostics: PageDiagnostics::default(),
         }
     }
 
@@ -497,6 +539,18 @@ impl PageGutter {
         PageGutter { frame, ..self }
     }
 
+    /// This gutter with the `diagnostics` that a plain editor page paints over
+    /// its text, as the live grid paints them.
+    ///
+    /// Empty until set, so a page paints no diagnostic span. A diff page
+    /// ignores it, since a diff view paints no diagnostics.
+    pub(crate) fn diagnostics(self, diagnostics: PageDiagnostics) -> PageGutter {
+        PageGutter {
+            diagnostics,
+            ..self
+        }
+    }
+
     /// A scene for a page's rich gutter to paint into, at this gutter's batch
     /// protocol.
     fn scene(&self) -> ApcScene {
@@ -509,6 +563,37 @@ impl PageGutter {
     /// its two columns off the loop.
     pub(crate) fn theme(&self) -> &crate::theme::Theme {
         &self.theme
+    }
+}
+
+/// The diagnostics a plain editor page paints over its text, resolved on the
+/// run loop.
+///
+/// A page renders off the loop from a [`DisplaySnapshot`], where the editor's
+/// anchored span cache does not reach. The spans come from the list that the
+/// gutter refresh resolves for each set and buffer version, so a page costs no
+/// resolve of its own.
+///
+/// `colors` is `None` when a severity color is not RGB. The page then paints
+/// each span's severity style alone and stamps no curly or dotted line over
+/// it, as the live grid does.
+#[derive(Clone, Default)]
+pub(crate) struct PageDiagnostics {
+    /// Every diagnostic of the buffer, in start order.
+    pub(crate) spans: Arc<[ResolvedDiag]>,
+    pub(crate) colors: Option<SeverityColors>,
+}
+
+impl PageDiagnostics {
+    /// The spans that start before the end of `bytes` and end past its start,
+    /// in start order.
+    fn overlapping(&self, bytes: &Range<usize>) -> Vec<ResolvedDiag> {
+        let starts_before_end = self.spans.partition_point(|span| span.start < bytes.end);
+        self.spans[..starts_before_end]
+            .iter()
+            .filter(|span| span.end > bytes.start)
+            .copied()
+            .collect()
     }
 }
 
@@ -1066,6 +1151,13 @@ mod tests {
     use ratatui::style::Style;
     use std::sync::Arc;
 
+    /// Ten numbered lines that a page and a live paint both show.
+    ///
+    /// The combining mark on line zero occupies no cell of its own, so both
+    /// paths must join it to the cell its base went into. Without it a byte
+    /// comparison of the two passes over a paint loop that drops marks.
+    const PAGE_DOC: &str = "l\u{301}ine zero\nline one\nline two\nline three\nline four\nline five\nline six\nline seven\nline eight\nline nine\n";
+
     /// The endpoints a page resolved for itself before a refill began sharing
     /// one set across its pages, which is the behavior these tests pin.
     fn page_endpoints(
@@ -1098,13 +1190,7 @@ mod tests {
         let mut h = Stoat::test();
         let root = PathBuf::from("/page-snapshot");
         let path = root.join("doc.txt");
-        // The combining mark on line zero occupies no cell of its own, so both
-        // paths must join it to the cell its base went into. Without it the
-        // byte comparison below passes over a paint loop that drops marks.
-        h.fake_fs().insert_file(
-            &path,
-            "l\u{301}ine zero\nline one\nline two\nline three\nline four\nline five\nline six\nline seven\nline eight\nline nine\n".as_bytes(),
-        );
+        h.fake_fs().insert_file(&path, PAGE_DOC.as_bytes());
         h.stoat.active_workspace_mut().git_root = root;
         dispatch(&mut h.stoat, &OpenFile { path });
         h.settle();
@@ -1175,6 +1261,135 @@ mod tests {
             );
 
             assert_eq!(got, expected, "page at top_row {top_row}");
+        }
+    }
+
+    /// A page paints the diagnostic spans of its rows as the unfocused live grid
+    /// paints them, with the curly or dotted line that the frame stamps over each.
+    ///
+    /// The error on row 1 curls, the hint on row 5 dots, and the unused code from
+    /// row 7 into row 8 mutes its text across the edge between two pages.
+    #[test]
+    fn a_page_paints_the_diagnostic_spans_of_the_unfocused_live_grid() {
+        use super::{
+            page_buffer, render_page_from_snapshot, serialize_buffer, PageDiagnostics, PageGutter,
+            Rect,
+        };
+        use crate::{
+            action_handlers::{self, dispatch},
+            render::{
+                editor::{render_editor_with_overlay, ResolvedChrome},
+                undercurl::{self, UndercurlBatch},
+            },
+            theme::scope,
+            LineNumbers, Stoat,
+        };
+        use lsp_types::{Diagnostic, DiagnosticSeverity, DiagnosticTag, Position, Range};
+        use std::path::PathBuf;
+        use stoat_action::OpenFile;
+        use stoat_config::WrapMode;
+
+        let diagnostic = |severity, start: (u32, u32), end: (u32, u32), tags| Diagnostic {
+            range: Range::new(Position::new(start.0, start.1), Position::new(end.0, end.1)),
+            severity: Some(severity),
+            tags,
+            ..Default::default()
+        };
+
+        let mut h = Stoat::test();
+        let root = PathBuf::from("/page-diagnostics");
+        let path = root.join("doc.txt");
+        h.fake_fs().insert_file(&path, PAGE_DOC.as_bytes());
+        h.stoat.active_workspace_mut().git_root = root;
+        dispatch(&mut h.stoat, &OpenFile { path: path.clone() });
+        h.settle();
+        h.seed_diagnostics(
+            &path,
+            vec![
+                diagnostic(DiagnosticSeverity::ERROR, (1, 0), (1, 4), None),
+                diagnostic(DiagnosticSeverity::HINT, (5, 0), (5, 4), None),
+                diagnostic(
+                    DiagnosticSeverity::WARNING,
+                    (7, 0),
+                    (8, 4),
+                    Some(vec![DiagnosticTag::UNNECESSARY]),
+                ),
+            ],
+        );
+
+        let theme = h.stoat.theme.clone();
+        let fallback = theme.get(scope::UI_TEXT);
+        let chrome = ResolvedChrome::resolve(&theme);
+        let set = h.stoat.diagnostics.clone();
+        let editor = action_handlers::focused_editor_mut(&mut h.stoat).expect("focused editor");
+
+        for top_row in [0u32, 4, 8] {
+            let area = Rect::new(0, 0, 12, 4);
+            let mut live = page_buffer(area, &theme);
+            let mut undercurls = UndercurlBatch::default();
+            undercurls.begin();
+            let saved = editor.scroll_row;
+            editor.scroll_row = top_row;
+            render_editor_with_overlay(
+                editor,
+                area,
+                fallback,
+                &theme,
+                &chrome,
+                &mut live,
+                false,
+                false,
+                LineNumbers::Absolute,
+                false,
+                None,
+                None,
+                Some((&path, &set)),
+                None,
+                true,
+                Some(&mut undercurls),
+                0.0,
+                DiffDials::shipped(),
+                WrapMode::None,
+                80,
+                0,
+                &[],
+                false,
+                None,
+            );
+            editor.scroll_row = saved;
+            undercurl::snapshot_cells(&live, undercurls.spans_mut());
+            let mut expected = serialize_buffer(&live);
+            expected.extend(undercurl::build(&live, undercurls.spans()));
+
+            let cache = editor
+                .gutter_severity_cache
+                .as_ref()
+                .expect("the live paint resolves the diagnostics");
+            let gutter = PageGutter::new(true, cache.map.clone(), theme.clone(), None, None)
+                .diagnostics(PageDiagnostics {
+                    spans: cache.spans.clone(),
+                    colors: chrome.severity.clone(),
+                });
+            let snapshot = editor.display_map.snapshot();
+            let got = render_page_from_snapshot(
+                &snapshot,
+                top_row,
+                fallback,
+                12,
+                4,
+                &gutter,
+                false,
+                0.0,
+                DiffDials::shipped(),
+                page_endpoints(&snapshot, top_row, 4),
+                None,
+                None,
+            );
+
+            assert_eq!(got, expected, "page at top_row {top_row}");
+            if top_row == 0 {
+                assert!(find(&got, b"4:3").is_some(), "the error on row 1 curls");
+            }
         }
     }
 

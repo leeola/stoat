@@ -1152,6 +1152,10 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
         .chrome
         .as_ref()
         .and_then(|(_, chrome)| chrome.rich_gutter.clone());
+    let severity_colors = stoat
+        .chrome
+        .as_ref()
+        .and_then(|(_, chrome)| chrome.severity.clone());
     // A diff page draws its gutter as runs only when the page gutter colors and
     // the diff colors both resolve. The dim only fades the colors, so one answer
     // holds for every pane.
@@ -1319,7 +1323,15 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
                 .diff_view
                 .then(|| crate::render::pane::diff_base_tint(theme))
                 .flatten(),
-        );
+        )
+        .diagnostics(crate::smooth_scroll::PageDiagnostics {
+            spans: editor
+                .gutter_severity_cache
+                .as_ref()
+                .map(|cache| cache.spans.clone())
+                .unwrap_or_default(),
+            colors: severity_colors.clone(),
+        });
         let diff_view = editor.diff_view;
         let mut rendered = Vec::new();
         let Refill {

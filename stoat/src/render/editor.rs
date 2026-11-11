@@ -311,15 +311,16 @@ pub(crate) fn render_editor_with_overlay(
                 // The marks and the underline read the same resolution, so they
                 // cannot disagree about where a diagnostic sits.
                 build_diagnostic_span_cache(editor, set, path, buffer_snapshot);
-                let map = editor
+                let spans: Arc<[ResolvedDiag]> = editor
                     .diagnostic_span_cache
                     .as_ref()
-                    .map(|cache| row_severity_from_spans(&cache.resolve_all(buffer_snapshot)))
+                    .map(|cache| cache.resolve_all(buffer_snapshot).into())
                     .unwrap_or_default();
                 editor.gutter_severity_cache = Some(GutterSeverityCache {
                     version,
                     buffer_version,
-                    map: Arc::new(map),
+                    map: Arc::new(row_severity_from_spans(&spans)),
+                    spans,
                 });
             }
             &editor
@@ -476,7 +477,7 @@ pub(crate) fn render_editor_with_overlay(
         } = editor;
         if let Some(cache) = diagnostic_span_cache.as_ref() {
             paint_diagnostic_spans(
-                cache,
+                cache.resolve_overlapping(&visible, buffer_snapshot),
                 diagnostic_paint_scratch,
                 visible.clone(),
                 rope,
@@ -1115,6 +1116,13 @@ pub(crate) struct GutterSeverityCache {
     pub(crate) version: u64,
     buffer_version: u64,
     pub(crate) map: Arc<RowSeverity>,
+    /// Every diagnostic of the buffer, resolved against the cache's buffer
+    /// version, in start order.
+    ///
+    /// A pooled page renders off the run loop, where the anchored
+    /// [`DiagnosticSpanCache`] does not reach, so the page paints its
+    /// diagnostic spans from this list.
+    pub(crate) spans: Arc<[ResolvedDiag]>,
 }
 
 /// Cached gutter geometry for one set of drawn-gutter inputs, in three layers.
@@ -2214,13 +2222,17 @@ pub(crate) fn draw_fallback_line_numbers(
 
 /// Underline every visible diagnostic's text span in its severity color.
 ///
-/// Each diagnostic range is resolved from LSP line/character positions to buffer
-/// byte offsets and painted through [`paint_offset_range`], which merges the
-/// style so the underlined span keeps its syntax background. Empty ranges paint
-/// nothing.
+/// `spans` are resolved diagnostics in start order. A span that ends before
+/// `visible` or is empty paints nothing, and the rest clip to `visible`. Each
+/// paints through [`paint_offset_range`], which merges the style so the
+/// underlined span keeps its syntax background.
+///
+/// The live grid passes the spans that the cache bounds keep for the viewport.
+/// A pooled page passes the spans of its own rows from the list that the gutter
+/// refresh resolved, since a page renders off the run loop.
 #[allow(clippy::too_many_arguments)]
-fn paint_diagnostic_spans(
-    cache: &DiagnosticSpanCache,
+pub(crate) fn paint_diagnostic_spans(
+    spans: Vec<ResolvedDiag>,
     scratch: &mut DiagnosticPaintScratch,
     visible: Range<usize>,
     rope: &Rope,
@@ -2253,7 +2265,7 @@ fn paint_diagnostic_spans(
     } = scratch;
     muted_cells.clear();
 
-    // Only spans overlapping the viewport can paint a cell, and the cache bounds
+    // Only the spans that overlap the viewport paint a cell, and the caller bounds
     // which those are at both ends. Paint them least-severe first so the worst
     // severity lands last, on top, for both the cell foreground and the
     // collected undercurl spans. rust-analyzer can publish a WARNING and a HINT
@@ -2261,8 +2273,7 @@ fn paint_diagnostic_spans(
     // hint's grey win.
     ordered.clear();
     ordered.extend(
-        cache
-            .resolve_overlapping(&visible, snapshot.buffer_snapshot())
+        spans
             .into_iter()
             .filter(|s| s.start < s.end && s.end > visible.start),
     );

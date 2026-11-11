@@ -4158,6 +4158,32 @@ fn fill_paints_page_and_spares_live_grid() {
     );
 }
 
+/// A fill keeps the curly line and its color that a re-stamp of a cell sets,
+/// as a pooled page stamps the line under a diagnostic after its cells.
+#[test]
+fn a_fill_keeps_a_curly_underline_and_its_color_on_the_page() {
+    let mut terminal = Terminal::new(2, 4, Theme::default());
+    declare_pool(&mut terminal, 0, 2, 4);
+
+    let mut stream = encode_fill(&FillCommand { pool: 0, index: 0 });
+    stream.extend_from_slice(b"hi\x1b7\x1b[1;1H\x1b[0;39;49;4:3;58:2::0:255:0mh\x1b8\x1b[0m");
+    stream.extend_from_slice(&encode_fill_end());
+    terminal.advance(&stream);
+
+    let page = pool_page(&terminal, 0, 0);
+    let (curled, plain) = (page.get(0, 0), page.get(0, 1));
+    assert_eq!(
+        (
+            (curled.ch, curled.underline, curled.underline_color),
+            plain.underline
+        ),
+        (
+            ('h', UnderlineStyle::Curly, Rgb::new(0, 255, 0)),
+            UnderlineStyle::None
+        ),
+    );
+}
+
 /// A row patch paints its page and spares the live screen. The capture holds
 /// its rows off the screen, and the output after the patch's close marker
 /// paints the screen. The patch arrives in a read of its own, which no fill
