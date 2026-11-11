@@ -16,7 +16,7 @@ use crate::{
     editor_state::{EditorId, EditorState},
     pane::Pane,
     render::{
-        chrome::{self, TypeTag},
+        chrome,
         editor::{fit_diff_view, render_editor_with_overlay, screen_cell, split_minimap_strip},
         paint::style_rgb,
         pane::diff_base_tint,
@@ -548,29 +548,24 @@ fn emit_header_hairlines(rows: impl Iterator<Item = Rect>, theme: &Theme, scene:
 /// The runs of the header over the file at `rel_path`, each in the style it
 /// paints in.
 ///
-/// The header names the file's type tag, its directory, and its name. Then it
-/// counts the lines `stats` adds and removes and the hunks. A count of zero
-/// takes no run. Where the tree pass refined a hunk, the count names the git
-/// hunks and then the structural ones. With no structural count to tell them
-/// from, the count names the hunks alone.
+/// The header names the file's directory, its name, and its extension in the
+/// type's color. Then it counts the lines `stats` adds and removes and the
+/// hunks. A count of zero takes no run. Where the tree pass refined a hunk,
+/// the count names the git hunks and then the structural ones. With no
+/// structural count to tell them from, the count names the hunks alone.
 fn header_runs(rel_path: &str, stats: ExcerptStats, theme: &Theme) -> Vec<(String, Style)> {
     let muted = theme.get(scope::UI_TEXT_MUTED);
-    let mut runs = Vec::new();
-    if let Some(TypeTag {
-        tag,
-        scope: tag_scope,
-        ..
-    }) = chrome::type_tag(Path::new(rel_path))
-    {
-        runs.push((format!("{tag} "), theme.get(tag_scope)));
-    }
-
+    let bold = theme.get(scope::UI_TEXT).add_modifier(Modifier::BOLD);
     let (dir, name) = rel_path.split_at(rel_path.rfind('/').map_or(0, |slash| slash + 1));
-    runs.push((dir.to_string(), muted));
-    runs.push((
-        name.to_string(),
-        theme.get(scope::UI_TEXT).add_modifier(Modifier::BOLD),
-    ));
+    let mut runs = vec![(dir.to_string(), muted)];
+    match chrome::tagged_name(Path::new(name)) {
+        Some(tagged) => {
+            let suffix = theme.get(tagged.tag.scope).add_modifier(Modifier::BOLD);
+            runs.push((tagged.stem, bold));
+            runs.push((tagged.suffix, suffix));
+        },
+        None => runs.push((name.to_string(), bold)),
+    }
 
     if stats.added > 0 {
         runs.push((format!(" +{}", stats.added), theme.get(scope::DIFF_ADDED)));
@@ -1007,10 +1002,10 @@ mod tests {
         );
     }
 
-    /// A header names the type tag, the directory, and the bold name, then the
-    /// line counts in their diff colors and the hunks in muted text. With no
-    /// structural hunk the count names the hunks alone, and a count of zero
-    /// takes no run.
+    /// A header names the directory, the bold name, and the bold extension in
+    /// the type's color, then the line counts in their diff colors and the
+    /// hunks in muted text. With no structural hunk the count names the hunks
+    /// alone, and a count of zero takes no run.
     #[test]
     fn a_header_counts_its_lines_and_hunks_after_the_path() {
         let h = TestHarness::with_size(40, 4);
@@ -1041,11 +1036,14 @@ mod tests {
             ),
             (
                 vec![
-                    run("rs ", theme.get(scope::UI_TAG_RUST)),
                     run("stoat/src/render/", theme.get(scope::UI_TEXT_MUTED)),
                     run(
-                        "chrome.rs",
+                        "chrome",
                         theme.get(scope::UI_TEXT).add_modifier(Modifier::BOLD)
+                    ),
+                    run(
+                        ".rs",
+                        theme.get(scope::UI_TAG_RUST).add_modifier(Modifier::BOLD)
                     ),
                     run(" +12", theme.get(scope::DIFF_ADDED)),
                     run(" \u{2212}15", theme.get(scope::DIFF_DELETED)),
@@ -1055,9 +1053,9 @@ mod tests {
                     ),
                 ],
                 [
-                    "rs src/theme.rs +6 \u{b7} 1 hunk",
+                    "src/theme.rs +6 \u{b7} 1 hunk",
                     "notes.txt \u{2212}4 \u{b7} 3 hunks",
-                    "rs a.rs +1 \u{2212}1 \u{b7} 1 git hunk \u{b7} 1 structural",
+                    "a.rs +1 \u{2212}1 \u{b7} 1 git hunk \u{b7} 1 structural",
                     "new.txt",
                 ]
                 .map(String::from),
