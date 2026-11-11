@@ -457,7 +457,7 @@ impl Painter<'_> {
         Panel {
             style: BorderStyle::None_,
             border: fill,
-            corner_radius: 1,
+            corner_radius: 4,
             fill: Some(fill),
             shadow: PanelShadow::None_,
             edges: Edge::symmetric(0, 0),

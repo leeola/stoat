@@ -752,7 +752,7 @@ mod tests {
             height: 1,
             style: BorderStyle::None_,
             border: bytes(hex),
-            corner_radius: 1,
+            corner_radius: 4,
             fill: Some(bytes(hex)),
             shadow: PanelShadow::None_,
             edges: Edge::symmetric(0, 1),

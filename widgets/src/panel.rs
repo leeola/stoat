@@ -71,7 +71,7 @@ impl Panel {
     /// A chip's box in `fill`, one row of cells that holds a short label.
     ///
     /// The box stands one logical pixel inside the row's top and bottom edges,
-    /// with corners of radius 1, so a chip reads as a box inside its row and
+    /// with corners of radius 4, so a chip reads as a box inside its row and
     /// not as a band across the row. It draws no line and no shadow. The cells
     /// under it keep the row's background, and their glyphs draw over the
     /// fill.
@@ -79,7 +79,7 @@ impl Panel {
         Panel {
             style: BorderStyle::None_,
             border: fill,
-            corner_radius: 1,
+            corner_radius: 4,
             fill: Some(fill),
             shadow: PanelShadow::None_,
             edges: Edge::symmetric(0, 1),

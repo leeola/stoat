@@ -134,8 +134,9 @@ fn the_gutter_draws_the_hunk_and_state_lanes_left_of_the_number() {
 /// never does.
 ///
 /// The cursor opens on the row's first column, so the ghost outlines the base
-/// text's first cell, column 6. Its dashed top edge lies one pixel below the
-/// cell's top, in the dim text color, and the next cell holds none of it.
+/// text's first cell, column 6. Its dashed outline rounds its corners at 4 px
+/// inside the cell, so the cell's top row holds none of its dim pixels, its
+/// left side holds some, and the next cell holds none.
 #[test]
 fn a_modified_row_reads_removed_on_the_base_side_and_added_on_the_live_side() {
     let mut home = support::scratch_home();
@@ -166,12 +167,16 @@ fn a_modified_row_reads_removed_on_the_base_side_and_added_on_the_live_side() {
         let (x, _, width, _) = cell_rect(col, 4, 1, 1);
         pixels_of(&shot, (x, y + dy, width, 1), TEXT_DIM)
     };
-    let ghost = (row_dims(6, 0), row_dims(6, 1) > 0, row_dims(7, 1));
+    let side_dims = {
+        let (x, _, _, _) = cell_rect(6, 4, 1, 1);
+        pixels_of(&shot, (x, y, 1, height), TEXT_DIM)
+    };
+    let ghost = (row_dims(6, 0), side_dims > 0, row_dims(7, 1));
     if ghost != (0, true, 0) {
         let frame = keep_frame(&shot, &mut home, "diff_ghost_cursor");
         panic!(
-            "the ghost's dim pixels read {ghost:?} on the cell top, its edge, and the next cell; \
-             the frame is {}",
+            "the ghost's dim pixels read {ghost:?} on the cell top, its left side, and the next \
+             cell; the frame is {}",
             frame.display(),
         );
     }

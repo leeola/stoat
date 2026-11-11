@@ -290,7 +290,7 @@ fn a_chip_panel_sits_under_the_pane_pool() {
             height: 1,
             style: BorderStyle::None_,
             border: CHIP_CONFLICT,
-            corner_radius: 1,
+            corner_radius: 4,
             fill: Some(CHIP_CONFLICT),
             shadow: PanelShadow::None_,
             edges: Edge::symmetric(0, 0),

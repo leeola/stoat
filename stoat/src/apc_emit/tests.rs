@@ -687,7 +687,7 @@ fn status_bar_emits_sub_cell_components_inside_stoatty() {
         height: 1,
         style: BorderStyle::None_,
         border: [127, 176, 255],
-        corner_radius: 1,
+        corner_radius: 4,
         fill: Some([127, 176, 255]),
         shadow: PanelShadow::None_,
         edges: Edge::symmetric(0, 1),

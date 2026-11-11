@@ -754,7 +754,7 @@ mod tests {
                     height: 1,
                     style: BorderStyle::None_,
                     border: [4, 5, 6],
-                    corner_radius: 1,
+                    corner_radius: 4,
                     fill: Some([4, 5, 6]),
                     shadow: PanelShadow::None_,
                     edges: Edge::symmetric(0, 1),

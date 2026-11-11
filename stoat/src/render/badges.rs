@@ -266,7 +266,7 @@ fn render_single_badge(
             Panel {
                 style: BorderStyle::None_,
                 border: color,
-                corner_radius: 1,
+                corner_radius: 4,
                 fill: tint,
                 shadow: PanelShadow::None_,
                 edges: Edge::symmetric(0, 0),
@@ -598,7 +598,7 @@ mod tests {
                         height: 1,
                         style: BorderStyle::None_,
                         border: BADGE_RGB,
-                        corner_radius: 1,
+                        corner_radius: 4,
                         fill: Some(TINT),
                         shadow: PanelShadow::None_,
                         edges: Edge::symmetric(0, 0),

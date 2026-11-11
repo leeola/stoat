@@ -431,7 +431,7 @@ pub(crate) fn emit_ghost_cursor(
     Panel {
         style: BorderStyle::Dashed,
         border,
-        corner_radius: 1,
+        corner_radius: 4,
         fill: None,
         shadow: PanelShadow::None_,
         edges: Edge::symmetric(0, 1),

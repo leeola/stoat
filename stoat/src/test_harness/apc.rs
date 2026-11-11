@@ -459,7 +459,7 @@ mod tests {
         assert_eq!(
             filled,
             [
-                (BorderStyle::None_, PanelShadow::None_, 1, chip),
+                (BorderStyle::None_, PanelShadow::None_, 4, chip),
                 (BorderStyle::None_, PanelShadow::Halo, 2, fill),
             ],
             "the mode chip, then the box"

@@ -1847,7 +1847,7 @@ fn draw_conflict_chip(
     Panel {
         style: BorderStyle::None_,
         border: color,
-        corner_radius: 1,
+        corner_radius: 4,
         fill: style_rgb(chip.style.bg),
         shadow: PanelShadow::None_,
         edges: Edge::symmetric(0, 0),

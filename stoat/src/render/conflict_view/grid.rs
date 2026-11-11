@@ -971,7 +971,7 @@ fn draw_chip(
         Panel {
             style: BorderStyle::None_,
             border: tone.tint,
-            corner_radius: 1,
+            corner_radius: 4,
             fill: Some(tone.tint),
             shadow: PanelShadow::None_,
             edges: Edge::symmetric(0, 0),
