@@ -234,6 +234,13 @@ pub(crate) struct EditorState {
     /// reuses their capacity instead of allocating a pair per pane per frame.
     /// Holds nothing between frames. Transient render state, not persisted.
     pub(crate) diagnostic_paint_scratch: crate::render::editor::DiagnosticPaintScratch,
+    /// The cursor inputs of the last paint's end-of-line diagnostic messages,
+    /// or `None` after a paint that printed none.
+    ///
+    /// Only the paint knows whether the pane painted as focused and whether
+    /// the popover drew, so a pooled page prints from this record what the
+    /// live grid printed. Transient render state, not persisted.
+    pub(crate) eol_cursor: Option<crate::render::editor::EolCursor>,
     /// Cells the last render reserved on the left for the diagnostic gutter (0
     /// or 1), so click-to-offset can subtract the same inset the text rect was
     /// shifted by. Transient render state written by `render_editor`, not
@@ -344,6 +351,7 @@ impl EditorState {
             status_scene_cache: Default::default(),
             diagnostic_span_cache: None,
             diagnostic_paint_scratch: Default::default(),
+            eol_cursor: None,
             gutter_width: 0,
             stack_gutter_digits: None,
             reveal_flashes: Vec::new(),

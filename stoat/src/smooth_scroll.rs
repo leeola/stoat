@@ -32,8 +32,9 @@ use crate::{
         conflict_view::{render_conflict_rows, GridPaint},
         editor::{
             draw_fallback_line_numbers, gutter_component_lines, gutter_diff_marks, gutter_geometry,
-            paint_chunk_rows, paint_diagnostic_spans, rich_gutter, visible_byte_range,
-            DiagnosticPaintScratch, RichGutterColors, RowSeverity, SeverityColors,
+            paint_chunk_rows, paint_diagnostic_spans, paint_line_diagnostics, rich_gutter,
+            visible_byte_range, DiagnosticPaintScratch, EolCursor, RichGutterColors, RowSeverity,
+            SeverityColors,
         },
         file_finder::paint_finder_rows,
         help::{paint_help_detail_rows, paint_help_list_rows},
@@ -253,7 +254,8 @@ pub(crate) fn render_page_decorations(
 ///
 /// Paints the line-number gutter, then the text and syntax highlights inset past
 /// it, then the diagnostic spans of [`PageGutter::diagnostics()`] over the text.
-/// These are the cells the unfocused live grid paints for these rows, minus the
+/// A page of the focused editor also prints each line's diagnostic message after
+/// the text. These are the cells the live grid paints for these rows, minus the
 /// cursor and selection a pooled page never carries. Rows past the document end
 /// stay blank, and the [`serialize_buffer`] bytes fully repaint the slot
 /// regardless of its prior contents.
@@ -373,6 +375,20 @@ pub(crate) fn render_page_from_snapshot(
                 gutter.diagnostics.colors.as_ref(),
                 dim,
             );
+            if let Some(cursor) = gutter.diagnostics.eol {
+                paint_line_diagnostics(
+                    &gutter.diagnostics.spans,
+                    &gutter.diagnostics.messages,
+                    cursor,
+                    gutter.theme(),
+                    snapshot,
+                    top_row,
+                    end_row,
+                    inner,
+                    area.x + area.width,
+                    &mut buf,
+                );
+            }
         }
     }
 
@@ -577,11 +593,20 @@ impl PageGutter {
 /// `colors` is `None` when a severity color is not RGB. The page then paints
 /// each span's severity style alone and stamps no curly or dotted line over
 /// it, as the live grid does.
+///
+/// A page prints each line's message after its text only with an `eol`
+/// record, which the last live paint leaves when it printed the messages.
 #[derive(Clone, Default)]
 pub(crate) struct PageDiagnostics {
     /// Every diagnostic of the buffer, in start order.
     pub(crate) spans: Arc<[ResolvedDiag]>,
     pub(crate) colors: Option<SeverityColors>,
+    /// The first line of each diagnostic's message, by its index.
+    pub(crate) messages: Arc<[Box<str>]>,
+    /// The cursor inputs of the last live paint's messages, or `None` where
+    /// that paint printed none, as the live grid of an unfocused pane prints
+    /// none.
+    pub(crate) eol: Option<EolCursor>,
 }
 
 impl PageDiagnostics {
@@ -1369,6 +1394,7 @@ mod tests {
                 .diagnostics(PageDiagnostics {
                     spans: cache.spans.clone(),
                     colors: chrome.severity.clone(),
+                    ..Default::default()
                 });
             let snapshot = editor.display_map.snapshot();
             let got = render_page_from_snapshot(

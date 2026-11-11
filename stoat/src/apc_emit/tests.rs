@@ -1079,6 +1079,187 @@ fn a_glide_page_carries_the_undercurl_of_its_diagnostic() {
     );
 }
 
+/// The messages' stamp moves only where the cursor changes what a page prints:
+/// whether the messages print, the popover's diagnostic, and a cursor line
+/// whose readout differs from the diagnostic the line starts.
+#[test]
+fn the_message_stamp_moves_only_where_the_cursor_changes_a_line() {
+    let span = |start_line: u32, end_line: u32, severity, index| ResolvedDiag {
+        start: start_line as usize * 10,
+        end: end_line as usize * 10 + 5,
+        severity,
+        unnecessary: false,
+        start_line,
+        end_line,
+        index,
+    };
+    let spans = [
+        span(0, 2, lsp_types::DiagnosticSeverity::WARNING, 0),
+        span(5, 5, lsp_types::DiagnosticSeverity::ERROR, 1),
+    ];
+    let at = |line, readout: Option<usize>, suppress| {
+        let readout = readout.map(|index| spans[index]);
+        eol_page_stamp(
+            Some(EolCursor {
+                line,
+                readout,
+                suppress,
+            }),
+            &spans,
+        )
+    };
+
+    let base = at(3, None, None);
+    assert_eq!(
+        [
+            eol_page_stamp(None, &spans) == base,
+            at(4, None, None) == base,
+            at(1, Some(0), None) == base,
+            at(0, Some(0), None) == base,
+            at(3, None, Some(1)) == base,
+        ],
+        [false, true, false, true, false],
+        "a record, a readout its line does not start, and the popover's pick move the stamp",
+    );
+    let anywhere = EolCursor {
+        line: 0,
+        readout: None,
+        suppress: None,
+    };
+    assert_eq!(
+        [
+            eol_page_stamp(None, &[]),
+            eol_page_stamp(Some(anywhere), &[])
+        ],
+        [0, 0],
+        "a buffer with no diagnostic stamps 0",
+    );
+}
+
+/// A pooled page of the focused editor prints each line's diagnostic message
+/// as the live grid prints it, and the error that the popover shows on no line.
+#[test]
+fn a_glide_page_prints_the_messages_of_the_focused_pane() {
+    let (mut h, mut rx, _, region) = message_page_harness();
+    let live = h.stoat.render();
+    let bytes = emit_raw(&mut h, &mut rx);
+
+    let rect = Rect::new(region.left, region.top, region.width, region.height);
+    let page = page_cells(
+        fill_payload(&bytes, region.pool, 0),
+        region.width,
+        region.height,
+    );
+    let live = buffer_cells(&live, rect);
+    let rows = [0, 6].map(|row| row_text(&page, row));
+    assert_eq!(
+        rows,
+        [0, 6].map(|row| row_text(&live, row)),
+        "the page prints the live rows"
+    );
+    assert_eq!(
+        (
+            rows[0].contains("bad"),
+            rows[1].trim_end().ends_with("unused `y`")
+        ),
+        (false, true),
+        "the popover's error prints on no line, and line 6 prints its warning",
+    );
+}
+
+/// An unfocused pane's live grid prints no diagnostic message, and neither do
+/// its pages. The focus move changes no other page input, so the messages'
+/// stamp alone refills the page that the next glide reads.
+#[test]
+fn an_unfocused_pane_s_page_prints_no_message() {
+    let (mut h, mut rx, editor_id, region) = message_page_harness();
+    let row_6 = |bytes: &[u8]| {
+        let page = page_cells(
+            fill_payload(bytes, region.pool, 0),
+            region.width,
+            region.height,
+        );
+        let row = row_text(&page, 6);
+        (row.contains("let y = 2;"), row.contains("unused `y`"))
+    };
+    h.stoat.render();
+    let focused = row_6(&emit_raw(&mut h, &mut rx));
+
+    action_handlers::dispatch(&mut h.stoat, &stoat_action::FocusLeft);
+    h.stoat.render();
+    let editor = &mut h.stoat.active_workspace_mut().editors[editor_id];
+    editor.scroll_offset = 0.5;
+    editor.scroll_glide = ScrollGlide::Page;
+    let unfocused = row_6(&emit_raw(&mut h, &mut rx));
+
+    assert_eq!([focused, unfocused], [(true, true), (true, false)]);
+}
+
+/// [`editor_page_around`]'s split under [`rgb_diagnostic_theme`], over the
+/// file and the diagnostics of the editor's popover message test, with the
+/// focused editor and its pool region.
+///
+/// The cursor sits in the error's span, so the popover shows the error and its
+/// message prints on no line, while line 6 prints the warning's. The inactive
+/// fade is 0, so a focus move changes no page input but the messages.
+fn message_page_harness() -> (
+    crate::test_harness::TestHarness,
+    tokio::sync::mpsc::UnboundedReceiver<Vec<u8>>,
+    EditorId,
+    PoolRegionCommand,
+) {
+    let mut h = crate::test_harness::TestHarness::with_size(80, 24);
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+    h.stoat.set_apc_tx(tx);
+    h.stoat.theme = Arc::new(rgb_diagnostic_theme());
+    h.stoat.settings.ui_inactive_dim = Some(0.0);
+    h.stoat.settings.editor_line_numbers = Some(LineNumbers::Absolute);
+    h.stoat.settings.editor_minimap = Some(MinimapMode::Off);
+    let path = h.write_file("a.txt", "let x = 1;\n\n\n\n\n\nlet y = 2;\n");
+    h.type_action("SplitRight()");
+    h.open_file(&path);
+    h.settle();
+
+    let diagnostic =
+        |start: (u32, u32), end: (u32, u32), severity, message: &str| lsp_types::Diagnostic {
+            range: lsp_types::Range::new(
+                lsp_types::Position::new(start.0, start.1),
+                lsp_types::Position::new(end.0, end.1),
+            ),
+            severity: Some(severity),
+            message: message.to_string(),
+            ..Default::default()
+        };
+    h.seed_diagnostics(
+        &path,
+        vec![
+            diagnostic((0, 0), (0, 3), lsp_types::DiagnosticSeverity::ERROR, "bad"),
+            diagnostic(
+                (6, 4),
+                (6, 5),
+                lsp_types::DiagnosticSeverity::WARNING,
+                "unused `y`",
+            ),
+        ],
+    );
+
+    let ws = h.stoat.active_workspace();
+    let pane = ws.panes.pane(ws.panes.focus());
+    let View::Editor(editor_id) = pane.view else {
+        panic!("the focused pane shows no editor");
+    };
+    let (_, _, region) = editor_pool_panes(&h.stoat)
+        .into_iter()
+        .find(|(pool, _, _)| *pool == pane.index)
+        .expect("the focused editor pools");
+    (h, rx, editor_id, region)
+}
+
+/// The symbols of row `row` of `rows`.
+fn row_text(rows: &CellRows, row: usize) -> String {
+    rows[row].iter().map(|&(ch, _, _)| ch).collect()
+}
+
 #[test]
 fn diagnostic_popover_emits_a_popover_frame_inside_stoatty() {
     use stoatty_protocol::command::Command;

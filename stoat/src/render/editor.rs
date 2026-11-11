@@ -198,6 +198,7 @@ pub(crate) fn render_editor_with_overlay(
     editor.ghost_cursor_cell = None;
     editor.minimap_rect = None;
     editor.text_rect = None;
+    editor.eol_cursor = None;
 
     if editor.diff_view {
         let inner = reserve_minimap_strip(editor, inner, minimap_enabled);
@@ -606,6 +607,7 @@ pub(crate) fn render_editor_with_overlay(
                 readout: cache.cursor_line_diagnostic(line, buffer_snapshot),
                 suppress,
             };
+            editor.eol_cursor = Some(eol);
             paint_line_diagnostics(
                 &gutter_cache.spans,
                 &cache.messages,

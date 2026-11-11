@@ -16,6 +16,7 @@ use crate::{
     app::{modal_split_percent, modal_zoom_steps, ModalKind, Stoat},
     buffer_registry::BufferRegistry,
     commit_list::Preview,
+    diagnostic_spans::{self, ResolvedDiag},
     diff_changes::{self, DiffChangesId, DiffChangesState},
     display_map::{highlights::HighlightEndpoints, DisplayPoint, DisplaySnapshot, PaintVersion},
     editor_state::{EditorId, EditorState, ScrollGlide},
@@ -24,6 +25,7 @@ use crate::{
     pane::{FocusTarget, PaneId, Placement, View},
     render::{
         diff_changes::PagePaint,
+        editor::EolCursor,
         hover::HoverFrame,
         rail_strip_id,
         review::DiffDials,
@@ -1097,7 +1099,7 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
             pool: u32,
             width: u16,
             height: u16,
-            gutter: crate::smooth_scroll::PageGutter,
+            gutter: Box<crate::smooth_scroll::PageGutter>,
             diff_view: bool,
             dim: f32,
             dials: DiffDials,
@@ -1260,6 +1262,11 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
         // edit and every layer reflow into the content hash below.
         let buffer_version = editor.display_map.buffer_snapshot().version();
         let paint_version = editor.display_map.snapshot().paint_version();
+        let spans = editor
+            .gutter_severity_cache
+            .as_ref()
+            .map(|cache| cache.spans.clone())
+            .unwrap_or_default();
         let content_version = editor_page_content_version(
             editor_syntax(editor.diff_view),
             editor.gutter_width,
@@ -1277,6 +1284,7 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
             paint_version,
             theme_epoch,
             page_spotlight,
+            eol_page_stamp(editor.eol_cursor, &spans),
         );
         let snapshot = editor.display_map.snapshot();
         // The spotlight recolors only the rows it lights, so where it falls is
@@ -1325,12 +1333,14 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
                 .flatten(),
         )
         .diagnostics(crate::smooth_scroll::PageDiagnostics {
-            spans: editor
-                .gutter_severity_cache
-                .as_ref()
-                .map(|cache| cache.spans.clone())
-                .unwrap_or_default(),
+            spans,
             colors: severity_colors.clone(),
+            messages: editor
+                .diagnostic_span_cache
+                .as_ref()
+                .map(|cache| cache.messages.clone())
+                .unwrap_or_default(),
+            eol: editor.eol_cursor,
         });
         let diff_view = editor.diff_view;
         let mut rendered = Vec::new();
@@ -1531,7 +1541,7 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
                     pool: region.pool,
                     width: region.width,
                     height: region.height,
-                    gutter,
+                    gutter: Box::new(gutter),
                     diff_view,
                     dials: diff_dials,
                     dim,
@@ -1943,6 +1953,7 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
                 editor.display_map.snapshot().paint_version(),
                 theme_epoch,
                 None,
+                0,
             );
             let snapshot = editor.display_map.snapshot();
             let severity = editor
@@ -1971,15 +1982,17 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
                     pool: region.pool,
                     width: region.width,
                     height: region.height,
-                    gutter: crate::smooth_scroll::PageGutter::new(
-                        line_numbers != LineNumbers::Off,
-                        severity,
-                        theme.clone(),
-                        base_rich.clone(),
-                        None,
-                    )
-                    .batched(batch_decorations)
-                    .page_icons(page_icons),
+                    gutter: Box::new(
+                        crate::smooth_scroll::PageGutter::new(
+                            line_numbers != LineNumbers::Off,
+                            severity,
+                            theme.clone(),
+                            base_rich.clone(),
+                            None,
+                        )
+                        .batched(batch_decorations)
+                        .page_icons(page_icons),
+                    ),
                     diff_view,
                     // A modal preview is not the diff view the knobs turn, so
                     // it paints at the shipped dials.
@@ -3585,6 +3598,10 @@ pub(crate) fn display_map_stamp(buffer_version: u64, paint_version: PaintVersion
 /// lights, so [`spotlight_page_version`] carries it in each page's own
 /// version, and a move between two annotations refills only the pages either
 /// one lights.
+///
+/// `eol_stamp` is the [`eol_page_stamp`] of the record the live paint left, so
+/// a change of the diagnostic messages a page prints after its lines refills
+/// it.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn editor_page_content_version(
     syntax_highlight: bool,
@@ -3600,6 +3617,7 @@ pub(crate) fn editor_page_content_version(
     paint_version: PaintVersion,
     theme_epoch: u64,
     spotlight: Option<&Spotlight>,
+    eol_stamp: u64,
 ) -> u64 {
     let mut hasher = DefaultHasher::new();
     (!syntax_highlight).hash(&mut hasher);
@@ -3622,6 +3640,7 @@ pub(crate) fn editor_page_content_version(
     spotlight
         .map(|spotlight| (spotlight.dim * 1000.0) as u32)
         .hash(&mut hasher);
+    eol_stamp.hash(&mut hasher);
     hasher.finish()
 }
 
@@ -3804,6 +3823,45 @@ fn spotlight_page_version(
 
     let mut hasher = DefaultHasher::new();
     (color, from, to).hash(&mut hasher);
+    hasher.finish()
+}
+
+/// The cells version that the end-of-line diagnostic messages give every page
+/// of an editor pool, from the record `eol` that the live paint left.
+///
+/// A page knows no cursor, so the stamp holds only the three things that the
+/// cursor changes on a page.
+///
+/// - Whether the messages print.
+/// - The diagnostic that the popover keeps off every line.
+/// - The cursor's line and the diagnostic it prints there, where that differs from the diagnostic
+///   the line starts.
+///
+/// Each index is read after the popover's filter.
+///
+/// A cursor that moves over lines where the two agree leaves the stamp, so a
+/// held `j` at the margin refills no page for it. A buffer with no diagnostic
+/// stamps 0, so a focus move alone refills none.
+fn eol_page_stamp(eol: Option<EolCursor>, spans: &[ResolvedDiag]) -> u64 {
+    if spans.is_empty() {
+        return 0;
+    }
+
+    let mut hasher = DefaultHasher::new();
+    eol.is_some().hash(&mut hasher);
+    if let Some(eol) = eol {
+        let shown = |found: Option<ResolvedDiag>| {
+            found
+                .map(|found| found.index)
+                .filter(|&index| Some(index) != eol.suppress)
+        };
+        let printed = shown(eol.readout);
+        let started = shown(diagnostic_spans::line_start_diagnostics(spans, &[eol.line])[0]);
+        eol.suppress.hash(&mut hasher);
+        (printed != started)
+            .then_some((eol.line, printed))
+            .hash(&mut hasher);
+    }
     hasher.finish()
 }
 
