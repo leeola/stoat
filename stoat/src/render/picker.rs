@@ -47,11 +47,20 @@ const MAX_PAGE_DOTS: usize = 5;
 /// The page dots' geometry in sixteenths of a cell: the current page's width,
 /// any other page's width, the gap between two dots, a dot's height, and its
 /// top edge in the row.
-const CURRENT_DOT_WIDTH: u16 = 24;
-const PAGE_DOT_WIDTH: u16 = 6;
-const PAGE_DOT_GAP: u16 = 8;
+///
+/// At a 9 by 18 pixel cell a dot is 4 pixels square, the current page's dot
+/// is 14 pixels wide, and the dots stand 5 pixels apart.
+const CURRENT_DOT_WIDTH: u16 = 25;
+const PAGE_DOT_WIDTH: u16 = 7;
+const PAGE_DOT_GAP: u16 = 9;
 const PAGE_DOT_HEIGHT: u16 = 4;
 const PAGE_DOT_TOP: i16 = 6;
+
+/// The radius the page dots round at, in logical pixels.
+///
+/// At a 9 by 18 pixel cell it is half a dot's height, so a dot draws as a
+/// circle and the current page's dot as a pill.
+const PAGE_DOT_RADIUS: u8 = 2;
 
 /// The words a filter modal's header row shows around its query.
 pub(crate) struct FilterHeader<'a> {
@@ -313,7 +322,7 @@ fn paint_page_dots(
             width,
             height: PAGE_DOT_HEIGHT,
             color,
-            radius: 0,
+            radius: PAGE_DOT_RADIUS,
             corners: 0,
         }
         .render(origin, buf, scene);
@@ -934,7 +943,8 @@ mod tests {
         (test_support::row_text(&buf, 0), scene.buffer().clone())
     }
 
-    /// The bar frames of page dots at `(x, width, color)`, in sixteenths.
+    /// The bar frames of page dots at `(x, width, color)`, in sixteenths, each
+    /// rounded at 2 logical pixels on all four corners.
     fn dot_frames(dots: &[(i16, u16, [u8; 3])]) -> Vec<u8> {
         dots.iter()
             .flat_map(|&(x, width, color)| {
@@ -946,16 +956,16 @@ mod tests {
                     color,
                     occludes: false,
                     hatch: None,
-                    radius: 0,
+                    radius: 2,
                     corners: 0,
                 })
             })
             .collect()
     }
 
-    /// The dots end one cell from the right edge, the lit one wide, and the
-    /// hints stop short of them. Past five pages the lit dot stands at the
-    /// selection's share of the list.
+    /// The dots end one cell from the right edge, round and the lit one wide,
+    /// and the hints stop short of them. Past five pages the lit dot stands at
+    /// the selection's share of the list.
     #[test]
     fn the_footer_paints_its_hints_and_page_dots() {
         let (lit, dim) = ([1, 2, 3], [4, 5, 6]);
@@ -968,20 +978,20 @@ mod tests {
             [
                 (
                     format!(" Enter open  C-f/C-b page{}", " ".repeat(15)),
-                    dot_frames(&[(572, 6, dim), (586, 24, lit), (618, 6, dim)]),
+                    dot_frames(&[(567, 7, dim), (583, 25, lit), (617, 7, dim)]),
                 ),
                 (
                     format!(" Enter open{}", " ".repeat(9)),
-                    dot_frames(&[(266, 24, lit), (298, 6, dim)]),
+                    dot_frames(&[(263, 25, lit), (297, 7, dim)]),
                 ),
                 (
                     format!(" Enter open  C-f/C-b page{}", " ".repeat(15)),
                     dot_frames(&[
-                        (544, 6, dim),
-                        (558, 6, dim),
-                        (572, 24, lit),
-                        (604, 6, dim),
-                        (618, 6, dim),
+                        (535, 7, dim),
+                        (551, 7, dim),
+                        (567, 25, lit),
+                        (601, 7, dim),
+                        (617, 7, dim),
                     ]),
                 ),
             ],
