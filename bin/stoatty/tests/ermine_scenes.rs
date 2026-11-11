@@ -37,6 +37,7 @@ const HATCH: [u8; 3] = [0x1b, 0x1d, 0x22];
 const FOLD_BUTTON: [u8; 3] = [0x1f, 0x2a, 0x3d];
 const TEXT_DIM: [u8; 3] = [0xa3, 0xa9, 0xb5];
 const HAIRLINE: [u8; 3] = [0x2e, 0x32, 0x3b];
+const STRONG: [u8; 3] = [0x3e, 0x43, 0x4e];
 const SELECT: [u8; 3] = [0x23, 0x32, 0x4a];
 const DISABLED: [u8; 3] = [0x5b, 0x61, 0x6d];
 const TINT_ACCENT: [u8; 3] = [0x22, 0x30, 0x49];
@@ -937,11 +938,17 @@ fn the_tab_bar_boxes_the_focused_layout_s_chip_inside_its_row() {
 }
 
 /// The file finder's box fills with the overlay surface where no text covers
-/// it, and its preview pane sits on the base surface.
+/// it, its preview pane sits on the base surface, and its corners round at
+/// 6 px.
 ///
 /// The overlay cell sits in the list column, under the fixture's two file
 /// rows. The base cell sits in the preview, under the six lines of the file it
 /// shows.
+///
+/// The box's top-left cell is (16, 9). Its 6 px arc leaves the cell's second
+/// pixel on the top row to the overlay fill of the cells under the box, darker
+/// than the hover surface, where a 2 px arc draws the border. The top edge's
+/// border starts at the cell's seventh pixel.
 #[test]
 fn the_file_finder_box_draws_on_the_overlay_surface() {
     let mut home = support::scratch_home();
@@ -965,6 +972,28 @@ fn the_file_finder_box_draws_on_the_overlay_surface() {
         cell_rect(111, 27, 1, 1),
         BASE,
         "finder_preview",
+    );
+
+    let (x, y, _, _) = cell_rect(16, 9, 1, 1);
+    let corner = dominant_color(&shot, (x + 1, y, 1, 1));
+    if corner
+        .iter()
+        .zip(HOVER)
+        .any(|(&found, hover)| found >= hover)
+    {
+        let frame = keep_frame(&shot, &mut home, "finder_corner");
+        panic!(
+            "the corner pixel {} is not darker than the hover surface; the frame is {}",
+            hex(corner),
+            frame.display(),
+        );
+    }
+    expect_region(
+        &shot,
+        &mut home,
+        (x + 6, y, 1, 1),
+        STRONG,
+        "finder_top_edge",
     );
 }
 

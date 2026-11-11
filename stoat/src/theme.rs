@@ -265,8 +265,8 @@ impl PanelRole {
         // each pane's first and last column.
         let (corner_radius, shadow, inset_x, above_pools) = match self {
             PanelRole::Island => (6, PanelShadow::Tucked, 0, false),
-            PanelRole::Popout => (1, PanelShadow::Overhang, 0, false),
-            PanelRole::Overlay => (2, PanelShadow::Drop, 0, true),
+            PanelRole::Popout => (4, PanelShadow::Overhang, 0, false),
+            PanelRole::Overlay => (6, PanelShadow::Drop, 0, true),
         };
         PanelSpec {
             corner_radius,
@@ -1238,8 +1238,8 @@ mod tests {
                 .map(|role| theme.panel(role)),
             [
                 spec(7, PanelShadow::Tucked, 0, false),
-                spec(1, PanelShadow::Overhang, 0, false),
-                spec(2, PanelShadow::Drop, 0, true),
+                spec(4, PanelShadow::Overhang, 0, false),
+                spec(6, PanelShadow::Drop, 0, true),
             ],
             "the island takes its set radius, and every unset field answers Ermine's"
         );
@@ -1582,6 +1582,8 @@ mod tests {
                 theme.get(scope::UI_STATUSLINE_NORMAL).fg,
                 theme.get(scope::UI_TABBAR_INACTIVE).fg,
                 theme.panel(PanelRole::Island),
+                theme.panel(PanelRole::Popout),
+                theme.panel(PanelRole::Overlay),
                 theme.themed_type_scale(TypeRole::Small),
                 theme.themed_type_scale(TypeRole::Ui),
             ),
@@ -1591,6 +1593,8 @@ mod tests {
                 Some(rgb(0x7fb0ff)),
                 Some(rgb(0x838a98)),
                 spec(6, PanelShadow::Tucked, 0, false),
+                spec(4, PanelShadow::Overhang, 0, false),
+                spec(6, PanelShadow::Drop, 0, true),
                 208,
                 232,
             )

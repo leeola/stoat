@@ -137,8 +137,8 @@ ui.type.ui.scale = 240;
 | Scope              | Ermine value                     |
 | ------------------ | -------------------------------- |
 | `ui.panel.island`  | radius 6, `tucked`, inset_x 0    |
-| `ui.panel.popout`  | radius 1, `overhang`             |
-| `ui.panel.overlay` | radius 2, `drop`, above_pools    |
+| `ui.panel.popout`  | radius 4, `overhang`             |
+| `ui.panel.overlay` | radius 6, `drop`, above_pools    |
 | `ui.type.title`    | 320                              |
 | `ui.type.body`     | 256                              |
 | `ui.type.ui`       | 232                              |

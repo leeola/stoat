@@ -438,8 +438,8 @@ theme ermine_night inherits default_dark {
     vcs.commit.row.removed.bg   = tint_conflict;
 
     ui.panel.island  = { radius: 6, shadow: tucked, inset_x: 0 };
-    ui.panel.popout  = { radius: 1, shadow: overhang };
-    ui.panel.overlay = { radius: 2, shadow: drop, above_pools: true };
+    ui.panel.popout  = { radius: 4, shadow: overhang };
+    ui.panel.overlay = { radius: 6, shadow: drop, above_pools: true };
     ui.type.ui       = { scale: 232 };
     ui.type.caption  = { scale: 216 };
     ui.type.small    = { scale: 208 };
