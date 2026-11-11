@@ -34,6 +34,7 @@ use std::{
 use stoat_text::Point;
 use stoat_widgets::{
     bar::{Bar, BarBatch},
+    gutter::Gutter,
     panel::Panel,
     text_run::{self, TextRun, TextRunBatch},
     ApcScene,
@@ -112,6 +113,14 @@ pub(crate) const DIFF_TINT_MAX: i8 = 2;
 /// A cell is half as wide as it is tall, so 6 sixteenths across draw the
 /// boards' 3 px border in a 9 px cell.
 const BASE_FRAME_WIDTH: u16 = 6;
+
+/// The gap between the diff view's two gutter lanes, in sixteenths, wider
+/// than the plain editor's because the diff boards draw the lanes 2 px apart.
+///
+/// The second lane then starts at 9/16 of a 9 px cell, 5.06 px, which rounds
+/// to pixel column 5, and ends at 15/16, 8.44 px, which rounds to 8. The lanes
+/// take pixel columns 0 to 2 and 5 to 7.
+const DIFF_GUTTER_LANE_GAP: u16 = 3;
 
 /// Height of the top bar in the frame that marks a split diff's base half, in
 /// sixteenths of a cell, which draw the boards' 3 px border in an 18 px row.
@@ -818,13 +827,12 @@ impl DiffLayout {
     /// draws its mark column, right-aligns the number in the next `digits`
     /// cells, puts the two status glyphs after it, and draws the rule in the
     /// cell after them. A `rich` gutter, given as the scale its numbers draw
-    /// at, spans the sub-cell gutter's
-    /// [`Gutter::cell_width`](stoat_widgets::gutter::Gutter::cell_width) and
-    /// places its parts at that gutter's sixteenth offsets. The git and state
-    /// bars [`draw_diff_status`] paints take the lanes left of the number.
+    /// at, spans [`diff_gutter`]'s [`Gutter::cell_width`] and places its parts
+    /// at that gutter's sixteenth offsets. The git and state bars
+    /// [`draw_diff_status`] paints take the lanes left of the number.
     pub(crate) fn diff_view(digits: u16, rich: Option<u16>) -> Self {
         let rich = rich.map(|number_scale| {
-            let gutter = editor::rich_gutter(&[], digits, ([0; 3], [0; 3], [0; 3]), number_scale);
+            let gutter = diff_gutter(digits, number_scale);
             let offsets = RichGutterOffsets {
                 number_right: gutter.number_right_edge(),
                 bars: [0, 1].map(|slot| gutter.bar_x(slot)),
@@ -857,6 +865,16 @@ impl DiffLayout {
     /// Offsets of the number, status, and rule columns from a side's start.
     fn offsets(&self) -> (u16, u16, Option<u16>) {
         (self.num_off, self.status_off, self.sep_off)
+    }
+}
+
+/// The sub-cell gutter a diff side lays out for `digits`-wide numbers at
+/// `number_scale`, the plain editor's [`editor::rich_gutter`] with its lanes
+/// [`DIFF_GUTTER_LANE_GAP`] apart.
+fn diff_gutter(digits: u16, number_scale: u16) -> Gutter<'static> {
+    Gutter {
+        pad: DIFF_GUTTER_LANE_GAP,
+        ..editor::rich_gutter(&[], digits, ([0; 3], [0; 3], [0; 3]), number_scale)
     }
 }
 
@@ -3913,7 +3931,7 @@ mod tests {
                 right_content_w: 55,
                 rich: Some(RichGutterOffsets {
                     number_right: 44,
-                    bars: [0, 7],
+                    bars: [0, 9],
                     bar_width: 6,
                     separator_x: 75,
                 }),
@@ -3959,9 +3977,7 @@ mod tests {
     /// side reserves a blank cell, the digits, two status glyphs and the rule.
     #[test]
     fn a_diff_side_reserves_the_two_lane_widgets_width() {
-        let widget = |digits| {
-            editor::rich_gutter(&[], digits, ([0; 3], [0; 3], [0; 3]), FULL_CELL_SCALE).cell_width()
-        };
+        let widget = |digits| diff_gutter(digits, FULL_CELL_SCALE).cell_width();
         assert_eq!(
             [2, 4].map(|digits| [None, Some(FULL_CELL_SCALE)]
                 .map(|rich| DiffLayout::diff_view(digits, rich).gutter_w)),
@@ -6111,7 +6127,7 @@ mod tests {
         let tick = BarCommand {
             x: (columns.right_x * 16 + offsets.bars[0]) as i16,
             y: 16,
-            width: 13,
+            width: 15,
             height: 2,
             color: style_rgb(rgb_diff_theme().get(s::DIFF_DELETED).fg).expect("an rgb color"),
             occludes: false,

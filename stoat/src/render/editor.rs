@@ -1911,7 +1911,7 @@ const GUTTER_LANE_GAP: u16 = 1;
 ///
 /// The hunk and state lanes sit left of the number, each [`GUTTER_LANE_WIDTH`]
 /// wide and [`GUTTER_LANE_GAP`] apart. The diff view lays its sides out from
-/// the same widget.
+/// the same widget, with its lanes [`review::DIFF_GUTTER_LANE_GAP`] apart.
 ///
 /// The `colors` are the number, separator, and background colors. The numbers
 /// draw at `number_scale`, which also sets the gutter's width, so a measure and

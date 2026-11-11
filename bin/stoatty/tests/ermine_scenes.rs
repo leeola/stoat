@@ -182,6 +182,41 @@ fn a_modified_row_reads_removed_on_the_base_side_and_added_on_the_live_side() {
     }
 }
 
+/// The split diff's two gutter lanes sit 2 px apart, as the DiffSplit board
+/// draws them, where the plain editor's sit 1 px apart.
+///
+/// Row 4 is a modified row. The live side's gutter starts in cell 77, right of
+/// the divider, where the added lane takes the cell's pixel columns 0 to 2 and
+/// the unstaged state lane its columns 5 to 7. The base side's state lane
+/// takes the same color, so the check reads the pixels of cell 77 alone.
+#[test]
+fn the_split_diff_s_gutter_lanes_sit_two_pixels_apart() {
+    let mut home = support::scratch_home();
+    let shot = settled_frame(
+        home.path(),
+        "basic-diff",
+        "unstaged.txt",
+        "<Space>df<Settle>",
+    );
+    let (x, y, width, height) = cell_rect(77, 4, 1, 1);
+    let lanes = [SUCCESS, DISABLED].map(|color| {
+        bar_columns(&shot, (y, height), color)
+            .into_iter()
+            .filter(|column| (x..x + width).contains(column))
+            .map(|column| column - x)
+            .collect::<Vec<_>>()
+    });
+
+    if lanes != [vec![0, 1, 2], vec![5, 6, 7]] {
+        let frame = keep_frame(&shot, &mut home, "diff_gutter_lanes");
+        panic!(
+            "the live side's added and state lanes fill pixel columns {lanes:?} of cell 77, not \
+             0 to 2 and 5 to 7; the frame is {}",
+            frame.display(),
+        );
+    }
+}
+
 /// The base side of the split diff recedes as a whole behind the live side.
 ///
 /// Row 6, `6 six`, is context on both sides. The left text starts at column 6
