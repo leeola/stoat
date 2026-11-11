@@ -966,6 +966,12 @@ fn the_commits_view_selects_its_first_row_beside_the_lane_graph() {
 
 /// The diff view keeps the which-key box docked as the same card with no key
 /// held, so the cell in the card's footer row is still on the raised surface.
+///
+/// The card takes columns 107 to 159 and rows 40 to 48 and the HintBox board's
+/// docked shape. Its top-left corner alone rounds, so that corner's pixel
+/// leaves the raised surface and the top-right corner's keeps it. A fillet
+/// joins its bottom-left corner to the status bar, so the pixel left of that
+/// corner on the card's last pixel row takes the raised surface too.
 #[test]
 fn the_diff_view_keeps_its_box_docked_on_the_raised_surface() {
     let mut home = support::scratch_home();
@@ -983,6 +989,29 @@ fn the_diff_view_keeps_its_box_docked_on_the_raised_surface() {
         RAISED,
         "diff_hints_card",
     );
+
+    let pixel = |x: u32, y: u32| {
+        let at = ((y * shot.width + x) * 4) as usize;
+        [shot.rgba[at], shot.rgba[at + 1], shot.rgba[at + 2]]
+    };
+    let (left, top, _, _) = cell_rect(107, 40, 1, 1);
+    let (right, _, width, _) = cell_rect(159, 40, 1, 1);
+    let (_, bottom, _, height) = cell_rect(0, 48, 1, 1);
+    let corners = [
+        pixel(left, top),
+        pixel(right + width - 1, top),
+        pixel(left - 1, bottom + height - 1),
+    ];
+    if corners[0] == RAISED || corners[1..] != [RAISED; 2] {
+        let frame = keep_frame(&shot, &mut home, "diff_hints_card_corners");
+        panic!(
+            "the card's top-left, top-right, and fillet pixels read {:?}, not a rounded top-left \
+             and {} at the other two; the frame is {}",
+            corners.map(hex),
+            hex(RAISED),
+            frame.display(),
+        );
+    }
 }
 
 /// The finder's selected row fills with the select surface and carries the

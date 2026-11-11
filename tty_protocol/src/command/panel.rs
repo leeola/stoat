@@ -110,11 +110,11 @@ pub fn edge_modes(edges: [Edge; 4]) -> u8 {
 /// inside it that rises from its bottom edge, so the panel reads as a raised
 /// card. [`PanelShadow::Overhang`] draws a fainter, shorter band in the same
 /// place, so the panel reads as tucked under whatever overhangs it above.
-/// [`PanelShadow::Halo`] is undisplaced with a tight halo clipped above the
-/// panel's bottom edge, so the panel reads as emerging from beneath whatever sits
-/// below it rather than floating in front. [`PanelShadow::Cast`] falls a short
-/// way below the panel's bottom edge and only between its sides, as a pinned
-/// row casts onto the rows that scroll under it.
+/// [`PanelShadow::Halo`] is undisplaced and soft, clipped at the panel's bottom
+/// and right edges, so a panel docked in a bottom-right corner reads as emerging
+/// from beneath what sits below and right of it. [`PanelShadow::Cast`] falls a
+/// short way below the panel's bottom edge and only between its sides, as a
+/// pinned row casts onto the rows that scroll under it.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum PanelShadow {
     None_,

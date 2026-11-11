@@ -10,7 +10,10 @@ use ratatui::{
 };
 use std::collections::HashMap;
 use stoat_widgets::panel::Panel;
-use stoatty_protocol::command::{BorderStyle, Edge, PanelShadow};
+use stoatty_protocol::command::{
+    panel::{CORNER_TOP_LEFT, FILLET_BOTTOM_LEFT},
+    BorderStyle, Edge, PanelShadow,
+};
 
 /// Columns between a row's key and its action.
 const GAP: usize = 3;
@@ -411,8 +414,9 @@ pub(crate) fn render_hints_grouped(
 /// it.
 ///
 /// `docked` is the card's fill, `Some` only under a live scene with an RGB
-/// fill. The box is then the docked card, a borderless panel in that fill
-/// whose shadow tucks under its bottom edge onto the status bar it docks on.
+/// fill. The box is then the docked card, a borderless panel in that fill. It
+/// rounds its top-left corner alone, a fillet joins its bottom-left corner to
+/// the status bar it docks on, and its shadow falls above and left of it alone.
 /// Otherwise it is the rounded modal frame in `style`. The inside rect is the
 /// same in both, so the layout's [`BORDER_PAD`] holds for either.
 ///
@@ -442,9 +446,9 @@ fn docked_frame(
         fill: Some(fill),
         shadow: PanelShadow::Halo,
         edges: Edge::symmetric(0, 0),
-        corners: 0,
-        fillets: 0,
-        fillet_radius: 2,
+        corners: CORNER_TOP_LEFT,
+        fillets: FILLET_BOTTOM_LEFT,
+        fillet_radius: 3,
         hatch: None,
         above_pools: true,
         backdrop: false,

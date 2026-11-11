@@ -59,10 +59,13 @@ const SHADOW_MARGIN_TUCKED: f32 = 12.0;
 /// onto the panel by whatever overhangs it.
 const SHADOW_MARGIN_OVERHANG: f32 = 5.0;
 
-/// Blur radius in logical pixels for a halo shadow. Tighter than
-/// [`SHADOW_MARGIN`], so the undisplaced halo stays a thin dark edge close to the
-/// panel and does not read as the panel floating.
-const SHADOW_MARGIN_HALO: f32 = 6.0;
+/// Blur radius in logical pixels for a halo shadow, three sigma of the 7
+/// logical pixel sigma that the boards' 14 px CSS blur stands for.
+///
+/// The boards shade a docked box above and left of it with two shadows whose
+/// spread cancels their offset, so only the blur reaches out of the box. The
+/// halo is undisplaced for the same reason.
+const SHADOW_MARGIN_HALO: f32 = 21.0;
 
 /// Cast-shadow displacement in logical pixels, straight down, the boards'
 /// `box-shadow: 0 4px 8px` under a pinned row.
@@ -1009,14 +1012,14 @@ mod tests {
     }
 
     /// A tucked panel shades nothing outside its box, so the ground beside,
-    /// above, and below it keeps its color. A halo shades the ground beside the
-    /// box and stops at its bottom edge.
+    /// above, and below it keeps its color. A halo shades the ground left of
+    /// the box and above it, and stops at its bottom and right edges.
     #[test]
     fn a_tucked_box_shades_nothing_outside_and_a_halo_stops_at_the_bottom() {
         let (device, queue) = require_headless_device();
         let blue = Some(Rgb::new(0, 0, 255));
         // A two-cell box spans pixels 12 to 36. The tucked margin pads its quad
-        // by twelve pixels and the halo's pads by six, so every pixel read here
+        // by twelve pixels and the halo's pads by 21, so every pixel read here
         // rasterizes.
         let tucked = |at| panel_pixel(&device, &queue, 2, blue, PanelShadow::Tucked, at);
         let halo = |at| panel_pixel(&device, &queue, 2, blue, PanelShadow::Halo, at);
@@ -1026,15 +1029,18 @@ mod tests {
                 tucked((10, 24)),
                 tucked((24, 10)),
                 tucked((24, 38)),
-                halo((24, 38))
+                halo((24, 38)),
+                halo((38, 24)),
             ],
-            [GROUND; 4],
-            "no tucked shade beside, above, or below the box, and no halo below it",
+            [GROUND; 5],
+            "no tucked shade beside, above, or below the box, and no halo below it or right of it",
         );
-        let beside = halo((10, 24));
+        let darker = |[r, g, b]: [u8; 3]| r < GROUND[0] && g < GROUND[1] && b < GROUND[2];
+        let (beside, above) = (halo((10, 24)), halo((24, 5)));
         assert!(
-            matches!(beside, [r, g, b] if r < GROUND[0] && g < GROUND[1] && b < GROUND[2]),
-            "the halo darkens the ground beside the box, got {beside:?}",
+            darker(beside) && darker(above),
+            "the halo darkens the ground left of the box and 7 px above it, got {beside:?} and \
+             {above:?}",
         );
     }
 
