@@ -331,6 +331,41 @@ fn the_split_diff_frames_its_base_column() {
     expect_base_frame_top(&shot, &mut home, 1, "diff_base_frame_top");
 }
 
+/// The split diff's mid divider draws in the hairline color, as the DiffSplit
+/// board draws the rule between its halves.
+///
+/// Row 3, `3 three`, is context on both sides. The divider is column 76, and
+/// its hairline takes the cell's pixel column 4, right of the base frame's
+/// right side. The check reads the row's middle pixel row.
+#[test]
+fn the_split_diff_s_mid_divider_draws_in_the_hairline_color() {
+    let mut home = support::scratch_home();
+    let shot = settled_frame(
+        home.path(),
+        "basic-diff",
+        "unstaged.txt",
+        "<Space>df<Settle>",
+    );
+    let (x, y, _, height) = cell_rect(76, 3, 1, 1);
+    let at = (((y + height / 2) * shot.width + x + 4) * 4) as usize;
+    let pixel = [shot.rgba[at], shot.rgba[at + 1], shot.rgba[at + 2]];
+
+    if pixel
+        .into_iter()
+        .zip(HAIRLINE)
+        .any(|(got, want)| got.abs_diff(want) > 6)
+    {
+        let frame = keep_frame(&shot, &mut home, "diff_mid_divider");
+        panic!(
+            "the mid divider's pixel at x {} reads {}, not within 6 of {}; the frame is {}",
+            x + 4,
+            hex(pixel),
+            hex(HAIRLINE),
+            frame.display(),
+        );
+    }
+}
+
 /// The split diff ends in its buffer's minimap strip on the editor surface, as
 /// a plain editor does.
 ///

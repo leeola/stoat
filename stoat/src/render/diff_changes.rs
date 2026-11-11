@@ -1075,7 +1075,8 @@ mod tests {
 
     /// Under a live scene each header lies between two hairlines in the
     /// inactive border color, along its top and bottom edges, the width of the
-    /// stack.
+    /// stack. The diff's mid divider takes the same color, so the check reads
+    /// the horizontal bars alone.
     #[test]
     fn a_header_lies_between_two_hairlines() {
         let mut h = two_files(16);
@@ -1088,7 +1089,7 @@ mod tests {
             h.stoat.apc_scene.lane_bytes(content_lane(index)),
         ))
         .into_iter()
-        .filter(|bar| bar.4 == HAIRLINE)
+        .filter(|bar| bar.4 == HAIRLINE && bar.3 == 1)
         .collect();
 
         assert_eq!(hairlines, header_hairlines());

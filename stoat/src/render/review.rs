@@ -1666,15 +1666,20 @@ pub(crate) fn paint_diff_rows(
     }
 
     // One hairline per gutter spanning the visible rows, replacing the per-row
-    // glyph. A gutter's hairline sits at the rich gutter's separator offset,
-    // and the mid divider centers in its cell at `DIVIDER_RULE_X`. A fold row's
-    // band runs across both sides, so each hairline breaks around it.
+    // glyph. A gutter's hairline sits at the rich gutter's separator offset in
+    // the rule color, and the mid divider centers in its cell at
+    // `DIVIDER_RULE_X` in the divider color. A fold row's band runs across both
+    // sides, so each hairline breaks around it.
     if let Some(rg) = rich.as_mut() {
         let spans = rule_spans((end_row - scroll_row) as u16, &fold_offsets);
-        let gutter_rules =
-            [left_x, right_x].map(|side| (side - inner.x) * 16 + rg.offsets.separator_x);
-        let divider = sep_x.map(|sep| (sep - inner.x) * 16 + DIVIDER_RULE_X);
-        for x in gutter_rules.into_iter().chain(divider) {
+        let gutter_rules = [left_x, right_x].map(|side| {
+            (
+                (side - inner.x) * 16 + rg.offsets.separator_x,
+                rg.colors.rule,
+            )
+        });
+        let divider = sep_x.map(|sep| ((sep - inner.x) * 16 + DIVIDER_RULE_X, rg.colors.divider));
+        for (x, color) in gutter_rules.into_iter().chain(divider) {
             if x / 16 >= inner.width {
                 continue;
             }
@@ -1686,7 +1691,7 @@ pub(crate) fn paint_diff_rows(
                         y: (top * 16) as i16,
                         width: 1,
                         height: rows * 16,
-                        color: rg.colors.dim,
+                        color,
                     },
                 );
             }
@@ -3559,11 +3564,16 @@ struct DiffRichGutter<'a> {
 ///
 /// The per-row change bar color is read from the row's change scope, so the
 /// resolver validates every change scope is RGB up front and this stores only
-/// the dim, background, and four mark-state colors used directly. `dim_amount`
-/// fades every bar toward the background on a pooled unfocused page.
+/// the dim, rule, divider, background, and four mark-state colors used
+/// directly. `dim_amount` fades every bar toward the background on a pooled
+/// unfocused page.
 #[derive(Clone, Copy)]
 pub(crate) struct DiffRichColors {
     dim: [u8; 3],
+    /// The hairline after each side's numbers, the plain gutter's rule color.
+    rule: [u8; 3],
+    /// The hairline between the two sides, the inactive border color.
+    divider: [u8; 3],
     bg: [u8; 3],
     staged: [u8; 3],
     unstaged: [u8; 3],
@@ -3611,8 +3621,15 @@ pub(crate) fn resolve_diff_rich_colors(
     // Pre-fade the directly-stored colors so the line numbers and separators
     // need no per-use dimming. The per-row change color fades at its call site.
     let bg = style_rgb(bg)?;
+    let context = style_rgb(theme.get(s::DIFF_CONTEXT).fg)?;
+    let border = style_rgb(theme.get(s::UI_BORDER_INACTIVE).fg);
+    let rule = style_rgb(theme.get(s::UI_DIVIDER).fg)
+        .or(border)
+        .unwrap_or(context);
     Some(DiffRichColors {
-        dim: dim_rgb(style_rgb(theme.get(s::DIFF_CONTEXT).fg)?, bg, dim_amount),
+        dim: dim_rgb(context, bg, dim_amount),
+        rule: dim_rgb(rule, bg, dim_amount),
+        divider: dim_rgb(border.unwrap_or(context), bg, dim_amount),
         bg,
         staged: dim_rgb(style_rgb(theme.get(s::DIFF_STAGED).fg)?, bg, dim_amount),
         unstaged: dim_rgb(style_rgb(theme.get(s::DIFF_UNSTAGED).fg)?, bg, dim_amount),
@@ -6349,7 +6366,9 @@ mod tests {
 
         let mut editor = diff_editor_staged("a\nb\nc\nd\n", "a\nB\nc\nd\n", "a\nB\nc\nD\n");
         let area = Rect::new(0, 0, 120, 8);
-        let theme = rgb_diff_theme();
+        let theme = rgb_diff_theme_with(
+            r##"ui.divider.fg = "#112233"; ui.border.inactive.fg = "#445566";"##,
+        );
 
         let mut rich_buf = Buffer::empty(area);
         let mut scene = ApcScene::new();
@@ -6377,32 +6396,32 @@ mod tests {
         let scroll = editor.scroll_row;
         let total = editor.display_map.snapshot().line_count();
         let rows = ((area.height as u32).min(total.saturating_sub(scroll))) as u16;
-        let dim = [128, 128, 128];
         let digits = diff_gutter_digits(&editor.display_map.snapshot());
         let cols = DiffColumns::compute(area, DiffLayout::diff_view(digits, Some(FULL_CELL_SCALE)));
         let offsets = cols.rich.expect("a rich layout");
 
-        // Each side's gutter separator and the mid divider paint as hairlines,
-        // the separators at the rich gutter's offset and the divider centered
-        // in its cell.
+        // Each side's gutter separator paints as a hairline in the divider
+        // color at the rich gutter's offset, and the mid divider as one in the
+        // inactive border color centered in its cell.
+        let (rule, border) = ([0x11, 0x22, 0x33], [0x44, 0x55, 0x66]);
         let divider = cols.sep_x.expect("two columns") * 16 + 8;
-        for x in [cols.left_x, cols.right_x]
-            .map(|side| side * 16 + offsets.separator_x)
+        for (x, color) in [cols.left_x, cols.right_x]
+            .map(|side| (side * 16 + offsets.separator_x, rule))
             .into_iter()
-            .chain([divider])
+            .chain([(divider, border)])
         {
             let frame = encode_bar(&BarCommand {
                 x: x as i16,
                 y: 0,
                 width: 1,
                 height: rows * 16,
-                color: dim,
+                color,
                 occludes: false,
                 hatch: None,
             });
             assert!(
                 contains(scene.buffer(), &frame),
-                "separator hairline at sixteenth {x}"
+                "hairline at sixteenth {x} in {color:?}"
             );
         }
 
@@ -6459,6 +6478,15 @@ mod tests {
         );
         assert!(has(&ascii_buf, "▎"), "the ASCII path paints status glyphs");
         assert!(has(&ascii_buf, "│"), "the ASCII path paints separators");
+    }
+
+    /// A theme with no divider and no inactive border draws the diff gutter's
+    /// rules and its mid divider in the context color.
+    #[test]
+    fn the_diff_hairlines_take_the_context_color_without_their_scopes() {
+        let colors =
+            resolve_diff_rich_colors(&rgb_diff_theme(), Style::default(), 0.0).expect("rgb colors");
+        assert_eq!((colors.rule, colors.divider), ([0x80; 3], [0x80; 3]));
     }
 
     #[test]
