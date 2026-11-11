@@ -1927,6 +1927,7 @@ pub(crate) fn rich_gutter(
         left_bars: 2,
         left_bar_width: GUTTER_LANE_WIDTH,
         pad: GUTTER_LANE_GAP,
+        lead: 0,
         number_scale,
         width_digits,
         number_fg,

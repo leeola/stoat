@@ -32,9 +32,9 @@ const HINT_DOT: &str = "\u{b7}";
 /// terminal, it writes a degraded cell gutter (a right-aligned line number and
 /// a one-column severity mark) into the buffer.
 ///
-/// Left to right, the gutter holds the hunk and state lanes, the right-aligned
-/// number, the icon cell, and the hairline. The icon cell is a whole grid cell,
-/// because an icon anchors to a cell.
+/// Left to right, the gutter holds its lead, the hunk and state lanes, the
+/// right-aligned number, the icon cell, and the hairline. The icon cell is a
+/// whole grid cell, because an icon anchors to a cell.
 ///
 /// The geometry knobs are in **sixteenths of a cell** (16 = one cell), so the
 /// gutter tracks live font zoom. The widget positions every element at an
@@ -53,6 +53,13 @@ pub struct Gutter<'a> {
     pub left_bar_width: u16,
     /// Padding between adjacent lanes, in sixteenths.
     pub pad: u16,
+    /// Sixteenths before the first lane, which leave room for a frame the
+    /// caller draws along the gutter's left edge.
+    ///
+    /// The lead counts toward the run before the icon cell. A lead that
+    /// pushes that run past a cell boundary moves the number, the icon cell,
+    /// and the hairline a cell right.
+    pub lead: u16,
     /// Line-number glyph size, in 256ths of a cell. A hint's dot draws at it
     /// too.
     pub number_scale: u16,
@@ -153,14 +160,15 @@ impl Gutter<'_> {
 
     /// Slot `slot`'s left edge, in sixteenths from the gutter's left edge.
     ///
-    /// Slots 0 and 1 are the hunk and state lanes at the gutter's left edge,
-    /// and no other slot exists.
+    /// Slots 0 and 1 are the hunk and state lanes, which start
+    /// [`Self::lead`] in from the gutter's left edge, and no other slot
+    /// exists.
     pub fn bar_x(&self, slot: u16) -> u16 {
         debug_assert!(
             slot < 2,
             "a gutter has two lanes, and slot {slot} is neither"
         );
-        slot * (self.left_bar_width + self.pad)
+        self.lead + slot * (self.left_bar_width + self.pad)
     }
 
     /// Where a right-aligned line number ends, in sixteenths from the gutter's left edge.
@@ -173,9 +181,11 @@ impl Gutter<'_> {
         self.cell_width() * 16 - 1 - TEXT_GAP
     }
 
-    /// Sixteenths the left lanes and the pad between them span.
+    /// Sixteenths the lead, the left lanes, and the pad between them span.
     fn left_bars_span(&self) -> u16 {
-        self.left_bars * self.left_bar_width + self.left_bars.saturating_sub(1) * self.pad
+        self.lead
+            + self.left_bars * self.left_bar_width
+            + self.left_bars.saturating_sub(1) * self.pad
     }
 
     /// Sixteenths a run of `digits` numerals advances at [`Self::number_scale`].
@@ -419,6 +429,7 @@ mod tests {
             left_bars: 2,
             left_bar_width: 6,
             pad: 1,
+            lead: 0,
             number_scale: 160,
             width_digits: 2,
             number_fg: [99, 109, 131],
@@ -591,6 +602,26 @@ mod tests {
                 gutter.separator_x(),
             ),
             (48, 44, [0, 7], 75),
+        );
+    }
+
+    /// A lead moves the lanes right. A lead of 12 pushes the 37-sixteenth run
+    /// to 49, past three cells, so the number, the icon cell, and the hairline
+    /// move a cell right too.
+    #[test]
+    fn a_lead_moves_the_lanes_and_the_parts_after_them() {
+        let gutter = Gutter {
+            lead: 12,
+            ..config(&[])
+        };
+        assert_eq!(
+            (
+                [0, 1].map(|slot| gutter.bar_x(slot)),
+                gutter.number_right_edge(),
+                gutter.separator_x(),
+                gutter.cell_width(),
+            ),
+            ([12, 19], 60, 91, 6),
         );
     }
 

@@ -304,6 +304,7 @@ fn pane_gutter<'a>(pane: &Pane, lines: &'a [GutterLine]) -> Gutter<'a> {
         left_bars: 2,
         left_bar_width: pane.gutter.bar_width,
         pad: pane.gutter.pad,
+        lead: 0,
         number_scale: NUMBER_SCALE,
         width_digits: width_digits(),
         number_fg: NUMBER_FG,

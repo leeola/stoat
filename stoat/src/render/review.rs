@@ -114,6 +114,16 @@ pub(crate) const DIFF_TINT_MAX: i8 = 2;
 /// boards' 3 px border in a 9 px cell.
 const BASE_FRAME_WIDTH: u16 = 6;
 
+/// The sixteenths a diff gutter leaves before its lanes, so the base side's
+/// hunk lane starts where the base frame's left bar ends, as the diff boards
+/// pad the base side by the frame's 3 px.
+///
+/// The frame's 6 sixteenths end at 3.375 px of a 9 px cell, and a lane from 5
+/// starts at 2.8125 px. Both round to pixel column 3, so the lane takes the
+/// boards' columns 3 to 5. A lead of 6 starts the lane at 3.375 px and widens
+/// it to four columns.
+const BASE_FRAME_LEAD: u16 = 5;
+
 /// The gap between the diff view's two gutter lanes, in sixteenths, wider
 /// than the plain editor's because the diff boards draw the lanes 2 px apart.
 ///
@@ -811,12 +821,16 @@ pub(crate) struct DiffLayout {
 pub(crate) struct RichGutterOffsets {
     /// Where a right-aligned line number ends.
     number_right: u16,
-    /// Each status bar's left edge: the git bar, then the state bar.
+    /// Each status bar's left edge on the live side: the git bar, then the
+    /// state bar.
     bars: [u16; 2],
     /// Each status bar's width.
     bar_width: u16,
     /// The separator hairline's left edge.
     separator_x: u16,
+    /// The sixteenths the base side's bars sit right of [`Self::bars`], past
+    /// the left bar of the frame around the base column.
+    frame_lead: u16,
 }
 
 impl DiffLayout {
@@ -835,9 +849,10 @@ impl DiffLayout {
             let gutter = diff_gutter(digits, number_scale);
             let offsets = RichGutterOffsets {
                 number_right: gutter.number_right_edge(),
-                bars: [0, 1].map(|slot| gutter.bar_x(slot)),
+                bars: [0, 1].map(|slot| gutter.bar_x(slot) - gutter.lead),
                 bar_width: gutter.left_bar_width,
                 separator_x: gutter.separator_x(),
+                frame_lead: gutter.lead,
             };
             (gutter.cell_width(), offsets)
         });
@@ -870,10 +885,15 @@ impl DiffLayout {
 
 /// The sub-cell gutter a diff side lays out for `digits`-wide numbers at
 /// `number_scale`, the plain editor's [`editor::rich_gutter`] with its lanes
-/// [`DIFF_GUTTER_LANE_GAP`] apart.
+/// [`DIFF_GUTTER_LANE_GAP`] apart and [`BASE_FRAME_LEAD`] in from its left
+/// edge.
+///
+/// Both sides reserve the lead, so their text columns match. Only the base
+/// side draws its lanes past it, beside the frame's left bar.
 fn diff_gutter(digits: u16, number_scale: u16) -> Gutter<'static> {
     Gutter {
         pad: DIFF_GUTTER_LANE_GAP,
+        lead: BASE_FRAME_LEAD,
         ..editor::rich_gutter(&[], digits, ([0; 3], [0; 3], [0; 3]), number_scale)
     }
 }
@@ -1142,6 +1162,7 @@ pub(crate) fn paint_diff_rows(
                     colors,
                     offsets,
                     number_scale,
+                    base_lead: 0,
                     numbers: TextRunBatch::default(),
                     bars: BarBatch::default(),
                 })
@@ -1163,6 +1184,11 @@ pub(crate) fn paint_diff_rows(
         sep_x,
         rich: _,
     } = DiffColumns::compute(inner, layout);
+    if sep_x.is_some()
+        && let Some(rg) = rich.as_mut()
+    {
+        rg.base_lead = rg.offsets.frame_lead;
+    }
 
     let dim_style = theme.get(s::DIFF_CONTEXT);
     let del_style = theme.get(s::DIFF_DELETED);
@@ -1461,6 +1487,7 @@ pub(crate) fn paint_diff_rows(
                         buf,
                         inner,
                         (right_x, status_right_x),
+                        false,
                         y,
                         change_scope,
                         mark.state,
@@ -1520,6 +1547,7 @@ pub(crate) fn paint_diff_rows(
                                 buf,
                                 inner,
                                 (left_x, status_left_x),
+                                true,
                                 y,
                                 staged_mark_scope(status),
                                 state,
@@ -1870,6 +1898,7 @@ fn chip_gutter<'a>(
         colors: resolve_diff_rich_colors(theme, fallback_style, 0.0)?,
         offsets,
         number_scale,
+        base_lead: 0,
         numbers: TextRunBatch::default(),
         bars: BarBatch::default(),
     })
@@ -3022,6 +3051,7 @@ fn paint_base_side(
                 buf,
                 inner,
                 (side_x, status_x),
+                true,
                 y,
                 change_scope,
                 state,
@@ -3039,6 +3069,7 @@ fn paint_base_side(
                     buf,
                     inner,
                     (side_x, status_x),
+                    true,
                     y,
                     staged_mark_scope(status),
                     state,
@@ -3509,6 +3540,10 @@ struct DiffRichGutter<'a> {
     /// The scale the line numbers draw at, the one [`Self::offsets`] were laid
     /// out for.
     number_scale: u16,
+    /// The sixteenths the base side's bars sit right of the offsets' bars:
+    /// the offsets' frame lead where a split layout frames the base column,
+    /// and 0 in a unified layout, which has no frame.
+    base_lead: u16,
     /// The numbers and bars the paint gathers row by row, flushed into
     /// [`Self::scene`] after the last row so each style goes out as one batch.
     ///
@@ -3663,10 +3698,11 @@ fn draw_diff_num(
 
 /// Emit the git and state bars (rich) or paint the ASCII status glyphs.
 ///
-/// The bars sit at the rich offsets from `side_x`, the side's first cell. The
-/// git bar takes the change color and the state bar the color of `state`.
-/// With `seam` set, the git bar is the short top-aligned bar the rich gutter
-/// draws for a deletion.
+/// The bars sit at the rich offsets from `side_x`, the side's first cell, and
+/// on the `base` side [`DiffRichGutter::base_lead`] further right, past the
+/// frame's left bar. The git bar takes the change color and the state bar the
+/// color of `state`. With `seam` set, the git bar is the short top-aligned bar
+/// the rich gutter draws for a deletion.
 ///
 /// The glyphs take the cell gutter's status column at `status_x`.
 #[allow(clippy::too_many_arguments)]
@@ -3675,6 +3711,7 @@ fn draw_diff_status(
     buf: &mut Buffer,
     inner: Rect,
     (side_x, status_x): (u16, u16),
+    base: bool,
     y: u16,
     change_scope: &str,
     state: MarkState,
@@ -3693,7 +3730,8 @@ fn draw_diff_status(
                 MarkState::Unapproved => rg.colors.unapproved,
             };
             let kind_height = if seam { 6 } else { 16 };
-            let side = (side_x - inner.x) * 16;
+            let lead = if base { rg.base_lead } else { 0 };
+            let side = (side_x - inner.x) * 16 + lead;
             let y0 = ((y - inner.y) * 16) as i16;
             let bars = [(change, kind_height), (state_color, 16)];
             for (x, (color, height)) in rg.offsets.bars.into_iter().zip(bars) {
@@ -3919,25 +3957,26 @@ mod tests {
         );
 
         // The shipped small type scale, which the rich gutter's numbers draw at.
-        // Two digits at it fit five cells with both lanes, where the cell
-        // gutter takes six.
+        // Two digits at it take six cells with the frame's lead and both lanes,
+        // as the cell gutter does.
         let small = 208;
         assert_eq!(
             DiffColumns::compute(wide, DiffLayout::diff_view(2, Some(small))),
             DiffColumns {
-                left_text_x: 8,
-                left_content_w: 55,
-                right_text_x: 69,
-                right_content_w: 55,
+                left_text_x: 9,
+                left_content_w: 54,
+                right_text_x: 70,
+                right_content_w: 54,
                 rich: Some(RichGutterOffsets {
-                    number_right: 44,
+                    number_right: 60,
                     bars: [0, 9],
                     bar_width: 6,
-                    separator_x: 75,
+                    separator_x: 91,
+                    frame_lead: 5,
                 }),
                 ..cell
             },
-            "a rich gutter is narrower and places its parts in sixteenths"
+            "a rich gutter places its parts in sixteenths"
         );
 
         assert_eq!(
@@ -6001,9 +6040,9 @@ mod tests {
         let bytes = scene.buffer();
         let bars = |row: u16, scope: &str| {
             let color = style_rgb(rgb_diff_theme().get(scope).fg).expect("an rgb color");
-            [columns.left_x, columns.right_x].map(|x| {
+            [(columns.left_x, offsets.frame_lead), (columns.right_x, 0)].map(|(x, lead)| {
                 let frame = encode_bar(&BarCommand {
-                    x: (x * 16 + offsets.bars[1]) as i16,
+                    x: (x * 16 + lead + offsets.bars[1]) as i16,
                     y: (row * 16) as i16,
                     width: offsets.bar_width,
                     height: 16,
@@ -6150,7 +6189,7 @@ mod tests {
         ));
         let offsets = columns.rich.expect("a rich layout");
         let git_bar = BarCommand {
-            x: (columns.left_x * 16 + offsets.bars[0]) as i16,
+            x: (columns.left_x * 16 + offsets.frame_lead + offsets.bars[0]) as i16,
             y: 16,
             width: offsets.bar_width,
             height: 6,
@@ -6371,23 +6410,25 @@ mod tests {
         // columns. Every row is searched rather than pinning the block layout.
         let staged = [[0, 255, 255], [255, 0, 255]];
         let staged_bar = (0..rows).any(|row| {
-            [cols.left_x, cols.right_x].iter().any(|&side| {
-                let x = side * 16 + offsets.bars[1];
-                staged.iter().any(|&color| {
-                    contains(
-                        scene.buffer(),
-                        &encode_bar(&BarCommand {
-                            x: x as i16,
-                            y: (row * 16) as i16,
-                            width: offsets.bar_width,
-                            height: 16,
-                            color,
-                            occludes: false,
-                            hatch: None,
-                        }),
-                    )
+            [(cols.left_x, offsets.frame_lead), (cols.right_x, 0)]
+                .iter()
+                .any(|&(side, lead)| {
+                    let x = side * 16 + lead + offsets.bars[1];
+                    staged.iter().any(|&color| {
+                        contains(
+                            scene.buffer(),
+                            &encode_bar(&BarCommand {
+                                x: x as i16,
+                                y: (row * 16) as i16,
+                                width: offsets.bar_width,
+                                height: 16,
+                                color,
+                                occludes: false,
+                                hatch: None,
+                            }),
+                        )
+                    })
                 })
-            })
         });
         assert!(staged_bar, "a changed row emits a staged/unstaged bar");
 

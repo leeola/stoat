@@ -133,8 +133,13 @@ fn the_gutter_draws_the_hunk_and_state_lanes_left_of_the_number() {
 /// pixel columns the color fills over the row's whole height, which a glyph
 /// never does.
 ///
+/// The base side's removed lane sits beside the frame's left bar, as the
+/// boards pad the base side by the frame's 3 px. It fills pixel columns 3 to 5
+/// of the pane's first cell, column 1, and the frame's sides stay whole on the
+/// row.
+///
 /// The cursor opens on the row's first column, so the ghost outlines the base
-/// text's first cell, column 6. Its dashed outline rounds its corners at 4 px
+/// text's first cell, column 7. Its dashed outline rounds its corners at 4 px
 /// inside the cell, so the cell's top row holds none of its dim pixels, its
 /// left side holds some, and the next cell holds none.
 #[test]
@@ -163,15 +168,29 @@ fn a_modified_row_reads_removed_on_the_base_side_and_added_on_the_live_side() {
         );
     }
 
+    let lane: Vec<u32> = {
+        let (x, _, _, _) = cell_rect(1, 4, 1, 1);
+        (x + 3..x + 6).collect()
+    };
+    if removed != lane {
+        let frame = keep_frame(&shot, &mut home, "diff_removed_lane");
+        panic!(
+            "the removed lane fills pixel columns {removed:?}, not {lane:?} beside the frame's \
+             left bar; the frame is {}",
+            frame.display(),
+        );
+    }
+    expect_base_frame_sides(&shot, &mut home, 4, "diff_frame_beside_lane");
+
     let row_dims = |col: u16, dy: u32| {
         let (x, _, width, _) = cell_rect(col, 4, 1, 1);
         pixels_of(&shot, (x, y + dy, width, 1), TEXT_DIM)
     };
     let side_dims = {
-        let (x, _, _, _) = cell_rect(6, 4, 1, 1);
+        let (x, _, _, _) = cell_rect(7, 4, 1, 1);
         pixels_of(&shot, (x, y, 1, height), TEXT_DIM)
     };
-    let ghost = (row_dims(6, 0), side_dims > 0, row_dims(7, 1));
+    let ghost = (row_dims(7, 0), side_dims > 0, row_dims(8, 1));
     if ghost != (0, true, 0) {
         let frame = keep_frame(&shot, &mut home, "diff_ghost_cursor");
         panic!(
@@ -219,8 +238,8 @@ fn the_split_diff_s_gutter_lanes_sit_two_pixels_apart() {
 
 /// The base side of the split diff recedes as a whole behind the live side.
 ///
-/// Row 6, `6 six`, is context on both sides. The left text starts at column 6
-/// and the right at column 82. The base side paints the context color, which
+/// Row 6, `6 six`, is context on both sides. The left text starts at column 7
+/// and the right at column 83. The base side paints the context color, which
 /// alone reaches about two thirds of the live text, so only the fade brings the
 /// left text's peak below three fifths of the right's.
 #[test]
@@ -232,8 +251,8 @@ fn the_base_side_of_the_split_diff_recedes_behind_the_live_side() {
         "unstaged.txt",
         "<Space>df<Settle>",
     );
-    let base = brightest(&shot, cell_rect(6, 6, 5, 1));
-    let live = brightest(&shot, cell_rect(82, 6, 5, 1));
+    let base = brightest(&shot, cell_rect(7, 6, 5, 1));
+    let live = brightest(&shot, cell_rect(83, 6, 5, 1));
 
     if u16::from(base) * 5 >= u16::from(live) * 3 {
         let frame = keep_frame(&shot, &mut home, "diff_base_side");
