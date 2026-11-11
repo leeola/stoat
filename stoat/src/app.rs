@@ -4090,8 +4090,9 @@ impl Stoat {
     /// The chrome columns between each side of the window and the pane tree,
     /// one while islands are on and none otherwise.
     ///
-    /// A whole cell carries the gap the Ermine boards draw as 4 px, because the
-    /// panes lay out in whole cells.
+    /// A whole cell carries the margin the Ermine boards draw as 8 px, because
+    /// the panes lay out in whole cells. Each island reaches into the cell
+    /// until 8 px of it stay on the window ground.
     pub(crate) fn island_margin(&self) -> u16 {
         u16::from(self.islands_on())
     }

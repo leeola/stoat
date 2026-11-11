@@ -69,7 +69,7 @@ use crate::{
     },
     lsp::{progress::LspProgressMap, registry::LspRegistry},
     minimap::{diff_view::DiffViewStrip, emit, EdgeClass, MinimapContent},
-    pane::{DockVisibility, FocusTarget, Pane, PaneId, View},
+    pane::{Divider, DockVisibility, FocusTarget, Pane, PaneId, View},
     rebase::RebasePause,
     run::{RunId, RunState},
     term_session::{TermId, TermSession},
@@ -533,6 +533,13 @@ pub(crate) struct FrameCtx<'a> {
     /// [`BACKDROP_PANEL_PROTOCOL`] or later does. An older one takes the flag
     /// as above every pool, so a backdrop it draws hides the pane's own glide.
     pub(crate) backdrop_panels: bool,
+    /// The rect the pane tree lays its panes out in. An island whose side meets
+    /// it reaches out into the window's chrome margin there.
+    pub(crate) pane_root: Rect,
+    /// The gaps between sibling panes, as
+    /// [`PaneTree::dividers`](crate::pane::PaneTree::dividers) lays them out.
+    /// An island whose side meets one reaches out into that gap.
+    pub(crate) dividers: &'a [Divider],
     /// The span of the window's bottom row under a bottom-right badge's chip,
     /// from [`badges::bottom_right_cover`]. A status bar on that row keeps its
     /// segments left of it, since the chip paints over the bar.
@@ -1405,6 +1412,9 @@ pub(crate) fn frame(
     let hunk_position = diff::repo_hunk_position(ws);
     let conflict_position = conflict_session::conflict_position(ws);
     let run_cwd = pane::focused_run_cwd(ws.focus, &ws.panes, &ws.runs);
+    // The islands read where the gaps run, and the hairlines paint in them when
+    // islands are off, so the frame lays them out once for both.
+    let dividers = ws.panes.dividers();
 
     let frame = FrameCtx {
         workspace_name,
@@ -1474,6 +1484,8 @@ pub(crate) fn frame(
         minimap_band: single_minimap_rect,
         islands,
         backdrop_panels: stoat.stoatty && stoat.stoatty_protocol >= BACKDROP_PANEL_PROTOCOL,
+        pane_root: ws.panes.area(),
+        dividers: &dividers,
         badge_cover,
         hover_cell: stoat.hover_cell,
         home: stoat.home.as_deref(),
@@ -1675,7 +1687,7 @@ pub(crate) fn frame(
     // An island's halo marks where one pane ends and the next starts, so the gap
     // between islands draws no hairline. A drag in the gap still resizes.
     if !frame.islands {
-        pane::render_pane_dividers(&ws.panes.dividers(), &stoat.theme, buf, &mut *scene);
+        pane::render_pane_dividers(&dividers, &stoat.theme, buf, &mut *scene);
     }
 
     // A paint from here on writes over the panes wherever its box falls, so

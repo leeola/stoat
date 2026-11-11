@@ -1614,6 +1614,8 @@ mod tests {
             minimap_band: None,
             islands: false,
             backdrop_panels: false,
+            pane_root: Rect::default(),
+            dividers: &[],
             badge_cover: None,
             hover_cell: None,
             home: None,

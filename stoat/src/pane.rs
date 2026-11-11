@@ -739,6 +739,12 @@ impl PaneTree {
         self.recalculate();
     }
 
+    /// The rect the tree lays its panes out in, as the last [`Self::resize`]
+    /// set it.
+    pub(crate) fn area(&self) -> Rect {
+        self.area
+    }
+
     /// Moves focus to the adjacent split pane in `direction`.
     /// Returns whether focus actually changed.
     pub fn focus_direction(&mut self, direction: Direction) -> bool {

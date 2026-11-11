@@ -96,6 +96,14 @@ const TAB_DIVIDER_TOP: i16 = 2;
 /// 1.125 px, so 12 sixteenths are the nearest whole count.
 const TAB_DIVIDER_HEIGHT: u16 = 12;
 
+/// The logical pixels the boards leave between an island and the window's
+/// side, and between two sibling islands.
+const ISLAND_SPACING: u8 = 8;
+
+/// The corner radius of a read-only editor's dashed ring, which the ReadOnly
+/// board draws as a 2 px curve whatever radius the islands take.
+pub(crate) const READ_ONLY_RING_RADIUS: u8 = 2;
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn render_pane(
     pane: &Pane,
@@ -398,11 +406,16 @@ pub(crate) fn render_pane(
 
 /// Declare the island halo of a pane whose content fills `content_area`.
 ///
-/// The halo is a backdrop panel with no border and no fill over the content, so
-/// it draws only the island role's shadow around the content, and the pane's
-/// pool composite still draws inside it. A pane flush against the
-/// single-minimap band, over the band's own rows, takes the band into its
-/// island, so the band sits inside an island and not on the window ground.
+/// The halo is a backdrop panel over the content in the editor surface's fill,
+/// with the island role's radius and shadow. A backdrop paints its fill only
+/// outside its cells, so the pane's tints and its pool composite keep drawing
+/// inside it. A pane flush against the single-minimap band, over the band's own
+/// rows, takes the band into its island, so the band sits inside an island and
+/// not on the window ground.
+///
+/// The island reaches past its cells as [`island_edges`] sets its sides, so the
+/// strips it reaches across take the surface. Its border is the window ground,
+/// which the renderer paints over the corner arcs inside the pane's cells.
 pub(crate) fn render_island(content_area: Rect, frame: FrameCtx<'_>, scene: &mut ApcScene) {
     let theme = frame.theme;
     let Some(chrome) = style_rgb(
@@ -427,13 +440,18 @@ pub(crate) fn render_island(content_area: Rect, frame: FrameCtx<'_>, scene: &mut
     };
 
     let role = theme.panel(PanelRole::Island);
+    let surface = style_rgb(
+        theme
+            .try_get(crate::theme::scope::UI_BACKGROUND)
+            .and_then(|style| style.bg),
+    );
     Panel {
         style: BorderStyle::None_,
         border: chrome,
         corner_radius: role.corner_radius,
-        fill: None,
+        fill: surface,
         shadow: role.shadow,
-        edges: Edge::symmetric(role.inset_x, 0),
+        edges: island_edges(area, frame, role.inset_x),
         corners: 0,
         fillets: 0,
         fillet_radius: 2,
@@ -443,6 +461,63 @@ pub(crate) fn render_island(content_area: Rect, frame: FrameCtx<'_>, scene: &mut
         anchor: None,
     }
     .draw_components(area, scene);
+}
+
+/// The sides of the island over `area`, in [`Edge`] order: top, right,
+/// bottom, then left.
+///
+/// A side that meets the window's chrome margin reaches into it, and a side
+/// that meets the gap toward a sibling pane reaches into that gap, so the
+/// island stands [`ISLAND_SPACING`] pixels from the window and from its
+/// siblings. A gap divider counts when it spans the island's rows or columns.
+/// The pane root runs on over the single minimap band, which the island beside
+/// it takes, and no island reaches over the band. Any other left or right side
+/// keeps the island role's `inset_x`, and the top and the bottom meet no margin.
+fn island_edges(area: Rect, frame: FrameCtx<'_>, inset_x: u8) -> [Edge; 4] {
+    let root = frame.pane_root;
+    let root_right = frame
+        .minimap_band
+        .map_or(root.right(), |band| band.right().max(root.right()));
+    let vertical = |x: u16| {
+        frame.dividers.iter().any(|divider| {
+            divider.orientation == DividerOrientation::Vertical
+                && divider.x == x
+                && divider.y <= area.y
+                && divider.y + divider.len >= area.bottom()
+        })
+    };
+    let horizontal = |y: u16| {
+        frame.dividers.iter().any(|divider| {
+            divider.orientation == DividerOrientation::Horizontal
+                && divider.y == y
+                && divider.x <= area.x
+                && divider.x + divider.len >= area.right()
+        })
+    };
+    let side = |margin: bool, gap: bool, rest: Edge| match (margin, gap) {
+        (true, _) => Edge::Margin(ISLAND_SPACING),
+        (false, true) => Edge::Gap(ISLAND_SPACING),
+        (false, false) => rest,
+    };
+
+    [
+        side(
+            false,
+            area.y.checked_sub(1).is_some_and(horizontal),
+            Edge::Inset(0),
+        ),
+        side(
+            area.right() == root_right,
+            vertical(area.right()),
+            Edge::Inset(inset_x),
+        ),
+        side(false, horizontal(area.bottom()), Edge::Inset(0)),
+        side(
+            area.x == root.x,
+            area.x.checked_sub(1).is_some_and(vertical),
+            Edge::Inset(inset_x),
+        ),
+    ]
 }
 
 /// Declare the dashed ring and the label of a read-only editor whose text
@@ -491,7 +566,7 @@ fn render_read_only_frame(
     Panel {
         style: BorderStyle::Dashed,
         border: ring_rgb,
-        corner_radius: theme.panel(PanelRole::Island).corner_radius,
+        corner_radius: READ_ONLY_RING_RADIUS,
         fill: None,
         shadow: PanelShadow::None_,
         edges: Edge::symmetric(0, 0),

@@ -317,7 +317,7 @@ fn the_split_diff_s_status_halves_take_their_side_tints() {
 ///
 /// Row 3, `3 three`, is context with no hunk mark, so its only base-tint
 /// pixels are the frame's two sides. The top bar fills the top three pixel
-/// rows of row 1, under the tab bar.
+/// rows of row 1, under the tab bar, past the island's rounded corner.
 #[test]
 fn the_split_diff_frames_its_base_column() {
     let mut home = support::scratch_home();
@@ -390,9 +390,10 @@ fn the_split_diff_ends_in_the_minimap_strip_on_the_editor_surface() {
 /// Row 1 is the first file's header, and row 2 the file's first line, context
 /// with no hunk mark. The frame's sides stop at the header, so no base-tint
 /// pixel column runs down row 1, and they draw down row 2. The top bar alone
-/// crosses the header. It fills the header's top three pixel rows from the
-/// left side's first pixel column to the right side's last, although the
-/// view's stack stays composited at rest.
+/// crosses the header. It fills the header's top three pixel rows to the right
+/// side's last pixel column, although the view's stack stays composited at
+/// rest. The island's 6 px top-left arc clips the bar's start, which lies 5 px
+/// right of the left side's first pixel column.
 #[test]
 fn the_changes_view_frames_its_base_column_between_the_headers() {
     let mut home = support::scratch_home();
@@ -405,7 +406,7 @@ fn the_changes_view_frames_its_base_column_between_the_headers() {
     expect_base_frame_sides(&shot, &mut home, 2, "changes_base_frame");
 
     let (_, y, _, height) = cell_rect(0, 1, 1, 1);
-    let span: Vec<u32> = (cell_rect(1, 1, 1, 1).0..=cell_rect(76, 1, 1, 1).0 + 3).collect();
+    let span: Vec<u32> = (cell_rect(1, 1, 1, 1).0 + 5..=cell_rect(76, 1, 1, 1).0 + 3).collect();
     let down = bar_columns(&shot, (y, height), SIDE_BASE);
     let top = bar_columns(&shot, (y, 3), SIDE_BASE);
     let below = bar_columns(&shot, (y + 3, 1), SIDE_BASE);
@@ -441,11 +442,15 @@ fn the_changes_view_ends_in_the_minimap_strip_on_the_editor_surface() {
 /// The single band rounds its viewport band's corners at 4 px, as the Editor
 /// board draws the band.
 ///
+/// The single band rounds its viewport band's corners at 4 px, as the Editor
+/// board draws the band.
+///
 /// The band's first cell is column 152 on row 1, where the thumb starts at the
-/// file's top. On the thumb's top pixel row, the band's last pixel column
-/// lies past the arc and keeps the editor surface. The fifth column from the
-/// right, the first past the 4 px arc, reads the band's color, the accent at 9
-/// percent over the surface.
+/// file's top. The island's own 6 px corner clips the band's top-right corner,
+/// so the check reads the thumb's top-left corner. On the band's first pixel
+/// column, the thumb's top pixel row lies past the arc and keeps the editor
+/// surface. The fifth pixel row, the first past the 4 px arc, reads the band's
+/// color, the accent at 9 percent over the surface.
 #[test]
 fn the_viewport_band_rounds_its_corners() {
     const BAND: [u8; 3] = [0x20, 0x27, 0x32];
@@ -454,13 +459,13 @@ fn the_viewport_band_rounds_its_corners() {
     let shot = settled_frame(home.path(), "basic-diff", "unstaged.txt", "");
     let (x, y, _, _) = cell_rect(152, 1, 1, 1);
 
-    expect_region(&shot, &mut home, (x + 62, y, 1, 1), BASE, "band_corner");
+    expect_region(&shot, &mut home, (x, y, 1, 1), BASE, "band_corner");
     expect_region(
         &shot,
         &mut home,
-        (x + 58, y, 1, 1),
+        (x, y + 4, 1, 1),
         BAND,
-        "band_top_past_the_arc",
+        "band_side_past_the_arc",
     );
 }
 
@@ -599,33 +604,158 @@ fn the_changes_view_folds_unchanged_lines_into_a_hatched_row() {
     }
 }
 
-/// The panes sit one chrome column in from each window edge, and a blank text
-/// cell inside them stays on the base surface.
+/// The panes stand 8 px in from each window edge, as every board draws its
+/// island, and a blank text cell inside them stays on the base surface.
+///
+/// Each margin column is 9 px wide, and the island reaches 1 px into it. On
+/// row 4, pixel columns 0 to 7 keep the chrome ground and column 8 takes the
+/// base surface. On the right the island takes the minimap band and reaches
+/// pixel column 1431, the margin column's first, so 1432 to 1439 keep the
+/// ground.
 #[test]
-fn the_panes_sit_one_chrome_column_in_from_each_window_edge() {
+fn the_panes_sit_eight_pixels_in_from_each_window_edge() {
     let mut home = support::scratch_home();
     let shot = settled_frame(home.path(), "basic-diff", "unstaged.txt", "");
+    expect_region(
+        &shot,
+        &mut home,
+        cell_rect(80, 4, 1, 1),
+        BASE,
+        "blank_text_cell",
+    );
 
-    for (col, want, what) in [
-        (0, CHROME, "left_margin"),
-        (COLS - 1, CHROME, "right_margin"),
-        (80, BASE, "blank_text_cell"),
-    ] {
-        expect_region(&shot, &mut home, cell_rect(col, 4, 1, 1), want, what);
+    let (_, y, _, height) = cell_rect(0, 4, 1, 1);
+    let row = |from: u32, to: u32| {
+        (from..to)
+            .map(|x| pixel(&shot, x, y + height / 2))
+            .collect::<Vec<_>>()
+    };
+    let (left, right) = (row(0, 9), row(1431, 1440));
+    let want = (
+        [vec![CHROME; 8], vec![BASE]].concat(),
+        [vec![BASE], vec![CHROME; 8]].concat(),
+    );
+    if (left.clone(), right.clone()) != want {
+        let frame = keep_frame(&shot, &mut home, "window_margins");
+        panic!(
+            "row 4 reads {:?} at pixel columns 0 to 8 and {:?} at 1431 to 1439, not the ground \
+             up to the island's edge 8 px in; the frame is {}",
+            left.into_iter().map(hex).collect::<Vec<_>>(),
+            right.into_iter().map(hex).collect::<Vec<_>>(),
+            frame.display(),
+        );
+    }
+}
+
+/// Two panes side by side stand 8 px apart, as the StartSplit board draws
+/// them.
+///
+/// The gap column, 76, is 9 px wide. The left island reaches its first pixel
+/// column, 684, and the right island none of it, so 685 to 692 keep the chrome
+/// ground. Pixel row 189 lies on row 10, past the file's lines, and the check
+/// reads no pixel of the right pane's own cells, where a changed row's gutter
+/// lane draws.
+#[test]
+fn side_by_side_panes_stand_eight_pixels_apart() {
+    let mut home = support::scratch_home();
+    let shot = settled_frame(
+        home.path(),
+        "basic-diff",
+        "unstaged.txt",
+        "<Space>as<Settle>",
+    );
+    let gap: Vec<[u8; 3]> = (684..693).map(|x| pixel(&shot, x, 189)).collect();
+
+    if gap != [vec![BASE], vec![CHROME; 8]].concat() {
+        let frame = keep_frame(&shot, &mut home, "side_by_side_gap");
+        panic!(
+            "pixel row 189 reads {:?} across the gap column, not the left island's last pixel \
+             and then the ground; the frame is {}",
+            gap.into_iter().map(hex).collect::<Vec<_>>(),
+            frame.display(),
+        );
+    }
+}
+
+/// Two stacked panes stand 8 px apart, as the boards space their islands.
+///
+/// The gap row, 24, is 18 px tall, and each island reaches 5 px of it. The
+/// upper island's 5 px, pixel rows 432 to 436, carry its tucked band, darker
+/// than the base surface and darker on each row toward the island's bottom
+/// edge, where the flat ground keeps one color. One of those rows equals the
+/// ground's color, so the check reads the deepening and not a color. Rows 437
+/// to 444 keep the chrome ground, and the lower island's rows 445 to 449 take
+/// the base surface. Pixel column 720 lies in the middle of both panes.
+#[test]
+fn stacked_panes_stand_eight_pixels_apart() {
+    let mut home = support::scratch_home();
+    let shot = settled_frame(
+        home.path(),
+        "basic-diff",
+        "unstaged.txt",
+        "<Space>av<Settle>",
+    );
+    let column = |from: u32, to: u32| (from..to).map(|y| pixel(&shot, 720, y)).collect::<Vec<_>>();
+    let (band, ground, lower) = (column(432, 437), column(437, 445), column(445, 450));
+    let brightness =
+        |[red, green, blue]: [u8; 3]| u16::from(red) + u16::from(green) + u16::from(blue);
+    let darker = band
+        .iter()
+        .all(|shade| shade.iter().zip(BASE).all(|(&got, base)| got < base))
+        && band
+            .windows(2)
+            .all(|pair| brightness(pair[1]) < brightness(pair[0]));
+
+    if !darker || ground != [CHROME; 8] || lower != [BASE; 5] {
+        let frame = keep_frame(&shot, &mut home, "stacked_gap");
+        panic!(
+            "pixel column 720 reads {:?}, {:?}, and {:?} down the gap row, not the upper island's \
+             shaded edge, the ground, and the lower island's edge; the frame is {}",
+            band.into_iter().map(hex).collect::<Vec<_>>(),
+            ground.into_iter().map(hex).collect::<Vec<_>>(),
+            lower.into_iter().map(hex).collect::<Vec<_>>(),
+            frame.display(),
+        );
+    }
+}
+
+/// An island's corners round at 6 px against the ground, as every board draws
+/// a pane.
+///
+/// The plain editor's island starts at pixel column 8, a pixel into the
+/// margin, and at pixel row 18, under the tab bar, so its top-left arc centers
+/// on (14, 24). The arc leaves (8, 18) and (9, 18) on the chrome ground. The
+/// second lies inside the pane's first cell, where only the ground the island
+/// paints over its corner clears the cell. The arc leaves (16, 18) and
+/// (8, 26) whole on the base surface.
+#[test]
+fn an_island_rounds_its_corners_against_the_ground() {
+    let mut home = support::scratch_home();
+    let shot = settled_frame(home.path(), "basic-diff", "unstaged.txt", "");
+    let corner = [(8, 18), (9, 18), (16, 18), (8, 26)].map(|(x, y)| pixel(&shot, x, y));
+
+    if corner != [CHROME, CHROME, BASE, BASE] {
+        let frame = keep_frame(&shot, &mut home, "island_corner");
+        panic!(
+            "the island's top-left corner reads {:?} at (8, 18), (9, 18), (16, 18), and (8, 26), \
+             not the ground outside its 6 px arc and the base surface inside it; the frame is {}",
+            corner.map(hex),
+            frame.display(),
+        );
     }
 }
 
 /// Each pane's island darkens a band inside its bottom edge and shades nothing
 /// on the margin beside it.
 ///
-/// The pane starts at pixel column 9, past the one-column margin, so pixel
-/// column 8 keeps the chrome ground. Row 48 is the pane's last content row,
-/// above the status row. The band rises twelve pixels from the pane's bottom
-/// edge, so row 47 keeps the base surface. Row 48's last pixel row reads the
-/// boards' bottom row within one in every channel, and the fifth from its
-/// bottom reads darker than the base surface in every channel. The fifth lies
-/// past the island's two-pixel corner radius, so it reads the band only where
-/// the band reaches past the corner arcs.
+/// The island reaches 1 px into the one-column margin and stops 8 px from the
+/// window's edge, so pixel column 3 keeps the chrome ground. Row 48 is the
+/// pane's last content row, above the status row. The band rises twelve pixels
+/// from the pane's bottom edge, so row 47 keeps the base surface. Row 48's last
+/// pixel row reads the boards' bottom row within one in every channel, and the
+/// fifth from its bottom reads darker than the base surface in every channel.
+/// Both reads lie in cell 80, far from the island's 6 px corner arcs, so they
+/// read the band alone.
 #[test]
 fn the_island_s_bottom_band_darkens_inside_the_pane() {
     // The base surface under 0.27 of black, the boards' bottom pixel row.
@@ -638,7 +768,7 @@ fn the_island_s_bottom_band_darkens_inside_the_pane() {
     expect_region(
         &shot,
         &mut home,
-        (8, y, 1, height),
+        (3, y, 1, height),
         CHROME,
         "margin_beside_the_pane",
     );
@@ -1692,18 +1822,20 @@ fn expect_base_frame_sides(shot: &Snapshot, home: &mut TempDir, row: u16, what: 
 /// of the frame around a split diff's base column, and the pixel row under them
 /// does not.
 ///
-/// The bar is one run of the base tint from the left side's first pixel column
-/// to the right side's last, where the sides are the columns the tint fills
-/// down the whole row. Below the bar the tint fills the sides alone. A miss
-/// saves the frame as [`expect_region`] does.
+/// The sides are the columns the tint fills down the row under the bar, and
+/// below the bar the tint fills the sides alone. The bar is one run of the
+/// base tint to the right side's last pixel column. It starts where the
+/// island's 6 px top-left arc leaves its three rows whole. The island starts a
+/// pixel left of the left side, so that column lies 5 px right of the left
+/// side's first. A miss saves the frame as [`expect_region`] does.
 fn expect_base_frame_top(shot: &Snapshot, home: &mut TempDir, row: u16, what: &str) {
     let (_, y, _, height) = cell_rect(0, row, 1, 1);
-    let sides = bar_columns(shot, (y, height), SIDE_BASE);
+    let sides = bar_columns(shot, (y + 3, height - 3), SIDE_BASE);
     let top = bar_columns(shot, (y, 3), SIDE_BASE);
     let below = bar_columns(shot, (y + 3, 1), SIDE_BASE);
 
     let span: Vec<u32> = match (sides.first(), sides.last()) {
-        (Some(&first), Some(&last)) => (first..=last).collect(),
+        (Some(&first), Some(&last)) => (first + 5..=last).collect(),
         _ => Vec::new(),
     };
     if !span.is_empty() && top == span && below == sides {
@@ -1889,6 +2021,12 @@ fn distinct_colors(shot: &Snapshot, (x, y, width, height): PixelRect) -> usize {
         }
     }
     colors.len()
+}
+
+/// The RGB color of pixel `(x, y)` in `shot`.
+fn pixel(shot: &Snapshot, x: u32, y: u32) -> [u8; 3] {
+    let at = ((y * shot.width + x) * 4) as usize;
+    [shot.rgba[at], shot.rgba[at + 1], shot.rgba[at + 2]]
 }
 
 fn hex([red, green, blue]: [u8; 3]) -> String {

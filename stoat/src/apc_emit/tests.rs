@@ -1874,9 +1874,12 @@ fn an_open_dock_clears_to_the_surface_over_a_chrome_ground() {
     );
 }
 
-/// Under islands, each split pane declares a backdrop halo over its content,
-/// and the gap between the panes draws no divider hairline. A theme with no
-/// chrome surface keeps the flush layout, with no halo and the gap hairline.
+/// Under islands, each split pane declares a backdrop halo over its content in
+/// the editor surface's fill, and the gap between the panes draws no divider
+/// hairline. A halo reaches 8 px from the window's sides and from its sibling,
+/// so a side at the window takes a margin edge and a side at the gap a gap
+/// edge, side by side and stacked. A theme with no chrome surface keeps the
+/// flush layout, with no halo and the gap hairline.
 #[test]
 fn split_panes_declare_island_halos_in_place_of_the_gap_hairline() {
     use stoatty_protocol::{
@@ -1884,7 +1887,7 @@ fn split_panes_declare_island_halos_in_place_of_the_gap_hairline() {
         BACKDROP_PANEL_PROTOCOL,
     };
 
-    let paint = |chrome: &str| {
+    let paint = |chrome: &str, split: &str| {
         let src = format!(
             r##"theme t {{
                 ui.background.bg = "#102030";
@@ -1902,7 +1905,7 @@ fn split_panes_declare_island_halos_in_place_of_the_gap_hairline() {
         h.stoat.stoatty_protocol = BACKDROP_PANEL_PROTOCOL;
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
         h.stoat.set_apc_tx(tx);
-        h.type_action("SplitRight()");
+        h.type_action(split);
         h.settle();
 
         let mut buf = Buffer::empty(h.stoat.size());
@@ -1916,7 +1919,7 @@ fn split_panes_declare_island_halos_in_place_of_the_gap_hairline() {
             .split_panes()
             .map(|(_, pane)| pane.area)
             .collect();
-        contents.sort_by_key(|area| area.x);
+        contents.sort_by_key(|area| (area.x, area.y));
         let gap = (contents[0].x + contents[0].width) as i16 * 16 + 8;
 
         let cmds = drain_apc(&mut rx);
@@ -1927,7 +1930,7 @@ fn split_panes_declare_island_halos_in_place_of_the_gap_hairline() {
                 _ => None,
             })
             .collect();
-        halos.sort_by_key(|panel| panel.left);
+        halos.sort_by_key(|panel| (panel.left, panel.top));
         let gap_bars: Vec<(i16, u16)> = cmds
             .iter()
             .filter_map(|cmd| match cmd {
@@ -1937,17 +1940,17 @@ fn split_panes_declare_island_halos_in_place_of_the_gap_hairline() {
             .collect();
         (contents, halos, gap_bars, gap)
     };
-    let halo = |area: Rect| PanelCommand {
+    let halo = |area: Rect, edges: [Edge; 4]| PanelCommand {
         top: area.y,
         left: area.x,
         width: area.width,
         height: area.height,
         style: BorderStyle::None_,
         border: [1, 2, 3],
-        corner_radius: 2,
-        fill: None,
+        corner_radius: 6,
+        fill: Some([0x10, 0x20, 0x30]),
         shadow: PanelShadow::Tucked,
-        edges: Edge::symmetric(0, 0),
+        edges,
         corners: 0,
         fillets: 0,
         fillet_radius: 2,
@@ -1957,17 +1960,34 @@ fn split_panes_declare_island_halos_in_place_of_the_gap_hairline() {
         anchor: None,
     };
 
-    let (contents, island_halos, island_bars, _) = paint(r##"ui.surface.chrome.bg = "#010203";"##);
-    let (_, flush_halos, flush_bars, gap) = paint("");
+    let chrome = r##"ui.surface.chrome.bg = "#010203";"##;
+    let (beside, beside_halos, island_bars, _) = paint(chrome, "SplitRight()");
+    let (stacked, stacked_halos, _, _) = paint(chrome, "SplitDown()");
+    let (_, flush_halos, flush_bars, gap) = paint("", "SplitRight()");
+    let (inset, margin, gap8) = (Edge::Inset(0), Edge::Margin(8), Edge::Gap(8));
     assert_eq!(
-        (island_halos, island_bars, flush_halos, flush_bars),
         (
-            contents.into_iter().map(halo).collect::<Vec<_>>(),
+            beside_halos,
+            stacked_halos,
+            island_bars,
+            flush_halos,
+            flush_bars
+        ),
+        (
+            vec![
+                halo(beside[0], [inset, gap8, inset, margin]),
+                halo(beside[1], [inset, margin, inset, gap8]),
+            ],
+            vec![
+                halo(stacked[0], [inset, margin, gap8, margin]),
+                halo(stacked[1], [gap8, margin, inset, margin]),
+            ],
             vec![],
             vec![],
             vec![(gap, 1)],
         ),
-        "a halo per pane and no gap hairline under islands, the hairline alone without",
+        "a halo per pane that reaches into the margins and the gap, and no gap hairline under \
+         islands, the hairline alone without",
     );
 }
 
@@ -2125,7 +2145,7 @@ fn read_only_paint(h: &mut crate::test_harness::TestHarness) -> (Vec<command::Co
 /// cell inside the ring's right end, and the run starts one cell into the
 /// chip.
 fn ring_and_label(text: Rect, label: &str, theme: &crate::theme::Theme) -> Vec<command::Command> {
-    use crate::theme::{PanelRole, TypeRole};
+    use crate::{render::pane::READ_ONLY_RING_RADIUS, theme::TypeRole};
     use stoatty_protocol::command::{
         BorderStyle, Command, Edge, PanelCommand, PanelShadow, TextRunCommand,
     };
@@ -2144,7 +2164,7 @@ fn ring_and_label(text: Rect, label: &str, theme: &crate::theme::Theme) -> Vec<c
             height: ring.height,
             style: BorderStyle::Dashed,
             border: READ_ONLY_FRAME,
-            corner_radius: theme.panel(PanelRole::Island).corner_radius,
+            corner_radius: READ_ONLY_RING_RADIUS,
             fill: None,
             shadow: PanelShadow::None_,
             edges: Edge::symmetric(0, 0),

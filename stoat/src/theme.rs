@@ -259,11 +259,12 @@ impl PanelRole {
     /// Ermine's frame for the role, which each field a theme leaves unset
     /// falls back to.
     fn ermine(self) -> PanelSpec {
-        // An island sits flush with its cells, because whole-cell chrome
-        // columns carry the gap around it. An inset hides the outer pixels of
+        // An island takes no inset, because its sides reach out past its cells
+        // instead, into the window's chrome columns and the gaps between
+        // panes, to stand 8 px from each. An inset hides the outer pixels of
         // each pane's first and last column.
         let (corner_radius, shadow, inset_x, above_pools) = match self {
-            PanelRole::Island => (2, PanelShadow::Tucked, 0, false),
+            PanelRole::Island => (6, PanelShadow::Tucked, 0, false),
             PanelRole::Popout => (1, PanelShadow::Overhang, 0, false),
             PanelRole::Overlay => (2, PanelShadow::Drop, 0, true),
         };
@@ -1589,7 +1590,7 @@ mod tests {
                 Some(rgb(0x121418)),
                 Some(rgb(0x7fb0ff)),
                 Some(rgb(0x838a98)),
-                spec(2, PanelShadow::Tucked, 0, false),
+                spec(6, PanelShadow::Tucked, 0, false),
                 208,
                 232,
             )
