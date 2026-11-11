@@ -34,6 +34,9 @@ use stoat_widgets::{
     bar::Bar,
     text_run::{self, TextRun, TextRunBatch},
 };
+use stoatty_protocol::command::panel::{
+    CORNER_BOTTOM_LEFT, CORNER_BOTTOM_RIGHT, CORNER_TOP_LEFT, CORNER_TOP_RIGHT,
+};
 
 pub(crate) fn render_commits(
     pane: &Pane,
@@ -158,6 +161,12 @@ const STAT_BAR_CELLS: u16 = 7;
 
 /// Height of a stat bar in sixteenths of a cell, centered in its row.
 const STAT_BAR_HEIGHT: u16 = 4;
+
+/// The radius a stat bar's track rounds its ends at, in logical pixels.
+///
+/// At a 9 by 18 pixel cell it is half the track's height, so each end of the
+/// track draws as a half circle.
+const STAT_BAR_RADIUS: u8 = 2;
 
 /// The keys the commits view's preview answers, each a bound key and the word
 /// for what it does.
@@ -1152,6 +1161,9 @@ fn paint_file_path(
 /// A track fills `ui.divider`, and the added and deleted shares fill over it
 /// from the left, each the [`stat_share`] of its count against `largest`, the
 /// largest change in the commit.
+///
+/// The track's ends draw round, and a share rounds the corners where it meets
+/// an end of the track, as if the track clipped it.
 fn stat_bar(
     cells: Rect,
     change: &CommitFileChange,
@@ -1174,17 +1186,35 @@ fn stat_bar(
         let Some(color) = style_rgb(theme.get(scope).fg).filter(|_| width > 0) else {
             continue;
         };
+        let corners = track_end_corners(x, width, span);
         Bar {
             x: x as i16,
             y,
             width,
             height: STAT_BAR_HEIGHT,
             color,
-            radius: 0,
-            corners: 0,
+            radius: if corners == 0 { 0 } else { STAT_BAR_RADIUS },
+            corners,
         }
         .render(cells, buf, scene);
     }
+}
+
+/// The corners of the stretch from `x`, `width` wide, that meet an end of a
+/// `span` wide stat bar track.
+///
+/// A stretch that meets neither end gets no corners. Its bar must draw at
+/// radius 0, since a bar's empty corner mask rounds all four corners.
+fn track_end_corners(x: u16, width: u16, span: u16) -> u8 {
+    let left = match x {
+        0 => CORNER_TOP_LEFT | CORNER_BOTTOM_LEFT,
+        _ => 0,
+    };
+    let right = match x + width == span {
+        true => CORNER_TOP_RIGHT | CORNER_BOTTOM_RIGHT,
+        false => 0,
+    };
+    left | right
 }
 
 /// The sixteenths of a `span` wide stat bar that `count` changed lines fill,
@@ -1960,7 +1990,11 @@ mod tests {
         sync::Arc,
     };
     use stoat_language::{Language, LanguageRegistry};
-    use stoatty_protocol::command::{self, BorderStyle, Command, Edge, PanelCommand, PanelShadow};
+    use stoatty_protocol::command::{
+        self,
+        panel::{CORNER_BOTTOM_LEFT, CORNER_BOTTOM_RIGHT, CORNER_TOP_LEFT, CORNER_TOP_RIGHT},
+        BorderStyle, Command, Edge, PanelCommand, PanelShadow,
+    };
 
     /// The same RGB theme the diff-view tests use, so the washes engage.
     fn rgb_theme() -> Theme {
@@ -2875,8 +2909,10 @@ mod tests {
         );
     }
 
-    /// Inside stoatty a file row ends in a track, its added and deleted shares
-    /// over it in proportion to the commit's largest change.
+    /// Inside stoatty a file row ends in a round-ended track, its added and
+    /// deleted shares over it in proportion to the commit's largest change. A
+    /// share rounds the corners where it meets an end of the track, and a share
+    /// between the ends stays square.
     #[test]
     fn a_file_rows_stat_bar_fills_its_shares_over_the_track() {
         let mut h = Stoat::test();
@@ -2886,13 +2922,21 @@ mod tests {
             .commit_with_message(
                 "a1000000",
                 "feat: root",
-                &[("src/a.rs", ""), ("src/b.rs", "x\n")],
+                &[
+                    ("src/a.rs", ""),
+                    ("src/b.rs", "x\n"),
+                    ("src/c.rs", "u\nv\n"),
+                ],
             )
             .commit_with_parent_message(
                 "b2000000",
                 "a1000000",
                 "feat: grow",
-                &[("src/a.rs", "1\n2\n3\n4\n"), ("src/b.rs", "y\n")],
+                &[
+                    ("src/a.rs", "1\n2\n3\n4\n"),
+                    ("src/b.rs", "y\n"),
+                    ("src/c.rs", "w\nx\n"),
+                ],
             );
         h.open_commits("/repo");
         h.render_composited();
@@ -2904,14 +2948,14 @@ mod tests {
             (rgb(scope::DIFF_ADDED), "added"),
             (rgb(scope::DIFF_DELETED), "deleted"),
         ];
-        let bars: Vec<(&str, i16, i16, u16)> =
+        let bars: Vec<(&str, i16, i16, u16, u8, u8)> =
             command::decode_stream(&h.stoat.apc_scene.all_bytes())
                 .into_iter()
                 .filter_map(|cmd| match cmd {
                     Command::Bar(bar) if bar.height == STAT_BAR_HEIGHT => kinds
                         .iter()
                         .find(|(color, _)| *color == bar.color)
-                        .map(|(_, kind)| (*kind, bar.x, bar.y, bar.width)),
+                        .map(|(_, kind)| (*kind, bar.x, bar.y, bar.width, bar.radius, bar.corners)),
                     _ => None,
                 })
                 .collect();
@@ -2922,21 +2966,30 @@ mod tests {
             ws.panes.pane(ws.panes.focus()).area
         };
         let detail = commits_detail_rect(pane, None).expect("a detail pane");
-        let (x, a, b) = (
+        let (x, a, b, c) = (
             ((detail.x + detail.width - TEXT_INSET - STAT_BAR_CELLS) * 16) as i16,
             row * 16 + 6,
             row * 16 + 22,
+            row * 16 + 38,
+        );
+        let (left, right) = (
+            CORNER_TOP_LEFT | CORNER_BOTTOM_LEFT,
+            CORNER_TOP_RIGHT | CORNER_BOTTOM_RIGHT,
         );
         assert_eq!(
             bars,
             [
-                ("track", x, a, 112),
-                ("added", x, a, 112),
-                ("track", x, b, 112),
-                ("added", x, b, 28),
-                ("deleted", x + 28, b, 28),
+                ("track", x, a, 112, 2, left | right),
+                ("added", x, a, 112, 2, left | right),
+                ("track", x, b, 112, 2, left | right),
+                ("added", x, b, 28, 2, left),
+                ("deleted", x + 28, b, 28, 0, 0),
+                ("track", x, c, 112, 2, left | right),
+                ("added", x, c, 56, 2, left),
+                ("deleted", x + 56, c, 56, 2, right),
             ],
-            "the largest change fills its track, and a smaller one fills its share",
+            "the largest change fills its track, a smaller one fills its share, and \
+             each share rounds where it meets an end of the track",
         );
     }
 
