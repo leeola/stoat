@@ -48,6 +48,7 @@ const SUCCESS: [u8; 3] = [0x8f, 0xd1, 0x8a];
 const SIDE_BASE: [u8; 3] = [0x2a, 0x1d, 0x20];
 const SIDE_TARGET: [u8; 3] = [0x1d, 0x2a, 0x1f];
 const WASH: [u8; 3] = [0x2a, 0x3c, 0x5a];
+const TAB_WASH: [u8; 3] = [0x24, 0x35, 0x52];
 const CURSOR_SECONDARY: [u8; 3] = [0x8a, 0x90, 0x9c];
 const READONLY_FRAME: [u8; 3] = [0x8a, 0x76, 0x50];
 const TINT_OURS: [u8; 3] = [0x18, 0x24, 0x1b];
@@ -847,56 +848,46 @@ fn the_status_row_sits_on_the_ground_with_no_hairline() {
     );
 }
 
-/// The tab bar sits on the ground over a lone tab, with the active tab on the
-/// base surface, its top corners rounded off, under a 2 px accent edge.
+/// The tab bar sits on the ground over a lone tab, and the active tab draws as
+/// a pill in the accent wash, one pixel inside the row, with its corners
+/// rounded at 4 px.
 ///
 /// The bar leads with the workspace name, whose length follows the session's
 /// random name, so the check reads row 0 as runs of color rather than at a
-/// fixed column. The tab's left edge is the first base pixel of the row's
-/// middle, where the edge runs straight, and the rounding takes the base
-/// out of that column's top pixel. Column 8 of the tab lies past the 6 px arc,
-/// so its top two pixels show the accent edge and its third the base.
+/// fixed column. The tab's left edge is the first wash pixel of the row's
+/// middle, where the edge runs straight. Pixel column 8 of the tab lies in its
+/// pad cell, past the arc, so it reads the ground on the row's first and last
+/// pixel rows and the wash on the second. On the second pixel row the arc
+/// takes the wash out of the tab's first pixel column.
 #[test]
-fn the_tab_bar_sits_on_the_ground_with_the_active_tab_on_base() {
+fn the_tab_bar_sits_on_the_ground_with_the_active_tab_in_a_pill() {
     let mut home = support::scratch_home();
     let shot = settled_frame(home.path(), "many-files", "src/alpha.txt", "");
 
-    expect_row_runs(&shot, &mut home, 0, &[GROUND, BASE, GROUND], "tab_bar");
+    expect_row_runs(&shot, &mut home, 0, &[GROUND, TAB_WASH, GROUND], "tab_bar");
 
     let (_, top, _, height) = cell_rect(0, 0, 1, 1);
-    let pixel = |x: u32, y: u32| {
-        let at = ((y * shot.width + x) * 4) as usize;
-        [shot.rgba[at], shot.rgba[at + 1], shot.rgba[at + 2]]
-    };
     let middle = top + height / 2;
-    let Some(left) = (0..shot.width).find(|&x| pixel(x, middle) == BASE) else {
+    let Some(left) = (0..shot.width).find(|&x| pixel(&shot, x, middle) == TAB_WASH) else {
         let frame = keep_frame(&shot, &mut home, "tab_bar_middle");
         panic!(
             "no pixel of row 0's middle reads {}; the frame is {}",
-            hex(BASE),
+            hex(TAB_WASH),
             frame.display(),
         );
     };
-    if pixel(left, top) == BASE {
-        let frame = keep_frame(&shot, &mut home, "tab_corner");
-        panic!(
-            "the active tab's top-left pixel at x {left} reads {}, not rounded off; the frame \
-             is {}",
-            hex(BASE),
-            frame.display(),
-        );
-    }
 
-    let edge = [top, top + 1, top + 2].map(|y| pixel(left + 8, y));
-    if edge != [ACCENT, ACCENT, BASE] {
-        let frame = keep_frame(&shot, &mut home, "tab_edge");
+    let column = [top, top + 1, top + height - 1].map(|y| pixel(&shot, left + 8, y));
+    let corner = pixel(&shot, left, top + 1);
+    if column != [GROUND, TAB_WASH, GROUND] || corner == TAB_WASH {
+        let frame = keep_frame(&shot, &mut home, "tab_pill");
         panic!(
-            "the active tab's top three pixels at x {} read {:?}, not two {} over {}; the frame \
-             is {}",
+            "the tab's pixel column {} reads {:?} on the row's first, second, and last pixel \
+             rows, not the ground, the wash, and the ground, or its first column's second \
+             pixel reads {}, not rounded off; the frame is {}",
             left + 8,
-            edge.map(hex),
-            hex(ACCENT),
-            hex(BASE),
+            column.map(hex),
+            hex(corner),
             frame.display(),
         );
     }

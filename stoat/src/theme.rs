@@ -907,9 +907,6 @@ pub mod scope {
     /// The workspace name that leads the tab bar. A theme that leaves it unset
     /// draws the name in the text color of [`UI_TABBAR_INACTIVE`].
     pub const UI_TABBAR_NAME: &str = "ui.tabbar.name";
-    /// The accent edge along the active tab's top. A theme that leaves it
-    /// unset draws none.
-    pub const UI_TABBAR_EDGE: &str = "ui.tabbar.edge";
     /// The chips at the tab bar's right that name the two diff layouts while
     /// one has the focus, the focused layout's chip active.
     pub const UI_TABBAR_TOGGLE_ACTIVE: &str = "ui.tabbar.toggle.active";
@@ -1817,20 +1814,15 @@ mod tests {
         );
     }
 
-    /// The ermine theme draws the active tab's accent edge in its accent blue,
-    /// and default_dark leaves the edge unset, so it draws none.
+    /// The ermine theme fills the active tab with the faint accent wash that
+    /// the boards' tab pill takes.
     #[test]
-    fn the_ermine_theme_colors_the_active_tab_edge() {
-        let [ermine, dark] = shipped_themes();
+    fn the_ermine_theme_fills_the_active_tab_with_the_accent_wash() {
+        let theme = load(crate::app::DEFAULT_KEYMAP, "ermine_night");
         assert_eq!(
-            (
-                ermine
-                    .try_get(scope::UI_TABBAR_EDGE)
-                    .and_then(|style| style.fg),
-                dark.try_get(scope::UI_TABBAR_EDGE),
-            ),
-            (Some(rgb(0x7fb0ff)), None),
-            "the accent edge, and no edge under default_dark",
+            theme.get(scope::UI_TABBAR_ACTIVE).bg,
+            Some(rgb(0x243552)),
+            "the active tab's fill",
         );
     }
 

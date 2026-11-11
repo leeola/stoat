@@ -55,10 +55,7 @@ use stoat_widgets::{
     text_run::{self, TextRun},
     ApcScene,
 };
-use stoatty_protocol::command::{
-    panel::{CORNER_TOP_LEFT, CORNER_TOP_RIGHT, FILLET_BOTTOM_LEFT, FILLET_BOTTOM_RIGHT},
-    BorderStyle, Edge, PanelShadow,
-};
+use stoatty_protocol::command::{BorderStyle, Edge, PanelShadow};
 
 /// Buffer lines the minimap strip draws per vertical cell.
 ///
@@ -1342,7 +1339,7 @@ struct RunBox {
 enum BoxShape {
     /// A chip one logical pixel inside the row, as [`Panel::chip`] draws it.
     Chip,
-    /// The active tab, as [`tab_panels`] draws it.
+    /// The active tab, a chip in its background.
     Tab,
 }
 
@@ -1590,12 +1587,6 @@ fn render_status_runs(
 
     let start = scene.bytes().len();
     let scale = frame.theme.type_scale(TypeRole::Ui);
-    let edge = style_rgb(
-        frame
-            .theme
-            .try_get(crate::theme::scope::UI_TABBAR_EDGE)
-            .and_then(|style| style.fg),
-    );
     for (run, (bg, left, right)) in runs.iter().zip(&rich) {
         let boxes: Vec<SegmentBox> = run
             .boxes
@@ -1606,8 +1597,7 @@ fn render_status_runs(
                     .shape
                     .zip(left.get(run_box.segments.start))
                     .map_or_else(Vec::new, |(shape, first)| match shape {
-                        BoxShape::Chip => vec![Panel::chip(first.bg)],
-                        BoxShape::Tab => tab_panels(first.bg, edge),
+                        BoxShape::Chip | BoxShape::Tab => vec![Panel::chip(first.bg)],
                     }),
             })
             .collect();
@@ -1663,10 +1653,9 @@ fn status_scene_key(runs: &[StatusRun], separator: [u8; 3]) -> u64 {
 ///
 /// Under a live scene a hairline in `ui.border.inactive` follows the name,
 /// each tab takes whole cells with its text centered, and the active tab
-/// draws as [`tab_panels`] in its background, under an edge in
-/// `ui.tabbar.edge` where the theme sets one. In cells the active tab is its
-/// background. Every tab takes a box, so no tab moves when another becomes the
-/// active one.
+/// draws as a chip in its background, one logical pixel inside the row. In
+/// cells the active tab is its background. Every tab takes a box, so no tab
+/// moves when another becomes the active one.
 ///
 /// While the split pane in focus shows a diff view or a changes view, the bar
 /// ends in two chips, `files` and `changes`, which name the two diff layouts.
@@ -1858,44 +1847,6 @@ fn draw_tab_divider(
         corners: 0,
     }
     .render(run.area, buf, scene);
-}
-
-/// The panels the active tab draws as, in `fill`, in draw order.
-///
-/// Its top corners round at 6 and its bottom corners stay square, with a
-/// fillet beside each that joins the tab to the pane below it, as the boards
-/// draw the active tab.
-///
-/// With an `edge` color the tab carries a 2 px accent edge along its top, as
-/// the boards' inset box shadow draws it. The tab shape draws first in the
-/// accent, and the tab then draws over it with its top edge 2 px lower. Its
-/// arcs start 2 px lower too, so the edge follows the rounded corners.
-fn tab_panels(fill: [u8; 3], edge: Option<[u8; 3]>) -> Vec<Panel> {
-    let panel = |color: [u8; 3], top: u8, fillets: u8| Panel {
-        style: BorderStyle::None_,
-        border: color,
-        corner_radius: 6,
-        fill: Some(color),
-        shadow: PanelShadow::None_,
-        edges: [
-            Edge::Inset(top),
-            Edge::Inset(0),
-            Edge::Inset(0),
-            Edge::Inset(0),
-        ],
-        corners: CORNER_TOP_LEFT | CORNER_TOP_RIGHT,
-        fillets,
-        fillet_radius: 2,
-        hatch: None,
-        above_pools: false,
-        backdrop: false,
-        anchor: None,
-    };
-    let fillets = FILLET_BOTTOM_LEFT | FILLET_BOTTOM_RIGHT;
-    match edge {
-        Some(edge) => vec![panel(edge, 0, 0), panel(fill, 2, fillets)],
-        None => vec![panel(fill, 0, fillets)],
-    }
 }
 
 /// The segment ahead of a tab's label that marks its file as unmerged or as
@@ -6444,20 +6395,15 @@ mod tests {
     /// Under a live scene a hairline parts the workspace name from the tabs, and
     /// each suffix draws in its tag's color at the label's Ui type scale.
     ///
-    /// The active tab draws as two panels rounded at 6 at their top corners.
-    /// The accent shape draws first, and the base shape then draws over it from
-    /// 2 px lower, filleted into the pane, so the accent shows as the edge
-    /// along the tab's top.
+    /// The active tab draws as one chip in its background, rounded at 4 and one
+    /// logical pixel inside the row's top and bottom, over the tab's cells.
     ///
     /// The cells match the plain bar, since every role scales to a whole cell
     /// under `cfg(test)`. The name ends at column 4, where the hairline stands
     /// 12 sixteenths tall from sixteenth 2, and the bar draws no other mark.
     #[test]
-    fn the_live_tab_bar_divides_the_name_rounds_the_active_tab_and_colors_each_suffix() {
-        use super::{
-            style_rgb, BorderStyle, PanelShadow, TypeRole, CORNER_TOP_LEFT, CORNER_TOP_RIGHT,
-            FILLET_BOTTOM_LEFT, FILLET_BOTTOM_RIGHT,
-        };
+    fn the_live_tab_bar_divides_the_name_boxes_the_active_tab_and_colors_each_suffix() {
+        use super::{style_rgb, BorderStyle, PanelShadow, TypeRole};
         use ratatui::style::Color;
         use stoatty_protocol::command::{Command, Edge, PanelCommand};
 
@@ -6466,29 +6412,23 @@ mod tests {
 
         let theme = &h.stoat.theme;
         let rgb = |color: Option<Color>| style_rgb(color).expect("the theme colors it in RGB");
-        let base = rgb(theme.get(crate::theme::scope::UI_TABBAR_ACTIVE).bg);
+        let active = rgb(theme.get(crate::theme::scope::UI_TABBAR_ACTIVE).bg);
         let rust = rgb(theme.get(crate::theme::scope::UI_TAG_RUST).fg);
         let md = rgb(theme.get(crate::theme::scope::UI_TAG_MARKDOWN).fg);
         let divider = rgb(theme.get(crate::theme::scope::UI_BORDER_INACTIVE).fg);
-        let edge = rgb(theme.get(crate::theme::scope::UI_TABBAR_EDGE).fg);
-        let tab = |color, top, fillets| PanelCommand {
+        let tab = PanelCommand {
             top: 0,
             left: 26,
             width: 17,
             height: 1,
             style: BorderStyle::None_,
-            border: color,
-            corner_radius: 6,
-            fill: Some(color),
+            border: active,
+            corner_radius: 4,
+            fill: Some(active),
             shadow: PanelShadow::None_,
-            edges: [
-                Edge::Inset(top),
-                Edge::Inset(0),
-                Edge::Inset(0),
-                Edge::Inset(0),
-            ],
-            corners: CORNER_TOP_LEFT | CORNER_TOP_RIGHT,
-            fillets,
+            edges: Edge::symmetric(0, 1),
+            corners: 0,
+            fillets: 0,
             fillet_radius: 2,
             hatch: None,
             above_pools: false,
@@ -6515,14 +6455,8 @@ mod tests {
             .collect();
         assert_eq!(
             (panels, marks),
-            (
-                vec![
-                    tab(edge, 0, 0),
-                    tab(base, 2, FILLET_BOTTOM_LEFT | FILLET_BOTTOM_RIGHT),
-                ],
-                vec![(64, 2, 1, 12, divider)],
-            ),
-            "the active tab's accent shape and its base shape, and the name's hairline alone",
+            (vec![tab], vec![(64, 2, 1, 12, divider)]),
+            "the active tab's chip, and the name's hairline alone",
         );
 
         let ui = theme.type_scale(TypeRole::Ui);
@@ -6639,14 +6573,13 @@ mod tests {
                 format!("{:<30}", " ws   ! f.txt"),
                 ratatui::style::Color::Rgb(0xf5, 0x9a, 0xa0),
                 vec![
-                    (5, 9, Some([0x7f, 0xb0, 0xff])),
-                    (5, 9, Some([0x17, 0x19, 0x1e])),
+                    (5, 9, Some([0x24, 0x35, 0x52])),
                     (71, 28, Some([0x33, 0x20, 0x1f])),
                 ],
                 Some((71 * 16 + 8, text.to_string(), [0xf2, 0x77, 0x7f])),
             ),
-            "the active tab's accent edge and box, then the chip one cell before the bar's \
-             edge, its text 8/16 in",
+            "the active tab's chip in the accent wash, then the chunk chip one cell before \
+             the bar's edge, its text 8/16 in",
         );
     }
 

@@ -259,6 +259,7 @@ theme ermine_night inherits default_dark {
     let brand            = "#c98a5a";
     let number           = "#f2a869";
     let wash             = "#2a3c5a";
+    let tab_wash         = "#243552";
     let cursor_secondary = "#8a909c";
     let divider          = "#22252b";
     let hatch            = "#1b1d22";
@@ -334,10 +335,9 @@ theme ermine_night inherits default_dark {
 
     ui.list.current.bg = raised;
 
-    ui.tabbar.active       = { fg: text, bg: base };
+    ui.tabbar.active       = { fg: text, bg: tab_wash };
     ui.tabbar.inactive     = { fg: muted, bg: ground };
     ui.tabbar.name.fg      = special;
-    ui.tabbar.edge.fg      = accent;
     ui.statusbar.focused   = { fg: dim, bg: ground };
     ui.statusbar.unfocused = { fg: muted, bg: ground };
     ui.mode_label          = { fg: chrome, modifiers: [bold] };
