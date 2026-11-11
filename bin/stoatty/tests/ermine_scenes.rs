@@ -1407,12 +1407,18 @@ fn a_hover_ends_in_a_footer_on_the_raised_surface() {
     }
 }
 
-/// A completion row of a function leads with its badge on the function tint.
+/// A completion row of a function leads with its badge on the function tint,
+/// and the selected first row is a box in the select fill with 4 px corners.
 ///
 /// The server loads the crate before it answers, so the completion key plays
 /// again until the tint shows. The prefix `mai` names the fixture's `main`
 /// function. Every badge sits in the box's first column, so the tinted cells
 /// all share one column.
+///
+/// The badge's box stands 1 px inside its row, so the first tinted cell's
+/// first pixel row shows the row's box. Its pixel column 0 lies outside the
+/// box's corner arc and keeps the overlay, and its column 4 lies on the box's
+/// straight top edge.
 #[test]
 fn a_function_completion_leads_with_its_badge_on_the_function_tint() {
     let mut home = support::scratch_home();
@@ -1440,6 +1446,23 @@ fn a_function_completion_leads_with_its_badge_on_the_function_tint() {
             frame.display(),
         );
     }
+
+    let (col, row) = tinted[0];
+    let (x, y, _, _) = cell_rect(col, row, 1, 1);
+    expect_region(
+        &shot,
+        &mut home,
+        (x, y, 1, 1),
+        OVERLAY,
+        "selected_row_corner",
+    );
+    expect_region(
+        &shot,
+        &mut home,
+        (x + 4, y, 1, 1),
+        SELECT,
+        "selected_row_top_edge",
+    );
 }
 
 /// A selection washes its range, the primary cursor is the terminal's own

@@ -5,6 +5,7 @@ use crate::{
     pane::{FocusTarget, View},
     render::{
         cursor_popup,
+        paint::style_rgb,
         text::{clip_to_width, write_str, write_str_clipped},
     },
     theme::scope,
@@ -13,9 +14,12 @@ use nucleo::Utf32Str;
 use ratatui::{
     buffer::Buffer,
     layout::Rect,
+    style::Style,
     widgets::{Block, Borders},
 };
 use std::ops::Range;
+use stoat_widgets::panel::Panel;
+use stoatty_protocol::command::Edge;
 
 /// Maximum number of completion rows visible at once. Larger lists
 /// scroll so the selected row stays in view.
@@ -30,6 +34,9 @@ const KIND_GAP: usize = 2;
 /// Rows the footer takes under the list, which are the hairline and the detail
 /// line.
 const FOOTER_ROWS: u16 = 2;
+
+/// The corner radius of the live popup's selected row, in logical pixels.
+const SELECTED_ROW_RADIUS: u8 = 4;
 
 /// The on-screen rectangles of the completion popup, derived from `stoat` by
 /// [`completion_popup_layout`], plus the scroll offset of the first visible row.
@@ -314,11 +321,14 @@ pub(crate) fn render_completion(
 ///
 /// Shared by the live popup, which derives `start_row` from the viewport, and
 /// the smooth-scroll pool, which paints absolute pages, so both render
-/// identical rows. The selected row's accent bar goes into `scene`.
+/// identical rows.
 ///
-/// With `panels`, a badge's box goes through
-/// [`chip_cells`](crate::render::chrome::chip_cells). A pool page captures no
-/// panel, so a page passes `false` and paints the box into the badge's cell.
+/// With `panels`, a live scene, and an RGB selection fill, the selected row is
+/// a box with rounded corners across the row in that fill, and a badge's box
+/// goes through [`chip_cells`](crate::render::chrome::chip_cells) over it.
+/// Otherwise the selected row's cells take the selection fill and the accent
+/// bar marks it, as a plain terminal draws it. A pool page captures no panel,
+/// so a page passes `false` and paints the badge's box into its cell.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn paint_completion_rows(
     popup: &CompletionPopup,
@@ -354,16 +364,34 @@ pub(crate) fn paint_completion_rows(
                 break;
             };
             let row = area.y + row_idx;
-            let row_style = if item_idx == selected_idx {
-                selected_style
-            } else {
-                text_style
+            let selected = item_idx == selected_idx;
+            let row_fill =
+                style_rgb(selected_style.bg).filter(|_| selected && panels && scene.live());
+            let (cell_style, row_style) = match (selected, row_fill) {
+                (true, Some(_)) => (
+                    text_style,
+                    Style {
+                        bg: text_style.bg,
+                        ..selected_style
+                    },
+                ),
+                (true, None) => (selected_style, selected_style),
+                (false, _) => (text_style, text_style),
             };
             for col in area.x..area.x + area.width {
-                buf[(col, row)].set_char(' ').set_style(row_style);
+                buf[(col, row)].set_char(' ').set_style(cell_style);
             }
-            // A badge's box hides the chrome sent before it in its rect, so it
-            // goes out ahead of the selection bar that shares its cell.
+            // A box hides the chrome sent before it in its rect, so the row's
+            // box goes out first, then the badge's box over it, and then the
+            // selection bar that shares the badge's cell.
+            if let Some(fill) = row_fill {
+                Panel {
+                    corner_radius: SELECTED_ROW_RADIUS,
+                    edges: Edge::symmetric(0, 0),
+                    ..Panel::chip(fill)
+                }
+                .draw_components(Rect::new(area.x, row, area.width, 1), scene);
+            }
             if let Some((glyph, kind_scope)) = kind_glyph(item.kind).filter(|_| width > 0) {
                 let badge = match panels {
                     true => crate::render::chrome::chip_cells(
@@ -375,7 +403,7 @@ pub(crate) fn paint_completion_rows(
                 };
                 write_str(buf, area.x, row, glyph, row_style.patch(badge));
             }
-            if item_idx == selected_idx {
+            if selected && row_fill.is_none() {
                 crate::render::chrome::selection_bar(area.x, row, theme, buf, scene);
             }
 
@@ -686,12 +714,13 @@ mod tests {
     }
 
     /// The badge cell of each kind class as (glyph, foreground, background),
-    /// with an item of a kind that has no badge last, and the chip panels the
-    /// badges' boxes draw as.
+    /// with an item of a kind that has no badge last, and the panels the rows
+    /// draw.
     ///
-    /// A badge cell keeps its row's background, the selection's on the first
-    /// row and the box's on the rest, and its box is a panel in the kind's
-    /// tint.
+    /// A badge cell keeps the box's background, and its box is a panel in the
+    /// kind's tint. The selected first row is a box across the row in the
+    /// selection fill with 4 px corners and no accent bar. It goes out ahead of
+    /// the first badge's box, which shows over it.
     #[test]
     fn each_kind_class_leads_its_row_with_its_badge() {
         let kinds = [
@@ -718,44 +747,30 @@ mod tests {
         let panels: Vec<PanelCommand> = scene
             .iter()
             .filter_map(|command| match command {
-                Command::Panel(panel) if panel.width == 1 => Some(*panel),
+                Command::Panel(panel) if (panel.left, panel.height) == (inner.x, 1) => Some(*panel),
                 _ => None,
             })
             .collect();
         let (x, y) = ((inner.x * 16) as i16, (inner.y * 16) as i16);
-        let first_box = scene.iter().position(|command| {
-            matches!(command, Command::Panel(panel) if (panel.left, panel.top) == (inner.x, inner.y))
-        });
-        let selection_bar = scene.iter().position(|command| {
+        let selection_bar = scene.iter().any(|command| {
             matches!(command, Command::Bar(bar) if (bar.x, bar.y, bar.height) == (x, y, 16))
         });
-        assert!(
-            matches!((first_box, selection_bar), (Some(at), Some(bar)) if at < bar),
-            "the first badge's box goes out ahead of the selection bar in its cell, got \
-             {first_box:?} and {selection_bar:?}"
-        );
-        let selected = h
-            .stoat
-            .theme
-            .list_selected(scope::UI_SELECTION)
-            .bg
-            .expect("the selection fills its row");
         let bytes = |hex: u32| [(hex >> 16) as u8, (hex >> 8) as u8, hex as u8];
         let rgb = |hex: u32| {
             let [r, g, b] = bytes(hex);
             Color::Rgb(r, g, b)
         };
-        let chip = |row: u16, hex: u32| PanelCommand {
+        let panel = |row: u16, width: u16, hex: u32, edges: [Edge; 4]| PanelCommand {
             top: inner.y + row,
             left: inner.x,
-            width: 1,
+            width,
             height: 1,
             style: BorderStyle::None_,
             border: bytes(hex),
             corner_radius: 4,
             fill: Some(bytes(hex)),
             shadow: PanelShadow::None_,
-            edges: Edge::symmetric(0, 1),
+            edges,
             corners: 0,
             fillets: 0,
             fillet_radius: 2,
@@ -764,11 +779,12 @@ mod tests {
             backdrop: false,
             anchor: None,
         };
+        let chip = |row: u16, hex: u32| panel(row, 1, hex, Edge::symmetric(0, 1));
         assert_eq!(
-            (badges, panels),
+            (badges, panels, selection_bar),
             (
                 vec![
-                    ("f", rgb(0x7fb0ff), selected),
+                    ("f", rgb(0x7fb0ff), rgb(0x252830)),
                     ("c", rgb(0x6cc7d6), rgb(0x252830)),
                     ("m", rgb(0xc59af0), rgb(0x252830)),
                     ("v", rgb(0xa3a9b5), rgb(0x252830)),
@@ -776,12 +792,14 @@ mod tests {
                     (" ", rgb(0xdfe2e8), rgb(0x252830)),
                 ],
                 vec![
+                    panel(0, inner.width, 0x23324a, Edge::symmetric(0, 0)),
                     chip(0, 0x223049),
                     chip(1, 0x1e3237),
                     chip(2, 0x2a2236),
                     chip(3, 0x2c3039),
                     chip(4, 0x2c3039),
                 ],
+                false,
             ),
         );
     }
