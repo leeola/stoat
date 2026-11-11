@@ -681,17 +681,16 @@ fn side_by_side_panes_stand_eight_pixels_apart() {
     }
 }
 
-/// Two stacked panes stand 8 px apart, as the boards space their islands.
+/// Two stacked panes meet at the upper pane's status row, which is the gap
+/// between them, as the PaneStatus board stacks its islands.
 ///
-/// The gap row, 24, is 18 px tall, and each island reaches 5 px of it. The
-/// upper island's 5 px, pixel rows 432 to 436, carry its tucked band, darker
-/// than the base surface and darker on each row toward the island's bottom
-/// edge, where the flat ground keeps one color. One of those rows equals the
-/// ground's color, so the check reads the deepening and not a color. Rows 437
-/// to 444 keep the ground, and the lower island's rows 445 to 449 take
-/// the base surface. Pixel column 720 lies in the middle of both panes.
+/// The row, 24, is 18 px tall, from pixel row 432 to 449, and no island
+/// reaches into it. Pixel column 720 lies in the middle of both panes, where
+/// the row holds no text, so it reads the ground down all 18 pixel rows, and
+/// the lower island's first pixel row, 450, reads the base surface. The upper
+/// pane's name draws in the row's first cells.
 #[test]
-fn stacked_panes_stand_eight_pixels_apart() {
+fn stacked_panes_meet_at_the_upper_pane_s_status_row() {
     let mut home = support::scratch_home();
     let shot = settled_frame(
         home.path(),
@@ -699,25 +698,16 @@ fn stacked_panes_stand_eight_pixels_apart() {
         "unstaged.txt",
         "<Space>av<Settle>",
     );
-    let column = |from: u32, to: u32| (from..to).map(|y| pixel(&shot, 720, y)).collect::<Vec<_>>();
-    let (band, ground, lower) = (column(432, 437), column(437, 445), column(445, 450));
-    let brightness =
-        |[red, green, blue]: [u8; 3]| u16::from(red) + u16::from(green) + u16::from(blue);
-    let darker = band
-        .iter()
-        .all(|shade| shade.iter().zip(BASE).all(|(&got, base)| got < base))
-        && band
-            .windows(2)
-            .all(|pair| brightness(pair[1]) < brightness(pair[0]));
+    let column: Vec<[u8; 3]> = (432..451).map(|y| pixel(&shot, 720, y)).collect();
+    let name = brightest(&shot, cell_rect(1, 24, 12, 1));
 
-    if !darker || ground != [GROUND; 8] || lower != [BASE; 5] {
-        let frame = keep_frame(&shot, &mut home, "stacked_gap");
+    if column != [vec![GROUND; 18], vec![BASE]].concat() || name <= 0x80 {
+        let frame = keep_frame(&shot, &mut home, "stacked_status_row");
         panic!(
-            "pixel column 720 reads {:?}, {:?}, and {:?} down the gap row, not the upper island's \
-             shaded edge, the ground, and the lower island's edge; the frame is {}",
-            band.into_iter().map(hex).collect::<Vec<_>>(),
-            ground.into_iter().map(hex).collect::<Vec<_>>(),
-            lower.into_iter().map(hex).collect::<Vec<_>>(),
+            "pixel column 720 reads {:?} down pixel rows 432 to 450, not the ground down the \
+             status row and then the lower island's base, or the row's first cells peak at \
+             {name:#04x}, not the pane's name; the frame is {}",
+            column.into_iter().map(hex).collect::<Vec<_>>(),
             frame.display(),
         );
     }

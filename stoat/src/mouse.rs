@@ -2441,8 +2441,8 @@ fn copy_status(text: &str) -> String {
 /// The buffer offset under the cell `col`, `row` of the editor pane at `area`,
 /// or `None` for a cell outside the painted text.
 ///
-/// A cell past the pane's last row, such as one on the window's status row,
-/// maps to nothing rather than to the line below the last visible one.
+/// A cell past the pane's last row, such as one on the pane's status row, maps
+/// to nothing rather than to the line below the last visible one.
 pub(crate) fn editor_screen_to_offset(
     stoat: &mut Stoat,
     editor_id: EditorId,

@@ -133,11 +133,11 @@ pub(crate) fn rail_strip_id(strip_id: u32) -> u32 {
 /// every pane's to cover them, and the highest id stays above any pane index.
 pub(crate) const OVERLAY_LANE: u32 = u32::MAX;
 
-/// The scene lane of the window's status row, which changes with every cursor
-/// move while the panes stand.
+/// The scene lane of every split pane's status row, which changes with every
+/// cursor move while the panes stand.
 ///
-/// The row sits below every pane and covers none, so its lane only has to stay
-/// under [`OVERLAY_LANE`], where a card docked above the row draws.
+/// Each row sits under its pane and covers none, so the lane only has to stay
+/// under [`OVERLAY_LANE`], where a card docked above a row draws.
 pub(crate) const STATUS_LANE: u32 = u32::MAX - 1;
 
 /// The opacity of the minimap's viewport thumb, nine percent of 255.
@@ -322,7 +322,7 @@ impl LspServerList {
 pub(crate) struct FrameCtx<'a> {
     pub(crate) workspace_name: &'a str,
     /// Whether the tab bar takes the frame's top row. The bar then leads with
-    /// the workspace name, so the window's status row leaves the name out.
+    /// the workspace name, so a status row leaves the name out.
     pub(crate) tab_bar_shown: bool,
     pub(crate) workspace_root: &'a Path,
     pub(crate) mode: &'a str,
@@ -915,8 +915,9 @@ pub(crate) fn perf_label(seg: PerfSegment) -> String {
 
 pub(crate) const PRIMARY_MODES: &[&str] = &["normal", "insert", "select"];
 
-/// Reserve the bottom row for the window's status bar so the which-key hint box,
-/// bottom-anchored over the full-window right edge, never paints over it.
+/// Reserve the bottom row for the status rows of the bottom panes, so the
+/// which-key hint box, bottom-anchored over the full-window right edge, never
+/// paints over them.
 pub(crate) fn hints_overlay_area(size: Rect) -> Rect {
     Rect {
         x: size.x,
@@ -1286,7 +1287,6 @@ pub(crate) fn frame(
     let single_minimap_rect = stoat.single_minimap_rect;
     let modal_overlay = modal_overlay_open(stoat);
     let size = stoat.layout_size();
-    let status_bar = stoat.status_bar_rect();
     let inactive_dim = stoat.painted_inactive_dim();
     let modal_dim = stoat.modal_dim();
 
@@ -1754,13 +1754,16 @@ pub(crate) fn frame(
         }
     }
 
-    // The row shows the pane focus anchors to, which reads unfocused while a
-    // dock or a detached window holds focus.
-    let lsp_badge_rect = status_bar.and_then(|row| {
-        let id = ws.panes.focus_anchor();
-        scene.set_lane(STATUS_LANE);
-        let badge = render_window_status(
-            ws.panes.pane(id),
+    // Every split pane paints its status in the row under it. The rows share
+    // one lane, so a cursor move resends them and no pane's content.
+    scene.set_lane(STATUS_LANE);
+    let mut lsp_badge_rect = None;
+    for (id, pane) in ws.panes.split_panes() {
+        let Some(row) = pane_status_row(pane.area, single_minimap_rect, full) else {
+            continue;
+        };
+        let badge = render_split_status(
+            pane,
             matches!(ws.focus, FocusTarget::SplitPane) && split_focused == id,
             overlay_pane == Some(id),
             row,
@@ -1777,9 +1780,9 @@ pub(crate) fn frame(
             buf,
             scene,
         );
-        scene.set_lane(OVERLAY_LANE);
-        badge
-    });
+        lsp_badge_rect = lsp_badge_rect.or(badge);
+    }
+    scene.set_lane(OVERLAY_LANE);
     stoat.lsp_badge_rect = lsp_badge_rect;
     if lsp_badge_rect.is_none() {
         stoat.lsp_badge_hovered = false;
@@ -2596,14 +2599,42 @@ fn single_band_rail(ws: &Workspace, chrome: MinimapChrome<'_>) -> Option<u32> {
     }
 }
 
-/// Paint the window's status row, `row`, with the status of `pane`, and return
-/// the hover rect of the LSP badge the row shows.
+/// The status row of the split pane over `area`, the row under the pane over
+/// its columns.
+///
+/// Every pane has one free row under it, the row between it and a stacked
+/// sibling or the row that [`Stoat::layout_size`] leaves at the window's
+/// bottom, so a row takes nothing from the panes. A pane whose island takes
+/// the single minimap `band` runs its row under the band too. `None` for an
+/// empty area and for a pane that reaches the `window`'s last row.
+///
+/// [`Stoat::layout_size`]: crate::Stoat::layout_size
+pub(crate) fn pane_status_row(area: Rect, band: Option<Rect>, window: Rect) -> Option<Rect> {
+    if area.is_empty() || area.bottom() >= window.bottom() {
+        return None;
+    }
+    let width = match band {
+        Some(band) if band.x == area.right() && band.y == area.y && band.height == area.height => {
+            area.width + band.width
+        },
+        _ => area.width,
+    };
+    Some(Rect {
+        y: area.bottom(),
+        height: 1,
+        width,
+        ..area
+    })
+}
+
+/// Paint the status row of the split pane `pane`, `row`, and return the hover
+/// rect of the LSP badge the row shows.
 ///
 /// With `screen_over` set, a rebase, reword, or conflict screen covers the
 /// pane, and the row names that screen. A commits view's row names the commits
 /// screen and its selected commit. Every other view shows its pane status.
 #[allow(clippy::too_many_arguments)]
-fn render_window_status(
+fn render_split_status(
     pane: &Pane,
     is_focused: bool,
     screen_over: bool,
@@ -2657,8 +2688,8 @@ fn render_window_status(
 /// strip, and the cards it pops out.
 ///
 /// Lane 0 stays below every pane for the tab bar, and [`STATUS_LANE`] and
-/// [`OVERLAY_LANE`] above them, so a cursor move that redraws only the window's
-/// status row sends only that row.
+/// [`OVERLAY_LANE`] above them, so a cursor move that redraws only the status
+/// rows sends only those rows.
 pub(crate) fn content_lane(pane_index: u32) -> u32 {
     1 + pane_index
 }

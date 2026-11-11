@@ -77,8 +77,8 @@ pub(crate) fn render_commits(
     }
 }
 
-/// The selected commit, as the window's status row names it after the commits
-/// screen, with a merge's count of parents as a remark.
+/// The selected commit, as a commits pane's status row names it after the
+/// commits screen, with a merge's count of parents as a remark.
 pub(crate) fn status_subject(state: &CommitListState) -> Option<ScreenSubject<'_>> {
     state
         .commits

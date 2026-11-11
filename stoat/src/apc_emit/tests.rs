@@ -1876,10 +1876,11 @@ fn an_open_dock_clears_to_the_surface_over_a_chrome_ground() {
 
 /// Under islands, each split pane declares a backdrop halo over its content in
 /// the editor surface's fill, and the gap between the panes draws no divider
-/// hairline. A halo reaches 8 px from the window's sides and from its sibling,
-/// so a side at the window takes a margin edge and a side at the gap a gap
-/// edge, side by side and stacked. A theme with no chrome surface keeps the
-/// flush layout, with no halo and the gap hairline.
+/// hairline. A halo reaches 8 px from the window's sides and from a sibling
+/// beside it, so a side at the window takes a margin edge and a side at the gap
+/// a gap edge. Stacked halos meet the upper pane's status row, so their facing
+/// edges stay flush. A theme with no chrome surface keeps the flush layout,
+/// with no halo and the gap hairline.
 #[test]
 fn split_panes_declare_island_halos_in_place_of_the_gap_hairline() {
     use stoatty_protocol::{
@@ -1979,8 +1980,8 @@ fn split_panes_declare_island_halos_in_place_of_the_gap_hairline() {
                 halo(beside[1], [inset, margin, inset, gap8]),
             ],
             vec![
-                halo(stacked[0], [inset, margin, gap8, margin]),
-                halo(stacked[1], [gap8, margin, inset, margin]),
+                halo(stacked[0], [inset, margin, inset, margin]),
+                halo(stacked[1], [inset, margin, inset, margin]),
             ],
             vec![],
             vec![],

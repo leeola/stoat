@@ -4012,8 +4012,8 @@ impl Stoat {
     ///
     /// While islands are on, the area also stops [`Self::island_margin`]
     /// columns short of each side of the window, so the window ground shows
-    /// along both edges. It stops one row short of the bottom too, which
-    /// [`Self::status_bar_rect`] takes.
+    /// along both edges. It stops one row short of the bottom too, the row
+    /// that holds the bottom panes' status rows, [`Self::status_bar_rect`].
     ///
     /// Centered modals do not lay out here. They take the full [`Self::size`]
     /// and the strip yields to them, so their paint, pools, and mouse hit-tests
@@ -4049,14 +4049,14 @@ impl Stoat {
         }
     }
 
-    /// The window's status row, which shows the status of the pane that holds
-    /// focus.
+    /// The row under the pane tree, which holds the status rows of the panes
+    /// at the tree's bottom.
     ///
     /// The row is the window's last, under the pane tree and the minimap band
-    /// alike, and stops at the island margins as the panes do. One row serves
-    /// the whole split, so a pane gives none of its own rows to a status bar.
-    /// `None` for a window under two rows tall, which keeps its one row for
-    /// the panes.
+    /// alike, and stops at the island margins as the panes do. A pane above a
+    /// stacked sibling takes the row between them for its status, so no pane
+    /// gives up a row of its own. `None` for a window under two rows tall,
+    /// which keeps its one row for the panes.
     pub(crate) fn status_bar_rect(&self) -> Option<Rect> {
         if self.size.height < 2 {
             return None;

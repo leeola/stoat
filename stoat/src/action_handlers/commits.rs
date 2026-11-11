@@ -1462,8 +1462,10 @@ mod tests {
         );
     }
 
+    /// An unfocused commits list dims, and its own status row names the commits
+    /// screen while the focused pane's row beside it names that pane's file.
     #[test]
-    fn an_unfocused_list_dims_and_leaves_the_row_to_the_focused_pane() {
+    fn an_unfocused_list_dims_and_names_itself() {
         let mut h = Stoat::test();
         h.resize(90, 16);
         seed_two_commits_on_main(&mut h);
@@ -1493,18 +1495,36 @@ mod tests {
                 .collect();
             first_rows.push(row);
         }
-        let row = h.stoat.status_bar_rect().expect("a status row").y;
-        let status = h
-            .rendered_text()
-            .lines()
-            .nth(usize::from(row))
-            .expect("the status row")
-            .replace('\u{2500}', " ");
+        let text = h.rendered_text();
+        let row_text = |pane| {
+            let area = h.stoat.active_workspace().panes.pane(pane).area;
+            let row =
+                crate::render::pane_status_row(area, h.stoat.single_minimap_rect, h.stoat.size())
+                    .expect("the pane has a status row");
+            text.lines()
+                .nth(usize::from(row.y))
+                .expect("the status row")
+                .chars()
+                .skip(usize::from(row.x))
+                .take(usize::from(row.width))
+                .collect::<String>()
+                .replace('\u{2500}', " ")
+        };
+        let focused = h.stoat.active_workspace().panes.focus();
 
         assert_eq!(
-            (first_rows[0] != first_rows[1], status),
-            (true, format!("{:<86}1:1", " NOR  repo scratch")),
-            "an unfocused list dims, and the status row names the focused pane"
+            (
+                first_rows[0] != first_rows[1],
+                row_text(list_pane),
+                row_text(focused)
+            ),
+            (
+                true,
+                format!("{:<45}", " commits \u{b7} b2c3d4e"),
+                format!("{:<40}1:1 ", " NOR  repo scratch"),
+            ),
+            "an unfocused list dims, its row names the commits screen, and the focused pane's \
+             row names its file"
         );
     }
 

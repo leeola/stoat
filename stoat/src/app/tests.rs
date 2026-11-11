@@ -7041,14 +7041,14 @@ fn a_held_screen_row_leaves_no_capture_under_the_scroll_it_moved() {
 }
 
 /// Render one frame and return each split pane's content lane, in pane order,
-/// and then the window's status lane.
+/// and then the status lane.
 fn pane_lanes(h: &mut crate::test_harness::TestHarness) -> Vec<Vec<u8>> {
     let _ = h.stoat.render();
     split_lanes(h)
 }
 
-/// Each split pane's content lane, in pane order, and then the window's status
-/// lane, as the last frame left them.
+/// Each split pane's content lane, in pane order, and then the status lane, as
+/// the last frame left them.
 fn split_lanes(h: &crate::test_harness::TestHarness) -> Vec<Vec<u8>> {
     let indices: Vec<u32> = h
         .stoat
@@ -7065,9 +7065,9 @@ fn split_lanes(h: &crate::test_harness::TestHarness) -> Vec<Vec<u8>> {
         .collect()
 }
 
-/// A replayed pane puts its content back into its content lane, and the
-/// window's status row paints into a lane of its own, so stoatty still receives
-/// only the lane that changed.
+/// A replayed pane puts its content back into its content lane, and the status
+/// rows paint into a lane of their own, so stoatty still receives only the lane
+/// that changed.
 ///
 /// The test above reads the lanes end to end. A status row written into a
 /// content lane reads the same there, so this compares each lane by id.
@@ -7102,35 +7102,60 @@ fn a_replayed_pane_keeps_its_content_lane_beside_the_status_lane() {
     );
 }
 
-/// The window's status row rides a lane apart from every pane, so a cursor
-/// move resends the row alone.
+/// Every split pane's status row rides one lane apart from the panes' content,
+/// so a cursor move resends the rows alone. The lane holds one row per pane,
+/// over that pane's columns, and nothing else.
 #[test]
-fn the_status_lane_holds_the_status_row_alone() {
+fn the_status_lane_holds_the_status_rows_alone() {
     let mut h = Stoat::test();
     diff_pair(&mut h);
     let _ = h.stoat.render();
 
-    // A run's row rides in sixteenths of a cell, so this reads the cell row.
-    let text_rows = |lane: u32| -> Vec<i16> {
+    // A run rides in sixteenths of a cell, so this reads its cell.
+    let text_cells = |lane: u32| -> Vec<(i16, i16)> {
         command::decode_stream(h.stoat.apc_scene.lane_bytes(lane))
             .into_iter()
             .filter_map(|cmd| match cmd {
-                command::Command::TextRun(run) => Some(run.row.div_euclid(16)),
+                command::Command::TextRun(run) => {
+                    Some((run.col.div_euclid(16), run.row.div_euclid(16)))
+                },
                 _ => None,
             })
             .collect()
     };
-    let status_row = h.stoat.status_bar_rect().expect("a status row").y as i16;
-    let status_rows = text_rows(STATUS_LANE);
-    assert!(
-        !status_rows.is_empty() && status_rows.iter().all(|row| *row == status_row),
-        "the status lane holds only the status row {status_row}, got {status_rows:?}"
+    let (band, size) = (h.stoat.single_minimap_rect, h.stoat.size());
+    let rows: Vec<Rect> = h
+        .stoat
+        .active_workspace()
+        .panes
+        .split_panes()
+        .filter_map(|(_, pane)| crate::render::pane_status_row(pane.area, band, size))
+        .collect();
+    let on = |row: &Rect, (col, y): (i16, i16)| {
+        y == row.y as i16 && (row.x as i16..row.right() as i16).contains(&col)
+    };
+
+    let status = text_cells(STATUS_LANE);
+    assert_eq!(
+        (
+            rows.len(),
+            rows.iter()
+                .all(|row| status.iter().any(|&cell| on(row, cell))),
+            status
+                .iter()
+                .all(|&cell| rows.iter().any(|row| on(row, cell))),
+        ),
+        (2, true, true),
+        "each pane's row holds runs, and every run lies on a pane's row: {status:?}"
     );
     for (_, pane) in h.stoat.active_workspace().panes.split_panes() {
-        let content_rows = text_rows(content_lane(pane.index));
+        let content = text_cells(content_lane(pane.index));
         assert!(
-            !content_rows.is_empty() && !content_rows.contains(&status_row),
-            "a content lane holds none of it, got {content_rows:?}"
+            !content.is_empty()
+                && content
+                    .iter()
+                    .all(|&cell| rows.iter().all(|row| !on(row, cell))),
+            "a content lane holds none of the rows, got {content:?}"
         );
     }
 }
@@ -7194,7 +7219,7 @@ fn a_focused_pane_repaints_when_an_input_it_reads_moves() {
     }
 }
 
-/// The bytes the window's status lane held in the last frame.
+/// The bytes the status lane held in the last frame.
 fn status_lane_bytes(h: &crate::test_harness::TestHarness) -> Vec<u8> {
     h.stoat.apc_scene.lane_bytes(STATUS_LANE).to_vec()
 }
@@ -8067,9 +8092,9 @@ fn published_on_parse_wake(h: &mut crate::test_harness::TestHarness) -> bool {
     })
 }
 
-/// A badge raised over the window's status row moves the row's segments out
-/// from under the box. The row paints on every frame, so the content of the
-/// panes above it replays, and the frame matches a repaint.
+/// A badge raised over the window's last row moves the segments of the status
+/// row there out from under the box. The row paints on every frame, so the
+/// content of the panes above it replays, and the frame matches a repaint.
 #[test]
 fn a_badge_over_the_status_row_replays_the_content_above_it() {
     let mut h = Stoat::test();
@@ -8226,13 +8251,13 @@ fn a_dial_turn_repaints_an_unfocused_diff_pane() {
 }
 
 /// A base switch renames the sides before the new diff lands. The names paint
-/// in the window's status row, which paints on every frame, so the focused
-/// diff pane replays its content and the row still names the new base.
+/// in the diff pane's status row, which paints on every frame, so the focused
+/// diff pane replays its content and its row still names the new base.
 #[test]
 fn a_renamed_side_shows_over_a_focused_diff_pane_that_replays() {
     let mut h = Stoat::test();
     diff_pair(&mut h);
-    {
+    let diff = {
         let ws = h.stoat.active_workspace_mut();
         let diff = ws
             .panes
@@ -8243,7 +8268,8 @@ fn a_renamed_side_shows_over_a_focused_diff_pane_that_replays() {
             })
             .expect("the diff pane");
         ws.panes.set_focus(diff);
-    }
+        diff
+    };
     let _ = frame_paints(&mut h);
     assert_eq!(
         frame_paints(&mut h),
@@ -8256,10 +8282,7 @@ fn a_renamed_side_shows_over_a_focused_diff_pane_that_replays() {
         .set_diff_base(Some(DiffBase::named("main", "0123456789abcdef".into())));
     let before = h.stoat.pane_paints;
     let buf = h.render_composited();
-    let row = h.stoat.status_bar_rect().expect("a status row");
-    let status_row: String = (row.x..row.x + row.width)
-        .map(|x| buf[(x, row.y)].symbol())
-        .collect();
+    let status_row = status_row_text(&h, &buf, diff);
     assert_eq!(
         (
             h.stoat.pane_paints - before,
@@ -10497,11 +10520,28 @@ fn the_status_message_shows_only_on_the_focused_pane_bar() {
     h.stoat.set_status("saved");
     h.snapshot();
 
-    let row = window_status_text(&h);
+    let left = h
+        .stoat
+        .active_workspace()
+        .panes
+        .split_pane_ids()
+        .into_iter()
+        .find(|&id| id != right)
+        .expect("the commits pane");
+    let (focused, list) = (
+        status_row_text(&h, h.rendered_buffer(), right),
+        status_row_text(&h, h.rendered_buffer(), left),
+    );
     assert_eq!(
-        (row.contains("saved"), row.contains("commits")),
-        (true, false),
-        "the row shows the focused pane with its message, and not the commits list beside it"
+        (
+            focused.contains("saved"),
+            focused.contains("commits"),
+            list.contains("saved"),
+            list.contains("commits"),
+        ),
+        (true, false, false, true),
+        "the focused pane's row shows the message, and the commits list's row beside it \
+         names its screen alone"
     );
 }
 
@@ -10511,10 +10551,18 @@ fn the_status_message_shows_only_on_the_focused_pane_bar() {
 fn a_long_status_message_stays_inside_an_overlay_bar() {
     let mut h = commits_in_the_right_half();
     h.snapshot();
-    let quiet = window_status_text(&h);
+    let quiet = status_row_text(
+        &h,
+        h.rendered_buffer(),
+        h.stoat.active_workspace().panes.focus(),
+    );
     h.stoat.set_status("@".repeat(200));
     h.snapshot();
-    let loud = window_status_text(&h);
+    let loud = status_row_text(
+        &h,
+        h.rendered_buffer(),
+        h.stoat.active_workspace().panes.focus(),
+    );
 
     let label = quiet.trim_end();
     assert_eq!(
@@ -10535,7 +10583,11 @@ fn a_count_with_no_room_stays_off_an_overlay_bar() {
     h.stoat.pending_count = Some(3);
     h.snapshot();
 
-    let bar = window_status_text(&h);
+    let bar = status_row_text(
+        &h,
+        h.rendered_buffer(),
+        h.stoat.active_workspace().panes.focus(),
+    );
     assert_eq!(
         (bar.contains("www"), bar.contains(" 3 ")),
         (true, false),
@@ -10563,13 +10615,71 @@ fn commits_in_the_right_half() -> crate::test_harness::TestHarness {
     h
 }
 
-/// The text of the window's status row in the last rendered frame.
-fn window_status_text(h: &crate::test_harness::TestHarness) -> String {
-    let row = h.stoat.status_bar_rect().expect("a status row");
-    let buf = h.rendered_buffer();
-    (row.x..row.x + row.width)
+/// The text of `pane`'s status row in `buf`.
+fn status_row_text(h: &crate::test_harness::TestHarness, buf: &Buffer, pane: PaneId) -> String {
+    let area = h.stoat.active_workspace().panes.pane(pane).area;
+    let row = crate::render::pane_status_row(area, h.stoat.single_minimap_rect, h.stoat.size())
+        .expect("the pane has a status row");
+    (row.x..row.right())
         .map(|x| buf[(x, row.y)].symbol())
         .collect()
+}
+
+/// Every split pane paints its status in the row under it, over its own
+/// columns, and the mode chip leads the focused pane's row alone.
+///
+/// The layout splits right and then down, and each pane shows a file of its
+/// own, so a row that read another pane's status names another file.
+#[test]
+fn each_split_pane_paints_its_status_row_under_itself() {
+    let mut h = crate::test_harness::TestHarness::with_size(80, 24);
+    let [a, b, c] = ["a.txt", "b.txt", "c.txt"].map(|name| h.write_file(name, "alpha\n"));
+    h.open_file(&a);
+    h.type_action("SplitRight()");
+    h.open_file(&b);
+    action_handlers::dispatch(&mut h.stoat, &stoat_action::SplitDown);
+    h.open_file(&c);
+    h.snapshot();
+
+    let ws = h.stoat.active_workspace();
+    let focused = ws.panes.focus();
+    let mut panes: Vec<(Rect, bool)> = ws
+        .panes
+        .split_panes()
+        .map(|(id, pane)| (pane.area, id == focused))
+        .collect();
+    panes.sort_by_key(|(area, _)| (area.x, area.y));
+    let buf = h.rendered_buffer();
+    let rows: Vec<(bool, bool, bool)> = panes
+        .iter()
+        .zip(["a.txt", "b.txt", "c.txt"])
+        .map(|((area, _), name)| {
+            let text: String = (area.x..area.right())
+                .map(|x| buf[(x, area.bottom())].symbol())
+                .collect();
+            (
+                text.starts_with(" NOR "),
+                text.contains(name),
+                text.trim_end().ends_with("1:1"),
+            )
+        })
+        .collect();
+
+    assert_eq!(
+        (
+            panes
+                .iter()
+                .map(|(_, focused)| *focused)
+                .collect::<Vec<_>>(),
+            rows
+        ),
+        (
+            vec![false, false, true],
+            vec![(false, true, true), (false, true, true), (true, true, true)],
+        ),
+        "the bottom-right pane holds focus, and each row under a pane names its file and \
+         position, with the mode chip in the focused pane's row alone",
+    );
 }
 
 #[test]

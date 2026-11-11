@@ -459,13 +459,16 @@ pub(crate) fn render_island(content_area: Rect, frame: FrameCtx<'_>, scene: &mut
 /// The sides of the island over `area`, in [`Edge`] order: top, right,
 /// bottom, then left.
 ///
-/// A side that meets the window's chrome margin reaches into it, and a side
-/// that meets the gap toward a sibling pane reaches into that gap, so the
-/// island stands [`ISLAND_SPACING`] pixels from the window and from its
-/// siblings. A gap divider counts when it spans the island's rows or columns.
-/// The pane root runs on over the single minimap band, which the island beside
-/// it takes, and no island reaches over the band. Any other left or right side
-/// keeps the island role's `inset_x`, and the top and the bottom meet no margin.
+/// A left or right side that meets the window's chrome margin reaches into it,
+/// and one that meets the gap toward a sibling pane reaches into that gap, so
+/// the island stands [`ISLAND_SPACING`] pixels from the window and from its
+/// siblings. A gap divider counts when it spans the island's rows. The pane
+/// root runs on over the single minimap band, which the island beside it
+/// takes, and no island reaches over the band. Any other left or right side
+/// keeps the island role's `inset_x`.
+///
+/// The top and the bottom stay flush, since each meets a status row or the
+/// tab bar, and never a gap.
 fn island_edges(area: Rect, frame: FrameCtx<'_>, inset_x: u8) -> [Edge; 4] {
     let root = frame.pane_root;
     let root_right = frame
@@ -479,14 +482,6 @@ fn island_edges(area: Rect, frame: FrameCtx<'_>, inset_x: u8) -> [Edge; 4] {
                 && divider.y + divider.len >= area.bottom()
         })
     };
-    let horizontal = |y: u16| {
-        frame.dividers.iter().any(|divider| {
-            divider.orientation == DividerOrientation::Horizontal
-                && divider.y == y
-                && divider.x <= area.x
-                && divider.x + divider.len >= area.right()
-        })
-    };
     let side = |margin: bool, gap: bool, rest: Edge| match (margin, gap) {
         (true, _) => Edge::Margin(ISLAND_SPACING),
         (false, true) => Edge::Gap(ISLAND_SPACING),
@@ -494,17 +489,13 @@ fn island_edges(area: Rect, frame: FrameCtx<'_>, inset_x: u8) -> [Edge; 4] {
     };
 
     [
-        side(
-            false,
-            area.y.checked_sub(1).is_some_and(horizontal),
-            Edge::Inset(0),
-        ),
+        Edge::Inset(0),
         side(
             area.right() == root_right,
             vertical(area.right()),
             Edge::Inset(inset_x),
         ),
-        side(false, horizontal(area.bottom()), Edge::Inset(0)),
+        Edge::Inset(0),
         side(
             area.x == root.x,
             area.x.checked_sub(1).is_some_and(vertical),
@@ -1167,6 +1158,11 @@ pub(crate) struct ScreenSubject<'a> {
     pub(crate) note: Option<String>,
 }
 
+/// Draw the hairline of each vertical divider in `dividers`, lit where it
+/// touches the focused pane.
+///
+/// A horizontal divider draws nothing, because its row holds the status row
+/// of the pane above it.
 pub(crate) fn render_pane_dividers(
     dividers: &[Divider],
     theme: &crate::theme::Theme,
@@ -1187,18 +1183,12 @@ pub(crate) fn render_pane_dividers(
                 let height = d.y.saturating_add(d.len).min(buf_end_y).saturating_sub(d.y);
                 chrome::vline(buf, d.x, d.y, height, style, &mut *scene);
             },
-            DividerOrientation::Horizontal => {
-                if d.y >= buf_end_y {
-                    continue;
-                }
-                let width = d.x.saturating_add(d.len).min(buf_end_x).saturating_sub(d.x);
-                chrome::hline(buf, d.x, d.y, width, style, &mut *scene);
-            },
+            DividerOrientation::Horizontal => continue,
         }
     }
 }
 
-/// Paint `status`, the status of `pane`, into the window's status row.
+/// Paint `status`, the status of `pane`, into its status row.
 ///
 /// The row changes with every cursor move, so the caller opens a lane of its
 /// own for it, and a move leaves every pane's content lane off the wire.
@@ -1283,7 +1273,7 @@ fn draw_divider_cell(
     }
 }
 
-/// The segments of one pane's status, laid out in the window's status row.
+/// The segments of one pane's status, laid out in its status row.
 ///
 /// The frame builds it once, after the panes paint or replay, and reads the LSP
 /// badge's hover rect back from it.
@@ -1355,7 +1345,7 @@ fn mode_chip_box(leads: bool) -> Vec<RunBox> {
     }
 }
 
-/// The status of `pane`, laid out in `area`, the window's status row.
+/// The status of `pane`, laid out in `area`, its status row.
 ///
 /// A changes view's row reads its focused excerpt, as an editor pane's row
 /// reads its editor. Empty for a commits view, whose row names the screen
@@ -5401,8 +5391,9 @@ mod tests {
     }
 
     /// A command that waits on a buffer ends when the buffer leaves, and a quit
-    /// over the buffer returns to a shell, so the status row names what waits
-    /// while the focused pane shows the buffer.
+    /// over the buffer returns to a shell, so the status row of each pane that
+    /// shows the buffer names what waits. The split shows the buffer in both
+    /// panes, so both rows name it.
     ///
     /// The mark has to leave with the waiter while the file stays on screen.
     #[test]
@@ -5435,13 +5426,13 @@ mod tests {
         };
         assert_eq!(
             names(&mut h),
-            (1, 1),
-            "the row over the file names its waiter"
+            (2, 2),
+            "each row over the file names its waiter"
         );
 
         h.stoat
             .handle_agent_control(AgentControl::ClientGone { uid, client: 0 });
-        assert_eq!(names(&mut h), (1, 0), "the mark leaves with the waiter");
+        assert_eq!(names(&mut h), (2, 0), "the mark leaves with the waiter");
     }
 
     /// The search prompt is the only thing on screen that reports the query, so
@@ -5795,10 +5786,12 @@ mod tests {
         );
     }
 
-    /// The status row leads with the chunk while the conflict view holds focus,
-    /// and names the file once focus moves to the pane beside it, since only
-    /// the conflict pane leads with the chunk. The open widens its pane, so the
-    /// layout unwidens to show the other one.
+    /// The conflict pane's status row leads with the chunk while the conflict
+    /// view holds focus. Once focus moves to the pane beside it, that pane's
+    /// row leads with the mode chip and its file, and the conflict pane's row
+    /// names its scratch buffer, since only the focused conflict pane leads
+    /// with the chunk. The open widens its pane, so the layout unwidens to show
+    /// the other one.
     #[test]
     fn the_conflict_lead_leaves_the_row_with_the_focus() {
         let mut h = crate::test_harness::TestHarness::with_size(120, 12);
@@ -5824,11 +5817,11 @@ mod tests {
         h.settle();
         h.stoat.active_workspace_mut().panes.unwiden();
 
-        let row = |h: &mut crate::test_harness::TestHarness| {
+        let rows = |h: &mut crate::test_harness::TestHarness| {
             let buf = h.render_composited();
-            status_row(&buf, buf.area)
+            pane_status_rows(h, &buf)
         };
-        let on_conflict = row(&mut h);
+        let on_conflict = rows(&mut h);
         {
             let panes = &mut h.stoat.active_workspace_mut().panes;
             let focused = panes.focus();
@@ -5839,13 +5832,20 @@ mod tests {
                 .expect("the pane beside the conflict view");
             panes.set_focus(beside);
         }
-        let on_file = row(&mut h);
+        let on_file = rows(&mut h);
 
+        let [left, right] = [on_conflict[0].0, on_conflict[1].0];
         assert_eq!(
             [on_conflict, on_file],
             [
-                format!("{:<116}2:1 ", " NOR  repo  conflict \u{b7} chunk 1 / 1"),
-                format!("{:<116}1:1 ", " NOR  repo f.txt"),
+                vec![
+                    pane_row(left, " f.txt", "1:1"),
+                    pane_row(right, " NOR  repo  conflict \u{b7} chunk 1 / 1", "2:1"),
+                ],
+                vec![
+                    pane_row(left, " NOR  repo f.txt", "1:1"),
+                    pane_row(right, " scratch", "2:1"),
+                ],
             ],
         );
     }
@@ -5858,6 +5858,38 @@ mod tests {
             .map(|x| buf[(x, row)].symbol())
             .collect::<String>()
             .replace('─', " ")
+    }
+
+    /// The split panes' status rows in `buf`, left to right and then top to
+    /// bottom, each as its width and its text as [`status_row`] reads it.
+    fn pane_status_rows(h: &crate::test_harness::TestHarness, buf: &Buffer) -> Vec<(u16, String)> {
+        let mut areas: Vec<Rect> = h
+            .stoat
+            .active_workspace()
+            .panes
+            .split_panes()
+            .map(|(_, pane)| pane.area)
+            .collect();
+        areas.sort_by_key(|area| (area.x, area.y));
+        areas
+            .into_iter()
+            .map(|area| {
+                let row = crate::render::pane_status_row(
+                    area,
+                    h.stoat.single_minimap_rect,
+                    h.stoat.size(),
+                )
+                .expect("the pane has a status row");
+                (row.width, status_row(buf, row))
+            })
+            .collect()
+    }
+
+    /// A status row `width` cells wide that leads with `lead` and ends in the
+    /// position `at` and one pad cell.
+    fn pane_row(width: u16, lead: &str, at: &str) -> (u16, String) {
+        let fill = usize::from(width) - at.len() - 1;
+        (width, format!("{lead:<fill$}{at} "))
     }
 
     /// Several cursors show as `{count} sel` after the file name, and a lone
@@ -6016,10 +6048,11 @@ mod tests {
         );
     }
 
-    /// The status row counts the cursors of the pane that holds focus. Each pane
-    /// keeps its own cursors, so the count follows the focus from pane to pane.
+    /// Each pane's status row counts that pane's cursors, and the mode chip
+    /// leads the focused pane's row alone, so the chip follows the focus while
+    /// each count stays with its pane.
     #[test]
-    fn the_status_row_counts_the_focused_pane_s_cursors() {
+    fn each_pane_s_status_row_counts_its_own_cursors() {
         let mut h = crate::test_harness::TestHarness::with_size(120, 12);
         h.seed_focused_buffer("foo\nbar\n");
         dispatch(&mut h.stoat, &MoveDown);
@@ -6027,19 +6060,26 @@ mod tests {
         let counted = h.stoat.active_workspace().panes.focus();
         h.type_action("SplitRight()");
         dispatch(&mut h.stoat, &KeepPrimarySelection);
-        let row = |h: &mut crate::test_harness::TestHarness| {
+        let rows = |h: &mut crate::test_harness::TestHarness| {
             let buf = h.render_composited();
-            status_row(&buf, buf.area)
+            pane_status_rows(h, &buf)
         };
 
-        let away = row(&mut h);
+        let away = rows(&mut h);
         h.stoat.active_workspace_mut().panes.set_focus(counted);
-        let back = row(&mut h);
+        let back = rows(&mut h);
+        let [left, right] = [away[0].0, away[1].0];
         assert_eq!(
             [away, back],
             [
-                format!("{:<116}1:1 ", " NOR  (unnamed) scratch [+] "),
-                format!("{:<116}1:1 ", " NOR  (unnamed) scratch [+]  2 sel "),
+                vec![
+                    pane_row(left, " scratch [+]  2 sel ", "1:1"),
+                    pane_row(right, " NOR  (unnamed) scratch [+] ", "1:1"),
+                ],
+                vec![
+                    pane_row(left, " NOR  (unnamed) scratch [+]  2 sel ", "1:1"),
+                    pane_row(right, " scratch [+] ", "1:1"),
+                ],
             ],
         );
     }
