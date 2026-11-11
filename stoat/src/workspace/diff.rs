@@ -1146,7 +1146,6 @@ impl DiffState {
                         rev_changed: rev.map(|sha| {
                             repo.changed_files_from(&sha)
                                 .into_iter()
-                                .filter(|file| !file.untracked)
                                 .map(|file| file.path)
                                 .collect()
                         }),

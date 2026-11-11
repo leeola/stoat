@@ -3362,8 +3362,10 @@ mod tests {
     /// A range review checks the tip of `from` out once and diffs it against
     /// the merge base, named by both refs as typed. It opens the first tracked
     /// file the whole range changed, where the tip commit alone changed
-    /// `c.rs`. It holds one commit, so a step moves nothing, and
-    /// `:review-done` returns the tree.
+    /// `c.rs`. The changes view over the range lists the untracked scratch file
+    /// beside the files the range changed, as it does under every base. It
+    /// holds one commit, so a step moves nothing, and `:review-done` returns
+    /// the tree.
     #[test]
     fn a_range_review_diffs_the_tip_against_the_merge_base() {
         let mut h = fork_harness();
@@ -3435,7 +3437,11 @@ mod tests {
                     ("main b2c3d4e".to_string(), "feature".to_string()),
                 ),
                 vec!["detached:e5f6a7b8".to_string()],
-                vec!["a.rs".to_string(), "c.rs".to_string()],
+                vec![
+                    "0-scratch.txt".to_string(),
+                    "a.rs".to_string(),
+                    "c.rs".to_string()
+                ],
                 Some("ref:main".to_string()),
                 None,
             ),

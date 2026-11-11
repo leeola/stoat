@@ -1899,8 +1899,9 @@ fn relist(stoat: &mut Stoat) -> bool {
 /// the revision take the tally's place.
 ///
 /// An untracked file that holds content joins, since the tally counts it as
-/// one unstaged hunk. Its excerpt shows the whole file as one added hunk,
-/// which the staging keys add to the index.
+/// one unstaged hunk. Under a revision base it joins too, since the files
+/// changed since the revision include it. Its excerpt shows the whole file as
+/// one added hunk, which the staging keys add to the index.
 ///
 /// An open buffer under the working directory whose diff map holds a hunk
 /// joins the list, so an unsaved edit shows. A buffer with no unsaved edit
@@ -3899,6 +3900,30 @@ fn hint_width() -> u32 {
 
         stacked(&mut h);
         assert_eq!(excerpts(&h), listed(&["a.txt", "b.txt", "c.txt", "z.txt"]));
+    }
+
+    /// Under a revision base an untracked file with content stacks beside the
+    /// files changed since the revision, as the change walk under that base
+    /// visits it.
+    #[test]
+    fn a_revision_base_lists_an_untracked_file() {
+        let mut h = TestHarness::with_size(100, 24);
+        h.stage_review_scenario("/repo", &[("a.txt", "a\n", "A\n")]);
+        repo(&mut h)
+            .untracked("z.txt")
+            .commit("base0", &[("a.txt", "a\n")]);
+        h.fake_fs()
+            .insert_file(Path::new("/repo/z.txt"), b"scratch\n");
+        dispatch(
+            &mut h.stoat,
+            &stoat_action::DiffFiles {
+                rev: Some("base0".into()),
+            },
+        );
+        h.settle();
+
+        stacked(&mut h);
+        assert_eq!(excerpts(&h), listed(&["a.txt", "z.txt"]));
     }
 
     /// An excerpt shows its hunk with three rows of context each side, and the
