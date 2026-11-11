@@ -88,6 +88,7 @@ pub(crate) fn render_walkthrough_picker(
             chrome,
             ws,
             buf,
+            scene,
         );
     }
 

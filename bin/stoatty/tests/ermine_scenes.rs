@@ -953,6 +953,12 @@ fn the_tab_bar_boxes_the_focused_layout_s_chip_inside_its_row() {
 ///
 /// The rule under the preview's path header runs through the middle pixel row
 /// of cell row 13 in the divider color, as a rule on the editor surface draws.
+///
+/// The preview numbers its lines in a column from cell 68. On the first row,
+/// cell row 14, the column's first four cells hold the number in the muted
+/// color and no text, so they peak above the base surface and at most at the
+/// muted color. Cell row 21 is the first row past the file's seven lines, and
+/// its column holds no number.
 #[test]
 fn the_file_finder_box_draws_on_the_overlay_surface() {
     let mut home = support::scratch_home();
@@ -1008,6 +1014,18 @@ fn the_file_finder_box_draws_on_the_overlay_surface() {
         DIVIDER,
         "preview_header_rule",
     );
+
+    let peak = |color: [u8; 3]| color.into_iter().max().expect("a color has channels");
+    let first = brightest(&shot, cell_rect(68, 14, 4, 1));
+    let past_end = brightest(&shot, cell_rect(68, 21, 5, 1));
+    if !(peak(BASE) + 1..=peak(MUTED)).contains(&first) || past_end != peak(BASE) {
+        let frame = keep_frame(&shot, &mut home, "preview_numbers");
+        panic!(
+            "the number column peaks at {first:#04x} on the first row and at {past_end:#04x} \
+             past the file's end; the frame is {}",
+            frame.display(),
+        );
+    }
 }
 
 /// The Pane Picker draws its badge as the board draws it.

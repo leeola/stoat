@@ -241,10 +241,13 @@ pub(crate) struct EditorState {
     /// the popover drew, so a pooled page prints from this record what the
     /// live grid printed. Transient render state, not persisted.
     pub(crate) eol_cursor: Option<crate::render::editor::EolCursor>,
-    /// Cells the last render reserved on the left for the diagnostic gutter (0
-    /// or 1), so click-to-offset can subtract the same inset the text rect was
-    /// shifted by. Transient render state written by `render_editor`, not
-    /// persisted.
+    /// Cells the last render reserved on the left for the line numbers or the
+    /// diagnostic gutter, so click-to-offset subtracts the inset that moved
+    /// the text rect.
+    ///
+    /// A picker preview records its number column here, so the pool that
+    /// glides the preview pages the same column. Transient render state
+    /// written by `render_editor` and the preview's paint, not persisted.
     pub(crate) gutter_width: u16,
     /// The gutter digit count the changes view stack this editor is an excerpt
     /// of shares, so the text column lines up down the stack. `None` for an

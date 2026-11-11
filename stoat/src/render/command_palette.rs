@@ -266,6 +266,7 @@ fn render_palette_arg_picker(
             chrome,
             ws,
             buf,
+            scene,
         );
     }
 

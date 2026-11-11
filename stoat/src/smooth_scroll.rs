@@ -39,6 +39,7 @@ use crate::{
         },
         file_finder::paint_finder_rows,
         help::{paint_help_detail_rows, paint_help_list_rows},
+        picker::paint_preview_numbers,
         review::{
             diff_gutter_digits, emit_base_frame, paint_diff_rows, BufferNumbering, DiffDials,
             FrameEdges,
@@ -519,6 +520,9 @@ pub(crate) struct PageGutter {
     frame: Option<[u8; 3]>,
     /// The diagnostics a plain editor page paints over its text.
     diagnostics: PageDiagnostics,
+    /// Whether the page numbers its lines as a picker preview does, in place
+    /// of the line-number gutter and the severity column.
+    number_column: bool,
 }
 
 impl PageGutter {
@@ -546,6 +550,7 @@ impl PageGutter {
             icons: false,
             frame: None,
             diagnostics: PageDiagnostics::default(),
+            number_column: false,
         }
     }
 
@@ -575,6 +580,21 @@ impl PageGutter {
     /// - [`emit_base_frame`] for the frame's geometry.
     pub(crate) fn framed(self, frame: Option<[u8; 3]>) -> PageGutter {
         PageGutter { frame, ..self }
+    }
+
+    /// This gutter numbering a picker preview's lines when `on`.
+    ///
+    /// Off until set. With it on, the page paints the column the live preview
+    /// paints and no line-number gutter or severity column, whatever
+    /// [`Self::new`] took.
+    ///
+    /// See also:
+    /// - [`paint_preview_numbers`] for the column's numbers.
+    pub(crate) fn number_column(self, on: bool) -> PageGutter {
+        PageGutter {
+            number_column: on,
+            ..self
+        }
     }
 
     /// This gutter with the `diagnostics` that a plain editor page paints over
@@ -657,6 +677,9 @@ impl PageDiagnostics {
 /// with a bar in the returned frames under RGB severity colors, and with a
 /// letter in `buf` otherwise. A page with no diagnostic answers `(0, empty)`,
 /// so its text starts at column zero.
+///
+/// A gutter with [`PageGutter::number_column`] set paints a picker preview's
+/// number column in its place, with the numbers in the returned frames.
 #[allow(clippy::too_many_arguments)]
 fn paint_page_gutter(
     snapshot: &DisplaySnapshot,
@@ -669,6 +692,12 @@ fn paint_page_gutter(
     dim: f32,
     live: Option<&crate::diff_map::LiveHunks<'_>>,
 ) -> (u16, Vec<u8>) {
+    if gutter.number_column {
+        let mut scene = gutter.scene();
+        let width = paint_preview_numbers(snapshot, top_row, area, gutter.theme(), buf, &mut scene);
+        return (width, scene.buffer().clone());
+    }
+
     if !gutter.line_numbers {
         if gutter.severity.is_empty() {
             return (0, Vec::new());
@@ -2976,6 +3005,116 @@ mod tests {
                 grouped.contains(entry.def.short_desc()),
             ),
             (true, false, true),
+        );
+    }
+
+    /// A page of a picker's file preview numbers its lines as the live preview
+    /// does, so a glide shows no shift as the pool composites over the pane.
+    ///
+    /// The three lines fill the first page and end on the first row of the page
+    /// at row 2, and the page past the end draws no number. Under a dead scene
+    /// the digits go into the column's cells, right-aligned before one blank
+    /// cell.
+    #[test]
+    fn a_preview_page_numbers_its_lines_as_the_live_preview_does() {
+        use super::{page_buffer, render_page_from_snapshot, serialize_buffer, Rect};
+        use crate::{
+            render::{
+                editor::{ResolvedChrome, RowSeverity},
+                picker::render_picker_preview,
+            },
+            test_harness::TestHarness,
+            theme::scope,
+            workspace::Workspace,
+        };
+        use std::path::PathBuf;
+        use stoat_widgets::ApcScene;
+        use stoatty_protocol::command::decode_stream;
+
+        let mut h = TestHarness::with_size(120, 30);
+        let root = PathBuf::from("/preview-numbers");
+        h.fake_fs()
+            .insert_file(root.join("a.txt"), b"alpha\nbeta\ngamma");
+        h.stoat.active_workspace_mut().git_root = root;
+        h.type_keys("space p");
+        h.settle();
+
+        let theme = h.stoat.theme.clone();
+        let fallback = theme.get(scope::UI_TEXT);
+        let chrome = ResolvedChrome::resolve(&theme);
+        let gutter = PageGutter::new(
+            false,
+            Arc::new(RowSeverity::default()),
+            theme.clone(),
+            None,
+            None,
+        )
+        .number_column(true);
+        let area = Rect::new(0, 0, 16, 2);
+        let finder = h.stoat.file_finder.take().expect("the finder is open");
+        let preview = &finder.active_core_ref().preview;
+        let ws = h.stoat.active_workspace_mut();
+
+        let paint = |ws: &mut Workspace, top_row: u32, live: bool| {
+            if let Some(editor) = ws.editors.get_mut(preview.editor) {
+                editor.scroll_row = top_row;
+            }
+            let mut buf = page_buffer(area, &theme);
+            let mut scene = ApcScene::new();
+            scene.set_live(live);
+            render_picker_preview(preview, area, &theme, &chrome, ws, &mut buf, &mut scene);
+            (buf, scene)
+        };
+        let numbers = |bytes: &[u8]| {
+            decode_stream(bytes)
+                .into_iter()
+                .filter_map(|command| match command {
+                    Command::TextRun(run) => Some(run.text),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+                .join(" ")
+        };
+
+        for (top_row, shown) in [(0, "1 2"), (2, "3"), (7, "")] {
+            let (live, mut scene) = paint(ws, top_row, true);
+            let mut expected = serialize_buffer(&live);
+            expected.extend_from_slice(scene.buffer());
+
+            let snapshot = ws
+                .editors
+                .get_mut(preview.editor)
+                .expect("the preview's editor")
+                .display_map
+                .snapshot();
+            let page = render_page_from_snapshot(
+                &snapshot,
+                top_row,
+                fallback,
+                area.width,
+                area.height,
+                &gutter,
+                false,
+                0.0,
+                DiffDials::shipped(),
+                page_endpoints(&snapshot, top_row, area.height),
+                None,
+                None,
+            );
+
+            assert_eq!(
+                (numbers(&page), page == expected),
+                (shown.to_owned(), true),
+                "the page at row {top_row} numbers its lines and paints as the live preview",
+            );
+        }
+
+        let (dead, _) = paint(ws, 0, false);
+        let first_row: String = (0..area.width).map(|x| dead[(x, 0)].symbol()).collect();
+        assert_eq!(
+            first_row.trim_end(),
+            "   1 alpha",
+            "the first row under a dead scene"
         );
     }
 }

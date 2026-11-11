@@ -89,6 +89,7 @@ pub(crate) fn render_jumplist_picker(
             chrome,
             ws,
             buf,
+            scene,
         );
     }
 

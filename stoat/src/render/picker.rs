@@ -6,16 +6,17 @@
 //! a `PathPicker`, so both render through these functions and cannot drift.
 
 use crate::{
+    display_map::DisplaySnapshot,
     fuzzy,
     input_view::InputView,
     picker::{write_row_display, PickList, Preview},
     render::{
         chrome::TypeTag,
-        editor::{render_editor, ResolvedChrome},
+        editor::{self, render_editor, ResolvedChrome},
         paint::style_rgb,
         text::{write_str, write_str_clipped},
     },
-    theme::{scope, Theme},
+    theme::{scope, Theme, TypeRole},
     workspace::Workspace,
 };
 use ratatui::{
@@ -26,9 +27,13 @@ use ratatui::{
 };
 use std::{
     collections::BTreeMap,
+    fmt::Write,
     path::{Path, PathBuf},
 };
-use stoat_widgets::bar::Bar;
+use stoat_widgets::{
+    bar::Bar,
+    text_run::{self, TextRun, TextRunBatch},
+};
 use unicode_width::UnicodeWidthStr;
 
 /// The glyph before a filter modal's query. The command palette keeps `:` in
@@ -714,6 +719,11 @@ pub(crate) fn name_start(label: &str) -> usize {
 
 /// Paint the picker's preview pane by rendering its scratch editor into `area`.
 /// A no-op for an empty rect.
+///
+/// A file's or a buffer's text leads each line with its number, in a column
+/// of [`preview_number_columns`] cells at the pane's left. The editor's
+/// `gutter_width` records the column, so the pool that glides the pane pages
+/// the same numbers.
 pub(crate) fn render_picker_preview(
     preview: &Preview,
     area: Rect,
@@ -721,14 +731,125 @@ pub(crate) fn render_picker_preview(
     chrome: &ResolvedChrome,
     ws: &mut Workspace,
     buf: &mut Buffer,
+    scene: &mut stoat_widgets::ApcScene,
 ) {
     if area.width == 0 || area.height == 0 {
         return;
     }
+    let Some(editor) = ws.editors.get_mut(preview.editor) else {
+        return;
+    };
     let fallback = theme.get(scope::UI_TEXT);
-    if let Some(editor) = ws.editors.get_mut(preview.editor) {
+
+    // The paint writes `gutter_width` on most paths, but a scroll past the end
+    // returns before the write, so the column is set here on both branches.
+    if !preview.numbers_lines() {
         render_editor(editor, area, fallback, theme, Some(chrome), buf, false);
+        editor.gutter_width = 0;
+        return;
     }
+
+    let columns = preview_number_columns(editor.display_map.buffer_snapshot().line_count());
+    let text = Rect {
+        x: area.x + columns,
+        width: area.width.saturating_sub(columns),
+        ..area
+    };
+    render_editor(editor, text, fallback, theme, Some(chrome), buf, false);
+    let snapshot = editor.display_map.snapshot();
+    paint_preview_numbers(&snapshot, editor.scroll_row, area, theme, buf, scene);
+    editor.gutter_width = columns;
+}
+
+/// Sixteenths between a preview number's right edge and its line's text, the
+/// board's 14 px at the 9 px cell.
+const PREVIEW_NUMBER_GAP: u16 = 24;
+
+/// The fewest digits a preview's number column holds.
+///
+/// Four digits and the cell before the text are the board's 44 px column, so
+/// a short file's text starts where a long file's does.
+const PREVIEW_NUMBER_DIGITS: u16 = 4;
+
+/// Cells the number column of a preview over `line_count` lines takes.
+///
+/// The column holds the widest number, at least [`PREVIEW_NUMBER_DIGITS`]
+/// wide, and one cell before the text.
+pub(crate) fn preview_number_columns(line_count: u32) -> u16 {
+    editor::gutter_digits(line_count).max(PREVIEW_NUMBER_DIGITS) + 1
+}
+
+/// Paint the numbers of a preview's lines from display row `top_row` into the
+/// number column at `area`'s left, and return the column's width in cells.
+///
+/// Each line takes its absolute number on its first row. A wrapped line's
+/// later rows and the rows past the end of the text take none. The empty line
+/// after a trailing newline takes one, since the cursor reaches it.
+///
+/// A live scene with an RGB `ui.text.muted` draws each number as a text run at
+/// the caption scale, with its right edge [`PREVIEW_NUMBER_GAP`] sixteenths
+/// before the text. Any other paint writes the digits in that style into the
+/// column's cells, right-aligned before one blank cell.
+///
+/// The live preview and the pages that glide it both paint their numbers
+/// through this, so the numbers hold still across the handoff between the two.
+pub(crate) fn paint_preview_numbers(
+    snapshot: &DisplaySnapshot,
+    top_row: u32,
+    area: Rect,
+    theme: &Theme,
+    buf: &mut Buffer,
+    scene: &mut stoat_widgets::ApcScene,
+) -> u16 {
+    let width = preview_number_columns(snapshot.buffer_line_count());
+    let visible = snapshot
+        .line_count()
+        .saturating_sub(top_row)
+        .min(u32::from(area.height));
+    let (lines, _) = editor::gutter_geometry(snapshot, top_row, visible);
+
+    let muted = theme.get(scope::UI_TEXT_MUTED);
+    let color = style_rgb(muted.fg).filter(|_| scene.live());
+    let scale = theme.type_scale(TypeRole::Caption);
+    let run_end = width * 16 - PREVIEW_NUMBER_GAP;
+    let digits_end = area.x + width - 1;
+
+    let mut runs = TextRunBatch::default();
+    let mut number = String::new();
+    let mut y = area.y;
+    for (line, height) in lines {
+        number.clear();
+        write!(number, "{line}").expect("writing to a String is infallible");
+
+        match color {
+            Some(color) => {
+                let advance = text_run::advance_sixteenths(number.len(), scale);
+                runs.push(
+                    Rect::new(area.x, y, 1, 1),
+                    TextRun {
+                        col: run_end.saturating_sub(advance) as i16,
+                        row: 0,
+                        scale,
+                        color,
+                        bg: None,
+                        text: &number,
+                        bold: false,
+                        follow: 0,
+                        anchor: None,
+                    },
+                );
+            },
+            None => {
+                let x = digits_end.saturating_sub(number.len() as u16);
+                let end_x = digits_end.min(area.x + area.width);
+                write_str_clipped(buf, x, y, &number, muted, end_x);
+            },
+        }
+        y += height;
+    }
+    runs.flush(scene);
+
+    width
 }
 
 /// Share of a modal's body its list pane takes, before the user drags the

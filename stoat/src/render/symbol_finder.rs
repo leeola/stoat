@@ -133,6 +133,7 @@ pub(crate) fn render_symbol_finder(
             chrome,
             ws,
             buf,
+            scene,
         );
     }
 

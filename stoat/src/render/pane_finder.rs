@@ -83,6 +83,7 @@ pub(crate) fn render_pane_finder(
             chrome,
             ws,
             buf,
+            scene,
         );
     }
 

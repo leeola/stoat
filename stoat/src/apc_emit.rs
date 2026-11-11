@@ -1966,6 +1966,9 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
                 .map(|cache| cache.map.clone())
                 .unwrap_or_default();
             let diff_view = editor.diff_view;
+            // The live paint records the preview's number column as its gutter,
+            // and a preview takes that column whatever the panes' setting is.
+            let number_column = editor.gutter_width > 0;
 
             let entered = pool::emit_into(
                 &mut out,
@@ -1988,14 +1991,15 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
                     height: region.height,
                     gutter: Box::new(
                         crate::smooth_scroll::PageGutter::new(
-                            line_numbers != LineNumbers::Off,
+                            false,
                             severity,
                             theme.clone(),
                             base_rich.clone(),
                             None,
                         )
                         .batched(batch_decorations)
-                        .page_icons(page_icons),
+                        .page_icons(page_icons)
+                        .number_column(number_column),
                     ),
                     diff_view,
                     // A modal preview is not the diff view the knobs turn, so

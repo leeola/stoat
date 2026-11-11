@@ -1892,6 +1892,18 @@ impl Preview {
         self.rendered_for.as_ref()
     }
 
+    /// Whether the pane numbers its lines, which it does for a file's or a
+    /// buffer's text.
+    ///
+    /// A directory listing, a terminal screen, and the text a picker composes
+    /// have no lines a reader goes to by number.
+    pub(crate) fn numbers_lines(&self) -> bool {
+        matches!(
+            self.rendered_for,
+            Some(PreviewSource::File(_) | PreviewSource::Buffer(_))
+        )
+    }
+
     /// Blank the preview when nothing is selected. No-op when already empty.
     pub(crate) fn clear(&mut self, ws: &mut Workspace) {
         if self.rendered_for.is_some() {

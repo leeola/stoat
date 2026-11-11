@@ -5610,6 +5610,57 @@ fn a_wheel_over_the_preview_moves_the_pool_scroll_target() {
         "the wheel moved the pool target past {before:?}, got {after:?}"
     );
 }
+
+/// A page of the preview pool numbers a file's lines in the preview's own
+/// column, as the live preview paints them, though the panes number none.
+///
+/// The numbers ride the page as text runs, and the text starts past the
+/// column's five cells.
+#[test]
+fn a_preview_page_numbers_a_file_s_lines_with_the_pane_numbers_off() {
+    use stoatty_protocol::command::{decode_stream, Command};
+
+    let mut h = crate::test_harness::TestHarness::with_size(160, 40);
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+    h.stoat.set_apc_tx(tx);
+    h.stoat.settings.editor_line_numbers = Some(LineNumbers::Off);
+    let root = PathBuf::from("/preview-page-numbers");
+    h.fake_fs()
+        .insert_file(root.join("a.txt"), b"alpha\nbeta\ngamma");
+    h.stoat.active_workspace_mut().git_root = root;
+    h.type_keys("space p");
+    h.settle();
+    h.stoat.render();
+
+    let preview = finder_layout(&h)
+        .preview
+        .expect("the test terminal is wide enough for a preview");
+    let bytes = emit_raw(&mut h, &mut rx);
+    let payload = fill_payload(
+        &bytes,
+        crate::smooth_scroll::non_pane_pool::MODAL_PREVIEW,
+        0,
+    );
+    let numbers: Vec<String> = decode_stream(payload)
+        .into_iter()
+        .filter_map(|command| match command {
+            Command::TextRun(run) => Some(run.text),
+            _ => None,
+        })
+        .collect();
+    let first_row: String = page_cells(payload, preview.width, preview.height)
+        .remove(0)
+        .into_iter()
+        .map(|(ch, ..)| ch)
+        .collect();
+
+    assert_eq!(
+        (numbers.join(" "), first_row.trim_end()),
+        ("1 2 3".to_owned(), "     alpha"),
+        "the page numbers the file's lines and starts its text past the column",
+    );
+}
+
 #[test]
 fn file_finder_list_is_pooled_and_retired() {
     use stoat_action::OpenFileFinder;

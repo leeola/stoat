@@ -106,6 +106,7 @@ pub(crate) fn render_diagnostics_picker(
             chrome,
             ws,
             buf,
+            scene,
         );
     }
 

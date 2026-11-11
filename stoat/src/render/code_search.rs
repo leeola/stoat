@@ -76,6 +76,7 @@ pub(crate) fn render_code_search(
             chrome,
             ws,
             buf,
+            scene,
         );
     }
 

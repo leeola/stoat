@@ -84,6 +84,7 @@ pub(crate) fn render_location_picker(
             chrome,
             ws,
             buf,
+            scene,
         );
     }
 

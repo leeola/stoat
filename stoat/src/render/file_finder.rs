@@ -264,6 +264,7 @@ pub(crate) fn render_file_finder(
             chrome,
             ws,
             buf,
+            scene,
         );
         if let Some(header) = layout.preview_header {
             paint_preview_header(finder, header, home, theme, ws, buf, scene);
