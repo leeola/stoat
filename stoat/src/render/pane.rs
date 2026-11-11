@@ -1538,6 +1538,10 @@ fn status_scene_key(runs: &[StatusRun], separator: [u8; 3]) -> u64 {
 /// `ui.tabbar.toggle.inactive`. The chips show only where they fit beside the
 /// tabs, and a press on them does nothing.
 ///
+/// Under a live scene the chips read at the Caption scale, and a chip whose
+/// background differs from the bar's draws as a [`Panel::chip`], one logical
+/// pixel inside the row. A chip on the bar's background reads as plain text.
+///
 /// Leaves in `spans` the extent of each painted tab, in sixteenths of a cell
 /// from the left edge of `area`, so a pointer press resolves against the
 /// segments as painted.
@@ -1564,8 +1568,8 @@ pub(crate) fn render_tab_bar(
     let TabSegments { left, boxes } =
         tab_segments(ws, theme, frame.workspace_name, (active, inactive));
 
-    // The right run packs from the bar's edge in slice order, so the chips
-    // list from right to left after the pad that ends the bar.
+    // The chips pack from the bar's edge in slice order, so they list from
+    // right to left after the pad that ends the bar.
     let mut right: Vec<StatusSeg> = Vec::new();
     if let Some(focused) = focused_diff_layout(ws) {
         let on = inactive.patch(theme.get(crate::theme::scope::UI_TABBAR_TOGGLE_ACTIVE));
@@ -1576,9 +1580,6 @@ pub(crate) fn render_tab_bar(
     let chars = |segments: &[StatusSeg]| -> usize {
         segments.iter().map(|(text, _)| text.chars().count()).sum()
     };
-    if chars(&left) + chars(&right) > usize::from(area.width) {
-        right.clear();
-    }
 
     // The chip takes its cells out of the run, and one blank cell ends the bar
     // after it. It drops where the tabs leave it no room, as the diff chips do.
@@ -1591,13 +1592,16 @@ pub(crate) fn render_tab_bar(
         },
         None => area,
     };
+    if chars(&left) + chars(&right) > usize::from(segments.width) {
+        right.clear();
+    }
 
     let runs = [StatusRun {
         area,
         segments,
         style: inactive,
         left,
-        right,
+        right: Vec::new(),
         hairline: true,
         boxes,
     }];
@@ -1610,6 +1614,14 @@ pub(crate) fn render_tab_bar(
     if rich {
         draw_tab_divider(&runs[0], scale, theme, buf, scene);
     }
+    draw_layout_chips(
+        &right,
+        segments,
+        inactive,
+        rich.then(|| theme.type_scale(TypeRole::Caption)),
+        buf,
+        scene,
+    );
     if let Some(chip) = chip {
         let rect = Rect::new(segments.right(), area.y, chip.cells, 1);
         draw_conflict_chip(&chip, rect, theme, buf, scene);
@@ -1872,6 +1884,64 @@ fn draw_conflict_chip(
         anchor: None,
     }
     .render(rect, buf, scene);
+}
+
+/// Paint the tab bar's layout `chips` over `row`, packed leftward from its
+/// right edge in slice order, one cell per character.
+///
+/// With a `scale`, each chip's text draws as a run at `scale`, centered in the
+/// chip's cells. A chip whose background differs from `base`'s also draws as a
+/// [`Panel::chip`] in that background. Each chip first blanks its cells in
+/// `base`, so no glyph left there draws over the chip.
+///
+/// Without a scale, or where a color is not RGB, the chips paint into cells as
+/// [`paint_status_fallback`] lays them out.
+fn draw_layout_chips(
+    chips: &[StatusSeg],
+    row: Rect,
+    base: Style,
+    scale: Option<u16>,
+    buf: &mut Buffer,
+    scene: &mut ApcScene,
+) {
+    let rich = scale
+        .and_then(|scale| resolve_rich_segments(chips, base).map(|segments| (scale, segments)));
+    let Some((scale, segments)) = rich else {
+        paint_status_fallback(buf, row, &[], chips);
+        return;
+    };
+
+    let base_bg = style_rgb(base.bg);
+    let mut right = row.right();
+    for segment in &segments {
+        let cells = segment.text.chars().count() as u16;
+        let Some(left) = right.checked_sub(cells).filter(|&left| left >= row.x) else {
+            break;
+        };
+        right = left;
+
+        let rect = Rect::new(left, row.y, cells, 1);
+        for x in rect.x..rect.right() {
+            text::write_cell(buf, x, rect.y, ' ', base);
+        }
+        if Some(segment.bg) != base_bg {
+            Panel::chip(segment.bg).draw_components(rect, scene);
+        }
+
+        let advance = text_run::advance_sixteenths(usize::from(cells), scale);
+        TextRun {
+            col: ((u32::from(cells) * 16).saturating_sub(u32::from(advance)) / 2) as i16,
+            row: 0,
+            scale,
+            color: segment.fg,
+            bg: None,
+            text: segment.text,
+            bold: segment.bold,
+            follow: 0,
+            anchor: None,
+        }
+        .render(rect, buf, scene);
+    }
 }
 
 /// The diff layout that the split pane in focus shows, as the tab bar's chip
@@ -6045,6 +6115,61 @@ mod tests {
         h.cover_with_diff_changes(false);
         h.settle();
         h.assert_snapshot("changes_view_tab_toggles");
+    }
+
+    /// Under a live scene the focused layout's chip draws as a chip panel in its
+    /// fill, and no bar in that fill backs either chip. The pad ends the bar in
+    /// column 119, the `changes` chip takes the nine columns before it, and the
+    /// `files` chip the seven before those.
+    #[test]
+    fn the_live_tab_bar_boxes_the_focused_layout_s_chip() {
+        use super::style_rgb;
+        use stoatty_protocol::command::{Command, Edge};
+
+        let mut h = toggles_harness();
+        let fill = style_rgb(
+            h.stoat
+                .theme
+                .get(crate::theme::scope::UI_TABBAR_TOGGLE_ACTIVE)
+                .bg,
+        )
+        .expect("the theme fills the active chip in RGB");
+        let chips = |h: &mut crate::test_harness::TestHarness| {
+            h.render_composited();
+            let scene = stoatty_protocol::command::decode_stream(&h.stoat.apc_scene.all_bytes());
+            let panels: Vec<_> = scene
+                .iter()
+                .filter_map(|command| match command {
+                    Command::Panel(panel) if panel.top == 0 && panel.fill == Some(fill) => {
+                        Some((panel.left, panel.width, panel.edges))
+                    },
+                    _ => None,
+                })
+                .collect();
+            let bars = scene
+                .iter()
+                .filter(|command| {
+                    matches!(command, Command::Bar(bar) if bar.y < 16 && bar.color == fill)
+                })
+                .count();
+            (panels, bars)
+        };
+
+        focused_editor_mut(&mut h.stoat)
+            .expect("editor")
+            .set_diff_view(true);
+        let diff = chips(&mut h);
+        h.cover_with_diff_changes(false);
+        h.settle();
+        let changes = chips(&mut h);
+
+        let inset = Edge::symmetric(0, 1);
+        assert_eq!(
+            (diff, changes),
+            ((vec![(103, 7, inset)], 0), (vec![(110, 9, inset)], 0)),
+            "the files chip's panel over the diff and the changes chip's over the changes view, \
+             and no bar in the chip's fill",
+        );
     }
 
     /// One changed `a.rs` open in an editor, 120 by 8, with the tab bar on and

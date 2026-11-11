@@ -301,7 +301,8 @@ The typed UI scopes, by group (syntax scopes are open-ended):
 - `ui.tabbar.toggle.active`, `ui.tabbar.toggle.inactive` -- the `files` and
   `changes` chips at the right of the tab bar while a diff view or a changes
   view has the focus, the chip of the focused view's layout active. A chip
-  takes the tab bar's colors where its scope leaves them unset.
+  takes the tab bar's colors where its scope leaves them unset. A chip's
+  background fills its box where it differs from the tab bar's.
 - `ui.tabbar.name` -- the workspace name that leads the tab bar, in its
   foreground. A theme that leaves it unset draws the name in the text color
   of `ui.tabbar.inactive`.

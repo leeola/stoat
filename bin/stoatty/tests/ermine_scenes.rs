@@ -645,6 +645,43 @@ fn the_tab_bar_sits_on_chrome_with_the_active_tab_on_base() {
     }
 }
 
+/// The split diff's tab bar ends in its layout chips as the DiffSplit board
+/// draws them. The focused `files` chip is a box on the hover surface one
+/// pixel inside the bar's row, and the `changes` chip is text on the chrome.
+///
+/// The bar ends in a pad cell at column 159, so the `changes` chip takes
+/// columns 150 to 158 and the `files` chip columns 143 to 149.
+#[test]
+fn the_tab_bar_boxes_the_focused_layout_s_chip_inside_its_row() {
+    let mut home = support::scratch_home();
+    let shot = settled_frame(
+        home.path(),
+        "basic-diff",
+        "unstaged.txt",
+        "<Space>df<Settle>",
+    );
+    let (_, top, _, height) = cell_rect(0, 0, 1, 1);
+    let band = |col: u16, (dy, rows): (u32, u32)| {
+        let (x, _, width, _) = cell_rect(col, 0, 1, 1);
+        dominant_color(&shot, (x, top + dy, width, rows))
+    };
+
+    let files: Vec<[[u8; 3]; 3]> = (143..150)
+        .map(|col| [(0, 1), (1, height - 2), (height - 1, 1)].map(|rows| band(col, rows)))
+        .collect();
+    let changes: Vec<[u8; 3]> = (150..159).map(|col| band(col, (0, height))).collect();
+    if files != [[CHROME, HOVER, CHROME]; 7] || changes != [CHROME; 9] {
+        let frame = keep_frame(&shot, &mut home, "tab_bar_layout_chips");
+        panic!(
+            "the files chip's columns read {:?} on their first, middle, and last pixel rows, \
+             and the changes chip's columns read {:?}; the frame is {}",
+            files.iter().map(|rows| rows.map(hex)).collect::<Vec<_>>(),
+            changes.iter().map(|&color| hex(color)).collect::<Vec<_>>(),
+            frame.display(),
+        );
+    }
+}
+
 /// The file finder's box fills with the overlay surface where no text covers
 /// it, and its preview pane sits on the base surface.
 ///
