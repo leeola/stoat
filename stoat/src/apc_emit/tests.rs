@@ -8101,6 +8101,61 @@ fn a_reload_that_moves_the_view_redeclares_the_pool() {
     );
 }
 
+/// A reload that moves a changes view's stack reaches the terminal as a swap
+/// of the stack's pool, as an editor's reload does. Twenty lines arrive at the
+/// end of the first file, and the view inside the second file's excerpt moves
+/// down with its text in one scroll.
+#[test]
+fn a_reload_that_moves_the_stack_redeclares_its_pool() {
+    let mut h = crate::test_harness::TestHarness::with_size(120, 24);
+    h.stoat.stoatty_protocol = stoatty_protocol::PROTOCOL_VERSION;
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+    h.stoat.set_apc_tx(tx);
+    let lines = |edit: bool, appended: usize| {
+        let line = |i: usize| match edit && i.is_multiple_of(4) {
+            true => format!("line {i} edit\n"),
+            false => format!("line {i}\n"),
+        };
+        let new: String = (0..appended).map(|i| format!("new {i}\n")).collect();
+        (0..40).map(line).collect::<String>() + &new
+    };
+    let (base, work) = (lines(false, 0), lines(true, 0));
+    h.stage_review_scenario("/repo", &[("a.txt", &base, &work), ("b.txt", &base, &work)]);
+    h.cover_with_diff_changes(false);
+    h.settle();
+    let _ = h.stoat.render();
+    {
+        let state = h
+            .stoat
+            .active_workspace_mut()
+            .focused_diff_changes_mut()
+            .expect("a changes view");
+        state.scroll = state.excerpts[1].top + 5;
+    }
+    let _ = h.stoat.render();
+    emit_smooth_scroll(&mut h.stoat);
+    h.settle();
+    drain_apc(&mut rx);
+
+    h.fake_fs()
+        .insert_file(PathBuf::from("/repo/a.txt"), lines(true, 20).as_bytes());
+    auto_reload::reload_all(&mut h.stoat, true);
+    h.settle();
+    let _ = h.stoat.render();
+    emit_smooth_scroll(&mut h.stoat);
+    let scroll = h
+        .stoat
+        .active_workspace()
+        .focused_diff_changes()
+        .expect("a changes view")
+        .scroll as u64;
+
+    assert_eq!(
+        pane_pool_moves(drain_apc(&mut rx)),
+        [("drop", None), ("region", None), ("scroll", Some(scroll))],
+    );
+}
+
 /// A reload below the view leaves the pool as it rests, with no drop, no
 /// region, and no scroll.
 #[test]

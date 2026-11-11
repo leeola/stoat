@@ -7429,11 +7429,15 @@ impl Stoat {
         self.focus_location(at)
     }
 
-    /// Release every view of the active workspace that a reload holds, since
-    /// the reader acted and the view follows them again.
+    /// Release every view and changes view stack of the active workspace that
+    /// a reload holds, since the reader acted and the view follows them again.
     fn drop_view_holds(&mut self) {
-        for (_, editor) in self.active_workspace_mut().editors.iter_mut() {
+        let ws = self.active_workspace_mut();
+        for (_, editor) in ws.editors.iter_mut() {
             editor.view_hold = None;
+        }
+        for (_, state) in ws.diff_changes_views.iter_mut() {
+            state.view_hold = None;
         }
     }
 

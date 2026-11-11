@@ -641,6 +641,10 @@ fn stack_cache_key(
 ) -> Option<PaneCacheKey> {
     if state.held_screen_row.is_some()
         || state.pending_landing.is_some()
+        || state
+            .view_hold
+            .as_ref()
+            .is_some_and(|hold| hold.rested.is_none())
         || (is_focused && frame.goto_word_labels.is_some())
     {
         return None;

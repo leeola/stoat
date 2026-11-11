@@ -23,8 +23,8 @@ use crate::{
     buffer_registry::{BufferRegistry, OpenOrigin},
     diff_map::{DiffHunk, DiffHunkStatus, DiffMap},
     display_map::{
-        BlockRowKind, DisplaySnapshot, FoldPlaceholder, FoldScope, FoldSnapshot, InlayPoint,
-        InlaySnapshot, ScopeMark,
+        BlockRowKind, DisplayPoint, DisplaySnapshot, FoldPlaceholder, FoldScope, FoldSnapshot,
+        InlayPoint, InlaySnapshot, ScopeMark,
     },
     editor_state::{EditorId, EditorState},
     multi_buffer::MultiBufferSnapshot,
@@ -147,6 +147,14 @@ pub(crate) struct DiffChangesState {
     /// changes view opened from. The paint applies it after it fits each
     /// excerpt to the width, so the rows it counts are the rows it paints.
     pub held_screen_row: Option<u16>,
+    /// The text a reload keeps on a row of the view until the reader next
+    /// acts.
+    pub view_hold: Option<StackHold>,
+    /// A reload's seat placed the stack with the text under it, so the
+    /// terminal takes the next scroll target with no ease. The emit drops the
+    /// stack's pool when that target moved and declares it again on the
+    /// target.
+    pub pool_swap: bool,
     /// The focused excerpt's editor and its cursor as of the last paint.
     ///
     /// The paint scrolls to the cursor only when the cursor moved since, so a
@@ -172,6 +180,29 @@ pub(crate) struct CursorScope {
     /// The syntax version of the parse the chain was read from.
     syntax: u64,
     scope: Arc<FoldScope>,
+}
+
+/// The text a reload pins to a row of a changes view, so the stack rows that
+/// the old and the new files share keep their screen rows.
+///
+/// Each paint finds the seat's stack row and scrolls so that row sits on
+/// [`Self::screen_row`]. The reload edit, the relist, and the refold that
+/// follows a landed diff map each move that row, and the paint after each one
+/// scrolls to match. The hold ends at the reader's next input, and when
+/// another writer moved the scroll from where the last paint left it.
+pub(crate) struct StackHold {
+    pub(crate) seat: StackSeat,
+    pub(crate) screen_row: usize,
+    /// The scroll the last paint left, `None` before the first one.
+    pub(crate) rested: Option<usize>,
+}
+
+/// What a [`StackHold`] keeps on its screen row.
+pub(crate) enum StackSeat {
+    /// The focused excerpt's cursor, wherever the reload's landings put it.
+    Cursor,
+    /// A text position in the excerpt that the editor shows.
+    Text(EditorId, Anchor),
 }
 
 /// The rows at the top of a changes view that repeat the context of the stack
@@ -778,6 +809,8 @@ impl Default for DiffChangesState {
             covered_diff: false,
             pending_landing: None,
             held_screen_row: None,
+            view_hold: None,
+            pool_swap: false,
             followed_cursor: None,
             last_cursor_row: None,
             scope_cache: None,
@@ -1251,6 +1284,129 @@ fn excerpt_at(
         .saturating_sub(excerpt.top + header_rows(excerpt))
         .min(rows - 1);
     Some((index, display_row as u32))
+}
+
+/// Seat each changes view of `ws` that a paint has sized and that no reload
+/// holds yet on the text it shows, before a reload edits a buffer under it.
+///
+/// A stack with its cursor on screen holds the cursor, which then keeps its
+/// screen row through the reload's landings. Any other stack holds the first
+/// row under its pinned rows that shows buffer text. A stack that a reload
+/// already holds keeps its seat, since a reload of every open buffer edits one
+/// buffer after another with no paint to correct the rows between them.
+pub(crate) fn seat_stacks(ws: &mut Workspace) {
+    let Workspace {
+        diff_changes_views,
+        editors,
+        ..
+    } = ws;
+    for (_, state) in diff_changes_views.iter_mut() {
+        if state.view_hold.is_none() && state.viewport_rows > 0 {
+            state.view_hold = stack_seat(state, editors);
+        }
+    }
+}
+
+/// The seat a reload holds `state` on, or `None` when no row of its view
+/// shows buffer text.
+///
+/// A header row and a Scope row show no buffer text, so the walk passes them.
+fn stack_seat(
+    state: &mut DiffChangesState,
+    editors: &mut SlotMap<EditorId, EditorState>,
+) -> Option<StackHold> {
+    layout_stack(state, editors);
+    let view = state.scroll..state.scroll + state.viewport_rows;
+    let hold = |seat, row: usize| StackHold {
+        seat,
+        screen_row: row - state.scroll,
+        rested: None,
+    };
+    if let Some(row) = cursor_stack_row(state, editors).filter(|row| view.contains(row)) {
+        return Some(hold(StackSeat::Cursor, row));
+    }
+
+    let start = view.start + pinned_header(state, editors, state.scroll).rows();
+    (start..view.end).find_map(|row| {
+        let excerpt = state
+            .excerpts
+            .iter()
+            .rev()
+            .find(|excerpt| excerpt.top <= row)?;
+        let display_row = row.checked_sub(excerpt.top + header_rows(excerpt))?;
+        if display_row >= excerpt_rows(excerpt, editors) {
+            return None;
+        }
+        let editor = editors.get_mut(excerpt.editor_id)?;
+        let snapshot = editor.display_map.snapshot();
+        let point = snapshot.display_to_buffer(DisplayPoint::new(display_row as u32, 0))?;
+        let buffer_snapshot = snapshot.buffer_snapshot();
+        let offset = buffer_snapshot.rope().point_to_offset(point);
+        let anchor = buffer_snapshot.anchor_at(offset, Bias::Right);
+        Some(hold(StackSeat::Text(excerpt.editor_id, anchor), row))
+    })
+}
+
+/// Scroll `state` so the text its reload hold keeps sits on its screen row,
+/// as of the last [`layout_stack`] of `total` rows.
+///
+/// A held screen row or a pending landing drops the hold, since each is a
+/// deliberate move. So do a scroll that another writer moved since the last
+/// paint and a seat whose text left the stack. The scroll stops at the last
+/// page, and the move marks the stack's pool for a swap and records the
+/// cursor as followed, so the paint scrolls to it no further.
+pub(crate) fn apply_stack_hold(
+    state: &mut DiffChangesState,
+    editors: &mut SlotMap<EditorId, EditorState>,
+    total: usize,
+) {
+    if state.held_screen_row.is_some() || state.pending_landing.is_some() {
+        state.view_hold = None;
+        return;
+    }
+    let Some(mut hold) = state.view_hold.take() else {
+        return;
+    };
+    if hold.rested.is_some_and(|scroll| scroll != state.scroll) {
+        return;
+    }
+    let Some(row) = hold_stack_row(state, editors, &hold) else {
+        return;
+    };
+
+    state.scroll = row
+        .saturating_sub(hold.screen_row)
+        .min(total.saturating_sub(state.viewport_rows));
+    state.pool_swap = true;
+    state.followed_cursor = focused_cursor(state, editors);
+    hold.rested = Some(state.scroll);
+    state.view_hold = Some(hold);
+}
+
+/// The stack row of the text `hold` keeps, as of the last [`layout_stack`].
+///
+/// `None` when the seat's excerpt left the stack or waits on its diff map.
+fn hold_stack_row(
+    state: &DiffChangesState,
+    editors: &mut SlotMap<EditorId, EditorState>,
+    hold: &StackHold,
+) -> Option<usize> {
+    let StackSeat::Text(editor_id, anchor) = &hold.seat else {
+        return cursor_stack_row(state, editors);
+    };
+    let excerpt = state
+        .excerpts
+        .iter()
+        .find(|excerpt| excerpt.editor_id == *editor_id)?;
+    excerpt.folded_version?;
+    let editor = editors.get_mut(*editor_id)?;
+    let snapshot = editor.display_map.snapshot();
+    let buffer_snapshot = snapshot.buffer_snapshot();
+    let point = buffer_snapshot
+        .rope()
+        .offset_to_point(buffer_snapshot.resolve_anchor(anchor));
+    let display_row = snapshot.buffer_to_display(point).row as usize;
+    Some(excerpt.top + header_rows(excerpt) + display_row)
 }
 
 /// Scroll the focused changes view so its cursor sits inside the scrolloff
@@ -2888,14 +3044,17 @@ mod tests {
         cursor_point, cursor_stack_row, excerpt_rows, expand_from_cursor, fold_edge, fold_excerpt,
         follow_cursor, gap_fold, gaps, header_rows, kept_runs, landing_row, layout_stack,
         listed_files, place_cursor, press_cell, pump_diff_changes_stack, reveal_rows, scope_parts,
-        DiffChangesState, ExcerptStats, ExpandDir, FoldEdge, Landing, ScopeParse, StackStamp,
+        select_row, DiffChangesState, ExcerptStats, ExpandDir, FoldEdge, Landing, ScopeParse,
+        StackStamp,
     };
     use crate::{
         action_handlers::dispatch,
+        auto_reload,
         buffer::{BufferId, TextBuffer},
+        buffer_registry::AutoReloadMode,
         diff_map::{DiffHunk, DiffHunkStatus, DiffMap, TokenDetail},
         display_map::{DisplayPoint, FoldScope, InlayPoint, ScopeMark},
-        editor_state::EditorState,
+        editor_state::{EditorId, EditorState},
         host::FakeRepoBuilder,
         test_harness::TestHarness,
         theme::FULL_CELL_SCALE,
@@ -2904,6 +3063,7 @@ mod tests {
             Workspace,
         },
     };
+    use ratatui::buffer::Buffer;
     use slotmap::SlotMap;
     use std::{
         ops::{Range, RangeInclusive},
@@ -4370,5 +4530,309 @@ fn hint_width() -> u32 {
             (before, open(&h, "/repo/a.txt"), open(&h, "/repo/b.txt")),
             ((true, true), true, false),
         );
+    }
+
+    /// Lines `line 0` to `line 38`, and with `edit` the lines from 4 on edited
+    /// in every other block of five, so a stack shows each line but the first.
+    /// `appended` new lines follow them.
+    fn blocks(edit: bool, appended: usize) -> String {
+        let line = |n: usize| match edit && n >= 4 && ((n - 4) / 5).is_multiple_of(2) {
+            true => format!("line {n} edit\n"),
+            false => format!("line {n}\n"),
+        };
+        let new: String = (0..appended).map(|n| format!("new {n}\n")).collect();
+        (0..39).map(line).collect::<String>() + &new
+    }
+
+    /// A painted changes view over `a.txt` and `b.txt`, two [`blocks`] files,
+    /// with its view inside `b.txt`'s excerpt `offset` rows past its header.
+    ///
+    /// With `cursor_there`, the cursor sits on screen five rows under the
+    /// view's top in `b.txt`, else on `a.txt`'s tenth stack row above the
+    /// view. A paint follows the cursor before the scroll moves, so the scroll
+    /// stays where it is set.
+    fn seated_stack(cursor_there: bool, offset: usize) -> TestHarness {
+        let mut h = TestHarness::with_size(120, 24);
+        let (base, work) = (blocks(false, 0), blocks(true, 0));
+        h.stage_review_scenario("/repo", &[("a.txt", &base, &work), ("b.txt", &base, &work)]);
+        stacked(&mut h);
+        let _ = h.stoat.render();
+        with_stack(&mut h, |state, editors| {
+            let row = match cursor_there {
+                true => state.excerpts[1].top + offset + 5,
+                false => state.excerpts[0].top + 10,
+            };
+            select_row(state, editors, row);
+        });
+        let _ = h.stoat.render();
+        with_stack(&mut h, |state, _| {
+            state.scroll = state.excerpts[1].top + offset;
+        });
+        let _ = h.stoat.render();
+        h
+    }
+
+    /// The edited [`blocks`] text with three new lines after line `after`.
+    fn with_mid_lines(after: usize) -> String {
+        let work = blocks(true, 0);
+        let lines: Vec<&str> = work.split_inclusive('\n').collect();
+        lines[..=after].concat() + "mid 0\nmid 1\nmid 2\n" + &lines[after + 1..].concat()
+    }
+
+    /// Write `text` to `/repo/<file>`, reload every buffer, settle, and return
+    /// the first paint.
+    fn reload_file(h: &mut TestHarness, file: &str, text: &str) -> Buffer {
+        h.fake_fs()
+            .insert_file(Path::new(&format!("/repo/{file}")), text.as_bytes());
+        auto_reload::reload_all(&mut h.stoat, true);
+        h.settle();
+        h.stoat.render()
+    }
+
+    /// Run `f` over the focused changes view and the workspace's editors.
+    fn with_stack<T>(
+        h: &mut TestHarness,
+        f: impl FnOnce(&mut DiffChangesState, &mut SlotMap<EditorId, EditorState>) -> T,
+    ) -> T {
+        let ws = h.stoat.active_workspace_mut();
+        let id = ws
+            .focused_diff_changes_id()
+            .expect("a focused changes view");
+        let Workspace {
+            diff_changes_views,
+            editors,
+            ..
+        } = ws;
+        f(&mut diff_changes_views[id], editors)
+    }
+
+    /// The text on each row of the focused stack's view, a header row as its
+    /// file's path.
+    fn stack_screen_text(h: &mut TestHarness) -> Vec<String> {
+        with_stack(h, |state, editors| {
+            layout_stack(state, editors);
+            (state.scroll..state.scroll + state.viewport_rows)
+                .map(|row| {
+                    let Some(excerpt) = state.excerpts.iter().rev().find(|e| e.top <= row) else {
+                        return String::new();
+                    };
+                    match row.checked_sub(excerpt.top + header_rows(excerpt)) {
+                        None => excerpt.rel_path.clone(),
+                        Some(display_row) => editors
+                            .get_mut(excerpt.editor_id)
+                            .map(|editor| {
+                                editor
+                                    .display_map
+                                    .snapshot()
+                                    .display_line(display_row as u32)
+                            })
+                            .unwrap_or_default(),
+                    }
+                })
+                .collect()
+        })
+    }
+
+    /// The focused stack's scroll and whether a reload holds it.
+    fn stack_view(h: &mut TestHarness) -> (usize, bool) {
+        with_stack(h, |state, _| (state.scroll, state.view_hold.is_some()))
+    }
+
+    /// Append twenty lines to `a.txt` on disk, reload every buffer, settle,
+    /// and paint.
+    fn grow_first_file(h: &mut TestHarness) {
+        reload_file(h, "a.txt", &blocks(true, 20));
+    }
+
+    /// Twenty lines that arrive at the end of the first file leave the second
+    /// file's text on its screen rows. The cursor there keeps its screen row,
+    /// so the stack moves down twenty rows.
+    #[test]
+    fn a_reload_holds_the_stack_when_lines_arrive_above_the_view() {
+        let mut h = seated_stack(true, 5);
+        let (before, (scroll, _)) = (stack_screen_text(&mut h), stack_view(&mut h));
+
+        grow_first_file(&mut h);
+
+        assert_eq!(
+            (stack_screen_text(&mut h), stack_view(&mut h)),
+            (before, (scroll + 20, true)),
+        );
+    }
+
+    /// A stack whose cursor sits above the view holds the first text row under
+    /// its pinned header, so the text stays put though the cursor does not
+    /// move. A view that starts on the file header holds the text row under
+    /// the header, and the header stays on the view's top row.
+    #[test]
+    fn a_reload_holds_the_stack_with_the_cursor_off_screen() {
+        for offset in [5, 0] {
+            let mut h = seated_stack(false, offset);
+            let (before, (scroll, _)) = (stack_screen_text(&mut h), stack_view(&mut h));
+
+            grow_first_file(&mut h);
+
+            assert_eq!(
+                (stack_screen_text(&mut h), stack_view(&mut h).0),
+                (before, scroll + 20),
+                "with the view {offset} rows past the second header",
+            );
+        }
+    }
+
+    /// The cursor on screen keeps its screen row though three lines arrive in
+    /// its own file between the view's top and the cursor.
+    #[test]
+    fn a_reload_keeps_the_stack_cursor_on_its_screen_row() {
+        let mut h = seated_stack(true, 5);
+        let cursor_screen_row = |h: &mut TestHarness| {
+            with_stack(h, |state, editors| {
+                layout_stack(state, editors);
+                cursor_stack_row(state, editors).map(|row| row - state.scroll)
+            })
+        };
+        let before = cursor_screen_row(&mut h);
+
+        reload_file(&mut h, "b.txt", &with_mid_lines(7));
+
+        assert_eq!((before, cursor_screen_row(&mut h)), (Some(5), Some(5)));
+    }
+
+    /// Lines that arrive in an off-screen cursor's own file above it move the
+    /// cursor, and the stack holds its text with no follow to the cursor.
+    #[test]
+    fn a_reload_that_moves_an_off_screen_cursor_holds_the_stack() {
+        let mut h = seated_stack(false, 5);
+        let before = stack_screen_text(&mut h);
+
+        reload_file(&mut h, "a.txt", &with_mid_lines(2));
+
+        assert_eq!(stack_screen_text(&mut h), before);
+    }
+
+    /// An auto-reload poll holds the stack as a reload does.
+    #[test]
+    fn a_poll_reload_holds_the_stack() {
+        let mut h = seated_stack(false, 5);
+        let before = stack_screen_text(&mut h);
+        let id = h
+            .stoat
+            .active_workspace()
+            .buffers
+            .id_for_path(Path::new("/repo/a.txt"))
+            .expect("a.txt is open");
+        h.stoat
+            .active_workspace_mut()
+            .buffers
+            .set_auto_reload(id, AutoReloadMode::Tail);
+        auto_reload::ensure_auto_reload_poll(&mut h.stoat);
+
+        h.fake_fs()
+            .insert_file(Path::new("/repo/a.txt"), blocks(true, 20).as_bytes());
+        auto_reload::pump_auto_reload(&mut h.stoat);
+        h.run_until_parked();
+        auto_reload::pump_auto_reload_install(&mut h.stoat);
+        h.settle();
+        let _ = h.stoat.render();
+
+        assert_eq!(stack_screen_text(&mut h), before);
+    }
+
+    /// A deliberate move after the hold's first paint releases the stack.
+    /// Another writer's scroll keeps its row, and a held screen row puts the
+    /// cursor on screen row 3.
+    #[test]
+    fn a_deliberate_move_releases_the_stack() {
+        let after = |deliberate: fn(&mut DiffChangesState)| {
+            let mut h = seated_stack(true, 5);
+            grow_first_file(&mut h);
+            with_stack(&mut h, |state, _| deliberate(state));
+            let _ = h.stoat.render();
+            with_stack(&mut h, |state, editors| {
+                let cursor = cursor_stack_row(state, editors).map(|row| row - state.scroll);
+                (state.scroll, cursor, state.view_hold.is_some())
+            })
+        };
+        let (scrolled, _, scrolled_held) = after(|state| state.scroll = 10);
+        let (_, cursor, held_row_held) = after(|state| state.held_screen_row = Some(3));
+
+        assert_eq!(
+            ((scrolled, scrolled_held), (cursor, held_row_held)),
+            ((10, false), (Some(3), false)),
+        );
+    }
+
+    /// A diff map that lands after the reload folds most of the first file
+    /// away, and the second file's text stays on its screen rows.
+    #[test]
+    fn a_refold_after_a_reload_keeps_the_stack_rows() {
+        let mut h = seated_stack(true, 5);
+        grow_first_file(&mut h);
+        let before = stack_screen_text(&mut h);
+        let id = h
+            .stoat
+            .active_workspace()
+            .buffers
+            .id_for_path(Path::new("/repo/a.txt"))
+            .expect("a.txt is open");
+
+        h.stoat
+            .active_workspace_mut()
+            .install_test_diff_map(id, map_of(&blocks(true, 0), &blocks(true, 20)));
+        pump_diff_changes_stack(&mut h.stoat);
+        let _ = h.stoat.render();
+
+        assert_eq!(stack_screen_text(&mut h), before);
+    }
+
+    /// The reader's next key releases the stack, so a reload never fights a
+    /// move the reader makes.
+    #[test]
+    fn a_key_after_a_reload_releases_the_stack() {
+        let mut h = seated_stack(true, 5);
+        grow_first_file(&mut h);
+        let held = stack_view(&mut h).1;
+
+        h.type_keys("j");
+
+        assert_eq!((held, stack_view(&mut h).1), (true, false));
+    }
+
+    /// The first paint after a reload shows the stack as a steady paint does,
+    /// since the stack alone places the rows of its excerpts. Here the second
+    /// file's header sits four rows down the view, and three lines arrive in
+    /// that file between its header and its cursor.
+    #[test]
+    fn the_first_paint_after_a_reload_matches_a_steady_paint() {
+        let mut h = seated_stack(true, 0);
+        with_stack(&mut h, |state, _| state.scroll -= 4);
+        let _ = h.stoat.render();
+
+        let first = reload_file(&mut h, "b.txt", &with_mid_lines(1));
+        h.stoat.pane_cache.clear();
+
+        assert_eq!(first, h.stoat.render());
+    }
+
+    /// The paint that applies a reload's hold moves the stack, so it caches no
+    /// pane under the scroll it leaves. A move back to that scroll paints the
+    /// rows there, as a fresh paint does.
+    ///
+    /// A steady paint before the reload lets the reload's paint capture, since
+    /// a capture skips the second of two frames whose keys moved. The first
+    /// file grows by five lines, so it stays out of the view at that scroll
+    /// and no reload flash there denies the paint a key.
+    #[test]
+    fn a_move_back_after_a_reload_paints_the_rows_there() {
+        let mut h = seated_stack(true, 10);
+        let scroll = stack_view(&mut h).0;
+        let _ = h.stoat.render();
+        reload_file(&mut h, "a.txt", &blocks(true, 5));
+
+        with_stack(&mut h, |state, _| state.scroll = scroll);
+        let moved_back = h.stoat.render();
+        h.stoat.pane_cache.clear();
+
+        assert_eq!(moved_back, h.stoat.render());
     }
 }

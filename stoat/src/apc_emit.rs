@@ -1625,6 +1625,21 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
             );
             let selection =
                 painted_selection(state, &mut ws.editors, is_focused, frame, split_gutter);
+            // A reload's seat moved the stack with the text under it, so the
+            // pool takes the moved target as a swap, as an editor's does.
+            if std::mem::take(&mut state.pool_swap)
+                && stoat
+                    .smooth_scroll
+                    .last_target(region.pool)
+                    .is_some_and(|from| from != state.scroll as f32)
+            {
+                drop_pane_pool(
+                    &mut stoat.smooth_scroll,
+                    [&mut stoat.aux_cursor, &mut stoat.stack_cursor],
+                    &mut out,
+                    region.pool,
+                );
+            }
 
             let state = &*state;
             let editors = &mut ws.editors;

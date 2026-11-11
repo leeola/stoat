@@ -28,7 +28,7 @@ use crate::{
     buffer_lifecycle,
     buffer_registry::{AutoReloadMode, OpenOrigin},
     debounce::{self, FS_WATCH_DEBOUNCE},
-    diff_changes::{DiffChangesId, Landing},
+    diff_changes::{self, DiffChangesId, Landing},
     display_map::DisplayPoint,
     editor_state::{EditorId, EditorState, ViewHold},
     keymap_state,
@@ -527,7 +527,10 @@ fn install_reload(
     // take no seat.
     let seats = match mode {
         AutoReloadMode::Follow => Vec::new(),
-        _ => seat_views(stoat, id, &tail_followers),
+        _ => {
+            diff_changes::seat_stacks(stoat.active_workspace_mut());
+            seat_views(stoat, id, &tail_followers)
+        },
     };
 
     let flashed = old_span.start..old_span.start + text.len();
@@ -874,6 +877,7 @@ fn reload_from_disk(
         // through a snapshot that reads the buffer.
         let landings = item_landings(stoat, id, &old_text, &normalized, &hunks);
         let seats = seat_views(stoat, id, &[]);
+        diff_changes::seat_stacks(stoat.active_workspace_mut());
 
         let edits: Vec<(Range<usize>, &str)> = hunks
             .iter()
@@ -1032,16 +1036,26 @@ fn item_landings(
 /// the view and draws no follow. Any other view holds the first of its rows
 /// that shows buffer text. An editor in `skip`, and one no paint has sized,
 /// takes no seat.
+///
+/// An excerpt editor of a changes view takes no seat either. Each paint of the
+/// stack sets the scroll of that editor, and [`diff_changes::seat_stacks`]
+/// holds the stack.
 fn seat_views(
     stoat: &mut Stoat,
     id: BufferId,
     skip: &[EditorId],
 ) -> Vec<(EditorId, Option<Anchor>, u32)> {
-    stoat
-        .active_workspace_mut()
-        .editors
+    let ws = stoat.active_workspace_mut();
+    let stacked = |editor_id: EditorId| {
+        ws.diff_changes_views
+            .values()
+            .any(|state| state.excerpts.iter().any(|e| e.editor_id == editor_id))
+    };
+    ws.editors
         .iter_mut()
-        .filter(|(editor_id, editor)| editor.buffer_id == id && !skip.contains(editor_id))
+        .filter(|(editor_id, editor)| {
+            editor.buffer_id == id && !skip.contains(editor_id) && !stacked(*editor_id)
+        })
         .filter_map(|(editor_id, editor)| {
             let viewport = editor.viewport_rows?;
             let top = editor.scroll_row;

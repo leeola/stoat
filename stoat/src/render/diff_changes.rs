@@ -206,6 +206,7 @@ pub(crate) fn render_diff_changes(
         }
     }
     let total = diff_changes::layout_stack(state, editors);
+    diff_changes::apply_stack_hold(state, editors, total);
     let cursor = diff_changes::focused_cursor(state, editors);
     if let Some(row) = diff_changes::cursor_stack_row(state, editors) {
         match state.held_screen_row.take() {
