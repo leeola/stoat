@@ -48,15 +48,24 @@ const TOGGLE_ON_MARK: &str = "\u{25cf}";
 /// The mark of a toggle that is off, U+25CB WHITE CIRCLE.
 const TOGGLE_OFF_MARK: &str = "\u{25cb}";
 
-/// The small colored tag a tab, a finder row, or a changes header shows in
-/// place of a file's extension, and the theme scope that colors it.
+/// The small colored tag a finder row or a changes header shows in place of a
+/// file's extension, and the theme scope that colors it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct TypeTag {
     pub(crate) tag: &'static str,
     pub(crate) scope: &'static str,
-    /// Whether the name ends in `.gz`. The tag is then the inner extension's,
-    /// and a tab adds a `gz` tag in the same scope.
+    /// Whether the name ends in `.gz`. The tag is then the inner extension's.
     pub(crate) gzip: bool,
+}
+
+/// A file name split at the extension its [`TypeTag`] names, for a label that
+/// reads the stem and then the extension in the tag's color.
+pub(crate) struct TaggedName {
+    pub(crate) stem: String,
+    /// The rest of the name after the stem, its dots included: `.rs`, or
+    /// `.md.gz` for a gzip name.
+    pub(crate) suffix: String,
+    pub(crate) tag: TypeTag,
 }
 
 /// Size and center a modal box over `area` for content of `content` cells,
@@ -432,6 +441,26 @@ pub(crate) fn type_tag(path: &Path) -> Option<TypeTag> {
     })
 }
 
+/// The name of the file at `path` split at the extension its [`TypeTag`]
+/// names, or `None` for a file whose extension takes no tag.
+///
+/// A gzip name splits before both of its extensions, so `CHANGELOG.md.gz`
+/// splits as `CHANGELOG` and `.md.gz`.
+pub(crate) fn tagged_name(path: &Path) -> Option<TaggedName> {
+    let tag = type_tag(path)?;
+    let name = path.file_name()?.to_str()?;
+    let stem = match tag.gzip {
+        true => Path::new(path.file_stem()?).file_stem()?,
+        false => path.file_stem()?,
+    }
+    .to_str()?;
+    Some(TaggedName {
+        stem: stem.to_string(),
+        suffix: name[stem.len()..].to_string(),
+        tag,
+    })
+}
+
 /// Draw a horizontal separator across `width` cells at row `y`, starting at
 /// column `x`.
 ///
@@ -664,7 +693,8 @@ pub(crate) fn text(
 mod tests {
     use super::{
         hline, hline_edge, list_modal_width, modal_box, modal_frame, modal_frame_above_pools,
-        modal_frame_anchored, popout_frame, text, toggle_mark, type_tag, vline, TypeTag,
+        modal_frame_anchored, popout_frame, tagged_name, text, toggle_mark, type_tag, vline,
+        TypeTag,
     };
     use crate::theme::{scope, PanelRole, Theme};
     use ratatui::{
@@ -713,6 +743,24 @@ mod tests {
                 None,
                 tagged("md", scope::UI_TAG_MARKDOWN, true),
                 None,
+            ],
+        );
+    }
+
+    /// A tagged name splits before the extension its tag names, and a gzip name
+    /// before both of its extensions.
+    #[test]
+    fn tagged_name_splits_the_stem_from_its_extension() {
+        let split =
+            |name: &str| tagged_name(Path::new(name)).map(|tagged| (tagged.stem, tagged.suffix));
+        let pair = |stem: &str, suffix: &str| Some((stem.to_string(), suffix.to_string()));
+
+        assert_eq!(
+            ["CHANGELOG.md.gz", "lib.rs", "config.stcfg"].map(split),
+            [
+                pair("CHANGELOG", ".md.gz"),
+                pair("lib", ".rs"),
+                pair("config", ".stcfg"),
             ],
         );
     }

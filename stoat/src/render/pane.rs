@@ -10,10 +10,9 @@ use crate::{
     minimap::RAIL_MAX_COLUMNS,
     pane::{Divider, DividerOrientation, FocusTarget, Pane, PaneTree, Placement, View},
     render::{
-        chrome::{self, TypeTag},
-        commits, diff_changes,
+        chrome, commits, diff_changes,
         editor::{editor_cursor_position, render_editor_with_overlay, split_minimap_strip},
-        paint::{blend, dim_rgb, style_rgb},
+        paint::{dim_rgb, style_rgb},
         popout::{
             paint_popout_card, popout_area, popout_card_bg, popout_inset, scaled_char_capacity,
             wrap_popout_lines,
@@ -96,11 +95,6 @@ const TAB_DIVIDER_TOP: i16 = 2;
 /// The Editor board draws a 14 px rule, and a sixteenth of the 18 px row is
 /// 1.125 px, so 12 sixteenths are the nearest whole count.
 const TAB_DIVIDER_HEIGHT: u16 = 12;
-
-/// How much of a tag's color the dot joining it to a tab's name keeps over
-/// the tab's background, in percent, as the Editor board draws the dot at
-/// 55 percent opacity.
-const TAG_DOT_PERCENT: u16 = 55;
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn render_pane(
@@ -1532,18 +1526,16 @@ fn status_scene_key(runs: &[StatusRun], separator: [u8; 3]) -> u64 {
 ///
 /// The name leads in bold, since the status row leaves it out while the bar
 /// shows. A tab reads as its [`Workspace::tab_label`], and a tagged file's
-/// extension follows it as a tag in the tag's color, joined by a dot. A gzip
-/// file's tab adds a second dot and a `gz` tag in the same color. Painting
-/// through the status-bar segment path means the bar picks up the same
-/// scaled-run rendering under stoatty and the same cell fallback elsewhere.
+/// extension follows its stem as a `.ext` suffix in the type's color, `.md.gz`
+/// for a gzip file. Painting through the status-bar segment path means the bar
+/// picks up the same scaled-run rendering under stoatty and the same cell
+/// fallback elsewhere.
 ///
 /// Under a live scene a hairline in `ui.border.inactive` follows the name,
 /// each tab takes whole cells with its text centered, and the active tab
-/// draws as a [`tab_panel`] in its background. A dot draws as a square in the
-/// color [`tag_dot`] gives it, and the tag after the dot draws at
-/// [`TypeRole::Small`], as the Editor board sets a tag smaller than its
-/// label. In cells the active tab is its background, and a dot is a U+00B7.
-/// Every tab takes a box, so no tab moves when another becomes the active one.
+/// draws as a [`tab_panel`] in its background. In cells the active tab is its
+/// background. Every tab takes a box, so no tab moves when another becomes the
+/// active one.
 ///
 /// While the split pane in focus shows a diff view or a changes view, the bar
 /// ends in two chips, `files` and `changes`, which name the two diff layouts.
@@ -1671,8 +1663,8 @@ struct TabSegments {
 /// The tab bar's left segments for `ws` under `workspace_name`, the active
 /// tab in the first of `styles` and the rest in the second.
 ///
-/// A tab's segments are its conflict mark, its label, and a dot and a tag for
-/// each type tag its file carries.
+/// A tab's segments are its conflict mark and its label. A tagged file's label
+/// is its stem, and its extension follows as a suffix in the tag's color.
 fn tab_segments(
     ws: &Workspace,
     theme: &crate::theme::Theme,
@@ -1687,31 +1679,20 @@ fn tab_segments(
         (" ".to_string(), inactive),
     ];
     let mut boxes = Vec::new();
-    let mut dots = Vec::new();
-    let mut small = Vec::new();
     for idx in 0..ws.tabs.len() {
         let is_active = idx == ws.active_tab;
         let style = if is_active { active } else { inactive };
         let first = left.len();
-        let (label, tag) = ws.tab_label(idx);
+        let (label, suffix) = ws.tab_label(idx);
         if let Some(mark) = ws.tab_conflict_mark(idx) {
             left.push(tab_mark(mark, style, theme));
         }
-        left.push((format!(" {label} "), style));
-        if let Some(TypeTag {
-            tag,
-            scope: tag_scope,
-            gzip,
-        }) = tag
-        {
-            let tag_style = tinted(style, theme, tag_scope);
-            let dot = tag_dot(style, tag_style, theme);
-            for name in [Some(tag), gzip.then_some("gz")].into_iter().flatten() {
-                dots.push(left.len());
-                left.push(("\u{b7}".to_string(), dot));
-                small.push(left.len());
-                left.push((format!("{name} "), tag_style));
-            }
+        match suffix {
+            Some((suffix, tag_scope)) => {
+                left.push((format!(" {label}"), style));
+                left.push((format!("{suffix} "), tinted(style, theme, tag_scope)));
+            },
+            None => left.push((format!(" {label} "), style)),
         }
         boxes.push(RunBox {
             segments: first..left.len(),
@@ -1722,8 +1703,8 @@ fn tab_segments(
     TabSegments {
         left,
         boxes,
-        dots,
-        small,
+        dots: Vec::new(),
+        small: Vec::new(),
     }
 }
 
@@ -1780,22 +1761,6 @@ fn tab_panel(fill: [u8; 3]) -> Panel {
         above_pools: false,
         backdrop: false,
         anchor: None,
-    }
-}
-
-/// The style of the dot that joins a tab's name to its tag, in a tab painted
-/// in `style` with a tag in `tag_style`.
-///
-/// The dot takes the tag's color mixed [`TAG_DOT_PERCENT`] into the tab's
-/// background, as the Editor board fades the dot over the tab. A theme that
-/// gives either color as other than RGB mutes the dot to `ui.text.muted`.
-fn tag_dot(style: Style, tag_style: Style, theme: &crate::theme::Theme) -> Style {
-    match (style_rgb(style.bg), style_rgb(tag_style.fg)) {
-        (Some(bg), Some(tag)) => {
-            let [r, g, b] = blend(bg, tag, TAG_DOT_PERCENT);
-            style.fg(Color::Rgb(r, g, b))
-        },
-        _ => tinted(style, theme, crate::theme::scope::UI_TEXT_MUTED),
     }
 }
 
@@ -6080,7 +6045,7 @@ mod tests {
         assert_eq!(
             [plain, diff, docked, narrow, changes],
             [
-                "repo a \u{b7}rs",
+                "repo a.rs",
                 "repo \u{b1} a.rs files changes",
                 "repo \u{b1} a.rs",
                 "repo \u{b1} a.rs",
@@ -6121,13 +6086,12 @@ mod tests {
     }
 
     /// The bar leads with the workspace name and a one-cell gap. A tagged file's
-    /// tab trades its extension for the tag after a dot. A gzip file's tab
-    /// trades both extensions for the inner tag and a `gz` tag in the tag's
-    /// color, after a second dot. A dot takes the tag's color mixed into its
-    /// tab's background. Each tab's click span covers its label and its tags.
+    /// tab reads its stem and then its extension as a suffix in the tag's
+    /// color, and a gzip file's suffix holds both extensions. Each tab's click
+    /// span covers its label and its suffix.
     #[test]
     fn the_tab_bar_leads_with_the_workspace_and_tags_each_file() {
-        use super::{style_rgb, TAG_DOT_PERCENT};
+        use super::style_rgb;
         use ratatui::style::Color;
 
         let mut h = tagged_tabs_harness();
@@ -6136,49 +6100,40 @@ mod tests {
 
         let text = h.rendered_text();
         let bar = text.lines().next().expect("the tab bar row");
-        let lead = " ws   chrome \u{b7}rs  panel \u{b7}rs  CHANGELOG \u{b7}md \u{b7}gz ";
+        let lead = " ws   chrome.rs  panel.rs  CHANGELOG.md.gz ";
         let fg_at = |needle: &str| {
             let col = lead[..lead.find(needle).expect("the bar names it")]
                 .chars()
                 .count();
             h.rendered_buffer()[(col as u16, 0)].fg
         };
-        let theme = &h.stoat.theme;
-        let rgb = |color: Option<Color>| style_rgb(color).expect("the theme colors it in RGB");
-        let md = rgb(theme.get(crate::theme::scope::UI_TAG_MARKDOWN).fg);
-        let base = rgb(theme.get(crate::theme::scope::UI_TABBAR_ACTIVE).bg);
-        let [r, g, b] = crate::render::paint::blend(base, md, TAG_DOT_PERCENT);
+        let md = style_rgb(h.stoat.theme.get(crate::theme::scope::UI_TAG_MARKDOWN).fg)
+            .expect("the theme colors it in RGB");
         assert_eq!(
-            (bar.trim_end(), fg_at("md"), fg_at("\u{b7}gz"), fg_at("gz")),
-            (
-                lead.trim_end(),
-                Color::Rgb(md[0], md[1], md[2]),
-                Color::Rgb(r, g, b),
-                Color::Rgb(md[0], md[1], md[2])
-            ),
-            "the bar text, then the active gzip tab's inner tag, second dot, and gz tag",
+            (bar.trim_end(), fg_at(".md.gz")),
+            (lead.trim_end(), Color::Rgb(md[0], md[1], md[2])),
+            "the bar text, then the active gzip tab's suffix in the markdown color",
         );
         assert_eq!(
             h.stoat.tab_bar_spans,
-            [(5, 17), (17, 28), (28, 47)].map(|(start, end): (u16, u16)| start * 16..end * 16),
-            "each tab's span in sixteenths, from its label's lead space to its last tag",
+            [(5, 16), (16, 26), (26, 43)].map(|(start, end): (u16, u16)| start * 16..end * 16),
+            "each tab's span in sixteenths, from its label's lead space to its suffix",
         );
     }
 
     /// Under a live scene a hairline parts the workspace name from the tabs, the
     /// active tab draws as a panel rounded at its top corners and filleted into
-    /// the pane, each dot draws as a square in the color its tag mixes, and
-    /// each tag draws at the Small type scale.
+    /// the pane, and each suffix draws in its tag's color at the label's Ui
+    /// type scale.
     ///
     /// The cells match the plain bar, since every role scales to a whole cell
     /// under `cfg(test)`. The name ends at column 4, where the hairline stands
-    /// 12 sixteenths tall from sixteenth 2. The dots sit in columns 13, 24, 39,
-    /// and 43, each square 6 sixteenths wide and 3 tall, 5 into its cell.
+    /// 12 sixteenths tall from sixteenth 2, and the bar draws no other mark.
     #[test]
-    fn the_live_tab_bar_divides_the_name_rounds_the_active_tab_and_dots_each_tag() {
+    fn the_live_tab_bar_divides_the_name_rounds_the_active_tab_and_colors_each_suffix() {
         use super::{
             style_rgb, BorderStyle, PanelShadow, TypeRole, CORNER_TOP_LEFT, CORNER_TOP_RIGHT,
-            FILLET_BOTTOM_LEFT, FILLET_BOTTOM_RIGHT, TAG_DOT_PERCENT,
+            FILLET_BOTTOM_LEFT, FILLET_BOTTOM_RIGHT,
         };
         use ratatui::style::Color;
         use stoatty_protocol::command::{Command, Edge, PanelCommand};
@@ -6189,14 +6144,9 @@ mod tests {
         let theme = &h.stoat.theme;
         let rgb = |color: Option<Color>| style_rgb(color).expect("the theme colors it in RGB");
         let base = rgb(theme.get(crate::theme::scope::UI_TABBAR_ACTIVE).bg);
-        let chrome = rgb(theme.get(crate::theme::scope::UI_TABBAR_INACTIVE).bg);
         let rust = rgb(theme.get(crate::theme::scope::UI_TAG_RUST).fg);
         let md = rgb(theme.get(crate::theme::scope::UI_TAG_MARKDOWN).fg);
         let divider = rgb(theme.get(crate::theme::scope::UI_BORDER_INACTIVE).fg);
-        let dot = |column: i16, ground, tag| {
-            let color = crate::render::paint::blend(ground, tag, TAG_DOT_PERCENT);
-            (column * 16 + 5, 7, 6, 3, color)
-        };
 
         let scene = stoatty_protocol::command::decode_stream(&h.stoat.apc_scene.all_bytes());
         let panels: Vec<PanelCommand> = scene
@@ -6220,8 +6170,8 @@ mod tests {
             (
                 vec![PanelCommand {
                     top: 0,
-                    left: 28,
-                    width: 19,
+                    left: 26,
+                    width: 17,
                     height: 1,
                     style: BorderStyle::None_,
                     border: base,
@@ -6237,50 +6187,35 @@ mod tests {
                     backdrop: false,
                     anchor: None,
                 }],
-                vec![
-                    dot(13, chrome, rust),
-                    dot(24, chrome, rust),
-                    dot(39, base, md),
-                    dot(43, base, md),
-                    (64, 2, 1, 12, divider),
-                ],
+                vec![(64, 2, 1, 12, divider)],
             ),
-            "the active tab's panel, then each dot's square and the name's hairline",
+            "the active tab's panel, and the name's hairline alone",
         );
 
-        let small = theme.type_scale(TypeRole::Small);
-        let tags: Vec<(&str, u16)> = scene
+        let ui = theme.type_scale(TypeRole::Ui);
+        let suffixes: Vec<(&str, u16, [u8; 3])> = scene
             .iter()
             .filter_map(|command| match command {
                 Command::TextRun(run)
-                    if run.row < 16 && ["rs ", "md ", "gz "].contains(&run.text.as_str()) =>
+                    if run.row < 16 && [".rs ", ".md.gz "].contains(&run.text.as_str()) =>
                 {
-                    Some((run.text.as_str(), run.scale))
+                    Some((run.text.as_str(), run.scale, run.color))
                 },
                 _ => None,
             })
             .collect();
         assert_eq!(
-            tags,
-            [
-                ("rs ", small),
-                ("rs ", small),
-                ("md ", small),
-                ("gz ", small)
-            ],
-            "each tag's run carries the Small scale",
+            suffixes,
+            [(".rs ", ui, rust), (".rs ", ui, rust), (".md.gz ", ui, md)],
+            "each suffix's run carries the label's scale and its tag's color",
         );
     }
 
-    /// The tab bar marks each tag to draw at the Small type scale and the dot
-    /// before it to draw as a square, and gives every tab one box, the active
-    /// tab's a panel.
-    ///
-    /// `Theme::type_scale` answers a whole cell for every role under
-    /// `cfg(test)`, so the marks, not the scales a scene carries, tell a tag
-    /// from a label here.
+    /// The tab bar gives every tab one box, the active tab's a panel. No segment
+    /// draws small or as a dot, since a tagged file's extension reads as a
+    /// plain suffix.
     #[test]
-    fn the_tab_segments_mark_each_tag_small_and_box_each_tab() {
+    fn the_tab_segments_box_each_tab() {
         use super::{tab_segments, BoxShape};
 
         let h = tagged_tabs_harness();
@@ -6305,9 +6240,9 @@ mod tests {
         assert_eq!(
             (texts(&segments.small), texts(&segments.dots), boxes),
             (
-                vec!["rs ", "rs ", "md ", "gz "],
-                vec!["\u{b7}"; 4],
-                vec![(2..5, None), (5..8, None), (8..13, Some(BoxShape::Tab))],
+                Vec::<&str>::new(),
+                Vec::<&str>::new(),
+                vec![(2..4, None), (4..6, None), (6..8, Some(BoxShape::Tab))],
             ),
         );
     }

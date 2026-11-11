@@ -31,11 +31,7 @@ use crate::{
     input_history::InputHistory,
     pane::{DockId, DockPanel, DockSide, FocusTarget, PaneId, PaneTree, View},
     rebase::{ActiveRebase, RebaseState},
-    render::{
-        chrome::{self, TypeTag},
-        text,
-        walkthrough::SlideParts,
-    },
+    render::{chrome, text, walkthrough::SlideParts},
     review_approval::ApprovedRows,
     run::{RunId, RunState},
     ssh::RemoteTarget,
@@ -834,27 +830,18 @@ impl Workspace {
         }
     }
 
-    /// The label tab `idx` shows in the tab bar, with the type tag that stands
-    /// in for the label's extension.
+    /// The label tab `idx` shows in the tab bar, with the extension that
+    /// follows it and the theme scope that colors that extension.
     ///
     /// A tab whose focused pane edits a file with a [`chrome::type_tag`] reads
-    /// as the file's stem beside that tag. A gzip file's stem drops both
-    /// extensions, so `CHANGELOG.md.gz` reads `CHANGELOG`. Every other tab
-    /// reads as [`Self::tab_title`] names it, with no tag. So does a renamed
-    /// tab, whose name is the user's, and a diff view, whose `±` takes the
-    /// tag's place.
-    pub(crate) fn tab_label(&self, idx: usize) -> (String, Option<TypeTag>) {
-        let tagged = self.tab_file(idx).and_then(|path| {
-            let tag = chrome::type_tag(path)?;
-            let named = match tag.gzip {
-                true => Path::new(path.file_stem()?),
-                false => path,
-            };
-            let stem = named.file_stem()?.to_string_lossy().into_owned();
-            Some((stem, tag))
-        });
-        match tagged {
-            Some((stem, tag)) => (stem, Some(tag)),
+    /// as the file's stem, then its extension as a suffix in the tag's scope.
+    /// A gzip file's suffix holds both extensions, so `CHANGELOG.md.gz` reads
+    /// `CHANGELOG` then `.md.gz`. Every other tab reads as [`Self::tab_title`]
+    /// names it, with no suffix. So does a renamed tab, whose name is the
+    /// user's, and a diff view, whose title leads with `±`.
+    pub(crate) fn tab_label(&self, idx: usize) -> (String, Option<(String, &'static str)>) {
+        match self.tab_file(idx).and_then(chrome::tagged_name) {
+            Some(name) => (name.stem, Some((name.suffix, name.tag.scope))),
             None => (self.tab_title(idx), None),
         }
     }
@@ -2419,7 +2406,6 @@ mod tests {
         diff_changes::DiffChangesId,
         editor_state::EditorId,
         pane::{Axis, DockPanel, DockSide, DockVisibility, FocusTarget, View},
-        render::chrome::TypeTag,
         run::RunId,
         term_session::{TermId, ViewLocation},
         test_fixture::fake_term_session,
@@ -2830,11 +2816,11 @@ mod tests {
         );
     }
 
-    /// A tagged file's tab trades its extension for the tag. An untagged file
-    /// keeps its whole name, and so does a renamed tab, whose name is the
-    /// user's.
+    /// A tagged file's tab splits its name at the extension, which follows as a
+    /// suffix in the tag's scope. An untagged file keeps its whole name, and so
+    /// does a renamed tab, whose name is the user's.
     #[test]
-    fn tab_label_trades_a_tagged_extension_for_its_tag() {
+    fn tab_label_splits_a_tagged_name_at_its_extension() {
         let mut h = TestHarness::with_size(80, 24);
         let label = |h: &TestHarness| h.stoat.active_workspace().tab_label(0);
 
@@ -2854,11 +2840,7 @@ mod tests {
             [
                 (
                     "lib".to_string(),
-                    Some(TypeTag {
-                        tag: "rs",
-                        scope: scope::UI_TAG_RUST,
-                        gzip: false,
-                    }),
+                    Some((".rs".to_string(), scope::UI_TAG_RUST)),
                 ),
                 ("notes.txt".to_string(), None),
                 ("plan.rs".to_string(), None),
