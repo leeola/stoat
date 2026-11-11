@@ -9,6 +9,7 @@ use etcetera::{base_strategy::Xdg, BaseStrategy};
 use serde::{de::Error as _, Deserialize, Deserializer};
 use snafu::{ResultExt, Snafu};
 use std::{collections::BTreeMap, io, path::PathBuf};
+use stoatty_render::gpu;
 use stoatty_term::{grid::Rgb, theme::Theme};
 use vscode_theme::{Rgba, VsCodeTheme};
 
@@ -82,6 +83,13 @@ pub struct Config {
     /// so the cursor stays on text as it is typed.
     #[serde(default = "default_cursor_animation")]
     pub cursor_animation: CursorAnimation,
+
+    /// How stoatty encodes each frame's colors for the display. `gamma22`
+    /// re-encodes the sRGB values for a display that decodes at gamma 2.2, as
+    /// Chromium browsers do, so dark colors show as light as their hex means.
+    /// `none` presents the values as drawn.
+    #[serde(default = "default_display_transfer")]
+    pub display_transfer: DisplayTransfer,
 
     /// Program to launch over the PTY instead of the default stoat editor, with
     /// its arguments. `None`, the default, launches the resolved stoat.
@@ -234,6 +242,41 @@ pub enum CursorAnimation {
 /// `serde(default)` on [`Config::cursor_animation`].
 fn default_cursor_animation() -> CursorAnimation {
     CursorAnimation::Block
+}
+
+/// How stoatty encodes a frame's colors for the display, selectable in the
+/// config.
+///
+/// [`Gamma22`](Self::Gamma22) re-encodes each sRGB value for a display that
+/// decodes at gamma 2.2, as Chromium browsers present a hex color.
+/// [`None`](Self::None) presents the values as drawn.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum DisplayTransfer {
+    None,
+    Gamma22,
+}
+
+impl From<DisplayTransfer> for gpu::DisplayTransfer {
+    fn from(transfer: DisplayTransfer) -> gpu::DisplayTransfer {
+        match transfer {
+            DisplayTransfer::None => gpu::DisplayTransfer::None,
+            DisplayTransfer::Gamma22 => gpu::DisplayTransfer::Gamma22,
+        }
+    }
+}
+
+/// The display transfer used when the config omits the key, for the
+/// `serde(default)` on [`Config::display_transfer`].
+///
+/// Linux takes `gamma22`, because the measurement behind it came from a Linux
+/// Wayland desk. Other systems present the values as drawn, since no
+/// measurement covers them.
+fn default_display_transfer() -> DisplayTransfer {
+    match cfg!(target_os = "linux") {
+        true => DisplayTransfer::Gamma22,
+        false => DisplayTransfer::None,
+    }
 }
 
 /// The log level used when the config omits the key, for the `serde(default)`
@@ -481,7 +524,7 @@ fn merge_tables(base: &mut toml::Table, overlay: toml::Table) {
 mod tests {
     use super::{
         embedded_default, merge_tables, parse_vscode_themes, settle, Config, CursorAnimation,
-        HexColor, ShellConfig, DEFAULT_CONFIG,
+        DisplayTransfer, HexColor, ShellConfig, DEFAULT_CONFIG,
     };
     use stoatty_term::{grid::Rgb, theme::Theme};
     use vscode_theme::builtin_sources;
@@ -585,6 +628,22 @@ mod tests {
                 .cursor_animation,
             CursorAnimation::Warp,
             "a user file selects the warp cursor animation"
+        );
+    }
+
+    #[test]
+    fn display_transfer_ships_gamma22_and_user_can_turn_it_off() {
+        assert_eq!(
+            settle(DEFAULT_CONFIG, None).unwrap().display_transfer,
+            DisplayTransfer::Gamma22,
+            "the embedded default ships the gamma 2.2 transfer"
+        );
+        assert_eq!(
+            settle(DEFAULT_CONFIG, Some("display_transfer = \"none\"\n"))
+                .unwrap()
+                .display_transfer,
+            DisplayTransfer::None,
+            "a user file turns the transfer off"
         );
     }
 

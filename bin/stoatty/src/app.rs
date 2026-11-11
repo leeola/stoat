@@ -266,6 +266,7 @@ fn run_with_config(
             ligatures: config.ligatures,
         },
         config.cursor_animation,
+        config.display_transfer,
         size,
         maximized,
         working_directory,
@@ -391,6 +392,9 @@ struct App {
     ligatures: bool,
     /// Selected cursor motion style, read once into [`State`] at window creation.
     cursor_animation: CursorAnimation,
+    /// How every window's context encodes its frames for the display, set on
+    /// each context as it is built and on every one at a config reload.
+    display_transfer: config::DisplayTransfer,
     /// The window's content size in cells (`[cols, rows]`) to open sized to, or
     /// `None` for the winit default window. Read once at window creation.
     size: Option<[u16; 2]>,
@@ -430,6 +434,7 @@ impl App {
         theme_name: String,
         font: FontSettings,
         cursor_animation: CursorAnimation,
+        display_transfer: config::DisplayTransfer,
         size: Option<[u16; 2]>,
         maximized: bool,
         working_directory: Option<PathBuf>,
@@ -450,6 +455,7 @@ impl App {
             font_family: font.family,
             ligatures: font.ligatures,
             cursor_animation,
+            display_transfer,
             size,
             maximized,
             state: None,
@@ -617,6 +623,7 @@ struct AuxWindowConfig<'a> {
     theme: Theme,
     font_family: &'a [String],
     ligatures: bool,
+    display_transfer: config::DisplayTransfer,
 }
 
 pub(crate) struct State {
@@ -1239,6 +1246,7 @@ impl ApplicationHandler<PtyEvent> for App {
             self.theme.background,
             self.theme.cursor,
         );
+        gpu.set_display_transfer(self.display_transfer.into());
         let gpu_time = t_gpu.elapsed();
 
         // The surface a platform grants can differ from the size asked for, and
@@ -1338,6 +1346,7 @@ impl ApplicationHandler<PtyEvent> for App {
                         &mut self.font_family,
                         &mut self.ligatures,
                         &mut self.cursor_animation,
+                        &mut self.display_transfer,
                     );
                 }
                 handle_term_events(
@@ -1348,6 +1357,7 @@ impl ApplicationHandler<PtyEvent> for App {
                         theme: self.theme,
                         font_family: &self.font_family,
                         ligatures: self.ligatures,
+                        display_transfer: self.display_transfer,
                     },
                     events,
                 );
@@ -1465,6 +1475,7 @@ impl ApplicationHandler<PtyEvent> for App {
                     theme: self.theme,
                     font_family: &self.font_family,
                     ligatures: self.ligatures,
+                    display_transfer: self.display_transfer,
                 },
                 events,
             );
@@ -2704,7 +2715,8 @@ fn side_button_event(
 
 /// Re-read the config file and apply what a running window can change.
 ///
-/// Theme, font size, and cursor animation take effect on the next frame. Font
+/// Theme, font size, and cursor animation take effect on the next frame. The
+/// display transfer reaches every window's context and redraws each one. Font
 /// family and ligatures are baked into the primary window's text pass when it is
 /// built, so a change to either only reaches windows opened afterward and is
 /// logged rather than silently dropped.
@@ -2720,6 +2732,7 @@ fn apply_config_reload(
     font_family: &mut Vec<String>,
     ligatures: &mut bool,
     cursor_animation: &mut CursorAnimation,
+    display_transfer: &mut config::DisplayTransfer,
 ) {
     let config = match config::load() {
         Ok(config) => config,
@@ -2767,6 +2780,17 @@ fn apply_config_reload(
 
     state.cursor_animation = config.cursor_animation;
     *cursor_animation = config.cursor_animation;
+
+    *display_transfer = config.display_transfer;
+    state
+        .gpu
+        .set_display_transfer(config.display_transfer.into());
+    for aux in &mut state.aux {
+        if let Some(gpu) = aux.gpu.as_mut() {
+            gpu.set_display_transfer(config.display_transfer.into());
+        }
+        aux.window.request_redraw();
+    }
 
     if *font_family != config.font_family || *ligatures != config.ligatures {
         tracing::info!("font family and ligature changes apply to this window on next launch");
@@ -3035,6 +3059,7 @@ fn open_aux_window(
     let theme = config.theme;
     let font_family = config.font_family.to_vec();
     let ligatures = config.ligatures;
+    let display_transfer = config.display_transfer;
     let shared = state.shared_gpu.clone();
     let spawn = std::thread::Builder::new()
         .name(format!("aux-gpu-{window_id}"))
@@ -3062,7 +3087,7 @@ fn open_aux_window(
                     theme.cursor,
                 )
             });
-            let gpu = match shared {
+            let mut gpu = match shared {
                 Some(gpu) => gpu,
                 None => {
                     tracing::info!(
@@ -3080,6 +3105,7 @@ fn open_aux_window(
                     )
                 },
             };
+            gpu.set_display_transfer(display_transfer.into());
             let _ = proxy.send_event(PtyEvent::AuxGpuReady {
                 window: window_id,
                 gpu: Box::new(gpu),

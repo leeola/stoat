@@ -42,6 +42,12 @@ ligatures = true
 # the cursor stays on the text as it is typed.
 cursor_animation = "block"
 
+# How stoatty encodes each frame's colors for the display. An sRGB display
+# decodes at gamma 2.2, where the sRGB standard's curve is piecewise, so dark
+# colors show darker than their hex means. "gamma22" encodes the frame for such
+# a display, as Chromium browsers do. "none" presents the values as drawn.
+display_transfer = "gamma22"
+
 # The level of the stoatty log for stoatty's own crates, which is error, warn,
 # info, debug, or trace. Debug is the default, and it carries the diagnostic
 # lines a bug report needs. A full tracing directive string such as

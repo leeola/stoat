@@ -46,14 +46,18 @@ use stoatty_term::{
     term::Damage,
 };
 use wgpu::{
-    Adapter, Backends, BufferDescriptor, BufferUsages, Color, CommandEncoder,
+    Adapter, Backends, BindGroup, BindGroupDescriptor, BindGroupEntry, BindGroupLayout,
+    BindGroupLayoutDescriptor, BindGroupLayoutEntry, BindingResource, BindingType,
+    BufferDescriptor, BufferUsages, Color, ColorTargetState, ColorWrites, CommandEncoder,
     CommandEncoderDescriptor, CompositeAlphaMode, CurrentSurfaceTexture, Device, DeviceDescriptor,
-    Extent3d, Instance, InstanceDescriptor, LoadOp, MapMode, Operations, Origin3d, PollType,
-    PowerPreference, PresentMode, Queue, RenderPass, RenderPassColorAttachment,
-    RenderPassDescriptor, RequestAdapterOptions, StoreOp, Surface, SurfaceColorSpace,
-    SurfaceConfiguration, SurfaceTexture, TexelCopyBufferInfo, TexelCopyBufferLayout,
-    TexelCopyTextureInfo, Texture, TextureAspect, TextureDescriptor, TextureDimension,
-    TextureFormat, TextureUsages, TextureView, TextureViewDescriptor, COPY_BYTES_PER_ROW_ALIGNMENT,
+    Extent3d, FragmentState, Instance, InstanceDescriptor, LoadOp, MapMode, Operations, Origin3d,
+    PipelineLayoutDescriptor, PollType, PowerPreference, PresentMode, Queue, RenderPass,
+    RenderPassColorAttachment, RenderPassDescriptor, RenderPipeline, RenderPipelineDescriptor,
+    RequestAdapterOptions, ShaderModuleDescriptor, ShaderSource, ShaderStages, StoreOp, Surface,
+    SurfaceColorSpace, SurfaceConfiguration, SurfaceTexture, TexelCopyBufferInfo,
+    TexelCopyBufferLayout, TexelCopyTextureInfo, Texture, TextureAspect, TextureDescriptor,
+    TextureDimension, TextureFormat, TextureSampleType, TextureUsages, TextureView,
+    TextureViewDescriptor, TextureViewDimension, VertexState, COPY_BYTES_PER_ROW_ALIGNMENT,
 };
 #[cfg(feature = "perf")]
 use {
@@ -1717,6 +1721,9 @@ pub struct GpuContext {
     /// [`OFFSCREEN_FORMAT`].
     view_format: TextureFormat,
     renderer: Renderer,
+    /// The pass that re-encodes each frame for the display, or `None` to write
+    /// the frame as drawn. See [`Self::set_display_transfer`].
+    transfer: Option<TransferPass>,
     perf: FrameProfiler,
     /// Whether to composite the perf HUD topmost. Toggled from the app.
     #[cfg(feature = "perf")]
@@ -1738,12 +1745,157 @@ enum Target {
 /// The view a frame records into, from [`GpuContext::acquire`].
 struct Acquired {
     view: TextureView,
+    /// The target's own view when the frame records into the display transfer's
+    /// staging texture, which the transfer then draws into this view. `None`
+    /// when the frame records into the target directly.
+    display: Option<TextureView>,
     /// The swapchain drawable to present after the frame records. `None` for an
     /// offscreen target, which has nothing to present.
     present: Option<SurfaceTexture>,
     /// Whether the drawable came at a size the passes did not prepare against,
     /// so the frame prepares again before it records.
     resized: bool,
+}
+
+/// The pass that re-encodes a frame for a display's transfer function.
+///
+/// A frame records into the staging texture in place of its target, and
+/// [`Self::record`] then draws that texture into the target through the
+/// transfer curve in one full-screen triangle.
+struct TransferPass {
+    pipeline: RenderPipeline,
+    layout: BindGroupLayout,
+    /// The target's format, which the staging texture shares so the passes'
+    /// values land in it as they land in the target.
+    format: TextureFormat,
+    /// The staging texture, its view, and the bind group that reads it, built
+    /// on the first frame and rebuilt when the target's size moves.
+    staged: Option<(Texture, TextureView, BindGroup)>,
+}
+
+impl TransferPass {
+    fn new(device: &Device, format: TextureFormat) -> TransferPass {
+        let shader = device.create_shader_module(ShaderModuleDescriptor {
+            label: Some("display transfer"),
+            source: ShaderSource::Wgsl(include_str!("shaders/transfer.wgsl").into()),
+        });
+        let layout = device.create_bind_group_layout(&BindGroupLayoutDescriptor {
+            label: Some("display transfer"),
+            entries: &[BindGroupLayoutEntry {
+                binding: 0,
+                visibility: ShaderStages::FRAGMENT,
+                ty: BindingType::Texture {
+                    sample_type: TextureSampleType::Float { filterable: false },
+                    view_dimension: TextureViewDimension::D2,
+                    multisampled: false,
+                },
+                count: None,
+            }],
+        });
+        let pipeline_layout = device.create_pipeline_layout(&PipelineLayoutDescriptor {
+            label: Some("display transfer"),
+            bind_group_layouts: &[Some(&layout)],
+            immediate_size: 0,
+        });
+
+        let pipeline = device.create_render_pipeline(&RenderPipelineDescriptor {
+            label: Some("display transfer"),
+            layout: Some(&pipeline_layout),
+            vertex: VertexState {
+                module: &shader,
+                entry_point: Some("vs_main"),
+                compilation_options: Default::default(),
+                buffers: &[],
+            },
+            fragment: Some(FragmentState {
+                module: &shader,
+                entry_point: Some("fs_main"),
+                compilation_options: Default::default(),
+                targets: &[Some(ColorTargetState {
+                    format,
+                    blend: None,
+                    write_mask: ColorWrites::ALL,
+                })],
+            }),
+            primitive: Default::default(),
+            depth_stencil: None,
+            multisample: Default::default(),
+            multiview_mask: None,
+            cache: None,
+        });
+
+        TransferPass {
+            pipeline,
+            layout,
+            format,
+            staged: None,
+        }
+    }
+
+    /// The view of a staging texture of `width` by `height`, built when there
+    /// is none at that size.
+    fn staged_view(&mut self, device: &Device, width: u32, height: u32) -> TextureView {
+        let staged = match self.staged.take() {
+            Some(staged) if (staged.0.width(), staged.0.height()) == (width, height) => staged,
+            _ => {
+                let texture = device.create_texture(&TextureDescriptor {
+                    label: Some("display transfer staging"),
+                    size: Extent3d {
+                        width,
+                        height,
+                        depth_or_array_layers: 1,
+                    },
+                    mip_level_count: 1,
+                    sample_count: 1,
+                    dimension: TextureDimension::D2,
+                    format: self.format,
+                    usage: TextureUsages::RENDER_ATTACHMENT | TextureUsages::TEXTURE_BINDING,
+                    view_formats: &[],
+                });
+                let view = texture.create_view(&TextureViewDescriptor::default());
+                let bind_group = device.create_bind_group(&BindGroupDescriptor {
+                    label: Some("display transfer staging"),
+                    layout: &self.layout,
+                    entries: &[BindGroupEntry {
+                        binding: 0,
+                        resource: BindingResource::TextureView(&view),
+                    }],
+                });
+                (texture, view, bind_group)
+            },
+        };
+
+        let view = staged.1.clone();
+        self.staged = Some(staged);
+        view
+    }
+
+    /// Draw the staging texture into `target` through the transfer curve.
+    fn record(&self, encoder: &mut CommandEncoder, target: &TextureView) {
+        let Some((_, _, bind_group)) = &self.staged else {
+            return;
+        };
+
+        let mut pass = encoder.begin_render_pass(&RenderPassDescriptor {
+            label: Some("display transfer"),
+            color_attachments: &[Some(RenderPassColorAttachment {
+                view: target,
+                depth_slice: None,
+                resolve_target: None,
+                ops: Operations {
+                    load: LoadOp::Clear(Color::BLACK),
+                    store: StoreOp::Store,
+                },
+            })],
+            depth_stencil_attachment: None,
+            timestamp_writes: None,
+            occlusion_query_set: None,
+            multiview_mask: None,
+        });
+        pass.set_pipeline(&self.pipeline);
+        pass.set_bind_group(0, bind_group, &[]);
+        pass.draw(0..3, 0..1);
+    }
 }
 
 /// What a render call did with the frame it was handed.
@@ -1773,6 +1925,25 @@ impl FrameOutcome {
         presented: false,
         atlas_stale: false,
     };
+}
+
+/// How a frame's sRGB values are encoded for the display that shows them.
+///
+/// The passes draw sRGB values, and a display decodes what it receives with
+/// its own transfer function. An sRGB display decodes at gamma 2.2, where the
+/// sRGB curve is piecewise, so dark values show darker than their hex means.
+///
+/// See also:
+/// - [`GpuContext::set_display_transfer`] to choose one for a context.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum DisplayTransfer {
+    /// Write the values as drawn.
+    #[default]
+    None,
+    /// Decode each channel with the piecewise sRGB curve and encode it at gamma
+    /// 2.2, which a display that decodes at 2.2 needs to show the light the
+    /// sRGB values mean. A Chromium browser presents a hex color this way.
+    Gamma22,
 }
 
 /// The GPU handles one window's context was built on, for a second window to
@@ -2035,6 +2206,7 @@ impl GpuContext {
             queue,
             view_format,
             renderer,
+            transfer: None,
             perf: FrameProfiler::new(),
             #[cfg(feature = "perf")]
             show_perf_hud: false,
@@ -2112,6 +2284,7 @@ impl GpuContext {
             queue: shared.queue.clone(),
             view_format,
             renderer,
+            transfer: None,
             perf: FrameProfiler::new(),
             #[cfg(feature = "perf")]
             show_perf_hud: false,
@@ -2157,6 +2330,7 @@ impl GpuContext {
             queue: shared.queue.clone(),
             view_format: OFFSCREEN_FORMAT,
             renderer,
+            transfer: None,
             perf: FrameProfiler::new(),
             #[cfg(feature = "perf")]
             show_perf_hud: false,
@@ -2263,6 +2437,23 @@ impl GpuContext {
         self.renderer.set_cursor_fill(fill);
     }
 
+    /// Encode the frames from the next draw on for the display, as `transfer`
+    /// names it.
+    ///
+    /// [`DisplayTransfer::Gamma22`] costs one full-screen pass a frame and a
+    /// staging texture of the target's size. [`DisplayTransfer::None`] frees
+    /// both.
+    pub fn set_display_transfer(&mut self, transfer: DisplayTransfer) {
+        match transfer {
+            DisplayTransfer::None => self.transfer = None,
+            DisplayTransfer::Gamma22 => {
+                if self.transfer.is_none() {
+                    self.transfer = Some(TransferPass::new(&self.device, self.view_format));
+                }
+            },
+        }
+    }
+
     /// Draw a frame of `grid` to the target. `cursor` is the cursor's
     /// position in fractional cell coordinates, or `None` when it is hidden.
     /// `scroll` carries the eased whole-grid and scroll-region offsets;
@@ -2292,6 +2483,7 @@ impl GpuContext {
 
         let Some(Acquired {
             view,
+            display,
             present,
             resized,
         }) = self.acquire()
@@ -2325,6 +2517,14 @@ impl GpuContext {
                 &samples,
                 resolution,
             );
+        }
+
+        if let (Some(display), Some(transfer)) = (&display, &self.transfer) {
+            let mut encoder = self
+                .device
+                .create_command_encoder(&CommandEncoderDescriptor::default());
+            transfer.record(&mut encoder, display);
+            self.queue.submit([encoder.finish()]);
         }
 
         self.perf.mark_submitted();
@@ -2390,6 +2590,7 @@ impl GpuContext {
 
         let Some(Acquired {
             view,
+            display,
             present,
             resized,
         }) = self.acquire()
@@ -2485,6 +2686,10 @@ impl GpuContext {
                 multiview_mask: None,
             });
             self.renderer.record_hud_over(&mut render_pass);
+        }
+
+        if let (Some(display), Some(transfer)) = (&display, &self.transfer) {
+            transfer.record(&mut encoder, display);
         }
 
         self.renderer
@@ -2663,36 +2868,47 @@ impl GpuContext {
     /// presents after the record, and adopts the drawable's size when it moved.
     /// An outdated or lost surface re-configures, so the next frame recovers.
     /// An offscreen target hands out the view of its texture every time.
+    ///
+    /// With a display transfer set, the frame records into its staging texture
+    /// at the target's size, and the target's view rides along for the transfer.
     fn acquire(&mut self) -> Option<Acquired> {
-        let drawable = match &mut self.target {
-            Target::Offscreen { view, .. } => {
-                return Some(Acquired {
-                    view: view.clone(),
-                    present: None,
-                    resized: false,
+        let (target, present, resized) = match &mut self.target {
+            Target::Offscreen { view, .. } => (view.clone(), None, false),
+            Target::Surface { surface, config } => {
+                let drawable = match surface.get_current_texture() {
+                    CurrentSurfaceTexture::Success(frame)
+                    | CurrentSurfaceTexture::Suboptimal(frame) => frame,
+                    CurrentSurfaceTexture::Outdated | CurrentSurfaceTexture::Lost => {
+                        surface.configure(&self.device, config);
+                        return None;
+                    },
+                    CurrentSurfaceTexture::Timeout
+                    | CurrentSurfaceTexture::Occluded
+                    | CurrentSurfaceTexture::Validation => return None,
+                };
+
+                let resized =
+                    self.adopt_drawable_size(drawable.texture.width(), drawable.texture.height());
+                let view = drawable.texture.create_view(&TextureViewDescriptor {
+                    format: Some(self.view_format),
+                    ..Default::default()
                 });
-            },
-            Target::Surface { surface, config } => match surface.get_current_texture() {
-                CurrentSurfaceTexture::Success(frame)
-                | CurrentSurfaceTexture::Suboptimal(frame) => frame,
-                CurrentSurfaceTexture::Outdated | CurrentSurfaceTexture::Lost => {
-                    surface.configure(&self.device, config);
-                    return None;
-                },
-                CurrentSurfaceTexture::Timeout
-                | CurrentSurfaceTexture::Occluded
-                | CurrentSurfaceTexture::Validation => return None,
+                (view, Some(drawable), resized)
             },
         };
 
-        let resized = self.adopt_drawable_size(drawable.texture.width(), drawable.texture.height());
-        let view = drawable.texture.create_view(&TextureViewDescriptor {
-            format: Some(self.view_format),
-            ..Default::default()
-        });
+        let (width, height) = self.size();
+        let (view, display) = match self.transfer.as_mut() {
+            Some(transfer) => (
+                transfer.staged_view(&self.device, width, height),
+                Some(target),
+            ),
+            None => (target, None),
+        };
         Some(Acquired {
             view,
-            present: Some(drawable),
+            display,
+            present,
             resized,
         })
     }
@@ -2949,9 +3165,9 @@ pub(crate) fn offscreen_texture(
 mod tests {
     use super::{
         build_font_system, clamp_scissor, covered_rects, needs_configure, pool_cursor_cell,
-        surface_formats, CommandEncoderDescriptor, CursorLayer, FontConfig, FontSystem, Frame,
-        FrameOutcome, GpuContext, PoolComposite, Renderer, SharedFonts, SharedGpu,
-        SurfaceColorSpace, SurfaceConfiguration, TextureFormat, MAX_COVERED,
+        surface_formats, CommandEncoderDescriptor, CursorLayer, DisplayTransfer, FontConfig,
+        FontSystem, Frame, FrameOutcome, GpuContext, PoolComposite, Renderer, SharedFonts,
+        SharedGpu, SurfaceColorSpace, SurfaceConfiguration, TextureFormat, MAX_COVERED,
     };
     use crate::test_support::{
         self, pixel, read_back, require_headless_device, require_headless_gpu, still_frame,
@@ -3781,6 +3997,85 @@ mod tests {
             ),
             "the frame lands, with the red cell beside its ground-colored neighbor",
         );
+    }
+
+    /// A gamma 2.2 transfer re-encodes the drawn sRGB values as a Chromium
+    /// browser presents them for a display that decodes at 2.2. The dark pane
+    /// and ground read as a capture of the browser read them, through the
+    /// pooled path too. Without the transfer they land as drawn, and a resized
+    /// target lifts them again through a rebuilt staging texture.
+    #[test]
+    fn a_gamma22_transfer_lifts_dark_srgb_values_as_a_browser_does() {
+        let (ground, pane) = (Rgb::new(0x12, 0x14, 0x18), Rgb::new(0x17, 0x19, 0x1e));
+        let mut context = offscreen_context(&require_headless_gpu(), [256, 128], ground);
+        let grid = |context: &GpuContext| {
+            let (rows, cols) = context.grid_size();
+            let mut grid = filled_grid(rows, cols, ground);
+            grid.get_mut(0, 0).bg = pane;
+            grid
+        };
+        let read = |context: &GpuContext| {
+            let shot = context
+                .read_back()
+                .expect("an offscreen context reads back");
+            let width = context.size().0;
+            [
+                pixel(&shot, width, 1, 1),
+                pixel(&shot, width, CELL[0] + 1, 1),
+            ]
+        };
+        let drawn = |context: &mut GpuContext| {
+            let cells = grid(context);
+            draw_still(context, &cells);
+            read(context)
+        };
+
+        context.set_display_transfer(DisplayTransfer::Gamma22);
+        let lifted = drawn(&mut context);
+        let pooled = {
+            let cells = grid(&context);
+            let (full, none) = (Damage::Full, Damage::Partial(Vec::new()));
+            context.render_with_pools(&cells, still_frame(&full, &none), &[], &[], None);
+            read(&context)
+        };
+        context.set_display_transfer(DisplayTransfer::None);
+        let plain = drawn(&mut context);
+        context.set_display_transfer(DisplayTransfer::Gamma22);
+        context.resize(300, 64);
+        let resized = drawn(&mut context);
+
+        let lifted_cells = [[0x1d, 0x1f, 0x23], [0x19, 0x1b, 0x1e]];
+        assert_eq!(
+            [lifted, pooled, plain, resized],
+            [
+                lifted_cells,
+                lifted_cells,
+                [[0x17, 0x19, 0x1e], [0x12, 0x14, 0x18]],
+                lifted_cells,
+            ],
+            "the pane and its ground neighbor, lifted, pooled, plain, and resized",
+        );
+    }
+
+    /// The transfer's curve maps the bytes of the measured colors to the bytes
+    /// a capture of the browser read, and keeps black and white.
+    #[test]
+    fn gamma22_from_srgb_matches_the_measured_browser_values() {
+        let byte = |value: u8| (gamma22_from_srgb(f32::from(value) / 255.0) * 255.0).round() as u8;
+        assert_eq!(
+            [0x00, 0x12, 0x17, 0x1e, 0xff].map(byte),
+            [0x00, 0x19, 0x1d, 0x23, 0xff],
+        );
+    }
+
+    /// The CPU twin of the transfer shader's curve: the piecewise sRGB decode,
+    /// then the gamma 2.2 encode.
+    fn gamma22_from_srgb(value: f32) -> f32 {
+        let linear = match value <= 0.04045 {
+            true => value / 12.92,
+            false => ((value + 0.055) / 1.055).powf(2.4),
+        };
+        linear.powf(1.0 / 2.2)
     }
 
     /// A 300-pixel row is 1200 bytes, which the copy pads to a 1280-byte
