@@ -1016,20 +1016,35 @@ pub(crate) fn themed_fg(theme: &crate::theme::Theme) -> Color {
         .unwrap_or(Color::Reset)
 }
 
-/// The background of the window ground, for a caller that has nothing more
-/// specific to fall back to.
+/// The background the theme gives the window ground, or `None` for a theme
+/// that sets no ground apart from the panes.
 ///
-/// The ground is `ui.surface.chrome`, and it shows in the gaps between panes,
-/// since each pane clears its content to [`surface_blank`]. A theme with no
-/// chrome surface grounds the window on the editor surface, `ui.background`.
-pub(crate) fn themed_bg(theme: &crate::theme::Theme) -> Color {
+/// The ground is `ui.surface.ground`. A theme that sets only
+/// `ui.surface.chrome` grounds the window on the chrome, so one color serves
+/// as both its ground and the ink of its chips.
+pub(crate) fn ground_surface(theme: &crate::theme::Theme) -> Option<Color> {
     [
+        crate::theme::scope::UI_SURFACE_GROUND,
         crate::theme::scope::UI_SURFACE_CHROME,
-        crate::theme::scope::UI_BACKGROUND,
     ]
     .into_iter()
     .find_map(|scope| theme.try_get(scope).and_then(|s| s.bg))
-    .unwrap_or(Color::Reset)
+}
+
+/// The background of the window ground, for a caller that has nothing more
+/// specific to fall back to.
+///
+/// The ground is [`ground_surface`], and it shows in the gaps between panes,
+/// since each pane clears its content to [`surface_blank`]. A theme with no
+/// ground surface grounds the window on the editor surface, `ui.background`.
+pub(crate) fn themed_bg(theme: &crate::theme::Theme) -> Color {
+    ground_surface(theme)
+        .or_else(|| {
+            theme
+                .try_get(crate::theme::scope::UI_BACKGROUND)
+                .and_then(|s| s.bg)
+        })
+        .unwrap_or(Color::Reset)
 }
 
 /// The blank cell a pane's content starts from, which is the themed text color
@@ -3110,19 +3125,31 @@ mod themed_blank_tests {
         );
     }
 
-    /// The window ground is the chrome surface where a theme sets one, and the
-    /// editor surface where it does not.
+    /// The window ground is the ground surface where a theme sets one, the
+    /// chrome surface where it sets only that, and the editor surface where it
+    /// sets neither.
     #[test]
-    fn the_themed_blank_takes_the_chrome_surface_over_the_background() {
+    fn the_themed_blank_takes_the_ground_then_the_chrome_then_the_background() {
+        let ground = load_theme(
+            r##"theme t {
+                ui.background.bg = "#102030";
+                ui.surface.chrome.bg = "#010203";
+                ui.surface.ground.bg = "#040506";
+            }"##,
+        );
         let chrome = load_theme(
             r##"theme t { ui.background.bg = "#102030"; ui.surface.chrome.bg = "#010203"; }"##,
         );
         let plain = load_theme(r##"theme t { ui.background.bg = "#102030"; }"##);
 
         assert_eq!(
-            [themed_blank(&chrome).bg, themed_blank(&plain).bg],
-            [Color::Rgb(1, 2, 3), Color::Rgb(0x10, 0x20, 0x30)],
-            "the chrome surface, then the background for a theme with no chrome",
+            [&ground, &chrome, &plain].map(|theme| themed_blank(theme).bg),
+            [
+                Color::Rgb(4, 5, 6),
+                Color::Rgb(1, 2, 3),
+                Color::Rgb(0x10, 0x20, 0x30)
+            ],
+            "the ground surface, then the chrome, then the background",
         );
     }
 

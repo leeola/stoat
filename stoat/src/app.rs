@@ -4074,17 +4074,13 @@ impl Stoat {
     ///
     /// The island look needs the halo, a borderless backdrop panel that only
     /// stoatty draws, from [`BACKDROP_PANEL_PROTOCOL`] on. A plain terminal and
-    /// an older stoatty keep the flush layout. A theme with no RGB chrome surface
-    /// sets no ground apart from the panes, so it keeps the flush layout too.
+    /// an older stoatty keep the flush layout. A theme with no RGB ground
+    /// surface sets no ground apart from the panes, so it keeps the flush layout
+    /// too.
     pub(crate) fn islands_on(&self) -> bool {
         self.stoatty
             && self.stoatty_protocol >= BACKDROP_PANEL_PROTOCOL
-            && paint::style_rgb(
-                self.theme
-                    .try_get(crate::theme::scope::UI_SURFACE_CHROME)
-                    .and_then(|style| style.bg),
-            )
-            .is_some()
+            && paint::style_rgb(crate::render::ground_surface(&self.theme)).is_some()
     }
 
     /// The chrome columns between each side of the window and the pane tree,

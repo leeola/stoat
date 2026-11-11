@@ -147,9 +147,10 @@ ui.type.ui.scale = 240;
 | `ui.type.mode`     | 208                              |
 
 The island frame is flush with a pane's cells, at inset_x 0. Inside stoatty, a
-theme that sets `ui.surface.chrome` lays the panes out one chrome column in from
-each side of the window. That whole-cell margin carries the gap around a pane,
-and an inset hides the outer pixels of the pane's first and last column.
+theme that sets `ui.surface.ground` or `ui.surface.chrome` lays the panes out
+one chrome column in from each side of the window. That whole-cell margin
+carries the gap around a pane, and an inset hides the outer pixels of the
+pane's first and last column.
 
 The popout cards over the status bar draw in the `popout` frame. Every modal
 and cursor popup, the key hints box, the docks, and the run pane draw in the
@@ -208,11 +209,14 @@ The typed UI scopes, by group (syntax scopes are open-ended):
 
 - `ui.background` -- the editor's base background, which every pane's content
   clears to.
+- `ui.surface.ground` -- the window ground that every frame blanks to, which
+  shows in the window margins and the gaps between panes (background). A theme
+  that leaves it unset grounds the window on `ui.surface.chrome`, and a theme
+  that sets neither grounds it on `ui.background`.
 - `ui.surface.chrome`, `ui.surface.overlay` -- the surface tokens for the window
   chrome and for floating overlays (foreground the stroke, background the
-  fill). The background of `ui.surface.chrome` is the window ground that every
-  frame blanks to, which shows in the gaps between panes. A theme that leaves
-  it unset grounds the window on `ui.background`.
+  fill). The background of `ui.surface.chrome` inks the chips that sit on the
+  ground, such as the git status chip, and seeds the tints of the badges.
 - `ui.surface.raised` -- the fill of a row raised inside a floating box, such
   as the hover popup's footer of goto keys. A theme that leaves it unset
   fills the row with the box's own fill.

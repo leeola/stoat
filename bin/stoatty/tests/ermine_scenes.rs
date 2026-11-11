@@ -30,6 +30,7 @@ const FONT_SIZE: u32 = 15;
 const ACCENT: [u8; 3] = [0x7f, 0xb0, 0xff];
 const BASE: [u8; 3] = [0x17, 0x19, 0x1e];
 const CHROME: [u8; 3] = [0x12, 0x14, 0x18];
+const GROUND: [u8; 3] = [0x0c, 0x0e, 0x11];
 const HOVER: [u8; 3] = [0x2c, 0x30, 0x39];
 const OVERLAY: [u8; 3] = [0x25, 0x28, 0x30];
 const RAISED: [u8; 3] = [0x1e, 0x21, 0x27];
@@ -73,7 +74,7 @@ type PixelRect = (u32, u32, u32, u32);
 /// The normal-mode chip fills with the accent one pixel inside the status
 /// row's top and bottom edges, and a blank text cell with the base surface.
 ///
-/// The chip's cell keeps the row's chrome in its top and bottom pixel rows,
+/// The chip's cell keeps the row's ground in its top and bottom pixel rows,
 /// as the Editor board draws a 16 px chip on its row.
 #[test]
 fn the_basic_diff_scene_draws_on_the_ermine_palette() {
@@ -89,7 +90,7 @@ fn the_basic_diff_scene_draws_on_the_ermine_palette() {
         "mode_chip",
     );
     for (edge, what) in [(y, "mode_chip_top"), (y + height - 1, "mode_chip_bottom")] {
-        expect_region(&shot, &mut home, (x, edge, width, 1), CHROME, what);
+        expect_region(&shot, &mut home, (x, edge, width, 1), GROUND, what);
     }
     expect_region(
         &shot,
@@ -301,7 +302,7 @@ fn the_split_diff_s_status_halves_take_their_side_tints() {
 
     let (x, y, _, height) = cell_rect(76, 49, 1, 1);
     let whole =
-        [(0, 4, SIDE_BASE), (4, 1, CHROME), (5, 4, SIDE_TARGET)].map(|(dx, width, color)| {
+        [(0, 4, SIDE_BASE), (4, 1, GROUND), (5, 4, SIDE_TARGET)].map(|(dx, width, color)| {
             pixels_of(&shot, (x + dx, y, width, height), color) == (width * height) as usize
         });
     if whole != [true; 3] {
@@ -610,7 +611,7 @@ fn the_changes_view_folds_unchanged_lines_into_a_hatched_row() {
 /// island, and a blank text cell inside them stays on the base surface.
 ///
 /// Each margin column is 9 px wide, and the island reaches 1 px into it. On
-/// row 4, pixel columns 0 to 7 keep the chrome ground and column 8 takes the
+/// row 4, pixel columns 0 to 7 keep the ground and column 8 takes the
 /// base surface. On the right the island takes the minimap band and reaches
 /// pixel column 1431, the margin column's first, so 1432 to 1439 keep the
 /// ground.
@@ -634,8 +635,8 @@ fn the_panes_sit_eight_pixels_in_from_each_window_edge() {
     };
     let (left, right) = (row(0, 9), row(1431, 1440));
     let want = (
-        [vec![CHROME; 8], vec![BASE]].concat(),
-        [vec![BASE], vec![CHROME; 8]].concat(),
+        [vec![GROUND; 8], vec![BASE]].concat(),
+        [vec![BASE], vec![GROUND; 8]].concat(),
     );
     if (left.clone(), right.clone()) != want {
         let frame = keep_frame(&shot, &mut home, "window_margins");
@@ -653,7 +654,7 @@ fn the_panes_sit_eight_pixels_in_from_each_window_edge() {
 /// them.
 ///
 /// The gap column, 76, is 9 px wide. The left island reaches its first pixel
-/// column, 684, and the right island none of it, so 685 to 692 keep the chrome
+/// column, 684, and the right island none of it, so 685 to 692 keep the
 /// ground. Pixel row 189 lies on row 10, past the file's lines, and the check
 /// reads no pixel of the right pane's own cells, where a changed row's gutter
 /// lane draws.
@@ -668,7 +669,7 @@ fn side_by_side_panes_stand_eight_pixels_apart() {
     );
     let gap: Vec<[u8; 3]> = (684..693).map(|x| pixel(&shot, x, 189)).collect();
 
-    if gap != [vec![BASE], vec![CHROME; 8]].concat() {
+    if gap != [vec![BASE], vec![GROUND; 8]].concat() {
         let frame = keep_frame(&shot, &mut home, "side_by_side_gap");
         panic!(
             "pixel row 189 reads {:?} across the gap column, not the left island's last pixel \
@@ -686,7 +687,7 @@ fn side_by_side_panes_stand_eight_pixels_apart() {
 /// than the base surface and darker on each row toward the island's bottom
 /// edge, where the flat ground keeps one color. One of those rows equals the
 /// ground's color, so the check reads the deepening and not a color. Rows 437
-/// to 444 keep the chrome ground, and the lower island's rows 445 to 449 take
+/// to 444 keep the ground, and the lower island's rows 445 to 449 take
 /// the base surface. Pixel column 720 lies in the middle of both panes.
 #[test]
 fn stacked_panes_stand_eight_pixels_apart() {
@@ -708,7 +709,7 @@ fn stacked_panes_stand_eight_pixels_apart() {
             .windows(2)
             .all(|pair| brightness(pair[1]) < brightness(pair[0]));
 
-    if !darker || ground != [CHROME; 8] || lower != [BASE; 5] {
+    if !darker || ground != [GROUND; 8] || lower != [BASE; 5] {
         let frame = keep_frame(&shot, &mut home, "stacked_gap");
         panic!(
             "pixel column 720 reads {:?}, {:?}, and {:?} down the gap row, not the upper island's \
@@ -726,7 +727,7 @@ fn stacked_panes_stand_eight_pixels_apart() {
 ///
 /// The plain editor's island starts at pixel column 8, a pixel into the
 /// margin, and at pixel row 18, under the tab bar, so its top-left arc centers
-/// on (14, 24). The arc leaves (8, 18) and (9, 18) on the chrome ground. The
+/// on (14, 24). The arc leaves (8, 18) and (9, 18) on the ground. The
 /// second lies inside the pane's first cell, where only the ground the island
 /// paints over its corner clears the cell. The arc leaves (16, 18) and
 /// (8, 26) whole on the base surface.
@@ -736,7 +737,7 @@ fn an_island_rounds_its_corners_against_the_ground() {
     let shot = settled_frame(home.path(), "basic-diff", "unstaged.txt", "");
     let corner = [(8, 18), (9, 18), (16, 18), (8, 26)].map(|(x, y)| pixel(&shot, x, y));
 
-    if corner != [CHROME, CHROME, BASE, BASE] {
+    if corner != [GROUND, GROUND, BASE, BASE] {
         let frame = keep_frame(&shot, &mut home, "island_corner");
         panic!(
             "the island's top-left corner reads {:?} at (8, 18), (9, 18), (16, 18), and (8, 26), \
@@ -751,7 +752,7 @@ fn an_island_rounds_its_corners_against_the_ground() {
 /// on the margin beside it.
 ///
 /// The island reaches 1 px into the one-column margin and stops 8 px from the
-/// window's edge, so pixel column 3 keeps the chrome ground. Row 48 is the
+/// window's edge, so pixel column 3 keeps the ground. Row 48 is the
 /// pane's last content row, above the status row. The band rises twelve pixels
 /// from the pane's bottom edge, so row 47 keeps the base surface. Row 48's last
 /// pixel row reads the boards' bottom row within one in every channel, and the
@@ -771,7 +772,7 @@ fn the_island_s_bottom_band_darkens_inside_the_pane() {
         &shot,
         &mut home,
         (3, y, 1, height),
-        CHROME,
+        GROUND,
         "margin_beside_the_pane",
     );
     expect_region(
@@ -806,8 +807,8 @@ fn the_island_s_bottom_band_darkens_inside_the_pane() {
     );
 }
 
-/// The status row sits on chrome, and its hairline takes the bar's own color,
-/// so no line shows above the bar. Its branch glyph draws as a glyph.
+/// The status row sits on the ground, and its hairline takes the bar's own
+/// color, so no line shows above the bar. Its branch glyph draws as a glyph.
 ///
 /// The hairline is the top pixel row of the status row, read here over a
 /// blank cell of the bar. The branch glyph, U+2387, draws in column 117, the
@@ -815,7 +816,7 @@ fn the_island_s_bottom_band_darkens_inside_the_pane() {
 /// through many colors there, and the empty box that a missing glyph draws
 /// keeps to a few along its straight edges.
 #[test]
-fn the_status_row_sits_on_chrome_with_no_hairline() {
+fn the_status_row_sits_on_the_ground_with_no_hairline() {
     let mut home = support::scratch_home();
     let shot = settled_frame(home.path(), "basic-diff", "unstaged.txt", "");
     let (x, y, width, _) = cell_rect(80, ROWS - 1, 1, 1);
@@ -834,20 +835,20 @@ fn the_status_row_sits_on_chrome_with_no_hairline() {
         &shot,
         &mut home,
         cell_rect(20, ROWS - 1, 1, 1),
-        CHROME,
+        GROUND,
         "status_text_cell",
     );
     expect_region(
         &shot,
         &mut home,
         (x, y, width, 1),
-        CHROME,
+        GROUND,
         "status_hairline",
     );
 }
 
-/// The tab bar sits on chrome over a lone tab, with the active tab on the base
-/// surface, its top corners rounded off, under a 2 px accent edge.
+/// The tab bar sits on the ground over a lone tab, with the active tab on the
+/// base surface, its top corners rounded off, under a 2 px accent edge.
 ///
 /// The bar leads with the workspace name, whose length follows the session's
 /// random name, so the check reads row 0 as runs of color rather than at a
@@ -856,11 +857,11 @@ fn the_status_row_sits_on_chrome_with_no_hairline() {
 /// out of that column's top pixel. Column 8 of the tab lies past the 6 px arc,
 /// so its top two pixels show the accent edge and its third the base.
 #[test]
-fn the_tab_bar_sits_on_chrome_with_the_active_tab_on_base() {
+fn the_tab_bar_sits_on_the_ground_with_the_active_tab_on_base() {
     let mut home = support::scratch_home();
     let shot = settled_frame(home.path(), "many-files", "src/alpha.txt", "");
 
-    expect_row_runs(&shot, &mut home, 0, &[CHROME, BASE, CHROME], "tab_bar");
+    expect_row_runs(&shot, &mut home, 0, &[GROUND, BASE, GROUND], "tab_bar");
 
     let (_, top, _, height) = cell_rect(0, 0, 1, 1);
     let pixel = |x: u32, y: u32| {
@@ -903,7 +904,7 @@ fn the_tab_bar_sits_on_chrome_with_the_active_tab_on_base() {
 
 /// The split diff's tab bar ends in its layout chips as the DiffSplit board
 /// draws them. The focused `files` chip is a box on the hover surface one
-/// pixel inside the bar's row, and the `changes` chip is text on the chrome.
+/// pixel inside the bar's row, and the `changes` chip is text on the ground.
 ///
 /// The bar ends in a pad cell at column 159, so the `changes` chip takes
 /// columns 150 to 158 and the `files` chip columns 143 to 149.
@@ -926,7 +927,7 @@ fn the_tab_bar_boxes_the_focused_layout_s_chip_inside_its_row() {
         .map(|col| [(0, 1), (1, height - 2), (height - 1, 1)].map(|rows| band(col, rows)))
         .collect();
     let changes: Vec<[u8; 3]> = (150..159).map(|col| band(col, (0, height))).collect();
-    if files != [[CHROME, HOVER, CHROME]; 7] || changes != [CHROME; 9] {
+    if files != [[GROUND, HOVER, GROUND]; 7] || changes != [GROUND; 9] {
         let frame = keep_frame(&shot, &mut home, "tab_bar_layout_chips");
         panic!(
             "the files chip's columns read {:?} on their first, middle, and last pixel rows, \

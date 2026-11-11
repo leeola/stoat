@@ -87,11 +87,11 @@ bright_cyan = "#6ed5de"
 bright_white = "#fafafa"
 
 # The terminal palette of the Ermine design language, and the default. The
-# background is the chrome surface that shows in the gaps between a stoat
+# background is the window ground that shows in the gaps between a stoat
 # child's panes. The design sets no bright ramp, so the bright colors other
 # than bright_black and bright_white are the zed ones above.
 [themes.ermine_night]
-background = "#121418"
+background = "#0c0e11"
 foreground = "#dfe2e8"
 cursor = "#dfe2e8"
 black = "#17191e"

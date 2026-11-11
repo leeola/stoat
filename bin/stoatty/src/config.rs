@@ -675,7 +675,7 @@ mod tests {
 
         assert_eq!(
             (config.theme.as_str(), config.resolve_theme().background),
-            ("ermine_night", Rgb::new(0x12, 0x14, 0x18)),
+            ("ermine_night", Rgb::new(0x0c, 0x0e, 0x11)),
         );
     }
 
@@ -691,7 +691,7 @@ mod tests {
             config.resolve_theme(),
             Theme {
                 foreground: rgb(0xdfe2e8),
-                background: rgb(0x121418),
+                background: rgb(0x0c0e11),
                 cursor: rgb(0xdfe2e8),
                 ansi: [
                     0x17191e, 0xf2777f, 0x8fd18a, 0xe8bd6a, 0x7fb0ff, 0xc59af0, 0x6cc7d6, 0xa3a9b5,

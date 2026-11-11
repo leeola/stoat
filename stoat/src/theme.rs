@@ -744,6 +744,13 @@ pub enum ThemeError {
 pub mod scope {
     pub const UI_BACKGROUND: &str = "ui.background";
     pub const UI_SURFACE_CHROME: &str = "ui.surface.chrome";
+
+    /// The window ground, the background in the window margins and the gaps
+    /// between the islands.
+    ///
+    /// A theme that leaves it unset grounds the window on [`UI_SURFACE_CHROME`],
+    /// which also inks the chips that sit on the ground.
+    pub const UI_SURFACE_GROUND: &str = "ui.surface.ground";
     pub const UI_SURFACE_OVERLAY: &str = "ui.surface.overlay";
     pub const UI_SURFACE_RAISED: &str = "ui.surface.raised";
 
@@ -1579,6 +1586,7 @@ mod tests {
             (
                 theme.get(scope::UI_BACKGROUND).bg,
                 theme.get(scope::UI_SURFACE_CHROME).bg,
+                theme.get(scope::UI_SURFACE_GROUND).bg,
                 theme.get(scope::UI_STATUSLINE_NORMAL).fg,
                 theme.get(scope::UI_TABBAR_INACTIVE).fg,
                 theme.panel(PanelRole::Island),
@@ -1590,6 +1598,7 @@ mod tests {
             (
                 Some(rgb(0x17191e)),
                 Some(rgb(0x121418)),
+                Some(rgb(0x0c0e11)),
                 Some(rgb(0x7fb0ff)),
                 Some(rgb(0x838a98)),
                 spec(6, PanelShadow::Tucked, 0, false),

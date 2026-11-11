@@ -418,11 +418,7 @@ pub(crate) fn render_pane(
 /// which the renderer paints over the corner arcs inside the pane's cells.
 pub(crate) fn render_island(content_area: Rect, frame: FrameCtx<'_>, scene: &mut ApcScene) {
     let theme = frame.theme;
-    let Some(chrome) = style_rgb(
-        theme
-            .try_get(crate::theme::scope::UI_SURFACE_CHROME)
-            .and_then(|style| style.bg),
-    ) else {
+    let Some(ground) = style_rgb(crate::render::ground_surface(theme)) else {
         return;
     };
     let area = match frame.minimap_band {
@@ -447,7 +443,7 @@ pub(crate) fn render_island(content_area: Rect, frame: FrameCtx<'_>, scene: &mut
     );
     Panel {
         style: BorderStyle::None_,
-        border: chrome,
+        border: ground,
         corner_radius: role.corner_radius,
         fill: surface,
         shadow: role.shadow,

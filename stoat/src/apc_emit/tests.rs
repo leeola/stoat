@@ -2834,7 +2834,7 @@ fn a_detached_diff_view_s_row_names_its_sides_at_the_divider() {
     let halves = vec![
         (rgb(0x7fb0ff), 5),
         (rgb(0x2a1d20), 54),
-        (rgb(0x121418), 1),
+        (rgb(0x0c0e11), 1),
         (rgb(0x1d2a1f), 60),
     ];
     let row = |base: &str| {

@@ -7262,7 +7262,7 @@ mod tests {
         });
 
         let rgb = |hex: u32| Color::Rgb((hex >> 16) as u8, (hex >> 8) as u8, hex as u8);
-        let expected = [rgb(0x2a1d20), rgb(0x121418), rgb(0x1d2a1f)];
+        let expected = [rgb(0x2a1d20), rgb(0x0c0e11), rgb(0x1d2a1f)];
         assert_eq!(fills, [expected, expected], "in both frames");
     }
 
@@ -7298,7 +7298,7 @@ mod tests {
             ),
             (
                 Some(7),
-                [rgb(0x2a1d20), rgb(0x121418), rgb(0x1d2a1f)],
+                [rgb(0x2a1d20), rgb(0x0c0e11), rgb(0x1d2a1f)],
                 vec![0, 56 * 16 + 7 - 6],
             ),
         );
@@ -7327,7 +7327,7 @@ mod tests {
             runs
         });
 
-        let expected = [0x7fb0ff, 0x121418, 0x2a1d20, 0x1d2a1f, 0x121418].map(rgb);
+        let expected = [0x7fb0ff, 0x0c0e11, 0x2a1d20, 0x1d2a1f, 0x0c0e11].map(rgb);
         assert_eq!(runs, [expected, expected].map(Vec::from), "in both frames");
     }
 
