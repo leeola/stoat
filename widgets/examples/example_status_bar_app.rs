@@ -244,8 +244,6 @@ fn render_frame(
     StatusBar {
         left: &left,
         boxes: &[],
-        dots: &[],
-        scales: &[],
         right: &right,
         scale: SCALES[state.scale],
         separator: SEPARATOR,

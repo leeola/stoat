@@ -8,19 +8,6 @@ use crate::{
 use ratatui::{buffer::Buffer, layout::Rect, widgets::StatefulWidget};
 use std::ops::Range;
 
-/// The width of a dot segment's square, in sixteenths of a cell.
-///
-/// A cell is half as wide as it is tall, so 6 sixteenths across and
-/// [`DOT_HEIGHT`] down draw a square.
-const DOT_WIDTH: u16 = 6;
-
-/// The height of a dot segment's square, in sixteenths of a cell.
-const DOT_HEIGHT: u16 = 3;
-
-/// How far down the row a dot segment's square starts, in sixteenths of a
-/// cell, which puts its center where a middle dot's glyph sits.
-const DOT_TOP: i16 = 7;
-
 /// A status bar composed of left- and right-anchored scaled text segments and a
 /// top hairline separator that reads across the background between them.
 ///
@@ -58,14 +45,6 @@ pub struct StatusBar<'a> {
     /// Runs of [`Self::left`] that each draw in one box of whole cells, in
     /// order and apart.
     pub boxes: &'a [SegmentBox],
-    /// The indices of the [`Self::left`] segments that draw as a small square
-    /// in their foreground in place of their text, centered across the text's
-    /// advance.
-    pub dots: &'a [usize],
-    /// The [`Self::left`] segments that draw at their own glyph size, each an
-    /// index and a size in 256ths of the cell size, in place of
-    /// [`Self::scale`].
-    pub scales: &'a [(usize, u16)],
     /// Segments packed right-to-left from the right edge, in slice order.
     pub right: &'a [StatusSegment<'a>],
     /// Glyph size in 256ths of the cell size.
@@ -154,7 +133,7 @@ impl StatusBar<'_> {
             self.boxes
                 .iter()
                 .map(|segment_box| segment_box.segments.clone()),
-            |index| segment_scale(self.scales, self.scale, index),
+            self.scale,
             limit,
         );
 
@@ -191,8 +170,7 @@ impl StatusBar<'_> {
                 },
                 LeftItem::Segment { index, x, text } => {
                     let seg = &self.left[index];
-                    let scale = segment_scale(self.scales, self.scale, index);
-                    let advance = advance(text, scale);
+                    let advance = advance(text, self.scale);
                     if !paneled.contains(&index) {
                         self.draw_backing(x, advance, seg.bg, area, buf, scene);
                     }
@@ -202,10 +180,7 @@ impl StatusBar<'_> {
                         bg: seg.bg,
                         bold: seg.bold,
                     };
-                    match self.dots.contains(&index) {
-                        true => self.draw_dot(x, advance, seg.fg, area, buf, scene),
-                        false => self.draw_run(x, &fitted, scale, area, buf, scene),
-                    }
+                    self.draw_run(x, &fitted, self.scale, area, buf, scene);
                     cursor = cursor.max(x + advance);
                 },
             }
@@ -299,41 +274,18 @@ impl StatusBar<'_> {
         }
         .render(area, buf, scene);
     }
-
-    /// Draw a dot segment's square in `color` in place of its glyph, centered
-    /// across the `advance` sixteenths at `x`.
-    fn draw_dot(
-        &self,
-        x: u16,
-        advance: u16,
-        color: [u8; 3],
-        area: Rect,
-        buf: &mut Buffer,
-        scene: &mut ApcScene,
-    ) {
-        Bar {
-            x: cells::signed_sixteenths(x + advance.saturating_sub(DOT_WIDTH) / 2),
-            y: DOT_TOP,
-            width: DOT_WIDTH,
-            height: DOT_HEIGHT,
-            color,
-        }
-        .render(area, buf, scene);
-    }
 }
 
 /// The extent of each box of `boxes` that a bar of left segments `texts`
 /// draws in `segments_width` cells, in sixteenths from the bar's left edge.
 ///
-/// A segment advances at its entry in `scales`, as [`StatusBar::scales`]
-/// gives it, or at `scale`. These are the boxes
+/// Each segment advances at `scale`. These are the boxes
 /// [`StatusBar::draw_components_within`] draws, so a press hit-tests against
 /// what is on screen. A box past the bar's edge has no entry, and one that the
 /// edge cuts ends there.
 pub fn box_spans(
     texts: &[&str],
     boxes: &[Range<usize>],
-    scales: &[(usize, u16)],
     scale: u16,
     segments_width: u16,
 ) -> Vec<Range<u16>> {
@@ -341,7 +293,7 @@ pub fn box_spans(
         texts.len(),
         |index| texts[index],
         boxes.iter().cloned(),
-        |index| segment_scale(scales, scale, index),
+        scale,
         cells::span_sixteenths(segments_width),
     )
     .into_iter()
@@ -357,7 +309,7 @@ pub fn box_spans(
 /// Lay out a left run of `count` segments in `limit` sixteenths, with each run
 /// of `boxes` in one box of whole cells.
 ///
-/// `text` gives each segment's text and `scale` the glyph size it advances at.
+/// `text` gives each segment's text, and every segment advances at `scale`.
 /// A plain segment packs at the cursor. A box starts on the next whole cell,
 /// spans the fewest whole cells that hold its run, and centers the run. A
 /// segment or a box that crosses `limit` is cut there and ends the layout.
@@ -365,7 +317,7 @@ fn layout_left<'t>(
     count: usize,
     text: impl Fn(usize) -> &'t str,
     boxes: impl Iterator<Item = Range<usize>>,
-    scale: impl Fn(usize) -> u16,
+    scale: u16,
     limit: u16,
 ) -> Vec<LeftItem<'t>> {
     let mut items = Vec::new();
@@ -375,7 +327,7 @@ fn layout_left<'t>(
     while index < count {
         let Some((box_index, run)) = boxes.next_if(|(_, run)| run.start == index) else {
             let full = text(index);
-            let fitted = clip_to_room(full, limit - cursor, scale(index));
+            let fitted = clip_to_room(full, limit - cursor, scale);
             if fitted.is_empty() && !full.is_empty() {
                 break;
             }
@@ -384,7 +336,7 @@ fn layout_left<'t>(
                 x: cursor,
                 text: fitted,
             });
-            cursor += advance(fitted, scale(index));
+            cursor += advance(fitted, scale);
             if fitted.len() < full.len() {
                 break;
             }
@@ -397,7 +349,7 @@ fn layout_left<'t>(
             break;
         }
         let natural = run.clone().fold(0u16, |sum, segment| {
-            sum.saturating_add(advance(text(segment), scale(segment)))
+            sum.saturating_add(advance(text(segment), scale))
         });
         let span = natural.div_ceil(16).saturating_mul(16);
         let end = start.saturating_add(span).min(limit);
@@ -409,7 +361,7 @@ fn layout_left<'t>(
         let mut x = start + (span - natural) / 2;
         for segment in run.clone() {
             let full = text(segment);
-            let fitted = clip_to_room(full, limit.saturating_sub(x), scale(segment));
+            let fitted = clip_to_room(full, limit.saturating_sub(x), scale);
             if fitted.is_empty() && !full.is_empty() {
                 return items;
             }
@@ -418,7 +370,7 @@ fn layout_left<'t>(
                 x,
                 text: fitted,
             });
-            x += advance(fitted, scale(segment));
+            x += advance(fitted, scale);
             if fitted.len() < full.len() {
                 return items;
             }
@@ -427,15 +379,6 @@ fn layout_left<'t>(
         index = run.end;
     }
     items
-}
-
-/// The glyph size of left segment `index`, which is its entry in `scales`, or
-/// `scale` for a segment with none.
-fn segment_scale(scales: &[(usize, u16)], scale: u16, index: usize) -> u16 {
-    scales
-        .iter()
-        .find(|&&(segment, _)| segment == index)
-        .map_or(scale, |&(_, own)| own)
 }
 
 /// Sixteenths a segment's `text` advances at `scale`.
@@ -466,7 +409,6 @@ mod tests {
     use super::{box_spans, SegmentBox, StatusBar, StatusSegment};
     use crate::{panel::Panel, ApcScene};
     use ratatui::{buffer::Buffer, layout::Rect};
-    use std::ops::Range;
     use stoatty_protocol::command::{
         encode_bar, encode_panel, encode_text_run, BarCommand, BorderStyle, Edge, PanelCommand,
         PanelShadow, TextRunCommand,
@@ -501,8 +443,6 @@ mod tests {
         let status = StatusBar {
             left: &left,
             boxes: &[],
-            dots: &[],
-            scales: &[],
             right: &[],
             scale: 160,
             separator: [60, 66, 77],
@@ -584,8 +524,6 @@ mod tests {
         let status = StatusBar {
             left: &[],
             boxes: &[],
-            dots: &[],
-            scales: &[],
             right: &right,
             scale: 160,
             separator: [60, 66, 77],
@@ -641,8 +579,6 @@ mod tests {
         let status = StatusBar {
             left: &[],
             boxes: &[],
-            dots: &[],
-            scales: &[],
             right: &right,
             scale: 160,
             separator: [60, 66, 77],
@@ -699,8 +635,6 @@ mod tests {
         let status = StatusBar {
             left: &left,
             boxes: &[],
-            dots: &[],
-            scales: &[],
             right: &[],
             scale: 160,
             separator: [60, 66, 77],
@@ -753,8 +687,6 @@ mod tests {
         let status = StatusBar {
             left: &left,
             boxes: &[],
-            dots: &[],
-            scales: &[],
             right: &[],
             scale: 160,
             separator: [60, 66, 77],
@@ -858,8 +790,6 @@ mod tests {
         let status = StatusBar {
             left: &left,
             boxes: &[],
-            dots: &[],
-            scales: &[],
             right: &right,
             scale: 160,
             separator: [60, 66, 77],
@@ -908,8 +838,6 @@ mod tests {
         let status = StatusBar {
             left: &[],
             boxes: &[],
-            dots: &[],
-            scales: &[],
             right: &[],
             scale: 160,
             separator: [60, 66, 77],
@@ -953,8 +881,6 @@ mod tests {
         let status = StatusBar {
             left: &left,
             boxes: &[],
-            dots: &[],
-            scales: &[],
             right: &right,
             scale: 160,
             separator: [60, 66, 77],
@@ -1031,8 +957,6 @@ mod tests {
         let status = StatusBar {
             left: &left,
             boxes: &[],
-            dots: &[],
-            scales: &[],
             right: &right,
             scale: 160,
             separator: [60, 66, 77],
@@ -1128,8 +1052,6 @@ mod tests {
             let status = StatusBar {
                 left: &left,
                 boxes: &boxes,
-                dots: &[],
-                scales: &[],
                 right: &[],
                 scale: 232,
                 separator: [60, 66, 77],
@@ -1208,10 +1130,9 @@ mod tests {
 
     /// A box after a plain segment starts on the next whole cell and centers
     /// its whole run. A box with a panel breaks the hairline and draws no
-    /// background bar for its segments, and a dot segment draws a square in
-    /// place of its glyph.
+    /// background bar for its segments.
     #[test]
-    fn a_box_aligns_its_run_and_a_dot_draws_a_square() {
+    fn a_box_aligns_its_run() {
         let segment = |text, fg, bg| StatusSegment {
             text,
             fg,
@@ -1231,8 +1152,6 @@ mod tests {
         let status = StatusBar {
             left: &left,
             boxes: &boxes,
-            dots: &[2],
-            scales: &[],
             right: &[],
             scale: 160,
             separator: [60, 66, 77],
@@ -1269,8 +1188,7 @@ mod tests {
         };
         // "a" advances 10 sixteenths at scale 160, so the box starts on cell 1.
         // Its run advances 20 + 10 + 10 = 40, so it takes three cells and starts
-        // 4 in: "bc" at 20, the dot's 10 from 40 with its square at 42, and "d"
-        // at 50.
+        // 4 in: "bc" at 20, "." at 40, and "d" at 50.
         let panel = encode_panel(&PanelCommand {
             top: 0,
             left: 1,
@@ -1298,7 +1216,7 @@ mod tests {
                 run(0, "a", [1, 1, 1]),
                 panel,
                 run(20, "bc", [2, 2, 2]),
-                bar(42, 7, 6, 3, [3, 3, 3]),
+                run(40, ".", [3, 3, 3]),
                 run(50, "d", [4, 4, 4]),
             ]
             .concat(),
@@ -1313,7 +1231,7 @@ mod tests {
         let texts = ["ab", "cde", "fghij", "k"];
         let boxes = [1..3, 3..4];
         let spans = |scale: u16, width: u16| {
-            box_spans(&texts, &boxes, &[], scale, width)
+            box_spans(&texts, &boxes, scale, width)
                 .into_iter()
                 .map(|span| (span.start, span.end))
                 .collect::<Vec<_>>()
@@ -1329,90 +1247,6 @@ mod tests {
                 vec![(32, 96)],
                 vec![],
             ],
-        );
-    }
-
-    /// A left segment with its own scale draws its run at that scale and
-    /// advances by it, so the box around it, the segments after it, and the
-    /// box's span all follow.
-    #[test]
-    fn a_segment_draws_and_advances_at_its_own_scale() {
-        let segment = |text, fg| StatusSegment {
-            text,
-            fg,
-            bg: [0, 0, 0],
-            bold: false,
-        };
-        let left = [
-            segment("ab", [1, 1, 1]),
-            segment("cd", [2, 2, 2]),
-            segment("e", [3, 3, 3]),
-        ];
-        let boxes = [SegmentBox {
-            segments: 0..2,
-            panels: Vec::new(),
-        }];
-        let scales = [(1, 80)];
-        let status = StatusBar {
-            left: &left,
-            boxes: &boxes,
-            dots: &[],
-            scales: &scales,
-            right: &[],
-            scale: 160,
-            separator: [60, 66, 77],
-            bg: [0, 0, 0],
-        };
-        let area = Rect::new(0, 0, 20, 1);
-        let mut buf = Buffer::empty(area);
-        let mut scene = ApcScene::new();
-        status.draw_components(area, &mut buf, &mut scene);
-
-        let run = |col: i16, text: &str, scale: u16, color: [u8; 3]| {
-            encode_text_run(&TextRunCommand {
-                col,
-                row: 0,
-                scale,
-                color,
-                bg: None,
-                bold: false,
-                follow: 0,
-                anchor: None,
-                text: text.to_owned(),
-            })
-        };
-        let hairline = encode_bar(&BarCommand {
-            x: 0,
-            y: 0,
-            width: 320,
-            height: 1,
-            color: [60, 66, 77],
-            occludes: false,
-            hatch: None,
-        });
-        let runs: Vec<Range<usize>> = boxes
-            .iter()
-            .map(|segment_box| segment_box.segments.clone())
-            .collect();
-        let spans: Vec<_> = box_spans(&["ab", "cd", "e"], &runs, &scales, 160, 20)
-            .into_iter()
-            .map(|span| (span.start, span.end))
-            .collect();
-        // "ab" advances 20 at scale 160 and "cd" 10 at 80, so the box takes two
-        // cells and starts its run 1 in, with "ab" at 1 and "cd" at 21. "e"
-        // follows the box at 32.
-        assert_eq!(
-            (scene.bytes(), spans),
-            (
-                &[
-                    hairline,
-                    run(1, "ab", 160, [1, 1, 1]),
-                    run(21, "cd", 80, [2, 2, 2]),
-                    run(32, "e", 160, [3, 3, 3]),
-                ]
-                .concat()[..],
-                vec![(0, 32)],
-            ),
         );
     }
 }

@@ -996,8 +996,6 @@ pub(crate) fn render_overlay_status(
         right,
         hairline: true,
         boxes: mode_chip_box(is_focused),
-        dots: Vec::new(),
-        small: Vec::new(),
     };
     render_status_runs(&[run], frame, buf, scene, None);
 }
@@ -1190,13 +1188,6 @@ struct StatusRun {
     /// Runs of left segments that a live scene draws in one box of whole
     /// cells each, such as the mode chip and a tab.
     boxes: Vec<RunBox>,
-    /// The left segments that a live scene draws as a small square in their
-    /// foreground in place of their text, such as the dot that joins a tab's
-    /// name to its tag.
-    dots: Vec<usize>,
-    /// The left segments that a live scene draws at [`TypeRole::Small`] in
-    /// place of [`TypeRole::Ui`], such as a tab's tag.
-    small: Vec<usize>,
 }
 
 /// A run of a [`StatusRun`]'s left segments that a live scene draws in one
@@ -1406,8 +1397,7 @@ pub(crate) struct StatusSceneCache {
 /// unset.
 ///
 /// A run's [`RunBox`]es reach the bar as [`SegmentBox`]es, each with its
-/// shape's panel in its first segment's background, and its dots as the
-/// bar's [`StatusBar::dots`].
+/// shape's panels in its first segment's background.
 ///
 /// With a `cache`, a repaint whose runs and colors all hold splices the
 /// recorded frame. Splicing is only sound because
@@ -1464,7 +1454,6 @@ fn render_status_runs(
 
     let start = scene.bytes().len();
     let scale = frame.theme.type_scale(TypeRole::Ui);
-    let small = frame.theme.type_scale(TypeRole::Small);
     let edge = style_rgb(
         frame
             .theme
@@ -1486,12 +1475,9 @@ fn render_status_runs(
                     }),
             })
             .collect();
-        let scales: Vec<(usize, u16)> = run.small.iter().map(|&index| (index, small)).collect();
         StatusBar {
             left,
             boxes: &boxes,
-            dots: &run.dots,
-            scales: &scales,
             right,
             scale,
             separator: if run.hairline { separator } else { *bg },
@@ -1575,12 +1561,8 @@ pub(crate) fn render_tab_bar(
         buf[(x, area.y)].set_char(' ').set_style(inactive);
     }
 
-    let TabSegments {
-        left,
-        boxes,
-        dots,
-        small,
-    } = tab_segments(ws, theme, frame.workspace_name, (active, inactive));
+    let TabSegments { left, boxes } =
+        tab_segments(ws, theme, frame.workspace_name, (active, inactive));
 
     // The right run packs from the bar's edge in slice order, so the chips
     // list from right to left after the pad that ends the bar.
@@ -1618,8 +1600,6 @@ pub(crate) fn render_tab_bar(
         right,
         hairline: true,
         boxes,
-        dots,
-        small,
     }];
     let rich = render_status_runs(&runs, frame, buf, scene, None);
     let scale = if rich {
@@ -1641,20 +1621,7 @@ pub(crate) fn render_tab_bar(
         .iter()
         .map(|run_box| run_box.segments.clone())
         .collect();
-    let scales: Vec<(usize, u16)> = match rich {
-        true => {
-            let small = theme.type_scale(TypeRole::Small);
-            runs[0].small.iter().map(|&index| (index, small)).collect()
-        },
-        false => Vec::new(),
-    };
-    spans.extend(status_bar::box_spans(
-        &texts,
-        &tabs,
-        &scales,
-        scale,
-        segments.width,
-    ));
+    spans.extend(status_bar::box_spans(&texts, &tabs, scale, segments.width));
 }
 
 /// The tab bar's left segments, the workspace name and then each tab, with
@@ -1663,10 +1630,6 @@ struct TabSegments {
     left: Vec<StatusSeg>,
     /// One box per tab, the active tab's a [`BoxShape::Tab`].
     boxes: Vec<RunBox>,
-    /// The dots that join each name to its tags.
-    dots: Vec<usize>,
-    /// The tags, which draw at [`TypeRole::Small`].
-    small: Vec<usize>,
 }
 
 /// The tab bar's left segments for `ws` under `workspace_name`, the active
@@ -1711,12 +1674,7 @@ fn tab_segments(
         });
     }
 
-    TabSegments {
-        left,
-        boxes,
-        dots: Vec::new(),
-        small: Vec::new(),
-    }
+    TabSegments { left, boxes }
 }
 
 /// Draw the hairline that parts the workspace name from the tabs in the tab
@@ -2449,8 +2407,6 @@ fn status_segments(
                 right: base_right,
                 hairline: false,
                 boxes: mode_chip_box(chip_end.is_some()),
-                dots: Vec::new(),
-                small: Vec::new(),
             },
             StatusRun {
                 area: target,
@@ -2460,8 +2416,6 @@ fn status_segments(
                 right,
                 hairline: false,
                 boxes: Vec::new(),
-                dots: Vec::new(),
-                small: Vec::new(),
             },
         ],
         None => vec![StatusRun {
@@ -2472,8 +2426,6 @@ fn status_segments(
             right,
             hairline: true,
             boxes: mode_chip_box(chip_end.is_some()),
-            dots: Vec::new(),
-            small: Vec::new(),
         }],
     }
 }
@@ -6256,9 +6208,7 @@ mod tests {
         );
     }
 
-    /// The tab bar gives every tab one box, the active tab's a panel. No segment
-    /// draws small or as a dot, since a tagged file's extension reads as a
-    /// plain suffix.
+    /// The tab bar gives every tab one box, the active tab's a panel.
     #[test]
     fn the_tab_segments_box_each_tab() {
         use super::{tab_segments, BoxShape};
@@ -6270,12 +6220,6 @@ mod tests {
             theme.get(crate::theme::scope::UI_TABBAR_INACTIVE),
         );
         let segments = tab_segments(h.stoat.active_workspace(), theme, "ws", styles);
-        let texts = |indices: &[usize]| -> Vec<&str> {
-            indices
-                .iter()
-                .map(|&index| segments.left[index].0.as_str())
-                .collect()
-        };
         let boxes: Vec<_> = segments
             .boxes
             .iter()
@@ -6283,12 +6227,8 @@ mod tests {
             .collect();
 
         assert_eq!(
-            (texts(&segments.small), texts(&segments.dots), boxes),
-            (
-                Vec::<&str>::new(),
-                Vec::<&str>::new(),
-                vec![(2..4, None), (4..6, None), (6..8, Some(BoxShape::Tab))],
-            ),
+            boxes,
+            vec![(2..4, None), (4..6, None), (6..8, Some(BoxShape::Tab))],
         );
     }
 
