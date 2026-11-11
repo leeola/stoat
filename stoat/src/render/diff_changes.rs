@@ -287,8 +287,9 @@ pub(crate) fn stack_composited(pane: &Pane, frame: FrameCtx<'_>) -> bool {
 /// viewport, its text rect, and the cell of its cursor.
 ///
 /// The rows draw the two sides of the frame around the base column, as
-/// [`review::emit_base_frame`] lays them over `area`, and no top. The sides
-/// cross every header, over its hairlines.
+/// [`review::emit_base_frame`] lays them, and no top. The sides stop at each
+/// header and resume under it, since the boards draw the header over the
+/// frame. Only the pane's top bar crosses the first header's top.
 ///
 /// Under [`PagePaint::DecorationsOnly`] the rows write no cell. The headers'
 /// hairlines, the frame's sides, and the excerpts' diff gutters fill `scene`
@@ -319,18 +320,26 @@ pub(crate) fn paint_stack_rows(
             })
     };
 
-    // The frame's sides draw over the header hairlines, and the excerpts'
-    // hunk lanes draw over the frame's left side.
-    emit_header_hairlines(
-        state
-            .excerpts
-            .iter()
-            .filter_map(|excerpt| header_row(excerpt.top)),
-        frame.theme,
-        scene,
-    );
+    // The frame's sides run between the headers, which the boards layer over
+    // the frame, and the excerpts' hunk lanes draw over the left side.
+    let headers = state
+        .excerpts
+        .iter()
+        .filter_map(|excerpt| header_row(excerpt.top));
+    emit_header_hairlines(headers.clone(), frame.theme, scene);
     if let Some(tint) = diff_base_tint(frame.theme) {
-        review::emit_base_frame(area, tint, FrameEdges::Sides, scene);
+        let mut start = area.y;
+        for end in headers.map(|row| row.y).chain([area.bottom()]) {
+            if end > start {
+                let rows = Rect {
+                    y: start,
+                    height: end - start,
+                    ..area
+                };
+                review::emit_base_frame(rows, tint, FrameEdges::Sides, scene);
+            }
+            start = end + 1;
+        }
     }
 
     let origins =
@@ -624,8 +633,9 @@ fn paint_header(buf: &mut Buffer, row: Rect, runs: &[(String, Style)], theme: &T
 /// describes.
 ///
 /// The page scrolls with the stack, so it takes the sides of the frame that
-/// the rows draw and no top. The pane's own frame keeps the top edge above the
-/// pool. An empty stack holds no pool, so every page has excerpts to frame.
+/// the rows draw between its headers, and no top. The pane's own frame keeps
+/// the top edge above the pool. An empty stack holds no pool, so every page
+/// has excerpts to frame.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn paint_stack_page(
     state: &DiffChangesState,
@@ -1987,9 +1997,9 @@ mod tests {
     }
 
     /// A split changes view frames its content once around the base column, in
-    /// the base tint. The header hairlines lead the content and the sides cross
-    /// over them, and the top edge trails every row, over the first header's
-    /// hairline. No excerpt adds a bar of that tint.
+    /// the base tint. The header hairlines lead the content, and the sides run
+    /// between the headers. The top edge trails every row, over the first
+    /// header's hairline. No excerpt adds a bar of that tint.
     #[test]
     fn a_split_changes_view_frames_its_content_once() {
         let mut h = changes_view(
@@ -2011,30 +2021,36 @@ mod tests {
 
         // The stack spans the 120 columns and 23 rows above the status row, its
         // headers lie on rows 0 and 4, and the divider's hairline sits 952
-        // sixteenths in. The frame stops a sixteenth short of it.
+        // sixteenths in. The frame stops a sixteenth short of it. The sides run
+        // over rows 1 to 3 and 5 to 22.
         assert_eq!(
             (
-                bars[..6].to_vec(),
+                bars[..8].to_vec(),
                 bars.last().copied(),
                 bars.iter().filter(|bar| bar.4 == TINT).count()
             ),
             (
                 [
                     header_hairlines(),
-                    vec![(0, 0, 6, 368, TINT), (945, 0, 6, 368, TINT)],
+                    vec![
+                        (0, 16, 6, 48, TINT),
+                        (945, 16, 6, 48, TINT),
+                        (0, 80, 6, 288, TINT),
+                        (945, 80, 6, 288, TINT),
+                    ],
                 ]
                 .concat(),
                 Some((0, 0, 951, 3, TINT)),
-                3,
+                5,
             ),
         );
     }
 
-    /// A stack page draws the two sides of the frame around the base column,
-    /// the height of the page, after the header hairlines, so the sides cross
-    /// over them. The page draws no top.
+    /// A stack page draws the two sides of the frame around the base column
+    /// over the rows between its headers, after the header hairlines. The page
+    /// draws no top.
     #[test]
-    fn a_stack_page_draws_the_frame_s_sides_over_the_header_hairlines() {
+    fn a_stack_page_frames_the_rows_between_its_headers() {
         let mut h = changes_view(
             120,
             24,
@@ -2066,16 +2082,21 @@ mod tests {
 
         assert_eq!(
             (
-                bars[..6].to_vec(),
+                bars[..8].to_vec(),
                 bars.iter().filter(|bar| bar.4 == TINT).count()
             ),
             (
                 [
                     header_hairlines(),
-                    vec![(0, 0, 6, 192, TINT), (945, 0, 6, 192, TINT)],
+                    vec![
+                        (0, 16, 6, 48, TINT),
+                        (945, 16, 6, 48, TINT),
+                        (0, 80, 6, 112, TINT),
+                        (945, 80, 6, 112, TINT),
+                    ],
                 ]
                 .concat(),
-                2,
+                4,
             ),
         );
     }

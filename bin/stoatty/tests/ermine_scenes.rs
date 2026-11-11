@@ -276,15 +276,17 @@ fn the_split_diff_ends_in_the_minimap_strip_on_the_editor_surface() {
     expect_strip_band(&shot, &mut home, "diff_strip");
 }
 
-/// The changes view frames its base column once, across its file headers.
+/// The changes view frames its base column between its file headers, as the
+/// DiffChanges board layers each header over the frame.
 ///
-/// Row 1 is the first file's header, which carries no hunk mark, so its only
-/// base-tint pixels down the whole row are the frame's two sides. A frame for
-/// each excerpt leaves the header outside every frame. The top bar fills the
-/// row's top three pixel rows over the header's hairline, although the view's
-/// stack stays composited at rest.
+/// Row 1 is the first file's header, and row 2 the file's first line, context
+/// with no hunk mark. The frame's sides stop at the header, so no base-tint
+/// pixel column runs down row 1, and they draw down row 2. The top bar alone
+/// crosses the header. It fills the header's top three pixel rows from the
+/// left side's first pixel column to the right side's last, although the
+/// view's stack stays composited at rest.
 #[test]
-fn the_changes_view_frames_its_base_column_across_the_headers() {
+fn the_changes_view_frames_its_base_column_between_the_headers() {
     let mut home = support::scratch_home();
     let shot = settled_frame(
         home.path(),
@@ -292,8 +294,22 @@ fn the_changes_view_frames_its_base_column_across_the_headers() {
         "unstaged.txt",
         "<Space>dc<Settle>",
     );
-    expect_base_frame_sides(&shot, &mut home, 1, "changes_base_frame");
-    expect_base_frame_top(&shot, &mut home, 1, "changes_base_frame_top");
+    expect_base_frame_sides(&shot, &mut home, 2, "changes_base_frame");
+
+    let (_, y, _, height) = cell_rect(0, 1, 1, 1);
+    let span: Vec<u32> = (cell_rect(1, 1, 1, 1).0..=cell_rect(76, 1, 1, 1).0 + 3).collect();
+    let down = bar_columns(&shot, (y, height), SIDE_BASE);
+    let top = bar_columns(&shot, (y, 3), SIDE_BASE);
+    let below = bar_columns(&shot, (y + 3, 1), SIDE_BASE);
+    if !down.is_empty() || top != span || !below.is_empty() {
+        let frame = keep_frame(&shot, &mut home, "changes_base_frame_top");
+        panic!(
+            "the first header holds the base tint down its whole row in columns {down:?}, over \
+             its top three pixel rows in {top:?}, and on the pixel row under them in {below:?}, \
+             where the top bar alone spans {span:?}; the frame is {}",
+            frame.display(),
+        );
+    }
 }
 
 /// The changes view ends in its stack's minimap strip on the editor surface,

@@ -271,11 +271,11 @@ pub(crate) fn render_pane(
                     buf,
                     &mut *scene,
                 );
-                // The stack's rows draw the frame's sides, on the live paint
-                // and on a held stack's pages alike, so the sides go out over
-                // the header hairlines. The top goes out after the rows, over
-                // the first row's hairline. An empty stack shows no base column
-                // to frame.
+                // The stack's rows draw the frame's sides between the headers,
+                // on the live paint and on a held stack's pages alike. The top
+                // goes out after the rows, over the first row's hairline, and
+                // it alone crosses the first header. An empty stack shows no
+                // base column to frame.
                 if !state.excerpts.is_empty() {
                     emit_pane_base_frame(content_area, FrameEdges::Top, frame, scene);
                 }
