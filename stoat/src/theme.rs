@@ -896,6 +896,9 @@ pub mod scope {
 
     pub const UI_TABBAR_ACTIVE: &str = "ui.tabbar.active";
     pub const UI_TABBAR_INACTIVE: &str = "ui.tabbar.inactive";
+    /// The workspace name that leads the tab bar. A theme that leaves it unset
+    /// draws the name in the text color of [`UI_TABBAR_INACTIVE`].
+    pub const UI_TABBAR_NAME: &str = "ui.tabbar.name";
     /// The accent edge along the active tab's top. A theme that leaves it
     /// unset draws none.
     pub const UI_TABBAR_EDGE: &str = "ui.tabbar.edge";
@@ -1807,6 +1810,24 @@ mod tests {
             ),
             (Some(rgb(0x7fb0ff)), None),
             "the accent edge, and no edge under default_dark",
+        );
+    }
+
+    /// The ermine theme draws the tab bar's workspace name in its special
+    /// color, and default_dark leaves the name's scope unset, so the name keeps
+    /// the inactive tab's color.
+    #[test]
+    fn the_ermine_theme_colors_the_tab_bar_name() {
+        let [ermine, dark] = shipped_themes();
+        assert_eq!(
+            (
+                ermine
+                    .try_get(scope::UI_TABBAR_NAME)
+                    .and_then(|style| style.fg),
+                dark.try_get(scope::UI_TABBAR_NAME),
+            ),
+            (Some(rgb(0xc59af0)), None),
+            "the special color, and no name color under default_dark",
         );
     }
 

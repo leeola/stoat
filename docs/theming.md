@@ -302,6 +302,9 @@ The typed UI scopes, by group (syntax scopes are open-ended):
   `changes` chips at the right of the tab bar while a diff view or a changes
   view has the focus, the chip of the focused view's layout active. A chip
   takes the tab bar's colors where its scope leaves them unset.
+- `ui.tabbar.name` -- the workspace name that leads the tab bar, in its
+  foreground. A theme that leaves it unset draws the name in the text color
+  of `ui.tabbar.inactive`.
 - `ui.tabbar.edge` -- the 2 pixel accent edge along the top of the active
   tab, in its foreground. A theme that leaves it unset draws none.
 - `ui.statusline.<mode>` -- the mode chip color per editor mode (`normal`,

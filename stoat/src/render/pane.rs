@@ -1532,7 +1532,8 @@ fn status_scene_key(runs: &[StatusRun], separator: [u8; 3]) -> u64 {
 /// per tab.
 ///
 /// The name leads in bold, since the status row leaves it out while the bar
-/// shows. A tab reads as its [`Workspace::tab_label`], and a tagged file's
+/// shows. It takes the color of `ui.tabbar.name` where the theme sets one. A
+/// tab reads as its [`Workspace::tab_label`], and a tagged file's
 /// extension follows its stem as a `.ext` suffix in the type's color, `.md.gz`
 /// for a gzip file. Painting through the status-bar segment path means the bar
 /// picks up the same scaled-run rendering under stoatty and the same cell
@@ -1679,11 +1680,13 @@ fn tab_segments(
     workspace_name: &str,
     (active, inactive): (Style, Style),
 ) -> TabSegments {
+    let name = theme
+        .try_get(crate::theme::scope::UI_TABBAR_NAME)
+        .and_then(|style| style.fg)
+        .map_or(inactive, |fg| inactive.fg(fg))
+        .add_modifier(Modifier::BOLD);
     let mut left: Vec<StatusSeg> = vec![
-        (
-            format!(" {workspace_name} "),
-            inactive.add_modifier(Modifier::BOLD),
-        ),
+        (format!(" {workspace_name} "), name),
         (" ".to_string(), inactive),
     ];
     let mut boxes = Vec::new();
@@ -6108,10 +6111,10 @@ mod tests {
         h
     }
 
-    /// The bar leads with the workspace name and a one-cell gap. A tagged file's
-    /// tab reads its stem and then its extension as a suffix in the tag's
-    /// color, and a gzip file's suffix holds both extensions. Each tab's click
-    /// span covers its label and its suffix.
+    /// The bar leads with the workspace name in its own color and a one-cell
+    /// gap. A tagged file's tab reads its stem and then its extension as a
+    /// suffix in the tag's color, and a gzip file's suffix holds both
+    /// extensions. Each tab's click span covers its label and its suffix.
     #[test]
     fn the_tab_bar_leads_with_the_workspace_and_tags_each_file() {
         use super::style_rgb;
@@ -6130,12 +6133,18 @@ mod tests {
                 .count();
             h.rendered_buffer()[(col as u16, 0)].fg
         };
-        let md = style_rgb(h.stoat.theme.get(crate::theme::scope::UI_TAG_MARKDOWN).fg)
+        let theme = &h.stoat.theme;
+        let md = style_rgb(theme.get(crate::theme::scope::UI_TAG_MARKDOWN).fg)
             .expect("the theme colors it in RGB");
         assert_eq!(
-            (bar.trim_end(), fg_at(".md.gz")),
-            (lead.trim_end(), Color::Rgb(md[0], md[1], md[2])),
-            "the bar text, then the active gzip tab's suffix in the markdown color",
+            (bar.trim_end(), Some(fg_at("ws")), fg_at(".md.gz")),
+            (
+                lead.trim_end(),
+                theme.get(crate::theme::scope::UI_TABBAR_NAME).fg,
+                Color::Rgb(md[0], md[1], md[2]),
+            ),
+            "the bar text, the workspace name in its color, then the active gzip tab's suffix \
+             in the markdown color",
         );
         assert_eq!(
             h.stoat.tab_bar_spans,
