@@ -3602,6 +3602,37 @@ mod tests {
         );
     }
 
+    /// An untracked file with content stacks as an excerpt, and `space h s` on
+    /// its one added hunk adds the file to the index as the patch that creates
+    /// it there.
+    #[test]
+    fn space_h_s_on_an_untracked_excerpt_adds_the_file_to_the_index() {
+        let mut h = TestHarness::with_size(100, 24);
+        h.stage_review_scenario("/repo", &[("a.txt", "a\n", "A\n")]);
+        h.fake_fs().insert_file(Path::new("/repo/n.txt"), b"x\ny\n");
+        h.fake_git().add_repo(Path::new("/repo")).untracked("n.txt");
+        h.stoat.set_diff_warm_auto(true);
+        h.open_file(Path::new("/repo/a.txt"));
+        dispatch(&mut h.stoat, &stoat_action::DiffChanges);
+        h.settle();
+        h.type_keys("] g");
+        let landed = place(&mut h).0;
+
+        h.type_keys("space h s");
+        h.settle_diff_jobs();
+        assert_eq!(
+            (landed, h.fake_git().applied_patches(Path::new("/repo"))),
+            (
+                "n.txt".to_string(),
+                vec![
+                    "diff --git a/n.txt b/n.txt\nnew file mode 100644\n--- /dev/null\n+++ \
+                     b/n.txt\n@@ -0,0 +1,2 @@\n+x\n+y\n"
+                        .to_string()
+                ],
+            ),
+        );
+    }
+
     /// A landing on an unsaved edit waits for the diff map that holds the edit,
     /// and lands on the edit once its file's excerpt is folded.
     #[test]

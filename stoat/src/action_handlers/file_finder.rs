@@ -287,11 +287,10 @@ pub(super) fn open_file_finder(
 /// The files the diff in the focused pane shows, or `None` when the focused
 /// pane shows no diff.
 ///
-/// Over the changes view these are the files it lists. Over the per-file diff
-/// the untracked files join them, since the walk from file to file enters an
-/// untracked file. A focus on a dock reads as no diff.
+/// These are the files the changes view lists, over the changes view and the
+/// per-file diff alike. A focus on a dock reads as no diff.
 fn diff_scope_paths(stoat: &mut Stoat) -> Option<Vec<PathBuf>> {
-    let per_file = {
+    {
         let ws = stoat.active_workspace();
         let FocusTarget::SplitPane = ws.focus else {
             return None;
@@ -306,11 +305,10 @@ fn diff_scope_paths(stoat: &mut Stoat) -> Option<Vec<PathBuf>> {
         if !per_file && !matches!(pane.view, View::DiffChanges(_)) {
             return None;
         }
-        per_file
-    };
+    }
 
     stoat.sync_repo_root();
-    let listed = diff_changes::listed_files(stoat, per_file);
+    let listed = diff_changes::listed_files(stoat);
     Some(listed.into_values().collect())
 }
 

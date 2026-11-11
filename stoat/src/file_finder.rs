@@ -43,12 +43,10 @@ pub enum FinderScope {
     /// Files with uncommitted git changes. Refreshed on every scope toggle
     /// so the list stays current.
     Modified,
-    /// The files the diff under the finder shows, captured at open time. Over
-    /// the changes view these are the files it lists. Over the per-file diff
-    /// the untracked files join them, since the walk from file to file enters
-    /// an untracked file. Only an open over one of the two lands here, and for
-    /// that open the scope takes [`FinderScope::Modified`]'s place in the
-    /// Shift-Tab cycle.
+    /// The files the diff under the finder shows, untracked files with content
+    /// among them, captured at open time. Only an open over the changes view or
+    /// the per-file diff lands here, and for that open the scope takes
+    /// [`FinderScope::Modified`]'s place in the Shift-Tab cycle.
     Diff,
     /// Currently-open path-bound buffers from the workspace's
     /// [`BufferRegistry`]. Captured at open time. Reachable only through the
@@ -1302,7 +1300,7 @@ mod tests {
 
         assert_eq!(
             scope_and_base(&h),
-            (FinderScope::Diff, repo_paths(&["a.txt", "b.txt"]))
+            (FinderScope::Diff, repo_paths(&["a.txt", "b.txt", "d.txt"]))
         );
         assert!(
             h.snapshot().content.contains("Files \u{00B7} diff"),

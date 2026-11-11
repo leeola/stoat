@@ -53,8 +53,8 @@ pub struct HunkTallies {
     pub unstaged_per_file: Vec<(PathBuf, usize)>,
     /// The untracked files among [`Self::per_file`], sorted and repo-relative.
     ///
-    /// The tally counts an untracked file as a change, but a list of the work
-    /// in the tree leaves a scratch file out.
+    /// The tally counts an untracked file as one unstaged hunk, and the status
+    /// bar names these files apart from the unstaged hunks.
     pub untracked: Vec<PathBuf>,
     /// The files the index leaves unmerged, sorted and repo-relative. Empty
     /// unless a merge, a rebase, or a cherry-pick stopped on a conflict.

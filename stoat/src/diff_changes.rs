@@ -1873,7 +1873,7 @@ fn relist(stoat: &mut Stoat) -> bool {
     }
 
     stoat.sync_repo_root();
-    let listed = changed_files(stoat);
+    let listed = listed_files(stoat);
     for &id in &stale {
         sync_excerpts(stoat, id, &listed);
     }
@@ -1890,11 +1890,6 @@ fn relist(stoat: &mut Stoat) -> bool {
     true
 }
 
-/// The files a changes view lists.
-fn changed_files(stoat: &Stoat) -> BTreeMap<String, PathBuf> {
-    listed_files(stoat, false)
-}
-
 /// The files a diff over the working tree shows, keyed by their path relative
 /// to the working directory, so the keys run in path order.
 ///
@@ -1903,9 +1898,9 @@ fn changed_files(stoat: &Stoat) -> BTreeMap<String, PathBuf> {
 /// HEAD under any other base. Under a revision base the files changed since
 /// the revision take the tally's place.
 ///
-/// An untracked file joins only under `keep_untracked`. The changes view leaves
-/// it out, so a scratch file beside the work does not fill the stack. The
-/// per-file walk enters it, so the finder over the per-file diff lists it.
+/// An untracked file that holds content joins, since the tally counts it as
+/// one unstaged hunk. Its excerpt shows the whole file as one added hunk,
+/// which the staging keys add to the index.
 ///
 /// An open buffer under the working directory whose diff map holds a hunk
 /// joins the list, so an unsaved edit shows. A buffer with no unsaved edit
@@ -1916,7 +1911,7 @@ fn changed_files(stoat: &Stoat) -> BTreeMap<String, PathBuf> {
 /// Outside a repository the list is empty. The working directory is the
 /// workspace's resolved [`Workspace::repo_root`], so a list opens no
 /// repository.
-pub(crate) fn listed_files(stoat: &Stoat, keep_untracked: bool) -> BTreeMap<String, PathBuf> {
+pub(crate) fn listed_files(stoat: &Stoat) -> BTreeMap<String, PathBuf> {
     let ws = stoat.active_workspace();
     let Some(workdir) = ws.repo_root.clone() else {
         return BTreeMap::new();
@@ -1932,13 +1927,10 @@ pub(crate) fn listed_files(stoat: &Stoat, keep_untracked: bool) -> BTreeMap<Stri
                 true => ws.repo_unstaged_hunk_totals(),
                 false => ws.repo_hunk_totals(),
             };
-            let untracked = ws.repo_untracked_files().unwrap_or_default();
             totals
                 .unwrap_or_default()
                 .iter()
-                .filter(|(path, count)| {
-                    *count > 0 && (keep_untracked || untracked.binary_search(path).is_err())
-                })
+                .filter(|(_, count)| *count > 0)
                 .map(|(path, _)| workdir.join(path))
                 .collect()
         },
@@ -3888,10 +3880,10 @@ fn hint_width() -> u32 {
         h.settle();
     }
 
-    /// Each changed file gets an excerpt, folded, in path order, and an
-    /// untracked file beside them gets none.
+    /// Each changed file and each untracked file with content gets an excerpt,
+    /// folded, in path order.
     #[test]
-    fn changed_files_build_folded_excerpts_in_path_order() {
+    fn changed_and_untracked_files_build_folded_excerpts_in_path_order() {
         let mut h = TestHarness::with_size(100, 24);
         h.stage_review_scenario(
             "/repo",
@@ -3906,7 +3898,7 @@ fn hint_width() -> u32 {
             .insert_file(Path::new("/repo/z.txt"), b"scratch\n");
 
         stacked(&mut h);
-        assert_eq!(excerpts(&h), listed(&["a.txt", "b.txt", "c.txt"]));
+        assert_eq!(excerpts(&h), listed(&["a.txt", "b.txt", "c.txt", "z.txt"]));
     }
 
     /// An excerpt shows its hunk with three rows of context each side, and the
@@ -4461,7 +4453,7 @@ fn hint_width() -> u32 {
 
     /// The files the changes view lists, by their path in the repository.
     fn listed_rel_paths(h: &TestHarness) -> Vec<String> {
-        listed_files(&h.stoat, false).into_keys().collect()
+        listed_files(&h.stoat).into_keys().collect()
     }
 
     /// An open and a close move the stamp's path part, and a diff landing its

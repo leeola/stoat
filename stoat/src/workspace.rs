@@ -1576,15 +1576,6 @@ impl Workspace {
             .map(|tallies| tallies.unstaged_per_file.as_slice())
     }
 
-    /// The untracked files the tally counts, sorted by repo-relative path, or
-    /// `None` before the first tally lands and outside a repo.
-    pub(crate) fn repo_untracked_files(&self) -> Option<&[PathBuf]> {
-        self.diff
-            .repo_hunk_tallies
-            .as_ref()
-            .map(|tallies| tallies.untracked.as_slice())
-    }
-
     /// The files the index leaves unmerged, sorted by repo-relative path, or
     /// `None` before the first tally lands and outside a repo.
     pub(crate) fn repo_conflicted_files(&self) -> Option<&[PathBuf]> {
