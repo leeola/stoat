@@ -383,39 +383,22 @@ pub(crate) fn render_editor_with_overlay(
             severity_version,
             &mut editor.diagnostic_rows_cache,
         );
-        // Rich mode emits a sub-cell severity bar per row instead of the glyph,
-        // engaging only with a scene and every severity color resolved to RGB.
-        let rich = scene.as_deref_mut().zip(severity.as_ref());
-        match rich {
-            Some((scene, colors)) => {
-                let area = Rect {
-                    x: inner.x,
-                    y: inner.y,
-                    width: 1,
-                    height: inner.height,
-                };
-                let bar_bg = style_rgb(fallback_style.bg.or_else(|| {
-                    theme
-                        .try_get(crate::theme::scope::UI_BACKGROUND)
-                        .and_then(|st| st.bg)
-                }));
-                for &(row_offset, sev) in rows {
-                    let color = match bar_bg {
-                        Some(bg) if dim > 0.0 => dim_rgb(severity_color(sev, colors), bg, dim),
-                        _ => severity_color(sev, colors),
-                    };
-                    Bar {
-                        x: 0,
-                        y: (row_offset * 16) as i16,
-                        width: 6,
-                        height: 16,
-                        color,
-                    }
-                    .render(area, buf, &mut *scene);
-                }
-            },
-            None => paint_diagnostic_gutter(rows, inner.x, inner.y, theme, buf),
-        }
+        let column = Rect {
+            x: inner.x,
+            y: inner.y,
+            width: 1,
+            height: inner.height,
+        };
+        paint_severity_column(
+            rows,
+            column,
+            severity.as_ref(),
+            gutter_background(theme, fallback_style),
+            dim,
+            theme,
+            buf,
+            scene.as_deref_mut(),
+        );
         1
     };
 
@@ -1559,7 +1542,7 @@ impl ResolvedChrome {
 }
 
 /// The background the gutter fills, preferring the pane's own over the theme's.
-fn gutter_background(theme: &Theme, fallback_style: Style) -> Option<[u8; 3]> {
+pub(crate) fn gutter_background(theme: &Theme, fallback_style: Style) -> Option<[u8; 3]> {
     style_rgb(fallback_style.bg.or_else(|| {
         theme
             .try_get(crate::theme::scope::UI_BACKGROUND)
@@ -1607,19 +1590,70 @@ fn diagnostic_rows<'c>(
         severity_version,
     );
     if cache.as_ref().is_none_or(|c| c.key != key) {
-        let rows = (scroll_row..end_row)
-            .map_while(|display_row| {
-                let offset = (display_row - scroll_row) as u16;
-                (offset < inner.height).then_some((display_row, offset))
-            })
-            .filter_map(|(display_row, offset)| {
-                let row = buffer_row_of(snapshot, display_row)?;
-                Some((offset, row_severity.at(row)?))
-            })
-            .collect();
+        let rows = severity_rows(snapshot, row_severity, scroll_row..end_row, inner.height);
         *cache = Some(DiagnosticRowsCache { key, rows });
     }
     &cache.as_ref().expect("filled just above").rows
+}
+
+/// The display rows of `rows` that carry a diagnostic, each as its offset from
+/// the first of `rows` and its severity, for the gutter with line numbers off.
+///
+/// Stops after `height` rows, the height of the column the marks go in.
+pub(crate) fn severity_rows(
+    snapshot: &DisplaySnapshot,
+    row_severity: &RowSeverity,
+    rows: Range<u32>,
+    height: u16,
+) -> Vec<(u16, DiagnosticSeverity)> {
+    let top = rows.start;
+    rows.map_while(|display_row| {
+        let offset = (display_row - top) as u16;
+        (offset < height).then_some((display_row, offset))
+    })
+    .filter_map(|(display_row, offset)| {
+        let row = buffer_row_of(snapshot, display_row)?;
+        Some((offset, row_severity.at(row)?))
+    })
+    .collect()
+}
+
+/// Paint the one-column severity gutter of an editor with line numbers off,
+/// a mark on each of `rows` in `column`.
+///
+/// With a scene and RGB severity colors, each row takes a sub-cell bar in its
+/// severity color, faded toward `ground` by `dim`. Otherwise each row takes
+/// its severity letter in the cell, styled from `theme`.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn paint_severity_column(
+    rows: &[(u16, DiagnosticSeverity)],
+    column: Rect,
+    colors: Option<&SeverityColors>,
+    ground: Option<[u8; 3]>,
+    dim: f32,
+    theme: &Theme,
+    buf: &mut Buffer,
+    scene: Option<&mut ApcScene>,
+) {
+    let Some((scene, colors)) = scene.zip(colors) else {
+        paint_diagnostic_gutter(rows, column.x, column.y, theme, buf);
+        return;
+    };
+
+    for &(row_offset, sev) in rows {
+        let color = match ground {
+            Some(bg) if dim > 0.0 => dim_rgb(severity_color(sev, colors), bg, dim),
+            _ => severity_color(sev, colors),
+        };
+        Bar {
+            x: 0,
+            y: (row_offset * 16) as i16,
+            width: 6,
+            height: 16,
+            color,
+        }
+        .render(column, buf, &mut *scene);
+    }
 }
 
 /// The buffer row shown at `display_row`, or `None` when the row is a block's

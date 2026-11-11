@@ -31,8 +31,9 @@ use crate::{
         completion::paint_completion_rows,
         conflict_view::{render_conflict_rows, GridPaint},
         editor::{
-            draw_fallback_line_numbers, gutter_component_lines, gutter_diff_marks, gutter_geometry,
-            paint_chunk_rows, paint_diagnostic_spans, paint_line_diagnostics, rich_gutter,
+            draw_fallback_line_numbers, gutter_background, gutter_component_lines,
+            gutter_diff_marks, gutter_geometry, paint_chunk_rows, paint_diagnostic_spans,
+            paint_line_diagnostics, paint_severity_column, rich_gutter, severity_rows,
             visible_byte_range, DiagnosticPaintScratch, EolCursor, RichGutterColors, RowSeverity,
             SeverityColors,
         },
@@ -228,11 +229,21 @@ pub(crate) fn render_page_decorations(
     let end_row = top_row
         .saturating_add(region_height as u32)
         .min(snapshot.line_count());
-    // The rich gutter draws into a scene rather than cells, so nothing writes
-    // this buffer.
-    let mut cells = Buffer::empty(Rect::default());
-    let (_, components) =
-        paint_page_gutter(snapshot, top_row, end_row, &mut cells, area, gutter, live);
+    // The terminal keeps the page's cells, so the cells this paint writes go to
+    // a buffer nothing reads. The rich gutter writes none. Only the letters of
+    // a numberless gutter write any, in its one column.
+    let mut cells = Buffer::empty(Rect { width: 1, ..area });
+    let (_, components) = paint_page_gutter(
+        snapshot,
+        top_row,
+        end_row,
+        &mut cells,
+        area,
+        gutter,
+        fallback_style,
+        dim,
+        live,
+    );
 
     let mut frame = Vec::with_capacity(components.len() + 32);
     encode_fill_decorations_scope(&mut frame, pool, index, |out| {
@@ -332,8 +343,17 @@ pub(crate) fn render_page_from_snapshot(
         .saturating_add(region_height as u32)
         .min(snapshot.line_count());
 
-    let (gutter_w, apc) =
-        paint_page_gutter(snapshot, top_row, end_row, &mut buf, area, gutter, live);
+    let (gutter_w, apc) = paint_page_gutter(
+        snapshot,
+        top_row,
+        end_row,
+        &mut buf,
+        area,
+        gutter,
+        fallback_style,
+        dim,
+        live,
+    );
 
     let mut undercurls = UndercurlBatch::default();
     if end_row > top_row {
@@ -504,9 +524,11 @@ pub(crate) struct PageGutter {
 impl PageGutter {
     /// Bundle the gutter inputs resolved on the run loop for an editor page fill.
     ///
-    /// `line_numbers` off yields a gutterless page whose text starts at column
-    /// zero, matching a live render with the gutter disabled. `current_line`
-    /// selects relative numbering, and `None` paints absolute.
+    /// `line_numbers` off yields a page with no number gutter, matching a live
+    /// render with the gutter disabled. Its text starts at column zero, or at
+    /// column one where `severity` holds a diagnostic, which takes the
+    /// one-column severity gutter. `current_line` selects relative numbering,
+    /// and `None` paints absolute.
     pub(crate) fn new(
         line_numbers: bool,
         severity: Arc<RowSeverity>,
@@ -625,11 +647,17 @@ impl PageDiagnostics {
 /// Paint the page's line-number gutter, returning the cell columns it reserves
 /// and the rich APC frames to append after the page cells.
 ///
-/// Returns `(0, empty)` when line numbers are off, so the page text then starts
-/// at column zero exactly as before. In rich mode the sub-cell components draw
-/// into a scratch scene whose bytes ride the fill, leaving the gutter cells in
-/// `buf` at the page background. In fallback mode the degraded numbers paint
-/// into `buf` and no bytes are returned.
+/// In rich mode the sub-cell components draw into a scratch scene whose bytes
+/// ride the fill, leaving the gutter cells in `buf` at the page background. In
+/// fallback mode the degraded numbers paint into `buf` and no bytes are
+/// returned.
+///
+/// With line numbers off, a page whose rows carry a diagnostic keeps the
+/// one-column severity gutter of the live grid. It marks each diagnostic row
+/// with a bar in the returned frames under RGB severity colors, and with a
+/// letter in `buf` otherwise. A page with no diagnostic answers `(0, empty)`,
+/// so its text starts at column zero.
+#[allow(clippy::too_many_arguments)]
 fn paint_page_gutter(
     snapshot: &DisplaySnapshot,
     top_row: u32,
@@ -637,10 +665,30 @@ fn paint_page_gutter(
     buf: &mut Buffer,
     area: Rect,
     gutter: &PageGutter,
+    fallback_style: Style,
+    dim: f32,
     live: Option<&crate::diff_map::LiveHunks<'_>>,
 ) -> (u16, Vec<u8>) {
     if !gutter.line_numbers {
-        return (0, Vec::new());
+        if gutter.severity.is_empty() {
+            return (0, Vec::new());
+        }
+        let rows = severity_rows(snapshot, &gutter.severity, top_row..end_row, area.height);
+        let mut scene = gutter.diagnostics.colors.is_some().then(|| gutter.scene());
+        paint_severity_column(
+            &rows,
+            Rect { width: 1, ..area },
+            gutter.diagnostics.colors.as_ref(),
+            gutter_background(gutter.theme(), fallback_style),
+            dim,
+            gutter.theme(),
+            buf,
+            scene.as_mut(),
+        );
+        return (
+            1,
+            scene.map_or_else(Vec::new, |mut scene| scene.buffer().clone()),
+        );
     }
 
     let visible = end_row.saturating_sub(top_row).min(area.height as u32);
@@ -1172,7 +1220,10 @@ mod tests {
     use crate::{
         display_map::{highlights::HighlightEndpoints, DisplaySnapshot},
         render::review::DiffDials,
+        theme::Theme,
+        LineNumbers,
     };
+    use lsp_types::{Diagnostic, DiagnosticSeverity};
     use ratatui::style::Style;
     use std::sync::Arc;
 
@@ -1296,9 +1347,135 @@ mod tests {
     /// row 7 into row 8 mutes its text across the edge between two pages.
     #[test]
     fn a_page_paints_the_diagnostic_spans_of_the_unfocused_live_grid() {
+        use lsp_types::DiagnosticTag;
+
+        let unused = Diagnostic {
+            tags: Some(vec![DiagnosticTag::UNNECESSARY]),
+            ..diagnostic(DiagnosticSeverity::WARNING, (7, 0), (8, 4))
+        };
+        let diagnostics = vec![
+            diagnostic(DiagnosticSeverity::ERROR, (1, 0), (1, 4)),
+            diagnostic(DiagnosticSeverity::HINT, (5, 0), (5, 4)),
+            unused,
+        ];
+        let pages = live_and_page_bytes(None, LineNumbers::Absolute, diagnostics, &[0, 4, 8]);
+
+        for (top_row, (live, page)) in [0, 4, 8].into_iter().zip(&pages) {
+            assert_eq!(page, live, "page at top_row {top_row}");
+        }
+        assert!(
+            find(&pages[0].1, b"4:3").is_some(),
+            "the error on row 1 curls"
+        );
+    }
+
+    /// With line numbers off, a page keeps the one-column severity gutter of the
+    /// live grid. Under a theme whose severity colors are not RGB, each
+    /// diagnostic row takes its letter in column 0 on both, and the text starts
+    /// at column 1.
+    #[test]
+    fn a_numberless_page_keeps_the_severity_column() {
+        let errors = [1, 5]
+            .map(|row| diagnostic(DiagnosticSeverity::ERROR, (row, 0), (row, 4)))
+            .to_vec();
+        let pages = live_and_page_bytes(Some(Theme::empty()), LineNumbers::Off, errors, &[0, 4]);
+
+        for (top_row, (live, page)) in [0, 4].into_iter().zip(&pages) {
+            assert_eq!(page, live, "page at top_row {top_row}");
+        }
+    }
+
+    /// With line numbers off and RGB severity colors, a page marks each
+    /// diagnostic row of its one-column gutter with a sub-cell bar in the
+    /// severity color, as the live grid does under stoatty. The column's cells
+    /// hold no letter.
+    #[test]
+    fn a_numberless_page_bars_its_diagnostic_rows() {
+        use super::{render_page_from_snapshot, PageDiagnostics};
+        use crate::{
+            render::{
+                editor::{ResolvedChrome, RowSeverity},
+                paint::style_rgb,
+            },
+            term_screen::TermScreen,
+            theme::scope,
+        };
+        use stoatty_protocol::command::{decode_stream, BarCommand};
+
+        let (snapshot, numbered, fallback) = rich_gutter_page();
+        let theme = numbered.theme.clone();
+        let gutter = PageGutter::new(
+            false,
+            Arc::new(RowSeverity::for_rows([(1, DiagnosticSeverity::ERROR)])),
+            theme.clone(),
+            None,
+            None,
+        )
+        .diagnostics(PageDiagnostics {
+            colors: ResolvedChrome::resolve(&theme).severity,
+            ..Default::default()
+        });
+        let bytes = render_page_from_snapshot(
+            &snapshot,
+            0,
+            fallback,
+            12,
+            4,
+            &gutter,
+            false,
+            0.0,
+            DiffDials::shipped(),
+            page_endpoints(&snapshot, 0, 4),
+            None,
+            None,
+        );
+
+        let bars: Vec<BarCommand> = decode_stream(&bytes)
+            .into_iter()
+            .filter_map(|command| match command {
+                Command::Bar(bar) => Some(bar),
+                _ => None,
+            })
+            .collect();
+        let mut screen = TermScreen::new(4, 12);
+        screen.feed(&bytes[..find(&bytes, b"\x1b_").unwrap_or(bytes.len())]);
+        let column: Vec<char> = (0..4).map(|row| screen.row(row)[0].ch).collect();
+        let error = style_rgb(theme.get(scope::UI_DIAGNOSTIC_ERROR).fg)
+            .expect("the shipped error color is RGB");
+
+        assert_eq!(
+            (bars, column),
+            (
+                vec![BarCommand {
+                    x: 0,
+                    y: 16,
+                    width: 6,
+                    height: 16,
+                    color: error,
+                    occludes: false,
+                    hatch: None,
+                }],
+                vec![' '; 4],
+            ),
+            "one bar on row 1 in the error color, and no letter in the column",
+        );
+    }
+
+    /// The bytes of an unfocused live paint of [`PAGE_DOC`] and of the page that
+    /// stands in for it, as one `(live, page)` pair for each of `top_rows`.
+    ///
+    /// The live bytes carry the lines that the frame stamps under the
+    /// diagnostics. The file carries `diagnostics`, and the page takes its
+    /// gutter and its diagnostics from what the live paint resolved. `theme`
+    /// replaces the shipped theme when given.
+    fn live_and_page_bytes(
+        theme: Option<Theme>,
+        line_numbers: LineNumbers,
+        diagnostics: Vec<Diagnostic>,
+        top_rows: &[u32],
+    ) -> Vec<(Vec<u8>, Vec<u8>)> {
         use super::{
-            page_buffer, render_page_from_snapshot, serialize_buffer, PageDiagnostics, PageGutter,
-            Rect,
+            page_buffer, render_page_from_snapshot, serialize_buffer, PageDiagnostics, Rect,
         };
         use crate::{
             action_handlers::{self, dispatch},
@@ -1307,19 +1484,11 @@ mod tests {
                 undercurl::{self, UndercurlBatch},
             },
             theme::scope,
-            LineNumbers, Stoat,
+            Stoat,
         };
-        use lsp_types::{Diagnostic, DiagnosticSeverity, DiagnosticTag, Position, Range};
         use std::path::PathBuf;
         use stoat_action::OpenFile;
         use stoat_config::WrapMode;
-
-        let diagnostic = |severity, start: (u32, u32), end: (u32, u32), tags| Diagnostic {
-            range: Range::new(Position::new(start.0, start.1), Position::new(end.0, end.1)),
-            severity: Some(severity),
-            tags,
-            ..Default::default()
-        };
 
         let mut h = Stoat::test();
         let root = PathBuf::from("/page-diagnostics");
@@ -1328,94 +1497,98 @@ mod tests {
         h.stoat.active_workspace_mut().git_root = root;
         dispatch(&mut h.stoat, &OpenFile { path: path.clone() });
         h.settle();
-        h.seed_diagnostics(
-            &path,
-            vec![
-                diagnostic(DiagnosticSeverity::ERROR, (1, 0), (1, 4), None),
-                diagnostic(DiagnosticSeverity::HINT, (5, 0), (5, 4), None),
-                diagnostic(
-                    DiagnosticSeverity::WARNING,
-                    (7, 0),
-                    (8, 4),
-                    Some(vec![DiagnosticTag::UNNECESSARY]),
-                ),
-            ],
-        );
+        h.seed_diagnostics(&path, diagnostics);
 
-        let theme = h.stoat.theme.clone();
+        let theme = theme.map_or_else(|| h.stoat.theme.clone(), Arc::new);
         let fallback = theme.get(scope::UI_TEXT);
         let chrome = ResolvedChrome::resolve(&theme);
         let set = h.stoat.diagnostics.clone();
         let editor = action_handlers::focused_editor_mut(&mut h.stoat).expect("focused editor");
 
-        for top_row in [0u32, 4, 8] {
-            let area = Rect::new(0, 0, 12, 4);
-            let mut live = page_buffer(area, &theme);
-            let mut undercurls = UndercurlBatch::default();
-            undercurls.begin();
-            let saved = editor.scroll_row;
-            editor.scroll_row = top_row;
-            render_editor_with_overlay(
-                editor,
-                area,
-                fallback,
-                &theme,
-                &chrome,
-                &mut live,
-                false,
-                false,
-                LineNumbers::Absolute,
-                false,
-                None,
-                None,
-                Some((&path, &set)),
-                None,
-                true,
-                Some(&mut undercurls),
-                0.0,
-                DiffDials::shipped(),
-                WrapMode::None,
-                80,
-                0,
-                &[],
-                false,
-                None,
-            );
-            editor.scroll_row = saved;
-            undercurl::snapshot_cells(&live, undercurls.spans_mut());
-            let mut expected = serialize_buffer(&live);
-            expected.extend(undercurl::build(&live, undercurls.spans()));
+        top_rows
+            .iter()
+            .map(|&top_row| {
+                let area = Rect::new(0, 0, 12, 4);
+                let mut live = page_buffer(area, &theme);
+                let mut undercurls = UndercurlBatch::default();
+                undercurls.begin();
+                let saved = editor.scroll_row;
+                editor.scroll_row = top_row;
+                render_editor_with_overlay(
+                    editor,
+                    area,
+                    fallback,
+                    &theme,
+                    &chrome,
+                    &mut live,
+                    false,
+                    false,
+                    line_numbers,
+                    false,
+                    None,
+                    None,
+                    Some((&path, &set)),
+                    None,
+                    true,
+                    Some(&mut undercurls),
+                    0.0,
+                    DiffDials::shipped(),
+                    WrapMode::None,
+                    80,
+                    0,
+                    &[],
+                    false,
+                    None,
+                );
+                editor.scroll_row = saved;
+                undercurl::snapshot_cells(&live, undercurls.spans_mut());
+                let mut expected = serialize_buffer(&live);
+                expected.extend(undercurl::build(&live, undercurls.spans()));
 
-            let cache = editor
-                .gutter_severity_cache
-                .as_ref()
-                .expect("the live paint resolves the diagnostics");
-            let gutter = PageGutter::new(true, cache.map.clone(), theme.clone(), None, None)
+                let cache = editor
+                    .gutter_severity_cache
+                    .as_ref()
+                    .expect("the live paint resolves the diagnostics");
+                let gutter = PageGutter::new(
+                    line_numbers != LineNumbers::Off,
+                    cache.map.clone(),
+                    theme.clone(),
+                    None,
+                    None,
+                )
                 .diagnostics(PageDiagnostics {
                     spans: cache.spans.clone(),
                     colors: chrome.severity.clone(),
                     ..Default::default()
                 });
-            let snapshot = editor.display_map.snapshot();
-            let got = render_page_from_snapshot(
-                &snapshot,
-                top_row,
-                fallback,
-                12,
-                4,
-                &gutter,
-                false,
-                0.0,
-                DiffDials::shipped(),
-                page_endpoints(&snapshot, top_row, 4),
-                None,
-                None,
-            );
+                let snapshot = editor.display_map.snapshot();
+                let page = render_page_from_snapshot(
+                    &snapshot,
+                    top_row,
+                    fallback,
+                    12,
+                    4,
+                    &gutter,
+                    false,
+                    0.0,
+                    DiffDials::shipped(),
+                    page_endpoints(&snapshot, top_row, 4),
+                    None,
+                    None,
+                );
+                (expected, page)
+            })
+            .collect()
+    }
 
-            assert_eq!(got, expected, "page at top_row {top_row}");
-            if top_row == 0 {
-                assert!(find(&got, b"4:3").is_some(), "the error on row 1 curls");
-            }
+    /// A diagnostic of `severity` from the buffer point `start` to `end`.
+    fn diagnostic(severity: DiagnosticSeverity, start: (u32, u32), end: (u32, u32)) -> Diagnostic {
+        use lsp_types::{Position, Range};
+
+        Diagnostic {
+            range: Range::new(Position::new(start.0, start.1), Position::new(end.0, end.1)),
+            severity: Some(severity),
+            ..Default::default()
         }
     }
 
@@ -1963,7 +2136,17 @@ mod tests {
         );
         let area = Rect::new(0, 0, 12, 5);
         let mut buf = Buffer::empty(area);
-        let (width, _) = paint_page_gutter(&snapshot, 0, 5, &mut buf, area, &gutter, None);
+        let (width, _) = paint_page_gutter(
+            &snapshot,
+            0,
+            5,
+            &mut buf,
+            area,
+            &gutter,
+            Style::default(),
+            0.0,
+            None,
+        );
 
         let digits: Vec<String> = (0..5)
             .map(|y| {
@@ -2323,10 +2506,12 @@ mod tests {
         use super::{page_buffer, paint_page_gutter};
         use ratatui::layout::Rect;
 
-        let (snapshot, gutter, _) = rich_gutter_page();
+        let (snapshot, gutter, fallback) = rich_gutter_page();
         let area = Rect::new(0, 0, 12, 4);
         let mut buf = page_buffer(area, gutter.theme());
-        let (width, components) = paint_page_gutter(&snapshot, 0, 4, &mut buf, area, &gutter, None);
+        let (width, components) = paint_page_gutter(
+            &snapshot, 0, 4, &mut buf, area, &gutter, fallback, 0.0, None,
+        );
 
         assert_eq!(
             (width > 0, components.is_empty(), buf),
