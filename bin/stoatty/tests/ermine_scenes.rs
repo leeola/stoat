@@ -37,6 +37,7 @@ const HATCH: [u8; 3] = [0x1b, 0x1d, 0x22];
 const FOLD_BUTTON: [u8; 3] = [0x1f, 0x2a, 0x3d];
 const TEXT_DIM: [u8; 3] = [0xa3, 0xa9, 0xb5];
 const HAIRLINE: [u8; 3] = [0x2e, 0x32, 0x3b];
+const DIVIDER: [u8; 3] = [0x22, 0x25, 0x2b];
 const STRONG: [u8; 3] = [0x3e, 0x43, 0x4e];
 const SELECT: [u8; 3] = [0x23, 0x32, 0x4a];
 const DISABLED: [u8; 3] = [0x5b, 0x61, 0x6d];
@@ -949,6 +950,9 @@ fn the_tab_bar_boxes_the_focused_layout_s_chip_inside_its_row() {
 /// pixel on the top row to the overlay fill of the cells under the box, darker
 /// than the hover surface, where a 2 px arc draws the border. The top edge's
 /// border starts at the cell's seventh pixel.
+///
+/// The rule under the preview's path header runs through the middle pixel row
+/// of cell row 13 in the divider color, as a rule on the editor surface draws.
 #[test]
 fn the_file_finder_box_draws_on_the_overlay_surface() {
     let mut home = support::scratch_home();
@@ -994,6 +998,15 @@ fn the_file_finder_box_draws_on_the_overlay_surface() {
         (x + 6, y, 1, 1),
         STRONG,
         "finder_top_edge",
+    );
+
+    let (x, y, width, height) = cell_rect(111, 13, 1, 1);
+    expect_region(
+        &shot,
+        &mut home,
+        (x, y + height / 2, width, 1),
+        DIVIDER,
+        "preview_header_rule",
     );
 }
 

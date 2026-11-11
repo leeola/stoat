@@ -402,6 +402,9 @@ fn row_prefix(finder: &FileFinder) -> &str {
 /// shown source's directory and name, the lines the pane shows at the right,
 /// and the rule under them.
 ///
+/// The rule draws in `ui.divider`, the color of a rule on the editor surface,
+/// and in `ui.border.inactive` when the theme gives the divider no color.
+///
 /// Under a live scene the header sits on the editor surface, which the
 /// preview below it shares, and a plain terminal keeps the modal's fill under
 /// both. A blank pane leaves the header row empty, and a source with no path
@@ -467,14 +470,11 @@ fn paint_preview_header(
         }
     }
 
-    crate::render::chrome::hline(
-        buf,
-        header.x,
-        y + 1,
-        header.width,
-        theme.get(crate::theme::scope::UI_BORDER_INACTIVE),
-        scene,
-    );
+    let rule = theme
+        .try_get(crate::theme::scope::UI_DIVIDER)
+        .filter(|style| style.fg.is_some())
+        .unwrap_or_else(|| theme.get(crate::theme::scope::UI_BORDER_INACTIVE));
+    crate::render::chrome::hline(buf, header.x, y + 1, header.width, rule, scene);
 }
 
 /// The first and last buffer lines, counted from 1, that `editor` showed in
