@@ -106,7 +106,6 @@ fn paint_view_rows(
     finder.picker.viewport_rows = Some(rows);
 
     let row_style = theme.get(crate::theme::scope::UI_TEXT);
-    let selected_style = theme.list_selected(crate::theme::scope::UI_SELECTION);
     let match_style = theme.list_match();
 
     let selected = finder.selected();
@@ -132,16 +131,21 @@ fn paint_view_rows(
         };
         let row = area.y + offset as u16;
         let base_style = match row_idx == selected {
-            true => selected_style,
-            false => row_style,
+            true => crate::render::chrome::selected_row(
+                Rect::new(area.x, row, area.width, 1),
+                row_style,
+                true,
+                theme,
+                buf,
+                scene,
+            ),
+            false => {
+                for col in area.x..area.x + area.width {
+                    buf[(col, row)].set_char(' ').set_style(row_style);
+                }
+                row_style
+            },
         };
-
-        for col in area.x..area.x + area.width {
-            buf[(col, row)].set_char(' ').set_style(base_style);
-        }
-        if row_idx == selected {
-            crate::render::chrome::selection_bar(area.x, row, theme, buf, scene);
-        }
 
         let place = entry.place.label();
         let cells = [entry.kind, entry.title.as_str(), place.as_str()];

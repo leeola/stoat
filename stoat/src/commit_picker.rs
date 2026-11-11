@@ -1807,6 +1807,7 @@ mod tests {
             ratatui::layout::Rect::new(table.x, 0, table.width, 0),
             table,
             &h.stoat.theme,
+            false,
             &mut live,
             &mut stoat_widgets::ApcScene::new(),
         );

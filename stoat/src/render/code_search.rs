@@ -83,21 +83,35 @@ pub(crate) fn render_code_search(
     finder.preview_rows = layout.preview.map(|rect| rect.height as usize);
     let start_row =
         crate::render::picker::window_start(finder.selected, layout.list.height as usize);
-    paint_match_rows(finder, layout.list, start_row, &git_root, theme, buf, scene);
+    paint_match_rows(
+        finder,
+        layout.list,
+        start_row,
+        &git_root,
+        theme,
+        true,
+        buf,
+        scene,
+    );
 }
 
 /// Paint the match list into `area`, starting at match `start_row`.
 ///
 /// Each row shows a dim `path:line:col` location and the matched line's
 /// snippet. The caller picks the window rather than the painter deriving it,
-/// so a pooled page paints rows the selection is nowhere near. The selected
-/// row's accent bar goes into `scene`.
+/// so a pooled page paints rows the selection is nowhere near.
+///
+/// The selected row draws through
+/// [`chrome::selected_row`](crate::render::chrome::selected_row) with
+/// `panels`, which a pool page passes false.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn paint_match_rows(
     finder: &CodeSearchFinder,
     area: Rect,
     start_row: usize,
     git_root: &Path,
     theme: &Theme,
+    panels: bool,
     buf: &mut Buffer,
     scene: &mut stoat_widgets::ApcScene,
 ) {
@@ -113,7 +127,6 @@ pub(crate) fn paint_match_rows(
     }
 
     let row_style = theme.get(scope::UI_TEXT);
-    let selected_style = theme.list_selected(scope::UI_SELECTION);
 
     let end_x = area.x + area.width;
     let label_x = area.x + 1;
@@ -121,17 +134,22 @@ pub(crate) fn paint_match_rows(
     for (row_idx, m) in finder.matches.iter().skip(start_row).take(rows).enumerate() {
         let row = area.y + row_idx as u16;
         let is_selected = start_row + row_idx == finder.selected;
-        let style = if is_selected {
-            selected_style
-        } else {
-            row_style
+        let style = match is_selected {
+            true => crate::render::chrome::selected_row(
+                Rect::new(area.x, row, area.width, 1),
+                row_style,
+                panels,
+                theme,
+                buf,
+                scene,
+            ),
+            false => {
+                for col in area.x..end_x {
+                    buf[(col, row)].set_char(' ').set_style(row_style);
+                }
+                row_style
+            },
         };
-        for col in area.x..end_x {
-            buf[(col, row)].set_char(' ').set_style(style);
-        }
-        if is_selected {
-            crate::render::chrome::selection_bar(area.x, row, theme, buf, scene);
-        }
 
         let location = format!(
             "{}:{}:{}",

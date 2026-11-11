@@ -22,6 +22,7 @@ use crate::{
     render::{
         content_lane,
         hints::HintRow,
+        picker::test_support::{rounded_row_boxes, row_boxes, RowBox},
         review::{DiffColumns, DiffDials, DiffLayout},
         undercurl::UnderlineKind,
         walkthrough::Spotlight,
@@ -16203,7 +16204,7 @@ fn diagnostics_picker_renders_a_selection_past_the_visible_rows() {
 }
 
 /// A reader tells stored tours apart by slug, stop count, and title, so each
-/// row shows all three.
+/// row shows all three. The selected first row draws as the rounded row.
 #[test]
 fn the_walkthrough_picker_rows_show_slug_count_and_title() {
     let mut h = crate::test_harness::TestHarness::with_size(160, 40);
@@ -16212,15 +16213,20 @@ fn the_walkthrough_picker_rows_show_slug_count_and_title() {
     h.snapshot();
 
     let rows = target_picker_rows(&h, ModalKind::WalkthroughPicker);
+    let words = [row_words(&h, rows, rows.y), row_words(&h, rows, rows.y + 1)];
+    let (boxes, rounded) = first_row_boxes(&mut h, rows);
     assert_eq!(
-        [row_words(&h, rows, rows.y), row_words(&h, rows, rows.y + 1)],
-        ["\u{2502} alpha 1 Alpha tour", "zebra 2 Zebra tour"],
-        "the selected first row leads with its accent bar",
+        (words, boxes),
+        (
+            ["alpha 1 Alpha tour", "zebra 2 Zebra tour"].map(String::from),
+            rounded
+        ),
+        "each row shows its tour, and the selected first row draws its two boxes",
     );
 }
 
 /// A reader tells held views apart by kind, title, and place, so each row
-/// shows all three.
+/// shows all three. The selected first row draws as the rounded row.
 #[test]
 fn the_pane_finder_rows_show_kind_title_and_place() {
     let mut h = crate::test_harness::TestHarness::with_size(160, 40);
@@ -16231,11 +16237,37 @@ fn the_pane_finder_rows_show_kind_title_and_place() {
     h.snapshot();
 
     let rows = target_picker_rows(&h, ModalKind::PaneFinder);
+    let words = [row_words(&h, rows, rows.y), row_words(&h, rows, rows.y + 1)];
+    let (boxes, rounded) = first_row_boxes(&mut h, rows);
     assert_eq!(
-        [row_words(&h, rows, rows.y), row_words(&h, rows, rows.y + 1)],
-        ["\u{2502}buffer buf.txt tab 1", "term term tab 2"],
-        "the selected first row leads with its accent bar",
+        (words, boxes),
+        (
+            ["buffer buf.txt tab 1", "term term tab 2"].map(String::from),
+            rounded
+        ),
+        "each row shows its view, and the selected first row draws its two boxes",
     );
+}
+
+/// The boxes a fresh live frame draws over the first row of `rows`, and the
+/// two boxes of a rounded selected row in the theme's accent and select fill.
+fn first_row_boxes(
+    h: &mut crate::test_harness::TestHarness,
+    rows: Rect,
+) -> (Vec<RowBox>, Vec<RowBox>) {
+    use crate::{render::paint::style_rgb, theme::scope};
+
+    let theme = &h.stoat.theme;
+    let accent = style_rgb(theme.get(scope::UI_BORDER_FOCUSED).fg).expect("an RGB accent");
+    let select =
+        style_rgb(theme.list_selected(scope::UI_SELECTION).bg).expect("an RGB select fill");
+
+    let _ = h.stoat.render();
+    let first = Rect::new(rows.x, rows.y, rows.width, 1);
+    (
+        row_boxes(&h.stoat.apc_scene.all_bytes(), first),
+        rounded_row_boxes(accent, select),
+    )
 }
 
 /// The words painted on `row` across the list `rows`, joined by single

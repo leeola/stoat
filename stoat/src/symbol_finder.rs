@@ -845,7 +845,16 @@ mod tests {
         fuzzy,
         input_view::{InputView, SubmitTarget},
         picker::{self, Preview},
+        render::{
+            picker::test_support::{
+                rounded_row_boxes, rounded_row_theme, row_boxes, ROW_ACCENT, ROW_SELECT,
+            },
+            symbol_finder::paint_symbol_rows,
+        },
     };
+    use ratatui::{buffer::Buffer, layout::Rect};
+    use std::path::Path;
+    use stoat_widgets::ApcScene;
 
     fn entry(title: &str) -> SymbolFinderEntry {
         SymbolFinderEntry {
@@ -1063,5 +1072,30 @@ mod tests {
         let mut f = finder(&["a", "b", "c"]);
         f.move_selection(1);
         assert_eq!(f.selected_entry().map(|e| e.title.as_str()), Some("b"));
+    }
+
+    /// In a live scene the selected symbol's row draws as the rounded row's two
+    /// boxes across the list.
+    #[test]
+    fn the_selected_symbol_draws_the_rounded_row() {
+        let mut f = finder(&["a", "b", "c"]);
+        f.move_selection(1);
+        let area = Rect::new(2, 1, 30, 3);
+        let mut scene = ApcScene::new();
+        paint_symbol_rows(
+            &f,
+            area,
+            0,
+            Path::new("/r"),
+            &rounded_row_theme(),
+            true,
+            &mut Buffer::empty(Rect::new(0, 0, 34, 5)),
+            &mut scene,
+        );
+
+        assert_eq!(
+            row_boxes(scene.bytes(), Rect::new(2, 2, 30, 1)),
+            rounded_row_boxes(ROW_ACCENT, ROW_SELECT),
+        );
     }
 }

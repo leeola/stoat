@@ -423,7 +423,61 @@ pub(crate) fn target_picker_layout(
 #[cfg(test)]
 pub(crate) mod test_support {
     use crate::theme::Theme;
-    use ratatui::{buffer::Buffer, style::Color};
+    use ratatui::{buffer::Buffer, layout::Rect, style::Color};
+    use stoatty_protocol::command::{self, Command, Edge};
+
+    /// One panel's fill, edges, and corner radius, as [`row_boxes`] reads it.
+    pub(crate) type RowBox = (Option<[u8; 3]>, [Edge; 4], u8);
+
+    /// The accent [`rounded_row_theme`] gives the focused border.
+    pub(crate) const ROW_ACCENT: [u8; 3] = [7, 8, 9];
+
+    /// The selection background [`rounded_row_theme`] sets.
+    pub(crate) const ROW_SELECT: [u8; 3] = [4, 5, 6];
+
+    /// A theme whose selection and accent are RGB, so a live scene draws a
+    /// selected row as its two rounded boxes.
+    pub(crate) fn rounded_row_theme() -> Theme {
+        let src = r##"theme t {
+            ui.selection.bg = "#040506";
+            ui.border.focused.fg = "#070809";
+        }"##;
+        let (config, _) = stoat_config::parse(src);
+        Theme::from_config(&config.expect("theme parses"), "t").expect("theme loads")
+    }
+
+    /// Each panel in `bytes` that spans exactly `rect`, in the order the panels
+    /// go out.
+    pub(crate) fn row_boxes(bytes: &[u8], rect: Rect) -> Vec<RowBox> {
+        command::decode_stream(bytes)
+            .into_iter()
+            .filter_map(|cmd| match cmd {
+                Command::Panel(panel)
+                    if (panel.left, panel.top, panel.width, panel.height)
+                        == (rect.x, rect.y, rect.width, rect.height) =>
+                {
+                    Some((panel.fill, panel.edges, panel.corner_radius))
+                },
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// What [`row_boxes`] reads at a rounded selected row in `accent` and
+    /// `select`: the accent box 6 px inside the list's sides, then the select
+    /// box 2 px further in on its left, both with 6 px corners.
+    pub(crate) fn rounded_row_boxes(accent: [u8; 3], select: [u8; 3]) -> Vec<RowBox> {
+        let row_box = |fill, left| {
+            let edges = [
+                Edge::Inset(0),
+                Edge::Inset(6),
+                Edge::Inset(0),
+                Edge::Inset(left),
+            ];
+            (Some(fill), edges, 6)
+        };
+        vec![row_box(accent, 6), row_box(select, 8)]
+    }
 
     /// The background [`selected_rows`] scans for.
     pub(crate) const SELECTION_BG: Color = Color::Rgb(255, 0, 0);

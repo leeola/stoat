@@ -5967,9 +5967,12 @@ fn typing_in_the_finder_defers_its_pool_refill_until_the_list_scrolls() {
 /// row's first cell.
 #[test]
 fn the_finder_rounds_its_live_selected_row_and_keeps_the_bar_on_its_page() {
-    use crate::theme::scope;
+    use crate::{
+        render::picker::test_support::{rounded_row_boxes, row_boxes},
+        theme::scope,
+    };
     use stoat_action::OpenFileFinder;
-    use stoatty_protocol::command::{BarCommand, Command, Edge};
+    use stoatty_protocol::command::{BarCommand, Command};
 
     let mut h = Stoat::test();
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
@@ -6011,34 +6014,9 @@ fn the_finder_rounds_its_live_selected_row_and_keeps_the_bar_on_its_page() {
             .collect()
     };
 
-    let row_boxes = |bytes: &[u8]| -> Vec<(Option<[u8; 3]>, [Edge; 4], u8)> {
-        command::decode_stream(bytes)
-            .into_iter()
-            .filter_map(|cmd| match cmd {
-                Command::Panel(panel)
-                    if (panel.top, panel.left, panel.width, panel.height)
-                        == (list.y, list.x, list.width, 1) =>
-                {
-                    Some((panel.fill, panel.edges, panel.corner_radius))
-                },
-                _ => None,
-            })
-            .collect()
-    };
     let select =
-        crate::render::paint::style_rgb(h.stoat.theme.list_selected(scope::UI_SELECTION).bg);
-    let row_box = |fill, left| {
-        (
-            fill,
-            [
-                Edge::Inset(0),
-                Edge::Inset(6),
-                Edge::Inset(0),
-                Edge::Inset(left),
-            ],
-            6,
-        )
-    };
+        crate::render::paint::style_rgb(h.stoat.theme.list_selected(scope::UI_SELECTION).bg)
+            .expect("an RGB select fill");
 
     h.stoat.render();
     let live = h.stoat.apc_scene.all_bytes();
@@ -6048,12 +6026,12 @@ fn the_finder_rounds_its_live_selected_row_and_keeps_the_bar_on_its_page() {
     assert_eq!(
         (
             list_bars(&live, list.x, list.y),
-            row_boxes(&live),
+            row_boxes(&live, Rect::new(list.x, list.y, list.width, 1)),
             list_bars(page, 0, 0),
         ),
         (
             Vec::new(),
-            vec![row_box(Some([0x7f, 0xb0, 0xff]), 6), row_box(select, 8)],
+            rounded_row_boxes([0x7f, 0xb0, 0xff], select),
             vec![bar(0, 0)],
         ),
         "the live row is the accent box under the select box with no bar, and the page keeps \

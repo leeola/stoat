@@ -489,6 +489,7 @@ fn render_palette_filter(
         list,
         scroll,
         theme,
+        true,
         buf,
         &mut *scene,
     );
@@ -576,7 +577,9 @@ fn usage_line(entry: &RegistryEntry) -> String {
 ///
 /// Shared by the live list, which derives `start_row` from the selection, and
 /// the smooth-scroll pool, which paints absolute pages, so both render
-/// identical rows. The selected row's accent bar goes into `scene`.
+/// identical rows. The selected row draws through
+/// [`chrome::selected_row`](crate::render::chrome::selected_row) with
+/// `panels`, which a pool page passes false.
 ///
 /// Each name leaves out its first `name_offset` bytes, the group token and
 /// space a grouped list's title already shows. A match position indexes the
@@ -590,6 +593,7 @@ pub(crate) fn paint_palette_rows(
     area: Rect,
     start_row: usize,
     theme: &crate::theme::Theme,
+    panels: bool,
     buf: &mut Buffer,
     scene: &mut stoat_widgets::ApcScene,
 ) {
@@ -599,7 +603,6 @@ pub(crate) fn paint_palette_rows(
     }
 
     let row_style = theme.get(crate::theme::scope::UI_TEXT);
-    let selected_style = theme.list_selected(crate::theme::scope::UI_SELECTION);
     let desc_style = theme.get(crate::theme::scope::UI_TEXT_MUTED);
     let match_style = theme.list_match();
 
@@ -618,18 +621,22 @@ pub(crate) fn paint_palette_rows(
         let abs = start_row + row_idx;
         let row = area.y + row_idx as u16;
         let is_selected = abs == selected;
-        let style = if is_selected {
-            selected_style
-        } else {
-            row_style
+        let style = match is_selected {
+            true => crate::render::chrome::selected_row(
+                Rect::new(area.x, row, area.width, 1),
+                row_style,
+                panels,
+                theme,
+                buf,
+                scene,
+            ),
+            false => {
+                for col in area.x..end_x {
+                    buf[(col, row)].set_char(' ').set_style(row_style);
+                }
+                row_style
+            },
         };
-
-        for col in area.x..end_x {
-            buf[(col, row)].set_char(' ').set_style(style);
-        }
-        if is_selected {
-            crate::render::chrome::selection_bar(area.x, row, theme, buf, scene);
-        }
 
         let name = shown_name(entry, name_offset);
         let name_x = area.x + 1;
@@ -700,6 +707,7 @@ mod tests {
             list,
             0,
             &Theme::empty(),
+            false,
             &mut buf,
             &mut stoat_widgets::ApcScene::new(),
         );

@@ -245,6 +245,7 @@ pub(crate) fn render_commit_picker(
         layout.header,
         layout.list,
         theme,
+        true,
         buf,
         &mut *scene,
     );
@@ -629,13 +630,17 @@ pub(crate) fn clamped_preview_scroll(scroll: usize, doc: &DiffDocument, height: 
 /// of each row's joined haystack onto the column showing them, and one whose
 /// cell truncated it away is dropped.
 ///
-/// The selected row's accent bar goes into `scene`.
+/// The selected row draws through
+/// [`chrome::selected_row`](crate::render::chrome::selected_row) with
+/// `panels`, which a pool page passes false.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn paint_commit_picker_rows(
     picker: &CommitPicker,
     start_row: usize,
     header: Rect,
     area: Rect,
     theme: &Theme,
+    panels: bool,
     buf: &mut Buffer,
     scene: &mut ApcScene,
 ) {
@@ -663,7 +668,6 @@ pub(crate) fn paint_commit_picker_rows(
     );
 
     let row_style = theme.get(scope::UI_TEXT);
-    let selected_style = theme.list_selected(scope::UI_SELECTION);
     let match_style = theme.list_match();
     let sha_style = theme.get(scope::VCS_COMMIT_SHA);
     let branch_style = theme.get(scope::VCS_COMMIT_METADATA);
@@ -678,17 +682,22 @@ pub(crate) fn paint_commit_picker_rows(
         let indices = picker.row_indices(start_row + row_idx, &mut derived, &mut matching);
         let y = area.y + row_idx as u16;
         let is_selected = start_row + row_idx == picker.selected;
-        let style = if is_selected {
-            selected_style
-        } else {
-            row_style
+        let style = match is_selected {
+            true => crate::render::chrome::selected_row(
+                Rect::new(area.x, y, area.width, 1),
+                row_style,
+                panels,
+                theme,
+                buf,
+                scene,
+            ),
+            false => {
+                for col in area.x..end_x {
+                    buf[(col, y)].set_char(' ').set_style(row_style);
+                }
+                row_style
+            },
         };
-        for col in area.x..end_x {
-            buf[(col, y)].set_char(' ').set_style(style);
-        }
-        if is_selected {
-            crate::render::chrome::selection_bar(area.x, y, theme, buf, scene);
-        }
 
         let bounds = Rect::new(text_x, y, table_width, 1);
         for (column, (&width, &start)) in widths.iter().zip(starts.iter()).enumerate() {

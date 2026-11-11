@@ -893,7 +893,7 @@ pub(crate) fn render_code_search_page(
         page,
         theme,
         |buf, area, start_row, scene| {
-            paint_match_rows(finder, area, start_row, git_root, theme, buf, scene)
+            paint_match_rows(finder, area, start_row, git_root, theme, false, buf, scene)
         },
     )
 }
@@ -918,7 +918,7 @@ pub(crate) fn render_symbol_finder_page(
         page,
         theme,
         |buf, area, start_row, scene| {
-            paint_symbol_rows(finder, area, start_row, git_root, theme, buf, scene)
+            paint_symbol_rows(finder, area, start_row, git_root, theme, false, buf, scene)
         },
     )
 }
@@ -956,6 +956,7 @@ pub(crate) fn render_palette_page(
                 area,
                 start_row,
                 theme,
+                false,
                 buf,
                 scene,
             )
@@ -1161,7 +1162,7 @@ pub(crate) fn render_commit_picker_list_page(
             // The column header sits above the pool region, so the page hands the
             // painter a zero-height rect it will never write into.
             let header = Rect::new(table.x, 0, table.width, 0);
-            paint_commit_picker_rows(picker, start_row, header, table, theme, buf, scene);
+            paint_commit_picker_rows(picker, start_row, header, table, theme, false, buf, scene);
 
             if graph_cells > 0 {
                 let graph = Rect::new(0, 0, graph_cells, area.height);

@@ -1697,9 +1697,9 @@ mod tests {
             .lines()
             .any(|line| line.contains("palette \u{00B7} git :"));
         let subcommand = &top.command_name["git ".len()..];
-        // The top row is the selected one, so the accent bar leads its name.
+        // The name starts one cell in from the box's left border.
         let shown = (
-            row.contains(&format!("\u{2502}{subcommand} ")),
+            row.contains(&format!("\u{2502} {subcommand} ")),
             row.contains(top.command_name.as_str()),
         );
 

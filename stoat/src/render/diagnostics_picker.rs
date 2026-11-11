@@ -131,7 +131,6 @@ fn paint_diagnostic_rows(
     picker.picker.viewport_rows = Some(rows);
 
     let row_style = theme.get(crate::theme::scope::UI_TEXT);
-    let selected_style = theme.list_selected(crate::theme::scope::UI_SELECTION);
     let muted_style = theme.get(crate::theme::scope::UI_TEXT_MUTED);
     let match_style = theme.list_match();
 
@@ -162,15 +161,21 @@ fn paint_diagnostic_rows(
         let row = area.y + offset as u16;
         let is_selected = row_idx == selected;
         let base_style = match is_selected {
-            true => selected_style,
-            false => row_style,
+            true => crate::render::chrome::selected_row(
+                Rect::new(area.x, row, area.width, 1),
+                row_style,
+                true,
+                theme,
+                buf,
+                scene,
+            ),
+            false => {
+                for col in area.x..area.x + area.width {
+                    buf[(col, row)].set_char(' ').set_style(row_style);
+                }
+                row_style
+            },
         };
-        for col in area.x..area.x + area.width {
-            buf[(col, row)].set_char(' ').set_style(base_style);
-        }
-        if is_selected {
-            crate::render::chrome::selection_bar(area.x, row, theme, buf, scene);
-        }
 
         let path_text = match workspace_scope {
             true => entry
@@ -237,5 +242,70 @@ fn severity_glyph(severity: Option<DiagnosticSeverity>) -> &'static str {
         Some(DiagnosticSeverity::INFORMATION) => "I",
         Some(DiagnosticSeverity::HINT) => "H",
         _ => " ",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::paint_diagnostic_rows;
+    use crate::{
+        buffer::BufferId,
+        diagnostics_picker::{DiagnosticsEntry, DiagnosticsPicker, PickerScope},
+        editor_state::EditorId,
+        host::OffsetEncoding,
+        input_view::{InputView, SubmitTarget},
+        picker::Preview,
+        render::picker::test_support::{
+            rounded_row_boxes, rounded_row_theme, row_boxes, ROW_ACCENT, ROW_SELECT,
+        },
+    };
+    use ratatui::{buffer::Buffer, layout::Rect};
+    use std::{
+        path::{Path, PathBuf},
+        sync::Arc,
+    };
+    use stoat_scheduler::{Executor, TestScheduler};
+    use stoat_widgets::ApcScene;
+
+    /// In a live scene the selected diagnostic's row draws as the rounded row's
+    /// two boxes across the list.
+    #[test]
+    fn the_selected_diagnostic_draws_the_rounded_row() {
+        let entry = |line: u32| DiagnosticsEntry {
+            offset: 0,
+            line,
+            column: 1,
+            severity: None,
+            message: format!("diagnostic-{line}"),
+            path: None,
+            encoding: OffsetEncoding::Utf16,
+        };
+        let input = InputView {
+            editor_id: EditorId::default(),
+            buffer_id: BufferId::new(0),
+            target: SubmitTarget::DiagnosticsPicker,
+        };
+        let mut picker = DiagnosticsPicker::from_entries(
+            vec![entry(1), entry(2)],
+            PickerScope::Local(PathBuf::from("/r/a.rs")),
+            input,
+            Preview::test_dummy(),
+            Executor::new(Arc::new(TestScheduler::new())),
+            crate::test_notify(),
+        );
+        let mut scene = ApcScene::new();
+        paint_diagnostic_rows(
+            &mut picker,
+            Path::new("/r"),
+            Rect::new(2, 1, 30, 2),
+            &rounded_row_theme(),
+            &mut Buffer::empty(Rect::new(0, 0, 34, 4)),
+            &mut scene,
+        );
+
+        assert_eq!(
+            row_boxes(scene.bytes(), Rect::new(2, 1, 30, 1)),
+            rounded_row_boxes(ROW_ACCENT, ROW_SELECT),
+        );
     }
 }

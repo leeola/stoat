@@ -113,7 +113,6 @@ fn paint_tour_rows(
     picker.picker.viewport_rows = Some(rows);
 
     let row_style = theme.get(crate::theme::scope::UI_TEXT);
-    let selected_style = theme.list_selected(crate::theme::scope::UI_SELECTION);
     let prompt_style = theme.get(crate::theme::scope::UI_PROMPT);
     let match_style = theme.list_match();
 
@@ -137,20 +136,27 @@ fn paint_tour_rows(
             continue;
         };
         let row = area.y + offset as u16;
-        let is_selected = row_idx == selected;
         let is_playing = playing == Some(entry_idx);
-        let base_style = match (is_selected, is_playing) {
-            (true, _) => selected_style,
-            (false, true) => prompt_style,
-            (false, false) => row_style,
+        let unselected = match is_playing {
+            true => prompt_style,
+            false => row_style,
         };
-
-        for col in area.x..area.x + area.width {
-            buf[(col, row)].set_char(' ').set_style(base_style);
-        }
-        if is_selected {
-            crate::render::chrome::selection_bar(area.x, row, theme, buf, scene);
-        }
+        let base_style = match row_idx == selected {
+            true => crate::render::chrome::selected_row(
+                Rect::new(area.x, row, area.width, 1),
+                unselected,
+                true,
+                theme,
+                buf,
+                scene,
+            ),
+            false => {
+                for col in area.x..area.x + area.width {
+                    buf[(col, row)].set_char(' ').set_style(unselected);
+                }
+                unselected
+            },
+        };
 
         let marker = match is_playing {
             true => ">",
