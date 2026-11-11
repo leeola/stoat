@@ -12,10 +12,7 @@
 
 use crate::editor_state::EditorState;
 use lsp_types::{DiagnosticSeverity, DiagnosticTag};
-use std::{
-    ops::{Range, RangeInclusive},
-    path::Path,
-};
+use std::{ops::Range, path::Path, sync::Arc};
 use stoat_text::{Anchor, Bias};
 
 /// A diagnostic resolved to byte offsets once per (set, buffer) version, so the
@@ -84,6 +81,13 @@ pub(crate) struct DiagnosticSpanCache {
     /// version too, unlike the spans, because a line number means something
     /// different after an edit above it.
     cursor_line_diag: Option<(u32, u64, Option<ResolvedDiag>)>,
+    /// The first line of each diagnostic's message, by its index in
+    /// `set.get(path)`.
+    ///
+    /// A painter off the run loop holds the text without the set. The cache
+    /// rebuilds once for each publish and not for each buffer version, so a
+    /// keystroke allocates no string.
+    pub(crate) messages: Arc<[Box<str>]>,
 }
 
 impl DiagnosticSpanCache {
@@ -188,69 +192,6 @@ impl DiagnosticSpanCache {
 
         self.cursor_line_diag = Some((line, buffer_version, found));
         found
-    }
-
-    /// The worst-severity diagnostic that starts on each of `lines`, in the
-    /// order given, or `None` for a line where none starts.
-    ///
-    /// A span over many lines answers only for the line it starts on, so a
-    /// reader that prints one message per line prints a long span once. Ties
-    /// go to the earliest span, as in [`Self::cursor_line_diagnostic`].
-    ///
-    /// Each run of consecutive lines takes one batch resolve, so the cost
-    /// follows the spans those lines hold. A fold that hides the lines between
-    /// two runs keeps its spans out of the work.
-    pub(crate) fn line_start_diagnostics(
-        &self,
-        lines: &[u32],
-        snapshot: &crate::multi_buffer::MultiBufferSnapshot,
-    ) -> Vec<Option<ResolvedDiag>> {
-        let rope = snapshot.rope();
-        let mut found = vec![None; lines.len()];
-
-        let mut run_start = 0;
-        while run_start < lines.len() {
-            let first = lines[run_start];
-            let mut run_end = run_start + 1;
-            while lines.get(run_end) == Some(&(lines[run_end - 1] + 1)) {
-                run_end += 1;
-            }
-            let last = lines[run_end - 1];
-
-            // A zero-width span at a line's end sits on that line, so the run
-            // reaches the newline of its last line.
-            let bytes = rope.point_to_offset(stoat_text::Point::new(first, 0))
-                ..=rope.point_to_offset(stoat_text::Point::new(last, rope.line_len(last)));
-            let spans = &self.spans[self.starting_in(&bytes, snapshot)];
-            for span in resolve_span_range(spans, snapshot) {
-                let slot = &mut found[run_start + (span.start_line - first) as usize];
-                let worse = |held: ResolvedDiag| {
-                    severity_rank(span.severity) < severity_rank(held.severity)
-                };
-                if slot.is_none_or(worse) {
-                    *slot = Some(span);
-                }
-            }
-
-            run_start = run_end;
-        }
-        found
-    }
-
-    /// The index range of [`Self::spans`] whose starts fall inside `bytes`.
-    fn starting_in(
-        &self,
-        bytes: &RangeInclusive<usize>,
-        snapshot: &crate::multi_buffer::MultiBufferSnapshot,
-    ) -> Range<usize> {
-        let start = |span: &AnchoredDiag| snapshot.resolve_anchor(&span.start);
-        let lo = self
-            .spans
-            .partition_point(|span| start(span) < *bytes.start());
-        let hi = self
-            .spans
-            .partition_point(|span| start(span) <= *bytes.end());
-        lo..hi
     }
 }
 
@@ -361,11 +302,17 @@ pub(crate) fn build_diagnostic_span_cache(
     };
     if stale {
         let spans = anchored_diagnostics(set, path, snapshot);
+        let messages = set
+            .get(path)
+            .iter()
+            .map(|diag| Box::from(diag.message.lines().next().unwrap_or("")))
+            .collect();
         editor.diagnostic_span_cache = Some(DiagnosticSpanCache {
             set_version,
             prefix_max_end: prefix_max_end_indices(&spans, snapshot),
             cursor_line_diag: None,
             spans,
+            messages,
         });
     }
 }
@@ -440,6 +387,34 @@ pub(crate) fn diagnostic_at_offset(
         .into_iter()
         .filter(|s| s.start < s.end && s.start <= offset && offset < s.end)
         .min_by_key(|s| severity_rank(s.severity))
+}
+
+/// The worst-severity diagnostic that starts on each of `lines`, in the order
+/// given, or `None` for a line where none starts.
+///
+/// `spans` are resolved diagnostics in start order. A span over many lines
+/// answers only for the line it starts on, so a reader that prints one message
+/// per line prints a long span once. A zero-width span counts for its line.
+/// Ties go to the earliest span, as in
+/// [`DiagnosticSpanCache::cursor_line_diagnostic`].
+///
+/// It reads the resolved list alone and no anchor, so it answers off the run
+/// loop as it does on it.
+pub(crate) fn line_start_diagnostics(
+    spans: &[ResolvedDiag],
+    lines: &[u32],
+) -> Vec<Option<ResolvedDiag>> {
+    lines
+        .iter()
+        .map(|&line| {
+            let first = spans.partition_point(|span| span.start_line < line);
+            spans[first..]
+                .iter()
+                .take_while(|span| span.start_line == line)
+                .min_by_key(|span| severity_rank(span.severity))
+                .copied()
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -633,6 +608,7 @@ mod tests {
             prefix_max_end: super::prefix_max_end_indices(&spans, snapshot),
             cursor_line_diag: None,
             spans,
+            messages: Default::default(),
         }
     }
 
@@ -762,21 +738,21 @@ mod tests {
             (6, 6, DiagnosticSeverity::INFORMATION),
         ]);
 
-        let found: Vec<Option<usize>> = cache
-            .line_start_diagnostics(&[0, 1, 2, 3, 6], &snapshot)
-            .iter()
-            .map(|span| span.map(|span| span.index))
-            .collect();
+        let found: Vec<Option<usize>> =
+            super::line_start_diagnostics(&cache.resolve_all(&snapshot), &[0, 1, 2, 3, 6])
+                .iter()
+                .map(|span| span.map(|span| span.index))
+                .collect();
         assert_eq!(found, [Some(0), Some(1), Some(3), None, Some(5)]);
     }
 
-    /// A span counts for its line from any column, on the last line of a run
-    /// as on any other.
+    /// A span counts for its line from any column, not only from the line's
+    /// start.
     #[test]
     fn a_span_starting_mid_line_answers_for_its_line() {
         let (cache, snapshot) = span_cache(&[(3, 3)]);
 
-        let found = cache.line_start_diagnostics(&[0], &snapshot);
+        let found = super::line_start_diagnostics(&cache.resolve_all(&snapshot), &[0]);
         assert_eq!(
             found
                 .iter()

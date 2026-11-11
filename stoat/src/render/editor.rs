@@ -3,7 +3,7 @@ use crate::{
     auto_reload::ReloadFlash,
     buffer::BufferId,
     diagnostic_spans::{
-        build_diagnostic_span_cache, diagnostic_at_offset, severity_rank, DiagnosticSpanCache,
+        build_diagnostic_span_cache, diagnostic_at_offset, line_start_diagnostics, severity_rank,
         ResolvedDiag,
     },
     diff_map::{DiffHunkStatus, GutterMark, MarkState},
@@ -596,16 +596,22 @@ pub(crate) fn render_editor_with_overlay(
             }
         }
 
-        if let Some(cache) = editor.diagnostic_span_cache.as_mut() {
-            paint_line_diagnostics(
-                cache,
-                set,
-                path,
-                rope,
-                &snapshot,
-                cursor,
+        if let (Some(cache), Some(gutter_cache)) = (
+            editor.diagnostic_span_cache.as_mut(),
+            editor.gutter_severity_cache.as_ref(),
+        ) {
+            let line = rope.offset_to_point(cursor).row;
+            let eol = EolCursor {
+                line,
+                readout: cache.cursor_line_diagnostic(line, buffer_snapshot),
                 suppress,
+            };
+            paint_line_diagnostics(
+                &gutter_cache.spans,
+                &cache.messages,
+                eol,
                 theme,
+                &snapshot,
                 editor.scroll_row,
                 end_row,
                 inner,
@@ -1120,8 +1126,8 @@ pub(crate) struct GutterSeverityCache {
     /// version, in start order.
     ///
     /// A pooled page renders off the run loop, where the anchored
-    /// [`DiagnosticSpanCache`] does not reach, so the page paints its
-    /// diagnostic spans from this list.
+    /// [`DiagnosticSpanCache`](crate::diagnostic_spans::DiagnosticSpanCache) does
+    /// not reach, so the page paints its diagnostic spans from this list.
     pub(crate) spans: Arc<[ResolvedDiag]>,
 }
 
@@ -2398,27 +2404,41 @@ fn push_undercurl_runs(
     }
 }
 
+/// The cursor's inputs to the end-of-line diagnostic messages.
+///
+/// The cursor's line reads out the worst diagnostic that reaches it from
+/// anywhere. Every other line reads the worst diagnostic that starts on it, and
+/// the diagnostic that the popover shows prints on no line. One value carries
+/// these, so [`paint_line_diagnostics`] reads no cache.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct EolCursor {
+    /// The buffer row the cursor sits on.
+    pub(crate) line: u32,
+    /// The diagnostic that the cursor's line reads out.
+    pub(crate) readout: Option<ResolvedDiag>,
+    /// The index of the diagnostic that the popover shows.
+    pub(crate) suppress: Option<usize>,
+}
+
 /// Paint each visible line's diagnostic as a message after the line's text.
 ///
 /// A line shows the first message line of the worst diagnostic that starts on
 /// it, italic in the severity color, [`EOL_MESSAGE_GAP`] cells past its text.
 /// A span over many lines prints once, on the line it starts. The cursor's line
-/// reads the worst diagnostic that reaches it from anywhere instead, so a span
-/// the cursor sits inside still reads out there.
+/// reads `cursor.readout` instead, so a span the cursor sits inside still reads
+/// out there.
 ///
-/// `suppress` is the diagnostic the popover shows, which prints on no line. A
-/// soft-wrapped line prints after its last row, and a message that reaches the
-/// pane's right edge ends in an ellipsis.
+/// `spans` are the buffer's resolved diagnostics in start order, and `messages`
+/// holds the first message line of each by its index. A soft-wrapped line
+/// prints after its last row, and a message that reaches the pane's right edge
+/// ends in an ellipsis.
 #[allow(clippy::too_many_arguments)]
-fn paint_line_diagnostics(
-    cache: &mut DiagnosticSpanCache,
-    set: &crate::diagnostics::DiagnosticSet,
-    path: &Path,
-    rope: &Rope,
-    snapshot: &DisplaySnapshot,
-    cursor: usize,
-    suppress: Option<usize>,
+pub(crate) fn paint_line_diagnostics(
+    spans: &[ResolvedDiag],
+    messages: &[Box<str>],
+    cursor: EolCursor,
     theme: &Theme,
+    snapshot: &DisplaySnapshot,
     scroll_row: u32,
     end_row: u32,
     inner: Rect,
@@ -2427,26 +2447,20 @@ fn paint_line_diagnostics(
 ) {
     let line_ends = line_end_rows(snapshot, scroll_row, end_row);
     let lines: Vec<u32> = line_ends.iter().map(|&(_, line)| line).collect();
-    let starts = cache.line_start_diagnostics(&lines, snapshot.buffer_snapshot());
-    let cursor_line = rope.offset_to_point(cursor).row;
-    let diagnostics = set.get(path);
+    let starts = line_start_diagnostics(spans, &lines);
 
     for (&(display_row, line), start) in line_ends.iter().zip(starts) {
         // Containment is by line rather than by offset, so a diagnostic
         // reaching the cursor's line from anywhere on it wins the readout.
-        let found = match line == cursor_line {
-            true => cache.cursor_line_diagnostic(line, snapshot.buffer_snapshot()),
+        let found = match line == cursor.line {
+            true => cursor.readout,
             false => start,
         };
-        let Some(found) = found.filter(|found| Some(found.index) != suppress) else {
+        let Some(found) = found.filter(|found| Some(found.index) != cursor.suppress) else {
             continue;
         };
 
-        let message = diagnostics[found.index]
-            .message
-            .lines()
-            .next()
-            .unwrap_or("");
+        let message = messages.get(found.index).map_or("", AsRef::as_ref);
         let style = theme
             .get(severity_scope(found.severity))
             .add_modifier(Modifier::ITALIC);
