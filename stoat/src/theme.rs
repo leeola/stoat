@@ -896,6 +896,9 @@ pub mod scope {
 
     pub const UI_TABBAR_ACTIVE: &str = "ui.tabbar.active";
     pub const UI_TABBAR_INACTIVE: &str = "ui.tabbar.inactive";
+    /// The accent edge along the active tab's top. A theme that leaves it
+    /// unset draws none.
+    pub const UI_TABBAR_EDGE: &str = "ui.tabbar.edge";
     /// The chips at the tab bar's right that name the two diff layouts while
     /// one has the focus, the focused layout's chip active.
     pub const UI_TABBAR_TOGGLE_ACTIVE: &str = "ui.tabbar.toggle.active";
@@ -1787,6 +1790,23 @@ mod tests {
             ),
             (Some(rgb(0xc9b383)), Some(rgb(0x8a7650)), None),
             "the label, the ring, and no ring under default_dark",
+        );
+    }
+
+    /// The ermine theme draws the active tab's accent edge in its accent blue,
+    /// and default_dark leaves the edge unset, so it draws none.
+    #[test]
+    fn the_ermine_theme_colors_the_active_tab_edge() {
+        let [ermine, dark] = shipped_themes();
+        assert_eq!(
+            (
+                ermine
+                    .try_get(scope::UI_TABBAR_EDGE)
+                    .and_then(|style| style.fg),
+                dark.try_get(scope::UI_TABBAR_EDGE),
+            ),
+            (Some(rgb(0x7fb0ff)), None),
+            "the accent edge, and no edge under default_dark",
         );
     }
 

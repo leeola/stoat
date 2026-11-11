@@ -586,13 +586,14 @@ fn the_status_row_sits_on_chrome_with_no_hairline() {
 }
 
 /// The tab bar sits on chrome over a lone tab, with the active tab on the base
-/// surface, its top corners rounded off.
+/// surface, its top corners rounded off, under a 2 px accent edge.
 ///
 /// The bar leads with the workspace name, whose length follows the session's
 /// random name, so the check reads row 0 as runs of color rather than at a
 /// fixed column. The tab's left edge is the first base pixel of the row's
 /// middle, where the edge runs straight, and the rounding takes the base
-/// out of that column's top pixel.
+/// out of that column's top pixel. Column 8 of the tab lies past the 6 px arc,
+/// so its top two pixels show the accent edge and its third the base.
 #[test]
 fn the_tab_bar_sits_on_chrome_with_the_active_tab_on_base() {
     let mut home = support::scratch_home();
@@ -619,6 +620,20 @@ fn the_tab_bar_sits_on_chrome_with_the_active_tab_on_base() {
         panic!(
             "the active tab's top-left pixel at x {left} reads {}, not rounded off; the frame \
              is {}",
+            hex(BASE),
+            frame.display(),
+        );
+    }
+
+    let edge = [top, top + 1, top + 2].map(|y| pixel(left + 8, y));
+    if edge != [ACCENT, ACCENT, BASE] {
+        let frame = keep_frame(&shot, &mut home, "tab_edge");
+        panic!(
+            "the active tab's top three pixels at x {} read {:?}, not two {} over {}; the frame \
+             is {}",
+            left + 8,
+            edge.map(hex),
+            hex(ACCENT),
             hex(BASE),
             frame.display(),
         );

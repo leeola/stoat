@@ -105,12 +105,13 @@ pub struct StatusSegment<'a> {
 pub struct SegmentBox {
     /// The run, as indices into [`StatusBar::left`].
     pub segments: Range<usize>,
-    /// The panel that draws the box behind the run, or `None` for a box that
-    /// only aligns the run. The bar places the panel on the box's cells.
+    /// The panels that draw the box behind the run, in order, or none for a
+    /// box that only aligns the run. The bar places each panel on the box's
+    /// cells.
     ///
-    /// A box with a panel draws no background bar for its segments, because
-    /// the panel is their background.
-    pub panel: Option<Panel>,
+    /// A box with panels draws no background bar for its segments, because
+    /// the panels are their background.
+    pub panels: Vec<Panel>,
 }
 
 /// One step of a left run's layout, in the order the bar draws it.
@@ -164,7 +165,7 @@ impl StatusBar<'_> {
         let mut from = 0;
         for item in &layout {
             if let LeftItem::Box { index, cells } = item
-                && self.boxes[*index].panel.is_some()
+                && !self.boxes[*index].panels.is_empty()
             {
                 self.draw_hairline(from..cells.start, area, buf, scene);
                 from = cells.end;
@@ -179,9 +180,11 @@ impl StatusBar<'_> {
                 LeftItem::Box { index, cells } => {
                     let segment_box = &self.boxes[index];
                     paneled = 0..0;
-                    if let Some(panel) = &segment_box.panel {
+                    if !segment_box.panels.is_empty() {
                         let rect = Rect::new(area.x + cells.start, area.y, cells.len() as u16, 1);
-                        panel.draw_components(rect, scene);
+                        for panel in &segment_box.panels {
+                            panel.draw_components(rect, scene);
+                        }
                         paneled = segment_box.segments.clone();
                     }
                     cursor = cursor.max(cells::span_sixteenths(cells.end));
@@ -1119,7 +1122,7 @@ mod tests {
         ];
         let boxes = [SegmentBox {
             segments: 0..1,
-            panel: Some(Panel::chip([4, 5, 6])),
+            panels: vec![Panel::chip([4, 5, 6])],
         }];
         let draw = |width: u16| {
             let status = StatusBar {
@@ -1223,7 +1226,7 @@ mod tests {
         ];
         let boxes = [SegmentBox {
             segments: 1..4,
-            panel: Some(Panel::chip([9, 9, 9])),
+            panels: vec![Panel::chip([9, 9, 9])],
         }];
         let status = StatusBar {
             left: &left,
@@ -1347,7 +1350,7 @@ mod tests {
         ];
         let boxes = [SegmentBox {
             segments: 0..2,
-            panel: None,
+            panels: Vec::new(),
         }];
         let scales = [(1, 80)];
         let status = StatusBar {
