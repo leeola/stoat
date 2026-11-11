@@ -214,6 +214,11 @@ fn the_base_side_of_the_split_diff_recedes_behind_the_live_side() {
 ///
 /// Row 49 is the status row. Column 30 lies in the base half and column 130 in
 /// the target half.
+///
+/// Column 76 is the diff's divider, whose 9 px cell starts at pixel column
+/// 684. The base tint runs to the hairline's pixel, 688, the ground fills that
+/// pixel, and the target tint fills the cell past it, as the DiffChanges
+/// board's footer keeps a 1 px ground divider between its halves.
 #[test]
 fn the_split_diff_s_status_halves_take_their_side_tints() {
     let mut home = support::scratch_home();
@@ -237,6 +242,20 @@ fn the_split_diff_s_status_halves_take_their_side_tints() {
         SIDE_TARGET,
         "diff_status_target_half",
     );
+
+    let (x, y, _, height) = cell_rect(76, 49, 1, 1);
+    let whole =
+        [(0, 4, SIDE_BASE), (4, 1, CHROME), (5, 4, SIDE_TARGET)].map(|(dx, width, color)| {
+            pixels_of(&shot, (x + dx, y, width, height), color) == (width * height) as usize
+        });
+    if whole != [true; 3] {
+        let frame = keep_frame(&shot, &mut home, "diff_status_divider");
+        panic!(
+            "the divider cell's base, ground, and target pixel columns from {x} read whole as \
+             {whole:?}; the frame is {}",
+            frame.display(),
+        );
+    }
 }
 
 /// A frame in the base tint runs down both sides of the split diff's base

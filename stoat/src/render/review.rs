@@ -128,7 +128,7 @@ const BASE_FRAME_RULE_GAP: u16 = 1;
 
 /// Where the mid divider's hairline sits in the divider column, which is the
 /// column's middle, in sixteenths of a cell from its left edge.
-const DIVIDER_RULE_X: u16 = 8;
+pub(crate) const DIVIDER_RULE_X: u16 = 8;
 
 /// Width of the lane that marks a row an expand just opened, in sixteenths of
 /// a cell. One board px is two sixteenths across, so the ExpandFlow board's

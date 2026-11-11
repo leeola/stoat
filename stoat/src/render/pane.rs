@@ -1149,7 +1149,60 @@ pub(crate) fn render_pane_status(
         View::Editor(id) => editors.get_mut(id).map(|e| &mut e.status_scene_cache),
         _ => None,
     };
-    render_status_runs(&status.runs, frame, buf, scene, cache);
+    if render_status_runs(&status.runs, frame, buf, scene, cache) {
+        draw_divider_cell(&status.runs, frame.theme, buf, scene);
+    }
+}
+
+/// Draw the cell between the two halves of a split status row `runs` as the
+/// base half's fill up to the diff's hairline and the target half's fill past
+/// it, with one pixel of window ground under the hairline.
+///
+/// The ground pixel is a bar with the hairline's own geometry, drawn last, so
+/// it lands on the hairline's pixel whichever way the bar shader rounds the
+/// cell's middle. A row with no such cell, or a color outside RGB, draws
+/// nothing, and the cell keeps the window ground.
+fn draw_divider_cell(
+    runs: &[StatusRun],
+    theme: &crate::theme::Theme,
+    buf: &mut Buffer,
+    scene: &mut ApcScene,
+) {
+    let [base, target] = runs else {
+        return;
+    };
+    if target.area.x != base.area.right() + 1 {
+        return;
+    }
+    let colors = (|| {
+        Some((
+            style_rgb(base.style.bg)?,
+            style_rgb(target.style.bg)?,
+            style_rgb(Some(crate::render::themed_bg(theme)))?,
+        ))
+    })();
+    let Some((base_bg, target_bg, ground)) = colors else {
+        return;
+    };
+
+    // Bars of different colors overlap here, so they render one at a time in
+    // draw order rather than through a batch, which groups them by color.
+    let cell = Rect::new(base.area.right(), base.area.y, 1, 1);
+    let rule = review::DIVIDER_RULE_X;
+    for (x, width, color) in [
+        (0, rule, base_bg),
+        (rule, 16 - rule, target_bg),
+        (rule, 1, ground),
+    ] {
+        Bar {
+            x: x as i16,
+            y: 0,
+            width,
+            height: 16,
+            color,
+        }
+        .render(cell, buf, scene);
+    }
 }
 
 /// The segments of one pane's status, laid out in the window's status row.
@@ -1170,7 +1223,9 @@ pub(crate) struct StatusRow {
 ///
 /// A plain row is one run across its width. A split diff view's row is two,
 /// its base half and its target half, with a cell of window ground between
-/// them at the diff's divider.
+/// them at the diff's divider. Under a live scene that cell takes each half's
+/// fill on its side of the diff's hairline and keeps one pixel of ground under
+/// it, as [`draw_divider_cell`] draws it.
 #[derive(Default, Hash)]
 struct StatusRun {
     /// The cells the run fills.
@@ -3652,6 +3707,9 @@ mod tests {
         h.settle();
     }
 
+    /// The symbols of `buf`'s bottom row, the status row. A split diff's
+    /// divider cell reads U+2502 there, the glyph the composite draws for the
+    /// bars that fill the cell.
     fn bar_row(buf: &Buffer) -> String {
         let y = buf.area.height - 1;
         (0..buf.area.width).map(|x| buf[(x, y)].symbol()).collect()
@@ -4530,6 +4588,55 @@ mod tests {
     /// divider. The target name and the position fill the target half.
     #[test]
     fn diff_view_status_halves() {
+        let mut h = status_halves_harness();
+        h.type_keys("j j j");
+        h.assert_snapshot("diff_view_status_halves");
+    }
+
+    /// Under a live scene the divider's cell of a split diff view's status row
+    /// takes the base half's fill left of the diff's hairline and the target
+    /// half's fill right of it, then one sixteenth of window ground over the
+    /// hairline's place. The divider is column 59 of the 120-wide window, and
+    /// the status row is row 7.
+    #[test]
+    fn the_status_divider_cell_splits_between_the_side_fills() {
+        use super::{style_rgb, DiffSidesColors};
+        use stoatty_protocol::command::{decode_stream, Command};
+
+        let mut h = status_halves_harness();
+        h.stoat.render();
+        let bars: Vec<_> = decode_stream(h.stoat.apc_scene.lane_bytes(crate::render::STATUS_LANE))
+            .into_iter()
+            .flat_map(|command| match command {
+                Command::Bar(bar) => vec![(bar.x, bar.y, bar.width, bar.height, bar.color)],
+                Command::Bars(group) => group
+                    .bars
+                    .into_iter()
+                    .map(|(x, y, width, height)| (x, y, width, height, group.color))
+                    .collect(),
+                _ => Vec::new(),
+            })
+            .filter(|bar| (944..960).contains(&bar.0))
+            .collect();
+
+        let theme = &h.stoat.theme;
+        let colors = DiffSidesColors::resolve(theme);
+        let rgb = |color| style_rgb(Some(color)).expect("the theme colors it in RGB");
+        assert_eq!(
+            bars,
+            [
+                (944, 112, 8, 16, rgb(colors.base.bg)),
+                (952, 112, 8, 16, rgb(colors.target.bg)),
+                (952, 112, 1, 16, rgb(crate::render::themed_bg(theme))),
+            ],
+            "the base fill to the hairline, the target fill past it, and the ground on the \
+             hairline's sixteenth, in draw order",
+        );
+    }
+
+    /// A 120 by 8 split diff view of one changed `a.rs`, with no minimap and
+    /// its hints box hidden.
+    fn status_halves_harness() -> crate::test_harness::TestHarness {
         let mut h = crate::test_harness::TestHarness::with_size(120, 8);
         h.stoat.minimap_override = Some(false);
         // The diff view keeps its hints box up, and 8 rows leave it over the
@@ -4542,8 +4649,7 @@ mod tests {
         focused_editor_mut(&mut h.stoat)
             .expect("focused editor")
             .set_diff_view(true);
-        h.type_keys("j j j");
-        h.assert_snapshot("diff_view_status_halves");
+        h
     }
 
     fn hunk_position(
@@ -5043,8 +5149,8 @@ mod tests {
         assert_eq!(
             row.split_whitespace().collect::<Vec<_>>().join(" "),
             format!(
-                "NOR changes hunk 1 / 1 \u{b7} 1 file \u{b7} +1 \u{2212}1 \u{2212} index + working \
-                 tree {}:{}",
+                "NOR changes hunk 1 / 1 \u{b7} 1 file \u{b7} +1 \u{2212}1 \u{2212} index \u{2502} \
+                 + working tree {}:{}",
                 point.row + 1,
                 point.column + 1,
             ),
@@ -5075,9 +5181,10 @@ mod tests {
                 bar(&[("c.txt", "c\n", "c\nC\nD\n")]),
             ],
             [
-                "NOR changes hunk 1 / 2 \u{b7} 2 files \u{b7} +1 \u{2212}2 \u{2212} HEAD + working \
+                "NOR changes hunk 1 / 2 \u{b7} 2 files \u{b7} +1 \u{2212}2 \u{2212} HEAD \u{2502} \
+                 + working tree 1:1",
+                "NOR changes hunk - / 1 \u{b7} 1 file \u{b7} +2 \u{2212} HEAD \u{2502} + working \
                  tree 1:1",
-                "NOR changes hunk - / 1 \u{b7} 1 file \u{b7} +2 \u{2212} HEAD + working tree 1:1",
             ],
         );
     }
@@ -5123,7 +5230,8 @@ mod tests {
         };
         let theme = |scope: &str| wide.stoat.theme.get(scope).fg;
 
-        let tail = "hunk 1 / 1 \u{b7} 1 file \u{b7} +1 \u{2212}1 \u{2212} HEAD + working tree 4:1";
+        let tail = "hunk 1 / 1 \u{b7} 1 file \u{b7} +1 \u{2212}1 \u{2212} HEAD \u{2502} + working \
+                    tree 4:1";
         assert_eq!(
             (
                 text(&buf),
@@ -5189,7 +5297,7 @@ mod tests {
         let row = bar_row(&h.render_composited()).replace('─', " ");
         assert_eq!(
             row.split_whitespace().collect::<Vec<_>>().join(" "),
-            "NOR changes \u{2212} HEAD + working tree",
+            "NOR changes \u{2212} HEAD \u{2502} + working tree",
         );
     }
 
