@@ -85,6 +85,8 @@ mod tests {
             color: [5, 6, 7],
             occludes: false,
             hatch: None,
+            radius: 0,
+            corners: 0,
         };
         let mut bytes = encode_lane_begin(3);
         bytes.extend(encode_bar(&bar));

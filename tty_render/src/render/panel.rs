@@ -595,8 +595,8 @@ fn build_panel_instances_into(panels: &[Panel], scale_factor: f32, out: &mut Vec
     }));
 }
 
-/// The corners a panel rounds, as four bits from top-left clockwise. A panel
-/// that names no corner rounds all four.
+/// The corners a panel or a bar rounds, as four bits from top-left clockwise.
+/// A mask that names no corner rounds all four.
 pub(crate) fn corner_mask(corners: u8) -> u8 {
     match corners & 0b1111 {
         0 => 0b1111,

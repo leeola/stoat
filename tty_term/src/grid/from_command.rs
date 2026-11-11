@@ -94,6 +94,8 @@ pub(crate) fn bar_from_command(command: &BarCommand, y: i16, seq: u32) -> Bar {
         seq,
         occludes: command.occludes,
         hatch: command.hatch.map(|[r, g, b]| Rgb::new(r, g, b)),
+        radius: command.radius,
+        corners: command.corners,
     }
 }
 

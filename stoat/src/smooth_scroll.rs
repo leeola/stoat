@@ -1454,6 +1454,8 @@ mod tests {
                     color: error,
                     occludes: false,
                     hatch: None,
+                    radius: 0,
+                    corners: 0,
                 }],
                 vec![' '; 4],
             ),
@@ -2739,6 +2741,8 @@ mod tests {
                 color,
                 occludes: false,
                 hatch: None,
+                radius: 0,
+                corners: 0,
             });
             decorations
                 .windows(command.len())

@@ -484,6 +484,8 @@ pub(crate) fn hline(
                 width: width.saturating_mul(16),
                 height: 1,
                 color,
+                radius: 0,
+                corners: 0,
             }
             .render(Rect::new(x, y, width, 1), buf, scene);
         },
@@ -518,6 +520,8 @@ pub(crate) fn hline_edge(
                 width: width.saturating_mul(16),
                 height: 1,
                 color,
+                radius: 0,
+                corners: 0,
             }
             .render(Rect::new(x, y, width, 1), buf, scene);
         },
@@ -548,6 +552,8 @@ pub(crate) fn vline(
                 width: 1,
                 height: height.saturating_mul(16),
                 color,
+                radius: 0,
+                corners: 0,
             }
             .render(Rect::new(x, y, 1, height), buf, scene);
         },
@@ -595,6 +601,8 @@ pub(crate) fn selection_bar(x: u16, y: u16, theme: &Theme, buf: &mut Buffer, sce
         width: SELECTION_BAR_WIDTH,
         height: 16,
         color,
+        radius: 0,
+        corners: 0,
     }
     .render(Rect::new(x, y, 1, 1), buf, scene);
 }
@@ -1360,6 +1368,8 @@ mod tests {
                 color: [1, 2, 3],
                 occludes: false,
                 hatch: None,
+                radius: 0,
+                corners: 0,
             })
         );
     }
@@ -1394,6 +1404,8 @@ mod tests {
                     color: [1, 2, 3],
                     occludes: false,
                     hatch: None,
+                    radius: 0,
+                    corners: 0,
                 })
                 .as_slice()
             ),
@@ -1470,6 +1482,8 @@ mod tests {
                 color: [1, 2, 3],
                 occludes: false,
                 hatch: None,
+                radius: 0,
+                corners: 0,
             })
         );
     }

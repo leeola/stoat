@@ -8,8 +8,8 @@
 //! scales it by the cell size of the grid it sits on, so bars track font zoom.
 
 use crate::render::{
-    globals_offset, rgb_f32, CellMetrics, CompositeSlot, CompositeSlots, Occluder, OccluderBuffer,
-    PoolOccluders, RowAnchor, GLOBALS_SLOTS, GLOBALS_SLOT_STRIDE,
+    globals_offset, panel, rgb_f32, CellMetrics, CompositeSlot, CompositeSlots, Occluder,
+    OccluderBuffer, PoolOccluders, RowAnchor, GLOBALS_SLOTS, GLOBALS_SLOT_STRIDE,
 };
 use bytemuck::{Pod, Zeroable};
 use std::mem;
@@ -32,8 +32,9 @@ const SIXTEENTHS: f32 = 16.0;
 
 /// The per-bar instance data. Carries the top-left and the size in
 /// cell-fraction units, the fill color, the declaration-order seq the fragment
-/// shader occludes by, and the hatch color with 1.0 in its last lane when the
-/// bar is hatched.
+/// shader occludes by, the hatch color with 1.0 in its last lane when the bar is
+/// hatched, and the corner radius in logical pixels with the four-bit mask of
+/// the corners it rounds.
 #[repr(C)]
 #[derive(Clone, Copy, PartialEq, Pod, Zeroable)]
 struct BarInstance {
@@ -42,6 +43,8 @@ struct BarInstance {
     color: [f32; 3],
     seq: u32,
     hatch: [f32; 4],
+    radius: f32,
+    corners: u32,
 }
 
 /// The uniform shared by every instance. Carries the surface resolution and
@@ -197,6 +200,8 @@ impl BarPass {
                         2 => Float32x3,
                         3 => Uint32,
                         4 => Float32x4,
+                        5 => Float32,
+                        6 => Uint32,
                     ],
                 })],
             },
@@ -557,6 +562,8 @@ fn build_bar_instances_into(bars: &[Bar], out: &mut Vec<BarInstance>) {
             let [r, g, b] = rgb_f32(hatch);
             [r, g, b, 1.0]
         }),
+        radius: f32::from(bar.radius),
+        corners: u32::from(panel::corner_mask(bar.corners)),
     };
     out.extend(bars.iter().filter(|bar| bar.hatch.is_some()).map(instance));
     out.extend(bars.iter().filter(|bar| bar.hatch.is_none()).map(instance));
@@ -569,6 +576,8 @@ mod tests {
         render::{background::BackgroundPass, CellMetrics, PoolOccluders, RowAnchor},
         test_support::{read_back, require_headless_device},
     };
+    use std::ops::Range;
+    use stoatty_protocol::command::panel::{CORNER_TOP_LEFT, CORNER_TOP_RIGHT};
     use stoatty_term::grid::{Bar, Grid, Rgb};
     use wgpu::{
         naga::{
@@ -677,6 +686,8 @@ mod tests {
                 seq: 0,
                 occludes: false,
                 hatch: None,
+                radius: 0,
+                corners: 0,
             };
             let mut bars = BarPass::new(&device, TextureFormat::Rgba8Unorm, metrics);
             bars.prepare(
@@ -752,6 +763,8 @@ mod tests {
             seq: 0,
             occludes: false,
             hatch: None,
+            radius: 0,
+            corners: 0,
         };
         let mut bars = BarPass::new(&device, TextureFormat::Rgba8Unorm, metrics);
         bars.prepare_composite(
@@ -815,6 +828,8 @@ mod tests {
             seq,
             occludes: false,
             hatch,
+            radius: 0,
+            corners: 0,
         };
         let instances = build_bar_instances(&[
             bar(0, None),
@@ -853,6 +868,8 @@ mod tests {
             seq: 0,
             occludes: false,
             hatch: Some(Rgb::new(0, 255, 0)),
+            radius: 0,
+            corners: 0,
         };
         let mut bars = BarPass::new(&device, TextureFormat::Rgba8Unorm, metrics);
         bars.prepare(
@@ -885,6 +902,76 @@ mod tests {
         assert_eq!(painted, expected, "row 3, fill f and hatch h");
     }
 
+    /// A bar rounds the corners its mask names at its radius and keeps the
+    /// others square. A 4 pixel dot at radius 2 covers under half of each corner
+    /// pixel and its center whole. A 3 pixel tall ledge with its top corners
+    /// rounded keeps its bottom row whole.
+    #[test]
+    fn a_bar_rounds_the_corners_its_mask_names() {
+        let (device, queue) = require_headless_device();
+        let metrics = CellMetrics {
+            font_size: 16.0,
+            width: 16.0,
+            height: 16.0,
+            scale_factor: 1.0,
+        };
+        let bar = |x, width, height, corners| Bar {
+            x,
+            y: 8,
+            width,
+            height,
+            color: Rgb::new(255, 0, 0),
+            seq: 0,
+            occludes: false,
+            hatch: None,
+            radius: 2,
+            corners,
+        };
+        let mut bars = BarPass::new(&device, TextureFormat::Rgba8Unorm, metrics);
+        bars.prepare(
+            &device,
+            &queue,
+            &[
+                bar(8, 4, 4, 0),
+                bar(20, 8, 3, CORNER_TOP_LEFT | CORNER_TOP_RIGHT),
+            ],
+            &[],
+            [TARGET as f32, TARGET as f32],
+            RowAnchor::UNIFORM,
+        );
+        let rgba = render_rgba(&device, &queue, |pass| bars.draw(pass));
+
+        let coverage = |cols: Range<u32>, rows: Range<u32>| -> Vec<String> {
+            rows.map(|row| {
+                cols.clone()
+                    .map(|col| match rgba[((row * TARGET + col) * 4) as usize] {
+                        0 => '.',
+                        1..128 => '-',
+                        128..255 => '+',
+                        255 => '#',
+                    })
+                    .collect()
+            })
+            .collect()
+        };
+        assert_eq!(
+            coverage(7..13, 7..13),
+            ["......", ".-++-.", ".+##+.", ".+##+.", ".-++-.", "......"],
+            "the dot: - under half, + half or more, # whole",
+        );
+        assert_eq!(
+            coverage(19..29, 7..12),
+            [
+                "..........",
+                ".-+####+-.",
+                ".+######+.",
+                ".########.",
+                "..........",
+            ],
+            "the ledge rounds its top corners and keeps its bottom row whole",
+        );
+    }
+
     #[test]
     fn a_reused_bar_scratch_holds_only_this_frame_s_bars() {
         let bars = [Bar {
@@ -896,6 +983,8 @@ mod tests {
             seq: 7,
             occludes: false,
             hatch: None,
+            radius: 0,
+            corners: 0,
         }];
 
         let mut scratch = build_bar_instances(&bars);
@@ -925,6 +1014,8 @@ mod tests {
             seq: 7,
             occludes: false,
             hatch: None,
+            radius: 0,
+            corners: 0,
         }];
         let first = build_bar_instances(&bars);
         assert!(
@@ -954,6 +1045,8 @@ mod tests {
             seq: 7,
             occludes: false,
             hatch: None,
+            radius: 0,
+            corners: 0,
         }];
 
         let instances = build_bar_instances(&bars);
@@ -979,6 +1072,8 @@ mod tests {
             seq: 0,
             occludes: false,
             hatch: None,
+            radius: 0,
+            corners: 0,
         }];
 
         let instances = build_bar_instances(&bars);
@@ -1020,6 +1115,8 @@ mod tests {
             seq: 0,
             occludes: false,
             hatch: None,
+            radius: 0,
+            corners: 0,
         };
 
         pass.prepare_composite(

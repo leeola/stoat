@@ -19,6 +19,15 @@ pub struct Bar {
     pub width: u16,
     pub height: u16,
     pub color: [u8; 3],
+    /// The radius the bar's corners round at, in logical pixels, or 0 for a
+    /// square bar.
+    ///
+    /// See also:
+    /// - [`BarCommand::radius`] for how the terminal holds the radius to the bar's sides.
+    pub radius: u8,
+    /// The corners that round, as [`BarCommand::corners`] names them. A mask
+    /// of 0 rounds all four.
+    pub corners: u8,
 }
 
 impl Bar {
@@ -62,6 +71,8 @@ impl Bar {
                 color: self.color,
                 occludes,
                 hatch,
+                radius: self.radius,
+                corners: self.corners,
             },
         );
     }
@@ -86,6 +97,8 @@ impl StatefulWidget for Bar {
 ///
 /// A scene without the batch protocol, as [`ApcScene::set_batch_protocol`]
 /// declares it, takes one `bar` per bar, in the same group order.
+///
+/// A batch carries no corner radius, so its bars draw square.
 #[derive(Default)]
 pub struct BarBatch {
     groups: Vec<BarsCommand>,
@@ -134,6 +147,8 @@ impl BarBatch {
                         color: group.color,
                         occludes: false,
                         hatch: None,
+                        radius: 0,
+                        corners: 0,
                     },
                 );
             }
@@ -148,8 +163,9 @@ mod tests {
     use ratatui::{buffer::Buffer, layout::Rect, widgets::StatefulWidget};
     use stoatty_protocol::command::{decode_stream, encode_bar, BarCommand, BarsCommand, Command};
 
-    /// A bar sits at absolute sixteenths. An occluding render writes the same
-    /// bar with its flag set, and a hatched render with its hatch color.
+    /// A bar sits at absolute sixteenths with its corner radius and mask. An
+    /// occluding render writes the same bar with its flag set, and a hatched
+    /// render with its hatch color.
     #[test]
     fn emits_a_bar_at_absolute_sixteenths_plain_occluding_or_hatched() {
         let bar = || Bar {
@@ -158,6 +174,8 @@ mod tests {
             width: 5,
             height: 16,
             color: [10, 20, 30],
+            radius: 2,
+            corners: 3,
         };
         let area = Rect::new(2, 4, 1, 1);
         let mut plain = ApcScene::new();
@@ -180,6 +198,8 @@ mod tests {
                 color: [10, 20, 30],
                 occludes,
                 hatch,
+                radius: 2,
+                corners: 3,
             })
         };
         assert_eq!(
@@ -207,6 +227,8 @@ mod tests {
             width: 5,
             height: 16,
             color: [10, 20, 30],
+            radius: 0,
+            corners: 0,
         }
         .render(Rect::new(2, 4, 1, 1), &mut buf, &mut scene);
 
@@ -218,6 +240,8 @@ mod tests {
             color: [10, 20, 30],
             occludes: false,
             hatch: None,
+            radius: 0,
+            corners: 0,
         });
         assert_eq!(
             scene.buffer().as_slice(),
@@ -243,6 +267,8 @@ mod tests {
                     width: 2,
                     height: 16,
                     color,
+                    radius: 0,
+                    corners: 0,
                 };
                 batch.push(Rect::new(1, 2, 4, 4), bar);
             }
@@ -258,6 +284,8 @@ mod tests {
                 color,
                 occludes: false,
                 hatch: None,
+                radius: 0,
+                corners: 0,
             })
         };
 

@@ -881,6 +881,8 @@ mod tests {
                 color: [1, 2, 3],
                 occludes: false,
                 hatch: None,
+                radius: 0,
+                corners: 0,
             }))
         });
 

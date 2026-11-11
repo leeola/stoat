@@ -313,6 +313,8 @@ fn paint_page_dots(
             width,
             height: PAGE_DOT_HEIGHT,
             color,
+            radius: 0,
+            corners: 0,
         }
         .render(origin, buf, scene);
         x += width + PAGE_DOT_GAP;
@@ -944,6 +946,8 @@ mod tests {
                     color,
                     occludes: false,
                     hatch: None,
+                    radius: 0,
+                    corners: 0,
                 })
             })
             .collect()

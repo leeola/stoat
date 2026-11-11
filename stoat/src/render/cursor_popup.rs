@@ -208,6 +208,8 @@ mod tests {
                 color: [0x7f, 0xb0, 0xff],
                 occludes: false,
                 hatch: None,
+                radius: 0,
+                corners: 0,
             })],
         );
     }

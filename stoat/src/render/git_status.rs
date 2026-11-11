@@ -489,6 +489,8 @@ impl Painter<'_> {
                 width,
                 height: rect.height * 16,
                 color: rgb(style),
+                radius: 0,
+                corners: 0,
             }
             .render(rect, self.buf, self.scene);
             return;
@@ -514,6 +516,8 @@ impl Painter<'_> {
                 fg: self.theme.get(scope::UI_SURFACE_RAISED).bg,
                 ..Style::default()
             }),
+            radius: 0,
+            corners: 0,
         }
         .render(row, self.buf, self.scene);
     }

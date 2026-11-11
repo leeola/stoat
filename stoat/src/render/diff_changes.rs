@@ -501,6 +501,8 @@ fn paint_pinned_header(
                 width: row.width * 16,
                 height: 1,
                 color,
+                radius: 0,
+                corners: 0,
             }
             .render_occluding(row, scene);
         }
@@ -547,6 +549,8 @@ fn emit_header_hairlines(rows: impl Iterator<Item = Rect>, theme: &Theme, scene:
                     width: row.width * 16,
                     height: 1,
                     color,
+                    radius: 0,
+                    corners: 0,
                 },
             );
         }

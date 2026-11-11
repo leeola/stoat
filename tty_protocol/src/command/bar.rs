@@ -14,8 +14,8 @@ const OCCLUDES: u8 = 1;
 const HATCHED: u8 = 2;
 
 /// Bytes a `bar` argument takes, which hold the rect, the color, the flags
-/// byte, and the hatch color.
-const BAR_ARG: usize = 15;
+/// byte, the hatch color, the corner radius, and the corner mask.
+const BAR_ARG: usize = 17;
 
 /// Fill a thin rectangle off the cell grid in a solid color.
 ///
@@ -50,13 +50,28 @@ pub struct BarCommand {
     /// every plain bar, so the plain bars and the text runs over its rect show
     /// whatever order they were declared in. [`BarsCommand`] carries no hatch.
     pub hatch: Option<[u8; 3]>,
+    /// The radius the bar's corners round at, in logical pixels, or 0 for a
+    /// square bar.
+    ///
+    /// The terminal holds the radius to the bar's shorter side, not to half of
+    /// it. A bar narrower than its radius then still rounds its outer corners
+    /// at the radius it shares with the bars beside it, as one share of a
+    /// round-ended meter does. A caller rounds both corners of one side only
+    /// at half that side or less. [`BarsCommand`] carries no radius, so its
+    /// bars stay square.
+    pub radius: u8,
+    /// The corners that round, as the panel's mask names them: bit 0 the
+    /// top-left and then clockwise, per
+    /// [`CORNER_TOP_LEFT`](crate::command::panel::CORNER_TOP_LEFT). A mask of
+    /// 0 rounds all four.
+    pub corners: u8,
 }
 
 /// Encode a [`BarCommand`] as a full `Gstoatty;bar` frame for an emitter.
 ///
-/// The position, size, color, a flags byte, and the hatch color ride in a
-/// single fixed 15-byte argument. A bar with no hatch writes the hatch color as
-/// zeros.
+/// The position, size, color, a flags byte, the hatch color, the corner
+/// radius, and the corner mask ride in a single fixed 17-byte argument. A bar
+/// with no hatch writes the hatch color as zeros.
 pub fn encode_bar(command: &BarCommand) -> Vec<u8> {
     let mut out = Vec::new();
     encode_bar_into(&mut out, command);
@@ -75,7 +90,8 @@ pub fn encode_bar_into(out: &mut Vec<u8>, command: &BarCommand) {
         let occludes = if command.occludes { OCCLUDES } else { 0 };
         let hatched = if command.hatch.is_some() { HATCHED } else { 0 };
         w.write_all(&[occludes | hatched])?;
-        w.write_all(&command.hatch.unwrap_or([0, 0, 0]))
+        w.write_all(&command.hatch.unwrap_or([0, 0, 0]))?;
+        w.write_all(&[command.radius, command.corners])
     });
     frame::end(out);
 }
@@ -91,6 +107,8 @@ pub(super) fn decode_bar(args: &[Vec<u8>]) -> Option<BarCommand> {
         color: [arg[8], arg[9], arg[10]],
         occludes: arg[11] & OCCLUDES != 0,
         hatch: (arg[11] & HATCHED != 0).then_some([arg[12], arg[13], arg[14]]),
+        radius: arg[15],
+        corners: arg[16],
     })
 }
 
@@ -179,10 +197,14 @@ pub(super) fn decode_bars(args: &[Vec<u8>]) -> Option<BarsCommand> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::command::{decode, decode_stream, Command};
+    use crate::command::{
+        decode, decode_stream,
+        panel::{CORNER_TOP_LEFT, CORNER_TOP_RIGHT},
+        Command,
+    };
 
-    /// A bar comes back whole, a plain one, an occluding one, and a hatched one
-    /// alike.
+    /// A bar comes back whole, a plain one, an occluding one, a hatched one, and
+    /// one rounded at two corners alike.
     #[test]
     fn bar_round_trips() {
         let plain = BarCommand {
@@ -193,6 +215,8 @@ mod tests {
             color: [220, 50, 47],
             occludes: false,
             hatch: None,
+            radius: 0,
+            corners: 0,
         };
         let occluding = BarCommand {
             occludes: true,
@@ -202,19 +226,25 @@ mod tests {
             hatch: Some([27, 29, 34]),
             ..plain
         };
+        let rounded = BarCommand {
+            radius: 2,
+            corners: CORNER_TOP_LEFT | CORNER_TOP_RIGHT,
+            ..plain
+        };
 
         assert_eq!(
-            [plain, occluding, hatched].map(|command| decode(&encode_bar(&command))),
+            [plain, occluding, hatched, rounded].map(|command| decode(&encode_bar(&command))),
             [
                 Some(Command::Bar(plain)),
                 Some(Command::Bar(occluding)),
                 Some(Command::Bar(hatched)),
+                Some(Command::Bar(rounded)),
             ],
         );
     }
 
-    /// A bar's argument is a fixed 15 bytes, so the 14 bytes of a bar cut short
-    /// of its hatch color decode to nothing.
+    /// A bar's argument is a fixed 17 bytes, so the 16 bytes of a bar cut short
+    /// of its corner mask decode to nothing.
     #[test]
     fn rejects_wrong_length_bar_payload() {
         let mut arg = frame::decode(&encode_bar(&BarCommand {
@@ -225,6 +255,8 @@ mod tests {
             color: [5, 6, 7],
             occludes: false,
             hatch: None,
+            radius: 0,
+            corners: 0,
         }))
         .expect("one frame")
         .args

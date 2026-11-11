@@ -1877,6 +1877,8 @@ fn decoration_seq_stamps_declaration_order_and_resets() {
         color: [1, 2, 3],
         occludes: false,
         hatch: None,
+        radius: 0,
+        corners: 0,
     }));
 
     let mut terminal = Terminal::new(8, 8, Theme::default());
@@ -2469,6 +2471,8 @@ fn bar_frames(count: usize) -> Vec<u8> {
             color: [1, 2, 3],
             occludes: false,
             hatch: None,
+            radius: 0,
+            corners: 0,
         }));
     }
     stream
@@ -2695,8 +2699,8 @@ fn a_resize_mid_fill_keeps_a_window_pools_page() {
     );
 }
 
-/// A bar frame sets a grid bar, an occluding one keeps its flag, and a hatched
-/// one keeps its hatch color.
+/// A bar frame sets a grid bar with its corner radius and mask, an occluding
+/// one keeps its flag, and a hatched one keeps its hatch color.
 #[test]
 fn bar_apc_frame_sets_a_grid_bar() {
     let projected = |occludes: bool, hatch: Option<[u8; 3]>| {
@@ -2708,6 +2712,8 @@ fn bar_apc_frame_sets_a_grid_bar() {
             color: [220, 50, 47],
             occludes,
             hatch,
+            radius: 2,
+            corners: 3,
         });
         let mut terminal = Terminal::new(8, 8, Theme::default());
         let mut grid = Grid::new(8, 8);
@@ -2724,6 +2730,8 @@ fn bar_apc_frame_sets_a_grid_bar() {
         seq: 1,
         occludes,
         hatch,
+        radius: 2,
+        corners: 3,
     };
 
     assert_eq!(
@@ -2766,6 +2774,8 @@ fn line_layout_shifts_a_bound_component_past_an_expansion() {
         color: [220, 50, 47],
         occludes: false,
         hatch: None,
+        radius: 0,
+        corners: 0,
     });
 
     let mut terminal = Terminal::new(8, 8, Theme::default());
@@ -3113,6 +3123,8 @@ fn bar_at(x: i16) -> Vec<u8> {
         color: [1, 2, 3],
         occludes: false,
         hatch: None,
+        radius: 0,
+        corners: 0,
     })
 }
 
@@ -4854,6 +4866,8 @@ fn fill_captures_bar_and_text_run_onto_the_slot() {
         color: [220, 50, 47],
         occludes: false,
         hatch: None,
+        radius: 0,
+        corners: 0,
     }));
     stream.extend_from_slice(&encode_text_run(&TextRunCommand {
         col: 0,
@@ -4899,6 +4913,8 @@ fn fill_captures_bar_and_text_run_onto_the_slot() {
             seq: 0,
             occludes: false,
             hatch: None,
+            radius: 0,
+            corners: 0,
         }]
     );
 
@@ -5115,6 +5131,8 @@ fn refilling_a_slot_clears_its_decorations() {
         color: [1, 2, 3],
         occludes: false,
         hatch: None,
+        radius: 0,
+        corners: 0,
     }));
     stream.extend_from_slice(&encode_fill_end());
     terminal.advance(&stream);
@@ -5158,6 +5176,8 @@ fn a_page_paints_into_a_reused_context_without_the_previous_page() {
         color: [1, 2, 3],
         occludes: false,
         hatch: None,
+        radius: 0,
+        corners: 0,
     }));
     stream.extend_from_slice(&encode_fill_end());
     terminal.advance(&stream);

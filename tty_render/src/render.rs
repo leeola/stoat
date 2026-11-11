@@ -1812,6 +1812,8 @@ mod tests {
             seq,
             occludes,
             hatch: None,
+            radius: 0,
+            corners: 0,
         };
         let bars = [bar(4, true), bar(5, false)];
         let panels = [panel(1, true), panel(2, false)];

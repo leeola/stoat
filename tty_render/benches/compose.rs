@@ -185,6 +185,8 @@ fn add_chrome(grid: &mut Grid) {
             seq: 0,
             occludes: false,
             hatch: None,
+            radius: 0,
+            corners: 0,
         },
         Bar {
             x: 30,
@@ -195,6 +197,8 @@ fn add_chrome(grid: &mut Grid) {
             seq: 0,
             occludes: false,
             hatch: None,
+            radius: 0,
+            corners: 0,
         },
     ]);
 }

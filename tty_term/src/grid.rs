@@ -2136,6 +2136,15 @@ pub struct Bar {
     /// as [`BarCommand::hatch`](stoatty_protocol::command::BarCommand::hatch)
     /// declares it.
     pub hatch: Option<Rgb>,
+    /// The radius the bar's corners round at in logical pixels, or 0 for a
+    /// square bar, as
+    /// [`BarCommand::radius`](stoatty_protocol::command::BarCommand::radius)
+    /// declares it.
+    pub radius: u8,
+    /// The corners that round, as
+    /// [`BarCommand::corners`](stoatty_protocol::command::BarCommand::corners)
+    /// names them. A mask of 0 rounds all four.
+    pub corners: u8,
 }
 
 /// A stroked path drawn off the cell grid in a solid color.
@@ -2589,6 +2598,8 @@ mod tests {
             color: [255, 0, 0],
             occludes: false,
             hatch: None,
+            radius: 0,
+            corners: 0,
         }
     }
 
@@ -3165,6 +3176,8 @@ mod tests {
             seq: 0,
             occludes: false,
             hatch: None,
+            radius: 0,
+            corners: 0,
         };
         grid.set_bars(vec![bar]);
 
@@ -3508,6 +3521,8 @@ mod region_blit_tests {
             seq: 0,
             occludes: false,
             hatch: None,
+            radius: 0,
+            corners: 0,
         }]);
         grid.set_polylines(vec![Polyline {
             points: vec![[0, 0], [16, 16]],

@@ -2,7 +2,8 @@
 // color, off the cell grid, so a gutter can pack thin status bars and a hairline
 // separator into a fraction of a cell. The rectangle is given in cell-fraction
 // units and scaled by the cell size of the grid it sits on, so it tracks font
-// zoom.
+// zoom. A bar with a corner radius rounds the corners its mask names, which
+// draws a dot, a pill, or one share of a round-ended meter.
 
 struct Globals {
     resolution: vec2<f32>,
@@ -50,6 +51,12 @@ struct VsOut {
     @location(1) @interpolate(flat) seq: u32,
     // The hatch color, and 1.0 to stripe the fill with it.
     @location(2) @interpolate(flat) hatch: vec4<f32>,
+    // The pixels the bar covers, min then max, which its corners round within.
+    @location(3) @interpolate(flat) rect: vec4<f32>,
+    // The corner radius in framebuffer pixels, 0 for a square bar.
+    @location(4) @interpolate(flat) radius: f32,
+    // The corners that round, bit 0 the top-left and then clockwise.
+    @location(5) @interpolate(flat) corners: u32,
 }
 
 @vertex
@@ -60,6 +67,8 @@ fn vs_main(
     @location(2) color: vec3<f32>,
     @location(3) seq: u32,
     @location(4) hatch: vec4<f32>,
+    @location(5) radius: f32,
+    @location(6) corner_mask: u32,
 ) -> VsOut {
     var corners = array<vec2<f32>, 6>(
         vec2<f32>(0.0, 0.0),
@@ -113,6 +122,14 @@ fn vs_main(
     out.color = color;
     out.seq = seq;
     out.hatch = hatch;
+    // A gliding pool puts the quad's edges between pixels. The rect is the
+    // span of pixel centers the rasterizer covers, so a gliding bar's straight
+    // edges stay whole as a square bar's do.
+    out.rect = vec4<f32>(ceil(min_px - 0.5), ceil(max_px - 0.5));
+    // floor(x + 0.5) rounds a half up as the panel pass rounds its radius, so a
+    // bar and a panel at one logical radius round alike at a fractional scale.
+    out.radius = floor(radius * globals.scale_factor + 0.5);
+    out.corners = corner_mask;
     return out;
 }
 
@@ -127,6 +144,25 @@ fn bar_color(in: VsOut) -> vec3<f32> {
     let diagonal = (in.clip.x + shifted) / globals.scale_factor;
     let on_line = diagonal - HATCH_PITCH * floor(diagonal / HATCH_PITCH) < 1.0;
     return select(in.color, in.hatch.rgb, in.hatch.w > 0.5 && on_line);
+}
+
+/// The share of the fragment's pixel that the bar covers.
+///
+/// The fragment's quadrant names the corner it lies toward, as occluder_sdf
+/// names it, and that corner rounds when the mask holds its bit. The radius is
+/// held to the bar's shorter side, not to half of it. A share of a round-ended
+/// meter narrower than the meter's radius then still rounds its outer corners
+/// at that radius. A square bar covers every pixel whole.
+fn bar_coverage(in: VsOut) -> f32 {
+    if in.radius <= 0.0 {
+        return 1.0;
+    }
+    let half = (in.rect.zw - in.rect.xy) * 0.5;
+    let p = in.clip.xy - (in.rect.xy + in.rect.zw) * 0.5;
+    let corner = select(select(0u, 1u, p.x > 0.0), select(3u, 2u, p.x > 0.0), p.y > 0.0);
+    let rounded = ((in.corners >> corner) & 1u) == 1u;
+    let radius = select(0.0, min(in.radius, 2.0 * min(half.x, half.y)), rounded);
+    return clamp(0.5 - rounded_box_sdf(p, half, radius), 0.0, 1.0);
 }
 
 @fragment
@@ -153,5 +189,5 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
         }
     }
 
-    return vec4<f32>(bar_color(in), 1.0);
+    return vec4<f32>(bar_color(in), bar_coverage(in));
 }

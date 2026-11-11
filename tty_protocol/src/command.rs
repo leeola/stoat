@@ -630,6 +630,8 @@ mod tests {
                     color: [5, 6, 7],
                     occludes: false,
                     hatch: None,
+                    radius: 0,
+                    corners: 0,
                 }),
             ),
             ("fill", encode_fill(&FillCommand { pool: 1, index: 2 })),
@@ -1191,6 +1193,8 @@ mod tests {
                 color: [200, 100, 50],
                 occludes: false,
                 hatch: None,
+                radius: 0,
+                corners: 0,
             }),
             Command::Bars(BarsCommand {
                 color: [200, 100, 50],
@@ -1289,6 +1293,8 @@ mod tests {
             color: [2, 2, 2],
             occludes: false,
             hatch: None,
+            radius: 0,
+            corners: 0,
         };
 
         let mut out = Vec::new();

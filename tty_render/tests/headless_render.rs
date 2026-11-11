@@ -189,6 +189,8 @@ fn builds_passes_and_draws_a_frame_off_screen() {
             seq: 0,
             occludes: false,
             hatch: None,
+            radius: 0,
+            corners: 0,
         },
         Bar {
             x: 30,
@@ -199,6 +201,8 @@ fn builds_passes_and_draws_a_frame_off_screen() {
             seq: 0,
             occludes: false,
             hatch: None,
+            radius: 0,
+            corners: 0,
         },
     ]);
 

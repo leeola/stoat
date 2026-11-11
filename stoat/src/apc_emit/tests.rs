@@ -2444,6 +2444,8 @@ fn pane_divider_emits_a_hairline_bar_inside_stoatty() {
         },
         occludes: false,
         hatch: None,
+        radius: 0,
+        corners: 0,
     };
     let cmds = drain_apc(&mut rx);
     assert!(
@@ -5988,6 +5990,8 @@ fn the_finder_marks_its_selected_row_with_the_accent_bar() {
         color: [0x7f, 0xb0, 0xff],
         occludes: false,
         hatch: None,
+        radius: 0,
+        corners: 0,
     };
     // The header's hairline starts at the list's column too, half a row above
     // the list, so only the bars from the list's top row down count.

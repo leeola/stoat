@@ -309,6 +309,8 @@ fn render_graph_header(
                 width: SWATCH_WIDTH,
                 height: SWATCH_HEIGHT,
                 color,
+                radius: 0,
+                corners: 0,
             }
             .render(Rect::new(x, row.y, 1, 1), buf, &mut *scene),
             false => {
@@ -328,6 +330,8 @@ fn render_graph_header(
             width: row.width * 16,
             height: RULE_STROKE,
             color,
+            radius: 0,
+            corners: 0,
         }
         .render(row, buf, scene);
     }
@@ -695,6 +699,8 @@ fn ring(cells: Rect, color: [u8; 3], buf: &mut Buffer, scene: &mut stoat_widgets
             width,
             height,
             color,
+            radius: 0,
+            corners: 0,
         }
         .render(cells, buf, scene);
     }
@@ -1174,6 +1180,8 @@ fn stat_bar(
             width,
             height: STAT_BAR_HEIGHT,
             color,
+            radius: 0,
+            corners: 0,
         }
         .render(cells, buf, scene);
     }
@@ -1402,6 +1410,8 @@ fn paint_lane(
             width: LANE_BAR_WIDTH,
             height: 16,
             color,
+            radius: 0,
+            corners: 0,
         }
         .render(cell, buf, scene),
         None => {

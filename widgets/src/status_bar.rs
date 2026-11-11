@@ -212,6 +212,8 @@ impl StatusBar<'_> {
             width: cells::span_sixteenths(cells.end - cells.start),
             height: 1,
             color: self.separator,
+            radius: 0,
+            corners: 0,
         }
         .render(area, buf, scene);
     }
@@ -246,6 +248,8 @@ impl StatusBar<'_> {
             width: advance,
             height: 16,
             color: bg,
+            radius: 0,
+            corners: 0,
         }
         .render(area, buf, scene);
     }
@@ -463,6 +467,8 @@ mod tests {
             color: [4, 5, 6],
             occludes: false,
             hatch: None,
+            radius: 0,
+            corners: 0,
         });
         let first = encode_text_run(&TextRunCommand {
             col: 0,
@@ -483,6 +489,8 @@ mod tests {
             color: [10, 11, 12],
             occludes: false,
             hatch: None,
+            radius: 0,
+            corners: 0,
         });
         let second = encode_text_run(&TextRunCommand {
             col: 20,
@@ -544,6 +552,8 @@ mod tests {
             color: [4, 5, 6],
             occludes: false,
             hatch: None,
+            radius: 0,
+            corners: 0,
         });
         let run = encode_text_run(&TextRunCommand {
             col: 300,
@@ -600,6 +610,8 @@ mod tests {
             color: [60, 66, 77],
             occludes: false,
             hatch: None,
+            radius: 0,
+            corners: 0,
         });
         let run = encode_text_run(&TextRunCommand {
             col: 108,
@@ -730,6 +742,8 @@ mod tests {
             color: [10, 11, 12],
             occludes: false,
             hatch: None,
+            radius: 0,
+            corners: 0,
         });
         let overruns = encode_text_run(&TextRunCommand {
             col: 20,
@@ -750,6 +764,8 @@ mod tests {
             color: [10, 11, 12],
             occludes: false,
             hatch: None,
+            radius: 0,
+            corners: 0,
         });
         assert!(
             contains(scene.buffer(), &fits),
@@ -822,6 +838,8 @@ mod tests {
             color: [4, 4, 4],
             occludes: false,
             hatch: None,
+            radius: 0,
+            corners: 0,
         });
         assert!(
             !contains(scene.buffer(), &dropped_run),
@@ -857,6 +875,8 @@ mod tests {
             color: [60, 66, 77],
             occludes: false,
             hatch: None,
+            radius: 0,
+            corners: 0,
         });
         assert!(
             contains(scene.buffer(), &separator),
@@ -900,6 +920,8 @@ mod tests {
             color: [60, 66, 77],
             occludes: false,
             hatch: None,
+            radius: 0,
+            corners: 0,
         });
         // advance(" NOR ") = 5 * 160 / 16 = 50; right start = 320 - 50 = 270.
         let left_bar = encode_bar(&BarCommand {
@@ -910,6 +932,8 @@ mod tests {
             color: [4, 5, 6],
             occludes: false,
             hatch: None,
+            radius: 0,
+            corners: 0,
         });
         let right_bar = encode_bar(&BarCommand {
             x: 270,
@@ -919,6 +943,8 @@ mod tests {
             color: [10, 11, 12],
             occludes: false,
             hatch: None,
+            radius: 0,
+            corners: 0,
         });
 
         let frames = scene.buffer();
@@ -977,6 +1003,8 @@ mod tests {
             color: bar_bg,
             occludes: false,
             hatch: None,
+            radius: 0,
+            corners: 0,
         });
         let base_run = encode_text_run(&TextRunCommand {
             col: 0,
@@ -997,6 +1025,8 @@ mod tests {
             color: [60, 66, 77],
             occludes: false,
             hatch: None,
+            radius: 0,
+            corners: 0,
         });
         let distinct_bar = encode_bar(&BarCommand {
             x: 300,
@@ -1006,6 +1036,8 @@ mod tests {
             color: [10, 11, 12],
             occludes: false,
             hatch: None,
+            radius: 0,
+            corners: 0,
         });
 
         let frames = scene.buffer();
@@ -1072,6 +1104,8 @@ mod tests {
                 color: [60, 66, 77],
                 occludes: false,
                 hatch: None,
+                radius: 0,
+                corners: 0,
             })
         };
         let panel = |width: u16| {
@@ -1184,6 +1218,8 @@ mod tests {
                 color,
                 occludes: false,
                 hatch: None,
+                radius: 0,
+                corners: 0,
             })
         };
         // "a" advances 10 sixteenths at scale 160, so the box starts on cell 1.

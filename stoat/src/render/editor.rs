@@ -1651,6 +1651,8 @@ pub(crate) fn paint_severity_column(
             width: 6,
             height: 16,
             color,
+            radius: 0,
+            corners: 0,
         }
         .render(column, buf, &mut *scene);
     }
@@ -5395,6 +5397,8 @@ mod tests {
                 color,
                 occludes: false,
                 hatch: None,
+                radius: 0,
+                corners: 0,
             });
             frame.contains(String::from_utf8_lossy(&command).as_ref())
         };

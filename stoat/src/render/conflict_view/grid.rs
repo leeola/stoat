@@ -473,6 +473,8 @@ impl RowPainter<'_> {
                 width: BAR_WIDTH,
                 height: 16,
                 color,
+                radius: 0,
+                corners: 0,
             },
         );
     }
@@ -626,6 +628,8 @@ pub(super) fn paint_header(
             width: area.width * 16,
             height: 1,
             color,
+            radius: 0,
+            corners: 0,
         }
         .render(Rect::new(area.x, y, 1, 1), buf, scene);
     }
@@ -796,6 +800,8 @@ pub(super) fn paint_rows(
                 width: 1,
                 height: rows * 16,
                 color: colors.divider,
+                radius: 0,
+                corners: 0,
             },
         );
     }
@@ -816,6 +822,8 @@ pub(super) fn paint_rows(
                 width: cells.width * 16,
                 height: 16,
                 color: fill,
+                radius: 0,
+                corners: 0,
             }
             .render_hatched(hatch, cells, paint.scene);
         }
@@ -944,6 +952,8 @@ fn push_hairlines(bars: &mut BarBatch, cols: &GridColumns, y: u16, rows: u16, co
                 width: 1,
                 height,
                 color,
+                radius: 0,
+                corners: 0,
             },
         );
     }

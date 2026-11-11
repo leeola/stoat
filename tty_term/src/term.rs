@@ -1911,6 +1911,8 @@ impl Terminal {
                         color: batch.color,
                         occludes: false,
                         hatch: None,
+                        radius: 0,
+                        corners: 0,
                     }));
                 }
             },

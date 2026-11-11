@@ -98,6 +98,8 @@ fn a_box_occludes_the_bars_runs_and_icons_beneath_it() {
         seq: 1,
         occludes: false,
         hatch: None,
+        radius: 0,
+        corners: 0,
     }]);
     grid.set_text_runs(vec![TextRun {
         col: 0,
@@ -437,6 +439,8 @@ fn a_pool_prepared_in_the_same_frame_leaves_the_live_occluders_alone() {
         seq: 50,
         occludes: false,
         hatch: None,
+        radius: 0,
+        corners: 0,
     }]);
     // The three passes that occlude a live primitive each keep their own
     // occluder buffer, so each needs something of its own on the row below.
@@ -719,6 +723,8 @@ fn a_chip_occludes_only_the_box_it_draws() {
             seq: 1,
             occludes: false,
             hatch: None,
+            radius: 0,
+            corners: 0,
         }]);
         grid.set_panels(vec![Panel {
             top: 1,
@@ -801,6 +807,8 @@ fn a_box_occludes_across_the_cell_its_edge_reaches() {
             seq: 1,
             occludes: false,
             hatch: None,
+            radius: 0,
+            corners: 0,
         }]);
         grid.set_panels(vec![Panel {
             top: 1,
@@ -911,6 +919,8 @@ fn an_occluding_bar_hides_the_run_beneath_it_and_holds_over_a_pane_pool() {
         seq,
         occludes,
         hatch: None,
+        radius: 0,
+        corners: 0,
     };
     live.set_bars(vec![
         bar(1, 2, held, 2, true),

@@ -1283,6 +1283,8 @@ fn draw_divider_cell(
             width,
             height: 16,
             color,
+            radius: 0,
+            corners: 0,
         }
         .render(cell, buf, scene);
     }
@@ -1856,6 +1858,8 @@ fn draw_tab_divider(
         width: 1,
         height: TAB_DIVIDER_HEIGHT,
         color,
+        radius: 0,
+        corners: 0,
     }
     .render(run.area, buf, scene);
 }

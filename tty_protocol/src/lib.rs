@@ -208,9 +208,14 @@
 /// predates it reads the chrome bytes as a span count and draws stray spans.
 /// This version drops a shorter head.
 ///
+/// Version 32 reads a fixed 17-byte `bar` argument, which ends in the bar's
+/// corner radius in logical px and its corner mask. A terminal that predates
+/// it reads the first 15 bytes and draws every bar square. This version drops
+/// a shorter argument.
+///
 /// Zero is reserved for a peer whose handshake carries no version at all, which
 /// is every build from before the field existed.
-pub const PROTOCOL_VERSION: u32 = 31;
+pub const PROTOCOL_VERSION: u32 = 32;
 
 /// The first [`PROTOCOL_VERSION`] whose terminal reads the `text_runs` and
 /// `bars` batches.
@@ -253,6 +258,13 @@ pub const MINIMAP_THUMB_RADIUS_PROTOCOL: u32 = 30;
 /// An earlier terminal reads the chrome bytes as spans, and a terminal at this
 /// version drops a `popover` head that holds no chrome.
 pub const POPOVER_CHROME_PROTOCOL: u32 = 31;
+
+/// The first [`PROTOCOL_VERSION`] whose terminal rounds a `bar`'s corners at
+/// the radius and mask its argument declares.
+///
+/// An earlier terminal draws every bar square, and a terminal at this version
+/// drops a `bar` argument that holds no radius.
+pub const BAR_CORNERS_PROTOCOL: u32 = 32;
 
 pub mod command;
 pub mod detect;

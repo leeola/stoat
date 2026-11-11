@@ -124,6 +124,8 @@ pub(crate) fn render_run_pane(
             width: area.width.saturating_mul(16),
             height: 1,
             color,
+            radius: 0,
+            corners: 0,
         }
         .render(Rect::new(area.x, input_row, area.width, 1), buf, scene);
     }

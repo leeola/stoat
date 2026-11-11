@@ -271,6 +271,8 @@ impl Gutter<'_> {
                             width: self.left_bar_width,
                             height: height.min(remaining),
                             color,
+                            radius: 0,
+                            corners: 0,
                         },
                     );
                 }
@@ -288,6 +290,8 @@ impl Gutter<'_> {
                 width: 1,
                 height: cells::span_sixteenths(self.total_rows().min(area.height)),
                 color: self.separator,
+                radius: 0,
+                corners: 0,
             },
         );
         numbers.flush(scene);
@@ -468,6 +472,8 @@ mod tests {
             color,
             occludes: false,
             hatch: None,
+            radius: 0,
+            corners: 0,
         })
     }
 
@@ -534,6 +540,8 @@ mod tests {
                             color: batch.color,
                             occludes: false,
                             hatch: None,
+                            radius: 0,
+                            corners: 0,
                         })
                     })
                     .collect(),

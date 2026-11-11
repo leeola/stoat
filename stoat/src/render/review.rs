@@ -1043,6 +1043,8 @@ pub(crate) fn emit_base_frame(
             width: right,
             height: BASE_FRAME_TOP_HEIGHT,
             color,
+            radius: 0,
+            corners: 0,
         }
         .render_occluding(inner, scene);
         return;
@@ -1059,6 +1061,8 @@ pub(crate) fn emit_base_frame(
                 width,
                 height,
                 color,
+                radius: 0,
+                corners: 0,
             },
         );
     }
@@ -1692,6 +1696,8 @@ pub(crate) fn paint_diff_rows(
                         width: 1,
                         height: rows * 16,
                         color,
+                        radius: 0,
+                        corners: 0,
                     },
                 );
             }
@@ -1970,6 +1976,8 @@ fn paint_fold_controls(
                         width: FOLD_BUTTON_WIDTH,
                         height: 16,
                         color: rg.colors.faded(bg),
+                        radius: 0,
+                        corners: 0,
                     }
                     .render(inner, buf, rg.scene);
                 }
@@ -2093,6 +2101,8 @@ fn paint_scope_chip(
                     width,
                     height: SCOPE_CHIP_HEIGHT,
                     color: rg.colors.faded(bg),
+                    radius: 0,
+                    corners: 0,
                 }
                 .render(inner, buf, rg.scene);
             }
@@ -2205,6 +2215,8 @@ fn paint_reveal_mark(
                     width: REVEAL_LANE_WIDTH,
                     height: 16,
                     color: rg.colors.faded(lane),
+                    radius: 0,
+                    corners: 0,
                 },
             ),
             None if !decorations_only => {
@@ -2273,6 +2285,8 @@ fn hatch_cells(
         width: (right - left) * 16,
         height: 16,
         color: rg.colors.faded(fill),
+        radius: 0,
+        corners: 0,
     }
     .render_hatched(rg.colors.faded(lines), inner, rg.scene);
 }
@@ -3760,6 +3774,8 @@ fn draw_diff_status(
                         width: rg.offsets.bar_width,
                         height,
                         color,
+                        radius: 0,
+                        corners: 0,
                     },
                 );
             }
@@ -3802,6 +3818,8 @@ fn draw_removal_tick(
                     width: bars[1] + rg.offsets.bar_width - bars[0],
                     height: 2,
                     color,
+                    radius: 0,
+                    corners: 0,
                 },
             );
         },
@@ -5118,6 +5136,8 @@ mod tests {
                     color: [0x30, 0x30, 0x30],
                     occludes: false,
                     hatch: None,
+                    radius: 0,
+                    corners: 0,
                 }),
                 PANEL_PARTS
                     .iter()
@@ -5499,6 +5519,8 @@ mod tests {
                     color: [0x17, 0x19, 0x1e],
                     occludes: false,
                     hatch: Some([0x1b, 0x1d, 0x22]),
+                    radius: 0,
+                    corners: 0,
                 }],
                 vec![None],
                 true,
@@ -5648,6 +5670,8 @@ mod tests {
                     color: [0x1f, 0x2a, 0x3d],
                     occludes: false,
                     hatch: None,
+                    radius: 0,
+                    corners: 0,
                 }],
                 vec![
                     ("\u{2191}".to_string(), (6 + (36 - glyph) / 2) as i16, None),
@@ -5739,6 +5763,8 @@ mod tests {
             color: REVEAL_LANE,
             occludes: false,
             hatch: None,
+            radius: 0,
+            corners: 0,
         };
         assert_eq!(
             lanes,
@@ -6066,6 +6092,8 @@ mod tests {
                     color,
                     occludes: false,
                     hatch: None,
+                    radius: 0,
+                    corners: 0,
                 });
                 bytes
                     .windows(frame.len())
@@ -6188,6 +6216,8 @@ mod tests {
             color: style_rgb(rgb_diff_theme().get(s::DIFF_DELETED).fg).expect("an rgb color"),
             occludes: false,
             hatch: None,
+            radius: 0,
+            corners: 0,
         };
         assert!(
             holds_bar(&bytes, tick),
@@ -6213,6 +6243,8 @@ mod tests {
             color: style_rgb(rgb_diff_theme().get(s::DIFF_DELETED).fg).expect("an rgb color"),
             occludes: false,
             hatch: None,
+            radius: 0,
+            corners: 0,
         };
         assert!(
             holds_bar(&bytes, git_bar),
@@ -6418,6 +6450,8 @@ mod tests {
                 color,
                 occludes: false,
                 hatch: None,
+                radius: 0,
+                corners: 0,
             });
             assert!(
                 contains(scene.buffer(), &frame),
@@ -6444,6 +6478,8 @@ mod tests {
                                 color,
                                 occludes: false,
                                 hatch: None,
+                                radius: 0,
+                                corners: 0,
                             }),
                         )
                     })
