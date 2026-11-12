@@ -452,18 +452,15 @@ fn the_changes_view_ends_in_the_minimap_strip_on_the_editor_surface() {
 /// The single band rounds its viewport band's corners at 4 px, as the Editor
 /// board draws the band.
 ///
-/// The single band rounds its viewport band's corners at 4 px, as the Editor
-/// board draws the band.
-///
 /// The band's first cell is column 152 on row 1, where the thumb starts at the
 /// file's top. The island's own 6 px corner clips the band's top-right corner,
 /// so the check reads the thumb's top-left corner. On the band's first pixel
 /// column, the thumb's top pixel row lies past the arc and keeps the editor
 /// surface. The fifth pixel row, the first past the 4 px arc, reads the band's
-/// color, the accent at 9 percent over the surface.
+/// color, the accent at 18 percent over the surface.
 #[test]
 fn the_viewport_band_rounds_its_corners() {
-    const BAND: [u8; 3] = [0x20, 0x27, 0x32];
+    const BAND: [u8; 3] = [0x2a, 0x34, 0x47];
 
     let mut home = support::scratch_home();
     let shot = settled_frame(home.path(), "basic-diff", "unstaged.txt", "");

@@ -140,11 +140,11 @@ pub(crate) const OVERLAY_LANE: u32 = u32::MAX;
 /// under [`OVERLAY_LANE`], where a card docked above a row draws.
 pub(crate) const STATUS_LANE: u32 = u32::MAX - 1;
 
-/// The opacity of the minimap's viewport thumb, nine percent of 255.
+/// The opacity of the minimap's viewport thumb, eighteen percent of 255.
 ///
 /// The thumb takes the focus accent, so a light wash marks the viewport and
 /// leaves the strip's lines readable under it.
-const MINIMAP_THUMB_ALPHA: u8 = 23;
+const MINIMAP_THUMB_ALPHA: u8 = 46;
 
 /// The chrome of a Pane Picker badge, as the Ermine board draws it.
 ///
@@ -3461,7 +3461,8 @@ mod minimap_chrome_tests {
     use stoatty_protocol::command::{self, Command};
 
     /// A pane's minimap strip is seven cells wide at six lines a cell, and its
-    /// viewport thumb washes the focus accent at nine percent with no outline.
+    /// viewport thumb washes the focus accent at eighteen percent with no
+    /// outline.
     #[test]
     fn the_strip_is_seven_cells_with_an_accent_thumb() {
         let mut h = TestHarness::with_size(120, 24);
@@ -3484,7 +3485,7 @@ mod minimap_chrome_tests {
                 strip.thumb,
                 strip.thumb_border
             ),
-            (7, 6, [r, g, b, 23], None)
+            (7, 6, [r, g, b, 46], None)
         );
     }
 }
