@@ -1950,7 +1950,7 @@ fn split_panes_declare_island_halos_in_place_of_the_gap_hairline() {
         border: [1, 2, 3],
         corner_radius: 6,
         fill: Some([0x10, 0x20, 0x30]),
-        shadow: PanelShadow::Tucked,
+        shadow: PanelShadow::None_,
         edges,
         corners: 0,
         fillets: 0,

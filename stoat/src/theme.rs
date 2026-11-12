@@ -264,7 +264,7 @@ impl PanelRole {
         // panes, to stand 8 px from each. An inset hides the outer pixels of
         // each pane's first and last column.
         let (corner_radius, shadow, inset_x, above_pools) = match self {
-            PanelRole::Island => (6, PanelShadow::Tucked, 0, false),
+            PanelRole::Island => (6, PanelShadow::None_, 0, false),
             PanelRole::Popout => (4, PanelShadow::Overhang, 0, false),
             PanelRole::Overlay => (6, PanelShadow::Drop, 0, true),
         };
@@ -1241,7 +1241,7 @@ mod tests {
             [PanelRole::Island, PanelRole::Popout, PanelRole::Overlay]
                 .map(|role| theme.panel(role)),
             [
-                spec(7, PanelShadow::Tucked, 0, false),
+                spec(7, PanelShadow::None_, 0, false),
                 spec(4, PanelShadow::Overhang, 0, false),
                 spec(6, PanelShadow::Drop, 0, true),
             ],
@@ -1598,7 +1598,7 @@ mod tests {
                 Some(rgb(0x0c0e11)),
                 Some(rgb(0x7fb0ff)),
                 Some(rgb(0x838a98)),
-                spec(6, PanelShadow::Tucked, 0, false),
+                spec(6, PanelShadow::None_, 0, false),
                 spec(4, PanelShadow::Overhang, 0, false),
                 spec(6, PanelShadow::Drop, 0, true),
                 208,

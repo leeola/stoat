@@ -739,22 +739,16 @@ fn an_island_rounds_its_corners_against_the_ground() {
     }
 }
 
-/// Each pane's island darkens a band inside its bottom edge and shades nothing
-/// on the margin beside it.
+/// Each pane's island draws no band inside its bottom edge and shades nothing
+/// on the margin beside it, as every revised board draws its panes.
 ///
 /// The island reaches 1 px into the one-column margin and stops 8 px from the
-/// window's edge, so pixel column 3 keeps the ground. Row 48 is the
-/// pane's last content row, above the status row. The band rises twelve pixels
-/// from the pane's bottom edge, so row 47 keeps the base surface. Row 48's last
-/// pixel row reads the boards' bottom row within one in every channel, and the
-/// fifth from its bottom reads darker than the base surface in every channel.
-/// Both reads lie in cell 80, far from the island's 6 px corner arcs, so they
-/// read the band alone.
+/// window's edge, so pixel column 3 keeps the ground. Row 48 is the pane's
+/// last content row, above its status row. Every pixel of its cell 80, far
+/// from the island's 6 px corner arcs, reads the base surface down to the
+/// island's bottom edge.
 #[test]
-fn the_island_s_bottom_band_darkens_inside_the_pane() {
-    // The base surface under 0.27 of black, the boards' bottom pixel row.
-    const BAND_EDGE: [u8; 3] = [0x11, 0x12, 0x16];
-
+fn the_island_draws_no_band_inside_its_bottom_edge() {
     let mut home = support::scratch_home();
     let shot = settled_frame(home.path(), "basic-diff", "unstaged.txt", "");
     let (_, y, _, height) = cell_rect(0, 4, 1, 1);
@@ -766,36 +760,20 @@ fn the_island_s_bottom_band_darkens_inside_the_pane() {
         GROUND,
         "margin_beside_the_pane",
     );
-    expect_region(
-        &shot,
-        &mut home,
-        cell_rect(80, ROWS - 3, 1, 1),
-        BASE,
-        "row_above_the_band",
-    );
 
-    let (x, y, width, height) = cell_rect(80, ROWS - 2, 1, 1);
-    let edge = dominant_color(&shot, (x, y + height - 1, width, 1));
-    let fifth = dominant_color(&shot, (x, y + height - 5, width, 1));
-    let at_edge = edge
-        .iter()
-        .zip(BAND_EDGE)
-        .all(|(&edge, board)| edge.abs_diff(board) <= 1);
-    let darker = fifth.iter().zip(BASE).all(|(&fifth, base)| fifth < base);
-    if at_edge && darker {
-        return;
+    let rect = cell_rect(80, ROWS - 2, 1, 1);
+    let (_, _, width, height) = rect;
+    let base = pixels_of(&shot, rect, BASE);
+    if base != (width * height) as usize {
+        let frame = keep_frame(&shot, &mut home, "bottom_edge");
+        panic!(
+            "{base} of the {} pixels of the pane's last row at cell 80 read {}, not all of \
+             them; the frame is {}",
+            width * height,
+            hex(BASE),
+            frame.display(),
+        );
     }
-
-    let frame = keep_frame(&shot, &mut home, "bottom_band");
-    panic!(
-        "the pane's bottom pixel row reads {}, not within one of {}, or the fifth from the \
-         bottom reads {}, not darker than {}; the frame is {}",
-        hex(edge),
-        hex(BAND_EDGE),
-        hex(fifth),
-        hex(BASE),
-        frame.display(),
-    );
 }
 
 /// The status row sits on the ground, and its hairline takes the bar's own
