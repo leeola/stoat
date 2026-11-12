@@ -1339,7 +1339,8 @@ struct RunBox {
 /// The panel a [`RunBox`] draws as, in its first segment's background.
 #[derive(Clone, Copy, Hash, PartialEq, Debug)]
 enum BoxShape {
-    /// A chip one logical pixel inside the row, as [`Panel::chip`] draws it.
+    /// The mode chip's box, as [`mode_chip_panel`] draws it, with its label
+    /// at [`TypeRole::Mode`].
     Chip,
     /// The active tab, a chip in its background.
     Tab,
@@ -1354,6 +1355,20 @@ fn mode_chip_box(leads: bool) -> Vec<RunBox> {
             shape: Some(BoxShape::Chip),
         }],
         false => Vec::new(),
+    }
+}
+
+/// The mode chip's panel in `fill`, a box smaller than [`Panel::chip`] inside
+/// the same cells.
+///
+/// The boards draw the mode chip 14 px tall and about 34 px wide on an 18 px
+/// row. The chip's box keeps its whole cells, so the panel stands 2 px inside
+/// the row's top and bottom and 5 px inside each end of the box. Over the five
+/// cells of ` NOR ` at 9 px cells, that is 35 by 14 px.
+fn mode_chip_panel(fill: [u8; 3]) -> Panel {
+    Panel {
+        edges: Edge::symmetric(5, 2),
+        ..Panel::chip(fill)
     }
 }
 
@@ -1532,7 +1547,9 @@ pub(crate) struct StatusSceneCache {
 /// unset.
 ///
 /// A run's [`RunBox`]es reach the bar as [`SegmentBox`]es, each with its
-/// shape's panels in its first segment's background.
+/// shape's panels in its first segment's background. The mode chip's box
+/// draws its label at [`TypeRole::Mode`], and every other segment at
+/// [`TypeRole::Ui`].
 ///
 /// With a `cache`, a repaint whose runs and colors all hold splices the
 /// recorded frame. Splicing is only sound because
@@ -1599,8 +1616,11 @@ fn render_status_runs(
                     .shape
                     .zip(left.get(run_box.segments.start))
                     .map_or_else(Vec::new, |(shape, first)| match shape {
-                        BoxShape::Chip | BoxShape::Tab => vec![Panel::chip(first.bg)],
+                        BoxShape::Chip => vec![mode_chip_panel(first.bg)],
+                        BoxShape::Tab => vec![Panel::chip(first.bg)],
                     }),
+                scale: (run_box.shape == Some(BoxShape::Chip))
+                    .then(|| frame.theme.type_scale(TypeRole::Mode)),
             })
             .collect();
         StatusBar {

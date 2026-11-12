@@ -47,7 +47,8 @@ pub struct StatusBar<'a> {
     pub boxes: &'a [SegmentBox],
     /// Segments packed right-to-left from the right edge, in slice order.
     pub right: &'a [StatusSegment<'a>],
-    /// Glyph size in 256ths of the cell size.
+    /// Glyph size in 256ths of the cell size, for every segment outside a
+    /// [`SegmentBox`] that states its own.
     pub scale: u16,
     /// Hairline separator color, drawn along the row's top edge.
     pub separator: [u8; 3],
@@ -91,6 +92,12 @@ pub struct SegmentBox {
     /// A box with panels draws no background bar for its segments, because
     /// the panels are their background.
     pub panels: Vec<Panel>,
+    /// The glyph size of the run in 256ths of a cell, in place of
+    /// [`StatusBar::scale`], or `None` for the bar's own.
+    ///
+    /// The box sizes and centers its run at this scale. An editor's mode chip
+    /// uses it to draw its label smaller than the bar's other text.
+    pub scale: Option<u16>,
 }
 
 /// One step of a left run's layout, in the order the bar draws it.
@@ -99,8 +106,13 @@ enum LeftItem<'t> {
     /// bar's left edge.
     Box { index: usize, cells: Range<u16> },
     /// Left segment `index` draws `text`, the part of its text that fits, from
-    /// `x` sixteenths.
-    Segment { index: usize, x: u16, text: &'t str },
+    /// `x` sixteenths, its glyphs at `scale`.
+    Segment {
+        index: usize,
+        x: u16,
+        text: &'t str,
+        scale: u16,
+    },
 }
 
 impl StatusBar<'_> {
@@ -132,7 +144,7 @@ impl StatusBar<'_> {
             |index| self.left[index].text,
             self.boxes
                 .iter()
-                .map(|segment_box| segment_box.segments.clone()),
+                .map(|segment_box| (segment_box.segments.clone(), segment_box.scale)),
             self.scale,
             limit,
         );
@@ -168,9 +180,14 @@ impl StatusBar<'_> {
                     }
                     cursor = cursor.max(cells::span_sixteenths(cells.end));
                 },
-                LeftItem::Segment { index, x, text } => {
+                LeftItem::Segment {
+                    index,
+                    x,
+                    text,
+                    scale,
+                } => {
                     let seg = &self.left[index];
-                    let advance = advance(text, self.scale);
+                    let advance = advance(text, scale);
                     if !paneled.contains(&index) {
                         self.draw_backing(x, advance, seg.bg, area, buf, scene);
                     }
@@ -180,7 +197,7 @@ impl StatusBar<'_> {
                         bg: seg.bg,
                         bold: seg.bold,
                     };
-                    self.draw_run(x, &fitted, self.scale, area, buf, scene);
+                    self.draw_run(x, &fitted, scale, area, buf, scene);
                     cursor = cursor.max(x + advance);
                 },
             }
@@ -296,7 +313,7 @@ pub fn box_spans(
     layout_left(
         texts.len(),
         |index| texts[index],
-        boxes.iter().cloned(),
+        boxes.iter().map(|run| (run.clone(), None)),
         scale,
         cells::span_sixteenths(segments_width),
     )
@@ -313,14 +330,15 @@ pub fn box_spans(
 /// Lay out a left run of `count` segments in `limit` sixteenths, with each run
 /// of `boxes` in one box of whole cells.
 ///
-/// `text` gives each segment's text, and every segment advances at `scale`.
-/// A plain segment packs at the cursor. A box starts on the next whole cell,
-/// spans the fewest whole cells that hold its run, and centers the run. A
-/// segment or a box that crosses `limit` is cut there and ends the layout.
+/// `text` gives each segment's text. A plain segment advances at `scale`, and
+/// a boxed run at its box's own scale where the box states one. A plain
+/// segment packs at the cursor. A box starts on the next whole cell, spans the
+/// fewest whole cells that hold its run, and centers the run. A segment or a
+/// box that crosses `limit` is cut there and ends the layout.
 fn layout_left<'t>(
     count: usize,
     text: impl Fn(usize) -> &'t str,
-    boxes: impl Iterator<Item = Range<usize>>,
+    boxes: impl Iterator<Item = (Range<usize>, Option<u16>)>,
     scale: u16,
     limit: u16,
 ) -> Vec<LeftItem<'t>> {
@@ -329,7 +347,8 @@ fn layout_left<'t>(
     let mut cursor = 0u16;
     let mut index = 0;
     while index < count {
-        let Some((box_index, run)) = boxes.next_if(|(_, run)| run.start == index) else {
+        let Some((box_index, (run, own))) = boxes.next_if(|(_, (run, _))| run.start == index)
+        else {
             let full = text(index);
             let fitted = clip_to_room(full, limit - cursor, scale);
             if fitted.is_empty() && !full.is_empty() {
@@ -339,6 +358,7 @@ fn layout_left<'t>(
                 index,
                 x: cursor,
                 text: fitted,
+                scale,
             });
             cursor += advance(fitted, scale);
             if fitted.len() < full.len() {
@@ -352,8 +372,9 @@ fn layout_left<'t>(
         if start >= limit {
             break;
         }
+        let run_scale = own.unwrap_or(scale);
         let natural = run.clone().fold(0u16, |sum, segment| {
-            sum.saturating_add(advance(text(segment), scale))
+            sum.saturating_add(advance(text(segment), run_scale))
         });
         let span = natural.div_ceil(16).saturating_mul(16);
         let end = start.saturating_add(span).min(limit);
@@ -365,7 +386,7 @@ fn layout_left<'t>(
         let mut x = start + (span - natural) / 2;
         for segment in run.clone() {
             let full = text(segment);
-            let fitted = clip_to_room(full, limit.saturating_sub(x), scale);
+            let fitted = clip_to_room(full, limit.saturating_sub(x), run_scale);
             if fitted.is_empty() && !full.is_empty() {
                 return items;
             }
@@ -373,8 +394,9 @@ fn layout_left<'t>(
                 index: segment,
                 x,
                 text: fitted,
+                scale: run_scale,
             });
-            x += advance(fitted, scale);
+            x += advance(fitted, run_scale);
             if fitted.len() < full.len() {
                 return items;
             }
@@ -1079,6 +1101,7 @@ mod tests {
         let boxes = [SegmentBox {
             segments: 0..1,
             panels: vec![Panel::chip([4, 5, 6])],
+            scale: None,
         }];
         let draw = |width: u16| {
             let status = StatusBar {
@@ -1182,6 +1205,7 @@ mod tests {
         let boxes = [SegmentBox {
             segments: 1..4,
             panels: vec![Panel::chip([9, 9, 9])],
+            scale: None,
         }];
         let status = StatusBar {
             left: &left,
@@ -1254,6 +1278,76 @@ mod tests {
                 run(20, "bc", [2, 2, 2]),
                 run(40, ".", [3, 3, 3]),
                 run(50, "d", [4, 4, 4]),
+            ]
+            .concat(),
+        );
+    }
+
+    /// A box that states its own scale sizes, centers, and draws its run at
+    /// that scale, and the segment after the box keeps the bar's scale.
+    #[test]
+    fn a_box_draws_its_run_at_its_own_scale() {
+        let segment = |text, bg| StatusSegment {
+            text,
+            fg: [1, 2, 3],
+            bg,
+            bold: false,
+        };
+        let left = [segment(" NOR ", [4, 5, 6]), segment("ab", [0, 0, 0])];
+        let boxes = [SegmentBox {
+            segments: 0..1,
+            panels: vec![Panel::chip([4, 5, 6])],
+            scale: Some(208),
+        }];
+        let status = StatusBar {
+            left: &left,
+            boxes: &boxes,
+            right: &[],
+            scale: 256,
+            separator: [60, 66, 77],
+            bg: [0, 0, 0],
+        };
+        let area = Rect::new(0, 0, 10, 1);
+        let mut buf = Buffer::empty(area);
+        let mut scene = ApcScene::new();
+        status.draw_components(area, &mut buf, &mut scene);
+
+        let mut panel = ApcScene::new();
+        Panel::chip([4, 5, 6]).draw_components(Rect::new(0, 0, 5, 1), &mut panel);
+        let hairline = encode_bar(&BarCommand {
+            x: 80,
+            y: 0,
+            width: 80,
+            height: 1,
+            color: [60, 66, 77],
+            occludes: false,
+            hatch: None,
+            radius: 0,
+            corners: 0,
+        });
+        let run = |col: i16, text: &str, scale: u16| {
+            encode_text_run(&TextRunCommand {
+                col,
+                row: 0,
+                scale,
+                color: [1, 2, 3],
+                bg: None,
+                bold: false,
+                follow: 0,
+                anchor: None,
+                text: text.to_owned(),
+            })
+        };
+        // " NOR " advances 65 sixteenths at 208, so the box takes cells 0..5
+        // and its run sits (80 - 65) / 2 = 7 sixteenths in. "ab" packs at the
+        // box's end at the bar's 256.
+        assert_eq!(
+            scene.bytes(),
+            [
+                hairline,
+                panel.bytes().to_vec(),
+                run(7, " NOR ", 208),
+                run(80, "ab", 256),
             ]
             .concat(),
         );

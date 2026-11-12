@@ -3197,8 +3197,9 @@ mod tests {
     }
 
     /// The commits screen draws the mode chip's box and the HEAD badge's box as
-    /// chip panels, each on its own row. A pool page of the list paints the
-    /// badge's box into its cells and sends no panel.
+    /// chip panels, each on its own row. The mode chip's panel stands inside
+    /// its cells. A pool page of the list paints the badge's box into its cells
+    /// and sends no panel.
     #[test]
     fn the_commits_screen_draws_its_chip_boxes_as_panels() {
         let mut h = Stoat::test();
@@ -3215,19 +3216,17 @@ mod tests {
             (cell_of(&text, "HEAD"), cell_of(&text, "NOR"));
         let (_, mode_color) =
             crate::render::pane::mode_segment("normal", &theme, &Default::default());
-        let mut panels: Vec<(u16, u16, Option<[u8; 3]>)> =
-            command::decode_stream(&h.stoat.apc_scene.all_bytes())
-                .into_iter()
-                .filter_map(|command| match command {
-                    Command::Panel(panel)
-                        if (panel.height, panel.edges) == (1, Edge::symmetric(0, 1)) =>
-                    {
-                        Some((panel.top, panel.left, panel.fill))
-                    },
-                    _ => None,
-                })
-                .collect();
-        panels.sort();
+        let chip_edges = [Edge::symmetric(0, 1), Edge::symmetric(5, 2)];
+        let mut panels: Vec<_> = command::decode_stream(&h.stoat.apc_scene.all_bytes())
+            .into_iter()
+            .filter_map(|command| match command {
+                Command::Panel(panel) if panel.height == 1 && chip_edges.contains(&panel.edges) => {
+                    Some((panel.top, panel.left, panel.fill, panel.edges))
+                },
+                _ => None,
+            })
+            .collect();
+        panels.sort_by_key(|&(top, left, ..)| (top, left));
 
         let list = h
             .stoat
@@ -3246,9 +3245,15 @@ mod tests {
                     (
                         badge_row,
                         badge - 1,
-                        style_rgb(theme.get(scope::VCS_REF_HEAD).bg)
+                        style_rgb(theme.get(scope::VCS_REF_HEAD).bg),
+                        chip_edges[0]
                     ),
-                    (mode_row, mode - 1, style_rgb(Some(mode_color))),
+                    (
+                        mode_row,
+                        mode - 1,
+                        style_rgb(Some(mode_color)),
+                        chip_edges[1]
+                    ),
                 ],
                 0,
             ),

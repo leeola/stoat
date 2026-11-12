@@ -690,7 +690,7 @@ fn status_bar_emits_sub_cell_components_inside_stoatty() {
         corner_radius: 4,
         fill: Some([127, 176, 255]),
         shadow: PanelShadow::None_,
-        edges: Edge::symmetric(0, 1),
+        edges: Edge::symmetric(5, 2),
         corners: 0,
         fillets: 0,
         fillet_radius: 2,
@@ -701,7 +701,8 @@ fn status_bar_emits_sub_cell_components_inside_stoatty() {
     };
     assert!(
         cmds.contains(&Command::Panel(chip)),
-        "the mode chip's box emits as a chip panel over its five cells, got {cmds:?}"
+        "the mode chip's box emits as a panel over its five cells, 5 px inside its ends and \
+         2 px inside the row, got {cmds:?}"
     );
     assert!(
         !cmds
