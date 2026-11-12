@@ -911,6 +911,37 @@ fn the_tab_bar_boxes_the_focused_layout_s_chip_inside_its_row() {
     }
 }
 
+/// The finder box casts the boards' modal shadow, `0 18px 40px
+/// rgba(0,0,0,0.6)`, which reaches past 60 px under the box.
+///
+/// The box's top-left cell is (16, 9), and it spans 128 by 32 cells. The pixel
+/// 30 px under its bottom edge at its middle column lies 12 px past the shadow
+/// rect's bottom, where the blur still lays about a sixth of black over the
+/// editor surface.
+#[test]
+fn the_file_finder_box_casts_the_modal_shadow() {
+    let mut home = support::scratch_home();
+    let shot = settled_frame(
+        home.path(),
+        "basic-diff",
+        "unstaged.txt",
+        "<Space>p<Settle>",
+    );
+
+    let (x, y, width, height) = cell_rect(16, 9, 128, 32);
+    let under = dominant_color(&shot, (x + width / 2, y + height + 30, 1, 1));
+    if under.iter().zip(BASE).any(|(&found, base)| found >= base) {
+        let frame = keep_frame(&shot, &mut home, "finder_shadow");
+        panic!(
+            "the pixel 30 px under the finder box reads {}, not darker than {} in every \
+             channel; the frame is {}",
+            hex(under),
+            hex(BASE),
+            frame.display(),
+        );
+    }
+}
+
 /// The file finder's box fills with the overlay surface where no text covers
 /// it, its preview pane sits on the base surface, and its corners round at
 /// 6 px.

@@ -48,12 +48,14 @@ const STYLE_ROUNDED: u32 = 3u;
 const STYLE_NONE: u32 = 4u;
 const STYLE_DASHED: u32 = 5u;
 
-// Drop-shadow color and peak alpha. The shadow paints only outside the box
-// exterior (fs_main gates it by interior coverage); this is its opacity where
-// the blur covers the shadow rect whole, which is well inside the rect. Its own
-// edge carries half of it, and three sigma out it reaches zero.
+// Drop-shadow color and peak alpha, the alpha of the boards'
+// `box-shadow: 0 18px 40px rgba(0, 0, 0, 0.6)` under every modal. The shadow
+// paints only outside the box exterior (fs_main gates it by interior coverage);
+// this is its opacity where the blur covers the shadow rect whole, which is
+// well inside the rect. Its own edge carries half of it, and three sigma out it
+// reaches zero.
 const SHADOW_COLOR: vec3<f32> = vec3<f32>(0.0, 0.0, 0.0);
-const SHADOW_ALPHA: f32 = 0.32;
+const SHADOW_ALPHA: f32 = 0.6;
 // Peak opacity of a halo shadow, the alpha of the boards'
 // `box-shadow: 0 -10px 14px -10px rgba(0, 0, 0, 0.5)` and its leftward twin
 // on a docked box. As for SHADOW_ALPHA, the box's own edge carries half of it.

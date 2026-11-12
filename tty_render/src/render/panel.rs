@@ -38,13 +38,18 @@ const INITIAL_CAPACITY: usize = 16;
 /// fragment for every pixel of it.
 const REGION_VERTICES: u32 = 30;
 
-/// Drop-shadow blur radius in logical pixels. The shadow's alpha fades to zero
+/// Drop-shadow blur radius in logical pixels, three sigma of the 20 logical
+/// pixel sigma that the boards' 40 px CSS blur stands for.
+///
+/// The boards draw every modal with `box-shadow: 0 18px 40px rgba(0,0,0,0.6)`,
+/// and one drop shadow serves every overlay. The shadow's alpha fades to zero
 /// across this distance past the shadow rectangle.
-const SHADOW_MARGIN: f32 = 16.0;
+const SHADOW_MARGIN: f32 = 60.0;
 
-/// Drop-shadow displacement in logical pixels, down and to the right, so a
-/// panel reads as floating above the grid rather than pasted onto it.
-const SHADOW_OFFSET: [f32; 2] = [5.0, 7.0];
+/// Drop-shadow displacement in logical pixels, straight down, the boards'
+/// `box-shadow: 0 18px 40px` under a modal, so a panel reads as floating above
+/// the grid rather than pasted onto it.
+const SHADOW_OFFSET: [f32; 2] = [0.0, 18.0];
 
 /// Height in logical pixels of a tucked shadow's interior bottom band, the band
 /// a raised card darkens inside its bottom edge.
@@ -887,7 +892,7 @@ mod tests {
         // A shadow alone never reaches past SHADOW_ALPHA. So a coverage above
         // that which also exceeds the shadowless panel's is neither of the two
         // inputs, and only compositing them produces it.
-        let ceiling = (0.32 * 255.0) as u8;
+        let ceiling = (0.6 * 255.0) as u8;
         let composited = dropped.iter().zip(&alone).position(|(dropped, alone)| {
             (1..255).contains(alone) && dropped > alone && *dropped > ceiling
         });

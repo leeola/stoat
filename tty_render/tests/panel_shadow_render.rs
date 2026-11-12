@@ -134,7 +134,7 @@ fn render_scene_over(
 #[test]
 fn unfilled_panel_shadow_stays_outside_the_box() {
     // A panel inset one cell from the top-left, leaving a couple cells of margin
-    // at the bottom-right for the [5,7]px shadow to fall into.
+    // at the bottom-right for the drop shadow to fall into.
     let r = render_panel(|rows, cols| Panel {
         top: 1,
         left: 1,
