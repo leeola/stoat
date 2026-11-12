@@ -200,6 +200,16 @@ impl ApcScene {
         self.active = 0;
     }
 
+    /// Offset the text runs, bars, and panels that follow in the open lane by
+    /// `offset` logical px, positive right and down.
+    ///
+    /// The offset holds until the next nudge or the end of the lane. A host
+    /// before [`NUDGE_PROTOCOL`](stoatty_protocol::NUDGE_PROTOCOL) ignores it,
+    /// and a dead scene drops it as it drops every append.
+    pub fn nudge(&mut self, offset: [i16; 2]) {
+        command::encode_nudge_into(self.buffer(), offset);
+    }
+
     /// Forget what the last flush wrote, so the next [`Self::flush_to`] sends
     /// the whole scene even when it matches.
     ///

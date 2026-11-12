@@ -163,6 +163,7 @@ session control. "Head" is the fixed prefix of the first argument.
 | `reset` | C | -- | Clears every decoration |
 | `lane_begin` | C | 4 B | Opens a numbered lane and clears its decorations |
 | `lane_end` | C | -- | Closes the open lane |
+| `nudge` | C | 4 B | Offsets the text runs, bars, and panels after it by logical px |
 | `config_reload` | C | -- | The terminal re-reads its own config file |
 | `zoom_capture` | C | 1 B | Claim or release the platform zoom combo |
 | `font_step` | C | 4 B | Step the terminal's font size |
@@ -227,6 +228,15 @@ From protocol version 34, edge mode 3 in a `panel` is an outset. The box edge
 stands the edge's px outside the cell edge, at any cell size, as a box taller
 than its row needs. A terminal below version 34 reads the mode as an inset of
 the same px. Send an outset only to a terminal at version 34 or later.
+
+From protocol version 35, a `nudge` frame carries an i16 dx and an i16 dy,
+each big-endian, in logical px, positive right and down. Every `text_run`,
+`text_runs` entry, `bar`, `bars` entry, and `panel` after it draws that far from
+its declared place, until the next `nudge`, `lane_begin`, `lane_end`, or
+`reset`. An icon takes no nudge, since it carries its own offset. A panel's
+inset and outset edges move with the nudge, and its margin and gap edges keep
+their place. A terminal below version 35 ignores the frame. Send a nudge only
+to a terminal at version 35 or later.
 
 `ident` travels the other way, terminal to program, and arrives as input bytes
 on stdin. `decode` never yields it; use `decode_ident_reply`.

@@ -30,6 +30,7 @@ use minimap::{
     decode_minimap, decode_minimap_drop, decode_minimap_len, decode_minimap_lines,
     decode_minimap_runs, decode_minimap_view,
 };
+use nudge::decode_nudge;
 use panel::decode_panel;
 use polyline::decode_polyline;
 use pool::{
@@ -51,6 +52,7 @@ pub mod icon;
 pub mod lane;
 pub mod line_layout;
 pub mod minimap;
+pub mod nudge;
 pub mod panel;
 pub mod polyline;
 pub mod pool;
@@ -76,8 +78,10 @@ pub use minimap::{
     MinimapCommand, MinimapDropCommand, MinimapLenCommand, MinimapLinesCommand, MinimapRun,
     MinimapViewCommand,
 };
+pub use nudge::{encode_nudge, encode_nudge_into};
 pub use panel::{
-    decode_panels, edge_modes, encode_panel, encode_panel_into, Edge, PanelCommand, PanelShadow,
+    decode_panels, edge_modes, encode_panel, encode_panel_into, nudged, Edge, PanelCommand,
+    PanelShadow,
 };
 pub use polyline::{encode_polyline, encode_polyline_into, PolylineCommand};
 pub use pool::{
@@ -278,6 +282,11 @@ pub enum Command {
     /// Close the lane that [`Command::LaneBegin`] opened, so the decorations
     /// that follow belong to lane 0. Carries no payload.
     LaneEnd,
+    /// Offset the text runs, bars, and panels that follow by `[dx, dy]`
+    /// logical pixels, positive right and down.
+    ///
+    /// [`nudge`] has the full rules.
+    Nudge([i16; 2]),
     /// The terminal's own config file changed on disk, so it should re-read and
     /// re-apply it. Carries no payload: the terminal reads the file itself, and
     /// the program that sends this is only reporting that it wrote it.
@@ -465,6 +474,7 @@ pub fn encode_into(out: &mut Vec<u8>, command: &Command) {
         Command::Reset => encode_reset_into(out),
         Command::LaneBegin(id) => encode_lane_begin_into(out, *id),
         Command::LaneEnd => encode_lane_end_into(out),
+        Command::Nudge(offset) => encode_nudge_into(out, *offset),
         Command::ConfigReload => encode_config_reload_into(out),
         Command::ZoomCapture { on, inband } => encode_zoom_capture_into(out, *on, *inband),
         Command::FontStep { delta } => encode_font_step_into(out, *delta),
@@ -525,6 +535,7 @@ fn dispatch(sub: &str, args: &[Vec<u8>]) -> Option<Command> {
         "reset" => Some(Command::Reset),
         "lane_begin" => decode_lane_begin(args).map(Command::LaneBegin),
         "lane_end" => Some(Command::LaneEnd),
+        "nudge" => decode_nudge(args).map(Command::Nudge),
         "config_reload" => Some(Command::ConfigReload),
         "zoom_capture" => decode_zoom_capture(args),
         "font_step" => decode_font_step(args),
@@ -1266,6 +1277,7 @@ mod tests {
             Command::Reset,
             Command::LaneBegin(7),
             Command::LaneEnd,
+            Command::Nudge([3, -7]),
         ];
 
         for command in commands {

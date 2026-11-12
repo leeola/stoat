@@ -306,6 +306,7 @@ fn a_pool_text_run_paints_on_its_own_row_after_the_live_grid_scrolls() {
         anchor: None,
         text: "MMM".into(),
         seq: 0,
+        nudge: [0, 0],
     }]);
 
     let pixels = harness.composite(&device, &queue, &pool, 0.0, None);

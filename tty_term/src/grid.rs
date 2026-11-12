@@ -1254,12 +1254,12 @@ impl PagePool {
             .into_iter()
             .map(|command| {
                 let run = StoredTextRun::from(command);
-                text_run_from_command(&run, run.row, 0)
+                text_run_from_command(&run, run.row, 0, [0, 0])
             })
             .collect();
         let bars: Vec<Bar> = bars
             .iter()
-            .map(|command| bar_from_command(command, command.y, 0))
+            .map(|command| bar_from_command(command, command.y, 0, [0, 0]))
             .collect();
 
         let icons: Vec<Icon> = icons
@@ -2105,6 +2105,10 @@ pub struct TextRun {
     /// Pool this run rides, and the pool's top row, so the run glides with a
     /// scrolling pane. `None` leaves it fixed to the screen.
     pub anchor: Option<(u32, f32)>,
+    /// The logical pixels the run draws from its declared place, `[dx, dy]`,
+    /// positive right and down, as the `nudge` in force at its declaration set
+    /// them.
+    pub nudge: [i16; 2],
     /// Monotonic declaration-order index across all non-cell components. See
     /// [`Panel::seq`].
     pub seq: u32,
@@ -2145,6 +2149,10 @@ pub struct Bar {
     /// [`BarCommand::corners`](stoatty_protocol::command::BarCommand::corners)
     /// names them. A mask of 0 rounds all four.
     pub corners: u8,
+    /// The logical pixels the bar draws from its declared place, `[dx, dy]`,
+    /// positive right and down, as the `nudge` in force at its declaration set
+    /// them.
+    pub nudge: [i16; 2],
 }
 
 /// A stroked path drawn off the cell grid in a solid color.
@@ -2914,6 +2922,7 @@ mod tests {
             anchor: None,
             text: "42".into(),
             seq: 0,
+            nudge: [0, 0],
         };
         grid.set_text_runs(vec![run.clone()]);
 
@@ -3005,6 +3014,7 @@ mod tests {
             anchor: None,
             text: "x".into(),
             seq: 0,
+            nudge: [0, 0],
         }
     }
 
@@ -3178,6 +3188,7 @@ mod tests {
             hatch: None,
             radius: 0,
             corners: 0,
+            nudge: [0, 0],
         };
         grid.set_bars(vec![bar]);
 
@@ -3511,6 +3522,7 @@ mod region_blit_tests {
             anchor: None,
             text: "x".into(),
             seq: 0,
+            nudge: [0, 0],
         }]);
         grid.set_bars(vec![Bar {
             x: 0,
@@ -3523,6 +3535,7 @@ mod region_blit_tests {
             hatch: None,
             radius: 0,
             corners: 0,
+            nudge: [0, 0],
         }]);
         grid.set_polylines(vec![Polyline {
             points: vec![[0, 0], [16, 16]],

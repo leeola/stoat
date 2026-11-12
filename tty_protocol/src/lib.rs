@@ -222,9 +222,14 @@
 /// box edge its px outside the cell edge at any cell size. A terminal that
 /// predates it reads the edge as an inset of the same px.
 ///
+/// Version 35 reads `nudge`, which offsets the text runs, bars, and panels
+/// after it by logical px until the next nudge, lane marker, or reset. A
+/// terminal that predates it ignores the frame and draws each component at its
+/// declared place.
+///
 /// Zero is reserved for a peer whose handshake carries no version at all, which
 /// is every build from before the field existed.
-pub const PROTOCOL_VERSION: u32 = 34;
+pub const PROTOCOL_VERSION: u32 = 35;
 
 /// The first [`PROTOCOL_VERSION`] whose terminal reads the `text_runs` and
 /// `bars` batches.
@@ -281,6 +286,14 @@ pub const BAR_CORNERS_PROTOCOL: u32 = 32;
 /// An earlier terminal reads the outline's alpha as the rule class, and a
 /// terminal at this version drops a `minimap` head that holds no alpha.
 pub const MINIMAP_THUMB_OUTLINE_PROTOCOL: u32 = 33;
+
+/// The first [`PROTOCOL_VERSION`] whose terminal draws the text runs, bars,
+/// and panels after a `nudge` at its offset.
+///
+/// An earlier terminal ignores the nudge and draws each component at its
+/// declared place, so an emitter that moves chrome off the cell grid sends the
+/// nudge only to a terminal at this version or later.
+pub const NUDGE_PROTOCOL: u32 = 35;
 
 pub mod command;
 pub mod detect;

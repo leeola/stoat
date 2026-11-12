@@ -197,6 +197,7 @@ fn the_live_grid_boxes_occlude_a_pool_at_its_own_font_size() {
         hatch: None,
         radius: 0,
         corners: 0,
+        nudge: [0, 0],
     }]);
     pool.set_text_runs(vec![TextRun {
         col: 0,
@@ -209,6 +210,7 @@ fn the_live_grid_boxes_occlude_a_pool_at_its_own_font_size() {
         anchor: None,
         text: " ".repeat(cols as usize).into(),
         seq: 1,
+        nudge: [0, 0],
     }]);
 
     let (full, none) = (Damage::Full, Damage::Partial(Vec::new()));

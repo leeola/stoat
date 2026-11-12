@@ -175,6 +175,7 @@ fn builds_passes_and_draws_a_frame_off_screen() {
         anchor: None,
         text: "127".into(),
         seq: 0,
+        nudge: [0, 0],
     }]);
 
     // Two sub-cell color bars, so the bar pass fills thin rectangles at a
@@ -191,6 +192,7 @@ fn builds_passes_and_draws_a_frame_off_screen() {
             hatch: None,
             radius: 0,
             corners: 0,
+            nudge: [0, 0],
         },
         Bar {
             x: 30,
@@ -203,6 +205,7 @@ fn builds_passes_and_draws_a_frame_off_screen() {
             hatch: None,
             radius: 0,
             corners: 0,
+            nudge: [0, 0],
         },
     ]);
 

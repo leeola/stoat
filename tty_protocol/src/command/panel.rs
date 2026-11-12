@@ -106,6 +106,34 @@ pub fn edge_modes(edges: [Edge; 4]) -> u8 {
         .fold(0, |modes, (side, edge)| modes | edge.mode() << (2 * side))
 }
 
+/// The edges of a box drawn `[dx, dy]` logical pixels from its declared place,
+/// positive right and down.
+///
+/// The nudge moves each inset or outset edge with the box. An edge that the
+/// move carries past its cell edge turns from an inset into an outset, or back,
+/// and an edge more than 255 pixels from its cell edge stops at 255.
+///
+/// A margin or a gap edge stays as it is. Those modes state a distance to the
+/// far side of the neighbor cell rather than to the panel's own cell edge, so
+/// no pixel count moves them the same way at every cell size.
+pub fn nudged(edges: [Edge; 4], [dx, dy]: [i16; 2]) -> [Edge; 4] {
+    let (dx, dy) = (i32::from(dx), i32::from(dy));
+    let inward = [dy, -dx, -dy, dx];
+    let px = |n: i32| u8::try_from(n.min(255)).unwrap_or(u8::MAX);
+
+    array::from_fn(|side| {
+        let inset = match edges[side] {
+            Edge::Inset(n) => i32::from(n),
+            Edge::Outset(n) => -i32::from(n),
+            edge @ (Edge::Margin(_) | Edge::Gap(_)) => return edge,
+        } + inward[side];
+        match inset >= 0 {
+            true => Edge::Inset(px(inset)),
+            false => Edge::Outset(px(-inset)),
+        }
+    })
+}
+
 /// How a panel's shadow is drawn.
 ///
 /// [`PanelShadow::None_`] draws no shadow. [`PanelShadow::Drop`] is a displaced,
@@ -736,6 +764,47 @@ mod tests {
         assert_eq!(
             decode(&encode_panel(&command)),
             Some(Command::Panel(command))
+        );
+    }
+
+    /// A nudge moves a box's inset and outset edges, turning one into the
+    /// other past the cell edge, and leaves its margin and gap edges.
+    #[test]
+    fn a_nudge_moves_inset_and_outset_edges_and_keeps_margins() {
+        assert_eq!(
+            [
+                nudged(Edge::symmetric(5, 1), [0, -3]),
+                nudged(
+                    [
+                        Edge::Outset(2),
+                        Edge::Margin(6),
+                        Edge::Outset(2),
+                        Edge::Gap(4),
+                    ],
+                    [0, 7],
+                ),
+                nudged(Edge::symmetric(0, 0), [-300, 400]),
+            ],
+            [
+                [
+                    Edge::Outset(2),
+                    Edge::Inset(5),
+                    Edge::Inset(4),
+                    Edge::Inset(5),
+                ],
+                [
+                    Edge::Inset(5),
+                    Edge::Margin(6),
+                    Edge::Outset(9),
+                    Edge::Gap(4),
+                ],
+                [
+                    Edge::Inset(255),
+                    Edge::Inset(255),
+                    Edge::Outset(255),
+                    Edge::Outset(255),
+                ],
+            ],
         );
     }
 

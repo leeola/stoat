@@ -23,19 +23,19 @@ use stoatty_protocol::command::{
     encode_fill_decorations_scope, encode_fill_end, encode_fill_rows_scope, encode_font_step,
     encode_hello, encode_icon, encode_ident_reply, encode_lane_begin, encode_lane_end,
     encode_line_layout, encode_minimap, encode_minimap_drop, encode_minimap_len,
-    encode_minimap_lines, encode_minimap_view, encode_panel, encode_polyline, encode_pool_anchor,
-    encode_pool_cursor, encode_pool_cursor_release, encode_pool_drop, encode_pool_region,
-    encode_popover, encode_reposition, encode_reset, encode_scale, encode_scroll,
-    encode_scroll_region, encode_sketch, encode_text_run, encode_text_run_end, encode_text_runs,
-    encode_window_open, encode_zoom_capture, BarCommand, BarsCommand, BorderCommand,
-    BorderStyle as ProtoBorderStyle, Edge, FillCommand, FillRowsCommand, HelloCommand, IconCommand,
-    IconKind as ProtoIconKind, IdentReply, LineLayoutCommand, LineSummary, MinimapCommand,
-    MinimapDropCommand, MinimapLenCommand, MinimapLinesCommand, MinimapRun, MinimapViewCommand,
-    PanelCommand, PanelShadow as ProtoPanelShadow, PolylineCommand, PoolAnchorCommand,
-    PoolCursorCommand, PoolCursorReleaseCommand, PoolDropCommand, PoolKind, PoolRegionCommand,
-    PopoverChrome, PopoverCommand, PopoverSpan, RepositionCommand, ScaleCommand, ScrollCommand,
-    ScrollRegionCommand, SketchBounds, SketchCommand, SketchEasing, SketchPhase, SketchShape,
-    SketchStyle, SketchTiming, TextRunCommand, TextRunsCommand, WindowOpenCommand,
+    encode_minimap_lines, encode_minimap_view, encode_nudge, encode_panel, encode_polyline,
+    encode_pool_anchor, encode_pool_cursor, encode_pool_cursor_release, encode_pool_drop,
+    encode_pool_region, encode_popover, encode_reposition, encode_reset, encode_scale,
+    encode_scroll, encode_scroll_region, encode_sketch, encode_text_run, encode_text_run_end,
+    encode_text_runs, encode_window_open, encode_zoom_capture, BarCommand, BarsCommand,
+    BorderCommand, BorderStyle as ProtoBorderStyle, Edge, FillCommand, FillRowsCommand,
+    HelloCommand, IconCommand, IconKind as ProtoIconKind, IdentReply, LineLayoutCommand,
+    LineSummary, MinimapCommand, MinimapDropCommand, MinimapLenCommand, MinimapLinesCommand,
+    MinimapRun, MinimapViewCommand, PanelCommand, PanelShadow as ProtoPanelShadow, PolylineCommand,
+    PoolAnchorCommand, PoolCursorCommand, PoolCursorReleaseCommand, PoolDropCommand, PoolKind,
+    PoolRegionCommand, PopoverChrome, PopoverCommand, PopoverSpan, RepositionCommand, ScaleCommand,
+    ScrollCommand, ScrollRegionCommand, SketchBounds, SketchCommand, SketchEasing, SketchPhase,
+    SketchShape, SketchStyle, SketchTiming, TextRunCommand, TextRunsCommand, WindowOpenCommand,
 };
 
 /// Base64, for a test feeding a graphics payload.
@@ -2305,6 +2305,7 @@ fn text_run_apc_frame_sets_a_grid_text_run() {
             anchor: None,
             text: "42".into(),
             seq: 1,
+            nudge: [0, 0],
         }]
     );
 }
@@ -2732,6 +2733,7 @@ fn bar_apc_frame_sets_a_grid_bar() {
         hatch,
         radius: 2,
         corners: 3,
+        nudge: [0, 0],
     };
 
     assert_eq!(
@@ -3385,6 +3387,114 @@ fn a_lane_marker_commits_an_open_run_into_its_lane() {
         run_labels(&grid),
         Vec::<&str>::new(),
         "the run landed in lane 1, which the re-declaration emptied"
+    );
+}
+
+/// A nudge offsets the text runs, bars, and panels after it. A lane marker and
+/// a reset each zero it for what follows, and a run cut off by a nudge keeps
+/// the offset it opened under.
+#[test]
+fn a_nudge_offsets_what_follows_until_a_lane_marker_or_a_reset() {
+    let panel = encode_panel(&PanelCommand {
+        top: 1,
+        left: 1,
+        width: 2,
+        height: 1,
+        style: ProtoBorderStyle::None_,
+        border: [1, 2, 3],
+        corner_radius: 0,
+        fill: Some([4, 5, 6]),
+        shadow: ProtoPanelShadow::None_,
+        edges: Edge::symmetric(5, 1),
+        corners: 0,
+        fillets: 0,
+        fillet_radius: 0,
+        hatch: None,
+        above_pools: false,
+        backdrop: false,
+        anchor: None,
+    });
+    let projected = |stream: Vec<u8>| {
+        let mut terminal = Terminal::new(8, 8, Theme::default());
+        let mut grid = Grid::new(8, 8);
+        terminal.advance(&stream);
+        terminal.project(&mut grid);
+        let runs: Vec<_> = grid
+            .text_runs()
+            .iter()
+            .map(|run| (run.text.to_string(), run.nudge))
+            .collect();
+        let bars: Vec<_> = grid.bars().iter().map(|bar| (bar.x, bar.nudge)).collect();
+        let panels: Vec<_> = grid.panels().iter().map(|panel| panel.edges).collect();
+        (runs, bars, panels)
+    };
+    let run = |text: &str, dy: i16| (text.to_owned(), [0, dy]);
+    let mut open_run = text_run_frame("f");
+    open_run.truncate(open_run.len() - encode_text_run_end().len());
+
+    assert_eq!(
+        projected(
+            [
+                encode_nudge([0, -3]),
+                text_run_frame("a"),
+                bar_at(1),
+                panel,
+                encode_lane_begin(1),
+                text_run_frame("b"),
+                encode_nudge([0, -5]),
+                text_run_frame("c"),
+                encode_lane_end(),
+                text_run_frame("d"),
+            ]
+            .concat()
+        ),
+        (
+            vec![run("a", -3), run("d", 0), run("b", 0), run("c", -5)],
+            vec![(1, [0, -3])],
+            vec![[
+                Edge::Outset(2),
+                Edge::Inset(5),
+                Edge::Inset(4),
+                Edge::Inset(5),
+            ]],
+        ),
+        "lane 0's run, bar, and panel take the nudge, and a lane_begin and a lane_end each \
+         zero it",
+    );
+    assert_eq!(
+        [
+            projected([encode_nudge([0, -3]), encode_reset(), text_run_frame("e")].concat()).0,
+            projected([open_run, encode_nudge([0, -3]), text_run_frame("g")].concat()).0,
+        ],
+        [vec![run("e", 0)], vec![run("f", 0), run("g", -3)]],
+        "a reset zeroes the nudge, and the run a nudge cuts off keeps the offset before it",
+    );
+}
+
+/// A redeclared scene that moves only its nudge projects its runs and bars
+/// again, since the nudge moves where they draw.
+#[test]
+fn a_redeclare_that_moves_only_a_nudge_projects_again() {
+    let mut terminal = Terminal::new(8, 8, Theme::default());
+    let mut grid = Grid::new(8, 8);
+    let scene = |dy| {
+        [
+            encode_reset(),
+            encode_nudge([0, dy]),
+            text_run_frame("a"),
+            bar_at(1),
+        ]
+        .concat()
+    };
+
+    terminal.advance(&scene(-3));
+    terminal.project(&mut grid);
+    terminal.advance(&scene(2));
+    terminal.project(&mut grid);
+    assert_eq!(
+        (grid.text_runs()[0].nudge, grid.bars()[0].nudge),
+        ([0, 2], [0, 2]),
+        "the second declaration's nudge reaches the grid",
     );
 }
 
@@ -4900,6 +5010,7 @@ fn fill_captures_bar_and_text_run_onto_the_slot() {
             anchor: None,
             text: "42".into(),
             seq: 0,
+            nudge: [0, 0],
         }]
     );
     assert_eq!(
@@ -4915,6 +5026,7 @@ fn fill_captures_bar_and_text_run_onto_the_slot() {
             hatch: None,
             radius: 0,
             corners: 0,
+            nudge: [0, 0],
         }]
     );
 
@@ -4976,6 +5088,7 @@ fn project_pool_stamps_translated_decorations_and_culls_off_window() {
             anchor: None,
             text: "bb".into(),
             seq: 0,
+            nudge: [0, 0],
         }]
     );
 }

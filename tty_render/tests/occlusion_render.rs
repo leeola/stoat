@@ -100,6 +100,7 @@ fn a_box_occludes_the_bars_runs_and_icons_beneath_it() {
         hatch: None,
         radius: 0,
         corners: 0,
+        nudge: [0, 0],
     }]);
     grid.set_text_runs(vec![TextRun {
         col: 0,
@@ -112,6 +113,7 @@ fn a_box_occludes_the_bars_runs_and_icons_beneath_it() {
         anchor: None,
         text: " ".repeat(cols).into(),
         seq: 2,
+        nudge: [0, 0],
     }]);
     grid.set_icons(vec![
         Icon {
@@ -441,6 +443,7 @@ fn a_pool_prepared_in_the_same_frame_leaves_the_live_occluders_alone() {
         hatch: None,
         radius: 0,
         corners: 0,
+        nudge: [0, 0],
     }]);
     // The three passes that occlude a live primitive each keep their own
     // occluder buffer, so each needs something of its own on the row below.
@@ -455,6 +458,7 @@ fn a_pool_prepared_in_the_same_frame_leaves_the_live_occluders_alone() {
         anchor: None,
         text: " ".repeat(cols).into(),
         seq: 50,
+        nudge: [0, 0],
     }]);
     grid.set_polylines(vec![Polyline {
         points: (0..=cols as i16)
@@ -725,6 +729,7 @@ fn a_chip_occludes_only_the_box_it_draws() {
             hatch: None,
             radius: 0,
             corners: 0,
+            nudge: [0, 0],
         }]);
         grid.set_panels(vec![Panel {
             top: 1,
@@ -809,6 +814,7 @@ fn a_box_occludes_across_the_cell_its_edge_reaches() {
             hatch: None,
             radius: 0,
             corners: 0,
+            nudge: [0, 0],
         }]);
         grid.set_panels(vec![Panel {
             top: 1,
@@ -921,6 +927,7 @@ fn an_occluding_bar_hides_the_run_beneath_it_and_holds_over_a_pane_pool() {
         hatch: None,
         radius: 0,
         corners: 0,
+        nudge: [0, 0],
     };
     live.set_bars(vec![
         bar(1, 2, held, 2, true),
@@ -938,6 +945,7 @@ fn an_occluding_bar_hides_the_run_beneath_it_and_holds_over_a_pane_pool() {
         anchor: None,
         text: " ".repeat(cols).into(),
         seq: 1,
+        nudge: [0, 0],
     }]);
 
     let mut pool = Grid::new(rows, cols);

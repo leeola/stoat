@@ -340,10 +340,16 @@ pub(super) fn stamp_pool_decorations(pool: &PagePool, out: &mut Grid, top: i64, 
 /// than stamped per cell. The declared row is a logical row resolved through the
 /// line layout, so a run tracks expansions above it. The renderer clamps an
 /// out-of-grid anchor, so wire coordinates need no guard here.
-pub(super) fn apply_text_runs(grid: &mut Grid, runs: &[StoredTextRun], seqs: &[u32]) {
+pub(super) fn apply_text_runs(
+    grid: &mut Grid,
+    runs: &[StoredTextRun],
+    seqs: &[u32],
+    nudges: &[[i16; 2]],
+) {
     grid.fill_text_runs(runs.len(), |grid, index| {
         let run = &runs[index];
-        text_run_from_command(run, resolve_logical_row(grid, run.row), seqs[index])
+        let row = resolve_logical_row(grid, run.row);
+        text_run_from_command(run, row, seqs[index], nudges[index])
     });
 }
 
@@ -352,10 +358,16 @@ pub(super) fn apply_text_runs(grid: &mut Grid, runs: &[StoredTextRun], seqs: &[u
 /// Grid-level like the overlays, so the full list is set each projection rather
 /// than stamped per cell. The declared `y` is a logical row resolved through the
 /// line layout, so a bar tracks expansions above it.
-pub(super) fn apply_bars(grid: &mut Grid, commands: &[BarCommand], seqs: &[u32]) {
+pub(super) fn apply_bars(
+    grid: &mut Grid,
+    commands: &[BarCommand],
+    seqs: &[u32],
+    nudges: &[[i16; 2]],
+) {
     grid.fill_bars(commands.len(), |grid, index| {
         let command = &commands[index];
-        bar_from_command(command, resolve_logical_row(grid, command.y), seqs[index])
+        let y = resolve_logical_row(grid, command.y);
+        bar_from_command(command, y, seqs[index], nudges[index])
     });
 }
 

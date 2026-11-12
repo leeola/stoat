@@ -76,6 +76,7 @@ fn pool_decorations_composite_and_glide_with_the_shift() {
         hatch: None,
         radius: 0,
         corners: 0,
+        nudge: [0, 0],
     }]);
     pool.set_text_runs(vec![TextRun {
         col: 0,
@@ -88,6 +89,7 @@ fn pool_decorations_composite_and_glide_with_the_shift() {
         anchor: None,
         text: "   ".into(),
         seq: 0,
+        nudge: [0, 0],
     }]);
 
     let no_decoration = Damage::Partial(Vec::new());

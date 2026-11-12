@@ -63,11 +63,17 @@ impl From<TextRunCommand> for StoredTextRun {
 /// Project a declared text run into its grid [`TextRun`].
 ///
 /// `row` is the run's declared row already resolved through the target grid's
-/// line layout, and `seq` its declaration order among the non-cell components.
-/// Both come from the caller because a pool page has neither. A page carries no
-/// line layout, so its row resolution is the identity, and its runs are the base
-/// layer of the composite, so they take `seq` 0.
-pub(crate) fn text_run_from_command(run: &StoredTextRun, row: i16, seq: u32) -> TextRun {
+/// line layout, `seq` its declaration order among the non-cell components, and
+/// `nudge` the offset in force at its declaration. All three come from the
+/// caller because a pool page has none of them. A page carries no line layout,
+/// so its row resolution is the identity. Its runs are the base layer of the
+/// composite, so they take `seq` 0, and a page takes no nudge.
+pub(crate) fn text_run_from_command(
+    run: &StoredTextRun,
+    row: i16,
+    seq: u32,
+    nudge: [i16; 2],
+) -> TextRun {
     TextRun {
         col: run.col,
         row,
@@ -77,14 +83,15 @@ pub(crate) fn text_run_from_command(run: &StoredTextRun, row: i16, seq: u32) -> 
         bold: run.bold,
         follow: run.follow,
         anchor: run.anchor,
+        nudge,
         text: Arc::clone(&run.text),
         seq,
     }
 }
 
 /// Project a declared [`BarCommand`] into its grid [`Bar`]. See
-/// [`text_run_from_command`] for where `y` and `seq` come from.
-pub(crate) fn bar_from_command(command: &BarCommand, y: i16, seq: u32) -> Bar {
+/// [`text_run_from_command`] for where `y`, `seq`, and `nudge` come from.
+pub(crate) fn bar_from_command(command: &BarCommand, y: i16, seq: u32, nudge: [i16; 2]) -> Bar {
     Bar {
         x: command.x,
         y,
@@ -96,6 +103,7 @@ pub(crate) fn bar_from_command(command: &BarCommand, y: i16, seq: u32) -> Bar {
         hatch: command.hatch.map(|[r, g, b]| Rgb::new(r, g, b)),
         radius: command.radius,
         corners: command.corners,
+        nudge,
     }
 }
 

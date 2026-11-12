@@ -65,6 +65,7 @@ fn a_followed_run_is_clear_early_and_painted_once_its_mark_is_drawn() {
             anchor: None,
             text: "MMMM".into(),
             seq: 1,
+            nudge: [0, 0],
         },
         TextRun {
             col: 0,
@@ -77,6 +78,7 @@ fn a_followed_run_is_clear_early_and_painted_once_its_mark_is_drawn() {
             anchor: None,
             text: "  ".into(),
             seq: 2,
+            nudge: [0, 0],
         },
     ]);
 

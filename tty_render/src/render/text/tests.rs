@@ -1248,6 +1248,7 @@ fn a_bold_text_run_keys_its_glyphs_at_the_bold_weight() {
         anchor: None,
         text: text.into(),
         seq: 0,
+        nudge: [0, 0],
     };
     let mut grid = Grid::new(1, 8);
     grid.set_text_runs(vec![run("a", false), run("b", true)]);
@@ -1536,6 +1537,7 @@ fn followed(id: u32, follow: u32) -> Grid {
         anchor: None,
         text: "42".into(),
         seq: 42,
+        nudge: [0, 0],
     }]);
     grid
 }
@@ -1660,6 +1662,7 @@ fn run_rect_carries_its_run_occlusion_seq() {
         anchor: None,
         text: "42".into(),
         seq: 42,
+        nudge: [0, 0],
     }]);
 
     let rects = pass.build_run_rects(&grid);
@@ -1686,6 +1689,7 @@ fn run_without_bg_builds_no_rect() {
         anchor: None,
         text: "42".into(),
         seq: 42,
+        nudge: [0, 0],
     }]);
 
     assert!(
@@ -1709,6 +1713,7 @@ fn build_run_rects_into_clears_prior_scratch() {
         anchor: None,
         text: "42".into(),
         seq: 7,
+        nudge: [0, 0],
     }]);
 
     let fresh = pass.build_run_rects(&grid);
@@ -1745,6 +1750,7 @@ fn a_run_on_the_last_row_backs_the_anchored_row() {
         anchor: None,
         text: "42".into(),
         seq: 1,
+        nudge: [0, 0],
     };
     grid.set_text_runs(vec![run(3 * 16), run(4 * 16)]);
     let anchor = GridLayout {
@@ -1787,6 +1793,7 @@ fn a_run_rect_covers_whole_pixels() {
         anchor: None,
         text: "42".into(),
         seq: 7,
+        nudge: [0, 0],
     }]);
 
     let rects = pass.build_run_rects(&grid);
@@ -1821,6 +1828,7 @@ fn ascii_burst_run() -> TextRun {
             .collect::<String>()
             .into(),
         seq: 0,
+        nudge: [0, 0],
     }
 }
 
@@ -1919,6 +1927,7 @@ fn composite_runs_reresolve_when_the_row_pack_grows_the_atlas() {
         anchor: None,
         text: "42".into(),
         seq: 0,
+        nudge: [0, 0],
     }]);
 
     let (initial, _) = pass.atlas.texture_dims();
@@ -2554,6 +2563,7 @@ fn chrome_run(text: &str) -> TextRun {
         anchor: None,
         text: text.into(),
         seq: 0,
+        nudge: [0, 0],
     }
 }
 
@@ -3826,6 +3836,7 @@ fn a_moved_composite_rebuilds_against_its_new_origin() {
         anchor: None,
         text: "charlie".into(),
         seq: 0,
+        nudge: [0, 0],
     }]);
 
     let composite = |pass: &mut TextPass, origin, content_changed| {
@@ -3958,6 +3969,7 @@ fn a_composite_whose_runs_held_builds_none_of_them_again() {
         anchor: None,
         text: "charlie".into(),
         seq: 0,
+        nudge: [0, 0],
     };
     grid.set_text_runs(vec![run(32)]);
 
@@ -4037,6 +4049,7 @@ fn a_composite_bakes_its_runs_again_when_the_atlas_moved_under_them() {
         anchor: None,
         text: "42".into(),
         seq: 0,
+        nudge: [0, 0],
     }]);
 
     let composite = |pass: &mut TextPass, grid: &Grid| {

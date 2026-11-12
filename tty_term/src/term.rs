@@ -316,6 +316,10 @@ pub struct Terminal {
     bar_seq: Vec<u32>,
     polyline_seq: Vec<u32>,
     sketch_seq: Vec<u32>,
+    /// The nudge each text run and each bar was declared under, held in
+    /// lockstep with [`Self::text_runs`] and [`Self::bars`] like their seqs.
+    text_run_nudge: Vec<[i16; 2]>,
+    bar_nudge: Vec<[i16; 2]>,
     /// Declared minimap strips set by `Gstoatty;minimap` frames, applied to the
     /// grid by [`Self::project`]. A decoration cleared like a border, with a
     /// parallel [`Self::minimap_seq`] for z-order.
@@ -362,6 +366,9 @@ pub struct Terminal {
     /// The lane that decorations land in. It is the lane the last `lane_begin`
     /// opened, or 0 outside any lane.
     lane: u32,
+    /// The offset in logical px that the last `nudge` set for the text runs,
+    /// bars, and panels that land after it. A lane marker and a reset zero it.
+    nudge: [i16; 2],
     /// Whether a lane changed since [`Self::flatten_lanes`] last rebuilt the
     /// flat lists.
     lanes_changed: bool,
@@ -634,8 +641,10 @@ struct ProjectedDecorations {
     icon_seq: Vec<u32>,
     text_runs: Vec<StoredTextRun>,
     text_run_seq: Vec<u32>,
+    text_run_nudge: Vec<[i16; 2]>,
     bars: Vec<BarCommand>,
     bar_seq: Vec<u32>,
+    bar_nudge: Vec<[i16; 2]>,
     polylines: Vec<PolylineCommand>,
     polyline_seq: Vec<u32>,
     sketches: Vec<SketchCommand>,
@@ -673,6 +682,8 @@ struct LaneDecorations {
     polyline_seq: Vec<u32>,
     sketch_seq: Vec<u32>,
     minimap_seq: Vec<u32>,
+    text_run_nudge: Vec<[i16; 2]>,
+    bar_nudge: Vec<[i16; 2]>,
     /// The lane-local seq the next sequenced decoration takes.
     decoration_seq: u32,
 }
@@ -713,6 +724,8 @@ impl LaneDecorations {
         self.polyline_seq.clear();
         self.sketch_seq.clear();
         self.minimap_seq.clear();
+        self.text_run_nudge.clear();
+        self.bar_nudge.clear();
         self.decoration_seq = 0;
     }
 }
@@ -825,6 +838,27 @@ fn reconcile_seq<T: Clone + PartialEq>(
     } else {
         retained.0.clone_from(current.0);
         retained.1.clone_from(current.1);
+    }
+}
+
+/// [`reconcile_seq`] for a list that also holds the nudge of each entry.
+///
+/// A redeclare that moves only a nudge still moves where the entry draws, so
+/// the nudges have to match too for the category to count as unchanged.
+fn reconcile_nudged<T: Clone + PartialEq>(
+    dirty: &mut bool,
+    current: (&Vec<T>, &Vec<u32>, &Vec<[i16; 2]>),
+    retained: (&mut Vec<T>, &mut Vec<u32>, &mut Vec<[i16; 2]>),
+) {
+    if !*dirty {
+        return;
+    }
+    if current.0 == retained.0 && current.1 == retained.1 && current.2 == retained.2 {
+        *dirty = false;
+    } else {
+        retained.0.clone_from(current.0);
+        retained.1.clone_from(current.1);
+        retained.2.clone_from(current.2);
     }
 }
 
@@ -1247,6 +1281,8 @@ impl Terminal {
             bar_seq: Vec::new(),
             polyline_seq: Vec::new(),
             sketch_seq: Vec::new(),
+            text_run_nudge: Vec::new(),
+            bar_nudge: Vec::new(),
             minimaps: Vec::new(),
             minimap_seq: Vec::new(),
             minimap_contents: HashMap::new(),
@@ -1257,6 +1293,7 @@ impl Terminal {
             minimap_journal_lines: 0,
             lanes: BTreeMap::new(),
             lane: 0,
+            nudge: [0, 0],
             lanes_changed: false,
             decorations_dirty: DecorationDirty::default(),
             output_since_project: false,
@@ -1525,9 +1562,11 @@ impl Terminal {
                         | Command::FillEnd
                         | Command::Reset
                         // A dropped lane marker files every decoration after it
-                        // under the wrong lane.
+                        // under the wrong lane, and a dropped nudge draws every
+                        // one after it at the wrong offset.
                         | Command::LaneBegin(_)
                         | Command::LaneEnd
+                        | Command::Nudge(_)
                         | Command::Popover(_)
                         | Command::PopoverEnd
                         | Command::TextRun(_)
@@ -2071,11 +2110,11 @@ impl Terminal {
                 self.commit_capture();
                 self.stage_or_apply(Command::Reset);
             },
-            // A lane marker commits an open capture first, so a run that was
-            // streaming when the marker arrived lands in the lane it opened in.
-            // The marker itself stages like a reset, in order with the
-            // decorations around it.
-            Command::LaneBegin(_) | Command::LaneEnd => {
+            // A lane marker or a nudge commits an open capture first, so a run
+            // whose text streamed in before it lands in the lane and at the
+            // offset it opened in. The marker itself stages like a reset, in
+            // order with the decorations around it.
+            Command::LaneBegin(_) | Command::LaneEnd | Command::Nudge(_) => {
                 self.commit_capture();
                 self.stage_or_apply(command);
             },
@@ -2368,6 +2407,10 @@ impl Terminal {
                 }
             },
             Command::Panel(panel) => {
+                let panel = PanelCommand {
+                    edges: command::nudged(panel.edges, self.nudge),
+                    ..panel
+                };
                 let lane = self.lanes.entry(self.lane).or_default();
                 if push_capped(&mut lane.panels, panel, &mut self.warned_decoration_cap) {
                     lane.panel_seq.push(lane.decoration_seq);
@@ -2401,6 +2444,7 @@ impl Terminal {
                 let lane = self.lanes.entry(self.lane).or_default();
                 if push_capped(&mut lane.bars, bar, &mut self.warned_decoration_cap) {
                     lane.bar_seq.push(lane.decoration_seq);
+                    lane.bar_nudge.push(self.nudge);
                     lane.decoration_seq += 1;
                     self.lanes_changed = true;
                 }
@@ -2439,6 +2483,7 @@ impl Terminal {
                     &mut self.warned_decoration_cap,
                 ) {
                     lane.text_run_seq.push(lane.decoration_seq);
+                    lane.text_run_nudge.push(self.nudge);
                     lane.decoration_seq += 1;
                     self.lanes_changed = true;
                 }
@@ -2474,7 +2519,11 @@ impl Terminal {
                 self.decorations_dirty.minimaps = true;
             },
             Command::LaneBegin(id) => self.begin_lane(id),
-            Command::LaneEnd => self.lane = 0,
+            Command::LaneEnd => {
+                self.lane = 0;
+                self.nudge = [0, 0];
+            },
+            Command::Nudge(offset) => self.nudge = offset,
             Command::Reset => self.clear_decorations(),
             // None of these reach here. apply_command routes them at feed time:
             // the stream and pool controls, the immediate minimap content,
@@ -2517,6 +2566,7 @@ impl Terminal {
     /// Lane 0 itself is exempt, since every decoration outside a lane lands
     /// there anyway.
     fn begin_lane(&mut self, id: u32) {
+        self.nudge = [0, 0];
         if id != 0 && !self.lanes.contains_key(&id) && self.lanes.len() >= MAX_LANES {
             self.warn_lane_cap(id);
             self.lane = 0;
@@ -2588,6 +2638,8 @@ impl Terminal {
         self.polyline_seq.clear();
         self.sketch_seq.clear();
         self.minimap_seq.clear();
+        self.text_run_nudge.clear();
+        self.bar_nudge.clear();
 
         // Seq 0 belongs to pool-composited content, which sorts below every
         // declared decoration.
@@ -2603,6 +2655,8 @@ impl Terminal {
             self.polylines.extend_from_slice(&lane.polylines);
             self.sketches.extend_from_slice(&lane.sketches);
             self.minimaps.extend_from_slice(&lane.minimaps);
+            self.text_run_nudge.extend_from_slice(&lane.text_run_nudge);
+            self.bar_nudge.extend_from_slice(&lane.bar_nudge);
 
             extend_renumbered(&mut self.panel_seq, &lane.panel_seq, base);
             extend_renumbered(&mut self.icon_seq, &lane.icon_seq, base);
@@ -3306,15 +3360,19 @@ impl Terminal {
             (&self.icons, &self.icon_seq),
             (&mut last.icons, &mut last.icon_seq),
         );
-        reconcile_seq(
+        reconcile_nudged(
             &mut dirty.text_runs,
-            (&self.text_runs, &self.text_run_seq),
-            (&mut last.text_runs, &mut last.text_run_seq),
+            (&self.text_runs, &self.text_run_seq, &self.text_run_nudge),
+            (
+                &mut last.text_runs,
+                &mut last.text_run_seq,
+                &mut last.text_run_nudge,
+            ),
         );
-        reconcile_seq(
+        reconcile_nudged(
             &mut dirty.bars,
-            (&self.bars, &self.bar_seq),
-            (&mut last.bars, &mut last.bar_seq),
+            (&self.bars, &self.bar_seq, &self.bar_nudge),
+            (&mut last.bars, &mut last.bar_seq, &mut last.bar_nudge),
         );
         reconcile_seq(
             &mut dirty.polylines,
@@ -3377,6 +3435,7 @@ impl Terminal {
             declared
         });
         self.lane = 0;
+        self.nudge = [0, 0];
         self.lanes_changed = true;
         self.scroll_region = None;
         self.line_layout = None;
@@ -3862,10 +3921,15 @@ impl Terminal {
             apply_line_layout(grid, self.line_layout.as_ref());
         }
         if self.decorations_dirty.text_runs || layout_changed {
-            apply_text_runs(grid, &self.text_runs, &self.text_run_seq);
+            apply_text_runs(
+                grid,
+                &self.text_runs,
+                &self.text_run_seq,
+                &self.text_run_nudge,
+            );
         }
         if self.decorations_dirty.bars || layout_changed {
-            apply_bars(grid, &self.bars, &self.bar_seq);
+            apply_bars(grid, &self.bars, &self.bar_seq, &self.bar_nudge);
         }
         if self.decorations_dirty.polylines || layout_changed {
             apply_polylines(grid, &self.polylines, &self.polyline_seq);

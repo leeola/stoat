@@ -688,6 +688,7 @@ mod tests {
                 hatch: None,
                 radius: 0,
                 corners: 0,
+                nudge: [0, 0],
             };
             let mut bars = BarPass::new(&device, TextureFormat::Rgba8Unorm, metrics);
             bars.prepare(
@@ -765,6 +766,7 @@ mod tests {
             hatch: None,
             radius: 0,
             corners: 0,
+            nudge: [0, 0],
         };
         let mut bars = BarPass::new(&device, TextureFormat::Rgba8Unorm, metrics);
         bars.prepare_composite(
@@ -830,6 +832,7 @@ mod tests {
             hatch,
             radius: 0,
             corners: 0,
+            nudge: [0, 0],
         };
         let instances = build_bar_instances(&[
             bar(0, None),
@@ -870,6 +873,7 @@ mod tests {
             hatch: Some(Rgb::new(0, 255, 0)),
             radius: 0,
             corners: 0,
+            nudge: [0, 0],
         };
         let mut bars = BarPass::new(&device, TextureFormat::Rgba8Unorm, metrics);
         bars.prepare(
@@ -926,6 +930,7 @@ mod tests {
             hatch: None,
             radius: 2,
             corners,
+            nudge: [0, 0],
         };
         let mut bars = BarPass::new(&device, TextureFormat::Rgba8Unorm, metrics);
         bars.prepare(
@@ -985,6 +990,7 @@ mod tests {
             hatch: None,
             radius: 0,
             corners: 0,
+            nudge: [0, 0],
         }];
 
         let mut scratch = build_bar_instances(&bars);
@@ -1016,6 +1022,7 @@ mod tests {
             hatch: None,
             radius: 0,
             corners: 0,
+            nudge: [0, 0],
         }];
         let first = build_bar_instances(&bars);
         assert!(
@@ -1047,6 +1054,7 @@ mod tests {
             hatch: None,
             radius: 0,
             corners: 0,
+            nudge: [0, 0],
         }];
 
         let instances = build_bar_instances(&bars);
@@ -1074,6 +1082,7 @@ mod tests {
             hatch: None,
             radius: 0,
             corners: 0,
+            nudge: [0, 0],
         }];
 
         let instances = build_bar_instances(&bars);
@@ -1117,6 +1126,7 @@ mod tests {
             hatch: None,
             radius: 0,
             corners: 0,
+            nudge: [0, 0],
         };
 
         pass.prepare_composite(
