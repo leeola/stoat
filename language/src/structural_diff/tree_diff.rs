@@ -737,7 +737,7 @@ fn prepare_per_file<'a>(
 fn run_span(arena: &SyntaxArena, run: &[SyntaxId]) -> Range<usize> {
     match (run.first(), run.last()) {
         (Some(&first), Some(&last)) => {
-            full_byte_range(arena, first).start..full_byte_range(arena, last).end
+            arena.full_byte_range(first).start..arena.full_byte_range(last).end
         },
         _ => 0..0,
     }
@@ -883,11 +883,11 @@ fn matched_atom_pairs(
                 (lhs_top, rhs_top) = (lhs_parent, rhs_parent);
             }
 
-            let lhs = full_byte_range(&prepared.lhs_arena, lhs_id);
-            let rhs = full_byte_range(&prepared.rhs_arena, rhs_id);
-            let lhs_starts = full_byte_range(&prepared.lhs_arena, lhs_top).start
+            let lhs = prepared.lhs_arena.full_byte_range(lhs_id);
+            let rhs = prepared.rhs_arena.full_byte_range(rhs_id);
+            let lhs_starts = prepared.lhs_arena.full_byte_range(lhs_top).start
                 <= line_head(prepared.lhs_text, &prepared.lhs_lines, lhs.start);
-            let rhs_starts = full_byte_range(&prepared.rhs_arena, rhs_top).start
+            let rhs_starts = prepared.rhs_arena.full_byte_range(rhs_top).start
                 <= line_head(prepared.rhs_text, &prepared.rhs_lines, rhs.start);
             (lhs_starts && rhs_starts).then_some(MatchedPair { lhs, rhs })
         })
@@ -1212,7 +1212,7 @@ fn move_source_for_changeset(
         Side::Lhs => (view.lhs_arena, view.lhs_lines),
         Side::Rhs => (view.rhs_arena, view.rhs_lines),
     };
-    let byte_range = full_byte_range(arena, src_id);
+    let byte_range = arena.full_byte_range(src_id);
     let line_range = lines.lines_for(&byte_range);
     let buffer = if src_idx == viewer_idx {
         None
@@ -1224,31 +1224,6 @@ fn move_source_for_changeset(
         side,
         byte_range,
         line_range,
-    }
-}
-
-fn full_byte_range(arena: &SyntaxArena, id: SyntaxId) -> Range<usize> {
-    match arena.get(id) {
-        Syntax::Atom(a) => a.byte_range.clone(),
-        Syntax::List(l) => {
-            let start = if l.open_byte_range.start < l.open_byte_range.end {
-                l.open_byte_range.start
-            } else {
-                l.children
-                    .first()
-                    .map(|c| full_byte_range(arena, *c).start)
-                    .unwrap_or(0)
-            };
-            let end = if l.close_byte_range.start < l.close_byte_range.end {
-                l.close_byte_range.end
-            } else {
-                l.children
-                    .last()
-                    .map(|c| full_byte_range(arena, *c).end)
-                    .unwrap_or(start)
-            };
-            start..end
-        },
     }
 }
 
@@ -1403,13 +1378,13 @@ mod tests {
                 token("foo", 1, 1),
                 token("(", 1, 1),
                 token("bar", 1, 2),
-                token(",", 1, 3),
+                token(",", 1, 2),
                 token("baz", 1, 4),
                 token(")", 1, 5),
                 token(";", 1, 5),
                 token("}", 2, 6),
             ],
-            "the slider moves the kept comma to line 3, and its pair moves with it",
+            "the kept comma stays after bar, since bang's line reads whole",
         );
     }
 
@@ -1649,11 +1624,7 @@ mod tests {
 
     /// A call tweaked and then repeated as a new call marks the tweak on the
     /// old call's line and the whole new call, as a reader sees the change.
-    ///
-    /// Inside a macro's token tree, the slider pass then trades the two commas
-    /// between the calls. The comma after the old call reads as added, and the
-    /// new call's own comma pairs with the old one, because the slider keeps
-    /// the unchanged node at the end of a run.
+    /// Inside a macro's token tree, each call keeps the comma on its own line.
     #[test]
     fn a_repeated_call_marks_the_tweak_and_the_new_call() {
         let statements = (
@@ -1684,11 +1655,51 @@ mod tests {
                 ],
                 vec![
                     (Side::Rhs, ".clone()", 4),
-                    (Side::Rhs, ",", 4),
                     (Side::Rhs, "ca_store", 5),
                     (Side::Rhs, ".write_versioned(&provider_household_index)", 6),
-                    (Side::Rhs, ".instrument(span)", 7),
+                    (Side::Rhs, ".instrument(span),", 7),
                 ],
+            ],
+        );
+    }
+
+    /// An element inserted into a list written one element per line marks its
+    /// own line whole, so the comma on the line above stays unchanged. When the
+    /// element shares its line with others, or the list sits on one line, the
+    /// slider pass moves the inserted run onto the comma before it.
+    #[test]
+    fn an_element_inserted_on_its_own_line_keeps_its_comma() {
+        let lines = (
+            "fn f() {\n    g(\n        alpha_value,\n        gamma_value,\n    );\n}\n",
+            "fn f() {\n    g(\n        alpha_value,\n        beta_value,\n        \
+             gamma_value,\n    );\n}\n",
+        );
+        let shared_line = (
+            "fn f() {\n    g(\n        a,\n        c, d,\n    );\n}\n",
+            "fn f() {\n    g(\n        a,\n        b, c, d,\n    );\n}\n",
+        );
+        let line_end = (
+            "fn f() {\n    g(\n        a,\n        c,\n    );\n}\n",
+            "fn f() {\n    g(\n        a, b,\n        c,\n    );\n}\n",
+        );
+        let one_line = ("fn f() { g(a, c); }\n", "fn f() { g(a, b, c); }\n");
+        let rows = |(lhs, rhs): (&'static str, &'static str)| {
+            let result = diff_with_language(&rust_lang(), lhs, rhs).unwrap();
+            change_rows(&result, lhs, rhs)
+        };
+
+        assert_eq!(
+            [
+                rows(lines),
+                rows(shared_line),
+                rows(line_end),
+                rows(one_line),
+            ],
+            [
+                vec![(Side::Rhs, "beta_value,", 3)],
+                vec![(Side::Rhs, ",", 2), (Side::Rhs, "b", 3)],
+                vec![(Side::Rhs, ",", 2), (Side::Rhs, "b", 2)],
+                vec![(Side::Rhs, ",", 0), (Side::Rhs, "b", 0)],
             ],
         );
     }

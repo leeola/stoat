@@ -163,6 +163,56 @@ impl SyntaxArena {
         &self.source[atom.byte_range.start.min(len)..atom.byte_range.end.min(len)]
     }
 
+    /// The bytes that `id` covers in the source.
+    ///
+    /// A list starts at its opening delimiter, or at its first child when it
+    /// has no opening delimiter. It ends at its closing delimiter, or at its
+    /// last child.
+    pub(crate) fn full_byte_range(&self, id: SyntaxId) -> Range<usize> {
+        match self.get(id) {
+            Syntax::Atom(a) => a.byte_range.clone(),
+            Syntax::List(l) => {
+                let start = if l.open_byte_range.start < l.open_byte_range.end {
+                    l.open_byte_range.start
+                } else {
+                    l.children
+                        .first()
+                        .map(|c| self.full_byte_range(*c).start)
+                        .unwrap_or(0)
+                };
+                let end = if l.close_byte_range.start < l.close_byte_range.end {
+                    l.close_byte_range.end
+                } else {
+                    l.children
+                        .last()
+                        .map(|c| self.full_byte_range(*c).end)
+                        .unwrap_or(start)
+                };
+                start..end
+            },
+        }
+    }
+
+    /// Whether only whitespace lies between the start of the line that holds
+    /// `byte` and `byte` itself.
+    pub(crate) fn starts_line(&self, byte: usize) -> bool {
+        let before = &self.source.as_bytes()[..byte.min(self.source.len())];
+        before
+            .iter()
+            .rev()
+            .take_while(|&&b| b != b'\n')
+            .all(u8::is_ascii_whitespace)
+    }
+
+    /// Whether only whitespace lies between `byte` and the end of its line.
+    pub(crate) fn ends_line(&self, byte: usize) -> bool {
+        let after = &self.source.as_bytes()[byte.min(self.source.len())..];
+        after
+            .iter()
+            .take_while(|&&b| b != b'\n')
+            .all(u8::is_ascii_whitespace)
+    }
+
     pub fn len(&self) -> usize {
         self.nodes.len()
     }

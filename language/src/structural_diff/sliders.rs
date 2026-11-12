@@ -47,7 +47,7 @@ use super::{
 };
 #[cfg(test)]
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::{collections::HashMap, ops::Range};
 
 #[cfg(test)]
 thread_local! {
@@ -146,6 +146,10 @@ fn fix_sliders_recursive(
 /// counterparts that the swap leaves behind. The swap then claims unchanged
 /// text that the other side lacks, or crosses the order of the matches.
 ///
+/// A run that covers whole lines stays in place when the slid run does not, as
+/// [`keeps_whole_lines`] describes. An element inserted into a list written
+/// one element per line thus keeps its own comma.
+///
 /// Slide-right does not exist. One direction gives the pass a stable fixed
 /// point, with no oscillation between passes. Two passes still run, because a
 /// cascade of slides moves the boundaries again in the second pass.
@@ -180,6 +184,7 @@ fn slide_within_children(
                 && children[region_start..region_end]
                     .iter()
                     .all(|&id| is_deep(arena, id, changes, ChangeKind::Pending))
+                && !keeps_whole_lines(arena, children, region_start..region_end)
             {
                 mark_subtree(arena, prev, changes, ChangeKind::Pending);
                 mark_subtree(arena, last_in_region, changes, ChangeKind::Unchanged);
@@ -187,6 +192,27 @@ fn slide_within_children(
             }
         }
     }
+}
+
+/// Whether the run `children[run]` covers whole lines and the slid run does
+/// not.
+///
+/// A run that starts its first line and ends its last reads as whole lines
+/// added or removed. The slide trades the run's last node for the equal node
+/// before the run, such as the comma at the end of the line above. After the
+/// slide, that line reads as changed at its end, and the run's own line loses
+/// its last token.
+fn keeps_whole_lines(arena: &SyntaxArena, children: &[SyntaxId], run: Range<usize>) -> bool {
+    let whole = |first: SyntaxId, last: SyntaxId| {
+        arena.starts_line(arena.full_byte_range(first).start)
+            && arena.ends_line(arena.full_byte_range(last).end)
+    };
+    let prev = children[run.start - 1];
+    let slid_last = match run.len() {
+        1 => prev,
+        _ => children[run.end - 2],
+    };
+    whole(children[run.start], children[run.end - 1]) && !whole(prev, slid_last)
 }
 
 /// Whether `id` and every node under it carry `kind`.

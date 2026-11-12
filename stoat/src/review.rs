@@ -910,8 +910,8 @@ mod tests {
                     side("    foo(", None),
                     true
                 ),
-                (None, side("        bar,", Some(11..12)), true),
-                (None, side("        bang,", Some(8..12)), true),
+                (None, side("        bar,", None), true),
+                (None, side("        bang,", Some(8..13)), true),
                 (None, side("        baz,", Some(11..12)), true),
                 (None, side("    );", None), true),
                 (side("}", None), side("}", None), false),
