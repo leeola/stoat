@@ -2940,9 +2940,10 @@ impl TextPass {
 
         let col = f32::from(run.col) / 16.0;
         let row = f32::from(run.row) / 16.0;
-        let left = snap_cell(col, 0.0, self.face.metrics.width);
-        let right = snap_cell(col + chars * scale, 0.0, self.face.metrics.width);
-        let row_top = row_anchor.row_y(row, self.face.metrics.height);
+        let [dx, dy] = physical_nudge(run.nudge, self.face.metrics.scale_factor);
+        let left = snap_cell(col, 0.0, self.face.metrics.width) + dx;
+        let right = snap_cell(col + chars * scale, 0.0, self.face.metrics.width) + dx;
+        let row_top = row_anchor.row_y(row, self.face.metrics.height) + dy;
         let top = row_top.round();
         let bottom = (row_top + self.face.metrics.height).round();
         Some(RectInstance {
@@ -2976,6 +2977,7 @@ impl TextPass {
         }
         let col = f32::from(run.col) / 16.0;
         let row = f32::from(run.row) / 16.0;
+        let nudge = physical_nudge(run.nudge, self.face.metrics.scale_factor);
         let style = font::FaceStyle {
             bold: run.bold,
             italic: false,
@@ -3009,6 +3011,7 @@ impl TextPass {
                 self.face.metrics,
                 origin,
                 row_anchor,
+                nudge,
             );
             out.push(TextInstance {
                 pos,
@@ -5140,6 +5143,15 @@ fn snap_cell(cell: f32, origin: f32, size: f32) -> f32 {
     ((cell + origin) * size).round() - origin * size
 }
 
+/// A text run's nudge in physical pixels at `scale_factor`.
+///
+/// Rounded to whole pixels, so a run that sits on whole pixels stays on them.
+/// A half rounds up, as the bar shader rounds a bar's nudge, so a run and a bar
+/// with the same nudge move by the same pixels at any display scale.
+fn physical_nudge(nudge: [i16; 2], scale_factor: f32) -> [f32; 2] {
+    nudge.map(|px| (f32::from(px) * scale_factor + 0.5).floor())
+}
+
 /// Whether `ch` is a cell-fill codepoint: box-drawing (U+2500-257F), block
 /// elements (U+2580-259F), or powerline (U+E0B0-E0D4).
 ///
@@ -5256,6 +5268,9 @@ fn cell_box(
 ///
 /// `row_anchor` places the row the run anchors at, so a run on the last row
 /// paints where that row does.
+///
+/// `nudge` moves the glyph by the run's nudge in whole physical pixels, as
+/// [`physical_nudge`] gives it, so the pen and the top stay on whole pixels.
 #[allow(clippy::too_many_arguments)]
 fn text_run_origin(
     col: f32,
@@ -5267,10 +5282,12 @@ fn text_run_origin(
     metrics: CellMetrics,
     origin: [f32; 2],
     row_anchor: RowAnchor,
+    nudge: [f32; 2],
 ) -> [f32; 2] {
-    let pen_x = snap_cell(col + index as f32 * scale, origin[0], metrics.width);
+    let pen_x = snap_cell(col + index as f32 * scale, origin[0], metrics.width) + nudge[0];
     let centered_top = (row_anchor.row_y(row + origin[1], metrics.height)
-        + (metrics.height - metrics.height * scale) / 2.0)
+        + (metrics.height - metrics.height * scale) / 2.0
+        + nudge[1])
         .round()
         - origin[1] * metrics.height;
     let baseline_y = centered_top + baseline * scale;

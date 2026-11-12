@@ -45,6 +45,9 @@ struct BarInstance {
     hatch: [f32; 4],
     radius: f32,
     corners: u32,
+    /// The bar's nudge in logical pixels. The vertex stage scales it by the
+    /// display scale, so a change of scale leaves the instance valid.
+    nudge: [f32; 2],
 }
 
 /// The uniform shared by every instance. Carries the surface resolution and
@@ -202,6 +205,7 @@ impl BarPass {
                         4 => Float32x4,
                         5 => Float32,
                         6 => Uint32,
+                        7 => Float32x2,
                     ],
                 })],
             },
@@ -564,6 +568,7 @@ fn build_bar_instances_into(bars: &[Bar], out: &mut Vec<BarInstance>) {
         }),
         radius: f32::from(bar.radius),
         corners: u32::from(panel::corner_mask(bar.corners)),
+        nudge: bar.nudge.map(f32::from),
     };
     out.extend(bars.iter().filter(|bar| bar.hatch.is_some()).map(instance));
     out.extend(bars.iter().filter(|bar| bar.hatch.is_none()).map(instance));
@@ -706,6 +711,74 @@ mod tests {
         };
 
         assert_eq!((lit(0), lit(5)), (2, 2), "both phases read one width");
+    }
+
+    /// A nudged bar draws its nudge in logical px from its declared place,
+    /// scaled to framebuffer pixels by the display scale.
+    ///
+    /// At scale 1 the cells are 9 by 18 pixels, so a full-cell bar on row 2
+    /// covers rows 36 to 53, and a nudge 3 px up moves it to rows 33 to 50. At
+    /// scale 2 the cells are 18 by 36, so a bar on cell (0, 0) covers columns 0
+    /// to 17 and rows 0 to 35, and a nudge of 2 right and 3 down moves it 4 and
+    /// 6 pixels.
+    ///
+    /// At scale 1.5 a nudge of 3 is 4.5 pixels, and a half rounds up, so 3
+    /// right and 3 up move a bar on cell (0, 1) 5 right and 4 up, as a text run
+    /// with that nudge moves.
+    #[test]
+    fn a_nudged_bar_draws_its_nudge_from_its_place() {
+        let (device, queue) = require_headless_device();
+        let lit = |scale_factor: f32, y: i16, nudge: [i16; 2], [col, row]: [u32; 2]| {
+            let metrics = CellMetrics {
+                font_size: 15.0 * scale_factor,
+                width: 9.0 * scale_factor,
+                height: 18.0 * scale_factor,
+                scale_factor,
+            };
+            let bar = Bar {
+                x: 0,
+                y,
+                width: 16,
+                height: 16,
+                color: Rgb::new(255, 0, 0),
+                seq: 0,
+                occludes: false,
+                hatch: None,
+                radius: 0,
+                corners: 0,
+                nudge,
+            };
+            let mut bars = BarPass::new(&device, TextureFormat::Rgba8Unorm, metrics);
+            bars.prepare(
+                &device,
+                &queue,
+                &[bar],
+                &[],
+                [TARGET as f32, TARGET as f32],
+                RowAnchor::UNIFORM,
+            );
+            let rgba = render_rgba(&device, &queue, |pass| bars.draw(pass));
+
+            let red = |x: u32, y: u32| rgba[((y * TARGET + x) * 4) as usize] > 0;
+            let rows: Vec<u32> = (0..TARGET).filter(|&y| red(col, y)).collect();
+            let cols: Vec<u32> = (0..TARGET).filter(|&x| red(x, row)).collect();
+            (rows, cols)
+        };
+        let span = |range: Range<u32>| range.collect::<Vec<_>>();
+
+        assert_eq!(
+            [
+                lit(1.0, 32, [0, -3], [4, 40]),
+                lit(2.0, 0, [2, 3], [10, 20]),
+                lit(1.5, 16, [3, -3], [10, 30]),
+            ],
+            [
+                (span(33..51), span(0..9)),
+                (span(6..42), span(4..22)),
+                (span(23..50), span(5..19)),
+            ],
+            "the rows down one column and the columns along one row the bar fills",
+        );
     }
 
     /// A gliding pool moves its cells and its bars by the same shift, so a bar
@@ -1054,7 +1127,7 @@ mod tests {
             hatch: None,
             radius: 0,
             corners: 0,
-            nudge: [0, 0],
+            nudge: [2, -5],
         }];
 
         let instances = build_bar_instances(&bars);
@@ -1067,6 +1140,11 @@ mod tests {
             [220.0 / 255.0, 50.0 / 255.0, 47.0 / 255.0]
         );
         assert_eq!(instances[0].seq, 7, "the bar's occlusion seq is carried");
+        assert_eq!(
+            instances[0].nudge,
+            [2.0, -5.0],
+            "the nudge rides in logical pixels"
+        );
     }
 
     #[test]

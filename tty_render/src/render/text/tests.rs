@@ -277,6 +277,7 @@ fn a_pooled_glyph_lands_on_the_same_pixel_as_the_live_grid() {
             metrics,
             region,
             RowAnchor::UNIFORM,
+            [0.0; 2],
         );
         let live = text_run_origin(
             2.0 + region[0],
@@ -288,6 +289,7 @@ fn a_pooled_glyph_lands_on_the_same_pixel_as_the_live_grid() {
             metrics,
             [0.0; 2],
             RowAnchor::UNIFORM,
+            [0.0; 2],
         );
 
         assert_eq!(
@@ -487,7 +489,8 @@ fn text_run_origin_matches_glyph_origin_at_unit_scale() {
             baseline,
             metrics,
             [0.0; 2],
-            RowAnchor::UNIFORM
+            RowAnchor::UNIFORM,
+            [0.0; 2],
         ),
         glyph_origin(3, 2, [1, 10], baseline, metrics, [0.0; 2])
     );
@@ -508,6 +511,7 @@ fn text_run_origin_scales_advance_and_centers_in_row() {
         metrics,
         [0.0; 2],
         RowAnchor::UNIFORM,
+        [0.0; 2],
     );
 
     // Two half-scale glyphs advance one cell, and the shorter line is
@@ -518,6 +522,33 @@ fn text_run_origin_scales_advance_and_centers_in_row() {
             metrics.width,
             (metrics.height - metrics.height * 0.5) / 2.0 + baseline * 0.5
         ]
+    );
+}
+
+/// A nudge moves a run's glyph by its pixels: a nudge up moves the baseline
+/// up, and a nudge right moves the pen right.
+#[test]
+fn a_nudge_moves_the_run_origin_by_its_pixels() {
+    let metrics = CellMetrics::from_font_size(30, 1.0);
+    let at = |nudge| {
+        text_run_origin(
+            1.0,
+            2.0,
+            1,
+            0.75,
+            [1, 10],
+            14.0,
+            metrics,
+            [0.0; 2],
+            RowAnchor::UNIFORM,
+            nudge,
+        )
+    };
+    let rest = at([0.0; 2]);
+
+    assert_eq!(
+        [at([0.0, -3.0]), at([7.0, 0.0])],
+        [[rest[0], rest[1] - 3.0], [rest[0] + 7.0, rest[1]]],
     );
 }
 
@@ -532,7 +563,20 @@ fn a_run_on_the_last_row_takes_the_anchored_row() {
         bottom_row_y: 4.0 * metrics.height - 16.0,
     }
     .row_anchor();
-    let top = |row| text_run_origin(0.0, row, 0, 1.0, [0, 0], 0.0, metrics, [0.0; 2], anchor)[1];
+    let top = |row| {
+        text_run_origin(
+            0.0,
+            row,
+            0,
+            1.0,
+            [0, 0],
+            0.0,
+            metrics,
+            [0.0; 2],
+            anchor,
+            [0.0; 2],
+        )[1]
+    };
 
     assert_eq!(
         [top(3.0), top(4.0)],
@@ -562,6 +606,7 @@ fn a_fractional_run_snaps_every_glyph_to_a_whole_pixel() {
                 metrics,
                 [0.0; 2],
                 RowAnchor::UNIFORM,
+                [0.0; 2],
             )[0]
         })
         .collect();
@@ -1671,6 +1716,61 @@ fn run_rect_carries_its_run_occlusion_seq() {
     assert_eq!(
         rects[0].seq, 42,
         "the run rect carries its run's occlusion seq"
+    );
+}
+
+/// A nudged run draws its glyphs and its background box its nudge from where
+/// the same run draws without one, at the display scale.
+///
+/// At scale factor 2 a nudge of 7 px right and 3 px up is 14 and 6
+/// framebuffer pixels. At 1.5 a nudge of 3 is 4.5 pixels, and a half rounds
+/// up, so 3 right and 3 up move 5 right and 4 up, as a bar with that nudge
+/// moves.
+#[test]
+fn a_nudged_run_moves_its_glyphs_and_box_by_its_nudge() {
+    let (device, queue) = require_headless_device();
+    let moved = |scale_factor: f32, nudge: [i16; 2]| {
+        let mut pass = TextPass::new(
+            &device,
+            TextureFormat::Rgba8Unorm,
+            CellMetrics::from_font_size(16, scale_factor),
+            font::build_font_system(),
+            &["JetBrains Mono".to_owned()],
+            true,
+        );
+        let mut placed = |nudge| {
+            let mut grid = Grid::new(2, 12);
+            grid.set_text_runs(vec![TextRun {
+                col: 16,
+                row: 16,
+                scale: 256,
+                color: Rgb::new(255, 255, 255),
+                bg: Some(Rgb::new(4, 5, 6)),
+                bold: false,
+                follow: 0,
+                anchor: None,
+                text: "ab".into(),
+                seq: 1,
+                nudge,
+            }]);
+            let glyph = pass.build_text_run_instances(&device, &queue, &grid, [0.0; 2], 0)[0].pos;
+            let rect = pass.build_run_rects(&grid)[0].pos;
+            [glyph, rect]
+        };
+        let (rest, moved) = (placed([0, 0]), placed(nudge));
+
+        // The glyph's top carries the fractional baseline, so the deltas round
+        // away the float noise of moving it by a whole number of pixels.
+        [0, 1].map(|index| {
+            let ([x, y], [rest_x, rest_y]) = (moved[index], rest[index]);
+            [(x - rest_x).round(), (y - rest_y).round()]
+        })
+    };
+
+    assert_eq!(
+        [moved(2.0, [7, -3]), moved(1.5, [3, -3])],
+        [[[14.0, -6.0]; 2], [[5.0, -4.0]; 2]],
+        "the glyph and the box move by the nudge in framebuffer pixels",
     );
 }
 

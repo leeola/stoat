@@ -69,6 +69,7 @@ fn vs_main(
     @location(4) hatch: vec4<f32>,
     @location(5) radius: f32,
     @location(6) corner_mask: u32,
+    @location(7) nudge: vec2<f32>,
 ) -> VsOut {
     var corners = array<vec2<f32>, 6>(
         vec2<f32>(0.0, 0.0),
@@ -102,10 +103,16 @@ fn vs_main(
     //
     // Both edges go through row_y, so a bar that ends at the top of the last
     // row ends where that row paints, not on the uniform pitch.
+    //
+    // The nudge moves the bar by whole framebuffer pixels, added after the
+    // snap like the glide, so the bar keeps its width. floor(x + 0.5) rounds a
+    // half up as the text pass rounds a run's nudge, so a run and a bar with one
+    // nudge move alike at a fractional scale.
     let shift_px = vec2<f32>(0.0, globals.shift_rows * globals.cell_size.y);
-    let min_px = round(cell_px(origin + globals.origin_cells)) + shift_px;
+    let nudge_px = floor(nudge * globals.scale_factor + vec2<f32>(0.5, 0.5));
+    let min_px = round(cell_px(origin + globals.origin_cells)) + shift_px + nudge_px;
     let snapped = max(
-        round(cell_px(origin + globals.origin_cells + size)) + shift_px,
+        round(cell_px(origin + globals.origin_cells + size)) + shift_px + nudge_px,
         min_px + vec2<f32>(1.0, 1.0)
     );
     let size_px = size * globals.cell_size;
