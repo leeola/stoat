@@ -712,6 +712,14 @@ pub(crate) const MIN_PREVIEW_ROWS: u16 = 3;
 /// the text centered at any font size.
 pub(crate) const STATUS_ROW_PAD: u8 = 3;
 
+/// The logical px of ground above and below the tab bar's cell row inside its
+/// band.
+///
+/// The boards draw the tab bar 32 px tall over an 18 px cell row. The band
+/// states its height as one cell row plus this pad on each side, as a status
+/// row's band does with [`STATUS_ROW_PAD`].
+pub(crate) const TAB_BAR_PAD: u8 = 7;
+
 /// Which way a modal's list/preview separator runs, and so which pointer
 /// coordinate a drag along it reads.
 #[derive(Copy, Clone)]
@@ -4022,7 +4030,8 @@ impl Stoat {
     /// columns short of each side of the window, so the window ground shows
     /// along both edges. It stops [`Self::status_rows`] rows short of the
     /// bottom too, the rows that hold the bottom panes' status rows. The last
-    /// is [`Self::status_bar_rect`], and a band's spare row sits above it.
+    /// is [`Self::status_bar_rect`], and a band's spare row sits above it. It
+    /// starts under the [`Self::tab_bar_rows`] rows of the tab bar.
     ///
     /// Centered modals do not lay out here. They take the full [`Self::size`]
     /// and the strip yields to them, so their paint, pools, and mouse hit-tests
@@ -4048,12 +4057,10 @@ impl Stoat {
             },
             None => size,
         };
-        if !self.tab_bar_visible() {
-            return size;
-        }
+        let tab_bar_rows = self.tab_bar_rows();
         Rect {
-            y: size.y + 1,
-            height: size.height.saturating_sub(1),
+            y: size.y + tab_bar_rows,
+            height: size.height.saturating_sub(tab_bar_rows),
             ..size
         }
     }
@@ -4108,6 +4115,18 @@ impl Stoat {
         match self.chrome_bands_on() {
             true => 2,
             false => 1,
+        }
+    }
+
+    /// The grid rows the tab bar takes at the window's top this frame.
+    ///
+    /// A hidden bar takes none. A shown bar takes two as a band and one
+    /// without, and its cells stay on the first of them.
+    pub(crate) fn tab_bar_rows(&self) -> u16 {
+        match (self.tab_bar_visible(), self.chrome_bands_on()) {
+            (false, _) => 0,
+            (true, true) => 2,
+            (true, false) => 1,
         }
     }
 

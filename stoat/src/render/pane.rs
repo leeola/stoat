@@ -1,6 +1,6 @@
 use crate::{
     action_handlers::search::StatusPrompt,
-    app::{SPINNER_FRAMES, STATUS_ROW_PAD},
+    app::{SPINNER_FRAMES, STATUS_ROW_PAD, TAB_BAR_PAD},
     buffer::BufferId,
     buffer_registry::{BufferRegistry, ReadOnly},
     diff_changes::{DiffChangesId, DiffChangesState},
@@ -92,6 +92,13 @@ const TAB_DIVIDER_TOP: i16 = 2;
 /// The Editor board draws a 14 px rule, and a sixteenth of the 18 px row is
 /// 1.125 px, so 12 sixteenths are the nearest whole count.
 const TAB_DIVIDER_HEIGHT: u16 = 12;
+
+/// The logical px the active tab's pill stands outside its row at the top and
+/// the bottom inside a tab bar band.
+///
+/// The boards draw the pill 22 px tall, `padding: 1px 6px` on a 20 px line,
+/// over the bar's 18 px cell row.
+const TAB_PILL_OUTSET: u8 = 2;
 
 /// The logical pixels the boards leave between an island and the window's
 /// side, and between two sibling islands.
@@ -467,11 +474,13 @@ pub(crate) fn render_island(content_area: Rect, frame: FrameCtx<'_>, scene: &mut
 /// takes, and no island reaches over the band. Any other left or right side
 /// keeps the island role's `inset_x`.
 ///
-/// The top stays flush, since it meets a status row or the tab bar, and never
-/// a gap. The bottom stays flush too without chrome bands. With them, the
-/// bottom reaches into the band's spare row under the pane and stops twice
+/// Without chrome bands, the top and the bottom stay flush, since each meets
+/// a status row or the tab bar, and never a gap. With them, the bottom reaches
+/// into the status band's spare row under the pane. It stops twice
 /// [`STATUS_ROW_PAD`] short of the status row, so the band's ground starts
-/// that far above the row.
+/// that far above the row. A top pane under a shown tab bar reaches up into
+/// the bar band's spare row the same way. It stops twice [`TAB_BAR_PAD`]
+/// below the bar's cell row, where the 32 px band ends.
 fn island_edges(area: Rect, frame: FrameCtx<'_>, inset_x: u8) -> [Edge; 4] {
     let root = frame.pane_root;
     let root_right = frame
@@ -491,13 +500,17 @@ fn island_edges(area: Rect, frame: FrameCtx<'_>, inset_x: u8) -> [Edge; 4] {
         (false, false) => rest,
     };
 
+    let top = match frame.chrome_bands && frame.tab_bar_shown && area.y == root.y {
+        true => Edge::Margin(2 * TAB_BAR_PAD),
+        false => Edge::Inset(0),
+    };
     let bottom = match frame.chrome_bands {
         true => Edge::Margin(2 * STATUS_ROW_PAD),
         false => Edge::Inset(0),
     };
 
     [
-        Edge::Inset(0),
+        top,
         side(
             area.right() == root_right,
             vertical(area.right()),
@@ -1392,6 +1405,28 @@ fn mode_chip_panel(fill: [u8; 3]) -> Panel {
     }
 }
 
+/// The active tab's pill in `fill`, a [`Panel::chip`] over the tab's cells.
+///
+/// Inside a tab bar `band`, the pill stands [`TAB_PILL_OUTSET`] px outside the
+/// row's top and bottom, the boards' 22 px on the 18 px row. The band's ground
+/// holds it, because the bar's row draws [`TAB_BAR_PAD`] px down from the
+/// band's top. Without a band, the pill keeps the chip's box inside its row.
+fn tab_pill_panel(fill: [u8; 3], band: bool) -> Panel {
+    let chip = Panel::chip(fill);
+    match band {
+        true => Panel {
+            edges: [
+                Edge::Outset(TAB_PILL_OUTSET),
+                chip.edges[1],
+                Edge::Outset(TAB_PILL_OUTSET),
+                chip.edges[3],
+            ],
+            ..chip
+        },
+        false => chip,
+    }
+}
+
 /// The status of `pane`, laid out in `area`, its status row.
 ///
 /// A changes view's row reads its focused excerpt, as an editor pane's row
@@ -1637,7 +1672,7 @@ fn render_status_runs(
                     .zip(left.get(run_box.segments.start))
                     .map_or_else(Vec::new, |(shape, first)| match shape {
                         BoxShape::Chip => vec![mode_chip_panel(first.bg)],
-                        BoxShape::Tab => vec![Panel::chip(first.bg)],
+                        BoxShape::Tab => vec![tab_pill_panel(first.bg, frame.chrome_bands)],
                     }),
                 scale: (run_box.shape == Some(BoxShape::Chip))
                     .then(|| frame.theme.type_scale(TypeRole::Mode)),
@@ -5085,6 +5120,99 @@ mod tests {
             ],
             "the pane rows, the status rows, the lane's first and last nudge, and the island \
              bottoms",
+        );
+    }
+
+    /// From the nudge protocol on, the tab bar is a band over the top two
+    /// rows. Lane 0 nudges the bar down by the pad before its text runs and
+    /// back after them, the active tab's pill stands out of its row, and the
+    /// top pane's island reaches up into the band. A stoatty before the nudge
+    /// keeps the one-row bar, the chip's box, and flush island tops. A hidden
+    /// bar takes no rows, and no island reaches above its pane.
+    ///
+    /// Two stacked panes at 160 by 50 under a bar that always shows start on
+    /// rows 2 and 26 with the band, and on rows 1 and 25 without it. With the
+    /// bar hidden, the band's protocol starts them on rows 0 and 25.
+    #[test]
+    fn the_tab_bar_is_a_band_from_the_nudge_protocol_on() {
+        use stoat_config::TabBarMode;
+        use stoatty_protocol::{
+            command::{decode_stream, Command, Edge},
+            NUDGE_PROTOCOL,
+        };
+
+        let layout = |protocol: u32, bar: TabBarMode| {
+            let mut h = crate::test_harness::TestHarness::with_size(160, 50);
+            h.stoat.stoatty_protocol = protocol;
+            h.stoat.settings.ui_tab_bar = Some(bar);
+            h.type_action("SplitDown()");
+            h.settle();
+            h.stoat.render();
+
+            let mut tops: Vec<u16> = h
+                .stoat
+                .active_workspace()
+                .panes
+                .split_panes()
+                .map(|(_, pane)| pane.area.y)
+                .collect();
+            tops.sort_unstable();
+
+            let lane = decode_stream(h.stoat.apc_scene.lane_bytes(0));
+            let mut order: Vec<Option<[i16; 2]>> = lane
+                .iter()
+                .filter_map(|command| match command {
+                    Command::Nudge(offset) => Some(Some(*offset)),
+                    Command::TextRun(_) | Command::TextRuns(_) => Some(None),
+                    _ => None,
+                })
+                .collect();
+            order.dedup();
+            let pills: Vec<[Edge; 4]> = lane
+                .iter()
+                .filter_map(|command| match command {
+                    Command::Panel(panel) => Some(panel.edges),
+                    _ => None,
+                })
+                .collect();
+
+            let mut islands: Vec<(u16, Edge)> = h
+                .stoat
+                .apc_scene
+                .panels()
+                .filter(|panel| panel.backdrop)
+                .map(|panel| (panel.top, panel.edges[0]))
+                .collect();
+            islands.sort_unstable_by_key(|&(top, _)| top);
+            let island_tops: Vec<Edge> = islands.into_iter().map(|(_, edge)| edge).collect();
+
+            (tops, order, pills, island_tops)
+        };
+
+        let pill = Edge::Outset(2);
+        assert_eq!(
+            [
+                layout(NUDGE_PROTOCOL, TabBarMode::Always),
+                layout(NUDGE_PROTOCOL - 1, TabBarMode::Always),
+                layout(NUDGE_PROTOCOL, TabBarMode::Never),
+            ],
+            [
+                (
+                    vec![2, 26],
+                    vec![Some([0, 7]), None, Some([0, 0])],
+                    vec![[pill, Edge::Inset(0), pill, Edge::Inset(0)]],
+                    vec![Edge::Margin(14), Edge::Inset(0)],
+                ),
+                (
+                    vec![1, 25],
+                    vec![None],
+                    vec![Edge::symmetric(0, 1)],
+                    vec![Edge::Inset(0); 2],
+                ),
+                (vec![0, 25], vec![], vec![], vec![Edge::Inset(0); 2]),
+            ],
+            "the pane tops, lane 0's nudges around its text runs, the pill's edges, and the \
+             island tops",
         );
     }
 

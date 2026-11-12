@@ -32,6 +32,15 @@ const FONT_SIZE: u32 = 15;
 /// status row, where the band's ground starts.
 const STATUS_ROW_PAD: u32 = 3;
 
+/// The px the tab bar's elements draw below its grid row, which centers them
+/// in the 32 px tab bar band. The island under the bar starts twice this far
+/// below the bar's row, where the band ends.
+const TAB_BAR_PAD: u32 = 7;
+
+/// The px the active tab's pill stands outside the bar's row at the top and
+/// the bottom inside the band, which makes the pill 22 px on the 18 px row.
+const TAB_PILL_OUTSET: u32 = 2;
+
 const ACCENT: [u8; 3] = [0x7f, 0xb0, 0xff];
 const BASE: [u8; 3] = [0x17, 0x19, 0x1e];
 const CHROME: [u8; 3] = [0x12, 0x14, 0x18];
@@ -138,13 +147,13 @@ fn the_basic_diff_scene_draws_on_the_ermine_palette() {
 /// cells the hunk lane's 6/16 snaps to the first three pixel columns of that
 /// cell, the boards' 3 px. The state lane starts one sixteenth later, which
 /// leaves the fourth column on the base surface and takes the fifth to the
-/// seventh. The tab bar takes row 0, so the changed row is row 4, `4 four
-/// changed`.
+/// seventh. The tab bar's band takes rows 0 and 1, so the changed row is row
+/// 5, `4 four changed`.
 #[test]
 fn the_gutter_draws_the_hunk_and_state_lanes_left_of_the_number() {
     let mut home = support::scratch_home();
     let shot = settled_frame(home.path(), "basic-diff", "unstaged.txt", "");
-    let (x, y, _, height) = cell_rect(1, 4, 1, 1);
+    let (x, y, _, height) = cell_rect(1, 5, 1, 1);
 
     expect_region(&shot, &mut home, (x, y, 3, height), ACCENT, "hunk_lane");
     expect_region(&shot, &mut home, (x + 3, y, 1, height), BASE, "lane_gap");
@@ -161,7 +170,7 @@ fn the_gutter_draws_the_hunk_and_state_lanes_left_of_the_number() {
 /// live side of the split diff, and the base side outlines the cell beside
 /// the cursor.
 ///
-/// The changed row is row 4, `4 four` on the left and `4 four changed` on the
+/// The changed row is row 5, `4 four` on the left and `4 four changed` on the
 /// right. A bar is too narrow to lead its cell's colors, so the check finds the
 /// pixel columns the color fills over the row's whole height, which a glyph
 /// never does.
@@ -184,7 +193,7 @@ fn a_modified_row_reads_removed_on_the_base_side_and_added_on_the_live_side() {
         "unstaged.txt",
         "<Space>df<Settle>",
     );
-    let (_, y, _, height) = cell_rect(0, 4, 1, 1);
+    let (_, y, _, height) = cell_rect(0, 5, 1, 1);
     let [removed, added, modified] =
         [DANGER, SUCCESS, ACCENT].map(|color| bar_columns(&shot, (y, height), color));
 
@@ -202,7 +211,7 @@ fn a_modified_row_reads_removed_on_the_base_side_and_added_on_the_live_side() {
     }
 
     let lane: Vec<u32> = {
-        let (x, _, _, _) = cell_rect(1, 4, 1, 1);
+        let (x, _, _, _) = cell_rect(1, 5, 1, 1);
         (x + 3..x + 6).collect()
     };
     if removed != lane {
@@ -213,14 +222,14 @@ fn a_modified_row_reads_removed_on_the_base_side_and_added_on_the_live_side() {
             frame.display(),
         );
     }
-    expect_base_frame_sides(&shot, &mut home, 4, "diff_frame_beside_lane");
+    expect_base_frame_sides(&shot, &mut home, 5, "diff_frame_beside_lane");
 
     let row_dims = |col: u16, dy: u32| {
-        let (x, _, width, _) = cell_rect(col, 4, 1, 1);
+        let (x, _, width, _) = cell_rect(col, 5, 1, 1);
         pixels_of(&shot, (x, y + dy, width, 1), TEXT_DIM)
     };
     let side_dims = {
-        let (x, _, _, _) = cell_rect(7, 4, 1, 1);
+        let (x, _, _, _) = cell_rect(7, 5, 1, 1);
         pixels_of(&shot, (x, y, 1, height), TEXT_DIM)
     };
     let ghost = (row_dims(7, 0), side_dims > 0, row_dims(8, 1));
@@ -237,7 +246,7 @@ fn a_modified_row_reads_removed_on_the_base_side_and_added_on_the_live_side() {
 /// The split diff's two gutter lanes sit 2 px apart, as the DiffSplit board
 /// draws them, where the plain editor's sit 1 px apart.
 ///
-/// Row 4 is a modified row. The live side's gutter starts in cell 77, right of
+/// Row 5 is a modified row. The live side's gutter starts in cell 77, right of
 /// the divider, where the added lane takes the cell's pixel columns 0 to 2 and
 /// the unstaged state lane its columns 5 to 7. The base side's state lane
 /// takes the same color, so the check reads the pixels of cell 77 alone.
@@ -250,7 +259,7 @@ fn the_split_diff_s_gutter_lanes_sit_two_pixels_apart() {
         "unstaged.txt",
         "<Space>df<Settle>",
     );
-    let (x, y, width, height) = cell_rect(77, 4, 1, 1);
+    let (x, y, width, height) = cell_rect(77, 5, 1, 1);
     let lanes = [SUCCESS, DISABLED].map(|color| {
         bar_columns(&shot, (y, height), color)
             .into_iter()
@@ -271,7 +280,7 @@ fn the_split_diff_s_gutter_lanes_sit_two_pixels_apart() {
 
 /// The base side of the split diff recedes as a whole behind the live side.
 ///
-/// Row 6, `6 six`, is context on both sides. The left text starts at column 7
+/// Row 7, `6 six`, is context on both sides. The left text starts at column 7
 /// and the right at column 83. The base side paints the context color, which
 /// alone reaches about two thirds of the live text, so only the fade brings the
 /// left text's peak below three fifths of the right's.
@@ -284,8 +293,8 @@ fn the_base_side_of_the_split_diff_recedes_behind_the_live_side() {
         "unstaged.txt",
         "<Space>df<Settle>",
     );
-    let base = brightest(&shot, cell_rect(7, 6, 5, 1));
-    let live = brightest(&shot, cell_rect(83, 6, 5, 1));
+    let base = brightest(&shot, cell_rect(7, 7, 5, 1));
+    let live = brightest(&shot, cell_rect(83, 7, 5, 1));
 
     if u16::from(base) * 5 >= u16::from(live) * 3 {
         let frame = keep_frame(&shot, &mut home, "diff_base_side");
@@ -345,9 +354,9 @@ fn the_split_diff_s_status_halves_sit_on_the_ground() {
 /// A frame in the base tint runs down both sides of the split diff's base
 /// column and along its top, inside the pane's first row.
 ///
-/// Row 3, `3 three`, is context with no hunk mark, so its only base-tint
+/// Row 4, `3 three`, is context with no hunk mark, so its only base-tint
 /// pixels are the frame's two sides. The top bar fills the top three pixel
-/// rows of row 1, under the tab bar, past the island's rounded corner.
+/// rows of row 2, under the tab bar's band.
 #[test]
 fn the_split_diff_frames_its_base_column() {
     let mut home = support::scratch_home();
@@ -357,14 +366,14 @@ fn the_split_diff_frames_its_base_column() {
         "unstaged.txt",
         "<Space>df<Settle>",
     );
-    expect_base_frame_sides(&shot, &mut home, 3, "diff_base_frame");
-    expect_base_frame_top(&shot, &mut home, 1, "diff_base_frame_top");
+    expect_base_frame_sides(&shot, &mut home, 4, "diff_base_frame");
+    expect_base_frame_top(&shot, &mut home, 2, "diff_base_frame_top");
 }
 
 /// The split diff's mid divider draws in the hairline color, as the DiffSplit
 /// board draws the rule between its halves.
 ///
-/// Row 3, `3 three`, is context on both sides. The divider is column 76, and
+/// Row 4, `3 three`, is context on both sides. The divider is column 76, and
 /// its hairline takes the cell's pixel column 4, right of the base frame's
 /// right side. The check reads the row's middle pixel row.
 #[test]
@@ -376,7 +385,7 @@ fn the_split_diff_s_mid_divider_draws_in_the_hairline_color() {
         "unstaged.txt",
         "<Space>df<Settle>",
     );
-    let (x, y, _, height) = cell_rect(76, 3, 1, 1);
+    let (x, y, _, height) = cell_rect(76, 4, 1, 1);
     let at = (((y + height / 2) * shot.width + x + 4) * 4) as usize;
     let pixel = [shot.rgba[at], shot.rgba[at + 1], shot.rgba[at + 2]];
 
@@ -417,13 +426,13 @@ fn the_split_diff_ends_in_the_minimap_strip_on_the_editor_surface() {
 /// The changes view frames its base column between its file headers, as the
 /// DiffChanges board layers each header over the frame.
 ///
-/// Row 1 is the first file's header, and row 2 the file's first line, context
+/// Row 2 is the first file's header, and row 3 the file's first line, context
 /// with no hunk mark. The frame's sides stop at the header, so no base-tint
-/// pixel column runs down row 1, and they draw down row 2. The top bar alone
+/// pixel column runs down row 2, and they draw down row 3. The top bar alone
 /// crosses the header. It fills the header's top three pixel rows to the right
 /// side's last pixel column, although the view's stack stays composited at
-/// rest. The island's 6 px top-left arc clips the bar's start, which lies 5 px
-/// right of the left side's first pixel column.
+/// rest. It starts on the left side's first pixel column, because the
+/// island's 6 px top-left arc lies in the tab bar's band, above the header.
 #[test]
 fn the_changes_view_frames_its_base_column_between_the_headers() {
     let mut home = support::scratch_home();
@@ -433,10 +442,10 @@ fn the_changes_view_frames_its_base_column_between_the_headers() {
         "unstaged.txt",
         "<Space>dc<Settle>",
     );
-    expect_base_frame_sides(&shot, &mut home, 2, "changes_base_frame");
+    expect_base_frame_sides(&shot, &mut home, 3, "changes_base_frame");
 
-    let (_, y, _, height) = cell_rect(0, 1, 1, 1);
-    let span: Vec<u32> = (cell_rect(1, 1, 1, 1).0 + 5..=cell_rect(76, 1, 1, 1).0 + 3).collect();
+    let (_, y, _, height) = cell_rect(0, 2, 1, 1);
+    let span: Vec<u32> = (cell_rect(1, 2, 1, 1).0..=cell_rect(76, 2, 1, 1).0 + 3).collect();
     let down = bar_columns(&shot, (y, height), SIDE_BASE);
     let top = bar_columns(&shot, (y, 3), SIDE_BASE);
     let below = bar_columns(&shot, (y + 3, 1), SIDE_BASE);
@@ -472,7 +481,7 @@ fn the_changes_view_ends_in_the_minimap_strip_on_the_editor_surface() {
 /// The single band rounds its viewport band's corners at 4 px and outlines
 /// the band in the accent at 90 percent, as the Editor board draws the band.
 ///
-/// The band's first cell is column 152 on row 1, where the thumb starts at the
+/// The band's first cell is column 152 on row 2, where the thumb starts at the
 /// file's top. The island's own 6 px corner clips the band's top-right corner,
 /// so the check reads the thumb's top-left corner. On the band's first pixel
 /// column, the thumb's top pixel row lies past the arc and keeps the editor
@@ -487,7 +496,7 @@ fn the_viewport_band_rounds_its_corners() {
 
     let mut home = support::scratch_home();
     let shot = settled_frame(home.path(), "basic-diff", "unstaged.txt", "");
-    let (x, y, _, _) = cell_rect(152, 1, 1, 1);
+    let (x, y, _, _) = cell_rect(152, 2, 1, 1);
 
     expect_region(&shot, &mut home, (x, y, 1, 1), BASE, "band_corner");
     expect_region(
@@ -509,7 +518,7 @@ fn the_viewport_band_rounds_its_corners() {
 /// The changes view heads each file with a row on the raised surface, between
 /// two hairlines.
 ///
-/// Row 1 is the first file's header. Its text is centered, so the cells from
+/// Row 2 is the first file's header. Its text is centered, so the cells from
 /// column 2 to column 31 and from column 120 to column 149 hold none. The
 /// hairlines take the top and bottom pixel rows of the header row. Over the
 /// base column the frame's top bar covers the top one, so the check reads it
@@ -524,7 +533,7 @@ fn the_changes_view_heads_each_file_on_the_raised_surface() {
         "<Space>dc<Settle>",
     );
 
-    let (x, y, width, height) = cell_rect(2, 1, 30, 1);
+    let (x, y, width, height) = cell_rect(2, 2, 30, 1);
     expect_region(
         &shot,
         &mut home,
@@ -532,7 +541,7 @@ fn the_changes_view_heads_each_file_on_the_raised_surface() {
         RAISED,
         "changes_header",
     );
-    let (live_x, ..) = cell_rect(120, 1, 30, 1);
+    let (live_x, ..) = cell_rect(120, 2, 30, 1);
     expect_region(
         &shot,
         &mut home,
@@ -552,13 +561,14 @@ fn the_changes_view_heads_each_file_on_the_raised_surface() {
 /// The changes view pins the File Header of the file under the stack's top
 /// edge to the stack's first row while the stack scrolls under it.
 ///
-/// The scene is 20 rows tall, so the stack shows 18. Two pages put the cursor
-/// on the stack's last row and the scroll on the last page, which starts
-/// inside hunks.txt, past its header and before its last row. Row 1 then shows
+/// The scene is 20 rows tall, and the tab bar's band and the status band take
+/// two rows each, so the stack shows 16. Two pages put the cursor on the
+/// stack's last row and the scroll on the last page, which starts inside
+/// hunks.txt, past its header and before its last row. Row 2 then shows
 /// hunks.txt's header on the raised surface over its bottom hairline. Where
 /// the cover fails, the resident pool's composite shows a stack row there.
 ///
-/// The pinned header casts its shadow on row 2, which the stack's pool
+/// The pinned header casts its shadow on row 3, which the stack's pool
 /// composites. A strip 2 px under that row's top edge takes about 0.38 of
 /// black and a strip 16 px under it none. The two strips share the row's
 /// surface, so a diff tint or a hatch there cancels out.
@@ -573,7 +583,7 @@ fn the_changes_view_pins_the_file_header_over_its_scrolling_stack() {
     let shot = session.snapshot().expect("a snapshot");
     drop(session);
 
-    let (x, y, width, height) = cell_rect(2, 1, 30, 1);
+    let (x, y, width, height) = cell_rect(2, 2, 30, 1);
     expect_region(
         &shot,
         &mut home,
@@ -589,7 +599,7 @@ fn the_changes_view_pins_the_file_header_over_its_scrolling_stack() {
         "pinned_header_bottom",
     );
 
-    let (x, y, width, _) = cell_rect(20, 2, 12, 1);
+    let (x, y, width, _) = cell_rect(20, 3, 12, 1);
     let [near, far] = [2, 16].map(|down| dominant_color(&shot, (x, y + down, width, 1)));
     if !near.iter().zip(far).all(|(&near, far)| near < far) {
         let frame = keep_frame(&shot, &mut home, "pinned_header_shadow");
@@ -606,7 +616,7 @@ fn the_changes_view_pins_the_file_header_over_its_scrolling_stack() {
 /// The changes view folds the unchanged lines between two hunks into a fold
 /// row under the boards' hatch.
 ///
-/// The diff-kinds stack lists hunks.txt fourth, and its fold row is row 19,
+/// The diff-kinds stack lists hunks.txt fourth, and its fold row is row 20,
 /// under the row of its line 6 on the base surface. The fold hides seven
 /// lines, so the row carries one Fold Button, whose box covers most of columns
 /// 1 and 2. The count starts one cell past the buttons and ends before column
@@ -622,20 +632,20 @@ fn the_changes_view_folds_unchanged_lines_into_a_hatched_row() {
     expect_region(
         &shot,
         &mut home,
-        cell_rect(2, 18, 30, 1),
+        cell_rect(2, 19, 30, 1),
         BASE,
         "changes_row_above_fold",
     );
     expect_region(
         &shot,
         &mut home,
-        cell_rect(1, 19, 2, 1),
+        cell_rect(1, 20, 2, 1),
         FOLD_BUTTON,
         "changes_fold_button",
     );
     for (rect, what) in [
-        (cell_rect(18, 19, 52, 1), "changes_fold_row"),
-        (cell_rect(84, 19, 56, 1), "changes_fold_row_center"),
+        (cell_rect(18, 20, 52, 1), "changes_fold_row"),
+        (cell_rect(84, 20, 56, 1), "changes_fold_row_center"),
     ] {
         expect_hatch(&shot, &mut home, rect, (BASE, HATCH), what);
     }
@@ -717,11 +727,11 @@ fn side_by_side_panes_stand_eight_pixels_apart() {
 /// Two stacked panes meet at the upper pane's status row, whose 24 px band is
 /// the gap between them, as the PaneStatus board stacks its islands.
 ///
-/// The band takes the last 6 px of the spare row 23 and all of the status row
-/// 24, from pixel row 426 to 449. The upper island stops at pixel row 425, and
-/// the lower island starts at 450. Pixel column 720 lies in the middle of both
-/// panes, where the row holds no text. Down that column, pixel row 425 reads
-/// the base surface, the band's 24 pixel rows read the ground, and 450 reads
+/// The band takes the last 6 px of the spare row 24 and all of the status row
+/// 25, from pixel row 444 to 467. The upper island stops at pixel row 443, and
+/// the lower island starts at 468. Pixel column 720 lies in the middle of both
+/// panes, where the row holds no text. Down that column, pixel row 443 reads
+/// the base surface, the band's 24 pixel rows read the ground, and 468 reads
 /// the base surface again. The upper pane's name draws in the status row's
 /// first cells.
 #[test]
@@ -733,13 +743,13 @@ fn stacked_panes_meet_at_the_upper_pane_s_status_row() {
         "unstaged.txt",
         "<Space>av<Settle>",
     );
-    let column: Vec<[u8; 3]> = (425..451).map(|y| pixel(&shot, 720, y)).collect();
-    let name = brightest(&shot, cell_rect(1, 24, 12, 1));
+    let column: Vec<[u8; 3]> = (443..469).map(|y| pixel(&shot, 720, y)).collect();
+    let name = brightest(&shot, cell_rect(1, 25, 12, 1));
 
     if column != [vec![BASE], vec![GROUND; 24], vec![BASE]].concat() || name <= 0x80 {
         let frame = keep_frame(&shot, &mut home, "stacked_status_row");
         panic!(
-            "pixel column 720 reads {:?} down pixel rows 425 to 450, not the upper island's \
+            "pixel column 720 reads {:?} down pixel rows 443 to 468, not the upper island's \
              base, the ground down the status band, and then the lower island's base, or the \
              row's first cells peak at {name:#04x}, not the pane's name; the frame is {}",
             column.into_iter().map(hex).collect::<Vec<_>>(),
@@ -751,24 +761,39 @@ fn stacked_panes_meet_at_the_upper_pane_s_status_row() {
 /// An island's corners round at 6 px against the ground, as every board draws
 /// a pane.
 ///
-/// The plain editor's island starts at pixel column 8, a pixel into the
-/// margin, and at pixel row 18, under the tab bar, so its top-left arc centers
-/// on (14, 24). The arc leaves (8, 18) and (9, 18) on the ground. The
-/// second lies inside the pane's first cell, where only the ground the island
-/// paints over its corner clears the cell. The arc leaves (16, 18) and
-/// (8, 26) whole on the base surface.
+/// `<Space>av` stacks two panes. Each island starts at pixel column 8, a pixel
+/// into the margin. The upper island starts at pixel row 32, where the tab
+/// bar's band ends, so its top-left arc centers on (14, 38). The lower island
+/// starts at pixel row 468, under the upper pane's status band, so its arc
+/// centers on (14, 474). Each arc leaves the pixel at its island's top-left
+/// corner and the pixel right of it on the ground. 8 px along, the top edge
+/// runs straight, with the ground on the pixel row over it and the base
+/// surface on its first pixel row. The pixel 8 px down the left edge reads the
+/// base surface too.
+///
+/// The lower arc lies inside the lower pane's first cell, where only the
+/// ground the island paints over its corner clears the cell.
 #[test]
 fn an_island_rounds_its_corners_against_the_ground() {
     let mut home = support::scratch_home();
-    let shot = settled_frame(home.path(), "basic-diff", "unstaged.txt", "");
-    let corner = [(8, 18), (9, 18), (16, 18), (8, 26)].map(|(x, y)| pixel(&shot, x, y));
+    let shot = settled_frame(
+        home.path(),
+        "basic-diff",
+        "unstaged.txt",
+        "<Space>av<Settle>",
+    );
+    let corners = [32, 468].map(|top| {
+        [(8, top), (9, top), (16, top - 1), (16, top), (8, top + 8)]
+            .map(|(x, y)| pixel(&shot, x, y))
+    });
 
-    if corner != [GROUND, GROUND, BASE, BASE] {
+    if corners != [[GROUND, GROUND, GROUND, BASE, BASE]; 2] {
         let frame = keep_frame(&shot, &mut home, "island_corner");
         panic!(
-            "the island's top-left corner reads {:?} at (8, 18), (9, 18), (16, 18), and (8, 26), \
-             not the ground outside its 6 px arc and the base surface inside it; the frame is {}",
-            corner.map(hex),
+            "the islands' top-left corners read {:?} at (8, top), (9, top), (16, top - 1), \
+             (16, top), and (8, top + 8) for the tops 32 and 468, not the ground outside each \
+             island and the base surface inside it; the frame is {}",
+            corners.map(|corner| corner.map(hex)),
             frame.display(),
         );
     }
@@ -859,16 +884,18 @@ fn the_status_row_sits_on_the_ground_with_no_hairline() {
 }
 
 /// The tab bar sits on the ground over a lone tab, and the active tab draws as
-/// a pill in the accent wash, one pixel inside the row, with its corners
-/// rounded at 4 px.
+/// a 22 px pill in the accent wash, with its corners rounded at 4 px.
 ///
 /// The bar leads with the workspace name, whose length follows the session's
 /// random name, so the check reads row 0 as runs of color rather than at a
-/// fixed column. The tab's left edge is the first wash pixel of the row's
-/// middle, where the edge runs straight. Pixel column 8 of the tab lies in its
-/// pad cell, past the arc, so it reads the ground on the row's first and last
-/// pixel rows and the wash on the second. On the second pixel row the arc
-/// takes the wash out of the tab's first pixel column.
+/// fixed column. The bar's row draws [`TAB_BAR_PAD`] px down in its 32 px
+/// band, and the pill stands [`TAB_PILL_OUTSET`] px outside that row at the
+/// top and the bottom, from pixel row 5 to 26. The tab's left edge is the
+/// first wash pixel of the row's middle, where the edge runs straight. Pixel
+/// column 8 of the tab lies in its pad cell, past the arc. It reads the ground
+/// on the pixel rows over and under the pill, and the wash on the pill's first
+/// and last pixel rows. On the pill's second pixel row the arc takes the wash
+/// out of the tab's first pixel column.
 #[test]
 fn the_tab_bar_sits_on_the_ground_with_the_active_tab_in_a_pill() {
     let mut home = support::scratch_home();
@@ -876,27 +903,31 @@ fn the_tab_bar_sits_on_the_ground_with_the_active_tab_in_a_pill() {
 
     expect_row_runs(&shot, &mut home, 0, &[GROUND, TAB_WASH, GROUND], "tab_bar");
 
-    let (_, top, _, height) = cell_rect(0, 0, 1, 1);
-    let middle = top + height / 2;
+    let (_, row_top, _, height) = cell_rect(0, 0, 1, 1);
+    let middle = row_top + TAB_BAR_PAD + height / 2;
     let Some(left) = (0..shot.width).find(|&x| pixel(&shot, x, middle) == TAB_WASH) else {
         let frame = keep_frame(&shot, &mut home, "tab_bar_middle");
         panic!(
-            "no pixel of row 0's middle reads {}; the frame is {}",
+            "no pixel of the bar's middle pixel row {middle} reads {}; the frame is {}",
             hex(TAB_WASH),
             frame.display(),
         );
     };
 
-    let column = [top, top + 1, top + height - 1].map(|y| pixel(&shot, left + 8, y));
+    let top = row_top + TAB_BAR_PAD - TAB_PILL_OUTSET;
+    let bottom = row_top + TAB_BAR_PAD + height + TAB_PILL_OUTSET - 1;
+    let column = [top - 1, top, bottom, bottom + 1].map(|y| pixel(&shot, left + 8, y));
     let corner = pixel(&shot, left, top + 1);
-    if column != [GROUND, TAB_WASH, GROUND] || corner == TAB_WASH {
+    if column != [GROUND, TAB_WASH, TAB_WASH, GROUND] || corner == TAB_WASH {
         let frame = keep_frame(&shot, &mut home, "tab_pill");
         panic!(
-            "the tab's pixel column {} reads {:?} on the row's first, second, and last pixel \
-             rows, not the ground, the wash, and the ground, or its first column's second \
-             pixel reads {}, not rounded off; the frame is {}",
+            "the tab's pixel column {} reads {:?} on pixel rows {}, {top}, {bottom}, and {}, not \
+             the ground, the wash, the wash, and the ground, or its first column's second pixel \
+             reads {}, not rounded off; the frame is {}",
             left + 8,
             column.map(hex),
+            top - 1,
+            bottom + 1,
             hex(corner),
             frame.display(),
         );
@@ -907,8 +938,9 @@ fn the_tab_bar_sits_on_the_ground_with_the_active_tab_in_a_pill() {
 /// draws them. The focused `files` chip is a box on the hover surface one
 /// pixel inside the bar's row, and the `changes` chip is text on the ground.
 ///
-/// The bar ends in a pad cell at column 159, so the `changes` chip takes
-/// columns 150 to 158 and the `files` chip columns 143 to 149.
+/// The bar's row draws [`TAB_BAR_PAD`] px down in its band, so the checks read
+/// the row there. The bar ends in a pad cell at column 159, so the `changes`
+/// chip takes columns 150 to 158 and the `files` chip columns 143 to 149.
 #[test]
 fn the_tab_bar_boxes_the_focused_layout_s_chip_inside_its_row() {
     let mut home = support::scratch_home();
@@ -918,7 +950,8 @@ fn the_tab_bar_boxes_the_focused_layout_s_chip_inside_its_row() {
         "unstaged.txt",
         "<Space>df<Settle>",
     );
-    let (_, top, _, height) = cell_rect(0, 0, 1, 1);
+    let (_, row_top, _, height) = cell_rect(0, 0, 1, 1);
+    let top = row_top + TAB_BAR_PAD;
     let band = |col: u16, (dy, rows): (u32, u32)| {
         let (x, _, width, _) = cell_rect(col, 0, 1, 1);
         dominant_color(&shot, (x, top + dy, width, rows))
@@ -1067,8 +1100,9 @@ fn the_file_finder_box_draws_on_the_overlay_surface() {
 /// border in the window ground, and a shadow falls under it.
 ///
 /// `<Space>as` splits the window and moves the focus to the right pane, so the
-/// one badge sits in the left pane. That pane takes rows 1 to 47 above its
-/// status band, so the 6-row box centers with its top-left cell at (34, 21).
+/// one badge sits in the left pane. That pane takes rows 2 to 47, between the
+/// tab bar's band and its status band, so the 6-row box centers with its
+/// top-left cell at (34, 22).
 /// The cell one in from that corner lies inside the box and left of the digit.
 ///
 /// The pixel on the box's left edge four rows down lies outside the 10 px
@@ -1085,7 +1119,7 @@ fn the_pane_picker_badge_draws_the_accent_box() {
         "unstaged.txt",
         "<Space>as<Settle><Space>ae<Settle>",
     );
-    let (col, row) = (34, 21);
+    let (col, row) = (34, 22);
 
     expect_region(
         &shot,
@@ -1162,28 +1196,28 @@ fn the_commits_view_selects_its_first_row_beside_the_lane_graph() {
     expect_region(
         &shot,
         &mut home,
-        cell_rect(30, 1, 1, 1),
+        cell_rect(30, 2, 1, 1),
         BASE,
         "graph_header_row",
     );
     expect_region(
         &shot,
         &mut home,
-        cell_rect(30, 2, 1, 1),
+        cell_rect(30, 3, 1, 1),
         SELECT,
         "selected_commit_row",
     );
     expect_region(
         &shot,
         &mut home,
-        cell_rect(30, 4, 1, 1),
+        cell_rect(30, 5, 1, 1),
         BASE,
         "unselected_commit_row",
     );
     expect_region(
         &shot,
         &mut home,
-        cell_rect(120, 8, 1, 1),
+        cell_rect(120, 9, 1, 1),
         TINT_OURS,
         "added_preview_row",
     );
@@ -1333,7 +1367,7 @@ fn the_finder_header_ends_in_a_chip_on_the_hover_surface() {
 fn the_editor_behind_the_finder_fades() {
     let mut home = support::scratch_home();
     let mut session = spawn_settled(home.path(), "many-files", "src/alpha.txt");
-    let text = cell_rect(6, 1, 17, 1);
+    let text = cell_rect(6, 2, 17, 1);
     let before = session.snapshot().expect("a snapshot");
     play(&mut session, "<Space>p<Settle>");
     let after = session.snapshot().expect("a snapshot");
@@ -1578,11 +1612,11 @@ fn a_function_completion_leads_with_its_badge_on_the_function_tint() {
 /// A selection washes its range, the primary cursor is the terminal's own
 /// opaque block, and a secondary cursor takes the theme's cursor block.
 ///
-/// The text starts in cell 6, and the tab bar takes row 0. `jjvll` selects
-/// `3 t` on row 3, so the wash covers the `3` and the blank cell after it, and
-/// the primary cursor sits on the `t` in cell 8. `<Esc>CC` copies the
-/// selection onto the next two rows, and the newest, on row 5, takes the
-/// primary, which leaves the cursor on row 3 secondary.
+/// The text starts in cell 6, and the tab bar's band takes rows 0 and 1.
+/// `jjvll` selects `3 t` on row 4, so the wash covers the `3` and the blank
+/// cell after it, and the primary cursor sits on the `t` in cell 8. `<Esc>CC`
+/// copies the selection onto the next two rows, and the newest, on row 6,
+/// takes the primary, which leaves the cursor on row 4 secondary.
 #[test]
 fn the_selection_scene_paints_the_wash_and_both_cursor_kinds() {
     let mut home = support::scratch_home();
@@ -1593,14 +1627,14 @@ fn the_selection_scene_paints_the_wash_and_both_cursor_kinds() {
     expect_region(
         &selected,
         &mut home,
-        cell_rect(7, 3, 1, 1),
+        cell_rect(7, 4, 1, 1),
         WASH,
         "selection_wash",
     );
     expect_region(
         &selected,
         &mut home,
-        cell_rect(8, 3, 1, 1),
+        cell_rect(8, 4, 1, 1),
         CURSOR_PRIMARY,
         "primary_cursor",
     );
@@ -1610,14 +1644,14 @@ fn the_selection_scene_paints_the_wash_and_both_cursor_kinds() {
     expect_region(
         &copied,
         &mut home,
-        cell_rect(8, 3, 1, 1),
+        cell_rect(8, 4, 1, 1),
         CURSOR_SECONDARY,
         "secondary_cursor",
     );
     expect_region(
         &copied,
         &mut home,
-        cell_rect(8, 5, 1, 1),
+        cell_rect(8, 6, 1, 1),
         CURSOR_PRIMARY,
         "copied_primary_cursor",
     );
@@ -1625,17 +1659,17 @@ fn the_selection_scene_paints_the_wash_and_both_cursor_kinds() {
 
 /// A gzip file's pane rings its text in the dashed read-only hairline.
 ///
-/// The tab bar takes row 0, so the first content row is row 1, and the
-/// ring's top edge is that row's first pixel row. Three pixels in five carry
-/// the dashed stroke, so the stroke's color leads a run of them, and the run
-/// two pixels down lies under the stroke on the editor surface. Cells 20 to
-/// 60 lie clear of the ring's rounded corners and of the label at its right
-/// end.
+/// The tab bar's band takes rows 0 and 1, so the first content row is row 2,
+/// and the ring's top edge is that row's first pixel row. Three pixels in
+/// five carry the dashed stroke, so the stroke's color leads a run of them,
+/// and the run two pixels down lies under the stroke on the editor surface.
+/// Cells 20 to 60 lie clear of the ring's rounded corners and of the label at
+/// its right end.
 #[test]
 fn a_read_only_pane_draws_the_dashed_ring_over_its_text() {
     let mut home = support::scratch_home();
     let shot = settled_frame(home.path(), "read-only", "CHANGELOG.md.gz", "");
-    let (x, y, width, _) = cell_rect(20, 1, 40, 1);
+    let (x, y, width, _) = cell_rect(20, 2, 40, 1);
 
     expect_region(
         &shot,
@@ -1655,14 +1689,14 @@ fn a_read_only_pane_draws_the_dashed_ring_over_its_text() {
 
 /// The conflict view paints as the MergeGrid on the Ermine palette.
 ///
-/// The fixture pauses a merge with one conflict in `file.txt`. The tab bar
-/// takes row 0, and the minimap band takes the window's last seven columns
-/// before its margin. So the view spans 151 cells, with sides of 48 cells at x
-/// 1 and 104 and the merged column of 55 cells at x 49. The header is row 1,
-/// `1 shared header` is row 2, and the chunk's first row is row 3, where each
-/// column takes its side's tint. The ours bar sits 4/16 into its column, so at
-/// 9-pixel cells it snaps to the third and fourth pixel columns of the
-/// column's first cell.
+/// The fixture pauses a merge with one conflict in `file.txt`. The tab bar's
+/// band takes rows 0 and 1, and the minimap band takes the window's last seven
+/// columns before its margin. So the view spans 151 cells, with sides of 48
+/// cells at x 1 and 104 and the merged column of 55 cells at x 49. The header
+/// is row 2, `1 shared header` is row 3, and the chunk's first row is row 4,
+/// where each column takes its side's tint. The ours bar sits 4/16 into its
+/// column, so at 9-pixel cells it snaps to the third and fourth pixel columns
+/// of the column's first cell.
 #[test]
 fn the_conflict_view_paints_the_merge_grid() {
     let mut home = support::scratch_home();
@@ -1674,15 +1708,15 @@ fn the_conflict_view_paints_the_merge_grid() {
     );
 
     for (col, row, want, what) in [
-        (5, 3, TINT_OURS, "ours_conflict_row"),
-        (55, 3, TINT_CONFLICT, "merged_conflict_row"),
-        (113, 3, TINT_THEIRS, "theirs_conflict_row"),
-        (55, 1, MERGED_HEAD, "merged_header"),
-        (5, 2, BASE, "context_row"),
+        (5, 4, TINT_OURS, "ours_conflict_row"),
+        (55, 4, TINT_CONFLICT, "merged_conflict_row"),
+        (113, 4, TINT_THEIRS, "theirs_conflict_row"),
+        (55, 2, MERGED_HEAD, "merged_header"),
+        (5, 3, BASE, "context_row"),
     ] {
         expect_region(&shot, &mut home, cell_rect(col, row, 20, 1), want, what);
     }
-    let (x, y, _, height) = cell_rect(1, 3, 1, 1);
+    let (x, y, _, height) = cell_rect(1, 4, 1, 1);
     expect_region(&shot, &mut home, (x + 2, y, 2, height), SUCCESS, "ours_bar");
 }
 
@@ -1690,7 +1724,8 @@ fn the_conflict_view_paints_the_merge_grid() {
 ///
 /// The chip reads `1 unresolved · 1 / 1 chunks` at the Caption scale, 24
 /// cells that end one cell before the bar's right edge, so cells 140 to 152
-/// of row 0 lie inside it on its fill.
+/// of the bar's row lie inside it on its fill. The row draws [`TAB_BAR_PAD`]
+/// px down in its band, so the check reads it there.
 #[test]
 fn the_tab_bar_ends_in_the_conflict_chip() {
     let mut home = support::scratch_home();
@@ -1701,10 +1736,11 @@ fn the_tab_bar_ends_in_the_conflict_chip() {
         "<C-;>Conflict<Enter><Settle>",
     );
 
+    let (x, y, width, height) = cell_rect(140, 0, 12, 1);
     expect_region(
         &shot,
         &mut home,
-        cell_rect(140, 0, 12, 1),
+        (x, y + TAB_BAR_PAD, width, height),
         CHIP_CONFLICT,
         "conflict_chip",
     );
@@ -1807,10 +1843,10 @@ fn spawn_settled(home: &Path, fixture: &str, file: &str) -> HeadlessSession {
     session
 }
 
-/// Wait until the basic-diff scene's modified row, row 4, shows its hunk lane
+/// Wait until the basic-diff scene's modified row, row 5, shows its hunk lane
 /// in the accent, and then until the frame settles.
 fn wait_for_diff(session: &mut HeadlessSession) {
-    let (x, y, _, height) = cell_rect(1, 4, 1, 1);
+    let (x, y, _, height) = cell_rect(1, 5, 1, 1);
     let deadline = Instant::now() + support::STARTUP_TIMEOUT;
     while dominant_color(&session.snapshot().expect("a snapshot"), (x, y, 3, height)) != ACCENT {
         assert!(
@@ -2002,10 +2038,10 @@ fn expect_base_frame_sides(shot: &Snapshot, home: &mut TempDir, row: u16, what: 
 ///
 /// The sides are the columns the tint fills down the row under the bar, and
 /// below the bar the tint fills the sides alone. The bar is one run of the
-/// base tint to the right side's last pixel column. It starts where the
-/// island's 6 px top-left arc leaves its three rows whole. The island starts a
-/// pixel left of the left side, so that column lies 5 px right of the left
-/// side's first. A miss saves the frame as [`expect_region`] does.
+/// base tint from the left side's first pixel column to the right side's last.
+/// The island starts 4 px above the pane's first row, in the tab bar's band,
+/// so its 6 px top-left arc leaves the bar's three rows whole. A miss saves the
+/// frame as [`expect_region`] does.
 fn expect_base_frame_top(shot: &Snapshot, home: &mut TempDir, row: u16, what: &str) {
     let (_, y, _, height) = cell_rect(0, row, 1, 1);
     let sides = bar_columns(shot, (y + 3, height - 3), SIDE_BASE);
@@ -2013,7 +2049,7 @@ fn expect_base_frame_top(shot: &Snapshot, home: &mut TempDir, row: u16, what: &s
     let below = bar_columns(shot, (y + 3, 1), SIDE_BASE);
 
     let span: Vec<u32> = match (sides.first(), sides.last()) {
-        (Some(&first), Some(&last)) => (first + 5..=last).collect(),
+        (Some(&first), Some(&last)) => (first..=last).collect(),
         _ => Vec::new(),
     };
     if !span.is_empty() && top == span && below == sides {
@@ -2030,20 +2066,20 @@ fn expect_base_frame_top(shot: &Snapshot, home: &mut TempDir, row: u16, what: &s
 }
 
 /// Panics unless each of the single band's seven columns, 152 to 158, reads
-/// as the editor surface from row 1 under the tab bar to row 47 above the
-/// status band, and the band draws text runs on row 1.
+/// as the editor surface from row 2 under the tab bar's band to row 47 above
+/// the status band, and the band draws text runs on row 2.
 ///
 /// The strip's runs, its marks, and its viewport band cover few of a column's
 /// pixels, so each column reads as the surface that a text strip sits on. A
-/// short plain-text file's strip rows fill row 1 and draw their runs in grey,
+/// short plain-text file's strip rows fill row 2 and draw their runs in grey,
 /// as [`grey_run_pixels`] counts them. A miss saves the frame as
 /// [`expect_region`] does.
 fn expect_strip_band(shot: &Snapshot, home: &mut TempDir, what: &str) {
     for col in 152..=158 {
-        expect_region(shot, home, cell_rect(col, 1, 1, 47), BASE, what);
+        expect_region(shot, home, cell_rect(col, 2, 1, 46), BASE, what);
     }
 
-    let runs = grey_run_pixels(shot, cell_rect(152, 1, 7, 1));
+    let runs = grey_run_pixels(shot, cell_rect(152, 2, 7, 1));
     if runs > 0 {
         return;
     }

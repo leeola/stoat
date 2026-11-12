@@ -1052,7 +1052,7 @@ pub(crate) fn handle_mouse(stoat: &mut Stoat, mouse: MouseEvent) -> UpdateEffect
         return effect;
     }
 
-    // A press on the tab bar row is the bar's. Ahead of focus_at and the pane
+    // A press on the tab bar's rows is the bar's. Ahead of focus_at and the pane
     // handlers, which read a row above every pane as the focused pane's first
     // row.
     if let Some(effect) = handle_tab_bar_mouse(stoat, mouse) {
@@ -1514,19 +1514,20 @@ fn land_on_stack_row(
         .min(total.saturating_sub(state.viewport_rows));
 }
 
-/// Claims a button press on the tab bar row, switching to the tab under a left
-/// press.
+/// Claims a button press on the tab bar's rows, switching to the tab under a
+/// left press.
 ///
-/// Returns `None` for an event that is not a press on the visible bar. Every
-/// press on the row is claimed, on a tab or not, because the row is above every
-/// pane and an unclaimed press there reaches the focused pane as a press on its
-/// first row.
+/// Returns `None` for an event that is not a press on the visible bar. A band
+/// takes two rows, and each tab draws over part of both, so a press on either
+/// row finds the tab. Every press on the rows is claimed, on a tab or not,
+/// because the rows are above every pane and an unclaimed press there reaches
+/// the focused pane as a press on its first row.
 fn handle_tab_bar_mouse(stoat: &mut Stoat, mouse: MouseEvent) -> Option<UpdateEffect> {
     let MouseEventKind::Down(button) = mouse.kind else {
         return None;
     };
     let bar = stoat.size();
-    if !stoat.tab_bar_visible() || mouse.row != bar.y {
+    if !(bar.y..bar.y + stoat.tab_bar_rows()).contains(&mouse.row) {
         return None;
     }
 
@@ -2596,6 +2597,7 @@ mod tests {
     };
     use stoat_action::{MoveDown, NewTab, OpenFile, SplitDown, SplitRight, TogglePaneWiden};
     use stoat_text::Point;
+    use stoatty_protocol::NUDGE_PROTOCOL;
     /// A buffer with `count` single-line diagnostics on consecutive rows,
     /// painted once so the pane areas and the render's span cache exist.
     fn hover_diagnostics_harness(count: u32) -> (crate::test_harness::TestHarness, EditorId) {
@@ -4193,6 +4195,41 @@ mod tests {
         assert_eq!(
             [active_after_press(&mut h, 0), active_after_press(&mut h, 1)],
             [0, 1],
+        );
+    }
+
+    /// A tab bar band takes the top two rows, so a left press at the first
+    /// tab's middle column switches to it from either row. Without the band,
+    /// the second row is the first pane row, and a press there keeps the tab.
+    ///
+    /// The press reads the tab's extent from the bar's painted spans, in
+    /// sixteenths of a cell from the bar's left edge.
+    #[test]
+    fn a_press_on_either_row_of_a_tab_bar_band_switches_tabs() {
+        let active_after_press = |protocol: u32, row: u16| {
+            let mut h = Stoat::test();
+            h.stoat.stoatty_protocol = protocol;
+            action_handlers::dispatch(&mut h.stoat, &NewTab);
+            h.stoat.render();
+            let first = h.stoat.tab_bar_spans[0].clone();
+            let column = (first.start + first.end) / 32;
+            h.stoat.update(mouse_event(
+                MouseEventKind::Down(MouseButton::Left),
+                column,
+                row,
+            ));
+            h.stoat.active_workspace().active_tab
+        };
+
+        assert_eq!(
+            [
+                active_after_press(NUDGE_PROTOCOL, 0),
+                active_after_press(NUDGE_PROTOCOL, 1),
+                active_after_press(NUDGE_PROTOCOL - 1, 1),
+            ],
+            [0, 0, 1],
+            "the active tab after a press on row 0 and row 1 of a band, then on row 1 under a \
+             one-row bar",
         );
     }
 

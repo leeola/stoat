@@ -21,9 +21,17 @@ mod support;
 /// The wait for the frame that follows a few keys.
 const STEP_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// The scene's editor font size, which also sizes the tab bar row the golden
+/// The scene's editor font size, which also sizes the tab bar rows the golden
 /// comparison leaves out.
 const FONT_SIZE: u32 = 14;
+
+/// The grid rows of the tab bar's band at the frame's top, which the golden
+/// comparison leaves out.
+///
+/// The bar leads with the workspace name, which stoat draws from the clock.
+/// The band draws the bar 7 px down, so the name's ink reaches into the second
+/// row.
+const TAB_BAR_ROWS: u32 = 2;
 
 /// The largest channel difference at which a pixel still matches its golden.
 ///
@@ -105,12 +113,13 @@ fn the_basic_diff_frame_changes_when_the_cursor_moves() {
 /// Why `shot` does not match the golden PNG at `golden`, or `None` when it
 /// does.
 ///
-/// The comparison leaves out the top grid row, the tab bar, because it leads
-/// with the workspace name, which stoat draws from the clock. A pixel matches
-/// when no channel differs by more than [`CHANNEL_TOLERANCE`], and the frame
-/// matches when at most [`MISMATCH_LIMIT`] of the compared pixels do not. A
-/// missing golden or a frame that does not match writes the whole frame to
-/// `<golden>.new`, which a reviewer moves over the golden to accept it.
+/// The comparison leaves out the top [`TAB_BAR_ROWS`] grid rows, the tab bar's
+/// band, because the bar leads with the workspace name, which stoat draws from
+/// the clock. A pixel matches when no channel differs by more than
+/// [`CHANNEL_TOLERANCE`], and the frame matches when at most
+/// [`MISMATCH_LIMIT`] of the compared pixels do not. A missing golden or a
+/// frame that does not match writes the whole frame to `<golden>.new`, which a
+/// reviewer moves over the golden to accept it.
 fn golden_mismatch(shot: &Snapshot, golden: &Path) -> Option<String> {
     let fresh = {
         let mut fresh = OsString::from(golden.as_os_str());
@@ -139,7 +148,8 @@ fn golden_mismatch(shot: &Snapshot, golden: &Path) -> Option<String> {
         ));
     }
 
-    let tab_bar = (shot.width * render::cell_size(FONT_SIZE, 1.0)[1] as u32) as usize;
+    let tab_bar =
+        (shot.width * TAB_BAR_ROWS * render::cell_size(FONT_SIZE, 1.0)[1] as u32) as usize;
     let compared = (shot.width * shot.height) as usize - tab_bar;
     let differing = expected
         .as_raw()

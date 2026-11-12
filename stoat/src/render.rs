@@ -53,7 +53,9 @@ use crate::{
         surround, textobject, yank,
     },
     apc_emit,
-    app::{self, modal_split_percent, modal_zoom_steps, ModalKind, Stoat, STATUS_ROW_PAD},
+    app::{
+        self, modal_split_percent, modal_zoom_steps, ModalKind, Stoat, STATUS_ROW_PAD, TAB_BAR_PAD,
+    },
     auto_reload::ReloadFlash,
     buffer::BufferId,
     buffer_registry::BufferRegistry,
@@ -329,7 +331,7 @@ impl LspServerList {
 #[derive(Clone, Copy)]
 pub(crate) struct FrameCtx<'a> {
     pub(crate) workspace_name: &'a str,
-    /// Whether the tab bar takes the frame's top row. The bar then leads with
+    /// Whether the tab bar takes the frame's top rows. The bar then leads with
     /// the workspace name, so a status row leaves the name out.
     pub(crate) tab_bar_shown: bool,
     /// Whether the chrome rows draw as bands, from [`Stoat::chrome_bands_on`].
@@ -1278,7 +1280,7 @@ pub(crate) fn frame(
     let minimap_enabled = minimap_mode != MinimapMode::Off;
     emit::ensure_minimap_content_ids(stoat);
 
-    let tab_bar_rows = u16::from(stoat.tab_bar_visible());
+    let tab_bar_rows = stoat.tab_bar_rows();
     let status_rows = stoat.status_rows();
     let chrome_bands = stoat.chrome_bands_on();
     let islands = stoat.islands_on();
@@ -1287,8 +1289,8 @@ pub(crate) fn frame(
     // Single mode reserves a strip band at the window's right edge and shrinks
     // the pane layout by the strip width, so the panes never overlap the strip.
     // The band stops above the status rows so a status bar on the last row runs
-    // the full window width, and starts one row down when the tab bar holds the
-    // top, since the band derives its own rect instead of going through
+    // the full window width, and starts under the tab bar's rows when the bar
+    // holds the top, since the band derives its own rect instead of going through
     // `layout_size`. The band is stamped on Stoat for the mouse handler, then
     // read back for this paint. It sits inside the island margin, so the
     // window reads margin, panes, band, margin.
@@ -1450,7 +1452,7 @@ pub(crate) fn frame(
 
     let frame = FrameCtx {
         workspace_name,
-        tab_bar_shown: tab_bar_rows == 1,
+        tab_bar_shown: tab_bar_rows > 0,
         chrome_bands,
         workspace_root: &ws.git_root,
         mode,
@@ -1553,15 +1555,24 @@ pub(crate) fn frame(
     let mut frame_holds = Vec::new();
 
     // The bar paints after the stale holds clear. On the frame a second tab
-    // opens, the pane it pushes down still holds a rect over the bar's row.
-    if tab_bar_rows == 1 {
+    // opens, the pane it pushes down still holds a rect over the bar's row. A
+    // band keeps the bar's cells on its first row and nudges the bar down to
+    // center it in 32 px. The bar draws in lane 0, so the nudge ends before
+    // the panes paint there.
+    if tab_bar_rows > 0 {
         let bar = Rect {
             x: full.x,
             y: full.y,
             width: full.width,
             height: 1,
         };
+        if chrome_bands {
+            scene.nudge([0, i16::from(TAB_BAR_PAD)]);
+        }
         pane::render_tab_bar(ws, bar, frame, buf, scene, &mut stoat.tab_bar_spans);
+        if chrome_bands {
+            scene.nudge([0, 0]);
+        }
     } else {
         stoat.tab_bar_spans.clear();
     }
