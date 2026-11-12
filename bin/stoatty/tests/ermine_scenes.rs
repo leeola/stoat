@@ -1776,8 +1776,34 @@ fn settled_frame(home: &Path, fixture: &str, file: &str, keys: &str) -> Snapshot
 
 /// A session of the `fixture` scene with `file` open, once its first frame
 /// settles.
+///
+/// The basic-diff scene also waits for its file's diff, which lands after the
+/// first frame. Under load, a settle sometimes ends before the diff lands, and
+/// the frame then shows no gutter lanes and no file counts in the status row.
 fn spawn_settled(home: &Path, fixture: &str, file: &str) -> HeadlessSession {
-    spawn_scene(ermine_scene(fixture, file, home))
+    let mut session = spawn_scene(ermine_scene(fixture, file, home));
+    if fixture == "basic-diff" {
+        wait_for_diff(&mut session);
+    }
+    session
+}
+
+/// Wait until the basic-diff scene's modified row, row 4, shows its hunk lane
+/// in the accent, and then until the frame settles.
+fn wait_for_diff(session: &mut HeadlessSession) {
+    let (x, y, _, height) = cell_rect(1, 4, 1, 1);
+    let deadline = Instant::now() + support::STARTUP_TIMEOUT;
+    while dominant_color(&session.snapshot().expect("a snapshot"), (x, y, 3, height)) != ACCENT {
+        assert!(
+            Instant::now() < deadline,
+            "the basic-diff scene's diff did not land"
+        );
+        play(session, "<Wait:100>");
+    }
+
+    session
+        .wait_settled(support::SETTLE, support::STARTUP_TIMEOUT)
+        .expect("the frame with the diff settles");
 }
 
 /// A session of `scene`, once its first frame settles.
