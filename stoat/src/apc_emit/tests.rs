@@ -2816,9 +2816,8 @@ fn detached_pane_status_row_names_its_file_and_no_sides() {
 
 /// A detached diff view's status row splits at the diff's divider and names
 /// its sides there, as a split row in the main window does, and so does a
-/// detached changes view's row. The base half takes the base tint past the
-/// mode chip, the divider's cell keeps the window ground, and the target half
-/// takes the target tint.
+/// detached changes view's row. Past the mode chip both halves and the
+/// divider's cell sit on the window ground.
 #[test]
 fn a_detached_diff_view_s_row_names_its_sides_at_the_divider() {
     let split = detached_diff_row(|h| {
@@ -2832,12 +2831,7 @@ fn a_detached_diff_view_s_row_names_its_sides_at_the_divider() {
     });
 
     let rgb = |hex: u32| Some(Color::Rgb((hex >> 16) as u8, (hex >> 8) as u8, hex as u8));
-    let halves = vec![
-        (rgb(0x7fb0ff), 5),
-        (rgb(0x2a1d20), 54),
-        (rgb(0x0c0e11), 1),
-        (rgb(0x1d2a1f), 60),
-    ];
+    let halves = vec![(rgb(0x7fb0ff), 5), (rgb(0x0c0e11), 115)];
     let row = |base: &str| {
         (
             halves.clone(),

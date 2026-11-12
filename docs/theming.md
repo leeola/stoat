@@ -355,6 +355,10 @@ The typed UI scopes, by group (syntax scopes are open-ended):
   An unset label takes the foreground of `diff.sides.base` where the theme
   sets that scope, as every scope falls back to its parent, and the base
   name's color where it sets neither.
+- `diff.sides.base.frame` -- the frame around a split diff's base column, in
+  its foreground. A theme that leaves it unset frames the column in the base
+  half's fill. The frame reads this scope alone and never falls back to the
+  foreground of `diff.sides.base`, which is the half's text color.
 - `ui.diagnostic.error`, `ui.diagnostic.warning`, `ui.diagnostic.info`,
   `ui.diagnostic.hint` -- LSP diagnostic severities.
 - `vcs.conflict.*`, `vcs.commit.*`, `vcs.rebase.*` -- merge conflicts, the

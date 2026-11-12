@@ -47,6 +47,14 @@ impl Theme {
             .find_map(|s| self.styles.get(s).copied())
     }
 
+    /// Look up `scope` alone, with no parent fallback.
+    ///
+    /// For a scope whose parent's colors mean something else, such as a
+    /// frame under a scope whose foreground colors text.
+    pub(crate) fn try_get_exact(&self, scope: &str) -> Option<Style> {
+        self.styles.get(scope).copied()
+    }
+
     pub fn palette_get(&self, name: &str) -> Option<Color> {
         self.palette.get(name).copied()
     }
@@ -1009,6 +1017,12 @@ pub mod scope {
     /// Where neither it nor a parent scope sets a foreground, the label takes
     /// the base name's color.
     pub const DIFF_SIDES_BASE_LABEL: &str = "diff.sides.base.label";
+    /// The frame around a split diff's base column, in its foreground.
+    ///
+    /// A theme that leaves it unset frames the column in the base half's fill.
+    /// The frame reads this scope alone, since the foreground of
+    /// [`DIFF_SIDES_BASE`] is the half's text color.
+    pub const DIFF_SIDES_BASE_FRAME: &str = "diff.sides.base.frame";
     /// The target half, as [`DIFF_SIDES_BASE`] is the base half, with
     /// `diff.added` in place of `diff.deleted`.
     pub const DIFF_SIDES_TARGET: &str = "diff.sides.target";

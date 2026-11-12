@@ -46,7 +46,6 @@ const TINT_ACCENT: [u8; 3] = [0x22, 0x30, 0x49];
 const DANGER: [u8; 3] = [0xf2, 0x77, 0x7f];
 const SUCCESS: [u8; 3] = [0x8f, 0xd1, 0x8a];
 const SIDE_BASE: [u8; 3] = [0x2a, 0x1d, 0x20];
-const SIDE_TARGET: [u8; 3] = [0x1d, 0x2a, 0x1f];
 const WASH: [u8; 3] = [0x2a, 0x3c, 0x5a];
 const TAB_WASH: [u8; 3] = [0x24, 0x35, 0x52];
 const CURSOR_SECONDARY: [u8; 3] = [0x8a, 0x90, 0x9c];
@@ -267,18 +266,15 @@ fn the_base_side_of_the_split_diff_recedes_behind_the_live_side() {
     }
 }
 
-/// The split diff's status row tints its base half toward removal and its
-/// target half toward addition.
+/// The split diff's status row sits on the window ground under both halves
+/// and on the divider's cell, as the revised DiffSplit and DiffChanges boards
+/// draw the footer with no fill behind its halves.
 ///
 /// Row 49 is the status row. Column 30 lies in the base half and column 130 in
-/// the target half.
-///
-/// Column 76 is the diff's divider, whose 9 px cell starts at pixel column
-/// 684. The base tint runs to the hairline's pixel, 688, the ground fills that
-/// pixel, and the target tint fills the cell past it, as the DiffChanges
-/// board's footer keeps a 1 px ground divider between its halves.
+/// the target half. Column 76 is the diff's divider, and every pixel of its
+/// 9 px cell keeps the ground.
 #[test]
-fn the_split_diff_s_status_halves_take_their_side_tints() {
+fn the_split_diff_s_status_halves_sit_on_the_ground() {
     let mut home = support::scratch_home();
     let shot = settled_frame(
         home.path(),
@@ -290,27 +286,27 @@ fn the_split_diff_s_status_halves_take_their_side_tints() {
         &shot,
         &mut home,
         cell_rect(30, 49, 1, 1),
-        SIDE_BASE,
+        GROUND,
         "diff_status_base_half",
     );
     expect_region(
         &shot,
         &mut home,
         cell_rect(130, 49, 1, 1),
-        SIDE_TARGET,
+        GROUND,
         "diff_status_target_half",
     );
 
-    let (x, y, _, height) = cell_rect(76, 49, 1, 1);
-    let whole =
-        [(0, 4, SIDE_BASE), (4, 1, GROUND), (5, 4, SIDE_TARGET)].map(|(dx, width, color)| {
-            pixels_of(&shot, (x + dx, y, width, height), color) == (width * height) as usize
-        });
-    if whole != [true; 3] {
+    let rect = cell_rect(76, 49, 1, 1);
+    let (_, _, width, height) = rect;
+    let ground = pixels_of(&shot, rect, GROUND);
+    if ground != (width * height) as usize {
         let frame = keep_frame(&shot, &mut home, "diff_status_divider");
         panic!(
-            "the divider cell's base, ground, and target pixel columns from {x} read whole as \
-             {whole:?}; the frame is {}",
+            "{ground} of the {} pixels of the divider cell read {}, not all of them; the frame \
+             is {}",
+            width * height,
+            hex(GROUND),
             frame.display(),
         );
     }

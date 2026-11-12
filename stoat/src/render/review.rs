@@ -7246,10 +7246,10 @@ mod tests {
         );
     }
 
-    /// The halves meet at the diff's divider column, with the base tint left of
-    /// it, the window ground on it, and the target tint right of it.
+    /// The halves sit on the window ground on both sides of the diff's divider
+    /// column and on it, as the revised boards draw the footer.
     #[test]
-    fn the_status_halves_meet_at_the_divider() {
+    fn the_status_halves_sit_on_the_window_ground() {
         use ratatui::style::Color;
 
         let mut h = diff_harness("a\nb\nc\nold\n", "a\nb\nc\nnew\n");
@@ -7261,8 +7261,7 @@ mod tests {
             [58, 59, 60].map(|x| buf[(x, y)].bg)
         });
 
-        let rgb = |hex: u32| Color::Rgb((hex >> 16) as u8, (hex >> 8) as u8, hex as u8);
-        let expected = [rgb(0x2a1d20), rgb(0x0c0e11), rgb(0x1d2a1f)];
+        let expected = [Color::Rgb(0x0c, 0x0e, 0x11); 3];
         assert_eq!(fills, [expected, expected], "in both frames");
     }
 
@@ -7296,18 +7295,14 @@ mod tests {
                 [55, 56, 57].map(|x| buf[(x, y)].bg),
                 frame_sides,
             ),
-            (
-                Some(7),
-                [rgb(0x2a1d20), rgb(0x0c0e11), rgb(0x1d2a1f)],
-                vec![0, 56 * 16 + 7 - 6],
-            ),
+            (Some(7), [rgb(0x0c0e11); 3], vec![0, 56 * 16 + 7 - 6],),
         );
     }
 
     /// A diff too narrow for two columns keeps one status bar, and names its
-    /// sides there as two chips on their tints.
+    /// sides there on the window ground, past the mode chip.
     #[test]
-    fn a_unified_diff_names_its_sides_as_chips_in_one_bar() {
+    fn a_unified_diff_names_its_sides_in_one_bar_on_the_ground() {
         use ratatui::style::Color;
 
         let mut h = diff_harness_sized(80, "a\nb\nc\nold\n", "a\nb\nc\nnew\n");
@@ -7327,7 +7322,7 @@ mod tests {
             runs
         });
 
-        let expected = [0x7fb0ff, 0x0c0e11, 0x2a1d20, 0x1d2a1f, 0x0c0e11].map(rgb);
+        let expected = [0x7fb0ff, 0x0c0e11].map(rgb);
         assert_eq!(runs, [expected, expected].map(Vec::from), "in both frames");
     }
 

@@ -792,8 +792,9 @@ impl DiffSidesColors {
     /// where neither its scope nor a parent sets a foreground.
     ///
     /// No color depends on the pane's focus. The frame around the base column
-    /// takes the base half's fill, and a gliding pane's pages carry that frame
-    /// under a version that holds no focus.
+    /// takes [`diff_base_tint`], which falls back to the base half's fill, and
+    /// a gliding pane's pages carry that frame under a version that holds no
+    /// focus.
     fn resolve(theme: &crate::theme::Theme) -> Self {
         use crate::theme::scope;
         let bar = theme.get(scope::UI_STATUSBAR_FOCUSED);
@@ -882,13 +883,19 @@ impl DiffSideColors {
     }
 }
 
-/// The fill of a split diff's base half in `theme` as RGB, which the frame
-/// around the base column takes, or `None` for a fill outside RGB.
+/// The color of the frame around a split diff's base column in `theme` as RGB,
+/// or `None` for a color outside RGB.
 ///
-/// The frame draws only as rich bars, so a fill with no RGB value has no
-/// frame.
+/// The frame takes the foreground of `diff.sides.base.frame`, and the base
+/// half's fill where the theme leaves that scope unset. The frame draws only
+/// as rich bars, so a color with no RGB value has no frame.
 pub(crate) fn diff_base_tint(theme: &crate::theme::Theme) -> Option<[u8; 3]> {
-    style_rgb(Some(DiffSidesColors::resolve(theme).base.bg))
+    let frame = theme
+        .try_get_exact(crate::theme::scope::DIFF_SIDES_BASE_FRAME)
+        .and_then(|style| style.fg);
+    style_rgb(Some(
+        frame.unwrap_or_else(|| DiffSidesColors::resolve(theme).base.bg),
+    ))
 }
 
 /// Emit the `edges` of the frame around the base column of a diff pane whose
@@ -1226,8 +1233,9 @@ pub(crate) fn render_pane_status(
 ///
 /// The ground pixel is a bar with the hairline's own geometry, drawn last, so
 /// it lands on the hairline's pixel whichever way the bar shader rounds the
-/// cell's middle. A row with no such cell, or a color outside RGB, draws
-/// nothing, and the cell keeps the window ground.
+/// cell's middle. A row with no such cell, a color outside RGB, or a theme
+/// whose halves both sit on the ground draws nothing, and the cell keeps the
+/// window ground.
 fn draw_divider_cell(
     runs: &[StatusRun],
     theme: &crate::theme::Theme,
@@ -1250,6 +1258,9 @@ fn draw_divider_cell(
     let Some((base_bg, target_bg, ground)) = colors else {
         return;
     };
+    if base_bg == ground && target_bg == ground {
+        return;
+    }
 
     // Bars of different colors overlap here, so they render one at a time in
     // draw order rather than through a batch, which groups them by color.
@@ -1293,7 +1304,8 @@ pub(crate) struct StatusRow {
 /// its base half and its target half, with a cell of window ground between
 /// them at the diff's divider. Under a live scene that cell takes each half's
 /// fill on its side of the diff's hairline and keeps one pixel of ground under
-/// it, as [`draw_divider_cell`] draws it.
+/// it, as [`draw_divider_cell`] draws it. A theme whose halves sit on the
+/// ground draws no bar there.
 #[derive(Default, Hash)]
 struct StatusRun {
     /// The cells the run fills.
@@ -4622,39 +4634,57 @@ mod tests {
     /// half's fill right of it, then one sixteenth of window ground over the
     /// hairline's place. The divider is column 59 of the 120-wide window, and
     /// the status row is row 7.
+    ///
+    /// Ermine's halves sit on the window ground, so its cell draws no bar. A
+    /// theme over Ermine that restates the two tints draws all three.
     #[test]
-    fn the_status_divider_cell_splits_between_the_side_fills() {
-        use super::{style_rgb, DiffSidesColors};
+    fn the_status_divider_cell_splits_between_tinted_side_fills() {
         use stoatty_protocol::command::{decode_stream, Command};
 
-        let mut h = status_halves_harness();
-        h.stoat.render();
-        let bars: Vec<_> = decode_stream(h.stoat.apc_scene.lane_bytes(crate::render::STATUS_LANE))
-            .into_iter()
-            .flat_map(|command| match command {
-                Command::Bar(bar) => vec![(bar.x, bar.y, bar.width, bar.height, bar.color)],
-                Command::Bars(group) => group
-                    .bars
-                    .into_iter()
-                    .map(|(x, y, width, height)| (x, y, width, height, group.color))
-                    .collect(),
-                _ => Vec::new(),
-            })
-            .filter(|bar| (944..960).contains(&bar.0))
-            .collect();
+        let bars = |h: &mut crate::test_harness::TestHarness| -> Vec<_> {
+            h.stoat.render();
+            decode_stream(h.stoat.apc_scene.lane_bytes(crate::render::STATUS_LANE))
+                .into_iter()
+                .flat_map(|command| match command {
+                    Command::Bar(bar) => vec![(bar.x, bar.y, bar.width, bar.height, bar.color)],
+                    Command::Bars(group) => group
+                        .bars
+                        .into_iter()
+                        .map(|(x, y, width, height)| (x, y, width, height, group.color))
+                        .collect(),
+                    _ => Vec::new(),
+                })
+                .filter(|bar| (944..960).contains(&bar.0))
+                .collect()
+        };
 
-        let theme = &h.stoat.theme;
-        let colors = DiffSidesColors::resolve(theme);
-        let rgb = |color| style_rgb(Some(color)).expect("the theme colors it in RGB");
+        let mut h = status_halves_harness();
+        let shipped = bars(&mut h);
+
+        let src = format!(
+            "{}\ntheme tinted inherits ermine_night {{ diff.sides.base.bg = \"#2a1d20\"; \
+             diff.sides.target.bg = \"#1d2a1f\"; }}",
+            crate::app::DEFAULT_KEYMAP
+        );
+        let (config, _) = stoat_config::parse(&src);
+        let tinted =
+            crate::theme::Theme::from_config(&config.expect("the config parses"), "tinted")
+                .expect("the theme loads");
+        h.stoat.theme = Arc::new(tinted);
+        h.stoat.theme_epoch += 1;
+
         assert_eq!(
-            bars,
-            [
-                (944, 112, 8, 16, rgb(colors.base.bg)),
-                (952, 112, 8, 16, rgb(colors.target.bg)),
-                (952, 112, 1, 16, rgb(crate::render::themed_bg(theme))),
-            ],
-            "the base fill to the hairline, the target fill past it, and the ground on the \
-             hairline's sixteenth, in draw order",
+            (shipped, bars(&mut h)),
+            (
+                vec![],
+                vec![
+                    (944, 112, 8, 16, [0x2a, 0x1d, 0x20]),
+                    (952, 112, 8, 16, [0x1d, 0x2a, 0x1f]),
+                    (952, 112, 1, 16, [0x0c, 0x0e, 0x11]),
+                ],
+            ),
+            "no bar on the ground, and under the tints the base fill to the hairline, the \
+             target fill past it, and the ground on the hairline's sixteenth, in draw order",
         );
     }
 
@@ -4959,19 +4989,43 @@ mod tests {
         );
     }
 
+    /// A theme that sets the base half's text and fill but no frame frames the
+    /// base column in the fill. The half's foreground is its text color, so
+    /// the frame never takes it.
+    #[test]
+    fn an_unset_frame_takes_the_base_fill_and_not_its_text_color() {
+        use super::diff_base_tint;
+
+        let src = r##"theme t { diff.sides.base = { fg: "#010203", bg: "#040506" }; }"##;
+        let (config, _) = stoat_config::parse(src);
+        let theme =
+            crate::theme::Theme::from_config(&config.expect("theme parses"), "t").expect("loads");
+        assert_eq!(diff_base_tint(&theme), Some([4, 5, 6]), "the base fill");
+    }
+
     /// Ermine sets each half's colors through its `diff.sides` scopes, and a
     /// theme without them tints the status bar toward each side's status
     /// color.
+    ///
+    /// Ermine's halves sit on the window ground, and its base frame keeps the
+    /// removal tint through `diff.sides.base.frame`. default_dark frames the
+    /// base column in the base half's fill.
     #[test]
     fn the_side_colors_take_the_theme_s_scopes_and_derive_the_rest() {
+        use super::diff_base_tint;
         use ratatui::style::Color;
 
         let (config, _) = stoat_config::parse(crate::app::DEFAULT_KEYMAP);
         let config = config.expect("the shipped config parses");
-        let resolved = ["ermine_night", "default_dark"].map(|name| {
-            let theme = crate::theme::Theme::from_config(&config, name).expect("theme loads");
-            DiffSidesColors::resolve(&theme)
-        });
+        let themes = ["ermine_night", "default_dark"]
+            .map(|name| crate::theme::Theme::from_config(&config, name).expect("theme loads"));
+        let resolved = themes.each_ref().map(DiffSidesColors::resolve);
+        let frames = themes.each_ref().map(diff_base_tint);
+        assert_eq!(
+            frames,
+            [Some([0x2a, 0x1d, 0x20]), Some([0x72, 0x6d, 0x81])],
+            "Ermine's frame scope, and default_dark's base fill",
+        );
 
         let rgb = |hex: u32| Color::Rgb((hex >> 16) as u8, (hex >> 8) as u8, hex as u8);
         let side = |[bg, fg, name, mark]: [u32; 4]| DiffSideColors {
@@ -4984,8 +5038,8 @@ mod tests {
             resolved,
             [
                 DiffSidesColors {
-                    base: side([0x2a1d20, 0xa3898c, 0xf2b3b7, 0xf2777f]),
-                    target: side([0x1d2a1f, 0x8ea78b, 0xbfe6bb, 0x8fd18a]),
+                    base: side([0x0c0e11, 0xa3898c, 0xf2b3b7, 0xf2777f]),
+                    target: side([0x0c0e11, 0x8ea78b, 0xbfe6bb, 0x8fd18a]),
                     label: rgb(0xe6d3d5),
                 },
                 DiffSidesColors {
@@ -5193,7 +5247,7 @@ mod tests {
         assert_eq!(
             row.split_whitespace().collect::<Vec<_>>().join(" "),
             format!(
-                "NOR changes hunk 1 / 1 \u{b7} 1 file \u{b7} +1 \u{2212}1 \u{2212} index \u{2502} \
+                "NOR changes hunk 1 / 1 \u{b7} 1 file \u{b7} +1 \u{2212}1 \u{2212} index \
                  + working tree {}:{}",
                 point.row + 1,
                 point.column + 1,
@@ -5225,9 +5279,9 @@ mod tests {
                 bar(&[("c.txt", "c\n", "c\nC\nD\n")]),
             ],
             [
-                "NOR changes hunk 1 / 2 \u{b7} 2 files \u{b7} +1 \u{2212}2 \u{2212} HEAD \u{2502} \
+                "NOR changes hunk 1 / 2 \u{b7} 2 files \u{b7} +1 \u{2212}2 \u{2212} HEAD \
                  + working tree 1:1",
-                "NOR changes hunk - / 1 \u{b7} 1 file \u{b7} +2 \u{2212} HEAD \u{2502} + working \
+                "NOR changes hunk - / 1 \u{b7} 1 file \u{b7} +2 \u{2212} HEAD + working \
                  tree 1:1",
             ],
         );
@@ -5274,7 +5328,7 @@ mod tests {
         };
         let theme = |scope: &str| wide.stoat.theme.get(scope).fg;
 
-        let tail = "hunk 1 / 1 \u{b7} 1 file \u{b7} +1 \u{2212}1 \u{2212} HEAD \u{2502} + working \
+        let tail = "hunk 1 / 1 \u{b7} 1 file \u{b7} +1 \u{2212}1 \u{2212} HEAD + working \
                     tree 4:1";
         assert_eq!(
             (
@@ -5341,7 +5395,7 @@ mod tests {
         let row = bar_row(&h.render_composited()).replace('─', " ");
         assert_eq!(
             row.split_whitespace().collect::<Vec<_>>().join(" "),
-            "NOR changes \u{2212} HEAD \u{2502} + working tree",
+            "NOR changes \u{2212} HEAD + working tree",
         );
     }
 
