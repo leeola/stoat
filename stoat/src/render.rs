@@ -146,6 +146,12 @@ pub(crate) const STATUS_LANE: u32 = u32::MAX - 1;
 /// leaves the strip's lines readable under it.
 const MINIMAP_THUMB_ALPHA: u8 = 46;
 
+/// The opacity of the minimap thumb's outline, ninety percent of 255.
+///
+/// The fill alone loses the viewport's ends against a busy strip, so a strong
+/// line in the same accent states where the viewport starts and stops.
+const MINIMAP_THUMB_OUTLINE_ALPHA: u8 = 230;
+
 /// The chrome of a Pane Picker badge, as the Ermine board draws it.
 ///
 /// The board sets `border-radius: 10px`, `border: 2px solid`, and `box-shadow:
@@ -206,6 +212,8 @@ pub(crate) struct MinimapChrome<'a> {
     pub(crate) diff_changes_rail: Option<u32>,
     /// Viewport-thumb fill color, rgba.
     pub(crate) thumb: [u8; 4],
+    /// Viewport-thumb outline color, rgba.
+    pub(crate) thumb_border: [u8; 4],
     /// The class whose runs every strip draws as an Item Rule hairline, the
     /// class table's [`EdgeClass::Rule`].
     pub(crate) rule_class: u8,
@@ -1305,10 +1313,9 @@ pub(crate) fn frame(
 
     // The palettes exist exactly while the minimap is on, per the refresh above.
     let minimap_chrome = stoat.minimap_palettes.as_ref().map(|palettes| {
-        let thumb = {
+        let [r, g, b] = {
             let focused = stoat.theme.get(crate::theme::scope::UI_BORDER_FOCUSED);
-            let [r, g, b] = paint::style_rgb(focused.fg).unwrap_or([90, 90, 110]);
-            [r, g, b, MINIMAP_THUMB_ALPHA]
+            paint::style_rgb(focused.fg).unwrap_or([90, 90, 110])
         };
         let rail = stoat.theme.get(crate::theme::scope::UI_MINIMAP_RAIL);
         let [gr, gg, gb] = paint::style_rgb(rail.bg).unwrap_or([0, 0, 0]);
@@ -1328,7 +1335,8 @@ pub(crate) fn frame(
                 .diff_changes_strips
                 .get(&stoat.active_workspace)
                 .and_then(|strip| strip.held_rail_id()),
-            thumb,
+            thumb: [r, g, b, MINIMAP_THUMB_ALPHA],
+            thumb_border: [r, g, b, MINIMAP_THUMB_OUTLINE_ALPHA],
             rule_class: stoat.minimap_class_table.edge_class(EdgeClass::Rule),
             rail_ground: [gr, gg, gb, u8::MAX],
             rail_cover: [cr, cg, cb, u8::MAX],
@@ -1680,7 +1688,7 @@ pub(crate) fn frame(
             max_columns: pane::MINIMAP_MAX_COLUMNS,
             bg: [0, 0, 0, 0],
             thumb: chrome.thumb,
-            thumb_border: None,
+            thumb_border: Some(chrome.thumb_border),
             rule_class: chrome.rule_class,
             thumb_radius: pane::MINIMAP_THUMB_RADIUS,
             palette,
@@ -3461,8 +3469,8 @@ mod minimap_chrome_tests {
     use stoatty_protocol::command::{self, Command};
 
     /// A pane's minimap strip is seven cells wide at six lines a cell, and its
-    /// viewport thumb washes the focus accent at eighteen percent with no
-    /// outline.
+    /// viewport thumb washes the focus accent at eighteen percent with an
+    /// outline at 90 percent.
     #[test]
     fn the_strip_is_seven_cells_with_an_accent_thumb() {
         let mut h = TestHarness::with_size(120, 24);
@@ -3485,7 +3493,7 @@ mod minimap_chrome_tests {
                 strip.thumb,
                 strip.thumb_border
             ),
-            (7, 6, [r, g, b, 46], None)
+            (7, 6, [r, g, b, 46], Some([r, g, b, 230]))
         );
     }
 }

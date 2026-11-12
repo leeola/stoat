@@ -617,8 +617,9 @@ fn render_read_only_frame(
 /// The per-pane minimap strip that `pane` declares over content store
 /// `content_id`, in the syntax palette.
 ///
-/// A dimmed pane's palette and thumb blend toward the theme background at the
-/// pane's dim, as the rest of the pane does.
+/// A dimmed pane's palette, thumb, and thumb outline blend toward the theme
+/// background at the pane's dim, as the rest of the pane does. The thumb and
+/// its outline keep their alpha.
 fn pane_minimap<'a>(
     pane: &Pane,
     chrome: MinimapChrome<'a>,
@@ -644,6 +645,8 @@ fn pane_minimap<'a>(
 
     let [tr, tg, tb, ta] = chrome.thumb;
     let thumb = blend([tr, tg, tb]);
+    let [or, og, ob, oa] = chrome.thumb_border;
+    let outline = blend([or, og, ob]);
     let palette = match dim > 0.0 {
         true => chrome.dimmed_palette,
         false => chrome.palette,
@@ -655,7 +658,7 @@ fn pane_minimap<'a>(
         max_columns: MINIMAP_MAX_COLUMNS,
         bg: [0, 0, 0, 0],
         thumb: [thumb[0], thumb[1], thumb[2], ta],
-        thumb_border: None,
+        thumb_border: Some([outline[0], outline[1], outline[2], oa]),
         rule_class: chrome.rule_class,
         thumb_radius: MINIMAP_THUMB_RADIUS,
         palette,
@@ -3658,7 +3661,7 @@ mod tests {
     ///
     /// The strip fills no ground of its own, and its columns end at the text
     /// strip's limit. The viewport is the thumb color at the plain strip's
-    /// alpha with no outline.
+    /// alpha, outlined in the same color at the outline's alpha.
     #[test]
     fn a_diff_screen_declares_a_seven_cell_syntax_strip() {
         let screens: [(&str, EnterScreen); 2] = [
@@ -3715,7 +3718,12 @@ mod tests {
                         thumb[2],
                         crate::render::MINIMAP_THUMB_ALPHA,
                     ],
-                    None,
+                    Some([
+                        thumb[0],
+                        thumb[1],
+                        thumb[2],
+                        crate::render::MINIMAP_THUMB_OUTLINE_ALPHA,
+                    ]),
                     h.stoat.minimap_class_table.palette().to_vec(),
                 );
                 assert_eq!(strips.last(), Some(&declared), "{screen} in {mode:?}");

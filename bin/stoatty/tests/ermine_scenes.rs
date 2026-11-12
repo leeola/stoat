@@ -449,18 +449,21 @@ fn the_changes_view_ends_in_the_minimap_strip_on_the_editor_surface() {
     expect_strip_band(&shot, &mut home, "changes_strip");
 }
 
-/// The single band rounds its viewport band's corners at 4 px, as the Editor
-/// board draws the band.
+/// The single band rounds its viewport band's corners at 4 px and outlines
+/// the band in the accent at 90 percent, as the Editor board draws the band.
 ///
 /// The band's first cell is column 152 on row 1, where the thumb starts at the
 /// file's top. The island's own 6 px corner clips the band's top-right corner,
 /// so the check reads the thumb's top-left corner. On the band's first pixel
 /// column, the thumb's top pixel row lies past the arc and keeps the editor
-/// surface. The fifth pixel row, the first past the 4 px arc, reads the band's
-/// color, the accent at 18 percent over the surface.
+/// surface. The fifth pixel row, the first past the 4 px arc, reads the
+/// outline, the accent at 90 percent over the band's color. Two pixels in,
+/// left of the first content column, that row reads the band's color, the
+/// accent at 18 percent over the surface.
 #[test]
 fn the_viewport_band_rounds_its_corners() {
     const BAND: [u8; 3] = [0x2a, 0x34, 0x47];
+    const OUTLINE: [u8; 3] = [0x77, 0xa4, 0xed];
 
     let mut home = support::scratch_home();
     let shot = settled_frame(home.path(), "basic-diff", "unstaged.txt", "");
@@ -471,8 +474,15 @@ fn the_viewport_band_rounds_its_corners() {
         &shot,
         &mut home,
         (x, y + 4, 1, 1),
+        OUTLINE,
+        "band_outline_past_the_arc",
+    );
+    expect_region(
+        &shot,
+        &mut home,
+        (x + 2, y + 4, 1, 1),
         BAND,
-        "band_side_past_the_arc",
+        "band_inside_the_outline",
     );
 }
 

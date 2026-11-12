@@ -1829,9 +1829,14 @@ mod tests {
             [dr, dg, db, ta],
             "the unfocused thumb dims its rgb and keeps its alpha"
         );
+        let [or, og, ob, oa] = focused
+            .thumb_border
+            .expect("the focused pane outlines its thumb");
+        let [lr, lg, lb] = dim_rgb([or, og, ob], bg, dim);
         assert_eq!(
-            unfocused.thumb_border, None,
-            "the unfocused thumb carries no outline to dim"
+            unfocused.thumb_border,
+            Some([lr, lg, lb, oa]),
+            "the unfocused outline dims its rgb and keeps its alpha"
         );
 
         // The blend is held across frames rather than redone on each one, so a
