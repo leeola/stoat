@@ -12,7 +12,7 @@ use crate::{
     render::{
         chrome, commits, diff_changes,
         editor::{editor_cursor_position, render_editor_with_overlay, split_minimap_strip},
-        paint::{dim_rgb, style_rgb},
+        paint::{dim_rgb, floor_rgb, luma, style_rgb, FAINT_CONTRAST_FLOOR},
         popout::{
             paint_popout_card, popout_area, popout_card_bg, popout_inset, scaled_char_capacity,
             wrap_popout_lines,
@@ -1150,7 +1150,7 @@ fn overlay_status_segments(
         push_left(&mut left, &mut cursor, end_x, text, style);
 
         if let Some(note) = subject.and_then(|subject| subject.note.as_deref()) {
-            let muted = tinted(base_style, theme, crate::theme::scope::UI_TEXT_MUTED);
+            let muted = muted_tint(base_style, theme);
             push_left(&mut left, &mut cursor, end_x, format!("{note} "), muted);
         }
     }
@@ -2088,6 +2088,34 @@ fn tinted(style: Style, theme: &crate::theme::Theme, scope: &str) -> Style {
     }
 }
 
+/// `style` with the foreground of `ui.text.muted`, lifted to
+/// [`FAINT_CONTRAST_FLOOR`] off `style`'s background when it sits closer.
+///
+/// Some themes fill a status row with their muted color itself, as
+/// default_dark fills its focused row, and a muted segment there does not
+/// show. The lift stops at the floor, so the segment still reads dimmer than
+/// the row's text.
+///
+/// A row whose own text sits closer to its fill than the floor keeps the muted
+/// color, since its theme chose a faint row. There the lift puts the muted
+/// segments above the row's own text.
+fn muted_tint(style: Style, theme: &crate::theme::Theme) -> Style {
+    let muted = tinted(style, theme, crate::theme::scope::UI_TEXT_MUTED);
+    let (Some(fg), Some(text), Some(bg)) = (
+        style_rgb(muted.fg),
+        style_rgb(style.fg),
+        style_rgb(style.bg),
+    ) else {
+        return muted;
+    };
+    if (luma(text) - luma(bg)).abs() < FAINT_CONTRAST_FLOOR {
+        return muted;
+    }
+
+    let [r, g, b] = floor_rgb(fg, bg);
+    muted.fg(Color::Rgb(r, g, b))
+}
+
 /// The status row's segments for `name`, the name of what its pane shows.
 ///
 /// A file's name, with `split`, reads its directory in `ui.text.muted` over
@@ -2108,7 +2136,7 @@ fn name_segments(
     row_style: Style,
     theme: &crate::theme::Theme,
 ) -> Vec<StatusSeg> {
-    let muted = tinted(row_style, theme, crate::theme::scope::UI_TEXT_MUTED);
+    let muted = muted_tint(row_style, theme);
     let mut segments: Vec<StatusSeg> = Vec::new();
     if split {
         let (dir, file) = name.split_at(name.rfind('/').map_or(0, |slash| slash + 1));
@@ -2354,7 +2382,7 @@ fn status_segments(
             push_left(&mut left, &mut cursor, lead_end, text, style);
         }
         if let Some(note) = read_only_note(status.read_only, status.disk_len, status.text_len) {
-            let muted = tinted(lead_style, theme, crate::theme::scope::UI_TEXT_MUTED);
+            let muted = muted_tint(lead_style, theme);
             push_left(&mut left, &mut cursor, lead_end, note, muted);
         }
     }
@@ -2364,7 +2392,7 @@ fn status_segments(
         && count > 1
         && prompt.is_none()
     {
-        let muted = tinted(lead_style, theme, crate::theme::scope::UI_TEXT_MUTED);
+        let muted = muted_tint(lead_style, theme);
         push_left(
             &mut left,
             &mut cursor,
@@ -2455,7 +2483,7 @@ fn status_segments(
         let start = right_anchor.saturating_sub(width);
         if start >= cursor {
             let style = split.map_or_else(
-                || tinted(trail_style, theme, crate::theme::scope::UI_TEXT_MUTED),
+                || muted_tint(trail_style, theme),
                 |(_, colors)| trail_style.fg(colors.target.name),
             );
             right.push((text, style));
@@ -2470,14 +2498,14 @@ fn status_segments(
         let width = text.chars().count() as u16;
         let start = right_anchor.saturating_sub(width);
         if start >= cursor {
-            let muted = tinted(trail_style, theme, crate::theme::scope::UI_TEXT_MUTED);
+            let muted = muted_tint(trail_style, theme);
             right.push((text, muted));
             right_anchor = start;
         }
     }
     if is_focused {
         let badge_right = right_anchor;
-        let muted = tinted(trail_style, theme, crate::theme::scope::UI_TEXT_MUTED);
+        let muted = muted_tint(trail_style, theme);
         // The block reads left to right as the servers and then the sources the
         // file's diagnostics name, and right segments push leftward, so the
         // sources push first. The first piece that fits ends the block with a
@@ -3134,7 +3162,7 @@ fn repo_segments(
         .map(|(count, arrow)| format!(" {arrow}{count}"))
         .collect();
     if !divergence.is_empty() {
-        segments.push((divergence, tinted(base_style, theme, s::UI_TEXT_MUTED)));
+        segments.push((divergence, muted_tint(base_style, theme)));
     }
     if repo.rebasing {
         let color = theme.get(s::UI_STATUSLINE_REBASE).fg.unwrap_or(Color::Red);
@@ -3163,19 +3191,29 @@ fn repo_segments(
     }
 
     let counts = [
-        (repo.staged, '\u{271a}', "staged", s::DIFF_STAGED),
-        (repo.unstaged, '\u{270e}', "unstaged", s::UI_TEXT_MUTED),
-        (repo.untracked, '?', "untracked", s::UI_TEXT_DIM),
+        (
+            repo.staged,
+            '\u{271a}',
+            "staged",
+            tinted(base_style, theme, s::DIFF_STAGED),
+        ),
+        (
+            repo.unstaged,
+            '\u{270e}',
+            "unstaged",
+            muted_tint(base_style, theme),
+        ),
+        (
+            repo.untracked,
+            '?',
+            "untracked",
+            tinted(base_style, theme, s::UI_TEXT_DIM),
+        ),
     ];
     let held: Vec<StatusSeg> = counts
         .into_iter()
         .filter(|&(count, ..)| count > 0)
-        .map(|(count, glyph, word, scope)| {
-            (
-                format!(" {glyph} {count} {word}"),
-                tinted(base_style, theme, scope),
-            )
-        })
+        .map(|(count, glyph, word, style)| (format!(" {glyph} {count} {word}"), style))
         .collect();
     match held.is_empty() {
         true => segments.push((
@@ -3613,9 +3651,9 @@ fn render_image_pane(
 #[cfg(test)]
 mod tests {
     use super::{
-        byte_size, diff_base_lead, focused_staged_label, name_segments, paint_status_fallback,
-        read_only_note, repo_segments, resolve_rich_segments, split_halves, split_side_segments,
-        status_filename, tab_mark, DiffSideColors, DiffSidesColors,
+        byte_size, diff_base_lead, focused_staged_label, muted_tint, name_segments,
+        paint_status_fallback, read_only_note, repo_segments, resolve_rich_segments, split_halves,
+        split_side_segments, status_filename, tab_mark, DiffSideColors, DiffSidesColors,
     };
     use crate::{
         action_handlers::{dispatch, focused_editor_mut},
@@ -3882,6 +3920,75 @@ mod tests {
         assert_eq!(
             inks,
             [[muted, dim, rust, muted], [muted, text, rust, muted]],
+            "the unfocused left row, then the focused right row",
+        );
+    }
+
+    /// A muted segment lifts off a status row filled with the muted color, as
+    /// default_dark's focused row is, and stays dimmer than the row's text.
+    /// default_dark's faint unfocused row and both Ermine rows keep the theme's
+    /// muted color.
+    #[test]
+    fn a_muted_segment_lifts_off_a_row_filled_with_the_muted_color() {
+        use ratatui::style::Color;
+
+        let (config, _) = stoat_config::parse(crate::app::DEFAULT_KEYMAP);
+        let config = config.expect("the shipped config parses");
+        let inks = |name: &str| {
+            let theme = crate::theme::Theme::from_config(&config, name).expect("the theme loads");
+            [
+                crate::theme::scope::UI_STATUSBAR_FOCUSED,
+                crate::theme::scope::UI_STATUSBAR_UNFOCUSED,
+            ]
+            .map(|row| muted_tint(theme.get(row), &theme).fg)
+        };
+        let rgb = |[r, g, b]: [u8; 3]| Some(Color::Rgb(r, g, b));
+
+        assert_eq!(
+            [inks("default_dark"), inks("ermine_night")],
+            [
+                [rgb([0xb4, 0xb9, 0xc4]), rgb([0x63, 0x6d, 0x83])],
+                [rgb([0x83, 0x8a, 0x98]), rgb([0x83, 0x8a, 0x98])],
+            ],
+        );
+    }
+
+    /// default_dark's focused status row inks its directory and its position
+    /// in the lifted muted color, and its unfocused row in the theme's muted
+    /// color.
+    #[test]
+    fn default_dark_s_focused_row_shows_its_muted_segments() {
+        use ratatui::style::Color;
+
+        let (config, _) = stoat_config::parse(crate::app::DEFAULT_KEYMAP);
+        let config = config.expect("the shipped config parses");
+        let mut h = crate::test_harness::TestHarness::with_size(120, 12);
+        h.stoat.stoatty = false;
+        h.stoat.theme = Arc::new(
+            crate::theme::Theme::from_config(&config, "default_dark").expect("the theme loads"),
+        );
+        h.stoat.active_workspace_mut().git_root = PathBuf::from("/repo");
+        let path = PathBuf::from("/repo/src/a.rs");
+        h.fake_fs().insert_file(&path, b"fn a() {}\n");
+        dispatch(&mut h.stoat, &OpenFile { path });
+        h.settle();
+        h.type_action("SplitRight()");
+
+        let buf = h.render_composited();
+        let inks: Vec<_> = pane_status_rects(&h)
+            .into_iter()
+            .map(|row| {
+                let text = status_row(&buf, row);
+                let at = |part: &str| row.x + text.find(part).expect("the part shows") as u16;
+                [at("src/"), at("1:1")].map(|x| buf[(x, row.y)].fg)
+            })
+            .collect();
+
+        let [muted, lifted] =
+            [[0x63, 0x6d, 0x83], [0xb4, 0xb9, 0xc4]].map(|[r, g, b]| Color::Rgb(r, g, b));
+        assert_eq!(
+            inks,
+            [[muted, muted], [lifted, lifted]],
             "the unfocused left row, then the focused right row",
         );
     }
