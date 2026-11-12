@@ -218,9 +218,13 @@
 /// radius. A terminal that predates it reads the outline's alpha as the rule
 /// class. This version drops a shorter head.
 ///
+/// Version 34 reads edge mode 3 in a `panel` as an outset, which stands the
+/// box edge its px outside the cell edge at any cell size. A terminal that
+/// predates it reads the edge as an inset of the same px.
+///
 /// Zero is reserved for a peer whose handshake carries no version at all, which
 /// is every build from before the field existed.
-pub const PROTOCOL_VERSION: u32 = 33;
+pub const PROTOCOL_VERSION: u32 = 34;
 
 /// The first [`PROTOCOL_VERSION`] whose terminal reads the `text_runs` and
 /// `bars` batches.

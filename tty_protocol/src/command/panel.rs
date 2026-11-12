@@ -59,6 +59,9 @@ pub enum Edge {
     /// between them in a cell of any size. A 9 pixel column splits as 3 and 2,
     /// and an 18 pixel row splits as 7 and 7.
     Gap(u8),
+    /// The box edge stands this many logical pixels outside the cell edge, at
+    /// any cell size.
+    Outset(u8),
 }
 
 impl Edge {
@@ -77,7 +80,7 @@ impl Edge {
     /// The logical pixels the edge states, whatever its mode.
     pub fn px(self) -> u8 {
         match self {
-            Edge::Inset(px) | Edge::Margin(px) | Edge::Gap(px) => px,
+            Edge::Inset(px) | Edge::Margin(px) | Edge::Gap(px) | Edge::Outset(px) => px,
         }
     }
 
@@ -86,12 +89,13 @@ impl Edge {
             Edge::Inset(_) => 0,
             Edge::Margin(_) => 1,
             Edge::Gap(_) => 2,
+            Edge::Outset(_) => 3,
         }
     }
 }
 
 /// The modes of `edges` packed in one byte, two bits per edge from the low pair
-/// in [`PanelCommand::edges`] order: 0 inset, 1 margin, and 2 gap.
+/// in [`PanelCommand::edges`] order: 0 inset, 1 margin, 2 gap, and 3 outset.
 ///
 /// The wire carries this byte, and a renderer that resolves the edges on the
 /// GPU unpacks the same word.
@@ -161,9 +165,10 @@ pub struct PanelCommand {
     ///
     /// `Edge::symmetric(0, 0)` is cell-exact. An inset draws the box inside its
     /// cells, as a chip shorter than its row does, and a margin or a gap reaches
-    /// across the cell beside them. The border, fill, corner rounding, and
-    /// shadow all follow the resolved box. A strip between the box and the cell
-    /// edge shows what lies behind it.
+    /// across the cell beside them. An outset stands the box a fixed distance
+    /// outside its cells, as a box taller than its row does. The border, fill,
+    /// corner rounding, and shadow all follow the resolved box. A strip between
+    /// the box and the cell edge shows what lies behind it.
     pub edges: [Edge; 4],
     /// The corners [`Self::corner_radius`] rounds, one bit each, from
     /// [`CORNER_TOP_LEFT`] to [`CORNER_BOTTOM_LEFT`]. Zero rounds all four, so a
@@ -341,13 +346,11 @@ fn decode_shadow(code: u8) -> PanelShadow {
 }
 
 /// The edges that an [`edge_modes`] byte and four px bytes state.
-///
-/// An unknown mode reads as an inset, so the box of a newer emitter's added mode
-/// stays inside its cells on an older reader.
 fn decode_edges(modes: u8, px: [u8; 4]) -> [Edge; 4] {
     array::from_fn(|side| match (modes >> (2 * side)) & 0b11 {
         1 => Edge::Margin(px[side]),
         2 => Edge::Gap(px[side]),
+        3 => Edge::Outset(px[side]),
         _ => Edge::Inset(px[side]),
     })
 }
@@ -701,7 +704,7 @@ mod tests {
         let edges = [
             Edge::Gap(4),
             Edge::Margin(4),
-            Edge::Inset(1),
+            Edge::Outset(2),
             Edge::Gap(250),
         ];
         let command = PanelCommand {
@@ -726,27 +729,13 @@ mod tests {
 
         assert_eq!(
             edge_modes(edges),
-            0b1000_0110,
-            "a top gap in bits 0-1, a right margin in bits 2-3, a left gap in bits 6-7",
+            0b1011_0110,
+            "a top gap in bits 0-1, a right margin in bits 2-3, a bottom outset in bits 4-5, \
+             a left gap in bits 6-7",
         );
         assert_eq!(
             decode(&encode_panel(&command)),
             Some(Command::Panel(command))
-        );
-    }
-
-    /// A mode this decoder does not know reads as an inset, so the box stays
-    /// inside its cells.
-    #[test]
-    fn an_unknown_edge_mode_reads_as_an_inset() {
-        assert_eq!(
-            decode_edges(0b1111_1111, [5, 6, 7, 8]),
-            [
-                Edge::Inset(5),
-                Edge::Inset(6),
-                Edge::Inset(7),
-                Edge::Inset(8)
-            ]
         );
     }
 

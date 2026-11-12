@@ -223,6 +223,11 @@ corner, and a `border` draws it as a solid light line. A terminal that does
 not know the code reads it as a light line, so a program sends it to any
 terminal.
 
+From protocol version 34, edge mode 3 in a `panel` is an outset. The box edge
+stands the edge's px outside the cell edge, at any cell size, as a box taller
+than its row needs. A terminal below version 34 reads the mode as an inset of
+the same px. Send an outset only to a terminal at version 34 or later.
+
 `ident` travels the other way, terminal to program, and arrives as input bytes
 on stdin. `decode` never yields it; use `decode_ident_reply`.
 

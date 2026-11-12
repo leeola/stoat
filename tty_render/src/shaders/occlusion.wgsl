@@ -28,6 +28,7 @@ struct Occluder {
 // bottom, left.
 const EDGE_MARGIN: u32 = 1u;
 const EDGE_GAP: u32 = 2u;
+const EDGE_OUTSET: u32 = 3u;
 
 // Each edge's offset into the box from its cell edge, in physical pixels, in the
 // order top, right, bottom, left. A negative offset reaches out across the
@@ -37,7 +38,7 @@ const EDGE_GAP: u32 = 2u;
 // and stops `px` short of its far side. A gap reaches half as far as that
 // margin, with the top and left halves rounded down and the bottom and right
 // halves rounded up, so two neighbors that both state a gap leave `px` between
-// them in a cell of any size.
+// them in a cell of any size. An outset stands `px` outside the cell edge.
 fn edge_offsets(edge_px: vec4<f32>, edge_modes: u32, cell_size: vec2<f32>) -> vec4<f32> {
     let modes = vec4<u32>(edge_modes, edge_modes >> 2u, edge_modes >> 4u, edge_modes >> 6u) & vec4<u32>(3u);
     let extent = vec4<f32>(cell_size.y, cell_size.x, cell_size.y, cell_size.x);
@@ -45,7 +46,8 @@ fn edge_offsets(edge_px: vec4<f32>, edge_modes: u32, cell_size: vec2<f32>) -> ve
     let half = reach * 0.5;
     let gap = vec4<f32>(floor(half.x), ceil(half.y), ceil(half.z), floor(half.w));
     let margin_or_inset = select(edge_px, -reach, modes == vec4<u32>(EDGE_MARGIN));
-    return select(margin_or_inset, -gap, modes == vec4<u32>(EDGE_GAP));
+    let gap_margin_or_inset = select(margin_or_inset, -gap, modes == vec4<u32>(EDGE_GAP));
+    return select(gap_margin_or_inset, -edge_px, modes == vec4<u32>(EDGE_OUTSET));
 }
 
 // Signed distance to a rounded rectangle of half-size `half` and corner radius

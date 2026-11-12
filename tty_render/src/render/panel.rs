@@ -1267,6 +1267,61 @@ mod tests {
         );
     }
 
+    /// An outset edge stands its px outside the cell edge.
+    ///
+    /// The cells are 9 by 18 pixels, and the panel covers columns 1 to 4 of
+    /// row 1, which is pixels 18 to 35 down. Its top edge is an outset of 2 and
+    /// its bottom edge an outset of 9, so its fill covers pixels 16 to 44 down.
+    #[test]
+    fn an_outset_edge_stands_outside_its_cell_edge() {
+        let (device, queue) = require_headless_device();
+        let mut grid = Grid::new(3, 7);
+        grid.set_panels(vec![Panel {
+            top: 1,
+            left: 1,
+            width: 4,
+            height: 1,
+            style: BorderStyle::None_,
+            border: Rgb::new(255, 0, 0),
+            corner_radius: 0,
+            fill: Some(Rgb::new(255, 0, 0)),
+            shadow: PanelShadow::None_,
+            edges: [
+                Edge::Outset(2),
+                Edge::Inset(0),
+                Edge::Outset(9),
+                Edge::Inset(0),
+            ],
+            corners: 0,
+            fillets: 0,
+            fillet_radius: 2,
+            hatch: None,
+            above_pools: false,
+            backdrop: false,
+            anchor: None,
+            seq: 0,
+        }]);
+
+        let metrics = CellMetrics {
+            font_size: 15.0,
+            width: 9.0,
+            height: 18.0,
+            scale_factor: 1.0,
+        };
+        let red = render_red(&device, &queue, &grid, metrics, Halves::Under);
+        let column = (0..TARGET)
+            .map(|y| red[(y * TARGET + 20) as usize])
+            .collect::<Vec<u8>>();
+
+        let expected = (0..TARGET)
+            .map(|y| if (16..45).contains(&y) { 255 } else { 0 })
+            .collect::<Vec<u8>>();
+        assert_eq!(
+            column, expected,
+            "down pixel column 20, the fill covers pixels 16 to 44 and nothing above or below",
+        );
+    }
+
     /// A backdrop with a fill paints its ground, its border color, over the
     /// part of its own cells that a rounded corner leaves outside the box. The
     /// ground draws in the stroke pass, above the text, and the rest of the
