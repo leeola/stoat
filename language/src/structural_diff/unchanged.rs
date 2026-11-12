@@ -11,9 +11,7 @@
 //!
 //! 1. **Shrink at endpoints.** Walk both sides from the front, pairing children with matching
 //!    `ContentId`, and stop on the first mismatch. Repeat from the back. The matched ranges are
-//!    tagged [`ChangeKind::Unchanged`] recursively. When the shrinks leave members on one side
-//!    only, and those members repeat the members before them, the run moves onto the later copy, as
-//!    [`repeat_shift`] describes.
+//!    tagged [`ChangeKind::Unchanged`] recursively.
 //!
 //! 2. **LCS anchors.** Over the remaining middle, diff child `ContentId`s to recover the matched
 //!    subsequence. Each match is an anchor, marked unchanged along with its subtree. In a middle
@@ -25,7 +23,10 @@
 //!    container drills down to its changed statement. A longer run first peels each pair at its
 //!    ends that shares at least four subtrees unique on their own side. A middle too large to
 //!    search whole then pairs its members by the equal subtrees they share. Each peeled or shared
-//!    pair recurses the same way, and every other non-empty run is a section.
+//!    pair recurses the same way, and every other non-empty run is a section. A run with members on
+//!    one side only moves onto the later copy when that copy repeats the members before it, as
+//!    [`repeat_shift`] describes. The move re-pairs the closing anchor or the suffix pairs that
+//!    follow the run, so those stay unmarked.
 //!
 //! After this pass, every node carries a [`ChangeKind`] in a side [`ChangeMap`], and the changed
 //! sections are collected in [`PreprocessResult::sections`]. The Dijkstra search then runs over one
@@ -271,9 +272,8 @@ pub fn mark_unchanged(
 /// [`ChangeKind::Unchanged`] and collecting the changed runs between anchors
 /// into `out.sections`.
 ///
-/// When the shrinks leave members on one side only, [`repeat_shift`] decides
-/// whether they move onto the later copy, and [`emit_shifted`] emits a moved
-/// run.
+/// A run with members on one side only moves onto a later copy when
+/// [`repeat_shift`] accepts the move, and [`emit_shifted`] emits a moved run.
 ///
 /// The unmatched run between two consecutive anchors is a changed section. A
 /// run of exactly one same-kind [`Syntax::List`] on each side recurses into
@@ -300,8 +300,8 @@ fn pair_children(
         prefix += 1;
     }
 
-    // Phase 1b: shrink common suffix. The pairs are marked only once the
-    // repeat shift decides how many of them stay.
+    // Phase 1b: shrink common suffix. The pairs are marked only once phase 3
+    // decides how many of them stay.
     let mut suffix = 0usize;
     while prefix + suffix < lhs.len()
         && prefix + suffix < rhs.len()
@@ -311,52 +311,26 @@ fn pair_children(
         suffix += 1;
     }
 
-    let shift = repeat_shift(lhs_arena, rhs_arena, lhs, rhs, prefix, suffix);
-    let kept = suffix - shift.map_or(0, |(undone, _)| undone);
-    for k in 0..kept {
-        let lhs_id = lhs[lhs.len() - 1 - k];
-        let rhs_id = rhs[rhs.len() - 1 - k];
-        match_subtrees(lhs_arena, rhs_arena, lhs_id, rhs_id, out);
-    }
-    if let Some((undone, side)) = shift {
-        emit_shifted(
-            lhs_arena,
-            rhs_arena,
-            lhs,
-            rhs,
-            (prefix, undone, side),
-            facts,
-            out,
-        );
-        return;
-    }
-
     let lhs_mid = &lhs[prefix..lhs.len() - suffix];
     let rhs_mid = &rhs[prefix..rhs.len() - suffix];
 
     // Phase 2: LCS anchors over the middle. Matched pairs are byte-for-byte
-    // equal, so mark them and their descendants Unchanged.
+    // equal. Phase 3 marks each one once the run before it is decided, since a
+    // moved run re-pairs the anchor that closes it.
     let anchors = if !lhs_mid.is_empty() && !rhs_mid.is_empty() {
         let pairs = lcs_pairs(lhs_arena, rhs_arena, lhs_mid, rhs_mid);
         splitting_anchors(lhs_arena, rhs_arena, lhs_mid, rhs_mid, pairs, facts)
     } else {
         Vec::new()
     };
-    for &(lhs_idx, rhs_idx) in &anchors {
-        match_subtrees(
-            lhs_arena,
-            rhs_arena,
-            lhs_mid[lhs_idx],
-            rhs_mid[rhs_idx],
-            out,
-        );
-    }
 
     // Phase 3: each unmatched run between consecutive anchors (and before the
-    // first / after the last) goes to emit_run. A sentinel anchor past the end
-    // of both middles closes the final run.
+    // first / after the last) goes to emit_run, or to emit_shifted when it
+    // moves onto a later copy. A sentinel anchor past the end of both middles
+    // closes the final run, which the suffix pairs follow.
     let mut lhs_cursor = 0usize;
     let mut rhs_cursor = 0usize;
+    let mut suffix_undone = 0;
     let boundaries = anchors
         .iter()
         .copied()
@@ -364,30 +338,100 @@ fn pair_children(
     for (lhs_anchor, rhs_anchor) in boundaries {
         let lhs_run = &lhs_mid[lhs_cursor..lhs_anchor];
         let rhs_run = &rhs_mid[rhs_cursor..rhs_anchor];
-        emit_run(lhs_arena, rhs_arena, lhs_run, rhs_run, facts, out);
+        let anchor =
+            (lhs_anchor < lhs_mid.len()).then(|| (lhs_mid[lhs_anchor], rhs_mid[rhs_anchor]));
+        let after = match anchor {
+            None => suffix,
+            Some((lhs_id, _)) if matches!(lhs_arena.get(lhs_id), Syntax::List(_)) => 1,
+            Some(_) => 0,
+        };
+
+        let shift = OneSidedRun::new(
+            (prefix + lhs_cursor, prefix + rhs_cursor),
+            (lhs_run.len(), rhs_run.len()),
+            after,
+        )
+        .and_then(|run| {
+            repeat_shift(lhs_arena, rhs_arena, lhs, rhs, run).map(|undone| (run, undone))
+        });
+        match shift {
+            Some(shift) => emit_shifted(lhs_arena, rhs_arena, lhs, rhs, shift, facts, out),
+            None => emit_run(lhs_arena, rhs_arena, lhs_run, rhs_run, facts, out),
+        }
+
+        let undone = shift.map_or(0, |(_, undone)| undone);
+        match anchor {
+            Some((lhs_id, rhs_id)) if undone == 0 => {
+                match_subtrees(lhs_arena, rhs_arena, lhs_id, rhs_id, out);
+            },
+            Some(_) => {},
+            None => suffix_undone = undone,
+        }
         lhs_cursor = lhs_anchor + 1;
         rhs_cursor = rhs_anchor + 1;
     }
+
+    for k in suffix_undone..suffix {
+        let lhs_id = lhs[lhs.len() - suffix + k];
+        let rhs_id = rhs[rhs.len() - suffix + k];
+        match_subtrees(lhs_arena, rhs_arena, lhs_id, rhs_id, out);
+    }
 }
 
-/// How far to move a run that the shrinks of [`pair_children`] leave on one
-/// side only, so it lands on the copy that repeats the members before it.
+/// A run between two boundaries of [`pair_children`] that holds members on one
+/// side only, with the pairs right behind it that match whole.
 ///
-/// The answer is the count of suffix pairs to undo and the side that holds the
-/// run, or `None` to leave the run where the shrinks put it.
+/// `fronts` gives, per side, the index in the full child list where the run
+/// starts. On the empty side it is the index of the first member after the
+/// gap. Pair `j` behind the run matches the empty side's member `j` places
+/// after its front with the member `j` places after the run's end.
 ///
-/// The suffix shrink pairs from the back. When a member was tweaked and a copy
-/// of it added after it, the old member pairs with the far copy, so the tweak
-/// reads as added along with the front of the copy. A reader sees the old
-/// member tweaked in place and the whole copy added.
+/// A move undoes at most the first `after` of those pairs. They are the suffix
+/// pairs when the run closes the middles, and the closing anchor alone when
+/// that anchor is a list. An atom anchor offers none. An atom re-pairs only
+/// with an identical atom, so a move across it only rotates the run.
+#[derive(Clone, Copy)]
+struct OneSidedRun {
+    side: Side,
+    fronts: (usize, usize),
+    len: usize,
+    after: usize,
+}
+
+impl OneSidedRun {
+    /// The run of `lens` members per side from `fronts`, or `None` unless
+    /// exactly one side holds members.
+    fn new(fronts: (usize, usize), lens: (usize, usize), after: usize) -> Option<Self> {
+        let (side, len) = match lens {
+            (0, 0) => return None,
+            (0, len) => (Side::Rhs, len),
+            (len, 0) => (Side::Lhs, len),
+            _ => return None,
+        };
+        Some(Self {
+            side,
+            fronts,
+            len,
+            after,
+        })
+    }
+}
+
+/// How many of the pairs behind `run` to undo, so the run lands on the copy
+/// that repeats the members before it, or `None` to leave the run in place.
 ///
-/// Each try undoes one more of the suffix pairs nearest the run, and fewer
-/// pairs than the run holds. Each undone member of the shorter side re-pairs
-/// with the longer side's member at its offset from the front, which must be
-/// [`similar`]. The run then moves as many places toward the back. A try
-/// scores the moved run's members that are similar to the members right
-/// before it, member for member, and a run with fewer members before it
-/// scores none.
+/// The suffix shrink and the anchors pair equal members across a gap. When a
+/// member was tweaked and a copy of it added after it, the old member pairs
+/// with the far copy, so the tweak reads as added along with the front of the
+/// copy. A reader sees the old member tweaked in place and the whole copy
+/// added.
+///
+/// Each try undoes one more of the pairs behind the run, and fewer pairs than
+/// the run holds. Each undone member of the empty side re-pairs with the run's
+/// member at its offset from the front, which must be [`similar`]. The run
+/// then moves as many places toward the back. A try scores the moved run's
+/// members that are similar to the members right before it, member for
+/// member, and a run with fewer members before it scores none.
 ///
 /// The moved run ends with the copies of the undone members, and each copy
 /// repeats the member that its original re-pairs with. Only the members in
@@ -397,98 +441,123 @@ fn pair_children(
 ///
 /// The best try wins, the one that undoes fewest on a tie. It holds when at
 /// least two thirds of its evidence members repeat, and when it scores more
-/// than the run scores where the shrinks left it. In a list of members that
-/// all look alike, such as a run of `push` calls, the run already repeats the
-/// members before it, so new members inserted among them stay where they are.
+/// than the run scores in place. In a list of members that all look alike,
+/// such as a run of `push` calls, the run already repeats the members before
+/// it, so new members inserted among them stay where they are.
+///
+/// A list of alike members also repeats at every distance, so a moved run in
+/// it repeats its neighbors as well as its copy. The try therefore holds only
+/// when more of its evidence members repeat the copy than repeat the member
+/// right before them. Shell functions that call one tool with a few flags
+/// changed form such a list. A block of a write and a flush does not, since
+/// the write and the flush do not look alike.
 fn repeat_shift(
     lhs_arena: &SyntaxArena,
     rhs_arena: &SyntaxArena,
     lhs: &[SyntaxId],
     rhs: &[SyntaxId],
-    prefix: usize,
-    suffix: usize,
-) -> Option<(usize, Side)> {
-    let (side, (short_arena, short), (long_arena, long)) =
-        if prefix + suffix == lhs.len() && lhs.len() < rhs.len() {
-            (Side::Rhs, (lhs_arena, lhs), (rhs_arena, rhs))
-        } else if prefix + suffix == rhs.len() && rhs.len() < lhs.len() {
-            (Side::Lhs, (rhs_arena, rhs), (lhs_arena, lhs))
-        } else {
-            return None;
-        };
-    let run = long.len() - short.len();
-    if suffix == 0 || prefix + suffix < run {
+    run: OneSidedRun,
+) -> Option<usize> {
+    let ((short_arena, short, gap), (long_arena, long, front)) = match run.side {
+        Side::Rhs => (
+            (lhs_arena, lhs, run.fronts.0),
+            (rhs_arena, rhs, run.fronts.1),
+        ),
+        Side::Lhs => (
+            (rhs_arena, rhs, run.fronts.1),
+            (lhs_arena, lhs, run.fronts.0),
+        ),
+    };
+    let len = run.len;
+    let most = run.after.min(len.saturating_sub(1));
+    if most == 0 || front + most < len {
         return None;
     }
 
-    let short_leaves: Vec<OnceCell<Vec<ContentId>>> =
-        short.iter().map(|_| OnceCell::new()).collect();
-    let long_leaves: Vec<OnceCell<Vec<ContentId>>> = long.iter().map(|_| OnceCell::new()).collect();
+    // The tries read only the run, the members before it, and the pairs behind
+    // it, so the caches cover that span and not the whole list.
+    let base = front.saturating_sub(len);
+    let short_leaves: Vec<OnceCell<Vec<ContentId>>> = (0..most).map(|_| OnceCell::new()).collect();
+    let long_leaves: Vec<OnceCell<Vec<ContentId>>> = (base..front + len + most)
+        .map(|_| OnceCell::new())
+        .collect();
     let short_at = |i: usize| Member {
         arena: short_arena,
         id: short[i],
-        leaves: &short_leaves[i],
+        leaves: &short_leaves[i - gap],
     };
     let long_at = |i: usize| Member {
         arena: long_arena,
         id: long[i],
-        leaves: &long_leaves[i],
+        leaves: &long_leaves[i - base],
     };
 
-    let repeats = |start: usize| match start >= run {
-        true => (0..run)
-            .filter(|&i| similar(long_at(start + i), long_at(start - run + i)))
+    let repeats = |start: usize| match start >= len {
+        true => (0..len)
+            .filter(|&i| similar(long_at(start + i), long_at(start - len + i)))
             .count(),
         false => 0,
     };
-    let unmoved = repeats(prefix);
-    let mut best = (unmoved, 0);
-    for undone in 1..run.min(suffix + 1) {
-        // Undone member i always re-pairs with the longer side's member i, so a
-        // failed re-pair fails every later try too.
-        let front = prefix + undone - 1;
-        if best.0 == run || !similar(short_at(front), long_at(front)) {
+    let mut best: Option<(usize, usize)> = None;
+    for undone in 1..=most {
+        // Undone pair j always re-pairs the empty side's member j with the
+        // run's member j, so a failed re-pair fails every later try too.
+        let j = undone - 1;
+        if !similar(short_at(gap + j), long_at(front + j)) {
             break;
         }
-        let score = repeats(prefix + undone);
-        if score > best.0 {
-            best = (score, undone);
+        // Most runs fail the first re-pair, so the score in place waits for it.
+        let (score, _) = *best.get_or_insert_with(|| (repeats(front), 0));
+        if score == len {
+            break;
+        }
+        let moved = repeats(front + undone);
+        if moved > score {
+            best = Some((moved, undone));
         }
     }
 
-    let (score, undone) = best;
+    let (score, undone) = best?;
+    if undone == 0 {
+        return None;
+    }
     let evidence = score - undone;
-    (undone > 0 && evidence * 3 >= (run - undone) * 2).then_some((undone, side))
+    let alike = (front + undone..front + len)
+        .filter(|&i| similar(long_at(i), long_at(i - 1)))
+        .count();
+    (evidence * 3 >= (len - undone) * 2 && evidence > alike).then_some(undone)
 }
 
-/// Emit the run that [`repeat_shift`] moved, given as `(prefix, undone, side)`.
+/// Emit a run that [`repeat_shift`] moved, given with the count of pairs
+/// behind it that the move undid.
 ///
-/// Each undone suffix member pairs with the member at its offset on the other
-/// side. An identical pair matches whole, and any other pair goes to
-/// [`emit_pair`]. The moved run then becomes one section, empty on the side
-/// that holds none of it.
+/// Each undone pair's member on the empty side pairs with the run's member at
+/// its offset from the front. An identical pair matches whole, and any other
+/// pair goes to [`emit_pair`]. The moved run then becomes one section, empty
+/// on the side that holds none of it.
 fn emit_shifted(
     lhs_arena: &SyntaxArena,
     rhs_arena: &SyntaxArena,
     lhs: &[SyntaxId],
     rhs: &[SyntaxId],
-    (prefix, undone, side): (usize, usize, Side),
+    (run, undone): (OneSidedRun, usize),
     facts: &ArenaFacts,
     out: &mut PreprocessResult,
 ) {
-    for i in prefix..prefix + undone {
-        if lhs_arena.get(lhs[i]).content_id() == rhs_arena.get(rhs[i]).content_id() {
-            match_subtrees(lhs_arena, rhs_arena, lhs[i], rhs[i], out);
+    let (lhs_front, rhs_front) = run.fronts;
+    for j in 0..undone {
+        let (lhs_id, rhs_id) = (lhs[lhs_front + j], rhs[rhs_front + j]);
+        if lhs_arena.get(lhs_id).content_id() == rhs_arena.get(rhs_id).content_id() {
+            match_subtrees(lhs_arena, rhs_arena, lhs_id, rhs_id, out);
         } else {
-            emit_pair(lhs_arena, rhs_arena, lhs[i], rhs[i], facts, out);
+            emit_pair(lhs_arena, rhs_arena, lhs_id, rhs_id, facts, out);
         }
     }
 
-    let start = prefix + undone;
-    let run = start..start + lhs.len().abs_diff(rhs.len());
-    out.sections.push(match side {
-        Side::Lhs => (lhs[run].to_vec(), Vec::new()),
-        Side::Rhs => (Vec::new(), rhs[run].to_vec()),
+    let moved = |front: usize| front + undone..front + undone + run.len;
+    out.sections.push(match run.side {
+        Side::Lhs => (lhs[moved(lhs_front)].to_vec(), Vec::new()),
+        Side::Rhs => (Vec::new(), rhs[moved(rhs_front)].to_vec()),
     });
 }
 
@@ -1224,9 +1293,11 @@ mod tests {
     /// A run stays where the shrinks leave it when its members do not repeat
     /// the members before it, here because `other();` repeats nothing (1 of 2).
     /// It stays too when it already repeats them as well as the moved run does,
-    /// as two calls inserted among calls that all look alike do. A run of one
-    /// member always stays, such as one call inserted among such calls, or a
-    /// deleted match arm that is similar to the arm after it.
+    /// as two calls inserted among calls that all look alike do. It stays as
+    /// well when its members repeat their neighbors as often as their copies,
+    /// as two `sync` calls inserted after a `sync` call they resemble do. A run
+    /// of one member always stays, such as one call inserted among such calls,
+    /// or a deleted match arm that is similar to the arm after it.
     #[test]
     fn a_one_sided_run_moves_onto_the_copy_that_repeats_the_members_before_it() {
         let two = "fn f() { store.write(&geo); store.flush(span); }";
@@ -1241,6 +1312,11 @@ mod tests {
                     Ok(P::Restart) => { h.set(\"restart\", p.on); } } }";
         let arms_without_camera = "fn f() { match p { _ if x.is_empty() => {} \
                                    Ok(P::Restart) => { h.set(\"restart\", p.on); } } }";
+        let syncs =
+            "fn f() { prep(); sync(host, user, pass, gmail); sync(host6, user, pass, ipv6); }";
+        let syncs_with_two = "fn f() { prep(); sync(host, user, pass, gmail); \
+                              sync(host, user, pass, trash); sync(host, user, pass, inet4); \
+                              sync(host6, user, pass, ipv6); }";
 
         assert_eq!(
             [
@@ -1250,6 +1326,7 @@ mod tests {
                 section_texts(pushes, pushes_with_3),
                 section_texts(pushes, pushes_with_3_9),
                 section_texts(arms, arms_without_camera),
+                section_texts(syncs, syncs_with_two),
             ],
             [
                 vec![
@@ -1267,6 +1344,55 @@ mod tests {
                     vec!["Ok(P::Camera) => { h.set(\"camera\", p.on); }"],
                     vec![]
                 )],
+                vec![(
+                    vec![],
+                    vec![
+                        "sync(host, user, pass, trash);",
+                        "sync(host, user, pass, inet4);"
+                    ]
+                )],
+            ],
+        );
+    }
+
+    /// A one-sided run moves onto the later copy when another edit in the list
+    /// leaves both middles holding members. The run then closes at the suffix,
+    /// or at a list anchor when an edit after the copy stops the suffix shrink.
+    /// Deleting such a copy mirrors it.
+    #[test]
+    fn a_one_sided_run_beside_another_edit_moves_onto_the_copy() {
+        let edit_before = "fn f() { a(); store.write(&geo); store.flush(span); }";
+        let copy_after_edit = "fn f() { b(); store.write(&geo); store.flush(span.clone()); \
+                               store.write(&phi); store.flush(span); }";
+        let edits_around = "fn f() { a(); x(); store.write(&geo); store.flush(span); c(); }";
+        let copy_between_edits = "fn f() { b(); store.write(&geo); store.flush(span.clone()); \
+                                  store.write(&phi); store.flush(span); d(); }";
+        let copy = ["store.write(&phi);", "store.flush(span);"];
+
+        assert_eq!(
+            [
+                section_texts(edit_before, copy_after_edit),
+                section_texts(edits_around, copy_between_edits),
+                section_texts(copy_between_edits, edits_around),
+            ],
+            [
+                vec![
+                    (vec!["a"], vec!["b"]),
+                    (vec!["span"], vec!["span.clone()"]),
+                    (vec![], copy.to_vec()),
+                ],
+                vec![
+                    (vec!["a();", "x();"], vec!["b();"]),
+                    (vec!["span"], vec!["span.clone()"]),
+                    (vec![], copy.to_vec()),
+                    (vec!["c"], vec!["d"]),
+                ],
+                vec![
+                    (vec!["b();"], vec!["a();", "x();"]),
+                    (vec!["span.clone()"], vec!["span"]),
+                    (copy.to_vec(), vec![]),
+                    (vec!["d"], vec!["c"]),
+                ],
             ],
         );
     }

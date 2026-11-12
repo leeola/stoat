@@ -1693,6 +1693,32 @@ mod tests {
         );
     }
 
+    /// A call tweaked and repeated between two other edits marks the tweak and
+    /// the whole new call, though the edit after the copy keeps the suffix
+    /// shrink from reaching the old call.
+    #[test]
+    fn a_repeated_call_between_other_edits_marks_the_whole_new_call() {
+        let lhs =
+            "fn f() {\n    a();\n    store.write(&geo);\n    store.flush(span);\n    c();\n}\n";
+        let rhs =
+            "fn f() {\n    b();\n    store.write(&geo);\n    store.flush(span.clone());\n    \
+                   store.write(&phi);\n    store.flush(span);\n    d();\n}\n";
+        let result = diff_with_language(&rust_lang(), lhs, rhs).unwrap();
+
+        assert_eq!(
+            change_rows(&result, lhs, rhs),
+            [
+                (Side::Lhs, "a", 1),
+                (Side::Rhs, "b", 1),
+                (Side::Rhs, ".clone()", 3),
+                (Side::Lhs, "c", 4),
+                (Side::Rhs, "store.write(&phi);", 4),
+                (Side::Rhs, "store.flush(span);", 5),
+                (Side::Rhs, "d", 6),
+            ],
+        );
+    }
+
     /// The pair of an attribute that slid moves with it, so every unchanged
     /// token still pairs, each with its line on the right side.
     #[test]
