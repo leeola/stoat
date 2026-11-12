@@ -1286,11 +1286,13 @@ fn the_editor_behind_the_finder_fades() {
     }
 }
 
-/// The finder ends in a footer row on the raised surface.
+/// The finder ends in a footer two rows tall on the raised surface, flush with
+/// the box's bottom.
 ///
 /// No other surface of the frame is raised, so the raised cells form one run
-/// in one row. The docked key hints box waits for its toggle under the finder,
-/// so the run spans the 126 cells inside the box's border.
+/// in each of two rows, one over the other. The docked key hints box waits for
+/// its toggle under the finder, so each run spans the 126 cells between the
+/// box's sides.
 #[test]
 fn the_finder_ends_in_a_footer_on_the_raised_surface() {
     let mut home = support::scratch_home();
@@ -1302,20 +1304,28 @@ fn the_finder_ends_in_a_footer_on_the_raised_surface() {
     );
 
     let raised = cells_of(&shot, RAISED);
-    if !one_run_in_one_row(&raised) || raised.len() != 126 {
+    let (upper, lower) = raised.split_at(raised.len() / 2);
+    let two_rows = raised.len() == 2 * 126
+        && one_run_in_one_row(upper)
+        && one_run_in_one_row(lower)
+        && lower[0] == (upper[0].0, upper[0].1 + 1);
+    if !two_rows {
         let frame = keep_frame(&shot, &mut home, "finder_footer");
         panic!(
-            "the raised cells {raised:?} are not one footer run in one row; the frame is {}",
+            "the raised cells {raised:?} are not two footer runs, one over the other; the frame \
+             is {}",
             frame.display(),
         );
     }
 }
 
-/// The session picker ends in a footer row on the raised surface.
+/// The session picker ends in a footer row on the raised surface, on the
+/// box's bottom row.
 ///
 /// No other surface of the frame is raised, so the raised cells form one run
 /// in one row. The box holds its recommended 112 columns, so the footer spans
-/// the 110 cells inside its border.
+/// the 110 cells between its sides. The cell under the run lies outside the
+/// box, so it does not read the box's overlay surface.
 #[test]
 fn the_session_picker_ends_in_a_footer_on_the_raised_surface() {
     let mut home = support::scratch_home();
@@ -1327,10 +1337,14 @@ fn the_session_picker_ends_in_a_footer_on_the_raised_surface() {
     );
 
     let raised = cells_of(&shot, RAISED);
-    if !one_run_in_one_row(&raised) || raised.len() != 110 {
+    let below = raised
+        .first()
+        .map(|&(col, row)| dominant_color(&shot, cell_rect(col, row + 1, 1, 1)));
+    if !one_run_in_one_row(&raised) || raised.len() != 110 || below == Some(OVERLAY) {
         let frame = keep_frame(&shot, &mut home, "session_footer");
         panic!(
-            "the raised cells {raised:?} are not one footer run across the box; the frame is {}",
+            "the raised cells {raised:?} are not one footer run on the box's bottom row, the \
+             cell under it {below:?}; the frame is {}",
             frame.display(),
         );
     }

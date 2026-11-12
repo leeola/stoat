@@ -35,9 +35,9 @@ pub(crate) struct FinderLayout {
     /// The path header over the preview and the rule under it, which only
     /// [`file_finder_layout_with_chrome`] sets. The preview starts below it.
     pub(crate) preview_header: Option<Rect>,
-    /// The footer row of key hints and page dots, which only
-    /// [`file_finder_layout_with_chrome`] sets. The list and the preview end
-    /// above it.
+    /// The footer of key hints and page dots, which only
+    /// [`file_finder_layout_with_chrome`] sets. It takes the inner rect's last
+    /// row and the box's bottom row, and the list and the preview end above it.
     pub(crate) footer: Option<Rect>,
 }
 
@@ -117,7 +117,8 @@ pub(crate) fn file_finder_layout(
 /// the finder shows, which are its footer and the path header over its
 /// preview.
 ///
-/// The footer takes the inner rect's last row, so the list and the preview end
+/// The footer takes the inner rect's last row and the bottom border's row under
+/// it, so it sits flush with the box's bottom, and the list and the preview end
 /// above it. The preview then covers only the editor below its header, which is
 /// the rect the pooled preview page fills and a wheel scrolls. A body of one row
 /// keeps no footer, and a preview too short to keep an editor row under the
@@ -160,9 +161,9 @@ pub(crate) fn file_finder_layout_with_chrome(
         let inner = layout.inner;
         layout.footer = Some(Rect::new(
             inner.x,
-            inner.y + inner.height - 1,
+            layout.modal.bottom() - 2,
             inner.width,
-            1,
+            2,
         ));
         layout.list.height -= 1;
         if let Some(preview) = layout.preview.as_mut() {

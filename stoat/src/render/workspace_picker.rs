@@ -26,8 +26,8 @@ const MAX_ENTRY_ROWS: u16 = 10;
 /// filter input, its separator, and the column header.
 const HEADER_ROWS: u16 = 3;
 
-/// Rows the chrome takes inside the border below the list, which is the footer
-/// of the status legend and the bound keys.
+/// Rows the footer of the status legend and the bound keys takes at the box's
+/// bottom, on the bottom border's row.
 const FOOTER_ROWS: u16 = 1;
 
 /// Columns the box asks for, which hold the footer's legend and all of its key
@@ -57,8 +57,9 @@ const FILLED_MARK: &str = "\u{25cf}";
 const SAVED_MARK: &str = "\u{25cb}";
 
 /// Lay the workspace picker's modal out within `area`, returning its outer box
-/// and the inner rect holding the header, the rows, and the footer, or
-/// [`None`] when `area` is too small to host it or there is nothing to list.
+/// and the inner rect holding the header and the rows, or [`None`] when `area`
+/// is too small to host it or there is nothing to list. The footer sits on the
+/// box's bottom row, under the inner rect.
 ///
 /// The box's top sits [`SESSION_FINDER_TOP_ROWS`] below `area`'s. In a short
 /// `area` the box rises until its bottom edge meets `area`'s.
@@ -67,7 +68,7 @@ pub(crate) fn workspace_picker_layout(area: Rect, entries_len: usize) -> Option<
         return None;
     }
     let entry_rows = (entries_len as u16).min(MAX_ENTRY_ROWS);
-    let content_height = 2 + HEADER_ROWS + entry_rows + FOOTER_ROWS;
+    let content_height = 1 + HEADER_ROWS + entry_rows + FOOTER_ROWS;
     let mut modal = crate::render::chrome::modal_box(
         area,
         (0, content_height),
@@ -89,7 +90,7 @@ pub(crate) fn workspace_picker_list(inner: Rect) -> Rect {
         inner.x,
         inner.y + HEADER_ROWS,
         inner.width,
-        inner.height.saturating_sub(HEADER_ROWS + FOOTER_ROWS),
+        inner.height.saturating_sub(HEADER_ROWS),
     )
 }
 
@@ -343,7 +344,7 @@ pub(crate) fn render_workspace_picker(
 
     let footer = Rect::new(
         inner.x,
-        inner.y + inner.height.saturating_sub(FOOTER_ROWS),
+        picker_area.bottom() - FOOTER_ROWS,
         inner.width,
         FOOTER_ROWS,
     );
@@ -474,9 +475,7 @@ fn tail_within(path: &str, room: usize) -> Option<&str> {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        render_workspace_picker, workspace_picker_layout, FOOTER_ROWS, HEADER_ROWS, MAX_ENTRY_ROWS,
-    };
+    use super::{render_workspace_picker, workspace_picker_layout, HEADER_ROWS, MAX_ENTRY_ROWS};
     use crate::{
         buffer::BufferId,
         editor_state::EditorId,
@@ -600,8 +599,9 @@ mod tests {
         assert_eq!(modal.width, 112, "the box holds at its recommended width");
         assert_eq!(
             inner.height,
-            HEADER_ROWS + 3 + FOOTER_ROWS,
-            "the filter, separator, and column labels sit above the rows, and the footer below"
+            HEADER_ROWS + 3,
+            "the filter, separator, and column labels sit above the rows, and the footer takes \
+             the box's bottom row"
         );
     }
 
@@ -614,14 +614,14 @@ mod tests {
             workspace_picker_layout(Rect::new(0, 0, 120, height), 3)
                 .map(|(modal, _)| (modal.y, modal.bottom()))
         };
-        assert_eq!([span(40), span(14)], [Some((8, 17)), Some((5, 14))]);
+        assert_eq!([span(40), span(14)], [Some((8, 16)), Some((6, 14))]);
     }
 
     #[test]
     fn layout_caps_the_rows_it_shows() {
         let (_, inner) = workspace_picker_layout(Rect::new(0, 0, 120, 40), 30)
             .expect("the area hosts the modal");
-        assert_eq!(inner.height, HEADER_ROWS + MAX_ENTRY_ROWS + FOOTER_ROWS);
+        assert_eq!(inner.height, HEADER_ROWS + MAX_ENTRY_ROWS);
     }
 
     #[test]
@@ -1210,7 +1210,7 @@ mod tests {
     #[test]
     fn the_footer_leads_with_the_status_legend() {
         let (buf, _, inner) = painted_statuses(true);
-        let row = inner.y + inner.height - 1;
+        let row = inner.y + inner.height;
         let text: String = row_text(&buf, row)
             .chars()
             .skip(inner.x as usize)

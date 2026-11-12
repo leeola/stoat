@@ -6047,13 +6047,14 @@ fn the_finder_rounds_its_live_selected_row_and_keeps_the_bar_on_its_page() {
         radius: 0,
         corners: 0,
     };
-    // The header's hairline starts at the list's column too, half a row above
-    // the list, so only the bars from the list's top row down count.
-    let list_bars = |bytes: &[u8], col: u16, top: u16| -> Vec<BarCommand> {
+    // The header's hairline and the footer's rule start at the list's column
+    // too, above and below the list, so only the bars on the list's rows count.
+    let list_bars = |bytes: &[u8], col: u16, (top, bottom): (u16, u16)| -> Vec<BarCommand> {
+        let rows = top as i16 * 16..bottom as i16 * 16;
         command::decode_stream(bytes)
             .into_iter()
             .filter_map(|cmd| match cmd {
-                Command::Bar(found) if found.x == col as i16 * 16 && found.y >= top as i16 * 16 => {
+                Command::Bar(found) if found.x == col as i16 * 16 && rows.contains(&found.y) => {
                     Some(found)
                 },
                 _ => None,
@@ -6072,9 +6073,9 @@ fn the_finder_rounds_its_live_selected_row_and_keeps_the_bar_on_its_page() {
 
     assert_eq!(
         (
-            list_bars(&live, list.x, list.y),
+            list_bars(&live, list.x, (list.y, list.bottom())),
             row_boxes(&live, Rect::new(list.x, list.y, list.width, 1)),
-            list_bars(page, 0, 0),
+            list_bars(page, 0, (0, list.height)),
         ),
         (
             Vec::new(),

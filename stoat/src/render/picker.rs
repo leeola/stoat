@@ -224,8 +224,13 @@ pub(crate) struct Footer<'a> {
     pub(crate) pages: Option<(usize, usize)>,
 }
 
-/// Paint a modal's footer row into `rect`, with its lead and key hints from the
+/// Paint a modal's footer into `rect`, with its lead and key hints from the
 /// left, a note right of them, and its page dots at the right.
+///
+/// The footer fills every row of `rect` with its surface and paints its line
+/// in the first, so a footer that reaches the box's bottom edge sits flush
+/// with it. Under a live scene a hairline in `ui.border.inactive` along the
+/// top of the first row rules the footer off from the body above it.
 ///
 /// The lead's spans paint in their own styles, two cells before the hints. Each
 /// hint is a key in `ui.key_label` and the word it does in `ui.text.muted`. The
@@ -242,8 +247,23 @@ pub(crate) fn modal_footer(
 ) {
     let style = theme.get(scope::UI_MODAL_FOOTER);
     let row_end = rect.x + rect.width;
-    for x in rect.x..row_end {
-        buf[(x, rect.y)].set_char(' ').set_style(style);
+    for y in rect.y..rect.y + rect.height {
+        for x in rect.x..row_end {
+            buf[(x, y)].set_char(' ').set_style(style);
+        }
+    }
+
+    if let Some(color) = style_rgb(theme.get(scope::UI_BORDER_INACTIVE).fg) {
+        Bar {
+            x: 0,
+            y: 0,
+            width: rect.width.saturating_mul(16),
+            height: 1,
+            color,
+            radius: 0,
+            corners: 0,
+        }
+        .render(Rect { height: 1, ..rect }, buf, scene);
     }
 
     let hints_end = paint_page_dots(rect, footer.pages, theme, buf, scene);
@@ -1099,20 +1119,35 @@ mod tests {
     }
 
     /// The text of a footer painted `width` columns wide in a live scene, and
-    /// the bar frames its dots send.
+    /// the bar frames its rule and its dots send.
     fn footer_row(
         width: u16,
         note: Option<&str>,
         pages: Option<(usize, usize)>,
     ) -> (String, Vec<u8>) {
+        let (rows, frames) = footer_rows(width, 1, note, pages);
+        (rows[0].0.clone(), frames)
+    }
+
+    /// Each row of a footer painted `width` by `height` in a live scene, as its
+    /// text and whether every cell takes the footer's surface, and the bar
+    /// frames its rule and its dots send.
+    fn footer_rows(
+        width: u16,
+        height: u16,
+        note: Option<&str>,
+        pages: Option<(usize, usize)>,
+    ) -> (Vec<(String, bool)>, Vec<u8>) {
         let src = r##"theme t {
             ui.border.focused.fg = "#010203";
             ui.surface.overlay.fg = "#040506";
+            ui.border.inactive.fg = "#070809";
+            ui.modal.footer.bg = "#0a0b0c";
         }"##;
         let (config, _) = stoat_config::parse(src);
         let theme = Theme::from_config(&config.expect("theme parses"), "t").expect("theme loads");
 
-        let area = Rect::new(0, 0, width, 1);
+        let area = Rect::new(0, 0, width, height);
         let mut buf = Buffer::empty(area);
         let mut scene = stoat_widgets::ApcScene::new();
         let hints = [("Enter", "open"), ("C-f/C-b", "page")];
@@ -1123,7 +1158,31 @@ mod tests {
             ..Footer::default()
         };
         modal_footer(&mut buf, area, &footer, &theme, &mut scene);
-        (test_support::row_text(&buf, 0), scene.buffer().clone())
+
+        let surface = theme.get(scope::UI_MODAL_FOOTER).bg;
+        let rows = (0..height)
+            .map(|y| {
+                let filled = (0..width).all(|x| Some(buf[(x, y)].bg) == surface);
+                (test_support::row_text(&buf, y), filled)
+            })
+            .collect();
+        (rows, scene.buffer().clone())
+    }
+
+    /// The bar frame of a footer's rule across `width` cells, one sixteenth
+    /// tall along the top of its first row.
+    fn rule_frame(width: u16) -> Vec<u8> {
+        encode_bar(&BarCommand {
+            x: 0,
+            y: 0,
+            width: width * 16,
+            height: 1,
+            color: [7, 8, 9],
+            occludes: false,
+            hatch: None,
+            radius: 0,
+            corners: 0,
+        })
     }
 
     /// The bar frames of page dots at `(x, width, color)`, in sixteenths, each
@@ -1146,12 +1205,15 @@ mod tests {
             .collect()
     }
 
-    /// The dots end one cell from the right edge, round and the lit one wide,
-    /// and the hints stop short of them. Past five pages the lit dot stands at
-    /// the selection's share of the list.
+    /// A hairline rules the footer's top edge. The dots end one cell from the
+    /// right edge, round and the lit one wide, and the hints stop short of
+    /// them. Past five pages the lit dot stands at the selection's share of the
+    /// list. A footer two rows tall fills both rows with its surface and paints
+    /// its line in the first.
     #[test]
     fn the_footer_paints_its_hints_and_page_dots() {
         let (lit, dim) = ([1, 2, 3], [4, 5, 6]);
+        let three_pages = dot_frames(&[(567, 7, dim), (583, 25, lit), (617, 7, dim)]);
         assert_eq!(
             [
                 footer_row(40, None, Some((1, 3))),
@@ -1161,23 +1223,38 @@ mod tests {
             [
                 (
                     format!(" Enter open  C-f/C-b page{}", " ".repeat(15)),
-                    dot_frames(&[(567, 7, dim), (583, 25, lit), (617, 7, dim)]),
+                    [rule_frame(40), three_pages.clone()].concat(),
                 ),
                 (
                     format!(" Enter open{}", " ".repeat(9)),
-                    dot_frames(&[(263, 25, lit), (297, 7, dim)]),
+                    [rule_frame(20), dot_frames(&[(263, 25, lit), (297, 7, dim)]),].concat(),
                 ),
                 (
                     format!(" Enter open  C-f/C-b page{}", " ".repeat(15)),
-                    dot_frames(&[
-                        (535, 7, dim),
-                        (551, 7, dim),
-                        (567, 25, lit),
-                        (601, 7, dim),
-                        (617, 7, dim),
-                    ]),
+                    [
+                        rule_frame(40),
+                        dot_frames(&[
+                            (535, 7, dim),
+                            (551, 7, dim),
+                            (567, 25, lit),
+                            (601, 7, dim),
+                            (617, 7, dim),
+                        ]),
+                    ]
+                    .concat(),
                 ),
             ],
+        );
+        assert_eq!(
+            footer_rows(40, 2, None, Some((1, 3))),
+            (
+                vec![
+                    (format!(" Enter open  C-f/C-b page{}", " ".repeat(15)), true),
+                    (" ".repeat(40), true),
+                ],
+                [rule_frame(40), three_pages].concat(),
+            ),
+            "both rows on the footer's surface, the line and the rule in the first",
         );
     }
 
@@ -1193,11 +1270,11 @@ mod tests {
             [
                 (
                     format!(" Enter open  C-f/C-b page{}normal ", " ".repeat(8)),
-                    Vec::new(),
+                    rule_frame(40),
                 ),
                 (
                     format!(" Enter open  C-f/C-b page{}", " ".repeat(5)),
-                    Vec::new(),
+                    rule_frame(30),
                 ),
             ],
         );
