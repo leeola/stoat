@@ -71,13 +71,16 @@ const LSP_DEADLINE: Duration = Duration::from_secs(90);
 /// A pixel rectangle as `(x, y, width, height)`.
 type PixelRect = (u32, u32, u32, u32);
 
-/// The normal-mode chip fills with the accent two pixels inside the status
-/// row's top and bottom edges and five pixels inside its box's ends, and a
-/// blank text cell with the base surface.
+/// The normal-mode chip fills with the accent, and a blank text cell fills
+/// with the base surface.
 ///
-/// The chip's second cell keeps the row's ground in its top two and bottom
-/// two pixel rows, and the box's first cell keeps it in its first five pixel
-/// columns, as the revised boards draw a 14 px chip on the 18 px row.
+/// The boards draw a 16 by 34 px chip on the 18 px row. Its box is the five
+/// cells from column 1. The chip stands one pixel inside the row's top and
+/// bottom, five inside the box's start, and six inside its end.
+///
+/// The checks read the pixel row or column on each side of each edge, ground
+/// outside and accent inside. An edge one pixel off then fails a check. The
+/// column checks read the rows between the chip's 4 px corners.
 #[test]
 fn the_basic_diff_scene_draws_on_the_ermine_palette() {
     let mut home = support::scratch_home();
@@ -87,21 +90,31 @@ fn the_basic_diff_scene_draws_on_the_ermine_palette() {
     expect_region(
         &shot,
         &mut home,
-        (x, y + 2, width, height - 4),
+        (x, y + 1, width, height - 2),
         ACCENT,
         "mode_chip",
     );
-    for (edge, what) in [(y, "mode_chip_top"), (y + height - 2, "mode_chip_bottom")] {
-        expect_region(&shot, &mut home, (x, edge, width, 2), GROUND, what);
+    for (row, want, what) in [
+        (y, GROUND, "mode_chip_top"),
+        (y + 1, ACCENT, "mode_chip_top_row"),
+        (y + height - 2, ACCENT, "mode_chip_bottom_row"),
+        (y + height - 1, GROUND, "mode_chip_bottom"),
+    ] {
+        expect_region(&shot, &mut home, (x, row, width, 1), want, what);
     }
+
     let (start, ..) = cell_rect(1, ROWS - 1, 1, 1);
-    expect_region(
-        &shot,
-        &mut home,
-        (start, y, 5, height),
-        GROUND,
-        "mode_chip_end",
-    );
+    let (end, ..) = cell_rect(6, ROWS - 1, 1, 1);
+    for (column, want, what) in [
+        (start + 4, GROUND, "mode_chip_start"),
+        (start + 5, ACCENT, "mode_chip_first_column"),
+        (end - 7, ACCENT, "mode_chip_last_column"),
+        (end - 6, GROUND, "mode_chip_end"),
+    ] {
+        let rect = (column, y + 5, 1, height - 10);
+        expect_region(&shot, &mut home, rect, want, what);
+    }
+
     expect_region(
         &shot,
         &mut home,

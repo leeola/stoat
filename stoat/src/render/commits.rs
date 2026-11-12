@@ -3216,7 +3216,15 @@ mod tests {
             (cell_of(&text, "HEAD"), cell_of(&text, "NOR"));
         let (_, mode_color) =
             crate::render::pane::mode_segment("normal", &theme, &Default::default());
-        let chip_edges = [Edge::symmetric(0, 1), Edge::symmetric(5, 2)];
+        let chip_edges = [
+            Edge::symmetric(0, 1),
+            [
+                Edge::Inset(1),
+                Edge::Inset(6),
+                Edge::Inset(1),
+                Edge::Inset(5),
+            ],
+        ];
         let mut panels: Vec<_> = command::decode_stream(&h.stoat.apc_scene.all_bytes())
             .into_iter()
             .filter_map(|command| match command {

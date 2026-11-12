@@ -1364,13 +1364,22 @@ fn mode_chip_box(leads: bool) -> Vec<RunBox> {
 /// The mode chip's panel in `fill`, a box smaller than [`Panel::chip`] inside
 /// the same cells.
 ///
-/// The boards draw the mode chip 14 px tall and about 34 px wide on an 18 px
-/// row. The chip's box keeps its whole cells, so the panel stands 2 px inside
-/// the row's top and bottom and 5 px inside each end of the box. Over the five
-/// cells of ` NOR ` at 9 px cells, that is 35 by 14 px.
+/// The boards draw the mode chip 16 px tall and 34 px wide on an 18 px row.
+/// The chip's box keeps its whole cells, so the panel stands inside them. It
+/// stands 1 px inside the row's top and bottom, 5 px inside the box's start,
+/// and 6 px inside its end. Over the five cells of ` NOR ` at 9 px cells, that
+/// is 34 by 16 px.
+///
+/// The box spares 11 px across its width. That count is odd, so the end takes
+/// one pixel more than the start.
 fn mode_chip_panel(fill: [u8; 3]) -> Panel {
     Panel {
-        edges: Edge::symmetric(5, 2),
+        edges: [
+            Edge::Inset(1),
+            Edge::Inset(6),
+            Edge::Inset(1),
+            Edge::Inset(5),
+        ],
         ..Panel::chip(fill)
     }
 }
