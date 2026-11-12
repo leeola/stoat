@@ -53,7 +53,7 @@ use crate::{
         surround, textobject, yank,
     },
     apc_emit,
-    app::{self, modal_split_percent, modal_zoom_steps, ModalKind, Stoat},
+    app::{self, modal_split_percent, modal_zoom_steps, ModalKind, Stoat, STATUS_ROW_PAD},
     auto_reload::ReloadFlash,
     buffer::BufferId,
     buffer_registry::BufferRegistry,
@@ -332,6 +332,10 @@ pub(crate) struct FrameCtx<'a> {
     /// Whether the tab bar takes the frame's top row. The bar then leads with
     /// the workspace name, so a status row leaves the name out.
     pub(crate) tab_bar_shown: bool,
+    /// Whether the chrome rows draw as bands, from [`Stoat::chrome_bands_on`].
+    ///
+    /// A band's island then reaches into the spare row the band takes.
+    pub(crate) chrome_bands: bool,
     pub(crate) workspace_root: &'a Path,
     pub(crate) mode: &'a str,
     /// The app screen in the foreground, from [`crate::keymap_state::view_predicate`].
@@ -923,15 +927,17 @@ pub(crate) fn perf_label(seg: PerfSegment) -> String {
 
 pub(crate) const PRIMARY_MODES: &[&str] = &["normal", "insert", "select"];
 
-/// Reserve the bottom row for the status rows of the bottom panes, so the
-/// which-key hint box, bottom-anchored over the full-window right edge, never
-/// paints over them.
-pub(crate) fn hints_overlay_area(size: Rect) -> Rect {
+/// Reserve the `status_rows` bottom rows for the status rows of the bottom
+/// panes, so the which-key hint box, bottom-anchored over the full-window right
+/// edge, never paints over them.
+///
+/// A band's spare row counts, since the band's ground starts inside it.
+pub(crate) fn hints_overlay_area(size: Rect, status_rows: u16) -> Rect {
     Rect {
         x: size.x,
         y: size.y,
         width: size.width,
-        height: size.height.saturating_sub(1),
+        height: size.height.saturating_sub(status_rows),
     }
 }
 
@@ -1273,12 +1279,14 @@ pub(crate) fn frame(
     emit::ensure_minimap_content_ids(stoat);
 
     let tab_bar_rows = u16::from(stoat.tab_bar_visible());
+    let status_rows = stoat.status_rows();
+    let chrome_bands = stoat.chrome_bands_on();
     let islands = stoat.islands_on();
     let margin = stoat.island_margin();
 
     // Single mode reserves a strip band at the window's right edge and shrinks
     // the pane layout by the strip width, so the panes never overlap the strip.
-    // The band stops one row above the bottom so a status bar on that row runs
+    // The band stops above the status rows so a status bar on the last row runs
     // the full window width, and starts one row down when the tab bar holds the
     // top, since the band derives its own rect instead of going through
     // `layout_size`. The band is stamped on Stoat for the mouse handler, then
@@ -1290,7 +1298,7 @@ pub(crate) fn frame(
             x: full.x + full.width - editor::MINIMAP_STRIP_COLS - margin,
             y: full.y + tab_bar_rows,
             width: editor::MINIMAP_STRIP_COLS,
-            height: full.height.saturating_sub(1 + tab_bar_rows),
+            height: full.height.saturating_sub(status_rows + tab_bar_rows),
         });
     let single_minimap_rect = stoat.single_minimap_rect;
     let modal_overlay = modal_overlay_open(stoat);
@@ -1368,6 +1376,7 @@ pub(crate) fn frame(
 
     let ws = &mut stoat.workspaces[stoat.active_workspace];
 
+    ws.panes.row_gap = status_rows;
     ws.layout(size);
 
     // Synced ahead of the panes, because the bottom status rows lay their
@@ -1442,6 +1451,7 @@ pub(crate) fn frame(
     let frame = FrameCtx {
         workspace_name,
         tab_bar_shown: tab_bar_rows == 1,
+        chrome_bands,
         workspace_root: &ws.git_root,
         mode,
         screen,
@@ -1763,11 +1773,16 @@ pub(crate) fn frame(
     }
 
     // Every split pane paints its status in the row under it. The rows share
-    // one lane, so a cursor move resends them and no pane's content.
+    // one lane, so a cursor move resends them and no pane's content. A band
+    // nudges the lane up to center the row in its 24 px, and ends the nudge
+    // before the lane does, for a terminal that reads the lanes as one stream.
     scene.set_lane(STATUS_LANE);
+    if chrome_bands {
+        scene.nudge([0, -i16::from(STATUS_ROW_PAD)]);
+    }
     let mut lsp_badge_rect = None;
     for (id, pane) in ws.panes.split_panes() {
-        let Some(row) = pane_status_row(pane.area, single_minimap_rect, full) else {
+        let Some(row) = pane_status_row(pane.area, single_minimap_rect, full, status_rows) else {
             continue;
         };
         let badge = render_split_status(
@@ -1789,6 +1804,9 @@ pub(crate) fn frame(
             scene,
         );
         lsp_badge_rect = lsp_badge_rect.or(badge);
+    }
+    if chrome_bands {
+        scene.nudge([0, 0]);
     }
     scene.set_lane(OVERLAY_LANE);
     stoat.lsp_badge_rect = lsp_badge_rect;
@@ -1889,6 +1907,7 @@ pub(crate) fn frame(
                     toggles,
                     &stoat.theme,
                     full,
+                    status_rows,
                     buf,
                     &mut *scene,
                 );
@@ -1917,6 +1936,7 @@ pub(crate) fn frame(
                         toggles,
                         &stoat.theme,
                         full,
+                        status_rows,
                         buf,
                         &mut *scene,
                     );
@@ -1938,6 +1958,7 @@ pub(crate) fn frame(
                         toggles,
                         &stoat.theme,
                         full,
+                        status_rows,
                         buf,
                         &mut *scene,
                     );
@@ -1970,6 +1991,7 @@ pub(crate) fn frame(
                     toggles,
                     &stoat.theme,
                     full,
+                    status_rows,
                     buf,
                     &mut *scene,
                 );
@@ -2001,6 +2023,7 @@ pub(crate) fn frame(
                     toggles,
                     &stoat.theme,
                     full,
+                    status_rows,
                     buf,
                     &mut *scene,
                 );
@@ -2032,6 +2055,7 @@ pub(crate) fn frame(
                     toggles,
                     &stoat.theme,
                     full,
+                    status_rows,
                     buf,
                     &mut *scene,
                 );
@@ -2065,6 +2089,7 @@ pub(crate) fn frame(
                     toggles,
                     &stoat.theme,
                     full,
+                    status_rows,
                     buf,
                     &mut *scene,
                 );
@@ -2097,6 +2122,7 @@ pub(crate) fn frame(
                     toggles,
                     &stoat.theme,
                     full,
+                    status_rows,
                     buf,
                     &mut *scene,
                 );
@@ -2130,6 +2156,7 @@ pub(crate) fn frame(
                     toggles,
                     &stoat.theme,
                     full,
+                    status_rows,
                     buf,
                     &mut *scene,
                 );
@@ -2163,6 +2190,7 @@ pub(crate) fn frame(
                         toggles,
                         &stoat.theme,
                         full,
+                        status_rows,
                         buf,
                         &mut *scene,
                     );
@@ -2195,6 +2223,7 @@ pub(crate) fn frame(
                     toggles,
                     &stoat.theme,
                     full,
+                    status_rows,
                     buf,
                     &mut *scene,
                 );
@@ -2226,6 +2255,7 @@ pub(crate) fn frame(
                     toggles,
                     &stoat.theme,
                     full,
+                    status_rows,
                     buf,
                     &mut *scene,
                 );
@@ -2257,6 +2287,7 @@ pub(crate) fn frame(
                         toggles,
                         &stoat.theme,
                         full,
+                        status_rows,
                         buf,
                         &mut *scene,
                     );
@@ -2288,6 +2319,7 @@ pub(crate) fn frame(
                         toggles,
                         &stoat.theme,
                         full,
+                        status_rows,
                         buf,
                         &mut *scene,
                     );
@@ -2417,6 +2449,7 @@ pub(crate) fn frame(
             toggles,
             &stoat.theme,
             full,
+            status_rows,
             buf,
             &mut *scene,
         );
@@ -2607,18 +2640,25 @@ fn single_band_rail(ws: &Workspace, chrome: MinimapChrome<'_>) -> Option<u32> {
     }
 }
 
-/// The status row of the split pane over `area`, the row under the pane over
-/// its columns.
+/// The status row of the split pane over `area`, the last of the `rows` rows
+/// under the pane, over its columns.
 ///
-/// Every pane has one free row under it, the row between it and a stacked
-/// sibling or the row that [`Stoat::layout_size`] leaves at the window's
-/// bottom, so a row takes nothing from the panes. A pane whose island takes
-/// the single minimap `band` runs its row under the band too. `None` for an
-/// empty area and for a pane that reaches the `window`'s last row.
+/// Every pane has `rows` free rows under it, the gap between it and a stacked
+/// sibling or the rows that [`Stoat::layout_size`] leaves at the window's
+/// bottom, so a status row takes nothing from the panes. A band's two rows put
+/// the status row under the spare row. A pane whose island takes the single
+/// minimap `band` runs its row under the band too. `None` for an empty area
+/// and for a pane whose status row reaches past the `window`'s last row.
 ///
 /// [`Stoat::layout_size`]: crate::Stoat::layout_size
-pub(crate) fn pane_status_row(area: Rect, band: Option<Rect>, window: Rect) -> Option<Rect> {
-    if area.is_empty() || area.bottom() >= window.bottom() {
+pub(crate) fn pane_status_row(
+    area: Rect,
+    band: Option<Rect>,
+    window: Rect,
+    rows: u16,
+) -> Option<Rect> {
+    let y = area.bottom() + rows.saturating_sub(1);
+    if area.is_empty() || y >= window.bottom() {
         return None;
     }
     let width = match band {
@@ -2628,7 +2668,7 @@ pub(crate) fn pane_status_row(area: Rect, band: Option<Rect>, window: Rect) -> O
         _ => area.width,
     };
     Some(Rect {
-        y: area.bottom(),
+        y,
         height: 1,
         width,
         ..area
@@ -2842,6 +2882,7 @@ fn cached_modal_hints(
     toggles: ToggleStates,
     theme: &crate::theme::Theme,
     area: Rect,
+    status_rows: u16,
     buf: &mut Buffer,
     scene: &mut ApcScene,
 ) {
@@ -2895,6 +2936,7 @@ fn cached_modal_hints(
         toggles,
         theme,
         area,
+        status_rows,
         buf,
         scene,
     );

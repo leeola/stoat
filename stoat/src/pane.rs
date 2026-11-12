@@ -308,6 +308,14 @@ pub struct PaneTree {
     /// it here.
     #[serde(skip)]
     natural: HashMap<PaneId, Rect>,
+    /// The rows between two stacked panes, which hold the upper pane's status
+    /// row.
+    ///
+    /// A plain status row takes one row and a band takes two. The frame sets it
+    /// from [`crate::Stoat::status_rows`] before each layout, and a restored or
+    /// copied tree holds one until then.
+    #[serde(skip, default = "one_row")]
+    pub(crate) row_gap: u16,
 }
 
 impl PaneTree {
@@ -344,6 +352,7 @@ impl PaneTree {
             last_split_focus: pane_id,
             widened: None,
             natural: HashMap::new(),
+            row_gap: one_row(),
         }
     }
 
@@ -367,6 +376,7 @@ impl PaneTree {
             last_split_focus: _,
             widened: _,
             natural: _,
+            row_gap: _,
         } = self;
 
         let mut panes = panes.clone();
@@ -413,6 +423,7 @@ impl PaneTree {
             last_split_focus: PaneId::default(),
             widened: None,
             natural: HashMap::new(),
+            row_gap: one_row(),
         }
     }
 
@@ -1225,7 +1236,7 @@ impl PaneTree {
 
                     match split.axis {
                         Axis::Horizontal => {
-                            let gap = 1u16;
+                            let gap = self.row_gap;
                             let total_gap = gap.saturating_mul(len.saturating_sub(1) as u16);
                             let usable = area.height.saturating_sub(total_gap);
                             let extents = child_extents(&split.weights, len, usable);
@@ -1385,6 +1396,11 @@ pub(crate) fn persisted_docks(docks: &SlotMap<DockId, DockPanel>) -> SlotMap<Doc
         *area = Rect::default();
     }
     docks
+}
+
+/// The [`PaneTree::row_gap`] a tree holds before the frame sets it.
+fn one_row() -> u16 {
+    1
 }
 
 /// Per-child extents (summing to `usable`) for a split of `len` children.

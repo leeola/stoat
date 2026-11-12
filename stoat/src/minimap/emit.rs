@@ -1203,9 +1203,9 @@ mod tests {
         );
     }
 
-    /// `body` open as file `name` in a 120 by 24 window under a terminal that
-    /// reads every protocol, so its strip is a 23-cell band of 138 rows over a
-    /// 23-line viewport.
+    /// `body` open as file `name` in a 120 by 25 window under a terminal that
+    /// reads every protocol. Its status band takes two rows, so its strip is a
+    /// 23-cell band of 138 rows over a 23-line viewport.
     fn open_in_band(
         name: &str,
         body: &str,
@@ -1221,7 +1221,7 @@ mod tests {
         h.stoat.active_workspace_mut().git_root = root;
         action_handlers::dispatch(&mut h.stoat, &OpenFile { path });
         h.settle();
-        h.resize(120, 24);
+        h.resize(120, 25);
         (h, rx)
     }
 

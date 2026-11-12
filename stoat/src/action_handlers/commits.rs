@@ -1498,9 +1498,13 @@ mod tests {
         let text = h.rendered_text();
         let row_text = |pane| {
             let area = h.stoat.active_workspace().panes.pane(pane).area;
-            let row =
-                crate::render::pane_status_row(area, h.stoat.single_minimap_rect, h.stoat.size())
-                    .expect("the pane has a status row");
+            let row = crate::render::pane_status_row(
+                area,
+                h.stoat.single_minimap_rect,
+                h.stoat.size(),
+                h.stoat.status_rows(),
+            )
+            .expect("the pane has a status row");
             text.lines()
                 .nth(usize::from(row.y))
                 .expect("the status row")

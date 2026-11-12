@@ -1,6 +1,6 @@
 use crate::{
     action_handlers::search::StatusPrompt,
-    app::SPINNER_FRAMES,
+    app::{SPINNER_FRAMES, STATUS_ROW_PAD},
     buffer::BufferId,
     buffer_registry::{BufferRegistry, ReadOnly},
     diff_changes::{DiffChangesId, DiffChangesState},
@@ -467,8 +467,11 @@ pub(crate) fn render_island(content_area: Rect, frame: FrameCtx<'_>, scene: &mut
 /// takes, and no island reaches over the band. Any other left or right side
 /// keeps the island role's `inset_x`.
 ///
-/// The top and the bottom stay flush, since each meets a status row or the
-/// tab bar, and never a gap.
+/// The top stays flush, since it meets a status row or the tab bar, and never
+/// a gap. The bottom stays flush too without chrome bands. With them, the
+/// bottom reaches into the band's spare row under the pane and stops twice
+/// [`STATUS_ROW_PAD`] short of the status row, so the band's ground starts
+/// that far above the row.
 fn island_edges(area: Rect, frame: FrameCtx<'_>, inset_x: u8) -> [Edge; 4] {
     let root = frame.pane_root;
     let root_right = frame
@@ -488,6 +491,11 @@ fn island_edges(area: Rect, frame: FrameCtx<'_>, inset_x: u8) -> [Edge; 4] {
         (false, false) => rest,
     };
 
+    let bottom = match frame.chrome_bands {
+        true => Edge::Margin(2 * STATUS_ROW_PAD),
+        false => Edge::Inset(0),
+    };
+
     [
         Edge::Inset(0),
         side(
@@ -495,7 +503,7 @@ fn island_edges(area: Rect, frame: FrameCtx<'_>, inset_x: u8) -> [Edge; 4] {
             vertical(area.right()),
             Edge::Inset(inset_x),
         ),
-        Edge::Inset(0),
+        bottom,
         side(
             area.x == root.x,
             area.x.checked_sub(1).is_some_and(vertical),
@@ -5000,6 +5008,86 @@ mod tests {
         assert_eq!(label, Some(Color::Rgb(0xe6, 0xd3, 0xd5)));
     }
 
+    /// From the nudge protocol on, each status row is a band. It takes two rows
+    /// under its pane, its island reaches into the first, and its lane nudges
+    /// up by the pad and back. A stoatty before the nudge keeps one row, a
+    /// flush island bottom, and no nudge.
+    ///
+    /// Two stacked panes at 160 by 50 with no tab bar keep their status rows
+    /// on rows 24 and 49 either way. The bands take one row from each pane.
+    #[test]
+    fn a_status_row_is_a_band_from_the_nudge_protocol_on() {
+        use stoatty_protocol::{
+            command::{decode_stream, Command, Edge},
+            NUDGE_PROTOCOL,
+        };
+
+        let layout = |protocol: u32| {
+            let mut h = crate::test_harness::TestHarness::with_size(160, 50);
+            h.stoat.stoatty_protocol = protocol;
+            h.type_action("SplitDown()");
+            h.settle();
+            h.stoat.render();
+
+            let mut areas: Vec<Rect> = h
+                .stoat
+                .active_workspace()
+                .panes
+                .split_panes()
+                .map(|(_, pane)| pane.area)
+                .collect();
+            areas.sort_by_key(|area| area.y);
+            let rows: Vec<u16> = areas
+                .iter()
+                .filter_map(|&area| {
+                    crate::render::pane_status_row(
+                        area,
+                        h.stoat.single_minimap_rect,
+                        h.stoat.size(),
+                        h.stoat.status_rows(),
+                    )
+                })
+                .map(|row| row.y)
+                .collect();
+            let lane = decode_stream(h.stoat.apc_scene.lane_bytes(crate::render::STATUS_LANE));
+            let nudges: Vec<Command> = [lane.first(), lane.last()]
+                .into_iter()
+                .flatten()
+                .filter(|command| matches!(command, Command::Nudge(_)))
+                .cloned()
+                .collect();
+            let bottoms: Vec<Edge> = h
+                .stoat
+                .apc_scene
+                .panels()
+                .filter(|panel| panel.backdrop)
+                .map(|panel| panel.edges[2])
+                .collect();
+            let spans: Vec<(u16, u16)> = areas.iter().map(|area| (area.y, area.height)).collect();
+            (spans, rows, nudges, bottoms)
+        };
+
+        assert_eq!(
+            [layout(NUDGE_PROTOCOL), layout(NUDGE_PROTOCOL - 1)],
+            [
+                (
+                    vec![(0, 23), (25, 23)],
+                    vec![24, 49],
+                    vec![Command::Nudge([0, -3]), Command::Nudge([0, 0])],
+                    vec![Edge::Margin(6); 2],
+                ),
+                (
+                    vec![(0, 24), (25, 24)],
+                    vec![24, 49],
+                    vec![],
+                    vec![Edge::Inset(0); 2],
+                ),
+            ],
+            "the pane rows, the status rows, the lane's first and last nudge, and the island \
+             bottoms",
+        );
+    }
+
     /// A 120 by 8 split diff view of one changed `a.rs`, with no minimap and
     /// its hints box hidden.
     fn status_halves_harness() -> crate::test_harness::TestHarness {
@@ -6231,8 +6319,13 @@ mod tests {
         areas
             .into_iter()
             .map(|area| {
-                crate::render::pane_status_row(area, h.stoat.single_minimap_rect, h.stoat.size())
-                    .expect("the pane has a status row")
+                crate::render::pane_status_row(
+                    area,
+                    h.stoat.single_minimap_rect,
+                    h.stoat.size(),
+                    h.stoat.status_rows(),
+                )
+                .expect("the pane has a status row")
             })
             .collect()
     }

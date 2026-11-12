@@ -92,7 +92,7 @@ use stoat_text::{
 use stoat_widgets::{pool::SmoothScrollState, ApcScene};
 use stoatty_protocol::{
     window_ipc::{MouseButton as IpcMouseButton, MouseKind, WindowIpcEvent},
-    BACKDROP_PANEL_PROTOCOL, BATCHED_DECORATIONS_PROTOCOL,
+    BACKDROP_PANEL_PROTOCOL, BATCHED_DECORATIONS_PROTOCOL, NUDGE_PROTOCOL,
 };
 use tokio::{
     io::AsyncBufReadExt,
@@ -703,6 +703,14 @@ pub(crate) const PREVIEW_WHEEL_ROWS: usize = 3;
 /// modal's bottom edge should leave a diff still worth looking at instead of a
 /// sliver.
 pub(crate) const MIN_PREVIEW_ROWS: u16 = 3;
+
+/// The logical px of ground above and below a status row's cell row inside
+/// its band.
+///
+/// The boards draw a status row 24 px tall over an 18 px cell row. A band
+/// states its height as one cell row plus this pad on each side, so it keeps
+/// the text centered at any font size.
+pub(crate) const STATUS_ROW_PAD: u8 = 3;
 
 /// Which way a modal's list/preview separator runs, and so which pointer
 /// coordinate a drag along it reads.
@@ -4012,8 +4020,9 @@ impl Stoat {
     ///
     /// While islands are on, the area also stops [`Self::island_margin`]
     /// columns short of each side of the window, so the window ground shows
-    /// along both edges. It stops one row short of the bottom too, the row
-    /// that holds the bottom panes' status rows, [`Self::status_bar_rect`].
+    /// along both edges. It stops [`Self::status_rows`] rows short of the
+    /// bottom too, the rows that hold the bottom panes' status rows. The last
+    /// is [`Self::status_bar_rect`], and a band's spare row sits above it.
     ///
     /// Centered modals do not lay out here. They take the full [`Self::size`]
     /// and the strip yields to them, so their paint, pools, and mouse hit-tests
@@ -4034,7 +4043,7 @@ impl Stoat {
         };
         let size = match self.status_bar_rect() {
             Some(_) => Rect {
-                height: size.height - 1,
+                height: size.height - self.status_rows(),
                 ..size
             },
             None => size,
@@ -4053,12 +4062,14 @@ impl Stoat {
     /// at the tree's bottom.
     ///
     /// The row is the window's last, under the pane tree and the minimap band
-    /// alike, and stops at the island margins as the panes do. A pane above a
-    /// stacked sibling takes the row between them for its status, so no pane
-    /// gives up a row of its own. `None` for a window under two rows tall,
-    /// which keeps its one row for the panes.
+    /// alike, and stops at the island margins as the panes do. With chrome
+    /// bands on, [`Self::layout_size`] also leaves the row above it free, as
+    /// the band's spare row. A pane above a stacked sibling takes the gap
+    /// between them for its status, so no pane gives up a row of its own.
+    /// `None` for a window too short to hold the status rows and one row of
+    /// panes, which keeps its rows for the panes.
     pub(crate) fn status_bar_rect(&self) -> Option<Rect> {
-        if self.size.height < 2 {
+        if self.size.height < self.status_rows() + 1 {
             return None;
         }
         let margin = self.island_margin();
@@ -4081,6 +4092,23 @@ impl Stoat {
         self.stoatty
             && self.stoatty_protocol >= BACKDROP_PANEL_PROTOCOL
             && paint::style_rgb(crate::render::ground_surface(&self.theme)).is_some()
+    }
+
+    /// Whether the chrome rows draw as bands at the boards' heights.
+    ///
+    /// A band takes two grid rows, and its elements draw off the cell grid at a
+    /// nudge, which a terminal reads from [`NUDGE_PROTOCOL`] on. The bands
+    /// stand on the window ground, so they need the islands too.
+    pub(crate) fn chrome_bands_on(&self) -> bool {
+        self.islands_on() && self.stoatty_protocol >= NUDGE_PROTOCOL
+    }
+
+    /// The grid rows a status row takes, two for a band and one without.
+    pub(crate) fn status_rows(&self) -> u16 {
+        match self.chrome_bands_on() {
+            true => 2,
+            false => 1,
+        }
     }
 
     /// The chrome columns between each side of the window and the pane tree,

@@ -7123,13 +7123,17 @@ fn the_status_lane_holds_the_status_rows_alone() {
             })
             .collect()
     };
-    let (band, size) = (h.stoat.single_minimap_rect, h.stoat.size());
+    let (band, size, status_rows) = (
+        h.stoat.single_minimap_rect,
+        h.stoat.size(),
+        h.stoat.status_rows(),
+    );
     let rows: Vec<Rect> = h
         .stoat
         .active_workspace()
         .panes
         .split_panes()
-        .filter_map(|(_, pane)| crate::render::pane_status_row(pane.area, band, size))
+        .filter_map(|(_, pane)| crate::render::pane_status_row(pane.area, band, size, status_rows))
         .collect();
     let on = |row: &Rect, (col, y): (i16, i16)| {
         y == row.y as i16 && (row.x as i16..row.right() as i16).contains(&col)
@@ -10618,8 +10622,13 @@ fn commits_in_the_right_half() -> crate::test_harness::TestHarness {
 /// The text of `pane`'s status row in `buf`.
 fn status_row_text(h: &crate::test_harness::TestHarness, buf: &Buffer, pane: PaneId) -> String {
     let area = h.stoat.active_workspace().panes.pane(pane).area;
-    let row = crate::render::pane_status_row(area, h.stoat.single_minimap_rect, h.stoat.size())
-        .expect("the pane has a status row");
+    let row = crate::render::pane_status_row(
+        area,
+        h.stoat.single_minimap_rect,
+        h.stoat.size(),
+        h.stoat.status_rows(),
+    )
+    .expect("the pane has a status row");
     (row.x..row.right())
         .map(|x| buf[(x, row.y)].symbol())
         .collect()

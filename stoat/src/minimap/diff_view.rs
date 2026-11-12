@@ -452,7 +452,8 @@ mod tests {
 
     /// A diff view of a 600-line file whose live text drops base lines 100
     /// and 101 and adds three lines after base line 399, on a stoatty of the
-    /// current protocol at 120 by 24 with the per-pane strip.
+    /// current protocol at 120 by 25 with the per-pane strip. Its status band
+    /// takes two rows, so the pane keeps 23.
     ///
     /// The display holds 603 rows, the removed base rows at display rows 100
     /// and 101 and the added lines at display rows 400 to 402. They want 5
@@ -468,6 +469,7 @@ mod tests {
         live.drain(100..102);
         let (mut h, rx) = diff_view_of("long.txt", &base, &live);
         h.stoat.stoatty_protocol = PROTOCOL_VERSION;
+        h.resize(120, 25);
         (h, rx)
     }
 

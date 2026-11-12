@@ -1637,6 +1637,9 @@ mod tests {
     fn a_stack_past_the_cap_declares_a_rail_over_its_rows() {
         let (mut h, mut rx) = banded_stack();
         h.stoat.stoatty_protocol = PROTOCOL_VERSION;
+        // The status band takes two rows, so 25 keep the 23-row pane whose
+        // 138-row strip the counts below assume.
+        h.resize(120, 25);
         frame(&mut h, &mut rx);
         frame(&mut h, &mut rx);
         h.stoat.settings.editor_minimap_thumb_min_rows = Some(5);

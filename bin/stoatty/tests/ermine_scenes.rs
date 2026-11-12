@@ -27,6 +27,11 @@ const COLS: u16 = 160;
 const ROWS: u16 = 50;
 const FONT_SIZE: u32 = 15;
 
+/// The px a status row's elements draw above their grid row, which centers
+/// them in the 24 px status band. The island stops twice this far above the
+/// status row, where the band's ground starts.
+const STATUS_ROW_PAD: u32 = 3;
+
 const ACCENT: [u8; 3] = [0x7f, 0xb0, 0xff];
 const BASE: [u8; 3] = [0x17, 0x19, 0x1e];
 const CHROME: [u8; 3] = [0x12, 0x14, 0x18];
@@ -75,8 +80,9 @@ type PixelRect = (u32, u32, u32, u32);
 /// with the base surface.
 ///
 /// The boards draw a 16 by 34 px chip on the 18 px row. Its box is the five
-/// cells from column 1. The chip stands one pixel inside the row's top and
-/// bottom, five inside the box's start, and six inside its end.
+/// cells from column 1. The status row draws [`STATUS_ROW_PAD`] px up in its
+/// band. The chip stands one pixel inside that row's top and bottom, five
+/// inside the box's start, and six inside its end.
 ///
 /// The checks read the pixel row or column on each side of each edge, ground
 /// outside and accent inside. An edge one pixel off then fails a check. The
@@ -86,7 +92,8 @@ fn the_basic_diff_scene_draws_on_the_ermine_palette() {
     let mut home = support::scratch_home();
     let shot = settled_frame(home.path(), "basic-diff", "unstaged.txt", "");
 
-    let (x, y, width, height) = cell_rect(2, ROWS - 1, 1, 1);
+    let (x, row_top, width, height) = cell_rect(2, ROWS - 1, 1, 1);
+    let y = row_top - STATUS_ROW_PAD;
     expect_region(
         &shot,
         &mut home,
@@ -707,14 +714,16 @@ fn side_by_side_panes_stand_eight_pixels_apart() {
     }
 }
 
-/// Two stacked panes meet at the upper pane's status row, which is the gap
-/// between them, as the PaneStatus board stacks its islands.
+/// Two stacked panes meet at the upper pane's status row, whose 24 px band is
+/// the gap between them, as the PaneStatus board stacks its islands.
 ///
-/// The row, 24, is 18 px tall, from pixel row 432 to 449, and no island
-/// reaches into it. Pixel column 720 lies in the middle of both panes, where
-/// the row holds no text, so it reads the ground down all 18 pixel rows, and
-/// the lower island's first pixel row, 450, reads the base surface. The upper
-/// pane's name draws in the row's first cells.
+/// The band takes the last 6 px of the spare row 23 and all of the status row
+/// 24, from pixel row 426 to 449. The upper island stops at pixel row 425, and
+/// the lower island starts at 450. Pixel column 720 lies in the middle of both
+/// panes, where the row holds no text. Down that column, pixel row 425 reads
+/// the base surface, the band's 24 pixel rows read the ground, and 450 reads
+/// the base surface again. The upper pane's name draws in the status row's
+/// first cells.
 #[test]
 fn stacked_panes_meet_at_the_upper_pane_s_status_row() {
     let mut home = support::scratch_home();
@@ -724,15 +733,15 @@ fn stacked_panes_meet_at_the_upper_pane_s_status_row() {
         "unstaged.txt",
         "<Space>av<Settle>",
     );
-    let column: Vec<[u8; 3]> = (432..451).map(|y| pixel(&shot, 720, y)).collect();
+    let column: Vec<[u8; 3]> = (425..451).map(|y| pixel(&shot, 720, y)).collect();
     let name = brightest(&shot, cell_rect(1, 24, 12, 1));
 
-    if column != [vec![GROUND; 18], vec![BASE]].concat() || name <= 0x80 {
+    if column != [vec![BASE], vec![GROUND; 24], vec![BASE]].concat() || name <= 0x80 {
         let frame = keep_frame(&shot, &mut home, "stacked_status_row");
         panic!(
-            "pixel column 720 reads {:?} down pixel rows 432 to 450, not the ground down the \
-             status row and then the lower island's base, or the row's first cells peak at \
-             {name:#04x}, not the pane's name; the frame is {}",
+            "pixel column 720 reads {:?} down pixel rows 425 to 450, not the upper island's \
+             base, the ground down the status band, and then the lower island's base, or the \
+             row's first cells peak at {name:#04x}, not the pane's name; the frame is {}",
             column.into_iter().map(hex).collect::<Vec<_>>(),
             frame.display(),
         );
@@ -769,10 +778,12 @@ fn an_island_rounds_its_corners_against_the_ground() {
 /// on the margin beside it, as every revised board draws its panes.
 ///
 /// The island reaches 1 px into the one-column margin and stops 8 px from the
-/// window's edge, so pixel column 3 keeps the ground. Row 48 is the pane's
-/// last content row, above its status row. Every pixel of its cell 80, far
-/// from the island's 6 px corner arcs, reads the base surface down to the
-/// island's bottom edge.
+/// window's edge, so pixel column 3 keeps the ground. Row 47 is the pane's
+/// last content row. The island reaches 12 px into row 48, the spare row of
+/// the status band, and stops 6 px above the status row. Every pixel of cell
+/// 80 from row 47's top down to that edge, far from the island's 6 px corner
+/// arcs, reads the base surface. The pixel row under the edge keeps the
+/// ground.
 #[test]
 fn the_island_draws_no_band_inside_its_bottom_edge() {
     let mut home = support::scratch_home();
@@ -787,16 +798,20 @@ fn the_island_draws_no_band_inside_its_bottom_edge() {
         "margin_beside_the_pane",
     );
 
-    let rect = cell_rect(80, ROWS - 2, 1, 1);
-    let (_, _, width, height) = rect;
-    let base = pixels_of(&shot, rect, BASE);
-    if base != (width * height) as usize {
+    let (x, top, width, _) = cell_rect(80, ROWS - 3, 1, 1);
+    let (_, status_top, ..) = cell_rect(80, ROWS - 1, 1, 1);
+    let height = status_top - 2 * STATUS_ROW_PAD - top;
+    let base = pixels_of(&shot, (x, top, width, height), BASE);
+    let ground = pixels_of(&shot, (x, top + height, width, 1), GROUND);
+    if base != (width * height) as usize || ground != width as usize {
         let frame = keep_frame(&shot, &mut home, "bottom_edge");
         panic!(
-            "{base} of the {} pixels of the pane's last row at cell 80 read {}, not all of \
-             them; the frame is {}",
+            "{base} of the {} pixels of cell 80 from the pane's last row down to the island's \
+             bottom edge read {}, and {ground} of the {width} under that edge read {}, not all \
+             of them; the frame is {}",
             width * height,
             hex(BASE),
+            hex(GROUND),
             frame.display(),
         );
     }
@@ -805,8 +820,9 @@ fn the_island_draws_no_band_inside_its_bottom_edge() {
 /// The status row sits on the ground, and its hairline takes the bar's own
 /// color, so no line shows above the bar. Its branch glyph draws as a glyph.
 ///
-/// The hairline is the top pixel row of the status row, read here over a
-/// blank cell of the bar. The branch glyph, U+2387, draws in column 117, the
+/// The hairline is the top pixel row of the status row, which draws
+/// [`STATUS_ROW_PAD`] px up in its band. The check reads it over a blank cell
+/// of the bar. The branch glyph, U+2387, draws in column 117, the
 /// first glyph cell of the right-aligned repo segment. A glyph's strokes blend
 /// through many colors there, and the empty box that a missing glyph draws
 /// keeps to a few along its straight edges.
@@ -836,7 +852,7 @@ fn the_status_row_sits_on_the_ground_with_no_hairline() {
     expect_region(
         &shot,
         &mut home,
-        (x, y, width, 1),
+        (x, y - STATUS_ROW_PAD, width, 1),
         GROUND,
         "status_hairline",
     );
@@ -1051,8 +1067,9 @@ fn the_file_finder_box_draws_on_the_overlay_surface() {
 /// border in the window ground, and a shadow falls under it.
 ///
 /// `<Space>as` splits the window and moves the focus to the right pane, so the
-/// one badge sits in the left pane, with its top-left cell at (34, 22). The
-/// cell one in from that corner lies inside the box and left of the digit.
+/// one badge sits in the left pane. That pane takes rows 1 to 47 above its
+/// status band, so the 6-row box centers with its top-left cell at (34, 21).
+/// The cell one in from that corner lies inside the box and left of the digit.
 ///
 /// The pixel on the box's left edge four rows down lies outside the 10 px
 /// arc, so it shows neither the fill nor the border. The pixel 40 px along the
@@ -1068,7 +1085,7 @@ fn the_pane_picker_badge_draws_the_accent_box() {
         "unstaged.txt",
         "<Space>as<Settle><Space>ae<Settle>",
     );
-    let (col, row) = (34, 22);
+    let (col, row) = (34, 21);
 
     expect_region(
         &shot,
@@ -1108,8 +1125,9 @@ fn the_pane_picker_badge_draws_the_accent_box() {
 
 /// The which-key box docks on the status bar as a card on the raised surface.
 ///
-/// The cell two columns left of the window's right edge, two rows above the
-/// status row, sits in the card's footer row.
+/// The card's cells end above the two rows of the status band, so its footer
+/// row is three rows above the status row. The cell two columns left of the
+/// window's right edge sits in that footer row.
 #[test]
 fn the_space_box_docks_as_a_card_on_the_raised_surface() {
     let mut home = support::scratch_home();
@@ -1118,7 +1136,7 @@ fn the_space_box_docks_as_a_card_on_the_raised_surface() {
     expect_region(
         &shot,
         &mut home,
-        cell_rect(157, 47, 1, 1),
+        cell_rect(157, 46, 1, 1),
         RAISED,
         "hints_card",
     );
@@ -1174,11 +1192,12 @@ fn the_commits_view_selects_its_first_row_beside_the_lane_graph() {
 /// The diff view keeps the which-key box docked as the same card with no key
 /// held, so the cell in the card's footer row is still on the raised surface.
 ///
-/// The card takes columns 107 to 159 and rows 40 to 48 and the HintBox board's
-/// docked shape. Its top-left corner alone rounds, so that corner's pixel
-/// leaves the raised surface and the top-right corner's keeps it. A fillet
-/// joins its bottom-left corner to the status bar, so the pixel left of that
-/// corner on the card's last pixel row takes the raised surface too.
+/// The card takes columns 107 to 159 and rows 39 to 47, above the two rows of
+/// the status band, and the HintBox board's docked shape. Its top-left corner
+/// alone rounds, so that corner's pixel leaves the raised surface and the
+/// top-right corner's keeps it. A fillet curves out from its bottom-left
+/// corner, so the pixel left of that corner on the card's last pixel row takes
+/// the raised surface too.
 #[test]
 fn the_diff_view_keeps_its_box_docked_on_the_raised_surface() {
     let mut home = support::scratch_home();
@@ -1192,7 +1211,7 @@ fn the_diff_view_keeps_its_box_docked_on_the_raised_surface() {
     expect_region(
         &shot,
         &mut home,
-        cell_rect(157, 47, 1, 1),
+        cell_rect(157, 46, 1, 1),
         RAISED,
         "diff_hints_card",
     );
@@ -1201,9 +1220,9 @@ fn the_diff_view_keeps_its_box_docked_on_the_raised_surface() {
         let at = ((y * shot.width + x) * 4) as usize;
         [shot.rgba[at], shot.rgba[at + 1], shot.rgba[at + 2]]
     };
-    let (left, top, _, _) = cell_rect(107, 40, 1, 1);
-    let (right, _, width, _) = cell_rect(159, 40, 1, 1);
-    let (_, bottom, _, height) = cell_rect(0, 48, 1, 1);
+    let (left, top, _, _) = cell_rect(107, 39, 1, 1);
+    let (right, _, width, _) = cell_rect(159, 39, 1, 1);
+    let (_, bottom, _, height) = cell_rect(0, 47, 1, 1);
     let corners = [
         pixel(left, top),
         pixel(right + width - 1, top),
@@ -2011,8 +2030,8 @@ fn expect_base_frame_top(shot: &Snapshot, home: &mut TempDir, row: u16, what: &s
 }
 
 /// Panics unless each of the single band's seven columns, 152 to 158, reads
-/// as the editor surface from row 1 under the tab bar to row 48 above the
-/// status row, and the band draws text runs on row 1.
+/// as the editor surface from row 1 under the tab bar to row 47 above the
+/// status band, and the band draws text runs on row 1.
 ///
 /// The strip's runs, its marks, and its viewport band cover few of a column's
 /// pixels, so each column reads as the surface that a text strip sits on. A
@@ -2021,7 +2040,7 @@ fn expect_base_frame_top(shot: &Snapshot, home: &mut TempDir, row: u16, what: &s
 /// [`expect_region`] does.
 fn expect_strip_band(shot: &Snapshot, home: &mut TempDir, what: &str) {
     for col in 152..=158 {
-        expect_region(shot, home, cell_rect(col, 1, 1, 48), BASE, what);
+        expect_region(shot, home, cell_rect(col, 1, 1, 47), BASE, what);
     }
 
     let runs = grey_run_pixels(shot, cell_rect(152, 1, 7, 1));

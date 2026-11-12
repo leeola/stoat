@@ -196,6 +196,9 @@ struct LaidCell {
 /// text at its right. A footer always closes it, with `footer`'s text at its
 /// left and the cache's [`FooterKeys`] at its right. Under a live scene the box
 /// is the docked card, a borderless panel in `ui.modal.hints.card`'s fill.
+///
+/// The box docks above the bottom `status_rows` rows of `area`, which hold the
+/// bottom panes' status rows.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn render_hints_grouped(
     title: &str,
@@ -205,6 +208,7 @@ pub(crate) fn render_hints_grouped(
     toggles: ToggleStates,
     theme: &crate::theme::Theme,
     area: Rect,
+    status_rows: u16,
     buf: &mut Buffer,
     scene: &mut stoat_widgets::ApcScene,
 ) {
@@ -212,10 +216,9 @@ pub(crate) fn render_hints_grouped(
         return;
     }
 
-    // Reserve the bottom row for the bottom panes' status rows. Every caller
-    // passes the full window, so the box lays out flush to the right edge
-    // above the row.
-    let area = super::hints_overlay_area(area);
+    // Reserve the bottom panes' status rows. Every caller passes the full
+    // window, so the box lays out flush to the right edge above them.
+    let area = super::hints_overlay_area(area, status_rows);
 
     let right = footer_runs(&cache.footer_keys);
     let right_width = runs_width(&right);
@@ -754,6 +757,7 @@ mod tests {
             toggles,
             &Theme::empty(),
             area,
+            1,
             &mut buf,
             &mut scene,
         );
@@ -1032,6 +1036,7 @@ mod tests {
             ToggleStates::default(),
             &Theme::empty(),
             area,
+            1,
             &mut buf,
             &mut stoat_widgets::ApcScene::new(),
         );
@@ -1068,10 +1073,47 @@ mod tests {
             ToggleStates::default(),
             theme,
             area,
+            1,
             &mut buf,
             &mut scene,
         );
         buf
+    }
+
+    /// The box docks above the rows its caller reserves for the bottom panes'
+    /// status rows, one for a plain row and two for a band.
+    #[test]
+    fn the_box_docks_above_the_reserved_status_rows() {
+        let bottom = |status_rows: u16| {
+            let mut cache = HintsCache::new(
+                0,
+                group_by_action(&plain(&[("k", "act".to_string())])),
+                FooterKeys::default(),
+            );
+            let area = Rect::new(0, 0, 40, 12);
+            let mut buf = Buffer::empty(area);
+            let mut scene = stoat_widgets::ApcScene::new();
+            scene.set_live(false);
+            render_hints_grouped(
+                "normal",
+                "",
+                &mut cache,
+                None,
+                ToggleStates::default(),
+                &Theme::empty(),
+                area,
+                status_rows,
+                &mut buf,
+                &mut scene,
+            );
+            (0..area.height).find(|&y| row_text(&buf, y).contains('└'))
+        };
+
+        assert_eq!(
+            [bottom(1), bottom(2)],
+            [Some(10), Some(9)],
+            "the bottom border sits on the row above the reserved rows",
+        );
     }
 
     /// A row's key draws bold and its action at the text's weight, as the
