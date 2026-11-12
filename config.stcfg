@@ -338,7 +338,7 @@ theme ermine_night inherits default_dark {
     ui.tabbar.inactive     = { fg: muted, bg: ground };
     ui.tabbar.name.fg      = special;
     ui.statusbar.focused   = { fg: dim, bg: ground };
-    ui.statusbar.unfocused = { fg: muted, bg: ground };
+    ui.statusbar.unfocused = { fg: dim, bg: ground };
     ui.mode_label          = { fg: chrome, modifiers: [bold] };
     ui.statusbar.separator.fg = ground;
 

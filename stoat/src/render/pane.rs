@@ -2065,6 +2065,58 @@ fn tinted(style: Style, theme: &crate::theme::Theme, scope: &str) -> Style {
     }
 }
 
+/// The status row's segments for `name`, the name of what its pane shows.
+///
+/// A file's name, with `split`, reads its directory in `ui.text.muted` over
+/// `row_style`, its stem in `name_style`, and the extension that its
+/// [`chrome::TypeTag`] names in the tag's color, as the tab bar reads an
+/// extension. Any other name, such as a terminal's title, is one segment in
+/// `name_style`. The modified mark that `dirty` adds reads muted.
+///
+/// The texts join to `pad`, `name`, the mark, and one closing space, whether
+/// the name parts or not. So a split changes the row's colors and never its
+/// text or its width.
+fn name_segments(
+    name: &str,
+    pad: &str,
+    dirty: bool,
+    split: bool,
+    name_style: Style,
+    row_style: Style,
+    theme: &crate::theme::Theme,
+) -> Vec<StatusSeg> {
+    let muted = tinted(row_style, theme, crate::theme::scope::UI_TEXT_MUTED);
+    let mut segments: Vec<StatusSeg> = Vec::new();
+    if split {
+        let (dir, file) = name.split_at(name.rfind('/').map_or(0, |slash| slash + 1));
+        let lead = match dir {
+            "" => pad,
+            dir => {
+                segments.push((format!("{pad}{dir}"), muted));
+                ""
+            },
+        };
+        match chrome::tagged_name(Path::new(file)) {
+            Some(tagged) => {
+                let suffix = tinted(row_style, theme, tagged.tag.scope);
+                segments.push((format!("{lead}{}", tagged.stem), name_style));
+                segments.push((tagged.suffix, suffix));
+            },
+            None => segments.push((format!("{lead}{file}"), name_style)),
+        }
+    } else {
+        segments.push((format!("{pad}{name}"), name_style));
+    }
+    if dirty {
+        segments.push((" [+]".to_owned(), muted));
+    }
+
+    if let Some((text, _)) = segments.last_mut() {
+        text.push(' ');
+    }
+    segments
+}
+
 /// Resolve the style for the transient status message segment from the bar's
 /// base style plus the theme's `ui.message.error` override.
 ///
@@ -2261,9 +2313,23 @@ fn status_segments(
         } else {
             ""
         };
-        let modified = if status.dirty { " [+]" } else { "" };
-        let text = format!("{left_pad}{name}{modified} ");
-        push_left(&mut left, &mut cursor, lead_end, text, lead_style);
+        let name_style = if is_focused {
+            tinted(lead_style, theme, crate::theme::scope::UI_TEXT)
+        } else {
+            lead_style
+        };
+        let segments = name_segments(
+            name,
+            left_pad,
+            status.dirty,
+            status.buffer_id.is_some(),
+            name_style,
+            lead_style,
+            theme,
+        );
+        for (text, style) in segments {
+            push_left(&mut left, &mut cursor, lead_end, text, style);
+        }
         if let Some(note) = read_only_note(status.read_only, status.disk_len, status.text_len) {
             let muted = tinted(lead_style, theme, crate::theme::scope::UI_TEXT_MUTED);
             push_left(&mut left, &mut cursor, lead_end, note, muted);
@@ -2365,9 +2431,10 @@ fn status_segments(
         let width = text.chars().count() as u16;
         let start = right_anchor.saturating_sub(width);
         if start >= cursor {
-            let style = split.map_or(trail_style, |(_, colors)| {
-                trail_style.fg(colors.target.name)
-            });
+            let style = split.map_or_else(
+                || tinted(trail_style, theme, crate::theme::scope::UI_TEXT_MUTED),
+                |(_, colors)| trail_style.fg(colors.target.name),
+            );
             right.push((text, style));
             right_anchor = start;
         }
@@ -3523,9 +3590,9 @@ fn render_image_pane(
 #[cfg(test)]
 mod tests {
     use super::{
-        byte_size, diff_base_lead, focused_staged_label, paint_status_fallback, read_only_note,
-        repo_segments, resolve_rich_segments, split_halves, split_side_segments, status_filename,
-        tab_mark, DiffSideColors, DiffSidesColors,
+        byte_size, diff_base_lead, focused_staged_label, name_segments, paint_status_fallback,
+        read_only_note, repo_segments, resolve_rich_segments, split_halves, split_side_segments,
+        status_filename, tab_mark, DiffSideColors, DiffSidesColors,
     };
     use crate::{
         action_handlers::{dispatch, focused_editor_mut},
@@ -3704,6 +3771,90 @@ mod tests {
             status_filename(&mut editor, None, root, Some(home)),
             "scratch",
             "a pathless buffer names itself",
+        );
+    }
+
+    /// A file's name reads its directory muted, its stem in the name's style,
+    /// and a tagged extension in the tag's color, and any other name stays one
+    /// segment. However the name parts, its texts join to the pad, the name,
+    /// the modified mark, and one closing space.
+    #[test]
+    fn a_status_name_parts_into_directory_stem_and_suffix() {
+        let h = Stoat::test();
+        let theme = &*h.stoat.theme;
+        let row = theme.get(crate::theme::scope::UI_STATUSBAR_FOCUSED);
+        let [name, muted, rust] = [
+            crate::theme::scope::UI_TEXT,
+            crate::theme::scope::UI_TEXT_MUTED,
+            crate::theme::scope::UI_TAG_RUST,
+        ]
+        .map(|scope| row.fg(theme.get(scope).fg.expect("an ink")));
+        let parts = |text: &str, pad: &str, dirty: bool, split: bool| {
+            name_segments(text, pad, dirty, split, name, row, theme)
+        };
+        let seg = |text: &str, style| (text.to_owned(), style);
+
+        assert_eq!(
+            [
+                parts("src/render/chrome.rs", " ", true, true),
+                parts("src/render/chrome.rs", "", false, true),
+                parts("Makefile", " ", false, true),
+                parts("zsh: ~/src", " ", false, false),
+            ],
+            [
+                vec![
+                    seg(" src/render/", muted),
+                    seg("chrome", name),
+                    seg(".rs", rust),
+                    seg(" [+] ", muted),
+                ],
+                vec![
+                    seg("src/render/", muted),
+                    seg("chrome", name),
+                    seg(".rs ", rust),
+                ],
+                vec![seg(" Makefile ", name)],
+                vec![seg(" zsh: ~/src ", name)],
+            ],
+        );
+    }
+
+    /// The cell fallback inks each split pane's row with the directory muted,
+    /// the name in the text color on the focused row and dim on the other,
+    /// the extension in the tag's color, and the position muted.
+    #[test]
+    fn each_status_row_inks_the_directory_name_extension_and_position() {
+        let mut h = crate::test_harness::TestHarness::with_size(120, 12);
+        h.stoat.stoatty = false;
+        h.stoat.active_workspace_mut().git_root = PathBuf::from("/repo");
+        let path = PathBuf::from("/repo/src/a.rs");
+        h.fake_fs().insert_file(&path, b"fn a() {}\n");
+        dispatch(&mut h.stoat, &OpenFile { path });
+        h.settle();
+        h.type_action("SplitRight()");
+
+        let buf = h.render_composited();
+        let inks: Vec<_> = pane_status_rects(&h)
+            .into_iter()
+            .map(|row| {
+                let text = status_row(&buf, row);
+                let at = |part: &str| row.x + text.find(part).expect("the part shows") as u16;
+                [at("src/"), at("a.rs"), at(".rs"), at("1:1")].map(|x| buf[(x, row.y)].fg)
+            })
+            .collect();
+
+        let theme = &*h.stoat.theme;
+        let [text, dim, muted, rust] = [
+            crate::theme::scope::UI_TEXT,
+            crate::theme::scope::UI_TEXT_DIM,
+            crate::theme::scope::UI_TEXT_MUTED,
+            crate::theme::scope::UI_TAG_RUST,
+        ]
+        .map(|scope| theme.get(scope).fg.expect("an ink"));
+        assert_eq!(
+            inks,
+            [[muted, dim, rust, muted], [muted, text, rust, muted]],
+            "the unfocused left row, then the focused right row",
         );
     }
 
@@ -5914,9 +6065,17 @@ mod tests {
             .replace('─', " ")
     }
 
-    /// The split panes' status rows in `buf`, left to right and then top to
-    /// bottom, each as its width and its text as [`status_row`] reads it.
+    /// The split panes' status rows in `buf`, in [`pane_status_rects`] order,
+    /// each as its width and its text as [`status_row`] reads it.
     fn pane_status_rows(h: &crate::test_harness::TestHarness, buf: &Buffer) -> Vec<(u16, String)> {
+        pane_status_rects(h)
+            .into_iter()
+            .map(|row| (row.width, status_row(buf, row)))
+            .collect()
+    }
+
+    /// The split panes' status rows, left to right and then top to bottom.
+    fn pane_status_rects(h: &crate::test_harness::TestHarness) -> Vec<Rect> {
         let mut areas: Vec<Rect> = h
             .stoat
             .active_workspace()
@@ -5928,13 +6087,8 @@ mod tests {
         areas
             .into_iter()
             .map(|area| {
-                let row = crate::render::pane_status_row(
-                    area,
-                    h.stoat.single_minimap_rect,
-                    h.stoat.size(),
-                )
-                .expect("the pane has a status row");
-                (row.width, status_row(buf, row))
+                crate::render::pane_status_row(area, h.stoat.single_minimap_rect, h.stoat.size())
+                    .expect("the pane has a status row")
             })
             .collect()
     }
