@@ -11,7 +11,9 @@
 //!
 //! 1. **Shrink at endpoints.** Walk both sides from the front, pairing children with matching
 //!    `ContentId`, and stop on the first mismatch. Repeat from the back. The matched ranges are
-//!    tagged [`ChangeKind::Unchanged`] recursively.
+//!    tagged [`ChangeKind::Unchanged`] recursively. When the shrinks leave members on one side
+//!    only, and those members repeat the members before them, the run moves onto the later copy, as
+//!    [`repeat_shift`] describes.
 //!
 //! 2. **LCS anchors.** Over the remaining middle, diff child `ContentId`s to recover the matched
 //!    subsequence. Each match is an anchor, marked unchanged along with its subtree. In a middle
@@ -39,7 +41,9 @@ use super::{
     arena::{Syntax, SyntaxArena, SyntaxId},
     content_id::ContentId,
     fx::FxBuildHasher,
+    graph,
     moves::MAX_AMBIGUITY,
+    Side,
 };
 use imara_diff::{Algorithm, Diff, InternedInput, Interner};
 use smallvec::SmallVec;
@@ -267,6 +271,10 @@ pub fn mark_unchanged(
 /// [`ChangeKind::Unchanged`] and collecting the changed runs between anchors
 /// into `out.sections`.
 ///
+/// When the shrinks leave members on one side only, [`repeat_shift`] decides
+/// whether they move onto the later copy, and [`emit_shifted`] emits a moved
+/// run.
+///
 /// The unmatched run between two consecutive anchors is a changed section. A
 /// run of exactly one same-kind [`Syntax::List`] on each side recurses into
 /// its children instead, so a small edit inside a container drills down to the
@@ -292,17 +300,35 @@ fn pair_children(
         prefix += 1;
     }
 
-    // Phase 1b: shrink common suffix.
+    // Phase 1b: shrink common suffix. The pairs are marked only once the
+    // repeat shift decides how many of them stay.
     let mut suffix = 0usize;
     while prefix + suffix < lhs.len()
         && prefix + suffix < rhs.len()
         && lhs_arena.get(lhs[lhs.len() - 1 - suffix]).content_id()
             == rhs_arena.get(rhs[rhs.len() - 1 - suffix]).content_id()
     {
-        let lhs_id = lhs[lhs.len() - 1 - suffix];
-        let rhs_id = rhs[rhs.len() - 1 - suffix];
-        match_subtrees(lhs_arena, rhs_arena, lhs_id, rhs_id, out);
         suffix += 1;
+    }
+
+    let shift = repeat_shift(lhs_arena, rhs_arena, lhs, rhs, prefix, suffix);
+    let kept = suffix - shift.map_or(0, |(undone, _)| undone);
+    for k in 0..kept {
+        let lhs_id = lhs[lhs.len() - 1 - k];
+        let rhs_id = rhs[rhs.len() - 1 - k];
+        match_subtrees(lhs_arena, rhs_arena, lhs_id, rhs_id, out);
+    }
+    if let Some((undone, side)) = shift {
+        emit_shifted(
+            lhs_arena,
+            rhs_arena,
+            lhs,
+            rhs,
+            (prefix, undone, side),
+            facts,
+            out,
+        );
+        return;
     }
 
     let lhs_mid = &lhs[prefix..lhs.len() - suffix];
@@ -342,6 +368,219 @@ fn pair_children(
         lhs_cursor = lhs_anchor + 1;
         rhs_cursor = rhs_anchor + 1;
     }
+}
+
+/// How far to move a run that the shrinks of [`pair_children`] leave on one
+/// side only, so it lands on the copy that repeats the members before it.
+///
+/// The answer is the count of suffix pairs to undo and the side that holds the
+/// run, or `None` to leave the run where the shrinks put it.
+///
+/// The suffix shrink pairs from the back. When a member was tweaked and a copy
+/// of it added after it, the old member pairs with the far copy, so the tweak
+/// reads as added along with the front of the copy. A reader sees the old
+/// member tweaked in place and the whole copy added.
+///
+/// Each try undoes one more of the suffix pairs nearest the run, and fewer
+/// pairs than the run holds. Each undone member of the shorter side re-pairs
+/// with the longer side's member at its offset from the front, which must be
+/// [`similar`]. The run then moves as many places toward the back. A try
+/// scores the moved run's members that are similar to the members right
+/// before it, member for member, and a run with fewer members before it
+/// scores none.
+///
+/// The moved run ends with the copies of the undone members, and each copy
+/// repeats the member that its original re-pairs with. Only the members in
+/// front of the copies are evidence of a repeat. A try that undoes the whole
+/// run has none, so a run of one member never moves. A deleted match arm is
+/// similar to the arm after it, but that does not make the arm a copy.
+///
+/// The best try wins, the one that undoes fewest on a tie. It holds when at
+/// least two thirds of its evidence members repeat, and when it scores more
+/// than the run scores where the shrinks left it. In a list of members that
+/// all look alike, such as a run of `push` calls, the run already repeats the
+/// members before it, so new members inserted among them stay where they are.
+fn repeat_shift(
+    lhs_arena: &SyntaxArena,
+    rhs_arena: &SyntaxArena,
+    lhs: &[SyntaxId],
+    rhs: &[SyntaxId],
+    prefix: usize,
+    suffix: usize,
+) -> Option<(usize, Side)> {
+    let (side, (short_arena, short), (long_arena, long)) =
+        if prefix + suffix == lhs.len() && lhs.len() < rhs.len() {
+            (Side::Rhs, (lhs_arena, lhs), (rhs_arena, rhs))
+        } else if prefix + suffix == rhs.len() && rhs.len() < lhs.len() {
+            (Side::Lhs, (rhs_arena, rhs), (lhs_arena, lhs))
+        } else {
+            return None;
+        };
+    let run = long.len() - short.len();
+    if suffix == 0 || prefix + suffix < run {
+        return None;
+    }
+
+    let short_leaves: Vec<OnceCell<Vec<ContentId>>> =
+        short.iter().map(|_| OnceCell::new()).collect();
+    let long_leaves: Vec<OnceCell<Vec<ContentId>>> = long.iter().map(|_| OnceCell::new()).collect();
+    let short_at = |i: usize| Member {
+        arena: short_arena,
+        id: short[i],
+        leaves: &short_leaves[i],
+    };
+    let long_at = |i: usize| Member {
+        arena: long_arena,
+        id: long[i],
+        leaves: &long_leaves[i],
+    };
+
+    let repeats = |start: usize| match start >= run {
+        true => (0..run)
+            .filter(|&i| similar(long_at(start + i), long_at(start - run + i)))
+            .count(),
+        false => 0,
+    };
+    let unmoved = repeats(prefix);
+    let mut best = (unmoved, 0);
+    for undone in 1..run.min(suffix + 1) {
+        // Undone member i always re-pairs with the longer side's member i, so a
+        // failed re-pair fails every later try too.
+        let front = prefix + undone - 1;
+        if best.0 == run || !similar(short_at(front), long_at(front)) {
+            break;
+        }
+        let score = repeats(prefix + undone);
+        if score > best.0 {
+            best = (score, undone);
+        }
+    }
+
+    let (score, undone) = best;
+    let evidence = score - undone;
+    (undone > 0 && evidence * 3 >= (run - undone) * 2).then_some((undone, side))
+}
+
+/// Emit the run that [`repeat_shift`] moved, given as `(prefix, undone, side)`.
+///
+/// Each undone suffix member pairs with the member at its offset on the other
+/// side. An identical pair matches whole, and any other pair goes to
+/// [`emit_pair`]. The moved run then becomes one section, empty on the side
+/// that holds none of it.
+fn emit_shifted(
+    lhs_arena: &SyntaxArena,
+    rhs_arena: &SyntaxArena,
+    lhs: &[SyntaxId],
+    rhs: &[SyntaxId],
+    (prefix, undone, side): (usize, usize, Side),
+    facts: &ArenaFacts,
+    out: &mut PreprocessResult,
+) {
+    for i in prefix..prefix + undone {
+        if lhs_arena.get(lhs[i]).content_id() == rhs_arena.get(rhs[i]).content_id() {
+            match_subtrees(lhs_arena, rhs_arena, lhs[i], rhs[i], out);
+        } else {
+            emit_pair(lhs_arena, rhs_arena, lhs[i], rhs[i], facts, out);
+        }
+    }
+
+    let start = prefix + undone;
+    let run = start..start + lhs.len().abs_diff(rhs.len());
+    out.sections.push(match side {
+        Side::Lhs => (lhs[run].to_vec(), Vec::new()),
+        Side::Rhs => (Vec::new(), rhs[run].to_vec()),
+    });
+}
+
+/// One member of a run that [`repeat_shift`] tries, with its leaf ids worked
+/// out on first use, since one member meets several others across the tries.
+#[derive(Clone, Copy)]
+struct Member<'a> {
+    arena: &'a SyntaxArena,
+    id: SyntaxId,
+    leaves: &'a OnceCell<Vec<ContentId>>,
+}
+
+impl Member<'_> {
+    fn leaves(&self) -> &[ContentId] {
+        self.leaves.get_or_init(|| leaf_ids(self.arena, self.id))
+    }
+}
+
+/// Whether `lhs` and `rhs` read as one member and its tweak.
+///
+/// Two subtrees of one content id are similar. Two lists of one kind are
+/// similar when their words, as [`leaf_ids`] gives them, share a longest
+/// common subsequence of more than half the longer word count. Exactly half
+/// is enough when the shorter list's words all lie in it, so a tweak that only
+/// adds words, such as `span` to `span.clone()`, keeps the pair. Two module
+/// declarations that share only `pub` are not similar. Two atoms that differ
+/// are never similar.
+fn similar(lhs: Member<'_>, rhs: Member<'_>) -> bool {
+    let (lhs_node, rhs_node) = (lhs.arena.get(lhs.id), rhs.arena.get(rhs.id));
+    if lhs_node.content_id() == rhs_node.content_id() {
+        return true;
+    }
+    if !same_kind_lists(lhs_node, rhs_node) {
+        return false;
+    }
+
+    let (lhs_leaves, rhs_leaves) = (lhs.leaves(), rhs.leaves());
+    let shorter = lhs_leaves.len().min(rhs_leaves.len());
+    let longer = lhs_leaves.len().max(rhs_leaves.len());
+    // The subsequence is no longer than the shorter list, so a shorter list
+    // under half the longer fails before the table runs.
+    if shorter * 2 < longer {
+        return false;
+    }
+    let common = lcs_len(lhs_leaves, rhs_leaves);
+    common > 0 && (common * 2 > longer || (common * 2 == longer && common == shorter))
+}
+
+/// The content ids of the words under `id`, in source order.
+///
+/// A word is an atom that names something. It holds a letter or a digit, it
+/// is not punctuation, and it is not a keyword or an operator. A keyword such
+/// as `mod` or `fn` is an anonymous token, whose kind is its own text. Every
+/// member of a list of declarations shares it, so it says nothing about which
+/// member is which. An empty group such as the `()` of a call with no
+/// arguments lowers to one atom that holds no letter or digit.
+fn leaf_ids(arena: &SyntaxArena, id: SyntaxId) -> Vec<ContentId> {
+    let mut leaves = Vec::new();
+    let mut stack = vec![id];
+    while let Some(current) = stack.pop() {
+        match arena.get(current) {
+            Syntax::List(list) => stack.extend(list.children.iter().rev().copied()),
+            node @ Syntax::Atom(atom) => {
+                let text = arena.text(atom);
+                let word = atom.kind != text && text.chars().any(char::is_alphanumeric);
+                if word && !graph::probably_punctuation(arena, node) {
+                    leaves.push(node.content_id());
+                }
+            },
+        }
+    }
+    leaves
+}
+
+/// The length of the longest common subsequence of `a` and `b`.
+///
+/// The table keeps one row at a time, so its memory is the length of `b`.
+fn lcs_len(a: &[ContentId], b: &[ContentId]) -> usize {
+    let mut row = vec![0usize; b.len() + 1];
+    for x in a {
+        let mut diagonal = 0;
+        for (j, y) in b.iter().enumerate() {
+            let above = row[j + 1];
+            row[j + 1] = if x == y {
+                diagonal + 1
+            } else {
+                above.max(row[j])
+            };
+            diagonal = above;
+        }
+    }
+    row[b.len()]
 }
 
 /// The pairs of `pairs` that anchor a split of the two middles.
@@ -975,6 +1214,92 @@ mod tests {
                 vec!["a.is_some() || b.is_some()", "||", "c"],
             )],
             "one section holds both chains",
+        );
+    }
+
+    /// A statement tweaked and then repeated as a new copy pairs with its tweak
+    /// in place, and the copy is the insertion, as a reader sees it. Deleting
+    /// such a copy mirrors it.
+    ///
+    /// A run stays where the shrinks leave it when its members do not repeat
+    /// the members before it, here because `other();` repeats nothing (1 of 2).
+    /// It stays too when it already repeats them as well as the moved run does,
+    /// as two calls inserted among calls that all look alike do. A run of one
+    /// member always stays, such as one call inserted among such calls, or a
+    /// deleted match arm that is similar to the arm after it.
+    #[test]
+    fn a_one_sided_run_moves_onto_the_copy_that_repeats_the_members_before_it() {
+        let two = "fn f() { store.write(&geo); store.flush(span); }";
+        let four = "fn f() { store.write(&geo); store.flush(span.clone()); store.write(&phi); \
+                    store.flush(span); }";
+        let other = "fn f() { store.write(&geo); store.flush(x); other(); store.flush(span); }";
+        let pushes = "fn f() { a.push(1); a.push(2); a.push(4); }";
+        let pushes_with_3 = "fn f() { a.push(1); a.push(2); a.push(3); a.push(4); }";
+        let pushes_with_3_9 = "fn f() { a.push(1); a.push(2); a.push(3); a.push(9); a.push(4); }";
+        let arms = "fn f() { match p { _ if x.is_empty() => {} \
+                    Ok(P::Camera) => { h.set(\"camera\", p.on); } \
+                    Ok(P::Restart) => { h.set(\"restart\", p.on); } } }";
+        let arms_without_camera = "fn f() { match p { _ if x.is_empty() => {} \
+                                   Ok(P::Restart) => { h.set(\"restart\", p.on); } } }";
+
+        assert_eq!(
+            [
+                section_texts(two, four),
+                section_texts(four, two),
+                section_texts(two, other),
+                section_texts(pushes, pushes_with_3),
+                section_texts(pushes, pushes_with_3_9),
+                section_texts(arms, arms_without_camera),
+            ],
+            [
+                vec![
+                    (vec!["span"], vec!["span.clone()"]),
+                    (vec![], vec!["store.write(&phi);", "store.flush(span);"]),
+                ],
+                vec![
+                    (vec!["span.clone()"], vec!["span"]),
+                    (vec!["store.write(&phi);", "store.flush(span);"], vec![]),
+                ],
+                vec![(vec![], vec!["store.flush(x);", "other();"])],
+                vec![(vec![], vec!["a.push(3);"])],
+                vec![(vec![], vec!["a.push(3);", "a.push(9);"])],
+                vec![(
+                    vec!["Ok(P::Camera) => { h.set(\"camera\", p.on); }"],
+                    vec![]
+                )],
+            ],
+        );
+    }
+
+    /// Inside a macro's token tree, the tweaked call keeps its comma in place,
+    /// and the whole second call is the insertion, since 7 of its 8 members
+    /// repeat the members of the call before it.
+    #[test]
+    fn a_repeated_call_in_a_token_tree_is_the_insertion() {
+        let lhs = "fn run() { tokio::join!(ca_store.write_versioned(&geo_households)\
+                   .instrument(span),); }";
+        let rhs = "fn run() { tokio::join!(ca_store.write_versioned(&geo_households)\
+                   .instrument(span.clone()), ca_store.write_versioned(&provider_household_index)\
+                   .instrument(span),); }";
+
+        assert_eq!(
+            section_texts(lhs, rhs),
+            [
+                (vec![], vec![".", "clone", "()"]),
+                (
+                    vec![],
+                    vec![
+                        "ca_store",
+                        ".",
+                        "write_versioned",
+                        "(&provider_household_index)",
+                        ".",
+                        "instrument",
+                        "(span)",
+                        ",",
+                    ],
+                ),
+            ],
         );
     }
 

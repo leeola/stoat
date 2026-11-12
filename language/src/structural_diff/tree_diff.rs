@@ -1647,6 +1647,52 @@ mod tests {
         );
     }
 
+    /// A call tweaked and then repeated as a new call marks the tweak on the
+    /// old call's line and the whole new call, as a reader sees the change.
+    ///
+    /// Inside a macro's token tree, the slider pass then trades the two commas
+    /// between the calls. The comma after the old call reads as added, and the
+    /// new call's own comma pairs with the old one, because the slider keeps
+    /// the unchanged node at the end of a run.
+    #[test]
+    fn a_repeated_call_marks_the_tweak_and_the_new_call() {
+        let statements = (
+            "fn f() {\n    store.write(&geo);\n    store.flush(span);\n}\n",
+            "fn f() {\n    store.write(&geo);\n    store.flush(span.clone());\n    \
+             store.write(&phi);\n    store.flush(span);\n}\n",
+        );
+        let joined = (
+            "fn run() {\n    tokio::join!(\n        ca_store\n            \
+             .write_versioned(&geo_households)\n            .instrument(span),\n    );\n}\n",
+            "fn run() {\n    tokio::join!(\n        ca_store\n            \
+             .write_versioned(&geo_households)\n            .instrument(span.clone()),\n        \
+             ca_store\n            .write_versioned(&provider_household_index)\n            \
+             .instrument(span),\n    );\n}\n",
+        );
+        let rows = |(lhs, rhs): (&'static str, &'static str)| {
+            let result = diff_with_language(&rust_lang(), lhs, rhs).unwrap();
+            change_rows(&result, lhs, rhs)
+        };
+
+        assert_eq!(
+            [rows(statements), rows(joined)],
+            [
+                vec![
+                    (Side::Rhs, ".clone()", 2),
+                    (Side::Rhs, "store.write(&phi);", 3),
+                    (Side::Rhs, "store.flush(span);", 4),
+                ],
+                vec![
+                    (Side::Rhs, ".clone()", 4),
+                    (Side::Rhs, ",", 4),
+                    (Side::Rhs, "ca_store", 5),
+                    (Side::Rhs, ".write_versioned(&provider_household_index)", 6),
+                    (Side::Rhs, ".instrument(span)", 7),
+                ],
+            ],
+        );
+    }
+
     /// The pair of an attribute that slid moves with it, so every unchanged
     /// token still pairs, each with its line on the right side.
     #[test]
