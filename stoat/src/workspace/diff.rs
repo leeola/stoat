@@ -44,7 +44,7 @@ use std::{
     path::{Path, PathBuf},
     pin::Pin,
     sync::{Arc, Mutex},
-    task::{Context, Poll},
+    task::{Context, Poll, Wake, Waker},
     time::{Duration, Instant},
 };
 use stoat_language::{
@@ -955,18 +955,20 @@ impl DiffState {
     ) -> bool {
         self.refresh_pair_bases(buffers, executor, redraw_notify);
 
-        let waker = futures::task::noop_waker();
         let mut completed: Vec<(DiffJobOutput, bool, bool, Instant)> = Vec::new();
-        self.jobs.retain(|_, job| {
-            let mut cx = Context::from_waker(&waker);
-            match Pin::new(&mut job.task).poll(&mut cx) {
-                Poll::Ready(out) => {
-                    completed.push((out, job.superseded, job.base_moved, job.started));
-                    false
-                },
-                Poll::Pending => true,
-            }
-        });
+        if !self.jobs.is_empty() {
+            let waker = Waker::from(Arc::new(RedrawWaker(redraw_notify.clone())));
+            self.jobs.retain(|_, job| {
+                let mut cx = Context::from_waker(&waker);
+                match Pin::new(&mut job.task).poll(&mut cx) {
+                    Poll::Ready(out) => {
+                        completed.push((out, job.superseded, job.base_moved, job.started));
+                        false
+                    },
+                    Poll::Pending => true,
+                }
+            });
+        }
         for (out, superseded, base_moved, started) in completed {
             if base_moved {
                 tracing::info!(
@@ -1310,6 +1312,20 @@ impl DiffLanding {
             Self::FileHop { .. } => "FileHop",
             Self::HeldRow { .. } => "HeldRow",
         }
+    }
+}
+
+/// A waker that asks the run loop for a frame.
+///
+/// A diff job asks for a frame before its result reaches the job's task. So
+/// the drive in that frame sometimes polls the task before the result is
+/// there. Polled with this waker, the task asks for another frame when its
+/// result lands, and the drive in that frame installs it.
+struct RedrawWaker(Arc<Notify>);
+
+impl Wake for RedrawWaker {
+    fn wake(self: Arc<Self>) {
+        self.0.notify_one();
     }
 }
 
@@ -2341,7 +2357,7 @@ mod tests {
         theme::Theme,
         workspace::Workspace,
     };
-    use futures::future;
+    use futures::{future, FutureExt};
     use ratatui::style::Color;
     use std::{
         collections::HashMap,
@@ -3488,6 +3504,48 @@ mod tests {
             h.fake_git().blob_reads(&repo),
             before,
             "which reuses the cached blobs rather than rereading them",
+        );
+    }
+
+    /// A diff job's result that lands after a drive polled its task asks for
+    /// the frame that installs it.
+    ///
+    /// The job asks for a frame before its result reaches its task, so the
+    /// drive in that frame sometimes polls the task too early. The test
+    /// scheduler runs the job's closure at the spawn and its task only when
+    /// the scheduler runs. So the drive after the spawn always polls too early.
+    #[test]
+    fn a_diff_job_polled_before_it_lands_asks_for_the_frame_that_installs_it() {
+        let (mut h, buffer_id) = wanted_harness();
+        h.settle_diff_jobs();
+
+        h.stoat
+            .active_workspace()
+            .buffers
+            .get(buffer_id)
+            .expect("buffer")
+            .write()
+            .expect("poisoned")
+            .edit(0..0, "x");
+        h.stoat.drive_background();
+        h.advance_clock(DIFF_SETTLE + std::time::Duration::from_millis(1));
+
+        h.stoat.drive_background();
+        h.stoat.drive_background();
+        assert_eq!(
+            h.stoat.active_workspace().diff.jobs.len(),
+            1,
+            "the drive after the spawn finds the job still in flight",
+        );
+
+        let _ = h.stoat.redraw_notify.notified().now_or_never();
+        h.run_until_parked();
+        let asked = h.stoat.redraw_notify.notified().now_or_never().is_some();
+        h.stoat.drive_background();
+        assert_eq!(
+            (asked, h.stoat.active_workspace().diff.jobs.len()),
+            (true, 0),
+            "the landed result asks for a frame, and that frame's drive installs it",
         );
     }
 
