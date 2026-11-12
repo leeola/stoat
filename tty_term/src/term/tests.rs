@@ -6311,7 +6311,7 @@ fn minimap_cmd(strip_id: u32, content_id: u32) -> MinimapCommand {
         max_columns: 120,
         bg: [0, 0, 0, 0],
         thumb: [200, 200, 200, 48],
-        thumb_border: Some([255, 255, 255]),
+        thumb_border: Some([255, 255, 255, 255]),
         rule_class: 0,
         thumb_radius: 0,
         palette: vec![[0, 0, 0], [1, 2, 3]],

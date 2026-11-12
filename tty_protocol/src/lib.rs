@@ -213,9 +213,14 @@
 /// it reads the first 15 bytes and draws every bar square. This version drops
 /// a shorter argument.
 ///
+/// Version 33 reads a fixed 33-byte `minimap` head, whose thumb outline is
+/// rgba. The terminal draws the outline as a ring at the thumb's corner
+/// radius. A terminal that predates it reads the outline's alpha as the rule
+/// class. This version drops a shorter head.
+///
 /// Zero is reserved for a peer whose handshake carries no version at all, which
 /// is every build from before the field existed.
-pub const PROTOCOL_VERSION: u32 = 32;
+pub const PROTOCOL_VERSION: u32 = 33;
 
 /// The first [`PROTOCOL_VERSION`] whose terminal reads the `text_runs` and
 /// `bars` batches.
@@ -265,6 +270,13 @@ pub const POPOVER_CHROME_PROTOCOL: u32 = 31;
 /// An earlier terminal draws every bar square, and a terminal at this version
 /// drops a `bar` argument that holds no radius.
 pub const BAR_CORNERS_PROTOCOL: u32 = 32;
+
+/// The first [`PROTOCOL_VERSION`] whose terminal draws a `minimap` thumb's
+/// rgba outline as a ring at the thumb's corner radius.
+///
+/// An earlier terminal reads the outline's alpha as the rule class, and a
+/// terminal at this version drops a `minimap` head that holds no alpha.
+pub const MINIMAP_THUMB_OUTLINE_PROTOCOL: u32 = 33;
 
 pub mod command;
 pub mod detect;

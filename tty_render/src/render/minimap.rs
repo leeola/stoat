@@ -26,8 +26,9 @@ use wgpu::{
 const INITIAL_CAPACITY: usize = 256;
 
 /// The per-quad instance data. It carries an absolute-pixel rectangle, an rgba
-/// fill, the strip's declaration-order seq the fragment shader occludes by, and
-/// a corner radius in physical pixels, 0 for a square quad.
+/// fill, the strip's declaration-order seq the fragment shader occludes by, a
+/// corner radius in physical pixels, 0 for a square quad, and a ring width in
+/// physical pixels, 0 for a filled quad.
 #[repr(C)]
 #[derive(Clone, Copy, PartialEq, Pod, Zeroable)]
 struct MinimapInstance {
@@ -36,6 +37,7 @@ struct MinimapInstance {
     color: [f32; 4],
     seq: u32,
     radius: f32,
+    stroke: f32,
 }
 
 /// The uniform shared by every instance, matching the bar pass layout so the
@@ -194,6 +196,7 @@ impl MinimapPass {
                         2 => Float32x4,
                         3 => Uint32,
                         4 => Float32,
+                        5 => Float32,
                     ],
                 })],
             },
@@ -596,6 +599,7 @@ fn build_strip(
         color: rgba_f32(strip.strip.bg),
         seq,
         radius: 0.0,
+        stroke: 0.0,
     }];
 
     let total = content.len() as f32;
@@ -644,6 +648,7 @@ fn build_strip(
                 color: rgb_weighted_f32(*color, run.weight),
                 seq,
                 radius: 0.0,
+                stroke: 0.0,
             });
         }
     }
@@ -656,43 +661,42 @@ fn build_strip(
         layout.strip_h,
         layout.line_h,
     );
-    // An outline's four hairlines stay square, so a thumb under one does too.
-    let radius = match strip.strip.thumb_border {
-        Some(_) => 0.0,
-        None => f32::from(strip.strip.thumb_radius) * metrics.scale_factor,
-    };
-    instances.push(MinimapInstance {
-        origin: [layout.strip_x, layout.strip_y + thumb_offset],
-        size: [layout.strip_w, thumb_height],
-        color: rgba_f32(strip.strip.thumb),
-        seq,
-        radius,
-    });
-
+    let radius = f32::from(strip.strip.thumb_radius) * metrics.scale_factor;
+    let fill = rgba_f32(strip.strip.thumb);
     let Some(border) = strip.strip.thumb_border else {
+        instances.push(MinimapInstance {
+            origin: [layout.strip_x, layout.strip_y + thumb_offset],
+            size: [layout.strip_w, thumb_height],
+            color: fill,
+            seq,
+            radius,
+            stroke: 0.0,
+        });
         return (instances, rect);
     };
 
-    // The thumb's outline, one logical pixel wide on rounded rows so the
-    // hairline stays crisp.
-    let border = rgb_opaque_f32(border);
+    // An outlined thumb stands on whole pixel rows, so its one logical pixel
+    // ring stays crisp and the fill ends under the ring.
     let top_y = (layout.strip_y + thumb_offset).round();
     let bottom_y = (top_y + thumb_height).round();
-    let (x, w, h) = (layout.strip_x, layout.strip_w, bottom_y - top_y);
-    for (origin, size) in [
-        ([x, top_y], [w, hairline]),
-        ([x, bottom_y - hairline], [w, hairline]),
-        ([x, top_y], [hairline, h]),
-        ([x + w - hairline, top_y], [hairline, h]),
-    ] {
-        instances.push(MinimapInstance {
-            origin,
-            size,
-            color: border,
-            seq,
-            radius: 0.0,
-        });
-    }
+    let origin = [layout.strip_x, top_y];
+    let size = [layout.strip_w, bottom_y - top_y];
+    instances.push(MinimapInstance {
+        origin,
+        size,
+        color: fill,
+        seq,
+        radius,
+        stroke: 0.0,
+    });
+    instances.push(MinimapInstance {
+        origin,
+        size,
+        color: rgba_f32(border),
+        seq,
+        radius,
+        stroke: hairline,
+    });
 
     (instances, rect)
 }
@@ -792,7 +796,7 @@ mod tests {
             max_columns: 120,
             bg: Rgba::new(0, 0, 0, 0),
             thumb: Rgba::new(200, 200, 200, 48),
-            thumb_border: Some(Rgb::new(255, 255, 255)),
+            thumb_border: Some(Rgba::new(255, 255, 255, 255)),
             rule_class: 0,
             thumb_radius: 0,
             palette: vec![
@@ -953,9 +957,8 @@ mod tests {
         // height 10 * 12 = 120.
         assert_eq!(rect, [60.0, 0.0, 48.0, 120.0]);
 
-        // Background first, then the two runs, then the thumb and its four
-        // border edges.
-        assert_eq!(instances.len(), 8);
+        // Background first, then the two runs, then the thumb and its ring.
+        assert_eq!(instances.len(), 5);
         let first_run = instances[1];
         assert_eq!(first_run.origin, [60.0, 0.0], "class-1 run at start_col 0");
         assert_eq!(first_run.size[0], 4.0 * 0.4, "width is len * col_w");
@@ -1009,9 +1012,9 @@ mod tests {
             uniform_layout(),
         );
 
-        // Background + one run (the single line) + thumb + its four border
-        // edges, nothing for the missing lines the strip window covers.
-        assert_eq!(instances.len(), 7);
+        // Background + one run (the single line) + thumb + its ring, nothing
+        // for the missing lines the strip window covers.
+        assert_eq!(instances.len(), 4);
     }
 
     /// A strip that declares no outline shows the viewport by the thumb's tint
@@ -1040,18 +1043,18 @@ mod tests {
         );
     }
 
-    /// A borderless strip rounds its thumb at the declared radius in physical
-    /// pixels, and no other quad. A thumb under an outline stays square, as
-    /// the outline's hairlines do.
+    /// A strip rounds its thumb at the declared radius in physical pixels, and
+    /// no other quad. An outlined thumb's ring takes the same radius, and only
+    /// the ring has a stroke, one physical pixel wide at scale 1.
     #[test]
-    fn the_thumb_alone_carries_the_radius() {
+    fn the_thumb_and_its_ring_carry_the_radius() {
         let run = MinimapRun {
             start_col: 0,
             len: 4,
             class: 1,
             weight: 255,
         };
-        let radii = |border: Option<Rgb>, scale_factor: f32| {
+        let radii = |border: Option<Rgba>, scale_factor: f32| {
             let mut rounded = strip(None);
             rounded.strip.thumb_border = border;
             rounded.strip.thumb_radius = 4;
@@ -1067,7 +1070,7 @@ mod tests {
             );
             instances
                 .iter()
-                .map(|instance| instance.radius)
+                .map(|instance| (instance.radius, instance.stroke))
                 .collect::<Vec<_>>()
         };
 
@@ -1075,10 +1078,14 @@ mod tests {
             [
                 radii(None, 1.0),
                 radii(None, 2.0),
-                radii(Some(Rgb::new(255, 255, 255)), 1.0),
+                radii(Some(Rgba::new(255, 255, 255, 255)), 1.0),
             ],
-            [vec![0.0, 0.0, 4.0], vec![0.0, 0.0, 8.0], vec![0.0; 7],],
-            "the background, the run, the thumb, and any outline's four edges",
+            [
+                vec![(0.0, 0.0), (0.0, 0.0), (4.0, 0.0)],
+                vec![(0.0, 0.0), (0.0, 0.0), (8.0, 0.0)],
+                vec![(0.0, 0.0), (0.0, 0.0), (4.0, 0.0), (4.0, 1.0)],
+            ],
+            "the background, the run, the thumb, and any outline's ring",
         );
     }
 
@@ -1274,10 +1281,10 @@ mod tests {
         pass.prepare(&device, &queue, &second, &[], resolution, uniform_layout());
 
         // A strip's instances are its lines plus its background, its thumb, and
-        // the thumb's four border edges.
+        // the thumb's ring.
         assert_eq!(
             (two_lines, pass.built[0].instances.len(), pass.builds),
-            (8, 12, 2),
+            (5, 9, 2),
             "the second grid's lines are the ones built",
         );
     }
@@ -1516,7 +1523,7 @@ mod tests {
             max_columns,
             bg: Rgba::new(0, 0, 0, 0),
             thumb: Rgba::new(0, 0, 0, 0),
-            thumb_border: Some(Rgb::new(0, 0, 0)),
+            thumb_border: Some(Rgba::new(0, 0, 0, 255)),
             rule_class: 0,
             thumb_radius: 0,
             palette: vec![Rgb::new(255, 0, 0)],
@@ -1711,7 +1718,7 @@ mod tests {
         // No view, so the thumb spans the whole four-cell strip: 6 px wide and
         // 48 tall, with the border on rows 0 and 47 and columns 0 and 5.
         let mut strip = red_strip(1, 4, 6, 12);
-        strip.thumb_border = Some(Rgb::new(255, 0, 0));
+        strip.thumb_border = Some(Rgba::new(255, 0, 0, 255));
         let grid = red_grid(strip, vec![Vec::new(); 10], None);
 
         let red = render_red(&device, &queue, &grid, &[], metrics());
@@ -1766,6 +1773,29 @@ mod tests {
             (off, corner(0)[0]),
             (vec![], 255),
             "every corner pixel within 2 of its arc coverage, and a square corner whole",
+        );
+    }
+
+    /// A rounded thumb's outline is a ring one pixel wide that follows the
+    /// 4 px arc, so the corner pixel past the arc stays clear while the
+    /// straight edges draw whole. The transparent fill leaves the inside clear.
+    #[test]
+    fn an_outlined_thumb_rings_its_rounded_corners() {
+        let (device, queue) = require_headless_device();
+
+        // No view, so the thumb and its ring span the whole strip, 12 px wide
+        // and 48 tall from the target's top left.
+        let mut strip = red_strip(2, 4, 6, 12);
+        strip.thumb_border = Some(Rgba::new(255, 0, 0, 255));
+        strip.thumb_radius = 4;
+        let grid = red_grid(strip, vec![Vec::new(); 10], None);
+        let red = render_red(&device, &queue, &grid, &[], metrics());
+        let at = |x: u32, y: u32| u32::from(red[(y * TARGET + x) as usize]);
+
+        assert_eq!(
+            [at(0, 0), at(0, 24), at(6, 0), at(3, 24)],
+            [0, 255, 255, 0],
+            "a clear corner past the arc, whole straight edges, and a clear inside",
         );
     }
 
