@@ -1294,10 +1294,14 @@ pub(crate) fn frame(
     // `layout_size`. The band is stamped on Stoat for the mouse handler, then
     // read back for this paint. It sits inside the island margin, and
     // `layout_size` leaves a gap column of the margin's width left of it, so
-    // under islands the window reads margin, panes, gap, band, margin.
+    // under islands the window reads margin, panes, gap, band, margin. While
+    // no split pane shows an editor or a changes view, the band tracks no pane
+    // and is not reserved, so `layout_size` gives its columns to the panes.
     stoat.active_workspace_mut().refresh_band_pane();
+    let tracked = stoat.active_workspace().band_pane.is_some();
     stoat.single_minimap_rect = (minimap_mode == MinimapMode::Single
-        && full.width >= editor::MINIMAP_MIN_PANE_COLS)
+        && full.width >= editor::MINIMAP_MIN_PANE_COLS
+        && tracked)
         .then(|| Rect {
             x: full.x + full.width - editor::MINIMAP_STRIP_COLS - margin,
             y: full.y + tab_bar_rows,

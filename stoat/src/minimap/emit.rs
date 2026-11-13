@@ -1944,6 +1944,52 @@ mod tests {
         );
     }
 
+    /// Single mode reserves no band while no split pane shows an editor or a
+    /// changes view, so panes of labels take every column. An editor pane
+    /// brings the band back, and the band leaves with it.
+    #[test]
+    fn single_minimap_mode_reserves_no_band_without_a_strip_pane() {
+        use stoat_action::SplitRight;
+        use stoat_config::MinimapMode;
+
+        let label_focused = |h: &mut crate::test_harness::TestHarness| {
+            let ws = h.stoat.active_workspace_mut();
+            let focus = ws.panes.focus();
+            ws.panes.pane_mut(focus).view = View::Label("x".into());
+        };
+        let band = |h: &mut crate::test_harness::TestHarness| {
+            let _ = h.stoat.render();
+            (
+                h.stoat.single_minimap_rect.is_some(),
+                h.stoat.layout_size().width,
+            )
+        };
+
+        let mut h = Stoat::test();
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+        h.stoat.set_apc_tx(tx);
+        h.stoat.settings.editor_minimap = Some(MinimapMode::Single);
+        h.resize(200, 24);
+
+        label_focused(&mut h);
+        let lone_label = band(&mut h);
+
+        let a = h.write_file("a.txt", "alpha\n");
+        action_handlers::dispatch(&mut h.stoat, &SplitRight);
+        h.open_file(&a);
+        let editor_beside = band(&mut h);
+
+        label_focused(&mut h);
+        let two_labels = band(&mut h);
+
+        assert_eq!(
+            [lone_label, editor_beside, two_labels],
+            [(false, 200), (true, 193), (false, 200)],
+            "the band and the pane tree's width with labels, with an editor beside, and with \
+             labels again",
+        );
+    }
+
     /// Under islands a gap column parts the panes from the band, and the band
     /// sits inside the window's right margin, so the window reads margin,
     /// panes, gap, band, margin.

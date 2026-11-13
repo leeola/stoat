@@ -1376,7 +1376,8 @@ pub struct Stoat {
     pub(crate) tab_bar_spans: Vec<Range<u16>>,
     /// The window-right strip band single-minimap mode reserves, stamped every
     /// paint. `Some` only under stoatty in [`stoat_config::MinimapMode::Single`]
-    /// on a wide-enough window, and `None` in per-pane and off modes.
+    /// on a wide-enough window while a split pane shows an editor or a changes
+    /// view, and `None` in per-pane and off modes.
     pub(crate) single_minimap_rect: Option<Rect>,
     /// The focused pane's status-bar LSP badge group, in cells, stamped every
     /// paint. `Some` only when a badge painted, `None` when the focused bar shows
@@ -3767,6 +3768,9 @@ impl Stoat {
     /// `Some(true)` shows the setting's mode, falling back to
     /// [`MinimapMode::Single`] when the setting itself is `Off`. With no
     /// override the setting wins, defaulting to [`MinimapMode::Single`].
+    ///
+    /// Single mode reserves no band while no split pane shows an editor or a
+    /// changes view, so a window of terminals gives every column to the panes.
     pub(crate) fn minimap_mode(&self) -> MinimapMode {
         let setting = self.settings.editor_minimap.unwrap_or(MinimapMode::Single);
         match self.minimap_override {
