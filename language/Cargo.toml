@@ -13,11 +13,11 @@ blake3 = { workspace = true }
 imara-diff = { workspace = true }
 serde = { workspace = true }
 smallvec = { workspace = true }
-tree-sitter = "0.27"
+tree-sitter = { workspace = true }
 tree-sitter-language = "0.1"
 
 [build-dependencies]
-cc = "1"
+cc = { workspace = true }
 
 [dev-dependencies]
 divan = "0.1"

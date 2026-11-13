@@ -97,7 +97,6 @@ regex = "1"
 regex-cursor = { version = "0.1", default-features = false, features = [
   "perf-inline",
 ] }
-brush-parser = "0.4"
 wgpu = "30"
 bytemuck = { version = "1.25", features = ["derive"] }
 raw-window-handle = "0.6"
