@@ -11,6 +11,7 @@ use crate::{
 };
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
 use flate2::{read::GzEncoder, Compression};
+use futures::FutureExt;
 use ratatui::{
     buffer::Buffer,
     style::{Color, Modifier},
@@ -25,6 +26,7 @@ use std::{
 use stoat_config::{Settings, TabBarMode};
 use stoat_scheduler::TestScheduler;
 use stoatty_protocol::command;
+use tokio::sync::Notify;
 use unicode_width::UnicodeWidthStr;
 
 pub struct Frame {
@@ -596,6 +598,17 @@ impl TestHarness {
     /// test's to read rather than one [`Self::settle`] already consumed.
     pub fn run_until_parked(&mut self) {
         self.scheduler.run_until_parked();
+    }
+
+    /// Run the scheduler to rest and report whether that woke `notify`.
+    ///
+    /// A wake from before the run is drained first, so only a task that lands
+    /// during the run counts. A test polls a task before it lands and then
+    /// asks this whether the landing asks for the pass that collects it.
+    pub(crate) fn wakes_when_parked(&mut self, notify: Arc<Notify>) -> bool {
+        let _ = notify.notified().now_or_never();
+        self.run_until_parked();
+        notify.notified().now_or_never().is_some()
     }
 
     /// Drive the scheduler and async pump pipeline to a fixed point. After

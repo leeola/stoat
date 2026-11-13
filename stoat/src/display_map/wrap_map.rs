@@ -3,6 +3,7 @@ use super::{
     highlights::{Chunk, HighlightCursor, HighlightEndpoints},
     tab_map::{self, TabChunks, TabPoint, TabSnapshot},
 };
+use crate::wake;
 use std::{
     borrow::Cow,
     cmp::Ordering,
@@ -571,7 +572,7 @@ impl WrapMap {
 
     fn poll_background_task(&mut self) {
         if let Some(ref mut task) = self.background_task {
-            let waker = futures::task::noop_waker();
+            let waker = wake::notify_waker(&self.redraw);
             let mut cx = Context::from_waker(&waker);
             if let Poll::Ready((snapshot, edits)) = Pin::new(task).poll(&mut cx) {
                 let mut inverted = mem::take(&mut self.interpolated_edits);
@@ -1911,6 +1912,7 @@ mod tests {
         },
         multi_buffer::{MultiBuffer, MultiBufferSnapshot},
     };
+    use futures::{channel::oneshot, FutureExt};
     use ratatui::style::Color;
     use std::{
         collections::HashMap,
@@ -1928,6 +1930,18 @@ mod tests {
     }
 
     fn make_snapshot(content: &str, wrap_width: Option<u32>) -> Arc<super::WrapSnapshot> {
+        let (_, wrap_snapshot) = WrapMap::new(
+            make_tab_snapshot(content),
+            wrap_width,
+            test_executor(),
+            crate::test_notify(),
+        );
+        wrap_snapshot
+    }
+
+    /// The tab snapshot of `content`, with no inlays or folds and four-column
+    /// tabs.
+    fn make_tab_snapshot(content: &str) -> TabSnapshot {
         let buffer = TextBuffer::with_text(BufferId::new(0), content);
         let shared = Arc::new(RwLock::new(buffer));
         let multi_buffer = MultiBuffer::singleton(shared);
@@ -1935,14 +1949,42 @@ mod tests {
         let (_, inlay_snapshot) = InlayMap::new(buffer_snapshot);
         let (_, fold_snapshot) = FoldMap::new(inlay_snapshot);
         let mut tab_map = TabMap::new(std::num::NonZeroU32::new(4).unwrap());
-        let (tab_snapshot, _) = tab_map.sync(fold_snapshot, Patch::empty());
-        let (_, wrap_snapshot) = WrapMap::new(
-            tab_snapshot,
-            wrap_width,
-            test_executor(),
-            crate::test_notify(),
+        tab_map.sync(fold_snapshot, Patch::empty()).0
+    }
+
+    /// A rewrap that lands after a poll found it running wakes the map's
+    /// redraw, so the next sync installs it.
+    ///
+    /// The walk's own task wakes the redraw before it stores its result, and
+    /// that wake sometimes goes to the sync that finds the walk still running.
+    /// The task here has no wake of its own, so only the poll asks again.
+    #[test]
+    fn a_rewrap_polled_before_it_lands_wakes_the_redraw() {
+        let scheduler = Arc::new(TestScheduler::new());
+        let executor = Executor::new(scheduler.clone());
+        let redraw = crate::test_notify();
+        let (mut wrap_map, _) = WrapMap::new(
+            make_tab_snapshot("one two three\n"),
+            Some(20),
+            executor.clone(),
+            redraw.clone(),
         );
-        wrap_snapshot
+        let (tx, rx) = oneshot::channel();
+        wrap_map.background_task =
+            Some(executor.spawn(async move { rx.await.expect("the test sends the walk") }));
+        wrap_map.poll_background_task();
+
+        let walked = (wrap_map.snapshot.clone(), Patch::empty());
+        assert!(tx.send(walked).is_ok(), "the walk awaits its result");
+        let _ = redraw.notified().now_or_never();
+        scheduler.run_until_parked();
+        let asked = redraw.notified().now_or_never().is_some();
+        wrap_map.poll_background_task();
+        assert_eq!(
+            (asked, wrap_map.background_task.is_none()),
+            (true, true),
+            "the landed walk wakes the redraw, and the next poll installs it",
+        );
     }
 
     /// [`make_snapshot`] with `range` folded behind the default ellipsis, each

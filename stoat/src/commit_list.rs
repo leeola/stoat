@@ -3,6 +3,7 @@ use crate::{
     host::{CommitFileChange, CommitInfo, GitRepo},
     pane::View,
     review_session::DiffDocument,
+    wake,
 };
 use serde::{Deserialize, Serialize};
 use slotmap::new_key_type;
@@ -15,6 +16,7 @@ use std::{
     task::{Context, Poll},
 };
 use stoat_scheduler::Task;
+use tokio::sync::Notify;
 
 /// Commits whose built preview a surface keeps around.
 ///
@@ -419,11 +421,14 @@ impl CommitListState {
     /// A load that found the pending selection's commit selects it on the row
     /// it stood on. One that found the commit gone ends the wait and leaves the
     /// selection where it is.
-    pub(crate) fn poll_pending_load(&mut self) -> bool {
+    ///
+    /// A load still running wakes `redraw_notify` when it lands, so the next
+    /// pass collects it.
+    pub(crate) fn poll_pending_load(&mut self, redraw_notify: &Arc<Notify>) -> bool {
         let Some(mut task) = self.pending_load.take() else {
             return false;
         };
-        let waker = futures::task::noop_waker();
+        let waker = wake::notify_waker(redraw_notify);
         let mut cx = Context::from_waker(&waker);
         match Pin::new(&mut task).poll(&mut cx) {
             Poll::Ready(load) => {
@@ -453,11 +458,13 @@ impl CommitListState {
 
     /// Poll the in-flight preview task. On completion, caches the
     /// session under its sha. Returns true when a result landed.
-    pub(crate) fn poll_pending_preview(&mut self) -> bool {
+    ///
+    /// A preview still running wakes `redraw_notify` when it lands.
+    pub(crate) fn poll_pending_preview(&mut self, redraw_notify: &Arc<Notify>) -> bool {
         let Some(mut pending) = self.pending_preview.take() else {
             return false;
         };
-        let waker = futures::task::noop_waker();
+        let waker = wake::notify_waker(redraw_notify);
         let mut cx = Context::from_waker(&waker);
         match Pin::new(&mut pending.task).poll(&mut cx) {
             Poll::Ready(load) => {

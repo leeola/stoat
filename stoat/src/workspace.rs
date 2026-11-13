@@ -37,6 +37,7 @@ use crate::{
     ssh::RemoteTarget,
     syntax_parse::{parse_buffer_step, ParseJobOutput},
     term_session::{TermId, TermSession, ViewLocation},
+    wake,
     workspace::diff::{
         BaseHighlightCache, ChangedRangesMemo, ChangedRangesScan, DiffBase, DiffLanding, DiffState,
         PairBase, RepoStatus, RevOrigin, WorktreeBase,
@@ -1416,7 +1417,8 @@ impl Workspace {
         &mut self,
         language_registry: &LanguageRegistry,
     ) -> Vec<(BufferId, Vec<DiffLanding>)> {
-        self.diff.poll_wants(&self.buffers, language_registry)
+        self.diff
+            .poll_wants(&self.buffers, language_registry, &self.redraw_notify)
     }
 
     /// Point every buffer's diff at `base`, or back at the working tree's pick
@@ -1736,7 +1738,7 @@ impl Workspace {
         self.drain_index_debounce(executor, index_update_tx, redraw_notify);
 
         let mut installed: Vec<ParseLanding> = Vec::new();
-        let waker = futures::task::noop_waker();
+        let waker = wake::notify_waker(parse_notify);
         let mut completed: Vec<ParseJobOutput> = Vec::new();
         self.parse_jobs.retain(|_, job| {
             let mut cx = Context::from_waker(&waker);
@@ -2403,6 +2405,7 @@ mod tests {
         test_harness::TestHarness,
         theme::scope,
     };
+    use futures::channel::oneshot;
     use ratatui::layout::Rect;
     use std::{
         path::{Path, PathBuf},
@@ -2953,6 +2956,45 @@ mod tests {
         assert!(
             cancel.load(Ordering::Relaxed),
             "and stops the parse rather than only dropping its result",
+        );
+    }
+
+    /// A parse that lands after a drive polled its job wakes the parse notify,
+    /// so the next pass installs it.
+    ///
+    /// A job's own task wakes the notify before it stores its result, and that
+    /// wake sometimes goes to the drive that finds the job still running. The
+    /// job here has no wake of its own, so only the drive's poll asks again.
+    #[test]
+    fn a_parse_polled_before_it_lands_wakes_the_pass_that_installs_it() {
+        let mut h = TestHarness::with_size(40, 10);
+        let id = h.stoat.focused_editor_ids().expect("focused editor").1;
+        let (tx, rx) = oneshot::channel();
+        let task = h
+            .stoat
+            .executor
+            .spawn(async move { rx.await.ok().flatten() });
+        let cancel = Arc::new(AtomicBool::new(false));
+        h.stoat
+            .active_workspace_mut()
+            .parse_jobs
+            .insert(id, ParseJob { task, cancel });
+        h.stoat.drive_background();
+        assert!(
+            h.stoat.active_workspace().parse_jobs.contains_key(&id),
+            "the drive finds the parse still running",
+        );
+
+        assert!(tx.send(None).is_ok(), "the job awaits its result");
+        let asked = h.wakes_when_parked(h.stoat.parse_notify.clone());
+        h.stoat.drive_background();
+        assert_eq!(
+            (
+                asked,
+                h.stoat.active_workspace().parse_jobs.contains_key(&id)
+            ),
+            (true, false),
+            "the landed parse wakes the parse notify, and the next drive takes it",
         );
     }
 

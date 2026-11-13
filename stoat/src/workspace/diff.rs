@@ -32,7 +32,7 @@ use crate::{
     jumplist::JumpEntry,
     multi_buffer::MultiBuffer,
     review_approval::ApprovedRows,
-    syntax_parse,
+    syntax_parse, wake,
 };
 use codegraph::FileId;
 use std::{
@@ -44,7 +44,7 @@ use std::{
     path::{Path, PathBuf},
     pin::Pin,
     sync::{Arc, Mutex},
-    task::{Context, Poll, Wake, Waker},
+    task::{Context, Poll},
     time::{Duration, Instant},
 };
 use stoat_language::{
@@ -788,8 +788,9 @@ impl DiffState {
         &mut self,
         buffers: &BufferRegistry,
         language_registry: &LanguageRegistry,
+        redraw_notify: &Arc<Notify>,
     ) -> Vec<(BufferId, Vec<DiffLanding>)> {
-        let waker = futures::task::noop_waker();
+        let waker = wake::notify_waker(redraw_notify);
         let mut landed = Vec::new();
         self.wants.retain(|_, want| {
             let mut cx = Context::from_waker(&waker);
@@ -957,7 +958,7 @@ impl DiffState {
 
         let mut completed: Vec<(DiffJobOutput, bool, bool, Instant)> = Vec::new();
         if !self.jobs.is_empty() {
-            let waker = Waker::from(Arc::new(RedrawWaker(redraw_notify.clone())));
+            let waker = wake::notify_waker(redraw_notify);
             self.jobs.retain(|_, job| {
                 let mut cx = Context::from_waker(&waker);
                 match Pin::new(&mut job.task).poll(&mut cx) {
@@ -1109,7 +1110,7 @@ impl DiffState {
     ) -> bool {
         let mut landed = false;
         if let Some(job) = &mut self.tally_job {
-            let waker = futures::task::noop_waker();
+            let waker = wake::notify_waker(redraw_notify);
             let mut cx = Context::from_waker(&waker);
             if let Poll::Ready(tally) = Pin::new(job).poll(&mut cx) {
                 // A `None` answer means the root is outside a repo now, which
@@ -1312,20 +1313,6 @@ impl DiffLanding {
             Self::FileHop { .. } => "FileHop",
             Self::HeldRow { .. } => "HeldRow",
         }
-    }
-}
-
-/// A waker that asks the run loop for a frame.
-///
-/// A diff job asks for a frame before its result reaches the job's task. So
-/// the drive in that frame sometimes polls the task before the result is
-/// there. Polled with this waker, the task asks for another frame when its
-/// result lands, and the drive in that frame installs it.
-struct RedrawWaker(Arc<Notify>);
-
-impl Wake for RedrawWaker {
-    fn wake(self: Arc<Self>) {
-        self.0.notify_one();
     }
 }
 
@@ -3546,6 +3533,54 @@ mod tests {
             (asked, h.stoat.active_workspace().diff.jobs.len()),
             (true, 0),
             "the landed result asks for a frame, and that frame's drive installs it",
+        );
+    }
+
+    /// A repository tally that lands after a drive polled its task asks for
+    /// the frame that installs it, as a diff job does.
+    #[test]
+    fn a_tally_polled_before_it_lands_asks_for_the_frame_that_installs_it() {
+        let (mut h, _) = wanted_harness();
+        h.settle_diff_jobs();
+
+        h.stoat.active_workspace_mut().diff.stale_tally();
+        h.stoat.drive_background();
+        h.stoat.drive_background();
+        assert!(
+            h.stoat.active_workspace().diff.tally_job.is_some(),
+            "the drive after the spawn finds the tally still in flight",
+        );
+
+        let asked = h.wakes_when_parked(h.stoat.redraw_notify.clone());
+        h.stoat.drive_background();
+        assert_eq!(
+            (asked, h.stoat.active_workspace().diff.tally_pending()),
+            (true, false),
+            "the landed tally asks for a frame, and that frame's drive installs it",
+        );
+    }
+
+    /// A want's hunks that land after a pump polled its task ask for the frame
+    /// that installs them, as a diff job's do.
+    #[test]
+    fn a_want_polled_before_it_lands_asks_for_the_frame_that_installs_it() {
+        let (mut h, buffer_id) = wanted_harness();
+
+        action_handlers::review::ensure_diff_map(&mut h.stoat, buffer_id, None);
+        let early = action_handlers::review::pump_diff_wants(&mut h.stoat);
+        assert!(
+            !early && h.stoat.active_workspace().diff.want_pending(buffer_id),
+            "the pump after the spawn finds the want still in flight",
+        );
+
+        let asked = h.wakes_when_parked(h.stoat.redraw_notify.clone());
+        assert_eq!(
+            (
+                asked,
+                action_handlers::review::pump_diff_wants(&mut h.stoat)
+            ),
+            (true, true),
+            "the landed want asks for a frame, and that frame's pump installs it",
         );
     }
 

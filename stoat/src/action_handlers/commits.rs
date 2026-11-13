@@ -425,11 +425,12 @@ fn ensure_selected_preview(stoat: &mut Stoat, id: CommitListId) {
 /// Every action handler that touches a list calls this, so tests which settle
 /// the scheduler see consistent state on the next render.
 fn drain_commits_tasks(stoat: &mut Stoat, id: CommitListId) {
-    let Some(state) = stoat.active_workspace_mut().commit_lists.get_mut(id) else {
+    let ws = stoat.active_workspace_mut();
+    let Some(state) = ws.commit_lists.get_mut(id) else {
         return;
     };
-    state.poll_pending_load();
-    state.poll_pending_preview();
+    state.poll_pending_load(&ws.redraw_notify);
+    state.poll_pending_preview(&ws.redraw_notify);
 }
 
 /// Pull the finished tasks of every open list into its state, and spawn the
@@ -457,11 +458,12 @@ pub(crate) fn pump_commits(stoat: &mut Stoat) -> bool {
 /// whether anything landed or started.
 fn pump_commit_list(stoat: &mut Stoat, id: CommitListId) -> bool {
     let landed = {
-        let Some(state) = stoat.active_workspace_mut().commit_lists.get_mut(id) else {
+        let ws = stoat.active_workspace_mut();
+        let Some(state) = ws.commit_lists.get_mut(id) else {
             return false;
         };
-        let a = state.poll_pending_load();
-        let b = state.poll_pending_preview();
+        let a = state.poll_pending_load(&ws.redraw_notify);
+        let b = state.poll_pending_preview(&ws.redraw_notify);
         a || b
     };
     let spawned_before = {
@@ -788,6 +790,14 @@ mod tests {
     /// Open `:commits` over a two-commit history and settle, leaving the newer
     /// commit selected.
     fn open_two_commit_history(h: &mut crate::test_harness::TestHarness) {
+        seed_two_commit_history(h);
+        h.type_text(":commits");
+        h.type_keys("enter");
+        h.settle();
+    }
+
+    /// Root the workspace at a `/repo` whose `main` holds two commits.
+    fn seed_two_commit_history(h: &mut crate::test_harness::TestHarness) {
         h.seed_linear_history(
             "/repo",
             &[
@@ -806,10 +816,73 @@ mod tests {
             .branch("main", "bbbb2222")
             .set_head_branch("main");
         h.stoat.active_workspace_mut().git_root = "/repo".into();
+    }
 
-        h.type_text(":commits");
-        h.type_keys("enter");
-        h.settle();
+    /// A page that lands after a pump polled its load asks for the frame that
+    /// installs it.
+    ///
+    /// The load asks for a frame before its result reaches its task, so the
+    /// pump in that frame sometimes finds it still running. The test scheduler runs
+    /// the load's closure at the spawn and its task only when it runs, so the
+    /// pump after the open always finds it running.
+    #[test]
+    fn a_page_polled_before_it_lands_asks_for_the_frame_that_installs_it() {
+        let mut h = Stoat::test();
+        seed_two_commit_history(&mut h);
+        let _ = super::open_commits(&mut h.stoat);
+        super::pump_commits(&mut h.stoat);
+
+        let asked = h.wakes_when_parked(h.stoat.redraw_notify.clone());
+        super::pump_commits(&mut h.stoat);
+        let loaded = h
+            .stoat
+            .active_workspace()
+            .focused_commits()
+            .expect("commits state")
+            .commits
+            .len();
+        assert_eq!(
+            (asked, loaded),
+            (true, 2),
+            "the landed page asks for a frame, and that frame's pump installs it",
+        );
+    }
+
+    /// A preview that lands after a pump polled its build asks for the frame
+    /// that installs it, as a page does.
+    #[test]
+    fn a_preview_polled_before_it_lands_asks_for_the_frame_that_installs_it() {
+        let mut h = Stoat::test();
+        open_two_commit_history(&mut h);
+        let sha = {
+            let state = h
+                .stoat
+                .active_workspace_mut()
+                .focused_commits_mut()
+                .expect("commits state");
+            state.selected = 1;
+            state.selected_sha().expect("the older commit").to_string()
+        };
+        let list = h
+            .stoat
+            .active_workspace()
+            .focused_commits_id()
+            .expect("the list pane");
+        super::ensure_selected_preview(&mut h.stoat, list);
+        super::pump_commits(&mut h.stoat);
+
+        let asked = h.wakes_when_parked(h.stoat.redraw_notify.clone());
+        super::pump_commits(&mut h.stoat);
+        let state = h
+            .stoat
+            .active_workspace()
+            .focused_commits()
+            .expect("commits state");
+        assert_eq!(
+            (asked, state.summaries.contains_key(&sha)),
+            (true, true),
+            "the landed preview asks for a frame, and that frame's pump installs it",
+        );
     }
 
     /// Reading the summary took a tree walk, and a wide commit made that tens of

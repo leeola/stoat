@@ -8,6 +8,7 @@ use crate::{
     git_jobs::{self, GitJob, GitJobKey, GitLanding, GitWork},
     host::CommitInfo,
     review_walk::{ReturnRef, ReviewWalk, WalkSpan},
+    wake,
     workspace::diff::DiffBase,
 };
 use std::{
@@ -1061,7 +1062,7 @@ pub(crate) fn pump_commit_picker(stoat: &mut Stoat) -> bool {
     }
     let walked = install_pending_commits(stoat);
     let landed = match stoat.commit_picker.as_mut() {
-        Some(picker) => poll_pending_preview(picker),
+        Some(picker) => poll_pending_preview(picker, &stoat.redraw_notify),
         None => return walked,
     };
 
@@ -1093,7 +1094,7 @@ fn install_pending_commits(stoat: &mut Stoat) -> bool {
         return false;
     };
 
-    let waker = futures::task::noop_waker();
+    let waker = wake::notify_waker(&stoat.redraw_notify);
     let mut cx = Context::from_waker(&waker);
     let loaded = match Pin::new(&mut task).poll(&mut cx) {
         Poll::Ready(loaded) => loaded,
@@ -1204,7 +1205,12 @@ fn ensure_selected_preview(stoat: &mut Stoat) {
 /// construction while only one build runs at a time, since the two are recorded
 /// together at the spawn. It is the invariant that lets a session be cached
 /// without asking where the selection has moved to in the meantime.
-fn poll_pending_preview(picker: &mut CommitPicker) -> bool {
+///
+/// A build still running wakes `redraw_notify` when it lands.
+fn poll_pending_preview(
+    picker: &mut CommitPicker,
+    redraw_notify: &Arc<tokio::sync::Notify>,
+) -> bool {
     use std::{
         future::Future,
         pin::Pin,
@@ -1214,7 +1220,7 @@ fn poll_pending_preview(picker: &mut CommitPicker) -> bool {
     let Some(mut pending) = picker.pending_preview.take() else {
         return false;
     };
-    let waker = futures::task::noop_waker();
+    let waker = wake::notify_waker(redraw_notify);
     let mut cx = Context::from_waker(&waker);
     match Pin::new(&mut pending.task).poll(&mut cx) {
         Poll::Ready(load) => {
@@ -1714,9 +1720,9 @@ mod tests {
         assert_eq!(picker.commits.len(), 3, "the seeded history arrived");
     }
 
-    /// The pump reading the walk polls with a noop waker, so without a wake at
-    /// completion the picker would sit empty after the keystroke that opened it
-    /// until some unrelated event drove the pumps.
+    /// Nothing else drives the pumps after the keystroke that opened the picker.
+    /// Without a wake at completion, the picker stays empty until some unrelated
+    /// event drives them.
     ///
     /// The query matches no row, so the walk lands on an empty selection and no
     /// preview build follows it. That leaves the walk as the only thing that
@@ -1752,6 +1758,66 @@ mod tests {
         assert!(
             notified.enable(),
             "the walk should wake the loop so the list appears on its own",
+        );
+    }
+
+    /// A walk that lands after a pump polled it asks for the frame that
+    /// installs it.
+    ///
+    /// The walk asks for a frame before its result reaches its task, so the
+    /// pump in that frame sometimes finds it still running. The test scheduler
+    /// runs the walk at the spawn and its task only when it runs, so the pump
+    /// after the open always finds it running.
+    #[test]
+    fn a_walk_polled_before_it_lands_asks_for_the_frame_that_installs_it() {
+        let mut h = harness();
+        super::git_ls(&mut h.stoat, None);
+        super::pump_commit_picker(&mut h.stoat);
+
+        let asked = h.wakes_when_parked(h.stoat.redraw_notify.clone());
+        super::pump_commit_picker(&mut h.stoat);
+        let walked = h
+            .stoat
+            .commit_picker
+            .as_ref()
+            .expect("picker")
+            .commits
+            .len();
+        assert_eq!(
+            (asked, walked),
+            (true, 3),
+            "the landed walk asks for a frame, and that frame's pump installs it",
+        );
+    }
+
+    /// A preview that lands after a pump polled its build asks for the frame
+    /// that installs it, as a walk does.
+    #[test]
+    fn a_picker_preview_polled_before_it_lands_asks_for_the_frame_that_installs_it() {
+        let mut h = harness();
+        super::git_ls(&mut h.stoat, None);
+        h.settle();
+        super::commit_picker_step(&mut h.stoat, 1);
+        let sha = h
+            .stoat
+            .commit_picker
+            .as_ref()
+            .and_then(|picker| picker.selected_commit())
+            .expect("a selected commit")
+            .sha
+            .clone();
+        super::pump_commit_picker(&mut h.stoat);
+
+        let asked = h.wakes_when_parked(h.stoat.redraw_notify.clone());
+        super::pump_commit_picker(&mut h.stoat);
+        let picker = h.stoat.commit_picker.as_ref().expect("picker");
+        assert_eq!(
+            (
+                asked,
+                matches!(picker.preview_sessions.get(&sha), Preview::Built(_))
+            ),
+            (true, true),
+            "the landed preview asks for a frame, and that frame's pump installs it",
         );
     }
 
