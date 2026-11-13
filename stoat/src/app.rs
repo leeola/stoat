@@ -4028,23 +4028,26 @@ impl Stoat {
     ///
     /// While islands are on, the area also stops [`Self::island_margin`]
     /// columns short of each side of the window, so the window ground shows
-    /// along both edges. It stops [`Self::status_rows`] rows short of the
-    /// bottom too, the rows that hold the bottom panes' status rows. The last
-    /// is [`Self::status_bar_rect`], and a band's spare row sits above it. It
-    /// starts under the [`Self::tab_bar_rows`] rows of the tab bar.
+    /// along both edges. It stops the same number of columns short of a
+    /// reserved band. That gap column parts the band from the panes, so the
+    /// band stands as an island of its own. It stops [`Self::status_rows`]
+    /// rows short of the bottom too, the rows that hold the bottom panes'
+    /// status rows. The last is [`Self::status_bar_rect`], and a band's spare
+    /// row sits above it. It starts under the [`Self::tab_bar_rows`] rows of
+    /// the tab bar.
     ///
     /// Centered modals do not lay out here. They take the full [`Self::size`]
     /// and the strip yields to them, so their paint, pools, and mouse hit-tests
     /// derive from `size` instead.
     pub(crate) fn layout_size(&self) -> Rect {
+        let margin = self.island_margin();
         let size = match self.single_minimap_rect {
             Some(band) => Rect {
-                width: self.size.width.saturating_sub(band.width),
+                width: self.size.width.saturating_sub(band.width + margin),
                 ..self.size
             },
             None => self.size,
         };
-        let margin = self.island_margin();
         let size = Rect {
             x: size.x + margin,
             width: size.width.saturating_sub(2 * margin),

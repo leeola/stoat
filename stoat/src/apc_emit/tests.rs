@@ -1998,11 +1998,11 @@ fn split_panes_declare_island_halos_in_place_of_the_gap_hairline() {
     );
 }
 
-/// A pane flush against the minimap band, over the band's rows, takes the band
-/// into its island. Stacked panes leave the band outside, since neither spans
-/// the band's rows.
+/// Under islands the minimap band is an island of its own, one gap column
+/// right of the panes, whether one pane spans the band's rows or two stacked
+/// panes share them.
 #[test]
-fn a_pane_beside_the_minimap_band_takes_the_band_into_its_island() {
+fn the_minimap_band_is_an_island_beside_the_panes() {
     let halos = |split_down: bool| {
         let (mut h, mut rx) = islands_harness();
         h.stoat.settings.editor_minimap = Some(MinimapMode::Single);
@@ -2011,7 +2011,9 @@ fn a_pane_beside_the_minimap_band_takes_the_band_into_its_island() {
             h.type_action("SplitDown()");
             h.settle();
         }
-        let spans: Vec<(u16, u16)> = island_halos(&mut h, &mut rx)
+        let mut halos = island_halos(&mut h, &mut rx);
+        halos.sort_by_key(|halo| (halo.x, halo.y));
+        let spans: Vec<(u16, u16)> = halos
             .into_iter()
             .map(|halo| (halo.x, halo.x + halo.width))
             .collect();
@@ -2026,8 +2028,11 @@ fn a_pane_beside_the_minimap_band_takes_the_band_into_its_island() {
     let (stacked, ..) = halos(true);
     assert_eq!(
         (single, stacked),
-        (vec![(1, band_end)], vec![(1, band_x), (1, band_x)]),
-        "one pane's island reaches over the band, and stacked islands stop at it",
+        (
+            vec![(1, band_x - 1), (band_x, band_end)],
+            vec![(1, band_x - 1), (1, band_x - 1), (band_x, band_end)],
+        ),
+        "the pane islands stop at the gap column, and the band takes an island of its own",
     );
 }
 

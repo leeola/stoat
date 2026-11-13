@@ -1944,10 +1944,11 @@ mod tests {
         );
     }
 
-    /// Under islands the band sits inside the window's right margin, so the
-    /// window reads margin, panes, band, margin.
+    /// Under islands a gap column parts the panes from the band, and the band
+    /// sits inside the window's right margin, so the window reads margin,
+    /// panes, gap, band, margin.
     #[test]
-    fn under_islands_the_band_sits_inside_the_right_margin() {
+    fn under_islands_a_gap_column_parts_the_panes_from_the_band() {
         use stoat_config::MinimapMode;
 
         let mut h = Stoat::test();
@@ -1965,8 +1966,8 @@ mod tests {
         let panes = h.stoat.layout_size();
         assert_eq!(
             [panes.x, panes.x + panes.width, band.x + band.width],
-            [1, band.x, 199],
-            "a margin, the panes up to the band, then the band one column short of the edge",
+            [1, band.x - 1, 199],
+            "a margin, the panes up to the gap column, then the band one column short of the edge",
         );
     }
 

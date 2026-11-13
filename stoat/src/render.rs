@@ -1292,8 +1292,9 @@ pub(crate) fn frame(
     // the full window width, and starts under the tab bar's rows when the bar
     // holds the top, since the band derives its own rect instead of going through
     // `layout_size`. The band is stamped on Stoat for the mouse handler, then
-    // read back for this paint. It sits inside the island margin, so the
-    // window reads margin, panes, band, margin.
+    // read back for this paint. It sits inside the island margin, and
+    // `layout_size` leaves a gap column of the margin's width left of it, so
+    // under islands the window reads margin, panes, gap, band, margin.
     stoat.single_minimap_rect = (minimap_mode == MinimapMode::Single
         && full.width >= editor::MINIMAP_MIN_PANE_COLS)
         .then(|| Rect {
@@ -1689,9 +1690,13 @@ pub(crate) fn frame(
 
     // The band shows a buffer's minimap, which sits on the editor surface as a
     // pane's content does, so the band clears to that surface and not to the
-    // window ground.
+    // window ground. Under islands it stands apart from the panes as an island
+    // of its own.
     if let Some(band) = single_minimap_rect {
         clear_surface(band, buf, &stoat.theme);
+        if frame.islands && scene.live() {
+            pane::render_band_island(band, frame, scene);
+        }
     }
 
     // Single mode declares one strip over the reserved right-edge band for the
@@ -2682,9 +2687,10 @@ fn single_band_rail(ws: &Workspace, chrome: MinimapChrome<'_>) -> Option<u32> {
 /// Every pane has `rows` free rows under it, the gap between it and a stacked
 /// sibling or the rows that [`Stoat::layout_size`] leaves at the window's
 /// bottom, so a status row takes nothing from the panes. A band's two rows put
-/// the status row under the spare row. A pane whose island takes the single
-/// minimap `band` runs its row under the band too. `None` for an empty area
-/// and for a pane whose status row reaches past the `window`'s last row.
+/// the status row under the spare row. A pane flush against the single
+/// minimap `band`, over the band's rows, runs its row under the band too,
+/// which only the flush layout allows. `None` for an empty area and for a
+/// pane whose status row reaches past the `window`'s last row.
 ///
 /// [`Stoat::layout_size`]: crate::Stoat::layout_size
 pub(crate) fn pane_status_row(

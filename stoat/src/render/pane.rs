@@ -413,45 +413,39 @@ pub(crate) fn render_pane(
 /// The halo is a backdrop panel over the content in the editor surface's fill,
 /// with the island role's radius and shadow. A backdrop paints its fill only
 /// outside its cells, so the pane's tints and its pool composite keep drawing
-/// inside it. A pane flush against the single-minimap band, over the band's own
-/// rows, takes the band into its island, so the band sits inside an island and
-/// not on the window ground.
+/// inside it.
 ///
 /// The island reaches past its cells as [`island_edges`] sets its sides, so the
 /// strips it reaches across take the surface. Its border is the window ground,
 /// which the renderer paints over the corner arcs inside the pane's cells.
 pub(crate) fn render_island(content_area: Rect, frame: FrameCtx<'_>, scene: &mut ApcScene) {
     let theme = frame.theme;
-    let Some(ground) = style_rgb(crate::render::ground_surface(theme)) else {
-        return;
-    };
-    let area = match frame.minimap_band {
-        Some(band)
-            if band.x == content_area.right()
-                && band.y == content_area.y
-                && band.height == content_area.height =>
-        {
-            Rect {
-                width: content_area.width + band.width,
-                ..content_area
-            }
-        },
-        _ => content_area,
-    };
+    let inset_x = theme.panel(PanelRole::Island).inset_x;
+    if let Some(panel) = island_panel(island_edges(content_area, frame, inset_x), theme) {
+        panel.draw_components(content_area, scene);
+    }
+}
 
+/// The halo of an island whose sides reach as `edges` sets them.
+///
+/// The fill is the editor surface and the border is the window ground, at the
+/// island role's radius and shadow. `None` under a theme with no RGB ground,
+/// which sets nothing apart from the islands.
+fn island_panel(edges: [Edge; 4], theme: &crate::theme::Theme) -> Option<Panel> {
+    let ground = style_rgb(crate::render::ground_surface(theme))?;
     let role = theme.panel(PanelRole::Island);
     let surface = style_rgb(
         theme
             .try_get(crate::theme::scope::UI_BACKGROUND)
             .and_then(|style| style.bg),
     );
-    Panel {
+    Some(Panel {
         style: BorderStyle::None_,
         border: ground,
         corner_radius: role.corner_radius,
         fill: surface,
         shadow: role.shadow,
-        edges: island_edges(area, frame, role.inset_x),
+        edges,
         corners: 0,
         fillets: 0,
         fillet_radius: 2,
@@ -459,8 +453,7 @@ pub(crate) fn render_island(content_area: Rect, frame: FrameCtx<'_>, scene: &mut
         above_pools: false,
         backdrop: true,
         anchor: None,
-    }
-    .draw_components(area, scene);
+    })
 }
 
 /// The sides of the island over `area`, in [`Edge`] order: top, right,
@@ -469,10 +462,10 @@ pub(crate) fn render_island(content_area: Rect, frame: FrameCtx<'_>, scene: &mut
 /// A left or right side that meets the window's chrome margin reaches into it,
 /// and one that meets the gap toward a sibling pane reaches into that gap, so
 /// the island stands [`ISLAND_SPACING`] pixels from the window and from its
-/// siblings. A gap divider counts when it spans the island's rows. The pane
-/// root runs on over the single minimap band, which the island beside it
-/// takes, and no island reaches over the band. Any other left or right side
-/// keeps the island role's `inset_x`.
+/// siblings. A gap divider counts when it spans the island's rows. The gap
+/// column left of the single minimap band counts too, since the band stands
+/// as an island of its own. Any other left or right side keeps the island
+/// role's `inset_x`.
 ///
 /// Without chrome bands, the top and the bottom stay flush, since each meets
 /// a status row or the tab bar, and never a gap. With them, the bottom reaches
@@ -483,9 +476,6 @@ pub(crate) fn render_island(content_area: Rect, frame: FrameCtx<'_>, scene: &mut
 /// below the bar's cell row, where the 32 px band ends.
 fn island_edges(area: Rect, frame: FrameCtx<'_>, inset_x: u8) -> [Edge; 4] {
     let root = frame.pane_root;
-    let root_right = frame
-        .minimap_band
-        .map_or(root.right(), |band| band.right().max(root.right()));
     let vertical = |x: u16| {
         frame.dividers.iter().any(|divider| {
             divider.orientation == DividerOrientation::Vertical
@@ -499,30 +489,60 @@ fn island_edges(area: Rect, frame: FrameCtx<'_>, inset_x: u8) -> [Edge; 4] {
         (false, true) => Edge::Gap(ISLAND_SPACING),
         (false, false) => rest,
     };
-
-    let top = match frame.chrome_bands && frame.tab_bar_shown && area.y == root.y {
-        true => Edge::Margin(2 * TAB_BAR_PAD),
-        false => Edge::Inset(0),
-    };
-    let bottom = match frame.chrome_bands {
-        true => Edge::Margin(2 * STATUS_ROW_PAD),
-        false => Edge::Inset(0),
-    };
+    let at_root_right = area.right() == root.right();
+    let banded = frame.minimap_band.is_some();
 
     [
-        top,
+        island_top(frame, area.y == root.y),
         side(
-            area.right() == root_right,
-            vertical(area.right()),
+            at_root_right && !banded,
+            vertical(area.right()) || (at_root_right && banded),
             Edge::Inset(inset_x),
         ),
-        bottom,
+        island_bottom(frame),
         side(
             area.x == root.x,
             area.x.checked_sub(1).is_some_and(vertical),
             Edge::Inset(inset_x),
         ),
     ]
+}
+
+/// Declare the island halo of the single minimap `band`.
+///
+/// The band stands one gap column right of the pane tree, inside the window's
+/// right margin, so its halo reaches into the gap as a sibling pane's does and
+/// into the margin as a pane's does. Its top and bottom are those of a pane at
+/// the top of the tree, so the band lines up with the panes beside it and
+/// leaves the status rows under them on the window ground.
+pub(crate) fn render_band_island(band: Rect, frame: FrameCtx<'_>, scene: &mut ApcScene) {
+    let edges = [
+        island_top(frame, true),
+        Edge::Margin(ISLAND_SPACING),
+        island_bottom(frame),
+        Edge::Gap(ISLAND_SPACING),
+    ];
+    if let Some(panel) = island_panel(edges, frame.theme) {
+        panel.draw_components(band, scene);
+    }
+}
+
+/// The top side of an island, which reaches up into a tab bar band only from
+/// the pane tree's top row.
+fn island_top(frame: FrameCtx<'_>, at_root_top: bool) -> Edge {
+    match frame.chrome_bands && frame.tab_bar_shown && at_root_top {
+        true => Edge::Margin(2 * TAB_BAR_PAD),
+        false => Edge::Inset(0),
+    }
+}
+
+/// The bottom side of an island, which reaches into the spare row of the
+/// status band under it whenever chrome bands are on.
+fn island_bottom(frame: FrameCtx<'_>) -> Edge {
+    match frame.chrome_bands {
+        true => Edge::Margin(2 * STATUS_ROW_PAD),
+        false => Edge::Inset(0),
+    }
 }
 
 /// Declare the dashed ring and the label of a read-only editor whose text
@@ -5050,6 +5070,8 @@ mod tests {
     ///
     /// Two stacked panes at 160 by 50 with no tab bar keep their status rows
     /// on rows 24 and 49 either way. The bands take one row from each pane.
+    /// The single minimap band's island, the third, ends as the lower pane's
+    /// island does.
     #[test]
     fn a_status_row_is_a_band_from_the_nudge_protocol_on() {
         use stoatty_protocol::{
@@ -5109,13 +5131,13 @@ mod tests {
                     vec![(0, 23), (25, 23)],
                     vec![24, 49],
                     vec![Command::Nudge([0, -3]), Command::Nudge([0, 0])],
-                    vec![Edge::Margin(6); 2],
+                    vec![Edge::Margin(6); 3],
                 ),
                 (
                     vec![(0, 24), (25, 24)],
                     vec![24, 49],
                     vec![],
-                    vec![Edge::Inset(0); 2],
+                    vec![Edge::Inset(0); 3],
                 ),
             ],
             "the pane rows, the status rows, the lane's first and last nudge, and the island \
@@ -5126,9 +5148,10 @@ mod tests {
     /// From the nudge protocol on, the tab bar is a band over the top two
     /// rows. Lane 0 nudges the bar down by the pad before its text runs and
     /// back after them, the active tab's pill stands out of its row, and the
-    /// top pane's island reaches up into the band. A stoatty before the nudge
-    /// keeps the one-row bar, the chip's box, and flush island tops. A hidden
-    /// bar takes no rows, and no island reaches above its pane.
+    /// islands of the top pane and the single minimap band reach up into the
+    /// band. A stoatty before the nudge keeps the one-row bar, the chip's box,
+    /// and flush island tops. A hidden bar takes no rows, and no island reaches
+    /// above its pane.
     ///
     /// Two stacked panes at 160 by 50 under a bar that always shows start on
     /// rows 2 and 26 with the band, and on rows 1 and 25 without it. With the
@@ -5201,15 +5224,15 @@ mod tests {
                     vec![2, 26],
                     vec![Some([0, 7]), None, Some([0, 0])],
                     vec![[pill, Edge::Inset(0), pill, Edge::Inset(0)]],
-                    vec![Edge::Margin(14), Edge::Inset(0)],
+                    vec![Edge::Margin(14), Edge::Margin(14), Edge::Inset(0)],
                 ),
                 (
                     vec![1, 25],
                     vec![None],
                     vec![Edge::symmetric(0, 1)],
-                    vec![Edge::Inset(0); 2],
+                    vec![Edge::Inset(0); 3],
                 ),
-                (vec![0, 25], vec![], vec![], vec![Edge::Inset(0); 2]),
+                (vec![0, 25], vec![], vec![], vec![Edge::Inset(0); 3]),
             ],
             "the pane tops, lane 0's nudges around its text runs, the pill's edges, and the \
              island tops",
@@ -5887,6 +5910,70 @@ mod tests {
                 .map(|x| buf[(x, row)].bg)
                 .collect::<Vec<_>>(),
             vec![target; usize::from(band.width)],
+        );
+    }
+
+    /// Under islands no status row reaches the gap column or the band. The
+    /// islands on each side of that column reach into it, and the band's
+    /// island spans the rows of a pane island that spans the pane tree.
+    ///
+    /// After `SplitRight` and `SplitDown` at 200 by 24, the left pane spans the
+    /// tree's rows, and two panes stack in the right column beside the band.
+    #[test]
+    fn the_band_island_spans_the_pane_rows_and_no_status_row_reaches_it() {
+        use stoat_config::MinimapMode;
+        use stoatty_protocol::{
+            command::{Edge, PanelCommand},
+            PROTOCOL_VERSION,
+        };
+
+        let mut h = crate::test_harness::TestHarness::with_size(200, 24);
+        h.stoat.stoatty_protocol = PROTOCOL_VERSION;
+        h.stoat.settings.editor_minimap = Some(MinimapMode::Single);
+        h.type_action("SplitRight()");
+        h.type_action("SplitDown()");
+        h.settle();
+        h.stoat.render();
+
+        let band = h
+            .stoat
+            .single_minimap_rect
+            .expect("single mode reserves a band");
+        let left = h
+            .stoat
+            .active_workspace()
+            .panes
+            .split_panes()
+            .map(|(_, pane)| pane.area)
+            .min_by_key(|area| area.x)
+            .expect("the left pane");
+        let ends: Vec<u16> = pane_status_rects(&h)
+            .iter()
+            .map(|row| row.right())
+            .collect();
+        let mut islands: Vec<PanelCommand> = h
+            .stoat
+            .apc_scene
+            .panels()
+            .filter(|panel| panel.backdrop)
+            .collect();
+        islands.sort_by_key(|panel| (panel.left, panel.top));
+        let sides: Vec<(Edge, Edge)> = islands
+            .iter()
+            .map(|panel| (panel.edges[3], panel.edges[1]))
+            .collect();
+        let rows = |panel: &PanelCommand| (panel.top, panel.height, panel.edges[0], panel.edges[2]);
+
+        let (margin, gap) = (Edge::Margin(8), Edge::Gap(8));
+        assert_eq!(
+            (ends, sides, islands.last().map(rows)),
+            (
+                vec![left.right(), band.x - 1, band.x - 1],
+                vec![(margin, gap), (gap, gap), (gap, gap), (gap, margin)],
+                islands.first().map(rows),
+            ),
+            "each status row ends with its pane, short of the gap column, the islands beside the \
+             band reach into that column, and the band's island spans the left island's rows",
         );
     }
 

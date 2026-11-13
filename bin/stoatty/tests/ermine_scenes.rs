@@ -246,10 +246,10 @@ fn a_modified_row_reads_removed_on_the_base_side_and_added_on_the_live_side() {
 /// The split diff's two gutter lanes sit 2 px apart, as the DiffSplit board
 /// draws them, where the plain editor's sit 1 px apart.
 ///
-/// Row 5 is a modified row. The live side's gutter starts in cell 77, right of
+/// Row 5 is a modified row. The live side's gutter starts in cell 76, right of
 /// the divider, where the added lane takes the cell's pixel columns 0 to 2 and
 /// the unstaged state lane its columns 5 to 7. The base side's state lane
-/// takes the same color, so the check reads the pixels of cell 77 alone.
+/// takes the same color, so the check reads the pixels of cell 76 alone.
 #[test]
 fn the_split_diff_s_gutter_lanes_sit_two_pixels_apart() {
     let mut home = support::scratch_home();
@@ -259,7 +259,7 @@ fn the_split_diff_s_gutter_lanes_sit_two_pixels_apart() {
         "unstaged.txt",
         "<Space>df<Settle>",
     );
-    let (x, y, width, height) = cell_rect(77, 5, 1, 1);
+    let (x, y, width, height) = cell_rect(76, 5, 1, 1);
     let lanes = [SUCCESS, DISABLED].map(|color| {
         bar_columns(&shot, (y, height), color)
             .into_iter()
@@ -271,7 +271,7 @@ fn the_split_diff_s_gutter_lanes_sit_two_pixels_apart() {
     if lanes != [vec![0, 1, 2], vec![5, 6, 7]] {
         let frame = keep_frame(&shot, &mut home, "diff_gutter_lanes");
         panic!(
-            "the live side's added and state lanes fill pixel columns {lanes:?} of cell 77, not \
+            "the live side's added and state lanes fill pixel columns {lanes:?} of cell 76, not \
              0 to 2 and 5 to 7; the frame is {}",
             frame.display(),
         );
@@ -281,7 +281,7 @@ fn the_split_diff_s_gutter_lanes_sit_two_pixels_apart() {
 /// The base side of the split diff recedes as a whole behind the live side.
 ///
 /// Row 7, `6 six`, is context on both sides. The left text starts at column 7
-/// and the right at column 83. The base side paints the context color, which
+/// and the right at column 82. The base side paints the context color, which
 /// alone reaches about two thirds of the live text, so only the fade brings the
 /// left text's peak below three fifths of the right's.
 #[test]
@@ -294,7 +294,7 @@ fn the_base_side_of_the_split_diff_recedes_behind_the_live_side() {
         "<Space>df<Settle>",
     );
     let base = brightest(&shot, cell_rect(7, 7, 5, 1));
-    let live = brightest(&shot, cell_rect(83, 7, 5, 1));
+    let live = brightest(&shot, cell_rect(82, 7, 5, 1));
 
     if u16::from(base) * 5 >= u16::from(live) * 3 {
         let frame = keep_frame(&shot, &mut home, "diff_base_side");
@@ -310,7 +310,7 @@ fn the_base_side_of_the_split_diff_recedes_behind_the_live_side() {
 /// draw the footer with no fill behind its halves.
 ///
 /// Row 49 is the status row. Column 30 lies in the base half and column 130 in
-/// the target half. Column 76 is the diff's divider, and every pixel of its
+/// the target half. Column 75 is the diff's divider, and every pixel of its
 /// 9 px cell keeps the ground.
 #[test]
 fn the_split_diff_s_status_halves_sit_on_the_ground() {
@@ -336,7 +336,7 @@ fn the_split_diff_s_status_halves_sit_on_the_ground() {
         "diff_status_target_half",
     );
 
-    let rect = cell_rect(76, 49, 1, 1);
+    let rect = cell_rect(75, 49, 1, 1);
     let (_, _, width, height) = rect;
     let ground = pixels_of(&shot, rect, GROUND);
     if ground != (width * height) as usize {
@@ -373,9 +373,9 @@ fn the_split_diff_frames_its_base_column() {
 /// The split diff's mid divider draws in the hairline color, as the DiffSplit
 /// board draws the rule between its halves.
 ///
-/// Row 4, `3 three`, is context on both sides. The divider is column 76, and
-/// its hairline takes the cell's pixel column 4, right of the base frame's
-/// right side. The check reads the row's middle pixel row.
+/// Row 4, `3 three`, is context on both sides. The divider is column 75, and
+/// its hairline takes the cell's pixel column 5, one pixel past the base
+/// frame's right side. The check reads the row's middle pixel row.
 #[test]
 fn the_split_diff_s_mid_divider_draws_in_the_hairline_color() {
     let mut home = support::scratch_home();
@@ -385,8 +385,8 @@ fn the_split_diff_s_mid_divider_draws_in_the_hairline_color() {
         "unstaged.txt",
         "<Space>df<Settle>",
     );
-    let (x, y, _, height) = cell_rect(76, 4, 1, 1);
-    let at = (((y + height / 2) * shot.width + x + 4) * 4) as usize;
+    let (x, y, _, height) = cell_rect(75, 4, 1, 1);
+    let at = (((y + height / 2) * shot.width + x + 5) * 4) as usize;
     let pixel = [shot.rgba[at], shot.rgba[at + 1], shot.rgba[at + 2]];
 
     if pixel
@@ -397,7 +397,7 @@ fn the_split_diff_s_mid_divider_draws_in_the_hairline_color() {
         let frame = keep_frame(&shot, &mut home, "diff_mid_divider");
         panic!(
             "the mid divider's pixel at x {} reads {}, not within 6 of {}; the frame is {}",
-            x + 4,
+            x + 5,
             hex(pixel),
             hex(HAIRLINE),
             frame.display(),
@@ -445,7 +445,7 @@ fn the_changes_view_frames_its_base_column_between_the_headers() {
     expect_base_frame_sides(&shot, &mut home, 3, "changes_base_frame");
 
     let (_, y, _, height) = cell_rect(0, 2, 1, 1);
-    let span: Vec<u32> = (cell_rect(1, 2, 1, 1).0..=cell_rect(76, 2, 1, 1).0 + 3).collect();
+    let span: Vec<u32> = (cell_rect(1, 2, 1, 1).0..=cell_rect(75, 2, 1, 1).0 + 3).collect();
     let down = bar_columns(&shot, (y, height), SIDE_BASE);
     let top = bar_columns(&shot, (y, 3), SIDE_BASE);
     let below = bar_columns(&shot, (y + 3, 1), SIDE_BASE);
@@ -481,14 +481,15 @@ fn the_changes_view_ends_in_the_minimap_strip_on_the_editor_surface() {
 /// The single band rounds its viewport band's corners at 4 px and outlines
 /// the band in the accent at 90 percent, as the Editor board draws the band.
 ///
-/// The band's first cell is column 152 on row 2, where the thumb starts at the
-/// file's top. The island's own 6 px corner clips the band's top-right corner,
-/// so the check reads the thumb's top-left corner. On the band's first pixel
-/// column, the thumb's top pixel row lies past the arc and keeps the editor
-/// surface. The fifth pixel row, the first past the 4 px arc, reads the
-/// outline, the accent at 90 percent over the band's color. Two pixels in,
-/// left of the first content column, that row reads the band's color, the
-/// accent at 18 percent over the surface.
+/// The band's last cell is column 158 on row 2, where the thumb starts at the
+/// file's top. The band's own island starts 4 px above that row, and its 6 px
+/// top-left arc clips the thumb's top-left corner, so the check reads the
+/// thumb's top-right corner. On the band's last pixel column, the thumb's top
+/// pixel row lies past the arc and keeps the editor surface. The fifth pixel
+/// row, the first past the 4 px arc, reads the outline, the accent at 90
+/// percent over the band's color. Two pixels in, past the end of every strip
+/// line, that row reads the band's color, the accent at 18 percent over the
+/// surface.
 #[test]
 fn the_viewport_band_rounds_its_corners() {
     const BAND: [u8; 3] = [0x2a, 0x34, 0x47];
@@ -496,7 +497,8 @@ fn the_viewport_band_rounds_its_corners() {
 
     let mut home = support::scratch_home();
     let shot = settled_frame(home.path(), "basic-diff", "unstaged.txt", "");
-    let (x, y, _, _) = cell_rect(152, 2, 1, 1);
+    let (x, y, width, _) = cell_rect(158, 2, 1, 1);
+    let x = x + width - 1;
 
     expect_region(&shot, &mut home, (x, y, 1, 1), BASE, "band_corner");
     expect_region(
@@ -509,7 +511,7 @@ fn the_viewport_band_rounds_its_corners() {
     expect_region(
         &shot,
         &mut home,
-        (x + 2, y + 4, 1, 1),
+        (x - 2, y + 4, 1, 1),
         BAND,
         "band_inside_the_outline",
     );
@@ -656,9 +658,8 @@ fn the_changes_view_folds_unchanged_lines_into_a_hatched_row() {
 ///
 /// Each margin column is 9 px wide, and the island reaches 1 px into it. On
 /// row 4, pixel columns 0 to 7 keep the ground and column 8 takes the
-/// base surface. On the right the island takes the minimap band and reaches
-/// pixel column 1431, the margin column's first, so 1432 to 1439 keep the
-/// ground.
+/// base surface. On the right the minimap band's own island reaches pixel
+/// column 1431, the margin column's first, so 1432 to 1439 keep the ground.
 #[test]
 fn the_panes_sit_eight_pixels_in_from_each_window_edge() {
     let mut home = support::scratch_home();
@@ -697,8 +698,8 @@ fn the_panes_sit_eight_pixels_in_from_each_window_edge() {
 /// Two panes side by side stand 8 px apart, as the StartSplit board draws
 /// them.
 ///
-/// The gap column, 76, is 9 px wide. The left island reaches its first pixel
-/// column, 684, and the right island none of it, so 685 to 692 keep the
+/// The gap column, 75, is 9 px wide. The left island reaches its first pixel
+/// column, 675, and the right island none of it, so 676 to 683 keep the
 /// ground. Pixel row 189 lies on row 10, past the file's lines, and the check
 /// reads no pixel of the right pane's own cells, where a changed row's gutter
 /// lane draws.
@@ -711,7 +712,7 @@ fn side_by_side_panes_stand_eight_pixels_apart() {
         "unstaged.txt",
         "<Space>as<Settle>",
     );
-    let gap: Vec<[u8; 3]> = (684..693).map(|x| pixel(&shot, x, 189)).collect();
+    let gap: Vec<[u8; 3]> = (675..684).map(|x| pixel(&shot, x, 189)).collect();
 
     if gap != [vec![BASE], vec![GROUND; 8]].concat() {
         let frame = keep_frame(&shot, &mut home, "side_by_side_gap");
@@ -847,7 +848,7 @@ fn the_island_draws_no_band_inside_its_bottom_edge() {
 ///
 /// The hairline is the top pixel row of the status row, which draws
 /// [`STATUS_ROW_PAD`] px up in its band. The check reads it over a blank cell
-/// of the bar. The branch glyph, U+2387, draws in column 117, the
+/// of the bar. The branch glyph, U+2387, draws in column 109, the
 /// first glyph cell of the right-aligned repo segment. A glyph's strokes blend
 /// through many colors there, and the empty box that a missing glyph draws
 /// keeps to a few along its straight edges.
@@ -857,7 +858,7 @@ fn the_status_row_sits_on_the_ground_with_no_hairline() {
     let shot = settled_frame(home.path(), "basic-diff", "unstaged.txt", "");
     let (x, y, width, _) = cell_rect(80, ROWS - 1, 1, 1);
 
-    let colors = distinct_colors(&shot, cell_rect(117, ROWS - 1, 1, 1));
+    let colors = distinct_colors(&shot, cell_rect(109, ROWS - 1, 1, 1));
     if colors <= 12 {
         let frame = keep_frame(&shot, &mut home, "branch_glyph");
         panic!(
@@ -1100,9 +1101,9 @@ fn the_file_finder_box_draws_on_the_overlay_surface() {
 /// border in the window ground, and a shadow falls under it.
 ///
 /// `<Space>as` splits the window and moves the focus to the right pane, so the
-/// one badge sits in the left pane. That pane takes rows 2 to 47, between the
-/// tab bar's band and its status band, so the 6-row box centers with its
-/// top-left cell at (34, 22).
+/// one badge sits in the left pane. That pane takes columns 1 to 74, and rows
+/// 2 to 47 between the tab bar's band and its status band, so the box centers
+/// with its top-left cell at (33, 22).
 /// The cell one in from that corner lies inside the box and left of the digit.
 ///
 /// The pixel on the box's left edge four rows down lies outside the 10 px
@@ -1119,7 +1120,7 @@ fn the_pane_picker_badge_draws_the_accent_box() {
         "unstaged.txt",
         "<Space>as<Settle><Space>ae<Settle>",
     );
-    let (col, row) = (34, 22);
+    let (col, row) = (33, 22);
 
     expect_region(
         &shot,
@@ -1694,12 +1695,12 @@ fn a_read_only_pane_draws_the_dashed_ring_over_its_text() {
 ///
 /// The fixture pauses a merge with one conflict in `file.txt`. The tab bar's
 /// band takes rows 0 and 1, and the minimap band takes the window's last seven
-/// columns before its margin. So the view spans 151 cells, with sides of 48
-/// cells at x 1 and 104 and the merged column of 55 cells at x 49. The header
-/// is row 2, `1 shared header` is row 3, and the chunk's first row is row 4,
-/// where each column takes its side's tint. The ours bar sits 4/16 into its
-/// column, so at 9-pixel cells it snaps to the third and fourth pixel columns
-/// of the column's first cell.
+/// columns before its margin, past a gap column. So the view spans 150 cells,
+/// with sides of 48 cells at x 1 and 103 and the merged column of 54 cells at
+/// x 49. The header is row 2, `1 shared header` is row 3, and the chunk's
+/// first row is row 4, where each column takes its side's tint. The ours bar
+/// sits 4/16 into its column, so at 9-pixel cells it snaps to the third and
+/// fourth pixel columns of the column's first cell.
 #[test]
 fn the_conflict_view_paints_the_merge_grid() {
     let mut home = support::scratch_home();
@@ -2007,9 +2008,9 @@ fn expect_hatch(
 ///
 /// The left side is the first three pixel columns of the pane's first cell,
 /// column 1, the boards' 3 px border. The right one is three pixel columns of
-/// the divider column, 76, the middle of the pane's 151 cells. It starts a
-/// pixel into the cell and ends at the hairline, which the even column draws
-/// on the cell's fifth pixel column. A miss saves the frame as
+/// the divider column, 75, the middle of the pane's 150 cells. It starts a
+/// pixel into the cell and ends a pixel short of the hairline, which the odd
+/// column draws on the cell's sixth pixel column. A miss saves the frame as
 /// [`expect_region`] does.
 fn expect_base_frame_sides(shot: &Snapshot, home: &mut TempDir, row: u16, what: &str) {
     let (_, y, _, height) = cell_rect(0, row, 1, 1);
@@ -2019,7 +2020,7 @@ fn expect_base_frame_sides(shot: &Snapshot, home: &mut TempDir, row: u16, what: 
         let (x, _, width, _) = cell_rect(col, row, 1, 1);
         x..x + width
     };
-    let (left, right) = (cell(1), cell(76));
+    let (left, right) = (cell(1), cell(75));
     let sides: Vec<u32> = [0, 1, 2]
         .map(|dx| left.start + dx)
         .into_iter()
