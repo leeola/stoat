@@ -66,13 +66,19 @@ pub fn scratch_env(home: &Path) -> Vec<(String, String)> {
 /// `CARGO_BIN_EXE_*` names only this package's binaries, and stoat belongs to
 /// `stoat_bin`. Walking up from the test binary follows whatever target
 /// directory and profile the run uses.
+///
+/// Cargo before 1.100 builds a test executable in the profile's `deps`
+/// directory. From 1.100 on, it builds one in `build/<package>/<hash>/out`.
+/// The binary sits in the profile directory above either one.
 pub fn stoat_binary() -> PathBuf {
-    let mut path = std::env::current_exe().expect("this test's own path");
-    path.pop();
-    if path.ends_with("deps") {
-        path.pop();
-    }
-    let binary = path.join("stoat");
+    let exe = std::env::current_exe().expect("this test's own path");
+    let profile = exe
+        .ancestors()
+        .skip(1)
+        .find(|dir| dir.ends_with("deps") || dir.ends_with("build"))
+        .and_then(Path::parent)
+        .expect("a test executable sits under a cargo profile directory");
+    let binary = profile.join("stoat");
 
     assert!(
         binary.is_file(),
