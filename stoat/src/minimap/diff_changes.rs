@@ -924,16 +924,18 @@ pub(crate) fn emit_diff_changes_thumb(
 }
 
 /// The changes view whose stack `ws`'s strip follows, which is the focused
-/// one, else the first one in pane order.
+/// one, else the one the single band tracks, else the first one in pane order.
 fn followed_view(ws: &Workspace) -> Option<DiffChangesId> {
-    ws.focused_diff_changes_id().or_else(|| {
-        ws.panes
-            .split_panes()
-            .find_map(|(_, pane)| match pane.view {
-                View::DiffChanges(id) => Some(id),
-                _ => None,
-            })
-    })
+    ws.focused_diff_changes_id()
+        .or_else(|| ws.band_diff_changes_id())
+        .or_else(|| {
+            ws.panes
+                .split_panes()
+                .find_map(|(_, pane)| match pane.view {
+                    View::DiffChanges(id) => Some(id),
+                    _ => None,
+                })
+        })
 }
 
 /// The key of each excerpt of changes view `id` in `ws` and the hunks its
@@ -2594,22 +2596,29 @@ mod tests {
         assert_eq!(views, [(index, 0, rows as u32 * 256)]);
     }
 
-    /// In single mode the band follows focus, so a changes view that a dock
-    /// took focus from places no thumb.
+    /// In single mode the band keeps tracking a changes view while a dock
+    /// holds focus, so the view keeps its thumb there.
     #[test]
-    fn an_unfocused_changes_view_places_no_thumb_on_the_band() {
-        let (mut h, mut rx) = strip_harness(8);
-        let ws = h.stoat.active_workspace_mut();
-        let dock = ws.docks.insert(DockPanel {
-            view: View::Label("dock".into()),
-            side: DockSide::Right,
-            visibility: DockVisibility::Hidden,
-            default_width: 30,
-            area: Default::default(),
-        });
-        ws.focus = FocusTarget::Dock(dock);
-        let (_, views) = strip_frames(&frame(&mut h, &mut rx));
-        assert_eq!(views, []);
+    fn a_changes_view_keeps_its_thumb_while_a_dock_holds_focus() {
+        let thumbs = |docked: bool| {
+            let (mut h, mut rx) = strip_harness(8);
+            if docked {
+                let ws = h.stoat.active_workspace_mut();
+                let dock = ws.docks.insert(DockPanel {
+                    view: View::Label("dock".into()),
+                    side: DockSide::Right,
+                    visibility: DockVisibility::Hidden,
+                    default_width: 30,
+                    area: Default::default(),
+                });
+                ws.focus = FocusTarget::Dock(dock);
+            }
+            strip_frames(&frame(&mut h, &mut rx)).1
+        };
+
+        let undocked = thumbs(false);
+        assert_ne!(undocked, [], "the changes view places a thumb on the band");
+        assert_eq!(thumbs(true), undocked);
     }
 
     /// Turning syntax colors off sends every line again, since it recolors

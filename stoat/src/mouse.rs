@@ -1158,19 +1158,18 @@ fn handle_minimap_mouse(stoat: &mut Stoat, mouse: MouseEvent) -> Option<UpdateEf
 
     if let MouseEventKind::Down(MouseButton::Left) = mouse.kind {
         let pos = Position::new(mouse.column, mouse.row);
-        // Single mode has one shared band that scrubs the focused changes view
-        // or editor. The changes view comes first, since its focused excerpt
-        // is the focused editor and the band shows the stack. Per-pane mode
-        // walks the panes to find the strip under the click.
+        // Single mode has one shared band that scrubs the changes view or the
+        // editor of the pane it tracks. Per-pane mode walks the panes to find
+        // the strip under the click.
         let hit = if stoat.minimap_mode() == MinimapMode::Single {
             stoat
                 .single_minimap_rect
                 .filter(|band| band.contains(pos))
                 .and_then(|_| {
-                    let diff_changes = stoat.active_workspace().focused_diff_changes_id();
-                    match (diff_changes, stoat.focused_editor_ids()) {
+                    let ws = stoat.active_workspace();
+                    match (ws.band_diff_changes_id(), ws.band_editor_id()) {
                         (Some(id), _) => Some(MinimapDrag::DiffChanges(id)),
-                        (None, Some((editor_id, _))) => Some(MinimapDrag::Editor(editor_id)),
+                        (None, Some(editor_id)) => Some(MinimapDrag::Editor(editor_id)),
                         (None, None) => None,
                     }
                 })

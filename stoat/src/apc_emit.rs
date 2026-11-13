@@ -1134,6 +1134,7 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
     // the focused split editor outside insert mode. Resolved before the ws
     // borrow so the per-pane loop can gate on it.
     let focused_editor = stoat.focused_editor_ids().map(|(id, _)| id);
+    let band_editor = stoat.active_workspace().band_editor_id();
     let focused_pool = panes
         .iter()
         .find(|(_, id, region)| region.window == 0 && focused_editor == Some(*id))
@@ -1394,12 +1395,12 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
         entered.retain(|page| !rendered.contains(page));
 
         // Per-pane mode feeds each pane's own strip, keyed by its pool. Single
-        // mode feeds one shared strip (u32::MAX) for the focused pane only.
+        // mode feeds one shared strip (u32::MAX) for the tracked pane only.
         // Aux windows draw no minimap, so a windowed region feeds no strip.
         let view_strip = if region.window != 0 {
             None
         } else if single_minimap {
-            (focused_editor == Some(*editor_id)).then_some(crate::render::SINGLE_MINIMAP_STRIP_ID)
+            (band_editor == Some(*editor_id)).then_some(crate::render::SINGLE_MINIMAP_STRIP_ID)
         } else {
             editor.minimap_rect.is_some().then_some(region.pool)
         };

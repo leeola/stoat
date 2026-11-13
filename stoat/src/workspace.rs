@@ -29,7 +29,7 @@ use crate::{
     git_status::Note,
     host::{git::MergeState, GitHost},
     input_history::InputHistory,
-    pane::{DockId, DockPanel, DockSide, FocusTarget, PaneId, PaneTree, View},
+    pane::{DockId, DockPanel, DockSide, FocusTarget, PaneId, PaneTree, Placement, View},
     rebase::{ActiveRebase, RebaseState},
     render::{chrome, text, walkthrough::SlideParts},
     review_approval::ApprovedRows,
@@ -274,6 +274,12 @@ pub struct Workspace {
     /// a term listed here is sized to this grid rather than to its pane's
     /// content area, and its pane leaves the live grid blank beneath the pool.
     pub(crate) term_pool_grids: HashMap<TermId, (u16, u16)>,
+    /// The split pane whose strip the single minimap band shows.
+    ///
+    /// Each paint stamps it through [`Self::refresh_band_pane`], and every
+    /// reader of the band takes it from here. The band then stays on an editor
+    /// or a changes view while focus moves to a pane or a dock with no strip.
+    pub(crate) band_pane: Option<PaneId>,
     /// The app's redraw handle, so editors created after construction reach it.
     ///
     /// Held here rather than passed per call because the two places editors are
@@ -582,6 +588,7 @@ impl Workspace {
             runs: SlotMap::with_key(),
             terms: SlotMap::with_key(),
             term_pool_grids: HashMap::new(),
+            band_pane: None,
             redraw_notify: redraw,
             code_graph: CodeGraph::new(),
             index_generation: 0,
@@ -787,6 +794,62 @@ impl Workspace {
     pub(crate) fn focused_diff_changes_mut(&mut self) -> Option<&mut DiffChangesState> {
         let id = self.focused_diff_changes_id()?;
         self.diff_changes_views.get_mut(id)
+    }
+
+    /// Stamp [`Self::band_pane`] for this paint.
+    ///
+    /// The focused split pane wins when it shows an editor or a changes view.
+    /// Otherwise the band keeps the pane it tracked while that pane still shows
+    /// one on screen, and else takes the first such pane in pane order. A dock
+    /// that takes focus leaves the pane tree's focus in place, so it does not
+    /// move the band.
+    pub(crate) fn refresh_band_pane(&mut self) {
+        let strip_pane = |id: PaneId| {
+            self.panes.contains(id) && {
+                let pane = self.panes.pane(id);
+                pane.placement == Placement::Split
+                    && matches!(pane.view, View::Editor(_) | View::DiffChanges(_))
+            }
+        };
+        let shown = |id: PaneId| strip_pane(id) && !self.panes.pane(id).area.is_empty();
+
+        let tracked = Some(self.panes.focus())
+            .filter(|&id| strip_pane(id))
+            .or_else(|| self.band_pane.filter(|&id| shown(id)))
+            .or_else(|| {
+                self.panes
+                    .split_panes()
+                    .map(|(id, _)| id)
+                    .find(|&id| shown(id))
+            });
+        self.band_pane = tracked;
+    }
+
+    /// The view of the pane [`Self::band_pane`] names, while that pane lives.
+    ///
+    /// A close between two paints leaves the stamped id behind, so the lookup
+    /// asks the pane tree before it reads the pane.
+    pub(crate) fn band_view(&self) -> Option<&View> {
+        let id = self.band_pane.filter(|&id| self.panes.contains(id))?;
+        Some(&self.panes.pane(id).view)
+    }
+
+    /// The editor the single minimap band shows, `None` while it tracks a
+    /// changes view or no pane.
+    pub(crate) fn band_editor_id(&self) -> Option<EditorId> {
+        match self.band_view()? {
+            View::Editor(id) => Some(*id),
+            _ => None,
+        }
+    }
+
+    /// The changes view the single minimap band shows, `None` while it tracks
+    /// an editor or no pane.
+    pub(crate) fn band_diff_changes_id(&self) -> Option<DiffChangesId> {
+        match self.band_view()? {
+            View::DiffChanges(id) => Some(*id),
+            _ => None,
+        }
     }
 
     /// What tab `idx` calls itself in the tab bar, taken from its focused

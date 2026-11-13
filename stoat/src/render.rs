@@ -1295,6 +1295,7 @@ pub(crate) fn frame(
     // read back for this paint. It sits inside the island margin, and
     // `layout_size` leaves a gap column of the margin's width left of it, so
     // under islands the window reads margin, panes, gap, band, margin.
+    stoat.active_workspace_mut().refresh_band_pane();
     stoat.single_minimap_rect = (minimap_mode == MinimapMode::Single
         && full.width >= editor::MINIMAP_MIN_PANE_COLS)
         .then(|| Rect {
@@ -1700,9 +1701,9 @@ pub(crate) fn frame(
     }
 
     // Single mode declares one strip over the reserved right-edge band for the
-    // focused split pane's buffer or changes view. The scene re-stamps every
-    // paint, so a focus switch to another buffer redeclares it. Any other view
-    // leaves the band empty.
+    // tracked split pane's buffer or changes view. The scene re-stamps every
+    // paint, so a switch of the tracked pane to another buffer redeclares it.
+    // With no tracked pane the band stays empty.
     if !modal_overlay
         && let (Some(band), Some(chrome)) = (single_minimap_rect, frame.minimap_chrome)
         && let Some((content_id, palette)) = single_band_content(ws, chrome)
@@ -2645,18 +2646,20 @@ fn hints_footer_keys(
     }
 }
 
-/// The content store and palette the single band declares for the focused
-/// split pane of `ws`, or `None` when that pane shows neither a buffer nor an
-/// changes view.
+/// The content store and palette the single band declares for the tracked
+/// split pane of `ws`, or `None` with no tracked pane.
 ///
 /// An editor's strip shows what [`MinimapChrome::editor_strip`] answers. A
 /// changes view's strip shows the workspace's changes view document. Both take
 /// the syntax palette.
+///
+/// See also:
+/// - [`Workspace::refresh_band_pane`] for which pane the band tracks.
 fn single_band_content<'a>(
     ws: &Workspace,
     chrome: MinimapChrome<'a>,
 ) -> Option<(u32, &'a [[u8; 3]])> {
-    match ws.panes.pane(ws.panes.focus()).view {
+    match *ws.band_view()? {
         View::Editor(editor_id) => {
             let editor = ws.editors.get(editor_id)?;
             let (content_id, _) = chrome.editor_strip(editor_id, editor)?;
@@ -2668,10 +2671,10 @@ fn single_band_content<'a>(
 }
 
 /// The content id of the Coverage Rail the single band over `ws` shows in its
-/// last cell, `None` while the focused editor's or changes view's strip fits,
-/// and over any other view.
+/// last cell, `None` while the tracked editor's or changes view's strip fits,
+/// and with no tracked pane.
 fn single_band_rail(ws: &Workspace, chrome: MinimapChrome<'_>) -> Option<u32> {
-    match ws.panes.pane(ws.panes.focus()).view {
+    match *ws.band_view()? {
         View::Editor(editor_id) => {
             let editor = ws.editors.get(editor_id)?;
             chrome.editor_strip(editor_id, editor)?.1

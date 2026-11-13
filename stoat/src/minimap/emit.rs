@@ -203,11 +203,11 @@ pub(crate) fn emit_minimap(stoat: &mut Stoat) {
     };
 
     // Per-pane mode places a changes view's thumb on its own strip where the
-    // paint reserved one. Single mode places the focused changes view's thumb
+    // paint reserved one. Single mode places the tracked changes view's thumb
     // on the band.
     let diff_changes_views: Vec<(DiffChangesId, Option<u32>)> = {
         let ws = &stoat.workspaces[ws_id];
-        let focused = ws.focused_diff_changes_id();
+        let tracked = ws.band_diff_changes_id();
         ws.panes
             .split_panes()
             .filter_map(|(_, pane)| {
@@ -216,7 +216,7 @@ pub(crate) fn emit_minimap(stoat: &mut Stoat) {
                 };
                 let state = ws.diff_changes_views.get(id)?;
                 let strip_id = match single {
-                    true => (focused == Some(id)).then_some(SINGLE_MINIMAP_STRIP_ID),
+                    true => (tracked == Some(id)).then_some(SINGLE_MINIMAP_STRIP_ID),
                     false => state.minimap_rect.is_some().then_some(pane.index),
                 };
                 Some((id, strip_id))
@@ -940,7 +940,7 @@ mod tests {
         action_handlers, apc_emit,
         display_map::highlights::{HighlightStyleId, HighlightStyleInterner},
         minimap::SYNC_SLICE,
-        test_fixture::{drain_apc, focused_editor_pane_area},
+        test_fixture::{drain_apc, focused_editor_pane_area, mouse_event},
     };
     use ratatui::layout::Rect;
     use std::{path::PathBuf, sync::Arc, time::Duration};
@@ -2456,6 +2456,90 @@ mod tests {
             Some(0),
             "focusing another pane at the same offset re-emits the strip view"
         );
+    }
+
+    /// The band keeps tracking the editor that focus leaves for a pane with no
+    /// strip. It declares that editor's strip and feeds its thumb, and a press
+    /// on it scrolls that editor, whichever of two editor panes focus left.
+    #[test]
+    fn single_band_tracks_the_editor_focus_leaves_for_a_label() {
+        use crossterm::event::{MouseButton, MouseEventKind};
+        use stoat_action::SplitDown;
+        use stoat_config::MinimapMode;
+        use stoatty_protocol::command::Command;
+
+        let tracked = |focus_left: bool| {
+            let mut h = Stoat::test();
+            let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+            h.stoat.set_apc_tx(tx);
+            h.stoat.settings.editor_minimap = Some(MinimapMode::Single);
+            h.resize(200, 24);
+
+            let lines =
+                |word: &str| -> String { (0..200).map(|i| format!("{word} {i}\n")).collect() };
+            let a = h.write_file("a.txt", &lines("alpha"));
+            let b = h.write_file("b.txt", &lines("bravo"));
+            h.open_file(&a);
+            h.type_action("SplitRight()");
+            h.open_file(&b);
+            if focus_left {
+                h.type_action("FocusLeft()");
+            }
+            h.settle();
+            let _ = h.stoat.render();
+            let (editor, buffer) = h.stoat.focused_editor_ids().expect("a focused editor");
+
+            // The split and the label land before the next paint, as an action
+            // that splits into a pane with no strip does. A typed key paints
+            // after it, which stamps the new pane while it still shows an editor.
+            action_handlers::dispatch(&mut h.stoat, &SplitDown);
+            h.settle();
+            let ws = h.stoat.active_workspace_mut();
+            let label = ws.panes.focus();
+            ws.panes.pane_mut(label).view = View::Label("x".into());
+            let _ = h.stoat.render();
+            apc_emit::emit_apc_scene(&mut h.stoat);
+            apc_emit::emit_smooth_scroll(&mut h.stoat);
+            let commands = drain_apc(&mut rx);
+            let declared: Vec<u32> = commands
+                .iter()
+                .filter_map(|command| match command {
+                    Command::Minimap(strip) if strip.strip_id == SINGLE_MINIMAP_STRIP_ID => {
+                        Some(strip.content_id)
+                    },
+                    _ => None,
+                })
+                .collect();
+            let thumb = commands.iter().rev().find_map(|command| match command {
+                Command::MinimapView(view) if view.strip_id == SINGLE_MINIMAP_STRIP_ID => {
+                    Some(view.top_256)
+                },
+                _ => None,
+            });
+            let content = h.stoat.minimap_content[&(h.stoat.active_workspace, buffer)].content_id();
+
+            let band = h
+                .stoat
+                .single_minimap_rect
+                .expect("single mode reserves a band");
+            h.stoat.update(mouse_event(
+                MouseEventKind::Down(MouseButton::Left),
+                band.x + band.width / 2,
+                band.y + band.height / 2,
+            ));
+            let scrolled = h.stoat.active_workspace().editors[editor].scroll_row > 0;
+            (declared, thumb, content, scrolled)
+        };
+
+        for side in ["left", "right"] {
+            let (declared, thumb, content, scrolled) = tracked(side == "left");
+            assert_eq!(
+                (declared, thumb, scrolled),
+                (vec![content], Some(0), true),
+                "the band declares, feeds the thumb of, and scrolls the {side} editor that focus \
+                 left",
+            );
+        }
     }
 
     /// The palette takes the list-modal width, so on a wide window its box
