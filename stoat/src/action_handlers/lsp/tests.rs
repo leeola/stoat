@@ -5,6 +5,7 @@ use crate::{
     },
     test_harness::TestHarness,
 };
+use futures::channel::oneshot;
 use ratatui::style::Style;
 use std::{
     path::{Path, PathBuf},
@@ -2812,6 +2813,51 @@ fn snapshot_symbol_picker() {
     crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::OpenSymbolPicker);
     h.settle();
     h.assert_snapshot("snapshot_symbol_picker");
+}
+
+/// A symbol's doc that lands after a pump polled its hover asks for the pass
+/// that shows it.
+///
+/// A hover's own task asks for a pass before it stores its reply, and that ask
+/// sometimes goes to the pump that finds the hover still running. The hover
+/// here asks for nothing itself, so only the pump's poll asks again.
+#[test]
+fn a_symbol_doc_polled_before_it_lands_asks_for_the_pass_that_shows_it() {
+    let mut h = TestHarness::with_size(120, 30);
+    enable_document_symbols_and_hover(&h);
+    let root = seed(&mut h, &[("main.rs", "fn target() {}\n")]);
+    let path = root.join("main.rs");
+    open_buffer(&mut h, path.clone());
+    h.fake_lsp().set_document_symbols(
+        path.to_str().unwrap(),
+        DocumentSymbolResponse::Flat(vec![flat_symbol("target", path.to_str().unwrap(), 0, 3)]),
+    );
+    crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::OpenSymbolPicker);
+    h.settle();
+
+    let (tx, rx) = oneshot::channel();
+    let task = h
+        .stoat
+        .executor
+        .spawn(async move { rx.await.ok().flatten() });
+    h.stoat.symbol_finder.as_mut().expect("finder").pending_doc = Some(task);
+    assert!(
+        !super::pump_symbol_finder_doc(&mut h.stoat),
+        "the pump finds the hover still running",
+    );
+
+    assert!(
+        tx.send(Some("LATE DOC".to_string())).is_ok(),
+        "the hover awaits its reply"
+    );
+    let asked = h.wakes_when_parked(h.stoat.redraw_notify.clone());
+    super::pump_symbol_finder_doc(&mut h.stoat);
+    let finder = h.stoat.symbol_finder.as_ref().expect("finder");
+    assert_eq!(
+        (asked, finder.doc_markdown.as_deref()),
+        (true, Some("LATE DOC")),
+        "the landed doc asks for a pass, and that pass's pump shows it",
+    );
 }
 
 #[test]

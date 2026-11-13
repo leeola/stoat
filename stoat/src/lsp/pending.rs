@@ -3,19 +3,20 @@
 //! Every LSP feature that answers asynchronously keeps one of these. A trigger
 //! arms it behind a debounce, and a pump polls it once per background pass.
 //!
-//! The slot exists because polling a task from the run loop takes a noop waker,
-//! a context, and a pin, and putting it back when it is not ready yet. Written
+//! The slot exists because polling a task from the run loop takes a waker, a
+//! context, and a pin, and putting it back when it is not ready yet. Written
 //! per feature that is six lines of ceremony around one question, repeated for
 //! every request kind the editor makes.
 
-use crate::lsp::stamp::DocumentStamp;
-use futures::task::noop_waker;
+use crate::{lsp::stamp::DocumentStamp, wake};
 use std::{
     future::Future,
     pin::Pin,
+    sync::Arc,
     task::{Context, Poll},
 };
 use stoat_scheduler::Task;
+use tokio::sync::Notify;
 
 /// The slot a feature's in-flight request occupies, empty while none is out.
 pub(crate) struct Pending<T>(Option<Task<T>>);
@@ -53,13 +54,16 @@ impl<T> Pending<T> {
     ///
     /// The value comes back owned rather than borrowed, which releases the
     /// caller's borrow of this slot before the apply step takes the app again.
-    pub(crate) fn poll(&mut self) -> Option<T>
+    ///
+    /// A request still running wakes `redraw_notify` when it lands, so the next
+    /// pass collects it.
+    pub(crate) fn poll(&mut self, redraw_notify: &Arc<Notify>) -> Option<T>
     where
         T: Unpin,
     {
         let mut task = self.0.take()?;
 
-        let waker = noop_waker();
+        let waker = wake::notify_waker(redraw_notify);
         let mut cx = Context::from_waker(&waker);
         match Pin::new(&mut task).poll(&mut cx) {
             Poll::Ready(value) => Some(value),
@@ -102,14 +106,15 @@ impl<T> StampedPending<T> {
     }
 
     /// Take the request's stamp and value once it resolves, leaving the slot
-    /// empty. See [`Pending::poll`] for what `None` covers.
-    pub(crate) fn poll(&mut self) -> Option<(DocumentStamp, T)>
+    /// empty. See [`Pending::poll`] for what `None` covers and what the
+    /// running request wakes.
+    pub(crate) fn poll(&mut self, redraw_notify: &Arc<Notify>) -> Option<(DocumentStamp, T)>
     where
         T: Unpin,
     {
         let (stamp, mut task) = self.0.take()?;
 
-        let waker = noop_waker();
+        let waker = wake::notify_waker(redraw_notify);
         let mut cx = Context::from_waker(&waker);
         match Pin::new(&mut task).poll(&mut cx) {
             Poll::Ready(value) => Some((stamp, value)),
@@ -156,19 +161,22 @@ impl<T> LabeledPending<T> {
     }
 
     /// Take the request's label and value once it resolves, leaving the slot
-    /// empty. See [`Pending::poll`] for what `None` covers.
-    pub(crate) fn poll(&mut self) -> Option<(&'static str, T)>
+    /// empty. See [`Pending::poll`] for what `None` covers and what the
+    /// running request wakes.
+    pub(crate) fn poll(&mut self, redraw_notify: &Arc<Notify>) -> Option<(&'static str, T)>
     where
         T: Unpin,
     {
-        self.task.poll().map(|value| (self.label, value))
+        self.task
+            .poll(redraw_notify)
+            .map(|value| (self.label, value))
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Arc;
+    use futures::{channel::oneshot, FutureExt};
     use stoat_scheduler::TestScheduler;
 
     #[test]
@@ -176,7 +184,11 @@ mod tests {
         let mut slot: Pending<u8> = Pending::default();
 
         assert!(!slot.is_pending(), "a fresh slot holds no request");
-        assert_eq!(slot.poll(), None, "and polling one answers nothing");
+        assert_eq!(
+            slot.poll(&crate::test_notify()),
+            None,
+            "and polling one answers nothing"
+        );
     }
 
     #[test]
@@ -187,15 +199,30 @@ mod tests {
         scheduler.run_until_parked();
 
         assert!(slot.is_pending(), "the request is out until it is polled");
-        assert_eq!(slot.poll(), Some(7), "polling hands the value over");
+        assert_eq!(
+            slot.poll(&crate::test_notify()),
+            Some(7),
+            "polling hands the value over"
+        );
         assert!(!slot.is_pending(), "and leaves the slot empty");
-        assert_eq!(slot.poll(), None, "so a second poll answers nothing");
+        assert_eq!(
+            slot.poll(&crate::test_notify()),
+            None,
+            "so a second poll answers nothing"
+        );
     }
 
+    /// A request still running stays in the slot, and its landing asks for the
+    /// pass that collects it.
+    ///
+    /// A request's own task asks for a pass before it stores its value, and
+    /// that ask sometimes goes to the pass that finds it still running. The
+    /// request here asks for nothing itself, so only the poll asks again.
     #[test]
     fn a_running_request_stays_in_the_slot() {
         let scheduler = Arc::new(TestScheduler::new());
         let executor = scheduler.executor();
+        let notify = crate::test_notify();
         let mut slot = Pending::default();
         let timer = executor.timer(std::time::Duration::from_millis(50));
         slot.arm(executor.spawn(async move {
@@ -204,12 +231,20 @@ mod tests {
         }));
         scheduler.run_until_parked();
 
-        assert_eq!(slot.poll(), None, "a request still running answers nothing");
+        assert_eq!(
+            slot.poll(&notify),
+            None,
+            "a request still running answers nothing"
+        );
         assert!(slot.is_pending(), "and stays out for the next pass");
 
         scheduler.advance_clock(std::time::Duration::from_millis(50));
         scheduler.run_until_parked();
-        assert_eq!(slot.poll(), Some(7), "the next pass collects it");
+        assert!(
+            notify.notified().now_or_never().is_some(),
+            "its landing asks for the next pass",
+        );
+        assert_eq!(slot.poll(&notify), Some(7), "the next pass collects it");
     }
 
     /// A stamp needs a buffer to name, so these go through the harness rather
@@ -223,6 +258,38 @@ mod tests {
         (h, stamp)
     }
 
+    /// A stamped request still running asks for the pass that collects it when
+    /// it lands, as a plain request does.
+    #[test]
+    fn a_running_stamped_request_asks_for_the_pass_that_collects_it() {
+        let (mut h, stamp) = stamped_harness();
+        let notify = crate::test_notify();
+        let (tx, rx) = oneshot::channel();
+        let mut slot = StampedPending::default();
+        slot.arm(
+            Some(stamp),
+            h.stoat
+                .executor
+                .spawn(async move { rx.await.unwrap_or(0u8) }),
+        );
+        assert_eq!(
+            slot.poll(&notify),
+            None,
+            "a request still running answers nothing"
+        );
+
+        assert_eq!(tx.send(7), Ok(()), "the request awaits its reply");
+        assert!(
+            h.wakes_when_parked(notify.clone()),
+            "its landing asks for the next pass"
+        );
+        assert_eq!(
+            slot.poll(&notify),
+            Some((stamp, 7)),
+            "the next pass collects it"
+        );
+    }
+
     #[test]
     fn a_resolved_stamped_request_yields_its_stamp_with_the_value() {
         let (mut h, stamp) = stamped_harness();
@@ -231,7 +298,7 @@ mod tests {
         h.settle();
 
         assert_eq!(
-            slot.poll(),
+            slot.poll(&crate::test_notify()),
             Some((stamp, 7)),
             "the stamp comes back with the value"
         );
@@ -260,7 +327,11 @@ mod tests {
 
         slot.clear();
         assert!(!slot.is_pending(), "clearing empties the slot");
-        assert_eq!(slot.poll(), None, "so its answer never arrives");
+        assert_eq!(
+            slot.poll(&crate::test_notify()),
+            None,
+            "so its answer never arrives"
+        );
     }
 
     #[test]
@@ -279,7 +350,11 @@ mod tests {
             }),
         );
         scheduler.run_until_parked();
-        assert_eq!(slot.poll(), None, "a request still running answers nothing");
+        assert_eq!(
+            slot.poll(&crate::test_notify()),
+            None,
+            "a request still running answers nothing"
+        );
         assert_eq!(
             slot.label(),
             Some("definition"),
@@ -289,7 +364,7 @@ mod tests {
         scheduler.advance_clock(std::time::Duration::from_millis(50));
         scheduler.run_until_parked();
         assert_eq!(
-            slot.poll(),
+            slot.poll(&crate::test_notify()),
             Some(("definition", 7)),
             "the label comes back with the value"
         );

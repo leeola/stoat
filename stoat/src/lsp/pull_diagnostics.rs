@@ -14,9 +14,8 @@
 //! collects the replies, both of them background work the user never asks for.
 
 use crate::{
-    action_handlers, app::Stoat, buffer::BufferId, host::LanguageServerFeature, lsp::util,
+    action_handlers, app::Stoat, buffer::BufferId, host::LanguageServerFeature, lsp::util, wake,
 };
-use futures::task::noop_waker;
 use lsp_types::{
     Diagnostic, DocumentDiagnosticParams, DocumentDiagnosticReport, DocumentDiagnosticReportResult,
     TextDocumentIdentifier, Uri,
@@ -169,7 +168,7 @@ pub(crate) fn pump_lsp_pull_diagnostics(stoat: &mut Stoat) -> bool {
         return false;
     }
 
-    let waker = noop_waker();
+    let waker = wake::notify_waker(&stoat.redraw_notify);
     let mut cx = Context::from_waker(&waker);
     let ready: Vec<(BufferId, Option<PullDiagnosticsOutcome>)> = {
         let mut ready = Vec::new();
@@ -262,6 +261,7 @@ mod tests {
         test_fixture::{diag, open_buffer, seed},
         test_harness::TestHarness,
     };
+    use futures::channel::oneshot;
     use stoat_action::CloseBuffer;
 
     fn enable_pull_diagnostics(h: &TestHarness) {
@@ -302,6 +302,36 @@ mod tests {
                 },
             },
         ))
+    }
+
+    /// A pull that lands after a pump polled it asks for the pass that applies
+    /// it.
+    ///
+    /// A pull's own task asks for a pass before it stores its reply, and that
+    /// ask sometimes goes to the pump that finds the pull still running. The
+    /// pull here asks for nothing itself, so only the pump's poll asks again.
+    #[test]
+    fn a_pull_polled_before_it_lands_asks_for_the_pass_that_applies_it() {
+        let mut h = TestHarness::with_size(80, 24);
+        let id = h.stoat.focused_editor_ids().expect("editor").1;
+        let (tx, rx) = oneshot::channel();
+        let task = h
+            .stoat
+            .executor
+            .spawn(async move { rx.await.ok().flatten() });
+        h.stoat.pending_pull_diagnostics.insert(id, task);
+        assert!(
+            !pump_lsp_pull_diagnostics(&mut h.stoat),
+            "the pump finds the pull still running",
+        );
+
+        assert!(tx.send(None).is_ok(), "the pull awaits its reply");
+        let asked = h.wakes_when_parked(h.stoat.redraw_notify.clone());
+        assert_eq!(
+            (asked, pump_lsp_pull_diagnostics(&mut h.stoat)),
+            (true, true),
+            "the landed pull asks for a pass, and that pass's pump applies it",
+        );
     }
 
     #[test]

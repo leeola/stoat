@@ -5,6 +5,7 @@ use crate::{
     buffer_registry::{OpenOrigin, ReadOnly},
     host::LanguageServerFeature,
     lsp::sync,
+    wake,
     workspace::WorkspaceId,
 };
 use lsp_types::{
@@ -417,7 +418,10 @@ fn buffer_version(stoat: &Stoat, buffer_id: BufferId) -> Option<u64> {
 /// The outcome lands in the workspace the save started in, whichever workspace
 /// is on screen. An outcome whose workspace closed writes nothing.
 pub(crate) fn pump_format_on_save(stoat: &mut Stoat) -> bool {
-    let waker = futures::task::noop_waker();
+    if stoat.pending_format_on_save.is_empty() {
+        return false;
+    }
+    let waker = wake::notify_waker(&stoat.redraw_notify);
     let mut cx = Context::from_waker(&waker);
     let mut landed_any = false;
     for mut pending in std::mem::take(&mut stoat.pending_format_on_save) {
@@ -1044,7 +1048,7 @@ mod tests {
         test_harness::{self, editor, TestHarness},
         Stoat,
     };
-    use futures::FutureExt;
+    use futures::{channel::oneshot, FutureExt};
     use lsp_types::{
         OneOf, SaveOptions, ServerCapabilities, TextDocumentSyncCapability, TextDocumentSyncKind,
         TextDocumentSyncOptions, TextDocumentSyncSaveOptions,
@@ -1599,6 +1603,55 @@ mod tests {
         assert!(
             notified.enable(),
             "the format answer wakes the loop, so the pump applies it without a key",
+        );
+    }
+
+    /// A format answer that lands after a pump polled its request asks for the
+    /// pass that writes the buffer.
+    ///
+    /// A request's own task asks for a pass before it stores its answer, and
+    /// that ask sometimes goes to the pump that finds the request still
+    /// running. The request here asks for nothing itself, so only the pump's
+    /// poll asks again.
+    #[test]
+    fn a_format_answer_polled_before_it_lands_asks_for_the_pass_that_writes() {
+        let mut h = Stoat::test();
+        let path = open_rs(&mut h, &PathBuf::from("/fos-late"), "a.rs", b"fn a() {}\n");
+        let buffer_id = h.stoat.focused_editor_ids().expect("editor").1;
+        let workspace = h.stoat.active_workspace;
+        let outcome = super::FormatOnSaveOutcome {
+            workspace,
+            buffer_id,
+            uri: super::super::lsp::path_to_uri(&path).expect("a file uri"),
+            path,
+            edits: None,
+            version: super::buffer_version(&h.stoat, buffer_id).expect("the open buffer"),
+            encoding: crate::host::OffsetEncoding::Utf16,
+            force: false,
+        };
+        let (tx, rx) = oneshot::channel();
+        let task = h
+            .stoat
+            .executor
+            .spawn(async move { rx.await.expect("the test answers") });
+        h.stoat
+            .pending_format_on_save
+            .push(super::PendingFormatOnSave {
+                workspace,
+                buffer_id,
+                task,
+            });
+        assert!(
+            !super::pump_format_on_save(&mut h.stoat),
+            "the pump finds the request still running",
+        );
+
+        assert!(tx.send(outcome).is_ok(), "the request awaits its answer");
+        let asked = h.wakes_when_parked(h.stoat.redraw_notify.clone());
+        assert_eq!(
+            (asked, super::pump_format_on_save(&mut h.stoat)),
+            (true, true),
+            "the landed answer asks for a pass, and that pass's pump writes the buffer",
         );
     }
 

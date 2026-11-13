@@ -271,7 +271,10 @@ fn documentation_first_line(doc: Documentation) -> Option<String> {
 /// ([`Stoat::pending_signature_help_request`]) and apply the result to
 /// [`Stoat::pending_signature_help`]. Returns true when state changed.
 pub(crate) fn pump_lsp_signature_help(stoat: &mut Stoat) -> bool {
-    let Some(popup) = stoat.pending_signature_help_request.poll() else {
+    let Some(popup) = stoat
+        .pending_signature_help_request
+        .poll(&stoat.redraw_notify)
+    else {
         return false;
     };
     stoat.pending_signature_help = popup;

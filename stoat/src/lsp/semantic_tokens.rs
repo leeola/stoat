@@ -554,7 +554,7 @@ fn decode_semantic_tokens(
 /// Poll any in-flight semantic-tokens request and paint the results onto the
 /// focused editor's LSP highlight channel. Returns true when state changed.
 pub(crate) fn pump_lsp_semantic_tokens(stoat: &mut Stoat) -> bool {
-    let Some(outcome) = stoat.pending_semantic_tokens.poll() else {
+    let Some(outcome) = stoat.pending_semantic_tokens.poll(&stoat.redraw_notify) else {
         return false;
     };
     if let Some(outcome) = outcome {

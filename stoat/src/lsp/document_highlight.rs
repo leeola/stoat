@@ -181,7 +181,10 @@ fn convert_document_highlights(
 /// and write text highlights on the focused editor. Returns true when state
 /// changed.
 pub(crate) fn pump_lsp_document_highlight(stoat: &mut Stoat) -> bool {
-    let Some(response) = stoat.pending_document_highlight_request.poll() else {
+    let Some(response) = stoat
+        .pending_document_highlight_request
+        .poll(&stoat.redraw_notify)
+    else {
         return false;
     };
     if let Some((buffer_id, items)) = response {

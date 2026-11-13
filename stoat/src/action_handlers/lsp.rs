@@ -21,6 +21,7 @@ use crate::{
     lsp::stamp::DocumentStamp,
     render::editor,
     symbol_finder::{SymbolFinder, SymbolFinderEntry, SymbolFinderScope, SymbolTarget},
+    wake,
 };
 pub(crate) use lsp_types::Uri;
 use lsp_types::{
@@ -835,7 +836,7 @@ fn inlay_hint_text(hint: &InlayHint) -> String {
 /// editor's display map, replacing the buffer's previous hint inlays. Returns
 /// true when state changed.
 pub(crate) fn pump_lsp_inlay_hints(stoat: &mut Stoat) -> bool {
-    let Some(response) = stoat.pending_inlay_hint_request.poll() else {
+    let Some(response) = stoat.pending_inlay_hint_request.poll(&stoat.redraw_notify) else {
         return false;
     };
     if let Some((buffer_id, items)) = response
@@ -1051,7 +1052,7 @@ pub(crate) fn code_action(stoat: &mut Stoat) -> UpdateEffect {
 /// resolve trigger. Clears the picker when no actionable entries
 /// remain.
 pub(crate) fn pump_lsp_code_actions(stoat: &mut Stoat) -> bool {
-    let Some(outcome) = stoat.pending_code_action_request.poll() else {
+    let Some(outcome) = stoat.pending_code_action_request.poll(&stoat.redraw_notify) else {
         return false;
     };
     match outcome {
@@ -1128,7 +1129,8 @@ pub(crate) fn pump_lsp_code_actions(stoat: &mut Stoat) -> bool {
 /// the app. On `Ready(None)` the resolve produced no edit, which is a
 /// silent no-op.
 pub(crate) fn pump_lsp_code_action_resolve(stoat: &mut Stoat) -> bool {
-    let Some((requested_at, edit)) = stoat.pending_code_action_resolve.poll() else {
+    let Some((requested_at, edit)) = stoat.pending_code_action_resolve.poll(&stoat.redraw_notify)
+    else {
         return false;
     };
     if let Some(edit) = edit
@@ -1409,7 +1411,7 @@ pub(crate) fn rename_symbol(stoat: &mut Stoat) -> UpdateEffect {
 /// in insert mode so typing routes through `handle_insert_key` into the
 /// modal's [`InputView`].
 pub(crate) fn pump_lsp_prepare_rename(stoat: &mut Stoat) -> bool {
-    let Some(outcome) = stoat.pending_prepare_rename.poll() else {
+    let Some(outcome) = stoat.pending_prepare_rename.poll(&stoat.redraw_notify) else {
         return false;
     };
     match outcome {
@@ -1519,7 +1521,7 @@ pub(crate) fn rename_input_cancel(stoat: &mut Stoat) -> bool {
 
 /// Poll any in-flight rename task and apply its [`WorkspaceEdit`].
 pub(crate) fn pump_lsp_rename(stoat: &mut Stoat) -> bool {
-    let Some((requested_at, edit)) = stoat.pending_rename.poll() else {
+    let Some((requested_at, edit)) = stoat.pending_rename.poll(&stoat.redraw_notify) else {
         return false;
     };
     if let Some(edit) = edit
@@ -1640,7 +1642,10 @@ pub(crate) fn open_symbol_picker(stoat: &mut Stoat) -> UpdateEffect {
 /// only installs the result. An empty result keeps the modal open over an empty
 /// list, matching finder behavior.
 pub(crate) fn pump_lsp_symbol_picker(stoat: &mut Stoat) -> bool {
-    let Some(entries) = stoat.pending_symbol_picker_request.poll() else {
+    let Some(entries) = stoat
+        .pending_symbol_picker_request
+        .poll(&stoat.redraw_notify)
+    else {
         return false;
     };
     let query = symbol_finder_query(stoat);
@@ -1800,7 +1805,7 @@ pub(crate) fn pump_symbol_finder_doc(stoat: &mut Stoat) -> bool {
     let Some(mut task) = finder.pending_doc.take() else {
         return false;
     };
-    let waker = futures::task::noop_waker();
+    let waker = wake::notify_waker(&stoat.redraw_notify);
     let mut cx = Context::from_waker(&waker);
     match Pin::new(&mut task).poll(&mut cx) {
         Poll::Ready(doc) => {
@@ -1962,7 +1967,10 @@ fn spawn_workspace_symbol_request(
 /// The request task converts and concatenates each server's response, so this
 /// only installs the result. Drops the picker when no server returned an entry.
 pub(crate) fn pump_lsp_workspace_symbol(stoat: &mut Stoat) -> bool {
-    let Some(entries) = stoat.pending_workspace_symbol_request.poll() else {
+    let Some(entries) = stoat
+        .pending_workspace_symbol_request
+        .poll(&stoat.redraw_notify)
+    else {
         return false;
     };
     let Some(finder) = stoat.symbol_finder.as_ref() else {
@@ -2238,7 +2246,8 @@ pub(crate) fn format_document(stoat: &mut Stoat) -> UpdateEffect {
 /// [`crate::lsp::edit_apply::apply_workspace_edit`] are logged and
 /// swallowed so a malformed edit does not crash the app.
 pub(crate) fn pump_lsp_format(stoat: &mut Stoat) -> bool {
-    let Some((requested_at, response)) = stoat.pending_format_request.poll() else {
+    let Some((requested_at, response)) = stoat.pending_format_request.poll(&stoat.redraw_notify)
+    else {
         return false;
     };
     if let Some(FormatResponse { uri, edits }) = response
@@ -2306,7 +2315,7 @@ pub(crate) fn open_location_picker(
 /// chooses. A request still running stays in its slot. Returns true when
 /// state changed so the caller can request a redraw.
 pub(crate) fn pump_lsp_jumps(stoat: &mut Stoat) -> bool {
-    let Some((label, mut entries)) = stoat.pending_lsp_jump.poll() else {
+    let Some((label, mut entries)) = stoat.pending_lsp_jump.poll(&stoat.redraw_notify) else {
         return false;
     };
     tracing::info!(

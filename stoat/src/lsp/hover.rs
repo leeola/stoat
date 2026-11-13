@@ -238,7 +238,7 @@ pub(crate) fn merge_hovers(sections: Vec<(String, String, bool)>) -> (String, bo
 /// its slot.
 /// Returns true when state changed so the caller can request a redraw.
 pub(crate) fn pump_lsp_hover(stoat: &mut Stoat) -> bool {
-    let Some(outcome) = stoat.pending_hover_request.poll() else {
+    let Some(outcome) = stoat.pending_hover_request.poll(&stoat.redraw_notify) else {
         return false;
     };
     match outcome {

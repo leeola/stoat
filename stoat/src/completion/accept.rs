@@ -333,7 +333,8 @@ fn apply_additional_edits(
 /// cursor rides edit-tracking anchors, so imports inserted above it keep
 /// it correct. Returns `true` when the buffer changed.
 pub(crate) fn pump_completion_accept(stoat: &mut Stoat) -> bool {
-    let Some((requested_at, imports)) = stoat.pending_completion_accept.poll() else {
+    let Some((requested_at, imports)) = stoat.pending_completion_accept.poll(&stoat.redraw_notify)
+    else {
         return false;
     };
     // Imports name lines in the text the accept left behind. Typing since then

@@ -137,7 +137,7 @@ fn resolve_advertised(host: &std::sync::Arc<dyn crate::host::LspHost>) -> bool {
 /// its label still matches. A resolve that lands after the selection
 /// moved is discarded. Returns `true` when the popup changed.
 pub(crate) fn pump_completion_resolve(stoat: &mut Stoat) -> bool {
-    let Some(outcome) = stoat.pending_completion_resolve.poll() else {
+    let Some(outcome) = stoat.pending_completion_resolve.poll(&stoat.redraw_notify) else {
         return false;
     };
     match outcome {

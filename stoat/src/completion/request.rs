@@ -897,7 +897,7 @@ fn resolve_outcome(stoat: &mut Stoat, outcome: RequestOutcome) -> bool {
 /// the popup state changed, mirroring the convention used by the
 /// other LSP pumps so the render loop can drive both for free.
 pub(crate) fn pump(stoat: &mut Stoat) -> bool {
-    let Some(outcome) = stoat.pending_completion_request.poll() else {
+    let Some(outcome) = stoat.pending_completion_request.poll(&stoat.redraw_notify) else {
         return false;
     };
     resolve_outcome(stoat, outcome)

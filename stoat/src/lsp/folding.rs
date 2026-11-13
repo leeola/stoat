@@ -145,7 +145,7 @@ fn convert_folding_ranges(
 /// Poll any in-flight folding-range request and install the results as foldable
 /// creases on the focused editor. Returns true when state changed.
 pub(crate) fn pump_lsp_folding_ranges(stoat: &mut Stoat) -> bool {
-    let Some(outcome) = stoat.pending_folding_ranges.poll() else {
+    let Some(outcome) = stoat.pending_folding_ranges.poll(&stoat.redraw_notify) else {
         return false;
     };
     if let Some((buffer_id, ranges)) = outcome
