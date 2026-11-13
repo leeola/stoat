@@ -670,12 +670,18 @@ fn handle_modal_mouse(stoat: &mut Stoat, mouse: MouseEvent) -> UpdateEffect {
 /// [`ModalSurfaces::row_at`] reads. A press off every file row does nothing.
 fn press_git_status_row(stoat: &mut Stoat, mouse: MouseEvent) -> UpdateEffect {
     let size = stoat.size();
+    let (tab_bar_rows, status_rows) = (stoat.tab_bar_rows(), stoat.status_rows());
     let Some(panel) = stoat.git_status.as_mut() else {
         return UpdateEffect::None;
     };
-    let Some(index) =
-        crate::render::git_status::git_status_row_at(panel, size, mouse.column, mouse.row)
-    else {
+    let Some(index) = crate::render::git_status::git_status_row_at(
+        panel,
+        size,
+        tab_bar_rows,
+        status_rows,
+        mouse.column,
+        mouse.row,
+    ) else {
         return UpdateEffect::None;
     };
 

@@ -34,8 +34,12 @@ use stoatty_protocol::command::{BorderStyle, Edge, PanelShadow};
 /// The box's width in cells, the board's 460 px.
 const BOX_WIDTH: u16 = 51;
 
-/// The row the box's top edge sits on, under the tab bar and a banner row.
-const BOX_TOP: u16 = 2;
+/// The rows between the tab bar and the box's top edge.
+///
+/// The boards hang the box 36 px under the top bar, past a 24 px banner, its
+/// 4 px margin, and an 8 px gap. That is two whole rows, which stay blank,
+/// since the window draws no banner.
+const BOX_GAP: u16 = 2;
 
 /// Cells between the box's right edge and the window's right edge.
 const BOX_MARGIN: u16 = 1;
@@ -78,31 +82,35 @@ const BAR_GLYPH: &str = "\u{258e}";
 /// Lay the panel out within `area`, returning its box and the box's inner
 /// rect, or [`None`] when `area` is too small to hold one row of it.
 ///
-/// The box hangs from [`BOX_TOP`] at the window's right, and its height fits
-/// its rows. It stops one row short of the window's bottom, which the status
-/// bar holds, and rows past that are clipped.
+/// The box hangs [`BOX_GAP`] rows under the tab bar's `tab_bar_rows` at the
+/// window's right, and its height fits its rows. It stops above the bottom
+/// `status_rows`, which the status rows hold, and rows past that are clipped.
 pub(crate) fn git_status_layout(
     area: Rect,
     model: Option<&GitStatusModel>,
+    tab_bar_rows: u16,
+    status_rows: u16,
 ) -> Option<(Rect, Rect)> {
     if area.width < BOX_WIDTH + BOX_MARGIN {
         return None;
     }
-    let height = (content_rows(model) + 2).min(area.height.saturating_sub(BOX_TOP + 1));
+    let top = tab_bar_rows + BOX_GAP;
+    let height = (content_rows(model) + 2).min(area.height.saturating_sub(top + status_rows));
     if height < 3 {
         return None;
     }
 
     let rect = Rect::new(
         area.right() - BOX_MARGIN - BOX_WIDTH,
-        area.y + BOX_TOP,
+        area.y + top,
         BOX_WIDTH,
         height,
     );
     Some((rect, Block::default().borders(Borders::ALL).inner(rect)))
 }
 
-/// Paint the panel over `area`, the window.
+/// Paint the panel over `area`, the window, clear of the tab bar's
+/// `tab_bar_rows` at its top and the `status_rows` at its bottom.
 ///
 /// The panel's top moves first, so the selected row shows in the box at the
 /// height the window leaves it. Until the first read lands, the box holds one
@@ -111,10 +119,14 @@ pub(crate) fn render_git_status(
     panel: &mut GitStatusPanel,
     theme: &Theme,
     area: Rect,
+    tab_bar_rows: u16,
+    status_rows: u16,
     buf: &mut Buffer,
     scene: &mut ApcScene,
 ) {
-    let Some((rect, inner)) = git_status_layout(area, panel.model.as_ref()) else {
+    let Some((rect, inner)) =
+        git_status_layout(area, panel.model.as_ref(), tab_bar_rows, status_rows)
+    else {
         return;
     };
     let body_top = body_top(inner, panel.model.as_ref());
@@ -185,11 +197,13 @@ pub(crate) fn render_git_status(
 pub(crate) fn git_status_row_at(
     panel: &GitStatusPanel,
     area: Rect,
+    tab_bar_rows: u16,
+    status_rows: u16,
     column: u16,
     row: u16,
 ) -> Option<usize> {
     let model = panel.model.as_ref()?;
-    let (_, inner) = git_status_layout(area, Some(model))?;
+    let (_, inner) = git_status_layout(area, Some(model), tab_bar_rows, status_rows)?;
     if !inner.contains(Position::new(column, row)) {
         return None;
     }

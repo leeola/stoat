@@ -1752,11 +1752,12 @@ fn the_tab_bar_ends_in_the_conflict_chip() {
 /// The git status panel names the merge in progress in its banner and leads
 /// its sections with the conflicted file.
 ///
-/// The box hangs from row 2 with its right edge one cell in from the window's,
-/// so its inner cells span columns 109 to 157 from row 3. Row 3 is the header,
-/// whose rule is the row's last pixel row. Rows 4 to 6 are the banner, whose
-/// bar is the first pixel column of column 109. Row 7 heads the conflicted
-/// section, and row 8 holds its file, whose bar sits 4/16 into column 109.
+/// The box hangs from row 4, two rows under the tab bar's band, with its right
+/// edge one cell in from the window's, so its inner cells span columns 109 to
+/// 157 from row 5. Row 5 is the header, whose rule is the row's last pixel
+/// row. Rows 6 to 8 are the banner, whose bar is the first pixel column of
+/// column 109. Row 9 heads the conflicted section, and row 10 holds its file,
+/// whose bar sits 4/16 into column 109.
 #[test]
 fn the_git_status_panel_names_the_merge_in_its_banner() {
     let mut home = support::scratch_home();
@@ -1770,18 +1771,18 @@ fn the_git_status_panel_names_the_merge_in_its_banner() {
     expect_region(
         &shot,
         &mut home,
-        cell_rect(157, 3, 1, 1),
+        cell_rect(157, 5, 1, 1),
         BASE,
         "inner_top_right",
     );
     expect_region(
         &shot,
         &mut home,
-        cell_rect(140, 4, 15, 3),
+        cell_rect(140, 6, 15, 3),
         TINT_MERGE,
         "banner_rows",
     );
-    let (x, y, width, _) = cell_rect(130, 3, 25, 1);
+    let (x, y, width, _) = cell_rect(130, 5, 25, 1);
     expect_region(
         &shot,
         &mut home,
@@ -1789,9 +1790,9 @@ fn the_git_status_panel_names_the_merge_in_its_banner() {
         RAISED,
         "header_rule",
     );
-    let (x, y, _, height) = cell_rect(109, 4, 1, 3);
+    let (x, y, _, height) = cell_rect(109, 6, 1, 3);
     expect_region(&shot, &mut home, (x, y, 1, height), CONFLICT, "banner_bar");
-    let (x, y, _, height) = cell_rect(109, 8, 1, 1);
+    let (x, y, _, height) = cell_rect(109, 10, 1, 1);
     expect_region(
         &shot,
         &mut home,
@@ -1804,8 +1805,9 @@ fn the_git_status_panel_names_the_merge_in_its_banner() {
 /// The git status panel colors each file's bar by its section, the staged
 /// file's in info and the unstaged file's in muted.
 ///
-/// With no banner, row 4 heads the staged section over its file on row 5, and
-/// row 6 heads the unstaged section over its file on row 7.
+/// The box hangs from row 4 with its header on row 5. With no banner, row 6
+/// heads the staged section over its file on row 7, and row 8 heads the
+/// unstaged section over its file on row 9.
 #[test]
 fn the_git_status_panel_bars_each_file_in_its_section_color() {
     let mut home = support::scratch_home();
@@ -1816,7 +1818,7 @@ fn the_git_status_panel_bars_each_file_in_its_section_color() {
         ":git status<Enter><Settle>",
     );
 
-    for (row, want, what) in [(5, INFO, "staged_bar"), (7, MUTED, "unstaged_bar")] {
+    for (row, want, what) in [(7, INFO, "staged_bar"), (9, MUTED, "unstaged_bar")] {
         let (x, y, _, height) = cell_rect(109, row, 1, 1);
         expect_region(&shot, &mut home, (x + 2, y, 2, height), want, what);
     }
