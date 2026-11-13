@@ -1919,6 +1919,7 @@ pub(crate) fn frame(
                     &stoat.theme,
                     full,
                     status_rows,
+                    chrome_bands,
                     buf,
                     &mut *scene,
                 );
@@ -1948,6 +1949,7 @@ pub(crate) fn frame(
                         &stoat.theme,
                         full,
                         status_rows,
+                        chrome_bands,
                         buf,
                         &mut *scene,
                     );
@@ -1970,6 +1972,7 @@ pub(crate) fn frame(
                         &stoat.theme,
                         full,
                         status_rows,
+                        chrome_bands,
                         buf,
                         &mut *scene,
                     );
@@ -2003,6 +2006,7 @@ pub(crate) fn frame(
                     &stoat.theme,
                     full,
                     status_rows,
+                    chrome_bands,
                     buf,
                     &mut *scene,
                 );
@@ -2035,6 +2039,7 @@ pub(crate) fn frame(
                     &stoat.theme,
                     full,
                     status_rows,
+                    chrome_bands,
                     buf,
                     &mut *scene,
                 );
@@ -2067,6 +2072,7 @@ pub(crate) fn frame(
                     &stoat.theme,
                     full,
                     status_rows,
+                    chrome_bands,
                     buf,
                     &mut *scene,
                 );
@@ -2101,6 +2107,7 @@ pub(crate) fn frame(
                     &stoat.theme,
                     full,
                     status_rows,
+                    chrome_bands,
                     buf,
                     &mut *scene,
                 );
@@ -2134,6 +2141,7 @@ pub(crate) fn frame(
                     &stoat.theme,
                     full,
                     status_rows,
+                    chrome_bands,
                     buf,
                     &mut *scene,
                 );
@@ -2168,6 +2176,7 @@ pub(crate) fn frame(
                     &stoat.theme,
                     full,
                     status_rows,
+                    chrome_bands,
                     buf,
                     &mut *scene,
                 );
@@ -2202,6 +2211,7 @@ pub(crate) fn frame(
                         &stoat.theme,
                         full,
                         status_rows,
+                        chrome_bands,
                         buf,
                         &mut *scene,
                     );
@@ -2235,6 +2245,7 @@ pub(crate) fn frame(
                     &stoat.theme,
                     full,
                     status_rows,
+                    chrome_bands,
                     buf,
                     &mut *scene,
                 );
@@ -2267,6 +2278,7 @@ pub(crate) fn frame(
                     &stoat.theme,
                     full,
                     status_rows,
+                    chrome_bands,
                     buf,
                     &mut *scene,
                 );
@@ -2299,6 +2311,7 @@ pub(crate) fn frame(
                         &stoat.theme,
                         full,
                         status_rows,
+                        chrome_bands,
                         buf,
                         &mut *scene,
                     );
@@ -2331,6 +2344,7 @@ pub(crate) fn frame(
                         &stoat.theme,
                         full,
                         status_rows,
+                        chrome_bands,
                         buf,
                         &mut *scene,
                     );
@@ -2461,6 +2475,7 @@ pub(crate) fn frame(
             &stoat.theme,
             full,
             status_rows,
+            chrome_bands,
             buf,
             &mut *scene,
         );
@@ -2894,6 +2909,7 @@ fn cached_modal_hints(
     theme: &crate::theme::Theme,
     area: Rect,
     status_rows: u16,
+    bands: bool,
     buf: &mut Buffer,
     scene: &mut ApcScene,
 ) {
@@ -2948,6 +2964,7 @@ fn cached_modal_hints(
         theme,
         area,
         status_rows,
+        bands,
         buf,
         scene,
     );

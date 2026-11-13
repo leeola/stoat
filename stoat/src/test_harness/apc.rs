@@ -278,7 +278,10 @@ mod tests {
     use super::composite_scene;
     use crate::{action_handlers::dispatch, Stoat};
     use ratatui::{buffer::Buffer, layout::Rect, style::Color};
-    use stoatty_protocol::command::{BorderStyle, Command, Edge, PanelCommand, PanelShadow};
+    use stoatty_protocol::{
+        command::{BorderStyle, Command, Edge, PanelCommand, PanelShadow},
+        NUDGE_PROTOCOL,
+    };
 
     /// The compositor replays every component over the finished main pass, so
     /// without the occlusion rule an earlier frame's border lands on cells the
@@ -463,6 +466,40 @@ mod tests {
                 (BorderStyle::None_, PanelShadow::Halo, 2, fill),
             ],
             "the mode chip, then the box"
+        );
+    }
+
+    /// From the nudge protocol on, the docked card's bottom edge crosses the
+    /// status band's spare row and stops on the band's ground, twice the pad
+    /// above the status row. A stoatty before the nudge keeps every edge of
+    /// the card on its cells.
+    #[test]
+    fn the_docked_card_reaches_the_status_band() {
+        let edges = |protocol: u32| {
+            let mut h = frame_after("space");
+            h.stoat.stoatty_protocol = protocol;
+            h.stoat.render();
+            stoatty_protocol::command::decode_stream(&h.stoat.apc_scene.all_bytes())
+                .into_iter()
+                .filter_map(|command| match command {
+                    Command::Panel(panel) if panel.shadow == PanelShadow::Halo => Some(panel.edges),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+        };
+
+        assert_eq!(
+            [edges(NUDGE_PROTOCOL), edges(NUDGE_PROTOCOL - 1)],
+            [
+                vec![[
+                    Edge::Inset(0),
+                    Edge::Inset(0),
+                    Edge::Margin(6),
+                    Edge::Inset(0)
+                ]],
+                vec![Edge::symmetric(0, 0)],
+            ],
+            "the docked card's edges with a status band and without",
         );
     }
 

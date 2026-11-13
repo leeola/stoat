@@ -1226,12 +1226,14 @@ fn the_commits_view_selects_its_first_row_beside_the_lane_graph() {
 /// The diff view keeps the which-key box docked as the same card with no key
 /// held, so the cell in the card's footer row is still on the raised surface.
 ///
-/// The card takes columns 107 to 159 and rows 39 to 47, above the two rows of
-/// the status band, and the HintBox board's docked shape. Its top-left corner
-/// alone rounds, so that corner's pixel leaves the raised surface and the
-/// top-right corner's keeps it. A fillet curves out from its bottom-left
-/// corner, so the pixel left of that corner on the card's last pixel row takes
-/// the raised surface too.
+/// The card's cells take columns 107 to 159 and rows 39 to 47, above the two
+/// rows of the status band, and the card takes the HintBox board's docked
+/// shape. Its fill reaches into row 48, the band's spare row, and stops 6 px
+/// above the status row, on the band's ground. Its top-left corner alone
+/// rounds, so that corner's pixel leaves the raised surface and the top-right
+/// corner's keeps it. A fillet curves out from its bottom-left corner, so the
+/// pixel left of that corner on the card's last pixel row takes the raised
+/// surface too.
 #[test]
 fn the_diff_view_keeps_its_box_docked_on_the_raised_surface() {
     let mut home = support::scratch_home();
@@ -1256,11 +1258,12 @@ fn the_diff_view_keeps_its_box_docked_on_the_raised_surface() {
     };
     let (left, top, _, _) = cell_rect(107, 39, 1, 1);
     let (right, _, width, _) = cell_rect(159, 39, 1, 1);
-    let (_, bottom, _, height) = cell_rect(0, 47, 1, 1);
+    let (_, status_top, ..) = cell_rect(0, ROWS - 1, 1, 1);
+    let bottom = status_top - 2 * STATUS_ROW_PAD;
     let corners = [
         pixel(left, top),
         pixel(right + width - 1, top),
-        pixel(left - 1, bottom + height - 1),
+        pixel(left - 1, bottom - 1),
     ];
     if corners[0] == RAISED || corners[1..] != [RAISED; 2] {
         let frame = keep_frame(&shot, &mut home, "diff_hints_card_corners");

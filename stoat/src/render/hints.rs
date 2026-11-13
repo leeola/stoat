@@ -1,4 +1,5 @@
 use crate::{
+    app::STATUS_ROW_PAD,
     theme::TypeRole,
     toggle::{Toggle, ToggleStates},
 };
@@ -198,7 +199,8 @@ struct LaidCell {
 /// is the docked card, a borderless panel in `ui.modal.hints.card`'s fill.
 ///
 /// The box docks above the bottom `status_rows` rows of `area`, which hold the
-/// bottom panes' status rows.
+/// bottom panes' status rows. With `bands`, those rows are status bands, and
+/// the docked card reaches down to the top of the band under it.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn render_hints_grouped(
     title: &str,
@@ -209,6 +211,7 @@ pub(crate) fn render_hints_grouped(
     theme: &crate::theme::Theme,
     area: Rect,
     status_rows: u16,
+    bands: bool,
     buf: &mut Buffer,
     scene: &mut stoat_widgets::ApcScene,
 ) {
@@ -253,7 +256,15 @@ pub(crate) fn render_hints_grouped(
     let modal_style = theme.get(crate::theme::scope::UI_MODAL_HINTS_CARD);
     let run_bg = crate::render::modal_fill(theme, modal_style);
     let docked = run_bg.filter(|_| scene.live());
-    let inner = docked_frame(buf, help_area, modal_style, docked, theme, &mut *scene);
+    let inner = docked_frame(
+        buf,
+        help_area,
+        modal_style,
+        docked,
+        bands,
+        theme,
+        &mut *scene,
+    );
 
     let key_style = theme.get(crate::theme::scope::UI_KEY_LABEL);
     // A row's keys are what the box is for, so they draw bold, and the
@@ -424,6 +435,11 @@ pub(crate) fn render_hints_grouped(
 /// Otherwise it is the rounded modal frame in `style`. The inside rect is the
 /// same in both, so the layout's [`BORDER_PAD`] holds for either.
 ///
+/// With `bands`, the rows under `area` are a status band, whose ground starts
+/// twice [`STATUS_ROW_PAD`] above its status row. The card's bottom edge then
+/// crosses the band's spare row and stops on that ground, so the fillet joins
+/// the band. The card's cells do not move.
+///
 /// Both clear the cells under the box first, because a panel's fill covers the
 /// cells' backgrounds and not their glyphs.
 fn docked_frame(
@@ -431,6 +447,7 @@ fn docked_frame(
     area: Rect,
     style: Style,
     docked: Option<[u8; 3]>,
+    bands: bool,
     theme: &crate::theme::Theme,
     scene: &mut stoat_widgets::ApcScene,
 ) -> Rect {
@@ -443,13 +460,17 @@ fn docked_frame(
             buf, area, None, style, theme, scene,
         );
     };
+    let bottom = match bands {
+        true => Edge::Margin(2 * STATUS_ROW_PAD),
+        false => Edge::Inset(0),
+    };
     Panel {
         style: BorderStyle::None_,
         border: fill,
         corner_radius: 2,
         fill: Some(fill),
         shadow: PanelShadow::Halo,
-        edges: Edge::symmetric(0, 0),
+        edges: [Edge::Inset(0), Edge::Inset(0), bottom, Edge::Inset(0)],
         corners: CORNER_TOP_LEFT,
         fillets: FILLET_BOTTOM_LEFT,
         fillet_radius: 3,
@@ -758,6 +779,7 @@ mod tests {
             &Theme::empty(),
             area,
             1,
+            false,
             &mut buf,
             &mut scene,
         );
@@ -1037,6 +1059,7 @@ mod tests {
             &Theme::empty(),
             area,
             1,
+            false,
             &mut buf,
             &mut stoat_widgets::ApcScene::new(),
         );
@@ -1074,6 +1097,7 @@ mod tests {
             theme,
             area,
             1,
+            false,
             &mut buf,
             &mut scene,
         );
@@ -1103,6 +1127,7 @@ mod tests {
                 &Theme::empty(),
                 area,
                 status_rows,
+                false,
                 &mut buf,
                 &mut scene,
             );
