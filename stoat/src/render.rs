@@ -1882,6 +1882,8 @@ pub(crate) fn frame(
         &ws.badges,
         &stoat.badges,
         badge_area,
+        chrome_bands,
+        tab_bar_rows > 0,
         &stoat.theme,
         buf,
         &mut *scene,

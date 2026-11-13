@@ -1,5 +1,6 @@
 use crate::{
     agent_status::AgentStatus,
+    app::{STATUS_ROW_PAD, TAB_BAR_PAD},
     badge::{Anchor, Badge, BadgeSource, BadgeState, BadgeTray, StackDirection},
     code_index::nav::TrailState,
     render::{
@@ -30,11 +31,19 @@ const TINT_PERCENT: u16 = 12;
 
 /// Paint each visible badge of the workspace and global trays over `area`.
 ///
+/// With `chrome_bands`, the window's bottom row is a status band, and its top
+/// row is the tab bar's band while `tab_bar_shown`. A chip on either row draws
+/// at the band's nudge, so it centers in the band as the band's own elements
+/// do.
+///
 /// Returns whether it painted a badge.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn render_badges(
     workspace: &BadgeTray,
     global: &BadgeTray,
     area: Rect,
+    chrome_bands: bool,
+    tab_bar_shown: bool,
     theme: &crate::theme::Theme,
     buf: &mut Buffer,
     scene: &mut ApcScene,
@@ -45,12 +54,47 @@ pub(crate) fn render_badges(
 
     let mut painted = false;
     for anchor in Anchor::ALL {
-        for (badge, rect) in placements(workspace, global, anchor, area) {
-            render_single_badge(badge, rect.x, rect.y, theme, buf, scene);
-            painted = true;
+        let placed = placements(workspace, global, anchor, area);
+        if placed.is_empty() {
+            continue;
         }
+
+        let nudge = band_nudge(anchor, chrome_bands, tab_bar_shown);
+        if nudge != 0 {
+            scene.nudge([0, nudge]);
+        }
+        for (badge, rect) in placed {
+            render_single_badge(badge, rect.x, rect.y, nudge != 0, theme, buf, scene);
+        }
+        if nudge != 0 {
+            scene.nudge([0, 0]);
+        }
+        painted = true;
     }
     painted
+}
+
+/// The logical px the chips at `anchor` draw below their grid rows, negative
+/// for up.
+///
+/// A bottom anchor sits on the status band's row and draws up by the status
+/// row's pad. A top anchor sits on the tab bar band's row and draws down by
+/// the bar's pad. A stack of chips moves as one, which keeps the chips a row
+/// apart. Without chrome bands no row is a band, and a hidden tab bar leaves a
+/// pane's first row at the top, so those chips draw on their rows.
+fn band_nudge(anchor: Anchor, chrome_bands: bool, tab_bar_shown: bool) -> i16 {
+    if !chrome_bands {
+        return 0;
+    }
+    match anchor {
+        Anchor::TopLeft | Anchor::TopCenter | Anchor::TopRight if tab_bar_shown => {
+            i16::from(TAB_BAR_PAD)
+        },
+        Anchor::BottomLeft | Anchor::BottomCenter | Anchor::BottomRight => {
+            -i16::from(STATUS_ROW_PAD)
+        },
+        _ => 0,
+    }
 }
 
 /// The columns the bottom-right badges cover on `area`'s bottom row, as a
@@ -228,10 +272,15 @@ pub(crate) fn sync_pinned_badge(tray: &mut BadgeTray, pinned: bool) {
 /// The chip fills with its tint and its text reads in the badge's semantic
 /// color. Both arms blank the chip's cells in the tint first. A cell glyph
 /// draws above a panel's fill, so a glyph left under the chip shows through it.
+///
+/// A `nudged` chip's panel stands off its row, and its fill covers only the
+/// part of the row inside the panel. So the cells under a nudged panel keep
+/// the row's own background, and no tinted strip shows beside the chip.
 fn render_single_badge(
     badge: &Badge,
     x: u16,
     y: u16,
+    nudged: bool,
     theme: &crate::theme::Theme,
     buf: &mut Buffer,
     scene: &mut ApcScene,
@@ -245,11 +294,16 @@ fn render_single_badge(
         Some([r, g, b]) => semantic.bg(Color::Rgb(r, g, b)),
         None => semantic,
     };
+    let rich = style_rgb(semantic.fg).filter(|_| scene.live());
+    let blank = match rich.is_some() && nudged {
+        true => Style { bg: None, ..style },
+        false => style,
+    };
     for col in x..x + w {
-        write_cell(buf, col, y, ' ', style);
+        write_cell(buf, col, y, ' ', blank);
     }
 
-    match style_rgb(semantic.fg).filter(|_| scene.live()) {
+    match rich {
         // A badge anchored to a screen edge overhangs the pane behind it, and
         // that pane's pool composite erases the overhanging cells on every
         // glide frame. A panel over the rect punches it out of the composite.
@@ -364,7 +418,11 @@ fn badge_border_style(state: BadgeState, theme: &crate::theme::Theme) -> Style {
 mod tests {
     use super::*;
     use crate::{agent_status::AgentHookEvent, Stoat};
-    use stoatty_protocol::command::{self, Command, PanelCommand, TextRunCommand};
+    use stoat_config::TabBarMode;
+    use stoatty_protocol::{
+        command::{self, Command, PanelCommand, TextRunCommand},
+        NUDGE_PROTOCOL,
+    };
 
     #[test]
     fn snapshot_agent_badge_active() {
@@ -399,6 +457,67 @@ mod tests {
             })
             .collect();
         assert_eq!((h.stoat.tab_bar_visible(), chip_rows), (true, vec![0]));
+    }
+
+    /// From the nudge protocol on, a chip on a chrome band draws at the band's
+    /// nudge, as the band's own elements do. A bottom-right chip draws up by
+    /// the status row's pad, and a top-right chip down by the tab bar's pad
+    /// while the bar shows. The overlay lane ends on a zero nudge, so nothing
+    /// after the chips moves. A hidden bar, or a stoatty before the nudge,
+    /// leaves a chip on its row.
+    #[test]
+    fn a_chip_on_a_chrome_band_takes_the_band_nudge() {
+        let nudges = |protocol: u32, bar: TabBarMode| {
+            let mut h = crate::test_harness::TestHarness::with_size(160, 50);
+            h.stoat.stoatty_protocol = protocol;
+            h.stoat.settings.ui_tab_bar = Some(bar);
+            h.stoat.badges.insert(Badge {
+                source: BadgeSource::Agent,
+                anchor: Anchor::TopRight,
+                ..corner_badge("top")
+            });
+            h.stoat.badges.insert(corner_badge("bottom"));
+            h.settle();
+            h.stoat.render();
+
+            let lane =
+                command::decode_stream(h.stoat.apc_scene.lane_bytes(crate::render::OVERLAY_LANE));
+            let in_effect = |at: usize| {
+                lane[..at]
+                    .iter()
+                    .rev()
+                    .find_map(|command| match command {
+                        Command::Nudge(nudge) => Some(*nudge),
+                        _ => None,
+                    })
+                    .unwrap_or([0, 0])
+            };
+            let chip = |label: &str| {
+                let at = lane
+                    .iter()
+                    .position(
+                        |command| matches!(command, Command::TextRun(run) if run.text == label),
+                    )
+                    .expect("the chip's text run");
+                (matches!(lane[at - 1], Command::Panel(_)), in_effect(at - 1))
+            };
+            (chip("top"), chip("bottom"), in_effect(lane.len()))
+        };
+
+        assert_eq!(
+            [
+                nudges(NUDGE_PROTOCOL, TabBarMode::Always),
+                nudges(NUDGE_PROTOCOL, TabBarMode::Never),
+                nudges(NUDGE_PROTOCOL - 1, TabBarMode::Always),
+            ],
+            [
+                ((true, [0, 7]), (true, [0, -3]), [0, 0]),
+                ((true, [0, 0]), (true, [0, -3]), [0, 0]),
+                ((true, [0, 0]), (true, [0, 0]), [0, 0]),
+            ],
+            "whether a panel leads each chip's text and the nudge on it, top then bottom, and the \
+             nudge the lane ends on",
+        );
     }
 
     #[test]
@@ -560,8 +679,9 @@ mod tests {
     }
 
     /// Paint one badge at the buffer origin and hand back what it wrote to each
-    /// surface. `live` picks the arm, as a stoatty host does.
-    fn paint(state: BadgeState, live: bool) -> (Buffer, Vec<u8>) {
+    /// surface. `live` picks the arm, as a stoatty host does, and `nudged`
+    /// marks a chip on a chrome band.
+    fn paint(state: BadgeState, live: bool, nudged: bool) -> (Buffer, Vec<u8>) {
         let mut buf = Buffer::empty(Rect::new(0, 0, 8, 5));
         let mut scene = ApcScene::new();
         scene.set_live(live);
@@ -570,6 +690,7 @@ mod tests {
             &badge(state),
             0,
             0,
+            nudged,
             &rgb_badge_theme(),
             &mut buf,
             &mut scene,
@@ -585,7 +706,7 @@ mod tests {
     /// it go blank in the tint.
     #[test]
     fn rich_arm_emits_a_tinted_panel_and_the_text_run() {
-        let (buf, bytes) = paint(BadgeState::Complete, true);
+        let (buf, bytes) = paint(BadgeState::Complete, true, false);
 
         assert_eq!(
             (command::decode_stream(&bytes), buf),
@@ -632,9 +753,21 @@ mod tests {
     /// badge color over the tint in its one row of cells.
     #[test]
     fn cell_arm_paints_the_text_over_the_tint() {
-        let (buf, bytes) = paint(BadgeState::Complete, false);
+        let (buf, bytes) = paint(BadgeState::Complete, false, false);
 
         assert_eq!((bytes, buf), (Vec::new(), chip_buffer(" ab ")));
+    }
+
+    /// A nudged chip's panel leaves part of its row uncovered, so the cells it
+    /// blanks keep the row's background and take no tint.
+    #[test]
+    fn a_nudged_chip_keeps_the_row_background_in_its_cells() {
+        let (buf, _) = paint(BadgeState::Complete, true, true);
+        let mut row = Buffer::empty(Rect::new(0, 0, 8, 5));
+        let [r, g, b] = BADGE_RGB;
+        row.set_string(0, 0, "    ", Style::default().fg(Color::Rgb(r, g, b)));
+
+        assert_eq!(buf, row);
     }
 
     /// The chip tints the chrome surface, or the background where a theme sets
@@ -664,8 +797,8 @@ mod tests {
     /// to hold it.
     #[test]
     fn an_active_badge_leads_with_a_dot() {
-        let (_, rich) = paint(BadgeState::Active, true);
-        let (cells, _) = paint(BadgeState::Active, false);
+        let (_, rich) = paint(BadgeState::Active, true, false);
+        let (cells, _) = paint(BadgeState::Active, false, false);
         let run_text = command::decode_stream(&rich)
             .into_iter()
             .find_map(|cmd| match cmd {
@@ -707,6 +840,8 @@ mod tests {
             &tray,
             &BadgeTray::new(),
             area,
+            false,
+            false,
             &rgb_badge_theme(),
             &mut buf,
             &mut scene,
