@@ -2320,13 +2320,12 @@ pub(crate) fn changes_to_hunks(
 /// whitespace-only row: full strength and wash-free. `None` means "no detail
 /// resolved" instead, and leaves the row to the caller's default.
 ///
-/// `Added` and `Deleted` hunks keep `None` unless the tree pass found the lines
-/// relocated, which is the one thing the line pass cannot see. A hunk the tree
-/// pass covers entirely becomes [`DiffHunkStatus::Moved`] and takes the spans
-/// naming where the content came from; a hunk it covers in part keeps its
-/// status and takes them anyway, since the renderer tints a `Moved` span with
-/// the move color wherever it sits. A hunk it does not reach keeps `None`,
-/// which is what suppresses a whole-line wash on it.
+/// `Added` and `Deleted` hunks take the spans of the tree changes that reach
+/// them. The line pass does not see a relocation, and a relocation takes the
+/// whole hunk only when it holds every word of every line. Such a hunk becomes
+/// [`DiffHunkStatus::Moved`], and its spans name where the content came from.
+/// Any other hunk keeps its status with the moved spans inside it, since the
+/// renderer tints a `Moved` span with the move color wherever it sits.
 ///
 /// Spans stay file-absolute, exactly as [`replaced_change_spans`] leaves them.
 pub(crate) fn merge_structural_detail(
@@ -2424,10 +2423,11 @@ pub(crate) fn merge_structural_detail(
             }));
         }
 
-        // A hunk the relocation accounts for line by line is the other half of
-        // a move, and the line pass had no way to know it. One it accounts for
-        // in part is still an addition or a deletion, and keeps its status
-        // while the spans inside it tint as moved.
+        // A hunk whose every line the relocation holds word for word is the
+        // other half of a move, and the line pass had no way to know it. A hunk
+        // with a word outside the relocation is still an addition or a
+        // deletion, and keeps its status while the spans inside it tint as
+        // moved.
         if !refining && !moved_ranges.is_empty() {
             let (text, starts, lines) = match hunk.status {
                 DiffHunkStatus::Deleted => (
@@ -2437,7 +2437,7 @@ pub(crate) fn merge_structural_detail(
                 ),
                 _ => (buffer_text, &buffer_starts, hunk.buffer_line_range.clone()),
             };
-            if lines_covered(&moved_ranges, starts, text, lines) {
+            if lines_relocated(&moved_ranges, starts, text, lines) {
                 hunk.status = DiffHunkStatus::Moved;
             }
         }
@@ -2498,22 +2498,51 @@ fn counterpart_in_hunk(
     })
 }
 
-/// Whether every line of `lines` carrying content is touched by one of
-/// `ranges`.
+/// Whether `ranges` relocate every line of `lines` that carries content, with
+/// every word of each such line inside the ranges.
 ///
 /// Blank lines are skipped rather than counted against the cover. The tree
-/// differ marks tokens, and a line holding none can never be reached, so
-/// requiring it would let the blank separator between two relocated functions
-/// decide that neither of them moved.
-fn lines_covered(ranges: &[Range<usize>], starts: &[usize], text: &str, lines: Range<u32>) -> bool {
+/// differ marks tokens, so no range reaches a line that holds none. If a blank
+/// line counted, the blank separator between two relocated functions makes
+/// neither of them read as moved.
+fn lines_relocated(
+    ranges: &[Range<usize>],
+    starts: &[usize],
+    text: &str,
+    lines: Range<u32>,
+) -> bool {
     lines
         .filter(|line| !line_is_blank(starts, text, *line))
         .all(|line| {
             let bounds = line_range_to_byte_range(starts, text.len(), &(line..line + 1));
-            ranges
-                .iter()
-                .any(|range| range.start < bounds.end && bounds.start < range.end)
+            line_relocated(ranges, text, bounds)
         })
+}
+
+/// Whether `ranges` relocate the line whose bytes in `text` are `bounds`.
+///
+/// The line relocates when a range reaches it and every letter, digit, and
+/// underscore of the line lies inside a range. Other chars outside the ranges
+/// do not count, because a relocated list member leaves its separator behind.
+/// The line `foo(x),` relocates when only `foo(x)` moved.
+fn line_relocated(ranges: &[Range<usize>], text: &str, bounds: Range<usize>) -> bool {
+    let reached = ranges
+        .iter()
+        .any(|range| range.start < bounds.end && bounds.start < range.end);
+    reached
+        && text[bounds.clone()]
+            .char_indices()
+            .filter(|&(_, ch)| is_word_char(ch))
+            .all(|(offset, _)| {
+                ranges
+                    .iter()
+                    .any(|range| range.contains(&(bounds.start + offset)))
+            })
+}
+
+/// Whether `ch` is a letter, a digit, or an underscore.
+fn is_word_char(ch: char) -> bool {
+    ch.is_alphanumeric() || ch == '_'
 }
 
 /// Whether buffer `row` holds a non-whitespace char.
@@ -5709,6 +5738,112 @@ mod tests {
             [detail(9), detail(13)],
             "the string's first and third lines each detail their own hunk",
         );
+    }
+
+    /// A removed or added hunk reads as moved only when the relocation holds
+    /// every word of each of its lines. A separator that the move leaves behind
+    /// does not count against its line.
+    #[test]
+    fn a_hunk_reads_moved_only_when_the_move_holds_every_word_of_its_lines() {
+        let moved = |side, range| tree_change(side, range, LangChangeKind::Moved);
+        assert_eq!(
+            [
+                merged_statuses(
+                    "a\nxx yy\nc\n",
+                    "a\nc\nyy\n",
+                    &[moved(Side::Lhs, 5..7), moved(Side::Rhs, 4..6)],
+                ),
+                merged_statuses(
+                    "a\nfoo(x),\nc\n",
+                    "a\nc\nfoo(x)\n",
+                    &[moved(Side::Lhs, 2..8), moved(Side::Rhs, 4..10)],
+                ),
+            ],
+            [
+                vec![DiffHunkStatus::Deleted, DiffHunkStatus::Moved],
+                vec![DiffHunkStatus::Moved, DiffHunkStatus::Moved],
+            ],
+            "xx keeps its line a removal, and the comma does not",
+        );
+    }
+
+    /// A call removed above an `if` stays a removal when the body of the `if`
+    /// gains a line that holds one of the call's arguments.
+    #[test]
+    fn a_removed_call_whose_argument_moved_stays_a_removal() {
+        let base = concat!(
+            "fn push(&mut self, keys: Keys) {\n",
+            "    let page = &mut self.page;\n",
+            "    D::insert(&mut page.indexes, keys, page.households.len() as u32);\n",
+            "    if page.last_keys != Some(keys) {\n",
+            "        D::insert(&mut self.page_indexes, keys, self.pages.len() as u32);\n",
+            "        page.last_keys = Some(keys);\n",
+            "    }\n",
+            "}\n",
+        );
+        let buffer = concat!(
+            "fn push(&mut self, keys: Keys) {\n",
+            "    let page = &mut self.page;\n",
+            "    if page.last_keys != Some(keys) {\n",
+            "        let row = page.households.len() as u32;\n",
+            "        if let Some(last_keys) = page.last_keys {\n",
+            "            D::insert_range(&mut page.indexes, last_keys, page.run_start..row);\n",
+            "        }\n",
+            "        page.run_start = row;\n",
+            "        D::insert(&mut self.page_indexes, keys, self.pages.len() as u32);\n",
+            "        page.last_keys = Some(keys);\n",
+            "    }\n",
+            "}\n",
+        );
+
+        let statuses: Vec<DiffHunkStatus> = rust_hunks(base, buffer)
+            .into_iter()
+            .map(|hunk| hunk.status)
+            .collect();
+        assert_eq!(statuses, [DiffHunkStatus::Deleted, DiffHunkStatus::Added]);
+    }
+
+    /// A tree change of `kind` over `byte_range` on `side`, with no move
+    /// metadata, pair, or refinement.
+    fn tree_change(
+        side: Side,
+        byte_range: std::ops::Range<usize>,
+        kind: LangChangeKind,
+    ) -> DiffChange {
+        DiffChange {
+            side,
+            byte_range,
+            kind,
+            move_metadata: None,
+            pair_id: None,
+            deletion_rhs_anchor: None,
+            refined_spans: None,
+            prose: false,
+        }
+    }
+
+    /// The line hunks of `buffer` against `base` once `tree_changes` merge into
+    /// them, with no unsearched section.
+    fn merged(base: &str, buffer: &str, tree_changes: &[DiffChange]) -> Vec<DiffHunk> {
+        let mut hunks = super::changes_to_hunks(
+            &stoat_language::structural_diff::diff(base, buffer).changes,
+            base,
+            buffer,
+        );
+        super::merge_structural_detail(&mut hunks, tree_changes, &[], base, buffer);
+        hunks
+    }
+
+    /// The status of each hunk that [`merged`] gives.
+    fn merged_statuses(
+        base: &str,
+        buffer: &str,
+        tree_changes: &[DiffChange],
+    ) -> Vec<DiffHunkStatus> {
+        merged(base, buffer, tree_changes)
+            .into_iter()
+            .map(|hunk| hunk.status)
+            .collect()
     }
 
     /// Each line hunk's token detail once the Rust tree pass of `buffer`

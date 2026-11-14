@@ -7151,6 +7151,53 @@ mod tests {
         );
     }
 
+    /// A removed call whose argument moved into a new line keeps its row in the
+    /// left column, between the lines that stand around it in the base.
+    #[test]
+    fn a_removed_line_with_a_moved_argument_keeps_its_left_row() {
+        let base = concat!(
+            "fn push(&mut self, keys: Keys) {\n",
+            "    let page = &mut self.page;\n",
+            "    D::insert(&mut page.indexes, keys, page.households.len() as u32);\n",
+            "    if page.last_keys != Some(keys) {\n",
+            "        D::insert(&mut self.page_indexes, keys, self.pages.len() as u32);\n",
+            "        page.last_keys = Some(keys);\n",
+            "    }\n",
+            "}\n",
+        );
+        let buffer = concat!(
+            "fn push(&mut self, keys: Keys) {\n",
+            "    let page = &mut self.page;\n",
+            "    if page.last_keys != Some(keys) {\n",
+            "        let row = page.households.len() as u32;\n",
+            "        if let Some(last_keys) = page.last_keys {\n",
+            "            D::insert_range(&mut page.indexes, last_keys, page.run_start..row);\n",
+            "        }\n",
+            "        page.run_start = row;\n",
+            "        D::insert(&mut self.page_indexes, keys, self.pages.len() as u32);\n",
+            "        page.last_keys = Some(keys);\n",
+            "    }\n",
+            "}\n",
+        );
+        let h = diff_harness_sized(200, base, buffer);
+        let left = left_text(&harness_columns(&h));
+        let buf = h.rendered_buffer();
+
+        let top = row_holding(buf, left.clone(), "fn push");
+        let rows: Vec<String> = (top..top + 4)
+            .map(|y| line_text(buf, y, left.clone()).trim().to_string())
+            .collect();
+        assert_eq!(
+            rows,
+            [
+                "fn push(&mut self, keys: Keys) {",
+                "let page = &mut self.page;",
+                "D::insert(&mut page.indexes, keys, page.households.len() as u32);",
+                "if page.last_keys != Some(keys) {",
+            ],
+        );
+    }
+
     /// A width-120 diff-view harness over one `.rs` file diffed `base` ->
     /// `buffer`, rendered once. The default theme resolves diff colors to RGB, so
     /// the change washes engage.
