@@ -2258,6 +2258,11 @@ pub struct Stoat {
     /// the popup's `prefix_range`, or by acceptance.
     pub(crate) pending_completion: Option<crate::completion::CompletionPopup>,
 
+    /// The buffer write that shows the selected completion row, which the next
+    /// selection key, an accept, or an abort reverts. Set by
+    /// [`crate::completion::preview::show`].
+    pub(crate) completion_preview: Option<crate::completion::preview::CompletionPreview>,
+
     /// Monotonic counter bumped each time a popup is installed into
     /// [`Self::pending_completion`], so the pooled list region detects a re-query
     /// by comparing one `u64` rather than hashing every label each emit.
@@ -2962,6 +2967,7 @@ impl Stoat {
             quit_after_save: None,
             quit_requested: false,
             pending_completion: None,
+            completion_preview: None,
             completion_generation: 0,
             pending_completion_request: Pending::default(),
             pending_narrow: None,
@@ -7239,6 +7245,9 @@ impl Stoat {
     /// menu accepts on Enter. With no row selected the menu ignores Enter, so
     /// Enter types its newline.
     ///
+    /// Each selection key also writes the selected row into the buffer as a
+    /// preview, as the menu does, through [`crate::completion::preview::show`].
+    ///
     /// Every other key accepts the selected row first and returns `None`, so
     /// the key then goes on to the insert arms and the keymap over the
     /// accepted text. Helix replays Enter into the menu for each key the menu
@@ -7290,6 +7299,7 @@ impl Stoat {
         crate::completion::request::settle_pending_narrow(self);
         step(self.pending_completion.as_mut()?);
         action_handlers::completion::arm_completion_resolve(self);
+        crate::completion::preview::show(self);
         Some(UpdateEffect::Redraw)
     }
 

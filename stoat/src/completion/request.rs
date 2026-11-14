@@ -152,9 +152,11 @@ pub(crate) fn record_dismiss(stoat: &mut Stoat) {
 
 /// Close the completion popup at the reader's request, as Ctrl-c does.
 ///
-/// The request in flight goes with it, so its answer does not reopen the
-/// popup. The popup returns on the next edit, as it does after an accept.
+/// A live preview reverts first, so the text the reader typed comes back. The
+/// request in flight goes with the popup, so its answer does not reopen it.
+/// The popup returns on the next edit, as it does after an accept.
 pub(crate) fn abort(stoat: &mut Stoat) {
+    crate::completion::preview::revert(stoat);
     stoat.pending_completion = None;
     stoat.pending_completion_request.clear();
     stoat.pending_narrow = None;
@@ -176,6 +178,7 @@ pub(crate) fn trigger(stoat: &mut Stoat) {
     if !insert_mode_in_editor_pane(stoat) {
         stoat.pending_completion_request.clear();
         stoat.pending_completion = None;
+        stoat.completion_preview = None;
         stoat.last_completion_signature = None;
         stoat.active_snippet = None;
         return;
@@ -196,10 +199,11 @@ pub(crate) fn trigger(stoat: &mut Stoat) {
     // to notice the cursor leaving the range it was filtered for. An edit is
     // not that case. It moves the cursor by construction, and typing on is the
     // very thing the refine below answers, so the check waits until that has
-    // declined.
+    // declined. A live preview puts the cursor past the prefix range by design.
     if !edited {
         if let Some(popup) = &stoat.pending_completion
             && cursor_left_popup(popup, cursor_offset)
+            && !crate::completion::preview::is_live(stoat)
         {
             stoat.pending_completion = None;
         }
@@ -916,10 +920,11 @@ pub(crate) fn pump(stoat: &mut Stoat) -> bool {
     resolve_outcome(stoat, outcome)
 }
 
-struct EditorSnapshot {
+/// The focused editor's buffer and cursor, read in one pass.
+pub(crate) struct EditorSnapshot {
     /// The whole snapshot rather than its rope, since the sources anchor their
     /// replace ranges against the fragment tree they read them off.
-    buffer: TextBufferSnapshot,
+    pub(crate) buffer: TextBufferSnapshot,
     cursor_offset: usize,
     buffer_id: BufferId,
     buffer_version: u64,
@@ -946,7 +951,9 @@ fn insert_mode_in_editor_pane(stoat: &Stoat) -> bool {
     matches!(ws.panes.pane(pane_id).view, View::Editor(_))
 }
 
-fn focused_editor_snapshot(stoat: &Stoat) -> Option<EditorSnapshot> {
+/// The focused editor's [`EditorSnapshot`], or `None` when the focus is not an
+/// editor pane.
+pub(crate) fn focused_editor_snapshot(stoat: &Stoat) -> Option<EditorSnapshot> {
     let ws = stoat.active_workspace();
     let FocusTarget::SplitPane = ws.focus else {
         return None;
@@ -988,7 +995,7 @@ fn focused_buffer_signature(stoat: &Stoat) -> Option<(BufferId, u64)> {
 /// answering at all, without the rope clone and two path allocations it also
 /// makes. Runs on every insert-mode keystroke, most of which the dedupe it
 /// feeds discards.
-fn focused_buffer_probe(stoat: &Stoat) -> Option<(BufferId, u64, usize)> {
+pub(crate) fn focused_buffer_probe(stoat: &Stoat) -> Option<(BufferId, u64, usize)> {
     let ws = stoat.active_workspace();
     let FocusTarget::SplitPane = ws.focus else {
         return None;
@@ -2801,11 +2808,11 @@ mod harness_tests {
         h.type_text("foo");
         h.advance_clock(COMPLETION_DEBOUNCE);
         h.type_text("b");
-        h.type_keys("tab");
         assert!(
             h.stoat.pending_completion_request.is_pending(),
-            "the re-ask is still in flight once Tab has selected the row",
+            "the re-ask is in flight when Tab arrives",
         );
+        h.type_keys("tab");
 
         crate::completion::accept::execute(&mut h.stoat);
 

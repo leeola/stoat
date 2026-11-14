@@ -153,7 +153,16 @@ pub(crate) fn completion_popup_layout(stoat: &mut Stoat) -> Option<(String, Comp
         _ => return None,
     };
 
-    let prefix = extract_prefix(stoat, prefix_range);
+    // A live preview fills the prefix range with the selected row, so the text
+    // the reader typed comes from the popup instead.
+    let prefix = match crate::completion::preview::is_live(stoat) {
+        true => stoat
+            .pending_completion
+            .as_ref()
+            .map(|popup| popup.prefix.clone())
+            .unwrap_or_default(),
+        false => extract_prefix(stoat, prefix_range),
+    };
 
     let (content_area, cursor_screen) =
         cursor_popup::focused_editor_popup_ctx(stoat, anchor_offset)?;

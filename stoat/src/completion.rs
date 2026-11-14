@@ -13,6 +13,7 @@ pub(crate) mod accept;
 mod e2e;
 pub mod lsp;
 pub mod path;
+pub(crate) mod preview;
 pub(crate) mod request;
 pub(crate) mod snippet;
 pub mod word;

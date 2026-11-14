@@ -17,6 +17,7 @@ use crate::{
     app::{Stoat, UpdateEffect},
     buffer::{BufferId, TextBuffer},
     completion::CompletionItem,
+    editor_state::EditorId,
     lsp::stamp::DocumentStamp,
     pane::{FocusTarget, View},
 };
@@ -34,7 +35,8 @@ pub(crate) struct AcceptedImports {
 /// Accept the selected item in [`Stoat::pending_completion`]. No-op
 /// when the popup is not showing, the focused pane is not an editor,
 /// or no row is selected. With no row selected the popup stays open,
-/// because the reader has not chosen a row to accept.
+/// because the reader has not chosen a row to accept. A live preview of
+/// the row reverts first, so the accept replaces what the reader typed.
 ///
 /// Every cursor gets a copy of the accepted text. Snippet items
 /// (`is_snippet: true`) parse the insert text via
@@ -57,6 +59,8 @@ pub(crate) fn execute(stoat: &mut Stoat) -> UpdateEffect {
     else {
         return UpdateEffect::None;
     };
+    // Ahead of the close, since a preview is live only while its popup is open.
+    let pristine = crate::completion::preview::revert(stoat);
     stoat.pending_completion = None;
 
     let editor_id = {
@@ -83,11 +87,15 @@ pub(crate) fn execute(stoat: &mut Stoat) -> UpdateEffect {
     };
 
     // Resolved against the buffer as it is now, not as the source read it. An
-    // edit that collapsed the text between the two ends also crosses them.
+    // edit that collapsed the text between the two ends also crosses them. A
+    // preview wrote over the fragments the item's anchors point into, so after
+    // its revert the range resolves against the buffer from before the first
+    // preview, whose text the revert put back.
     let edit_range = {
         let guard = buffer.read().expect("poisoned");
-        let start = guard.resolve_anchor(&item.replace_range.start);
-        let end = guard.resolve_anchor(&item.replace_range.end);
+        let snapshot = pristine.as_ref().unwrap_or(&guard.snapshot);
+        let start = snapshot.resolve_anchor(&item.replace_range.start);
+        let end = snapshot.resolve_anchor(&item.replace_range.end);
         start.min(end)..start.max(end)
     };
 
@@ -118,20 +126,8 @@ pub(crate) fn execute(stoat: &mut Stoat) -> UpdateEffect {
         editor.selections.replace_with(selections, new_buf);
         active
     } else {
-        // Each cursor lands past its own copy, and its tail maps through every
-        // copy, so a selection the reader typed into survives the accept.
-        let landings: Vec<(usize, usize)> = copies
-            .iter()
-            .flat_map(|(_, start, ids)| {
-                ids.iter().map(move |&id| (id, start + inserted_text.len()))
-            })
-            .collect();
-        let written: Vec<(Range<usize>, usize)> = copies
-            .iter()
-            .rev()
-            .map(|(range, _, _)| (range.clone(), inserted_text.len()))
-            .collect();
-        stoat.land_cursors_after_insert(editor_id, landings, &tails, &written);
+        let lens = vec![inserted_text.len(); copies.len()];
+        land_past_copies(stoat, editor_id, &copies, &lens, &tails);
         None
     };
 
@@ -151,7 +147,7 @@ pub(crate) fn execute(stoat: &mut Stoat) -> UpdateEffect {
 /// `edit_range` is the range of the `newest` selection, which the request
 /// measured from. The copies come sorted by start descending, as
 /// [`replace_ranges`] answers them.
-fn insert_at_every_cursor(
+pub(super) fn insert_at_every_cursor(
     buffer: &mut TextBuffer,
     selections: &[Selection<Anchor>],
     newest: usize,
@@ -188,6 +184,33 @@ fn insert_at_every_cursor(
         .zip(&starts)
         .map(|((range, ids), start)| (range, buffer.resolve_anchor(start), ids))
         .collect()
+}
+
+/// Land each cursor past its own copy of a batch that [`insert_at_every_cursor`]
+/// wrote.
+///
+/// `lens` holds each copy's written length in the order of `copies`. Each tail
+/// maps through every copy, so a selection the reader typed into survives the
+/// write. `tails` are the selection tails as they stood before the write.
+pub(super) fn land_past_copies(
+    stoat: &mut Stoat,
+    editor_id: EditorId,
+    copies: &[(Range<usize>, usize, Vec<usize>)],
+    lens: &[usize],
+    tails: &[(usize, usize, bool, bool)],
+) {
+    let landings: Vec<(usize, usize)> = copies
+        .iter()
+        .zip(lens)
+        .flat_map(|((_, start, ids), &len)| ids.iter().map(move |&id| (id, start + len)))
+        .collect();
+    let written: Vec<(Range<usize>, usize)> = copies
+        .iter()
+        .zip(lens)
+        .rev()
+        .map(|((range, _, _), &len)| (range.clone(), len))
+        .collect();
+    stoat.land_cursors_after_insert(editor_id, landings, tails, &written);
 }
 
 /// The range each cursor replaces when a completion is accepted at every

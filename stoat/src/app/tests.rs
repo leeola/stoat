@@ -15166,7 +15166,7 @@ fn enter_accepts_only_a_selected_row() {
 }
 
 #[test]
-fn selection_keys_step_the_popup_with_wrap_and_leave_the_cursor() {
+fn selection_keys_step_the_popup_with_wrap() {
     let mut h = Stoat::test();
     let _path = open_scratch_file(&mut h, "");
     h.type_keys("i");
@@ -15196,7 +15196,7 @@ fn selection_keys_step_the_popup_with_wrap_and_leave_the_cursor() {
             vec![expected("down"), expected("tab"), expected("ctrl-n")],
             cursor_before,
         ),
-        "each pair opens unselected, wraps both ways, and moves no cursor",
+        "each pair opens unselected and wraps both ways, and Ctrl-c puts the cursor back",
     );
 }
 
@@ -15230,25 +15230,30 @@ fn half_page_keys_step_the_popup_by_half_its_height() {
             vec![expected("pagedown"), expected("ctrl-d")],
             "f".to_string()
         ),
-        "each pair opens unselected, steps five rows both ways with wrap, and edits nothing",
+        "each pair opens unselected and steps five rows both ways with wrap, and Ctrl-c \
+         leaves only the typed text",
     );
 }
 
 /// The selection of a fresh popup of `rows` rows over the typed `f`, then the
 /// selection after each of `keys`.
+///
+/// Each selection previews its row over the `f`, so the popup closes with
+/// Ctrl-c at the end, which puts the `f` back.
 fn popup_selections(
     h: &mut crate::test_harness::TestHarness,
     rows: usize,
     keys: &[&str],
 ) -> Vec<Option<usize>> {
     use crate::completion::{CompletionItem, CompletionPopup, CompletionSource};
+    let replace_range = crate::completion::anchor_range_in_focused(&h.stoat, 0..1);
     let items = (0..rows)
         .map(|row| CompletionItem {
             label: format!("foo{row}"),
             source: CompletionSource::Word,
             kind: None,
             detail: None,
-            replace_range: crate::completion::unused_replace_range(),
+            replace_range: replace_range.clone(),
             insert_text: format!("foo{row}"),
             is_snippet: false,
             documentation: None,
@@ -15273,6 +15278,7 @@ fn popup_selections(
         h.type_keys(key);
         seen.push(selected(h));
     }
+    h.type_keys("ctrl-c");
     seen
 }
 
