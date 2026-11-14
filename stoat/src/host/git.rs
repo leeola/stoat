@@ -184,6 +184,55 @@ pub struct CommitFileChange {
 /// its repo-relative path and carries its content on either side.
 pub type CommitChanges = (Vec<CommitFileChange>, Vec<(PathBuf, String, String)>);
 
+/// The commit that last changed each line of a file, as [`GitRepo::blame`]
+/// answers it.
+///
+/// Each run names its commit by an index into `commits`, and each commit
+/// appears in that list once. A file that one commit wrote in many places
+/// therefore carries the metadata of that commit once.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FileBlame {
+    /// The runs in line order. Together they cover every line of the blamed
+    /// text.
+    pub runs: Vec<BlameRun>,
+    pub commits: Vec<BlameCommit>,
+}
+
+/// Consecutive lines of a blamed file that one commit last changed.
+///
+/// A run is one hunk of the blame. Two runs that touch sometimes name the
+/// same commit, so a paint that draws one block for each commit joins them.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BlameRun {
+    /// The 0-based line of the blamed text where the run starts.
+    pub start_line: u32,
+    pub lines: u32,
+    /// The index of the commit of the run in [`FileBlame::commits`].
+    pub commit: u32,
+    /// The 0-based line that the first line of the run has in the version of
+    /// the file at that commit.
+    ///
+    /// When later commits move lines, this differs from `start_line`. The
+    /// patch of the commit counts lines in that version, so a view of the
+    /// patch finds the run at this line.
+    pub commit_line: u32,
+    /// The repo-relative path that the file had in that commit.
+    ///
+    /// A rename after the commit makes this differ from the blamed path.
+    pub commit_path: PathBuf,
+}
+
+/// A commit that a blame names, with the zone of its time.
+///
+/// A clock time in the zone of the commit, not in the zone of the viewer,
+/// needs this offset, because [`CommitInfo::time`] holds only the instant.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BlameCommit {
+    pub info: CommitInfo,
+    /// The offset from UTC, in minutes, of the zone of `info.time`.
+    pub utc_offset_minutes: i32,
+}
+
 /// Discovers repositories. Kept separate from [`GitRepo`] so the host
 /// can be a cheap cloneable value (`Arc<dyn GitHost>`) while repository
 /// handles carry per-repo state.
@@ -609,6 +658,22 @@ pub trait GitRepo: Send + Sync {
     /// part of a second. A caller that only needs somewhere to open pays
     /// neither.
     fn commit_first_path(&self, sha: &str) -> Option<PathBuf>;
+
+    /// The commit that last changed each line of `path`, in the version of the
+    /// file at `at`.
+    ///
+    /// `at` is a full sha, and `None` blames HEAD. The answer covers committed
+    /// text only, so uncommitted edits in the working tree or in a buffer do
+    /// not change it. `path` is absolute or repo-relative.
+    ///
+    /// The runs cover every line of the blamed text in line order.
+    ///
+    /// `None` for an unknown sha, a path that the commit does not hold, a path
+    /// outside the workdir, and an unborn HEAD.
+    ///
+    /// The call walks the whole history of the file, and on a long history it
+    /// takes seconds. Run it off the run loop.
+    fn blame(&self, path: &Path, at: Option<&str>) -> Option<FileBlame>;
 
     /// Replace HEAD's tree (and optionally its message) with the given
     /// values, creating a new commit and writing the ref HEAD points

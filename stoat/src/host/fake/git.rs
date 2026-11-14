@@ -3,9 +3,10 @@ mod rebase;
 use crate::host::{
     fake::FakeFs,
     git::{
-        BackendSnafu, ChangeLineStats, ChangedFile, CherryPickOutcome, CommitFileChange,
-        CommitFileChangeKind, CommitInfo, ConflictedFile, GitApplyError, GitHost, GitRepo,
-        HunkTallies, MergeOutcome, MergeState, RebaseError, RebaseTodo, RewriteResult, StagedKind,
+        BackendSnafu, BlameCommit, BlameRun, ChangeLineStats, ChangedFile, CherryPickOutcome,
+        CommitFileChange, CommitFileChangeKind, CommitInfo, ConflictedFile, FileBlame,
+        GitApplyError, GitHost, GitRepo, HunkTallies, MergeOutcome, MergeState, RebaseError,
+        RebaseTodo, RewriteResult, StagedKind,
     },
 };
 use std::{
@@ -18,6 +19,7 @@ use std::{
         Arc, Mutex,
     },
 };
+use stoat_language::structural_diff;
 use stoat_text::LineEnding;
 
 /// The reason libgit2 gives when a commit meets an index that still holds an
@@ -2312,6 +2314,79 @@ impl GitRepo for FakeGitRepo {
             .map(|change| change.rel_path)
     }
 
+    /// Follows first parents only. Seeded commits carry no zone, so every
+    /// offset is 0.
+    fn blame(&self, path: &Path, at: Option<&str>) -> Option<FileBlame> {
+        let state = self.state.lock().unwrap();
+        let rel = path.strip_prefix(&self.workdir).unwrap_or(path);
+        let start = at.or(state.head.as_deref())?;
+        let text = state.commits.get(start)?.tree.get(rel)?;
+
+        // Each line still to place, as its line in the blamed text and its
+        // line in the version of the file at `cursor`.
+        let mut pending: Vec<(u32, u32)> = (0..text.split_inclusive('\n').count() as u32)
+            .map(|line| (line, line))
+            .collect();
+        let mut owners: Vec<(u32, &str, u32)> = Vec::with_capacity(pending.len());
+        let mut cursor = start;
+        while !pending.is_empty() {
+            let commit = &state.commits[cursor];
+            let parent = commit.parents.first().and_then(|sha| {
+                let text = state.commits.get(sha)?.tree.get(rel)?;
+                Some((sha.as_str(), text))
+            });
+            let Some((parent_sha, parent_text)) = parent else {
+                owners.extend(
+                    pending
+                        .drain(..)
+                        .map(|(blamed, line)| (blamed, cursor, line)),
+                );
+                break;
+            };
+
+            let origins = line_origins(parent_text, &commit.tree[rel]);
+            let mut kept = Vec::with_capacity(pending.len());
+            for (blamed, line) in pending {
+                match origins[line as usize] {
+                    Some(origin) => kept.push((blamed, origin)),
+                    None => owners.push((blamed, cursor, line)),
+                }
+            }
+            pending = kept;
+            cursor = parent_sha;
+        }
+        owners.sort_unstable_by_key(|&(blamed, _, _)| blamed);
+
+        let mut index: HashMap<&str, u32> = HashMap::new();
+        let mut commits: Vec<BlameCommit> = Vec::new();
+        let mut runs: Vec<BlameRun> = Vec::new();
+        for (blamed, sha, commit_line) in owners {
+            let commit = *index.entry(sha).or_insert_with(|| {
+                commits.push(BlameCommit {
+                    info: commit_info(sha, &state.commits[sha]),
+                    utc_offset_minutes: 0,
+                });
+                commits.len() as u32 - 1
+            });
+            if let Some(run) = runs.last_mut()
+                && run.commit == commit
+                && run.commit_line + run.lines == commit_line
+            {
+                run.lines += 1;
+                continue;
+            }
+
+            runs.push(BlameRun {
+                start_line: blamed,
+                lines: 1,
+                commit,
+                commit_line,
+                commit_path: rel.to_path_buf(),
+            });
+        }
+        Some(FileBlame { runs, commits })
+    }
+
     fn commit_file_changes(&self, sha: &str) -> Vec<CommitFileChange> {
         let state = self.state.lock().unwrap();
         let Some(commit) = state.commits.get(sha) else {
@@ -2372,6 +2447,42 @@ fn line_delta(base: &str, new: &str) -> (u32, u32) {
     let adds = new_lines.difference(&base_lines).count() as u32;
     let dels = base_lines.difference(&new_lines).count() as u32;
     (adds, dels)
+}
+
+/// For each line of `new`, the line of `base` that it keeps, or `None` for a
+/// line in a region that the line diff from `base` changed.
+///
+/// The fake blame follows a line back through history with this map. A line
+/// keeps an older commit for as long as each diff leaves it alone.
+fn line_origins(base: &str, new: &str) -> Vec<Option<u32>> {
+    let new_lines = new.split_inclusive('\n').count();
+    let mut origins: Vec<Option<u32>> = Vec::with_capacity(new_lines);
+    let mut base_line = 0;
+    for (base_bytes, new_bytes) in structural_diff::line_hunks(base, new) {
+        let kept = boundary_line(new, new_bytes.start) as usize - origins.len();
+        origins.extend((base_line..).take(kept).map(Some));
+        origins.resize(boundary_line(new, new_bytes.end) as usize, None);
+        base_line = boundary_line(base, base_bytes.end);
+    }
+
+    let kept = new_lines - origins.len();
+    origins.extend((base_line..).take(kept).map(Some));
+    origins
+}
+
+/// The line that a region boundary at byte `offset` of `text` comes before.
+///
+/// A region covers whole lines, so a boundary is the start of a line or the
+/// end of the text. The end comes after the last line even when that line has
+/// no newline. A count of the newlines before the end misses that line.
+fn boundary_line(text: &str, offset: usize) -> u32 {
+    if offset == text.len() {
+        return text.split_inclusive('\n').count() as u32;
+    }
+    text.as_bytes()[..offset]
+        .iter()
+        .filter(|&&byte| byte == b'\n')
+        .count() as u32
 }
 
 #[cfg(test)]
@@ -4017,5 +4128,65 @@ mod tests {
             )),
             "the pair is what one call answers",
         );
+    }
+
+    /// A line keeps the commit that wrote it until a later commit changes it,
+    /// and a blame at an older commit reads the file as it stood there.
+    #[test]
+    fn blame_names_the_commit_that_last_changed_each_line() {
+        let host = FakeGit::new();
+        host.add_repo(workdir())
+            .commit("c1", &[("a.txt", "one\ntwo\nthree\n")])
+            .commit_with_parent("c2", "c1", &[("a.txt", "one\nTWO\nthree\n")])
+            .commit_with_parent("c3", "c2", &[("a.txt", "zero\none\nTWO\nthree\n")]);
+        let repo = host.discover(&workdir()).unwrap();
+
+        let head = repo
+            .blame(Path::new("a.txt"), None)
+            .expect("HEAD holds a.txt");
+        assert_eq!(
+            runs(&head),
+            [
+                (0, 1, "c3", 0),
+                (1, 1, "c1", 0),
+                (2, 1, "c2", 1),
+                (3, 1, "c1", 2)
+            ],
+            "each line at the line it had in its commit",
+        );
+
+        let root = repo
+            .blame(Path::new("a.txt"), Some("c1"))
+            .expect("c1 holds a.txt");
+        assert_eq!(runs(&root), [(0, 3, "c1", 0)], "the root wrote every line");
+        assert_eq!(repo.blame(Path::new("missing.txt"), None), None);
+    }
+
+    /// A last line with no newline belongs to the diff region that changes it,
+    /// so the commit that changed it owns it.
+    #[test]
+    fn blame_gives_a_last_line_with_no_newline_to_the_commit_that_changed_it() {
+        let host = FakeGit::new();
+        host.add_repo(workdir())
+            .commit("c1", &[("a.txt", "one\ntwo")])
+            .commit_with_parent("c2", "c1", &[("a.txt", "one\nTWO")]);
+        let repo = host.discover(&workdir()).unwrap();
+
+        let head = repo
+            .blame(Path::new("a.txt"), None)
+            .expect("HEAD holds a.txt");
+        assert_eq!(runs(&head), [(0, 1, "c1", 0), (1, 1, "c2", 1)]);
+    }
+
+    /// The runs of `blame` as `(start_line, lines, sha, commit_line)`.
+    fn runs(blame: &FileBlame) -> Vec<(u32, u32, &str, u32)> {
+        blame
+            .runs
+            .iter()
+            .map(|run| {
+                let sha = blame.commits[run.commit as usize].info.sha.as_str();
+                (run.start_line, run.lines, sha, run.commit_line)
+            })
+            .collect()
     }
 }

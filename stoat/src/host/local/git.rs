@@ -2,12 +2,13 @@ mod rebase;
 mod tree;
 
 use crate::host::git::{
-    BackendSnafu, ChangeLineStats, ChangedFile, CherryPickOutcome, CommitChanges, CommitFileChange,
-    CommitFileChangeKind, CommitInfo, ConflictedFile, GitApplyError, GitHost, GitRepo, HunkTallies,
-    MergeOutcome, MergeState, RebaseError, RebaseTodo, RewriteResult, StagedKind,
+    BackendSnafu, BlameCommit, BlameRun, ChangeLineStats, ChangedFile, CherryPickOutcome,
+    CommitChanges, CommitFileChange, CommitFileChangeKind, CommitInfo, ConflictedFile, FileBlame,
+    GitApplyError, GitHost, GitRepo, HunkTallies, MergeOutcome, MergeState, RebaseError,
+    RebaseTodo, RewriteResult, StagedKind,
 };
 use git2::{
-    build::CheckoutBuilder, ApplyLocation, Branch, BranchType, Commit, Delta, Diff,
+    build::CheckoutBuilder, ApplyLocation, BlameOptions, Branch, BranchType, Commit, Delta, Diff,
     DiffFindOptions, DiffLineType, DiffOptions, ErrorCode, Repository, RepositoryState, Sort,
     StashFlags, Status, StatusEntry, StatusOptions,
 };
@@ -1401,6 +1402,50 @@ impl GitRepo for LocalGitRepo {
                 .map(Path::to_path_buf)
         })
     }
+
+    fn blame(&self, path: &Path, at: Option<&str>) -> Option<FileBlame> {
+        let repo = self.repo.lock().expect("git repo lock");
+        let rel = repo
+            .workdir()
+            .and_then(|wd| path.strip_prefix(wd).ok())
+            .unwrap_or(path);
+
+        let mut opts = BlameOptions::new();
+        if let Some(sha) = at {
+            opts.newest_commit(git2::Oid::from_str(sha).ok()?);
+        }
+        let blame = repo.blame_file(rel, Some(&mut opts)).ok()?;
+
+        let mut index: HashMap<git2::Oid, u32> = HashMap::new();
+        let mut commits: Vec<BlameCommit> = Vec::new();
+        let mut runs: Vec<BlameRun> = Vec::with_capacity(blame.len());
+        for hunk in blame.iter().filter(|hunk| hunk.lines_in_hunk() > 0) {
+            let oid = hunk.final_commit_id();
+            let commit = match index.get(&oid) {
+                Some(&commit) => commit,
+                None => {
+                    let found = repo.find_commit(oid).ok()?;
+                    commits.push(BlameCommit {
+                        info: commit_info(&found),
+                        utc_offset_minutes: found.time().offset_minutes(),
+                    });
+                    let commit = commits.len() as u32 - 1;
+                    index.insert(oid, commit);
+                    commit
+                },
+            };
+
+            // libgit2 counts both start lines from 1.
+            runs.push(BlameRun {
+                start_line: hunk.final_start_line() as u32 - 1,
+                lines: hunk.lines_in_hunk() as u32,
+                commit,
+                commit_line: hunk.orig_start_line() as u32 - 1,
+                commit_path: hunk.path().unwrap_or(rel).to_path_buf(),
+            });
+        }
+        Some(FileBlame { runs, commits })
+    }
 }
 
 /// Which edges a history walk follows.
@@ -1470,31 +1515,36 @@ fn walk_history(
         let Ok(commit) = repo.find_commit(oid) else {
             continue;
         };
-        let sha = oid.to_string();
-        let short_sha = sha.chars().take(7).collect();
-        let summary = commit
-            .summary()
-            .ok()
-            .flatten()
-            .unwrap_or_default()
-            .trim()
-            .to_string();
-        let author = commit.author();
-        let author_name = author.name().unwrap_or_default().to_string();
-        let author_email = author.email().unwrap_or_default().to_string();
-        let time = commit.time().seconds();
-        let parents = commit.parent_ids().map(|id| id.to_string()).collect();
-        out.push(CommitInfo {
-            sha,
-            short_sha,
-            summary,
-            author_name,
-            author_email,
-            time,
-            parents,
-        });
+        out.push(commit_info(&commit));
     }
     out
+}
+
+/// The row `commit` reports through the log walks and through a blame.
+fn commit_info(commit: &Commit<'_>) -> CommitInfo {
+    let sha = commit.id().to_string();
+    let short_sha = sha.chars().take(7).collect();
+    let summary = commit
+        .summary()
+        .ok()
+        .flatten()
+        .unwrap_or_default()
+        .trim()
+        .to_string();
+    let author = commit.author();
+    let author_name = author.name().unwrap_or_default().to_string();
+    let author_email = author.email().unwrap_or_default().to_string();
+    let time = commit.time().seconds();
+    let parents = commit.parent_ids().map(|id| id.to_string()).collect();
+    CommitInfo {
+        sha,
+        short_sha,
+        summary,
+        author_name,
+        author_email,
+        time,
+        parents,
+    }
 }
 
 /// Update the working tree and index to `commit`'s tree without moving HEAD.
@@ -2094,8 +2144,8 @@ fn count_hunks(diff: &Diff<'_>, per_file: &mut dyn FnMut(PathBuf, usize)) -> usi
 mod tests {
     use super::{apply_mismatch_detail, patch_target_path, LocalGit, QUOTED_LINE_MAX};
     use crate::host::git::{
-        CherryPickOutcome, CommitFileChangeKind, GitApplyError, GitHost, GitRepo, MergeOutcome,
-        MergeState, RebaseTodo, RebaseTodoOp, StagedKind,
+        CherryPickOutcome, CommitFileChangeKind, FileBlame, GitApplyError, GitHost, GitRepo,
+        MergeOutcome, MergeState, RebaseTodo, RebaseTodoOp, StagedKind,
     };
     use git2::{
         build::CheckoutBuilder, Commit, Oid, Repository, RepositoryInitOptions, RepositoryState,
@@ -2254,6 +2304,7 @@ mod tests {
     }
 
     /// Commit `contents` on top of HEAD, adding every named path to the index.
+    /// On an unborn branch the commit is the root commit.
     fn commit_files(repo: &Repository, dir: &TempDir, files: &[(&str, &[u8])]) -> String {
         let sig = Signature::now("test", "t@t").unwrap();
         for (name, bytes) in files {
@@ -2267,8 +2318,9 @@ mod tests {
             index.write().unwrap();
             repo.find_tree(index.write_tree().unwrap()).unwrap()
         };
-        let parent = repo.head().unwrap().peel_to_commit().unwrap();
-        repo.commit(Some("HEAD"), &sig, &sig, "add", &tree, &[&parent])
+        let parent = repo.head().ok().map(|head| head.peel_to_commit().unwrap());
+        let parents: Vec<_> = parent.iter().collect();
+        repo.commit(Some("HEAD"), &sig, &sig, "add", &tree, &parents)
             .unwrap()
             .to_string()
     }
@@ -3715,5 +3767,57 @@ mod tests {
             2,
             "where the unpaired read splits it into a deletion and an addition",
         );
+    }
+
+    /// A line keeps the commit that wrote it until a later commit changes it,
+    /// and a blame at an older commit reads the file as it stood there.
+    #[test]
+    fn blame_names_the_commit_that_last_changed_each_line() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = {
+            let mut opts = RepositoryInitOptions::new();
+            opts.initial_head("main");
+            Repository::init_opts(dir.path(), &opts).unwrap()
+        };
+        let c1 = commit_files(&repo, &dir, &[("a.txt", b"one\ntwo\nthree\n")]);
+        let c2 = commit_files(&repo, &dir, &[("a.txt", b"one\nTWO\nthree\n")]);
+        let c3 = commit_files(&repo, &dir, &[("a.txt", b"zero\none\nTWO\nthree\n")]);
+        let git = discover(&dir);
+
+        let head = git
+            .blame(Path::new("a.txt"), None)
+            .expect("HEAD holds a.txt");
+        assert_eq!(
+            runs(&head),
+            [
+                (0, 1, c3.as_str(), 0),
+                (1, 1, c1.as_str(), 0),
+                (2, 1, c2.as_str(), 1),
+                (3, 1, c1.as_str(), 2),
+            ],
+            "each line at the line it had in its commit",
+        );
+
+        let root = git
+            .blame(Path::new("a.txt"), Some(&c1))
+            .expect("c1 holds a.txt");
+        assert_eq!(
+            runs(&root),
+            [(0, 3, c1.as_str(), 0)],
+            "the root wrote every line"
+        );
+        assert_eq!(git.blame(Path::new("missing.txt"), None), None);
+    }
+
+    /// The runs of `blame` as `(start_line, lines, sha, commit_line)`.
+    fn runs(blame: &FileBlame) -> Vec<(u32, u32, &str, u32)> {
+        blame
+            .runs
+            .iter()
+            .map(|run| {
+                let sha = blame.commits[run.commit as usize].info.sha.as_str();
+                (run.start_line, run.lines, sha, run.commit_line)
+            })
+            .collect()
     }
 }
