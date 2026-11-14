@@ -284,8 +284,11 @@ pub trait GitRepo: Send + Sync {
     fn hunk_tallies(&self) -> HunkTallies;
 
     /// Whether the repository has index or working-tree changes to *tracked*
-    /// files. Untracked files are excluded, because no stoat git operation
-    /// writes the working tree, so an untracked file is never at risk.
+    /// files.
+    ///
+    /// Untracked files are excluded, because no stoat git operation puts one at
+    /// risk. A checkout and a stash pop write the working tree, but an
+    /// untracked file is safe from every write except a stash that takes it.
     ///
     /// Guards the in-memory commit rewrites (rebase, commit-review apply) that
     /// must refuse to run over tracked edits but tolerate untracked files.
@@ -803,12 +806,15 @@ pub trait GitRepo: Send + Sync {
     ///
     /// The stasher is the repository's configured identity. The stash message
     /// is `On <branch>: <message>` for a given `message`, and git's `WIP on
-    /// <branch>: <sha> <subject>` for `None`. Untracked files stay where they
-    /// are.
+    /// <branch>: <sha> <subject>` for `None`.
+    ///
+    /// Untracked files stay where they are unless `untracked` is set. With
+    /// `untracked`, the stash takes them too, as `git stash -u` does, and they
+    /// leave the working tree. Ignored files stay in both cases.
     ///
     /// Fails with the `Backend` reason `nothing to stash` when no tracked path
-    /// differs from HEAD.
-    fn stash_save(&self, message: Option<&str>) -> Result<String, GitApplyError>;
+    /// differs from HEAD and the stash takes no untracked file.
+    fn stash_save(&self, message: Option<&str>, untracked: bool) -> Result<String, GitApplyError>;
 
     /// The stashes, newest first, each as a row the commit picker lists.
     ///
@@ -819,10 +825,13 @@ pub trait GitRepo: Send + Sync {
 
     /// Apply the stash whose commit is `sha` to the working tree, then drop it.
     ///
+    /// With `index`, the changes that the stash held staged return staged, as
+    /// `git stash pop --index` does.
+    ///
     /// Fails with the `Backend` reason `no such stash` when no stash has that
     /// commit. A pop that conflicts fails with the backend's reason and keeps
     /// the stash.
-    fn stash_pop(&self, sha: &str) -> Result<(), GitApplyError>;
+    fn stash_pop(&self, sha: &str, index: bool) -> Result<(), GitApplyError>;
 
     /// Stage every change to a tracked file, as `git add -u` does, and return
     /// how many tracked paths it staged.

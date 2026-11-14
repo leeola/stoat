@@ -16,7 +16,7 @@ pub(super) fn git_stash(stoat: &mut Stoat, message: Option<&str>) -> UpdateEffec
     let job = GitJob::new("stash", None, move |stoat: &mut Stoat| {
         let (repo, _) = commit_repo(stoat)?;
         Some(Box::new(move || {
-            let stashed = match repo.stash_save(message.as_deref()) {
+            let stashed = match repo.stash_save(message.as_deref(), false) {
                 Ok(sha) => Ok(sha),
                 Err(GitApplyError::Backend { reason, .. }) => Err(reason),
             };
@@ -68,7 +68,7 @@ pub(super) fn queue_stash_pop(stoat: &mut Stoat, stash: Option<CommitInfo>) {
         Some(Box::new(move || {
             let popped = match stash.or_else(|| repo.stash_list().into_iter().next()) {
                 None => Err(("no stash", None)),
-                Some(row) => match repo.stash_pop(&row.sha) {
+                Some(row) => match repo.stash_pop(&row.sha, false) {
                     Ok(()) => Ok(row),
                     Err(GitApplyError::Backend { reason, .. }) => {
                         Err(("stash pop failed", Some(reason)))

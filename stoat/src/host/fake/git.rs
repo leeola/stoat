@@ -892,13 +892,17 @@ impl FakeChange {
     }
 }
 
-/// A stash, with the registrations and index texts it took from the working
-/// tree, so a pop puts back exactly what the save took.
+/// A stash, with the registrations, index texts, and untracked paths it took
+/// from the working tree, so a pop puts back exactly what the save took.
 struct FakeStash {
     sha: String,
     message: String,
     changed: Vec<FakeChange>,
     index_contents: HashMap<PathBuf, String>,
+    /// The untracked paths and their line counts. Only a save that takes
+    /// untracked files fills them.
+    untracked: BTreeSet<PathBuf>,
+    untracked_lines: HashMap<PathBuf, u32>,
     time: i64,
 }
 
@@ -2174,10 +2178,10 @@ impl GitRepo for FakeGitRepo {
     /// That message is `On <branch>: <message>` for a given message, and `WIP
     /// on <branch>: <head6> <summary>` without one, with `(no branch)` for a
     /// detached HEAD. Untracked paths live in their own set, so every
-    /// registration is tracked, and the untracked paths stay as a default stash
-    /// leaves them. The apply failure knob fails it as it fails
+    /// registration is tracked. The untracked paths and their line counts stay
+    /// unless `untracked` is set. The apply failure knob fails it as it fails
     /// [`GitRepo::commit_index`].
-    fn stash_save(&self, message: Option<&str>) -> Result<String, GitApplyError> {
+    fn stash_save(&self, message: Option<&str>, untracked: bool) -> Result<String, GitApplyError> {
         let mut state = self.state.lock().unwrap();
         if let Some(reason) = &state.apply_error {
             return BackendSnafu {
@@ -2185,7 +2189,7 @@ impl GitRepo for FakeGitRepo {
             }
             .fail();
         }
-        if state.changed.is_empty() {
+        if state.changed.is_empty() && (!untracked || state.untracked.is_empty()) {
             return BackendSnafu {
                 reason: "nothing to stash",
             }
@@ -2207,13 +2211,19 @@ impl GitRepo for FakeGitRepo {
         };
         state.synth_counter += 1;
         let sha = format!("stash-{}", state.synth_counter);
-        let stash = FakeStash {
+        let mut stash = FakeStash {
             sha: sha.clone(),
             message,
             changed: mem::take(&mut state.changed),
             index_contents: mem::take(&mut state.index_contents),
+            untracked: BTreeSet::new(),
+            untracked_lines: HashMap::new(),
             time: 1_700_000_000 + state.synth_counter as i64,
         };
+        if untracked {
+            stash.untracked = mem::take(&mut state.untracked);
+            stash.untracked_lines = mem::take(&mut state.untracked_lines);
+        }
         state.stashes.push(stash);
         Ok(sha)
     }
@@ -2236,9 +2246,13 @@ impl GitRepo for FakeGitRepo {
             .collect()
     }
 
-    /// Restores the stash's registrations and index texts and removes it. The
-    /// apply failure knob fails it as it fails [`GitRepo::commit_index`].
-    fn stash_pop(&self, sha: &str) -> Result<(), GitApplyError> {
+    /// Restores the stash's registrations, index texts, and untracked paths,
+    /// and removes it.
+    ///
+    /// Each registration keeps its staged flag, so the staged changes return
+    /// staged under either `index` value. The apply failure knob fails it as it
+    /// fails [`GitRepo::commit_index`].
+    fn stash_pop(&self, sha: &str, _index: bool) -> Result<(), GitApplyError> {
         let mut state = self.state.lock().unwrap();
         if let Some(reason) = &state.apply_error {
             return BackendSnafu {
@@ -2255,6 +2269,8 @@ impl GitRepo for FakeGitRepo {
         let stash = state.stashes.remove(at);
         state.changed.extend(stash.changed);
         state.index_contents.extend(stash.index_contents);
+        state.untracked.extend(stash.untracked);
+        state.untracked_lines.extend(stash.untracked_lines);
         Ok(())
     }
 
@@ -3750,7 +3766,7 @@ mod tests {
         let b = workdir().join("b.rs");
         let before = repo.changed_files();
 
-        let sha = repo.stash_save(None).unwrap();
+        let sha = repo.stash_save(None, false).unwrap();
         let saved = (
             repo.changed_files(),
             repo.index_content(&b),
@@ -3759,18 +3775,18 @@ mod tests {
                 .map(|row| (row.sha, row.summary))
                 .collect::<Vec<_>>(),
         );
-        repo.stash_pop(&sha).unwrap();
+        repo.stash_pop(&sha, false).unwrap();
         let clean = host
             .discover(Path::new("/clean"))
             .unwrap()
-            .stash_save(None)
+            .stash_save(None, false)
             .map_err(|err| err.to_string());
         assert_eq!(
             (
                 saved,
                 repo.changed_files(),
                 repo.index_content(&b),
-                repo.stash_pop(&sha).map_err(|err| err.to_string()),
+                repo.stash_pop(&sha, false).map_err(|err| err.to_string()),
                 clean,
             ),
             (
@@ -3789,6 +3805,48 @@ mod tests {
                 Some("new".to_string()),
                 Err("git backend failure: no such stash".to_string()),
                 Err("git backend failure: nothing to stash".to_string()),
+            ),
+        );
+    }
+
+    /// A stash takes the untracked paths and their line counts only on
+    /// request, and a pop puts them back. A tree that holds nothing but an
+    /// untracked file has something to stash only when the stash takes it.
+    #[test]
+    fn stash_takes_untracked_paths_on_request() {
+        let host = FakeGit::new();
+        host.add_repo(workdir())
+            .unstaged_file("a.rs", "edit")
+            .untracked("c.rs")
+            .lines("c.rs", 3, 0);
+        host.add_repo("/only").untracked("d.rs");
+        let repo = host.discover(&workdir()).unwrap();
+        let only = host.discover(Path::new("/only")).unwrap();
+        let unstaged = |repo: &Arc<dyn GitRepo>| repo.change_line_stats().unstaged;
+
+        let kept = repo.stash_save(None, false).unwrap();
+        let after_default = unstaged(&repo);
+        repo.stash_pop(&kept, false).unwrap();
+        let taken = repo.stash_save(None, true).unwrap();
+        let after_untracked = unstaged(&repo);
+        repo.stash_pop(&taken, false).unwrap();
+
+        assert_eq!(
+            (
+                after_default,
+                after_untracked,
+                unstaged(&repo),
+                only.stash_save(None, false).map_err(|err| err.to_string()),
+                only.stash_save(None, true)
+                    .map(|_| unstaged(&only))
+                    .map_err(|err| err.to_string()),
+            ),
+            (
+                vec![(PathBuf::from("c.rs"), 3, 0)],
+                Vec::new(),
+                vec![(PathBuf::from("a.rs"), 0, 0), (PathBuf::from("c.rs"), 3, 0)],
+                Err("git backend failure: nothing to stash".to_string()),
+                Ok(Vec::new()),
             ),
         );
     }

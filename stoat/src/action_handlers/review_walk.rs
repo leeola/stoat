@@ -2059,7 +2059,7 @@ mod tests {
             h.fake_git()
                 .add_repo("/repo")
                 .unstaged_file("a.rs", message);
-            repo.stash_save(Some(message)).expect("a stash");
+            repo.stash_save(Some(message), false).expect("a stash");
         }
 
         h.type_text(":git sls");

@@ -10,7 +10,7 @@ use crate::host::git::{
 use git2::{
     build::CheckoutBuilder, ApplyLocation, BlameOptions, Branch, BranchType, Commit, Delta, Diff,
     DiffFindOptions, DiffLineType, DiffOptions, ErrorCode, Repository, RepositoryState, Sort,
-    StashFlags, Status, StatusEntry, StatusOptions,
+    StashApplyOptions, StashFlags, Status, StatusEntry, StatusOptions,
 };
 use std::{
     cell::{Cell, RefCell},
@@ -1189,10 +1189,15 @@ impl GitRepo for LocalGitRepo {
         Ok(new_id.to_string())
     }
 
-    fn stash_save(&self, message: Option<&str>) -> Result<String, GitApplyError> {
+    fn stash_save(&self, message: Option<&str>, untracked: bool) -> Result<String, GitApplyError> {
         let mut repo = self.repo.lock().expect("git repo lock");
         let sig = repo.signature().map_err(err_msg)?;
-        match repo.stash_save2(&sig, message, Some(StashFlags::DEFAULT)) {
+        let flags = if untracked {
+            StashFlags::INCLUDE_UNTRACKED
+        } else {
+            StashFlags::DEFAULT
+        };
+        match repo.stash_save2(&sig, message, Some(flags)) {
             Ok(oid) => Ok(oid.to_string()),
             Err(err) if err.code() == ErrorCode::NotFound => BackendSnafu {
                 reason: "nothing to stash",
@@ -1232,23 +1237,28 @@ impl GitRepo for LocalGitRepo {
             .collect()
     }
 
-    fn stash_pop(&self, sha: &str) -> Result<(), GitApplyError> {
+    fn stash_pop(&self, sha: &str, index: bool) -> Result<(), GitApplyError> {
         let mut repo = self.repo.lock().expect("git repo lock");
         let mut found = None;
-        repo.stash_foreach(|index, _, oid| {
+        repo.stash_foreach(|position, _, oid| {
             if oid.to_string() == sha {
-                found = Some(index);
+                found = Some(position);
             }
             found.is_none()
         })
         .map_err(err_msg)?;
-        let Some(index) = found else {
+        let Some(position) = found else {
             return BackendSnafu {
                 reason: "no such stash",
             }
             .fail();
         };
-        repo.stash_pop(index, None).map_err(err_msg)
+
+        let mut opts = StashApplyOptions::new();
+        if index {
+            opts.reinstantiate_index();
+        }
+        repo.stash_pop(position, Some(&mut opts)).map_err(err_msg)
     }
 
     fn checkout_detached(&self, sha: &str) -> Result<(), GitApplyError> {
@@ -3558,11 +3568,11 @@ mod tests {
         let (dir, repo, _shas) = seeded_repo();
         set_identity(&repo);
         let git = discover(&dir);
-        let clean = git.stash_save(None).map_err(|err| err.to_string());
+        let clean = git.stash_save(None, false).map_err(|err| err.to_string());
 
         let a = dir.path().join("a.txt");
         std::fs::write(&a, "four").unwrap();
-        let sha = git.stash_save(Some("wip")).unwrap();
+        let sha = git.stash_save(Some("wip"), false).unwrap();
         let saved = (
             git.changed_files(),
             std::fs::read_to_string(&a).unwrap(),
@@ -3572,7 +3582,7 @@ mod tests {
                 .collect::<Vec<_>>(),
         );
 
-        git.stash_pop(&sha).unwrap();
+        git.stash_pop(&sha, false).unwrap();
         let popped = (
             git.changed_files()
                 .into_iter()
@@ -3586,7 +3596,7 @@ mod tests {
                 clean,
                 saved,
                 popped,
-                git.stash_pop(&sha).map_err(|err| err.to_string())
+                git.stash_pop(&sha, false).map_err(|err| err.to_string())
             ),
             (
                 Err("git backend failure: nothing to stash".to_string()),
@@ -3597,6 +3607,50 @@ mod tests {
                 ),
                 (vec![a.clone()], "four".to_string(), 0),
                 Err("git backend failure: no such stash".to_string()),
+            ),
+        );
+    }
+
+    /// A stash that takes untracked files moves them out of the working tree
+    /// with the edits. A pop with the index puts a staged edit back staged,
+    /// and a pop without it puts the edit back unstaged.
+    #[test]
+    fn stash_takes_untracked_files_and_pop_reinstates_the_index() {
+        let (dir, repo, _shas) = seeded_repo();
+        set_identity(&repo);
+        let a = dir.path().join("a.txt");
+        let notes = dir.path().join("notes.txt");
+        std::fs::write(&a, "four").unwrap();
+        std::fs::write(&notes, "notes").unwrap();
+        {
+            let mut index = repo.index().unwrap();
+            index.add_path(Path::new("a.txt")).unwrap();
+            index.write().unwrap();
+        }
+        let git = discover(&dir);
+        let staged = || {
+            git.changed_files()
+                .into_iter()
+                .map(|file| (file.path, file.staged))
+                .collect::<Vec<_>>()
+        };
+
+        let sha = git.stash_save(None, true).unwrap();
+        let saved = (notes.exists(), staged());
+        git.stash_pop(&sha, true).unwrap();
+        let with_index = (std::fs::read_to_string(&notes).ok(), staged());
+
+        let sha = git.stash_save(None, true).unwrap();
+        git.stash_pop(&sha, false).unwrap();
+        assert_eq!(
+            (saved, with_index, staged()),
+            (
+                (false, Vec::new()),
+                (
+                    Some("notes".to_string()),
+                    vec![(a.clone(), true), (notes.clone(), false)],
+                ),
+                vec![(a, false), (notes, false)],
             ),
         );
     }
