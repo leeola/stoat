@@ -15296,6 +15296,93 @@ fn ctrl_c_closes_the_completion_popup_rather_than_quitting() {
     );
 }
 
+/// Typing on after a Tab keeps the chosen row. The typed key accepts it first
+/// and then does its own work over the accepted text, and Escape accepts it
+/// before it leaves insert mode. With no row selected the key only does its
+/// own work, which narrows the popup.
+#[test]
+fn a_key_the_popup_does_not_own_accepts_the_selected_row_first() {
+    let after = |keys: &str| {
+        let mut h = Stoat::test();
+        let path = open_popup_over_fo(&mut h);
+        h.type_keys(keys);
+        (
+            h.buffer_text_at(&path),
+            h.stoat
+                .pending_completion
+                .as_ref()
+                .map(|popup| popup.selected_idx),
+            h.stoat.focused_mode().to_string(),
+        )
+    };
+
+    assert_eq!(
+        [
+            after("tab ("),
+            after("tab tab backspace"),
+            after("tab escape"),
+            after("o"),
+        ],
+        [
+            ("foobar()".to_string(), None, "insert".to_string()),
+            ("fooba".to_string(), None, "insert".to_string()),
+            ("foobar".to_string(), None, "normal".to_string()),
+            ("foo".to_string(), Some(None), "insert".to_string()),
+        ],
+        "the text, the popup's selection when it stays open, and the mode",
+    );
+}
+
+/// An unbound key has no work of its own and reports no change. The accept
+/// before it still wrote the row and closed the popup, so the frame repaints.
+#[test]
+fn an_unbound_key_that_accepts_a_row_repaints() {
+    let mut h = Stoat::test();
+    let path = open_popup_over_fo(&mut h);
+    h.type_keys("tab");
+
+    let effect = h.stoat.update(Event::Key(KeyEvent::new(
+        KeyCode::F(12),
+        KeyModifiers::NONE,
+    )));
+
+    assert_eq!(
+        (
+            effect,
+            h.buffer_text_at(&path),
+            h.stoat.pending_completion.is_some()
+        ),
+        (UpdateEffect::Redraw, "foobar".to_string(), false),
+    );
+}
+
+/// Opens `fo` in insert mode under a popup of the rows `foobar` and `foobaz`,
+/// which both replace the typed `fo`.
+fn open_popup_over_fo(h: &mut crate::test_harness::TestHarness) -> PathBuf {
+    use crate::completion::{CompletionItem, CompletionPopup, CompletionSource};
+    let path = open_scratch_file(h, "");
+    h.type_keys("i f o");
+    let replace_range = crate::completion::anchor_range_in_focused(&h.stoat, 0..2);
+    let row = |label: &str| CompletionItem {
+        label: label.into(),
+        source: CompletionSource::Word,
+        kind: None,
+        detail: None,
+        replace_range: replace_range.clone(),
+        insert_text: label.into(),
+        is_snippet: false,
+        documentation: None,
+        lsp_item: None,
+        server: None,
+    };
+    h.stoat.pending_completion = Some(CompletionPopup {
+        prefix_range: 0..2,
+        prefix: "fo".into(),
+        ..CompletionPopup::showing(vec![row("foobar"), row("foobaz")])
+    });
+    path
+}
+
 #[test]
 fn up_and_down_with_no_popup_move_cursor() {
     let mut h = Stoat::test();

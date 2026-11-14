@@ -5800,9 +5800,16 @@ impl Stoat {
                 let workspace_before = self.active_workspace;
                 let focus_before = self.active_workspace().focus;
                 let pane_before = self.active_workspace().panes.focus();
+                let popup_before = self.pending_completion.is_some();
                 let effect = self.handle_key(key);
                 self.rest_left_pane(workspace_before, focus_before, pane_before);
                 let cursor_moved = self.focused_cursor_pos() != before;
+
+                // A key the completion popup does not own accepts the selected
+                // row and then does its own work. An unbound key has no work of
+                // its own and reports no change, but the accept wrote the row
+                // and closed the popup, so the frame repaints.
+                let popup_closed = popup_before && self.pending_completion.is_none();
 
                 // Re-follow the cursor when a key moved it, pulling the view
                 // along so a count jump past the margin lands the view on the
@@ -5825,7 +5832,7 @@ impl Stoat {
                     }
                 };
 
-                if scrolled {
+                if scrolled || popup_closed {
                     effect.merge(UpdateEffect::Redraw)
                 } else {
                     effect
@@ -7222,7 +7229,7 @@ impl Stoat {
         }
     }
 
-    /// Handles a key that an open completion popup owns.
+    /// Handles a key while the completion popup is open.
     ///
     /// The keys follow the Helix completion menu. Tab, Down, and Ctrl-n select
     /// the next row, and Shift-Tab, Up, and Ctrl-p select the row before. Both
@@ -7230,8 +7237,12 @@ impl Stoat {
     /// accepts the selected row, because the menu accepts on Enter. With no
     /// row selected the menu ignores Enter, so Enter types its newline.
     ///
-    /// Returns `None` for every other key, which then goes to the insert arms
-    /// and the keymap as it does with no popup open.
+    /// Every other key accepts the selected row first and returns `None`, so
+    /// the key then goes on to the insert arms and the keymap over the
+    /// accepted text. Helix replays Enter into the menu for each key the menu
+    /// ignores, Escape among them, so typing on after a Tab keeps the chosen
+    /// row. With no row selected the key only does its own work. A bare
+    /// modifier press accepts nothing, because it is not input.
     ///
     /// A selection key or Enter first lands a narrow that is still on the
     /// pool. The landing narrow then does not clear the row that a selection
@@ -7254,7 +7265,17 @@ impl Stoat {
                     .is_some();
                 return selected.then(|| crate::completion::accept::execute(self));
             },
-            _ => return None,
+            (KeyCode::Modifier(_), _) => return None,
+            _ => {
+                if self
+                    .pending_completion
+                    .as_ref()
+                    .is_some_and(|popup| popup.selected_idx.is_some())
+                {
+                    crate::completion::accept::execute(self);
+                }
+                return None;
+            },
         };
 
         crate::completion::request::settle_pending_narrow(self);

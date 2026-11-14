@@ -856,7 +856,12 @@ mod tests {
             lsp_item: None,
             server: None,
         }];
-        install_popup(&mut h, items, 0..3);
+        // Not `install_popup`, which selects the first row. A popup opens with
+        // no row selected, so the backspace deletes rather than accepts.
+        h.stoat.pending_completion = Some(CompletionPopup {
+            prefix_range: 0..3,
+            ..CompletionPopup::showing(items)
+        });
 
         h.type_keys("backspace");
         h.type_keys("tab");
