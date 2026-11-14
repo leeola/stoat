@@ -15236,6 +15236,66 @@ fn selection_keys_step_the_popup_with_wrap_and_leave_the_cursor() {
     );
 }
 
+/// No binding takes Ctrl-c in insert mode, so the press quits unless something
+/// takes it first. An open completion popup takes it and closes. The request
+/// the typing armed goes with it, so its answer does not reopen the popup.
+#[test]
+fn ctrl_c_closes_the_completion_popup_rather_than_quitting() {
+    use crate::completion::{
+        request::COMPLETION_DEBOUNCE, CompletionItem, CompletionPopup, CompletionSource,
+    };
+    let mut h = Stoat::test();
+    let path = open_scratch_file(&mut h, "foobar\n");
+    action_handlers::movement::jump_to_offset(&mut h.stoat, "foobar\n".len());
+    h.type_keys("i f o");
+    assert!(
+        h.stoat.pending_completion_request.is_pending(),
+        "the typed prefix armed a request that answers with foobar",
+    );
+    let row = |label: &str| CompletionItem {
+        label: label.into(),
+        source: CompletionSource::Word,
+        kind: None,
+        detail: None,
+        replace_range: crate::completion::unused_replace_range(),
+        insert_text: label.into(),
+        is_snippet: false,
+        documentation: None,
+        lsp_item: None,
+        server: None,
+    };
+    h.stoat.pending_completion = Some(CompletionPopup {
+        prefix_range: 7..9,
+        ..CompletionPopup::showing(vec![row("foobar"), row("foobaz")])
+    });
+
+    let effect = h.stoat.update(Event::Key(ctrl('c')));
+    let closed = (
+        matches!(effect, UpdateEffect::Quit),
+        h.stoat.pending_completion.is_some(),
+        h.stoat.pending_completion_request.is_pending(),
+        h.stoat.focused_mode().to_string(),
+        h.buffer_text_at(&path),
+    );
+    h.advance_clock(COMPLETION_DEBOUNCE);
+
+    assert_eq!(
+        (closed, h.stoat.pending_completion.is_some()),
+        (
+            (
+                false,
+                false,
+                false,
+                "insert".to_string(),
+                "foobar\nfo".to_string()
+            ),
+            false,
+        ),
+        "the popup and its request close, the session stays in insert mode, \
+         and no answer reopens the popup",
+    );
+}
+
 #[test]
 fn up_and_down_with_no_popup_move_cursor() {
     let mut h = Stoat::test();

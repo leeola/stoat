@@ -2254,8 +2254,8 @@ pub struct Stoat {
 
     /// Editor autocomplete popup waiting to be painted. Set by the
     /// trigger pipeline (item 83) when a completion request resolves;
-    /// cleared by `Esc` in insert mode, by motion that leaves the
-    /// popup's `prefix_range`, or by acceptance.
+    /// cleared by `Esc` or `Ctrl-c` in insert mode, by motion that leaves
+    /// the popup's `prefix_range`, or by acceptance.
     pub(crate) pending_completion: Option<crate::completion::CompletionPopup>,
 
     /// Monotonic counter bumped each time a popup is installed into
@@ -6059,12 +6059,17 @@ impl Stoat {
 
         if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
             // The recording holds the press that closes a modal, so a replay
-            // closes it too. A hover arrives asynchronously, so a replay finds
-            // none to dismiss, and the press that dismissed one stays out.
+            // closes it too. A completion popup or a hover arrives
+            // asynchronously, so a replay finds none to dismiss, and the press
+            // that dismissed one stays out.
             if active_modal(self).is_some() {
                 action_handlers::macro_recording::capture(self, &key);
             }
             if keymap_state::close_topmost_modal(self) {
+                return UpdateEffect::Redraw;
+            }
+            if self.pending_completion.is_some() {
+                crate::completion::request::abort(self);
                 return UpdateEffect::Redraw;
             }
             if self.pending_hover.is_some() {

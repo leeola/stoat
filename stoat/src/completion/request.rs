@@ -141,12 +141,25 @@ fn is_word_or_path_char(ch: char) -> bool {
 /// unchanged signature and returns early instead of re-arming a request.
 ///
 /// Called after a completion is accepted, so the text the accept just
-/// inserted does not immediately reopen the popup on the next event.
+/// inserted does not immediately reopen the popup on the next event. An
+/// [`abort`] calls it too, so the popup stays closed until the next edit.
 pub(crate) fn record_dismiss(stoat: &mut Stoat) {
     let Some((buffer_id, version)) = focused_buffer_signature(stoat) else {
         return;
     };
     stoat.last_completion_signature = Some((buffer_id, version));
+}
+
+/// Close the completion popup at the reader's request, as Ctrl-c does.
+///
+/// The request in flight goes with it, so its answer does not reopen the
+/// popup. The popup returns on the next edit, as it does after an accept.
+pub(crate) fn abort(stoat: &mut Stoat) {
+    stoat.pending_completion = None;
+    stoat.pending_completion_request.clear();
+    stoat.pending_narrow = None;
+    stoat.pending_completion_resolve.clear();
+    record_dismiss(stoat);
 }
 
 /// Per-event entry point. In insert mode with a focused
