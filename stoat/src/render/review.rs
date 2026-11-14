@@ -2996,6 +2996,9 @@ fn paint_base_side(
         .get(&base_line)
         .map(Vec::as_slice)
         .unwrap_or(&[]);
+    let relocated = snapshot
+        .diff_map()
+        .is_some_and(|dm| dm.base_line_relocated(base_line));
     if !decorations_only {
         let token_spans = base_token_spans(snapshot, base_line);
         let refined = snapshot
@@ -3004,12 +3007,9 @@ fn paint_base_side(
         // A base line the change removed whole is gone from the working tree,
         // so the row takes its status color entire. A refined line leaves that
         // to its spans, because the chars outside them are unchanged text.
-        // Moved wins over deleted on the same test the gutter bar below uses,
-        // which keeps the two agreeing.
-        let moved = changes
-            .iter()
-            .any(|(_, k, _)| matches!(k, ChangeKind::Moved));
-        let tint_row = match (refined, moved) {
+        // A relocated line takes the moved color on the same test the gutter
+        // bar below uses, which keeps the two agreeing.
+        let tint_row = match (refined, relocated) {
             (true, _) => None,
             (false, true) => tints.map(|t| t.moved),
             (false, false) => tints.map(|t| t.deleted),
@@ -3057,10 +3057,7 @@ fn paint_base_side(
     // staged mark on the same base line.
     match removal {
         Some(state) => {
-            let change_scope = if changes
-                .iter()
-                .any(|(_, k, _)| matches!(k, ChangeKind::Moved))
-            {
+            let change_scope = if relocated {
                 s::DIFF_MOVED
             } else {
                 s::DIFF_DELETED
@@ -7115,6 +7112,64 @@ mod tests {
             "the moved chars take the moved color and the rest of the removed line \
              keeps the deleted color",
         );
+    }
+
+    /// A removed row bars as moved only when its moved span holds every word of
+    /// the line.
+    #[test]
+    fn a_removed_row_bars_as_moved_only_when_the_move_holds_the_whole_line() {
+        let bar =
+            |span| status_cells(&mut removed_line_editor(ChangeKind::Moved, span))[1][0].clone();
+        assert_eq!(
+            [bar(3..5), bar(3..7)],
+            [glyph("▎", s::DIFF_DELETED), glyph("▎", s::DIFF_MOVED)],
+            "bb alone left the line, and then all of bbxx did",
+        );
+    }
+
+    /// Outside its moved span, a removed row that keeps a word tints as a
+    /// removal, the same as when the span holds new text.
+    #[test]
+    fn a_removed_row_tints_as_removed_outside_its_moved_span() {
+        let after_bb = |kind| {
+            let (buf, columns) = cell_paint(&mut removed_line_editor(kind, 3..5));
+            let y = row_holding(&buf, columns.left_text_x..columns.right_text_x, "bbxx");
+            let first = columns.left_text_x + 2;
+            [first, first + 1].map(|x| (buf[(x, y)].fg, buf[(x, y)].bg))
+        };
+        assert_eq!(
+            after_bb(ChangeKind::Moved),
+            after_bb(ChangeKind::Novel),
+            "xx was removed, so it keeps the removal's tint",
+        );
+    }
+
+    /// A diff-view editor over `aa\ncc\n` whose one unstaged `Deleted` hunk
+    /// removed base line 1, `bbxx`, with one tree span of `kind` over `span`.
+    fn removed_line_editor(kind: ChangeKind, span: std::ops::Range<usize>) -> EditorState {
+        let dm = DiffMap::from_hunks(
+            [DiffHunk {
+                status: DiffHunkStatus::Deleted,
+                unstaged_lines: std::iter::once(1..1).collect(),
+                marked_rows: Vec::new(),
+                buffer_start_line: 1,
+                buffer_line_range: 1..1,
+                base_byte_range: 3..7,
+                anchor_range: None,
+                token_detail: Some(Arc::new(TokenDetail {
+                    buffer_spans: Vec::new(),
+                    base_spans: vec![ChangeSpan {
+                        byte_range: span,
+                        kind,
+                        move_metadata: None,
+                        prose: ProseChange::None,
+                    }],
+                    tree: true,
+                })),
+            }],
+            Some(Arc::new("aa\nbbxx\ncc\n".to_string())),
+        );
+        diff_editor_with_map("aa\ncc\n", dm)
     }
 
     #[test]

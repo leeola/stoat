@@ -619,6 +619,9 @@ struct BaseLineMark {
     /// Whether the hunk names the line's changed chars, which leaves the chars
     /// outside its spans as unchanged text.
     refined: bool,
+    /// Whether a relocation accounts for every word of the line, so the line
+    /// left for another place and nothing of it was removed.
+    relocated: bool,
 }
 
 type BaseStaged = BTreeMap<u32, BaseLineMark>;
@@ -1659,6 +1662,17 @@ impl DiffMap {
         self.base_staged.get(&line).is_some_and(|mark| mark.refined)
     }
 
+    /// Whether a relocation accounts for every word of base `line`, so the line
+    /// left for another place and nothing of it was removed.
+    ///
+    /// `false` when no hunk covers `line`, and when a part of the line was
+    /// removed or stayed.
+    pub(crate) fn base_line_relocated(&self, line: u32) -> bool {
+        self.base_staged
+            .get(&line)
+            .is_some_and(|mark| mark.relocated)
+    }
+
     /// The mark the staged mark at base `line` paints, or `None` when no mark
     /// covers it.
     ///
@@ -2675,6 +2689,10 @@ fn prose_change(change: &stoat_language::structural_diff::DiffChange, text: &str
 /// a detail, and an empty one means a whitespace-only change, so no char of the
 /// line changed. A `Deleted` or `Moved` hunk, and a `Modified` hunk with no
 /// detail, removed the line whole.
+///
+/// A line is relocated when the hunk's `Moved` base spans hold every word of
+/// it, as [`line_relocated`] reads them. A line that keeps a word outside those
+/// spans had that word removed or kept, so the line is not a move.
 fn compute_base_staged(hunks: &SumTree<DiffHunk>, base_text: Option<&Arc<String>>) -> BaseStaged {
     let Some(base_text) = base_text else {
         return BTreeMap::new();
@@ -2682,11 +2700,23 @@ fn compute_base_staged(hunks: &SumTree<DiffHunk>, base_text: Option<&Arc<String>
     let starts = line_starts(base_text);
     let mut out = BTreeMap::new();
     for hunk in hunks.iter() {
-        let mark = BaseLineMark {
-            staged: hunk.staged(),
-            refined: hunk.status == DiffHunkStatus::Modified && hunk.token_detail.is_some(),
-        };
+        let staged = hunk.staged();
+        let refined = hunk.status == DiffHunkStatus::Modified && hunk.token_detail.is_some();
+        let moved: Vec<Range<usize>> = hunk
+            .token_detail
+            .iter()
+            .flat_map(|detail| detail.base_spans.iter())
+            .filter(|span| span.kind == ChangeKind::Moved)
+            .map(|span| span.byte_range.clone())
+            .collect();
+
         for line in hunk_base_lines(hunk, &starts, base_text) {
+            let bounds = line_range_to_byte_range(&starts, base_text.len(), &(line..line + 1));
+            let mark = BaseLineMark {
+                staged,
+                refined,
+                relocated: line_relocated(&moved, base_text, bounds),
+            };
             out.insert(line, mark);
         }
     }
