@@ -842,7 +842,7 @@ define_action!(
     "AcceptCompletion",
     ActionKind::AcceptCompletion,
     "accept the highlighted completion popup item",
-    "Replace the highlighted item's replace_range in the focused buffer with its insert_text and place the primary cursor at the inserted end. Clears the completion popup and the in-flight request. No-op when no popup is showing.",
+    "Replace the highlighted item's replace_range in the focused buffer with its insert_text and place the primary cursor at the inserted end. Clears the completion popup and the in-flight request. No-op when no popup is showing or no row is selected.",
     ActionPriority::Common
 );
 
@@ -852,7 +852,7 @@ define_action!(
     "SmartTab",
     ActionKind::SmartTab,
     "smart Tab in insert mode",
-    "Arbitrate the Tab key in insert mode: advance the active snippet placeholder if one is in flight, accept the highlighted completion popup item if the popup is open, otherwise insert the buffer's indent unit when the cursor follows only whitespace on the current line. No-op when none of those conditions hold.",
+    "Arbitrate the Tab key in insert mode: advance the active snippet placeholder if one is in flight, otherwise insert the buffer's indent unit when the cursor follows only whitespace on the current line. No-op when none of those conditions hold.",
     ActionPriority::Common
 );
 
@@ -862,7 +862,7 @@ define_action!(
     "InsertTab",
     ActionKind::InsertTab,
     "insert one indent unit",
-    "Insert the buffer's indentation unit at every cursor, regardless of surrounding text. Unlike `SmartTab`, it does not consult the completion popup or the leading-whitespace guard, so it is the plain-insert counterpart typically bound to Shift-Tab.",
+    "Insert the buffer's indentation unit at every cursor, regardless of surrounding text. Unlike `SmartTab`, it does not consult the leading-whitespace guard, so it is the plain-insert counterpart typically bound to Shift-Tab.",
     ActionPriority::Rare
 );
 

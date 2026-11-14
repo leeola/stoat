@@ -19,18 +19,14 @@ pub(crate) struct ResolvedCompletion {
 
 /// Arbitrate the Tab key in insert mode.
 ///
-/// An open completion popup accepts its highlighted item. Otherwise the line
-/// behind the cursors decides. With nothing but whitespace behind every one of
-/// them the key indents. Anywhere else it advances an in-flight snippet, or
-/// moves to the end of the enclosing syntax node when there is none.
+/// The line behind the cursors decides. With nothing but whitespace behind
+/// every one of them the key indents. Anywhere else it advances an in-flight
+/// snippet, or moves to the end of the enclosing syntax node when there is none.
 ///
 /// Indentation is what Tab means in an indent whatever else is in flight, which
 /// is why a running snippet does not take the key there. It only takes the key
 /// where the alternative is a motion.
 pub(super) fn smart_tab(stoat: &mut Stoat) -> UpdateEffect {
-    if stoat.pending_completion.is_some() {
-        return crate::completion::accept::execute(stoat);
-    }
     let Some((editor_id, buffer_id)) = stoat.focused_editor_ids() else {
         return UpdateEffect::None;
     };
@@ -50,9 +46,9 @@ pub(super) fn smart_tab(stoat: &mut Stoat) -> UpdateEffect {
 
 /// Insert one indent step at every cursor, unconditionally.
 ///
-/// The plain counterpart to [`smart_tab`], skipping the snippet, completion,
-/// and leading-whitespace arbitration, so a keystroke bound to it always
-/// indents. Typically bound to Shift-Tab.
+/// The plain counterpart to [`smart_tab`], skipping the snippet and
+/// leading-whitespace arbitration, so a keystroke bound to it always indents.
+/// Typically bound to Shift-Tab.
 pub(super) fn insert_tab(stoat: &mut Stoat) -> UpdateEffect {
     let Some((editor_id, buffer_id)) = stoat.focused_editor_ids() else {
         return UpdateEffect::None;
@@ -97,9 +93,9 @@ pub(crate) fn arm_completion_resolve(stoat: &mut Stoat) {
 }
 
 /// The `(label, raw LSP item)` to resolve for the selected row, or `None`
-/// when no resolve should fire. No resolve fires when the server does not
-/// advertise `resolveProvider`, the selected row is not an LSP item, or
-/// it already carries both detail and documentation.
+/// when no resolve fires. No resolve fires when no row is selected,
+/// the server does not advertise `resolveProvider`, the selected row is not
+/// an LSP item, or it already carries both detail and documentation.
 fn resolve_plan(
     stoat: &Stoat,
 ) -> Option<(
@@ -150,7 +146,7 @@ fn apply_resolved(stoat: &mut Stoat, resolved: ResolvedCompletion) -> bool {
     let Some(popup) = stoat.pending_completion.as_mut() else {
         return false;
     };
-    let Some(&(index, _)) = popup.matches.get(popup.selected_idx) else {
+    let Some(&(index, _)) = popup.selected_idx.and_then(|row| popup.matches.get(row)) else {
         return false;
     };
 
@@ -284,13 +280,13 @@ mod tests {
     }
 
     #[test]
-    fn smart_tab_accepts_pending_completion_when_popup_visible() {
+    fn smart_tab_leaves_an_open_popup_alone() {
         let mut h = Stoat::test();
         let path = h.write_file("a.rs", "fo\n");
         h.open_file(&path);
         h.type_keys("l l i");
         let replace_range = crate::completion::anchor_range_in_focused(&h.stoat, 0..2);
-        h.stoat.pending_completion = Some(CompletionPopup {
+        let popup = CompletionPopup {
             prefix_range: 0..2,
             ..CompletionPopup::showing(vec![CompletionItem {
                 label: "foo".into(),
@@ -304,10 +300,15 @@ mod tests {
                 lsp_item: None,
                 server: None,
             }])
-        });
+        };
+        h.stoat.pending_completion = Some(popup.clone());
+
         dispatch(&mut h.stoat, &SmartTab);
-        assert!(h.stoat.pending_completion.is_none());
-        assert_eq!(h.buffer_text_at(&path), "foo\n");
+        assert_eq!(
+            (h.buffer_text_at(&path), h.stoat.pending_completion.take()),
+            ("fo\n".to_string(), Some(popup)),
+            "the action neither accepts a row nor moves the selection",
+        );
     }
 
     #[test]
@@ -389,8 +390,13 @@ mod tests {
         }
     }
 
+    /// The popup over `items` with its first row selected, as a selection key
+    /// leaves it.
     fn popup(items: Vec<CompletionItem>) -> CompletionPopup {
-        CompletionPopup::showing(items)
+        CompletionPopup {
+            selected_idx: Some(0),
+            ..CompletionPopup::showing(items)
+        }
     }
 
     #[test]
@@ -428,7 +434,7 @@ mod tests {
         super::arm_completion_resolve(&mut h.stoat);
         // Move to "bar" before the debounce elapses. Re-arming cancels
         // foo's in-flight resolve.
-        h.stoat.pending_completion.as_mut().unwrap().selected_idx = 1;
+        h.stoat.pending_completion.as_mut().unwrap().selected_idx = Some(1);
         super::arm_completion_resolve(&mut h.stoat);
         h.advance_clock(std::time::Duration::from_millis(150));
 

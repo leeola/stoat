@@ -829,7 +829,7 @@ mod tests {
             .pending_completion
             .as_mut()
             .expect("popup")
-            .selected_idx = smile;
+            .selected_idx = Some(smile);
         action_handlers::dispatch(&mut h.stoat, &stoat_action::AcceptCompletion);
 
         let buffer_id = h

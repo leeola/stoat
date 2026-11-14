@@ -1559,7 +1559,8 @@ fn a_hover_ends_in_a_footer_on_the_raised_surface() {
 /// and the selected first row is a box in the select fill with 4 px corners.
 ///
 /// The server loads the crate before it answers, so the completion key plays
-/// again until the tint shows. The prefix `mai` names the fixture's `main`
+/// again until the tint shows. The popup opens with no row selected, so Tab
+/// then selects the first row. The prefix `mai` names the fixture's `main`
 /// function. Every badge sits in the box's first column, so the tinted cells
 /// all share one column.
 ///
@@ -1574,20 +1575,23 @@ fn a_function_completion_leads_with_its_badge_on_the_function_tint() {
     play(&mut session, "/unused<Enter>omai");
 
     let deadline = Instant::now() + LSP_DEADLINE;
-    let (shot, tinted) = loop {
+    loop {
         play(&mut session, "<C-Space><Wait:2000>");
         let shot = session.snapshot().expect("a snapshot");
-        let tinted = cells_of(&shot, TINT_ACCENT);
-        if !tinted.is_empty() {
-            break (shot, tinted);
+        if !cells_of(&shot, TINT_ACCENT).is_empty() {
+            break;
         }
         assert!(
             Instant::now() < deadline,
             "no function completion showed before the deadline"
         );
-    };
+    }
 
-    if tinted.iter().any(|&(col, _)| col != tinted[0].0) {
+    play(&mut session, "<Tab><Settle>");
+    let shot = session.snapshot().expect("a snapshot");
+    let tinted = cells_of(&shot, TINT_ACCENT);
+
+    if tinted.is_empty() || tinted.iter().any(|&(col, _)| col != tinted[0].0) {
         let frame = keep_frame(&shot, &mut home, "completion_badges");
         panic!(
             "the function tint cells {tinted:?} are not one badge column; the frame is {}",

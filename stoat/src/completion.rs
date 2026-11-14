@@ -117,7 +117,7 @@ pub struct CompletionItem {
 /// the trigger pipeline (item 83) replaces the items as the prefix
 /// changes and clears the field when the cursor leaves
 /// [`Self::prefix_range`]; the acceptance handler (item 89)
-/// consumes the entry on `Tab`.
+/// consumes the entry on `Enter`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct CompletionPopup {
     /// Every item the sources answered with, in the order they answered.
@@ -139,9 +139,11 @@ pub struct CompletionPopup {
     /// scoring is the same pass that decides the match, so a caller that
     /// narrows has it already.
     pub matches: Vec<(u32, u32)>,
-    /// Index of the highlighted row in [`Self::matches`]. Tab accepts
-    /// this row; Up / Down adjust it within bounds.
-    pub selected_idx: usize,
+    /// The selected row, as an index into [`Self::matches`].
+    ///
+    /// `None` until a selection key moves onto a row, so that typing on never
+    /// accepts a row the reader did not choose.
+    pub selected_idx: Option<usize>,
     /// Byte offset in the buffer the popup is anchored to. The
     /// renderer maps this to a screen cell via the focused editor's
     /// display map.
@@ -182,7 +184,7 @@ impl CompletionPopup {
         Self {
             matches: (0..items.len() as u32).map(|index| (index, 0)).collect(),
             items: items.into(),
-            selected_idx: 0,
+            selected_idx: None,
             anchor_offset: 0,
             prefix_range: 0..0,
             prefix: String::new(),
@@ -212,9 +214,42 @@ impl CompletionPopup {
             .filter_map(|&(index, _)| self.items.get(index as usize))
     }
 
-    /// The highlighted item, or `None` when the popup shows nothing.
+    /// The selected item, or `None` when no row is selected.
     pub fn selected(&self) -> Option<&CompletionItem> {
-        self.row(self.selected_idx)
+        self.row(self.selected_idx?)
+    }
+
+    /// Selects the row `step` rows below the selected one.
+    ///
+    /// The step wraps past the last row to the first. With no row selected,
+    /// the first row takes the selection, as the Helix menu does for its
+    /// forward keys. A `step` of zero counts as one, and a step longer than
+    /// the list counts as the whole list.
+    pub(crate) fn select_next(&mut self, step: usize) {
+        let len = self.len();
+        if len == 0 {
+            return;
+        }
+        let step = step.clamp(1, len);
+        self.selected_idx = Some(self.selected_idx.map_or(0, |row| (row + step) % len));
+    }
+
+    /// Selects the row `step` rows above the selected one.
+    ///
+    /// The step wraps past the first row to the last. With no row selected,
+    /// the selection lands `step` rows above the end, so one step selects the
+    /// last row, as the Helix menu does for its backward keys. `step` counts
+    /// as it does for [`Self::select_next`].
+    pub(crate) fn select_prev(&mut self, step: usize) {
+        let len = self.len();
+        if len == 0 {
+            return;
+        }
+        let step = step.clamp(1, len);
+        self.selected_idx = Some(
+            self.selected_idx
+                .map_or(len - step, |row| (row + len - step) % len),
+        );
     }
 }
 
@@ -515,7 +550,7 @@ mod tests {
         };
         assert_eq!(popup.clone(), popup);
         assert_eq!(popup.rows().cloned().collect::<Vec<_>>(), [item]);
-        assert_eq!(popup.selected_idx, 0);
+        assert_eq!(popup.selected_idx, None);
         assert_eq!(popup.anchor_offset, 4);
         assert_eq!(popup.prefix_range, 4..7);
     }

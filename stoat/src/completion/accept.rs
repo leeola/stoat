@@ -3,8 +3,8 @@
 //! Replaces the highlighted item's `replace_range` with its
 //! `insert_text` at every cursor in the focused buffer, puts each cursor
 //! at the end of its own insertion, and clears popup state. Bound to
-//! `Tab` in insert mode via the arbitration arm in
-//! [`crate::app::Stoat::handle_insert_key`].
+//! `Enter` in insert mode via
+//! [`crate::app::Stoat::handle_completion_key`].
 //!
 //! An item's `replace_range` is anchored against the text its source
 //! read, so it still names that text after the keystrokes the popup
@@ -31,9 +31,10 @@ pub(crate) struct AcceptedImports {
     edits: Vec<lsp_types::TextEdit>,
 }
 
-/// Accept the highlighted item in [`Stoat::pending_completion`]. No-op
+/// Accept the selected item in [`Stoat::pending_completion`]. No-op
 /// when the popup is not showing, the focused pane is not an editor,
-/// or the popup's items list is empty.
+/// or no row is selected. With no row selected the popup stays open,
+/// because the reader has not chosen a row to accept.
 ///
 /// Every cursor gets a copy of the accepted text. Snippet items
 /// (`is_snippet: true`) parse the insert text via
@@ -44,16 +45,19 @@ pub(crate) struct AcceptedImports {
 /// verbatim, and each cursor lands at the end of its own insertion.
 pub(crate) fn execute(stoat: &mut Stoat) -> UpdateEffect {
     // A narrow off the loop has not landed yet on the keystroke that armed it,
-    // and the rows it installs next are the ones the reader sees when Tab
-    // arrives. Landing it here is what makes them the rows accepted.
+    // and the rows it installs next are the ones the reader sees when the
+    // accept arrives. Landing it here is what makes them the rows accepted.
     crate::completion::request::settle_pending_narrow(stoat);
 
-    let Some(popup) = stoat.pending_completion.take() else {
+    let Some(item) = stoat
+        .pending_completion
+        .as_ref()
+        .and_then(|popup| popup.selected())
+        .cloned()
+    else {
         return UpdateEffect::None;
     };
-    let Some(item) = popup.selected().cloned() else {
-        return UpdateEffect::None;
-    };
+    stoat.pending_completion = None;
 
     let editor_id = {
         let ws = stoat.active_workspace();
@@ -393,6 +397,7 @@ mod tests {
 
     fn install_popup(h: &mut TestHarness, items: Vec<CompletionItem>, prefix_range: Range<usize>) {
         h.stoat.pending_completion = Some(CompletionPopup {
+            selected_idx: Some(0),
             anchor_offset: prefix_range.start,
             prefix_range,
             ..CompletionPopup::showing(items)
@@ -490,7 +495,7 @@ mod tests {
         h.type_text("fo");
         let replace_range = anchors(&h, 0..2);
         h.stoat.pending_completion = Some(CompletionPopup {
-            selected_idx: 1,
+            selected_idx: Some(1),
             prefix_range: 0..2,
             ..CompletionPopup::showing(vec![
                 CompletionItem {
@@ -854,6 +859,7 @@ mod tests {
         install_popup(&mut h, items, 0..3);
 
         h.type_keys("backspace");
+        h.type_keys("tab");
         dispatch(&mut h.stoat, &AcceptCompletion);
 
         assert_eq!(h.buffer_text_at(&path), "foobaréxx");
@@ -885,6 +891,7 @@ mod tests {
         });
 
         h.type_text("n");
+        h.type_keys("tab");
         dispatch(&mut h.stoat, &AcceptCompletion);
 
         assert_eq!(h.buffer_text_at(&path), "println!()");
@@ -914,6 +921,7 @@ mod tests {
         );
 
         h.type_text("o");
+        h.type_keys("tab");
         dispatch(&mut h.stoat, &AcceptCompletion);
 
         assert_eq!(h.buffer_text_at(&path), "foobar\nfoobar");
@@ -930,6 +938,7 @@ mod tests {
         h.type_keys("i");
         h.type_text("foo");
         h.advance_clock(crate::completion::request::COMPLETION_DEBOUNCE);
+        h.type_keys("tab");
 
         dispatch(&mut h.stoat, &AcceptCompletion);
 

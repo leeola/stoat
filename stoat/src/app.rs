@@ -7110,6 +7110,12 @@ impl Stoat {
             return Some(UpdateEffect::Redraw);
         }
 
+        if self.pending_completion.is_some()
+            && let Some(effect) = self.handle_completion_key(&key)
+        {
+            return Some(effect);
+        }
+
         match key.code {
             KeyCode::Char('w') if key.modifiers == KeyModifiers::CONTROL => {
                 self.editor_delete_word_backward(editor_id, buffer_id);
@@ -7180,21 +7186,6 @@ impl Stoat {
                 action_handlers::dispatch(self, &stoat_action::MoveRight);
                 Some(UpdateEffect::Redraw)
             },
-            KeyCode::Up if self.pending_completion.is_some() => {
-                if let Some(popup) = self.pending_completion.as_mut() {
-                    popup.selected_idx = popup.selected_idx.saturating_sub(1);
-                }
-                action_handlers::completion::arm_completion_resolve(self);
-                Some(UpdateEffect::Redraw)
-            },
-            KeyCode::Down if self.pending_completion.is_some() => {
-                if let Some(popup) = self.pending_completion.as_mut() {
-                    let last = popup.len().saturating_sub(1);
-                    popup.selected_idx = (popup.selected_idx + 1).min(last);
-                }
-                action_handlers::completion::arm_completion_resolve(self);
-                Some(UpdateEffect::Redraw)
-            },
             KeyCode::Up => {
                 action_handlers::dispatch(self, &stoat_action::MoveUp);
                 Some(UpdateEffect::Redraw)
@@ -7224,6 +7215,47 @@ impl Stoat {
             },
             _ => None,
         }
+    }
+
+    /// Handles a key that an open completion popup owns.
+    ///
+    /// The keys follow the Helix completion menu. Tab, Down, and Ctrl-n select
+    /// the next row, and Shift-Tab, Up, and Ctrl-p select the row before. Both
+    /// directions wrap at the ends of the list, as the menu does. Enter
+    /// accepts the selected row, because the menu accepts on Enter. With no
+    /// row selected the menu ignores Enter, so Enter types its newline.
+    ///
+    /// Returns `None` for every other key, which then goes to the insert arms
+    /// and the keymap as it does with no popup open.
+    ///
+    /// A selection key or Enter first lands a narrow that is still on the
+    /// pool. The landing narrow then does not clear the row that a selection
+    /// key selects, and Enter reads the selection that the typed keys before
+    /// it left. If the narrow leaves no rows, the popup closes and the key
+    /// does its normal work.
+    fn handle_completion_key(&mut self, key: &KeyEvent) -> Option<UpdateEffect> {
+        let step: fn(&mut crate::completion::CompletionPopup) = match (key.code, key.modifiers) {
+            (KeyCode::Tab | KeyCode::Down, KeyModifiers::NONE)
+            | (KeyCode::Char('n'), KeyModifiers::CONTROL) => |popup| popup.select_next(1),
+            (KeyCode::BackTab, _)
+            | (KeyCode::Up, KeyModifiers::NONE)
+            | (KeyCode::Char('p'), KeyModifiers::CONTROL) => |popup| popup.select_prev(1),
+            (KeyCode::Enter, KeyModifiers::NONE) => {
+                crate::completion::request::settle_pending_narrow(self);
+                let selected = self
+                    .pending_completion
+                    .as_ref()
+                    .and_then(|popup| popup.selected())
+                    .is_some();
+                return selected.then(|| crate::completion::accept::execute(self));
+            },
+            _ => return None,
+        };
+
+        crate::completion::request::settle_pending_narrow(self);
+        step(self.pending_completion.as_mut()?);
+        action_handlers::completion::arm_completion_resolve(self);
+        Some(UpdateEffect::Redraw)
     }
 
     /// True when every cursor in `editor_id` has nothing but whitespace behind

@@ -430,7 +430,7 @@ fn refine_open_popup(stoat: &mut Stoat, owned: &ContextOwned) -> Refine {
             .as_mut()
             .expect("borrowed one just above");
         popup.matches = narrowed(&popup.items, &popup.matches, &owned.prefix);
-        popup.selected_idx = 0;
+        popup.selected_idx = None;
         popup.anchor_offset = owned.prefix_range.start;
         popup.prefix_range = owned.prefix_range.clone();
         popup.prefix = owned.prefix.clone();
@@ -456,7 +456,7 @@ fn refine_open_popup(stoat: &mut Stoat, owned: &ContextOwned) -> Refine {
     Refine::Done(CompletionPopup {
         matches: narrowed(&popup.items, &popup.matches, &owned.prefix),
         items: popup.items,
-        selected_idx: 0,
+        selected_idx: None,
         anchor_offset: owned.prefix_range.start,
         prefix_range: owned.prefix_range.clone(),
         prefix: owned.prefix.clone(),
@@ -627,7 +627,7 @@ fn ask_again(
             CompletionPopup {
                 items,
                 matches,
-                selected_idx: 0,
+                selected_idx: None,
                 anchor_offset: owned.prefix_range.start,
                 prefix_range: owned.prefix_range,
                 prefix: owned.prefix,
@@ -768,7 +768,7 @@ fn install_refill(stoat: &mut Stoat, refill: Refill) {
         CompletionPopup {
             items: items.into(),
             matches,
-            selected_idx: 0,
+            selected_idx: None,
             anchor_offset: prefix_range.start,
             prefix_range,
             prefix,
@@ -823,7 +823,7 @@ fn install_narrow(
         CompletionPopup {
             items: popup.items,
             matches,
-            selected_idx: 0,
+            selected_idx: None,
             anchor_offset: prefix_range.start,
             prefix_range,
             prefix,
@@ -862,7 +862,7 @@ pub(crate) fn settle_pending_narrow(stoat: &mut Stoat) {
         CompletionPopup {
             matches: narrowed(&popup.items, &popup.matches, &request.prefix),
             items: popup.items,
-            selected_idx: 0,
+            selected_idx: None,
             anchor_offset: request.prefix_range.start,
             prefix_range: request.prefix_range,
             prefix: request.prefix,
@@ -1253,7 +1253,7 @@ async fn run_request(
     RequestOutcome::Replace(CompletionPopup {
         items: items.into(),
         matches,
-        selected_idx: 0,
+        selected_idx: None,
         anchor_offset: owned.prefix_range.start,
         prefix_range: owned.prefix_range,
         prefix: owned.prefix,
@@ -1503,6 +1503,7 @@ mod harness_tests {
         action_handlers::dispatch, completion::CompletionSource, test_fixture::open_scratch_at,
         test_harness::TestHarness,
     };
+    use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
     use lsp_types::{CompletionOptions, ServerCapabilities};
     use std::path::PathBuf;
     use stoat_action::OpenFile;
@@ -2436,11 +2437,17 @@ mod harness_tests {
     /// that armed it. These tests are about the window before it lands, so they
     /// drive the key alone.
     fn type_unrendered(h: &mut TestHarness, text: &str) {
-        use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
         for ch in text.chars() {
-            let key = KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE);
-            let _ = h.stoat.update(Event::Key(key));
+            press_unrendered(h, KeyCode::Char(ch));
         }
+    }
+
+    /// Press `code` with no modifier and no render after it, as
+    /// [`type_unrendered`] types.
+    fn press_unrendered(h: &mut TestHarness, code: KeyCode) {
+        let _ = h
+            .stoat
+            .update(Event::Key(KeyEvent::new(code, KeyModifiers::NONE)));
     }
 
     /// A popup large enough that its narrow goes to the blocking pool.
@@ -2507,10 +2514,11 @@ mod harness_tests {
         );
     }
 
-    /// Tab inside the window a pooled narrow runs in accepts from the rows the
-    /// narrow is about to show, not the ones it replaces.
+    /// Tab inside the window a pooled narrow runs in selects from the rows the
+    /// narrow is about to show, not the ones it replaces, so the accept takes a
+    /// narrowed row.
     #[test]
-    fn accepting_during_a_narrow_takes_the_narrowed_row() {
+    fn tab_during_a_narrow_selects_a_narrowed_row() {
         let mut h = TestHarness::default();
         large_popup(&mut h);
 
@@ -2520,6 +2528,7 @@ mod harness_tests {
             "the narrow is in flight when Tab arrives",
         );
 
+        press_unrendered(&mut h, KeyCode::Tab);
         let accepted = crate::completion::accept::execute(&mut h.stoat);
         assert!(
             matches!(accepted, crate::app::UpdateEffect::Redraw),
@@ -2543,7 +2552,7 @@ mod harness_tests {
                 .rope()
                 .to_string(),
             "foobar",
-            "the narrowed first row is what Tab took",
+            "the narrowed first row is what Tab selected",
         );
     }
 
@@ -2762,7 +2771,7 @@ mod harness_tests {
         );
     }
 
-    /// Tab inside a re-ask window accepts against the text the reader has
+    /// A row accepted inside a re-ask window replaces the text the reader has
     /// typed, not the shorter prefix the ask went out on. The popup's range is
     /// what acceptance replaces, so a stale one leaves the keystrokes since
     /// behind the accepted row.
@@ -2779,9 +2788,10 @@ mod harness_tests {
         h.type_text("foo");
         h.advance_clock(COMPLETION_DEBOUNCE);
         h.type_text("b");
+        h.type_keys("tab");
         assert!(
             h.stoat.pending_completion_request.is_pending(),
-            "the re-ask is in flight when Tab arrives",
+            "the re-ask is still in flight once Tab has selected the row",
         );
 
         crate::completion::accept::execute(&mut h.stoat);

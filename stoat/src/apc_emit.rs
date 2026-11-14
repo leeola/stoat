@@ -2450,7 +2450,11 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
                 cells: content_version,
                 decorations: 0,
             },
-            |page| selection_page_stamp(popup.selected_idx, page, region.height),
+            |page| {
+                popup
+                    .selected_idx
+                    .map_or(0, |row| selection_page_stamp(row, page, region.height))
+            },
             true,
             |page| {
                 crate::smooth_scroll::render_completion_page(

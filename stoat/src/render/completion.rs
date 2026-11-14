@@ -56,8 +56,8 @@ pub(crate) struct CompletionLayout {
     /// The detail and documentation line of the selected row, painted on the
     /// footer row under the hairline below [`Self::inner`].
     ///
-    /// `None` when the selected row has neither, or when the box leaves no list
-    /// row above the footer.
+    /// `None` when no row is selected, when the selected row has neither, or
+    /// when the box leaves no list row above the footer.
     pub(crate) detail: Option<String>,
 }
 
@@ -75,7 +75,7 @@ struct LayoutKey {
     tick: u64,
     generation: u64,
     /// The popup's own geometry inputs, or `None` when no popup is open.
-    popup: Option<(usize, usize, Range<usize>, usize)>,
+    popup: Option<(usize, Option<usize>, Range<usize>, usize)>,
 }
 
 /// One frame's completion geometry, so the frame's two consumers compute it
@@ -165,7 +165,7 @@ pub(crate) fn completion_popup_layout(stoat: &mut Stoat) -> Option<(String, Comp
 
     let popup = stoat.pending_completion.as_ref()?;
     let total = popup.len();
-    let viewport_top = viewport_top_for(selected_idx, total, MAX_VISIBLE_ROWS);
+    let viewport_top = viewport_top_for(selected_idx.unwrap_or(0), total, MAX_VISIBLE_ROWS);
     let visible_count = total.saturating_sub(viewport_top).min(MAX_VISIBLE_ROWS);
 
     // Counted rather than truncated, since the width is all these want and a
@@ -186,7 +186,9 @@ pub(crate) fn completion_popup_layout(stoat: &mut Stoat) -> Option<(String, Comp
         width => KIND_GAP + width,
     };
     let row_width = (LABEL_COLUMN + label_width + name_room).min(interior_width as usize) as u16;
-    let detail = popup.row(selected_idx).and_then(detail_footer);
+    let detail = selected_idx
+        .and_then(|row| popup.row(row))
+        .and_then(detail_footer);
     let detail_width = detail.as_deref().map(clipped_width).unwrap_or(0) as u16;
     let footer_rows = if detail.is_some() { FOOTER_ROWS } else { 0 };
 
@@ -332,7 +334,7 @@ pub(crate) fn render_completion(
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn paint_completion_rows(
     popup: &CompletionPopup,
-    selected_idx: usize,
+    selected_idx: Option<usize>,
     prefix: &str,
     start_row: usize,
     area: Rect,
@@ -364,7 +366,7 @@ pub(crate) fn paint_completion_rows(
                 break;
             };
             let row = area.y + row_idx;
-            let selected = item_idx == selected_idx;
+            let selected = selected_idx == Some(item_idx);
             let row_fill =
                 style_rgb(selected_style.bg).filter(|_| selected && panels && scene.live());
             let (cell_style, row_style) = match (selected, row_fill) {
@@ -579,10 +581,10 @@ mod tests {
         let mut h = TestHarness::with_size(40, 24);
         let _path = open_scratch_file(&mut h, "");
         h.type_keys("i");
-        h.stoat.pending_completion = Some(CompletionPopup::showing(vec![
-            make_item("alpha"),
-            make_item("beta"),
-        ]));
+        h.stoat.pending_completion = Some(CompletionPopup {
+            selected_idx: Some(0),
+            ..CompletionPopup::showing(vec![make_item("alpha"), make_item("beta")])
+        });
 
         // The pool emit is the second consumer, and it ships nothing without a
         // stoatty listening, so without these it never asks for a layout at all.
@@ -647,7 +649,7 @@ mod tests {
         let _path = open_scratch_file(&mut h, "");
         h.type_keys("i");
         h.stoat.pending_completion = Some(CompletionPopup {
-            selected_idx: 1,
+            selected_idx: Some(1),
             anchor_offset: 0,
             prefix_range: 0..0,
             ..CompletionPopup::showing(vec![
@@ -667,7 +669,10 @@ mod tests {
         let mut foo = make_item("foo");
         foo.detail = Some("fn foo() -> u32".into());
         foo.documentation = Some("Returns the foo.\nMore details.".into());
-        h.stoat.pending_completion = Some(CompletionPopup::showing(vec![foo, make_item("bar")]));
+        h.stoat.pending_completion = Some(CompletionPopup {
+            selected_idx: Some(0),
+            ..CompletionPopup::showing(vec![foo, make_item("bar")])
+        });
         h.assert_snapshot("snapshot_completion_popup_detail_footer");
     }
 
@@ -680,7 +685,7 @@ mod tests {
             .map(|i| make_item(&format!("item_{i:02}")))
             .collect();
         h.stoat.pending_completion = Some(CompletionPopup {
-            selected_idx: 12,
+            selected_idx: Some(12),
             ..CompletionPopup::showing(items)
         });
         h.assert_snapshot("snapshot_completion_popup_scrolling");
@@ -692,7 +697,7 @@ mod tests {
         let _path = open_scratch_file(&mut h, "pri");
         h.type_keys("A");
         h.stoat.pending_completion = Some(CompletionPopup {
-            selected_idx: 0,
+            selected_idx: Some(0),
             anchor_offset: 3,
             prefix_range: 0..3,
             ..CompletionPopup::showing(vec![
@@ -818,7 +823,8 @@ mod tests {
             kind: Some(CompletionItemKind::Function),
             ..make_item("x")
         }]);
-        let page = crate::smooth_scroll::render_completion_page(&popup, 0, "", 0, &theme, 10, 1);
+        let page =
+            crate::smooth_scroll::render_completion_page(&popup, Some(0), "", 0, &theme, 10, 1);
 
         let panels = decode_stream(&page)
             .into_iter()
@@ -957,7 +963,15 @@ mod tests {
             let mut buf = Buffer::empty(area);
             let mut scene = ApcScene::new();
             super::paint_completion_rows(
-                &popup, 0, "", 0, area, &theme, true, &mut buf, &mut scene,
+                &popup,
+                Some(0),
+                "",
+                0,
+                area,
+                &theme,
+                true,
+                &mut buf,
+                &mut scene,
             );
             (0..width).map(|x| buf[(x, 0)].symbol()).collect()
         };
@@ -975,7 +989,10 @@ mod tests {
         let mut h = TestHarness::with_size(40, 5);
         let _path = open_scratch_file(&mut h, "");
         h.type_keys("i");
-        h.stoat.pending_completion = Some(CompletionPopup::showing(vec![foo]));
+        h.stoat.pending_completion = Some(CompletionPopup {
+            selected_idx: Some(0),
+            ..CompletionPopup::showing(vec![foo])
+        });
 
         let (_, layout) = super::completion_popup_layout(&mut h.stoat).expect("the popup lays out");
         assert_eq!(
@@ -990,7 +1007,10 @@ mod tests {
         let mut h = TestHarness::with_size(40, 12);
         let _path = open_scratch_file(&mut h, "");
         h.type_keys("i");
-        h.stoat.pending_completion = Some(CompletionPopup::showing(items));
+        h.stoat.pending_completion = Some(CompletionPopup {
+            selected_idx: Some(0),
+            ..CompletionPopup::showing(items)
+        });
 
         let buf = h.stoat.render();
         let (_, layout) = super::completion_popup_layout(&mut h.stoat).expect("the popup lays out");

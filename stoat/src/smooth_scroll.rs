@@ -1051,7 +1051,7 @@ pub(crate) fn render_arg_page(
 /// alone selects the rows, and the list is read-only here.
 pub(crate) fn render_completion_page(
     popup: &CompletionPopup,
-    selected_idx: usize,
+    selected_idx: Option<usize>,
     prefix: &str,
     page: u64,
     theme: &crate::theme::Theme,

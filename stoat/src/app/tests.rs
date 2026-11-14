@@ -15128,38 +15128,81 @@ fn tab_with_no_popup_smart_indents_after_whitespace() {
 }
 
 #[test]
-fn tab_with_popup_open_invokes_acceptance() {
+fn enter_accepts_only_a_selected_row() {
     use crate::completion::{CompletionItem, CompletionPopup, CompletionSource};
-    let mut h = Stoat::test();
-    let path = open_scratch_file(&mut h, "");
-    h.type_keys("i");
-    h.type_keys("f o o");
-    let replace_range = crate::completion::anchor_range_in_focused(&h.stoat, 0..3);
-    h.stoat.pending_completion = Some(CompletionPopup {
-        prefix_range: 0..3,
-        ..CompletionPopup::showing(vec![CompletionItem {
-            label: "foobar".into(),
+    let after_keys = |keys: &str| {
+        let mut h = Stoat::test();
+        let path = open_scratch_file(&mut h, "");
+        h.type_keys("i");
+        h.type_keys("f o o");
+        let replace_range = crate::completion::anchor_range_in_focused(&h.stoat, 0..3);
+        h.stoat.pending_completion = Some(CompletionPopup {
+            prefix_range: 0..3,
+            ..CompletionPopup::showing(vec![CompletionItem {
+                label: "foobar".into(),
+                source: CompletionSource::Word,
+                kind: None,
+                detail: None,
+                replace_range,
+                insert_text: "foobar".into(),
+                is_snippet: false,
+                documentation: None,
+                lsp_item: None,
+                server: None,
+            }])
+        });
+        h.type_keys(keys);
+        (
+            h.buffer_text_at(&path),
+            h.stoat.pending_completion.is_some(),
+        )
+    };
+
+    assert_eq!(
+        [after_keys("enter"), after_keys("tab enter")],
+        [("foo\n".to_string(), false), ("foobar".to_string(), false)],
+        "with no row selected Enter types its newline, and after Tab it accepts the row",
+    );
+}
+
+#[test]
+fn selection_keys_step_the_popup_with_wrap_and_leave_the_cursor() {
+    use crate::completion::{CompletionItem, CompletionPopup, CompletionSource};
+
+    /// The selection of a fresh three-row popup, then after each of `keys`.
+    fn selections(h: &mut crate::test_harness::TestHarness, keys: &[&str]) -> Vec<Option<usize>> {
+        let rows = ["foo", "foobar", "foobaz"].map(|label| CompletionItem {
+            label: label.into(),
             source: CompletionSource::Word,
             kind: None,
             detail: None,
-            replace_range,
-            insert_text: "foobar".into(),
+            replace_range: crate::completion::unused_replace_range(),
+            insert_text: label.into(),
             is_snippet: false,
             documentation: None,
             lsp_item: None,
             server: None,
-        }])
-    });
+        });
+        h.stoat.pending_completion = Some(CompletionPopup {
+            prefix_range: 0..1,
+            ..CompletionPopup::showing(rows.to_vec())
+        });
 
-    h.type_keys("tab");
+        let selected = |h: &crate::test_harness::TestHarness| {
+            h.stoat
+                .pending_completion
+                .as_ref()
+                .expect("the popup stays open")
+                .selected_idx
+        };
+        let mut seen = vec![selected(h)];
+        for key in keys {
+            h.type_keys(key);
+            seen.push(selected(h));
+        }
+        seen
+    }
 
-    assert_eq!(h.buffer_text_at(&path), "foobar");
-    assert!(h.stoat.pending_completion.is_none());
-}
-
-#[test]
-fn up_and_down_arrows_navigate_popup_without_moving_cursor() {
-    use crate::completion::{CompletionItem, CompletionPopup, CompletionSource};
     let mut h = Stoat::test();
     let _path = open_scratch_file(&mut h, "");
     h.type_keys("i");
@@ -15167,67 +15210,30 @@ fn up_and_down_arrows_navigate_popup_without_moving_cursor() {
     let cursor_before = focused_primary_offsets(&mut h);
     assert_eq!(cursor_before.0, 1);
 
-    let popup = || CompletionPopup {
-        prefix_range: 0..1,
-        ..CompletionPopup::showing(vec![
-            CompletionItem {
-                label: "foo".into(),
-                source: CompletionSource::Word,
-                kind: None,
-                detail: None,
-                replace_range: crate::completion::unused_replace_range(),
-                insert_text: "foo".into(),
-                is_snippet: false,
-                documentation: None,
-                lsp_item: None,
-                server: None,
-            },
-            CompletionItem {
-                label: "foobar".into(),
-                source: CompletionSource::Word,
-                kind: None,
-                detail: None,
-                replace_range: crate::completion::unused_replace_range(),
-                insert_text: "foobar".into(),
-                is_snippet: false,
-                documentation: None,
-                lsp_item: None,
-                server: None,
-            },
-            CompletionItem {
-                label: "foobaz".into(),
-                source: CompletionSource::Word,
-                kind: None,
-                detail: None,
-                replace_range: crate::completion::unused_replace_range(),
-                insert_text: "foobaz".into(),
-                is_snippet: false,
-                documentation: None,
-                lsp_item: None,
-                server: None,
-            },
-        ])
+    let mut observed = Vec::new();
+    for (forward, backward) in [("down", "up"), ("tab", "backtab"), ("ctrl-n", "ctrl-p")] {
+        observed.push((
+            forward,
+            selections(&mut h, &[forward, forward, forward, forward, backward]),
+            selections(&mut h, &[backward]),
+        ));
+    }
+    let expected = |forward| {
+        (
+            forward,
+            vec![None, Some(0), Some(1), Some(2), Some(0), Some(2)],
+            vec![None, Some(2)],
+        )
     };
-    h.stoat.pending_completion = Some(popup());
 
-    h.type_keys("down");
-    assert_eq!(h.stoat.pending_completion.as_ref().unwrap().selected_idx, 1,);
-    h.type_keys("down");
-    assert_eq!(h.stoat.pending_completion.as_ref().unwrap().selected_idx, 2,);
-    // Clamps at last index.
-    h.type_keys("down");
-    assert_eq!(h.stoat.pending_completion.as_ref().unwrap().selected_idx, 2,);
-
-    h.type_keys("up");
-    assert_eq!(h.stoat.pending_completion.as_ref().unwrap().selected_idx, 1,);
-    h.type_keys("up");
-    assert_eq!(h.stoat.pending_completion.as_ref().unwrap().selected_idx, 0,);
-    // Saturates at zero.
-    h.type_keys("up");
-    assert_eq!(h.stoat.pending_completion.as_ref().unwrap().selected_idx, 0,);
-
-    let cursor_after = focused_primary_offsets(&mut h);
-    assert_eq!(cursor_before, cursor_after);
+    assert_eq!(
+        (observed, focused_primary_offsets(&mut h)),
+        (
+            vec![expected("down"), expected("tab"), expected("ctrl-n")],
+            cursor_before,
+        ),
+        "each pair opens unselected, wraps both ways, and moves no cursor",
+    );
 }
 
 #[test]
@@ -15265,7 +15271,7 @@ fn snippet_tabstop_wins_mid_line_only() {
             server: None,
         }])
     });
-    h.type_keys("tab");
+    h.type_keys("tab enter");
     assert_eq!(h.buffer_text_at(&path), "name(arg)");
     assert!(h.stoat.active_snippet.is_some(), "a snippet is in flight");
 
@@ -15313,7 +15319,7 @@ fn tab_advances_active_snippet_to_next_tabstop() {
             server: None,
         }])
     });
-    h.type_keys("tab");
+    h.type_keys("tab enter");
     assert_eq!(h.buffer_text_at(&path), "name(arg)");
     let (start, end) = focused_primary_offsets(&mut h);
     assert_eq!((start, end), (0, 4), "first tabstop");
@@ -15356,7 +15362,7 @@ fn leaving_insert_mode_clears_active_snippet() {
             server: None,
         }])
     });
-    h.type_keys("tab");
+    h.type_keys("tab enter");
     assert!(h.stoat.active_snippet.is_some());
 
     h.type_keys("escape");
