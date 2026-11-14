@@ -15167,42 +15167,6 @@ fn enter_accepts_only_a_selected_row() {
 
 #[test]
 fn selection_keys_step_the_popup_with_wrap_and_leave_the_cursor() {
-    use crate::completion::{CompletionItem, CompletionPopup, CompletionSource};
-
-    /// The selection of a fresh three-row popup, then after each of `keys`.
-    fn selections(h: &mut crate::test_harness::TestHarness, keys: &[&str]) -> Vec<Option<usize>> {
-        let rows = ["foo", "foobar", "foobaz"].map(|label| CompletionItem {
-            label: label.into(),
-            source: CompletionSource::Word,
-            kind: None,
-            detail: None,
-            replace_range: crate::completion::unused_replace_range(),
-            insert_text: label.into(),
-            is_snippet: false,
-            documentation: None,
-            lsp_item: None,
-            server: None,
-        });
-        h.stoat.pending_completion = Some(CompletionPopup {
-            prefix_range: 0..1,
-            ..CompletionPopup::showing(rows.to_vec())
-        });
-
-        let selected = |h: &crate::test_harness::TestHarness| {
-            h.stoat
-                .pending_completion
-                .as_ref()
-                .expect("the popup stays open")
-                .selected_idx
-        };
-        let mut seen = vec![selected(h)];
-        for key in keys {
-            h.type_keys(key);
-            seen.push(selected(h));
-        }
-        seen
-    }
-
     let mut h = Stoat::test();
     let _path = open_scratch_file(&mut h, "");
     h.type_keys("i");
@@ -15214,8 +15178,8 @@ fn selection_keys_step_the_popup_with_wrap_and_leave_the_cursor() {
     for (forward, backward) in [("down", "up"), ("tab", "backtab"), ("ctrl-n", "ctrl-p")] {
         observed.push((
             forward,
-            selections(&mut h, &[forward, forward, forward, forward, backward]),
-            selections(&mut h, &[backward]),
+            popup_selections(&mut h, 3, &[forward, forward, forward, forward, backward]),
+            popup_selections(&mut h, 3, &[backward]),
         ));
     }
     let expected = |forward| {
@@ -15234,6 +15198,82 @@ fn selection_keys_step_the_popup_with_wrap_and_leave_the_cursor() {
         ),
         "each pair opens unselected, wraps both ways, and moves no cursor",
     );
+}
+
+/// A half-page key moves the selection by half of the rows the popup shows,
+/// with wrap. Ten of the twelve rows show, so a half page is five rows.
+#[test]
+fn half_page_keys_step_the_popup_by_half_its_height() {
+    let mut h = Stoat::test();
+    let path = open_scratch_file(&mut h, "");
+    h.type_keys("i f");
+
+    let mut observed = Vec::new();
+    for (forward, backward) in [("pagedown", "pageup"), ("ctrl-d", "ctrl-u")] {
+        observed.push((
+            forward,
+            popup_selections(&mut h, 12, &[forward, forward, forward, forward]),
+            popup_selections(&mut h, 12, &[backward]),
+        ));
+    }
+    let expected = |forward| {
+        (
+            forward,
+            vec![None, Some(0), Some(5), Some(10), Some(3)],
+            vec![None, Some(7)],
+        )
+    };
+
+    assert_eq!(
+        (observed, h.buffer_text_at(&path)),
+        (
+            vec![expected("pagedown"), expected("ctrl-d")],
+            "f".to_string()
+        ),
+        "each pair opens unselected, steps five rows both ways with wrap, and edits nothing",
+    );
+}
+
+/// The selection of a fresh popup of `rows` rows over the typed `f`, then the
+/// selection after each of `keys`.
+fn popup_selections(
+    h: &mut crate::test_harness::TestHarness,
+    rows: usize,
+    keys: &[&str],
+) -> Vec<Option<usize>> {
+    use crate::completion::{CompletionItem, CompletionPopup, CompletionSource};
+    let items = (0..rows)
+        .map(|row| CompletionItem {
+            label: format!("foo{row}"),
+            source: CompletionSource::Word,
+            kind: None,
+            detail: None,
+            replace_range: crate::completion::unused_replace_range(),
+            insert_text: format!("foo{row}"),
+            is_snippet: false,
+            documentation: None,
+            lsp_item: None,
+            server: None,
+        })
+        .collect();
+    h.stoat.pending_completion = Some(CompletionPopup {
+        prefix_range: 0..1,
+        ..CompletionPopup::showing(items)
+    });
+
+    let selected = |h: &crate::test_harness::TestHarness| {
+        h.stoat
+            .pending_completion
+            .as_ref()
+            .expect("the popup stays open")
+            .selected_idx
+    };
+    let mut seen = vec![selected(h)];
+    for key in keys {
+        h.type_keys(key);
+        seen.push(selected(h));
+    }
+    seen
 }
 
 /// No binding takes Ctrl-c in insert mode, so the press quits unless something

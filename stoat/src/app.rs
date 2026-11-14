@@ -7232,10 +7232,12 @@ impl Stoat {
     /// Handles a key while the completion popup is open.
     ///
     /// The keys follow the Helix completion menu. Tab, Down, and Ctrl-n select
-    /// the next row, and Shift-Tab, Up, and Ctrl-p select the row before. Both
-    /// directions wrap at the ends of the list, as the menu does. Enter
-    /// accepts the selected row, because the menu accepts on Enter. With no
-    /// row selected the menu ignores Enter, so Enter types its newline.
+    /// the next row, and Shift-Tab, Up, and Ctrl-p select the row before.
+    /// PageDown and Ctrl-d move the selection half a page forward, and PageUp
+    /// and Ctrl-u move it half a page back. All of them wrap at the ends of
+    /// the list, as the menu does. Enter accepts the selected row, because the
+    /// menu accepts on Enter. With no row selected the menu ignores Enter, so
+    /// Enter types its newline.
     ///
     /// Every other key accepts the selected row first and returns `None`, so
     /// the key then goes on to the insert arms and the keymap over the
@@ -7256,6 +7258,13 @@ impl Stoat {
             (KeyCode::BackTab, _)
             | (KeyCode::Up, KeyModifiers::NONE)
             | (KeyCode::Char('p'), KeyModifiers::CONTROL) => |popup| popup.select_prev(1),
+            (KeyCode::PageDown, KeyModifiers::NONE)
+            | (KeyCode::Char('d'), KeyModifiers::CONTROL) => {
+                |popup| popup.select_next(crate::render::completion::half_page(popup))
+            },
+            (KeyCode::PageUp, KeyModifiers::NONE) | (KeyCode::Char('u'), KeyModifiers::CONTROL) => {
+                |popup| popup.select_prev(crate::render::completion::half_page(popup))
+            },
             (KeyCode::Enter, KeyModifiers::NONE) => {
                 crate::completion::request::settle_pending_narrow(self);
                 let selected = self

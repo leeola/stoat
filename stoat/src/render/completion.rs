@@ -438,6 +438,14 @@ pub(crate) fn paint_completion_rows(
     });
 }
 
+/// The number of rows a half-page key moves the selection of `popup`.
+///
+/// Half of the rows the popup shows at once, and at least one, as the Helix
+/// menu moves half of its own height.
+pub(crate) fn half_page(popup: &CompletionPopup) -> usize {
+    (popup.len().min(MAX_VISIBLE_ROWS) / 2).max(1)
+}
+
 /// The glyph and the theme scope of the badge that leads a row of `kind`.
 ///
 /// Returns [`None`] for a kind with no badge, which are files, folders,
