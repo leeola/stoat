@@ -57,6 +57,7 @@ use crate::{
         self, modal_split_percent, modal_zoom_steps, ModalKind, Stoat, STATUS_ROW_PAD, TAB_BAR_PAD,
     },
     auto_reload::ReloadFlash,
+    blame::BlameState,
     buffer::BufferId,
     buffer_registry::BufferRegistry,
     commit_list::{CommitListId, CommitListState},
@@ -573,6 +574,12 @@ pub(crate) struct FrameCtx<'a> {
     /// directory at its right end, and its mode chip reads `RUN` whatever mode
     /// its input is in. See [`pane::focused_run_cwd`].
     pub(crate) run_cwd: Option<&'a Path>,
+    /// The commit of each line of every blamed buffer, which a blamed pane's
+    /// status row names for the cursor line.
+    pub(crate) blame: &'a BlameState,
+    /// The moment the frame paints, in unix epoch seconds, which a blame date
+    /// measures its age against.
+    pub(crate) now_epoch: i64,
     /// Latency readout for the status bar, or `None` before any frame has
     /// been painted. Present only under the `perf` feature.
     #[cfg(feature = "perf")]
@@ -1285,6 +1292,7 @@ pub(crate) fn frame(
     let chrome_bands = stoat.chrome_bands_on();
     let islands = stoat.islands_on();
     let margin = stoat.island_margin();
+    stoat.active_workspace_mut().refresh_blame_rows();
 
     // Single mode reserves a strip band at the window's right edge and shrinks
     // the pane layout by the strip width, so the panes never overlap the strip.
@@ -1531,6 +1539,8 @@ pub(crate) fn frame(
         hover_cell: stoat.hover_cell,
         home: stoat.home.as_deref(),
         run_cwd,
+        blame: &ws.blame,
+        now_epoch: crate::commit_picker::now_epoch(&stoat.executor),
         #[cfg(feature = "perf")]
         perf: PerfSegment::capture(&stoat.perf),
     };

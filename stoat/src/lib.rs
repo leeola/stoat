@@ -8,6 +8,7 @@ pub mod app;
 pub mod attach;
 pub(crate) mod auto_reload;
 pub mod badge;
+pub(crate) mod blame;
 pub mod buffer;
 pub(crate) mod buffer_lifecycle;
 mod buffer_registry;

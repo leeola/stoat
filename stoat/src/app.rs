@@ -9846,6 +9846,17 @@ impl Stoat {
 
         let git_jobs = git_jobs::pump(self);
         let commit_wait = action_handlers::git_commit::pump_commit_wait(self);
+        let blame = {
+            let Self {
+                workspaces,
+                active_workspace,
+                executor,
+                git_host,
+                redraw_notify,
+                ..
+            } = self;
+            workspaces[*active_workspace].pump_blame(executor, git_host, redraw_notify)
+        };
 
         let changed_file_jump = action_handlers::movement::pump_changed_file_jump(self);
         let diff_wants = action_handlers::review::pump_diff_wants(self);
@@ -9875,6 +9886,7 @@ impl Stoat {
             || commit_picker
             || git_jobs
             || commit_wait
+            || blame
             || code_search
             || changed_file_jump
             || diff_wants

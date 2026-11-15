@@ -1,6 +1,7 @@
 use crate::{
     action_handlers::search::StatusPrompt,
     app::{SPINNER_FRAMES, STATUS_ROW_PAD, TAB_BAR_PAD},
+    blame::{self, LineBlame},
     buffer::BufferId,
     buffer_registry::{BufferRegistry, ReadOnly},
     diff_changes::{DiffChangesId, DiffChangesState},
@@ -1548,7 +1549,8 @@ pub(crate) struct PaneStatusCells {
 ///
 /// `blame` is whether the pane shows the Blame Column, as
 /// [`Pane::blames`](crate::pane::Pane::blames) reads it. The row then names it
-/// after the file name, as [`status_row`] does in the main window.
+/// after the file name, and names the cursor line's commit left of the
+/// position, as [`status_row`] does in the main window.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn pane_status_cells(
     view: &View,
@@ -2286,6 +2288,10 @@ fn status_message_style(base_style: Style, theme: &crate::theme::Theme) -> Style
 /// Scope takes the room that the rest of the lead and the side names in its
 /// run leave. After the hunk, the lead counts the stack, as [`stack_summary`]
 /// describes.
+///
+/// With `blame`, the row names the commit of the cursor line left of the
+/// position, as [`blame_label`] words it. Before the blame lands, it names
+/// none.
 #[allow(clippy::too_many_arguments)]
 fn status_segments(
     view: &View,
@@ -2583,6 +2589,19 @@ fn status_segments(
             right_anchor = start;
         }
     }
+    let commit_label = cursor_pos
+        .zip(status.buffer_id)
+        .filter(|_| blame)
+        .and_then(|((line, _), id)| frame.blame.line(id, line - 1))
+        .map(|line| blame_label(&line, frame.now_epoch));
+    if let Some(text) = commit_label {
+        let width = text.chars().count() as u16;
+        let start = right_anchor.saturating_sub(width);
+        if start >= cursor {
+            right.push((text, trail_style));
+            right_anchor = start;
+        }
+    }
     if let Some(cwd) = frame.run_cwd.filter(|_| is_focused) {
         let text = format!(
             " {} ",
@@ -2799,6 +2818,22 @@ fn status_segments(
             hairline: true,
             boxes: mode_chip_box(chip_end.is_some()),
         }],
+    }
+}
+
+/// The status row's segment for the commit of a blamed pane's cursor line.
+///
+/// A committed line reads its short sha, the first word of its author, and its
+/// date, as [`blame::short_date`] words it against `now_epoch`.
+fn blame_label(line: &LineBlame<'_>, now_epoch: i64) -> String {
+    match line {
+        LineBlame::Uncommitted => " uncommitted ".to_owned(),
+        LineBlame::Commit { commit } => format!(
+            " {} \u{b7} {} \u{b7} {} ",
+            commit.info.short_sha,
+            blame::author_word(&commit.info.author_name),
+            blame::short_date(commit.info.time, commit.utc_offset_minutes, now_epoch),
+        ),
     }
 }
 
@@ -3752,9 +3787,11 @@ mod tests {
         action_handlers::{dispatch, focused_editor_mut},
         agent_ipc::AgentControl,
         badge::{Anchor, Badge, BadgeSource, BadgeState},
+        blame,
         buffer::{BufferId, TextBuffer},
         buffer_lifecycle,
         buffer_registry::ReadOnly,
+        commit_picker,
         diff_map::{DiffMap, MarkKind},
         editor_state::EditorState,
         host::LspNotification,
@@ -3763,7 +3800,7 @@ mod tests {
         rebase::RebaseState,
         term_session::TermId,
         workspace::{
-            diff::{DiffBase, HunkPosition, RepoStatus, WorktreeBase},
+            diff::{DiffBase, HunkPosition, RepoStatus, WorktreeBase, DIFF_SETTLE},
             TabConflictMark,
         },
         Stoat,
@@ -3774,6 +3811,7 @@ mod tests {
         collections::HashMap,
         path::{Path, PathBuf},
         sync::{Arc, RwLock},
+        time::Duration,
     };
     use stoat_action::{
         AddSelectionAbove, AddSelectionBelow, Conflict, KeepPrimarySelection, MoveDown, OpenFile,
@@ -4048,6 +4086,47 @@ mod tests {
             [None, Some("src/a.rs".to_string())],
             "the left row holds no blame, and the blamed right row holds it after the name",
         );
+    }
+
+    /// A blamed pane's status row names the cursor line's commit left of the
+    /// position, and names an edited line uncommitted once the typing settles.
+    #[test]
+    fn a_blamed_status_row_names_the_commit_of_the_cursor_line() {
+        let mut h = crate::test_harness::TestHarness::with_size(120, 12);
+        h.seed_linear_history("/repo", &[("c1aaaaaaaa", "one", &[("a.rs", "one\n")])]);
+        let now = commit_picker::now_epoch(&h.stoat.executor);
+        let time = now - 3 * 86_400;
+        h.fake_git()
+            .add_repo("/repo")
+            .authored("c1aaaaaaaa", "Ada Lovelace", time);
+        h.stoat.active_workspace_mut().git_root = PathBuf::from("/repo");
+        h.fake_fs().insert_file("/repo/a.rs", "one\n");
+        h.open_file(Path::new("/repo/a.rs"));
+        h.type_keys("space h a");
+        h.settle();
+        let committed = blamed_row_end(&mut h, 32);
+
+        h.edit_focused(0..0, "x");
+        h.advance_clock(DIFF_SETTLE + Duration::from_millis(1));
+        let commit = format!(
+            " c1aaaaa \u{b7} Ada \u{b7} {}  1:1 ",
+            blame::short_date(time, 0, now)
+        );
+        assert_eq!(
+            [committed, blamed_row_end(&mut h, 32)],
+            [
+                format!("{commit:>32}"),
+                format!("{:>32}", " uncommitted  1:2 ")
+            ],
+        );
+    }
+
+    /// The last `width` cells of the focused pane's status row, painted.
+    fn blamed_row_end(h: &mut crate::test_harness::TestHarness, width: usize) -> String {
+        let buf = h.render_composited();
+        let (_, text) = pane_status_rows(h, &buf).remove(0);
+        let cells: Vec<char> = text.chars().collect();
+        cells[cells.len() - width..].iter().collect()
     }
 
     /// A muted segment lifts off a status row filled with the muted color, as

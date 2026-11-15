@@ -1,12 +1,15 @@
 mod rebase;
 
-use crate::host::{
-    fake::FakeFs,
-    git::{
-        BackendSnafu, BlameCommit, BlameRun, ChangeLineStats, ChangedFile, CherryPickOutcome,
-        CommitFileChange, CommitFileChangeKind, CommitInfo, ConflictedFile, FileBlame,
-        GitApplyError, GitHost, GitRepo, HunkTallies, MergeOutcome, MergeState, RebaseError,
-        RebaseTodo, RewriteResult, StagedKind,
+use crate::{
+    blame,
+    host::{
+        fake::FakeFs,
+        git::{
+            BackendSnafu, BlameCommit, BlameRun, ChangeLineStats, ChangedFile, CherryPickOutcome,
+            CommitFileChange, CommitFileChangeKind, CommitInfo, ConflictedFile, FileBlame,
+            GitApplyError, GitHost, GitRepo, HunkTallies, MergeOutcome, MergeState, RebaseError,
+            RebaseTodo, RewriteResult, StagedKind,
+        },
     },
 };
 use std::{
@@ -19,7 +22,6 @@ use std::{
         Arc, Mutex,
     },
 };
-use stoat_language::structural_diff;
 use stoat_text::LineEnding;
 
 /// The reason libgit2 gives when a commit meets an index that still holds an
@@ -2360,7 +2362,7 @@ impl GitRepo for FakeGitRepo {
                 break;
             };
 
-            let origins = line_origins(parent_text, &commit.tree[rel]);
+            let origins = blame::line_origins(parent_text, &commit.tree[rel]);
             let mut kept = Vec::with_capacity(pending.len());
             for (blamed, line) in pending {
                 match origins[line as usize] {
@@ -2463,42 +2465,6 @@ fn line_delta(base: &str, new: &str) -> (u32, u32) {
     let adds = new_lines.difference(&base_lines).count() as u32;
     let dels = base_lines.difference(&new_lines).count() as u32;
     (adds, dels)
-}
-
-/// For each line of `new`, the line of `base` that it keeps, or `None` for a
-/// line in a region that the line diff from `base` changed.
-///
-/// The fake blame follows a line back through history with this map. A line
-/// keeps an older commit for as long as each diff leaves it alone.
-fn line_origins(base: &str, new: &str) -> Vec<Option<u32>> {
-    let new_lines = new.split_inclusive('\n').count();
-    let mut origins: Vec<Option<u32>> = Vec::with_capacity(new_lines);
-    let mut base_line = 0;
-    for (base_bytes, new_bytes) in structural_diff::line_hunks(base, new) {
-        let kept = boundary_line(new, new_bytes.start) as usize - origins.len();
-        origins.extend((base_line..).take(kept).map(Some));
-        origins.resize(boundary_line(new, new_bytes.end) as usize, None);
-        base_line = boundary_line(base, base_bytes.end);
-    }
-
-    let kept = new_lines - origins.len();
-    origins.extend((base_line..).take(kept).map(Some));
-    origins
-}
-
-/// The line that a region boundary at byte `offset` of `text` comes before.
-///
-/// A region covers whole lines, so a boundary is the start of a line or the
-/// end of the text. The end comes after the last line even when that line has
-/// no newline. A count of the newlines before the end misses that line.
-fn boundary_line(text: &str, offset: usize) -> u32 {
-    if offset == text.len() {
-        return text.split_inclusive('\n').count() as u32;
-    }
-    text.as_bytes()[..offset]
-        .iter()
-        .filter(|&&byte| byte == b'\n')
-        .count() as u32
 }
 
 #[cfg(test)]

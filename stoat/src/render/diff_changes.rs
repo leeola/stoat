@@ -1625,6 +1625,8 @@ mod tests {
             hover_cell: None,
             home: None,
             run_cwd: None,
+            blame: &stoat.active_workspace().blame,
+            now_epoch: 0,
             #[cfg(feature = "perf")]
             perf: None,
         }

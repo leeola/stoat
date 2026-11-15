@@ -507,6 +507,8 @@ fn emit_window_content(stoat: &mut Stoat, out: &mut Vec<u8>) -> Vec<Vec<u8>> {
         hover_cell: None,
         home: stoat.home.as_deref(),
         run_cwd,
+        blame: &ws.blame,
+        now_epoch: crate::commit_picker::now_epoch(&stoat.executor),
         #[cfg(feature = "perf")]
         perf: None,
     };
@@ -1638,6 +1640,8 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
             hover_cell: None,
             home: None,
             run_cwd: None,
+            blame: &ws.blame,
+            now_epoch: crate::commit_picker::now_epoch(&stoat.executor),
             #[cfg(feature = "perf")]
             perf: None,
         };

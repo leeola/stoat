@@ -1318,7 +1318,7 @@ impl DiffLanding {
 
 /// A task that wakes a redraw when a settle window closes, so the frame that
 /// ends the window is drawn even when nothing else asks for one.
-fn settle_timer(executor: &Executor, redraw_notify: &Arc<Notify>) -> Task<()> {
+pub(crate) fn settle_timer(executor: &Executor, redraw_notify: &Arc<Notify>) -> Task<()> {
     let timer_executor = executor.clone();
     executor.spawn_with_redraw(redraw_notify.clone(), async move {
         timer_executor.timer(DIFF_SETTLE).await;

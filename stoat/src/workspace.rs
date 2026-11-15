@@ -12,6 +12,7 @@ use crate::{
     alloc_trim,
     auto_reload::ReloadFlash,
     badge::BadgeTray,
+    blame::BlameState,
     buffer::{BufferId, SharedBuffer, TextBufferSnapshot},
     buffer_registry::BufferRegistry,
     code_index::{
@@ -420,6 +421,8 @@ pub struct Workspace {
     /// Everything the git-diff pipeline remembers between passes, which
     /// [`Self::drive_diff_jobs`] reads to decide what is owed a recompute.
     diff: DiffState,
+    /// The commit of each line of every buffer that a blamed pane shows.
+    pub(crate) blame: BlameState,
     /// The buffer ids [`Self::collect_visible_buffer_ids`] last collected.
     ///
     /// Held rather than returned because both the parse and the diff driver
@@ -619,6 +622,7 @@ impl Workspace {
             #[cfg(test)]
             parse_snapshot_clones: std::cell::Cell::new(0),
             diff: DiffState::default(),
+            blame: BlameState::default(),
             visible_buffers: Vec::new(),
             index_jobs: HashMap::new(),
             index_extractions: HashMap::new(),
@@ -1383,9 +1387,11 @@ impl Workspace {
         self.diff.stale_tally();
     }
 
-    /// Stale every buffer's diff map. See [`DiffState::invalidate_all`].
+    /// Stale every buffer's diff map and blame. See [`DiffState::invalidate_all`]
+    /// and [`BlameState::invalidate_all`].
     pub(crate) fn invalidate_all_diffs(&mut self) {
         self.diff.invalidate_all();
+        self.blame.invalidate_all();
         self.diff_changes_epoch += 1;
     }
 
@@ -1735,6 +1741,50 @@ impl Workspace {
             self.land_tally();
         }
         self.visible_buffers = visible;
+    }
+
+    /// Land and start the blames of the buffers that blamed panes show, and
+    /// report whether one landed or started. See [`BlameState::pump`].
+    pub(crate) fn pump_blame(
+        &mut self,
+        executor: &Executor,
+        git_host: &Arc<dyn GitHost>,
+        redraw_notify: &Arc<Notify>,
+    ) -> bool {
+        let mut wanted = Vec::new();
+        self.blamed_buffer_ids(&mut wanted);
+        self.blame.pump(
+            &self.buffers,
+            &self.git_root,
+            &wanted,
+            executor,
+            git_host,
+            redraw_notify,
+        )
+    }
+
+    /// Resolve the blame rows of the buffers that blamed panes show. See
+    /// [`BlameState::refresh_rows`].
+    pub(crate) fn refresh_blame_rows(&mut self) {
+        let mut wanted = Vec::new();
+        self.blamed_buffer_ids(&mut wanted);
+        self.blame.refresh_rows(&self.buffers, &wanted);
+    }
+
+    /// The buffers with a path that blamed split panes show, each once.
+    fn blamed_buffer_ids(&self, out: &mut Vec<BufferId>) {
+        for (_, pane) in self.panes.split_panes() {
+            let View::Editor(editor_id) = pane.view else {
+                continue;
+            };
+            let Some(editor) = self.editors.get(editor_id) else {
+                continue;
+            };
+            let id = editor.buffer_id;
+            if pane.blames(editor) && self.buffers.path_for(id).is_some() && !out.contains(&id) {
+                out.push(id);
+            }
+        }
     }
 
     /// Build a fresh [`EditorState`] for `buffer_id`, seeded with the buffer's
