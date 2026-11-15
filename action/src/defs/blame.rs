@@ -101,3 +101,27 @@ define_action!(
     ActionPriority::Rare,
     palette_visible = false
 );
+
+define_action!(
+    CommitPreviewNextFileDef,
+    CommitPreviewNextFile,
+    "CommitPreviewNextFile",
+    ActionKind::CommitPreviewNextFile,
+    "go to the next file in the Commit Preview",
+    "Scroll the patch of the Commit Preview to the header of the next file. \
+     At the last file the scroll stays, and the status says so.",
+    ActionPriority::Rare,
+    palette_visible = false
+);
+
+define_action!(
+    CommitPreviewPrevFileDef,
+    CommitPreviewPrevFile,
+    "CommitPreviewPrevFile",
+    ActionKind::CommitPreviewPrevFile,
+    "go to the previous file in the Commit Preview",
+    "Scroll the patch of the Commit Preview to the nearest file header above \
+     the top row. At the first file the scroll stays, and the status says so.",
+    ActionPriority::Rare,
+    palette_visible = false
+);

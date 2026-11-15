@@ -574,7 +574,7 @@ mod tests {
                 &format!("\u{2502}{}\u{2502}", "\u{2500}".repeat(92)),
                 &format!(
                     "\u{2514} {:<91}\u{2518}",
-                    "j/k scroll  y copy sha  Esc back to blame"
+                    "j/k scroll  ]/[ file  y copy sha  Esc back to blame"
                 ),
             ],
         );

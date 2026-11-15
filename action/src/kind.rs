@@ -85,6 +85,8 @@ action_kinds! {
     CommitPreviewClose,
     CommitPreviewLineDown,
     CommitPreviewLineUp,
+    CommitPreviewNextFile,
+    CommitPreviewPrevFile,
     DiffUnderline,
     DiffBold,
     DiffSyntax,

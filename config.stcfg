@@ -805,6 +805,8 @@ on key {
     modal == commit_preview && mode == normal {
         j -> CommitPreviewLineDown() "scroll";
         k -> CommitPreviewLineUp() "scroll";
+        ] -> SetMode(bracket_next) "file";
+        [ -> SetMode(bracket_prev) "file";
         Down -> CommitPreviewLineDown();
         Up -> CommitPreviewLineUp();
         Ctrl-d -> PickerDetailDown();
@@ -813,6 +815,17 @@ on key {
         PageUp -> PickerDetailUp();
         y -> BlameCopySha() "copy sha";
         Escape -> CommitPreviewClose() "back to blame";
+    }
+    # The file hops read as the editor's bracket chords do. The editor's
+    # bracket blocks stay out of every modal, so none of their keys reach the
+    # pane under the preview.
+    modal == commit_preview && mode == bracket_next {
+        f -> [CommitPreviewNextFile(), SetMode(normal)];
+        Escape -> SetMode(normal);
+    }
+    modal == commit_preview && mode == bracket_prev {
+        f -> [CommitPreviewPrevFile(), SetMode(normal)];
+        Escape -> SetMode(normal);
     }
     modal == jumplist && mode == insert {
         Up -> PickerPrev();
@@ -1093,7 +1106,9 @@ on key {
         j -> [ScrollDown(), SetMode(select)];
         k -> [ScrollUp(), SetMode(select)];
     }
-    mode == bracket_next {
+    # The bracket menus stay out of every modal. A modal that opens one binds
+    # its own keys there, so no key here edits or moves the pane under it.
+    !modal && mode == bracket_next {
         Escape -> SetMode(normal);
         Space -> [AddNewlineBelow(), SetMode(normal)];
 
@@ -1126,7 +1141,7 @@ on key {
             x -> [GotoNextXmlElement(), SetMode(normal)];
         }
     }
-    mode == bracket_prev {
+    !modal && mode == bracket_prev {
         Escape -> SetMode(normal);
         Space -> [AddNewlineAbove(), SetMode(normal)];
 

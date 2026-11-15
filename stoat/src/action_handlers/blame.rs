@@ -859,6 +859,57 @@ mod tests {
         assert_eq!(headers, ["a.rs", "b.rs"]);
     }
 
+    /// `] f` puts the next file's header at the top of the body, and `[ f` the
+    /// nearest header above the top row. Past the last or the first file the
+    /// scroll stays and the status says so. Each chord hands back normal mode.
+    #[test]
+    fn bracket_f_hops_the_preview_between_its_files() {
+        let mut h = three_file_preview();
+        let hop = |keys: &str| {
+            h.type_keys(keys);
+            (
+                top_header(&h),
+                h.stoat.pending_message.take(),
+                h.stoat.focused_mode().to_string(),
+            )
+        };
+        let at = |file: &str, status: Option<&str>| {
+            (
+                Some(file.to_string()),
+                status.map(str::to_string),
+                "normal".to_string(),
+            )
+        };
+        assert_eq!(
+            ["[ f", "] f", "] f", "] f", "[ f"].map(hop),
+            [
+                at("a.rs", Some("no file above")),
+                at("b.rs", None),
+                at("c.rs", None),
+                at("c.rs", Some("no file below")),
+                at("b.rs", None),
+            ],
+        );
+    }
+
+    /// The editor's bracket keys stay out of the preview, so `] Space` and
+    /// `[ Space` add no line to the buffer under it. `Escape` leaves each menu
+    /// and keeps the preview open.
+    #[test]
+    fn the_editor_bracket_keys_leave_the_buffer_under_the_preview() {
+        let mut h = blamed_repo("one\ntwo\n");
+        h.type_keys("j enter");
+        h.type_keys("] space escape [ space escape");
+        assert_eq!(
+            (
+                h.focused_buffer_text(),
+                h.stoat.commit_preview.is_some(),
+                h.stoat.focused_mode(),
+            ),
+            ("one\ntwo\n".to_string(), true, "normal"),
+        );
+    }
+
     /// A preview opened from a line the commit added in the second of its two
     /// files opens with that file's header at the top of the body. Under a live
     /// scene a light ring in the focused border's color marks the line's row,
@@ -1094,12 +1145,51 @@ mod tests {
         h
     }
 
+    /// A 120-cell window with the Commit Preview open on a commit that edits
+    /// `a.rs`, `b.rs`, and `c.rs`, its patch built. The third file adds 20
+    /// lines, so its header reaches the top of the 13 rows the patch shows in.
+    fn three_file_preview() -> TestHarness {
+        let c = {
+            let lines: String = (0..20).map(|i| format!("c{i}\n")).collect();
+            format!("c\n{lines}")
+        };
+        let mut h = blamed_history(
+            &[
+                (
+                    "c1",
+                    "one",
+                    &[("a.rs", "one\n"), ("b.rs", "b\n"), ("c.rs", "c\n")],
+                ),
+                (
+                    "c2",
+                    "two",
+                    &[("a.rs", "one\ntwo\n"), ("b.rs", "b\nc\n"), ("c.rs", &c)],
+                ),
+            ],
+            "one\ntwo\n",
+        );
+        h.type_keys("j enter");
+        h.settle();
+        h
+    }
+
     /// The rows the open preview's patch scrolls down by.
     fn preview_scroll(h: &TestHarness) -> Option<usize> {
         h.stoat
             .commit_preview
             .as_ref()
             .map(|preview| preview.scroll)
+    }
+
+    /// The path of the file whose header is the open preview's top row, or
+    /// `None` when the top row is no header.
+    fn top_header(h: &TestHarness) -> Option<String> {
+        let preview = h.stoat.commit_preview.as_ref()?;
+        let doc = preview.document.as_ref()?.as_ref()?;
+        match preview.rows.get(preview.scroll)? {
+            PatchRow::Header { file } => Some(doc.files[*file].rel_path.clone()),
+            _ => None,
+        }
     }
 
     /// Whether the open preview's build landed.

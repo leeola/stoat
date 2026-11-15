@@ -162,6 +162,45 @@ pub(crate) fn scroll_by(stoat: &mut Stoat, rows: i32) -> UpdateEffect {
     UpdateEffect::Redraw
 }
 
+/// Scroll the open preview's patch to the header of the next or the previous
+/// file.
+///
+/// A forward hop takes the first header below the top row, and a backward hop
+/// the nearest header above it. If the top row is inside a file, that file's
+/// own header is the nearest one above it.
+///
+/// The header goes to the top of the body, unless the patch ends less than a
+/// page below it. Past the last or the first file the scroll stays, and the
+/// status says so.
+pub(crate) fn hop_file(stoat: &mut Stoat, forward: bool) -> UpdateEffect {
+    let Some(preview) = stoat.commit_preview.as_mut() else {
+        return UpdateEffect::None;
+    };
+
+    let scroll = preview.scroll;
+    let mut headers = preview
+        .rows
+        .iter()
+        .enumerate()
+        .filter(|(_, row)| matches!(row, PatchRow::Header { .. }))
+        .map(|(at, _)| at);
+    let target = if forward {
+        headers.find(|&at| at > scroll)
+    } else {
+        headers.rfind(|&at| at < scroll)
+    };
+
+    match target {
+        Some(at) => preview.scroll = at,
+        None => stoat.set_status(if forward {
+            "no file below"
+        } else {
+            "no file above"
+        }),
+    }
+    UpdateEffect::Redraw
+}
+
 /// Close the preview, which leaves the blamed pane it opened over.
 pub(crate) fn close(stoat: &mut Stoat) -> UpdateEffect {
     stoat.commit_preview = None;

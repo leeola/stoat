@@ -732,6 +732,8 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
         ActionKind::CommitPreviewClose => commit_preview::close(stoat),
         ActionKind::CommitPreviewLineDown => commit_preview::scroll_by(stoat, 1),
         ActionKind::CommitPreviewLineUp => commit_preview::scroll_by(stoat, -1),
+        ActionKind::CommitPreviewNextFile => commit_preview::hop_file(stoat, true),
+        ActionKind::CommitPreviewPrevFile => commit_preview::hop_file(stoat, false),
         ActionKind::DiffUnderline => stoat.handle_diff_underline_toggle(),
         ActionKind::DiffBold => stoat.handle_diff_bold_toggle(),
         ActionKind::DiffSyntax => stoat.handle_diff_syntax_toggle(),

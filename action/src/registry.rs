@@ -4,7 +4,8 @@ use crate::{
         app::{OpenLogs, PinMode, Quit, QuitAll, QuitAllCancel, QuitAllConfirm, ShowVersion},
         blame::{
             BlameCard, BlameCardClose, BlameCopySha, BlamePreview, CommitPreviewClose,
-            CommitPreviewLineDown, CommitPreviewLineUp, ToggleBlame,
+            CommitPreviewLineDown, CommitPreviewLineUp, CommitPreviewNextFile,
+            CommitPreviewPrevFile, ToggleBlame,
         },
         commits::{
             CloseCommits, CommitsDetailDown, CommitsDetailUp, CommitsFirst, CommitsLast,
@@ -368,6 +369,12 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
     });
     add(CommitPreviewLineUp::DEF, |_| {
         Ok(Box::new(CommitPreviewLineUp))
+    });
+    add(CommitPreviewNextFile::DEF, |_| {
+        Ok(Box::new(CommitPreviewNextFile))
+    });
+    add(CommitPreviewPrevFile::DEF, |_| {
+        Ok(Box::new(CommitPreviewPrevFile))
     });
     add(DiffUnderline::DEF, |_| Ok(Box::new(DiffUnderline)));
     add(DiffBold::DEF, |_| Ok(Box::new(DiffBold)));
@@ -1623,6 +1630,8 @@ mod tests {
         "CommitPreviewClose",
         "CommitPreviewLineDown",
         "CommitPreviewLineUp",
+        "CommitPreviewNextFile",
+        "CommitPreviewPrevFile",
         "DiffUnderline",
         "DiffBold",
         "DiffSyntax",
@@ -2214,7 +2223,8 @@ mod tests {
         // + 2 BlameCard/BlameCardClose.
         // + 1 BlameCopySha.
         // + 4 the Commit Preview actions.
-        assert_eq!(all().count(), 503);
+        // + 2 CommitPreviewNextFile/CommitPreviewPrevFile.
+        assert_eq!(all().count(), 505);
     }
 
     #[test]
