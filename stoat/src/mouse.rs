@@ -679,14 +679,15 @@ fn handle_modal_mouse(stoat: &mut Stoat, mouse: MouseEvent) -> UpdateEffect {
 /// [`ModalSurfaces::row_at`] reads. A press off every file row does nothing.
 fn press_git_status_row(stoat: &mut Stoat, mouse: MouseEvent) -> UpdateEffect {
     let size = stoat.size();
-    let (tab_bar_rows, status_rows) = (stoat.tab_bar_rows(), stoat.status_rows());
+    let top_rows = stoat.tab_bar_rows() + stoat.banner_rows();
+    let status_rows = stoat.status_rows();
     let Some(panel) = stoat.git_status.as_mut() else {
         return UpdateEffect::None;
     };
     let Some(index) = crate::render::git_status::git_status_row_at(
         panel,
         size,
-        tab_bar_rows,
+        top_rows,
         status_rows,
         mouse.column,
         mouse.row,
@@ -1071,6 +1072,9 @@ pub(crate) fn handle_mouse(stoat: &mut Stoat, mouse: MouseEvent) -> UpdateEffect
     // handlers, which read a row above every pane as the focused pane's first
     // row.
     if let Some(effect) = handle_tab_bar_mouse(stoat, mouse) {
+        return closed_effect(effect);
+    }
+    if let Some(effect) = handle_banner_mouse(stoat, mouse) {
         return closed_effect(effect);
     }
 
@@ -1559,6 +1563,22 @@ fn tab_at(spans: &[Range<u16>], column: u16) -> Option<usize> {
     spans
         .iter()
         .position(|span| (u32::from(span.start)..u32::from(span.end)).contains(&center))
+}
+
+/// Claims a button press on the checkout banner's rows, which does nothing.
+///
+/// Returns `None` for an event that is not a press on the shown banner. The
+/// claim is there because the rows are above every pane, as the tab bar's are,
+/// and an unclaimed press there reaches the focused pane as a press on its
+/// first row.
+fn handle_banner_mouse(stoat: &Stoat, mouse: MouseEvent) -> Option<UpdateEffect> {
+    let MouseEventKind::Down(_) = mouse.kind else {
+        return None;
+    };
+    let top = stoat.size().y + stoat.tab_bar_rows();
+    (top..top + stoat.banner_rows())
+        .contains(&mouse.row)
+        .then_some(UpdateEffect::None)
 }
 
 /// Route a left-button press over the open hover popup to its text
@@ -2611,6 +2631,7 @@ mod tests {
         editor_state::EditorState,
         host::NoopLsp,
         render::hover::HoverPopup,
+        review_walk::{ReturnRef, ReviewWalk},
         test_fixture::{mouse_event, open_scratch_file},
     };
     use crossterm::event::KeyModifiers;
@@ -4296,6 +4317,34 @@ mod tests {
         );
     }
 
+    /// The checkout banner's row sits above every pane too, so a press there
+    /// leaves the focus and the cursor where they were. With the tab bar shown,
+    /// the banner takes row 1.
+    #[test]
+    fn a_press_on_the_checkout_banner_stops_at_the_banner() {
+        let mut h = Stoat::test();
+        action_handlers::dispatch(&mut h.stoat, &NewTab);
+        h.seed_focused_buffer("alpha\nbeta\ngamma\n");
+        action_handlers::dispatch(&mut h.stoat, &MoveDown);
+        h.stoat.active_workspace_mut().review_walk = Some(ReviewWalk::blame_checkout(
+            "c1",
+            ReturnRef::Branch("main".into()),
+            None,
+        ));
+        h.stoat.render();
+        let state = |h: &mut crate::test_harness::TestHarness| {
+            (
+                h.stoat.active_workspace().panes.focus(),
+                crate::test_harness::editor::head_offsets(&mut h.stoat),
+            )
+        };
+        let before = state(&mut h);
+
+        h.stoat
+            .update(mouse_event(MouseEventKind::Down(MouseButton::Left), 3, 1));
+        assert_eq!(state(&mut h), before);
+    }
+
     #[test]
     fn a_press_resolves_by_its_cell_center() {
         let spans = [0..50, 50..120];
@@ -4384,6 +4433,29 @@ mod tests {
         left_press(&mut h, 33, 5);
 
         assert_eq!(git_status_selected(&h), Some(5));
+    }
+
+    /// Under the checkout banner the box hangs a row lower, so its body holds a
+    /// line less, and a press names the row drawn under it there.
+    ///
+    /// At 80 by 14 the banner takes row 0, and the body holds seven lines.
+    /// Selecting the last of twelve files scrolls the body to start at the
+    /// seventh, which row 6 shows under the head on row 5.
+    #[test]
+    fn a_press_under_the_checkout_banner_names_the_git_status_row_drawn_there() {
+        let mut h = git_status_harness(80, 14, 12);
+        h.stoat.active_workspace_mut().review_walk = Some(ReviewWalk::blame_checkout(
+            "c1",
+            ReturnRef::Branch("main".into()),
+            None,
+        ));
+        for _ in 0..11 {
+            h.type_keys("j");
+        }
+        h.snapshot();
+        left_press(&mut h, 33, 6);
+
+        assert_eq!(git_status_selected(&h), Some(6));
     }
 
     /// The wheel walks the selection one row per line of travel and stops at

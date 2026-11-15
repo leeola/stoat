@@ -273,6 +273,7 @@ theme ermine_night inherits default_dark {
     let tint_info        = "#1e3237";
     let tint_reveal      = "#1a2226";
     let tint_special     = "#2a2236";
+    let tint_warning     = "#2e2a1e";
     let side_base_frame  = "#2a1d20";
     let side_base_fg     = "#a3898c";
     let side_base_name   = "#f2b3b7";
@@ -396,6 +397,7 @@ theme ermine_night inherits default_dark {
     vcs.conflict.head.bg   = merged_head;
     vcs.merge.banner       = { fg: conflict, bg: tint_merge };
     vcs.rebase.banner      = { fg: danger, bg: tint_conflict };
+    vcs.checkout.banner    = { fg: warning, bg: tint_warning };
 
     vcs.status.conflicted.fg     = danger;
     vcs.status.staged.fg         = info;

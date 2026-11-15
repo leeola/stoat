@@ -550,10 +550,10 @@ pub(crate) fn render_band_island(band: Rect, frame: FrameCtx<'_>, scene: &mut Ap
     }
 }
 
-/// The top side of an island, which reaches up into a tab bar band only from
-/// the pane tree's top row.
+/// The top side of an island, which reaches up into the band above the pane
+/// tree, the tab bar's or the checkout banner's, only from the tree's top row.
 fn island_top(frame: FrameCtx<'_>, at_root_top: bool) -> Edge {
-    match frame.chrome_bands && frame.tab_bar_shown && at_root_top {
+    match frame.chrome_bands && (frame.tab_bar_shown || frame.banner_shown) && at_root_top {
         true => Edge::Margin(2 * TAB_BAR_PAD),
         false => Edge::Inset(0),
     }

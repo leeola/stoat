@@ -1090,6 +1090,9 @@ pub mod scope {
     pub const VCS_MERGE_BANNER: &str = "vcs.merge.banner";
     /// The banner row that names a rebase paused on a conflict.
     pub const VCS_REBASE_BANNER: &str = "vcs.rebase.banner";
+    /// The banner row under the tab bar that names a blame checkout until its
+    /// return, in its foreground on its background.
+    pub(crate) const VCS_CHECKOUT_BANNER: &str = "vcs.checkout.banner";
     /// The section heads of the git status panel, one per section.
     pub const VCS_STATUS_CONFLICTED: &str = "vcs.status.conflicted";
     pub const VCS_STATUS_STAGED: &str = "vcs.status.staged";
@@ -1973,6 +1976,22 @@ mod tests {
         assert_eq!(
             [style(&ermine), style(&dark)],
             [Some((Some(rgb(0xc59af0)), Some(rgb(0x2a2236)))), None],
+        );
+    }
+
+    /// The ermine theme draws the checkout banner in the warning color on its
+    /// tint, and default_dark leaves the banner's scope unset.
+    #[test]
+    fn the_ermine_theme_colors_the_checkout_banner() {
+        let [ermine, dark] = shipped_themes();
+        let style = |theme: &Theme| {
+            theme
+                .try_get(scope::VCS_CHECKOUT_BANNER)
+                .map(|style: Style| (style.fg, style.bg))
+        };
+        assert_eq!(
+            [style(&ermine), style(&dark)],
+            [Some((Some(rgb(0xe8bd6a)), Some(rgb(0x2e2a1e)))), None],
         );
     }
 

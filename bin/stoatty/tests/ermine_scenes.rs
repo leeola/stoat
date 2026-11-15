@@ -78,6 +78,7 @@ const BLAME_SELECTED: [u8; 3] = [0x1b, 0x22, 0x30];
 const BLAME_AGE_1: [u8; 3] = [0x4f, 0x5a, 0x6e];
 const BLAME_AGE_2: [u8; 3] = [0x5d, 0x79, 0xa8];
 const BLAME_AGE_4: [u8; 3] = [0xa9, 0xc8, 0xff];
+const TINT_WARNING: [u8; 3] = [0x2e, 0x2a, 0x1e];
 
 /// The primary cursor's opaque block, the terminal palette's cursor color. The
 /// color comes from stoatty's own palette rather than a theme scope.
@@ -1905,6 +1906,32 @@ fn the_cursor_commit_tints_every_run_of_it() {
     }
 }
 
+/// A blame checkout draws its banner under the tab bar until the return, as
+/// the BlameCheckout board draws it.
+///
+/// The scene checks out the third commit from line 18, and the confirm stashes
+/// the uncommitted line. The banner's band takes rows 2 and 3, pixel rows 36
+/// to 71. Its box draws 2 px down and stands 4 px outside row 2, so it fills
+/// pixel rows 34 to 59, with the ground on pixel rows 33 and 62. The island
+/// under the banner reaches 4 px into row 3, so its base surface starts at
+/// pixel row 68. Pixel column 720 lies clear of the banner's texts.
+#[test]
+fn a_blame_checkout_draws_its_banner_under_the_tab_bar() {
+    let mut home = support::scratch_home();
+    let shot = checked_out_frame(home.path());
+
+    let found = [33, 47, 62, 70].map(|y| pixel(&shot, 720, y));
+    if found != [GROUND, TINT_WARNING, GROUND, BASE] {
+        let frame = keep_frame(&shot, &mut home, "checkout_banner");
+        panic!(
+            "pixel column 720 reads {:?} at pixel rows 33, 47, 62, and 70, not the ground, the \
+             banner's tint, the ground, and the island's base; the frame is {}",
+            found.map(hex),
+            frame.display(),
+        );
+    }
+}
+
 /// The frame the `fixture` scene with `file` open settles on after `keys` play.
 ///
 /// The session ends before this returns, so the child is gone before its
@@ -1924,6 +1951,30 @@ fn blamed_frame(home: &Path, keys: &str) -> Snapshot {
     play(&mut session, "<Space>ha");
     wait_for_blame(&mut session);
     play(&mut session, keys);
+    session.snapshot().expect("a snapshot")
+}
+
+/// The frame the blame scene settles on once the checkout of the third commit
+/// from line 18 lands, past the confirm that stashes the uncommitted line.
+///
+/// The confirm opens once a read of the tree lands, so the `<Enter>` waits for
+/// the fill of the confirm's title row. The session ends before this returns,
+/// as in [`settled_frame`].
+fn checked_out_frame(home: &Path) -> Snapshot {
+    let mut session = spawn_settled(home, "blame", "src/chrome.rs");
+    play(&mut session, "<Space>ha");
+    wait_for_blame(&mut session);
+
+    play(&mut session, "18Gc");
+    let title_row = cell_rect(95, 22, 10, 1);
+    wait_for_color(&mut session, title_row, OVERLAY, "the checkout confirm");
+    play(&mut session, "<Enter>");
+    wait_for_color(
+        &mut session,
+        (720, 47, 1, 1),
+        TINT_WARNING,
+        "the checkout banner",
+    );
     session.snapshot().expect("a snapshot")
 }
 
@@ -1978,6 +2029,20 @@ fn wait_for_blame(session: &mut HeadlessSession) {
     session
         .wait_settled(support::SETTLE, support::STARTUP_TIMEOUT)
         .expect("the frame with the blame settles");
+}
+
+/// Wait until most pixels of `rect` read `color`, where `what` shows, and then
+/// until the frame settles.
+fn wait_for_color(session: &mut HeadlessSession, rect: PixelRect, color: [u8; 3], what: &str) {
+    let deadline = Instant::now() + support::STARTUP_TIMEOUT;
+    while dominant_color(&session.snapshot().expect("a snapshot"), rect) != color {
+        assert!(Instant::now() < deadline, "{what} did not show");
+        play(session, "<Wait:100>");
+    }
+
+    session
+        .wait_settled(support::SETTLE, support::STARTUP_TIMEOUT)
+        .expect("the frame settles");
 }
 
 /// A session of `scene`, once its first frame settles.

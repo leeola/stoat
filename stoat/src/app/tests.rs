@@ -28,6 +28,7 @@ use crate::{
         walkthrough::Spotlight,
         STATUS_LANE,
     },
+    review_walk::ReturnRef,
     run::GridSelection,
     test_fixture::{
         fake_term_session, finder_layout, focused_editor_pane_area, mouse_event,
@@ -12230,6 +12231,59 @@ fn islands_inset_the_pane_layout_one_column_from_each_edge() {
         [Rect::new(1, 0, 78, 23), full, full, full],
         "ermine_night under islands, then an older stoatty, a plain terminal, and default_dark",
     );
+}
+
+/// A walk that a blame checkout opened takes the checkout banner's rows above
+/// the pane tree, one row in cells and two as a band. A walk of the commit list
+/// takes none, and the rows go back to the panes when the walk ends.
+#[test]
+fn a_blame_walk_takes_the_banner_rows_above_the_panes() {
+    let tops = |protocol: u32| {
+        let mut h = Stoat::test();
+        h.stoat.stoatty_protocol = protocol;
+        let blame = || ReviewWalk::blame_checkout("c1", ReturnRef::Branch("main".into()), None);
+        let commits = ReviewWalk {
+            origin: WalkOrigin::Commits,
+            ..blame()
+        };
+        [None, Some(blame()), Some(commits), None].map(|walk| {
+            h.stoat.active_workspace_mut().review_walk = walk;
+            (h.stoat.banner_rows(), h.stoat.layout_size().y)
+        })
+    };
+
+    assert_eq!(
+        [tops(0), tops(NUDGE_PROTOCOL)],
+        [
+            [(0, 0), (1, 1), (0, 0), (0, 0)],
+            [(0, 0), (2, 2), (0, 0), (0, 0)],
+        ],
+        "the banner rows and the pane tree's top with no walk, a blame walk, a commits walk, \
+         and no walk again, in cells and then under bands",
+    );
+}
+
+/// The single minimap band starts under the checkout banner's row, as the pane
+/// tree does, and still stops above the status row.
+#[test]
+fn the_single_band_starts_under_the_checkout_banner() {
+    let mut h = Stoat::test();
+    h.stoat.settings.editor_minimap = Some(MinimapMode::Single);
+    h.resize(200, 24);
+    let file = h.write_file("a.txt", "a\n");
+    h.open_file(&file);
+    h.stoat.active_workspace_mut().review_walk = Some(ReviewWalk::blame_checkout(
+        "c1",
+        ReturnRef::Branch("main".into()),
+        None,
+    ));
+    let _ = h.stoat.render();
+
+    let band = h
+        .stoat
+        .single_minimap_rect
+        .map(|band| (band.y, band.height));
+    assert_eq!((band, h.stoat.layout_size().y), (Some((1, 22)), 1));
 }
 
 #[test]

@@ -402,6 +402,9 @@ The typed UI scopes, by group (syntax scopes are open-ended):
   them unset.
 - `vcs.merge.banner`, `vcs.rebase.banner` -- the banner row of a merge in
   progress and of a rebase paused on a conflict.
+- `vcs.checkout.banner` -- the banner row under the tab bar that names a blame
+  checkout until its return. A theme that leaves it unset draws the banner in
+  the `ui.badge.active` foreground on the window ground.
 - `vcs.status.conflicted`, `vcs.status.staged`, `vcs.status.unstaged`,
   `vcs.status.untracked` -- the section heads of the git status panel.
   `vcs.status.kind.added`, `.modified`, `.deleted`, `.renamed`, `.untracked`,

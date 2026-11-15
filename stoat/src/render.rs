@@ -1,4 +1,5 @@
 pub(crate) mod badges;
+pub(crate) mod banner;
 pub(crate) mod blame;
 pub(crate) mod blame_card;
 pub(crate) mod checkout_confirm;
@@ -340,6 +341,9 @@ pub(crate) struct FrameCtx<'a> {
     /// Whether the tab bar takes the frame's top rows. The bar then leads with
     /// the workspace name, so a status row leaves the name out.
     pub(crate) tab_bar_shown: bool,
+    /// Whether the checkout banner takes the rows under the tab bar, from
+    /// [`Stoat::banner_shown`].
+    pub(crate) banner_shown: bool,
     /// Whether the chrome rows draw as bands, from [`Stoat::chrome_bands_on`].
     ///
     /// A band's island then reaches into the spare row the band takes.
@@ -1293,6 +1297,7 @@ pub(crate) fn frame(
     emit::ensure_minimap_content_ids(stoat);
 
     let tab_bar_rows = stoat.tab_bar_rows();
+    let banner_rows = stoat.banner_rows();
     let status_rows = stoat.status_rows();
     let chrome_bands = stoat.chrome_bands_on();
     let islands = stoat.islands_on();
@@ -1302,14 +1307,15 @@ pub(crate) fn frame(
     // Single mode reserves a strip band at the window's right edge and shrinks
     // the pane layout by the strip width, so the panes never overlap the strip.
     // The band stops above the status rows so a status bar on the last row runs
-    // the full window width, and starts under the tab bar's rows when the bar
-    // holds the top, since the band derives its own rect instead of going through
-    // `layout_size`. The band is stamped on Stoat for the mouse handler, then
-    // read back for this paint. It sits inside the island margin, and
-    // `layout_size` leaves a gap column of the margin's width left of it, so
-    // under islands the window reads margin, panes, gap, band, margin. While
-    // no split pane shows an editor or a changes view, the band tracks no pane
-    // and is not reserved, so `layout_size` gives its columns to the panes.
+    // the full window width, and starts under the rows of the tab bar and the
+    // checkout banner where they hold the top, since the band derives its own
+    // rect instead of going through `layout_size`. The band is stamped on
+    // Stoat for the mouse handler, then read back for this paint. It sits
+    // inside the island margin, and `layout_size` leaves a gap column of the
+    // margin's width left of it, so under islands the window reads margin,
+    // panes, gap, band, margin. While no split pane shows an editor or a
+    // changes view, the band tracks no pane and is not reserved, so
+    // `layout_size` gives its columns to the panes.
     stoat.active_workspace_mut().refresh_band_pane();
     let tracked = stoat.active_workspace().band_pane.is_some();
     stoat.single_minimap_rect = (minimap_mode == MinimapMode::Single
@@ -1317,9 +1323,11 @@ pub(crate) fn frame(
         && tracked)
         .then(|| Rect {
             x: full.x + full.width - editor::MINIMAP_STRIP_COLS - margin,
-            y: full.y + tab_bar_rows,
+            y: full.y + tab_bar_rows + banner_rows,
             width: editor::MINIMAP_STRIP_COLS,
-            height: full.height.saturating_sub(status_rows + tab_bar_rows),
+            height: full
+                .height
+                .saturating_sub(status_rows + tab_bar_rows + banner_rows),
         });
     let single_minimap_rect = stoat.single_minimap_rect;
     let modal_overlay = modal_overlay_open(stoat);
@@ -1472,6 +1480,7 @@ pub(crate) fn frame(
     let frame = FrameCtx {
         workspace_name,
         tab_bar_shown: tab_bar_rows > 0,
+        banner_shown: banner_rows > 0,
         chrome_bands,
         workspace_root: &ws.git_root,
         mode,
@@ -1596,6 +1605,28 @@ pub(crate) fn frame(
         }
     } else {
         stoat.tab_bar_spans.clear();
+    }
+
+    // The banner paints after the stale holds clear too, since a pane it pushes
+    // down still holds a rect over its rows on the frame it first shows.
+    if banner_rows > 0
+        && let Some(walk) = &ws.review_walk
+    {
+        let row = Rect {
+            x: full.x + margin,
+            y: full.y + tab_bar_rows,
+            width: full.width.saturating_sub(2 * margin),
+            height: 1,
+        };
+        banner::render_checkout_banner(
+            walk,
+            row,
+            chrome_bands,
+            tab_bar_rows > 0,
+            frame.theme,
+            buf,
+            scene,
+        );
     }
 
     for (id, pane) in ws.panes.split_panes() {
@@ -2061,7 +2092,7 @@ pub(crate) fn frame(
                     panel,
                     &stoat.theme,
                     full,
-                    tab_bar_rows,
+                    tab_bar_rows + banner_rows,
                     status_rows,
                     buf,
                     &mut *scene,

@@ -53,6 +53,7 @@ use crate::{
         undercurl::{self, UndercurlBatch},
         BlankedBuffer, Hold, PRIMARY_MODES,
     },
+    review_walk::{ReviewWalk, WalkOrigin},
     run::{CommandMark, PtyNotification, RunId},
     selection::{merge_overlapping_spans, SpanLanding},
     session_log::SessionLog,
@@ -721,6 +722,14 @@ pub(crate) const STATUS_ROW_PAD: u8 = 3;
 /// states its height as one cell row plus this pad on each side, as a status
 /// row's band does with [`STATUS_ROW_PAD`].
 pub(crate) const TAB_BAR_PAD: u8 = 7;
+
+/// The logical px the checkout banner's box stands outside its cell row at
+/// the top and the bottom.
+///
+/// The boards draw the banner 26 px tall over an 18 px cell row. The box
+/// states its height as the cell row plus this pad on each side, so it keeps
+/// its height at any font size.
+pub(crate) const BANNER_PAD: u8 = 4;
 
 /// Which way a modal's list/preview separator runs, and so which pointer
 /// coordinate a drag along it reads.
@@ -4070,7 +4079,7 @@ impl Stoat {
     /// rows short of the bottom too, the rows that hold the bottom panes'
     /// status rows. The last is [`Self::status_bar_rect`], and a band's spare
     /// row sits above it. It starts under the [`Self::tab_bar_rows`] rows of
-    /// the tab bar.
+    /// the tab bar and the [`Self::banner_rows`] rows of the checkout banner.
     ///
     /// Centered modals do not lay out here. They take the full [`Self::size`]
     /// and the strip yields to them, so their paint, pools, and mouse hit-tests
@@ -4096,10 +4105,10 @@ impl Stoat {
             },
             None => size,
         };
-        let tab_bar_rows = self.tab_bar_rows();
+        let top_rows = self.tab_bar_rows() + self.banner_rows();
         Rect {
-            y: size.y + tab_bar_rows,
-            height: size.height.saturating_sub(tab_bar_rows),
+            y: size.y + top_rows,
+            height: size.height.saturating_sub(top_rows),
             ..size
         }
     }
@@ -4163,6 +4172,32 @@ impl Stoat {
     /// without, and its cells stay on the first of them.
     pub(crate) fn tab_bar_rows(&self) -> u16 {
         match (self.tab_bar_visible(), self.chrome_bands_on()) {
+            (false, _) => 0,
+            (true, true) => 2,
+            (true, false) => 1,
+        }
+    }
+
+    /// Whether the checkout banner shows under the tab bar this frame.
+    ///
+    /// The banner shows while the active workspace's review walk is one that a
+    /// blame checkout opened. Every other walk shows no banner.
+    pub(crate) fn banner_shown(&self) -> bool {
+        matches!(
+            self.active_workspace().review_walk,
+            Some(ReviewWalk {
+                origin: WalkOrigin::Blame { .. },
+                ..
+            })
+        )
+    }
+
+    /// The grid rows the checkout banner takes under the tab bar this frame.
+    ///
+    /// A hidden banner takes none. A shown banner takes two as a band and one
+    /// without, as the tab bar does, and its cells stay on the first of them.
+    pub(crate) fn banner_rows(&self) -> u16 {
+        match (self.banner_shown(), self.chrome_bands_on()) {
             (false, _) => 0,
             (true, true) => 2,
             (true, false) => 1,

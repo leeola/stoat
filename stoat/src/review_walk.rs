@@ -78,6 +78,36 @@ pub(crate) struct ReviewWalk {
 }
 
 impl ReviewWalk {
+    /// A blame checkout's walk at the one commit `short_sha`, back to
+    /// `return_ref`, for a test that reads a walk without running a checkout.
+    #[cfg(test)]
+    pub(crate) fn blame_checkout(
+        short_sha: &str,
+        return_ref: ReturnRef,
+        stash: Option<WalkStash>,
+    ) -> ReviewWalk {
+        ReviewWalk {
+            workdir: PathBuf::from("/repo"),
+            commits: vec![CommitInfo {
+                sha: short_sha.to_owned(),
+                short_sha: short_sha.to_owned(),
+                summary: String::new(),
+                author_name: String::new(),
+                author_email: String::new(),
+                time: 0,
+                parents: Vec::new(),
+            }],
+            cursor: 0,
+            return_ref,
+            span: WalkSpan::Commits,
+            origin: WalkOrigin::Blame {
+                path: PathBuf::from("src/lib.rs"),
+                row: 0,
+            },
+            stash,
+        }
+    }
+
     /// The commit under the cursor.
     ///
     /// A walk is never built empty, so this has something to return for the

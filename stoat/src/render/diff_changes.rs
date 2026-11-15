@@ -1576,6 +1576,7 @@ mod tests {
         FrameCtx {
             workspace_name: "",
             tab_bar_shown: false,
+            banner_shown: false,
             chrome_bands: false,
             workspace_root: Path::new(""),
             mode: "normal",
