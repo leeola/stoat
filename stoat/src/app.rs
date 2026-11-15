@@ -2134,6 +2134,13 @@ pub struct Stoat {
     /// it and then falls through, so the click still lands where it was aimed.
     pub(crate) pending_hover: Option<crate::render::hover::HoverPopup>,
 
+    /// The commit card of the cursor line in a blamed pane, opened by `K`.
+    ///
+    /// [`action_handlers::blame::sync_card`] closes it after an event when the
+    /// cursor leaves its line, the pane stops blaming, the focus moves, or a
+    /// modal opens. The card and the hover popup never show together.
+    pub(crate) blame_card: Option<crate::blame::BlameCard>,
+
     /// In-flight `textDocument/signatureHelp` request, armed by
     /// [`crate::lsp::signature_help::signature_help_trigger`] on a trigger
     /// character and polled by
@@ -2946,6 +2953,7 @@ impl Stoat {
             pending_lsp_jump: LabeledPending::default(),
             pending_hover_request: Pending::default(),
             pending_hover: None,
+            blame_card: None,
             pending_signature_help_request: Pending::default(),
             pending_signature_help_timer: None,
             signature_help_tx,
@@ -5864,6 +5872,7 @@ impl Stoat {
         crate::lsp::pull_diagnostics::pull_diagnostics_trigger(self);
         crate::lsp::semantic_tokens::semantic_tokens_trigger(self);
         crate::lsp::folding::folding_ranges_trigger(self);
+        action_handlers::blame::sync_card(self);
         self.log_focus_change(focus_before);
 
         if user_input {
@@ -9857,6 +9866,7 @@ impl Stoat {
             } = self;
             workspaces[*active_workspace].pump_blame(executor, git_host, redraw_notify)
         };
+        let blame_card = action_handlers::blame::pump_card(self);
 
         let changed_file_jump = action_handlers::movement::pump_changed_file_jump(self);
         let diff_wants = action_handlers::review::pump_diff_wants(self);
@@ -9887,6 +9897,7 @@ impl Stoat {
             || git_jobs
             || commit_wait
             || blame
+            || blame_card
             || code_search
             || changed_file_jump
             || diff_wants

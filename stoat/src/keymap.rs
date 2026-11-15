@@ -1025,6 +1025,41 @@ impl Keymap {
             .collect()
     }
 
+    /// Returns `(key_label, actions, label)` for the active bindings that need
+    /// the truthy field `field`, with each binding's short name if the config
+    /// gives one.
+    ///
+    /// A binding qualifies when one of its predicates names `field` as a bare
+    /// atom joined with `&&`, such as `blame` in `mode == normal && blame`. The
+    /// Blame Card lists these as the keys that act on its line, so a key that a
+    /// config binds there shows on the card too.
+    ///
+    /// A wheel binding is left out, because the card affords a key press, which
+    /// a notch is not.
+    pub(crate) fn flag_bindings(
+        &self,
+        state: &dyn KeymapState,
+        field: &str,
+    ) -> Vec<(String, &[ResolvedAction], Option<&str>)> {
+        self.effective_bindings(state)
+            .into_iter()
+            .filter(|binding| {
+                binding
+                    .predicates
+                    .iter()
+                    .any(|p| predicate_has_flag(p, field))
+            })
+            .filter(|binding| binding.key.wheel.is_none())
+            .map(|binding| {
+                (
+                    binding.key.display_label(),
+                    binding.actions.as_ref(),
+                    binding.label.as_deref(),
+                )
+            })
+            .collect()
+    }
+
     /// Returns `(key, actions, label)` for the chord entries and the context
     /// keys a press reaches in `state`, with each binding's short name if the
     /// config gives one.
@@ -1111,6 +1146,21 @@ fn predicate_eq_matches(pred: &Predicate, field: &str, value: &str) -> bool {
         },
         // A negated scope equality is not a scope claim, so `Not` is not walked.
         Predicate::Not(_) => false,
+        _ => false,
+    }
+}
+
+/// Whether `pred` needs the truthy field `field`, as a bare atom it joins
+/// with `&&`.
+///
+/// `Or` and `Not` are not walked, since a guard of `field || x` or `!field`
+/// holds without the field.
+fn predicate_has_flag(pred: &Predicate, field: &str) -> bool {
+    match pred {
+        Predicate::Bool(f) => f.node == field,
+        Predicate::And(l, r) => {
+            predicate_has_flag(&l.node, field) || predicate_has_flag(&r.node, field)
+        },
         _ => false,
     }
 }
@@ -4757,6 +4807,53 @@ mod tests {
                 ("j".to_string(), "HelpNext".to_string()),
             ],
             "the generic `modal` and bare `mode` bindings must be excluded"
+        );
+    }
+
+    /// The flag bindings are the active bindings whose guard needs the flag
+    /// through `&&`, beside a negated field, and with the label each gives.
+    /// A binding under an alternative to the flag, and a key that a flagged
+    /// binding outranks, are left out.
+    #[test]
+    fn flag_bindings_keeps_the_bindings_that_need_the_flag() {
+        let config = parse_config(
+            r#"on key {
+                mode == "normal" {
+                    K -> ExtendUp();
+                    q -> Quit();
+                }
+                !modal && mode == "normal" && blame {
+                    K -> BlameCard();
+                    blame_card {
+                        Escape -> BlameCardClose() "close";
+                    }
+                }
+                blame || modal {
+                    x -> Other();
+                }
+            }"#,
+        );
+        let keymap = Keymap::compile(&config);
+        let state = TestState::new()
+            .set("mode", StateValue::String("normal".into()))
+            .set("blame", StateValue::Bool(true))
+            .set("blame_card", StateValue::Bool(true));
+
+        let flagged: Vec<_> = keymap
+            .flag_bindings(&state, "blame")
+            .iter()
+            .map(|(key, actions, label)| (key.clone(), actions[0].name.clone(), *label))
+            .collect();
+        assert_eq!(
+            flagged,
+            vec![
+                ("K".to_string(), "BlameCard".to_string(), None),
+                (
+                    "Esc".to_string(),
+                    "BlameCardClose".to_string(),
+                    Some("close")
+                ),
+            ],
         );
     }
 

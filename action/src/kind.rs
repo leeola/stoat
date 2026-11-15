@@ -78,6 +78,8 @@ action_kinds! {
     DiffFiles,
     ChangeWalkWrap,
     ToggleBlame,
+    BlameCard,
+    BlameCardClose,
     DiffUnderline,
     DiffBold,
     DiffSyntax,

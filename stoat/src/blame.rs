@@ -1,7 +1,8 @@
 use crate::{
     buffer::{BufferId, TextBufferSnapshot},
     buffer_registry::BufferRegistry,
-    host::{BlameCommit, FileBlame, GitHost},
+    editor_state::EditorId,
+    host::{BlameCommit, FileBlame, GitHost, GitRepo},
     wake,
     workspace::diff::{self, DIFF_SETTLE},
 };
@@ -24,6 +25,9 @@ use tokio::sync::Notify;
 /// The age past which a blame date shows its year in place of its month and
 /// day.
 const YEAR_SECONDS: i64 = 365 * 86_400;
+
+/// The most commits whose Blame Card details [`BlameState`] keeps.
+const DETAILS_CAPACITY: usize = 64;
 
 /// The commit of each line of every blamed buffer in a workspace.
 ///
@@ -49,6 +53,9 @@ pub(crate) struct BlameState {
     /// The count of blames that landed. A landed blame changes the runs of a
     /// blamed pane while its buffer stays the same.
     pub(crate) epoch: u64,
+    /// The Blame Card details of each commit read so far, by full sha. A
+    /// commit's message and change never move, so no git write stales them.
+    details: HashMap<String, Arc<CommitDetails>>,
 }
 
 /// The commit of one line of a blamed buffer.
@@ -89,6 +96,36 @@ pub(crate) struct BlameRows {
     /// The rows in order, with no gap between two runs. Two adjacent runs name
     /// different commits.
     pub(crate) runs: Vec<(Range<u32>, Option<u32>)>,
+}
+
+/// The body of a commit's message and the size of its change, which the Blame
+/// Card reads beyond the commit's blame entry.
+pub(crate) struct CommitDetails {
+    /// The first paragraph of the message after the subject, its lines joined
+    /// with spaces, or `None` for a message of one paragraph.
+    pub(crate) body: Option<String>,
+    pub(crate) files: usize,
+    pub(crate) added: u32,
+    pub(crate) removed: u32,
+}
+
+/// The card that names the commit of the cursor's line in a blamed pane.
+///
+/// The card holds its commit, so a blame that lands under it does not change
+/// what it shows. The card closes when the cursor leaves its row.
+pub(crate) struct BlameCard {
+    pub(crate) editor: EditorId,
+    /// The buffer row the card opened on.
+    pub(crate) row: u32,
+    pub(crate) commit: BlameCommit,
+    /// The body and the change size, `None` until they load.
+    pub(crate) details: Option<Arc<CommitDetails>>,
+    /// The key and the label of each blame binding the card lists, in keymap
+    /// order.
+    pub(crate) hints: Vec<(String, String)>,
+    /// The read of the details on the blocking pool. It answers `None` when it
+    /// finds no repository.
+    load: Option<Task<Option<CommitDetails>>>,
 }
 
 /// The blame of one buffer.
@@ -266,6 +303,24 @@ impl BlameState {
         self.files.get(&id)?.base.as_ref()
     }
 
+    /// The Blame Card details of commit `sha`, or `None` before a card read
+    /// them.
+    pub(crate) fn details(&self, sha: &str) -> Option<&Arc<CommitDetails>> {
+        self.details.get(sha)
+    }
+
+    /// Keep the Blame Card details of commit `sha`.
+    ///
+    /// The cache holds at most [`DETAILS_CAPACITY`] commits. A full cache
+    /// empties before it takes the next, so a long walk through the history
+    /// costs no more than that many entries.
+    pub(crate) fn file_details(&mut self, sha: String, details: Arc<CommitDetails>) {
+        if self.details.len() >= DETAILS_CAPACITY {
+            self.details.clear();
+        }
+        self.details.insert(sha, details);
+    }
+
     /// Whether buffer `id` at `version` is owed a blame run on this pump.
     fn owes_run(
         &mut self,
@@ -367,6 +422,44 @@ impl BlameRows {
     }
 }
 
+impl BlameCard {
+    /// A card that names `commit` on row `row` of the buffer that `editor`
+    /// shows, with its `details` when a cache holds them and the `load` that
+    /// reads them otherwise.
+    pub(crate) fn new(
+        editor: EditorId,
+        row: u32,
+        commit: BlameCommit,
+        details: Option<Arc<CommitDetails>>,
+        load: Option<Task<Option<CommitDetails>>>,
+    ) -> Self {
+        Self {
+            editor,
+            row,
+            commit,
+            details,
+            hints: Vec::new(),
+            load,
+        }
+    }
+
+    /// The details once their load lands, or `None` while it runs.
+    ///
+    /// A card with no load, or whose load landed, answers `None`, and so does
+    /// a load that found no repository. A load still pending wakes `redraw`
+    /// when it lands.
+    pub(crate) fn poll_details(&mut self, redraw: &Arc<Notify>) -> Option<CommitDetails> {
+        let task = self.load.as_mut()?;
+        let waker = wake::notify_waker(redraw);
+        let landed = match Pin::new(task).poll(&mut Context::from_waker(&waker)) {
+            Poll::Ready(details) => details,
+            Poll::Pending => return None,
+        };
+        self.load = None;
+        landed
+    }
+}
+
 /// For each line of `new`, the line of `base` that it keeps, or `None` for a
 /// line in a region that the line diff from `base` changed.
 ///
@@ -390,6 +483,37 @@ pub(crate) fn line_origins(base: &str, new: &str) -> Vec<Option<u32>> {
     origins
 }
 
+/// The details of commit `sha` in `repo`, as the Blame Card shows them.
+///
+/// Reads the commit's message and its change against its first parent, so a
+/// caller runs it on the blocking pool. An unknown sha reads no body and no
+/// change.
+pub(crate) fn commit_details(repo: &dyn GitRepo, sha: &str) -> CommitDetails {
+    let changes = repo.commit_file_changes(sha);
+    CommitDetails {
+        body: repo.commit_message(sha).as_deref().and_then(message_body),
+        files: changes.len(),
+        added: changes.iter().map(|change| change.additions).sum(),
+        removed: changes.iter().map(|change| change.deletions).sum(),
+    }
+}
+
+/// The first paragraph of commit message `message` after its subject, its
+/// lines trimmed and joined with spaces, or `None` for a one-paragraph
+/// message.
+fn message_body(message: &str) -> Option<String> {
+    let mut lines = message.lines().map(str::trim);
+    lines
+        .by_ref()
+        .take_while(|line| !line.is_empty())
+        .for_each(drop);
+    let body: Vec<&str> = lines
+        .skip_while(|line| line.is_empty())
+        .take_while(|line| !line.is_empty())
+        .collect();
+    (!body.is_empty()).then(|| body.join(" "))
+}
+
 /// The first word of author name `name`, which names the author where the
 /// room is short.
 ///
@@ -405,12 +529,7 @@ pub(crate) fn author_word(name: &str) -> &str {
 /// one shows its four-digit year. A time or an offset that no date holds shows
 /// `--/--`.
 pub(crate) fn short_date(time: i64, utc_offset_minutes: i32, now_epoch: i64) -> String {
-    let date = utc_offset_minutes
-        .checked_mul(60)
-        .and_then(|seconds| UtcOffset::from_whole_seconds(seconds).ok())
-        .zip(OffsetDateTime::from_unix_timestamp(time).ok())
-        .and_then(|(offset, utc)| utc.checked_to_offset(offset));
-    let Some(date) = date else {
+    let Some(date) = zoned(time, utc_offset_minutes) else {
         return "--/--".to_owned();
     };
 
@@ -419,6 +538,35 @@ pub(crate) fn short_date(time: i64, utc_offset_minutes: i32, now_epoch: i64) -> 
     } else {
         date.year().to_string()
     }
+}
+
+/// The date and the time of commit time `time` in the zone
+/// `utc_offset_minutes` east of UTC, as the Blame Card's meta line reads them.
+///
+/// A commit of the 365 days before `now_epoch` shows `MM/DD HH:MM`, and an
+/// older one leads with its year, as `YYYY/MM/DD HH:MM`. A time or an offset
+/// that no date holds shows `--/-- --:--`.
+pub(crate) fn date_time(time: i64, utc_offset_minutes: i32, now_epoch: i64) -> String {
+    let Some(date) = zoned(time, utc_offset_minutes) else {
+        return "--/-- --:--".to_owned();
+    };
+
+    let (month, day) = (u8::from(date.month()), date.day());
+    let (hour, minute) = (date.hour(), date.minute());
+    if now_epoch.saturating_sub(time) <= YEAR_SECONDS {
+        format!("{month:02}/{day:02} {hour:02}:{minute:02}")
+    } else {
+        format!("{}/{month:02}/{day:02} {hour:02}:{minute:02}", date.year())
+    }
+}
+
+/// Commit time `time` in the zone `utc_offset_minutes` east of UTC, or `None`
+/// when no date holds the time or no zone the offset.
+fn zoned(time: i64, utc_offset_minutes: i32) -> Option<OffsetDateTime> {
+    let offset = UtcOffset::from_whole_seconds(utc_offset_minutes.checked_mul(60)?).ok()?;
+    OffsetDateTime::from_unix_timestamp(time)
+        .ok()?
+        .checked_to_offset(offset)
 }
 
 /// The age bucket of each of `commits`, by its index, from 0 for the oldest to
@@ -580,14 +728,17 @@ fn boundary_line(text: &str, offset: usize) -> u32 {
 
 #[cfg(test)]
 mod tests {
-    use super::{age_buckets, line_origins, short_date};
+    use super::{
+        age_buckets, date_time, line_origins, message_body, short_date, BlameState, CommitDetails,
+        DETAILS_CAPACITY,
+    };
     use crate::{
         app::Stoat,
         host::{BlameCommit, CommitInfo},
         test_harness::{CommitSpec, TestHarness},
         workspace::diff::DIFF_SETTLE,
     };
-    use std::{ops::Range, path::Path, time::Duration};
+    use std::{ops::Range, path::Path, sync::Arc, time::Duration};
 
     /// 2026-11-11T14:02:00Z, in unix epoch seconds.
     const NOV_11: i64 = 1_794_405_720;
@@ -633,6 +784,77 @@ mod tests {
             ],
             ["11/11", "11/10", "11/11", "2025", "--/--"],
             "three days old, eight hours west of UTC, 365 days old, 400 days old, past every date",
+        );
+    }
+
+    /// A date and time read the minute in the commit's own zone, and lead with
+    /// the year after a year.
+    #[test]
+    fn date_time_reads_the_minute_in_the_commit_zone_and_the_year_past_a_year() {
+        assert_eq!(
+            [
+                date_time(NOV_11, 0, NOV_11 + 3 * DAY),
+                date_time(NOV_11 - 9 * 3_600, -480, NOV_11),
+                date_time(NOV_11 - 400 * DAY, 0, NOV_11),
+                date_time(i64::MAX, 0, NOV_11),
+            ],
+            [
+                "11/11 14:02",
+                "11/10 21:02",
+                "2025/10/07 14:02",
+                "--/-- --:--"
+            ],
+            "three days old, eight hours west of UTC, 400 days old, past every date",
+        );
+    }
+
+    /// A full details cache empties before it takes the next commit, so that
+    /// commit stands alone in it.
+    #[test]
+    fn a_full_details_cache_empties_before_it_takes_the_next() {
+        let mut state = BlameState::default();
+        let details = || {
+            Arc::new(CommitDetails {
+                body: None,
+                files: 0,
+                added: 0,
+                removed: 0,
+            })
+        };
+        for index in 0..DETAILS_CAPACITY {
+            state.file_details(format!("sha{index}"), details());
+        }
+        let full = state
+            .details(&format!("sha{}", DETAILS_CAPACITY - 1))
+            .is_some();
+        state.file_details("next".to_owned(), details());
+        assert_eq!(
+            (
+                full,
+                state
+                    .details(&format!("sha{}", DETAILS_CAPACITY - 1))
+                    .is_some(),
+                state.details("next").is_some(),
+            ),
+            (true, false, true),
+        );
+    }
+
+    /// A message body is the first paragraph after the subject with its lines
+    /// joined, and a message of one paragraph has none.
+    #[test]
+    fn message_body_joins_the_first_paragraph_after_the_subject() {
+        assert_eq!(
+            [
+                message_body("subject"),
+                message_body("subject\n\nfirst line\nsecond line\n\nlater paragraph\n"),
+                message_body("subject\nwrapped subject\n\n\n  indented body  \n"),
+            ],
+            [
+                None,
+                Some("first line second line".to_owned()),
+                Some("indented body".to_owned())
+            ],
         );
     }
 

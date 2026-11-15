@@ -262,6 +262,7 @@ pub(crate) fn pump_lsp_hover(stoat: &mut Stoat) -> bool {
             };
             let mut popup = HoverPopup::new(lines, response.anchor_offset, response.editor_id);
             popup.footer = goto_keys(stoat);
+            stoat.blame_card = None;
             stoat.pending_hover = Some(popup);
             true
         },

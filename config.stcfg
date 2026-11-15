@@ -667,6 +667,7 @@ on init {
 #   comment        the cursor row opens with a line comment token of the
 #                  buffer's language
 #   blame          the focused pane shows the Blame Column
+#   blame_card     the Blame Card shows, which Escape closes
 #   pair           exactly two split panes show two different files
 #   git            the workspace root is inside a git repository
 #   walkthrough    a walkthrough tour is open
@@ -1481,6 +1482,17 @@ on key {
         e -> SetRebaseOpEdit();
         Enter -> ExecuteRebase();
         : -> OpenCommandPalette();
+    }
+    # The blame keys act on the cursor line whenever the pane shows the Blame
+    # Column, not only while the Blame Card shows, because a blame key can act
+    # on an uncommitted line, which has no card. The guard outranks the plain
+    # normal keys by one atom, so K here shadows ExtendUp. The card lists the
+    # labeled bindings of this block as its key hints.
+    !modal && mode == normal && blame {
+        K -> BlameCard();
+        blame_card {
+            Escape -> BlameCardClose() "close";
+        }
     }
     view == reword && mode == normal {
         Escape -> RewordAbort();

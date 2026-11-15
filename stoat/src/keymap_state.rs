@@ -50,6 +50,7 @@ pub(crate) const BUILTIN_FIELDS: &[&str] = &[
     "pair_diff",
     "comment",
     "blame",
+    "blame_card",
 ];
 
 /// The keymap predicate values that the active [`Workspace`] and the app
@@ -106,6 +107,9 @@ pub(crate) struct Flags {
     /// diagnostics picker lists. An app value that [`Self::with_app`] copies
     /// in.
     pub(crate) any_diags: bool,
+    /// Whether the Blame Card shows, which `Escape` closes. An app value that
+    /// [`Self::with_app`] copies in.
+    pub(crate) blame_card: bool,
 }
 
 impl Flags {
@@ -130,6 +134,7 @@ impl Flags {
             prev_buffer: prev_buffer(ws),
             last_picker: false,
             any_diags: false,
+            blame_card: false,
         }
     }
 
@@ -139,6 +144,7 @@ impl Flags {
         self.workspaces = app.workspaces;
         self.last_picker = app.last_picker;
         self.any_diags = app.any_diags;
+        self.blame_card = app.blame_card;
         self
     }
 }
@@ -154,6 +160,7 @@ pub(crate) struct AppFlags {
     pub(crate) workspaces: u32,
     pub(crate) last_picker: bool,
     pub(crate) any_diags: bool,
+    pub(crate) blame_card: bool,
 }
 
 impl AppFlags {
@@ -163,6 +170,7 @@ impl AppFlags {
             workspaces: u32::try_from(stoat.workspaces.len()).unwrap_or(u32::MAX),
             last_picker: stoat.last_picker_action.is_some(),
             any_diags: stoat.diagnostics.iter().next().is_some(),
+            blame_card: stoat.blame_card.is_some(),
         }
     }
 }
@@ -202,6 +210,8 @@ pub(crate) struct StoatKeymapState<'a> {
     last_picker: StateValue,
     /// Whether any path holds a published diagnostic.
     any_diags: StateValue,
+    /// Whether the Blame Card shows.
+    blame_card: StateValue,
     /// The focused pane's kind, absent only when there is no focus. `None` reads
     /// as an unset field, so a `pane == x` predicate is false without one.
     pane: Option<StateValue>,
@@ -282,6 +292,7 @@ impl<'a> StoatKeymapState<'a> {
             prev_buffer: StateValue::Bool(flags.prev_buffer),
             last_picker: StateValue::Bool(flags.last_picker),
             any_diags: StateValue::Bool(flags.any_diags),
+            blame_card: StateValue::Bool(flags.blame_card),
             pane: None,
             view: None,
             modal: None,
@@ -423,6 +434,7 @@ impl KeymapState for StoatKeymapState<'_> {
             "prev_buffer" => Some(&self.prev_buffer),
             "last_picker" => Some(&self.last_picker),
             "any_diags" => Some(&self.any_diags),
+            "blame_card" => Some(&self.blame_card),
             "pane" => self.pane.as_ref(),
             "view" => self.view.as_ref(),
             "modal" => self.modal.as_ref(),

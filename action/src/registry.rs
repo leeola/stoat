@@ -2,7 +2,7 @@ use crate::{
     defs::{
         agent::SpawnClaude,
         app::{OpenLogs, PinMode, Quit, QuitAll, QuitAllCancel, QuitAllConfirm, ShowVersion},
-        blame::ToggleBlame,
+        blame::{BlameCard, BlameCardClose, ToggleBlame},
         commits::{
             CloseCommits, CommitsDetailDown, CommitsDetailUp, CommitsFirst, CommitsLast,
             CommitsNext, CommitsOpenReview, CommitsPageDown, CommitsPageUp, CommitsPrev,
@@ -353,6 +353,8 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
     });
     add(ChangeWalkWrap::DEF, |_| Ok(Box::new(ChangeWalkWrap)));
     add(ToggleBlame::DEF, |_| Ok(Box::new(ToggleBlame)));
+    add(BlameCard::DEF, |_| Ok(Box::new(BlameCard)));
+    add(BlameCardClose::DEF, |_| Ok(Box::new(BlameCardClose)));
     add(DiffUnderline::DEF, |_| Ok(Box::new(DiffUnderline)));
     add(DiffBold::DEF, |_| Ok(Box::new(DiffBold)));
     add(DiffSyntax::DEF, |_| Ok(Box::new(DiffSyntax)));
@@ -1600,6 +1602,8 @@ mod tests {
         "FollowReload",
         "ChangeWalkWrap",
         "ToggleBlame",
+        "BlameCard",
+        "BlameCardClose",
         "DiffUnderline",
         "DiffBold",
         "DiffSyntax",
@@ -2188,7 +2192,8 @@ mod tests {
         // + 7 the git status panel's row and banner keys.
         // + 1 GitStatusSkip.
         // + 1 ToggleBlame.
-        assert_eq!(all().count(), 496);
+        // + 2 BlameCard/BlameCardClose.
+        assert_eq!(all().count(), 498);
     }
 
     #[test]

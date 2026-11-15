@@ -1,5 +1,6 @@
 pub(crate) mod badges;
 pub(crate) mod blame;
+pub(crate) mod blame_card;
 pub(crate) mod chrome;
 pub(crate) mod code_action;
 pub(crate) mod code_search;
@@ -1877,6 +1878,7 @@ pub(crate) fn frame(
     // the connector to it is emitted.
     overlaid |= walkthrough::render_slide(stoat, buf, &mut *scene);
     overlaid |= hover::render_hover(stoat, buf, &mut *scene);
+    overlaid |= blame_card::render_blame_card(stoat, buf, &mut *scene);
     overlaid |= signature_help::render_signature_help(stoat, buf, &mut *scene);
     overlaid |= completion::render_completion(stoat, buf, &mut *scene);
     overlaid |= code_action::render_code_action(stoat, buf, &mut *scene);

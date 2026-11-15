@@ -579,9 +579,10 @@ pub(crate) fn render_editor_with_overlay(
         // The mouse hover wins over the cursor when both land in a span. The
         // popover needs a scene plus the severity and background colors resolved
         // to RGB, and its presence suppresses the same diagnostic's redundant
-        // EOL message.
+        // EOL message. A blamed pane's Blame Card claims the row under the
+        // cursor's line, so there the cursor's diagnostic opens no popover.
         let mut suppress = None;
-        if let Some(found) = hover_diag.or(cursor_diag) {
+        if let Some(found) = hover_diag.or(cursor_diag.filter(|_| blame.is_none())) {
             let bg = style_rgb(fallback_style.bg.or_else(|| {
                 theme
                     .try_get(crate::theme::scope::UI_BACKGROUND)
@@ -7073,8 +7074,11 @@ mod tests {
         );
     }
 
-    /// With line numbers off, a blamed pane's severity column and the popover
-    /// of the diagnostic under the cursor move 18 cells right, past the column.
+    /// With line numbers off, a blamed pane's severity column moves 18 cells
+    /// right, past the column. There the diagnostic under the cursor opens no
+    /// popover, since the Blame Card claims the row under the line, and the
+    /// popover of the diagnostic under the mouse opens 18 cells right of where
+    /// the cursor's opened.
     #[test]
     fn the_severity_column_and_its_popover_move_past_the_blame_column() {
         let mut h = blame_column_harness(120);
@@ -7107,10 +7111,18 @@ mod tests {
             .into_iter()
             .map(|(x, y, width, height, color)| (x + 18 * 16, y, width, height, color))
             .collect();
+        let cursor_popovers = popover_lefts(&h);
+
+        let text = {
+            let editor = action_handlers::focused_editor_mut(&mut h.stoat).expect("focused editor");
+            editor.text_rect.expect("the text painted")
+        };
+        h.stoat.hover_cell = Some((text.x, text.y));
+        h.stoat.render();
         assert_eq!(
-            (rest, popover_lefts(&h)),
-            (moved, vec![popovers[0] + 18]),
-            "the mark and the popover 18 cells right",
+            (rest, cursor_popovers, popover_lefts(&h)),
+            (moved, Vec::new(), vec![popovers[0] + 18]),
+            "the mark 18 cells right, no popover from the cursor, and the mouse's 18 cells right",
         );
     }
 
