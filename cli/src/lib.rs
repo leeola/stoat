@@ -37,6 +37,10 @@ pub const FIXTURES: &[(&str, &str)] = &[
         "a four-commit linear chain for walking log and history",
     ),
     (
+        "blame",
+        "one Rust file committed four times by two authors, for the Blame Column",
+    ),
+    (
         "conflict",
         "two branches editing the same lines, so cherry-picking conflicts",
     ),

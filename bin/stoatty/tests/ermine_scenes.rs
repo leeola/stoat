@@ -73,6 +73,11 @@ const CONFLICT: [u8; 3] = [0xf5, 0x9a, 0xa0];
 const TINT_MERGE: [u8; 3] = [0x2a, 0x1d, 0x21];
 const INFO: [u8; 3] = [0x6c, 0xc7, 0xd6];
 const MUTED: [u8; 3] = [0x83, 0x8a, 0x98];
+const BLAME_SURFACE: [u8; 3] = [0x14, 0x16, 0x1a];
+const BLAME_SELECTED: [u8; 3] = [0x1b, 0x22, 0x30];
+const BLAME_AGE_1: [u8; 3] = [0x4f, 0x5a, 0x6e];
+const BLAME_AGE_2: [u8; 3] = [0x5d, 0x79, 0xa8];
+const BLAME_AGE_4: [u8; 3] = [0xa9, 0xc8, 0xff];
 
 /// The primary cursor's opaque block, the terminal palette's cursor color. The
 /// color comes from stoatty's own palette rather than a theme scope.
@@ -1829,12 +1834,95 @@ fn the_git_status_panel_bars_each_file_in_its_section_color() {
     }
 }
 
+/// The Blame Column draws its surface 158 px wide from the pane's left edge
+/// and each run's 2 px bar in the color of its commit's age, as the BlameView
+/// board draws them. A divider takes the top pixel row of each run's first
+/// line past the file's first line.
+///
+/// The cursor rests on the uncommitted line 34, so no commit is selected. File
+/// line n shows on row n + 1, and the pane starts at x 9. The bar takes x 9
+/// and 10, the surface x 11 to 166, and the editor surface shows from x 167.
+/// Lines 2, 5, 15, and 27 belong to the four commits from the oldest, and line
+/// 34 is uncommitted. Line 4 starts the second commit's run on row 5.
+#[test]
+fn the_blame_column_draws_its_surface_and_each_run_in_its_age_color() {
+    let mut home = support::scratch_home();
+    let shot = blamed_frame(home.path(), "34G<Settle>");
+
+    let runs = [
+        (3, BLAME_AGE_1),
+        (6, BLAME_AGE_2),
+        (16, ACCENT),
+        (28, BLAME_AGE_4),
+        (35, MUTED),
+    ];
+    let (_, y, _, _) = cell_rect(0, 5, 1, 1);
+    let found = (
+        runs.map(|(row, color)| column_bars(&shot, row, color)),
+        runs.map(|(row, _)| surface_color(&shot, row)),
+        column_bars(&shot, 3, BLAME_SURFACE),
+        pixel(&shot, 167, y + 9),
+        [y - 1, y, y + 1].map(|y| pixel(&shot, 13, y)),
+    );
+
+    let want = (
+        runs.map(|_| vec![9, 10]),
+        runs.map(|_| BLAME_SURFACE),
+        (11..=166).collect::<Vec<u32>>(),
+        BASE,
+        [BLAME_SURFACE, DIVIDER, BLAME_SURFACE],
+    );
+    if found != want {
+        let frame = keep_frame(&shot, &mut home, "blame_column");
+        panic!(
+            "the bars, the surfaces, row 3's surface columns, the pixel past the surface, and \
+             the divider's three pixels read {found:?}, not {want:?}; the frame is {}",
+            frame.display(),
+        );
+    }
+}
+
+/// Every run of the cursor's commit draws the selected surface, as the
+/// BlameView board tints both runs of its cursor's commit.
+///
+/// The cursor rests on line 18, in the second run of the third commit. That
+/// commit holds lines 14 to 16 and 18 to 20, which show on rows 15 to 17 and
+/// 19 to 21. Rows 14, 18, and 22 show lines of the first commit.
+#[test]
+fn the_cursor_commit_tints_every_run_of_it() {
+    let mut home = support::scratch_home();
+    let shot = blamed_frame(home.path(), "18G<Settle>");
+
+    let found: Vec<[u8; 3]> = (14..=22).map(|row| surface_color(&shot, row)).collect();
+    let (plain, tint) = (BLAME_SURFACE, BLAME_SELECTED);
+    if found != [plain, tint, tint, tint, plain, tint, tint, tint, plain] {
+        let frame = keep_frame(&shot, &mut home, "blame_selection");
+        let colors = found.iter().map(|&color| hex(color)).collect::<Vec<_>>();
+        panic!(
+            "rows 14 to 22 of the column read {colors:?}; the frame is {}",
+            frame.display(),
+        );
+    }
+}
+
 /// The frame the `fixture` scene with `file` open settles on after `keys` play.
 ///
 /// The session ends before this returns, so the child is gone before its
 /// scratch home is.
 fn settled_frame(home: &Path, fixture: &str, file: &str, keys: &str) -> Snapshot {
     let mut session = spawn_settled(home, fixture, file);
+    play(&mut session, keys);
+    session.snapshot().expect("a snapshot")
+}
+
+/// The frame the blame scene settles on with its Blame Column on, once the
+/// blame lands and `keys` play.
+///
+/// The session ends before this returns, as in [`settled_frame`].
+fn blamed_frame(home: &Path, keys: &str) -> Snapshot {
+    let mut session = spawn_settled(home, "blame", "src/chrome.rs");
+    play(&mut session, "<Space>ha");
+    wait_for_blame(&mut session);
     play(&mut session, keys);
     session.snapshot().expect("a snapshot")
 }
@@ -1869,6 +1957,27 @@ fn wait_for_diff(session: &mut HeadlessSession) {
     session
         .wait_settled(support::SETTLE, support::STARTUP_TIMEOUT)
         .expect("the frame with the diff settles");
+}
+
+/// Wait until the blame scene's row 3 draws the selected surface, and then
+/// until the frame settles.
+///
+/// Row 3 shows line 2, a line of the commit of the cursor's line 1. The column
+/// draws its plain surface until the blame lands, so only the selection marks
+/// the landed blame.
+fn wait_for_blame(session: &mut HeadlessSession) {
+    let deadline = Instant::now() + support::STARTUP_TIMEOUT;
+    while surface_color(&session.snapshot().expect("a snapshot"), 3) != BLAME_SELECTED {
+        assert!(
+            Instant::now() < deadline,
+            "the blame scene's blame did not land"
+        );
+        play(session, "<Wait:100>");
+    }
+
+    session
+        .wait_settled(support::SETTLE, support::STARTUP_TIMEOUT)
+        .expect("the frame with the blame settles");
 }
 
 /// A session of `scene`, once its first frame settles.
@@ -2156,6 +2265,25 @@ fn bar_columns(shot: &Snapshot, (y, height): (u32, u32), color: [u8; 3]) -> Vec<
             })
         })
         .collect()
+}
+
+/// The pixel columns of the Blame Column's 18 cells from column 1 that `color`
+/// fills over the whole band of `row`, left to right.
+fn column_bars(shot: &Snapshot, row: u16, color: [u8; 3]) -> Vec<u32> {
+    let (x, y, width, height) = cell_rect(1, row, 18, 1);
+    bar_columns(shot, (y, height), color)
+        .into_iter()
+        .filter(|column| (x..x + width).contains(column))
+        .collect()
+}
+
+/// The dominant color of the Blame Column's surface on `row`, right of the
+/// run's bar and under a divider.
+///
+/// A label's glyphs cover less of the row than the surface under them does.
+fn surface_color(shot: &Snapshot, row: u16) -> [u8; 3] {
+    let (_, y, _, height) = cell_rect(1, row, 1, 1);
+    dominant_color(shot, (11, y + 1, 156, height - 1))
 }
 
 /// How many pixels of `rect` in `shot` are exactly `color`.

@@ -30,7 +30,8 @@ pub use harness::LiveHarness;
 
 /// Unix epoch seconds for the first commit's author/committer clock. Each
 /// subsequent commit advances by one second, keeping the timeline monotonic
-/// while fully determined by commit order rather than wall-clock time.
+/// while fully determined by commit order rather than wall-clock time. A
+/// commit through [`FixtureRepo::commit_as`] signs at its own time instead.
 const FIXTURE_EPOCH: i64 = 1_700_000_000;
 
 const FIXTURE_AUTHOR: &str = "stoat fixture";
@@ -393,6 +394,229 @@ converts an index from 2.x. Read the upgrade notes before you upgrade,
 because brine 2.x does not open a 3.x index.
 ";
 
+/// `src/chrome.rs` of the `blame` fixture at Lee's first commit.
+///
+/// The file holds the `modal_box` and `zoomed` functions that the BlameView
+/// board draws. It carries an earlier version of each line that a later
+/// commit changes, so each later commit replaces whole lines and a line diff
+/// blames every line as the board does.
+const BLAME_C1: &str = r#"/// Size and center a modal box over `area` for content of `content` cells,
+/// returning `None` when `area` is too small to host `min`.
+pub(crate) fn modal_box(
+    area: layout::Rect,
+    content: Size,
+    recommended: Size,
+    min: Size,
+    zoom: Zoom,
+) -> Option<layout::Rect> {
+    let ceiling = (
+        area.width.saturating_sub(MODAL_MARGIN_MIN),
+        area.height.saturating_sub(MODAL_MARGIN_MIN),
+    );
+
+    let width = zoomed(area.width.max(min.0), content.0, recommended.0, min.0, ceiling.0, zoom);
+    let height = zoomed(area.height.max(min.1),
+        content.1,
+        recommended.1,
+        min.1,
+        ceiling.1,
+        zoom,
+    ); // zoomed clamps to the ceiling
+    // Center the box in the area.
+    Some(Rect::new(
+        area.x + (area.width - width) / 2,
+        area.y + (area.height - height) / 2,
+        width,
+        height,
+    ))
+};
+
+/// Size one dimension of a [`modal_box`].
+fn zoomed(area: u16, content: u16, rec: u16, min: u16, ceil: u16, zoom: i8) -> u16 {
+    let step = (area / 10).max(1);
+    let base = content.max(rec).max(min);
+    (base as i32 + zoom as i32 * step as i32).clamp(min as i32, ceil as i32) as u16
+}
+"#;
+
+/// [`BLAME_C1`] after Ana's commit, which takes the sizes as plain tuples and
+/// names `Rect` without its module.
+const BLAME_C2: &str = r#"/// Size and center a modal box over `area` for content of `content` cells,
+/// returning `None` when `area` is too small to host `min`.
+pub(crate) fn modal_box(
+    area: Rect,
+    content: (u16, u16),
+    recommended: (u16, u16),
+    min: (u16, u16),
+    zoom: i8,
+) -> Option<Rect> {
+    let ceiling = (
+        area.width.saturating_sub(MODAL_MARGIN_MIN),
+        area.height.saturating_sub(MODAL_MARGIN_MIN),
+    );
+
+    let width = zoomed(area.width.max(min.0), content.0, recommended.0, min.0, ceiling.0, zoom);
+    let height = zoomed(area.height.max(min.1),
+        content.1,
+        recommended.1,
+        min.1,
+        ceiling.1,
+        zoom,
+    ); // zoomed clamps to the ceiling
+    // Center the box in the area.
+    Some(Rect::new(
+        area.x + (area.width - width) / 2,
+        area.y + (area.height - height) / 2,
+        width,
+        height,
+    ))
+};
+
+/// Size one dimension of a [`modal_box`].
+fn zoomed(area: u16, content: u16, rec: u16, min: u16, ceil: u16, zoom: i8) -> u16 {
+    let step = (area / 10).max(1);
+    let base = content.max(rec).max(min);
+    (base as i32 + zoom as i32 * step as i32).clamp(min as i32, ceil as i32) as u16
+}
+"#;
+
+/// [`BLAME_C2`] after Lee's commit that returns `None` when the area cannot
+/// host `min`, which drops the `.max(min.N)` guards that the early return
+/// makes redundant.
+const BLAME_C3: &str = r#"/// Size and center a modal box over `area` for content of `content` cells,
+/// returning `None` when `area` is too small to host `min`.
+pub(crate) fn modal_box(
+    area: Rect,
+    content: (u16, u16),
+    recommended: (u16, u16),
+    min: (u16, u16),
+    zoom: i8,
+) -> Option<Rect> {
+    let ceiling = (
+        area.width.saturating_sub(MODAL_MARGIN_MIN),
+        area.height.saturating_sub(MODAL_MARGIN_MIN),
+    );
+    if ceiling.0 < min.0 || ceiling.1 < min.1 {
+        return None;
+    }
+
+    let width = zoomed(area.width, content.0, recommended.0, min.0, ceiling.0, zoom);
+    let height = zoomed(
+        area.height,
+        content.1,
+        recommended.1,
+        min.1,
+        ceiling.1,
+        zoom,
+    ); // zoomed clamps to the ceiling
+    // Center the box in the area.
+    Some(Rect::new(
+        area.x + (area.width - width) / 2,
+        area.y + (area.height - height) / 2,
+        width,
+        height,
+    ))
+};
+
+/// Size one dimension of a [`modal_box`].
+fn zoomed(area: u16, content: u16, rec: u16, min: u16, ceil: u16, zoom: i8) -> u16 {
+    let step = (area / 10).max(1);
+    let base = content.max(rec).max(min);
+    (base as i32 + zoom as i32 * step as i32).clamp(min as i32, ceil as i32) as u16
+}
+"#;
+
+/// [`BLAME_C3`] after Lee's commit that drops two inline comments.
+const BLAME_C4: &str = r#"/// Size and center a modal box over `area` for content of `content` cells,
+/// returning `None` when `area` is too small to host `min`.
+pub(crate) fn modal_box(
+    area: Rect,
+    content: (u16, u16),
+    recommended: (u16, u16),
+    min: (u16, u16),
+    zoom: i8,
+) -> Option<Rect> {
+    let ceiling = (
+        area.width.saturating_sub(MODAL_MARGIN_MIN),
+        area.height.saturating_sub(MODAL_MARGIN_MIN),
+    );
+    if ceiling.0 < min.0 || ceiling.1 < min.1 {
+        return None;
+    }
+
+    let width = zoomed(area.width, content.0, recommended.0, min.0, ceiling.0, zoom);
+    let height = zoomed(
+        area.height,
+        content.1,
+        recommended.1,
+        min.1,
+        ceiling.1,
+        zoom,
+    );
+
+    Some(Rect::new(
+        area.x + (area.width - width) / 2,
+        area.y + (area.height - height) / 2,
+        width,
+        height,
+    ))
+};
+
+/// Size one dimension of a [`modal_box`].
+fn zoomed(area: u16, content: u16, rec: u16, min: u16, ceil: u16, zoom: i8) -> u16 {
+    let step = (area / 10).max(1);
+    let base = content.max(rec).max(min);
+    (base as i32 + zoom as i32 * step as i32).clamp(min as i32, ceil as i32) as u16
+}
+"#;
+
+/// The working tree's `src/chrome.rs`, which drops the stray `;` after the
+/// brace that closes `modal_box`.
+///
+/// The edit stays unstaged, so its line blames as uncommitted.
+const BLAME_WORK: &str = r#"/// Size and center a modal box over `area` for content of `content` cells,
+/// returning `None` when `area` is too small to host `min`.
+pub(crate) fn modal_box(
+    area: Rect,
+    content: (u16, u16),
+    recommended: (u16, u16),
+    min: (u16, u16),
+    zoom: i8,
+) -> Option<Rect> {
+    let ceiling = (
+        area.width.saturating_sub(MODAL_MARGIN_MIN),
+        area.height.saturating_sub(MODAL_MARGIN_MIN),
+    );
+    if ceiling.0 < min.0 || ceiling.1 < min.1 {
+        return None;
+    }
+
+    let width = zoomed(area.width, content.0, recommended.0, min.0, ceiling.0, zoom);
+    let height = zoomed(
+        area.height,
+        content.1,
+        recommended.1,
+        min.1,
+        ceiling.1,
+        zoom,
+    );
+
+    Some(Rect::new(
+        area.x + (area.width - width) / 2,
+        area.y + (area.height - height) / 2,
+        width,
+        height,
+    ))
+}
+
+/// Size one dimension of a [`modal_box`].
+fn zoomed(area: u16, content: u16, rec: u16, min: u16, ceil: u16, zoom: i8) -> u16 {
+    let step = (area / 10).max(1);
+    let base = content.max(rec).max(min);
+    (base as i32 + zoom as i32 * step as i32).clamp(min as i32, ceil as i32) as u16
+}
+"#;
+
 /// Failure materializing a fixture repository.
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub))]
@@ -443,6 +667,10 @@ pub enum FixtureError {
 /// - `history`: a four-commit linear chain, each commit adding a distinct file, giving
 ///   [`crate::host::GitRepo::log_commits`] and [`crate::host::GitRepo::commit_file_changes`] real
 ///   history to walk.
+/// - `blame`: one Rust file, `src/chrome.rs`, committed four times by two authors days apart, then
+///   edited on one line in the working tree and left unstaged. The four commit times take the four
+///   age buckets of the Blame Column, and [`crate::host::GitRepo::blame`] splits the file into the
+///   runs the BlameView board draws, with the edited line uncommitted.
 /// - `conflict`: a base commit with two divergent children on `main` and `theirs` editing the same
 ///   lines, so [`crate::host::GitRepo::cherry_pick_tree`] between the tips conflicts. The repo is
 ///   left mid-merge of `theirs` into `main`, with `file.txt` unmerged in the index and marker soup
@@ -512,6 +740,7 @@ pub fn materialize(name: &str, dest: &Path) -> Result<(), FixtureError> {
         "diff-kinds" => materialize_diff_kinds(dest),
         "many-files" => materialize_many_files(dest),
         "history" => materialize_history(dest),
+        "blame" => materialize_blame(dest),
         "conflict" => materialize_conflict(dest),
         "rebase" => materialize_rebase(dest),
         "rust-lsp" => materialize_rust_lsp(dest),
@@ -621,6 +850,34 @@ fn materialize_history(dest: &Path) -> Result<(), FixtureError> {
     repo.commit("add app config", &[("app.txt", HISTORY_APP)])?;
     repo.commit("add ci pipeline", &[("ci.txt", HISTORY_CI)])?;
     repo.commit("add tests", &[("tests.txt", HISTORY_TESTS)])?;
+    Ok(())
+}
+
+fn materialize_blame(dest: &Path) -> Result<(), FixtureError> {
+    let file = "src/chrome.rs";
+    let day = 86_400;
+
+    let mut repo = FixtureRepo::init(dest)?;
+    repo.commit_as("add modal_box", "Lee", FIXTURE_EPOCH, &[(file, BLAME_C1)])?;
+    repo.commit_as(
+        "modal_box: take plain tuples",
+        "Ana",
+        FIXTURE_EPOCH + 15 * day,
+        &[(file, BLAME_C2)],
+    )?;
+    repo.commit_as(
+        "modal_box: return None when the area cannot host min",
+        "Lee",
+        FIXTURE_EPOCH + 18 * day,
+        &[(file, BLAME_C3)],
+    )?;
+    repo.commit_as(
+        "modal_box: drop the inline comments",
+        "Lee",
+        FIXTURE_EPOCH + 20 * day,
+        &[(file, BLAME_C4)],
+    )?;
+    repo.unstaged_file(file, BLAME_WORK)?;
     Ok(())
 }
 
@@ -746,12 +1003,40 @@ impl FixtureRepo {
         self.commit_staged(message)
     }
 
+    /// [`Self::commit`] signed by `author` at `time`, in unix epoch seconds, for
+    /// a history that needs more than one author or commits days apart.
+    fn commit_as(
+        &mut self,
+        message: &str,
+        author: &str,
+        time: i64,
+        files: &[(&str, &str)],
+    ) -> Result<&mut Self, FixtureError> {
+        for (name, content) in files {
+            self.write(name, content)?;
+            self.stage(name)?;
+        }
+        self.commit_signed(message, author, time)
+    }
+
     /// Commit the index's tree with a pinned signature, parented off the
     /// current HEAD when there is one.
     fn commit_staged(&mut self, message: &str) -> Result<&mut Self, FixtureError> {
-        let time = Time::new(FIXTURE_EPOCH + self.commit_count, 0);
+        let time = FIXTURE_EPOCH + self.commit_count;
         self.commit_count += 1;
-        let sig = Signature::new(FIXTURE_AUTHOR, FIXTURE_EMAIL, &time).context(GitSnafu)?;
+        self.commit_signed(message, FIXTURE_AUTHOR, time)
+    }
+
+    /// Commit the index's tree signed by `author` at `time`, in unix epoch
+    /// seconds, parented off the current HEAD when there is one.
+    fn commit_signed(
+        &mut self,
+        message: &str,
+        author: &str,
+        time: i64,
+    ) -> Result<&mut Self, FixtureError> {
+        let time = Time::new(time, 0);
+        let sig = Signature::new(author, FIXTURE_EMAIL, &time).context(GitSnafu)?;
 
         // Scope the tree and parent borrows of `self.repo` so they drop before
         // the `&mut self` return. `git2::Tree` holds an immutable borrow of the
@@ -1064,6 +1349,57 @@ mod tests {
         assert!(head_changes
             .iter()
             .any(|c| c.rel_path.ends_with("tests.txt") && c.kind == CommitFileChangeKind::Added));
+    }
+
+    /// The `blame` fixture blames HEAD's `src/chrome.rs` into the runs the
+    /// BlameView board draws, over four commits by author and day, and leaves
+    /// the file's edited line unstaged.
+    #[test]
+    fn blame_splits_the_file_into_the_board_s_runs() {
+        let dir = tempfile::tempdir().unwrap();
+        materialize("blame", dir.path()).unwrap();
+
+        let repo = LocalGit::new().discover(dir.path()).unwrap();
+        let blame = repo.blame(Path::new("src/chrome.rs"), None).unwrap();
+        let commit = |index: u32| {
+            let info = &blame.commits[index as usize].info;
+            (
+                info.author_name.as_str(),
+                (info.time - FIXTURE_EPOCH) / 86_400,
+            )
+        };
+        let commits: Vec<_> = (0..blame.commits.len() as u32).map(commit).collect();
+        let runs: Vec<_> = blame
+            .runs
+            .iter()
+            .map(|run| (run.start_line, run.lines, commit(run.commit)))
+            .collect();
+        let changed: Vec<_> = repo
+            .changed_files()
+            .into_iter()
+            .map(|file| (file.path.ends_with("src/chrome.rs"), file.staged))
+            .collect();
+
+        let [first, second, third, fourth] = [("Lee", 0), ("Ana", 15), ("Lee", 18), ("Lee", 20)];
+        assert_eq!(
+            (commits, runs, changed),
+            (
+                vec![first, second, third, fourth],
+                vec![
+                    (0, 3, first),
+                    (3, 6, second),
+                    (9, 4, first),
+                    (13, 3, third),
+                    (16, 1, first),
+                    (17, 3, third),
+                    (20, 5, first),
+                    (25, 2, fourth),
+                    (27, 14, first),
+                ],
+                vec![(true, false)],
+            ),
+            "the commits by author and day, the runs, and the one unstaged file",
+        );
     }
 
     #[test]
