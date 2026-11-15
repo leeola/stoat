@@ -238,6 +238,11 @@ inset and outset edges move with the nudge, and its margin and gap edges keep
 their place. A terminal below version 35 ignores the frame. Send a nudge only
 to a terminal at version 35 or later.
 
+From protocol version 36, bit 1 of the flags byte that ends a `text_run` head,
+and of the one in a `text_runs` batch's shared fields, draws the run in the
+italic face, and bit 0 in the bold face. A terminal below version 36 reads bit
+0 alone and draws the run upright, so a program sends the bit to any terminal.
+
 `ident` travels the other way, terminal to program, and arrives as input bytes
 on stdin. `decode` never yields it; use `decode_ident_reply`.
 

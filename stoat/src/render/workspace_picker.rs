@@ -411,6 +411,7 @@ fn paint_marker(
             bg: None,
             text,
             bold: false,
+            italic: false,
             follow: 0,
             anchor: None,
         }

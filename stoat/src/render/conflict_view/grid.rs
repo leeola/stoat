@@ -503,6 +503,7 @@ impl RowPainter<'_> {
                 bg: Some(bg),
                 text: &self.scratch,
                 bold,
+                italic: false,
                 follow: 0,
                 anchor: None,
             },
@@ -894,6 +895,7 @@ fn header_cell(cell: HeaderCell<'_>, buf: &mut Buffer, scene: &mut ApcScene) {
             bg: Some(bg),
             text,
             bold,
+            italic: false,
             follow: 0,
             anchor: None,
         }
@@ -1003,6 +1005,7 @@ fn draw_chip(
         bg: Some(tone.tint),
         text,
         bold: false,
+        italic: false,
         follow: 0,
         anchor: None,
     }

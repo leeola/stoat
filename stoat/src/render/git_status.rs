@@ -555,6 +555,7 @@ impl Painter<'_> {
             bg,
             text,
             bold: style.add_modifier.contains(Modifier::BOLD),
+            italic: false,
             follow: 0,
             anchor: None,
         }

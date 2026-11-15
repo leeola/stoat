@@ -1865,6 +1865,7 @@ fn decoration_seq_stamps_declaration_order_and_resets() {
         color: [1, 2, 3],
         bg: Some([0, 0, 0]),
         bold: false,
+        italic: false,
         follow: 0,
         anchor: None,
         text: "x".to_owned(),
@@ -2282,6 +2283,7 @@ fn text_run_apc_frame_sets_a_grid_text_run() {
         color: [150, 160, 170],
         bg: Some([24, 26, 32]),
         bold: false,
+        italic: false,
         follow: 0,
         anchor: None,
         text: "42".to_owned(),
@@ -2301,6 +2303,7 @@ fn text_run_apc_frame_sets_a_grid_text_run() {
             color: Rgb::new(150, 160, 170),
             bg: Some(Rgb::new(24, 26, 32)),
             bold: false,
+            italic: false,
             follow: 0,
             anchor: None,
             text: "42".into(),
@@ -2308,6 +2311,48 @@ fn text_run_apc_frame_sets_a_grid_text_run() {
             nudge: [0, 0],
         }]
     );
+}
+
+/// The italic bit of a run, and of a batch, reaches the grid run each
+/// projects, and an upright run stays upright.
+#[test]
+fn the_italic_bit_reaches_the_grid_run() {
+    let run = |text: &str, italic: bool| {
+        encode_text_run(&TextRunCommand {
+            col: 0,
+            row: 0,
+            scale: 256,
+            color: [1, 2, 3],
+            bg: None,
+            bold: false,
+            italic,
+            follow: 0,
+            anchor: None,
+            text: text.to_owned(),
+        })
+    };
+    let batch = encode_text_runs(&TextRunsCommand {
+        scale: 256,
+        color: [1, 2, 3],
+        bg: None,
+        bold: false,
+        italic: true,
+        follow: 0,
+        anchor: None,
+        runs: vec![(0, 16, "b".to_owned())],
+    });
+
+    let mut terminal = Terminal::new(8, 8, Theme::default());
+    let mut grid = Grid::new(8, 8);
+    terminal.advance(&[run("a", true), batch, run("c", false)].concat());
+    terminal.project(&mut grid);
+
+    let faces: Vec<(&str, bool)> = grid
+        .text_runs()
+        .iter()
+        .map(|run| (&*run.text, run.italic))
+        .collect();
+    assert_eq!(faces, [("a", true), ("b", true), ("c", false)]);
 }
 
 /// The capture buffer is handed back and reused, so a run must not read
@@ -2323,6 +2368,7 @@ fn runs_captured_through_one_buffer_keep_their_own_text() {
             color: [1, 2, 3],
             bg: None,
             bold: false,
+            italic: false,
             follow: 0,
             anchor: None,
             text: text.to_owned(),
@@ -2355,6 +2401,7 @@ fn a_run_of_invalid_bytes_still_captures_lossily() {
         color: [1, 2, 3],
         bg: None,
         bold: false,
+        italic: false,
         follow: 0,
         anchor: None,
         text: "ok".to_owned(),
@@ -2764,6 +2811,7 @@ fn line_layout_shifts_a_bound_component_past_an_expansion() {
         color: [150, 160, 170],
         bg: Some([0, 0, 0]),
         bold: false,
+        italic: false,
         follow: 0,
         anchor: None,
         text: "4".to_owned(),
@@ -2879,6 +2927,7 @@ fn text_runs_reresolve_when_only_the_line_layout_changes() {
         color: [150, 160, 170],
         bg: Some([0, 0, 0]),
         bold: false,
+        italic: false,
         follow: 0,
         anchor: None,
         text: "4".to_owned(),
@@ -3023,6 +3072,7 @@ fn text_run_frame(text: &str) -> Vec<u8> {
         color: [200, 200, 200],
         bg: Some([0, 0, 0]),
         bold: true,
+        italic: false,
         follow: 0,
         anchor: None,
         text: text.to_owned(),
@@ -3161,6 +3211,7 @@ fn text_runs_frame(texts: &[&str]) -> Vec<u8> {
         color: [200, 200, 200],
         bg: Some([0, 0, 0]),
         bold: true,
+        italic: false,
         follow: 0,
         anchor: None,
         runs: texts
@@ -4383,6 +4434,7 @@ fn page_run(text: &str) -> TextRunCommand {
         color: [1, 2, 3],
         bg: None,
         bold: false,
+        italic: false,
         follow: 0,
         anchor: None,
         text: text.to_owned(),
@@ -4865,6 +4917,7 @@ fn a_text_run_carries_its_weight_follow_and_anchor_to_the_grid() {
         color: [1, 2, 3],
         bg: None,
         bold: true,
+        italic: false,
         follow: 7,
         anchor: Some((3, 1.5)),
         text: "label".to_string(),
@@ -4986,6 +5039,7 @@ fn fill_captures_bar_and_text_run_onto_the_slot() {
         color: [150, 160, 170],
         bg: Some([24, 26, 32]),
         bold: false,
+        italic: false,
         follow: 0,
         anchor: None,
         text: "42".to_owned(),
@@ -5006,6 +5060,7 @@ fn fill_captures_bar_and_text_run_onto_the_slot() {
             color: Rgb::new(150, 160, 170),
             bg: Some(Rgb::new(24, 26, 32)),
             bold: false,
+            italic: false,
             follow: 0,
             anchor: None,
             text: "42".into(),
@@ -5051,6 +5106,7 @@ fn project_pool_stamps_translated_decorations_and_culls_off_window() {
         color: [1, 2, 3],
         bg: Some([0, 0, 0]),
         bold: false,
+        italic: false,
         follow: 0,
         anchor: None,
         text: "aa".to_owned(),
@@ -5063,6 +5119,7 @@ fn project_pool_stamps_translated_decorations_and_culls_off_window() {
         color: [4, 5, 6],
         bg: Some([0, 0, 0]),
         bold: false,
+        italic: false,
         follow: 0,
         anchor: None,
         text: "bb".to_owned(),
@@ -5084,6 +5141,7 @@ fn project_pool_stamps_translated_decorations_and_culls_off_window() {
             color: Rgb::new(4, 5, 6),
             bg: Some(Rgb::new(0, 0, 0)),
             bold: false,
+            italic: false,
             follow: 0,
             anchor: None,
             text: "bb".into(),

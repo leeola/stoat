@@ -341,6 +341,7 @@ fn render_single_badge(
                 bg: None,
                 text: &text,
                 bold: false,
+                italic: false,
                 follow: 0,
                 anchor: None,
             }
@@ -739,6 +740,7 @@ mod tests {
                         bg: None,
                         text: "ab".to_string(),
                         bold: false,
+                        italic: false,
                         follow: 0,
                         anchor: None,
                     }),

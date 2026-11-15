@@ -2980,7 +2980,7 @@ impl TextPass {
         let nudge = physical_nudge(run.nudge, self.face.metrics.scale_factor);
         let style = font::FaceStyle {
             bold: run.bold,
-            italic: false,
+            italic: run.italic,
         };
 
         for (index, ch) in run.text.chars().enumerate() {

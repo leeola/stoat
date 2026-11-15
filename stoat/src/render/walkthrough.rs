@@ -784,6 +784,7 @@ impl Painter {
                     bg: None,
                     text: line.clone(),
                     bold: false,
+                    italic: false,
                     follow: stroke.id,
                     anchor: self.anchor,
                 },

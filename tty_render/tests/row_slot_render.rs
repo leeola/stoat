@@ -302,6 +302,7 @@ fn a_pool_text_run_paints_on_its_own_row_after_the_live_grid_scrolls() {
         color: run_color,
         bg: None,
         bold: false,
+        italic: false,
         follow: 0,
         anchor: None,
         text: "MMM".into(),

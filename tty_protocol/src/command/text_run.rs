@@ -10,6 +10,9 @@ use crate::frame;
 /// The bit of a run's flags byte that draws its glyphs in the bold face.
 const BOLD: u8 = 1;
 
+/// The bit of a run's flags byte that draws its glyphs in the italic face.
+const ITALIC: u8 = 2;
+
 /// Bytes a `text_run` head takes, which hold the position, the scale, the
 /// colors, the sketch the run follows, its anchor, and the flags byte.
 const TEXT_RUN_HEAD: usize = 27;
@@ -48,6 +51,10 @@ pub struct TextRunCommand<S = String> {
     /// attribute draws in. The run advances one scaled cell width per
     /// character in either face.
     pub bold: bool,
+    /// Whether the glyphs draw in the italic face, the face a cell's italic
+    /// attribute draws in. A terminal before [`crate::ITALIC_RUN_PROTOCOL`]
+    /// draws the run upright.
+    pub italic: bool,
     /// Sketch whose reveal and opacity this run takes, so a label appears as
     /// the box it sits in draws itself and recedes with it as it dims. Zero
     /// fades the run in on its own and leaves it at full strength.
@@ -125,19 +132,24 @@ pub fn encode_text_run_scope<S>(
         let (host, top_rows) = command.anchor.unwrap_or((0, 0.0));
         w.write_all(&host.to_be_bytes())?;
         w.write_all(&top_rows.to_be_bytes())?;
-        w.write_all(&[flags(command.bold)])
+        w.write_all(&[flags(command.bold, command.italic)])
     });
     frame::end(out);
     text(out);
     encode_text_run_end_into(out);
 }
 
-/// The flags byte of a run, or of a batch's shared style, in `bold`.
-fn flags(bold: bool) -> u8 {
-    match bold {
-        true => BOLD,
-        false => 0,
+/// The flags byte of a run, or of a batch's shared style, with the bit of each
+/// face that `bold` and `italic` ask for.
+fn flags(bold: bool, italic: bool) -> u8 {
+    let mut flags = 0;
+    if bold {
+        flags |= BOLD;
     }
+    if italic {
+        flags |= ITALIC;
+    }
+    flags
 }
 
 /// Encode a [`Command::TextRunEnd`] as a full `Gstoatty;text_run_end`
@@ -171,6 +183,7 @@ pub(super) fn decode_text_run(args: &[Vec<u8>]) -> Option<TextRunCommand> {
         color: [arg[6], arg[7], arg[8]],
         bg: (arg[12] != 0).then_some([arg[9], arg[10], arg[11]]),
         bold: arg[26] & BOLD != 0,
+        italic: arg[26] & ITALIC != 0,
         follow: u32::from_be_bytes([arg[13], arg[14], arg[15], arg[16]]),
         anchor: (arg[17] != 0).then(|| {
             (
@@ -204,6 +217,9 @@ pub struct TextRunsCommand<S = String> {
     /// Whether every run of the batch draws in the bold face, as
     /// [`TextRunCommand::bold`] draws one.
     pub bold: bool,
+    /// Whether every run of the batch draws in the italic face, as
+    /// [`TextRunCommand::italic`] draws one.
+    pub italic: bool,
     pub follow: u32,
     pub anchor: Option<(u32, f32)>,
     pub runs: Vec<(i16, i16, S)>,
@@ -251,7 +267,7 @@ pub fn encode_text_runs_into<S: AsRef<str>>(out: &mut Vec<u8>, command: &TextRun
             let (host, top_rows) = command.anchor.unwrap_or((0, 0.0));
             w.write_all(&host.to_be_bytes())?;
             w.write_all(&top_rows.to_be_bytes())?;
-            w.write_all(&[flags(command.bold)])?;
+            w.write_all(&[flags(command.bold, command.italic)])?;
             w.write_all(&(runs.len() as u16).to_be_bytes())?;
             for (col, row, text) in runs {
                 let text = text.as_ref().as_bytes();
@@ -297,6 +313,7 @@ pub(super) fn decode_text_runs(args: &[Vec<u8>]) -> Option<TextRunsCommand> {
         color: [head[2], head[3], head[4]],
         bg: (head[8] != 0).then_some([head[5], head[6], head[7]]),
         bold: head[22] & BOLD != 0,
+        italic: head[22] & ITALIC != 0,
         follow: u32::from_be_bytes([head[9], head[10], head[11], head[12]]),
         anchor: (head[13] != 0).then(|| {
             (
@@ -325,6 +342,7 @@ mod tests {
             color: [1, 2, 3],
             bg: Some([4, 5, 6]),
             bold: true,
+            italic: false,
             follow: 42,
             anchor: Some((7, 2.5)),
             text: "label".to_string(),
@@ -361,6 +379,7 @@ mod tests {
             color: [0, 0, 0],
             bg: None,
             bold: false,
+            italic: false,
             follow: 0,
             anchor: None,
             text: String::new(),
@@ -388,12 +407,56 @@ mod tests {
         assert!(decode(b"Gstoatty;text_run;YWJj").is_none());
     }
 
+    /// An italic run and an italic batch keep the italic bit across the wire,
+    /// apart from the bold bit, which both leave clear.
+    #[test]
+    fn an_italic_run_and_an_italic_batch_round_trip() {
+        let run = TextRunCommand {
+            col: 1,
+            row: 2,
+            scale: 192,
+            color: [1, 2, 3],
+            bg: None,
+            bold: false,
+            italic: true,
+            follow: 0,
+            anchor: None,
+            text: "uncommitted".to_string(),
+        };
+        let runs = TextRunsCommand {
+            bold: false,
+            italic: true,
+            ..batch(vec![(0, 0, "a".into())])
+        };
+        assert_eq!(
+            [
+                decode_stream(&encode_text_run(&run)),
+                decode_stream(&encode_text_runs(&runs)),
+            ],
+            [
+                vec![Command::TextRun(run), Command::TextRunEnd],
+                vec![Command::TextRuns(runs)],
+            ],
+        );
+    }
+
+    /// A flags byte with the bold bit alone, as every emitter before the
+    /// italic bit wrote it, reads as an upright bold run.
+    #[test]
+    fn a_bold_only_flags_byte_decodes_upright() {
+        let mut head = vec![0; TEXT_RUN_HEAD];
+        head[TEXT_RUN_HEAD - 1] = BOLD;
+        let run = decode_text_run(&[head]).expect("a whole head decodes");
+        assert_eq!((run.bold, run.italic), (true, false));
+    }
+
     fn batch(runs: Vec<(i16, i16, String)>) -> TextRunsCommand {
         TextRunsCommand {
             scale: 160,
             color: [1, 2, 3],
             bg: Some([4, 5, 6]),
             bold: true,
+            italic: false,
             follow: 9,
             anchor: Some((7, 2.5)),
             runs,

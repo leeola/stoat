@@ -227,9 +227,13 @@
 /// terminal that predates it ignores the frame and draws each component at its
 /// declared place.
 ///
+/// Version 36 reads bit 1 of a text run's flags byte, and of a `text_runs`
+/// batch's, as the italic face. A terminal that predates it reads the bold bit
+/// alone and draws the run upright.
+///
 /// Zero is reserved for a peer whose handshake carries no version at all, which
 /// is every build from before the field existed.
-pub const PROTOCOL_VERSION: u32 = 35;
+pub const PROTOCOL_VERSION: u32 = 36;
 
 /// The first [`PROTOCOL_VERSION`] whose terminal reads the `text_runs` and
 /// `bars` batches.
@@ -294,6 +298,13 @@ pub const MINIMAP_THUMB_OUTLINE_PROTOCOL: u32 = 33;
 /// declared place, so an emitter that moves chrome off the cell grid sends the
 /// nudge only to a terminal at this version or later.
 pub const NUDGE_PROTOCOL: u32 = 35;
+
+/// The first [`PROTOCOL_VERSION`] whose terminal draws a text run in the
+/// italic face when the run asks for it.
+///
+/// An earlier terminal reads the bold bit alone and draws the run upright, so
+/// an emitter sends the italic bit to any terminal.
+pub const ITALIC_RUN_PROTOCOL: u32 = 36;
 
 pub mod command;
 pub mod detect;

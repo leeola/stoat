@@ -31,6 +31,9 @@ pub struct TextRun<'a> {
     /// Whether the glyphs draw in the bold face. The run advances as far in
     /// either face.
     pub bold: bool,
+    /// Whether the glyphs draw in the italic face. The run advances as far in
+    /// either face.
+    pub italic: bool,
     pub text: &'a str,
     /// Hand-drawn mark whose reveal this run fades in with, by its id, so a
     /// label appears as the mark it names draws itself. Zero draws the run at
@@ -77,6 +80,7 @@ impl StatefulWidget for TextRun<'_> {
                 color: self.color,
                 bg: self.bg,
                 bold: self.bold,
+                italic: self.italic,
                 follow: self.follow,
                 anchor: self.anchor,
                 text: self.text,
@@ -90,8 +94,8 @@ impl StatefulWidget for TextRun<'_> {
 ///
 /// A gutter numbers every row with a run of its own, and a frame per number
 /// spends most of its bytes on the head. The batch groups the runs pushed into
-/// it by the fields they share, the scale, color, background, weight, follow,
-/// and anchor, and [`Self::flush`] writes each group as one frame. The groups go
+/// it by the fields they share, the scale, color, background, weight, slant,
+/// follow, and anchor, and [`Self::flush`] writes each group as one frame. The groups go
 /// out in the order their first runs arrived, so the draw order between styles
 /// changes. Batch only runs that do not overlap one another.
 ///
@@ -118,6 +122,7 @@ struct RunStyle {
     color: [u8; 3],
     bg: Option<[u8; 3]>,
     bold: bool,
+    italic: bool,
     follow: u32,
     anchor: Option<(u32, f32)>,
 }
@@ -130,6 +135,7 @@ impl TextRunBatch {
             color: run.color,
             bg: run.bg,
             bold: run.bold,
+            italic: run.italic,
             follow: run.follow,
             anchor: run.anchor,
         };
@@ -160,6 +166,7 @@ impl TextRunBatch {
                 color,
                 bg,
                 bold,
+                italic,
                 follow,
                 anchor,
             } = group.style;
@@ -176,6 +183,7 @@ impl TextRunBatch {
                         color,
                         bg,
                         bold,
+                        italic,
                         follow,
                         anchor,
                         runs,
@@ -194,6 +202,7 @@ impl TextRunBatch {
                         color,
                         bg,
                         bold,
+                        italic,
                         follow,
                         anchor,
                         text: &self.text[span],
@@ -227,6 +236,7 @@ mod tests {
             bg: Some([40, 44, 52]),
             text: "42",
             bold: false,
+            italic: false,
             follow: 0,
             anchor: None,
         }
@@ -239,6 +249,7 @@ mod tests {
             color: [99, 109, 131],
             bg: Some([40, 44, 52]),
             bold: false,
+            italic: false,
             follow: 0,
             anchor: None,
             text: "42".to_owned(),
@@ -246,8 +257,8 @@ mod tests {
         assert_eq!(scene.buffer().as_slice(), expected.as_slice());
     }
 
-    /// A label names its weight, the mark it fades in with, and the pool it
-    /// rides. None of them is area-relative, so they reach the wire as
+    /// A label names its weight, its slant, the mark it fades in with, and the
+    /// pool it rides. None of them is area-relative, so they reach the wire as
     /// declared.
     #[test]
     fn a_weight_a_follow_and_an_anchor_reach_the_wire_as_declared() {
@@ -262,6 +273,7 @@ mod tests {
             bg: None,
             text: "42",
             bold: true,
+            italic: true,
             follow: 7,
             anchor: Some((3, 12.5)),
         }
@@ -274,6 +286,7 @@ mod tests {
             color: [99, 109, 131],
             bg: None,
             bold: true,
+            italic: true,
             follow: 7,
             anchor: Some((3, 12.5)),
             text: "42".to_owned(),
@@ -294,6 +307,7 @@ mod tests {
             bg: Some([40, 44, 52]),
             text: "42",
             bold: false,
+            italic: false,
             follow: 0,
             anchor: None,
         }
@@ -306,6 +320,7 @@ mod tests {
             color: [99, 109, 131],
             bg: Some([40, 44, 52]),
             bold: false,
+            italic: false,
             follow: 0,
             anchor: None,
             text: "42".to_owned(),
@@ -366,6 +381,7 @@ mod tests {
                     bg: None,
                     text,
                     bold,
+                    italic: false,
                     follow: 0,
                     anchor: None,
                 };
@@ -380,6 +396,7 @@ mod tests {
                 color,
                 bg: None,
                 bold,
+                italic: false,
                 follow: 0,
                 anchor: None,
                 runs: runs
@@ -397,6 +414,7 @@ mod tests {
                     color,
                     bg: None,
                     bold,
+                    italic: false,
                     follow: 0,
                     anchor: None,
                     text: text.to_owned(),
@@ -422,6 +440,58 @@ mod tests {
                 single(64, grey, true, "4"),
             ]
             .concat(),
+        );
+    }
+
+    /// A slant is part of the style, so an italic run in a style the batch
+    /// holds goes out in a group of its own, as a frame per group and as a
+    /// frame per run.
+    #[test]
+    fn a_batch_groups_its_italic_runs_apart() {
+        let flushed = |batches: bool| {
+            let mut scene = ApcScene::new();
+            scene.set_batch_protocol(batches);
+            let mut batch = TextRunBatch::default();
+            for (row, italic, text) in [(0, false, "a"), (16, true, "b"), (32, false, "c")] {
+                let run = TextRun {
+                    col: 0,
+                    row,
+                    scale: 160,
+                    color: [1, 1, 1],
+                    bg: None,
+                    text,
+                    bold: false,
+                    italic,
+                    follow: 0,
+                    anchor: None,
+                };
+                batch.push(Rect::new(0, 0, 4, 4), run);
+            }
+            batch.flush(&mut scene);
+            decode_stream(scene.buffer())
+                .into_iter()
+                .filter_map(|command| match command {
+                    Command::TextRuns(group) => Some((
+                        group.italic,
+                        group.runs.into_iter().map(|(_, _, text)| text).collect(),
+                    )),
+                    Command::TextRun(run) => Some((run.italic, vec![run.text])),
+                    _ => None,
+                })
+                .collect::<Vec<(bool, Vec<String>)>>()
+        };
+        let texts = |texts: &[&str]| texts.iter().map(|&text| text.to_owned()).collect();
+
+        assert_eq!(
+            [flushed(true), flushed(false)],
+            [
+                vec![(false, texts(&["a", "c"])), (true, texts(&["b"]))],
+                vec![
+                    (false, texts(&["a"])),
+                    (false, texts(&["c"])),
+                    (true, texts(&["b"])),
+                ],
+            ],
         );
     }
 }

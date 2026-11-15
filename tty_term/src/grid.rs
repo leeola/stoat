@@ -2098,6 +2098,9 @@ pub struct TextRun {
     /// Whether the glyphs draw in the bold face, the face a cell's bold
     /// attribute draws in.
     pub bold: bool,
+    /// Whether the glyphs draw in the italic face, the face a cell's italic
+    /// attribute draws in.
+    pub italic: bool,
     pub text: Arc<str>,
     /// Sketch whose reveal this run fades in with, so a label appears as the
     /// box it sits in draws itself. Zero fades the run in on its own.
@@ -2918,6 +2921,7 @@ mod tests {
             color: Rgb::new(150, 160, 170),
             bg: Some(Rgb::new(24, 26, 32)),
             bold: false,
+            italic: false,
             follow: 0,
             anchor: None,
             text: "42".into(),
@@ -3010,6 +3014,7 @@ mod tests {
             color: Rgb::new(1, 2, 3),
             bg: None,
             bold: false,
+            italic: false,
             follow: 0,
             anchor: None,
             text: "x".into(),
@@ -3518,6 +3523,7 @@ mod region_blit_tests {
             color: Rgb::new(1, 2, 3),
             bg: None,
             bold: false,
+            italic: false,
             follow: 0,
             anchor: None,
             text: "x".into(),

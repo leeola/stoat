@@ -85,6 +85,7 @@ fn pool_decorations_composite_and_glide_with_the_shift() {
         color: black,
         bg: Some(run_bg),
         bold: false,
+        italic: false,
         follow: 0,
         anchor: None,
         text: "   ".into(),

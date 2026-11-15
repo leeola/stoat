@@ -1289,6 +1289,7 @@ fn a_bold_text_run_keys_its_glyphs_at_the_bold_weight() {
         color: Rgb::new(255, 255, 255),
         bg: None,
         bold,
+        italic: false,
         follow: 0,
         anchor: None,
         text: text.into(),
@@ -1308,6 +1309,45 @@ fn a_bold_text_run_keys_its_glyphs_at_the_bold_weight() {
         .collect();
     weights.sort();
     assert_eq!(weights, [('a', 400), ('b', 700)]);
+}
+
+/// A text run's slant picks the face its glyphs key, as a cell's italic
+/// attribute does. An italic run keys its glyph in the italic face, and an
+/// upright run in the regular one.
+#[test]
+fn an_italic_text_run_keys_its_glyphs_in_the_italic_face() {
+    let (device, queue, mut pass) = bundled_text_pass();
+    let run = |italic: bool| TextRun {
+        col: 0,
+        row: 0,
+        scale: 256,
+        color: Rgb::new(255, 255, 255),
+        bg: None,
+        bold: false,
+        italic,
+        follow: 0,
+        anchor: None,
+        text: "a".into(),
+        seq: 0,
+        nudge: [0, 0],
+    };
+    let mut grid = Grid::new(1, 8);
+    grid.set_text_runs(vec![run(false), run(true)]);
+    pass.build_text_run_instances(&device, &queue, &grid, [0.0; 2], 0);
+
+    let font = |italic: bool| {
+        pass.face
+            .shape_cache
+            .iter()
+            .find(|((ch, _, style), _)| *ch == 'a' && style.italic == italic)
+            .and_then(|(_, key)| key.map(|key| key.font_id))
+    };
+    let (upright, slanted) = (font(false), font(true));
+    assert_eq!(
+        (upright.is_some(), slanted.is_some(), upright == slanted),
+        (true, true, false),
+        "an upright and an italic glyph, each from its own face",
+    );
 }
 
 /// A wide emoji draws from a color face, so its glyph lands in the color atlas
@@ -1578,6 +1618,7 @@ fn followed(id: u32, follow: u32) -> Grid {
         color: Rgb::new(1, 2, 3),
         bg: Some(Rgb::new(4, 5, 6)),
         bold: false,
+        italic: false,
         follow,
         anchor: None,
         text: "42".into(),
@@ -1703,6 +1744,7 @@ fn run_rect_carries_its_run_occlusion_seq() {
         color: Rgb::new(1, 2, 3),
         bg: Some(Rgb::new(4, 5, 6)),
         bold: false,
+        italic: false,
         follow: 0,
         anchor: None,
         text: "42".into(),
@@ -1747,6 +1789,7 @@ fn a_nudged_run_moves_its_glyphs_and_box_by_its_nudge() {
                 color: Rgb::new(255, 255, 255),
                 bg: Some(Rgb::new(4, 5, 6)),
                 bold: false,
+                italic: false,
                 follow: 0,
                 anchor: None,
                 text: "ab".into(),
@@ -1785,6 +1828,7 @@ fn run_without_bg_builds_no_rect() {
         color: Rgb::new(1, 2, 3),
         bg: None,
         bold: false,
+        italic: false,
         follow: 0,
         anchor: None,
         text: "42".into(),
@@ -1809,6 +1853,7 @@ fn build_run_rects_into_clears_prior_scratch() {
         color: Rgb::new(1, 2, 3),
         bg: Some(Rgb::new(4, 5, 6)),
         bold: false,
+        italic: false,
         follow: 0,
         anchor: None,
         text: "42".into(),
@@ -1846,6 +1891,7 @@ fn a_run_on_the_last_row_backs_the_anchored_row() {
         color: Rgb::new(1, 2, 3),
         bg: Some(Rgb::new(4, 5, 6)),
         bold: false,
+        italic: false,
         follow: 0,
         anchor: None,
         text: "42".into(),
@@ -1889,6 +1935,7 @@ fn a_run_rect_covers_whole_pixels() {
         color: Rgb::new(1, 2, 3),
         bg: Some(Rgb::new(4, 5, 6)),
         bold: false,
+        italic: false,
         follow: 0,
         anchor: None,
         text: "42".into(),
@@ -1921,6 +1968,7 @@ fn ascii_burst_run() -> TextRun {
         color: Rgb::new(255, 255, 255),
         bg: None,
         bold: false,
+        italic: false,
         follow: 0,
         anchor: None,
         text: (0x21u32..=0x7e)
@@ -2023,6 +2071,7 @@ fn composite_runs_reresolve_when_the_row_pack_grows_the_atlas() {
         color: Rgb::new(255, 255, 255),
         bg: None,
         bold: false,
+        italic: false,
         follow: 0,
         anchor: None,
         text: "42".into(),
@@ -2659,6 +2708,7 @@ fn chrome_run(text: &str) -> TextRun {
         color: Rgb::new(200, 200, 200),
         bg: None,
         bold: false,
+        italic: false,
         follow: 0,
         anchor: None,
         text: text.into(),
@@ -3932,6 +3982,7 @@ fn a_moved_composite_rebuilds_against_its_new_origin() {
         color: Rgb::new(255, 255, 255),
         bg: None,
         bold: false,
+        italic: false,
         follow: 0,
         anchor: None,
         text: "charlie".into(),
@@ -4065,6 +4116,7 @@ fn a_composite_whose_runs_held_builds_none_of_them_again() {
         color: Rgb::new(255, 255, 255),
         bg: Some(Rgb::new(20, 20, 20)),
         bold: false,
+        italic: false,
         follow: 0,
         anchor: None,
         text: "charlie".into(),
@@ -4145,6 +4197,7 @@ fn a_composite_bakes_its_runs_again_when_the_atlas_moved_under_them() {
         color: Rgb::new(255, 255, 255),
         bg: None,
         bold: false,
+        italic: false,
         follow: 0,
         anchor: None,
         text: "42".into(),

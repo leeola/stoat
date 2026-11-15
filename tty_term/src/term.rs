@@ -1926,6 +1926,7 @@ impl Terminal {
                         color: batch.color,
                         bg: batch.bg,
                         bold: batch.bold,
+                        italic: batch.italic,
                         follow: batch.follow,
                         anchor: batch.anchor,
                         text,

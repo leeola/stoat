@@ -1366,6 +1366,7 @@ fn render_file_preview(
                         bg: None,
                         text: &num_text,
                         bold: false,
+                        italic: false,
                         follow: 0,
                         anchor: None,
                     },

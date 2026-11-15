@@ -652,6 +652,7 @@ fn render_read_only_frame(
         bg: None,
         text: label,
         bold: false,
+        italic: false,
         follow: 0,
         anchor: None,
     }
@@ -2080,6 +2081,7 @@ fn draw_conflict_chip(
         bg: None,
         text: &chip.text,
         bold: false,
+        italic: false,
         follow: 0,
         anchor: None,
     }
@@ -2137,6 +2139,7 @@ fn draw_layout_chips(
             bg: None,
             text: segment.text,
             bold: segment.bold,
+            italic: false,
             follow: 0,
             anchor: None,
         }

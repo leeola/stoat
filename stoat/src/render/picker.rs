@@ -854,6 +854,7 @@ pub(crate) fn paint_preview_numbers(
                         bg: None,
                         text: &number,
                         bold: false,
+                        italic: false,
                         follow: 0,
                         anchor: None,
                     },

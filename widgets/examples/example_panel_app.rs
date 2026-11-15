@@ -151,6 +151,7 @@ fn draw_scene(frame: &mut Frame<'_>, scene: &mut ApcScene) {
                     bg: Some(EDITOR_BG),
                     text: &format!(" {shadow_name} {style_name} "),
                     bold: false,
+                    italic: false,
                     follow: 0,
                     anchor: None,
                 },

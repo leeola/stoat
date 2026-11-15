@@ -528,6 +528,7 @@ fn write_overlay_chrome(out: &mut Vec<u8>, anchor: Option<(u32, f32)>) {
             color: CHROME_FG,
             bg: Some(OVERLAY_BG),
             bold: false,
+            italic: false,
             follow: 0,
             anchor,
             text: " note ",
