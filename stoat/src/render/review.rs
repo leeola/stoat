@@ -31,7 +31,7 @@ use std::{
     fmt::Write,
     hash::{DefaultHasher, Hash, Hasher},
 };
-use stoat_text::Point;
+use stoat_text::{patch::Patch, Point};
 use stoat_widgets::{
     bar::{Bar, BarBatch},
     gutter::Gutter,
@@ -648,6 +648,9 @@ fn build_diff_row_states(
     rows: std::ops::Range<u32>,
 ) -> Vec<DiffRowState> {
     let mut hunk_scratch: Vec<&DiffHunk> = Vec::new();
+    let drift = snapshot
+        .diff_map()
+        .and_then(|dm| dm.span_drift(snapshot.buffer_snapshot()));
     rows.map(|display_row| {
         let buffer_row = match snapshot.classify_row(display_row) {
             BlockRowKind::BufferRow { buffer_row } => buffer_row,
@@ -674,6 +677,7 @@ fn build_diff_row_states(
             snapshot,
             display_row,
             buffer_row,
+            drift.as_ref(),
             &mut hunk_scratch,
             &mut change_spans,
         );
@@ -3439,9 +3443,11 @@ pub(crate) fn paint_highlighted_row(
 /// tagged with its [`ChangeKind`], taken from the buffer spans of any hunk
 /// covering the row.
 ///
-/// The token detail's byte ranges are absolute buffer offsets. Each is clamped
-/// to the row and mapped through [`DisplaySnapshot::buffer_to_display`], so tab
-/// expansion in the painted chunks stays aligned.
+/// The token detail's byte ranges are offsets into the text the diff ran
+/// against. `drift` carries each one to the live text first, so a span stays on
+/// its text while the reader types before the next diff lands. Each is then
+/// clamped to the row and mapped through [`DisplaySnapshot::buffer_to_display`],
+/// so tab expansion in the painted chunks stays aligned.
 ///
 /// A soft-wrapped line spreads a span over several display rows, so each row
 /// takes only its own part of it. A part that continues from the row above
@@ -3455,6 +3461,7 @@ fn write_buffer_row_change_spans<'a>(
     snapshot: &'a DisplaySnapshot,
     display_row: u32,
     buffer_row: u32,
+    drift: Option<&Patch<usize>>,
     hunks: &mut Vec<&'a DiffHunk>,
     out: &mut Vec<(std::ops::Range<usize>, ChangeKind, ProseChange)>,
 ) {
@@ -3481,8 +3488,15 @@ fn write_buffer_row_change_spans<'a>(
             continue;
         };
         for span in &detail.buffer_spans {
-            let start = span.byte_range.start.max(line_start);
-            let end = span.byte_range.end.min(line_end);
+            let (span_start, span_end) = match drift {
+                Some(patch) => (
+                    patch.old_to_new(span.byte_range.start),
+                    patch.old_to_new(span.byte_range.end),
+                ),
+                None => (span.byte_range.start, span.byte_range.end),
+            };
+            let start = span_start.max(line_start);
+            let end = span_end.min(line_end);
             if start >= end {
                 continue;
             }
@@ -9165,18 +9179,83 @@ mod tests {
         let mut hunks = Vec::new();
         let mut spans = Vec::new();
 
-        write_buffer_row_change_spans(&snapshot, 1, 1, &mut hunks, &mut spans);
+        write_buffer_row_change_spans(&snapshot, 1, 1, None, &mut hunks, &mut spans);
         assert_eq!(
             spans,
             vec![(0..2, ChangeKind::Replaced, ProseChange::None)],
             "the modified row reports the span covering its changed bytes",
         );
 
-        write_buffer_row_change_spans(&snapshot, 2, 2, &mut hunks, &mut spans);
+        write_buffer_row_change_spans(&snapshot, 2, 2, None, &mut hunks, &mut spans);
         assert_eq!(
             spans,
             Vec::new(),
             "the unmodified row after it reports nothing of its own",
+        );
+    }
+
+    /// A changed span stays on its text while the reader types, before the
+    /// next diff lands.
+    #[test]
+    fn a_span_stays_on_its_text_while_text_is_typed_before_it() {
+        let mut tb = TextBuffer::with_text(BufferId::new(0), "aa\nbb::cc\n");
+        let mut dm = DiffMap::from_hunks(
+            [DiffHunk {
+                status: DiffHunkStatus::Modified,
+                unstaged_lines: std::iter::once(1..2).collect(),
+                marked_rows: Vec::new(),
+                buffer_start_line: 1,
+                buffer_line_range: 1..2,
+                base_byte_range: 0..0,
+                anchor_range: None,
+                token_detail: Some(Arc::new(TokenDetail {
+                    buffer_spans: vec![ChangeSpan {
+                        byte_range: 7..9,
+                        kind: ChangeKind::Replaced,
+                        move_metadata: None,
+                        prose: ProseChange::None,
+                    }],
+                    base_spans: Vec::new(),
+                    tree: false,
+                })),
+            }],
+            None,
+        );
+        dm.anchor_hunks(&tb.snapshot);
+        tb.diff_map = Some(dm);
+        let shared = Arc::new(RwLock::new(tb));
+        let executor = Executor::new(Arc::new(TestScheduler::new()));
+        let mut editor = EditorState::new(
+            BufferId::new(0),
+            shared.clone(),
+            executor,
+            crate::test_notify(),
+        );
+        editor.set_diff_view(true);
+
+        let mut row_spans = || {
+            let snapshot = editor.display_map.snapshot();
+            let drift = snapshot
+                .diff_map()
+                .and_then(|dm| dm.span_drift(snapshot.buffer_snapshot()));
+            let (mut hunks, mut spans) = (Vec::new(), Vec::new());
+            write_buffer_row_change_spans(&snapshot, 1, 1, drift.as_ref(), &mut hunks, &mut spans);
+            spans
+        };
+        let span = |columns| vec![(columns, ChangeKind::Replaced, ProseChange::None)];
+
+        assert_eq!(row_spans(), span(4..6), "the span covers cc");
+        shared.write().expect("poisoned").edit(0..0, "x");
+        assert_eq!(
+            row_spans(),
+            span(4..6),
+            "text typed on the row above leaves the span on cc",
+        );
+        shared.write().expect("poisoned").edit(4..4, "y");
+        assert_eq!(
+            row_spans(),
+            span(5..7),
+            "text typed before the span on its own row moves it",
         );
     }
 

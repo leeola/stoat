@@ -17,7 +17,8 @@ use std::{
     },
 };
 use stoat_text::{
-    Anchor, Bias, ContextLessSummary, Dimension, Item, Point, Rope, SeekTarget, SumTree,
+    patch::Patch, Anchor, Bias, ContextLessSummary, Dimension, Item, Point, Rope, SeekTarget,
+    SumTree,
 };
 
 static DIFF_MAP_VERSION_COUNTER: AtomicUsize = AtomicUsize::new(1);
@@ -731,6 +732,13 @@ pub struct DiffMap {
     /// What the hunks' staged state means in this map.
     mark_kind: MarkKind,
     version: usize,
+    /// The version of the buffer text that the diff ran against, as
+    /// [`Self::anchor_hunks`] records it.
+    ///
+    /// A reader that holds a later text carries the token spans across the
+    /// edits between the two, as [`Self::span_drift`] answers them. `None` for
+    /// a map that was never anchored, whose spans read as stored.
+    text_version: Option<u64>,
     /// What [`Self::live_hunks`] last resolved, so the four callers that ask
     /// per frame pay for one walk between them.
     ///
@@ -842,6 +850,7 @@ impl DiffMap {
             staged_tally,
             mark_kind: MarkKind::default(),
             version: Self::next_version(),
+            text_version: None,
             resolved_rows: Arc::new(Mutex::new(None)),
         }
     }
@@ -920,6 +929,7 @@ impl DiffMap {
     /// redraws the boundary. The alternative loses the hunk's mark on that line
     /// entirely, so the drift is the better trade.
     pub fn anchor_hunks(&mut self, snapshot: &TextBufferSnapshot) {
+        self.text_version = Some(snapshot.version);
         if self.hunks.is_empty() {
             return;
         }
@@ -1090,6 +1100,21 @@ impl DiffMap {
             staged,
         });
         held.answer(|i| live[i].0, self.mark_kind)
+    }
+
+    /// The edits that carry an offset of the text the diff ran against to
+    /// `buffer`, or `None` when the two texts are equal or the map was never
+    /// anchored.
+    ///
+    /// Costs one walk of the buffer's changed fragments, so a caller asks once
+    /// per paint and not once per row.
+    pub(crate) fn span_drift(&self, buffer: &MultiBufferSnapshot) -> Option<Patch<usize>> {
+        let since = self.text_version?;
+        if since == buffer.version() {
+            return None;
+        }
+        let patch = buffer.edits_since(since);
+        (!patch.is_empty()).then_some(patch)
     }
 
     pub fn version(&self) -> usize {
@@ -3292,6 +3317,41 @@ mod tests {
         assert!(
             dm.gutter_mark_for_line(3).is_some(),
             "while the stored rows still name where the diff ran",
+        );
+    }
+
+    /// A map carries its spans only across the edits made after the text it
+    /// was anchored to, so it answers no drift before that text moves.
+    #[test]
+    fn span_drift_is_none_until_the_text_moves() {
+        use crate::{
+            buffer::{BufferId, TextBuffer},
+            multi_buffer::MultiBuffer,
+        };
+        use std::sync::RwLock;
+
+        let shared = Arc::new(RwLock::new(TextBuffer::with_text(
+            BufferId::new(0),
+            "l0\nl1\n",
+        )));
+        let multi = MultiBuffer::singleton(shared.clone());
+        let never_anchored = DiffMap::from_hunks([added_hunk(1..2)], None);
+        let mut anchored = DiffMap::from_hunks([added_hunk(1..2)], None);
+        anchored.anchor_hunks(&shared.read().expect("poisoned").snapshot);
+        let at_the_anchor = anchored.span_drift(&multi.snapshot()).is_none();
+
+        shared.write().expect("poisoned").edit(0..0, "new\n");
+        let snapshot = multi.snapshot();
+        assert_eq!(
+            (
+                never_anchored.span_drift(&snapshot).is_none(),
+                at_the_anchor,
+                anchored
+                    .span_drift(&snapshot)
+                    .map(|patch| patch.old_to_new(3)),
+            ),
+            (true, true, Some(7)),
+            "no drift with no anchor or at the anchored text, then the edit carries 3 to 7",
         );
     }
 
