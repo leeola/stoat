@@ -3,9 +3,9 @@ use crate::{
         agent::SpawnClaude,
         app::{OpenLogs, PinMode, Quit, QuitAll, QuitAllCancel, QuitAllConfirm, ShowVersion},
         blame::{
-            BlameCard, BlameCardClose, BlameCopySha, BlamePreview, CommitPreviewClose,
-            CommitPreviewLineDown, CommitPreviewLineUp, CommitPreviewNextFile, CommitPreviewParent,
-            CommitPreviewPrevFile, ToggleBlame,
+            BlameCard, BlameCardClose, BlameCheckout, BlameCopySha, BlamePreview,
+            CommitPreviewClose, CommitPreviewLineDown, CommitPreviewLineUp, CommitPreviewNextFile,
+            CommitPreviewParent, CommitPreviewPrevFile, ToggleBlame,
         },
         commits::{
             CloseCommits, CommitsDetailDown, CommitsDetailUp, CommitsFirst, CommitsLast,
@@ -361,6 +361,7 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
     add(BlameCardClose::DEF, |_| Ok(Box::new(BlameCardClose)));
     add(BlameCopySha::DEF, |_| Ok(Box::new(BlameCopySha)));
     add(BlamePreview::DEF, |_| Ok(Box::new(BlamePreview)));
+    add(BlameCheckout::DEF, |_| Ok(Box::new(BlameCheckout)));
     add(CommitPreviewClose::DEF, |_| {
         Ok(Box::new(CommitPreviewClose))
     });
@@ -1630,6 +1631,7 @@ mod tests {
         "BlameCardClose",
         "BlameCopySha",
         "BlamePreview",
+        "BlameCheckout",
         "CommitPreviewClose",
         "CommitPreviewLineDown",
         "CommitPreviewLineUp",
@@ -2229,7 +2231,8 @@ mod tests {
         // + 4 the Commit Preview actions.
         // + 2 CommitPreviewNextFile/CommitPreviewPrevFile.
         // + 1 CommitPreviewParent.
-        assert_eq!(all().count(), 506);
+        // + 1 BlameCheckout.
+        assert_eq!(all().count(), 507);
     }
 
     #[test]

@@ -30,6 +30,21 @@ pub(crate) enum WalkSpan {
     },
 }
 
+/// Where a walk started, which decides what each of its landings shows.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum WalkOrigin {
+    /// The commit list, a review, or a walkthrough. A landing shows the
+    /// commit's first changed file, or the file the start names, in the
+    /// per-file diff.
+    Commits,
+    /// A blamed line. A landing shows the line's file at the line, under the
+    /// changes view.
+    ///
+    /// `path` is the repo-relative path and `row` the 0-based line that the
+    /// blamed line has in the walked commit.
+    Blame { path: PathBuf, row: u32 },
+}
+
 /// A walk through a run of commits, showing each one's diff in turn.
 ///
 /// The working tree follows the cursor. Stepping checks the current commit out
@@ -46,6 +61,7 @@ pub(crate) struct ReviewWalk {
     pub(crate) cursor: usize,
     pub(crate) return_ref: ReturnRef,
     pub(crate) span: WalkSpan,
+    pub(crate) origin: WalkOrigin,
 }
 
 impl ReviewWalk {
@@ -82,7 +98,7 @@ impl ReviewWalk {
 
 #[cfg(test)]
 mod tests {
-    use super::{ReturnRef, ReviewWalk, WalkSpan};
+    use super::{ReturnRef, ReviewWalk, WalkOrigin, WalkSpan};
     use crate::host::CommitInfo;
     use std::path::PathBuf;
 
@@ -103,6 +119,7 @@ mod tests {
             cursor: 0,
             return_ref: ReturnRef::Branch("main".into()),
             span: WalkSpan::Commits,
+            origin: WalkOrigin::Commits,
         }
     }
 

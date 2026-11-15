@@ -446,7 +446,10 @@ mod tests {
                 format!("{:\u{2500}<56}", "c2 two"),
                 meta,
                 format!("{:<56}", "the body of two"),
-                format!("{:\u{2500}<56}", "Ret preview patch  y copy sha  Esc close"),
+                format!(
+                    "{:\u{2500}<56}",
+                    "Ret preview patch  c check out  y copy sha  Esc close"
+                ),
             ],
         );
     }

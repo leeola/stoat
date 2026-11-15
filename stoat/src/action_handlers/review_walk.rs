@@ -7,7 +7,7 @@ use crate::{
     commit_picker::{self, CommitPicker, CommitPickerRole, LoadedCommits, RangeFrom},
     git_jobs::{self, GitJob, GitJobKey, GitLanding, GitWork},
     host::CommitInfo,
-    review_walk::{ReturnRef, ReviewWalk, WalkSpan},
+    review_walk::{ReturnRef, ReviewWalk, WalkOrigin, WalkSpan},
     wake,
     workspace::diff::DiffBase,
 };
@@ -82,6 +82,7 @@ pub(crate) fn review(stoat: &mut Stoat, from: Option<&str>, against: Option<&str
                         WalkLandingKind::Walk,
                         span,
                         None,
+                        WalkOrigin::Commits,
                     );
                 },
                 Err((label, detail)) => {
@@ -734,6 +735,7 @@ fn install_walk(stoat: &mut Stoat) -> UpdateEffect {
         WalkLandingKind::Walk,
         WalkSpan::Commits,
         None,
+        WalkOrigin::Commits,
     );
     UpdateEffect::Redraw
 }
@@ -759,6 +761,9 @@ fn install_walk(stoat: &mut Stoat) -> UpdateEffect {
 /// `open` names the file the first landing shows in place of the commit's first
 /// changed file, for a caller that knows which file the reader stands on. Every
 /// later step shows its own commit's first file.
+///
+/// `origin` decides what each landing of the walk shows, as [`WalkOrigin`]
+/// describes.
 pub(super) fn queue_walk_start(
     stoat: &mut Stoat,
     workdir: PathBuf,
@@ -766,6 +771,7 @@ pub(super) fn queue_walk_start(
     kind: WalkLandingKind,
     span: WalkSpan,
     open: Option<PathBuf>,
+    origin: WalkOrigin,
 ) {
     let job = GitJob::new(
         "walk start",
@@ -810,6 +816,7 @@ pub(super) fn queue_walk_start(
                 cursor: 0,
                 return_ref,
                 span,
+                origin,
             });
 
             let (workdir, sha, standing) = walk_position(stoat)?;
@@ -868,6 +875,36 @@ pub(super) fn walk_one_commit(
         WalkLandingKind::Walk,
         WalkSpan::Commits,
         open,
+        WalkOrigin::Commits,
+    );
+    UpdateEffect::Redraw
+}
+
+/// Start a walk over `commit` alone for a blamed line, and land on the line.
+///
+/// `path` and `row` are the repo-relative path and the 0-based line that the
+/// blamed line has in `commit`. The landing opens that file at that line and
+/// opens the changes view over it, which lands on the same line. The walk is a
+/// walk of one in every other way, so `:done` puts the tree back as it does for
+/// any walk.
+///
+/// The walk starts at its queued job's turn, as [`queue_walk_start`]
+/// describes, so the walk does not exist yet when this returns.
+pub(super) fn walk_blame_commit(
+    stoat: &mut Stoat,
+    workdir: PathBuf,
+    commit: CommitInfo,
+    path: PathBuf,
+    row: u32,
+) -> UpdateEffect {
+    queue_walk_start(
+        stoat,
+        workdir,
+        vec![commit],
+        WalkLandingKind::Walk,
+        WalkSpan::Commits,
+        Some(path.clone()),
+        WalkOrigin::Blame { path, row },
     );
     UpdateEffect::Redraw
 }
@@ -1475,12 +1512,14 @@ fn land_walk_checkout(
 /// Show a landed commit, with its parent as the diff base and its first changed
 /// path on screen.
 ///
-/// The same three steps [`super::review::land_diff_on_commit`] takes, against
-/// values the job already read rather than reads made here. A range review
-/// takes its merge base as the diff base instead, named by both refs.
+/// The landing sets the diff base, names the walk's place in the Review badge,
+/// and opens the path in the per-file diff, all from values the job already
+/// read. A range review takes its merge base as the diff base instead, named
+/// by both refs.
 ///
 /// A walkthrough's landing hands the screen to the tour instead, which opens
-/// the file its stop names on `sha`.
+/// the file its stop names on `sha`. A blame walk's landing raises no badge,
+/// and it opens the blamed file at the blamed line under the changes view.
 fn land_walk(
     stoat: &mut Stoat,
     kind: WalkLandingKind,
@@ -1489,13 +1528,12 @@ fn land_walk(
     sha: &str,
     landing: WalkLanding,
 ) {
-    let span = stoat
+    let walk = stoat
         .active_workspace()
         .review_walk
         .as_ref()
-        .filter(|_| kind.follows_walk())
-        .map(|walk| &walk.span);
-    let base = match span {
+        .filter(|_| kind.follows_walk());
+    let base = match walk.map(|walk| &walk.span) {
         Some(WalkSpan::Range {
             base,
             from,
@@ -1503,7 +1541,17 @@ fn land_walk(
         }) => DiffBase::review(base.clone(), from, against),
         Some(WalkSpan::Commits) | None => DiffBase::parent_of(sha, landing.parent),
     };
+    let origin = walk.map(|walk| walk.origin.clone());
     stoat.active_workspace_mut().set_diff_base(Some(base));
+
+    if let Some(WalkOrigin::Blame { path, row }) = origin {
+        super::file::open_file(stoat, &workdir.join(path), OpenOrigin::Visited);
+        if let Some(editor) = super::focused_editor_mut(stoat) {
+            super::movement::set_cursor_row(editor, row);
+        }
+        super::diff_changes::open_diff_changes(stoat);
+        return;
+    }
     super::review::emit_review_info_badge(stoat, standing);
 
     if kind == WalkLandingKind::Walkthrough {
@@ -1573,7 +1621,7 @@ fn walk_position(stoat: &Stoat) -> Option<(PathBuf, String, String)> {
 mod tests {
     use super::{
         queue_walk_landing, queue_walk_start, walk_navigate_as, walk_one_commit, ReturnRef,
-        ReviewWalk, WalkLandingKind, WalkSpan,
+        ReviewWalk, WalkLandingKind, WalkOrigin, WalkSpan,
     };
     use crate::{
         app::Stoat,
@@ -2974,6 +3022,7 @@ mod tests {
             cursor: 0,
             return_ref: ReturnRef::Branch("main".to_string()),
             span: WalkSpan::Commits,
+            origin: WalkOrigin::Commits,
         }
     }
 
@@ -3454,6 +3503,7 @@ mod tests {
             WalkLandingKind::Walk,
             span,
             None,
+            WalkOrigin::Commits,
         );
         h.settle();
         let landed = (

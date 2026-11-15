@@ -729,6 +729,7 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
         ActionKind::BlameCardClose => blame::close_card(stoat),
         ActionKind::BlameCopySha => blame::copy_sha(stoat),
         ActionKind::BlamePreview => blame::preview(stoat),
+        ActionKind::BlameCheckout => blame::checkout(stoat),
         ActionKind::CommitPreviewClose => commit_preview::close(stoat),
         ActionKind::CommitPreviewLineDown => commit_preview::scroll_by(stoat, 1),
         ActionKind::CommitPreviewLineUp => commit_preview::scroll_by(stoat, -1),

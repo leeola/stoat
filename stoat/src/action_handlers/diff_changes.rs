@@ -696,7 +696,7 @@ pub(crate) fn respawn_diff_changes_panes(stoat: &mut Stoat) {
 /// An open re-reads the git state. It stales every diff map and the repository
 /// tally, since a commit or a write that no watcher event reported otherwise
 /// leaves the stack on the tree before it.
-fn open_diff_changes(stoat: &mut Stoat) -> UpdateEffect {
+pub(super) fn open_diff_changes(stoat: &mut Stoat) -> UpdateEffect {
     // Before the landing's map is wanted below, so that want reads fresh blobs
     // rather than landing superseded and diffing a second time.
     let ws = stoat.active_workspace_mut();

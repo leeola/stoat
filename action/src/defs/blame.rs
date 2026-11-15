@@ -68,6 +68,20 @@ define_action!(
 );
 
 define_action!(
+    BlameCheckoutDef,
+    BlameCheckout,
+    "BlameCheckout",
+    ActionKind::BlameCheckout,
+    "check the commit out",
+    "Check out the commit that last changed the cursor line of a blamed pane, \
+     detached, and open the changes view on that line against the commit's \
+     parent. The checkout is a review walk of one commit, so :done returns. \
+     Tracked changes, unsaved buffers, an open walk, and a rebase refuse it.",
+    ActionPriority::Rare,
+    palette_visible = false
+);
+
+define_action!(
     CommitPreviewCloseDef,
     CommitPreviewClose,
     "CommitPreviewClose",

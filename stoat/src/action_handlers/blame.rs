@@ -1,5 +1,5 @@
 use crate::{
-    action_handlers::review,
+    action_handlers::{review, review_walk},
     app::{Stoat, UpdateEffect},
     blame::{self, BlameCard, CommitDetails, LineBlame},
     buffer::BufferId,
@@ -22,6 +22,9 @@ const BLAME_CARD_REST: Duration = Duration::from_millis(500);
 
 /// The status a blame key sets on a line whose blame has not landed.
 const BLAME_LOADING: &str = "blame is loading";
+
+/// The status a blame key sets on a line that no commit holds.
+const LINE_UNCOMMITTED: &str = "line is not committed";
 
 /// The rest the card's timer waits on, as the focused editor, its cursor's
 /// buffer row, and its buffer's version.
@@ -75,7 +78,7 @@ pub(super) fn open_card(stoat: &mut Stoat, announce: bool) -> UpdateEffect {
     };
     let LineBlame::Commit { commit, .. } = line else {
         if announce {
-            stoat.set_status("line is not committed");
+            stoat.set_status(LINE_UNCOMMITTED);
         }
         return UpdateEffect::Redraw;
     };
@@ -181,6 +184,59 @@ pub(super) fn preview(stoat: &mut Stoat) -> UpdateEffect {
 
     commit_preview::open(stoat, commit, origin);
     UpdateEffect::Redraw
+}
+
+/// Check the commit of the cursor's line out, and show the line in the changes
+/// view against the commit's parent.
+///
+/// The checkout is a review walk of one commit, so `:done` puts HEAD back. A
+/// pane that does not blame checks nothing out. A line whose blame has not
+/// landed and an uncommitted line check nothing out, and the status row says
+/// why. An open walk, a running rebase, a buffer with unsaved edits, and
+/// tracked changes in the working tree refuse the checkout, and the Review
+/// badge says why.
+pub(super) fn checkout(stoat: &mut Stoat) -> UpdateEffect {
+    if blamed_cursor(stoat).is_none() {
+        return UpdateEffect::None;
+    }
+    let (commit, path, row) = match cursor_line_blame(stoat) {
+        None => {
+            stoat.set_status(BLAME_LOADING);
+            return UpdateEffect::Redraw;
+        },
+        Some((_, _, LineBlame::Uncommitted)) => {
+            stoat.set_status(LINE_UNCOMMITTED);
+            return UpdateEffect::Redraw;
+        },
+        Some((
+            _,
+            _,
+            LineBlame::Commit {
+                commit,
+                commit_line,
+                commit_path,
+                ..
+            },
+        )) => (commit.info.clone(), commit_path.to_path_buf(), commit_line),
+    };
+
+    let Some(workdir) = review_walk::checkout_repo(stoat).and_then(|repo| repo.workdir()) else {
+        return UpdateEffect::Redraw;
+    };
+    // A checkout writes the files under the buffers, and the reload after it
+    // passes over a buffer with unsaved edits. That buffer keeps the text of
+    // the commit the reader left, and a write puts it over the checked-out file.
+    if !stoat.active_workspace().buffers.dirty_buffers().is_empty() {
+        review::emit_review_error_badge(
+            stoat,
+            "unsaved buffers",
+            Some("write or discard them before a checkout".to_string()),
+        );
+        return UpdateEffect::Redraw;
+    }
+
+    stoat.blame_card = None;
+    review_walk::walk_blame_commit(stoat, workdir, commit, path, row)
 }
 
 /// Keep the Blame Card in step with the cursor after an event.
@@ -337,7 +393,7 @@ fn acting_commit(stoat: &Stoat) -> Result<BlameCommit, &'static str> {
     }
     match cursor_line_blame(stoat) {
         None => Err(BLAME_LOADING),
-        Some((_, _, LineBlame::Uncommitted)) => Err("line is not committed"),
+        Some((_, _, LineBlame::Uncommitted)) => Err(LINE_UNCOMMITTED),
         Some((_, _, LineBlame::Commit { commit, .. })) => Ok(commit.clone()),
     }
 }
@@ -378,6 +434,7 @@ mod tests {
         action_handlers::{self, dispatch},
         app::Stoat,
         badge::BadgeSource,
+        diff_changes,
         host::ClipboardKind,
         keymap_state,
         lsp::hover::{HoverOutcome, HoverResponse},
@@ -387,6 +444,7 @@ mod tests {
         test_fixture,
         test_harness::{CommitSpec, TestHarness},
         theme::scope,
+        workspace::{diff::DiffBase, Workspace},
     };
     use crossterm::event::MouseEventKind;
     use ratatui::layout::Rect;
@@ -394,7 +452,10 @@ mod tests {
         path::{Path, PathBuf},
         time::Duration,
     };
-    use stoat_action::{BlameCard, BlamePreview, CommitPreviewParent, SetTheme, ToggleBlame};
+    use stoat_action::{
+        BlameCard, BlameCheckout, BlamePreview, CommitPreviewParent, DiffChanges, SetTheme,
+        ToggleBlame,
+    };
     use stoatty_protocol::{
         command::{decode_stream, BorderStyle, Command},
         PROTOCOL_VERSION,
@@ -478,6 +539,7 @@ mod tests {
                 (Some("the body of two"), 1, 1, 0),
                 vec![
                     ("Ret".to_string(), "preview patch".to_string()),
+                    ("c".to_string(), "check out".to_string()),
                     ("y".to_string(), "copy sha".to_string()),
                     ("Esc".to_string(), "close".to_string()),
                 ],
@@ -1191,6 +1253,133 @@ mod tests {
         assert_eq!((built, dropped, preview_built(&h)), (true, false, true));
     }
 
+    /// A checkout from the last line `b2c3d4e5` added closes the Blame Card,
+    /// checks that commit out, detached, and reads it against its parent. The
+    /// changes view opens on the line's file at the line, past the first line
+    /// of its hunk, and the checkout raises no Review badge.
+    #[test]
+    fn a_checkout_opens_the_changes_view_at_the_blamed_line() {
+        let mut h = checkout_history(CHECKOUT_A);
+        h.type_keys("j j K");
+        dispatch(&mut h.stoat, &BlameCheckout);
+        let card = h.stoat.blame_card.is_some();
+        h.settle();
+        assert_eq!(
+            (
+                card,
+                checkouts(&h),
+                base_sha(&h),
+                changes_cursor(&mut h),
+                review_badge(&h),
+            ),
+            (
+                false,
+                vec!["detached:b2c3d4e5".to_string()],
+                Some("a1b2c3d4".to_string()),
+                Some(("a.rs".to_string(), 2)),
+                None,
+            ),
+        );
+    }
+
+    /// The landing shows the blamed line after the reader moved off the line,
+    /// and off its file, while the checkout ran.
+    #[test]
+    fn a_checkout_lands_on_the_blamed_line_after_the_reader_moved() {
+        let mut h = checkout_history(CHECKOUT_A);
+        h.fake_fs().insert_file("/repo/b.rs", "fn b() {}\n");
+        h.type_keys("j j");
+        dispatch(&mut h.stoat, &BlameCheckout);
+        h.stoat.collapse_focused_cursor_to(0);
+        h.stoat.open_file(Path::new("/repo/b.rs"));
+        h.settle();
+        assert_eq!(changes_cursor(&mut h), Some(("a.rs".to_string(), 2)));
+    }
+
+    /// A checkout before the blame lands, or from an edited line, checks
+    /// nothing out, and the status says why.
+    #[test]
+    fn a_checkout_needs_a_commit_for_the_line() {
+        let loading = {
+            let mut h = repo_pane(CHECKOUT_HISTORY, CHECKOUT_A);
+            h.stoat.active_workspace_mut().repo_root = Some(PathBuf::from("/repo"));
+            dispatch(&mut h.stoat, &ToggleBlame);
+            dispatch(&mut h.stoat, &BlameCheckout);
+            h.settle();
+            (checkouts(&h), h.stoat.pending_message.clone())
+        };
+        let edited = {
+            let mut h = checkout_history("fn a() {}\nfn a2() {}\nEDITED\n");
+            h.type_keys("j j c");
+            h.settle();
+            (checkouts(&h), h.stoat.pending_message.clone())
+        };
+        assert_eq!(
+            [loading, edited],
+            [
+                (Vec::new(), Some("blame is loading".to_string())),
+                (Vec::new(), Some("line is not committed".to_string())),
+            ],
+        );
+    }
+
+    /// Tracked changes, an unsaved buffer, and the walk an earlier `c` opened
+    /// each refuse a checkout, and the Review badge says why.
+    #[test]
+    fn c_refuses_over_tracked_changes_unsaved_buffers_and_an_open_walk() {
+        let refused = |seed: &dyn Fn(&mut TestHarness)| {
+            let mut h = checkout_history(CHECKOUT_A);
+            seed(&mut h);
+            h.type_keys("j j c");
+            h.settle();
+            (checkouts(&h), review_badge(&h))
+        };
+        assert_eq!(
+            [
+                refused(&|h| {
+                    h.fake_git().add_repo("/repo").modified(
+                        "b.rs",
+                        "fn b() {}\n",
+                        "fn b() { 1 }\n",
+                    );
+                }),
+                refused(&|h| h.type_keys("i x escape")),
+                refused(&|h| {
+                    h.type_keys("j j c");
+                    h.settle();
+                    dispatch(&mut h.stoat, &DiffChanges);
+                    h.type_keys("k k");
+                }),
+            ],
+            [
+                (Vec::new(), Some("uncommitted changes".to_string())),
+                (Vec::new(), Some("unsaved buffers".to_string())),
+                (
+                    vec!["detached:b2c3d4e5".to_string()],
+                    Some("a review walk is open".to_string()),
+                ),
+            ],
+        );
+    }
+
+    /// In a pane that does not blame, `c` changes the selection, as the plain
+    /// normal keys bind it, and the checkout action does nothing.
+    #[test]
+    fn c_changes_in_a_pane_that_does_not_blame() {
+        let mut h = blamed_repo("one\ntwo\n");
+        h.type_keys("space h a");
+        h.type_keys("c");
+        dispatch(&mut h.stoat, &BlameCheckout);
+        assert_eq!(
+            (
+                h.focused_buffer_text(),
+                h.stoat.focused_mode(),
+                h.stoat.pending_message.clone(),
+            ),
+            ("ne\ntwo\n".to_string(), "insert", None),
+        );
+    }
+
     /// A 120-cell window over `a.rs` of a repository whose first commit writes
     /// `one` and whose second adds `two` under a message with a body, with
     /// `text` in the working tree and the Blame Column on.
@@ -1204,16 +1393,81 @@ mod tests {
         )
     }
 
+    /// `a.rs` as `b2c3d4e5` leaves it, with the two lines that commit added
+    /// after the first.
+    const CHECKOUT_A: &str = "fn a() {}\nfn a2() {}\nfn a3() {}\n";
+
+    /// A history of three commits, in which `a1b2c3d4` writes the first line of
+    /// `a.rs`, `b2c3d4e5` adds two more, and `c3d4e5f6` adds `b.rs`.
+    const CHECKOUT_HISTORY: &[CommitSpec<'static>] = &[
+        ("a1b2c3d4", "feat: add a.rs", &[("a.rs", "fn a() {}\n")]),
+        ("b2c3d4e5", "chore: tweak a", &[("a.rs", CHECKOUT_A)]),
+        (
+            "c3d4e5f6",
+            "feat: add b.rs",
+            &[("a.rs", CHECKOUT_A), ("b.rs", "fn b() {}\n")],
+        ),
+    ];
+
+    /// A 120-cell window over `a.rs` of [`CHECKOUT_HISTORY`] in `/repo` on
+    /// `main` at `c3d4e5f6`, with `text` in the working tree and the Blame
+    /// Column on.
+    fn checkout_history(text: &str) -> TestHarness {
+        let h = blamed_history(CHECKOUT_HISTORY, text);
+        h.fake_git()
+            .add_repo("/repo")
+            .branch("main", "c3d4e5f6")
+            .set_head_branch("main");
+        h
+    }
+
+    /// Each checkout the fake host recorded in `/repo`, oldest first.
+    fn checkouts(h: &TestHarness) -> Vec<String> {
+        h.fake_git().checkouts(Path::new("/repo"))
+    }
+
+    /// The commit the workspace's diff base reads against.
+    fn base_sha(h: &TestHarness) -> Option<String> {
+        match h.stoat.active_workspace().diff_base() {
+            Some(DiffBase::Rev { sha, .. }) => sha.clone(),
+            _ => None,
+        }
+    }
+
+    /// The file and the cursor's buffer row of the focused excerpt of the
+    /// focused changes view.
+    fn changes_cursor(h: &mut TestHarness) -> Option<(String, u32)> {
+        let id = h.stoat.active_workspace().focused_diff_changes_id()?;
+        let Workspace {
+            diff_changes_views,
+            editors,
+            ..
+        } = h.stoat.active_workspace_mut();
+        let excerpt = diff_changes_views.get(id)?.focused_excerpt()?;
+        let editor = editors.get_mut(excerpt.editor_id)?;
+        Some((
+            excerpt.rel_path.clone(),
+            diff_changes::cursor_point(editor).row,
+        ))
+    }
+
     /// A 120-cell window over `a.rs` of a repository that holds `history`, with
     /// `text` in the working tree and the Blame Column on.
     fn blamed_history(history: &[CommitSpec<'_>], text: &str) -> TestHarness {
+        let mut h = repo_pane(history, text);
+        h.type_keys("space h a");
+        h.settle();
+        h
+    }
+
+    /// A 120-cell window over `a.rs` of a repository that holds `history`, with
+    /// `text` in the working tree and the Blame Column off.
+    fn repo_pane(history: &[CommitSpec<'_>], text: &str) -> TestHarness {
         let mut h = TestHarness::with_size(120, 24);
         h.seed_linear_history("/repo", history);
         h.stoat.active_workspace_mut().git_root = PathBuf::from("/repo");
         h.fake_fs().insert_file("/repo/a.rs", text);
         h.open_file(Path::new("/repo/a.rs"));
-        h.type_keys("space h a");
-        h.settle();
         h
     }
 

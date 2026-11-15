@@ -10,7 +10,7 @@ use crate::{
         text::text_width,
         walkthrough::{SlideParts, EXIT_MS},
     },
-    review_walk::WalkSpan,
+    review_walk::{WalkOrigin, WalkSpan},
     walkthrough::{
         self,
         run::{part, WalkthroughRun},
@@ -140,6 +140,7 @@ fn open_commit_tour(stoat: &mut Stoat, run: WalkthroughRun, git_root: &Path) -> 
         WalkLandingKind::Walkthrough,
         WalkSpan::Commits,
         None,
+        WalkOrigin::Commits,
     );
     stoat.set_status(format!("checking out {first:.7}"));
     UpdateEffect::Redraw

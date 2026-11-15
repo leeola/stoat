@@ -1522,6 +1522,7 @@ on key {
     !modal && mode == normal && blame {
         K -> BlameCard();
         Enter -> BlamePreview() "preview patch";
+        c -> BlameCheckout() "check out";
         y -> BlameCopySha() "copy sha";
         blame_card {
             Escape -> BlameCardClose() "close";

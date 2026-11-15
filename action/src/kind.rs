@@ -82,6 +82,7 @@ action_kinds! {
     BlameCardClose,
     BlameCopySha,
     BlamePreview,
+    BlameCheckout,
     CommitPreviewClose,
     CommitPreviewLineDown,
     CommitPreviewLineUp,
