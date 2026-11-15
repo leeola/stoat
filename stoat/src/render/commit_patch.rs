@@ -156,6 +156,20 @@ pub(crate) fn origin_scroll(rows: &[PatchRow], origin: usize, body_rows: usize) 
     }
 }
 
+/// The file count and the added and removed lines of `doc`, as its File
+/// Headers count them.
+///
+/// The Commit Preview's meta line reads this for a patch whose build carries
+/// no change summary, which is the patch of a merge against a parent other
+/// than the first.
+pub(crate) fn patch_summary(doc: &DiffDocument) -> (usize, u32, u32) {
+    (0..doc.files.len())
+        .map(|file| file_stats(doc, file))
+        .fold((doc.files.len(), 0, 0), |(files, added, removed), stats| {
+            (files, added + stats.added, removed + stats.removed)
+        })
+}
+
 /// Paint `rows`, the rows of `doc`'s patch from the scroll on, into `area`,
 /// one row per screen row from its top.
 ///

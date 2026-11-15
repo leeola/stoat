@@ -4,7 +4,7 @@ use crate::{
         app::{OpenLogs, PinMode, Quit, QuitAll, QuitAllCancel, QuitAllConfirm, ShowVersion},
         blame::{
             BlameCard, BlameCardClose, BlameCopySha, BlamePreview, CommitPreviewClose,
-            CommitPreviewLineDown, CommitPreviewLineUp, CommitPreviewNextFile,
+            CommitPreviewLineDown, CommitPreviewLineUp, CommitPreviewNextFile, CommitPreviewParent,
             CommitPreviewPrevFile, ToggleBlame,
         },
         commits::{
@@ -375,6 +375,9 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
     });
     add(CommitPreviewPrevFile::DEF, |_| {
         Ok(Box::new(CommitPreviewPrevFile))
+    });
+    add(CommitPreviewParent::DEF, |_| {
+        Ok(Box::new(CommitPreviewParent))
     });
     add(DiffUnderline::DEF, |_| Ok(Box::new(DiffUnderline)));
     add(DiffBold::DEF, |_| Ok(Box::new(DiffBold)));
@@ -1632,6 +1635,7 @@ mod tests {
         "CommitPreviewLineUp",
         "CommitPreviewNextFile",
         "CommitPreviewPrevFile",
+        "CommitPreviewParent",
         "DiffUnderline",
         "DiffBold",
         "DiffSyntax",
@@ -2224,7 +2228,8 @@ mod tests {
         // + 1 BlameCopySha.
         // + 4 the Commit Preview actions.
         // + 2 CommitPreviewNextFile/CommitPreviewPrevFile.
-        assert_eq!(all().count(), 505);
+        // + 1 CommitPreviewParent.
+        assert_eq!(all().count(), 506);
     }
 
     #[test]

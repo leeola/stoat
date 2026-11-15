@@ -1846,7 +1846,7 @@ fn index_row_through(
 /// commit still shows as whole-file additions rather than as nothing. The scans
 /// have always been this forgiving, having read the base tree with a default on
 /// failure.
-pub(super) fn changed_or_whole(
+pub(crate) fn changed_or_whole(
     repo: &dyn GitRepo,
     base: Option<&str>,
     new: &str,
@@ -1865,9 +1865,9 @@ pub(super) fn changed_or_whole(
 /// parse of each buffer whose language has an outline query.
 ///
 /// Takes the language registry directly rather than `&Stoat` so it runs
-/// inside the off-loop scan closures, including the commit-preview build in
-/// the sibling `commits` module.
-pub(super) fn build_document_from_changes(
+/// inside the off-loop scan closures, including the commit-preview builds in
+/// the sibling `commits` module and in [`crate::commit_preview`].
+pub(crate) fn build_document_from_changes(
     langs: &LanguageRegistry,
     workdir: &Path,
     changes: Vec<(std::path::PathBuf, String, String)>,

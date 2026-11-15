@@ -394,7 +394,7 @@ mod tests {
         path::{Path, PathBuf},
         time::Duration,
     };
-    use stoat_action::{BlameCard, BlamePreview, SetTheme, ToggleBlame};
+    use stoat_action::{BlameCard, BlamePreview, CommitPreviewParent, SetTheme, ToggleBlame};
     use stoatty_protocol::{
         command::{decode_stream, BorderStyle, Command},
         PROTOCOL_VERSION,
@@ -910,6 +910,105 @@ mod tests {
         );
     }
 
+    /// `P` reads a merge's patch against its second parent, and a second `P`
+    /// against its first again. Each patch lists the files that differ from its
+    /// parent and carries their syntax colors, and its meta line names that
+    /// parent and counts the patch. Only the first parent's patch rings the
+    /// origin. A theme switch builds the patch again against the parent it
+    /// reads.
+    #[test]
+    fn p_steps_a_merge_preview_through_its_parents() {
+        let mut h = merge_preview();
+        let opened = parent_view(&mut h);
+        h.type_keys("P");
+        h.settle();
+        let stepped = parent_view(&mut h);
+        dispatch(
+            &mut h.stoat,
+            &SetTheme {
+                name: "default_dark".into(),
+            },
+        );
+        h.settle();
+        let themed = parent_view(&mut h);
+        h.type_keys("P");
+        h.settle();
+
+        let view = |parent: usize, files: &[&str], ringed: bool, against: &str| {
+            let files: Vec<String> = files.iter().map(|file| file.to_string()).collect();
+            let meta = format!("fake \u{b7} 2023/11/14 22:13 \u{b7} against parent {against}");
+            (parent, files, ringed, true, meta)
+        };
+        let first = view(0, &["a.rs"], true, "m3 \u{b7} 1 file +1 \u{2212}0");
+        let second = view(
+            1,
+            &["a.rs", "c.rs"],
+            false,
+            "s2 \u{b7} 2 files +2 \u{2212}0",
+        );
+        assert_eq!(
+            [opened, stepped, themed, parent_view(&mut h)],
+            [first.clone(), second.clone(), second, first],
+        );
+    }
+
+    /// A step to another parent drops the patch, its rows, its summary, and its
+    /// origin row until the next build lands, and starts that patch at its top.
+    #[test]
+    fn a_parent_step_drops_the_patch_until_its_build_lands() {
+        let mut h = merge_preview();
+        if let Some(preview) = h.stoat.commit_preview.as_mut() {
+            preview.scroll = 2;
+        }
+        dispatch(&mut h.stoat, &CommitPreviewParent);
+
+        let preview = h
+            .stoat
+            .commit_preview
+            .as_ref()
+            .expect("the preview is open");
+        assert_eq!(
+            (
+                preview.parent,
+                preview.document.is_none(),
+                preview.rows.len(),
+                preview.summary,
+                preview.origin_row,
+                preview.scroll,
+            ),
+            (1, true, 0, None, None, 0),
+        );
+    }
+
+    /// `P` on a commit with one parent or none keeps the patch it shows, and
+    /// the status says why.
+    #[test]
+    fn p_on_a_commit_with_one_parent_or_none_keeps_its_patch() {
+        let press = |history: &[CommitSpec<'_>], keys: &str| {
+            let mut h = blamed_history(history, "one\ntwo\n");
+            h.type_keys(keys);
+            h.settle();
+            h.type_keys("P");
+            (h.stoat.pending_message.take(), preview_built(&h))
+        };
+        assert_eq!(
+            [
+                press(&[("c1", "one", &[("a.rs", "one\ntwo\n")])], "enter"),
+                press(
+                    &[
+                        ("c1", "one", &[("a.rs", "one\n")]),
+                        ("c2", "two", &[("a.rs", "one\ntwo\n")]),
+                    ],
+                    "j enter",
+                ),
+            ],
+            [
+                (Some("commit has no parent".to_string()), true),
+                (Some("commit has one parent".to_string()), true),
+            ],
+        );
+    }
+
     /// A preview opened from a line the commit added in the second of its two
     /// files opens with that file's header at the top of the body. Under a live
     /// scene a light ring in the focused border's color marks the line's row,
@@ -1173,6 +1272,41 @@ mod tests {
         h
     }
 
+    /// A 120-cell window with the Commit Preview open on the merge `m4`, its
+    /// patch built and its box drawn in cells.
+    ///
+    /// `c1` writes `a.rs`. The side branch `s2` adds `side` to it, and the
+    /// mainline `m3` adds `main` and the file `c.rs`. `m4` merges `s2` into
+    /// `m3`, so its first parent lacks the `side` line that the preview opens
+    /// from.
+    fn merge_preview() -> TestHarness {
+        let mut h = TestHarness::with_size(120, 24);
+        h.fake_git()
+            .add_repo("/repo")
+            .commit_with_message("c1", "one", &[("a.rs", "one\n")])
+            .commit_with_parent_message("s2", "c1", "side", &[("a.rs", "one\nside\n")])
+            .commit_with_parent_message(
+                "m3",
+                "c1",
+                "main",
+                &[("a.rs", "one\nmain\n"), ("c.rs", "c\n")],
+            )
+            .merge_commit(
+                "m4",
+                "s2",
+                &[("a.rs", "one\nmain\nside\n"), ("c.rs", "c\n")],
+            );
+        h.stoat.active_workspace_mut().git_root = PathBuf::from("/repo");
+        h.fake_fs().insert_file("/repo/a.rs", "one\nmain\nside\n");
+        h.open_file(Path::new("/repo/a.rs"));
+        h.type_keys("space h a");
+        h.settle();
+        h.stoat.stoatty = false;
+        h.type_keys("j j enter");
+        h.settle();
+        h
+    }
+
     /// The rows the open preview's patch scrolls down by.
     fn preview_scroll(h: &TestHarness) -> Option<usize> {
         h.stoat
@@ -1190,6 +1324,38 @@ mod tests {
             PatchRow::Header { file } => Some(doc.files[*file].rel_path.clone()),
             _ => None,
         }
+    }
+
+    /// The open preview's parent index, the files of its patch, whether the
+    /// patch rings the origin, whether each file carries its syntax colors, and
+    /// the meta line that a cell box draws.
+    fn parent_view(h: &mut TestHarness) -> (usize, Vec<String>, bool, bool, String) {
+        h.snapshot();
+        let meta = h
+            .rendered_text()
+            .lines()
+            .nth(5)
+            .map(|row| row.chars().skip(15).take(91).collect::<String>())
+            .unwrap_or_default();
+        let preview = h
+            .stoat
+            .commit_preview
+            .as_ref()
+            .expect("the preview is open");
+        let doc = preview
+            .document
+            .clone()
+            .flatten()
+            .expect("the patch landed");
+        (
+            preview.parent,
+            doc.files.iter().map(|file| file.rel_path.clone()).collect(),
+            preview.origin_row.is_some(),
+            doc.files
+                .iter()
+                .all(|file| file.buffer_highlights.is_some()),
+            meta.trim_end().to_string(),
+        )
     }
 
     /// Whether the open preview's build landed.

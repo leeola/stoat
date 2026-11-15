@@ -125,3 +125,16 @@ define_action!(
     ActionPriority::Rare,
     palette_visible = false
 );
+
+define_action!(
+    CommitPreviewParentDef,
+    CommitPreviewParent,
+    "CommitPreviewParent",
+    ActionKind::CommitPreviewParent,
+    "preview against the next parent",
+    "Show the patch of the Commit Preview against the next parent of a merge, \
+     and go back to the first parent after the last. A commit with one parent \
+     or none keeps its patch, and the status says so.",
+    ActionPriority::Rare,
+    palette_visible = false
+);
