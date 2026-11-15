@@ -3,14 +3,14 @@ use crate::{
     app::{Stoat, UpdateEffect},
     blame::{self, BlameCard, CommitDetails, LineBlame},
     buffer::BufferId,
-    commit_preview,
+    commit_preview::{self, PreviewOrigin},
     editor_state::EditorId,
     host::{self, BlameCommit, ClipboardKind},
     keymap_state::{self, StoatKeymapState},
     pane::{FocusTarget, View},
     render::editor,
 };
-use std::{sync::Arc, time::Duration};
+use std::{path::Path, sync::Arc, time::Duration};
 use stoat_scheduler::Task;
 
 /// How long the cursor rests on a committed line of a blamed pane before the
@@ -19,6 +19,9 @@ use stoat_scheduler::Task;
 /// The BlameFlow board opens the card "after a moment" and names no setting,
 /// so the wait is a constant.
 const BLAME_CARD_REST: Duration = Duration::from_millis(500);
+
+/// The status a blame key sets on a line whose blame has not landed.
+const BLAME_LOADING: &str = "blame is loading";
 
 /// The rest the card's timer waits on, as the focused editor, its cursor's
 /// buffer row, and its buffer's version.
@@ -66,7 +69,7 @@ pub(super) fn open_card(stoat: &mut Stoat, announce: bool) -> UpdateEffect {
     }
     let Some((editor, row, line)) = cursor_line_blame(stoat) else {
         if announce {
-            stoat.set_status("blame is loading");
+            stoat.set_status(BLAME_LOADING);
         }
         return UpdateEffect::Redraw;
     };
@@ -136,23 +139,47 @@ pub(super) fn copy_sha(stoat: &mut Stoat) -> UpdateEffect {
 /// Open the Commit Preview on the commit of the cursor's line, or the
 /// working-tree diff on an uncommitted line.
 ///
-/// A pane that does not blame opens nothing. A line whose blame has not landed
-/// opens nothing, and the status row says so.
+/// The preview opens at the line's place in the commit, and its label names
+/// the pane's file and the cursor's line. A pane that does not blame opens
+/// nothing. A line whose blame has not landed opens nothing, and the status
+/// row says so.
 pub(super) fn preview(stoat: &mut Stoat) -> UpdateEffect {
-    if blamed_cursor(stoat).is_none() {
+    let Some((_, buffer, row)) = blamed_cursor(stoat) else {
         return UpdateEffect::None;
-    }
-    if matches!(
-        cursor_line_blame(stoat),
-        Some((_, _, LineBlame::Uncommitted))
-    ) {
-        return review::diff(stoat, None);
-    }
+    };
+    let (commit, origin) = match cursor_line_blame(stoat) {
+        None => {
+            stoat.set_status(BLAME_LOADING);
+            return UpdateEffect::Redraw;
+        },
+        Some((_, _, LineBlame::Uncommitted)) => return review::diff(stoat, None),
+        Some((
+            _,
+            _,
+            LineBlame::Commit {
+                commit,
+                commit_line,
+                commit_path,
+                ..
+            },
+        )) => {
+            let name = stoat
+                .active_workspace()
+                .buffers
+                .path_for(buffer)
+                .and_then(Path::file_name)
+                .unwrap_or_default()
+                .to_string_lossy();
+            let origin = PreviewOrigin {
+                path: commit_path.to_path_buf(),
+                line: commit_line,
+                label: format!("{name}:{}", row + 1),
+            };
+            (commit.clone(), origin)
+        },
+    };
 
-    match acting_commit(stoat) {
-        Ok(commit) => commit_preview::open(stoat, commit),
-        Err(status) => stoat.set_status(status),
-    }
+    commit_preview::open(stoat, commit, origin);
     UpdateEffect::Redraw
 }
 
@@ -309,7 +336,7 @@ fn acting_commit(stoat: &Stoat) -> Result<BlameCommit, &'static str> {
         return Ok(preview.commit.clone());
     }
     match cursor_line_blame(stoat) {
-        None => Err("blame is loading"),
+        None => Err(BLAME_LOADING),
         Some((_, _, LineBlame::Uncommitted)) => Err("line is not committed"),
         Some((_, _, LineBlame::Commit { commit, .. })) => Ok(commit.clone()),
     }
@@ -356,16 +383,22 @@ mod tests {
         lsp::hover::{HoverOutcome, HoverResponse},
         pane::View,
         register::Register,
-        render::commit_patch::PatchRow,
+        render::{commit_patch::PatchRow, paint, OVERLAY_LANE},
         test_fixture,
         test_harness::{CommitSpec, TestHarness},
+        theme::scope,
     };
     use crossterm::event::MouseEventKind;
+    use ratatui::layout::Rect;
     use std::{
         path::{Path, PathBuf},
         time::Duration,
     };
     use stoat_action::{BlameCard, BlamePreview, SetTheme, ToggleBlame};
+    use stoatty_protocol::{
+        command::{decode_stream, BorderStyle, Command},
+        PROTOCOL_VERSION,
+    };
 
     /// `space h a` sets the flag of the focused pane, and a second press
     /// clears it.
@@ -824,6 +857,89 @@ mod tests {
             })
             .collect();
         assert_eq!(headers, ["a.rs", "b.rs"]);
+    }
+
+    /// A preview opened from a line the commit added in the second of its two
+    /// files opens with that file's header at the top of the body. Under a live
+    /// scene a light ring in the focused border's color marks the line's row,
+    /// before the row's number runs so the ring hides none of them. A run on the
+    /// row's tint ends a cell short of the row's right edge, so its 8 characters
+    /// start at column 97, and it names the pane's file and the cursor's line,
+    /// which an uncommitted line above it moves off the line's place in the
+    /// commit.
+    #[test]
+    fn the_preview_opens_at_the_blamed_line_ringed_and_labeled() {
+        let lines =
+            |stem: &str, count| -> String { (0..count).map(|i| format!("{stem}{i}\n")).collect() };
+        let (a, b) = (
+            format!("a\n{}", lines("a", 40)),
+            format!("b\n{}", lines("b", 20)),
+        );
+        let mut h = TestHarness::with_size(120, 24);
+        h.seed_linear_history(
+            "/repo",
+            &[
+                ("c1", "one", &[("a.rs", "a\n"), ("b.rs", "b\n")]),
+                ("c2", "two", &[("a.rs", &a), ("b.rs", &b)]),
+            ],
+        );
+        h.stoat.active_workspace_mut().git_root = PathBuf::from("/repo");
+        h.fake_fs().insert_file("/repo/b.rs", format!("new\n{b}"));
+        h.open_file(Path::new("/repo/b.rs"));
+        h.type_keys("space h a");
+        h.settle();
+        h.stoat.stoatty_protocol = PROTOCOL_VERSION;
+        h.type_keys("j j enter");
+        h.settle();
+        h.stoat.render();
+
+        let theme = &h.stoat.theme;
+        let accent = paint::style_rgb(theme.get(scope::UI_BORDER_FOCUSED).fg);
+        let tint = paint::style_rgb(theme.get(scope::VCS_COMMIT_ROW_ADDED).bg);
+        let commands = decode_stream(h.stoat.apc_scene.lane_bytes(OVERLAY_LANE));
+        let rings: Vec<(usize, Rect)> = commands
+            .iter()
+            .enumerate()
+            .filter_map(|(at, command)| match command {
+                Command::Panel(panel)
+                    if panel.style == BorderStyle::Light && Some(panel.border) == accent =>
+                {
+                    Some((
+                        at,
+                        Rect::new(panel.left, panel.top, panel.width, panel.height),
+                    ))
+                },
+                _ => None,
+            })
+            .collect();
+        let numbers = commands
+            .iter()
+            .position(|command| matches!(command, Command::TextRuns(_)));
+        let labels: Vec<(&str, i16, Option<[u8; 3]>)> = commands
+            .iter()
+            .filter_map(|command| match command {
+                Command::TextRun(run) if run.text.starts_with('\u{25c2}') => {
+                    Some((run.text.as_str(), run.col, run.bg))
+                },
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            (
+                preview_scroll(&h),
+                rings.iter().map(|&(_, rect)| rect).collect::<Vec<_>>(),
+                rings
+                    .iter()
+                    .all(|&(at, _)| numbers.is_some_and(|numbers| at < numbers)),
+                labels,
+            ),
+            (
+                Some(42),
+                vec![Rect::new(14, 9, 92, 1)],
+                true,
+                vec![("\u{25c2} b.rs:3", 97 * 16, tint)],
+            ),
+        );
     }
 
     /// A wheel notch over the patch scrolls it three rows.

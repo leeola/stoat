@@ -22,7 +22,7 @@ use crate::{
     theme::{scope, Theme, TypeRole},
 };
 use ratatui::{buffer::Buffer, layout::Rect, style::Style, widgets::StatefulWidget};
-use std::{fmt::Write, sync::Arc};
+use std::{fmt::Write, path::Path, sync::Arc};
 use stoat_widgets::{
     text_run::{self, TextRun, TextRunBatch},
     ApcScene,
@@ -119,6 +119,41 @@ pub(crate) fn patch_rows(doc: &DiffDocument) -> Vec<PatchRow> {
         }
     }
     rows
+}
+
+/// The index in `rows` of the row that holds line `line`, 0-based, of the
+/// commit's version of the file at `path`, or `None` when no hunk shows that
+/// line.
+pub(crate) fn origin_row(
+    doc: &DiffDocument,
+    rows: &[PatchRow],
+    path: &Path,
+    line: u32,
+) -> Option<usize> {
+    let file = doc
+        .files
+        .iter()
+        .position(|file| Path::new(&file.rel_path) == path)?;
+    rows.iter().position(|row| {
+        matches!(row, PatchRow::Line(shown) if shown.file == file && shown.new == Some(line + 1))
+    })
+}
+
+/// The first scroll of a patch whose origin is row `origin`, for a body of
+/// `body_rows` rows.
+///
+/// The scroll puts the File Header of the origin's file at the top when the
+/// origin then shows, and otherwise puts the origin one third down the body.
+pub(crate) fn origin_scroll(rows: &[PatchRow], origin: usize, body_rows: usize) -> usize {
+    let header = rows.get(..=origin).and_then(|above| {
+        above
+            .iter()
+            .rposition(|row| matches!(row, PatchRow::Header { .. }))
+    });
+    match header {
+        Some(header) if origin - header < body_rows => header,
+        _ => origin.saturating_sub(body_rows / 3),
+    }
 }
 
 /// Paint `rows`, the rows of `doc`'s patch from the scroll on, into `area`,
@@ -440,7 +475,7 @@ fn is_line(row: &PatchRow) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{patch_rows, render_commit_patch, PatchLine, PatchRow};
+    use super::{origin_row, origin_scroll, patch_rows, render_commit_patch, PatchLine, PatchRow};
     use crate::{
         display_map::{FoldScope, ScopeMark},
         render::commits::{LineKind, PreviewDials},
@@ -449,7 +484,11 @@ mod tests {
         theme::Theme,
     };
     use ratatui::{buffer::Buffer, layout::Rect, style::Color};
-    use std::{path::PathBuf, sync::Arc};
+    use std::{
+        iter,
+        path::{Path, PathBuf},
+        sync::Arc,
+    };
     use stoat_language::ScopeSegment;
     use stoat_widgets::ApcScene;
 
@@ -578,6 +617,52 @@ mod tests {
                     Color::Reset
                 ],
             ),
+        );
+    }
+
+    /// The origin row is the line row of the origin's file whose commit number
+    /// is the origin's line plus one. A line that no hunk shows has none.
+    #[test]
+    fn origin_row_finds_the_line_by_its_commit_number() {
+        let doc = two_files();
+        let rows = patch_rows(&doc);
+        let find = |path: &str, line| origin_row(&doc, &rows, Path::new(path), line);
+        assert_eq!(
+            [
+                find("a.txt", 5),
+                find("b.txt", 0),
+                find("a.txt", 20),
+                find("b.txt", 4)
+            ],
+            [Some(7), Some(21), None, None],
+        );
+    }
+
+    /// The first scroll tops the body with the nearest header above the origin
+    /// when the origin then shows, and otherwise puts the origin a third of the
+    /// way down the body.
+    #[test]
+    fn origin_scroll_tops_the_header_or_thirds_the_origin() {
+        let fold = || PatchRow::Fold {
+            hidden: 1,
+            scope: None,
+        };
+        let rows: Vec<PatchRow> = [
+            PatchRow::Header { file: 0 },
+            fold(),
+            PatchRow::Header { file: 1 },
+        ]
+        .into_iter()
+        .chain(iter::repeat_with(fold).take(70))
+        .collect();
+        assert_eq!(
+            [
+                origin_scroll(&rows, 11, 40),
+                origin_scroll(&rows, 41, 40),
+                origin_scroll(&rows, 42, 40),
+                origin_scroll(&rows, 62, 40),
+            ],
+            [2, 2, 29, 49],
         );
     }
 

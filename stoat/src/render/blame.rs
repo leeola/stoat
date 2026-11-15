@@ -828,6 +828,7 @@ mod tests {
         };
         let rows = BlameRows {
             runs: vec![(0..3, Some(0)), (3..5, Some(1)), (5..6, None)],
+            spans: Vec::new(),
         };
         let base = BlameBase {
             text: String::new(),

@@ -20,15 +20,20 @@ use crate::{
         picker::{self, Footer},
         text,
     },
-    theme::{scope, PanelRole, Theme},
+    theme::{scope, PanelRole, Theme, TypeRole},
 };
 use ratatui::{
     buffer::Buffer,
     layout::Rect,
     style::Modifier,
-    widgets::{Block, Borders},
+    widgets::{Block, Borders, StatefulWidget},
 };
-use stoat_widgets::{panel::Panel, ApcScene};
+use std::mem;
+use stoat_widgets::{
+    panel::Panel,
+    text_run::{self, TextRun},
+    ApcScene,
+};
 use stoatty_protocol::command::{BorderStyle, Edge, PanelShadow};
 
 /// The columns the board's box stands in from each side of the window.
@@ -331,6 +336,76 @@ fn paint_meta(preview: &CommitPreview, now_epoch: i64, theme: &Theme, row: Rect,
     }
 }
 
+/// Ring `row`, the row of the patch that holds the origin's line, in the
+/// focused border's color.
+///
+/// Without a live scene the row takes no ring. The ring is a panel, and a
+/// panel hides the scene components declared before it inside its box, so it
+/// goes before the row's lane, numbers, and rule.
+fn paint_origin_ring(row: Rect, theme: &Theme, scene: &mut ApcScene) {
+    let Some(border) =
+        paint::style_rgb(theme.get(scope::UI_BORDER_FOCUSED).fg).filter(|_| scene.live())
+    else {
+        return;
+    };
+    Panel {
+        style: BorderStyle::Light,
+        border,
+        corner_radius: 0,
+        fill: None,
+        shadow: PanelShadow::None_,
+        edges: Edge::symmetric(0, 0),
+        corners: 0,
+        fillets: 0,
+        fillet_radius: 2,
+        hatch: None,
+        above_pools: true,
+        backdrop: false,
+        anchor: None,
+    }
+    .draw_components(row, scene);
+}
+
+/// Name where the reader came from at the right end of `row`, in the focused
+/// border's color, as `label` after a left-pointing triangle.
+///
+/// Under a live scene the name is a Caption-scale run that ends a cell short
+/// of the row's right edge, on the background of the cell under it, so it
+/// covers the code it overlaps. Without one it is cells that end at the same
+/// place.
+fn paint_origin_label(
+    label: &str,
+    row: Rect,
+    theme: &Theme,
+    buf: &mut Buffer,
+    scene: &mut ApcScene,
+) {
+    let text = format!("\u{25c2} {label}");
+    let style = theme.get(scope::UI_BORDER_FOCUSED);
+    let last = row.right() - 1;
+    let Some(color) = paint::style_rgb(style.fg).filter(|_| scene.live()) else {
+        let width = text.chars().count() as u16;
+        text::write_str(buf, last.saturating_sub(width), row.y, &text, style);
+        return;
+    };
+
+    let scale = theme.type_scale(TypeRole::Caption);
+    let advance = text_run::advance_sixteenths(text.chars().count(), scale);
+    TextRun {
+        col: -(advance as i16),
+        row: 0,
+        scale,
+        color,
+        bg: paint::style_rgb(Some(buf[(last, row.y)].bg)),
+        text: &text,
+        bold: false,
+        italic: false,
+        follow: 0,
+        anchor: None,
+    }
+    .render(Rect::new(last, row.y, 1, 1), buf, scene);
+}
+
 /// Paint the patch into `body`, or a word in its place: [`LOADING`] while the
 /// patch builds, and `no changes` for a commit with no diff.
 fn paint_body(
@@ -343,8 +418,23 @@ fn paint_body(
 ) {
     let word = match &preview.document {
         Some(Some(doc)) => {
-            let last_page = preview.rows.len().saturating_sub(usize::from(body.height));
+            let height = usize::from(body.height);
+            if mem::take(&mut preview.seek)
+                && let Some(origin) = preview.origin_row
+            {
+                preview.scroll = commit_patch::origin_scroll(&preview.rows, origin, height);
+            }
+            let last_page = preview.rows.len().saturating_sub(height);
             preview.scroll = preview.scroll.min(last_page);
+
+            let origin = preview
+                .origin_row
+                .and_then(|row| row.checked_sub(preview.scroll))
+                .filter(|&row| row < height)
+                .map(|row| Rect::new(body.x, body.y + row as u16, body.width, 1));
+            if let Some(row) = origin {
+                paint_origin_ring(row, theme, scene);
+            }
             commit_patch::render_commit_patch(
                 doc,
                 &preview.rows[preview.scroll..],
@@ -354,6 +444,9 @@ fn paint_body(
                 buf,
                 scene,
             );
+            if let Some(row) = origin {
+                paint_origin_label(&preview.origin.label, row, theme, buf, scene);
+            }
             return;
         },
         Some(None) => "no changes",
@@ -491,7 +584,8 @@ mod tests {
     /// border, at the board's edges. A plain panel that draws nothing goes
     /// first and holds the pools back. A backdrop panel then fills the ring
     /// outside those cells, strokes the frame, and casts the shadow. The
-    /// read-only chip draws in its own box.
+    /// read-only chip draws in its own box, and a light square ring marks the
+    /// origin row, the added line the preview opened from.
     #[test]
     fn the_live_box_draws_a_backdrop_ring_at_the_board_edges() {
         let mut h = preview_open();
@@ -543,6 +637,16 @@ mod tests {
                     chip.edges,
                     chip.above_pools,
                     chip.backdrop,
+                ),
+                (
+                    Rect::new(14, 9, 92, 1),
+                    BorderStyle::Light,
+                    None,
+                    PanelShadow::None_,
+                    0,
+                    Edge::symmetric(0, 0),
+                    true,
+                    false,
                 ),
             ],
         );
@@ -638,6 +742,26 @@ mod tests {
             .map(|row| row.chars().skip(14).take(92).collect())
             .unwrap_or_default();
         assert_eq!(row, format!("{:<92}", "   1   1 \u{2502}one"));
+    }
+
+    /// Without a live scene the origin row takes no ring, and its label is
+    /// cells that end a cell short of the row's right edge.
+    #[test]
+    fn the_cell_label_names_the_origin_at_the_row_end() {
+        let mut h = preview_open();
+        h.stoat.stoatty = false;
+        h.snapshot();
+
+        let row: String = h
+            .rendered_text()
+            .lines()
+            .nth(9)
+            .map(|row| row.chars().skip(14).take(92).collect())
+            .unwrap_or_default();
+        assert_eq!(
+            row,
+            format!("{:<83}\u{25c2} a.rs:2 ", "\u{258e}      2 \u{2502}two"),
+        );
     }
 
     /// The open preview hides the terminal cursor, which otherwise draws at the

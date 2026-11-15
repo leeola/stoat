@@ -64,7 +64,17 @@ pub(crate) enum LineBlame<'a> {
     Uncommitted,
     /// The commit that last changed the line, and its index in the file's
     /// blame, which every run of the commit shares.
-    Commit { index: u32, commit: &'a BlameCommit },
+    ///
+    /// `commit_line` is the 0-based line the line has in the commit's own
+    /// version of the file, and `commit_path` is that version's repo-relative
+    /// path. A patch of the commit counts its lines there, so a view of the
+    /// patch finds the line at that place.
+    Commit {
+        index: u32,
+        commit: &'a BlameCommit,
+        commit_line: u32,
+        commit_path: &'a Path,
+    },
 }
 
 /// HEAD's text of one file and the commit that last changed each of its lines.
@@ -79,13 +89,26 @@ pub(crate) struct BlameBase {
     pub(crate) ages: Vec<u8>,
 }
 
-/// A run of consecutive buffer lines that share one commit, pinned to the
-/// buffer text that the blame mapped.
+/// A run of consecutive buffer lines that keep consecutive lines of one blame
+/// run, or of uncommitted lines, pinned to the buffer text that the blame
+/// mapped.
 struct BlameSpan {
     anchors: Range<Anchor>,
-    /// The index of the commit in [`FileBlame::commits`], or `None` for
-    /// uncommitted lines.
-    commit: Option<u32>,
+    /// Where the span's lines sit in HEAD's blame, or `None` for uncommitted
+    /// lines.
+    origin: Option<SpanOrigin>,
+}
+
+/// Where the lines of a span sit in HEAD's blame.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct SpanOrigin {
+    /// The index of the commit in [`FileBlame::commits`].
+    commit: u32,
+    /// The index in [`FileBlame::runs`] of the run that holds the span's lines.
+    run: u32,
+    /// The HEAD line of the span's first line. The span's later lines follow it
+    /// in order.
+    base_line: u32,
 }
 
 /// The spans of one buffer as the rows they cover in one version of its text.
@@ -96,6 +119,9 @@ pub(crate) struct BlameRows {
     /// The rows in order, with no gap between two runs. Two adjacent runs name
     /// different commits.
     pub(crate) runs: Vec<(Range<u32>, Option<u32>)>,
+    /// The rows of each span in order, with the span's origin. A run of the
+    /// column joins the adjacent spans of one commit.
+    pub(crate) spans: Vec<(Range<u32>, Option<SpanOrigin>)>,
 }
 
 /// The body of a commit's message and the size of its change, which the Blame
@@ -267,18 +293,32 @@ impl BlameState {
         }
     }
 
-    /// The commit of row `row` of buffer `id`, as [`Self::refresh_rows`] last
-    /// resolved the rows.
+    /// The commit of row `row` of buffer `id`, with the row's place in that
+    /// commit's version of the file, as [`Self::refresh_rows`] last resolved
+    /// the rows.
     ///
     /// `None` before a blame of the buffer lands, for a file outside the
     /// repository, and for a row past the last line.
     pub(crate) fn line(&self, id: BufferId, row: u32) -> Option<LineBlame<'_>> {
         let file = self.files.get(&id)?;
-        let Some(index) = file.rows.as_ref()?.1.at(row)? else {
+        let (rows, origin) = file.rows.as_ref()?.1.span(row)?;
+        let Some(origin) = origin else {
             return Some(LineBlame::Uncommitted);
         };
-        let commit = file.base.as_ref()?.blame.commits.get(index as usize)?;
-        Some(LineBlame::Commit { index, commit })
+        let blame = &file.base.as_ref()?.blame;
+        let run = blame.runs.get(origin.run as usize)?;
+        let commit = blame.commits.get(origin.commit as usize)?;
+
+        // A span's lines are consecutive lines of its run, so a row's offset
+        // into the span carries into the run. Typing inside the span since the
+        // blame mapped it carries a row past the run's end, which clamps.
+        let offset = origin.base_line.saturating_sub(run.start_line) + (row - rows.start);
+        Some(LineBlame::Commit {
+            index: origin.commit,
+            commit,
+            commit_line: run.commit_line + offset.min(run.lines.saturating_sub(1)),
+            commit_path: &run.commit_path,
+        })
     }
 
     /// The index of the commit of row `row` of buffer `id`, which every run of
@@ -415,10 +455,13 @@ impl BlameRows {
         self.runs.get(after).filter(|(rows, _)| rows.contains(&row))
     }
 
-    /// The commit of row `row`, `Some(None)` for an uncommitted row, or `None`
-    /// for a row past the last run.
-    fn at(&self, row: u32) -> Option<Option<u32>> {
-        self.run(row).map(|(_, commit)| *commit)
+    /// The span that holds row `row`, as its rows and its origin, or `None` for
+    /// a row past the last span.
+    fn span(&self, row: u32) -> Option<&(Range<u32>, Option<SpanOrigin>)> {
+        let after = self.spans.partition_point(|(rows, _)| rows.end <= row);
+        self.spans
+            .get(after)
+            .filter(|(rows, _)| rows.contains(&row))
     }
 }
 
@@ -618,27 +661,30 @@ fn resolve_base(
     Some(base)
 }
 
-/// Group the lines of `snapshot` into spans of one commit, each anchored in
-/// `snapshot`.
+/// Group the lines of `snapshot` into spans, each anchored in `snapshot`.
 ///
-/// A line takes the commit of the HEAD line it keeps under the line diff from
-/// `base`'s text. A line in a changed region is uncommitted, and so is every
+/// A line takes the place in HEAD's blame of the HEAD line it keeps under the
+/// line diff from `base`'s text. A span holds consecutive lines of one blame
+/// run, so a line that keeps another run, or a HEAD line past a gap, starts
+/// the next span. A line in a changed region is uncommitted, and so is every
 /// line when HEAD does not hold the file.
 fn map_spans(base: Option<&BlameBase>, snapshot: &TextBufferSnapshot) -> Vec<BlameSpan> {
     let text = snapshot.visible_text.to_string();
-    let commits: Vec<Option<u32>> = match base {
+    let origins: Vec<Option<SpanOrigin>> = match base {
         Some(base) => line_origins(&base.text, &text)
             .into_iter()
-            .map(|origin| origin.and_then(|line| commit_at(&base.blame, line)))
+            .map(|origin| origin.and_then(|line| line_origin(&base.blame, line)))
             .collect(),
         None => vec![None; text.split_inclusive('\n').count()],
     };
 
-    let mut groups: Vec<(Range<u32>, Option<u32>)> = Vec::new();
-    for (line, commit) in (0u32..).zip(commits) {
+    let mut groups: Vec<(Range<u32>, Option<SpanOrigin>)> = Vec::new();
+    for (line, origin) in (0u32..).zip(origins) {
         match groups.last_mut() {
-            Some((lines, last)) if *last == commit => lines.end += 1,
-            _ => groups.push((line..line + 1, commit)),
+            Some((lines, last)) if continues(*last, origin, lines.end - lines.start) => {
+                lines.end += 1
+            },
+            _ => groups.push((line..line + 1, origin)),
         }
     }
 
@@ -660,25 +706,48 @@ fn map_spans(base: Option<&BlameBase>, snapshot: &TextBufferSnapshot) -> Vec<Bla
     groups
         .into_iter()
         .zip(starts.into_iter().zip(ends))
-        .map(|((_, commit), (start, end))| BlameSpan {
+        .map(|((_, origin), (start, end))| BlameSpan {
             anchors: start..end,
-            commit,
+            origin,
         })
         .collect()
 }
 
-/// The commit of line `line` of the blamed text, from the run that covers it.
-fn commit_at(blame: &FileBlame, line: u32) -> Option<u32> {
-    let after = blame.runs.partition_point(|run| run.start_line <= line);
-    let run = &blame.runs[after.checked_sub(1)?];
-    (line < run.start_line + run.lines).then_some(run.commit)
+/// Whether a line of `origin` continues a span of `len` lines that starts at
+/// `first`, which holds when both are uncommitted or when the line keeps the
+/// next HEAD line of the same run.
+fn continues(first: Option<SpanOrigin>, origin: Option<SpanOrigin>, len: u32) -> bool {
+    match (first, origin) {
+        (None, None) => true,
+        (Some(first), Some(origin)) => {
+            origin.run == first.run && origin.base_line == first.base_line + len
+        },
+        _ => false,
+    }
+}
+
+/// Where line `line` of the blamed text sits in `blame`, from the run that
+/// covers it.
+fn line_origin(blame: &FileBlame, line: u32) -> Option<SpanOrigin> {
+    let run = blame
+        .runs
+        .partition_point(|run| run.start_line <= line)
+        .checked_sub(1)?;
+    let held = &blame.runs[run];
+    (line < held.start_line + held.lines).then_some(SpanOrigin {
+        commit: held.commit,
+        run: run as u32,
+        base_line: line,
+    })
 }
 
 /// The rows that `spans` cover in `snapshot`.
 ///
 /// A row belongs to the span that holds its first byte. Text typed where two
 /// spans meet falls inside both, since a start anchors left and an end right,
-/// so each span starts no earlier than the span before it ends.
+/// so each span starts no earlier than the span before it ends. Each span
+/// keeps its own rows, and a run of the column joins the adjacent spans of one
+/// commit.
 fn resolve_rows(spans: &[BlameSpan], snapshot: &TextBufferSnapshot) -> BlameRows {
     let anchors: Vec<Anchor> = spans
         .iter()
@@ -695,6 +764,7 @@ fn resolve_rows(spans: &[BlameSpan], snapshot: &TextBufferSnapshot) -> BlameRows
     };
 
     let mut runs: Vec<(Range<u32>, Option<u32>)> = Vec::with_capacity(spans.len());
+    let mut span_rows = Vec::with_capacity(spans.len());
     let mut end = 0;
     let (pairs, _) = offsets.as_chunks::<2>();
     for (span, &[start_offset, end_offset]) in spans.iter().zip(pairs) {
@@ -703,12 +773,17 @@ fn resolve_rows(spans: &[BlameSpan], snapshot: &TextBufferSnapshot) -> BlameRows
         if start == end {
             continue;
         }
+        span_rows.push((start..end, span.origin));
+        let commit = span.origin.map(|origin| origin.commit);
         match runs.last_mut() {
-            Some((rows, commit)) if *commit == span.commit => rows.end = end,
-            _ => runs.push((start..end, span.commit)),
+            Some((rows, last)) if *last == commit => rows.end = end,
+            _ => runs.push((start..end, commit)),
         }
     }
-    BlameRows { runs }
+    BlameRows {
+        runs,
+        spans: span_rows,
+    }
 }
 
 /// The line that a region boundary at byte `offset` of `text` comes before.
@@ -730,7 +805,7 @@ fn boundary_line(text: &str, offset: usize) -> u32 {
 mod tests {
     use super::{
         age_buckets, date_time, line_origins, message_body, short_date, BlameState, CommitDetails,
-        DETAILS_CAPACITY,
+        LineBlame, DETAILS_CAPACITY,
     };
     use crate::{
         app::Stoat,
@@ -892,6 +967,51 @@ mod tests {
         );
     }
 
+    /// A committed line names its commit, the index every run of that commit
+    /// shares, and its line and path in the commit's own version of the file. A
+    /// later commit that adds a line above it and drops one between its
+    /// neighbors moves it in HEAD, and a buffer that adds and drops lines moves
+    /// it again, so its commit line differs from its HEAD line and from its
+    /// buffer row. Its commit index differs from the index of its blame run.
+    #[test]
+    fn a_line_names_its_place_in_its_commit() {
+        let mut h = Stoat::test();
+        h.seed_linear_history(
+            "/repo",
+            &[
+                ("c1", "one", &[("a.rs", "a\nb\nc\nd\ne\n")]),
+                ("c2", "two", &[("a.rs", "x\na\nc\nd\ne\n")]),
+            ],
+        );
+        h.stoat.active_workspace_mut().git_root = "/repo".into();
+        h.fake_fs().insert_file("/repo/a.rs", "new\nx\na\nc\ne\n");
+        h.open_file(Path::new("/repo/a.rs"));
+        h.type_keys("space h a");
+        h.settle();
+
+        let at = |place: &str| Some(place.to_string());
+        assert_eq!(
+            commit_lines(&mut h, 0..5),
+            [
+                None,
+                at("c2/0 a.rs:0"),
+                at("c1/1 a.rs:0"),
+                at("c1/1 a.rs:2"),
+                at("c1/1 a.rs:4"),
+            ],
+        );
+    }
+
+    /// A line typed inside a span before the next blame run keeps the span's
+    /// commit, and its commit line stays inside the span's run.
+    #[test]
+    fn a_line_typed_into_a_span_keeps_its_place_inside_the_run() {
+        let mut h = blamed("/repo/a.rs", "one\ntwo\n");
+        h.type_keys("j o");
+        let at = Some("c2/1 a.rs:1".to_string());
+        assert_eq!(commit_lines(&mut h, 1..3), [at.clone(), at]);
+    }
+
     /// Each line names the commit that last changed it. A line that differs
     /// from HEAD, and every line of a file HEAD does not hold, is uncommitted.
     /// A file outside the repository has no blame.
@@ -1018,6 +1138,29 @@ mod tests {
                 (rows.clone(), sha)
             })
             .collect()
+    }
+
+    /// The place in its commit of each row in `rows` of the focused buffer, as
+    /// `<sha>/<commit index> <commit path>:<commit line>`, or `None` for an
+    /// uncommitted row.
+    fn commit_lines(h: &mut TestHarness, rows: Range<u32>) -> Vec<Option<String>> {
+        let ws = h.stoat.active_workspace_mut();
+        ws.refresh_blame_rows();
+        let (_, id) = ws.focused_editor().expect("an editor holds the focus");
+        rows.map(|row| match ws.blame.line(id, row) {
+            Some(LineBlame::Commit {
+                index,
+                commit,
+                commit_line,
+                commit_path,
+            }) => Some(format!(
+                "{}/{index} {}:{commit_line}",
+                commit.info.sha,
+                commit_path.display(),
+            )),
+            _ => None,
+        })
+        .collect()
     }
 
     fn shas(runs: &[(Range<u32>, Option<&str>)]) -> Vec<(Range<u32>, Option<String>)> {

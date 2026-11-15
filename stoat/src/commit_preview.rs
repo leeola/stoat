@@ -16,11 +16,23 @@ use crate::{
     render::commit_patch::{self, PatchRow},
     review_session::DiffDocument,
 };
-use std::sync::Arc;
+use std::{path::PathBuf, sync::Arc};
 use stoat_scheduler::Task;
 
 /// The `modal` predicate value of the preview, which its key block matches.
 const MODAL: &str = "commit_preview";
+
+/// Where the reader opened the preview from, which the patch finds and rings.
+pub(crate) struct PreviewOrigin {
+    /// The repo-relative path the blamed file has in the commit.
+    pub(crate) path: PathBuf,
+    /// The 0-based line the blamed line has in the commit's version of the
+    /// file.
+    pub(crate) line: u32,
+    /// The pane's file name and the cursor's 1-based line, which the ring's
+    /// label reads.
+    pub(crate) label: String,
+}
 
 /// A commit's header over its patch, open over the panes as a modal.
 ///
@@ -35,6 +47,13 @@ pub(crate) struct CommitPreview {
     pub(crate) document: Option<Option<Arc<DiffDocument>>>,
     /// The rows of the patch, built when the document lands.
     pub(crate) rows: Vec<PatchRow>,
+    pub(crate) origin: PreviewOrigin,
+    /// The row of the patch that holds the origin's line, or `None` before the
+    /// patch lands and when no hunk shows that line.
+    pub(crate) origin_row: Option<usize>,
+    /// Whether the first paint that holds the patch still owes the scroll that
+    /// shows the origin.
+    pub(crate) seek: bool,
     /// The commit's file count and its added and removed lines, once the build
     /// lands.
     pub(crate) summary: Option<(usize, u32, u32)>,
@@ -51,8 +70,9 @@ pub(crate) struct CommitPreview {
 /// Open the preview on `commit` and start the build of its patch.
 ///
 /// The preview puts the pane in normal mode, where the preview's keys bind.
-/// Outside a repository with a working tree it opens nothing.
-pub(crate) fn open(stoat: &mut Stoat, commit: BlameCommit) {
+/// Its first paint with the patch scrolls to `origin`'s line. Outside a
+/// repository with a working tree it opens nothing.
+pub(crate) fn open(stoat: &mut Stoat, commit: BlameCommit, origin: PreviewOrigin) {
     let Some(task) = start_load(stoat, &commit.info.sha) else {
         return;
     };
@@ -65,6 +85,9 @@ pub(crate) fn open(stoat: &mut Stoat, commit: BlameCommit) {
         parent: 0,
         document: None,
         rows: Vec::new(),
+        origin,
+        origin_row: None,
+        seek: true,
         summary: None,
         scroll: 0,
         hints: footer_hints(&stoat.keymap),
@@ -115,6 +138,14 @@ pub(crate) fn pump(stoat: &mut Stoat) -> bool {
         .as_ref()
         .map(commit_patch::patch_rows)
         .unwrap_or_default();
+    preview.origin_row = loaded.document.as_ref().and_then(|doc| {
+        commit_patch::origin_row(
+            doc,
+            &preview.rows,
+            &preview.origin.path,
+            preview.origin.line,
+        )
+    });
     preview.document = Some(loaded.document.map(Arc::new));
     true
 }
