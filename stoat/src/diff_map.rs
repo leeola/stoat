@@ -3102,6 +3102,41 @@ mod tests {
         ChangeKind as LangChangeKind, DiffChange, MoveMetadata, MoveSource, Side,
     };
 
+    /// A source whose statements share sub-expressions, so a line edit makes the
+    /// tree pass move and pair tokens across lines.
+    const SWEEP_SOURCE: &str = concat!(
+        "struct Page {\n",
+        "    indexes: Vec<u32>,\n",
+        "    households: Vec<u32>,\n",
+        "    last_keys: Option<u32>,\n",
+        "    run_start: u32,\n",
+        "}\n",
+        "\n",
+        "impl Page {\n",
+        "    fn push(&mut self, keys: u32, household: u32) {\n",
+        "        if self.households.len() == PAGE_ROWS {\n",
+        "            self.flush();\n",
+        "        }\n",
+        "        insert(&mut self.indexes, keys, self.households.len() as u32);\n",
+        "        if self.last_keys != Some(keys) {\n",
+        "            let row = self.households.len() as u32;\n",
+        "            self.run_start = row;\n",
+        "            self.last_keys = Some(keys);\n",
+        "        }\n",
+        "        self.households.push(household);\n",
+        "    }\n",
+        "\n",
+        "    fn flush(&mut self) {\n",
+        "        let rows = std::mem::take(&mut self.households);\n",
+        "        for index in &mut self.indexes {\n",
+        "            optimize(index, rows.len() as u32);\n",
+        "        }\n",
+        "        self.last_keys = None;\n",
+        "        self.run_start = 0;\n",
+        "    }\n",
+        "}\n",
+    );
+
     /// The structured stops, the git stops, and the change count of one map,
     /// each stop as its `(start, end)` rows.
     type Walks = (Vec<(u32, u32)>, Vec<(u32, u32)>, usize);
@@ -6175,6 +6210,40 @@ mod tests {
         (detail.base_spans.clone(), detail.buffer_spans.clone())
     }
 
+    /// No line edit of [`SWEEP_SOURCE`] leaves a hunk that hides a change.
+    ///
+    /// [`rust_hunks`] checks every set of hunks that it builds, so the sweep
+    /// only builds them. It removes each line, repeats it, swaps it with the
+    /// next, moves it three lines down, and overwrites it with the line two
+    /// below.
+    #[test]
+    fn line_edits_of_a_source_leave_no_hunk_that_hides_a_change() {
+        let lines: Vec<&str> = SWEEP_SOURCE.lines().collect();
+        let n = 30;
+        let join = |lines: &[&str]| lines.join("\n") + "\n";
+
+        let mut edits = 0;
+        for at in 0..n {
+            let mut removed = lines.clone();
+            removed.remove(at);
+            let mut repeated = lines.clone();
+            repeated.insert(at, lines[at]);
+            let mut swapped = lines.clone();
+            swapped.swap(at, (at + 1) % n);
+            let mut moved = lines.clone();
+            let line = moved.remove(at);
+            moved.insert((at + 3).min(moved.len()), line);
+            let mut overwritten = lines.clone();
+            overwritten[at] = lines[(at + 2) % n];
+
+            for edited in [removed, repeated, swapped, moved, overwritten] {
+                rust_hunks(SWEEP_SOURCE, &join(&edited));
+                edits += 1;
+            }
+        }
+        assert_eq!(edits, 150, "five edits of each of the 30 lines");
+    }
+
     /// Each line hunk's token detail once the Rust tree pass of `buffer`
     /// against `base` merges into it.
     fn rust_detail(base: &str, buffer: &str) -> Vec<Option<Arc<TokenDetail>>> {
@@ -6186,6 +6255,9 @@ mod tests {
 
     /// Each line hunk once the Rust tree pass of `buffer` against `base`
     /// merges into it.
+    ///
+    /// Panics when a hunk hides a change, as [`assert_hunks_show_their_changes`]
+    /// reads it.
     fn rust_hunks(base: &str, buffer: &str) -> Vec<DiffHunk> {
         let language = stoat_language::LanguageRegistry::standard()
             .for_path(std::path::Path::new("a.rs"))
@@ -6198,6 +6270,107 @@ mod tests {
             buffer,
         );
         super::merge_structural_detail(&mut hunks, &tree.changes, &tree.unsearched, base, buffer);
+        assert_hunks_show_their_changes(base, buffer, &hunks, &tree.changes);
         hunks
+    }
+
+    /// Panics when a hunk of `buffer` against `base` hides text that changed.
+    ///
+    /// A `Moved` hunk holds no word char outside its `Moved` spans, on the side
+    /// that it covers. The non-whitespace chars of a `Modified` hunk outside its
+    /// spans are equal on its two sides, where the whole range of a `Replaced`
+    /// change counts as marked, because its refined spans come from a char diff
+    /// and do not partition the pair. A hunk with no tree detail goes unchecked.
+    fn assert_hunks_show_their_changes(
+        base: &str,
+        buffer: &str,
+        hunks: &[DiffHunk],
+        tree_changes: &[DiffChange],
+    ) {
+        let base_starts = super::line_starts(base);
+        let buffer_starts = super::line_starts(buffer);
+        let replaced = |side: Side| -> Vec<std::ops::Range<usize>> {
+            tree_changes
+                .iter()
+                .filter(|change| change.side == side && change.kind == LangChangeKind::Replaced)
+                .map(|change| change.byte_range.clone())
+                .collect()
+        };
+        let (lhs_replaced, rhs_replaced) = (replaced(Side::Lhs), replaced(Side::Rhs));
+
+        for hunk in hunks {
+            let Some(detail) = hunk.token_detail.as_ref().filter(|detail| detail.tree) else {
+                continue;
+            };
+            let base_lines = super::line_range_to_byte_range(
+                &base_starts,
+                base.len(),
+                &super::hunk_base_lines(hunk, &base_starts, base),
+            );
+            let buffer_rows = super::line_range_to_byte_range(
+                &buffer_starts,
+                buffer.len(),
+                &hunk.buffer_line_range,
+            );
+            let spans = |spans: &[ChangeSpan], moved_only: bool| -> Vec<std::ops::Range<usize>> {
+                spans
+                    .iter()
+                    .filter(|span| !moved_only || span.kind == ChangeKind::Moved)
+                    .map(|span| span.byte_range.clone())
+                    .collect()
+            };
+
+            match hunk.status {
+                DiffHunkStatus::Moved => {
+                    let (text, bounds, moved) = match hunk.buffer_line_range.is_empty() {
+                        true => (base, base_lines, spans(&detail.base_spans, true)),
+                        false => (buffer, buffer_rows, spans(&detail.buffer_spans, true)),
+                    };
+                    assert_eq!(
+                        chars_outside(text, bounds, &[&moved], super::is_word_char),
+                        "",
+                        "a moved hunk holds words outside its moved spans: {hunk:?}",
+                    );
+                },
+                DiffHunkStatus::Modified => {
+                    let not_space = |ch: char| !ch.is_whitespace();
+                    let base_marked = spans(&detail.base_spans, false);
+                    let buffer_marked = spans(&detail.buffer_spans, false);
+                    assert_eq!(
+                        chars_outside(base, base_lines, &[&base_marked, &lhs_replaced], not_space),
+                        chars_outside(
+                            buffer,
+                            buffer_rows,
+                            &[&buffer_marked, &rhs_replaced],
+                            not_space
+                        ),
+                        "the unmarked text of a modified hunk differs between its sides: {hunk:?}",
+                    );
+                },
+                DiffHunkStatus::Added | DiffHunkStatus::Deleted => {},
+            }
+        }
+    }
+
+    /// The chars of `text[bounds]` that `keep` accepts and no range of `ranges`
+    /// holds, in order.
+    fn chars_outside(
+        text: &str,
+        bounds: std::ops::Range<usize>,
+        ranges: &[&[std::ops::Range<usize>]],
+        keep: fn(char) -> bool,
+    ) -> String {
+        text[bounds.clone()]
+            .char_indices()
+            .filter(|&(offset, ch)| {
+                let at = bounds.start + offset;
+                keep(ch)
+                    && !ranges
+                        .iter()
+                        .flat_map(|list| list.iter())
+                        .any(|range| range.contains(&at))
+            })
+            .map(|(_, ch)| ch)
+            .collect()
     }
 }
