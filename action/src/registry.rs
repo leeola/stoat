@@ -4,8 +4,9 @@ use crate::{
         app::{OpenLogs, PinMode, Quit, QuitAll, QuitAllCancel, QuitAllConfirm, ShowVersion},
         blame::{
             BlameCard, BlameCardClose, BlameCheckout, BlameCopySha, BlamePreview,
-            CommitPreviewClose, CommitPreviewLineDown, CommitPreviewLineUp, CommitPreviewNextFile,
-            CommitPreviewParent, CommitPreviewPrevFile, ToggleBlame,
+            CheckoutConfirmAccept, CheckoutConfirmCancel, CommitPreviewClose,
+            CommitPreviewLineDown, CommitPreviewLineUp, CommitPreviewNextFile, CommitPreviewParent,
+            CommitPreviewPrevFile, ToggleBlame,
         },
         commits::{
             CloseCommits, CommitsDetailDown, CommitsDetailUp, CommitsFirst, CommitsLast,
@@ -362,6 +363,12 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
     add(BlameCopySha::DEF, |_| Ok(Box::new(BlameCopySha)));
     add(BlamePreview::DEF, |_| Ok(Box::new(BlamePreview)));
     add(BlameCheckout::DEF, |_| Ok(Box::new(BlameCheckout)));
+    add(CheckoutConfirmAccept::DEF, |_| {
+        Ok(Box::new(CheckoutConfirmAccept))
+    });
+    add(CheckoutConfirmCancel::DEF, |_| {
+        Ok(Box::new(CheckoutConfirmCancel))
+    });
     add(CommitPreviewClose::DEF, |_| {
         Ok(Box::new(CommitPreviewClose))
     });
@@ -1632,6 +1639,8 @@ mod tests {
         "BlameCopySha",
         "BlamePreview",
         "BlameCheckout",
+        "CheckoutConfirmAccept",
+        "CheckoutConfirmCancel",
         "CommitPreviewClose",
         "CommitPreviewLineDown",
         "CommitPreviewLineUp",
@@ -2232,7 +2241,8 @@ mod tests {
         // + 2 CommitPreviewNextFile/CommitPreviewPrevFile.
         // + 1 CommitPreviewParent.
         // + 1 BlameCheckout.
-        assert_eq!(all().count(), 507);
+        // + 2 CheckoutConfirmAccept/CheckoutConfirmCancel.
+        assert_eq!(all().count(), 509);
     }
 
     #[test]

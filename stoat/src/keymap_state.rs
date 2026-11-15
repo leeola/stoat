@@ -708,6 +708,7 @@ pub(crate) fn view_predicate(ws: &Workspace) -> Option<&'static str> {
 pub(crate) enum ActiveModal {
     Run,
     QuitConfirm,
+    CheckoutConfirm,
     CommitPreview,
     WorkspacePicker,
     GitStatus,
@@ -738,6 +739,7 @@ impl ActiveModal {
         match self {
             Self::Run => "run",
             Self::QuitConfirm => "quit_confirm",
+            Self::CheckoutConfirm => "checkout_confirm",
             Self::CommitPreview => "commit_preview",
             Self::WorkspacePicker => "workspace_picker",
             Self::GitStatus => "git_status",
@@ -782,6 +784,7 @@ impl ActiveModal {
             Self::WalkthroughPicker => Some("walkthroughs"),
             Self::Run
             | Self::QuitConfirm
+            | Self::CheckoutConfirm
             | Self::CommitPreview
             | Self::GitStatus
             | Self::Rename
@@ -844,7 +847,7 @@ impl ActiveModal {
     ///
     /// The file finder, help, the workspace picker, and the Commit Preview end in
     /// a footer of their own keys, and the box repeats those keys over the
-    /// modal's lower right.
+    /// modal's lower right. The checkout confirm lists its keys in its last row.
     /// The git status panel names its keys in its section heads and its
     /// banner, and in a short window the box covers its rows. The palette
     /// keeps its box behind the toggle as well.
@@ -855,6 +858,7 @@ impl ActiveModal {
                 | Self::Help
                 | Self::WorkspacePicker
                 | Self::GitStatus
+                | Self::CheckoutConfirm
                 | Self::CommitPreview
                 | Self::Palette
         )
@@ -920,6 +924,9 @@ pub(crate) fn close_topmost_modal(stoat: &mut Stoat) -> bool {
             }
         },
         ActiveModal::QuitConfirm => stoat.quit_all_confirm = None,
+        // The preview behind the confirm closes with it. A caller that opens
+        // another modal next closes one modal and expects none to stay.
+        ActiveModal::CheckoutConfirm => stoat.checkout_confirm = None,
         ActiveModal::CommitPreview => stoat.commit_preview = None,
         ActiveModal::GitStatus => stoat.git_status = None,
         ActiveModal::WorkspacePicker => {
@@ -990,6 +997,8 @@ pub(crate) fn active_modal(stoat: &Stoat) -> Option<ActiveModal> {
         Some(ActiveModal::Run)
     } else if stoat.quit_all_confirm.is_some() {
         Some(ActiveModal::QuitConfirm)
+    } else if stoat.checkout_confirm.is_some() {
+        Some(ActiveModal::CheckoutConfirm)
     } else if stoat.commit_preview.is_some() {
         Some(ActiveModal::CommitPreview)
     } else if stoat.workspace_picker.is_some() {
@@ -1055,6 +1064,7 @@ fn open_modal_count(stoat: &Stoat) -> usize {
     [
         stoat.modal_run.is_some(),
         stoat.quit_all_confirm.is_some(),
+        stoat.checkout_confirm.is_some(),
         stoat.commit_preview.is_some(),
         stoat.workspace_picker.is_some(),
         stoat.git_status.is_some(),
@@ -1992,9 +2002,10 @@ mod tests {
     }
 
     /// Every variant, in the canonical order [`active_modal`] resolves them.
-    const ALL_MODALS: [ActiveModal; 21] = [
+    const ALL_MODALS: [ActiveModal; 22] = [
         ActiveModal::Run,
         ActiveModal::QuitConfirm,
+        ActiveModal::CheckoutConfirm,
         ActiveModal::CommitPreview,
         ActiveModal::WorkspacePicker,
         ActiveModal::GitStatus,
@@ -2029,6 +2040,7 @@ mod tests {
             [
                 "run",
                 "quit_confirm",
+                "checkout_confirm",
                 "commit_preview",
                 "workspace_picker",
                 "git_status",
@@ -2057,6 +2069,7 @@ mod tests {
         let boxed = [
             "run",
             "quit_confirm",
+            "checkout_confirm",
             "commit_preview",
             "workspace_picker",
             "git_status",

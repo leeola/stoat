@@ -3,8 +3,10 @@ use crate::{
     app::{Stoat, UpdateEffect},
     blame::{self, BlameCard, CommitDetails, LineBlame},
     buffer::BufferId,
+    checkout_confirm::{self, CheckoutTarget},
     commit_preview::{self, PreviewOrigin},
     editor_state::EditorId,
+    git_jobs::{self, GitJob, GitLanding, GitWork},
     host::{self, BlameCommit, ClipboardKind},
     keymap_state::{self, StoatKeymapState},
     pane::{FocusTarget, View},
@@ -189,38 +191,54 @@ pub(super) fn preview(stoat: &mut Stoat) -> UpdateEffect {
 /// Check the commit of the cursor's line out, and show the line in the changes
 /// view against the commit's parent.
 ///
-/// The checkout is a review walk of one commit, so `:done` puts HEAD back. A
-/// pane that does not blame checks nothing out. A line whose blame has not
-/// landed and an uncommitted line check nothing out, and the status row says
-/// why. An open walk, a running rebase, a buffer with unsaved edits, and
-/// tracked changes in the working tree refuse the checkout, and the Review
-/// badge says why.
+/// While the Commit Preview is open, the commit and the line are the
+/// preview's. The checkout is a review walk of one commit, so `:done` puts HEAD
+/// back. A pane that does not blame checks nothing out. A line whose blame has
+/// not landed and an uncommitted line check nothing out, and the status row
+/// says why. An open walk, a running rebase, and a buffer with unsaved edits
+/// refuse the checkout, and the Review badge says why.
+///
+/// The git queue reads the working tree's changes. A clean tree checks out at
+/// once. A tree with changes, untracked files among them, opens the checkout
+/// confirm, which offers to stash them first.
 pub(super) fn checkout(stoat: &mut Stoat) -> UpdateEffect {
-    if blamed_cursor(stoat).is_none() {
-        return UpdateEffect::None;
-    }
-    let (commit, path, row) = match cursor_line_blame(stoat) {
+    let (commit, path, row) = match &stoat.commit_preview {
+        Some(preview) => (
+            preview.commit.info.clone(),
+            preview.origin.path.clone(),
+            preview.origin.line,
+        ),
         None => {
-            stoat.set_status(BLAME_LOADING);
-            return UpdateEffect::Redraw;
+            if blamed_cursor(stoat).is_none() {
+                return UpdateEffect::None;
+            }
+            match cursor_line_blame(stoat) {
+                None => {
+                    stoat.set_status(BLAME_LOADING);
+                    return UpdateEffect::Redraw;
+                },
+                Some((_, _, LineBlame::Uncommitted)) => {
+                    stoat.set_status(LINE_UNCOMMITTED);
+                    return UpdateEffect::Redraw;
+                },
+                Some((
+                    _,
+                    _,
+                    LineBlame::Commit {
+                        commit,
+                        commit_line,
+                        commit_path,
+                        ..
+                    },
+                )) => (commit.info.clone(), commit_path.to_path_buf(), commit_line),
+            }
         },
-        Some((_, _, LineBlame::Uncommitted)) => {
-            stoat.set_status(LINE_UNCOMMITTED);
-            return UpdateEffect::Redraw;
-        },
-        Some((
-            _,
-            _,
-            LineBlame::Commit {
-                commit,
-                commit_line,
-                commit_path,
-                ..
-            },
-        )) => (commit.info.clone(), commit_path.to_path_buf(), commit_line),
     };
 
-    let Some(workdir) = review_walk::checkout_repo(stoat).and_then(|repo| repo.workdir()) else {
+    let Some(repo) = review_walk::checkout_repo(stoat) else {
+        return UpdateEffect::Redraw;
+    };
+    let Some(workdir) = repo.workdir() else {
         return UpdateEffect::Redraw;
     };
     // A checkout writes the files under the buffers, and the reload after it
@@ -236,7 +254,69 @@ pub(super) fn checkout(stoat: &mut Stoat) -> UpdateEffect {
     }
 
     stoat.blame_card = None;
-    review_walk::walk_blame_commit(stoat, workdir, commit, path, row)
+    let target = CheckoutTarget {
+        workdir,
+        commit,
+        path,
+        row,
+    };
+    let job = GitJob::new("checkout check", None, move |_: &mut Stoat| {
+        Some(Box::new(move || {
+            let files = checkout_confirm::file_rows(&repo.changed_files(), &target.workdir);
+            let branch = repo.head_branch();
+            let head = repo
+                .resolve_rev("HEAD")
+                .map(|sha| sha.chars().take(7).collect())
+                .unwrap_or_default();
+            Box::new(move |stoat: &mut Stoat| {
+                land_checkout_check(stoat, target, branch, head, files);
+            }) as GitLanding
+        }) as GitWork)
+    });
+    git_jobs::enqueue(stoat, job);
+    UpdateEffect::Redraw
+}
+
+/// Start the checkout of `target` once the git queue read the working tree, or
+/// ask first when the tree holds changes.
+///
+/// A clean tree closes the Commit Preview and checks out at once.
+fn land_checkout_check(
+    stoat: &mut Stoat,
+    target: CheckoutTarget,
+    branch: Option<String>,
+    head: String,
+    files: Vec<(String, String)>,
+) {
+    if !files.is_empty() {
+        checkout_confirm::open(stoat, target, branch, head, files);
+        return;
+    }
+
+    stoat.commit_preview = None;
+    let CheckoutTarget {
+        workdir,
+        commit,
+        path,
+        row,
+    } = target;
+    review_walk::walk_blame_commit(stoat, workdir, commit, path, row);
+}
+
+/// Stash the working tree's changes and start the checkout the confirm names.
+///
+/// The Commit Preview behind the confirm closes with it.
+pub(super) fn accept_checkout(stoat: &mut Stoat) -> UpdateEffect {
+    let Some(confirm) = stoat.checkout_confirm.take() else {
+        return UpdateEffect::None;
+    };
+    let CheckoutTarget {
+        workdir,
+        commit,
+        path,
+        row,
+    } = confirm.target;
+    review_walk::walk_blame_commit_stashing(stoat, workdir, commit, path, row)
 }
 
 /// Keep the Blame Card in step with the cursor after an event.
@@ -435,7 +515,7 @@ mod tests {
         app::Stoat,
         badge::BadgeSource,
         diff_changes,
-        host::ClipboardKind,
+        host::{ClipboardKind, GitRepo},
         keymap_state,
         lsp::hover::{HoverOutcome, HoverResponse},
         pane::View,
@@ -450,11 +530,12 @@ mod tests {
     use ratatui::layout::Rect;
     use std::{
         path::{Path, PathBuf},
+        sync::Arc,
         time::Duration,
     };
     use stoat_action::{
-        BlameCard, BlameCheckout, BlamePreview, CommitPreviewParent, DiffChanges, SetTheme,
-        ToggleBlame,
+        BlameCard, BlameCheckout, BlamePreview, CommitPreviewParent, DiffChanges,
+        OpenCommandPalette, SetTheme, ToggleBlame,
     };
     use stoatty_protocol::{
         command::{decode_stream, BorderStyle, Command},
@@ -1323,10 +1404,10 @@ mod tests {
         );
     }
 
-    /// Tracked changes, an unsaved buffer, and the walk an earlier `c` opened
-    /// each refuse a checkout, and the Review badge says why.
+    /// An unsaved buffer and the walk an earlier `c` opened each refuse a
+    /// checkout, and the Review badge says why.
     #[test]
-    fn c_refuses_over_tracked_changes_unsaved_buffers_and_an_open_walk() {
+    fn c_refuses_over_unsaved_buffers_and_an_open_walk() {
         let refused = |seed: &dyn Fn(&mut TestHarness)| {
             let mut h = checkout_history(CHECKOUT_A);
             seed(&mut h);
@@ -1336,13 +1417,6 @@ mod tests {
         };
         assert_eq!(
             [
-                refused(&|h| {
-                    h.fake_git().add_repo("/repo").modified(
-                        "b.rs",
-                        "fn b() {}\n",
-                        "fn b() { 1 }\n",
-                    );
-                }),
                 refused(&|h| h.type_keys("i x escape")),
                 refused(&|h| {
                     h.type_keys("j j c");
@@ -1352,7 +1426,6 @@ mod tests {
                 }),
             ],
             [
-                (Vec::new(), Some("uncommitted changes".to_string())),
                 (Vec::new(), Some("unsaved buffers".to_string())),
                 (
                     vec!["detached:b2c3d4e5".to_string()],
@@ -1377,6 +1450,219 @@ mod tests {
                 h.stoat.pending_message.clone(),
             ),
             ("ne\ntwo\n".to_string(), "insert", None),
+        );
+    }
+
+    /// Over a tree with changes, a checkout opens the confirm, which lists the
+    /// changes with the untracked file among them, and checks nothing out.
+    #[test]
+    fn a_checkout_over_changes_opens_the_confirm() {
+        let mut h = dirty_checkout();
+        h.type_keys("j j c");
+        h.settle();
+        let pair = |left: &str, right: &str| (left.to_string(), right.to_string());
+        assert_eq!(
+            (
+                keymap_state::modal_predicate(&h.stoat),
+                h.stoat.checkout_confirm.as_ref().map(|confirm| {
+                    (
+                        confirm.branch.clone(),
+                        confirm.head.clone(),
+                        confirm.files.clone(),
+                        confirm.hints.clone(),
+                    )
+                }),
+                checkouts(&h),
+            ),
+            (
+                Some("checkout_confirm"),
+                Some((
+                    Some("main".to_string()),
+                    "c3d4e5f".to_string(),
+                    vec![pair(" M", "b.rs"), pair("??", "notes.md")],
+                    vec![pair("Ret", "stash and check out"), pair("Esc", "cancel")],
+                )),
+                Vec::<String>::new(),
+            ),
+        );
+    }
+
+    /// The confirm opens in normal mode, where its keys bind, from any mode.
+    #[test]
+    fn the_confirm_opens_in_normal_mode() {
+        let mut h = dirty_checkout();
+        h.type_keys("j j");
+        dispatch(&mut h.stoat, &BlameCheckout);
+        h.stoat.set_focused_mode("insert".to_string());
+        h.settle();
+        assert_eq!(
+            (h.stoat.checkout_confirm.is_some(), h.stoat.focused_mode()),
+            (true, "normal"),
+        );
+    }
+
+    /// The palette key over the confirm closes the confirm and the preview
+    /// behind it as the palette opens, so the palette is the one modal open.
+    #[test]
+    fn the_palette_key_closes_the_confirm_and_the_preview_behind_it() {
+        let mut h = dirty_checkout();
+        h.type_keys("j j enter");
+        h.settle();
+        h.type_keys("c");
+        h.settle();
+        h.type_keys("ctrl-;");
+        assert_eq!(
+            (
+                h.stoat.checkout_confirm.is_some(),
+                h.stoat.commit_preview.is_some(),
+                h.stoat.command_palette.is_some(),
+            ),
+            (false, false, true),
+        );
+    }
+
+    /// `Enter` in the confirm stashes the changes, the untracked file with
+    /// them, under a message that names the commit. It then checks the commit
+    /// out and opens the changes view at the blamed line.
+    #[test]
+    fn enter_in_the_confirm_stashes_the_changes_and_checks_out() {
+        let mut h = dirty_checkout();
+        h.type_keys("j j c");
+        h.settle();
+        h.type_keys("enter");
+        h.settle();
+        assert_eq!(
+            (
+                stashes(&h),
+                changed_files(&h),
+                checkouts(&h),
+                h.stoat.checkout_confirm.is_some(),
+                changes_cursor(&mut h),
+            ),
+            (
+                vec!["On main: stoat: blame checkout of b2c3d4e".to_string()],
+                0,
+                vec!["detached:b2c3d4e5".to_string()],
+                false,
+                Some(("a.rs".to_string(), 2)),
+            ),
+        );
+    }
+
+    /// `Escape` in the confirm closes it with no stash and no walk.
+    #[test]
+    fn escape_in_the_confirm_checks_nothing_out() {
+        let mut h = dirty_checkout();
+        h.type_keys("j j c");
+        h.settle();
+        h.type_keys("escape");
+        h.settle();
+        assert_eq!(
+            (
+                h.stoat.checkout_confirm.is_some(),
+                stashes(&h),
+                checkouts(&h),
+                h.stoat.active_workspace().review_walk.is_some(),
+            ),
+            (false, Vec::<String>::new(), Vec::<String>::new(), false),
+        );
+    }
+
+    /// A stash that fails checks nothing out, leaves no walk, and badges the
+    /// failure.
+    #[test]
+    fn a_failed_stash_ends_the_checkout() {
+        let mut h = dirty_checkout();
+        h.type_keys("j j c");
+        h.settle();
+        h.fake_git().add_repo("/repo").fail_apply_with("disk full");
+        h.type_keys("enter");
+        h.settle();
+        assert_eq!(
+            (
+                checkouts(&h),
+                h.stoat.active_workspace().review_walk.is_some(),
+                review_badge(&h),
+            ),
+            (
+                Vec::<String>::new(),
+                false,
+                Some("checkout failed".to_string())
+            ),
+        );
+    }
+
+    /// From an open Commit Preview, `c` takes the preview behind the confirm,
+    /// and the frame paints both boxes. `Escape` brings the preview back.
+    #[test]
+    fn the_confirm_holds_the_preview_behind_it_and_gives_it_back() {
+        let mut h = dirty_checkout();
+        h.stoat.stoatty = false;
+        h.type_keys("j j enter");
+        h.settle();
+        h.type_keys("c");
+        h.settle();
+        let held = (
+            keymap_state::modal_predicate(&h.stoat),
+            h.stoat
+                .checkout_confirm
+                .as_ref()
+                .is_some_and(|confirm| confirm.behind.is_some()),
+        );
+        h.snapshot();
+        let text = h.rendered_text();
+        let painted =
+            ["preview \u{b7} read-only", "Check out b2c3d4e?"].map(|part| text.contains(part));
+        h.type_keys("escape");
+        assert_eq!(
+            (held, painted, keymap_state::modal_predicate(&h.stoat)),
+            (
+                (Some("checkout_confirm"), true),
+                [true, true],
+                Some("commit_preview"),
+            ),
+        );
+    }
+
+    /// A modal opened while the check waits in the git queue keeps the confirm
+    /// out, and nothing is checked out.
+    #[test]
+    fn a_modal_opened_before_the_check_lands_keeps_the_confirm_out() {
+        let mut h = dirty_checkout();
+        h.type_keys("j j");
+        dispatch(&mut h.stoat, &BlameCheckout);
+        dispatch(&mut h.stoat, &OpenCommandPalette);
+        h.settle();
+        assert_eq!(
+            (
+                h.stoat.checkout_confirm.is_some(),
+                h.stoat.command_palette.is_some(),
+                checkouts(&h),
+            ),
+            (false, true, Vec::<String>::new()),
+        );
+    }
+
+    /// From the Commit Preview over a clean tree, `c` closes the preview and
+    /// checks the previewed commit out at the preview's line.
+    #[test]
+    fn c_in_the_preview_checks_its_commit_out_over_a_clean_tree() {
+        let mut h = checkout_history(CHECKOUT_A);
+        h.type_keys("j j enter");
+        h.settle();
+        h.type_keys("c");
+        h.settle();
+        assert_eq!(
+            (
+                h.stoat.commit_preview.is_some(),
+                checkouts(&h),
+                changes_cursor(&mut h),
+            ),
+            (
+                false,
+                vec!["detached:b2c3d4e5".to_string()],
+                Some(("a.rs".to_string(), 2)),
+            ),
         );
     }
 
@@ -1449,6 +1735,39 @@ mod tests {
             excerpt.rel_path.clone(),
             diff_changes::cursor_point(editor).row,
         ))
+    }
+
+    /// [`checkout_history`] over a working tree that edits `b.rs` and holds
+    /// the untracked `notes.md`.
+    fn dirty_checkout() -> TestHarness {
+        let h = checkout_history(CHECKOUT_A);
+        h.fake_git()
+            .add_repo("/repo")
+            .unstaged_file("b.rs", "fn b() { 1 }\n")
+            .untracked("notes.md");
+        h
+    }
+
+    /// The stash messages of `/repo`, newest first.
+    fn stashes(h: &TestHarness) -> Vec<String> {
+        repo(h)
+            .stash_list()
+            .into_iter()
+            .map(|stash| stash.summary)
+            .collect()
+    }
+
+    /// How many files of `/repo` differ from HEAD, untracked files among them.
+    fn changed_files(h: &TestHarness) -> usize {
+        repo(h).changed_files().len()
+    }
+
+    /// The fake host's `/repo`.
+    fn repo(h: &TestHarness) -> Arc<dyn GitRepo> {
+        h.stoat
+            .git_host
+            .discover(Path::new("/repo"))
+            .expect("the repository")
     }
 
     /// A 120-cell window over `a.rs` of a repository that holds `history`, with

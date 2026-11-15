@@ -780,6 +780,12 @@ on key {
         N -> QuitAllCancel();
         Escape -> QuitAllCancel();
     }
+    # The checkout confirm lists the labeled bindings of this block in its last
+    # row, in this order.
+    modal == checkout_confirm {
+        Enter -> CheckoutConfirmAccept() "stash and check out";
+        Escape -> CheckoutConfirmCancel() "cancel";
+    }
     # The panel opens over a view whose keys rank by two predicates, such as
     # the conflict view's `view == conflict && mode == normal`. The mode
     # predicate ranks the panel's keys level with them, and a tie goes to the
@@ -807,6 +813,7 @@ on key {
         k -> CommitPreviewLineUp() "scroll";
         ] -> SetMode(bracket_next) "file";
         [ -> SetMode(bracket_prev) "file";
+        c -> BlameCheckout() "check out";
         P -> CommitPreviewParent() "other parent";
         Down -> CommitPreviewLineDown();
         Up -> CommitPreviewLineUp();

@@ -1,5 +1,8 @@
 use crate::{
-    action_handlers::{self, read_string_via_host, review_walk::WalkLandingKind},
+    action_handlers::{
+        self, read_string_via_host,
+        review_walk::{WalkEntry, WalkLandingKind},
+    },
     app::{Stoat, UpdateEffect},
     buffer_registry::OpenOrigin,
     code_index::{build, nav},
@@ -139,7 +142,7 @@ fn open_commit_tour(stoat: &mut Stoat, run: WalkthroughRun, git_root: &Path) -> 
         commits,
         WalkLandingKind::Walkthrough,
         WalkSpan::Commits,
-        None,
+        WalkEntry::default(),
         WalkOrigin::Commits,
     );
     stoat.set_status(format!("checking out {first:.7}"));

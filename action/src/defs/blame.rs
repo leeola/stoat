@@ -76,7 +76,33 @@ define_action!(
     "Check out the commit that last changed the cursor line of a blamed pane, \
      detached, and open the changes view on that line against the commit's \
      parent. The checkout is a review walk of one commit, so :done returns. \
-     Tracked changes, unsaved buffers, an open walk, and a rebase refuse it.",
+     Over uncommitted changes it asks first and offers to stash them. Unsaved \
+     buffers, an open walk, and a rebase refuse it.",
+    ActionPriority::Rare,
+    palette_visible = false
+);
+
+define_action!(
+    CheckoutConfirmAcceptDef,
+    CheckoutConfirmAccept,
+    "CheckoutConfirmAccept",
+    ActionKind::CheckoutConfirmAccept,
+    "stash and check out",
+    "Stash the working tree's changes, the untracked files with them, and \
+     check out the commit the checkout confirm names. A checkout that fails \
+     puts the changes back.",
+    ActionPriority::Rare,
+    palette_visible = false
+);
+
+define_action!(
+    CheckoutConfirmCancelDef,
+    CheckoutConfirmCancel,
+    "CheckoutConfirmCancel",
+    ActionKind::CheckoutConfirmCancel,
+    "cancel the checkout",
+    "Close the checkout confirm with no checkout and no stash, and bring back \
+     the Commit Preview it opened over.",
     ActionPriority::Rare,
     palette_visible = false
 );

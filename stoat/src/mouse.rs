@@ -608,7 +608,7 @@ pub(crate) fn boxed_modal_surfaces(stoat: &Stoat) -> Option<ModalSurfaces> {
         }),
         // Nothing to point at. It owns the pointer all the same, so a press
         // never reaches the panes it covers, and keys alone answer it.
-        ActiveModal::QuitConfirm => Some(ModalSurfaces {
+        ActiveModal::QuitConfirm | ActiveModal::CheckoutConfirm => Some(ModalSurfaces {
             list: Rect::new(0, 0, 0, 0),
             preview: None,
             len: 0,

@@ -1,6 +1,7 @@
 pub(crate) mod badges;
 pub(crate) mod blame;
 pub(crate) mod blame_card;
+pub(crate) mod checkout_confirm;
 pub(crate) mod chrome;
 pub(crate) mod code_action;
 pub(crate) mod code_search;
@@ -1950,6 +1951,46 @@ pub(crate) fn frame(
                     buf,
                     &mut *scene,
                 );
+            }
+        },
+        Some(ActiveModal::CheckoutConfirm) => {
+            if let Some(confirm) = &mut stoat.checkout_confirm {
+                if let Some(preview) = confirm.behind.as_mut() {
+                    commit_preview::render_commit_preview_modal(
+                        preview,
+                        crate::commit_picker::now_epoch(&stoat.executor),
+                        &stoat.theme,
+                        preview_dials,
+                        full,
+                        buf,
+                        &mut *scene,
+                    );
+                }
+                checkout_confirm::render_checkout_confirm(
+                    confirm,
+                    &stoat.theme,
+                    full,
+                    buf,
+                    &mut *scene,
+                );
+                if modal_hints {
+                    cached_modal_hints(
+                        &mut stoat.hints_cache,
+                        &stoat.keymap,
+                        mode,
+                        "checkout_confirm",
+                        None,
+                        Some("check out"),
+                        on_request,
+                        toggles,
+                        &stoat.theme,
+                        full,
+                        status_rows,
+                        chrome_bands,
+                        buf,
+                        &mut *scene,
+                    );
+                }
             }
         },
         Some(ActiveModal::CommitPreview) => {

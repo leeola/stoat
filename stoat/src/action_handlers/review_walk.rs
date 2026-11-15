@@ -81,7 +81,7 @@ pub(crate) fn review(stoat: &mut Stoat, from: Option<&str>, against: Option<&str
                         vec![commit],
                         WalkLandingKind::Walk,
                         span,
-                        None,
+                        WalkEntry::default(),
                         WalkOrigin::Commits,
                     );
                 },
@@ -734,7 +734,7 @@ fn install_walk(stoat: &mut Stoat) -> UpdateEffect {
         commits,
         WalkLandingKind::Walk,
         WalkSpan::Commits,
-        None,
+        WalkEntry::default(),
         WalkOrigin::Commits,
     );
     UpdateEffect::Redraw
@@ -758,9 +758,9 @@ fn install_walk(stoat: &mut Stoat) -> UpdateEffect {
 /// only while a tour that spans commits still plays. A refusal closes that
 /// tour, since no landing comes to carry it on.
 ///
-/// `open` names the file the first landing shows in place of the commit's first
-/// changed file, for a caller that knows which file the reader stands on. Every
-/// later step shows its own commit's first file.
+/// `entry` names what the first landing does beyond its checkout, as
+/// [`WalkEntry`] describes. Every later step shows its own commit's first
+/// file.
 ///
 /// `origin` decides what each landing of the walk shows, as [`WalkOrigin`]
 /// describes.
@@ -770,7 +770,7 @@ pub(super) fn queue_walk_start(
     commits: Vec<CommitInfo>,
     kind: WalkLandingKind,
     span: WalkSpan,
-    open: Option<PathBuf>,
+    entry: WalkEntry,
     origin: WalkOrigin,
 ) {
     let job = GitJob::new(
@@ -793,7 +793,7 @@ pub(super) fn queue_walk_start(
             let return_ref = if stoat.active_workspace().review_walk.is_some() {
                 None
             } else {
-                walk_return_ref(stoat, &workdir).ok()
+                walk_return_ref(stoat, &workdir, entry.stash.is_some()).ok()
             };
             let Some(return_ref) = return_ref else {
                 if tour {
@@ -820,7 +820,7 @@ pub(super) fn queue_walk_start(
             });
 
             let (workdir, sha, standing) = walk_position(stoat)?;
-            walk_checkout_work(stoat, kind, workdir, sha, standing, open)
+            walk_checkout_work(stoat, kind, workdir, sha, standing, entry)
         },
     );
     git_jobs::enqueue(stoat, job);
@@ -834,14 +834,19 @@ pub(super) fn queue_walk_start(
 /// whether the user was on a branch or already detached, and reattaching
 /// someone who was detached moves a branch they never asked to move.
 ///
-/// A tree with tracked changes refuses. A walk checks commits out, so starting
-/// one over uncommitted work either loses it or leaves the checkout half
-/// applied.
-fn walk_return_ref(stoat: &mut Stoat, workdir: &Path) -> Result<ReturnRef, UpdateEffect> {
+/// A tree with tracked changes refuses unless `allow_dirty` holds. A walk
+/// checks commits out, so starting one over uncommitted work either loses it or
+/// leaves the checkout half applied. A start that stashes the changes first
+/// passes `allow_dirty`.
+fn walk_return_ref(
+    stoat: &mut Stoat,
+    workdir: &Path,
+    allow_dirty: bool,
+) -> Result<ReturnRef, UpdateEffect> {
     let Some(repo) = stoat.git_host.discover(workdir) else {
         return Err(review_error(stoat, "not in a git repository", None));
     };
-    if repo.has_tracked_changes() {
+    if !allow_dirty && repo.has_tracked_changes() {
         return Err(dirty_tree_error(stoat));
     }
     match repo.head_branch() {
@@ -874,7 +879,10 @@ pub(super) fn walk_one_commit(
         vec![commit],
         WalkLandingKind::Walk,
         WalkSpan::Commits,
-        open,
+        WalkEntry {
+            open,
+            ..WalkEntry::default()
+        },
         WalkOrigin::Commits,
     );
     UpdateEffect::Redraw
@@ -897,13 +905,47 @@ pub(super) fn walk_blame_commit(
     path: PathBuf,
     row: u32,
 ) -> UpdateEffect {
+    start_blame_walk(stoat, workdir, commit, path, row, None)
+}
+
+/// Start a walk over `commit` alone for a blamed line, as
+/// [`walk_blame_commit`] does, over a working tree whose changes the first
+/// landing stashes.
+///
+/// The stash takes the untracked files too. Its message names the commit, so
+/// `git stash list` says where the changes went. A landing that fails puts the
+/// changes back and ends the walk.
+pub(super) fn walk_blame_commit_stashing(
+    stoat: &mut Stoat,
+    workdir: PathBuf,
+    commit: CommitInfo,
+    path: PathBuf,
+    row: u32,
+) -> UpdateEffect {
+    let stash = format!("stoat: blame checkout of {}", commit.short_sha);
+    start_blame_walk(stoat, workdir, commit, path, row, Some(stash))
+}
+
+/// Queue the start of a blame walk, whose first landing stashes under `stash`
+/// when one is given.
+fn start_blame_walk(
+    stoat: &mut Stoat,
+    workdir: PathBuf,
+    commit: CommitInfo,
+    path: PathBuf,
+    row: u32,
+    stash: Option<String>,
+) -> UpdateEffect {
     queue_walk_start(
         stoat,
         workdir,
         vec![commit],
         WalkLandingKind::Walk,
         WalkSpan::Commits,
-        Some(path.clone()),
+        WalkEntry {
+            open: Some(path.clone()),
+            stash,
+        },
         WalkOrigin::Blame { path, row },
     );
     UpdateEffect::Redraw
@@ -1347,6 +1389,23 @@ impl WalkLandingKind {
     }
 }
 
+/// What a walk's first landing does beyond its checkout.
+///
+/// Every later landing shows its own commit's first file and stashes nothing,
+/// so only the start carries one.
+#[derive(Default)]
+pub(super) struct WalkEntry {
+    /// The file the first landing shows in place of the commit's first changed
+    /// file, for a caller that knows which file the reader stands on.
+    open: Option<PathBuf>,
+    /// The message of the stash that the first landing makes of the working
+    /// tree's changes, the untracked files with them, before it checks out.
+    ///
+    /// A start with one accepts a tree with tracked changes, which a walk
+    /// otherwise refuses.
+    stash: Option<String>,
+}
+
 /// What one step's git work produced.
 struct WalkLanding {
     /// The commit's parent, which becomes the diff base.
@@ -1390,7 +1449,9 @@ pub(super) fn queue_walk_landing(
     let job = GitJob::new(
         "walk landing",
         Some(GitJobKey::WalkLanding),
-        move |stoat: &mut Stoat| walk_checkout_work(stoat, kind, workdir, sha, standing, None),
+        move |stoat: &mut Stoat| {
+            walk_checkout_work(stoat, kind, workdir, sha, standing, WalkEntry::default())
+        },
     );
     git_jobs::enqueue(stoat, job);
 }
@@ -1401,8 +1462,8 @@ pub(super) fn queue_walk_landing(
 /// The span is read here, at the job's start, so the work knows which base a
 /// range review lands against. A rebase pause has no walk and reads none.
 ///
-/// `open` is the file the landing shows in place of the one the commit or the
-/// range changed first.
+/// `entry` is what a walk's start asks of its first landing, and
+/// [`WalkEntry::default`] for every later one.
 ///
 /// Returns `None`, with the failure reported, when `workdir` holds no
 /// repository.
@@ -1412,7 +1473,7 @@ fn walk_checkout_work(
     workdir: PathBuf,
     sha: String,
     standing: String,
-    open: Option<PathBuf>,
+    entry: WalkEntry,
 ) -> Option<GitWork> {
     let range_base = stoat
         .active_workspace()
@@ -1427,10 +1488,11 @@ fn walk_checkout_work(
         report_failure(stoat, kind, WalkFailure::NoRepository);
         return None;
     };
+    let stashing = entry.stash.is_some();
     Some(Box::new(move || {
-        let landed = walk_landing(&*repo, kind, &workdir, &sha, range_base.as_deref(), open);
+        let landed = walk_landing(&*repo, kind, &workdir, &sha, range_base.as_deref(), entry);
         Box::new(move |stoat: &mut Stoat| {
-            land_walk_checkout(stoat, kind, &workdir, &standing, &sha, landed);
+            land_walk_checkout(stoat, kind, &workdir, &standing, &sha, landed, stashing);
         }) as GitLanding
     }) as GitWork)
 }
@@ -1439,27 +1501,40 @@ fn walk_checkout_work(
 ///
 /// Under a `range_base` the first path is the first tracked file the whole
 /// range changed against that base, rather than the first file the commit
-/// touched, since the review reads as one diff against the base. An `open` path
-/// is the first path under either, since its caller knows the file the reader
-/// stands on.
+/// touched, since the review reads as one diff against the base. The entry's
+/// `open` path is the first path under either, since its caller knows the file
+/// the reader stands on.
+///
+/// An entry with a stash message stashes the working tree's changes first, the
+/// untracked files with them, whether or not HEAD moves, so the confirm that
+/// asked for the stash holds. A tree with nothing to stash goes on with no
+/// stash. A checkout that then fails pops the stash back before it answers.
 fn walk_landing(
     repo: &dyn crate::host::GitRepo,
     kind: WalkLandingKind,
     workdir: &Path,
     sha: &str,
     range_base: Option<&str>,
-    open: Option<PathBuf>,
+    entry: WalkEntry,
 ) -> Result<WalkLanding, WalkFailure> {
+    let stash = match &entry.stash {
+        Some(message) => stash_tree(repo, message)?,
+        None => None,
+    };
     if repo.resolve_rev("HEAD").as_deref() != Some(sha) {
-        if kind.follows_walk() && repo.has_tracked_changes() {
+        if kind.follows_walk() && entry.stash.is_none() && repo.has_tracked_changes() {
             return Err(WalkFailure::DirtyTree);
         }
         if let Err(err) = repo.checkout_detached(sha) {
-            return Err(WalkFailure::Checkout(err.to_string()));
+            let detail = match stash.as_deref().map(|stash| repo.stash_pop(stash, true)) {
+                Some(Err(pop)) => format!("{err}; the changes stay in the stash: {pop}"),
+                Some(Ok(())) | None => err.to_string(),
+            };
+            return Err(WalkFailure::Checkout(detail));
         }
     }
 
-    let first_path = match (open, range_base) {
+    let first_path = match (entry.open, range_base) {
         (Some(path), _) => Some(path),
         (None, Some(base)) => repo
             .changed_files_from(base)
@@ -1474,10 +1549,31 @@ fn walk_landing(
     })
 }
 
+/// Stash the working tree's changes under `message`, the untracked files with
+/// them, and answer the stash's sha.
+///
+/// A tree with nothing to stash answers `None`, since a checkout over it loses
+/// nothing.
+fn stash_tree(
+    repo: &dyn crate::host::GitRepo,
+    message: &str,
+) -> Result<Option<String>, WalkFailure> {
+    match repo.stash_save(Some(message), true) {
+        Ok(sha) => Ok(Some(sha)),
+        Err(crate::host::GitApplyError::Backend { reason, .. }) if reason == "nothing to stash" => {
+            Ok(None)
+        },
+        Err(err) => Err(WalkFailure::Checkout(err.to_string())),
+    }
+}
+
 /// Apply a landed checkout of `sha`, or report why it did not land.
 ///
 /// A walk checkout that lands after the walk ended applies nothing and reports
 /// nothing, since the reader left the walk that asked for it.
+///
+/// A failed landing of a start that stashed ends its walk. HEAD never moved,
+/// and the stash went back into the tree, so no walk stands to return from.
 fn land_walk_checkout(
     stoat: &mut Stoat,
     kind: WalkLandingKind,
@@ -1485,6 +1581,7 @@ fn land_walk_checkout(
     standing: &str,
     sha: &str,
     landed: Result<WalkLanding, WalkFailure>,
+    stashing: bool,
 ) {
     if kind.follows_walk() && stoat.active_workspace().review_walk.is_none() {
         return;
@@ -1495,7 +1592,12 @@ fn land_walk_checkout(
             auto_reload::reload_clean_buffers(stoat);
             land_walk(stoat, kind, workdir, standing, sha, landing);
         },
-        Err(failure) => report_failure(stoat, kind, failure),
+        Err(failure) => {
+            if stashing {
+                stoat.active_workspace_mut().review_walk = None;
+            }
+            report_failure(stoat, kind, failure);
+        },
     }
 
     // The reader steps on while a checkout is out, so the cursor is sometimes
@@ -1620,8 +1722,8 @@ fn walk_position(stoat: &Stoat) -> Option<(PathBuf, String, String)> {
 #[cfg(test)]
 mod tests {
     use super::{
-        queue_walk_landing, queue_walk_start, walk_navigate_as, walk_one_commit, ReturnRef,
-        ReviewWalk, WalkLandingKind, WalkOrigin, WalkSpan,
+        queue_walk_landing, queue_walk_start, walk_landing, walk_navigate_as, walk_one_commit,
+        ReturnRef, ReviewWalk, WalkEntry, WalkFailure, WalkLandingKind, WalkOrigin, WalkSpan,
     };
     use crate::{
         app::Stoat,
@@ -3391,6 +3493,77 @@ mod tests {
         );
     }
 
+    /// A stashing landing whose checkout fails puts the stash back, so the tree
+    /// holds its changes again and the stash list holds nothing.
+    #[test]
+    fn a_stashing_landing_pops_the_stash_back_when_its_checkout_fails() {
+        let h = harness();
+        h.fake_git()
+            .add_repo("/repo")
+            .unstaged_file("a.rs", "fn a() { 1 }\n")
+            .untracked("notes.md");
+        let repo = h.stoat.git_host.discover(Path::new("/repo")).expect("repo");
+        let before = repo.changed_files();
+        let entry = WalkEntry {
+            open: None,
+            stash: Some("wip".to_string()),
+        };
+
+        let landed = walk_landing(
+            &*repo,
+            WalkLandingKind::Walk,
+            Path::new("/repo"),
+            "f0f0f0f0",
+            None,
+            entry,
+        );
+        let detail = match landed {
+            Err(WalkFailure::Checkout(detail)) => Some(detail),
+            _ => None,
+        };
+        assert_eq!(
+            (detail, repo.changed_files(), repo.stash_list().len()),
+            (
+                Some("git backend failure: unknown sha: f0f0f0f0".to_string()),
+                before,
+                0,
+            ),
+        );
+    }
+
+    /// A stashing landing over a clean tree finds nothing to stash and checks
+    /// out all the same.
+    #[test]
+    fn a_stashing_landing_over_a_clean_tree_checks_out_with_no_stash() {
+        let h = harness();
+        let repo = h.stoat.git_host.discover(Path::new("/repo")).expect("repo");
+        let entry = WalkEntry {
+            open: None,
+            stash: Some("wip".to_string()),
+        };
+
+        let landed = walk_landing(
+            &*repo,
+            WalkLandingKind::Walk,
+            Path::new("/repo"),
+            "b2c3d4e5",
+            None,
+            entry,
+        );
+        assert_eq!(
+            (
+                landed.ok().map(|landing| landing.parent),
+                checkouts(&h),
+                repo.stash_list().len(),
+            ),
+            (
+                Some(Some("a1b2c3d4".to_string())),
+                vec!["detached:b2c3d4e5".to_string()],
+                0,
+            ),
+        );
+    }
+
     #[test]
     fn review_done_returns_to_the_starting_branch() {
         let mut h = harness();
@@ -3502,7 +3675,7 @@ mod tests {
             vec![tip],
             WalkLandingKind::Walk,
             span,
-            None,
+            WalkEntry::default(),
             WalkOrigin::Commits,
         );
         h.settle();

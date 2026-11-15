@@ -83,6 +83,8 @@ action_kinds! {
     BlameCopySha,
     BlamePreview,
     BlameCheckout,
+    CheckoutConfirmAccept,
+    CheckoutConfirmCancel,
     CommitPreviewClose,
     CommitPreviewLineDown,
     CommitPreviewLineUp,

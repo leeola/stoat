@@ -9,6 +9,7 @@ use crate::{
     buffer::BufferId,
     buffer_registry::OpenOrigin,
     button_repeat::{self, ButtonRepeat, PressSource},
+    checkout_confirm::CheckoutConfirm,
     code_index::{
         build::IndexUpdate,
         store::{IndexWrites, ManifestEdit},
@@ -1080,6 +1081,9 @@ pub struct Stoat {
     pub(crate) git_status: Option<GitStatusPanel>,
     /// The Commit Preview, or `None` while it is closed.
     pub(crate) commit_preview: Option<CommitPreview>,
+    /// The confirm that asks before a blame checkout stashes the working
+    /// tree's changes, or `None` while it is closed.
+    pub(crate) checkout_confirm: Option<CheckoutConfirm>,
     /// Confirmation modal shown when [`stoat_action::QuitAll`] fires
     /// with at least one dirty buffer in any workspace. `Some` while
     /// the user is being prompted to discard or cancel; cleared on
@@ -2748,6 +2752,7 @@ impl Stoat {
             workspace_picker: None,
             git_status: None,
             commit_preview: None,
+            checkout_confirm: None,
             quit_all_confirm: None,
             jumplist_picker: None,
             walkthrough_picker: None,
@@ -7023,6 +7028,7 @@ impl Stoat {
             ActiveModal::PaneFinder => &self.pane_finder.as_ref()?.picker.input,
             ActiveModal::Run
             | ActiveModal::QuitConfirm
+            | ActiveModal::CheckoutConfirm
             | ActiveModal::CommitPreview
             | ActiveModal::GitStatus => return None,
         };
