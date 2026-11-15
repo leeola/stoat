@@ -726,6 +726,7 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
         ActionKind::ToggleBlame => blame::toggle_blame(stoat),
         ActionKind::BlameCard => blame::open_card(stoat, true),
         ActionKind::BlameCardClose => blame::close_card(stoat),
+        ActionKind::BlameCopySha => blame::copy_sha(stoat),
         ActionKind::DiffUnderline => stoat.handle_diff_underline_toggle(),
         ActionKind::DiffBold => stoat.handle_diff_bold_toggle(),
         ActionKind::DiffSyntax => stoat.handle_diff_syntax_toggle(),

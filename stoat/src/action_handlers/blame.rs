@@ -4,6 +4,7 @@ use crate::{
     blame::{self, BlameCard, CommitDetails, LineBlame},
     buffer::BufferId,
     editor_state::EditorId,
+    host::{self, BlameCommit, ClipboardKind},
     keymap_state::{self, StoatKeymapState},
     pane::{FocusTarget, View},
     render::editor,
@@ -100,6 +101,34 @@ pub(super) fn open_card(stoat: &mut Stoat, announce: bool) -> UpdateEffect {
 /// Close the Blame Card.
 pub(super) fn close_card(stoat: &mut Stoat) -> UpdateEffect {
     stoat.blame_card = None;
+    UpdateEffect::Redraw
+}
+
+/// Copy the full sha of the commit the blame keys act on to the system
+/// clipboard, and name its short sha in the status row.
+///
+/// The registers keep what they hold. A pane that does not blame copies
+/// nothing. A line whose blame has not landed and an uncommitted line copy
+/// nothing, and the status says why.
+pub(super) fn copy_sha(stoat: &mut Stoat) -> UpdateEffect {
+    if blamed_cursor(stoat).is_none() {
+        return UpdateEffect::None;
+    }
+    let commit = match acting_commit(stoat) {
+        Ok(commit) => commit,
+        Err(status) => {
+            stoat.set_status(status);
+            return UpdateEffect::Redraw;
+        },
+    };
+
+    host::clipboard_copy(
+        stoat.clipboard_host().as_ref(),
+        stoat.env_host().as_ref(),
+        ClipboardKind::System,
+        &commit.info.sha,
+    );
+    stoat.set_status(format!("copied {}", commit.info.short_sha));
     UpdateEffect::Redraw
 }
 
@@ -244,6 +273,20 @@ fn cursor_line_blame(stoat: &Stoat) -> Option<(EditorId, u32, LineBlame<'_>)> {
     Some((editor, row, line))
 }
 
+/// The commit the blame keys act on, or the status that says why there is
+/// none.
+///
+/// The commit is the one that last changed the cursor's line, so every blame
+/// key reads it from here. The status reads `blame is loading` before a blame
+/// of the buffer lands, and `line is not committed` on an uncommitted line.
+fn acting_commit(stoat: &Stoat) -> Result<BlameCommit, &'static str> {
+    match cursor_line_blame(stoat) {
+        None => Err("blame is loading"),
+        Some((_, _, LineBlame::Uncommitted)) => Err("line is not committed"),
+        Some((_, _, LineBlame::Commit { commit, .. })) => Ok(commit.clone()),
+    }
+}
+
 /// Read the Blame Card details of commit `sha` on the blocking pool.
 ///
 /// The task wakes the run loop when it lands, so the card fills in on the
@@ -280,8 +323,10 @@ mod tests {
         action_handlers::dispatch,
         app::Stoat,
         badge::BadgeSource,
+        host::ClipboardKind,
         lsp::hover::{HoverOutcome, HoverResponse},
         pane::View,
+        register::Register,
         test_harness::{CommitSpec, TestHarness},
     };
     use std::{
@@ -366,7 +411,10 @@ mod tests {
             (
                 ("c2", 1),
                 (Some("the body of two"), 1, 1, 0),
-                vec![("Esc".to_string(), "close".to_string())],
+                vec![
+                    ("y".to_string(), "copy sha".to_string()),
+                    ("Esc".to_string(), "close".to_string()),
+                ],
             ),
         );
     }
@@ -593,6 +641,58 @@ mod tests {
         assert_eq!((h.stoat.focused_mode(), card_line(&h)), ("insert", None));
     }
 
+    /// `y` copies the full 40-character sha of the cursor line's commit to
+    /// the system clipboard, names its short sha in the status row, and
+    /// leaves the unnamed register as it was.
+    #[test]
+    fn y_copies_the_commit_sha_and_keeps_the_registers() {
+        let sha = "c2".repeat(20);
+        let mut h = blamed_history(
+            &[
+                ("c1", "one", &[("a.rs", "one\n")]),
+                (&sha, "two", &[("a.rs", "one\ntwo\n")]),
+            ],
+            "one\ntwo\n",
+        );
+        let register = unnamed(&h);
+        h.type_keys("j y");
+        assert_eq!(
+            (
+                h.fake_clipboard().writes_for(ClipboardKind::System),
+                h.stoat.pending_message.clone(),
+                unnamed(&h),
+            ),
+            (vec![sha], Some("copied c2c2c2c".to_string()), register),
+        );
+    }
+
+    /// `y` on an uncommitted line copies nothing, and the status says why.
+    #[test]
+    fn y_on_an_uncommitted_line_copies_nothing() {
+        let mut h = blamed_repo("one\nTWO\n");
+        h.type_keys("j y");
+        assert_eq!(
+            (h.fake_clipboard().writes(), h.stoat.pending_message.clone()),
+            (
+                Vec::<String>::new(),
+                Some("line is not committed".to_string())
+            ),
+        );
+    }
+
+    /// In a pane that does not blame, `y` yanks the selection into the unnamed
+    /// register and copies nothing to the clipboard.
+    #[test]
+    fn y_yanks_in_a_pane_that_does_not_blame() {
+        let mut h = blamed_repo("one\ntwo\n");
+        h.type_keys("space h a");
+        h.type_keys("y");
+        assert_eq!(
+            (unnamed(&h), h.fake_clipboard().writes()),
+            (Some(vec!["o".to_string()]), Vec::<String>::new()),
+        );
+    }
+
     /// In a pane that does not blame, `K` extends the selection up, as the
     /// plain normal keys bind it.
     #[test]
@@ -630,6 +730,14 @@ mod tests {
         h.type_keys("space h a");
         h.settle();
         h
+    }
+
+    /// The unnamed register's contents.
+    fn unnamed(h: &TestHarness) -> Option<Vec<String>> {
+        h.stoat
+            .registers
+            .read(Register::Unnamed)
+            .map(<[String]>::to_vec)
     }
 
     /// The commit and the row of the open card.

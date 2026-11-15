@@ -1490,6 +1490,7 @@ on key {
     # labeled bindings of this block as its key hints.
     !modal && mode == normal && blame {
         K -> BlameCard();
+        y -> BlameCopySha() "copy sha";
         blame_card {
             Escape -> BlameCardClose() "close";
         }

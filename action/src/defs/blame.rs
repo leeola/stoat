@@ -38,3 +38,16 @@ define_action!(
     ActionPriority::Rare,
     palette_visible = false
 );
+
+define_action!(
+    BlameCopyShaDef,
+    BlameCopySha,
+    "BlameCopySha",
+    ActionKind::BlameCopySha,
+    "copy the commit's sha",
+    "Copy the full sha of the commit that last changed the cursor line of a \
+     blamed pane to the system clipboard. The registers keep what they hold. \
+     An uncommitted line has no commit to copy.",
+    ActionPriority::Rare,
+    palette_visible = false
+);

@@ -80,6 +80,7 @@ action_kinds! {
     ToggleBlame,
     BlameCard,
     BlameCardClose,
+    BlameCopySha,
     DiffUnderline,
     DiffBold,
     DiffSyntax,
