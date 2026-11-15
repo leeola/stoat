@@ -268,6 +268,7 @@ theme ermine_night inherits default_dark {
     let blame_age_1      = "#4f5a6e";
     let blame_age_2      = "#5d79a8";
     let blame_age_4      = "#a9c8ff";
+    let blame_selected   = "#1b2230";
     let tint_accent      = "#223049";
     let tint_info        = "#1e3237";
     let tint_reveal      = "#1a2226";
@@ -379,6 +380,8 @@ theme ermine_night inherits default_dark {
     ui.blame.age.2.fg  = blame_age_2;
     ui.blame.age.3.fg  = accent;
     ui.blame.age.4.fg  = blame_age_4;
+    ui.blame.selected  = { fg: accent, bg: blame_selected };
+    ui.blame.selected.date.fg = success;
 
     ui.pane_picker.badge = { fg: chrome, bg: accent };
 

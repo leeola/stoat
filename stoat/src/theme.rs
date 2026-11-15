@@ -834,6 +834,19 @@ pub mod scope {
         "ui.blame.age.3",
         "ui.blame.age.4",
     ];
+    /// The runs of the commit under the focused pane's cursor in the Blame
+    /// Column, with the foreground for their bars and short shas and the
+    /// background for their surface.
+    ///
+    /// A theme that leaves it unset selects with the [`UI_TEXT`] foreground
+    /// and the [`UI_SELECTION`] background.
+    pub(crate) const UI_BLAME_SELECTED: &str = "ui.blame.selected";
+    /// The date of a selected run in the Blame Column, as its foreground.
+    ///
+    /// A theme that leaves it unset draws the date in the
+    /// [`UI_BLAME_SELECTED`] foreground, as a lookup broadens a scope to its
+    /// parent.
+    pub(crate) const UI_BLAME_SELECTED_DATE: &str = "ui.blame.selected.date";
     /// The badge the Pane Picker draws on each pane its digits reach. The
     /// background is the badge's fill, and the foreground is its digit and
     /// its border.
@@ -1913,6 +1926,31 @@ mod tests {
                 [None; 4],
             ),
             "the four ages, oldest first, and no age scope under default_dark",
+        );
+    }
+
+    /// The ermine theme selects a Blame Column commit with the accent bar on
+    /// its own surface and a green date, and default_dark leaves both scopes
+    /// unset.
+    #[test]
+    fn the_ermine_theme_colors_the_blame_selection() {
+        let [ermine, dark] = shipped_themes();
+        let style =
+            |theme: &Theme, name| theme.try_get(name).map(|style: Style| (style.fg, style.bg));
+        assert_eq!(
+            [
+                style(&ermine, scope::UI_BLAME_SELECTED),
+                style(&ermine, scope::UI_BLAME_SELECTED_DATE),
+                style(&dark, scope::UI_BLAME_SELECTED),
+                style(&dark, scope::UI_BLAME_SELECTED_DATE),
+            ],
+            [
+                Some((Some(rgb(0x7fb0ff)), Some(rgb(0x1b2230)))),
+                Some((Some(rgb(0x8fd18a)), None)),
+                None,
+                None,
+            ],
+            "the selection and its date, and neither under default_dark",
         );
     }
 

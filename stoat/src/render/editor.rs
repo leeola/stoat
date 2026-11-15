@@ -6984,10 +6984,10 @@ mod tests {
         assert_eq!((blamed_gutter, blamed_text_x), (gutter + 18, text_x + 18));
     }
 
-    /// Each line of the file's one run takes a bar in ermine's newest age
-    /// color and the column's surface beside it, the empty row past the last
-    /// line takes the surface alone, and the gutter's own bars move 18 cells
-    /// right.
+    /// The cursor's line selects the file's one commit, so each line of its
+    /// run takes ermine's selected bar and the selected surface beside it.
+    /// The empty row past the last line takes the column's surface alone, and
+    /// the gutter's own bars move 18 cells right.
     #[test]
     fn the_blame_column_draws_its_bars_left_of_the_gutter() {
         let mut h = blame_column_harness(120);
@@ -7006,15 +7006,15 @@ mod tests {
             .collect();
 
         let (left, top) = ((area.x * 16) as i16, (area.y * 16) as i16);
-        let (age, surface) = ([0xa9, 0xc8, 0xff], [0x14, 0x16, 0x1a]);
+        let (bar, selected, surface) = (SELECTED_BAR, SELECTED_SURFACE, [0x14, 0x16, 0x1a]);
         assert_eq!(
             (column, rest),
             (
                 vec![
-                    (left, top, 4, 16, age),
-                    (left + 4, top, 277, 16, surface),
-                    (left, top + 16, 4, 16, age),
-                    (left + 4, top + 16, 277, 16, surface),
+                    (left, top, 4, 16, bar),
+                    (left + 4, top, 277, 16, selected),
+                    (left, top + 16, 4, 16, bar),
+                    (left + 4, top + 16, 277, 16, selected),
                     (left, top + 32, 281, 16, surface),
                 ],
                 moved
@@ -7128,16 +7128,144 @@ mod tests {
         assert_eq!((text_start(&mut h), blames), (before, true));
     }
 
+    /// The cursor's line selects its commit. Each line of that commit takes
+    /// ermine's selected bar and surface and no other line does, and a move
+    /// onto a line of the other commit moves the selection to that commit.
+    #[test]
+    fn the_cursor_lines_commit_draws_as_the_selection() {
+        let mut h = alternating_blame_harness();
+        let first = selection_bars(&column_bars(&h, focused_pane_index(&h)));
+        h.type_keys("j");
+        h.stoat.render();
+        let second = selection_bars(&column_bars(&h, focused_pane_index(&h)));
+
+        let (bar, surface) = (SELECTED_BAR, SELECTED_SURFACE);
+        assert_eq!(
+            (first, second),
+            (
+                vec![
+                    (0, 0, 4, 16, bar),
+                    (4, 0, 277, 16, surface),
+                    (0, 32, 4, 16, bar),
+                    (4, 33, 277, 15, surface),
+                ],
+                vec![
+                    (0, 16, 4, 16, bar),
+                    (4, 17, 277, 15, surface),
+                    (0, 48, 4, 16, bar),
+                    (4, 49, 277, 15, surface),
+                ],
+            ),
+            "the first commit's lines, then the second commit's",
+        );
+    }
+
+    /// A pane that loses the focus selects no commit. Its column keeps every
+    /// bar it drew while focused, and none of them takes a selected color.
+    #[test]
+    fn an_unfocused_pane_selects_no_commit() {
+        let mut h = alternating_blame_harness();
+        h.stoat.pane_fade_override = Some(false);
+        let index = focused_pane_index(&h);
+        let focused = column_bars(&h, index);
+        h.type_action("SplitRight()");
+        h.settle();
+        h.stoat.render();
+        let unfocused = column_bars(&h, index);
+
+        let places = |bars: &[BarDraw]| -> Vec<(i16, i16, u16, u16)> {
+            bars.iter()
+                .map(|&(x, y, width, height, _)| (x, y, width, height))
+                .collect()
+        };
+        assert_eq!(
+            (
+                selection_bars(&focused).len(),
+                selection_bars(&unfocused),
+                places(&unfocused),
+            ),
+            (4, Vec::new(), places(&focused)),
+            "the focused paint's selection, then the unfocused paint's bars",
+        );
+    }
+
+    /// A cursor on an uncommitted line selects no commit, so no bar takes a
+    /// selected color. On a committed line the same pane selects the commit
+    /// of that line.
+    #[test]
+    fn a_cursor_on_an_uncommitted_line_selects_no_commit() {
+        let mut h = history_harness(120, &[("c1", "one", &[("a.rs", "a\nb\n")])], "a\nb\nc\n");
+        blame_on(&mut h);
+        let committed = selection_bars(&column_bars(&h, focused_pane_index(&h)));
+        h.type_keys("j j");
+        h.stoat.render();
+        let uncommitted = selection_bars(&column_bars(&h, focused_pane_index(&h)));
+
+        let (bar, surface) = (SELECTED_BAR, SELECTED_SURFACE);
+        assert_eq!(
+            (committed, uncommitted),
+            (
+                vec![
+                    (0, 0, 4, 16, bar),
+                    (4, 0, 277, 16, surface),
+                    (0, 16, 4, 16, bar),
+                    (4, 16, 277, 16, surface),
+                ],
+                Vec::new(),
+            ),
+            "the committed lines from line 1, then nothing from line 3",
+        );
+    }
+
+    /// The bar and the short sha color of ermine's selected commit.
+    const SELECTED_BAR: [u8; 3] = [0x7f, 0xb0, 0xff];
+
+    /// The surface beside the lines of ermine's selected commit.
+    const SELECTED_SURFACE: [u8; 3] = [0x1b, 0x22, 0x30];
+
+    /// A decoded bar as its place, its size, and its color.
+    type BarDraw = (i16, i16, u16, u16, [u8; 3]);
+
     /// A 24-row window `width` cells wide over `a.rs` of a repository at
     /// `/repo`, painted with its Blame Column off.
     ///
     /// The minimap stays off, so the pane's lane holds the column and the
     /// gutter alone.
     fn blame_column_harness(width: u16) -> crate::test_harness::TestHarness {
+        let text = "fn alpha() {}\nfn beta() {}\n";
+        history_harness(width, &[("c1", "one", &[("a.rs", text)])], text)
+    }
+
+    /// A 120-cell window over `a.rs`, whose lines alternate between two
+    /// commits, painted with its Blame Column on and its cursor on line 1.
+    ///
+    /// Each line is a run of its own, so each line past the first draws a
+    /// divider over its top.
+    fn alternating_blame_harness() -> crate::test_harness::TestHarness {
+        let text = "a\nB\nc\nD\n";
+        let mut h = history_harness(
+            120,
+            &[
+                ("c1", "one", &[("a.rs", "a\nb\nc\nd\n")]),
+                ("c2", "two", &[("a.rs", text)]),
+            ],
+            text,
+        );
+        blame_on(&mut h);
+        h
+    }
+
+    /// A 24-row window `width` cells wide over `a.rs` of a repository at
+    /// `/repo` that holds `history`, with `text` in the working tree, painted
+    /// with its Blame Column off.
+    fn history_harness(
+        width: u16,
+        history: &[crate::test_harness::CommitSpec<'_>],
+        text: &str,
+    ) -> crate::test_harness::TestHarness {
         let mut h = crate::test_harness::TestHarness::with_size(width, 24);
         h.stoat.minimap_override = Some(false);
-        let text = "fn alpha() {}\nfn beta() {}\n";
-        h.seed_linear_history("/repo", &[("c1", "one", &[("a.rs", text)])]);
+        h.seed_linear_history("/repo", history);
         h.stoat.active_workspace_mut().git_root = PathBuf::from("/repo");
         h.fake_fs().insert_file("/repo/a.rs", text);
         h.open_file(std::path::Path::new("/repo/a.rs"));
@@ -7165,10 +7293,14 @@ mod tests {
         (area, editor.gutter_width, text.x)
     }
 
-    /// The bars in the focused pane's lane, each as its place, its size, and
-    /// its color.
-    fn lane_bars(h: &crate::test_harness::TestHarness) -> Vec<(i16, i16, u16, u16, [u8; 3])> {
-        lane_commands(h)
+    /// The bars in the focused pane's lane.
+    fn lane_bars(h: &crate::test_harness::TestHarness) -> Vec<BarDraw> {
+        pane_lane_bars(h, focused_pane_index(h))
+    }
+
+    /// The bars in the lane of the pane at `index`.
+    fn pane_lane_bars(h: &crate::test_harness::TestHarness, index: u32) -> Vec<BarDraw> {
+        pane_lane_commands(h, index)
             .into_iter()
             .flat_map(|command| match command {
                 Command::Bar(bar) => vec![(bar.x, bar.y, bar.width, bar.height, bar.color)],
@@ -7212,14 +7344,51 @@ mod tests {
 
     /// The commands in the focused pane's lane, as the last paint left them.
     fn lane_commands(h: &crate::test_harness::TestHarness) -> Vec<Command> {
-        let index = {
-            let ws = h.stoat.active_workspace();
-            ws.panes.pane(ws.panes.focus()).index
-        };
+        pane_lane_commands(h, focused_pane_index(h))
+    }
+
+    /// The commands in the lane of the pane at `index`, as the last paint left
+    /// them.
+    fn pane_lane_commands(h: &crate::test_harness::TestHarness, index: u32) -> Vec<Command> {
         let lane = h
             .stoat
             .apc_scene
             .lane_bytes(crate::render::content_lane(index));
         decode_stream(lane)
+    }
+
+    /// The lane index of the focused pane.
+    fn focused_pane_index(h: &crate::test_harness::TestHarness) -> u32 {
+        let ws = h.stoat.active_workspace();
+        ws.panes.pane(ws.panes.focus()).index
+    }
+
+    /// The Blame Column's bars in the lane of the pane at `index`, each placed
+    /// from the pane's top left, in place order.
+    fn column_bars(h: &crate::test_harness::TestHarness, index: u32) -> Vec<BarDraw> {
+        let area = {
+            let ws = h.stoat.active_workspace();
+            ws.panes
+                .split_panes()
+                .find(|(_, pane)| pane.index == index)
+                .map(|(_, pane)| pane.area)
+                .expect("the pane at the index")
+        };
+        let (left, top) = ((area.x * 16) as i16, (area.y * 16) as i16);
+        let mut bars: Vec<BarDraw> = pane_lane_bars(h, index)
+            .into_iter()
+            .filter(|&(x, ..)| x < left + 18 * 16)
+            .map(|(x, y, width, height, color)| (x - left, y - top, width, height, color))
+            .collect();
+        bars.sort_by_key(|&(x, y, ..)| (y, x));
+        bars
+    }
+
+    /// The bars of `bars` in a selected color.
+    fn selection_bars(bars: &[BarDraw]) -> Vec<BarDraw> {
+        bars.iter()
+            .copied()
+            .filter(|bar| [SELECTED_BAR, SELECTED_SURFACE].contains(&bar.4))
+            .collect()
     }
 }

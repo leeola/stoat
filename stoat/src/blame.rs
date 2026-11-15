@@ -55,8 +55,9 @@ pub(crate) struct BlameState {
 pub(crate) enum LineBlame<'a> {
     /// The line differs from HEAD's text, or HEAD does not hold the file.
     Uncommitted,
-    /// The commit that last changed the line.
-    Commit { commit: &'a BlameCommit },
+    /// The commit that last changed the line, and its index in the file's
+    /// blame, which every run of the commit shares.
+    Commit { index: u32, commit: &'a BlameCommit },
 }
 
 /// HEAD's text of one file and the commit that last changed each of its lines.
@@ -240,7 +241,17 @@ impl BlameState {
             return Some(LineBlame::Uncommitted);
         };
         let commit = file.base.as_ref()?.blame.commits.get(index as usize)?;
-        Some(LineBlame::Commit { commit })
+        Some(LineBlame::Commit { index, commit })
+    }
+
+    /// The index of the commit of row `row` of buffer `id`, which every run of
+    /// that commit shares, or `None` for an uncommitted row and before a blame
+    /// lands.
+    pub(crate) fn commit_index(&self, id: BufferId, row: u32) -> Option<u32> {
+        match self.line(id, row)? {
+            LineBlame::Commit { index, .. } => Some(index),
+            LineBlame::Uncommitted => None,
+        }
     }
 
     /// The runs of buffer `id` as [`Self::refresh_rows`] last resolved them,

@@ -552,6 +552,9 @@ pub(crate) struct PageBlame {
     /// The moment the run loop built the page, which a run's date measures its
     /// age against.
     pub(crate) now_epoch: i64,
+    /// The index of the commit under the focused pane's cursor, whose runs
+    /// draw as the selection, or `None` to select nothing.
+    pub(crate) selected: Option<u32>,
 }
 
 impl PageGutter {
@@ -753,6 +756,7 @@ fn paint_page_gutter(
         rows,
         base: blame.base.as_deref(),
         now_epoch: blame.now_epoch,
+        selected: blame.selected,
     });
     blame::paint_blame_column(
         lines.as_ref(),
@@ -1755,6 +1759,8 @@ mod tests {
     /// A blamed page's frames hold the Blame Column that the live paint of the
     /// same rows holds, bar for bar and run for run. The file holds two
     /// commits and an uncommitted line, so the two pages cross three runs.
+    /// Both paints select the second commit, so its lines draw as the
+    /// selection.
     #[test]
     fn a_blamed_page_draws_the_column_the_live_paint_draws() {
         use super::{page_buffer, render_page_from_snapshot};
@@ -1797,11 +1803,16 @@ mod tests {
             .expect("the shipped theme resolves the column");
         let now_epoch = crate::commit_picker::now_epoch(&h.stoat.executor);
         let (_, id) = h.stoat.focused_editor_ids().expect("a focused editor");
-        let (rows, base) = {
+        let (rows, base, selected) = {
             let ws = h.stoat.active_workspace();
             let rows = ws.blame.rows(id).cloned().expect("the rows resolved");
-            (rows, ws.blame.base(id).cloned())
+            (
+                rows,
+                ws.blame.base(id).cloned(),
+                ws.blame.commit_index(id, 2),
+            )
         };
+        assert_eq!(selected, Some(1), "line 3 holds the second commit");
         let gutter = PageGutter::new(
             true,
             Arc::new(RowSeverity::default()),
@@ -1814,6 +1825,7 @@ mod tests {
             rows: Some(rows.clone()),
             base: base.clone(),
             now_epoch,
+            selected,
         }));
         let editor = action_handlers::focused_editor_mut(&mut h.stoat).expect("focused editor");
 
@@ -1853,6 +1865,7 @@ mod tests {
                         rows: &rows,
                         base: base.as_deref(),
                         now_epoch,
+                        selected,
                     }),
                 }),
             );
@@ -1927,11 +1940,16 @@ mod tests {
                 author: [6, 6, 6],
                 date: [7, 7, 7],
                 uncommitted: [8, 8, 8],
+                selected: [9, 9, 9],
+                selected_surface: [10, 10, 10],
+                selected_author: [11, 11, 11],
+                selected_date: [12, 12, 12],
                 scale: 256,
             },
             rows: None,
             base: None,
             now_epoch: 0,
+            selected: None,
         }
     }
 

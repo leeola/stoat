@@ -112,6 +112,14 @@ pub(crate) struct EditorState {
     /// keeps the content version stable so the buffered window does not refill
     /// per dragged row. The settle emit refreshes it. Transient, not persisted.
     pub(crate) pool_current_line: Option<u32>,
+    /// The cursor buffer line that a pooled page's Blame Column last selected
+    /// its commit from, in any numbering mode.
+    ///
+    /// Held through a wheel glide as [`Self::pool_current_line`] is, so the
+    /// dragged cursor does not move the selection and redecorate the window
+    /// per row. `None` for an editor whose pane holds no focus. Transient, not
+    /// persisted.
+    pub(crate) pool_cursor_line: Option<u32>,
     /// A reload's seat placed the view with the text under it, so the terminal
     /// takes the next scroll target with no ease. The emit drops the pane's
     /// pool when that target moved and declares it again on the target.
@@ -332,6 +340,7 @@ impl EditorState {
             scroll_offset: 0.0,
             scroll_glide: ScrollGlide::None,
             pool_current_line: None,
+            pool_cursor_line: None,
             pool_swap: false,
             viewport_rows: None,
             held_screen_row: None,

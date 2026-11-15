@@ -173,6 +173,12 @@ pub(crate) fn render_pane(
                 let diagnostic_info = buffers
                     .path_for(editor.buffer_id)
                     .map(|path| (path, frame.diagnostics));
+                // An unfocused pane selects nothing, as its cursor is not the
+                // reader's.
+                let selected = is_focused
+                    .then(|| editor_cursor_position(editor))
+                    .flatten()
+                    .and_then(|(line, _)| frame.blame.commit_index(editor.buffer_id, line - 1));
                 let blame = frame
                     .chrome
                     .blame
@@ -184,6 +190,7 @@ pub(crate) fn render_pane(
                             rows,
                             base: frame.blame.base(editor.buffer_id).map(|base| base.as_ref()),
                             now_epoch: frame.now_epoch,
+                            selected,
                         }),
                     });
                 render_editor_with_overlay(
@@ -2846,7 +2853,7 @@ fn status_segments(
 fn blame_label(line: &LineBlame<'_>, now_epoch: i64) -> String {
     match line {
         LineBlame::Uncommitted => " uncommitted ".to_owned(),
-        LineBlame::Commit { commit } => format!(
+        LineBlame::Commit { commit, .. } => format!(
             " {} \u{b7} {} \u{b7} {} ",
             commit.info.short_sha,
             blame::author_word(&commit.info.author_name),

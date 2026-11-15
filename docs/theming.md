@@ -261,6 +261,13 @@ The typed UI scopes, by group (syntax scopes are open-ended):
   age is a rank among the file's commit times. A theme that leaves one unset
   draws that age in the `ui.text.muted` foreground. default_dark leaves all
   four unset.
+- `ui.blame.selected`, `ui.blame.selected.date` -- the runs of the commit
+  under the focused pane's cursor in the Blame Column. The foreground draws
+  their bars and short shas, the background their surface, and the date
+  scope's foreground their dates. Their authors take the `ui.text`
+  foreground. A theme that leaves them unset selects with the `ui.text`
+  foreground and the `ui.selection` background. default_dark leaves both
+  unset.
 - `ui.pane_picker.badge` -- the digit badge the Pane Picker draws on each
   pane it reaches: the background is the fill, and the foreground is the
   digit and the border. A theme that leaves it unset fills the badge with the

@@ -1088,6 +1088,8 @@ fn a_glide_page_carries_the_undercurl_of_its_diagnostic() {
 /// A blamed pane's pooled page carries the Blame Column at its left, each
 /// line's bar and surface and its run's short sha, so a glide over the page
 /// keeps the column the live grid draws.
+/// The cursor's line selects the file's one commit, so its lines carry the
+/// selected bar and surface.
 #[test]
 fn a_blamed_pane_page_carries_the_blame_column() {
     use stoatty_protocol::command::Command;
@@ -1109,46 +1111,256 @@ fn a_blamed_pane_page_carries_the_blame_column() {
         ws.panes.pane(ws.panes.focus()).index
     };
     let bytes = emit_raw(&mut h, &mut rx);
-    let (mut bars, mut shas) = (Vec::new(), Vec::new());
-    for command in command::decode_stream(fill_payload(&bytes, pool, 0)) {
-        match command {
-            Command::Bar(bar) if bar.x < 18 * 16 => {
-                bars.push((bar.x, bar.y, bar.width, bar.height, bar.color))
-            },
-            Command::Bars(group) => bars.extend(
-                group
-                    .bars
-                    .into_iter()
-                    .filter(|&(x, ..)| x < 18 * 16)
-                    .map(|(x, y, width, height)| (x, y, width, height, group.color)),
-            ),
-            Command::TextRun(run) if run.text == "c1" => shas.push((run.col, run.row)),
-            Command::TextRuns(group) => shas.extend(
-                group
-                    .runs
-                    .into_iter()
-                    .filter(|(_, _, text)| text == "c1")
-                    .map(|(col, row, _)| (col, row)),
-            ),
-            _ => {},
-        }
-    }
-    bars.sort_by_key(|&(x, y, ..)| (y, x));
+    let shas: Vec<(i16, i16)> = command::decode_stream(fill_payload(&bytes, pool, 0))
+        .into_iter()
+        .flat_map(|command| match command {
+            Command::TextRun(run) if run.text == "c1" => vec![(run.col, run.row)],
+            Command::TextRuns(group) => group
+                .runs
+                .into_iter()
+                .filter(|(_, _, text)| text == "c1")
+                .map(|(col, row, _)| (col, row))
+                .collect(),
+            _ => Vec::new(),
+        })
+        .collect();
 
-    let (age, surface) = ([0xa9, 0xc8, 0xff], [0x14, 0x16, 0x1a]);
+    let (bar, selected, surface) = ([0x7f, 0xb0, 0xff], [0x1b, 0x22, 0x30], [0x14, 0x16, 0x1a]);
     assert_eq!(
-        (bars, shas),
+        (page_column_bars(&bytes, pool), shas),
         (
             vec![
-                (0, 0, 4, 16, age),
-                (4, 0, 277, 16, surface),
-                (0, 16, 4, 16, age),
-                (4, 16, 277, 16, surface),
+                (0, 0, 4, 16, bar),
+                (4, 0, 277, 16, selected),
+                (0, 16, 4, 16, bar),
+                (4, 16, 277, 16, selected),
                 (0, 32, 281, 16, surface),
             ],
             vec![(14, 0)],
         ),
     );
+}
+
+/// An unfocused pane's pooled page selects no commit, as the pane's live paint
+/// selects none. Each line keeps its commit's age color and the plain surface.
+#[test]
+fn an_unfocused_blamed_page_selects_no_commit() {
+    let (mut h, mut rx) = buffered_blamed_pool(
+        stoatty_protocol::PROTOCOL_VERSION,
+        "a\nb\nc\nd\n",
+        "a\nB\nc\nD\n",
+    );
+    h.stoat.pane_fade_override = Some(false);
+    let pool = {
+        let ws = h.stoat.active_workspace();
+        ws.panes.pane(ws.panes.focus()).index
+    };
+    h.type_action("SplitRight()");
+    h.settle();
+    h.stoat.render();
+    // The harness sizes itself through a resize, which arms the pool settle,
+    // and a pool whose rectangle moves fills no page until the settle passes.
+    h.stoat.pool_settle = None;
+    let bytes = emit_raw(&mut h, &mut rx);
+
+    let (old, new, surface, divider) = (
+        [0x4f, 0x5a, 0x6e],
+        [0xa9, 0xc8, 0xff],
+        [0x14, 0x16, 0x1a],
+        [0x22, 0x25, 0x2b],
+    );
+    assert_eq!(
+        page_column_bars(&bytes, pool),
+        [
+            (0, 0, 4, 16, old),
+            (4, 0, 277, 16, surface),
+            (0, 16, 4, 16, new),
+            (4, 16, 277, 1, divider),
+            (4, 17, 277, 15, surface),
+            (0, 32, 4, 16, old),
+            (4, 32, 277, 1, divider),
+            (4, 33, 277, 15, surface),
+            (0, 48, 4, 16, new),
+            (4, 48, 277, 1, divider),
+            (4, 49, 277, 15, surface),
+            (0, 64, 281, 16, surface),
+        ],
+    );
+}
+
+/// The Blame Column's bars on page 0 of `pool` in `bytes`, in place order.
+fn page_column_bars(bytes: &[u8], pool: u32) -> Vec<(i16, i16, u16, u16, [u8; 3])> {
+    use stoatty_protocol::command::Command;
+
+    let mut bars: Vec<_> = command::decode_stream(fill_payload(bytes, pool, 0))
+        .into_iter()
+        .flat_map(|command| match command {
+            Command::Bar(bar) => vec![(bar.x, bar.y, bar.width, bar.height, bar.color)],
+            Command::Bars(group) => group
+                .bars
+                .into_iter()
+                .map(|(x, y, width, height)| (x, y, width, height, group.color))
+                .collect(),
+            _ => Vec::new(),
+        })
+        .filter(|&(x, ..)| x < 18 * 16)
+        .collect();
+    bars.sort_by_key(|&(x, y, ..)| (y, x));
+    bars
+}
+
+/// A move of the cursor and the scroll row inside one commit's lines refills
+/// no page. A move onto another commit's line moves the selection, which the
+/// window takes as decorations over the cells it keeps.
+#[test]
+fn a_move_onto_another_commit_redecorates_the_blamed_window() {
+    assert_eq!(
+        blame_selection_fills(stoatty_protocol::PROTOCOL_VERSION),
+        [(Vec::new(), Vec::new()), (Vec::new(), vec![0, 1])],
+        "a move to line 2, then a move to line 3",
+    );
+}
+
+/// Before the decorations-only fill, the window takes a move of the
+/// selection as a refill of the pages the move composites.
+#[test]
+fn a_move_onto_another_commit_refills_an_undecorated_window() {
+    assert_eq!(
+        blame_selection_fills(FILL_DECORATIONS_PROTOCOL - 1),
+        [(Vec::new(), Vec::new()), (vec![0, 1], Vec::new())],
+        "a move to line 2, then a move to line 3",
+    );
+}
+
+/// A wheel glide drags the cursor off the first commit's line, and the
+/// window holds the line the selection came from until the glide settles. So
+/// the drag redecorates no page mid-glide, and the settle redecorates the
+/// window once.
+#[test]
+fn a_wheel_glide_holds_the_blame_selection_until_it_settles() {
+    let base: String = (0..400).map(|i| format!("line {i}\n")).collect();
+    let text = base
+        .replace("line ", "LINE ")
+        .replacen("LINE 0\n", "line 0\n", 1);
+    let (mut h, mut rx) = buffered_blamed_pool(stoatty_protocol::PROTOCOL_VERSION, &base, &text);
+    let cursor_commit = |h: &mut crate::test_harness::TestHarness| {
+        let editor = action_handlers::focused_editor_mut(&mut h.stoat).expect("focused editor");
+        let (line, _) = crate::render::editor::editor_cursor_position(editor)?;
+        let id = editor.buffer_id;
+        h.stoat.active_workspace().blame.commit_index(id, line - 1)
+    };
+
+    view::wheel_scroll(
+        action_handlers::focused_editor_mut(&mut h.stoat).expect("focused editor"),
+        true,
+    );
+    for _ in 0..1000 {
+        if cursor_commit(&mut h) != Some(0) || !app::animating(&h.stoat) {
+            break;
+        }
+        app::tick_animation(&mut h.stoat, 0.016);
+    }
+    let dragged = (cursor_commit(&mut h), app::animating(&h.stoat));
+    emit_smooth_scroll(&mut h.stoat);
+    let mid = fill_pages(drain_apc(&mut rx)).1;
+
+    for _ in 0..1000 {
+        if !app::animating(&h.stoat) {
+            break;
+        }
+        app::tick_animation(&mut h.stoat, 0.016);
+    }
+    emit_smooth_scroll(&mut h.stoat);
+    let settled = fill_pages(drain_apc(&mut rx)).1;
+
+    assert_eq!(
+        (dragged, mid, settled),
+        ((Some(1), true), Vec::new(), vec![0, 1, 2, 3, 4]),
+        "a drag onto the second commit mid-glide, no decorations then, and the settle's",
+    );
+}
+
+/// Buffer the pool window of a blamed pane for a terminal at `protocol`, then
+/// move the cursor and the scroll row to line 2 and then to line 3, and report
+/// the pages each kind of fill in each move named.
+///
+/// Line 3 of the 40-line file holds the second of two commits, and every other
+/// line the first. A move of the scroll row carries each change, since a pool
+/// at rest defers it.
+fn blame_selection_fills(protocol: u32) -> Vec<(Vec<u64>, Vec<u64>)> {
+    let base: String = (0..40).map(|i| format!("line {i}\n")).collect();
+    let text = base.replace("line 2\n", "LINE 2\n");
+    let (mut h, mut rx) = buffered_blamed_pool(protocol, &base, &text);
+
+    [1, 2]
+        .into_iter()
+        .map(|line| {
+            h.stoat
+                .collapse_focused_cursor_to("line 0\n".len() * line as usize);
+            {
+                let editor =
+                    action_handlers::focused_editor_mut(&mut h.stoat).expect("focused editor");
+                editor.scroll_row = line;
+                editor.scroll_glide = ScrollGlide::None;
+            }
+            emit_smooth_scroll(&mut h.stoat);
+            fill_pages(drain_apc(&mut rx))
+        })
+        .collect()
+}
+
+/// A 120-cell window over `a.rs` of a repository whose first commit holds
+/// `base` and whose second holds `text`, for a terminal at `protocol`, with
+/// the pane's pool window buffered and the receiver drained.
+///
+/// The Blame Column is on and the cursor rests on line 1. The lines number
+/// absolutely, so a cursor move reaches a page only through the commit the
+/// column selects.
+fn buffered_blamed_pool(
+    protocol: u32,
+    base: &str,
+    text: &str,
+) -> (
+    crate::test_harness::TestHarness,
+    tokio::sync::mpsc::UnboundedReceiver<Vec<u8>>,
+) {
+    let mut h = crate::test_harness::TestHarness::with_size(120, 24);
+    h.stoat.stoatty_protocol = protocol;
+    h.stoat.settings.editor_line_numbers = Some(LineNumbers::Absolute);
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+    h.stoat.set_apc_tx(tx);
+    h.seed_linear_history(
+        "/repo",
+        &[
+            ("c1", "one", &[("a.rs", base)]),
+            ("c2", "two", &[("a.rs", text)]),
+        ],
+    );
+    h.stoat.active_workspace_mut().git_root = PathBuf::from("/repo");
+    h.fake_fs().insert_file("/repo/a.rs", text.as_bytes());
+    h.open_file(&PathBuf::from("/repo/a.rs"));
+    h.type_keys("space h a");
+    h.settle();
+    h.stoat.render();
+    emit_smooth_scroll(&mut h.stoat);
+    let _ = drain_apc(&mut rx);
+    (h, rx)
+}
+
+/// The pages that the whole fills of `commands` name, and then the pages that
+/// its decorations-only fills name.
+fn fill_pages(commands: Vec<command::Command>) -> (Vec<u64>, Vec<u64>) {
+    use stoatty_protocol::command::{Command, FillCommand};
+
+    let (mut fills, mut decorations) = (Vec::new(), Vec::new());
+    for command in commands {
+        match command {
+            Command::Fill(FillCommand { index, .. }) => fills.push(index),
+            Command::FillDecorations(FillCommand { index, .. }) => decorations.push(index),
+            _ => {},
+        }
+    }
+    (fills, decorations)
 }
 
 /// The messages' stamp moves only where the cursor changes what a page prints:

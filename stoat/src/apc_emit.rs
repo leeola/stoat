@@ -1261,6 +1261,23 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
             editor.pool_current_line = line;
             line
         };
+        // The Blame Column selects the commit of the cursor's line in any
+        // numbering mode, and a wheel glide holds that line as it holds the
+        // numbered one.
+        let cursor_line = if editor.scroll_glide == ScrollGlide::Wheel {
+            editor.pool_cursor_line
+        } else {
+            let line = (focused_editor == Some(*editor_id))
+                .then(|| {
+                    crate::render::editor::editor_cursor_position(editor).map(|(line, _)| line)
+                })
+                .flatten();
+            editor.pool_cursor_line = line;
+            line
+        };
+        let blame_selected = blame
+            .and(cursor_line)
+            .and_then(|line| ws.blame.commit_index(editor.buffer_id, line - 1));
 
         // The rich gutter lays its numbers over the page as runs, so a
         // terminal that reads decorations-only fills takes a cursor line change
@@ -1270,6 +1287,10 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
         // diff colors resolve too and as cells when they do not. Only a
         // conflict page's stage gutters number rows absolutely, so the line
         // reaches neither of its versions.
+        //
+        // A decorations-only fill repaints the Blame Column only where the
+        // gutter splits. There the selected commit joins the decoration
+        // version, and elsewhere the cell version.
         let split_gutter = decorate_pages
             && base_rich.is_some()
             && editor.conflict_view.is_none()
@@ -1278,6 +1299,7 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
             true => {
                 let mut hasher = DefaultHasher::new();
                 current_line.hash(&mut hasher);
+                blame_selected.hash(&mut hasher);
                 hasher.finish()
             },
             false => 0,
@@ -1311,6 +1333,7 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
             page_spotlight,
             eol_page_stamp(editor.eol_cursor, &spans),
             blame,
+            blame_selected.filter(|_| !split_gutter),
         );
         let snapshot = editor.display_map.snapshot();
         // The spotlight recolors only the rows it lights, so where it falls is
@@ -1380,6 +1403,7 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
                     rows: ws.blame.rows(editor.buffer_id).cloned(),
                     base: ws.blame.base(editor.buffer_id).cloned(),
                     now_epoch,
+                    selected: blame_selected,
                 }),
         );
         let diff_view = editor.diff_view;
@@ -1999,6 +2023,7 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
                 theme_epoch,
                 None,
                 0,
+                None,
                 None,
             );
             let snapshot = editor.display_map.snapshot();
@@ -3659,6 +3684,11 @@ pub(crate) fn display_map_stamp(buffer_version: u64, paint_version: PaintVersion
 ///
 /// `blame` is the blame value of the pane's cache key, so a page refills when
 /// the Blame Column turns on or off and when a blame lands.
+///
+/// `blame_selected` is the commit the Blame Column selects, so a page refills
+/// when the cursor moves onto another commit's line. A page whose gutter
+/// splits carries the selection in its decoration version instead and takes
+/// `None` here.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn editor_page_content_version(
     syntax_highlight: bool,
@@ -3676,6 +3706,7 @@ pub(crate) fn editor_page_content_version(
     spotlight: Option<&Spotlight>,
     eol_stamp: u64,
     blame: Option<u64>,
+    blame_selected: Option<u32>,
 ) -> u64 {
     let mut hasher = DefaultHasher::new();
     (!syntax_highlight).hash(&mut hasher);
@@ -3700,6 +3731,7 @@ pub(crate) fn editor_page_content_version(
         .hash(&mut hasher);
     eol_stamp.hash(&mut hasher);
     blame.hash(&mut hasher);
+    blame_selected.hash(&mut hasher);
     hasher.finish()
 }
 
