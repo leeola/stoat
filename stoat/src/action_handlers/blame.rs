@@ -3,6 +3,7 @@ use crate::{
     app::{Stoat, UpdateEffect},
     blame::{self, BlameCard, CommitDetails, LineBlame},
     buffer::BufferId,
+    commit_preview,
     editor_state::EditorId,
     host::{self, BlameCommit, ClipboardKind},
     keymap_state::{self, StoatKeymapState},
@@ -129,6 +130,29 @@ pub(super) fn copy_sha(stoat: &mut Stoat) -> UpdateEffect {
         &commit.info.sha,
     );
     stoat.set_status(format!("copied {}", commit.info.short_sha));
+    UpdateEffect::Redraw
+}
+
+/// Open the Commit Preview on the commit of the cursor's line, or the
+/// working-tree diff on an uncommitted line.
+///
+/// A pane that does not blame opens nothing. A line whose blame has not landed
+/// opens nothing, and the status row says so.
+pub(super) fn preview(stoat: &mut Stoat) -> UpdateEffect {
+    if blamed_cursor(stoat).is_none() {
+        return UpdateEffect::None;
+    }
+    if matches!(
+        cursor_line_blame(stoat),
+        Some((_, _, LineBlame::Uncommitted))
+    ) {
+        return review::diff(stoat, None);
+    }
+
+    match acting_commit(stoat) {
+        Ok(commit) => commit_preview::open(stoat, commit),
+        Err(status) => stoat.set_status(status),
+    }
     UpdateEffect::Redraw
 }
 
@@ -277,9 +301,13 @@ fn cursor_line_blame(stoat: &Stoat) -> Option<(EditorId, u32, LineBlame<'_>)> {
 /// none.
 ///
 /// The commit is the one that last changed the cursor's line, so every blame
-/// key reads it from here. The status reads `blame is loading` before a blame
-/// of the buffer lands, and `line is not committed` on an uncommitted line.
+/// key reads it from here. While the Commit Preview is open, the commit is the
+/// one the preview shows. The status reads `blame is loading` before a blame of
+/// the buffer lands, and `line is not committed` on an uncommitted line.
 fn acting_commit(stoat: &Stoat) -> Result<BlameCommit, &'static str> {
+    if let Some(preview) = &stoat.commit_preview {
+        return Ok(preview.commit.clone());
+    }
     match cursor_line_blame(stoat) {
         None => Err("blame is loading"),
         Some((_, _, LineBlame::Uncommitted)) => Err("line is not committed"),
@@ -320,20 +348,24 @@ fn card_hints(stoat: &Stoat) -> Vec<(String, String)> {
 mod tests {
     use super::BLAME_CARD_REST;
     use crate::{
-        action_handlers::dispatch,
+        action_handlers::{self, dispatch},
         app::Stoat,
         badge::BadgeSource,
         host::ClipboardKind,
+        keymap_state,
         lsp::hover::{HoverOutcome, HoverResponse},
         pane::View,
         register::Register,
+        render::commits,
+        test_fixture,
         test_harness::{CommitSpec, TestHarness},
     };
+    use crossterm::event::MouseEventKind;
     use std::{
         path::{Path, PathBuf},
         time::Duration,
     };
-    use stoat_action::{BlameCard, ToggleBlame};
+    use stoat_action::{BlameCard, BlamePreview, SetTheme, ToggleBlame};
 
     /// `space h a` sets the flag of the focused pane, and a second press
     /// clears it.
@@ -412,6 +444,7 @@ mod tests {
                 ("c2", 1),
                 (Some("the body of two"), 1, 1, 0),
                 vec![
+                    ("Ret".to_string(), "preview patch".to_string()),
                     ("y".to_string(), "copy sha".to_string()),
                     ("Esc".to_string(), "close".to_string()),
                 ],
@@ -706,6 +739,166 @@ mod tests {
         );
     }
 
+    /// `Enter` on a committed line opens the Commit Preview on the line's
+    /// commit as the `commit_preview` modal, and its build lands the patch of
+    /// the commit's file and the commit's change size.
+    #[test]
+    fn enter_opens_the_preview_on_the_line_commit_and_its_patch_lands() {
+        let mut h = blamed_repo("one\ntwo\n");
+        h.type_keys("j enter");
+        let modal = keymap_state::modal_predicate(&h.stoat);
+        h.settle();
+
+        let preview = h.stoat.commit_preview.as_ref().expect("the preview opened");
+        let files = preview.document.as_ref().map(|doc| {
+            doc.as_ref().map(|doc| {
+                doc.files
+                    .iter()
+                    .map(|file| file.rel_path.clone())
+                    .collect::<Vec<_>>()
+            })
+        });
+        assert_eq!(
+            (
+                preview.commit.info.sha.as_str(),
+                modal,
+                preview.summary,
+                files
+            ),
+            (
+                "c2",
+                Some("commit_preview"),
+                Some((1, 1, 0)),
+                Some(Some(vec!["a.rs".to_string()])),
+            ),
+        );
+    }
+
+    /// `j` scrolls the preview's patch one row, and `Ctrl-d` half of the 13
+    /// rows the patch shows in at this window size.
+    #[test]
+    fn j_scrolls_the_preview_a_row_and_ctrl_d_half_the_patch_rows() {
+        let mut h = long_preview();
+        h.type_keys("j");
+        let row = preview_scroll(&h);
+        h.type_keys("ctrl-d");
+        assert_eq!((row, preview_scroll(&h)), (Some(1), Some(7)));
+    }
+
+    /// The scroll stops where the patch's last row meets the bottom of the 13
+    /// rows the patch shows in.
+    #[test]
+    fn the_preview_scroll_stops_at_the_patch_last_page() {
+        let mut h = long_preview();
+        h.type_keys("ctrl-d ctrl-d ctrl-d ctrl-d ctrl-d ctrl-d ctrl-d ctrl-d");
+        let last_page = h
+            .stoat
+            .commit_preview
+            .as_ref()
+            .and_then(|preview| preview.document.clone().flatten())
+            .map(|doc| commits::preview_row_count(&doc) - 13);
+        assert_eq!(preview_scroll(&h), last_page);
+    }
+
+    /// A wheel notch over the patch scrolls it three rows.
+    #[test]
+    fn a_wheel_notch_over_the_patch_scrolls_it_three_rows() {
+        let mut h = long_preview();
+        h.stoat.update(test_fixture::mouse_event(
+            MouseEventKind::ScrollDown,
+            50,
+            10,
+        ));
+        assert_eq!(preview_scroll(&h), Some(3));
+    }
+
+    /// The preview opens in normal mode, where its keys bind, from any mode.
+    #[test]
+    fn the_preview_opens_in_normal_mode() {
+        let mut h = blamed_repo("one\ntwo\n");
+        h.type_keys("j i");
+        dispatch(&mut h.stoat, &BlamePreview);
+        assert_eq!(
+            (h.stoat.commit_preview.is_some(), h.stoat.focused_mode()),
+            (true, "normal"),
+        );
+    }
+
+    /// The palette key over the preview closes the preview as the palette
+    /// opens, so two modals never show at once.
+    #[test]
+    fn the_palette_key_closes_the_preview() {
+        let mut h = blamed_repo("one\ntwo\n");
+        h.type_keys("j enter");
+        h.type_keys("ctrl-;");
+        assert_eq!(
+            (
+                h.stoat.commit_preview.is_some(),
+                h.stoat.command_palette.is_some()
+            ),
+            (false, true),
+        );
+    }
+
+    /// `Escape` closes the preview, and the pane under it still blames.
+    #[test]
+    fn escape_closes_the_preview_and_the_pane_still_blames() {
+        let mut h = blamed_repo("one\ntwo\n");
+        h.type_keys("j enter");
+        let opened = h.stoat.commit_preview.is_some();
+        h.type_keys("escape");
+        assert_eq!(
+            (opened, h.stoat.commit_preview.is_some(), blamed(&h)),
+            (true, false, true),
+        );
+    }
+
+    /// `y` in the preview copies the commit the preview shows, after the
+    /// cursor under it moves to a line of another commit.
+    #[test]
+    fn y_in_the_preview_copies_the_previewed_commit() {
+        let mut h = blamed_repo("one\ntwo\n");
+        h.type_keys("j enter");
+        h.stoat.collapse_focused_cursor_to(0);
+        h.type_keys("y");
+        assert_eq!(
+            h.fake_clipboard().writes_for(ClipboardKind::System),
+            vec!["c2".to_string()],
+        );
+    }
+
+    /// `Enter` on an edited line opens the working-tree diff and no preview.
+    #[test]
+    fn enter_on_an_edited_line_opens_the_working_tree_diff() {
+        let mut h = blamed_repo("one\nTWO\n");
+        h.type_keys("j enter");
+        let diff_view =
+            action_handlers::focused_editor_mut(&mut h.stoat).map(|editor| editor.diff_view);
+        assert_eq!(
+            (diff_view, h.stoat.commit_preview.is_some()),
+            (Some(true), false),
+        );
+    }
+
+    /// A theme switch builds the open preview's patch again, since the build
+    /// bakes the theme's syntax colors into the patch.
+    #[test]
+    fn a_theme_switch_builds_the_open_preview_again() {
+        let mut h = blamed_repo("one\ntwo\n");
+        h.type_keys("j enter");
+        h.settle();
+        let built = preview_built(&h);
+        dispatch(
+            &mut h.stoat,
+            &SetTheme {
+                name: "default_dark".into(),
+            },
+        );
+        let dropped = preview_built(&h);
+        h.settle();
+        assert_eq!((built, dropped, preview_built(&h)), (true, false, true));
+    }
+
     /// A 120-cell window over `a.rs` of a repository whose first commit writes
     /// `one` and whose second adds `two` under a message with a body, with
     /// `text` in the working tree and the Blame Column on.
@@ -738,6 +931,41 @@ mod tests {
             .registers
             .read(Register::Unnamed)
             .map(<[String]>::to_vec)
+    }
+
+    /// A 120-cell window with the Commit Preview open on a commit that adds 40
+    /// lines, its patch built, so the patch has more rows than the box shows.
+    fn long_preview() -> TestHarness {
+        let text = {
+            let lines: String = (0..40).map(|i| format!("line {i}\n")).collect();
+            format!("one\n{lines}")
+        };
+        let mut h = blamed_history(
+            &[
+                ("c1", "one", &[("a.rs", "one\n")]),
+                ("c2", "two", &[("a.rs", &text)]),
+            ],
+            &text,
+        );
+        h.type_keys("j enter");
+        h.settle();
+        h
+    }
+
+    /// The rows the open preview's patch scrolls down by.
+    fn preview_scroll(h: &TestHarness) -> Option<usize> {
+        h.stoat
+            .commit_preview
+            .as_ref()
+            .map(|preview| preview.scroll)
+    }
+
+    /// Whether the open preview's build landed.
+    fn preview_built(h: &TestHarness) -> bool {
+        h.stoat
+            .commit_preview
+            .as_ref()
+            .is_some_and(|preview| preview.document.is_some())
     }
 
     /// The commit and the row of the open card.

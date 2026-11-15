@@ -653,7 +653,7 @@ impl PreviewHighlights {
 /// The wake is what makes the preview appear on its own, for the reason
 /// [`spawn_commit_log_load`] describes. It fires on a failed tree read too,
 /// since the pump has a pending handle to clear either way.
-fn spawn_commit_preview_load(
+pub(crate) fn spawn_commit_preview_load(
     executor: &stoat_scheduler::Executor,
     repo: Arc<dyn crate::host::GitRepo>,
     workdir: std::path::PathBuf,

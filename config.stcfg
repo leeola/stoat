@@ -382,6 +382,7 @@ theme ermine_night inherits default_dark {
     ui.blame.age.4.fg  = blame_age_4;
     ui.blame.selected  = { fg: accent, bg: blame_selected };
     ui.blame.selected.date.fg = success;
+    ui.preview.chip = { fg: special, bg: tint_special };
 
     ui.pane_picker.badge = { fg: chrome, bg: accent };
 
@@ -798,6 +799,20 @@ on key {
         C -> GitStatusCommit();
         a -> GitStatusAbort();
         S -> GitStatusSkip();
+    }
+    # The Commit Preview's footer lists the labeled bindings of this block in
+    # this order, with the keys of one label joined, so Escape comes last.
+    modal == commit_preview && mode == normal {
+        j -> CommitPreviewLineDown() "scroll";
+        k -> CommitPreviewLineUp() "scroll";
+        Down -> CommitPreviewLineDown();
+        Up -> CommitPreviewLineUp();
+        Ctrl-d -> PickerDetailDown();
+        Ctrl-u -> PickerDetailUp();
+        PageDown -> PickerDetailDown();
+        PageUp -> PickerDetailUp();
+        y -> BlameCopySha() "copy sha";
+        Escape -> CommitPreviewClose() "back to blame";
     }
     modal == jumplist && mode == insert {
         Up -> PickerPrev();
@@ -1490,6 +1505,7 @@ on key {
     # labeled bindings of this block as its key hints.
     !modal && mode == normal && blame {
         K -> BlameCard();
+        Enter -> BlamePreview() "preview patch";
         y -> BlameCopySha() "copy sha";
         blame_card {
             Escape -> BlameCardClose() "close";

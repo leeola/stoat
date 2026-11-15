@@ -708,6 +708,7 @@ pub(crate) fn view_predicate(ws: &Workspace) -> Option<&'static str> {
 pub(crate) enum ActiveModal {
     Run,
     QuitConfirm,
+    CommitPreview,
     WorkspacePicker,
     GitStatus,
     Jumplist,
@@ -737,6 +738,7 @@ impl ActiveModal {
         match self {
             Self::Run => "run",
             Self::QuitConfirm => "quit_confirm",
+            Self::CommitPreview => "commit_preview",
             Self::WorkspacePicker => "workspace_picker",
             Self::GitStatus => "git_status",
             Self::Jumplist => "jumplist",
@@ -780,6 +782,7 @@ impl ActiveModal {
             Self::WalkthroughPicker => Some("walkthroughs"),
             Self::Run
             | Self::QuitConfirm
+            | Self::CommitPreview
             | Self::GitStatus
             | Self::Rename
             | Self::Search
@@ -839,15 +842,21 @@ impl ActiveModal {
     /// Whether this modal's docked key hints box waits for the hints toggle,
     /// rather than showing whenever the modal opens.
     ///
-    /// The file finder, help, and the workspace picker end in a footer of their
-    /// own keys, and the box repeats those keys over the modal's lower right.
+    /// The file finder, help, the workspace picker, and the Commit Preview end in
+    /// a footer of their own keys, and the box repeats those keys over the
+    /// modal's lower right.
     /// The git status panel names its keys in its section heads and its
     /// banner, and in a short window the box covers its rows. The palette
     /// keeps its box behind the toggle as well.
     pub(crate) fn hints_on_request(self) -> bool {
         matches!(
             self,
-            Self::FileFinder | Self::Help | Self::WorkspacePicker | Self::GitStatus | Self::Palette
+            Self::FileFinder
+                | Self::Help
+                | Self::WorkspacePicker
+                | Self::GitStatus
+                | Self::CommitPreview
+                | Self::Palette
         )
     }
 
@@ -911,6 +920,7 @@ pub(crate) fn close_topmost_modal(stoat: &mut Stoat) -> bool {
             }
         },
         ActiveModal::QuitConfirm => stoat.quit_all_confirm = None,
+        ActiveModal::CommitPreview => stoat.commit_preview = None,
         ActiveModal::GitStatus => stoat.git_status = None,
         ActiveModal::WorkspacePicker => {
             if let Some(picker) = stoat.workspace_picker.take() {
@@ -980,6 +990,8 @@ pub(crate) fn active_modal(stoat: &Stoat) -> Option<ActiveModal> {
         Some(ActiveModal::Run)
     } else if stoat.quit_all_confirm.is_some() {
         Some(ActiveModal::QuitConfirm)
+    } else if stoat.commit_preview.is_some() {
+        Some(ActiveModal::CommitPreview)
     } else if stoat.workspace_picker.is_some() {
         Some(ActiveModal::WorkspacePicker)
     } else if stoat.git_status.is_some() {
@@ -1043,6 +1055,7 @@ fn open_modal_count(stoat: &Stoat) -> usize {
     [
         stoat.modal_run.is_some(),
         stoat.quit_all_confirm.is_some(),
+        stoat.commit_preview.is_some(),
         stoat.workspace_picker.is_some(),
         stoat.git_status.is_some(),
         stoat.jumplist_picker.is_some(),
@@ -1979,9 +1992,10 @@ mod tests {
     }
 
     /// Every variant, in the canonical order [`active_modal`] resolves them.
-    const ALL_MODALS: [ActiveModal; 20] = [
+    const ALL_MODALS: [ActiveModal; 21] = [
         ActiveModal::Run,
         ActiveModal::QuitConfirm,
+        ActiveModal::CommitPreview,
         ActiveModal::WorkspacePicker,
         ActiveModal::GitStatus,
         ActiveModal::Jumplist,
@@ -2015,6 +2029,7 @@ mod tests {
             [
                 "run",
                 "quit_confirm",
+                "commit_preview",
                 "workspace_picker",
                 "git_status",
                 "jumplist",
@@ -2042,6 +2057,7 @@ mod tests {
         let boxed = [
             "run",
             "quit_confirm",
+            "commit_preview",
             "workspace_picker",
             "git_status",
             "jumplist",

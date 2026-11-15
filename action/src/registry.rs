@@ -2,7 +2,10 @@ use crate::{
     defs::{
         agent::SpawnClaude,
         app::{OpenLogs, PinMode, Quit, QuitAll, QuitAllCancel, QuitAllConfirm, ShowVersion},
-        blame::{BlameCard, BlameCardClose, BlameCopySha, ToggleBlame},
+        blame::{
+            BlameCard, BlameCardClose, BlameCopySha, BlamePreview, CommitPreviewClose,
+            CommitPreviewLineDown, CommitPreviewLineUp, ToggleBlame,
+        },
         commits::{
             CloseCommits, CommitsDetailDown, CommitsDetailUp, CommitsFirst, CommitsLast,
             CommitsNext, CommitsOpenReview, CommitsPageDown, CommitsPageUp, CommitsPrev,
@@ -356,6 +359,16 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
     add(BlameCard::DEF, |_| Ok(Box::new(BlameCard)));
     add(BlameCardClose::DEF, |_| Ok(Box::new(BlameCardClose)));
     add(BlameCopySha::DEF, |_| Ok(Box::new(BlameCopySha)));
+    add(BlamePreview::DEF, |_| Ok(Box::new(BlamePreview)));
+    add(CommitPreviewClose::DEF, |_| {
+        Ok(Box::new(CommitPreviewClose))
+    });
+    add(CommitPreviewLineDown::DEF, |_| {
+        Ok(Box::new(CommitPreviewLineDown))
+    });
+    add(CommitPreviewLineUp::DEF, |_| {
+        Ok(Box::new(CommitPreviewLineUp))
+    });
     add(DiffUnderline::DEF, |_| Ok(Box::new(DiffUnderline)));
     add(DiffBold::DEF, |_| Ok(Box::new(DiffBold)));
     add(DiffSyntax::DEF, |_| Ok(Box::new(DiffSyntax)));
@@ -1606,6 +1619,10 @@ mod tests {
         "BlameCard",
         "BlameCardClose",
         "BlameCopySha",
+        "BlamePreview",
+        "CommitPreviewClose",
+        "CommitPreviewLineDown",
+        "CommitPreviewLineUp",
         "DiffUnderline",
         "DiffBold",
         "DiffSyntax",
@@ -2196,7 +2213,8 @@ mod tests {
         // + 1 ToggleBlame.
         // + 2 BlameCard/BlameCardClose.
         // + 1 BlameCopySha.
-        assert_eq!(all().count(), 499);
+        // + 4 the Commit Preview actions.
+        assert_eq!(all().count(), 503);
     }
 
     #[test]

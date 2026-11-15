@@ -2,6 +2,7 @@ use super::{focused_pane_jumplist, pane_editor_ids};
 use crate::{
     app::{Stoat, UpdateEffect},
     buffer_registry::OpenOrigin,
+    commit_preview,
     file_finder::OpenIntent,
     keymap_state::{active_modal, ActiveModal},
     pane::{FocusTarget, View},
@@ -117,9 +118,10 @@ pub(super) fn picker_rename(stoat: &mut Stoat) -> UpdateEffect {
 
 /// Scroll the open list modal's preview pane half a pane in `dir`.
 ///
-/// Each modal holds its preview differently. Help and the commit picker keep
-/// their own row offset, since neither preview is a buffer. The rest back one
-/// with a real editor and scroll it the way an editor pane scrolls.
+/// Each modal holds its preview differently. Help, the commit picker, and the
+/// Commit Preview keep their own row offset, since none of their previews is a
+/// buffer. The rest back one with a real editor and scroll it the way an editor
+/// pane scrolls.
 ///
 /// The pane's height comes from the same surfaces lookup the pointer uses, so
 /// a half-pane step matches the pane on screen.
@@ -147,6 +149,7 @@ pub(super) fn picker_detail(stoat: &mut Stoat, dir: i32) -> UpdateEffect {
             };
             return UpdateEffect::Redraw;
         },
+        Some(ActiveModal::CommitPreview) => return commit_preview::scroll_by(stoat, step),
         _ => crate::mouse::modal_preview_editor(stoat),
     };
 

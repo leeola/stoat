@@ -20,6 +20,7 @@ mod commit_graph;
 mod commit_list;
 mod commit_message;
 mod commit_picker;
+mod commit_preview;
 pub mod completion;
 pub(crate) mod conflict_session;
 pub(crate) mod debounce;

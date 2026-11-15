@@ -847,6 +847,12 @@ pub mod scope {
     /// [`UI_BLAME_SELECTED`] foreground, as a lookup broadens a scope to its
     /// parent.
     pub(crate) const UI_BLAME_SELECTED_DATE: &str = "ui.blame.selected.date";
+    /// The chip in the Commit Preview's header that marks the preview read-only,
+    /// with the foreground for its text and the background for its box.
+    ///
+    /// A theme that leaves it unset draws the chip's text in the
+    /// [`UI_TEXT_MUTED`] foreground with no box.
+    pub(crate) const UI_PREVIEW_CHIP: &str = "ui.preview.chip";
     /// The badge the Pane Picker draws on each pane its digits reach. The
     /// background is the badge's fill, and the foreground is its digit and
     /// its border.
@@ -1951,6 +1957,22 @@ mod tests {
                 None,
             ],
             "the selection and its date, and neither under default_dark",
+        );
+    }
+
+    /// The ermine theme draws the Commit Preview's read-only chip in the special
+    /// color on its tint, and default_dark leaves the chip's scope unset.
+    #[test]
+    fn the_ermine_theme_colors_the_preview_chip() {
+        let [ermine, dark] = shipped_themes();
+        let style = |theme: &Theme| {
+            theme
+                .try_get(scope::UI_PREVIEW_CHIP)
+                .map(|style: Style| (style.fg, style.bg))
+        };
+        assert_eq!(
+            [style(&ermine), style(&dark)],
+            [Some((Some(rgb(0xc59af0)), Some(rgb(0x2a2236)))), None],
         );
     }
 

@@ -51,3 +51,53 @@ define_action!(
     ActionPriority::Rare,
     palette_visible = false
 );
+
+define_action!(
+    BlamePreviewDef,
+    BlamePreview,
+    "BlamePreview",
+    ActionKind::BlamePreview,
+    "preview the commit's patch",
+    "Open the Commit Preview on the commit that last changed the cursor line \
+     of a blamed pane. The preview is a read-only overlay with the commit's \
+     header and its patch against its first parent, built from git objects, \
+     so the working tree, HEAD, and the buffers stay as they were. An \
+     uncommitted line opens the working-tree diff instead.",
+    ActionPriority::Rare,
+    palette_visible = false
+);
+
+define_action!(
+    CommitPreviewCloseDef,
+    CommitPreviewClose,
+    "CommitPreviewClose",
+    ActionKind::CommitPreviewClose,
+    "close the Commit Preview",
+    "Close the Commit Preview and return to the blamed pane it opened from.",
+    ActionPriority::Rare,
+    palette_visible = false
+);
+
+define_action!(
+    CommitPreviewLineDownDef,
+    CommitPreviewLineDown,
+    "CommitPreviewLineDown",
+    ActionKind::CommitPreviewLineDown,
+    "scroll the Commit Preview down",
+    "Scroll the patch of the Commit Preview down one row. The scroll stops \
+     where the last row of the patch reaches the bottom of the box.",
+    ActionPriority::Rare,
+    palette_visible = false
+);
+
+define_action!(
+    CommitPreviewLineUpDef,
+    CommitPreviewLineUp,
+    "CommitPreviewLineUp",
+    ActionKind::CommitPreviewLineUp,
+    "scroll the Commit Preview up",
+    "Scroll the patch of the Commit Preview up one row. The scroll stops at \
+     the first row of the patch.",
+    ActionPriority::Rare,
+    palette_visible = false
+);

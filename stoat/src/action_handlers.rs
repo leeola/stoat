@@ -52,6 +52,7 @@ use crate::{
     auto_reload,
     buffer_registry::OpenOrigin,
     command_palette::CommandPalette,
+    commit_preview,
     diff_changes::ExpandDir,
     display_map::syntax_theme::SyntaxStyles,
     editor_state::{EditorId, EditorState},
@@ -727,6 +728,10 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
         ActionKind::BlameCard => blame::open_card(stoat, true),
         ActionKind::BlameCardClose => blame::close_card(stoat),
         ActionKind::BlameCopySha => blame::copy_sha(stoat),
+        ActionKind::BlamePreview => blame::preview(stoat),
+        ActionKind::CommitPreviewClose => commit_preview::close(stoat),
+        ActionKind::CommitPreviewLineDown => commit_preview::scroll_by(stoat, 1),
+        ActionKind::CommitPreviewLineUp => commit_preview::scroll_by(stoat, -1),
         ActionKind::DiffUnderline => stoat.handle_diff_underline_toggle(),
         ActionKind::DiffBold => stoat.handle_diff_bold_toggle(),
         ActionKind::DiffSyntax => stoat.handle_diff_syntax_toggle(),
@@ -1639,6 +1644,7 @@ fn set_theme(stoat: &mut Stoat, name: &str) -> UpdateEffect {
                 picker.pending_preview = None;
                 picker.requested_preview = None;
             }
+            commit_preview::reload(stoat);
 
             // The class table is rebuilt and the stores are kept. A class is a
             // theme-key index, so what a store holds means the same under the

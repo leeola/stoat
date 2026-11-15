@@ -14,6 +14,7 @@ use crate::{
         WHEEL_BINDING_COOLDOWN,
     },
     buffer::BufferId,
+    commit_preview,
     diff_changes::{self, DiffChangesId, DiffChangesState},
     display_map::DisplaySnapshot,
     editor_state::{EditorId, EditorState, ScrollGlide},
@@ -594,6 +595,14 @@ pub(crate) fn boxed_modal_surfaces(stoat: &Stoat) -> Option<ModalSurfaces> {
         ActiveModal::GitStatus => Some(ModalSurfaces {
             list: Rect::new(0, 0, 0, 0),
             preview: None,
+            len: 0,
+            selected: 0,
+        }),
+        // The patch is the one surface the preview scrolls. The box has no list,
+        // so a press or a wheel off the patch does nothing.
+        ActiveModal::CommitPreview => Some(ModalSurfaces {
+            list: Rect::new(0, 0, 0, 0),
+            preview: Some(crate::render::commit_preview::commit_preview_layout(size)?.body),
             len: 0,
             selected: 0,
         }),
@@ -1699,8 +1708,9 @@ fn wheel_binding(stoat: &mut Stoat, mouse: MouseEvent) -> Option<UpdateEffect> {
 /// Scroll the open modal's preview pane one wheel step.
 ///
 /// Each modal holds its preview differently. Most back it with a real editor
-/// and scroll through the same path an editor pane does. The commit picker and
-/// help keep their own row offset instead, since neither preview is a buffer.
+/// and scroll through the same path an editor pane does. The commit picker,
+/// help, and the Commit Preview keep their own row offset instead, since none
+/// of their previews is a buffer.
 fn scroll_modal_preview(stoat: &mut Stoat, down: bool) -> UpdateEffect {
     let editor = match active_modal(stoat) {
         Some(ActiveModal::CommitPicker) => {
@@ -1712,6 +1722,16 @@ fn scroll_modal_preview(stoat: &mut Stoat, down: bool) -> UpdateEffect {
                 false => picker.preview_scroll.saturating_sub(PREVIEW_WHEEL_ROWS),
             };
             return UpdateEffect::Redraw;
+        },
+        Some(ActiveModal::CommitPreview) => {
+            let rows = PREVIEW_WHEEL_ROWS as i32;
+            return commit_preview::scroll_by(
+                stoat,
+                match down {
+                    true => rows,
+                    false => -rows,
+                },
+            );
         },
         Some(ActiveModal::Help) => {
             return match down {

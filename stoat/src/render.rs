@@ -6,6 +6,7 @@ pub(crate) mod code_action;
 pub(crate) mod code_search;
 pub(crate) mod command_palette;
 pub(crate) mod commit_picker;
+pub(crate) mod commit_preview;
 pub(crate) mod commits;
 pub(crate) mod completion;
 pub(crate) mod conflict;
@@ -1948,6 +1949,37 @@ pub(crate) fn frame(
                     buf,
                     &mut *scene,
                 );
+            }
+        },
+        Some(ActiveModal::CommitPreview) => {
+            if let Some(preview) = &mut stoat.commit_preview {
+                commit_preview::render_commit_preview_modal(
+                    preview,
+                    crate::commit_picker::now_epoch(&stoat.executor),
+                    &stoat.theme,
+                    preview_dials,
+                    full,
+                    buf,
+                    &mut *scene,
+                );
+                if modal_hints {
+                    cached_modal_hints(
+                        &mut stoat.hints_cache,
+                        &stoat.keymap,
+                        mode,
+                        "commit_preview",
+                        None,
+                        Some("preview"),
+                        on_request,
+                        toggles,
+                        &stoat.theme,
+                        full,
+                        status_rows,
+                        chrome_bands,
+                        buf,
+                        &mut *scene,
+                    );
+                }
             }
         },
         Some(ActiveModal::WorkspacePicker) => {

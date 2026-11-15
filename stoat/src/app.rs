@@ -14,6 +14,7 @@ use crate::{
         store::{IndexWrites, ManifestEdit},
     },
     command_palette::CommandPalette,
+    commit_preview::{self, CommitPreview},
     debounce,
     diff_changes::{REVEAL_FADE, REVEAL_HOLD},
     display_map::syntax_theme::SyntaxStyles,
@@ -1077,6 +1078,8 @@ pub struct Stoat {
     pub(crate) workspace_picker: Option<WorkspacePicker>,
     /// The git status panel, or `None` while it is closed.
     pub(crate) git_status: Option<GitStatusPanel>,
+    /// The Commit Preview, or `None` while it is closed.
+    pub(crate) commit_preview: Option<CommitPreview>,
     /// Confirmation modal shown when [`stoat_action::QuitAll`] fires
     /// with at least one dirty buffer in any workspace. `Some` while
     /// the user is being prompted to discard or cancel; cleared on
@@ -2744,6 +2747,7 @@ impl Stoat {
             symbol_finder: None,
             workspace_picker: None,
             git_status: None,
+            commit_preview: None,
             quit_all_confirm: None,
             jumplist_picker: None,
             walkthrough_picker: None,
@@ -6995,9 +6999,9 @@ impl Stoat {
     /// open or the open one has no input of its own.
     ///
     /// A picker without an input (the jumplist, diagnostics, and location pickers,
-    /// the quit prompt, a modal run, the git status panel) answers `None` so the
-    /// caller keeps resolving through the panes behind it, which is where the
-    /// keys it does handle land.
+    /// the quit prompt, a modal run, the git status panel, the Commit Preview)
+    /// answers `None` so the caller keeps resolving through the panes behind it,
+    /// which is where the keys it does handle land.
     pub(crate) fn active_modal_input(&self) -> Option<(EditorId, BufferId)> {
         let input = match active_modal(self)? {
             ActiveModal::WorkspacePicker => &self.workspace_picker.as_ref()?.input,
@@ -7017,7 +7021,10 @@ impl Stoat {
             ActiveModal::Jumplist => &self.jumplist_picker.as_ref()?.picker.input,
             ActiveModal::WalkthroughPicker => &self.walkthrough_picker.as_ref()?.picker.input,
             ActiveModal::PaneFinder => &self.pane_finder.as_ref()?.picker.input,
-            ActiveModal::Run | ActiveModal::QuitConfirm | ActiveModal::GitStatus => return None,
+            ActiveModal::Run
+            | ActiveModal::QuitConfirm
+            | ActiveModal::CommitPreview
+            | ActiveModal::GitStatus => return None,
         };
 
         Some((input.editor_id, input.buffer_id))
@@ -7103,11 +7110,16 @@ impl Stoat {
     /// recorded while painting the current frame, so it is exactly where the
     /// cursor cell would otherwise be drawn. `None` for finder/palette/dock/run
     /// focus, where the editor paints its own cursor cell and the terminal
-    /// cursor stays hidden. Must be called after a render.
+    /// cursor stays hidden. `None` too while the Commit Preview is open, since
+    /// its box covers the pane and has no input of its own. Must be called
+    /// after a render.
     ///
     /// For a changes view, returns the cursor cell of the focused excerpt. While
     /// that excerpt is outside the window, returns `None`.
     pub(crate) fn primary_cursor_screen_pos(&self) -> Option<(u16, u16)> {
+        if self.commit_preview.is_some() {
+            return None;
+        }
         let (focused_id, _) = self.focused_editor_ids()?;
         let ws = self.active_workspace();
         let FocusTarget::SplitPane = ws.focus else {
@@ -9877,6 +9889,7 @@ impl Stoat {
         };
         let blame_card = action_handlers::blame::pump_card(self);
         let blame_rest = action_handlers::blame::pump_rest(self);
+        let commit_preview = commit_preview::pump(self);
 
         let changed_file_jump = action_handlers::movement::pump_changed_file_jump(self);
         let diff_wants = action_handlers::review::pump_diff_wants(self);
@@ -9909,6 +9922,7 @@ impl Stoat {
             || blame
             || blame_card
             || blame_rest
+            || commit_preview
             || code_search
             || changed_file_jump
             || diff_wants
