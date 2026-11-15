@@ -264,6 +264,7 @@ theme ermine_night inherits default_dark {
     let divider          = "#22252b";
     let hatch            = "#1b1d22";
     let fold_button      = "#1f2a3d";
+    let blame_surface    = "#14161a";
     let tint_accent      = "#223049";
     let tint_info        = "#1e3237";
     let tint_reveal      = "#1a2226";
@@ -369,6 +370,8 @@ theme ermine_night inherits default_dark {
 
     ui.readonly.label.fg = readonly;
     ui.readonly.frame.fg = readonly_line;
+
+    ui.blame.column.bg = blame_surface;
 
     ui.pane_picker.badge = { fg: chrome, bg: accent };
 

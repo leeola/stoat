@@ -1085,6 +1085,39 @@ fn a_glide_page_carries_the_undercurl_of_its_diagnostic() {
     );
 }
 
+/// A blamed pane's pooled page carries the Blame Column's surface at its left,
+/// so a glide over the page keeps the column the live grid draws.
+#[test]
+fn a_blamed_pane_page_carries_the_blame_column_surface() {
+    use stoatty_protocol::command::Command;
+
+    let mut h = crate::test_harness::TestHarness::with_size(120, 24);
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+    h.stoat.set_apc_tx(tx);
+    let text = "fn alpha() {}\nfn beta() {}\n";
+    h.seed_linear_history("/repo", &[("c1", "one", &[("a.rs", text)])]);
+    h.stoat.active_workspace_mut().git_root = PathBuf::from("/repo");
+    h.fake_fs().insert_file("/repo/a.rs", text);
+    h.open_file(&PathBuf::from("/repo/a.rs"));
+    h.type_keys("space h a");
+    h.settle();
+    h.stoat.render();
+
+    let pool = {
+        let ws = h.stoat.active_workspace();
+        ws.panes.pane(ws.panes.focus()).index
+    };
+    let bytes = emit_raw(&mut h, &mut rx);
+    let surfaces: Vec<_> = command::decode_stream(fill_payload(&bytes, pool, 0))
+        .into_iter()
+        .filter_map(|command| match command {
+            Command::Bar(bar) if bar.width == 281 => Some((bar.x, bar.y, bar.height, bar.color)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(surfaces, [(0, 0, 48, [0x14, 0x16, 0x1a])]);
+}
+
 /// The messages' stamp moves only where the cursor changes what a page prints:
 /// whether the messages print, the popover's diagnostic, and a cursor line
 /// whose readout differs from the diagnostic the line starts.

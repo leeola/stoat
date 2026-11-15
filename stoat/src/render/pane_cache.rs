@@ -175,6 +175,14 @@ pub(crate) struct PaneCacheKey {
     /// and no version moves with that. `None` for a changes view and a
     /// terminal pane.
     pub(crate) read_only: Option<ReadOnly>,
+    /// The landed blames, as [`BlameState::epoch`] counts them, for a pane
+    /// that shows the Blame Column, and `None` for any other pane.
+    ///
+    /// The toggle moves it between the two, and so does each landed blame,
+    /// which changes the column while no version of the buffer moves.
+    ///
+    /// [`BlameState::epoch`]: crate::blame::BlameState::epoch
+    pub(crate) blame: Option<u64>,
     /// The excerpts a changes view's window shows, hashed with the focused
     /// index, the window's rows, and whether the terminal composites the
     /// stack. Each one counts its buffer, placement, rows, path, fold,
@@ -521,6 +529,7 @@ pub(crate) fn pane_cache_key(
         scene_live,
         terminal_cursor: frame.terminal_cursor_editor == Some(editor_id),
         read_only: buffers.read_only(buffer),
+        blame: pane.blames(editor).then_some(frame.blame.epoch),
         stack: 0,
         terminal: 0,
     })
@@ -596,6 +605,7 @@ fn terminal_cache_key(
         scene_live,
         terminal_cursor: false,
         read_only: None,
+        blame: None,
         stack: 0,
         terminal: terminal.finish(),
     })
@@ -748,6 +758,7 @@ fn stack_cache_key(
         scene_live,
         terminal_cursor: frame.terminal_cursor_editor == Some(editor_id),
         read_only: None,
+        blame: None,
         stack: stack.finish(),
         terminal: 0,
     })
@@ -869,6 +880,7 @@ mod tests {
             scene_live: false,
             terminal_cursor: false,
             read_only: None,
+            blame: None,
             stack: 0,
             terminal: 0,
         }
@@ -883,7 +895,7 @@ mod tests {
     #[test]
     fn each_field_tells_two_keys_apart() {
         let base = key(PaintVersion::default());
-        let moved: [(&str, PaneCacheKey); 25] = [
+        let moved: [(&str, PaneCacheKey); 26] = [
             (
                 "buffer",
                 PaneCacheKey {
@@ -1042,6 +1054,13 @@ mod tests {
                 "read_only",
                 PaneCacheKey {
                     read_only: Some(ReadOnly::Compressed),
+                    ..base
+                },
+            ),
+            (
+                "blame",
+                PaneCacheKey {
+                    blame: Some(0),
                     ..base
                 },
             ),

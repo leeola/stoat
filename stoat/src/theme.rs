@@ -816,6 +816,13 @@ pub mod scope {
     /// A theme that leaves it unset draws no ring and no label, so the status
     /// row is the pane's only read-only mark.
     pub const UI_READONLY_FRAME: &str = "ui.readonly.frame";
+    /// The surface of the Blame Column at the left of a blamed pane, as its
+    /// background.
+    ///
+    /// A theme that leaves it unset fills the column with the
+    /// [`UI_SURFACE_RAISED`] background, and with the [`UI_BACKGROUND`]
+    /// background when that is unset too.
+    pub(crate) const UI_BLAME_COLUMN: &str = "ui.blame.column";
     /// The badge the Pane Picker draws on each pane its digits reach. The
     /// background is the badge's fill, and the foreground is its digit and
     /// its border.
@@ -1855,6 +1862,23 @@ mod tests {
             ),
             (Some(rgb(0xc59af0)), None),
             "the special color, and no name color under default_dark",
+        );
+    }
+
+    /// The ermine theme fills the Blame Column with its own surface, and
+    /// default_dark leaves the column's scope unset.
+    #[test]
+    fn the_ermine_theme_colors_the_blame_column() {
+        let [ermine, dark] = shipped_themes();
+        assert_eq!(
+            (
+                ermine
+                    .try_get(scope::UI_BLAME_COLUMN)
+                    .and_then(|style| style.bg),
+                dark.try_get(scope::UI_BLAME_COLUMN),
+            ),
+            (Some(rgb(0x14161a)), None),
+            "the column surface, and no column scope under default_dark",
         );
     }
 

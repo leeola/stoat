@@ -427,6 +427,7 @@ pub(crate) fn paint_stack_rows(
             frame.reload_flashes,
             paint == PagePaint::DecorationsOnly,
             origins.as_ref().map(|origins| origins[index]),
+            None,
         );
         editor.viewport_rows = Some(rows as u32);
     }

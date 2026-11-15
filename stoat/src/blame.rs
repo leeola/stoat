@@ -48,7 +48,7 @@ pub(crate) struct BlameState {
     settle_timers: HashMap<BufferId, Task<()>>,
     /// The count of blames that landed. A landed blame changes the runs of a
     /// blamed pane while its buffer stays the same.
-    epoch: u64,
+    pub(crate) epoch: u64,
 }
 
 /// The commit of one line of a blamed buffer.

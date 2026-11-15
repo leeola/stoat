@@ -172,6 +172,7 @@ pub(crate) fn render_pane(
                 let diagnostic_info = buffers
                     .path_for(editor.buffer_id)
                     .map(|path| (path, frame.diagnostics));
+                let blame = frame.chrome.blame.as_ref().filter(|_| pane.blames(editor));
                 render_editor_with_overlay(
                     editor,
                     content_area,
@@ -203,6 +204,7 @@ pub(crate) fn render_pane(
                     frame.reload_flashes,
                     false,
                     None,
+                    blame,
                 );
                 if editor.diff_view {
                     emit_pane_base_frame(content_area, FrameEdges::Top, frame, scene);

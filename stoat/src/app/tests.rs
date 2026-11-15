@@ -15643,6 +15643,7 @@ fn editor_page_content_version_tracks_the_cursor_line() {
         0,
         None,
         0,
+        None,
     );
     assert_eq!(
         base,
@@ -15660,7 +15661,8 @@ fn editor_page_content_version_tracks_the_cursor_line() {
             paint,
             0,
             None,
-            0
+            0,
+            None,
         ),
         "identical inputs keep a buffered page cached"
     );
@@ -15680,7 +15682,8 @@ fn editor_page_content_version_tracks_the_cursor_line() {
             paint,
             0,
             None,
-            0
+            0,
+            None,
         ),
         "a cursor-line move refills buffered pages"
     );
@@ -15700,7 +15703,8 @@ fn editor_page_content_version_tracks_the_cursor_line() {
             paint,
             0,
             None,
-            0
+            0,
+            None,
         ),
         "switching to absolute numbering refills"
     );
@@ -15720,7 +15724,8 @@ fn editor_page_content_version_tracks_the_cursor_line() {
             paint,
             0,
             None,
-            0
+            0,
+            None,
         ),
         "a wrap-width change refills buffered pages"
     );
@@ -15740,7 +15745,8 @@ fn editor_page_content_version_tracks_the_cursor_line() {
             paint,
             0,
             None,
-            0
+            0,
+            None,
         ),
         "a diff-view hunk change refills buffered pages"
     );
@@ -15763,7 +15769,8 @@ fn editor_page_content_version_tracks_the_cursor_line() {
             paint,
             0,
             None,
-            0
+            0,
+            None,
         ),
         "a soften step refills buffered pages rather than gliding stale colors"
     );
@@ -15783,7 +15790,8 @@ fn editor_page_content_version_tracks_the_cursor_line() {
             paint,
             0,
             None,
-            0
+            0,
+            None,
         ),
         "a focus change to a dimmed pane refills buffered pages"
     );
@@ -15803,7 +15811,8 @@ fn editor_page_content_version_tracks_the_cursor_line() {
             paint,
             0,
             None,
-            0
+            0,
+            None,
         ),
         "a buffer edit refills buffered pages"
     );
@@ -15823,7 +15832,8 @@ fn editor_page_content_version_tracks_the_cursor_line() {
             paint,
             1,
             None,
-            0
+            0,
+            None,
         ),
         "a theme switch refills buffered pages"
     );
@@ -15844,8 +15854,39 @@ fn editor_page_content_version_tracks_the_cursor_line() {
             0,
             None,
             1,
+            None,
         ),
         "a change of the printed diagnostic messages refills buffered pages"
+    );
+
+    let blamed = |blame| {
+        editor_page_content_version(
+            true,
+            3,
+            None,
+            Some(10),
+            0,
+            false,
+            0,
+            0.0,
+            DiffDials::shipped(),
+            0,
+            paint,
+            0,
+            None,
+            0,
+            blame,
+        )
+    };
+    assert_ne!(
+        base,
+        blamed(Some(0)),
+        "the Blame Column turning on refills buffered pages"
+    );
+    assert_ne!(
+        blamed(Some(0)),
+        blamed(Some(1)),
+        "a landed blame refills buffered pages"
     );
 
     let lit = |start: usize| {
@@ -15869,6 +15910,7 @@ fn editor_page_content_version_tracks_the_cursor_line() {
             0,
             Some(&spotlight),
             0,
+            None,
         )
     };
     assert_ne!(
@@ -15931,6 +15973,7 @@ fn an_edit_or_a_fold_refills_pooled_pages_and_the_minimap_window() {
                 0,
                 None,
                 0,
+                None,
             ),
             display_map_stamp(buffer_version, paint_version),
         )

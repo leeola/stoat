@@ -1170,6 +1170,10 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
         .chrome
         .as_ref()
         .and_then(|(_, chrome)| chrome.severity.clone());
+    let blame_colors = stoat
+        .chrome
+        .as_ref()
+        .and_then(|(_, chrome)| Some((chrome.blame.clone()?, chrome.gutter_bg)));
     // A diff page draws its gutter as runs only when the page gutter colors and
     // the diff colors both resolve. The dim only fades the colors, so one answer
     // holds for every pane.
@@ -1183,6 +1187,14 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
         let Some(editor) = ws.editors.get_mut(*editor_id) else {
             continue;
         };
+        // The pane cache key's blame value, which the pages hold to the same
+        // toggle and landed blames as the live grid.
+        let blame = ws
+            .panes
+            .split_panes()
+            .find(|(_, pane)| pane.index == region.pool)
+            .is_some_and(|(_, pane)| pane.blames(editor))
+            .then_some(ws.blame.epoch);
         // A pooled page carries the same fade as its pane's live grid, so a
         // wheel glide over it never flashes bright content.
         let dim =
@@ -1297,6 +1309,7 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
             theme_epoch,
             page_spotlight,
             eol_page_stamp(editor.eol_cursor, &spans),
+            blame,
         );
         let snapshot = editor.display_map.snapshot();
         // The spotlight recolors only the rows it lights, so where it falls is
@@ -1353,7 +1366,18 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
                 .map(|cache| cache.messages.clone())
                 .unwrap_or_default(),
             eol: editor.eol_cursor,
-        });
+        })
+        .blamed(
+            blame_colors
+                .as_ref()
+                .filter(|_| blame.is_some())
+                .map(|(colors, bg)| crate::smooth_scroll::PageBlame {
+                    colors: match bg {
+                        Some(bg) => colors.dim(*bg, dim),
+                        None => colors.clone(),
+                    },
+                }),
+        );
         let diff_view = editor.diff_view;
         let mut rendered = Vec::new();
         let Refill {
@@ -1971,6 +1995,7 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
                 theme_epoch,
                 None,
                 0,
+                None,
             );
             let snapshot = editor.display_map.snapshot();
             let severity = editor
@@ -3627,6 +3652,9 @@ pub(crate) fn display_map_stamp(buffer_version: u64, paint_version: PaintVersion
 /// `eol_stamp` is the [`eol_page_stamp`] of the record the live paint left, so
 /// a change of the diagnostic messages a page prints after its lines refills
 /// it.
+///
+/// `blame` is the blame value of the pane's cache key, so a page refills when
+/// the Blame Column turns on or off and when a blame lands.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn editor_page_content_version(
     syntax_highlight: bool,
@@ -3643,6 +3671,7 @@ pub(crate) fn editor_page_content_version(
     theme_epoch: u64,
     spotlight: Option<&Spotlight>,
     eol_stamp: u64,
+    blame: Option<u64>,
 ) -> u64 {
     let mut hasher = DefaultHasher::new();
     (!syntax_highlight).hash(&mut hasher);
@@ -3666,6 +3695,7 @@ pub(crate) fn editor_page_content_version(
         .map(|spotlight| (spotlight.dim * 1000.0) as u32)
         .hash(&mut hasher);
     eol_stamp.hash(&mut hasher);
+    blame.hash(&mut hasher);
     hasher.finish()
 }
 

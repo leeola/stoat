@@ -1,4 +1,5 @@
 pub(crate) mod badges;
+pub(crate) mod blame;
 pub(crate) mod chrome;
 pub(crate) mod code_action;
 pub(crate) mod code_search;

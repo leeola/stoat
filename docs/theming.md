@@ -252,6 +252,10 @@ The typed UI scopes, by group (syntax scopes are open-ended):
 - `ui.readonly.label`, `ui.readonly.frame` -- the label and the dashed ring
   a read-only editor pane draws inside stoatty. default_dark leaves both
   unset, so its read-only panes draw neither.
+- `ui.blame.column` -- the background of the Blame Column at the left of a
+  blamed pane. A theme that leaves it unset fills the column with the
+  `ui.surface.raised` background, and with the `ui.background` background
+  when that is unset too. default_dark leaves it unset.
 - `ui.pane_picker.badge` -- the digit badge the Pane Picker draws on each
   pane it reaches: the background is the fill, and the foreground is the
   digit and the border. A theme that leaves it unset fills the badge with the

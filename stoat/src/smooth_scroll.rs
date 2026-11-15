@@ -25,6 +25,7 @@ use crate::{
     file_finder::FileFinder,
     help::Help,
     render::{
+        blame::{self, BlameColors, BLAME_COLUMN_CELLS},
         code_search::paint_match_rows,
         command_palette::paint_palette_rows,
         commits::paint_commit_rows,
@@ -32,10 +33,10 @@ use crate::{
         conflict_view::{render_conflict_rows, GridPaint},
         editor::{
             draw_fallback_line_numbers, gutter_background, gutter_component_lines,
-            gutter_diff_marks, gutter_geometry, paint_chunk_rows, paint_diagnostic_spans,
-            paint_line_diagnostics, paint_severity_column, rich_gutter, severity_rows,
-            visible_byte_range, DiagnosticPaintScratch, EolCursor, RichGutterColors, RowSeverity,
-            SeverityColors,
+            gutter_diff_marks, gutter_digits, gutter_geometry, measure_gutter_width,
+            paint_chunk_rows, paint_diagnostic_spans, paint_line_diagnostics,
+            paint_severity_column, rich_gutter, severity_rows, visible_byte_range,
+            DiagnosticPaintScratch, EolCursor, RichGutterColors, RowSeverity, SeverityColors,
         },
         file_finder::paint_finder_rows,
         help::{paint_help_detail_rows, paint_help_list_rows},
@@ -231,9 +232,13 @@ pub(crate) fn render_page_decorations(
         .saturating_add(region_height as u32)
         .min(snapshot.line_count());
     // The terminal keeps the page's cells, so the cells this paint writes go to
-    // a buffer nothing reads. The rich gutter writes none. Only the letters of
-    // a numberless gutter write any, in its one column.
-    let mut cells = Buffer::empty(Rect { width: 1, ..area });
+    // a buffer nothing reads. The rich gutter and the Blame Column write none.
+    // Only the letters of a numberless gutter write any, in its one column,
+    // which sits past the Blame Column on a blamed page.
+    let mut cells = Buffer::empty(Rect {
+        width: area.width.min(BLAME_COLUMN_CELLS + 1),
+        ..area
+    });
     let (_, components) = paint_page_gutter(
         snapshot,
         top_row,
@@ -523,6 +528,20 @@ pub(crate) struct PageGutter {
     /// Whether the page numbers its lines as a picker preview does, in place
     /// of the line-number gutter and the severity column.
     number_column: bool,
+    /// The Blame Column of a blamed pane's page, or `None` for a page that
+    /// shows no column.
+    blame: Option<PageBlame>,
+}
+
+/// The Blame Column inputs that a blamed pane's page paints from, resolved on
+/// the run loop.
+///
+/// A page shows the column when the live grid does, which is when the pane
+/// blames and the theme resolves the column's colors.
+#[derive(Clone)]
+pub(crate) struct PageBlame {
+    /// The colors as the live grid paints them, dimmed by the pane's fade.
+    pub(crate) colors: BlameColors,
 }
 
 impl PageGutter {
@@ -551,6 +570,7 @@ impl PageGutter {
             frame: None,
             diagnostics: PageDiagnostics::default(),
             number_column: false,
+            blame: None,
         }
     }
 
@@ -580,6 +600,14 @@ impl PageGutter {
     /// - [`emit_base_frame`] for the frame's geometry.
     pub(crate) fn framed(self, frame: Option<[u8; 3]>) -> PageGutter {
         PageGutter { frame, ..self }
+    }
+
+    /// This gutter with the Blame Column of `blame` left of it.
+    ///
+    /// The column takes its cells only when the page has the room that
+    /// [`blame::blame_cells`] asks for, as the live grid does.
+    pub(crate) fn blamed(self, blame: Option<PageBlame>) -> PageGutter {
+        PageGutter { blame, ..self }
     }
 
     /// This gutter numbering a picker preview's lines when `on`.
@@ -664,19 +692,12 @@ impl PageDiagnostics {
     }
 }
 
-/// Paint the page's line-number gutter, returning the cell columns it reserves
-/// and the rich APC frames to append after the page cells.
+/// Paint the page's gutter, returning the cell columns it reserves and the rich
+/// APC frames to append after the page cells.
 ///
-/// In rich mode the sub-cell components draw into a scratch scene whose bytes
-/// ride the fill, leaving the gutter cells in `buf` at the page background. In
-/// fallback mode the degraded numbers paint into `buf` and no bytes are
-/// returned.
-///
-/// With line numbers off, a page whose rows carry a diagnostic keeps the
-/// one-column severity gutter of the live grid. It marks each diagnostic row
-/// with a bar in the returned frames under RGB severity colors, and with a
-/// letter in `buf` otherwise. A page with no diagnostic answers `(0, empty)`,
-/// so its text starts at column zero.
+/// A blamed page paints the Blame Column first and the line gutter past it, as
+/// [`paint_page_line_gutter`] paints it. The column's surface is a bar in the
+/// returned frames, as the live grid draws it under stoatty.
 ///
 /// A gutter with [`PageGutter::number_column`] set paints a picker preview's
 /// number column in its place, with the numbers in the returned frames.
@@ -698,6 +719,96 @@ fn paint_page_gutter(
         return (width, scene.buffer().clone());
     }
 
+    let blame_w = gutter.blame.as_ref().map_or(0, |_| {
+        blame::blame_cells(area.width, line_gutter_width(snapshot, gutter))
+    });
+    let Some(blame) = gutter.blame.as_ref().filter(|_| blame_w > 0) else {
+        return paint_page_line_gutter(
+            snapshot,
+            top_row,
+            end_row,
+            buf,
+            area,
+            gutter,
+            fallback_style,
+            dim,
+            live,
+        );
+    };
+
+    let mut scene = gutter.scene();
+    let rows = end_row.saturating_sub(top_row).min(u32::from(area.height)) as u16;
+    blame::paint_blame_surface(
+        Rect {
+            width: blame_w,
+            ..area
+        },
+        rows,
+        &blame.colors,
+        buf,
+        Some(&mut scene),
+    );
+
+    let past_column = Rect {
+        x: area.x + blame_w,
+        width: area.width - blame_w,
+        ..area
+    };
+    let (width, components) = paint_page_line_gutter(
+        snapshot,
+        top_row,
+        end_row,
+        buf,
+        past_column,
+        gutter,
+        fallback_style,
+        dim,
+        live,
+    );
+    let mut frames = scene.buffer().clone();
+    frames.extend_from_slice(&components);
+    (blame_w + width, frames)
+}
+
+/// The cells that the line-number gutter or the severity column of `gutter`
+/// reserves on a page of `snapshot`, measured before the paint as the live
+/// grid measures them.
+fn line_gutter_width(snapshot: &DisplaySnapshot, gutter: &PageGutter) -> u16 {
+    match (gutter.line_numbers, gutter.severity.is_empty()) {
+        (true, _) => measure_gutter_width(
+            gutter_digits(snapshot.buffer_line_count()),
+            gutter.rich.as_ref().map(|rich| rich.number_scale),
+        ),
+        (false, true) => 0,
+        (false, false) => 1,
+    }
+}
+
+/// Paint the page's line-number gutter into `area`, returning the cell columns
+/// it reserves and the rich APC frames to append after the page cells.
+///
+/// In rich mode the sub-cell components draw into a scratch scene whose bytes
+/// ride the fill, leaving the gutter cells in `buf` at the page background. In
+/// fallback mode the degraded numbers paint into `buf` and no bytes are
+/// returned.
+///
+/// With line numbers off, a page whose rows carry a diagnostic keeps the
+/// one-column severity gutter of the live grid. It marks each diagnostic row
+/// with a bar in the returned frames under RGB severity colors, and with a
+/// letter in `buf` otherwise. A page with no diagnostic answers `(0, empty)`,
+/// so its text starts at the left of `area`.
+#[allow(clippy::too_many_arguments)]
+fn paint_page_line_gutter(
+    snapshot: &DisplaySnapshot,
+    top_row: u32,
+    end_row: u32,
+    buf: &mut Buffer,
+    area: Rect,
+    gutter: &PageGutter,
+    fallback_style: Style,
+    dim: f32,
+    live: Option<&crate::diff_map::LiveHunks<'_>>,
+) -> (u16, Vec<u8>) {
     if !gutter.line_numbers {
         if gutter.severity.is_empty() {
             return (0, Vec::new());
@@ -1347,6 +1458,7 @@ mod tests {
                 &[],
                 false,
                 None,
+                None,
             );
             editor.scroll_row = saved;
             let expected = serialize_buffer(&expected);
@@ -1494,6 +1606,127 @@ mod tests {
         );
     }
 
+    /// A page from a blamed gutter starts its text and its gutter 18 cells
+    /// further right than the page from the same gutter unblamed, and its
+    /// frames carry the column's surface as one bar over the page's four rows.
+    #[test]
+    fn a_blamed_page_moves_its_text_past_the_blame_column() {
+        use super::{render_page_from_snapshot, PageBlame};
+        use crate::{render::blame::BlameColors, term_screen::TermScreen};
+        use stoatty_protocol::command::{decode_stream, BarCommand};
+
+        let (snapshot, gutter, fallback) = rich_gutter_page();
+        let blamed = gutter.clone().blamed(Some(PageBlame {
+            colors: BlameColors { surface: [1, 2, 3] },
+        }));
+        let page = |gutter: &PageGutter| {
+            let bytes = render_page_from_snapshot(
+                &snapshot,
+                0,
+                fallback,
+                60,
+                4,
+                gutter,
+                false,
+                0.0,
+                DiffDials::shipped(),
+                page_endpoints(&snapshot, 0, 4),
+                None,
+                None,
+            );
+            let mut screen = TermScreen::new(4, 60);
+            screen.feed(&bytes[..find(&bytes, b"\x1b_").unwrap_or(bytes.len())]);
+            let row: String = screen.row(0).iter().map(|cell| cell.ch).collect();
+            let bars: Vec<BarCommand> = decode_stream(&bytes)
+                .into_iter()
+                .filter_map(|command| match command {
+                    Command::Bar(bar) => Some(bar),
+                    _ => None,
+                })
+                .collect();
+            (row, bars)
+        };
+
+        let ((plain_row, plain_bars), (blamed_row, blamed_bars)) = (page(&gutter), page(&blamed));
+        assert!(!plain_bars.is_empty(), "the gutter draws its separator");
+        let (surfaces, rest): (Vec<_>, Vec<_>) =
+            blamed_bars.into_iter().partition(|bar| bar.width == 281);
+        let shifted_row: String = " "
+            .repeat(18)
+            .chars()
+            .chain(plain_row.chars().take(42))
+            .collect();
+        let shifted_bars: Vec<BarCommand> = plain_bars
+            .into_iter()
+            .map(|bar| BarCommand {
+                x: bar.x + 18 * 16,
+                ..bar
+            })
+            .collect();
+        let surface = BarCommand {
+            x: 0,
+            y: 0,
+            width: 281,
+            height: 64,
+            color: [1, 2, 3],
+            occludes: false,
+            hatch: None,
+            radius: 0,
+            corners: 0,
+        };
+        assert_eq!(
+            (blamed_row, surfaces, rest),
+            (shifted_row, vec![surface], shifted_bars),
+            "the text and the gutter past the column, and one surface bar left of them",
+        );
+    }
+
+    /// A decorations refill of a blamed page whose numberless gutter marks a
+    /// diagnostic with a letter writes the letter past the column, into the
+    /// cells nothing reads, and carries the column's surface.
+    #[test]
+    fn a_blamed_numberless_decorations_refill_carries_the_surface() {
+        use super::{render_page_decorations, PageBlame};
+        use crate::render::{blame::BlameColors, editor::RowSeverity};
+        use stoatty_protocol::command::decode_stream;
+
+        let (snapshot, numbered, fallback) = rich_gutter_page();
+        let gutter = PageGutter::new(
+            false,
+            Arc::new(RowSeverity::for_rows([(1, DiagnosticSeverity::ERROR)])),
+            numbered.theme.clone(),
+            numbered.rich.clone(),
+            None,
+        )
+        .blamed(Some(PageBlame {
+            colors: BlameColors { surface: [1, 2, 3] },
+        }));
+        let bytes = render_page_decorations(
+            &snapshot,
+            1,
+            0,
+            60,
+            4,
+            &gutter,
+            false,
+            fallback,
+            0.0,
+            DiffDials::shipped(),
+            None,
+        );
+
+        let surfaces: Vec<_> = decode_stream(&bytes)
+            .into_iter()
+            .filter_map(|command| match command {
+                Command::Bar(bar) if bar.width == 281 => {
+                    Some((bar.x, bar.y, bar.height, bar.color))
+                },
+                _ => None,
+            })
+            .collect();
+        assert_eq!(surfaces, [(0, 0, 64, [1, 2, 3])]);
+    }
+
     /// The bytes of an unfocused live paint of [`PAGE_DOC`] and of the page that
     /// stands in for it, as one `(live, page)` pair for each of `top_rows`.
     ///
@@ -1571,6 +1804,7 @@ mod tests {
                     0,
                     &[],
                     false,
+                    None,
                     None,
                 );
                 editor.scroll_row = saved;
@@ -1686,6 +1920,7 @@ mod tests {
             &[],
             false,
             None,
+            None,
         );
         let expected = serialize_buffer(&expected);
 
@@ -1780,6 +2015,7 @@ mod tests {
             0,
             &[],
             false,
+            None,
             None,
         );
         let expected = serialize_buffer(&expected);

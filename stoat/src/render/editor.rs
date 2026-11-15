@@ -14,6 +14,7 @@ use crate::{
     editor_state::EditorState,
     minimap::color_to_rgb,
     render::{
+        blame::{self, BlameColors},
         conflict_view::render_conflict_view,
         paint::{dim_rgb, floor_style, style_rgb},
         review::{
@@ -143,6 +144,7 @@ pub(crate) fn render_editor(
         &[],
         false,
         None,
+        None,
     );
 }
 
@@ -166,6 +168,10 @@ pub(crate) fn render_editor(
 /// `k` steps from the focused cursor across the whole stack, focused or not.
 /// With no step origin, a focused diff view counts buffer lines from its
 /// cursor line, and an unfocused one paints absolute numbers.
+///
+/// With `blame`, a plain editor shows the Blame Column left of its gutter in
+/// those colors, when the pane has the room that [`blame::blame_cells`] asks
+/// for. The column moves the text right, and `gutter_width` counts it.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn render_editor_with_overlay(
     editor: &mut EditorState,
@@ -192,6 +198,7 @@ pub(crate) fn render_editor_with_overlay(
     reload_flashes: &[ReloadFlash],
     decorations_only: bool,
     step_origin: Option<i64>,
+    blame: Option<&BlameColors>,
 ) {
     editor.viewport_rows = Some(inner.height as u32);
     editor.cursor_screen_cell = None;
@@ -275,7 +282,12 @@ pub(crate) fn render_editor_with_overlay(
         }
     };
 
-    let after_gutter = inner.width.saturating_sub(measured_gutter_w);
+    let blame_w = blame.map_or(0, |_| blame::blame_cells(inner.width, measured_gutter_w));
+
+    let after_gutter = inner
+        .width
+        .saturating_sub(measured_gutter_w)
+        .saturating_sub(blame_w);
     let minimap_cols = if minimap_enabled && after_gutter >= MINIMAP_MIN_PANE_COLS {
         MINIMAP_STRIP_COLS
     } else {
@@ -355,11 +367,33 @@ pub(crate) fn render_editor_with_overlay(
 
     let severity_version = diagnostic_info.map_or(0, |(path, set)| set.version_for(path));
 
+    let gutter_area = Rect {
+        x: inner.x + blame_w,
+        width: inner.width - blame_w,
+        ..inner
+    };
+    if let Some(colors) = blame.filter(|_| blame_w > 0) {
+        let colors = match chrome.gutter_bg {
+            Some(bg) => colors.dim(bg, dim),
+            None => colors.clone(),
+        };
+        blame::paint_blame_surface(
+            Rect {
+                width: blame_w,
+                ..inner
+            },
+            (end_row - editor.scroll_row) as u16,
+            &colors,
+            buf,
+            scene.as_deref_mut(),
+        );
+    }
+
     let gutter_w = if line_numbers != LineNumbers::Off {
         draw_line_number_gutter(
             &snapshot,
             editor.scroll_row,
-            inner,
+            gutter_area,
             end_row,
             row_severity,
             theme,
@@ -378,16 +412,14 @@ pub(crate) fn render_editor_with_overlay(
             &snapshot,
             row_severity,
             editor.scroll_row,
-            inner,
+            gutter_area,
             end_row,
             severity_version,
             &mut editor.diagnostic_rows_cache,
         );
         let column = Rect {
-            x: inner.x,
-            y: inner.y,
             width: 1,
-            height: inner.height,
+            ..gutter_area
         };
         paint_severity_column(
             rows,
@@ -410,15 +442,17 @@ pub(crate) fn render_editor_with_overlay(
         "painted gutter width matches the measured width the wrap used",
     );
 
-    // Inset the text rect by the gutter, and record the width so click-to-offset
-    // subtracts the same shift. Written after the `row_severity` borrow ends.
+    // Inset the text rect by the column and the gutter, and record the width so
+    // click-to-offset subtracts the same shift. Written after the
+    // `row_severity` borrow ends.
+    let text_inset = blame_w + gutter_w;
     let inner = Rect {
-        x: inner.x + gutter_w,
+        x: inner.x + text_inset,
         y: inner.y,
-        width: inner.width.saturating_sub(gutter_w),
+        width: inner.width.saturating_sub(text_inset),
         height: inner.height,
     };
-    editor.gutter_width = gutter_w;
+    editor.gutter_width = text_inset;
 
     let inner = reserve_minimap_strip(editor, inner, minimap_enabled);
     editor.text_rect = Some(inner);
@@ -529,7 +563,7 @@ pub(crate) fn render_editor_with_overlay(
                         return None;
                     }
                     let offset =
-                        display_cell_to_offset(&snapshot, editor.scroll_row, gutter_w, col, row)?;
+                        display_cell_to_offset(&snapshot, editor.scroll_row, text_inset, col, row)?;
                     diagnostic_at_offset(cache, offset, buffer_snapshot)
                 });
                 (diagnostic_at_offset(cache, cursor, buffer_snapshot), hover)
@@ -562,7 +596,7 @@ pub(crate) fn render_editor_with_overlay(
                     .min(u32::from(content_area.height)) as u16;
                 let anchor_col = content_area
                     .x
-                    .saturating_add(gutter_w)
+                    .saturating_add(text_inset)
                     .saturating_add(rel_col);
                 let anchor_row = content_area.y.saturating_add(rel_row);
                 if render_diagnostic_popover(
@@ -1527,6 +1561,9 @@ pub(crate) struct ResolvedChrome {
     pub(crate) diff_marks: DiffMarkColors,
     /// Background the rich gutter fills, and what its foregrounds dim toward.
     pub(crate) gutter_bg: Option<[u8; 3]>,
+    /// The Blame Column's colors. `None` when the theme holds no RGB surface,
+    /// and then a blamed pane shows no column.
+    pub(crate) blame: Option<BlameColors>,
 }
 
 impl ResolvedChrome {
@@ -1537,6 +1574,7 @@ impl ResolvedChrome {
             severity: severity_colors(theme),
             diff_marks: DiffMarkColors::resolve(theme),
             gutter_bg: gutter_background(theme, fallback_style),
+            blame: BlameColors::resolve(theme),
         }
     }
 }
@@ -3159,6 +3197,7 @@ mod tests {
     use stoat_action::{ExtendToLineEnd, MoveDown, MoveRight, OpenFile, OpenFileFinder};
     use stoat_config::{LineNumbers, WrapMode};
     use stoat_text::{Bias, Point, SelectionGoal};
+    use stoatty_protocol::command::{decode_stream, Command};
 
     /// Overlapping spans of mixed severity, so the sweep has to keep the worst
     /// one inside the overlap and hand each row back to the one still open once
@@ -3481,6 +3520,7 @@ mod tests {
             &[],
             false,
             None,
+            None,
         );
 
         let italic: String = (0..area.width)
@@ -3559,6 +3599,7 @@ mod tests {
                 0,
                 &[],
                 false,
+                None,
                 None,
             );
             (0..area.width).map(|x| buf[(x, 1)].clone()).collect()
@@ -3656,6 +3697,7 @@ mod tests {
                 0,
                 &[],
                 false,
+                None,
                 None,
             );
             buf
@@ -4062,6 +4104,7 @@ mod tests {
             &[],
             false,
             None,
+            None,
         );
         (0..area.width).map(|x| buf[(x, 0)].clone()).collect()
     }
@@ -4184,6 +4227,7 @@ mod tests {
             &[],
             false,
             None,
+            None,
         );
 
         let washed: Vec<bool> = (0..4).map(|x| Some(buf[(x, 0)].bg) == sel_bg).collect();
@@ -4226,6 +4270,7 @@ mod tests {
             0,
             &[],
             false,
+            None,
             None,
         );
 
@@ -4366,6 +4411,7 @@ mod tests {
             0,
             &[],
             false,
+            None,
             None,
         );
         let snapshot = editor.display_map.snapshot();
@@ -4542,6 +4588,7 @@ mod tests {
                 &[],
                 false,
                 None,
+                None,
             );
         }
 
@@ -4590,6 +4637,7 @@ mod tests {
             0,
             &[],
             false,
+            None,
             None,
         );
         editor
@@ -4756,6 +4804,7 @@ mod tests {
             &[],
             false,
             None,
+            None,
         );
         editor
             .gutter_geometry_cache
@@ -4839,6 +4888,7 @@ mod tests {
             0,
             &[],
             false,
+            None,
             None,
         );
         String::from_utf8_lossy(scene.bytes()).into_owned()
@@ -4997,6 +5047,7 @@ mod tests {
             &[],
             false,
             None,
+            None,
         );
         buf
     }
@@ -5040,6 +5091,7 @@ mod tests {
             0,
             &[],
             false,
+            None,
             None,
         );
         let rect = editor.minimap_rect;
@@ -5189,6 +5241,7 @@ mod tests {
             0,
             &[],
             false,
+            None,
             None,
         );
         let glyph_x = editor.gutter_width - 2;
@@ -5667,6 +5720,7 @@ mod tests {
             &[],
             false,
             None,
+            None,
         );
 
         // Row 1 is the line the trailing newline opens, and the gutter takes
@@ -5730,6 +5784,7 @@ mod tests {
             0,
             &[],
             false,
+            None,
             None,
         );
 
@@ -6911,5 +6966,207 @@ mod tests {
         }
         dispatch(&mut h.stoat, &ExtendToLineEnd);
         h.assert_snapshot("selection_spanning_fold");
+    }
+
+    /// The Blame Column moves a blamed pane's text 18 cells right, and the
+    /// gutter width counts it.
+    #[test]
+    fn the_blame_column_moves_the_text_right() {
+        let mut h = blame_column_harness(120);
+        let (_, gutter, text_x) = text_start(&mut h);
+        blame_on(&mut h);
+        let (_, blamed_gutter, blamed_text_x) = text_start(&mut h);
+        assert_eq!((blamed_gutter, blamed_text_x), (gutter + 18, text_x + 18));
+    }
+
+    /// The column's surface is one bar at the pane's left, 281 sixteenths wide
+    /// over the file's three rows, in ermine's column color, and the gutter's
+    /// own bars move 18 cells right.
+    #[test]
+    fn the_blame_column_surface_is_one_bar_left_of_the_gutter() {
+        let mut h = blame_column_harness(120);
+        let gutter = lane_bars(&h);
+        assert!(!gutter.is_empty(), "the gutter draws its separator");
+        blame_on(&mut h);
+        let (area, _, _) = text_start(&mut h);
+        let (surfaces, rest): (Vec<_>, Vec<_>) = lane_bars(&h)
+            .into_iter()
+            .partition(|&(_, _, width, _, _)| width == 281);
+        let moved: Vec<_> = gutter
+            .into_iter()
+            .map(|(x, y, width, height, color)| (x + 18 * 16, y, width, height, color))
+            .collect();
+        let surface = (
+            (area.x * 16) as i16,
+            (area.y * 16) as i16,
+            281,
+            48,
+            [0x14, 0x16, 0x1a],
+        );
+        assert_eq!(
+            (surfaces, rest),
+            (vec![surface], moved),
+            "one surface bar at the pane's left, and the gutter's bars 18 cells right",
+        );
+    }
+
+    /// A press on a text cell of a blamed pane lands on the offset that the
+    /// cell 18 columns to its left gave before the column turned on.
+    #[test]
+    fn a_press_past_the_blame_column_lands_on_the_text_under_it() {
+        let mut h = blame_column_harness(120);
+        let (area, _, text_x) = text_start(&mut h);
+        let (editor_id, _) = h.stoat.focused_editor_ids().expect("focused editor");
+        let col = text_x - area.x + 3;
+        let before = crate::mouse::editor_screen_to_offset(&mut h.stoat, editor_id, area, col, 1);
+        blame_on(&mut h);
+        let after =
+            crate::mouse::editor_screen_to_offset(&mut h.stoat, editor_id, area, col + 18, 1);
+        assert_eq!([before, after], [Some(17), Some(17)], "the b of beta");
+    }
+
+    /// A blamed pane wraps its lines at the width its text keeps past the
+    /// column and the gutter, less the cell the cursor takes past a line's end.
+    #[test]
+    fn a_blamed_pane_wraps_at_its_text_width() {
+        let mut h = blame_column_harness(120);
+        blame_on(&mut h);
+        let editor = action_handlers::focused_editor_mut(&mut h.stoat).expect("focused editor");
+        let text = editor.text_rect.expect("the text painted");
+        assert_eq!(
+            editor.display_map.wrap_width(),
+            Some(u32::from(text.width) - 1)
+        );
+    }
+
+    /// With line numbers off, a blamed pane's severity column and the popover
+    /// of the diagnostic under the cursor move 18 cells right, past the column.
+    #[test]
+    fn the_severity_column_and_its_popover_move_past_the_blame_column() {
+        let mut h = blame_column_harness(120);
+        h.stoat.settings.editor_line_numbers = Some(LineNumbers::Off);
+        h.seed_diagnostics(
+            "/repo/a.rs",
+            vec![Diagnostic {
+                range: Range::new(Position::new(0, 0), Position::new(0, 2)),
+                severity: Some(DiagnosticSeverity::ERROR),
+                message: "expected an item".to_owned(),
+                ..Default::default()
+            }],
+        );
+        h.stoat.render();
+        let (marks, popovers) = (lane_bars(&h), popover_lefts(&h));
+        assert_eq!(
+            (marks.len(), popovers.len()),
+            (1, 1),
+            "one mark and one popover"
+        );
+
+        blame_on(&mut h);
+        let rest: Vec<_> = lane_bars(&h)
+            .into_iter()
+            .filter(|&(_, _, width, _, _)| width != 281)
+            .collect();
+        let moved: Vec<_> = marks
+            .into_iter()
+            .map(|(x, y, width, height, color)| (x + 18 * 16, y, width, height, color))
+            .collect();
+        assert_eq!(
+            (rest, popover_lefts(&h)),
+            (moved, vec![popovers[0] + 18]),
+            "the mark and the popover 18 cells right",
+        );
+    }
+
+    /// A pane with no room for the column, its gutter, and 20 text cells keeps
+    /// its text where it was while it blames.
+    #[test]
+    fn a_narrow_pane_shows_no_blame_column() {
+        let mut h = blame_column_harness(40);
+        let before = text_start(&mut h);
+        blame_on(&mut h);
+        let blames = {
+            let ws = h.stoat.active_workspace();
+            ws.panes.pane(ws.panes.focus()).blame
+        };
+        assert_eq!((text_start(&mut h), blames), (before, true));
+    }
+
+    /// A 24-row window `width` cells wide over `a.rs` of a repository at
+    /// `/repo`, painted with its Blame Column off.
+    ///
+    /// The minimap stays off, so the pane's lane holds the column and the
+    /// gutter alone.
+    fn blame_column_harness(width: u16) -> crate::test_harness::TestHarness {
+        let mut h = crate::test_harness::TestHarness::with_size(width, 24);
+        h.stoat.minimap_override = Some(false);
+        let text = "fn alpha() {}\nfn beta() {}\n";
+        h.seed_linear_history("/repo", &[("c1", "one", &[("a.rs", text)])]);
+        h.stoat.active_workspace_mut().git_root = PathBuf::from("/repo");
+        h.fake_fs().insert_file("/repo/a.rs", text);
+        h.open_file(std::path::Path::new("/repo/a.rs"));
+        h.settle();
+        h.stoat.render();
+        h
+    }
+
+    /// Turn the focused pane's Blame Column on, and paint.
+    fn blame_on(h: &mut crate::test_harness::TestHarness) {
+        h.type_keys("space h a");
+        h.settle();
+        h.stoat.render();
+    }
+
+    /// The focused pane's area, its editor's gutter width, and the column its
+    /// text starts at.
+    fn text_start(h: &mut crate::test_harness::TestHarness) -> (Rect, u16, u16) {
+        let area = {
+            let ws = h.stoat.active_workspace();
+            ws.panes.pane(ws.panes.focus()).area
+        };
+        let editor = action_handlers::focused_editor_mut(&mut h.stoat).expect("focused editor");
+        let text = editor.text_rect.expect("the text painted");
+        (area, editor.gutter_width, text.x)
+    }
+
+    /// The bars in the focused pane's lane, each as its place, its size, and
+    /// its color.
+    fn lane_bars(h: &crate::test_harness::TestHarness) -> Vec<(i16, i16, u16, u16, [u8; 3])> {
+        lane_commands(h)
+            .into_iter()
+            .flat_map(|command| match command {
+                Command::Bar(bar) => vec![(bar.x, bar.y, bar.width, bar.height, bar.color)],
+                Command::Bars(group) => group
+                    .bars
+                    .into_iter()
+                    .map(|(x, y, width, height)| (x, y, width, height, group.color))
+                    .collect(),
+                _ => Vec::new(),
+            })
+            .collect()
+    }
+
+    /// The left cell of each popover in the focused pane's lane.
+    fn popover_lefts(h: &crate::test_harness::TestHarness) -> Vec<u16> {
+        lane_commands(h)
+            .into_iter()
+            .filter_map(|command| match command {
+                Command::Popover(popover) => Some(popover.left),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The commands in the focused pane's lane, as the last paint left them.
+    fn lane_commands(h: &crate::test_harness::TestHarness) -> Vec<Command> {
+        let index = {
+            let ws = h.stoat.active_workspace();
+            ws.panes.pane(ws.panes.focus()).index
+        };
+        let lane = h
+            .stoat
+            .apc_scene
+            .lane_bytes(crate::render::content_lane(index));
+        decode_stream(lane)
     }
 }
