@@ -1425,6 +1425,13 @@ pub struct Stoat {
     /// `(buffer, version, cursor offset)` the document-highlight trigger last
     /// requested for, so an unchanged tick does not re-request.
     pub(crate) last_document_highlight_key: Option<(BufferId, u64, usize)>,
+    /// The timer that opens the Blame Card once the cursor rests on a line of a
+    /// blamed pane, armed by [`action_handlers::blame::sync_card`] and polled by
+    /// [`action_handlers::blame::pump_rest`].
+    pub(crate) blame_rest: Pending<action_handlers::blame::RestKey>,
+    /// The rest key the Blame Card timer last started for, so an event that
+    /// keeps the key keeps the timer.
+    pub(crate) last_blame_rest: Option<action_handlers::blame::RestKey>,
     /// Last diagnostic `result_id` the server returned per buffer, sent as
     /// `previous_result_id` on the next pull so the server may answer Unchanged.
     pub(crate) pull_diagnostic_result_ids: std::collections::HashMap<BufferId, String>,
@@ -2822,6 +2829,8 @@ impl Stoat {
             last_inlay_hint_key: None,
             pending_document_highlight_request: Pending::default(),
             last_document_highlight_key: None,
+            blame_rest: Pending::default(),
+            last_blame_rest: None,
             pull_diagnostic_result_ids: std::collections::HashMap::new(),
             pending_pull_diagnostics: std::collections::HashMap::new(),
             last_pull_diagnostic_key: std::collections::HashMap::new(),
@@ -9867,6 +9876,7 @@ impl Stoat {
             workspaces[*active_workspace].pump_blame(executor, git_host, redraw_notify)
         };
         let blame_card = action_handlers::blame::pump_card(self);
+        let blame_rest = action_handlers::blame::pump_rest(self);
 
         let changed_file_jump = action_handlers::movement::pump_changed_file_jump(self);
         let diff_wants = action_handlers::review::pump_diff_wants(self);
@@ -9898,6 +9908,7 @@ impl Stoat {
             || commit_wait
             || blame
             || blame_card
+            || blame_rest
             || code_search
             || changed_file_jump
             || diff_wants

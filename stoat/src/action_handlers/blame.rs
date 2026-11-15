@@ -8,8 +8,22 @@ use crate::{
     pane::{FocusTarget, View},
     render::editor,
 };
-use std::sync::Arc;
+use std::{sync::Arc, time::Duration};
 use stoat_scheduler::Task;
+
+/// How long the cursor rests on a committed line of a blamed pane before the
+/// Blame Card opens by itself.
+///
+/// The BlameFlow board opens the card "after a moment" and names no setting,
+/// so the wait is a constant.
+const BLAME_CARD_REST: Duration = Duration::from_millis(500);
+
+/// The rest the card's timer waits on, as the focused editor, its cursor's
+/// buffer row, and its buffer's version.
+///
+/// A move inside one line keeps the key, and a move to another line or an
+/// edit changes it.
+pub(crate) type RestKey = (EditorId, u32, u64);
 
 /// Show or hide the Blame Column of the focused split pane.
 ///
@@ -89,12 +103,40 @@ pub(super) fn close_card(stoat: &mut Stoat) -> UpdateEffect {
     UpdateEffect::Redraw
 }
 
+/// Keep the Blame Card in step with the cursor after an event.
+///
+/// The card closes once its line is gone from under the cursor. The rest
+/// timer starts again whenever the cursor's line or its text changes, so the
+/// card opens by itself after the cursor rests on a line for
+/// [`BLAME_CARD_REST`].
+pub(crate) fn sync_card(stoat: &mut Stoat) {
+    close_stale_card(stoat);
+    arm_rest(stoat);
+}
+
+/// Open the Blame Card once the cursor has rested on its line for
+/// [`BLAME_CARD_REST`], and answer whether a card opened.
+///
+/// A timer whose rest the cursor has since left opens nothing, and so does a
+/// rest while a card shows. A rest on an uncommitted line, or before the
+/// blame lands, opens nothing and sets no status.
+pub(crate) fn pump_rest(stoat: &mut Stoat) -> bool {
+    let Some(key) = stoat.blame_rest.poll(&stoat.redraw_notify) else {
+        return false;
+    };
+    if stoat.last_blame_rest != Some(key) || stoat.blame_card.is_some() {
+        return false;
+    }
+    open_card(stoat, false);
+    stoat.blame_card.is_some()
+}
+
 /// Close the Blame Card once its line is gone from under the cursor.
 ///
 /// The card stays while no modal is open, the focused pane still blames, the
 /// cursor stays on the card's row, and the card's commit still holds that row.
 /// Any other state closes it.
-pub(crate) fn sync_card(stoat: &mut Stoat) {
+fn close_stale_card(stoat: &mut Stoat) {
     let Some(card) = stoat.blame_card.as_ref() else {
         return;
     };
@@ -107,6 +149,47 @@ pub(crate) fn sync_card(stoat: &mut Stoat) {
     if !holds {
         stoat.blame_card = None;
     }
+}
+
+/// Start the rest timer when the rest key of the cursor's line changed.
+///
+/// A state with no key drops the timer. A key that did not change keeps the
+/// running timer, or none once it fired, so a card closed with `Escape` stays
+/// closed until the cursor leaves its line or the buffer changes.
+fn arm_rest(stoat: &mut Stoat) {
+    let Some(key) = rest_key(stoat) else {
+        stoat.blame_rest.clear();
+        stoat.last_blame_rest = None;
+        return;
+    };
+    if stoat.last_blame_rest == Some(key) {
+        return;
+    }
+
+    stoat.last_blame_rest = Some(key);
+    let executor = stoat.executor.clone();
+    let task = stoat.spawn_woken(async move {
+        executor.timer(BLAME_CARD_REST).await;
+        key
+    });
+    stoat.blame_rest.arm(task);
+}
+
+/// The rest key of the cursor's line, or `None` unless the focused pane
+/// blames in normal mode with no modal open.
+fn rest_key(stoat: &Stoat) -> Option<RestKey> {
+    if stoat.focused_mode() != "normal" || keymap_state::active_modal(stoat).is_some() {
+        return None;
+    }
+    let (editor, _, row) = blamed_cursor(stoat)?;
+    let version = stoat
+        .active_workspace()
+        .editors
+        .get(editor)?
+        .display_map
+        .buffer_snapshot()
+        .version();
+    Some((editor, row, version))
 }
 
 /// Fill the Blame Card's details once their load lands, and keep them in the
@@ -192,6 +275,7 @@ fn card_hints(stoat: &Stoat) -> Vec<(String, String)> {
 
 #[cfg(test)]
 mod tests {
+    use super::BLAME_CARD_REST;
     use crate::{
         action_handlers::dispatch,
         app::Stoat,
@@ -200,7 +284,10 @@ mod tests {
         pane::View,
         test_harness::{CommitSpec, TestHarness},
     };
-    use std::path::{Path, PathBuf};
+    use std::{
+        path::{Path, PathBuf},
+        time::Duration,
+    };
     use stoat_action::{BlameCard, ToggleBlame};
 
     /// `space h a` sets the flag of the focused pane, and a second press
@@ -418,6 +505,94 @@ mod tests {
         assert_eq!(details, Some((1, 1, 0)));
     }
 
+    /// A rest of 500 ms on a committed line opens the card for that line, and
+    /// a rest a millisecond short of that opens nothing.
+    #[test]
+    fn a_rest_on_a_committed_line_opens_the_card() {
+        let mut h = blamed_repo("one\ntwo\n");
+        h.type_keys("j");
+        h.advance_clock(Duration::from_millis(499));
+        let before = card_line(&h);
+        h.advance_clock(Duration::from_millis(1));
+        assert_eq!((before, card_line(&h)), (None, Some(("c2".to_string(), 1))));
+    }
+
+    /// An edit starts the rest again, so a card closed with `Escape` opens
+    /// again a rest after an edit of its line that an undo takes back.
+    #[test]
+    fn an_edit_starts_the_rest_again() {
+        let mut h = blamed_repo("one\ntwo\n");
+        h.advance_clock(BLAME_CARD_REST);
+        h.type_keys("escape");
+        h.type_keys("> u");
+        h.advance_clock(BLAME_CARD_REST);
+        assert_eq!(card_line(&h), Some(("c1".to_string(), 0)));
+    }
+
+    /// A rest with a modal open opens no card, though the mode stays normal.
+    #[test]
+    fn a_rest_under_a_modal_opens_nothing() {
+        let mut h = blamed_repo("one\ntwo\n");
+        h.type_keys("space h t");
+        h.advance_clock(BLAME_CARD_REST);
+        assert_eq!((h.stoat.git_status.is_some(), card_line(&h)), (true, None));
+    }
+
+    /// A move to another line starts the rest again, so the card opens a whole
+    /// rest after the last move.
+    #[test]
+    fn a_move_starts_the_rest_again() {
+        let mut h = blamed_repo("one\ntwo\n");
+        h.advance_clock(Duration::from_millis(300));
+        h.type_keys("j");
+        h.advance_clock(Duration::from_millis(300));
+        let early = card_line(&h);
+        h.advance_clock(Duration::from_millis(200));
+        assert_eq!((early, card_line(&h)), (None, Some(("c2".to_string(), 1))));
+    }
+
+    /// A card closed with `Escape` stays closed while the cursor rests on its
+    /// line, and a rest after the cursor leaves the line and comes back opens
+    /// it again.
+    #[test]
+    fn a_card_closed_with_escape_stays_closed_until_the_cursor_moves() {
+        let mut h = blamed_repo("one\ntwo\n");
+        h.advance_clock(BLAME_CARD_REST);
+        let opened = card_line(&h);
+        h.type_keys("escape");
+        h.advance_clock(BLAME_CARD_REST);
+        let closed = card_line(&h);
+        h.type_keys("j k");
+        h.advance_clock(BLAME_CARD_REST);
+
+        let line_one = Some(("c1".to_string(), 0));
+        assert_eq!(
+            (opened, closed, card_line(&h)),
+            (line_one.clone(), None, line_one),
+        );
+    }
+
+    /// A rest on an uncommitted line opens no card and sets no status.
+    #[test]
+    fn a_rest_on_an_uncommitted_line_opens_nothing() {
+        let mut h = blamed_repo("one\nTWO\n");
+        h.type_keys("j");
+        h.advance_clock(BLAME_CARD_REST);
+        assert_eq!(
+            (card_line(&h), h.stoat.pending_message.clone()),
+            (None, None)
+        );
+    }
+
+    /// A rest in insert mode opens no card.
+    #[test]
+    fn a_rest_in_insert_mode_opens_nothing() {
+        let mut h = blamed_repo("one\ntwo\n");
+        h.type_keys("i");
+        h.advance_clock(BLAME_CARD_REST);
+        assert_eq!((h.stoat.focused_mode(), card_line(&h)), ("insert", None));
+    }
+
     /// In a pane that does not blame, `K` extends the selection up, as the
     /// plain normal keys bind it.
     #[test]
@@ -455,6 +630,14 @@ mod tests {
         h.type_keys("space h a");
         h.settle();
         h
+    }
+
+    /// The commit and the row of the open card.
+    fn card_line(h: &TestHarness) -> Option<(String, u32)> {
+        h.stoat
+            .blame_card
+            .as_ref()
+            .map(|card| (card.commit.info.sha.clone(), card.row))
     }
 
     /// Whether the focused split pane holds the blame flag.
