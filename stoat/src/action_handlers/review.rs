@@ -9,7 +9,7 @@ use crate::{
     commit_list::Preview,
     diff_cache::{DiffCache, DiffCacheKey},
     diff_map::{hunk_base_lines, line_starts},
-    display_map::{syntax_theme::SyntaxStyles, DisplaySnapshot},
+    display_map::{syntax_theme::SyntaxStyles, DisplaySnapshot, FoldScope, ScopeMark},
     editor_state::EditorId,
     git_jobs::{self, GitJob, GitLanding, GitWork},
     host::GitRepo,
@@ -40,7 +40,7 @@ use std::{
     },
 };
 use stoat_language::{Language, LanguageRegistry};
-use stoat_text::SelectionGoal;
+use stoat_text::{Rope, SelectionGoal};
 use tracing::field;
 
 /// Cache key matching what [`populate_diff_cache`] writes, so a scan reads back
@@ -1861,6 +1861,9 @@ pub(super) fn changed_or_whole(
 /// A pair whose two sides are equal is skipped, so a caller that reports a
 /// path without a content change contributes nothing.
 ///
+/// Each chunk carries the Scope of its first changed line, which costs one
+/// parse of each buffer whose language has an outline query.
+///
 /// Takes the language registry directly rather than `&Stoat` so it runs
 /// inside the off-loop scan closures, including the commit-preview build in
 /// the sibling `commits` module.
@@ -1892,7 +1895,66 @@ pub(super) fn build_document_from_changes(
     if doc.order.is_empty() {
         return None;
     }
+    attach_chunk_scopes(&mut doc);
     Some(doc)
+}
+
+/// Set the Scope of each chunk of `doc`, the chain of items that hold the
+/// chunk's first changed line.
+///
+/// A change reads the buffer's tree, and a pure removal reads the base's. The
+/// buffer parses with no memo, since the document's memo holds bases and a
+/// buffer tree filed there evicts a base that a later diff reads. The base tree
+/// is the one the diff filed in that memo.
+fn attach_chunk_scopes(doc: &mut DiffDocument) {
+    let memo = doc.tree_cache.clone();
+    let DiffDocument { files, chunks, .. } = doc;
+    for file in files.iter() {
+        let Some(language) = file.language.as_ref() else {
+            continue;
+        };
+        let Some(query) = language.outline_query() else {
+            continue;
+        };
+        let buffer =
+            stoat_language::structural_diff::parse_memoized(language, &file.buffer_text, None)
+                .map(|tree| (tree, Rope::from(file.buffer_text.as_str())));
+        let mut base = None;
+
+        for id in &file.chunks {
+            let Some(chunk) = chunks.get_mut(id) else {
+                continue;
+            };
+            let (row, parsed) = match chunk.buffer_line_range.is_empty() {
+                false => (chunk.buffer_line_range.start, buffer.as_ref()),
+                true => {
+                    let base = base.get_or_insert_with(|| {
+                        stoat_language::structural_diff::parse_memoized(
+                            language,
+                            &file.base_text,
+                            Some(&memo),
+                        )
+                        .map(|tree| (tree, Rope::from(file.base_text.as_str())))
+                    });
+                    (chunk.base_line_range.start, base.as_ref())
+                },
+            };
+            let Some((tree, rope)) = parsed else {
+                continue;
+            };
+
+            let byte = crate::diff_changes::first_text_byte(rope, row);
+            let segments = stoat_language::scope_chain(query, tree.root_node(), rope, byte);
+            if !segments.is_empty() {
+                chunk.scope = Some(Arc::new(FoldScope {
+                    segments,
+                    split: None,
+                    end_of_file: false,
+                    mark: ScopeMark::None,
+                }));
+            }
+        }
+    }
 }
 
 /// Bake tree-sitter spans for both sides of every file the session holds.
@@ -5082,6 +5144,60 @@ mod tests {
             memo_len(&doc),
             2,
             "the base side goes through the memo and the buffer side does not",
+        );
+    }
+
+    /// Each chunk carries the Scope of its first changed line. A change inside
+    /// a function names the function, a removal names it from the parent's
+    /// text, and a change at the top level names nothing. A changed line that
+    /// opens a function inside an impl names both, since the chain reads the
+    /// line's first non-blank byte.
+    #[test]
+    fn each_chunk_carries_the_scope_of_its_first_change() {
+        let changes = vec![
+            (
+                PathBuf::from("a.rs"),
+                "fn alpha() {\n    1;\n}\n".into(),
+                "fn alpha() {\n    2;\n}\n".into(),
+            ),
+            (
+                PathBuf::from("b.rs"),
+                "// head\nfn beta() {\n    1;\n    2;\n}\n".into(),
+                "// head\nfn beta() {\n    1;\n}\n".into(),
+            ),
+            (PathBuf::from("c.rs"), "// one\n".into(), "// two\n".into()),
+            (
+                PathBuf::from("d.rs"),
+                "impl A {\n    fn gamma() {}\n}\n".into(),
+                "impl A {\n    fn gamma() { 1 }\n}\n".into(),
+            ),
+        ];
+        let doc =
+            build_document_from_changes(&LanguageRegistry::standard(), Path::new("/work"), changes)
+                .expect("four changed files build a document");
+
+        let scopes: Vec<Option<Vec<String>>> = doc
+            .files
+            .iter()
+            .map(|file| {
+                doc.chunks[&file.chunks[0]].scope.as_ref().map(|scope| {
+                    scope
+                        .segments
+                        .iter()
+                        .map(|segment| format!("{:?} {}", segment.keyword, segment.name))
+                        .collect()
+                })
+            })
+            .collect();
+        let chain = |segments: &[&str]| Some(segments.iter().map(|s| s.to_string()).collect());
+        assert_eq!(
+            scopes,
+            [
+                chain(&["Some(\"fn\") alpha"]),
+                chain(&["Some(\"fn\") beta"]),
+                None,
+                chain(&["Some(\"impl\") A", "Some(\"fn\") gamma"]),
+            ],
         );
     }
 }

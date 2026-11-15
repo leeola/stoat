@@ -535,7 +535,11 @@ fn paint_pinned_header(
 
 /// Emit a hairline along the top and the bottom edge of each header row in
 /// `rows`, in the inactive border color.
-fn emit_header_hairlines(rows: impl Iterator<Item = Rect>, theme: &Theme, scene: &mut ApcScene) {
+pub(crate) fn emit_header_hairlines(
+    rows: impl Iterator<Item = Rect>,
+    theme: &Theme,
+    scene: &mut ApcScene,
+) {
     let Some(color) = style_rgb(theme.get(scope::UI_BORDER_INACTIVE).fg) else {
         return;
     };
@@ -567,7 +571,11 @@ fn emit_header_hairlines(rows: impl Iterator<Item = Rect>, theme: &Theme, scene:
 /// hunks. A count of zero takes no run. Where the tree pass refined a hunk,
 /// the count names the git hunks and then the structural ones. With no
 /// structural count to tell them from, the count names the hunks alone.
-fn header_runs(rel_path: &str, stats: ExcerptStats, theme: &Theme) -> Vec<(String, Style)> {
+pub(crate) fn header_runs(
+    rel_path: &str,
+    stats: ExcerptStats,
+    theme: &Theme,
+) -> Vec<(String, Style)> {
     let muted = theme.get(scope::UI_TEXT_MUTED);
     let bold = theme.get(scope::UI_TEXT).add_modifier(Modifier::BOLD);
     let (dir, name) = rel_path.split_at(rel_path.rfind('/').map_or(0, |slash| slash + 1));
@@ -611,7 +619,7 @@ fn header_runs(rel_path: &str, stats: ExcerptStats, theme: &Theme) -> Vec<(Strin
 ///
 /// Runs wider than the row start at its left column and clip at its right
 /// edge, so the start of the file's path stays in view.
-fn paint_header(buf: &mut Buffer, row: Rect, runs: &[(String, Style)], theme: &Theme) {
+pub(crate) fn paint_header(buf: &mut Buffer, row: Rect, runs: &[(String, Style)], theme: &Theme) {
     let fill = theme.get(scope::UI_SURFACE_RAISED);
     let end_x = row.x + row.width;
     for x in row.x..end_x {

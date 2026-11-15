@@ -13,6 +13,7 @@ use crate::{
     keymap::Keymap,
     keymap_state::{Flags, StoatKeymapState},
     lsp::pending::Pending,
+    render::commit_patch::{self, PatchRow},
     review_session::DiffDocument,
 };
 use std::sync::Arc;
@@ -32,6 +33,8 @@ pub(crate) struct CommitPreview {
     /// The patch, `None` while it builds and `Some(None)` for a commit with no
     /// diff to show.
     pub(crate) document: Option<Option<Arc<DiffDocument>>>,
+    /// The rows of the patch, built when the document lands.
+    pub(crate) rows: Vec<PatchRow>,
     /// The commit's file count and its added and removed lines, once the build
     /// lands.
     pub(crate) summary: Option<(usize, u32, u32)>,
@@ -61,6 +64,7 @@ pub(crate) fn open(stoat: &mut Stoat, commit: BlameCommit) {
         commit,
         parent: 0,
         document: None,
+        rows: Vec::new(),
         summary: None,
         scroll: 0,
         hints: footer_hints(&stoat.keymap),
@@ -106,6 +110,11 @@ pub(crate) fn pump(stoat: &mut Stoat) -> bool {
         let removed = files.iter().map(|file| file.deletions).sum();
         (files.len(), added, removed)
     });
+    preview.rows = loaded
+        .document
+        .as_ref()
+        .map(commit_patch::patch_rows)
+        .unwrap_or_default();
     preview.document = Some(loaded.document.map(Arc::new));
     true
 }

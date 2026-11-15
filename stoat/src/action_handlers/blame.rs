@@ -356,7 +356,7 @@ mod tests {
         lsp::hover::{HoverOutcome, HoverResponse},
         pane::View,
         register::Register,
-        render::commits,
+        render::commit_patch::PatchRow,
         test_fixture,
         test_harness::{CommitSpec, TestHarness},
     };
@@ -786,18 +786,44 @@ mod tests {
     }
 
     /// The scroll stops where the patch's last row meets the bottom of the 13
-    /// rows the patch shows in.
+    /// rows the patch shows in. The patch holds the file's header, its one
+    /// line of context, and its 40 added lines, so the last page starts at row
+    /// 29.
     #[test]
     fn the_preview_scroll_stops_at_the_patch_last_page() {
         let mut h = long_preview();
         h.type_keys("ctrl-d ctrl-d ctrl-d ctrl-d ctrl-d ctrl-d ctrl-d ctrl-d");
-        let last_page = h
-            .stoat
-            .commit_preview
-            .as_ref()
-            .and_then(|preview| preview.document.clone().flatten())
-            .map(|doc| commits::preview_row_count(&doc) - 13);
-        assert_eq!(preview_scroll(&h), last_page);
+        assert_eq!(preview_scroll(&h), Some(29));
+    }
+
+    /// The preview of a commit that edits two files heads the rows of each.
+    #[test]
+    fn the_preview_heads_each_file_of_the_commit() {
+        let mut h = blamed_history(
+            &[
+                ("c1", "one", &[("a.rs", "one\n"), ("b.rs", "b\n")]),
+                ("c2", "two", &[("a.rs", "one\ntwo\n"), ("b.rs", "b\nc\n")]),
+            ],
+            "one\ntwo\n",
+        );
+        h.type_keys("j enter");
+        h.settle();
+
+        let preview = h.stoat.commit_preview.as_ref().expect("the preview opened");
+        let doc = preview
+            .document
+            .clone()
+            .flatten()
+            .expect("the patch landed");
+        let headers: Vec<&str> = preview
+            .rows
+            .iter()
+            .filter_map(|row| match row {
+                PatchRow::Header { file } => Some(doc.files[*file].rel_path.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(headers, ["a.rs", "b.rs"]);
     }
 
     /// A wheel notch over the patch scrolls it three rows.

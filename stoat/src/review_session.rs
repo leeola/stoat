@@ -1,5 +1,6 @@
 use crate::{
     diff_map::BaseHighlights,
+    display_map::FoldScope,
     review::{
         extract_review_hunks_changeset, line_byte_offsets, split_lines, ReviewFileInput,
         ReviewHunk, ReviewRow,
@@ -38,6 +39,13 @@ pub(crate) struct ReviewChunk {
     pub buffer_byte_range: Range<usize>,
     #[allow(dead_code)]
     pub base_byte_range: Range<usize>,
+    /// The Scope of the chunk's first change, the items that hold that line in
+    /// the buffer text, or in the base text for a pure removal.
+    ///
+    /// `None` for a change at the top level and for a language with no outline
+    /// query. A document built from a commit's changes sets it, and any other
+    /// document leaves it `None`.
+    pub scope: Option<Arc<FoldScope>>,
 }
 
 #[derive(Clone)]
@@ -142,6 +150,7 @@ impl DiffDocument {
                     base_line_range,
                     buffer_byte_range,
                     base_byte_range,
+                    scope: None,
                 },
             );
             self.order.push(id);

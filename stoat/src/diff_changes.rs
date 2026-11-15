@@ -2695,7 +2695,7 @@ fn covers(outer: &Range<usize>, inner: &Range<usize>) -> bool {
 
 /// The byte of the first character on `row` of `rope` that is not whitespace,
 /// or the end of the row for a blank row.
-fn first_text_byte(rope: &Rope, row: u32) -> usize {
+pub(crate) fn first_text_byte(rope: &Rope, row: u32) -> usize {
     let row = row.min(rope.max_point().row);
     let start = rope.point_to_offset(Point::new(row, 0));
     let end = rope.point_to_offset(Point::new(row, rope.line_len(row)));

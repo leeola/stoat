@@ -5,6 +5,7 @@ pub(crate) mod chrome;
 pub(crate) mod code_action;
 pub(crate) mod code_search;
 pub(crate) mod command_palette;
+pub(crate) mod commit_patch;
 pub(crate) mod commit_picker;
 pub(crate) mod commit_preview;
 pub(crate) mod commits;

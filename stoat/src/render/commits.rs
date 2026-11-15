@@ -1418,7 +1418,7 @@ fn render_file_preview(
 /// A live scene draws a bar at the cell's left edge, and a plain terminal a
 /// left quarter block in the same color. A context line takes no mark. A moved
 /// line takes the moved color on either side, as the split diff's gutter does.
-fn paint_lane(
+pub(crate) fn paint_lane(
     kind: LineKind,
     side: &ReviewSide,
     theme: &crate::theme::Theme,
@@ -1455,10 +1455,12 @@ fn paint_lane(
     }
 }
 
-/// What one row of the commits view's preview shows, which decides its lane
+/// What one row of a commit's unified preview shows, which decides its lane
 /// mark, its background, and how its text paints.
+///
+/// The commits view's preview and the Commit Preview's patch both read it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum LineKind {
+pub(crate) enum LineKind {
     /// A line both sides hold, shown as its live line.
     Context,
     /// A base line the commit removed.
@@ -1557,8 +1559,8 @@ pub(crate) fn preview_row_count(doc: &DiffDocument) -> usize {
 /// thing.
 #[derive(Copy, Clone)]
 pub(crate) struct PreviewDials {
-    paint: DiffDials,
-    syntax: bool,
+    pub(crate) paint: DiffDials,
+    pub(crate) syntax: bool,
 }
 
 impl PreviewDials {
@@ -1572,7 +1574,7 @@ impl PreviewDials {
     /// The values a session starts at with the tint off, for a test of a paint
     /// that the tint dial recolors.
     #[cfg(test)]
-    fn untinted() -> Self {
+    pub(crate) fn untinted() -> Self {
         Self {
             paint: DiffDials::untinted(),
             syntax: true,

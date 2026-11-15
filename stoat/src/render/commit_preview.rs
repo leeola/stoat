@@ -14,8 +14,8 @@ use crate::{
     blame,
     commit_preview::CommitPreview,
     render::{
-        self, chrome, commit_picker,
-        commits::{self, PreviewDials},
+        self, chrome, commit_patch,
+        commits::PreviewDials,
         paint,
         picker::{self, Footer},
         text,
@@ -343,9 +343,17 @@ fn paint_body(
 ) {
     let word = match &preview.document {
         Some(Some(doc)) => {
-            preview.scroll =
-                commit_picker::clamped_preview_scroll(preview.scroll, doc, body.height);
-            commits::render_commit_preview(doc, theme, body, preview.scroll, dials, buf, scene);
+            let last_page = preview.rows.len().saturating_sub(usize::from(body.height));
+            preview.scroll = preview.scroll.min(last_page);
+            commit_patch::render_commit_patch(
+                doc,
+                &preview.rows[preview.scroll..],
+                theme,
+                body,
+                dials,
+                buf,
+                scene,
+            );
             return;
         },
         Some(None) => "no changes",
@@ -599,6 +607,37 @@ mod tests {
         let buf = h.stoat.render();
         let row: String = (14..106).map(|x| buf[(x, 13)].symbol()).collect();
         assert_eq!(row, format!("{:^92}", "loading\u{2026}"));
+    }
+
+    /// A scrolled preview paints its patch from the scroll. One step down puts
+    /// the patch's context line in the body's first row, where the File Header
+    /// was.
+    #[test]
+    fn a_scrolled_preview_paints_its_patch_from_the_scroll() {
+        let text = {
+            let lines: String = (0..40).map(|i| format!("line {i}\n")).collect();
+            format!("one\n{lines}")
+        };
+        let mut h = blamed_pane(
+            &[
+                ("c1", "one", &[("a.rs", "one\n")]),
+                ("c2", "two", &[("a.rs", &text)]),
+            ],
+            &text,
+        );
+        h.stoat.stoatty = false;
+        h.type_keys("j enter");
+        h.settle();
+        h.type_keys("j");
+        h.snapshot();
+
+        let row: String = h
+            .rendered_text()
+            .lines()
+            .nth(7)
+            .map(|row| row.chars().skip(14).take(92).collect())
+            .unwrap_or_default();
+        assert_eq!(row, format!("{:<92}", "   1   1 \u{2502}one"));
     }
 
     /// The open preview hides the terminal cursor, which otherwise draws at the
