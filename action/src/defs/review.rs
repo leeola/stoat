@@ -404,8 +404,10 @@ define_action!(
     ActionKind::ReviewDone,
     "end the review walk",
     "End a review walk, checking out the branch or commit the working tree \
-     was on when the walk started and closing any open diff. Keeps the walk \
-     so it can be retried when the checkout back fails.",
+     was on when the walk started and closing any open diff or changes view. \
+     A stash that a blame checkout made goes back into the working tree, and \
+     a pop that fails keeps the changes in the stash. Keeps the walk so it \
+     can be retried when the checkout back fails.",
     ActionPriority::Rare,
     aliases = &["review done"],
     command_name = "review-done"

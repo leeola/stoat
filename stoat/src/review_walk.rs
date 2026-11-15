@@ -45,6 +45,16 @@ pub(crate) enum WalkOrigin {
     Blame { path: PathBuf, row: u32 },
 }
 
+/// The stash that a blame checkout made of the working tree's changes, which
+/// the walk's return pops.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct WalkStash {
+    /// The stash commit's sha.
+    pub(crate) sha: String,
+    /// How many files the stash took, untracked files among them.
+    pub(crate) changes: usize,
+}
+
 /// A walk through a run of commits, showing each one's diff in turn.
 ///
 /// The working tree follows the cursor. Stepping checks the current commit out
@@ -62,6 +72,9 @@ pub(crate) struct ReviewWalk {
     pub(crate) return_ref: ReturnRef,
     pub(crate) span: WalkSpan,
     pub(crate) origin: WalkOrigin,
+    /// The stash the walk's first landing made, which the return pops, or
+    /// `None` for a walk that stashed nothing.
+    pub(crate) stash: Option<WalkStash>,
 }
 
 impl ReviewWalk {
@@ -120,6 +133,7 @@ mod tests {
             return_ref: ReturnRef::Branch("main".into()),
             span: WalkSpan::Commits,
             origin: WalkOrigin::Commits,
+            stash: None,
         }
     }
 

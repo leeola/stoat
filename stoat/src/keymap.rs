@@ -4073,6 +4073,31 @@ mod tests {
         );
     }
 
+    /// `c` in the git chord returns from a review walk while one holds HEAD at
+    /// a commit, and turns the change walk's wrap off and on otherwise.
+    #[test]
+    fn git_chord_c_returns_from_a_walk_and_turns_the_wrap_otherwise() {
+        let keymap = Keymap::compile(&parse_config(crate::app::DEFAULT_KEYMAP));
+        let names = |state: &TestState| {
+            keymap
+                .lookup(state, &key_event(KeyCode::Char('c'), KeyModifiers::NONE))
+                .map(|actions| {
+                    actions
+                        .iter()
+                        .map(|action| action.name.clone())
+                        .collect::<Vec<_>>()
+                })
+        };
+        let walking = TestState::in_repo("space_git").set("checkout", StateValue::Bool(true));
+        assert_eq!(
+            [names(&walking), names(&TestState::in_repo("space_git"))],
+            [
+                Some(vec!["ReviewDone".to_string(), "SetMode".to_string()]),
+                Some(vec!["ChangeWalkWrap".to_string(), "SetMode".to_string()]),
+            ],
+        );
+    }
+
     /// The `~` pin holds the mode it is already in, so the chord's own arms
     /// repeat. The pin is not a doubled `h`, because `h` inside the chord is
     /// the HEAD diff.

@@ -7,7 +7,7 @@ use crate::{
     commit_picker::{self, CommitPicker, CommitPickerRole, LoadedCommits, RangeFrom},
     git_jobs::{self, GitJob, GitJobKey, GitLanding, GitWork},
     host::CommitInfo,
-    review_walk::{ReturnRef, ReviewWalk, WalkOrigin, WalkSpan},
+    review_walk::{ReturnRef, ReviewWalk, WalkOrigin, WalkSpan, WalkStash},
     wake,
     workspace::diff::DiffBase,
 };
@@ -817,6 +817,7 @@ pub(super) fn queue_walk_start(
                 return_ref,
                 span,
                 origin,
+                stash: None,
             });
 
             let (workdir, sha, standing) = walk_position(stoat)?;
@@ -1051,12 +1052,18 @@ pub(crate) fn review_done(stoat: &mut Stoat) -> UpdateEffect {
             return None;
         };
         Some(Box::new(move || {
-            let restored = match &walk.return_ref {
+            let returned = match &walk.return_ref {
                 ReturnRef::Branch(name) => repo.checkout_ref(name),
                 ReturnRef::Detached(sha) => repo.checkout_detached(sha),
             }
-            .map_err(|err| err.to_string());
-            Box::new(move |stoat: &mut Stoat| land_return(stoat, walk, restored)) as GitLanding
+            .map_err(|err| err.to_string())
+            .map(|()| {
+                let stash = walk.stash.as_ref()?;
+                repo.stash_pop(&stash.sha, true)
+                    .err()
+                    .map(|err| err.to_string())
+            });
+            Box::new(move |stoat: &mut Stoat| land_return(stoat, walk, returned)) as GitLanding
         }) as GitWork)
     });
     git_jobs::enqueue(stoat, job);
@@ -1066,28 +1073,62 @@ pub(crate) fn review_done(stoat: &mut Stoat) -> UpdateEffect {
 /// Leave the diff view once a walk's return lands, with every clean buffer
 /// re-read from the restored tree, or put the walk back if the return failed.
 ///
-/// A return that lands takes the walk's badge down too. The badge names the
-/// commit the walk stood on, and the tree has left it. A commits list the walk
-/// opened from comes back in the focused pane.
-fn land_return(stoat: &mut Stoat, walk: ReviewWalk, restored: Result<(), String>) {
-    if let Err(err) = restored {
-        restore_walk(stoat, walk);
-        review_error(stoat, "could not return", Some(err));
-        return;
-    }
+/// `returned` is the return checkout's error, or the error of the stash pop
+/// that followed it inside `Ok`.
+///
+/// A return that lands closes a focused changes view, stales the diffs, and
+/// reloads the commits lists, as a checkout does. It takes the walk's badge
+/// down too. The badge names the commit the walk stood on, and the tree has
+/// left it. A commits list the walk opened from comes back in the focused
+/// pane.
+///
+/// The status names where HEAD went back to, and how many changes a popped
+/// stash put back. A pop that failed ends the walk all the same, since HEAD is
+/// back. Its changes stay in the stash, and the Review badge says why.
+fn land_return(stoat: &mut Stoat, walk: ReviewWalk, returned: Result<Option<String>, String>) {
+    let pop_error = match returned {
+        Ok(pop_error) => pop_error,
+        Err(err) => {
+            restore_walk(stoat, walk);
+            review_error(stoat, "could not return", Some(err));
+            return;
+        },
+    };
 
     auto_reload::reload_clean_buffers(stoat);
 
     // Only a return that landed clears the base. A failed one leaves the tree at
     // the commit, and the base must still name that commit's parent.
     stoat.active_workspace_mut().set_diff_base(None);
-    super::review::exit_diff_view(stoat);
+    if stoat.active_workspace().focused_diff_changes_id().is_some() {
+        super::diff_changes::close_diff_changes(stoat);
+    } else {
+        super::review::exit_diff_view(stoat);
+    }
+    stoat.active_workspace_mut().invalidate_all_diffs();
+    super::commits::reload_every_list(stoat);
     let focus = stoat.active_workspace().panes.focus();
     super::commits::restore_covered_commits(stoat, focus);
     stoat
         .active_workspace_mut()
         .badges
         .remove_by_source(BadgeSource::Review);
+
+    let mut status = match &walk.return_ref {
+        ReturnRef::Branch(name) => format!("returned to {name}"),
+        ReturnRef::Detached(sha) => format!("HEAD detached at {}", &sha[..sha.len().min(7)]),
+    };
+    match (walk.stash, pop_error) {
+        (_, Some(reason)) => {
+            review_error(stoat, "stash kept", Some(reason));
+        },
+        (Some(stash), None) => match stash.changes {
+            1 => status.push_str(", 1 change restored"),
+            changes => status.push_str(&format!(", {changes} changes restored")),
+        },
+        (None, None) => {},
+    }
+    stoat.set_status(status);
 }
 
 /// Put back a walk whose return did not happen.
@@ -1413,6 +1454,9 @@ struct WalkLanding {
     /// The first path the commit changed, or `None` for one that changed
     /// nothing and so has no file to open onto.
     first_path: Option<PathBuf>,
+    /// The sha of the stash the landing made and how many files it took, or
+    /// `None` for a landing that stashed nothing.
+    stash: Option<(String, usize)>,
 }
 
 /// Why a step's git work did not land.
@@ -1526,7 +1570,7 @@ fn walk_landing(
             return Err(WalkFailure::DirtyTree);
         }
         if let Err(err) = repo.checkout_detached(sha) {
-            let detail = match stash.as_deref().map(|stash| repo.stash_pop(stash, true)) {
+            let detail = match stash.as_ref().map(|(stash, _)| repo.stash_pop(stash, true)) {
                 Some(Err(pop)) => format!("{err}; the changes stay in the stash: {pop}"),
                 Some(Ok(())) | None => err.to_string(),
             };
@@ -1546,20 +1590,22 @@ fn walk_landing(
     Ok(WalkLanding {
         parent: repo.parent_sha(sha),
         first_path,
+        stash,
     })
 }
 
 /// Stash the working tree's changes under `message`, the untracked files with
-/// them, and answer the stash's sha.
+/// them, and answer the stash's sha and how many files it took.
 ///
 /// A tree with nothing to stash answers `None`, since a checkout over it loses
 /// nothing.
 fn stash_tree(
     repo: &dyn crate::host::GitRepo,
     message: &str,
-) -> Result<Option<String>, WalkFailure> {
+) -> Result<Option<(String, usize)>, WalkFailure> {
+    let changes = repo.changed_files().len();
     match repo.stash_save(Some(message), true) {
-        Ok(sha) => Ok(Some(sha)),
+        Ok(sha) => Ok(Some((sha, changes))),
         Err(crate::host::GitApplyError::Backend { reason, .. }) if reason == "nothing to stash" => {
             Ok(None)
         },
@@ -1574,6 +1620,9 @@ fn stash_tree(
 ///
 /// A failed landing of a start that stashed ends its walk. HEAD never moved,
 /// and the stash went back into the tree, so no walk stands to return from.
+///
+/// A stash the landing made goes on record first, even for a walk that ended
+/// while its checkout was out, since that walk's return pops it.
 fn land_walk_checkout(
     stoat: &mut Stoat,
     kind: WalkLandingKind,
@@ -1583,6 +1632,13 @@ fn land_walk_checkout(
     landed: Result<WalkLanding, WalkFailure>,
     stashing: bool,
 ) {
+    if let Ok(WalkLanding {
+        stash: Some((stash, changes)),
+        ..
+    }) = &landed
+    {
+        record_stash(stoat, stash, *changes);
+    }
     if kind.follows_walk() && stoat.active_workspace().review_walk.is_none() {
         return;
     }
@@ -1608,6 +1664,25 @@ fn land_walk_checkout(
         && cursor_sha != sha
     {
         queue_walk_landing(stoat, kind, workdir, cursor_sha, standing);
+    }
+}
+
+/// Record the stash `sha`, which took `changes` files, on the walk whose first
+/// landing made it.
+///
+/// The walk still stands, or its return waits in the git queue. At most one of
+/// the two holds a walk while a first landing lands, since a walk starts only
+/// once the return before it has run.
+fn record_stash(stoat: &mut Stoat, sha: &str, changes: usize) {
+    let ws = stoat.active_workspace_mut();
+    for walk in [ws.review_walk.as_mut(), ws.ending_walk.as_mut()]
+        .into_iter()
+        .flatten()
+    {
+        walk.stash = Some(WalkStash {
+            sha: sha.to_string(),
+            changes,
+        });
     }
 }
 
@@ -3125,6 +3200,7 @@ mod tests {
             return_ref: ReturnRef::Branch("main".to_string()),
             span: WalkSpan::Commits,
             origin: WalkOrigin::Commits,
+            stash: None,
         }
     }
 

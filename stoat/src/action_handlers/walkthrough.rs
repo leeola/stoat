@@ -2511,6 +2511,8 @@ mod tests {
         );
     }
 
+    /// `:done` during a commit tour closes the tour with the walk, and the
+    /// status that the return leaves names the branch.
     #[test]
     fn review_done_closes_a_commit_tour() {
         let mut h = commit_tour_harness();
@@ -2521,11 +2523,7 @@ mod tests {
         h.settle();
         assert_eq!(
             (checkouts(&h).last().cloned(), tour_slug(&h), status(&h)),
-            (
-                Some("ref:main".to_owned()),
-                None,
-                Some("walkthrough closed")
-            ),
+            (Some("ref:main".to_owned()), None, Some("returned to main")),
         );
     }
 

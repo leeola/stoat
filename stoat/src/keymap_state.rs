@@ -27,6 +27,7 @@ pub(crate) const BUILTIN_FIELDS: &[&str] = &[
     "pair",
     "git",
     "walkthrough",
+    "checkout",
     "trail",
     "panes",
     "detached",
@@ -71,6 +72,9 @@ pub(crate) struct Flags {
     pub(crate) git: bool,
     /// Whether a walkthrough tour is open. See [`Workspace::walkthrough`].
     pub(crate) walkthrough: bool,
+    /// Whether a review walk holds HEAD at a commit. See
+    /// [`Workspace::review_walk`].
+    pub(crate) checkout: bool,
     /// The call-graph trail's phase, `armed` or `path`, or `None` with no
     /// trail. See [`Workspace::trail`].
     pub(crate) trail: Option<&'static str>,
@@ -122,6 +126,7 @@ impl Flags {
             pair: ws.pair_panes().is_some(),
             git: ws.repo_root.is_some(),
             walkthrough: ws.walkthrough.is_some(),
+            checkout: ws.review_walk.is_some(),
             trail: ws.trail.as_ref().and_then(|trail| trail.phase()),
             panes: u32::try_from(ws.panes.split_pane_count()).unwrap_or(u32::MAX),
             detached: matches!(focused.placement, Placement::Window(_)),
@@ -185,6 +190,8 @@ pub(crate) struct StoatKeymapState<'a> {
     git: StateValue,
     /// Whether a walkthrough tour is open.
     walkthrough: StateValue,
+    /// Whether a review walk holds HEAD at a commit.
+    checkout: StateValue,
     /// The call-graph trail's phase, `armed` or `path`. Absent with no trail,
     /// so a bare `trail` reads false.
     trail: Option<StateValue>,
@@ -280,6 +287,7 @@ impl<'a> StoatKeymapState<'a> {
             pair: StateValue::Bool(flags.pair),
             git: StateValue::Bool(flags.git),
             walkthrough: StateValue::Bool(flags.walkthrough),
+            checkout: StateValue::Bool(flags.checkout),
             trail: flags.trail.map(|phase| StateValue::String(phase.into())),
             panes: StateValue::Number(f64::from(flags.panes)),
             detached: StateValue::Bool(flags.detached),
@@ -422,6 +430,7 @@ impl KeymapState for StoatKeymapState<'_> {
             "pair" => Some(&self.pair),
             "git" => Some(&self.git),
             "walkthrough" => Some(&self.walkthrough),
+            "checkout" => Some(&self.checkout),
             "trail" => self.trail.as_ref(),
             "panes" => Some(&self.panes),
             "detached" => Some(&self.detached),
@@ -1339,6 +1348,8 @@ mod tests {
         app::DEFAULT_KEYMAP,
         code_index::nav,
         diff_map::{DiffHunk, DiffHunkStatus, DiffMap, StagedMark},
+        host::CommitInfo,
+        review_walk::{ReturnRef, ReviewWalk, WalkOrigin, WalkSpan},
         run::RunId,
     };
     use codegraph::SymbolKey;
@@ -1990,6 +2001,47 @@ mod tests {
                 scope_after(&[&stoat_action::OpenFileFinder]),
             ),
             (None, named("buffers"), named("all")),
+        );
+    }
+
+    /// `checkout` holds while a review walk is open, and not otherwise. A
+    /// `SetVar` of the same name is refused, so no user variable shadows it.
+    #[test]
+    fn checkout_holds_only_while_a_review_walk_is_open() {
+        let mut h = Stoat::test();
+        let checkout = |stoat: &Stoat| match StoatKeymapState::from_stoat(stoat).get("checkout") {
+            Some(StateValue::Bool(open)) => Some(*open),
+            _ => None,
+        };
+        let closed = checkout(&h.stoat);
+        h.stoat.active_workspace_mut().review_walk = Some(ReviewWalk {
+            workdir: "/repo".into(),
+            commits: vec![CommitInfo {
+                sha: "c1".into(),
+                short_sha: "c1".into(),
+                summary: String::new(),
+                author_name: String::new(),
+                author_email: String::new(),
+                time: 0,
+                parents: Vec::new(),
+            }],
+            cursor: 0,
+            return_ref: ReturnRef::Branch("main".into()),
+            span: WalkSpan::Commits,
+            origin: WalkOrigin::Commits,
+            stash: None,
+        });
+        let shadow = user_var(&resolved(
+            "SetVar",
+            vec![Value::Ident("checkout".into()), Value::Bool(true)],
+        ));
+        assert_eq!(
+            (closed, checkout(&h.stoat), shadow),
+            (
+                Some(false),
+                Some(true),
+                Err("SetVar name `checkout` shadows a built-in field".to_string()),
+            ),
         );
     }
 

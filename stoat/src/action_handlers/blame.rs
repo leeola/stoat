@@ -521,6 +521,7 @@ mod tests {
         pane::View,
         register::Register,
         render::{commit_patch::PatchRow, paint, OVERLAY_LANE},
+        review_walk::WalkStash,
         test_fixture,
         test_harness::{CommitSpec, TestHarness},
         theme::scope,
@@ -534,8 +535,8 @@ mod tests {
         time::Duration,
     };
     use stoat_action::{
-        BlameCard, BlameCheckout, BlamePreview, CommitPreviewParent, DiffChanges,
-        OpenCommandPalette, SetTheme, ToggleBlame,
+        BlameCard, BlameCheckout, BlamePreview, CheckoutConfirmAccept, CommitPreviewParent,
+        DiffChanges, OpenCommandPalette, ReviewDone, SetTheme, ToggleBlame,
     };
     use stoatty_protocol::{
         command::{decode_stream, BorderStyle, Command},
@@ -1666,6 +1667,147 @@ mod tests {
         );
     }
 
+    /// A stashing checkout records its stash on the walk, with how many files
+    /// it took, so the return pops it.
+    #[test]
+    fn a_stashing_checkout_records_its_stash_on_the_walk() {
+        let h = stashed_checkout();
+        let sha = repo(&h)
+            .stash_list()
+            .first()
+            .map(|stash| stash.sha.clone())
+            .expect("the checkout's stash");
+        assert_eq!(
+            h.stoat
+                .active_workspace()
+                .review_walk
+                .as_ref()
+                .and_then(|walk| walk.stash.clone()),
+            Some(WalkStash { sha, changes: 2 }),
+        );
+    }
+
+    /// `space h c` after a stashing checkout returns to `main` and pops the
+    /// stash, so both changes come back. The base and the walk clear, an
+    /// editor takes the focus, and the status names the return.
+    #[test]
+    fn space_h_c_returns_from_a_stashing_checkout_and_pops_the_stash() {
+        let mut h = stashed_checkout();
+        h.type_keys("space h c");
+        h.settle();
+        let ws = h.stoat.active_workspace();
+        assert_eq!(
+            (
+                checkouts(&h).last().cloned(),
+                stashes(&h),
+                changed_files(&h),
+                base_sha(&h),
+                ws.review_walk.is_some(),
+                matches!(ws.panes.pane(ws.panes.focus()).view, View::Editor(_)),
+                h.stoat.pending_message.clone(),
+            ),
+            (
+                Some("ref:main".to_string()),
+                Vec::<String>::new(),
+                2,
+                None,
+                false,
+                true,
+                Some("returned to main, 2 changes restored".to_string()),
+            ),
+        );
+    }
+
+    /// A return pressed while the stashing checkout is still out pops the stash
+    /// too. The checkout's landing records the stash on the ended walk, whose
+    /// return runs after it.
+    #[test]
+    fn a_return_pressed_while_the_checkout_is_out_pops_the_stash() {
+        let mut h = dirty_checkout();
+        h.type_keys("j j c");
+        h.settle();
+        dispatch(&mut h.stoat, &CheckoutConfirmAccept);
+        dispatch(&mut h.stoat, &ReviewDone);
+        h.settle();
+        assert_eq!(
+            (
+                stashes(&h),
+                changed_files(&h),
+                h.stoat.active_workspace().review_walk.is_some(),
+                h.stoat.pending_message.clone(),
+            ),
+            (
+                Vec::<String>::new(),
+                2,
+                false,
+                Some("returned to main, 2 changes restored".to_string()),
+            ),
+        );
+    }
+
+    /// A pop that fails still ends the walk, since HEAD is back, and the Review
+    /// badge says the stash kept the changes.
+    #[test]
+    fn a_failed_pop_ends_the_walk_and_keeps_the_stash() {
+        let mut h = stashed_checkout();
+        h.fake_git().add_repo("/repo").fail_apply_with("conflict");
+        h.type_keys("space h c");
+        h.settle();
+        assert_eq!(
+            (
+                checkouts(&h).last().cloned(),
+                h.stoat.active_workspace().review_walk.is_some(),
+                stashes(&h).len(),
+                review_badge(&h),
+            ),
+            (
+                Some("ref:main".to_string()),
+                false,
+                1,
+                Some("stash kept".to_string()),
+            ),
+        );
+    }
+
+    /// The return's status names a detached HEAD by its commit, and it reads
+    /// one restored change in the singular.
+    #[test]
+    fn the_return_status_names_a_detached_head_and_one_change() {
+        let returned = |mut h: TestHarness, stashing: bool| {
+            h.type_keys("j j c");
+            h.settle();
+            if stashing {
+                h.type_keys("enter");
+                h.settle();
+            }
+            h.type_keys("space h c");
+            h.settle();
+            h.stoat.pending_message.clone()
+        };
+        let detached = returned(blamed_history(CHECKOUT_HISTORY, CHECKOUT_A), false);
+        let one = {
+            let h = checkout_history(CHECKOUT_A);
+            h.fake_git().add_repo("/repo").untracked("notes.md");
+            returned(h, true)
+        };
+        assert_eq!(
+            [detached, one],
+            [
+                Some("HEAD detached at c3d4e5f".to_string()),
+                Some("returned to main, 1 change restored".to_string()),
+            ],
+        );
+    }
+
+    /// With no walk open, `space h c` turns the change walk's wrap off and on.
+    #[test]
+    fn space_h_c_with_no_walk_turns_the_change_walk_wrap() {
+        let mut h = checkout_history(CHECKOUT_A);
+        let before = h.stoat.change_walk_wrap;
+        h.type_keys("space h c");
+        assert_eq!((before, h.stoat.change_walk_wrap), (true, false));
+    }
+
     /// A 120-cell window over `a.rs` of a repository whose first commit writes
     /// `one` and whose second adds `two` under a message with a body, with
     /// `text` in the working tree and the Blame Column on.
@@ -1745,6 +1887,17 @@ mod tests {
             .add_repo("/repo")
             .unstaged_file("b.rs", "fn b() { 1 }\n")
             .untracked("notes.md");
+        h
+    }
+
+    /// [`dirty_checkout`] after `Enter` in the confirm of a checkout from the
+    /// last line `b2c3d4e5` added, with the checkout landed.
+    fn stashed_checkout() -> TestHarness {
+        let mut h = dirty_checkout();
+        h.type_keys("j j c");
+        h.settle();
+        h.type_keys("enter");
+        h.settle();
         h
     }
 

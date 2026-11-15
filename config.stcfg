@@ -672,6 +672,7 @@ on init {
 #   pair           exactly two split panes show two different files
 #   git            the workspace root is inside a git repository
 #   walkthrough    a walkthrough tour is open
+#   checkout       a review walk holds HEAD at a commit
 #   trail          the call-graph trail's phase, armed or path, absent with none
 #   panes          the number of split panes in the active tab
 #   detached       the focused pane is detached into its own window
@@ -1999,6 +2000,8 @@ on key {
     # for editing.
     #
     # `c` turns the change walk's wrap past the last changed file off and on.
+    # While a review walk holds HEAD at a commit, `c` returns from it instead,
+    # as `:done` does, and pops the stash a blame checkout made.
     #
     # `D` diffs the two files that two panes show, with the first pane's file
     # as the base. It is bound only while two panes show two different files.
@@ -2075,6 +2078,9 @@ on key {
         }
 
         c -> [ChangeWalkWrap(), SetMode(normal)];
+        checkout {
+            c -> [ReviewDone(), SetMode(normal)] "return";
+        }
         r -> [ForceReloadAll(), SetMode(normal)];
         R -> [LiveReload(), SetMode(normal)];
     }
