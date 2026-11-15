@@ -2328,11 +2328,13 @@ pub(crate) fn changes_to_hunks(
 /// and the move pass's guesses, which wash far more than the line pass's char
 /// refinement.
 ///
-/// A `Modified` hunk the tree pass finds nothing in takes an empty
-/// [`TokenDetail`] rather than `None`. The renderer washes nothing and softens
-/// nothing for an empty span list, which is the intended reading of a
-/// whitespace-only row: full strength and wash-free. `None` means "no detail
-/// resolved" instead, and leaves the row to the caller's default.
+/// A `Modified` hunk that the tree pass marks nothing in, and whose two sides
+/// hold the same tokens, takes an empty [`TokenDetail`] rather than `None`. Its
+/// change is whitespace only. The renderer washes nothing and softens nothing
+/// for an empty span list, which is the intended reading of such a row: full
+/// strength and wash-free. `None` means "no detail resolved" instead, and
+/// leaves the row to the caller's default. Any token that one side holds alone
+/// takes a span, as [`mark_unexplained`] finds it.
 ///
 /// `Added` and `Deleted` hunks take the spans of the tree changes that reach
 /// them. The line pass does not see a relocation, and a relocation takes the
@@ -2392,6 +2394,15 @@ pub(crate) fn merge_structural_detail(
         let mut buffer_spans = Vec::new();
         let mut base_spans = Vec::new();
         let mut moved_ranges = Vec::new();
+        let mut buffer_side = HunkSide::new(buffer_text, buffer_bytes.clone());
+        let mut base_side = HunkSide::new(
+            base_text,
+            line_range_to_byte_range(
+                &base_starts,
+                base_text.len(),
+                &hunk_base_lines(hunk, &base_starts, base_text),
+            ),
+        );
         let reaching = [
             changes_reaching(&rhs, tree_changes, &buffer_bytes),
             changes_reaching(&lhs, tree_changes, &hunk.base_byte_range),
@@ -2399,18 +2410,28 @@ pub(crate) fn merge_structural_detail(
         for &i in reaching.into_iter().flatten() {
             let (change, prose) = (&tree_changes[i], prose_by_change[i]);
             let moved = change.kind == LangChangeKind::Moved;
-            // A relocation that stays inside a Modified hunk is noise. The tree
-            // differ reports every token of a block reindented under a new
+            let side = match change.side {
+                Side::Rhs => &mut buffer_side,
+                Side::Lhs => &mut base_side,
+            };
+            // A relocation that stays inside a Modified hunk is set aside. The
+            // tree differ reports every token of a block reindented under a new
             // parent as moved, and a wash of those marks a run of untouched
-            // statements more heavily than the line differ does. A move whose
-            // counterpart lies outside the hunk is a token that left this line
-            // or arrived on it, which the reader sees here.
+            // statements more heavily than the line differ does. A set-aside
+            // relocation comes back as a moved span only when the token diff
+            // below finds it reordered. A move whose counterpart lies outside
+            // the hunk is a token that left this line or arrived on it, which
+            // the reader sees here.
             if moved
                 && refining
                 && counterpart_in_hunk(change, &hunk.base_byte_range, &buffer_bytes)
             {
+                side.set_aside
+                    .push((change.byte_range.clone(), change.move_metadata.clone()));
                 continue;
             }
+            side.explained.push(change.byte_range.clone());
+
             let (bounds, out) = match change.side {
                 Side::Rhs => (&buffer_bytes, &mut buffer_spans),
                 Side::Lhs => (&hunk.base_byte_range, &mut base_spans),
@@ -2454,6 +2475,10 @@ pub(crate) fn merge_structural_detail(
             if lines_relocated(&moved_ranges, starts, text, lines) {
                 hunk.status = DiffHunkStatus::Moved;
             }
+        }
+
+        if refining {
+            mark_unexplained(&base_side, &buffer_side, &mut base_spans, &mut buffer_spans);
         }
 
         hunk.marked_rows = marked_row_runs(
@@ -2557,6 +2582,194 @@ fn line_relocated(ranges: &[Range<usize>], text: &str, bounds: Range<usize>) -> 
 /// Whether `ch` is a letter, a digit, or an underscore.
 fn is_word_char(ch: char) -> bool {
     ch.is_alphanumeric() || ch == '_'
+}
+
+/// One side of a `Modified` hunk, as [`mark_unexplained`] reads it.
+///
+/// `bounds` is the bytes of the hunk's lines on that side. `explained` holds the
+/// whole range of each tree change that the hunk shows. `set_aside` holds the
+/// relocations inside the hunk that the merge shows no span for, each with its
+/// provenance.
+///
+/// Both lists ascend, as each side's tree changes do, so a lookup in them is a
+/// binary search. A scan of every range for every char costs too much on a
+/// large rewritten hunk.
+struct HunkSide<'a> {
+    text: &'a str,
+    bounds: Range<usize>,
+    explained: Vec<Range<usize>>,
+    set_aside: Vec<(
+        Range<usize>,
+        Option<Arc<stoat_language::structural_diff::MoveMetadata>>,
+    )>,
+}
+
+impl<'a> HunkSide<'a> {
+    fn new(text: &'a str, bounds: Range<usize>) -> Self {
+        Self {
+            text,
+            bounds,
+            explained: Vec::new(),
+            set_aside: Vec::new(),
+        }
+    }
+
+    /// The tokens of the side's lines that no tree change explains, in order.
+    ///
+    /// A token is a run of word chars, or one other char that is not
+    /// whitespace, so an identifier never splits.
+    fn unexplained_tokens(&self) -> Vec<Range<usize>> {
+        let mut tokens = Vec::new();
+        let mut word = None;
+        for (offset, ch) in self.text[self.bounds.clone()].char_indices() {
+            let at = self.bounds.start + offset;
+            let free = !self.explains(at);
+            if free && is_word_char(ch) {
+                word.get_or_insert(at);
+                continue;
+            }
+
+            if let Some(start) = word.take() {
+                tokens.push(start..at);
+            }
+            if free && !ch.is_whitespace() {
+                tokens.push(at..at + ch.len_utf8());
+            }
+        }
+        if let Some(start) = word {
+            tokens.push(start..self.bounds.end);
+        }
+        tokens
+    }
+
+    /// Whether a tree change that the hunk shows holds the byte at `at`.
+    ///
+    /// The ranges ascend, so no range but the first one that ends past `at`
+    /// holds it.
+    fn explains(&self, at: usize) -> bool {
+        let next = self.explained.partition_point(|range| range.end <= at);
+        self.explained
+            .get(next)
+            .is_some_and(|range| range.start <= at)
+    }
+
+    /// The text of `tokens` with one token on each line, and the start offset of
+    /// each line.
+    fn token_lines(&self, tokens: &[Range<usize>]) -> (String, Vec<usize>) {
+        let mut lines = String::new();
+        let mut starts = Vec::with_capacity(tokens.len());
+        for token in tokens {
+            starts.push(lines.len());
+            lines.push_str(&self.text[token.clone()]);
+            lines.push('\n');
+        }
+        (lines, starts)
+    }
+
+    /// Push one span onto `out` for each run of `tokens` that touch and sit in
+    /// the same set-aside relocation, or in none.
+    ///
+    /// A run inside a relocation is a `Moved` span with the provenance of that
+    /// relocation. Any other run is a `Novel` span.
+    fn push_spans(&self, tokens: &[Range<usize>], out: &mut Vec<ChangeSpan>) {
+        // A run extends only a span that this call pushed. The spans before
+        // `first` are the tree pass's own.
+        let first = out.len();
+        let mut last_home = None;
+        for token in tokens {
+            let home = self.relocation_of(token);
+            if let Some(span) = out[first..].last_mut()
+                && span.byte_range.end == token.start
+                && last_home == home
+            {
+                span.byte_range.end = token.end;
+                continue;
+            }
+
+            out.push(self.span(token.clone(), home));
+            last_home = home;
+        }
+    }
+
+    /// The index of the set-aside relocation whose range holds `token` whole.
+    ///
+    /// The relocations ascend, so no relocation but the first one that ends at
+    /// or past the token's end holds it.
+    fn relocation_of(&self, token: &Range<usize>) -> Option<usize> {
+        let next = self
+            .set_aside
+            .partition_point(|(range, _)| range.end < token.end);
+        self.set_aside
+            .get(next)
+            .is_some_and(|(range, _)| range.start <= token.start)
+            .then_some(next)
+    }
+
+    /// A span over `byte_range`, `Moved` with the provenance of the set-aside
+    /// relocation at `home`, or `Novel` outside every relocation.
+    fn span(&self, byte_range: Range<usize>, home: Option<usize>) -> ChangeSpan {
+        let (kind, move_metadata) = match home {
+            Some(index) => (ChangeKind::Moved, self.set_aside[index].1.clone()),
+            None => (ChangeKind::Novel, None),
+        };
+        ChangeSpan {
+            byte_range,
+            kind,
+            move_metadata,
+            prose: ProseChange::None,
+        }
+    }
+}
+
+/// Mark the tokens that one side of a `Modified` hunk holds and the other side
+/// lacks, among the tokens that no tree change explains.
+///
+/// The tree pass pairs a token with an equal token anywhere in the file, while
+/// the line pass pairs lines. A token that the tree pass holds unchanged
+/// against a token outside the hunk therefore reads as unchanged beside rows
+/// that do not hold it. A diff of the two sides' unexplained tokens finds such a
+/// token. A reindent keeps its token order and marks nothing, and a reorder
+/// does not keep it.
+///
+/// The spans join the tree pass's spans on each side, sorted by start.
+fn mark_unexplained(
+    base: &HunkSide<'_>,
+    buffer: &HunkSide<'_>,
+    base_spans: &mut Vec<ChangeSpan>,
+    buffer_spans: &mut Vec<ChangeSpan>,
+) {
+    let base_tokens = base.unexplained_tokens();
+    let buffer_tokens = buffer.unexplained_tokens();
+    let same = base_tokens.len() == buffer_tokens.len()
+        && base_tokens
+            .iter()
+            .zip(&buffer_tokens)
+            .all(|(lhs, rhs)| base.text[lhs.clone()] == buffer.text[rhs.clone()]);
+    if same {
+        return;
+    }
+
+    let (base_lines, base_starts) = base.token_lines(&base_tokens);
+    let (buffer_lines, buffer_starts) = buffer.token_lines(&buffer_tokens);
+    let tokens_in = |starts: &[usize], bytes: Range<usize>| {
+        starts.partition_point(|&start| start < bytes.start)
+            ..starts.partition_point(|&start| start < bytes.end)
+    };
+    for (base_bytes, buffer_bytes) in
+        stoat_language::structural_diff::line_hunks(&base_lines, &buffer_lines)
+    {
+        base.push_spans(
+            &base_tokens[tokens_in(&base_starts, base_bytes)],
+            base_spans,
+        );
+        buffer.push_spans(
+            &buffer_tokens[tokens_in(&buffer_starts, buffer_bytes)],
+            buffer_spans,
+        );
+    }
+
+    base_spans.sort_by_key(|span| span.byte_range.start);
+    buffer_spans.sort_by_key(|span| span.byte_range.start);
 }
 
 /// Whether buffer `row` holds a non-whitespace char.
@@ -2885,7 +3098,9 @@ mod tests {
         multi_buffer::MultiBuffer,
     };
     use std::sync::Arc;
-    use stoat_language::structural_diff::{ChangeKind as LangChangeKind, DiffChange, Side};
+    use stoat_language::structural_diff::{
+        ChangeKind as LangChangeKind, DiffChange, MoveMetadata, MoveSource, Side,
+    };
 
     /// The structured stops, the git stops, and the change count of one map,
     /// each stop as its `(start, end)` rows.
@@ -5874,6 +6089,90 @@ mod tests {
             .into_iter()
             .map(|hunk| hunk.status)
             .collect()
+    }
+
+    /// Text that the tree pass leaves unmarked in a `Modified` hunk takes a span
+    /// when the other side lacks it, and a reindent still marks nothing.
+    #[test]
+    fn text_the_tree_pass_left_unmarked_takes_a_span_when_the_other_side_lacks_it() {
+        let novel = |side, range| tree_change(side, range, LangChangeKind::Novel);
+        assert_eq!(
+            [
+                merged_spans(
+                    "a\nold one\nb\n",
+                    "a\nnew\nb\n",
+                    &[novel(Side::Lhs, 2..5), novel(Side::Rhs, 2..5)],
+                ),
+                merged_spans("a\nx y\nb\n", "a\nx z\nb\n", &[]),
+                merged_spans("a\nx y\nb\n", "a\n  x  y\nb\n", &[]),
+            ],
+            [
+                (
+                    vec![novel_span(2..5), novel_span(6..9)],
+                    vec![novel_span(2..5)],
+                ),
+                (vec![novel_span(4..5)], vec![novel_span(4..5)]),
+                (Vec::new(), Vec::new()),
+            ],
+            "one and y sit on one side alone, and the reindent keeps its tokens",
+        );
+    }
+
+    /// Two runs that changed places inside one hunk read as moved, at the token
+    /// that the diff of the two orders finds moved.
+    #[test]
+    fn a_reorder_inside_one_hunk_marks_the_token_that_moved() {
+        let moved = |side,
+                     range: std::ops::Range<usize>,
+                     other_side,
+                     other: std::ops::Range<usize>| DiffChange {
+            move_metadata: Some(Arc::new(MoveMetadata {
+                sources: vec![MoveSource {
+                    buffer: None,
+                    side: other_side,
+                    byte_range: other,
+                    line_range: 1..2,
+                }],
+            })),
+            ..tree_change(side, range, LangChangeKind::Moved)
+        };
+        let hunks = merged(
+            "a\nfoo bar\nb\n",
+            "a\nbar foo\nb\n",
+            &[
+                moved(Side::Lhs, 2..5, Side::Rhs, 6..9),
+                moved(Side::Rhs, 6..9, Side::Lhs, 2..5),
+            ],
+        );
+
+        assert_eq!(
+            hunks.iter().map(moved_extents).collect::<Vec<_>>(),
+            [(Some(2..5), Some(6..9))],
+            "foo left the front of the line and arrived at its end",
+        );
+    }
+
+    /// A `Novel` span over `byte_range`, as the merge writes one.
+    fn novel_span(byte_range: std::ops::Range<usize>) -> ChangeSpan {
+        ChangeSpan {
+            byte_range,
+            kind: ChangeKind::Novel,
+            move_metadata: None,
+            prose: ProseChange::None,
+        }
+    }
+
+    /// The base and buffer spans of the first hunk that [`merged`] gives.
+    fn merged_spans(
+        base: &str,
+        buffer: &str,
+        tree_changes: &[DiffChange],
+    ) -> (Vec<ChangeSpan>, Vec<ChangeSpan>) {
+        let hunk = merged(base, buffer, tree_changes).remove(0);
+        let detail = hunk
+            .token_detail
+            .expect("the merge details a searched hunk");
+        (detail.base_spans.clone(), detail.buffer_spans.clone())
     }
 
     /// Each line hunk's token detail once the Rust tree pass of `buffer`
