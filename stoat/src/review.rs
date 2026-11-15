@@ -920,6 +920,67 @@ mod tests {
         );
     }
 
+    /// A statement removed above an `if` whose body grew reads as a removal,
+    /// and the `if` line between the removal and the new block stays context.
+    #[test]
+    fn a_statement_removed_beside_a_grown_if_leaves_the_if_line_as_context() {
+        let base = concat!(
+            "fn push(&mut self, keys: Keys) {\n",
+            "    let page = &mut self.page;\n",
+            "    D::insert(&mut page.indexes, keys, page.households.len() as u32);\n",
+            "    if page.last_keys != Some(keys) {\n",
+            "        D::insert(&mut self.page_indexes, keys, self.pages.len() as u32);\n",
+            "        page.last_keys = Some(keys);\n",
+            "    }\n",
+            "}\n",
+        );
+        let buffer = concat!(
+            "fn push(&mut self, keys: Keys) {\n",
+            "    let page = &mut self.page;\n",
+            "    if page.last_keys != Some(keys) {\n",
+            "        let row = page.households.len() as u32;\n",
+            "        if let Some(last_keys) = page.last_keys {\n",
+            "            D::insert_range(&mut page.indexes, last_keys, page.run_start..row);\n",
+            "        }\n",
+            "        page.run_start = row;\n",
+            "        D::insert(&mut self.page_indexes, keys, self.pages.len() as u32);\n",
+            "        page.last_keys = Some(keys);\n",
+            "    }\n",
+            "}\n",
+        );
+        let hunks = hunks_rust(base, buffer, 1);
+
+        let rows: Vec<(Option<&str>, Option<&str>, bool)> = shapes(&hunks)
+            .concat()
+            .into_iter()
+            .map(|(left, right, changed)| {
+                (
+                    left.map(|(text, _)| text),
+                    right.map(|(text, _)| text),
+                    changed,
+                )
+            })
+            .collect();
+        let context = |text| (Some(text), Some(text), false);
+        let removed = |text| (Some(text), None, true);
+        let added = |text| (None, Some(text), true);
+        assert_eq!(
+            rows,
+            [
+                context("    let page = &mut self.page;"),
+                removed("    D::insert(&mut page.indexes, keys, page.households.len() as u32);"),
+                context("    if page.last_keys != Some(keys) {"),
+                added("        let row = page.households.len() as u32;"),
+                added("        if let Some(last_keys) = page.last_keys {"),
+                added("            D::insert_range(&mut page.indexes, last_keys, page.run_start..row);"),
+                added("        }"),
+                added("        page.run_start = row;"),
+                context("        D::insert(&mut self.page_indexes, keys, self.pages.len() as u32);"),
+            ],
+            "the removal sits above the unchanged if line, and the new block below it",
+        );
+    }
+
     /// Two statements replaced by one call across lines pair with the call
     /// from its first line down. The identifiers the call kept do not pull
     /// each removed statement beside the argument line that holds it.

@@ -82,6 +82,14 @@ const ATOM_ANCHOR_BUDGET: u64 = 2_000;
 /// kept most of its body from two lists that share only boilerplate.
 const MOSTLY_UNCHANGED_MIN_COMMON_CHILDREN: usize = 4;
 
+/// The atom leaves that the second child of two lists must hold for the lists
+/// to pair by their head before the search.
+///
+/// A head of one token names nothing about the body that follows it. Two `fn`
+/// items of one name, or two `let` statements of one name, share such a head,
+/// and the count of shared subtrees still decides for them.
+const SAME_HEAD_MIN_LEAVES: u32 = 3;
+
 /// The product of a run's node counts, lhs times rhs, above which the run pairs
 /// its members by shared content before the search.
 ///
@@ -761,11 +769,16 @@ fn emit_pair(
 
 /// Whether `lhs` and `rhs` are lists that share at least
 /// [`MOSTLY_UNCHANGED_MIN_COMMON_CHILDREN`] subtrees, each unique on its own
-/// side.
+/// side, or that kept their head as [`same_head`] reads it.
 ///
 /// A shared subtree counts once, and the walk skips the nodes under it, so a
 /// matched parent does not count again through its children. The counts span
 /// each whole arena, so a subtree repeated anywhere in its file pins nothing.
+///
+/// The head is a second way to peel, because a construct that kept its head and
+/// grew its body shares too few unique subtrees for the count. An `if` with a
+/// short body that gained a statement shares its condition and its old
+/// statements, and that is fewer than four.
 fn is_mostly_unchanged_pair(
     lhs_arena: &SyntaxArena,
     rhs_arena: &SyntaxArena,
@@ -808,7 +821,52 @@ fn is_mostly_unchanged_pair(
             stack.extend(list.children.iter().copied());
         }
     }
-    false
+    same_head(lhs_arena, rhs_arena, lhs, rhs, facts)
+}
+
+/// Whether `lhs` and `rhs` are one construct that kept its head.
+///
+/// Two lists of one kind that open with the same two children are one
+/// construct, such as an `if`, a `while`, or a `match` that kept its condition
+/// or its scrutinee. Each list holds three children or more, so the head is
+/// not the whole list, and the second child holds at least
+/// [`SAME_HEAD_MIN_LEAVES`] atom leaves.
+///
+/// A list with one child stands for that child, so the test reads through a
+/// statement that wraps one expression.
+fn same_head(
+    lhs_arena: &SyntaxArena,
+    rhs_arena: &SyntaxArena,
+    mut lhs: SyntaxId,
+    mut rhs: SyntaxId,
+    facts: &ArenaFacts,
+) -> bool {
+    let (lhs_sizes, _) = facts.sizes(lhs_arena, rhs_arena);
+    loop {
+        let (Syntax::List(lhs_list), Syntax::List(rhs_list)) =
+            (lhs_arena.get(lhs), rhs_arena.get(rhs))
+        else {
+            return false;
+        };
+        if lhs_list.kind != rhs_list.kind {
+            return false;
+        }
+        if lhs_list.children.len() == 1 && rhs_list.children.len() == 1 {
+            lhs = lhs_list.children[0];
+            rhs = rhs_list.children[0];
+            continue;
+        }
+
+        let equal = |index: usize| {
+            lhs_arena.get(lhs_list.children[index]).content_id()
+                == rhs_arena.get(rhs_list.children[index]).content_id()
+        };
+        return lhs_list.children.len() >= 3
+            && rhs_list.children.len() >= 3
+            && equal(0)
+            && equal(1)
+            && lhs_sizes[lhs_list.children[1].0].1 >= SAME_HEAD_MIN_LEAVES;
+    }
 }
 
 /// Whether a run pairs its members by shared content before the search.
@@ -1515,6 +1573,22 @@ mod tests {
             shapes,
             [vec![(2, 2)], vec![(1, 1), (1, 1)]],
             "a name and two calls stay one section, and a name and three calls peel",
+        );
+    }
+
+    /// A statement removed beside an `if` that kept its condition peels away
+    /// from the `if`, so each change searches as its own section.
+    #[test]
+    fn a_pair_peels_from_an_equal_head() {
+        let lhs = "fn f() {\n    gone(alpha, beta);\n    if ready(now) {\n        work(one, two);\n    }\n}\n";
+        let rhs = "fn f() {\n    if ready(now) {\n        prep(alpha);\n        work(one, two);\n    }\n}\n";
+        assert_eq!(
+            section_texts(lhs, rhs),
+            [
+                (vec!["gone(alpha, beta);"], vec![]),
+                (vec![], vec!["prep(alpha);"]),
+            ],
+            "the removed call and the added call search apart",
         );
     }
 
