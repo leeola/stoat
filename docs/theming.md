@@ -256,6 +256,11 @@ The typed UI scopes, by group (syntax scopes are open-ended):
   blamed pane. A theme that leaves it unset fills the column with the
   `ui.surface.raised` background, and with the `ui.background` background
   when that is unset too. default_dark leaves it unset.
+- `ui.blame.age.1` through `ui.blame.age.4` -- the foreground of a Blame
+  Column run's bar and short sha, by the age of its commit, oldest first. The
+  age is a rank among the file's commit times. A theme that leaves one unset
+  draws that age in the `ui.text.muted` foreground. default_dark leaves all
+  four unset.
 - `ui.pane_picker.badge` -- the digit badge the Pane Picker draws on each
   pane it reaches: the background is the fill, and the foreground is the
   digit and the border. A theme that leaves it unset fills the badge with the

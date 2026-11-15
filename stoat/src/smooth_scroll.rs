@@ -15,6 +15,7 @@
 //! `p * region.height`. [`page_top_row`] maps a page index to that row.
 
 use crate::{
+    blame::{BlameBase, BlameRows},
     code_search::CodeSearchFinder,
     command_palette::ArgPicker,
     commit_list::CommitListState,
@@ -25,7 +26,7 @@ use crate::{
     file_finder::FileFinder,
     help::Help,
     render::{
-        blame::{self, BlameColors, BLAME_COLUMN_CELLS},
+        blame::{self, BlameColors, BlameLines, BLAME_COLUMN_CELLS},
         code_search::paint_match_rows,
         command_palette::paint_palette_rows,
         commits::paint_commit_rows,
@@ -542,6 +543,15 @@ pub(crate) struct PageGutter {
 pub(crate) struct PageBlame {
     /// The colors as the live grid paints them, dimmed by the pane's fade.
     pub(crate) colors: BlameColors,
+    /// The runs as the live grid last resolved them, or `None` before a blame
+    /// of the buffer lands.
+    pub(crate) rows: Option<Arc<BlameRows>>,
+    /// HEAD's text and blame of the file, or `None` for a file HEAD does not
+    /// hold.
+    pub(crate) base: Option<Arc<BlameBase>>,
+    /// The moment the run loop built the page, which a run's date measures its
+    /// age against.
+    pub(crate) now_epoch: i64,
 }
 
 impl PageGutter {
@@ -737,13 +747,20 @@ fn paint_page_gutter(
     };
 
     let mut scene = gutter.scene();
-    let rows = end_row.saturating_sub(top_row).min(u32::from(area.height)) as u16;
-    blame::paint_blame_surface(
+    let visible = end_row.saturating_sub(top_row).min(u32::from(area.height));
+    let (folded, _) = gutter_geometry(snapshot, top_row, visible);
+    let lines = blame.rows.as_deref().map(|rows| BlameLines {
+        rows,
+        base: blame.base.as_deref(),
+        now_epoch: blame.now_epoch,
+    });
+    blame::paint_blame_column(
+        lines.as_ref(),
+        &folded,
         Rect {
             width: blame_w,
             ..area
         },
-        rows,
         &blame.colors,
         buf,
         Some(&mut scene),
@@ -1358,16 +1375,23 @@ pub(crate) fn page_buffer(area: Rect, theme: &crate::theme::Theme) -> Buffer {
 
 #[cfg(test)]
 mod tests {
-    use super::PageGutter;
+    use super::{PageBlame, PageGutter};
     use crate::{
         display_map::{highlights::HighlightEndpoints, DisplaySnapshot},
-        render::review::DiffDials,
+        render::{blame::BlameColors, review::DiffDials},
         theme::Theme,
         LineNumbers,
     };
     use lsp_types::{Diagnostic, DiagnosticSeverity};
     use ratatui::style::Style;
     use std::sync::Arc;
+
+    /// A decoded bar as its place, its size, and its color.
+    type BarDraw = (i16, i16, u16, u16, [u8; 3]);
+
+    /// A decoded text run as its text, its place, its color, and whether it
+    /// slants.
+    type RunDraw = (String, i16, i16, [u8; 3], bool);
 
     /// Ten numbered lines that a page and a live paint both show.
     ///
@@ -1607,18 +1631,17 @@ mod tests {
     }
 
     /// A page from a blamed gutter starts its text and its gutter 18 cells
-    /// further right than the page from the same gutter unblamed, and its
-    /// frames carry the column's surface as one bar over the page's four rows.
+    /// further right than the page from the same gutter unblamed. With no
+    /// blame landed, its frames carry the column's surface as one bar on each
+    /// of the page's four rows.
     #[test]
     fn a_blamed_page_moves_its_text_past_the_blame_column() {
-        use super::{render_page_from_snapshot, PageBlame};
-        use crate::{render::blame::BlameColors, term_screen::TermScreen};
+        use super::render_page_from_snapshot;
+        use crate::term_screen::TermScreen;
         use stoatty_protocol::command::{decode_stream, BarCommand};
 
         let (snapshot, gutter, fallback) = rich_gutter_page();
-        let blamed = gutter.clone().blamed(Some(PageBlame {
-            colors: BlameColors { surface: [1, 2, 3] },
-        }));
+        let blamed = gutter.clone().blamed(Some(surface_only_blame()));
         let page = |gutter: &PageGutter| {
             let bytes = render_page_from_snapshot(
                 &snapshot,
@@ -1650,7 +1673,7 @@ mod tests {
         let ((plain_row, plain_bars), (blamed_row, blamed_bars)) = (page(&gutter), page(&blamed));
         assert!(!plain_bars.is_empty(), "the gutter draws its separator");
         let (surfaces, rest): (Vec<_>, Vec<_>) =
-            blamed_bars.into_iter().partition(|bar| bar.width == 281);
+            blamed_bars.into_iter().partition(|bar| bar.x < 18 * 16);
         let shifted_row: String = " "
             .repeat(18)
             .chars()
@@ -1663,11 +1686,11 @@ mod tests {
                 ..bar
             })
             .collect();
-        let surface = BarCommand {
+        let surface = |row: i16| BarCommand {
             x: 0,
-            y: 0,
+            y: row * 16,
             width: 281,
-            height: 64,
+            height: 16,
             color: [1, 2, 3],
             occludes: false,
             hatch: None,
@@ -1676,18 +1699,22 @@ mod tests {
         };
         assert_eq!(
             (blamed_row, surfaces, rest),
-            (shifted_row, vec![surface], shifted_bars),
-            "the text and the gutter past the column, and one surface bar left of them",
+            (
+                shifted_row,
+                (0..4).map(surface).collect::<Vec<_>>(),
+                shifted_bars
+            ),
+            "the text and the gutter past the column, and a surface bar left of them on each row",
         );
     }
 
     /// A decorations refill of a blamed page whose numberless gutter marks a
     /// diagnostic with a letter writes the letter past the column, into the
-    /// cells nothing reads, and carries the column's surface.
+    /// cells nothing reads, and carries the column's surface on each row.
     #[test]
     fn a_blamed_numberless_decorations_refill_carries_the_surface() {
-        use super::{render_page_decorations, PageBlame};
-        use crate::render::{blame::BlameColors, editor::RowSeverity};
+        use super::render_page_decorations;
+        use crate::render::editor::RowSeverity;
         use stoatty_protocol::command::decode_stream;
 
         let (snapshot, numbered, fallback) = rich_gutter_page();
@@ -1698,9 +1725,7 @@ mod tests {
             numbered.rich.clone(),
             None,
         )
-        .blamed(Some(PageBlame {
-            colors: BlameColors { surface: [1, 2, 3] },
-        }));
+        .blamed(Some(surface_only_blame()));
         let bytes = render_page_decorations(
             &snapshot,
             1,
@@ -1724,7 +1749,190 @@ mod tests {
                 _ => None,
             })
             .collect();
-        assert_eq!(surfaces, [(0, 0, 64, [1, 2, 3])]);
+        assert_eq!(surfaces, [0, 16, 32, 48].map(|y| (0, y, 16, [1, 2, 3])),);
+    }
+
+    /// A blamed page's frames hold the Blame Column that the live paint of the
+    /// same rows holds, bar for bar and run for run. The file holds two
+    /// commits and an uncommitted line, so the two pages cross three runs.
+    #[test]
+    fn a_blamed_page_draws_the_column_the_live_paint_draws() {
+        use super::{page_buffer, render_page_from_snapshot};
+        use crate::{
+            action_handlers,
+            render::{
+                blame::{BlameLines, BlamePaint},
+                editor::{render_editor_with_overlay, ResolvedChrome, RowSeverity},
+            },
+            test_harness::TestHarness,
+            theme::scope,
+        };
+        use ratatui::layout::Rect;
+        use std::path::Path;
+        use stoat_config::WrapMode;
+        use stoat_widgets::ApcScene;
+
+        let mut h = TestHarness::with_size(80, 24);
+        h.seed_linear_history(
+            "/repo",
+            &[
+                ("c1", "one", &[("a.rs", "one\ntwo\n")]),
+                ("c2", "two", &[("a.rs", "one\ntwo\nthree\nfour\n")]),
+            ],
+        );
+        h.stoat.active_workspace_mut().git_root = "/repo".into();
+        h.fake_fs()
+            .insert_file("/repo/a.rs", "one\ntwo\nthree\nfour\nfive\n");
+        h.open_file(Path::new("/repo/a.rs"));
+        h.type_keys("space h a");
+        h.settle();
+        h.stoat.render();
+
+        let theme = h.stoat.theme.clone();
+        let fallback = theme.get(scope::UI_TEXT);
+        let chrome = ResolvedChrome::resolve(&theme);
+        let colors = chrome
+            .blame
+            .clone()
+            .expect("the shipped theme resolves the column");
+        let now_epoch = crate::commit_picker::now_epoch(&h.stoat.executor);
+        let (_, id) = h.stoat.focused_editor_ids().expect("a focused editor");
+        let (rows, base) = {
+            let ws = h.stoat.active_workspace();
+            let rows = ws.blame.rows(id).cloned().expect("the rows resolved");
+            (rows, ws.blame.base(id).cloned())
+        };
+        let gutter = PageGutter::new(
+            true,
+            Arc::new(RowSeverity::default()),
+            theme.clone(),
+            chrome.rich_gutter.clone(),
+            None,
+        )
+        .blamed(Some(PageBlame {
+            colors: colors.clone(),
+            rows: Some(rows.clone()),
+            base: base.clone(),
+            now_epoch,
+        }));
+        let editor = action_handlers::focused_editor_mut(&mut h.stoat).expect("focused editor");
+
+        for top_row in [0, 4] {
+            let area = Rect::new(0, 0, 60, 4);
+            let mut scene = ApcScene::new();
+            let saved = editor.scroll_row;
+            editor.scroll_row = top_row;
+            render_editor_with_overlay(
+                editor,
+                area,
+                fallback,
+                &theme,
+                &chrome,
+                &mut page_buffer(area, &theme),
+                false,
+                false,
+                LineNumbers::Absolute,
+                false,
+                None,
+                None,
+                None,
+                Some(&mut scene),
+                true,
+                None,
+                0.0,
+                DiffDials::shipped(),
+                WrapMode::None,
+                80,
+                0,
+                &[],
+                false,
+                None,
+                Some(BlamePaint {
+                    colors: &colors,
+                    lines: Some(BlameLines {
+                        rows: &rows,
+                        base: base.as_deref(),
+                        now_epoch,
+                    }),
+                }),
+            );
+            editor.scroll_row = saved;
+
+            let snapshot = editor.display_map.snapshot();
+            let page = render_page_from_snapshot(
+                &snapshot,
+                top_row,
+                fallback,
+                60,
+                4,
+                &gutter,
+                false,
+                0.0,
+                DiffDials::shipped(),
+                page_endpoints(&snapshot, top_row, 4),
+                None,
+                None,
+            );
+            let live = blame_column(scene.buffer());
+            assert!(
+                !live.0.is_empty() && !live.1.is_empty(),
+                "the live paint at top_row {top_row} draws bars and a label",
+            );
+            assert_eq!(blame_column(&page), live, "page at top_row {top_row}");
+        }
+    }
+
+    /// The bars and the text runs that `bytes` draws in the Blame Column, in
+    /// place order.
+    fn blame_column(bytes: &[u8]) -> (Vec<BarDraw>, Vec<RunDraw>) {
+        use stoatty_protocol::command::decode_stream;
+
+        let (mut bars, mut runs) = (Vec::new(), Vec::new());
+        for command in decode_stream(bytes) {
+            match command {
+                Command::Bar(bar) => bars.push((bar.x, bar.y, bar.width, bar.height, bar.color)),
+                Command::Bars(group) => bars.extend(
+                    group
+                        .bars
+                        .into_iter()
+                        .map(|(x, y, width, height)| (x, y, width, height, group.color)),
+                ),
+                Command::TextRun(run) => {
+                    runs.push((run.text, run.col, run.row, run.color, run.italic))
+                },
+                Command::TextRuns(group) => runs.extend(
+                    group
+                        .runs
+                        .into_iter()
+                        .map(|(col, row, text)| (text, col, row, group.color, group.italic)),
+                ),
+                _ => {},
+            }
+        }
+        bars.retain(|&(x, ..)| x < 18 * 16);
+        runs.retain(|&(_, col, ..)| col < 18 * 16);
+        bars.sort_by_key(|&(x, y, ..)| (y, x));
+        runs.sort_by_key(|&(_, col, row, ..)| (row, col));
+        (bars, runs)
+    }
+
+    /// A page's Blame Column in test colors, before a blame of its file
+    /// lands.
+    fn surface_only_blame() -> PageBlame {
+        PageBlame {
+            colors: BlameColors {
+                surface: [1, 2, 3],
+                ages: [[4, 4, 4]; 4],
+                divider: [5, 5, 5],
+                author: [6, 6, 6],
+                date: [7, 7, 7],
+                uncommitted: [8, 8, 8],
+                scale: 256,
+            },
+            rows: None,
+            base: None,
+            now_epoch: 0,
+        }
     }
 
     /// The bytes of an unfocused live paint of [`PAGE_DOC`] and of the page that

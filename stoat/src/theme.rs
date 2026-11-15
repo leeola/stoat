@@ -823,6 +823,17 @@ pub mod scope {
     /// [`UI_SURFACE_RAISED`] background, and with the [`UI_BACKGROUND`]
     /// background when that is unset too.
     pub(crate) const UI_BLAME_COLUMN: &str = "ui.blame.column";
+    /// The four age colors of the Blame Column, oldest first, as foregrounds.
+    ///
+    /// A run's bar and short sha take the color of its commit's age bucket, a
+    /// rank among the file's commit times. A theme that leaves one unset draws
+    /// that bucket in the [`UI_TEXT_MUTED`] foreground.
+    pub(crate) const UI_BLAME_AGE: [&str; 4] = [
+        "ui.blame.age.1",
+        "ui.blame.age.2",
+        "ui.blame.age.3",
+        "ui.blame.age.4",
+    ];
     /// The badge the Pane Picker draws on each pane its digits reach. The
     /// background is the badge's fill, and the foreground is its digit and
     /// its border.
@@ -1879,6 +1890,29 @@ mod tests {
             ),
             (Some(rgb(0x14161a)), None),
             "the column surface, and no column scope under default_dark",
+        );
+    }
+
+    /// The ermine theme gives the Blame Column's four ages their own colors,
+    /// and default_dark leaves the four scopes unset.
+    #[test]
+    fn the_ermine_theme_colors_the_blame_ages() {
+        let [ermine, dark] = shipped_themes();
+        assert_eq!(
+            (
+                scope::UI_BLAME_AGE.map(|name| ermine.try_get(name).and_then(|style| style.fg)),
+                scope::UI_BLAME_AGE.map(|name| dark.try_get(name)),
+            ),
+            (
+                [
+                    Some(rgb(0x4f5a6e)),
+                    Some(rgb(0x5d79a8)),
+                    Some(rgb(0x7fb0ff)),
+                    Some(rgb(0xa9c8ff)),
+                ],
+                [None; 4],
+            ),
+            "the four ages, oldest first, and no age scope under default_dark",
         );
     }
 

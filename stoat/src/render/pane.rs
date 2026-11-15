@@ -11,6 +11,7 @@ use crate::{
     minimap::RAIL_MAX_COLUMNS,
     pane::{Divider, DividerOrientation, FocusTarget, Pane, PaneTree, Placement, View},
     render::{
+        blame::{BlameLines, BlamePaint},
         chrome, commits, diff_changes,
         editor::{editor_cursor_position, render_editor_with_overlay, split_minimap_strip},
         paint::{dim_rgb, floor_rgb, luma, style_rgb, FAINT_CONTRAST_FLOOR},
@@ -172,7 +173,19 @@ pub(crate) fn render_pane(
                 let diagnostic_info = buffers
                     .path_for(editor.buffer_id)
                     .map(|path| (path, frame.diagnostics));
-                let blame = frame.chrome.blame.as_ref().filter(|_| pane.blames(editor));
+                let blame = frame
+                    .chrome
+                    .blame
+                    .as_ref()
+                    .filter(|_| pane.blames(editor))
+                    .map(|colors| BlamePaint {
+                        colors,
+                        lines: frame.blame.rows(editor.buffer_id).map(|rows| BlameLines {
+                            rows,
+                            base: frame.blame.base(editor.buffer_id).map(|base| base.as_ref()),
+                            now_epoch: frame.now_epoch,
+                        }),
+                    });
                 render_editor_with_overlay(
                     editor,
                     content_area,

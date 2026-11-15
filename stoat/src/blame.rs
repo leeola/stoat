@@ -63,9 +63,12 @@ pub(crate) enum LineBlame<'a> {
 ///
 /// The text and the blame read one commit, so the lines the blame counts are
 /// the lines of the text.
-struct BlameBase {
-    text: String,
-    blame: FileBlame,
+pub(crate) struct BlameBase {
+    pub(crate) text: String,
+    pub(crate) blame: FileBlame,
+    /// The age bucket of each commit of `blame`, by its index, as
+    /// [`age_buckets`] ranks them.
+    pub(crate) ages: Vec<u8>,
 }
 
 /// A run of consecutive buffer lines that share one commit, pinned to the
@@ -78,10 +81,13 @@ struct BlameSpan {
 }
 
 /// The spans of one buffer as the rows they cover in one version of its text.
-struct BlameRows {
+///
+/// Each run is one visual run of the Blame Column, which is a maximal group of
+/// consecutive rows with one commit, or of uncommitted rows.
+pub(crate) struct BlameRows {
     /// The rows in order, with no gap between two runs. Two adjacent runs name
     /// different commits.
-    runs: Vec<(Range<u32>, Option<u32>)>,
+    pub(crate) runs: Vec<(Range<u32>, Option<u32>)>,
 }
 
 /// The blame of one buffer.
@@ -237,6 +243,18 @@ impl BlameState {
         Some(LineBlame::Commit { commit })
     }
 
+    /// The runs of buffer `id` as [`Self::refresh_rows`] last resolved them,
+    /// or `None` before a blame of the buffer lands.
+    pub(crate) fn rows(&self, id: BufferId) -> Option<&Arc<BlameRows>> {
+        self.files.get(&id)?.rows.as_ref().map(|(_, rows)| rows)
+    }
+
+    /// HEAD's text and blame of buffer `id`, or `None` before a blame lands and
+    /// for a file HEAD does not hold.
+    pub(crate) fn base(&self, id: BufferId) -> Option<&Arc<BlameBase>> {
+        self.files.get(&id)?.base.as_ref()
+    }
+
     /// Whether buffer `id` at `version` is owed a blame run on this pump.
     fn owes_run(
         &mut self,
@@ -324,12 +342,17 @@ impl BlameState {
 }
 
 impl BlameRows {
+    /// The run that holds row `row`, as its rows and its commit, or `None` for
+    /// a row past the last run.
+    pub(crate) fn run(&self, row: u32) -> Option<&(Range<u32>, Option<u32>)> {
+        let after = self.runs.partition_point(|(rows, _)| rows.end <= row);
+        self.runs.get(after).filter(|(rows, _)| rows.contains(&row))
+    }
+
     /// The commit of row `row`, `Some(None)` for an uncommitted row, or `None`
     /// for a row past the last run.
     fn at(&self, row: u32) -> Option<Option<u32>> {
-        let after = self.runs.partition_point(|(rows, _)| rows.end <= row);
-        let (rows, commit) = self.runs.get(after)?;
-        rows.contains(&row).then_some(*commit)
+        self.run(row).map(|(_, commit)| *commit)
     }
 }
 
@@ -387,6 +410,27 @@ pub(crate) fn short_date(time: i64, utc_offset_minutes: i32, now_epoch: i64) -> 
     }
 }
 
+/// The age bucket of each of `commits`, by its index, from 0 for the oldest to
+/// 3 for the newest.
+///
+/// The bucket is a rank among the file's distinct commit times, not an
+/// absolute age, so a file of four commits draws four colors however close
+/// their dates lie. A lone commit takes the newest bucket.
+pub(crate) fn age_buckets(commits: &[BlameCommit]) -> Vec<u8> {
+    let mut times: Vec<i64> = commits.iter().map(|commit| commit.info.time).collect();
+    times.sort_unstable();
+    times.dedup();
+
+    let top = times.len().saturating_sub(1);
+    commits
+        .iter()
+        .map(|commit| match top {
+            0 => 3,
+            _ => (times.partition_point(|&time| time < commit.info.time) * 3 / top) as u8,
+        })
+        .collect()
+}
+
 /// HEAD's blame of `path` in the repository at `git_root`.
 ///
 /// `None` for a path outside the workdir, which has no blame. `Some(None)` for
@@ -409,7 +453,8 @@ fn resolve_base(
     let base = repo.resolve_rev("HEAD").and_then(|head| {
         let text = repo.content_at(&head, path)?;
         let blame = repo.blame(path, Some(&head))?;
-        Some(Arc::new(BlameBase { text, blame }))
+        let ages = age_buckets(&blame.commits);
+        Some(Arc::new(BlameBase { text, blame, ages }))
     });
     Some(base)
 }
@@ -524,9 +569,10 @@ fn boundary_line(text: &str, offset: usize) -> u32 {
 
 #[cfg(test)]
 mod tests {
-    use super::{line_origins, short_date};
+    use super::{age_buckets, line_origins, short_date};
     use crate::{
         app::Stoat,
+        host::{BlameCommit, CommitInfo},
         test_harness::{CommitSpec, TestHarness},
         workspace::diff::DIFF_SETTLE,
     };
@@ -576,6 +622,40 @@ mod tests {
             ],
             ["11/11", "11/10", "11/11", "2025", "--/--"],
             "three days old, eight hours west of UTC, 365 days old, 400 days old, past every date",
+        );
+    }
+
+    /// The buckets rank the distinct commit times, oldest 0 and newest 3, and a
+    /// lone commit takes the newest.
+    #[test]
+    fn age_buckets_rank_the_commit_times_into_four_buckets() {
+        let buckets = |times: &[i64]| {
+            let commits: Vec<BlameCommit> = times
+                .iter()
+                .map(|&time| BlameCommit {
+                    info: CommitInfo {
+                        sha: String::new(),
+                        short_sha: String::new(),
+                        summary: String::new(),
+                        author_name: String::new(),
+                        author_email: String::new(),
+                        time,
+                        parents: Vec::new(),
+                    },
+                    utc_offset_minutes: 0,
+                })
+                .collect();
+            age_buckets(&commits)
+        };
+        assert_eq!(
+            [
+                buckets(&[5]),
+                buckets(&[9, 5]),
+                buckets(&[4, 1, 3, 2]),
+                buckets(&[50, 10, 40, 20, 30]),
+            ],
+            [vec![3], vec![3, 0], vec![3, 0, 2, 1], vec![3, 0, 2, 0, 1]],
+            "one, two, four, and five commit times",
         );
     }
 

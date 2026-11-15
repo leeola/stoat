@@ -1085,10 +1085,11 @@ fn a_glide_page_carries_the_undercurl_of_its_diagnostic() {
     );
 }
 
-/// A blamed pane's pooled page carries the Blame Column's surface at its left,
-/// so a glide over the page keeps the column the live grid draws.
+/// A blamed pane's pooled page carries the Blame Column at its left, each
+/// line's bar and surface and its run's short sha, so a glide over the page
+/// keeps the column the live grid draws.
 #[test]
-fn a_blamed_pane_page_carries_the_blame_column_surface() {
+fn a_blamed_pane_page_carries_the_blame_column() {
     use stoatty_protocol::command::Command;
 
     let mut h = crate::test_harness::TestHarness::with_size(120, 24);
@@ -1108,14 +1109,46 @@ fn a_blamed_pane_page_carries_the_blame_column_surface() {
         ws.panes.pane(ws.panes.focus()).index
     };
     let bytes = emit_raw(&mut h, &mut rx);
-    let surfaces: Vec<_> = command::decode_stream(fill_payload(&bytes, pool, 0))
-        .into_iter()
-        .filter_map(|command| match command {
-            Command::Bar(bar) if bar.width == 281 => Some((bar.x, bar.y, bar.height, bar.color)),
-            _ => None,
-        })
-        .collect();
-    assert_eq!(surfaces, [(0, 0, 48, [0x14, 0x16, 0x1a])]);
+    let (mut bars, mut shas) = (Vec::new(), Vec::new());
+    for command in command::decode_stream(fill_payload(&bytes, pool, 0)) {
+        match command {
+            Command::Bar(bar) if bar.x < 18 * 16 => {
+                bars.push((bar.x, bar.y, bar.width, bar.height, bar.color))
+            },
+            Command::Bars(group) => bars.extend(
+                group
+                    .bars
+                    .into_iter()
+                    .filter(|&(x, ..)| x < 18 * 16)
+                    .map(|(x, y, width, height)| (x, y, width, height, group.color)),
+            ),
+            Command::TextRun(run) if run.text == "c1" => shas.push((run.col, run.row)),
+            Command::TextRuns(group) => shas.extend(
+                group
+                    .runs
+                    .into_iter()
+                    .filter(|(_, _, text)| text == "c1")
+                    .map(|(col, row, _)| (col, row)),
+            ),
+            _ => {},
+        }
+    }
+    bars.sort_by_key(|&(x, y, ..)| (y, x));
+
+    let (age, surface) = ([0xa9, 0xc8, 0xff], [0x14, 0x16, 0x1a]);
+    assert_eq!(
+        (bars, shas),
+        (
+            vec![
+                (0, 0, 4, 16, age),
+                (4, 0, 277, 16, surface),
+                (0, 16, 4, 16, age),
+                (4, 16, 277, 16, surface),
+                (0, 32, 281, 16, surface),
+            ],
+            vec![(14, 0)],
+        ),
+    );
 }
 
 /// The messages' stamp moves only where the cursor changes what a page prints:

@@ -1174,6 +1174,7 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
         .chrome
         .as_ref()
         .and_then(|(_, chrome)| Some((chrome.blame.clone()?, chrome.gutter_bg)));
+    let now_epoch = crate::commit_picker::now_epoch(&stoat.executor);
     // A diff page draws its gutter as runs only when the page gutter colors and
     // the diff colors both resolve. The dim only fades the colors, so one answer
     // holds for every pane.
@@ -1376,6 +1377,9 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
                         Some(bg) => colors.dim(*bg, dim),
                         None => colors.clone(),
                     },
+                    rows: ws.blame.rows(editor.buffer_id).cloned(),
+                    base: ws.blame.base(editor.buffer_id).cloned(),
+                    now_epoch,
                 }),
         );
         let diff_view = editor.diff_view;

@@ -14,7 +14,7 @@ use crate::{
     editor_state::EditorState,
     minimap::color_to_rgb,
     render::{
-        blame::{self, BlameColors},
+        blame::{self, BlameColors, BlamePaint},
         conflict_view::render_conflict_view,
         paint::{dim_rgb, floor_style, style_rgb},
         review::{
@@ -169,9 +169,9 @@ pub(crate) fn render_editor(
 /// With no step origin, a focused diff view counts buffer lines from its
 /// cursor line, and an unfocused one paints absolute numbers.
 ///
-/// With `blame`, a plain editor shows the Blame Column left of its gutter in
-/// those colors, when the pane has the room that [`blame::blame_cells`] asks
-/// for. The column moves the text right, and `gutter_width` counts it.
+/// With `blame`, a plain editor shows the Blame Column left of its gutter,
+/// when the pane has the room that [`blame::blame_cells`] asks for. The column
+/// moves the text right, and `gutter_width` counts it.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn render_editor_with_overlay(
     editor: &mut EditorState,
@@ -198,7 +198,7 @@ pub(crate) fn render_editor_with_overlay(
     reload_flashes: &[ReloadFlash],
     decorations_only: bool,
     step_origin: Option<i64>,
-    blame: Option<&BlameColors>,
+    blame: Option<BlamePaint<'_>>,
 ) {
     editor.viewport_rows = Some(inner.height as u32);
     editor.cursor_screen_cell = None;
@@ -282,7 +282,9 @@ pub(crate) fn render_editor_with_overlay(
         }
     };
 
-    let blame_w = blame.map_or(0, |_| blame::blame_cells(inner.width, measured_gutter_w));
+    let blame_w = blame
+        .as_ref()
+        .map_or(0, |_| blame::blame_cells(inner.width, measured_gutter_w));
 
     let after_gutter = inner
         .width
@@ -372,17 +374,20 @@ pub(crate) fn render_editor_with_overlay(
         width: inner.width - blame_w,
         ..inner
     };
-    if let Some(colors) = blame.filter(|_| blame_w > 0) {
+    if let Some(paint) = blame.as_ref().filter(|_| blame_w > 0) {
         let colors = match chrome.gutter_bg {
-            Some(bg) => colors.dim(bg, dim),
-            None => colors.clone(),
+            Some(bg) => paint.colors.dim(bg, dim),
+            None => paint.colors.clone(),
         };
-        blame::paint_blame_surface(
+        let (folded, _) =
+            gutter_geometry(&snapshot, editor.scroll_row, end_row - editor.scroll_row);
+        blame::paint_blame_column(
+            paint.lines.as_ref(),
+            &folded,
             Rect {
                 width: blame_w,
                 ..inner
             },
-            (end_row - editor.scroll_row) as u16,
             &colors,
             buf,
             scene.as_deref_mut(),
@@ -6979,34 +6984,63 @@ mod tests {
         assert_eq!((blamed_gutter, blamed_text_x), (gutter + 18, text_x + 18));
     }
 
-    /// The column's surface is one bar at the pane's left, 281 sixteenths wide
-    /// over the file's three rows, in ermine's column color, and the gutter's
-    /// own bars move 18 cells right.
+    /// Each line of the file's one run takes a bar in ermine's newest age
+    /// color and the column's surface beside it, the empty row past the last
+    /// line takes the surface alone, and the gutter's own bars move 18 cells
+    /// right.
     #[test]
-    fn the_blame_column_surface_is_one_bar_left_of_the_gutter() {
+    fn the_blame_column_draws_its_bars_left_of_the_gutter() {
         let mut h = blame_column_harness(120);
         let gutter = lane_bars(&h);
         assert!(!gutter.is_empty(), "the gutter draws its separator");
         blame_on(&mut h);
         let (area, _, _) = text_start(&mut h);
-        let (surfaces, rest): (Vec<_>, Vec<_>) = lane_bars(&h)
+        let column_end = ((area.x + 18) * 16) as i16;
+        let (mut column, rest): (Vec<_>, Vec<_>) = lane_bars(&h)
             .into_iter()
-            .partition(|&(_, _, width, _, _)| width == 281);
+            .partition(|&(x, ..)| x < column_end);
+        column.sort_by_key(|&(x, y, ..)| (y, x));
         let moved: Vec<_> = gutter
             .into_iter()
             .map(|(x, y, width, height, color)| (x + 18 * 16, y, width, height, color))
             .collect();
-        let surface = (
-            (area.x * 16) as i16,
-            (area.y * 16) as i16,
-            281,
-            48,
-            [0x14, 0x16, 0x1a],
-        );
+
+        let (left, top) = ((area.x * 16) as i16, (area.y * 16) as i16);
+        let (age, surface) = ([0xa9, 0xc8, 0xff], [0x14, 0x16, 0x1a]);
         assert_eq!(
-            (surfaces, rest),
-            (vec![surface], moved),
-            "one surface bar at the pane's left, and the gutter's bars 18 cells right",
+            (column, rest),
+            (
+                vec![
+                    (left, top, 4, 16, age),
+                    (left + 4, top, 277, 16, surface),
+                    (left, top + 16, 4, 16, age),
+                    (left + 4, top + 16, 277, 16, surface),
+                    (left, top + 32, 281, 16, surface),
+                ],
+                moved
+            ),
+            "the run's bars and the surface, and the gutter's bars 18 cells right",
+        );
+    }
+
+    /// The first line of a blamed run reads its commit's short sha at the
+    /// label's start, past the run's bar and its gap.
+    #[test]
+    fn a_blamed_run_names_its_short_sha_on_its_first_line() {
+        let mut h = blame_column_harness(120);
+        blame_on(&mut h);
+        let (area, _, _) = text_start(&mut h);
+        let shas: Vec<_> = lane_texts(&h)
+            .into_iter()
+            .filter(|(text, ..)| text == "c1")
+            .collect();
+        assert_eq!(
+            shas,
+            [(
+                "c1".to_owned(),
+                (area.x * 16 + 14) as i16,
+                (area.y * 16) as i16
+            )]
         );
     }
 
@@ -7063,9 +7097,11 @@ mod tests {
         );
 
         blame_on(&mut h);
+        let (area, _, _) = text_start(&mut h);
+        let column_end = ((area.x + 18) * 16) as i16;
         let rest: Vec<_> = lane_bars(&h)
             .into_iter()
-            .filter(|&(_, _, width, _, _)| width != 281)
+            .filter(|&(x, ..)| x >= column_end)
             .collect();
         let moved: Vec<_> = marks
             .into_iter()
@@ -7140,6 +7176,23 @@ mod tests {
                     .bars
                     .into_iter()
                     .map(|(x, y, width, height)| (x, y, width, height, group.color))
+                    .collect(),
+                _ => Vec::new(),
+            })
+            .collect()
+    }
+
+    /// The text runs in the focused pane's lane, each as its text and its
+    /// place in sixteenths.
+    fn lane_texts(h: &crate::test_harness::TestHarness) -> Vec<(String, i16, i16)> {
+        lane_commands(h)
+            .into_iter()
+            .flat_map(|command| match command {
+                Command::TextRun(run) => vec![(run.text, run.col, run.row)],
+                Command::TextRuns(group) => group
+                    .runs
+                    .into_iter()
+                    .map(|(col, row, text)| (text, col, row))
                     .collect(),
                 _ => Vec::new(),
             })
