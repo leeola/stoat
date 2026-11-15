@@ -2,6 +2,7 @@ use crate::{
     defs::{
         agent::SpawnClaude,
         app::{OpenLogs, PinMode, Quit, QuitAll, QuitAllCancel, QuitAllConfirm, ShowVersion},
+        blame::ToggleBlame,
         commits::{
             CloseCommits, CommitsDetailDown, CommitsDetailUp, CommitsFirst, CommitsLast,
             CommitsNext, CommitsOpenReview, CommitsPageDown, CommitsPageUp, CommitsPrev,
@@ -351,6 +352,7 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
         Ok(Box::new(DiffFiles { rev }))
     });
     add(ChangeWalkWrap::DEF, |_| Ok(Box::new(ChangeWalkWrap)));
+    add(ToggleBlame::DEF, |_| Ok(Box::new(ToggleBlame)));
     add(DiffUnderline::DEF, |_| Ok(Box::new(DiffUnderline)));
     add(DiffBold::DEF, |_| Ok(Box::new(DiffBold)));
     add(DiffSyntax::DEF, |_| Ok(Box::new(DiffSyntax)));
@@ -1597,6 +1599,7 @@ mod tests {
         "LiveReload",
         "FollowReload",
         "ChangeWalkWrap",
+        "ToggleBlame",
         "DiffUnderline",
         "DiffBold",
         "DiffSyntax",
@@ -2184,7 +2187,8 @@ mod tests {
         // + 3 the git status panel actions.
         // + 7 the git status panel's row and banner keys.
         // + 1 GitStatusSkip.
-        assert_eq!(all().count(), 495);
+        // + 1 ToggleBlame.
+        assert_eq!(all().count(), 496);
     }
 
     #[test]

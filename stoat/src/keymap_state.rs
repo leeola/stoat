@@ -49,6 +49,7 @@ pub(crate) const BUILTIN_FIELDS: &[&str] = &[
     "changes",
     "pair_diff",
     "comment",
+    "blame",
 ];
 
 /// The keymap predicate values that the active [`Workspace`] and the app
@@ -246,6 +247,10 @@ pub(crate) struct StoatKeymapState<'a> {
     /// Whether the focused editor's cursor row opens with a line comment token
     /// of the buffer's language.
     comment: StateValue,
+    /// Whether the focused split pane shows the Blame Column, which it does only
+    /// over a plain editor, as [`Pane::blames`](crate::pane::Pane::blames)
+    /// reads it.
+    blame: StateValue,
     /// Config-defined session variables, read only after the built-in fields so
     /// a variable can never shadow one. Borrowed from the owning [`Stoat`];
     /// `None` for the flag-built states that carry no user vars.
@@ -291,6 +296,7 @@ impl<'a> StoatKeymapState<'a> {
             changes: StateValue::Bool(false),
             pair_diff: StateValue::Bool(false),
             comment: StateValue::Bool(false),
+            blame: StateValue::Bool(false),
             user_vars: None,
         }
     }
@@ -366,8 +372,8 @@ impl<'a> StoatKeymapState<'a> {
     }
 
     /// Set the `lsp`/`lang`/`diags`/`has_selection`/`modified`/`changes`/
-    /// `pair_diff`/`comment` predicate values from a focused-buffer derivation
-    /// (see [`focus_flags`]).
+    /// `pair_diff`/`comment`/`blame` predicate values from a focused-buffer
+    /// derivation (see [`focus_flags`]).
     pub(crate) fn with_focus_flags(mut self, flags: FocusFlags) -> Self {
         self.lsp = StateValue::Bool(flags.lsp);
         self.lang = flags.lang.map(|l| StateValue::String(l.into()));
@@ -377,6 +383,7 @@ impl<'a> StoatKeymapState<'a> {
         self.changes = StateValue::Bool(flags.changes);
         self.pair_diff = StateValue::Bool(flags.pair_diff);
         self.comment = StateValue::Bool(flags.comment);
+        self.blame = StateValue::Bool(flags.blame);
         self
     }
 
@@ -430,6 +437,7 @@ impl KeymapState for StoatKeymapState<'_> {
             "changes" => Some(&self.changes),
             "pair_diff" => Some(&self.pair_diff),
             "comment" => Some(&self.comment),
+            "blame" => Some(&self.blame),
             other => self.user_vars.and_then(|m| m.get(other)),
         }
     }
@@ -515,6 +523,7 @@ pub(crate) struct FocusFlags {
     changes: bool,
     pair_diff: bool,
     comment: bool,
+    blame: bool,
 }
 
 /// Derive [`FocusFlags`] for the focused buffer, sharing [`resolve_focus`] with
@@ -554,6 +563,10 @@ pub(crate) fn focus_flags(
         .buffers
         .path_for(buffer_id)
         .is_some_and(|path| ws.pair_for(path).is_some());
+    // A dock's editor resolves as the focus too, and the split pane's flag
+    // says nothing about it.
+    let blame = matches!(ws.focus, FocusTarget::SplitPane)
+        && ws.panes.pane(ws.panes.focus()).blames(editor);
     FocusFlags {
         lsp,
         lang,
@@ -563,6 +576,7 @@ pub(crate) fn focus_flags(
         changes,
         pair_diff,
         comment,
+        blame,
     }
 }
 
@@ -1448,6 +1462,34 @@ mod tests {
             [scratch, staged, git(&h)],
             [false, true, false].map(|on| Some(StateValue::Bool(on))),
             "a scratch root, the staged repository, then a root outside it",
+        );
+    }
+
+    /// The `blame` predicate as the keymap reads it.
+    fn blame(h: &crate::test_harness::TestHarness) -> Option<StateValue> {
+        StoatKeymapState::from_stoat(&h.stoat).get("blame").cloned()
+    }
+
+    /// `blame` reads the focused pane's flag while the pane shows a plain
+    /// editor, and reads false once that editor turns into a diff view.
+    #[test]
+    fn blame_reads_the_focused_pane_over_a_plain_editor() {
+        let mut h = Stoat::test();
+        let off = blame(&h);
+        {
+            let ws = h.stoat.active_workspace_mut();
+            let focus = ws.panes.focus();
+            ws.panes.pane_mut(focus).blame = true;
+        }
+        let on = blame(&h);
+
+        action_handlers::focused_editor_mut(&mut h.stoat)
+            .expect("editor")
+            .set_diff_view(true);
+        assert_eq!(
+            [off, on, blame(&h)],
+            [false, true, false].map(|on| Some(StateValue::Bool(on))),
+            "off, on over the plain editor, then off over its diff view",
         );
     }
 

@@ -564,7 +564,7 @@ pub(crate) fn action_is_available(kind: ActionKind, ctx: &Availability) -> bool 
 
         GitLs | GitReview | Review | GitCheckout | GitBranch | GitCommit | GitAmend | GitAdd
         | GitRebase | GitStatus | GitDiff | GitDiffCached | GitStash | GitStashPush
-        | GitStashPop | GitStashList | GitMerge => ctx.in_repo,
+        | GitStashPop | GitStashList | GitMerge | ToggleBlame => ctx.in_repo,
         GitMergeAbort | GitMergeContinue => ctx.in_repo && ctx.in_merge,
 
         // WalkthroughOpen is absent on purpose. A reader opens a tour when none
@@ -2020,6 +2020,7 @@ mod tests {
             "GitStashPop",
             "GitStashPush",
             "GitStatus",
+            "ToggleBlame",
         ];
         let without = |left_out: &[&str]| -> Vec<&str> {
             group

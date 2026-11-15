@@ -516,7 +516,7 @@ fn emit_window_content(stoat: &mut Stoat, out: &mut Vec<u8>) -> Vec<Vec<u8>> {
     let mut patch_batches = Vec::new();
 
     for (windowed_index, (pane_id, window)) in windowed.into_iter().enumerate() {
-        let (content, status, view, index, is_focused, area) = {
+        let (content, status, view, index, is_focused, area, blame) = {
             let pane = ws.panes.pane(pane_id);
             // The pane stops one row above its window's last row, which is the
             // window's status row.
@@ -527,6 +527,10 @@ fn emit_window_content(stoat: &mut Stoat, out: &mut Vec<u8>) -> Vec<Vec<u8>> {
                 ..pane.area
             };
             let is_focused = matches!(focus_target, FocusTarget::SplitPane) && pane_id == focus_id;
+            let blame = match pane.view {
+                View::Editor(id) => ws.editors.get(id).is_some_and(|editor| pane.blames(editor)),
+                _ => false,
+            };
             (
                 content,
                 status,
@@ -534,6 +538,7 @@ fn emit_window_content(stoat: &mut Stoat, out: &mut Vec<u8>) -> Vec<Vec<u8>> {
                 pane.index,
                 is_focused,
                 pane.area,
+                blame,
             )
         };
 
@@ -690,6 +695,7 @@ fn emit_window_content(stoat: &mut Stoat, out: &mut Vec<u8>) -> Vec<Vec<u8>> {
             &ws.terms,
             &mut ws.diff_changes_views,
             badge,
+            blame,
         );
         let content_version = {
             let mut hasher = DefaultHasher::new();

@@ -77,6 +77,7 @@ action_kinds! {
     OpenHelp,
     DiffFiles,
     ChangeWalkWrap,
+    ToggleBlame,
     DiffUnderline,
     DiffBold,
     DiffSyntax,

@@ -1,5 +1,6 @@
 mod agent;
 mod amend;
+mod blame;
 pub(crate) mod code_search;
 mod comment_reflow;
 pub(crate) mod commits;
@@ -722,6 +723,7 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
             movement::goto_change(stoat, movement::ChangeDir::Prev, movement::ChangeUnit::Git)
         },
         ActionKind::ChangeWalkWrap => movement::toggle_change_wrap(stoat),
+        ActionKind::ToggleBlame => blame::toggle_blame(stoat),
         ActionKind::DiffUnderline => stoat.handle_diff_underline_toggle(),
         ActionKind::DiffBold => stoat.handle_diff_bold_toggle(),
         ActionKind::DiffSyntax => stoat.handle_diff_syntax_toggle(),

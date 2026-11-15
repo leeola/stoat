@@ -1469,9 +1469,14 @@ pub(crate) fn status_row(
 
     let content = pane.area;
     let sides = sides_layout(&pane.view, content, frame, editors);
+    let blame = match pane.view {
+        View::Editor(id) => editors.get(id).is_some_and(|editor| pane.blames(editor)),
+        _ => false,
+    };
     let mut badge = None;
     let runs = status_segments(
-        &pane.view, is_focused, area, sides, frame, editors, buffers, terms, changes, &mut badge,
+        &pane.view, is_focused, blame, area, sides, frame, editors, buffers, terms, changes,
+        &mut badge,
     );
     StatusRow { runs, badge }
 }
@@ -1540,6 +1545,10 @@ pub(crate) struct PaneStatusCells {
 /// `content` is the pane's content in the row's coordinates. A diff view's row
 /// splits at the divider that its diff body takes there, and names the base
 /// and the target as a split row in the main window does.
+///
+/// `blame` is whether the pane shows the Blame Column, as
+/// [`Pane::blames`](crate::pane::Pane::blames) reads it. The row then names it
+/// after the file name, as [`status_row`] does in the main window.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn pane_status_cells(
     view: &View,
@@ -1552,10 +1561,11 @@ pub(crate) fn pane_status_cells(
     terms: &SlotMap<TermId, TermSession>,
     changes: &mut SlotMap<DiffChangesId, DiffChangesState>,
     badge: Option<u32>,
+    blame: bool,
 ) -> PaneStatusCells {
     let sides = sides_layout(view, content, frame, editors);
     let mut runs = status_segments(
-        view, is_focused, area, sides, frame, editors, buffers, terms, changes, &mut None,
+        view, is_focused, blame, area, sides, frame, editors, buffers, terms, changes, &mut None,
     );
 
     if let (Some(digit), Some(first)) = (badge, runs.first_mut()) {
@@ -2280,6 +2290,7 @@ fn status_message_style(base_style: Style, theme: &crate::theme::Theme) -> Style
 fn status_segments(
     view: &View,
     is_focused: bool,
+    blame: bool,
     area: Rect,
     sides: Option<SidesLayout>,
     frame: FrameCtx<'_>,
@@ -2456,6 +2467,16 @@ fn status_segments(
         if let Some(note) = read_only_note(status.read_only, status.disk_len, status.text_len) {
             let muted = muted_tint(lead_style, theme);
             push_left(&mut left, &mut cursor, lead_end, note, muted);
+        }
+        if blame {
+            let muted = muted_tint(lead_style, theme);
+            push_left(
+                &mut left,
+                &mut cursor,
+                lead_end,
+                " blame ".to_owned(),
+                muted,
+            );
         }
     }
     // A lone cursor paints no count, since the count only answers how many
@@ -3993,6 +4014,39 @@ mod tests {
             inks,
             [[muted, dim, rust, muted], [muted, text, rust, muted]],
             "the unfocused left row, then the focused right row",
+        );
+    }
+
+    /// A blamed pane's status row names `blame` right after its file name, and
+    /// the other pane's row does not name it.
+    #[test]
+    fn a_blamed_pane_names_blame_after_its_file_name() {
+        let mut h = crate::test_harness::TestHarness::with_size(120, 12);
+        h.stoat.active_workspace_mut().git_root = PathBuf::from("/repo");
+        let path = PathBuf::from("/repo/src/a.rs");
+        h.fake_fs().insert_file(&path, b"fn a() {}\n");
+        dispatch(&mut h.stoat, &OpenFile { path });
+        h.settle();
+        h.type_action("SplitRight()");
+        {
+            let ws = h.stoat.active_workspace_mut();
+            let focus = ws.panes.focus();
+            ws.panes.pane_mut(focus).blame = true;
+        }
+
+        let buf = h.render_composited();
+        let before_blame: Vec<Option<String>> = pane_status_rows(&h, &buf)
+            .into_iter()
+            .map(|(_, text)| {
+                let words: Vec<&str> = text.split_whitespace().collect();
+                let at = words.iter().position(|word| *word == "blame")?;
+                Some(words[at.checked_sub(1)?].to_string())
+            })
+            .collect();
+        assert_eq!(
+            before_blame,
+            [None, Some("src/a.rs".to_string())],
+            "the left row holds no blame, and the blamed right row holds it after the name",
         );
     }
 

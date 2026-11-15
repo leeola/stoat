@@ -35,11 +35,12 @@ pub(crate) enum Toggle {
     TabBar,
     PaneFade,
     RelativeNumbers,
+    Blame,
 }
 
 impl Toggle {
     /// Every toggle, in declaration order.
-    pub(crate) const ALL: [Toggle; 20] = [
+    pub(crate) const ALL: [Toggle; 21] = [
         Toggle::FollowChanges,
         Toggle::LiveReload,
         Toggle::FollowReload,
@@ -60,6 +61,7 @@ impl Toggle {
         Toggle::TabBar,
         Toggle::PaneFade,
         Toggle::RelativeNumbers,
+        Toggle::Blame,
     ];
 
     /// The toggle an action of `kind` flips, or `None` for an action that flips
@@ -86,6 +88,7 @@ impl Toggle {
             ActionKind::ToggleTabBar => Toggle::TabBar,
             ActionKind::TogglePaneFade => Toggle::PaneFade,
             ActionKind::ToggleRelativeNumbers => Toggle::RelativeNumbers,
+            ActionKind::ToggleBlame => Toggle::Blame,
             _ => return None,
         })
     }
@@ -126,6 +129,7 @@ impl Toggle {
             Toggle::TabBar => stoat.tab_bar_visible(),
             Toggle::PaneFade => stoat.pane_fade_enabled(),
             Toggle::RelativeNumbers => stoat.relative_numbers_enabled(),
+            Toggle::Blame => ws.panes.pane(ws.panes.focus()).blame,
         }
     }
 }
@@ -220,6 +224,7 @@ mod tests {
                 binding_toggle(&[action("SetMode")]),
                 binding_toggle(&[action("DiffFiles")]),
                 binding_toggle(&[diff_head]),
+                binding_toggle(&[action("ToggleBlame"), action("SetMode")]),
             ],
             [
                 Some(Toggle::FollowChanges),
@@ -228,6 +233,7 @@ mod tests {
                 None,
                 Some(Toggle::DiffView),
                 None,
+                Some(Toggle::Blame),
             ],
         );
     }
@@ -339,6 +345,11 @@ mod tests {
         dispatch(&mut h.stoat, &ToggleWrap);
         dispatch(&mut h.stoat, &ToggleMinimap);
         dispatch(&mut h.stoat, &ToggleTabBar);
+        {
+            let ws = h.stoat.active_workspace_mut();
+            let focus = ws.panes.focus();
+            ws.panes.pane_mut(focus).blame = true;
+        }
 
         assert_eq!(
             on(&h.stoat),
@@ -351,6 +362,7 @@ mod tests {
                 Toggle::TabBar,
                 Toggle::PaneFade,
                 Toggle::RelativeNumbers,
+                Toggle::Blame,
             ],
             "each view toggle reads the state its action flipped",
         );

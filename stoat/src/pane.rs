@@ -1,7 +1,7 @@
 use crate::{
     commit_list::CommitListId,
     diff_changes::DiffChangesId,
-    editor_state::EditorId,
+    editor_state::{EditorId, EditorState},
     jumplist::{ChangeLanding, JumpList},
     run::RunId,
     term_session::TermId,
@@ -216,6 +216,17 @@ pub struct Pane {
     /// restored session starts unlatched.
     #[serde(skip)]
     pub(crate) diff_mode: bool,
+    /// Whether the pane shows the Blame Column while it shows a plain editor.
+    ///
+    /// Per pane rather than per editor, because each cross-file open replaces
+    /// the editor, and the column stays while the pane moves between files. A
+    /// diff view or a conflict view hides the column without clearing the flag,
+    /// as [`Self::blames`] reads it.
+    ///
+    /// `serde(skip)`: session intent rather than persisted layout, so a
+    /// restored session starts with the column off.
+    #[serde(skip)]
+    pub(crate) blame: bool,
     /// The buffers this pane has shown, oldest first and each once.
     ///
     /// A buffer enters when the pane moves off it, and
@@ -241,6 +252,18 @@ pub struct Pane {
 }
 
 impl Pane {
+    /// Whether the pane shows the Blame Column over `editor`, the editor of its
+    /// view.
+    ///
+    /// The column shows only on a plain editor, so a diff view and a conflict
+    /// view hide it while [`Self::blame`] stays set.
+    pub(crate) fn blames(&self, editor: &EditorState) -> bool {
+        self.blame
+            && matches!(self.view, View::Editor(_))
+            && !editor.diff_view
+            && editor.conflict_view.is_none()
+    }
+
     /// Move `id` to the tail of [`Self::buffer_history`], as the buffer the pane
     /// showed most recently.
     pub(crate) fn record_shown(&mut self, id: BufferId) {
@@ -332,6 +355,7 @@ impl PaneTree {
             jumplist: JumpList::default(),
             change_landing: None,
             diff_mode: false,
+            blame: false,
             buffer_history: Vec::new(),
         });
 
@@ -390,12 +414,14 @@ impl PaneTree {
                 jumplist: _,
                 change_landing,
                 diff_mode,
+                blame,
                 buffer_history: _,
             } = pane;
             *prev_view = None;
             *area = Rect::default();
             *change_landing = None;
             *diff_mode = false;
+            *blame = false;
         }
 
         let mut nodes = nodes.clone();
@@ -548,6 +574,7 @@ impl PaneTree {
             jumplist: anchor.jumplist.clone(),
             change_landing: anchor.change_landing.clone(),
             diff_mode: false,
+            blame: false,
             buffer_history: anchor.buffer_history.clone(),
         };
         let new_pane_id = self.panes.insert(pane);
@@ -842,6 +869,7 @@ impl PaneTree {
         std::mem::swap(&mut pa.change_landing, &mut pb.change_landing);
         std::mem::swap(&mut pa.buffer_history, &mut pb.buffer_history);
         std::mem::swap(&mut pa.diff_mode, &mut pb.diff_mode);
+        std::mem::swap(&mut pa.blame, &mut pb.blame);
     }
 
     pub fn split_panes(&self) -> Traverse<'_> {

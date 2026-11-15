@@ -653,6 +653,7 @@ on init {
 #                  space h D set
 #   comment        the cursor row opens with a line comment token of the
 #                  buffer's language
+#   blame          the focused pane shows the Blame Column
 #   pair           exactly two split panes show two different files
 #   git            the workspace root is inside a git repository
 #   walkthrough    a walkthrough tour is open
@@ -1952,6 +1953,9 @@ on key {
     # the changed files by section under the branch and any merge or rebase
     # in progress.
     #
+    # `a` shows or hides the Blame Column of the focused pane, which names the
+    # commit that last changed each line.
+    #
     # The mouse side buttons ride the same hops, forward as p and back as n, so
     # a pinned chord walks changes from the mouse exactly as the keys do. The
     # forward button sits above the back button, so the upper button walks up
@@ -1987,6 +1991,7 @@ on key {
             f -> [FollowChanges(), SetMode(normal)];
             l -> GitLs();
             t -> [SetMode(normal), GitStatus()];
+            a -> [ToggleBlame(), SetMode(normal)];
         }
 
         git && changes {

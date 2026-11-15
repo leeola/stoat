@@ -4764,10 +4764,11 @@ fn the_git_chord_marks_its_toggles() {
         [
             (off.to_string(), inactive),
             (on.to_string(), active),
+            (off.to_string(), inactive),
             (on.to_string(), active),
             (off.to_string(), inactive),
         ],
-        "d and R are off, and c and f are on",
+        "a, d, and R are off, and c and f are on",
     );
 }
 

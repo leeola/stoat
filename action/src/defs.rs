@@ -1,5 +1,6 @@
 pub mod agent;
 pub mod app;
+pub mod blame;
 pub mod commits;
 pub mod conflict;
 pub mod diff_changes;
