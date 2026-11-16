@@ -731,6 +731,7 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
         ActionKind::BlameCopySha => blame::copy_sha(stoat),
         ActionKind::BlamePreview => blame::preview(stoat),
         ActionKind::BlameCheckout => blame::checkout(stoat),
+        ActionKind::BlameParent => blame::blame_parent(stoat),
         ActionKind::CheckoutConfirmAccept => blame::accept_checkout(stoat),
         ActionKind::CheckoutConfirmCancel => checkout_confirm::cancel(stoat),
         ActionKind::CommitPreviewClose => commit_preview::close(stoat),

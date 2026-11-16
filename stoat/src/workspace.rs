@@ -863,8 +863,10 @@ impl Workspace {
     /// What tab `idx` calls itself in the tab bar, taken from its focused
     /// pane's view.
     ///
-    /// A pane in the diff view names its file after a `±`, as `± main.rs`. A
-    /// file measured against another file names the file the pane edits. A
+    /// A pane on a revision buffer names the file and the commit, as
+    /// `main.rs @ a1b2c3d`. A pane in the diff view names its file after a `±`,
+    /// as `± main.rs`. A file measured against another file names the file the
+    /// pane edits. A
     /// changes view counts the files its stack holds, as `± changes · 2
     /// files`. Any other pane reads as [`Self::view_title`] names its view.
     /// An out-of-range index is empty.
@@ -886,6 +888,18 @@ impl Workspace {
         };
 
         let view = &tree.pane(tree.focus()).view;
+        if let View::Editor(id) = view
+            && let Some(source) = self
+                .editors
+                .get(*id)
+                .and_then(|editor| self.buffers.revision(editor.buffer_id))
+        {
+            let name = source
+                .path
+                .file_name()
+                .map_or_else(String::new, |name| name.to_string_lossy().into_owned());
+            return format!("{name} @ {}", diff::short_sha(&source.sha));
+        }
         match view {
             View::Editor(id) if self.editors.get(*id).is_some_and(|editor| editor.diff_view) => {
                 format!("\u{b1} {}", self.view_title(view))
@@ -1775,7 +1789,8 @@ impl Workspace {
         self.blame.refresh_rows(&self.buffers, &wanted);
     }
 
-    /// The buffers with a path that blamed split panes show, each once.
+    /// The buffers with a path or a revision that blamed split panes show, each
+    /// once.
     fn blamed_buffer_ids(&self, out: &mut Vec<BufferId>) {
         for (_, pane) in self.panes.split_panes() {
             let View::Editor(editor_id) = pane.view else {
@@ -1785,7 +1800,9 @@ impl Workspace {
                 continue;
             };
             let id = editor.buffer_id;
-            if pane.blames(editor) && self.buffers.path_for(id).is_some() && !out.contains(&id) {
+            let blamable =
+                self.buffers.path_for(id).is_some() || self.buffers.revision(id).is_some();
+            if pane.blames(editor) && blamable && !out.contains(&id) {
                 out.push(id);
             }
         }

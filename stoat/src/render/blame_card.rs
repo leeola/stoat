@@ -415,7 +415,8 @@ mod tests {
     /// Without components the card is plain rows under the cursor's line,
     /// from the card's second column to its last but one. The rows read the
     /// sha and the subject, the meta line cut to the card, the body, and the
-    /// card's keys, over the frame's border on the first and last rows.
+    /// card's keys cut to the card, over the frame's border on the first and
+    /// last rows.
     #[test]
     fn the_cell_card_reads_its_rows_under_the_line() {
         let mut h = card_open();
@@ -448,7 +449,7 @@ mod tests {
                 format!("{:<56}", "the body of two"),
                 format!(
                     "{:\u{2500}<56}",
-                    "Ret preview patch  c check out  y copy sha  Esc close"
+                    "Ret preview patch  c check out  p blame parent  y copy s"
                 ),
             ],
         );

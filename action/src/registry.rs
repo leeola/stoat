@@ -3,7 +3,7 @@ use crate::{
         agent::SpawnClaude,
         app::{OpenLogs, PinMode, Quit, QuitAll, QuitAllCancel, QuitAllConfirm, ShowVersion},
         blame::{
-            BlameCard, BlameCardClose, BlameCheckout, BlameCopySha, BlamePreview,
+            BlameCard, BlameCardClose, BlameCheckout, BlameCopySha, BlameParent, BlamePreview,
             CheckoutConfirmAccept, CheckoutConfirmCancel, CommitPreviewClose,
             CommitPreviewLineDown, CommitPreviewLineUp, CommitPreviewNextFile, CommitPreviewParent,
             CommitPreviewPrevFile, ToggleBlame,
@@ -363,6 +363,7 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
     add(BlameCopySha::DEF, |_| Ok(Box::new(BlameCopySha)));
     add(BlamePreview::DEF, |_| Ok(Box::new(BlamePreview)));
     add(BlameCheckout::DEF, |_| Ok(Box::new(BlameCheckout)));
+    add(BlameParent::DEF, |_| Ok(Box::new(BlameParent)));
     add(CheckoutConfirmAccept::DEF, |_| {
         Ok(Box::new(CheckoutConfirmAccept))
     });
@@ -1639,6 +1640,7 @@ mod tests {
         "BlameCopySha",
         "BlamePreview",
         "BlameCheckout",
+        "BlameParent",
         "CheckoutConfirmAccept",
         "CheckoutConfirmCancel",
         "CommitPreviewClose",
@@ -2242,7 +2244,8 @@ mod tests {
         // + 1 CommitPreviewParent.
         // + 1 BlameCheckout.
         // + 2 CheckoutConfirmAccept/CheckoutConfirmCancel.
-        assert_eq!(all().count(), 509);
+        // + 1 BlameParent.
+        assert_eq!(all().count(), 510);
     }
 
     #[test]

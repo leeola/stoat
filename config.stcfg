@@ -817,6 +817,7 @@ on key {
         ] -> SetMode(bracket_next) "file";
         [ -> SetMode(bracket_prev) "file";
         c -> BlameCheckout() "check out";
+        p -> BlameParent() "blame parent";
         P -> CommitPreviewParent() "other parent";
         Down -> CommitPreviewLineDown();
         Up -> CommitPreviewLineUp();
@@ -1533,6 +1534,7 @@ on key {
         K -> BlameCard();
         Enter -> BlamePreview() "preview patch";
         c -> BlameCheckout() "check out";
+        p -> BlameParent() "blame parent";
         y -> BlameCopySha() "copy sha";
         blame_card {
             Escape -> BlameCardClose() "close";

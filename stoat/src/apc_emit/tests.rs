@@ -2540,6 +2540,25 @@ fn a_read_only_pane_rings_its_text_and_names_why() {
     }
 }
 
+/// A revision buffer rings its text and names itself a revision on the ring,
+/// as a read-only file names why.
+#[test]
+fn a_revision_pane_rings_its_text_and_names_it_a_revision() {
+    let mut h = read_only_harness(read_only_theme(), "a.txt", b"notes\n", true);
+    let path = PathBuf::from("/ro/a.txt");
+    crate::buffer_lifecycle::show_revision(&mut h.stoat, &path, "a1b2c3d4e5", "notes\n");
+
+    let (marks, _) = read_only_paint(&mut h);
+    let text = action_handlers::focused_editor_mut(&mut h.stoat)
+        .expect("the focused editor")
+        .text_rect
+        .expect("the painted text");
+    assert_eq!(
+        marks,
+        ring_and_label(text, "read only \u{b7} revision", &h.stoat.theme),
+    );
+}
+
 /// No ring draws under a theme that leaves the read-only scopes unset, nor for
 /// a terminal that reads a backdrop panel as one above every pool.
 #[test]

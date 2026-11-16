@@ -83,6 +83,21 @@ define_action!(
 );
 
 define_action!(
+    BlameParentDef,
+    BlameParent,
+    "BlameParent",
+    ActionKind::BlameParent,
+    "blame the file at the commit's parent",
+    "Show the file of the cursor line's commit as it stood at the commit's \
+     first parent, read-only, with the cursor on the line that matches. The \
+     pane keeps its blame, so a second press goes one commit further, and the \
+     jump back returns. From the Commit Preview it closes the preview first. A \
+     root commit and a file the parent does not hold set the status instead.",
+    ActionPriority::Rare,
+    palette_visible = false
+);
+
+define_action!(
     CheckoutConfirmAcceptDef,
     CheckoutConfirmAccept,
     "CheckoutConfirmAccept",

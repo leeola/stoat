@@ -102,6 +102,23 @@ pub(crate) enum ReadOnly {
     /// The text is a gzip file's decompressed content, held only in memory, so
     /// it has no file of its own to write back to, and no save writes it.
     Compressed,
+    /// The text is a file as it stood at a commit, which the buffer's
+    /// [`RevisionSource`] names. The buffer has no path, so no save, reload,
+    /// diff, or language server reaches it.
+    Revision,
+}
+
+/// The file and the commit whose text a revision buffer holds.
+///
+/// A revision buffer has no path of its own, since its text is not the file on
+/// disk. This names the working file it stands for and the commit it shows. The
+/// status row and the tab name them, and a blame reads at the commit.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct RevisionSource {
+    /// The working file's path.
+    pub(crate) path: PathBuf,
+    /// The full sha of the commit the text stands at.
+    pub(crate) sha: String,
 }
 
 struct BufferEntry {
@@ -171,6 +188,9 @@ struct BufferEntry {
     /// Why the buffer must not write back to its file, or `None` for a buffer
     /// that writes back.
     read_only: Option<ReadOnly>,
+    /// The file and the commit a revision buffer holds, or `None` for every
+    /// other buffer.
+    revision: Option<RevisionSource>,
     /// The buffer's auto-reload mode. Any non-[`AutoReloadMode::Off`] value is
     /// reported by [`BufferRegistry::auto_reload_paths`] so the auto-reload pump
     /// re-reads the file as the on-disk mtime advances. Set for the session log
@@ -282,6 +302,7 @@ impl BufferRegistry {
                 disk_mtime: None,
                 disk_len: None,
                 read_only: None,
+                revision: None,
                 auto_reload: AutoReloadMode::Off,
                 last_shown: 0,
                 line_ending: LineEnding::default(),
@@ -302,6 +323,53 @@ impl BufferRegistry {
     /// existing buffer discards `rope` the way it discards `text`.
     pub(crate) fn open_rope(&mut self, path: &Path, rope: Rope) -> (BufferId, SharedBuffer) {
         self.register(path, |id| TextBuffer::with_rope(id, rope))
+    }
+
+    /// Returns the buffer that holds `source`, or creates one with `text`.
+    ///
+    /// One buffer serves one file at one commit, so a later open of the same
+    /// `source` ignores `text`. A new buffer has no path and is read-only as a
+    /// [`ReadOnly::Revision`].
+    pub(crate) fn open_revision(
+        &mut self,
+        source: RevisionSource,
+        text: &str,
+    ) -> (BufferId, SharedBuffer) {
+        if let Some((&id, entry)) = self
+            .buffers
+            .iter()
+            .find(|(_, entry)| entry.revision.as_ref() == Some(&source))
+        {
+            return (id, entry.buffer.clone());
+        }
+
+        let id = self.allocate_id();
+        let buffer = Arc::new(RwLock::new(TextBuffer::with_text(id, text)));
+        self.buffers.insert(
+            id,
+            BufferEntry {
+                buffer: buffer.clone(),
+                path: None,
+                language: None,
+                syntax: None,
+                syntax_map: None,
+                token_spans: None,
+                tokens: None,
+                lsp_tokens: None,
+                lsp_token_source: None,
+                lsp_symbol_kinds: None,
+                preview: false,
+                origin: OpenOrigin::Visited,
+                disk_mtime: None,
+                disk_len: None,
+                read_only: Some(ReadOnly::Revision),
+                revision: Some(source),
+                auto_reload: AutoReloadMode::Off,
+                last_shown: 0,
+                line_ending: LineEnding::default(),
+            },
+        );
+        (id, buffer)
     }
 
     /// The existing buffer for `path`, or one `build` makes and this records.
@@ -338,6 +406,7 @@ impl BufferRegistry {
                 disk_mtime: None,
                 disk_len: None,
                 read_only: None,
+                revision: None,
                 auto_reload: AutoReloadMode::Off,
                 last_shown: 0,
                 line_ending: LineEnding::default(),
@@ -428,6 +497,12 @@ impl BufferRegistry {
     /// writes back and for an unknown id.
     pub(crate) fn read_only(&self, id: BufferId) -> Option<ReadOnly> {
         self.buffers.get(&id).and_then(|e| e.read_only)
+    }
+
+    /// The file and the commit that `id` holds a revision of, or `None` for a
+    /// buffer that is no revision and for an unknown id.
+    pub(crate) fn revision(&self, id: BufferId) -> Option<&RevisionSource> {
+        self.buffers.get(&id)?.revision.as_ref()
     }
 
     /// Record the line terminator `id`'s file was read with, so a save can write
@@ -619,12 +694,19 @@ impl BufferRegistry {
     /// persisted. Restored file buffers therefore need their language
     /// re-detected from the path before the parse pipeline will
     /// highlight them, since it skips any buffer whose language is
-    /// `None`. Scratch buffers, lacking a path, are excluded.
+    /// `None`. A revision buffer answers its source's path, whose language its
+    /// text takes. Scratch buffers, lacking both, are excluded.
     pub(crate) fn buffers_needing_language(&self) -> Vec<(BufferId, PathBuf)> {
         self.buffers
             .iter()
             .filter(|(_, entry)| entry.language.is_none())
-            .filter_map(|(id, entry)| entry.path.clone().map(|path| (*id, path)))
+            .filter_map(|(id, entry)| {
+                let path = entry
+                    .path
+                    .as_ref()
+                    .or(entry.revision.as_ref().map(|source| &source.path))?;
+                Some((*id, path.clone()))
+            })
             .collect()
     }
 
@@ -933,6 +1015,7 @@ impl BufferRegistry {
                 disk_mtime: entry.disk_mtime,
                 disk_len: entry.disk_len,
                 read_only: entry.read_only,
+                revision: entry.revision.clone(),
             })
             .collect();
         entries.sort_by_key(|e| e.id);
@@ -988,6 +1071,7 @@ impl BufferRegistry {
                     disk_mtime: entry.disk_mtime,
                     disk_len: entry.disk_len,
                     read_only: entry.read_only,
+                    revision: entry.revision,
                     auto_reload: AutoReloadMode::Off,
                     last_shown: 0,
                     line_ending: entry.line_ending,
@@ -1041,6 +1125,13 @@ pub(crate) struct BufferEntrySnap {
     /// writable buffer.
     #[serde(default)]
     pub read_only: Option<ReadOnly>,
+    /// The file and the commit a revision buffer holds, so a restored revision
+    /// buffer still names them and blames at the commit.
+    ///
+    /// Defaulted so a state file written before this field loads, with no
+    /// revision.
+    #[serde(default)]
+    pub revision: Option<RevisionSource>,
 }
 
 /// 32-byte blake3 hash of `text`.
@@ -1202,6 +1293,73 @@ mod tests {
             (restored.read_only(id), restored.disk_len(id)),
             (Some(ReadOnly::Compressed), Some(41_600))
         );
+    }
+
+    /// One buffer serves one file at one commit, so a second open of the pair
+    /// answers the first buffer and keeps its text, and another commit answers
+    /// another buffer. A revision buffer has no path and is read-only.
+    #[test]
+    fn open_revision_serves_one_buffer_per_file_and_commit() {
+        let mut reg = BufferRegistry::new();
+        let (first, _) = reg.open_revision(revision("c1"), "one\n");
+        let (again, buffer) = reg.open_revision(revision("c1"), "other\n");
+        let (second, _) = reg.open_revision(revision("c2"), "two\n");
+
+        let text = buffer
+            .read()
+            .expect("buffer")
+            .snapshot
+            .visible_text
+            .to_string();
+        assert_eq!(
+            (
+                again == first,
+                second == first,
+                text,
+                reg.path_for(first),
+                reg.read_only(first),
+                reg.revision(second),
+            ),
+            (
+                true,
+                false,
+                "one\n".to_owned(),
+                None,
+                Some(ReadOnly::Revision),
+                Some(&revision("c2")),
+            ),
+        );
+    }
+
+    /// A restored revision buffer keeps its tag and its source, and its
+    /// language comes back from the source's path.
+    #[test]
+    fn a_snapshot_round_trip_keeps_the_revision_and_its_language_path() {
+        let mut reg = BufferRegistry::new();
+        let (id, _) = reg.open_revision(revision("c1"), "fn a() {}\n");
+
+        let mut restored = BufferRegistry::new();
+        restored.restore_from(reg.snapshot_retaining(|_, _| true));
+        assert_eq!(
+            (
+                restored.read_only(id),
+                restored.revision(id),
+                restored.buffers_needing_language(),
+            ),
+            (
+                Some(ReadOnly::Revision),
+                Some(&revision("c1")),
+                vec![(id, PathBuf::from("/repo/a.rs"))],
+            ),
+        );
+    }
+
+    /// `/repo/a.rs` at commit `sha`.
+    fn revision(sha: &str) -> RevisionSource {
+        RevisionSource {
+            path: PathBuf::from("/repo/a.rs"),
+            sha: sha.to_owned(),
+        }
     }
 
     /// A state file written before the disk length was saved loads, and its

@@ -18,7 +18,7 @@ use crate::{
     app::{self, Stoat, UpdateEffect},
     badge::{Anchor, Badge, BadgeSource, BadgeState},
     buffer::{BufferId, SharedBuffer},
-    buffer_registry::{OpenOrigin, ReadOnly},
+    buffer_registry::{OpenOrigin, ReadOnly, RevisionSource},
     diff_changes::{self, DiffChangesId},
     editor_state::{EditorId, EditorState},
     host::FsMetadata,
@@ -757,6 +757,37 @@ fn register_open(
     Some((buffer_id, buffer))
 }
 
+/// Show `path` as it stood at commit `sha`, whose text is `text`, in the
+/// focused pane, and answer the revision buffer that holds it.
+///
+/// The buffer is read-only and has no path, so it reaches no language server,
+/// no reload, and no diff. It takes the language of `path`. One buffer serves
+/// one file at one commit, so a later show of the same pair shows the same
+/// buffer. The pane records a jump first, so the jump back returns from it.
+pub(crate) fn show_revision(stoat: &mut Stoat, path: &Path, sha: &str, text: &str) -> BufferId {
+    let workspace = stoat.active_workspace;
+    let source = RevisionSource {
+        path: path.to_path_buf(),
+        sha: sha.to_owned(),
+    };
+    let language = stoat.language_registry.for_path(path);
+    let ws = &mut stoat.workspaces[workspace];
+    let (buffer_id, buffer) = ws
+        .buffers
+        .open_revision(source, &LineEnding::normalize(text));
+    if ws.buffers.language_for(buffer_id).is_none()
+        && let Some(language) = language
+    {
+        ws.buffers.set_language(buffer_id, language);
+    }
+
+    let target = ws.panes.focus();
+    let executor = stoat.executor.clone();
+    jump::record_pane_switch(stoat, workspace, target, buffer_id);
+    show_buffer_in_pane(stoat, workspace, target, buffer_id, buffer, executor);
+    buffer_id
+}
+
 /// Show `buffer_id` in `target` by swapping the pane's editor to a fresh
 /// [`EditorState`] over the buffer, garbage-collecting the outgoing one.
 ///
@@ -1207,7 +1238,7 @@ mod tests {
     };
     use stoat_action::{
         CloseAllBuffers, CloseBuffer, DiffFiles, FocusLeft, ForceCloseAllBuffers, GotoLastAccessed,
-        OpenBuffer, OpenFile, SetMark, SplitRight,
+        JumpBackward, OpenBuffer, OpenFile, SaveBuffer, SetMark, SplitRight,
     };
 
     fn focused_buffer_id(stoat: &mut Stoat) -> BufferId {
@@ -1223,6 +1254,62 @@ mod tests {
         h.settle();
         let buffer_id = focused_editor_mut(&mut h.stoat).expect("editor").buffer_id;
         (path, buffer_id)
+    }
+
+    /// A revision shows a file's text at a commit in the focused pane, in a
+    /// read-only buffer with no path that takes the file's language. Its line
+    /// endings read as LF, as an open's do. The tab names the file and the
+    /// commit, a save refuses and names the commit, and the jump back returns
+    /// to the file.
+    #[test]
+    fn show_revision_shows_a_commit_read_only_and_jumps_back() {
+        let mut h = Stoat::test();
+        let path = PathBuf::from("/repo/a.rs");
+        h.fake_fs().insert_file(&path, b"fn two() {}\n");
+        dispatch(&mut h.stoat, &OpenFile { path: path.clone() });
+        h.settle();
+        let file = focused_buffer_id(&mut h.stoat);
+
+        let revision = show_revision(&mut h.stoat, &path, "a1b2c3d4e5", "fn one() {}\r\n");
+        let shown = {
+            let ws = h.stoat.active_workspace();
+            let text = ws.buffers.get(revision).map(|buffer| {
+                let buffer = buffer.read().expect("buffer");
+                buffer.snapshot.visible_text.to_string()
+            });
+            (
+                text,
+                ws.buffers.language_for(revision).map(|lang| lang.name),
+                ws.buffers.read_only(revision),
+                ws.buffers.path_for(revision).map(Path::to_path_buf),
+                ws.tab_title(0),
+            )
+        };
+        let focused = focused_buffer_id(&mut h.stoat);
+        dispatch(&mut h.stoat, &SaveBuffer);
+        let refusal = h.stoat.pending_message.clone();
+        dispatch(&mut h.stoat, &JumpBackward);
+
+        assert_eq!(
+            (
+                focused == revision,
+                shown,
+                refusal,
+                focused_buffer_id(&mut h.stoat) == file
+            ),
+            (
+                true,
+                (
+                    Some("fn one() {}\n".to_owned()),
+                    Some("rust"),
+                    Some(ReadOnly::Revision),
+                    None,
+                    "a.rs @ a1b2c3d".to_owned(),
+                ),
+                Some("a.rs is read only: a revision of a1b2c3d".to_owned()),
+                true,
+            ),
+        );
     }
 
     /// A `.gz` name reads on the pool, since its size on disk understates its

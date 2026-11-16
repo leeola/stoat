@@ -1,6 +1,6 @@
 use crate::{
     buffer::{BufferId, TextBufferSnapshot},
-    buffer_registry::BufferRegistry,
+    buffer_registry::{BufferRegistry, RevisionSource},
     editor_state::EditorId,
     host::{BlameCommit, FileBlame, GitHost, GitRepo},
     wake,
@@ -77,7 +77,8 @@ pub(crate) enum LineBlame<'a> {
     },
 }
 
-/// HEAD's text of one file and the commit that last changed each of its lines.
+/// The text of one file at HEAD, or at the commit a revision buffer holds, and
+/// the commit that last changed each of its lines.
 ///
 /// The text and the blame read one commit, so the lines the blame counts are
 /// the lines of the text.
@@ -179,7 +180,9 @@ struct BlameJob {
 
 struct BlameJobOutput {
     buffer_id: BufferId,
-    path: PathBuf,
+    /// The path whose HEAD blame the job read, which the cache keeps, or `None`
+    /// for the blame of a revision, which the cache does not keep.
+    cache_path: Option<PathBuf>,
     version: u64,
     /// The base the job read. `None` for a path outside the repository.
     base: Option<Option<Arc<BlameBase>>>,
@@ -235,25 +238,36 @@ impl BlameState {
             if !self.owes_run(executor, redraw, id, version) || self.jobs.contains_key(&id) {
                 continue;
             }
-            let Some(path) = buffers.path_for(id).map(Path::to_path_buf) else {
+            let revision = buffers.revision(id).cloned();
+            let Some(path) = buffers
+                .path_for(id)
+                .or(revision.as_ref().map(|source| source.path.as_path()))
+                .map(Path::to_path_buf)
+            else {
                 continue;
             };
 
             let snapshot = shared.read().expect("buffer poisoned").snapshot.clone();
-            let cached = self.base.get(&path).cloned();
+            // The cache holds HEAD's blame of each path, so the blame of a
+            // revision neither reads it nor writes it.
+            let cached = match revision {
+                Some(_) => None,
+                None => self.base.get(&path).cloned(),
+            };
             let task = executor.spawn_blocking({
                 let git_host = git_host.clone();
                 let git_root = git_root.to_path_buf();
                 let redraw = redraw.clone();
                 move || {
-                    let base = cached.or_else(|| resolve_base(&*git_host, &git_root, &path));
+                    let base = cached
+                        .or_else(|| resolve_base(&*git_host, &git_root, &path, revision.as_ref()));
                     let spans = base
                         .as_ref()
                         .map_or_else(Vec::new, |base| map_spans(base.as_deref(), &snapshot));
                     redraw.notify_one();
                     BlameJobOutput {
                         buffer_id: id,
-                        path,
+                        cache_path: revision.is_none().then_some(path),
                         version: snapshot.version,
                         base,
                         spans,
@@ -426,10 +440,11 @@ impl BlameState {
         for (out, superseded) in landed {
             // The base of a superseded job is possibly from before the move,
             // so the cache does not keep it, and its buffer owes another run.
-            if let Some(base) = &out.base
+            if let Some(path) = out.cache_path
+                && let Some(base) = &out.base
                 && !superseded
             {
-                self.base.insert(out.path, base.clone());
+                self.base.insert(path, base.clone());
             }
             self.files.insert(
                 out.buffer_id,
@@ -524,6 +539,29 @@ pub(crate) fn line_origins(base: &str, new: &str) -> Vec<Option<u32>> {
     let kept = new_lines - origins.len();
     origins.extend((base_line..).take(kept).map(Some));
     origins
+}
+
+/// The line of `parent_text` that line `line` of `commit_text` matches, which a
+/// blame of the commit's parent puts the cursor on.
+///
+/// A line the commit left as it was matches the parent line it keeps. A line
+/// the commit changed matches the parent line where the change starts, one past
+/// the parent line of the nearest kept line above it, or the first line when no
+/// line above is kept. The answer stays on a line the parent holds.
+pub(crate) fn parent_line(parent_text: &str, commit_text: &str, line: u32) -> u32 {
+    let origins = line_origins(parent_text, commit_text);
+    let line = line as usize;
+    if let Some(Some(origin)) = origins.get(line) {
+        return *origin;
+    }
+
+    let last = (parent_text.split_inclusive('\n').count() as u32).saturating_sub(1);
+    origins
+        .iter()
+        .take(line)
+        .rev()
+        .find_map(|origin| *origin)
+        .map_or(0, |origin| (origin + 1).min(last))
 }
 
 /// The details of commit `sha` in `repo`, as the Blame Card shows them.
@@ -633,14 +671,16 @@ pub(crate) fn age_buckets(commits: &[BlameCommit]) -> Vec<u8> {
         .collect()
 }
 
-/// HEAD's blame of `path` in the repository at `git_root`.
+/// The blame of `path` in the repository at `git_root`, at HEAD, or at the
+/// commit of `revision` for a buffer that holds the file at that commit.
 ///
 /// `None` for a path outside the workdir, which has no blame. `Some(None)` for
-/// a path HEAD does not hold and for a repository with no commit.
+/// a path the commit does not hold and for a repository with no commit.
 fn resolve_base(
     git_host: &dyn GitHost,
     git_root: &Path,
     path: &Path,
+    revision: Option<&RevisionSource>,
 ) -> Option<Option<Arc<BlameBase>>> {
     let repo = git_host.discover(git_root)?;
     if !repo
@@ -652,9 +692,13 @@ fn resolve_base(
 
     // HEAD resolves once, so the text and the blame read the same commit even
     // when a commit lands between the two reads.
-    let base = repo.resolve_rev("HEAD").and_then(|head| {
-        let text = repo.content_at(&head, path)?;
-        let blame = repo.blame(path, Some(&head))?;
+    let commit = match revision {
+        Some(source) => Some(source.sha.clone()),
+        None => repo.resolve_rev("HEAD"),
+    };
+    let base = commit.and_then(|commit| {
+        let text = repo.content_at(&commit, path)?;
+        let blame = repo.blame(path, Some(&commit))?;
         let ages = age_buckets(&blame.commits);
         Some(Arc::new(BlameBase { text, blame, ages }))
     });
@@ -804,8 +848,8 @@ fn boundary_line(text: &str, offset: usize) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::{
-        age_buckets, date_time, line_origins, message_body, short_date, BlameState, CommitDetails,
-        LineBlame, DETAILS_CAPACITY,
+        age_buckets, date_time, line_origins, message_body, parent_line, short_date, BlameState,
+        CommitDetails, LineBlame, DETAILS_CAPACITY,
     };
     use crate::{
         app::Stoat,
@@ -1095,6 +1139,64 @@ mod tests {
                 3
             ),
             "the run in flight read c2, so a third run reads c3",
+        );
+    }
+
+    /// A kept line matches the parent line it keeps, after a changed block too.
+    /// A changed line matches the parent line where its change starts. A change
+    /// at the top starts at the first line, and one past the parent's end stays
+    /// on the parent's last line.
+    #[test]
+    fn parent_line_matches_kept_lines_and_the_start_of_a_change() {
+        assert_eq!(
+            [
+                parent_line("a\nb\nc\n", "a\nX\nY\nc\n", 3),
+                parent_line("a\nb\nc\n", "a\nB\nc\n", 1),
+                parent_line("x\ny\nz\n", "x\ny\nnew\nz\n", 2),
+                parent_line("a\nb\n", "new\na\nb\n", 0),
+                parent_line("a\nb\n", "a\nb\nc\n", 2),
+            ],
+            [2, 1, 2, 0, 1],
+        );
+    }
+
+    /// A blamed pane on a revision buffer blames the file at the revision's
+    /// commit. Every line of `c1`'s text names `c1`, though HEAD's `c2`
+    /// rewrote the first line since. The blame of the revision neither reads
+    /// nor replaces the cached HEAD blame of the file, which the file's own
+    /// blame read first.
+    #[test]
+    fn a_revision_blames_at_its_commit() {
+        let mut h = Stoat::test();
+        h.seed_linear_history(
+            "/repo",
+            &[
+                ("c1", "one", &[("a.rs", "one\ntwo\n")]),
+                ("c2", "rewrite", &[("a.rs", "ONE\ntwo\n")]),
+            ],
+        );
+        h.stoat.active_workspace_mut().git_root = "/repo".into();
+        h.fake_fs().insert_file("/repo/a.rs", "ONE\ntwo\n");
+        h.open_file(Path::new("/repo/a.rs"));
+        h.type_keys("space h a");
+        h.settle();
+
+        let path = Path::new("/repo/a.rs");
+        crate::buffer_lifecycle::show_revision(&mut h.stoat, path, "c1", "one\ntwo\n");
+        h.settle();
+        let cached = h
+            .stoat
+            .active_workspace()
+            .blame
+            .base
+            .get(path)
+            .map(|base| base.as_ref().map(|base| base.text.clone()));
+        assert_eq!(
+            (blame_runs(&mut h), cached),
+            (
+                shas(&[(0..2, Some("c1"))]),
+                Some(Some("ONE\ntwo\n".to_owned()))
+            ),
         );
     }
 

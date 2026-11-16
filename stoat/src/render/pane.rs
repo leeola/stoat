@@ -631,6 +631,7 @@ fn render_read_only_frame(
     let label = match kind {
         ReadOnly::Compressed => "read only \u{b7} gzip",
         ReadOnly::Permission => "read only \u{b7} no write access",
+        ReadOnly::Revision => "read only \u{b7} revision",
     };
     let chip_width = label.chars().count() as u16 + 2;
     let Some(x) = ring
@@ -2495,7 +2496,12 @@ fn status_segments(
         for (text, style) in segments {
             push_left(&mut left, &mut cursor, lead_end, text, style);
         }
-        if let Some(note) = read_only_note(status.read_only, status.disk_len, status.text_len) {
+        if let Some(note) = read_only_note(
+            status.read_only,
+            status.disk_len,
+            status.text_len,
+            status.revision.as_deref(),
+        ) {
             let muted = muted_tint(lead_style, theme);
             push_left(&mut left, &mut cursor, lead_end, note, muted);
         }
@@ -3040,11 +3046,13 @@ fn push_left(left: &mut Vec<StatusSeg>, cursor: &mut u16, end_x: u16, text: Stri
 /// A compressed buffer reads the file's size on disk and its text's size,
 /// `disk_len` and `text_len` in bytes. A buffer a state file restored without
 /// the disk size reads the kind alone. A buffer the process lacks write
-/// access to reads `read only`.
+/// access to reads `read only`. A revision buffer reads `at` and then
+/// `revision`, the short sha of its commit.
 fn read_only_note(
     kind: Option<ReadOnly>,
     disk_len: Option<u64>,
     text_len: usize,
+    revision: Option<&str>,
 ) -> Option<String> {
     Some(match kind? {
         ReadOnly::Compressed => match disk_len {
@@ -3056,6 +3064,7 @@ fn read_only_note(
             None => " gzip ".to_owned(),
         },
         ReadOnly::Permission => " read only ".to_owned(),
+        ReadOnly::Revision => format!(" at {} ", revision?),
     })
 }
 
@@ -3662,8 +3671,11 @@ fn editor_status_info(
         return PaneStatusInfo::default();
     };
     let buffer_id = editor.buffer_id;
-    let filename =
-        status_filename(editor, buffers.path_for(buffer_id), workspace_root, home).to_string();
+    let revision = buffers.revision(buffer_id);
+    let path = buffers
+        .path_for(buffer_id)
+        .or(revision.map(|source| source.path.as_path()));
+    let filename = status_filename(editor, path, workspace_root, home).to_string();
     // The fields come off the same buffer at the same moment, and the bar
     // wants them together. One acquisition answers for all of them, so the
     // staged label takes no lock of its own.
@@ -3687,6 +3699,7 @@ fn editor_status_info(
         read_only: buffers.read_only(buffer_id),
         disk_len: buffers.disk_len(buffer_id),
         text_len,
+        revision: revision.map(|source| diff::short_sha(&source.sha)),
         dirty,
         cursor_pos: editor_cursor_position(editor),
         selections: Some((
@@ -3714,6 +3727,9 @@ struct PaneStatusInfo {
     /// The buffer's text length in bytes, which a compressed buffer's segment
     /// names beside the file's.
     text_len: usize,
+    /// The short sha of the commit a revision buffer holds, which its segment
+    /// names.
+    revision: Option<String>,
     dirty: bool,
     cursor_pos: Option<(u32, u32)>,
     /// The primary cursor's 1-based place among the cursors in start order,
@@ -6476,21 +6492,24 @@ mod tests {
 
     /// A compressed buffer names both sizes, or the kind alone without the size
     /// on disk, and a buffer the process lacks write access to reads `read only`.
-    /// A buffer that writes back has no segment.
+    /// A revision buffer names its commit. A buffer that writes back has no
+    /// segment.
     #[test]
     fn the_read_only_note_names_the_kind_and_the_sizes() {
         assert_eq!(
             [
-                read_only_note(None, Some(41_600), 190_464),
-                read_only_note(Some(ReadOnly::Compressed), Some(41_600), 190_464),
-                read_only_note(Some(ReadOnly::Compressed), None, 190_464),
-                read_only_note(Some(ReadOnly::Permission), None, 5),
+                read_only_note(None, Some(41_600), 190_464, None),
+                read_only_note(Some(ReadOnly::Compressed), Some(41_600), 190_464, None),
+                read_only_note(Some(ReadOnly::Compressed), None, 190_464, None),
+                read_only_note(Some(ReadOnly::Permission), None, 5, None),
+                read_only_note(Some(ReadOnly::Revision), None, 5, Some("a1b2c3d")),
             ],
             [
                 None,
                 Some(" gzip \u{b7} 41 KiB \u{2192} 186 KiB ".to_owned()),
                 Some(" gzip ".to_owned()),
                 Some(" read only ".to_owned()),
+                Some(" at a1b2c3d ".to_owned()),
             ],
         );
     }
@@ -6708,6 +6727,27 @@ mod tests {
     fn pane_row(width: u16, lead: &str, at: &str) -> (u16, String) {
         let fill = usize::from(width) - at.len() - 1;
         (width, format!("{lead:<fill$}{at} "))
+    }
+
+    /// A revision buffer's status row names the working file as a file's row
+    /// does, and its commit after it.
+    #[test]
+    fn the_status_row_names_a_revision_file_and_its_commit() {
+        let mut h = crate::test_harness::TestHarness::with_size(60, 12);
+        h.stoat.active_workspace_mut().git_root = PathBuf::from("/repo");
+        let path = Path::new("/repo/src/a.rs");
+        buffer_lifecycle::show_revision(&mut h.stoat, path, "a1b2c3d4e5", "fn a() {}\n");
+
+        let buf = h.render_composited();
+        let rows = pane_status_rows(&h, &buf);
+        assert_eq!(
+            rows,
+            [pane_row(
+                rows[0].0,
+                " NOR  repo src/a.rs  at a1b2c3d",
+                "1:1"
+            )],
+        );
     }
 
     /// Several cursors show as `{count} sel` after the file name, and a lone

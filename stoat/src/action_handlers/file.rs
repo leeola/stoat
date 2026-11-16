@@ -6,7 +6,7 @@ use crate::{
     host::LanguageServerFeature,
     lsp::sync,
     wake,
-    workspace::WorkspaceId,
+    workspace::{diff, WorkspaceId},
 };
 use lsp_types::{
     DidSaveTextDocumentParams, DocumentFormattingParams, TextDocumentIdentifier,
@@ -217,7 +217,7 @@ fn save_flow(stoat: &mut Stoat, force: bool) -> SaveFlow {
 fn save_buffer_flow(stoat: &mut Stoat, buffer_id: BufferId, force: bool) -> SaveFlow {
     let path = match stoat.active_workspace().buffers.path_for(buffer_id) {
         Some(p) => p.to_path_buf(),
-        None => return SaveFlow::NoTarget,
+        None => return refuse_pathless(stoat, buffer_id),
     };
 
     // A save of this buffer already formatting or on its way to disk drops
@@ -245,13 +245,7 @@ fn save_buffer_flow(stoat: &mut Stoat, buffer_id: BufferId, force: bool) -> Save
     }
 
     if let Some(kind) = refresh_read_only(stoat, buffer_id, &path) {
-        let message = match kind {
-            ReadOnly::Permission => "Path is read only".to_string(),
-            ReadOnly::Compressed => format!(
-                "{} is read only: decompressed from gzip in memory",
-                display_name(&path)
-            ),
-        };
+        let message = read_only_message(stoat, buffer_id, kind, &path);
         stoat.set_status(message);
         return SaveFlow::RefusedReadOnly;
     }
@@ -270,6 +264,44 @@ fn save_buffer_flow(stoat: &mut Stoat, buffer_id: BufferId, force: bool) -> Save
         WriteOutcome::Wrote => SaveFlow::Wrote,
         WriteOutcome::Armed => SaveFlow::Armed,
         WriteOutcome::Failed => SaveFlow::Failed,
+    }
+}
+
+/// Refuse the save of `buffer_id`, a buffer with no path, when it holds a
+/// revision, and find nothing to save in any other buffer with no path.
+///
+/// A revision buffer's text is a commit's, so its save refuses as a read-only
+/// buffer's does and names the working file the buffer stands for.
+fn refuse_pathless(stoat: &mut Stoat, buffer_id: BufferId) -> SaveFlow {
+    let Some(path) = stoat
+        .active_workspace()
+        .buffers
+        .revision(buffer_id)
+        .map(|source| source.path.clone())
+    else {
+        return SaveFlow::NoTarget;
+    };
+    let message = read_only_message(stoat, buffer_id, ReadOnly::Revision, &path);
+    stoat.set_status(message);
+    SaveFlow::RefusedReadOnly
+}
+
+/// The status a refused save of `buffer_id`, read-only as `kind`, sets, which
+/// says why its text does not write back to `path`.
+fn read_only_message(stoat: &Stoat, buffer_id: BufferId, kind: ReadOnly, path: &Path) -> String {
+    let name = display_name(path);
+    match kind {
+        ReadOnly::Permission => "Path is read only".to_string(),
+        ReadOnly::Compressed => format!("{name} is read only: decompressed from gzip in memory"),
+        ReadOnly::Revision => {
+            let sha = stoat
+                .active_workspace()
+                .buffers
+                .revision(buffer_id)
+                .map(|source| diff::short_sha(&source.sha))
+                .unwrap_or_default();
+            format!("{name} is read only: a revision of {sha}")
+        },
     }
 }
 

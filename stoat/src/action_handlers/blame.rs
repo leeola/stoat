@@ -3,16 +3,22 @@ use crate::{
     app::{Stoat, UpdateEffect},
     blame::{self, BlameCard, CommitDetails, LineBlame},
     buffer::BufferId,
+    buffer_lifecycle,
     checkout_confirm::{self, CheckoutTarget},
     commit_preview::{self, PreviewOrigin},
     editor_state::EditorId,
     git_jobs::{self, GitJob, GitLanding, GitWork},
-    host::{self, BlameCommit, ClipboardKind},
+    host::{self, BlameCommit, ClipboardKind, CommitInfo},
     keymap_state::{self, StoatKeymapState},
     pane::{FocusTarget, View},
     render::editor,
+    workspace::diff,
 };
-use std::{path::Path, sync::Arc, time::Duration};
+use std::{
+    path::{Path, PathBuf},
+    sync::Arc,
+    time::Duration,
+};
 use stoat_scheduler::Task;
 
 /// How long the cursor rests on a committed line of a blamed pane before the
@@ -34,6 +40,23 @@ const LINE_UNCOMMITTED: &str = "line is not committed";
 /// A move inside one line keeps the key, and a move to another line or an
 /// edit changes it.
 pub(crate) type RestKey = (EditorId, u32, u64);
+
+/// What the read of a blamed file at its commit's parent found, which
+/// [`pump_blame_parent`] shows.
+pub(crate) struct ParentLanding {
+    /// The file's path in the working tree.
+    path: PathBuf,
+    /// The full sha of the commit's first parent, which the text stands at.
+    parent: String,
+    /// The full sha of the blamed commit, where a file the parent does not hold
+    /// starts.
+    commit: String,
+    /// The file's text at the parent, or `None` for a file the parent does not
+    /// hold.
+    text: Option<String>,
+    /// The parent's line that matches the blamed line.
+    row: u32,
+}
 
 /// Show or hide the Blame Column of the focused split pane.
 ///
@@ -202,36 +225,12 @@ pub(super) fn preview(stoat: &mut Stoat) -> UpdateEffect {
 /// once. A tree with changes, untracked files among them, opens the checkout
 /// confirm, which offers to stash them first.
 pub(super) fn checkout(stoat: &mut Stoat) -> UpdateEffect {
-    let (commit, path, row) = match &stoat.commit_preview {
-        Some(preview) => (
-            preview.commit.info.clone(),
-            preview.origin.path.clone(),
-            preview.origin.line,
-        ),
-        None => {
-            if blamed_cursor(stoat).is_none() {
-                return UpdateEffect::None;
-            }
-            match cursor_line_blame(stoat) {
-                None => {
-                    stoat.set_status(BLAME_LOADING);
-                    return UpdateEffect::Redraw;
-                },
-                Some((_, _, LineBlame::Uncommitted)) => {
-                    stoat.set_status(LINE_UNCOMMITTED);
-                    return UpdateEffect::Redraw;
-                },
-                Some((
-                    _,
-                    _,
-                    LineBlame::Commit {
-                        commit,
-                        commit_line,
-                        commit_path,
-                        ..
-                    },
-                )) => (commit.info.clone(), commit_path.to_path_buf(), commit_line),
-            }
+    let (commit, path, row) = match acting_line(stoat) {
+        Ok(acting) => acting,
+        Err(None) => return UpdateEffect::None,
+        Err(Some(status)) => {
+            stoat.set_status(status);
+            return UpdateEffect::Redraw;
         },
     };
 
@@ -317,6 +316,79 @@ pub(super) fn accept_checkout(stoat: &mut Stoat) -> UpdateEffect {
         row,
     } = confirm.target;
     review_walk::walk_blame_commit_stashing(stoat, workdir, commit, path, row)
+}
+
+/// Show the file of the commit a commit key acts on as it stood at the commit's
+/// first parent, with the cursor on the line that matches.
+///
+/// While the Commit Preview is open, the commit and the line are the preview's,
+/// and the preview closes first. The texts read on the blocking pool, and
+/// [`pump_blame_parent`] shows the parent's text once they land. A root commit
+/// shows nothing, and the status says why.
+pub(super) fn blame_parent(stoat: &mut Stoat) -> UpdateEffect {
+    let (commit, path, line) = match acting_line(stoat) {
+        Ok(acting) => acting,
+        Err(None) => return UpdateEffect::None,
+        Err(Some(status)) => {
+            stoat.set_status(status);
+            return UpdateEffect::Redraw;
+        },
+    };
+    commit_preview::close(stoat);
+    let Some(parent) = commit.parents.first().cloned() else {
+        stoat.set_status("commit has no parent");
+        return UpdateEffect::Redraw;
+    };
+    let Some(repo) = stoat.git_host.discover(&stoat.active_workspace().git_root) else {
+        return UpdateEffect::Redraw;
+    };
+    let Some(workdir) = repo.workdir() else {
+        return UpdateEffect::Redraw;
+    };
+
+    let path = workdir.join(path);
+    let task = stoat.executor.spawn_blocking(move || {
+        let text = repo.content_at(&parent, &path);
+        let row = match (&text, repo.content_at(&commit.sha, &path)) {
+            (Some(parent_text), Some(commit_text)) => {
+                blame::parent_line(parent_text, &commit_text, line)
+            },
+            _ => line,
+        };
+        ParentLanding {
+            path,
+            parent,
+            commit: commit.sha,
+            text,
+            row,
+        }
+    });
+    stoat.pending_blame_parent.arm(task);
+    UpdateEffect::Redraw
+}
+
+/// Show the parent's text that [`blame_parent`] read once the read lands, with
+/// the cursor on the matching line, and answer whether a read landed.
+///
+/// A file the parent does not hold shows nothing, and the status names the
+/// commit the file starts at.
+pub(crate) fn pump_blame_parent(stoat: &mut Stoat) -> bool {
+    let Some(landing) = stoat.pending_blame_parent.poll(&stoat.redraw_notify) else {
+        return false;
+    };
+    let Some(text) = landing.text else {
+        stoat.set_status(format!(
+            "file starts at {}",
+            diff::short_sha(&landing.commit)
+        ));
+        return true;
+    };
+
+    buffer_lifecycle::show_revision(stoat, &landing.path, &landing.parent, &text);
+    if let Some(editor) = super::focused_editor_mut(stoat) {
+        super::movement::set_cursor_row(editor, landing.row);
+    }
+    true
 }
 
 /// Keep the Blame Card in step with the cursor after an event.
@@ -478,6 +550,39 @@ fn acting_commit(stoat: &Stoat) -> Result<BlameCommit, &'static str> {
     }
 }
 
+/// The commit a commit key acts on, with the repo-relative path the file has in
+/// that commit and the line there, or the status that says why there is none.
+///
+/// While the Commit Preview is open, they are the preview's commit and the line
+/// it opened from. Otherwise they are the cursor line's. A pane that does not
+/// blame answers `Err(None)`, which sets no status.
+fn acting_line(stoat: &Stoat) -> Result<(CommitInfo, PathBuf, u32), Option<&'static str>> {
+    if let Some(preview) = &stoat.commit_preview {
+        return Ok((
+            preview.commit.info.clone(),
+            preview.origin.path.clone(),
+            preview.origin.line,
+        ));
+    }
+    if blamed_cursor(stoat).is_none() {
+        return Err(None);
+    }
+    match cursor_line_blame(stoat) {
+        None => Err(Some(BLAME_LOADING)),
+        Some((_, _, LineBlame::Uncommitted)) => Err(Some(LINE_UNCOMMITTED)),
+        Some((
+            _,
+            _,
+            LineBlame::Commit {
+                commit,
+                commit_line,
+                commit_path,
+                ..
+            },
+        )) => Ok((commit.info.clone(), commit_path.to_path_buf(), commit_line)),
+    }
+}
+
 /// Read the Blame Card details of commit `sha` on the blocking pool.
 ///
 /// The task wakes the run loop when it lands, so the card fills in on the
@@ -514,6 +619,7 @@ mod tests {
         action_handlers::{self, dispatch},
         app::Stoat,
         badge::BadgeSource,
+        blame::LineBlame,
         diff_changes,
         host::{ClipboardKind, GitRepo},
         keymap_state,
@@ -523,7 +629,7 @@ mod tests {
         render::{commit_patch::PatchRow, paint, OVERLAY_LANE},
         review_walk::{ReturnRef, WalkStash},
         test_fixture,
-        test_harness::{CommitSpec, TestHarness},
+        test_harness::{self, CommitSpec, TestHarness},
         theme::scope,
         workspace::{diff::DiffBase, Workspace},
     };
@@ -536,7 +642,7 @@ mod tests {
     };
     use stoat_action::{
         BlameCard, BlameCheckout, BlamePreview, CheckoutConfirmAccept, CommitPreviewParent,
-        DiffChanges, OpenCommandPalette, ReviewDone, SetTheme, ToggleBlame,
+        DiffChanges, JumpBackward, OpenCommandPalette, ReviewDone, SetTheme, ToggleBlame,
     };
     use stoatty_protocol::{
         command::{decode_stream, BorderStyle, Command},
@@ -622,6 +728,7 @@ mod tests {
                 vec![
                     ("Ret".to_string(), "preview patch".to_string()),
                     ("c".to_string(), "check out".to_string()),
+                    ("p".to_string(), "blame parent".to_string()),
                     ("y".to_string(), "copy sha".to_string()),
                     ("Esc".to_string(), "close".to_string()),
                 ],
@@ -1884,6 +1991,117 @@ mod tests {
         );
     }
 
+    /// `p` on the line that `c3` replaced shows `a.rs` as it stood at `c2`, the
+    /// commit's parent, read-only. The cursor lands on row 1, where the change
+    /// starts in the parent, and the Blame Column names `c1` and `c2` over the
+    /// parent's text. The jump back returns to the file.
+    #[test]
+    fn p_shows_the_file_at_the_commit_parent_and_the_jump_back_returns() {
+        let mut h = blamed_history(PARENT_HISTORY, "one\nTWO\nthree\n");
+        h.type_keys("j p");
+        h.settle();
+        let parent = revision_view(&mut h);
+        dispatch(&mut h.stoat, &JumpBackward);
+        assert_eq!(
+            (parent, revision_view(&mut h)),
+            (
+                revision("c2", "one\ntwo\nthree\n", 1, &["c1", "c1", "c2"]),
+                (
+                    None,
+                    "one\nTWO\nthree\n".to_string(),
+                    1,
+                    commits(&["c1", "c3", "c2"]),
+                ),
+            ),
+        );
+    }
+
+    /// A second `p` on a line of the parent's own commit goes one commit
+    /// further. `p` on a line of the root commit shows nothing, and the status
+    /// says why.
+    #[test]
+    fn p_steps_back_through_parents_and_stops_at_the_root() {
+        let mut h = blamed_history(PARENT_HISTORY, "one\nTWO\nthree\n");
+        h.type_keys("j p");
+        h.settle();
+        h.type_keys("j p");
+        h.settle();
+        let grandparent = revision_view(&mut h);
+        h.type_keys("k p");
+        h.settle();
+        assert_eq!(
+            (
+                grandparent,
+                revision_view(&mut h).0,
+                h.stoat.pending_message.clone(),
+            ),
+            (
+                revision("c1", "one\ntwo\n", 1, &["c1", "c1"]),
+                Some("c1".to_string()),
+                Some("commit has no parent".to_string()),
+            ),
+        );
+    }
+
+    /// `p` in the Commit Preview closes the preview and acts on the preview's
+    /// commit and line, as it acts on the cursor's line.
+    #[test]
+    fn p_in_the_preview_closes_it_and_shows_the_parent() {
+        let mut h = blamed_history(PARENT_HISTORY, "one\nTWO\nthree\n");
+        h.type_keys("j enter");
+        let opened = h.stoat.commit_preview.is_some();
+        h.type_keys("p");
+        h.settle();
+        assert_eq!(
+            (
+                opened,
+                h.stoat.commit_preview.is_some(),
+                revision_view(&mut h)
+            ),
+            (
+                true,
+                false,
+                revision("c2", "one\ntwo\nthree\n", 1, &["c1", "c1", "c2"]),
+            ),
+        );
+    }
+
+    /// `p` on a line of the commit that added the file shows nothing, since the
+    /// parent does not hold the file, and the status names that commit.
+    #[test]
+    fn p_on_the_commit_that_adds_the_file_names_where_it_starts() {
+        let mut h = blamed_history(
+            &[
+                ("c1", "b", &[("b.rs", "b\n")]),
+                ("c2", "a", &[("b.rs", "b\n"), ("a.rs", "one\n")]),
+            ],
+            "one\n",
+        );
+        h.type_keys("p");
+        h.settle();
+        assert_eq!(
+            (revision_view(&mut h).0, h.stoat.pending_message.clone()),
+            (None, Some("file starts at c2".to_string())),
+        );
+    }
+
+    /// In a pane that does not blame, `p` pastes after the selection, as the
+    /// plain normal keys bind it.
+    #[test]
+    fn p_pastes_in_a_pane_that_does_not_blame() {
+        let mut h = blamed_repo("one\ntwo\n");
+        h.type_keys("space h a");
+        h.type_keys("y p");
+        h.settle();
+        assert_eq!(
+            (
+                test_harness::editor::focused_buffer_text(&mut h.stoat),
+                h.stoat.pending_blame_parent.is_pending(),
+            ),
+            ("oone\ntwo\n".to_string(), false),
+        );
+    }
+
     /// A 120-cell window over `a.rs` of a repository whose first commit writes
     /// `one` and whose second adds `two` under a message with a body, with
     /// `text` in the working tree and the Blame Column on.
@@ -1912,6 +2130,59 @@ mod tests {
             &[("a.rs", CHECKOUT_A), ("b.rs", "fn b() {}\n")],
         ),
     ];
+
+    /// A history of three commits over `a.rs`. `c1` writes two lines, `c2` adds
+    /// a third, and `c3` replaces the second.
+    const PARENT_HISTORY: &[CommitSpec<'static>] = &[
+        ("c1", "one two", &[("a.rs", "one\ntwo\n")]),
+        ("c2", "three", &[("a.rs", "one\ntwo\nthree\n")]),
+        ("c3", "rewrite two", &[("a.rs", "one\nTWO\nthree\n")]),
+    ];
+
+    /// The focused pane's buffer as a revision, its text, its cursor, and its
+    /// blame.
+    ///
+    /// The tuple holds the commit the buffer is a revision of, or `None` for a
+    /// file, then the text, the cursor's row, and the commit that the blame
+    /// names for each line.
+    fn revision_view(h: &mut TestHarness) -> (Option<String>, String, u32, Vec<Option<String>>) {
+        let row = h
+            .cursor_display_positions()
+            .first()
+            .map_or(0, |&(row, _)| row);
+        let text = test_harness::editor::focused_buffer_text(&mut h.stoat);
+        let ws = h.stoat.active_workspace_mut();
+        ws.refresh_blame_rows();
+        let (_, id) = ws.focused_editor().expect("an editor holds the focus");
+        let lines = (0..text.lines().count() as u32)
+            .map(|line| match ws.blame.line(id, line) {
+                Some(LineBlame::Commit { commit, .. }) => Some(commit.info.sha.clone()),
+                _ => None,
+            })
+            .collect();
+        (
+            ws.buffers.revision(id).map(|source| source.sha.clone()),
+            text,
+            row,
+            lines,
+        )
+    }
+
+    /// The [`revision_view`] of a revision of `sha` that holds `text`, with the
+    /// cursor on `row` and the blame naming `shas` line by line.
+    fn revision(
+        sha: &str,
+        text: &str,
+        row: u32,
+        shas: &[&str],
+    ) -> (Option<String>, String, u32, Vec<Option<String>>) {
+        (Some(sha.to_string()), text.to_string(), row, commits(shas))
+    }
+
+    /// `shas` as the commits a blame names line by line.
+    fn commits(shas: &[&str]) -> Vec<Option<String>> {
+        shas.iter().map(|sha| Some((*sha).to_string())).collect()
+    }
 
     /// A 120-cell window over `a.rs` of [`CHECKOUT_HISTORY`] in `/repo` on
     /// `main` at `c3d4e5f6`, with `text` in the working tree and the Blame

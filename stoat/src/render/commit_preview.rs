@@ -546,7 +546,8 @@ mod tests {
     /// Without components the box is cells. Its header reads the sha, the
     /// subject, and the read-only chip at the right, its meta line names the
     /// parent and the change size, a rule closes the header, and the footer on
-    /// the bottom border reads the keys.
+    /// the bottom border reads the keys. In the 120-cell window the footer
+    /// leaves out `Esc back to blame`, the first key that does not fit.
     #[test]
     fn the_cell_box_reads_its_header_meta_line_and_footer() {
         let mut h = preview_open();
@@ -574,7 +575,7 @@ mod tests {
                 &format!("\u{2502}{}\u{2502}", "\u{2500}".repeat(92)),
                 &format!(
                     "\u{2514} {:<91}\u{2518}",
-                    "j/k scroll  ]/[ file  c check out  P other parent  y copy sha  Esc back to blame"
+                    "j/k scroll  ]/[ file  c check out  p blame parent  P other parent  y copy sha"
                 ),
             ],
         );

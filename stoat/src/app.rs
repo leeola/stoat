@@ -1448,6 +1448,9 @@ pub struct Stoat {
     /// The rest key the Blame Card timer last started for, so an event that
     /// keeps the key keeps the timer.
     pub(crate) last_blame_rest: Option<action_handlers::blame::RestKey>,
+    /// The read of a blamed file at its commit's parent, which `BlameParent`
+    /// arms and [`action_handlers::blame::pump_blame_parent`] polls.
+    pub(crate) pending_blame_parent: Pending<action_handlers::blame::ParentLanding>,
     /// Last diagnostic `result_id` the server returned per buffer, sent as
     /// `previous_result_id` on the next pull so the server may answer Unchanged.
     pub(crate) pull_diagnostic_result_ids: std::collections::HashMap<BufferId, String>,
@@ -2849,6 +2852,7 @@ impl Stoat {
             last_document_highlight_key: None,
             blame_rest: Pending::default(),
             last_blame_rest: None,
+            pending_blame_parent: Pending::default(),
             pull_diagnostic_result_ids: std::collections::HashMap::new(),
             pending_pull_diagnostics: std::collections::HashMap::new(),
             last_pull_diagnostic_key: std::collections::HashMap::new(),
@@ -9931,6 +9935,7 @@ impl Stoat {
         };
         let blame_card = action_handlers::blame::pump_card(self);
         let blame_rest = action_handlers::blame::pump_rest(self);
+        let blame_parent = action_handlers::blame::pump_blame_parent(self);
         let commit_preview = commit_preview::pump(self);
 
         let changed_file_jump = action_handlers::movement::pump_changed_file_jump(self);
@@ -9964,6 +9969,7 @@ impl Stoat {
             || blame
             || blame_card
             || blame_rest
+            || blame_parent
             || commit_preview
             || code_search
             || changed_file_jump
