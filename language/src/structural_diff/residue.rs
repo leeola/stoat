@@ -78,6 +78,7 @@ impl ResidueSide {
                         .filter_map(|child| copied[child.0])
                         .collect(),
                     content_id: list.content_id,
+                    layout_id: list.layout_id,
                     next_sibling: None,
                 }),
             };
@@ -329,20 +330,28 @@ fn rows(day: u32) -> Vec<Row> {{
     #[test]
     fn a_call_rewrapped_after_the_move_still_moves() {
         let removed = tests_file(12);
-        let rewrapped = removed.replace(
-            "let found = scan(&rows(3), &query(\"level >= 3\"));",
-            "let found = scan(\n        &rows(3),\n        &query(\"level >= 3\")\n    );",
-        );
-        assert_eq!(
+        // A formatter that re-wraps the call puts each argument on its own
+        // line, and its vertical form takes a trailing comma.
+        let row = |comma: &str| {
+            let rewrapped = removed.replace(
+                "let found = scan(&rows(3), &query(\"level >= 3\"));",
+                &format!(
+                    "let found = scan(\n        &rows(3),\n        &query(\"level >= 3\"){comma}\n    );"
+                ),
+            );
             (
                 rewrapped.lines().count() - removed.lines().count(),
                 unmoved_lines(&[
                     (&removed, ""),
-                    ("pub fn scan() {}\n", &in_module(&rewrapped))
+                    ("pub fn scan() {}\n", &in_module(&rewrapped)),
                 ]),
-            ),
-            (3, vec![(vec![], vec![]), (vec![], vec![2, 3])]),
-            "the call takes three more lines and still moves with its test",
+            )
+        };
+        let moved = (3, vec![(vec![], vec![]), (vec![], vec![2, 3])]);
+        assert_eq!(
+            [row(""), row(",")],
+            [moved.clone(), moved],
+            "the call takes three more lines and still moves, with a trailing comma or without",
         );
     }
 

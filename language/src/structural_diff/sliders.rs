@@ -287,12 +287,14 @@ mod tests {
         children: Vec<SyntaxId>,
         cids: &[ContentId],
     ) -> SyntaxId {
+        let content_id = ContentId::for_list(kind, cids);
         arena.alloc(Syntax::List(List {
             kind,
             open_byte_range: 0..0,
             close_byte_range: 0..0,
             children,
-            content_id: ContentId::for_list(kind, cids),
+            content_id,
+            layout_id: content_id,
             next_sibling: None,
         }))
     }

@@ -3,9 +3,11 @@
 //! The unchanged-preprocessing pass and the Dijkstra search tag every node
 //! either [`ChangeKind::Unchanged`] or [`ChangeKind::Pending`]. A subtree is a
 //! move candidate only when an atom under it is still `Pending`. Candidates
-//! with the same [`super::ContentId`] on both sides are *moves*, byte-for-byte
-//! equal subtrees that the search did not pair in place. This includes
-//! cross-indentation moves inside a different parent. The move pass rewrites
+//! with the same [`super::List::layout_id`] on both sides are *moves*,
+//! subtrees equal token for token apart from a trailing comma, which the
+//! search did not pair in place. This includes cross-indentation moves inside
+//! a different parent, and a call that a formatter re-wrapped with a trailing
+//! comma after its block moved deeper. The move pass rewrites
 //! paired candidates to [`ChangeKind::Moved`] and publishes a [`MoveRecord`]
 //! that links each right-side target to its left-side source(s).
 //!
@@ -126,7 +128,7 @@ fn precompute_depths(parents: &[Option<SyntaxId>]) -> Vec<usize> {
 pub const MIN_LEAVES: usize = 4;
 
 /// Maximum number of candidates on a side with the same
-/// [`super::ContentId`] before the move pass gives up. Guards against
+/// [`super::List::layout_id`] before the move pass gives up. Guards against
 /// pathological repetition (e.g. files with hundreds of identical empty
 /// argument lists) where every match would be noise. Values above this
 /// produce no move records for the given content id.
@@ -145,6 +147,9 @@ pub const MAX_AMBIGUITY: usize = 8;
 /// One resolved move: a right-side target paired with one or more
 /// left-side sources. Populated by [`find_moves`] and consumed by the
 /// diff collection pass to emit [`super::DiffChange`]s with metadata.
+///
+/// The target equals each source token for token, apart from a trailing
+/// comma.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MoveRecord {
     pub rhs_target: SyntaxId,
@@ -202,14 +207,17 @@ pub fn find_moves(
         .collect()
 }
 
-/// Run the move pass across a changeset of files. Indexes
-/// [`ContentId`] candidates over the union of all per-file LHS arenas
+/// Run the move pass across a changeset of files. Indexes candidates by
+/// [`super::List::layout_id`] over the union of all per-file LHS arenas
 /// and RHS arenas, then runs the same shrink-shared / proximity-pair
 /// pairing logic as the single-file path on `(file_idx, SyntaxId)`
 /// tuples. Emits [`ChangesetMoveRecord`]s sorted by
-/// `(rhs_file_idx, byte_start)` for determinism. Cross-file moves are
-/// detected naturally: a `ContentId` that appears in file 0's LHS and
-/// file 1's RHS pairs across the file boundary.
+/// `(rhs_file_idx, byte_start)` for determinism. Cross-file moves need no
+/// step of their own. A layout id that appears in file 0's LHS and file 1's
+/// RHS pairs across the file boundary.
+///
+/// A moved subtree equals its source token for token, apart from a trailing
+/// comma.
 ///
 /// See [`find_moves`] for the single-file conventions this generalises
 /// (indexes only subtrees that hold a `Pending` atom and an atom with an
@@ -372,8 +380,8 @@ type CidIndex = HashMap<ContentId, Vec<FileNode>, FxBuildHasher>;
 /// A set of changeset nodes, Fx-hashed for the same reason as [`CidIndex`].
 type NodeSet = HashSet<FileNode, FxBuildHasher>;
 
-/// Group into `out`, by [`ContentId`], each node of `arena` whose subtree holds
-/// a `Pending` atom.
+/// Group into `out`, by [`super::List::layout_id`], each node of `arena` whose
+/// subtree holds a `Pending` atom.
 ///
 /// A subtree that the search matched in full is no candidate. A copy of it on
 /// the other side is then an addition, not a move of an original that stayed
@@ -406,7 +414,7 @@ fn index_candidates(
         if !has_identity[i] {
             continue;
         }
-        out.entry(arena.get(id).content_id())
+        out.entry(arena.get(id).layout_id())
             .or_default()
             .push((file_idx, id));
     }
@@ -560,7 +568,7 @@ fn extend_over_neighbors(
             while let (Some(lhs_next), Some(rhs_next)) =
                 (lhs.sibling(l, after), rhs.sibling(r, after))
             {
-                let joins = lhs.content_id(lhs_next) == rhs.content_id(rhs_next)
+                let joins = lhs.layout_id(lhs_next) == rhs.layout_id(rhs_next)
                     && lhs.movable(lhs_next)
                     && rhs.movable(rhs_next)
                     && !paired_lhs.contains(&lhs_next)
@@ -608,8 +616,8 @@ impl SideNodes<'_> {
         sibling.map(|&sibling| (file, sibling))
     }
 
-    fn content_id(&self, (file, id): FileNode) -> ContentId {
-        self.arenas[file].get(id).content_id()
+    fn layout_id(&self, (file, id): FileNode) -> ContentId {
+        self.arenas[file].get(id).layout_id()
     }
 
     /// Whether `node` holds an unmatched atom with an identity of its own, as
@@ -1491,6 +1499,58 @@ mod tests {
             ),
             (vec![unchanged.clone()], vec![unchanged, pending]),
             "the attribute matched in place keeps its place, and the new copy stays novel",
+        );
+    }
+
+    /// A formatter that re-wraps a moved call adds a trailing comma, and the
+    /// function still pairs whole, its new comma included.
+    #[test]
+    fn a_function_that_gained_a_trailing_comma_still_moves() {
+        let pairs: &[(&str, &str)] = &[
+            ("fn moved() { call(alpha, beta); }\n", ""),
+            (
+                "",
+                "fn moved() {\n    call(\n        alpha,\n        beta,\n    );\n}\n",
+            ),
+        ];
+        let (lhs_arenas, rhs_arenas, _, pre) = find_moves_changeset_in(pairs);
+
+        assert_eq!(
+            (
+                unmoved_atoms(&lhs_arenas[0], &pre[0].lhs_changes),
+                unmoved_atoms(&rhs_arenas[1], &pre[1].rhs_changes),
+            ),
+            (vec![], vec![]),
+            "every atom moves on both sides",
+        );
+    }
+
+    /// Nine types share one `derive` list, too common to pair alone, and the
+    /// formatter re-wrapped each copy with a trailing comma after the move.
+    /// Each type still takes its attribute along.
+    #[test]
+    fn a_rewrapped_attribute_moves_with_its_type() {
+        let types = |derive: &str| -> String {
+            (0..9)
+                .map(|n| format!("{derive}\nstruct Kind{n} {{ value: u32 }}\n"))
+                .collect()
+        };
+        // The functions that stay keep each file from moving whole.
+        let lhs_a = format!("fn left() {{}}\n{}", types("#[derive(Clone, Debug)]"));
+        let rhs_b = format!(
+            "fn keep() {{}}\n{}",
+            types("#[derive(\n    Clone,\n    Debug,\n)]")
+        );
+        let pairs: &[(&str, &str)] = &[(&lhs_a, "fn left() {}\n"), ("fn keep() {}\n", &rhs_b)];
+        let (lhs_arenas, rhs_arenas, _, pre) = find_moves_changeset_in(pairs);
+
+        assert_eq!(
+            (
+                unmoved_atoms(&lhs_arenas[0], &pre[0].lhs_changes),
+                unmoved_atoms(&rhs_arenas[1], &pre[1].rhs_changes),
+            ),
+            (vec![], vec![]),
+            "every type moves with its attribute",
         );
     }
 

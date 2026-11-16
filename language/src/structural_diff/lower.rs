@@ -70,6 +70,7 @@ pub fn lower_tree(tree: &tree_sitter::Tree, source: Arc<str>) -> (SyntaxArena, S
 struct Scratch {
     ids: Vec<SyntaxId>,
     cids: Vec<ContentId>,
+    lids: Vec<ContentId>,
     /// The interned name of each node kind id the lowering met, so the
     /// process-wide set is consulted once per kind.
     kinds: Vec<Option<&'static str>>,
@@ -104,9 +105,11 @@ fn lower_node(
     if cursor.goto_first_child() {
         loop {
             let child_id = lower_node(arena, cursor, source, scratch);
-            let child_cid = arena.get(child_id).content_id();
+            let child = arena.get(child_id);
+            let (child_cid, child_lid) = (child.content_id(), child.layout_id());
             scratch.ids.push(child_id);
             scratch.cids.push(child_cid);
+            scratch.lids.push(child_lid);
             if !cursor.goto_next_sibling() {
                 break;
             }
@@ -115,9 +118,16 @@ fn lower_node(
     }
 
     let content_id = ContentId::for_list(kind, &scratch.cids[base..]);
+    // The frame's own tail of the stack is truncated below, so dropping the
+    // comma's entry here touches no other frame.
+    if let Some(comma) = trailing_comma(arena, &scratch.ids[base..]) {
+        scratch.lids.remove(base + comma);
+    }
+    let layout_id = ContentId::for_list(kind, &scratch.lids[base..]);
     let children = scratch.ids[base..].to_vec();
     scratch.ids.truncate(base);
     scratch.cids.truncate(base);
+    scratch.lids.truncate(base);
 
     let (open_byte_range, close_byte_range) = delimiter_ranges(arena, node, &children);
     arena.alloc(Syntax::List(List {
@@ -126,8 +136,25 @@ fn lower_node(
         close_byte_range,
         children,
         content_id,
+        layout_id,
         next_sibling: None,
     }))
+}
+
+/// The index in `children` of a trailing comma, the last child of kind `,` or
+/// the `,` directly before a last child that closes the list.
+///
+/// A list holds its delimiters as atom children, so the comma of `f(a, b,)`
+/// sits before the `)`, and the comma of a struct's last field sits before the
+/// `}`.
+fn trailing_comma(arena: &SyntaxArena, children: &[SyntaxId]) -> Option<usize> {
+    let kind_at = |index: usize| arena.get(children[index]).kind();
+    let last = children.len().checked_sub(1)?;
+    if kind_at(last) == "," {
+        return Some(last);
+    }
+    let before = last.checked_sub(1)?;
+    (matches!(kind_at(last), ")" | "]" | "}" | ">") && kind_at(before) == ",").then_some(before)
 }
 
 /// The kind name of `node`, as the `'static` name the arena keeps.
@@ -226,6 +253,38 @@ mod tests {
     fn equal_kind_names_share_one_copy() {
         let owned = String::from("call_expression");
         assert!(ptr::eq(intern("call_expression"), intern(&owned)));
+    }
+
+    /// A trailing comma changes a list's content id but not its layout id, so
+    /// the move pass still pairs a call that a formatter re-wrapped.
+    #[test]
+    fn a_trailing_comma_keeps_the_layout_id() {
+        let ids = |source: &str| {
+            let tree = parse(&rust_lang(), source, None).unwrap();
+            let (arena, root) = lower_tree(&tree, Arc::from(source));
+            let root = arena.get(root);
+            (root.content_id(), root.layout_id())
+        };
+        let plain = ids("fn f() { g(a, b); }");
+        let comma = ids("fn f() { g(a, b,); }");
+        let other = ids("fn f() { g(a, c); }");
+        // The optional comma of a last match arm is the arm's last child.
+        let arm = ids("fn f() { match x { A => g() } }");
+        let arm_comma = ids("fn f() { match x { A => g(), } }");
+
+        assert_eq!(
+            [
+                plain.0 == plain.1,
+                plain.0 == comma.0,
+                plain.1 == comma.1,
+                plain.0 == other.0,
+                plain.1 == other.1,
+                arm.0 == arm_comma.0,
+                arm.1 == arm_comma.1,
+            ],
+            [true, false, true, false, false, false, true],
+            "a trailing comma changes the content id alone, and a changed argument changes both",
+        );
     }
 
     #[test]

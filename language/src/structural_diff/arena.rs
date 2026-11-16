@@ -43,6 +43,19 @@ pub struct List {
     /// collisions); enables `O(1)` equality during the unchanged-
     /// preprocessing pass.
     pub content_id: ContentId,
+    /// The content hash with a trailing comma left out, at this list and at
+    /// every list below it.
+    ///
+    /// A formatter that re-wraps a call onto one line per argument adds a
+    /// trailing comma. Two lists that differ only in that comma share a layout
+    /// id, so the move pass still pairs a moved block that the formatter
+    /// re-wrapped. A list with no trailing comma anywhere below it has a layout
+    /// id equal to its content id.
+    ///
+    /// Two lists that trade a trailing comma in place, one losing it and one
+    /// gaining it in the same statement, therefore read as moved. That is
+    /// tolerated, because the pair still holds the same code.
+    pub layout_id: ContentId,
     /// Sibling that follows this node in its parent's children list,
     /// or `None` if this is the last child (or the root). Set by
     /// [`SyntaxArena::link_siblings`] after the tree is fully
@@ -342,6 +355,14 @@ impl Syntax {
         }
     }
 
+    /// The [`List::layout_id`] of a list, and the content id of an atom.
+    pub fn layout_id(&self) -> ContentId {
+        match self {
+            Syntax::List(l) => l.layout_id,
+            Syntax::Atom(a) => a.content_id,
+        }
+    }
+
     pub fn kind(&self) -> &'static str {
         match self {
             Syntax::List(l) => l.kind,
@@ -379,12 +400,14 @@ mod tests {
         children: Vec<SyntaxId>,
         child_ids: &[ContentId],
     ) -> Syntax {
+        let content_id = ContentId::for_list(kind, child_ids);
         Syntax::List(List {
             kind,
             open_byte_range: 0..1,
             close_byte_range: 4..5,
             children,
-            content_id: ContentId::for_list(kind, child_ids),
+            content_id,
+            layout_id: content_id,
             next_sibling: None,
         })
     }
