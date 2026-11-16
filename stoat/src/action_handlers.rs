@@ -2037,6 +2037,7 @@ mod tests {
         buffer::OPS_COMPACT_THRESHOLD,
         multi_buffer::MultiBuffer,
         pane::{DockPanel, DockVisibility},
+        review_walk::{ReturnRef, ReviewWalk},
         selection::SelectionsCollection,
         test_harness::{editor, keys, stoat},
     };
@@ -3470,6 +3471,35 @@ mod tests {
         assert_eq!(
             landed, cursor,
             "the copy's cursor stays inside the appended run"
+        );
+    }
+
+    /// A copy leaves a blame checkout with its source, since the checkout's
+    /// HEAD and stash belong to the workspace that made them.
+    ///
+    /// HEAD stands on the walk's commit, so a walk that reaches the copy passes
+    /// the check of HEAD and stays there.
+    #[test]
+    fn copy_workspace_leaves_a_blame_checkout_with_its_source() {
+        let mut h = Stoat::test();
+        h.fake_git().add_repo("/repo").set_head("c1");
+        h.stoat.active_workspace_mut().review_walk = Some(ReviewWalk::blame_checkout(
+            "c1",
+            ReturnRef::Branch("main".into()),
+            None,
+        ));
+        let source = h.stoat.active_workspace;
+
+        h.type_action("CopyWorkspace()");
+        h.settle();
+        h.stoat.drive_background();
+        h.settle();
+        assert_eq!(
+            (
+                h.stoat.workspaces[source].review_walk.is_some(),
+                h.stoat.active_workspace().review_walk.is_some(),
+            ),
+            (true, false),
         );
     }
 

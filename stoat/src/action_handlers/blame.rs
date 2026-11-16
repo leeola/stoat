@@ -521,7 +521,7 @@ mod tests {
         pane::View,
         register::Register,
         render::{commit_patch::PatchRow, paint, OVERLAY_LANE},
-        review_walk::WalkStash,
+        review_walk::{ReturnRef, WalkStash},
         test_fixture,
         test_harness::{CommitSpec, TestHarness},
         theme::scope,
@@ -1808,6 +1808,82 @@ mod tests {
         assert_eq!((before, h.stoat.change_walk_wrap), (true, false));
     }
 
+    /// A restart restores a stashing checkout's walk with its stash, its banner,
+    /// and the commit's parent as the base. HEAD still stands on the commit, so
+    /// the check keeps the walk and runs no more, and `space h c` then returns
+    /// and pops the stash.
+    #[test]
+    fn a_restarted_checkout_keeps_its_walk_and_returns_with_its_stash() {
+        let mut h = restarted(stashed_checkout());
+        let restored = (
+            h.stoat.active_workspace().review_walk.as_ref().map(|walk| {
+                (
+                    walk.return_ref.clone(),
+                    walk.stash.as_ref().map(|s| s.changes),
+                )
+            }),
+            base_sha(&h),
+            h.stoat.banner_shown(),
+            h.stoat.active_workspace().walk_unchecked,
+        );
+        h.type_keys("space h c");
+        h.settle();
+        assert_eq!(
+            (
+                restored,
+                stashes(&h),
+                changed_files(&h),
+                h.stoat.pending_message.clone(),
+            ),
+            (
+                (
+                    Some((ReturnRef::Branch("main".to_string()), Some(2))),
+                    Some("a1b2c3d4".to_string()),
+                    true,
+                    false,
+                ),
+                Vec::<String>::new(),
+                2,
+                Some("returned to main, 2 changes restored".to_string()),
+            ),
+        );
+    }
+
+    /// A restart after another tool moved HEAD ends the restored walk and its
+    /// base, and the Review badge names the stash that holds the changes.
+    #[test]
+    fn a_restart_after_head_moved_ends_the_walk_and_names_the_stash() {
+        let h = stashed_checkout();
+        let stash = repo(&h)
+            .stash_list()
+            .first()
+            .map(|stash| stash.sha.clone())
+            .expect("the checkout's stash");
+        h.fake_git().add_repo("/repo").set_head("a1b2c3d4");
+        let h = restarted(h);
+
+        let ws = h.stoat.active_workspace();
+        let badge = ws
+            .badges
+            .find_by_source(BadgeSource::Review)
+            .and_then(|id| ws.badges.get(id))
+            .map(|badge| (badge.label.clone(), badge.detail.clone()));
+        assert_eq!(
+            (ws.review_walk.is_some(), base_sha(&h), badge),
+            (
+                false,
+                None,
+                Some((
+                    "checkout ended outside stoat".to_string(),
+                    Some(format!(
+                        "stash {} holds your changes",
+                        &stash[..stash.len().min(7)]
+                    )),
+                )),
+            ),
+        );
+    }
+
     /// A 120-cell window over `a.rs` of a repository whose first commit writes
     /// `one` and whose second adds `two` under a message with a body, with
     /// `text` in the working tree and the Blame Column on.
@@ -1897,6 +1973,36 @@ mod tests {
         h.type_keys("j j c");
         h.settle();
         h.type_keys("enter");
+        h.settle();
+        h
+    }
+
+    /// `h` after a restart with `--continue`.
+    ///
+    /// The session saves, a fresh workspace takes the active one's place, and
+    /// the save restores into it on the path that `--continue` takes.
+    fn restarted(mut h: TestHarness) -> TestHarness {
+        let path = PathBuf::from("/state/session.ron");
+        let id = h.stoat.active_workspace;
+        h.stoat.workspaces[id]
+            .save_state(&path, &*h.stoat.fs_host)
+            .expect("the session saves");
+
+        let mut fresh = Workspace::new(
+            h.stoat.workspaces[id].git_root.clone(),
+            &h.stoat.executor,
+            h.stoat.redraw_notify.clone(),
+        );
+        fresh.id = id;
+        h.stoat.workspaces[id] = fresh;
+        let size = h.stoat.layout_size();
+        h.stoat.workspaces[id].layout(size);
+
+        // The replay finishes on the pool during a settle, and the drive after
+        // it installs the result and queues the check of HEAD.
+        h.stoat.spawn_workspace_restore(id, path);
+        h.settle();
+        h.stoat.drive_background();
         h.settle();
         h
     }

@@ -9872,6 +9872,7 @@ impl Stoat {
         crate::project_env::install_pending(self);
         self.install_pending_workspace_restore();
         self.start_background_restore();
+        action_handlers::review_walk::check_restored_walk(self);
         crate::session_log::sync(self);
         crate::diff_warm::ensure_diff_warm(self);
         crate::diff_warm::install_finished(self);

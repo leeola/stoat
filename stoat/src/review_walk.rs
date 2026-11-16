@@ -1,4 +1,5 @@
 use crate::host::CommitInfo;
+use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
 /// Where a walk puts HEAD back when it finishes.
@@ -6,7 +7,7 @@ use std::path::PathBuf;
 /// Captured before the walk detaches, because a walk cannot tell afterwards
 /// whether the user was on a branch or already detached, and reattaching
 /// someone who was detached would move a branch they never asked to move.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) enum ReturnRef {
     Branch(String),
     Detached(String),
@@ -31,7 +32,7 @@ pub(crate) enum WalkSpan {
 }
 
 /// Where a walk started, which decides what each of its landings shows.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) enum WalkOrigin {
     /// The commit list, a review, or a walkthrough. A landing shows the
     /// commit's first changed file, or the file the start names, in the
@@ -47,7 +48,7 @@ pub(crate) enum WalkOrigin {
 
 /// The stash that a blame checkout made of the working tree's changes, which
 /// the walk's return pops.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct WalkStash {
     /// The stash commit's sha.
     pub(crate) sha: String,
@@ -136,6 +137,48 @@ impl ReviewWalk {
         let moved = next != self.cursor;
         self.cursor = next;
         moved
+    }
+}
+
+/// The on-disk shape of a blame checkout's walk, which a restart brings back.
+///
+/// A restart that loses the walk leaves HEAD detached at the commit, with no
+/// way to return and a stash that nothing names. Only a blame checkout saves
+/// its walk. A walk of the commit list keeps its lists and its cursor in state
+/// the session does not hold, and a blame checkout's walk is one commit.
+#[derive(Debug, Serialize, Deserialize)]
+pub(crate) struct BlameCheckoutSnap {
+    pub workdir: PathBuf,
+    pub commit: CommitInfo,
+    pub return_ref: ReturnRef,
+    pub origin: WalkOrigin,
+    pub stash: Option<WalkStash>,
+}
+
+impl BlameCheckoutSnap {
+    /// The snapshot of `walk`, or `None` for a walk that a blame checkout did
+    /// not open.
+    pub(crate) fn of(walk: &ReviewWalk) -> Option<BlameCheckoutSnap> {
+        matches!(walk.origin, WalkOrigin::Blame { .. }).then(|| BlameCheckoutSnap {
+            workdir: walk.workdir.clone(),
+            commit: walk.current().clone(),
+            return_ref: walk.return_ref.clone(),
+            origin: walk.origin.clone(),
+            stash: walk.stash.clone(),
+        })
+    }
+
+    /// The walk this snapshot saved, at its one commit.
+    pub(crate) fn into_walk(self) -> ReviewWalk {
+        ReviewWalk {
+            workdir: self.workdir,
+            commits: vec![self.commit],
+            cursor: 0,
+            return_ref: self.return_ref,
+            span: WalkSpan::Commits,
+            origin: self.origin,
+            stash: self.stash,
+        }
     }
 }
 

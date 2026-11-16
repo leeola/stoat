@@ -46,10 +46,12 @@ pub(super) fn copy_workspace(stoat: &mut Stoat) -> UpdateEffect {
     let git_root = stoat.active_workspace().git_root.clone();
     let mut state = stoat.active_workspace().to_state();
     // The copy must not inherit any in-flight rebase pointer from its
-    // source; it ties to half-applied git state that belongs to the
-    // original workspace.
+    // source. It ties to half-applied git state that belongs to the
+    // original workspace. A blame checkout's walk ties to the source's
+    // HEAD and stash the same way, and a second return pops one stash twice.
     state.rebase = None;
     state.rebase_active = None;
+    state.blame_checkout = None;
     state.uid = WorkspaceUid::now(&stoat.executor);
     state.parent = Some(stoat.active_workspace().family_root());
 

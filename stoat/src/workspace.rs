@@ -382,6 +382,9 @@ pub struct Workspace {
     /// find no walk. It stays here until the return's start takes it, so an
     /// amend that lands before then still moves its return ref.
     pub(crate) ending_walk: Option<crate::review_walk::ReviewWalk>,
+    /// Whether [`Self::review_walk`] came back from a restore, and no git job
+    /// has yet checked that HEAD still stands on its commit.
+    pub(crate) walk_unchecked: bool,
     /// Walkthrough being played (if any). Opened by `WalkthroughOpen` and
     /// dropped only by `WalkthroughDone`, so moving away from a stop's file
     /// leaves the tour where it was.
@@ -612,6 +615,7 @@ impl Workspace {
             diff_changes_epoch: 0,
             review_walk: None,
             ending_walk: None,
+            walk_unchecked: false,
             walkthrough: None,
             rebase: None,
             rebase_active: None,

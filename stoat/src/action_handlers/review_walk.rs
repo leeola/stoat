@@ -1139,6 +1139,66 @@ fn restore_walk(stoat: &mut Stoat, walk: ReviewWalk) {
     stoat.active_workspace_mut().review_walk.get_or_insert(walk);
 }
 
+/// Check the walk that a restore brought back against where HEAD stands.
+///
+/// A restore puts a blame checkout's walk back as the session saved it. A tool
+/// that moved HEAD while stoat was closed leaves that walk on a commit HEAD
+/// left, and a return from it checks out over work that the walk never saw.
+/// The first call after the restore reads HEAD on the git queue, and later
+/// calls do nothing.
+///
+/// When HEAD is not the walk's commit, the landing ends the walk and its base,
+/// and the Review badge names the stash, since nothing else names it then. A
+/// repository that is gone ends the walk too, since a return from it fails.
+pub(crate) fn check_restored_walk(stoat: &mut Stoat) {
+    if !std::mem::take(&mut stoat.active_workspace_mut().walk_unchecked) {
+        return;
+    }
+
+    let job = GitJob::new("walk check", None, |stoat: &mut Stoat| {
+        let (workdir, sha) = {
+            let walk = stoat.active_workspace().review_walk.as_ref()?;
+            (walk.workdir.clone(), walk.current().sha.clone())
+        };
+        let Some(repo) = stoat.git_host.discover(&workdir) else {
+            land_walk_check(stoat, &sha, None);
+            return None;
+        };
+        Some(Box::new(move || {
+            let head = repo.resolve_rev("HEAD");
+            Box::new(move |stoat: &mut Stoat| land_walk_check(stoat, &sha, head)) as GitLanding
+        }) as GitWork)
+    });
+    git_jobs::enqueue(stoat, job);
+}
+
+/// End the restored walk at commit `sha` unless `head`, where HEAD stands, is
+/// that commit.
+///
+/// A walk that is no longer at `sha` stays as it is, such as one that a return
+/// took while the check ran.
+fn land_walk_check(stoat: &mut Stoat, sha: &str, head: Option<String>) {
+    let ws = stoat.active_workspace_mut();
+    if head.as_deref() == Some(sha)
+        || ws
+            .review_walk
+            .as_ref()
+            .is_none_or(|walk| walk.current().sha != sha)
+    {
+        return;
+    }
+
+    let stash = ws.review_walk.take().and_then(|walk| walk.stash);
+    ws.set_diff_base(None);
+    let detail = stash.map(|stash| {
+        format!(
+            "stash {} holds your changes",
+            &stash.sha[..stash.sha.len().min(7)]
+        )
+    });
+    review_error(stoat, "checkout ended outside stoat", detail);
+}
+
 fn dirty_tree_error(stoat: &mut Stoat) -> UpdateEffect {
     review_error(
         stoat,
@@ -1797,8 +1857,9 @@ fn walk_position(stoat: &Stoat) -> Option<(PathBuf, String, String)> {
 #[cfg(test)]
 mod tests {
     use super::{
-        queue_walk_landing, queue_walk_start, walk_landing, walk_navigate_as, walk_one_commit,
-        ReturnRef, ReviewWalk, WalkEntry, WalkFailure, WalkLandingKind, WalkOrigin, WalkSpan,
+        check_restored_walk, land_walk_check, queue_walk_landing, queue_walk_start, walk_landing,
+        walk_navigate_as, walk_one_commit, ReturnRef, ReviewWalk, WalkEntry, WalkFailure,
+        WalkLandingKind, WalkOrigin, WalkSpan,
     };
     use crate::{
         app::Stoat,
@@ -4284,6 +4345,48 @@ mod tests {
                 vec!["a1b2c3d4".to_string()],
                 Some("not in a git repository".to_string())
             ),
+        );
+    }
+
+    /// A restored walk over a workdir outside every repository ends at the
+    /// check of HEAD, since a return from it fails, and the Review badge says
+    /// so.
+    #[test]
+    fn the_check_ends_a_restored_walk_outside_a_repository() {
+        let mut h = harness();
+        let ws = h.stoat.active_workspace_mut();
+        ws.review_walk = Some(ReviewWalk {
+            workdir: PathBuf::from("/elsewhere"),
+            ..ReviewWalk::blame_checkout("a1b2c3d4", ReturnRef::Branch("main".into()), None)
+        });
+        ws.walk_unchecked = true;
+
+        check_restored_walk(&mut h.stoat);
+        h.settle();
+        assert_eq!(
+            (walk_shas(&h), review_badge(&h)),
+            (
+                Vec::<String>::new(),
+                Some("checkout ended outside stoat".to_string())
+            ),
+        );
+    }
+
+    /// The check's landing leaves alone a walk that is no longer at the checked
+    /// commit, such as one that a return took while the check ran.
+    #[test]
+    fn the_check_leaves_a_walk_at_another_commit() {
+        let mut h = harness();
+        h.stoat.active_workspace_mut().review_walk = Some(ReviewWalk::blame_checkout(
+            "b2c3d4e5",
+            ReturnRef::Branch("main".into()),
+            None,
+        ));
+
+        land_walk_check(&mut h.stoat, "a1b2c3d4", Some("c3d4e5f6".to_string()));
+        assert_eq!(
+            (walk_shas(&h), review_badge(&h)),
+            (vec!["b2c3d4e5".to_string()], None),
         );
     }
 }

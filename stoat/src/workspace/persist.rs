@@ -28,8 +28,9 @@ use crate::{
     input_history::InputHistory,
     pane::{self, DockId, DockPanel, FocusTarget, PaneId, PaneTree, View},
     rebase::RebaseState,
+    review_walk::BlameCheckoutSnap,
     ssh::RemoteTarget,
-    workspace::{Tab, Workspace, WorkspaceUid},
+    workspace::{diff::DiffBase, Tab, Workspace, WorkspaceUid},
 };
 use serde::{Deserialize, Serialize};
 use slotmap::SlotMap;
@@ -148,6 +149,11 @@ pub(crate) struct WorkspaceStateV1 {
     /// files that predate the field.
     #[serde(default)]
     pub commit_lists: Vec<(CommitListId, CommitListSnap)>,
+    /// The walk of a blame checkout that holds HEAD at a commit, so a restart
+    /// keeps the way back and the stash the checkout made. `None` with no such
+    /// walk out, and on files that predate the field.
+    #[serde(default)]
+    pub blame_checkout: Option<BlameCheckoutSnap>,
     /// Selection endpoints owed a re-take against a compacted buffer's seed,
     /// resolved but not yet re-anchored.
     ///
@@ -418,6 +424,7 @@ impl Workspace {
                 .iter()
                 .map(|(id, list)| (id, list.snapshot()))
                 .collect(),
+            blame_checkout: self.review_walk.as_ref().and_then(BlameCheckoutSnap::of),
             pending_reanchors,
             drifted_buffers: Vec::new(),
         }
@@ -583,6 +590,19 @@ impl Workspace {
             },
             snap => snap.map(ActiveRebaseSnap::into_active),
         };
+        // The walk names the commit HEAD stood on at the save. A tool that moves
+        // HEAD while stoat is closed leaves the walk on a commit HEAD left, so
+        // the first git job after the restore checks HEAD.
+        if let Some(snap) = state.blame_checkout {
+            let walk = snap.into_walk();
+            let commit = walk.current();
+            self.set_diff_base(Some(DiffBase::parent_of(
+                &commit.sha,
+                commit.parents.first().cloned(),
+            )));
+            self.review_walk = Some(walk);
+            self.walk_unchecked = true;
+        }
         self.name = if state.name.is_empty() {
             super::name::default_workspace_name(state.uid)
         } else {
@@ -1072,7 +1092,9 @@ mod tests {
         multi_buffer::MultiBuffer,
         pane::{Axis, DockSide, DockVisibility, Placement},
         rebase::{ActiveRebase, RebasePause},
+        review_walk::{ReturnRef, ReviewWalk, WalkOrigin, WalkStash},
         selection::SelectionsCollection,
+        workspace::diff::RevOrigin,
     };
     use std::{
         collections::{HashSet, VecDeque},
@@ -2218,6 +2240,107 @@ mod tests {
                 (false, Some("rebase interrupted".to_string())),
                 (true, None)
             ],
+        );
+    }
+
+    /// A blame checkout's walk comes back from a save with its commit, its
+    /// return branch, and its stash, under its commit's parent as the base, and
+    /// it waits for the check of HEAD. A walk of the commit list saves nothing,
+    /// since its lists and its cursor stay out of the session.
+    #[test]
+    fn a_blame_checkout_survives_a_save_and_a_commits_walk_does_not() {
+        let walk = |origin: WalkOrigin| {
+            let stash = WalkStash {
+                sha: "s1".to_string(),
+                changes: 2,
+            };
+            let mut walk = ReviewWalk {
+                origin,
+                ..ReviewWalk::blame_checkout(
+                    "c2",
+                    ReturnRef::Branch("main".to_string()),
+                    Some(stash),
+                )
+            };
+            walk.commits[0].parents = vec!["c1".to_string()];
+            walk
+        };
+        let fields = |walk: &ReviewWalk| {
+            (
+                walk.workdir.clone(),
+                walk.commits.clone(),
+                walk.cursor,
+                walk.return_ref.clone(),
+                walk.span.clone(),
+                walk.origin.clone(),
+                walk.stash.clone(),
+            )
+        };
+        let restored = |origin: WalkOrigin| {
+            let (fake, exec) = (FakeFs::new(), executor());
+            let path = PathBuf::from("/repo/state.ron");
+            let mut ws = new_laid_out_workspace(PathBuf::from("/repo"), &exec);
+            ws.review_walk = Some(walk(origin));
+            ws.save_state(&path, &fake).expect("the state saves");
+
+            let mut fresh = new_laid_out_workspace(PathBuf::from("/repo"), &exec);
+            fresh
+                .restore_state(&path, &fake, &exec)
+                .expect("the state restores");
+            let base = match fresh.diff_base() {
+                Some(DiffBase::Rev {
+                    sha,
+                    origin: RevOrigin::ParentOf(commit),
+                }) => Some((sha.clone(), commit.clone())),
+                _ => None,
+            };
+            (
+                fresh.review_walk.as_ref().map(fields),
+                base,
+                fresh.walk_unchecked,
+            )
+        };
+
+        let blame = WalkOrigin::Blame {
+            path: PathBuf::from("src/lib.rs"),
+            row: 4,
+        };
+        assert_eq!(
+            [restored(blame.clone()), restored(WalkOrigin::Commits)],
+            [
+                (
+                    Some(fields(&walk(blame))),
+                    Some((Some("c1".to_string()), "c2".to_string())),
+                    true,
+                ),
+                (None, None, false),
+            ],
+        );
+    }
+
+    /// A file from before the field holds no blame checkout, so it restores
+    /// with no walk to check.
+    #[test]
+    fn a_state_file_without_the_blame_checkout_restores_no_walk() {
+        let (fake, exec) = (FakeFs::new(), executor());
+        let mut ws = new_laid_out_workspace(PathBuf::from("/repo"), &exec);
+        ws.review_walk = Some(ReviewWalk::blame_checkout(
+            "c2",
+            ReturnRef::Branch("main".to_string()),
+            None,
+        ));
+        let path = PathBuf::from("/repo/state.ron");
+        let body = ron::ser::to_string(&LegacyState::from(ws.to_state())).unwrap();
+        assert!(!body.contains("blame_checkout"), "no checkout on the wire");
+        fake.write(&path, body.as_bytes()).unwrap();
+
+        let mut fresh = new_laid_out_workspace(PathBuf::from("/repo"), &exec);
+        fresh
+            .restore_state(&path, &fake, &exec)
+            .expect("a file from before the field parses");
+        assert_eq!(
+            (fresh.review_walk.is_some(), fresh.walk_unchecked),
+            (false, false),
         );
     }
 
