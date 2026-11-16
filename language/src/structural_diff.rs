@@ -37,6 +37,7 @@ mod line_diff;
 mod lower;
 mod moves;
 mod refine;
+mod residue;
 mod sliders;
 mod stack;
 mod tree_diff;
@@ -49,6 +50,7 @@ pub use content_id::ContentId;
 pub use line_diff::{align_lines, diff_lines, line_hunks};
 pub use lower::lower_tree;
 pub use moves::{find_moves, ChangesetMoveRecord, FileMoveInput, MoveRecord};
+pub use residue::{finalize_single_with_residue, pair_residues, MoveResidue};
 use std::{ops::Range, path::PathBuf, sync::Arc};
 pub use tree_diff::{
     diff_changeset, diff_changeset_from_slots, diff_with_language, diff_with_language_cancellable,

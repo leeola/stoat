@@ -163,6 +163,15 @@ impl SyntaxArena {
         &self.source[atom.byte_range.start.min(len)..atom.byte_range.end.min(len)]
     }
 
+    /// An empty arena over the same source text as this one, sized for `nodes`
+    /// entries up front.
+    ///
+    /// A copy of part of a lowered tree keeps the byte ranges of its atoms,
+    /// which name bytes of this source.
+    pub(crate) fn with_same_source(&self, nodes: usize) -> Self {
+        Self::with_capacity(self.source.clone(), nodes)
+    }
+
     /// The bytes that `id` covers in the source.
     ///
     /// A list starts at its opening delimiter, or at its first child when it

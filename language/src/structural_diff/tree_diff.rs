@@ -298,7 +298,7 @@ pub fn diff_with_language_cancellable(
 /// from, which finalizing reads to refine each replaced pair. Dropping the
 /// value puts a memoized base's lowered arena back in its memo.
 pub struct PreparedDiff<'a> {
-    prepared: PreparedFile<'a>,
+    pub(super) prepared: PreparedFile<'a>,
     _marker: PhantomData<&'a str>,
 }
 
@@ -335,6 +335,19 @@ pub fn prepare_diff<'a>(
 ///
 /// `pairs` says whether [`DiffResult::matched`] is filled.
 pub fn finalize_single(prepared: &PreparedDiff<'_>, pairs: MatchedPairs) -> DiffResult {
+    finalize_single_parts(prepared, pairs).0
+}
+
+/// [`finalize_single`], with the left and right change maps as the in-file
+/// move pass leaves them.
+///
+/// A node that the maps leave `Pending` paired with nothing in this file.
+/// [`super::finalize_single_with_residue`] keeps those nodes for the pairing
+/// across files.
+pub(super) fn finalize_single_parts(
+    prepared: &PreparedDiff<'_>,
+    pairs: MatchedPairs,
+) -> (DiffResult, ChangeMap, ChangeMap) {
     let p = &prepared.prepared;
     let mut lhs_changes = p.lhs_changes.clone();
     let mut rhs_changes = p.rhs_changes.clone();
@@ -368,7 +381,7 @@ pub fn finalize_single(prepared: &PreparedDiff<'_>, pairs: MatchedPairs) -> Diff
     if pairs == MatchedPairs::Collect {
         result.matched = matched_atom_pairs(p, &lhs_changes, &rhs_changes);
     }
-    result
+    (result, lhs_changes, rhs_changes)
 }
 
 /// Run [`diff_with_language`]-quality diffs across a multi-file
@@ -521,15 +534,15 @@ pub fn diff_changeset_from_slots(mut slots: Vec<ChangesetSlot<'_>>) -> Vec<DiffR
 /// [`finalize_per_file`] consumes to emit a [`DiffResult`]. The
 /// identifying [`BufferRef`] travels alongside in [`ChangesetSlot`]
 /// rather than here, since single-file diffs have no buffer.
-struct PreparedFile<'a> {
-    lhs_arena: SyntaxArena,
-    rhs_arena: SyntaxArena,
+pub(super) struct PreparedFile<'a> {
+    pub(super) lhs_arena: SyntaxArena,
+    pub(super) rhs_arena: SyntaxArena,
     lhs_root: SyntaxId,
     rhs_root: SyntaxId,
     lhs_changes: ChangeMap,
     rhs_changes: ChangeMap,
-    lhs_lines: LineIndex,
-    rhs_lines: LineIndex,
+    pub(super) lhs_lines: LineIndex,
+    pub(super) rhs_lines: LineIndex,
     /// The source texts the change byte ranges index into, retained so
     /// [`finalize_per_file`] can char-refine each `Replaced` pair.
     lhs_text: &'a str,
@@ -577,11 +590,11 @@ impl Drop for PreparedFile<'_> {
 /// Borrowed view of the arenas + line indices for one prepared file.
 /// Used by [`build_move_metadata_changeset`] when materialising
 /// [`MoveSource`]s for cross-file moves.
-struct PreparedFileView<'a> {
-    lhs_arena: &'a SyntaxArena,
-    rhs_arena: &'a SyntaxArena,
-    lhs_lines: &'a LineIndex,
-    rhs_lines: &'a LineIndex,
+pub(super) struct PreparedFileView<'a> {
+    pub(super) lhs_arena: &'a SyntaxArena,
+    pub(super) rhs_arena: &'a SyntaxArena,
+    pub(super) lhs_lines: &'a LineIndex,
+    pub(super) rhs_lines: &'a LineIndex,
 }
 
 /// The bounds that [`prepare_per_file`] runs one file under.
@@ -908,7 +921,7 @@ fn matched_atom_pairs(
 /// Novel run even if byte-adjacent, and two adjacent Moved runs with
 /// different metadata stay separate so downstream callers can offer
 /// per-move jump actions.
-fn collect_changes(
+pub(super) fn collect_changes(
     arena: &SyntaxArena,
     root: SyntaxId,
     changes: &ChangeMap,
@@ -1113,7 +1126,7 @@ type MoveMetadataMap = HashMap<SyntaxId, Arc<MoveMetadata>>;
 /// source file's [`BufferRef`]; intra-file (`my_idx == other_idx`)
 /// sources keep `buffer: None` per the
 /// [`super::MoveSource`] documented invariant.
-fn build_move_metadata_changeset(
+pub(super) fn build_move_metadata_changeset(
     cs_records: &[ChangesetMoveRecord],
     my_idx: usize,
     side: Side,
@@ -1229,7 +1242,8 @@ fn move_source_for_changeset(
 
 /// Byte-offset to 0-based line-number index. Precomputed once per side
 /// so every move-metadata lookup is two O(log n) binary searches.
-struct LineIndex {
+#[derive(Clone)]
+pub(super) struct LineIndex {
     /// Byte offset at the start of each line (line 0 starts at offset 0).
     line_starts: Vec<usize>,
 }

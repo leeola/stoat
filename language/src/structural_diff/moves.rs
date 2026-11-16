@@ -86,7 +86,7 @@ fn precompute_has_identity(arena: &SyntaxArena) -> Vec<bool> {
 /// A list reads its children, never its own tag. The singleton-list recursion
 /// in [`super::unchanged`] marks children only, so a list it descended into
 /// keeps `Pending` over content that matched in full.
-fn precompute_has_pending(arena: &SyntaxArena, changes: &ChangeMap) -> Vec<bool> {
+pub(super) fn precompute_has_pending(arena: &SyntaxArena, changes: &ChangeMap) -> Vec<bool> {
     let mut has_pending = vec![false; arena.len()];
     for i in 0..arena.len() {
         has_pending[i] = match arena.get(SyntaxId(i)) {
