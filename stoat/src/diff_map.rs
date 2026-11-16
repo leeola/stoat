@@ -2337,6 +2337,25 @@ pub(crate) fn changes_to_hunks(
     hunks
 }
 
+/// Drop the prose mark from every span of `hunks`.
+///
+/// The line pass knows no grammar, so it calls every change prose, and the
+/// diff view bolds a prose span and underlines one that kept some of its
+/// words. A caller that knows the file has a grammar drops that claim, because
+/// the spans then sit in code. The spans keep their ranges, so a hunk that the
+/// tree pass never details still washes the chars that differ.
+pub(crate) fn clear_prose(hunks: &mut [DiffHunk]) {
+    for detail in hunks
+        .iter_mut()
+        .filter_map(|hunk| hunk.token_detail.as_mut())
+    {
+        let detail = Arc::make_mut(detail);
+        for span in detail.buffer_spans.iter_mut().chain(&mut detail.base_spans) {
+            span.prose = ProseChange::None;
+        }
+    }
+}
+
 /// Replace each `Modified` hunk's token detail with the tree differ's spans,
 /// clipped to that hunk.
 ///
@@ -4877,6 +4896,39 @@ mod tests {
                 "with {unsearched:?} unsearched, the first hunk keeps the line pass's detail",
             );
         }
+    }
+
+    #[test]
+    fn clear_prose_keeps_the_ranges_of_an_unsearched_hunk() {
+        let base = "let total = alpha + beta;\n";
+        let buffer = "let total = alpha + gamma;\n";
+        let mut hunks = super::changes_to_hunks(
+            &stoat_language::structural_diff::diff(base, buffer).changes,
+            base,
+            buffer,
+        );
+        let marks = |hunks: &[DiffHunk]| {
+            let spans: Vec<&ChangeSpan> = hunks
+                .iter()
+                .filter_map(|hunk| hunk.token_detail.as_deref())
+                .flat_map(|detail| detail.buffer_spans.iter().chain(&detail.base_spans))
+                .collect();
+            let ranges: Vec<_> = spans.iter().map(|span| span.byte_range.clone()).collect();
+            let mut prose: Vec<_> = spans.iter().map(|span| span.prose).collect();
+            prose.dedup();
+            (ranges, prose)
+        };
+        let recorded = marks(&hunks).0;
+
+        super::clear_prose(&mut hunks);
+        let unsearched = [(0..base.len(), 0..buffer.len())];
+        super::merge_structural_detail(&mut hunks, &[], &unsearched, base, buffer);
+
+        assert_eq!(
+            marks(&hunks),
+            (recorded, vec![ProseChange::None]),
+            "the unsearched hunk keeps the line pass's ranges with no prose mark",
+        );
     }
 
     #[test]

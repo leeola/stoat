@@ -20,8 +20,9 @@ use crate::{
     diff::{self, ReviewFileInput},
     diff_cache::ContentHash,
     diff_map::{
-        changes_to_hunks, line_starts, mark_approved, mark_staged, merge_structural_detail,
-        staged_marks, BaseHighlights, DiffHunk, DiffHunkStatus, DiffMap, MarkKind,
+        changes_to_hunks, clear_prose, line_starts, mark_approved, mark_staged,
+        merge_structural_detail, staged_marks, BaseHighlights, DiffHunk, DiffHunkStatus, DiffMap,
+        MarkKind,
     },
     display_map::{highlights::HighlightStyle, syntax_theme::SyntaxStyles},
     editor_state::EditorId,
@@ -708,13 +709,16 @@ impl DiffState {
         };
         landings.extend(landing);
 
+        let grammar = language_registry.for_path(&path);
+        let has_grammar = grammar.is_some();
         // A hunks-only job takes no language, memo, tree, or anchors. Its
         // hunks lack anchors on purpose, which is what tells
         // `DiffMap::renders_same_as` that the drive's colored map decorates
-        // differently.
+        // differently. It still takes `has_grammar`, so its line-pass spans in
+        // a file with a grammar read as code.
         let (language, buffer_tree) = match whole {
             true => (
-                language_registry.for_path(&path),
+                grammar,
                 buffers
                     .syntax(id)
                     .filter(|state| state.version == target_version)
@@ -745,6 +749,7 @@ impl DiffState {
                     target_version,
                     id,
                     language.as_ref(),
+                    has_grammar,
                     &syntax_styles,
                     &base_cache,
                     tree_cache.as_ref(),
@@ -1040,6 +1045,7 @@ impl DiffState {
             let buffer_snapshot = shared.read().expect("buffer poisoned").snapshot.clone();
 
             let language = language_registry.for_path(&path);
+            let has_grammar = language.is_some();
             let cached_base = self.base_text.get(&path).cloned();
             // Parsing this buffer is the largest item in the diff, and the
             // highlight pipeline has already done it for these exact bytes:
@@ -1073,6 +1079,7 @@ impl DiffState {
                         cur_version,
                         buffer_id,
                         language.as_ref(),
+                        has_grammar,
                         &syntax_styles,
                         &base_cache,
                         Some(&tree_cache),
@@ -1347,6 +1354,7 @@ fn run_diff_job(
     target_version: u64,
     buffer_id: BufferId,
     language: Option<&Arc<Language>>,
+    has_grammar: bool,
     syntax_styles: &SyntaxStyles,
     base_cache: &BaseHighlightCache,
     tree_memo: Option<&TreeCache>,
@@ -1367,6 +1375,7 @@ fn run_diff_job(
         compute_diff_map(
             &buffer_text,
             language,
+            has_grammar,
             syntax_styles,
             base_cache,
             &base.clone().with_approved(approved),
@@ -1752,12 +1761,19 @@ pub(crate) type BaseHighlightCache = Arc<Mutex<BaseHighlightMemo>>;
 /// lines, the line pass's char-refined spans stand. A file with no hunk skips
 /// the tree pass, because the pass only details the line pass's hunks.
 ///
+/// With `has_grammar`, the file has a grammar, and the line pass's spans read
+/// as code wherever they stand. Without it they read as prose, which the diff
+/// view marks more heavily. `language` alone does not say which, because a
+/// hunks-only job passes none for a file that has a grammar.
+///
 /// `buffer_tree` is a tree already parsed from `buffer_text`, which the tree
 /// pass takes in place of parsing the buffer a second time. It must describe
 /// exactly those bytes. A tree from another grammar is discarded downstream.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn compute_diff_map(
     buffer_text: &str,
     language: Option<&Arc<Language>>,
+    has_grammar: bool,
     syntax_styles: &SyntaxStyles,
     base_cache: &BaseHighlightCache,
     base: &DiffBaseText,
@@ -1829,6 +1845,9 @@ pub(super) fn compute_diff_map(
         }
     } else {
         let mut hunks = changes_to_hunks(&result.changes, base_text, buffer_text);
+        if has_grammar {
+            clear_prose(&mut hunks);
+        }
         mark_staged(&mut hunks, &staged_changed);
         if let Some(approved) = &base.approved {
             mark_approved(&mut hunks, approved.ranges());
@@ -2333,7 +2352,7 @@ mod tests {
         buffer::BufferId,
         diff_map::{
             BaseHighlights, DiffHunk, DiffHunkStatus, DiffMap, GutterMark, MarkKind, MarkState,
-            StagedMark,
+            ProseChange, StagedMark,
         },
         display_map::syntax_theme::SyntaxStyles,
         host::DiffStatus,
@@ -2836,6 +2855,7 @@ mod tests {
         compute_diff_map(
             buffer,
             Some(&language),
+            true,
             &styles,
             // A fresh style cache, so the highlight pass reaches its parse
             // instead of answering from the spans the call above filed.
@@ -2873,6 +2893,7 @@ mod tests {
             compute_diff_map(
                 buffer,
                 Some(&language),
+                true,
                 &styles,
                 &cache,
                 &base,
@@ -2921,6 +2942,7 @@ mod tests {
         let diff_map = compute_diff_map(
             text,
             Some(&language),
+            true,
             &styles,
             &Arc::new(Mutex::new(BaseHighlightMemo::default())),
             &diff_base(text, text, None),
@@ -2942,9 +2964,15 @@ mod tests {
 
     /// The map the line pass alone builds for `buffer` against `base`.
     fn plain_diff(buffer: &str, base: &DiffBaseText) -> DiffMap {
+        line_pass_diff(buffer, base, false)
+    }
+
+    /// [`plain_diff`] in a file that has a grammar when `has_grammar` is set.
+    fn line_pass_diff(buffer: &str, base: &DiffBaseText, has_grammar: bool) -> DiffMap {
         compute_diff_map(
             buffer,
             None,
+            has_grammar,
             &SyntaxStyles::from_theme(&Theme::empty()),
             &BaseHighlightCache::default(),
             base,
@@ -2952,6 +2980,41 @@ mod tests {
             None,
         )
         .expect("a diff map")
+    }
+
+    /// The prose marks of every span in `dm`, buffer side then base side, with
+    /// each run of equal marks merged into one.
+    fn span_prose(dm: &DiffMap) -> Vec<ProseChange> {
+        let mut prose: Vec<ProseChange> = dm
+            .hunks()
+            .filter_map(|hunk| hunk.token_detail.as_deref())
+            .flat_map(|detail| detail.buffer_spans.iter().chain(&detail.base_spans))
+            .map(|span| span.prose)
+            .collect();
+        prose.dedup();
+        prose
+    }
+
+    /// The line pass reads no grammar and calls every change prose. Only a
+    /// file with no grammar keeps that claim, so a hunk that the tree pass
+    /// leaves to the line pass marks code as code.
+    #[test]
+    fn a_line_pass_span_is_prose_only_in_a_file_with_no_grammar() {
+        let base = "let total = alpha + beta;\n";
+        let base = diff_base(base, base, None);
+        let prose = |has_grammar| {
+            span_prose(&line_pass_diff(
+                "let total = alpha + gamma;\n",
+                &base,
+                has_grammar,
+            ))
+        };
+
+        assert_eq!(
+            [prose(false), prose(true)],
+            [vec![ProseChange::Part], vec![ProseChange::None]],
+            "only a file with no grammar marks the changed part of a line as prose",
+        );
     }
 
     /// The base holds one change over the text behind it and the buffer one
@@ -3587,11 +3650,14 @@ mod tests {
     /// A repo where `a.rs` gains a line over HEAD, open with the background
     /// diff on, and the buffer's id. The open leaves the map to the caller.
     fn wanted_harness() -> (TestHarness, BufferId) {
+        wanted_harness_of("fn foo() {}\n", "fn foo() {}\nfn bar() {}\n")
+    }
+
+    /// [`wanted_harness`] with `a.rs` at `head` in HEAD and at `working` in the
+    /// working tree.
+    fn wanted_harness_of(head: &str, working: &str) -> (TestHarness, BufferId) {
         let mut h = TestHarness::with_size(80, 24);
-        h.stage_review_scenario(
-            "/repo",
-            &[("a.rs", "fn foo() {}\n", "fn foo() {}\nfn bar() {}\n")],
-        );
+        h.stage_review_scenario("/repo", &[("a.rs", head, working)]);
         h.stoat.set_diff_warm_auto(true);
         h.stoat.open_file(Path::new("/repo/a.rs"));
         let buffer_id = h.stoat.focused_editor_ids().expect("focused editor").1;
@@ -3639,6 +3705,30 @@ mod tests {
             wanted_map(&h, buffer_id),
             (1, true, false, true),
             "the drive lands the colors with no clock advance",
+        );
+    }
+
+    /// A want's hunks-only map runs no tree pass, so the line pass's spans
+    /// stand until the drive's map lands. In a file with a grammar they still
+    /// read as code.
+    #[test]
+    fn a_wanted_map_of_a_file_with_a_grammar_marks_no_prose() {
+        let (mut h, buffer_id) = wanted_harness_of(
+            "let total = alpha + beta;\n",
+            "let total = alpha + gamma;\n",
+        );
+        h.settle_diff_map(buffer_id);
+
+        let ws = h.stoat.active_workspace();
+        let prose = {
+            let buffer = ws.buffers.get(buffer_id).expect("buffer");
+            let guard = buffer.read().expect("poisoned");
+            span_prose(guard.diff_map.as_ref().expect("diff map installed"))
+        };
+        assert_eq!(
+            (prose, ws.hunks_installed(buffer_id)),
+            (vec![ProseChange::None], true),
+            "the hunks-only map of a rust file marks no span as prose",
         );
     }
 

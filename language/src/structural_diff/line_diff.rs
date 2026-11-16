@@ -196,8 +196,9 @@ impl ChangeSink<'_> {
                 pair_id,
                 deletion_rhs_anchor,
                 refined_spans: None,
-                // The line pass runs where no grammar parsed, so nothing in
-                // the file carries a token boundary to mark an edit against.
+                // The line pass reads no grammar, so it flags every change
+                // prose. A caller that knows the file's grammar decides what
+                // the flag means.
                 prose: true,
             });
         }
