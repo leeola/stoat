@@ -30,9 +30,9 @@
 //!
 //! Nodes that are tiny (`atom_leaf_count < MIN_LEAVES`) or would
 //! explode pairing state (`content_id` with more than [`MAX_AMBIGUITY`]
-//! candidates on either side) are skipped: they produce noise without
-//! informing the user. Both thresholds are tuning constants at the top
-//! of this module for easy calibration.
+//! candidates on either side that no paired ancestor holds) are skipped:
+//! they produce noise without informing the user. Both thresholds are
+//! tuning constants at the top of this module for easy calibration.
 //!
 //! The move pass runs after slider correction in
 //! [`super::tree_diff::diff_with_language`] so its input is the final
@@ -125,6 +125,10 @@ pub const MIN_LEAVES: usize = 4;
 /// pathological repetition (e.g. files with hundreds of identical empty
 /// argument lists) where every match would be noise. Values above this
 /// produce no move records for the given content id.
+///
+/// The count covers only the candidates that no paired ancestor holds. A
+/// statement that a dozen moved functions share leaves one candidate per side
+/// once those functions pair, so its copy in an edited function still moves.
 ///
 /// Calibrated by the `max_ambiguity_cap` tier-1 test: at 8 the cap
 /// accommodates realistic consolidation (N:1 where N = 2-5 helpers
@@ -292,13 +296,14 @@ pub fn find_moves_changeset(files: &mut [FileMoveInput<'_>]) -> Vec<ChangesetMov
     for (cid, _, _) in &shared {
         let lhs_cand = lhs_by_cid.get(cid).expect("cid in shared set");
         let rhs_cand = rhs_by_cid.get(cid).expect("cid in shared set");
-        if lhs_cand.len() > MAX_AMBIGUITY || rhs_cand.len() > MAX_AMBIGUITY {
-            continue;
-        }
-
         let lhs_avail = filter_unpaired_multi(lhs_cand, &paired_lhs, &lhs_parents_per);
         let rhs_avail = filter_unpaired_multi(rhs_cand, &paired_rhs, &rhs_parents_per);
         if lhs_avail.is_empty() || rhs_avail.is_empty() {
+            continue;
+        }
+        // The cap counts only the copies that no larger move holds. `shared`
+        // runs largest first, so every larger move has paired by now.
+        if lhs_avail.len() > MAX_AMBIGUITY || rhs_avail.len() > MAX_AMBIGUITY {
             continue;
         }
 
@@ -1205,10 +1210,16 @@ mod tests {
     }
 
     /// Run mark_unchanged + find_moves_changeset on `pairs` and return
-    /// the per-file LHS arenas, RHS arenas, and emitted records.
+    /// the per-file LHS arenas, RHS arenas, emitted records, and the change
+    /// maps the pass marked.
     fn find_moves_changeset_in<'a>(
         pairs: &[(&'a str, &'a str)],
-    ) -> (Vec<SyntaxArena>, Vec<SyntaxArena>, Vec<ChangesetMoveRecord>) {
+    ) -> (
+        Vec<SyntaxArena>,
+        Vec<SyntaxArena>,
+        Vec<ChangesetMoveRecord>,
+        Vec<PreprocessResult>,
+    ) {
         let mut lhs_arenas: Vec<SyntaxArena> = Vec::new();
         let mut rhs_arenas: Vec<SyntaxArena> = Vec::new();
         let mut roots: Vec<(SyntaxId, SyntaxId)> = Vec::new();
@@ -1238,7 +1249,76 @@ mod tests {
             find_moves_changeset(&mut inputs)
         };
 
-        (lhs_arenas, rhs_arenas, records)
+        (lhs_arenas, rhs_arenas, records, preprocesses)
+    }
+
+    /// A statement of 26 atoms that every function of [`functions_sharing`]
+    /// holds.
+    const LET_TOTAL: &str = "let total: Vec<u32> = rows.iter().map(|row| row.value).collect();";
+
+    /// `count` functions that each hold [`LET_TOTAL`], told apart by the
+    /// number that their `check` call passes. A function that `edited` picks
+    /// passes `100 + n` in place of `n`, so it pairs with no unedited copy.
+    fn functions_sharing(count: usize, edited: impl Fn(usize) -> bool) -> String {
+        (0..count)
+            .map(|n| {
+                let check = match edited(n) {
+                    true => 100 + n,
+                    false => n,
+                };
+                format!("fn case_{n}() {{ {LET_TOTAL} check(total, {check}); }}\n")
+            })
+            .collect()
+    }
+
+    /// The atom changes of each copy of [`LET_TOTAL`] when `lhs` leaves file 0
+    /// and `rhs` arrives in file 1.
+    ///
+    /// The first list reads file 0's left side, and the second reads file 1's
+    /// right side.
+    fn copies_after_a_cross_file_move(lhs: &str, rhs: &str) -> [Vec<Vec<ChangeKind>>; 2] {
+        let lhs_a = format!("fn left() {{}}\n{lhs}");
+        let rhs_b = format!("fn keep() {{}}\n{rhs}");
+        let pairs: &[(&str, &str)] = &[(&lhs_a, "fn left() {}\n"), ("fn keep() {}\n", &rhs_b)];
+        let (lhs_arenas, rhs_arenas, _, pre) = find_moves_changeset_in(pairs);
+        [
+            atom_kinds_of_copies(&lhs_arenas[0], &pre[0].lhs_changes, &lhs_a, LET_TOTAL),
+            atom_kinds_of_copies(&rhs_arenas[1], &pre[1].rhs_changes, &rhs_b, LET_TOTAL),
+        ]
+    }
+
+    #[test]
+    fn a_copy_under_a_moved_ancestor_does_not_count_as_ambiguous() {
+        // An edit inside `case_3` keeps its function and its block from
+        // pairing whole. Its copy of the statement then moves only when the
+        // statement pairs on its own.
+        let kinds = copies_after_a_cross_file_move(
+            &functions_sharing(10, |_| false),
+            &functions_sharing(10, |n| n == 3),
+        );
+
+        let moved = vec![vec![ChangeKind::Moved; 26]; 10];
+        assert_eq!(
+            kinds,
+            [moved.clone(), moved],
+            "every copy moves, the one in the edited function included",
+        );
+    }
+
+    #[test]
+    fn more_unpaired_copies_than_the_cap_stay_unmoved() {
+        let copies = MAX_AMBIGUITY + 1;
+        let kinds = copies_after_a_cross_file_move(
+            &functions_sharing(copies, |_| false),
+            &functions_sharing(copies, |_| true),
+        );
+
+        let pending = vec![vec![ChangeKind::Pending; 26]; copies];
+        assert_eq!(
+            kinds,
+            [pending.clone(), pending],
+            "no function pairs whole, so every copy counts against the cap",
+        );
     }
 
     #[test]
@@ -1260,7 +1340,7 @@ mod tests {
                  fn migrated() { let x = 1; let y = 2; let z = 3; }",
             ),
         ];
-        let (lhs_arenas, rhs_arenas, records) = find_moves_changeset_in(pairs);
+        let (lhs_arenas, rhs_arenas, records, _) = find_moves_changeset_in(pairs);
 
         let cross_file = records.iter().find(|r| {
             r.lhs_sources
@@ -1306,7 +1386,7 @@ mod tests {
                 "fn second() { shared(); }",
             ),
         ];
-        let (lhs_arenas, rhs_arenas, records) = find_moves_changeset_in(pairs);
+        let (lhs_arenas, rhs_arenas, records, _) = find_moves_changeset_in(pairs);
 
         let consolidation = records
             .iter()
@@ -1354,7 +1434,7 @@ mod tests {
             ("", "fn first() { render_widget(config, style, theme); }"),
             ("", "fn second() { render_widget(config, style, theme); }"),
         ];
-        let (lhs_arenas, rhs_arenas, records) = find_moves_changeset_in(pairs);
+        let (lhs_arenas, rhs_arenas, records, _) = find_moves_changeset_in(pairs);
 
         let render_records: Vec<&ChangesetMoveRecord> = records
             .iter()
