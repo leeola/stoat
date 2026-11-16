@@ -1621,8 +1621,9 @@ on key {
         Cmd-0 -> DiffTintUp() "tint up";
     }
     # The focused excerpt is an editor, so a normal-mode key that this block
-    # leaves out acts on the excerpt's file. n and p search and paste there, as
-    # in any buffer. j, k, and the pages cross into the next file at an
+    # leaves out acts on the excerpt's file. p pastes there, as in any
+    # buffer, and n searches on from there through the files of the stack.
+    # j, k, and the pages cross into the next file at an
     # excerpt's edge. `] g`, `[ g`, the review mode's n and p, the Alt notches,
     # and the side buttons walk the hunks across the excerpts, as the diff
     # view's walk crosses into the next changed file. `] h`, `[ h`, and the

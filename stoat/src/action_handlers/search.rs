@@ -2,11 +2,12 @@ use crate::{
     action_handlers::{pane_editor_ids, split_selection::RegexSelectKind},
     app::{Stoat, UpdateEffect},
     buffer::BufferId,
-    editor_state::{EditorState, ScrollGlide},
+    editor_state::{EditorId, EditorState, ScrollGlide},
     input_history::InputHistory,
     input_view::{InputView, SubmitTarget},
     jumplist::JumpEntry,
     multi_buffer::MultiBufferSnapshot,
+    workspace::Workspace,
 };
 use regex_cursor::{engines::meta, regex_automata::util::syntax, Input};
 use serde::{Deserialize, Serialize};
@@ -17,17 +18,23 @@ use stoat_text::{char_is_word, Anchor, Rope, Selection};
 /// one byte slice.
 pub(crate) type CursorRegex = meta::Regex;
 
-/// The whole text of the buffer a search last scanned, held so that each scan
-/// runs over one byte slice.
+/// The selections of an excerpt editor that a search landing replaced, which
+/// the prompt puts back when its preview leaves that excerpt.
+type Displaced = (EditorId, Arc<[Selection<Anchor>]>);
+
+/// The whole text of a buffer that a search last scanned, held so that each
+/// scan runs over one byte slice.
 ///
 /// The rope's leaves hold 128 bytes. A scan across them steps a tree cursor
 /// per leaf and defeats the regex engine's prefilters, so on a large file a
 /// scan that finds nothing costs several times a scan of one slice. Each
-/// keystroke of a search prompt, and each `n` and `N`, scans the same buffer,
-/// so one copy serves them all until the buffer's text moves.
+/// keystroke of a search prompt, and each `n` and `N`, scans the same buffers,
+/// so one copy serves them all until a buffer's text moves.
 ///
-/// One slot holds one buffer, so the copy costs the memory of one buffer's
-/// text beside its rope.
+/// The held texts belong to the buffers that the last scan covers. That is the
+/// buffer of each excerpt for a search over a changes view, and one buffer for
+/// any other scan. Each copy costs the memory of its buffer's text beside the
+/// rope.
 pub(crate) struct SearchText {
     buffer: BufferId,
     version: u64,
@@ -35,12 +42,10 @@ pub(crate) struct SearchText {
 }
 
 impl SearchText {
-    /// Drop `held` when it holds `buffer`, so a closed buffer's text does not
-    /// outlive it.
-    pub(crate) fn forget(held: &mut Option<SearchText>, buffer: BufferId) {
-        if held.as_ref().is_some_and(|text| text.buffer == buffer) {
-            *held = None;
-        }
+    /// Drop the text of `buffer` from `held`, so a closed buffer's text does
+    /// not outlive it.
+    pub(crate) fn forget(held: &mut Vec<SearchText>, buffer: BufferId) {
+        held.retain(|text| text.buffer != buffer);
     }
 }
 
@@ -107,6 +112,19 @@ pub(crate) struct SearchInputState {
     /// The preview syncs once per frame, so without this every idle frame
     /// redoes the restore-and-jump for a query that has not changed.
     previewed: Option<String>,
+    /// The pane editor's buffer when the prompt opened. Over a changes view,
+    /// that is the buffer of the focused excerpt.
+    ///
+    /// A preview that lands in another excerpt moves the focus there, and the
+    /// origin selections belong to this buffer's excerpt. So each restore gives
+    /// this excerpt the focus first.
+    origin_buffer: Option<BufferId>,
+    /// The selections of another excerpt that the last preview replaced.
+    ///
+    /// The next keystroke, Escape, and Enter give them back before the jump
+    /// runs again from the origin, so a preview leaves no trace in a file it
+    /// moves away from.
+    displaced: Option<Displaced>,
 }
 
 /// Persisted query + direction from the most recent submitted search.
@@ -237,13 +255,17 @@ fn open_input(stoat: &mut Stoat, direction: SearchDirection) -> UpdateEffect {
         (
             editor.selections.shared_anchors(),
             (editor.scroll_row, editor.scroll_offset),
+            editor.buffer_id,
         )
     });
 
     let executor = stoat.executor.clone();
     let ws = stoat.active_workspace_mut();
     let input = InputView::create(ws, executor, SubmitTarget::Search, "", "insert");
-    let (origin_selections, origin_view) = origin.unwrap_or((Arc::from([]), (0, 0.0)));
+    let (origin_selections, origin_view, origin_buffer) = match origin {
+        Some((selections, view, buffer)) => (selections, view, Some(buffer)),
+        None => (Arc::from([]), (0, 0.0), None),
+    };
     stoat.search_input = Some(SearchInputState {
         input,
         direction,
@@ -252,14 +274,16 @@ fn open_input(stoat: &mut Stoat, direction: SearchDirection) -> UpdateEffect {
         origin_view,
         origin_jump,
         previewed: None,
+        origin_buffer,
+        displaced: None,
     });
     UpdateEffect::Redraw
 }
 
 /// The focused pane's editor, or `None` when that pane shows no editor.
 ///
-/// A changes view answers its focused excerpt's editor, so a search there walks
-/// the excerpt's file.
+/// A changes view answers its focused excerpt's editor. A search there starts
+/// in that excerpt's file and goes on through the files of the stack.
 ///
 /// The search and regex prompt paths reach the editor this way rather than
 /// through [`super::focused_editor_mut`], because while a prompt is open focus
@@ -348,15 +372,25 @@ pub(crate) fn sync_search_preview(stoat: &mut Stoat) {
     let extend = state.extend;
     let selections = Arc::clone(&state.origin_selections);
     let view = state.origin_view;
+    let origin_buffer = state.origin_buffer;
+    let displaced = state.displaced.take();
 
+    return_to_origin(stoat, origin_buffer, displaced);
     restore_origin_selections(stoat, selections);
 
     let regex = (!query.is_empty())
         .then(|| compile_cursor_regex(&query, smart_case(stoat)))
         .flatten();
-    if let Some(regex) = regex
-        && jump_to_match(stoat, &regex, direction, extend).moved()
-    {
+    let (outcome, displaced) = match regex {
+        Some(regex) => jump_to_match(stoat, &regex, direction, extend),
+        None => (SearchOutcome::NoMatch, None),
+    };
+    stoat
+        .search_input
+        .as_mut()
+        .expect("prompt still open")
+        .displaced = displaced;
+    if outcome.moved() {
         let scrolloff = stoat.settings.scrolloff.unwrap_or(3);
         if let Some(editor) = pane_editor(stoat) {
             super::view::land_jump(editor, scrolloff);
@@ -391,6 +425,7 @@ pub(crate) fn search_submit(stoat: &mut Stoat) -> bool {
     let ws = stoat.active_workspace_mut();
     state.input.dispose(ws);
 
+    return_to_origin(stoat, state.origin_buffer, state.displaced);
     restore_origin_selections(stoat, state.origin_selections);
 
     if query.is_empty() {
@@ -407,7 +442,7 @@ pub(crate) fn search_submit(stoat: &mut Stoat) -> bool {
     let outcome = last
         .regex
         .as_ref()
-        .map(|regex| jump_to_match(stoat, regex, direction, extend));
+        .map(|regex| jump_to_match(stoat, regex, direction, extend).0);
     let moved = outcome.is_some_and(SearchOutcome::moved);
     if !moved {
         restore_origin_view(stoat, state.origin_view);
@@ -473,8 +508,30 @@ pub(crate) fn search_cancel(stoat: &mut Stoat) -> bool {
     let ws = stoat.active_workspace_mut();
     state.input.dispose(ws);
 
+    return_to_origin(stoat, state.origin_buffer, state.displaced);
     restore_origin(stoat, state.origin_selections, state.origin_view);
     true
+}
+
+/// Give a changes view back the excerpt focus that the open prompt found, and
+/// give back the selections that a preview replaced in another excerpt.
+///
+/// This runs before each restore of the origin selections, because those go to
+/// the focused excerpt's editor. Outside a changes view it has no effect, since
+/// no preview there replaces the selections of another editor.
+fn return_to_origin(
+    stoat: &mut Stoat,
+    origin_buffer: Option<BufferId>,
+    displaced: Option<Displaced>,
+) {
+    if let Some((editor_id, selections)) = displaced
+        && let Some(editor) = stoat.active_workspace_mut().editors.get_mut(editor_id)
+    {
+        editor.selections.restore(selections);
+    }
+    if let Some(buffer) = origin_buffer {
+        super::diff_changes::focus_stack_buffer(stoat, buffer);
+    }
 }
 
 pub(super) fn search_next(stoat: &mut Stoat) -> UpdateEffect {
@@ -524,7 +581,7 @@ fn repeat_search(
 
     let mut outcome = SearchOutcome::NoMatch;
     for _ in 0..count {
-        outcome = jump_to_match(stoat, &regex, direction, extend);
+        outcome = jump_to_match(stoat, &regex, direction, extend).0;
         if !outcome.moved() {
             break;
         }
@@ -539,7 +596,12 @@ fn repeat_search(
 
     match outcome {
         SearchOutcome::Landed => {},
-        SearchOutcome::Wrapped => stoat.set_status("Wrapped around document"),
+        // The message names what the walk covered, so a select mode walk over
+        // a changes view, which wraps inside one file, names the document.
+        SearchOutcome::Wrapped => match stack_scan(stoat.active_workspace(), extend) {
+            Some(_) => stoat.set_status("Wrapped around the changes"),
+            None => stoat.set_status("Wrapped around document"),
+        },
         SearchOutcome::NoMatch => stoat.set_status("No more matches"),
     }
     UpdateEffect::Redraw
@@ -689,9 +751,9 @@ impl SearchOutcome {
     }
 }
 
-/// Find the next match of `regex` in the focused editor's buffer, walking in
-/// `direction` with wrap-around, and give it to the primary selection as its
-/// new range.
+/// Find the next match of `regex` from the focused editor's primary selection,
+/// walking in `direction` with wrap-around, and give it to the primary
+/// selection as its new range.
 ///
 /// The whole match becomes the selection, so the operation after a search acts
 /// on the matched text. The primary's direction carries over, and every other
@@ -707,9 +769,28 @@ impl SearchOutcome {
 /// cursor instead puts a reverse repeat inside the match it just landed on,
 /// which finds that same match again.
 ///
+/// Over a changes view the walk goes on through the files of the stack, as
+/// [`jump_in_stack`] walks them, and the answer holds the selections of another
+/// excerpt that the landing replaced. A select mode walk stays in the focused
+/// excerpt's file, because one selection set holds the ranges of one buffer.
+///
 /// Takes the pattern already compiled, since `n` and `N` repeat one that
 /// [`LastSearch`] built when it was submitted.
 fn jump_to_match(
+    stoat: &mut Stoat,
+    regex: &CursorRegex,
+    direction: SearchDirection,
+    extend: bool,
+) -> (SearchOutcome, Option<Displaced>) {
+    match stack_scan(stoat.active_workspace(), extend) {
+        None => (jump_in_editor(stoat, regex, direction, extend), None),
+        Some((at, stack)) => jump_in_stack(stoat, regex, direction, at, &stack),
+    }
+}
+
+/// [`jump_to_match`] in the one buffer of the focused editor, which wraps
+/// inside that buffer.
+fn jump_in_editor(
     stoat: &mut Stoat,
     regex: &CursorRegex,
     direction: SearchDirection,
@@ -730,6 +811,7 @@ fn jump_to_match(
     };
 
     let text = search_text(&mut stoat.search_text, buffer_snapshot);
+    keep_texts(&mut stoat.search_text, &[buffer_snapshot.buffer_id()]);
     let target = match direction {
         SearchDirection::Forward => find_forward(regex, &text, from),
         SearchDirection::Reverse => find_reverse(regex, &text, from),
@@ -760,13 +842,185 @@ fn jump_to_match(
     }
 }
 
+/// The excerpts that a search over the focused changes view walks, in stack
+/// order, and the position of the focused excerpt among them.
+///
+/// An excerpt that waits on its diff map is left out, because the stack's focus
+/// does not move to it.
+///
+/// `None` outside a changes view, while the focused excerpt waits on its diff
+/// map, and for a select mode walk, whose one selection set holds the ranges
+/// of one buffer only.
+fn stack_scan(ws: &Workspace, extend: bool) -> Option<(usize, Vec<(EditorId, BufferId)>)> {
+    if extend {
+        return None;
+    }
+    let state = ws.focused_diff_changes()?;
+    state.focused_excerpt()?.folded_version?;
+    let folded: Vec<(usize, EditorId, BufferId)> = state
+        .excerpts
+        .iter()
+        .enumerate()
+        .filter(|(_, excerpt)| excerpt.folded_version.is_some())
+        .map(|(index, excerpt)| (index, excerpt.editor_id, excerpt.buffer_id))
+        .collect();
+    let at = folded
+        .iter()
+        .position(|&(index, _, _)| index == state.focused)?;
+    let stack = folded
+        .into_iter()
+        .map(|(_, editor_id, buffer_id)| (editor_id, buffer_id))
+        .collect();
+    Some((at, stack))
+}
+
+/// Find the next match of `regex` across the files of the focused changes
+/// view, from the focused excerpt's primary selection, and land it.
+///
+/// `stack` lists the excerpts whose diff maps have landed, in stack order, and
+/// `at` is the focused one's position, as [`stack_scan`] answers them. The scan
+/// reads the whole text of each file, its folded rows too.
+///
+/// A match in the focused file lands as [`jump_in_editor`] lands one. A match
+/// in another excerpt moves the focus there and becomes that excerpt's primary
+/// selection, and the answer holds the selections that it replaced.
+fn jump_in_stack(
+    stoat: &mut Stoat,
+    regex: &CursorRegex,
+    direction: SearchDirection,
+    at: usize,
+    stack: &[(EditorId, BufferId)],
+) -> (SearchOutcome, Option<Displaced>) {
+    let active = stoat.active_workspace;
+    let (reversed, from) = {
+        let Some(editor) = stoat.workspaces[active].editors.get_mut(stack[at].0) else {
+            return (SearchOutcome::NoMatch, None);
+        };
+        let snapshot = editor.display_map.snapshot();
+        let buffer_snapshot = snapshot.buffer_snapshot();
+        let sel = editor.selections.newest_anchor();
+        let from = match direction {
+            SearchDirection::Forward => buffer_snapshot.resolve_anchor(&sel.end),
+            SearchDirection::Reverse => buffer_snapshot.resolve_anchor(&sel.start),
+        };
+        (sel.reversed, from)
+    };
+
+    let found = {
+        let editors = &mut stoat.workspaces[active].editors;
+        let held = &mut stoat.search_text;
+        stack_legs(direction, at, stack.len(), from)
+            .into_iter()
+            .find_map(|(index, leg, wrapped)| {
+                let editor = editors.get_mut(stack[index].0)?;
+                let snapshot = editor.display_map.snapshot();
+                let text = search_text(held, snapshot.buffer_snapshot());
+                // An empty match at the very start of a file selects nothing
+                // and lands nowhere, so the scan goes on past it.
+                let hit = leg.find(regex, &text).filter(|hit| hit.end != 0)?;
+                Some((index, Hit { wrapped, ..hit }))
+            })
+    };
+    let buffers: Vec<BufferId> = stack.iter().map(|&(_, buffer_id)| buffer_id).collect();
+    keep_texts(&mut stoat.search_text, &buffers);
+
+    let Some((index, hit)) = found else {
+        return (SearchOutcome::NoMatch, None);
+    };
+    let outcome = match hit.wrapped {
+        true => SearchOutcome::Wrapped,
+        false => SearchOutcome::Landed,
+    };
+    let (editor_id, buffer_id) = stack[index];
+    let Some(editor) = stoat.workspaces[active].editors.get_mut(editor_id) else {
+        return (SearchOutcome::NoMatch, None);
+    };
+    let snapshot = editor.display_map.snapshot();
+    let buffer_snapshot = snapshot.buffer_snapshot();
+    if index == at {
+        editor
+            .selections
+            .replace_primary(hit.start..hit.end, reversed, buffer_snapshot);
+        return (outcome, None);
+    }
+
+    let displaced = (editor_id, editor.selections.shared_anchors());
+    editor
+        .selections
+        .replace_primary(hit.start..hit.end, false, buffer_snapshot);
+    super::diff_changes::focus_stack_buffer(stoat, buffer_id);
+    (outcome, Some(displaced))
+}
+
+/// How one step of a stack scan reads the file of its excerpt.
+#[derive(Clone, Copy)]
+enum Leg {
+    /// The first match at or after the offset.
+    After(usize),
+    /// The last match that ends at or before the offset.
+    Before(usize),
+    /// The last match that starts at or after the offset.
+    From(usize),
+}
+
+impl Leg {
+    fn find(self, regex: &CursorRegex, text: &str) -> Option<Hit> {
+        let len = text.len();
+        match self {
+            Leg::After(at) => next_match_at_or_after(regex, text, at.min(len)),
+            Leg::Before(end) => last_match_in(regex, text, 0..end.min(len)),
+            Leg::From(start) => last_match_in(regex, text, start.min(len)..len),
+        }
+    }
+}
+
+/// The steps of a stack scan from `from` in the excerpt at `at`, as
+/// `(excerpt, leg, wrapped)` in the order the scan takes them.
+///
+/// A forward scan reads the rest of the focused file, then the excerpts after
+/// it, and wraps to the excerpts before it and the start of the focused file. A
+/// reverse scan mirrors it, with the nearest excerpt first. With one excerpt
+/// the steps are the scan of one buffer.
+fn stack_legs(
+    direction: SearchDirection,
+    at: usize,
+    len: usize,
+    from: usize,
+) -> Vec<(usize, Leg, bool)> {
+    let mut legs = Vec::with_capacity(len + 1);
+    match direction {
+        SearchDirection::Forward => {
+            legs.push((at, Leg::After(from), false));
+            legs.extend((at + 1..len).map(|index| (index, Leg::After(0), false)));
+            legs.extend((0..at).map(|index| (index, Leg::After(0), true)));
+            legs.push((at, Leg::After(0), true));
+        },
+        SearchDirection::Reverse => {
+            legs.push((at, Leg::Before(from), false));
+            legs.extend(
+                (0..at)
+                    .rev()
+                    .map(|index| (index, Leg::Before(usize::MAX), false)),
+            );
+            legs.extend(
+                (at + 1..len)
+                    .rev()
+                    .map(|index| (index, Leg::Before(usize::MAX), true)),
+            );
+            legs.push((at, Leg::From(from), true));
+        },
+    }
+    legs
+}
+
 /// The whole text of `buffer`, from `held` when it holds that buffer at its
-/// current version, and otherwise collected from the rope and held in place of
-/// what `held` had.
-fn search_text(held: &mut Option<SearchText>, buffer: &MultiBufferSnapshot) -> Arc<String> {
-    if let Some(text) = held.as_ref()
-        && text.buffer == buffer.buffer_id()
-        && text.version == buffer.version()
+/// current version, and otherwise collected from the rope and held, in place of
+/// any older text of that buffer.
+fn search_text(held: &mut Vec<SearchText>, buffer: &MultiBufferSnapshot) -> Arc<String> {
+    let id = buffer.buffer_id();
+    if let Some(text) = held
+        .iter()
+        .find(|text| text.buffer == id && text.version == buffer.version())
     {
         return Arc::clone(&text.text);
     }
@@ -775,12 +1029,22 @@ fn search_text(held: &mut Option<SearchText>, buffer: &MultiBufferSnapshot) -> A
     let mut text = String::with_capacity(rope.len());
     text.extend(rope.chunks());
     let text = Arc::new(text);
-    *held = Some(SearchText {
-        buffer: buffer.buffer_id(),
+    let entry = SearchText {
+        buffer: id,
         version: buffer.version(),
         text: Arc::clone(&text),
-    });
+    };
+    match held.iter_mut().find(|held| held.buffer == id) {
+        Some(slot) => *slot = entry,
+        None => held.push(entry),
+    }
     text
+}
+
+/// Drop the held text of every buffer outside `buffers`, the buffers that the
+/// last scan covers.
+fn keep_texts(held: &mut Vec<SearchText>, buffers: &[BufferId]) {
+    held.retain(|text| buffers.contains(&text.buffer));
 }
 
 /// A match a search step reached, and whether the scan ran off the end of the
@@ -825,24 +1089,29 @@ fn find_forward(regex: &CursorRegex, text: &str, from: usize) -> Option<Hit> {
 /// scan, so a run of overlapping candidates aligns from the cursor.
 fn find_reverse(regex: &CursorRegex, text: &str, from: usize) -> Option<Hit> {
     let from = from.min(text.len());
-    let last = |range: Range<usize>| {
-        regex
-            .find_iter(Input::new(text.as_bytes()).range(range))
-            .last()
-            .map(|m| Hit {
-                start: m.start(),
-                end: m.end(),
-                wrapped: false,
-            })
-    };
-
-    if let Some(hit) = last(0..from) {
+    if let Some(hit) = last_match_in(regex, text, 0..from) {
         return Some(hit);
     }
-    last(from..text.len()).map(|hit| Hit {
+    last_match_in(regex, text, from..text.len()).map(|hit| Hit {
         wrapped: true,
         ..hit
     })
+}
+
+/// The last match of `regex` that fits inside `range` of `text`.
+///
+/// The bound moves the match span alone, so an assertion in the pattern still
+/// reads the text on either side of it, and the offsets stay buffer offsets.
+/// The hit is never marked as wrapped.
+fn last_match_in(regex: &CursorRegex, text: &str, range: Range<usize>) -> Option<Hit> {
+    regex
+        .find_iter(Input::new(text.as_bytes()).range(range))
+        .last()
+        .map(|m| Hit {
+            start: m.start(),
+            end: m.end(),
+            wrapped: false,
+        })
 }
 
 /// The first regex match whose start is at or after `at`.
@@ -922,6 +1191,7 @@ mod tests {
     use super::{LastSearch, SearchDirection};
     use crate::{
         buffer::{BufferId, TextBuffer},
+        diff_changes::DiffChangesState,
         editor_state::ScrollGlide,
         multi_buffer::MultiBuffer,
         test_fixture::open_scratch_at,
@@ -1640,7 +1910,7 @@ mod tests {
 
         let buffer = TextBuffer::with_text(BufferId::new(0), &text);
         let snapshot = MultiBuffer::singleton(Arc::new(RwLock::new(buffer))).snapshot();
-        let held = super::search_text(&mut None, &snapshot);
+        let held = super::search_text(&mut Vec::new(), &snapshot);
         let needle = "needle_in_a_haystack";
         let regex = super::compile_cursor_regex(needle, false).expect("valid regex");
         let target = at + "the ".len();
@@ -1669,7 +1939,7 @@ mod tests {
 
     /// The text a prompt's keystroke scanned, as the held copy holds it.
     fn held_text(h: &TestHarness) -> Arc<String> {
-        Arc::clone(&h.stoat.search_text.as_ref().expect("a held text").text)
+        Arc::clone(&h.stoat.search_text.first().expect("a held text").text)
     }
 
     /// The second keystroke of a search scans the copy the first one held,
@@ -2359,5 +2629,176 @@ mod tests {
         h.type_text("[unclosed");
         h.type_keys("enter");
         assert_eq!(h.primary_head_offset(), before);
+    }
+
+    /// A settled changes view over `a.txt` and then `b.txt`, whose one line
+    /// each holds `foo` and a word of its own.
+    fn stack() -> TestHarness {
+        let mut h = TestHarness::with_size(100, 24);
+        cover_with_stack(&mut h);
+        h
+    }
+
+    fn cover_with_stack(h: &mut TestHarness) {
+        h.stage_review_scenario(
+            "/repo",
+            &[("a.txt", "x\n", "foo one\n"), ("b.txt", "y\n", "foo two\n")],
+        );
+        h.cover_with_diff_changes(false);
+        h.settle();
+    }
+
+    /// The focused excerpt's file and the byte range of its newest selection.
+    fn stack_place(h: &mut TestHarness) -> (String, usize, usize) {
+        let rel_path = h
+            .stoat
+            .active_workspace()
+            .focused_diff_changes()
+            .and_then(DiffChangesState::focused_excerpt)
+            .expect("a focused excerpt")
+            .rel_path
+            .clone();
+        let (start, end) = excerpt_range(h, &rel_path);
+        (rel_path, start, end)
+    }
+
+    /// The byte range of the newest selection in the excerpt of `rel_path`.
+    fn excerpt_range(h: &mut TestHarness, rel_path: &str) -> (usize, usize) {
+        let ws = h.stoat.active_workspace_mut();
+        let editor_id = ws
+            .focused_diff_changes()
+            .and_then(|state| {
+                state
+                    .excerpts
+                    .iter()
+                    .find(|excerpt| excerpt.rel_path == rel_path)
+            })
+            .expect("an excerpt of the file")
+            .editor_id;
+        let editor = ws.editors.get_mut(editor_id).expect("an excerpt editor");
+        let snapshot = editor.display_map.snapshot();
+        let buffer = snapshot.buffer_snapshot();
+        let newest = editor.selections.newest_anchor();
+        (
+            buffer.resolve_anchor(&newest.start),
+            buffer.resolve_anchor(&newest.end),
+        )
+    }
+
+    fn at(rel_path: &str, start: usize, end: usize) -> (String, usize, usize) {
+        (rel_path.to_string(), start, end)
+    }
+
+    #[test]
+    fn a_search_goes_on_into_the_next_file() {
+        let mut h = stack();
+        submit(&mut h, "two");
+        assert_eq!(stack_place(&mut h), at("b.txt", 4, 7));
+    }
+
+    /// `n` past the last match of the last file wraps to the first file, and
+    /// `N` from the first file wraps back to the last.
+    #[test]
+    fn a_repeat_wraps_from_the_last_file_to_the_first() {
+        let mut h = stack();
+        submit(&mut h, "foo");
+        let submitted = stack_place(&mut h);
+
+        h.type_keys("n");
+        let forward = (stack_place(&mut h), h.stoat.pending_message.take());
+
+        h.type_keys("N");
+        let reverse = (stack_place(&mut h), h.stoat.pending_message.take());
+        let wrapped = Some("Wrapped around the changes".to_string());
+        assert_eq!(
+            (submitted, forward, reverse),
+            (
+                at("b.txt", 0, 3),
+                (at("a.txt", 0, 3), wrapped.clone()),
+                (at("b.txt", 0, 3), wrapped),
+            ),
+        );
+    }
+
+    #[test]
+    fn a_preview_in_another_file_goes_back_on_escape() {
+        let mut h = stack();
+        let origin = (stack_place(&mut h), excerpt_range(&mut h, "b.txt"));
+        h.type_keys("/");
+        preview(&mut h, "two");
+        let previewed = stack_place(&mut h);
+
+        h.type_keys("escape");
+        assert_eq!(
+            (
+                previewed,
+                (stack_place(&mut h), excerpt_range(&mut h, "b.txt"))
+            ),
+            (at("b.txt", 4, 7), origin),
+        );
+    }
+
+    #[test]
+    fn a_preview_that_moves_back_restores_the_file_it_left() {
+        let mut h = stack();
+        let origin = excerpt_range(&mut h, "b.txt");
+        h.type_keys("/");
+        preview(&mut h, "two");
+        h.type_keys("backspace backspace backspace");
+        preview(&mut h, "one");
+        assert_eq!(
+            (stack_place(&mut h), excerpt_range(&mut h, "b.txt")),
+            (at("a.txt", 4, 7), origin),
+        );
+    }
+
+    /// A select mode repeat wraps inside the focused file, because one
+    /// selection set holds the ranges of one buffer.
+    #[test]
+    fn a_select_mode_repeat_stays_in_its_file() {
+        let mut h = stack();
+        super::set_pattern(&mut h.stoat, "foo".into());
+        h.type_keys("v n");
+        assert_eq!(
+            (stack_place(&mut h).0, h.stoat.pending_message.as_deref()),
+            ("a.txt".to_string(), Some("Wrapped around document")),
+        );
+    }
+
+    #[test]
+    fn a_jump_back_after_a_search_returns_to_the_first_file() {
+        let mut h = stack();
+        let origin = stack_place(&mut h);
+        submit(&mut h, "two");
+        let crossed = stack_place(&mut h);
+
+        crate::action_handlers::dispatch(&mut h.stoat, &action::JumpBackward);
+        assert_eq!(
+            (crossed, stack_place(&mut h), h.stoat.current_view()),
+            (at("b.txt", 4, 7), origin, Some("diff_changes")),
+        );
+    }
+
+    /// The held texts are those of the stack's files, so a stack search drops
+    /// the text of a file that an earlier search scanned.
+    #[test]
+    fn a_stack_search_holds_one_text_per_file() {
+        let mut h = TestHarness::with_size(100, 24);
+        seed(&mut h, "foo\n");
+        submit(&mut h, "foo");
+        cover_with_stack(&mut h);
+
+        submit(&mut h, "two");
+        let held: Vec<BufferId> = h.stoat.search_text.iter().map(|text| text.buffer).collect();
+        let files: Vec<BufferId> = h
+            .stoat
+            .active_workspace()
+            .focused_diff_changes()
+            .expect("a changes view")
+            .excerpts
+            .iter()
+            .map(|excerpt| excerpt.buffer_id)
+            .collect();
+        assert_eq!(held, files);
     }
 }
