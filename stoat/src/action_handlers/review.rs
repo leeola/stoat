@@ -4126,6 +4126,7 @@ mod tests {
             status,
             unstaged_lines: iter::once(rows.clone()).collect(),
             marked_rows: Vec::new(),
+            relocated_rows: Vec::new(),
             buffer_start_line: rows.start,
             buffer_line_range: rows,
             base_byte_range: 0..0,

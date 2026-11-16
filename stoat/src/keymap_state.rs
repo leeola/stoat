@@ -1564,6 +1564,7 @@ mod tests {
             status: DiffHunkStatus::Added,
             unstaged_lines: iter::once(0..1).collect(),
             marked_rows: Vec::new(),
+            relocated_rows: Vec::new(),
             buffer_start_line: 0,
             buffer_line_range: 0..1,
             base_byte_range: 0..0,

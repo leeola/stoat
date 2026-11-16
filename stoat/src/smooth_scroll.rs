@@ -3173,6 +3173,7 @@ mod tests {
             })),
             unstaged_lines: std::iter::once(1..2).collect(),
             marked_rows: std::iter::once(1..2).collect(),
+            relocated_rows: Vec::new(),
         };
         let unreached = DiffHunk {
             buffer_start_line: 2,
@@ -3181,6 +3182,7 @@ mod tests {
             token_detail: None,
             unstaged_lines: std::iter::once(2..3).collect(),
             marked_rows: Vec::new(),
+            relocated_rows: Vec::new(),
             ..reached.clone()
         };
         let buffer_id = action_handlers::focused_editor_mut(&mut h.stoat)

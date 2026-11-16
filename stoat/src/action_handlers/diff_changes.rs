@@ -3169,6 +3169,7 @@ mod tests {
                 })),
                 unstaged_lines: std::iter::once(1..4).collect(),
                 marked_rows: vec![1..2, 3..4],
+                relocated_rows: Vec::new(),
             };
             ws.install_test_diff_map(buffer_id, DiffMap::from_hunks([split], None));
 

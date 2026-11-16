@@ -1839,6 +1839,7 @@ pub(super) fn compute_diff_map(
                     token_detail: None,
                     unstaged_lines,
                     marked_rows: Vec::new(),
+                    relocated_rows: Vec::new(),
                 }],
                 Some(base.base.clone()),
             )
@@ -2738,6 +2739,7 @@ mod tests {
             status: DiffHunkStatus::Added,
             unstaged_lines: vec![line_range.clone()],
             marked_rows: Vec::new(),
+            relocated_rows: Vec::new(),
             buffer_start_line: line_range.start,
             buffer_line_range: line_range,
             base_byte_range: 0..0,
@@ -2753,6 +2755,7 @@ mod tests {
             status: DiffHunkStatus::Deleted,
             unstaged_lines: vec![rows.clone()],
             marked_rows: Vec::new(),
+            relocated_rows: Vec::new(),
             buffer_start_line: row,
             buffer_line_range: rows,
             base_byte_range: 0..0,

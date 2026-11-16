@@ -5379,6 +5379,7 @@ mod tests {
             })),
             unstaged_lines: std::iter::once(1..3).collect(),
             marked_rows: std::iter::once(1..2).collect(),
+            relocated_rows: Vec::new(),
         };
         let unreached = DiffHunk {
             buffer_start_line: 4,
@@ -5387,6 +5388,7 @@ mod tests {
             token_detail: None,
             unstaged_lines: std::iter::once(4..5).collect(),
             marked_rows: Vec::new(),
+            relocated_rows: Vec::new(),
             ..reached.clone()
         };
         let base = String::from("a\nb\nc\nd\nE\n");
@@ -5427,6 +5429,7 @@ mod tests {
             })),
             unstaged_lines: std::iter::once(1..2).collect(),
             marked_rows: std::iter::once(1..2).collect(),
+            relocated_rows: Vec::new(),
         };
         let unreached = DiffHunk {
             buffer_start_line: 2,
@@ -5435,6 +5438,7 @@ mod tests {
             token_detail: None,
             unstaged_lines: std::iter::once(2..3).collect(),
             marked_rows: Vec::new(),
+            relocated_rows: Vec::new(),
             ..reached.clone()
         };
         let base = String::from("a\nb\nc\n");

@@ -192,6 +192,15 @@ pub struct DiffHunk {
     /// rope drifts from the anchor-tracked live rows after any edit above the
     /// hunk.
     pub(crate) marked_rows: Vec<Range<u32>>,
+    /// Stored rows of an `Added` hunk whose every word a relocation holds, as
+    /// sorted runs.
+    ///
+    /// A block that arrived under a new wrapper shares its hunk with the
+    /// wrapper's new rows, so the hunk stays `Added`, and these rows read as
+    /// moved. A blank row between two such rows lies inside their run. The
+    /// list is empty on every other hunk, and on an `Added` hunk that a
+    /// relocation holds whole, which reads `Moved` instead.
+    pub(crate) relocated_rows: Vec<Range<u32>>,
 }
 
 impl DiffHunk {
@@ -212,6 +221,23 @@ impl DiffHunk {
     /// narrow to.
     pub(crate) fn refined(&self) -> bool {
         !self.marked_rows.is_empty()
+    }
+
+    /// The status that the stored row `stored_row` of this hunk reads.
+    ///
+    /// A row of an `Added` hunk whose every word a relocation holds reads
+    /// `Moved`, as [`Self::relocated_rows`] records it. Every other row reads
+    /// the hunk's status.
+    pub(crate) fn row_status(&self, stored_row: u32) -> DiffHunkStatus {
+        let relocated = self.status == DiffHunkStatus::Added
+            && self
+                .relocated_rows
+                .iter()
+                .any(|run| run.contains(&stored_row));
+        match relocated {
+            true => DiffHunkStatus::Moved,
+            false => self.status,
+        }
     }
 
     /// Whether the tree pass wrote this hunk's detail.
@@ -343,7 +369,7 @@ impl<'a> LiveHunks<'a> {
                     return Some((above.status, above.staged()));
                 }
             }
-            return Some((hunk.status, hunk.line_staged(stored)));
+            return Some((hunk.row_status(stored), hunk.line_staged(stored)));
         }
         if hunk.status == DiffHunkStatus::Deleted && live.rows.start == line {
             return Some((DiffHunkStatus::Deleted, hunk.staged()));
@@ -368,7 +394,8 @@ impl<'a> LiveHunks<'a> {
         if !live.rows.contains(&line) {
             return DiffStatus::Unchanged;
         }
-        match live.hunk.status {
+        let stored = (line + live.hunk.buffer_line_range.start).saturating_sub(live.rows.start);
+        match live.hunk.row_status(stored) {
             DiffHunkStatus::Added => DiffStatus::Added,
             DiffHunkStatus::Modified => DiffStatus::Modified,
             DiffHunkStatus::Moved => DiffStatus::Moved,
@@ -1171,7 +1198,7 @@ impl DiffMap {
         cursor.seek(&target, Bias::Right);
         cursor.prev();
         match cursor.item() {
-            Some(hunk) if hunk.buffer_line_range.contains(&line) => match hunk.status {
+            Some(hunk) if hunk.buffer_line_range.contains(&line) => match hunk.row_status(line) {
                 DiffHunkStatus::Added => DiffStatus::Added,
                 DiffHunkStatus::Modified => DiffStatus::Modified,
                 DiffHunkStatus::Moved => DiffStatus::Moved,
@@ -1212,7 +1239,7 @@ impl DiffMap {
         cursor.prev();
         let hunk = cursor.item()?;
         if hunk.buffer_line_range.contains(&line) {
-            return Some((hunk.status, hunk.line_staged(line)));
+            return Some((hunk.row_status(line), hunk.line_staged(line)));
         }
         if hunk.status == DiffHunkStatus::Deleted && hunk.buffer_start_line == line {
             return Some((DiffHunkStatus::Deleted, hunk.staged()));
@@ -2193,6 +2220,7 @@ pub(crate) fn changes_to_hunks(
                 status: DiffHunkStatus::Moved,
                 unstaged_lines: Vec::new(),
                 marked_rows: Vec::new(),
+                relocated_rows: Vec::new(),
                 buffer_start_line: line_range.start,
                 buffer_line_range: line_range,
                 base_byte_range: base_range,
@@ -2234,6 +2262,7 @@ pub(crate) fn changes_to_hunks(
                 status: DiffHunkStatus::Moved,
                 unstaged_lines: Vec::new(),
                 marked_rows: Vec::new(),
+                relocated_rows: Vec::new(),
                 buffer_start_line: lhs_line,
                 buffer_line_range: lhs_line..lhs_line,
                 base_byte_range: full_range,
@@ -2277,6 +2306,7 @@ pub(crate) fn changes_to_hunks(
             status: DiffHunkStatus::Modified,
             unstaged_lines: Vec::new(),
             marked_rows: Vec::new(),
+            relocated_rows: Vec::new(),
             buffer_start_line: line_range.start,
             buffer_line_range: line_range,
             base_byte_range: lhs_change.byte_range.clone(),
@@ -2302,6 +2332,7 @@ pub(crate) fn changes_to_hunks(
                     status: DiffHunkStatus::Added,
                     unstaged_lines: Vec::new(),
                     marked_rows: Vec::new(),
+                    relocated_rows: Vec::new(),
                     buffer_start_line: line_range.start,
                     buffer_line_range: line_range,
                     base_byte_range: 0..0,
@@ -2321,6 +2352,7 @@ pub(crate) fn changes_to_hunks(
                     status: DiffHunkStatus::Deleted,
                     unstaged_lines: Vec::new(),
                     marked_rows: Vec::new(),
+                    relocated_rows: Vec::new(),
                     buffer_start_line: buffer_line,
                     buffer_line_range: buffer_line..buffer_line,
                     base_byte_range: cur.byte_range.clone(),
@@ -2516,8 +2548,10 @@ pub(crate) fn merge_structural_detail(
                 ),
                 _ => (buffer_text, &buffer_starts, hunk.buffer_line_range.clone()),
             };
-            if lines_relocated(&moved_ranges, starts, text, lines) {
+            if lines_relocated(&moved_ranges, starts, text, lines.clone()) {
                 hunk.status = DiffHunkStatus::Moved;
+            } else if hunk.status == DiffHunkStatus::Added {
+                hunk.relocated_rows = relocated_row_runs(&moved_ranges, starts, text, lines);
             }
         }
 
@@ -2600,6 +2634,39 @@ fn lines_relocated(
             let bounds = line_range_to_byte_range(starts, text.len(), &(line..line + 1));
             line_relocated(ranges, text, bounds)
         })
+}
+
+/// The rows of `lines` whose every word `ranges` relocate, as sorted runs.
+///
+/// A blank row holds no word, so it relocates nothing alone. A blank row
+/// between two relocated rows joins them into one run, as the blank line
+/// inside a moved block is a part of the block.
+fn relocated_row_runs(
+    ranges: &[Range<usize>],
+    starts: &[usize],
+    text: &str,
+    lines: Range<u32>,
+) -> Vec<Range<u32>> {
+    let mut runs: Vec<Range<u32>> = Vec::new();
+    let mut joins_last = false;
+    for line in lines {
+        if line_is_blank(starts, text, line) {
+            continue;
+        }
+
+        let bounds = line_range_to_byte_range(starts, text.len(), &(line..line + 1));
+        if !line_relocated(ranges, text, bounds) {
+            joins_last = false;
+            continue;
+        }
+
+        match runs.last_mut() {
+            Some(run) if joins_last => run.end = line + 1,
+            _ => runs.push(line..line + 1),
+        }
+        joins_last = true;
+    }
+    runs
 }
 
 /// Whether `ranges` relocate the line whose bytes in `text` are `bounds`.
@@ -3143,7 +3210,7 @@ mod tests {
     };
     use std::sync::Arc;
     use stoat_language::structural_diff::{
-        ChangeKind as LangChangeKind, DiffChange, MoveMetadata, MoveSource, Side,
+        BufferRef, ChangeKind as LangChangeKind, DiffChange, MoveMetadata, MoveSource, Side,
     };
 
     /// A source whose statements share sub-expressions, so a line edit makes the
@@ -3229,6 +3296,7 @@ mod tests {
             status: DiffHunkStatus::Added,
             unstaged_lines: vec![line_range.clone()],
             marked_rows: Vec::new(),
+            relocated_rows: Vec::new(),
             buffer_start_line: line_range.start,
             buffer_line_range: line_range,
             base_byte_range: 0..0,
@@ -3470,6 +3538,7 @@ mod tests {
             status: DiffHunkStatus::Moved,
             unstaged_lines: std::iter::once(5..5).collect(),
             marked_rows: Vec::new(),
+            relocated_rows: Vec::new(),
             buffer_start_line: 5,
             buffer_line_range: 5..5,
             base_byte_range: 0..0,
@@ -3540,6 +3609,7 @@ mod tests {
         let staged = DiffHunk {
             unstaged_lines: Vec::new(),
             marked_rows: Vec::new(),
+            relocated_rows: Vec::new(),
             ..added_hunk(1..2)
         };
         let recount = |dm: &DiffMap| {
@@ -3574,6 +3644,7 @@ mod tests {
         dm.push_hunk(DiffHunk {
             unstaged_lines: Vec::new(),
             marked_rows: Vec::new(),
+            relocated_rows: Vec::new(),
             ..added_hunk(5..6)
         });
         assert_eq!(dm.staged_counts(), (2, 1));
@@ -3756,6 +3827,7 @@ mod tests {
         let hunk = DiffHunk {
             token_detail: Some(empty_detail(true)),
             marked_rows: std::iter::once(1..2).collect(),
+            relocated_rows: Vec::new(),
             ..modified_hunk(1..2, 3..5)
         };
         let dm = staged_map(
@@ -3963,6 +4035,7 @@ mod tests {
             status: DiffHunkStatus::Deleted,
             unstaged_lines: std::iter::once((after_line + 1)..(after_line + 1)).collect(),
             marked_rows: Vec::new(),
+            relocated_rows: Vec::new(),
             buffer_start_line: after_line + 1,
             buffer_line_range: (after_line + 1)..(after_line + 1),
             base_byte_range,
@@ -3979,6 +4052,7 @@ mod tests {
             status: DiffHunkStatus::Modified,
             unstaged_lines: vec![line_range.clone()],
             marked_rows: Vec::new(),
+            relocated_rows: Vec::new(),
             buffer_start_line: line_range.start,
             buffer_line_range: line_range,
             base_byte_range,
@@ -4030,6 +4104,7 @@ mod tests {
             status: DiffHunkStatus::Moved,
             unstaged_lines: std::iter::once(3..3).collect(),
             marked_rows: Vec::new(),
+            relocated_rows: Vec::new(),
             buffer_start_line: 3,
             buffer_line_range: 3..3,
             base_byte_range: 0..0,
@@ -4344,6 +4419,7 @@ mod tests {
                 token_detail,
                 unstaged_lines: Vec::new(),
                 marked_rows: Vec::new(),
+                relocated_rows: Vec::new(),
             });
             [dm.base_line_refined(1), dm.base_line_refined(0)]
         };
@@ -4982,6 +5058,7 @@ mod tests {
             token_detail: (!marked.is_empty()).then(|| empty_detail(true)),
             unstaged_lines: std::iter::once(rows).collect(),
             marked_rows: marked,
+            relocated_rows: Vec::new(),
         }
     }
 
@@ -5464,6 +5541,7 @@ mod tests {
                 token_detail,
                 unstaged_lines: std::iter::once(1..3).collect(),
                 marked_rows,
+                relocated_rows: Vec::new(),
             };
             marks_over(vec![hunk], 0..4, text)
         };
@@ -5500,6 +5578,7 @@ mod tests {
             })),
             unstaged_lines: std::iter::once(1..2).collect(),
             marked_rows: Vec::new(),
+            relocated_rows: Vec::new(),
         };
         let base = Arc::new("a\nb\n".to_string());
         let line_pass = DiffMap::from_hunks(
@@ -6195,6 +6274,99 @@ mod tests {
         assert_eq!(statuses, [DiffHunkStatus::Deleted, DiffHunkStatus::Added]);
     }
 
+    /// A line that arrived from another file shares an `Added` hunk with a new
+    /// line above it. The row that the relocation holds whole reads as moved,
+    /// and the new line and the blank row after it read as added.
+    #[test]
+    fn a_relocated_row_of_an_added_hunk_reads_moved() {
+        let (base, buffer) = ("keep();\n", "keep();\nfresh(1);\n\nmoved(2);\n");
+        let hunks = merged(
+            base,
+            buffer,
+            &[
+                tree_change(Side::Rhs, 8..17, LangChangeKind::Novel),
+                arrived_from_another_file(19..28),
+            ],
+        );
+        let hunk_statuses: Vec<DiffHunkStatus> = hunks.iter().map(|hunk| hunk.status).collect();
+        let dm = DiffMap::from_hunks(hunks, Some(Arc::new(base.into())));
+        let multi = buffer_holding(buffer);
+        let snapshot = multi.snapshot();
+        let live = dm.live_hunks(&snapshot);
+
+        let rows = vec![
+            DiffStatus::Unchanged,
+            DiffStatus::Added,
+            DiffStatus::Added,
+            DiffStatus::Moved,
+        ];
+        assert_eq!(
+            (
+                hunk_statuses,
+                (0..4)
+                    .map(|row| dm.status_for_line(row))
+                    .collect::<Vec<_>>(),
+                (0..4)
+                    .map(|row| live.status_for_line(row))
+                    .collect::<Vec<_>>(),
+                dm.gutter_mark_for_line(3).map(|mark| mark.status),
+                live.gutter_mark_for_line(3).map(|mark| mark.status),
+            ),
+            (
+                vec![DiffHunkStatus::Added],
+                rows.clone(),
+                rows,
+                Some(DiffHunkStatus::Moved),
+                Some(DiffHunkStatus::Moved),
+            ),
+            "the hunk stays added, and only the row that arrived reads as moved",
+        );
+    }
+
+    /// A blank row between two rows that arrived joins their run, as the blank
+    /// line between two moved functions does. A new line ends the run.
+    #[test]
+    fn a_relocated_run_takes_a_blank_row_and_ends_at_a_new_line() {
+        let hunks = merged(
+            "keep();\n",
+            "keep();\nmoved(1);\n\nmoved(2);\nfresh(3);\nmoved(4);\n",
+            &[
+                arrived_from_another_file(8..17),
+                arrived_from_another_file(19..28),
+                tree_change(Side::Rhs, 29..38, LangChangeKind::Novel),
+                arrived_from_another_file(39..48),
+            ],
+        );
+        assert_eq!(
+            hunks
+                .iter()
+                .map(|hunk| (hunk.status, hunk.relocated_rows.clone()))
+                .collect::<Vec<_>>(),
+            [(DiffHunkStatus::Added, vec![1..4, 5..6])],
+            "the blank row 2 joins rows 1 and 3, and the new row 4 splits off row 5",
+        );
+    }
+
+    #[test]
+    fn an_added_hunk_that_a_relocation_holds_whole_reads_moved() {
+        let hunks = merged(
+            "keep();\n",
+            "keep();\nfresh(1);\n\nmoved(2);\n",
+            &[
+                arrived_from_another_file(8..17),
+                arrived_from_another_file(19..28),
+            ],
+        );
+        assert_eq!(
+            hunks
+                .iter()
+                .map(|hunk| (hunk.status, hunk.relocated_rows.clone()))
+                .collect::<Vec<_>>(),
+            [(DiffHunkStatus::Moved, vec![])],
+            "the whole hunk moved, so no row reads a status of its own",
+        );
+    }
+
     /// A tree change of `kind` over `byte_range` on `side`, with no move
     /// metadata, pair, or refinement.
     fn tree_change(
@@ -6236,6 +6408,25 @@ mod tests {
             .into_iter()
             .map(|hunk| hunk.status)
             .collect()
+    }
+
+    /// A tree change that moved `byte_range` of the buffer here from the first
+    /// line of another file.
+    fn arrived_from_another_file(byte_range: std::ops::Range<usize>) -> DiffChange {
+        DiffChange {
+            move_metadata: Some(Arc::new(MoveMetadata {
+                sources: vec![MoveSource {
+                    buffer: Some(BufferRef {
+                        path: "b.rs".into(),
+                        fingerprint: [0; 32],
+                    }),
+                    side: Side::Lhs,
+                    byte_range: 0..9,
+                    line_range: 0..1,
+                }],
+            })),
+            ..tree_change(Side::Rhs, byte_range, LangChangeKind::Moved)
+        }
     }
 
     /// Text that the tree pass leaves unmarked in a `Modified` hunk takes a span
