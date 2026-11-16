@@ -34,6 +34,11 @@
 //! they produce noise without informing the user. Both thresholds are
 //! tuning constants at the top of this module for easy calibration.
 //!
+//! A one-to-one move extends over the equal neighbors on both sides that no
+//! pass paired, with no size or ambiguity gate. A `#[test]` line or a doc
+//! comment beside a moved function is too small or too common to pair on its
+//! own, and the move beside it names where it went.
+//!
 //! The move pass runs after slider correction in
 //! [`super::tree_diff::diff_with_language`] so its input is the final
 //! residual `Pending` set. It does not depend on any Dijkstra state; if
@@ -317,6 +322,24 @@ pub fn find_moves_changeset(files: &mut [FileMoveInput<'_>]) -> Vec<ChangesetMov
         );
     }
 
+    extend_over_neighbors(
+        &SideNodes {
+            arenas: files.iter().map(|f| f.lhs_arena).collect(),
+            parents: &lhs_parents_per,
+            pending: &lhs_pending_per,
+            identity: &lhs_identity_per,
+        },
+        &SideNodes {
+            arenas: files.iter().map(|f| f.rhs_arena).collect(),
+            parents: &rhs_parents_per,
+            pending: &rhs_pending_per,
+            identity: &rhs_identity_per,
+        },
+        &mut paired_lhs,
+        &mut paired_rhs,
+        &mut records,
+    );
+
     for (fi, id) in &paired_lhs {
         let f = &mut files[*fi];
         mark_subtree_moved(f.lhs_arena, *id, f.lhs_changes);
@@ -504,6 +527,98 @@ fn emit_records_multi(
     }
 }
 
+/// Extend each one-to-one move in `records` over the equal neighbors on both
+/// sides that no pass paired.
+///
+/// A `#[test]` line or a doc comment is a sibling of the function it belongs
+/// to. It is too small or too common to pair on its own, but the move beside
+/// it names where it went. A step takes the two siblings just before the pair,
+/// or just after it. It takes them only when their content is equal, each
+/// holds an unmatched atom with an identity, and neither is paired. Each step
+/// pushes a one-to-one record of its own, which extends in turn.
+///
+/// A neighbor that passes holds no paired descendant. The main loop skipped
+/// its content for size or for ambiguity, and each of its descendants has at
+/// least as many unheld copies, so the main loop skipped those too.
+fn extend_over_neighbors(
+    lhs: &SideNodes<'_>,
+    rhs: &SideNodes<'_>,
+    paired_lhs: &mut NodeSet,
+    paired_rhs: &mut NodeSet,
+    records: &mut Vec<ChangesetMoveRecord>,
+) {
+    let mut next = 0;
+    while next < records.len() {
+        let record = &records[next];
+        next += 1;
+        let (&[source], target) = (record.lhs_sources.as_slice(), record.rhs_target) else {
+            continue;
+        };
+
+        for after in [false, true] {
+            let (mut l, mut r) = (source, target);
+            while let (Some(lhs_next), Some(rhs_next)) =
+                (lhs.sibling(l, after), rhs.sibling(r, after))
+            {
+                let joins = lhs.content_id(lhs_next) == rhs.content_id(rhs_next)
+                    && lhs.movable(lhs_next)
+                    && rhs.movable(rhs_next)
+                    && !paired_lhs.contains(&lhs_next)
+                    && !paired_rhs.contains(&rhs_next);
+                if !joins {
+                    break;
+                }
+
+                paired_lhs.insert(lhs_next);
+                paired_rhs.insert(rhs_next);
+                records.push(ChangesetMoveRecord {
+                    rhs_target: rhs_next,
+                    lhs_sources: vec![lhs_next],
+                });
+                (l, r) = (lhs_next, rhs_next);
+            }
+        }
+    }
+}
+
+/// One side of the changeset as [`extend_over_neighbors`] reads it, each
+/// vector indexed by file.
+struct SideNodes<'a> {
+    arenas: Vec<&'a SyntaxArena>,
+    parents: &'a [Vec<Option<SyntaxId>>],
+    pending: &'a [Vec<bool>],
+    identity: &'a [Vec<bool>],
+}
+
+impl SideNodes<'_> {
+    /// The sibling just before `node` in its parent's children, or just after
+    /// it when `after` is set.
+    fn sibling(&self, (file, id): FileNode, after: bool) -> Option<FileNode> {
+        let parent = self.parents[file][id.0]?;
+        let Syntax::List(list) = self.arenas[file].get(parent) else {
+            return None;
+        };
+        let pos = list.children.iter().position(|&child| child == id)?;
+        let sibling = match after {
+            true => list.children.get(pos + 1),
+            false => pos
+                .checked_sub(1)
+                .and_then(|before| list.children.get(before)),
+        };
+        sibling.map(|&sibling| (file, sibling))
+    }
+
+    fn content_id(&self, (file, id): FileNode) -> ContentId {
+        self.arenas[file].get(id).content_id()
+    }
+
+    /// Whether `node` holds an unmatched atom with an identity of its own, as
+    /// every move candidate does.
+    fn movable(&self, (file, id): FileNode) -> bool {
+        self.pending[file][id.0] && self.identity[file][id.0]
+    }
+}
+
 fn build_parent_map(arena: &SyntaxArena) -> Vec<Option<SyntaxId>> {
     let mut parents = vec![None; arena.len()];
     for i in 0..arena.len() {
@@ -668,6 +783,21 @@ mod tests {
                 .flat_map(|child| atom_kinds(arena, changes, *child))
                 .collect(),
         }
+    }
+
+    /// The text of every atom that `changes` leaves [`ChangeKind::Pending`],
+    /// in byte order.
+    fn unmoved_atoms<'a>(arena: &'a SyntaxArena, changes: &ChangeMap) -> Vec<&'a str> {
+        let mut atoms: Vec<(usize, &str)> = (0..arena.len())
+            .map(SyntaxId)
+            .filter(|id| changes.get(*id) == ChangeKind::Pending)
+            .filter_map(|id| match arena.get(id) {
+                Syntax::Atom(atom) => Some((atom.byte_range.start, arena.text(atom))),
+                Syntax::List(_) => None,
+            })
+            .collect();
+        atoms.sort_unstable();
+        atoms.into_iter().map(|(_, text)| text).collect()
     }
 
     fn moved_nodes(arena: &SyntaxArena, changes: &ChangeMap) -> Vec<SyntaxId> {
@@ -1318,6 +1448,70 @@ mod tests {
             kinds,
             [pending.clone(), pending],
             "no function pairs whole, so every copy counts against the cap",
+        );
+    }
+
+    #[test]
+    fn a_move_takes_its_attribute_and_its_doc_comment() {
+        let blocks: String = (0..10)
+            .map(|n| {
+                format!("/// Case {n}.\n#[test]\nfn case_{n}() {{ check(rows({n}), {n}); }}\n")
+            })
+            .collect();
+        let indented: String = blocks.lines().map(|line| format!("    {line}\n")).collect();
+        let lhs_a = format!("fn left() {{}}\n{blocks}");
+        let rhs_b = format!("fn lib() {{}}\nmod tests {{\n{indented}}}\n");
+        let pairs: &[(&str, &str)] = &[(&lhs_a, "fn left() {}\n"), ("fn lib() {}\n", &rhs_b)];
+        let (lhs_arenas, rhs_arenas, _, pre) = find_moves_changeset_in(pairs);
+
+        assert_eq!(
+            (
+                unmoved_atoms(&lhs_arenas[0], &pre[0].lhs_changes),
+                unmoved_atoms(&rhs_arenas[1], &pre[1].rhs_changes),
+            ),
+            (vec![], vec!["mod", "tests", "{", "}"]),
+            "each test moves with its attribute and its comment, and only the wrapper is novel",
+        );
+    }
+
+    #[test]
+    fn a_neighbor_matched_in_place_stays_out_of_the_move() {
+        // The right side's new copy of the attribute sits above the moved
+        // function, so both neighbors of the move are equal, and only the
+        // left one matched in place.
+        let lhs = "#[inline]\nfn moved() { work(1, 2); }\nfn stay() { rest(3); }\n";
+        let rhs = "#[inline]\nfn stay() { rest(3); }\n#[inline]\nfn moved() { work(1, 2); }\n";
+        let (lhs_arena, rhs_arena, _, _, pre, _) = find_moves_in(lhs, rhs);
+
+        let (unchanged, pending) = (vec![ChangeKind::Unchanged; 4], vec![ChangeKind::Pending; 4]);
+        assert_eq!(
+            (
+                atom_kinds_of_copies(&lhs_arena, &pre.lhs_changes, lhs, "#[inline]"),
+                atom_kinds_of_copies(&rhs_arena, &pre.rhs_changes, rhs, "#[inline]"),
+            ),
+            (vec![unchanged.clone()], vec![unchanged, pending]),
+            "the attribute matched in place keeps its place, and the new copy stays novel",
+        );
+    }
+
+    #[test]
+    fn an_unequal_neighbor_ends_the_extension() {
+        let function = "fn case() { check(rows(1), 1); }\n";
+        let lhs_a = format!("/// Old words.\n{function}");
+        let rhs_b = format!("/// New words.\n{function}");
+        let pairs: &[(&str, &str)] = &[(&lhs_a, ""), ("", &rhs_b)];
+        let (lhs_arenas, rhs_arenas, _, pre) = find_moves_changeset_in(pairs);
+
+        assert_eq!(
+            (
+                unmoved_atoms(&lhs_arenas[0], &pre[0].lhs_changes),
+                unmoved_atoms(&rhs_arenas[1], &pre[1].rhs_changes),
+            ),
+            (
+                vec!["//", "/", " Old words.\n"],
+                vec!["//", "/", " New words.\n"]
+            ),
+            "the function moves, and each comment stays novel",
         );
     }
 
