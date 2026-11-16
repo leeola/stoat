@@ -127,7 +127,12 @@ pub(crate) fn record_pane_switch(
 /// A no-op when the entry's buffer has been closed. Cross-buffer jumps reuse
 /// [`show_buffer_in_pane`](crate::buffer_lifecycle::show_buffer_in_pane), so an open buffer
 /// is re-shown without a disk read.
+///
+/// Over a changes view, an entry in a file of the stack lands on that file's
+/// excerpt, and the changes view stays. An entry in any other file closes the
+/// changes view.
 pub(crate) fn apply_jump_entry(stoat: &mut Stoat, entry: JumpEntry) {
+    let in_stack = super::diff_changes::focus_stack_buffer(stoat, entry.buffer_id);
     let resolved = {
         let ws = stoat.active_workspace();
         let pane_id = match ws.focus {
@@ -138,7 +143,7 @@ pub(crate) fn apply_jump_entry(stoat: &mut Stoat, entry: JumpEntry) {
             View::Editor(eid) => ws.editors.get(eid).map(|e| e.buffer_id),
             _ => None,
         };
-        if current_buffer == Some(entry.buffer_id) {
+        if in_stack || current_buffer == Some(entry.buffer_id) {
             None
         } else {
             match ws.buffers.get(entry.buffer_id) {
@@ -173,6 +178,12 @@ pub(crate) fn apply_jump_entry(stoat: &mut Stoat, entry: JumpEntry) {
         editor
             .selections
             .replace_with(entry.selections.clone(), buf_snap);
+    }
+
+    // The stack's paint sets each excerpt editor's scroll, and the key epilogue
+    // opens the fold over the cursor and scrolls the stack to it.
+    if in_stack {
+        return;
     }
 
     // A cross-buffer jump shows the entry's editor in the pane again, so the

@@ -819,6 +819,31 @@ pub(super) fn land_pick(stoat: &mut Stoat, path: &Path) -> bool {
     true
 }
 
+/// Move the focus of the focused changes view to the excerpt that shows
+/// `buffer_id`, and answer whether the view shows that buffer in a folded
+/// excerpt.
+///
+/// The move places no cursor and pushes no jump. The caller places the cursor
+/// through [`super::focused_editor_mut`], which then answers that excerpt's
+/// editor.
+pub(crate) fn focus_stack_buffer(stoat: &mut Stoat, buffer_id: BufferId) -> bool {
+    let Some(state) = stoat.active_workspace_mut().focused_diff_changes_mut() else {
+        return false;
+    };
+    let Some(index) = state
+        .excerpts
+        .iter()
+        .position(|excerpt| excerpt.buffer_id == buffer_id && excerpt.folded_version.is_some())
+    else {
+        return false;
+    };
+    if index != state.focused {
+        state.focused = index;
+        state.held_screen_row = None;
+    }
+    true
+}
+
 /// The focused excerpt's file, relative to the repository, and the buffer
 /// position of its cursor.
 ///
@@ -1186,7 +1211,7 @@ fn lands(snapshot: &DisplaySnapshot, row: u32) -> bool {
 mod tests {
     use super::{diff_changes_jump, diff_changes_step, respawn_diff_changes_panes, viewport_rows};
     use crate::{
-        action_handlers::{commits, dispatch, focused_editor_mut, pane, view},
+        action_handlers::{commits, dispatch, focused_editor_mut, jump, pane, view},
         apc_emit,
         app::UpdateEffect,
         buffer::BufferId,
@@ -1594,6 +1619,46 @@ mod tests {
                 at("a.txt", 0),
                 at("b.txt", 9),
             ),
+        );
+    }
+
+    /// A jump back from the second file of the stack lands on the first file's
+    /// excerpt, and the changes view stays.
+    #[test]
+    fn a_jump_back_lands_on_the_excerpt_it_left() {
+        let mut h = two_files();
+        h.cover_with_diff_changes(false);
+        h.settle();
+        jump::push_jump(&mut h.stoat);
+        h.type_keys("j j");
+        let crossed = place(&mut h);
+
+        dispatch(&mut h.stoat, &stoat_action::JumpBackward);
+        assert_eq!(
+            (crossed, h.stoat.current_view(), place(&mut h)),
+            (at("b.txt", 0), Some("diff_changes"), at("a.txt", 0)),
+        );
+    }
+
+    /// A jump back to a file that the stack does not show closes the changes
+    /// view and shows that file.
+    #[test]
+    fn a_jump_back_to_a_file_outside_the_stack_closes_the_view() {
+        let mut h = TestHarness::with_size(100, 24);
+        h.fake_fs().insert_file(Path::new("/notes.txt"), b"notes\n");
+        h.open_file(Path::new("/notes.txt"));
+        jump::push_jump(&mut h.stoat);
+        h.stage_review_scenario("/repo", &[("a.txt", "a\n", "A\n"), ("b.txt", "b\n", "B\n")]);
+        h.cover_with_diff_changes(false);
+        h.settle();
+
+        dispatch(&mut h.stoat, &stoat_action::JumpBackward);
+        assert_eq!(
+            (
+                h.stoat.current_view(),
+                h.stoat.active_workspace().diff_changes_views.len(),
+            ),
+            (Some("file"), 0),
         );
     }
 
