@@ -49,7 +49,7 @@ use std::{
     time::{Duration, Instant},
 };
 use stoat_language::{
-    structural_diff::{self, MatchedPairs, TreeCache},
+    structural_diff::{self, BufferRef, DiffChange, MatchedPairs, MoveResidue, TreeCache},
     HighlightId, Language, LanguageRegistry, SyntaxMap, Tree,
 };
 use stoat_scheduler::{Executor, Task};
@@ -396,6 +396,19 @@ pub(crate) struct DiffState {
     /// A base change clears them, so they live as long as the review that set
     /// them. A diff of the file reads them as its staged state.
     pub(super) approved: HashMap<PathBuf, Arc<ApprovedRows>>,
+    /// The files in the pairing across files, keyed by buffer.
+    ///
+    /// Each holds the residue of its last whole diff, so code that left one
+    /// open file and arrived in another reads as moved in both. A buffer's
+    /// entry goes when its buffer closes, when a diff of it lands with no
+    /// residue, and when the base changes.
+    shares: HashMap<BufferId, FileMoves>,
+    /// Whether a closed buffer left the pairing, which the next drive re-pairs
+    /// without it.
+    ///
+    /// A buffer closes where no buffer registry is at hand, so the re-pair
+    /// waits for the drive.
+    pairing_stale: bool,
 }
 
 impl DiffState {
@@ -541,6 +554,7 @@ impl DiffState {
     pub(super) fn reset_for_new_base(&mut self) {
         self.jobs.clear();
         self.approved.clear();
+        self.shares.clear();
         self.invalidate_all();
     }
 
@@ -604,6 +618,9 @@ impl DiffState {
         self.diffed.remove(&id);
         self.settle.remove(&id);
         self.settle_timers.remove(&id);
+        if self.shares.remove(&id).is_some() {
+            self.pairing_stale = true;
+        }
         if let Some(path) = path {
             self.base_text.remove(path);
         }
@@ -621,6 +638,7 @@ impl DiffState {
             || self.diffed.contains_key(&id)
             || self.settle.contains_key(&id)
             || self.settle_timers.contains_key(&id)
+            || self.shares.contains_key(&id)
             || path.is_some_and(|path| self.base_text.contains_key(path))
     }
 
@@ -959,6 +977,10 @@ impl DiffState {
         base_cache: &BaseHighlightCache,
         redraw_notify: &Arc<Notify>,
     ) -> bool {
+        if self.pairing_stale {
+            self.pairing_stale = false;
+            self.install_paired(buffers, None);
+        }
         self.refresh_pair_bases(buffers, executor, redraw_notify);
 
         let mut completed: Vec<(DiffJobOutput, bool, bool, Instant)> = Vec::new();
@@ -1178,31 +1200,113 @@ impl DiffState {
     ///
     /// A superseded map still paints, since it read its blobs no earlier than
     /// the map on screen.
+    ///
+    /// A map that comes with a residue joins the pairing across files, which
+    /// installs it with the moves it finds. A map without one leaves the
+    /// pairing, and the other files re-pair without it.
     fn land(&mut self, buffers: &BufferRegistry, out: DiffJobOutput, superseded: bool) {
         if !superseded {
             // Filed whether or not it resolved, since a miss is what an
             // ignored buffer keeps re-deriving otherwise.
             self.base_text.insert(out.path, out.base);
         }
-        if let Some(shared) = buffers.get(out.buffer_id) {
-            let mut guard = shared.write().expect("buffer poisoned");
-            // A recompute landing on the same hunks is not news. Every
-            // decoration consumer keys off the map's version, and the minimap's
-            // edge sweep re-derives the whole file from it, so installing an
-            // identical map costs that for nothing. A write under .git re-diffs
-            // every visible buffer against content that did not move, which is
-            // where this earns its keep.
-            let same = match (&guard.diff_map, &out.diff_map) {
-                (Some(installed), Some(fresh)) => installed.renders_same_as(fresh),
-                (None, None) => true,
-                _ => false,
-            };
-            if !same {
-                guard.diff_map = out.diff_map;
-                self.maps_epoch += 1;
-            }
+        match (out.diff_map, out.moves) {
+            (Some(plain), Some(share)) => {
+                let moves = FileMoves {
+                    plain,
+                    share,
+                    applied: Vec::new(),
+                };
+                self.shares.insert(out.buffer_id, moves);
+                self.install_paired(buffers, Some(out.buffer_id));
+            },
+            (diff_map, _) => {
+                self.install(buffers, out.buffer_id, diff_map);
+                if self.shares.remove(&out.buffer_id).is_some() {
+                    self.install_paired(buffers, None);
+                }
+            },
         }
     }
+
+    /// Install `diff_map` on `id`'s buffer, unless it renders the same as the
+    /// map already there.
+    fn install(&mut self, buffers: &BufferRegistry, id: BufferId, diff_map: Option<DiffMap>) {
+        let Some(shared) = buffers.get(id) else {
+            return;
+        };
+        let mut guard = shared.write().expect("buffer poisoned");
+        // A recompute landing on the same hunks is not news. Every decoration
+        // consumer keys off the map's version, and the minimap's edge sweep
+        // re-derives the whole file from it, so installing an identical map
+        // costs that for nothing. A write under .git re-diffs every visible
+        // buffer against content that did not move, which is where this earns
+        // its keep.
+        let same = match (&guard.diff_map, &diff_map) {
+            (Some(installed), Some(fresh)) => installed.renders_same_as(fresh),
+            (None, None) => true,
+            _ => false,
+        };
+        if !same {
+            guard.diff_map = diff_map;
+            self.maps_epoch += 1;
+        }
+    }
+
+    /// Pair the residues of every file that shares one, and install the map of
+    /// each file whose moves changed, and of `landed`, with its moves.
+    ///
+    /// The files pair in path order, so one set of files pairs the same way
+    /// whichever diff landed last. The pairing runs on the event thread. A
+    /// residue holds only the nodes above unpaired tokens, so an ordinary edit
+    /// adds a few nodes, and a new or a removed file its whole tree.
+    fn install_paired(&mut self, buffers: &BufferRegistry, landed: Option<BufferId>) {
+        let mut ids: Vec<BufferId> = self.shares.keys().copied().collect();
+        ids.sort_by(|a, b| {
+            self.shares[a]
+                .share
+                .buffer
+                .path
+                .cmp(&self.shares[b].share.buffer.path)
+        });
+        let pairing = {
+            let files: Vec<(&BufferRef, &MoveResidue)> = ids
+                .iter()
+                .map(|id| {
+                    let share = &self.shares[id].share;
+                    (&share.buffer, &share.residue)
+                })
+                .collect();
+            structural_diff::pair_residues(&files)
+        };
+
+        for (id, moved) in ids.into_iter().zip(pairing) {
+            let diff_map = {
+                let Some(moves) = self.shares.get_mut(&id) else {
+                    continue;
+                };
+                if moved == moves.applied && landed != Some(id) {
+                    continue;
+                }
+                let diff_map = match moved.is_empty() {
+                    true => moves.plain.clone(),
+                    false => moves.plain.with_moved_changes(&moved, &moves.share.text),
+                };
+                moves.applied = moved;
+                diff_map
+            };
+            self.install(buffers, id, Some(diff_map));
+        }
+    }
+}
+
+/// A file in the pairing across files, as [`DiffState::shares`] holds it.
+struct FileMoves {
+    /// The map that the file's diff job built, before any move across files.
+    plain: DiffMap,
+    share: MoveShare,
+    /// The moved changes of the last pairing, which the installed map shows.
+    applied: Vec<DiffChange>,
 }
 
 pub(super) struct DiffJob {
@@ -1233,6 +1337,22 @@ pub(super) struct DiffJobOutput {
     /// answer for an ignored file and re-deriving it costs a working-tree
     /// walk.
     pub(super) base: Option<DiffBaseText>,
+    /// What the diff offers the pairing across files, `None` when it ran no
+    /// tree pass or measured against another file.
+    pub(super) moves: Option<MoveShare>,
+}
+
+/// One file's offer to the pairing across files.
+///
+/// A diff of one file does not see that its removed code arrived in another
+/// file. The workspace pairs the residues of the open buffers'
+/// diffs, and each file's map takes the moves that the pairing finds.
+pub(super) struct MoveShare {
+    /// The file, as the moves in other files name it.
+    buffer: BufferRef,
+    /// The buffer text that the diff ran against, which the moved spans index.
+    text: Arc<String>,
+    residue: MoveResidue,
 }
 
 /// A diff on the blocking pool that a caller waits on, and what runs once it
@@ -1342,6 +1462,10 @@ pub(crate) fn settle_timer(executor: &Executor, redraw_notify: &Arc<Notify>) -> 
 /// With `anchor`, the hunks are anchored against the snapshot.
 /// `approved` holds a range review's approved rows, which mark the hunks
 /// staged in place of the base's staged side.
+///
+/// A diff with a residue offers it in [`DiffJobOutput::moves`], unless the
+/// file measures against another file, whose moves name no file of the
+/// changeset.
 #[allow(clippy::too_many_arguments)]
 fn run_diff_job(
     git_host: &dyn GitHost,
@@ -1371,7 +1495,7 @@ fn run_diff_job(
     };
     // The approvals go on a copy, so the base filed for reuse never holds
     // rows that the next press moves.
-    let diff_map = base.as_ref().and_then(|base| {
+    let computed = base.as_ref().and_then(|base| {
         compute_diff_map(
             &buffer_text,
             language,
@@ -1382,19 +1506,34 @@ fn run_diff_job(
             tree_memo,
             buffer_tree,
         )
-        .map(|mut diff_map| {
-            if anchor {
-                diff_map.anchor_hunks(buffer_snapshot);
-            }
-            diff_map
-        })
     });
+    let (diff_map, residue) = match computed {
+        Some(ComputedDiff { mut map, residue }) => {
+            if anchor {
+                map.anchor_hunks(buffer_snapshot);
+            }
+            (Some(map), residue)
+        },
+        None => (None, None),
+    };
+
+    let moves = residue
+        .filter(|_| !matches!(diff_base, Some(DiffBase::Pair { .. })))
+        .map(|residue| MoveShare {
+            buffer: BufferRef {
+                path: path.clone(),
+                fingerprint: blake3::hash(buffer_text.as_bytes()).into(),
+            },
+            text: Arc::new(buffer_text),
+            residue,
+        });
     DiffJobOutput {
         buffer_id,
         path,
         target_version,
         diff_map,
         base,
+        moves,
     }
 }
 
@@ -1769,6 +1908,12 @@ pub(crate) type BaseHighlightCache = Arc<Mutex<BaseHighlightMemo>>;
 /// `buffer_tree` is a tree already parsed from `buffer_text`, which the tree
 /// pass takes in place of parsing the buffer a second time. It must describe
 /// exactly those bytes. A tree from another grammar is discarded downstream.
+///
+/// A tree pass also answers its residue, the subtrees that it paired with
+/// nothing, which the pairing across files reads. A removed file runs the tree
+/// pass for its residue alone, so it offers every subtree that it held. A file
+/// with no hunk, no `language`, or a side over the byte limit answers no
+/// residue.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn compute_diff_map(
     buffer_text: &str,
@@ -1779,7 +1924,7 @@ pub(super) fn compute_diff_map(
     base: &DiffBaseText,
     tree_memo: Option<&TreeCache>,
     buffer_tree: Option<&Tree>,
-) -> Option<DiffMap> {
+) -> Option<ComputedDiff> {
     let base_text = &*base.base;
     let staged_text = &*base.staged_text;
 
@@ -1810,6 +1955,7 @@ pub(super) fn compute_diff_map(
             .staged_from
             .as_deref()
             .is_some_and(|from| !from.is_empty());
+    let mut residue = None;
     let mut diff_map = if buffer_removed(buffer_text) && had_content {
         if base_text.is_empty() {
             // The removal is already in the base, so the staged mark the
@@ -1829,6 +1975,23 @@ pub(super) fn compute_diff_map(
                 true => Vec::new(),
                 false => vec![anchor.clone()],
             };
+            // The removal keeps one hunk, but its residue offers every subtree
+            // that the file held, so code that it lost to another open file
+            // reads as moved there.
+            residue = language
+                .and_then(|language| {
+                    structural_diff::prepare_diff(
+                        language,
+                        base_text,
+                        buffer_text,
+                        None,
+                        tree_memo,
+                        buffer_tree,
+                    )
+                })
+                .map(|prepared| {
+                    structural_diff::finalize_single_with_residue(&prepared, MatchedPairs::Skip).1
+                });
             DiffMap::from_hunks(
                 [DiffHunk {
                     status: DiffHunkStatus::Deleted,
@@ -1860,24 +2023,27 @@ pub(super) fn compute_diff_map(
         // spans in place, which is what the view showed before this ran.
         if !hunks.is_empty()
             && let Some(language) = language
-            && let Some(tree) = structural_diff::diff_with_language_cancellable(
+            && let Some(prepared) = structural_diff::prepare_diff(
                 language,
                 base_text,
                 buffer_text,
                 None,
                 tree_memo,
                 buffer_tree,
-                MatchedPairs::Skip,
             )
-            && !tree.fell_back_to_line_diff
         {
-            merge_structural_detail(
-                &mut hunks,
-                &tree.changes,
-                &tree.unsearched,
-                base_text,
-                buffer_text,
-            );
+            let (tree, tree_residue) =
+                structural_diff::finalize_single_with_residue(&prepared, MatchedPairs::Skip);
+            if !tree.fell_back_to_line_diff {
+                merge_structural_detail(
+                    &mut hunks,
+                    &tree.changes,
+                    &tree.unsearched,
+                    base_text,
+                    buffer_text,
+                );
+            }
+            residue = Some(tree_residue);
         }
         DiffMap::from_hunks(hunks, Some(base.base.clone()))
     };
@@ -1900,7 +2066,19 @@ pub(super) fn compute_diff_map(
     if base.approved.is_some() {
         diff_map = diff_map.with_mark_kind(MarkKind::Approved);
     }
-    Some(diff_map)
+    Some(ComputedDiff {
+        map: diff_map,
+        residue,
+    })
+}
+
+/// A buffer's diff map, with the residue of its tree pass, as
+/// [`compute_diff_map`] answers them.
+pub(super) struct ComputedDiff {
+    pub(super) map: DiffMap,
+    /// The subtrees that the tree pass paired with nothing, for the pairing
+    /// across files. `None` when no tree pass ran.
+    pub(super) residue: Option<MoveResidue>,
 }
 
 /// Read the texts a diff measures `path` against from the repo `git_root` is
@@ -2904,6 +3082,7 @@ mod tests {
                 buffer_tree,
             )
             .expect("a tracked file has a diff map")
+            .map
             .hunks()
             .cloned()
             .collect::<Vec<_>>()
@@ -2952,7 +3131,8 @@ mod tests {
             Some(&TreeCache::default()),
             None,
         )
-        .expect("a tracked file has a diff map");
+        .expect("a tracked file has a diff map")
+        .map;
 
         let first_token = diff_map
             .base_highlights_for_line(0)
@@ -2983,6 +3163,86 @@ mod tests {
             None,
         )
         .expect("a diff map")
+        .map
+    }
+
+    /// A removed file keeps one hunk, and still offers the code that it held
+    /// to the pairing across files.
+    #[test]
+    fn a_removed_file_offers_its_code_as_residue() {
+        let language = LanguageRegistry::standard()
+            .for_path(Path::new("a.rs"))
+            .expect("rust language");
+        let base = "fn a() { one(1); }\nfn b() { two(2); }\n";
+        let computed = compute_diff_map(
+            "\n",
+            Some(&language),
+            true,
+            &SyntaxStyles::from_theme(&Theme::empty()),
+            &BaseHighlightCache::default(),
+            &diff_base(base, base, None),
+            None,
+            None,
+        )
+        .expect("a tracked file has a diff map");
+
+        let statuses: Vec<DiffHunkStatus> = computed.map.hunks().map(|hunk| hunk.status).collect();
+        assert_eq!(
+            (statuses, computed.residue.is_some()),
+            (vec![DiffHunkStatus::Deleted], true),
+            "one removal, and a residue that holds the removed functions",
+        );
+    }
+
+    /// A file whose code moved to another open file reads as moved until that
+    /// file's buffer closes, and the next drive re-pairs without it.
+    #[test]
+    fn a_closed_buffer_takes_its_moves_out_of_the_other_files() {
+        let mut h = TestHarness::with_size(100, 24);
+        h.stoat.set_diff_warm_auto(true);
+        h.stage_review_scenario(
+            "/repo",
+            &[
+                ("a.rs", "fn moved() { work(1, 2); }\n", ""),
+                (
+                    "b.rs",
+                    "fn keep() {}\n",
+                    "fn keep() {}\nfn moved() { work(1, 2); }\n",
+                ),
+            ],
+        );
+        h.cover_with_diff_changes(false);
+        h.settle();
+        h.settle_diff_jobs();
+        let statuses = |h: &TestHarness| {
+            let ws = h.stoat.active_workspace();
+            let id = ws
+                .buffers
+                .id_for_path(Path::new("/repo/a.rs"))
+                .expect("a.rs open");
+            let buffer = ws.buffers.get(id).expect("a buffer");
+            let guard = buffer.read().expect("poisoned");
+            let dm = guard.diff_map.as_ref().expect("diff map installed");
+            dm.hunks().map(|hunk| hunk.status).collect::<Vec<_>>()
+        };
+        let paired = statuses(&h);
+
+        let b = h
+            .stoat
+            .active_workspace()
+            .buffers
+            .id_for_path(Path::new("/repo/b.rs"))
+            .expect("b.rs open");
+        h.stoat
+            .active_workspace_mut()
+            .diff
+            .release(b, Some(Path::new("/repo/b.rs")));
+        h.stoat.drive_background();
+        assert_eq!(
+            (paired, statuses(&h)),
+            (vec![DiffHunkStatus::Moved], vec![DiffHunkStatus::Deleted]),
+            "the removal reads as moved while b.rs shares, and as removed once it closes",
+        );
     }
 
     /// The prose marks of every span in `dm`, buffer side then base side, with

@@ -888,6 +888,35 @@ impl DiffMap {
         self
     }
 
+    /// A copy of this map in which `moved`, the code of this file that a
+    /// pairing across files found moved, reads as moved.
+    ///
+    /// A map is immutable once built, so the pairing lands on a rebuilt copy.
+    /// `buffer_text` is the text the diff ran against. The copy keeps the base
+    /// highlights, the staged marks, the mark kind, and the anchors of this
+    /// map. With no move, or with no base text, the copy is a clone.
+    ///
+    /// See also:
+    /// - [`apply_moved_changes`] for what a move changes in a hunk.
+    pub(crate) fn with_moved_changes(
+        &self,
+        moved: &[stoat_language::structural_diff::DiffChange],
+        buffer_text: &str,
+    ) -> Self {
+        let Some(base_text) = self.base_text.as_ref().filter(|_| !moved.is_empty()) else {
+            return self.clone();
+        };
+        let mut hunks: Vec<DiffHunk> = self.hunks.iter().cloned().collect();
+        apply_moved_changes(&mut hunks, moved, base_text, buffer_text);
+
+        let mut map = Self::from_hunks(hunks, self.base_text.clone());
+        map.base_highlights = self.base_highlights.clone();
+        map.set_staged_marks(self.staged_marks.as_ref().clone());
+        map.mark_kind = self.mark_kind;
+        map.text_version = self.text_version;
+        map
+    }
+
     /// What the hunks' staged state means in this map.
     pub fn mark_kind(&self) -> MarkKind {
         self.mark_kind
@@ -2570,6 +2599,145 @@ pub(crate) fn merge_structural_detail(
             tree: true,
         }));
     }
+}
+
+/// Mark as moved the code of `hunks` that a pairing across files found moved,
+/// as [`DiffMap::with_moved_changes`] applies it.
+///
+/// A diff of one file sees no move to or from another file, so the line pass
+/// and the tree pass leave that code `Added` or `Deleted`. Each change of
+/// `moved` cuts the spans it reaches and takes their place as one moved span at
+/// its full width, as [`merge_structural_detail`] keeps a relocation. A hunk
+/// that a relocation then holds whole turns `Moved`. An `Added` hunk that it
+/// holds in part records the rows that it holds whole, as the merge does.
+///
+/// A whole-file removal has no detail, because no tree pass reads an empty
+/// side, so it takes an empty one. Any other hunk with no detail stays as it
+/// is, since no tree pass described it. The marked rows stay as they are,
+/// because they already cover every row that a span reaches.
+pub(crate) fn apply_moved_changes(
+    hunks: &mut [DiffHunk],
+    moved: &[stoat_language::structural_diff::DiffChange],
+    base_text: &str,
+    buffer_text: &str,
+) {
+    use stoat_language::structural_diff::Side;
+
+    let buffer_starts = line_starts(buffer_text);
+    let base_starts = line_starts(base_text);
+    let reaching = |side: Side, bounds: &Range<usize>| -> Vec<_> {
+        moved
+            .iter()
+            .filter(|change| {
+                change.side == side
+                    && change.byte_range.start < bounds.end
+                    && bounds.start < change.byte_range.end
+            })
+            .collect()
+    };
+
+    for hunk in hunks.iter_mut() {
+        if hunk.status == DiffHunkStatus::Moved {
+            continue;
+        }
+        let buffer_bytes =
+            line_range_to_byte_range(&buffer_starts, buffer_text.len(), &hunk.buffer_line_range);
+        let buffer_moves = reaching(Side::Rhs, &buffer_bytes);
+        let base_moves = reaching(Side::Lhs, &hunk.base_byte_range);
+        if buffer_moves.is_empty() && base_moves.is_empty() {
+            continue;
+        }
+
+        if hunk.token_detail.is_none() && hunk.status == DiffHunkStatus::Deleted {
+            hunk.token_detail = Some(Arc::new(TokenDetail {
+                buffer_spans: Vec::new(),
+                base_spans: Vec::new(),
+                tree: true,
+            }));
+        }
+        let Some(detail) = hunk.token_detail.as_mut() else {
+            continue;
+        };
+        let detail = Arc::make_mut(detail);
+        cut_around_moves(&mut detail.buffer_spans, &buffer_moves);
+        cut_around_moves(&mut detail.base_spans, &base_moves);
+
+        let (text, starts, lines, spans) = match hunk.status {
+            DiffHunkStatus::Added => (
+                buffer_text,
+                &buffer_starts,
+                hunk.buffer_line_range.clone(),
+                &detail.buffer_spans,
+            ),
+            DiffHunkStatus::Deleted => (
+                base_text,
+                &base_starts,
+                byte_range_to_line_range(&base_starts, base_text.len(), &hunk.base_byte_range),
+                &detail.base_spans,
+            ),
+            DiffHunkStatus::Modified | DiffHunkStatus::Moved => continue,
+        };
+        let moved_ranges: Vec<Range<usize>> = spans
+            .iter()
+            .filter(|span| span.kind == ChangeKind::Moved)
+            .map(|span| span.byte_range.clone())
+            .collect();
+        if lines_relocated(&moved_ranges, starts, text, lines.clone()) {
+            hunk.status = DiffHunkStatus::Moved;
+            hunk.relocated_rows.clear();
+        } else if hunk.status == DiffHunkStatus::Added {
+            hunk.relocated_rows = relocated_row_runs(&moved_ranges, starts, text, lines);
+        }
+    }
+}
+
+/// Cut each span of `spans` that is not moved around the changes of `moved`,
+/// and add each change as a moved span at its full width.
+///
+/// A piece of a span outside every change keeps its kind, its prose mark, and
+/// its metadata. The spans come back sorted by start.
+fn cut_around_moves(
+    spans: &mut Vec<ChangeSpan>,
+    moved: &[&stoat_language::structural_diff::DiffChange],
+) {
+    if moved.is_empty() {
+        return;
+    }
+
+    let mut cut = Vec::with_capacity(spans.len() + moved.len());
+    for span in spans.drain(..) {
+        if span.kind == ChangeKind::Moved {
+            cut.push(span);
+            continue;
+        }
+        let mut pieces = vec![span.byte_range.clone()];
+        for change in moved {
+            let around = &change.byte_range;
+            pieces = pieces
+                .into_iter()
+                .flat_map(|piece| {
+                    [
+                        piece.start..piece.end.min(around.start),
+                        piece.start.max(around.end)..piece.end,
+                    ]
+                })
+                .filter(|piece| piece.start < piece.end)
+                .collect();
+        }
+        cut.extend(pieces.into_iter().map(|byte_range| ChangeSpan {
+            byte_range,
+            ..span.clone()
+        }));
+    }
+
+    cut.extend(moved.iter().map(|change| ChangeSpan {
+        byte_range: change.byte_range.clone(),
+        kind: ChangeKind::Moved,
+        move_metadata: change.move_metadata.clone(),
+        prose: ProseChange::None,
+    }));
+    cut.sort_by_key(|span| span.byte_range.start);
+    *spans = cut;
 }
 
 /// The indices in `side` whose change's byte range reaches `bounds`.
@@ -6285,7 +6453,7 @@ mod tests {
             buffer,
             &[
                 tree_change(Side::Rhs, 8..17, LangChangeKind::Novel),
-                arrived_from_another_file(19..28),
+                moved_change(Side::Rhs, 19..28, "b.rs"),
             ],
         );
         let hunk_statuses: Vec<DiffHunkStatus> = hunks.iter().map(|hunk| hunk.status).collect();
@@ -6331,10 +6499,10 @@ mod tests {
             "keep();\n",
             "keep();\nmoved(1);\n\nmoved(2);\nfresh(3);\nmoved(4);\n",
             &[
-                arrived_from_another_file(8..17),
-                arrived_from_another_file(19..28),
+                moved_change(Side::Rhs, 8..17, "b.rs"),
+                moved_change(Side::Rhs, 19..28, "b.rs"),
                 tree_change(Side::Rhs, 29..38, LangChangeKind::Novel),
-                arrived_from_another_file(39..48),
+                moved_change(Side::Rhs, 39..48, "b.rs"),
             ],
         );
         assert_eq!(
@@ -6353,8 +6521,8 @@ mod tests {
             "keep();\n",
             "keep();\nfresh(1);\n\nmoved(2);\n",
             &[
-                arrived_from_another_file(8..17),
-                arrived_from_another_file(19..28),
+                moved_change(Side::Rhs, 8..17, "b.rs"),
+                moved_change(Side::Rhs, 19..28, "b.rs"),
             ],
         );
         assert_eq!(
@@ -6364,6 +6532,89 @@ mod tests {
                 .collect::<Vec<_>>(),
             [(DiffHunkStatus::Moved, vec![])],
             "the whole hunk moved, so no row reads a status of its own",
+        );
+    }
+
+    /// A removed file's hunk has no detail, because no tree pass reads an empty
+    /// side. The lines that moved to another file read relocated all the same,
+    /// and a move of the whole text turns the hunk `Moved`.
+    #[test]
+    fn a_removed_file_marks_the_lines_that_moved_to_another_file() {
+        let base = "/// Stays.\nfn a() { one(1); }\nfn b() { two(2); }\n";
+        let removed = DiffMap::from_hunks(
+            [DiffHunk {
+                status: DiffHunkStatus::Deleted,
+                buffer_start_line: 0,
+                buffer_line_range: 0..0,
+                base_byte_range: 0..base.len(),
+                anchor_range: None,
+                token_detail: None,
+                unstaged_lines: std::iter::once(0..0).collect(),
+                marked_rows: Vec::new(),
+                relocated_rows: Vec::new(),
+            }],
+            Some(Arc::new(base.into())),
+        );
+        let after = |moved: std::ops::Range<usize>| {
+            let dm = removed.with_moved_changes(&[moved_change(Side::Lhs, moved, "b.rs")], "");
+            let relocated: Vec<bool> = (0..3).map(|line| dm.base_line_relocated(line)).collect();
+            let statuses: Vec<DiffHunkStatus> = dm.hunks().map(|hunk| hunk.status).collect();
+            (relocated, statuses)
+        };
+
+        assert_eq!(
+            (after(11..48), after(0..48)),
+            (
+                (vec![false, true, true], vec![DiffHunkStatus::Deleted]),
+                (vec![true, true, true], vec![DiffHunkStatus::Moved]),
+            ),
+            "the two functions moved while the comment stayed, then the whole text moved",
+        );
+    }
+
+    #[test]
+    fn a_moved_part_of_an_added_hunk_splits_its_span() {
+        let (base, buffer) = ("keep();\n", "keep();\nfresh(1);\n\nmoved(2);\n");
+        let novel = |range| tree_change(Side::Rhs, range, LangChangeKind::Novel);
+        let dm = DiffMap::from_hunks(
+            merged(base, buffer, &[novel(8..17), novel(19..28)]),
+            Some(Arc::new(base.into())),
+        )
+        .with_moved_changes(&[moved_change(Side::Rhs, 19..28, "b.rs")], buffer);
+
+        let spans: Vec<_> = dm
+            .hunks()
+            .flat_map(|hunk| hunk.token_detail.iter())
+            .flat_map(|detail| detail.buffer_spans.iter())
+            .map(|span| (span.byte_range.clone(), span.kind.clone()))
+            .collect();
+        assert_eq!(
+            (
+                spans,
+                (0..4)
+                    .map(|row| dm.status_for_line(row))
+                    .collect::<Vec<_>>(),
+            ),
+            (
+                vec![(8..17, ChangeKind::Novel), (19..28, ChangeKind::Moved)],
+                vec![
+                    DiffStatus::Unchanged,
+                    DiffStatus::Added,
+                    DiffStatus::Added,
+                    DiffStatus::Moved,
+                ],
+            ),
+            "the line that moved leaves the novel span and reads as moved",
+        );
+    }
+
+    #[test]
+    fn no_moved_change_renders_the_same() {
+        let (base, buffer) = ("keep();\n", "keep();\nfresh(1);\n");
+        let dm = DiffMap::from_hunks(merged(base, buffer, &[]), Some(Arc::new(base.into())));
+        assert!(
+            dm.with_moved_changes(&[], buffer).renders_same_as(&dm),
+            "a pairing that found no move leaves the map as it renders",
         );
     }
 
@@ -6410,22 +6661,26 @@ mod tests {
             .collect()
     }
 
-    /// A tree change that moved `byte_range` of the buffer here from the first
-    /// line of another file.
-    fn arrived_from_another_file(byte_range: std::ops::Range<usize>) -> DiffChange {
+    /// A tree change that moved `byte_range` of `side` to or from the first
+    /// line of the file at `path`.
+    fn moved_change(side: Side, byte_range: std::ops::Range<usize>, path: &str) -> DiffChange {
+        let other_side = match side {
+            Side::Lhs => Side::Rhs,
+            Side::Rhs => Side::Lhs,
+        };
         DiffChange {
             move_metadata: Some(Arc::new(MoveMetadata {
                 sources: vec![MoveSource {
                     buffer: Some(BufferRef {
-                        path: "b.rs".into(),
+                        path: path.into(),
                         fingerprint: [0; 32],
                     }),
-                    side: Side::Lhs,
+                    side: other_side,
                     byte_range: 0..9,
                     line_range: 0..1,
                 }],
             })),
-            ..tree_change(Side::Rhs, byte_range, LangChangeKind::Moved)
+            ..tree_change(side, byte_range, LangChangeKind::Moved)
         }
     }
 

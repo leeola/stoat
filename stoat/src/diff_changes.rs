@@ -3048,7 +3048,7 @@ mod tests {
         diff_map::{DiffHunk, DiffHunkStatus, DiffMap, TokenDetail},
         display_map::{DisplayPoint, FoldScope, InlayPoint, ScopeMark},
         editor_state::{EditorId, EditorState},
-        host::FakeRepoBuilder,
+        host::{DiffStatus, FakeRepoBuilder},
         test_harness::TestHarness,
         theme::FULL_CELL_SCALE,
         workspace::{
@@ -3975,6 +3975,103 @@ fn hint_width() -> u32 {
 
         stacked(&mut h);
         assert_eq!(excerpts(&h), listed(&["d.txt"]));
+    }
+
+    /// Ten tests, each a doc comment, an attribute, and a function of three
+    /// lines.
+    fn test_blocks() -> String {
+        (1..=10)
+            .map(|n| {
+                format!(
+                    "/// Case {n}.\n#[test]\nfn case_{n}() {{\n    check(rows({n}), {n});\n}}\n"
+                )
+            })
+            .collect()
+    }
+
+    /// `pub fn scan() {}` with `blocks` in a new `mod tests` below it.
+    fn lib_with_tests(blocks: &str) -> String {
+        let indented: String = blocks.lines().map(|line| format!("    {line}\n")).collect();
+        format!("pub fn scan() {{}}\n\n#[cfg(test)]\nmod tests {{\n{indented}}}\n")
+    }
+
+    /// A changes view over `files` in /repo, with every diff map settled.
+    fn settled_stack(files: &[(&str, &str, &str)]) -> TestHarness {
+        let mut h = TestHarness::with_size(100, 24);
+        h.stoat.set_diff_warm_auto(true);
+        h.stage_review_scenario("/repo", files);
+        stacked(&mut h);
+        h.settle_diff_jobs();
+        h
+    }
+
+    /// The diff map of the open buffer of `path`.
+    fn installed_map(h: &TestHarness, path: &str) -> DiffMap {
+        let ws = h.stoat.active_workspace();
+        let id = ws
+            .buffers
+            .id_for_path(Path::new(path))
+            .expect("an open buffer");
+        let buffer = ws.buffers.get(id).expect("a buffer");
+        let guard = buffer.read().expect("buffer poisoned");
+        guard.diff_map.clone().expect("a diff map")
+    }
+
+    /// Tests that leave their own file for a new module of another file read as
+    /// moved in both files, and the module's own rows read as added.
+    #[test]
+    fn tests_that_move_into_another_files_module_read_as_moved() {
+        let blocks = test_blocks();
+        let lib = lib_with_tests(&blocks);
+        let h = settled_stack(&[
+            ("tests.rs", &blocks, ""),
+            ("lib.rs", "pub fn scan() {}\n", &lib),
+        ]);
+
+        let tests_map = installed_map(&h, "/repo/tests.rs");
+        let lib_map = installed_map(&h, "/repo/lib.rs");
+        let mut lib_rows = vec![
+            DiffStatus::Unchanged,
+            DiffStatus::Added,
+            DiffStatus::Added,
+            DiffStatus::Added,
+        ];
+        lib_rows.extend([DiffStatus::Moved; 50]);
+        lib_rows.push(DiffStatus::Added);
+        assert_eq!(
+            (
+                tests_map
+                    .hunks()
+                    .map(|hunk| hunk.status)
+                    .collect::<Vec<_>>(),
+                (0..55)
+                    .map(|row| lib_map.status_for_line(row))
+                    .collect::<Vec<_>>(),
+            ),
+            (vec![DiffHunkStatus::Moved], lib_rows),
+            "the removed file moved whole, and only the module's own rows read as added",
+        );
+    }
+
+    /// A copy of tests that stay in their own file is an addition, not a move.
+    #[test]
+    fn a_copy_in_another_file_stays_added() {
+        let blocks = test_blocks();
+        let h = settled_stack(&[
+            ("tests.rs", &blocks, &format!("// A new note.\n{blocks}")),
+            ("lib.rs", "pub fn scan() {}\n", &lib_with_tests(&blocks)),
+        ]);
+
+        let lib_map = installed_map(&h, "/repo/lib.rs");
+        let mut lib_rows = vec![DiffStatus::Unchanged];
+        lib_rows.extend([DiffStatus::Added; 54]);
+        assert_eq!(
+            (0..55)
+                .map(|row| lib_map.status_for_line(row))
+                .collect::<Vec<_>>(),
+            lib_rows,
+            "no row of the copy reads as moved",
+        );
     }
 
     /// A stack over the changed a.txt with the clean d.txt open under it, and
