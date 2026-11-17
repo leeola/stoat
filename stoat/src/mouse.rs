@@ -4531,11 +4531,14 @@ mod tests {
 
     /// A press in a scrolled workspace list names the row drawn under it.
     ///
-    /// Twelve rows show ten at a time, so with the last one selected the
-    /// window starts at row 2, which paints at row 3 of the inner rect.
+    /// The 40-row harness shows fourteen rows, half its height less the box's
+    /// six other rows. Sixteen rows then scroll, so with the last one selected
+    /// the window starts at row 2, which paints at row 3 of the inner rect.
     #[test]
     fn a_press_in_a_scrolled_workspace_picker_names_the_row_drawn_there() {
-        let names = ["a", "b", "c", "d", "e", "f", "g", "h", "i", "j", "k", "l"];
+        let names = [
+            "a", "b", "c", "d", "e", "f", "g", "h", "i", "j", "k", "l", "m", "n", "o", "p",
+        ];
         let (mut h, inner) = workspace_picker_harness(&names);
         for _ in 1..names.len() {
             h.type_keys("Down");

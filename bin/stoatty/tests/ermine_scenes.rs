@@ -1470,12 +1470,13 @@ fn the_finder_ends_in_a_key_line_on_the_ground() {
 /// The session picker's ground plate runs from the top of its header row to
 /// its key line, which ends the plate 10 px into the modal rect's last row.
 ///
-/// The box holds its recommended 112 columns and seven rows from cell (24, 8),
-/// so the inner rect runs from cell (25, 9) to cell 134, and the key line is
-/// its last row, cell row 13. The top edge reads one pixel on each side, the
-/// ground inside and the shadowed panes outside, in the inner rect's first
-/// cell, which the plate's corner arcs leave whole. The line's keys end and
-/// its legend starts well clear of pixel column 900.
+/// The box is the S size, 80 columns and seven rows, a third of the way down
+/// the 43 rows the 50-row window leaves around it. So it starts at cell
+/// (40, 14), the inner rect runs from cell (41, 15) to cell 118, and the key
+/// line is its last row, cell row 19. The top edge reads one pixel on each
+/// side, the ground inside and the shadowed panes outside, in the inner rect's
+/// first cell, which the plate's corner arcs leave whole. The line's keys end
+/// and its legend starts clear of pixel column 840.
 #[test]
 fn the_session_picker_plate_ends_in_its_key_line() {
     let mut home = support::scratch_home();
@@ -1486,7 +1487,7 @@ fn the_session_picker_plate_ends_in_its_key_line() {
         "<C-a><C-f><Settle>",
     );
 
-    let (column, top, _, _) = cell_rect(25, 9, 1, 1);
+    let (column, top, _, _) = cell_rect(41, 15, 1, 1);
     let (outside, inside) = (
         pixel(&shot, column + 2, top - 1),
         pixel(&shot, column + 2, top),
@@ -1502,7 +1503,7 @@ fn the_session_picker_plate_ends_in_its_key_line() {
             frame.display(),
         );
     }
-    expect_key_line(&shot, &mut home, 13, (25, 135), 900, "session_key_line");
+    expect_key_line(&shot, &mut home, 19, (41, 119), 840, "session_key_line");
 }
 
 /// The help header names both scopes. The active `applicable` sits in a chip

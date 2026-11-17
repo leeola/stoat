@@ -12,24 +12,21 @@ use crate::{
 use ratatui::{
     buffer::Buffer,
     layout::Rect,
-    style::Style,
+    style::{Modifier, Style},
     widgets::{Block, Borders, StatefulWidget},
 };
 use std::path::Path;
 use stoat_widgets::text_run::{self, TextRun};
-use unicode_width::UnicodeWidthStr;
-
-/// Rows of workspaces the modal shows at once. A longer list scrolls under the
-/// selection rather than growing the box past a readable height.
-const MAX_ENTRY_ROWS: u16 = 10;
 
 /// Rows the chrome takes inside the border above the list, which are the
 /// filter input, its separator, and the column header.
 const HEADER_ROWS: u16 = 3;
 
-/// Columns the box asks for, which hold the footer's legend and all of its key
-/// hints in whole cells.
-const RECOMMENDED_COLUMNS: u16 = 112;
+/// Columns the box takes, the boards' S width.
+///
+/// The key line keeps its legend at this width, and a hint that does not fit
+/// beside it drops.
+const RECOMMENDED_COLUMNS: u16 = 80;
 
 /// The footer's hints, each a bound key and the word for what it does.
 const SESSION_HINTS: [(&str, &str); 6] = [
@@ -40,11 +37,6 @@ const SESSION_HINTS: [(&str, &str); 6] = [
     ("Del", "delete"),
     ("S-Tab", "scope"),
 ];
-
-/// Rows between the window's top and the box's top border.
-///
-/// The boards place the dialog 150 px down a window of 18 px rows.
-const SESSION_FINDER_TOP_ROWS: u16 = 8;
 
 /// The filled dot that marks the active session and one open in the
 /// background, in its row and in the footer legend.
@@ -59,13 +51,18 @@ const SAVED_MARK: &str = "\u{25cb}";
 /// inner rect's last row and the box's bottom row, as
 /// [`footer_rect`](crate::render::picker::footer_rect) gives it.
 ///
-/// The box's top sits [`SESSION_FINDER_TOP_ROWS`] below `area`'s. In a short
-/// `area` the box rises until its bottom edge meets `area`'s.
+/// The box is the boards' S size. It takes [`RECOMMENDED_COLUMNS`], and its
+/// list shows every session up to half `area`'s height less the box's other
+/// rows, past which the list scrolls. The box's top sits a third of the way
+/// down the room `area` leaves around it.
 pub(crate) fn workspace_picker_layout(area: Rect, entries_len: usize) -> Option<(Rect, Rect)> {
     if entries_len == 0 {
         return None;
     }
-    let entry_rows = (entries_len as u16).min(MAX_ENTRY_ROWS);
+    let max_rows = (area.height / 2)
+        .saturating_sub(HEADER_ROWS + FOOTER_ROWS + 1)
+        .max(1);
+    let entry_rows = u16::try_from(entries_len).unwrap_or(u16::MAX).min(max_rows);
     let content_height = 1 + HEADER_ROWS + entry_rows + FOOTER_ROWS;
     let mut modal = crate::render::chrome::modal_box(
         area,
@@ -74,7 +71,7 @@ pub(crate) fn workspace_picker_layout(area: Rect, entries_len: usize) -> Option<
         (60, 6),
         0,
     )?;
-    modal.y = (area.y + SESSION_FINDER_TOP_ROWS).min(area.y + area.height - modal.height);
+    modal.y = area.y + (area.height - modal.height) / 3;
     Some((modal, Block::default().borders(Borders::ALL).inner(modal)))
 }
 
@@ -163,7 +160,6 @@ pub(crate) fn render_workspace_picker(
     let current_style = theme.get(crate::theme::scope::UI_PROMPT);
     let header_style = theme.get(crate::theme::scope::UI_TEXT_MUTED);
     let match_style = theme.list_match();
-    let key_style = theme.get(crate::theme::scope::UI_KEY_LABEL);
     let parent_style = theme.get(crate::theme::scope::UI_TEXT_MUTED);
     let disabled_style = theme.get(crate::theme::scope::UI_TEXT_DISABLED);
     let run_style = theme.get(crate::theme::scope::UI_STATUSLINE_RUN);
@@ -174,26 +170,14 @@ pub(crate) fn render_workspace_picker(
     let creating = picker.filtered().is_empty() && !query.is_empty() && !picker.renaming();
 
     let header_row = inner.y + 2;
-    if creating {
-        // Alt-Enter makes a root session too when the create leaves the fresh
-        // launch workspace, as `workspace_picker_create_sub` decides.
-        let sub_session = picker.omitted_workspace != Some(ws.id) || !ws.is_fresh();
-        let family = format!(" new sub-session of {}", picker.family_name());
-        let mut hint = vec![("Enter", key_style), (" new session", header_style)];
-        if sub_session {
-            hint.extend([
-                ("   ", header_style),
-                ("Alt-Enter", key_style),
-                (family.as_str(), header_style),
-            ]);
+    if !creating {
+        if plate.is_some() {
+            let rule = theme
+                .try_get(crate::theme::scope::UI_DIVIDER)
+                .filter(|style| style.fg.is_some())
+                .unwrap_or_else(|| theme.get(crate::theme::scope::UI_BORDER_INACTIVE));
+            crate::render::chrome::hline_edge(buf, inner.x, header_row, inner.width, rule, scene);
         }
-        let end_x = inner.x + inner.width;
-        let mut x = name_x;
-        for (text, style) in hint {
-            write_str_clipped(buf, x, header_row, text, style, end_x);
-            x = x.saturating_add(text.width() as u16);
-        }
-    } else {
         write_str(buf, name_x, header_row, "name", header_style);
         write_str(buf, path_x, header_row, "path", header_style);
         write_str(
@@ -336,7 +320,17 @@ pub(crate) fn render_workspace_picker(
             buf,
             scene,
         );
-        write_str(buf, marker_x, entries_top, "+", selected_style);
+        let plus_style = match theme.get(crate::theme::scope::DIFF_ADDED).fg {
+            Some(fg) => selected_style.fg(fg),
+            None => selected_style,
+        };
+        write_str(
+            buf,
+            marker_x,
+            entries_top,
+            "+",
+            plus_style.add_modifier(Modifier::BOLD),
+        );
         write_str_clipped(
             buf,
             name_x,
@@ -369,10 +363,21 @@ pub(crate) fn render_workspace_picker(
         (SAVED_MARK, status_style(WorkspaceStatus::Inactive, theme)),
         (" saved", header_style),
     ];
-    let parts = Footer {
-        hints: &SESSION_HINTS,
-        legend: &legend,
-        ..Footer::default()
+    // Alt-Enter makes a root session too when the create leaves the fresh
+    // launch workspace, as `workspace_picker_create_sub` decides.
+    let sub_session = picker.omitted_workspace != Some(ws.id) || !ws.is_fresh();
+    let family = format!("new sub-session of {}", picker.family_name());
+    let create_hints = [("Enter", "new session"), ("Alt-Enter", family.as_str())];
+    let parts = match creating {
+        true => Footer {
+            hints: &create_hints[..1 + usize::from(sub_session)],
+            ..Footer::default()
+        },
+        false => Footer {
+            hints: &SESSION_HINTS,
+            legend: &legend,
+            ..Footer::default()
+        },
     };
     crate::render::picker::modal_footer(buf, footer, &parts, plate, theme, scene);
 }
@@ -488,7 +493,6 @@ fn tail_within(path: &str, room: usize) -> Option<&str> {
 mod tests {
     use super::{
         render_workspace_picker, workspace_picker_layout, workspace_picker_list, HEADER_ROWS,
-        MAX_ENTRY_ROWS,
     };
     use crate::{
         buffer::BufferId,
@@ -509,7 +513,11 @@ mod tests {
         },
         workspace_picker::WorkspacePicker,
     };
-    use ratatui::{buffer::Buffer, layout::Rect, style::Color};
+    use ratatui::{
+        buffer::Buffer,
+        layout::Rect,
+        style::{Color, Modifier},
+    };
     use slotmap::SlotMap;
     use std::{path::PathBuf, sync::Arc, time::UNIX_EPOCH};
     use stoat_scheduler::{Executor, TestScheduler};
@@ -617,7 +625,7 @@ mod tests {
     fn layout_holds_the_header_above_one_row_per_workspace() {
         let (modal, inner) =
             workspace_picker_layout(Rect::new(0, 0, 120, 40), 3).expect("the area hosts the modal");
-        assert_eq!(modal.width, 112, "the box holds at its recommended width");
+        assert_eq!(modal.width, 80, "the box holds at the S width");
         assert_eq!(
             (inner.height, workspace_picker_list(inner).height),
             (HEADER_ROWS + 3 + 1, 3),
@@ -626,25 +634,29 @@ mod tests {
         );
     }
 
-    /// The box opens eight rows below the window's top, as the boards place
-    /// it, and a window too short for that lifts it until its bottom meets the
-    /// window's.
+    /// The box opens a third of the way down the room the window leaves around
+    /// it, as the boards place the S size. A 14-row box of eight sessions in a
+    /// 50-row window leaves 36 rows and opens at row 12. A 20-row window caps
+    /// the list at four rows, so its 10-row box opens at row 3.
     #[test]
-    fn layout_opens_eight_rows_down_or_meets_a_short_window_s_bottom() {
+    fn layout_opens_a_third_down() {
         let span = |height| {
-            workspace_picker_layout(Rect::new(0, 0, 120, height), 3)
+            workspace_picker_layout(Rect::new(0, 0, 120, height), 8)
                 .map(|(modal, _)| (modal.y, modal.bottom()))
         };
-        assert_eq!([span(40), span(14)], [Some((8, 17)), Some((5, 14))]);
+        assert_eq!([span(50), span(20)], [Some((12, 26)), Some((3, 13))]);
     }
 
+    /// The list shows every session up to half the window's height less the
+    /// box's six other rows. A 40-row window caps it at 14 rows, so the box
+    /// fills half the window.
     #[test]
     fn layout_caps_the_rows_it_shows() {
-        let (_, inner) = workspace_picker_layout(Rect::new(0, 0, 120, 40), 30)
+        let (modal, inner) = workspace_picker_layout(Rect::new(0, 0, 120, 40), 30)
             .expect("the area hosts the modal");
         assert_eq!(
-            (inner.height, workspace_picker_list(inner).height),
-            (HEADER_ROWS + MAX_ENTRY_ROWS + 1, MAX_ENTRY_ROWS),
+            (modal.height, workspace_picker_list(inner).height),
+            (20, 14)
         );
     }
 
@@ -667,7 +679,10 @@ mod tests {
             area,
         );
 
-        let half = picker.viewport_rows.expect("the render stamped a viewport") / 2;
+        let half = picker
+            .viewport_rows
+            .expect("the render stamped a viewport")
+            .div_ceil(2);
         assert!(
             half > 1,
             "a meaningful page needs more than one row: {half}"
@@ -984,23 +999,100 @@ mod tests {
             .collect()
     }
 
-    /// The create row's header names both keys and the family a sub-session
-    /// joins.
+    /// The key line's text inside the modal's border, on the inner rect's last
+    /// row.
+    fn key_line_text(buf: &Buffer, inner: Rect) -> String {
+        row_text(buf, inner.y + inner.height - 1)
+            .chars()
+            .skip(inner.x as usize)
+            .take(inner.width as usize)
+            .collect()
+    }
+
+    /// The create row's key line names both keys and the family a sub-session
+    /// joins, with no legend, and the column header row stays blank.
     #[test]
-    fn a_create_row_hints_both_keys_in_the_header() {
+    fn a_create_row_hints_both_keys_in_the_key_line() {
         let (buf, inner, _) = painted_with_query("notes");
         assert_eq!(
-            header_text(&buf, inner).trim(),
-            "Enter new session   Alt-Enter new sub-session of ws00"
+            [header_text(&buf, inner), key_line_text(&buf, inner)]
+                .map(|text| text.trim().to_owned()),
+            [
+                String::new(),
+                "Enter new session  Alt-Enter new sub-session of ws00".to_owned(),
+            ],
         );
     }
 
     /// A create that leaves the fresh launch workspace makes a root session on
-    /// either key, so the header names Enter alone.
+    /// either key, so the key line names Enter alone.
     #[test]
     fn a_create_row_from_a_fresh_launch_hints_enter_alone() {
         let (buf, inner, _) = painted_with("notes", WorkspacePicker::omit_active);
-        assert_eq!(header_text(&buf, inner).trim(), "Enter new session");
+        assert_eq!(key_line_text(&buf, inner).trim(), "Enter new session");
+    }
+
+    /// The create row's `+` reads in the added color, bold.
+    #[test]
+    fn a_create_row_marks_its_plus_in_the_added_color() {
+        let (mut picker, mut workspaces, active) = picker_with("notes", |_| {});
+        let (buf, _, inner) = painted(&mut picker, &mut workspaces, active, false);
+        let plus = &buf[(inner.x + 1, workspace_picker_list(inner).y)];
+        assert_eq!(
+            (plus.symbol(), plus.fg, plus.modifier),
+            ("+", ADDED, Modifier::BOLD),
+        );
+    }
+
+    /// Under the plate the column header row ends in a hairline in
+    /// `ui.divider` along its bottom edge, across the inner rect. The cell look
+    /// draws none.
+    #[test]
+    fn under_the_plate_the_column_header_rules_its_bottom_edge() {
+        let theme = {
+            let src = r##"theme t {
+                ui.surface.ground.bg = "#010101";
+                ui.background.bg = "#020202";
+                ui.divider.fg = "#030303";
+            }"##;
+            let (config, _) = stoat_config::parse(src);
+            Theme::from_config(&config.expect("theme parses"), "t").expect("theme loads")
+        };
+        let edge_rules = |nudges: bool| {
+            let (mut picker, mut workspaces, active) = picker_over(3);
+            let area = Rect::new(0, 0, 120, 30);
+            let mut buf = Buffer::empty(area);
+            let mut scene = ApcScene::new();
+            scene.set_nudge_protocol(nudges);
+            render_with(
+                &theme,
+                &mut picker,
+                &mut workspaces,
+                active,
+                &mut buf,
+                area,
+                &mut scene,
+            );
+            let (_, inner) = workspace_picker_layout(area, picker.entries().len())
+                .expect("the area hosts the modal");
+            let edge = i16::try_from(inner.y + HEADER_ROWS - 1).expect("a row on screen") * 16 + 15;
+            let rules: Vec<(i16, u16, [u8; 3])> = command::decode_stream(scene.bytes())
+                .into_iter()
+                .filter_map(|cmd| match cmd {
+                    Command::Bar(bar) if bar.y == edge => Some((bar.x, bar.width, bar.color)),
+                    _ => None,
+                })
+                .collect();
+            (inner, rules)
+        };
+        let ((inner, plate), (_, cells)) = (edge_rules(true), edge_rules(false));
+        assert_eq!(
+            (plate, cells),
+            (
+                vec![(inner.x as i16 * 16, inner.width * 16, [3, 3, 3])],
+                Vec::new()
+            ),
+        );
     }
 
     /// The words of each of `rows` inside the modal's border, top first.
@@ -1115,6 +1207,7 @@ mod tests {
     const PROMPT: Color = Color::Rgb(0, 0, 7);
     const SELECTED: Color = Color::Rgb(0, 0, 8);
     const KEY: Color = Color::Rgb(0, 0, 9);
+    const ADDED: Color = Color::Rgb(0, 0, 10);
 
     fn parts_theme() -> Theme {
         let src = r##"theme t {
@@ -1127,6 +1220,7 @@ mod tests {
             ui.prompt.fg = "#000007";
             ui.selection.fg = "#000008";
             ui.key_label.fg = "#000009";
+            diff.added.fg = "#00000a";
         }"##;
         let (config, _) = stoat_config::parse(src);
         Theme::from_config(&config.expect("theme parses"), "t").expect("theme loads")
@@ -1231,8 +1325,8 @@ mod tests {
 
     /// The key line lists the bound keys on the inner rect's last row, then
     /// ends with a legend of the three status marks, each the shape its rows
-    /// draw. At the box's recommended width every key and the legend fit, two
-    /// cells apart.
+    /// draw. At the S width the legend keeps its place, so the first three
+    /// keys fit beside it and the rest drop.
     #[test]
     fn the_footer_ends_with_the_status_legend() {
         let (buf, _, inner) = painted_statuses(true);
@@ -1244,8 +1338,11 @@ mod tests {
             .collect();
         assert_eq!(
             text.trim_end(),
-            " Enter switch  A-Enter sub-session  C-r rename  C-x close  Del delete  S-Tab scope  \
-             \u{25cf} active  \u{25cf} open  \u{25cb} saved"
+            format!(
+                " Enter switch  A-Enter sub-session  C-r rename{}\u{25cf} active  \u{25cf} open  \
+                 \u{25cb} saved",
+                " ".repeat(6)
+            )
         );
 
         let dots: Vec<Color> = (inner.x..inner.x + inner.width)
@@ -1313,7 +1410,7 @@ mod tests {
         let (mut picker, mut workspaces, active) = picker_with("notes", |_| {});
         let (buf, _, inner) = painted(&mut picker, &mut workspaces, active, true);
         assert_eq!(
-            pieces(&buf, inner, inner.y + HEADER_ROWS - 1),
+            pieces(&buf, inner, inner.y + inner.height - 1),
             owned(&[
                 ("Enter", KEY),
                 ("new", MUTED),
