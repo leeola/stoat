@@ -264,6 +264,22 @@ pub(crate) struct Excerpt {
     /// A file that a commit or a base change took off the list took no edit,
     /// so its excerpt goes though it holds the focus.
     pub opened_version: u64,
+    /// The buffer's text version at the last cut from a new diff map.
+    ///
+    /// A cut compares it with the text now, to tell a diff that an edit moved
+    /// from a diff that moved under unchanged text. A cut that only a parse
+    /// moved leaves it, because the parse of an edit lands before the diff map
+    /// of that edit.
+    pub cut_text: u64,
+    /// Whether the cursor held a row open at the last cut or the last
+    /// [`reveal_cursor`].
+    ///
+    /// A cursor that the reader put inside a fold keeps its row open through
+    /// the cuts after it.
+    pub cursor_held: bool,
+    /// Whether a reload replaced the buffer's text since the last cut from a
+    /// new diff map, so the text change is no edit of the reader's.
+    pub reloaded: bool,
     /// The row spans a reader opened out of the folds, which every refold keeps
     /// open until a collapse drops them.
     ///
@@ -1509,6 +1525,7 @@ pub(crate) fn reveal_cursor(stoat: &mut Stoat) -> bool {
     ) else {
         return false;
     };
+    state.excerpts[state.focused].cursor_held = row.is_some();
     if changed && screen_row.is_some() {
         state.held_screen_row = screen_row;
     }
@@ -2104,6 +2121,9 @@ fn open_excerpt(
         top: 0,
         owns_buffer,
         opened_version,
+        cut_text: opened_version,
+        cursor_held: false,
+        reloaded: false,
         revealed: Vec::new(),
     })
 }
@@ -2161,6 +2181,9 @@ pub(crate) fn adopt_excerpt(
             top: 0,
             owns_buffer: true,
             opened_version,
+            cut_text: opened_version,
+            cursor_held: false,
+            reloaded: false,
             revealed: Vec::new(),
         },
     );
@@ -2179,6 +2202,21 @@ pub(crate) fn adopt_excerpt(
         .unwrap_or(state.focused);
 }
 
+/// Mark every excerpt of `buffer_id` in the changes views of `ws` as
+/// reloaded.
+///
+/// A reload replaces the buffer's text from the disk, so the next cut from a
+/// new diff map does not take the text change for the reader's edit.
+pub(crate) fn note_reload(ws: &mut Workspace, buffer_id: BufferId) {
+    let excerpts = ws
+        .diff_changes_views
+        .values_mut()
+        .flat_map(|state| &mut state.excerpts);
+    for excerpt in excerpts.filter(|excerpt| excerpt.buffer_id == buffer_id) {
+        excerpt.reloaded = true;
+    }
+}
+
 /// Remove `excerpt`'s editor, and close its buffer when the stack opened it
 /// and nothing else needs it.
 fn drop_excerpt(stoat: &mut Stoat, excerpt: Excerpt) {
@@ -2195,8 +2233,13 @@ fn drop_excerpt(stoat: &mut Stoat, excerpt: Excerpt) {
 /// its folds were cut, and report whether any did.
 ///
 /// An excerpt cut for the first time puts its cursor on a row it shows, by
-/// [`landing_row`], unless a landing waits on its file. A later cut keeps the
-/// cursor's row open where [`reveal_row`] holds it.
+/// [`landing_row`], unless a landing waits on its file.
+///
+/// A later cut keeps the cursor's row open where [`reveal_row`] holds it, if
+/// the cursor held a row before the cut or the reader's own edit in the
+/// focused excerpt hid the row. Any other hold moves the cursor to a shown row
+/// by [`landing_row`], because a diff that a base change or a reload moved
+/// under the cursor leaves a hold that the reader did not ask for.
 fn refold(ws: &mut Workspace) -> bool {
     let cache = ws.diff_tree_cache();
     let Workspace {
@@ -2207,7 +2250,8 @@ fn refold(ws: &mut Workspace) -> bool {
     } = ws;
     let mut any = false;
     for state in diff_changes_views.values_mut() {
-        for excerpt in &mut state.excerpts {
+        let focused = state.focused;
+        for (index, excerpt) in state.excerpts.iter_mut().enumerate() {
             let Some(version) = map_version(buffers, excerpt.buffer_id) else {
                 continue;
             };
@@ -2218,16 +2262,21 @@ fn refold(ws: &mut Workspace) -> bool {
             let Some(editor) = editors.get_mut(excerpt.editor_id) else {
                 continue;
             };
+            let text = buffers
+                .get(excerpt.buffer_id)
+                .map(|buffer| buffer.read().expect("buffer poisoned").version());
             // A first cut comes before the cursor is placed, so no cursor holds
             // a row open yet.
             let first = excerpt.folded_version.is_none();
-            let cursor = match first {
+            let hold = match first {
                 true => None,
                 false => {
                     let insert = editor.mode == "insert";
                     reveal_row(editor, insert, &excerpt.revealed)
                 },
             };
+            let typed = index == focused && text != Some(excerpt.cut_text) && !excerpt.reloaded;
+            let cursor = hold.filter(|_| excerpt.cursor_held || typed);
             let parse = ScopeParse::of(buffers, excerpt.buffer_id, &cache);
             let Some((folded, kept, _)) = fold_excerpt(
                 editor,
@@ -2239,8 +2288,16 @@ fn refold(ws: &mut Workspace) -> bool {
             ) else {
                 continue;
             };
+            let new_map = excerpt.folded_version != Some(folded);
             excerpt.folded_version = Some(folded);
             excerpt.folded_syntax = syntax;
+            excerpt.cursor_held = cursor.is_some();
+            if new_map {
+                excerpt.reloaded = false;
+                if let Some(text) = text {
+                    excerpt.cut_text = text;
+                }
+            }
             any = true;
 
             let landing_waits = state
@@ -2250,6 +2307,10 @@ fn refold(ws: &mut Workspace) -> bool {
             if first && !landing_waits {
                 let row = cursor_point(editor).row;
                 place_cursor(editor, Point::new(landing_row(&kept, row), 0));
+            }
+            if hold.is_some() && cursor.is_none() {
+                let row = landing_row(&kept, cursor_point(editor).row);
+                place_cursor(editor, Point::new(row, 0));
             }
         }
     }
@@ -3035,10 +3096,10 @@ fn map_version(buffers: &BufferRegistry, id: BufferId) -> Option<usize> {
 mod tests {
     use super::{
         cursor_point, cursor_stack_row, excerpt_rows, expand_from_cursor, fold_edge, fold_excerpt,
-        follow_cursor, gap_fold, gaps, header_rows, kept_runs, landing_row, layout_stack,
-        listed_files, place_cursor, press_cell, pump_diff_changes_stack, reveal_rows, scope_parts,
-        select_row, DiffChangesState, ExcerptStats, ExpandDir, FoldEdge, Landing, ScopeParse,
-        StackStamp,
+        follow_cursor, gap_fold, gaps, header_rows, kept_rows, kept_runs, landing_row,
+        layout_stack, listed_files, place_cursor, press_cell, pump_diff_changes_stack,
+        reveal_cursor, reveal_rows, scope_parts, select_row, DiffChangesState, Excerpt,
+        ExcerptStats, ExpandDir, FoldEdge, Landing, ScopeParse, StackStamp,
     };
     use crate::{
         action_handlers::dispatch,
@@ -4287,6 +4348,231 @@ fn hint_width() -> u32 {
             (index.is_some(), head.is_some(), index != head),
             (true, true, true)
         );
+    }
+
+    /// A base switch that takes the hunk around the cursor folds the cursor's
+    /// row, and the cursor moves to the first row the excerpt shows below it.
+    #[test]
+    fn a_base_switch_that_hides_the_cursor_row_moves_the_cursor_to_a_shown_row() {
+        let mut h = index_stack(&[(0, "staged")], &[(0, "staged"), (25, "work")]);
+        place_cursor(excerpt_editor(&mut h, "e.txt"), Point::new(2, 0));
+        let before = focus(&mut h);
+
+        h.stoat
+            .active_workspace_mut()
+            .set_worktree_base(WorktreeBase::Index);
+        settle_cut(&mut h);
+        assert_eq!(
+            (before, focus(&mut h), kept_of(&mut h, "e.txt")),
+            (at("e.txt", 2), at("e.txt", 22), vec![(22, 29)]),
+        );
+    }
+
+    /// A cursor that the reader put inside a fold keeps its row open through a
+    /// base switch.
+    #[test]
+    fn a_cursor_held_inside_a_fold_keeps_its_row_through_a_base_switch() {
+        let mut h = index_stack(&[(0, "staged")], &[(0, "staged"), (25, "work")]);
+        place_cursor(excerpt_editor(&mut h, "e.txt"), Point::new(12, 0));
+        reveal_cursor(&mut h.stoat);
+
+        h.stoat
+            .active_workspace_mut()
+            .set_worktree_base(WorktreeBase::Index);
+        settle_cut(&mut h);
+        assert_eq!(focus(&mut h), at("e.txt", 12));
+    }
+
+    /// A reload that takes the hunk around the cursor is no edit of the
+    /// reader's, so the cursor moves to a shown row, as at a base switch.
+    #[test]
+    fn a_reload_that_hides_the_cursor_row_moves_the_cursor_to_a_shown_row() {
+        let mut h = work_row_stack(&["e.txt"]);
+        reload_file(&mut h, "e.txt", &lines(&[(25, "work")]));
+        settle_cut(&mut h);
+        assert_eq!(focus(&mut h), at("e.txt", 22));
+    }
+
+    /// The reader's own edit that takes the hunk around the cursor keeps the
+    /// cursor's row open.
+    #[test]
+    fn an_edit_that_hides_the_cursor_row_keeps_the_row_open() {
+        let mut h = work_row_stack(&["e.txt"]);
+        replace_first(&mut h, "e.txt", "work", "l0");
+        settle_cut(&mut h);
+        assert_eq!(focus(&mut h), at("e.txt", 2));
+    }
+
+    /// A later cut that no edit of the reader's moves keeps the hold that the
+    /// reader's edit took, because the excerpt carries the hold.
+    #[test]
+    fn an_edit_hold_lasts_through_a_base_switch() {
+        let mut h = index_stack(&[(25, "staged")], &[(0, "work"), (25, "work")]);
+        place_cursor(excerpt_editor(&mut h, "e.txt"), Point::new(2, 0));
+        replace_first(&mut h, "e.txt", "work", "l0");
+        settle_cut(&mut h);
+        let edited = focus(&mut h);
+
+        h.stoat
+            .active_workspace_mut()
+            .set_worktree_base(WorktreeBase::Index);
+        settle_cut(&mut h);
+        assert_eq!((edited, focus(&mut h)), (at("e.txt", 2), at("e.txt", 2)));
+    }
+
+    /// An edit outside the focused excerpt is no edit of the reader's in the
+    /// stack, so the cursor of the excerpt it hid moves to a shown row, and
+    /// the focus stays where it was.
+    #[test]
+    fn an_edit_out_of_focus_that_hides_a_cursor_row_moves_that_cursor() {
+        let mut h = work_row_stack(&["e.txt", "f.txt"]);
+        replace_first(&mut h, "f.txt", "work", "l0");
+        settle_cut(&mut h);
+        assert_eq!(
+            (
+                focus(&mut h),
+                cursor_point(excerpt_editor(&mut h, "f.txt")).row
+            ),
+            (at("e.txt", 2), 22),
+        );
+    }
+
+    /// In a file with a grammar the parse of an edit lands before its diff
+    /// map, and the cut that the parse moves leaves the edit for the cut of
+    /// the diff map to see.
+    #[test]
+    fn an_edit_that_hides_the_cursor_row_keeps_it_open_past_the_parse() {
+        let mut h = work_row_stack(&["e.rs"]);
+        land_parse(&mut h);
+        let before = cut_from(&h, "e.rs");
+        replace_first(&mut h, "e.rs", "work", "l0");
+        land_parse(&mut h);
+        let parsed = cut_from(&h, "e.rs");
+
+        settle_cut(&mut h);
+        assert_eq!(
+            (
+                before.1.is_some(),
+                parsed.0 == before.0,
+                parsed.1 != before.1,
+                focus(&mut h)
+            ),
+            (true, true, true, at("e.rs", 2)),
+        );
+    }
+
+    /// Paint the stack, which asks for the parse of each excerpt, and let the
+    /// parses land, with no diff map spawned.
+    fn land_parse(h: &mut TestHarness) {
+        h.render_composited();
+        for _ in 0..2 {
+            h.stoat.drive_background();
+            h.settle();
+        }
+    }
+
+    /// The text of a file of 30 rows, `l0` to `l29`, with each row that `edit`
+    /// names replaced.
+    fn lines(edit: &[(usize, &str)]) -> String {
+        (0..30)
+            .map(|row| match edit.iter().find(|(at, _)| *at == row) {
+                Some((_, text)) => format!("{text}\n"),
+                None => format!("l{row}\n"),
+            })
+            .collect()
+    }
+
+    /// A settled changes view against HEAD over e.txt, whose index and working
+    /// tree each change the rows that `index` and `work` name.
+    fn index_stack(index: &[(usize, &str)], work: &[(usize, &str)]) -> TestHarness {
+        let mut h = TestHarness::with_size(100, 24);
+        h.stoat.set_diff_warm_auto(true);
+        h.stage_index_scenario(
+            "/repo",
+            &[("e.txt", &lines(&[]), &lines(index), &lines(work))],
+        );
+        h.stoat
+            .active_workspace_mut()
+            .set_worktree_base(WorktreeBase::Head);
+        stacked(&mut h);
+        h.settle_diff_jobs();
+        h
+    }
+
+    /// A settled changes view over `rel_paths`, each changed to `work` on row
+    /// 0 and on row 25, with each cursor on row 2 in the context of the change
+    /// on row 0.
+    fn work_row_stack(rel_paths: &[&str]) -> TestHarness {
+        let (head, work) = (lines(&[]), lines(&[(0, "work"), (25, "work")]));
+        let files: Vec<(&str, &str, &str)> = rel_paths
+            .iter()
+            .map(|path| (*path, head.as_str(), work.as_str()))
+            .collect();
+        let mut h = settled_stack(&files);
+        for path in rel_paths {
+            place_cursor(excerpt_editor(&mut h, path), Point::new(2, 0));
+        }
+        h
+    }
+
+    /// Replace the first `from` in `rel_path` with `to`, as an edit with no
+    /// reload behind it.
+    fn replace_first(h: &mut TestHarness, rel_path: &str, from: &str, to: &str) {
+        let buffer_id = excerpt_of(h.stoat.active_workspace(), rel_path).buffer_id;
+        let start = h
+            .buffer_text(buffer_id)
+            .find(from)
+            .expect("the replaced text");
+        let buffer = h.stoat.active_workspace().buffers.get(buffer_id);
+        buffer
+            .expect("a buffer")
+            .write()
+            .expect("buffer poisoned")
+            .edit(start..start + from.len(), to);
+    }
+
+    /// Let the stack cut its folds from the diff maps that follow a change.
+    fn settle_cut(h: &mut TestHarness) {
+        h.settle_diff_jobs();
+        h.settle();
+    }
+
+    /// The excerpt of `rel_path` in the focused changes view.
+    fn excerpt_of<'a>(ws: &'a Workspace, rel_path: &str) -> &'a Excerpt {
+        ws.focused_diff_changes()
+            .and_then(|state| {
+                state
+                    .excerpts
+                    .iter()
+                    .find(|excerpt| excerpt.rel_path == rel_path)
+            })
+            .expect("an excerpt of the file")
+    }
+
+    /// The editor of the excerpt of `rel_path` in the focused changes view.
+    fn excerpt_editor<'a>(h: &'a mut TestHarness, rel_path: &str) -> &'a mut EditorState {
+        let ws = h.stoat.active_workspace_mut();
+        let editor_id = excerpt_of(ws, rel_path).editor_id;
+        ws.editors.get_mut(editor_id).expect("an editor")
+    }
+
+    /// The rows the excerpt of `rel_path` shows with no cursor row held open,
+    /// as each run's first row and the row past its last.
+    fn kept_of(h: &mut TestHarness, rel_path: &str) -> Vec<(u32, u32)> {
+        let revealed = excerpt_of(h.stoat.active_workspace(), rel_path)
+            .revealed
+            .clone();
+        kept_rows(excerpt_editor(h, rel_path), &revealed)
+            .into_iter()
+            .map(|run| (run.start, run.end))
+            .collect()
+    }
+
+    /// The diff map version and the syntax version that the folds of the
+    /// excerpt of `rel_path` were cut from.
+    fn cut_from(h: &TestHarness, rel_path: &str) -> (Option<usize>, Option<u64>) {
+        let excerpt = excerpt_of(h.stoat.active_workspace(), rel_path);
+        (excerpt.folded_version, excerpt.folded_syntax)
     }
 
     /// One excerpt's folds: the diff map version they were cut from, the fold

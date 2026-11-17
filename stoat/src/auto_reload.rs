@@ -930,6 +930,9 @@ fn reload_from_disk(
 /// A span with no text is a pure deletion. It widens to the line that holds
 /// the offset where the text was removed, so the reader still sees where the
 /// text went.
+///
+/// The changes views learn of the reload too, so a cut does not take the new
+/// text for an edit of the reader's.
 fn note_reload_flash(
     stoat: &mut Stoat,
     buffer: &SharedBuffer,
@@ -954,6 +957,7 @@ fn note_reload_flash(
             .collect()
     };
 
+    diff_changes::note_reload(stoat.active_workspace_mut(), id);
     let flashes = &mut stoat.active_workspace_mut().reload_flashes;
     flashes.retain(|flash| flash.buffer != id);
     flashes.push(ReloadFlash {
