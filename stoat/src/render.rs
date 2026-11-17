@@ -2605,7 +2605,7 @@ pub(crate) fn frame(
         }
 
         let conflict_footer = conflict_position
-            .filter(|_| screen == Some("conflict"))
+            .filter(|_| own_box == Some("conflict"))
             .map(|position| hints::HintsFooter {
                 text: format!(
                     "chunk {} / {}",
@@ -2670,15 +2670,15 @@ pub(crate) fn frame(
 
 /// The rows the hints box lists from `state`, its bindings grouped by action.
 ///
-/// A screen with its own box, which `own_box` names, scopes to the bindings
-/// that name its view, such as `view == conflict`. The screen rides on the
-/// editor's modes, so its mode alone names the editor's keys rather than the
-/// screen's. A terminal or agent pane at rest sends every other key to its
-/// child, so it scopes to the bindings that name its pane kind. A primary mode
-/// narrows to the chord entries and the context-bound keys, because the whole
-/// editor keymap is what the help screen is for. A chord sub-mode, the
-/// walkthrough's among them, lists the keys its own mode binds, so the root
-/// keys every mode answers stay off its box.
+/// A screen with its own box, which `own_box` names only in a primary mode,
+/// scopes to the bindings that name its view, such as `view == conflict`. The
+/// screen rides on the editor's modes, so its mode alone names the editor's
+/// keys rather than the screen's. A terminal or agent pane at rest sends every
+/// other key to its child, so it scopes to the bindings that name its pane
+/// kind. A primary mode narrows to the chord entries and the context-bound
+/// keys, because the whole editor keymap is what the help screen is for. A
+/// chord sub-mode, the walkthrough's among them, lists the keys its own mode
+/// binds, so the root keys every mode answers stay off its box.
 ///
 /// A chord's binding that only returns to a primary mode is its exit, the
 /// Escape every chord binds, so it makes no row. In a primary mode such a
@@ -2747,16 +2747,17 @@ pub(crate) fn keeps_hints_up(screen: Option<&str>, touring: bool) -> bool {
 ///
 /// Only a screen that [`keeps_hints_up`] has a box of its own, so a box that
 /// the toggle forces on during a tour reads as the mode's. The conflict
-/// screen's box lists the screen's bindings in every mode. The diff and
-/// changes views share the `diff` box, which lists the editor's keys, so a
-/// chord sub-mode over either view shows the mode's own box in its place,
-/// under the mode's title.
+/// screen's box lists the screen's bindings, and the diff and changes views
+/// share the `diff` box, which lists the editor's keys. Either box shows in a
+/// primary mode only, because the bindings it lists do not apply in a chord.
+/// A chord sub-mode over any of the three screens shows the mode's own box in
+/// its place, under the mode's title.
 fn screen_own_box(screen: Option<&str>, mode: &str, touring: bool) -> Option<&'static str> {
     if !keeps_hints_up(screen, touring) {
         return None;
     }
     match screen {
-        Some("conflict") => Some("conflict"),
+        Some("conflict") if PRIMARY_MODES.contains(&mode) => Some("conflict"),
         Some("diff" | "diff_changes") if PRIMARY_MODES.contains(&mode) => Some("diff"),
         _ => None,
     }
@@ -3897,13 +3898,15 @@ mod dispatch_tests {
         );
     }
 
-    /// The conflict screen's own box shows in every mode. The diff and changes
-    /// views share the `diff` box, which shows in a primary mode with no tour
-    /// open, and a chord sub-mode over either view shows the mode's box.
+    /// The conflict screen's own box shows in a primary mode. The diff and
+    /// changes views share the `diff` box, which shows in a primary mode with
+    /// no tour open. A chord sub-mode over any of the three screens shows the
+    /// mode's box.
     #[test]
     fn a_screen_s_own_box_shows_in_its_modes() {
         assert_eq!(
             [
+                screen_own_box(Some("conflict"), "normal", false),
                 screen_own_box(Some("conflict"), "space", false),
                 screen_own_box(Some("diff"), "normal", false),
                 screen_own_box(Some("diff"), "select", false),
@@ -3917,6 +3920,7 @@ mod dispatch_tests {
             ],
             [
                 Some("conflict"),
+                None,
                 Some("diff"),
                 Some("diff"),
                 None,
@@ -4380,6 +4384,51 @@ mod lsp_filter_tests {
             ),
             ([false; 6], true, true),
             "the box rows: {rows:?}",
+        );
+    }
+
+    /// The `space d` box over the conflict view lists the chord's keys, as it
+    /// does over the two diff views. The chunk footer stays on the conflict
+    /// screen's own box, so the chord's frame shows the chunk in the pane's
+    /// status row alone.
+    #[test]
+    fn a_chord_over_the_conflict_view_lists_the_chord_s_keys() {
+        let mut h = TestHarness::with_size(150, 50);
+        let git_root = h.stoat.active_workspace().git_root.clone();
+        h.fake_git().add_repo(git_root.clone()).conflicted_file(
+            "f.txt",
+            Some("base\n"),
+            Some("ours\n"),
+            Some("theirs\n"),
+        );
+        // The root resolved as no repository before the seed, and that miss
+        // holds until REPO_RETRY passes. The diff chord binds only in a
+        // repository.
+        h.stoat.active_workspace_mut().repo_root = Some(git_root);
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::Conflict);
+        h.settle();
+        let own_box_chunks = box_text(&mut h).matches("chunk 1 / 1").count();
+
+        h.type_keys("space d");
+        let chord_chunks = box_text(&mut h).matches("chunk 1 / 1").count();
+        let keys: Vec<String> = h
+            .stoat
+            .hints_cache
+            .as_ref()
+            .expect("the space d box laid out its rows")
+            .rows
+            .iter()
+            .map(|row| row.keys.clone())
+            .collect();
+        let lists_key = |key: &str| {
+            keys.iter()
+                .any(|keys| keys.split(", ").any(|listed| listed == key))
+        };
+
+        assert_eq!(
+            (["f", "c", "x"].map(lists_key), own_box_chunks, chord_chunks),
+            ([true; 3], 2, 1),
+            "the box rows: {keys:?}",
         );
     }
 
