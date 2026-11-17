@@ -8,6 +8,7 @@ use crate::{
     pane::{FocusTarget, View},
     pane_finder::PaneTarget,
 };
+use std::path::{Path, PathBuf};
 
 /// Step the open list modal's selection by `delta` rows.
 ///
@@ -289,6 +290,9 @@ pub(super) fn diagnostics_picker_close(stoat: &mut Stoat) -> UpdateEffect {
 /// selection. Workspace-scope entries carry a target path and a sentinel
 /// offset, so the file is opened first and the byte offset recomputed
 /// from the entry's `(line, column)`. An empty picker just closes.
+///
+/// A file that the focused changes view shows lands on its excerpt, and the
+/// view stays.
 pub(super) fn diagnostics_picker_select(stoat: &mut Stoat) -> UpdateEffect {
     let Some(mut picker) = stoat.diagnostics_picker.take() else {
         return UpdateEffect::None;
@@ -312,7 +316,12 @@ pub(super) fn diagnostics_picker_select(stoat: &mut Stoat) -> UpdateEffect {
     super::jump::push_jump(stoat);
     let offset = match path {
         Some(path) => {
-            super::file::open_file(stoat, &path, OpenOrigin::Visited);
+            let buffer = stoat.active_workspace().buffers.id_for_path(&path);
+            let in_stack =
+                buffer.is_some_and(|buffer| super::diff_changes::focus_stack_buffer(stoat, buffer));
+            if !in_stack {
+                super::file::open_file(stoat, &path, OpenOrigin::Visited);
+            }
             stoat
                 .offset_for_focused_point(line, column, encoding)
                 .unwrap_or(0)
@@ -803,10 +812,13 @@ fn build_diagnostics_picker(
 /// Drive [`ActionKind::OpenDiagnosticsPicker`]. Snapshots the
 /// focused buffer's diagnostic list from `Stoat::diagnostics`
 /// and stores the picker on `Stoat::diagnostics_picker`. A
-/// changes view snapshots its focused excerpt's file. No-op
-/// when the focused pane shows no editor, the buffer has no
-/// path on disk, or the path has no diagnostics.
+/// changes view lists every file of its stack, in stack order.
+/// No-op when the focused pane shows no editor, the buffer has
+/// no path on disk, or the path has no diagnostics.
 pub(super) fn open_diagnostics_picker(stoat: &mut Stoat) -> UpdateEffect {
+    if stoat.active_workspace().focused_diff_changes().is_some() {
+        return open_stack_diagnostics_picker(stoat);
+    }
     let ws = stoat.active_workspace_mut();
     let buffer_id = match ws.focus {
         FocusTarget::SplitPane => match pane_editor_ids(ws) {
@@ -851,18 +863,140 @@ pub(super) fn open_diagnostics_picker(stoat: &mut Stoat) -> UpdateEffect {
     UpdateEffect::Redraw
 }
 
+/// [`open_diagnostics_picker`] over a changes view, which lists the diagnostics
+/// of every file of the stack in stack order.
+///
+/// No-op when no file of the stack has a diagnostic.
+fn open_stack_diagnostics_picker(stoat: &mut Stoat) -> UpdateEffect {
+    let paths: Vec<PathBuf> = {
+        let ws = stoat.active_workspace();
+        let Some(state) = ws.focused_diff_changes() else {
+            return UpdateEffect::None;
+        };
+        state
+            .excerpts
+            .iter()
+            .filter(|excerpt| excerpt.folded_version.is_some())
+            .filter_map(|excerpt| ws.buffers.path_for(excerpt.buffer_id))
+            .map(Path::to_path_buf)
+            .collect()
+    };
+    let entries = crate::diagnostics_picker::DiagnosticsPicker::changes_entries(
+        &stoat.diagnostics,
+        &stoat.lsp_registry.offset_encodings(),
+        &paths,
+    );
+    if entries.is_empty() {
+        return UpdateEffect::None;
+    }
+    stoat.diagnostics_picker = Some(build_diagnostics_picker(
+        stoat,
+        entries,
+        crate::diagnostics_picker::PickerScope::Changes,
+    ));
+    UpdateEffect::Redraw
+}
+
 #[cfg(test)]
 mod tests {
     use super::{super::dispatch, *};
     use crate::{
+        diagnostics_picker::PickerScope,
+        diff_changes::DiffChangesState,
         run::OutputBlock,
-        test_fixture::{drain_apc, open_scratch_file, store_two_tours},
+        test_fixture::{diag, drain_apc, open_scratch_file, store_two_tours},
         test_harness::{editor, keys, stoat, TestHarness},
     };
     use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
     use stoat_action::{Action, MoveDown, SaveSelection};
+    use stoat_text::Point;
     use stoatty_protocol::command::Command;
     use tokio::sync::mpsc;
+
+    /// The diagnostics list opened over a settled changes view of `a.rs` and
+    /// `b.rs`, each with one diagnostic.
+    fn stack_diagnostics_list() -> TestHarness {
+        let mut h = TestHarness::with_size(100, 24);
+        h.stage_review_scenario(
+            "/repo",
+            &[("a.rs", "x\n", "a\nb\n"), ("b.rs", "y\n", "c\nd\n")],
+        );
+        h.cover_with_diff_changes(false);
+        h.settle();
+        h.seed_diagnostics("/repo/a.rs", vec![diag(0, 0, "first")]);
+        h.seed_diagnostics("/repo/b.rs", vec![diag(1, 0, "second")]);
+        dispatch(&mut h.stoat, &stoat_action::OpenDiagnosticsPicker);
+        h
+    }
+
+    #[test]
+    fn a_diagnostics_list_over_a_changes_view_lists_every_file() {
+        let h = stack_diagnostics_list();
+        let picker = h
+            .stoat
+            .diagnostics_picker
+            .as_ref()
+            .expect("the list opened");
+        let listed: Vec<(Option<&Path>, &str)> = picker
+            .entries()
+            .iter()
+            .map(|entry| (entry.path.as_deref(), entry.message.as_str()))
+            .collect();
+        assert_eq!(
+            (picker.scope(), listed),
+            (
+                &PickerScope::Changes,
+                vec![
+                    (Some(Path::new("/repo/a.rs")), "first"),
+                    (Some(Path::new("/repo/b.rs")), "second"),
+                ],
+            ),
+        );
+    }
+
+    /// The list names the changes scope, and each row names its own file beside
+    /// its message.
+    #[test]
+    fn a_diagnostics_list_over_a_changes_view_shows_its_scope_and_files() {
+        let mut h = stack_diagnostics_list();
+        h.snapshot();
+        let text = h.rendered_text();
+        let row_names = |file: &str, message: &str| {
+            text.lines()
+                .any(|line| line.contains(file) && line.contains(message))
+        };
+        assert_eq!(
+            (
+                text.contains("diagnostics \u{00B7} changes"),
+                row_names("a.rs", "first"),
+                row_names("b.rs", "sec"),
+            ),
+            (true, true, true),
+            "{text}",
+        );
+    }
+
+    #[test]
+    fn a_diagnostics_pick_lands_on_the_other_excerpt() {
+        let mut h = stack_diagnostics_list();
+        picker_step(&mut h.stoat, 1);
+        dispatch(&mut h.stoat, &stoat_action::SubmitPromptInput);
+
+        let ws = h.stoat.active_workspace_mut();
+        let (rel_path, editor_id) = {
+            let excerpt = ws
+                .focused_diff_changes()
+                .and_then(DiffChangesState::focused_excerpt)
+                .expect("a focused excerpt");
+            (excerpt.rel_path.clone(), excerpt.editor_id)
+        };
+        let editor = ws.editors.get_mut(editor_id).expect("an excerpt editor");
+        let cursor = crate::diff_changes::cursor_point(editor);
+        assert_eq!(
+            (h.stoat.current_view(), rel_path.as_str(), cursor),
+            (Some("diff_changes"), "b.rs", Point::new(1, 0)),
+        );
+    }
 
     /// One verb set serves every list modal, so the verbs reach the dispatch
     /// whether or not a modal is open. With none open there is no list to

@@ -65,6 +65,7 @@ pub(crate) fn render_diagnostics_picker(
     let modal_style = theme.get(crate::theme::scope::UI_MODAL_PICKER);
     let label = match picker.scope() {
         PickerScope::Local(_) => "diagnostics",
+        PickerScope::Changes => "diagnostics \u{00B7} changes",
         PickerScope::Workspace => "diagnostics \u{00B7} workspace",
     };
     crate::render::clear_modal(modal_area, buf, theme, modal_style);
@@ -135,8 +136,8 @@ fn paint_diagnostic_rows(
     let muted_style = theme.get(crate::theme::scope::UI_TEXT_MUTED);
     let match_style = theme.list_match();
 
-    let workspace_scope = matches!(picker.scope(), PickerScope::Workspace);
-    let columns: &[Column] = match workspace_scope {
+    let path_scope = !matches!(picker.scope(), PickerScope::Local(_));
+    let columns: &[Column] = match path_scope {
         true => &WORKSPACE_COLUMNS,
         false => &LOCAL_COLUMNS,
     };
@@ -178,7 +179,7 @@ fn paint_diagnostic_rows(
             },
         };
 
-        let path_text = match workspace_scope {
+        let path_text = match path_scope {
             true => entry
                 .path
                 .as_deref()
@@ -189,7 +190,7 @@ fn paint_diagnostic_rows(
         let position = format!("{:>4}:{:<3}", entry.line, entry.column);
 
         let mut cells: Vec<&str> = Vec::with_capacity(columns.len());
-        if workspace_scope {
+        if path_scope {
             cells.push(&path_text);
         }
         cells.extend([
@@ -207,7 +208,7 @@ fn paint_diagnostic_rows(
             // than the diagnostic itself. A selected row keeps one style
             // throughout, since the highlight is what carries it.
             |column| match column {
-                0 if workspace_scope && !is_selected => muted_style,
+                0 if path_scope && !is_selected => muted_style,
                 _ => base_style,
             },
         );

@@ -6,15 +6,19 @@ use crate::{
     picker::{Preview, PreviewSource, TargetPicker},
 };
 use lsp_types::{Diagnostic, DiagnosticSeverity};
-use std::{collections::HashMap, path::PathBuf, sync::Arc};
+use std::{
+    collections::HashMap,
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 use stoat_scheduler::Executor;
 use tokio::sync::Notify;
 
 /// Whether the picker lists the focused buffer's diagnostics
-/// only (`Local`) or every workspace path (`Workspace`). The
-/// renderer paints a path column when scope is `Workspace`,
-/// and selecting a `Workspace` entry opens its file before
-/// jumping.
+/// only (`Local`), the files of a changes view (`Changes`), or
+/// every workspace path (`Workspace`). The renderer paints a
+/// path column for every scope but `Local`, and selecting an
+/// entry with a path goes to its file before jumping.
 ///
 /// A local entry carries no path of its own, which is what marks it local to
 /// the jump. The scope holds the one path they all share, so the preview still
@@ -22,15 +26,19 @@ use tokio::sync::Notify;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum PickerScope {
     Local(PathBuf),
+    /// The files of the focused changes view, in stack order. Each entry
+    /// carries its path, as a [`Self::Workspace`] entry does.
+    Changes,
     Workspace,
 }
 
-/// Modal listing diagnostics in either the focused buffer
-/// (Local scope) or every path in `Stoat::diagnostics`
-/// (Workspace scope). Built from a snapshot of the diagnostic
-/// set so render can run without re-entering buffer locks.
-/// Selecting an entry collapses the focused editor's cursor at
-/// its diagnostic. Workspace entries open the target file first.
+/// Modal listing diagnostics in the focused buffer (Local
+/// scope), the files of a changes view (Changes scope), or every
+/// path in `Stoat::diagnostics` (Workspace scope). Built from a
+/// snapshot of the diagnostic set so render runs without
+/// re-entering buffer locks. Selecting an entry collapses the
+/// focused editor's cursor at its diagnostic. An entry with a
+/// path goes to its file first.
 ///
 /// Navigation, filtering, and selection route through the
 /// `modal == diagnostics && mode == insert` keymap block. A query narrows the
@@ -46,19 +54,19 @@ pub struct DiagnosticsPicker {
 
 pub struct DiagnosticsEntry {
     /// Byte offset in the entry's source buffer. Meaningful
-    /// only for Local entries -- workspace entries set this to
-    /// 0 because the target buffer may not be open at picker
-    /// construction time. The select handler recomputes the
-    /// offset from `(line, column)` after opening the file.
+    /// only for Local entries. An entry with a path sets this
+    /// to 0, because the target buffer is not always open at
+    /// picker construction time. The select handler recomputes
+    /// the offset from `(line, column)` after it opens the file.
     pub offset: usize,
     pub line: u32,
     pub column: u32,
     pub severity: Option<DiagnosticSeverity>,
     pub message: String,
     /// Absolute path of the file the diagnostic comes from.
-    /// `None` for Local-scope entries (caller already has the
-    /// focused editor's path); `Some` for Workspace-scope
-    /// entries.
+    /// `None` for Local-scope entries, whose caller already has
+    /// the focused editor's path. `Some` for Changes-scope and
+    /// Workspace-scope entries.
     pub path: Option<PathBuf>,
     /// Offset encoding of the server that published the diagnostic. The select
     /// handler converts `(line, column)` back to a byte offset through it, so a
@@ -167,22 +175,7 @@ impl DiagnosticsPicker {
     ) -> Vec<DiagnosticsEntry> {
         let mut entries: Vec<DiagnosticsEntry> = diagnostics
             .iter_attributed()
-            .map(|(path, server, diag)| {
-                let line = diag.range.start.line;
-                let column = diag.range.start.character;
-                DiagnosticsEntry {
-                    offset: 0,
-                    line: line + 1,
-                    column: column + 1,
-                    severity: diag.severity,
-                    message: render_message(&diag.message),
-                    path: Some(path.to_path_buf()),
-                    encoding: encodings
-                        .get(server)
-                        .copied()
-                        .unwrap_or(OffsetEncoding::Utf16),
-                }
-            })
+            .map(|(path, server, diag)| path_entry(path, server, diag, encodings))
             .collect();
         entries.sort_by(|a, b| {
             let a_path = a.path.as_deref();
@@ -193,6 +186,55 @@ impl DiagnosticsPicker {
                 .then_with(|| a.column.cmp(&b.column))
         });
         entries
+    }
+
+    /// One entry per diagnostic of each file in `paths`, for the files of a
+    /// changes view's stack.
+    ///
+    /// The files keep the order of `paths`, and each file's entries sort by
+    /// `(line, column)`, so the list follows the stack. A diagnostic of a file
+    /// outside `paths` adds no entry. Every `offset` is the sentinel `0`, as in
+    /// [`Self::workspace_entries`].
+    pub fn changes_entries(
+        diagnostics: &DiagnosticSet,
+        encodings: &HashMap<String, OffsetEncoding>,
+        paths: &[PathBuf],
+    ) -> Vec<DiagnosticsEntry> {
+        let mut entries = Vec::new();
+        for path in paths {
+            let start = entries.len();
+            entries.extend(
+                diagnostics
+                    .attributed(path)
+                    .map(|(server, diag)| path_entry(path, server, diag, encodings)),
+            );
+            entries[start..].sort_by_key(|entry| (entry.line, entry.column));
+        }
+        entries
+    }
+}
+
+/// The entry for one diagnostic that `server` published for `path`.
+///
+/// The `offset` is the sentinel `0`, because the file need not be open yet. The
+/// select handler recomputes it from `(line, column)` in the server's encoding.
+fn path_entry(
+    path: &Path,
+    server: &str,
+    diag: &Diagnostic,
+    encodings: &HashMap<String, OffsetEncoding>,
+) -> DiagnosticsEntry {
+    DiagnosticsEntry {
+        offset: 0,
+        line: diag.range.start.line + 1,
+        column: diag.range.start.character + 1,
+        severity: diag.severity,
+        message: render_message(&diag.message),
+        path: Some(path.to_path_buf()),
+        encoding: encodings
+            .get(server)
+            .copied()
+            .unwrap_or(OffsetEncoding::Utf16),
     }
 }
 
@@ -217,8 +259,8 @@ pub(crate) fn haystack_prefix_len(entry: &DiagnosticsEntry) -> u32 {
 /// Where a diagnostic's preview reads from and which 0-based line it centres
 /// on.
 ///
-/// A workspace entry names its own file. A local one does not, so the scope's
-/// path stands in for it. An open buffer wins over the file either way, so a
+/// A workspace or changes entry names its own file. A local one does not, so
+/// the scope's path stands in for it. An open buffer wins over the file either way, so a
 /// diagnostic in edited text previews what the reader has on screen.
 pub(crate) fn diagnostic_target(
     ws: &crate::workspace::Workspace,
@@ -228,7 +270,7 @@ pub(crate) fn diagnostic_target(
     let path = match (&entry.path, scope) {
         (Some(path), _) => path,
         (None, PickerScope::Local(path)) => path,
-        (None, PickerScope::Workspace) => return None,
+        (None, PickerScope::Workspace | PickerScope::Changes) => return None,
     };
     let source = match ws.buffers.id_for_path(path) {
         Some(id) => PreviewSource::Buffer(id),
@@ -351,6 +393,44 @@ mod tests {
     }
 
     #[test]
+    fn changes_entries_follow_the_path_order_and_skip_other_files() {
+        let mut set = DiagnosticSet::new();
+        for (path, diagnostics) in [
+            (
+                "/ws/a.rs",
+                vec![
+                    diag(1, 0, "a-second", DiagnosticSeverity::ERROR),
+                    diag(0, 0, "a-first", DiagnosticSeverity::ERROR),
+                ],
+            ),
+            (
+                "/ws/b.rs",
+                vec![diag(3, 0, "b-only", DiagnosticSeverity::WARNING)],
+            ),
+            (
+                "/ws/c.rs",
+                vec![diag(0, 0, "c-only", DiagnosticSeverity::ERROR)],
+            ),
+        ] {
+            set.replace_for_path(PathBuf::from(path), diagnostics);
+        }
+        let paths = [PathBuf::from("/ws/b.rs"), PathBuf::from("/ws/a.rs")];
+
+        let entries = DiagnosticsPicker::changes_entries(&set, &HashMap::new(), &paths);
+        assert_eq!(
+            entries
+                .iter()
+                .map(|e| (e.path.as_deref(), e.line, e.message.as_str()))
+                .collect::<Vec<_>>(),
+            [
+                (Some(Path::new("/ws/b.rs")), 4, "b-only"),
+                (Some(Path::new("/ws/a.rs")), 1, "a-first"),
+                (Some(Path::new("/ws/a.rs")), 2, "a-second"),
+            ],
+        );
+    }
+
+    #[test]
     fn local_entries_truncate_long_messages_and_strip_newlines() {
         let buffer = buf("x\n");
         let long = "a".repeat(200);
@@ -405,7 +485,7 @@ mod tests {
         assert!(
             matches!(
                 local,
-                Some((PreviewSource::File(ref path), 11)) if path == std::path::Path::new("/ws/a.rs")
+                Some((PreviewSource::File(ref path), 11)) if path == Path::new("/ws/a.rs")
             ),
             "the scope's file previews at the diagnostic's 0-based line"
         );

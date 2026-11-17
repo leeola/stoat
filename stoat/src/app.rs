@@ -9990,7 +9990,9 @@ impl Stoat {
 
     /// Resolve a `(line, column)` 0-based point to a byte
     /// offset in the focused editor's rope. Returns `None`
-    /// when the focused pane is not an editor.
+    /// when the focused pane shows no editor.
+    ///
+    /// A changes view resolves the point in its focused excerpt's file.
     pub(crate) fn offset_for_focused_point(
         &mut self,
         line: u32,
@@ -9999,10 +10001,7 @@ impl Stoat {
     ) -> Option<usize> {
         let ws = self.active_workspace_mut();
         let editor_id = match ws.focus {
-            FocusTarget::SplitPane => match ws.panes.pane(ws.panes.focus()).view {
-                View::Editor(id) => id,
-                _ => return None,
-            },
+            FocusTarget::SplitPane => action_handlers::pane_editor_ids(ws)?.0,
             FocusTarget::Dock(_) => return None,
         };
         let editor = ws.editors.get_mut(editor_id)?;
@@ -10019,12 +10018,14 @@ impl Stoat {
     /// `offset`. Used by non-jumplist navigation flows (e.g. the
     /// diagnostics picker) that need to move the cursor without
     /// touching jumplist state.
+    ///
+    /// A changes view moves the cursor of its focused excerpt.
     pub(crate) fn collapse_focused_cursor_to(&mut self, offset: usize) {
         let ws = self.active_workspace_mut();
         let editor_id = match ws.focus {
-            FocusTarget::SplitPane => match ws.panes.pane(ws.panes.focus()).view {
-                View::Editor(id) => id,
-                _ => return,
+            FocusTarget::SplitPane => match action_handlers::pane_editor_ids(ws) {
+                Some((id, _)) => id,
+                None => return,
             },
             FocusTarget::Dock(_) => return,
         };
