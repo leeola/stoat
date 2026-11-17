@@ -1609,7 +1609,8 @@ on key {
     # Ctrl-t flips between the two diff layouts, so both screens bind it. On
     # the per-file diff it runs DiffChanges onto the hunk under the cursor, and
     # on the changes view it runs DiffFiles onto the cursor's hunk. DiffChanges
-    # on the changes view closes it, so space d c opens and closes the view.
+    # on the changes view closes it to the plain file, so space d c opens and
+    # closes the view.
     view == diff {
         Ctrl-t -> DiffChanges() "files / changes";
     }

@@ -45,12 +45,17 @@ pub(crate) enum StackPress {
 
 /// Open a changes view over the focused view, or close the focused one.
 ///
-/// On a focused changes view this closes it and lands on the cursor's file.
+/// On a focused changes view this closes it and lands the pane on the cursor's
+/// file as a plain editor, also when the view opened from the per-file diff.
+/// The action turns the changes view off and does not go back a layer.
+/// [`close_diff_changes`], which `q` runs, is the close that returns to a
+/// covered diff.
+///
 /// Anywhere else it shows a changes view over the focused view. `DiffFiles`
 /// opens the per-file diff from a changes view.
 pub(super) fn toggle_diff_changes(stoat: &mut Stoat) -> UpdateEffect {
     if stoat.active_workspace().focused_diff_changes_id().is_some() {
-        return close_diff_changes(stoat);
+        return close_changes_view(stoat, false);
     }
     open_diff_changes(stoat)
 }
@@ -68,6 +73,14 @@ pub(super) fn toggle_diff_changes(stoat: &mut Stoat) -> UpdateEffect {
 /// puts back the view the changes view covered. A covered view that is gone
 /// closes the pane instead, and a last pane gets a fresh scratch editor.
 pub(crate) fn close_diff_changes(stoat: &mut Stoat) -> UpdateEffect {
+    close_changes_view(stoat, true)
+}
+
+/// Close the focused changes view as [`close_diff_changes`] does.
+///
+/// With `to_covered_diff` false, a changes view opened from a per-file diff
+/// lands the pane in a plain editor and does not return to the diff.
+fn close_changes_view(stoat: &mut Stoat, to_covered_diff: bool) -> UpdateEffect {
     if stoat.active_workspace().focused_diff_changes_id().is_none() {
         return UpdateEffect::None;
     }
@@ -79,7 +92,7 @@ pub(crate) fn close_diff_changes(stoat: &mut Stoat) -> UpdateEffect {
     let Some(state) = take_down(ws, focus) else {
         return UpdateEffect::None;
     };
-    let (covered, covered_diff) = (state.covered, state.covered_diff);
+    let (covered, covered_diff) = (state.covered, state.covered_diff && to_covered_diff);
     match landing {
         Some(landing) => {
             if put_back_covered(stoat, focus, covered, false) {
@@ -2678,6 +2691,47 @@ mod tests {
         assert_eq!(
             (h.stoat.current_view(), focused_path(&h)),
             (Some("diff"), Some(PathBuf::from("/repo/b.txt"))),
+        );
+    }
+
+    /// `DiffChanges` on a changes view opened from the per-file diff lands in
+    /// the plain file the cursor ended in, and does not return to the diff as
+    /// `q` does.
+    #[test]
+    fn diff_changes_on_a_changes_view_from_the_diff_lands_in_the_plain_file() {
+        let mut h = deep_files();
+        h.open_file(Path::new("/repo/a.txt"));
+        dispatch(&mut h.stoat, &stoat_action::DiffFiles { rev: None });
+        h.settle();
+        dispatch(&mut h.stoat, &stoat_action::DiffChanges);
+        h.settle();
+        h.type_keys("j j j j j");
+        dispatch(&mut h.stoat, &stoat_action::DiffChanges);
+        assert_eq!(
+            (h.stoat.current_view(), focused_path(&h)),
+            (Some("file"), Some(PathBuf::from("/repo/b.txt"))),
+        );
+    }
+
+    /// `DiffChanges` on an empty changes view opened from the per-file diff
+    /// puts back the covered editor as a plain file.
+    #[test]
+    fn diff_changes_on_an_empty_changes_view_from_the_diff_lands_in_the_plain_file() {
+        let mut h = TestHarness::with_size(100, 24);
+        h.stoat.active_workspace_mut().git_root = PathBuf::from("/repo");
+        h.fake_git().add_repo(PathBuf::from("/repo"));
+        h.cover_with_diff_changes(true);
+        h.settle();
+        dispatch(&mut h.stoat, &stoat_action::DiffChanges);
+        assert_eq!(
+            (
+                h.stoat.current_view(),
+                h.stoat
+                    .active_workspace()
+                    .focused_diff_changes_id()
+                    .is_none()
+            ),
+            (Some("file"), true),
         );
     }
 
