@@ -4,6 +4,7 @@ use crate::{
     commit_picker::{CommitColumn, CommitPicker, CommitPickerRole, COMMIT_COLUMNS},
     host::CommitInfo,
     render::{
+        chrome::{ISLAND_BOTTOM, ISLAND_GAP, ISLAND_SIDE, ISLAND_TOP},
         file_finder::file_finder_layout,
         paint::{blend, style_rgb},
         picker::{FilterHeader, FILTER_PROMPT},
@@ -221,17 +222,39 @@ pub(crate) fn render_commit_picker(
         &mut *scene,
     );
 
-    if let Some(preview_rect) = layout.preview {
-        // Spans the modal rather than the table, since the preview below it
-        // does too and the graph column is part of what it divides.
-        crate::render::chrome::hline(
-            buf,
-            inner.x,
-            layout.list.y + layout.list.height,
-            inner.width,
-            separator_style,
-            &mut *scene,
+    let plate = crate::render::chrome::plate_colors(theme, scene);
+    if let Some(plate) = plate {
+        let body = layout.body();
+        let table = Rect::new(
+            body.x,
+            layout.header.y,
+            body.width,
+            body.bottom() - layout.header.y,
         );
+        let table_bottom = match layout.preview {
+            Some(_) => ISLAND_GAP,
+            None => ISLAND_BOTTOM,
+        };
+        let table_edges = [ISLAND_TOP, ISLAND_SIDE, table_bottom, ISLAND_SIDE];
+        crate::render::chrome::modal_island(table, table_edges, plate, theme, buf, scene);
+        if let Some(preview) = layout.preview {
+            let preview_edges = [ISLAND_GAP, ISLAND_SIDE, ISLAND_BOTTOM, ISLAND_SIDE];
+            crate::render::chrome::modal_island(preview, preview_edges, plate, theme, buf, scene);
+        }
+    }
+    if let Some(preview_rect) = layout.preview {
+        if plate.is_none() {
+            // Spans the modal rather than the table, since the preview below it
+            // does too and the graph column is part of what it divides.
+            crate::render::chrome::hline(
+                buf,
+                inner.x,
+                layout.list.y + layout.list.height,
+                inner.width,
+                separator_style,
+                &mut *scene,
+            );
+        }
         render_preview(picker, preview_rect, theme, dials, buf, scene);
     }
 
@@ -249,14 +272,14 @@ pub(crate) fn render_commit_picker(
         &mut *scene,
     );
     if let Some(graph_rect) = layout.graph {
-        paint_commit_graph(
-            &picker_graph(picker, theme),
-            start_row,
-            graph_rect,
-            theme,
-            buf,
-            scene,
-        );
+        // The node halos and merge holes paint the background, which under the
+        // plate is the table's Island rather than the modal's surface.
+        let graph = picker_graph(picker, theme);
+        let graph = GraphPaint {
+            background: plate.map(|plate| plate.surface).or(graph.background),
+            ..graph
+        };
+        paint_commit_graph(&graph, start_row, graph_rect, theme, buf, scene);
     }
 }
 

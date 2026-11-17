@@ -66,15 +66,21 @@ pub(crate) fn render_location_picker(
         &mut *scene,
     );
 
+    let plate = crate::render::chrome::plate_colors(theme, scene);
+    if let Some(plate) = plate {
+        crate::render::chrome::list_islands(layout.list, layout.preview, plate, theme, buf, scene);
+    }
     if let Some(preview_rect) = layout.preview {
-        crate::render::chrome::vline(
-            buf,
-            layout.list.x + layout.list.width,
-            layout.list.y,
-            layout.list.height,
-            theme.get(crate::theme::scope::UI_BORDER_INACTIVE),
-            scene,
-        );
+        if plate.is_none() {
+            crate::render::chrome::vline(
+                buf,
+                layout.list.x + layout.list.width,
+                layout.list.y,
+                layout.list.height,
+                theme.get(crate::theme::scope::UI_BORDER_INACTIVE),
+                scene,
+            );
+        }
         picker.preview_rows = Some(preview_rect.height as usize);
         crate::render::picker::render_picker_preview(
             &picker.preview,

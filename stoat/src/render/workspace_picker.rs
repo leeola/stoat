@@ -1,5 +1,6 @@
 use crate::{
     render::{
+        chrome::{ISLAND_BOTTOM, ISLAND_SIDE, ISLAND_TOP},
         paint::style_rgb,
         picker::{FilterHeader, Footer, FILTER_PROMPT},
         text::{write_str, write_str_clipped},
@@ -131,6 +132,17 @@ pub(crate) fn render_workspace_picker(
         chrome,
         scene,
     );
+    if let Some(plate) = crate::render::chrome::plate_colors(theme, scene) {
+        let body_top = inner.y + 2;
+        let body = Rect::new(
+            inner.x,
+            body_top,
+            inner.width,
+            inner.bottom().saturating_sub(body_top),
+        );
+        let edges = [ISLAND_TOP, ISLAND_SIDE, ISLAND_BOTTOM, ISLAND_SIDE];
+        crate::render::chrome::modal_island(body, edges, plate, theme, buf, scene);
+    }
 
     const NAME_W: u16 = 24;
     const BUF_W: u16 = 5;

@@ -112,18 +112,33 @@ pub(crate) fn render_symbol_finder(
         &mut *scene,
     );
 
+    let plate = crate::render::chrome::plate_colors(theme, scene);
+    if let Some(plate) = plate {
+        crate::render::chrome::list_islands(list, preview, plate, theme, buf, scene);
+    }
     if let Some(preview_rect) = preview {
-        crate::render::chrome::vline(
-            buf,
-            list.x + list.width,
-            list.y,
-            list.height,
-            separator_style,
-            scene,
-        );
+        if plate.is_none() {
+            crate::render::chrome::vline(
+                buf,
+                list.x + list.width,
+                list.y,
+                list.height,
+                separator_style,
+                scene,
+            );
+        }
         finder.preview_rows = Some(preview_rect.height as usize);
+        // Under the plate the rule sits inside the preview's Island, on the
+        // editor surface, so it takes the color of a rule there.
+        let doc_rule = match plate {
+            Some(_) => theme
+                .try_get(scope::UI_DIVIDER)
+                .filter(|style| style.fg.is_some())
+                .unwrap_or(separator_style),
+            None => separator_style,
+        };
         let source_rect = match finder.styled_doc_lines(theme_epoch, theme, languages) {
-            Some(lines) => render_doc_pane(lines, preview_rect, separator_style, buf, scene),
+            Some(lines) => render_doc_pane(lines, preview_rect, doc_rule, buf, scene),
             None => preview_rect,
         };
         crate::render::picker::render_picker_preview(

@@ -77,12 +77,29 @@ const PLATE_EDGES: [Edge; 4] = [
     Edge::Outset(11),
 ];
 
+/// The top edge of a plate's Island, which reaches 4 px into the row above the
+/// Island's cells.
+pub(crate) const ISLAND_TOP: Edge = Edge::Margin(14);
+
+/// The side of a plate's Island at the plate's edge, which reaches 3 px into
+/// the column beside its cells and so stands 8 px in from the plate.
+pub(crate) const ISLAND_SIDE: Edge = Edge::Margin(6);
+
+/// The side of an Island that faces another across the separator column or row
+/// between their cells, which leaves 8 px between the two.
+pub(crate) const ISLAND_GAP: Edge = Edge::Gap(8);
+
+/// The bottom edge of a plate's Island, 4 px under its last row.
+pub(crate) const ISLAND_BOTTOM: Edge = Edge::Outset(4);
+
 /// The colors of a modal plate, as [`plate_colors`] resolves them for the
 /// theme.
 #[derive(Clone, Copy)]
 pub(crate) struct PlateColors {
     /// The window ground, which fills the plate.
     pub(crate) ground: [u8; 3],
+    /// The editor surface, which fills the plate's Islands.
+    pub(crate) surface: [u8; 3],
 }
 
 /// The small colored tag a finder row or a changes header shows in place of a
@@ -374,12 +391,12 @@ pub(crate) fn plate_colors(theme: &Theme, scene: &ApcScene) -> Option<PlateColor
         return None;
     }
     let ground = style_rgb(render::ground_surface(theme))?;
-    style_rgb(
+    let surface = style_rgb(
         theme
             .try_get(scope::UI_BACKGROUND)
             .and_then(|style| style.bg),
     )?;
-    Some(PlateColors { ground })
+    Some(PlateColors { ground, surface })
 }
 
 /// Draw a filter modal's box over `modal`, and return the rect its content lays
@@ -430,6 +447,67 @@ pub(crate) fn modal_plate(
     let shadow = theme.panel(PanelRole::Overlay).shadow;
     plate(Some(colors.ground), shadow, true).draw_components(inner, scene);
     inner
+}
+
+/// Draw one Island of a modal plate over `cells`, a panel in the editor surface
+/// with rounded corners whose sides stand at `edges`.
+///
+/// The cells clear to the editor surface first, so the Island's content must
+/// paint after this call. The panel's border is the plate's ground, so the
+/// corner arcs inside the cells show the ground. An empty rect draws nothing.
+pub(crate) fn modal_island(
+    cells: Rect,
+    edges: [Edge; 4],
+    plate: PlateColors,
+    theme: &Theme,
+    buf: &mut Buffer,
+    scene: &mut ApcScene,
+) {
+    if cells.is_empty() {
+        return;
+    }
+    render::clear_surface(cells, buf, theme);
+    Panel {
+        style: BorderStyle::None_,
+        border: plate.ground,
+        corner_radius: theme.panel(PanelRole::Island).corner_radius,
+        fill: Some(plate.surface),
+        shadow: PanelShadow::None_,
+        edges,
+        corners: 0,
+        fillets: 0,
+        fillet_radius: 2,
+        hatch: None,
+        above_pools: false,
+        backdrop: true,
+        anchor: None,
+    }
+    .draw_components(cells, scene);
+}
+
+/// Draw the Island of a plate's list, and the Island of the preview beside it
+/// when there is one.
+///
+/// The separator column between the two becomes the gap between their Islands.
+/// Without a preview, the list's Island stands in from the plate on both sides.
+pub(crate) fn list_islands(
+    list: Rect,
+    preview: Option<Rect>,
+    plate: PlateColors,
+    theme: &Theme,
+    buf: &mut Buffer,
+    scene: &mut ApcScene,
+) {
+    let list_right = match preview {
+        Some(_) => ISLAND_GAP,
+        None => ISLAND_SIDE,
+    };
+    let list_edges = [ISLAND_TOP, list_right, ISLAND_BOTTOM, ISLAND_SIDE];
+    modal_island(list, list_edges, plate, theme, buf, scene);
+    if let Some(preview) = preview {
+        let preview_edges = [ISLAND_TOP, ISLAND_SIDE, ISLAND_BOTTOM, ISLAND_GAP];
+        modal_island(preview, preview_edges, plate, theme, buf, scene);
+    }
 }
 
 /// Clear the glyphs of the cells the plate's edges cross, outside its inner
@@ -910,8 +988,9 @@ pub(crate) fn text(
 mod tests {
     use super::{
         hline, hline_edge, list_modal_width, modal_box, modal_frame, modal_frame_above_pools,
-        modal_frame_anchored, modal_plate, plate_colors, popout_frame, selected_row, tagged_name,
-        text, toggle_mark, type_tag, vline, TypeTag,
+        modal_frame_anchored, modal_island, modal_plate, plate_colors, popout_frame, selected_row,
+        tagged_name, text, toggle_mark, type_tag, vline, TypeTag, ISLAND_BOTTOM, ISLAND_GAP,
+        ISLAND_SIDE, ISLAND_TOP,
     };
     use crate::{
         render,
@@ -1235,20 +1314,8 @@ mod tests {
         modal_plate(&mut buf, modal, rgb_style(), &theme, &mut nudge_scene());
 
         let ground = Color::Rgb(0x0c, 0x0e, 0x11);
-        let rows: Vec<String> = (0..10)
-            .map(|y| {
-                (0..16)
-                    .map(|x| match (buf[(x, y)].symbol(), buf[(x, y)].bg) {
-                        ("x", bg) if bg == PANE => '.',
-                        (" ", bg) if bg == PANE => 'r',
-                        (" ", bg) if bg == ground => 'g',
-                        _ => '?',
-                    })
-                    .collect()
-            })
-            .collect();
         assert_eq!(
-            rows,
+            cell_rows(&buf, &[(PANE, 'r'), (ground, 'g')]),
             [
                 "................",
                 "................",
@@ -1261,6 +1328,98 @@ mod tests {
                 "................",
                 "................",
             ],
+        );
+    }
+
+    /// `buf` as rows of one character per cell, `.` for a cell that keeps the
+    /// pane's glyph and background, and the mark that `blanks` pairs with a
+    /// blank cell's background.
+    fn cell_rows(buf: &Buffer, blanks: &[(Color, char)]) -> Vec<String> {
+        (0..buf.area.height)
+            .map(|y| {
+                (0..buf.area.width)
+                    .map(|x| {
+                        let cell = &buf[(x, y)];
+                        match cell.symbol() {
+                            "x" if cell.bg == PANE => '.',
+                            " " => blanks
+                                .iter()
+                                .find(|&&(bg, _)| bg == cell.bg)
+                                .map_or('?', |&(_, mark)| mark),
+                            _ => '?',
+                        }
+                    })
+                    .collect()
+            })
+            .collect()
+    }
+
+    /// An Island clears its cells to the editor surface and declares one
+    /// backdrop panel over them, filled with the surface and bordered with the
+    /// ground at the island role's radius. An empty rect draws nothing.
+    #[test]
+    fn a_modal_island_fills_its_cells_with_the_editor_surface() {
+        let theme = plate_theme();
+        let plate = plate_colors(&theme, &nudge_scene()).expect("the plate look");
+        let mut buf = pane_buffer();
+        let mut scene = nudge_scene();
+        let edges = [ISLAND_TOP, ISLAND_GAP, ISLAND_BOTTOM, ISLAND_SIDE];
+        modal_island(
+            Rect::new(4, 3, 5, 2),
+            edges,
+            plate,
+            &theme,
+            &mut buf,
+            &mut scene,
+        );
+        modal_island(
+            Rect::new(1, 1, 0, 3),
+            edges,
+            plate,
+            &theme,
+            &mut buf,
+            &mut scene,
+        );
+
+        let panel = encode_panel(&PanelCommand {
+            top: 3,
+            left: 4,
+            width: 5,
+            height: 2,
+            style: BorderStyle::None_,
+            border: [0x0c, 0x0e, 0x11],
+            corner_radius: theme.panel(PanelRole::Island).corner_radius,
+            fill: Some([0x17, 0x19, 0x1e]),
+            shadow: PanelShadow::None_,
+            edges,
+            corners: 0,
+            fillets: 0,
+            fillet_radius: 2,
+            hatch: None,
+            above_pools: false,
+            backdrop: true,
+            anchor: None,
+        });
+        let surface = Color::Rgb(0x17, 0x19, 0x1e);
+        assert_eq!(
+            (cell_rows(&buf, &[(surface, 's')]), scene.bytes().to_vec()),
+            (
+                [
+                    "................",
+                    "................",
+                    "................",
+                    "....sssss.......",
+                    "....sssss.......",
+                    "................",
+                    "................",
+                    "................",
+                    "................",
+                    "................",
+                ]
+                .map(String::from)
+                .to_vec(),
+                panel,
+            ),
         );
     }
 

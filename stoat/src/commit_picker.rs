@@ -2023,6 +2023,45 @@ mod tests {
         );
     }
 
+    /// Under the plate look the graph stands on the table's Island, so its node
+    /// halos and merge holes paint the Island's surface, not the modal's.
+    #[test]
+    fn under_the_plate_the_graph_paints_the_island_surface() {
+        const SURFACE: [u8; 3] = [0x17, 0x19, 0x1e];
+
+        let mut h = seeded_picker_harness();
+        let mut picker = h.stoat.commit_picker.take().expect("open");
+        let theme = graph_theme_with(
+            r##"ui.surface.ground.bg = "#0c0e11"; ui.background.bg = "#17191e";"##,
+        );
+        let chrome = crate::render::editor::ResolvedChrome::resolve(&theme);
+        let dials = crate::render::commits::PreviewDials::from_stoat(&h.stoat);
+        let area = ratatui::layout::Rect::new(0, 0, 160, 40);
+        let mut buf = ratatui::buffer::Buffer::empty(area);
+        let mut scene = stoat_widgets::ApcScene::new();
+        scene.set_nudge_protocol(true);
+        crate::render::commit_picker::render_commit_picker(
+            &mut picker,
+            h.stoat.active_workspace_mut(),
+            &theme,
+            &chrome,
+            area,
+            0,
+            crate::render::picker::DEFAULT_LIST_PERCENT,
+            dials,
+            &mut buf,
+            &mut scene,
+        );
+
+        let mut grounds: Vec<[u8; 3]> = node_discs(&mut scene)
+            .into_iter()
+            .map(|(_, color)| color)
+            .filter(|&color| color == GRAPH_BG || color == SURFACE)
+            .collect();
+        grounds.dedup();
+        assert_eq!(grounds, [SURFACE]);
+    }
+
     /// HEAD's node fills in the text color, and every other node keeps its own.
     #[test]
     fn heads_node_fills_in_the_text_color() {

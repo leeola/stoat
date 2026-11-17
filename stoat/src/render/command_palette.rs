@@ -2,6 +2,7 @@ use crate::{
     command_palette::{CommandPalette, PaletteScope},
     input_view::InputView,
     render::{
+        chrome::{ISLAND_BOTTOM, ISLAND_GAP, ISLAND_SIDE, ISLAND_TOP},
         picker::{FilterHeader, DEFAULT_LIST_PERCENT},
         text::{wrap_text, write_str, write_str_clipped},
     },
@@ -250,15 +251,21 @@ fn render_palette_arg_picker(
     let Some(picker) = palette.arg_picker.as_mut() else {
         return;
     };
+    let plate = crate::render::chrome::plate_colors(theme, scene);
+    if let Some(plate) = plate {
+        crate::render::chrome::list_islands(list, preview, plate, theme, buf, scene);
+    }
     if let Some(preview_rect) = preview {
-        crate::render::chrome::vline(
-            buf,
-            list.x + list.width,
-            list.y,
-            list.height,
-            separator_style,
-            scene,
-        );
+        if plate.is_none() {
+            crate::render::chrome::vline(
+                buf,
+                list.x + list.width,
+                list.y,
+                list.height,
+                separator_style,
+                scene,
+            );
+        }
         crate::render::picker::render_picker_preview(
             &picker.active_core_ref().preview,
             preview_rect,
@@ -341,6 +348,11 @@ fn render_palette_free_arg(
     let body_bottom = inner.y + inner.height;
     if body_top >= body_bottom {
         return;
+    }
+    if let Some(plate) = crate::render::chrome::plate_colors(theme, scene) {
+        let body = Rect::new(inner.x, body_top, inner.width, body_bottom - body_top);
+        let edges = [ISLAND_TOP, ISLAND_SIDE, ISLAND_BOTTOM, ISLAND_SIDE];
+        crate::render::chrome::modal_island(body, edges, plate, theme, buf, scene);
     }
 
     let text_style = theme.get(crate::theme::scope::UI_TEXT);
@@ -480,6 +492,19 @@ fn render_palette_filter(
     let separator_style = theme.get(crate::theme::scope::UI_BORDER_INACTIVE);
 
     let list = layout.list;
+    let doc = layout.doc;
+    let plate = crate::render::chrome::plate_colors(theme, scene);
+    if let Some(plate) = plate {
+        let list_bottom = match doc.is_empty() {
+            true => ISLAND_BOTTOM,
+            false => ISLAND_GAP,
+        };
+        let list_edges = [ISLAND_TOP, ISLAND_SIDE, list_bottom, ISLAND_SIDE];
+        crate::render::chrome::modal_island(list, list_edges, plate, theme, buf, scene);
+        let doc_edges = [ISLAND_GAP, ISLAND_SIDE, ISLAND_BOTTOM, ISLAND_SIDE];
+        crate::render::chrome::modal_island(doc, doc_edges, plate, theme, buf, scene);
+    }
+
     let scroll = selected.saturating_sub(list.height.saturating_sub(1) as usize);
     paint_palette_rows(
         filtered,
@@ -494,17 +519,18 @@ fn render_palette_filter(
         &mut *scene,
     );
 
-    let doc = layout.doc;
     if doc.height > 0 {
-        let doc_separator_row = doc.y - 1;
-        crate::render::chrome::hline(
-            buf,
-            inner.x,
-            doc_separator_row,
-            inner.width,
-            separator_style,
-            scene,
-        );
+        if plate.is_none() {
+            let doc_separator_row = doc.y - 1;
+            crate::render::chrome::hline(
+                buf,
+                inner.x,
+                doc_separator_row,
+                inner.width,
+                separator_style,
+                scene,
+            );
+        }
         let lines = filtered
             .get(selected)
             .map(|e| doc_lines(e, inner.width.saturating_sub(1) as usize))
@@ -678,10 +704,15 @@ fn shown_name(entry: &RegistryEntry, offset: usize) -> &str {
 #[cfg(test)]
 mod tests {
     use super::{
-        doc_lines, paint_doc_lines, paint_palette_rows, palette_filter_layout, usage_line,
-        DOC_ROWS, LIST_ROWS,
+        doc_lines, paint_doc_lines, paint_palette_rows, palette_filter_layout,
+        render_command_palette, usage_line, DOC_ROWS, ISLAND_BOTTOM, ISLAND_GAP, ISLAND_SIDE,
+        ISLAND_TOP, LIST_ROWS,
     };
-    use crate::theme::Theme;
+    use crate::{
+        render::editor::ResolvedChrome,
+        test_fixture::{plate_islands, row_rules},
+        theme::Theme,
+    };
     use ratatui::{buffer::Buffer, layout::Rect, style::Style};
     use stoat_action::registry;
 
@@ -862,6 +893,53 @@ mod tests {
                     String::new(),
                 ][..],
                 true,
+            ),
+        );
+    }
+
+    /// Under the plate look the command list and the doc pane draw as Islands
+    /// stacked across the separator row, which draws no rule.
+    #[test]
+    fn under_the_plate_the_list_and_the_doc_pane_draw_as_islands() {
+        let mut h = crate::Stoat::test();
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::OpenCommandPalette);
+        let mut palette = h.stoat.command_palette.take().expect("the palette is open");
+        let theme = h.stoat.theme.clone();
+        let chrome = ResolvedChrome::resolve(&theme);
+        let area = Rect::new(0, 0, 200, 40);
+        let mut buf = Buffer::empty(area);
+        let mut scene = stoat_widgets::ApcScene::new();
+        scene.set_nudge_protocol(true);
+        render_command_palette(
+            &mut palette,
+            h.stoat.active_workspace_mut(),
+            None,
+            &theme,
+            &chrome,
+            area,
+            0,
+            &mut buf,
+            &mut scene,
+        );
+
+        let layout = layout(area, palette.list_rows_hint(), 0);
+        assert_eq!(
+            (
+                plate_islands(&theme, &scene),
+                row_rules(&scene, layout.doc.y - 1)
+            ),
+            (
+                vec![
+                    (
+                        layout.list,
+                        [ISLAND_TOP, ISLAND_SIDE, ISLAND_GAP, ISLAND_SIDE]
+                    ),
+                    (
+                        layout.doc,
+                        [ISLAND_GAP, ISLAND_SIDE, ISLAND_BOTTOM, ISLAND_SIDE]
+                    ),
+                ],
+                0,
             ),
         );
     }

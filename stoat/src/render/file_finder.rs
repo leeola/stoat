@@ -239,24 +239,34 @@ pub(crate) fn render_file_finder(
         &mut *scene,
     );
 
+    let plate = crate::render::chrome::plate_colors(theme, scene);
+    if let Some(plate) = plate {
+        let preview_pane = layout.preview.map(|preview| match layout.preview_header {
+            Some(header) => header.union(preview),
+            None => preview,
+        });
+        crate::render::chrome::list_islands(layout.list, preview_pane, plate, theme, buf, scene);
+    }
     if let Some(preview_rect) = layout.preview {
-        // The preview's editor paints only the cells it has content for, so
-        // the pane takes the editor surface first, as a pane does and as the
-        // pages that pool it blank to.
-        if scene.live() {
-            crate::render::clear_surface(preview_rect, buf, theme);
-            if let Some(header) = layout.preview_header {
-                crate::render::clear_surface(header, buf, theme);
+        if plate.is_none() {
+            // The preview's editor paints only the cells it has content for,
+            // so the pane takes the editor surface first, as a pane does and
+            // as the pages that pool it blank to.
+            if scene.live() {
+                crate::render::clear_surface(preview_rect, buf, theme);
+                if let Some(header) = layout.preview_header {
+                    crate::render::clear_surface(header, buf, theme);
+                }
             }
+            crate::render::chrome::vline(
+                buf,
+                layout.list.x + layout.list.width,
+                layout.list.y,
+                layout.list.height,
+                separator_style,
+                scene,
+            );
         }
-        crate::render::chrome::vline(
-            buf,
-            layout.list.x + layout.list.width,
-            layout.list.y,
-            layout.list.height,
-            separator_style,
-            scene,
-        );
         crate::render::picker::render_picker_preview(
             &finder.active_core_ref().preview,
             preview_rect,
@@ -404,7 +414,9 @@ fn row_prefix(finder: &FileFinder) -> &str {
 /// and the rule under them.
 ///
 /// The rule draws in `ui.divider`, the color of a rule on the editor surface,
-/// and in `ui.border.inactive` when the theme gives the divider no color.
+/// and in `ui.border.inactive` when the theme gives the divider no color. It
+/// runs through the header's second row, or along the bottom of its first row
+/// under the plate look, which keeps the second row blank above the source.
 ///
 /// Under a live scene the header sits on the editor surface, which the
 /// preview below it shares, and a plain terminal keeps the modal's fill under
@@ -475,7 +487,10 @@ fn paint_preview_header(
         .try_get(crate::theme::scope::UI_DIVIDER)
         .filter(|style| style.fg.is_some())
         .unwrap_or_else(|| theme.get(crate::theme::scope::UI_BORDER_INACTIVE));
-    crate::render::chrome::hline(buf, header.x, y + 1, header.width, rule, scene);
+    match crate::render::chrome::plate_colors(theme, scene) {
+        Some(_) => crate::render::chrome::hline_edge(buf, header.x, y, header.width, rule, scene),
+        None => crate::render::chrome::hline(buf, header.x, y + 1, header.width, rule, scene),
+    }
 }
 
 /// The first and last buffer lines, counted from 1, that `editor` showed in
@@ -494,9 +509,18 @@ fn shown_lines(editor: &mut EditorState) -> Option<(u32, u32)> {
 
 #[cfg(test)]
 mod tests {
-    use super::{file_finder_layout, file_finder_layout_with_chrome};
-    use crate::render::picker::DEFAULT_LIST_PERCENT;
-    use ratatui::layout::Rect;
+    use super::{file_finder_layout, file_finder_layout_with_chrome, render_file_finder};
+    use crate::{
+        render::{
+            chrome::{ISLAND_BOTTOM, ISLAND_GAP, ISLAND_SIDE, ISLAND_TOP},
+            editor::ResolvedChrome,
+            picker::DEFAULT_LIST_PERCENT,
+        },
+        test_fixture::{column_rules, plate_islands},
+    };
+    use ratatui::{buffer::Buffer, layout::Rect};
+    use std::path::PathBuf;
+    use stoat_widgets::ApcScene;
 
     /// Every caller of this layout must fit inside the same area, so the box a
     /// short list gets and the box a data-heavy modal gets are checked together.
@@ -581,6 +605,68 @@ mod tests {
             file_finder_layout(Rect::new(0, 0, 200, 13), (120, 32), 0, DEFAULT_LIST_PERCENT)
                 .is_none(),
             "so does a height under the 12-row minimum plus its thinnest margin"
+        );
+    }
+
+    /// Under the plate look the list and the preview with its path header draw
+    /// as Islands that face each other across the separator column, which
+    /// draws no rule.
+    #[test]
+    fn under_the_plate_the_list_and_the_preview_draw_as_islands() {
+        let mut h = crate::Stoat::test();
+        let root = PathBuf::from("/islands");
+        h.fake_fs()
+            .insert_files([(root.join("a.rs"), "fn a() {}".as_bytes())]);
+        h.stoat.active_workspace_mut().git_root = root;
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::OpenFileFinder);
+        h.settle();
+        let mut finder = h.stoat.file_finder.take().expect("the finder is open");
+        let theme = h.stoat.theme.clone();
+        let chrome = ResolvedChrome::resolve(&theme);
+        let area = Rect::new(0, 0, 200, 40);
+        let mut buf = Buffer::empty(area);
+        let mut scene = ApcScene::new();
+        scene.set_nudge_protocol(true);
+        render_file_finder(
+            &mut finder,
+            h.stoat.active_workspace_mut(),
+            None,
+            &theme,
+            &chrome,
+            area,
+            0,
+            DEFAULT_LIST_PERCENT,
+            &mut buf,
+            &mut scene,
+        );
+
+        let layout = file_finder_layout_with_chrome(
+            area,
+            finder.content_size,
+            0,
+            DEFAULT_LIST_PERCENT,
+            finder.shows_no_match(),
+        )
+        .expect("the finder fits");
+        let preview = layout.preview.expect("a preview beside the list");
+        let pane = layout
+            .preview_header
+            .map_or(preview, |header| header.union(preview));
+        assert_eq!(
+            (
+                plate_islands(&theme, &scene),
+                column_rules(&scene, layout.list.right())
+            ),
+            (
+                vec![
+                    (
+                        layout.list,
+                        [ISLAND_TOP, ISLAND_GAP, ISLAND_BOTTOM, ISLAND_SIDE]
+                    ),
+                    (pane, [ISLAND_TOP, ISLAND_SIDE, ISLAND_BOTTOM, ISLAND_GAP]),
+                ],
+                0,
+            ),
         );
     }
 }

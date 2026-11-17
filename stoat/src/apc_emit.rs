@@ -2596,13 +2596,15 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
             resident: false,
         };
         let detail_scroll = help.detail_scroll() as u32;
+        let surface = crate::render::chrome::plate_colors(theme, &stoat.apc_scene).is_some();
         // The detail body is the selected entry's, so a hash of its name is
         // the content version. It bumps on a selection move and on a filter
         // change that lands a different entry at the same index. The theme
-        // joins it, because it recolors the body.
+        // and the fill join it, because each recolors the body.
         let detail_version = {
             let mut hasher = DefaultHasher::new();
             stoat.theme_epoch.hash(&mut hasher);
+            surface.hash(&mut hasher);
             help.selected_entry()
                 .map(|entry| entry.def.name())
                 .hash(&mut hasher);
@@ -2620,6 +2622,7 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
                     help,
                     page,
                     theme,
+                    surface,
                     detail.width,
                     detail.height,
                 )

@@ -980,6 +980,24 @@ fn the_tab_bar_boxes_the_focused_layout_s_chip_inside_its_row() {
     }
 }
 
+/// The finder's list and preview Islands stand 8 px apart.
+///
+/// The list ends before cell 67, the separator column, and the preview starts
+/// at cell 68. Cell row 25 is blank in both panes, and on its middle pixel row
+/// the two Islands stand 8 px apart across the separator.
+#[test]
+fn the_finder_islands_stand_eight_pixels_apart() {
+    let mut home = support::scratch_home();
+    let shot = settled_frame(
+        home.path(),
+        "basic-diff",
+        "unstaged.txt",
+        "<Space>p<Settle>",
+    );
+
+    expect_islands_apart(&shot, &mut home, 67, 25, "finder_islands");
+}
+
 /// The finder plate casts the boards' modal shadow, `0 18px 40px
 /// rgba(0,0,0,0.6)`, which reaches past 60 px under the plate.
 ///
@@ -1027,8 +1045,9 @@ fn the_file_finder_box_casts_the_modal_shadow() {
 ///
 /// The base cell sits in the preview, under the six lines of the file it shows.
 ///
-/// The rule under the preview's path header runs through the middle pixel row
-/// of cell row 13 in the divider color, as a rule on the editor surface draws.
+/// The rule under the preview's path header runs along the last pixel row of
+/// cell row 12, the header's first row, in the divider color, as a rule on the
+/// editor surface draws. The pixel row above it reads the base surface.
 ///
 /// The preview numbers its lines in a column from cell 68. On the first row,
 /// cell row 14, the column's first four cells hold the number in the muted
@@ -1103,11 +1122,18 @@ fn the_file_finder_box_draws_as_the_ground_plate() {
         "finder_preview",
     );
 
-    let (x, y, width, height) = cell_rect(111, 13, 1, 1);
+    let (x, y, width, height) = cell_rect(111, 12, 1, 1);
     expect_region(
         &shot,
         &mut home,
-        (x, y + height / 2, width, 1),
+        (x, y + height - 2, width, 1),
+        BASE,
+        "preview_header_over_rule",
+    );
+    expect_region(
+        &shot,
+        &mut home,
+        (x, y + height - 1, width, 1),
         DIVIDER,
         "preview_header_rule",
     );
@@ -1312,11 +1338,11 @@ fn the_diff_view_keeps_its_box_docked_on_the_raised_surface() {
 /// rounded corners, and an accent edge runs inside the box's left side.
 ///
 /// The select cells form one run in one row. The box stands 6 px inside the
-/// list's sides, so the list's first cell holds 6 px of the plate's ground
-/// and the run starts at the second cell. On that first cell's middle pixel
-/// row, pixel columns 0 to 5 read the ground, 6 and 7 the 2 px accent edge,
-/// and 8 the select fill. On its first pixel row, column 6 reads the ground,
-/// which the 6 px arc leaves clear.
+/// list's sides, so the list's first cell holds 6 px of the list's Island,
+/// on the base surface, and the run starts at the second cell. On that first
+/// cell's middle pixel row, pixel columns 0 to 5 read the base, 6 and 7 the
+/// 2 px accent edge, and 8 the select fill. On its first pixel row, column 6
+/// reads the base, which the 6 px arc leaves clear.
 #[test]
 fn the_finder_marks_its_selected_row_with_a_rounded_fill_and_an_accent_edge() {
     let mut home = support::scratch_home();
@@ -1342,9 +1368,7 @@ fn the_finder_marks_its_selected_row_with_a_rounded_fill_and_an_accent_edge() {
     };
 
     let (x, y, _, height) = cell_rect(col - 1, row, 1, 1);
-    let middle = [
-        GROUND, GROUND, GROUND, GROUND, GROUND, GROUND, ACCENT, ACCENT, SELECT,
-    ];
+    let middle = [BASE, BASE, BASE, BASE, BASE, BASE, ACCENT, ACCENT, SELECT];
     for (offset, want) in (0..).zip(middle) {
         let what = format!("selected_row_middle_column_{offset}");
         expect_region(
@@ -1359,7 +1383,7 @@ fn the_finder_marks_its_selected_row_with_a_rounded_fill_and_an_accent_edge() {
         &shot,
         &mut home,
         (x + 6, y, 1, 1),
-        GROUND,
+        BASE,
         "selected_row_top_arc",
     );
 }
@@ -1522,27 +1546,26 @@ fn the_help_header_names_both_scopes() {
     );
 }
 
-/// The help modal's detail pane fills with the raised surface.
+/// The help modal's detail pane is an Island on the base surface, 8 px right of
+/// the list's Island.
 ///
-/// The pane spans most rows of the box's right side, so its raised cells reach
-/// many rows, where the footer alone raises only one.
+/// The list ends before cell 82, the separator column, and the detail starts at
+/// cell 83. Cell row 30 is blank in both panes, and on its middle pixel row the
+/// two Islands stand 8 px apart across the separator. A blank cell low in the
+/// detail reads the base surface.
 #[test]
-fn the_help_detail_draws_on_the_raised_surface() {
+fn the_help_detail_draws_on_the_editor_surface() {
     let mut home = support::scratch_home();
     let shot = settled_frame(home.path(), "basic-diff", "unstaged.txt", "?<Settle>");
 
-    let mut rows: Vec<u16> = cells_of(&shot, RAISED)
-        .into_iter()
-        .map(|(_, row)| row)
-        .collect();
-    rows.dedup();
-    if rows.len() < 10 {
-        let frame = keep_frame(&shot, &mut home, "help_detail");
-        panic!(
-            "the raised cells reach rows {rows:?}, too few for a detail pane; the frame is {}",
-            frame.display(),
-        );
-    }
+    expect_islands_apart(&shot, &mut home, 82, 30, "help_islands");
+    expect_region(
+        &shot,
+        &mut home,
+        cell_rect(110, 38, 1, 1),
+        BASE,
+        "help_detail",
+    );
 }
 
 /// A hover ends in a footer row on the raised surface, inside the overlay box.
@@ -2156,6 +2179,33 @@ fn expect_region(shot: &Snapshot, home: &mut TempDir, rect: PixelRect, want: [u8
         "{what}: most pixels of {rect:?} are {}, not {}; the frame is {}",
         hex(found),
         hex(want),
+        frame.display(),
+    );
+}
+
+/// Panics unless two Islands stand 8 px apart across the separator column
+/// `separator`, on the middle pixel row of cell row `row`.
+///
+/// The left Island reaches the separator's first pixel, the next 8 px read the
+/// ground, and the right Island starts at the next column's first pixel. Each
+/// of the ten pixels is read alone, so a gap one pixel off fails. A miss saves
+/// the frame as [`expect_region`] does.
+fn expect_islands_apart(shot: &Snapshot, home: &mut TempDir, separator: u16, row: u16, what: &str) {
+    let (x, y, _, height) = cell_rect(separator, row, 1, 1);
+    let y = y + height / 2;
+    let found: Vec<[u8; 3]> = (x..x + 10).map(|x| pixel(shot, x, y)).collect();
+    let mut want = vec![BASE];
+    want.extend([GROUND; 8]);
+    want.push(BASE);
+    if found == want {
+        return;
+    }
+
+    let frame = keep_frame(shot, home, what);
+    panic!(
+        "{what}: the pixels from ({x}, {y}) read {:?}, not the base, 8 px of the ground, and \
+         the base; the frame is {}",
+        found.iter().map(|&color| hex(color)).collect::<Vec<_>>(),
         frame.display(),
     );
 }

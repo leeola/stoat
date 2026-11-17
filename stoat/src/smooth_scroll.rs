@@ -1239,12 +1239,15 @@ pub(crate) fn render_help_list_page(
 /// line `page * region_height` into a fresh region-sized [`Buffer`], returning
 /// the page's self-contained VT byte stream.
 ///
-/// Mirrors [`render_help_list_page`] but paints the detail body; the page index
-/// alone selects the lines, and the detail is read-only here.
+/// Mirrors [`render_help_list_page`] but paints the detail body. The page index
+/// alone selects the lines, and the detail is read-only here. `surface` picks
+/// the editor surface over the raised fill, as [`paint_help_detail_rows`] reads
+/// it.
 pub(crate) fn render_help_detail_page(
     help: &Help,
     page: u64,
     theme: &crate::theme::Theme,
+    surface: bool,
     region_width: u16,
     region_height: u16,
 ) -> Vec<u8> {
@@ -1253,7 +1256,9 @@ pub(crate) fn render_help_detail_page(
         region_height,
         page,
         theme,
-        |buf, area, start_row, _| paint_help_detail_rows(help, area, start_row, theme, buf),
+        |buf, area, start_row, _| {
+            paint_help_detail_rows(help, area, start_row, theme, surface, buf)
+        },
     )
 }
 

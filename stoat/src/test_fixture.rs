@@ -20,6 +20,7 @@ use crate::{
     term_screen::TermScreen,
     term_session::TermSession,
     test_harness::TestHarness,
+    theme::Theme,
     walkthrough::{self, Location, Point, Walkthrough},
 };
 use crossterm::event::{Event, KeyModifiers, MouseEvent, MouseEventKind};
@@ -33,6 +34,7 @@ use ratatui::layout::Rect;
 use std::{path::PathBuf, sync::Arc};
 use stoat_action::OpenFile;
 use stoat_config::MinimapMode;
+use stoat_widgets::ApcScene;
 use stoatty_protocol::command::{self, LineSummary, MinimapRun};
 use tokio::sync::mpsc::UnboundedReceiver;
 
@@ -461,4 +463,47 @@ pub(crate) fn store_two_tours(h: &mut TestHarness) {
             serde_json::to_string(&tour).expect("serialize"),
         );
     }
+}
+
+/// The Islands of a modal plate that `scene` declares, as each one's cells and
+/// edges in declaration order.
+///
+/// An Island is a backdrop panel in the theme's editor surface, which sets it
+/// apart from the plate's own panels. Without the plate look there are none.
+pub(crate) fn plate_islands(theme: &Theme, scene: &ApcScene) -> Vec<(Rect, [command::Edge; 4])> {
+    let Some(plate) = crate::render::chrome::plate_colors(theme, scene) else {
+        return Vec::new();
+    };
+    scene
+        .panels()
+        .filter(|panel| panel.backdrop && panel.fill == Some(plate.surface))
+        .map(|panel| {
+            let cells = Rect::new(panel.left, panel.top, panel.width, panel.height);
+            (cells, panel.edges)
+        })
+        .collect()
+}
+
+/// The hairline bars that `scene` declares down the middle of column `x`, as a
+/// separator column's `chrome::vline` draws them.
+pub(crate) fn column_rules(scene: &ApcScene, x: u16) -> usize {
+    let middle = i16::try_from(x).expect("a column on screen") * 16 + 8;
+    command::decode_stream(scene.bytes())
+        .into_iter()
+        .filter(
+            |cmd| matches!(cmd, command::Command::Bar(bar) if bar.x == middle && bar.width == 1),
+        )
+        .count()
+}
+
+/// The hairline bars that `scene` declares across the middle of row `y`, as a
+/// separator row's `chrome::hline` draws them.
+pub(crate) fn row_rules(scene: &ApcScene, y: u16) -> usize {
+    let middle = i16::try_from(y).expect("a row on screen") * 16 + 8;
+    command::decode_stream(scene.bytes())
+        .into_iter()
+        .filter(
+            |cmd| matches!(cmd, command::Command::Bar(bar) if bar.y == middle && bar.height == 1),
+        )
+        .count()
 }

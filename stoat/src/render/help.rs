@@ -154,14 +154,25 @@ pub(crate) fn render_help(
     );
 
     let list_rect = layout.list;
-    crate::render::chrome::vline(
-        buf,
-        list_rect.x + list_rect.width,
-        list_rect.y,
-        list_rect.height,
-        theme.get(crate::theme::scope::UI_BORDER_INACTIVE),
-        scene,
-    );
+    let plate = crate::render::chrome::plate_colors(theme, scene);
+    match plate {
+        Some(plate) => crate::render::chrome::list_islands(
+            list_rect,
+            Some(layout.detail),
+            plate,
+            theme,
+            buf,
+            scene,
+        ),
+        None => crate::render::chrome::vline(
+            buf,
+            list_rect.x + list_rect.width,
+            list_rect.y,
+            list_rect.height,
+            theme.get(crate::theme::scope::UI_BORDER_INACTIVE),
+            scene,
+        ),
+    }
 
     let list_scroll =
         crate::render::picker::window_start(help.selected(), list_rect.height as usize);
@@ -171,6 +182,7 @@ pub(crate) fn render_help(
         layout.detail,
         help.detail_scroll() as usize,
         theme,
+        plate.is_some(),
         buf,
     );
 
@@ -330,7 +342,8 @@ impl DetailLine {
 }
 
 /// Paint the selected help entry's detail into `area` starting at line
-/// `start_row`, on the `ui.surface.raised` fill.
+/// `start_row`, on the `ui.surface.raised` fill, or on the editor surface when
+/// `surface` is set, as the detail's Island is under the plate look.
 ///
 /// The detail reads as the entry's name and palette command, its short and long
 /// descriptions, a `bindings` table, and its parameters. A table row is a
@@ -343,13 +356,19 @@ pub(crate) fn paint_help_detail_rows(
     area: Rect,
     start_row: usize,
     theme: &crate::theme::Theme,
+    surface: bool,
     buf: &mut Buffer,
 ) {
-    let raised = theme.get(crate::theme::scope::UI_SURFACE_RAISED);
-    for y in area.y..area.y + area.height {
-        for x in area.x..area.x + area.width {
-            buf[(x, y)].set_char(' ').set_style(raised);
-        }
+    match surface {
+        true => crate::render::clear_surface(area, buf, theme),
+        false => {
+            let raised = theme.get(crate::theme::scope::UI_SURFACE_RAISED);
+            for y in area.y..area.y + area.height {
+                for x in area.x..area.x + area.width {
+                    buf[(x, y)].set_char(' ').set_style(raised);
+                }
+            }
+        },
     }
 
     let Some(entry) = help.selected_entry() else {
@@ -548,7 +567,11 @@ fn context_summary(context: &SnapshotState) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::keymap::ResolvedArg;
+    use crate::{
+        keymap::ResolvedArg,
+        render::chrome::{ISLAND_BOTTOM, ISLAND_GAP, ISLAND_SIDE, ISLAND_TOP},
+        test_fixture::{column_rules, plate_islands},
+    };
     use stoat_config::Value;
 
     #[test]
@@ -645,6 +668,48 @@ mod tests {
         assert!(
             text.ends_with("normal \u{00B7} view file \u{00B7} pane editor "),
             "the footer reads {text:?}"
+        );
+    }
+
+    /// Under the plate look the list and the detail draw as Islands that face
+    /// each other across the separator column, which draws no rule.
+    #[test]
+    fn under_the_plate_the_list_and_the_detail_draw_as_islands() {
+        let mut h = crate::test_harness::TestHarness::with_size(200, 40);
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::OpenHelp);
+        let help = h.stoat.help.take().expect("help is open");
+        let theme = h.stoat.theme.clone();
+        let chrome = crate::render::editor::ResolvedChrome::resolve(&theme);
+        let area = Rect::new(0, 0, 200, 40);
+        let mut buf = Buffer::empty(area);
+        let mut scene = stoat_widgets::ApcScene::new();
+        scene.set_nudge_protocol(true);
+        render_help(
+            &help,
+            "insert",
+            h.stoat.active_workspace_mut(),
+            &theme,
+            &chrome,
+            area,
+            0,
+            &mut buf,
+            &mut scene,
+        );
+
+        let layout = help_layout(area, help_content_rows(&help), 0).expect("help fits");
+        let (list, detail) = (layout.list, layout.detail);
+        assert_eq!(
+            (
+                plate_islands(&theme, &scene),
+                column_rules(&scene, list.right())
+            ),
+            (
+                vec![
+                    (list, [ISLAND_TOP, ISLAND_GAP, ISLAND_BOTTOM, ISLAND_SIDE]),
+                    (detail, [ISLAND_TOP, ISLAND_SIDE, ISLAND_BOTTOM, ISLAND_GAP]),
+                ],
+                0,
+            ),
         );
     }
 }
