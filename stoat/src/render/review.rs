@@ -112,22 +112,13 @@ pub(crate) fn diff_soften_scale(level: i8) -> f32 {
 /// `diff.*` colors for, so nothing above it would say more.
 pub(crate) const DIFF_TINT_MAX: i8 = 2;
 
-/// Width of each side bar in the frame that marks a split diff's base half, in
-/// sixteenths of a cell.
+/// The sixteenths the base side's lanes stand in from its left edge, which
+/// draw the diff boards' `padding: 0 3px` on the base half.
 ///
-/// A cell is half as wide as it is tall, so 6 sixteenths across draw the
-/// boards' 3 px border in a 9 px cell.
-const BASE_FRAME_WIDTH: u16 = 6;
-
-/// The sixteenths a diff gutter leaves before its lanes, so the base side's
-/// hunk lane starts where the base frame's left bar ends, as the diff boards
-/// pad the base side by the frame's 3 px.
-///
-/// The frame's 6 sixteenths end at 3.375 px of a 9 px cell, and a lane from 5
-/// starts at 2.8125 px. Both round to pixel column 3, so the lane takes the
-/// boards' columns 3 to 5. A lead of 6 starts the lane at 3.375 px and widens
-/// it to four columns.
-const BASE_FRAME_LEAD: u16 = 5;
+/// A lane from 5 starts at 2.8125 px of a 9 px cell, which rounds to pixel
+/// column 3, so the lane takes the boards' columns 3 to 5. A lead of 6 starts
+/// the lane at 3.375 px and widens it to four columns.
+const BASE_SIDE_LEAD: u16 = 5;
 
 /// The gap between the diff view's two gutter lanes, in sixteenths, wider
 /// than the plain editor's because the diff boards draw the lanes 2 px apart.
@@ -136,19 +127,6 @@ const BASE_FRAME_LEAD: u16 = 5;
 /// to pixel column 5, and ends at 15/16, 8.44 px, which rounds to 8. The lanes
 /// take pixel columns 0 to 2 and 5 to 7.
 const DIFF_GUTTER_LANE_GAP: u16 = 3;
-
-/// Height of the top bar in the frame that marks a split diff's base half, in
-/// sixteenths of a cell, which draw the boards' 3 px border in an 18 px row.
-const BASE_FRAME_TOP_HEIGHT: u16 = 3;
-
-/// Sixteenths between the frame's right side and the divider's hairline.
-///
-/// The hairline sits half a pixel into the 9 px divider cell, and the bar
-/// shader rounds each edge half to even. A side flush with the hairline draws
-/// 4 px at an odd divider column and 3 px at an even one. One sixteenth short,
-/// it draws the boards' 3 px at both and leaves a pixel before the hairline at
-/// an odd column, where the boards leave about half a pixel.
-const BASE_FRAME_RULE_GAP: u16 = 1;
 
 /// Where the mid divider's hairline sits in the divider column, which is the
 /// column's middle, in sixteenths of a cell from its left edge.
@@ -837,9 +815,9 @@ pub(crate) struct RichGutterOffsets {
     bar_width: u16,
     /// The separator hairline's left edge.
     separator_x: u16,
-    /// The sixteenths the base side's bars sit right of [`Self::bars`], past
-    /// the left bar of the frame around the base column.
-    frame_lead: u16,
+    /// The sixteenths the base side's bars sit right of [`Self::bars`], the
+    /// width of the base half's pad.
+    base_lead: u16,
 }
 
 impl DiffLayout {
@@ -861,7 +839,7 @@ impl DiffLayout {
                 bars: [0, 1].map(|slot| gutter.bar_x(slot) - gutter.lead),
                 bar_width: gutter.left_bar_width,
                 separator_x: gutter.separator_x(),
-                frame_lead: gutter.lead,
+                base_lead: gutter.lead,
             };
             (gutter.cell_width(), offsets)
         });
@@ -894,15 +872,16 @@ impl DiffLayout {
 
 /// The sub-cell gutter a diff side lays out for `digits`-wide numbers at
 /// `number_scale`, the plain editor's [`editor::rich_gutter`] with its lanes
-/// [`DIFF_GUTTER_LANE_GAP`] apart and [`BASE_FRAME_LEAD`] in from its left
+/// [`DIFF_GUTTER_LANE_GAP`] apart and [`BASE_SIDE_LEAD`] in from its left
 /// edge.
 ///
 /// Both sides reserve the lead, so their text columns match. Only the base
-/// side draws its lanes past it, beside the frame's left bar.
+/// side draws its lanes past it, so the lead pads the base half. No frame
+/// marks the half.
 fn diff_gutter(digits: u16, number_scale: u16) -> Gutter<'static> {
     Gutter {
         pad: DIFF_GUTTER_LANE_GAP,
-        lead: BASE_FRAME_LEAD,
+        lead: BASE_SIDE_LEAD,
         ..editor::rich_gutter(&[], digits, ([0; 3], [0; 3], [0; 3]), number_scale)
     }
 }
@@ -998,84 +977,6 @@ impl DiffColumns {
 /// [`DIFF_TWO_COLUMN_MIN`], where both sides share one column.
 pub(crate) fn diff_divider_x(inner: Rect) -> Option<u16> {
     (inner.width >= DIFF_TWO_COLUMN_MIN).then(|| divider_x(inner))
-}
-
-/// The edges of the base half's frame that one paint emits.
-///
-/// The sides go out ahead of the rows and the top after them, so a pane emits
-/// the two in separate paints.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum FrameEdges {
-    /// The two sides, for a pane ahead of its rows and for a pool page. A page
-    /// scrolls, and the top edge stays with the pane.
-    Sides,
-    /// The top, for a pane after its rows. It occludes, so it holds its place
-    /// over the pane's pool composite, and only the pane draws it.
-    Top,
-}
-
-/// Emit the frame that marks the base half of the split diff over `inner`, in
-/// `color`.
-///
-/// A bar runs down the half's left edge, where the status row's base half
-/// starts below, and one down its right edge, which ends a sixteenth short of
-/// the divider's hairline (see [`BASE_FRAME_RULE_GAP`]). Each is the height of
-/// `inner`. A third bar runs from the left bar's outer edge to the right bar's
-/// along the top of `inner`'s first row. `edges` picks which of them emit.
-///
-/// The right bar sits in the divider column rather than the half's last cell,
-/// so it covers no base text.
-///
-/// Emit the sides ahead of the gutter, so the gutter's hunk lane, which shares
-/// the left bar's place, draws over it. Emit the top after the rows: it hides
-/// the first row's gutter runs and rules beneath it, as the boards draw the
-/// frame over the rows. A unified layout has no base half, so it emits nothing.
-///
-/// See also:
-/// - [`PageGutter::framed`](crate::smooth_scroll::PageGutter::framed), which carries the side bars
-///   onto a gliding pane's pages.
-pub(crate) fn emit_base_frame(
-    inner: Rect,
-    color: [u8; 3],
-    edges: FrameEdges,
-    scene: &mut ApcScene,
-) {
-    let Some(divider) = diff_divider_x(inner) else {
-        return;
-    };
-
-    let right = (divider - inner.x) * 16 + DIVIDER_RULE_X - BASE_FRAME_RULE_GAP;
-    if edges == FrameEdges::Top {
-        Bar {
-            x: 0,
-            y: 0,
-            width: right,
-            height: BASE_FRAME_TOP_HEIGHT,
-            color,
-            radius: 0,
-            corners: 0,
-        }
-        .render_occluding(inner, scene);
-        return;
-    }
-
-    let (width, height) = (BASE_FRAME_WIDTH, inner.height * 16);
-    let mut bars = BarBatch::default();
-    for x in [0, right - width] {
-        bars.push(
-            inner,
-            Bar {
-                x: x as i16,
-                y: 0,
-                width,
-                height,
-                color,
-                radius: 0,
-                corners: 0,
-            },
-        );
-    }
-    bars.flush(scene);
 }
 
 /// The column that splits `inner` into two sides, the left one the narrower
@@ -1200,7 +1101,7 @@ pub(crate) fn paint_diff_rows(
     if sep_x.is_some()
         && let Some(rg) = rich.as_mut()
     {
-        rg.base_lead = rg.offsets.frame_lead;
+        rg.base_lead = rg.offsets.base_lead;
     }
 
     let dim_style = theme.get(s::DIFF_CONTEXT);
@@ -3581,8 +3482,8 @@ struct DiffRichGutter<'a> {
     /// out for.
     number_scale: u16,
     /// The sixteenths the base side's bars sit right of the offsets' bars:
-    /// the offsets' frame lead where a split layout frames the base column,
-    /// and 0 in a unified layout, which has no frame.
+    /// the offsets' base lead where a split layout pads the base half, and 0
+    /// in a unified layout, which has no base half.
     base_lead: u16,
     /// The numbers and bars the paint gathers row by row, flushed into
     /// [`Self::scene`] after the last row so each style goes out as one batch.
@@ -3753,7 +3654,7 @@ fn draw_diff_num(
 ///
 /// The bars sit at the rich offsets from `side_x`, the side's first cell, and
 /// on the `base` side [`DiffRichGutter::base_lead`] further right, past the
-/// frame's left bar. The git bar takes the change color and the state bar the
+/// base half's pad. The git bar takes the change color and the state bar the
 /// color of `state`. With `seam` set, the git bar is the short top-aligned bar
 /// the rich gutter draws for a deletion.
 ///
@@ -4014,8 +3915,8 @@ mod tests {
         );
 
         // The shipped small type scale, which the rich gutter's numbers draw at.
-        // Two digits at it take six cells with the frame's lead and both lanes,
-        // as the cell gutter does.
+        // Two digits at it take six cells with the base side's lead and both
+        // lanes, as the cell gutter does.
         let small = 208;
         assert_eq!(
             DiffColumns::compute(wide, DiffLayout::diff_view(2, Some(small))),
@@ -4029,7 +3930,7 @@ mod tests {
                     bars: [0, 9],
                     bar_width: 6,
                     separator_x: 91,
-                    frame_lead: 5,
+                    base_lead: 5,
                 }),
                 ..cell
             },
@@ -6109,7 +6010,7 @@ mod tests {
         let bytes = scene.buffer();
         let bars = |row: u16, scope: &str| {
             let color = style_rgb(rgb_diff_theme().get(scope).fg).expect("an rgb color");
-            [(columns.left_x, offsets.frame_lead), (columns.right_x, 0)].map(|(x, lead)| {
+            [(columns.left_x, offsets.base_lead), (columns.right_x, 0)].map(|(x, lead)| {
                 let frame = encode_bar(&BarCommand {
                     x: (x * 16 + lead + offsets.bars[1]) as i16,
                     y: (row * 16) as i16,
@@ -6263,7 +6164,7 @@ mod tests {
         ));
         let offsets = columns.rich.expect("a rich layout");
         let git_bar = BarCommand {
-            x: (columns.left_x * 16 + offsets.frame_lead + offsets.bars[0]) as i16,
+            x: (columns.left_x * 16 + offsets.base_lead + offsets.bars[0]) as i16,
             y: 16,
             width: offsets.bar_width,
             height: 6,
@@ -6379,45 +6280,6 @@ mod tests {
         );
     }
 
-    /// The frame bars the base half's two sides, 3 px wide and the full height
-    /// of the body, and its top, 3 px tall along the first row's top edge, which
-    /// occludes. A paint emits the edges it names. A unified diff has no base
-    /// half to frame.
-    #[test]
-    fn the_base_frame_bars_the_base_half_s_sides_and_top() {
-        let bars = |inner: Rect, edges: FrameEdges| {
-            let mut scene = ApcScene::new();
-            emit_base_frame(inner, [1, 2, 3], edges, &mut scene);
-            decode_stream(scene.buffer())
-                .into_iter()
-                .map(|command| match command {
-                    Command::Bar(bar) => {
-                        (bar.x, bar.y, bar.width, bar.height, bar.color, bar.occludes)
-                    },
-                    other => panic!("the frame draws only bars, got {other:?}"),
-                })
-                .collect::<Vec<_>>()
-        };
-
-        // The divider of a 120-wide body at column 2 sits at column 61, and its
-        // hairline sits 952 sixteenths from the body's left edge. The frame
-        // stops a sixteenth short of it.
-        let wide = Rect::new(2, 1, 120, 10);
-        let left = (32, 16, 6, 160, [1, 2, 3], false);
-        let right = (32 + 951 - 6, 16, 6, 160, [1, 2, 3], false);
-        let top = (32, 16, 951, 3, [1, 2, 3], true);
-        let narrow = Rect::new(2, 1, 80, 10);
-        assert_eq!(
-            [
-                bars(wide, FrameEdges::Sides),
-                bars(wide, FrameEdges::Top),
-                bars(narrow, FrameEdges::Sides),
-                bars(narrow, FrameEdges::Top),
-            ],
-            [vec![left, right], vec![top], vec![], vec![]],
-        );
-    }
-
     #[test]
     fn diff_view_rich_gutter_emits_bars_and_suppresses_ascii() {
         fn contains(haystack: &[u8], needle: &[u8]) -> bool {
@@ -6491,7 +6353,7 @@ mod tests {
         // columns. Every row is searched rather than pinning the block layout.
         let staged = [[0, 255, 255], [255, 0, 255]];
         let staged_bar = (0..rows).any(|row| {
-            [(cols.left_x, offsets.frame_lead), (cols.right_x, 0)]
+            [(cols.left_x, offsets.base_lead), (cols.right_x, 0)]
                 .iter()
                 .any(|&(side, lead)| {
                     let x = side * 16 + lead + offsets.bars[1];
@@ -7403,8 +7265,7 @@ mod tests {
 
     /// A diff view's minimap strip narrows the diff body, so the body's
     /// divider sits at column 56 of 121, left of the content's middle. The
-    /// status halves meet there, and the frame's right side ends a sixteenth
-    /// short of its hairline.
+    /// status halves meet there, under the divider's hairline.
     #[test]
     fn the_status_halves_meet_at_the_divider_beside_the_strip() {
         use ratatui::style::Color;
@@ -7416,11 +7277,11 @@ mod tests {
         let strip = crate::action_handlers::focused_editor_mut(&mut h.stoat)
             .expect("editor")
             .minimap_rect;
-        let frame_sides: Vec<i16> = content_bars(&mut h)
+        let divider = (56 * 16 + DIVIDER_RULE_X) as i16;
+        let hairlines = content_bars(&mut h)
             .into_iter()
-            .filter(|bar| bar.4 == [0x2a, 0x1d, 0x20] && bar.1 == 0 && !bar.5)
-            .map(|bar| bar.0)
-            .collect();
+            .filter(|bar| bar.0 == divider && bar.2 == 1)
+            .count();
 
         let buf = h.rendered_buffer();
         let y = buf.area.height - 1;
@@ -7429,9 +7290,9 @@ mod tests {
             (
                 strip.map(|strip| strip.width),
                 [55, 56, 57].map(|x| buf[(x, y)].bg),
-                frame_sides,
+                hairlines,
             ),
-            (Some(7), [rgb(0x0c0e11); 3], vec![0, 56 * 16 + 7 - 6],),
+            (Some(7), [rgb(0x0c0e11); 3], 1),
         );
     }
 
@@ -7474,45 +7335,6 @@ mod tests {
             !h.rendered_text().contains("working tree"),
             "{}",
             h.rendered_text()
-        );
-    }
-
-    /// A split diff pane paints its base frame's sides ahead of the rest of its
-    /// content and the occluding top after it, in the base tint. A unified diff
-    /// and a plain pane paint none.
-    #[test]
-    fn a_split_diff_pane_frames_its_content_sides_first_and_top_last() {
-        let tint = [0x2a, 0x1d, 0x20];
-        let tinted = |bars: Vec<(i16, i16, u16, u16, [u8; 3], bool)>| {
-            bars.into_iter().filter(|bar| bar.4 == tint).count()
-        };
-
-        let mut split = diff_harness("a\nb\nc\nold\n", "a\nb\nc\nnew\n");
-        let bars = content_bars(&mut split);
-        let mut unified = diff_harness_sized(80, "a\nb\nc\nold\n", "a\nb\nc\nnew\n");
-        let mut plain = diff_harness("a\nb\nc\nold\n", "a\nb\nc\nnew\n");
-        crate::action_handlers::focused_editor_mut(&mut plain.stoat)
-            .expect("editor")
-            .set_diff_view(false);
-
-        // The body spans the 120 columns and 9 rows above the status row, and
-        // the divider's hairline sits 952 sixteenths in. The frame stops a
-        // sixteenth short of it.
-        assert_eq!(
-            (
-                bars[..2].to_vec(),
-                bars.last().copied(),
-                tinted(bars),
-                tinted(content_bars(&mut unified)),
-                tinted(content_bars(&mut plain)),
-            ),
-            (
-                vec![(0, 0, 6, 144, tint, false), (945, 0, 6, 144, tint, false)],
-                Some((0, 0, 951, 3, tint, true)),
-                3,
-                0,
-                0,
-            ),
         );
     }
 

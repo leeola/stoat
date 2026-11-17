@@ -5188,12 +5188,10 @@ fn content_lane_bytes(h: &crate::test_harness::TestHarness, pool: u32) -> Vec<u8
     h.stoat.apc_scene.lane_bytes(lane).to_vec()
 }
 
-/// A step that scrolls a held stack leaves the stack's runs and bars, and the
-/// sides of the frame around its base column, out of the pane's content lane.
-/// The frame's top edge and the minimap strip's declaration stay, and the
-/// pinned header's cover joins them. The pool's pages carry the runs and the
-/// sides, and its composite covers the live grid. The top edge occludes, so it
-/// holds over the composite.
+/// A step that scrolls a held stack leaves the stack's runs and bars out of
+/// the pane's content lane. The minimap strip's declaration stays, and the
+/// pinned header's cover joins it. The pool's pages carry the runs, and its
+/// composite covers the live grid.
 #[test]
 fn a_scrolling_step_over_a_held_stack_keeps_its_runs_out_of_its_lane() {
     use stoatty_protocol::command::{Command, PanelShadow};
@@ -5201,17 +5199,14 @@ fn a_scrolling_step_over_a_held_stack_keeps_its_runs_out_of_its_lane() {
     let base: String = (1..=30).map(|i| format!("{i}\n")).collect();
     let text: String = (1..=30).map(|i| format!("L{i}\n")).collect();
     let (mut h, mut rx, pool) = gutter_stack(&[("a.txt", &base, &text)], MinimapMode::PerPane);
-    let tint = crate::render::pane::diff_base_tint(&h.stoat.theme).expect("an RGB tint");
-    let top_edge = |command: &Command| matches!(command, Command::Bar(bar) if bar.color == tint && bar.occludes);
     let (runs, rest): (Vec<Command>, Vec<Command>) =
         command::decode_stream(&content_lane_bytes(&h, pool))
             .into_iter()
             .partition(|command| {
-                !top_edge(command)
-                    && matches!(
-                        command,
-                        Command::TextRun(_) | Command::TextRunEnd | Command::Bar(_)
-                    )
+                matches!(
+                    command,
+                    Command::TextRun(_) | Command::TextRunEnd | Command::Bar(_)
+                )
             });
     emit_raw(&mut h, &mut rx);
 
@@ -5223,7 +5218,6 @@ fn a_scrolling_step_over_a_held_stack_keeps_its_runs_out_of_its_lane() {
         let state = h.stoat.active_workspace().focused_diff_changes();
         (state.expect("the changes view").scroll > 0).then_some(lane)
     });
-    let top_edges = rest.iter().filter(|command| top_edge(command)).count();
     // The scrolled stack pins its file's header, whose cover leaves the
     // stack's first row to the live grid and casts a shadow under it. This
     // theme sets no RGB border color, so the header draws no hairlines.
@@ -5243,8 +5237,8 @@ fn a_scrolling_step_over_a_held_stack_keeps_its_runs_out_of_its_lane() {
         command::decode_stream(scene.bytes())
     };
     assert_eq!(
-        (runs.is_empty(), top_edges, scrolled),
-        (false, 1, Some([cover, rest].concat()))
+        (runs.is_empty(), scrolled),
+        (false, Some([cover, rest].concat()))
     );
 }
 
@@ -5252,34 +5246,22 @@ fn a_scrolling_step_over_a_held_stack_keeps_its_runs_out_of_its_lane() {
 /// nothing else about the pane moved since a capture painted under the
 /// composite.
 ///
-/// While the terminal holds the stack, the lane keeps only the top edge of the
-/// frame around the base column, which occludes, so it holds over the pool's
-/// composite.
+/// While the terminal holds the stack, the pool's pages carry all that the
+/// stack draws, so the lane keeps nothing.
 #[test]
 fn a_stack_the_terminal_lets_go_paints_its_runs_again() {
-    use stoatty_protocol::command::Command;
-
     let (mut h, mut rx, pool) = gutter_stack(TWO_FILES, MinimapMode::Off);
     let first = content_lane_bytes(&h, pool);
     emit_raw(&mut h, &mut rx);
     h.stoat.render();
     h.stoat.render();
-    let held = command::decode_stream(&content_lane_bytes(&h, pool));
+    let held = content_lane_bytes(&h, pool);
 
-    let top_edge: Vec<Command> = command::decode_stream(&first)
-        .into_iter()
-        .filter(|command| matches!(command, Command::Bar(bar) if bar.occludes))
-        .collect();
     crate::ssh::retire_terminal_state(&mut h.stoat);
     h.stoat.render();
     assert_eq!(
-        (
-            first.is_empty(),
-            top_edge.len(),
-            held,
-            content_lane_bytes(&h, pool)
-        ),
-        (false, 1, top_edge.clone(), first)
+        (first.is_empty(), held, content_lane_bytes(&h, pool)),
+        (false, Vec::new(), first)
     );
 }
 
@@ -7305,79 +7287,6 @@ fn pool_reenters_after(change: impl FnOnce(&mut Stoat)) {
     assert!(
         !drain_fills(&mut rx).is_empty(),
         "the change recolors the page, so the pool re-enters it"
-    );
-}
-
-/// A split diff pane's pooled pages carry the two sides of the base frame, so
-/// the frame holds while a glide covers the live grid with the pool.
-#[test]
-fn a_split_diff_pane_s_pages_carry_the_base_frame() {
-    use stoatty_protocol::command::Command;
-
-    let mut h = Stoat::test();
-    h.resize(140, 12);
-    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
-    h.stoat.set_apc_tx(tx);
-
-    let root = PathBuf::from("/framed-pool");
-    let path = root.join("a.txt");
-    h.fake_fs().insert_file(&path, b"alpha\nbravo\ncharlie\n");
-    h.stoat.active_workspace_mut().git_root = root;
-    action_handlers::dispatch(&mut h.stoat, &OpenFile { path });
-    h.settle();
-    let size = h.stoat.size();
-    h.stoat.active_workspace_mut().layout(size);
-    action_handlers::focused_editor_mut(&mut h.stoat)
-        .expect("focused editor")
-        .set_diff_view(true);
-
-    emit_smooth_scroll(&mut h.stoat);
-    let mut raw = Vec::new();
-    while let Ok(batch) = rx.try_recv() {
-        raw.extend(batch);
-    }
-    let commands = command::decode_stream(&raw);
-
-    let pool = {
-        let ws = h.stoat.active_workspace();
-        ws.panes.pane(ws.panes.focus()).index
-    };
-    let region = commands
-        .iter()
-        .find_map(|c| match c {
-            Command::PoolRegion(region) if region.pool == pool => Some(*region),
-            _ => None,
-        })
-        .expect("the diff pane declares its pool");
-    let pages = commands
-        .iter()
-        .filter(|c| matches!(c, Command::Fill(_) | Command::FillDecorations(_)))
-        .count();
-
-    let tint = crate::render::pane::diff_base_tint(&h.stoat.theme).expect("an RGB tint");
-    let frame: Vec<_> = commands
-        .into_iter()
-        .flat_map(|c| match c {
-            Command::Bar(bar) => vec![(bar.x, bar.y, bar.width, bar.height, bar.color)],
-            Command::Bars(group) => group
-                .bars
-                .into_iter()
-                .map(|(x, y, width, height)| (x, y, width, height, group.color))
-                .collect(),
-            _ => Vec::new(),
-        })
-        .filter(|bar| bar.4 == tint)
-        .collect();
-
-    let divider = crate::render::review::diff_divider_x(Rect::new(0, 0, region.width, 1))
-        .expect("the region splits in two");
-    let side = |x: u16| (x as i16, 0, 6, region.height * 16, tint);
-    // The hairline sits 8 sixteenths into the divider column, and the right
-    // side stops a sixteenth short of it.
-    assert_eq!(
-        (pages > 0, frame),
-        (true, [side(0), side(divider * 16 + 7 - 6)].repeat(pages)),
-        "each page carries both sides",
     );
 }
 

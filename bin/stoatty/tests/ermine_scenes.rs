@@ -59,7 +59,6 @@ const DISABLED: [u8; 3] = [0x5b, 0x61, 0x6d];
 const TINT_ACCENT: [u8; 3] = [0x22, 0x30, 0x49];
 const DANGER: [u8; 3] = [0xf2, 0x77, 0x7f];
 const SUCCESS: [u8; 3] = [0x8f, 0xd1, 0x8a];
-const SIDE_BASE: [u8; 3] = [0x2a, 0x1d, 0x20];
 const WASH: [u8; 3] = [0x2a, 0x3c, 0x5a];
 const TAB_WASH: [u8; 3] = [0x24, 0x35, 0x52];
 const CURSOR_SECONDARY: [u8; 3] = [0x8a, 0x90, 0x9c];
@@ -181,10 +180,9 @@ fn the_gutter_draws_the_hunk_and_state_lanes_left_of_the_number() {
 /// pixel columns the color fills over the row's whole height, which a glyph
 /// never does.
 ///
-/// The base side's removed lane sits beside the frame's left bar, as the
-/// boards pad the base side by the frame's 3 px. It fills pixel columns 3 to 5
-/// of the pane's first cell, column 1, and the frame's sides stay whole on the
-/// row.
+/// The base side's removed lane stands 3 px in from the base half's left edge,
+/// as the boards pad the base half by 3 px. It fills pixel columns 3 to 5 of
+/// the pane's first cell, column 1.
 ///
 /// The cursor opens on the row's first column, so the ghost outlines the base
 /// text's first cell, column 7. Its dashed outline rounds its corners at 4 px
@@ -223,12 +221,11 @@ fn a_modified_row_reads_removed_on_the_base_side_and_added_on_the_live_side() {
     if removed != lane {
         let frame = keep_frame(&shot, &mut home, "diff_removed_lane");
         panic!(
-            "the removed lane fills pixel columns {removed:?}, not {lane:?} beside the frame's \
-             left bar; the frame is {}",
+            "the removed lane fills pixel columns {removed:?}, not {lane:?} past the base \
+             half's pad; the frame is {}",
             frame.display(),
         );
     }
-    expect_base_frame_sides(&shot, &mut home, 5, "diff_frame_beside_lane");
 
     let row_dims = |col: u16, dy: u32| {
         let (x, _, width, _) = cell_rect(col, 5, 1, 1);
@@ -357,14 +354,15 @@ fn the_split_diff_s_status_halves_sit_on_the_ground() {
     }
 }
 
-/// A frame in the base tint runs down both sides of the split diff's base
-/// column and along its top, inside the pane's first row.
+/// The split diff draws no frame on its base half, as the DiffSplit board pads
+/// the half by 3 px and draws no border around it.
 ///
-/// Row 4, `3 three`, is context with no hunk mark, so its only base-tint
-/// pixels are the frame's two sides. The top bar fills the top three pixel
-/// rows of row 2, under the tab bar's band.
+/// Row 4, `3 three`, is context with no hunk mark. The pane's first cell,
+/// column 1, reads the editor surface on its first three pixel columns. The
+/// divider cell, column 75, holds the hairline on one pixel column and the
+/// surface on the others.
 #[test]
-fn the_split_diff_frames_its_base_column() {
+fn the_split_diff_draws_no_frame_on_its_base_half() {
     let mut home = support::scratch_home();
     let shot = settled_frame(
         home.path(),
@@ -372,16 +370,32 @@ fn the_split_diff_frames_its_base_column() {
         "unstaged.txt",
         "<Space>df<Settle>",
     );
-    expect_base_frame_sides(&shot, &mut home, 4, "diff_base_frame");
-    expect_base_frame_top(&shot, &mut home, 2, "diff_base_frame_top");
+    let (x, y, _, height) = cell_rect(1, 4, 1, 1);
+    let divider = cell_rect(75, 4, 1, 1);
+    let got = [
+        pixels_of(&shot, (x, y, 3, height), BASE),
+        pixels_of(&shot, divider, HAIRLINE),
+        pixels_of(&shot, divider, BASE),
+    ];
+
+    let (_, _, width, _) = divider;
+    let want = [3 * height, height, (width - 1) * height].map(|pixels| pixels as usize);
+    if got != want {
+        let frame = keep_frame(&shot, &mut home, "diff_no_base_frame");
+        panic!(
+            "the pad's surface, the divider's hairline, and the divider's surface read {got:?} \
+             pixels, not {want:?}; the frame is {}",
+            frame.display(),
+        );
+    }
 }
 
 /// The split diff's mid divider draws in the hairline color, as the DiffSplit
 /// board draws the rule between its halves.
 ///
 /// Row 4, `3 three`, is context on both sides. The divider is column 75, and
-/// its hairline takes the cell's pixel column 5, one pixel past the base
-/// frame's right side. The check reads the row's middle pixel row.
+/// its hairline takes the cell's pixel column 5. The check reads the row's
+/// middle pixel row.
 #[test]
 fn the_split_diff_s_mid_divider_draws_in_the_hairline_color() {
     let mut home = support::scratch_home();
@@ -427,43 +441,6 @@ fn the_split_diff_ends_in_the_minimap_strip_on_the_editor_surface() {
         "<Space>df<Settle>",
     );
     expect_strip_band(&shot, &mut home, "diff_strip");
-}
-
-/// The changes view frames its base column between its file headers, as the
-/// DiffChanges board layers each header over the frame.
-///
-/// Row 2 is the first file's header, and row 3 the file's first line, context
-/// with no hunk mark. The frame's sides stop at the header, so no base-tint
-/// pixel column runs down row 2, and they draw down row 3. The top bar alone
-/// crosses the header. It fills the header's top three pixel rows to the right
-/// side's last pixel column, although the view's stack stays composited at
-/// rest. It starts on the left side's first pixel column, because the
-/// island's 6 px top-left arc lies in the tab bar's band, above the header.
-#[test]
-fn the_changes_view_frames_its_base_column_between_the_headers() {
-    let mut home = support::scratch_home();
-    let shot = settled_frame(
-        home.path(),
-        "basic-diff",
-        "unstaged.txt",
-        "<Space>dc<Settle>",
-    );
-    expect_base_frame_sides(&shot, &mut home, 3, "changes_base_frame");
-
-    let (_, y, _, height) = cell_rect(0, 2, 1, 1);
-    let span: Vec<u32> = (cell_rect(1, 2, 1, 1).0..=cell_rect(75, 2, 1, 1).0 + 3).collect();
-    let down = bar_columns(&shot, (y, height), SIDE_BASE);
-    let top = bar_columns(&shot, (y, 3), SIDE_BASE);
-    let below = bar_columns(&shot, (y + 3, 1), SIDE_BASE);
-    if !down.is_empty() || top != span || !below.is_empty() {
-        let frame = keep_frame(&shot, &mut home, "changes_base_frame_top");
-        panic!(
-            "the first header holds the base tint down its whole row in columns {down:?}, over \
-             its top three pixel rows in {top:?}, and on the pixel row under them in {below:?}, \
-             where the top bar alone spans {span:?}; the frame is {}",
-            frame.display(),
-        );
-    }
 }
 
 /// The changes view ends in its stack's minimap strip on the editor surface,
@@ -528,9 +505,7 @@ fn the_viewport_band_rounds_its_corners() {
 ///
 /// Row 2 is the first file's header. Its text is centered, so the cells from
 /// column 2 to column 31 and from column 120 to column 149 hold none. The
-/// hairlines take the top and bottom pixel rows of the header row. Over the
-/// base column the frame's top bar covers the top one, so the check reads it
-/// over the live column.
+/// hairlines take the top and bottom pixel rows of the header row.
 #[test]
 fn the_changes_view_heads_each_file_on_the_raised_surface() {
     let mut home = support::scratch_home();
@@ -549,11 +524,10 @@ fn the_changes_view_heads_each_file_on_the_raised_surface() {
         RAISED,
         "changes_header",
     );
-    let (live_x, ..) = cell_rect(120, 2, 30, 1);
     expect_region(
         &shot,
         &mut home,
-        (live_x, y, width, 1),
+        (x, y, width, 1),
         HAIRLINE,
         "changes_header_top",
     );
@@ -2329,74 +2303,6 @@ fn expect_hatch(
         "{what}: {rect:?} is not {} under lines of {} every 7 px; the frame is {}",
         hex(ground),
         hex(lines),
-        frame.display(),
-    );
-}
-
-/// Panics unless `row` of `shot` holds the two sides of the frame around a
-/// split diff's base column, and no other base-tint pixel.
-///
-/// The left side is the first three pixel columns of the pane's first cell,
-/// column 1, the boards' 3 px border. The right one is three pixel columns of
-/// the divider column, 75, the middle of the pane's 150 cells. It starts a
-/// pixel into the cell and ends a pixel short of the hairline, which the odd
-/// column draws on the cell's sixth pixel column. A miss saves the frame as
-/// [`expect_region`] does.
-fn expect_base_frame_sides(shot: &Snapshot, home: &mut TempDir, row: u16, what: &str) {
-    let (_, y, _, height) = cell_rect(0, row, 1, 1);
-    let columns = bar_columns(shot, (y, height), SIDE_BASE);
-
-    let cell = |col| {
-        let (x, _, width, _) = cell_rect(col, row, 1, 1);
-        x..x + width
-    };
-    let (left, right) = (cell(1), cell(75));
-    let sides: Vec<u32> = [0, 1, 2]
-        .map(|dx| left.start + dx)
-        .into_iter()
-        .chain([1, 2, 3].map(|dx| right.start + dx))
-        .collect();
-    if columns == sides {
-        return;
-    }
-
-    let frame = keep_frame(shot, home, what);
-    panic!(
-        "{what}: the base tint fills pixel columns {columns:?} of row {row}, not {sides:?}, the \
-         first three of {left:?} and the three past the first of {right:?}; the frame is {}",
-        frame.display(),
-    );
-}
-
-/// Panics unless the top three pixel rows of `row` in `shot` hold the top bar
-/// of the frame around a split diff's base column, and the pixel row under them
-/// does not.
-///
-/// The sides are the columns the tint fills down the row under the bar, and
-/// below the bar the tint fills the sides alone. The bar is one run of the
-/// base tint from the left side's first pixel column to the right side's last.
-/// The island starts 4 px above the pane's first row, in the tab bar's band,
-/// so its 6 px top-left arc leaves the bar's three rows whole. A miss saves the
-/// frame as [`expect_region`] does.
-fn expect_base_frame_top(shot: &Snapshot, home: &mut TempDir, row: u16, what: &str) {
-    let (_, y, _, height) = cell_rect(0, row, 1, 1);
-    let sides = bar_columns(shot, (y + 3, height - 3), SIDE_BASE);
-    let top = bar_columns(shot, (y, 3), SIDE_BASE);
-    let below = bar_columns(shot, (y + 3, 1), SIDE_BASE);
-
-    let span: Vec<u32> = match (sides.first(), sides.last()) {
-        (Some(&first), Some(&last)) => (first..=last).collect(),
-        _ => Vec::new(),
-    };
-    if !span.is_empty() && top == span && below == sides {
-        return;
-    }
-
-    let frame = keep_frame(shot, home, what);
-    panic!(
-        "{what}: the top three pixel rows of row {row} hold the base tint in columns {top:?} \
-         and the row under them in {below:?}, not one run across the sides {sides:?} and the \
-         sides alone; the frame is {}",
         frame.display(),
     );
 }

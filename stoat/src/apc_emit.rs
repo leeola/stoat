@@ -1377,12 +1377,6 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
         )
         .batched(batch_decorations)
         .page_icons(page_icons)
-        .framed(
-            editor
-                .diff_view
-                .then(|| crate::render::pane::diff_base_tint(theme))
-                .flatten(),
-        )
         .diagnostics(crate::smooth_scroll::PageDiagnostics {
             spans,
             colors: severity_colors.clone(),

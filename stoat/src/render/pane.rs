@@ -19,8 +19,7 @@ use crate::{
             paint_popout_card, popout_area, popout_card_bg, popout_inset, scaled_char_capacity,
             wrap_popout_lines,
         },
-        rail_strip_id,
-        review::{self, FrameEdges},
+        rail_strip_id, review,
         run_pane::render_run_pane,
         term_pane::render_term_pane,
         text,
@@ -161,10 +160,6 @@ pub(crate) fn render_pane(
         },
         View::Editor(editor_id) => {
             if let Some(editor) = editors.get_mut(*editor_id) {
-                if editor.diff_view {
-                    emit_pane_base_frame(content_area, FrameEdges::Sides, frame, scene);
-                }
-
                 let labels = if is_focused {
                     frame.goto_word_labels
                 } else {
@@ -226,9 +221,6 @@ pub(crate) fn render_pane(
                     None,
                     blame,
                 );
-                if editor.diff_view {
-                    emit_pane_base_frame(content_area, FrameEdges::Top, frame, scene);
-                }
                 if let Some(cell) = editor.ghost_cursor_cell.filter(|_| scene.live()) {
                     review::emit_ghost_cursor(
                         cell,
@@ -306,14 +298,6 @@ pub(crate) fn render_pane(
                     buf,
                     &mut *scene,
                 );
-                // The stack's rows draw the frame's sides between the headers,
-                // on the live paint and on a held stack's pages alike. The top
-                // goes out after the rows, over the first row's hairline, and
-                // it alone crosses the first header. An empty stack shows no
-                // base column to frame.
-                if !state.excerpts.is_empty() {
-                    emit_pane_base_frame(content_area, FrameEdges::Top, frame, scene);
-                }
                 if let (Some(strip), Some(chrome)) = (state.minimap_rect, frame.minimap_chrome)
                     && let Some(content_id) = chrome.diff_changes_content
                 {
@@ -860,10 +844,7 @@ impl DiffSidesColors {
     /// lifts that color toward white. The label takes the base name's color
     /// where neither its scope nor a parent sets a foreground.
     ///
-    /// No color depends on the pane's focus. The frame around the base column
-    /// takes [`diff_base_tint`], which falls back to the base half's fill, and
-    /// a gliding pane's pages carry that frame under a version that holds no
-    /// focus.
+    /// No color depends on the pane's focus.
     fn resolve(theme: &crate::theme::Theme) -> Self {
         use crate::theme::scope;
         let bar = theme.get(scope::UI_STATUSBAR_FOCUSED);
@@ -950,44 +931,6 @@ impl DiffSideColors {
             ),
         ]
     }
-}
-
-/// The color of the frame around a split diff's base column in `theme` as RGB,
-/// or `None` for a color outside RGB.
-///
-/// The frame takes the foreground of `diff.sides.base.frame`, and the base
-/// half's fill where the theme leaves that scope unset. The frame draws only
-/// as rich bars, so a color with no RGB value has no frame.
-pub(crate) fn diff_base_tint(theme: &crate::theme::Theme) -> Option<[u8; 3]> {
-    let frame = theme
-        .try_get_exact(crate::theme::scope::DIFF_SIDES_BASE_FRAME)
-        .and_then(|style| style.fg);
-    style_rgb(Some(
-        frame.unwrap_or_else(|| DiffSidesColors::resolve(theme).base.bg),
-    ))
-}
-
-/// Emit the `edges` of the frame around the base column of a diff pane whose
-/// content fills `content_area`.
-///
-/// A pane emits the sides ahead of its own paint and the top after it, as
-/// [`review::emit_base_frame`] orders them. The diff body leaves out the pane's
-/// minimap strip, so the frame does too. A changes view takes only the top
-/// edge here. Its stack rows draw the sides, so one frame spans the whole stack
-/// although each excerpt paints its own diff body.
-///
-/// Emits nothing on a dead scene or for a tint outside RGB.
-fn emit_pane_base_frame(
-    content_area: Rect,
-    edges: FrameEdges,
-    frame: FrameCtx<'_>,
-    scene: &mut ApcScene,
-) {
-    let Some(tint) = diff_base_tint(frame.theme).filter(|_| scene.live()) else {
-        return;
-    };
-    let (inner, _) = split_minimap_strip(content_area, frame.minimap_enabled);
-    review::emit_base_frame(inner, tint, edges, scene);
 }
 
 /// `from` moved `amount` of the way to `to`, or `from` unchanged when either
@@ -5697,30 +5640,13 @@ mod tests {
         );
     }
 
-    /// A theme that sets the base half's text and fill but no frame frames the
-    /// base column in the fill. The half's foreground is its text color, so
-    /// the frame never takes it.
-    #[test]
-    fn an_unset_frame_takes_the_base_fill_and_not_its_text_color() {
-        use super::diff_base_tint;
-
-        let src = r##"theme t { diff.sides.base = { fg: "#010203", bg: "#040506" }; }"##;
-        let (config, _) = stoat_config::parse(src);
-        let theme =
-            crate::theme::Theme::from_config(&config.expect("theme parses"), "t").expect("loads");
-        assert_eq!(diff_base_tint(&theme), Some([4, 5, 6]), "the base fill");
-    }
-
     /// Ermine sets each half's colors through its `diff.sides` scopes, and a
     /// theme without them tints the status bar toward each side's status
     /// color.
     ///
-    /// Ermine's halves sit on the window ground, and its base frame keeps the
-    /// removal tint through `diff.sides.base.frame`. default_dark frames the
-    /// base column in the base half's fill.
+    /// Ermine's halves sit on the window ground.
     #[test]
     fn the_side_colors_take_the_theme_s_scopes_and_derive_the_rest() {
-        use super::diff_base_tint;
         use ratatui::style::Color;
 
         let (config, _) = stoat_config::parse(crate::app::DEFAULT_KEYMAP);
@@ -5728,12 +5654,6 @@ mod tests {
         let themes = ["ermine_night", "default_dark"]
             .map(|name| crate::theme::Theme::from_config(&config, name).expect("theme loads"));
         let resolved = themes.each_ref().map(DiffSidesColors::resolve);
-        let frames = themes.each_ref().map(diff_base_tint);
-        assert_eq!(
-            frames,
-            [Some([0x2a, 0x1d, 0x20]), Some([0x72, 0x6d, 0x81])],
-            "Ermine's frame scope, and default_dark's base fill",
-        );
 
         let rgb = |hex: u32| Color::Rgb((hex >> 16) as u8, (hex >> 8) as u8, hex as u8);
         let side = |[bg, fg, name, mark]: [u32; 4]| DiffSideColors {
