@@ -1553,11 +1553,17 @@ pub(crate) fn pump_lsp_rename(stoat: &mut Stoat) -> bool {
 /// [`Stoat::pending_symbol_picker_request`] and applied by
 /// [`pump_lsp_symbol_picker`] on the next render tick.
 ///
+/// Over a changes view, the request goes to every file of the stack, and the
+/// finder lists their symbols in stack order.
+///
 /// No-op when the focused pane is not an editor or the buffer has no
 /// path. When the server does not advertise
 /// [`LanguageServerFeature::DocumentSymbols`], reports the
 /// language-server state to the status bar instead.
 pub(crate) fn open_symbol_picker(stoat: &mut Stoat) -> UpdateEffect {
+    if stoat.active_workspace().focused_diff_changes().is_some() {
+        return open_stack_symbol_picker(stoat);
+    }
     let (buffer_id, rope) = {
         let Some(editor) = crate::action_handlers::focused_editor_mut(stoat) else {
             return UpdateEffect::None;
@@ -1592,31 +1598,7 @@ pub(crate) fn open_symbol_picker(stoat: &mut Stoat) -> UpdateEffect {
     };
 
     let pending_change = crate::lsp::sync::flush_pending_did_change(stoat, buffer_id);
-    let task = stoat.spawn_woken(async move {
-        if let Some(pending_change) = pending_change {
-            pending_change.await;
-        }
-        let requests = hosts.iter().map(|(_, host)| {
-            let encoding = host.offset_encoding();
-            let params = params.clone();
-            async move { (encoding, host.document_symbol(params).await) }
-        });
-        let responses = futures::future::join_all(requests).await;
-
-        let mut entries = Vec::new();
-        for (encoding, result) in responses {
-            match result {
-                Ok(Some(response)) => entries.extend(crate::symbol_finder::symbol_picker_entries(
-                    &rope, encoding, response,
-                )),
-                Ok(None) => {},
-                Err(err) => {
-                    tracing::warn!(target: "stoat::lsp", ?err, "document_symbol request failed")
-                },
-            }
-        }
-        entries
-    });
+    let task = stoat.spawn_woken(document_symbol_entries(hosts, params, rope, pending_change));
     stoat.pending_symbol_picker_request.arm(task);
     stoat.set_focused_mode("normal".into());
     let executor = stoat.executor.clone();
@@ -1632,6 +1614,148 @@ pub(crate) fn open_symbol_picker(stoat: &mut Stoat) -> UpdateEffect {
     };
     stoat.symbol_finder = Some(finder);
     UpdateEffect::None
+}
+
+/// [`open_symbol_picker`] over a changes view, which lists the document
+/// symbols of every file of the stack in stack order.
+///
+/// Each entry targets its own file's excerpt. A file whose language has no
+/// server with document symbols adds no entry. When no file has one, the status
+/// bar reports the language-server state instead.
+fn open_stack_symbol_picker(stoat: &mut Stoat) -> UpdateEffect {
+    let (focused_buffer, files) = {
+        let ws = stoat.active_workspace();
+        let Some(state) = ws.focused_diff_changes() else {
+            return UpdateEffect::None;
+        };
+        let Some(focused) = state.focused_excerpt() else {
+            return UpdateEffect::None;
+        };
+        let files: Vec<(BufferId, PathBuf, Rope)> = state
+            .excerpts
+            .iter()
+            .filter(|excerpt| excerpt.folded_version.is_some())
+            .filter_map(|excerpt| {
+                let path = ws.buffers.path_for(excerpt.buffer_id)?.to_path_buf();
+                let rope = ws
+                    .buffers
+                    .get(excerpt.buffer_id)?
+                    .read()
+                    .ok()?
+                    .rope()
+                    .clone();
+                Some((excerpt.buffer_id, path, rope))
+            })
+            .collect();
+        (focused.buffer_id, files)
+    };
+
+    let mut requests = Vec::with_capacity(files.len());
+    for (buffer, path, rope) in files {
+        let hosts =
+            crate::lsp::hosts::feature_hosts(stoat, buffer, LanguageServerFeature::DocumentSymbols);
+        if hosts.is_empty() {
+            continue;
+        }
+        let Some(uri) = path_to_uri(&path) else {
+            continue;
+        };
+        let params = DocumentSymbolParams {
+            text_document: TextDocumentIdentifier { uri },
+            work_done_progress_params: Default::default(),
+            partial_result_params: Default::default(),
+        };
+        let pending_change = crate::lsp::sync::flush_pending_did_change(stoat, buffer);
+        let entries = document_symbol_entries(hosts, params, rope, pending_change);
+        requests.push((buffer, path, entries));
+    }
+    if requests.is_empty() {
+        return crate::lsp::session::report_lsp_unavailable(stoat, "document symbols");
+    }
+
+    let task = stoat.spawn_woken(async move {
+        let files = requests
+            .into_iter()
+            .map(|(buffer, path, entries)| async move {
+                let entries = entries.await;
+                entries
+                    .into_iter()
+                    .map(|entry| in_excerpt(entry, buffer, &path))
+                    .collect::<Vec<_>>()
+            });
+        futures::future::join_all(files)
+            .await
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>()
+    });
+    stoat.pending_symbol_picker_request.arm(task);
+    stoat.set_focused_mode("normal".into());
+    let executor = stoat.executor.clone();
+    let finder = {
+        let ws = stoat.active_workspace_mut();
+        SymbolFinder::new(
+            ws,
+            executor,
+            focused_buffer,
+            SymbolFinderScope::Changes,
+            Vec::new(),
+        )
+    };
+    stoat.symbol_finder = Some(finder);
+    UpdateEffect::None
+}
+
+/// `entry` with its offset target moved into the file of a changes view's
+/// excerpt.
+fn in_excerpt(entry: SymbolFinderEntry, buffer: BufferId, path: &Path) -> SymbolFinderEntry {
+    let SymbolTarget::Offset(offset) = entry.target else {
+        return entry;
+    };
+    SymbolFinderEntry {
+        target: SymbolTarget::Excerpt {
+            buffer,
+            path: path.to_path_buf(),
+            offset,
+        },
+        ..entry
+    }
+}
+
+/// The document symbols that `hosts` report for one file, as finder entries
+/// resolved against `rope` in each host's own offset encoding.
+///
+/// Awaits `pending_change` first, so each server answers for the text that
+/// `rope` holds. A host that fails or answers nothing adds no entry.
+async fn document_symbol_entries(
+    hosts: Vec<(String, Arc<dyn LspHost>)>,
+    params: DocumentSymbolParams,
+    rope: Rope,
+    pending_change: Option<Task<()>>,
+) -> Vec<SymbolFinderEntry> {
+    if let Some(pending_change) = pending_change {
+        pending_change.await;
+    }
+    let requests = hosts.iter().map(|(_, host)| {
+        let encoding = host.offset_encoding();
+        let params = params.clone();
+        async move { (encoding, host.document_symbol(params).await) }
+    });
+    let responses = futures::future::join_all(requests).await;
+
+    let mut entries = Vec::new();
+    for (encoding, result) in responses {
+        match result {
+            Ok(Some(response)) => entries.extend(crate::symbol_finder::symbol_picker_entries(
+                &rope, encoding, response,
+            )),
+            Ok(None) => {},
+            Err(err) => {
+                tracing::warn!(target: "stoat::lsp", ?err, "document_symbol request failed")
+            },
+        }
+    }
+    entries
 }
 
 /// Poll any in-flight document-symbol request and fill the open
@@ -1751,16 +1875,22 @@ fn sync_symbol_finder_doc(stoat: &mut Stoat) {
 /// Fire one `textDocument/hover` for a symbol entry's documentation, returning
 /// the flattened markdown or `None` on an empty, failed, or unroutable response.
 ///
-/// Document entries convert their buffer offset to an LSP position. Workspace
-/// entries use their stored position and path. Best-effort: a server that never
-/// received the file may reject the request, which yields `None`.
+/// Document entries convert their buffer offset to an LSP position. A changes
+/// view's entries convert their offset in their own file and ask that file's
+/// server. Workspace entries use their stored position and path. Best-effort:
+/// when a server that never received the file rejects the request, the answer
+/// is `None`.
 fn spawn_symbol_doc_request(
     stoat: &mut Stoat,
     buffer_id: BufferId,
     target: &SymbolTarget,
 ) -> Option<Task<Option<String>>> {
+    let host_buffer = match target {
+        SymbolTarget::Excerpt { buffer, .. } => *buffer,
+        SymbolTarget::Offset(_) | SymbolTarget::Workspace { .. } => buffer_id,
+    };
     let (_, host) =
-        crate::lsp::hosts::feature_hosts(stoat, buffer_id, LanguageServerFeature::Hover)
+        crate::lsp::hosts::feature_hosts(stoat, host_buffer, LanguageServerFeature::Hover)
             .into_iter()
             .next()?;
     let encoding = host.offset_encoding();
@@ -1773,6 +1903,16 @@ fn spawn_symbol_doc_request(
             let rope = ws.buffers.get(buffer_id)?.read().ok()?.rope().clone();
             let position = crate::lsp::util::byte_offset_to_lsp_pos(&rope, *offset, encoding);
             (uri, position)
+        },
+        SymbolTarget::Excerpt {
+            buffer,
+            path,
+            offset,
+        } => {
+            let ws = stoat.active_workspace();
+            let rope = ws.buffers.get(*buffer)?.read().ok()?.rope().clone();
+            let position = crate::lsp::util::byte_offset_to_lsp_pos(&rope, *offset, encoding);
+            (path_to_uri(path)?, position)
         },
         SymbolTarget::Workspace { path, position, .. } => (path_to_uri(path)?, *position),
     };

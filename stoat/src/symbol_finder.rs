@@ -1,6 +1,7 @@
 use crate::{
     app::{Stoat, UpdateEffect},
     buffer::BufferId,
+    buffer_registry::OpenOrigin,
     fuzzy,
     host::OffsetEncoding,
     input_view::{InputView, SubmitTarget},
@@ -13,32 +14,42 @@ use codegraph::SymbolKey;
 use lsp_types::{DocumentSymbol, DocumentSymbolResponse, Position, SymbolInformation, SymbolKind};
 use std::{
     hash::{DefaultHasher, Hash, Hasher},
-    path::PathBuf,
+    path::{Path, PathBuf},
 };
 use stoat_language::LanguageRegistry;
 use stoat_scheduler::{Executor, Task};
 use stoat_text::Rope;
 
-/// Whether the finder lists the focused buffer's document symbols or the whole
-/// workspace's symbols.
+/// Whether the finder lists the focused buffer's document symbols, those of
+/// every file of a changes view, or the whole workspace's symbols.
 ///
-/// Document scope filters a fixed list locally. Workspace scope re-issues the
-/// server request as the query changes, so its results also come from the
-/// server, not just a local filter.
+/// Document and changes scope filter a fixed list locally. Workspace scope
+/// re-issues the server request as the query changes, so its results also come
+/// from the server, not just a local filter.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum SymbolFinderScope {
     Document,
+    /// The files of the focused changes view, filtered locally as
+    /// [`Self::Document`] is.
+    Changes,
     Workspace,
 }
 
 /// Where selecting a [`SymbolFinderEntry`] takes the cursor.
 ///
 /// Document-symbol entries carry an [`Self::Offset`] into the finder's source
-/// buffer. Workspace entries carry the target file and LSP position, resolved
+/// buffer, and a changes view's entries an [`Self::Excerpt`] into their own
+/// file. Workspace entries carry the target file and LSP position, resolved
 /// against that file's server encoding when opened.
 #[derive(Debug, Clone)]
 pub(crate) enum SymbolTarget {
     Offset(usize),
+    /// An offset in one file of a changes view's stack.
+    Excerpt {
+        buffer: BufferId,
+        path: PathBuf,
+        offset: usize,
+    },
     Workspace {
         path: PathBuf,
         position: Position,
@@ -355,10 +366,11 @@ pub(crate) struct SymbolPicker {
 
 /// Sync the finder's preview pane to the selected entry.
 ///
-/// Loads the entry's source (the focused buffer for document scope, the target
-/// file or its live buffer for workspace scope), scrolls it so the symbol line
-/// sits a third down the pane, and lands the preview cursor at the symbol offset
-/// so the target line is markable. Clears the pane when nothing is selected.
+/// Loads the entry's source (the focused buffer for document scope, the entry's
+/// own file for changes scope, the target file or its live buffer for workspace
+/// scope), scrolls it so the symbol line sits a third down the pane, and lands
+/// the preview cursor at the symbol offset so the target line is markable.
+/// Clears the pane when nothing is selected.
 ///
 /// Runs once per ranking, selection, and pane height. The per-frame sync above
 /// would otherwise redo all of it every frame the modal stays open.
@@ -391,6 +403,7 @@ pub(crate) fn sync_symbol_finder_preview(stoat: &mut Stoat) {
 
     let source = match &target {
         SymbolTarget::Offset(_) => PreviewSource::Buffer(buffer_id),
+        SymbolTarget::Excerpt { buffer, .. } => PreviewSource::Buffer(*buffer),
         SymbolTarget::Workspace { path, .. } => match ws.buffers.id_for_path(path) {
             Some(id) => PreviewSource::Buffer(id),
             None => PreviewSource::File(path.clone()),
@@ -407,6 +420,7 @@ pub(crate) fn sync_symbol_finder_preview(stoat: &mut Stoat) {
             let buf_snap = snapshot.buffer_snapshot();
             match &target {
                 SymbolTarget::Offset(off) => *off,
+                SymbolTarget::Excerpt { offset, .. } => *offset,
                 SymbolTarget::Workspace {
                     position, encoding, ..
                 } => {
@@ -504,6 +518,11 @@ pub(crate) fn symbol_finder_submit(stoat: &mut Stoat) -> Option<UpdateEffect> {
         Some(SymbolTarget::Offset(offset)) => {
             crate::action_handlers::movement::jump_to_offset(stoat, offset);
         },
+        Some(SymbolTarget::Excerpt {
+            buffer,
+            path,
+            offset,
+        }) => open_excerpt_symbol_target(stoat, buffer, &path, offset),
         Some(SymbolTarget::Workspace {
             path,
             position,
@@ -516,6 +535,23 @@ pub(crate) fn symbol_finder_submit(stoat: &mut Stoat) -> Option<UpdateEffect> {
         None => {},
     }
     Some(UpdateEffect::Redraw)
+}
+
+/// Land a pick from a changes view's symbol list on its file's excerpt.
+///
+/// When the stack dropped the file, or the view closed, while the finder was
+/// open, the pick opens the file in the focused pane, as a workspace symbol
+/// opens its file.
+fn open_excerpt_symbol_target(stoat: &mut Stoat, buffer: BufferId, path: &Path, offset: usize) {
+    if !crate::action_handlers::diff_changes::focus_stack_buffer(stoat, buffer) {
+        let focused = stoat.active_workspace().panes.focus();
+        if crate::buffer_lifecycle::open_file_in_pane_now(stoat, focused, path, OpenOrigin::Visited)
+            .is_none()
+        {
+            return;
+        }
+    }
+    crate::action_handlers::movement::jump_to_offset(stoat, offset);
 }
 
 /// Close the symbol finder on Escape.

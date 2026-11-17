@@ -1,4 +1,6 @@
 use crate::{
+    diff_changes::DiffChangesState,
+    symbol_finder::{SymbolFinderScope, SymbolTarget},
     test_fixture::{
         diag, enable_document_symbols, enable_document_symbols_and_hover, enable_workspace_symbols,
         flat_symbol, install_two_servers, open_buffer, seed,
@@ -2642,6 +2644,134 @@ fn symbol_picker_populates_with_flat_symbols() {
     let finder = h.stoat.symbol_finder.as_ref().expect("finder open");
     let titles: Vec<&str> = finder.entries.iter().map(|e| e.title.as_str()).collect();
     assert_eq!(titles, vec!["foo", "bar"]);
+}
+
+/// The symbol list opened over a settled changes view of `a.rs` and `b.rs`,
+/// whose fake server has the capabilities that `enable` sets and reports one
+/// function symbol for each file.
+fn stack_symbol_list(enable: fn(&TestHarness)) -> TestHarness {
+    let mut h = TestHarness::with_size(100, 24);
+    enable(&h);
+    h.stage_review_scenario(
+        "/repo",
+        &[
+            ("a.rs", "fn a() {}\n", "fn a2() {}\n"),
+            ("b.rs", "fn b() {}\n", "fn b2() {}\n"),
+        ],
+    );
+    for (name, path) in [("a2", "/repo/a.rs"), ("b2", "/repo/b.rs")] {
+        h.fake_lsp().set_document_symbols(
+            path,
+            DocumentSymbolResponse::Flat(vec![flat_symbol(name, path, 0, 3)]),
+        );
+    }
+    h.cover_with_diff_changes(false);
+    h.settle();
+    crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::OpenSymbolPicker);
+    h.settle();
+    h
+}
+
+#[test]
+fn a_symbol_list_over_a_changes_view_lists_every_file() {
+    let h = stack_symbol_list(enable_document_symbols);
+    let finder = h.stoat.symbol_finder.as_ref().expect("finder open");
+    let listed: Vec<(&str, &Path)> = finder
+        .entries
+        .iter()
+        .map(|entry| match &entry.target {
+            SymbolTarget::Excerpt { path, .. } => (entry.title.as_str(), path.as_path()),
+            other => unreachable!("a changes view's symbols carry excerpt targets, got {other:?}"),
+        })
+        .collect();
+    assert_eq!(
+        (finder.scope, listed),
+        (
+            SymbolFinderScope::Changes,
+            vec![
+                ("a2", Path::new("/repo/a.rs")),
+                ("b2", Path::new("/repo/b.rs"))
+            ],
+        ),
+    );
+}
+
+/// The modal names the changes scope, each row names its file, and the preview
+/// shows the selected symbol's own file.
+#[test]
+fn a_symbol_list_over_a_changes_view_shows_its_scope_files_and_preview() {
+    let mut h = stack_symbol_list(enable_document_symbols);
+    h.type_keys("down");
+    h.settle();
+    h.snapshot();
+    let text = h.rendered_text();
+    let shown = ["symbols \u{00B7} changes", "a.rs:1", "b.rs:1", "fn b2() {}"]
+        .map(|part| text.contains(part));
+    assert_eq!(shown, [true; 4], "{text}");
+}
+
+#[test]
+fn a_symbol_pick_lands_on_the_other_excerpt() {
+    let mut h = stack_symbol_list(enable_document_symbols);
+    crate::symbol_finder::symbol_finder_move_selection(&mut h.stoat, 1);
+    crate::symbol_finder::symbol_finder_submit(&mut h.stoat);
+
+    let ws = h.stoat.active_workspace_mut();
+    let (rel_path, editor_id) = {
+        let excerpt = ws
+            .focused_diff_changes()
+            .and_then(DiffChangesState::focused_excerpt)
+            .expect("a focused excerpt");
+        (excerpt.rel_path.clone(), excerpt.editor_id)
+    };
+    let editor = ws.editors.get_mut(editor_id).expect("an excerpt editor");
+    let cursor = crate::diff_changes::cursor_point(editor);
+    assert_eq!(
+        (h.stoat.current_view(), rel_path.as_str(), cursor),
+        (Some("diff_changes"), "b.rs", Point::new(0, 3)),
+    );
+}
+
+#[test]
+fn a_symbol_pick_after_the_view_closes_opens_the_file() {
+    let mut h = stack_symbol_list(enable_document_symbols);
+    crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::CloseDiffChanges);
+    crate::symbol_finder::symbol_finder_move_selection(&mut h.stoat, 1);
+    crate::symbol_finder::symbol_finder_submit(&mut h.stoat);
+
+    let editor = crate::action_handlers::focused_editor_mut(&mut h.stoat).expect("an editor");
+    let (buffer_id, cursor) = (editor.buffer_id, crate::diff_changes::cursor_point(editor));
+    let path = h
+        .stoat
+        .active_workspace()
+        .buffers
+        .path_for(buffer_id)
+        .map(Path::to_path_buf);
+    assert_eq!(
+        (path, cursor),
+        (Some(PathBuf::from("/repo/b.rs")), Point::new(0, 3)),
+    );
+}
+
+/// Each file answers hover for its own symbols, so the doc of the second file's
+/// symbol shows only when the request names that file.
+#[test]
+fn a_symbol_doc_over_a_changes_view_comes_from_the_entry_file() {
+    let mut h = stack_symbol_list(enable_document_symbols_and_hover);
+    for (path, doc) in [("/repo/a.rs", "A2DOC"), ("/repo/b.rs", "B2DOC")] {
+        h.fake_lsp().set_hover(path, 0, 3, doc);
+    }
+    h.type_keys("down");
+    h.settle();
+
+    let finder = h.stoat.symbol_finder.as_ref().expect("finder open");
+    assert_eq!(
+        (
+            finder.selected_entry().map(|entry| entry.title.as_str()),
+            finder.doc_markdown.as_deref()
+        ),
+        (Some("b2"), Some("B2DOC")),
+    );
 }
 
 #[test]

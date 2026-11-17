@@ -88,6 +88,7 @@ pub(crate) fn render_symbol_finder(
 
     let label = match finder.scope {
         SymbolFinderScope::Document => "symbols \u{00B7} document",
+        SymbolFinderScope::Changes => "symbols \u{00B7} changes",
         SymbolFinderScope::Workspace => "symbols \u{00B7} workspace",
     };
     let modal_style = theme.get(scope::UI_MODAL_PALETTE);
@@ -211,7 +212,7 @@ pub(crate) fn paint_symbol_rows(
         let entry = &finder.entries[idx];
 
         let suffix = match &entry.target {
-            SymbolTarget::Workspace { path, .. } => {
+            SymbolTarget::Workspace { path, .. } | SymbolTarget::Excerpt { path, .. } => {
                 format!(
                     " {}:{}",
                     paths::display_relative(path, git_root),
