@@ -359,6 +359,8 @@ theme ermine_night inherits default_dark {
     ui.modal.picker  = { fg: strong, bg: overlay };
     ui.modal.run     = { fg: strong, bg: overlay };
     ui.modal.footer  = { bg: raised };
+    ui.modal.label   = { fg: special, modifiers: [bold] };
+    ui.chip          = { fg: text, bg: tab_wash };
 
     ui.completion.kind.function.bg = tint_accent;
     ui.completion.kind.constant.bg = tint_info;

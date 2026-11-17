@@ -1488,7 +1488,7 @@ mod tests {
         h.snapshot();
         let pick_base = h.rendered_text();
         assert!(
-            pick_base.contains("commits \u{00B7} review from commit"),
+            pick_base.contains("Commits \u{00B7} review from commit"),
             "a base picker says what selecting a row will start:\n{pick_base}"
         );
         assert!(
@@ -1503,7 +1503,7 @@ mod tests {
         h.snapshot();
         let browse = h.rendered_text();
         assert!(
-            browse.contains("commits \u{00B7} git log"),
+            browse.contains("Commits \u{00B7} git log"),
             "a browser names itself for what it shows:\n{browse}"
         );
         assert!(

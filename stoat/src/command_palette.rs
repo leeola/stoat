@@ -1695,7 +1695,7 @@ mod tests {
             .unwrap_or_default();
         let labeled = text
             .lines()
-            .any(|line| line.contains("palette \u{00B7} git :"));
+            .any(|line| line.contains("Palette \u{00B7} git :"));
         let subcommand = &top.command_name["git ".len()..];
         // The name starts one cell in from the box's left border.
         let shown = (
@@ -4166,7 +4166,7 @@ mod tests {
         let _ = h.snapshot();
         let text = h.rendered_text();
         assert!(
-            text.contains("palette \u{00B7} open, ignored :"),
+            text.contains("Palette \u{00B7} open, ignored :"),
             "the label names the fallback:\n{text}"
         );
     }

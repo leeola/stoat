@@ -285,6 +285,9 @@ The typed UI scopes, by group (syntax scopes are open-ended):
   leaves it unset gives the box `ui.modal.hints`.
 - `ui.modal.footer` -- the footer row a modal ends in, with its key hints and
   page dots.
+- `ui.modal.label` -- the name a filter modal's header row starts with, such
+  as `Files`. A theme that leaves it unset draws the name in the bold
+  `ui.text.dim`. default_dark leaves it unset.
 - `ui.completion.kind.function`, `ui.completion.kind.constant`,
   `ui.completion.kind.module`, `ui.completion.kind.variable`,
   `ui.completion.kind.keyword` -- the badge that leads a completion row, a

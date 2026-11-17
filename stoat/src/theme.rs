@@ -890,6 +890,10 @@ pub mod scope {
     pub const UI_MODAL_RUN: &str = "ui.modal.run";
     /// The footer row a modal ends in, with its key hints and page dots.
     pub const UI_MODAL_FOOTER: &str = "ui.modal.footer";
+    /// The name a filter modal's header row starts with, such as `Files`.
+    ///
+    /// A theme that leaves it unset draws the name in the bold `ui.text.dim`.
+    pub const UI_MODAL_LABEL: &str = "ui.modal.label";
 
     /// The badge that leads a completion row, a glyph on a tinted cell.
     ///

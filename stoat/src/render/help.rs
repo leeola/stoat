@@ -141,7 +141,7 @@ pub(crate) fn render_help(
         buf,
         layout.inner,
         &FilterHeader {
-            label: "help",
+            label: "Help",
             prompt,
             count: Some((help.filtered().len(), help.entries().len())),
             chips: &[("applicable", applicable), ("all", !applicable)],

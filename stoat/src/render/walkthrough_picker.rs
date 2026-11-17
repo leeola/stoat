@@ -55,7 +55,7 @@ pub(crate) fn render_walkthrough_picker(
         buf,
         layout.inner,
         &FilterHeader {
-            label: "walkthroughs",
+            label: "Walkthroughs",
             prompt: FILTER_PROMPT,
             count: Some((
                 picker.picker.filtered().len(),

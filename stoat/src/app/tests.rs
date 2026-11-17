@@ -16467,7 +16467,7 @@ fn the_workspace_diagnostics_header_names_its_scope() {
     open_diagnostics_picker(&mut h, 2);
     let text = h.rendered_text();
     assert!(
-        text.contains("diagnostics \u{00B7} workspace \u{203A}"),
+        text.contains("Diagnostics \u{00B7} workspace \u{203A}"),
         "the label carries the workspace scope:\n{text}"
     );
 }

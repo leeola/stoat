@@ -967,7 +967,7 @@ mod tests {
         };
         assert_eq!(
             (
-                text.contains("diagnostics \u{00B7} changes"),
+                text.contains("Diagnostics \u{00B7} changes"),
                 row_names("a.rs", "first"),
                 row_names("b.rs", "sec"),
             ),

@@ -54,7 +54,7 @@ pub(crate) fn render_location_picker(
         buf,
         layout.inner,
         &FilterHeader {
-            label: "locations",
+            label: "Locations",
             prompt: FILTER_PROMPT,
             count: Some((picker.filtered().len(), picker.entries().len())),
             chips: &[],

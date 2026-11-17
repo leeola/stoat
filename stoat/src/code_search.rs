@@ -1039,7 +1039,7 @@ mod tests {
             h.snapshot();
             let text = h.rendered_text();
             ["ast (rust)", "regex"]
-                .map(|mode| text.contains(&format!("search \u{00B7} {mode} \u{203A}")))
+                .map(|mode| text.contains(&format!("Search \u{00B7} {mode} \u{203A}")))
         }
 
         let mut h = open_ast_over(&[("a.rs", "fn a() {}\n")], "a.rs");

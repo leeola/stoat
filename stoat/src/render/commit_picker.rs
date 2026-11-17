@@ -199,7 +199,7 @@ pub(crate) fn render_commit_picker(
             CommitPickerRole::Stash => "git stash list",
         },
     };
-    let label = format!("commits \u{00B7} {state}");
+    let label = format!("Commits \u{00B7} {state}");
     let modal_style = theme.get(scope::UI_MODAL_PALETTE);
     crate::render::chrome::modal_plate(buf, layout.modal, modal_style, theme, &mut *scene);
 

@@ -177,10 +177,10 @@ pub(crate) fn paint_match_rows(
 /// language.
 fn code_search_label(finder: &CodeSearchFinder) -> String {
     match finder.mode {
-        SearchMode::Regex => "search \u{00B7} regex".to_string(),
+        SearchMode::Regex => "Search \u{00B7} regex".to_string(),
         SearchMode::Ast => {
             let lang = finder.target_lang.as_ref().map(|l| l.name).unwrap_or("?");
-            format!("search \u{00B7} ast ({lang})")
+            format!("Search \u{00B7} ast ({lang})")
         },
     }
 }

@@ -87,9 +87,9 @@ pub(crate) fn render_symbol_finder(
     };
 
     let label = match finder.scope {
-        SymbolFinderScope::Document => "symbols \u{00B7} document",
-        SymbolFinderScope::Changes => "symbols \u{00B7} changes",
-        SymbolFinderScope::Workspace => "symbols \u{00B7} workspace",
+        SymbolFinderScope::Document => "Symbols \u{00B7} document",
+        SymbolFinderScope::Changes => "Symbols \u{00B7} changes",
+        SymbolFinderScope::Workspace => "Symbols \u{00B7} workspace",
     };
     let modal_style = theme.get(scope::UI_MODAL_PALETTE);
     crate::render::chrome::modal_plate(buf, modal, modal_style, theme, &mut *scene);

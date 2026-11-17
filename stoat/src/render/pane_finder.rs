@@ -50,7 +50,7 @@ pub(crate) fn render_pane_finder(
         buf,
         layout.inner,
         &FilterHeader {
-            label: "panes",
+            label: "Panes",
             prompt: FILTER_PROMPT,
             count: Some((
                 finder.picker.filtered().len(),

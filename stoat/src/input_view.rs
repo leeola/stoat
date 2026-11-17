@@ -125,6 +125,28 @@ impl InputView {
         guard.snapshot.visible_text.to_string()
     }
 
+    /// The input's text, and the char index of the cell its cursor covers.
+    ///
+    /// The cell is the one the input's editor draws its block cursor on. A
+    /// cursor past the text's end covers the cell after its last char, so the
+    /// index is then the text's char count.
+    pub(crate) fn caret(&self, ws: &Workspace) -> (String, usize) {
+        let Some(editor) = ws.editors.get(self.editor_id) else {
+            return (String::new(), 0);
+        };
+        let buffer = editor.display_map.buffer_snapshot();
+        let selection = editor.selections.newest_anchor();
+        let cursor = stoat_text::cursor_offset(
+            buffer.rope(),
+            buffer.resolve_anchor(&selection.tail()),
+            buffer.resolve_anchor(&selection.head()),
+        );
+
+        let text = buffer.rope().to_string();
+        let index = text[..cursor.min(text.len())].chars().count();
+        (text, index)
+    }
+
     /// Replace the entire buffer text and move the cursor to the end. Used by
     /// consumers like the run pane where history navigation swaps the whole
     /// line, or when the consumer needs to clear the input after submission.
@@ -242,5 +264,41 @@ fn render_input_status(
             let start = right_edge - pos_len;
             write_str(buf, start, area.y, &pos_text, bar_style);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{InputView, SubmitTarget};
+    use stoat_text::{Bias, SelectionGoal};
+
+    /// The caret counts the chars, not the bytes, before the cell the cursor
+    /// covers. A cursor at the text's end covers the cell past its last char.
+    #[test]
+    fn the_caret_counts_the_chars_before_the_cursor() {
+        let mut h = crate::Stoat::test();
+        let executor = h.stoat.executor.clone();
+        let ws = h.stoat.active_workspace_mut();
+        let text = "a\u{00E9}b";
+        let input = InputView::create(ws, executor, SubmitTarget::FileFinder, text, "insert");
+        let at_end = input.caret(ws);
+
+        let editor = ws
+            .editors
+            .get_mut(input.editor_id)
+            .expect("the input's editor");
+        let snapshot = editor.display_map.snapshot();
+        let buffer = snapshot.buffer_snapshot();
+        let after_accent = buffer.anchor_at(3, Bias::Right);
+        editor.selections.transform(buffer, |selection| {
+            let mut moved = selection.clone();
+            moved.collapse_to(after_accent, SelectionGoal::None);
+            moved
+        });
+
+        assert_eq!(
+            (at_end, input.caret(ws)),
+            ((text.to_owned(), 3), (text.to_owned(), 2)),
+        );
     }
 }

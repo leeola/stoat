@@ -218,9 +218,9 @@ fn render_palette_arg_picker(
         .as_ref()
         .is_some_and(|picker| picker.fallback_active());
     let label = if fallback_active {
-        format!("palette \u{00B7} {}, ignored", entry.command_name)
+        format!("Palette \u{00B7} {}, ignored", entry.command_name)
     } else {
-        format!("palette \u{00B7} {}", entry.command_name)
+        format!("Palette \u{00B7} {}", entry.command_name)
     };
     let count = palette.arg_picker.as_ref().map(|picker| {
         let list = &picker.active_core_ref().picklist;
@@ -326,7 +326,7 @@ fn render_palette_free_arg(
     buf: &mut Buffer,
     scene: &mut stoat_widgets::ApcScene,
 ) {
-    let label = format!("palette \u{00B7} {}", entry.command_name);
+    let label = format!("Palette \u{00B7} {}", entry.command_name);
     let Some(layout) = render_palette_prelude(
         &palette.input,
         &label,
@@ -467,9 +467,9 @@ fn render_palette_filter(
     scene: &mut stoat_widgets::ApcScene,
 ) {
     let label: Cow<'static, str> = match (group, scope) {
-        (Some(group), _) => Cow::Owned(format!("palette \u{00B7} {group}")),
-        (None, PaletteScope::Active) => Cow::Borrowed("palette \u{00B7} applicable"),
-        (None, PaletteScope::All) => Cow::Borrowed("palette \u{00B7} all"),
+        (Some(group), _) => Cow::Owned(format!("Palette \u{00B7} {group}")),
+        (None, PaletteScope::Active) => Cow::Borrowed("Palette \u{00B7} applicable"),
+        (None, PaletteScope::All) => Cow::Borrowed("Palette \u{00B7} all"),
     };
     let name_offset = group.map_or(0, |group| group.len() + 1);
     let Some(layout) = render_palette_prelude(

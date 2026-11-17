@@ -112,9 +112,9 @@ pub(crate) fn render_workspace_picker(
     crate::render::chrome::modal_plate(buf, picker_area, modal_style, theme, &mut *scene);
 
     let label = match (picker.renaming(), picker.family_title()) {
-        (true, _) => "rename".to_owned(),
-        (false, None) => "sessions".to_owned(),
-        (false, Some(family)) => format!("sessions \u{00B7} {family}"),
+        (true, _) => "Rename".to_owned(),
+        (false, None) => "Sessions".to_owned(),
+        (false, Some(family)) => format!("Sessions \u{00B7} {family}"),
     };
     let family = picker.family_title().is_some();
     crate::render::picker::filter_header(
@@ -763,7 +763,7 @@ mod tests {
         assert!(
             painted
                 .iter()
-                .any(|row| row.contains("sessions \u{00B7} ws00 \u{203A}")),
+                .any(|row| row.contains("Sessions \u{00B7} ws00 \u{203A}")),
             "the header names the family by its root:\n{}",
             painted.join("\n")
         );
@@ -846,7 +846,7 @@ mod tests {
         assert!(
             painted
                 .iter()
-                .any(|row| row.contains("rename \u{203A} ws01")),
+                .any(|row| row.contains("Rename \u{203A} ws01")),
             "the header reads rename, and the name starts past its prompt:\n{}",
             painted.join("\n")
         );

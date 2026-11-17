@@ -2705,7 +2705,7 @@ fn a_symbol_list_over_a_changes_view_shows_its_scope_files_and_preview() {
     h.settle();
     h.snapshot();
     let text = h.rendered_text();
-    let shown = ["symbols \u{00B7} changes", "a.rs:1", "b.rs:1", "fn b2() {}"]
+    let shown = ["Symbols \u{00B7} changes", "a.rs:1", "b.rs:1", "fn b2() {}"]
         .map(|part| text.contains(part));
     assert_eq!(shown, [true; 4], "{text}");
 }

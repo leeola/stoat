@@ -56,7 +56,7 @@ pub(crate) fn render_jumplist_picker(
         buf,
         layout.inner,
         &FilterHeader {
-            label: "jumps",
+            label: "Jumps",
             prompt: FILTER_PROMPT,
             count: Some((
                 picker.picker.filtered().len(),

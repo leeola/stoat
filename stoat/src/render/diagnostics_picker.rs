@@ -64,9 +64,9 @@ pub(crate) fn render_diagnostics_picker(
 
     let modal_style = theme.get(crate::theme::scope::UI_MODAL_PICKER);
     let label = match picker.scope() {
-        PickerScope::Local(_) => "diagnostics",
-        PickerScope::Changes => "diagnostics \u{00B7} changes",
-        PickerScope::Workspace => "diagnostics \u{00B7} workspace",
+        PickerScope::Local(_) => "Diagnostics",
+        PickerScope::Changes => "Diagnostics \u{00B7} changes",
+        PickerScope::Workspace => "Diagnostics \u{00B7} workspace",
     };
     crate::render::chrome::modal_plate(buf, modal_area, modal_style, theme, &mut *scene);
 

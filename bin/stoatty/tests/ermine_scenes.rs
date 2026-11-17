@@ -1388,13 +1388,16 @@ fn the_finder_marks_its_selected_row_with_a_rounded_fill_and_an_accent_edge() {
     );
 }
 
-/// The finder's header ends in its scope chip on the hover surface.
+/// The finder's header ends in its scope chip, a box on the tab wash.
 ///
-/// The chip reads `S-Tab`, a middle dot, and `git only`, with one cell of
-/// padding at each end. So its cells form one run of 18 in one row, and no
-/// other cell of the frame takes the hover color.
+/// The box takes whole cells, the fewest that hold `S-Tab · git only` with
+/// 6 px of padding at each end. Those are the 15 cells that end at the inner
+/// rect's right edge, cell 143. The header row is cell row 10, and the box
+/// draws 1 px right and 7 px down of its cells. So the tab wash fills the
+/// pixels from (1153, 187) to (1287, 204), and no other pixel under the tab
+/// bar takes it.
 #[test]
-fn the_finder_header_ends_in_a_chip_on_the_hover_surface() {
+fn the_finder_header_ends_in_a_chip_on_the_tab_wash() {
     let mut home = support::scratch_home();
     let shot = settled_frame(
         home.path(),
@@ -1403,17 +1406,13 @@ fn the_finder_header_ends_in_a_chip_on_the_hover_surface() {
         "<Space>p<Settle>",
     );
 
-    let chip = cells_of(&shot, HOVER);
-    let one_run = chip.first().is_some_and(|&(col, row)| {
-        chip == (col..col + 18).map(|col| (col, row)).collect::<Vec<_>>()
-    });
-    if !one_run {
-        let frame = keep_frame(&shot, &mut home, "header_chip");
-        panic!(
-            "the hover cells {chip:?} are not one 18-cell run in one row; the frame is {}",
-            frame.display(),
-        );
-    }
+    expect_color_box(
+        &shot,
+        &mut home,
+        TAB_WASH,
+        (1153, 187, 1287, 204),
+        "header_chip",
+    );
 }
 
 /// The editor behind the finder fades toward its own ground.
@@ -1513,34 +1512,32 @@ fn the_session_picker_plate_ends_in_its_footer_row() {
     }
 }
 
-/// The help header names both scopes. The active `applicable` sits on the hover
-/// surface, and `all` follows one column later as text on the plate's ground.
+/// The help header names both scopes. The active `applicable` sits in a chip
+/// box on the tab wash, and `all` follows as text on the plate's ground.
 ///
-/// The active chip reads `applicable` with one cell of padding at each end, so
-/// its cells form one run of 12 in one row, and no other cell of the frame
-/// takes the hover color. The inactive chip's five cells start one column past
-/// that run and keep the ground.
+/// The box takes the fewest whole cells that hold `applicable` with 6 px of
+/// padding at each end, which are the 10 cells from cell 129. They end on the
+/// last cell edge left of `all` and its gap. The header row is cell row 3, and
+/// the box draws 1 px right and 7 px down of its cells. So the tab wash fills
+/// the pixels from (1162, 61) to (1251, 78), and no other pixel under the tab
+/// bar takes it. In that band, the 30 px from x 1258 hold `all` with no box,
+/// so most of them keep the ground.
 #[test]
 fn the_help_header_names_both_scopes() {
     let mut home = support::scratch_home();
     let shot = settled_frame(home.path(), "basic-diff", "unstaged.txt", "?<Settle>");
 
-    let chip = cells_of(&shot, HOVER);
-    let run = chip
-        .first()
-        .copied()
-        .filter(|&(col, row)| chip == (col..col + 12).map(|col| (col, row)).collect::<Vec<_>>());
-    let Some((col, row)) = run else {
-        let frame = keep_frame(&shot, &mut home, "help_scope_chips");
-        panic!(
-            "the hover cells {chip:?} are not one 12-cell run in one row; the frame is {}",
-            frame.display(),
-        );
-    };
+    expect_color_box(
+        &shot,
+        &mut home,
+        TAB_WASH,
+        (1162, 61, 1251, 78),
+        "help_active_scope",
+    );
     expect_region(
         &shot,
         &mut home,
-        cell_rect(col + 13, row, 5, 1),
+        (1258, 61, 30, 18),
         GROUND,
         "help_inactive_scope",
     );
@@ -2179,6 +2176,41 @@ fn expect_region(shot: &Snapshot, home: &mut TempDir, rect: PixelRect, want: [u8
         "{what}: most pixels of {rect:?} are {}, not {}; the frame is {}",
         hex(found),
         hex(want),
+        frame.display(),
+    );
+}
+
+/// Panics unless the pixels of `color` under the tab bar's 32 px band fill a
+/// box that spans exactly `want`, the inclusive `(left, top, right, bottom)`.
+///
+/// Every pixel of the color counts, so a second element in it widens the box
+/// and fails. A miss saves the frame as [`expect_region`] does.
+fn expect_color_box(
+    shot: &Snapshot,
+    home: &mut TempDir,
+    color: [u8; 3],
+    want: (u32, u32, u32, u32),
+    what: &str,
+) {
+    let found = (32..shot.height)
+        .flat_map(|y| (0..shot.width).map(move |x| (x, y)))
+        .filter(|&(x, y)| pixel(shot, x, y) == color)
+        .fold(None, |found: Option<(u32, u32, u32, u32)>, (x, y)| {
+            Some(match found {
+                None => (x, y, x, y),
+                Some((left, top, right, bottom)) => {
+                    (left.min(x), top.min(y), right.max(x), bottom.max(y))
+                },
+            })
+        });
+    if found == Some(want) {
+        return;
+    }
+
+    let frame = keep_frame(shot, home, what);
+    panic!(
+        "{what}: the pixels of {} span {found:?}, not {want:?}; the frame is {}",
+        hex(color),
         frame.display(),
     );
 }
