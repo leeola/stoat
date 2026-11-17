@@ -310,6 +310,22 @@ pub(super) fn diff_changes_open(stoat: &mut Stoat) -> UpdateEffect {
     UpdateEffect::Redraw
 }
 
+/// Close the focused changes view for the per-file diff of the view it
+/// covered, and answer whether it closed.
+///
+/// A folded excerpt in focus keeps the changes view open and answers false,
+/// so the caller flips to that excerpt's diff through [`diff_changes_open`].
+/// With none, the excerpts release and do not park, because the stack holds
+/// no folded excerpt worth keeping. The covered view then comes back plain,
+/// in normal mode.
+pub(super) fn close_for_covered_diff(stoat: &mut Stoat) -> bool {
+    if focused_target(stoat).is_some() {
+        return false;
+    }
+    close_changes_view(stoat, false);
+    true
+}
+
 /// Hold the focused editor's cursor on `screen_row` of the diff it opened.
 ///
 /// The next paint applies the hold. A file whose hunks are on the pool gets the
@@ -1262,10 +1278,16 @@ mod tests {
 
     /// A settled changes view over a repository with no changed file.
     fn empty_stack() -> TestHarness {
+        empty_stack_covering(false)
+    }
+
+    /// [`empty_stack`] whose changes view opened from the per-file diff when
+    /// `covered_diff` holds.
+    fn empty_stack_covering(covered_diff: bool) -> TestHarness {
         let mut h = TestHarness::with_size(100, 24);
         h.stoat.active_workspace_mut().git_root = PathBuf::from("/repo");
         h.fake_git().add_repo(PathBuf::from("/repo"));
-        h.cover_with_diff_changes(false);
+        h.cover_with_diff_changes(covered_diff);
         h.settle();
         h
     }
@@ -2717,11 +2739,7 @@ mod tests {
     /// puts back the covered editor as a plain file.
     #[test]
     fn diff_changes_on_an_empty_changes_view_from_the_diff_lands_in_the_plain_file() {
-        let mut h = TestHarness::with_size(100, 24);
-        h.stoat.active_workspace_mut().git_root = PathBuf::from("/repo");
-        h.fake_git().add_repo(PathBuf::from("/repo"));
-        h.cover_with_diff_changes(true);
-        h.settle();
+        let mut h = empty_stack_covering(true);
         dispatch(&mut h.stoat, &stoat_action::DiffChanges);
         assert_eq!(
             (
@@ -3220,6 +3238,62 @@ mod tests {
                 editor::focused_cursor_point(&mut h.stoat).row,
             ),
             (Some("diff"), Some(PathBuf::from("/repo/b.txt")), 8),
+        );
+    }
+
+    /// DiffFiles on an empty changes view closes it and turns the diff on for
+    /// the view it covered, and a second DiffFiles turns the diff off.
+    #[test]
+    fn diff_files_on_an_empty_changes_view_opens_the_covered_files_diff() {
+        let mut h = empty_stack();
+        dispatch(&mut h.stoat, &stoat_action::DiffFiles { rev: None });
+        h.settle();
+        let opened = (
+            h.stoat.current_view(),
+            h.stoat
+                .active_workspace()
+                .focused_diff_changes_id()
+                .is_none(),
+        );
+
+        dispatch(&mut h.stoat, &stoat_action::DiffFiles { rev: None });
+        assert_eq!(
+            (opened, h.stoat.current_view()),
+            ((Some("diff"), true), Some("file")),
+        );
+    }
+
+    /// DiffFiles on an empty changes view that opened from the per-file diff
+    /// turns the diff on for the view it covered.
+    #[test]
+    fn diff_files_on_an_empty_changes_view_from_the_diff_opens_the_diff() {
+        let mut h = empty_stack_covering(true);
+        dispatch(&mut h.stoat, &stoat_action::DiffFiles { rev: None });
+        h.settle();
+        assert_eq!(
+            (
+                h.stoat.current_view(),
+                h.stoat
+                    .active_workspace()
+                    .focused_diff_changes_id()
+                    .is_none()
+            ),
+            (Some("diff"), true),
+        );
+    }
+
+    /// DiffFiles before the first excerpt folds closes the changes view and
+    /// opens the diff of the file it covered.
+    #[test]
+    fn diff_files_before_the_first_excerpt_opens_the_covered_files_diff() {
+        let mut h = deep_files();
+        h.open_file(Path::new("/repo/a.txt"));
+        h.cover_with_diff_changes(false);
+        dispatch(&mut h.stoat, &stoat_action::DiffFiles { rev: None });
+        h.settle();
+        assert_eq!(
+            (h.stoat.current_view(), focused_path(&h)),
+            (Some("diff"), Some(PathBuf::from("/repo/a.txt"))),
         );
     }
 
