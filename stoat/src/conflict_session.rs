@@ -357,8 +357,9 @@ mod tests {
     use stoat_action::{
         Action, CloseConflict, Conflict, ConflictApply, ConflictNextChunk, ConflictNextFile,
         ConflictPickBoth, ConflictPickOurs, ConflictPickOursLine, ConflictPickTheirs,
-        ConflictPickTheirsLine, ConflictPrevChunk, ConflictPrevFile, ConflictResetChunk, FocusLeft,
-        FocusNext, GotoNextChange, GotoPrevChange, NewWorkspace, SplitRight,
+        ConflictPickTheirsLine, ConflictPrevChunk, ConflictPrevFile, ConflictResetChunk,
+        DiffChanges, DiffFiles, FocusLeft, FocusNext, GotoNextChange, GotoPrevChange, NewWorkspace,
+        SplitRight,
     };
 
     const MARKER: &str = "<<<<<<< ours\nours\n=======\ntheirs\n>>>>>>> theirs\n";
@@ -636,6 +637,100 @@ mod tests {
         assert_eq!(ws.panes.widened(), None, "closing unwidens");
         assert_eq!(ws.panes.pane(focused).area, focused_area, "pane restored");
         assert_eq!(ws.buffers.len(), buffers_before, "scratch buffer disposed");
+    }
+
+    /// `DiffChanges` on the conflict view closes it whole, so the changes view
+    /// covers the plain file and its close lands there.
+    #[test]
+    fn diff_changes_on_the_conflict_view_opens_the_changes_view_over_the_plain_file() {
+        let mut h = Stoat::test();
+        open(&mut h);
+
+        pick(&mut h, &DiffChanges);
+        let opened = (
+            h.stoat.active_workspace().conflict.is_some(),
+            h.stoat.current_view(),
+        );
+        pick(&mut h, &DiffChanges);
+        assert_eq!(
+            (opened, h.stoat.current_view()),
+            ((false, Some("diff_changes")), Some("file")),
+        );
+    }
+
+    #[test]
+    fn diff_files_on_the_conflict_view_opens_the_per_file_diff() {
+        let mut h = Stoat::test();
+        open(&mut h);
+
+        pick(&mut h, &DiffFiles { rev: None });
+        assert_eq!(
+            (
+                h.stoat.active_workspace().conflict.is_some(),
+                h.stoat.current_view()
+            ),
+            (false, Some("diff")),
+        );
+    }
+
+    /// A revision that the repository does not resolve changes nothing, so the
+    /// conflict view and its unwritten resolution stay.
+    #[test]
+    fn diff_files_with_an_unknown_revision_keeps_the_conflict_view() {
+        let mut h = Stoat::test();
+        open(&mut h);
+
+        pick(
+            &mut h,
+            &DiffFiles {
+                rev: Some("nope".into()),
+            },
+        );
+        assert_eq!(
+            (
+                h.stoat.active_workspace().conflict.is_some(),
+                h.stoat.current_view()
+            ),
+            (true, Some("conflict")),
+        );
+    }
+
+    /// `Conflict` on a changes view closes it whole, so the conflict view opens
+    /// over the plain file and its close lands there.
+    #[test]
+    fn conflict_on_a_changes_view_closes_it_and_opens_the_conflict_view() {
+        let mut h = Stoat::test();
+        seed_conflict(&mut h);
+        h.cover_with_diff_changes(false);
+
+        dispatch_conflict(&mut h);
+        let opened = (
+            h.stoat.active_workspace().diff_changes_views.is_empty(),
+            h.stoat.current_view(),
+        );
+        dispatch_conflict(&mut h);
+        assert_eq!(
+            (opened, h.stoat.current_view()),
+            ((true, Some("conflict")), Some("file")),
+        );
+    }
+
+    /// `Conflict` on the per-file diff leaves the diff, so the close lands in
+    /// the plain file and not back in the diff.
+    #[test]
+    fn conflict_on_the_per_file_diff_closes_to_the_plain_file() {
+        let mut h = Stoat::test();
+        seed_conflict(&mut h);
+
+        pick(&mut h, &DiffFiles { rev: None });
+        let diffed = h.stoat.current_view();
+        dispatch_conflict(&mut h);
+        let opened = h.stoat.current_view();
+        dispatch_conflict(&mut h);
+        assert_eq!(
+            (diffed, opened, h.stoat.current_view()),
+            (Some("diff"), Some("conflict"), Some("file")),
+        );
     }
 
     #[test]

@@ -175,6 +175,9 @@ pub(super) fn open_review_agent_edits(stoat: &mut Stoat, edits: &[stoat_action::
 /// On a changes view a revision, `index`, or `HEAD` changes the base and the
 /// changes view stays. The bare command there opens the per-file diff.
 ///
+/// An open conflict view closes first, so the diff shows the plain file that
+/// the conflict view covered.
+///
 /// The focused file's pair gives way to the revision, and a pair over any other
 /// file holds.
 ///
@@ -188,15 +191,18 @@ pub(super) fn open_review_agent_edits(stoat: &mut Stoat, edits: &[stoat_action::
 /// branch that carries either name stays reachable as `refs/heads/<name>`.
 pub(super) fn diff(stoat: &mut Stoat, rev: Option<&str>) -> UpdateEffect {
     let Some(rev) = rev else {
+        leave_conflict_view(stoat);
         // The bare command also drops any base a revision left installed, so
         // closing the diff always returns to the working tree's own base.
         toggle_diff_view(stoat);
         return UpdateEffect::Redraw;
     };
     if rev.eq_ignore_ascii_case("index") {
+        leave_conflict_view(stoat);
         return diff_against(stoat, WorktreeBase::Index);
     }
     if rev.eq_ignore_ascii_case("head") {
+        leave_conflict_view(stoat);
         return diff_against(stoat, WorktreeBase::Head);
     }
 
@@ -214,6 +220,7 @@ pub(super) fn diff(stoat: &mut Stoat, rev: Option<&str>) -> UpdateEffect {
         return UpdateEffect::Redraw;
     };
 
+    leave_conflict_view(stoat);
     drop_focused_pair(stoat);
     tracing::info!(target: "stoat::review", rev, sha = %sha, "diff base set");
     stoat
@@ -224,6 +231,17 @@ pub(super) fn diff(stoat: &mut Stoat, rev: Option<&str>) -> UpdateEffect {
     // only the bare command closes.
     show_installed_base(stoat);
     UpdateEffect::Redraw
+}
+
+/// Close an open conflict view, so [`diff`] shows the plain file and not the
+/// view's scratch merged buffer.
+///
+/// [`diff`] calls it only once the command applies, because a close discards
+/// the unwritten resolution and a refused revision changes nothing.
+fn leave_conflict_view(stoat: &mut Stoat) {
+    if stoat.active_workspace().conflict.is_some() {
+        super::conflict_view::close_conflict(stoat);
+    }
 }
 
 /// Pick `base` as the working tree's own base and show the diff view over it.

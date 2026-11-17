@@ -32,8 +32,10 @@ use stoat_text::{Anchor, Bias, LineEnding, SelectionGoal};
 /// Open the three-way conflict resolve view on the repository's conflicted
 /// files, swapping a scratch merged-result editor into the focused pane.
 ///
-/// Dispatching while the view is already open closes it (toggle). A press with
-/// no editor in the focused pane does nothing.
+/// Dispatching while the view is already open closes it (toggle). A changes
+/// view or a per-file diff in the focused pane closes first, so the view opens
+/// over the plain file and its close lands there. A press on any other pane
+/// with no editor does nothing.
 ///
 /// A worker discovers the repository, lists its conflicts, and aligns the first
 /// file, so the pane still shows the plain file until [`pump_conflict_file`]
@@ -50,6 +52,11 @@ pub(super) fn open_conflict(stoat: &mut Stoat) {
     if stoat.pending_conflict_file.is_some() {
         return;
     }
+
+    if stoat.active_workspace().focused_diff_changes_id().is_some() {
+        super::diff_changes::close_changes_view(stoat, false);
+    }
+    super::review::exit_diff_view(stoat);
 
     let saved_editor = {
         let ws = stoat.active_workspace();

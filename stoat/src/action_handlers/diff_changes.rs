@@ -5,7 +5,7 @@
 //! excerpts, and respawn a pane whose state did not survive a restore.
 
 use super::{
-    jump,
+    conflict_view, jump,
     movement::{self, ChangeDir, ChangeUnit},
     pane, review,
     view::{self, PageDir, ViewAlign},
@@ -51,9 +51,14 @@ pub(crate) enum StackPress {
 /// [`close_diff_changes`], which `q` runs, is the close that returns to a
 /// covered diff.
 ///
-/// Anywhere else it shows a changes view over the focused view. `DiffFiles`
-/// opens the per-file diff from a changes view.
+/// Anywhere else it shows a changes view over the focused view. An open
+/// conflict view closes first, so the changes view covers the plain file that
+/// the conflict view covered. `DiffFiles` opens the per-file diff from a
+/// changes view.
 pub(super) fn toggle_diff_changes(stoat: &mut Stoat) -> UpdateEffect {
+    if stoat.active_workspace().conflict.is_some() {
+        conflict_view::close_conflict(stoat);
+    }
     if stoat.active_workspace().focused_diff_changes_id().is_some() {
         return close_changes_view(stoat, false);
     }
@@ -80,7 +85,7 @@ pub(crate) fn close_diff_changes(stoat: &mut Stoat) -> UpdateEffect {
 ///
 /// With `to_covered_diff` false, a changes view opened from a per-file diff
 /// lands the pane in a plain editor and does not return to the diff.
-fn close_changes_view(stoat: &mut Stoat, to_covered_diff: bool) -> UpdateEffect {
+pub(super) fn close_changes_view(stoat: &mut Stoat, to_covered_diff: bool) -> UpdateEffect {
     if stoat.active_workspace().focused_diff_changes_id().is_none() {
         return UpdateEffect::None;
     }

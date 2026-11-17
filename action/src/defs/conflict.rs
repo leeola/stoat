@@ -8,8 +8,9 @@ define_action!(
     "resolve merge conflicts in a three-way view",
     "Open the current merge, rebase, or cherry-pick's conflicted files in a \
      three-column view of ours, an editable result, and theirs, built from the \
-     on-disk index stages. Re-dispatch to close the view and return to the \
-     plain file.",
+     on-disk index stages. From a changes view or the per-file diff it closes \
+     that view first. Re-dispatch to close the view and return to the plain \
+     file.",
     ActionPriority::Common
 );
 
