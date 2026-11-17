@@ -29,6 +29,7 @@ pub(crate) enum Toggle {
     MacroRecording,
     DiffView,
     ChangesView,
+    ConflictView,
     PaneWiden,
     Wrap,
     Minimap,
@@ -40,7 +41,7 @@ pub(crate) enum Toggle {
 
 impl Toggle {
     /// Every toggle, in declaration order.
-    pub(crate) const ALL: [Toggle; 21] = [
+    pub(crate) const ALL: [Toggle; 22] = [
         Toggle::FollowChanges,
         Toggle::LiveReload,
         Toggle::FollowReload,
@@ -55,6 +56,7 @@ impl Toggle {
         Toggle::MacroRecording,
         Toggle::DiffView,
         Toggle::ChangesView,
+        Toggle::ConflictView,
         Toggle::PaneWiden,
         Toggle::Wrap,
         Toggle::Minimap,
@@ -82,6 +84,7 @@ impl Toggle {
             ActionKind::RecordMacro => Toggle::MacroRecording,
             ActionKind::DiffFiles => Toggle::DiffView,
             ActionKind::DiffChanges => Toggle::ChangesView,
+            ActionKind::Conflict => Toggle::ConflictView,
             ActionKind::TogglePaneWiden => Toggle::PaneWiden,
             ActionKind::ToggleWrap => Toggle::Wrap,
             ActionKind::ToggleMinimap => Toggle::Minimap,
@@ -117,6 +120,7 @@ impl Toggle {
                     || resolve_focus(ws).is_some_and(|(editor, _)| editor.diff_view)
             },
             Toggle::ChangesView => ws.focused_diff_changes_id().is_some(),
+            Toggle::ConflictView => ws.conflict.is_some(),
             Toggle::PaneWiden => ws.panes.widened() == Some(ws.panes.focus()),
             Toggle::Wrap => resolve_focus(ws).is_some_and(|(editor, _)| {
                 editor
@@ -188,7 +192,7 @@ mod tests {
         keymap::{ResolvedAction, ResolvedArg},
         Stoat,
     };
-    use stoat_action::{ToggleMinimap, TogglePaneWiden, ToggleTabBar, ToggleWrap};
+    use stoat_action::{Conflict, ToggleMinimap, TogglePaneWiden, ToggleTabBar, ToggleWrap};
     use stoat_config::Value;
 
     fn action(name: &str) -> ResolvedAction {
@@ -384,6 +388,33 @@ mod tests {
                 reads(&h.stoat)
             ),
             (Some(Toggle::ChangesView), false, true),
+        );
+    }
+
+    /// The `space d x` row reads as the conflict view toggle, which is on while
+    /// the workspace holds a conflict session.
+    #[test]
+    fn the_conflict_view_toggle_reads_the_session() {
+        let mut h = Stoat::test();
+        let git_root = h.stoat.active_workspace().git_root.clone();
+        h.fake_git().add_repo(git_root).conflicted_file(
+            "f.txt",
+            Some("base\n"),
+            Some("ours\n"),
+            Some("theirs\n"),
+        );
+        let reads = |stoat: &Stoat| ToggleStates::read(stoat).is_on(Toggle::ConflictView);
+
+        let before = reads(&h.stoat);
+        dispatch(&mut h.stoat, &Conflict);
+        h.settle();
+        assert_eq!(
+            (
+                binding_toggle(&[action("Conflict"), action("SetMode")]),
+                before,
+                reads(&h.stoat)
+            ),
+            (Some(Toggle::ConflictView), false, true),
         );
     }
 }

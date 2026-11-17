@@ -4209,10 +4209,11 @@ mod tests {
         );
     }
 
-    /// The chord picks a diff layout, `f` for the per-file diff and `c` for the
-    /// changes view, and binds no `d` beside them.
+    /// The chord picks a diff layout, `f` for the per-file diff, `c` for the
+    /// changes view, and `x` for the conflict view, and binds no `d` beside
+    /// them.
     #[test]
-    fn space_d_f_and_space_d_c_pick_a_diff_layout() {
+    fn space_d_f_c_and_x_pick_a_diff_layout() {
         let config = parse_config(crate::app::DEFAULT_KEYMAP);
         let keymap = Keymap::compile(&config);
         let pressed = |key| {
@@ -4222,11 +4223,33 @@ mod tests {
             ))
         };
         assert_eq!(
-            [pressed('f'), pressed('c'), pressed('d')],
+            [pressed('f'), pressed('c'), pressed('x'), pressed('d')],
             [
                 Some(vec!["DiffFiles".to_string(), "SetMode".to_string()]),
                 Some(vec!["DiffChanges".to_string(), "SetMode".to_string()]),
+                Some(vec!["Conflict".to_string(), "SetMode".to_string()]),
                 None,
+            ],
+        );
+    }
+
+    /// The conflict view lists the conflicted files of the repository, so `x`
+    /// binds only where the workspace root is inside one.
+    #[test]
+    fn space_d_x_binds_only_in_a_repository() {
+        let config = parse_config(crate::app::DEFAULT_KEYMAP);
+        let keymap = Keymap::compile(&config);
+        let pressed = |git| {
+            let state = TestState::new()
+                .set("mode", StateValue::String("space_diff".into()))
+                .set("git", StateValue::Bool(git));
+            action_names(keymap.lookup(&state, &key_event(KeyCode::Char('x'), KeyModifiers::NONE)))
+        };
+        assert_eq!(
+            [pressed(true), pressed(false)],
+            [
+                Some(vec!["Conflict".to_string(), "SetMode".to_string()]),
+                None
             ],
         );
     }

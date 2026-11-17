@@ -2101,6 +2101,10 @@ on key {
     # list of every change. On a changes view `c` closes it. Once one is open,
     # `Ctrl-t` flips between them.
     #
+    # `x` opens the three-way conflict view on the repository's conflicted
+    # files, and a second `x` closes it. `c` already names the changes view,
+    # so the conflict view takes `x`, the key beside it.
+    #
     # `i` and `h` point the diff at the index or at HEAD, `b` flips the base
     # between them, and `e` opens the base on the command line. A pair diff of
     # two files has no index or HEAD behind it, so these four bind only where
@@ -2128,6 +2132,7 @@ on key {
 
         git {
             r -> [FollowReload(), SetMode(normal)];
+            x -> [Conflict(), SetMode(normal)];
         }
 
         view == diff {
