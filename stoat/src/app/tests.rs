@@ -16651,7 +16651,7 @@ fn the_walkthrough_picker_rows_show_slug_count_and_title() {
             ["alpha 1 Alpha tour", "zebra 2 Zebra tour"].map(String::from),
             rounded
         ),
-        "each row shows its tour, and the selected first row draws its two boxes",
+        "each row shows its tour, and the selected first row draws its rounded box",
     );
 }
 
@@ -16675,28 +16675,26 @@ fn the_pane_finder_rows_show_kind_title_and_place() {
             ["buffer buf.txt tab 1", "term term tab 2"].map(String::from),
             rounded
         ),
-        "each row shows its view, and the selected first row draws its two boxes",
+        "each row shows its view, and the selected first row draws its rounded box",
     );
 }
 
 /// The boxes a fresh live frame draws over the first row of `rows`, and the
-/// two boxes of a rounded selected row in the theme's accent and select fill.
+/// box of a rounded selected row in the theme's select fill.
 fn first_row_boxes(
     h: &mut crate::test_harness::TestHarness,
     rows: Rect,
 ) -> (Vec<RowBox>, Vec<RowBox>) {
     use crate::{render::paint::style_rgb, theme::scope};
 
-    let theme = &h.stoat.theme;
-    let accent = style_rgb(theme.get(scope::UI_BORDER_FOCUSED).fg).expect("an RGB accent");
     let select =
-        style_rgb(theme.list_selected(scope::UI_SELECTION).bg).expect("an RGB select fill");
+        style_rgb(h.stoat.theme.list_selected(scope::UI_SELECTION).bg).expect("an RGB select fill");
 
     let _ = h.stoat.render();
     let first = Rect::new(rows.x, rows.y, rows.width, 1);
     (
         row_boxes(&h.stoat.apc_scene.all_bytes(), first),
-        rounded_row_boxes(accent, select),
+        rounded_row_boxes(select),
     )
 }
 

@@ -176,7 +176,7 @@ pub(crate) fn render_help(
 
     let list_scroll =
         crate::render::picker::window_start(help.selected(), list_rect.height as usize);
-    paint_help_list_rows(help, list_rect, list_scroll, theme, buf, scene);
+    paint_help_list_rows(help, list_rect, list_scroll, theme, true, buf, scene);
     paint_help_detail_rows(
         help,
         layout.detail,
@@ -214,17 +214,20 @@ fn footer_note(help: &Help) -> String {
 ///
 /// Shared by the live list, which derives `start_row` from the selection, and
 /// the smooth-scroll pool, which paints absolute pages, so both render identical
-/// rows. The selected row's accent bar goes into `scene`.
+/// rows. The selected row draws through
+/// [`selected_row`](crate::render::chrome::selected_row), as a rounded box with
+/// `panels`. A pool page passes `panels` false, because a page captures no
+/// panel, and keeps the row's cells in the selected style with the accent bar.
 pub(crate) fn paint_help_list_rows(
     help: &Help,
     area: Rect,
     start_row: usize,
     theme: &crate::theme::Theme,
+    panels: bool,
     buf: &mut Buffer,
     scene: &mut stoat_widgets::ApcScene,
 ) {
     let row_style = theme.get(crate::theme::scope::UI_TEXT);
-    let selected_style = theme.list_selected(crate::theme::scope::UI_SELECTION);
     let key_style = theme
         .get(crate::theme::scope::UI_KEY_LABEL)
         .add_modifier(Modifier::BOLD);
@@ -258,19 +261,22 @@ pub(crate) fn paint_help_list_rows(
     for (row_idx, &entry_idx) in filtered.iter().skip(start_row).take(rows).enumerate() {
         let row = area.y + row_idx as u16;
         let entry = &entries[entry_idx];
-        let is_selected = entry_idx == *filtered.get(selected).unwrap_or(&usize::MAX);
-        let base = if is_selected {
-            selected_style
-        } else {
-            row_style
+        let base = match entry_idx == *filtered.get(selected).unwrap_or(&usize::MAX) {
+            true => crate::render::chrome::selected_row(
+                Rect::new(area.x, row, area.width, 1),
+                row_style,
+                panels,
+                theme,
+                buf,
+                scene,
+            ),
+            false => {
+                for col in area.x..row_end {
+                    buf[(col, row)].set_char(' ').set_style(row_style);
+                }
+                row_style
+            },
         };
-
-        for col in area.x..row_end {
-            buf[(col, row)].set_char(' ').set_style(base);
-        }
-        if is_selected {
-            crate::render::chrome::selection_bar(area.x, row, theme, buf, scene);
-        }
 
         let (key_text, key_cell_style) = match entry.key_label.as_deref() {
             Some(label) => (label, key_style),
@@ -573,6 +579,7 @@ mod tests {
         test_fixture::{column_rules, plate_islands},
     };
     use stoat_config::Value;
+    use stoatty_protocol::command::{decode_stream, Command};
 
     #[test]
     fn format_action_renders_args_then_bare() {
@@ -668,6 +675,44 @@ mod tests {
         assert!(
             text.ends_with("normal \u{00B7} view file \u{00B7} pane editor "),
             "the footer reads {text:?}"
+        );
+    }
+
+    /// The live list draws its selected first row as the rounded box with no
+    /// bar. A pooled page captures no panel, so the page of the same rows keeps
+    /// the accent bar at the row's first cell and draws no panel.
+    #[test]
+    fn the_help_list_rounds_its_live_row_and_keeps_the_bar_on_its_page() {
+        let mut h = crate::test_harness::TestHarness::with_size(200, 40);
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::OpenHelp);
+        let help = h.stoat.help.take().expect("help is open");
+        let theme = h.stoat.theme.clone();
+        let rows = Rect::new(0, 0, 40, 4);
+        let mut live = stoat_widgets::ApcScene::new();
+        paint_help_list_rows(
+            &help,
+            rows,
+            0,
+            &theme,
+            true,
+            &mut Buffer::empty(rows),
+            &mut live,
+        );
+        let page = crate::smooth_scroll::render_help_list_page(&help, 0, &theme, 40, 4);
+
+        let marks = |bytes: &[u8]| -> Vec<(char, i32, i32)> {
+            decode_stream(bytes)
+                .into_iter()
+                .filter_map(|command| match command {
+                    Command::Panel(panel) => Some(('p', panel.left.into(), panel.top.into())),
+                    Command::Bar(bar) => Some(('b', bar.x.into(), bar.y.into())),
+                    _ => None,
+                })
+                .collect()
+        };
+        assert_eq!(
+            (marks(live.bytes()), marks(&page)),
+            (vec![('p', 0, 0)], vec![('b', 0, 0)]),
         );
     }
 

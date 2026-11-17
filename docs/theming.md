@@ -241,8 +241,9 @@ The typed UI scopes, by group (syntax scopes are open-ended):
   unset paints each list's row with `ui.selection`, or with
   `ui.selection.reversed` in the commits, rebase, and conflict views. A theme
   that leaves `ui.list.match` unset paints the matches with
-  `ui.search.match`. Inside stoatty the selected row also carries an accent
-  bar at its left edge, in the `ui.border.focused` color.
+  `ui.search.match`. Inside stoatty the selected row of a filter modal's list
+  draws as a box with rounded corners. The selected row of every other list
+  carries an accent bar at its left edge, in the `ui.border.focused` color.
 - `ui.list.current` -- the row of a list that another pane shows, such as the
   file the commits view's diff preview stands on in its files table.
 - `ui.chip` -- the chip at the right end of a filter modal's header row, such

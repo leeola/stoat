@@ -758,14 +758,12 @@ pub(crate) mod test_support {
     /// One panel's fill, edges, and corner radius, as [`row_boxes`] reads it.
     pub(crate) type RowBox = (Option<[u8; 3]>, [Edge; 4], u8);
 
-    /// The accent [`rounded_row_theme`] gives the focused border.
-    pub(crate) const ROW_ACCENT: [u8; 3] = [7, 8, 9];
-
     /// The selection background [`rounded_row_theme`] sets.
     pub(crate) const ROW_SELECT: [u8; 3] = [4, 5, 6];
 
     /// A theme whose selection and accent are RGB, so a live scene draws a
-    /// selected row as its two rounded boxes.
+    /// selected row as its rounded box. The accent lets a row test show that
+    /// the box draws no accent.
     pub(crate) fn rounded_row_theme() -> Theme {
         let src = r##"theme t {
             ui.selection.bg = "#040506";
@@ -792,23 +790,20 @@ pub(crate) mod test_support {
             .collect()
     }
 
-    /// What [`row_boxes`] reads at a rounded selected row in `accent` and
-    /// `select`: the accent box 6 px inside the list's sides, then the select
-    /// box 2 px further in on its left, both with 6 px corners.
-    pub(crate) fn rounded_row_boxes(accent: [u8; 3], select: [u8; 3]) -> Vec<RowBox> {
-        let row_box = |fill, left| {
-            let edges = [
-                Edge::Inset(0),
-                Edge::Inset(6),
-                Edge::Inset(0),
-                Edge::Inset(left),
-            ];
-            (Some(fill), edges, 6)
-        };
-        vec![row_box(accent, 6), row_box(select, 8)]
+    /// What [`row_boxes`] reads at a rounded selected row in `select`, one box
+    /// with 4 px corners, 1 px inside the row's left side and 3 px inside its
+    /// right.
+    pub(crate) fn rounded_row_boxes(select: [u8; 3]) -> Vec<RowBox> {
+        let edges = [
+            Edge::Inset(0),
+            Edge::Inset(3),
+            Edge::Inset(0),
+            Edge::Inset(1),
+        ];
+        vec![(Some(select), edges, 4)]
     }
 
-    /// The background [`selected_rows`] scans for.
+    /// The background [`selection_theme`] gives the selection.
     pub(crate) const SELECTION_BG: Color = Color::Rgb(255, 0, 0);
 
     pub(crate) fn selection_theme() -> Theme {
@@ -824,16 +819,6 @@ pub(crate) mod test_support {
         let src = r##"theme t { ui.search.match.fg = "#ff0000"; }"##;
         let (config, _) = stoat_config::parse(src);
         Theme::from_config(&config.expect("theme parses"), "t").expect("theme loads")
-    }
-
-    /// Rows of `buf` carrying [`SELECTION_BG`], in ascending order.
-    pub(crate) fn selected_rows(buf: &Buffer) -> Vec<u16> {
-        let area = buf.area;
-        (area.y..area.y + area.height)
-            .filter(|&row| {
-                (area.x..area.x + area.width).any(|col| buf[(col, row)].bg == SELECTION_BG)
-            })
-            .collect()
     }
 
     pub(crate) fn row_text(buf: &Buffer, row: u16) -> String {
@@ -856,9 +841,9 @@ pub(crate) mod test_support {
 /// style to set a whole list apart, such as a list of ignored files.
 ///
 /// The selected row draws through [`chrome::selected_row`]. With `panels` it
-/// is a rounded box with an accent edge in a live scene. A pool page passes
-/// `panels` false, because a page captures no panel, and keeps the row's cells
-/// in [`Theme::list_selected`] with the accent bar.
+/// is a rounded box in a live scene. A pool page passes `panels` false,
+/// because a page captures no panel, and keeps the row's cells in
+/// [`Theme::list_selected`] with the accent bar.
 ///
 /// A path row keeps columns 1 and 2 for its [`chrome::type_tag`], so tagged and
 /// untagged rows align, and a wider tag pushes only its own row's label right.

@@ -263,7 +263,7 @@ mod tests {
         input_view::{InputView, SubmitTarget},
         picker::Preview,
         render::picker::test_support::{
-            rounded_row_boxes, rounded_row_theme, row_boxes, ROW_ACCENT, ROW_SELECT,
+            rounded_row_boxes, rounded_row_theme, row_boxes, ROW_SELECT,
         },
     };
     use ratatui::{buffer::Buffer, layout::Rect};
@@ -275,7 +275,7 @@ mod tests {
     use stoat_widgets::ApcScene;
 
     /// In a live scene the selected diagnostic's row draws as the rounded row's
-    /// two boxes across the list.
+    /// box across the list.
     #[test]
     fn the_selected_diagnostic_draws_the_rounded_row() {
         let entry = |line: u32| DiagnosticsEntry {
@@ -312,7 +312,7 @@ mod tests {
 
         assert_eq!(
             row_boxes(scene.bytes(), Rect::new(2, 1, 30, 1)),
-            rounded_row_boxes(ROW_ACCENT, ROW_SELECT),
+            rounded_row_boxes(ROW_SELECT),
         );
     }
 }

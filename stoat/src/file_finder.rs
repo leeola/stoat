@@ -3184,8 +3184,8 @@ mod tests {
         h.assert_snapshot("file_finder_multi_token_highlight");
     }
 
-    /// Under ermine_night the finder's selected row fills with the select
-    /// surface, and a matched char reads warning in bold over that fill.
+    /// Under ermine_night the finder's selected row fills with the tab wash,
+    /// and a matched char reads warning in bold over that fill.
     #[test]
     fn the_finder_paints_its_rows_in_the_list_scopes() {
         let mut h = crate::Stoat::test();
@@ -3200,13 +3200,13 @@ mod tests {
             let cell = &buf[(list.x + col, list.y)];
             (cell.fg, cell.bg, cell.modifier)
         };
-        let select = Color::Rgb(0x23, 0x32, 0x4a);
+        let wash = Color::Rgb(0x24, 0x35, 0x52);
 
         assert_eq!(
             [style(12), style(8)],
             [
-                (Color::Rgb(0xdf, 0xe2, 0xe8), select, Modifier::empty()),
-                (Color::Rgb(0xe8, 0xbd, 0x6a), select, Modifier::BOLD),
+                (Color::Rgb(0xdf, 0xe2, 0xe8), wash, Modifier::empty()),
+                (Color::Rgb(0xe8, 0xbd, 0x6a), wash, Modifier::BOLD),
             ],
             "the r of .rs and the f of foo.rs on the selected first row",
         );

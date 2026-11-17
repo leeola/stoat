@@ -1753,7 +1753,7 @@ mod tests {
             [
                 (Style::default().bg(Color::Blue), Style::default()),
                 (
-                    Style::default().fg(rgb(0xdfe2e8)).bg(rgb(0x23324a)),
+                    Style::default().fg(rgb(0xdfe2e8)).bg(rgb(0x243552)),
                     Style::default()
                         .fg(rgb(0xe8bd6a))
                         .add_modifier(Modifier::BOLD),

@@ -43,15 +43,23 @@ const ZOOM_STEP_DIVISOR: u16 = 10;
 const SELECTION_BAR_WIDTH: u16 = 3;
 
 /// The corner radius of a list's rounded selected row, in logical pixels.
-const SELECTED_ROW_RADIUS: u8 = 6;
+const SELECTED_ROW_RADIUS: u8 = 4;
 
-/// The logical pixels a rounded selected row stands inside the list's left
-/// and right sides.
-const SELECTED_ROW_INSET: u8 = 6;
-
-/// The width of the accent edge inside a rounded selected row's left side, in
-/// logical pixels.
-const SELECTED_ROW_EDGE: u8 = 2;
+/// Where a rounded selected row's sides stand inside the row's cells, top,
+/// right, bottom, and left, in logical pixels.
+///
+/// The boards set a selected row 4 px inside its Island's sides. A list
+/// Island's left side stands 3 px left of the list's first cell, so the box
+/// stands 1 px inside that cell. Beside a preview, the Island ends 1 px into
+/// the gap column, so the box stands 3 px inside the list's last cell. A list
+/// with no preview has its Island's side 3 px right of its last cell, so there
+/// the box stands 6 px inside the Island, 2 px further in than the boards'.
+const SELECTED_ROW_EDGES: [Edge; 4] = [
+    Edge::Inset(0),
+    Edge::Inset(3),
+    Edge::Inset(0),
+    Edge::Inset(1),
+];
 
 /// The mark of a toggle that is on, U+25CF BLACK CIRCLE.
 const TOGGLE_ON_MARK: &str = "\u{25cf}";
@@ -804,10 +812,9 @@ pub(crate) fn chip_cells(cells: Rect, style: Style, scene: &mut ApcScene) -> Sty
 /// Draw a list's selected row over the cells of `rect`, and return the style
 /// its glyphs take.
 ///
-/// With `panels`, a live scene, and an RGB `ui.list.selected` background and
-/// accent, the row is a box with rounded corners, which stands inside the
-/// list's sides in the select fill. An accent edge runs inside its left side
-/// and follows the corners. The cells take `row_style`, so the list's surface
+/// With `panels`, a live scene, and an RGB `ui.list.selected` background, the
+/// row is one box with 4 px corners in that background, whose sides stand at
+/// [`SELECTED_ROW_EDGES`]. The cells take `row_style`, so the list's surface
 /// shows around the box, and the glyphs take the selected style over the
 /// row's background.
 ///
@@ -824,32 +831,16 @@ pub(crate) fn selected_row(
     scene: &mut ApcScene,
 ) -> Style {
     let selected = theme.list_selected(scope::UI_SELECTION);
-    let colors = style_rgb(selected.bg).zip(style_rgb(theme.get(scope::UI_BORDER_FOCUSED).fg));
-    let Some((fill, accent)) = colors.filter(|_| panels && scene.live()) else {
+    let Some(fill) = style_rgb(selected.bg).filter(|_| panels && scene.live()) else {
         fill_cells(rect, selected, buf);
         selection_bar(rect.x, rect.y, theme, buf, scene);
         return selected;
     };
 
     fill_cells(rect, row_style, buf);
-
-    // The edge is the accent box less the select box, whose left side stands
-    // the edge's width further in. Both share the right side, so only the left
-    // crescent between the two arcs shows, as an inset shadow draws it.
     Panel {
         corner_radius: SELECTED_ROW_RADIUS,
-        edges: Edge::symmetric(SELECTED_ROW_INSET, 0),
-        ..Panel::chip(accent)
-    }
-    .draw_components(rect, scene);
-    Panel {
-        corner_radius: SELECTED_ROW_RADIUS,
-        edges: [
-            Edge::Inset(0),
-            Edge::Inset(SELECTED_ROW_INSET),
-            Edge::Inset(0),
-            Edge::Inset(SELECTED_ROW_INSET + SELECTED_ROW_EDGE),
-        ],
+        edges: SELECTED_ROW_EDGES,
         ..Panel::chip(fill)
     }
     .draw_components(rect, scene);
@@ -1659,59 +1650,61 @@ mod tests {
         );
     }
 
-    /// A selected row in a live scene draws as two boxes with 6 px corners:
-    /// the accent box 6 px inside the list's sides, then the select box 2 px
-    /// further in on its left. Its cells keep the row's style, and its glyphs
-    /// take the selected style over the row's background. Without `panels` the
-    /// cells take the selected style and the accent bar marks the row, and a
-    /// dead scene sends nothing.
+    /// A selected row in a live scene draws as one box in the select fill with
+    /// 4 px corners, 1 px inside the row's left side and 3 px inside its right,
+    /// in a theme with no accent too. Its cells keep the row's style, and its
+    /// glyphs take the selected style over the row's background. Without
+    /// `panels` the cells take the selected style and the accent bar marks the
+    /// row, and a dead scene sends nothing.
     #[test]
     fn a_selected_row_rounds_in_a_live_scene_and_fills_its_cells_elsewhere() {
-        let (config, errors) = parse(
-            r##"theme t {
-                ui.list.selected = { fg: "#010203", bg: "#040506" };
-                ui.border.focused.fg = "#070809";
-            }"##,
-        );
-        assert!(errors.is_empty(), "parse errors: {errors:?}");
-        let theme = Theme::from_config(&config.expect("a config"), "t").expect("the theme");
+        let theme_of = |accent: &str| {
+            let (config, errors) = parse(&format!(
+                r##"theme t {{
+                    ui.list.selected = {{ fg: "#010203", bg: "#040506" }};
+                    {accent}
+                }}"##
+            ));
+            assert!(errors.is_empty(), "parse errors: {errors:?}");
+            Theme::from_config(&config.expect("a config"), "t").expect("the theme")
+        };
+        let theme = theme_of(r##"ui.border.focused.fg = "#070809";"##);
+        let unaccented = theme_of("");
         let rect = Rect::new(1, 2, 10, 1);
         let row_style = Style::default().bg(Color::Rgb(9, 9, 9));
-        let paint = |panels: bool, live: bool| {
+        let paint = |theme: &Theme, panels: bool, live: bool| {
             let mut buf = Buffer::empty(Rect::new(0, 0, 12, 4));
             let mut scene = ApcScene::new();
             scene.set_live(live);
-            let glyphs = selected_row(rect, row_style, panels, &theme, &mut buf, &mut scene);
+            let glyphs = selected_row(rect, row_style, panels, theme, &mut buf, &mut scene);
             let cells: Vec<Color> = (1..11).map(|x| buf[(x, 2)].bg).collect();
             (glyphs, cells, scene.bytes().to_vec())
         };
 
-        let row_box = |fill: [u8; 3], left: u8| {
-            encode_panel(&PanelCommand {
-                top: 2,
-                left: 1,
-                width: 10,
-                height: 1,
-                style: BorderStyle::None_,
-                border: fill,
-                corner_radius: 6,
-                fill: Some(fill),
-                shadow: PanelShadow::None_,
-                edges: [
-                    Edge::Inset(0),
-                    Edge::Inset(6),
-                    Edge::Inset(0),
-                    Edge::Inset(left),
-                ],
-                corners: 0,
-                fillets: 0,
-                fillet_radius: 2,
-                hatch: None,
-                above_pools: false,
-                backdrop: false,
-                anchor: None,
-            })
-        };
+        let row_box = encode_panel(&PanelCommand {
+            top: 2,
+            left: 1,
+            width: 10,
+            height: 1,
+            style: BorderStyle::None_,
+            border: [4, 5, 6],
+            corner_radius: 4,
+            fill: Some([4, 5, 6]),
+            shadow: PanelShadow::None_,
+            edges: [
+                Edge::Inset(0),
+                Edge::Inset(3),
+                Edge::Inset(0),
+                Edge::Inset(1),
+            ],
+            corners: 0,
+            fillets: 0,
+            fillet_radius: 2,
+            hatch: None,
+            above_pools: false,
+            backdrop: false,
+            anchor: None,
+        });
         let bar = encode_bar(&BarCommand {
             x: 16,
             y: 32,
@@ -1729,13 +1722,15 @@ mod tests {
         let (row_bg, selected_bg) = (Color::Rgb(9, 9, 9), Color::Rgb(4, 5, 6));
 
         assert_eq!(
-            [paint(true, true), paint(false, true), paint(true, false)],
             [
-                (
-                    selected.bg(row_bg),
-                    vec![row_bg; 10],
-                    [row_box([7, 8, 9], 6), row_box([4, 5, 6], 8)].concat(),
-                ),
+                paint(&theme, true, true),
+                paint(&unaccented, true, true),
+                paint(&theme, false, true),
+                paint(&theme, true, false),
+            ],
+            [
+                (selected.bg(row_bg), vec![row_bg; 10], row_box.clone()),
+                (selected.bg(row_bg), vec![row_bg; 10], row_box),
                 (selected, vec![selected_bg; 10], bar),
                 (selected, vec![selected_bg; 10], Vec::new()),
             ],

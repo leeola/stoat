@@ -1230,7 +1230,7 @@ pub(crate) fn render_help_list_page(
         page,
         theme,
         |buf, area, start_row, scene| {
-            paint_help_list_rows(help, area, start_row, theme, buf, scene)
+            paint_help_list_rows(help, area, start_row, theme, false, buf, scene)
         },
     )
 }

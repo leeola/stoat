@@ -814,7 +814,7 @@ mod tests {
                     (" ", rgb(0xdfe2e8), rgb(0x252830)),
                 ],
                 vec![
-                    panel(0, inner.width, 0x23324a, Edge::symmetric(0, 0)),
+                    panel(0, inner.width, 0x243552, Edge::symmetric(0, 0)),
                     chip(0, 0x223049),
                     chip(1, 0x1e3237),
                     chip(2, 0x2a2236),

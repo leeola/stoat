@@ -10,6 +10,7 @@
 
 use std::{
     collections::{HashMap, HashSet},
+    ops::Range,
     path::{Path, PathBuf},
     time::{Duration, Instant},
 };
@@ -54,7 +55,6 @@ const TEXT_DIM: [u8; 3] = [0xa3, 0xa9, 0xb5];
 const HAIRLINE: [u8; 3] = [0x2e, 0x32, 0x3b];
 const DIVIDER: [u8; 3] = [0x22, 0x25, 0x2b];
 const STRONG: [u8; 3] = [0x3e, 0x43, 0x4e];
-const SELECT: [u8; 3] = [0x23, 0x32, 0x4a];
 const DISABLED: [u8; 3] = [0x5b, 0x61, 0x6d];
 const TINT_ACCENT: [u8; 3] = [0x22, 0x30, 0x49];
 const DANGER: [u8; 3] = [0xf2, 0x77, 0x7f];
@@ -1236,7 +1236,7 @@ fn the_space_box_docks_as_a_card_on_the_raised_surface() {
 /// The commits view lists the rebase fixture's history under the graph
 /// header's row, with the lane graph left of its rows. The header row stays on
 /// the base. A blank cell on the selected first row, the row under the header,
-/// fills with the select surface, and one two rows below stays on the base.
+/// fills with the tab wash, and one two rows below stays on the base.
 ///
 /// The selected commit adds `ast.txt`, so the preview's one row under its label
 /// is an added line, tinted whole past its text.
@@ -1261,7 +1261,7 @@ fn the_commits_view_selects_its_first_row_beside_the_lane_graph() {
         &shot,
         &mut home,
         cell_rect(30, 3, 1, 1),
-        SELECT,
+        TAB_WASH,
         "selected_commit_row",
     );
     expect_region(
@@ -1334,17 +1334,18 @@ fn the_diff_view_keeps_its_box_docked_on_the_raised_surface() {
     }
 }
 
-/// The finder's selected row fills with the select surface inside a box with
-/// rounded corners, and an accent edge runs inside the box's left side.
+/// The finder's selected row is one box in the tab wash with 4 px corners, and
+/// no accent edge runs inside it.
 ///
-/// The select cells form one run in one row. The box stands 6 px inside the
-/// list's sides, so the list's first cell holds 6 px of the list's Island,
-/// on the base surface, and the run starts at the second cell. On that first
-/// cell's middle pixel row, pixel columns 0 to 5 read the base, 6 and 7 the
-/// 2 px accent edge, and 8 the select fill. On its first pixel row, column 6
-/// reads the base, which the 6 px arc leaves clear.
+/// The selected row is the list's first, cell row 12, and its first cell is
+/// cell 17, from pixel column 153. The box stands 1 px inside that cell, so
+/// the row's first pixel column keeps the list's Island, on the base surface.
+/// The box spans pixel columns 154 to 599, 3 px inside the row's last cell,
+/// and its 4 px arcs leave the base at the four corner pixels. A blank pixel
+/// in the row's middle reads the tab wash, and no pixel of the row's first
+/// cell takes the accent.
 #[test]
-fn the_finder_marks_its_selected_row_with_a_rounded_fill_and_an_accent_edge() {
+fn the_finder_marks_its_selected_row_with_a_rounded_wash() {
     let mut home = support::scratch_home();
     let shot = settled_frame(
         home.path(),
@@ -1353,39 +1354,36 @@ fn the_finder_marks_its_selected_row_with_a_rounded_fill_and_an_accent_edge() {
         "<Space>p<Settle>",
     );
 
-    let selected = cells_of(&shot, SELECT);
-    let first = selected.first().copied();
-    let one_run = first.is_some_and(|(col, row)| {
-        let run = col..col + selected.len() as u16;
-        selected == run.map(|col| (col, row)).collect::<Vec<_>>()
-    });
-    let Some((col, row)) = first.filter(|_| one_run) else {
-        let frame = keep_frame(&shot, &mut home, "selected_row");
-        panic!(
-            "the select cells {selected:?} are not one run in one row; the frame is {}",
-            frame.display(),
-        );
-    };
-
-    let (x, y, _, height) = cell_rect(col - 1, row, 1, 1);
-    let middle = [BASE, BASE, BASE, BASE, BASE, BASE, ACCENT, ACCENT, SELECT];
-    for (offset, want) in (0..).zip(middle) {
-        let what = format!("selected_row_middle_column_{offset}");
-        expect_region(
-            &shot,
-            &mut home,
-            (x + offset, y + height / 2, 1, 1),
-            want,
-            &what,
-        );
-    }
     expect_region(
         &shot,
         &mut home,
-        (x + 6, y, 1, 1),
-        BASE,
-        "selected_row_top_arc",
+        (500, 225, 1, 1),
+        TAB_WASH,
+        "selected_row_middle",
     );
+    expect_region(
+        &shot,
+        &mut home,
+        (153, 216, 1, 18),
+        BASE,
+        "selected_row_first_column",
+    );
+    for (x, y) in [(154, 216), (599, 216), (154, 233), (599, 233)] {
+        let what = format!("selected_row_corner_{x}_{y}");
+        expect_region(&shot, &mut home, (x, y, 1, 1), BASE, &what);
+    }
+
+    let accent = (153..162)
+        .flat_map(|x| (216..234).map(move |y| (x, y)))
+        .filter(|&(x, y)| pixel(&shot, x, y) == ACCENT)
+        .count();
+    if accent > 0 {
+        let frame = keep_frame(&shot, &mut home, "selected_row_accent");
+        panic!(
+            "{accent} pixels of the selected row's first cell take the accent; the frame is {}",
+            frame.display(),
+        );
+    }
 }
 
 /// The finder's header ends in its scope chip, a box on the tab wash.
@@ -1394,8 +1392,8 @@ fn the_finder_marks_its_selected_row_with_a_rounded_fill_and_an_accent_edge() {
 /// 6 px of padding at each end. Those are the 15 cells that end at the inner
 /// rect's right edge, cell 143. The header row is cell row 10, and the box
 /// draws 1 px right and 7 px down of its cells. So the tab wash fills the
-/// pixels from (1153, 187) to (1287, 204), and no other pixel under the tab
-/// bar takes it.
+/// pixels from (1153, 187) to (1287, 204), and no other pixel of the header's
+/// 32 px band, pixel rows 180 to 211, takes it.
 #[test]
 fn the_finder_header_ends_in_a_chip_on_the_tab_wash() {
     let mut home = support::scratch_home();
@@ -1410,6 +1408,7 @@ fn the_finder_header_ends_in_a_chip_on_the_tab_wash() {
         &shot,
         &mut home,
         TAB_WASH,
+        180..212,
         (1153, 187, 1287, 204),
         "header_chip",
     );
@@ -1519,9 +1518,9 @@ fn the_session_picker_plate_ends_in_its_footer_row() {
 /// padding at each end, which are the 10 cells from cell 129. They end on the
 /// last cell edge left of `all` and its gap. The header row is cell row 3, and
 /// the box draws 1 px right and 7 px down of its cells. So the tab wash fills
-/// the pixels from (1162, 61) to (1251, 78), and no other pixel under the tab
-/// bar takes it. In that band, the 30 px from x 1258 hold `all` with no box,
-/// so most of them keep the ground.
+/// the pixels from (1162, 61) to (1251, 78), and no other pixel of the header's
+/// 32 px band, pixel rows 54 to 85, takes it. In that band, the 30 px from x 1258 hold `all` with
+/// no box, so most of them keep the ground.
 #[test]
 fn the_help_header_names_both_scopes() {
     let mut home = support::scratch_home();
@@ -1531,6 +1530,7 @@ fn the_help_header_names_both_scopes() {
         &shot,
         &mut home,
         TAB_WASH,
+        54..86,
         (1162, 61, 1251, 78),
         "help_active_scope",
     );
@@ -1613,7 +1613,7 @@ fn a_hover_ends_in_a_footer_on_the_raised_surface() {
 }
 
 /// A completion row of a function leads with its badge on the function tint,
-/// and the selected first row is a box in the select fill with 4 px corners.
+/// and the selected first row is a box in the tab wash with 4 px corners.
 ///
 /// The server loads the crate before it answers, so the completion key plays
 /// again until the tint shows. The popup opens with no row selected, so Tab
@@ -1669,7 +1669,7 @@ fn a_function_completion_leads_with_its_badge_on_the_function_tint() {
         &shot,
         &mut home,
         (x + 4, y, 1, 1),
-        SELECT,
+        TAB_WASH,
         "selected_row_top_edge",
     );
 }
@@ -2180,19 +2180,20 @@ fn expect_region(shot: &Snapshot, home: &mut TempDir, rect: PixelRect, want: [u8
     );
 }
 
-/// Panics unless the pixels of `color` under the tab bar's 32 px band fill a
-/// box that spans exactly `want`, the inclusive `(left, top, right, bottom)`.
+/// Panics unless the pixels of `color` in the pixel rows `rows` fill a box
+/// that spans exactly `want`, the inclusive `(left, top, right, bottom)`.
 ///
-/// Every pixel of the color counts, so a second element in it widens the box
-/// and fails. A miss saves the frame as [`expect_region`] does.
+/// Every pixel of the color in those rows counts, so a second element in it
+/// widens the box and fails. A miss saves the frame as [`expect_region`] does.
 fn expect_color_box(
     shot: &Snapshot,
     home: &mut TempDir,
     color: [u8; 3],
+    rows: Range<u32>,
     want: (u32, u32, u32, u32),
     what: &str,
 ) {
-    let found = (32..shot.height)
+    let found = rows
         .flat_map(|y| (0..shot.width).map(move |x| (x, y)))
         .filter(|&(x, y)| pixel(shot, x, y) == color)
         .fold(None, |found: Option<(u32, u32, u32, u32)>, (x, y)| {

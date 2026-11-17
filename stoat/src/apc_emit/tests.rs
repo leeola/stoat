@@ -6315,11 +6315,9 @@ fn typing_in_the_finder_defers_its_pool_refill_until_the_list_scrolls() {
     );
 }
 
-/// The finder's selected row draws as a rounded box in the live frame: the
-/// accent box 6 px inside the list's sides, then the select box 2 px further
-/// in on its left, both with 6 px corners, and no accent bar. The pool page
-/// that holds the row captures no panel, so it keeps the accent bar at the
-/// row's first cell.
+/// The finder's selected row draws as one rounded box in the live frame, with
+/// 4 px corners and no accent bar. The pool page that holds the row captures
+/// no panel, so it keeps the accent bar at the row's first cell.
 #[test]
 fn the_finder_rounds_its_live_selected_row_and_keeps_the_bar_on_its_page() {
     use crate::{
@@ -6385,13 +6383,8 @@ fn the_finder_rounds_its_live_selected_row_and_keeps_the_bar_on_its_page() {
             row_boxes(&live, Rect::new(list.x, list.y, list.width, 1)),
             list_bars(page, 0, (0, list.height)),
         ),
-        (
-            Vec::new(),
-            rounded_row_boxes([0x7f, 0xb0, 0xff], select),
-            vec![bar(0, 0)],
-        ),
-        "the live row is the accent box under the select box with no bar, and the page keeps \
-         one bar at its origin",
+        (Vec::new(), rounded_row_boxes(select), vec![bar(0, 0)],),
+        "the live row is one rounded box with no bar, and the page keeps one bar at its origin",
     );
 }
 

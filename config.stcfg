@@ -335,7 +335,7 @@ theme ermine_night inherits default_dark {
 
     # Every list reads these two. default_dark leaves them unset, so its lists
     # keep their own selection scopes and ui.search.match.
-    ui.list.selected = { fg: text, bg: select };
+    ui.list.selected = { fg: text, bg: tab_wash };
     ui.list.match    = { fg: warning, modifiers: [bold] };
 
     ui.list.current.bg = raised;

@@ -882,9 +882,7 @@ mod tests {
         input_view::{InputView, SubmitTarget},
         picker::{self, Preview},
         render::{
-            picker::test_support::{
-                rounded_row_boxes, rounded_row_theme, row_boxes, ROW_ACCENT, ROW_SELECT,
-            },
+            picker::test_support::{rounded_row_boxes, rounded_row_theme, row_boxes, ROW_SELECT},
             symbol_finder::paint_symbol_rows,
         },
     };
@@ -1110,8 +1108,8 @@ mod tests {
         assert_eq!(f.selected_entry().map(|e| e.title.as_str()), Some("b"));
     }
 
-    /// In a live scene the selected symbol's row draws as the rounded row's two
-    /// boxes across the list.
+    /// In a live scene the selected symbol's row draws as the rounded row's box
+    /// across the list.
     #[test]
     fn the_selected_symbol_draws_the_rounded_row() {
         let mut f = finder(&["a", "b", "c"]);
@@ -1131,7 +1129,7 @@ mod tests {
 
         assert_eq!(
             row_boxes(scene.bytes(), Rect::new(2, 2, 30, 1)),
-            rounded_row_boxes(ROW_ACCENT, ROW_SELECT),
+            rounded_row_boxes(ROW_SELECT),
         );
     }
 }

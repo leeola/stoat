@@ -161,7 +161,6 @@ pub(crate) fn render_workspace_picker(
 
     let row_style = theme.get(crate::theme::scope::UI_TEXT);
     let current_style = theme.get(crate::theme::scope::UI_PROMPT);
-    let selected_style = theme.list_selected(crate::theme::scope::UI_SELECTION);
     let header_style = theme.get(crate::theme::scope::UI_TEXT_MUTED);
     let match_style = theme.list_match();
     let key_style = theme.get(crate::theme::scope::UI_KEY_LABEL);
@@ -237,23 +236,27 @@ pub(crate) fn render_workspace_picker(
         let entry = &entries[idx];
         let indices = picker.row_indices(i, &mut derived, &mut matching);
         let row = entries_top + (i - start) as u16;
-        let is_selected = i == selected;
-        let base_style = if is_selected {
-            selected_style
-        } else {
-            match entry.status {
-                WorkspaceStatus::Active => current_style,
-                WorkspaceStatus::Background => row_style,
-                WorkspaceStatus::Inactive => header_style,
-            }
+        let status_style = match entry.status {
+            WorkspaceStatus::Active => current_style,
+            WorkspaceStatus::Background => row_style,
+            WorkspaceStatus::Inactive => header_style,
         };
-
-        for col in inner.x..inner.x + inner.width {
-            buf[(col, row)].set_char(' ').set_style(base_style);
-        }
-        if is_selected {
-            crate::render::chrome::selection_bar(inner.x, row, theme, buf, scene);
-        }
+        let base_style = match i == selected {
+            true => crate::render::chrome::selected_row(
+                Rect::new(inner.x, row, inner.width, 1),
+                status_style,
+                true,
+                theme,
+                buf,
+                scene,
+            ),
+            false => {
+                for col in inner.x..inner.x + inner.width {
+                    buf[(col, row)].set_char(' ').set_style(status_style);
+                }
+                status_style
+            },
+        };
 
         paint_marker(entry.status, marker_x, row, base_style, theme, buf, scene);
 
@@ -325,12 +328,14 @@ pub(crate) fn render_workspace_picker(
     }
 
     if creating {
-        for col in inner.x..inner.x + inner.width {
-            buf[(col, entries_top)]
-                .set_char(' ')
-                .set_style(selected_style);
-        }
-        crate::render::chrome::selection_bar(inner.x, entries_top, theme, buf, scene);
+        let selected_style = crate::render::chrome::selected_row(
+            Rect::new(inner.x, entries_top, inner.width, 1),
+            row_style,
+            true,
+            theme,
+            buf,
+            scene,
+        );
         write_str(buf, marker_x, entries_top, "+", selected_style);
         write_str_clipped(
             buf,
@@ -492,8 +497,11 @@ mod tests {
         buffer::BufferId,
         editor_state::EditorId,
         input_view::{InputView, SubmitTarget},
-        render::picker::test_support::{
-            match_theme, row_text, selected_rows, selection_theme, MATCH_FG,
+        render::{
+            paint::style_rgb,
+            picker::test_support::{
+                match_theme, row_text, selection_theme, MATCH_FG, SELECTION_BG,
+            },
         },
         run::RunState,
         ssh::{RemoteTarget, Transport},
@@ -565,23 +573,27 @@ mod tests {
         }
     }
 
+    /// Paint `picker` under [`selection_theme`] in a live scene, and return the
+    /// rows its selected-row boxes cover, top first.
     fn render(
         picker: &mut WorkspacePicker,
         workspaces: &mut SlotMap<WorkspaceId, Workspace>,
         active: WorkspaceId,
         buf: &mut Buffer,
         area: Rect,
-    ) {
+    ) -> Vec<u16> {
         let theme = selection_theme();
-        render_with(
-            &theme,
-            picker,
-            workspaces,
-            active,
-            buf,
-            area,
-            &mut ApcScene::new(),
-        );
+        let mut scene = ApcScene::new();
+        render_with(&theme, picker, workspaces, active, buf, area, &mut scene);
+        command::decode_stream(scene.bytes())
+            .into_iter()
+            .filter_map(|cmd| match cmd {
+                Command::Panel(panel) if panel.fill == style_rgb(Some(SELECTION_BG)) => {
+                    Some(panel.top)
+                },
+                _ => None,
+            })
+            .collect()
     }
 
     fn render_with(
@@ -692,9 +704,7 @@ mod tests {
 
         let area = Rect::new(0, 0, 100, 30);
         let mut buf = Buffer::empty(area);
-        render(&mut picker, &mut workspaces, active, &mut buf, area);
-
-        let rows = selected_rows(&buf);
+        let rows = render(&mut picker, &mut workspaces, active, &mut buf, area);
         assert_eq!(rows.len(), 1, "the selection is on screen exactly once");
         let text = row_text(&buf, rows[0]);
         assert!(
@@ -857,9 +867,9 @@ mod tests {
     /// yet.
     #[test]
     fn a_query_with_no_row_paints_a_create_row_in_its_place() {
-        let (buf, inner) = painted_with_query("notes");
+        let (buf, inner, rows) = painted_with_query("notes");
         assert_eq!(
-            selected_words(&buf, inner),
+            selected_words(&buf, inner, &rows),
             [["+", "notes", "/tmp/ws00"]],
             "one selected row names the query and the active root"
         );
@@ -867,9 +877,9 @@ mod tests {
 
     #[test]
     fn a_query_with_a_row_paints_no_create_row() {
-        let (buf, inner) = painted_with_query("ws01");
+        let (buf, inner, rows) = painted_with_query("ws01");
 
-        let selected: Vec<Vec<String>> = selected_words(&buf, inner)
+        let selected: Vec<Vec<String>> = selected_words(&buf, inner, &rows)
             .into_iter()
             .map(|words| words.into_iter().take(2).collect())
             .collect();
@@ -910,30 +920,33 @@ mod tests {
 
         let area = Rect::new(0, 0, 100, 30);
         let mut buf = Buffer::empty(area);
-        render(&mut picker, &mut workspaces, active, &mut buf, area);
         assert_eq!(
-            selected_rows(&buf),
+            render(&mut picker, &mut workspaces, active, &mut buf, area),
             Vec::<u16>::new(),
             "no row paints as selected"
         );
     }
 
     /// The picker over three workspaces with `query` typed into a real input
-    /// and ranked, painted, alongside the modal's inner rect.
-    fn painted_with_query(query: &str) -> (Buffer, Rect) {
+    /// and ranked, painted, alongside the modal's inner rect and the rows its
+    /// selected-row boxes cover.
+    fn painted_with_query(query: &str) -> (Buffer, Rect, Vec<u16>) {
         painted_with(query, |_| {})
     }
 
     /// [`painted_with_query`] with `adjust` run on the picker as it opens,
     /// before the query ranks.
-    fn painted_with(query: &str, adjust: impl FnOnce(&mut WorkspacePicker)) -> (Buffer, Rect) {
+    fn painted_with(
+        query: &str,
+        adjust: impl FnOnce(&mut WorkspacePicker),
+    ) -> (Buffer, Rect, Vec<u16>) {
         let (mut picker, mut workspaces, active) = picker_with(query, adjust);
         let area = Rect::new(0, 0, 100, 30);
         let mut buf = Buffer::empty(area);
-        render(&mut picker, &mut workspaces, active, &mut buf, area);
+        let rows = render(&mut picker, &mut workspaces, active, &mut buf, area);
         let (_, inner) = workspace_picker_layout(area, picker.entries().len())
             .expect("the area hosts the modal");
-        (buf, inner)
+        (buf, inner, rows)
     }
 
     /// The picker over three workspaces with `query` typed into a real input
@@ -975,7 +988,7 @@ mod tests {
     /// joins.
     #[test]
     fn a_create_row_hints_both_keys_in_the_header() {
-        let (buf, inner) = painted_with_query("notes");
+        let (buf, inner, _) = painted_with_query("notes");
         assert_eq!(
             header_text(&buf, inner).trim(),
             "Enter new session   Alt-Enter new sub-session of ws00"
@@ -986,15 +999,14 @@ mod tests {
     /// either key, so the header names Enter alone.
     #[test]
     fn a_create_row_from_a_fresh_launch_hints_enter_alone() {
-        let (buf, inner) = painted_with("notes", WorkspacePicker::omit_active);
+        let (buf, inner, _) = painted_with("notes", WorkspacePicker::omit_active);
         assert_eq!(header_text(&buf, inner).trim(), "Enter new session");
     }
 
-    /// The words of each selected row inside the modal's border, top first.
-    fn selected_words(buf: &Buffer, inner: Rect) -> Vec<Vec<String>> {
-        selected_rows(buf)
-            .into_iter()
-            .map(|row| {
+    /// The words of each of `rows` inside the modal's border, top first.
+    fn selected_words(buf: &Buffer, inner: Rect, rows: &[u16]) -> Vec<Vec<String>> {
+        rows.iter()
+            .map(|&row| {
                 row_text(buf, row)
                     .chars()
                     .skip(inner.x as usize)
