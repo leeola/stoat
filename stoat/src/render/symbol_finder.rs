@@ -92,8 +92,7 @@ pub(crate) fn render_symbol_finder(
         SymbolFinderScope::Workspace => "symbols \u{00B7} workspace",
     };
     let modal_style = theme.get(scope::UI_MODAL_PALETTE);
-    crate::render::clear_modal(modal, buf, theme, modal_style);
-    crate::render::chrome::modal_frame(buf, modal, None, modal_style, theme, &mut *scene);
+    crate::render::chrome::modal_plate(buf, modal, modal_style, theme, &mut *scene);
 
     let separator_style = theme.get(scope::UI_BORDER_INACTIVE);
 

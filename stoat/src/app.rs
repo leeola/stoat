@@ -9850,6 +9850,7 @@ impl Stoat {
         // be stuck at whatever was true then.
         scene.set_live(self.stoatty);
         scene.set_batch_protocol(self.stoatty_protocol >= BATCHED_DECORATIONS_PROTOCOL);
+        scene.set_nudge_protocol(self.stoatty_protocol >= NUDGE_PROTOCOL);
         let mut undercurls = std::mem::take(&mut self.pending_undercurls);
         undercurls.begin();
         let painted = crate::render::frame(self, buf, &mut scene, &mut undercurls, holds);

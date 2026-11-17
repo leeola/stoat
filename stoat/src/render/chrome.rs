@@ -1,6 +1,6 @@
 use crate::{
     buffer_lifecycle,
-    render::paint::style_rgb,
+    render::{self, paint::style_rgb},
     theme::{scope, PanelRole, Theme, TypeRole},
 };
 use ratatui::{
@@ -58,6 +58,32 @@ const TOGGLE_ON_MARK: &str = "\u{25cf}";
 
 /// The mark of a toggle that is off, U+25CB WHITE CIRCLE.
 const TOGGLE_OFF_MARK: &str = "\u{25cb}";
+
+/// The corner radius of a modal plate, in logical pixels, as the boards round
+/// it.
+const PLATE_RADIUS: u8 = 8;
+
+/// Where a modal plate's box stands against its inner cells, in top, right,
+/// bottom, left order.
+///
+/// The plate's top is the top of the header row, and its bottom reaches 10 px
+/// into the modal rect's last row. Its sides reach 11 px out, because the
+/// boards pad the plate 8 px to an Island and inset an Island's row text 12 px,
+/// which puts that text one cell inside the inner rect.
+const PLATE_EDGES: [Edge; 4] = [
+    Edge::Inset(0),
+    Edge::Outset(11),
+    Edge::Outset(10),
+    Edge::Outset(11),
+];
+
+/// The colors of a modal plate, as [`plate_colors`] resolves them for the
+/// theme.
+#[derive(Clone, Copy)]
+pub(crate) struct PlateColors {
+    /// The window ground, which fills the plate.
+    pub(crate) ground: [u8; 3],
+}
 
 /// The small colored tag a finder row or a changes header shows in place of a
 /// file's extension, and the theme scope that colors it.
@@ -334,6 +360,107 @@ fn modal_frame_inner(
     }
 
     inner
+}
+
+/// The colors of the modal plate look, or `None` when a modal keeps the
+/// bordered box of [`modal_frame`].
+///
+/// The plate stands off the cell grid by a few pixels, so it needs a live scene
+/// whose terminal reads `nudge` frames. The theme must give the window ground
+/// and the editor surface in RGB. The plate fills with the ground, and the
+/// boards draw a plate's body panes as Islands on the editor surface.
+pub(crate) fn plate_colors(theme: &Theme, scene: &ApcScene) -> Option<PlateColors> {
+    if !(scene.live() && scene.nudges()) {
+        return None;
+    }
+    let ground = style_rgb(render::ground_surface(theme))?;
+    style_rgb(
+        theme
+            .try_get(scope::UI_BACKGROUND)
+            .and_then(|style| style.bg),
+    )?;
+    Some(PlateColors { ground })
+}
+
+/// Draw a filter modal's box over `modal`, and return the rect its content lays
+/// out in, which is `modal` less one cell on each side.
+///
+/// With [`plate_colors`], the box is the ground plate of the modal boards: no
+/// border, rounded corners, and the modal shadow, with its edges at
+/// [`PLATE_EDGES`] around the inner rect. The row `modal.y` keeps the panes
+/// behind it. Without them, the box is a [`modal_frame`] over cells cleared to
+/// `style`.
+pub(crate) fn modal_plate(
+    buf: &mut Buffer,
+    modal: Rect,
+    style: Style,
+    theme: &Theme,
+    scene: &mut ApcScene,
+) -> Rect {
+    let Some(colors) = plate_colors(theme, scene) else {
+        render::clear_modal(modal, buf, theme, style);
+        return modal_frame(buf, modal, None, style, theme, scene);
+    };
+
+    let inner = Block::default().borders(Borders::ALL).inner(modal);
+    let [r, g, b] = colors.ground;
+    render::clear_modal(inner, buf, theme, Style::default().bg(Color::Rgb(r, g, b)));
+    clear_plate_ring(modal, inner, buf);
+
+    let plate = |fill, shadow, backdrop| Panel {
+        style: BorderStyle::None_,
+        border: colors.ground,
+        corner_radius: PLATE_RADIUS,
+        fill,
+        shadow,
+        edges: PLATE_EDGES,
+        corners: 0,
+        fillets: 0,
+        fillet_radius: 2,
+        hatch: None,
+        above_pools: false,
+        backdrop,
+        anchor: None,
+    };
+    // A backdrop hides no other pass's components, so a plain panel over the
+    // same box does that. The plain panel goes first, since a panel hides every
+    // earlier panel inside its box. Neither floats above pools, because the
+    // modal's own list pool glides inside the box.
+    plate(None, PanelShadow::None_, false).draw_components(inner, scene);
+    let shadow = theme.panel(PanelRole::Overlay).shadow;
+    plate(Some(colors.ground), shadow, true).draw_components(inner, scene);
+    inner
+}
+
+/// Clear the glyphs of the cells the plate's edges cross, outside its inner
+/// cells.
+///
+/// Those are the two columns on each side, over the rows from the inner rect's
+/// top to the modal rect's bottom, and the modal rect's last row between them.
+/// The backgrounds stay, so the part of each cell outside the plate shows the
+/// panes. The plate's fill covers the part inside, but a glyph draws over a
+/// fill.
+fn clear_plate_ring(modal: Rect, inner: Rect, buf: &mut Buffer) {
+    let area = buf.area;
+    let columns = [
+        modal.x.checked_sub(1),
+        Some(modal.x),
+        modal.right().checked_sub(1),
+        Some(modal.right()),
+    ];
+    for x in columns.into_iter().flatten() {
+        for y in inner.y..modal.bottom() {
+            if area.contains((x, y).into()) {
+                buf[(x, y)].set_char(' ');
+            }
+        }
+    }
+    let last = modal.bottom().saturating_sub(1);
+    for x in inner.x..inner.right() {
+        if area.contains((x, last).into()) {
+            buf[(x, last)].set_char(' ');
+        }
+    }
 }
 
 /// Declare a panel over `area` whose body draws nothing, for cells that must
@@ -783,10 +910,13 @@ pub(crate) fn text(
 mod tests {
     use super::{
         hline, hline_edge, list_modal_width, modal_box, modal_frame, modal_frame_above_pools,
-        modal_frame_anchored, popout_frame, selected_row, tagged_name, text, toggle_mark, type_tag,
-        vline, TypeTag,
+        modal_frame_anchored, modal_plate, plate_colors, popout_frame, selected_row, tagged_name,
+        text, toggle_mark, type_tag, vline, TypeTag,
     };
-    use crate::theme::{scope, PanelRole, Theme};
+    use crate::{
+        render,
+        theme::{scope, PanelRole, Theme},
+    };
     use ratatui::{
         buffer::Buffer,
         layout::Rect,
@@ -1008,6 +1138,178 @@ mod tests {
             text: " hi ".to_owned(),
         });
         assert_eq!(scene.buffer(), &[panel, title].concat());
+    }
+
+    /// A theme with the RGB window ground and editor surface that the plate look
+    /// needs.
+    fn plate_theme() -> Theme {
+        let (config, errors) = parse(
+            r##"theme t {
+                ui.surface.ground.bg = "#0c0e11";
+                ui.background.bg = "#17191e";
+            }"##,
+        );
+        assert!(errors.is_empty(), "parse errors: {errors:?}");
+        Theme::from_config(&config.expect("a config"), "t").expect("the theme")
+    }
+
+    /// A live scene whose host reads `nudge` frames.
+    fn nudge_scene() -> ApcScene {
+        let mut scene = ApcScene::new();
+        scene.set_nudge_protocol(true);
+        scene
+    }
+
+    /// The background of the pane under a modal.
+    const PANE: Color = Color::Rgb(9, 9, 9);
+
+    /// A pane under a modal, every cell the glyph `x` on [`PANE`].
+    fn pane_buffer() -> Buffer {
+        let mut buf = Buffer::empty(Rect::new(0, 0, 16, 10));
+        for cell in buf.content.iter_mut() {
+            cell.set_char('x').set_bg(PANE);
+        }
+        buf
+    }
+
+    /// The plate is two panels over the inner cells. A plain one goes first, and
+    /// a backdrop that fills with the ground and casts the modal shadow follows.
+    #[test]
+    fn a_plate_emits_a_plain_panel_and_a_ground_backdrop_over_its_inner_rect() {
+        let theme = plate_theme();
+        let mut buf = pane_buffer();
+        let mut scene = nudge_scene();
+
+        let modal = Rect::new(3, 2, 10, 6);
+        let inner = modal_plate(&mut buf, modal, rgb_style(), &theme, &mut scene);
+
+        let ground = [0x0c, 0x0e, 0x11];
+        let plate = |fill, shadow, backdrop| {
+            encode_panel(&PanelCommand {
+                top: 3,
+                left: 4,
+                width: 8,
+                height: 4,
+                style: BorderStyle::None_,
+                border: ground,
+                corner_radius: 8,
+                fill,
+                shadow,
+                edges: [
+                    Edge::Inset(0),
+                    Edge::Outset(11),
+                    Edge::Outset(10),
+                    Edge::Outset(11),
+                ],
+                corners: 0,
+                fillets: 0,
+                fillet_radius: 2,
+                hatch: None,
+                above_pools: false,
+                backdrop,
+                anchor: None,
+            })
+        };
+        let shadow = theme.panel(PanelRole::Overlay).shadow;
+        assert_eq!(
+            (inner, scene.bytes().to_vec()),
+            (
+                Rect::new(4, 3, 8, 4),
+                [
+                    plate(None, PanelShadow::None_, false),
+                    plate(Some(ground), shadow, true)
+                ]
+                .concat(),
+            ),
+        );
+    }
+
+    /// The inner cells clear to the ground. The cells that the plate's edges
+    /// cross lose their glyphs and keep the pane's background. Every other
+    /// cell keeps the pane, the row over the header too.
+    #[test]
+    fn a_plate_clears_its_inner_cells_and_the_glyphs_of_its_ring() {
+        let theme = plate_theme();
+        let mut buf = pane_buffer();
+        let modal = Rect::new(3, 2, 10, 6);
+        modal_plate(&mut buf, modal, rgb_style(), &theme, &mut nudge_scene());
+
+        let ground = Color::Rgb(0x0c, 0x0e, 0x11);
+        let rows: Vec<String> = (0..10)
+            .map(|y| {
+                (0..16)
+                    .map(|x| match (buf[(x, y)].symbol(), buf[(x, y)].bg) {
+                        ("x", bg) if bg == PANE => '.',
+                        (" ", bg) if bg == PANE => 'r',
+                        (" ", bg) if bg == ground => 'g',
+                        _ => '?',
+                    })
+                    .collect()
+            })
+            .collect();
+        assert_eq!(
+            rows,
+            [
+                "................",
+                "................",
+                "................",
+                "..rrggggggggrr..",
+                "..rrggggggggrr..",
+                "..rrggggggggrr..",
+                "..rrggggggggrr..",
+                "..rrrrrrrrrrrr..",
+                "................",
+                "................",
+            ],
+        );
+    }
+
+    /// Without the plate look, a plate draws what a clear of the modal rect and
+    /// a [`modal_frame`] over it draw.
+    #[test]
+    fn a_plate_without_the_nudge_protocol_is_the_cleared_modal_frame() {
+        let theme = plate_theme();
+        let modal = Rect::new(3, 2, 10, 6);
+        let draw = |plate: bool| {
+            let mut buf = pane_buffer();
+            let mut scene = ApcScene::new();
+            let inner = match plate {
+                true => modal_plate(&mut buf, modal, rgb_style(), &theme, &mut scene),
+                false => {
+                    render::clear_modal(modal, &mut buf, &theme, rgb_style());
+                    modal_frame(&mut buf, modal, None, rgb_style(), &theme, &mut scene)
+                },
+            };
+            (inner, buf, scene.bytes().to_vec())
+        };
+        assert_eq!(draw(true), draw(false));
+    }
+
+    /// The plate look needs a live scene that reads nudges, and a theme with an
+    /// RGB ground and an RGB editor surface.
+    #[test]
+    fn the_plate_look_needs_nudges_a_live_scene_and_both_surfaces() {
+        let ground_only = {
+            let (config, errors) = parse(r##"theme t { ui.surface.ground.bg = "#0c0e11"; }"##);
+            assert!(errors.is_empty(), "parse errors: {errors:?}");
+            Theme::from_config(&config.expect("a config"), "t").expect("the theme")
+        };
+        let theme = plate_theme();
+        let dead = {
+            let mut scene = nudge_scene();
+            scene.set_live(false);
+            scene
+        };
+        let cases = [
+            (&theme, nudge_scene()),
+            (&theme, ApcScene::new()),
+            (&theme, dead),
+            (&ground_only, nudge_scene()),
+        ];
+        assert_eq!(
+            cases.map(|(theme, scene)| plate_colors(theme, &scene).map(|colors| colors.ground)),
+            [Some([0x0c, 0x0e, 0x11]), None, None, None],
+        );
     }
 
     /// Chrome drawn over a pooled surface has to say so, or the pool composite

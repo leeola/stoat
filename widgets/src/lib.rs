@@ -97,6 +97,9 @@ pub struct ApcScene {
     /// [`Self::set_batch_protocol`] set. [`text_run::TextRunBatch`] and
     /// [`bar::BarBatch`] read it when they flush.
     pub(crate) batches: bool,
+    /// Whether the host reads `nudge` frames, as [`Self::set_nudge_protocol`]
+    /// set.
+    nudges: bool,
     /// Whether the next flush resets the terminal and sends the whole scene.
     ///
     /// Set by a switch of the lane protocol, since a flush in the other mode
@@ -121,6 +124,7 @@ impl ApcScene {
             active: 0,
             lanes_enabled: false,
             batches: false,
+            nudges: false,
             resync: false,
             dynamic_current: Vec::new(),
             dynamic_previous: Vec::new(),
@@ -167,6 +171,22 @@ impl ApcScene {
     /// stores the same runs and bars its single frames do.
     pub fn set_batch_protocol(&mut self, enabled: bool) {
         self.batches = enabled;
+    }
+
+    /// Declare whether the host reads `nudge` frames, which a stoatty at
+    /// [`NUDGE_PROTOCOL`](stoatty_protocol::NUDGE_PROTOCOL) or later does.
+    ///
+    /// Expected once per frame like [`Self::set_live`]. A widget that draws a
+    /// look only such a host shows reads it through [`Self::nudges`] before it
+    /// paints.
+    pub fn set_nudge_protocol(&mut self, enabled: bool) {
+        self.nudges = enabled;
+    }
+
+    /// Whether the host reads `nudge` frames, as [`Self::set_nudge_protocol`]
+    /// declared.
+    pub fn nudges(&self) -> bool {
+        self.nudges
     }
 
     /// Empty every lane so widgets build the next frame from scratch, and send

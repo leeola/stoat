@@ -980,13 +980,14 @@ fn the_tab_bar_boxes_the_focused_layout_s_chip_inside_its_row() {
     }
 }
 
-/// The finder box casts the boards' modal shadow, `0 18px 40px
-/// rgba(0,0,0,0.6)`, which reaches past 60 px under the box.
+/// The finder plate casts the boards' modal shadow, `0 18px 40px
+/// rgba(0,0,0,0.6)`, which reaches past 60 px under the plate.
 ///
-/// The box's top-left cell is (16, 9), and it spans 128 by 32 cells. The pixel
-/// 30 px under its bottom edge at its middle column lies 12 px past the shadow
-/// rect's bottom, where the blur still lays about a sixth of black over the
-/// editor surface.
+/// The box's modal rect is the 128 by 32 cells from cell (16, 9), and the
+/// plate's bottom edge stands 10 px into its last row, cell row 40. The pixel
+/// 30 px under that edge at the plate's middle column lies 12 px past the
+/// shadow rect's bottom, where the blur still lays about a sixth of black over
+/// the editor surface.
 #[test]
 fn the_file_finder_box_casts_the_modal_shadow() {
     let mut home = support::scratch_home();
@@ -997,12 +998,14 @@ fn the_file_finder_box_casts_the_modal_shadow() {
         "<Space>p<Settle>",
     );
 
-    let (x, y, width, height) = cell_rect(16, 9, 128, 32);
-    let under = dominant_color(&shot, (x + width / 2, y + height + 30, 1, 1));
+    let (x, _, width, _) = cell_rect(16, 9, 128, 32);
+    let (_, last_row, _, _) = cell_rect(16, 40, 1, 1);
+    let plate_bottom = last_row + 10;
+    let under = dominant_color(&shot, (x + width / 2, plate_bottom + 30, 1, 1));
     if under.iter().zip(BASE).any(|(&found, base)| found >= base) {
         let frame = keep_frame(&shot, &mut home, "finder_shadow");
         panic!(
-            "the pixel 30 px under the finder box reads {}, not darker than {} in every \
+            "the pixel 30 px under the finder plate reads {}, not darker than {} in every \
              channel; the frame is {}",
             hex(under),
             hex(BASE),
@@ -1011,18 +1014,18 @@ fn the_file_finder_box_casts_the_modal_shadow() {
     }
 }
 
-/// The file finder's box fills with the overlay surface where no text covers
-/// it, its preview pane sits on the base surface, and its corners round at
-/// 6 px.
+/// The file finder's box is the boards' ground plate, `background: #0c0e11`,
+/// with no hairline, and its preview pane sits on the base surface.
 ///
-/// The overlay cell sits in the list column, under the fixture's two file
-/// rows. The base cell sits in the preview, under the six lines of the file it
-/// shows.
+/// The box's modal rect is the 128 by 32 cells from cell (16, 9), so its inner
+/// rect runs from cell (17, 10) up to cell (143, 40). The plate's top is the top
+/// of the header row, cell row 10. Its sides stand 11 px outside the inner
+/// rect, and its bottom stands 10 px into the modal rect's last row, cell row
+/// 40. Each edge reads one pixel on each side, the ground inside and the
+/// shadowed panes outside. The header row reads the ground where no text
+/// covers it, and no pixel along the plate's sides takes the hairline color.
 ///
-/// The box's top-left cell is (16, 9). Its 6 px arc leaves the cell's second
-/// pixel on the top row to the overlay fill of the cells under the box, darker
-/// than the hover surface, where a 2 px arc draws the border. The top edge's
-/// border starts at the cell's seventh pixel.
+/// The base cell sits in the preview, under the six lines of the file it shows.
 ///
 /// The rule under the preview's path header runs through the middle pixel row
 /// of cell row 13 in the divider color, as a rule on the editor surface draws.
@@ -1033,7 +1036,7 @@ fn the_file_finder_box_casts_the_modal_shadow() {
 /// muted color. Cell row 21 is the first row past the file's seven lines, and
 /// its column holds no number.
 #[test]
-fn the_file_finder_box_draws_on_the_overlay_surface() {
+fn the_file_finder_box_draws_as_the_ground_plate() {
     let mut home = support::scratch_home();
     let shot = settled_frame(
         home.path(),
@@ -1042,41 +1045,62 @@ fn the_file_finder_box_draws_on_the_overlay_surface() {
         "<Space>p<Settle>",
     );
 
+    let (left, top, _, _) = cell_rect(17, 10, 1, 1);
+    let (right, last_row, _, _) = cell_rect(143, 40, 1, 1);
+    let (left, right, bottom) = (left - 11, right + 11, last_row + 10);
+    let (middle_x, middle_y) = ((left + right) / 2, (top + bottom) / 2);
+    let edges = [
+        ("left", (left - 1, middle_y), (left, middle_y)),
+        ("right", (right, middle_y), (right - 1, middle_y)),
+        ("top", (middle_x, top - 1), (middle_x, top)),
+        ("bottom", (middle_x, bottom), (middle_x, bottom - 1)),
+    ];
+    for (side, (outside_x, outside_y), (inside_x, inside_y)) in edges {
+        let outside = pixel(&shot, outside_x, outside_y);
+        let inside = pixel(&shot, inside_x, inside_y);
+        if outside == GROUND || inside != GROUND {
+            let frame = keep_frame(&shot, &mut home, "finder_plate");
+            panic!(
+                "the plate's {side} edge reads {} outside and {} inside, where only the \
+                 inside belongs to the ground {}; the frame is {}",
+                hex(outside),
+                hex(inside),
+                hex(GROUND),
+                frame.display(),
+            );
+        }
+    }
+
     expect_region(
         &shot,
         &mut home,
-        cell_rect(40, 25, 1, 1),
-        OVERLAY,
-        "finder_box",
+        cell_rect(60, 10, 20, 1),
+        GROUND,
+        "finder_header",
     );
+    let sides = [
+        (left, top, 9, bottom - top),
+        (right - 9, top, 9, bottom - top),
+    ];
+    let hairline: usize = sides
+        .into_iter()
+        .map(|side| pixels_of(&shot, side, STRONG))
+        .sum();
+    if hairline > 0 {
+        let frame = keep_frame(&shot, &mut home, "finder_hairline");
+        panic!(
+            "{hairline} pixels on the plate's sides take the hairline color {}; the frame is {}",
+            hex(STRONG),
+            frame.display(),
+        );
+    }
+
     expect_region(
         &shot,
         &mut home,
         cell_rect(111, 27, 1, 1),
         BASE,
         "finder_preview",
-    );
-
-    let (x, y, _, _) = cell_rect(16, 9, 1, 1);
-    let corner = dominant_color(&shot, (x + 1, y, 1, 1));
-    if corner
-        .iter()
-        .zip(HOVER)
-        .any(|(&found, hover)| found >= hover)
-    {
-        let frame = keep_frame(&shot, &mut home, "finder_corner");
-        panic!(
-            "the corner pixel {} is not darker than the hover surface; the frame is {}",
-            hex(corner),
-            frame.display(),
-        );
-    }
-    expect_region(
-        &shot,
-        &mut home,
-        (x + 6, y, 1, 1),
-        STRONG,
-        "finder_top_edge",
     );
 
     let (x, y, width, height) = cell_rect(111, 13, 1, 1);
@@ -1288,10 +1312,10 @@ fn the_diff_view_keeps_its_box_docked_on_the_raised_surface() {
 /// rounded corners, and an accent edge runs inside the box's left side.
 ///
 /// The select cells form one run in one row. The box stands 6 px inside the
-/// list's sides, so the list's first cell holds 6 px of the overlay surface
+/// list's sides, so the list's first cell holds 6 px of the plate's ground
 /// and the run starts at the second cell. On that first cell's middle pixel
-/// row, pixel columns 0 to 5 read the overlay, 6 and 7 the 2 px accent edge,
-/// and 8 the select fill. On its first pixel row, column 6 reads the overlay,
+/// row, pixel columns 0 to 5 read the ground, 6 and 7 the 2 px accent edge,
+/// and 8 the select fill. On its first pixel row, column 6 reads the ground,
 /// which the 6 px arc leaves clear.
 #[test]
 fn the_finder_marks_its_selected_row_with_a_rounded_fill_and_an_accent_edge() {
@@ -1319,7 +1343,7 @@ fn the_finder_marks_its_selected_row_with_a_rounded_fill_and_an_accent_edge() {
 
     let (x, y, _, height) = cell_rect(col - 1, row, 1, 1);
     let middle = [
-        OVERLAY, OVERLAY, OVERLAY, OVERLAY, OVERLAY, OVERLAY, ACCENT, ACCENT, SELECT,
+        GROUND, GROUND, GROUND, GROUND, GROUND, GROUND, ACCENT, ACCENT, SELECT,
     ];
     for (offset, want) in (0..).zip(middle) {
         let what = format!("selected_row_middle_column_{offset}");
@@ -1335,7 +1359,7 @@ fn the_finder_marks_its_selected_row_with_a_rounded_fill_and_an_accent_edge() {
         &shot,
         &mut home,
         (x + 6, y, 1, 1),
-        OVERLAY,
+        GROUND,
         "selected_row_top_arc",
     );
 }
@@ -1393,13 +1417,15 @@ fn the_editor_behind_the_finder_fades() {
     }
 }
 
-/// The finder ends in a footer two rows tall on the raised surface, flush with
-/// the box's bottom.
+/// The finder ends in a footer on the raised surface, in the inner rect's last
+/// row.
 ///
-/// No other surface of the frame is raised, so the raised cells form one run
-/// in each of two rows, one over the other. The docked key hints box waits for
-/// its toggle under the finder, so each run spans the 126 cells between the
-/// box's sides.
+/// The box's modal rect is the 128 by 32 cells from cell (16, 9), so the inner
+/// rect's last row is cell row 39. The footer's second row is the modal rect's
+/// last row, whose top 10 px the plate's ground covers, so its cells read the
+/// ground. No other surface of the frame is raised, so the raised cells are the
+/// 126 cells between the box's sides in row 39. The docked key hints box waits
+/// for its toggle under the finder.
 #[test]
 fn the_finder_ends_in_a_footer_on_the_raised_surface() {
     let mut home = support::scratch_home();
@@ -1411,30 +1437,26 @@ fn the_finder_ends_in_a_footer_on_the_raised_surface() {
     );
 
     let raised = cells_of(&shot, RAISED);
-    let (upper, lower) = raised.split_at(raised.len() / 2);
-    let two_rows = raised.len() == 2 * 126
-        && one_run_in_one_row(upper)
-        && one_run_in_one_row(lower)
-        && lower[0] == (upper[0].0, upper[0].1 + 1);
-    if !two_rows {
+    if raised != (17..143).map(|col| (col, 39)).collect::<Vec<_>>() {
         let frame = keep_frame(&shot, &mut home, "finder_footer");
         panic!(
-            "the raised cells {raised:?} are not two footer runs, one over the other; the frame \
-             is {}",
+            "the raised cells {raised:?} are not the 126 cells of row 39 between the box's \
+             sides; the frame is {}",
             frame.display(),
         );
     }
 }
 
-/// The session picker ends in a footer row on the raised surface, on the
-/// box's bottom row.
+/// The session picker's ground plate runs from the top of its header row to
+/// 10 px into its footer row, the modal rect's last row.
 ///
-/// No other surface of the frame is raised, so the raised cells form one run
-/// in one row. The box holds its recommended 112 columns, so the footer spans
-/// the 110 cells between its sides. The cell under the run lies outside the
-/// box, so it does not read the box's overlay surface.
+/// The box holds its recommended 112 columns and six rows from cell (24, 8),
+/// so the inner rect starts at cell (25, 9) and the footer row is cell row 13.
+/// Each edge reads one pixel on each side, the ground inside and the shadowed
+/// panes outside. The column reads stand in the inner rect's first cell, which
+/// the footer leaves blank and the plate's corner arcs leave whole.
 #[test]
-fn the_session_picker_ends_in_a_footer_on_the_raised_surface() {
+fn the_session_picker_plate_ends_in_its_footer_row() {
     let mut home = support::scratch_home();
     let shot = settled_frame(
         home.path(),
@@ -1443,28 +1465,37 @@ fn the_session_picker_ends_in_a_footer_on_the_raised_surface() {
         "<C-a><C-f><Settle>",
     );
 
-    let raised = cells_of(&shot, RAISED);
-    let below = raised
-        .first()
-        .map(|&(col, row)| dominant_color(&shot, cell_rect(col, row + 1, 1, 1)));
-    if !one_run_in_one_row(&raised) || raised.len() != 110 || below == Some(OVERLAY) {
-        let frame = keep_frame(&shot, &mut home, "session_footer");
-        panic!(
-            "the raised cells {raised:?} are not one footer run on the box's bottom row, the \
-             cell under it {below:?}; the frame is {}",
-            frame.display(),
-        );
+    let (column, top, _, _) = cell_rect(25, 9, 1, 1);
+    let (_, footer_row, _, _) = cell_rect(25, 13, 1, 1);
+    let (column, bottom) = (column + 2, footer_row + 10);
+    let edges = [
+        ("top", (column, top - 1), (column, top)),
+        ("bottom", (column, bottom), (column, bottom - 1)),
+    ];
+    for (side, (outside_x, outside_y), (inside_x, inside_y)) in edges {
+        let outside = pixel(&shot, outside_x, outside_y);
+        let inside = pixel(&shot, inside_x, inside_y);
+        if outside == GROUND || inside != GROUND {
+            let frame = keep_frame(&shot, &mut home, "session_plate");
+            panic!(
+                "the plate's {side} edge reads {} outside and {} inside, where only the \
+                 inside belongs to the ground {}; the frame is {}",
+                hex(outside),
+                hex(inside),
+                hex(GROUND),
+                frame.display(),
+            );
+        }
     }
 }
 
 /// The help header names both scopes. The active `applicable` sits on the hover
-/// surface, and `all` follows one column later as text on the box's own
-/// surface.
+/// surface, and `all` follows one column later as text on the plate's ground.
 ///
 /// The active chip reads `applicable` with one cell of padding at each end, so
 /// its cells form one run of 12 in one row, and no other cell of the frame
 /// takes the hover color. The inactive chip's five cells start one column past
-/// that run and keep the overlay fill.
+/// that run and keep the ground.
 #[test]
 fn the_help_header_names_both_scopes() {
     let mut home = support::scratch_home();
@@ -1486,7 +1517,7 @@ fn the_help_header_names_both_scopes() {
         &shot,
         &mut home,
         cell_rect(col + 13, row, 5, 1),
-        OVERLAY,
+        GROUND,
         "help_inactive_scope",
     );
 }
@@ -2396,14 +2427,6 @@ fn grey_run_pixels(shot: &Snapshot, (x, y, width, height): PixelRect) -> usize {
             high > 0x70 && high - low <= 0x20
         })
         .count()
-}
-
-/// Whether `cells`, row by row, form one unbroken run in one row.
-fn one_run_in_one_row(cells: &[(u16, u16)]) -> bool {
-    cells.first().is_some_and(|&(first, row)| {
-        let run = first..first + cells.len() as u16;
-        cells == run.map(|col| (col, row)).collect::<Vec<_>>()
-    })
 }
 
 /// The RGB color that the most pixels of `rect` in `shot` hold.

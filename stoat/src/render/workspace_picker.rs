@@ -108,8 +108,7 @@ pub(crate) fn render_workspace_picker(
     };
 
     let modal_style = theme.get(crate::theme::scope::UI_MODAL_PICKER);
-    crate::render::clear_modal(picker_area, buf, theme, modal_style);
-    crate::render::chrome::modal_frame(buf, picker_area, None, modal_style, theme, &mut *scene);
+    crate::render::chrome::modal_plate(buf, picker_area, modal_style, theme, &mut *scene);
 
     let label = match (picker.renaming(), picker.family_title()) {
         (true, _) => "rename".to_owned(),
