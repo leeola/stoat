@@ -289,12 +289,7 @@ fn paint_plate_header(
     if inner.is_empty() {
         return;
     }
-    let [r, g, b] = ground;
-    for x in inner.left()..inner.right() {
-        buf[(x, inner.y)]
-            .set_char(' ')
-            .set_style(Style::default().bg(Color::Rgb(r, g, b)));
-    }
+    blank_plate_row(buf, inner, ground);
 
     let (ui, caption) = (
         theme.type_scale(TypeRole::Ui),
@@ -336,18 +331,7 @@ fn paint_plate_header(
 
     scene.nudge(PLATE_HEADER_NUDGE);
     if let Some(fill) = fill {
-        for (_, cells) in &trailing.chips {
-            if let Some(cells) = cells {
-                Panel {
-                    edges: Edge::symmetric(0, 0),
-                    ..Panel::chip(fill)
-                }
-                .draw_components(
-                    Rect::new(inner.x + cells.start, inner.y, cells.len() as u16, 1),
-                    scene,
-                );
-            }
-        }
+        plate_chip_boxes(&trailing, fill, inner, scene);
     }
 
     let origin = Rect::new(inner.x, inner.y, 1, 1);
@@ -404,6 +388,42 @@ fn paint_plate_header(
     scene.nudge([0, 0]);
 }
 
+/// Blank `row`'s cells to the plate's `ground`, under the runs of a plate's
+/// header or key line.
+fn blank_plate_row(buf: &mut Buffer, row: Rect, ground: [u8; 3]) {
+    let [r, g, b] = ground;
+    for x in row.left()..row.right() {
+        buf[(x, row.y)]
+            .set_char(' ')
+            .set_style(Style::default().bg(Color::Rgb(r, g, b)));
+    }
+}
+
+/// Draw a chip panel in `fill` over the cells of each boxed chip that
+/// [`plate_trailing`] placed on `inner`'s first row.
+///
+/// The panels must follow the row's [`PLATE_HEADER_NUDGE`], so they stand off
+/// the cells as the chips' runs do.
+fn plate_chip_boxes(
+    trailing: &PlateTrailing,
+    fill: [u8; 3],
+    inner: Rect,
+    scene: &mut stoat_widgets::ApcScene,
+) {
+    for (_, cells) in &trailing.chips {
+        if let Some(cells) = cells {
+            Panel {
+                edges: Edge::symmetric(0, 0),
+                ..Panel::chip(fill)
+            }
+            .draw_components(
+                Rect::new(inner.x + cells.start, inner.y, cells.len() as u16, 1),
+                scene,
+            );
+        }
+    }
+}
+
 /// The places of a plate header's count and chips, which end at its right.
 #[derive(Debug, PartialEq)]
 struct PlateTrailing {
@@ -426,6 +446,8 @@ struct PlateTrailing {
 ///
 /// If the query then ends left of `query_min`, the chips drop together. If it
 /// still does, the count drops too, as [`paint_header_row`] drops them.
+///
+/// A [`PlateHeader`]'s meta takes the count's place, and its title the query's.
 fn plate_trailing(
     count: Option<&str>,
     chips: &[(&str, bool)],
@@ -508,6 +530,219 @@ fn query_window(query: &str, caret: usize, room: usize) -> (&str, Option<&str>, 
         Some(at_caret),
         &query[byte((caret + 1).min(len))..byte(stop.min(len))],
     )
+}
+
+/// The words of a header row that names one item, such as the commit that a
+/// preview shows, where a filter modal's row holds its query.
+pub(crate) struct PlateHeader<'a> {
+    /// The modal's name, painted first.
+    pub(crate) label: &'a str,
+    /// The item's name, bold after the label.
+    pub(crate) title: &'a str,
+    /// Styled spans that end left of the chip, each in its own color.
+    pub(crate) meta: &'a [(String, Style)],
+    /// A note that ends the row, boxed in `ui.preview.chip`.
+    pub(crate) chip: Option<&'a str>,
+}
+
+/// Paint a header that names one item, which is the label, the bold title, and
+/// the meta and the chip at the row's right end.
+///
+/// `inner` is the modal's rect inside its border. The header claims its first
+/// two rows, as [`filter_header`] does, so a caller's body starts at
+/// `inner.y + 2`.
+///
+/// The title keeps [`MIN_QUERY_COLUMNS`], as a filter modal's query does. A row
+/// too narrow for the title and the parts right of it drops the chip first,
+/// then the meta. The title clips where the kept parts start. A theme with no
+/// `ui.preview.chip` style draws the chip's text plain in `ui.text.muted`.
+///
+/// Under the plate look of [`plate_colors`](crate::render::chrome::plate_colors),
+/// the first row draws as runs in a 32 px band on the plate's ground, as
+/// [`filter_header`] draws its row there, and no rule draws under it.
+/// Otherwise the parts draw in the row's cells, and a rule in
+/// `ui.border.inactive` rules the row off from the body.
+pub(crate) fn plate_header(
+    buf: &mut Buffer,
+    inner: Rect,
+    header: &PlateHeader<'_>,
+    theme: &Theme,
+    scene: &mut stoat_widgets::ApcScene,
+) {
+    if let Some(plate) = crate::render::chrome::plate_colors(theme, scene) {
+        paint_plate_title_row(buf, inner, header, plate.ground, theme, scene);
+        return;
+    }
+
+    paint_title_row(buf, inner, header, theme, scene);
+    crate::render::chrome::hline(
+        buf,
+        inner.x,
+        inner.y + 1,
+        inner.width,
+        theme.get(scope::UI_BORDER_INACTIVE),
+        scene,
+    );
+}
+
+/// Paint `header`'s parts into `inner`'s first row as cells, for
+/// [`plate_header`].
+///
+/// The meta and the chip sit flush with the row's right end, one column apart,
+/// and one column clear of the title, as [`paint_header_row`] sets a filter
+/// modal's count and chips. The chip's box goes through
+/// [`chip_cells`](crate::render::chrome::chip_cells), so a live scene draws it
+/// as a panel.
+fn paint_title_row(
+    buf: &mut Buffer,
+    inner: Rect,
+    header: &PlateHeader<'_>,
+    theme: &Theme,
+    scene: &mut stoat_widgets::ApcScene,
+) {
+    let (y, end) = (inner.y, inner.x + inner.width);
+
+    let mut title_x = inner.x;
+    if !header.label.is_empty() {
+        write_str_clipped(buf, title_x, y, header.label, label_style(theme), end);
+        title_x = title_x.saturating_add(header.label.width() as u16 + 1);
+    }
+
+    let meta_width: u16 = header
+        .meta
+        .iter()
+        .map(|(text, _)| text.width() as u16)
+        .sum();
+    let mut meta = (!header.meta.is_empty()).then_some(meta_width);
+    let mut chip = header.chip.map(|chip| format!(" {chip} "));
+    let fits = |meta: Option<u16>, chip: &Option<String>| {
+        let trailing = meta.map_or(0, |width| width + 1)
+            + chip.as_ref().map_or(0, |chip| chip.width() as u16 + 1);
+        title_x + MIN_QUERY_COLUMNS + trailing <= end
+    };
+    if !fits(meta, &chip) {
+        chip = None;
+    }
+    if !fits(meta, &chip) {
+        meta = None;
+    }
+
+    let mut right = end;
+    if let Some(chip) = &chip {
+        let width = chip.width() as u16;
+        right -= width;
+        let cells = Rect::new(right, y, width, 1);
+        let style = match theme.try_get(scope::UI_PREVIEW_CHIP) {
+            Some(style) => crate::render::chrome::chip_cells(cells, style, scene),
+            None => theme.get(scope::UI_TEXT_MUTED),
+        };
+        write_str(buf, right, y, chip, style);
+        right -= 1;
+    }
+    if let Some(width) = meta {
+        right -= width;
+        let mut x = right;
+        for (text, style) in header.meta {
+            write_str(buf, x, y, text, *style);
+            x += text.width() as u16;
+        }
+        right -= 1;
+    }
+
+    let title = theme.get(scope::UI_TEXT).add_modifier(Modifier::BOLD);
+    write_str_clipped(buf, title_x, y, header.title, title, right);
+}
+
+/// Paint `header`'s parts into `inner`'s first row as a plate's header, runs
+/// in the boards' 32 px band on the plate's `ground`, for [`plate_header`].
+///
+/// The row's cells blank to the ground, and every part draws
+/// [`PLATE_HEADER_NUDGE`] px off the cells. The label and the title start at
+/// the row's left, [`PLATE_HEADER_GAP`] apart, at the [`TypeRole::Ui`] size.
+/// The meta and the chip end at the row's right at the [`TypeRole::Caption`]
+/// size, as [`plate_trailing`] places them. A part whose color has no RGB value
+/// draws nothing.
+fn paint_plate_title_row(
+    buf: &mut Buffer,
+    inner: Rect,
+    header: &PlateHeader<'_>,
+    ground: [u8; 3],
+    theme: &Theme,
+    scene: &mut stoat_widgets::ApcScene,
+) {
+    if inner.is_empty() {
+        return;
+    }
+    blank_plate_row(buf, inner, ground);
+
+    let (ui, caption) = (
+        theme.type_scale(TypeRole::Ui),
+        theme.type_scale(TypeRole::Caption),
+    );
+    let advance = |text: &str, scale| text_run::advance_sixteenths(text.chars().count(), scale);
+    let chars_in = |room: u16| usize::from(room) * 16 / usize::from(ui.max(1));
+    let label = label_style(theme);
+    let chip = theme.try_get(scope::UI_PREVIEW_CHIP);
+    let fill = chip.and_then(|style| style_rgb(style.bg));
+
+    let end = inner.width.saturating_mul(16);
+    let title_x = match header.label.is_empty() {
+        true => 0,
+        false => advance(header.label, ui).saturating_add(PLATE_HEADER_GAP),
+    };
+    let meta: String = header.meta.iter().map(|(text, _)| text.as_str()).collect();
+    let chips: Vec<(&str, bool)> = header.chip.map(|chip| (chip, true)).into_iter().collect();
+    let trailing = plate_trailing(
+        Some(meta.as_str()).filter(|meta| !meta.is_empty()),
+        &chips,
+        fill.is_some(),
+        end,
+        title_x.saturating_add(MIN_QUERY_COLUMNS * 16),
+        caption,
+    );
+    let label_text = clip_to_width(header.label, chars_in(end));
+    let title_room = chars_in(trailing.query_end.saturating_sub(title_x));
+    let title_text = clip_to_width(header.title, title_room);
+
+    scene.nudge(PLATE_HEADER_NUDGE);
+    if let Some(fill) = fill {
+        plate_chip_boxes(&trailing, fill, inner, scene);
+    }
+
+    let origin = Rect::new(inner.x, inner.y, 1, 1);
+    let mut run = |col: u16, part: &str, scale: u16, colors: (Option<[u8; 3]>, [u8; 3]), bold| {
+        if let (Some(color), false) = (colors.0, part.is_empty()) {
+            plate_run(col, part, scale, color, colors.1, bold).render(origin, buf, scene);
+        }
+    };
+    let bold = |style: Style| style.add_modifier.contains(Modifier::BOLD);
+    let text = style_rgb(theme.get(scope::UI_TEXT).fg);
+
+    run(
+        0,
+        label_text,
+        ui,
+        (style_rgb(label.fg), ground),
+        bold(label),
+    );
+    run(title_x, title_text, ui, (text, ground), true);
+    if let Some(mut col) = trailing.count {
+        for (part, style) in header.meta {
+            let colors = (style_rgb(style.fg), ground);
+            run(col, part.as_str(), caption, colors, bold(*style));
+            col += advance(part, caption);
+        }
+    }
+    for (&(name, _), (col, cells)) in chips.iter().zip(&trailing.chips) {
+        let colors = match (chip, cells) {
+            (Some(style), Some(_)) => (style_rgb(style.fg), fill.unwrap_or(ground)),
+            (Some(style), None) => (style_rgb(style.fg), ground),
+            (None, _) => (style_rgb(theme.get(scope::UI_TEXT_MUTED).fg), ground),
+        };
+        run(*col, name, caption, colors, false);
+    }
+
+    scene.nudge([0, 0]);
 }
 
 /// What a modal's key line shows, from its left edge to its right.
@@ -637,12 +872,7 @@ fn paint_plate_footer(
     theme: &Theme,
     scene: &mut stoat_widgets::ApcScene,
 ) {
-    let [r, g, b] = ground;
-    for x in rect.left()..rect.right() {
-        buf[(x, rect.y)]
-            .set_char(' ')
-            .set_style(Style::default().bg(Color::Rgb(r, g, b)));
-    }
+    blank_plate_row(buf, rect, ground);
 
     let caption = theme.type_scale(TypeRole::Caption);
     let width = |text: &str| text_run::advance_sixteenths(text.chars().count(), caption);
@@ -1750,6 +1980,180 @@ mod tests {
                 ("", Some("b"), "cde"),
                 ("", None, ""),
             ],
+        );
+    }
+
+    const PLATE_SHA: [u8; 3] = [10, 10, 10];
+
+    /// A muted span and a sha span in their own colors, the meta that every
+    /// title header test paints.
+    fn title_meta() -> [(String, Style); 2] {
+        [
+            (
+                "fake \u{b7} ".to_owned(),
+                Style::default().fg(Color::Rgb(5, 5, 5)),
+            ),
+            ("c1".to_owned(), Style::default().fg(Color::Rgb(10, 10, 10))),
+        ]
+    }
+
+    /// The buffer and the scene of a title header of `Commit`, `two`, `meta`,
+    /// and the read-only chip, which [`plate_header`] paints into the inner
+    /// rect (2, 1, `width`, 4) under a theme of the `PLATE_` colors, by a
+    /// scene that reads nudges where `nudges` holds.
+    fn painted_title_header(
+        meta: &[(String, Style)],
+        width: u16,
+        nudges: bool,
+    ) -> (Buffer, stoat_widgets::ApcScene) {
+        let theme = {
+            let src = r##"theme t {
+                ui.surface.ground.bg = "#010101";
+                ui.background.bg = "#020202";
+                ui.modal.label = { fg: "#030303", modifiers: [bold] };
+                ui.text.fg = "#040404";
+                ui.text.muted.fg = "#050505";
+                ui.preview.chip = { fg: "#060606", bg: "#070707" };
+                ui.border.inactive.fg = "#090909";
+            }"##;
+            let (config, _) = stoat_config::parse(src);
+            Theme::from_config(&config.expect("theme parses"), "t").expect("theme loads")
+        };
+        let header = PlateHeader {
+            label: "Commit",
+            title: "two",
+            meta,
+            chip: Some("preview \u{b7} read-only"),
+        };
+        let mut buf = Buffer::empty(Rect::new(0, 0, width + 4, 6));
+        let mut scene = stoat_widgets::ApcScene::new();
+        scene.set_nudge_protocol(nudges);
+        plate_header(
+            &mut buf,
+            Rect::new(2, 1, width, 4),
+            &header,
+            &theme,
+            &mut scene,
+        );
+        (buf, scene)
+    }
+
+    /// Under the plate a title header is runs 1 px right and 7 px down of its
+    /// cells, which blank to the ground, with no rule under it.
+    ///
+    /// The label leads in its bold color, and the bold title follows 14
+    /// sixteenths after it. From the right, the chip centers in a 21-cell chip
+    /// panel that ends on the row's last cell edge. The meta's spans end 14
+    /// sixteenths left of that box, each in its own color.
+    #[test]
+    fn a_plate_title_header_draws_its_parts_as_nudged_runs() {
+        let (buf, scene) = painted_title_header(&title_meta(), 60, true);
+        let row: Vec<Color> = (0..64).map(|x| buf[(x, 1)].bg).collect();
+        assert_eq!(
+            (row, plate_commands(&scene)),
+            (
+                [
+                    vec![Color::Reset; 2],
+                    vec![Color::Rgb(1, 1, 1); 60],
+                    vec![Color::Reset; 2],
+                ]
+                .concat(),
+                vec![
+                    Command::Nudge([1, 7]),
+                    Command::Panel(PanelCommand {
+                        top: 1,
+                        left: 41,
+                        width: 21,
+                        height: 1,
+                        style: BorderStyle::None_,
+                        border: PLATE_CHIP_FILL,
+                        corner_radius: 4,
+                        fill: Some(PLATE_CHIP_FILL),
+                        shadow: PanelShadow::None_,
+                        edges: Edge::symmetric(0, 0),
+                        corners: 0,
+                        fillets: 0,
+                        fillet_radius: 2,
+                        hatch: None,
+                        above_pools: false,
+                        backdrop: false,
+                        anchor: None,
+                    }),
+                    plate_run(32, "Commit", PLATE_LABEL, PLATE_GROUND, true),
+                    plate_run(142, "two", PLATE_TEXT, PLATE_GROUND, true),
+                    plate_run(498, "fake \u{b7} ", PLATE_MUTED, PLATE_GROUND, false),
+                    plate_run(610, "c1", PLATE_SHA, PLATE_GROUND, false),
+                    plate_run(
+                        672,
+                        "preview \u{b7} read-only",
+                        PLATE_CHIP_TEXT,
+                        PLATE_CHIP_FILL,
+                        false,
+                    ),
+                    Command::Nudge([0, 0]),
+                ],
+            ),
+        );
+    }
+
+    /// Without the plate a title header is cells. The label and the bold title
+    /// lead. From the right, the chip's padded box ends the row, and the meta
+    /// stands one column left of it, each span in its own color. A rule closes
+    /// the header on the next row, and nothing nudges.
+    #[test]
+    fn a_cell_title_header_sets_its_meta_and_chip_flush_right() {
+        let (buf, scene) = painted_title_header(&title_meta(), 60, false);
+        let style = |x: u16| (buf[(x, 1)].fg, buf[(x, 1)].modifier);
+        let rgb = |v: u8| Color::Rgb(v, v, v);
+        let nudges = plate_commands(&scene)
+            .into_iter()
+            .filter(|command| matches!(command, Command::Nudge(_)))
+            .count();
+        assert_eq!(
+            (
+                test_support::row_text(&buf, 1),
+                [2, 9, 31, 38, 42].map(style),
+                (test_fixture::row_rules(&scene, 2), nudges),
+            ),
+            (
+                format!(
+                    "  Commit two{}fake \u{b7} c1  preview \u{b7} read-only   ",
+                    " ".repeat(19)
+                ),
+                [
+                    (rgb(3), Modifier::BOLD),
+                    (rgb(4), Modifier::BOLD),
+                    (rgb(5), Modifier::empty()),
+                    (rgb(10), Modifier::empty()),
+                    (rgb(6), Modifier::empty()),
+                ],
+                (1, 0),
+            ),
+        );
+    }
+
+    /// The title keeps its 12-column floor in both looks. At 51 columns every
+    /// part fits, at 50 the chip drops, at 29 the meta still fits, and at 28 it
+    /// drops too.
+    #[test]
+    fn a_narrow_title_header_drops_its_chip_and_then_its_meta() {
+        let meta = title_meta();
+        let kept = |width: u16, nudges: bool| {
+            let (buf, scene) = painted_title_header(&meta, width, nudges);
+            let runs: String = plate_commands(&scene)
+                .into_iter()
+                .filter_map(|command| match command {
+                    Command::TextRun(run) => Some(run.text),
+                    _ => None,
+                })
+                .collect();
+            let drawn = test_support::row_text(&buf, 1) + &runs;
+            (drawn.contains("read-only"), drawn.contains("c1"))
+        };
+        assert_eq!(
+            [false, true].map(|nudges| [51, 50, 29, 28].map(|width| kept(width, nudges))),
+            [[(true, true), (false, true), (false, true), (false, false)]; 2],
+            "the chip goes first, then the meta, so the title keeps its floor",
         );
     }
 

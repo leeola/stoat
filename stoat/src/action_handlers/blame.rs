@@ -626,7 +626,7 @@ mod tests {
         lsp::hover::{HoverOutcome, HoverResponse},
         pane::View,
         register::Register,
-        render::{commit_patch::PatchRow, paint, OVERLAY_LANE},
+        render::{commit_patch::PatchRow, paint, OVERLAY_LANE, STATUS_LANE},
         review_walk::{ReturnRef, WalkStash},
         test_fixture,
         test_harness::{self, CommitSpec, TestHarness},
@@ -644,6 +644,7 @@ mod tests {
         BlameCard, BlameCheckout, BlamePreview, CheckoutConfirmAccept, CommitPreviewParent,
         DiffChanges, JumpBackward, OpenCommandPalette, ReviewDone, SetTheme, ToggleBlame,
     };
+    use stoat_config::TabBarMode;
     use stoatty_protocol::{
         command::{decode_stream, BorderStyle, Command},
         PROTOCOL_VERSION,
@@ -1058,26 +1059,26 @@ mod tests {
         );
     }
 
-    /// `j` scrolls the preview's patch one row, and `Ctrl-d` half of the 13
-    /// rows the patch shows in at this window size.
+    /// `j` scrolls the preview's patch one row, and `Ctrl-d` half of the 19
+    /// rows the patch shows in at this window size, rounded down.
     #[test]
     fn j_scrolls_the_preview_a_row_and_ctrl_d_half_the_patch_rows() {
         let mut h = long_preview();
         h.type_keys("j");
         let row = preview_scroll(&h);
         h.type_keys("ctrl-d");
-        assert_eq!((row, preview_scroll(&h)), (Some(1), Some(7)));
+        assert_eq!((row, preview_scroll(&h)), (Some(1), Some(10)));
     }
 
-    /// The scroll stops where the patch's last row meets the bottom of the 13
+    /// The scroll stops where the patch's last row meets the bottom of the 19
     /// rows the patch shows in. The patch holds the file's header, its one
     /// line of context, and its 40 added lines, so the last page starts at row
-    /// 29.
+    /// 23.
     #[test]
     fn the_preview_scroll_stops_at_the_patch_last_page() {
         let mut h = long_preview();
         h.type_keys("ctrl-d ctrl-d ctrl-d ctrl-d ctrl-d ctrl-d ctrl-d ctrl-d");
-        assert_eq!(preview_scroll(&h), Some(29));
+        assert_eq!(preview_scroll(&h), Some(23));
     }
 
     /// The preview of a commit that edits two files heads the rows of each.
@@ -1164,8 +1165,8 @@ mod tests {
     /// `P` reads a merge's patch against its second parent, and a second `P`
     /// against its first again. Each patch lists the files that differ from its
     /// parent and carries their syntax colors, and its meta line names that
-    /// parent and counts the patch. Only the first parent's patch rings the
-    /// origin. A theme switch builds the patch again against the parent it
+    /// parent and counts the patch in the header's meta. Only the first
+    /// parent's patch rings the origin. A theme switch builds the patch again against the parent it
     /// reads.
     #[test]
     fn p_steps_a_merge_preview_through_its_parents() {
@@ -1188,7 +1189,8 @@ mod tests {
         let view = |parent: usize, files: &[&str], ringed: bool, against: &str| {
             let files: Vec<String> = files.iter().map(|file| file.to_string()).collect();
             let meta = format!("fake \u{b7} 2023/11/14 22:13 \u{b7} against parent {against}");
-            (parent, files, ringed, true, meta)
+            let header = format!("Commit commit m4{meta:>78}  preview \u{b7} read-only ");
+            (parent, files, ringed, true, header)
         };
         let first = view(0, &["a.rs"], true, "m3 \u{b7} 1 file +1 \u{2212}0");
         let second = view(
@@ -1265,7 +1267,7 @@ mod tests {
     /// scene a light ring in the focused border's color marks the line's row,
     /// before the row's number runs so the ring hides none of them. A run on the
     /// row's tint ends a cell short of the row's right edge, so its 8 characters
-    /// start at column 97, and it names the pane's file and the cursor's line,
+    /// start at column 109, and it names the pane's file and the cursor's line,
     /// which an uncommitted line above it moves off the line's place in the
     /// commit.
     #[test]
@@ -1336,9 +1338,9 @@ mod tests {
             ),
             (
                 Some(42),
-                vec![Rect::new(14, 9, 92, 1)],
+                vec![Rect::new(2, 5, 116, 1)],
                 true,
-                vec![("\u{25c2} b.rs:3", 97 * 16, tint)],
+                vec![("\u{25c2} b.rs:3", 109 * 16, tint)],
             ),
         );
     }
@@ -1353,6 +1355,24 @@ mod tests {
             10,
         ));
         assert_eq!(preview_scroll(&h), Some(3));
+    }
+
+    /// With the tab bar on, the patch starts on row 4, under the tab bar's row,
+    /// the box's top, and the header's two rows. A wheel notch over the rule
+    /// on row 3 leaves the patch where it is, and one over row 4 scrolls it.
+    #[test]
+    fn a_wheel_notch_scrolls_the_patch_from_its_first_row_under_the_tab_bar() {
+        let mut h = long_preview();
+        h.stoat.settings.ui_tab_bar = Some(TabBarMode::Always);
+        let mut notch = |row| {
+            h.stoat.update(test_fixture::mouse_event(
+                MouseEventKind::ScrollDown,
+                50,
+                row,
+            ));
+            preview_scroll(&h)
+        };
+        assert_eq!([notch(3), notch(4)], [Some(0), Some(3)]);
     }
 
     /// The preview opens in normal mode, where its keys bind, from any mode.
@@ -1729,6 +1749,63 @@ mod tests {
                 [true, true],
                 Some("commit_preview"),
             ),
+        );
+    }
+
+    /// Under a live scene the preview's box covers every status row, so no
+    /// status row paints its components while the preview is open, nor while
+    /// it waits behind the confirm. Before the preview opens, the status lane
+    /// holds the pane's row.
+    #[test]
+    fn the_preview_covers_the_status_rows_behind_the_confirm_too() {
+        let mut h = dirty_checkout();
+        h.stoat.stoatty_protocol = PROTOCOL_VERSION;
+        let status_parts = |h: &mut TestHarness| {
+            h.stoat.render();
+            decode_stream(h.stoat.apc_scene.lane_bytes(STATUS_LANE))
+                .into_iter()
+                .filter(|command| !matches!(command, Command::Nudge(_)))
+                .count()
+        };
+        let closed = status_parts(&mut h);
+        h.type_keys("j j enter");
+        h.settle();
+        let open = status_parts(&mut h);
+        h.type_keys("c");
+        h.settle();
+        let behind = h
+            .stoat
+            .checkout_confirm
+            .as_ref()
+            .is_some_and(|confirm| confirm.behind.is_some());
+        assert_eq!(
+            (closed > 0, open, behind, status_parts(&mut h)),
+            (true, 0, true, 0),
+        );
+    }
+
+    /// With the tab bar on, the preview's header draws on row 2, under the tab
+    /// bar's row and the box's top, and it keeps that row behind the confirm
+    /// that `c` opens over it.
+    #[test]
+    fn the_preview_keeps_its_rows_under_the_tab_bar_behind_the_confirm() {
+        let mut h = dirty_checkout();
+        h.stoat.stoatty = false;
+        h.stoat.settings.ui_tab_bar = Some(TabBarMode::Always);
+        let header_row = |h: &mut TestHarness| {
+            h.snapshot();
+            h.rendered_text()
+                .lines()
+                .position(|row| row.contains("preview \u{b7} read-only"))
+        };
+        h.type_keys("j j enter");
+        h.settle();
+        let open = header_row(&mut h);
+        h.type_keys("c");
+        h.settle();
+        assert_eq!(
+            (open, header_row(&mut h), h.stoat.checkout_confirm.is_some()),
+            (Some(2), Some(2), true),
         );
     }
 
@@ -2431,14 +2508,15 @@ mod tests {
 
     /// The open preview's parent index, the files of its patch, whether the
     /// patch rings the origin, whether each file carries its syntax colors, and
-    /// the meta line that a cell box draws.
+    /// the header row inside the cell box's frame, which names the parent in
+    /// its meta.
     fn parent_view(h: &mut TestHarness) -> (usize, Vec<String>, bool, bool, String) {
         h.snapshot();
-        let meta = h
+        let header = h
             .rendered_text()
             .lines()
-            .nth(5)
-            .map(|row| row.chars().skip(15).take(91).collect::<String>())
+            .nth(1)
+            .map(|row| row.chars().skip(2).take(116).collect::<String>())
             .unwrap_or_default();
         let preview = h
             .stoat
@@ -2457,7 +2535,7 @@ mod tests {
             doc.files
                 .iter()
                 .all(|file| file.buffer_highlights.is_some()),
-            meta.trim_end().to_string(),
+            header,
         )
     }
 

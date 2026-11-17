@@ -1,31 +1,31 @@
 //! The Commit Preview's box, painted as the BlamePreview board draws it.
 //!
-//! The board places the box 120 px in from each side of the window, 60 px under
-//! its top, and 48 px over its bottom. At the scene's 9 by 18 px cell that is
-//! 13 columns in and 3 rows in, and each edge stands off its cells by the
-//! pixels left over. A window under 60 by 14 cells keeps a margin of 2 columns
-//! and 1 row on the cell grid instead.
+//! The box is the boards' L modal. It takes the window less one column on each
+//! side, from the first row under the tab bar to the window's last row, so it
+//! covers the panes and the status rows and leaves the tab bar in view.
 //!
-//! Inside the box, a header row names the commit with a read-only chip at its
-//! right, a muted meta line follows, and a rule divides them from the patch.
-//! The footer on the box's bottom row lists the preview's keys.
+//! Inside the box, a header row names the commit, with its meta and a
+//! read-only chip at its right. One Island holds the patch, and the key line
+//! lists the preview's keys. A terminal without the plate look draws the same
+//! cells inside a bordered frame.
 
 use crate::{
     blame,
     commit_preview::CommitPreview,
     render::{
-        self, chrome, commit_patch,
+        chrome::{self, ISLAND_BOTTOM, ISLAND_SIDE, ISLAND_TOP},
+        commit_patch,
         commits::PreviewDials,
         paint,
-        picker::{self, Footer},
+        picker::{self, Footer, PlateHeader},
         text,
     },
-    theme::{scope, PanelRole, Theme, TypeRole},
+    theme::{scope, Theme, TypeRole},
 };
 use ratatui::{
     buffer::Buffer,
     layout::Rect,
-    style::Modifier,
+    style::Style,
     widgets::{Block, Borders, StatefulWidget},
 };
 use std::mem;
@@ -36,36 +36,11 @@ use stoat_widgets::{
 };
 use stoatty_protocol::command::{BorderStyle, Edge, PanelShadow};
 
-/// The columns the board's box stands in from each side of the window.
-const BOARD_INSET_X: u16 = 13;
+/// The modal's name, which leads the header.
+const LABEL: &str = "Commit";
 
-/// The rows the board's box stands in from the top and the bottom of the
-/// window.
-const BOARD_INSET_Y: u16 = 3;
-
-/// The smallest window, in columns and rows, that keeps the board's margins.
-const BOARD_MIN: (u16, u16) = (60, 14);
-
-/// Where the board's box edges stand against the cells inside its border.
-///
-/// The box is 120 px in from each side, which is 13 columns and 3 px, so each
-/// side crosses the border column and stops 3 px short of its far side. It is
-/// 60 px down, which is 3 rows and 6 px, so the top crosses the border row and
-/// stops 6 px short of its top. It is 48 px up, which is 3 rows less 6 px, so
-/// the bottom stands 6 px under the footer row.
-const BOARD_EDGES: [Edge; 4] = [
-    Edge::Margin(6),
-    Edge::Margin(3),
-    Edge::Outset(6),
-    Edge::Margin(3),
-];
-
-/// The rows above the patch, which hold the header, the meta line, and the
-/// rule.
-const HEADER_ROWS: u16 = 3;
-
-/// The read-only chip's text, with its padding.
-const CHIP: &str = " preview \u{b7} read-only ";
+/// The read-only chip's text.
+const CHIP: &str = "preview \u{b7} read-only";
 
 /// The word the patch's rows show while the patch builds.
 const LOADING: &str = "loading\u{2026}";
@@ -73,87 +48,74 @@ const LOADING: &str = "loading\u{2026}";
 /// Where the preview's parts go in a window.
 pub(crate) struct PreviewLayout {
     /// The cells of the box, with its border rows and columns.
-    area: Rect,
-    /// Where the box's edges stand against the cells inside the border, or
-    /// `None` for a box on the cell grid.
-    edges: Option<[Edge; 4]>,
+    modal: Rect,
     /// The rows inside the border.
     inner: Rect,
     /// The rows the patch scrolls in.
     pub(crate) body: Rect,
-    /// The footer's row, which is the box's bottom border row.
+    /// The key line's rows, the inner rect's last row and the border row under
+    /// it.
     footer: Rect,
 }
 
-/// The preview's layout in the window `full`, or `None` for a window with no
-/// row for the patch.
-pub(crate) fn commit_preview_layout(full: Rect) -> Option<PreviewLayout> {
-    let (area, edges) = if full.width >= BOARD_MIN.0 && full.height >= BOARD_MIN.1 {
-        let area = Rect::new(
-            full.x + BOARD_INSET_X,
-            full.y + BOARD_INSET_Y,
-            full.width - 2 * BOARD_INSET_X,
-            full.height - 2 * BOARD_INSET_Y,
-        );
-        (area, Some(BOARD_EDGES))
-    } else {
-        let area = Rect::new(
-            full.x + 2,
-            full.y + 1,
-            full.width.saturating_sub(4),
-            full.height.saturating_sub(2),
-        );
-        (area, None)
-    };
-
-    let inner = Block::default().borders(Borders::ALL).inner(area);
-    if inner.width == 0 || inner.height <= HEADER_ROWS {
+/// The preview's layout in the window `full` under `tab_rows` rows of tab bar,
+/// or `None` for a window with no row for the patch.
+///
+/// The header takes the inner rect's first two rows, and the key line takes
+/// its last row, so the patch scrolls in the rows between them.
+pub(crate) fn commit_preview_layout(full: Rect, tab_rows: u16) -> Option<PreviewLayout> {
+    let modal = Rect::new(
+        full.x + 1,
+        full.y + tab_rows,
+        full.width.saturating_sub(2),
+        full.height.saturating_sub(tab_rows),
+    );
+    let inner = Block::default().borders(Borders::ALL).inner(modal);
+    if inner.width == 0 || inner.height <= 3 {
         return None;
     }
     Some(PreviewLayout {
-        area,
-        edges,
+        modal,
         inner,
-        body: Rect::new(
-            inner.x,
-            inner.y + HEADER_ROWS,
-            inner.width,
-            inner.height - HEADER_ROWS,
-        ),
-        footer: Rect::new(inner.x, area.bottom() - 1, inner.width, 1),
+        body: Rect::new(inner.x, inner.y + 2, inner.width, inner.height - 3),
+        footer: picker::footer_rect(modal),
     })
 }
 
-/// Paint the preview over the window `full`.
+/// Paint the preview over the window `full`, under `tab_rows` rows of tab bar.
 ///
 /// The paint clamps the preview's scroll to the patch's last page, since only
 /// a built patch knows how many rows it has.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn render_commit_preview_modal(
     preview: &mut CommitPreview,
     now_epoch: i64,
     theme: &Theme,
     dials: PreviewDials,
     full: Rect,
+    tab_rows: u16,
     buf: &mut Buffer,
     scene: &mut ApcScene,
 ) {
-    let Some(layout) = commit_preview_layout(full) else {
+    let Some(layout) = commit_preview_layout(full, tab_rows) else {
         return;
     };
-    paint_box(&layout, theme, buf, scene);
+    let style = theme.get(scope::UI_MODAL_PICKER);
+    chrome::modal_plate(buf, layout.modal, style, theme, scene);
+    let plate = chrome::plate_colors(theme, scene);
+    if let Some(plate) = plate {
+        let edges = [ISLAND_TOP, ISLAND_SIDE, ISLAND_BOTTOM, ISLAND_SIDE];
+        chrome::modal_island(layout.body, edges, plate, theme, buf, scene);
+    }
 
-    let inner = layout.inner;
-    let row = |offset: u16| Rect::new(inner.x, inner.y + offset, inner.width, 1);
-    paint_header(preview, theme, row(0), buf, scene);
-    paint_meta(preview, now_epoch, theme, row(1), buf);
-    chrome::hline(
-        buf,
-        inner.x,
-        inner.y + 2,
-        inner.width,
-        theme.get(scope::UI_DIVIDER),
-        scene,
-    );
+    let meta = meta_spans(preview, now_epoch, theme);
+    let header = PlateHeader {
+        label: LABEL,
+        title: &preview.commit.info.summary,
+        meta: &meta,
+        chip: Some(CHIP),
+    };
+    picker::plate_header(buf, layout.inner, &header, theme, scene);
     paint_body(preview, theme, dials, layout.body, buf, scene);
 
     let hints: Vec<(&str, &str)> = preview
@@ -165,134 +127,12 @@ pub(crate) fn render_commit_preview_modal(
         hints: &hints,
         ..Footer::default()
     };
-    // The box is not a plate, so its key line keeps the cell row on its surface.
-    picker::modal_footer(buf, layout.footer, &footer, None, theme, scene);
+    picker::modal_footer(buf, layout.footer, &footer, plate, theme, scene);
 }
 
-/// Paint the box's surface and its frame.
-///
-/// Under a live scene the board's box stands off the cell grid by a few
-/// pixels, and a cell's background colors the whole cell. So the cells inside
-/// the border carry the surface, and a backdrop panel fills the ring between
-/// those cells and the box's edges. A backdrop's fill leaves its own cells
-/// alone, so the patch keeps the tints its cells carry. Otherwise the box is a
-/// modal frame over cells that carry the surface.
-fn paint_box(layout: &PreviewLayout, theme: &Theme, buf: &mut Buffer, scene: &mut ApcScene) {
-    let style = theme.get(scope::UI_MODAL_PICKER);
-    let board = layout.edges.filter(|_| scene.live()).and_then(|edges| {
-        Some((
-            edges,
-            paint::style_rgb(style.fg)?,
-            render::modal_fill(theme, style)?,
-        ))
-    });
-    let Some((edges, border, surface)) = board else {
-        render::clear_modal(layout.area, buf, theme, style);
-        chrome::modal_frame_above_pools(buf, layout.area, None, style, theme, scene);
-        return;
-    };
-
-    let area = layout.area;
-    let cells = Rect::new(area.x + 1, area.y + 1, area.width - 2, area.height - 1);
-    render::clear_modal(cells, buf, theme, style);
-    clear_border_glyphs(area, buf);
-
-    let frame = theme.panel(PanelRole::Overlay);
-    let box_panel = |style, fill, shadow, backdrop: bool| Panel {
-        style,
-        border,
-        corner_radius: frame.corner_radius,
-        fill,
-        shadow,
-        edges,
-        corners: 0,
-        fillets: 0,
-        fillet_radius: 2,
-        hatch: None,
-        above_pools: !backdrop,
-        backdrop,
-        anchor: None,
-    };
-    // A backdrop hides no other pass's components and holds no pool composite
-    // back, so a plain panel over the same box does both. The plain panel goes
-    // first, since a panel hides every earlier panel inside its box.
-    box_panel(BorderStyle::None_, None, PanelShadow::None_, false).draw_components(cells, scene);
-    box_panel(BorderStyle::Rounded, Some(surface), frame.shadow, true)
-        .draw_components(cells, scene);
-}
-
-/// Clear the glyphs of the cells the board's box border crosses, which are the
-/// box's top row and side columns and the row under the box.
-///
-/// The backgrounds stay, so the part of each cell outside the box shows the
-/// panes. The box's fill covers the part inside, but the glyphs draw over a
-/// fill.
-fn clear_border_glyphs(area: Rect, buf: &mut Buffer) {
-    let below = Some(area.bottom()).filter(|&y| y < buf.area.bottom());
-    for y in [Some(area.y), below].into_iter().flatten() {
-        for x in area.x..area.right() {
-            buf[(x, y)].set_char(' ');
-        }
-    }
-    for y in area.y + 1..area.bottom() {
-        buf[(area.x, y)].set_char(' ');
-        buf[(area.right() - 1, y)].set_char(' ');
-    }
-}
-
-/// Paint the header row, which holds the short sha, the bold subject, and the
-/// read-only chip at the right.
-///
-/// The chip draws when the row holds it after the sha. A theme with no chip
-/// style draws its text plain in the muted color.
-fn paint_header(
-    preview: &CommitPreview,
-    theme: &Theme,
-    row: Rect,
-    buf: &mut Buffer,
-    scene: &mut ApcScene,
-) {
-    let info = &preview.commit.info;
-    let sha_x = row.x + 1;
-    let subject_x = sha_x + info.short_sha.chars().count() as u16 + 1;
-    let chip_width = CHIP.chars().count() as u16;
-    let chip_x = row
-        .right()
-        .checked_sub(chip_width + 1)
-        .filter(|&x| x > subject_x);
-
-    let text_end = chip_x.map_or(row.right() - 1, |x| x - 1);
-    text::write_str_clipped(
-        buf,
-        sha_x,
-        row.y,
-        &info.short_sha,
-        theme.get(scope::VCS_COMMIT_SHA),
-        text_end,
-    );
-    text::write_str_clipped(
-        buf,
-        subject_x,
-        row.y,
-        &info.summary,
-        theme.get(scope::UI_TEXT).add_modifier(Modifier::BOLD),
-        text_end,
-    );
-
-    let Some(chip_x) = chip_x else {
-        return;
-    };
-    let chip = Rect::new(chip_x, row.y, chip_width, 1);
-    let style = match theme.try_get(scope::UI_PREVIEW_CHIP) {
-        Some(style) => chrome::chip_cells(chip, style, scene),
-        None => theme.get(scope::UI_TEXT_MUTED),
-    };
-    text::write_str(buf, chip_x, row.y, CHIP, style);
-}
-
-/// Paint the meta line, which names the author, the date, the parent the patch
+/// The header's meta, which names the author, the date, the parent the patch
 /// is against, and the change size once the build lands.
-fn paint_meta(preview: &CommitPreview, now_epoch: i64, theme: &Theme, row: Rect, buf: &mut Buffer) {
+fn meta_spans(preview: &CommitPreview, now_epoch: i64, theme: &Theme) -> Vec<(String, Style)> {
     let info = &preview.commit.info;
     let muted = theme.get(scope::UI_TEXT_MUTED);
     let dot = || (" \u{b7} ".to_owned(), muted);
@@ -328,13 +168,7 @@ fn paint_meta(preview: &CommitPreview, now_epoch: i64, theme: &Theme, row: Rect,
             (format!("\u{2212}{removed}"), theme.get(scope::DIFF_DELETED)),
         ]);
     }
-
-    let end = row.right() - 1;
-    let mut x = row.x + 1;
-    for (part, style) in &parts {
-        text::write_str_clipped(buf, x, row.y, part, *style, end);
-        x = x.saturating_add(part.chars().count() as u16);
-    }
+    parts
 }
 
 /// Ring `row`, the row of the patch that holds the origin's line, in the
@@ -467,16 +301,20 @@ fn paint_body(
 
 #[cfg(test)]
 mod tests {
-    use super::{commit_preview_layout, BOARD_EDGES};
+    use super::commit_preview_layout;
     use crate::{
         action_handlers::dispatch,
-        render::{self, paint, OVERLAY_LANE},
+        render::{
+            chrome::{self, ISLAND_BOTTOM, ISLAND_SIDE, ISLAND_TOP},
+            paint, OVERLAY_LANE,
+        },
         test_harness::{CommitSpec, TestHarness},
         theme::{scope, PanelRole},
     };
-    use ratatui::{buffer::Buffer, layout::Rect, style::Color};
+    use ratatui::{layout::Rect, style::Color};
     use std::path::{Path, PathBuf};
     use stoat_action::BlamePreview;
+    use stoat_config::TabBarMode;
     use stoat_widgets::panel::Panel;
     use stoatty_protocol::{
         command::{decode_stream, BorderStyle, Command, Edge, PanelShadow},
@@ -503,54 +341,53 @@ mod tests {
         ("c2", "two", &[("a.rs", "one\ntwo\n")]),
     ];
 
-    /// A window of 60 by 14 cells or more holds the box 13 columns and 3 rows
-    /// in, at the board's edges, and a smaller window holds it 2 columns and
-    /// 1 row in, on the cell grid. The patch takes the rows under the header,
-    /// the meta line, and the rule, and the footer takes the bottom border row.
+    /// The box takes the window less one column on each side, from the first
+    /// row under the tab bar to the window's last row. The patch takes the
+    /// rows between the header's two rows and the key line, which takes the
+    /// inner rect's last row and the border row under it. A window that leaves
+    /// the patch no row has no layout.
     #[test]
-    fn the_box_keeps_the_board_margins_from_60_by_14_cells() {
-        let layouts = [(160, 50), (60, 14), (59, 14), (60, 13)].map(|(width, height)| {
-            commit_preview_layout(Rect::new(0, 0, width, height))
-                .map(|layout| (layout.area, layout.edges, layout.body, layout.footer))
-        });
+    fn the_box_takes_the_window_less_a_column_each_side_under_the_tab_bar() {
+        let layout = |width, height, tab_rows| {
+            commit_preview_layout(Rect::new(0, 0, width, height), tab_rows)
+                .map(|layout| (layout.modal, layout.body, layout.footer))
+        };
         assert_eq!(
-            layouts,
+            [
+                layout(160, 50, 2),
+                layout(80, 24, 0),
+                layout(80, 7, 1),
+                layout(80, 6, 1),
+            ],
             [
                 Some((
-                    Rect::new(13, 3, 134, 44),
-                    Some(BOARD_EDGES),
-                    Rect::new(14, 7, 132, 39),
-                    Rect::new(14, 46, 132, 1),
+                    Rect::new(1, 2, 158, 48),
+                    Rect::new(2, 5, 156, 43),
+                    Rect::new(2, 48, 156, 2),
                 )),
                 Some((
-                    Rect::new(13, 3, 34, 8),
-                    Some(BOARD_EDGES),
-                    Rect::new(14, 7, 32, 3),
-                    Rect::new(14, 10, 32, 1),
+                    Rect::new(1, 0, 78, 24),
+                    Rect::new(2, 3, 76, 19),
+                    Rect::new(2, 22, 76, 2),
                 )),
                 Some((
-                    Rect::new(2, 1, 55, 12),
-                    None,
-                    Rect::new(3, 5, 53, 7),
-                    Rect::new(3, 12, 53, 1),
+                    Rect::new(1, 1, 78, 6),
+                    Rect::new(2, 4, 76, 1),
+                    Rect::new(2, 5, 76, 2),
                 )),
-                Some((
-                    Rect::new(2, 1, 56, 11),
-                    None,
-                    Rect::new(3, 5, 54, 6),
-                    Rect::new(3, 11, 54, 1),
-                )),
+                None,
             ],
         );
     }
 
-    /// Without components the box is cells. Its header reads the sha, the
-    /// subject, and the read-only chip at the right, its meta line names the
-    /// parent and the change size, a rule closes the header, and the footer on
-    /// the bottom border reads the keys. In the 120-cell window the footer
-    /// leaves out `Esc back to blame`, the first key that does not fit.
+    /// Without components the box is cells inside a frame, which starts on the
+    /// window's first row while the tab bar hides. Its header row reads the
+    /// label and the subject, and from the right the meta and the read-only
+    /// chip, and a rule closes the header. The key line on the inner rect's
+    /// last row reads every key, and the border row under it is blank between
+    /// its corners.
     #[test]
-    fn the_cell_box_reads_its_header_meta_line_and_footer() {
+    fn the_cell_box_reads_its_header_row_and_key_line() {
         let mut h = preview_open();
         h.stoat.stoatty = false;
         h.snapshot();
@@ -558,131 +395,118 @@ mod tests {
         let rows: Vec<String> = h
             .rendered_text()
             .lines()
-            .skip(3)
-            .take(18)
-            .map(|row| row.chars().skip(13).take(94).collect())
+            .map(|row| row.chars().skip(1).take(118).collect())
             .collect();
         let meta =
             "fake \u{b7} 2023/11/14 22:13 \u{b7} against parent c1 \u{b7} 1 file +1 \u{2212}0";
+        let keys = "j/k scroll  ]/[ file  c check out  p blame parent  P other parent  \
+                    y copy sha  Esc back to blame";
         assert_eq!(
-            [&rows[0], &rows[1], &rows[2], &rows[3], &rows[17]],
+            [&rows[0], &rows[1], &rows[2], &rows[22], &rows[23]],
             [
-                &format!("\u{250c}{}\u{2510}", "\u{2500}".repeat(92)),
-                &format!(
-                    "\u{2502}{:<70} preview \u{b7} read-only  \u{2502}",
-                    " c2 two"
-                ),
-                &format!("\u{2502} {meta:<91}\u{2502}"),
-                &format!("\u{2502}{}\u{2502}", "\u{2500}".repeat(92)),
-                &format!(
-                    "\u{2514} {:<91}\u{2518}",
-                    "j/k scroll  ]/[ file  c check out  p blame parent  P other parent  y copy sha"
-                ),
+                &format!("\u{250c}{}\u{2510}", "\u{2500}".repeat(116)),
+                &format!("\u{2502}Commit two{meta:>84}  preview \u{b7} read-only \u{2502}"),
+                &format!("\u{2502}{}\u{2502}", "\u{2500}".repeat(116)),
+                &format!("\u{2502} {keys:<115}\u{2502}"),
+                &format!("\u{2514}{}\u{2518}", " ".repeat(116)),
             ],
         );
     }
 
-    /// Under a live scene the box is two panels over the cells inside its
-    /// border, at the board's edges. A plain panel that draws nothing goes
-    /// first and holds the pools back. A backdrop panel then fills the ring
-    /// outside those cells, strokes the frame, and casts the shadow. The
-    /// read-only chip draws in its own box, and a light square ring marks the
-    /// origin row, the added line the preview opened from.
+    /// Under a live scene the box is the plate's two panels over the inner
+    /// cells, a plain one and then a backdrop in the ground. One Island in the
+    /// editor surface follows over the patch's rows. The read-only chip draws
+    /// in its own box at the header row's right end, and a light square ring
+    /// marks the origin row, the added line the preview opened from. The key
+    /// line's row, the inner rect's last, blanks to the ground. The tab bar
+    /// shows in two rows here, so the box starts on row 2.
     #[test]
-    fn the_live_box_draws_a_backdrop_ring_at_the_board_edges() {
+    fn the_live_box_draws_a_plate_with_one_island() {
         let mut h = preview_open();
         h.stoat.stoatty_protocol = PROTOCOL_VERSION;
-        h.stoat.render();
+        h.stoat.settings.ui_tab_bar = Some(TabBarMode::Always);
+        let key_line: Vec<Color> = {
+            let buf = h.stoat.render();
+            (2..118).map(|x| buf[(x, 22)].bg).collect()
+        };
 
         let theme = &h.stoat.theme;
-        let frame = theme.panel(PanelRole::Overlay);
-        let surface = render::modal_fill(theme, theme.get(scope::UI_MODAL_PICKER));
+        let plate = chrome::plate_colors(theme, &h.stoat.apc_scene).expect("the plate look");
         let chip = Panel::chip(
             paint::style_rgb(theme.get(scope::UI_PREVIEW_CHIP).bg).expect("an RGB chip"),
         );
-        let cells = Rect::new(14, 4, 92, 17);
-        let edges = [
-            Edge::Margin(6),
-            Edge::Margin(3),
-            Edge::Outset(6),
-            Edge::Margin(3),
+        let inner = Rect::new(2, 3, 116, 20);
+        let [r, g, b] = plate.ground;
+        let plate_edges = [
+            Edge::Inset(0),
+            Edge::Outset(11),
+            Edge::Outset(10),
+            Edge::Outset(11),
         ];
         assert_eq!(
-            box_panels(&h),
-            [
-                (
-                    cells,
-                    BorderStyle::None_,
-                    None,
-                    PanelShadow::None_,
-                    frame.corner_radius,
-                    edges,
-                    true,
-                    false,
-                ),
-                (
-                    cells,
-                    BorderStyle::Rounded,
-                    surface,
-                    frame.shadow,
-                    frame.corner_radius,
-                    edges,
-                    false,
-                    true,
-                ),
-                (
-                    Rect::new(84, 4, 21, 1),
-                    chip.style,
-                    chip.fill,
-                    chip.shadow,
-                    chip.corner_radius,
-                    chip.edges,
-                    chip.above_pools,
-                    chip.backdrop,
-                ),
-                (
-                    Rect::new(14, 9, 92, 1),
-                    BorderStyle::Light,
-                    None,
-                    PanelShadow::None_,
-                    0,
-                    Edge::symmetric(0, 0),
-                    true,
-                    false,
-                ),
-            ],
+            (box_panels(&h), key_line),
+            (
+                vec![
+                    (
+                        inner,
+                        BorderStyle::None_,
+                        None,
+                        PanelShadow::None_,
+                        8,
+                        plate_edges,
+                        false,
+                        false,
+                    ),
+                    (
+                        inner,
+                        BorderStyle::None_,
+                        Some(plate.ground),
+                        theme.panel(PanelRole::Overlay).shadow,
+                        8,
+                        plate_edges,
+                        false,
+                        true,
+                    ),
+                    (
+                        Rect::new(2, 5, 116, 17),
+                        BorderStyle::None_,
+                        Some(plate.surface),
+                        PanelShadow::None_,
+                        theme.panel(PanelRole::Island).corner_radius,
+                        [ISLAND_TOP, ISLAND_SIDE, ISLAND_BOTTOM, ISLAND_SIDE],
+                        false,
+                        true,
+                    ),
+                    (
+                        Rect::new(97, 3, 21, 1),
+                        chip.style,
+                        chip.fill,
+                        chip.shadow,
+                        chip.corner_radius,
+                        Edge::symmetric(0, 0),
+                        chip.above_pools,
+                        chip.backdrop,
+                    ),
+                    (
+                        Rect::new(2, 7, 116, 1),
+                        BorderStyle::Light,
+                        None,
+                        PanelShadow::None_,
+                        0,
+                        Edge::symmetric(0, 0),
+                        true,
+                        false,
+                    ),
+                ],
+                vec![Color::Rgb(r, g, b); 116],
+            ),
         );
     }
 
-    /// Under a live scene the cells the box's border crosses hold no glyphs,
-    /// since the box's fill covers their backgrounds and not their glyphs.
-    /// They keep the pane's backgrounds rather than the box's surface, which
-    /// would show past the border. Before the preview opens, the same cells
-    /// hold the pane's text.
+    /// A root commit's meta says so where a commit names its parent, and a
+    /// commit of two files counts them in the plural.
     #[test]
-    fn the_live_box_clears_the_glyphs_its_border_crosses() {
-        let text = format!("{}\n", "x".repeat(110)).repeat(30);
-        let mut h = blamed_pane(&[("c1", "one", &[("a.rs", &text)])], &text);
-        h.stoat.stoatty_protocol = PROTOCOL_VERSION;
-        let before = border_cells(&h.stoat.render());
-
-        h.type_keys("enter");
-        h.settle();
-        let surface = h.stoat.theme.get(scope::UI_MODAL_PICKER).bg;
-        let after: Vec<(String, bool)> = border_cells(&h.stoat.render())
-            .into_iter()
-            .map(|(symbol, bg)| (symbol, Some(bg) == surface))
-            .collect();
-        assert_eq!(
-            (before.iter().any(|(symbol, _)| symbol == "x"), after),
-            (true, vec![(" ".to_string(), false); before.len()]),
-        );
-    }
-
-    /// A root commit's meta line says so where a commit names its parent, and
-    /// a commit of two files counts them in the plural.
-    #[test]
-    fn a_root_commit_meta_line_reads_root_commit() {
+    fn a_root_commit_meta_reads_root_commit() {
         let mut h = blamed_pane(
             &[("c1", "one", &[("a.rs", "one\n"), ("b.rs", "b\n")])],
             "one\n",
@@ -692,14 +516,17 @@ mod tests {
         h.settle();
         h.snapshot();
 
-        let meta: String = h
+        let header: String = h
             .rendered_text()
             .lines()
-            .nth(5)
-            .map(|row| row.chars().skip(15).take(91).collect())
+            .nth(1)
+            .map(|row| row.chars().skip(2).take(116).collect())
             .unwrap_or_default();
-        let want = "fake \u{b7} 2023/11/14 22:13 \u{b7} root commit \u{b7} 2 files +2 \u{2212}0";
-        assert_eq!(meta, format!("{want:<91}"));
+        let meta = "fake \u{b7} 2023/11/14 22:13 \u{b7} root commit \u{b7} 2 files +2 \u{2212}0";
+        assert_eq!(
+            header,
+            format!("Commit one{meta:>84}  preview \u{b7} read-only "),
+        );
     }
 
     /// The patch's rows read the loading word, centered, until the build
@@ -711,8 +538,8 @@ mod tests {
         dispatch(&mut h.stoat, &BlamePreview);
 
         let buf = h.stoat.render();
-        let row: String = (14..106).map(|x| buf[(x, 13)].symbol()).collect();
-        assert_eq!(row, format!("{:^92}", "loading\u{2026}"));
+        let row: String = (2..118).map(|x| buf[(x, 12)].symbol()).collect();
+        assert_eq!(row, format!("{:^116}", "loading\u{2026}"));
     }
 
     /// A scrolled preview paints its patch from the scroll. One step down puts
@@ -740,10 +567,10 @@ mod tests {
         let row: String = h
             .rendered_text()
             .lines()
-            .nth(7)
-            .map(|row| row.chars().skip(14).take(92).collect())
+            .nth(3)
+            .map(|row| row.chars().skip(2).take(116).collect())
             .unwrap_or_default();
-        assert_eq!(row, format!("{:<92}", "   1   1 \u{2502}one"));
+        assert_eq!(row, format!("{:<116}", "   1   1 \u{2502}one"));
     }
 
     /// Without a live scene the origin row takes no ring, and its label is
@@ -757,12 +584,12 @@ mod tests {
         let row: String = h
             .rendered_text()
             .lines()
-            .nth(9)
-            .map(|row| row.chars().skip(14).take(92).collect())
+            .nth(5)
+            .map(|row| row.chars().skip(2).take(116).collect())
             .unwrap_or_default();
         assert_eq!(
             row,
-            format!("{:<83}\u{25c2} a.rs:2 ", "\u{258e}      2 \u{2502}two"),
+            format!("{:<107}\u{25c2} a.rs:2 ", "\u{258e}      2 \u{2502}two"),
         );
     }
 
@@ -781,9 +608,13 @@ mod tests {
         );
     }
 
-    /// The overlay lane's panels that start in the box's cells.
+    /// The overlay lane's panels that start in the box's inner cells, under
+    /// the two rows of a tab bar that shows under a live scene.
+    ///
+    /// The strip band's Island beside the panes starts on the box's top row,
+    /// so the inner cells leave it out.
     fn box_panels(h: &TestHarness) -> Vec<PanelParts> {
-        let area = Rect::new(13, 3, 94, 18);
+        let area = Rect::new(2, 3, 116, 20);
         decode_stream(h.stoat.apc_scene.lane_bytes(OVERLAY_LANE))
             .iter()
             .filter_map(|command| match command {
@@ -800,18 +631,6 @@ mod tests {
                 _ => None,
             })
             .filter(|(cells, ..)| area.contains(cells.as_position()))
-            .collect()
-    }
-
-    /// The glyph and the background of each cell the box's border crosses in
-    /// `buf`: its top row, its side columns, and the row under it.
-    fn border_cells(buf: &Buffer) -> Vec<(String, Color)> {
-        let rows = [3, 21]
-            .into_iter()
-            .flat_map(|y| (13..107).map(move |x| (x, y)));
-        let sides = (4..21).flat_map(|y| [(13, y), (106, y)]);
-        rows.chain(sides)
-            .map(|(x, y)| (buf[(x, y)].symbol().to_owned(), buf[(x, y)].bg))
             .collect()
     }
 

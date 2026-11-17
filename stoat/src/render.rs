@@ -1402,6 +1402,18 @@ pub(crate) fn frame(
     // Resolved here for the same reason. It reads the window focus beside the
     // numbering settings off the whole &Stoat.
     let line_numbers = stoat.painted_line_numbers();
+    // The Commit Preview's L box covers every status row, the preview behind
+    // the checkout confirm too. A status row draws scene components, which the
+    // margin under the plate's bottom edge would show cut, so none paints under
+    // the box.
+    let status_covered = match painted_modal {
+        Some(ActiveModal::CommitPreview) => true,
+        Some(ActiveModal::CheckoutConfirm) => stoat
+            .checkout_confirm
+            .as_ref()
+            .is_some_and(|confirm| confirm.behind.is_some()),
+        _ => false,
+    };
 
     let ws = &mut stoat.workspaces[stoat.active_workspace];
 
@@ -1849,7 +1861,9 @@ pub(crate) fn frame(
     }
     let mut lsp_badge_rect = None;
     for (id, pane) in ws.panes.split_panes() {
-        let Some(row) = pane_status_row(pane.area, single_minimap_rect, full, status_rows) else {
+        let Some(row) = pane_status_row(pane.area, single_minimap_rect, full, status_rows)
+            .filter(|_| !status_covered)
+        else {
             continue;
         };
         let badge = render_split_status(
@@ -1993,6 +2007,7 @@ pub(crate) fn frame(
                         &stoat.theme,
                         preview_dials,
                         full,
+                        tab_bar_rows,
                         buf,
                         &mut *scene,
                     );
@@ -2032,6 +2047,7 @@ pub(crate) fn frame(
                     &stoat.theme,
                     preview_dials,
                     full,
+                    tab_bar_rows,
                     buf,
                     &mut *scene,
                 );

@@ -603,7 +603,10 @@ pub(crate) fn boxed_modal_surfaces(stoat: &Stoat) -> Option<ModalSurfaces> {
         // so a press or a wheel off the patch does nothing.
         ActiveModal::CommitPreview => Some(ModalSurfaces {
             list: Rect::new(0, 0, 0, 0),
-            preview: Some(crate::render::commit_preview::commit_preview_layout(size)?.body),
+            preview: Some(
+                crate::render::commit_preview::commit_preview_layout(size, stoat.tab_bar_rows())?
+                    .body,
+            ),
             len: 0,
             selected: 0,
         }),
