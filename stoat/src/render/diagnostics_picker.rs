@@ -68,7 +68,7 @@ pub(crate) fn render_diagnostics_picker(
         PickerScope::Changes => "Diagnostics \u{00B7} changes",
         PickerScope::Workspace => "Diagnostics \u{00B7} workspace",
     };
-    crate::render::chrome::modal_plate(buf, modal_area, modal_style, theme, &mut *scene);
+    crate::render::chrome::list_plate(buf, modal_area, modal_style, theme, &mut *scene);
 
     crate::render::picker::filter_header(
         buf,

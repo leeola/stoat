@@ -165,7 +165,7 @@ pub(crate) fn render_file_finder(
     let no_match = finder.shows_no_match();
 
     let modal_style = theme.get(crate::theme::scope::UI_MODAL_PALETTE);
-    crate::render::chrome::modal_plate(buf, layout.modal, modal_style, theme, &mut *scene);
+    crate::render::chrome::list_plate(buf, layout.modal, modal_style, theme, &mut *scene);
 
     let inner = layout.inner;
     let separator_style = theme.get(crate::theme::scope::UI_BORDER_INACTIVE);

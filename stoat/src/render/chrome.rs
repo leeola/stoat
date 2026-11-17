@@ -71,7 +71,7 @@ const TOGGLE_OFF_MARK: &str = "\u{25cb}";
 /// it.
 const PLATE_RADIUS: u8 = 8;
 
-/// Where a modal plate's box stands against its inner cells, in top, right,
+/// Where a list modal's plate stands against its inner cells, in top, right,
 /// bottom, left order.
 ///
 /// The plate's top is the top of the header row, and its bottom reaches 10 px
@@ -84,6 +84,22 @@ const PLATE_EDGES: [Edge; 4] = [
     Edge::Outset(10),
     Edge::Outset(11),
 ];
+
+/// Where a confirm's plate stands against its text cells, in top, right,
+/// bottom, left order.
+///
+/// The BlameFlow board pads a confirm 10 px above and under its text and 12 px
+/// on each side. A confirm has no Island, so its text sits on the plate.
+pub(crate) const CONFIRM_EDGES: [Edge; 4] = [
+    Edge::Outset(10),
+    Edge::Outset(12),
+    Edge::Outset(10),
+    Edge::Outset(12),
+];
+
+/// The logical px of a cell's width and height at the boards' font, which a
+/// plate's ring reads to count the cells that an edge crosses.
+const BOARD_CELL_PX: (u8, u8) = (9, 18);
 
 /// The top edge of a plate's Island, which reaches 4 px into the row above the
 /// Island's cells.
@@ -407,38 +423,59 @@ pub(crate) fn plate_colors(theme: &Theme, scene: &ApcScene) -> Option<PlateColor
     Some(PlateColors { ground, surface })
 }
 
-/// Draw a filter modal's box over `modal`, and return the rect its content lays
+/// Draw a list modal's box over `modal`, and return the rect its content lays
 /// out in, which is `modal` less one cell on each side.
 ///
-/// With [`plate_colors`], the box is the ground plate of the modal boards: no
-/// border, rounded corners, and the modal shadow, with its edges at
-/// [`PLATE_EDGES`] around the inner rect. The row `modal.y` keeps the panes
-/// behind it. Without them, the box is a [`modal_frame`] over cells cleared to
-/// `style`.
-pub(crate) fn modal_plate(
+/// With [`plate_colors`], the box is the [`modal_plate`] over that rect, with
+/// its edges at [`PLATE_EDGES`]. The row `modal.y` keeps the panes behind it.
+/// Without them, the box is a [`modal_frame`] over cells cleared to `style`.
+pub(crate) fn list_plate(
     buf: &mut Buffer,
     modal: Rect,
     style: Style,
     theme: &Theme,
     scene: &mut ApcScene,
 ) -> Rect {
-    let Some(colors) = plate_colors(theme, scene) else {
+    let Some(plate) = plate_colors(theme, scene) else {
         render::clear_modal(modal, buf, theme, style);
         return modal_frame(buf, modal, None, style, theme, scene);
     };
 
     let inner = Block::default().borders(Borders::ALL).inner(modal);
-    let [r, g, b] = colors.ground;
-    render::clear_modal(inner, buf, theme, Style::default().bg(Color::Rgb(r, g, b)));
-    clear_plate_ring(modal, inner, buf);
+    modal_plate(buf, inner, PLATE_EDGES, plate, theme, scene);
+    inner
+}
 
-    let plate = |fill, shadow, backdrop| Panel {
+/// Draw the ground plate of the modal boards over `cells`, with its sides at
+/// `edges` around them: no border, rounded corners, and the modal shadow.
+///
+/// The cells clear to the ground, and the cells that the edges cross lose
+/// their glyphs, so the box's content must paint after this call. Those
+/// crossed cells keep their backgrounds, so the part of each outside the plate
+/// shows the panes.
+///
+/// See also:
+/// - [`list_plate`] for a list modal's plate, or its frame without the plate look.
+/// - [`CONFIRM_EDGES`] for the edges around a confirm's text.
+pub(crate) fn modal_plate(
+    buf: &mut Buffer,
+    cells: Rect,
+    edges: [Edge; 4],
+    plate: PlateColors,
+    theme: &Theme,
+    scene: &mut ApcScene,
+) {
+    let [r, g, b] = plate.ground;
+    render::clear_modal(cells, buf, theme, Style::default().bg(Color::Rgb(r, g, b)));
+    clear_plate_ring(cells, edges, buf);
+
+    let panel = |fill, shadow, backdrop| Panel {
         style: BorderStyle::None_,
-        border: colors.ground,
+        border: plate.ground,
         corner_radius: PLATE_RADIUS,
         fill,
         shadow,
-        edges: PLATE_EDGES,
+        edges,
         corners: 0,
         fillets: 0,
         fillet_radius: 2,
@@ -449,12 +486,11 @@ pub(crate) fn modal_plate(
     };
     // A backdrop hides no other pass's components, so a plain panel over the
     // same box does that. The plain panel goes first, since a panel hides every
-    // earlier panel inside its box. Neither floats above pools, because the
-    // modal's own list pool glides inside the box.
-    plate(None, PanelShadow::None_, false).draw_components(inner, scene);
+    // earlier panel inside its box. Neither floats above pools, because a list
+    // modal's own pool glides inside the box.
+    panel(None, PanelShadow::None_, false).draw_components(cells, scene);
     let shadow = theme.panel(PanelRole::Overlay).shadow;
-    plate(Some(colors.ground), shadow, true).draw_components(inner, scene);
-    inner
+    panel(Some(plate.ground), shadow, true).draw_components(cells, scene);
 }
 
 /// Draw one Island of a modal plate over `cells`, a panel in the editor surface
@@ -518,34 +554,43 @@ pub(crate) fn list_islands(
     }
 }
 
-/// Clear the glyphs of the cells the plate's edges cross, outside its inner
-/// cells.
+/// Clear the glyphs of the cells that the plate's `edges` cross, outside its
+/// `cells`.
 ///
-/// Those are the two columns on each side, over the rows from the inner rect's
-/// top to the modal rect's bottom, and the modal rect's last row between them.
-/// The backgrounds stay, so the part of each cell outside the plate shows the
-/// panes. The plate's fill covers the part inside, but a glyph draws over a
-/// fill.
-fn clear_plate_ring(modal: Rect, inner: Rect, buf: &mut Buffer) {
-    let area = buf.area;
-    let columns = [
-        modal.x.checked_sub(1),
-        Some(modal.x),
-        modal.right().checked_sub(1),
-        Some(modal.right()),
+/// Each side clears as many cells as [`ring_reach`] counts for its edge, so
+/// the list plate's ring is two columns on each side and the row under its
+/// cells. The backgrounds stay, so the part of each cell outside the plate
+/// shows the panes. The plate's fill covers the part inside, but a glyph draws
+/// over a fill.
+fn clear_plate_ring(cells: Rect, edges: [Edge; 4], buf: &mut Buffer) {
+    let (width, height) = BOARD_CELL_PX;
+    let [top, right, bottom, left] = [
+        ring_reach(edges[0], height),
+        ring_reach(edges[1], width),
+        ring_reach(edges[2], height),
+        ring_reach(edges[3], width),
     ];
-    for x in columns.into_iter().flatten() {
-        for y in inner.y..modal.bottom() {
-            if area.contains((x, y).into()) {
+    let area = buf.area;
+    for y in cells.y.saturating_sub(top)..cells.bottom().saturating_add(bottom) {
+        for x in cells.x.saturating_sub(left)..cells.right().saturating_add(right) {
+            if !cells.contains((x, y).into()) && area.contains((x, y).into()) {
                 buf[(x, y)].set_char(' ');
             }
         }
     }
-    let last = modal.bottom().saturating_sub(1);
-    for x in inner.x..inner.right() {
-        if area.contains((x, last).into()) {
-            buf[(x, last)].set_char(' ');
-        }
+}
+
+/// The cells past a plate's cells that `edge` crosses, where a cell spans
+/// `cell_px` logical px across the edge's side.
+///
+/// An inset edge crosses none, and a margin or a gap stops inside the
+/// adjacent cell. An outset counts its px in whole cells, rounded up, at the
+/// boards' cell, which a larger font only makes generous.
+fn ring_reach(edge: Edge, cell_px: u8) -> u16 {
+    match edge {
+        Edge::Inset(_) => 0,
+        Edge::Margin(_) | Edge::Gap(_) => 1,
+        Edge::Outset(px) => u16::from(px).div_ceil(u16::from(cell_px)),
     }
 }
 
@@ -978,10 +1023,10 @@ pub(crate) fn text(
 #[cfg(test)]
 mod tests {
     use super::{
-        hline, hline_edge, list_modal_width, modal_box, modal_frame, modal_frame_above_pools,
-        modal_frame_anchored, modal_island, modal_plate, plate_colors, popout_frame, selected_row,
-        tagged_name, text, toggle_mark, type_tag, vline, TypeTag, ISLAND_BOTTOM, ISLAND_GAP,
-        ISLAND_SIDE, ISLAND_TOP,
+        hline, hline_edge, list_modal_width, list_plate, modal_box, modal_frame,
+        modal_frame_above_pools, modal_frame_anchored, modal_island, modal_plate, plate_colors,
+        popout_frame, selected_row, tagged_name, text, toggle_mark, type_tag, vline, TypeTag,
+        CONFIRM_EDGES, ISLAND_BOTTOM, ISLAND_GAP, ISLAND_SIDE, ISLAND_TOP,
     };
     use crate::{
         render,
@@ -1251,7 +1296,7 @@ mod tests {
         let mut scene = nudge_scene();
 
         let modal = Rect::new(3, 2, 10, 6);
-        let inner = modal_plate(&mut buf, modal, rgb_style(), &theme, &mut scene);
+        let inner = list_plate(&mut buf, modal, rgb_style(), &theme, &mut scene);
 
         let ground = [0x0c, 0x0e, 0x11];
         let plate = |fill, shadow, backdrop| {
@@ -1302,7 +1347,7 @@ mod tests {
         let theme = plate_theme();
         let mut buf = pane_buffer();
         let modal = Rect::new(3, 2, 10, 6);
-        modal_plate(&mut buf, modal, rgb_style(), &theme, &mut nudge_scene());
+        list_plate(&mut buf, modal, rgb_style(), &theme, &mut nudge_scene());
 
         let ground = Color::Rgb(0x0c, 0x0e, 0x11);
         assert_eq!(
@@ -1316,6 +1361,36 @@ mod tests {
                 "..rrggggggggrr..",
                 "..rrggggggggrr..",
                 "..rrrrrrrrrrrr..",
+                "................",
+                "................",
+            ],
+        );
+    }
+
+    /// A confirm's plate stands outside its text cells on every side. So its
+    /// ring is the row above those cells and the row under them, with two
+    /// columns on each side, since a 12 px outset passes a 9 px column.
+    #[test]
+    fn a_confirm_plate_clears_the_glyphs_of_the_frame_around_its_text() {
+        let theme = plate_theme();
+        let mut buf = pane_buffer();
+        let scene = &mut nudge_scene();
+        let plate = plate_colors(&theme, scene).expect("the plate look");
+        let cells = Rect::new(5, 3, 6, 3);
+        modal_plate(&mut buf, cells, CONFIRM_EDGES, plate, &theme, scene);
+
+        let ground = Color::Rgb(0x0c, 0x0e, 0x11);
+        assert_eq!(
+            cell_rows(&buf, &[(PANE, 'r'), (ground, 'g')]),
+            [
+                "................",
+                "................",
+                "...rrrrrrrrrr...",
+                "...rrggggggrr...",
+                "...rrggggggrr...",
+                "...rrggggggrr...",
+                "...rrrrrrrrrr...",
+                "................",
                 "................",
                 "................",
             ],
@@ -1424,7 +1499,7 @@ mod tests {
             let mut buf = pane_buffer();
             let mut scene = ApcScene::new();
             let inner = match plate {
-                true => modal_plate(&mut buf, modal, rgb_style(), &theme, &mut scene),
+                true => list_plate(&mut buf, modal, rgb_style(), &theme, &mut scene),
                 false => {
                     render::clear_modal(modal, &mut buf, &theme, rgb_style());
                     modal_frame(&mut buf, modal, None, rgb_style(), &theme, &mut scene)

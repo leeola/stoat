@@ -2004,7 +2004,7 @@ fn blamed_frame(home: &Path, keys: &str) -> Snapshot {
 /// from line 18 lands, past the confirm that stashes the uncommitted line.
 ///
 /// The confirm opens once a read of the tree lands, so the `<Enter>` waits for
-/// the fill of the confirm's title row. The session ends before this returns,
+/// the plate's ground on the confirm's title row. The session ends before this returns,
 /// as in [`settled_frame`].
 fn checked_out_frame(home: &Path) -> Snapshot {
     let mut session = spawn_settled(home, "blame", "src/chrome.rs");
@@ -2013,7 +2013,7 @@ fn checked_out_frame(home: &Path) -> Snapshot {
 
     play(&mut session, "18Gc");
     let title_row = cell_rect(95, 22, 10, 1);
-    wait_for_color(&mut session, title_row, OVERLAY, "the checkout confirm");
+    wait_for_color(&mut session, title_row, GROUND, "the checkout confirm");
     play(&mut session, "<Enter>");
     wait_for_color(
         &mut session,

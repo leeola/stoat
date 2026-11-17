@@ -101,7 +101,7 @@ pub(crate) fn render_commit_preview_modal(
         return;
     };
     let style = theme.get(scope::UI_MODAL_PICKER);
-    chrome::modal_plate(buf, layout.modal, style, theme, scene);
+    chrome::list_plate(buf, layout.modal, style, theme, scene);
     let plate = chrome::plate_colors(theme, scene);
     if let Some(plate) = plate {
         let edges = [ISLAND_TOP, ISLAND_SIDE, ISLAND_BOTTOM, ISLAND_SIDE];

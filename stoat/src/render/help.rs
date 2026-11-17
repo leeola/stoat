@@ -128,7 +128,7 @@ pub(crate) fn render_help(
     };
 
     let modal_style = theme.get(crate::theme::scope::UI_MODAL_HELP);
-    crate::render::chrome::modal_plate(buf, layout.modal, modal_style, theme, &mut *scene);
+    crate::render::chrome::list_plate(buf, layout.modal, modal_style, theme, &mut *scene);
 
     // Normal mode walks the list with plain letter keys, so its prompt differs
     // from the one a typed search shows.

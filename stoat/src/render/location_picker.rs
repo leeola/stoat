@@ -48,7 +48,7 @@ pub(crate) fn render_location_picker(
     };
 
     let modal_style = theme.get(crate::theme::scope::UI_MODAL_PICKER);
-    crate::render::chrome::modal_plate(buf, layout.modal, modal_style, theme, &mut *scene);
+    crate::render::chrome::list_plate(buf, layout.modal, modal_style, theme, &mut *scene);
 
     crate::render::picker::filter_header(
         buf,

@@ -13,7 +13,7 @@ use ratatui::{
     buffer::Buffer,
     layout::Rect,
     style::{Modifier, Style},
-    widgets::StatefulWidget,
+    widgets::{Block, Borders, StatefulWidget},
 };
 use stoat_widgets::{
     text_run::{self, TextRun},
@@ -32,6 +32,10 @@ const PAD: u16 = 1;
 /// each row the message wraps onto. Its keys draw at the caption scale under a
 /// live scene and as cells otherwise. An area too small for the box paints
 /// nothing.
+///
+/// Under the plate look of [`chrome::plate_colors`], the box is a plate whose
+/// edges stand at [`chrome::CONFIRM_EDGES`] around its text, and the keys draw
+/// on the plate's ground. Otherwise it is a frame over `ui.modal.picker`.
 pub(crate) fn render_checkout_confirm(
     confirm: &CheckoutConfirm,
     theme: &Theme,
@@ -51,9 +55,19 @@ pub(crate) fn render_checkout_confirm(
     };
 
     let style = theme.get(scope::UI_MODAL_PICKER);
-    render::clear_modal(modal, buf, theme, style);
-    let inner = chrome::modal_frame_above_pools(buf, modal, None, style, theme, scene);
+    let inner = Block::default().borders(Borders::ALL).inner(modal);
     let (x, end) = (inner.x + PAD, inner.right().saturating_sub(PAD));
+    let plate = chrome::plate_colors(theme, scene);
+    match plate {
+        Some(plate) => {
+            let text = Rect::new(x, inner.y, end.saturating_sub(x), inner.height);
+            chrome::modal_plate(buf, text, chrome::CONFIRM_EDGES, plate, theme, scene);
+        },
+        None => {
+            render::clear_modal(modal, buf, theme, style);
+            chrome::modal_frame_above_pools(buf, modal, None, style, theme, scene);
+        },
+    }
 
     let mut y = inner.y;
     paint_cells(buf, x, y, end, &title(confirm, theme));
@@ -64,7 +78,11 @@ pub(crate) fn render_checkout_confirm(
     paint_cells(buf, x, y + 1, end, &file_line(confirm, theme));
 
     let hints = hint_parts(&confirm.hints, theme);
-    match render::modal_fill(theme, style).filter(|_| scene.live()) {
+    let runs_bg = match plate {
+        Some(plate) => Some(plate.ground),
+        None => render::modal_fill(theme, style).filter(|_| scene.live()),
+    };
+    match runs_bg {
         Some(bg) => paint_runs(&hints, x, y + 2, bg, theme, buf, scene),
         None => paint_cells(buf, x, y + 2, end, &hints),
     }
@@ -183,6 +201,7 @@ mod tests {
     use crate::{
         checkout_confirm::{CheckoutConfirm, CheckoutTarget},
         host::CommitInfo,
+        render::chrome::CONFIRM_EDGES,
         theme::Theme,
     };
     use ratatui::{buffer::Buffer, layout::Rect};
@@ -277,6 +296,68 @@ mod tests {
             (" cancel", 832),
         ];
         assert_eq!(runs, want.map(|(text, col)| (text.to_string(), col)));
+    }
+
+    /// Under the plate look the box is the plate's two panels over the text
+    /// cells, which stand one cell inside the border, with their edges at the
+    /// confirm's. A plain panel goes first, and a backdrop in the ground
+    /// follows. Each run of the keys draws on the ground, not on the box's
+    /// `ui.modal.picker` surface.
+    #[test]
+    fn the_plate_box_stands_its_edges_around_the_text() {
+        let (config, _) = stoat_config::parse(
+            r##"theme t {
+                ui.surface.ground.bg = "#0c0e11";
+                ui.background.bg = "#17191e";
+                ui.modal.picker.bg = "#252830";
+                ui.key_label.fg = "#6cc7d6";
+                ui.text.muted.fg = "#838a98";
+            }"##,
+        );
+        let theme = Theme::from_config(&config.expect("theme parses"), "t").expect("theme loads");
+        let area = Rect::new(0, 0, 100, 40);
+        let mut buf = Buffer::empty(area);
+        let mut scene = ApcScene::new();
+        scene.set_nudge_protocol(true);
+        render_checkout_confirm(
+            &confirm(Some("main"), &[(" M", "b.rs"), ("??", "notes.md")]),
+            &theme,
+            area,
+            &mut buf,
+            &mut scene,
+        );
+
+        let commands = decode_stream(scene.bytes());
+        let panels: Vec<_> = commands
+            .iter()
+            .filter_map(|command| match command {
+                Command::Panel(panel) => Some((
+                    Rect::new(panel.left, panel.top, panel.width, panel.height),
+                    panel.fill,
+                    panel.edges,
+                    panel.backdrop,
+                )),
+                _ => None,
+            })
+            .collect();
+        let run_bgs: Vec<_> = commands
+            .iter()
+            .filter_map(|command| match command {
+                Command::TextRun(run) => Some(run.bg),
+                _ => None,
+            })
+            .collect();
+        let (text, ground) = (Rect::new(24, 17, 52, 5), [0x0c, 0x0e, 0x11]);
+        assert_eq!(
+            (panels, run_bgs),
+            (
+                vec![
+                    (text, None, CONFIRM_EDGES, false),
+                    (text, Some(ground), CONFIRM_EDGES, true),
+                ],
+                vec![Some(ground); 5],
+            ),
+        );
     }
 
     /// A confirm of `b2c3d4e5` over `files`, on `branch` or on a detached HEAD
