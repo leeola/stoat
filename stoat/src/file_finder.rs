@@ -400,11 +400,11 @@ impl FileFinder {
     /// Whether the list on display holds no row for the query, with every path
     /// delivered.
     ///
-    /// The finder then collapses to its header row. A walk that still streams
-    /// does not count, so a fresh open keeps its full box rather than drawing
-    /// it short until the first paths arrive. A scan for a longer query keeps
-    /// the answer, so the box stays short while the user types on past the
-    /// last match.
+    /// The finder then names the query in its list and shows no preview. A
+    /// walk that still streams does not count, so a fresh open does not show
+    /// that message before the first paths arrive. A scan for a longer query
+    /// keeps the answer, so the message stays while the user types on past
+    /// the last match.
     pub(crate) fn shows_no_match(&self) -> bool {
         self.active_core_ref().rows_empty()
     }
@@ -957,10 +957,7 @@ mod tests {
     use super::*;
     use crate::{test_fixture, test_harness::keys};
     use crossterm::event::{Event, KeyCode};
-    use ratatui::{
-        layout::Rect,
-        style::{Color, Modifier},
-    };
+    use ratatui::style::{Color, Modifier};
 
     fn p(s: &str) -> PathBuf {
         PathBuf::from(s)
@@ -3301,10 +3298,11 @@ mod tests {
     }
 
     /// A query that matches nothing, with no ignored file to fall back on,
-    /// collapses the box to its query row and rule at the full box's top. The
-    /// count's zero reads in the deleted color.
+    /// keeps the full box. Its list names the query, its preview reads no
+    /// preview, its key line stays, and the count's zero reads in the deleted
+    /// color.
     #[test]
-    fn snapshot_finder_with_no_match_collapses_to_its_header() {
+    fn snapshot_finder_with_no_match_names_its_query() {
         let mut h = TestHarness::with_size(120, 30);
         seed_finder_workspace(&mut h, &[("src/a.rs", "one"), ("b.txt", "two")]);
         h.type_keys("space p");
@@ -3315,24 +3313,24 @@ mod tests {
         h.settle();
         assert_eq!(
             test_fixture::finder_layout(&h).modal,
-            Rect { height: 4, ..full },
-            "the box keeps its top and width",
+            full,
+            "the box keeps its size and place",
         );
         h.assert_snapshot("file_finder_no_match");
     }
 
-    /// A walk that still streams keeps the full box though no row has arrived,
-    /// so a fresh open does not draw the box short and then grow it.
+    /// A walk that still streams does not count as no match, though no row has
+    /// arrived. A fresh open thus does not flash the no-match message before
+    /// its first paths.
     ///
     /// The harness walk delivers inside the key that opens the finder, so the
     /// test holds a fresh walk open in its place.
     #[test]
-    fn a_finder_keeps_its_full_box_while_the_walk_streams() {
+    fn a_finder_shows_no_message_while_the_walk_streams() {
         let mut h = TestHarness::with_size(120, 30);
         seed_finder_workspace(&mut h, &[("a.rs", "one")]);
         h.type_keys("space p");
         h.settle();
-        let full = test_fixture::finder_layout(&h).modal;
 
         let (_walk, rx) = tokio::sync::mpsc::unbounded_channel();
         let task = h.stoat.executor.spawn(async {});
@@ -3343,20 +3341,16 @@ mod tests {
             .core
             .reset_walk(rx, task);
 
-        let core = h
-            .stoat
-            .file_finder
-            .as_ref()
-            .expect("the finder is open")
-            .active_core_ref();
+        let finder = h.stoat.file_finder.as_ref().expect("the finder is open");
+        let core = finder.active_core_ref();
         assert_eq!(
             (
                 core.walking(),
                 core.picklist.filtered.len(),
-                test_fixture::finder_layout(&h).modal,
+                finder.shows_no_match(),
             ),
-            (true, 0, full),
-            "a walk with no row yet keeps the full box",
+            (true, 0, false),
+            "a walk with no row yet shows no message",
         );
     }
 

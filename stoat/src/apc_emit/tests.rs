@@ -6012,8 +6012,9 @@ fn file_finder_list_is_pooled_and_retired() {
     );
 }
 
-/// A finder whose query matches nothing shows its header alone, so the emit
-/// declares no list pool and retires the one the matches had.
+/// A finder whose query matches nothing paints a message in place of its
+/// rows. The emit then declares no list pool and retires the one the matches
+/// had.
 #[test]
 fn a_finder_with_no_match_retires_its_list_pool() {
     use stoatty_protocol::command::{Command, PoolDropCommand};
@@ -6051,6 +6052,53 @@ fn a_finder_with_no_match_retires_its_list_pool() {
             pool: crate::smooth_scroll::non_pane_pool::FINDER,
         })],
         "the finder pool's only command is its drop",
+    );
+}
+
+/// A finder whose query matches nothing paints `no preview` in its preview's
+/// cells. The emit then declares no preview pool and retires the one the
+/// matches had. The 200-column harness gives the finder a preview pane.
+#[test]
+fn a_finder_with_no_match_retires_its_preview_pool() {
+    use stoatty_protocol::command::Command;
+
+    let mut h = crate::test_harness::TestHarness::with_size(200, 50);
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+    h.stoat.set_apc_tx(tx);
+
+    let root = PathBuf::from("/finder-preview");
+    h.fake_fs().insert_file(root.join("a.rs"), b"x\n");
+    h.stoat.active_workspace_mut().git_root = root;
+    h.type_keys("space p");
+    h.settle();
+    let preview_pool = |commands: Vec<Command>| {
+        commands
+            .into_iter()
+            .filter_map(|command| match command {
+                Command::PoolRegion(region)
+                    if region.pool == crate::smooth_scroll::non_pane_pool::MODAL_PREVIEW =>
+                {
+                    Some("region")
+                },
+                Command::PoolDrop(retired)
+                    if retired.pool == crate::smooth_scroll::non_pane_pool::MODAL_PREVIEW =>
+                {
+                    Some("drop")
+                },
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+    };
+    emit_smooth_scroll(&mut h.stoat);
+    let open = preview_pool(drain_apc(&mut rx));
+
+    h.type_text("zzqxj");
+    h.settle();
+    emit_smooth_scroll(&mut h.stoat);
+    assert_eq!(
+        (open, preview_pool(drain_apc(&mut rx))),
+        (vec!["region"], vec!["drop"]),
+        "the preview pool declared with matches, then only dropped",
     );
 }
 

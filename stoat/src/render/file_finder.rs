@@ -27,8 +27,7 @@ pub(crate) struct FinderLayout {
     pub(crate) modal: Rect,
     /// Inside the border: prompt, input, separator, and body.
     pub(crate) inner: Rect,
-    /// The result list, also the smooth-scroll pool region. It is empty when
-    /// the finder collapses to its header for a query with no match.
+    /// The result list, also the smooth-scroll pool region.
     pub(crate) list: Rect,
     /// The preview pane's editor, present only when the body is wide enough.
     pub(crate) preview: Option<Rect>,
@@ -37,17 +36,13 @@ pub(crate) struct FinderLayout {
     pub(crate) preview_header: Option<Rect>,
     /// The key line, on the inner rect's last row and the box's bottom row,
     /// with the list and the preview ending above it. A body of one row keeps
-    /// none, and neither does a box collapsed to its header.
+    /// none.
     pub(crate) footer: Option<Rect>,
 }
 
 /// Rows the finder's preview gives its path header, the header row and the
 /// rule under it.
 const PREVIEW_HEADER_ROWS: u16 = 2;
-
-/// Rows of a finder box that shows no list, which are the two border rows and
-/// the filter header's query row and rule.
-const HEADER_BOX_ROWS: u16 = 4;
 
 /// The finder's footer hints, each a bound key and the word for what it does.
 const FINDER_HINTS: [(&str, &str); 4] = [
@@ -126,39 +121,15 @@ pub(crate) fn file_finder_layout(
 /// the pooled preview page fills and a wheel scrolls. A preview too short to
 /// keep an editor row under the header gets no header.
 ///
-/// `no_match` collapses the box to its header rows, as
-/// [`FileFinder::shows_no_match`] asks. The box keeps the full box's top and
-/// width, so the query row stays in place while a query loses and regains its
-/// matches. The list is then an empty rect, and there is no preview, preview
-/// header, or footer.
+/// A query that matches no file keeps this box, so the query row stays in
+/// place while a query loses and regains its matches.
 pub(crate) fn file_finder_layout_with_chrome(
     area: Rect,
     content: (u16, u16),
     zoom: i8,
     list_percent: u16,
-    no_match: bool,
 ) -> Option<FinderLayout> {
     let mut layout = file_finder_layout(area, content, zoom, list_percent)?;
-    if no_match {
-        let modal = Rect {
-            height: HEADER_BOX_ROWS,
-            ..layout.modal
-        };
-        let inner = Block::default().borders(Borders::ALL).inner(modal);
-        return Some(FinderLayout {
-            modal,
-            inner,
-            list: Rect {
-                y: inner.y + inner.height,
-                height: 0,
-                ..inner
-            },
-            preview: None,
-            preview_header: None,
-            footer: None,
-        });
-    }
-
     if let Some(preview) = layout.preview.filter(|p| p.height > PREVIEW_HEADER_ROWS) {
         layout.preview_header = Some(Rect {
             height: PREVIEW_HEADER_ROWS,
@@ -186,15 +157,12 @@ pub(crate) fn render_file_finder(
     buf: &mut Buffer,
     scene: &mut stoat_widgets::ApcScene,
 ) {
-    let Some(layout) = file_finder_layout_with_chrome(
-        area,
-        finder.content_size,
-        zoom,
-        list_percent,
-        finder.shows_no_match(),
-    ) else {
+    let Some(layout) =
+        file_finder_layout_with_chrome(area, finder.content_size, zoom, list_percent)
+    else {
         return;
     };
+    let no_match = finder.shows_no_match();
 
     let modal_style = theme.get(crate::theme::scope::UI_MODAL_PALETTE);
     crate::render::chrome::modal_plate(buf, layout.modal, modal_style, theme, &mut *scene);
@@ -256,22 +224,35 @@ pub(crate) fn render_file_finder(
                 scene,
             );
         }
-        crate::render::picker::render_picker_preview(
-            &finder.active_core_ref().preview,
-            preview_rect,
-            theme,
-            chrome,
-            ws,
-            buf,
-            scene,
-        );
-        if let Some(header) = layout.preview_header {
-            paint_preview_header(finder, header, home, theme, ws, buf, scene);
+        match no_match {
+            true => {
+                let pane = layout
+                    .preview_header
+                    .map_or(preview_rect, |header| header.union(preview_rect));
+                paint_no_preview(pane, theme, buf);
+            },
+            false => {
+                crate::render::picker::render_picker_preview(
+                    &finder.active_core_ref().preview,
+                    preview_rect,
+                    theme,
+                    chrome,
+                    ws,
+                    buf,
+                    scene,
+                );
+                if let Some(header) = layout.preview_header {
+                    paint_preview_header(finder, header, home, theme, ws, buf, scene);
+                }
+            },
         }
     }
 
     finder.active_core().picklist.viewport_rows = Some(layout.list.height as usize);
-    render_list(finder, home, layout.list, theme, buf, scene);
+    match no_match {
+        true => paint_no_match(&finder.input.text(ws), layout.list, theme, buf),
+        false => render_list(finder, home, layout.list, theme, buf, scene),
+    }
 
     if let Some(footer) = layout.footer {
         let parts = Footer {
@@ -280,6 +261,40 @@ pub(crate) fn render_file_finder(
         };
         crate::render::picker::modal_footer(buf, footer, &parts, plate, theme, scene);
     }
+}
+
+/// Paint the list of a finder whose query matches no file.
+///
+/// The list's first row reads `no file matches ` in `ui.text.muted`, then the
+/// query's first line in `ui.text`. The row clips at the list's right edge.
+fn paint_no_match(query: &str, list: Rect, theme: &crate::theme::Theme, buf: &mut Buffer) {
+    const NO_MATCH: &str = "no file matches ";
+    if list.is_empty() {
+        return;
+    }
+    let end = list.x + list.width;
+    let muted = theme.get(crate::theme::scope::UI_TEXT_MUTED);
+    write_str_clipped(buf, list.x + 1, list.y, NO_MATCH, muted, end);
+    let query = query.lines().next().unwrap_or_default();
+    let query_x = list.x + 1 + NO_MATCH.len() as u16;
+    let text = theme.get(crate::theme::scope::UI_TEXT);
+    write_str_clipped(buf, query_x, list.y, query, text, end);
+}
+
+/// Paint `no preview` in `ui.text.disabled` at the center of `pane`.
+///
+/// `pane` holds the cells of the preview's Island, its path header among
+/// them. A finder shows this in place of a preview while its query matches no
+/// file.
+fn paint_no_preview(pane: Rect, theme: &crate::theme::Theme, buf: &mut Buffer) {
+    const NO_PREVIEW: &str = "no preview";
+    if pane.is_empty() {
+        return;
+    }
+    let x = pane.x + pane.width.saturating_sub(NO_PREVIEW.len() as u16) / 2;
+    let y = pane.y + pane.height / 2;
+    let disabled = theme.get(crate::theme::scope::UI_TEXT_DISABLED);
+    write_str_clipped(buf, x, y, NO_PREVIEW, disabled, pane.x + pane.width);
 }
 
 /// The finder's header label, which names the list on show unless it is the
@@ -499,6 +514,7 @@ mod tests {
             picker::DEFAULT_LIST_PERCENT,
         },
         test_fixture::{column_rules, plate_islands},
+        theme::scope,
     };
     use ratatui::{buffer::Buffer, layout::Rect};
     use std::path::PathBuf;
@@ -532,34 +548,68 @@ mod tests {
         );
     }
 
-    /// The full box for this content is 160x32 at (20, 14), so the collapsed
-    /// box keeps that top and width.
+    /// A query that matches no file keeps the full box. The list's first row
+    /// reads `no file matches ` in the muted color and then the query in the
+    /// text color. The preview's cells, its path header's among them, read
+    /// `no preview` in the disabled color, centered.
     #[test]
-    fn a_finder_with_no_match_keeps_its_header_rows_alone() {
-        let layout = file_finder_layout_with_chrome(
-            Rect::new(0, 0, 200, 60),
-            (120, 9),
+    fn a_finder_with_no_match_keeps_its_full_box() {
+        let mut h = crate::Stoat::test();
+        let root = PathBuf::from("/no-match");
+        h.fake_fs()
+            .insert_files([(root.join("a.rs"), "fn a() {}".as_bytes())]);
+        h.stoat.active_workspace_mut().git_root = root;
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::OpenFileFinder);
+        h.settle();
+        h.type_text("zzqxj");
+        h.settle();
+        let mut finder = h.stoat.file_finder.take().expect("the finder is open");
+        let theme = h.stoat.theme.clone();
+        let chrome = ResolvedChrome::resolve(&theme);
+        let area = Rect::new(0, 0, 200, 40);
+        let mut buf = Buffer::empty(area);
+        render_file_finder(
+            &mut finder,
+            h.stoat.active_workspace_mut(),
+            None,
+            &theme,
+            &chrome,
+            area,
             0,
             DEFAULT_LIST_PERCENT,
-            true,
-        )
-        .expect("the area hosts the finder");
+            &mut buf,
+            &mut ApcScene::new(),
+        );
+
+        let layout =
+            file_finder_layout_with_chrome(area, finder.content_size, 0, DEFAULT_LIST_PERCENT)
+                .expect("the finder fits");
+        let preview = layout.preview.expect("a preview beside the list");
+        let pane = layout
+            .preview_header
+            .map_or(preview, |header| header.union(preview));
+        let (list, middle) = (layout.list, pane.y + pane.height / 2);
+        let note_x = pane.x + (pane.width - 10) / 2;
+        let read = |x: u16, y: u16, len: u16| {
+            (x..x + len)
+                .map(|x| buf[(x, y)].symbol())
+                .collect::<String>()
+        };
+        let fg = |name: &str| theme.get(name).fg;
         assert_eq!(
             (
-                layout.modal,
-                layout.inner,
-                layout.list,
-                layout.preview,
-                layout.preview_header,
-                layout.footer,
+                finder.shows_no_match(),
+                read(list.x + 1, list.y, 21),
+                [buf[(list.x + 1, list.y)].fg, buf[(list.x + 17, list.y)].fg],
+                read(note_x, middle, 10),
+                buf[(note_x, middle)].fg,
             ),
             (
-                Rect::new(20, 14, 160, 4),
-                Rect::new(21, 15, 158, 2),
-                Rect::new(21, 17, 158, 0),
-                None,
-                None,
-                None,
+                true,
+                "no file matches zzqxj".to_owned(),
+                [fg(scope::UI_TEXT_MUTED), fg(scope::UI_TEXT)].map(Option::unwrap),
+                "no preview".to_owned(),
+                fg(scope::UI_TEXT_DISABLED).unwrap(),
             ),
         );
     }
@@ -622,14 +672,9 @@ mod tests {
             &mut scene,
         );
 
-        let layout = file_finder_layout_with_chrome(
-            area,
-            finder.content_size,
-            0,
-            DEFAULT_LIST_PERCENT,
-            finder.shows_no_match(),
-        )
-        .expect("the finder fits");
+        let layout =
+            file_finder_layout_with_chrome(area, finder.content_size, 0, DEFAULT_LIST_PERCENT)
+                .expect("the finder fits");
         let preview = layout.preview.expect("a preview beside the list");
         let pane = layout
             .preview_header

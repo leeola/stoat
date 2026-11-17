@@ -798,17 +798,18 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
 
     // The file finder is a modal over normal mode (not a full-screen overlay
     // mode); its result list pools as a non-pane surface above the panes. A
-    // finder with no match shows its header alone, so it has no list to pool.
+    // finder with no match paints a message in place of its rows, so it has no
+    // list to pool.
     let finder_list = (!overlay)
         .then_some(stoat.file_finder.as_ref())
         .flatten()
+        .filter(|finder| !finder.shows_no_match())
         .and_then(|finder| {
             crate::render::file_finder::file_finder_layout_with_chrome(
                 stoat.size(),
                 finder.content_size,
                 modal_zoom_steps(&stoat.modal_zoom, ModalKind::FileFinder),
                 modal_split_percent(&stoat.modal_split, ModalKind::FileFinder),
-                finder.shows_no_match(),
             )
         })
         .map(|layout| layout.list)
