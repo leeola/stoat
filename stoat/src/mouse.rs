@@ -845,7 +845,7 @@ pub(crate) fn open_modal_separator(stoat: &Stoat) -> Option<(ModalKind, SplitSep
             modal_zoom_steps(&stoat.modal_zoom, ModalKind::CommitPicker),
             modal_split_percent(&stoat.modal_split, ModalKind::CommitPicker),
         )?;
-        layout.preview?;
+        let preview = layout.preview?;
         let inner = layout.inner;
         return Some((
             ModalKind::CommitPicker,
@@ -853,7 +853,7 @@ pub(crate) fn open_modal_separator(stoat: &Stoat) -> Option<(ModalKind, SplitSep
                 axis: SeparatorAxis::Rows,
                 line: layout.list.y + layout.list.height,
                 span: inner.x..inner.x + inner.width,
-                body: layout.list.y..inner.y + inner.height,
+                body: layout.list.y..preview.y + preview.height,
                 min_list: MIN_LIST_ROWS,
                 min_preview: MIN_PREVIEW_ROWS,
             },

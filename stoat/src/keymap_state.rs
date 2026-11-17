@@ -854,22 +854,29 @@ impl ActiveModal {
     /// Whether this modal's docked key hints box waits for the hints toggle,
     /// rather than showing whenever the modal opens.
     ///
-    /// The file finder, help, the workspace picker, and the Commit Preview end in
-    /// a footer of their own keys, and the box repeats those keys over the
-    /// modal's lower right. The checkout confirm lists its keys in its last row.
-    /// The git status panel names its keys in its section heads and its
-    /// banner, and in a short window the box covers its rows. The palette
-    /// keeps its box behind the toggle as well.
+    /// Every filter modal and the Commit Preview end in a key line of their own
+    /// keys, and the box repeats those keys over the modal's lower right. The
+    /// checkout confirm lists its keys in its last row. The git status panel
+    /// names its keys in its section heads and its banner, and in a short
+    /// window the box covers its rows.
     pub(crate) fn hints_on_request(self) -> bool {
         matches!(
             self,
             Self::FileFinder
+                | Self::CodeSearch
+                | Self::CommitPicker
+                | Self::SymbolFinder
+                | Self::Jumplist
+                | Self::Location
+                | Self::Diagnostics
+                | Self::PaneFinder
+                | Self::WalkthroughPicker
+                | Self::Palette
                 | Self::Help
                 | Self::WorkspacePicker
                 | Self::GitStatus
                 | Self::CheckoutConfirm
                 | Self::CommitPreview
-                | Self::Palette
         )
     }
 

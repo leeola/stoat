@@ -35,9 +35,9 @@ pub(crate) struct FinderLayout {
     /// The path header over the preview and the rule under it, which only
     /// [`file_finder_layout_with_chrome`] sets. The preview starts below it.
     pub(crate) preview_header: Option<Rect>,
-    /// The footer of key hints and page dots, which only
-    /// [`file_finder_layout_with_chrome`] sets. It takes the inner rect's last
-    /// row and the box's bottom row, and the list and the preview end above it.
+    /// The key line, on the inner rect's last row and the box's bottom row,
+    /// with the list and the preview ending above it. A body of one row keeps
+    /// none, and neither does a box collapsed to its header.
     pub(crate) footer: Option<Rect>,
 }
 
@@ -68,8 +68,12 @@ const FINDER_HINTS: [(&str, &str); 4] = [
 /// width its list takes from
 /// [`modal_split`](crate::app::Stoat::modal_split).
 ///
+/// The key line takes the inner rect's last row and the bottom border's row,
+/// as [`footer_rect`](crate::render::picker::footer_rect) gives it, and the
+/// list and the preview end above it.
+///
 /// Code search and the commit picker share this layout, so all three modals
-/// keep one box rule and one list/preview split.
+/// keep one box rule, one key line, and one list/preview split.
 pub(crate) fn file_finder_layout(
     area: Rect,
     content: (u16, u16),
@@ -91,6 +95,8 @@ pub(crate) fn file_finder_layout(
     if body_height == 0 {
         return None;
     }
+    let footer = (body_height > 1).then(|| crate::render::picker::footer_rect(modal));
+    let body_height = body_height - u16::from(footer.is_some());
     let body_width = inner.width;
 
     let (list, preview) = crate::render::picker::split_list_preview(
@@ -109,20 +115,16 @@ pub(crate) fn file_finder_layout(
         list,
         preview,
         preview_header: None,
-        footer: None,
+        footer,
     })
 }
 
-/// Lay out the file finder as [`file_finder_layout`] does, plus the rows only
-/// the finder shows, which are its footer and the path header over its
-/// preview.
+/// Lay out the file finder as [`file_finder_layout`] does, plus the path header
+/// over its preview, which only the finder shows.
 ///
-/// The footer takes the inner rect's last row and the bottom border's row under
-/// it, so it sits flush with the box's bottom, and the list and the preview end
-/// above it. The preview then covers only the editor below its header, which is
-/// the rect the pooled preview page fills and a wheel scrolls. A body of one row
-/// keeps no footer, and a preview too short to keep an editor row under the
-/// header gets no header.
+/// The preview then covers only the editor below its header, which is the rect
+/// the pooled preview page fills and a wheel scrolls. A preview too short to
+/// keep an editor row under the header gets no header.
 ///
 /// `no_match` collapses the box to its header rows, as
 /// [`FileFinder::shows_no_match`] asks. The box keeps the full box's top and
@@ -157,19 +159,6 @@ pub(crate) fn file_finder_layout_with_chrome(
         });
     }
 
-    if layout.list.height > 1 {
-        let inner = layout.inner;
-        layout.footer = Some(Rect::new(
-            inner.x,
-            layout.modal.bottom() - 2,
-            inner.width,
-            2,
-        ));
-        layout.list.height -= 1;
-        if let Some(preview) = layout.preview.as_mut() {
-            preview.height -= 1;
-        }
-    }
     if let Some(preview) = layout.preview.filter(|p| p.height > PREVIEW_HEADER_ROWS) {
         layout.preview_header = Some(Rect {
             height: PREVIEW_HEADER_ROWS,
@@ -285,18 +274,11 @@ pub(crate) fn render_file_finder(
     render_list(finder, home, layout.list, theme, buf, scene);
 
     if let Some(footer) = layout.footer {
-        let list = &finder.active_core_ref().picklist;
-        let pages = crate::render::picker::page_of(
-            list.selected,
-            list.filtered.len(),
-            layout.list.height as usize,
-        );
         let parts = Footer {
             hints: &FINDER_HINTS,
-            pages,
             ..Footer::default()
         };
-        crate::render::picker::modal_footer(buf, footer, &parts, theme, scene);
+        crate::render::picker::modal_footer(buf, footer, &parts, plate, theme, scene);
     }
 }
 

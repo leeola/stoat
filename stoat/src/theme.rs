@@ -888,7 +888,9 @@ pub mod scope {
     pub const UI_MODAL_PALETTE: &str = "ui.modal.palette";
     pub const UI_MODAL_PICKER: &str = "ui.modal.picker";
     pub const UI_MODAL_RUN: &str = "ui.modal.run";
-    /// The footer row a modal ends in, with its key hints and page dots.
+    /// The key line a modal ends in, with its key hints.
+    ///
+    /// A plate's key line draws on the plate's ground and does not read it.
     pub const UI_MODAL_FOOTER: &str = "ui.modal.footer";
     /// The name a filter modal's header row starts with, such as `Files`.
     ///

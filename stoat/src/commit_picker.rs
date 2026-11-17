@@ -2333,7 +2333,7 @@ mod tests {
         let before = layout(&h);
         let separator = before.list.y + before.list.height;
         let column = before.inner.x + 2;
-        let body_height = before.inner.y + before.inner.height - before.list.y;
+        let body_height = before.footer.expect("a key line under the body").y - before.list.y;
 
         press(
             &mut h,

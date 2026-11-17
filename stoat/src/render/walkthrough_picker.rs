@@ -1,6 +1,6 @@
 use crate::{
     render::{
-        picker::{FilterHeader, FILTER_PROMPT},
+        picker::{FilterHeader, Footer, FILTER_PROMPT, PICKER_HINTS},
         table::{self, Column, Width},
     },
     walkthrough_picker::WalkthroughPicker,
@@ -98,6 +98,12 @@ pub(crate) fn render_walkthrough_picker(
     }
 
     paint_tour_rows(picker, layout.list, theme, buf, scene);
+
+    let parts = Footer {
+        hints: &PICKER_HINTS,
+        ..Footer::default()
+    };
+    crate::render::picker::modal_footer(buf, layout.footer, &parts, plate, theme, scene);
 }
 
 /// Paint the surviving tours into `area`, following the selection.

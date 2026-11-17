@@ -2132,22 +2132,24 @@ pub(crate) fn frame(
                     buf,
                     &mut *scene,
                 );
-                cached_modal_hints(
-                    &mut stoat.hints_cache,
-                    &stoat.keymap,
-                    mode,
-                    "jumplist",
-                    None,
-                    None,
-                    on_request,
-                    toggles,
-                    &stoat.theme,
-                    full,
-                    status_rows,
-                    chrome_bands,
-                    buf,
-                    &mut *scene,
-                );
+                if modal_hints {
+                    cached_modal_hints(
+                        &mut stoat.hints_cache,
+                        &stoat.keymap,
+                        mode,
+                        "jumplist",
+                        None,
+                        None,
+                        on_request,
+                        toggles,
+                        &stoat.theme,
+                        full,
+                        status_rows,
+                        chrome_bands,
+                        buf,
+                        &mut *scene,
+                    );
+                }
             }
         },
         Some(ActiveModal::WalkthroughPicker) => {
@@ -2165,22 +2167,24 @@ pub(crate) fn frame(
                     buf,
                     &mut *scene,
                 );
-                cached_modal_hints(
-                    &mut stoat.hints_cache,
-                    &stoat.keymap,
-                    mode,
-                    "walkthrough_picker",
-                    None,
-                    None,
-                    on_request,
-                    toggles,
-                    &stoat.theme,
-                    full,
-                    status_rows,
-                    chrome_bands,
-                    buf,
-                    &mut *scene,
-                );
+                if modal_hints {
+                    cached_modal_hints(
+                        &mut stoat.hints_cache,
+                        &stoat.keymap,
+                        mode,
+                        "walkthrough_picker",
+                        None,
+                        None,
+                        on_request,
+                        toggles,
+                        &stoat.theme,
+                        full,
+                        status_rows,
+                        chrome_bands,
+                        buf,
+                        &mut *scene,
+                    );
+                }
             }
         },
         Some(ActiveModal::PaneFinder) => {
@@ -2198,22 +2202,24 @@ pub(crate) fn frame(
                     buf,
                     &mut *scene,
                 );
-                cached_modal_hints(
-                    &mut stoat.hints_cache,
-                    &stoat.keymap,
-                    mode,
-                    "pane_finder",
-                    None,
-                    None,
-                    on_request,
-                    toggles,
-                    &stoat.theme,
-                    full,
-                    status_rows,
-                    chrome_bands,
-                    buf,
-                    &mut *scene,
-                );
+                if modal_hints {
+                    cached_modal_hints(
+                        &mut stoat.hints_cache,
+                        &stoat.keymap,
+                        mode,
+                        "pane_finder",
+                        None,
+                        None,
+                        on_request,
+                        toggles,
+                        &stoat.theme,
+                        full,
+                        status_rows,
+                        chrome_bands,
+                        buf,
+                        &mut *scene,
+                    );
+                }
             }
         },
         Some(ActiveModal::Diagnostics) => {
@@ -2233,22 +2239,24 @@ pub(crate) fn frame(
                     buf,
                     &mut *scene,
                 );
-                cached_modal_hints(
-                    &mut stoat.hints_cache,
-                    &stoat.keymap,
-                    mode,
-                    "diagnostics",
-                    None,
-                    None,
-                    on_request,
-                    toggles,
-                    &stoat.theme,
-                    full,
-                    status_rows,
-                    chrome_bands,
-                    buf,
-                    &mut *scene,
-                );
+                if modal_hints {
+                    cached_modal_hints(
+                        &mut stoat.hints_cache,
+                        &stoat.keymap,
+                        mode,
+                        "diagnostics",
+                        None,
+                        None,
+                        on_request,
+                        toggles,
+                        &stoat.theme,
+                        full,
+                        status_rows,
+                        chrome_bands,
+                        buf,
+                        &mut *scene,
+                    );
+                }
             }
         },
         Some(ActiveModal::CommitPicker) => {
@@ -2267,22 +2275,24 @@ pub(crate) fn frame(
                     buf,
                     &mut *scene,
                 );
-                cached_modal_hints(
-                    &mut stoat.hints_cache,
-                    &stoat.keymap,
-                    mode,
-                    "commit_picker",
-                    None,
-                    None,
-                    on_request,
-                    toggles,
-                    &stoat.theme,
-                    full,
-                    status_rows,
-                    chrome_bands,
-                    buf,
-                    &mut *scene,
-                );
+                if modal_hints {
+                    cached_modal_hints(
+                        &mut stoat.hints_cache,
+                        &stoat.keymap,
+                        mode,
+                        "commit_picker",
+                        None,
+                        None,
+                        on_request,
+                        toggles,
+                        &stoat.theme,
+                        full,
+                        status_rows,
+                        chrome_bands,
+                        buf,
+                        &mut *scene,
+                    );
+                }
             }
         },
         Some(ActiveModal::Location) => {
@@ -2302,22 +2312,24 @@ pub(crate) fn frame(
                     buf,
                     &mut *scene,
                 );
-                cached_modal_hints(
-                    &mut stoat.hints_cache,
-                    &stoat.keymap,
-                    mode,
-                    "location",
-                    None,
-                    Some("locations"),
-                    on_request,
-                    toggles,
-                    &stoat.theme,
-                    full,
-                    status_rows,
-                    chrome_bands,
-                    buf,
-                    &mut *scene,
-                );
+                if modal_hints {
+                    cached_modal_hints(
+                        &mut stoat.hints_cache,
+                        &stoat.keymap,
+                        mode,
+                        "location",
+                        None,
+                        Some("locations"),
+                        on_request,
+                        toggles,
+                        &stoat.theme,
+                        full,
+                        status_rows,
+                        chrome_bands,
+                        buf,
+                        &mut *scene,
+                    );
+                }
             }
         },
         Some(ActiveModal::FileFinder) => {
@@ -2371,22 +2383,24 @@ pub(crate) fn frame(
                     buf,
                     &mut *scene,
                 );
-                cached_modal_hints(
-                    &mut stoat.hints_cache,
-                    &stoat.keymap,
-                    mode,
-                    "symbols",
-                    None,
-                    None,
-                    on_request,
-                    toggles,
-                    &stoat.theme,
-                    full,
-                    status_rows,
-                    chrome_bands,
-                    buf,
-                    &mut *scene,
-                );
+                if modal_hints {
+                    cached_modal_hints(
+                        &mut stoat.hints_cache,
+                        &stoat.keymap,
+                        mode,
+                        "symbols",
+                        None,
+                        None,
+                        on_request,
+                        toggles,
+                        &stoat.theme,
+                        full,
+                        status_rows,
+                        chrome_bands,
+                        buf,
+                        &mut *scene,
+                    );
+                }
             }
         },
         Some(ActiveModal::CodeSearch) => {
@@ -2404,22 +2418,24 @@ pub(crate) fn frame(
                     buf,
                     &mut *scene,
                 );
-                cached_modal_hints(
-                    &mut stoat.hints_cache,
-                    &stoat.keymap,
-                    mode,
-                    "code_search",
-                    None,
-                    None,
-                    on_request,
-                    toggles,
-                    &stoat.theme,
-                    full,
-                    status_rows,
-                    chrome_bands,
-                    buf,
-                    &mut *scene,
-                );
+                if modal_hints {
+                    cached_modal_hints(
+                        &mut stoat.hints_cache,
+                        &stoat.keymap,
+                        mode,
+                        "code_search",
+                        None,
+                        None,
+                        on_request,
+                        toggles,
+                        &stoat.theme,
+                        full,
+                        status_rows,
+                        chrome_bands,
+                        buf,
+                        &mut *scene,
+                    );
+                }
             }
         },
         Some(ActiveModal::Palette) => {
@@ -3931,9 +3947,8 @@ mod dispatch_tests {
         )
     }
 
-    /// A modal that ends in its own footer of keys, and the palette, paint no
-    /// hints box until the hints toggle asks for one. The jumplist has no
-    /// footer, so it paints its box unasked.
+    /// A modal that ends in its own key line paints no hints box until the
+    /// hints toggle asks for one. The jumplist's key line counts too.
     #[test]
     fn a_footed_modal_paints_its_hints_box_on_request() {
         let paints_box = |open: &dyn Action, modal: &str, scope: Option<&str>, toggle| {
@@ -3969,22 +3984,16 @@ mod dispatch_tests {
             .collect();
         assert_eq!(
             shown,
-            [
-                (false, true),
-                (false, true),
-                (false, true),
-                (false, true),
-                (true, true)
-            ],
+            [(false, true); 5],
             "the box unasked and on the toggle, per modal"
         );
     }
 
     /// A modal box names a footer key only where the key does what the footer
-    /// says. The jumplist shows its box unasked, so the toggle does not hide
-    /// it, and the file finder's box waits for the toggle, so it names the
-    /// toggle's key. Neither names a help key, because the modal takes `?`
-    /// first.
+    /// says. The quit confirm shows its box unasked, so the toggle does not
+    /// hide it, and the jumplist's and the file finder's boxes wait for the
+    /// toggle, since both end in a key line, so they name the toggle's key.
+    /// None names a help key, because the modal takes `?` first.
     #[test]
     fn a_modal_box_names_only_the_footer_keys_that_work() {
         let footer_keys = |open: &dyn Action| {
@@ -4000,18 +4009,17 @@ mod dispatch_tests {
                 .map(|cache| cache.footer_keys.clone())
         };
 
+        let toggled = Some(FooterKeys {
+            hide: Some("C-?".to_string()),
+            help: None,
+        });
         assert_eq!(
             [
+                footer_keys(&stoat_action::QuitAll),
                 footer_keys(&stoat_action::OpenJumplistPicker),
                 footer_keys(&stoat_action::OpenFileFinder),
             ],
-            [
-                Some(FooterKeys::default()),
-                Some(FooterKeys {
-                    hide: Some("C-?".to_string()),
-                    help: None,
-                }),
-            ],
+            [Some(FooterKeys::default()), toggled.clone(), toggled],
         );
     }
 

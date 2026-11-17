@@ -1,7 +1,7 @@
 use crate::{
     location_picker::LocationPicker,
     render::{
-        picker::{FilterHeader, FILTER_PROMPT},
+        picker::{FilterHeader, Footer, FILTER_PROMPT, PICKER_HINTS},
         table::{self, Column, Width},
     },
     workspace::Workspace,
@@ -94,6 +94,12 @@ pub(crate) fn render_location_picker(
     }
 
     paint_candidate_rows(picker, git_root, layout.list, theme, buf, scene);
+
+    let parts = Footer {
+        hints: &PICKER_HINTS,
+        ..Footer::default()
+    };
+    crate::render::picker::modal_footer(buf, layout.footer, &parts, plate, theme, scene);
 }
 
 /// Paint the candidate rows into `area`, following the selection.

@@ -17,9 +17,9 @@ use stoat_action::registry;
 use unicode_width::UnicodeWidthStr;
 
 /// Box rows the chrome takes around the body, which are the top border, the
-/// header row and the rule under it, and the footer, which sits on the bottom
-/// border's row.
-const CHROME_ROWS: u16 = 4;
+/// header row and the rule under it, and the key line's two rows, the inner
+/// rect's last row and the bottom border's row.
+const CHROME_ROWS: u16 = 5;
 
 /// The help footer's hints, each a bound key and the word for what it does.
 const HELP_HINTS: [(&str, &str); 6] = [
@@ -59,8 +59,8 @@ pub(crate) struct HelpLayout {
     pub(crate) list: Rect,
     /// The selected entry's detail, also a smooth-scroll pool region.
     pub(crate) detail: Rect,
-    /// The footer row of key hints, under the list and the detail on the
-    /// box's bottom row.
+    /// The key line under the list and the detail, as
+    /// [`footer_rect`](crate::render::picker::footer_rect) gives it.
     pub(crate) footer: Rect,
 }
 
@@ -82,9 +82,9 @@ pub(crate) fn help_layout(area: Rect, content_rows: u16, zoom: i8) -> Option<Hel
     )?;
     let inner = Block::default().borders(Borders::ALL).inner(modal);
 
+    let footer = crate::render::picker::footer_rect(modal);
     let body_top = inner.y + 2;
-    let footer_y = modal.bottom().saturating_sub(1);
-    let body_height = footer_y.saturating_sub(body_top);
+    let body_height = footer.y.saturating_sub(body_top);
     if body_height == 0 {
         return None;
     }
@@ -105,7 +105,7 @@ pub(crate) fn help_layout(area: Rect, content_rows: u16, zoom: i8) -> Option<Hel
         inner,
         list,
         detail,
-        footer: Rect::new(inner.x, footer_y, inner.width, 1),
+        footer,
     })
 }
 
@@ -192,7 +192,7 @@ pub(crate) fn render_help(
         note: Some(&note),
         ..Footer::default()
     };
-    crate::render::picker::modal_footer(buf, layout.footer, &parts, theme, scene);
+    crate::render::picker::modal_footer(buf, layout.footer, &parts, plate, theme, scene);
 }
 
 /// The footer's note, which is the mode help opened from and the context it
@@ -614,7 +614,7 @@ mod tests {
     #[test]
     fn a_long_entry_list_grows_the_box_to_show_every_row() {
         let laid = help_layout(Rect::new(0, 0, 200, 60), 50, 0).expect("the area hosts help");
-        assert_eq!(laid.modal.height, 54, "fifty entries plus four chrome rows");
+        assert_eq!(laid.modal.height, 55, "fifty entries plus five chrome rows");
         assert_eq!(
             laid.list.height, 50,
             "and the body then holds all fifty without scrolling"

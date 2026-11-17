@@ -2,7 +2,7 @@ use crate::{
     code_search::{CodeSearchFinder, SearchMode},
     paths,
     render::{
-        picker::{FilterHeader, FILTER_PROMPT},
+        picker::{FilterHeader, Footer, FILTER_PROMPT},
         text::{write_str, write_str_clipped},
     },
     theme::{scope, Theme},
@@ -10,6 +10,13 @@ use crate::{
 };
 use ratatui::{buffer::Buffer, layout::Rect};
 use std::path::Path;
+
+/// The code search's key line, each a bound key and the word for what it does.
+const CODE_SEARCH_HINTS: [(&str, &str); 3] = [
+    ("Enter", "open"),
+    ("C-d/C-u", "preview"),
+    ("S-Tab", "regex/ast"),
+];
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn render_code_search(
@@ -99,6 +106,14 @@ pub(crate) fn render_code_search(
         buf,
         scene,
     );
+
+    if let Some(footer) = layout.footer {
+        let parts = Footer {
+            hints: &CODE_SEARCH_HINTS,
+            ..Footer::default()
+        };
+        crate::render::picker::modal_footer(buf, footer, &parts, plate, theme, scene);
+    }
 }
 
 /// Paint the match list into `area`, starting at match `start_row`.

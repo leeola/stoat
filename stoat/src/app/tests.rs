@@ -16539,8 +16539,8 @@ fn escape_closes_the_diagnostics_picker_and_disposes_it() {
     );
 }
 
-/// A page covers half the rows the render stamped, and stops at each end
-/// rather than wrapping.
+/// A page covers half the rows the render stamped, rounded up, and stops at
+/// each end rather than wrapping.
 #[test]
 fn diagnostics_picker_pages_by_half_a_screen_and_stops_at_the_ends() {
     let mut h = crate::test_harness::TestHarness::with_size(160, 40);
@@ -16554,7 +16554,7 @@ fn diagnostics_picker_pages_by_half_a_screen_and_stops_at_the_ends() {
         .picker
         .viewport_rows
         .expect("the render stamped a viewport")
-        / 2;
+        .div_ceil(2);
     assert!(
         half > 1,
         "a meaningful page needs more than one row: {half}"
@@ -16888,8 +16888,8 @@ fn escape_closes_the_jumplist_picker_and_disposes_it() {
     );
 }
 
-/// A page covers half the rows the render stamped, and stops at each end
-/// rather than wrapping.
+/// A page covers half the rows the render stamped, rounded up, and stops at
+/// each end rather than wrapping.
 #[test]
 fn jumplist_picker_pages_by_half_a_screen_and_stops_at_the_ends() {
     let mut h = crate::test_harness::TestHarness::with_size(160, 40);
@@ -16903,7 +16903,7 @@ fn jumplist_picker_pages_by_half_a_screen_and_stops_at_the_ends() {
         .picker
         .viewport_rows
         .expect("the render stamped a viewport")
-        / 2;
+        .div_ceil(2);
     assert!(
         half > 1,
         "a meaningful page needs more than one row: {half}"

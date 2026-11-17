@@ -11,7 +11,7 @@ use crate::{
     input_view::InputView,
     picker::{write_row_display, PickList, Preview},
     render::{
-        chrome::TypeTag,
+        chrome::{PlateColors, TypeTag},
         editor::{self, render_editor, ResolvedChrome},
         paint::style_rgb,
         text::{clip_to_width, write_str, write_str_clipped},
@@ -63,27 +63,35 @@ const PLATE_HEADER_GAP: u16 = 14;
 /// padding at a 9 px cell.
 const CHIP_PAD: u16 = 11;
 
-/// Page dots a modal footer draws at most. A longer list maps its pages onto
-/// these, so the dots keep clear of the hints however long the list grows.
-const MAX_PAGE_DOTS: usize = 5;
-
-/// The page dots' geometry in sixteenths of a cell: the current page's width,
-/// any other page's width, the gap between two dots, a dot's height, and its
-/// top edge in the row.
+/// Rows a modal's key line takes, the inner rect's last row and the bottom
+/// border's row under it.
 ///
-/// At a 9 by 18 pixel cell a dot is 4 pixels square, the current page's dot
-/// is 14 pixels wide, and the dots stand 5 pixels apart.
-const CURRENT_DOT_WIDTH: u16 = 25;
-const PAGE_DOT_WIDTH: u16 = 7;
-const PAGE_DOT_GAP: u16 = 9;
-const PAGE_DOT_HEIGHT: u16 = 4;
-const PAGE_DOT_TOP: i16 = 6;
+/// Every filter modal ends in this one shape in both looks, so no layout reads
+/// the look.
+pub(crate) const FOOTER_ROWS: u16 = 2;
 
-/// The radius the page dots round at, in logical pixels.
+/// The logical px a plate's key line draws right and down of its row.
 ///
-/// At a 9 by 18 pixel cell it is half a dot's height, so a dot draws as a
-/// circle and the current page's dot as a pill.
-const PAGE_DOT_RADIUS: u8 = 2;
+/// 1 px right sets the line's text 12 px in from the plate's side, as the
+/// header's. The line spans the 24 px from 4 px under the row's top, where the
+/// Islands end, to the plate's bottom, so 7 px down centers an 18 px row in it.
+const PLATE_FOOTER_NUDGE: [i16; 2] = [1, 7];
+
+/// Sixteenths between two hints of a plate's key line, the boards' 14 px at a
+/// 9 px cell.
+const PLATE_HINT_GAP: u16 = 25;
+
+/// Sixteenths between the hints, the legend, and the note of a plate's key
+/// line, the boards' 10 px at a 9 px cell.
+const PLATE_FOOTER_GAP: u16 = 18;
+
+/// The key line of a list whose selection opens and shows in a preview, the
+/// symbol finder's and the target pickers'.
+pub(crate) const PICKER_HINTS: [(&str, &str); 3] = [
+    ("Enter", "open"),
+    ("C-d/C-u", "preview"),
+    ("C-f/C-b", "page"),
+];
 
 /// The words a filter modal's header row shows around its query.
 pub(crate) struct FilterHeader<'a> {
@@ -344,22 +352,9 @@ fn paint_plate_header(
 
     let origin = Rect::new(inner.x, inner.y, 1, 1);
     let mut run = |col: u16, part: &str, scale: u16, colors: (Option<[u8; 3]>, [u8; 3]), bold| {
-        let (Some(color), false) = (colors.0, part.is_empty()) else {
-            return;
-        };
-        TextRun {
-            col: i16::try_from(col).unwrap_or(i16::MAX),
-            row: 0,
-            scale,
-            color,
-            bg: Some(colors.1),
-            bold,
-            italic: false,
-            text: part,
-            follow: 0,
-            anchor: None,
+        if let (Some(color), false) = (colors.0, part.is_empty()) {
+            plate_run(col, part, scale, color, colors.1, bold).render(origin, buf, scene);
         }
-        .render(origin, buf, scene);
     };
     let bold = |style: Style| style.add_modifier.contains(Modifier::BOLD);
 
@@ -515,34 +510,70 @@ fn query_window(query: &str, caret: usize, room: usize) -> (&str, Option<&str>, 
     )
 }
 
-/// What a modal's footer row shows, from its left edge to its right.
+/// What a modal's key line shows, from its left edge to its right.
 #[derive(Default)]
 pub(crate) struct Footer<'a> {
-    /// Styled spans painted first, such as a legend of the row marks.
-    pub(crate) lead: &'a [(&'a str, Style)],
     /// Key hints, each a bound key and the word for what it does.
     pub(crate) hints: &'a [(&'a str, &'a str)],
-    /// A note set near the right edge, such as the context a modal opened in.
+    /// Styled spans set flush right, such as a legend of the row marks.
+    pub(crate) legend: &'a [(&'a str, Style)],
+    /// A note that ends the line, such as the context a modal opened in.
     pub(crate) note: Option<&'a str>,
-    /// The selection's page and the page count, as [`page_of`] gives them.
-    pub(crate) pages: Option<(usize, usize)>,
 }
 
-/// Paint a modal's footer into `rect`, with its lead and key hints from the
-/// left, a note right of them, and its page dots at the right.
+/// The rect of `modal`'s key line, the inner rect's last row and the bottom
+/// border's row under it, inside the side borders.
 ///
-/// The footer fills every row of `rect` with its surface and paints its line
-/// in the first, so a footer that reaches the box's bottom edge sits flush
-/// with it. Under a live scene a hairline in `ui.border.inactive` along the
-/// top of the first row rules the footer off from the body above it.
+/// A body ends on the row above the line, so it loses the inner rect's last
+/// row to the line.
+pub(crate) fn footer_rect(modal: Rect) -> Rect {
+    let rows = FOOTER_ROWS.min(modal.height);
+    Rect::new(
+        modal.x + 1,
+        modal.bottom() - rows,
+        modal.width.saturating_sub(2),
+        rows,
+    )
+}
+
+/// Paint a modal's key line into `rect`, which [`footer_rect`] gives, with its
+/// key hints from the left and its legend and note at the right.
 ///
-/// The lead's spans paint in their own styles, two cells before the hints. Each
-/// hint is a key in `ui.key_label` and the word it does in `ui.text.muted`. The
-/// first hint that does not fit, and every hint after it, is left out. The
-/// note ends one cell from the dots or the right edge, in `ui.text.muted`, and
-/// is left out when it does not clear the hints. The page dots draw only under
-/// a live scene.
+/// Each hint is a key in `ui.key_label` and the word it does in
+/// `ui.text.muted`. The legend's spans keep their own styles, and the note
+/// reads in `ui.text.muted`. The legend is always kept, and the first hint
+/// that does not clear it, and every hint after it, is left out. The note
+/// ends the line, with the legend before it, only when it clears the hints.
+///
+/// With `plate`, the line is the plate's: its first row blanks to the plate's
+/// ground, and every part draws as a run at the [`TypeRole::Caption`] size,
+/// [`PLATE_FOOTER_NUDGE`] px off the row, with no fill and no rule. Otherwise
+/// every row of `rect` fills with `ui.modal.footer` and the parts draw in the
+/// first row's cells. Under a live scene a hairline in `ui.border.inactive`
+/// along the top of that row rules the line off from the body above it.
 pub(crate) fn modal_footer(
+    buf: &mut Buffer,
+    rect: Rect,
+    footer: &Footer<'_>,
+    plate: Option<PlateColors>,
+    theme: &Theme,
+    scene: &mut stoat_widgets::ApcScene,
+) {
+    if rect.is_empty() {
+        return;
+    }
+    match plate {
+        Some(plate) => paint_plate_footer(buf, rect, footer, plate.ground, theme, scene),
+        None => paint_cell_footer(buf, rect, footer, theme, scene),
+    }
+}
+
+/// Paint `footer` into `rect` as a cell row on `ui.modal.footer`, ruled off at
+/// its top, for [`modal_footer`].
+///
+/// The line keeps one cell clear at each end, and its hints and its groups
+/// stand two cells apart.
+fn paint_cell_footer(
     buf: &mut Buffer,
     rect: Rect,
     footer: &Footer<'_>,
@@ -570,34 +601,175 @@ pub(crate) fn modal_footer(
         .render(Rect { height: 1, ..rect }, buf, scene);
     }
 
-    let hints_end = paint_page_dots(rect, footer.pages, theme, buf, scene);
-    let mut x = rect.x + 1;
-    for (text, span_style) in footer.lead {
-        write_str_clipped(buf, x, rect.y, text, *span_style, row_end);
-        x = x.saturating_add(text.width() as u16);
-    }
-    if !footer.lead.is_empty() {
-        x = x.saturating_add(2);
-    }
-
+    let places = place_footer(footer, rect.width.saturating_sub(2), (2, 2), |text| {
+        text.width() as u16
+    });
+    let (x, y) = (rect.x + 1, rect.y);
     let key_style = theme.get(scope::UI_KEY_LABEL);
     let word_style = theme.get(scope::UI_TEXT_MUTED);
-    for (key, word) in footer.hints {
-        let width = (key.width() + 1 + word.width()) as u16;
-        if x + width > hints_end {
-            break;
+    for (&(key, word), at) in footer.hints.iter().zip(places.hints) {
+        write_str_clipped(buf, x + at, y, key, key_style, row_end);
+        let word_x = x + at + key.width() as u16 + 1;
+        write_str_clipped(buf, word_x, y, word, word_style, row_end);
+    }
+    if let Some(mut at) = places.legend {
+        for &(text, span_style) in footer.legend {
+            write_str_clipped(buf, x + at, y, text, span_style, row_end);
+            at += text.width() as u16;
         }
-        write_str(buf, x, rect.y, key, key_style);
-        write_str(buf, x + key.width() as u16 + 1, rect.y, word, word_style);
-        x += width + 2;
+    }
+    if let (Some(note), Some(at)) = (footer.note, places.note) {
+        write_str_clipped(buf, x + at, y, note, word_style, row_end);
+    }
+}
+
+/// Paint `footer` into `rect`'s first row as the plate's key line, runs on the
+/// plate's `ground`, for [`modal_footer`].
+///
+/// The hints stand [`PLATE_HINT_GAP`] apart, and the hints, the legend, and the
+/// note stand [`PLATE_FOOTER_GAP`] apart. A part whose color has no RGB value
+/// draws nothing.
+fn paint_plate_footer(
+    buf: &mut Buffer,
+    rect: Rect,
+    footer: &Footer<'_>,
+    ground: [u8; 3],
+    theme: &Theme,
+    scene: &mut stoat_widgets::ApcScene,
+) {
+    let [r, g, b] = ground;
+    for x in rect.left()..rect.right() {
+        buf[(x, rect.y)]
+            .set_char(' ')
+            .set_style(Style::default().bg(Color::Rgb(r, g, b)));
     }
 
-    let note_x = footer.note.and_then(|note| {
-        let x_end = hints_end.saturating_sub(1);
-        Some((note, x_end.checked_sub(note.width() as u16)?))
+    let caption = theme.type_scale(TypeRole::Caption);
+    let width = |text: &str| text_run::advance_sixteenths(text.chars().count(), caption);
+    let places = place_footer(
+        footer,
+        rect.width.saturating_mul(16),
+        (PLATE_HINT_GAP, PLATE_FOOTER_GAP),
+        width,
+    );
+    let key = style_rgb(theme.get(scope::UI_KEY_LABEL).fg);
+    let muted = style_rgb(theme.get(scope::UI_TEXT_MUTED).fg);
+
+    let origin = Rect::new(rect.x, rect.y, 1, 1);
+    scene.nudge(PLATE_FOOTER_NUDGE);
+    let mut run = |col: u16, text: &str, color: Option<[u8; 3]>| {
+        if let (Some(color), false) = (color, text.is_empty()) {
+            plate_run(col, text, caption, color, ground, false).render(origin, buf, scene);
+        }
+    };
+    for (&(key_text, word), at) in footer.hints.iter().zip(places.hints) {
+        run(at, key_text, key);
+        run(at + width(key_text) + width(" "), word, muted);
+    }
+    if let Some(mut at) = places.legend {
+        for &(text, span_style) in footer.legend {
+            run(at, text, style_rgb(span_style.fg));
+            at += width(text);
+        }
+    }
+    if let (Some(note), Some(at)) = (footer.note, places.note) {
+        run(at, note, muted);
+    }
+    scene.nudge([0, 0]);
+}
+
+/// A run of `text` that starts `col` sixteenths into a plate's header or key
+/// line row, in `color` over an opaque `bg`, at `scale`.
+fn plate_run(
+    col: u16,
+    text: &str,
+    scale: u16,
+    color: [u8; 3],
+    bg: [u8; 3],
+    bold: bool,
+) -> TextRun<'_> {
+    TextRun {
+        col: i16::try_from(col).unwrap_or(i16::MAX),
+        row: 0,
+        scale,
+        color,
+        bg: Some(bg),
+        bold,
+        italic: false,
+        text,
+        follow: 0,
+        anchor: None,
+    }
+}
+
+/// Where the parts of a key line start, in the units of the measure that
+/// placed them, as [`place_footer`] gives them.
+#[derive(Debug, PartialEq)]
+struct FooterPlaces {
+    /// Each kept hint's start, in hint order.
+    hints: Vec<u16>,
+    /// The legend's start, when the footer has a legend.
+    legend: Option<u16>,
+    /// The note's start, when the note shows.
+    note: Option<u16>,
+}
+
+/// Place `footer`'s parts along a line `end` units long, with its hints
+/// `gaps.0` apart and its groups `gaps.1` apart, measured by `width`.
+///
+/// The hints start at 0. The legend ends at the line's end, and the first hint
+/// that does not end a group gap before it, and every hint after it, stays out.
+/// The note ends at the line's end and moves the legend before it, but only
+/// when the leftmost of them still clears the kept hints by a group gap.
+fn place_footer(
+    footer: &Footer<'_>,
+    end: u16,
+    (hint_gap, group_gap): (u16, u16),
+    width: impl Fn(&str) -> u16,
+) -> FooterPlaces {
+    let has_legend = !footer.legend.is_empty();
+    let legend_width: u16 = footer.legend.iter().map(|&(text, _)| width(text)).sum();
+    let legend_x = end.saturating_sub(legend_width);
+    let limit = match has_legend {
+        true => legend_x.saturating_sub(group_gap),
+        false => end,
+    };
+
+    let mut hints = Vec::with_capacity(footer.hints.len());
+    let mut hints_end = None;
+    let mut x = 0;
+    for &(key, word) in footer.hints {
+        let hint_end = x + width(key) + width(" ") + width(word);
+        if hint_end > limit {
+            break;
+        }
+        hints.push(x);
+        hints_end = Some(hint_end);
+        x = hint_end + hint_gap;
+    }
+
+    let note = footer
+        .note
+        .filter(|&note| width(note) <= end)
+        .map(|note| end - width(note));
+    let leftmost = note.map(|note_x| match has_legend {
+        true => note_x
+            .saturating_sub(group_gap)
+            .saturating_sub(legend_width),
+        false => note_x,
     });
-    if let Some((note, note_x)) = note_x.filter(|&(_, note_x)| note_x >= x) {
-        write_str(buf, note_x, rect.y, note, word_style);
+    let clears = |left: u16| hints_end.is_none_or(|hints_end| left >= hints_end + group_gap);
+    match leftmost.filter(|&left| clears(left)) {
+        Some(left) => FooterPlaces {
+            hints,
+            legend: has_legend.then_some(left),
+            note,
+        },
+        None => FooterPlaces {
+            hints,
+            legend: has_legend.then_some(legend_x),
+            note: None,
+        },
     }
 }
 
@@ -608,66 +780,6 @@ pub(crate) fn line_strong(theme: &Theme) -> Option<[u8; 3]> {
         .try_get(scope::UI_SURFACE_OVERLAY)
         .and_then(|style| style_rgb(style.fg))
         .or_else(|| style_rgb(theme.get(scope::UI_BORDER_INACTIVE).fg))
-}
-
-/// Draw the page dots of `pages` at the right of `rect`, and return the column
-/// the dots start at, which is `rect`'s right edge when none draw.
-///
-/// The dots end one cell from the right edge. Past [`MAX_PAGE_DOTS`] pages the
-/// lit dot is the one at the selection's share of the list.
-fn paint_page_dots(
-    rect: Rect,
-    pages: Option<(usize, usize)>,
-    theme: &Theme,
-    buf: &mut Buffer,
-    scene: &mut stoat_widgets::ApcScene,
-) -> u16 {
-    let end = rect.x + rect.width;
-    let Some((current, count)) = pages.filter(|&(_, count)| count > 0 && scene.live()) else {
-        return end;
-    };
-    let lit_color = style_rgb(theme.get(scope::UI_BORDER_FOCUSED).fg);
-    let (Some(lit_color), Some(dim_color)) = (lit_color, line_strong(theme)) else {
-        return end;
-    };
-
-    let dots = count.min(MAX_PAGE_DOTS);
-    let lit = current.min(count - 1) * dots / count;
-    let total = CURRENT_DOT_WIDTH + (dots as u16 - 1) * (PAGE_DOT_WIDTH + PAGE_DOT_GAP);
-    let Some(start) = (rect.width.saturating_sub(1) * 16).checked_sub(total) else {
-        return end;
-    };
-
-    let origin = Rect::new(rect.x, rect.y, 1, 1);
-    let mut x = start;
-    for dot in 0..dots {
-        let (width, color) = match dot == lit {
-            true => (CURRENT_DOT_WIDTH, lit_color),
-            false => (PAGE_DOT_WIDTH, dim_color),
-        };
-        Bar {
-            x: x as i16,
-            y: PAGE_DOT_TOP,
-            width,
-            height: PAGE_DOT_HEIGHT,
-            color,
-            radius: PAGE_DOT_RADIUS,
-            corners: 0,
-        }
-        .render(origin, buf, scene);
-        x += width + PAGE_DOT_GAP;
-    }
-    rect.x + start / 16
-}
-
-/// The page the selection is on and the pages a list of `len` entries spans
-/// at `rows` a page, or `None` for an empty list or a list with no rows on
-/// screen.
-pub(crate) fn page_of(selected: usize, len: usize, rows: usize) -> Option<(usize, usize)> {
-    if len == 0 || rows == 0 {
-        return None;
-    }
-    Some((selected.min(len - 1) / rows, len.div_ceil(rows)))
 }
 
 /// First entry visible when `selected` is showing, given `rows` on screen.
@@ -700,6 +812,8 @@ pub(crate) struct PickerLayout {
     pub(crate) list: Rect,
     /// The selected candidate's file, when the box is wide enough to show one.
     pub(crate) preview: Option<Rect>,
+    /// The key line under the list and the preview, as [`footer_rect`] gives it.
+    pub(crate) footer: Rect,
 }
 
 /// Lay a target picker out within `area`, or [`None`] when `area` is too small
@@ -720,9 +834,10 @@ pub(crate) fn target_picker_layout(
         zoom,
     )?;
     let inner = Block::default().borders(Borders::ALL).inner(modal);
+    let footer = footer_rect(modal);
 
     let body_top = inner.y + 2;
-    let body_height = (inner.y + inner.height).saturating_sub(body_top);
+    let body_height = footer.y.saturating_sub(body_top);
     if body_height == 0 {
         return None;
     }
@@ -740,6 +855,7 @@ pub(crate) fn target_picker_layout(
         inner,
         list,
         preview,
+        footer,
     })
 }
 
@@ -1637,60 +1753,40 @@ mod tests {
         );
     }
 
-    #[test]
-    fn page_of_counts_pages_of_whole_rows() {
-        assert_eq!(
-            [
-                page_of(0, 30, 10),
-                page_of(29, 30, 10),
-                page_of(10, 11, 10),
-                page_of(5, 0, 10),
-                page_of(5, 9, 0),
-            ],
-            [Some((0, 3)), Some((2, 3)), Some((1, 2)), None, None],
-        );
-    }
+    /// The hints every footer test paints.
+    const FOOTER_HINTS: [(&str, &str); 2] = [("Enter", "open"), ("C-f/C-b", "page")];
 
-    /// The text of a footer painted `width` columns wide in a live scene, and
-    /// the bar frames its rule and its dots send.
-    fn footer_row(
-        width: u16,
-        note: Option<&str>,
-        pages: Option<(usize, usize)>,
-    ) -> (String, Vec<u8>) {
-        let (rows, frames) = footer_rows(width, 1, note, pages);
-        (rows[0].0.clone(), frames)
-    }
-
-    /// Each row of a footer painted `width` by `height` in a live scene, as its
-    /// text and whether every cell takes the footer's surface, and the bar
-    /// frames its rule and its dots send.
-    fn footer_rows(
-        width: u16,
-        height: u16,
-        note: Option<&str>,
-        pages: Option<(usize, usize)>,
-    ) -> (Vec<(String, bool)>, Vec<u8>) {
+    /// A theme whose key line colors are each their own.
+    fn footer_theme() -> Theme {
         let src = r##"theme t {
-            ui.border.focused.fg = "#010203";
-            ui.surface.overlay.fg = "#040506";
+            ui.surface.ground.bg = "#010101";
+            ui.background.bg = "#020202";
+            ui.key_label.fg = "#030303";
+            ui.text.muted.fg = "#040404";
             ui.border.inactive.fg = "#070809";
             ui.modal.footer.bg = "#0a0b0c";
         }"##;
         let (config, _) = stoat_config::parse(src);
-        let theme = Theme::from_config(&config.expect("theme parses"), "t").expect("theme loads");
+        Theme::from_config(&config.expect("theme parses"), "t").expect("theme loads")
+    }
 
+    /// A legend of a mark in `#050505` and a muted word.
+    fn footer_legend() -> [(&'static str, Style); 2] {
+        [
+            ("\u{25cf}", Style::default().fg(Color::Rgb(5, 5, 5))),
+            (" open", Style::default().fg(Color::Rgb(4, 4, 4))),
+        ]
+    }
+
+    /// Each row of the cell look's `footer` painted `width` by `height` in a
+    /// live scene, as its text and whether every cell takes the footer's
+    /// surface, and the bar frames its rule sends.
+    fn cell_footer(width: u16, height: u16, footer: &Footer<'_>) -> (Vec<(String, bool)>, Vec<u8>) {
+        let theme = footer_theme();
         let area = Rect::new(0, 0, width, height);
         let mut buf = Buffer::empty(area);
         let mut scene = stoat_widgets::ApcScene::new();
-        let hints = [("Enter", "open"), ("C-f/C-b", "page")];
-        let footer = Footer {
-            hints: &hints,
-            note,
-            pages,
-            ..Footer::default()
-        };
-        modal_footer(&mut buf, area, &footer, &theme, &mut scene);
+        modal_footer(&mut buf, area, footer, None, &theme, &mut scene);
 
         let surface = theme.get(scope::UI_MODAL_FOOTER).bg;
         let rows = (0..height)
@@ -1700,6 +1796,17 @@ mod tests {
             })
             .collect();
         (rows, scene.buffer().clone())
+    }
+
+    /// The first row's text of the cell look's footer of [`FOOTER_HINTS`] and
+    /// `note`, painted `width` columns wide.
+    fn cell_footer_line(width: u16, note: Option<&str>) -> String {
+        let footer = Footer {
+            hints: &FOOTER_HINTS,
+            note,
+            ..Footer::default()
+        };
+        cell_footer(width, 1, &footer).0[0].0.clone()
     }
 
     /// The bar frame of a footer's rule across `width` cells, one sixteenth
@@ -1718,76 +1825,31 @@ mod tests {
         })
     }
 
-    /// The bar frames of page dots at `(x, width, color)`, in sixteenths, each
-    /// rounded at 2 logical pixels on all four corners.
-    fn dot_frames(dots: &[(i16, u16, [u8; 3])]) -> Vec<u8> {
-        dots.iter()
-            .flat_map(|&(x, width, color)| {
-                encode_bar(&BarCommand {
-                    x,
-                    y: 6,
-                    width,
-                    height: 4,
-                    color,
-                    occludes: false,
-                    hatch: None,
-                    radius: 2,
-                    corners: 0,
-                })
-            })
-            .collect()
-    }
-
-    /// A hairline rules the footer's top edge. The dots end one cell from the
-    /// right edge, round and the lit one wide, and the hints stop short of
-    /// them. Past five pages the lit dot stands at the selection's share of the
-    /// list. A footer two rows tall fills both rows with its surface and paints
-    /// its line in the first.
+    /// The cell look rules its top edge with a hairline and draws no dots. Its
+    /// hints run from one cell in, two cells apart, and a hint that does not
+    /// fit stays out. A footer two rows tall fills both rows with its surface
+    /// and paints its line in the first.
     #[test]
-    fn the_footer_paints_its_hints_and_page_dots() {
-        let (lit, dim) = ([1, 2, 3], [4, 5, 6]);
-        let three_pages = dot_frames(&[(567, 7, dim), (583, 25, lit), (617, 7, dim)]);
+    fn the_cell_footer_paints_its_hints_under_a_rule() {
+        let footer = Footer {
+            hints: &FOOTER_HINTS,
+            ..Footer::default()
+        };
         assert_eq!(
-            [
-                footer_row(40, None, Some((1, 3))),
-                footer_row(20, None, Some((0, 2))),
-                footer_row(40, None, Some((3, 7)))
-            ],
+            [cell_footer(40, 2, &footer), cell_footer(20, 1, &footer)],
             [
                 (
-                    format!(" Enter open  C-f/C-b page{}", " ".repeat(15)),
-                    [rule_frame(40), three_pages.clone()].concat(),
+                    vec![
+                        (format!(" Enter open  C-f/C-b page{}", " ".repeat(15)), true),
+                        (" ".repeat(40), true),
+                    ],
+                    rule_frame(40),
                 ),
                 (
-                    format!(" Enter open{}", " ".repeat(9)),
-                    [rule_frame(20), dot_frames(&[(263, 25, lit), (297, 7, dim)]),].concat(),
-                ),
-                (
-                    format!(" Enter open  C-f/C-b page{}", " ".repeat(15)),
-                    [
-                        rule_frame(40),
-                        dot_frames(&[
-                            (535, 7, dim),
-                            (551, 7, dim),
-                            (567, 25, lit),
-                            (601, 7, dim),
-                            (617, 7, dim),
-                        ]),
-                    ]
-                    .concat(),
+                    vec![(format!(" Enter open{}", " ".repeat(9)), true)],
+                    rule_frame(20),
                 ),
             ],
-        );
-        assert_eq!(
-            footer_rows(40, 2, None, Some((1, 3))),
-            (
-                vec![
-                    (format!(" Enter open  C-f/C-b page{}", " ".repeat(15)), true),
-                    (" ".repeat(40), true),
-                ],
-                [rule_frame(40), three_pages].concat(),
-            ),
-            "both rows on the footer's surface, the line and the rule in the first",
         );
     }
 
@@ -1797,19 +1859,175 @@ mod tests {
     fn the_footer_sets_its_note_right_of_the_hints() {
         assert_eq!(
             [
-                footer_row(40, Some("normal"), None),
-                footer_row(30, Some("normal"), None),
+                cell_footer_line(40, Some("normal")),
+                cell_footer_line(30, Some("normal")),
             ],
             [
+                format!(" Enter open  C-f/C-b page{}normal ", " ".repeat(8)),
+                format!(" Enter open  C-f/C-b page{}", " ".repeat(5)),
+            ],
+        );
+    }
+
+    /// A legend ends one cell from the right edge in its own styles, and a
+    /// hint that does not clear it by two cells stays out, so the legend keeps
+    /// its place in a narrow footer.
+    #[test]
+    fn the_footer_sets_its_legend_flush_right() {
+        let legend = footer_legend();
+        let footer = Footer {
+            hints: &FOOTER_HINTS,
+            legend: &legend,
+            ..Footer::default()
+        };
+        let line = |width: u16| {
+            let theme = footer_theme();
+            let area = Rect::new(0, 0, width, 1);
+            let mut buf = Buffer::empty(area);
+            let mut scene = stoat_widgets::ApcScene::new();
+            modal_footer(&mut buf, area, &footer, None, &theme, &mut scene);
+            (test_support::row_text(&buf, 0), buf[(width - 7, 0)].fg)
+        };
+        assert_eq!(
+            [line(40), line(30)],
+            [
                 (
-                    format!(" Enter open  C-f/C-b page{}normal ", " ".repeat(8)),
-                    rule_frame(40),
+                    format!(" Enter open  C-f/C-b page{}\u{25cf} open ", " ".repeat(8)),
+                    Color::Rgb(5, 5, 5),
                 ),
                 (
-                    format!(" Enter open  C-f/C-b page{}", " ".repeat(5)),
-                    rule_frame(30),
+                    format!(" Enter open{}\u{25cf} open ", " ".repeat(12)),
+                    Color::Rgb(5, 5, 5),
                 ),
             ],
+        );
+    }
+
+    /// The legend keeps its place over the hints, and the note shows only
+    /// when it still clears them with the legend moved left of it.
+    #[test]
+    fn the_footer_note_yields_to_the_hints_and_the_legend() {
+        let legend = [("L", Style::default())];
+        let footer = Footer {
+            hints: &[("ab", "cd")],
+            legend: &legend,
+            note: Some("nn"),
+        };
+        let chars = |text: &str| text.chars().count() as u16;
+        assert_eq!(
+            [
+                place_footer(&footer, 20, (2, 2), chars),
+                place_footer(&footer, 10, (2, 2), chars),
+            ],
+            [
+                FooterPlaces {
+                    hints: vec![0],
+                    legend: Some(15),
+                    note: Some(18),
+                },
+                FooterPlaces {
+                    hints: vec![0],
+                    legend: Some(9),
+                    note: None,
+                },
+            ],
+        );
+    }
+
+    /// The groups of a plate's key line stand 18 sixteenths apart. At 15 cells
+    /// a two-char note leaves the one-char legend only 14 sixteenths past the
+    /// one hint, so the note stays out and the legend ends the line.
+    #[test]
+    fn a_plate_footer_keeps_its_groups_18_sixteenths_apart() {
+        let theme = footer_theme();
+        let legend = [("L", Style::default().fg(Color::Rgb(5, 5, 5)))];
+        let footer = Footer {
+            hints: &FOOTER_HINTS[..1],
+            legend: &legend,
+            note: Some("nn"),
+        };
+        let plate = PlateColors {
+            ground: [1, 1, 1],
+            surface: [2, 2, 2],
+        };
+        let mut buf = Buffer::empty(Rect::new(0, 0, 20, 8));
+        let mut scene = stoat_widgets::ApcScene::new();
+        let rect = Rect::new(2, 5, 15, 2);
+        modal_footer(&mut buf, rect, &footer, Some(plate), &theme, &mut scene);
+
+        let texts: Vec<(i16, String)> = plate_commands(&scene)
+            .into_iter()
+            .filter_map(|command| match command {
+                Command::TextRun(run) => Some((run.col, run.text)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            texts,
+            [(32, "Enter"), (128, "open"), (256, "L")].map(|(col, text)| (col, text.to_owned())),
+        );
+    }
+
+    /// Under the plate the key line is runs 1 px right and 7 px down of its
+    /// first row, on the plate's ground, with no rule and no fill.
+    ///
+    /// The row's cells blank to the ground, and the row under it keeps its
+    /// cells. The hints stand 25 sixteenths apart, each key in the key color
+    /// and its word one space on in the muted color. The legend ends the line
+    /// in its own colors.
+    #[test]
+    fn a_plate_footer_draws_its_line_as_nudged_runs_on_the_ground() {
+        let theme = footer_theme();
+        let legend = footer_legend();
+        let footer = Footer {
+            hints: &FOOTER_HINTS,
+            legend: &legend,
+            ..Footer::default()
+        };
+        let plate = PlateColors {
+            ground: [1, 1, 1],
+            surface: [2, 2, 2],
+        };
+        let rect = Rect::new(2, 5, 40, 2);
+        let mut buf = Buffer::filled(Rect::new(0, 0, 44, 8), Cell::new("x"));
+        let mut scene = stoat_widgets::ApcScene::new();
+        modal_footer(&mut buf, rect, &footer, Some(plate), &theme, &mut scene);
+
+        let run = |col: i16, text: &str, color: [u8; 3]| {
+            Command::TextRun(TextRunCommand {
+                col,
+                row: 80,
+                scale: 256,
+                color,
+                bg: Some([1, 1, 1]),
+                bold: false,
+                italic: false,
+                follow: 0,
+                anchor: None,
+                text: text.to_owned(),
+            })
+        };
+        let cells = |y: u16| {
+            (2..42)
+                .map(|x| (buf[(x, y)].symbol().to_owned(), buf[(x, y)].bg))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            (plate_commands(&scene), cells(5), cells(6)),
+            (
+                vec![
+                    Command::Nudge([1, 7]),
+                    run(32, "Enter", [3, 3, 3]),
+                    run(128, "open", [4, 4, 4]),
+                    run(217, "C-f/C-b", [3, 3, 3]),
+                    run(345, "page", [4, 4, 4]),
+                    run(576, "\u{25cf}", [5, 5, 5]),
+                    run(592, " open", [4, 4, 4]),
+                    Command::Nudge([0, 0]),
+                ],
+                vec![(" ".to_owned(), Color::Rgb(1, 1, 1)); 40],
+                vec![("x".to_owned(), Color::Reset); 40],
+            ),
         );
     }
 

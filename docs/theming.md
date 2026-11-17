@@ -284,8 +284,9 @@ The typed UI scopes, by group (syntax scopes are open-ended):
   a borderless card docked on the status bar, so only its background shows,
   as the card's fill. In cells its foreground is the border hue. A theme that
   leaves it unset gives the box `ui.modal.hints`.
-- `ui.modal.footer` -- the footer row a modal ends in, with its key hints and
-  page dots.
+- `ui.modal.footer` -- the key line a modal ends in, with its key hints.
+  Inside stoatty a filter modal draws as a plate on the window ground, and its
+  key line draws on that ground with no fill.
 - `ui.modal.label` -- the name a filter modal's header row starts with, such
   as `Files`. A theme that leaves it unset draws the name in the bold
   `ui.text.dim`. default_dark leaves it unset.

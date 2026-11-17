@@ -2,7 +2,7 @@ use crate::{
     markdown::StyledLine,
     paths,
     render::{
-        picker::{FilterHeader, FILTER_PROMPT},
+        picker::{FilterHeader, Footer, FILTER_PROMPT, PICKER_HINTS},
         text::write_str_clipped,
     },
     symbol_finder::{SymbolFinder, SymbolFinderScope, SymbolTarget},
@@ -19,16 +19,18 @@ use ratatui::{
 use std::path::Path;
 use stoat_language::LanguageRegistry;
 
-/// Box rows the chrome takes around the list. Two borders, the prompt row, and
-/// the separator under it.
-const CHROME_ROWS: u16 = 4;
+/// Box rows the chrome takes around the list. Two borders, the prompt row, the
+/// separator under it, and the key line's row inside the bottom border.
+const CHROME_ROWS: u16 = 5;
 
 /// Lay out the centered symbol finder modal within `area`, or `None` when
 /// `area` is too small to host it.
 ///
-/// Returns the modal box, its inner rect (prompt, separator, then body), the
-/// result-list rect, and an optional preview pane rect. The preview appears only
-/// when the body is wide enough, so a narrow modal stays list-only.
+/// Returns the modal box, its inner rect (prompt, separator, body, then the key
+/// line's row), the result-list rect, and an optional preview pane rect. The
+/// preview appears only when the body is wide enough, so a narrow modal stays
+/// list-only. The key line is the modal's
+/// [`footer_rect`](crate::render::picker::footer_rect).
 ///
 /// `content_rows` is the symbols the list holds, which the box grows to fit past
 /// its recommended 32 rows. `zoom` is the user's step count from
@@ -50,7 +52,9 @@ pub(crate) fn symbol_finder_layout(
     let inner = Block::default().borders(Borders::ALL).inner(modal);
 
     let body_top = inner.y + 2;
-    let body_height = (inner.y + inner.height).saturating_sub(body_top);
+    let body_height = crate::render::picker::footer_rect(modal)
+        .y
+        .saturating_sub(body_top);
     if body_height == 0 {
         return None;
     }
@@ -156,6 +160,13 @@ pub(crate) fn render_symbol_finder(
     finder.viewport_rows = Some(list.height as usize);
     let start_row = crate::render::picker::window_start(finder.selected, list.height as usize);
     paint_symbol_rows(finder, list, start_row, &git_root, theme, true, buf, scene);
+
+    let parts = Footer {
+        hints: &PICKER_HINTS,
+        ..Footer::default()
+    };
+    let footer = crate::render::picker::footer_rect(modal);
+    crate::render::picker::modal_footer(buf, footer, &parts, plate, theme, scene);
 }
 
 /// Paint the symbol list into `area`, starting at symbol `start_row`.
@@ -402,7 +413,7 @@ mod tests {
         let (modal, _, list, _) =
             symbol_finder_layout(Rect::new(0, 0, 200, 60), 40, 0, DEFAULT_LIST_PERCENT)
                 .expect("the area hosts the finder");
-        assert_eq!(modal.height, 44, "forty symbols plus four chrome rows");
+        assert_eq!(modal.height, 45, "forty symbols plus five chrome rows");
         assert_eq!(
             list.height, 40,
             "and the body then holds all forty without scrolling"

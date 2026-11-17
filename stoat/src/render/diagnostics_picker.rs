@@ -1,7 +1,7 @@
 use crate::{
     diagnostics_picker::{DiagnosticsPicker, PickerScope},
     render::{
-        picker::{FilterHeader, FILTER_PROMPT},
+        picker::{FilterHeader, Footer, FILTER_PROMPT, PICKER_HINTS},
         table::{self, Column, Width},
     },
 };
@@ -117,6 +117,12 @@ pub(crate) fn render_diagnostics_picker(
     }
 
     paint_diagnostic_rows(picker, git_root, layout.list, theme, buf, scene);
+
+    let parts = Footer {
+        hints: &PICKER_HINTS,
+        ..Footer::default()
+    };
+    crate::render::picker::modal_footer(buf, layout.footer, &parts, plate, theme, scene);
 }
 
 /// Paint the surviving diagnostics into `area`, following the selection.

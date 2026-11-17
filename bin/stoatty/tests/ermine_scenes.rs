@@ -1439,17 +1439,15 @@ fn the_editor_behind_the_finder_fades() {
     }
 }
 
-/// The finder ends in a footer on the raised surface, in the inner rect's last
-/// row.
+/// The finder ends in its key line on the plate's ground, in the inner rect's
+/// last row, with no raised fill and no rule above it.
 ///
 /// The box's modal rect is the 128 by 32 cells from cell (16, 9), so the inner
-/// rect's last row is cell row 39. The footer's second row is the modal rect's
-/// last row, whose top 10 px the plate's ground covers, so its cells read the
-/// ground. No other surface of the frame is raised, so the raised cells are the
-/// 126 cells between the box's sides in row 39. The docked key hints box waits
-/// for its toggle under the finder.
+/// rect runs from cell 17 to cell 142 and its last row is cell row 39. The
+/// line's keys end well short of pixel column 1200. No cell of the frame is
+/// raised, and the docked key hints box waits for its toggle under the finder.
 #[test]
-fn the_finder_ends_in_a_footer_on_the_raised_surface() {
+fn the_finder_ends_in_a_key_line_on_the_ground() {
     let mut home = support::scratch_home();
     let shot = settled_frame(
         home.path(),
@@ -1459,26 +1457,27 @@ fn the_finder_ends_in_a_footer_on_the_raised_surface() {
     );
 
     let raised = cells_of(&shot, RAISED);
-    if raised != (17..143).map(|col| (col, 39)).collect::<Vec<_>>() {
-        let frame = keep_frame(&shot, &mut home, "finder_footer");
+    if !raised.is_empty() {
+        let frame = keep_frame(&shot, &mut home, "finder_raised");
         panic!(
-            "the raised cells {raised:?} are not the 126 cells of row 39 between the box's \
-             sides; the frame is {}",
+            "the cells {raised:?} take the raised surface; the frame is {}",
             frame.display(),
         );
     }
+    expect_key_line(&shot, &mut home, 39, (17, 143), 1200, "finder_key_line");
 }
 
 /// The session picker's ground plate runs from the top of its header row to
-/// 10 px into its footer row, the modal rect's last row.
+/// its key line, which ends the plate 10 px into the modal rect's last row.
 ///
-/// The box holds its recommended 112 columns and six rows from cell (24, 8),
-/// so the inner rect starts at cell (25, 9) and the footer row is cell row 13.
-/// Each edge reads one pixel on each side, the ground inside and the shadowed
-/// panes outside. The column reads stand in the inner rect's first cell, which
-/// the footer leaves blank and the plate's corner arcs leave whole.
+/// The box holds its recommended 112 columns and seven rows from cell (24, 8),
+/// so the inner rect runs from cell (25, 9) to cell 134, and the key line is
+/// its last row, cell row 13. The top edge reads one pixel on each side, the
+/// ground inside and the shadowed panes outside, in the inner rect's first
+/// cell, which the plate's corner arcs leave whole. The line's keys end and
+/// its legend starts well clear of pixel column 900.
 #[test]
-fn the_session_picker_plate_ends_in_its_footer_row() {
+fn the_session_picker_plate_ends_in_its_key_line() {
     let mut home = support::scratch_home();
     let shot = settled_frame(
         home.path(),
@@ -1488,27 +1487,22 @@ fn the_session_picker_plate_ends_in_its_footer_row() {
     );
 
     let (column, top, _, _) = cell_rect(25, 9, 1, 1);
-    let (_, footer_row, _, _) = cell_rect(25, 13, 1, 1);
-    let (column, bottom) = (column + 2, footer_row + 10);
-    let edges = [
-        ("top", (column, top - 1), (column, top)),
-        ("bottom", (column, bottom), (column, bottom - 1)),
-    ];
-    for (side, (outside_x, outside_y), (inside_x, inside_y)) in edges {
-        let outside = pixel(&shot, outside_x, outside_y);
-        let inside = pixel(&shot, inside_x, inside_y);
-        if outside == GROUND || inside != GROUND {
-            let frame = keep_frame(&shot, &mut home, "session_plate");
-            panic!(
-                "the plate's {side} edge reads {} outside and {} inside, where only the \
-                 inside belongs to the ground {}; the frame is {}",
-                hex(outside),
-                hex(inside),
-                hex(GROUND),
-                frame.display(),
-            );
-        }
+    let (outside, inside) = (
+        pixel(&shot, column + 2, top - 1),
+        pixel(&shot, column + 2, top),
+    );
+    if outside == GROUND || inside != GROUND {
+        let frame = keep_frame(&shot, &mut home, "session_plate");
+        panic!(
+            "the plate's top edge reads {} outside and {} inside, where only the inside \
+             belongs to the ground {}; the frame is {}",
+            hex(outside),
+            hex(inside),
+            hex(GROUND),
+            frame.display(),
+        );
     }
+    expect_key_line(&shot, &mut home, 13, (25, 135), 900, "session_key_line");
 }
 
 /// The help header names both scopes. The active `applicable` sits in a chip
@@ -2176,6 +2170,49 @@ fn expect_region(shot: &Snapshot, home: &mut TempDir, rect: PixelRect, want: [u8
         "{what}: most pixels of {rect:?} are {}, not {}; the frame is {}",
         hex(found),
         hex(want),
+        frame.display(),
+    );
+}
+
+/// Panics unless cell row `row` holds a plate's key line on the ground, with
+/// the plate ending 10 px into the row under it.
+///
+/// Across the cells `cols`, from their first cell to the cell before their
+/// last, no pixel row from 2 px above the row to 6 px into it takes the
+/// hairline, where the cell look rules its footer off. At the line's middle
+/// pixel row, `blank_x` reads the ground behind the line. Under it the pixel
+/// 1 px above the plate's bottom edge reads the ground, and the pixel at the
+/// edge does not. A miss saves the frame as [`expect_region`] does.
+fn expect_key_line(
+    shot: &Snapshot,
+    home: &mut TempDir,
+    row: u16,
+    cols: (u16, u16),
+    blank_x: u32,
+    what: &str,
+) {
+    let (left, top, _, height) = cell_rect(cols.0, row, 1, 1);
+    let (right, _, _, _) = cell_rect(cols.1, row, 1, 1);
+    let ruled: Vec<u32> = (top - 2..top + 6)
+        .filter(|&y| (left..right).any(|x| pixel(shot, x, y) == HAIRLINE))
+        .collect();
+    let bottom = top + height + 10;
+    let reads = [
+        pixel(shot, blank_x, top + height / 2),
+        pixel(shot, blank_x, bottom - 1),
+        pixel(shot, blank_x, bottom),
+    ];
+    if ruled.is_empty() && reads[0] == GROUND && reads[1] == GROUND && reads[2] != GROUND {
+        return;
+    }
+
+    let frame = keep_frame(shot, home, what);
+    panic!(
+        "{what}: the hairline takes the pixel rows {ruled:?}, and column {blank_x} reads {} \
+         in the line, {} above the plate's bottom edge, and {} at it; the frame is {}",
+        hex(reads[0]),
+        hex(reads[1]),
+        hex(reads[2]),
         frame.display(),
     );
 }

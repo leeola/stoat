@@ -3,7 +3,7 @@ use crate::{
     input_view::InputView,
     render::{
         chrome::{ISLAND_BOTTOM, ISLAND_GAP, ISLAND_SIDE, ISLAND_TOP},
-        picker::{FilterHeader, DEFAULT_LIST_PERCENT},
+        picker::{FilterHeader, Footer, DEFAULT_LIST_PERCENT, FOOTER_ROWS},
         text::{wrap_text, write_str, write_str_clipped},
     },
     workspace::Workspace,
@@ -21,8 +21,17 @@ const LIST_ROWS: u16 = 10;
 const DOC_ROWS: u16 = 6;
 
 /// Box rows the chrome takes around the list. Two borders, the `:` input, the
-/// separator under it, the doc separator, and the doc region itself.
-const CHROME_ROWS: u16 = 5 + DOC_ROWS;
+/// separator under it, the doc separator, the doc region itself, and the key
+/// line's row inside the bottom border.
+const CHROME_ROWS: u16 = 6 + DOC_ROWS;
+
+/// The palette's key line, each a bound key and the word for what it does.
+const PALETTE_HINTS: [(&str, &str); 4] = [
+    ("Enter", "run"),
+    ("Tab", "complete"),
+    ("S-Tab", "scope"),
+    ("C-Up/C-Down", "history"),
+];
 
 /// The on-screen rectangles of the command-palette filter modal, derived from a
 /// terminal `area` by [`palette_filter_layout`].
@@ -40,6 +49,9 @@ pub(crate) struct PaletteFilterLayout {
     pub(crate) list: Rect,
     /// The selected entry's documentation, below a separator under the list.
     pub(crate) doc: Rect,
+    /// The key line under the doc, as
+    /// [`footer_rect`](crate::render::picker::footer_rect) gives it.
+    pub(crate) footer: Rect,
 }
 
 /// Lay out the command-palette filter modal within `area`, or `None` when
@@ -79,7 +91,8 @@ pub(crate) fn palette_filter_layout(
     )?;
     let inner = Block::default().borders(Borders::ALL).inner(modal);
 
-    let body = inner.height.saturating_sub(3);
+    // The input, its separator, the doc separator, and the key line's row.
+    let body = inner.height.saturating_sub(3 + FOOTER_ROWS - 1);
     let list_height = body.saturating_sub(DOC_ROWS).max(LIST_ROWS).min(body);
     let doc_height = DOC_ROWS.min(body.saturating_sub(list_height));
 
@@ -91,6 +104,7 @@ pub(crate) fn palette_filter_layout(
         inner,
         list,
         doc,
+        footer: crate::render::picker::footer_rect(modal),
     })
 }
 
@@ -116,14 +130,17 @@ pub(crate) fn palette_arg_body(
     arg_body_split(layout.inner)
 }
 
-/// Split the arg-picker body below the `:` input into a result-list rect and an
-/// optional preview rect. `None` when the body has no rows.
+/// Split the arg-picker body below the `:` input and above the key line into a
+/// result-list rect and an optional preview rect. `None` when the body has no
+/// rows.
 ///
 /// The split stays at [`DEFAULT_LIST_PERCENT`], because the palette's separator
 /// is not draggable.
 fn arg_body_split(inner: Rect) -> Option<(Rect, Option<Rect>)> {
     let body_top = inner.y + 2;
-    let body_height = (inner.y + inner.height).saturating_sub(body_top);
+    let body_height = (inner.y + inner.height)
+        .saturating_sub(FOOTER_ROWS - 1)
+        .saturating_sub(body_top);
     if body_height == 0 {
         return None;
     }
@@ -305,6 +322,12 @@ fn render_palette_arg_picker(
         buf,
         scene,
     );
+
+    let parts = Footer {
+        hints: &PALETTE_HINTS,
+        ..Footer::default()
+    };
+    crate::render::picker::modal_footer(buf, layout.footer, &parts, plate, theme, scene);
 }
 
 /// Render the body for a free-typed argument, one with no inline picker
@@ -345,11 +368,12 @@ fn render_palette_free_arg(
     let inner = layout.inner;
 
     let body_top = inner.y + 2;
-    let body_bottom = inner.y + inner.height;
+    let body_bottom = layout.footer.y;
     if body_top >= body_bottom {
         return;
     }
-    if let Some(plate) = crate::render::chrome::plate_colors(theme, scene) {
+    let plate = crate::render::chrome::plate_colors(theme, scene);
+    if let Some(plate) = plate {
         let body = Rect::new(inner.x, body_top, inner.width, body_bottom - body_top);
         let edges = [ISLAND_TOP, ISLAND_SIDE, ISLAND_BOTTOM, ISLAND_SIDE];
         crate::render::chrome::modal_island(body, edges, plate, theme, buf, scene);
@@ -387,6 +411,12 @@ fn render_palette_free_arg(
             write_str(buf, inner.x + 1, doc_top + i as u16, line, doc_style);
         }
     }
+
+    let parts = Footer {
+        hints: &PALETTE_HINTS,
+        ..Footer::default()
+    };
+    crate::render::picker::modal_footer(buf, layout.footer, &parts, plate, theme, scene);
 }
 
 /// Render the chrome every palette modal shares, which is the frame, the header
@@ -538,6 +568,12 @@ fn render_palette_filter(
         let doc_style = theme.get(crate::theme::scope::UI_TEXT_DIM);
         paint_doc_lines(buf, doc, &lines, doc_style);
     }
+
+    let parts = Footer {
+        hints: &PALETTE_HINTS,
+        ..Footer::default()
+    };
+    crate::render::picker::modal_footer(buf, layout.footer, &parts, plate, theme, scene);
 }
 
 /// Paint `lines` into the doc region `doc`, one per row from its top, each
@@ -787,7 +823,7 @@ mod tests {
         let laid = layout(Rect::new(0, 0, 200, 60), 4, 0);
         assert_eq!(
             (laid.modal.width, laid.modal.height),
-            (160, 21),
+            (160, 22),
             "a list under LIST_ROWS leaves the box at its recommended size"
         );
         assert_eq!(
@@ -801,8 +837,8 @@ mod tests {
     fn a_long_command_list_grows_the_list_not_the_doc() {
         let laid = layout(Rect::new(0, 0, 200, 60), 18, 0);
         assert_eq!(
-            laid.modal.height, 29,
-            "eighteen rows plus eleven chrome rows size the box"
+            laid.modal.height, 30,
+            "eighteen rows plus twelve chrome rows size the box"
         );
         assert_eq!(
             (laid.list.height, laid.doc.height),
@@ -830,7 +866,7 @@ mod tests {
 
         assert_eq!(
             (size(2), size(-1)),
-            ((198, 33), (140, 15)),
+            ((198, 34), (140, 16)),
             "each step moves both by a tenth of the area, and growth stops at the thin margin"
         );
     }
@@ -846,7 +882,7 @@ mod tests {
         );
         assert_eq!(
             (laid.list.height, laid.doc.height),
-            (7, 0),
+            (6, 0),
             "every remaining body row goes to the list"
         );
     }

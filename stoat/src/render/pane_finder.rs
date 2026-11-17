@@ -1,7 +1,7 @@
 use crate::{
     pane_finder::PaneFinder,
     render::{
-        picker::{FilterHeader, FILTER_PROMPT},
+        picker::{FilterHeader, Footer, FILTER_PROMPT, PICKER_HINTS},
         table::{self, Column, Width},
     },
 };
@@ -93,6 +93,12 @@ pub(crate) fn render_pane_finder(
     }
 
     paint_view_rows(finder, layout.list, theme, buf, scene);
+
+    let parts = Footer {
+        hints: &PICKER_HINTS,
+        ..Footer::default()
+    };
+    crate::render::picker::modal_footer(buf, layout.footer, &parts, plate, theme, scene);
 }
 
 /// Paint the surviving views into `area`, following the selection.

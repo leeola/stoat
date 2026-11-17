@@ -7,7 +7,7 @@ use crate::{
         chrome::{ISLAND_BOTTOM, ISLAND_GAP, ISLAND_SIDE, ISLAND_TOP},
         file_finder::file_finder_layout,
         paint::{blend, style_rgb},
-        picker::{FilterHeader, FILTER_PROMPT},
+        picker::{FilterHeader, Footer, FILTER_PROMPT},
         table::{self, Column, Width},
         text::write_str_clipped,
     },
@@ -23,6 +23,10 @@ use stoat_widgets::{polyline::Polyline, ApcScene};
 /// shows enough history to choose from, and dragging the separator all the way
 /// up cannot leave the table unreadable.
 pub(crate) const MIN_LIST_ROWS: u16 = 5;
+
+/// The commit picker's key line, each a bound key and the word for what it
+/// does.
+const COMMIT_PICKER_HINTS: [(&str, &str); 2] = [("Enter", "open"), ("C-d/C-u", "diff")];
 
 /// The on-screen rectangles of the commit picker modal.
 ///
@@ -48,6 +52,9 @@ pub(crate) struct CommitPickerLayout {
     /// The selected commit's diff, at the modal's full width. `None` when the
     /// body has no rows left for it.
     pub(crate) preview: Option<Rect>,
+    /// The key line under the body, as the box's
+    /// [`FinderLayout`](crate::render::file_finder::FinderLayout) holds it.
+    pub(crate) footer: Option<Rect>,
 }
 
 impl CommitPickerLayout {
@@ -127,10 +134,13 @@ pub(crate) fn commit_picker_layout(
         crate::render::picker::DEFAULT_LIST_PERCENT,
     )?;
     let inner = box_layout.inner;
+    let body_end = box_layout
+        .footer
+        .map_or(inner.y + inner.height, |footer| footer.y);
 
     let header = Rect::new(inner.x, inner.y + 2, inner.width, 1);
     let body_top = header.y + 1;
-    let body_height = (inner.y + inner.height).saturating_sub(body_top);
+    let body_height = body_end.saturating_sub(body_top);
 
     let list_height = (body_height * list_percent / 100)
         .max(MIN_LIST_ROWS)
@@ -166,6 +176,7 @@ pub(crate) fn commit_picker_layout(
         graph,
         list,
         preview,
+        footer: box_layout.footer,
     })
 }
 
@@ -280,6 +291,14 @@ pub(crate) fn render_commit_picker(
             ..graph
         };
         paint_commit_graph(&graph, start_row, graph_rect, theme, buf, scene);
+    }
+
+    if let Some(footer) = layout.footer {
+        let parts = Footer {
+            hints: &COMMIT_PICKER_HINTS,
+            ..Footer::default()
+        };
+        crate::render::picker::modal_footer(buf, footer, &parts, plate, theme, scene);
     }
 }
 

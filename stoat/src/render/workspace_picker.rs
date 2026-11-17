@@ -2,7 +2,7 @@ use crate::{
     render::{
         chrome::{ISLAND_BOTTOM, ISLAND_SIDE, ISLAND_TOP},
         paint::style_rgb,
-        picker::{FilterHeader, Footer, FILTER_PROMPT},
+        picker::{FilterHeader, Footer, FILTER_PROMPT, FOOTER_ROWS},
         text::{write_str, write_str_clipped},
     },
     theme::TypeRole,
@@ -26,10 +26,6 @@ const MAX_ENTRY_ROWS: u16 = 10;
 /// Rows the chrome takes inside the border above the list, which are the
 /// filter input, its separator, and the column header.
 const HEADER_ROWS: u16 = 3;
-
-/// Rows the footer of the status legend and the bound keys takes at the box's
-/// bottom, on the bottom border's row.
-const FOOTER_ROWS: u16 = 1;
 
 /// Columns the box asks for, which hold the footer's legend and all of its key
 /// hints in whole cells.
@@ -59,8 +55,9 @@ const SAVED_MARK: &str = "\u{25cb}";
 
 /// Lay the workspace picker's modal out within `area`, returning its outer box
 /// and the inner rect holding the header and the rows, or [`None`] when `area`
-/// is too small to host it or there is nothing to list. The footer sits on the
-/// box's bottom row, under the inner rect.
+/// is too small to host it or there is nothing to list. The key line takes the
+/// inner rect's last row and the box's bottom row, as
+/// [`footer_rect`](crate::render::picker::footer_rect) gives it.
 ///
 /// The box's top sits [`SESSION_FINDER_TOP_ROWS`] below `area`'s. In a short
 /// `area` the box rises until its bottom edge meets `area`'s.
@@ -82,7 +79,8 @@ pub(crate) fn workspace_picker_layout(area: Rect, entries_len: usize) -> Option<
 }
 
 /// The rows the list paints in, inside the modal's `inner` rect, below the
-/// filter input, its rule, and the column header, and above the footer.
+/// filter input, its rule, and the column header, and above the key line on the
+/// inner rect's last row.
 ///
 /// The paint and the pointer's hit test both read it, so a press lands on the
 /// row drawn under it.
@@ -91,7 +89,7 @@ pub(crate) fn workspace_picker_list(inner: Rect) -> Rect {
         inner.x,
         inner.y + HEADER_ROWS,
         inner.width,
-        inner.height.saturating_sub(HEADER_ROWS),
+        inner.height.saturating_sub(HEADER_ROWS + FOOTER_ROWS - 1),
     )
 }
 
@@ -132,13 +130,15 @@ pub(crate) fn render_workspace_picker(
         chrome,
         scene,
     );
-    if let Some(plate) = crate::render::chrome::plate_colors(theme, scene) {
+    let plate = crate::render::chrome::plate_colors(theme, scene);
+    let footer = crate::render::picker::footer_rect(picker_area);
+    if let Some(plate) = plate {
         let body_top = inner.y + 2;
         let body = Rect::new(
             inner.x,
             body_top,
             inner.width,
-            inner.bottom().saturating_sub(body_top),
+            footer.y.saturating_sub(body_top),
         );
         let edges = [ISLAND_TOP, ISLAND_SIDE, ISLAND_BOTTOM, ISLAND_SIDE];
         crate::render::chrome::modal_island(body, edges, plate, theme, buf, scene);
@@ -358,12 +358,6 @@ pub(crate) fn render_workspace_picker(
         );
     }
 
-    let footer = Rect::new(
-        inner.x,
-        picker_area.bottom() - FOOTER_ROWS,
-        inner.width,
-        FOOTER_ROWS,
-    );
     let legend = [
         (FILLED_MARK, status_style(WorkspaceStatus::Active, theme)),
         (" active  ", header_style),
@@ -376,11 +370,11 @@ pub(crate) fn render_workspace_picker(
         (" saved", header_style),
     ];
     let parts = Footer {
-        lead: &legend,
         hints: &SESSION_HINTS,
+        legend: &legend,
         ..Footer::default()
     };
-    crate::render::picker::modal_footer(buf, footer, &parts, theme, scene);
+    crate::render::picker::modal_footer(buf, footer, &parts, plate, theme, scene);
 }
 
 /// The color a row's status mark takes, as a style whose foreground is the
@@ -492,7 +486,10 @@ fn tail_within(path: &str, room: usize) -> Option<&str> {
 
 #[cfg(test)]
 mod tests {
-    use super::{render_workspace_picker, workspace_picker_layout, HEADER_ROWS, MAX_ENTRY_ROWS};
+    use super::{
+        render_workspace_picker, workspace_picker_layout, workspace_picker_list, HEADER_ROWS,
+        MAX_ENTRY_ROWS,
+    };
     use crate::{
         buffer::BufferId,
         editor_state::EditorId,
@@ -622,10 +619,10 @@ mod tests {
             workspace_picker_layout(Rect::new(0, 0, 120, 40), 3).expect("the area hosts the modal");
         assert_eq!(modal.width, 112, "the box holds at its recommended width");
         assert_eq!(
-            inner.height,
-            HEADER_ROWS + 3,
-            "the filter, separator, and column labels sit above the rows, and the footer takes \
-             the box's bottom row"
+            (inner.height, workspace_picker_list(inner).height),
+            (HEADER_ROWS + 3 + 1, 3),
+            "the filter, separator, and column labels sit above the rows, and the key line takes \
+             the inner rect's last row"
         );
     }
 
@@ -638,14 +635,17 @@ mod tests {
             workspace_picker_layout(Rect::new(0, 0, 120, height), 3)
                 .map(|(modal, _)| (modal.y, modal.bottom()))
         };
-        assert_eq!([span(40), span(14)], [Some((8, 16)), Some((6, 14))]);
+        assert_eq!([span(40), span(14)], [Some((8, 17)), Some((5, 14))]);
     }
 
     #[test]
     fn layout_caps_the_rows_it_shows() {
         let (_, inner) = workspace_picker_layout(Rect::new(0, 0, 120, 40), 30)
             .expect("the area hosts the modal");
-        assert_eq!(inner.height, HEADER_ROWS + MAX_ENTRY_ROWS);
+        assert_eq!(
+            (inner.height, workspace_picker_list(inner).height),
+            (HEADER_ROWS + MAX_ENTRY_ROWS + 1, MAX_ENTRY_ROWS),
+        );
     }
 
     #[test]
@@ -1229,12 +1229,14 @@ mod tests {
         assert_eq!(marks, ["*", " ", "\u{00b7}"]);
     }
 
-    /// The footer leads with a legend of the three status marks, each the
-    /// shape its rows draw, then lists the bound keys.
+    /// The key line lists the bound keys on the inner rect's last row, then
+    /// ends with a legend of the three status marks, each the shape its rows
+    /// draw. At the box's recommended width every key and the legend fit, two
+    /// cells apart.
     #[test]
-    fn the_footer_leads_with_the_status_legend() {
+    fn the_footer_ends_with_the_status_legend() {
         let (buf, _, inner) = painted_statuses(true);
-        let row = inner.y + inner.height;
+        let row = inner.y + inner.height - 1;
         let text: String = row_text(&buf, row)
             .chars()
             .skip(inner.x as usize)
@@ -1242,8 +1244,8 @@ mod tests {
             .collect();
         assert_eq!(
             text.trim_end(),
-            " \u{25cf} active  \u{25cf} open  \u{25cb} saved  Enter switch  A-Enter sub-session  \
-             C-r rename  C-x close  Del delete  S-Tab scope"
+            " Enter switch  A-Enter sub-session  C-r rename  C-x close  Del delete  S-Tab scope  \
+             \u{25cf} active  \u{25cf} open  \u{25cb} saved"
         );
 
         let dots: Vec<Color> = (inner.x..inner.x + inner.width)

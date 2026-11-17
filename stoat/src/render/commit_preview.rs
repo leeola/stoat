@@ -165,7 +165,8 @@ pub(crate) fn render_commit_preview_modal(
         hints: &hints,
         ..Footer::default()
     };
-    picker::modal_footer(buf, layout.footer, &footer, theme, scene);
+    // The box is not a plate, so its key line keeps the cell row on its surface.
+    picker::modal_footer(buf, layout.footer, &footer, None, theme, scene);
 }
 
 /// Paint the box's surface and its frame.
