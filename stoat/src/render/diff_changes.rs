@@ -963,6 +963,53 @@ mod tests {
         );
     }
 
+    /// The deepest soften leaves an excerpt's changed base word readable, as
+    /// it does in the per-file diff view.
+    ///
+    /// `main` became `other`, so the `m` is a changed char and the `f` is an
+    /// unchanged one on the same row.
+    #[test]
+    fn the_deepest_soften_keeps_an_excerpt_s_changed_base_word_readable() {
+        let mut h = changes_view(
+            120,
+            16,
+            &[(
+                "a.rs",
+                "fn keep() {}\nfn main() {}\n",
+                "fn keep() {}\nfn other() {}\n",
+            )],
+        );
+        h.stoat.diff_syntax = false;
+        h.stoat.diff_soften = review::DIFF_SOFTEN_MAX;
+        let buf = h.render_composited();
+        let inner = {
+            let ws = h.stoat.active_workspace();
+            ws.panes.pane(ws.panes.focus()).area
+        };
+        let cols = excerpt_columns(&h, inner, 2);
+
+        let bg = paint::style_rgb(h.stoat.theme.get(scope::UI_BACKGROUND).bg)
+            .expect("the test theme has an rgb background");
+        let row = (inner.y..inner.y + inner.height)
+            .find(|&y| cells(&buf, cols.left_text_x, 7, y) == "fn main")
+            .expect("the changed line's base row paints in the left column");
+        let distance = |x: u16| {
+            let fg = paint::style_rgb(buf[(x, row)].style().fg).expect("an rgb foreground");
+            (paint::luma(fg) - paint::luma(bg)).abs()
+        };
+        let (unchanged, changed) = (distance(cols.left_text_x), distance(cols.left_text_x + 3));
+
+        assert!(
+            changed >= paint::FAINT_CONTRAST_FLOOR,
+            "the changed `m` stands {changed} from the background, under the floor",
+        );
+        assert!(
+            changed > unchanged,
+            "the changed `m` stands further from the background than the unchanged `f`: \
+             {changed} against {unchanged}",
+        );
+    }
+
     /// The excerpts share the widest gutter any of them needs, so a five-line
     /// file's text starts at the column a 1200-line file's text starts at, the
     /// column a four-digit gutter leaves, and both wrap at that gutter's width.

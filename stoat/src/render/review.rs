@@ -65,6 +65,11 @@ pub(crate) const MODIFIED_ROW_SOFTEN: f32 = 0.25;
 /// behind it as a whole, its changed chars with the rest. The fade keeps each
 /// char's weight, so a replacement still bolds on both sides for the char by
 /// char read.
+///
+/// The fade is the base column's fixed recede. The soften dial eases it below
+/// the shipped level and turns it off at zero. The dial never deepens it,
+/// because a deeper fade hides the changed chars that the dial exists to bring
+/// out.
 pub(crate) const BASE_SIDE_SOFTEN: f32 = 0.40;
 
 /// Furthest the diff view's soften may be turned down. Lands the scale on zero,
@@ -2654,7 +2659,8 @@ pub(crate) fn paint_base_row(
 /// `side_fade` is the background the whole segment fades toward by
 /// [`BASE_SIDE_SOFTEN`], after the rest of its styling. The split diff's base
 /// column passes it, and any other column passes `None`. The soften dial
-/// scales the fade, so a zero `dials.soften_scale` turns it off.
+/// eases the fade below the shipped level and turns it off at zero, but never
+/// deepens it.
 #[allow(clippy::too_many_arguments)]
 fn paint_base_segment(
     buf: &mut Buffer,
@@ -2688,7 +2694,7 @@ fn paint_base_segment(
     );
 
     let soften_gaps = soften_gaps.filter(|_| !change_spans.is_empty());
-    let side_amount = (BASE_SIDE_SOFTEN * dials.soften_scale).min(SOFTEN_CAP);
+    let side_amount = BASE_SIDE_SOFTEN * dials.soften_scale.min(1.0);
     let span_tints = tints.filter(|_| dials.tint_amount > 0.0);
     // Only a changed char lifts, and only against a receding surround: with
     // softening off nothing recedes, so nothing has to stand off it.
@@ -8666,8 +8672,8 @@ mod tests {
     /// [`BASE_SIDE_SOFTEN`] of the way from the removed color toward the
     /// background. With syntax off, the removed color is the whole line's.
     ///
-    /// The soften dial scales the fade, so the dial's bottom turns it off and
-    /// its top lands it on [`SOFTEN_CAP`].
+    /// The dial's bottom turns the fade off, and its top leaves it at the
+    /// shipped amount.
     #[test]
     fn diff_view_fades_a_removed_base_row_toward_the_background() {
         let mut h = diff_harness("fn keep() {}\nfn gone() {}\n", "fn keep() {}\n");
@@ -8694,7 +8700,44 @@ mod tests {
             let [r, g, b] = dim_rgb(deleted, bg, amount);
             Color::Rgb(r, g, b)
         };
-        assert_eq!(fgs, [0.0, BASE_SIDE_SOFTEN, SOFTEN_CAP].map(faded));
+        assert_eq!(fgs, [0.0, BASE_SIDE_SOFTEN, BASE_SIDE_SOFTEN].map(faded));
+    }
+
+    /// The deepest soften leaves a refined base row's changed word readable.
+    ///
+    /// The row's unchanged text recedes further, and the changed word keeps
+    /// the side fade's shipped amount. `main` became `other`, so the `m` is a
+    /// changed char and the `f` is an unchanged one on the same row.
+    #[test]
+    fn the_deepest_soften_keeps_a_changed_base_word_readable() {
+        let mut h = diff_harness(
+            "fn keep() {}\nfn main() {}\n",
+            "fn keep() {}\nfn other() {}\n",
+        );
+        h.stoat.diff_syntax = false;
+        h.stoat.diff_soften = DIFF_SOFTEN_MAX;
+        h.snapshot();
+
+        let bg =
+            style_rgb(h.stoat.theme.get(crate::theme::scope::UI_BACKGROUND).bg).expect("rgb bg");
+        let cols = harness_columns(&h);
+        let buf = h.rendered_buffer();
+        let row = row_holding(buf, left_text(&cols), "fn main");
+        let distance = |x: u16| {
+            let fg = style_rgb(buf[(x, row)].style().fg).expect("an rgb foreground");
+            (luma(fg) - luma(bg)).abs()
+        };
+        let (unchanged, changed) = (distance(cols.left_text_x), distance(cols.left_text_x + 3));
+
+        assert!(
+            changed >= FAINT_CONTRAST_FLOOR,
+            "the changed `m` stands {changed} from the background, under the floor",
+        );
+        assert!(
+            changed > unchanged,
+            "the changed `m` stands further from the background than the unchanged `f`: \
+             {changed} against {unchanged}",
+        );
     }
 
     /// The shipped dials are the ones a fresh session paints with, so a modal
