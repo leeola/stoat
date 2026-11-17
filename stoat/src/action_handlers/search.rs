@@ -2,6 +2,7 @@ use crate::{
     action_handlers::{pane_editor_ids, split_selection::RegexSelectKind},
     app::{Stoat, UpdateEffect},
     buffer::BufferId,
+    diff_changes,
     editor_state::{EditorId, EditorState, ScrollGlide},
     input_history::InputHistory,
     input_view::{InputView, SubmitTarget},
@@ -343,6 +344,11 @@ pub(super) fn restore_origin_view(stoat: &mut Stoat, view: (u32, f32)) {
 /// view lands as [`super::view::land_jump`] lands a jump, so a keystroke that
 /// keeps its match inside the padding band moves nothing on screen.
 ///
+/// Over a changes view, the preview opens the fold that hides its cursor and
+/// scrolls the stack to it, as a key that moves the cursor does. So the stack
+/// shows each landing, and the restored cursor after a query that names no
+/// match, in the frame of the keystroke.
+///
 /// The preview is deliberately silent. A query that wraps, matches nothing, or
 /// does not compile yet is an ordinary state mid-typing, so none of them raises
 /// a status message the way a submit does. A query with no usable match
@@ -390,13 +396,20 @@ pub(crate) fn sync_search_preview(stoat: &mut Stoat) {
         .as_mut()
         .expect("prompt still open")
         .displaced = displaced;
-    if outcome.moved() {
-        let scrolloff = stoat.settings.scrolloff.unwrap_or(3);
-        if let Some(editor) = pane_editor(stoat) {
-            super::view::land_jump(editor, scrolloff);
-        }
-    } else {
+
+    let scrolloff = stoat.settings.scrolloff.unwrap_or(3);
+    let over_stack = stoat.active_workspace().focused_diff_changes_id().is_some();
+    if !outcome.moved() {
         restore_origin_view(stoat, view);
+    } else if !over_stack && let Some(editor) = pane_editor(stoat) {
+        super::view::land_jump(editor, scrolloff);
+    }
+
+    // The key epilogue opens the fold over a changes view's cursor and scrolls
+    // the stack to it, but it runs before this sync moves the cursor.
+    if over_stack {
+        diff_changes::reveal_cursor(stoat);
+        diff_changes::follow_cursor(stoat, scrolloff);
     }
 }
 
@@ -1190,8 +1203,10 @@ pub(crate) fn compile_cursor_regex(pattern: &str, smart_case: bool) -> Option<Cu
 mod tests {
     use super::{LastSearch, SearchDirection};
     use crate::{
+        action_handlers::view,
         buffer::{BufferId, TextBuffer},
-        diff_changes::DiffChangesState,
+        diff_changes::{self, DiffChangesState},
+        display_map::DisplayPoint,
         editor_state::ScrollGlide,
         multi_buffer::MultiBuffer,
         test_fixture::open_scratch_at,
@@ -2800,5 +2815,88 @@ mod tests {
             .map(|excerpt| excerpt.buffer_id)
             .collect();
         assert_eq!(held, files);
+    }
+
+    /// A settled changes view, `height` rows tall, over two sixty-line files
+    /// changed on their forty-first line, so each excerpt folds the rows above
+    /// and below its hunk.
+    fn folded_stack(height: u16) -> TestHarness {
+        let mut h = TestHarness::with_size(100, height);
+        let base: String = (1..=60).map(|n| format!("{n}\n")).collect();
+        let working = base.replace("\n41\n", "\nFORTY-ONE\n");
+        h.stage_review_scenario(
+            "/repo",
+            &[("a.txt", &base, &working), ("b.txt", &base, &working)],
+        );
+        h.cover_with_diff_changes(false);
+        h.settle();
+        h
+    }
+
+    /// The buffer row that a paint shows at the focused excerpt's cursor, and
+    /// the stack's scroll.
+    fn shown(h: &mut TestHarness) -> (Option<u32>, usize) {
+        h.render_composited();
+        let ws = h.stoat.active_workspace_mut();
+        let state = ws.focused_diff_changes().expect("a changes view");
+        let scroll = state.scroll;
+        let editor_id = state
+            .focused_excerpt()
+            .expect("a focused excerpt")
+            .editor_id;
+        let editor = ws.editors.get_mut(editor_id).expect("an excerpt editor");
+        let row = view::cursor_display_row(editor);
+        let shown = editor
+            .display_map
+            .snapshot()
+            .display_to_buffer(DisplayPoint::new(row, 0))
+            .map(|point| point.row);
+        (shown, scroll)
+    }
+
+    /// [`shown`] once the stack follows its cursor, as the key epilogue makes
+    /// it follow after a key that moves the cursor.
+    fn followed(h: &mut TestHarness) -> (Option<u32>, usize) {
+        let scrolloff = h.stoat.settings.scrolloff.unwrap_or(3);
+        diff_changes::follow_cursor(&mut h.stoat, scrolloff);
+        shown(h)
+    }
+
+    /// A preview into a fold opens the fold, and the stack already stands
+    /// where a follow of the cursor puts it.
+    #[test]
+    fn a_preview_into_a_fold_shows_the_match() {
+        let mut h = folded_stack(10);
+        h.type_keys("/");
+        preview(&mut h, "59");
+        let previewed = shown(&mut h);
+        assert_eq!(previewed, (Some(58), followed(&mut h).1));
+    }
+
+    /// A preview that lands in a file below the screen scrolls the stack to
+    /// where a follow of the cursor puts it, not only far enough to show the
+    /// cursor on the last row.
+    #[test]
+    fn a_preview_into_a_file_below_the_screen_scrolls_to_it() {
+        let mut h = folded_stack(10);
+        h.type_keys("/");
+        preview(&mut h, "^1");
+        let previewed = (stack_place(&mut h), shown(&mut h));
+        assert_eq!(
+            previewed,
+            (at("b.txt", 0, 1), (Some(0), followed(&mut h).1))
+        );
+    }
+
+    /// A query that stops naming a match scrolls the stack back to the
+    /// restored cursor in the frame of the keystroke.
+    #[test]
+    fn a_preview_that_stops_matching_shows_the_origin_again() {
+        let mut h = folded_stack(10);
+        let origin = shown(&mut h);
+        h.type_keys("/");
+        preview(&mut h, "59");
+        preview(&mut h, "x");
+        assert_eq!(shown(&mut h), origin);
     }
 }
