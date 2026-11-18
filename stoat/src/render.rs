@@ -1501,6 +1501,7 @@ pub(crate) fn frame(
     let shown_conflict = ws.conflict.as_ref().map(|session| session.file.editor_id);
     if let Some(editor) = shown_conflict.and_then(|id| ws.editors.get_mut(id)) {
         editor.conflict_frame.position = conflict_position;
+        editor.conflict_frame.hover = stoat.conflict_hover;
     }
     let run_cwd = pane::focused_run_cwd(ws.focus, &ws.panes, &ws.runs);
     // The islands read where the gaps run, and the hairlines paint in them when

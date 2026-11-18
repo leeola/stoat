@@ -47,6 +47,7 @@ use crate::{
     rebase::RebasePause,
     register,
     render::{
+        conflict_view::ConflictHover,
         paint,
         pane_cache::PaneCacheEntry,
         sanitize,
@@ -1725,6 +1726,9 @@ pub struct Stoat {
     /// Index of the diagnostic the mouse last resolved to, used to redraw only
     /// when the hovered diagnostic changes rather than on every motion event.
     pub(crate) hover_diag: Option<usize>,
+    /// The open conflict chunk's side the pointer last rested over, which the
+    /// conflict view rings, or `None` off every open side.
+    pub(crate) conflict_hover: Option<ConflictHover>,
     /// Set on `MouseEventKind::Down(Left)` over a split divider. While `Some`,
     /// `Drag(Left)` moves that boundary via `set_divider` and `Up(Left)` clears
     /// it. Takes over the pointer so pane handlers never see the drag.
@@ -2901,6 +2905,7 @@ impl Stoat {
             pool_pointer: None,
             hover_cell: None,
             hover_diag: None,
+            conflict_hover: None,
             divider_drag: None,
             modal_separator_drag: None,
             commits_separator_drag: false,

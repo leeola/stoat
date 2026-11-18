@@ -7,9 +7,9 @@ use crate::{
     app::DEFAULT_KEYMAP,
     conflict_session::{ConflictLabels, ConflictPosition},
     host::git::MergeState,
-    merge_view::{ChunkState, MergeDoc},
+    merge_view::{ChunkState, MergeDoc, Side},
     render::{
-        conflict_view::render_conflict_view,
+        conflict_view::{render_conflict_view, ConflictHover},
         paint::{dim_rgb, style_rgb},
     },
     test_harness::TestHarness,
@@ -41,6 +41,7 @@ const CHIP_OURS: [u8; 3] = [0x1d, 0x2a, 0x1f];
 const CHIP_THEIRS: [u8; 3] = [0x2a, 0x22, 0x36];
 const CHIP_BOTH: [u8; 3] = [0x1f, 0x2a, 0x3d];
 const ACCENT: [u8; 3] = [0x7f, 0xb0, 0xff];
+const CHROME: [u8; 3] = [0x12, 0x14, 0x18];
 const MERGED_HEAD: [u8; 3] = [0x1b, 0x1d, 0x22];
 const CONFLICT: [u8; 3] = [0xf5, 0x9a, 0xa0];
 const TAG_CONFLICT: [u8; 3] = [0x3a, 0x20, 0x26];
@@ -598,6 +599,83 @@ fn an_open_chip_menu_draws_three_buttons_where_the_chip_stood() {
     );
 }
 
+/// A hovered side draws a ring over the chunk's rows in its column, a stroke
+/// in the side's color at radius 2 with no fill. On the ring's last row a pill
+/// in the chrome fill names the pick, 12 sixteenths in from its edge. The
+/// hovered cells wash 3 percent toward white.
+///
+/// The chunk's band takes rows 3 to 7, and the ours column cells 0 to 49. The
+/// pill's 21 characters, its pad, and the board's 6 px from the ring's right
+/// edge take 24 cells.
+#[test]
+fn a_hovered_side_draws_a_ring_and_a_pill() {
+    let shot = hovered_shot(ConflictHover {
+        chunk: 0,
+        side: Side::Ours,
+        merge_row: None,
+    });
+
+    assert_eq!(
+        (shot.panels(), shot.pill(), shot.buf[(10, 3)].bg),
+        (
+            vec![
+                (0, 3, 50, 5, SUCCESS, 2, None),
+                (26, 7, 24, 1, SUCCESS, 4, Some(CHROME)),
+            ],
+            Some((
+                26 * 16 + 12,
+                "click \u{b7} take ours \u{b7} o".to_string(),
+                SUCCESS
+            )),
+            rgb(dim_rgb(TINT_OURS, [0xff, 0xff, 0xff], 0.03)),
+        ),
+    );
+}
+
+/// With Alt held the ring covers the one theirs line under the pointer, and
+/// the pill names the line pick. The theirs column starts at cell 108.
+#[test]
+fn an_alt_hover_rings_one_line() {
+    let shot = hovered_shot(ConflictHover {
+        chunk: 0,
+        side: Side::Theirs,
+        merge_row: Some(1),
+    });
+
+    assert_eq!(
+        (shot.panels(), shot.pill()),
+        (
+            vec![
+                (108, 3, 50, 1, SPECIAL, 2, None),
+                (130, 3, 28, 1, SPECIAL, 4, Some(CHROME)),
+            ],
+            Some((
+                130 * 16 + 12,
+                "alt-click \u{b7} take line \u{b7} T".to_string(),
+                SPECIAL
+            )),
+        ),
+    );
+}
+
+/// A chunk a pick settled takes no pick from the pointer, so a hover left over
+/// it draws no ring and no pill.
+#[test]
+fn a_settled_chunk_draws_no_hover() {
+    let mut h = conflict_harness(ONE_CHUNK, &[&ConflictPickOurs]);
+    focused_editor_mut(&mut h.stoat)
+        .expect("center editor")
+        .conflict_frame
+        .hover = Some(ConflictHover {
+        chunk: 0,
+        side: Side::Ours,
+        merge_row: None,
+    });
+    let shot = paint(&mut h);
+
+    assert_eq!((shot.panels(), shot.pill()), (Vec::new(), None));
+}
+
 /// Each chip takes the tone of its kind. A run or a chunk the merge takes from
 /// ours takes the ours chip, one from theirs the theirs chip, and an unsettled
 /// chunk the conflict chip.
@@ -846,7 +924,8 @@ fn a_theme_without_the_board_scopes_falls_back_to_their_neighbors() {
             colors.chip_both,
             [colors.tag, colors.tag_resolved],
             colors.ghost,
-            colors.head
+            colors.head,
+            colors.chrome
         ),
         (
             band,
@@ -861,11 +940,12 @@ fn a_theme_without_the_board_scopes_falls_back_to_their_neighbors() {
                 .fg(rgb([0x63, 0x6d, 0x83]))
                 .add_modifier(Modifier::ITALIC),
             None,
+            colors.bg,
         ),
         "the band takes the conflict header's color, the chip the band, each \
          side's chip its side, the both button the Fold Buttons' cyan on gray, \
-         the tag the chip, the resolved tag the ours chip, and the ghost muted \
-         italic text",
+         the tag the chip, the resolved tag the ours chip, the ghost muted \
+         italic text, and the hover pill the surface",
     );
 }
 
@@ -882,6 +962,9 @@ struct GridShot {
 
 /// A bar's `(x, y, width, height, color)`, in sixteenths.
 type BarFields = (i16, i16, u16, u16, [u8; 3]);
+
+/// A panel's `(left, top, width, height, border, radius, fill)`, in cells.
+type PanelFields = (u16, u16, u16, u16, [u8; 3], u8, Option<[u8; 3]>);
 
 impl GridShot {
     /// Every bar, in the order the scene holds them.
@@ -935,6 +1018,45 @@ impl GridShot {
             })
             .collect()
     }
+
+    /// Each panel as `(left, top, width, height, border, radius, fill)`, in
+    /// cells, in the order the scene holds them.
+    fn panels(&self) -> Vec<PanelFields> {
+        self.commands
+            .iter()
+            .filter_map(|command| match command {
+                Command::Panel(panel) => Some((
+                    panel.left,
+                    panel.top,
+                    panel.width,
+                    panel.height,
+                    panel.border,
+                    panel.corner_radius,
+                    panel.fill,
+                )),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The hover pill's run as `(col, text, color)`, the one run that names a
+    /// pick.
+    fn pill(&self) -> Option<(i16, String, [u8; 3])> {
+        self.runs()
+            .into_iter()
+            .find(|(_, _, text, _)| text.contains("take"))
+            .map(|(col, _, text, color)| (col, text, color))
+    }
+}
+
+/// [`grid_shot`] of [`ONE_CHUNK`] with the pointer resting over `hover`.
+fn hovered_shot(hover: ConflictHover) -> GridShot {
+    let mut h = conflict_harness(ONE_CHUNK, &[]);
+    focused_editor_mut(&mut h.stoat)
+        .expect("center editor")
+        .conflict_frame
+        .hover = Some(hover);
+    paint(&mut h)
 }
 
 /// The 6/16 change bar of `column`'s cell on row `y`.

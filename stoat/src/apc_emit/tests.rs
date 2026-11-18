@@ -7121,6 +7121,7 @@ fn a_conflict_pane_fills_with_the_three_column_body() {
             cursor_row: None,
             chip_menu: None,
             layout: None,
+            hover: None,
         }),
     );
     let mut expected = crate::render::serialize_buffer(&cells);
@@ -7203,6 +7204,7 @@ fn a_move_after_a_chip_menu_opens_refills_its_page() {
             cursor_row: None,
             chip_menu: Some(0),
             layout: None,
+            hover: None,
         }),
     );
     let mut page = crate::render::serialize_buffer(&cells);

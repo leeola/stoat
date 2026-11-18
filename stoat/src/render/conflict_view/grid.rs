@@ -11,11 +11,11 @@
 //! scene components, and the layout paints only under a live scene. Without one
 //! the view keeps the cell layout of [`super::render_conflict_view`].
 
-use super::{GridPaint, BAND_TINT};
+use super::{ConflictHover, GridPaint, BAND_TINT};
 use crate::{
     conflict_session::{ConflictDerived, ConflictLabels, ConflictPosition},
     display_map::{CachedHighlightEndpoints, DisplaySnapshot},
-    merge_view::{AlignRow, ChunkState, MergeDoc, MergeRow},
+    merge_view::{AlignRow, ChunkState, MergeDoc, MergeRow, Side},
     render::{
         diff_changes, editor,
         paint::{dim_rgb, fill_line_tint, render_side_text, style_rgb},
@@ -34,9 +34,11 @@ use std::fmt::Write;
 use stoat_action::ActionKind;
 use stoat_widgets::{
     bar::{Bar, BarBatch},
+    panel::Panel,
     text_run::{self, TextRun, TextRunBatch},
     ApcScene,
 };
+use stoatty_protocol::command::{BorderStyle, Edge, PanelShadow};
 
 /// Rows the header takes above the grid's rows, the column header and then the
 /// File Header.
@@ -87,6 +89,30 @@ const CHIP_RADIUS: u8 = 4;
 /// The board's 2 px between the pick buttons an open chunk's chip offers, in
 /// sixteenths.
 const BUTTON_GAP: u16 = 4;
+
+/// How far a hovered side's cells wash toward white, the board's
+/// `background: rgba(255,255,255,0.03)`.
+const HOVER_WASH: f32 = 0.03;
+
+/// The radius of the hover ring's corners, the board's `border-radius: 2px`,
+/// in logical pixels.
+const RING_RADIUS: u8 = 2;
+
+/// The hover pill's `padding: 0 6px`, in sixteenths.
+const PILL_PAD: u16 = 12;
+
+/// The board's `right: 6px` between the hover pill and the ring's right edge,
+/// in logical pixels for the pill's box and in sixteenths for its cells.
+const PILL_END_PX: u8 = 6;
+const PILL_END: u16 = 12;
+
+/// The hover pill's `bottom: 2px` and the 2 px its 14 px line leaves above
+/// it on the 18 px row, in logical pixels.
+const PILL_INSET: u8 = 2;
+
+/// The radius of the hover pill's corners, the board's `border-radius: 4px`,
+/// in logical pixels.
+const PILL_RADIUS: u8 = 4;
 
 /// The pick buttons an open chunk's chip offers, with the pick each takes, in
 /// the order they stand.
@@ -255,6 +281,9 @@ pub(super) struct GridColors {
     pub(super) tag: Tone,
     /// The File Header's tag once the shown file holds no open conflict.
     pub(super) tag_resolved: Tone,
+    /// The fill of the hover's pill, `ui.surface.chrome`'s background or the
+    /// surface.
+    pub(super) chrome: [u8; 3],
 }
 
 impl GridColors {
@@ -316,6 +345,12 @@ impl GridColors {
             ),
             tag: scoped(s::VCS_CONFLICT_TAG, chip),
             tag_resolved: scoped(s::VCS_CONFLICT_TAG_RESOLVED, chip_ours),
+            chrome: style_rgb(
+                theme
+                    .try_get(s::UI_SURFACE_CHROME)
+                    .and_then(|style| style.bg),
+            )
+            .unwrap_or(bg),
         })
     }
 }
@@ -945,6 +980,15 @@ pub(super) fn paint_rows(
     let mut buttons = None;
     let button_scale = theme.type_scale(TypeRole::Small);
     let button_cells = (buttons_width(button_scale) + CHIP_MARGIN).div_ceil(16);
+    // A click pick settles the hovered chunk while the pointer rests, and a
+    // settled chunk takes no pick from the pointer.
+    let hover = paint.hover.filter(|hover| {
+        matches!(
+            states.get(hover.chunk),
+            Some(ChunkState::Unresolved | ChunkState::Picked)
+        )
+    });
+    let mut ring: Option<(u16, u16)> = None;
 
     for display_row in scroll_row..end_row {
         let y = body.y + (display_row - scroll_row) as u16;
@@ -953,7 +997,7 @@ pub(super) fn paint_rows(
         let kind = plan_row.map_or(MergeRowKind::Context, |row| row_kind(row, doc, states));
         let ours = plan_row.and_then(|row| row.ours).map(|i| &doc.rows[i]);
         let theirs = plan_row.and_then(|row| row.theirs).map(|i| &doc.rows[i]);
-        let look = RowLook::of(
+        let mut look = RowLook::of(
             kind,
             [
                 ours.is_some_and(|row| edited(row.base.as_ref(), row.ours.as_ref())),
@@ -961,6 +1005,15 @@ pub(super) fn paint_rows(
             ],
             colors,
         );
+        if let Some(hover) = hover.filter(|&hover| hovers(hover, plan_row)) {
+            let cell = match hover.side {
+                Side::Ours => &mut look.ours,
+                Side::Theirs => &mut look.theirs,
+            };
+            let under = cell.tint.unwrap_or(colors.bg);
+            cell.tint = Some(dim_rgb(under, [0xff, 0xff, 0xff], HOVER_WASH));
+            ring = Some(ring.map_or((y, y), |(top, _)| (top, y)));
+        }
 
         // A row past the plan, such as the empty line after the last newline,
         // pairs with no merge row, so its sides draw nothing at all.
@@ -1097,6 +1150,107 @@ pub(super) fn paint_rows(
             layout.buttons = cells;
         }
     }
+    if let (Some(hover), Some((top, bottom))) = (hover, ring) {
+        let (column, tone) = match hover.side {
+            Side::Ours => (cols.ours, colors.ours),
+            Side::Theirs => (cols.theirs, colors.theirs),
+        };
+        let area = Rect::new(column.x, top, column.width, bottom - top + 1);
+        let pill = Pill {
+            text: pill_text(hover),
+            color: tone.fg,
+            fill: colors.chrome,
+            scale: button_scale,
+        };
+        draw_hover(area, pill, buf, paint.scene);
+    }
+}
+
+/// Whether plan row `row` lies under `hover`, a row of its chunk, or with Alt
+/// held the one row whose line on the hovered side is the hovered line.
+fn hovers(hover: ConflictHover, row: Option<&AlignRow>) -> bool {
+    row.is_some_and(|row| {
+        let line = match hover.side {
+            Side::Ours => row.ours,
+            Side::Theirs => row.theirs,
+        };
+        row.chunk == Some(hover.chunk)
+            && hover
+                .merge_row
+                .is_none_or(|merge_row| line == Some(merge_row))
+    })
+}
+
+/// The pick the hover's pill names, what a press takes and the key that takes
+/// the same.
+fn pill_text(hover: ConflictHover) -> &'static str {
+    match (hover.merge_row.is_some(), hover.side) {
+        (false, Side::Ours) => "click \u{b7} take ours \u{b7} o",
+        (false, Side::Theirs) => "click \u{b7} take theirs \u{b7} t",
+        (true, Side::Ours) => "alt-click \u{b7} take line \u{b7} O",
+        (true, Side::Theirs) => "alt-click \u{b7} take line \u{b7} T",
+    }
+}
+
+/// The pill that names a hover's pick, its text, its colors, and its scale.
+struct Pill {
+    text: &'static str,
+    /// The text's color and the stroke around the pill.
+    color: [u8; 3],
+    fill: [u8; 3],
+    scale: u16,
+}
+
+/// Draw the hover's ring over `area`, a hovered side's rows, and `pill` on the
+/// area's last row against its right edge.
+///
+/// The ring is a stroke with no fill, since a filled panel hides the row tints
+/// under it, so the cells under the ring carry the hover's wash instead. The
+/// pill's cells hold its text, [`PILL_PAD`] at each side of it, and the
+/// [`PILL_END`] the pill stands in from the ring's right edge.
+fn draw_hover(area: Rect, pill: Pill, buf: &mut Buffer, scene: &mut ApcScene) {
+    let stroke = |radius: u8, fill: Option<[u8; 3]>, edges: [Edge; 4]| Panel {
+        style: BorderStyle::Rounded,
+        border: pill.color,
+        corner_radius: radius,
+        fill,
+        shadow: PanelShadow::None_,
+        edges,
+        corners: 0,
+        fillets: 0,
+        fillet_radius: 2,
+        hatch: None,
+        above_pools: false,
+        backdrop: false,
+        anchor: None,
+    };
+    stroke(RING_RADIUS, None, Edge::symmetric(0, 0)).draw_components(area, scene);
+
+    let advance = text_run::advance_sixteenths(pill.text.chars().count(), pill.scale);
+    let cells = (advance + 2 * PILL_PAD + PILL_END)
+        .div_ceil(16)
+        .min(area.width);
+    let at = Rect::new(area.right() - cells, area.bottom() - 1, cells, 1);
+    let edges = [
+        Edge::Inset(PILL_INSET),
+        Edge::Inset(PILL_END_PX),
+        Edge::Inset(PILL_INSET),
+        Edge::Inset(0),
+    ];
+    stroke(PILL_RADIUS, Some(pill.fill), edges).draw_components(at, scene);
+    TextRun {
+        col: PILL_PAD as i16,
+        row: 0,
+        scale: pill.scale,
+        color: pill.color,
+        bg: None,
+        text: pill.text,
+        bold: false,
+        italic: false,
+        follow: 0,
+        anchor: None,
+    }
+    .render(at, buf, scene);
 }
 
 /// What stands at the right end of a run's first merged row.

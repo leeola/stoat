@@ -941,6 +941,7 @@ pub(crate) fn render_conflict_page_from_parts(
             cursor_row: None,
             chip_menu: state.chip_menu,
             layout: None,
+            hover: None,
         }),
     );
     let mut bytes = serialize_buffer(&buf);
@@ -2556,6 +2557,7 @@ mod tests {
                     cursor_row: None,
                     chip_menu: None,
                     layout: None,
+                    hover: None,
                 }),
             );
         }

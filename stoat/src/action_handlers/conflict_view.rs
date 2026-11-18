@@ -634,6 +634,9 @@ fn show_file(stoat: &mut Stoat, target: usize, target_state: FileResolveState) {
         (outgoing_editor, target_editor)
     };
     set_chip_menu(stoat, None);
+    // Chunk numbers belong to one file, so a hover over the outgoing file's
+    // chunk names nothing in the shown one.
+    stoat.conflict_hover = None;
 
     {
         let ws = stoat.active_workspace_mut();

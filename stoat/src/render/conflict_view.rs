@@ -1,6 +1,6 @@
 use crate::{
     action_handlers::view,
-    conflict_session::ConflictDerived,
+    conflict_session::{ConflictDerived, ConflictFrame},
     display_map::{CachedHighlightEndpoints, DisplayPoint, DisplaySnapshot},
     editor_state::EditorState,
     merge_view::{AlignRow, ChunkState, MergeDoc, Side},
@@ -45,6 +45,9 @@ pub(crate) struct GridPaint<'a> {
     /// draws, so a press finds them. `None` for a pool page, which no press
     /// reads.
     pub(crate) layout: Option<&'a mut ConflictLayout>,
+    /// The side the pointer rests over, which the rows ring. `None` for a
+    /// pool page, since a glide shows no hover.
+    pub(crate) hover: Option<ConflictHover>,
 }
 
 /// Where the MergeGrid's columns, rows, and chips fell in the frame that
@@ -84,6 +87,17 @@ pub(crate) enum ConflictTarget {
         /// row of the chunk's band past that side's lines.
         merge_row: Option<usize>,
     },
+}
+
+/// The open chunk's side the pointer rests over, which the MergeGrid rings and
+/// names the pick of.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct ConflictHover {
+    pub(crate) chunk: usize,
+    pub(crate) side: Side,
+    /// The merge row of the one line an Alt press takes, set while Alt is
+    /// held. `None` rings the whole side, which a plain press takes.
+    pub(crate) merge_row: Option<usize>,
 }
 
 /// Column geometry for the conflict view's cell layout, the one a terminal with
@@ -224,7 +238,7 @@ pub(crate) fn render_conflict_view(
     // and a sibling field cannot be borrowed alongside it.
     let mut endpoint_cache = editor.highlight_endpoint_cache.take();
     let mut row_cache = editor.diff_row_cache.take();
-    let position = editor.conflict_frame.position;
+    let ConflictFrame { position, hover } = editor.conflict_frame;
     if let Some(state) = editor.conflict_view.as_mut() {
         let state = Arc::make_mut(state);
         let chip_menu = state.chip_menu;
@@ -259,6 +273,7 @@ pub(crate) fn render_conflict_view(
                 cursor_row: Some(cursor.row),
                 chip_menu,
                 layout: layout.as_mut(),
+                hover,
             }
         });
         let (doc, derived) = state.derived(&snapshot);

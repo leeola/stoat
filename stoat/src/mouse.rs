@@ -30,7 +30,10 @@ use crate::{
     },
     pane::{FocusTarget, Placement, View},
     rebase::RebasePause,
-    render::{commit_picker::MIN_LIST_ROWS, conflict_view::ConflictTarget},
+    render::{
+        commit_picker::MIN_LIST_ROWS,
+        conflict_view::{ConflictHover, ConflictTarget},
+    },
     run::GridSelection,
     term_session::TermId,
     theme::TypeRole,
@@ -977,7 +980,7 @@ pub(crate) fn handle_mouse(stoat: &mut Stoat, mouse: MouseEvent) -> UpdateEffect
         );
     }
     if let MouseEventKind::Moved = mouse.kind {
-        return handle_hover(stoat, mouse.column, mouse.row);
+        return handle_hover(stoat, mouse.column, mouse.row, mouse.modifiers);
     }
 
     // Any open boxed modal owns the pointer. A left click selects a row or
@@ -2308,16 +2311,24 @@ fn resolve_hover_diagnostic(stoat: &mut Stoat, column: u16, row: u16) -> Option<
     crate::diagnostic_spans::diagnostic_at_offset(cache, offset, buffer).map(|found| found.index)
 }
 
-/// Track the hovered cell and redraw only when the diagnostic under it
-/// changes, so mouse motion within one span does not repaint every event.
+/// Track the hovered cell and redraw only when the diagnostic or the conflict
+/// side under it changes, so mouse motion within one span does not repaint
+/// every event.
 ///
-/// Motion that stays inside one cell reuses the last answer rather than
+/// Motion that stays inside one cell reuses the last diagnostic rather than
 /// resolving again. That answer only drives the redraw decision, and the
 /// paint recomputes the hovered diagnostic from the cell every frame, so a
 /// diagnostic set arriving from a server still reaches the screen through
 /// its own redraw. The badge hit test is two comparisons and reruns
-/// regardless, since the badge rect moves under a pointer that has not.
-pub(crate) fn handle_hover(stoat: &mut Stoat, column: u16, row: u16) -> UpdateEffect {
+/// regardless, since the badge rect moves under a pointer that has not. The
+/// conflict side resolves on every event too, since `modifiers` decides
+/// whether it names one line, and Alt changes inside one cell.
+pub(crate) fn handle_hover(
+    stoat: &mut Stoat,
+    column: u16,
+    row: u16,
+    modifiers: KeyModifiers,
+) -> UpdateEffect {
     let moved = stoat.hover_cell != Some((column, row));
     stoat.hover_cell = Some((column, row));
     let resolved = if moved {
@@ -2331,12 +2342,49 @@ pub(crate) fn handle_hover(stoat: &mut Stoat, column: u16, row: u16) -> UpdateEf
             && row >= rect.y
             && row < rect.y + rect.height
     });
-    if stoat.hover_diag == resolved && stoat.lsp_badge_hovered == badge_hovered {
+    let conflict_hover = conflict_hover_at(stoat, column, row, modifiers);
+    if stoat.hover_diag == resolved
+        && stoat.lsp_badge_hovered == badge_hovered
+        && stoat.conflict_hover == conflict_hover
+    {
         return UpdateEffect::None;
     }
     stoat.hover_diag = resolved;
     stoat.lsp_badge_hovered = badge_hovered;
+    stoat.conflict_hover = conflict_hover;
     UpdateEffect::Redraw
+}
+
+/// The open conflict chunk's side under cell `column`, `row`, with `modifiers`
+/// held, or `None` off every open side.
+///
+/// With Alt held the hover names the one line under the pointer, as an Alt
+/// press takes it. A row of the chunk's band past that side's lines holds no
+/// line to take, so it is no hover under Alt.
+fn conflict_hover_at(
+    stoat: &mut Stoat,
+    column: u16,
+    row: u16,
+    modifiers: KeyModifiers,
+) -> Option<ConflictHover> {
+    let editor = action_handlers::focused_editor_mut(stoat)?;
+    let Some(ConflictTarget::Side {
+        chunk,
+        side,
+        merge_row,
+    }) = crate::render::conflict_view::conflict_target(editor, column, row)
+    else {
+        return None;
+    };
+    let merge_row = match modifiers.contains(KeyModifiers::ALT) {
+        true => Some(merge_row?),
+        false => None,
+    };
+    Some(ConflictHover {
+        chunk,
+        side,
+        merge_row,
+    })
 }
 
 /// Collapse the focused editor's selection to a block cursor on the cell at
@@ -2754,8 +2802,8 @@ mod tests {
         sync::Arc,
     };
     use stoat_action::{
-        Action, Conflict, ConflictPickOurs, ConflictPickTheirs, MoveDown, NewTab, OpenFile,
-        SplitDown, SplitRight, TogglePaneWiden,
+        Action, Conflict, ConflictNextFile, ConflictPickOurs, ConflictPickTheirs, MoveDown, NewTab,
+        OpenFile, SplitDown, SplitRight, TogglePaneWiden,
     };
     use stoat_text::Point;
     use stoatty_protocol::{
@@ -3125,7 +3173,7 @@ mod tests {
 
         // A second diagnostic moves the set version, leaving the cache stale.
         set_hover_diagnostics(&mut h, &PathBuf::from("/diag-hover/a.txt"), 2);
-        handle_hover(&mut h.stoat, 8, 0);
+        handle_hover(&mut h.stoat, 8, 0, KeyModifiers::NONE);
 
         assert_eq!(
             cached_span_count(&h, editor_id),
@@ -3179,13 +3227,13 @@ mod tests {
     #[test]
     fn a_repeat_hover_on_the_same_cell_resolves_nothing() {
         let (mut h, editor_id) = hover_diagnostics_harness(1);
-        handle_hover(&mut h.stoat, 8, 0);
+        handle_hover(&mut h.stoat, 8, 0, KeyModifiers::NONE);
         assert_eq!(cached_span_count(&h, editor_id), 1);
 
         set_hover_diagnostics(&mut h, &PathBuf::from("/diag-hover/a.txt"), 3);
 
         assert_eq!(
-            handle_hover(&mut h.stoat, 8, 0),
+            handle_hover(&mut h.stoat, 8, 0, KeyModifiers::NONE),
             UpdateEffect::None,
             "an unmoved pointer reports the diagnostic it already resolved",
         );
@@ -3202,21 +3250,21 @@ mod tests {
         h.stoat.lsp_badge_rect = Some(Rect::new(10, 5, 6, 1));
 
         assert_eq!(
-            handle_hover(&mut h.stoat, 12, 5),
+            handle_hover(&mut h.stoat, 12, 5, KeyModifiers::NONE),
             UpdateEffect::Redraw,
             "hovering onto the badge redraws"
         );
         assert!(h.stoat.lsp_badge_hovered, "hovering sets the flag");
 
         assert_eq!(
-            handle_hover(&mut h.stoat, 11, 5),
+            handle_hover(&mut h.stoat, 11, 5, KeyModifiers::NONE),
             UpdateEffect::None,
             "still inside the badge is a no-op"
         );
         assert!(h.stoat.lsp_badge_hovered);
 
         assert_eq!(
-            handle_hover(&mut h.stoat, 0, 0),
+            handle_hover(&mut h.stoat, 0, 0, KeyModifiers::NONE),
             UpdateEffect::Redraw,
             "moving off the badge redraws"
         );
@@ -3227,7 +3275,7 @@ mod tests {
     fn badge_disappearing_clears_the_hover_flag() {
         let mut h = Stoat::test();
         h.stoat.lsp_badge_rect = Some(Rect::new(10, 5, 6, 1));
-        handle_hover(&mut h.stoat, 12, 5);
+        handle_hover(&mut h.stoat, 12, 5, KeyModifiers::NONE);
         assert!(h.stoat.lsp_badge_hovered);
 
         // The scratch buffer has no language server, so the next paint stamps no
@@ -3645,6 +3693,113 @@ mod tests {
         ));
 
         assert_eq!((effect, chip_menu(&h)), (UpdateEffect::Redraw, None));
+    }
+
+    /// The pointer over an open chunk's side sets the hover and asks for one
+    /// repaint. A second move inside the same side asks for none, and a move
+    /// to the merged column clears the hover and repaints.
+    #[test]
+    fn the_pointer_over_an_open_side_sets_the_hover_and_redraws_once() {
+        let (mut h, layout) = conflict_press_harness(ONE_CHUNK);
+        let (x, y) = (layout.ours.start + 2, layout.body.y + 1);
+        let first = handle_hover(&mut h.stoat, x, y, KeyModifiers::NONE);
+        let hovered = h.stoat.conflict_hover;
+        let second = handle_hover(&mut h.stoat, x + 1, y, KeyModifiers::NONE);
+        let off = handle_hover(&mut h.stoat, layout.merged.start + 2, y, KeyModifiers::NONE);
+
+        assert_eq!(
+            (first, hovered, second, off, h.stoat.conflict_hover),
+            (
+                UpdateEffect::Redraw,
+                Some(ConflictHover {
+                    chunk: 0,
+                    side: Side::Ours,
+                    merge_row: None
+                }),
+                UpdateEffect::None,
+                UpdateEffect::Redraw,
+                None,
+            ),
+        );
+    }
+
+    /// With Alt held the hover names the line under the pointer, as an Alt
+    /// press takes it. A band row past that side's lines holds no line, so it
+    /// is no hover.
+    #[test]
+    fn an_alt_pointer_names_the_line_under_it() {
+        let (mut h, layout) = conflict_press_harness(ONE_CHUNK);
+        let x = layout.theirs.start + 2;
+        let mut hover = |row: u16| {
+            handle_hover(&mut h.stoat, x, layout.body.y + row, KeyModifiers::ALT);
+            h.stoat.conflict_hover
+        };
+
+        assert_eq!(
+            [hover(1), hover(2)],
+            [
+                Some(ConflictHover {
+                    chunk: 0,
+                    side: Side::Theirs,
+                    merge_row: Some(1)
+                }),
+                None,
+            ],
+        );
+    }
+
+    /// The frame hands the hover to the conflict view's paint, which rings the
+    /// hovered side with one unfilled panel in the scene.
+    #[test]
+    fn a_hovered_side_rings_in_the_frame() {
+        let (mut h, layout) = conflict_press_harness(ONE_CHUNK);
+        handle_hover(
+            &mut h.stoat,
+            layout.ours.start + 2,
+            layout.body.y + 1,
+            KeyModifiers::NONE,
+        );
+        h.stoat.render();
+
+        let rings = command::decode_stream(&h.stoat.apc_scene.all_bytes())
+            .into_iter()
+            .filter(|command| {
+                matches!(command, Command::Panel(panel) if panel.fill.is_none() && panel.corner_radius == 2)
+            })
+            .count();
+        assert_eq!(rings, 1);
+    }
+
+    /// A switch to another file clears the hover, since chunk numbers belong to
+    /// one file.
+    #[test]
+    fn a_file_switch_clears_the_hover() {
+        let mut h = Stoat::test();
+        let git_root = h.stoat.active_workspace().git_root.clone();
+        let mut repo = h.fake_git().add_repo(git_root);
+        for file in ["a.txt", "b.txt"] {
+            repo.conflicted_file(
+                file,
+                Some("a\nbase\n"),
+                Some("a\nours\n"),
+                Some("a\ntheirs\n"),
+            );
+        }
+        action_handlers::dispatch(&mut h.stoat, &Conflict);
+        h.settle();
+        h.stoat.render();
+        let layout = painted_layout(&mut h);
+        handle_hover(
+            &mut h.stoat,
+            layout.ours.start + 2,
+            layout.body.y + 1,
+            KeyModifiers::NONE,
+        );
+        let hovered = h.stoat.conflict_hover.is_some();
+        action_handlers::dispatch(&mut h.stoat, &ConflictNextFile);
+        h.settle();
+
+        assert_eq!((hovered, h.stoat.conflict_hover), (true, None));
     }
 
     /// The chunk whose chip shows its pick buttons, as the session holds it.

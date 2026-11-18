@@ -5,6 +5,7 @@ use crate::{
     host::git::{GitRepo, MergeState},
     merge_view::{AlignRow, ChunkState, MergeDoc, RowPick},
     multi_buffer::{MultiBuffer, MultiBufferSnapshot},
+    render::conflict_view::ConflictHover,
     workspace::{diff, Workspace},
 };
 use std::{
@@ -322,6 +323,9 @@ pub(crate) struct ConflictFrame {
     /// The position the frame read, `None` when the focused pane shows no
     /// conflict view.
     pub(crate) position: Option<ConflictPosition>,
+    /// The open chunk's side the pointer rests over, as the last motion event
+    /// found it.
+    pub(crate) hover: Option<ConflictHover>,
 }
 
 /// The focused conflict view's [`ConflictPosition`], or `None` when the focused
