@@ -452,7 +452,7 @@ impl RevealFlash {
     }
 }
 
-/// One run of the Scope chip a fold row centers, with the role that colors it.
+/// One run of the Scope a fold row names, with the role that colors it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct ScopePart {
     pub text: String,
@@ -2769,7 +2769,7 @@ pub(crate) fn first_text_byte(rope: &Rope, row: u32) -> usize {
     start + indent
 }
 
-/// The runs of `scope`'s chip that fit `room` sixteenths at text `scale`, or
+/// The runs of `scope` that fit `room` sixteenths at text `scale`, or
 /// none when not even the innermost item fits.
 ///
 /// Items join with `U+203A`. A chain too wide for the room drops items from its
@@ -2824,7 +2824,7 @@ fn mark_part(mark: &ScopeMark) -> Option<ScopePart> {
 }
 
 /// The sixteenths that `parts` advance at text `scale`.
-pub(crate) fn parts_advance(parts: &[ScopePart], scale: u16) -> u16 {
+fn parts_advance(parts: &[ScopePart], scale: u16) -> u16 {
     parts.iter().fold(0, |advance: u16, part| {
         advance.saturating_add(text_run::advance_sixteenths(
             part.text.chars().count(),
@@ -2833,7 +2833,7 @@ pub(crate) fn parts_advance(parts: &[ScopePart], scale: u16) -> u16 {
     })
 }
 
-/// The items a Scope chip names, outermost first, each as its runs. A fold
+/// The items a Scope names, outermost first, each as its runs. A fold
 /// with no change below it reads as one label item.
 fn scope_items(scope: &FoldScope) -> Vec<Vec<ScopePart>> {
     let label = |text: &str| vec![vec![ScopePart::new(text, ScopeRole::Separator)]];
@@ -3773,7 +3773,7 @@ fn hint_width() -> u32 {
         );
     }
 
-    /// The text of every run of `scope`'s chip, with room for all of it.
+    /// The text of every run of `scope`, with room for all of it.
     fn scope_text(scope: &FoldScope) -> String {
         scope_parts(scope, u16::MAX, FULL_CELL_SCALE)
             .iter()

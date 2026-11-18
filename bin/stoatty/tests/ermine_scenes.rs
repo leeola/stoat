@@ -637,16 +637,18 @@ fn the_changes_view_pins_the_file_header_over_its_scrolling_stack() {
 }
 
 /// The changes view folds the unchanged lines between two hunks into a fold
-/// row under the boards' hatch.
+/// row under the boards' hatch, and the divide's hairline runs through it.
 ///
 /// The diff-kinds stack lists hunks.txt fourth, and its fold row is row 20,
 /// under the row of its line 6 on the base surface. The fold hides seven
 /// lines, so the row carries one Fold Button, whose box covers most of columns
-/// 1 and 2. The count starts one cell past the buttons and ends before column
-/// 18. A text file's language has no outline query, so the row centers no
-/// Scope. The cells from column 18 to the divider, and from column 84 to
-/// column 139 right of it, hold no text. They take the base surface under the
-/// hatch's lines, which the stack's resident pool composites from its pages.
+/// 1 and 2. The count and the range end against the divide, so the count's
+/// muted text shows in the cells from column 61 to column 74. The divide takes
+/// one pixel column of the divider's cell, column 75. A text file's language
+/// has no outline query, so the row names no Scope. The cells from column 4 to
+/// column 60, and from column 77 to column 148 right of the divide, hold no
+/// text. They take the base surface under the hatch's lines, which the stack's
+/// resident pool composites from its pages.
 #[test]
 fn the_changes_view_folds_unchanged_lines_into_a_hatched_row() {
     let mut home = support::scratch_home();
@@ -667,10 +669,28 @@ fn the_changes_view_folds_unchanged_lines_into_a_hatched_row() {
         "changes_fold_button",
     );
     for (rect, what) in [
-        (cell_rect(18, 20, 52, 1), "changes_fold_row"),
-        (cell_rect(84, 20, 56, 1), "changes_fold_row_center"),
+        (cell_rect(4, 20, 57, 1), "changes_fold_row"),
+        (cell_rect(77, 20, 72, 1), "changes_fold_row_right"),
     ] {
         expect_hatch(&shot, &mut home, rect, (BASE, HATCH), what);
+    }
+
+    let (_, y, _, height) = cell_rect(0, 20, 1, 1);
+    let count = pixels_of(&shot, cell_rect(61, 20, 14, 1), MUTED);
+    let divide = {
+        let (cell_x, _, cell_width, _) = cell_rect(75, 20, 1, 1);
+        bar_columns(&shot, (y, height), HAIRLINE)
+            .into_iter()
+            .filter(|column| (cell_x..cell_x + cell_width).contains(column))
+            .count()
+    };
+    if count == 0 || divide != 1 {
+        let frame = keep_frame(&shot, &mut home, "changes_fold_row_divide");
+        panic!(
+            "the fold row reads {count} muted pixels in cells 61 to 74 and {divide} divide \
+             columns in cell 75; the frame is {}",
+            frame.display(),
+        );
     }
 }
 

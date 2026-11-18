@@ -343,14 +343,15 @@ The typed UI scopes, by group (syntax scopes are open-ended):
 - `diff.fold.button` -- a fold row's Fold Buttons at the row's left: the arrow
   glyph (foreground) on its square box (background). An unset scope takes
   `diff.fold`'s colors.
-- `diff.fold.range` -- the foreground of a fold row's line range at the row's
-  right, the first and the last line the fold hides.
+- `diff.fold.range` -- the foreground of a fold row's line range after its
+  count, the first and the last line the fold hides. A split diff ends the
+  count and the range against the divide.
 - `diff.scope.keyword`, `diff.scope.name`, `diff.scope.separator` -- the
-  foregrounds of the Scope chip a changes view's fold row centers, the chain
-  of items that hold the hunk below the fold, such as `impl Panel` then
-  `fn modal_frame`. Each item's keyword and name take the first two. The
+  foregrounds of the Scope a changes view's fold row names past the divide,
+  the chain of items that hold the hunk below the fold, such as `impl Panel`
+  then `fn modal_frame`. Each item's keyword and name take the first two. The
   `U+203A` mark between items takes the third, as does the `end of file`
-  label. The chip itself takes `diff.fold`'s background.
+  label. The Scope takes no box of its own.
 - `diff.reveal` -- the mark on the rows an expand just opened in the changes
   view: a lane at each side's left edge (foreground) over a tint across the
   row (background). The mark holds for 0.6 s and then fades out over 0.4 s.

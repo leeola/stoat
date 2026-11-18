@@ -44,7 +44,7 @@ const RULE_X: u16 = NEW_X + NUMBER_CELLS;
 const TEXT_X: u16 = RULE_X + 1;
 
 /// The Scope of a fold row over a hunk that no item holds, which draws the
-/// row's band and its count with no chip.
+/// row's band and its count with no Scope.
 static NO_SCOPE: FoldScope = FoldScope {
     segments: Vec::new(),
     split: None,
@@ -176,7 +176,7 @@ pub(crate) fn patch_summary(doc: &DiffDocument) -> (usize, u32, u32) {
 /// A File Header names its file and the lines the file adds and removes on the
 /// raised surface, between two hairlines under a live scene. A fold row takes
 /// `diff.fold`'s surface with its count at the left in `diff.fold.range` and
-/// the hunk's Scope as a chip in the middle. A line row takes a lane in its
+/// the hunk's Scope after the count. A line row takes a lane in its
 /// change color, its old and new numbers, a rule, and its code, on
 /// `vcs.commit.row.added` or `vcs.commit.row.removed` for a changed line. The
 /// code takes the token colors of the commit's text, and a removed line takes
@@ -460,11 +460,13 @@ fn file_stats(doc: &DiffDocument, file: usize) -> ExcerptStats {
         })
 }
 
-/// Paint a fold row over `hidden` lines into `rect`, with `hunk_scope` as its
-/// chip.
+/// Paint a fold row over `hidden` lines into `rect`, with `hunk_scope` after
+/// its count.
 ///
 /// The count draws as a run under a live scene, since the row's hatch is a bar
-/// and a bar draws over cell glyphs.
+/// and a bar draws over cell glyphs. The Scope follows the count as a unified
+/// fold row's follows its range, which is where the BlamePreview board draws
+/// it.
 fn paint_fold_row(
     hidden: u32,
     hunk_scope: Option<&FoldScope>,
@@ -474,9 +476,19 @@ fn paint_fold_row(
     scene: &mut ApcScene,
 ) {
     let live = scene.live();
+    let count = review::fold_row_placeholder(hidden).text;
+    let style = theme.get(scope::DIFF_FOLD_RANGE);
+    let scale = theme.type_scale(TypeRole::Small);
+    let run_color = paint::style_rgb(style.fg).filter(|_| live);
+    let chars = count.chars().count();
+    let count_end = match run_color {
+        Some(_) => 16 + text_run::advance_sixteenths(chars, scale),
+        None => (1 + chars as u16) * 16,
+    };
     review::paint_scope_row(
         hunk_scope.unwrap_or(&NO_SCOPE),
         rect,
+        Some(count_end),
         theme,
         theme.get(scope::UI_TEXT),
         buf,
@@ -484,13 +496,11 @@ fn paint_fold_row(
         false,
     );
 
-    let count = review::fold_row_placeholder(hidden).text;
-    let style = theme.get(scope::DIFF_FOLD_RANGE);
-    match paint::style_rgb(style.fg).filter(|_| live) {
+    match run_color {
         Some(color) => TextRun {
             col: 16,
             row: 0,
-            scale: theme.type_scale(TypeRole::Small),
+            scale,
             color,
             bg: None,
             text: &count,
@@ -595,9 +605,9 @@ mod tests {
 
     /// Without a live scene the rows are cells. Each File Header centers its
     /// file's name and counts, and the fold row reads its count from its second
-    /// cell with the hunk's Scope centered. A changed line's removed side shows
-    /// above its added sides, with the old number in the first column and the
-    /// new number in the second, each on its tint.
+    /// cell with the hunk's Scope two cells after it. A changed line's removed
+    /// side shows above its added sides, with the old number in the first
+    /// column and the new number in the second, each on its tint.
     #[test]
     fn the_cell_rows_read_the_header_the_count_and_both_numbers() {
         let doc = two_files();
@@ -632,7 +642,7 @@ mod tests {
             (
                 vec![
                     format!("{:^100}", "a.txt +3 \u{2212}2"),
-                    format!("{:<46}{:<54}", " \u{22ef} 1 line", "fn alpha"),
+                    format!("{:<11}{:<89}", " \u{22ef} 1 line", "fn alpha"),
                     format!("{:<100}", "   2   2 \u{2502}l2"),
                     format!("{:<100}", "   3   3 \u{2502}l3"),
                     format!("{:<100}", "   4   4 \u{2502}l4"),

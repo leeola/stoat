@@ -363,6 +363,7 @@ pub(crate) fn paint_stack_rows(
             review::paint_scope_row(
                 scope,
                 row,
+                None,
                 frame.theme,
                 text_style,
                 buf,
@@ -457,8 +458,8 @@ fn pinned_split(
 /// The rows first declare a panel whose body draws nothing, so a pool's
 /// composite leaves them to the live grid. The panel casts a short shadow on
 /// the rows that scroll under it. The header's cells then fill the first row.
-/// The Scope paints as a fold row with its chip alone, with no Fold Button, no
-/// count, and no range. A view that pins nothing, as
+/// The Scope paints as a fold row with its Scope alone past the divide, with no
+/// Fold Button, no count, and no range. A view that pins nothing, as
 /// [`diff_changes::pinned_header`] decides, paints nothing here.
 #[allow(clippy::too_many_arguments)]
 fn paint_pinned_header(
@@ -530,6 +531,7 @@ fn paint_pinned_header(
     review::paint_scope_row(
         &pinned.scope,
         row,
+        None,
         frame.theme,
         text_style,
         buf,
@@ -1848,11 +1850,12 @@ mod tests {
         );
     }
 
-    /// A pinned Scope draws a fold row's hatched surface and its chip under the
-    /// pinned header, with no Fold Button, count, or range. The cover spans
-    /// both pinned rows.
+    /// A pinned Scope draws a fold row's hatched surface under the pinned
+    /// header, with the divide's hairline through it and the Scope 20
+    /// sixteenths past the divide. It draws no Fold Button, count, or range.
+    /// The cover spans both pinned rows.
     #[test]
-    fn a_pinned_scope_draws_the_chip_alone() {
+    fn a_pinned_scope_draws_its_scope_past_the_divide() {
         let mut h = greeter_stack();
         let index = {
             let ws = h.stoat.active_workspace();
@@ -1882,21 +1885,26 @@ mod tests {
             })
             .collect();
         runs.sort();
+        let first = runs.first().map(|run| run.0);
         let text: String = runs.into_iter().map(|(_, text)| text).collect();
         let row_cells = cells(&h.render_composited(), 0, 120, 1);
         let fold = paint::style_rgb(h.stoat.theme.get(scope::DIFF_FOLD).bg).expect("an RGB fold");
-        let chip = bars.get(1).map_or(0, |bar| bar.2);
 
+        let divide = 59 * 16 + 8;
         // The composite draws the hatched surface as rules across the row's
-        // blank cells, so the chip's text is all the row reads past them.
+        // blank cells, so the Scope's text is all the row reads past them.
         assert_eq!(
-            (covers, bars, text, row_cells.trim_matches(['└', '┘', '─'])),
+            (
+                covers,
+                bars,
+                first,
+                text,
+                row_cells.trim_matches(['└', '┘', '─'])
+            ),
             (
                 vec![(0, 0, 120, 2)],
-                vec![
-                    (0, 16, 1920, 16, fold),
-                    (((1920 - chip) / 2) as i16, 17, chip, 14, fold),
-                ],
+                vec![(0, 16, 1920, 16, fold), (divide, 16, 1, 16, HAIRLINE)],
+                Some(divide + 20),
                 "impl Greeter \u{203a} fn greet".to_string(),
                 "impl Greeter \u{203a} fn greet",
             ),

@@ -137,17 +137,41 @@ pub(crate) const DIVIDER_RULE_X: u16 = 8;
 /// 2 px lane takes 4.
 const REVEAL_LANE_WIDTH: u16 = 4;
 
-/// Where a fold row's count starts, in sixteenths of a cell from the row's
-/// left, one cell past the slots of the two Fold Buttons.
+/// Where a unified fold row's count starts, in sixteenths of a cell from the
+/// row's left, one cell past the slots of the two Fold Buttons.
+///
+/// A fold row with a divide ends its count against the divide, but its count
+/// and range must still start at or past this column, or the range drops.
 const FOLD_COUNT_COL: u16 = FOLD_BUTTON_MARGIN + 2 * (FOLD_BUTTON_WIDTH + FOLD_BUTTON_GAP) + 16;
 
-/// The space at each side of a fold row's Scope chip, in sixteenths of a cell,
-/// which draw the ContextMatched board's 6 px padding.
-const SCOPE_CHIP_PAD: u16 = 12;
+/// The spacing of a fold row's runs.
+///
+/// The DiffChanges board pads each half of a fold row 10 px from the divide
+/// and from the row's edges, which is 20 sixteenths. The BlamePreview board
+/// puts a unified row's Scope 12 px after the text before it, which is 24.
+const RUN_SPACING: FoldSpacing = FoldSpacing {
+    divide: 20,
+    scope: 24,
+    edge: 20,
+    count: FOLD_COUNT_COL,
+};
 
-/// The height of a fold row's Scope chip, in sixteenths of a row, one in from
-/// the row's top. The ContextMatched board draws a 16 px chip in an 18 px row.
-const SCOPE_CHIP_HEIGHT: u16 = 14;
+/// The spacing of a fold row in cells, which puts all of its text on whole
+/// cells.
+///
+/// The divide's hairline sits half a cell into the divider's column. A pad of
+/// 24 then ends the count and the range one cell before that column, and
+/// starts the Scope two cells past it.
+const CELL_SPACING: FoldSpacing = FoldSpacing {
+    divide: 24,
+    scope: 32,
+    edge: 16,
+    count: FOLD_COUNT_COL / 16 * 16,
+};
+
+/// What a fold row's count reads before its line range, as the DiffChanges
+/// board writes `U+22EF {n} lines U+00B7 {lo}U+2013{hi}`.
+const FOLD_SEPARATOR: &str = " \u{b7} ";
 
 /// Fraction a changed char's foreground shifts toward its status color at
 /// `level`.
@@ -1267,6 +1291,7 @@ pub(crate) fn paint_diff_rows(
                         snapshot,
                         display_row,
                         diff_changes::fold_gap(snapshot, buffer_row),
+                        sep_x,
                         inner,
                         y,
                         theme,
@@ -1583,21 +1608,31 @@ pub(crate) fn paint_diff_rows(
     // glyph. A gutter's hairline sits at the rich gutter's separator offset in
     // the rule color, and the mid divider centers in its cell at
     // `DIVIDER_RULE_X` in the divider color. A fold row's band runs across both
-    // sides, so each hairline breaks around it.
+    // sides, so each gutter's hairline breaks around it. The fold row's text
+    // stands clear of the divide, so the divider runs through it unbroken.
     if let Some(rg) = rich.as_mut() {
-        let spans = rule_spans((end_row - scroll_row) as u16, &fold_offsets);
+        let rows = (end_row - scroll_row) as u16;
+        let gutter_spans = rule_spans(rows, &fold_offsets);
+        let divider_spans = rule_spans(rows, &[]);
         let gutter_rules = [left_x, right_x].map(|side| {
             (
                 (side - inner.x) * 16 + rg.offsets.separator_x,
                 rg.colors.rule,
+                &gutter_spans,
             )
         });
-        let divider = sep_x.map(|sep| ((sep - inner.x) * 16 + DIVIDER_RULE_X, rg.colors.divider));
-        for (x, color) in gutter_rules.into_iter().chain(divider) {
+        let divider = sep_x.map(|sep| {
+            (
+                (sep - inner.x) * 16 + DIVIDER_RULE_X,
+                rg.colors.divider,
+                &divider_spans,
+            )
+        });
+        for (x, color, spans) in gutter_rules.into_iter().chain(divider) {
             if x / 16 >= inner.width {
                 continue;
             }
-            for &(top, rows) in &spans {
+            for &(top, rows) in spans {
                 rg.bars.push(
                     inner,
                     Bar {
@@ -1621,24 +1656,31 @@ pub(crate) fn paint_diff_rows(
 /// `y`.
 ///
 /// The row takes `diff.fold`'s surface across both sides, as
-/// [`HatchedSurface`] resolves it. Its placeholder, which counts the lines the
-/// fold hides, starts one cell past the Fold Buttons in `ui.text.muted`. No
-/// number, mark, or base text paints, since the row stands for lines rather
-/// than showing one. A rich gutter draws the count at the scale of its numbers,
-/// with no box of its own over a hatch, so the stripes run on behind it. Cells
-/// draw it in cells.
+/// [`HatchedSurface`] resolves it. Its placeholder counts the lines the fold
+/// hides in `ui.text.muted`. No number, mark, or base text paints, since the
+/// row stands for lines rather than showing one. A rich gutter draws the text
+/// at the scale of its numbers, with no box of its own over a hatch, so the
+/// stripes run on behind it. Cells draw it in cells.
 ///
 /// `gap` is the buffer rows the fold hides. With it the row also carries its
-/// Fold Buttons and its line range, as [`paint_fold_controls`] paints them. It
-/// also centers the Scope its placeholder carries, as [`paint_scope_chip`]
-/// paints it, between the count and the range.
+/// Fold Buttons at its left, as [`paint_fold_buttons`] paints them, its line
+/// range in `diff.fold.range` after the count, and the Scope its placeholder
+/// carries, as [`paint_scope`] paints it.
 ///
-/// `text` is scratch space for the placeholder.
+/// `sep_x` is the divider's column of the two-column layout. There the count
+/// and the range end against the divide on the base side, and the Scope starts
+/// past the divide on the buffer side, so the divide's hairline runs through
+/// the row between them. A unified row reads its count, its range, and its
+/// Scope from the left, one cell past the Fold Buttons. [`fold_places`] lays
+/// out both.
+///
+/// `text` is scratch space for the count and the range.
 #[allow(clippy::too_many_arguments)]
 fn paint_fold_row(
     snapshot: &DisplaySnapshot,
     display_row: u32,
     gap: Option<std::ops::Range<u32>>,
+    sep_x: Option<u16>,
     inner: Rect,
     y: u16,
     theme: &crate::theme::Theme,
@@ -1647,16 +1689,56 @@ fn paint_fold_row(
     text: &mut String,
     decorations_only: bool,
 ) {
+    let (surface, cells) = paint_fold_surface(inner, y, theme, rich, buf, decorations_only);
+    let rope = snapshot.buffer_snapshot().rope();
+    let lines = gap.as_ref().map(|gap| diff_changes::fold_lines(rope, gap));
+
+    // One buffer holds the placeholder, then the separator and the range, so
+    // the count's run reads the separator only when the range shows.
     text.clear();
     snapshot.write_display_line(text, display_row);
-    let (surface, cells) = paint_fold_surface(inner, y, theme, rich, buf, decorations_only);
-    let muted = theme.get(s::UI_TEXT_MUTED);
+    let count_len = text.len();
+    let range_at = count_len + FOLD_SEPARATOR.len();
+    if let (Some(gap), Some(lines)) = (&gap, lines) {
+        let _ = write!(
+            text,
+            "{FOLD_SEPARATOR}{}\u{2013}{}",
+            gap.start + 1,
+            gap.start + lines
+        );
+    }
 
-    let chars = text.chars().count();
-    let count = match rich {
+    let scale = rich.as_ref().map(|rg| rg.number_scale);
+    let advance = |chars: usize| {
+        scale.map_or(chars as u16 * 16, |scale| {
+            text_run::advance_sixteenths(chars, scale)
+        })
+    };
+    let count_chars = text[..count_len].chars().count();
+    let places = fold_places(
+        sep_x.map(|sep| (sep - inner.x) * 16 + DIVIDER_RULE_X),
+        inner.width * 16,
+        (
+            advance(count_chars),
+            advance(count_chars + FOLD_SEPARATOR.chars().count()) - advance(count_chars),
+            gap.as_ref()
+                .map(|_| advance(text[range_at..].chars().count())),
+        ),
+        match scale {
+            Some(_) => RUN_SPACING,
+            None => CELL_SPACING,
+        },
+    );
+    let count = match places.range {
+        Some(_) => &text[..range_at],
+        None => &text[..count_len],
+    };
+
+    let muted = theme.get(s::UI_TEXT_MUTED);
+    let range = theme.get(s::DIFF_FOLD_RANGE);
+    match rich {
         Some(rg) => {
-            let advance = text_run::advance_sixteenths(chars, rg.number_scale);
-            let col = FOLD_COUNT_COL;
+            let row = ((y - inner.y) * 16) as i16;
             let color = style_rgb(muted.fg).unwrap_or(rg.colors.dim);
             let bg = match surface.hatch {
                 Some(_) => None,
@@ -1668,50 +1750,59 @@ fn paint_fold_row(
             rg.numbers.push(
                 inner,
                 TextRun {
-                    col: col as i16,
-                    row: ((y - inner.y) * 16) as i16,
+                    col: places.count as i16,
+                    row,
                     scale: rg.number_scale,
                     color: rg.colors.faded(color),
                     bg,
-                    text,
+                    text: count,
                     bold: false,
                     italic: false,
                     follow: 0,
                     anchor: None,
                 },
             );
-            col..col + advance
-        },
-        None => {
-            let x = (FOLD_COUNT_COL / 16).min(inner.width);
-            let width = (chars as u16).min(inner.width - x);
-            if !decorations_only {
-                write_str_clipped(
-                    buf,
-                    inner.x + x,
-                    y,
-                    text,
-                    cells.patch(muted),
-                    inner.x + inner.width,
+            if let Some(col) = places.range {
+                rg.numbers.push(
+                    inner,
+                    TextRun {
+                        col: col as i16,
+                        row,
+                        scale: rg.number_scale,
+                        color: rg.colors.faded(style_rgb(range.fg).unwrap_or(color)),
+                        bg: None,
+                        text: &text[range_at..],
+                        bold: false,
+                        italic: false,
+                        follow: 0,
+                        anchor: None,
+                    },
                 );
             }
-            x * 16..(x + width) * 16
         },
-    };
+        None if !decorations_only => {
+            let end = inner.x + inner.width;
+            let x = inner.x + (places.count / 16).min(inner.width);
+            write_str_clipped(buf, x, y, count, cells.patch(muted), end);
+            if let Some(col) = places.range {
+                let x = inner.x + (col / 16).min(inner.width);
+                write_str_clipped(buf, x, y, &text[range_at..], cells.patch(range), end);
+            }
+        },
+        None => {},
+    }
 
-    let Some(gap) = gap else {
+    let (Some(gap), Some(lines)) = (gap, lines) else {
         return;
     };
-    let range_start = paint_fold_controls(
-        snapshot,
-        &gap,
+    paint_fold_buttons(
+        (&gap, lines, rope.max_point().row + 1),
+        places.count,
         inner,
         y,
         theme,
         rich,
         buf,
-        (cells, count.clone()),
-        text,
         decorations_only,
     );
     let scope = snapshot
@@ -1719,10 +1810,9 @@ fn paint_fold_row(
         .fold_row_placeholder(gap.start)
         .and_then(|placeholder| placeholder.scope.clone());
     if let Some(scope) = scope {
-        let room_end = range_start.unwrap_or(inner.width * 16).saturating_sub(16);
-        paint_scope_chip(
+        paint_scope(
             &scope,
-            count.end + 16..room_end,
+            places.scope,
             inner,
             y,
             theme,
@@ -1731,6 +1821,85 @@ fn paint_fold_row(
             cells,
             decorations_only,
         );
+    }
+}
+
+/// The spaces a fold row lays its text out by, in sixteenths of a cell.
+#[derive(Clone, Copy)]
+struct FoldSpacing {
+    /// Between the divide's hairline and the text at each side of it.
+    divide: u16,
+    /// Between a unified row's last text and its Scope.
+    scope: u16,
+    /// Between the text and the row's left or right edge.
+    edge: u16,
+    /// Where a unified row's count starts.
+    count: u16,
+}
+
+/// Where a fold row's count, range, and Scope start, in sixteenths from the
+/// row's left.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct FoldPlaces {
+    count: u16,
+    /// Where the range starts, or `None` when the row has no room for it.
+    range: Option<u16>,
+    scope: u16,
+}
+
+/// Lay out a fold row `width` sixteenths wide by `spacing`.
+///
+/// `count` and `range` are the advances of the placeholder and of the range,
+/// which a row with no gap does not have. `separator` is the advance that the
+/// separator adds to the count's run before a range.
+///
+/// With `divide`, where the divide's hairline sits, the count and the range
+/// end against the divide and the Scope starts past it. The range drops when
+/// the two do not fit from `spacing.count` on, and the count then ends against
+/// the divide alone. A unified row starts its count at `spacing.count` with
+/// the range after it, and the range drops when it passes the row's right
+/// edge. Its Scope follows its last text.
+fn fold_places(
+    divide: Option<u16>,
+    width: u16,
+    (count, separator, range): (u16, u16, Option<u16>),
+    spacing: FoldSpacing,
+) -> FoldPlaces {
+    match divide {
+        Some(divide) => {
+            let end = divide.saturating_sub(spacing.divide);
+            let scope = divide + spacing.divide;
+            let fits = range
+                .and_then(|range| Some((end.checked_sub(count + separator + range)?, range)))
+                .filter(|&(start, _)| start >= spacing.count);
+            match fits {
+                Some((start, range)) => FoldPlaces {
+                    count: start,
+                    range: Some(end - range),
+                    scope,
+                },
+                None => FoldPlaces {
+                    count: end.saturating_sub(count),
+                    range: None,
+                    scope,
+                },
+            }
+        },
+        None => {
+            let range_at = spacing.count + count + separator;
+            match range.filter(|range| range_at + range + spacing.edge <= width) {
+                Some(range) => FoldPlaces {
+                    count: spacing.count,
+                    range: Some(range_at),
+                    scope: range_at + range + spacing.scope,
+                },
+                None => FoldPlaces {
+                    count: spacing.count,
+                    range: None,
+                    scope: spacing.count + count + spacing.scope,
+                },
+            }
+        },
     }
 }
 
@@ -1766,28 +1935,51 @@ fn paint_fold_surface(
     (surface, cells)
 }
 
-/// Paint `scope` alone on `row`, the row under a changes view excerpt's header
-/// when no fold lies above the excerpt's first change.
+/// Paint `scope` alone on `row`, as a fold row with no count.
 ///
-/// The row takes `diff.fold`'s surface, as a fold row does, and centers the
-/// Scope's chip as [`paint_scope_chip`] paints it, with no count, no Fold
-/// Buttons, and no line range. With a `scene` whose gutter colors resolve the
-/// row draws rich, as [`paint_diff_rows`] draws its gutter, and with
-/// `decorations_only` it sends the scene's bars and runs alone.
+/// The changes view paints one under an excerpt's header when no fold lies
+/// above the excerpt's first change, and pins one under its pinned header. The
+/// row takes `diff.fold`'s surface, as a fold row does, and paints the Scope as
+/// [`paint_scope`] paints a fold row's, with no Fold Buttons, count, or range.
+///
+/// With `after`, the Scope follows the text that the caller paints at the
+/// row's left, which ends `after` sixteenths in, as a unified fold row's Scope
+/// follows its range. A unified patch's fold row paints its count there.
+/// Without it the Scope starts past `row`'s divide, where [`diff_divider_x`]
+/// puts the divider, and the divide's hairline runs through the row. A row too
+/// narrow for a divide starts its Scope at the pad from its left edge.
+///
+/// With a `scene` whose gutter colors resolve the row draws rich, as
+/// [`paint_diff_rows`] draws its gutter, and with `decorations_only` it sends
+/// the scene's bars and runs alone.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn paint_scope_row(
     scope: &FoldScope,
     row: Rect,
+    after: Option<u16>,
     theme: &crate::theme::Theme,
     fallback_style: Style,
     buf: &mut Buffer,
     scene: Option<&mut ApcScene>,
     decorations_only: bool,
 ) {
-    let mut rich = chip_gutter(scene, theme, fallback_style);
+    let mut rich = scope_gutter(scene, theme, fallback_style);
     let (_, cells) = paint_fold_surface(row, row.y, theme, &mut rich, buf, decorations_only);
-    paint_scope_chip(
+    let spacing = match rich {
+        Some(_) => RUN_SPACING,
+        None => CELL_SPACING,
+    };
+    let divide = diff_divider_x(row)
+        .filter(|_| after.is_none())
+        .map(|divider| (divider - row.x) * 16 + DIVIDER_RULE_X);
+    let col = match (after, divide) {
+        (Some(after), _) => after + spacing.scope,
+        (None, Some(divide)) => divide + spacing.divide,
+        (None, None) => spacing.edge,
+    };
+    paint_scope(
         scope,
-        16..(row.width * 16).saturating_sub(16),
+        col,
         row,
         row.y,
         theme,
@@ -1796,19 +1988,33 @@ pub(crate) fn paint_scope_row(
         cells,
         decorations_only,
     );
+
     if let Some(rg) = rich.as_mut() {
+        if let Some(x) = divide {
+            rg.bars.push(
+                row,
+                Bar {
+                    x: x as i16,
+                    y: 0,
+                    width: 1,
+                    height: 16,
+                    color: rg.colors.divider,
+                    radius: 0,
+                    corners: 0,
+                },
+            );
+        }
         rg.numbers.flush(rg.scene);
         rg.bars.flush(rg.scene);
     }
 }
 
-/// The rich gutter of a row that draws no number, bar, or rule, such as a
-/// Scope row, or `None` without a `scene` and where the gutter colors do not
-/// resolve.
+/// The rich gutter of a row that draws no number, such as a Scope row, or
+/// `None` without a `scene` and where the gutter colors do not resolve.
 ///
 /// Its offsets lay out the narrowest number column, since the row reads none
 /// of them.
-fn chip_gutter<'a>(
+fn scope_gutter<'a>(
     scene: Option<&'a mut ApcScene>,
     theme: &crate::theme::Theme,
     fallback_style: Style,
@@ -1826,46 +2032,29 @@ fn chip_gutter<'a>(
     })
 }
 
-/// Paint the Fold Buttons and the line range of the fold row at screen row `y`.
+/// Paint the Fold Buttons of the fold row at screen row `y`.
 ///
-/// The fold hides buffer rows `gap`. [`diff_changes::fold_buttons`] picks the
-/// buttons, each an arrow on a square box in `diff.fold.button` at the row's
-/// left. A rich gutter draws each box as a bar and its arrow as a run over the
-/// box at the gutter's number scale. Cells draw the arrow on two cells in the
-/// scope's colors.
+/// The fold hides buffer rows `gap`, which hold `lines` lines of a buffer of
+/// `line_count`. From them [`diff_changes::fold_buttons`] picks the buttons,
+/// each an arrow on a square box in `diff.fold.button` at the row's left. A rich gutter draws each
+/// box as a bar and its arrow as a run over the box at the gutter's number scale. Cells draw the
+/// arrow on two cells in the scope's colors.
 ///
-/// The range names the first and the last line the fold hides, in
-/// `diff.fold.range` on the row's `cells` fill. It ends one cell in from the
-/// row's right edge.
-///
-/// The count, which spans `count` sixteenths from the row's left, stays
-/// readable on a narrow row. A button that reaches the count does not paint,
-/// and neither does a range that comes within a cell of it. `text` is scratch
-/// space for the range.
-///
-/// Answers where the range starts, in sixteenths from the row's left, or
-/// `None` when it does not paint.
+/// The count starts `count` sixteenths from the row's left and stays readable
+/// on a narrow row, so a button that reaches it does not paint.
 #[allow(clippy::too_many_arguments)]
-fn paint_fold_controls(
-    snapshot: &DisplaySnapshot,
-    gap: &std::ops::Range<u32>,
+fn paint_fold_buttons(
+    (gap, lines, line_count): (&std::ops::Range<u32>, u32, u32),
+    count: u16,
     inner: Rect,
     y: u16,
     theme: &crate::theme::Theme,
     rich: &mut Option<DiffRichGutter<'_>>,
     buf: &mut Buffer,
-    (cells, count): (Style, std::ops::Range<u16>),
-    text: &mut String,
     decorations_only: bool,
-) -> Option<u16> {
-    let rope = snapshot.buffer_snapshot().rope();
-    let lines = diff_changes::fold_lines(rope, gap);
-    let buttons = diff_changes::fold_buttons(gap, lines, rope.max_point().row + 1).glyphs();
+) {
+    let buttons = diff_changes::fold_buttons(gap, lines, line_count).glyphs();
     let button = theme.get(s::DIFF_FOLD_BUTTON);
-    let range = theme.get(s::DIFF_FOLD_RANGE);
-    text.clear();
-    let _ = write!(text, "{}\u{2013}{}", gap.start + 1, gap.start + lines);
-    let range_chars = text.chars().count() as u16;
 
     match rich {
         Some(rg) => {
@@ -1874,7 +2063,7 @@ fn paint_fold_controls(
             let glyph_advance = text_run::advance_sixteenths(1, rg.number_scale);
             for (slot, &(glyph, _)) in buttons.iter().enumerate() {
                 let x = FOLD_BUTTON_MARGIN + slot as u16 * (FOLD_BUTTON_WIDTH + FOLD_BUTTON_GAP);
-                if x + FOLD_BUTTON_WIDTH > count.start {
+                if x + FOLD_BUTTON_WIDTH > count {
                     break;
                 }
                 // Over a hatched surface, plain bars and runs draw in their
@@ -1909,75 +2098,37 @@ fn paint_fold_controls(
                     },
                 );
             }
-
-            let advance = text_run::advance_sixteenths(usize::from(range_chars), rg.number_scale);
-            let col = (inner.width * 16).saturating_sub(advance + 16);
-            if col < count.end + 16 {
-                return None;
-            }
-            rg.numbers.push(
-                inner,
-                TextRun {
-                    col: col as i16,
-                    row,
-                    scale: rg.number_scale,
-                    color: rg.colors.faded(style_rgb(range.fg).unwrap_or(fallback)),
-                    bg: None,
-                    text,
-                    bold: false,
-                    italic: false,
-                    follow: 0,
-                    anchor: None,
-                },
-            );
-            Some(col)
         },
         None if !decorations_only => {
             for (slot, &(glyph, _)) in buttons.iter().enumerate() {
                 let x = diff_changes::fold_button_cells(slot).start;
-                if (x + 2) * 16 > count.start {
+                if (x + 2) * 16 > count {
                     break;
                 }
                 buf[(inner.x + x, y)].set_char(glyph).set_style(button);
                 buf[(inner.x + x + 1, y)].set_style(button);
             }
-
-            let x = inner.width.saturating_sub(range_chars + 1);
-            if x * 16 < count.end + 16 {
-                return None;
-            }
-            write_str_clipped(
-                buf,
-                inner.x + x,
-                y,
-                text,
-                cells.patch(range),
-                inner.x + inner.width,
-            );
-            Some(x * 16)
         },
-        None => None,
+        None => {},
     }
 }
 
-/// Center `scope`'s chip on the fold row at screen row `y`, inside `room`, the
-/// sixteenths from the row's left that the row's count and range leave.
+/// Paint `scope` on the fold row at screen row `y`, from `col` sixteenths past
+/// the row's left.
 ///
-/// The chip names the items that [`diff_changes::scope_parts`] fits to the
-/// room, in `diff.scope.keyword`, `diff.scope.name`, and
-/// `diff.scope.separator`, on `diff.fold`'s background. The mark of a whole
-/// added or removed item takes `diff.added`'s or `diff.deleted`'s foreground.
-/// The chip centers on the row, and moves into the room where the center puts
-/// it past an edge of the room.
+/// The Scope names the items that [`diff_changes::scope_parts`] fits between
+/// `col` and the pad before the row's right edge, in `diff.scope.keyword`,
+/// `diff.scope.name`, and `diff.scope.separator`, with no box of its own. The
+/// mark of a whole added or removed item takes `diff.added`'s or
+/// `diff.deleted`'s foreground.
 ///
-/// A rich gutter draws the chip as a bar [`SCOPE_CHIP_HEIGHT`] sixteenths tall
-/// with [`SCOPE_CHIP_PAD`] sixteenths of space at each side, and each run over
-/// it at the gutter's number scale. Cells paint the runs on `cells`, the row's
-/// fill, with the chip's background under them.
+/// A rich gutter draws each part as a run at the gutter's number scale. Cells
+/// paint the parts on `cells`, the row's fill, from the first whole cell at or
+/// past `col`.
 #[allow(clippy::too_many_arguments)]
-fn paint_scope_chip(
+fn paint_scope(
     scope: &FoldScope,
-    room: std::ops::Range<u16>,
+    col: u16,
     inner: Rect,
     y: u16,
     theme: &crate::theme::Theme,
@@ -1986,41 +2137,15 @@ fn paint_scope_chip(
     cells: Style,
     decorations_only: bool,
 ) {
-    let chip = theme.get(s::DIFF_FOLD).bg;
     let muted = theme.get(s::UI_TEXT_MUTED).fg;
     let fg = |role: ScopeRole| theme.get(role.theme_scope()).fg.or(muted);
-    let room_len = room.end.saturating_sub(room.start);
 
     match rich {
         Some(rg) => {
-            let parts = diff_changes::scope_parts(
-                scope,
-                room_len.saturating_sub(2 * SCOPE_CHIP_PAD),
-                rg.number_scale,
-            );
-            if parts.is_empty() {
-                return;
-            }
-            let width = diff_changes::parts_advance(&parts, rg.number_scale) + 2 * SCOPE_CHIP_PAD;
-            let x = centered(inner.width * 16, width, &room);
+            let room = (inner.width * 16).saturating_sub(col + RUN_SPACING.edge);
             let row = ((y - inner.y) * 16) as i16;
-            // Over a hatched surface, plain bars and runs draw in their
-            // declaration order. The runs go out after the last row, so the
-            // chip goes into the scene now and lies under its runs.
-            if let Some(bg) = style_rgb(chip) {
-                Bar {
-                    x: x as i16,
-                    y: row + 1,
-                    width,
-                    height: SCOPE_CHIP_HEIGHT,
-                    color: rg.colors.faded(bg),
-                    radius: 0,
-                    corners: 0,
-                }
-                .render(inner, buf, rg.scene);
-            }
-            let mut col = x + SCOPE_CHIP_PAD;
-            for part in &parts {
+            let mut col = col;
+            for part in diff_changes::scope_parts(scope, room, rg.number_scale) {
                 let color = style_rgb(fg(part.role)).unwrap_or(rg.colors.dim);
                 rg.numbers.push(
                     inner,
@@ -2041,20 +2166,10 @@ fn paint_scope_chip(
             }
         },
         None if !decorations_only => {
-            let room = room.start.div_ceil(16)..room.end / 16;
-            let parts = diff_changes::scope_parts(
-                scope,
-                room.end.saturating_sub(room.start) * 16,
-                FULL_CELL_SCALE,
-            );
-            if parts.is_empty() {
-                return;
-            }
-            let width = diff_changes::parts_advance(&parts, FULL_CELL_SCALE) / 16;
-            let base = chip.map_or(cells, |bg| cells.bg(bg));
-            let mut x = centered(inner.width, width, &room);
-            for part in &parts {
-                let style = fg(part.role).map_or(base, |color| base.fg(color));
+            let mut x = col.div_ceil(16);
+            let room = inner.width.saturating_sub(x + CELL_SPACING.edge / 16);
+            for part in diff_changes::scope_parts(scope, room * 16, FULL_CELL_SCALE) {
+                let style = fg(part.role).map_or(cells, |color| cells.fg(color));
                 write_str_clipped(
                     buf,
                     inner.x + x,
@@ -2068,13 +2183,6 @@ fn paint_scope_chip(
         },
         None => {},
     }
-}
-
-/// The start that centers `width` in `total`, moved into `room` where the
-/// center puts it past an edge of the room.
-fn centered(total: u16, width: u16, room: &std::ops::Range<u16>) -> u16 {
-    let center = total.saturating_sub(width) / 2;
-    center.min(room.end.saturating_sub(width)).max(room.start)
 }
 
 /// Mark screen row `y` of `inner` as a row an expand just opened, at
@@ -4950,8 +5058,12 @@ mod tests {
     /// The fold fill and the muted text color the fold row tests read.
     const FOLD_THEME: &str = r##"diff.fold.bg = "#303030"; ui.text.muted.fg = "#909090";"##;
 
-    /// The count on the fold row of [`fold_row_editor`].
-    const FOLD_TEXT: &str = "\u{22ef} 12 lines";
+    /// The count on the fold row of [`fold_row_editor`], with the separator
+    /// before its range.
+    const FOLD_COUNT: &str = "\u{22ef} 12 lines \u{b7} ";
+
+    /// The line range on the fold row of [`fold_row_editor`].
+    const FOLD_RANGE: &str = "1\u{2013}12";
 
     /// A diff view of twenty lines whose sixteenth line changed, with lines 1
     /// to 12 under a fold row.
@@ -5003,84 +5115,54 @@ mod tests {
         ("panel", [0xdf, 0xe2, 0xe8]),
     ];
 
-    /// Under a rich gutter a fold row's Scope is a chip centered on the row. The
-    /// chip is a plain bar in the fold's background, then one run per part in
-    /// its role's color. The bar goes out before the runs, so it lies under
-    /// them.
+    /// Under a rich gutter a fold row's Scope starts 20 sixteenths past the
+    /// divide's hairline, one run per part in its role's color, and no bar of
+    /// its own lies under it.
     #[test]
-    fn a_rich_fold_row_centers_its_scope_on_a_chip() {
-        let (_, commands, scale, _) = rich_paint(
+    fn a_rich_fold_row_starts_its_scope_past_the_divide() {
+        let (_, commands, scale, cols) = rich_paint(
             &mut fold_row_editor_with(Some(panel_scope())),
             &format!("{FOLD_THEME} {SCOPE_COLORS}"),
             false,
         );
-        let chip = commands
+        let divide = cols.sep_x.expect("two columns") * 16 + DIVIDER_RULE_X;
+        let under: Vec<BarCommand> = commands
             .iter()
-            .enumerate()
-            .find_map(|(index, command)| match command {
-                Command::Bar(bar) if bar.y == 1 && bar.height == SCOPE_CHIP_HEIGHT => {
-                    Some((index, *bar))
-                },
+            .filter_map(|command| match command {
+                Command::Bar(bar) if bar.y == 0 && bar.x > divide as i16 => Some(*bar),
                 _ => None,
-            });
+            })
+            .collect();
         // The run batch groups runs by color, so the stream holds them out of
         // column order.
-        let mut runs: Vec<(usize, String, i16, [u8; 3])> = commands
+        let mut runs: Vec<(String, i16, [u8; 3])> = commands
             .iter()
-            .enumerate()
-            .filter_map(|(index, command)| match command {
+            .filter_map(|command| match command {
                 Command::TextRun(run) if PANEL_PARTS.iter().any(|(text, _)| run.text == *text) => {
-                    Some((index, run.text.to_string(), run.col, run.color))
+                    Some((run.text.to_string(), run.col, run.color))
                 },
                 _ => None,
             })
             .collect();
-        runs.sort_by_key(|run| run.2);
+        runs.sort_by_key(|run| run.1);
 
-        let advances =
-            PANEL_PARTS.map(|(text, _)| text_run::advance_sixteenths(text.chars().count(), scale));
-        let width = advances.iter().sum::<u16>() + 2 * SCOPE_CHIP_PAD;
-        let x = (1920 - width) / 2;
-        let cols = advances.iter().scan(x + SCOPE_CHIP_PAD, |col, advance| {
-            let at = *col;
-            *col += advance;
-            Some(at as i16)
-        });
         assert_eq!(
+            (under, runs),
             (
-                chip.map(|(_, bar)| bar),
-                runs.iter()
-                    .map(|(_, text, col, color)| (text.clone(), *col, *color))
-                    .collect::<Vec<_>>(),
-                chip.is_some_and(|(index, _)| runs.iter().all(|run| index < run.0)),
-            ),
-            (
-                Some(BarCommand {
-                    x: x as i16,
-                    y: 1,
-                    width,
-                    height: SCOPE_CHIP_HEIGHT,
-                    color: [0x30, 0x30, 0x30],
-                    occludes: false,
-                    hatch: None,
-                    radius: 0,
-                    corners: 0,
-                }),
+                Vec::new(),
                 PANEL_PARTS
                     .iter()
-                    .zip(cols)
+                    .zip(panel_cols(divide + 20, scale))
                     .map(|((text, color), col)| (text.to_string(), col, *color))
                     .collect(),
-                true,
             ),
         );
     }
 
-    /// In cells a fold row's Scope centers on the row in its roles' colors, on
-    /// the fold's background, while a hatched row fills its other cells in the
-    /// hatch color.
+    /// In cells a fold row's Scope starts two cells past the divider in its
+    /// roles' colors, on the hatch color that fills a hatched row's cells.
     #[test]
-    fn a_plain_fold_row_centers_its_scope_in_cells() {
+    fn a_plain_fold_row_starts_its_scope_two_cells_past_the_divider() {
         let buf = plain_fold_paint(
             &mut fold_row_editor_with(Some(panel_scope())),
             &format!("{HATCHED_FOLD_THEME} {SCOPE_COLORS}"),
@@ -5089,7 +5171,7 @@ mod tests {
             .iter()
             .flat_map(|(text, [r, g, b])| text.chars().map(move |ch| (ch, [*r, *g, *b])))
             .collect();
-        let start = (120 - chars.len() as u16) / 2;
+        let start = diff_divider_x(buf.area).expect("two columns") + 2;
         let rgb = |[r, g, b]: [u8; 3]| Color::Rgb(r, g, b);
         let painted: Vec<(String, Color, Color)> = (start - 1..start + chars.len() as u16 + 1)
             .map(|x| {
@@ -5107,15 +5189,15 @@ mod tests {
             .chain(
                 chars
                     .iter()
-                    .map(|&(ch, color)| (ch.to_string(), rgb(color), rgb([0x17, 0x19, 0x1e]))),
+                    .map(|&(ch, color)| (ch.to_string(), rgb(color), hatch)),
             )
             .chain([(" ".to_string(), Color::Reset, hatch)])
             .collect();
         assert_eq!(painted, expected);
     }
 
-    /// The mark of a whole added item takes `diff.added`'s color on the chip,
-    /// and the mark of a whole removed item takes `diff.deleted`'s.
+    /// The mark of a whole added item takes `diff.added`'s color, and the mark
+    /// of a whole removed item takes `diff.deleted`'s.
     #[test]
     fn a_scope_mark_takes_its_diff_color() {
         let mark_color = |mark: ScopeMark, text: &str| {
@@ -5143,10 +5225,11 @@ mod tests {
     }
 
     /// Under a rich gutter a Scope row stripes its whole row, as a fold row
-    /// does, and centers its chip over the stripes. It draws no count, no Fold
-    /// Buttons, and no line range.
+    /// does, and the divide's hairline runs through it. Its Scope starts 20
+    /// sixteenths past the divide. It draws no count, no Fold Buttons, and no
+    /// line range.
     #[test]
-    fn a_rich_scope_row_carries_its_chip_alone() {
+    fn a_rich_scope_row_carries_its_scope_alone() {
         let theme = rgb_diff_theme_with(&format!("{HATCHED_FOLD_THEME} {SCOPE_COLORS}"));
         let row = Rect::new(0, 0, 120, 1);
         let mut buf = Buffer::empty(row);
@@ -5154,6 +5237,7 @@ mod tests {
         paint_scope_row(
             &panel_scope(),
             row,
+            None,
             &theme,
             Style::default(),
             &mut buf,
@@ -5170,86 +5254,84 @@ mod tests {
                 _ => None,
             })
             .collect();
-        let mut texts: Vec<String> = commands
+        let mut runs: Vec<(i16, String)> = commands
             .iter()
             .filter_map(|command| match command {
-                Command::TextRun(run) => Some(run.text.to_string()),
+                Command::TextRun(run) => Some((run.col, run.text.to_string())),
                 _ => None,
             })
             .collect();
-        texts.sort();
+        runs.sort();
 
-        let scale = theme.type_scale(TypeRole::Small);
-        let width = PANEL_PARTS
-            .iter()
-            .map(|(text, _)| text_run::advance_sixteenths(text.chars().count(), scale))
-            .sum::<u16>()
-            + 2 * SCOPE_CHIP_PAD;
-        let mut parts: Vec<String> = PANEL_PARTS
-            .iter()
-            .map(|(text, _)| text.to_string())
-            .collect();
-        parts.sort();
+        let divide = diff_divider_x(row).expect("two columns") * 16 + DIVIDER_RULE_X;
+        let parts = panel_cols(divide + 20, theme.type_scale(TypeRole::Small))
+            .into_iter()
+            .zip(PANEL_PARTS.map(|(text, _)| text.to_string()))
+            .collect::<Vec<_>>();
         assert_eq!(
-            (bars, texts),
+            (bars, runs),
             (
-                vec![
-                    (0, 0, 1920, 16, true),
-                    (
-                        ((1920 - width) / 2) as i16,
-                        1,
-                        width,
-                        SCOPE_CHIP_HEIGHT,
-                        false
-                    ),
-                ],
+                vec![(0, 0, 1920, 16, true), (divide as i16, 0, 1, 16, false)],
                 parts,
             ),
         );
     }
 
-    /// In cells a Scope row fills in the hatch color and centers its chip on the
-    /// fold's background, with no count, no Fold Buttons, and no line range.
+    /// In cells a Scope row fills in the hatch color, with no count, no Fold
+    /// Buttons, and no line range. Its Scope starts two cells past the
+    /// divider, or one cell in on a row too narrow for a divider.
     #[test]
-    fn a_plain_scope_row_centers_its_chip_on_the_fill() {
+    fn a_plain_scope_row_starts_its_scope_two_cells_past_the_divider() {
         let theme = rgb_diff_theme_with(&format!("{HATCHED_FOLD_THEME} {SCOPE_COLORS}"));
-        let row = Rect::new(0, 0, 120, 1);
-        let mut buf = Buffer::empty(row);
-        paint_scope_row(
-            &panel_scope(),
-            row,
-            &theme,
-            Style::default(),
-            &mut buf,
-            None,
-            false,
-        );
+        let paint = |width: u16| {
+            let row = Rect::new(0, 0, width, 1);
+            let mut buf = Buffer::empty(row);
+            paint_scope_row(
+                &panel_scope(),
+                row,
+                None,
+                &theme,
+                Style::default(),
+                &mut buf,
+                None,
+                false,
+            );
+            let hatched = (0..width).all(|x| buf[(x, 0)].bg == Color::Rgb(0x1b, 0x1d, 0x22));
+            (line_text(&buf, 0, 0..width), hatched)
+        };
 
         let text: String = PANEL_PARTS.iter().map(|(text, _)| *text).collect();
-        let len = text.chars().count() as u16;
-        let chip = (120 - len) / 2..(120 + len) / 2;
-        let backgrounds: Vec<Color> = (0..120).map(|x| buf[(x, 0)].bg).collect();
-        assert_eq!(
-            (line_text(&buf, 0, 0..120), backgrounds),
+        let row = |width: usize, start: usize| {
+            let end = width - start - text.chars().count();
             (
-                format!(
-                    "{}{text}{}",
-                    " ".repeat(usize::from(chip.start)),
-                    " ".repeat(usize::from(120 - chip.end))
-                ),
-                (0..120)
-                    .map(|x| match chip.contains(&x) {
-                        true => Color::Rgb(0x17, 0x19, 0x1e),
-                        false => Color::Rgb(0x1b, 0x1d, 0x22),
-                    })
-                    .collect(),
-            ),
+                format!("{}{text}{}", " ".repeat(start), " ".repeat(end)),
+                true,
+            )
+        };
+        let divider = diff_divider_x(Rect::new(0, 0, 120, 1)).expect("two columns");
+        assert_eq!(
+            [paint(120), paint(80)],
+            [row(120, usize::from(divider) + 2), row(80, 1)],
         );
     }
 
-    /// A fold row paints across both sides on the fold fill, its count past the
-    /// Fold Buttons in muted text with no number beside it, and the rows below
-    /// number their base and buffer lines past the twelve lines it stands for.
+    /// The columns the runs of [`PANEL_PARTS`] start at, at text `scale`, when
+    /// the first starts at `from`.
+    fn panel_cols(from: u16, scale: u16) -> Vec<i16> {
+        PANEL_PARTS
+            .iter()
+            .scan(from, |col, (text, _)| {
+                let at = *col;
+                *col += text_run::advance_sixteenths(text.chars().count(), scale);
+                Some(at as i16)
+            })
+            .collect()
+    }
+
+    /// A fold row paints across both sides on the fold fill. Its count, in
+    /// muted text, and its range end one cell before the divider with no
+    /// number beside them. The rows below number their base and buffer lines
+    /// past the twelve lines it stands for.
     #[test]
     fn a_fold_row_spans_both_sides_and_the_numbers_resume_below_it() {
         let mut editor = fold_row_editor();
@@ -5271,7 +5353,7 @@ mod tests {
             false,
         );
 
-        let start = FOLD_COUNT_COL / 16;
+        let start = cell_count_start();
         let fill = Color::Rgb(0x30, 0x30, 0x30);
         assert_eq!(
             (
@@ -5281,7 +5363,10 @@ mod tests {
                 number_pairs(&buf, area)[1..].to_vec(),
             ),
             (
-                row_of(&[(0, "\u{2191}"), (start, FOLD_TEXT), (115, "1\u{2013}12")]),
+                row_of(&[
+                    (0, "\u{2191}"),
+                    (start, &format!("{FOLD_COUNT}{FOLD_RANGE}"))
+                ]),
                 true,
                 Color::Rgb(0x90, 0x90, 0x90),
                 pairs(13..=21, 13..=21),
@@ -5319,8 +5404,18 @@ mod tests {
         theme_src: &str,
         decorations_only: bool,
     ) -> (Buffer, Vec<Command>, u16, DiffColumns) {
+        rich_paint_at(editor, theme_src, decorations_only, 120)
+    }
+
+    /// [`rich_paint`] over a view `width` cells wide.
+    fn rich_paint_at(
+        editor: &mut EditorState,
+        theme_src: &str,
+        decorations_only: bool,
+        width: u16,
+    ) -> (Buffer, Vec<Command>, u16, DiffColumns) {
         let theme = rgb_diff_theme_with(theme_src);
-        let area = Rect::new(0, 0, 120, 10);
+        let area = Rect::new(0, 0, width, 10);
         let mut buf = Buffer::empty(area);
         let mut scene = ApcScene::new();
         render_diff_view(
@@ -5348,12 +5443,12 @@ mod tests {
     /// A text run's `(col, row, scale, color, bg)`.
     type RunFields = (i16, i16, u16, [u8; 3], Option<[u8; 3]>);
 
-    /// The runs of `commands` that draw [`FOLD_TEXT`].
+    /// The runs of `commands` that draw [`FOLD_COUNT`].
     fn fold_runs(commands: &[Command]) -> Vec<RunFields> {
         commands
             .iter()
             .filter_map(|command| match command {
-                Command::TextRun(run) if run.text == FOLD_TEXT => {
+                Command::TextRun(run) if run.text == FOLD_COUNT => {
                     Some((run.col, run.row, run.scale, run.color, run.bg))
                 },
                 _ => None,
@@ -5361,32 +5456,40 @@ mod tests {
             .collect()
     }
 
-    /// Under a rich gutter a fold row's count is one run at the gutter's number
-    /// scale, one cell past the Fold Buttons on the fold fill, and the mid
-    /// divider breaks around the row.
+    /// Under a rich gutter a fold row's count and range are runs at the
+    /// gutter's number scale on the fold fill, which end 20 sixteenths before
+    /// the divide's hairline with the range last. The mid divider is one bar
+    /// over every row, the fold row's too.
     #[test]
-    fn a_rich_fold_row_counts_past_its_buttons_and_breaks_the_divider() {
+    fn a_rich_fold_row_ends_its_count_at_the_divide_and_keeps_the_divider() {
         let (_, commands, scale, cols) = rich_fold_row_paint(FOLD_THEME, false);
-        let divider = (cols.sep_x.expect("two columns") * 16 + DIVIDER_RULE_X) as i16;
+        let divide = cols.sep_x.expect("two columns") * 16 + DIVIDER_RULE_X;
         let divider_bars: Vec<(i16, u16)> = commands
             .iter()
             .filter_map(|command| match command {
-                Command::Bar(bar) if bar.x == divider => Some((bar.y, bar.height)),
+                Command::Bar(bar) if bar.x == divide as i16 => Some((bar.y, bar.height)),
                 _ => None,
             })
             .collect();
+        let range_col = commands.iter().find_map(|command| match command {
+            Command::TextRun(run) if run.text == FOLD_RANGE => Some(run.col),
+            _ => None,
+        });
 
+        let range = text_run::advance_sixteenths(FOLD_RANGE.chars().count(), scale);
+        let count = text_run::advance_sixteenths(FOLD_COUNT.chars().count(), scale);
         assert_eq!(
-            (fold_runs(&commands), divider_bars),
+            (fold_runs(&commands), range_col, divider_bars),
             (
                 vec![(
-                    FOLD_COUNT_COL as i16,
+                    (divide - 20 - range - count) as i16,
                     0,
                     scale,
                     [0x90, 0x90, 0x90],
                     Some([0x30, 0x30, 0x30])
                 )],
-                vec![(16, 144)],
+                Some((divide - 20 - range) as i16),
+                vec![(0, 160)],
             ),
         );
     }
@@ -5464,15 +5567,22 @@ mod tests {
             &mut fold_row_editor(),
             &format!("{HATCHED_FOLD_THEME} {BUTTON_SCOPES}"),
         );
-        let start = FOLD_COUNT_COL / 16;
         let backgrounds: Vec<Color> = (0..120).map(|x| buf[(x, 0)].bg).collect();
         assert_eq!(
-            (backgrounds, buf[(start, 0)].fg),
+            (backgrounds, buf[(cell_count_start(), 0)].fg),
             (
                 [vec![BUTTON_BOX; 2], vec![Color::Rgb(0x1b, 0x1d, 0x22); 118]].concat(),
                 Color::Rgb(0x90, 0x90, 0x90),
             ),
         );
+    }
+
+    /// The cell where the count of [`fold_row_editor`]'s fold row starts in a
+    /// plain paint 120 cells wide, which ends its range one cell before the
+    /// divider.
+    fn cell_count_start() -> u16 {
+        let divider = diff_divider_x(Rect::new(0, 0, 120, 10)).expect("two columns");
+        divider - 1 - format!("{FOLD_COUNT}{FOLD_RANGE}").chars().count() as u16
     }
 
     /// The colors of a fold row's buttons and range in the button tests.
@@ -5484,7 +5594,7 @@ mod tests {
 
     /// In cells a fold row's button paints its arrow on two cells of the box
     /// color, and the third cell keeps the fold fill. The range ends one cell
-    /// in from the right edge in the range color.
+    /// before the divider in the range color.
     #[test]
     fn a_fold_row_paints_its_button_and_range_in_cells() {
         let buf = plain_fold_paint(
@@ -5493,10 +5603,11 @@ mod tests {
         );
         let symbol = |x: u16| buf[(x, 0)].symbol().to_string();
         let range = Color::Rgb(0x5b, 0x61, 0x6d);
+        let end = diff_divider_x(buf.area).expect("two columns") - 1;
         assert_eq!(
             (
                 [0, 1, 2].map(|x| (symbol(x), buf[(x, 0)].bg)),
-                [115, 116, 117, 118, 119].map(|x| (symbol(x), buf[(x, 0)].fg)),
+                [end - 4, end - 3, end - 2, end - 1, end].map(|x| (symbol(x), buf[(x, 0)].fg)),
             ),
             (
                 [
@@ -5561,31 +5672,38 @@ mod tests {
     }
 
     /// Under a rich gutter a button is a plain bar in the box color on the
-    /// hatch, with its arrow centered over it. The range is a run that ends one
-    /// cell in from the row's right edge. Neither run takes a box of its own.
+    /// hatch, with its arrow centered over it. The range is a run that ends 20
+    /// sixteenths before the divide's hairline. Neither run takes a box of its
+    /// own.
     #[test]
-    fn a_rich_fold_row_boxes_its_button_and_right_aligns_its_range() {
-        let (_, commands, scale, _) =
+    fn a_rich_fold_row_boxes_its_button_and_ends_its_range_at_the_divide() {
+        let (_, commands, scale, cols) =
             rich_fold_row_paint(&format!("{HATCHED_FOLD_THEME} {BUTTON_SCOPES}"), false);
         let boxes: Vec<BarCommand> = commands
             .iter()
             .filter_map(|command| match command {
-                Command::Bar(bar) if bar.hatch.is_none() && bar.y == 0 => Some(*bar),
+                Command::Bar(bar) if bar.hatch.is_none() && bar.y == 0 && bar.height == 16 => {
+                    Some(*bar)
+                },
                 _ => None,
             })
             .collect();
-        let runs: Vec<(String, i16, Option<[u8; 3]>)> = commands
+        // The run batch groups runs by color, so the stream holds them out of
+        // column order.
+        let mut runs: Vec<(String, i16, Option<[u8; 3]>)> = commands
             .iter()
             .filter_map(|command| match command {
-                Command::TextRun(run) if run.text == "\u{2191}" || run.text == "1\u{2013}12" => {
+                Command::TextRun(run) if run.text == "\u{2191}" || run.text == FOLD_RANGE => {
                     Some((run.text.to_string(), run.col, run.bg))
                 },
                 _ => None,
             })
             .collect();
+        runs.sort_by_key(|run| run.1);
 
         let glyph = text_run::advance_sixteenths(1, scale);
         let range = text_run::advance_sixteenths(4, scale);
+        let divide = cols.sep_x.expect("two columns") * 16 + DIVIDER_RULE_X;
         assert_eq!(
             (boxes, runs),
             (
@@ -5602,13 +5720,87 @@ mod tests {
                 }],
                 vec![
                     ("\u{2191}".to_string(), (6 + (36 - glyph) / 2) as i16, None),
-                    (
-                        "1\u{2013}12".to_string(),
-                        (120 * 16 - 16 - range) as i16,
-                        None
-                    ),
+                    (FOLD_RANGE.to_string(), (divide - 20 - range) as i16, None),
                 ],
             ),
+        );
+    }
+
+    /// A unified fold row reads its count one cell past the Fold Buttons, its
+    /// range right after the count, and its Scope after the range. The Scope
+    /// starts 24 sixteenths after the range under a rich gutter, and two cells
+    /// after it in cells.
+    #[test]
+    fn a_unified_fold_row_reads_its_count_range_and_scope_from_the_left() {
+        let theme = format!("{FOLD_THEME} {SCOPE_COLORS}");
+        let (_, commands, scale, _) = rich_paint_at(
+            &mut fold_row_editor_with(Some(panel_scope())),
+            &theme,
+            false,
+            80,
+        );
+        let col = |text: &str| {
+            commands.iter().find_map(|command| match command {
+                Command::TextRun(run) if run.text == text => Some(run.col),
+                _ => None,
+            })
+        };
+        let buf = plain_fold_paint_at(&mut fold_row_editor_with(Some(panel_scope())), &theme, 80);
+
+        let advance = |text: &str| text_run::advance_sixteenths(text.chars().count(), scale);
+        let range_at = FOLD_COUNT_COL + advance(FOLD_COUNT);
+        let scope_at = range_at + advance(FOLD_RANGE) + 24;
+        let scope: String = PANEL_PARTS.iter().map(|(text, _)| *text).collect();
+        let cells = format!("{FOLD_COUNT}{FOLD_RANGE}  {scope}");
+        let start = FOLD_COUNT_COL / 16;
+        assert_eq!(
+            (
+                [FOLD_COUNT, FOLD_RANGE, PANEL_PARTS[0].0].map(col),
+                line_text(&buf, 0, start..start + cells.chars().count() as u16),
+            ),
+            (
+                [FOLD_COUNT_COL, range_at, scope_at].map(|col| Some(col as i16)),
+                cells,
+            ),
+        );
+    }
+
+    /// A fold row with no room for its range reads its count with no separator
+    /// after it.
+    #[test]
+    fn a_fold_row_with_no_room_for_its_range_drops_the_separator() {
+        let buf = plain_fold_paint_at(&mut fold_row_editor(), FOLD_THEME, 22);
+        assert_eq!(
+            line_text(&buf, 0, 0..22),
+            format!("\u{2191}     {}      ", "\u{22ef} 12 lines"),
+        );
+    }
+
+    /// A count and range that do not fit between the Fold Buttons and the
+    /// divide drop the range, and the count ends against the divide alone. A
+    /// unified range that passes the row's right edge drops, and the Scope
+    /// follows the count.
+    #[test]
+    fn a_fold_row_drops_the_range_that_does_not_fit() {
+        let places = |divide, width| fold_places(divide, width, (100, 30, Some(60)), RUN_SPACING);
+        let place = |count, range, scope| FoldPlaces {
+            count,
+            range,
+            scope,
+        };
+        assert_eq!(
+            [
+                places(Some(400), 2000),
+                places(Some(250), 2000),
+                places(None, 2000),
+                places(None, 300),
+            ],
+            [
+                place(190, Some(320), 420),
+                place(130, None, 270),
+                place(98, Some(228), 312),
+                place(98, None, 222),
+            ],
         );
     }
 
@@ -5705,7 +5897,12 @@ mod tests {
     /// `editor` painted over 120 by 10 in plain cells under the settings
     /// `theme_src` adds.
     fn plain_fold_paint(editor: &mut EditorState, theme_src: &str) -> Buffer {
-        let area = Rect::new(0, 0, 120, 10);
+        plain_fold_paint_at(editor, theme_src, 120)
+    }
+
+    /// [`plain_fold_paint`] over a view `width` cells wide.
+    fn plain_fold_paint_at(editor: &mut EditorState, theme_src: &str, width: u16) -> Buffer {
+        let area = Rect::new(0, 0, width, 10);
         let mut buf = Buffer::empty(area);
         render_diff_view(
             editor,
