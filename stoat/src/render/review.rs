@@ -7213,10 +7213,11 @@ mod tests {
             .unwrap_or_else(|| panic!("no row across {cols:?} starts with {needle:?}"))
     }
 
-    /// The status row names both sides with the cursor on the top row, and
-    /// again once the base switches to the index.
+    /// The status row reads the diff's metrics left of the divider and the
+    /// pane's own row right of it, with the cursor on the top row, and again
+    /// once the base switches to the index.
     #[test]
-    fn the_diff_view_names_both_sides_in_its_status_row() {
+    fn the_diff_view_s_status_row_splits_into_metrics_and_a_pane_row() {
         let mut h = diff_harness("a\nb\nc\nold\n", "a\nb\nc\nnew\n");
         let head = status_row_in_both_frames(&mut h);
 
@@ -7226,26 +7227,38 @@ mod tests {
         h.settle_diff_jobs();
         let index = status_row_in_both_frames(&mut h);
 
-        // A rich frame lays each segment out at the Ui scale, which can close
-        // the space between a mark and its name, so the parts are looked for
-        // apart.
-        let names = |row: &String, base: &str| {
-            [base, "working tree", "\u{2212}", "+"]
-                .iter()
-                .all(|part| row.contains(part))
+        // The divider is column 59 of the 120-wide body, and its cell holds
+        // neither half's words.
+        let halves = |row: &String| {
+            let cells: Vec<char> = row.chars().collect();
+            let words = |cells: &[char]| {
+                let text: String = cells.iter().collect();
+                text.replace('─', " ")
+                    .split_whitespace()
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            };
+            [words(&cells[..59]), words(&cells[60..])]
+        };
+        let expected = |base: &str| {
+            [
+                format!("vs {base} \u{b7} structural diff \u{b7} hunk - / 1 +1 \u{2212}1"),
+                "NOR repo a.rs 1:1".to_string(),
+            ]
         };
         assert_eq!(
+            (head.each_ref().map(halves), index.each_ref().map(halves)),
             (
-                head.each_ref().map(|row| names(row, "HEAD")),
-                index.each_ref().map(|row| names(row, "index")),
+                [expected("HEAD"), expected("HEAD")],
+                [expected("index"), expected("index")]
             ),
-            ([true, true], [true, true]),
-            "{head:?} then {index:?}",
         );
     }
 
     /// The halves sit on the window ground on both sides of the diff's divider
-    /// column and on it, as the revised boards draw the footer.
+    /// column and on it, as the revised boards draw the footer. Only the mode
+    /// chip, which leads the target half from column 60, takes a fill of its
+    /// own.
     #[test]
     fn the_status_halves_sit_on_the_window_ground() {
         use ratatui::style::Color;
@@ -7256,16 +7269,19 @@ mod tests {
             h.snapshot();
             let buf = h.rendered_buffer();
             let y = buf.area.height - 1;
-            [58, 59, 60].map(|x| buf[(x, y)].bg)
+            [0..60, 60..65, 65..120].map(|xs| bg_runs(buf, y, xs))
         });
 
-        let expected = [Color::Rgb(0x0c, 0x0e, 0x11); 3];
-        assert_eq!(fills, [expected, expected], "in both frames");
+        let rgb = |hex: u32| Color::Rgb((hex >> 16) as u8, (hex >> 8) as u8, hex as u8);
+        let expected = [0x0c0e11, 0x7fb0ff, 0x0c0e11].map(|hex| vec![rgb(hex)]);
+        assert_eq!(fills, [expected.clone(), expected], "in both frames");
     }
 
     /// A diff view's minimap strip narrows the diff body, so the body's
     /// divider sits at column 56 of 121, left of the content's middle. The
-    /// status halves meet there, under the divider's hairline.
+    /// status halves meet there, under the divider's hairline. The base half
+    /// takes the divider's cell, and the target half's mode chip starts past
+    /// it.
     #[test]
     fn the_status_halves_meet_at_the_divider_beside_the_strip() {
         use ratatui::style::Color;
@@ -7292,14 +7308,15 @@ mod tests {
                 [55, 56, 57].map(|x| buf[(x, y)].bg),
                 hairlines,
             ),
-            (Some(7), [rgb(0x0c0e11); 3], 1),
+            (Some(7), [0x0c0e11, 0x0c0e11, 0x7fb0ff].map(rgb), 1),
         );
     }
 
-    /// A diff too narrow for two columns keeps one status bar, and names its
-    /// sides there on the window ground, past the mode chip.
+    /// A diff too narrow for two columns keeps one status bar on the window
+    /// ground past the mode chip, and reads the diff's metrics there after the
+    /// file name.
     #[test]
-    fn a_unified_diff_names_its_sides_in_one_bar_on_the_ground() {
+    fn a_unified_diff_reads_its_metrics_in_one_bar_on_the_ground() {
         use ratatui::style::Color;
 
         let mut h = diff_harness_sized(80, "a\nb\nc\nold\n", "a\nb\nc\nnew\n");
@@ -7308,19 +7325,29 @@ mod tests {
             h.stoat.stoatty = stoatty;
             h.snapshot();
             let buf = h.rendered_buffer();
-            let y = buf.area.height - 1;
-            let mut runs: Vec<Color> = Vec::new();
-            for x in 0..buf.area.width {
-                let bg = buf[(x, y)].bg;
-                if runs.last() != Some(&bg) {
-                    runs.push(bg);
-                }
-            }
-            runs
+            bg_runs(buf, buf.area.height - 1, 0..buf.area.width)
         });
+        let words: Vec<String> = status_row_in_both_frames(&mut h)
+            .iter()
+            .map(|row| {
+                row.replace('─', " ")
+                    .split_whitespace()
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            })
+            .collect();
 
         let expected = [0x7fb0ff, 0x0c0e11].map(rgb);
-        assert_eq!(runs, [expected, expected].map(Vec::from), "in both frames");
+        let text =
+            "NOR repo a.rs vs HEAD \u{b7} structural diff \u{b7} hunk - / 1 +1 \u{2212}1 1:1";
+        assert_eq!(
+            (runs, words),
+            (
+                [expected, expected].map(Vec::from),
+                vec![text.to_string(); 2]
+            ),
+            "in both frames",
+        );
     }
 
     #[test]

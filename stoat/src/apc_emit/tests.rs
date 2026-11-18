@@ -3123,12 +3123,13 @@ fn detached_pane_status_row_names_its_file_and_no_sides() {
     );
 }
 
-/// A detached diff view's status row splits at the diff's divider and names
-/// its sides there, as a split row in the main window does, and so does a
-/// detached changes view's row. Past the mode chip both halves and the
-/// divider's cell sit on the window ground.
+/// A detached diff view's status row splits at the diff's divider into the
+/// diff's metrics and the pane's own row, as a split row in the main window
+/// does, and so does a detached changes view's row. Both halves and the
+/// divider's cell sit on the window ground, and the mode chip leads the
+/// target half.
 #[test]
-fn a_detached_diff_view_s_row_names_its_sides_at_the_divider() {
+fn a_detached_diff_view_s_row_splits_at_the_divider() {
     let split = detached_diff_row(|h| {
         action_handlers::focused_editor_mut(&mut h.stoat)
             .expect("focused editor")
@@ -3140,18 +3141,18 @@ fn a_detached_diff_view_s_row_names_its_sides_at_the_divider() {
     });
 
     let rgb = |hex: u32| Some(Color::Rgb((hex >> 16) as u8, (hex >> 8) as u8, hex as u8));
-    let halves = vec![(rgb(0x7fb0ff), 5), (rgb(0x0c0e11), 115)];
-    let row = |base: &str| {
+    let halves = vec![(rgb(0x0c0e11), 60), (rgb(0x7fb0ff), 5), (rgb(0x0c0e11), 55)];
+    let row = |metrics: &str| {
         (
             halves.clone(),
-            [base.to_string(), "+ working tree 1:1".into()],
+            [metrics.to_string(), "NOR repo a.rs 1:1".into()],
         )
     };
     assert_eq!(
         [split, changes],
         [
-            row("NOR structural diff hunk - / 1 \u{2212} HEAD"),
-            row("NOR changes hunk - / 1 \u{b7} 1 file \u{b7} +1 \u{2212}1 \u{2212} HEAD"),
+            row("vs HEAD \u{b7} structural diff \u{b7} hunk - / 1 +1 \u{2212}1"),
+            row("vs HEAD \u{b7} 1 file \u{b7} hunk - / 1 +1 \u{2212}1"),
         ],
     );
 }
@@ -8531,12 +8532,13 @@ fn diff_status_halves_emit_ui_scale_runs_under_stoatty() {
 
     assert_eq!(
         (
-            ui_run("HEAD"),
-            ui_run("working tree"),
-            status_row.contains("working tree"),
+            ui_run("vs HEAD \u{b7} structural diff \u{b7} hunk - / 1"),
+            ui_run("2:1"),
+            status_row.contains("structural diff"),
         ),
         (true, true, false),
-        "each name streams as a Ui-scale run on the status row, with no grid text",
+        "the metrics and the position stream as Ui-scale runs on the status row, with no grid \
+         text",
     );
 }
 

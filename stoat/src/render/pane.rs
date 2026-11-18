@@ -4,7 +4,7 @@ use crate::{
     blame::{self, LineBlame},
     buffer::BufferId,
     buffer_registry::{BufferRegistry, ReadOnly},
-    diff_changes::{DiffChangesId, DiffChangesState},
+    diff_changes::{DiffChangesId, DiffChangesState, ExcerptStats},
     diff_map::MarkKind,
     display_map::FoldScope,
     editor_state::{EditorId, EditorState},
@@ -70,16 +70,6 @@ pub(super) const MINIMAP_MAX_COLUMNS: u8 = 120;
 /// The corner radius of a strip's viewport band, in logical px, as the Editor
 /// and ReadOnly boards round it.
 pub(super) const MINIMAP_THUMB_RADIUS: u8 = 4;
-
-/// How far a diff half's fill moves from the status bar's toward the side's
-/// status color, for a theme that sets no `diff.sides` fill.
-const SIDE_FILL_TINT: f32 = 0.12;
-
-/// How far a diff half's text moves from the bar's toward the status color.
-const SIDE_TEXT_TINT: f32 = 0.15;
-
-/// How far a side's name lifts from its status color toward white.
-const SIDE_NAME_LIFT: f32 = 0.4;
 
 /// The tab bar's conflict chip's `padding: 0 8px`, in sixteenths.
 const CHIP_PAD: u16 = 8;
@@ -778,8 +768,8 @@ pub(crate) fn dim_pane(area: Rect, is_focused: bool, frame: FrameCtx<'_>, buf: &
     }
 }
 
-/// The names a diff view's status row gives its two sides for the file at
-/// `path`.
+/// The names of the two sides a diff view compares for the file at `path`, as
+/// `(base, target)`.
 ///
 /// A pair names the sides of its own file, and the workspace base names those
 /// of every other file.
@@ -788,20 +778,20 @@ fn diff_sides_for<'a>(path: Option<&Path>, frame: FrameCtx<'a>) -> (&'a str, &'a
         .map_or(frame.diff_sides, |(from, to)| (from.as_str(), to.as_str()))
 }
 
-/// Where a diff view's status row names the base and the target it compares.
+/// Where a diff view's status row reads the diff's git metrics.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum SidesLayout {
     /// The row splits at this column, the diff's divider, into a base half and
-    /// a target half. The base name ends at the divider and the target name
-    /// starts past it, so each name sits under its own column.
+    /// a target half. The base half reads the metrics, and the target half is
+    /// the pane's own row.
     Split(u16),
-    /// The row runs whole and names both sides after its lead segments. A
-    /// unified diff has no divider for the names to meet at.
+    /// The row runs whole and reads the metrics after the file name. A unified
+    /// diff has no divider to split at.
     Inline,
 }
 
-/// How the status row of a pane showing `view` over `content` names the diff
-/// sides, or `None` for a pane that shows no diff.
+/// How the status row of a pane showing `view` over `content` lays out the
+/// diff's metrics, or `None` for a pane that shows no diff.
 ///
 /// The divider is the column the diff body splits at. The body leaves out the
 /// pane's minimap strip, so the divider does too.
@@ -822,127 +812,6 @@ fn sides_layout(
 
     let (inner, _) = split_minimap_strip(content, frame.minimap_enabled);
     Some(review::diff_divider_x(inner).map_or(SidesLayout::Inline, SidesLayout::Split))
-}
-
-/// The colors of both halves of a split diff view's status row.
-///
-/// The base half tints toward the removal color and the target half toward
-/// the addition color, so each half reads as the side of the diff above it.
-#[derive(Clone, Copy, Debug, PartialEq)]
-struct DiffSidesColors {
-    base: DiffSideColors,
-    target: DiffSideColors,
-    /// The screen label that leads the base half, such as `structural diff`.
-    label: Color,
-}
-
-impl DiffSidesColors {
-    /// The halves' colors in `theme`.
-    ///
-    /// Each channel a `diff.sides` scope sets wins. An unset one tints the
-    /// focused status bar toward the side's status color, and an unset name
-    /// lifts that color toward white. The label takes the base name's color
-    /// where neither its scope nor a parent sets a foreground.
-    ///
-    /// No color depends on the pane's focus.
-    fn resolve(theme: &crate::theme::Theme) -> Self {
-        use crate::theme::scope;
-        let bar = theme.get(scope::UI_STATUSBAR_FOCUSED);
-        let base = DiffSideColors::resolve(
-            theme,
-            bar,
-            (scope::DIFF_SIDES_BASE, scope::DIFF_SIDES_BASE_NAME),
-            scope::DIFF_DELETED,
-        );
-        Self {
-            base,
-            target: DiffSideColors::resolve(
-                theme,
-                bar,
-                (scope::DIFF_SIDES_TARGET, scope::DIFF_SIDES_TARGET_NAME),
-                scope::DIFF_ADDED,
-            ),
-            label: theme
-                .try_get(scope::DIFF_SIDES_BASE_LABEL)
-                .and_then(|style| style.fg)
-                .unwrap_or(base.name),
-        }
-    }
-}
-
-/// The colors one half of a split diff view's status row paints in.
-#[derive(Clone, Copy, Debug, PartialEq)]
-struct DiffSideColors {
-    /// The half's fill.
-    bg: Color,
-    /// The half's plain text, such as the hunk count.
-    fg: Color,
-    /// The side's name, and the other bright text of its half.
-    name: Color,
-    /// The `U+2212` or `+` ahead of the name, the side's status color itself.
-    mark: Color,
-}
-
-impl DiffSideColors {
-    /// The colors of one half, from its `(half, name)` scopes and its `status`
-    /// scope.
-    fn resolve(
-        theme: &crate::theme::Theme,
-        bar: Style,
-        (half, name): (&str, &str),
-        status: &str,
-    ) -> Self {
-        let bar_bg = bar.bg.unwrap_or_else(|| crate::render::themed_bg(theme));
-        let bar_fg = bar.fg.unwrap_or_else(|| crate::render::themed_fg(theme));
-        let mark = theme.get(status).fg.unwrap_or(bar_fg);
-        let set = theme.try_get(half).unwrap_or_default();
-
-        Self {
-            bg: set
-                .bg
-                .unwrap_or_else(|| tint_color(bar_bg, mark, SIDE_FILL_TINT)),
-            fg: set
-                .fg
-                .unwrap_or_else(|| tint_color(bar_fg, mark, SIDE_TEXT_TINT)),
-            name: theme
-                .try_get(name)
-                .and_then(|style| style.fg)
-                .unwrap_or_else(|| tint_color(mark, Color::Rgb(255, 255, 255), SIDE_NAME_LIFT)),
-            mark,
-        }
-    }
-
-    /// The half's fill, and the style its plain segments inherit, over the
-    /// bar's own `style`.
-    fn style(self, bar: Style) -> Style {
-        bar.fg(self.fg).bg(self.bg)
-    }
-
-    /// The side's mark and name over `style`, in reading order.
-    ///
-    /// The name is bold where the bar paints cells. The rich bar carries no
-    /// weight, so there the name reads by its color alone.
-    fn pair(self, mark: char, name: &str, style: Style) -> [StatusSeg; 2] {
-        [
-            (format!(" {mark}"), style.fg(self.mark)),
-            (
-                format!(" {name} "),
-                style.fg(self.name).add_modifier(Modifier::BOLD),
-            ),
-        ]
-    }
-}
-
-/// `from` moved `amount` of the way to `to`, or `from` unchanged when either
-/// color is not RGB.
-fn tint_color(from: Color, to: Color, amount: f32) -> Color {
-    match (style_rgb(Some(from)), style_rgb(Some(to))) {
-        (Some(from), Some(to)) => {
-            let [r, g, b] = review::tint_rgb(from, to, amount);
-            Color::Rgb(r, g, b)
-        },
-        _ => from,
-    }
 }
 
 /// The empty rect along the bottom edge of `pane_area` that the pane's LSP
@@ -1234,66 +1103,7 @@ pub(crate) fn render_pane_status(
         View::Editor(id) => editors.get_mut(id).map(|e| &mut e.status_scene_cache),
         _ => None,
     };
-    if render_status_runs(&status.runs, frame, buf, scene, cache) {
-        draw_divider_cell(&status.runs, frame.theme, buf, scene);
-    }
-}
-
-/// Draw the cell between the two halves of a split status row `runs` as the
-/// base half's fill up to the diff's hairline and the target half's fill past
-/// it, with one pixel of window ground under the hairline.
-///
-/// The ground pixel is a bar with the hairline's own geometry, drawn last, so
-/// it lands on the hairline's pixel whichever way the bar shader rounds the
-/// cell's middle. A row with no such cell, a color outside RGB, or a theme
-/// whose halves both sit on the ground draws nothing, and the cell keeps the
-/// window ground.
-fn draw_divider_cell(
-    runs: &[StatusRun],
-    theme: &crate::theme::Theme,
-    buf: &mut Buffer,
-    scene: &mut ApcScene,
-) {
-    let [base, target] = runs else {
-        return;
-    };
-    if target.area.x != base.area.right() + 1 {
-        return;
-    }
-    let colors = (|| {
-        Some((
-            style_rgb(base.style.bg)?,
-            style_rgb(target.style.bg)?,
-            style_rgb(Some(crate::render::themed_bg(theme)))?,
-        ))
-    })();
-    let Some((base_bg, target_bg, ground)) = colors else {
-        return;
-    };
-    if base_bg == ground && target_bg == ground {
-        return;
-    }
-
-    // Bars of different colors overlap here, so they render one at a time in
-    // draw order rather than through a batch, which groups them by color.
-    let cell = Rect::new(base.area.right(), base.area.y, 1, 1);
-    let rule = review::DIVIDER_RULE_X;
-    for (x, width, color) in [
-        (0, rule, base_bg),
-        (rule, 16 - rule, target_bg),
-        (rule, 1, ground),
-    ] {
-        Bar {
-            x: x as i16,
-            y: 0,
-            width,
-            height: 16,
-            color,
-            radius: 0,
-            corners: 0,
-        }
-        .render(cell, buf, scene);
-    }
+    render_status_runs(&status.runs, frame, buf, scene, cache);
 }
 
 /// The segments of one pane's status, laid out in its status row.
@@ -1313,11 +1123,9 @@ pub(crate) struct StatusRow {
 /// each of its ends.
 ///
 /// A plain row is one run across its width. A split diff view's row is two,
-/// its base half and its target half, with a cell of window ground between
-/// them at the diff's divider. Under a live scene that cell takes each half's
-/// fill on its side of the diff's hairline and keeps one pixel of ground under
-/// it, as [`draw_divider_cell`] draws it. A theme whose halves sit on the
-/// ground draws no bar there.
+/// its base half and its target half. The base half takes the cell at the
+/// diff's divider, which holds no segment, so the row's fill and hairline run
+/// unbroken under the divide.
 #[derive(Default, Hash)]
 struct StatusRun {
     /// The cells the run fills.
@@ -1329,8 +1137,7 @@ struct StatusRun {
     style: Style,
     left: Vec<StatusSeg>,
     right: Vec<StatusSeg>,
-    /// Whether the run draws the bar's hairline along its top. A half's tint
-    /// already sets it apart from the content, so the halves draw none.
+    /// Whether the run draws the bar's hairline along its top.
     hairline: bool,
     /// Runs of left segments that a live scene draws in one box of whole
     /// cells each, such as the mode chip and a tab.
@@ -2247,16 +2054,17 @@ fn status_message_style(base_style: Style, theme: &crate::theme::Theme) -> Style
 /// cell arithmetic [`paint_segment`] applies, so a segment enters the list only
 /// where it paints, and the `lsp_message` truncation matches the paint.
 ///
-/// `area` is the whole row. With `sides`, the row names the base and the
-/// target of a diff. A split row is two runs. The lead segments fill the base
-/// half, and the trailing ones fill the target half. A diff's row leaves out
-/// the workspace name, the file name, and the staged label, since the tab
-/// names the file, and its lead names the hunk the cursor stands in.
+/// `area` is the whole row. With `sides`, the row shows a diff. It reads the
+/// diff's git metrics, as [`diff_metrics`] words them, beside a normal pane
+/// row. A split row is two runs. The base half reads the metrics from its left
+/// edge and the counts against the divide, and the target half is the pane
+/// row. An inline row reads the metrics after the file name. A diff's row
+/// leaves out the screen label and the staged label, since the metrics name
+/// the diff's kind and its base.
 ///
-/// A changes view's lead names the Scope under the cursor before the hunk. The
-/// Scope takes the room that the rest of the lead and the side names in its
-/// run leave. After the hunk, the lead counts the stack, as [`stack_summary`]
-/// describes.
+/// A focused changes view names the Scope under the cursor after the file
+/// name. The Scope takes the room that the rest of the pane row leaves, less
+/// the position's, so the position keeps its place.
 ///
 /// With `blame`, the row names the commit of the cursor line left of the
 /// position, as [`blame_label`] words it. Before the blame lands, it names
@@ -2284,20 +2092,19 @@ fn status_segments(
     let segments = status_segments_area(area, frame.badge_cover);
     let end_x = segments.x + segments.width;
 
-    let colors = sides.map(|_| DiffSidesColors::resolve(theme));
     let split = match sides {
-        Some(SidesLayout::Split(divider)) => {
-            colors.map(|colors| (split_halves(area, divider, frame.badge_cover), colors))
-        },
+        Some(SidesLayout::Split(divider)) => Some(split_halves(area, divider, frame.badge_cover)),
         _ => None,
     };
-    let lead_style = split.map_or(bar_style, |(_, colors)| colors.base.style(bar_style));
-    let trail_style = split.map_or(bar_style, |(_, colors)| colors.target.style(bar_style));
-    let lead_end = split.map_or(end_x, |([(_, base), _], _)| base.right());
-    let trail_end = split.map_or(end_x, |([_, (_, target)], _)| target.right());
+    // A split row's pane segments fill its target half, since the base half
+    // holds the diff's metrics.
+    let (pane_x, pane_end) = match split {
+        Some([_, (_, target)]) => (target.x, target.right()),
+        None => (area.x, end_x),
+    };
 
     let mut left: Vec<(String, Style)> = Vec::new();
-    let mut cursor = area.x;
+    let mut cursor = pane_x;
     // The prompt takes the identifying left segments for as long as it is open.
     // The typed text is what the user needs to read mid-type. The workspace,
     // screen and file names are context they already have.
@@ -2311,8 +2118,8 @@ fn status_segments(
     let conflict = frame
         .conflict_position
         .filter(|_| is_focused && frame.screen == Some("conflict"));
-    // A changes view names the Scope under its cursor after the screen label.
-    // The Scope takes the room that the rest of the lead leaves, so it goes in
+    // A changes view names the Scope under its cursor after the file name.
+    // The Scope takes the room that the rest of the row leaves, so it goes in
     // at this index after the rest is in.
     let mut scope_at = None;
     let mut chip_end = None;
@@ -2322,30 +2129,30 @@ fn status_segments(
         push_left(
             &mut left,
             &mut cursor,
-            lead_end,
+            pane_end,
             format!(" {label} "),
             mode_style,
         );
         chip_end = Some(cursor);
         if let Some(prompt) = prompt {
-            push_prompt(&mut left, &mut cursor, lead_end, prompt, lead_style);
+            push_prompt(&mut left, &mut cursor, pane_end, prompt, bar_style);
         } else {
-            if !frame.tab_bar_shown && sides.is_none() {
+            if !frame.tab_bar_shown {
                 push_left(
                     &mut left,
                     &mut cursor,
-                    lead_end,
+                    pane_end,
                     format!(" {} ", frame.workspace_name),
-                    lead_style.add_modifier(Modifier::BOLD),
+                    bar_style.add_modifier(Modifier::BOLD),
                 );
             }
             if let Some(modal_label) = modal {
                 push_left(
                     &mut left,
                     &mut cursor,
-                    lead_end,
+                    pane_end,
                     format!(" {modal_label} "),
-                    lead_style,
+                    bar_style,
                 );
             } else if let Some(position) = conflict {
                 let at = position
@@ -2354,46 +2161,22 @@ fn status_segments(
                 push_left(
                     &mut left,
                     &mut cursor,
-                    lead_end,
+                    pane_end,
                     format!(
                         " {} \u{b7} chunk {at} / {} ",
                         position.operation, position.chunk_total
                     ),
-                    tinted(lead_style, theme, crate::theme::scope::UI_TEXT),
+                    tinted(bar_style, theme, crate::theme::scope::UI_TEXT),
                 );
-            } else if let Some((screen_label, screen_color)) = screen_segment(frame.screen, theme) {
-                let screen_color = split.map_or(screen_color, |(_, colors)| colors.label);
+            } else if let Some((screen_label, screen_color)) =
+                screen_segment(frame.screen, theme).filter(|_| sides.is_none())
+            {
                 push_left(
                     &mut left,
                     &mut cursor,
-                    lead_end,
+                    pane_end,
                     format!(" {screen_label} "),
-                    lead_style.fg(screen_color),
-                );
-                if let View::DiffChanges(id) = view {
-                    scope_at = Some((*id, left.len()));
-                }
-            }
-            if let Some(position) = frame.hunk_position.as_ref().filter(|_| sides.is_some()) {
-                let at = position
-                    .hunk_at
-                    .map_or_else(|| "-".to_string(), |k| k.to_string());
-                let stack = match view {
-                    View::DiffChanges(id) => changes
-                        .get(*id)
-                        .map_or_else(Vec::new, |state| stack_summary(state, buffers)),
-                    _ => Vec::new(),
-                };
-                let lead: Vec<String> =
-                    std::iter::once(format!("hunk {at} / {}", position.hunk_total))
-                        .chain(stack)
-                        .collect();
-                push_left(
-                    &mut left,
-                    &mut cursor,
-                    lead_end,
-                    format!(" {} ", lead.join(" \u{b7} ")),
-                    lead_style,
+                    bar_style.fg(screen_color),
                 );
             }
         }
@@ -2409,23 +2192,24 @@ fn status_segments(
         changes,
     );
     let cursor_pos = status.cursor_pos;
+    let metrics =
+        sides.map(|_| diff_metrics(view, status.buffer_id, is_focused, frame, buffers, changes));
     if let Some(name) = &status.filename
         && prompt.is_none()
         && modal.is_none()
-        && sides.is_none()
         && conflict.is_none()
     {
         // A name that opens the row or meets the mode chip takes a pad cell,
         // so it stands clear of the row's edge or of the chip's box.
-        let left_pad = if cursor == area.x || chip_end == Some(cursor) {
+        let left_pad = if cursor == pane_x || chip_end == Some(cursor) {
             " "
         } else {
             ""
         };
         let name_style = if is_focused {
-            tinted(lead_style, theme, crate::theme::scope::UI_TEXT)
+            tinted(bar_style, theme, crate::theme::scope::UI_TEXT)
         } else {
-            lead_style
+            bar_style
         };
         let segments = name_segments(
             name,
@@ -2433,11 +2217,14 @@ fn status_segments(
             status.dirty,
             status.buffer_id.is_some(),
             name_style,
-            lead_style,
+            bar_style,
             theme,
         );
         for (text, style) in segments {
-            push_left(&mut left, &mut cursor, lead_end, text, style);
+            push_left(&mut left, &mut cursor, pane_end, text, style);
+        }
+        if is_focused && let View::DiffChanges(id) = view {
+            scope_at = Some((*id, left.len()));
         }
         if let Some(note) = read_only_note(
             status.read_only,
@@ -2445,18 +2232,28 @@ fn status_segments(
             status.text_len,
             status.revision.as_deref(),
         ) {
-            let muted = muted_tint(lead_style, theme);
-            push_left(&mut left, &mut cursor, lead_end, note, muted);
+            let muted = muted_tint(bar_style, theme);
+            push_left(&mut left, &mut cursor, pane_end, note, muted);
         }
         if blame {
-            let muted = muted_tint(lead_style, theme);
+            let muted = muted_tint(bar_style, theme);
             push_left(
                 &mut left,
                 &mut cursor,
-                lead_end,
+                pane_end,
                 " blame ".to_owned(),
                 muted,
             );
+        }
+    }
+    // An inline row has no base half, so its metrics follow the file name.
+    if let Some(metrics) = metrics
+        .as_ref()
+        .filter(|_| split.is_none() && prompt.is_none() && modal.is_none())
+    {
+        let (text, counts) = metric_segments(metrics, bar_style, theme);
+        for (text, style) in std::iter::once(text).chain(counts) {
+            push_left(&mut left, &mut cursor, pane_end, text, style);
         }
     }
     // A lone cursor paints no count, since the count only answers how many
@@ -2465,11 +2262,11 @@ fn status_segments(
         && count > 1
         && prompt.is_none()
     {
-        let muted = muted_tint(lead_style, theme);
+        let muted = muted_tint(bar_style, theme);
         push_left(
             &mut left,
             &mut cursor,
-            lead_end,
+            pane_end,
             format!(" {count} sel "),
             muted,
         );
@@ -2482,84 +2279,40 @@ fn status_segments(
         push_left(
             &mut left,
             &mut cursor,
-            lead_end,
+            pane_end,
             format!("[for {label}] "),
-            lead_style.add_modifier(Modifier::BOLD),
+            bar_style.add_modifier(Modifier::BOLD),
         );
     }
 
-    let mut base_right: Vec<StatusSeg> = Vec::new();
-    let mut target_left: Vec<StatusSeg> = Vec::new();
-    if let Some(colors) = colors {
-        let path = status.buffer_id.and_then(|id| buffers.path_for(id));
-        let (base_name, target_name) = diff_sides_for(path, frame);
-        let scope = scope_at.and_then(|(id, at)| {
-            let scope = changes.get_mut(id)?.cursor_scope(editors, buffers)?;
-            Some((at, scope))
-        });
-        if let Some((at, scope)) = scope {
-            let pair_width = |side: DiffSideColors, mark: char, name: &str| -> u16 {
-                side.pair(mark, name, lead_style)
-                    .iter()
-                    .map(|(text, _)| text.chars().count() as u16)
-                    .sum()
-            };
-            // A split row's target pair packs in the target half, so only the
-            // base pair shares the lead's run.
-            let names = match split {
-                Some(_) => pair_width(colors.base, '\u{2212}', base_name),
-                None => {
-                    pair_width(colors.base, '\u{2212}', base_name)
-                        + pair_width(colors.target, '+', target_name)
-                },
-            };
-            let room = lead_end.saturating_sub(cursor).saturating_sub(names);
-            let runs = scope_runs(&scope, room, lead_style, theme);
-            let width: u16 = runs
-                .iter()
-                .map(|(text, _)| text.chars().count() as u16)
-                .sum();
-            cursor = cursor.saturating_add(width).min(lead_end);
-            left.splice(at..at, runs);
-        }
-        match split {
-            // The trailing segments pack against the target half's lead from
-            // here, since the base half's run ends at the divider.
-            Some(([_, (_, target)], _)) => {
-                (base_right, target_left, cursor) = split_side_segments(
-                    (base_name, target_name),
-                    colors,
-                    (lead_style, trail_style),
-                    (cursor, lead_end),
-                    target,
-                );
-            },
-            None => {
-                let pairs = [
-                    (colors.base, '\u{2212}', base_name),
-                    (colors.target, '+', target_name),
-                ];
-                for (side, mark, name) in pairs {
-                    for (text, style) in side.pair(mark, name, bar_style.bg(side.bg)) {
-                        push_left(&mut left, &mut cursor, end_x, text, style);
-                    }
-                }
-            },
-        }
+    let position = cursor_pos.map(|(line, col)| format!(" {line}:{col} "));
+    if let Some((id, at)) = scope_at
+        && let Some(scope) = changes
+            .get_mut(id)
+            .and_then(|state| state.cursor_scope(editors, buffers))
+    {
+        let position_width = position
+            .as_ref()
+            .map_or(0, |text| text.chars().count() as u16);
+        let room = pane_end
+            .saturating_sub(cursor)
+            .saturating_sub(position_width);
+        let runs = scope_runs(&scope, room, bar_style, theme);
+        let width: u16 = runs
+            .iter()
+            .map(|(text, _)| text.chars().count() as u16)
+            .sum();
+        cursor = cursor.saturating_add(width).min(pane_end);
+        left.splice(at..at, runs);
     }
 
     let mut right: Vec<(String, Style)> = Vec::new();
-    let mut right_anchor = trail_end;
-    if let Some((line, col)) = cursor_pos {
-        let text = format!(" {line}:{col} ");
+    let mut right_anchor = pane_end;
+    if let Some(text) = position {
         let width = text.chars().count() as u16;
         let start = right_anchor.saturating_sub(width);
         if start >= cursor {
-            let style = split.map_or_else(
-                || muted_tint(trail_style, theme),
-                |(_, colors)| trail_style.fg(colors.target.name),
-            );
-            right.push((text, style));
+            right.push((text, muted_tint(bar_style, theme)));
             right_anchor = start;
         }
     }
@@ -2572,7 +2325,7 @@ fn status_segments(
         let width = text.chars().count() as u16;
         let start = right_anchor.saturating_sub(width);
         if start >= cursor {
-            right.push((text, trail_style));
+            right.push((text, bar_style));
             right_anchor = start;
         }
     }
@@ -2584,14 +2337,14 @@ fn status_segments(
         let width = text.chars().count() as u16;
         let start = right_anchor.saturating_sub(width);
         if start >= cursor {
-            let muted = muted_tint(trail_style, theme);
+            let muted = muted_tint(bar_style, theme);
             right.push((text, muted));
             right_anchor = start;
         }
     }
     if is_focused {
         let badge_right = right_anchor;
-        let muted = muted_tint(trail_style, theme);
+        let muted = muted_tint(bar_style, theme);
         // The block reads left to right as the servers and then the sources the
         // file's diagnostics name, and right segments push leftward, so the
         // sources push first. The first piece that fits ends the block with a
@@ -2640,7 +2393,7 @@ fn status_segments(
             let width = text.chars().count() as u16;
             let start = right_anchor.saturating_sub(width);
             if start >= cursor {
-                right.push((text, trail_style));
+                right.push((text, bar_style));
                 right_anchor = start;
             }
         }
@@ -2649,7 +2402,7 @@ fn status_segments(
             let width = text.chars().count() as u16;
             let start = right_anchor.saturating_sub(width);
             if start >= cursor {
-                right.push((text, trail_style.add_modifier(Modifier::BOLD)));
+                right.push((text, bar_style.add_modifier(Modifier::BOLD)));
                 right_anchor = start;
             }
         }
@@ -2658,19 +2411,13 @@ fn status_segments(
             let width = text.chars().count() as u16;
             let start = right_anchor.saturating_sub(width);
             if start >= cursor {
-                right.push((text, trail_style.add_modifier(Modifier::BOLD)));
+                right.push((text, bar_style.add_modifier(Modifier::BOLD)));
                 right_anchor = start;
             }
         }
         // The severities push from hint to error, so they read error first.
-        let severities = focused_diagnostic_label(
-            view,
-            editors,
-            buffers,
-            frame.diagnostics,
-            trail_style,
-            theme,
-        );
+        let severities =
+            focused_diagnostic_label(view, editors, buffers, frame.diagnostics, bar_style, theme);
         for (text, style) in severities.into_iter().rev() {
             let width = text.chars().count() as u16;
             let start = right_anchor.saturating_sub(width);
@@ -2701,7 +2448,7 @@ fn status_segments(
                 frame.repo,
                 status.staged_counts,
                 frame.hunk_position.as_ref(),
-                (trail_style, theme),
+                (bar_style, theme),
             )
         {
             let width: u16 = segments
@@ -2720,7 +2467,7 @@ fn status_segments(
                 let text: String = message.chars().take(available).collect();
                 let width = text.chars().count() as u16;
                 let start = right_anchor.saturating_sub(width);
-                right.push((text, status_message_style(trail_style, theme)));
+                right.push((text, status_message_style(bar_style, theme)));
                 right_anchor = start;
             }
         }
@@ -2732,7 +2479,7 @@ fn status_segments(
                 let text: String = message.chars().take(available).collect();
                 let width = text.chars().count() as u16;
                 let start = right_anchor.saturating_sub(width);
-                right.push((text, trail_style));
+                right.push((text, bar_style));
                 right_anchor = start;
             }
         }
@@ -2745,7 +2492,7 @@ fn status_segments(
                     .collect();
                 let width = text.chars().count() as u16;
                 let start = right_anchor.saturating_sub(width);
-                right.push((text, trail_style.add_modifier(Modifier::ITALIC)));
+                right.push((text, bar_style.add_modifier(Modifier::ITALIC)));
                 right_anchor = start;
             }
         }
@@ -2755,7 +2502,7 @@ fn status_segments(
             let width = text.chars().count() as u16;
             let start = right_anchor.saturating_sub(width);
             if start >= cursor {
-                right.push((text, trail_style.add_modifier(Modifier::DIM)));
+                right.push((text, bar_style.add_modifier(Modifier::DIM)));
             }
         }
     }
@@ -2763,26 +2510,32 @@ fn status_segments(
     let _ = right_anchor;
 
     match split {
-        Some(([(base, base_segments), (target, target_segments)], _)) => vec![
-            StatusRun {
-                area: base,
-                segments: base_segments,
-                style: lead_style,
-                left,
-                right: base_right,
-                hairline: false,
-                boxes: mode_chip_box(chip_end.is_some()),
-            },
-            StatusRun {
-                area: target,
-                segments: target_segments,
-                style: trail_style,
-                left: target_left,
-                right,
-                hairline: false,
-                boxes: Vec::new(),
-            },
-        ],
+        Some([(base, base_segments), (target, target_segments)]) => {
+            let (base_left, base_right) = metrics
+                .as_ref()
+                .map(|metrics| metrics_half(metrics, base_segments, bar_style, theme))
+                .unwrap_or_default();
+            vec![
+                StatusRun {
+                    area: base,
+                    segments: base_segments,
+                    style: bar_style,
+                    left: base_left,
+                    right: base_right,
+                    hairline: true,
+                    boxes: Vec::new(),
+                },
+                StatusRun {
+                    area: target,
+                    segments: target_segments,
+                    style: bar_style,
+                    left,
+                    right,
+                    hairline: true,
+                    boxes: mode_chip_box(chip_end.is_some()),
+                },
+            ]
+        },
         None => vec![StatusRun {
             area,
             segments,
@@ -2811,23 +2564,111 @@ fn blame_label(line: &LineBlame<'_>, now_epoch: i64) -> String {
     }
 }
 
-/// The parts a changes view's status row puts after the hunk position: how
-/// many files `state` lists, then the lines their hunks add and remove.
+/// The git metrics a diff view's status row reads, as the text and then the
+/// lines the diff adds and removes.
 ///
-/// A line count of zero takes no place, as in the file headers. The row shows
-/// no hunk position for an empty stack, so the parts never count zero files.
-fn stack_summary(state: &DiffChangesState, buffers: &BufferRegistry) -> Vec<String> {
-    let files = state.excerpts.len();
-    let noun = if files == 1 { "file" } else { "files" };
-    let (added, removed) = state.line_counts(buffers);
-    let lines: Vec<String> = [('+', added), ('\u{2212}', removed)]
-        .into_iter()
-        .filter(|&(_, count)| count > 0)
-        .map(|(mark, count)| format!("{mark}{count}"))
-        .collect();
-    std::iter::once(format!("{files} {noun}"))
-        .chain((!lines.is_empty()).then(|| lines.join(" ")))
-        .collect()
+/// The text names the base of the file in `buffer_id`, then the screen's kind
+/// on the per-file diff or the count of the files a changes view lists, then
+/// the hunk at the cursor. An empty stack counts no files. Only the focused
+/// pane names a hunk, since the hunk position is the focused pane's.
+///
+/// The per-file diff counts the lines of its own buffer, and a changes view
+/// the lines of its whole stack, as its file headers count them.
+fn diff_metrics(
+    view: &View,
+    buffer_id: Option<BufferId>,
+    is_focused: bool,
+    frame: FrameCtx<'_>,
+    buffers: &BufferRegistry,
+    changes: &SlotMap<DiffChangesId, DiffChangesState>,
+) -> (String, u32, u32) {
+    let path = buffer_id.and_then(|id| buffers.path_for(id));
+    let mut parts = vec![format!("vs {}", diff_sides_for(path, frame).0)];
+    let (added, removed) = match view {
+        View::DiffChanges(id) => changes.get(*id).map_or((0, 0), |state| {
+            let files = state.excerpts.len();
+            if files > 0 {
+                let noun = if files == 1 { "file" } else { "files" };
+                parts.push(format!("{files} {noun}"));
+            }
+            state.line_counts(buffers)
+        }),
+        _ => {
+            parts.extend(
+                screen_segment(Some("diff"), frame.theme).map(|(label, _)| label.to_owned()),
+            );
+            let stats = buffer_id
+                .and_then(|id| buffers.get(id))
+                .and_then(|buffer| {
+                    let buffer = buffer.read().ok()?;
+                    buffer.diff_map.as_ref().map(ExcerptStats::of)
+                })
+                .unwrap_or_default();
+            (stats.added, stats.removed)
+        },
+    };
+    if let Some(position) = frame.hunk_position.as_ref().filter(|_| is_focused) {
+        let at = position
+            .hunk_at
+            .map_or_else(|| "-".to_string(), |at| at.to_string());
+        parts.push(format!("hunk {at} / {}", position.hunk_total));
+    }
+    (parts.join(" \u{b7} "), added, removed)
+}
+
+/// The segments of a diff view's metrics over `style`: the muted text, and
+/// then the lines the diff adds and removes in their status colors.
+///
+/// A count of zero takes no segment. The last count ends in a pad cell, as the
+/// text does, so the counts stand clear of whatever follows them.
+fn metric_segments(
+    (text, added, removed): &(String, u32, u32),
+    style: Style,
+    theme: &crate::theme::Theme,
+) -> (StatusSeg, Vec<StatusSeg>) {
+    use crate::theme::scope;
+    let mut counts: Vec<StatusSeg> = [
+        ('+', *added, scope::DIFF_ADDED),
+        ('\u{2212}', *removed, scope::DIFF_DELETED),
+    ]
+    .into_iter()
+    .filter(|&(_, count, _)| count > 0)
+    .map(|(mark, count, scope)| (format!(" {mark}{count}"), tinted(style, theme, scope)))
+    .collect();
+    if let Some((last, _)) = counts.last_mut() {
+        last.push(' ');
+    }
+    ((format!(" {text} "), muted_tint(style, theme)), counts)
+}
+
+/// The base half's segments of a split diff row, whose segment rect is
+/// `segments`: the metrics text from the half's left edge, and the counts
+/// packed against the divide in screen order.
+///
+/// The counts read as a pair, so the first count that does not clear the text
+/// ends the packing.
+fn metrics_half(
+    metrics: &(String, u32, u32),
+    segments: Rect,
+    style: Style,
+    theme: &crate::theme::Theme,
+) -> (Vec<StatusSeg>, Vec<StatusSeg>) {
+    let ((text, text_style), counts) = metric_segments(metrics, style, theme);
+    let mut left = Vec::new();
+    let mut cursor = segments.x;
+    push_left(&mut left, &mut cursor, segments.right(), text, text_style);
+
+    let mut right = Vec::new();
+    let mut anchor = segments.right();
+    for (text, style) in counts.into_iter().rev() {
+        let start = anchor.saturating_sub(text.chars().count() as u16);
+        if start < cursor {
+            break;
+        }
+        right.push((text, style));
+        anchor = start;
+    }
+    (left, right)
 }
 
 /// The runs that name `scope` in a changes view's status row, fitted to
@@ -2865,12 +2706,17 @@ fn scope_runs(
 /// The base half and the target half of status row `row` split at
 /// `divider`, each as its whole rect and the part of it that holds segments.
 ///
-/// The divider's own cell belongs to neither half. A divider outside the row
-/// leaves one half empty.
+/// The base half's whole rect takes the divider's own cell, so the row's
+/// hairline runs unbroken across it, and its segments stop before that cell.
+/// A divider outside the row leaves one half empty.
 fn split_halves(row: Rect, divider: u16, cover: Option<Rect>) -> [(Rect, Rect); 2] {
     let divider = divider.clamp(row.left(), row.right());
     let target_x = divider.saturating_add(1).min(row.right());
     let base = Rect {
+        width: target_x - row.x,
+        ..row
+    };
+    let base_segments = Rect {
         width: divider - row.x,
         ..row
     };
@@ -2879,50 +2725,10 @@ fn split_halves(row: Rect, divider: u16, cover: Option<Rect>) -> [(Rect, Rect); 
         width: row.right() - target_x,
         ..row
     };
-    [base, target].map(|half| (half, status_segments_area(half, cover)))
-}
-
-/// The side names of a row split at the divider, as the base half's right
-/// segments and the target half's left segments.
-///
-/// The third value is the column the target's segments reach.
-///
-/// The base pair ends at `lead_end`, where the base half's segments stop, and
-/// takes its place only clear of `cursor`, the column the lead segments
-/// reached. Its mark and name show together or not at all. The target pair
-/// packs from the left edge of `target`, the target half's segment rect.
-fn split_side_segments(
-    (base_name, target_name): (&str, &str),
-    colors: DiffSidesColors,
-    (lead_style, trail_style): (Style, Style),
-    (cursor, lead_end): (u16, u16),
-    target: Rect,
-) -> (Vec<StatusSeg>, Vec<StatusSeg>, u16) {
-    let base = colors.base.pair('\u{2212}', base_name, lead_style);
-    let width: u16 = base
-        .iter()
-        .map(|(text, _)| text.chars().count() as u16)
-        .sum();
-    let base_right = match lead_end
-        .checked_sub(width)
-        .is_some_and(|start| start >= cursor)
-    {
-        true => base.into_iter().rev().collect(),
-        false => Vec::new(),
-    };
-
-    let mut target_left = Vec::new();
-    let mut target_cursor = target.x;
-    for (text, style) in colors.target.pair('+', target_name, trail_style) {
-        push_left(
-            &mut target_left,
-            &mut target_cursor,
-            target.right(),
-            text,
-            style,
-        );
-    }
-    (base_right, target_left, target_cursor)
+    [
+        (base, status_segments_area(base_segments, cover)),
+        (target, status_segments_area(target, cover)),
+    ]
 }
 
 /// Append the open status prompt as left-anchored segments.
@@ -3763,9 +3569,9 @@ fn render_image_pane(
 #[cfg(test)]
 mod tests {
     use super::{
-        byte_size, diff_base_lead, focused_staged_label, muted_tint, name_segments,
+        byte_size, diff_base_lead, focused_staged_label, metrics_half, muted_tint, name_segments,
         paint_status_fallback, read_only_note, repo_segments, resolve_rich_segments, split_halves,
-        split_side_segments, status_filename, tab_mark, DiffSideColors, DiffSidesColors,
+        status_filename, tab_mark,
     };
     use crate::{
         action_handlers::{dispatch, focused_editor_mut},
@@ -5060,11 +4866,11 @@ mod tests {
         );
     }
 
-    /// A pair names its two files in its own pane's status row alone, and a git
-    /// diff in another tab names the workspace base there. Neither row repeats
-    /// the base as a lead, since its halves name it.
+    /// A pair names its base file in its own pane's status row alone, and a
+    /// git diff in another tab names the workspace base there. Neither row
+    /// repeats the base as a staged lead, since its metrics name it.
     #[test]
-    fn each_diff_s_status_row_names_its_own_sides() {
+    fn each_diff_s_status_row_names_its_own_base() {
         let mut h = crate::test_harness::TestHarness::with_size(120, 20);
         h.stage_review_scenario("/repo", &[("c.txt", "x\ny\nz\n", "x\ny\nZ\n")]);
         h.open_side_by_side(("/repo/a.txt", "one\ntwo\n"), ("/repo/b.txt", "one\nTWO\n"));
@@ -5079,8 +4885,8 @@ mod tests {
             h.snapshot();
             let text = h.rendered_text().replace('─', " ");
             [
-                text.contains("\u{2212} HEAD") && text.contains("+ working tree"),
-                text.contains("\u{2212} a.txt") && text.contains("+ b.txt"),
+                text.contains("vs HEAD"),
+                text.contains("vs a.txt"),
                 text.contains("diff vs a.txt"),
             ]
         };
@@ -5090,94 +4896,18 @@ mod tests {
         assert_eq!(
             [git_tab, named(&mut h)],
             [[true, false, false], [false, true, false]],
-            "each tab's diff names its own sides",
+            "each tab's diff names its own base",
         );
     }
 
-    /// A split diff view's status row leads its base half with the mode chip,
-    /// the screen label, and the hunk, and ends it with the base name at the
-    /// divider. The target name and the position fill the target half.
+    /// A split diff view's status row reads the diff's metrics in its base
+    /// half, with the counts against the divider. Its target half is the
+    /// pane's own row, with the mode chip, the file name, and the position.
     #[test]
     fn diff_view_status_halves() {
         let mut h = status_halves_harness();
         h.type_keys("j j j");
         h.assert_snapshot("diff_view_status_halves");
-    }
-
-    /// Under a live scene the divider's cell of a split diff view's status row
-    /// takes the base half's fill left of the diff's hairline and the target
-    /// half's fill right of it, then one sixteenth of window ground over the
-    /// hairline's place. The divider is column 59 of the 120-wide window, and
-    /// the status row is row 7.
-    ///
-    /// Ermine's halves sit on the window ground, so its cell draws no bar. A
-    /// theme over Ermine that restates the two tints draws all three.
-    #[test]
-    fn the_status_divider_cell_splits_between_tinted_side_fills() {
-        use stoatty_protocol::command::{decode_stream, Command};
-
-        let bars = |h: &mut crate::test_harness::TestHarness| -> Vec<_> {
-            h.stoat.render();
-            decode_stream(h.stoat.apc_scene.lane_bytes(crate::render::STATUS_LANE))
-                .into_iter()
-                .flat_map(|command| match command {
-                    Command::Bar(bar) => vec![(bar.x, bar.y, bar.width, bar.height, bar.color)],
-                    Command::Bars(group) => group
-                        .bars
-                        .into_iter()
-                        .map(|(x, y, width, height)| (x, y, width, height, group.color))
-                        .collect(),
-                    _ => Vec::new(),
-                })
-                .filter(|bar| (944..960).contains(&bar.0))
-                .collect()
-        };
-
-        let mut h = status_halves_harness();
-        let shipped = bars(&mut h);
-
-        let src = format!(
-            "{}\ntheme tinted inherits ermine_night {{ diff.sides.base.bg = \"#2a1d20\"; \
-             diff.sides.target.bg = \"#1d2a1f\"; }}",
-            crate::app::DEFAULT_KEYMAP
-        );
-        let (config, _) = stoat_config::parse(&src);
-        let tinted =
-            crate::theme::Theme::from_config(&config.expect("the config parses"), "tinted")
-                .expect("the theme loads");
-        h.stoat.theme = Arc::new(tinted);
-        h.stoat.theme_epoch += 1;
-
-        assert_eq!(
-            (shipped, bars(&mut h)),
-            (
-                vec![],
-                vec![
-                    (944, 112, 8, 16, [0x2a, 0x1d, 0x20]),
-                    (952, 112, 8, 16, [0x1d, 0x2a, 0x1f]),
-                    (952, 112, 1, 16, [0x0c, 0x0e, 0x11]),
-                ],
-            ),
-            "no bar on the ground, and under the tints the base fill to the hairline, the \
-             target fill past it, and the ground on the hairline's sixteenth, in draw order",
-        );
-    }
-
-    /// A split diff view's status row reads its screen label in the theme's
-    /// label color, #e6d3d5 in Ermine, apart from the base name beside the
-    /// divider.
-    #[test]
-    fn the_split_status_row_reads_its_screen_label_in_the_label_color() {
-        use ratatui::style::Color;
-
-        let mut h = status_halves_harness();
-        let buf = h.render_composited();
-        let row = bar_row(&buf);
-        let label = row
-            .find("structural diff")
-            .map(|at| buf[(row[..at].chars().count() as u16, buf.area.height - 1)].fg);
-
-        assert_eq!(label, Some(Color::Rgb(0xe6, 0xd3, 0xd5)));
     }
 
     /// From the nudge protocol on, each status row is a band. It takes two rows
@@ -5560,66 +5290,80 @@ mod tests {
         );
     }
 
-    /// Each kind of pair a diff's sides take reads at the divider, the base
-    /// name flush against it on the left and the target name just past it.
+    /// Each kind of base a diff takes reads from the base half's left edge as
+    /// `vs` and the base's name, and the counts pack against the divider.
     #[test]
-    fn the_status_halves_name_each_kind_of_side_pair() {
-        use ratatui::style::{Color, Style};
+    fn the_base_half_names_each_kind_of_base() {
+        use ratatui::style::Style;
 
-        let side = DiffSideColors {
-            bg: Color::Black,
-            fg: Color::Gray,
-            name: Color::White,
-            mark: Color::Red,
-        };
-        let colors = DiffSidesColors {
-            base: side,
-            target: side,
-            label: Color::White,
-        };
+        let theme = crate::theme::Theme::empty();
         let row = Rect::new(0, 0, 120, 1);
-        let painted = |names: (&str, &str)| {
-            let [(base, _), (target, target_segments)] = split_halves(row, 59, None);
-            let (base_right, target_left, _) = split_side_segments(
-                names,
-                colors,
-                (Style::default(), Style::default()),
-                (row.x, base.right()),
-                target_segments,
-            );
+        let painted = |base: &str| {
+            let [(_, segments), _] = split_halves(row, 59, None);
+            let metrics = (format!("vs {base}"), 6, 4);
+            let (left, right) = metrics_half(&metrics, segments, Style::default(), &theme);
             let mut buf = Buffer::empty(row);
-            paint_status_fallback(&mut buf, base, &[], &base_right);
-            paint_status_fallback(&mut buf, target, &target_left, &[]);
+            paint_status_fallback(&mut buf, segments, &left, &right);
             (0..row.width)
                 .map(|x| buf[(x, 0)].symbol())
                 .collect::<String>()
         };
 
-        let pairs = [
-            ("index", "working tree"),
-            ("HEAD", "working tree"),
-            ("main abc1234", "working tree"),
-            ("abc1234", "working tree"),
-            ("parent abc1234", "commit def5678"),
-            ("empty", "commit def5678"),
-            ("original", "proposal"),
-            ("a.txt", "b.txt"),
-            ("x/conf.toml", "y/conf.toml"),
+        let bases = [
+            "index",
+            "HEAD",
+            "main abc1234",
+            "abc1234",
+            "parent abc1234",
+            "empty",
+            "original",
+            "a.txt",
+            "x/conf.toml",
         ];
         assert_eq!(
-            pairs.map(painted),
-            pairs.map(|(base, target)| format!(
-                "{:>59} {:<60}",
-                format!(" \u{2212} {base} "),
-                format!(" + {target} ")
-            )),
+            bases.map(painted),
+            bases.map(|base| format!("{:<52} +6 \u{2212}4 {:61}", format!(" vs {base} "), "")),
         );
     }
 
-    /// The halves split around the divider's cell, and a badge box over the
+    /// A count of zero takes no segment. The counts pack from the divider and
+    /// show only clear of the text, so the first count that does not fit ends
+    /// the pair.
+    #[test]
+    fn the_counts_show_only_above_zero_and_clear_of_the_text() {
+        use ratatui::style::Style;
+
+        let theme = crate::theme::Theme::empty();
+        let painted = |width: u16, (added, removed): (u32, u32)| {
+            let segments = Rect::new(0, 0, width, 1);
+            let metrics = ("vs HEAD".to_string(), added, removed);
+            let (left, right) = metrics_half(&metrics, segments, Style::default(), &theme);
+            let mut buf = Buffer::empty(segments);
+            paint_status_fallback(&mut buf, segments, &left, &right);
+            (0..width).map(|x| buf[(x, 0)].symbol()).collect::<String>()
+        };
+
+        assert_eq!(
+            [
+                painted(20, (6, 0)),
+                painted(20, (0, 4)),
+                painted(14, (6, 4)),
+                painted(11, (6, 4)),
+            ],
+            [
+                format!("{:<16} +6 ", " vs HEAD "),
+                format!("{:<16} \u{2212}4 ", " vs HEAD "),
+                format!("{:<10} \u{2212}4 ", " vs HEAD "),
+                format!("{:<11}", " vs HEAD "),
+            ],
+        );
+    }
+
+    /// The base half takes the divider's cell, so the row's hairline runs
+    /// unbroken, and its segments stop before that cell. A badge box over the
     /// row's end takes the target half's segment room.
     #[test]
-    fn the_status_halves_leave_the_divider_cell_between_them() {
+    fn the_base_half_takes_the_divider_cell_and_its_segments_stop_before_it() {
         let row = Rect::new(2, 9, 120, 1);
         let badge = Rect::new(100, 9, 22, 1);
         assert_eq!(
@@ -5629,52 +5373,13 @@ mod tests {
             ],
             [
                 [
-                    (Rect::new(2, 9, 59, 1), Rect::new(2, 9, 59, 1)),
+                    (Rect::new(2, 9, 60, 1), Rect::new(2, 9, 59, 1)),
                     (Rect::new(62, 9, 60, 1), Rect::new(62, 9, 60, 1)),
                 ],
                 [
-                    (Rect::new(2, 9, 59, 1), Rect::new(2, 9, 59, 1)),
+                    (Rect::new(2, 9, 60, 1), Rect::new(2, 9, 59, 1)),
                     (Rect::new(62, 9, 60, 1), Rect::new(62, 9, 38, 1)),
                 ],
-            ],
-        );
-    }
-
-    /// Ermine sets each half's colors through its `diff.sides` scopes, and a
-    /// theme without them tints the status bar toward each side's status
-    /// color.
-    ///
-    /// Ermine's halves sit on the window ground.
-    #[test]
-    fn the_side_colors_take_the_theme_s_scopes_and_derive_the_rest() {
-        use ratatui::style::Color;
-
-        let (config, _) = stoat_config::parse(crate::app::DEFAULT_KEYMAP);
-        let config = config.expect("the shipped config parses");
-        let themes = ["ermine_night", "default_dark"]
-            .map(|name| crate::theme::Theme::from_config(&config, name).expect("theme loads"));
-        let resolved = themes.each_ref().map(DiffSidesColors::resolve);
-
-        let rgb = |hex: u32| Color::Rgb((hex >> 16) as u8, (hex >> 8) as u8, hex as u8);
-        let side = |[bg, fg, name, mark]: [u32; 4]| DiffSideColors {
-            bg: rgb(bg),
-            fg: rgb(fg),
-            name: rgb(name),
-            mark: rgb(mark),
-        };
-        assert_eq!(
-            resolved,
-            [
-                DiffSidesColors {
-                    base: side([0x0c0e11, 0xa3898c, 0xf2b3b7, 0xf2777f]),
-                    target: side([0x0c0e11, 0x8ea78b, 0xbfe6bb, 0x8fd18a]),
-                    label: rgb(0xe6d3d5),
-                },
-                DiffSidesColors {
-                    base: side([0x726d81, 0xf6e5e6, 0xeca7ac, 0xe06c75]),
-                    target: side([0x697782, 0xebf2e7, 0xc1dbaf, 0x98c379]),
-                    label: rgb(0xeca7ac),
-                },
             ],
         );
     }
@@ -5850,10 +5555,10 @@ mod tests {
         }
     }
 
-    /// A changes view's status row is the diff view's row with the screen
-    /// named `changes` and the stack's counts after the hunk, read through the
-    /// focused excerpt. A walk puts the cursor on the first chunk, so the hunk
-    /// reads `1 / 1`.
+    /// A changes view's status row reads the diff view's metrics with the
+    /// stack's file count in place of the screen's kind, and its pane row
+    /// through the focused excerpt. A walk puts the cursor on the first chunk,
+    /// so the hunk reads `1 / 1`.
     #[test]
     fn the_changes_view_bar_reads_the_focused_excerpts_hunks() {
         let mut h = crate::test_harness::TestHarness::with_size(112, 12);
@@ -5875,8 +5580,7 @@ mod tests {
         assert_eq!(
             row.split_whitespace().collect::<Vec<_>>().join(" "),
             format!(
-                "NOR changes hunk 1 / 1 \u{b7} 1 file \u{b7} +1 \u{2212}1 \u{2212} index \
-                 + working tree {}:{}",
+                "vs index \u{b7} 1 file \u{b7} hunk 1 / 1 +1 \u{2212}1 NOR repo f.txt {}:{}",
                 point.row + 1,
                 point.column + 1,
             ),
@@ -5884,8 +5588,8 @@ mod tests {
     }
 
     /// A changes view's status row counts the files its stack lists and sums
-    /// the lines their hunks add and remove. A line count of zero takes no
-    /// place.
+    /// the lines their hunks add and remove against the divider. A line count
+    /// of zero takes no place.
     #[test]
     fn the_changes_view_bar_counts_the_stack_s_files_and_lines() {
         let bar = |files: &[(&str, &str, &str)]| {
@@ -5907,18 +5611,16 @@ mod tests {
                 bar(&[("c.txt", "c\n", "c\nC\nD\n")]),
             ],
             [
-                "NOR changes hunk 1 / 2 \u{b7} 2 files \u{b7} +1 \u{2212}2 \u{2212} HEAD \
-                 + working tree 1:1",
-                "NOR changes hunk - / 1 \u{b7} 1 file \u{b7} +2 \u{2212} HEAD + working \
-                 tree 1:1",
+                "vs HEAD \u{b7} 2 files \u{b7} hunk 1 / 2 +1 \u{2212}2 NOR repo a.txt 1:1",
+                "vs HEAD \u{b7} 1 file \u{b7} hunk - / 1 +2 NOR repo c.txt 1:1",
             ],
         );
     }
 
     /// A changes view's status row names the Scope of the cursor's row after
-    /// the screen label, each part in its role's color. A row too narrow for
-    /// the whole chain drops items from the chain's middle, and the base
-    /// side's name keeps its place.
+    /// the file name, each part in its role's color. A row too narrow for the
+    /// whole chain drops items from the chain's middle, and the position keeps
+    /// its place.
     #[test]
     fn the_changes_view_bar_names_the_scope_under_the_cursor() {
         let base =
@@ -5956,17 +5658,16 @@ mod tests {
         };
         let theme = |scope: &str| wide.stoat.theme.get(scope).fg;
 
-        let tail = "hunk 1 / 1 \u{b7} 1 file \u{b7} +1 \u{2212}1 \u{2212} HEAD + working \
-                    tree 4:1";
+        let lead = "vs HEAD \u{b7} 1 file \u{b7} hunk 1 / 1 +1 \u{2212}1 NOR repo a.rs";
         assert_eq!(
             (
                 text(&buf),
-                text(&open(148).1),
+                text(&open(104).1),
                 [fg_at("mod"), fg_at("outer"), fg_at("\u{203a}")],
             ),
             (
-                format!("NOR changes mod outer \u{203a} impl Theme \u{203a} fn panel {tail}"),
-                format!("NOR changes \u{2026} \u{203a} fn panel {tail}"),
+                format!("{lead} mod outer \u{203a} impl Theme \u{203a} fn panel 4:1"),
+                format!("{lead} mod outer \u{203a} \u{2026} \u{203a} fn panel 4:1"),
                 [
                     theme(crate::theme::scope::DIFF_SCOPE_KEYWORD),
                     theme(crate::theme::scope::DIFF_SCOPE_NAME),
@@ -5995,9 +5696,9 @@ mod tests {
         let target = h
             .stoat
             .theme
-            .get(crate::theme::scope::DIFF_SIDES_TARGET)
+            .get(crate::theme::scope::UI_STATUSBAR_FOCUSED)
             .bg
-            .expect("the theme tints the target half");
+            .expect("the theme fills the focused status row");
         let row = band.y + band.height;
         assert_eq!(
             (band.x..band.x + band.width)
@@ -6071,10 +5772,11 @@ mod tests {
         );
     }
 
-    /// A changes view whose stack lists no file still names the sides it
-    /// compares.
+    /// A changes view whose stack lists no file still names the base it
+    /// compares against, and counts no file and no hunk. Its pane row names
+    /// the view, since no excerpt names a file.
     #[test]
-    fn the_changes_view_bar_names_an_empty_stack_s_sides() {
+    fn the_changes_view_bar_names_an_empty_stack_s_base() {
         let mut h = crate::test_harness::TestHarness::with_size(112, 12);
         h.stoat.active_workspace_mut().git_root = PathBuf::from("/repo");
         h.fake_git().add_repo("/repo").head_file("a.txt", "a\n");
@@ -6087,7 +5789,7 @@ mod tests {
         let row = bar_row(&h.render_composited()).replace('─', " ");
         assert_eq!(
             row.split_whitespace().collect::<Vec<_>>().join(" "),
-            "NOR changes \u{2212} HEAD + working tree",
+            "vs HEAD NOR repo [diff-changes]",
         );
     }
 

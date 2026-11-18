@@ -310,11 +310,13 @@ fn the_base_side_of_the_split_diff_recedes_behind_the_live_side() {
 
 /// The split diff's status row sits on the window ground under both halves
 /// and on the divider's cell, as the revised DiffSplit and DiffChanges boards
-/// draw the footer with no fill behind its halves.
+/// draw the footer with no fill behind its halves. The mode chip leads the
+/// target half, which is the pane's own row, so the base half shows no chip.
 ///
 /// Row 49 is the status row. Column 30 lies in the base half and column 130 in
 /// the target half. Column 75 is the diff's divider, and every pixel of its
-/// 9 px cell keeps the ground.
+/// 9 px cell keeps the ground. The chip's box takes cells 76 to 80, and its
+/// panel's fill shows in each of cells 77 to 80.
 #[test]
 fn the_split_diff_s_status_halves_sit_on_the_ground() {
     let mut home = support::scratch_home();
@@ -349,6 +351,18 @@ fn the_split_diff_s_status_halves_sit_on_the_ground() {
              is {}",
             width * height,
             hex(GROUND),
+            frame.display(),
+        );
+    }
+
+    let accent = |col: u16, cols: u16| pixels_of(&shot, cell_rect(col, 49, cols, 1), ACCENT);
+    let chip = (77..=80).map(|col| accent(col, 1)).collect::<Vec<_>>();
+    let base = accent(0, 75);
+    if chip.contains(&0) || base > 0 {
+        let frame = keep_frame(&shot, &mut home, "diff_status_chip");
+        panic!(
+            "the chip's fill reads {chip:?} pixels in cells 77 to 80 and {base} left of the \
+             divider, not some in each and none left of it; the frame is {}",
             frame.display(),
         );
     }

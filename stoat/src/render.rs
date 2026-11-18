@@ -431,8 +431,8 @@ pub(crate) struct FrameCtx<'a> {
     /// working tree. It replaces [`Self::repo`], which describes
     /// a working tree the pane is then not showing.
     pub(crate) diff_base: Option<&'a str>,
-    /// The names of the diff's left and right sides, which a diff view's status
-    /// row shows.
+    /// The names of the diff's left and right sides. A diff view's status row
+    /// names the left one, the base, in its metrics.
     pub(crate) diff_sides: (&'a str, &'a str),
     /// The sides a paired file's diff view names, keyed by the measured path.
     ///

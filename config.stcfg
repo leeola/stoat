@@ -274,11 +274,6 @@ theme ermine_night inherits default_dark {
     let tint_reveal      = "#1a2226";
     let tint_special     = "#2a2236";
     let tint_warning     = "#2e2a1e";
-    let side_base_fg     = "#a3898c";
-    let side_base_name   = "#f2b3b7";
-    let side_base_label  = "#e6d3d5";
-    let side_target_fg   = "#8ea78b";
-    let side_target_name = "#bfe6bb";
     let readonly         = "#c9b383";
     let readonly_line    = "#8a7650";
     let conflict         = "#f59aa0";
@@ -428,12 +423,6 @@ theme ermine_night inherits default_dark {
     ui.minimap.shape.comment.fg = shape_comment;
     ui.minimap.rule.fg          = disabled;
     ui.minimap.rail             = { fg: strong, bg: base };
-
-    diff.sides.base           = { fg: side_base_fg, bg: ground };
-    diff.sides.base.name.fg   = side_base_name;
-    diff.sides.base.label.fg  = side_base_label;
-    diff.sides.target         = { fg: side_target_fg, bg: ground };
-    diff.sides.target.name.fg = side_target_name;
 
     syntax.keyword        = { fg: special, modifiers: [] };
     syntax.function.fg    = accent;
