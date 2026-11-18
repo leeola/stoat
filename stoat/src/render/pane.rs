@@ -75,8 +75,8 @@ pub(super) const MINIMAP_MAX_COLUMNS: u8 = 120;
 /// and ReadOnly boards round it.
 pub(super) const MINIMAP_THUMB_RADIUS: u8 = 4;
 
-/// The tab bar's conflict chip's `padding: 0 8px`, in sixteenths.
-const CHIP_PAD: u16 = 8;
+/// The tab bar's conflict chip's `padding: 0 8px`, two sixteenths to the px.
+const CHIP_PAD: u16 = 16;
 
 /// The top of the hairline that parts the tab bar's workspace name from its
 /// tabs, in sixteenths down the row.
@@ -1799,7 +1799,8 @@ fn tab_mark(mark: TabConflictMark, style: Style, theme: &crate::theme::Theme) ->
 
 /// The chip the tab bar ends in while the conflict view is focused.
 struct ConflictChip {
-    /// The files the session has not applied, and the chunk at the cursor.
+    /// The operation and what is left of it, as [`conflict_chip_text`] words
+    /// them.
     text: String,
     style: Style,
     /// The chip's text color under a live scene, where it paints as a panel
@@ -1811,7 +1812,7 @@ struct ConflictChip {
 /// The tab bar's [`ConflictChip`], or `None` off the conflict screen.
 ///
 /// Under a live scene the chip's text draws at the Caption scale, the board's
-/// 11 px chrome text, so its width follows that text and the board's 8/16
+/// 11 px chrome text, so its width follows that text and the board's 8 px of
 /// padding on each side. In cells it takes its text and a cell on each side.
 fn conflict_chip(ws: &Workspace, frame: FrameCtx<'_>, live: bool) -> Option<ConflictChip> {
     use crate::theme::scope;
@@ -1819,15 +1820,12 @@ fn conflict_chip(ws: &Workspace, frame: FrameCtx<'_>, live: bool) -> Option<Conf
         .conflict_position
         .filter(|_| frame.screen == Some("conflict"))?;
     let session = ws.conflict.as_ref()?;
-
-    let unresolved = session.files.len().saturating_sub(session.applied.len());
-    let at = position
-        .chunk_at
-        .map_or_else(|| "-".to_string(), |at| at.to_string());
-    let text = format!(
-        "{unresolved} unresolved \u{b7} {at} / {} chunks",
-        position.chunk_total
-    );
+    let view = ws
+        .editors
+        .get(session.file.editor_id)?
+        .conflict_view
+        .as_ref()?;
+    let text = conflict_chip_text(&position, &view.labels);
 
     let theme = frame.theme;
     let style = theme
@@ -1849,6 +1847,29 @@ fn conflict_chip(ws: &Workspace, frame: FrameCtx<'_>, live: bool) -> Option<Conf
         rich,
         cells,
     })
+}
+
+/// The tab bar's conflict chip text, which names the operation and what is
+/// left of it.
+///
+/// A merge names theirs after `merge`, as in `merge main`, so the chip says
+/// what merges in. A rebase reads `rebase`, and conflicts with neither behind
+/// them read `conflict`. The chunks left count every file of the session, and
+/// the files count those that still hold an open chunk.
+fn conflict_chip_text(position: &ConflictPosition, labels: &ConflictLabels) -> String {
+    let lead = match position.operation {
+        "merge" => format!("merge {}", labels.theirs_short()),
+        operation => operation.to_string(),
+    };
+    let noun = if position.chunks_open == 1 {
+        "conflict"
+    } else {
+        "conflicts"
+    };
+    format!(
+        "{lead} \u{b7} {} {noun} left \u{b7} {} of {} files",
+        position.chunks_open, position.files_open, position.file_total
+    )
 }
 
 /// Paint `chip` over `rect`, a one-row rounded panel with its text in a run
@@ -3925,9 +3946,10 @@ fn render_image_pane(
 #[cfg(test)]
 mod tests {
     use super::{
-        byte_size, diff_base_lead, focused_staged_label, merge_facts, metrics_half, muted_tint,
-        name_segments, paint_status_fallback, read_only_note, repo_segments, resolve_rich_segments,
-        split_halves, split_thirds, status_filename, tab_mark, DiffMetrics,
+        byte_size, conflict_chip_text, diff_base_lead, focused_staged_label, merge_facts,
+        metrics_half, muted_tint, name_segments, paint_status_fallback, read_only_note,
+        repo_segments, resolve_rich_segments, split_halves, split_thirds, status_filename,
+        tab_mark, DiffMetrics,
     };
     use crate::{
         action_handlers::{dispatch, focused_editor_mut},
@@ -3941,7 +3963,10 @@ mod tests {
         conflict_session::{ConflictLabels, ConflictPosition},
         diff_map::{DiffMap, MarkKind},
         editor_state::EditorState,
-        host::{git::FileKind, LspNotification},
+        host::{
+            git::{FileKind, MergeState},
+            LspNotification,
+        },
         lsp::drain,
         pane::{DockPanel, DockSide, DockVisibility, FocusTarget, View},
         rebase::RebaseState,
@@ -7775,11 +7800,12 @@ mod tests {
     }
 
     /// A conflicted file's tab leads with `!` in the conflict mark's color once
-    /// the tally lists the file. The conflict view's tab names the file it
-    /// resolves and keeps the mark. While the view is focused the bar ends in a
-    /// chip that counts the files left and names the chunk at the cursor.
+    /// the tally lists the file. The conflict view's tab counts the files its
+    /// session resolves and keeps the mark. While the view is focused the bar
+    /// ends in a chip that names the operation and what is left of it, its text
+    /// a whole cell in from its edge.
     #[test]
-    fn the_tab_bar_marks_a_conflicted_file_and_ends_in_the_chunk_chip() {
+    fn the_tab_bar_marks_a_conflicted_file_and_ends_in_the_conflict_chip() {
         let mut h = conflict_tabs_harness(&["f.txt"]);
         dispatch(
             &mut h.stoat,
@@ -7804,13 +7830,15 @@ mod tests {
             })
             .collect();
         let chip_text = scene.iter().find_map(|command| match command {
-            stoatty_protocol::command::Command::TextRun(run) if run.text.contains("unresolved") => {
+            stoatty_protocol::command::Command::TextRun(run)
+                if run.text.contains(" left \u{b7} ") =>
+            {
                 Some((run.col, run.text.clone(), run.color))
             },
             _ => None,
         });
 
-        let text = "1 unresolved \u{b7} 1 / 1 chunks";
+        let text = "conflict \u{b7} 1 conflict left \u{b7} 1 of 1 files";
         assert_eq!(
             (
                 file_bar.chars().take(30).collect::<String>(),
@@ -7821,21 +7849,22 @@ mod tests {
             ),
             (
                 format!("{:<30}", " ws   ! f.txt"),
-                format!("{:<30}", " ws   ! f.txt"),
+                format!("{:<30}", " ws   ! conflicts \u{b7} 1 file"),
                 ratatui::style::Color::Rgb(0xf5, 0x9a, 0xa0),
                 vec![
-                    (5, 9, Some([0x24, 0x35, 0x52])),
-                    (71, 28, Some([0x33, 0x20, 0x1f])),
+                    (5, 22, Some([0x24, 0x35, 0x52])),
+                    (56, 43, Some([0x33, 0x20, 0x1f])),
                 ],
-                Some((71 * 16 + 8, text.to_string(), [0xf2, 0x77, 0x7f])),
+                Some((56 * 16 + 16, text.to_string(), [0xf2, 0x77, 0x7f])),
             ),
-            "the active tab's chip in the accent wash, then the chunk chip one cell before \
-             the bar's edge, its text 8/16 in",
+            "the active tab's chip in the accent wash, then the conflict chip one cell before \
+             the bar's edge, its text a whole cell in",
         );
     }
 
     /// A tab whose file the conflict view applied reads U+2713 in the added
-    /// color, and the view's own tab marks the next file it shows.
+    /// color. The view's own tab keeps its mark and counts the session's files,
+    /// and the chip counts the one file that still holds an open chunk.
     #[test]
     fn the_tab_bar_marks_an_applied_file_resolved() {
         let mut h = conflict_tabs_harness(&["a.txt", "b.txt"]);
@@ -7858,7 +7887,7 @@ mod tests {
             .into_iter()
             .find_map(|command| match command {
                 stoatty_protocol::command::Command::TextRun(run)
-                    if run.text.contains("unresolved") =>
+                    if run.text.contains(" left \u{b7} ") =>
                 {
                     Some(run.text)
                 },
@@ -7872,16 +7901,55 @@ mod tests {
             .expect("the theme colors added text");
         assert_eq!(
             (
-                tab_bar_row(&buf).chars().take(30).collect::<String>(),
+                tab_bar_row(&buf).chars().take(40).collect::<String>(),
                 buf[(6, 0)].fg,
                 chip,
             ),
             (
-                format!("{:<30}", " ws   \u{2713} a.txt  ! b.txt"),
+                format!("{:<40}", " ws   \u{2713} a.txt  ! conflicts \u{b7} 2 files"),
                 added,
-                Some("1 unresolved \u{b7} 1 / 1 chunks".to_string()),
+                Some("conflict \u{b7} 1 conflict left \u{b7} 1 of 2 files".to_string()),
             ),
-            "the chip counts the one file the view has not applied",
+        );
+    }
+
+    /// The conflict chip names the operation, with theirs after a merge. It
+    /// counts the open chunks of every file, in the singular for one, and the
+    /// files that still hold an open chunk.
+    #[test]
+    fn the_conflict_chip_names_the_operation_and_what_is_left() {
+        let merge = MergeState {
+            head_sha: "a1c4e9f00".to_string(),
+            head_name: Some("main".to_string()),
+            message: "Merge branch 'main'".to_string(),
+            conflicted: 3,
+        };
+        let labels = ConflictLabels::new(Some("ermine-tokens".to_string()), Some(&merge));
+        let chip = |operation: &'static str, chunks_open: usize, files_open: usize| {
+            let position = ConflictPosition {
+                operation,
+                chunk_at: Some(1),
+                chunk_total: 2,
+                file_at: 1,
+                file_total: 3,
+                file_open: chunks_open.min(1),
+                chunks_open,
+                files_open,
+            };
+            conflict_chip_text(&position, &labels)
+        };
+
+        assert_eq!(
+            [
+                chip("merge", 2, 2),
+                chip("rebase", 1, 1),
+                chip("conflict", 0, 0)
+            ],
+            [
+                "merge main \u{b7} 2 conflicts left \u{b7} 2 of 3 files",
+                "rebase \u{b7} 1 conflict left \u{b7} 1 of 3 files",
+                "conflict \u{b7} 0 conflicts left \u{b7} 0 of 3 files",
+            ],
         );
     }
 

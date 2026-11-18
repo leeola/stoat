@@ -871,14 +871,21 @@ impl Workspace {
     /// as `± main.rs`. A file measured against another file names the file the
     /// pane edits. A
     /// changes view counts the files its stack holds, as `± changes · 2
-    /// files`. Any other pane reads as [`Self::view_title`] names its view.
-    /// An out-of-range index is empty.
+    /// files`. The conflict view counts the files its session resolves, as
+    /// `conflicts U+00B7 2 files`, since the view steps through them all. Any
+    /// other pane reads as [`Self::view_title`] names its view. An
+    /// out-of-range index is empty.
     ///
     /// A `RenameTab` override wins over the derived name, so a renamed tab keeps
     /// its title no matter what its focused pane shows.
     pub(crate) fn tab_title(&self, idx: usize) -> String {
         if let Some(name) = self.tabs.get(idx).and_then(|tab| tab.name.as_ref()) {
             return name.clone();
+        }
+        if let Some(session) = self.conflict_tab(idx) {
+            let files = session.files.len();
+            let noun = if files == 1 { "file" } else { "files" };
+            return format!("conflicts \u{b7} {files} {noun}");
         }
 
         let tree = if idx == self.active_tab {
@@ -938,9 +945,15 @@ impl Workspace {
     /// The conflict mark tab `idx` carries, or `None` for a tab whose file is
     /// neither unmerged nor resolved in the conflict view.
     ///
-    /// A file the view applied reads as resolved before the next tally drops it
-    /// from the unmerged list, since the apply's index write lands first.
+    /// The conflict view's own tab reads as unmerged until the view closes,
+    /// whatever its files' states. A file the view applied reads as resolved
+    /// before the next tally drops it from the unmerged list, since the
+    /// apply's index write lands first.
     pub(crate) fn tab_conflict_mark(&self, idx: usize) -> Option<TabConflictMark> {
+        if self.conflict_tab(idx).is_some() {
+            return Some(TabConflictMark::Conflicted);
+        }
+
         let path = self.tab_file(idx)?;
         let applied = self.conflict.as_ref().is_some_and(|session| {
             session
@@ -960,8 +973,14 @@ impl Workspace {
     }
 
     /// The file the focused editor of tab `idx` shows, or `None` for a renamed
-    /// tab, a diff view, or a pane that is no editor.
+    /// tab, a diff view, the conflict view, or a pane that is no editor.
+    ///
+    /// The conflict view's tab names its session, so it takes no file's
+    /// extension and no file's mark.
     fn tab_file(&self, idx: usize) -> Option<&Path> {
+        if self.conflict_tab(idx).is_some() {
+            return None;
+        }
         let tab = self.tabs.get(idx).filter(|tab| tab.name.is_none())?;
         let tree = match idx == self.active_tab {
             true => &self.panes,
@@ -972,6 +991,24 @@ impl Workspace {
         };
         self.editors.get(*id).filter(|editor| !editor.diff_view)?;
         self.editor_file(*id)
+    }
+
+    /// The conflict session whose view tab `idx` shows, or `None` for a tab
+    /// whose focused pane shows no conflict view.
+    ///
+    /// The view shows the session's current file in that file's own editor,
+    /// so a focused pane on that editor shows the view, in a parked tab too.
+    fn conflict_tab(&self, idx: usize) -> Option<&ConflictSession> {
+        let tree = match idx == self.active_tab {
+            true => &self.panes,
+            false => self.tabs.get(idx)?.parked.as_ref()?,
+        };
+        let View::Editor(id) = tree.pane(tree.focus()).view else {
+            return None;
+        };
+        self.conflict
+            .as_ref()
+            .filter(|session| session.file.editor_id == id)
     }
 
     /// The file editor `id` shows, or `None` for one with no file.
@@ -2544,7 +2581,7 @@ pub(crate) fn view_kind(view: &View) -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use super::{BridgeWaiter, ParseJob, Workspace};
+    use super::{BridgeWaiter, ParseJob, TabConflictMark, Workspace};
     use crate::{
         action_handlers::dispatch,
         alloc_trim,
@@ -2569,7 +2606,7 @@ mod tests {
             Arc,
         },
     };
-    use stoat_action::{NewTab, OpenRun};
+    use stoat_action::{Conflict, NewTab, OpenRun};
     use stoat_language::LanguageRegistry;
     use stoat_scheduler::{Task, TestScheduler};
     use tokio::sync::mpsc;
@@ -2962,6 +2999,40 @@ mod tests {
                 "\u{b1} changes \u{b7} 1 file",
                 "\u{b1} changes \u{b7} 0 files",
             ],
+        );
+    }
+
+    /// The conflict view's tab counts the files its session resolves, while it
+    /// is the active tab and once a new tab parks it. It takes no extension of
+    /// the tagged file it shows, and it keeps the conflict mark while the view
+    /// is open.
+    #[test]
+    fn the_conflict_view_s_tab_counts_its_files() {
+        let mut h = TestHarness::with_size(120, 24);
+        let git_root = h.stoat.active_workspace().git_root.clone();
+        let mut repo = h.fake_git().add_repo(git_root);
+        for file in ["a.rs", "b.rs"] {
+            repo.conflicted_file(file, Some("base\n"), Some("ours\n"), Some("theirs\n"));
+        }
+        dispatch(&mut h.stoat, &Conflict);
+        h.settle();
+        let tab = |h: &TestHarness| {
+            let ws = h.stoat.active_workspace();
+            (ws.tab_title(0), ws.tab_label(0).1, ws.tab_conflict_mark(0))
+        };
+
+        let active = tab(&h);
+        dispatch(&mut h.stoat, &NewTab);
+        let parked = tab(&h);
+
+        let counted = (
+            "conflicts \u{b7} 2 files".to_string(),
+            None,
+            Some(TabConflictMark::Conflicted),
+        );
+        assert_eq!(
+            (active, parked, h.stoat.active_workspace().active_tab),
+            (counted.clone(), counted, 1),
         );
     }
 

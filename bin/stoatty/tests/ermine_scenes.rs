@@ -1915,10 +1915,11 @@ fn the_conflict_view_paints_the_merge_grid() {
 
 /// The tab bar ends in the conflict chip while the conflict view is focused.
 ///
-/// The chip reads `1 unresolved · 1 / 1 chunks` at the Caption scale, 24
-/// cells that end one cell before the bar's right edge, so cells 140 to 152
-/// of the bar's row lie inside it on its fill. The row draws [`TAB_BAR_PAD`]
-/// px down in its band, so the check reads it there.
+/// The chip reads `merge theirs U+00B7 1 conflict left U+00B7 1 of 1 files`
+/// at the Caption scale with 8 px of pad at each side. That is 40 cells that
+/// end one cell before the bar's right edge, so cells 121 to 133 of the bar's
+/// row lie inside it on its fill. The row draws [`TAB_BAR_PAD`] px down in its
+/// band, so the check reads it there.
 #[test]
 fn the_tab_bar_ends_in_the_conflict_chip() {
     let mut home = support::scratch_home();
@@ -1929,7 +1930,7 @@ fn the_tab_bar_ends_in_the_conflict_chip() {
         "<C-;>Conflict<Enter><Settle>",
     );
 
-    let (x, y, width, height) = cell_rect(140, 0, 12, 1);
+    let (x, y, width, height) = cell_rect(121, 0, 12, 1);
     expect_region(
         &shot,
         &mut home,
