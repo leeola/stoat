@@ -87,10 +87,10 @@ pub(crate) struct FileResolveState {
 
 /// Per-editor render cache for the three-column conflict view.
 ///
-/// Cloned from the session onto the swapped-in editor at open, so the renderer
-/// (which only receives the focused editor) can build its column display list
-/// from `doc` each frame. `rel_path` names the file in the MergeGrid header.
-/// Refreshed alongside the session when a pick reassembles a region.
+/// Cloned from the session onto the swapped-in editor at open, so the renderer,
+/// which receives the focused editor alone, builds its column display list
+/// from `doc` each frame. Refreshed alongside the session when a pick
+/// reassembles a region.
 #[derive(Clone)]
 pub(crate) struct ConflictViewState {
     pub(crate) doc: MergeDoc,
@@ -102,7 +102,6 @@ pub(crate) struct ConflictViewState {
     /// derive each chunk's resolution state against its live region text and
     /// paint the matching gutter glyph.
     pub(crate) picks: Vec<Vec<RowPick>>,
-    pub(crate) rel_path: String,
     /// The names the MergeGrid header gives the two sides.
     pub(crate) labels: ConflictLabels,
     /// Layout and chunk classification derived from the center buffer, rebuilt
@@ -132,14 +131,12 @@ impl ConflictViewState {
         doc: MergeDoc,
         chunk_anchors: Vec<(Anchor, Anchor)>,
         picks: Vec<Vec<RowPick>>,
-        rel_path: String,
         labels: ConflictLabels,
     ) -> Self {
         Self {
             doc,
             chunk_anchors,
             picks,
-            rel_path,
             labels,
             derived: None,
         }
@@ -205,38 +202,65 @@ impl ConflictViewState {
     }
 }
 
-/// The names the conflict view's header gives the two sides of the merge.
+/// The names the conflict view gives the two sides of the merge.
 ///
 /// Read once when the view opens, since a merge keeps both sides fixed until
-/// it ends, and every file of the session shares them.
+/// it ends, and every file of the session shares them. Index conflicts with no
+/// merge in progress, as a cherry-pick or a stash pop leaves them, have no
+/// merge head, so theirs reads `theirs`, the side git's markers name.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct ConflictLabels {
-    pub(crate) ours: String,
-    pub(crate) theirs: String,
+    /// The branch HEAD is on, `None` for a detached HEAD.
+    ours_branch: Option<String>,
+    /// The local branch at the merge head, `None` with no merge or no branch
+    /// at its head.
+    theirs_name: Option<String>,
+    /// The merge head's short sha, `None` with no merge.
+    theirs_sha: Option<String>,
 }
 
 impl ConflictLabels {
     /// The labels for a repository whose HEAD is on `head_branch`, mid-merge of
     /// `merge` when one is in progress.
-    ///
-    /// Ours names HEAD's branch, or `HEAD` when it is detached. Theirs names
-    /// the merge head's branch, or its short sha when no local branch points at
-    /// it. Index conflicts with no merge in progress, as a cherry-pick or a
-    /// stash pop leaves them, name theirs `theirs`, the side git's markers name.
     pub(crate) fn new(head_branch: Option<String>, merge: Option<&MergeState>) -> Self {
-        let theirs = match merge {
-            Some(MergeState {
-                head_name: Some(name),
-                ..
-            }) => name.clone(),
-            Some(merge) => diff::short_sha(&merge.head_sha),
-            None => "theirs".to_string(),
-        };
-
         Self {
-            ours: head_branch.unwrap_or_else(|| "HEAD".to_string()),
-            theirs,
+            ours_branch: head_branch,
+            theirs_name: merge.and_then(|merge| merge.head_name.clone()),
+            theirs_sha: merge.map(|merge| diff::short_sha(&merge.head_sha)),
         }
+    }
+
+    /// Ours as the MergeGrid's header names it, `HEAD · {branch}`, or `HEAD`
+    /// alone on a detached HEAD.
+    pub(crate) fn ours_label(&self) -> String {
+        match &self.ours_branch {
+            Some(branch) => format!("HEAD \u{b7} {branch}"),
+            None => self.ours_short().to_string(),
+        }
+    }
+
+    /// Theirs as the MergeGrid's header names it, `{branch} · {sha}`, or the
+    /// short form when no branch is at the merge head or no merge is in
+    /// progress.
+    pub(crate) fn theirs_label(&self) -> String {
+        match (&self.theirs_name, &self.theirs_sha) {
+            (Some(name), Some(sha)) => format!("{name} \u{b7} {sha}"),
+            _ => self.theirs_short().to_string(),
+        }
+    }
+
+    /// Ours in one word, HEAD's branch or `HEAD` on a detached HEAD.
+    pub(crate) fn ours_short(&self) -> &str {
+        self.ours_branch.as_deref().unwrap_or("HEAD")
+    }
+
+    /// Theirs in one word, the merge head's branch, else its short sha, else
+    /// `theirs` with no merge.
+    pub(crate) fn theirs_short(&self) -> &str {
+        self.theirs_name
+            .as_deref()
+            .or(self.theirs_sha.as_deref())
+            .unwrap_or("theirs")
     }
 }
 
@@ -1475,22 +1499,36 @@ mod tests {
         };
         let labels = |head: Option<&str>, merge: Option<MergeState>| {
             let labels = ConflictLabels::new(head.map(String::from), merge.as_ref());
-            (labels.ours, labels.theirs)
+            [
+                labels.ours_label(),
+                labels.theirs_label(),
+                labels.ours_short().to_string(),
+                labels.theirs_short().to_string(),
+            ]
         };
 
         assert_eq!(
             [
                 labels(Some("main"), Some(merge(Some("feature")))),
+                labels(Some("main"), Some(merge(None))),
                 labels(None, Some(merge(None))),
                 labels(Some("main"), None),
             ],
             [
-                ("main".to_string(), "feature".to_string()),
-                ("HEAD".to_string(), "f00dfee".to_string()),
-                ("main".to_string(), "theirs".to_string()),
-            ],
-            "a detached HEAD reads HEAD, a merge head no branch names reads its short \
-             sha, and conflicts with no merge read theirs",
+                [
+                    "HEAD \u{b7} main",
+                    "feature \u{b7} f00dfee",
+                    "main",
+                    "feature"
+                ],
+                ["HEAD \u{b7} main", "f00dfee", "main", "f00dfee"],
+                ["HEAD", "f00dfee", "HEAD", "f00dfee"],
+                ["HEAD \u{b7} main", "theirs", "main", "theirs"],
+            ]
+            .map(|labels| labels.map(String::from)),
+            "a merge head's branch leads its short sha, a merge head no branch names \
+             reads its sha alone, a detached HEAD reads HEAD, and conflicts with no \
+             merge read theirs",
         );
     }
 
@@ -1509,15 +1547,15 @@ mod tests {
 
         let labels = crate::action_handlers::focused_editor_mut(&mut h.stoat)
             .and_then(|editor| editor.conflict_view.as_ref())
-            .map(|state| state.labels.clone());
+            .map(|state| (state.labels.ours_label(), state.labels.theirs_label()));
         assert_eq!(
             (current_file(&h), labels),
             (
                 1,
-                Some(ConflictLabels {
-                    ours: "main".to_string(),
-                    theirs: "feature".to_string(),
-                })
+                Some((
+                    "HEAD \u{b7} main".to_string(),
+                    "feature \u{b7} f00dfee".to_string()
+                ))
             ),
         );
     }

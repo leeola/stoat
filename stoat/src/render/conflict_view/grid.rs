@@ -59,9 +59,9 @@ const NUMBER_RIGHT: u16 = 58;
 /// number field, in sixteenths.
 const DIVIDER_MARGIN: u16 = 10;
 
-/// The header cells' `padding: 0 8px` and `gap: 8px`, in sixteenths.
-const HEADER_PAD: u16 = 8;
-const HEADER_GAP: u16 = 8;
+/// The header cells' `padding: 0 10px` and `gap: 8px`, in sixteenths.
+const HEADER_PAD: u16 = 20;
+const HEADER_GAP: u16 = 16;
 
 /// The chip's `padding: 0 6px`, in sixteenths.
 const CHIP_PAD: u16 = 12;
@@ -83,8 +83,12 @@ const CHIP_RADIUS: u8 = 4;
 const UNTAKEN_FADE: f32 = 0.55;
 
 /// The keys each side's header names, for taking a chunk or one line from it.
-const OURS_KEYS: &str = "o \u{b7} O line";
-const THEIRS_KEYS: &str = "t \u{b7} T line";
+const OURS_KEYS: &str = "click \u{b7} o \u{b7} O line";
+const THEIRS_KEYS: &str = "click \u{b7} t \u{b7} T line";
+
+/// The merged column's header label, which names the column as the file the
+/// resolution writes.
+const MERGED_LABEL: &str = "working tree \u{b7} you edit here";
 
 /// A resolved MergeGrid, which holds where its columns fall and the colors
 /// they take.
@@ -205,7 +209,7 @@ pub(super) struct GridColors {
     pub(super) muted: [u8; 3],
     pub(super) hairline: [u8; 3],
     pub(super) divider: [u8; 3],
-    /// The rule under the header row.
+    /// The rule under the header row, the divider's color.
     pub(super) rule: Option<[u8; 3]>,
     /// The merged column's header fill.
     pub(super) head: Option<[u8; 3]>,
@@ -258,7 +262,8 @@ impl GridColors {
             muted,
             hairline,
             divider,
-            rule: style_rgb(theme.get(s::UI_SURFACE_RAISED).bg),
+            rule: style_rgb(theme.get(s::UI_DIVIDER).fg)
+                .or_else(|| style_rgb(theme.get(s::UI_SURFACE_RAISED).bg)),
             head: style_rgb(theme.get(s::VCS_CONFLICT_HEAD).bg),
             absent: style_rgb(theme.get(s::DIFF_ABSENT).bg),
             absent_hatch: style_rgb(theme.get(s::DIFF_ABSENT).fg),
@@ -404,7 +409,10 @@ struct HeaderCell<'a> {
     muted: [u8; 3],
     /// The surface under the cell, which backs each run.
     bg: [u8; 3],
-    scale: u16,
+    /// The scale of the name and the label, the board's 12 px header text.
+    text_scale: u16,
+    /// The scale of the keys, the board's 11 px.
+    keys_scale: u16,
 }
 
 /// The state one grid paint threads through its rows.
@@ -595,14 +603,15 @@ pub(super) fn row_kind(row: &AlignRow, doc: &MergeDoc, states: &[ChunkState]) ->
 ///
 /// The row holds each column's name and label, the side keys, the merged
 /// column's fill, the rule under the row, and the hairlines through it. The
-/// names and labels draw at `scale`, the board's 11 px chrome text. The merged
-/// column names the file at `path`.
+/// names and labels draw at `text_scale`, the board's 12 px header text, and
+/// the keys at `keys_scale`, its 11 px. Each side names its commit as `labels`
+/// reads it, and the merged column names the working tree.
 pub(super) fn paint_header(
     area: Rect,
     grid: &Grid,
     labels: &ConflictLabels,
-    path: &str,
-    scale: u16,
+    text_scale: u16,
+    keys_scale: u16,
     buf: &mut Buffer,
     scene: &mut ApcScene,
 ) {
@@ -626,7 +635,8 @@ pub(super) fn paint_header(
                 keys,
                 muted: colors.muted,
                 bg,
-                scale,
+                text_scale,
+                keys_scale,
             },
             buf,
             scene,
@@ -635,15 +645,21 @@ pub(super) fn paint_header(
     cell(
         cols.ours,
         ("ours", colors.ours.fg),
-        &labels.ours,
+        &labels.ours_label(),
         OURS_KEYS,
         colors.bg,
     );
-    cell(cols.merged, ("merged", colors.text), path, "", merged_bg);
+    cell(
+        cols.merged,
+        ("merged", colors.text),
+        MERGED_LABEL,
+        "",
+        merged_bg,
+    );
     cell(
         cols.theirs,
         ("theirs", colors.theirs.fg),
-        &labels.theirs,
+        &labels.theirs_label(),
         THEIRS_KEYS,
         colors.bg,
     );
@@ -891,10 +907,12 @@ fn header_cell(cell: HeaderCell<'_>, buf: &mut Buffer, scene: &mut ApcScene) {
         keys,
         muted,
         bg,
-        scale,
+        text_scale,
+        keys_scale,
     } = cell;
-    let advance = |text: &str| text_run::advance_sixteenths(text.chars().count(), scale);
-    let mut run = |col: u16, text: &str, color: [u8; 3], bold: bool| {
+    let advance =
+        |text: &str, scale: u16| text_run::advance_sixteenths(text.chars().count(), scale);
+    let mut run = |col: u16, text: &str, scale: u16, color: [u8; 3], bold: bool| {
         TextRun {
             col: col as i16,
             row: 0,
@@ -912,24 +930,25 @@ fn header_cell(cell: HeaderCell<'_>, buf: &mut Buffer, scene: &mut ApcScene) {
 
     let start = column.x * 16 + HEADER_PAD;
     let end = (column.right() * 16).saturating_sub(HEADER_PAD);
-    let label_x = start + advance(name) + HEADER_GAP;
-    if start + advance(name) > end {
+    let name_end = start + advance(name, text_scale);
+    if name_end > end {
         return;
     }
-    run(start, name, name_color, true);
+    run(start, name, text_scale, name_color, true);
 
-    let keys_x = end.saturating_sub(advance(keys));
+    let label_x = name_end + HEADER_GAP;
+    let keys_x = end.saturating_sub(advance(keys, keys_scale));
     let keys_fit = !keys.is_empty() && keys_x >= label_x;
     let label_end = match keys_fit {
         true => keys_x.saturating_sub(HEADER_GAP),
         false => end,
     };
-    let label = fit(label, label_end.saturating_sub(label_x), scale);
+    let label = fit(label, label_end.saturating_sub(label_x), text_scale);
     if !label.is_empty() {
-        run(label_x, label, muted, false);
+        run(label_x, label, text_scale, muted, false);
     }
     if keys_fit {
-        run(keys_x, keys, muted, false);
+        run(keys_x, keys, keys_scale, muted, false);
     }
 }
 

@@ -175,7 +175,7 @@ pub(crate) fn render_conflict_view(
                 },
                 &grid,
                 &state.labels,
-                &state.rel_path,
+                theme.type_scale(TypeRole::Ui),
                 theme.type_scale(TypeRole::Caption),
                 buf,
                 scene,

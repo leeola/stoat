@@ -1,7 +1,12 @@
-use super::{number_scale, row_kind, GridColors, GridColumns, MergeRowKind, RowLook, Tone};
+use super::{
+    number_scale, paint_header, row_kind, Grid, GridColors, GridColumns, MergeRowKind, RowLook,
+    Tone,
+};
 use crate::{
     action_handlers::{dispatch, focused_editor_mut},
     app::DEFAULT_KEYMAP,
+    conflict_session::ConflictLabels,
+    host::git::MergeState,
     merge_view::{ChunkState, MergeDoc},
     render::{
         conflict_view::render_conflict_view,
@@ -26,7 +31,6 @@ const DANGER: [u8; 3] = [0xf2, 0x77, 0x7f];
 const MUTED: [u8; 3] = [0x83, 0x8a, 0x98];
 const TEXT: [u8; 3] = [0xdf, 0xe2, 0xe8];
 const BASE: [u8; 3] = [0x17, 0x19, 0x1e];
-const RAISED: [u8; 3] = [0x1e, 0x21, 0x27];
 const HAIRLINE: [u8; 3] = [0x2e, 0x32, 0x3b];
 const DIVIDER: [u8; 3] = [0x22, 0x25, 0x2b];
 const TINT_OURS: [u8; 3] = [0x18, 0x24, 0x1b];
@@ -132,44 +136,123 @@ fn inserted_lines_classify_by_the_side_that_added_them() {
     );
 }
 
+/// The header names each side's commit and the merged column's working tree,
+/// each name and label at the Ui scale and the keys at the Caption scale, all
+/// 20 sixteenths in from their column's edges. The merged cell fills with the
+/// head color, and a rule in the divider's color underlines the row.
+///
+/// At the Ui scale of 232 a character advances 14.5 sixteenths, and at the
+/// Caption scale of 216 it advances 13.5. So the ours label starts after the
+/// name's 58 and a gap of 16, and the 18 characters of its keys end 20 short
+/// of the column's 800.
 #[test]
-fn the_header_names_each_side_and_the_merged_file() {
-    let shot = grid_shot(ONE_CHUNK, &[]);
-    let row = |cell: (u16, u16)| style_rgb(Some(shot.buf[cell].bg));
-    let header_runs: Vec<_> = shot
-        .runs()
-        .into_iter()
-        .filter(|&(_, row, ..)| row == 0)
-        .map(|(_, _, text, color)| (text, color))
+fn the_header_names_each_side_and_the_merged_column() {
+    let (config, errors) = stoat_config::parse(DEFAULT_KEYMAP);
+    assert!(errors.is_empty(), "parse errors: {errors:?}");
+    let theme = Theme::from_config(&config.expect("the shipped config parses"), "ermine_night")
+        .expect("ermine_night loads");
+    let grid = Grid {
+        cols: GridColumns::compute(AREA, 2, 208),
+        colors: GridColors::resolve(&theme).expect("ermine_night gives RGB colors"),
+    };
+    let merge = MergeState {
+        head_sha: "f00dfeed".to_string(),
+        head_name: Some("feature".to_string()),
+        message: String::new(),
+        conflicted: 1,
+    };
+    let labels = ConflictLabels::new(Some("main".to_string()), Some(&merge));
+    let mut buf = Buffer::empty(AREA);
+    let mut scene = ApcScene::new();
+    paint_header(
+        Rect { height: 1, ..AREA },
+        &grid,
+        &labels,
+        232,
+        216,
+        &mut buf,
+        &mut scene,
+    );
+
+    let commands = decode_stream(scene.buffer());
+    let runs: Vec<_> = commands
+        .iter()
+        .filter_map(|command| match command {
+            Command::TextRun(run) => Some((run.col, run.text.clone(), run.scale, run.color)),
+            _ => None,
+        })
         .collect();
-    let rule = shot.bars().into_iter().find(|&(.., color)| color == RAISED);
+    let rule = commands.iter().find_map(|command| match command {
+        Command::Bar(bar) if bar.y == 15 => Some((bar.x, bar.width, bar.height, bar.color)),
+        _ => None,
+    });
+    let bg = |x: u16| style_rgb(Some(buf[(x, 0)].bg));
 
     assert_eq!(
-        (
-            header_runs,
-            row((shot.cols.merged.x, 0)),
-            row((shot.cols.ours.x, 0)),
-            rule
-        ),
+        (runs, bg(grid.cols.merged.x), bg(grid.cols.ours.x), rule),
         (
             [
-                ("ours", SUCCESS),
-                ("main", MUTED),
-                ("o \u{b7} O line", MUTED),
-                ("merged", TEXT),
-                ("f.txt", MUTED),
-                ("theirs", SPECIAL),
-                ("feature", MUTED),
-                ("t \u{b7} T line", MUTED),
+                (20, "ours", 232, SUCCESS),
+                (94, "HEAD \u{b7} main", 232, MUTED),
+                (537, "click \u{b7} o \u{b7} O line", 216, MUTED),
+                (820, "merged", 232, TEXT),
+                (923, "working tree \u{b7} you edit here", 232, MUTED),
+                (1748, "theirs", 232, SPECIAL),
+                (1851, "feature \u{b7} f00dfee", 232, MUTED),
+                (2265, "click \u{b7} t \u{b7} T line", 216, MUTED),
             ]
-            .map(|(text, color)| (text.to_string(), color))
+            .map(|(col, text, scale, color)| (col, text.to_string(), scale, color))
             .to_vec(),
             Some(MERGED_HEAD),
             None,
-            Some((0, 15, AREA.width * 16, 1, RAISED)),
+            Some((0, AREA.width * 16, 1, DIVIDER)),
         ),
-        "the merged cell fills with the head color, and a rule underlines the row",
     );
+}
+
+/// A column too narrow for its label cuts the label's tail at the label's own
+/// scale. At 84 cells a side column is 26 cells. The ours column leaves 43
+/// sixteenths between its name and its keys, so two characters of 14.5 fit
+/// and a third does not. The longer name of the theirs column leaves 14, too
+/// few for one character, so its label draws no run. The merged column's 32
+/// cells leave room for 25 characters.
+#[test]
+fn a_narrow_column_cuts_its_label_at_the_label_scale() {
+    let (config, errors) = stoat_config::parse(DEFAULT_KEYMAP);
+    assert!(errors.is_empty(), "parse errors: {errors:?}");
+    let theme = Theme::from_config(&config.expect("the shipped config parses"), "ermine_night")
+        .expect("ermine_night loads");
+    let area = Rect::new(0, 0, 84, 1);
+    let grid = Grid {
+        cols: GridColumns::compute(area, 2, 208),
+        colors: GridColors::resolve(&theme).expect("ermine_night gives RGB colors"),
+    };
+    let merge = MergeState {
+        head_sha: "f00dfeed".to_string(),
+        head_name: Some("feature".to_string()),
+        message: String::new(),
+        conflicted: 1,
+    };
+    let labels = ConflictLabels::new(Some("main".to_string()), Some(&merge));
+    let mut scene = ApcScene::new();
+    paint_header(
+        area,
+        &grid,
+        &labels,
+        232,
+        216,
+        &mut Buffer::empty(area),
+        &mut scene,
+    );
+
+    let cut: Vec<String> = decode_stream(scene.buffer())
+        .into_iter()
+        .filter_map(|command| match command {
+            Command::TextRun(run) if run.color == MUTED && run.scale == 232 => Some(run.text),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(cut, ["HE", "working tree \u{b7} you edit h"]);
 }
 
 #[test]
@@ -482,7 +565,6 @@ fn the_grid_draws_dividers_and_hairlines_down_its_rows() {
         .bars()
         .into_iter()
         .filter(|&(_, _, width, ..)| width == 1)
-        .filter(|&(.., color)| color != RAISED)
         .collect();
     rules.sort();
     let divider = |x: u16| (x as i16 * 16 + 68, 16, 1, 128, DIVIDER);
