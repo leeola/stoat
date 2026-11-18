@@ -584,12 +584,14 @@ fn the_changes_view_heads_each_file_on_the_raised_surface() {
 /// The changes view pins the File Header of the file under the stack's top
 /// edge to the stack's first row while the stack scrolls under it.
 ///
-/// The scene is 20 rows tall, and the tab bar's band and the status band take
-/// two rows each, so the stack shows 16. Two pages put the cursor on the
+/// The scene is 22 rows tall, and the tab bar's band and the status band take
+/// two rows each, so the stack shows 18. Two pages put the cursor on the
 /// stack's last row and the scroll on the last page, which starts inside
-/// hunks.txt, past its header and before its last row. Row 2 then shows
-/// hunks.txt's header on the raised surface over its bottom hairline. Where
-/// the cover fails, the resident pool's composite shows a stack row there.
+/// hunks.txt, past its header and before its last row. The stack lists the
+/// staged move renamed-to.txt after hunks.txt, so its header row and fold row
+/// add to the page. Row 2 then shows hunks.txt's header on the raised surface
+/// over its bottom hairline. Where the cover fails, the resident pool's
+/// composite shows a stack row there.
 ///
 /// The pinned header casts its shadow on row 3, which the stack's pool
 /// composites. A strip 2 px under that row's top edge takes about 0.38 of
@@ -599,7 +601,7 @@ fn the_changes_view_heads_each_file_on_the_raised_surface() {
 fn the_changes_view_pins_the_file_header_over_its_scrolling_stack() {
     let mut home = support::scratch_home();
     let mut session = spawn_scene(Scene {
-        rows: 20,
+        rows: 22,
         ..ermine_scene("diff-kinds", "hunks.txt", home.path())
     });
     play(&mut session, "<Space>dc<Settle><C-f><C-f><Settle>");

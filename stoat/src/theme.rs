@@ -1009,15 +1009,15 @@ pub mod scope {
     /// box (background) at the row's left.
     pub const DIFF_FOLD_BUTTON: &str = "diff.fold.button";
     /// The foreground of a fold row's line range, the first and the last line
-    /// the fold hides, at the row's right.
+    /// the fold hides, after the row's count.
     pub const DIFF_FOLD_RANGE: &str = "diff.fold.range";
-    /// The foreground of a Scope's keywords, such as `fn` and `impl`, on the
-    /// chip a fold row centers.
+    /// The foreground of a Scope's keywords, such as `fn` and `impl`, on a fold
+    /// row.
     pub const DIFF_SCOPE_KEYWORD: &str = "diff.scope.keyword";
-    /// The foreground of a Scope's names on the chip a fold row centers.
+    /// The foreground of a Scope's names on a fold row.
     pub const DIFF_SCOPE_NAME: &str = "diff.scope.name";
-    /// The foreground of the marks between a Scope's segments on the chip a
-    /// fold row centers, and of its `end of file` label.
+    /// The foreground of the marks between a Scope's segments on a fold row,
+    /// and of its `end of file` and `content unchanged` labels.
     pub const DIFF_SCOPE_SEPARATOR: &str = "diff.scope.separator";
     /// The mark on the rows an expand just opened, a lane at each side's left
     /// edge (foreground) over a tint across the row (background). Both fade

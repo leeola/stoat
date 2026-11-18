@@ -9,7 +9,7 @@
 
 use crate::{
     diff_changes::ExcerptStats,
-    display_map::{FoldScope, ScopeMark, DEFAULT_TAB_SIZE},
+    display_map::{FoldEnd, FoldScope, ScopeMark, DEFAULT_TAB_SIZE},
     render::{
         chrome,
         commits::{self, LineKind, PreviewDials},
@@ -48,7 +48,7 @@ const TEXT_X: u16 = RULE_X + 1;
 static NO_SCOPE: FoldScope = FoldScope {
     segments: Vec::new(),
     split: None,
-    end_of_file: false,
+    end: FoldEnd::None,
     mark: ScopeMark::None,
 };
 
@@ -523,7 +523,7 @@ fn is_line(row: &PatchRow) -> bool {
 mod tests {
     use super::{origin_row, origin_scroll, patch_rows, render_commit_patch, PatchLine, PatchRow};
     use crate::{
-        display_map::{FoldScope, ScopeMark},
+        display_map::{FoldEnd, FoldScope, ScopeMark},
         render::commits::{LineKind, PreviewDials},
         review::ReviewFileInput,
         review_session::{DiffDocument, ReviewChunkId},
@@ -746,7 +746,7 @@ mod tests {
                 name_range: 0..0,
             }],
             split: None,
-            end_of_file: false,
+            end: FoldEnd::None,
             mark: ScopeMark::None,
         }
     }

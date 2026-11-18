@@ -25,8 +25,8 @@ pub use crease_map::{
     Crease, CreaseId, CreaseMap, CreaseMetadata, CreaseSnapshot, RenderToggleFn, RenderTrailerFn,
 };
 pub use fold_map::{
-    FoldMap, FoldMetadata, FoldOffset, FoldPlaceholder, FoldPoint, FoldScope, FoldSnapshot,
-    ScopeMark,
+    FoldEnd, FoldMap, FoldMetadata, FoldOffset, FoldPlaceholder, FoldPoint, FoldScope,
+    FoldSnapshot, ScopeMark,
 };
 use highlights::{AnchorResolver, HighlightVersions};
 pub use highlights::{

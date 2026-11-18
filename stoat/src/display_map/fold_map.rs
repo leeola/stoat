@@ -82,13 +82,13 @@ pub struct FoldPlaceholder {
     pub merge_adjacent: bool,
     /// Category identifier for selective fold removal.
     pub type_tag: Option<TypeId>,
-    /// The Scope a changes view's fold row centers, the items that hold the
-    /// hunk below the fold. `None` for any other fold, and for a fold over a
+    /// The Scope a changes view's fold row names, the items that hold the hunk
+    /// below the fold. `None` for any other fold, and for a fold over a
     /// language with no outline query.
     pub scope: Option<Arc<FoldScope>>,
 }
 
-/// The Scope a fold row centers, the items that hold the hunk below its fold.
+/// The Scope a fold row names, the items that hold the hunk below its fold.
 ///
 /// A fold row stands for lines the reader does not see, so its Scope names
 /// where the next change sits, such as `impl Panel` then `fn modal_frame`. It
@@ -101,8 +101,9 @@ pub struct FoldScope {
     /// The chain at the hunk's last row, when the innermost item there differs
     /// from the first row's, so the row names both.
     pub split: Option<Vec<ScopeSegment>>,
-    /// Whether the fold runs to the end of the file, with no hunk below it.
-    pub end_of_file: bool,
+    /// What the fold stands for when it runs to the end of the file with no
+    /// hunk below it, which the row reads in place of a chain.
+    pub end: FoldEnd,
     /// Whether the hunk adds, removes, or renames the item the chain ends on.
     pub mark: ScopeMark,
 }
@@ -112,8 +113,24 @@ impl FoldScope {
     ///
     /// A Scope with a split names the split's item, so it is not top level.
     pub(crate) fn is_top_level(&self) -> bool {
-        !self.end_of_file && self.segments.is_empty() && self.split.is_none()
+        self.end == FoldEnd::None && self.segments.is_empty() && self.split.is_none()
     }
+}
+
+/// What a fold that reaches the end of its file stands for, which its fold row
+/// reads in place of a chain of items.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum FoldEnd {
+    /// The fold ends before the file does, so a hunk lies below it.
+    #[default]
+    None,
+    /// The lines after the file's last change.
+    EndOfFile,
+    /// Every line of a file with no change, such as one that moved with no
+    /// edit.
+    Unchanged,
+    /// The lines of a file with no base past the rows the stack shows.
+    NewFile,
 }
 
 /// How a fold row's Scope marks a hunk that adds, removes, or renames a whole

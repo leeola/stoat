@@ -350,8 +350,8 @@ The typed UI scopes, by group (syntax scopes are open-ended):
   foregrounds of the Scope a changes view's fold row names past the divide,
   the chain of items that hold the hunk below the fold, such as `impl Panel`
   then `fn modal_frame`. Each item's keyword and name take the first two. The
-  `U+203A` mark between items takes the third, as does the `end of file`
-  label. The Scope takes no box of its own.
+  `U+203A` mark between items takes the third, as do the `end of file` and
+  `content unchanged` labels. The Scope takes no box of its own.
 - `diff.reveal` -- the mark on the rows an expand just opened in the changes
   view: a lane at each side's left edge (foreground) over a tint across the
   row (background). The mark holds for 0.6 s and then fades out over 0.4 s.

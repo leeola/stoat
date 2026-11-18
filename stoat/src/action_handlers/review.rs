@@ -9,7 +9,7 @@ use crate::{
     commit_list::Preview,
     diff_cache::{DiffCache, DiffCacheKey},
     diff_map::{hunk_base_lines, line_starts},
-    display_map::{syntax_theme::SyntaxStyles, DisplaySnapshot, FoldScope, ScopeMark},
+    display_map::{syntax_theme::SyntaxStyles, DisplaySnapshot, FoldEnd, FoldScope, ScopeMark},
     editor_state::EditorId,
     git_jobs::{self, GitJob, GitLanding, GitWork},
     host::GitRepo,
@@ -1972,7 +1972,7 @@ fn attach_chunk_scopes(doc: &mut DiffDocument) {
                 chunk.scope = Some(Arc::new(FoldScope {
                     segments,
                     split: None,
-                    end_of_file: false,
+                    end: FoldEnd::None,
                     mark: ScopeMark::None,
                 }));
             }

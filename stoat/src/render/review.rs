@@ -3921,7 +3921,7 @@ mod tests {
     use crate::{
         buffer::{BufferId, TextBuffer},
         diff_map::{self, ChangeSpan, DiffHunk, DiffHunkStatus, DiffMap, MarkKind, TokenDetail},
-        display_map::{InlayKind, ScopeMark},
+        display_map::{FoldEnd, InlayKind, ScopeMark},
         render::paint::FAINT_CONTRAST_FLOOR,
         theme::{scope::UI_SELECTION_EDITOR, Theme, FULL_CELL_SCALE},
         workspace::diff::WorktreeBase,
@@ -5096,12 +5096,12 @@ mod tests {
         FoldScope {
             segments: vec![item("impl", "Theme"), item("fn", "panel")],
             split: None,
-            end_of_file: false,
+            end: FoldEnd::None,
             mark: ScopeMark::None,
         }
     }
 
-    /// The colors of a Scope's keywords, names, and separators in the chip
+    /// The colors of a Scope's keywords, names, and separators in the Scope
     /// tests.
     const SCOPE_COLORS: &str = r##"diff.scope.keyword.fg = "#c59af0"; diff.scope.name.fg = "#dfe2e8"; diff.scope.separator.fg = "#5b616d";"##;
 

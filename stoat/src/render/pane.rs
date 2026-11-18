@@ -2674,7 +2674,7 @@ fn metrics_half(
 /// The runs that name `scope` in a changes view's status row, fitted to
 /// `room` cells with a pad cell at each side.
 ///
-/// The parts are the ones a fold row's chip shows, each in `style` with its
+/// The parts are the ones a fold row's Scope shows, each in `style` with its
 /// role's foreground from `theme`. No runs show where not even the innermost
 /// item fits.
 fn scope_runs(

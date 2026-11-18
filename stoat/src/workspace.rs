@@ -28,7 +28,10 @@ use crate::{
     display_map::{syntax_theme::SyntaxStyles, CachedHighlightEndpoints, DisplayPoint},
     editor_state::{EditorId, EditorState},
     git_status::Note,
-    host::{git::MergeState, GitHost},
+    host::{
+        git::{HunkTallies, MergeState},
+        GitHost,
+    },
     input_history::InputHistory,
     pane::{DockId, DockPanel, DockSide, FocusTarget, PaneId, PaneTree, Placement, View},
     rebase::{ActiveRebase, RebaseState},
@@ -1672,6 +1675,12 @@ impl Workspace {
             .repo_hunk_tallies
             .as_ref()
             .map(|tallies| tallies.conflicted.as_slice())
+    }
+
+    /// The repository tally the diff pipeline last installed, or `None` before
+    /// the first tally lands and outside a repo.
+    pub(crate) fn repo_tallies(&self) -> Option<&HunkTallies> {
+        self.diff.repo_hunk_tallies.as_ref()
     }
 
     /// Files changed since the revision base, absolute, as the last tally read

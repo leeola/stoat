@@ -23,10 +23,11 @@ use crate::{
     buffer_registry::{BufferRegistry, OpenOrigin},
     diff_map::{DiffHunk, DiffHunkStatus, DiffMap},
     display_map::{
-        BlockRowKind, DisplayPoint, DisplaySnapshot, FoldPlaceholder, FoldScope, FoldSnapshot,
-        InlayPoint, InlaySnapshot, ScopeMark,
+        BlockRowKind, DisplayPoint, DisplaySnapshot, FoldEnd, FoldPlaceholder, FoldScope,
+        FoldSnapshot, InlayPoint, InlaySnapshot, ScopeMark,
     },
     editor_state::{EditorId, EditorState},
+    host::git::FileKind,
     multi_buffer::MultiBufferSnapshot,
     pane::View,
     render,
@@ -83,7 +84,7 @@ pub(crate) const REVEAL_FADE: f32 = 0.4;
 /// large a share of the view, so a shorter view shows the stack alone.
 const PINNED_MIN_VIEWPORT: usize = 8;
 
-/// A fold's buffer range and the Scope its fold row centers.
+/// A fold's buffer range and the Scope its fold row names.
 type HeldFold = (Range<Point>, Option<Arc<FoldScope>>);
 
 new_key_type! {
@@ -472,6 +473,8 @@ pub(crate) enum ScopeRole {
     Added,
     /// The mark of a removed item, in `diff.deleted`.
     Removed,
+    /// A label the boards draw in the muted text color, in `ui.text.muted`.
+    Note,
 }
 
 impl ScopePart {
@@ -492,6 +495,7 @@ impl ScopeRole {
             Self::Separator => scope::DIFF_SCOPE_SEPARATOR,
             Self::Added => scope::DIFF_ADDED,
             Self::Removed => scope::DIFF_DELETED,
+            Self::Note => scope::UI_TEXT_MUTED,
         }
     }
 }
@@ -560,7 +564,7 @@ impl<'a> ScopeReader<'a> {
             return Some(FoldScope {
                 segments: Vec::new(),
                 split: None,
-                end_of_file: true,
+                end: FoldEnd::EndOfFile,
                 mark: ScopeMark::None,
             });
         }
@@ -588,7 +592,7 @@ impl<'a> ScopeReader<'a> {
         let scope = |segments, split, mark| FoldScope {
             segments,
             split,
-            end_of_file: false,
+            end: FoldEnd::None,
             mark,
         };
         if hunk.buffer_line_range.is_empty()
@@ -795,7 +799,7 @@ impl DiffChangesState {
                 first_text_byte(rope, row),
             ),
             split: None,
-            end_of_file: false,
+            end: FoldEnd::None,
             mark: ScopeMark::None,
         });
         self.scope_cache = Some(CursorScope {
@@ -1920,6 +1924,12 @@ fn relist(stoat: &mut Stoat) -> bool {
 /// changed since the revision include it. Its excerpt shows the whole file as
 /// one added hunk, which the staging keys add to the index.
 ///
+/// A file that moved with no edit, an empty untracked file, and an empty file
+/// new in the index hold no hunk. Each joins because the tally names it among
+/// its changes, so a move never leaves the list and an empty file shows. Under
+/// the index base such a file joins only while the working tree changes it
+/// over the index, so a staged move stays off.
+///
 /// An open buffer under the working directory whose diff map holds a hunk
 /// joins the list, so an unsaved edit shows. A buffer with no unsaved edit
 /// joins only while its map is current for its content and the git state. A
@@ -1945,12 +1955,23 @@ pub(crate) fn listed_files(stoat: &Stoat) -> BTreeMap<String, PathBuf> {
                 true => ws.repo_unstaged_hunk_totals(),
                 false => ws.repo_hunk_totals(),
             };
-            totals
+            let hunked = totals
                 .unwrap_or_default()
                 .iter()
                 .filter(|(_, count)| *count > 0)
-                .map(|(path, _)| workdir.join(path))
-                .collect()
+                .map(|(path, _)| workdir.join(path));
+            let unhunked = ws
+                .repo_tallies()
+                .into_iter()
+                .flat_map(|tallies| &tallies.changes)
+                .filter(|change| {
+                    matches!(
+                        change.kind,
+                        FileKind::Moved { .. } | FileKind::Untracked | FileKind::New
+                    ) && (!index_base || change.unstaged)
+                })
+                .map(|change| workdir.join(&change.path));
+            hunked.chain(unhunked).collect()
         },
     };
     let open = ws.buffers.open_paths().into_iter().filter(|path| {
@@ -2466,6 +2487,16 @@ fn fold_excerpt(
                             .and_then(|reader| reader.gap_scope(&gap, line_count))
                             .map(Arc::new),
                     };
+                    // No chain names a file with no change, so its label needs
+                    // no parse, and a language with no outline query reads it.
+                    if gap.end >= line_count && map.is_empty() {
+                        placeholder.scope = Some(Arc::new(FoldScope {
+                            segments: Vec::new(),
+                            split: None,
+                            end: FoldEnd::Unchanged,
+                            mark: ScopeMark::None,
+                        }));
+                    }
                 }
                 (range, placeholder)
             })
@@ -2776,8 +2807,9 @@ pub(crate) fn first_text_byte(rope: &Rope, row: u32) -> usize {
 /// middle for one `U+2026`, the item after the outermost first, and drops the
 /// outermost last, so the innermost item always shows. A split names the two
 /// innermost items after their common containers, joined with `+`. An empty
-/// chain gives no parts, since a hunk at the top level shows no Scope, and a
-/// fold with no change below it reads `end of file`.
+/// chain gives no parts, since a hunk at the top level shows no Scope. A fold
+/// that runs to the end of its file reads the label its [`FoldEnd`] names, such
+/// as `end of file`.
 ///
 /// A whole added item takes `+` before the chain, and a whole removed item
 /// takes `U+2212`. A renamed item reads its old name, `U+2192`, and its new
@@ -2833,12 +2865,22 @@ fn parts_advance(parts: &[ScopePart], scale: u16) -> u16 {
     })
 }
 
-/// The items a Scope names, outermost first, each as its runs. A fold
-/// with no change below it reads as one label item.
+/// The items a Scope names, outermost first, each as its runs.
+///
+/// A fold that runs to the end of its file reads as one label item. The lines
+/// after the last change read `end of file` and a file with no change reads
+/// `content unchanged`, both in the separator's color. The rest of a file with
+/// no base reads `rest of the new file` in the muted text color, as the boards
+/// draw it.
 fn scope_items(scope: &FoldScope) -> Vec<Vec<ScopePart>> {
-    let label = |text: &str| vec![vec![ScopePart::new(text, ScopeRole::Separator)]];
-    if scope.end_of_file {
-        return label("end of file");
+    let label = match scope.end {
+        FoldEnd::None => None,
+        FoldEnd::EndOfFile => Some(("end of file", ScopeRole::Separator)),
+        FoldEnd::Unchanged => Some(("content unchanged", ScopeRole::Separator)),
+        FoldEnd::NewFile => Some(("rest of the new file", ScopeRole::Note)),
+    };
+    if let Some((text, role)) = label {
+        return vec![vec![ScopePart::new(text, role)]];
     }
     let old_name = match &scope.mark {
         ScopeMark::Renamed(old) => Some(old.as_str()),
@@ -3099,7 +3141,7 @@ mod tests {
         follow_cursor, gap_fold, gaps, header_rows, kept_rows, kept_runs, landing_row,
         layout_stack, listed_files, place_cursor, press_cell, pump_diff_changes_stack,
         reveal_cursor, reveal_rows, scope_parts, select_row, DiffChangesState, Excerpt,
-        ExcerptStats, ExpandDir, FoldEdge, Landing, ScopeParse, StackStamp,
+        ExcerptStats, ExpandDir, FoldEdge, Landing, ScopeParse, ScopePart, ScopeRole, StackStamp,
     };
     use crate::{
         action_handlers::dispatch,
@@ -3107,7 +3149,7 @@ mod tests {
         buffer::{BufferId, TextBuffer},
         buffer_registry::AutoReloadMode,
         diff_map::{DiffHunk, DiffHunkStatus, DiffMap, TokenDetail},
-        display_map::{DisplayPoint, FoldScope, InlayPoint, ScopeMark},
+        display_map::{DisplayPoint, FoldEnd, FoldScope, InlayPoint, ScopeMark},
         editor_state::{EditorId, EditorState},
         host::{DiffStatus, FakeRepoBuilder},
         test_harness::TestHarness,
@@ -3561,7 +3603,8 @@ fn hint_width() -> u32 {
     /// A chain too wide for its room drops items from its middle for one
     /// ellipsis, the outermost item last, and keeps the innermost. Nothing
     /// shows where even the innermost does not fit or where a Scope names no
-    /// item, and the end of the file reads as a label.
+    /// item. Each end of a file reads as its label, and the rest of a new file
+    /// takes the muted note role.
     #[test]
     fn a_scope_drops_middle_items_until_it_fits() {
         let item = |keyword: &str, name: &str| ScopeSegment {
@@ -3570,15 +3613,15 @@ fn hint_width() -> u32 {
             item_range: 0..0,
             name_range: 0..0,
         };
-        let scope = |segments: Vec<ScopeSegment>, end_of_file| FoldScope {
+        let scope = |segments: Vec<ScopeSegment>, end| FoldScope {
             segments,
             split: None,
-            end_of_file,
+            end,
             mark: ScopeMark::None,
         };
         let chain = scope(
             vec![item("mod", "a"), item("impl", "B"), item("fn", "c")],
-            false,
+            FoldEnd::None,
         );
         let fit = |scope: &FoldScope, chars: u16| -> String {
             scope_parts(scope, chars * 16, FULL_CELL_SCALE)
@@ -3586,24 +3629,34 @@ fn hint_width() -> u32 {
                 .map(|part| part.text.as_str())
                 .collect()
         };
+        let label = |end| scope_parts(&scope(Vec::new(), end), u16::MAX, FULL_CELL_SCALE);
 
         assert_eq!(
-            [
-                fit(&chain, 21),
-                fit(&chain, 20),
-                fit(&chain, 15),
-                fit(&chain, 7),
-                fit(&scope(Vec::new(), false), 21),
-                fit(&scope(Vec::new(), true), 21),
-            ],
-            [
-                "mod a \u{203a} impl B \u{203a} fn c",
-                "mod a \u{203a} \u{2026} \u{203a} fn c",
-                "\u{2026} \u{203a} fn c",
-                "",
-                "",
-                "end of file",
-            ],
+            (
+                [
+                    fit(&chain, 21),
+                    fit(&chain, 20),
+                    fit(&chain, 15),
+                    fit(&chain, 7),
+                    fit(&scope(Vec::new(), FoldEnd::None), 21),
+                ],
+                [FoldEnd::EndOfFile, FoldEnd::Unchanged, FoldEnd::NewFile].map(label),
+            ),
+            (
+                [
+                    "mod a \u{203a} impl B \u{203a} fn c",
+                    "mod a \u{203a} \u{2026} \u{203a} fn c",
+                    "\u{2026} \u{203a} fn c",
+                    "",
+                    "",
+                ]
+                .map(String::from),
+                [
+                    vec![ScopePart::new("end of file", ScopeRole::Separator)],
+                    vec![ScopePart::new("content unchanged", ScopeRole::Separator)],
+                    vec![ScopePart::new("rest of the new file", ScopeRole::Note)],
+                ],
+            ),
         );
     }
 
@@ -3965,6 +4018,73 @@ fn hint_width() -> u32 {
 
         stacked(&mut h);
         assert_eq!(excerpts(&h), listed(&["a.txt", "b.txt", "c.txt", "z.txt"]));
+    }
+
+    /// Under the HEAD base a file that moved with no edit and an empty new
+    /// file stack beside an edited file, though neither holds a hunk, so a move
+    /// never leaves the stack and an empty file shows.
+    #[test]
+    fn a_file_moved_with_no_edit_and_an_empty_new_file_get_excerpts() {
+        let mut h = TestHarness::with_size(100, 24);
+        h.stage_review_scenario("/repo", &[("a.txt", "a\n", "A\n")]);
+        repo(&mut h)
+            .renamed("old.txt", "moved.txt", "same\n")
+            .empty_untracked("empty.txt");
+        h.stoat
+            .active_workspace_mut()
+            .set_worktree_base(WorktreeBase::Head);
+
+        stacked(&mut h);
+        assert_eq!(excerpts(&h), listed(&["a.txt", "empty.txt", "moved.txt"]));
+    }
+
+    /// Against the index a staged move with no edit leaves the working tree
+    /// as the index holds it, so the move takes no excerpt.
+    #[test]
+    fn a_staged_move_stays_off_a_stack_against_the_index() {
+        let mut h = TestHarness::with_size(100, 24);
+        h.stage_review_scenario("/repo", &[("a.txt", "a\n", "A\n")]);
+        repo(&mut h).renamed("old.txt", "moved.txt", "same\n");
+        h.stoat
+            .active_workspace_mut()
+            .set_worktree_base(WorktreeBase::Index);
+
+        stacked(&mut h);
+        assert_eq!(excerpts(&h), listed(&["a.txt"]));
+    }
+
+    /// A file with no change folds whole under one fold row, whose Scope reads
+    /// `content unchanged` in place of a chain, though a text file's language
+    /// has no outline query.
+    #[test]
+    fn a_file_with_no_change_folds_whole_under_content_unchanged() {
+        let mut h = TestHarness::with_size(100, 24);
+        repo(&mut h).renamed("old.txt", "moved.txt", "one\ntwo\nthree\n");
+        h.stoat
+            .active_workspace_mut()
+            .set_worktree_base(WorktreeBase::Head);
+        stacked(&mut h);
+
+        let snapshot = excerpt_editor(&mut h, "moved.txt").display_map.snapshot();
+        let folds = snapshot.fold_snapshot();
+        let inlays = folds.inlay_snapshot();
+        let rows: Vec<(Range<u32>, String)> = folds
+            .folds_in_range(InlayPoint::default()..folds.to_inlay_point(folds.max_point()))
+            .into_iter()
+            .filter(|fold| fold.placeholder.is_fold_row())
+            .map(|fold| {
+                (
+                    inlays.to_buffer_point(fold.range.start).row
+                        ..inlays.to_buffer_point(fold.range.end).row + 1,
+                    fold.placeholder
+                        .scope
+                        .as_deref()
+                        .map(scope_text)
+                        .unwrap_or_default(),
+                )
+            })
+            .collect();
+        assert_eq!(rows, vec![(0..4, "content unchanged".to_string())]);
     }
 
     /// Under a revision base an untracked file with content stacks beside the
