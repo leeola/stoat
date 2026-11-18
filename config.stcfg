@@ -396,6 +396,7 @@ theme ermine_night inherits default_dark {
     vcs.conflict.chip      = { fg: danger, bg: chip_conflict };
     vcs.conflict.chip.ours = { fg: success, bg: chip_ours };
     vcs.conflict.chip.theirs = { fg: special, bg: chip_theirs };
+    vcs.conflict.chip.both = { fg: accent, bg: fold_button };
     vcs.conflict.tag       = { fg: conflict, bg: tag_conflict };
     vcs.conflict.tag.resolved = { fg: success, bg: chip_ours };
     vcs.conflict.ghost     = { fg: muted, modifiers: [italic] };

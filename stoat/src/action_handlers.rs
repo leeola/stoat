@@ -225,6 +225,7 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
     // made and then moved on from waits to surprise a later yank.
     stoat.take_selected_register();
     conflict_view::disarm_clobber_unless_pick(stoat, action.kind());
+    conflict_view::set_chip_menu(stoat, None);
     let modal_before = keymap_state::active_modal(stoat);
 
     let group_buffer = if manages_own_undo_group(action.kind()) {

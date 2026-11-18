@@ -6834,6 +6834,8 @@ mod tests {
                     merged: 49..104,
                     theirs: 104..153,
                     body: Rect::new(0, 2, 153, 9),
+                    chips: vec![(Rect::new(85, 3, 19, 1), 0), (Rect::new(85, 9, 19, 1), 1)],
+                    buttons: Vec::new(),
                 }),
                 format!(
                     "{facts} 2 left {:<51}2:1 {:<56}",

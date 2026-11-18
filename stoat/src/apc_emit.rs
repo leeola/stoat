@@ -1340,6 +1340,20 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
             blame,
             blame_selected.filter(|_| !split_gutter),
         );
+        // A conflict page draws the chip menu's pick buttons, which change no
+        // buffer or paint version, so the open menu joins the page's version.
+        let content_version = match editor
+            .conflict_view
+            .as_ref()
+            .and_then(|state| state.chip_menu)
+        {
+            Some(chunk) => {
+                let mut hasher = DefaultHasher::new();
+                (content_version, chunk).hash(&mut hasher);
+                hasher.finish()
+            },
+            None => content_version,
+        };
         let snapshot = editor.display_map.snapshot();
         // The spotlight recolors only the rows it lights, so where it falls is
         // each page's own version. A diff-view page draws no spotlight.

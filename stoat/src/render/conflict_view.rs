@@ -19,6 +19,7 @@ use ratatui::{
     style::Style,
 };
 use std::{ops::Range, sync::Arc};
+use stoat_action::ActionKind;
 use stoat_text::cursor_offset;
 use stoat_widgets::ApcScene;
 
@@ -31,20 +32,28 @@ const CONFLICT_SIDE_NUM_MIN: u16 = 120;
 /// Blend fraction toward the background for an unresolved chunk's tint wash.
 const BAND_TINT: f32 = 0.85;
 
-/// A MergeGrid paint's scene, with what the live grid alone knows.
+/// A MergeGrid paint's scene, with what its rows draw beyond the document.
 pub(crate) struct GridPaint<'a> {
     pub(crate) scene: &'a mut ApcScene,
     /// The display row the cursor sits on, whose merged number the grid lifts.
     /// `None` for a pool page, which never carries the cursor.
     pub(crate) cursor_row: Option<u32>,
+    /// The chunk whose chip shows its pick buttons, as the view state holds
+    /// it.
+    pub(crate) chip_menu: Option<usize>,
+    /// Where the paint records the cells of the chips and the pick buttons it
+    /// draws, so a press finds them. `None` for a pool page, which no press
+    /// reads.
+    pub(crate) layout: Option<&'a mut ConflictLayout>,
 }
 
-/// Where the MergeGrid's columns and rows fell in the frame that painted it,
-/// in the frame's absolute cells.
+/// Where the MergeGrid's columns, rows, and chips fell in the frame that
+/// painted it, in the frame's absolute cells.
 ///
 /// The paint records it on the editor, so a reader outside the painter places
 /// itself against the columns the frame drew rather than laying out columns
-/// of its own. The status row splits its runs at the merged column's edges.
+/// of its own. The status row splits its runs at the merged column's edges,
+/// and a press finds the chip or the pick button under it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct ConflictLayout {
     pub(crate) ours: Range<u16>,
@@ -52,12 +61,21 @@ pub(crate) struct ConflictLayout {
     pub(crate) theirs: Range<u16>,
     /// The rows under the header, across all three columns.
     pub(crate) body: Rect,
+    /// The cells of each chunk's chip on screen, with the chunk it names.
+    pub(crate) chips: Vec<(Rect, usize)>,
+    /// The cells of each pick button of the open chip menu, with the pick it
+    /// takes.
+    pub(crate) buttons: Vec<(Rect, ActionKind)>,
 }
 
 /// What a press on the conflict view's MergeGrid lands on, as
 /// [`conflict_target`] reads it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ConflictTarget {
+    /// A pick button of the open chip menu, with the pick it takes.
+    Button(ActionKind),
+    /// A chunk's chip, with the state the chunk stands at.
+    Chip { chunk: usize, state: ChunkState },
     /// The ours or theirs side of a chunk that still takes picks.
     Side {
         chunk: usize,
@@ -191,11 +209,13 @@ pub(crate) fn render_conflict_view(
         width: text.end.saturating_sub(text.start),
         height: body.height,
     });
-    editor.conflict_layout = live.as_ref().map(|(_, grid)| ConflictLayout {
+    let mut layout = live.as_ref().map(|(_, grid)| ConflictLayout {
         ours: grid.cols.ours.x..grid.cols.ours.right(),
         merged: grid.cols.merged.x..grid.cols.merged.right(),
         theirs: grid.cols.theirs.x..grid.cols.theirs.right(),
         body,
+        chips: Vec::new(),
+        buttons: Vec::new(),
     });
     let scroll_row = editor.scroll_row;
     let cursor = cursor_display(editor, &snapshot);
@@ -207,6 +227,7 @@ pub(crate) fn render_conflict_view(
     let position = editor.conflict_frame.position;
     if let Some(state) = editor.conflict_view.as_mut() {
         let state = Arc::make_mut(state);
+        let chip_menu = state.chip_menu;
         let paint = live.map(|(scene, grid)| {
             grid::paint_header(
                 Rect { height: 1, ..inner },
@@ -236,6 +257,8 @@ pub(crate) fn render_conflict_view(
             GridPaint {
                 scene,
                 cursor_row: Some(cursor.row),
+                chip_menu,
+                layout: layout.as_mut(),
             }
         });
         let (doc, derived) = state.derived(&snapshot);
@@ -253,6 +276,7 @@ pub(crate) fn render_conflict_view(
             paint,
         );
     }
+    editor.conflict_layout = layout;
     editor.highlight_endpoint_cache = endpoint_cache;
     editor.diff_row_cache = row_cache;
 
@@ -263,28 +287,40 @@ pub(crate) fn render_conflict_view(
 /// view that `editor` shows, or `None` for a press the editor's own pointer
 /// path keeps.
 ///
-/// A press in the ours or theirs column of a chunk that still shows its
-/// markers or a per-row mix is a [`ConflictTarget::Side`]. The columns are the
-/// ones the last paint recorded, so a frame with no MergeGrid has no target. A
-/// chunk that a whole-side pick, an auto-resolution, or a hand edit settled is
-/// no target, so a press there places the cursor as on any row.
+/// A press on a pick button of the open chip menu is a
+/// [`ConflictTarget::Button`], and a press on a chunk's chip is a
+/// [`ConflictTarget::Chip`] whatever the chunk's state. A press in the ours or
+/// theirs column of a chunk that still shows its markers or a per-row mix is
+/// a [`ConflictTarget::Side`]. The cells are the ones the last paint recorded,
+/// so a frame with no MergeGrid has no target. A chunk that a whole-side pick,
+/// an auto-resolution, or a hand edit settled is no side target, so a press on
+/// its side places the cursor as on any row.
 pub(crate) fn conflict_target(
     editor: &mut EditorState,
     column: u16,
     row: u16,
 ) -> Option<ConflictTarget> {
-    let (body, side) = {
+    let at = Position::new(column, row);
+    let (body, chip, side) = {
         let layout = editor.conflict_layout.as_ref()?;
+        if let Some(&(_, kind)) = layout.buttons.iter().find(|(cells, _)| cells.contains(at)) {
+            return Some(ConflictTarget::Button(kind));
+        }
+        let chip = layout
+            .chips
+            .iter()
+            .find(|(cells, _)| cells.contains(at))
+            .map(|&(_, chunk)| chunk);
         let side = if layout.ours.contains(&column) {
-            Side::Ours
+            Some(Side::Ours)
         } else if layout.theirs.contains(&column) {
-            Side::Theirs
+            Some(Side::Theirs)
         } else {
-            return None;
+            None
         };
-        (layout.body, side)
+        (layout.body, chip, side)
     };
-    if !body.contains(Position::new(column, row)) {
+    if !body.contains(at) || (chip.is_none() && side.is_none()) {
         return None;
     }
     // At an unaligned rest the composite draws a row in the cell its offset
@@ -295,6 +331,12 @@ pub(crate) fn conflict_target(
     let snapshot = editor.display_map.snapshot();
     let state = Arc::make_mut(editor.conflict_view.as_mut()?);
     let (_, derived) = state.derived(&snapshot);
+    if let Some(chunk) = chip {
+        let state = *derived.states.get(chunk)?;
+        return Some(ConflictTarget::Chip { chunk, state });
+    }
+
+    let side = side?;
     let align = derived.plan.get(display_row as usize)?;
     let chunk = align.chunk?;
     if !matches!(

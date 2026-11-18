@@ -7119,6 +7119,8 @@ fn a_conflict_pane_fills_with_the_three_column_body() {
         Some(GridPaint {
             scene: &mut scene,
             cursor_row: None,
+            chip_menu: None,
+            layout: None,
         }),
     );
     let mut expected = crate::render::serialize_buffer(&cells);
@@ -7133,6 +7135,86 @@ fn a_conflict_pane_fills_with_the_three_column_body() {
             .iter()
             .any(|batch| batch.windows(expected.len()).any(|w| w == expected)),
         "a pooled fill carries the live three-column body, not the bare center buffer",
+    );
+}
+
+/// The chip menu's pick buttons change no buffer or paint version, so the
+/// conflict pages fold the open menu into their version. A rest leaves the
+/// change to the live grid, and the next move refills the page that holds the
+/// chunk with the buttons in the chip's place.
+///
+/// The chunk sits at line 30, on the second page of the region.
+#[test]
+fn a_move_after_a_chip_menu_opens_refills_its_page() {
+    use crate::render::conflict_view::{render_conflict_rows, GridPaint};
+    use ratatui::layout::Rect;
+
+    let stage = |middle: &str| -> String {
+        (0..60)
+            .map(|i| match i {
+                30 => format!("{middle}\n"),
+                _ => format!("line {i}\n"),
+            })
+            .collect()
+    };
+    let (mut h, mut rx) = conflict_pane_of([&stage("base"), &stage("OURS"), &stage("THEIRS")]);
+    emit_smooth_scroll(&mut h.stoat);
+    h.settle();
+    while rx.try_recv().is_ok() {}
+
+    action_handlers::conflict_view::set_chip_menu(&mut h.stoat, Some(0));
+    {
+        let editor = action_handlers::focused_editor_mut(&mut h.stoat).expect("center editor");
+        editor.scroll_row = 1;
+        editor.scroll_glide = ScrollGlide::None;
+    }
+    emit_smooth_scroll(&mut h.stoat);
+    h.settle();
+
+    let (_, _, region) = editor_pool_panes(&h.stoat)
+        .into_iter()
+        .next()
+        .expect("the conflict pane declares a pool region");
+    let theme = h.stoat.theme.clone();
+    let (snapshot, mut state) = {
+        let editor = action_handlers::focused_editor_mut(&mut h.stoat).expect("center editor");
+        (
+            editor.display_map.snapshot(),
+            editor.conflict_view.clone().expect("conflict view state"),
+        )
+    };
+    let area = Rect::new(0, 0, region.width, region.height);
+    let mut cells = crate::smooth_scroll::page_buffer(area, &theme);
+    let mut scene = ApcScene::new();
+    let (doc, derived) = Arc::make_mut(&mut state).derived(&snapshot);
+    render_conflict_rows(
+        &snapshot,
+        doc,
+        derived,
+        u32::from(region.height),
+        area,
+        theme.get(crate::theme::scope::UI_TEXT),
+        &theme,
+        &mut cells,
+        None,
+        None,
+        Some(GridPaint {
+            scene: &mut scene,
+            cursor_row: None,
+            chip_menu: Some(0),
+            layout: None,
+        }),
+    );
+    let mut page = crate::render::serialize_buffer(&cells);
+    page.extend_from_slice(scene.buffer());
+
+    let mut sent = Vec::new();
+    while let Ok(batch) = rx.try_recv() {
+        sent.extend(batch);
+    }
+    assert!(
+        sent.windows(page.len()).any(|w| w == page),
+        "the move refills the chunk's page with its buttons",
     );
 }
 

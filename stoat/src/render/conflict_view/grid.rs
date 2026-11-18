@@ -31,6 +31,7 @@ use ratatui::{
     widgets::StatefulWidget,
 };
 use std::fmt::Write;
+use stoat_action::ActionKind;
 use stoat_widgets::{
     bar::{Bar, BarBatch},
     text_run::{self, TextRun, TextRunBatch},
@@ -82,6 +83,18 @@ const CHIP_HEIGHT: u16 = 14;
 /// The radius of the chip's corners, the board's `border-radius: 4px`, in
 /// logical pixels.
 const CHIP_RADIUS: u8 = 4;
+
+/// The board's 2 px between the pick buttons an open chunk's chip offers, in
+/// sixteenths.
+const BUTTON_GAP: u16 = 4;
+
+/// The pick buttons an open chunk's chip offers, with the pick each takes, in
+/// the order they stand.
+const BUTTONS: [(&str, ActionKind); 3] = [
+    ("ours", ActionKind::ConflictPickOurs),
+    ("theirs", ActionKind::ConflictPickTheirs),
+    ("both", ActionKind::ConflictPickBoth),
+];
 
 /// How far the untaken side's text blends toward its surface, the board's
 /// `opacity: 0.45`.
@@ -205,9 +218,10 @@ impl Column {
 /// Each scope the boards added falls back to a neighbor when a theme leaves it
 /// unset, so a theme without those scopes keeps its look. The band takes the
 /// conflict header's color, the chip takes the band, each side's chip takes
-/// its side, the tag takes the chip, the resolved tag takes the ours chip, and
-/// the ghost takes muted italic text. A missing tint is its side's color
-/// washed toward the surface.
+/// its side, the both button takes the Fold Buttons' color and then the chip,
+/// the tag takes the chip, the resolved tag takes the ours chip, and the ghost
+/// takes muted italic text. A missing tint is its side's color washed toward
+/// the surface.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) struct GridColors {
     pub(super) bg: [u8; 3],
@@ -235,6 +249,8 @@ pub(super) struct GridColors {
     /// The chip of a run the merge takes from theirs, or a chunk resolved to
     /// it.
     pub(super) chip_theirs: Tone,
+    /// The both button among the pick buttons an open chunk's chip offers.
+    pub(super) chip_both: Tone,
     /// The File Header's tag while the shown file holds an open conflict.
     pub(super) tag: Tone,
     /// The File Header's tag once the shown file holds no open conflict.
@@ -291,6 +307,13 @@ impl GridColors {
             chip,
             chip_ours,
             chip_theirs: scoped(s::VCS_CONFLICT_CHIP_THEIRS, theirs),
+            chip_both: scoped(
+                s::VCS_CONFLICT_CHIP_BOTH,
+                theme
+                    .try_get(s::DIFF_FOLD_BUTTON)
+                    .and_then(tone)
+                    .unwrap_or(chip),
+            ),
             tag: scoped(s::VCS_CONFLICT_TAG, chip),
             tag_resolved: scoped(s::VCS_CONFLICT_TAG_RESOLVED, chip_ours),
         })
@@ -885,7 +908,7 @@ pub(super) fn paint_rows(
     buf: &mut Buffer,
     endpoint_cache: Option<&mut Option<CachedHighlightEndpoints>>,
     row_cache: Option<&mut Option<DiffRowCache>>,
-    paint: GridPaint<'_>,
+    mut paint: GridPaint<'_>,
 ) {
     let Grid { cols, colors } = grid;
     let ConflictDerived { states, plan, .. } = derived;
@@ -919,6 +942,9 @@ pub(super) fn paint_rows(
         scratch: String::new(),
     };
     let mut chips = Vec::new();
+    let mut buttons = None;
+    let button_scale = theme.type_scale(TypeRole::Small);
+    let button_cells = (buttons_width(button_scale) + CHIP_MARGIN).div_ceil(16);
 
     for display_row in scroll_row..end_row {
         let y = body.y + (display_row - scroll_row) as u16;
@@ -962,12 +988,16 @@ pub(super) fn paint_rows(
         if let Some(color) = look.merged.bar {
             painter.bar(merged, y, color);
         }
-        let chip = look
+        let chunk = plan_row.and_then(|row| row.chunk);
+        let mark = look
             .chip
             .filter(|_| opens_run(plan, index, kind, doc, states))
-            .map(|(text, tone)| (text, tone, cols.chip_cells(text)))
-            .filter(|&(_, _, cells)| cells <= merged.right().saturating_sub(merged.text_x));
-        let text_end = merged.right() - chip.map_or(0, |(_, _, cells)| cells);
+            .map(|(text, tone)| match chunk {
+                Some(chunk) if paint.chip_menu == Some(chunk) => RunMark::Buttons(button_cells),
+                _ => RunMark::Chip(text, tone, cols.chip_cells(text)),
+            })
+            .filter(|mark| mark.cells() <= merged.right().saturating_sub(merged.text_x));
+        let text_end = merged.right() - mark.as_ref().map_or(0, RunMark::cells);
 
         if let DiffRowKind::BufferRow { buffer_row } = row_states[index - scroll_row as usize].kind
         {
@@ -1005,8 +1035,12 @@ pub(super) fn paint_rows(
             }
         }
 
-        if let Some((text, tone, cells)) = chip {
-            chips.push((Rect::new(text_end, y, cells, 1), text, tone));
+        match mark {
+            Some(RunMark::Chip(text, tone, cells)) => {
+                chips.push((Rect::new(text_end, y, cells, 1), text, tone, chunk));
+            },
+            Some(RunMark::Buttons(cells)) => buttons = Some(Rect::new(text_end, y, cells, 1)),
+            None => {},
         }
     }
 
@@ -1050,8 +1084,35 @@ pub(super) fn paint_rows(
     }
     bars.flush(paint.scene);
     numbers.flush(paint.scene);
-    for (area, text, tone) in chips {
+    for (area, text, tone, chunk) in chips {
         draw_chip(area, text, tone, cols.number_scale, buf, paint.scene);
+        if let (Some(layout), Some(chunk)) = (paint.layout.as_deref_mut(), chunk) {
+            layout.chips.push((area, chunk));
+        }
+    }
+    if let Some(area) = buttons {
+        let tones = [colors.chip_ours, colors.chip_theirs, colors.chip_both];
+        let cells = draw_buttons(area, tones, button_scale, buf, paint.scene);
+        if let Some(layout) = paint.layout.as_deref_mut() {
+            layout.buttons = cells;
+        }
+    }
+}
+
+/// What stands at the right end of a run's first merged row.
+enum RunMark {
+    /// The chip that names the run, with its text, its tone, and its cells.
+    Chip(&'static str, Tone, u16),
+    /// The open chip menu's pick buttons in the chip's place, with their cells.
+    Buttons(u16),
+}
+
+impl RunMark {
+    /// The cells the mark takes from the end of the merged text.
+    fn cells(&self) -> u16 {
+        match *self {
+            Self::Chip(_, _, cells) | Self::Buttons(cells) => cells,
+        }
     }
 }
 
@@ -1223,6 +1284,69 @@ fn draw_chip(
 /// board's padding on each side, in sixteenths.
 fn chip_width(text: &str, scale: u16) -> u16 {
     text_run::advance_sixteenths(text.chars().count(), scale) + 2 * CHIP_PAD
+}
+
+/// Draw the open chip menu's pick buttons over `area`, the last ending where a
+/// chip's box ends, and answer each button's cells with the pick it takes.
+///
+/// Each button is a rounded bar under its label at `scale`, as a chip is, in
+/// its tone of `tones`. A button's cells are the ones whose centers it covers,
+/// so no cell falls to two buttons across the gap between them.
+fn draw_buttons(
+    area: Rect,
+    tones: [Tone; 3],
+    scale: u16,
+    buf: &mut Buffer,
+    scene: &mut ApcScene,
+) -> Vec<(Rect, ActionKind)> {
+    let mut x = (area.width * 16).saturating_sub(CHIP_MARGIN + buttons_width(scale));
+    let mut cells = Vec::with_capacity(BUTTONS.len());
+    for ((label, kind), tone) in BUTTONS.into_iter().zip(tones) {
+        let width = chip_width(label, scale);
+        // The box renders alone and before the run, as a chip's does.
+        Bar {
+            x: x as i16,
+            y: 1,
+            width,
+            height: CHIP_HEIGHT,
+            color: tone.tint,
+            radius: CHIP_RADIUS,
+            corners: 0,
+        }
+        .render(area, buf, scene);
+        TextRun {
+            col: (x + CHIP_PAD) as i16,
+            row: 0,
+            scale,
+            color: tone.fg,
+            bg: None,
+            text: label,
+            bold: false,
+            italic: false,
+            follow: 0,
+            anchor: None,
+        }
+        .render(area, buf, scene);
+
+        let start = area.x * 16 + x;
+        let covered = (start + 7) / 16..(start + width + 7) / 16;
+        cells.push((
+            Rect::new(covered.start, area.y, covered.end - covered.start, 1),
+            kind,
+        ));
+        x += width + BUTTON_GAP;
+    }
+    cells
+}
+
+/// The width of the open chip menu's pick buttons at `scale`, each a chip's
+/// box around its label, with [`BUTTON_GAP`] between them, in sixteenths.
+fn buttons_width(scale: u16) -> u16 {
+    let boxes: u16 = BUTTONS
+        .iter()
+        .map(|&(label, _)| chip_width(label, scale))
+        .sum();
+    boxes + BUTTON_GAP * (BUTTONS.len() as u16 - 1)
 }
 
 #[cfg(test)]

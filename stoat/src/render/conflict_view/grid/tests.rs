@@ -3,7 +3,7 @@ use super::{
     GridColumns, MergeRowKind, RowLook, Tone, HEADER_ROWS,
 };
 use crate::{
-    action_handlers::{dispatch, focused_editor_mut},
+    action_handlers::{conflict_view, dispatch, focused_editor_mut},
     app::DEFAULT_KEYMAP,
     conflict_session::{ConflictLabels, ConflictPosition},
     host::git::MergeState,
@@ -39,6 +39,8 @@ const TINT_CONFLICT: [u8; 3] = [0x2a, 0x1b, 0x1d];
 const CHIP_CONFLICT: [u8; 3] = [0x33, 0x20, 0x1f];
 const CHIP_OURS: [u8; 3] = [0x1d, 0x2a, 0x1f];
 const CHIP_THEIRS: [u8; 3] = [0x2a, 0x22, 0x36];
+const CHIP_BOTH: [u8; 3] = [0x1f, 0x2a, 0x3d];
+const ACCENT: [u8; 3] = [0x7f, 0xb0, 0xff];
 const MERGED_HEAD: [u8; 3] = [0x1b, 0x1d, 0x22];
 const CONFLICT: [u8; 3] = [0xf5, 0x9a, 0xa0];
 const TAG_CONFLICT: [u8; 3] = [0x3a, 0x20, 0x26];
@@ -559,6 +561,43 @@ fn a_chip_draws_as_a_rounded_bar_under_its_run() {
     );
 }
 
+/// An open chip menu draws three rounded buttons in the chip's place on the
+/// chunk's first row, in the ours, theirs, and both tones. Each is 14
+/// sixteenths tall under its label, 12 sixteenths in, with 4 sixteenths
+/// between buttons, and the last ends where the chip's box ended.
+#[test]
+fn an_open_chip_menu_draws_three_buttons_where_the_chip_stood() {
+    let closed = grid_shot(ONE_CHUNK, &[]).chips();
+    let mut h = conflict_harness(ONE_CHUNK, &[]);
+    conflict_view::set_chip_menu(&mut h.stoat, Some(0));
+    let open = paint(&mut h).chips();
+
+    let [((x, y, width, ..), ..)] = &closed[..] else {
+        panic!("one chip, got {closed:?}");
+    };
+    let end = x + *width as i16;
+    assert_eq!(
+        open,
+        [
+            (
+                (end - 304, *y, 88, 14, CHIP_OURS),
+                "ours".to_string(),
+                SUCCESS
+            ),
+            (
+                (end - 212, *y, 120, 14, CHIP_THEIRS),
+                "theirs".to_string(),
+                SPECIAL
+            ),
+            (
+                (end - 88, *y, 88, 14, CHIP_BOTH),
+                "both".to_string(),
+                ACCENT
+            ),
+        ],
+    );
+}
+
 /// Each chip takes the tone of its kind. A run or a chunk the merge takes from
 /// ours takes the ours chip, one from theirs the theirs chip, and an unsettled
 /// chunk the conflict chip.
@@ -804,6 +843,7 @@ fn a_theme_without_the_board_scopes_falls_back_to_their_neighbors() {
             colors.band,
             colors.chip,
             [colors.chip_ours, colors.chip_theirs],
+            colors.chip_both,
             [colors.tag, colors.tag_resolved],
             colors.ghost,
             colors.head
@@ -812,6 +852,10 @@ fn a_theme_without_the_board_scopes_falls_back_to_their_neighbors() {
             band,
             band,
             [colors.ours, colors.theirs],
+            Tone {
+                fg: [0x56, 0xb6, 0xc2],
+                tint: [0x33, 0x38, 0x42],
+            },
             [band, colors.ours],
             Style::default()
                 .fg(rgb([0x63, 0x6d, 0x83]))
@@ -819,8 +863,9 @@ fn a_theme_without_the_board_scopes_falls_back_to_their_neighbors() {
             None,
         ),
         "the band takes the conflict header's color, the chip the band, each \
-         side's chip its side, the tag the chip, the resolved tag the ours chip, \
-         and the ghost muted italic text",
+         side's chip its side, the both button the Fold Buttons' cyan on gray, \
+         the tag the chip, the resolved tag the ours chip, and the ghost muted \
+         italic text",
     );
 }
 

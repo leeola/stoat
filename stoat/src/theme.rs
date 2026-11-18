@@ -1102,6 +1102,8 @@ pub mod scope {
     /// The chip on the first merged row of a run the merge takes from theirs,
     /// or of a chunk resolved to theirs.
     pub const VCS_CONFLICT_CHIP_THEIRS: &str = "vcs.conflict.chip.theirs";
+    /// The both button among the pick buttons an open chunk's chip offers.
+    pub const VCS_CONFLICT_CHIP_BOTH: &str = "vcs.conflict.chip.both";
     /// The tag in the conflict view's File Header that counts the shown file's
     /// open conflicts.
     pub const VCS_CONFLICT_TAG: &str = "vcs.conflict.tag";

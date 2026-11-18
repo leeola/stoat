@@ -21,7 +21,7 @@ use crate::{
     host::ClipboardKind,
     keymap::WheelDirection,
     keymap_state::{active_modal, ActiveModal, StoatKeymapState},
-    merge_view::Side,
+    merge_view::{ChunkState, Side},
     minimap::{
         density::{self, Density, Tier},
         diff_view::diff_view_window,
@@ -1099,52 +1099,115 @@ pub(crate) fn handle_mouse(stoat: &mut Stoat, mouse: MouseEvent) -> UpdateEffect
         focus_at(stoat, mouse.column, mouse.row);
     }
 
-    if let Some(effect) = handle_conflict_press(stoat, mouse) {
-        return closed_effect(effect);
-    }
+    let menu_closed = match handle_conflict_press(stoat, mouse) {
+        ConflictPress::Taken(effect) => return closed_effect(effect),
+        ConflictPress::Passed { menu_closed } => menu_closed,
+    };
+    let owed = |effect| match effect {
+        UpdateEffect::None if menu_closed => UpdateEffect::Redraw,
+        other => other,
+    };
 
     let Some((col, row)) = translate_mouse_to_focused(stoat, mouse.column, mouse.row) else {
-        return closed_effect(UpdateEffect::None);
+        return closed_effect(owed(UpdateEffect::None));
     };
-    closed_effect(apply_focused_pane_mouse(stoat, mouse.kind, col, row))
+    closed_effect(owed(apply_focused_pane_mouse(stoat, mouse.kind, col, row)))
 }
 
-/// Take a side or a line of the conflict chunk under a left press, as the `o`,
-/// `t`, `O`, and `T` keys take them.
-///
-/// A press on the ours or theirs side of a chunk that still takes picks takes
-/// that whole side, and with Alt held it takes the one line under the
-/// pointer. The pick is one undo step, as a key's pick is. Any other press
-/// answers `None` and takes the editor's press path, which places the cursor,
-/// so the merged column stays a text area.
-fn handle_conflict_press(stoat: &mut Stoat, mouse: MouseEvent) -> Option<UpdateEffect> {
-    if !matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
-        return None;
-    }
-    let editor = action_handlers::focused_editor_mut(stoat)?;
-    let ConflictTarget::Side {
-        chunk,
-        side,
-        merge_row,
-    } = crate::render::conflict_view::conflict_target(editor, mouse.column, mouse.row)?;
-    let line = match mouse.modifiers.contains(KeyModifiers::ALT) {
-        true => Some(merge_row?),
-        false => None,
-    };
+/// What [`handle_conflict_press`] made of a press.
+enum ConflictPress {
+    /// The press took a pick, reset a chunk, or opened or closed the chip
+    /// menu, and owes this effect.
+    Taken(UpdateEffect),
+    /// The press takes its own path. With `menu_closed` it closed an open chip
+    /// menu, whose buttons show until the frame repaints.
+    Passed { menu_closed: bool },
+}
 
-    Some(action_handlers::with_action_group(stoat, |stoat| {
-        match line {
-            Some(merge_row) => {
+/// Take what a left press on the conflict view lands on, as the `o`, `t`,
+/// `b`, `O`, `T`, and `x` keys take it.
+///
+/// A press on an open chunk's chip shows its pick buttons in the chip's
+/// place, and a second press on the chip closes them. A press on a button
+/// takes its pick, and a press on a chip that took ours or theirs resets its
+/// chunk. A press on the ours or theirs side of a chunk that still takes picks
+/// takes that whole side, and with Alt held it takes the one line under the
+/// pointer. A pick or a reset is one undo step, as a key's is.
+///
+/// Any other press closes an open menu and takes the editor's press path,
+/// which places the cursor, so the merged column stays a text area.
+fn handle_conflict_press(stoat: &mut Stoat, mouse: MouseEvent) -> ConflictPress {
+    if !matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
+        return ConflictPress::Passed { menu_closed: false };
+    }
+    let menu = stoat
+        .active_workspace()
+        .conflict
+        .as_ref()
+        .and_then(|session| session.chip_menu);
+    let target = action_handlers::focused_editor_mut(stoat).and_then(|editor| {
+        crate::render::conflict_view::conflict_target(editor, mouse.column, mouse.row)
+    });
+
+    let opened = match target {
+        Some(ConflictTarget::Chip {
+            chunk,
+            state: ChunkState::Unresolved | ChunkState::Picked,
+        }) => (menu != Some(chunk)).then_some(chunk),
+        _ => None,
+    };
+    if menu.is_some() || opened.is_some() {
+        action_handlers::conflict_view::set_chip_menu(stoat, opened);
+    }
+
+    let passed = ConflictPress::Passed {
+        menu_closed: menu.is_some(),
+    };
+    match target {
+        Some(ConflictTarget::Button(kind)) => match menu {
+            Some(chunk) => take(stoat, |stoat| {
+                action_handlers::conflict_view::pick_chunk_side(stoat, chunk, kind)
+            }),
+            None => passed,
+        },
+        Some(ConflictTarget::Chip {
+            state: ChunkState::Unresolved | ChunkState::Picked,
+            ..
+        }) => ConflictPress::Taken(UpdateEffect::Redraw),
+        Some(ConflictTarget::Chip {
+            chunk,
+            state: ChunkState::Ours | ChunkState::Theirs,
+        }) => take(stoat, |stoat| {
+            action_handlers::conflict_view::reset_chunk(stoat, chunk)
+        }),
+        Some(ConflictTarget::Side {
+            chunk,
+            side,
+            merge_row,
+        }) => match (mouse.modifiers.contains(KeyModifiers::ALT), merge_row) {
+            (true, Some(merge_row)) => take(stoat, |stoat| {
                 action_handlers::conflict_view::pick_chunk_row(stoat, chunk, merge_row, side)
-            },
-            None => {
+            }),
+            (true, None) => passed,
+            (false, _) => {
                 let kind = match side {
                     Side::Ours => ActionKind::ConflictPickOurs,
                     Side::Theirs => ActionKind::ConflictPickTheirs,
                 };
-                action_handlers::conflict_view::pick_chunk_side(stoat, chunk, kind);
+                take(stoat, |stoat| {
+                    action_handlers::conflict_view::pick_chunk_side(stoat, chunk, kind)
+                })
             },
-        }
+        },
+        Some(ConflictTarget::Chip { .. }) | None => passed,
+    }
+}
+
+/// Run `edit` as one undo step and answer the redraw it owes, as a press on
+/// the conflict view takes a pick.
+fn take(stoat: &mut Stoat, edit: impl FnOnce(&mut Stoat)) -> ConflictPress {
+    ConflictPress::Taken(action_handlers::with_action_group(stoat, |stoat| {
+        edit(stoat);
         UpdateEffect::Redraw
     }))
 }
@@ -2691,11 +2754,14 @@ mod tests {
         sync::Arc,
     };
     use stoat_action::{
-        Conflict, ConflictPickOurs, MoveDown, NewTab, OpenFile, SplitDown, SplitRight,
-        TogglePaneWiden,
+        Action, Conflict, ConflictPickOurs, ConflictPickTheirs, MoveDown, NewTab, OpenFile,
+        SplitDown, SplitRight, TogglePaneWiden,
     };
     use stoat_text::Point;
-    use stoatty_protocol::NUDGE_PROTOCOL;
+    use stoatty_protocol::{
+        command::{self, Command},
+        NUDGE_PROTOCOL,
+    };
     /// A buffer with `count` single-line diagnostics on consecutive rows,
     /// painted once so the pane areas and the render's span cache exist.
     fn hover_diagnostics_harness(count: u32) -> (crate::test_harness::TestHarness, EditorId) {
@@ -3442,6 +3508,162 @@ mod tests {
         );
     }
 
+    /// The ermine_night tints of the ours, theirs, and both pick buttons.
+    const BUTTON_TINTS: [[u8; 3]; 3] = [[0x1d, 0x2a, 0x1f], [0x2a, 0x22, 0x36], [0x1f, 0x2a, 0x3d]];
+
+    /// A press on an open chunk's chip shows its three pick buttons in the
+    /// ours, theirs, and both tints, and the paint records a button for each
+    /// pick.
+    ///
+    /// The buttons stand in the 20 cells that end the merged column. Each takes
+    /// the cells whose centers it covers, so the cell under the gap after the
+    /// theirs button takes no pick.
+    #[test]
+    fn a_press_on_an_open_chunk_s_chip_offers_three_buttons() {
+        let (mut h, layout) = conflict_press_harness(ONE_CHUNK);
+        let (chip, _) = layout.chips[0];
+        conflict_press(&mut h, chip.x + 2, chip.y, false);
+        h.stoat.render();
+
+        let boxes: Vec<[u8; 3]> = command::decode_stream(&h.stoat.apc_scene.all_bytes())
+            .into_iter()
+            .filter_map(|command| match command {
+                Command::Bar(bar) if bar.radius > 0 && BUTTON_TINTS.contains(&bar.color) => {
+                    Some(bar.color)
+                },
+                _ => None,
+            })
+            .collect();
+        let end = layout.merged.end;
+        let button = |x: u16, width: u16, kind| (Rect::new(x, chip.y, width, 1), kind);
+
+        assert_eq!(
+            (boxes, painted_layout(&mut h).buttons, chip_menu(&h)),
+            (
+                BUTTON_TINTS.to_vec(),
+                vec![
+                    button(end - 20, 6, ActionKind::ConflictPickOurs),
+                    button(end - 14, 7, ActionKind::ConflictPickTheirs),
+                    button(end - 6, 5, ActionKind::ConflictPickBoth),
+                ],
+                Some(0),
+            ),
+        );
+    }
+
+    /// A press on the both button takes both sides of the menu's chunk, as `b`
+    /// does, and closes the menu.
+    #[test]
+    fn a_press_on_the_both_button_takes_both_sides() {
+        let (mut h, layout) = conflict_press_harness(ONE_CHUNK);
+        let (chip, _) = layout.chips[0];
+        conflict_press(&mut h, chip.x + 2, chip.y, false);
+        h.stoat.render();
+        let both = painted_layout(&mut h)
+            .buttons
+            .iter()
+            .find(|&&(_, kind)| kind == ActionKind::ConflictPickBoth)
+            .map(|&(cells, _)| cells)
+            .expect("the both button");
+        conflict_press(&mut h, both.x, both.y, false);
+
+        assert_eq!(
+            (conflict_center(&h), chip_menu(&h)),
+            ("a\nours\ntheirs\n".to_string(), None),
+        );
+    }
+
+    /// A press on the chip of a chunk that took ours or theirs resets the
+    /// chunk to its markers, as `x` does.
+    #[test]
+    fn a_press_on_a_took_chip_resets_its_chunk() {
+        let reset = |took: &dyn Action| {
+            let (mut h, _) = conflict_press_harness(ONE_CHUNK);
+            let marker = conflict_center(&h);
+            action_handlers::dispatch(&mut h.stoat, took);
+            h.stoat.render();
+            let (chip, _) = painted_layout(&mut h).chips[0];
+            conflict_press(&mut h, chip.x + 2, chip.y, false);
+            (conflict_center(&h), marker)
+        };
+        let [(ours, marker), (theirs, _)] = [reset(&ConflictPickOurs), reset(&ConflictPickTheirs)];
+
+        assert_eq!([ours, theirs], [marker.clone(), marker]);
+    }
+
+    /// A key closes the chip's buttons, so the next paint draws the chip again
+    /// and records no button.
+    #[test]
+    fn a_key_closes_the_chip_s_buttons() {
+        let (mut h, layout) = conflict_press_harness(ONE_CHUNK);
+        let (chip, _) = layout.chips[0];
+        conflict_press(&mut h, chip.x + 2, chip.y, false);
+        let opened = chip_menu(&h);
+        h.type_keys("j");
+        h.stoat.render();
+
+        let view_menu = action_handlers::focused_editor_mut(&mut h.stoat)
+            .and_then(|editor| editor.conflict_view.as_ref())
+            .and_then(|view| view.chip_menu);
+        assert_eq!(
+            (
+                opened,
+                chip_menu(&h),
+                view_menu,
+                painted_layout(&mut h).buttons
+            ),
+            (Some(0), None, None, Vec::new()),
+        );
+    }
+
+    /// A second press on the chip closes its buttons. The press lands on the
+    /// chip the last paint recorded, before a repaint draws the buttons there.
+    #[test]
+    fn a_second_press_on_the_chip_closes_its_buttons() {
+        let (mut h, layout) = conflict_press_harness(ONE_CHUNK);
+        let (chip, _) = layout.chips[0];
+        conflict_press(&mut h, chip.x + 2, chip.y, false);
+        let opened = chip_menu(&h);
+        conflict_press(&mut h, chip.x + 2, chip.y, false);
+
+        assert_eq!((opened, chip_menu(&h)), (Some(0), None));
+    }
+
+    /// A press elsewhere closes the chip's buttons and takes its own path. On
+    /// the column header that path maps to no line, so the frame still owes a
+    /// repaint to take the buttons down.
+    #[test]
+    fn a_press_elsewhere_closes_the_chip_s_buttons() {
+        let (mut h, layout) = conflict_press_harness(ONE_CHUNK);
+        let (chip, _) = layout.chips[0];
+        conflict_press(&mut h, chip.x + 2, chip.y, false);
+        h.stoat.render();
+        let effect = h.stoat.update(mouse_event(
+            MouseEventKind::Down(MouseButton::Left),
+            layout.merged.start + 2,
+            layout.body.y - 2,
+        ));
+
+        assert_eq!((effect, chip_menu(&h)), (UpdateEffect::Redraw, None));
+    }
+
+    /// The chunk whose chip shows its pick buttons, as the session holds it.
+    fn chip_menu(h: &crate::test_harness::TestHarness) -> Option<usize> {
+        h.stoat
+            .active_workspace()
+            .conflict
+            .as_ref()
+            .and_then(|session| session.chip_menu)
+    }
+
+    /// The columns, chips, and buttons the conflict editor's last paint
+    /// recorded.
+    fn painted_layout(h: &mut crate::test_harness::TestHarness) -> ConflictLayout {
+        action_handlers::focused_editor_mut(&mut h.stoat)
+            .and_then(|editor| editor.conflict_layout.clone())
+            .expect("the paint records the grid's columns")
+    }
+
     /// A harness on the conflict view of one file whose ancestor, ours, and
     /// theirs stages are `stages`, painted once, and the columns that paint
     /// recorded.
@@ -3461,9 +3683,7 @@ mod tests {
         h.settle();
         h.stoat.render();
 
-        let layout = action_handlers::focused_editor_mut(&mut h.stoat)
-            .and_then(|editor| editor.conflict_layout.clone())
-            .expect("the paint records the grid's columns");
+        let layout = painted_layout(&mut h);
         (h, layout)
     }
 

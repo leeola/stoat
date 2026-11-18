@@ -50,6 +50,12 @@ pub(crate) struct ConflictSession {
     /// immediate repeat of the identical pick clears it and overwrites. Any
     /// different pick re-arms for the new target.
     pub(crate) pending_clobber: Option<(usize, ActionKind)>,
+    /// The chunk whose chip shows its three pick buttons, until a pick, a
+    /// press elsewhere, or a key closes them.
+    ///
+    /// The shown file's [`ConflictViewState::chip_menu`] mirrors it, so the
+    /// painter and a pool page draw the buttons.
+    pub(crate) chip_menu: Option<usize>,
     /// In-progress resolve state of files visited and stepped away from, keyed
     /// by their index in [`Self::files`].
     ///
@@ -113,6 +119,9 @@ pub(crate) struct ConflictViewState {
     pub(crate) line_counts: (u32, u32),
     /// The names the MergeGrid header gives the two sides.
     pub(crate) labels: ConflictLabels,
+    /// The chunk whose chip shows its pick buttons, as
+    /// [`ConflictSession::chip_menu`] holds it while this file is shown.
+    pub(crate) chip_menu: Option<usize>,
     /// Layout and chunk classification derived from the center buffer, rebuilt
     /// only when that buffer or [`Self::picks`] changes. See [`Self::derived`].
     derived: Option<ConflictDerived>,
@@ -150,6 +159,7 @@ impl ConflictViewState {
             picks,
             rel_path,
             labels,
+            chip_menu: None,
             derived: None,
         }
     }

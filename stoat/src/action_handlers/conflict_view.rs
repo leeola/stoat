@@ -158,6 +158,7 @@ fn open_landed(stoat: &mut Stoat, load: ConflictLoad, intent: ConflictIntent) {
             file,
             saved_editor,
             pending_clobber: None,
+            chip_menu: None,
             parked,
             applied: HashSet::new(),
         });
@@ -471,7 +472,16 @@ pub(super) fn conflict_pick_theirs_line(stoat: &mut Stoat) {
 /// Reset the conflict chunk under the cursor back to its raw marker block,
 /// discarding any pick or hand edit in that region.
 pub(super) fn conflict_reset_chunk(stoat: &mut Stoat) {
-    let Some((chunk_idx, region, _)) = current_chunk(stoat) else {
+    let Some((chunk_idx, _, _)) = current_chunk(stoat) else {
+        return;
+    };
+    reset_chunk(stoat, chunk_idx);
+}
+
+/// Reset chunk `chunk_idx` back to its raw marker block, discarding any pick or
+/// hand edit in its region.
+pub(crate) fn reset_chunk(stoat: &mut Stoat, chunk_idx: usize) {
+    let Some((region, _)) = chunk_region(stoat, chunk_idx) else {
         return;
     };
     let (marker, picks) = {
@@ -623,6 +633,7 @@ fn show_file(stoat: &mut Stoat, target: usize, target_state: FileResolveState) {
         session.pending_clobber = None;
         (outgoing_editor, target_editor)
     };
+    set_chip_menu(stoat, None);
 
     {
         let ws = stoat.active_workspace_mut();
@@ -633,6 +644,29 @@ fn show_file(stoat: &mut Stoat, target: usize, target_state: FileResolveState) {
     }
 
     land_first_chunk_current(stoat);
+}
+
+/// Show chunk `menu`'s pick buttons in place of its chip, or close them with
+/// `None`.
+///
+/// The session holds the menu, and the shown file's view state mirrors it, so
+/// the painter and a pool page draw what the session holds. A value the view
+/// state already holds leaves it as it is, so a shared state takes no copy.
+pub(crate) fn set_chip_menu(stoat: &mut Stoat, menu: Option<usize>) {
+    let ws = stoat.active_workspace_mut();
+    let Some(session) = ws.conflict.as_mut() else {
+        return;
+    };
+    session.chip_menu = menu;
+
+    if let Some(view) = ws
+        .editors
+        .get_mut(session.file.editor_id)
+        .and_then(|editor| editor.conflict_view.as_mut())
+        .filter(|view| view.chip_menu != menu)
+    {
+        Arc::make_mut(view).chip_menu = menu;
+    }
 }
 
 /// Apply a landed conflict alignment, opening the view.
