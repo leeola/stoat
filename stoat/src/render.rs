@@ -419,6 +419,9 @@ pub(crate) struct FrameCtx<'a> {
     /// The repository's tally, which names each changed file's kind. It is
     /// `None` before the first tally lands and outside a repo.
     pub(crate) tallies: Option<&'a HunkTallies>,
+    /// The repository's working directory, which the tally's paths are
+    /// relative to. It is `None` outside a repo.
+    pub(crate) repo_root: Option<&'a Path>,
     /// Where the focused diff view stands among the repo's changed files and
     /// hunks, which the focused pane's bar names in its staged segment. `None`
     /// when the focused pane shows no diff view, which is what keeps the
@@ -1525,6 +1528,7 @@ pub(crate) fn frame(
         diff_warm_busy,
         repo: repo_status.as_ref(),
         tallies: tallies.as_deref(),
+        repo_root: ws.repo_root.as_deref(),
         hunk_position,
         conflict_position,
         diff_base: diff_base_lead.as_deref(),

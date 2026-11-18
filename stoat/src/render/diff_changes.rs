@@ -3051,6 +3051,7 @@ mod tests {
             diff_warm_busy: false,
             repo: None,
             tallies: None,
+            repo_root: None,
             hunk_position: None,
             conflict_position: None,
             diff_base: None,

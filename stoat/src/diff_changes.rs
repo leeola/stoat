@@ -1210,7 +1210,12 @@ pub(crate) fn hidden_lines(excerpt: &Excerpt, kind: &FileKind, buffers: &BufferR
         return 0;
     };
     let buffer = buffer.read().expect("buffer poisoned");
-    let rope = buffer.rope();
+    rope_lines(buffer.rope())
+}
+
+/// The lines `rope` holds, as [`fold_lines`] counts them, so the empty row
+/// after a final newline holds no line.
+pub(crate) fn rope_lines(rope: &Rope) -> u32 {
     fold_lines(rope, &(0..rope.max_point().row + 1))
 }
 

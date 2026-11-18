@@ -8,6 +8,7 @@ use crate::{
     diff_map::MarkKind,
     display_map::FoldScope,
     editor_state::{EditorId, EditorState},
+    host::git::{FileKind, HunkTallies},
     minimap::RAIL_MAX_COLUMNS,
     pane::{Divider, DividerOrientation, FocusTarget, Pane, PaneTree, Placement, View},
     render::{
@@ -1163,6 +1164,9 @@ enum BoxShape {
     Chip,
     /// The active tab, a chip in its background.
     Tab,
+    /// A File Kind Tag, a chip in its background as [`kind_tag_panel`] draws
+    /// it, with its label at [`TypeRole::Small`].
+    Tag,
 }
 
 /// The box a run that leads with the mode chip draws it in, or none for a run
@@ -1195,6 +1199,25 @@ fn mode_chip_panel(fill: [u8; 3]) -> Panel {
             Edge::Inset(6),
             Edge::Inset(1),
             Edge::Inset(5),
+        ],
+        ..Panel::chip(fill)
+    }
+}
+
+/// A File Kind Tag's panel in `fill`, a box smaller than [`Panel::chip`]
+/// inside the same cells.
+///
+/// The boards draw the tag 16 px tall on an 18 px row, with 5 px of pad at
+/// each side of its label. The tag's box keeps its whole cells, as the mode
+/// chip's does, so the panel stands 1 px inside the row's top and bottom and
+/// 2 px inside each end, and its width stands within 2 px of the board's.
+fn kind_tag_panel(fill: [u8; 3]) -> Panel {
+    Panel {
+        edges: [
+            Edge::Inset(1),
+            Edge::Inset(2),
+            Edge::Inset(1),
+            Edge::Inset(2),
         ],
         ..Panel::chip(fill)
     }
@@ -1409,8 +1432,8 @@ pub(crate) struct StatusSceneCache {
 ///
 /// A run's [`RunBox`]es reach the bar as [`SegmentBox`]es, each with its
 /// shape's panels in its first segment's background. The mode chip's box
-/// draws its label at [`TypeRole::Mode`], and every other segment at
-/// [`TypeRole::Ui`].
+/// draws its label at [`TypeRole::Mode`], a File Kind Tag's box at
+/// [`TypeRole::Small`], and every other segment at [`TypeRole::Ui`].
 ///
 /// With a `cache`, a repaint whose runs and colors all hold splices the
 /// recorded frame. Splicing is only sound because
@@ -1479,9 +1502,13 @@ fn render_status_runs(
                     .map_or_else(Vec::new, |(shape, first)| match shape {
                         BoxShape::Chip => vec![mode_chip_panel(first.bg)],
                         BoxShape::Tab => vec![tab_pill_panel(first.bg, frame.chrome_bands)],
+                        BoxShape::Tag => vec![kind_tag_panel(first.bg)],
                     }),
-                scale: (run_box.shape == Some(BoxShape::Chip))
-                    .then(|| frame.theme.type_scale(TypeRole::Mode)),
+                scale: match run_box.shape {
+                    Some(BoxShape::Chip) => Some(frame.theme.type_scale(TypeRole::Mode)),
+                    Some(BoxShape::Tag) => Some(frame.theme.type_scale(TypeRole::Small)),
+                    Some(BoxShape::Tab) | None => None,
+                },
             })
             .collect();
         StatusBar {
@@ -2246,13 +2273,17 @@ fn status_segments(
             );
         }
     }
-    // An inline row has no base half, so its metrics follow the file name.
+    // An inline row has no base half, so its metrics follow the file name. The
+    // tag's segment comes second among them. Only a per-file diff carries a
+    // tag, and its row splices no Scope runs before the metrics.
+    let mut inline_tag = None;
     if let Some(metrics) = metrics
         .as_ref()
         .filter(|_| split.is_none() && prompt.is_none() && modal.is_none())
     {
+        inline_tag = tag_box(metrics, left.len() + 1);
         let (text, counts) = metric_segments(metrics, bar_style, theme);
-        for (text, style) in std::iter::once(text).chain(counts) {
+        for (text, style) in text.into_iter().chain(counts) {
             push_left(&mut left, &mut cursor, pane_end, text, style);
         }
     }
@@ -2515,6 +2546,11 @@ fn status_segments(
                 .as_ref()
                 .map(|metrics| metrics_half(metrics, base_segments, bar_style, theme))
                 .unwrap_or_default();
+            let base_boxes = metrics
+                .as_ref()
+                .and_then(|metrics| tag_box(metrics, 1))
+                .into_iter()
+                .collect();
             vec![
                 StatusRun {
                     area: base,
@@ -2523,7 +2559,7 @@ fn status_segments(
                     left: base_left,
                     right: base_right,
                     hairline: true,
-                    boxes: Vec::new(),
+                    boxes: base_boxes,
                 },
                 StatusRun {
                     area: target,
@@ -2543,7 +2579,10 @@ fn status_segments(
             left,
             right,
             hairline: true,
-            boxes: mode_chip_box(chip_end.is_some()),
+            boxes: mode_chip_box(chip_end.is_some())
+                .into_iter()
+                .chain(inline_tag)
+                .collect(),
         }],
     }
 }
@@ -2564,16 +2603,33 @@ fn blame_label(line: &LineBlame<'_>, now_epoch: i64) -> String {
     }
 }
 
-/// The git metrics a diff view's status row reads, as the text and then the
-/// lines the diff adds and removes.
+/// The git metrics a diff view's status row reads.
 ///
-/// The text names the base of the file in `buffer_id`, then the screen's kind
-/// on the per-file diff or the count of the files a changes view lists, then
-/// the hunk at the cursor. An empty stack counts no files. Only the focused
-/// pane names a hunk, since the hunk position is the focused pane's.
+/// The text reads `lead`, then the File Kind Tag of a per-file diff's file in
+/// its own style, then `tail`. A row with no tag reads `lead` alone.
+#[derive(Default)]
+struct DiffMetrics {
+    lead: String,
+    /// The tag's text and its style, a foreground on a box's background.
+    tag: Option<(String, Style)>,
+    tail: String,
+    /// The lines the diff adds.
+    added: u32,
+    /// The lines the diff removes.
+    removed: u32,
+}
+
+/// The git metrics of the diff that `view` shows.
 ///
-/// The per-file diff counts the lines of its own buffer, and a changes view
-/// the lines of its whole stack, as its file headers count them.
+/// A changes view names its base, counts its files as [`stack_counts`] does,
+/// and names the hunk at the cursor. A per-file diff names its base, its
+/// screen's kind, and the hunk at the cursor. A per-file diff of a file that
+/// the tally names moved, untracked, new, or deleted names the kind in a File
+/// Kind Tag in place of the screen's, as [`kind_metrics`] reads it.
+///
+/// Only the focused pane names a hunk, since the hunk position is the focused
+/// pane's. The per-file diff counts the lines of its own buffer, and a changes
+/// view the lines of its whole stack, as its file headers count them.
 fn diff_metrics(
     view: &View,
     buffer_id: Option<BufferId>,
@@ -2581,55 +2637,185 @@ fn diff_metrics(
     frame: FrameCtx<'_>,
     buffers: &BufferRegistry,
     changes: &SlotMap<DiffChangesId, DiffChangesState>,
-) -> (String, u32, u32) {
+) -> DiffMetrics {
     let path = buffer_id.and_then(|id| buffers.path_for(id));
-    let mut parts = vec![format!("vs {}", diff_sides_for(path, frame).0)];
-    let (added, removed) = match view {
-        View::DiffChanges(id) => changes.get(*id).map_or((0, 0), |state| {
-            let files = state.excerpts.len();
-            if files > 0 {
-                let noun = if files == 1 { "file" } else { "files" };
-                parts.push(format!("{files} {noun}"));
-            }
+    let base = diff_sides_for(path, frame).0;
+    let hunk = frame
+        .hunk_position
+        .as_ref()
+        .filter(|_| is_focused)
+        .map(|position| {
+            let at = position
+                .hunk_at
+                .map_or_else(|| "-".to_string(), |at| at.to_string());
+            format!("hunk {at} / {}", position.hunk_total)
+        });
+
+    if let View::DiffChanges(id) = view {
+        let mut parts = vec![format!("vs {base}")];
+        let (added, removed) = changes.get(*id).map_or((0, 0), |state| {
+            parts.extend(stack_counts(state, frame.tallies));
             state.line_counts(buffers)
-        }),
+        });
+        parts.extend(hunk);
+        return DiffMetrics {
+            lead: parts.join(" \u{b7} "),
+            added,
+            removed,
+            ..DiffMetrics::default()
+        };
+    }
+
+    // The base text's lines and the buffer's, which a new file staged over a
+    // base with text counts. `str::lines` counts as `fold_lines` does, so no
+    // rope is built from the base on each frame.
+    let (stats, lines) = buffer_id
+        .and_then(|id| buffers.get(id))
+        .and_then(|buffer| {
+            let buffer = buffer.read().ok()?;
+            let map = buffer.diff_map.as_ref()?;
+            let base_lines = map.base_text().map(|text| text.lines().count() as u32);
+            let buffer_lines = crate::diff_changes::rope_lines(buffer.rope());
+            Some((
+                ExcerptStats::of(map),
+                base_lines.map(|base| (base, buffer_lines)),
+            ))
+        })
+        .unwrap_or_default();
+    let kind = path
+        .zip(frame.repo_root)
+        .and_then(|(path, root)| path.strip_prefix(root).ok())
+        .and_then(|rel_path| frame.tallies?.change(rel_path))
+        .map(|change| &change.kind);
+
+    let (lead, tag, tail) = match kind {
+        Some(kind) if *kind != FileKind::Modified => {
+            let (lead, tail) = kind_metrics(kind, base, lines, hunk);
+            let tag = (
+                diff_changes::kind_tag_text(kind),
+                frame.theme.kind_tag_style(kind),
+            );
+            (lead, Some(tag), tail)
+        },
         _ => {
+            let mut parts = vec![format!("vs {base}")];
             parts.extend(
                 screen_segment(Some("diff"), frame.theme).map(|(label, _)| label.to_owned()),
             );
-            let stats = buffer_id
-                .and_then(|id| buffers.get(id))
-                .and_then(|buffer| {
-                    let buffer = buffer.read().ok()?;
-                    buffer.diff_map.as_ref().map(ExcerptStats::of)
-                })
-                .unwrap_or_default();
-            (stats.added, stats.removed)
+            parts.extend(hunk);
+            (parts.join(" \u{b7} "), None, String::new())
         },
     };
-    if let Some(position) = frame.hunk_position.as_ref().filter(|_| is_focused) {
-        let at = position
-            .hunk_at
-            .map_or_else(|| "-".to_string(), |at| at.to_string());
-        parts.push(format!("hunk {at} / {}", position.hunk_total));
+    DiffMetrics {
+        lead,
+        tag,
+        tail,
+        added: stats.added,
+        removed: stats.removed,
     }
-    (parts.join(" \u{b7} "), added, removed)
 }
 
-/// The segments of a diff view's metrics over `style`: the muted text, and
-/// then the lines the diff adds and removes in their status colors.
+/// The parts of a changes view's metrics that count the files its stack
+/// lists, each for a count above zero.
 ///
-/// A count of zero takes no segment. The last count ends in a pad cell, as the
-/// text does, so the counts stand clear of whatever follows them.
+/// The parts count every file, then the moved files, the new files, and the
+/// deleted files, then the files folded to their headers. An untracked file
+/// counts as new. The kinds read `tallies`, so a file listed for an unsaved
+/// edit alone counts as a file and under no kind.
+fn stack_counts(state: &DiffChangesState, tallies: Option<&HunkTallies>) -> Vec<String> {
+    let (mut moved, mut new, mut deleted) = (0, 0, 0);
+    for excerpt in &state.excerpts {
+        match excerpt.file_kind(tallies) {
+            Some(FileKind::Moved { .. }) => moved += 1,
+            Some(FileKind::Untracked | FileKind::New) => new += 1,
+            Some(FileKind::Deleted) => deleted += 1,
+            Some(FileKind::Modified) | None => {},
+        }
+    }
+    let collapsed = state
+        .excerpts
+        .iter()
+        .filter(|excerpt| excerpt.collapsed)
+        .count();
+
+    let files = state.excerpts.len();
+    let noun = if files == 1 { "file" } else { "files" };
+    [
+        (files, noun),
+        (moved, "moved"),
+        (new, "new"),
+        (deleted, "deleted"),
+        (collapsed, "collapsed"),
+    ]
+    .into_iter()
+    .filter(|&(count, _)| count > 0)
+    .map(|(count, word)| format!("{count} {word}"))
+    .collect()
+}
+
+/// The lead and the tail that a per-file diff's metrics read around the File
+/// Kind Tag of a file of `kind`, against the base named `base`.
+///
+/// `lines` holds the lines of the diff's base text and of its buffer, `None`
+/// while the diff has no base text. A new file over a base that holds text
+/// counts them as staged, and a new file over an empty base reads `no base`.
+/// An untracked file names no base.
+fn kind_metrics(
+    kind: &FileKind,
+    base: &str,
+    lines: Option<(u32, u32)>,
+    hunk: Option<String>,
+) -> (String, String) {
+    let lead = format!("vs {base} \u{b7}");
+    let tail = |first: Option<String>| -> String {
+        first
+            .into_iter()
+            .chain(hunk.clone())
+            .collect::<Vec<_>>()
+            .join(" \u{b7} ")
+    };
+    match kind {
+        FileKind::Moved { from, .. } => (lead, tail(Some(format!("from {}", from.display())))),
+        FileKind::Untracked => ("no base \u{b7}".to_string(), "not in the index".to_string()),
+        FileKind::New => match lines {
+            Some((0, _)) => (lead, "no base".to_string()),
+            Some((base_lines, buffer_lines)) => (
+                lead,
+                tail(Some(format!("staged {base_lines} / {buffer_lines}"))),
+            ),
+            None => (lead, String::new()),
+        },
+        FileKind::Deleted | FileKind::Modified => (lead, tail(None)),
+    }
+}
+
+/// The segments of a diff view's metrics over `style`, as the text's segments
+/// and then the counts' segments.
+///
+/// The text reads the muted lead, the File Kind Tag in its own style, and the
+/// muted tail. The tag and the tail take no segment where the metrics hold
+/// none. The counts read the lines the diff adds and removes in their status
+/// colors, and a count of zero takes no segment. The last count ends in a pad
+/// cell, as the text does, so the counts stand clear of whatever follows
+/// them.
 fn metric_segments(
-    (text, added, removed): &(String, u32, u32),
+    metrics: &DiffMetrics,
     style: Style,
     theme: &crate::theme::Theme,
-) -> (StatusSeg, Vec<StatusSeg>) {
+) -> (Vec<StatusSeg>, Vec<StatusSeg>) {
     use crate::theme::scope;
+    let muted = muted_tint(style, theme);
+    let mut text = vec![(format!(" {} ", metrics.lead), muted)];
+    if let Some((tag, tag_style)) = &metrics.tag {
+        text.push((format!(" {tag} "), style.patch(*tag_style)));
+    }
+    if !metrics.tail.is_empty() {
+        text.push((format!(" {} ", metrics.tail), muted));
+    }
+
     let mut counts: Vec<StatusSeg> = [
-        ('+', *added, scope::DIFF_ADDED),
-        ('\u{2212}', *removed, scope::DIFF_DELETED),
+        ('+', metrics.added, scope::DIFF_ADDED),
+        ('\u{2212}', metrics.removed, scope::DIFF_DELETED),
     ]
     .into_iter()
     .filter(|&(_, count, _)| count > 0)
@@ -2638,7 +2824,20 @@ fn metric_segments(
     if let Some((last, _)) = counts.last_mut() {
         last.push(' ');
     }
-    ((format!(" {text} "), muted_tint(style, theme)), counts)
+    (text, counts)
+}
+
+/// The box of the File Kind Tag in `metrics`, whose segment stands at `at` in
+/// its run's left segments, or none for metrics with no tag.
+///
+/// A tag style with no background takes a box with no panel, which keeps the
+/// tag on whole cells.
+fn tag_box(metrics: &DiffMetrics, at: usize) -> Option<RunBox> {
+    let (_, style) = metrics.tag.as_ref()?;
+    Some(RunBox {
+        segments: at..at + 1,
+        shape: style.bg.is_some().then_some(BoxShape::Tag),
+    })
 }
 
 /// The base half's segments of a split diff row, whose segment rect is
@@ -2648,15 +2847,17 @@ fn metric_segments(
 /// The counts read as a pair, so the first count that does not clear the text
 /// ends the packing.
 fn metrics_half(
-    metrics: &(String, u32, u32),
+    metrics: &DiffMetrics,
     segments: Rect,
     style: Style,
     theme: &crate::theme::Theme,
 ) -> (Vec<StatusSeg>, Vec<StatusSeg>) {
-    let ((text, text_style), counts) = metric_segments(metrics, style, theme);
+    let (text, counts) = metric_segments(metrics, style, theme);
     let mut left = Vec::new();
     let mut cursor = segments.x;
-    push_left(&mut left, &mut cursor, segments.right(), text, text_style);
+    for (text, text_style) in text {
+        push_left(&mut left, &mut cursor, segments.right(), text, text_style);
+    }
 
     let mut right = Vec::new();
     let mut anchor = segments.right();
@@ -3571,7 +3772,7 @@ mod tests {
     use super::{
         byte_size, diff_base_lead, focused_staged_label, metrics_half, muted_tint, name_segments,
         paint_status_fallback, read_only_note, repo_segments, resolve_rich_segments, split_halves,
-        status_filename, tab_mark,
+        status_filename, tab_mark, DiffMetrics,
     };
     use crate::{
         action_handlers::{dispatch, focused_editor_mut},
@@ -3584,7 +3785,7 @@ mod tests {
         commit_picker,
         diff_map::{DiffMap, MarkKind},
         editor_state::EditorState,
-        host::LspNotification,
+        host::{git::FileKind, LspNotification},
         lsp::drain,
         pane::{DockPanel, DockSide, DockVisibility, FocusTarget, View},
         rebase::RebaseState,
@@ -4900,6 +5101,161 @@ mod tests {
         );
     }
 
+    /// A per-file diff of a file that the tally names moved, untracked, new, or
+    /// deleted reads its kind in a File Kind Tag between the lead and the tail
+    /// of its metrics. The tag draws as one box in its background over the
+    /// tag's own cells, 1 px inside the row's top and bottom and 2 px inside
+    /// each end. A unified diff's inline row reads the same after the file's
+    /// name.
+    #[test]
+    fn a_diff_s_status_row_tags_its_file_s_kind() {
+        use super::style_rgb;
+        use crate::test_harness::TestHarness;
+        use stoatty_protocol::command::{decode_stream, Command, Edge};
+
+        // The row from the lead on, as long as the metrics, and the row's text
+        // under each panel in the tag's fill, with the panel's edges.
+        let read =
+            |mut h: TestHarness, path: &str, base: WorktreeBase, kind: FileKind, text: &str| {
+                h.stoat.set_diff_warm_auto(true);
+                h.stoat.active_workspace_mut().set_worktree_base(base);
+                h.open_file(Path::new(path));
+                dispatch(&mut h.stoat, &stoat_action::DiffFiles { rev: None });
+                h.settle_diff_jobs();
+                h.type_keys("] g");
+                let row: Vec<char> = bar_row(&h.render_composited()).chars().collect();
+                let fill = style_rgb(h.stoat.theme.kind_tag_style(&kind).bg).expect("an RGB tag");
+                let tags: Vec<(String, [Edge; 4])> = decode_stream(&h.stoat.apc_scene.all_bytes())
+                    .into_iter()
+                    .filter_map(|command| match command {
+                        Command::Panel(panel) if panel.fill == Some(fill) => {
+                            let cells =
+                                usize::from(panel.left)..usize::from(panel.left + panel.width);
+                            Some((row[cells].iter().collect(), panel.edges))
+                        },
+                        _ => None,
+                    })
+                    .collect();
+                let row: String = row.into_iter().collect();
+                let lead = text.split('\u{b7}').next().unwrap_or_default();
+                let shown = row.find(lead).map(|at| {
+                    row[at..]
+                        .chars()
+                        .take(text.chars().count())
+                        .collect::<String>()
+                });
+                (shown, tags)
+            };
+        let repo = |h: &mut TestHarness| {
+            h.stoat.active_workspace_mut().git_root = PathBuf::from("/repo");
+            h.fake_git().add_repo("/repo").with_fs(h.fake_fs());
+        };
+        let moved = |width| {
+            let mut h = TestHarness::with_size(width, 12);
+            h.stage_rename_scenario("/repo", "old.rs", "new.rs", "one\ntwo\n", "one\nTWO\n");
+            h.fake_git().add_repo("/repo").similarity("new.rs", 94);
+            h
+        };
+        let untracked = {
+            let mut h = TestHarness::with_size(120, 12);
+            repo(&mut h);
+            h.fake_git().add_repo("/repo").untracked("u.rs");
+            h.fake_fs().insert_file(Path::new("/repo/u.rs"), b"fresh\n");
+            h
+        };
+        let new = || {
+            let mut h = TestHarness::with_size(120, 12);
+            repo(&mut h);
+            h.fake_git()
+                .add_repo("/repo")
+                .with_fs(h.fake_fs())
+                .index_file("n.rs", "a\nb\n")
+                .unstaged_file("n.rs", "a\nb\nc\n");
+            h
+        };
+        let deleted = {
+            let mut h = TestHarness::with_size(120, 12);
+            repo(&mut h);
+            h.fake_git().add_repo("/repo").deleted("d.rs", "gone\n");
+            h
+        };
+
+        let moved_kind = FileKind::Moved {
+            from: PathBuf::from("old.rs"),
+            similarity: 94,
+        };
+        let (moved_text, moved_tag) = (
+            " vs HEAD \u{b7}  moved \u{b7} 94%  from old.rs \u{b7} hunk 1 / 1 ",
+            " moved \u{b7} 94% ",
+        );
+        let cases = [
+            (
+                moved(120),
+                "/repo/new.rs",
+                WorktreeBase::Head,
+                moved_kind.clone(),
+                moved_text,
+                moved_tag,
+            ),
+            (
+                moved(80),
+                "/repo/new.rs",
+                WorktreeBase::Head,
+                moved_kind,
+                moved_text,
+                moved_tag,
+            ),
+            (
+                untracked,
+                "/repo/u.rs",
+                WorktreeBase::Index,
+                FileKind::Untracked,
+                " no base \u{b7}  untracked  not in the index ",
+                " untracked ",
+            ),
+            (
+                new(),
+                "/repo/n.rs",
+                WorktreeBase::Index,
+                FileKind::New,
+                " vs index \u{b7}  new  staged 2 / 3 \u{b7} hunk 1 / 1 ",
+                " new ",
+            ),
+            (
+                new(),
+                "/repo/n.rs",
+                WorktreeBase::Head,
+                FileKind::New,
+                " vs HEAD \u{b7}  new  no base ",
+                " new ",
+            ),
+            (
+                deleted,
+                "/repo/d.rs",
+                WorktreeBase::Head,
+                FileKind::Deleted,
+                " vs HEAD \u{b7}  deleted  hunk 1 / 1 ",
+                " deleted ",
+            ),
+        ];
+        let inset = [
+            Edge::Inset(1),
+            Edge::Inset(2),
+            Edge::Inset(1),
+            Edge::Inset(2),
+        ];
+        let (shown, wanted): (Vec<_>, Vec<_>) = cases
+            .into_iter()
+            .map(|(h, path, base, kind, text, tag)| {
+                (
+                    read(h, path, base, kind, text),
+                    (Some(text.to_string()), vec![(tag.to_string(), inset)]),
+                )
+            })
+            .unzip();
+        assert_eq!(shown, wanted);
+    }
+
     /// A split diff view's status row reads the diff's metrics in its base
     /// half, with the counts against the divider. Its target half is the
     /// pane's own row, with the mode chip, the file name, and the position.
@@ -5300,7 +5656,12 @@ mod tests {
         let row = Rect::new(0, 0, 120, 1);
         let painted = |base: &str| {
             let [(_, segments), _] = split_halves(row, 59, None);
-            let metrics = (format!("vs {base}"), 6, 4);
+            let metrics = DiffMetrics {
+                lead: format!("vs {base}"),
+                added: 6,
+                removed: 4,
+                ..DiffMetrics::default()
+            };
             let (left, right) = metrics_half(&metrics, segments, Style::default(), &theme);
             let mut buf = Buffer::empty(row);
             paint_status_fallback(&mut buf, segments, &left, &right);
@@ -5336,7 +5697,12 @@ mod tests {
         let theme = crate::theme::Theme::empty();
         let painted = |width: u16, (added, removed): (u32, u32)| {
             let segments = Rect::new(0, 0, width, 1);
-            let metrics = ("vs HEAD".to_string(), added, removed);
+            let metrics = DiffMetrics {
+                lead: "vs HEAD".to_string(),
+                added,
+                removed,
+                ..DiffMetrics::default()
+            };
             let (left, right) = metrics_half(&metrics, segments, Style::default(), &theme);
             let mut buf = Buffer::empty(segments);
             paint_status_fallback(&mut buf, segments, &left, &right);
@@ -5614,6 +5980,37 @@ mod tests {
                 "vs HEAD \u{b7} 2 files \u{b7} hunk 1 / 2 +1 \u{2212}2 NOR repo a.txt 1:1",
                 "vs HEAD \u{b7} 1 file \u{b7} hunk - / 1 +2 NOR repo c.txt 1:1",
             ],
+        );
+    }
+
+    /// A changes view's status row counts each kind among its files that is no
+    /// plain modification, an untracked file as new, and the files folded to
+    /// their headers. The deleted file starts folded.
+    #[test]
+    fn a_changes_view_s_status_row_counts_its_files_by_kind() {
+        let mut h = crate::test_harness::TestHarness::with_size(200, 12);
+        h.stoat.set_diff_warm_auto(true);
+        h.stage_review_scenario("/repo", &[("a.txt", "a\n", "A\n")]);
+        h.fake_git()
+            .add_repo("/repo")
+            .with_fs(h.fake_fs())
+            .renamed("old.txt", "moved.txt", "same\n")
+            .untracked("new.txt")
+            .deleted("gone.txt", "gone\n");
+        h.fake_fs()
+            .insert_file(Path::new("/repo/new.txt"), b"fresh\n");
+        h.stoat
+            .active_workspace_mut()
+            .set_worktree_base(WorktreeBase::Head);
+        h.open_file(Path::new("/repo/a.txt"));
+        h.cover_with_diff_changes(false);
+        h.settle_diff_jobs();
+
+        let row = bar_row(&h.render_composited()).replace('─', " ");
+        let lead = "vs HEAD \u{b7} 4 files \u{b7} 1 moved \u{b7} 1 new \u{b7} 1 deleted \u{b7} 1 collapsed";
+        assert_eq!(
+            row.split_whitespace().collect::<Vec<_>>().join(" "),
+            format!("{lead} \u{b7} hunk 1 / 3 +2 \u{2212}2 NOR repo a.txt 1:1"),
         );
     }
 
