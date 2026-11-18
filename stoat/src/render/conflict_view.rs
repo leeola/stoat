@@ -3,7 +3,7 @@ use crate::{
     conflict_session::ConflictDerived,
     display_map::{CachedHighlightEndpoints, DisplayPoint, DisplaySnapshot},
     editor_state::EditorState,
-    merge_view::{AlignRow, ChunkState, MergeDoc},
+    merge_view::{AlignRow, ChunkState, MergeDoc, Side},
     render::{
         paint::{
             dim_rgb, fill_line_tint, render_empty_num, render_side_num, render_side_text, style_rgb,
@@ -13,7 +13,11 @@ use crate::{
     review::ReviewSide,
     theme::TypeRole,
 };
-use ratatui::{buffer::Buffer, layout::Rect, style::Style};
+use ratatui::{
+    buffer::Buffer,
+    layout::{Position, Rect},
+    style::Style,
+};
 use std::{ops::Range, sync::Arc};
 use stoat_text::cursor_offset;
 use stoat_widgets::ApcScene;
@@ -48,6 +52,20 @@ pub(crate) struct ConflictLayout {
     pub(crate) theirs: Range<u16>,
     /// The rows under the header, across all three columns.
     pub(crate) body: Rect,
+}
+
+/// What a press on the conflict view's MergeGrid lands on, as
+/// [`conflict_target`] reads it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ConflictTarget {
+    /// The ours or theirs side of a chunk that still takes picks.
+    Side {
+        chunk: usize,
+        side: Side,
+        /// The merge row of the side's line under the press, or `None` on a
+        /// row of the chunk's band past that side's lines.
+        merge_row: Option<usize>,
+    },
 }
 
 /// Column geometry for the conflict view's cell layout, the one a terminal with
@@ -239,6 +257,62 @@ pub(crate) fn render_conflict_view(
     editor.diff_row_cache = row_cache;
 
     render_conflict_cursor(editor, cursor, body, text, theme, buf, delegates_cursor);
+}
+
+/// What a press on cell `column`, `row` of the frame lands on in the conflict
+/// view that `editor` shows, or `None` for a press the editor's own pointer
+/// path keeps.
+///
+/// A press in the ours or theirs column of a chunk that still shows its
+/// markers or a per-row mix is a [`ConflictTarget::Side`]. The columns are the
+/// ones the last paint recorded, so a frame with no MergeGrid has no target. A
+/// chunk that a whole-side pick, an auto-resolution, or a hand edit settled is
+/// no target, so a press there places the cursor as on any row.
+pub(crate) fn conflict_target(
+    editor: &mut EditorState,
+    column: u16,
+    row: u16,
+) -> Option<ConflictTarget> {
+    let (body, side) = {
+        let layout = editor.conflict_layout.as_ref()?;
+        let side = if layout.ours.contains(&column) {
+            Side::Ours
+        } else if layout.theirs.contains(&column) {
+            Side::Theirs
+        } else {
+            return None;
+        };
+        (layout.body, side)
+    };
+    if !body.contains(Position::new(column, row)) {
+        return None;
+    }
+    // At an unaligned rest the composite draws a row in the cell its offset
+    // rounds to, as the editor's own press path reads it.
+    let display_row =
+        editor.scroll_row + u32::from(editor.scroll_frac >= 0.5) + u32::from(row - body.y);
+
+    let snapshot = editor.display_map.snapshot();
+    let state = Arc::make_mut(editor.conflict_view.as_mut()?);
+    let (_, derived) = state.derived(&snapshot);
+    let align = derived.plan.get(display_row as usize)?;
+    let chunk = align.chunk?;
+    if !matches!(
+        derived.states.get(chunk)?,
+        ChunkState::Unresolved | ChunkState::Picked
+    ) {
+        return None;
+    }
+
+    let merge_row = match side {
+        Side::Ours => align.ours,
+        Side::Theirs => align.theirs,
+    };
+    Some(ConflictTarget::Side {
+        chunk,
+        side,
+        merge_row,
+    })
 }
 
 /// The display cell of the primary selection's cursor in `snapshot`.

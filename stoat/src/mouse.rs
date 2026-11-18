@@ -21,6 +21,7 @@ use crate::{
     host::ClipboardKind,
     keymap::WheelDirection,
     keymap_state::{active_modal, ActiveModal, StoatKeymapState},
+    merge_view::Side,
     minimap::{
         density::{self, Density, Tier},
         diff_view::diff_view_window,
@@ -29,17 +30,17 @@ use crate::{
     },
     pane::{FocusTarget, Placement, View},
     rebase::RebasePause,
-    render::commit_picker::MIN_LIST_ROWS,
+    render::{commit_picker::MIN_LIST_ROWS, conflict_view::ConflictTarget},
     run::GridSelection,
     term_session::TermId,
     theme::TypeRole,
     workspace::Workspace,
 };
-use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+use crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::layout::{Position, Rect};
 use slotmap::SlotMap;
 use std::ops::Range;
-use stoat_action::GitStatusOpen;
+use stoat_action::{ActionKind, GitStatusOpen};
 use stoat_config::MinimapMode;
 use stoat_text::{Bias, SelectionGoal};
 use stoat_widgets::minimap;
@@ -1098,10 +1099,54 @@ pub(crate) fn handle_mouse(stoat: &mut Stoat, mouse: MouseEvent) -> UpdateEffect
         focus_at(stoat, mouse.column, mouse.row);
     }
 
+    if let Some(effect) = handle_conflict_press(stoat, mouse) {
+        return closed_effect(effect);
+    }
+
     let Some((col, row)) = translate_mouse_to_focused(stoat, mouse.column, mouse.row) else {
         return closed_effect(UpdateEffect::None);
     };
     closed_effect(apply_focused_pane_mouse(stoat, mouse.kind, col, row))
+}
+
+/// Take a side or a line of the conflict chunk under a left press, as the `o`,
+/// `t`, `O`, and `T` keys take them.
+///
+/// A press on the ours or theirs side of a chunk that still takes picks takes
+/// that whole side, and with Alt held it takes the one line under the
+/// pointer. The pick is one undo step, as a key's pick is. Any other press
+/// answers `None` and takes the editor's press path, which places the cursor,
+/// so the merged column stays a text area.
+fn handle_conflict_press(stoat: &mut Stoat, mouse: MouseEvent) -> Option<UpdateEffect> {
+    if !matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
+        return None;
+    }
+    let editor = action_handlers::focused_editor_mut(stoat)?;
+    let ConflictTarget::Side {
+        chunk,
+        side,
+        merge_row,
+    } = crate::render::conflict_view::conflict_target(editor, mouse.column, mouse.row)?;
+    let line = match mouse.modifiers.contains(KeyModifiers::ALT) {
+        true => Some(merge_row?),
+        false => None,
+    };
+
+    Some(action_handlers::with_action_group(stoat, |stoat| {
+        match line {
+            Some(merge_row) => {
+                action_handlers::conflict_view::pick_chunk_row(stoat, chunk, merge_row, side)
+            },
+            None => {
+                let kind = match side {
+                    Side::Ours => ActionKind::ConflictPickOurs,
+                    Side::Theirs => ActionKind::ConflictPickTheirs,
+                };
+                action_handlers::conflict_view::pick_chunk_side(stoat, chunk, kind);
+            },
+        }
+        UpdateEffect::Redraw
+    }))
 }
 
 /// Route a pane-relative pointer event to whichever focused pane kind owns
@@ -2634,18 +2679,21 @@ mod tests {
         diff_changes::DiffChangesState,
         editor_state::EditorState,
         host::NoopLsp,
-        render::hover::HoverPopup,
+        render::{conflict_view::ConflictLayout, hover::HoverPopup},
         review_walk::{ReturnRef, ReviewWalk},
         test_fixture::{mouse_event, open_scratch_file},
     };
-    use crossterm::event::KeyModifiers;
+    use crossterm::event::{Event, KeyModifiers};
     use ratatui::style::Style;
     use slotmap::SlotMap;
     use std::{
         path::{Path, PathBuf},
         sync::Arc,
     };
-    use stoat_action::{MoveDown, NewTab, OpenFile, SplitDown, SplitRight, TogglePaneWiden};
+    use stoat_action::{
+        Conflict, ConflictPickOurs, MoveDown, NewTab, OpenFile, SplitDown, SplitRight,
+        TogglePaneWiden,
+    };
     use stoat_text::Point;
     use stoatty_protocol::NUDGE_PROTOCOL;
     /// A buffer with `count` single-line diagnostics on consecutive rows,
@@ -3186,8 +3234,6 @@ mod tests {
 
     #[test]
     fn conflict_view_click_maps_center_exact_and_sides_to_row_start() {
-        use stoat_action::Conflict;
-
         let mut h = Stoat::test();
         let git_root = h.stoat.active_workspace().git_root.clone();
         h.fake_git().add_repo(git_root).conflicted_file(
@@ -3249,6 +3295,213 @@ mod tests {
             (2, None, None),
             "a click on either header row maps to no line"
         );
+    }
+
+    /// One chunk whose ours and theirs lines replace the base line under `a`.
+    const ONE_CHUNK: [&str; 3] = ["a\nbase\n", "a\nours\n", "a\ntheirs\n"];
+
+    /// A press on the ours side of an open chunk takes ours, as `o` does, and
+    /// sets no status. The chunk's band starts on the body's second row, under
+    /// the shared `a`.
+    #[test]
+    fn a_press_on_an_open_chunk_s_ours_side_takes_ours() {
+        let (mut h, layout) = conflict_press_harness(ONE_CHUNK);
+        conflict_press(&mut h, layout.ours.start + 2, layout.body.y + 1, false);
+
+        assert_eq!(
+            (conflict_center(&h), h.stoat.pending_message.clone()),
+            ("a\nours\n".to_string(), None),
+        );
+    }
+
+    /// A press on the theirs side of an open chunk takes theirs, as `t` does.
+    #[test]
+    fn a_press_on_the_theirs_side_takes_theirs() {
+        let (mut h, layout) = conflict_press_harness(ONE_CHUNK);
+        conflict_press(&mut h, layout.theirs.start + 2, layout.body.y + 1, false);
+
+        assert_eq!(conflict_center(&h), "a\ntheirs\n");
+    }
+
+    /// An Alt press on a side line takes that line alone, as `T` takes the
+    /// line at the cursor, and the rest of the chunk stays in its marker block.
+    /// The chunk then shows a per-row mix, and a second Alt press takes the
+    /// other theirs line too.
+    #[test]
+    fn an_alt_press_on_a_side_line_takes_that_line_alone() {
+        let (mut h, layout) =
+            conflict_press_harness(["a\nb1\nb2\nc\n", "a\nO1\nO2\nc\n", "a\nT1\nT2\nc\n"]);
+        conflict_press(&mut h, layout.theirs.start + 2, layout.body.y + 2, true);
+        let second_line = conflict_center(&h);
+        h.stoat.render();
+        conflict_press(&mut h, layout.theirs.start + 2, layout.body.y + 1, true);
+
+        assert_eq!(
+            [second_line, conflict_center(&h)],
+            [
+                "a\nT2\n<<<<<<< ours\nO1\n=======\nT1\n>>>>>>> theirs\nc\n",
+                "a\nT1\nT2\nc\n",
+            ],
+        );
+    }
+
+    /// A press on the side of a chunk a whole-side pick settled changes no
+    /// text, and places the cursor at the start of the aligned merged row.
+    #[test]
+    fn a_press_on_a_settled_chunk_s_side_moves_the_cursor() {
+        let (mut h, layout) = conflict_press_harness(ONE_CHUNK);
+        action_handlers::dispatch(&mut h.stoat, &ConflictPickOurs);
+        h.stoat.render();
+        h.stoat.collapse_focused_cursor_to(0);
+        conflict_press(&mut h, layout.theirs.start + 2, layout.body.y + 1, false);
+
+        assert_eq!(
+            (conflict_center(&h), cursor_offset(&mut h)),
+            ("a\nours\n".to_string(), Some(2)),
+            "the cursor at the start of the ours line, after `a\\n`",
+        );
+    }
+
+    /// A press in the merged column of an open chunk places the cursor at the
+    /// pressed cell and takes no side.
+    #[test]
+    fn a_press_in_the_merged_column_places_the_cursor() {
+        let (mut h, layout) = conflict_press_harness(ONE_CHUNK);
+        let text_x = action_handlers::focused_editor_mut(&mut h.stoat)
+            .and_then(|editor| editor.text_rect)
+            .expect("the paint records the merged text")
+            .x;
+        let marker = conflict_center(&h);
+        conflict_press(&mut h, text_x + 3, layout.body.y + 1, false);
+
+        assert_eq!(
+            (conflict_center(&h), cursor_offset(&mut h)),
+            (marker, Some(5)),
+            "the cursor three cells into the `<<<<<<< ours` line, after `a\\n`",
+        );
+    }
+
+    /// An Alt press on a band row past a side's lines has no line to take, so
+    /// it places the cursor at the start of the aligned merged row. The chunk's
+    /// sides hold one line each, so the band's third row has none.
+    #[test]
+    fn an_alt_press_past_a_side_s_lines_places_the_cursor() {
+        let (mut h, layout) = conflict_press_harness(ONE_CHUNK);
+        let marker = conflict_center(&h);
+        h.stoat.collapse_focused_cursor_to(0);
+        conflict_press(&mut h, layout.theirs.start + 2, layout.body.y + 2, true);
+
+        assert_eq!(
+            (conflict_center(&h), cursor_offset(&mut h)),
+            (marker, Some("a\n<<<<<<< ours\n".len())),
+        );
+    }
+
+    /// At an unaligned rest the composite draws a row in the cell its offset
+    /// rounds to, so a press reads the row drawn under it. Three quarters of a
+    /// row down, the body's first row shows the chunk's first row.
+    #[test]
+    fn a_press_at_an_unaligned_rest_reads_the_row_drawn_there() {
+        let (mut h, layout) = conflict_press_harness(ONE_CHUNK);
+        action_handlers::focused_editor_mut(&mut h.stoat)
+            .expect("the conflict editor")
+            .scroll_frac = 0.75;
+        conflict_press(&mut h, layout.ours.start + 2, layout.body.y, false);
+
+        assert_eq!(conflict_center(&h), "a\nours\n");
+    }
+
+    /// Only the left button picks, so a right press on an open chunk's side
+    /// leaves the chunk's markers.
+    #[test]
+    fn a_right_press_on_a_side_takes_nothing() {
+        let (mut h, layout) = conflict_press_harness(ONE_CHUNK);
+        let marker = conflict_center(&h);
+        h.stoat.update(mouse_event(
+            MouseEventKind::Down(MouseButton::Right),
+            layout.ours.start + 2,
+            layout.body.y + 1,
+        ));
+
+        assert_eq!(conflict_center(&h), marker);
+    }
+
+    /// A press's pick is one undo step that puts the cursor back, as a key's
+    /// pick is.
+    #[test]
+    fn a_press_pick_undoes_in_one_step() {
+        let (mut h, layout) = conflict_press_harness(ONE_CHUNK);
+        let marker = conflict_center(&h);
+        h.stoat.collapse_focused_cursor_to(0);
+        conflict_press(&mut h, layout.ours.start + 2, layout.body.y + 1, false);
+        h.type_keys("u");
+
+        assert_eq!(
+            (conflict_center(&h), cursor_offset(&mut h)),
+            (marker, Some(0))
+        );
+    }
+
+    /// A harness on the conflict view of one file whose ancestor, ours, and
+    /// theirs stages are `stages`, painted once, and the columns that paint
+    /// recorded.
+    fn conflict_press_harness(
+        stages: [&str; 3],
+    ) -> (crate::test_harness::TestHarness, ConflictLayout) {
+        let [ancestor, ours, theirs] = stages;
+        let mut h = Stoat::test();
+        let git_root = h.stoat.active_workspace().git_root.clone();
+        h.fake_git().add_repo(git_root).conflicted_file(
+            "f.txt",
+            Some(ancestor),
+            Some(ours),
+            Some(theirs),
+        );
+        action_handlers::dispatch(&mut h.stoat, &Conflict);
+        h.settle();
+        h.stoat.render();
+
+        let layout = action_handlers::focused_editor_mut(&mut h.stoat)
+            .and_then(|editor| editor.conflict_layout.clone())
+            .expect("the paint records the grid's columns");
+        (h, layout)
+    }
+
+    /// Send a left press at `column`, `row`, with Alt held when `alt` is set.
+    fn conflict_press(h: &mut crate::test_harness::TestHarness, column: u16, row: u16, alt: bool) {
+        let modifiers = match alt {
+            true => KeyModifiers::ALT,
+            false => KeyModifiers::NONE,
+        };
+        h.stoat.update(Event::Mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column,
+            row,
+            modifiers,
+        }));
+    }
+
+    /// The byte offset of the focused editor's cursor.
+    fn cursor_offset(h: &mut crate::test_harness::TestHarness) -> Option<usize> {
+        h.stoat.focused_cursor_pos().map(|(_, offset)| offset)
+    }
+
+    /// The merged text of the conflict view's shown file.
+    fn conflict_center(h: &crate::test_harness::TestHarness) -> String {
+        let ws = h.stoat.active_workspace();
+        let buffer_id = ws
+            .conflict
+            .as_ref()
+            .expect("a session is open")
+            .file
+            .buffer_id;
+        ws.buffers
+            .get(buffer_id)
+            .expect("the merged buffer")
+            .read()
+            .expect("buffer poisoned")
+            .rope()
+            .to_string()
     }
 
     #[test]

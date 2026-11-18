@@ -781,24 +781,17 @@ fn land_resolved(stoat: &mut Stoat, current: usize, path: &Path, marked: Result<
 /// clobber guard and warns. An immediate repeat of the identical pick confirms
 /// and overwrites.
 fn pick_side(stoat: &mut Stoat, kind: ActionKind) {
-    let Some((chunk_idx, region, region_text)) = current_chunk(stoat) else {
+    let Some((chunk_idx, _, region_text)) = current_chunk(stoat) else {
         return;
     };
 
-    let (assembly, picks, manual) = {
+    let manual = {
         let Some(session) = stoat.active_workspace().conflict.as_ref() else {
             return;
         };
         let doc = &session.file.doc;
-        let chunk = &doc.chunks[chunk_idx];
-        let picks = match kind {
-            ActionKind::ConflictPickTheirs => chunk.all_theirs(),
-            ActionKind::ConflictPickBoth => chunk.all_both(),
-            _ => chunk.all_ours(),
-        };
-        let manual = chunk.classify(&doc.rows, &session.file.picks[chunk_idx], &region_text)
-            == ChunkState::Manual;
-        (chunk.assembly_text(&doc.rows, &picks), picks, manual)
+        doc.chunks[chunk_idx].classify(&doc.rows, &session.file.picks[chunk_idx], &region_text)
+            == ChunkState::Manual
     };
 
     let armed = stoat
@@ -814,7 +807,75 @@ fn pick_side(stoat: &mut Stoat, kind: ActionKind) {
         return;
     }
 
+    pick_chunk_side(stoat, chunk_idx, kind);
+}
+
+/// Apply a whole-side pick of `kind` to chunk `chunk_idx`, over whatever its
+/// center holds.
+///
+/// A press on a side takes it through here. The pointer targets only a chunk
+/// that still shows its markers or a per-row mix, so it needs no guard for a
+/// hand-edited center, which the keys arm through [`pick_side`].
+pub(crate) fn pick_chunk_side(stoat: &mut Stoat, chunk_idx: usize, kind: ActionKind) {
+    let Some((region, _)) = chunk_region(stoat, chunk_idx) else {
+        return;
+    };
+
+    let (assembly, picks) = {
+        let Some(session) = stoat.active_workspace().conflict.as_ref() else {
+            return;
+        };
+        let doc = &session.file.doc;
+        let chunk = &doc.chunks[chunk_idx];
+        let picks = match kind {
+            ActionKind::ConflictPickTheirs => chunk.all_theirs(),
+            ActionKind::ConflictPickBoth => chunk.all_both(),
+            _ => chunk.all_ours(),
+        };
+        (chunk.assembly_text(&doc.rows, &picks), picks)
+    };
+
     apply_resolution(stoat, chunk_idx, region, &assembly, picks);
+}
+
+/// Toggle the `side` line of merge row `merge_row` into or out of chunk
+/// `chunk_idx`'s resolution, as `O` and `T` toggle the line at the cursor.
+///
+/// Only a chunk that still shows its markers or a per-row mix takes the
+/// toggle, since only its center maps back to rows. Any other chunk keeps its
+/// text, and the status says to reset it first. A row outside the chunk
+/// changes nothing.
+pub(crate) fn pick_chunk_row(stoat: &mut Stoat, chunk_idx: usize, merge_row: usize, side: Side) {
+    let Some((region, region_text)) = chunk_region(stoat, chunk_idx) else {
+        return;
+    };
+
+    let picked = {
+        let Some(session) = stoat.active_workspace().conflict.as_ref() else {
+            return;
+        };
+        let doc = &session.file.doc;
+        let chunk = &doc.chunks[chunk_idx];
+        let Some(local) = merge_row
+            .checked_sub(chunk.row_range.start)
+            .filter(|&local| local < chunk.row_range.len())
+        else {
+            return;
+        };
+
+        let stored = &session.file.picks[chunk_idx];
+        let state = chunk.classify(&doc.rows, stored, &region_text);
+        matches!(state, ChunkState::Unresolved | ChunkState::Picked).then(|| {
+            let mut picks = effective_picks(chunk, stored, state);
+            toggle_side(&mut picks[local], side);
+            (chunk.partial_text(&doc.rows, &picks), picks)
+        })
+    };
+
+    match picked {
+        Some((text, picks)) => apply_resolution(stoat, chunk_idx, region, &text, picks),
+        None => stoat.set_status("chunk is settled, reset it to pick lines"),
+    }
 }
 
 /// Toggle the `key_side` line aligned with the cursor into or out of the current
@@ -1023,27 +1084,49 @@ fn current_chunk_and_row(stoat: &mut Stoat) -> Option<(usize, Range<usize>, Stri
     let buffer_snapshot = snapshot.buffer_snapshot();
     let cursor = buffer_snapshot.resolve_anchor(&cursor_anchor);
 
-    let session = stoat.active_workspace().conflict.as_ref()?;
-    let chunk_idx =
-        conflict_session::chunk_holding(&session.file.chunk_anchors, buffer_snapshot, cursor)?;
-
-    let (start, end) = &session.file.chunk_anchors[chunk_idx];
-    let region = buffer_snapshot.resolve_anchor(start)..buffer_snapshot.resolve_anchor(end);
+    let chunk_idx = {
+        let session = stoat.active_workspace().conflict.as_ref()?;
+        conflict_session::chunk_holding(&session.file.chunk_anchors, buffer_snapshot, cursor)?
+    };
+    let (region, region_text) = chunk_region(stoat, chunk_idx)?;
 
     let rope = buffer_snapshot.rope();
-    let region_text = rope.chunks_in_range(region.clone()).collect();
     let row_in_region =
         (rope.offset_to_point(cursor).row - rope.offset_to_point(region.start).row) as usize;
 
     Some((chunk_idx, region, region_text, row_in_region))
 }
 
+/// Chunk `chunk_idx`'s center region, as its current byte range in the merged
+/// buffer and the text it holds, or `None` with no session open or no such
+/// chunk.
+fn chunk_region(stoat: &mut Stoat, chunk_idx: usize) -> Option<(Range<usize>, String)> {
+    let editor_id = stoat.active_workspace().conflict.as_ref()?.file.editor_id;
+    let snapshot = stoat
+        .active_workspace_mut()
+        .editors
+        .get_mut(editor_id)?
+        .display_map
+        .snapshot();
+    let buffer_snapshot = snapshot.buffer_snapshot();
+
+    let session = stoat.active_workspace().conflict.as_ref()?;
+    let (start, end) = session.file.chunk_anchors.get(chunk_idx)?;
+    let region = buffer_snapshot.resolve_anchor(start)..buffer_snapshot.resolve_anchor(end);
+    let text = buffer_snapshot
+        .rope()
+        .chunks_in_range(region.clone())
+        .collect();
+    Some((region, text))
+}
+
 /// Write `text` over the chunk's center region, then mirror `picks` onto the
 /// session and the render cache and disarm the clobber guard.
 ///
-/// The buffer edit rides the dispatch-level undo group, so a pick and its
-/// revert are single undo steps. Chunk anchors auto-shift so later chunks stay
-/// aligned when this region grows or shrinks.
+/// The buffer edit rides the undo group that the caller's dispatch or
+/// [`super::with_action_group`] opens, so a pick and its revert are single
+/// undo steps. Chunk anchors auto-shift so later chunks stay aligned when this
+/// region grows or shrinks.
 fn apply_resolution(
     stoat: &mut Stoat,
     chunk_idx: usize,

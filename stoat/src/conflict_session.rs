@@ -456,10 +456,11 @@ fn chunk_states(
 mod tests {
     use super::ConflictLabels;
     use crate::{
+        action_handlers::conflict_view,
         app::Stoat,
         git_status::Note,
         host::git::MergeState,
-        merge_view::MergeDoc,
+        merge_view::{MergeDoc, Side},
         pane::View,
         rebase::{ActiveRebase, RebaseState},
         test_harness::TestHarness,
@@ -969,6 +970,35 @@ mod tests {
         assert_eq!(
             center_text(&h),
             "a\nT1\n<<<<<<< ours\nO2\n=======\nT2\n>>>>>>> theirs\nc\n"
+        );
+    }
+
+    /// A line pick takes a row of an open chunk alone. A row outside the
+    /// chunk changes nothing. On a chunk that a whole-side pick settled, the
+    /// pick keeps the chunk's text and says to reset it, since its center no
+    /// longer maps to rows.
+    #[test]
+    fn a_line_pick_changes_only_an_open_chunk_s_rows() {
+        let mut h = Stoat::test();
+        let marker = seed_rows(&mut h);
+        dispatch_conflict(&mut h);
+        let status = h.stoat.pending_message.clone();
+
+        conflict_view::pick_chunk_row(&mut h.stoat, 0, 9, Side::Theirs);
+        let off_the_rows = (center_text(&h), h.stoat.pending_message.clone());
+        pick(&mut h, &ConflictPickOurs);
+        conflict_view::pick_chunk_row(&mut h.stoat, 0, 2, Side::Theirs);
+        let settled = (center_text(&h), h.stoat.pending_message.clone());
+
+        assert_eq!(
+            [off_the_rows, settled],
+            [
+                (marker, status),
+                (
+                    "a\nO1\nO2\nc\n".to_string(),
+                    Some("chunk is settled, reset it to pick lines".to_string()),
+                ),
+            ],
         );
     }
 
