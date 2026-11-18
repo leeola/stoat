@@ -295,8 +295,12 @@ pub(crate) fn stack_composited(pane: &Pane, frame: FrameCtx<'_>) -> bool {
 /// painted excerpt's editor records where this paint laid it out: its scroll
 /// row, its viewport, its text rect, and the cell of its cursor.
 ///
+/// The first row of a file with no base reads `no base` on its base half, as
+/// [`paint_no_base`] lays it out.
+///
 /// Under [`PagePaint::DecorationsOnly`] the rows write no cell. The headers'
-/// hairlines and runs and the excerpts' diff gutters fill `scene` alone.
+/// hairlines and runs, the `no base` label, and the excerpts' diff gutters
+/// fill `scene` alone.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn paint_stack_rows(
     state: &DiffChangesState,
@@ -429,7 +433,67 @@ pub(crate) fn paint_stack_rows(
             origins.as_ref().map(|origins| origins[index]),
             None,
         );
+        if editor.scroll_row == 0
+            && diff_changes::excerpt_no_base(excerpt, buffers)
+            && let Some(divider) = review::diff_divider_x(excerpt_area)
+        {
+            paint_no_base(excerpt_area, divider, frame.theme, buf, scene, paint);
+        }
         editor.viewport_rows = Some(rows as u32);
+    }
+}
+
+/// Write `no base` on the first row of `area`, an excerpt of a file with no
+/// base, centered in the base half between the area's left edge and the
+/// divide's hairline in column `divider`, in `ui.text.muted`.
+///
+/// Under a live scene the label is a run at the caption scale, which a page
+/// sends with its decorations, so both page paints send it. It goes into the
+/// scene after the base half's hatch, so it draws over the hatch. With no live
+/// scene a cells paint writes it into the row's cells over their own style.
+fn paint_no_base(
+    area: Rect,
+    divider: u16,
+    theme: &Theme,
+    buf: &mut Buffer,
+    scene: &mut ApcScene,
+    paint: PagePaint,
+) {
+    const LABEL: &str = "no base";
+    let muted = theme.get(scope::UI_TEXT_MUTED);
+    match style_rgb(muted.fg).filter(|_| scene.live()) {
+        Some(color) => {
+            let scale = theme.type_scale(TypeRole::Caption);
+            let divide = (divider - area.x) * 16 + review::DIVIDER_RULE_X;
+            let advance = text_run::advance_sixteenths(LABEL.chars().count(), scale);
+            let mut runs = TextRunBatch::default();
+            runs.push(
+                area,
+                TextRun {
+                    col: (divide.saturating_sub(advance) / 2) as i16,
+                    row: 0,
+                    scale,
+                    color,
+                    bg: None,
+                    text: LABEL,
+                    bold: false,
+                    italic: false,
+                    follow: 0,
+                    anchor: None,
+                },
+            );
+            runs.flush(scene);
+        },
+        None if paint == PagePaint::Cells => {
+            let half = divider - area.x;
+            let x = area.x + half.saturating_sub(LABEL.len() as u16) / 2;
+            for (offset, ch) in LABEL.chars().enumerate() {
+                let cell = &mut buf[(x + offset as u16, area.y)];
+                let style = cell.style().patch(muted);
+                cell.set_char(ch).set_style(style);
+            }
+        },
+        None => {},
     }
 }
 
@@ -1368,6 +1432,123 @@ mod tests {
                 format!("{:<13}\u{b7} 2 hunks", "src/lib.rs"),
                 "src/lib.rs".to_string(),
             ],
+        );
+    }
+
+    /// A focused changes view at 120 by `height` over one untracked file of
+    /// `lines` numbered lines, with no minimap, settled.
+    fn untracked_stack(height: u16, lines: u32) -> TestHarness {
+        let mut h = TestHarness::with_size(120, height);
+        h.stoat.settings.editor_minimap = Some(MinimapMode::Off);
+        h.stoat.screen_hints_hidden = true;
+        h.stoat.active_workspace_mut().git_root = PathBuf::from("/repo");
+        h.fake_git()
+            .add_repo(PathBuf::from("/repo"))
+            .with_fs(h.fake_fs())
+            .untracked("new.txt");
+        let text: String = (1..=lines).map(|n| format!("{n}\n")).collect();
+        h.fake_fs()
+            .insert_file(Path::new("/repo/new.txt"), text.as_bytes());
+        h.open_file(Path::new("/repo/new.txt"));
+        h.cover_with_diff_changes(false);
+        h.settle();
+        h
+    }
+
+    /// The pane-relative column and row of each `no base` in `buf`'s cells.
+    fn no_base_cells(h: &TestHarness, buf: &Buffer) -> Vec<(u16, u16)> {
+        let inner = {
+            let ws = h.stoat.active_workspace();
+            ws.panes.pane(ws.panes.focus()).area
+        };
+        (inner.y..inner.bottom())
+            .flat_map(|y| (inner.x..inner.right() - 6).map(move |x| (x, y)))
+            .filter(|&(x, y)| {
+                (x..x + 7).map(|x| buf[(x, y)].symbol()).collect::<String>() == "no base"
+            })
+            .map(|(x, y)| (x - inner.x, y - inner.y))
+            .collect()
+    }
+
+    /// In cells a file with no base reads `no base` on its excerpt's first
+    /// row, centered in the base half left of the divider. A stack scrolled
+    /// past that row reads the label nowhere.
+    ///
+    /// The view is shorter than the stack's thirteen rows, so the scroll holds.
+    #[test]
+    fn a_file_with_no_base_reads_no_base_on_its_first_row() {
+        let mut h = untracked_stack(10, 30);
+        h.stoat.stoatty = false;
+        let top = h.render_composited();
+        stack(&mut h).0.scroll = 2;
+        let scrolled = h.render_composited();
+
+        let half = {
+            let ws = h.stoat.active_workspace();
+            let inner = ws.panes.pane(ws.panes.focus()).area;
+            review::diff_divider_x(inner).expect("a split stack") - inner.x
+        };
+        assert_eq!(
+            (no_base_cells(&h, &top), no_base_cells(&h, &scrolled)),
+            (vec![((half - 7) / 2, 1)], Vec::new()),
+        );
+    }
+
+    /// Under a live scene the label is one caption run in the muted color,
+    /// centered between the excerpt's left edge and the divide's hairline,
+    /// with no box of its own over the base half's hatch.
+    #[test]
+    fn a_live_stack_draws_no_base_as_a_centered_run() {
+        let mut h = untracked_stack(16, 30);
+        let width = {
+            let ws = h.stoat.active_workspace();
+            ws.panes.pane(ws.panes.focus()).area.width
+        };
+        let (runs, scale, muted) =
+            paint_directly(&mut h, |state, editors, buffers, frame, scene| {
+                let mut buf = Buffer::empty(Rect::new(0, 0, width, 14));
+                let area = buf.area;
+                paint_stack_rows(
+                    state,
+                    editors,
+                    buffers,
+                    true,
+                    frame.theme.get(scope::UI_TEXT),
+                    &mut UndercurlBatch::default(),
+                    frame,
+                    &mut buf,
+                    scene,
+                    0,
+                    area,
+                    PagePaint::Cells,
+                );
+                let runs: Vec<_> = decode_stream(scene.bytes())
+                    .into_iter()
+                    .filter_map(|command| match command {
+                        Command::TextRun(run) if run.text == "no base" => {
+                            Some((run.col, run.row, run.scale, run.color, run.bg))
+                        },
+                        _ => None,
+                    })
+                    .collect();
+                (
+                    runs,
+                    frame.theme.type_scale(TypeRole::Caption),
+                    paint::style_rgb(frame.theme.get(scope::UI_TEXT_MUTED).fg),
+                )
+            });
+
+        let divide = (width - 1) / 2 * 16 + review::DIVIDER_RULE_X;
+        let advance = text_run::advance_sixteenths(7, scale);
+        assert_eq!(
+            runs,
+            vec![(
+                ((divide - advance) / 2) as i16,
+                16,
+                scale,
+                muted.expect("an RGB muted color"),
+                None
+            )],
         );
     }
 

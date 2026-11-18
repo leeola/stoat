@@ -56,6 +56,10 @@ use stoat_widgets::text_run;
 /// of a marked run of a refined hunk.
 const CONTEXT_ROWS: u32 = 3;
 
+/// The rows a file with no base shows before its fold row, the count the
+/// DiffKindsChanges board draws.
+const NEW_FILE_ROWS: u32 = 11;
+
 /// Lines one expand opens of a fold. A fold of this many lines or fewer opens
 /// whole.
 const EXPAND_STEP: u32 = 10;
@@ -1089,6 +1093,31 @@ pub(crate) fn excerpt_stats(excerpt: &Excerpt, buffers: &BufferRegistry) -> Exce
         .diff_map
         .as_ref()
         .map_or_else(ExcerptStats::default, ExcerptStats::of)
+}
+
+/// Whether the file of `excerpt` has no base, so its first row reads `no base`
+/// on the base half.
+///
+/// `false` while the buffer waits on its diff map.
+pub(crate) fn excerpt_no_base(excerpt: &Excerpt, buffers: &BufferRegistry) -> bool {
+    buffers.get(excerpt.buffer_id).is_some_and(|buffer| {
+        buffer
+            .read()
+            .expect("buffer poisoned")
+            .diff_map
+            .as_ref()
+            .is_some_and(no_base)
+    })
+}
+
+/// Whether `map` diffs against an empty base text, as a file that the base does
+/// not hold does, so every line of the file is new.
+///
+/// A map with no base text at all, as a test builds one from bare hunks, says
+/// nothing about the base, so it does not count. The diff pipeline gives every
+/// map it builds its base text.
+fn no_base(map: &DiffMap) -> bool {
+    map.base_text().is_some_and(|text| text.is_empty())
 }
 
 /// The stack row of the focused excerpt's cursor, as of the last
@@ -2487,13 +2516,19 @@ fn fold_excerpt(
                             .and_then(|reader| reader.gap_scope(&gap, line_count))
                             .map(Arc::new),
                     };
-                    // No chain names a file with no change, so its label needs
-                    // no parse, and a language with no outline query reads it.
-                    if gap.end >= line_count && map.is_empty() {
+                    // No chain names the rest of a file with no base or a file
+                    // with no change, so its label needs no parse, and a
+                    // language with no outline query reads it.
+                    let label = match (no_base(map), map.is_empty()) {
+                        (true, _) => Some(FoldEnd::NewFile),
+                        (false, true) => Some(FoldEnd::Unchanged),
+                        (false, false) => None,
+                    };
+                    if let Some(end) = label.filter(|_| gap.end >= line_count) {
                         placeholder.scope = Some(Arc::new(FoldScope {
                             segments: Vec::new(),
                             split: None,
-                            end: FoldEnd::Unchanged,
+                            end,
                             mark: ScopeMark::None,
                         }));
                     }
@@ -2597,7 +2632,23 @@ fn held_scope<'a>(
 ///
 /// A `cursor` row keeps its context as a hunk's rows do, so a cursor outside
 /// every hunk's run shows with the rows around it.
+///
+/// A file with no base is one added hunk, so it keeps its first
+/// [`NEW_FILE_ROWS`] rows and the cursor's run alone, and the rest of the file
+/// folds. A file of that many rows or fewer shows whole.
 fn kept_runs(map: &DiffMap, line_count: u32, cursor: Option<u32>) -> Vec<Range<u32>> {
+    if no_base(map) {
+        let mut runs = Vec::with_capacity(2);
+        runs.push(0..NEW_FILE_ROWS.min(line_count));
+        runs.extend(
+            cursor.map(|row| {
+                row.saturating_sub(CONTEXT_ROWS)..(row + 1 + CONTEXT_ROWS).min(line_count)
+            }),
+        );
+        runs.retain(|run| !run.is_empty());
+        return merge_runs(runs);
+    }
+
     let mut wanted: Vec<Range<u32>> = Vec::new();
     for hunk in map.hunks() {
         let rows = &hunk.buffer_line_range;
@@ -3280,6 +3331,29 @@ mod tests {
             [runs(10), runs(36)],
             [vec![(7, 14), (37, 44)], vec![(33, 44)]],
             "the runs as start and end rows, for a cursor apart from the hunk and one touching it",
+        );
+    }
+
+    /// A file with no base keeps its first eleven rows, and a cursor past them
+    /// keeps its own row with its context. A file of eleven rows or fewer
+    /// shows whole.
+    #[test]
+    fn kept_runs_keep_the_first_rows_of_a_file_with_no_base() {
+        let runs = |map: &DiffMap, line_count, cursor| -> Vec<(u32, u32)> {
+            kept_runs(map, line_count, cursor)
+                .into_iter()
+                .map(|run| (run.start, run.end))
+                .collect()
+        };
+        let long = map_of("", &numbered(64));
+        assert_eq!(
+            [
+                runs(&long, 65, None),
+                runs(&long, 65, Some(40)),
+                runs(&map_of("", &numbered(5)), 6, None),
+            ],
+            [vec![(0, 11)], vec![(0, 11), (37, 44)], vec![(0, 6)]],
+            "the runs as start and end rows",
         );
     }
 
@@ -4065,10 +4139,53 @@ fn hint_width() -> u32 {
             .set_worktree_base(WorktreeBase::Head);
         stacked(&mut h);
 
-        let snapshot = excerpt_editor(&mut h, "moved.txt").display_map.snapshot();
+        assert_eq!(
+            fold_rows_of(&mut h, "moved.txt"),
+            vec![(0..4, "content unchanged".to_string())],
+        );
+    }
+
+    /// A long untracked file shows its first eleven rows and one fold row over
+    /// the rest, whose Scope reads `rest of the new file` where a parse of the
+    /// file reads the end of the file.
+    #[test]
+    fn a_long_untracked_file_folds_its_rest_under_a_label() {
+        let mut h = TestHarness::with_size(100, 24);
+        let text: String = (1..=64).map(|n| format!("line {n}\n")).collect();
+        repo(&mut h).untracked("notes.md");
+        h.fake_fs()
+            .insert_file(Path::new("/repo/notes.md"), text.as_bytes());
+        stacked(&mut h);
+        // The paint asks for the excerpt's parse, and the refold after it lands
+        // reads the Scope.
+        h.render_composited();
+        for _ in 0..2 {
+            h.stoat.drive_background();
+            h.settle();
+        }
+
+        let rows = {
+            let Workspace {
+                diff_changes_views,
+                editors,
+                ..
+            } = h.stoat.active_workspace_mut();
+            let state = diff_changes_views.values().next().expect("a changes view");
+            excerpt_rows(&state.excerpts[0], editors)
+        };
+        assert_eq!(
+            (rows, fold_rows_of(&mut h, "notes.md")),
+            (12, vec![(11..65, "rest of the new file".to_string())]),
+        );
+    }
+
+    /// The fold rows of the excerpt of `rel_path`, each as the buffer rows it
+    /// hides and the text of its Scope.
+    fn fold_rows_of(h: &mut TestHarness, rel_path: &str) -> Vec<(Range<u32>, String)> {
+        let snapshot = excerpt_editor(h, rel_path).display_map.snapshot();
         let folds = snapshot.fold_snapshot();
         let inlays = folds.inlay_snapshot();
-        let rows: Vec<(Range<u32>, String)> = folds
+        folds
             .folds_in_range(InlayPoint::default()..folds.to_inlay_point(folds.max_point()))
             .into_iter()
             .filter(|fold| fold.placeholder.is_fold_row())
@@ -4083,8 +4200,7 @@ fn hint_width() -> u32 {
                         .unwrap_or_default(),
                 )
             })
-            .collect();
-        assert_eq!(rows, vec![(0..4, "content unchanged".to_string())]);
+            .collect()
     }
 
     /// Under a revision base an untracked file with content stacks beside the
