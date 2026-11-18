@@ -3818,7 +3818,8 @@ mod tests {
     type EnterScreen = fn(&mut crate::test_harness::TestHarness);
 
     /// A split diff and a changes view declare the strip a plain editor
-    /// declares, seven cells in the syntax palette, as a per-pane strip and as
+    /// declares, seven cells in the syntax palette that marks its changes from
+    /// the class table's first Change Mark class, as a per-pane strip and as
     /// the single band alike.
     ///
     /// The strip fills no ground of its own, and its columns end at the text
@@ -3862,6 +3863,7 @@ mod tests {
                             strip.thumb,
                             strip.thumb_border,
                             strip.palette,
+                            strip.mark_class,
                         )),
                         _ => None,
                     })
@@ -3887,6 +3889,7 @@ mod tests {
                         crate::render::MINIMAP_THUMB_OUTLINE_ALPHA,
                     ]),
                     h.stoat.minimap_class_table.palette().to_vec(),
+                    h.stoat.minimap_class_table.mark_class(),
                 );
                 assert_eq!(strips.last(), Some(&declared), "{screen} in {mode:?}");
             }

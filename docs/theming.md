@@ -371,6 +371,9 @@ The typed UI scopes, by group (syntax scopes are open-ended):
   comments.
 - `ui.minimap.rule` -- the hairline (foreground) a minimap draws above the row
   where a top-level item starts.
+- `ui.minimap.diff.text` -- the gray (foreground) of every text run on a diff
+  view's strip. The changed parts of its rows take Change Marks in
+  `diff.added`, `diff.deleted`, and `vcs.conflict.mark`.
 - `ui.minimap.rail` -- the rail beside a minimap strip whose file does not fit
   it: the part of the file the strip covers (foreground) on the rail's ground
   (background).

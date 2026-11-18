@@ -9,24 +9,30 @@
 
 use super::{
     density::{Tier, CODE_SHARE_MIN},
-    frame_row, ClassTable, EdgeClass, LineRuns, RowMark, Run, CONTENT_COL, LANE_COLS, MAX_COLUMNS,
+    grey_row, ClassTable, EdgeClass, LineRuns, RowMark, Run, CONTENT_COL, LANE_COLS, MAX_COLUMNS,
     TAB_WIDTH, TICK_COLS,
 };
 use std::ops::Range;
 
 /// The rows a strip folds into bands, as a band's row reads them.
 ///
-/// A band's row reads the statistics and the mark of every row in the band and
-/// the text of the one row that represents it, so a source answers each on
-/// its own. A source that keeps no rows reads each one at derivation.
+/// A band's row reads the statistics and the Change Marks of every row in the
+/// band and the text of the one row that represents it, so a source answers
+/// each on its own. A source that keeps no rows reads each one at derivation.
 pub(crate) trait BandSource {
     /// The statistics of row `row`.
     fn stat(&self, row: u32) -> LineStat;
-    /// The mark of row `row`.
-    fn mark(&self, row: u32) -> RowMark;
     /// The runs of row `row`'s text, with no frame.
     fn content(&self, row: u32) -> LineRuns;
+    /// The Change Marks of row `row`, none for a source that shows no diff.
+    fn changes(&self, _row: u32) -> LineRuns {
+        LineRuns::default()
+    }
 }
+
+/// The runs a band keeps of one Change Mark class, past which the class's runs
+/// merge into one.
+const BAND_MARKS: usize = 3;
 
 /// Where the text of one buffer line starts and ends and what the line holds.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
@@ -220,35 +226,104 @@ pub(crate) fn shape_row(
     row
 }
 
-/// The strip row of `source`'s rows `band` under `tier`, its change tint at
-/// `tint_weight`.
+/// The strip row of a diff view's rows `band` under `tier`, in the diff text's
+/// gray under Change Marks.
 ///
-/// A Line row draws its row's text framed by its mark. A Fit row draws its
-/// representative row's text framed by the mark of the whole band, and a band
-/// with no representative keeps the mark over no text, so a change never
-/// averages away. A Shape row draws the band's outline.
-pub(crate) fn band_row(
+/// A Line row greys its row's text under the row's marks. A Fit row greys its
+/// representative row's text, and a Shape row draws its outline as one run in
+/// the gray. Each then takes the marks of every row of the band, as
+/// [`band_marks`] merges them, so a change never averages away.
+pub(crate) fn change_band_row(
     source: &impl BandSource,
     band: Range<u32>,
     tier: Tier,
     table: &ClassTable,
-    tint_weight: u8,
 ) -> LineRuns {
-    let mark = band_mark(band.clone().map(|row| source.mark(row)), table);
     if tier == Tier::Line {
-        return frame_row(source.content(band.start), mark, tint_weight);
+        return grey_row(
+            source.content(band.start),
+            &source.changes(band.start),
+            table,
+        );
     }
 
     let stats: Vec<LineStat> = band.clone().map(|row| source.stat(row)).collect();
-    match tier {
-        Tier::Shape => shape_row(shape(&stats), mark, table),
-        Tier::Line | Tier::Fit => {
-            let content = representative(&stats).map_or_else(LineRuns::default, |at| {
-                source.content(band.start + at as u32)
+    let text = match tier {
+        Tier::Shape => outline(shape(&stats)),
+        Tier::Line | Tier::Fit => representative(&stats).map_or_else(LineRuns::default, |at| {
+            source.content(band.start + at as u32)
+        }),
+    };
+    let changes: Vec<LineRuns> = band.map(|row| source.changes(row)).collect();
+    let marks = band_marks(changes.iter().flat_map(LineRuns::as_slice).copied(), table);
+    grey_row(text, &marks, table)
+}
+
+/// A band's outline as one run from its indent to its end, or no run for an
+/// all-blank band.
+fn outline(shape: Option<(u8, u8, bool)>) -> LineRuns {
+    let mut row = LineRuns::default();
+    if let Some((indent, end, _)) = shape {
+        let start = CONTENT_COL + u32::from(indent);
+        let end = (CONTENT_COL + u32::from(end)).min(MAX_COLUMNS);
+        if start < end {
+            row.push(Run {
+                start_col: start as u8,
+                len: (end - start) as u8,
+                class: 0,
+                weight: u8::MAX,
             });
-            frame_row(content, mark, tint_weight)
-        },
+        }
     }
+    row
+}
+
+/// The Change Marks of a band of rows, from the mark runs of every row in it.
+/// A lone row is a band of one.
+///
+/// Each class's runs merge where they touch or overlap, so no two marks of a
+/// class overlap. A class left with more than [`BAND_MARKS`] runs merges into
+/// one run from its first start to its last end. The removed marks go first,
+/// so the terminal draws the added marks over them. A run of any other class
+/// drops.
+pub(crate) fn band_marks(runs: impl Iterator<Item = Run>, table: &ClassTable) -> LineRuns {
+    let order = [
+        EdgeClass::MarkRemoved,
+        EdgeClass::MarkAdded,
+        EdgeClass::MarkConflict,
+    ]
+    .map(|kind| table.edge_class(kind));
+    let mut spans: [Vec<(u32, u32)>; 3] = Default::default();
+    for run in runs {
+        if let Some(at) = order.iter().position(|&class| class == run.class) {
+            let start = u32::from(run.start_col);
+            spans[at].push((start, start + u32::from(run.len)));
+        }
+    }
+
+    let mut marks = LineRuns::default();
+    for (spans, class) in spans.iter_mut().zip(order) {
+        spans.sort_unstable();
+        let mut merged: Vec<(u32, u32)> = Vec::new();
+        for &(start, end) in spans.iter() {
+            match merged.last_mut() {
+                Some(last) if start <= last.1 => last.1 = last.1.max(end),
+                _ => merged.push((start, end)),
+            }
+        }
+        if merged.len() > BAND_MARKS {
+            merged = vec![(merged[0].0, merged[merged.len() - 1].1)];
+        }
+        for (start, end) in merged {
+            marks.push(Run {
+                start_col: start as u8,
+                len: (end - start) as u8,
+                class,
+                weight: u8::MAX,
+            });
+        }
+    }
+    marks
 }
 
 /// `row` led by an Item Rule, a run in the rule class across the content that
@@ -270,15 +345,59 @@ pub(crate) fn with_rule(row: LineRuns, table: &ClassTable) -> LineRuns {
 #[cfg(test)]
 mod tests {
     use super::{
-        band_mark, line_stat, representative, shape, shape_row, with_rule, LineKind, LineStat,
+        band_mark, change_band_row, line_stat, representative, shape, shape_row, with_rule,
+        BandSource, LineKind, LineStat,
     };
     use crate::{
-        minimap::{ClassTable, EdgeClass, LineRuns, RowMark, Run},
+        minimap::{density::Tier, ClassTable, EdgeClass, LineRuns, RowMark, Run, CONTENT_COL},
         theme::Theme,
     };
 
+    /// Rows whose text is one run across their stat's columns, under fixed
+    /// Change Marks.
+    struct Rows {
+        stats: Vec<LineStat>,
+        changes: Vec<Vec<Run>>,
+    }
+
+    impl BandSource for Rows {
+        fn stat(&self, row: u32) -> LineStat {
+            self.stats[row as usize]
+        }
+
+        fn content(&self, row: u32) -> LineRuns {
+            let stat = self.stats[row as usize];
+            let mut line = LineRuns::default();
+            line.push(Run {
+                start_col: CONTENT_COL as u8 + stat.indent,
+                len: stat.end - stat.indent,
+                class: 0,
+                weight: 190,
+            });
+            line
+        }
+
+        fn changes(&self, row: u32) -> LineRuns {
+            let mut line = LineRuns::default();
+            for &run in &self.changes[row as usize] {
+                line.push(run);
+            }
+            line
+        }
+    }
+
     fn stat(indent: u8, end: u8, kind: LineKind) -> LineStat {
         LineStat { indent, end, kind }
+    }
+
+    /// A run of `kind`'s class at full weight.
+    fn class_run(table: &ClassTable, start_col: u8, len: u8, kind: EdgeClass) -> Run {
+        Run {
+            start_col,
+            len,
+            class: table.edge_class(kind),
+            weight: 255,
+        }
     }
 
     /// The stats of a band whose lines end at `ends`, a line ending at 0 blank.
@@ -411,6 +530,73 @@ mod tests {
                     run(8, 112, table.edge_class(EdgeClass::Rule)),
                     run(12, 56, table.edge_class(EdgeClass::Shape)),
                 ],
+            ],
+        );
+    }
+
+    /// A Fit band draws its representative row, line 4 of ends 10, 20, 30, 12,
+    /// and 16, in the diff gray. It keeps the marks of every row, the removed
+    /// marks first, and the added marks that overlap or touch join.
+    #[test]
+    fn a_fit_band_keeps_the_marks_of_every_row() {
+        let table = ClassTable::from_theme(&Theme::empty());
+        let run = |start_col, len, kind| class_run(&table, start_col, len, kind);
+        let (removed, added) = (EdgeClass::MarkRemoved, EdgeClass::MarkAdded);
+        let rows = Rows {
+            stats: band(&[10, 20, 30, 12, 16]),
+            changes: vec![
+                vec![run(8, 4, removed)],
+                vec![run(10, 4, added)],
+                vec![run(12, 8, added)],
+                vec![run(20, 2, added)],
+                vec![run(40, 4, added)],
+            ],
+        };
+
+        assert_eq!(
+            change_band_row(&rows, 0..5, Tier::Fit, &table)
+                .as_slice()
+                .to_vec(),
+            vec![
+                run(8, 16, EdgeClass::DiffText),
+                run(8, 4, removed),
+                run(10, 12, added),
+                run(40, 4, added),
+            ],
+        );
+    }
+
+    /// A Shape band draws its outline as one run in the diff gray under the
+    /// marks of every row. A class past three runs joins into one run from its
+    /// first start to its last end.
+    #[test]
+    fn a_shape_band_draws_its_outline_in_the_diff_grey_under_its_marks() {
+        let table = ClassTable::from_theme(&Theme::empty());
+        let run = |start_col, len, kind| class_run(&table, start_col, len, kind);
+        let (removed, added) = (EdgeClass::MarkRemoved, EdgeClass::MarkAdded);
+        let rows = Rows {
+            stats: vec![
+                stat(4, 20, LineKind::Code),
+                stat(4, 40, LineKind::Code),
+                stat(8, 60, LineKind::Code),
+                stat(0, 80, LineKind::Code),
+            ],
+            changes: vec![
+                vec![run(12, 2, added), run(20, 2, added)],
+                vec![run(30, 2, added)],
+                vec![run(50, 2, added), run(16, 4, removed)],
+                vec![],
+            ],
+        };
+
+        assert_eq!(
+            change_band_row(&rows, 0..4, Tier::Shape, &table)
+                .as_slice()
+                .to_vec(),
+            vec![
+                run(12, 56, EdgeClass::DiffText),
+                run(16, 4, removed),
+                run(12, 40, added),
             ],
         );
     }

@@ -1074,6 +1074,9 @@ pub mod scope {
     /// The hairline a minimap draws above the row where a top-level item
     /// starts.
     pub const UI_MINIMAP_RULE: &str = "ui.minimap.rule";
+    /// The gray of every text run on a diff view's strip, under the Change
+    /// Marks that color its changed parts.
+    pub const UI_MINIMAP_DIFF_TEXT: &str = "ui.minimap.diff.text";
     /// The rail beside a minimap strip whose file does not fit it, the part of
     /// the file the strip covers as foreground on the rail's ground as
     /// background.

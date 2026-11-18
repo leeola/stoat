@@ -79,10 +79,22 @@ const BLAME_AGE_1: [u8; 3] = [0x4f, 0x5a, 0x6e];
 const BLAME_AGE_2: [u8; 3] = [0x5d, 0x79, 0xa8];
 const BLAME_AGE_4: [u8; 3] = [0xa9, 0xc8, 0xff];
 const TINT_WARNING: [u8; 3] = [0x2e, 0x2a, 0x1e];
+const STRIP_TEXT: [u8; 3] = [0x3a, 0x3f, 0x49];
 
 /// The primary cursor's opaque block, the terminal palette's cursor color. The
 /// color comes from stoatty's own palette rather than a theme scope.
 const CURSOR_PRIMARY: [u8; 3] = [0xdf, 0xe2, 0xe8];
+
+/// The minimap's viewport band, the accent at 18 percent over the surface. The
+/// band draws over the strip's runs, so a run under it takes the same 18
+/// percent of the accent.
+const BAND_FILL: [u8; 3] = [0x2a, 0x34, 0x47];
+
+/// A diff strip's gray text under the viewport band.
+const BAND_STRIP_TEXT: [u8; 3] = [0x46, 0x53, 0x6a];
+
+/// [`SUCCESS`] under the viewport band, as an added Change Mark draws there.
+const BAND_MARK_ADDED: [u8; 3] = [0x8c, 0xcb, 0x9f];
 
 /// The wait for rust-analyzer to load the fixture crate and answer, the bound
 /// the live LSP tests allow.
@@ -444,8 +456,8 @@ fn the_split_diff_s_mid_divider_draws_in_the_hairline_color() {
 /// a plain editor does.
 ///
 /// The single band keeps its seven columns over the split diff, as
-/// [`expect_strip_band`] reads them. The file's lines draw their runs on the
-/// band's first row.
+/// [`expect_strip_band`] reads them. The file's lines draw their text in the
+/// strip's gray on the band's first row.
 #[test]
 fn the_split_diff_ends_in_the_minimap_strip_on_the_editor_surface() {
     let mut home = support::scratch_home();
@@ -462,8 +474,8 @@ fn the_split_diff_ends_in_the_minimap_strip_on_the_editor_surface() {
 /// in the band the split diff ends in.
 ///
 /// The band keeps its seven columns, as [`expect_strip_band`] reads them. The
-/// stack's first file header draws its run across the band's first row,
-/// beside the runs of the file's lines.
+/// stack's first file header draws its bar across the band's first row, and
+/// the file's lines draw their text, all in the strip's gray.
 #[test]
 fn the_changes_view_ends_in_the_minimap_strip_on_the_editor_surface() {
     let mut home = support::scratch_home();
@@ -474,6 +486,58 @@ fn the_changes_view_ends_in_the_minimap_strip_on_the_editor_surface() {
         "<Space>dc<Settle>",
     );
     expect_strip_band(&shot, &mut home, "changes_strip");
+}
+
+/// The split diff's strip draws a green Change Mark at least 12 px wide over
+/// the changed part of a row, and no lane and no red, as the Minimap boards
+/// draw a diff's strip.
+///
+/// The file's line 4 gains ` changed`, a modification that pairs with its
+/// base line, so display row 3 marks the added text alone and no row marks a
+/// removal. The strip's lines start at row 2's top at a 3 px pitch, so the
+/// mark's full pixel rows are 9 and 10 below that top. The 12 px mark starts
+/// at a fractional x, so it covers 11 pixels whole. The viewport band covers
+/// the whole file, so the mark reads [`BAND_MARK_ADDED`]. The strip's third
+/// and fourth pixel columns, where a lane drew, read the band's fill over the
+/// file's lines.
+#[test]
+fn the_split_diff_s_strip_marks_its_changed_rows() {
+    let mut home = support::scratch_home();
+    let shot = settled_frame(
+        home.path(),
+        "basic-diff",
+        "unstaged.txt",
+        "<Space>df<Settle>",
+    );
+    let (x, y, width, height) = cell_rect(152, 2, 7, 2);
+
+    let marked: Vec<u32> = (y..y + height)
+        .filter(|&row| longest_run(&shot, (x, row, width), BAND_MARK_ADDED) >= 11)
+        .map(|row| row - y)
+        .collect();
+    let red = (y..y + height)
+        .flat_map(|row| (x..x + width).map(move |col| (col, row)))
+        .filter(|&(col, row)| {
+            let [red, green, _] = pixel(&shot, col, row);
+            red >= green.saturating_add(0x30)
+        })
+        .count();
+    let lane = (y + 2..=y + 18)
+        .flat_map(|row| [x + 2, x + 3].map(|col| pixel(&shot, col, row)))
+        .filter(|&color| color != BAND_FILL)
+        .count();
+    if (marked.as_slice(), red, lane) == (&[9, 10][..], 0, 0) {
+        return;
+    }
+
+    let frame = keep_frame(&shot, &mut home, "diff_strip_marks");
+    panic!(
+        "the strip's pixel rows with 11 px of {} read {marked:?}, not [9, 10], with {red} \
+         red pixels and {lane} lane pixels off {}; the frame is {}",
+        hex(BAND_MARK_ADDED),
+        hex(BAND_FILL),
+        frame.display(),
+    );
 }
 
 /// The single band rounds its viewport band's corners at 4 px and outlines
@@ -2385,26 +2449,26 @@ fn expect_hatch(
 
 /// Panics unless each of the single band's seven columns, 152 to 158, reads
 /// as the editor surface from row 2 under the tab bar's band to row 47 above
-/// the status band, and the band draws text runs on row 2.
+/// the status band, and a diff strip draws its text on row 2.
 ///
 /// The strip's runs, its marks, and its viewport band cover few of a column's
 /// pixels, so each column reads as the surface that a text strip sits on. A
-/// short plain-text file's strip rows fill row 2 and draw their runs in grey,
-/// as [`grey_run_pixels`] counts them. A miss saves the frame as
+/// short file's diff strip rows fill row 2 and draw their text in the strip's
+/// gray, as [`strip_text_pixels`] counts it. A miss saves the frame as
 /// [`expect_region`] does.
 fn expect_strip_band(shot: &Snapshot, home: &mut TempDir, what: &str) {
     for col in 152..=158 {
         expect_region(shot, home, cell_rect(col, 2, 1, 46), BASE, what);
     }
 
-    let runs = grey_run_pixels(shot, cell_rect(152, 2, 7, 1));
-    if runs > 0 {
+    let text = strip_text_pixels(shot, cell_rect(152, 2, 7, 1));
+    if text > 0 {
         return;
     }
 
     let frame = keep_frame(shot, home, what);
     panic!(
-        "{what}: the band's first row holds no grey run pixel; the frame is {}",
+        "{what}: the band's first row holds no pixel of the strip's gray text; the frame is {}",
         frame.display(),
     );
 }
@@ -2511,25 +2575,41 @@ fn brightest(shot: &Snapshot, (x, y, width, height): PixelRect) -> u8 {
         .expect("the rectangle holds pixels")
 }
 
-/// The pixels of `rect` in `shot` that draw a minimap text run of a plain-text
-/// file, whose class takes a grey.
+/// The pixels of `rect` in `shot` that draw a diff strip's text, within 6 of
+/// [`STRIP_TEXT`] or of [`BAND_STRIP_TEXT`] under the viewport band.
 ///
-/// A grey keeps its channels within `0x20` of each other, and a run's peaks
-/// above `0x70`. The blue change lane, the surface, the viewport band, a row's
-/// change tint, and a file header's bar all miss one of the two tests.
-fn grey_run_pixels(shot: &Snapshot, (x, y, width, height): PixelRect) -> usize {
+/// A pixel that a run covers in part blends with the surface or the band and
+/// misses both, so the count is the runs' fully covered pixels.
+fn strip_text_pixels(shot: &Snapshot, (x, y, width, height): PixelRect) -> usize {
+    let near = |pixel: &[u8], color: [u8; 3]| {
+        pixel
+            .iter()
+            .zip(color)
+            .all(|(&got, want)| got.abs_diff(want) <= 6)
+    };
     (y..y + height)
         .flat_map(|row| {
             let start = ((row * shot.width + x) * 4) as usize;
             let end = start + (width * 4) as usize;
             shot.rgba[start..end].chunks_exact(4)
         })
-        .filter(|pixel| {
-            let high = pixel[0].max(pixel[1]).max(pixel[2]);
-            let low = pixel[0].min(pixel[1]).min(pixel[2]);
-            high > 0x70 && high - low <= 0x20
-        })
+        .filter(|pixel| near(&pixel[..3], STRIP_TEXT) || near(&pixel[..3], BAND_STRIP_TEXT))
         .count()
+}
+
+/// The longest run of pixels within 6 of `color` on pixel row `y` of `shot`,
+/// in the `width` pixels from `x`.
+fn longest_run(shot: &Snapshot, (x, y, width): (u32, u32, u32), color: [u8; 3]) -> u32 {
+    let (mut longest, mut run) = (0, 0);
+    for col in x..x + width {
+        let near = pixel(shot, col, y)
+            .into_iter()
+            .zip(color)
+            .all(|(got, want)| got.abs_diff(want) <= 6);
+        run = if near { run + 1 } else { 0 };
+        longest = longest.max(run);
+    }
+    longest
 }
 
 /// The RGB color that the most pixels of `rect` in `shot` hold.

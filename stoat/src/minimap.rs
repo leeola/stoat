@@ -242,6 +242,31 @@ impl LineRuns {
         self.len() < count
     }
 
+    /// Join the two neighboring runs with the narrowest gap between them into
+    /// one run over both and the gap, the first such pair on a tie.
+    ///
+    /// [`grey_row`] calls this while its text leaves no room for its marks.
+    /// The text's runs lie in column order and share one class and weight, so
+    /// the joined run keeps both.
+    fn close_narrowest_gap(&mut self) {
+        let count = self.len();
+        let gap = |at: usize| {
+            let left = self.runs[at - 1];
+            self.runs[at]
+                .start_col
+                .saturating_sub(left.start_col + left.len)
+        };
+        let Some(at) = (1..count).min_by_key(|&at| gap(at)) else {
+            return;
+        };
+
+        let right = self.runs[at];
+        let left = &mut self.runs[at - 1];
+        left.len = right.start_col + right.len - left.start_col;
+        self.runs.copy_within(at + 1..count, at);
+        self.len -= 1;
+    }
+
     fn last(&self) -> Option<&Run> {
         self.as_slice().last()
     }
@@ -263,6 +288,10 @@ impl LineRuns {
 /// [`ClassTable::edge_class`]. A buffer line never takes `Removed`, since a
 /// deleted line has no buffer row. The changes view marks the base lines it
 /// shows with it.
+///
+/// A diff view's strip draws its text in `DiffText` under the three mark
+/// kinds. Those come last, so they end the palette, as a strip's mark class
+/// needs.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum EdgeClass {
     Added,
@@ -281,6 +310,15 @@ pub enum EdgeClass {
     ShapeComment,
     /// The hairline above the row where a top-level item starts.
     Rule,
+    /// The gray of a diff strip's text, which every text run of a diff view's
+    /// strip takes.
+    DiffText,
+    /// The Change Mark of an added or a changed part of a diff strip's row.
+    MarkAdded,
+    /// The Change Mark of a removed part of a diff strip's row.
+    MarkRemoved,
+    /// The Change Mark of an unresolved conflict line.
+    MarkConflict,
 }
 
 /// The marks that frame a row, as the Minimap boards draw a row.
@@ -2076,6 +2114,31 @@ pub(crate) fn frame_row(content: LineRuns, mark: RowMark, tint_weight: u8) -> Li
     row
 }
 
+/// A diff view's strip row, `text` in the diff text's gray under `marks`.
+///
+/// Every run of `text` takes [`EdgeClass::DiffText`] at full weight, and the
+/// runs that touch merge, so a word reads as one block. The marks go after the
+/// text, so the terminal draws them over it.
+///
+/// No mark drops for want of room. While the text and the marks overflow the
+/// row's [`MAX_RUNS`], the narrowest gap of the text closes.
+pub(crate) fn grey_row(text: LineRuns, marks: &LineRuns, table: &ClassTable) -> LineRuns {
+    let mut row = text;
+    let class = table.edge_class(EdgeClass::DiffText);
+    for run in &mut row.runs[..usize::from(row.len)] {
+        run.class = class;
+        run.weight = u8::MAX;
+    }
+    row.merge_contiguous();
+    while row.len() > 1 && row.len() + marks.len() > MAX_RUNS {
+        row.close_narrowest_gap();
+    }
+    for &run in marks.as_slice() {
+        row.push(run);
+    }
+    row
+}
+
 /// A Coverage Rail row, a mark in `lane` across the first [`RAIL_MARK_COLS`]
 /// columns, or blank for a band that holds no hunk.
 fn rail_row(lane: Option<u8>) -> LineRuns {
@@ -2170,7 +2233,7 @@ fn glyph_weight(ch: char) -> u8 {
 /// the strip holds.
 ///
 /// The palette lays out the syntax block of [`Self::stride`] classes, then the
-/// ten edge classes. The whole palette fits the 64-entry cap of a terminal
+/// fourteen edge classes. The whole palette fits the 64-entry cap of a terminal
 /// before protocol 13. A row's [`RowMark`] names edge classes for its lane, its
 /// tint, and its tick, and its content keeps the syntax classes.
 pub struct ClassTable {
@@ -2228,6 +2291,10 @@ impl ClassTable {
             scope::UI_MINIMAP_SHAPE,
             scope::UI_MINIMAP_SHAPE_COMMENT,
             scope::UI_MINIMAP_RULE,
+            scope::UI_MINIMAP_DIFF_TEXT,
+            scope::DIFF_ADDED,
+            scope::DIFF_DELETED,
+            scope::VCS_CONFLICT_MARK,
         ] {
             palette.push(color_to_rgb(theme.get(scope).fg.unwrap_or(Color::White)));
         }
@@ -2248,6 +2315,14 @@ impl ClassTable {
     /// color on the strip.
     pub fn edge_class(&self, kind: EdgeClass) -> u8 {
         self.edge_base + kind as u8
+    }
+
+    /// The first class a diff view's strip draws as a Change Mark.
+    ///
+    /// The three mark classes end the palette, so every class from this one up
+    /// is a mark, as a strip's declared mark class reads.
+    pub fn mark_class(&self) -> u8 {
+        self.edge_class(EdgeClass::MarkAdded)
     }
 
     /// The number of classes in the syntax block, the default foreground and
@@ -2311,13 +2386,13 @@ mod tests {
     use super::{
         band::{shape_row, LineKind, LineStat},
         density::{Density, Tier},
-        frame_row, resolve_overlaps, summarize_line, BuildWindow, ClassTable, EdgeClass,
+        frame_row, grey_row, resolve_overlaps, summarize_line, BuildWindow, ClassTable, EdgeClass,
         EdgeSource, LineRuns, LineToken, MinimapContent, RowMark, RowSet, Run, Splice,
         SyncVersions, CONTENT_COL, CONTENT_RUNS, EDIT_SUMMARIZE_MAX, MAX_LINES, MAX_RUNS,
         SYNC_BUDGET, SYNC_SLICE, TINT_WEIGHT, TOKEN_BYTE_CAP,
     };
     use crate::theme::Theme;
-    use std::{cell::RefCell, collections::HashMap, ops::Range, sync::Arc, time::Duration};
+    use std::{cell::RefCell, collections::HashMap, iter, ops::Range, sync::Arc, time::Duration};
     use stoat_scheduler::{Executor, TestScheduler};
     use stoat_text::{
         patch::{Edit, Patch},
@@ -3536,7 +3611,7 @@ mod tests {
 
         // A `// note` line opens above every fourth row, from row 0, for one
         // edit more than the per-edit path takes.
-        let starts: Vec<usize> = std::iter::once(0)
+        let starts: Vec<usize> = iter::once(0)
             .chain(before.match_indices('\n').map(|(at, _)| at + 1))
             .collect();
         let edits: Vec<(Range<usize>, &str)> = (0..=EDIT_SUMMARIZE_MAX)
@@ -4536,9 +4611,61 @@ mod tests {
         let scopes = SyntaxStyles::from_theme(&Theme::empty()).theme_keys().len();
         assert_eq!(
             table.palette().len(),
-            scopes + 1 + 10,
+            scopes + 1 + 14,
             "a syntax block of the default foreground and one color per scope, then \
-             the ten edge classes",
+             the fourteen edge classes",
+        );
+    }
+
+    /// A gray row whose 21 words and 6 marks overflow the row closes the
+    /// narrowest gaps of its text, the first of equal gaps first, until every
+    /// mark fits.
+    #[test]
+    fn a_grey_row_closes_its_narrowest_gaps_to_keep_every_mark() {
+        let table = ClassTable::from_theme(&Theme::empty());
+        let class_run = |start_col, len, kind| Run {
+            start_col,
+            len,
+            class: table.edge_class(kind),
+            weight: 255,
+        };
+        let mut marks = LineRuns::default();
+        for at in 0..6 {
+            let kind = match at < 3 {
+                true => EdgeClass::MarkRemoved,
+                false => EdgeClass::MarkAdded,
+            };
+            marks.push(class_run(10 + 10 * at, 2, kind));
+        }
+        let words = vec!["ab"; 21].join(" ");
+        let row = grey_row(summarize_line(&words, &[], RowMark::NONE), &marks, &table);
+
+        let joined = class_run(8, 11, EdgeClass::DiffText);
+        let words = (4..21).map(|at| class_run(8 + 3 * at, 2, EdgeClass::DiffText));
+        assert_eq!(
+            row.as_slice().to_vec(),
+            iter::once(joined)
+                .chain(words)
+                .chain(marks.as_slice().iter().copied())
+                .collect::<Vec<_>>(),
+        );
+    }
+
+    /// The three Change Mark classes end the palette, and the mark class is the
+    /// first of them, so every class from it up is a mark.
+    #[test]
+    fn the_mark_classes_end_the_palette() {
+        let table = ClassTable::from_theme(&Theme::empty());
+        let last = table.palette().len() as u8 - 1;
+        let marks = [
+            EdgeClass::MarkAdded,
+            EdgeClass::MarkRemoved,
+            EdgeClass::MarkConflict,
+        ]
+        .map(|kind| table.edge_class(kind));
+        assert_eq!(
+            (table.mark_class(), marks),
+            (last - 2, [last - 2, last - 1, last])
         );
     }
 

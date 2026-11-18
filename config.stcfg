@@ -161,6 +161,7 @@ theme default_dark {
     ui.minimap.shape.fg         = dim;
     ui.minimap.shape.comment.fg = muted;
     ui.minimap.rule.fg          = muted;
+    ui.minimap.diff.text.fg     = muted;
     ui.minimap.rail             = { fg: subtle, bg: black };
 
     ui.diagnostic.error.fg   = danger;
@@ -286,6 +287,7 @@ theme ermine_night inherits default_dark {
     let merged_head      = "#1b1d22";
     let shape            = "#8b919c";
     let shape_comment    = "#6d727c";
+    let strip_text       = "#3a3f49";
 
     let black     = base;
     let white     = "#dfe2e8";
@@ -428,6 +430,7 @@ theme ermine_night inherits default_dark {
     ui.minimap.shape.fg         = shape;
     ui.minimap.shape.comment.fg = shape_comment;
     ui.minimap.rule.fg          = disabled;
+    ui.minimap.diff.text.fg     = strip_text;
     ui.minimap.rail             = { fg: strong, bg: base };
 
     syntax.keyword        = { fg: special, modifiers: [] };

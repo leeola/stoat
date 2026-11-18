@@ -2929,12 +2929,12 @@ mod tests {
 
     /// The single band follows its editor into the diff view, where it
     /// declares the editor's diff view strip in the class table's palette, as
-    /// it does over a plain editor, again at a theme switch. The strip's rows
-    /// carry their lanes and tints.
+    /// it does over a plain editor, again at a theme switch. The declaration
+    /// names the class table's first Change Mark class, and the strip's rows
+    /// draw their text in the diff gray under their Change Marks.
     ///
-    /// A tint step resends the changed row at its new weight and sends no
-    /// band, since the palette holds no dial. A syntax toggle over a
-    /// plain-text file changes no row.
+    /// Neither a tint step nor a syntax toggle sends a band or a row, since
+    /// neither the palette nor the rows hold a dial.
     #[test]
     fn a_diff_view_band_declares_the_syntax_palette() {
         use crate::{minimap::EdgeClass, render::SINGLE_MINIMAP_STRIP_ID};
@@ -2944,7 +2944,7 @@ mod tests {
         let band = |cmds: &[Command]| {
             cmds.iter().find_map(|c| match c {
                 Command::Minimap(m) if m.strip_id == SINGLE_MINIMAP_STRIP_ID => {
-                    Some((m.content_id, m.palette.clone()))
+                    Some((m.content_id, m.palette.clone(), m.mark_class))
                 },
                 _ => None,
             })
@@ -2982,19 +2982,17 @@ mod tests {
                 (splices(&stepped), splices(&flat)),
             ),
             (
-                Some((strip, first_palette.clone())),
+                Some((strip, first_palette.clone(), table.mark_class())),
                 Some(vec![
-                    table.edge_class(EdgeClass::Modified),
-                    table.edge_class(EdgeClass::Modified),
-                    0,
+                    table.edge_class(EdgeClass::DiffText),
+                    table.edge_class(EdgeClass::MarkAdded),
                 ]),
                 None,
                 None,
-                (1, 0),
+                (0, 0),
             ),
             "the band declares the diff view strip in the class table's palette over its \
-             synced rows, a tint step resends the changed row alone, and a syntax toggle \
-             sends nothing",
+             synced rows, and neither a tint step nor a syntax toggle sends a row",
         );
 
         action_handlers::dispatch(
@@ -3006,10 +3004,11 @@ mod tests {
         let themed = emit_frame(&mut h, &mut rx);
 
         let themed_palette = h.stoat.minimap_class_table.palette().to_vec();
+        let mark_class = h.stoat.minimap_class_table.mark_class();
         assert_ne!(themed_palette, first_palette, "the theme moves the palette");
         assert_eq!(
             band(&themed),
-            Some((strip, themed_palette)),
+            Some((strip, themed_palette, mark_class)),
             "a theme switch declares the class table's palette under the new theme",
         );
     }

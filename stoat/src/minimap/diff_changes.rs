@@ -3,8 +3,9 @@
 //! The changes view strip holds a line for each row the changes view's stack
 //! lays out, so the thumb maps the stack's scroll straight onto strip lines.
 //! An excerpt's header row takes a header bar. Each display row of an excerpt
-//! summarizes the file's text with its syntax colors and the mark of its
-//! change, or the base line that the diff view splices in for a removal.
+//! summarizes its text in the diff text's gray, the file's line or the base
+//! line that the diff view splices in for a removal, under Change Marks over
+//! the parts that changed. The strip follows no diff dial.
 //!
 //! A workspace holds one strip for its changes views. It follows the stack of
 //! the focused changes view, else the first one in pane order. An edit, a
@@ -23,15 +24,12 @@
 use super::{
     band::{self, BandSource, LineStat},
     density::{self, Density, Tier},
-    diff_view::{buffer_hull, hold_rows},
-    emit::{
-        convert_minimap_runs, encode_rail_update, minimap_line_tokens, strip_density,
-        WEIGHTED_RUN_PROTOCOL,
-    },
-    frame_row,
+    diff_view::hold_rows,
+    emit::{convert_minimap_runs, encode_rail_update, strip_density, WEIGHTED_RUN_PROTOCOL},
+    grey_row,
     rows::PassRail,
-    summarize_line, ClassTable, EdgeClass, LineRuns, LineToken, RowMark, Run, SweepRows,
-    LINES_PER_CELL, MAX_COLUMNS, SYNC_BUDGET, SYNC_SLICE, TINT_WEIGHT,
+    summarize_line, ClassTable, EdgeClass, LineRuns, RowMark, Run, SweepRows, CONTENT_COL,
+    LINES_PER_CELL, MAX_COLUMNS, SYNC_BUDGET, SYNC_SLICE,
 };
 use crate::{
     app::Stoat,
@@ -43,7 +41,10 @@ use crate::{
     editor_state::{EditorId, EditorState},
     host::DiffStatus,
     pane::View,
-    render::rail_strip_id,
+    render::{
+        rail_strip_id,
+        review::{self, DiffRowKind},
+    },
     smooth_scroll::non_pane_pool,
     workspace::{Workspace, WorkspaceId},
 };
@@ -73,8 +74,6 @@ pub(crate) struct DiffChangesStrip {
     budget: Duration,
     /// The lines the terminal holds, in stack order.
     held: Vec<HeldExcerpt>,
-    /// Whether the held lines take syntax colors.
-    syntax_on: bool,
     /// The [`ClassTable::class_version`] the held lines were summarized
     /// under.
     classes: u64,
@@ -99,7 +98,7 @@ pub(crate) struct DiffChangesStrip {
 /// The lines the terminal holds for one excerpt of the stack.
 struct HeldExcerpt {
     /// What the lines show, or `None` for lines that no excerpt matches, as
-    /// after a protocol or syntax switch recolors every line.
+    /// after a protocol or class table switch recolors every line.
     key: Option<ExcerptKey>,
     /// Lines held from the excerpt's header row on, fewer than its rows while
     /// its fill is in flight.
@@ -163,6 +162,14 @@ struct HunkMark {
     status: DiffHunkStatus,
     /// A hash of the base text the hunk removed, which removed-line rows show.
     removed: u64,
+    /// A hash of the shape of the buffer spans the hunk's token detail marks,
+    /// or of no detail, which a modified row's Change Marks follow.
+    ///
+    /// Each span hashes its length and its offset from the first span, so an
+    /// edit above the hunk that shifts every span alike resends nothing. A
+    /// diff that keeps the hunk's rows but reshapes its spans resends the rows
+    /// they mark.
+    spans: u64,
 }
 
 /// The rows the parses of one buffer changed between two syntax versions.
@@ -194,14 +201,13 @@ struct Step {
 /// row, and the inputs they show.
 ///
 /// A band crosses excerpt boundaries, so the held rows are one list rather
-/// than a list per excerpt. A change of the stack, the density, the syntax
-/// switch, or the class table starts a pass over every band, and the pass
-/// sends only the bands that come out different from the held ones.
+/// than a list per excerpt. A change of the stack, the density, or the class
+/// table starts a pass over every band, and the pass sends only the bands
+/// that come out different from the held ones.
 struct HeldBands {
     rows: Vec<LineRuns>,
     /// The excerpts the rows show.
     keys: Vec<ExcerptKey>,
-    syntax_on: bool,
     classes: u64,
     density: Density,
     /// The first band the pass in flight has not summarized, or `None` once
@@ -215,14 +221,16 @@ struct HeldBands {
 /// A header row and a Scope row read blank with no mark, since a band that
 /// holds a header draws the header bar and a Scope row holds no file text.
 ///
-/// The marks of the slice's rows are read once, since the band rows and the
-/// Coverage Rail both take them.
-struct StackRows<'a> {
+/// The Change Marks of the slice's rows are read once, since the band rows and
+/// the Coverage Rail both take them.
+struct StackRows {
     excerpts: Vec<ExcerptRows>,
-    table: &'a ClassTable,
     /// The slice's first stack row.
     first: usize,
-    /// The mark of each stack row of the slice, from `first` on.
+    /// The Change Marks of each stack row of the slice, from `first` on.
+    changes: Vec<LineRuns>,
+    /// The Coverage Rail's mark of each stack row of the slice, from `first`
+    /// on, as [`display_row_mark`] reads it off the row's Change Marks.
     marks: Vec<RowMark>,
 }
 
@@ -234,8 +242,6 @@ struct ExcerptRows {
     end: usize,
     snapshot: DisplaySnapshot,
     kept: Vec<Range<u32>>,
-    /// The syntax tokens of the buffer rows the slice's display rows show.
-    tokens: HashMap<u32, Vec<LineToken>>,
     comment_prefixes: &'static [&'static str],
 }
 
@@ -257,7 +263,6 @@ impl DiffChangesStrip {
             content_id,
             budget: SYNC_BUDGET,
             held: Vec::new(),
-            syntax_on: false,
             classes: 0,
             pending: false,
             parsed: HashMap::new(),
@@ -404,7 +409,6 @@ impl HeldBands {
         Self {
             rows: Vec::new(),
             keys: Vec::new(),
-            syntax_on: false,
             classes: 0,
             density: Density::LINE,
             next: Some(0),
@@ -412,20 +416,15 @@ impl HeldBands {
     }
 }
 
-impl<'a> StackRows<'a> {
+impl StackRows {
     /// The excerpts of `state`'s stack that stack rows `rows` cross, as of the
-    /// last [`diff_changes::layout_stack`].
-    ///
-    /// Each takes the syntax tokens of the shown buffer rows under its display
-    /// rows in `rows`, unless `tier` draws outlines alone.
+    /// last [`diff_changes::layout_stack`], with the Change Marks of each row.
     fn new(
         state: &DiffChangesState,
         editors: &mut SlotMap<EditorId, EditorState>,
         buffers: &BufferRegistry,
         rows: Range<usize>,
-        tier: Tier,
-        table: &'a ClassTable,
-        syntax_on: bool,
+        table: &ClassTable,
     ) -> Self {
         let mut excerpts = Vec::new();
         for excerpt in &state.excerpts {
@@ -440,18 +439,6 @@ impl<'a> StackRows<'a> {
 
             let kept = diff_changes::kept_rows(editor, &excerpt.revealed);
             let snapshot = editor.display_map.snapshot();
-            let tokens = match tier {
-                Tier::Shape => HashMap::new(),
-                Tier::Line | Tier::Fit => {
-                    let display =
-                        (rows.start.max(first) - first) as u32..(rows.end.min(end) - first) as u32;
-                    shown_runs(&kept, buffer_hull(&snapshot, display))
-                        .flat_map(|run| {
-                            minimap_line_tokens(&snapshot, excerpt.buffer_id, syntax_on, table, run)
-                        })
-                        .collect()
-                },
-            };
             let comment_prefixes = buffers
                 .language_for(excerpt.buffer_id)
                 .map_or(&[][..], |language| language.line_comments);
@@ -460,23 +447,27 @@ impl<'a> StackRows<'a> {
                 end,
                 snapshot,
                 kept,
-                tokens,
                 comment_prefixes,
             });
         }
 
-        let mut marks = vec![RowMark::NONE; rows.len()];
+        let mut changes = vec![LineRuns::default(); rows.len()];
         for excerpt in &excerpts {
-            for row in rows.start.max(excerpt.first)..rows.end.min(excerpt.end) {
-                let display = (row - excerpt.first) as u32;
-                marks[row - rows.start] =
-                    display_row_mark(&excerpt.snapshot, display, &excerpt.kept, table);
+            let shown = rows.start.max(excerpt.first)..rows.end.min(excerpt.end);
+            let display = (shown.start - excerpt.first) as u32..(shown.end - excerpt.first) as u32;
+            let rows_changes = row_changes(&excerpt.snapshot, display, &excerpt.kept, table);
+            for (row, line) in shown.zip(rows_changes) {
+                changes[row - rows.start] = line;
             }
         }
+        let marks = changes
+            .iter()
+            .map(|line| display_row_mark(line, table))
+            .collect();
         Self {
             excerpts,
-            table,
             first: rows.start,
+            changes,
             marks,
         }
     }
@@ -492,7 +483,7 @@ impl<'a> StackRows<'a> {
     }
 }
 
-impl BandSource for StackRows<'_> {
+impl BandSource for StackRows {
     fn stat(&self, row: u32) -> LineStat {
         self.locate(row)
             .map_or_else(LineStat::default, |(excerpt, display)| {
@@ -503,45 +494,33 @@ impl BandSource for StackRows<'_> {
             })
     }
 
-    fn mark(&self, row: u32) -> RowMark {
-        self.marks[row as usize - self.first]
-    }
-
     fn content(&self, row: u32) -> LineRuns {
         self.locate(row)
             .map_or_else(LineRuns::default, |(excerpt, display)| {
-                let kept = &excerpt.kept;
-                display_row(
-                    &excerpt.snapshot,
-                    display,
-                    kept,
-                    &excerpt.tokens,
-                    self.table,
-                )
-                .0
+                display_row(&excerpt.snapshot, display, &excerpt.kept)
             })
+    }
+
+    fn changes(&self, row: u32) -> LineRuns {
+        self.changes[row as usize - self.first]
     }
 }
 
 /// The minimap lines of the stack rows in `rows`, as the changes view paints
 /// those rows, as of the last [`diff_changes::layout_stack`].
 ///
-/// An excerpt's header row is a bar across the whole strip in the header class,
-/// so each file of the stack reads as one mark. A display row that shows the
-/// file's text summarizes that text with its syntax tokens and the mark of its
-/// diff status. A base line spliced in for a removal summarizes its text with
-/// the deleted mark, and a fold's placeholder row summarizes the placeholder
-/// with no mark. A Scope row under the header holds no file text, so its line
-/// is empty.
+/// An excerpt's header row is a bar across the whole strip in the diff text's
+/// gray, so each file of the stack reads as one mark. A display row
+/// summarizes its text in the gray under the Change Marks of its change, as
+/// [`display_row_line`] reads it. A Scope row under the header holds no file
+/// text, so its line is empty.
 ///
-/// With `syntax_on` unset, no row takes syntax tokens. A range past the
-/// stack's last row yields lines up to that row only.
+/// A range past the stack's last row yields lines up to that row only.
 pub(crate) fn summarize_rows(
     state: &DiffChangesState,
     editors: &mut SlotMap<EditorId, EditorState>,
     rows: Range<usize>,
     table: &ClassTable,
-    syntax_on: bool,
 ) -> Vec<LineRuns> {
     let mut lines = Vec::with_capacity(rows.len());
     for excerpt in &state.excerpts {
@@ -566,38 +545,23 @@ pub(crate) fn summarize_rows(
         let kept = diff_changes::kept_rows(editor, &excerpt.revealed);
         let snapshot = editor.display_map.snapshot();
         let display_rows = display_rows.start as u32..display_rows.end as u32;
-        let buffer_row = |row: u32| {
-            snapshot
-                .display_to_buffer(DisplayPoint::new(row, 0))
-                .map(|point| point.row)
-        };
-        let buffer_rows = match (
-            display_rows.clone().find_map(buffer_row),
-            display_rows.clone().rev().find_map(buffer_row),
-        ) {
-            (Some(start), Some(last)) => start..last + 1,
-            _ => 0..0,
-        };
-        let tokens: HashMap<u32, Vec<LineToken>> = shown_runs(&kept, buffer_rows)
-            .flat_map(|run| {
-                minimap_line_tokens(&snapshot, excerpt.buffer_id, syntax_on, table, run)
-            })
-            .collect();
+        let changes = row_changes(&snapshot, display_rows.clone(), &kept, table);
         lines.extend(
-            display_rows.map(|row| display_row_line(&snapshot, row, &kept, &tokens, table)),
+            display_rows
+                .zip(&changes)
+                .map(|(row, changes)| display_row_line(&snapshot, row, &kept, changes, table)),
         );
     }
     lines
 }
 
 /// The strip rows of bands `bands` of `state`'s stack under `density`, as of
-/// the last [`diff_changes::layout_stack`], and the marks of the stack rows
-/// the bands hold, from the first band's first row on.
+/// the last [`diff_changes::layout_stack`], and the Coverage Rail's marks of
+/// the stack rows the bands hold, from the first band's first row on.
 ///
 /// A band that holds an excerpt's header row is the header bar, so each file
 /// of the stack still reads as one mark at any fold. Every other band is
-/// [`band::band_row`] of its stack rows. With `syntax_on` unset, no row takes
-/// syntax tokens.
+/// [`band::change_band_row`] of its stack rows.
 fn band_lines(
     state: &DiffChangesState,
     editors: &mut SlotMap<EditorId, EditorState>,
@@ -605,20 +569,11 @@ fn band_lines(
     bands: Range<u32>,
     density: Density,
     table: &ClassTable,
-    syntax_on: bool,
 ) -> (Vec<LineRuns>, Vec<RowMark>) {
     let total = state.rows as u32;
     let per_row = density.lines_per_row;
     let rows = (bands.start * per_row) as usize..(bands.end * per_row).min(total) as usize;
-    let source = StackRows::new(
-        state,
-        editors,
-        buffers,
-        rows,
-        density.tier,
-        table,
-        syntax_on,
-    );
+    let source = StackRows::new(state, editors, buffers, rows, table);
     let lines = bands
         .map(|at| {
             let band = density::band(at, per_row, total);
@@ -628,7 +583,7 @@ fn band_lines(
                 .any(|excerpt| band.contains(&(excerpt.top as u32)));
             match header {
                 true => header_bar(table),
-                false => band::band_row(&source, band, density.tier, table, TINT_WEIGHT),
+                false => band::change_band_row(&source, band, density.tier, table),
             }
         })
         .collect();
@@ -642,15 +597,15 @@ fn band_lines(
 /// the lines of the rows those touched. An excerpt whose layout moved, a new
 /// excerpt, and an excerpt that left the stack each splice that excerpt's
 /// lines alone. A protocol that changes whether lines carry population blocks,
-/// a syntax switch, and a class table that gives other scopes a class replace
-/// every line. Each call sends slices of at most
-/// [`SYNC_SLICE`] lines until its time budget runs out, so a long stack fills
-/// over idle frames. A stack with no rows empties the strip.
+/// and a class table that gives other scopes a class, replace every line. Each
+/// call sends slices of at most [`SYNC_SLICE`] lines until its time budget runs
+/// out, so a long stack fills over idle frames. A stack with no rows empties
+/// the strip.
 ///
 /// Past one stack row per strip row the strip holds a band per row, as
-/// [`band_lines`] reads it. A change of the stack, the density, the syntax
-/// switch, or the class table then starts a pass over every band, which sends
-/// the bands that differ from the held ones under the same budget. A move
+/// [`band_lines`] reads it. A change of the stack, the density, or the class
+/// table then starts a pass over every band, which sends the bands that
+/// differ from the held ones under the same budget. A move
 /// between a line per stack row and bands replaces the whole store.
 ///
 /// While the stack does not fit the strip, the band pass also folds the marks
@@ -659,7 +614,6 @@ fn band_lines(
 /// starts, and so does a line per stack row.
 pub(crate) fn sync_diff_changes_strip(stoat: &mut Stoat, ws_id: WorkspaceId, out: &mut Vec<u8>) {
     let weighted = stoat.stoatty_protocol >= WEIGHTED_RUN_PROTOCOL;
-    let syntax_on = stoat.syntax_highlight;
     let thumb_min_rows = stoat.minimap_thumb_min_rows();
     let single_band = match stoat.minimap_mode() {
         MinimapMode::Single => Some(stoat.single_minimap_rect),
@@ -686,9 +640,8 @@ pub(crate) fn sync_diff_changes_strip(stoat: &mut Stoat, ws_id: WorkspaceId, out
     });
     strip.prune(&target);
     let classes = minimap_class_table.class_version;
-    if (strip.syntax_on, strip.classes) != (syntax_on, classes) {
+    if strip.classes != classes {
         strip.forget_held();
-        strip.syntax_on = syntax_on;
         strip.classes = classes;
     }
 
@@ -733,11 +686,9 @@ pub(crate) fn sync_diff_changes_strip(stoat: &mut Stoat, ws_id: WorkspaceId, out
         }
         let bands = strip.bands.get_or_insert_with(HeldBands::new);
         let density = strip.density;
-        if (&bands.keys, bands.syntax_on, bands.classes, bands.density)
-            != (&target, syntax_on, classes, density)
-        {
+        if (&bands.keys, bands.classes, bands.density) != (&target, classes, density) {
             bands.keys = target;
-            (bands.syntax_on, bands.classes, bands.density) = (syntax_on, classes, density);
+            (bands.classes, bands.density) = (classes, density);
             bands.next = Some(0);
         }
 
@@ -757,7 +708,6 @@ pub(crate) fn sync_diff_changes_strip(stoat: &mut Stoat, ws_id: WorkspaceId, out
                 at..end,
                 density,
                 minimap_class_table,
-                syntax_on,
             );
             strip
                 .rail
@@ -797,7 +747,7 @@ pub(crate) fn sync_diff_changes_strip(stoat: &mut Stoat, ws_id: WorkspaceId, out
     if let Some(state) = state {
         for (start, removed, rows) in strip.touched_splices(&target, &target_hunks, state, editors)
         {
-            let lines = summarize_rows(state, editors, rows, minimap_class_table, syntax_on);
+            let lines = summarize_rows(state, editors, rows, minimap_class_table);
             send(out, start, removed, lines);
         }
     }
@@ -818,7 +768,7 @@ pub(crate) fn sync_diff_changes_strip(stoat: &mut Stoat, ws_id: WorkspaceId, out
         let first = top + step.skip;
         let rows = first..first + (run - step.skip).min(SYNC_SLICE as usize);
         let lines = state.map_or_else(Vec::new, |state| {
-            summarize_rows(state, editors, rows.clone(), minimap_class_table, syntax_on)
+            summarize_rows(state, editors, rows.clone(), minimap_class_table)
         });
         send(out, first, step.removed, lines);
         hold(&mut strip.held, &target, &target_hunks, &step, rows.len());
@@ -1036,10 +986,23 @@ fn hunk_marks(map: &DiffMap) -> Arc<[HunkMark]> {
             let mut hasher = DefaultHasher::new();
             base.and_then(|text| text.get(hunk.base_byte_range.clone()))
                 .hash(&mut hasher);
+            let mut spans = DefaultHasher::new();
+            if let Some(detail) = &hunk.token_detail {
+                detail.tree.hash(&mut spans);
+                let first = detail
+                    .buffer_spans
+                    .first()
+                    .map_or(0, |span| span.byte_range.start);
+                for span in &detail.buffer_spans {
+                    let offset = span.byte_range.start.wrapping_sub(first);
+                    (offset, span.byte_range.len()).hash(&mut spans);
+                }
+            }
             HunkMark {
                 rows: hunk.buffer_line_range.clone(),
                 status: hunk.status,
                 removed: hasher.finish(),
+                spans: spans.finish(),
             }
         })
         .collect()
@@ -1199,70 +1162,44 @@ fn hold(
     held.splice(step.held.clone(), entries);
 }
 
-/// An excerpt's header row, a bar across the whole strip in the header class.
+/// An excerpt's header row, a bar across the whole strip in the diff text's
+/// gray.
 fn header_bar(table: &ClassTable) -> LineRuns {
     let mut line = LineRuns::default();
     line.push(Run {
         start_col: 0,
         len: MAX_COLUMNS as u8,
-        class: table.edge_class(EdgeClass::Header),
+        class: table.edge_class(EdgeClass::DiffText),
         weight: 255,
     });
     line
 }
 
-/// The parts of the kept runs `kept` inside the buffer rows `hull`, in order.
-///
-/// A slice's hull spans the folded gaps between kept runs. A gap's rows show
-/// as placeholders with no tokens, so only these parts take tokens.
-fn shown_runs(kept: &[Range<u32>], hull: Range<u32>) -> impl Iterator<Item = Range<u32>> {
-    let (start, end) = (hull.start, hull.end);
-    let first = kept.partition_point(|run| run.end <= start);
-    kept[first..]
-        .iter()
-        .take_while(move |run| run.start < end)
-        .map(move |run| run.start.max(start)..run.end.min(end))
-}
-
 /// The minimap line of display row `row` of a diff whose display is
-/// `snapshot`, with the buffer rows `kept` showing and `tokens` coloring them,
-/// as [`display_row`] reads the row.
+/// `snapshot`, with the buffer rows `kept` showing, its text as
+/// [`display_row`] reads it in the diff text's gray under `changes`, the row's
+/// Change Marks from [`row_changes`].
 pub(super) fn display_row_line(
     snapshot: &DisplaySnapshot,
     row: u32,
     kept: &[Range<u32>],
-    tokens: &HashMap<u32, Vec<LineToken>>,
+    changes: &LineRuns,
     table: &ClassTable,
 ) -> LineRuns {
-    let (content, mark) = display_row(snapshot, row, kept, tokens, table);
-    frame_row(content, mark, TINT_WEIGHT)
+    grey_row(display_row(snapshot, row, kept), changes, table)
 }
 
-/// The runs of display row `row`'s text, with no frame, and the mark that
-/// frames them, for a diff whose display is `snapshot` with the buffer rows
-/// `kept` showing and `tokens` coloring them.
+/// The runs of display row `row`'s text, with no frame, for a diff whose
+/// display is `snapshot` with the buffer rows `kept` showing.
 ///
 /// A row that shows the file's text summarizes the buffer bytes the row covers
-/// rather than its display text. The display text expands tabs while the
-/// tokens count buffer bytes, so on a tab-indented line the display text puts
-/// each color at the wrong column. A base line spliced in for a removal takes
-/// no tokens and the removed lane. A row whose buffer row no kept run holds is
-/// a fold's placeholder, which takes no tokens, since its buffer row is hidden.
-pub(super) fn display_row(
-    snapshot: &DisplaySnapshot,
-    row: u32,
-    kept: &[Range<u32>],
-    tokens: &HashMap<u32, Vec<LineToken>>,
-    table: &ClassTable,
-) -> (LineRuns, RowMark) {
+/// rather than its display text, as the editor's own strip summarizes the
+/// line. A base line spliced in for a removal summarizes its display text, and
+/// so does a fold's placeholder, a row whose buffer row no kept run holds.
+pub(super) fn display_row(snapshot: &DisplaySnapshot, row: u32, kept: &[Range<u32>]) -> LineRuns {
     let start = match row_kind(snapshot, row, kept) {
-        RowKind::Base => {
-            let text = summarize_line(&snapshot.display_line(row), &[], RowMark::NONE);
-            return (text, deleted_mark(table));
-        },
-        RowKind::Placeholder => {
-            let text = summarize_line(&snapshot.display_line(row), &[], RowMark::NONE);
-            return (text, RowMark::NONE);
+        RowKind::Base | RowKind::Placeholder => {
+            return summarize_line(&snapshot.display_line(row), &[], RowMark::NONE);
         },
         RowKind::Text(start) => start,
     };
@@ -1281,37 +1218,105 @@ pub(super) fn display_row(
     };
     let from = (start.column as usize).min(line.len());
     let end = end.clamp(from, line.len());
-    let row_tokens: Vec<LineToken> = tokens.get(&start.row).map_or_else(Vec::new, |tokens| {
-        tokens
-            .iter()
-            .filter_map(|token| {
-                let range = token.range.start.max(from)..token.range.end.min(end);
-                (range.start < range.end).then(|| LineToken {
-                    range: range.start - from..range.end - from,
-                    class: token.class,
-                })
-            })
-            .collect()
-    });
-    let mark = status_mark(snapshot.line_diff_status(start.row), table);
-    (
-        summarize_line(&line[from..end], &row_tokens, RowMark::NONE),
-        mark,
-    )
+    summarize_line(&line[from..end], &[], RowMark::NONE)
 }
 
-/// The mark of display row `row`, as [`display_row`] reads it, with no text
-/// read.
-pub(super) fn display_row_mark(
+/// The Change Marks of each display row in `rows` of a diff whose display is
+/// `snapshot`, with the buffer rows `kept` showing, as the diff view paints
+/// the rows' changes.
+///
+/// A base line spliced in for a removal takes one removed mark across its
+/// text, and an added or a moved row one added mark. So does a modified row
+/// that no token detail refines. A refined modified row takes an added mark
+/// over each of its changed spans, and none when the change removed tokens
+/// alone. An unchanged row and a fold's placeholder take none.
+///
+/// A mark across a row's text runs from its first run's start to its last
+/// run's end, so it lies over the gray text column for column.
+///
+/// A row's marks merge as a band's do in [`band::band_marks`], so a row with
+/// many changed spans holds few marks and leaves its text room.
+pub(super) fn row_changes(
     snapshot: &DisplaySnapshot,
-    row: u32,
+    rows: Range<u32>,
     kept: &[Range<u32>],
     table: &ClassTable,
-) -> RowMark {
-    match row_kind(snapshot, row, kept) {
-        RowKind::Base => deleted_mark(table),
-        RowKind::Placeholder => RowMark::NONE,
-        RowKind::Text(start) => status_mark(snapshot.line_diff_status(start.row), table),
+) -> Vec<LineRuns> {
+    let mut cache = None;
+    let states = review::diff_row_states(snapshot, rows.clone(), &mut cache);
+    let mark = |class: EdgeClass, start: u32, end: u32| {
+        let (start, end) = (start.min(MAX_COLUMNS), end.min(MAX_COLUMNS));
+        (start < end).then(|| Run {
+            start_col: start as u8,
+            len: (end - start) as u8,
+            class: table.edge_class(class),
+            weight: u8::MAX,
+        })
+    };
+    let across_text = |row: u32, class: EdgeClass| {
+        let text = display_row(snapshot, row, kept);
+        let runs = text.as_slice();
+        let start = runs.first().map_or(0, |run| u32::from(run.start_col));
+        let end = runs
+            .last()
+            .map_or(0, |run| u32::from(run.start_col) + u32::from(run.len));
+        mark(class, start, end)
+    };
+
+    rows.zip(states)
+        .map(|(row, state)| {
+            let runs: Vec<Run> = match state.kind {
+                DiffRowKind::Block { .. } => across_text(row, EdgeClass::MarkRemoved)
+                    .into_iter()
+                    .collect(),
+                DiffRowKind::BufferRow { buffer_row }
+                    if !kept.iter().any(|run| run.contains(&buffer_row)) =>
+                {
+                    Vec::new()
+                },
+                DiffRowKind::BufferRow { .. } => match state.status {
+                    DiffStatus::Modified if state.refined => state
+                        .change_spans
+                        .iter()
+                        .filter_map(|(span, ..)| {
+                            mark(
+                                EdgeClass::MarkAdded,
+                                CONTENT_COL + span.start as u32,
+                                CONTENT_COL + span.end as u32,
+                            )
+                        })
+                        .collect(),
+                    DiffStatus::Added | DiffStatus::Moved | DiffStatus::Modified => {
+                        across_text(row, EdgeClass::MarkAdded).into_iter().collect()
+                    },
+                    DiffStatus::Unchanged => Vec::new(),
+                },
+            };
+            band::band_marks(runs.into_iter(), table)
+        })
+        .collect()
+}
+
+/// The Coverage Rail's mark of a display row whose Change Marks are
+/// `changes`.
+///
+/// A row with an added mark takes the added lane, and a row with removed marks
+/// alone the removed lane, so the rail speaks the strip's two colors.
+pub(super) fn display_row_mark(changes: &LineRuns, table: &ClassTable) -> RowMark {
+    let holds = |kind: EdgeClass| {
+        let class = table.edge_class(kind);
+        changes.as_slice().iter().any(|run| run.class == class)
+    };
+    let lane = if holds(EdgeClass::MarkAdded) {
+        Some(EdgeClass::Added)
+    } else if holds(EdgeClass::MarkRemoved) {
+        Some(EdgeClass::Removed)
+    } else {
+        None
+    };
+    RowMark {
+        lane: lane.map(|kind| table.edge_class(kind)),
+        tick: None,
     }
 }
 
@@ -1328,33 +1333,9 @@ fn row_kind(snapshot: &DisplaySnapshot, row: u32, kept: &[Range<u32>]) -> RowKin
     }
 }
 
-/// The mark of a row of diff `status`.
-///
-/// An addition takes the added lane and a modification or a move the modified
-/// lane. An unchanged row takes no mark.
-fn status_mark(status: DiffStatus, table: &ClassTable) -> RowMark {
-    let lane = match status {
-        DiffStatus::Added => EdgeClass::Added,
-        DiffStatus::Modified | DiffStatus::Moved => EdgeClass::Modified,
-        DiffStatus::Unchanged => return RowMark::NONE,
-    };
-    RowMark {
-        lane: Some(table.edge_class(lane)),
-        tick: None,
-    }
-}
-
-/// The mark of a base line spliced in for a removal, the removed lane.
-fn deleted_mark(table: &ClassTable) -> RowMark {
-    RowMark {
-        lane: Some(table.edge_class(EdgeClass::Removed)),
-        tick: None,
-    }
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{header_bar, shown_runs, status_mark, summarize_rows};
+    use super::{display_row_mark, header_bar, row_changes, summarize_rows};
     use crate::{
         action_handlers::dispatch,
         apc_emit,
@@ -1362,10 +1343,9 @@ mod tests {
         buffer_registry::RetainedLspTokens,
         diff_changes::{self, StackStamp},
         display_map::highlights::{BufferSemanticTokens, SemanticTokenHighlight},
-        host::DiffStatus,
         minimap::{
             emit::{self, convert_minimap_runs},
-            summarize_line, ClassTable, EdgeClass, LineRuns, LineToken, RowMark, Run, MAX_COLUMNS,
+            grey_row, summarize_line, ClassTable, EdgeClass, LineRuns, RowMark, Run, MAX_COLUMNS,
             SYNC_SLICE,
         },
         mouse::MinimapDrag,
@@ -1425,7 +1405,7 @@ mod tests {
             .active_workspace()
             .focused_diff_changes_id()
             .expect("a focused changes view");
-        let (ws_id, syntax_on) = (h.stoat.active_workspace, h.stoat.syntax_highlight);
+        let ws_id = h.stoat.active_workspace;
         let Stoat {
             workspaces,
             minimap_class_table,
@@ -1439,56 +1419,53 @@ mod tests {
         let state = &mut diff_changes_views[id];
         diff_changes::layout_stack(state, editors);
         let table = table.unwrap_or(minimap_class_table);
-        summarize_rows(state, editors, rows, table, syntax_on)
+        summarize_rows(state, editors, rows, table)
     }
 
     fn runs(lines: &[LineRuns]) -> Vec<Vec<Run>> {
         lines.iter().map(|line| line.as_slice().to_vec()).collect()
     }
 
-    /// The modified row and the deleted row take the lane of their change at
-    /// columns 0 to 6 and its tint from column 8 at weight 41, under content
-    /// that starts at column 8. The context rows take neither.
+    /// Every row draws its text in the diff gray, one run per word at full
+    /// weight from column 8, and the header row a bar in the gray. An added
+    /// row takes one added mark across its text, a refined modified row an
+    /// added mark over its changed span alone, and the base row of a removal a
+    /// removed mark across its text. An unchanged row takes its text alone.
     #[test]
-    fn rows_take_the_lane_and_tint_of_their_change() {
+    fn rows_take_grey_text_and_the_marks_of_their_change() {
         let table = ClassTable::from_theme(&Theme::empty());
-        let mut h = one_file();
-        let mark_run = |start_col, len, class, weight| Run {
+        let mut h = files_of(&[(
+            "a.txt",
+            "a\nlet x = 1;\nc\nd\n",
+            "new one\na\nlet x = 2;\nc\n",
+        )]);
+        let run = |start_col, len, kind| Run {
             start_col,
             len,
-            class,
-            weight,
+            class: table.edge_class(kind),
+            weight: 255,
         };
-        let content = |text| summarize_line(text, &[], RowMark::NONE).as_slice().to_vec();
-        let framed = |text, kind| {
-            let lane = table.edge_class(kind);
-            [
-                vec![mark_run(0, 6, lane, 255), mark_run(8, 112, lane, 41)],
-                content(text),
-            ]
-            .concat()
-        };
+        let text = |start_col, len| run(start_col, len, EdgeClass::DiffText);
 
         let (_, total) = layout(&mut h);
         let lines = runs(&stack_lines(&mut h, 0..total, Some(&table)));
         assert_eq!(
-            (lines, content("B")[0].start_col),
-            (
+            lines,
+            vec![
+                vec![text(0, MAX_COLUMNS as u8)],
+                vec![text(8, 3), text(12, 3), run(8, 7, EdgeClass::MarkAdded)],
+                vec![text(8, 1)],
                 vec![
-                    vec![mark_run(
-                        0,
-                        MAX_COLUMNS as u8,
-                        table.edge_class(EdgeClass::Header),
-                        255
-                    )],
-                    content("a"),
-                    framed("B", EdgeClass::Modified),
-                    content("c"),
-                    framed("d", EdgeClass::Removed),
-                    content(""),
+                    text(8, 3),
+                    text(12, 1),
+                    text(14, 1),
+                    text(16, 2),
+                    run(16, 1, EdgeClass::MarkAdded),
                 ],
-                8,
-            ),
+                vec![text(8, 1)],
+                vec![text(8, 1), run(8, 1, EdgeClass::MarkRemoved)],
+                vec![],
+            ],
         );
     }
 
@@ -1532,7 +1509,8 @@ mod tests {
     /// A stack past the strip folds its rows into bands of 5 in the Fit tier,
     /// 112 for 560 stack rows. Each band that holds a header draws the header
     /// bar, and band 2, the held lines 9 to 13, draws its representative, line
-    /// 11, with no mark. The thumb ships the 23-row viewport in bands.
+    /// 11, in the diff gray with no mark. The thumb ships the 23-row viewport
+    /// in bands.
     #[test]
     fn a_stack_past_the_strip_folds_into_bands() {
         let (mut h, mut rx) = banded_stack();
@@ -1542,7 +1520,11 @@ mod tests {
 
         let header = convert_minimap_runs(header_bar(&h.stoat.minimap_class_table));
         let headers: Vec<usize> = (0..store.len()).filter(|&at| store[at] == header).collect();
-        let context = convert_minimap_runs(summarize_line("line 11", &[], RowMark::NONE));
+        let context = convert_minimap_runs(grey_row(
+            summarize_line("line 11", &[], RowMark::NONE),
+            &LineRuns::default(),
+            &h.stoat.minimap_class_table,
+        ));
         let rows = h
             .stoat
             .active_workspace()
@@ -1635,8 +1617,9 @@ mod tests {
     /// A stack that stops fitting its strip declares a Coverage Rail in the
     /// strip's last cell on the frame after the rail's pass, though nothing
     /// else on the pane moved. The rail holds the 560 stack rows at 5 a row
-    /// and marks each band of edited lines, the odd rows, and its thumb covers
-    /// the 138 rows of 4 stack rows the strip shows.
+    /// and marks each band of edited lines, the odd rows, in the added lane of
+    /// their Change Marks. Its thumb covers the 138 rows of 4 stack rows the
+    /// strip shows.
     #[test]
     fn a_stack_past_the_cap_declares_a_rail_over_its_rows() {
         let (mut h, mut rx) = banded_stack();
@@ -1658,7 +1641,7 @@ mod tests {
             .1
             .into_iter()
             .find(|view| view.0 == rail_strip_id(pane));
-        let modified = h.stoat.minimap_class_table.edge_class(EdgeClass::Modified);
+        let added = h.stoat.minimap_class_table.edge_class(EdgeClass::Added);
 
         assert_eq!(
             (
@@ -1680,7 +1663,7 @@ mod tests {
                 112,
                 (1..112)
                     .step_by(2)
-                    .map(|row| (row, rail_mark(modified)))
+                    .map(|row| (row, rail_mark(added)))
                     .collect(),
                 Some((rail_strip_id(pane), 0, 138 * 4 * 256 / 5)),
             ),
@@ -1843,10 +1826,74 @@ mod tests {
         h.stoat.minimap_class_table.class_of(style)
     }
 
-    /// A row reads the tokens of its own buffer line, each resolved to its
-    /// class, and a base row spliced in for a removal takes none.
+    /// A row whose buffer row no kept run holds reads as a fold's placeholder,
+    /// so it takes no mark though its buffer row changed. A hunk that lands
+    /// under a fold before the stack refolds thus marks nothing there. The
+    /// removed base row keeps its mark.
     #[test]
-    fn a_row_reads_the_tokens_of_its_own_line() {
+    fn a_row_outside_the_kept_runs_takes_no_mark() {
+        let mut h = one_file();
+        let table = ClassTable::from_theme(&Theme::empty());
+        let snapshot = {
+            let ws = h.stoat.active_workspace_mut();
+            let (editor_id, _) = ws.focused_editor().expect("an excerpt");
+            ws.editors[editor_id].display_map.snapshot()
+        };
+        let marked = |kept: Option<Range<u32>>| -> Vec<bool> {
+            let kept: Vec<Range<u32>> = kept.into_iter().collect();
+            row_changes(&snapshot, 0..5, &kept, &table)
+                .iter()
+                .map(|line| !line.as_slice().is_empty())
+                .collect()
+        };
+
+        assert_eq!(
+            [marked(Some(0..4)), marked(None)],
+            [
+                vec![false, true, false, true, false],
+                vec![false, false, false, true, false],
+            ],
+        );
+    }
+
+    /// A refined row with more changed spans than a band keeps of one class
+    /// takes one added mark from its first span's start to its last span's
+    /// end, so its text keeps its room in the row. The four changed digits
+    /// start at strip columns 14, 21, 29, and 37.
+    #[test]
+    fn a_row_past_three_changed_spans_takes_one_mark() {
+        let table = ClassTable::from_theme(&Theme::empty());
+        let mut h = files_of(&[(
+            "a.txt",
+            "alpha 1 beta 2 gamma 3 delta 4 omega\n",
+            "alpha 5 beta 6 gamma 7 delta 8 omega\n",
+        )]);
+        let run = |start_col, len, kind| Run {
+            start_col,
+            len,
+            class: table.edge_class(kind),
+            weight: 255,
+        };
+        let words = [(8, 5), (14, 1), (16, 4), (21, 1), (23, 5), (29, 1), (31, 5)];
+        let text = words
+            .into_iter()
+            .chain([(37, 1), (39, 5)])
+            .map(|(start_col, len)| run(start_col, len, EdgeClass::DiffText));
+
+        let lines = runs(&stack_lines(&mut h, 1..2, Some(&table)));
+        assert_eq!(
+            lines,
+            [text
+                .chain([run(14, 24, EdgeClass::MarkAdded)])
+                .collect::<Vec<_>>()],
+        );
+    }
+
+    /// A row draws its text in the diff gray though a token colors its line,
+    /// under the mark of its change, and a base row spliced in for a removal
+    /// takes the removed mark.
+    #[test]
+    fn a_row_draws_its_text_in_the_diff_grey() {
         let mut h = one_file();
         // B is byte 2 of "a\nB\nc\n".
         let class = token_over(&mut h, 2..3);
@@ -1854,49 +1901,46 @@ mod tests {
         let lines = runs(&stack_lines(&mut h, 0..total, None));
 
         let table = &h.stoat.minimap_class_table;
-        let modified = RowMark {
-            lane: Some(table.edge_class(EdgeClass::Modified)),
-            tick: None,
+        let run = |kind| Run {
+            start_col: 8,
+            len: 1,
+            class: table.edge_class(kind),
+            weight: 255,
         };
-        let deleted = RowMark {
-            lane: Some(table.edge_class(EdgeClass::Removed)),
-            tick: None,
-        };
-        let token = [LineToken { range: 0..1, class }];
         assert_eq!(
             (class != 0, [lines[2].clone(), lines[4].clone()]),
             (
                 true,
                 [
-                    summarize_line("B", &token, modified).as_slice().to_vec(),
-                    summarize_line("d", &[], deleted).as_slice().to_vec(),
+                    vec![run(EdgeClass::DiffText), run(EdgeClass::MarkAdded)],
+                    vec![run(EdgeClass::DiffText), run(EdgeClass::MarkRemoved)],
                 ]
             ),
         );
     }
 
-    /// A tab-indented row takes its colors at the columns the tab leaves, the
-    /// summary the editor's own strip gives that buffer line.
+    /// A tab-indented row's text and the mark of its change both start at the
+    /// column the tab leaves, so the mark lies over the text.
     #[test]
-    fn a_tab_indented_row_takes_its_colors_past_the_tab() {
+    fn a_tab_indented_row_marks_its_change_past_the_tab() {
         let mut h = files_of(&[("a.txt", "\tx\n", "\ty\n")]);
-        let class = token_over(&mut h, 1..2);
         let lines = runs(&stack_lines(&mut h, 1..2, None));
 
         let table = &h.stoat.minimap_class_table;
-        let modified = RowMark {
-            lane: Some(table.edge_class(EdgeClass::Modified)),
-            tick: None,
+        let run = |kind| Run {
+            start_col: 12,
+            len: 1,
+            class: table.edge_class(kind),
+            weight: 255,
         };
-        let token = [LineToken { range: 1..2, class }];
         assert_eq!(
             lines,
-            [summarize_line("\ty", &token, modified).as_slice().to_vec()]
+            [vec![run(EdgeClass::DiffText), run(EdgeClass::MarkAdded)]]
         );
     }
 
-    /// A fold's placeholder row summarizes the placeholder with no mark and no
-    /// tokens, though the hidden row under it holds a token.
+    /// A fold's placeholder row draws the placeholder in the diff gray with no
+    /// mark and no tokens, though the hidden row under it holds a token.
     #[test]
     fn a_fold_placeholder_row_takes_no_tokens() {
         let base: String = (1..=20).map(|n| format!("{n}\n")).collect();
@@ -1909,57 +1953,52 @@ mod tests {
         };
 
         let lines = runs(&stack_lines(&mut h, 1..2, None));
+        let text = summarize_line(&placeholder, &[], RowMark::NONE);
+        let table = &h.stoat.minimap_class_table;
         assert_eq!(
             lines,
-            [summarize_line(&placeholder, &[], RowMark::NONE)
+            [grey_row(text, &LineRuns::default(), table)
                 .as_slice()
                 .to_vec()]
         );
     }
 
-    /// An addition takes the added lane and a modification or a move the
-    /// modified lane, and an unchanged row takes no mark. No status takes a
+    /// A row's Coverage Rail lane reads its Change Marks. An added mark takes
+    /// the added lane over any removed mark, removed marks alone take the
+    /// removed lane, and a row with no mark takes no lane. No row takes a
     /// tick.
     #[test]
-    fn each_diff_status_takes_its_lane() {
+    fn each_diff_status_takes_its_mark() {
         let table = ClassTable::from_theme(&Theme::empty());
-        let lane = |edge| RowMark {
-            lane: Some(table.edge_class(edge)),
+        let marks = |kinds: &[EdgeClass]| {
+            let mut line = LineRuns::default();
+            for &kind in kinds {
+                line.push(Run {
+                    start_col: 8,
+                    len: 1,
+                    class: table.edge_class(kind),
+                    weight: 255,
+                });
+            }
+            line
+        };
+        let lane = |kind| RowMark {
+            lane: Some(table.edge_class(kind)),
             tick: None,
         };
-        let statuses = [
-            DiffStatus::Added,
-            DiffStatus::Moved,
-            DiffStatus::Modified,
-            DiffStatus::Unchanged,
-        ];
         assert_eq!(
-            statuses.map(|status| status_mark(status, &table)),
+            [
+                marks(&[EdgeClass::MarkRemoved, EdgeClass::MarkAdded]),
+                marks(&[EdgeClass::MarkRemoved]),
+                marks(&[]),
+            ]
+            .map(|line| display_row_mark(&line, &table)),
             [
                 lane(EdgeClass::Added),
-                lane(EdgeClass::Modified),
-                lane(EdgeClass::Modified),
-                RowMark::NONE,
+                lane(EdgeClass::Removed),
+                RowMark::NONE
             ],
         );
-    }
-
-    /// A slice takes tokens for the kept rows inside it alone, not for the
-    /// folded gaps between them. The kept runs are those of a 10k-row file
-    /// with a hunk every 47 rows, and the hull cuts a run at each end.
-    #[test]
-    fn a_slice_takes_tokens_for_its_kept_rows_alone() {
-        let kept: Vec<Range<u32>> = (0..10_000)
-            .step_by(47)
-            .map(|row: u32| row.saturating_sub(3)..row + 4)
-            .collect();
-        let hull = 45..9_024;
-
-        let resolved: Vec<u32> = shown_runs(&kept, hull.clone()).flatten().collect();
-        let shown: Vec<u32> = hull
-            .filter(|row| kept.iter().any(|run| run.contains(row)))
-            .collect();
-        assert_eq!(resolved, shown);
     }
 
     /// `files` staged as changes under a focused changes view, on a stoatty of
@@ -2201,20 +2240,26 @@ mod tests {
     }
 
     /// An edit that keeps an excerpt's layout resends the line of the row it
-    /// touched alone, and the diff landing after it, whose hunks keep their
-    /// rows, sends nothing.
+    /// touched alone. The diff landing after it keeps its hunk's rows but
+    /// widens the hunk's changed span, so it resends that row once more, with
+    /// the Change Mark over the whole edit.
     #[test]
     fn an_edit_that_keeps_the_layout_resends_its_row_alone() {
         let (mut h, mut rx) = strip_harness(8);
         frame(&mut h, &mut rx);
 
         edit_buffer(&mut h, "/repo/f000.txt", 1..2, "!!!!");
-        let edited = strip_frames(&frame(&mut h, &mut rx)).0;
+        let edited: Vec<(u32, u32, u32)> = strip_frames(&frame(&mut h, &mut rx))
+            .0
+            .into_iter()
+            .map(|(id, start, removed, _)| (id, start, removed))
+            .collect();
         h.settle_diff_jobs();
         let landed = strip_frames(&frame(&mut h, &mut rx)).0;
+        let id = strip_id(&h);
         assert_eq!(
             (edited, landed),
-            (vec![(strip_id(&h), 1, 1, wire_lines(&mut h, 1..2))], vec![]),
+            (vec![(id, 1, 1)], vec![(id, 1, 1, wire_lines(&mut h, 1..2))]),
         );
     }
 
@@ -2302,6 +2347,12 @@ mod tests {
 
     /// An edit while a long excerpt fills resends the touched rows the
     /// terminal holds, and the fill sends the rows past them as they stand.
+    ///
+    /// Until the diff lands, a row's Change Marks follow the spans of the
+    /// stale diff as the edits drift them, which a later edit moves on rows it
+    /// left alone. So the rows' text matches as the edits stand, and their
+    /// marks match once the diff lands, which refills the excerpt a slice per
+    /// frame.
     #[test]
     fn an_edit_during_a_fill_resends_only_the_rows_held() {
         let lines = SYNC_SLICE as usize + 40;
@@ -2329,11 +2380,32 @@ mod tests {
                 .map(|(_, start, removed, lines)| (start, removed, lines.len() as u32))
                 .collect::<Vec<_>>()
         };
+        let text_class = h.stoat.minimap_class_table.edge_class(EdgeClass::DiffText);
+        let text = |lines: &[LineSummary]| -> Vec<Vec<(u8, u8)>> {
+            lines
+                .iter()
+                .map(|line| {
+                    line.iter()
+                        .filter(|run| run.class == text_class)
+                        .map(|run| (run.start_col, run.len))
+                        .collect()
+                })
+                .collect()
+        };
+        let fill = (spans(&commands), spans(&held), text(&store));
+        let standing = text(&wire_lines(&mut h, 0..total));
+        h.settle_diff_jobs();
+        for _ in 0..3 {
+            apply(&mut store, &frame(&mut h, &mut rx));
+        }
         assert_eq!(
-            (spans(&commands), spans(&held), store),
+            (fill, store),
             (
-                vec![(SYNC_SLICE, 0, total as u32 - SYNC_SLICE)],
-                vec![(6, 1, 1)],
+                (
+                    vec![(SYNC_SLICE, 0, total as u32 - SYNC_SLICE)],
+                    vec![(6, 1, 1)],
+                    standing,
+                ),
                 wire_lines(&mut h, 0..total),
             ),
         );
@@ -2623,20 +2695,16 @@ mod tests {
         assert_eq!(thumbs(true), undocked);
     }
 
-    /// Turning syntax colors off sends every line again, since it recolors
-    /// rows that hold still.
+    /// Turning syntax colors off sends no line, since the strip draws its text
+    /// in the diff gray either way.
     #[test]
-    fn a_syntax_switch_sends_the_lines_again() {
+    fn a_syntax_switch_sends_no_line() {
         let (mut h, mut rx) = strip_harness(8);
         frame(&mut h, &mut rx);
-        let (_, held) = layout(&mut h);
 
         h.stoat.syntax_highlight = false;
         let (splices, _) = strip_frames(&frame(&mut h, &mut rx));
-        assert_eq!(
-            splices,
-            [(strip_id(&h), 0, held as u32, wire_lines(&mut h, 0..held))]
-        );
+        assert_eq!(splices, []);
     }
 
     /// A class table that gives other scopes a class sends every line again,

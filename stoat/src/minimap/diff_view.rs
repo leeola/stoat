@@ -2,10 +2,9 @@
 //!
 //! A diff view splices the base lines of a removal into its display, so its
 //! strip summarizes the display rows the editor scrolls through rather than
-//! the buffer's lines. A spliced base row reads the removed lane over its text
-//! in the default class, and a live row takes its syntax colors and the lane
-//! of its diff status. The rows follow the diff dials: the syntax toggle
-//! colors them, and the tint level weights their change tint.
+//! the buffer's lines. Every row draws its text in the diff text's gray, and
+//! Change Marks color the parts that changed. An added part takes green on a
+//! live row, and a removed base line takes red. The rows follow no diff dial.
 //!
 //! Past one display row per strip row the rows fold into bands, as an editor's
 //! strip folds its lines, read from the display rows themselves. A display
@@ -16,23 +15,19 @@
 use super::{
     band::{self, BandSource, LineStat},
     density::{self, Density, Tier},
-    diff_changes::{display_row, display_row_mark},
-    emit::{
-        convert_minimap_runs, encode_rail_update, minimap_line_tokens, strip_density,
-        WEIGHTED_RUN_PROTOCOL,
-    },
+    diff_changes::{display_row, display_row_mark, row_changes},
+    emit::{convert_minimap_runs, encode_rail_update, strip_density, WEIGHTED_RUN_PROTOCOL},
     rows::PassRail,
-    ClassTable, LineRuns, LineToken, RowMark, SYNC_BUDGET, SYNC_SLICE, TINT_WEIGHT,
+    LineRuns, RowMark, SYNC_BUDGET, SYNC_SLICE,
 };
 use crate::{
     app::Stoat,
-    display_map::{DisplayPoint, DisplaySnapshot},
+    display_map::DisplaySnapshot,
     editor_state::EditorId,
-    render::review::diff_tint_amount,
     workspace::{Workspace, WorkspaceId},
 };
 use std::{
-    collections::{hash_map::DefaultHasher, HashMap},
+    collections::hash_map::DefaultHasher,
     hash::{Hash, Hasher},
     ops::Range,
     slice,
@@ -55,10 +50,6 @@ pub(crate) struct DiffViewStrip {
     budget: Duration,
     /// The rows the terminal holds.
     held: Vec<LineRuns>,
-    /// Whether the rows take syntax colors.
-    syntax_on: bool,
-    /// The weight of the rows' change tint.
-    tint_weight: u8,
     /// The [`ClassTable::class_version`] the rows were summarized under.
     classes: u64,
     /// How many display rows each row stands for.
@@ -80,8 +71,6 @@ impl DiffViewStrip {
             content_id,
             budget: SYNC_BUDGET,
             held: Vec::new(),
-            syntax_on: false,
-            tint_weight: 0,
             classes: 0,
             density: Density::LINE,
             versions: 0,
@@ -109,19 +98,19 @@ impl DiffViewStrip {
 
 /// A slice of a diff view's display rows, as a band's row reads them.
 ///
-/// The marks of the slice's rows are read once, since the band rows and the
-/// Coverage Rail both take them.
+/// The Change Marks of the slice's rows are read once, since the band rows and
+/// the Coverage Rail both take them.
 struct DisplayRows<'a> {
     snapshot: &'a DisplaySnapshot,
     /// The buffer rows that show, every one in a diff view.
     kept: &'a [Range<u32>],
-    /// The syntax tokens of the buffer rows whose text a row summarizes.
-    tokens: &'a HashMap<u32, Vec<LineToken>>,
-    table: &'a ClassTable,
     comment_prefixes: &'a [&'a str],
     /// The slice's first display row.
     first: u32,
-    /// The mark of each display row of the slice, from `first` on.
+    /// The Change Marks of each display row of the slice, from `first` on.
+    changes: Vec<LineRuns>,
+    /// The Coverage Rail's mark of each display row of the slice, from `first`
+    /// on.
     marks: Vec<RowMark>,
 }
 
@@ -130,24 +119,23 @@ impl BandSource for DisplayRows<'_> {
         band::line_stat(&self.snapshot.display_line(row), self.comment_prefixes)
     }
 
-    fn mark(&self, row: u32) -> RowMark {
-        self.marks[(row - self.first) as usize]
+    fn content(&self, row: u32) -> LineRuns {
+        display_row(self.snapshot, row, self.kept)
     }
 
-    fn content(&self, row: u32) -> LineRuns {
-        display_row(self.snapshot, row, self.kept, self.tokens, self.table).0
+    fn changes(&self, row: u32) -> LineRuns {
+        self.changes[(row - self.first) as usize]
     }
 }
 
 /// Bring the strip of diff view editor `editor_id` in workspace `ws_id` in step
 /// with the editor's display rows, and append its splices to `out`.
 ///
-/// A change of the syntax toggle, the tint level, the class table, the
-/// density, the display, the text, the diff, or the parse starts a pass over
-/// every row. Each sync summarizes the pass's rows in slices of at most
-/// [`SYNC_SLICE`] until its time budget runs out, and sends the runs of rows
-/// that differ from the held ones. The pass ends by cutting the held rows past
-/// the display's last row.
+/// A change of the class table, the density, the display, the text, the diff,
+/// or the parse starts a pass over every row. Each sync summarizes the pass's
+/// rows in slices of at most [`SYNC_SLICE`] until its time budget runs out,
+/// and sends the runs of rows that differ from the held ones. The pass ends by
+/// cutting the held rows past the display's last row.
 ///
 /// The strip's density lands on the editor, which places the strip's thumb
 /// and maps a press on the strip.
@@ -163,8 +151,6 @@ pub(crate) fn sync_diff_view_strip(
     out: &mut Vec<u8>,
 ) {
     let weighted = stoat.stoatty_protocol >= WEIGHTED_RUN_PROTOCOL;
-    let syntax_on = stoat.syntax_highlight && stoat.diff_syntax;
-    let tint_weight = dial_tint_weight(stoat.diff_tint);
     let thumb_min_rows = stoat.minimap_thumb_min_rows();
     let single_strip = match stoat.minimap_mode() {
         MinimapMode::Single => Some(stoat.single_minimap_rect),
@@ -210,22 +196,9 @@ pub(crate) fn sync_diff_view_strip(
         hasher.finish()
     };
     let classes = minimap_class_table.class_version;
-    let inputs = (syntax_on, tint_weight, classes, density, versions);
-    if (
-        strip.syntax_on,
-        strip.tint_weight,
-        strip.classes,
-        strip.density,
-        strip.versions,
-    ) != inputs
-    {
-        (
-            strip.syntax_on,
-            strip.tint_weight,
-            strip.classes,
-            strip.density,
-            strip.versions,
-        ) = inputs;
+    let inputs = (classes, density, versions);
+    if (strip.classes, strip.density, strip.versions) != inputs {
+        (strip.classes, strip.density, strip.versions) = inputs;
         strip.next = Some(0);
     }
     let Some(mut row) = strip.next else {
@@ -263,36 +236,24 @@ pub(crate) fn sync_diff_view_strip(
         let bands = row..end;
         let display = bands.start * density.lines_per_row
             ..(bands.end * density.lines_per_row).min(display_rows);
-        let tokens = match density.tier {
-            Tier::Shape => HashMap::new(),
-            Tier::Line | Tier::Fit => {
-                let hull = buffer_hull(&snapshot, display.clone());
-                minimap_line_tokens(&snapshot, buffer_id, syntax_on, minimap_class_table, hull)
-            },
-        };
+        let changes = row_changes(&snapshot, display.clone(), kept, minimap_class_table);
+        let marks = changes
+            .iter()
+            .map(|line| display_row_mark(line, minimap_class_table))
+            .collect();
         let source = DisplayRows {
             snapshot: &snapshot,
             kept,
-            tokens: &tokens,
-            table: minimap_class_table,
             comment_prefixes,
             first: display.start,
-            marks: display
-                .clone()
-                .map(|at| display_row_mark(&snapshot, at, kept, minimap_class_table))
-                .collect(),
+            changes,
+            marks,
         };
         let lines: Vec<LineRuns> = bands
             .clone()
             .map(|at| {
                 let band = density::band(at, density.lines_per_row, display_rows);
-                band::band_row(
-                    &source,
-                    band,
-                    density.tier,
-                    minimap_class_table,
-                    tint_weight,
-                )
+                band::change_band_row(&source, band, density.tier, minimap_class_table)
             })
             .collect();
         strip
@@ -339,34 +300,6 @@ pub(crate) fn diff_view_window(
     (top, visible.min(u32::from(u16::MAX)) as u16)
 }
 
-/// The change tint's weight at diff tint level `level`, which the shipped
-/// level draws at [`TINT_WEIGHT`] and level 0 draws at none.
-fn dial_tint_weight(level: i8) -> u8 {
-    let scale = diff_tint_amount(level) / diff_tint_amount(1);
-    (f32::from(TINT_WEIGHT) * scale)
-        .round()
-        .min(f32::from(u8::MAX)) as u8
-}
-
-/// The buffer rows that the display rows `rows` of `snapshot` show, from the
-/// first one's to the last one's.
-///
-/// Spliced base rows show no buffer row and widen nothing.
-pub(super) fn buffer_hull(snapshot: &DisplaySnapshot, rows: Range<u32>) -> Range<u32> {
-    let buffer_row = |row: u32| {
-        snapshot
-            .display_to_buffer(DisplayPoint::new(row, 0))
-            .map(|point| point.row)
-    };
-    match (
-        rows.clone().find_map(buffer_row),
-        rows.rev().find_map(buffer_row),
-    ) {
-        (Some(first), Some(last)) => first..last + 1,
-        _ => 0..0,
-    }
-}
-
 /// Hold `lines` as the rows from `start` on, and send each run of them that
 /// differs from the held rows through `send`, as a start, a count of held rows
 /// it replaces, and its rows.
@@ -410,10 +343,10 @@ pub(super) fn hold_rows(
 #[cfg(test)]
 mod tests {
     use crate::{
-        action_handlers::{focused_editor_mut, review::enter_diff_view},
+        action_handlers::{dispatch, focused_editor_mut, review::enter_diff_view},
         apc_emit,
         editor_state::EditorId,
-        minimap::{density, emit, EdgeClass, CONTENT_COL, LANE_COLS},
+        minimap::{density, emit, EdgeClass},
         mouse::MinimapDrag,
         render::rail_strip_id,
         test_fixture::{
@@ -424,6 +357,7 @@ mod tests {
     use crossterm::event::{MouseButton, MouseEventKind};
     use ratatui::layout::Rect;
     use std::path::Path;
+    use stoat_action::{DiffSyntax, DiffTintUp};
     use stoat_config::MinimapMode;
     use stoatty_protocol::{
         command::{Command, LineSummary},
@@ -522,34 +456,18 @@ mod tests {
         h.stoat.diff_view_strips[&(h.stoat.active_workspace, editor_id)].content_id()
     }
 
-    /// The class of `row`'s lane, `None` for a row with no lane.
-    fn lane(row: &LineSummary) -> Option<u8> {
-        row.first()
-            .filter(|run| run.start_col == 0 && run.len == LANE_COLS as u8)
-            .map(|run| run.class)
-    }
-
-    /// The weight of `row`'s change tint, the run of its lane's class from
-    /// the content column on, `None` for a row with no tint.
-    fn tint(row: &LineSummary) -> Option<u8> {
-        let lane = lane(row)?;
-        row.iter()
-            .find(|run| run.start_col == CONTENT_COL as u8 && run.class == lane)
-            .map(|run| run.weight)
-    }
-
-    /// The classes of `row`'s text, which follows its lane and its tint.
-    fn text_classes(row: &LineSummary) -> Vec<u8> {
-        let lane = lane(row);
-        row.iter()
-            .filter(|run| Some(run.class) != lane)
-            .map(|run| run.class)
-            .collect()
+    /// The classes of `row`'s runs in order, with each repeat of the class
+    /// before it dropped, so a row reads its text's class and then its marks'.
+    fn classes(row: &LineSummary) -> Vec<u8> {
+        let mut classes: Vec<u8> = row.iter().map(|run| run.class).collect();
+        classes.dedup();
+        classes
     }
 
     /// The strip holds a row per display row, 42 for 40 live lines and 2
-    /// removed ones. The removed rows take the removed lane over text in the
-    /// default class, and the added rows take the added lane.
+    /// removed ones. Every row draws its text in the diff gray. The removed
+    /// rows take a removed mark and the added rows an added mark, and the rows
+    /// that hold take none.
     #[test]
     fn a_diff_view_strip_holds_a_row_per_display_row() {
         let (mut h, mut rx) = diff_view_harness();
@@ -558,49 +476,40 @@ mod tests {
         apply_minimap(&mut store, strip_id(&h), &commands);
 
         let table = &h.stoat.minimap_class_table;
-        let (removed, added) = (
-            table.edge_class(EdgeClass::Removed),
-            table.edge_class(EdgeClass::Added),
-        );
-        let expected: Vec<Option<u8>> = (0..42)
+        let class = |kind| table.edge_class(kind);
+        let expected: Vec<Vec<u8>> = (0..42)
             .map(|row| match row {
-                5 | 6 => Some(removed),
-                21..=23 => Some(added),
-                _ => None,
+                5 | 6 => vec![class(EdgeClass::DiffText), class(EdgeClass::MarkRemoved)],
+                21..=23 => vec![class(EdgeClass::DiffText), class(EdgeClass::MarkAdded)],
+                _ => vec![class(EdgeClass::DiffText)],
             })
             .collect();
-        let removed_text: Vec<Vec<u8>> = [5, 6]
-            .map(|row| {
-                let mut classes = text_classes(&store[row]);
-                classes.dedup();
-                classes
-            })
-            .to_vec();
-
-        assert_eq!(
-            (store.iter().map(lane).collect::<Vec<_>>(), removed_text),
-            (expected, vec![vec![0], vec![0]]),
-        );
+        assert_eq!(store.iter().map(classes).collect::<Vec<_>>(), expected);
     }
 
-    /// With the syntax toggle off, every row's text takes the default class,
-    /// where the parse colored some of it before.
+    /// A step of the tint dial or of the syntax toggle sends no row, since the
+    /// strip draws its text in the diff gray and its marks at full weight at
+    /// every setting of the two.
     #[test]
-    fn the_syntax_toggle_sends_the_rows_in_the_default_class() {
+    fn a_dial_step_sends_no_row() {
         let (mut h, mut rx) = diff_view_harness();
-        let mut store = Vec::new();
-        let commands = frame(&mut h, &mut rx);
+        frame(&mut h, &mut rx);
         let content_id = strip_id(&h);
-        apply_minimap(&mut store, content_id, &commands);
-        let colored =
-            |store: &[LineSummary]| store.iter().flat_map(text_classes).any(|class| class != 0);
-        let before = colored(&store);
 
-        h.stoat.diff_syntax = false;
-        let commands = frame(&mut h, &mut rx);
-        apply_minimap(&mut store, content_id, &commands);
-
-        assert_eq!((before, colored(&store), store.len()), (true, false, 42));
+        dispatch(&mut h.stoat, &DiffTintUp);
+        dispatch(&mut h.stoat, &DiffSyntax);
+        let sent = frame(&mut h, &mut rx)
+            .into_iter()
+            .filter(|command| match command {
+                Command::MinimapLines(splice) => splice.content_id == content_id,
+                Command::MinimapLen(len) => len.content_id == content_id,
+                _ => false,
+            })
+            .count();
+        assert_eq!(
+            (h.stoat.diff_tint, h.stoat.diff_syntax, sent),
+            (2, false, 0)
+        );
     }
 
     /// The thumb counts display rows, so a view whose top is display row 10
@@ -650,28 +559,6 @@ mod tests {
             .scroll_row;
 
         assert_eq!(scroll_row, 27 - viewport / 2);
-    }
-
-    /// A tint level of 0 sends the changed rows with no tint, the shipped
-    /// level 1 sends the boards' 16 percent, and level 2 twice that.
-    #[test]
-    fn the_tint_level_weights_the_change_tint() {
-        let (mut h, mut rx) = diff_view_harness();
-        let mut store = Vec::new();
-        let commands = frame(&mut h, &mut rx);
-        let content_id = strip_id(&h);
-        apply_minimap(&mut store, content_id, &commands);
-        let mut tints = |h: &mut TestHarness, level: i8| {
-            h.stoat.diff_tint = level;
-            let commands = frame(h, &mut rx);
-            apply_minimap(&mut store, content_id, &commands);
-            [5, 21].map(|row| tint(&store[row]))
-        };
-
-        assert_eq!(
-            [tints(&mut h, 0), tints(&mut h, 1), tints(&mut h, 2)],
-            [[None, None], [Some(41), Some(41)], [Some(82), Some(82)]],
-        );
     }
 
     /// The focused diff view's id, its pane's index, its strip rect, and its
