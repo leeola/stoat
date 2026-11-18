@@ -1096,6 +1096,12 @@ pub mod scope {
     /// The chip at the end of an unresolved chunk's first merged row, which
     /// names the chunk's state and its keys.
     pub const VCS_CONFLICT_CHIP: &str = "vcs.conflict.chip";
+    /// The chip on the first merged row of a run the merge takes from ours, or
+    /// of a chunk resolved to ours.
+    pub const VCS_CONFLICT_CHIP_OURS: &str = "vcs.conflict.chip.ours";
+    /// The chip on the first merged row of a run the merge takes from theirs,
+    /// or of a chunk resolved to theirs.
+    pub const VCS_CONFLICT_CHIP_THEIRS: &str = "vcs.conflict.chip.theirs";
     /// The ancestor's text, which the merged column shows for an unresolved
     /// chunk.
     pub const VCS_CONFLICT_GHOST: &str = "vcs.conflict.ghost";

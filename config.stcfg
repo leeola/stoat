@@ -283,6 +283,8 @@ theme ermine_night inherits default_dark {
     let tint_theirs      = "#231d2e";
     let tint_conflict    = "#2a1b1d";
     let chip_conflict    = "#33201f";
+    let chip_ours        = "#1d2a1f";
+    let chip_theirs      = "#2a2236";
     let tint_merge       = "#2a1d21";
     let merged_head      = "#1b1d22";
     let shape            = "#8b919c";
@@ -391,6 +393,8 @@ theme ermine_night inherits default_dark {
     vcs.conflict.theirs    = { fg: special, bg: tint_theirs };
     vcs.conflict.band      = { fg: danger, bg: tint_conflict };
     vcs.conflict.chip      = { fg: danger, bg: chip_conflict };
+    vcs.conflict.chip.ours = { fg: success, bg: chip_ours };
+    vcs.conflict.chip.theirs = { fg: special, bg: chip_theirs };
     vcs.conflict.ghost     = { fg: muted, modifiers: [italic] };
     vcs.conflict.mark.fg   = conflict;
     vcs.conflict.head.bg   = merged_head;

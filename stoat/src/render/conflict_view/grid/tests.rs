@@ -1,4 +1,4 @@
-use super::{number_scale, row_kind, GridColors, GridColumns, MergeRowKind, Tone};
+use super::{number_scale, row_kind, GridColors, GridColumns, MergeRowKind, RowLook, Tone};
 use crate::{
     action_handlers::{dispatch, focused_editor_mut},
     app::DEFAULT_KEYMAP,
@@ -18,9 +18,7 @@ use ratatui::{
 use std::{path::PathBuf, sync::Arc};
 use stoat_action::{Action, Conflict, ConflictPickOurs};
 use stoat_widgets::ApcScene;
-use stoatty_protocol::command::{
-    decode_stream, BorderStyle, Command, Edge, PanelCommand, PanelShadow,
-};
+use stoatty_protocol::command::{decode_stream, Command};
 
 const SUCCESS: [u8; 3] = [0x8f, 0xd1, 0x8a];
 const SPECIAL: [u8; 3] = [0xc5, 0x9a, 0xf0];
@@ -35,6 +33,8 @@ const TINT_OURS: [u8; 3] = [0x18, 0x24, 0x1b];
 const TINT_THEIRS: [u8; 3] = [0x23, 0x1d, 0x2e];
 const TINT_CONFLICT: [u8; 3] = [0x2a, 0x1b, 0x1d];
 const CHIP_CONFLICT: [u8; 3] = [0x33, 0x20, 0x1f];
+const CHIP_OURS: [u8; 3] = [0x1d, 0x2a, 0x1f];
+const CHIP_THEIRS: [u8; 3] = [0x2a, 0x22, 0x36];
 const MERGED_HEAD: [u8; 3] = [0x1b, 0x1d, 0x22];
 
 /// The one-chunk file most tests open.
@@ -60,12 +60,13 @@ fn the_columns_split_the_width_one_to_one_point_one_two_to_one() {
             layout(158, 4, 256)
         ],
         [
-            [(1, 50, 4), (51, 58, 54), (109, 50, 112)],
-            [(1, 48, 4), (49, 55, 52), (104, 48, 107)],
-            [(1, 50, 7), (51, 58, 57), (109, 50, 115)],
+            [(1, 50, 6), (51, 58, 56), (109, 50, 114)],
+            [(1, 48, 6), (49, 55, 54), (104, 48, 109)],
+            [(1, 50, 8), (51, 58, 58), (109, 50, 116)],
         ],
-        "the sides take 100 / 312 each, and the text starts on the cell past the \
-         bar, the number field, and the divider's margins",
+        "the sides take 100 / 312 each, the text starts on the cell past the bar, \
+         the number field, and the divider's margins, and a number too long for \
+         the field moves the text out",
     );
 }
 
@@ -239,12 +240,14 @@ fn an_unresolved_chunk_bars_its_edited_sides_and_chips_its_first_row() {
     let change_bars: Vec<_> = shot
         .bars()
         .into_iter()
-        .filter(|&(_, _, width, ..)| width == 3)
+        .filter(|&(_, _, width, ..)| width == 6)
         .collect();
-    let chip = shot.chip();
+    // The chip's 16 characters advance 256 sixteenths at the test scale, and
+    // its box adds 12 of padding on each side.
+    let chip_x = cols.merged.right() as i16 * 16 - 12 - 280;
 
     assert_eq!(
-        (change_bars, chip),
+        (change_bars, shot.chips()),
         (
             vec![
                 bar(cols.ours.x, 2, SUCCESS),
@@ -255,53 +258,89 @@ fn an_unresolved_chunk_bars_its_edited_sides_and_chips_its_first_row() {
                 bar(cols.merged.x, 5, DANGER),
                 bar(cols.merged.x, 6, DANGER),
             ],
-            Some((
-                Rect::new(cols.merged.right() - 17, 2, 17, 1),
+            vec![(
+                (chip_x, 33, 280, 14, CHIP_CONFLICT),
                 "conflict \u{b7} o t b".to_string(),
                 DANGER,
-                CHIP_CONFLICT,
-            )),
+            )],
         ),
-        "each band row bars the merged column, and the chip ends on the column's edge",
+        "each band row bars the merged column, and the chip ends 12 sixteenths \
+         before the column's edge",
     );
 }
 
-/// A chip's panel is a backdrop, which no pool composite takes as an occluder.
-/// A glide of the pane's pool then covers the live chip, and the chip that
-/// the page paints travels with its row.
+/// A chip draws as one rounded bar in its tint, 14 sixteenths tall, ahead of
+/// the run that names it. The run starts 12 sixteenths in and takes no box of
+/// its own. The scene holds no panel, so the chip rides a pool page with its
+/// row.
 #[test]
-fn a_chip_panel_sits_under_the_pane_pool() {
+fn a_chip_draws_as_a_rounded_bar_under_its_run() {
     let shot = grid_shot(ONE_CHUNK, &[]);
-    let panels: Vec<PanelCommand> = shot
+    let at = |found: fn(&Command) -> bool| shot.commands.iter().position(found);
+    let rounded: Vec<_> = shot
         .commands
         .iter()
         .filter_map(|command| match command {
-            Command::Panel(panel) => Some(*panel),
+            Command::Bar(bar) if bar.radius > 0 => Some((bar.x, bar.height, bar.radius, bar.color)),
             _ => None,
         })
         .collect();
+    let run = shot.commands.iter().find_map(|command| match command {
+        Command::TextRun(run) if run.text.starts_with("conflict") => Some((run.col, run.bg)),
+        _ => None,
+    });
+    let bar_at = at(|command| matches!(command, Command::Bar(bar) if bar.radius > 0));
+    let run_at =
+        at(|command| matches!(command, Command::TextRun(run) if run.text.starts_with("conflict")));
+    let box_x = rounded.first().map_or(0, |&(x, ..)| x);
 
     assert_eq!(
-        panels,
-        [PanelCommand {
-            top: 2,
-            left: shot.cols.merged.right() - 17,
-            width: 17,
-            height: 1,
-            style: BorderStyle::None_,
-            border: CHIP_CONFLICT,
-            corner_radius: 4,
-            fill: Some(CHIP_CONFLICT),
-            shadow: PanelShadow::None_,
-            edges: Edge::symmetric(0, 0),
-            corners: 0,
-            fillets: 0,
-            fillet_radius: 2,
-            hatch: None,
-            above_pools: false,
-            backdrop: true,
-            anchor: None,
-        }],
+        (
+            rounded
+                .iter()
+                .map(|&(_, height, radius, color)| (height, radius, color))
+                .collect::<Vec<_>>(),
+            run.map(|(col, bg)| (col - box_x, bg)),
+            bar_at < run_at,
+            at(|command| matches!(command, Command::Panel(_))),
+        ),
+        (vec![(14, 4, CHIP_CONFLICT)], Some((12, None)), true, None),
+    );
+}
+
+/// Each chip takes the tone of its kind. A run or a chunk the merge takes from
+/// ours takes the ours chip, one from theirs the theirs chip, and an unsettled
+/// chunk the conflict chip.
+#[test]
+fn each_chip_takes_the_tone_of_its_kind() {
+    let (config, errors) = stoat_config::parse(DEFAULT_KEYMAP);
+    assert!(errors.is_empty(), "parse errors: {errors:?}");
+    let theme = Theme::from_config(&config.expect("the shipped config parses"), "ermine_night")
+        .expect("ermine_night loads");
+    let colors = GridColors::resolve(&theme).expect("ermine_night gives RGB colors");
+    let tint = |kind| {
+        RowLook::of(kind, [false, false], &colors)
+            .chip
+            .map(|(_, tone)| tone.tint)
+    };
+
+    assert_eq!(
+        [
+            MergeRowKind::Ours,
+            MergeRowKind::TookOurs,
+            MergeRowKind::Theirs,
+            MergeRowKind::TookTheirs,
+            MergeRowKind::Conflict,
+        ]
+        .map(tint),
+        [
+            CHIP_OURS,
+            CHIP_OURS,
+            CHIP_THEIRS,
+            CHIP_THEIRS,
+            CHIP_CONFLICT
+        ]
+        .map(Some),
     );
 }
 
@@ -358,7 +397,7 @@ fn a_taken_side_bars_the_merged_column_and_fades_the_other_side() {
     let change_bars: Vec<_> = shot
         .bars()
         .into_iter()
-        .filter(|&(_, _, width, ..)| width == 3)
+        .filter(|&(_, _, width, ..)| width == 6)
         .collect();
     let theirs = &shot.buf[(cols.theirs.text_x, 2)];
     let [r, g, b] = dim_rgb(SPECIAL, BASE, 0.55);
@@ -366,17 +405,21 @@ fn a_taken_side_bars_the_merged_column_and_fades_the_other_side() {
     assert_eq!(
         (
             change_bars,
-            shot.chip().map(|(_, text, ..)| text),
+            shot.chips()
+                .into_iter()
+                .map(|((.., tint), text, fg)| (text, fg, tint))
+                .collect::<Vec<_>>(),
             (theirs.symbol(), theirs.fg),
             style_rgb(Some(shot.buf[(cols.ours.x, 2)].bg)),
         ),
         (
             vec![bar(cols.ours.x, 2, SUCCESS), bar(cols.merged.x, 2, SUCCESS)],
-            Some("\u{2713} took ours".to_string()),
+            vec![("\u{2713} took ours".to_string(), SUCCESS, CHIP_OURS)],
             ("T", Color::Rgb(r, g, b)),
             Some(TINT_OURS),
         ),
-        "the taken side tints and bars, and the untaken side's text fades",
+        "the taken side tints and bars, its chip takes the ours chip's tint, and \
+         the untaken side's text fades",
     );
 }
 
@@ -384,20 +427,18 @@ fn a_taken_side_bars_the_merged_column_and_fades_the_other_side() {
 fn one_sided_edits_tint_their_side_and_chip_the_first_row_of_a_run() {
     let shot = grid_shot(
         [
-            "a\nb\nc\nkeep\nbase\nz\n",
-            "a\nB\nC\nkeep\nOURS\nz\n",
-            "a\nb\nc\nkeep\nTHEIRS\nz\n",
+            "a\nb\nc\nkeep\nbase\nz\ntail\n",
+            "a\nB\nC\nkeep\nOURS\nz\ntail\n",
+            "a\nb\nc\nkeep\nTHEIRS\nz\nTAIL\n",
         ],
         &[],
     );
     let cols = &shot.cols;
     let bg = |x: u16, y: u16| style_rgb(Some(shot.buf[(x, y)].bg));
     let chips: Vec<_> = shot
-        .runs()
+        .chips()
         .into_iter()
-        .filter(|(_, _, text, _)| text.contains('\u{b7}'))
-        .filter(|&(_, row, ..)| row > 0)
-        .map(|(_, row, text, _)| (row / 16, text))
+        .map(|((_, y, .., tint), text, fg)| (y / 16, text, fg, tint))
         .collect();
 
     assert_eq!(
@@ -418,11 +459,18 @@ fn one_sided_edits_tint_their_side_and_chip_the_first_row_of_a_run() {
             [Some(TINT_OURS), None, None],
             [Some(TINT_OURS), None, None],
             vec![
-                (2, "auto \u{b7} ours".to_string()),
-                (5, "conflict \u{b7} o t b".to_string()),
+                (2, "auto \u{b7} ours".to_string(), SUCCESS, CHIP_OURS),
+                (
+                    5,
+                    "conflict \u{b7} o t b".to_string(),
+                    DANGER,
+                    CHIP_CONFLICT
+                ),
+                (11, "auto \u{b7} theirs".to_string(), SPECIAL, CHIP_THEIRS),
             ],
         ),
-        "only ours tints an ours edit, and its run of two rows takes one chip",
+        "only ours tints an ours edit, its run of two rows takes one chip, and \
+         each chip takes the tint of its kind",
     );
 }
 
@@ -437,7 +485,7 @@ fn the_grid_draws_dividers_and_hairlines_down_its_rows() {
         .filter(|&(.., color)| color != RAISED)
         .collect();
     rules.sort();
-    let divider = |x: u16| (x as i16 * 16 + 45, 16, 1, 128, DIVIDER);
+    let divider = |x: u16| (x as i16 * 16 + 68, 16, 1, 128, DIVIDER);
     let hairline = |x: i16, y: i16, height: u16| (x, y, 1, height, HAIRLINE);
     let mut want = vec![
         divider(cols.ours.x),
@@ -499,17 +547,24 @@ fn a_theme_without_the_board_scopes_falls_back_to_their_neighbors() {
     let colors = GridColors::resolve(&theme).expect("default_dark gives RGB colors");
 
     assert_eq!(
-        (colors.band, colors.chip, colors.ghost, colors.head),
+        (
+            colors.band,
+            colors.chip,
+            [colors.chip_ours, colors.chip_theirs],
+            colors.ghost,
+            colors.head
+        ),
         (
             band,
             band,
+            [colors.ours, colors.theirs],
             Style::default()
                 .fg(rgb([0x63, 0x6d, 0x83]))
                 .add_modifier(Modifier::ITALIC),
             None,
         ),
-        "the band takes the conflict header's color, the chip the band, and the \
-         ghost muted italic text",
+        "the band takes the conflict header's color, the chip the band, each \
+         side's chip its side, and the ghost muted italic text",
     );
 }
 
@@ -551,25 +606,38 @@ impl GridShot {
             .collect()
     }
 
-    /// The one chip panel's cell rect, the text of the run inside it, the
-    /// run's color, and the panel's fill.
-    fn chip(&self) -> Option<(Rect, String, [u8; 3], [u8; 3])> {
-        let panel = self.commands.iter().find_map(|command| match command {
-            Command::Panel(panel) => Some(panel),
-            _ => None,
-        })?;
-        let area = Rect::new(panel.left, panel.top, panel.width, panel.height);
-        let (_, _, text, color) = self
-            .runs()
-            .into_iter()
-            .find(|&(col, row, ..)| (col / 16) as u16 == area.x && (row / 16) as u16 == area.y)?;
-        Some((area, text, color, panel.fill?))
+    /// Each chip's box as `(x, y, width, height, tint)`, in sixteenths, with
+    /// the text and the color of the run that starts on the box, in the order
+    /// the scene holds them.
+    ///
+    /// A chip's box is the grid's one kind of rounded bar.
+    fn chips(&self) -> Vec<(BarFields, String, [u8; 3])> {
+        let runs = self.runs();
+        self.commands
+            .iter()
+            .filter_map(|command| match command {
+                Command::Bar(bar) if bar.radius > 0 => {
+                    Some((bar.x, bar.y, bar.width, bar.height, bar.color))
+                },
+                _ => None,
+            })
+            .filter_map(|chip| {
+                let (x, y, width, ..) = chip;
+                let (_, _, text, color) = runs
+                    .iter()
+                    .find(|&&(col, row, ..)| {
+                        row / 16 == y / 16 && (x..x + width as i16).contains(&col)
+                    })?
+                    .clone();
+                Some((chip, text, color))
+            })
+            .collect()
     }
 }
 
-/// The 3/16 change bar of `column`'s cell on row `y`.
+/// The 6/16 change bar of `column`'s cell on row `y`.
 fn bar(column: u16, y: u16, color: [u8; 3]) -> BarFields {
-    (column as i16 * 16 + 4, y as i16 * 16, 3, 16, color)
+    (column as i16 * 16 + 7, y as i16 * 16, 6, 16, color)
 }
 
 fn rgb([r, g, b]: [u8; 3]) -> Color {

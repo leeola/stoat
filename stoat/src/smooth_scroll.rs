@@ -939,7 +939,6 @@ pub(crate) fn render_conflict_page_from_parts(
         Some(GridPaint {
             scene: &mut scene,
             cursor_row: None,
-            panels: false,
         }),
     );
     let mut bytes = serialize_buffer(&buf);
@@ -2553,7 +2552,6 @@ mod tests {
                 Some(GridPaint {
                     scene: &mut scene,
                     cursor_row: None,
-                    panels: false,
                 }),
             );
         }

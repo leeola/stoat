@@ -1869,8 +1869,14 @@ fn a_read_only_pane_draws_the_dashed_ring_over_its_text() {
 /// with sides of 48 cells at x 1 and 103 and the merged column of 54 cells at
 /// x 49. The header is row 2, `1 shared header` is row 3, and the chunk's
 /// first row is row 4, where each column takes its side's tint. The ours bar
-/// sits 4/16 into its column, so at 9-pixel cells it snaps to the third and
-/// fourth pixel columns of the column's first cell.
+/// sits 7/16 into its column and is 6/16 wide, so at 9-pixel cells it snaps to
+/// pixel columns 4 to 6 of the column's first cell, the board's
+/// `margin-left: 4px; width: 3px`.
+///
+/// The chunk's chip ends 12/16 before the merged column's right edge at cell
+/// 103, and its box reaches back past cell 91. The check reads the 10 cells
+/// from cell 91, which the box covers but for a pixel row at its top and its
+/// bottom, so they read the chip's fill.
 #[test]
 fn the_conflict_view_paints_the_merge_grid() {
     let mut home = support::scratch_home();
@@ -1891,7 +1897,14 @@ fn the_conflict_view_paints_the_merge_grid() {
         expect_region(&shot, &mut home, cell_rect(col, row, 20, 1), want, what);
     }
     let (x, y, _, height) = cell_rect(1, 4, 1, 1);
-    expect_region(&shot, &mut home, (x + 2, y, 2, height), SUCCESS, "ours_bar");
+    expect_region(&shot, &mut home, (x + 4, y, 3, height), SUCCESS, "ours_bar");
+    expect_region(
+        &shot,
+        &mut home,
+        cell_rect(103 - 12, 4, 10, 1),
+        CHIP_CONFLICT,
+        "conflict_chip",
+    );
 }
 
 /// The tab bar ends in the conflict chip while the conflict view is focused.

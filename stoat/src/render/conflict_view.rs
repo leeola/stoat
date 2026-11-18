@@ -33,9 +33,6 @@ pub(crate) struct GridPaint<'a> {
     /// The display row the cursor sits on, whose merged number the grid lifts.
     /// `None` for a pool page, which never carries the cursor.
     pub(crate) cursor_row: Option<u32>,
-    /// Whether each chip takes a rounded panel. A pool page captures no panel,
-    /// so a page paints the chip's box into its cells.
-    pub(crate) panels: bool,
 }
 
 /// Column geometry for the conflict view's cell layout, the one a terminal with
@@ -186,7 +183,6 @@ pub(crate) fn render_conflict_view(
             GridPaint {
                 scene,
                 cursor_row: Some(cursor.row),
-                panels: true,
             }
         });
         let (doc, derived) = state.derived(&snapshot);

@@ -400,8 +400,10 @@ The typed UI scopes, by group (syntax scopes are open-ended):
   chip on a chunk's first merged row, the ancestor's text in the merged column,
   the merged column's header cell, and the mark on a conflicted file's tab.
   The `vcs.conflict.ours` and `vcs.conflict.theirs` backgrounds tint the two
-  side columns. The ermine_night theme sets these, and default_dark leaves
-  them unset.
+  side columns. `vcs.conflict.chip.ours` and `vcs.conflict.chip.theirs` color
+  the chip of a run the merge takes from that side, or of a chunk resolved to
+  it, and fall back to the side's own scope. The ermine_night theme sets
+  these, and default_dark leaves them unset.
 - `vcs.merge.banner`, `vcs.rebase.banner` -- the banner row of a merge in
   progress and of a rebase paused on a conflict.
 - `vcs.checkout.banner` -- the banner row under the tab bar that names a blame

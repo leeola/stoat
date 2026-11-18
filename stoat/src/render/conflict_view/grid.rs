@@ -32,34 +32,51 @@ use ratatui::{
 use std::fmt::Write;
 use stoat_widgets::{
     bar::{Bar, BarBatch},
-    panel::Panel,
     text_run::{self, TextRun, TextRunBatch},
     ApcScene,
 };
-use stoatty_protocol::command::{BorderStyle, Edge, PanelShadow};
 
 /// Rows the header takes above the grid's rows.
 pub(super) const HEADER_ROWS: u16 = 1;
 
 /// The change bar's left edge and width, in sixteenths from its column's left
 /// edge, the board's `margin-left: 4px; width: 3px`.
-const BAR_X: i16 = 4;
-const BAR_WIDTH: u16 = 3;
+///
+/// A board px across is two sixteenths, so at 9 px cells the bar takes pixel
+/// columns 4 to 6 of its column's first cell.
+const BAR_X: i16 = 7;
+const BAR_WIDTH: u16 = 6;
 
 /// Where the number field starts, in sixteenths from its column's left edge,
-/// right after the change bar.
-const NUMBER_X: u16 = 7;
+/// right after the change bar, the board's 7 px.
+const NUMBER_X: u16 = 14;
+
+/// The right edge of the number field, in sixteenths from its column's left
+/// edge, the end of the board's `width: 26px` field.
+const NUMBER_RIGHT: u16 = 58;
 
 /// The board's `margin: 0 6px` on each side of the 1/16 divider after the
 /// number field, in sixteenths.
-const DIVIDER_MARGIN: u16 = 6;
+const DIVIDER_MARGIN: u16 = 10;
 
 /// The header cells' `padding: 0 8px` and `gap: 8px`, in sixteenths.
 const HEADER_PAD: u16 = 8;
 const HEADER_GAP: u16 = 8;
 
 /// The chip's `padding: 0 6px`, in sixteenths.
-const CHIP_PAD: u16 = 6;
+const CHIP_PAD: u16 = 12;
+
+/// The board's `margin-right: 6px` between a chip and its column's right edge,
+/// in sixteenths.
+const CHIP_MARGIN: u16 = 12;
+
+/// The chip's height, the board's `line-height: 16px` on an 18 px row, in
+/// sixteenths down.
+const CHIP_HEIGHT: u16 = 14;
+
+/// The radius of the chip's corners, the board's `border-radius: 4px`, in
+/// logical pixels.
+const CHIP_RADIUS: u8 = 4;
 
 /// How far the untaken side's text blends toward its surface, the board's
 /// `opacity: 0.45`.
@@ -115,13 +132,15 @@ impl GridColumns {
     /// Lay the columns out over `area` for line numbers of `digits` digits at
     /// `number_scale`.
     ///
-    /// The text starts on the first whole cell past the divider's margin, so it
-    /// stays on the cell grid the buffer's text paints on.
+    /// The numbers right-align against the board's field, and a number too
+    /// long for it moves the field's edge out. The text starts on the first
+    /// whole cell past the divider's margin, so it stays on the cell grid the
+    /// buffer's text paints on.
     pub(super) fn compute(area: Rect, digits: u16, number_scale: u16) -> Self {
         let side = (u32::from(area.width) * 100 / 312) as u16;
         let merged = area.width.saturating_sub(2 * side);
-        let number_right =
-            NUMBER_X + text_run::advance_sixteenths(usize::from(digits), number_scale);
+        let number_right = NUMBER_RIGHT
+            .max(NUMBER_X + text_run::advance_sixteenths(usize::from(digits), number_scale));
         let text_offset = (number_right + 2 * DIVIDER_MARGIN + 1).div_ceil(16);
         let column = |x: u16, width: u16| Column {
             x,
@@ -145,11 +164,10 @@ impl GridColumns {
 
     /// The cells a chip reading `text` takes.
     ///
-    /// The chip holds its text and the board's padding on each side, rounded
-    /// up to whole cells.
+    /// The cells hold the chip's box, its text and the board's padding on each
+    /// side, and the board's margin after it, rounded up to whole cells.
     fn chip_cells(&self, text: &str) -> u16 {
-        let advance = text_run::advance_sixteenths(text.chars().count(), self.number_scale);
-        (advance + 2 * CHIP_PAD).div_ceil(16)
+        (chip_width(text, self.number_scale) + CHIP_MARGIN).div_ceil(16)
     }
 }
 
@@ -177,8 +195,9 @@ impl Column {
 ///
 /// Each scope the boards added falls back to a neighbor when a theme leaves it
 /// unset, so a theme without those scopes keeps its look. The band takes the
-/// conflict header's color, the chip takes the band, and the ghost takes muted
-/// italic text. A missing tint is its side's color washed toward the surface.
+/// conflict header's color, the chip takes the band, each side's chip takes
+/// its side, and the ghost takes muted italic text. A missing tint is its
+/// side's color washed toward the surface.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) struct GridColors {
     pub(super) bg: [u8; 3],
@@ -201,6 +220,11 @@ pub(super) struct GridColors {
     /// The merged column's rows of an unsettled chunk.
     pub(super) band: Tone,
     pub(super) chip: Tone,
+    /// The chip of a run the merge takes from ours, or a chunk resolved to it.
+    pub(super) chip_ours: Tone,
+    /// The chip of a run the merge takes from theirs, or a chunk resolved to
+    /// it.
+    pub(super) chip_theirs: Tone,
 }
 
 impl GridColors {
@@ -223,6 +247,9 @@ impl GridColors {
                 .try_get(s::VCS_CONFLICT_BAND)
                 .unwrap_or_else(|| theme.get(s::VCS_CONFLICT_HEADER)),
         )?;
+        let ours = tone(theme.get(s::VCS_CONFLICT_OURS))?;
+        let theirs = tone(theme.get(s::VCS_CONFLICT_THEIRS))?;
+        let chip = |scope: &str, side: Tone| theme.try_get(scope).and_then(tone).unwrap_or(side);
         let [r, g, b] = muted;
 
         Some(Self {
@@ -240,13 +267,12 @@ impl GridColors {
                     .fg(Color::Rgb(r, g, b))
                     .add_modifier(Modifier::ITALIC)
             }),
-            ours: tone(theme.get(s::VCS_CONFLICT_OURS))?,
-            theirs: tone(theme.get(s::VCS_CONFLICT_THEIRS))?,
+            ours,
+            theirs,
             band,
-            chip: theme
-                .try_get(s::VCS_CONFLICT_CHIP)
-                .and_then(tone)
-                .unwrap_or(band),
+            chip: chip(s::VCS_CONFLICT_CHIP, band),
+            chip_ours: chip(s::VCS_CONFLICT_CHIP_OURS, ours),
+            chip_theirs: chip(s::VCS_CONFLICT_CHIP_THEIRS, theirs),
         })
     }
 }
@@ -337,13 +363,13 @@ impl RowLook {
             MergeRowKind::Ours => Self {
                 ours: lit(colors.ours),
                 merged: barred(colors.ours),
-                chip: Some(("auto \u{b7} ours", colors.ours)),
+                chip: Some(("auto \u{b7} ours", colors.chip_ours)),
                 ..Self::default()
             },
             MergeRowKind::Theirs => Self {
                 merged: barred(colors.theirs),
                 theirs: lit(colors.theirs),
-                chip: Some(("auto \u{b7} theirs", colors.theirs)),
+                chip: Some(("auto \u{b7} theirs", colors.chip_theirs)),
                 ..Self::default()
             },
             MergeRowKind::Conflict => unsettled(true, "conflict \u{b7} o t b"),
@@ -352,14 +378,14 @@ impl RowLook {
                 ours: lit(colors.ours),
                 merged: barred(colors.ours),
                 theirs: faded,
-                chip: Some(("\u{2713} took ours", colors.ours)),
+                chip: Some(("\u{2713} took ours", colors.chip_ours)),
                 ..Self::default()
             },
             MergeRowKind::TookTheirs => Self {
                 ours: faded,
                 merged: barred(colors.theirs),
                 theirs: lit(colors.theirs),
-                chip: Some(("\u{2713} took theirs", colors.theirs)),
+                chip: Some(("\u{2713} took theirs", colors.chip_theirs)),
                 ..Self::default()
             },
         }
@@ -777,16 +803,6 @@ pub(super) fn paint_rows(
         }
 
         if let Some((text, tone, cells)) = chip {
-            // A pool page captures no panel, so its chip box is the cells.
-            let box_bg = match paint.panels {
-                true => merged_bg,
-                false => tone.tint,
-            };
-            for x in text_end..merged.right() {
-                painter.buf[(x, y)]
-                    .set_char(' ')
-                    .set_bg(Color::Rgb(box_bg[0], box_bg[1], box_bg[2]));
-            }
             chips.push((Rect::new(text_end, y, cells, 1), text, tone));
         }
     }
@@ -832,15 +848,7 @@ pub(super) fn paint_rows(
     bars.flush(paint.scene);
     numbers.flush(paint.scene);
     for (area, text, tone) in chips {
-        draw_chip(
-            area,
-            text,
-            tone,
-            cols.number_scale,
-            paint.panels,
-            buf,
-            paint.scene,
-        );
+        draw_chip(area, text, tone, cols.number_scale, buf, paint.scene);
     }
 }
 
@@ -961,48 +969,41 @@ fn push_hairlines(bars: &mut BarBatch, cols: &GridColumns, y: u16, rows: u16, co
     }
 }
 
-/// Draw a chip reading `text` over `area`, its text in `tone`'s color on its
-/// tint.
+/// Draw a chip reading `text` over `area`, its text in `tone`'s color on a
+/// rounded box in its tint.
 ///
-/// With `panel` set the box is a rounded panel. Without it the cells beneath
-/// already carry the box.
-///
-/// The panel is a backdrop, so the pane pool's composite covers it through a
-/// glide. The page under the composite paints the chip too, so the chip
-/// travels with its row and does not hold its settled place.
+/// The box ends [`CHIP_MARGIN`] before the area's right edge and stands in
+/// from the row's top and bottom, as the board's 16 px chip sits on its 18 px
+/// row. The box is a bar, which places in sixteenths and rides a pool page, so
+/// the chip travels with its row through a glide.
 fn draw_chip(
     area: Rect,
     text: &str,
     tone: Tone,
     scale: u16,
-    panel: bool,
     buf: &mut Buffer,
     scene: &mut ApcScene,
 ) {
-    if panel {
-        Panel {
-            style: BorderStyle::None_,
-            border: tone.tint,
-            corner_radius: 4,
-            fill: Some(tone.tint),
-            shadow: PanelShadow::None_,
-            edges: Edge::symmetric(0, 0),
-            corners: 0,
-            fillets: 0,
-            fillet_radius: 2,
-            hatch: None,
-            above_pools: false,
-            backdrop: true,
-            anchor: None,
-        }
-        .draw_components(area, scene);
+    let width = chip_width(text, scale);
+    let x = (area.width * 16).saturating_sub(CHIP_MARGIN + width);
+    // The box renders alone and before the run, since a bar batch drops the
+    // corner radius and the run's glyphs draw over the box.
+    Bar {
+        x: x as i16,
+        y: 1,
+        width,
+        height: CHIP_HEIGHT,
+        color: tone.tint,
+        radius: CHIP_RADIUS,
+        corners: 0,
     }
+    .render(area, buf, scene);
     TextRun {
-        col: CHIP_PAD as i16,
+        col: (x + CHIP_PAD) as i16,
         row: 0,
         scale,
         color: tone.fg,
-        bg: Some(tone.tint),
+        bg: None,
         text,
         bold: false,
         italic: false,
@@ -1010,6 +1011,12 @@ fn draw_chip(
         anchor: None,
     }
     .render(area, buf, scene);
+}
+
+/// The width of a chip's box reading `text` at `scale`, its text and the
+/// board's padding on each side, in sixteenths.
+fn chip_width(text: &str, scale: u16) -> u16 {
+    text_run::advance_sixteenths(text.chars().count(), scale) + 2 * CHIP_PAD
 }
 
 #[cfg(test)]

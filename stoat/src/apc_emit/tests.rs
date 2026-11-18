@@ -7119,7 +7119,6 @@ fn a_conflict_pane_fills_with_the_three_column_body() {
         Some(GridPaint {
             scene: &mut scene,
             cursor_row: None,
-            panels: false,
         }),
     );
     let mut expected = crate::render::serialize_buffer(&cells);
