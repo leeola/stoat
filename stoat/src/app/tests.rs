@@ -5533,6 +5533,7 @@ fn a_click_away_rests_a_run_commits_diff_changes_or_docked_view() {
             cursor_held: false,
             reloaded: false,
             revealed: Vec::new(),
+            empty: false,
         };
         let id = ws.diff_changes_views.insert(DiffChangesState {
             excerpts: vec![excerpt],

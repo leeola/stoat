@@ -149,8 +149,8 @@ struct ExcerptLayout {
     /// The LSP semantic tokens that color the excerpt's rows, which report no
     /// rows they changed.
     lsp_token_version: Option<u64>,
-    /// Whether a Scope row sits under the header, which moves every display
-    /// row's line by one.
+    /// Whether a Scope row or an empty file's note row sits under the header,
+    /// which moves every display row's line by one.
     scope_row: bool,
 }
 
@@ -550,7 +550,7 @@ pub(crate) fn summarize_rows(
         if rows.contains(&excerpt.top) {
             lines.push(header_bar(table));
         }
-        if excerpt.scope_row.is_some() && rows.contains(&(excerpt.top + 1)) {
+        if (excerpt.scope_row.is_some() || excerpt.empty) && rows.contains(&(excerpt.top + 1)) {
             lines.push(LineRuns::default());
         }
         let display_rows = rows.start.max(first) - first..end.saturating_sub(first);
@@ -983,12 +983,12 @@ fn excerpt_keys(
                 inlay_set_version: snapshot.inlay_snapshot().inlay_set_version,
                 pairs_modified_hunks: snapshot.pairs_modified_hunks(),
                 lsp_token_version,
-                scope_row: excerpt.scope_row.is_some(),
+                scope_row: excerpt.scope_row.is_some() || excerpt.empty,
             },
             None => ExcerptLayout {
                 rows,
                 lsp_token_version,
-                scope_row: excerpt.scope_row.is_some(),
+                scope_row: excerpt.scope_row.is_some() || excerpt.empty,
                 ..ExcerptLayout::default()
             },
         };

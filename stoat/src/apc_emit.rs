@@ -3773,6 +3773,7 @@ fn stack_page_version(
             excerpt.top,
             &excerpt.rel_path,
             excerpt.folded_version,
+            excerpt.empty,
             editor.display_map.wrap_width(),
             display_map_stamp(buffer_version, paint_version),
             editor.display_map.diff_version(),

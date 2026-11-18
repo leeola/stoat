@@ -709,6 +709,7 @@ fn stack_cache_key(
             end,
             &excerpt.rel_path,
             excerpt.folded_version,
+            excerpt.empty,
             shown.display_map.buffer_snapshot().version(),
             shown.display_map.snapshot().paint_version(),
             diff_version(buffers, excerpt.buffer_id)?,

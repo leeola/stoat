@@ -2009,6 +2009,102 @@ pub(crate) fn paint_scope_row(
     }
 }
 
+/// Paint a note row over `row`, which reads `left` and `right` each centered in
+/// its half of the row, as the stack paints one for an empty file with no base.
+///
+/// The row takes `diff.fold`'s surface, as a fold row does. Its halves meet at
+/// the divider that [`diff_divider_x`] places, and the divide's hairline runs
+/// through the row between them. A row too narrow for a divide centers `left`
+/// alone.
+///
+/// With a `scene` whose gutter colors resolve the row draws rich, as
+/// [`paint_diff_rows`] draws its gutter. Each text is then a run at the caption
+/// scale in `ui.text.muted`, and the divide is a bar in the divider color.
+/// Cells write both texts in the muted style over the surface's cells. With
+/// `decorations_only` the row sends the scene's bars and runs alone.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn paint_note_row(
+    left: &str,
+    right: &str,
+    row: Rect,
+    theme: &crate::theme::Theme,
+    fallback_style: Style,
+    buf: &mut Buffer,
+    scene: Option<&mut ApcScene>,
+    decorations_only: bool,
+) {
+    let mut rich = scope_gutter(scene, theme, fallback_style);
+    let (_, cells) = paint_fold_surface(row, row.y, theme, &mut rich, buf, decorations_only);
+    let muted = theme.get(s::UI_TEXT_MUTED);
+    let divider = diff_divider_x(row);
+
+    match rich.as_mut() {
+        Some(rg) => {
+            let scale = theme.type_scale(TypeRole::Caption);
+            let color = rg
+                .colors
+                .faded(style_rgb(muted.fg).unwrap_or(rg.colors.dim));
+            let width = row.width * 16;
+            let divide = divider.map(|divider| (divider - row.x) * 16 + DIVIDER_RULE_X);
+            let spans = match divide {
+                Some(divide) => [Some((left, 0..divide)), Some((right, divide..width))],
+                None => [Some((left, 0..width)), None],
+            };
+            for (text, span) in spans.into_iter().flatten() {
+                let advance = text_run::advance_sixteenths(text.chars().count(), scale);
+                let col = span.start + (span.end - span.start).saturating_sub(advance) / 2;
+                rg.numbers.push(
+                    row,
+                    TextRun {
+                        col: col as i16,
+                        row: 0,
+                        scale,
+                        color,
+                        bg: None,
+                        text,
+                        bold: false,
+                        italic: false,
+                        follow: 0,
+                        anchor: None,
+                    },
+                );
+            }
+            if let Some(x) = divide {
+                rg.bars.push(
+                    row,
+                    Bar {
+                        x: x as i16,
+                        y: 0,
+                        width: 1,
+                        height: 16,
+                        color: rg.colors.divider,
+                        radius: 0,
+                        corners: 0,
+                    },
+                );
+            }
+            rg.numbers.flush(rg.scene);
+            rg.bars.flush(rg.scene);
+        },
+        None if !decorations_only => {
+            let style = cells.patch(muted);
+            let spans = match divider {
+                Some(divider) => [
+                    Some((left, row.x..divider)),
+                    Some((right, divider + 1..row.right())),
+                ],
+                None => [Some((left, row.x..row.right())), None],
+            };
+            for (text, span) in spans.into_iter().flatten() {
+                let width = text.chars().count() as u16;
+                let x = span.start + (span.end - span.start).saturating_sub(width) / 2;
+                write_str_clipped(buf, x, row.y, text, style, span.end);
+            }
+        },
+        None => {},
+    }
+}
+
 /// The rich gutter of a row that draws no number, such as a Scope row, or
 /// `None` without a `scene` and where the gutter colors do not resolve.
 ///

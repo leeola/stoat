@@ -1634,7 +1634,7 @@ fn open_stack_symbol_picker(stoat: &mut Stoat) -> UpdateEffect {
         let files: Vec<(BufferId, PathBuf, Rope)> = state
             .excerpts
             .iter()
-            .filter(|excerpt| excerpt.folded_version.is_some())
+            .filter(|excerpt| excerpt.shows_rows())
             .filter_map(|excerpt| {
                 let path = ws.buffers.path_for(excerpt.buffer_id)?.to_path_buf();
                 let rope = ws

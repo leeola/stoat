@@ -858,23 +858,25 @@ fn jump_in_editor(
 /// The excerpts that a search over the focused changes view walks, in stack
 /// order, and the position of the focused excerpt among them.
 ///
-/// An excerpt that waits on its diff map is left out, because the stack's focus
-/// does not move to it.
+/// An excerpt that shows no rows is left out, because the stack's focus does
+/// not move to it.
 ///
-/// `None` outside a changes view, while the focused excerpt waits on its diff
-/// map, and for a select mode walk, whose one selection set holds the ranges
-/// of one buffer only.
+/// `None` outside a changes view, while the focused excerpt shows no rows, and
+/// for a select mode walk, whose one selection set holds the ranges of one
+/// buffer only.
 fn stack_scan(ws: &Workspace, extend: bool) -> Option<(usize, Vec<(EditorId, BufferId)>)> {
     if extend {
         return None;
     }
     let state = ws.focused_diff_changes()?;
-    state.focused_excerpt()?.folded_version?;
+    if !state.focused_excerpt()?.shows_rows() {
+        return None;
+    }
     let folded: Vec<(usize, EditorId, BufferId)> = state
         .excerpts
         .iter()
         .enumerate()
-        .filter(|(_, excerpt)| excerpt.folded_version.is_some())
+        .filter(|(_, excerpt)| excerpt.shows_rows())
         .map(|(index, excerpt)| (index, excerpt.editor_id, excerpt.buffer_id))
         .collect();
     let at = folded

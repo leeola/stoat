@@ -299,6 +299,21 @@ pub(crate) struct Excerpt {
     /// the first change lies at the top level, or the language has no outline
     /// query, since the row then has no Scope to show.
     pub scope_row: Option<Arc<FoldScope>>,
+    /// Whether the file holds no line and has no base, so the stack shows one
+    /// note row for it in place of rows. [`refold`] writes it at each cut.
+    pub empty: bool,
+}
+
+impl Excerpt {
+    /// Whether the stack shows rows of the excerpt's editor, the rows a cursor
+    /// stands on.
+    ///
+    /// An excerpt that waits on its diff map shows none yet, and the excerpt of
+    /// an empty file shows its note row alone, so `j`, `k`, a search, and the
+    /// staging keys pass it.
+    pub(crate) fn shows_rows(&self) -> bool {
+        self.folded_version.is_some() && !self.empty
+    }
 }
 
 /// The size of one excerpt's diff, which its header row counts out.
@@ -860,9 +875,10 @@ impl StackStamp {
 /// excerpt whose file left the list goes, unless an edit there took the file
 /// off the list and the focus is still on it. A file with no excerpt gets one.
 /// An excerpt whose buffer's diff map moved refolds, and each waiting landing
-/// lands once its excerpt is folded. The list reads the repository tally,
-/// which the pump drives too, and the buffers a disposed changes view released
-/// close here.
+/// lands once its excerpt is folded. A focus on an excerpt that shows no rows
+/// moves to one that does, as [`settle_focus`] moves it. The list reads the
+/// repository tally, which the pump drives too, and the buffers a disposed
+/// changes view released close here.
 /// Answers on the contract every pump in [`Stoat::drive_pumps`] answers.
 pub(crate) fn pump_diff_changes_stack(stoat: &mut Stoat) -> bool {
     let released = mem::take(&mut stoat.active_workspace_mut().diff_changes_released);
@@ -885,7 +901,38 @@ pub(crate) fn pump_diff_changes_stack(stoat: &mut Stoat) -> bool {
     let ws = stoat.active_workspace_mut();
     let refolded = refold(ws);
     let landed = land_pending(ws);
-    !released.is_empty() || tallied || relisted || refolded || landed
+    let mut settled = false;
+    for state in ws.diff_changes_views.values_mut() {
+        settled |= settle_focus(state);
+    }
+    !released.is_empty() || tallied || relisted || refolded || landed || settled
+}
+
+/// Move the focus of `state` off a cut excerpt that shows no rows, and report
+/// whether it moved.
+///
+/// The excerpt of an empty file shows its note row alone, so no cursor stands
+/// in it. The focus moves to the nearest excerpt that shows rows, the ones
+/// below it first. An excerpt that waits on its diff map keeps the focus,
+/// since it shows rows once its map lands.
+fn settle_focus(state: &mut DiffChangesState) -> bool {
+    let Some(focused) = state.focused_excerpt() else {
+        return false;
+    };
+    if focused.folded_version.is_none() || focused.shows_rows() {
+        return false;
+    }
+    let below = state.focused + 1..state.excerpts.len();
+    let above = (0..state.focused).rev();
+    let Some(index) = below
+        .chain(above)
+        .find(|&index| state.excerpts[index].shows_rows())
+    else {
+        return false;
+    };
+    state.focused = index;
+    state.held_screen_row = None;
+    true
 }
 
 /// Lay the excerpts of `state` out in stack rows, and answer the total.
@@ -909,8 +956,11 @@ pub(crate) fn layout_stack(
 
 /// The stack rows above `excerpt`'s first display row, its header row and the
 /// row that [`Excerpt::scope_row`] holds a Scope for.
+///
+/// The excerpt of an [`Excerpt::empty`] file takes its note row here too, the
+/// one row it shows under its header.
 pub(crate) fn header_rows(excerpt: &Excerpt) -> usize {
-    1 + usize::from(excerpt.scope_row.is_some())
+    1 + usize::from(excerpt.scope_row.is_some()) + usize::from(excerpt.empty)
 }
 
 /// The display rows of `excerpt`'s editor that the stack's window shows, as of
@@ -1066,7 +1116,8 @@ pub(crate) fn pinned_row(
     }
 }
 
-/// The display rows `excerpt` shows, zero while it waits on its diff map.
+/// The display rows `excerpt` shows, zero while it waits on its diff map and
+/// for an empty file, whose note row counts among its header rows.
 ///
 /// The count is current with every edit, fold, and wrap, and reads with no
 /// snapshot clone while none moved, so a layout per frame pays the version
@@ -1075,7 +1126,7 @@ pub(crate) fn excerpt_rows(
     excerpt: &Excerpt,
     editors: &mut SlotMap<EditorId, EditorState>,
 ) -> usize {
-    if excerpt.folded_version.is_none() {
+    if !excerpt.shows_rows() {
         return 0;
     }
     editors
@@ -1123,14 +1174,15 @@ fn no_base(map: &DiffMap) -> bool {
 /// The stack row of the focused excerpt's cursor, as of the last
 /// [`layout_stack`].
 ///
-/// `None` on an empty stack, and while the focused excerpt waits on its diff
-/// map.
+/// `None` on an empty stack, and while the focused excerpt shows no rows.
 pub(crate) fn cursor_stack_row(
     state: &DiffChangesState,
     editors: &mut SlotMap<EditorId, EditorState>,
 ) -> Option<usize> {
     let excerpt = state.focused_excerpt()?;
-    excerpt.folded_version?;
+    if !excerpt.shows_rows() {
+        return None;
+    }
     let editor = editors.get_mut(excerpt.editor_id)?;
     Some(excerpt.top + header_rows(excerpt) + view::cursor_display_row(editor) as usize)
 }
@@ -1143,14 +1195,15 @@ pub(crate) fn cursor_stack_row(
 /// excerpt header take no step, and a fold placeholder takes one. An origin is
 /// negative for the focused excerpt and the excerpts above it.
 ///
-/// `None` on an empty stack, and while the focused excerpt waits on its diff
-/// map.
+/// `None` on an empty stack, and while the focused excerpt shows no rows.
 pub(crate) fn step_origins(
     state: &DiffChangesState,
     editors: &mut SlotMap<EditorId, EditorState>,
 ) -> Option<Vec<i64>> {
     let focused = state.focused_excerpt()?;
-    focused.folded_version?;
+    if !focused.shows_rows() {
+        return None;
+    }
     let through_cursor = {
         let editor = editors.get_mut(focused.editor_id)?;
         let cursor_row = view::cursor_display_row(editor);
@@ -1160,14 +1213,14 @@ pub(crate) fn step_origins(
             .buffer_rows_above(cursor_row + 1)
     };
 
-    // An excerpt that waits on its diff map paints no row, so the walk passes
-    // over it.
+    // An excerpt that waits on its diff map and the excerpt of an empty file
+    // paint no row, so the walk passes over them.
     let totals: Vec<i64> = state
         .excerpts
         .iter()
-        .map(|excerpt| match excerpt.folded_version {
-            None => 0,
-            Some(_) => editors.get_mut(excerpt.editor_id).map_or(0, |editor| {
+        .map(|excerpt| match excerpt.shows_rows() {
+            false => 0,
+            true => editors.get_mut(excerpt.editor_id).map_or(0, |editor| {
                 let snapshot = editor.display_map.snapshot();
                 i64::from(snapshot.buffer_rows_above(snapshot.line_count()))
             }),
@@ -1434,7 +1487,7 @@ pub(crate) fn apply_stack_hold(
 
 /// The stack row of the text `hold` keeps, as of the last [`layout_stack`].
 ///
-/// `None` when the seat's excerpt left the stack or waits on its diff map.
+/// `None` when the seat's excerpt left the stack or shows no rows.
 fn hold_stack_row(
     state: &DiffChangesState,
     editors: &mut SlotMap<EditorId, EditorState>,
@@ -1447,7 +1500,9 @@ fn hold_stack_row(
         .excerpts
         .iter()
         .find(|excerpt| excerpt.editor_id == *editor_id)?;
-    excerpt.folded_version?;
+    if !excerpt.shows_rows() {
+        return None;
+    }
     let editor = editors.get_mut(*editor_id)?;
     let snapshot = editor.display_map.snapshot();
     let buffer_snapshot = snapshot.buffer_snapshot();
@@ -1526,7 +1581,7 @@ pub(crate) fn reveal_cursor(stoat: &mut Stoat) -> bool {
     layout_stack(state, editors);
     let Some((editor_id, buffer_id, revealed)) = state
         .focused_excerpt()
-        .filter(|excerpt| excerpt.folded_version.is_some())
+        .filter(|excerpt| excerpt.shows_rows())
         .map(|excerpt| {
             (
                 excerpt.editor_id,
@@ -1625,7 +1680,7 @@ pub(crate) fn expand_from_cursor(stoat: &mut Stoat, dir: ExpandDir) -> Result<()
     };
     let Some(editor) = state
         .focused_excerpt()
-        .filter(|excerpt| excerpt.folded_version.is_some())
+        .filter(|excerpt| excerpt.shows_rows())
         .and_then(|excerpt| editors.get_mut(excerpt.editor_id))
     else {
         return Err("no fold to open");
@@ -1694,7 +1749,7 @@ pub(crate) fn collapse_at_cursor(stoat: &mut Stoat) -> bool {
     let Some(excerpt) = state
         .excerpts
         .get_mut(state.focused)
-        .filter(|excerpt| excerpt.folded_version.is_some())
+        .filter(|excerpt| excerpt.shows_rows())
     else {
         return false;
     };
@@ -1765,9 +1820,9 @@ pub(crate) fn collapse_at_cursor(stoat: &mut Stoat) -> bool {
 /// than the view centers the cursor's row alone, as
 /// [`view::center_jump_on_span`] does.
 ///
-/// Before the first paint the stack has no height to center in, and while the
-/// focused excerpt waits on its diff map it has no rows. Either answers
-/// `false`, and the paint shows the row.
+/// Before the first paint the stack has no height to center in, and a focused
+/// excerpt that shows no rows has none to center. Either answers `false`, and
+/// the paint shows the row.
 pub(crate) fn center_jump(
     stoat: &mut Stoat,
     span: Range<u32>,
@@ -1789,9 +1844,7 @@ pub(crate) fn center_jump(
     let total = layout_stack(state, editors);
     let viewport = state.viewport_rows;
     let top = match state.focused_excerpt() {
-        Some(excerpt) if viewport > 0 && excerpt.folded_version.is_some() => {
-            excerpt.top + header_rows(excerpt)
-        },
+        Some(excerpt) if viewport > 0 && excerpt.shows_rows() => excerpt.top + header_rows(excerpt),
         _ => return false,
     };
     let rows = if span.len() > viewport {
@@ -2175,6 +2228,7 @@ fn open_excerpt(
         cursor_held: false,
         reloaded: false,
         revealed: Vec::new(),
+        empty: false,
     })
 }
 
@@ -2235,6 +2289,7 @@ pub(crate) fn adopt_excerpt(
             cursor_held: false,
             reloaded: false,
             revealed: Vec::new(),
+            empty: false,
         },
     );
     tracing::debug!(
@@ -2340,6 +2395,10 @@ fn refold(ws: &mut Workspace) -> bool {
             };
             let new_map = excerpt.folded_version != Some(folded);
             excerpt.folded_version = Some(folded);
+            excerpt.empty = excerpt_no_base(excerpt, buffers)
+                && buffers.get(excerpt.buffer_id).is_some_and(|buffer| {
+                    buffer.read().expect("buffer poisoned").rope().is_empty()
+                });
             excerpt.folded_syntax = syntax;
             excerpt.cursor_held = cursor.is_some();
             if new_map {
@@ -2417,6 +2476,10 @@ fn land_pending(ws: &mut Workspace) -> bool {
 /// A landing on its own row holds its screen row for the next paint. A landing
 /// that a fold or a missing excerpt moved shows another line, so the paint
 /// scrolls the least distance instead.
+///
+/// The excerpt of an [`Excerpt::empty`] file has no line for the cursor, so a
+/// landing there focuses it, scrolls its header's row into the view, and
+/// places no cursor.
 fn land(
     state: &mut DiffChangesState,
     editors: &mut SlotMap<EditorId, EditorState>,
@@ -2440,6 +2503,15 @@ fn land(
     };
     if excerpt.folded_version.is_none() {
         return false;
+    }
+    if excerpt.empty {
+        state.focused = index;
+        state.pending_landing = None;
+        state.held_screen_row = None;
+        layout_stack(state, editors);
+        let (header, viewport) = (state.excerpts[index].top, state.viewport_rows);
+        state.ensure_row_visible(editors, header, viewport);
+        return true;
     }
     let Some(editor) = editors.get_mut(excerpt.editor_id) else {
         return false;
@@ -4125,6 +4197,44 @@ fn hint_width() -> u32 {
 
         stacked(&mut h);
         assert_eq!(excerpts(&h), listed(&["a.txt"]));
+    }
+
+    /// An empty file with no base takes a note row under its header and shows
+    /// no row, so no cursor stands in it. `j` from the last row of the file
+    /// above passes it, and a focus that starts on it moves to the file below
+    /// at the next pump.
+    #[test]
+    fn an_empty_file_with_no_base_takes_a_note_row_and_no_cursor() {
+        let mut h = TestHarness::with_size(100, 24);
+        h.stage_review_scenario("/repo", &[("a.txt", "a\n", "A\n"), ("c.txt", "c\n", "C\n")]);
+        repo(&mut h).empty_untracked("b.txt");
+        stacked(&mut h);
+
+        let empty = with_stack(&mut h, |state, editors| {
+            let excerpt = &state.excerpts[1];
+            let rows = (
+                excerpt.rel_path.clone(),
+                excerpt.empty,
+                header_rows(excerpt),
+                excerpt_rows(excerpt, editors),
+            );
+            state.focused = 0;
+            place_cursor(&mut editors[state.excerpts[0].editor_id], Point::new(1, 0));
+            rows
+        });
+        h.type_keys("j");
+        let after_j = focus(&mut h).0;
+        with_stack(&mut h, |state, _| state.focused = 1);
+        pump_diff_changes_stack(&mut h.stoat);
+
+        assert_eq!(
+            (empty, after_j, focus(&mut h).0),
+            (
+                ("b.txt".to_string(), true, 2, 0),
+                "c.txt".to_string(),
+                "c.txt".to_string()
+            ),
+        );
     }
 
     /// A file with no change folds whole under one fold row, whose Scope reads

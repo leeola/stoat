@@ -74,9 +74,10 @@ pub(super) fn toggle_diff_changes(stoat: &mut Stoat) -> UpdateEffect {
 /// jump and `g a` return to the file the changes view covered.
 ///
 /// The excerpts close with it, and so does each buffer only the stack opened,
-/// except the one the pane lands on. With no folded excerpt in focus the close
-/// puts back the view the changes view covered. A covered view that is gone
-/// closes the pane instead, and a last pane gets a fresh scratch editor.
+/// except the one the pane lands on. With no excerpt in focus that shows rows
+/// the close puts back the view the changes view covered. A covered view that
+/// is gone closes the pane instead, and a last pane gets a fresh scratch
+/// editor.
 pub(crate) fn close_diff_changes(stoat: &mut Stoat) -> UpdateEffect {
     close_changes_view(stoat, true)
 }
@@ -261,8 +262,8 @@ pub(crate) fn close_diff_changes_for_open(
 /// excerpt and its undo history carry over. The stack parks rather than
 /// closing, so the flip back reuses its excerpts.
 ///
-/// A stack with no folded excerpt in focus leaves the changes view open, and
-/// [`no_target_status`] says why in the status row.
+/// A stack with no excerpt in focus that shows rows leaves the changes view
+/// open, and [`no_target_status`] says why in the status row.
 ///
 /// The cursor's line keeps the screen row it held in the stack, where the file
 /// has rows enough above and below it. A cursor off the stack's painted rows
@@ -400,7 +401,7 @@ pub(super) fn diff_changes_jump(stoat: &mut Stoat, delta: i32) -> UpdateEffect {
         return UpdateEffect::None;
     };
     let editor_id = match state.focused_excerpt() {
-        Some(excerpt) if excerpt.folded_version.is_some() => excerpt.editor_id,
+        Some(excerpt) if excerpt.shows_rows() => excerpt.editor_id,
         _ => return UpdateEffect::None,
     };
     let Some(editor) = editors.get_mut(editor_id) else {
@@ -867,7 +868,7 @@ pub(crate) fn focus_stack_buffer(stoat: &mut Stoat, buffer_id: BufferId) -> bool
     let Some(index) = state
         .excerpts
         .iter()
-        .position(|excerpt| excerpt.buffer_id == buffer_id && excerpt.folded_version.is_some())
+        .position(|excerpt| excerpt.buffer_id == buffer_id && excerpt.shows_rows())
     else {
         return false;
     };
@@ -881,12 +882,14 @@ pub(crate) fn focus_stack_buffer(stoat: &mut Stoat, buffer_id: BufferId) -> bool
 /// The focused excerpt's file, relative to the repository, and the buffer
 /// position of its cursor.
 ///
-/// `None` with no folded excerpt in focus.
+/// `None` with no excerpt in focus that shows rows.
 fn focused_target(stoat: &mut Stoat) -> Option<(String, Point)> {
     let ws = stoat.active_workspace_mut();
     let id = ws.focused_diff_changes_id()?;
     let excerpt = ws.diff_changes_views.get(id)?.focused_excerpt()?;
-    excerpt.folded_version?;
+    if !excerpt.shows_rows() {
+        return None;
+    }
     let rel_path = excerpt.rel_path.clone();
     let editor = ws.editors.get_mut(excerpt.editor_id)?;
     Some((rel_path, diff_changes::cursor_point(editor)))
@@ -895,17 +898,19 @@ fn focused_target(stoat: &mut Stoat) -> Option<(String, Point)> {
 /// The focused excerpt's buffer and the selections of its editor, which a
 /// close carries to the pane.
 ///
-/// `None` with no folded excerpt in focus.
+/// `None` with no excerpt in focus that shows rows.
 fn focused_target_selections(stoat: &Stoat) -> Option<(BufferId, Arc<[Selection<Anchor>]>)> {
     let ws = stoat.active_workspace();
     let excerpt = ws.focused_diff_changes()?.focused_excerpt()?;
-    excerpt.folded_version?;
+    if !excerpt.shows_rows() {
+        return None;
+    }
     let editor = ws.editors.get(excerpt.editor_id)?;
     Some((excerpt.buffer_id, editor.selections.shared_anchors()))
 }
 
-/// The status row's answer to a key that finds no folded excerpt in focus on
-/// the focused changes view.
+/// The status row's answer to a key that finds no excerpt in focus that shows
+/// rows on the focused changes view.
 ///
 /// The answer agrees with the pane. "no changes" needs an empty stack over a
 /// landed repository tally, where the pane reads "no changes" too. Any other
@@ -988,7 +993,9 @@ fn step_place(stoat: &mut Stoat) -> Option<(usize, u32)> {
     let id = ws.focused_diff_changes_id()?;
     let state = ws.diff_changes_views.get(id)?;
     let excerpt = state.focused_excerpt()?;
-    excerpt.folded_version?;
+    if !excerpt.shows_rows() {
+        return None;
+    }
     let editor = ws.editors.get_mut(excerpt.editor_id)?;
     Some((state.focused, view::cursor_display_row(editor)))
 }
@@ -1018,7 +1025,7 @@ fn cross_excerpt(stoat: &mut Stoat, down: bool) -> bool {
     };
     let Some(index) = excerpts_past(state, down)
         .into_iter()
-        .find(|&index| state.excerpts[index].folded_version.is_some())
+        .find(|&index| state.excerpts[index].shows_rows())
     else {
         return false;
     };
@@ -1128,7 +1135,7 @@ fn cross_rows(
 ) {
     for index in excerpts_past(state, down) {
         let excerpt = &state.excerpts[index];
-        if excerpt.folded_version.is_none() {
+        if !excerpt.shows_rows() {
             continue;
         }
         let Some(editor) = editors.get_mut(excerpt.editor_id) else {

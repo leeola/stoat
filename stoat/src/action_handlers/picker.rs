@@ -876,7 +876,7 @@ fn open_stack_diagnostics_picker(stoat: &mut Stoat) -> UpdateEffect {
         state
             .excerpts
             .iter()
-            .filter(|excerpt| excerpt.folded_version.is_some())
+            .filter(|excerpt| excerpt.shows_rows())
             .filter_map(|excerpt| ws.buffers.path_for(excerpt.buffer_id))
             .map(Path::to_path_buf)
             .collect()

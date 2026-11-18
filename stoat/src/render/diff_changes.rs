@@ -296,7 +296,8 @@ pub(crate) fn stack_composited(pane: &Pane, frame: FrameCtx<'_>) -> bool {
 /// row, its viewport, its text rect, and the cell of its cursor.
 ///
 /// The first row of a file with no base reads `no base` on its base half, as
-/// [`paint_no_base`] lays it out.
+/// [`paint_no_base`] lays it out. An empty file with no base shows one note row
+/// under its header in place of rows, as [`review::paint_note_row`] paints it.
 ///
 /// Under [`PagePaint::DecorationsOnly`] the rows write no cell. The headers'
 /// hairlines and runs, the `no base` label, and the excerpts' diff gutters
@@ -368,6 +369,23 @@ pub(crate) fn paint_stack_rows(
                 scope,
                 row,
                 None,
+                frame.theme,
+                text_style,
+                buf,
+                match scene.live() {
+                    true => Some(&mut *scene),
+                    false => None,
+                },
+                paint == PagePaint::DecorationsOnly,
+            );
+        }
+        if excerpt.empty
+            && let Some(row) = header_row(top + 1)
+        {
+            review::paint_note_row(
+                "no base",
+                "empty \u{b7} 0 lines",
+                row,
                 frame.theme,
                 text_style,
                 buf,
@@ -1549,6 +1567,99 @@ mod tests {
                 muted.expect("an RGB muted color"),
                 None
             )],
+        );
+    }
+
+    /// In cells an empty file with no base reads `no base` and `empty U+00B7 0
+    /// lines` on the row under its header, each centered in its half of the
+    /// row.
+    #[test]
+    fn an_empty_file_reads_no_base_and_empty_on_its_note_row() {
+        let mut h = untracked_stack(16, 0);
+        h.stoat.stoatty = false;
+        let buf = h.render_composited();
+        let inner = {
+            let ws = h.stoat.active_workspace();
+            ws.panes.pane(ws.panes.focus()).area
+        };
+        let divider = review::diff_divider_x(inner).expect("a split stack");
+
+        let right = "empty \u{b7} 0 lines";
+        let (left_width, right_width) = (divider - inner.x, inner.right() - divider - 1);
+        assert_eq!(
+            [
+                header_text(&buf, inner.x, left_width, inner.y + 1),
+                header_text(&buf, divider + 1, right_width, inner.y + 1),
+            ],
+            [
+                ("no base".to_string(), Some(inner.x + (left_width - 7) / 2)),
+                (
+                    right.to_string(),
+                    Some(divider + 1 + (right_width - 15) / 2)
+                ),
+            ],
+        );
+    }
+
+    /// Under a live scene the note row's two texts are caption runs in the
+    /// muted color, each centered in its half, and the divide's hairline runs
+    /// between them as a bar.
+    #[test]
+    fn a_live_note_row_draws_two_centered_runs_and_the_divide() {
+        let mut h = untracked_stack(16, 0);
+        let width = {
+            let ws = h.stoat.active_workspace();
+            ws.panes.pane(ws.panes.focus()).area.width
+        };
+        let (runs, bars, scale) =
+            paint_directly(&mut h, |state, editors, buffers, frame, scene| {
+                let mut buf = Buffer::empty(Rect::new(0, 0, width, 14));
+                let area = buf.area;
+                paint_stack_rows(
+                    state,
+                    editors,
+                    buffers,
+                    true,
+                    frame.theme.get(scope::UI_TEXT),
+                    &mut UndercurlBatch::default(),
+                    frame,
+                    &mut buf,
+                    scene,
+                    0,
+                    area,
+                    PagePaint::Cells,
+                );
+                let commands = decode_stream(scene.bytes());
+                let runs: Vec<(String, i16)> = commands
+                    .iter()
+                    .filter_map(|command| match command {
+                        Command::TextRun(run) if run.row == 16 => Some((run.text.clone(), run.col)),
+                        _ => None,
+                    })
+                    .collect();
+                let bars: Vec<_> = frame_bars(commands)
+                    .into_iter()
+                    .filter(|bar| bar.1 == 16 && bar.2 == 1)
+                    .collect();
+                (runs, bars, frame.theme.type_scale(TypeRole::Caption))
+            });
+
+        let divide = (width - 1) / 2 * 16 + review::DIVIDER_RULE_X;
+        let right = "empty \u{b7} 0 lines";
+        let advance = |text: &str| text_run::advance_sixteenths(text.chars().count(), scale);
+        let right_col = divide + (width * 16 - divide - advance(right)) / 2;
+        assert_eq!(
+            (runs, bars),
+            (
+                vec![
+                    (
+                        "no base".to_string(),
+                        ((divide - advance("no base")) / 2) as i16
+                    ),
+                    (right.to_string(), right_col as i16),
+                ],
+                vec![(divide as i16, 16, 1, 16, HAIRLINE)],
+            ),
         );
     }
 
