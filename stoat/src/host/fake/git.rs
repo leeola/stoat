@@ -7,8 +7,8 @@ use crate::{
         git::{
             BackendSnafu, BlameCommit, BlameRun, ChangeLineStats, ChangedFile, CherryPickOutcome,
             CommitFileChange, CommitFileChangeKind, CommitInfo, ConflictedFile, FileBlame,
-            GitApplyError, GitHost, GitRepo, HunkTallies, MergeOutcome, MergeState, RebaseError,
-            RebaseTodo, RewriteResult, StagedKind,
+            FileChange, FileKind, GitApplyError, GitHost, GitRepo, HunkTallies, MergeOutcome,
+            MergeState, RebaseError, RebaseTodo, RewriteResult, StagedKind,
         },
     },
 };
@@ -355,6 +355,21 @@ impl<'a> FakeRepoBuilder<'a> {
         self
     }
 
+    /// Set how alike the move registered at `rel_path` is to the file it left,
+    /// in percent, which [`GitRepo::hunk_tallies`] reports.
+    ///
+    /// A move reads 100 until this says otherwise. Silently does nothing for a
+    /// path with no registration, as [`Self::hunks`] does.
+    pub fn similarity(&mut self, rel_path: impl AsRef<Path>, percent: u8) -> &mut Self {
+        let abs = self.workdir.join(rel_path.as_ref());
+        self.mutate_repo(|state| {
+            if let Some(change) = state.changed.iter_mut().find(|c| c.file.path == abs) {
+                change.similarity = percent;
+            }
+        });
+        self
+    }
+
     /// Set the lines `rel_path` adds and deletes, as
     /// [`GitRepo::change_line_stats`] reports them.
     ///
@@ -454,13 +469,16 @@ impl<'a> FakeRepoBuilder<'a> {
         self.head_file(&rel, head);
         self.mutate_repo(|state| {
             state.changed.retain(|c| c.file.path != abs);
-            state.changed.push(FakeChange::new(ChangedFile {
-                path: abs,
-                staged: false,
-                staged_kind: None,
-                untracked: false,
-                renamed_from: None,
-            }));
+            state.changed.push(FakeChange {
+                deleted: true,
+                ..FakeChange::new(ChangedFile {
+                    path: abs,
+                    staged: false,
+                    staged_kind: None,
+                    untracked: false,
+                    renamed_from: None,
+                })
+            });
         });
         self
     }
@@ -493,6 +511,8 @@ impl<'a> FakeRepoBuilder<'a> {
                 },
                 hunks: 0,
                 lines: (0, 0),
+                similarity: 100,
+                deleted: false,
             });
         });
         if let Some(fs) = self.fs {
@@ -545,6 +565,23 @@ impl<'a> FakeRepoBuilder<'a> {
         self.mutate_repo(move |state| {
             state.untracked.insert(abs);
         });
+        self
+    }
+
+    /// Record `rel_path` as an empty untracked file, and write it empty to the
+    /// attached [`FakeFs`] if one was attached.
+    ///
+    /// [`GitRepo::hunk_tallies`] names the file among its changes and counts no
+    /// hunk for it, as a real tally does for a file with no line. Unlike a path
+    /// of [`Self::untracked`], no other read sees it.
+    pub fn empty_untracked(&mut self, rel_path: impl AsRef<Path>) -> &mut Self {
+        let abs = self.workdir.join(rel_path);
+        self.mutate_repo(|state| {
+            state.empty_untracked.insert(abs.clone());
+        });
+        if let Some(fs) = self.fs {
+            fs.insert_file(&abs, b"");
+        }
         self
     }
 
@@ -882,6 +919,13 @@ struct FakeChange {
     file: ChangedFile,
     hunks: usize,
     lines: (u32, u32),
+    /// How alike a move is to the file it left, in percent, which
+    /// [`GitRepo::hunk_tallies`] reports. 100 until
+    /// [`FakeRepoBuilder::similarity`] sets it.
+    similarity: u8,
+    /// Whether the registration takes the file out of the working tree, as
+    /// [`FakeRepoBuilder::deleted`] records it.
+    deleted: bool,
 }
 
 impl FakeChange {
@@ -890,6 +934,8 @@ impl FakeChange {
             file,
             hunks: 1,
             lines: (0, 0),
+            similarity: 100,
+            deleted: false,
         }
     }
 }
@@ -930,6 +976,11 @@ struct FakeRepoState {
     /// them. A path with no entry holds none, so a fixture that seeds an
     /// untracked path and never counts its lines reads as it always did.
     untracked_lines: HashMap<PathBuf, u32>,
+    /// Absolute paths of empty untracked files, seeded via
+    /// [`FakeRepoBuilder::empty_untracked`]. Kept apart from `untracked`,
+    /// whose every path counts as one hunk, and read by
+    /// [`GitRepo::hunk_tallies`] alone.
+    empty_untracked: BTreeSet<PathBuf>,
     /// Absolute paths [`GitRepo::is_path_ignored`] reports as gitignored, seeded
     /// via [`FakeRepoBuilder::ignored`]. Empty by default.
     ignored: HashSet<PathBuf>,
@@ -1025,21 +1076,76 @@ impl FakeRepoState {
     /// it, as a seeded blob or in the HEAD commit's tree, and added when not.
     fn staged_kind(&self, workdir: &Path, file: &ChangedFile) -> StagedKind {
         let rel = file.path.strip_prefix(workdir).unwrap_or(&file.path);
-        let in_head = self.head_contents.contains_key(rel)
-            || self
-                .head
-                .as_ref()
-                .and_then(|head| self.commits.get(head))
-                .is_some_and(|commit| commit.tree.contains_key(rel));
         if file.renamed_from.is_some() {
             StagedKind::Renamed
         } else if self.removed_index_entries.contains(rel) {
             StagedKind::Deleted
-        } else if in_head {
+        } else if self.in_head(rel) {
             StagedKind::Modified
         } else {
             StagedKind::Added
         }
+    }
+
+    /// Whether HEAD holds the repo-relative `rel`, as a seeded blob or in the
+    /// HEAD commit's tree.
+    fn in_head(&self, rel: &Path) -> bool {
+        self.head_contents.contains_key(rel)
+            || self
+                .head
+                .as_ref()
+                .and_then(|head| self.commits.get(head))
+                .is_some_and(|commit| commit.tree.contains_key(rel))
+    }
+
+    /// How each registration and untracked path of a working tree at
+    /// `workdir` stands against HEAD, as [`GitRepo::hunk_tallies`] names them.
+    ///
+    /// A registration is a move when it records the path it left, a deletion
+    /// when [`FakeRepoBuilder::deleted`] made it, and modified when HEAD holds
+    /// its path. Otherwise it is new when it is staged or the index holds its
+    /// path, and untracked when not. A registration with no hunk keeps an entry
+    /// only as a move, an untracked file, or a new file, as a real tally does.
+    fn file_changes(&self, workdir: &Path) -> Vec<FileChange> {
+        let relative = |path: &Path| path.strip_prefix(workdir).unwrap_or(path).to_path_buf();
+        let registered = self.changed.iter().filter_map(|change| {
+            let path = relative(&change.file.path);
+            let kind = match &change.file.renamed_from {
+                Some(from) => FileKind::Moved {
+                    from: relative(from),
+                    similarity: change.similarity,
+                },
+                None if change.deleted => FileKind::Deleted,
+                None if self.in_head(&path) => FileKind::Modified,
+                None if change.file.staged || self.index_contents.contains_key(&path) => {
+                    FileKind::New
+                },
+                None => FileKind::Untracked,
+            };
+            let holds_no_line = matches!(
+                kind,
+                FileKind::Moved { .. } | FileKind::Untracked | FileKind::New
+            );
+            (holds_no_line || change.hunks > 0).then_some(FileChange {
+                path,
+                kind,
+                unstaged: !change.file.staged,
+            })
+        });
+        let untracked = self
+            .untracked
+            .iter()
+            .chain(&self.empty_untracked)
+            .map(|path| FileChange {
+                path: relative(path),
+                kind: FileKind::Untracked,
+                unstaged: true,
+            });
+
+        let mut changes: Vec<FileChange> = registered.chain(untracked).collect();
+        changes.sort_by(|a, b| a.path.cmp(&b.path));
+        changes.dedup_by(|a, b| a.path == b.path);
+        changes
     }
 
     /// Follow parent links from `start`, newest first, yielding at most `limit`
@@ -1435,6 +1541,9 @@ impl GitRepo for FakeGitRepo {
     /// registration carries one side and a hunk count, one by default, so no
     /// fake file counts in both and every fixture reads as one edit until it
     /// says otherwise.
+    ///
+    /// The changes also name each path of
+    /// [`FakeRepoBuilder::empty_untracked`], which no other read sees.
     fn hunk_tallies(&self) -> HunkTallies {
         self.tally_calls.fetch_add(1, Ordering::Relaxed);
         let state = self.state.lock().unwrap();
@@ -1486,6 +1595,7 @@ impl GitRepo for FakeGitRepo {
             unstaged_per_file: unstaged_per_file.into_iter().collect(),
             untracked,
             conflicted,
+            changes: state.file_changes(&self.workdir),
         }
     }
 
@@ -2859,9 +2969,61 @@ mod tests {
             repo.hunk_tallies(),
             HunkTallies {
                 per_file: vec![(PathBuf::from("new.rs"), 0)],
+                changes: vec![FileChange {
+                    path: PathBuf::from("new.rs"),
+                    kind: FileKind::Moved {
+                        from: PathBuf::from("old.rs"),
+                        similarity: 100,
+                    },
+                    unstaged: false,
+                }],
                 ..Default::default()
             },
-            "moving a file edits no line",
+            "moving a file edits no line, and the move keeps its entry",
+        );
+    }
+
+    /// The tally names how each registration stands against HEAD. A path HEAD
+    /// holds is modified, a staged path HEAD lacks is new, and an unstaged one
+    /// is untracked. A move names the path it left and its similarity, and an
+    /// empty untracked file holds no hunk but keeps an entry.
+    #[test]
+    fn the_tally_names_each_registration_s_kind() {
+        let host = FakeGit::new();
+        host.add_repo(workdir())
+            .modified("a.rs", "v1", "v2")
+            .added("b.rs", "v1")
+            .staged_file("c.rs", "v1")
+            .deleted("d.rs", "v1")
+            .renamed("old.rs", "e.rs", "v1")
+            .similarity("e.rs", 94)
+            .untracked("f.rs")
+            .empty_untracked("g.rs");
+        let tallies = host.discover(&workdir()).unwrap().hunk_tallies();
+
+        let change = |path: &str, kind, unstaged| FileChange {
+            path: PathBuf::from(path),
+            kind,
+            unstaged,
+        };
+        let moved = FileKind::Moved {
+            from: PathBuf::from("old.rs"),
+            similarity: 94,
+        };
+        assert_eq!(
+            (tallies.changes, tallies.untracked),
+            (
+                vec![
+                    change("a.rs", FileKind::Modified, true),
+                    change("b.rs", FileKind::Untracked, true),
+                    change("c.rs", FileKind::New, false),
+                    change("d.rs", FileKind::Deleted, true),
+                    change("e.rs", moved, false),
+                    change("f.rs", FileKind::Untracked, true),
+                    change("g.rs", FileKind::Untracked, true),
+                ],
+                vec![PathBuf::from("f.rs")],
+            ),
         );
     }
 

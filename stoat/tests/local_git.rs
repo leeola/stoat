@@ -8,6 +8,7 @@ use std::{
     path::{Path, PathBuf},
 };
 use stoat::host::{
+    git::{FileChange, FileKind, HunkTallies},
     CommitFileChangeKind, GitApplyError, GitHost, GitRepo, LocalGit, RebaseTodo, RebaseTodoOp,
 };
 
@@ -486,7 +487,8 @@ fn hunk_tallies_count_an_untracked_file_as_unstaged() {
 }
 
 /// An untracked file's whole content is its one hunk, so a file holding no
-/// content holds no hunk either.
+/// content holds no hunk either. The tally still names the file among its
+/// changes, so a list of the changed files shows it.
 #[test]
 fn hunk_tallies_count_an_empty_untracked_file_as_nothing() {
     let tr = TestRepo::new();
@@ -497,7 +499,14 @@ fn hunk_tallies_count_an_empty_untracked_file_as_nothing() {
 
     assert_eq!(
         repo.hunk_tallies(),
-        Default::default(),
+        HunkTallies {
+            changes: vec![FileChange {
+                path: PathBuf::from("empty.rs"),
+                kind: FileKind::Untracked,
+                unstaged: true,
+            }],
+            ..Default::default()
+        },
         "an empty file adds no line, so it owes no hunk",
     );
 }
@@ -564,7 +573,17 @@ fn hunk_tallies_are_zero_for_a_pure_move() {
 
     assert_eq!(
         repo.hunk_tallies(),
-        Default::default(),
+        HunkTallies {
+            changes: vec![FileChange {
+                path: PathBuf::from("new.rs"),
+                kind: FileKind::Moved {
+                    from: PathBuf::from("old.rs"),
+                    similarity: 100,
+                },
+                unstaged: false,
+            }],
+            ..Default::default()
+        },
         "moving a file edits no line, so it owes no hunks on either side",
     );
 }
@@ -587,6 +606,86 @@ fn hunk_tallies_count_only_the_edit_in_a_move_plus_edit() {
         "the one edited line is the only hunk the move carries",
     );
     assert_eq!(tallies.per_file, vec![(PathBuf::from("new.rs"), 1)]);
+}
+
+/// The tally names how each changed file stands against HEAD. An edit, a
+/// deletion, an untracked file, a file new in the index, and a move that also
+/// edits a line each take their kind, and the move names the path it left and
+/// git's similarity. Only the files the working tree changes over the index
+/// read as unstaged.
+#[test]
+fn hunk_tallies_name_each_file_s_kind() {
+    let tr = TestRepo::new();
+    let twenty: String = (1..=20).map(|n| format!("line {n}\n")).collect();
+    tr.commit_file("a.rs", "one\n")
+        .commit_file("gone.rs", "gone\n")
+        .commit_file("old.rs", &twenty);
+    tr.write("a.rs", "two\n")
+        .write("fresh.rs", "fresh\n")
+        .write_and_stage("staged.rs", "staged\n")
+        .git_mv("old.rs", "moved.rs")
+        .write("moved.rs", &twenty.replace("line 10\n", "LINE 10\n"));
+    std::fs::remove_file(tr.join("gone.rs")).expect("remove gone.rs");
+
+    let tallies = LocalGit::new().discover(tr.path()).unwrap().hunk_tallies();
+    let similarity = match tallies
+        .change(Path::new("moved.rs"))
+        .map(|change| &change.kind)
+    {
+        Some(FileKind::Moved { similarity, .. }) => *similarity,
+        _ => 0,
+    };
+
+    let change = |path: &str, kind, unstaged| FileChange {
+        path: PathBuf::from(path),
+        kind,
+        unstaged,
+    };
+    let moved = FileKind::Moved {
+        from: PathBuf::from("old.rs"),
+        similarity,
+    };
+    assert_eq!(
+        (
+            tallies.changes.clone(),
+            tallies.change(Path::new("absent.rs")),
+            (50..100).contains(&similarity),
+        ),
+        (
+            vec![
+                change("a.rs", FileKind::Modified, true),
+                change("fresh.rs", FileKind::Untracked, true),
+                change("gone.rs", FileKind::Deleted, true),
+                change("moved.rs", moved, true),
+                change("staged.rs", FileKind::New, false),
+            ],
+            None,
+            true,
+        ),
+    );
+}
+
+/// A file renamed on disk and never staged reads as a move too, since the
+/// tally pairs the deleted path with the untracked one that matches it. The
+/// move is the working tree's alone, so it reads as unstaged.
+#[test]
+fn an_unstaged_move_reads_as_moved() {
+    let tr = TestRepo::new();
+    tr.commit_file("old.rs", "fn main() {}\n");
+    std::fs::rename(tr.join("old.rs"), tr.join("new.rs")).expect("rename file");
+
+    let tallies = LocalGit::new().discover(tr.path()).unwrap().hunk_tallies();
+    assert_eq!(
+        tallies.changes,
+        vec![FileChange {
+            path: PathBuf::from("new.rs"),
+            kind: FileKind::Moved {
+                from: PathBuf::from("old.rs"),
+                similarity: 100,
+            },
+            unstaged: true,
+        }],
+    );
 }
 
 /// Each side counts the lines it changes against its own neighbor, the index

@@ -59,6 +59,58 @@ pub struct HunkTallies {
     /// The files the index leaves unmerged, sorted and repo-relative. Empty
     /// unless a merge, a rebase, or a cherry-pick stopped on a conflict.
     pub conflicted: Vec<PathBuf>,
+    /// How each changed file stands against HEAD, sorted by path and
+    /// repo-relative, with one entry per path.
+    ///
+    /// Every file of [`Self::per_file`] has an entry. A file that moved with no
+    /// edit, an empty untracked file, and an empty file new in the index have
+    /// one too, though they hold no hunk.
+    pub changes: Vec<FileChange>,
+}
+
+impl HunkTallies {
+    /// How the file at the repo-relative `rel_path` stands against HEAD, or
+    /// `None` when the file holds no change.
+    pub fn change(&self, rel_path: &Path) -> Option<&FileChange> {
+        self.changes
+            .binary_search_by(|change| change.path.as_path().cmp(rel_path))
+            .ok()
+            .map(|index| &self.changes[index])
+    }
+}
+
+/// One changed file of a repository and how it stands against HEAD, as
+/// [`HunkTallies::changes`] lists it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FileChange {
+    /// The file's repo-relative path in the working tree, or in HEAD for a
+    /// deleted file.
+    pub path: PathBuf,
+    pub kind: FileKind,
+    /// Whether the working tree changes the file over the index, so a diff
+    /// against the index lists it.
+    pub unstaged: bool,
+}
+
+/// How a changed file stands against HEAD, which a diff's File Kind Tag names.
+///
+/// The kind compares HEAD with the working tree and reads the index only to
+/// tell a new file from an untracked one. So a staged file keeps its kind
+/// under every base a diff reads against.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum FileKind {
+    /// HEAD and the working tree both hold the path.
+    Modified,
+    /// The working tree holds under this path the content that HEAD holds
+    /// under the repo-relative `from`. Git pairs the two as a rename when they
+    /// are at least half alike, and `similarity` is how alike, in percent.
+    Moved { from: PathBuf, similarity: u8 },
+    /// Neither HEAD nor the index holds the path.
+    Untracked,
+    /// The index holds the path and HEAD does not.
+    New,
+    /// HEAD holds the path and the working tree does not.
+    Deleted,
 }
 
 /// Added and deleted lines per changed file, as

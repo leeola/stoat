@@ -4,17 +4,17 @@ mod tree;
 use crate::host::git::{
     BackendSnafu, BlameCommit, BlameRun, ChangeLineStats, ChangedFile, CherryPickOutcome,
     CommitChanges, CommitFileChange, CommitFileChangeKind, CommitInfo, ConflictedFile, FileBlame,
-    GitApplyError, GitHost, GitRepo, HunkTallies, MergeOutcome, MergeState, RebaseError,
-    RebaseTodo, RewriteResult, StagedKind,
+    FileChange, FileKind, GitApplyError, GitHost, GitRepo, HunkTallies, MergeOutcome, MergeState,
+    RebaseError, RebaseTodo, RewriteResult, StagedKind,
 };
 use git2::{
     build::CheckoutBuilder, ApplyLocation, BlameOptions, Branch, BranchType, Commit, Delta, Diff,
-    DiffFindOptions, DiffLineType, DiffOptions, ErrorCode, Repository, RepositoryState, Sort,
-    StashApplyOptions, StashFlags, Status, StatusEntry, StatusOptions,
+    DiffDelta, DiffFindOptions, DiffFormat, DiffLineType, DiffOptions, ErrorCode, Repository,
+    RepositoryState, Sort, StashApplyOptions, StashFlags, Status, StatusEntry, StatusOptions,
 };
 use std::{
     cell::{Cell, RefCell},
-    collections::{BTreeMap, HashMap},
+    collections::{BTreeMap, BTreeSet, HashMap},
     io,
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
@@ -356,6 +356,7 @@ impl GitRepo for LocalGitRepo {
             });
         let mut unstaged_per_file: BTreeMap<PathBuf, usize> = BTreeMap::new();
         let mut untracked: Vec<PathBuf> = Vec::new();
+        let mut unstaged_paths: BTreeSet<PathBuf> = BTreeSet::new();
         let unstaged = repo
             .diff_index_to_workdir(None, Some(&mut with_untracked()))
             .map_or(0, |mut diff| {
@@ -365,6 +366,13 @@ impl GitRepo for LocalGitRepo {
                         .filter(|delta| delta.status() == Delta::Untracked)
                         .filter_map(|delta| delta.new_file().path().map(Path::to_path_buf)),
                 );
+                unstaged_paths.extend(
+                    diff.deltas()
+                        .filter(|delta| {
+                            !matches!(delta.status(), Delta::Unmodified | Delta::Ignored)
+                        })
+                        .filter_map(|delta| delta_path(&delta)),
+                );
                 count_hunks(&diff, &mut |path, hunks| {
                     *unstaged_per_file.entry(path).or_default() += hunks;
                 })
@@ -372,6 +380,7 @@ impl GitRepo for LocalGitRepo {
         untracked.sort();
 
         let mut per_file: BTreeMap<PathBuf, usize> = BTreeMap::new();
+        let mut changes: Vec<FileChange> = Vec::new();
         if let Ok(mut diff) =
             repo.diff_tree_to_workdir_with_index(head_tree.as_ref(), Some(&mut with_untracked()))
         {
@@ -379,6 +388,7 @@ impl GitRepo for LocalGitRepo {
             count_hunks(&diff, &mut |path, hunks| {
                 *per_file.entry(path).or_default() += hunks;
             });
+            changes = file_changes(&diff, &per_file, &unstaged_paths);
         }
         // An empty untracked file holds no hunk, so `per_file` leaves it out.
         untracked.retain(|path| per_file.contains_key(path));
@@ -404,6 +414,7 @@ impl GitRepo for LocalGitRepo {
             unstaged_per_file: unstaged_per_file.into_iter().collect(),
             untracked,
             conflicted,
+            changes,
         }
     }
 
@@ -2148,6 +2159,99 @@ fn count_hunks(diff: &Diff<'_>, per_file: &mut dyn FnMut(PathBuf, usize)) -> usi
         per_file(path, 1);
     }
     total
+}
+
+/// How each delta of `diff`, a diff of HEAD against the working tree, stands
+/// against HEAD, sorted by path with one entry per path.
+///
+/// `per_file` holds the hunks [`count_hunks`] read off the same diff, and
+/// `unstaged` the paths the working tree changes over the index. A delta with
+/// no hunk keeps an entry only as a move, an untracked file, or a new file,
+/// since those kinds stand for a change with no line. A mode change or a
+/// changed binary file keeps none.
+fn file_changes(
+    diff: &Diff<'_>,
+    per_file: &BTreeMap<PathBuf, usize>,
+    unstaged: &BTreeSet<PathBuf>,
+) -> Vec<FileChange> {
+    let similarities = rename_similarities(diff);
+    let mut changes: Vec<FileChange> = diff
+        .deltas()
+        .filter_map(|delta| {
+            let path = delta_path(&delta)?;
+            let kind = match delta.status() {
+                Delta::Added => FileKind::New,
+                Delta::Untracked => FileKind::Untracked,
+                Delta::Deleted => FileKind::Deleted,
+                Delta::Renamed => FileKind::Moved {
+                    from: delta.old_file().path()?.to_path_buf(),
+                    similarity: similarities.get(&path).copied().unwrap_or(100),
+                },
+                Delta::Modified | Delta::Typechange | Delta::Conflicted | Delta::Copied => {
+                    FileKind::Modified
+                },
+                Delta::Unmodified | Delta::Ignored | Delta::Unreadable => return None,
+            };
+            let holds_no_line = matches!(
+                kind,
+                FileKind::Moved { .. } | FileKind::Untracked | FileKind::New
+            );
+            (holds_no_line || per_file.contains_key(&path)).then(|| FileChange {
+                unstaged: unstaged.contains(&path),
+                path,
+                kind,
+            })
+        })
+        .collect();
+    // libgit2 splits a change of a path's type into a deletion and an addition
+    // of the one path, and a lookup by path needs one entry.
+    changes.sort_by(|a, b| a.path.cmp(&b.path));
+    changes.dedup_by(|a, b| a.path == b.path);
+    changes
+}
+
+/// How alike each renamed delta of `diff` is to the file it left, in percent,
+/// under the delta's new path.
+///
+/// git2 has no accessor for a delta's similarity, so the number comes from the
+/// `similarity index N%` line that libgit2 writes into a rename's patch header.
+/// A header-only print reads no blob, and a diff with no rename skips it.
+fn rename_similarities(diff: &Diff<'_>) -> BTreeMap<PathBuf, u8> {
+    let mut similarities = BTreeMap::new();
+    if !diff.deltas().any(|delta| delta.status() == Delta::Renamed) {
+        return similarities;
+    }
+    let _ = diff.print(DiffFormat::PatchHeader, |delta, _, line| {
+        if delta.status() == Delta::Renamed
+            && line.origin_value() == DiffLineType::FileHeader
+            && let Some(path) = delta.new_file().path()
+            && let Some(percent) = similarity_percent(line.content())
+        {
+            similarities.insert(path.to_path_buf(), percent);
+        }
+        true
+    });
+    similarities
+}
+
+/// The percent in the `similarity index N%` line of the patch header `header`.
+fn similarity_percent(header: &[u8]) -> Option<u8> {
+    let header = std::str::from_utf8(header).ok()?;
+    let (_, rest) = header.split_once("similarity index ")?;
+    let (percent, _) = rest.split_once('%')?;
+    percent.parse().ok()
+}
+
+/// The repo-relative path that `delta` names.
+///
+/// A delta names its new path. A deletion has no new path, so it names its old
+/// one.
+fn delta_path(delta: &DiffDelta<'_>) -> Option<PathBuf> {
+    delta
+        .new_file()
+        .path()
+        .or_else(|| delta.old_file().path())
+        .map(Path::to_path_buf)
 }
 
 #[cfg(test)]
