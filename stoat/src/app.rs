@@ -1332,11 +1332,11 @@ pub struct Stoat {
     /// A cross-file changed-file hop scanning off the UI thread, applied by
     /// [`action_handlers::movement::pump_changed_file_jump`] when it lands.
     pub(crate) pending_changed_file_jump: Option<action_handlers::movement::PendingChangedFileJump>,
-    /// A conflicted file read and aligned off the UI thread, applied by
-    /// [`action_handlers::conflict_view::pump_conflict_file`] when it lands.
+    /// The conflicted files an open reads and aligns off the UI thread, applied
+    /// by [`action_handlers::conflict_view::pump_conflict_file`] when they land.
     ///
     /// An open discovers the repository and lists its conflicts, which loads
-    /// the whole index. Each file then reads its three stages, and the
+    /// the whole index. Each file then reads its three stages, and its
     /// alignment runs two structural diffs against the ancestor.
     pub(crate) pending_conflict_file: Option<action_handlers::conflict_view::PendingConflictFile>,
     /// The git writes the loop started, run one at a time in press order.

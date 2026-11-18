@@ -1,4 +1,5 @@
 use crate::{
+    buffer_registry::BufferRegistry,
     display_map::DisplaySnapshot,
     editor_state::EditorId,
     host::git::{GitRepo, MergeState},
@@ -7,6 +8,7 @@ use crate::{
     workspace::{diff, Workspace},
 };
 use std::{
+    cell::Cell,
     collections::{HashMap, HashSet},
     path::PathBuf,
     sync::Arc,
@@ -20,16 +22,12 @@ use stoat_text::{Anchor, BufferId};
 /// pane, so closing the view restores the plain file. Held as
 /// [`crate::workspace::Workspace::conflict`] while the `:conflict` view is open.
 pub(crate) struct ConflictSession {
-    /// Repository work directory the conflicted paths sit under.
-    pub(crate) workdir: PathBuf,
-    /// The repository the open discovered, held so stepping between files
-    /// reads the next one's stages without rediscovering it per press.
+    /// The repository the open discovered, held so an apply marks a file
+    /// resolved without rediscovering it per press.
     pub(crate) repo: Arc<dyn GitRepo>,
-    /// Every conflicted path in the repository, in discovery order.
+    /// Every conflicted path in the repository whose stages the open read, in
+    /// discovery order.
     pub(crate) files: Vec<PathBuf>,
-    /// The side names the open read, which each file the session steps to
-    /// shows in its header.
-    pub(crate) labels: ConflictLabels,
     /// Whether the conflicts come from a merge in progress, as the open read
     /// the repository.
     ///
@@ -82,6 +80,9 @@ pub(crate) struct FileResolveState {
     pub(crate) buffer_id: BufferId,
     /// The center editor swapped into the pane.
     pub(crate) editor_id: EditorId,
+    /// The chunks still on their markers, with the buffer version they were
+    /// counted at, so a frame counts a file again only after its text moved.
+    pub(crate) open_chunks: Cell<Option<(u64, usize)>>,
 }
 
 /// Per-editor render cache for the three-column conflict view.
@@ -240,7 +241,8 @@ impl ConflictLabels {
 }
 
 /// Where the focused conflict view's cursor stands among its file's chunks,
-/// and the operation the conflicts come from.
+/// where its file stands among the session's files, and how many chunks stay
+/// on their markers.
 ///
 /// The status row and the hints footer read it, as they read a diff view's
 /// [`HunkPosition`](crate::workspace::diff::HunkPosition).
@@ -252,13 +254,24 @@ pub(crate) struct ConflictPosition {
     /// The 1-based chunk the cursor stands in, or `None` outside every chunk.
     pub(crate) chunk_at: Option<usize>,
     pub(crate) chunk_total: usize,
+    /// The 1-based place of the shown file in the session's file list.
+    pub(crate) file_at: usize,
+    /// The conflicted files the session lists.
+    pub(crate) file_total: usize,
+    /// The shown file's chunks still on their markers.
+    pub(crate) file_open: usize,
+    /// The chunks still on their markers in every file of the session.
+    pub(crate) chunks_open: usize,
+    /// The files of the session that hold a chunk still on its markers.
+    pub(crate) files_open: usize,
 }
 
 /// The focused conflict view's [`ConflictPosition`], or `None` when the focused
 /// pane shows no conflict view.
 ///
 /// The cursor is the newest selection's start, the place the chunk keys read,
-/// so the chunk the position names is the chunk a pick acts on.
+/// so the chunk the position names is the chunk a pick acts on. The open
+/// counts read each file's held count, as [`open_chunks`] keeps it.
 pub(crate) fn conflict_position(ws: &Workspace) -> Option<ConflictPosition> {
     let session = ws.conflict.as_ref()?;
     let (editor_id, buffer_id) = ws.focused_editor()?;
@@ -273,11 +286,61 @@ pub(crate) fn conflict_position(ws: &Workspace) -> Option<ConflictPosition> {
         (false, false) => "conflict",
     };
 
+    let file_open = open_chunks(&session.file, &ws.buffers);
+    let (chunks_open, files_open) = session
+        .parked
+        .values()
+        .map(|file| open_chunks(file, &ws.buffers))
+        .chain([file_open])
+        .fold((0, 0), |(chunks, files), open| {
+            (chunks + open, files + usize::from(open > 0))
+        });
+
     Some(ConflictPosition {
         operation,
         chunk_at: state.chunk_at(&buffer, cursor).map(|index| index + 1),
         chunk_total: state.doc.chunks.len(),
+        file_at: session.current + 1,
+        file_total: session.files.len(),
+        file_open,
+        chunks_open,
+        files_open,
     })
+}
+
+/// The chunks of `file` whose center region still holds its conflict markers.
+///
+/// Picks and hand edits both take a chunk off the count. The count holds
+/// against the center buffer's version, so a later call counts again only
+/// after the text moved. A file whose buffer is gone counts none.
+pub(crate) fn open_chunks(file: &FileResolveState, buffers: &BufferRegistry) -> usize {
+    let Some(buffer) = buffers.get(file.buffer_id) else {
+        return 0;
+    };
+    let buffer = MultiBuffer::singleton(buffer);
+    let version = buffer.buffer_version();
+    if let Some((held, count)) = file.open_chunks.get()
+        && held == version
+    {
+        return count;
+    }
+
+    let snapshot = buffer.snapshot();
+    let rope = snapshot.rope();
+    let count = file
+        .chunk_anchors
+        .iter()
+        .zip(&file.doc.chunks)
+        .zip(&file.picks)
+        .filter(|(((start, end), chunk), picks)| {
+            let region: String = rope
+                .chunks_in_range(snapshot.resolve_anchor(start)..snapshot.resolve_anchor(end))
+                .collect();
+            chunk.classify(&file.doc.rows, picks, &region) == ChunkState::Unresolved
+        })
+        .count();
+    file.open_chunks.set(Some((version, count)));
+    count
 }
 
 /// The index of the chunk in `chunk_anchors` whose center region holds byte
@@ -365,7 +428,8 @@ mod tests {
     const MARKER: &str = "<<<<<<< ours\nours\n=======\ntheirs\n>>>>>>> theirs\n";
 
     /// Open or close the conflict view and settle, since the open leaves the
-    /// file's alignment to a worker and installs the session from the pump.
+    /// alignment of the files to a worker and installs the session from the
+    /// pump.
     fn dispatch_conflict(h: &mut TestHarness) {
         crate::action_handlers::dispatch(&mut h.stoat, &Conflict);
         h.settle();
@@ -386,8 +450,8 @@ mod tests {
         dispatch_conflict(h);
     }
 
-    /// Dispatch `action` and settle, since a step onto an unvisited file
-    /// leaves its alignment to a worker.
+    /// Dispatch `action` and settle, since some actions land their work from
+    /// a worker or from the git queue, as an apply does.
     fn pick(h: &mut TestHarness, action: &dyn Action) {
         crate::action_handlers::dispatch(&mut h.stoat, action);
         h.settle();
@@ -1057,18 +1121,18 @@ mod tests {
     }
 
     /// A three-way alignment runs two structural diffs against the ancestor,
-    /// which is why neither the open nor a step onto an unvisited file does it
-    /// on the thread that handled the press. Both leave the view as it was
-    /// until the document lands.
+    /// which is why the open aligns every file on a worker and leaves the view
+    /// as it was until the documents land. A step then shows the next file at
+    /// once, since its document landed with the open.
     #[test]
-    fn opening_and_stepping_leave_the_alignment_to_a_worker() {
+    fn the_open_aligns_every_file_on_a_worker() {
         let mut h = Stoat::test();
         seed_two_files(&mut h);
 
         crate::action_handlers::dispatch(&mut h.stoat, &Conflict);
         assert!(
             h.stoat.active_workspace().conflict.is_none(),
-            "the open installs no session before the document lands",
+            "the open installs no session before the documents land",
         );
         assert!(h.stoat.pending_conflict_file.is_some(), "an open is armed");
 
@@ -1076,54 +1140,56 @@ mod tests {
         assert_eq!(current_file(&h), 0, "the settle installs the session");
 
         crate::action_handlers::dispatch(&mut h.stoat, &ConflictNextFile);
-        assert_eq!(current_file(&h), 0, "the step still shows the first file");
-        assert!(h.stoat.pending_conflict_file.is_some(), "a step is armed");
-
-        h.settle();
-        assert_eq!(current_file(&h), 1, "the settle shows the second file");
-        assert!(
-            h.stoat.pending_conflict_file.is_none(),
-            "the landed document leaves nothing armed",
-        );
-
-        // A parked file has its document already, so stepping back needs no
-        // worker and no settle.
-        crate::action_handlers::dispatch(&mut h.stoat, &ConflictPrevFile);
-        assert_eq!(current_file(&h), 0, "a parked file is shown at once");
-        assert!(h.stoat.pending_conflict_file.is_none(), "nothing is armed");
-    }
-
-    #[test]
-    fn a_step_onto_a_parked_file_drops_a_switch_still_aligning() {
-        let mut h = Stoat::test();
-        seed_three_files(&mut h);
-        dispatch_conflict(&mut h);
-        pick(&mut h, &ConflictNextFile);
-        crate::action_handlers::dispatch(&mut h.stoat, &ConflictNextFile);
-        crate::action_handlers::dispatch(&mut h.stoat, &ConflictPrevFile);
-        h.settle();
-
         assert_eq!(
             (current_file(&h), h.stoat.pending_conflict_file.is_none()),
-            (0, true),
-            "the parked first file stays, and the third file's alignment never lands"
+            (1, true),
+            "the step shows the second file with nothing armed",
         );
     }
 
+    /// The open lands on the conflicted file the focused buffer shows, though
+    /// the repository lists another file first.
     #[test]
-    fn a_close_drops_a_switch_still_aligning() {
+    fn an_open_lands_on_the_conflicted_file_the_focused_buffer_shows() {
         let mut h = Stoat::test();
         seed_two_files(&mut h);
-        dispatch_conflict(&mut h);
-        crate::action_handlers::dispatch(&mut h.stoat, &ConflictNextFile);
-        crate::action_handlers::dispatch(&mut h.stoat, &CloseConflict);
+        let path = h.stoat.active_workspace().git_root.join("b.txt");
+        h.fake_fs().insert_file(&path, MARKER);
+        h.open_file(&path);
         dispatch_conflict(&mut h);
 
-        assert_eq!(
-            h.stoat.current_view(),
-            Some("conflict"),
-            "the open after the close goes through"
-        );
+        let shown = h
+            .stoat
+            .active_workspace()
+            .conflict
+            .as_ref()
+            .map(|session| (session.current, session.file.path.clone()));
+        assert_eq!(shown, Some((1, path)));
+    }
+
+    /// A file's open count holds against its center buffer's version. A held
+    /// count answers in place of a count while the version stands, and a pick
+    /// that moves the text counts the file again.
+    #[test]
+    fn an_open_count_holds_until_the_text_moves() {
+        let count = |h: &TestHarness| {
+            let ws = h.stoat.active_workspace();
+            let file = &ws.conflict.as_ref().expect("session open").file;
+            super::open_chunks(file, &ws.buffers)
+        };
+        let mut h = Stoat::test();
+        open(&mut h);
+        let counted = count(&h);
+        {
+            let ws = h.stoat.active_workspace();
+            let file = &ws.conflict.as_ref().expect("session open").file;
+            let (version, _) = file.open_chunks.get().expect("the count holds");
+            file.open_chunks.set(Some((version, 7)));
+        }
+        let held = count(&h);
+        pick(&mut h, &ConflictPickOurs);
+
+        assert_eq!((counted, held, count(&h)), (1, 7, 0));
     }
 
     #[test]
@@ -1508,6 +1574,41 @@ mod tests {
             ],
             "the cursor's chunk counts from one, and the line after a chunk names \
              none",
+        );
+    }
+
+    /// The position counts the session's files and the chunks still on their
+    /// markers in every file. Three files hold one chunk each, a pick in the
+    /// first leaves the other two open, and a step names the second file and
+    /// its open chunk.
+    #[test]
+    fn the_position_counts_the_files_and_the_open_chunks_of_the_session() {
+        let position = |h: &TestHarness| {
+            super::conflict_position(h.stoat.active_workspace()).map(|at| {
+                (
+                    at.file_at,
+                    at.file_total,
+                    at.file_open,
+                    at.chunks_open,
+                    at.files_open,
+                )
+            })
+        };
+        let mut h = Stoat::test();
+        seed_three_files(&mut h);
+        dispatch_conflict(&mut h);
+        let opened = position(&h);
+        pick(&mut h, &ConflictPickOurs);
+        let picked = position(&h);
+        pick(&mut h, &ConflictNextFile);
+
+        assert_eq!(
+            [opened, picked, position(&h)],
+            [
+                Some((1, 3, 1, 3, 3)),
+                Some((1, 3, 0, 2, 2)),
+                Some((2, 3, 1, 2, 2)),
+            ],
         );
     }
 }
