@@ -185,6 +185,7 @@ pub(crate) fn minimap_strip_from_command(command: &MinimapCommand) -> MinimapStr
             .map(|[r, g, b, a]| Rgba::new(r, g, b, a)),
         rule_class: command.rule_class,
         thumb_radius: command.thumb_radius,
+        mark_class: command.mark_class,
         palette: command
             .palette
             .iter()

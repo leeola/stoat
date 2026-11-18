@@ -392,6 +392,7 @@ fn render_frame(frame: &mut Frame<'_>, scene: &mut ApcScene, document: &[String]
             thumb_border: Some([60, 66, 77, 255]),
             rule_class: 0,
             thumb_radius: 0,
+            mark_class: 0,
             palette: &PALETTE,
         },
         STRIP,

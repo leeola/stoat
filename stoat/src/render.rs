@@ -227,6 +227,9 @@ pub(crate) struct MinimapChrome<'a> {
     /// The class whose runs every strip draws as an Item Rule hairline, the
     /// class table's [`EdgeClass::Rule`].
     pub(crate) rule_class: u8,
+    /// The first class whose runs a diff view's strip draws as Change Marks,
+    /// or 0 for none.
+    pub(crate) mark_class: u8,
     /// The ground of a Coverage Rail, rgba, the background of
     /// `ui.minimap.rail` made opaque.
     pub(crate) rail_ground: [u8; 4],
@@ -1382,6 +1385,7 @@ pub(crate) fn frame(
             thumb: [r, g, b, MINIMAP_THUMB_ALPHA],
             thumb_border: [r, g, b, MINIMAP_THUMB_OUTLINE_ALPHA],
             rule_class: stoat.minimap_class_table.edge_class(EdgeClass::Rule),
+            mark_class: 0,
             rail_ground: [gr, gg, gb, u8::MAX],
             rail_cover: [cr, cg, cb, u8::MAX],
         }
@@ -1790,6 +1794,7 @@ pub(crate) fn frame(
             thumb_border: Some(chrome.thumb_border),
             rule_class: chrome.rule_class,
             thumb_radius: pane::MINIMAP_THUMB_RADIUS,
+            mark_class: chrome.mark_class,
             palette,
         };
         let rail = single_band_rail(ws, chrome);

@@ -702,6 +702,7 @@ fn pane_minimap<'a>(
         thumb_border: Some([outline[0], outline[1], outline[2], oa]),
         rule_class: chrome.rule_class,
         thumb_radius: MINIMAP_THUMB_RADIUS,
+        mark_class: chrome.mark_class,
         palette,
     }
 }
@@ -726,6 +727,7 @@ pub(super) fn rail_minimap<'a>(
         thumb_border: None,
         rule_class: 0,
         thumb_radius: 0,
+        mark_class: 0,
         palette: chrome.palette,
     }
 }

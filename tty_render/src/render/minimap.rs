@@ -25,6 +25,12 @@ use wgpu::{
 /// Instance buffer capacity, in quads, allocated up front. Grows by doubling.
 const INITIAL_CAPACITY: usize = 256;
 
+/// The least width of a Change Mark in logical px, the boards' 12 px.
+const MARK_MIN_WIDTH: f32 = 12.0;
+
+/// The corner radius of a Change Mark in logical px, the boards' 1 px.
+const MARK_RADIUS: f32 = 1.0;
+
 /// The per-quad instance data. It carries an absolute-pixel rectangle, an rgba
 /// fill, the strip's declaration-order seq the fragment shader occludes by, a
 /// corner radius in physical pixels, 0 for a square quad, and a ring width in
@@ -578,6 +584,12 @@ fn thumb_geometry(
 ///
 /// A run in the strip's non-zero rule class draws as a hairline in the gap
 /// above its row, at the thumb outline's weight, in place of its block.
+///
+/// A run in the strip's non-zero mark class, or a later class, draws as a
+/// Change Mark. The mark is a block the row's whole pitch tall, centered on the
+/// row's block, at least [`MARK_MIN_WIDTH`] wide, with [`MARK_RADIUS`] corners.
+/// A mark whose width reaches past the strip's right edge moves left and keeps
+/// its width.
 fn build_strip(
     strip: &Minimap,
     content: &[LineSummary],
@@ -615,6 +627,7 @@ fn build_strip(
     let strip_right = layout.strip_x + layout.strip_w;
     let hairline = metrics.scale_factor.round().max(1.0);
     let rule_class = Some(strip.strip.rule_class).filter(|&class| class != 0);
+    let mark_class = Some(strip.strip.mark_class).filter(|&class| class != 0);
     let last = ((top + layout.visible_lines).ceil() as usize).min(content.len());
     let first = (top.max(0.0) as usize).min(last);
     for (line, runs) in (first..last).zip(&content[first..last]) {
@@ -635,9 +648,21 @@ fn build_strip(
             if width == 0.0 {
                 continue;
             }
-            let (origin, size) = match rule_class == Some(run.class) {
-                true => ([x, y - hairline], [width, hairline]),
-                false => ([x, y], [width, layout.run_h]),
+            let (origin, size, radius) = if rule_class == Some(run.class) {
+                ([x, y - hairline], [width, hairline], 0.0)
+            } else if mark_class.is_some_and(|first| run.class >= first) {
+                let width = (run.len as f32 * layout.col_w)
+                    .max(MARK_MIN_WIDTH * metrics.scale_factor)
+                    .min(layout.strip_w);
+                let x = x.min(strip_right - width).max(layout.strip_x);
+                let lift = (layout.line_h - layout.run_h) / 2.0;
+                (
+                    [x, y - lift],
+                    [width, layout.line_h],
+                    MARK_RADIUS * metrics.scale_factor,
+                )
+            } else {
+                ([x, y], [width, layout.run_h], 0.0)
             };
             instances.push(MinimapInstance {
                 origin,
@@ -647,7 +672,7 @@ fn build_strip(
                 // the strip carries texture at a size too small for letters.
                 color: rgb_weighted_f32(*color, run.weight),
                 seq,
-                radius: 0.0,
+                radius,
                 stroke: 0.0,
             });
         }
@@ -799,6 +824,7 @@ mod tests {
             thumb_border: Some(Rgba::new(255, 255, 255, 255)),
             rule_class: 0,
             thumb_radius: 0,
+            mark_class: 0,
             palette: vec![
                 Rgb::new(10, 20, 30),
                 Rgb::new(40, 50, 60),
@@ -926,6 +952,53 @@ mod tests {
                     [4.0 * 0.4, 1.0],
                     [40.0 / 255.0, 50.0 / 255.0, 60.0 / 255.0, 1.0],
                 ),
+            ],
+        );
+    }
+
+    /// A run in a class from the mark class up draws as a Change Mark, a
+    /// block the row's whole pitch tall that centers on the row's block, at
+    /// least 12 px wide, with 1 px corners. A mark that reaches past the
+    /// strip's right edge moves left and keeps its width, and a run in a class
+    /// under the mark class keeps its block.
+    #[test]
+    fn a_mark_class_run_draws_a_taller_rounded_block() {
+        let mut marked = strip(None);
+        marked.strip.lines_per_cell = 6;
+        marked.strip.mark_class = 2;
+        let run = |start_col, len, class| MinimapRun {
+            start_col,
+            len,
+            class,
+            weight: 255,
+        };
+        let mut content = vec![Vec::new(); 4];
+        content.push(vec![
+            run(10, 2, 2),
+            run(118, 2, 2),
+            run(40, 5, 1),
+            run(60, 2, 3),
+        ]);
+        let tall = CellMetrics {
+            height: 18.0,
+            ..metrics()
+        };
+        let (instances, _) = build_strip(&marked, &summaries(content), tall, uniform_layout());
+
+        // The strip is 8 cells of 6 px from x 60, so a column is 0.4 px and the
+        // right edge is x 108. Row 4 starts at y 12 under a 3 px pitch, and its
+        // blocks are 2 px tall. Class 3 lies past the mark class, so it marks
+        // too.
+        assert_eq!(
+            instances[1..5]
+                .iter()
+                .map(|instance| (instance.origin, instance.size, instance.radius))
+                .collect::<Vec<_>>(),
+            [
+                ([60.0 + 10.0 * 0.4, 11.5], [12.0, 3.0], 1.0),
+                ([96.0, 11.5], [12.0, 3.0], 1.0),
+                ([60.0 + 40.0 * 0.4, 12.0], [5.0 * 0.4, 2.0], 0.0),
+                ([60.0 + 60.0 * 0.4, 11.5], [12.0, 3.0], 1.0),
             ],
         );
     }
@@ -1526,6 +1599,7 @@ mod tests {
             thumb_border: Some(Rgba::new(0, 0, 0, 255)),
             rule_class: 0,
             thumb_radius: 0,
+            mark_class: 0,
             palette: vec![Rgb::new(255, 0, 0)],
         }
     }

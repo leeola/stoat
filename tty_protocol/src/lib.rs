@@ -231,9 +231,14 @@
 /// batch's, as the italic face. A terminal that predates it reads the bold bit
 /// alone and draws the run upright.
 ///
+/// Version 37 reads a fixed 34-byte `minimap` head, which ends in the mark
+/// class. A run in that class or a later one draws as a Change Mark. A
+/// terminal that predates it reads the first 33 bytes and draws such a run as a
+/// block. This version drops a shorter head.
+///
 /// Zero is reserved for a peer whose handshake carries no version at all, which
 /// is every build from before the field existed.
-pub const PROTOCOL_VERSION: u32 = 36;
+pub const PROTOCOL_VERSION: u32 = 37;
 
 /// The first [`PROTOCOL_VERSION`] whose terminal reads the `text_runs` and
 /// `bars` batches.
@@ -305,6 +310,13 @@ pub const NUDGE_PROTOCOL: u32 = 35;
 /// An earlier terminal reads the bold bit alone and draws the run upright, so
 /// an emitter sends the italic bit to any terminal.
 pub const ITALIC_RUN_PROTOCOL: u32 = 36;
+
+/// The first [`PROTOCOL_VERSION`] whose terminal draws a `minimap` run in the
+/// strip's mark class, or a later class, as a Change Mark.
+///
+/// An earlier terminal reads the head's first 33 bytes and draws such a run as
+/// a block, so an emitter sends the mark class to any terminal.
+pub const MINIMAP_MARK_PROTOCOL: u32 = 37;
 
 pub mod command;
 pub mod detect;

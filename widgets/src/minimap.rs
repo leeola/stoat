@@ -32,6 +32,9 @@ pub struct Minimap<'a> {
     pub rule_class: u8,
     /// Viewport-thumb corner radius in logical px, 0 for square corners.
     pub thumb_radius: u8,
+    /// The first class whose runs draw as Change Marks, or 0 for none. Every
+    /// class from it up is a mark class, so the palette ends in the mark colors.
+    pub mark_class: u8,
     /// Run-class palette, up to 256 rgb entries a summary's classes index.
     ///
     /// Borrowed, since a strip is redeclared every frame and the palette it
@@ -59,6 +62,7 @@ impl StatefulWidget for Minimap<'_> {
                 thumb_border: self.thumb_border,
                 rule_class: self.rule_class,
                 thumb_radius: self.thumb_radius,
+                mark_class: self.mark_class,
                 palette: self.palette,
             },
         );
@@ -127,6 +131,7 @@ mod tests {
             thumb_border: Some([60, 66, 77, 255]),
             rule_class: 5,
             thumb_radius: 6,
+            mark_class: 7,
             palette: &PALETTE,
         }
     }
@@ -153,6 +158,7 @@ mod tests {
             thumb_border: Some([60, 66, 77, 255]),
             rule_class: 5,
             thumb_radius: 6,
+            mark_class: 7,
             palette: PALETTE.to_vec(),
         });
         assert_eq!(scene.buffer().as_slice(), expected.as_slice());

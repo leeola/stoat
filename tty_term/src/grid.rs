@@ -2257,6 +2257,9 @@ pub struct MinimapStrip {
     /// The overlay's corner radius in logical px, 0 for square corners. The
     /// outline follows the same radius.
     pub thumb_radius: u8,
+    /// The first class whose runs draw as Change Marks in place of blocks.
+    /// Every class from it up is a mark class, and 0 marks no class.
+    pub mark_class: u8,
     /// Colors a run's class indexes, up to 256 entries.
     pub palette: Vec<Rgb>,
 }
@@ -3039,6 +3042,7 @@ mod tests {
                 thumb_border: Some(Rgba::new(0, 0, 0, 255)),
                 rule_class: 0,
                 thumb_radius: 0,
+                mark_class: 0,
                 palette: Vec::new(),
             },
             seq: 0,
