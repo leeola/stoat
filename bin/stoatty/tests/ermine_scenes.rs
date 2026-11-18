@@ -1867,16 +1867,19 @@ fn a_read_only_pane_draws_the_dashed_ring_over_its_text() {
 /// band takes rows 0 and 1, and the minimap band takes the window's last seven
 /// columns before its margin, past a gap column. So the view spans 150 cells,
 /// with sides of 48 cells at x 1 and 103 and the merged column of 54 cells at
-/// x 49. The header is row 2, `1 shared header` is row 3, and the chunk's
-/// first row is row 4, where each column takes its side's tint. The ours bar
-/// sits 7/16 into its column and is 6/16 wide, so at 9-pixel cells it snaps to
-/// pixel columns 4 to 6 of the column's first cell, the board's
-/// `margin-left: 4px; width: 3px`.
+/// x 49. The column header is row 2 and the File Header row 3, the File Header
+/// on the head color across all three columns. `1 shared header` is row 4, and
+/// the chunk's first row is row 5, where each column takes its side's tint.
+/// The ours bar sits 7/16 into its column and is 6/16 wide, so at 9-pixel
+/// cells it snaps to pixel columns 4 to 6 of the column's first cell, the
+/// board's `margin-left: 4px; width: 3px`.
 ///
-/// The chunk's chip ends 12/16 before the merged column's right edge at cell
-/// 103, and its box reaches back past cell 91. The check reads the 10 cells
-/// from cell 91, which the box covers but for a pixel row at its top and its
-/// bottom, so they read the chip's fill.
+/// The File Header's tag and counts end before cell 49, its path starts past
+/// cell 50, and its place starts past cell 140, so the checked spans of row 3
+/// read the head color. The chunk's chip ends 12/16 before the merged column's
+/// right edge at cell 103, and its box reaches back past cell 91. The check
+/// reads the 10 cells from cell 91, which the box covers but for a pixel row at
+/// its top and its bottom, so they read the chip's fill.
 #[test]
 fn the_conflict_view_paints_the_merge_grid() {
     let mut home = support::scratch_home();
@@ -1888,20 +1891,23 @@ fn the_conflict_view_paints_the_merge_grid() {
     );
 
     for (col, row, want, what) in [
-        (5, 4, TINT_OURS, "ours_conflict_row"),
-        (55, 4, TINT_CONFLICT, "merged_conflict_row"),
-        (113, 4, TINT_THEIRS, "theirs_conflict_row"),
+        (5, 5, TINT_OURS, "ours_conflict_row"),
+        (55, 5, TINT_CONFLICT, "merged_conflict_row"),
+        (113, 5, TINT_THEIRS, "theirs_conflict_row"),
         (55, 2, MERGED_HEAD, "merged_header"),
-        (5, 3, BASE, "context_row"),
+        (5, 3, MERGED_HEAD, "ours_file_header"),
+        (55, 3, MERGED_HEAD, "merged_file_header"),
+        (113, 3, MERGED_HEAD, "theirs_file_header"),
+        (5, 4, BASE, "context_row"),
     ] {
         expect_region(&shot, &mut home, cell_rect(col, row, 20, 1), want, what);
     }
-    let (x, y, _, height) = cell_rect(1, 4, 1, 1);
+    let (x, y, _, height) = cell_rect(1, 5, 1, 1);
     expect_region(&shot, &mut home, (x + 4, y, 3, height), SUCCESS, "ours_bar");
     expect_region(
         &shot,
         &mut home,
-        cell_rect(103 - 12, 4, 10, 1),
+        cell_rect(103 - 12, 5, 10, 1),
         CHIP_CONFLICT,
         "conflict_chip",
     );

@@ -7136,8 +7136,9 @@ fn a_conflict_pane_fills_with_the_three_column_body() {
     );
 }
 
-/// The MergeGrid's header row stays fixed above the rows a glide moves, so the
-/// conflict pane's pool region starts one row into its content.
+/// The MergeGrid's column header and File Header stay fixed above the rows a
+/// glide moves, so the conflict pane's pool region starts two rows into its
+/// content.
 #[test]
 fn a_conflict_pane_pools_the_rows_below_its_header() {
     let (mut h, _rx) = conflict_pane();
@@ -7155,7 +7156,7 @@ fn a_conflict_pane_pools_the_rows_below_its_header() {
 
     assert_eq!(
         (region.top, region.height),
-        (content.y + 1, content.height - 1),
+        (content.y + 2, content.height - 2),
     );
 }
 

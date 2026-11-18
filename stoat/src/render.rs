@@ -1498,6 +1498,10 @@ pub(crate) fn frame(
     // conflict view.
     let hunk_position = diff::repo_hunk_position(ws);
     let conflict_position = conflict_session::conflict_position(ws);
+    let shown_conflict = ws.conflict.as_ref().map(|session| session.file.editor_id);
+    if let Some(editor) = shown_conflict.and_then(|id| ws.editors.get_mut(id)) {
+        editor.conflict_frame.position = conflict_position;
+    }
     let run_cwd = pane::focused_run_cwd(ws.focus, &ws.panes, &ws.runs);
     // The islands read where the gaps run, and the hairlines paint in them when
     // islands are off, so the frame lays them out once for both.

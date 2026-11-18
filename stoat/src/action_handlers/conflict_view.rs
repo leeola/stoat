@@ -78,12 +78,15 @@ pub(super) fn open_conflict(stoat: &mut Stoat) {
             .map(Path::to_path_buf)
     });
     let origin = focused_editor_mut(stoat).map(super::jump::live_entry);
+    let git_root = stoat.active_workspace().git_root.clone();
+
     let source = ConflictSource {
         git_host: stoat.git_host.clone(),
-        git_root: stoat.active_workspace().git_root.clone(),
+        git_root: git_root.clone(),
         focused,
     };
     let intent = ConflictIntent {
+        git_root,
         workspace: stoat.active_workspace,
         saved_editor,
         origin,
@@ -102,6 +105,7 @@ pub(super) fn open_conflict(stoat: &mut Stoat) {
 /// press recorded, so the swap must take that same pane.
 fn open_landed(stoat: &mut Stoat, load: ConflictLoad, intent: ConflictIntent) {
     let ConflictIntent {
+        git_root,
         workspace,
         saved_editor,
         origin,
@@ -130,12 +134,12 @@ fn open_landed(stoat: &mut Stoat, load: ConflictLoad, intent: ConflictIntent) {
     let Some(shown) = docs.get_mut(current).and_then(Option::take) else {
         return;
     };
-    let (file, first_chunk_offset) = install_conflict_file(stoat, shown, &labels);
+    let (file, first_chunk_offset) = install_conflict_file(stoat, shown, &git_root, &labels);
     let parked: HashMap<usize, FileResolveState> = docs
         .into_iter()
         .enumerate()
         .filter_map(|(index, doc)| {
-            let (state, _) = install_conflict_file(stoat, doc?, &labels);
+            let (state, _) = install_conflict_file(stoat, doc?, &git_root, &labels);
             Some((index, state))
         })
         .collect();
@@ -180,6 +184,7 @@ struct ConflictDoc {
 /// It travels with the worker's answer, because there is no session to hold it
 /// yet.
 struct ConflictIntent {
+    git_root: PathBuf,
     workspace: WorkspaceId,
     saved_editor: EditorId,
     origin: Option<JumpEntry>,
@@ -316,6 +321,7 @@ fn read_conflict(
 fn install_conflict_file(
     stoat: &mut Stoat,
     landed: ConflictDoc,
+    git_root: &Path,
     labels: &ConflictLabels,
 ) -> (FileResolveState, Option<usize>) {
     let ConflictDoc { doc, ending, path } = landed;
@@ -323,6 +329,7 @@ fn install_conflict_file(
     let (center_text, chunk_ranges) = doc.initial_center_text();
     let first_chunk_offset = chunk_ranges.first().map(|r| r.start);
     let executor = stoat.executor.clone();
+    let rel_path = crate::paths::display_relative(&path, git_root);
 
     let ws = stoat.active_workspace_mut();
     let (buffer_id, buffer) = ws.buffers.new_scratch_preview();
@@ -368,6 +375,7 @@ fn install_conflict_file(
         doc.clone(),
         chunk_anchors.clone(),
         picks.clone(),
+        rel_path,
         labels.clone(),
     )));
     let editor_id = ws.editors.insert(editor);

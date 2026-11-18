@@ -1102,6 +1102,11 @@ pub mod scope {
     /// The chip on the first merged row of a run the merge takes from theirs,
     /// or of a chunk resolved to theirs.
     pub const VCS_CONFLICT_CHIP_THEIRS: &str = "vcs.conflict.chip.theirs";
+    /// The tag in the conflict view's File Header that counts the shown file's
+    /// open conflicts.
+    pub const VCS_CONFLICT_TAG: &str = "vcs.conflict.tag";
+    /// The File Header's tag once the shown file holds no open conflict.
+    pub const VCS_CONFLICT_TAG_RESOLVED: &str = "vcs.conflict.tag.resolved";
     /// The ancestor's text, which the merged column shows for an unresolved
     /// chunk.
     pub const VCS_CONFLICT_GHOST: &str = "vcs.conflict.ghost";

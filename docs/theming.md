@@ -402,8 +402,11 @@ The typed UI scopes, by group (syntax scopes are open-ended):
   The `vcs.conflict.ours` and `vcs.conflict.theirs` backgrounds tint the two
   side columns. `vcs.conflict.chip.ours` and `vcs.conflict.chip.theirs` color
   the chip of a run the merge takes from that side, or of a chunk resolved to
-  it, and fall back to the side's own scope. The ermine_night theme sets
-  these, and default_dark leaves them unset.
+  it, and fall back to the side's own scope. `vcs.conflict.tag` colors the
+  File Header's tag while the shown file holds an open conflict, and
+  `vcs.conflict.tag.resolved` once it holds none. They fall back to
+  `vcs.conflict.chip` and `vcs.conflict.chip.ours`. The ermine_night theme
+  sets these, and default_dark leaves them unset.
 - `vcs.merge.banner`, `vcs.rebase.banner` -- the banner row of a merge in
   progress and of a rebase paused on a conflict.
 - `vcs.checkout.banner` -- the banner row under the tab bar that names a blame

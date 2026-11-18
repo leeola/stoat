@@ -2960,7 +2960,7 @@ pub(crate) fn editor_pool_panes(stoat: &Stoat) -> Vec<(u32, EditorId, PoolRegion
             // strip is drawn, so its width is the columns to reserve.
             let strip_cols = editor.minimap_rect.map_or(0, |rect| rect.width);
             let width = content.width.saturating_sub(strip_cols);
-            // The conflict view's MergeGrid holds its header row above the rows
+            // The conflict view's MergeGrid holds its header rows above the rows
             // that scroll, so the region starts at the body its paint recorded.
             let header = editor
                 .conflict_view

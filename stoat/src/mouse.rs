@@ -3210,8 +3210,8 @@ mod tests {
         };
 
         // The paint records the center text, which the click maps against. The
-        // MergeGrid's header takes the first row, so the "<<<<<<< ours" marker
-        // line is the row after the first text row.
+        // MergeGrid's column header and File Header take the first two rows, so
+        // the "<<<<<<< ours" marker line is the row after the first text row.
         h.stoat.render();
         let (area, text) = {
             let ws = h.stoat.active_workspace();
@@ -3243,10 +3243,11 @@ mod tests {
         assert_eq!(
             (
                 text.y - area.y,
-                editor_screen_to_offset(&mut h.stoat, editor_id, area, center, 0)
+                editor_screen_to_offset(&mut h.stoat, editor_id, area, center, 0),
+                editor_screen_to_offset(&mut h.stoat, editor_id, area, center, 1),
             ),
-            (1, None),
-            "a click on the header row maps to no line"
+            (2, None, None),
+            "a click on either header row maps to no line"
         );
     }
 

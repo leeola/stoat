@@ -1,10 +1,11 @@
 //! The MergeGrid layout of the three-way conflict view.
 //!
-//! The Merge board draws a conflicted file as three columns under a header row,
-//! which are ours, the merged result, and theirs. Each column leads with a
-//! change bar, a line number, and a divider. Each row takes the tint of the
-//! side the merge takes it from, and a chip on the first row of each run names
-//! how the merge settles it.
+//! The Merge board draws a conflicted file as three columns, which are ours,
+//! the merged result, and theirs. Above them a column header names the three
+//! sides, and a File Header names the file and counts its conflicts. Each
+//! column leads with a change bar, a line number, and a divider. Each row takes
+//! the tint of the side the merge takes it from, and a chip on the first row of
+//! each run names how the merge settles it.
 //!
 //! The bars, hairlines, numbers, and chips are smaller than a cell, so they are
 //! scene components, and the layout paints only under a live scene. Without one
@@ -12,11 +13,11 @@
 
 use super::{GridPaint, BAND_TINT};
 use crate::{
-    conflict_session::{ConflictDerived, ConflictLabels},
+    conflict_session::{ConflictDerived, ConflictLabels, ConflictPosition},
     display_map::{CachedHighlightEndpoints, DisplaySnapshot},
     merge_view::{AlignRow, ChunkState, MergeDoc, MergeRow},
     render::{
-        editor,
+        diff_changes, editor,
         paint::{dim_rgb, fill_line_tint, render_side_text, style_rgb},
         review::{self, paint_highlighted_row, DiffDials, DiffRowCache, DiffRowKind},
     },
@@ -36,8 +37,12 @@ use stoat_widgets::{
     ApcScene,
 };
 
-/// Rows the header takes above the grid's rows.
-pub(super) const HEADER_ROWS: u16 = 1;
+/// Rows the header takes above the grid's rows, the column header and then the
+/// File Header.
+pub(super) const HEADER_ROWS: u16 = 2;
+
+/// The File Header tag's `padding: 0 5px`, in sixteenths.
+const TAG_PAD: u16 = 10;
 
 /// The change bar's left edge and width, in sixteenths from its column's left
 /// edge, the board's `margin-left: 4px; width: 3px`.
@@ -200,8 +205,9 @@ impl Column {
 /// Each scope the boards added falls back to a neighbor when a theme leaves it
 /// unset, so a theme without those scopes keeps its look. The band takes the
 /// conflict header's color, the chip takes the band, each side's chip takes
-/// its side, and the ghost takes muted italic text. A missing tint is its
-/// side's color washed toward the surface.
+/// its side, the tag takes the chip, the resolved tag takes the ours chip, and
+/// the ghost takes muted italic text. A missing tint is its side's color
+/// washed toward the surface.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) struct GridColors {
     pub(super) bg: [u8; 3],
@@ -229,6 +235,10 @@ pub(super) struct GridColors {
     /// The chip of a run the merge takes from theirs, or a chunk resolved to
     /// it.
     pub(super) chip_theirs: Tone,
+    /// The File Header's tag while the shown file holds an open conflict.
+    pub(super) tag: Tone,
+    /// The File Header's tag once the shown file holds no open conflict.
+    pub(super) tag_resolved: Tone,
 }
 
 impl GridColors {
@@ -253,7 +263,10 @@ impl GridColors {
         )?;
         let ours = tone(theme.get(s::VCS_CONFLICT_OURS))?;
         let theirs = tone(theme.get(s::VCS_CONFLICT_THEIRS))?;
-        let chip = |scope: &str, side: Tone| theme.try_get(scope).and_then(tone).unwrap_or(side);
+        let scoped =
+            |scope: &str, fallback: Tone| theme.try_get(scope).and_then(tone).unwrap_or(fallback);
+        let chip = scoped(s::VCS_CONFLICT_CHIP, band);
+        let chip_ours = scoped(s::VCS_CONFLICT_CHIP_OURS, ours);
         let [r, g, b] = muted;
 
         Some(Self {
@@ -275,9 +288,11 @@ impl GridColors {
             ours,
             theirs,
             band,
-            chip: chip(s::VCS_CONFLICT_CHIP, band),
-            chip_ours: chip(s::VCS_CONFLICT_CHIP_OURS, ours),
-            chip_theirs: chip(s::VCS_CONFLICT_CHIP_THEIRS, theirs),
+            chip,
+            chip_ours,
+            chip_theirs: scoped(s::VCS_CONFLICT_CHIP_THEIRS, theirs),
+            tag: scoped(s::VCS_CONFLICT_TAG, chip),
+            tag_resolved: scoped(s::VCS_CONFLICT_TAG_RESOLVED, chip_ours),
         })
     }
 }
@@ -679,6 +694,178 @@ pub(super) fn paint_header(
     let mut bars = BarBatch::default();
     push_hairlines(&mut bars, cols, y, 1, colors.hairline);
     bars.flush(scene);
+}
+
+/// What the File Header names about the shown file.
+pub(super) struct FileFacts<'a> {
+    /// The file's path from the repository's root.
+    pub(super) path: &'a str,
+    /// The session's position, `None` for a paint no frame read one for.
+    pub(super) position: Option<ConflictPosition>,
+    /// The lines theirs adds and removes against ours.
+    pub(super) counts: (u32, u32),
+}
+
+/// Paint the File Header row `area`, under the column header.
+///
+/// The row fills with the head color between a rule at its top and one at its
+/// bottom, and the merged column's hairlines cross it. The merged column names
+/// the file. The ours column ends in the file's tag and its counts against the
+/// merged column, and the theirs column ends in the file's place in the
+/// session.
+///
+/// The tag reads `conflict U+00B7 {total}` while every chunk is open,
+/// `conflict U+00B7 {open} of {total} left` while some are, and
+/// `U+2713 resolved` at none. With no position the row leaves out the tag, the
+/// counts, and the place.
+pub(super) fn paint_file_header(
+    area: Rect,
+    grid: &Grid,
+    file: FileFacts<'_>,
+    theme: &Theme,
+    buf: &mut Buffer,
+    scene: &mut ApcScene,
+) {
+    let Grid { cols, colors } = grid;
+    let y = area.y;
+    let fill = colors.head.unwrap_or(colors.bg);
+    fill_line_tint(buf, area.x, y, usize::from(area.width), fill);
+
+    let mut bars = BarBatch::default();
+    if let Some(color) = colors.rule {
+        for rule_y in [0, 15] {
+            bars.push(
+                Rect::new(area.x, y, 1, 1),
+                Bar {
+                    x: 0,
+                    y: rule_y,
+                    width: area.width * 16,
+                    height: 1,
+                    color,
+                    radius: 0,
+                    corners: 0,
+                },
+            );
+        }
+    }
+    push_hairlines(&mut bars, cols, y, 1, colors.hairline);
+    bars.flush(scene);
+
+    let ui = theme.type_scale(TypeRole::Ui);
+    let caption = theme.type_scale(TypeRole::Caption);
+    let at = Rect::new(0, y, 1, 1);
+
+    let mut col = cols.merged.x * 16 + HEADER_PAD;
+    let path_end = (cols.merged.right() * 16).saturating_sub(HEADER_PAD);
+    for (whole, style) in diff_changes::header_path(file.path, theme) {
+        let text = fit(&whole, path_end.saturating_sub(col), ui);
+        if text.is_empty() {
+            break;
+        }
+        let color = style_rgb(style.fg).unwrap_or(colors.text);
+        let bold = style.add_modifier.contains(Modifier::BOLD);
+        header_text(col, text, ui, color, bold, fill).render(at, buf, scene);
+        col += advance(text, ui);
+    }
+
+    let Some(position) = file.position else {
+        return;
+    };
+    let (tag_text, tag) = match position.file_open {
+        0 => ("\u{2713} resolved".to_string(), colors.tag_resolved),
+        open if open == position.chunk_total => (format!("conflict \u{b7} {open}"), colors.tag),
+        open => (
+            format!("conflict \u{b7} {open} of {} left", position.chunk_total),
+            colors.tag,
+        ),
+    };
+    let (added, removed) = file.counts;
+    let count_color = |scope: &str| style_rgb(theme.get(scope).fg).unwrap_or(colors.text);
+    let counts: Vec<(String, [u8; 3])> = [
+        (added, "+", count_color(s::DIFF_ADDED)),
+        (removed, "\u{2212}", count_color(s::DIFF_DELETED)),
+    ]
+    .into_iter()
+    .filter(|&(count, ..)| count > 0)
+    .map(|(count, sign, color)| (format!("{sign}{count}"), color))
+    .collect();
+
+    let small = cols.number_scale;
+    let tag_width = advance(&tag_text, small) + 2 * TAG_PAD;
+    let group = counts.iter().fold(tag_width, |width, (text, _)| {
+        width + HEADER_GAP + advance(text, caption)
+    });
+    let group_end = (cols.merged.x * 16).saturating_sub(HEADER_PAD);
+    let ours_start = cols.ours.x * 16 + HEADER_PAD;
+    if let Some(start) = group_end
+        .checked_sub(group)
+        .filter(|&start| start >= ours_start)
+    {
+        Bar {
+            x: start as i16,
+            y: 1,
+            width: tag_width,
+            height: CHIP_HEIGHT,
+            color: tag.tint,
+            radius: CHIP_RADIUS,
+            corners: 0,
+        }
+        .render(at, buf, scene);
+        TextRun {
+            col: (start + TAG_PAD) as i16,
+            row: 0,
+            scale: small,
+            color: tag.fg,
+            bg: None,
+            text: &tag_text,
+            bold: false,
+            italic: false,
+            follow: 0,
+            anchor: None,
+        }
+        .render(at, buf, scene);
+        let mut col = start + tag_width;
+        for (text, color) in &counts {
+            col += HEADER_GAP;
+            header_text(col, text, caption, *color, false, fill).render(at, buf, scene);
+            col += advance(text, caption);
+        }
+    }
+
+    let place = format!("file {} / {}", position.file_at, position.file_total);
+    let disabled = style_rgb(theme.get(s::UI_TEXT_DISABLED).fg).unwrap_or(colors.muted);
+    let place_x = (cols.theirs.right() * 16).saturating_sub(HEADER_PAD + advance(&place, caption));
+    if place_x >= cols.theirs.x * 16 + HEADER_PAD {
+        header_text(place_x, &place, caption, disabled, false, fill).render(at, buf, scene);
+    }
+}
+
+/// A File Header run of `text` from `col`, on the row's fill `bg`.
+fn header_text(
+    col: u16,
+    text: &str,
+    scale: u16,
+    color: [u8; 3],
+    bold: bool,
+    bg: [u8; 3],
+) -> TextRun<'_> {
+    TextRun {
+        col: col as i16,
+        row: 0,
+        scale,
+        color,
+        bg: Some(bg),
+        text,
+        bold,
+        italic: false,
+        follow: 0,
+        anchor: None,
+    }
+}
+
+/// The sixteenths `text` advances at `scale`.
+fn advance(text: &str, scale: u16) -> u16 {
+    text_run::advance_sixteenths(text.chars().count(), scale)
 }
 
 /// Paint the grid's rows over `body` from display row `scroll_row`.

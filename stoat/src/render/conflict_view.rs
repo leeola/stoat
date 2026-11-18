@@ -165,18 +165,32 @@ pub(crate) fn render_conflict_view(
     // and a sibling field cannot be borrowed alongside it.
     let mut endpoint_cache = editor.highlight_endpoint_cache.take();
     let mut row_cache = editor.diff_row_cache.take();
+    let position = editor.conflict_frame.position;
     if let Some(state) = editor.conflict_view.as_mut() {
         let state = Arc::make_mut(state);
         let paint = live.map(|(scene, grid)| {
             grid::paint_header(
-                Rect {
-                    height: grid::HEADER_ROWS,
-                    ..inner
-                },
+                Rect { height: 1, ..inner },
                 &grid,
                 &state.labels,
                 theme.type_scale(TypeRole::Ui),
                 theme.type_scale(TypeRole::Caption),
+                buf,
+                scene,
+            );
+            grid::paint_file_header(
+                Rect {
+                    y: inner.y + 1,
+                    height: 1,
+                    ..inner
+                },
+                &grid,
+                grid::FileFacts {
+                    path: &state.rel_path,
+                    position,
+                    counts: state.line_counts,
+                },
+                theme,
                 buf,
                 scene,
             );

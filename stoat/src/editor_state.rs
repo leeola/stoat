@@ -1,6 +1,6 @@
 use crate::{
     buffer::{BufferId, SharedBuffer},
-    conflict_session::ConflictViewState,
+    conflict_session::{ConflictFrame, ConflictViewState},
     diff_changes::RevealFlash,
     display_map::{CachedHighlightEndpoints, DisplayMap},
     minimap::density::Density,
@@ -170,6 +170,9 @@ pub(crate) struct EditorState {
     /// Behind an [`Arc`] so every pooled page fill takes a handle rather than
     /// a copy of the aligned rows.
     pub(crate) conflict_view: Option<Arc<ConflictViewState>>,
+    /// What the last frame handed the conflict view's painter, which the painter
+    /// reads beside [`Self::conflict_view`].
+    pub(crate) conflict_frame: ConflictFrame,
     pub(crate) selections: SelectionsCollection,
     /// Per-editor cursor for cycling through ambiguous move sources.
     /// `(hunk_line, source_index)` identifies which source the user is
@@ -349,6 +352,7 @@ impl EditorState {
             wrap_override: None,
             diff_view: false,
             conflict_view: None,
+            conflict_frame: ConflictFrame::default(),
             selections,
             move_source_cursor: None,
             expansion_history: Vec::new(),

@@ -167,6 +167,24 @@ impl MergeDoc {
         )
     }
 
+    /// The lines theirs changes against ours, as `(added, removed)`.
+    ///
+    /// A row whose theirs line differs from its ours line, or has no ours line,
+    /// adds one. A row whose ours line differs from its theirs line, or has no
+    /// theirs line, removes one. So a line both sides changed alike counts
+    /// nothing, and a conflicting line counts once each way.
+    pub(crate) fn line_counts(&self) -> (u32, u32) {
+        self.rows.iter().fold((0, 0), |(added, removed), row| {
+            let ours = row.ours.as_ref().map(|side| side.text.as_str());
+            let theirs = row.theirs.as_ref().map(|side| side.text.as_str());
+            let differs = ours != theirs;
+            (
+                added + u32::from(differs && theirs.is_some()),
+                removed + u32::from(differs && ours.is_some()),
+            )
+        })
+    }
+
     /// The initial center-column text plus the byte range each chunk occupies
     /// in it.
     ///
@@ -863,6 +881,15 @@ mod tests {
             [false, true, false, true, false]
         );
         assert_eq!(chunk_ranges(&separated.chunks), [1..2, 3..4]);
+    }
+
+    /// The line counts read what theirs changes against ours. The conflicting
+    /// line b counts once each way, the two lines only theirs adds count as
+    /// added, and the line only ours adds counts as removed.
+    #[test]
+    fn a_merge_doc_counts_what_theirs_changes_against_ours() {
+        let merged = doc("a\nb\nc\n", "a\nB\no\nc\n", "a\nX\nc\nt\nu\n");
+        assert_eq!(merged.line_counts(), (3, 2));
     }
 
     #[test]

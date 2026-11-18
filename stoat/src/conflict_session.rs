@@ -102,6 +102,15 @@ pub(crate) struct ConflictViewState {
     /// derive each chunk's resolution state against its live region text and
     /// paint the matching gutter glyph.
     pub(crate) picks: Vec<Vec<RowPick>>,
+    /// The file's path from the repository's root, which the File Header
+    /// names.
+    pub(crate) rel_path: String,
+    /// The lines theirs adds and removes against ours, which the File Header
+    /// counts.
+    ///
+    /// Counted once, since the merge document never changes and the painter
+    /// runs every frame.
+    pub(crate) line_counts: (u32, u32),
     /// The names the MergeGrid header gives the two sides.
     pub(crate) labels: ConflictLabels,
     /// Layout and chunk classification derived from the center buffer, rebuilt
@@ -131,12 +140,15 @@ impl ConflictViewState {
         doc: MergeDoc,
         chunk_anchors: Vec<(Anchor, Anchor)>,
         picks: Vec<Vec<RowPick>>,
+        rel_path: String,
         labels: ConflictLabels,
     ) -> Self {
         Self {
+            line_counts: doc.line_counts(),
             doc,
             chunk_anchors,
             picks,
+            rel_path,
             labels,
             derived: None,
         }
@@ -288,6 +300,18 @@ pub(crate) struct ConflictPosition {
     pub(crate) chunks_open: usize,
     /// The files of the session that hold a chunk still on its markers.
     pub(crate) files_open: usize,
+}
+
+/// What a frame hands the conflict view's painter beside the editor's own
+/// state.
+///
+/// The painter receives the editor alone, so the frame writes the session's
+/// position on the shown file's center editor before the panes paint.
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct ConflictFrame {
+    /// The position the frame read, `None` when the focused pane shows no
+    /// conflict view.
+    pub(crate) position: Option<ConflictPosition>,
 }
 
 /// The focused conflict view's [`ConflictPosition`], or `None` when the focused

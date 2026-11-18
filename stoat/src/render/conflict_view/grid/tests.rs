@@ -1,11 +1,11 @@
 use super::{
-    number_scale, paint_header, row_kind, Grid, GridColors, GridColumns, MergeRowKind, RowLook,
-    Tone,
+    number_scale, paint_file_header, paint_header, row_kind, FileFacts, Grid, GridColors,
+    GridColumns, MergeRowKind, RowLook, Tone, HEADER_ROWS,
 };
 use crate::{
     action_handlers::{dispatch, focused_editor_mut},
     app::DEFAULT_KEYMAP,
-    conflict_session::ConflictLabels,
+    conflict_session::{ConflictLabels, ConflictPosition},
     host::git::MergeState,
     merge_view::{ChunkState, MergeDoc},
     render::{
@@ -40,6 +40,13 @@ const CHIP_CONFLICT: [u8; 3] = [0x33, 0x20, 0x1f];
 const CHIP_OURS: [u8; 3] = [0x1d, 0x2a, 0x1f];
 const CHIP_THEIRS: [u8; 3] = [0x2a, 0x22, 0x36];
 const MERGED_HEAD: [u8; 3] = [0x1b, 0x1d, 0x22];
+const CONFLICT: [u8; 3] = [0xf5, 0x9a, 0xa0];
+const TAG_CONFLICT: [u8; 3] = [0x3a, 0x20, 0x26];
+const DISABLED: [u8; 3] = [0x5b, 0x61, 0x6d];
+
+/// The first sixteenth under the column header and the File Header, where the
+/// grid's rows start.
+const BODY_TOP: i16 = HEADER_ROWS as i16 * 16;
 
 /// The one-chunk file most tests open.
 ///
@@ -47,8 +54,10 @@ const MERGED_HEAD: [u8; 3] = [0x1b, 0x1d, 0x22];
 /// after it.
 const ONE_CHUNK: [&str; 3] = ["a\nbase\nz\n", "a\nOURS\nz\n", "a\nTHEIRS\nz\n"];
 
-/// The paint area, wide enough that the merged column ends past its chip.
-const AREA: Rect = Rect::new(0, 0, 158, 12);
+/// The paint area, wide enough that the merged column ends past its chip, and
+/// tall enough to hold the eleven rows of the one-sided edits test under the
+/// two header rows.
+const AREA: Rect = Rect::new(0, 0, 158, 13);
 
 #[test]
 fn the_columns_split_the_width_one_to_one_point_one_two_to_one() {
@@ -263,7 +272,7 @@ fn the_rows_start_below_the_header() {
     let first_numbers: Vec<_> = shot
         .runs()
         .into_iter()
-        .filter(|&(_, row, ..)| row == 16)
+        .filter(|&(_, row, ..)| row == 32)
         .map(|(_, _, text, _)| text)
         .collect();
 
@@ -272,14 +281,167 @@ fn the_rows_start_below_the_header() {
         (
             Some(Rect::new(
                 shot.cols.merged.text_x,
-                1,
+                2,
                 shot.cols.merged.right() - shot.cols.merged.text_x,
-                AREA.height - 1,
+                AREA.height - 2,
             )),
-            Some(u32::from(AREA.height) - 1),
+            Some(u32::from(AREA.height) - 2),
             vec!["1".to_string(), "1".to_string(), "1".to_string()],
         ),
     );
+}
+
+/// The File Header runs a rule along its top and its bottom on the head color.
+/// It tags the shown file's open conflicts and counts what theirs changes,
+/// both against the merged column, names the file from the merged column's
+/// pad, and ends in the file's place in the session against the theirs
+/// column's right edge. The tag reads every open chunk as the total, some as
+/// how many of the total stay left, and none as resolved, in the resolved
+/// tag's colors. A zero count takes no run.
+///
+/// At the test scale every character advances 16 sixteenths. So the tag of
+/// `conflict U+00B7 2` is 192 wide with 10 of pad each side, and the tag and
+/// its two counts, 16 apart, end 20 short of the merged column's 800.
+#[test]
+fn the_file_header_tags_the_open_conflicts_and_counts_the_file() {
+    let tags = [2, 1, 0].map(|open| {
+        let (commands, _) = file_header(AREA, open, (9, 4));
+        let tag = commands.iter().find_map(|command| match command {
+            Command::Bar(bar) if bar.radius > 0 => {
+                Some((bar.x, bar.y, bar.width, bar.height, bar.color))
+            },
+            _ => None,
+        });
+        let text = commands.iter().find_map(|command| match command {
+            Command::TextRun(run) if run.bg.is_none() => {
+                Some((run.col, run.text.clone(), run.color))
+            },
+            _ => None,
+        });
+        (tag, text)
+    });
+    let (commands, buf) = file_header(AREA, 2, (9, 4));
+    let rules: Vec<_> = commands
+        .iter()
+        .filter_map(|command| match command {
+            Command::Bar(bar) if bar.width == AREA.width * 16 => Some((bar.y, bar.color)),
+            _ => None,
+        })
+        .collect();
+    let runs: Vec<_> = commands
+        .into_iter()
+        .filter_map(|command| match command {
+            Command::TextRun(run) if run.bg.is_some() => {
+                Some((run.col, run.text, run.color, run.bold))
+            },
+            _ => None,
+        })
+        .collect();
+    let one_count: Vec<_> = file_header(AREA, 2, (0, 3))
+        .0
+        .into_iter()
+        .filter_map(|command| match command {
+            Command::TextRun(run) if run.text.starts_with(['+', '\u{2212}']) => {
+                Some((run.col, run.text))
+            },
+            _ => None,
+        })
+        .collect();
+
+    assert_eq!(
+        (
+            tags,
+            rules,
+            runs,
+            style_rgb(Some(buf[(0, 0)].bg)),
+            one_count
+        ),
+        (
+            [
+                (
+                    Some((472, 1, 212, 14, TAG_CONFLICT)),
+                    Some((482, "conflict \u{b7} 2".to_string(), CONFLICT)),
+                ),
+                (
+                    Some((312, 1, 372, 14, TAG_CONFLICT)),
+                    Some((322, "conflict \u{b7} 1 of 2 left".to_string(), CONFLICT)),
+                ),
+                (
+                    Some((504, 1, 180, 14, CHIP_OURS)),
+                    Some((514, "\u{2713} resolved".to_string(), SUCCESS)),
+                ),
+            ],
+            vec![(0, DIVIDER), (15, DIVIDER)],
+            vec![
+                (820, "src/".to_string(), MUTED, false),
+                (884, "notes".to_string(), TEXT, true),
+                (700, "+9".to_string(), SUCCESS, false),
+                (748, "\u{2212}4".to_string(), DANGER, false),
+                (2348, "file 1 / 1".to_string(), DISABLED, false),
+            ],
+            Some(MERGED_HEAD),
+            vec![(748, "\u{2212}3".to_string())],
+        ),
+    );
+}
+
+/// A column too narrow for its part of the File Header drops that part whole.
+/// At 66 cells the ours column has too little room for the tag and its counts,
+/// and at 30 cells the theirs column has too little room for the place.
+#[test]
+fn a_narrow_column_drops_its_part_of_the_file_header() {
+    let parts = [66, 30].map(|width| {
+        let (commands, _) = file_header(Rect::new(0, 0, width, 13), 2, (9, 4));
+        let tag = commands
+            .iter()
+            .any(|command| matches!(command, Command::Bar(bar) if bar.radius > 0));
+        let place = commands.iter().any(
+            |command| matches!(command, Command::TextRun(run) if run.text.starts_with("file")),
+        );
+        (tag, place)
+    });
+
+    assert_eq!(parts, [(false, true), (false, false)]);
+}
+
+/// Paint the File Header in `ermine_night` over the first row of `area` for
+/// `src/notes` with `open` of its two chunks open and `counts` lines theirs
+/// adds and removes, and answer the scene's commands and the cells.
+fn file_header(area: Rect, open: usize, counts: (u32, u32)) -> (Vec<Command>, Buffer) {
+    let (config, errors) = stoat_config::parse(DEFAULT_KEYMAP);
+    assert!(errors.is_empty(), "parse errors: {errors:?}");
+    let theme = Theme::from_config(&config.expect("the shipped config parses"), "ermine_night")
+        .expect("ermine_night loads");
+    let grid = Grid {
+        cols: GridColumns::compute(area, 2, 256),
+        colors: GridColors::resolve(&theme).expect("ermine_night gives RGB colors"),
+    };
+    let position = ConflictPosition {
+        operation: "merge",
+        chunk_at: None,
+        chunk_total: 2,
+        file_at: 1,
+        file_total: 1,
+        file_open: open,
+        chunks_open: open,
+        files_open: usize::from(open > 0),
+    };
+    let facts = FileFacts {
+        path: "src/notes",
+        position: Some(position),
+        counts,
+    };
+    let mut buf = Buffer::empty(area);
+    let mut scene = ApcScene::new();
+    paint_file_header(
+        Rect { height: 1, ..area },
+        &grid,
+        facts,
+        &theme,
+        &mut buf,
+        &mut scene,
+    );
+    (decode_stream(scene.buffer()), buf)
 }
 
 #[test]
@@ -290,11 +452,11 @@ fn an_unresolved_chunk_tints_each_column_and_ghosts_its_markers() {
         [cols.ours.x, cols.merged.x, cols.theirs.x].map(|x| style_rgb(Some(shot.buf[(x, y)].bg)))
     };
     let absent = style_rgb(shot.theme.get(scope::DIFF_ABSENT).bg);
-    let ghost = &shot.buf[(cols.merged.text_x, 2)];
+    let ghost = &shot.buf[(cols.merged.text_x, 3)];
 
     assert_eq!(
         (
-            [row(1), row(2), row(3), row(8)],
+            [row(2), row(3), row(4), row(9)],
             (
                 ghost.symbol(),
                 ghost.fg,
@@ -333,16 +495,16 @@ fn an_unresolved_chunk_bars_its_edited_sides_and_chips_its_first_row() {
         (change_bars, shot.chips()),
         (
             vec![
-                bar(cols.ours.x, 2, SUCCESS),
-                bar(cols.theirs.x, 2, SPECIAL),
-                bar(cols.merged.x, 2, DANGER),
+                bar(cols.ours.x, 3, SUCCESS),
+                bar(cols.theirs.x, 3, SPECIAL),
                 bar(cols.merged.x, 3, DANGER),
                 bar(cols.merged.x, 4, DANGER),
                 bar(cols.merged.x, 5, DANGER),
                 bar(cols.merged.x, 6, DANGER),
+                bar(cols.merged.x, 7, DANGER),
             ],
             vec![(
-                (chip_x, 33, 280, 14, CHIP_CONFLICT),
+                (chip_x, 49, 280, 14, CHIP_CONFLICT),
                 "conflict \u{b7} o t b".to_string(),
                 DANGER,
             )],
@@ -364,17 +526,23 @@ fn a_chip_draws_as_a_rounded_bar_under_its_run() {
         .commands
         .iter()
         .filter_map(|command| match command {
-            Command::Bar(bar) if bar.radius > 0 => Some((bar.x, bar.height, bar.radius, bar.color)),
+            Command::Bar(bar) if bar.radius > 0 && bar.y >= BODY_TOP => {
+                Some((bar.x, bar.height, bar.radius, bar.color))
+            },
             _ => None,
         })
         .collect();
     let run = shot.commands.iter().find_map(|command| match command {
-        Command::TextRun(run) if run.text.starts_with("conflict") => Some((run.col, run.bg)),
+        Command::TextRun(run) if run.row >= BODY_TOP && run.text.starts_with("conflict") => {
+            Some((run.col, run.bg))
+        },
         _ => None,
     });
-    let bar_at = at(|command| matches!(command, Command::Bar(bar) if bar.radius > 0));
-    let run_at =
-        at(|command| matches!(command, Command::TextRun(run) if run.text.starts_with("conflict")));
+    let bar_at =
+        at(|command| matches!(command, Command::Bar(bar) if bar.radius > 0 && bar.y >= BODY_TOP));
+    let run_at = at(
+        |command| matches!(command, Command::TextRun(run) if run.row >= BODY_TOP && run.text.starts_with("conflict")),
+    );
     let box_x = rounded.first().map_or(0, |&(x, ..)| x);
 
     assert_eq!(
@@ -449,15 +617,16 @@ fn the_cursor_row_lifts_its_merged_number() {
         (1..=8)
             .map(|line| {
                 let color = if line == 2 { TEXT } else { MUTED };
-                (line as i16, line.to_string(), color)
+                (line as i16 + 1, line.to_string(), color)
             })
             .collect::<Vec<_>>(),
         "the open lands the cursor on the chunk's first row, the second line",
     );
 }
 
-/// The three column names and the cursor row's merged number draw bold, as the
-/// MergeGrid board draws them, and no other run of the grid does.
+/// The three column names, the File Header's file name, and the cursor row's
+/// merged number draw bold, as the MergeGrid board draws them, and no other
+/// run of the grid does.
 #[test]
 fn the_column_names_and_the_cursor_row_s_number_draw_bold() {
     let shot = grid_shot(ONE_CHUNK, &[]);
@@ -470,7 +639,7 @@ fn the_column_names_and_the_cursor_row_s_number_draw_bold() {
         })
         .collect();
 
-    assert_eq!(bold, ["ours", "merged", "theirs", "2"]);
+    assert_eq!(bold, ["ours", "merged", "theirs", "f.txt", "2"]);
 }
 
 #[test]
@@ -482,7 +651,7 @@ fn a_taken_side_bars_the_merged_column_and_fades_the_other_side() {
         .into_iter()
         .filter(|&(_, _, width, ..)| width == 6)
         .collect();
-    let theirs = &shot.buf[(cols.theirs.text_x, 2)];
+    let theirs = &shot.buf[(cols.theirs.text_x, 3)];
     let [r, g, b] = dim_rgb(SPECIAL, BASE, 0.55);
 
     assert_eq!(
@@ -493,10 +662,10 @@ fn a_taken_side_bars_the_merged_column_and_fades_the_other_side() {
                 .map(|((.., tint), text, fg)| (text, fg, tint))
                 .collect::<Vec<_>>(),
             (theirs.symbol(), theirs.fg),
-            style_rgb(Some(shot.buf[(cols.ours.x, 2)].bg)),
+            style_rgb(Some(shot.buf[(cols.ours.x, 3)].bg)),
         ),
         (
-            vec![bar(cols.ours.x, 2, SUCCESS), bar(cols.merged.x, 2, SUCCESS)],
+            vec![bar(cols.ours.x, 3, SUCCESS), bar(cols.merged.x, 3, SUCCESS)],
             vec![("\u{2713} took ours".to_string(), SUCCESS, CHIP_OURS)],
             ("T", Color::Rgb(r, g, b)),
             Some(TINT_OURS),
@@ -527,14 +696,14 @@ fn one_sided_edits_tint_their_side_and_chip_the_first_row_of_a_run() {
     assert_eq!(
         (
             [
-                bg(cols.ours.x, 2),
-                bg(cols.merged.x, 2),
-                bg(cols.theirs.x, 2)
-            ],
-            [
                 bg(cols.ours.x, 3),
                 bg(cols.merged.x, 3),
                 bg(cols.theirs.x, 3)
+            ],
+            [
+                bg(cols.ours.x, 4),
+                bg(cols.merged.x, 4),
+                bg(cols.theirs.x, 4)
             ],
             chips,
         ),
@@ -542,14 +711,14 @@ fn one_sided_edits_tint_their_side_and_chip_the_first_row_of_a_run() {
             [Some(TINT_OURS), None, None],
             [Some(TINT_OURS), None, None],
             vec![
-                (2, "auto \u{b7} ours".to_string(), SUCCESS, CHIP_OURS),
+                (3, "auto \u{b7} ours".to_string(), SUCCESS, CHIP_OURS),
                 (
-                    5,
+                    6,
                     "conflict \u{b7} o t b".to_string(),
                     DANGER,
                     CHIP_CONFLICT
                 ),
-                (11, "auto \u{b7} theirs".to_string(), SPECIAL, CHIP_THEIRS),
+                (12, "auto \u{b7} theirs".to_string(), SPECIAL, CHIP_THEIRS),
             ],
         ),
         "only ours tints an ours edit, its run of two rows takes one chip, and \
@@ -567,7 +736,7 @@ fn the_grid_draws_dividers_and_hairlines_down_its_rows() {
         .filter(|&(_, _, width, ..)| width == 1)
         .collect();
     rules.sort();
-    let divider = |x: u16| (x as i16 * 16 + 68, 16, 1, 128, DIVIDER);
+    let divider = |x: u16| (x as i16 * 16 + 68, 32, 1, 128, DIVIDER);
     let hairline = |x: i16, y: i16, height: u16| (x, y, 1, height, HAIRLINE);
     let mut want = vec![
         divider(cols.ours.x),
@@ -575,8 +744,10 @@ fn the_grid_draws_dividers_and_hairlines_down_its_rows() {
         divider(cols.theirs.x),
         hairline(cols.merged.x as i16 * 16 - 1, 0, 16),
         hairline(cols.merged.right() as i16 * 16, 0, 16),
-        hairline(cols.merged.x as i16 * 16 - 1, 16, 128),
-        hairline(cols.merged.right() as i16 * 16, 16, 128),
+        hairline(cols.merged.x as i16 * 16 - 1, 16, 16),
+        hairline(cols.merged.right() as i16 * 16, 16, 16),
+        hairline(cols.merged.x as i16 * 16 - 1, 32, 128),
+        hairline(cols.merged.right() as i16 * 16, 32, 128),
     ];
     want.sort();
 
@@ -593,7 +764,7 @@ fn no_rgb_colors_or_no_row_under_the_header_keeps_the_cell_layout() {
     let ermine = h.stoat.theme.clone();
     let cases = [
         (AREA, Arc::new(Theme::empty())),
-        (Rect::new(0, 0, AREA.width, 1), ermine),
+        (Rect::new(0, 0, AREA.width, HEADER_ROWS), ermine),
     ];
     let layouts = cases.map(|(area, theme)| {
         let shot = paint_over(&mut h, area, theme);
@@ -633,6 +804,7 @@ fn a_theme_without_the_board_scopes_falls_back_to_their_neighbors() {
             colors.band,
             colors.chip,
             [colors.chip_ours, colors.chip_theirs],
+            [colors.tag, colors.tag_resolved],
             colors.ghost,
             colors.head
         ),
@@ -640,13 +812,15 @@ fn a_theme_without_the_board_scopes_falls_back_to_their_neighbors() {
             band,
             band,
             [colors.ours, colors.theirs],
+            [band, colors.ours],
             Style::default()
                 .fg(rgb([0x63, 0x6d, 0x83]))
                 .add_modifier(Modifier::ITALIC),
             None,
         ),
         "the band takes the conflict header's color, the chip the band, each \
-         side's chip its side, and the ghost muted italic text",
+         side's chip its side, the tag the chip, the resolved tag the ours chip, \
+         and the ghost muted italic text",
     );
 }
 
@@ -692,13 +866,14 @@ impl GridShot {
     /// the text and the color of the run that starts on the box, in the order
     /// the scene holds them.
     ///
-    /// A chip's box is the grid's one kind of rounded bar.
+    /// A chip's box is the one kind of rounded bar in the grid's rows. The File
+    /// Header's tag above them is rounded too.
     fn chips(&self) -> Vec<(BarFields, String, [u8; 3])> {
         let runs = self.runs();
         self.commands
             .iter()
             .filter_map(|command| match command {
-                Command::Bar(bar) if bar.radius > 0 => {
+                Command::Bar(bar) if bar.radius > 0 && bar.y >= BODY_TOP => {
                     Some((bar.x, bar.y, bar.width, bar.height, bar.color))
                 },
                 _ => None,
