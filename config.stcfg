@@ -2149,6 +2149,7 @@ on key {
 
         pair {
             D -> [SetMode(normal), DiffPair()];
+            p -> [SetMode(normal), DiffPair()];
         }
     }
     # Reading a tour is a run of steps rather than one, so `space W` holds this

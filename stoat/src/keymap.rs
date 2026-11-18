@@ -4284,18 +4284,21 @@ mod tests {
     fn the_diff_chord_binds_the_pair_diff_only_with_a_pair() {
         let config = parse_config(crate::app::DEFAULT_KEYMAP);
         let keymap = Keymap::compile(&config);
-        let pressed = |pair| {
+        let pressed = |key, pair| {
             let state = TestState::new()
                 .set("mode", StateValue::String("space_diff".into()))
                 .set("pair", StateValue::Bool(pair));
-            action_names(keymap.lookup(&state, &key_event(KeyCode::Char('D'), KeyModifiers::NONE)))
+            action_names(keymap.lookup(&state, &key_event(KeyCode::Char(key), KeyModifiers::NONE)))
         };
+        let arm = Some(vec!["SetMode".to_string(), "DiffPair".to_string()]);
         assert_eq!(
-            [pressed(true), pressed(false)],
             [
-                Some(vec!["SetMode".to_string(), "DiffPair".to_string()]),
-                None
+                pressed('D', true),
+                pressed('p', true),
+                pressed('D', false),
+                pressed('p', false)
             ],
+            [arm.clone(), arm, None, None],
         );
     }
 
