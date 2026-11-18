@@ -66,6 +66,7 @@ action_kinds! {
     DismissKeyHints,
     PinMode,
     OpenBuffer,
+    NewBuffer,
     OpenFileFinder,
     OpenFileFinderHSplit,
     OpenFileFinderVSplit,

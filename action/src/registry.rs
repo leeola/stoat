@@ -81,8 +81,8 @@ use crate::{
         },
         file::{
             AutoReload, AutoReloadConfig, FollowChanges, FollowReload, FontSizeDec, FontSizeInc,
-            ForceReloadAll, ForceReloadBuffer, ForceSaveBuffer, LiveReload, OpenBuffer, OpenConfig,
-            OpenFile, ReloadAll, ReloadBuffer, ToggleMinimap, ToggleWrap,
+            ForceReloadAll, ForceReloadBuffer, ForceSaveBuffer, LiveReload, NewBuffer, OpenBuffer,
+            OpenConfig, OpenFile, ReloadAll, ReloadBuffer, ToggleMinimap, ToggleWrap,
         },
         file_finder::{
             FileFinderScopeToggle, OpenBufferPicker, OpenChangedFilePicker, OpenFileFinder,
@@ -1003,6 +1003,7 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
             path: PathBuf::from(raw),
         }))
     });
+    add(NewBuffer::DEF, |_| Ok(Box::new(NewBuffer)));
     add(OpenRun::DEF, |_| Ok(Box::new(OpenRun)));
     add(SpawnClaude::DEF, |_| Ok(Box::new(SpawnClaude)));
     add(Terminal::DEF, |_| Ok(Box::new(Terminal)));
@@ -1633,6 +1634,7 @@ mod tests {
         "FollowChanges",
         "LiveReload",
         "FollowReload",
+        "NewBuffer",
         "ChangeWalkWrap",
         "ToggleBlame",
         "BlameCard",
@@ -1708,6 +1710,7 @@ mod tests {
             ("auto-reload-config", "AutoReloadConfig"),
             ("open", "OpenFile"),
             ("buffer", "OpenBuffer"),
+            ("new", "NewBuffer"),
             ("write", "SaveBuffer"),
         ];
         for (token, action) in cases {
@@ -1728,6 +1731,7 @@ mod tests {
             ("w", "SaveBuffer"),
             ("o", "OpenFile"),
             ("b", "OpenBuffer"),
+            ("n", "NewBuffer"),
             ("cd", "SetCwd"),
             ("ssh", "Ssh"),
             ("mosh", "Mosh"),
@@ -2245,7 +2249,8 @@ mod tests {
         // + 1 BlameCheckout.
         // + 2 CheckoutConfirmAccept/CheckoutConfirmCancel.
         // + 1 BlameParent.
-        assert_eq!(all().count(), 510);
+        // + 1 NewBuffer.
+        assert_eq!(all().count(), 511);
     }
 
     #[test]

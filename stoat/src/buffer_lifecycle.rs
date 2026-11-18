@@ -788,6 +788,24 @@ pub(crate) fn show_revision(stoat: &mut Stoat, path: &Path, sha: &str, text: &st
     buffer_id
 }
 
+/// Show a new empty scratch buffer in the focused pane, backing the
+/// `NewBuffer` action.
+///
+/// The pane records a jump first, so the jump back returns to the buffer it
+/// showed. That buffer becomes the pane's last accessed one. A displaced
+/// scratch with no typed text drops from the workspace instead.
+pub(crate) fn show_new_scratch(stoat: &mut Stoat) -> BufferId {
+    let workspace = stoat.active_workspace;
+    let ws = &mut stoat.workspaces[workspace];
+    let (buffer_id, buffer) = ws.buffers.new_scratch();
+    let target = ws.panes.focus();
+    let executor = stoat.executor.clone();
+
+    jump::record_pane_switch(stoat, workspace, target, buffer_id);
+    show_buffer_in_pane(stoat, workspace, target, buffer_id, buffer, executor);
+    buffer_id
+}
+
 /// Show `buffer_id` in `target` by swapping the pane's editor to a fresh
 /// [`EditorState`] over the buffer, garbage-collecting the outgoing one.
 ///
@@ -1238,7 +1256,7 @@ mod tests {
     };
     use stoat_action::{
         CloseAllBuffers, CloseBuffer, DiffFiles, FocusLeft, ForceCloseAllBuffers, GotoLastAccessed,
-        JumpBackward, OpenBuffer, OpenFile, SaveBuffer, SetMark, SplitRight,
+        JumpBackward, NewBuffer, OpenBuffer, OpenFile, SaveBuffer, SetMark, SplitRight,
     };
 
     fn focused_buffer_id(stoat: &mut Stoat) -> BufferId {
@@ -1309,6 +1327,55 @@ mod tests {
                 Some("a.rs is read only: a revision of a1b2c3d".to_owned()),
                 true,
             ),
+        );
+    }
+
+    /// `NewBuffer` shows a scratch with no path in the focused pane and asks
+    /// for a repaint. The file the pane showed stays open, and the jump back
+    /// returns to it.
+    #[test]
+    fn new_shows_a_scratch_and_the_jump_back_returns_to_the_file() {
+        let mut h = Stoat::test();
+        let (_, file) = open_path(&mut h, b"hello\n");
+        let effect = dispatch(&mut h.stoat, &NewBuffer);
+        let scratch = focused_buffer_id(&mut h.stoat);
+        let shown = {
+            let ws = h.stoat.active_workspace();
+            (
+                effect,
+                scratch != file,
+                ws.buffers.path_for(scratch).map(Path::to_path_buf),
+                ws.buffers.get(file).is_some(),
+            )
+        };
+        dispatch(&mut h.stoat, &JumpBackward);
+
+        assert_eq!(
+            (shown, focused_buffer_id(&mut h.stoat) == file),
+            ((UpdateEffect::Redraw, true, None, true), true),
+        );
+    }
+
+    /// A second `NewBuffer` on an untouched scratch drops that scratch, as a
+    /// displaced scratch with no typed text drops, so the workspace holds no
+    /// more buffers than before.
+    #[test]
+    fn new_on_an_untouched_scratch_replaces_it() {
+        let mut h = Stoat::test();
+        dispatch(&mut h.stoat, &NewBuffer);
+        let first = focused_buffer_id(&mut h.stoat);
+        let before = h.stoat.active_workspace().buffers.len();
+        dispatch(&mut h.stoat, &NewBuffer);
+        let second = focused_buffer_id(&mut h.stoat);
+        let ws = h.stoat.active_workspace();
+
+        assert_eq!(
+            (
+                ws.buffers.get(first).is_none(),
+                ws.buffers.len(),
+                second != first
+            ),
+            (true, before, true),
         );
     }
 

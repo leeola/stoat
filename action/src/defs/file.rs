@@ -143,6 +143,18 @@ impl Action for OpenBuffer {
     }
 }
 
+define_action!(
+    NewBufferDef,
+    NewBuffer,
+    "NewBuffer",
+    ActionKind::NewBuffer,
+    "open a new scratch buffer",
+    "Show a new empty scratch buffer in the focused pane. The buffer has no file, so a save writes nothing. A file the pane showed stays open, and a backward jump or GotoLastAccessed returns to it.",
+    ActionPriority::Common,
+    aliases = &["n"],
+    command_name = "new"
+);
+
 const AUTO_RELOAD_PARAMS: &[ParamDef] = &[ParamDef {
     name: "state",
     kind: ParamKind::String,

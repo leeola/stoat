@@ -422,6 +422,10 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
             file::open_file(stoat, &open.path, OpenOrigin::Named);
             UpdateEffect::Redraw
         },
+        ActionKind::NewBuffer => {
+            crate::buffer_lifecycle::show_new_scratch(stoat);
+            UpdateEffect::Redraw
+        },
         ActionKind::OpenFileFinder => {
             file_finder::open_file_finder(stoat, crate::file_finder::OpenIntent::Replace, None)
         },
