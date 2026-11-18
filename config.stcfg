@@ -1704,20 +1704,23 @@ on key {
         Down -> DiffChangesNext() "next row";
         Up -> DiffChangesPrev() "prev row";
     }
+    # A label is the key's short name in the view's hints box, as the HintBox
+    # board names the conflict keys. The box lists the keys that share a label
+    # on one row, so Escape and q read as one close row.
     view == conflict && mode == normal {
-        Escape -> CloseConflict();
-        q -> CloseConflict();
-        o -> ConflictPickOurs();
-        t -> ConflictPickTheirs();
-        b -> ConflictPickBoth();
-        O -> ConflictPickOursLine();
-        T -> ConflictPickTheirsLine();
-        x -> ConflictResetChunk();
-        n -> ConflictNextChunk();
-        p -> ConflictPrevChunk();
-        N -> ConflictNextFile();
-        P -> ConflictPrevFile();
-        Enter -> ConflictApply();
+        Escape -> CloseConflict() "close";
+        q -> CloseConflict() "close";
+        o -> ConflictPickOurs() "take ours";
+        t -> ConflictPickTheirs() "take theirs";
+        b -> ConflictPickBoth() "take both";
+        O -> ConflictPickOursLine() "ours, this line";
+        T -> ConflictPickTheirsLine() "theirs, this line";
+        x -> ConflictResetChunk() "reset chunk";
+        n -> ConflictNextChunk() "next chunk";
+        p -> ConflictPrevChunk() "prev chunk";
+        N -> ConflictNextFile() "next file";
+        P -> ConflictPrevFile() "prev file";
+        Enter -> ConflictApply() "apply";
     }
     mode == insert {
         Escape -> SetMode(normal);
