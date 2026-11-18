@@ -51,6 +51,7 @@ const OVERLAY: [u8; 3] = [0x25, 0x28, 0x30];
 const RAISED: [u8; 3] = [0x1e, 0x21, 0x27];
 const HATCH: [u8; 3] = [0x1b, 0x1d, 0x22];
 const FOLD_BUTTON: [u8; 3] = [0x1f, 0x2a, 0x3d];
+const TEXT: [u8; 3] = [0xdf, 0xe2, 0xe8];
 const TEXT_DIM: [u8; 3] = [0xa3, 0xa9, 0xb5];
 const HAIRLINE: [u8; 3] = [0x2e, 0x32, 0x3b];
 const DIVIDER: [u8; 3] = [0x22, 0x25, 0x2b];
@@ -515,11 +516,15 @@ fn the_viewport_band_rounds_its_corners() {
 }
 
 /// The changes view heads each file with a row on the raised surface, between
-/// two hairlines.
+/// two hairlines, and the divide's hairline runs through it.
 ///
-/// Row 2 is the first file's header. Its text is centered, so the cells from
-/// column 2 to column 31 and from column 120 to column 149 hold none. The
-/// hairlines take the top and bottom pixel rows of the header row.
+/// Row 2 is the first file's header. Its counts end left of the divider,
+/// column 75, and its path starts right of it, so the cells from column 2 to
+/// column 31 hold no text, and the cells from column 10 to column 40 hold no
+/// pixel of the text color. The hairlines take the top and bottom pixel rows
+/// of the header row. The path's runs take no background, so the top hairline
+/// runs unbroken over cells 77 to 86, where the path's name shows. The divide
+/// takes one pixel column of the divider's cell.
 #[test]
 fn the_changes_view_heads_each_file_on_the_raised_surface() {
     let mut home = support::scratch_home();
@@ -552,6 +557,28 @@ fn the_changes_view_heads_each_file_on_the_raised_surface() {
         HAIRLINE,
         "changes_header_bottom",
     );
+
+    let counts_half_text = pixels_of(&shot, cell_rect(10, 2, 31, 1), TEXT);
+    let path = cell_rect(77, 2, 10, 1);
+    let (path_x, _, path_width, _) = path;
+    let path_top = pixels_of(&shot, (path_x, y, path_width, 1), HAIRLINE);
+    let path_text = pixels_of(&shot, path, TEXT);
+    let divide = {
+        let (cell_x, _, cell_width, _) = cell_rect(75, 2, 1, 1);
+        bar_columns(&shot, (y, height), HAIRLINE)
+            .into_iter()
+            .filter(|column| (cell_x..cell_x + cell_width).contains(column))
+            .count()
+    };
+    if counts_half_text > 0 || path_top != path_width as usize || path_text == 0 || divide != 1 {
+        let frame = keep_frame(&shot, &mut home, "changes_header_layout");
+        panic!(
+            "the header reads {counts_half_text} text pixels in cells 10 to 40, {path_top} of \
+             {path_width} hairline pixels over the path, {path_text} text pixels in the path's \
+             cells, and {divide} divide columns in cell 75; the frame is {}",
+            frame.display(),
+        );
+    }
 }
 
 /// The changes view pins the File Header of the file under the stack's top

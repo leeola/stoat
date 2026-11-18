@@ -198,19 +198,21 @@ pub(crate) fn render_commit_patch(
         .enumerate()
         .filter(|(_, row)| matches!(row, PatchRow::Header { .. }))
         .map(|(index, _)| row_rect(index));
-    diff_changes::emit_header_hairlines(headers, theme, scene);
+    diff_changes::emit_header_hairlines(headers, false, theme, scene);
 
     let mut lines = LinePainter::new(doc, theme, dials, scene.live());
     for (index, row) in shown.iter().enumerate() {
         let rect = row_rect(index);
         match row {
             PatchRow::Header { file } => {
-                let runs = diff_changes::header_runs(
-                    &doc.files[*file].rel_path,
-                    file_stats(doc, *file),
-                    theme,
-                );
-                diff_changes::paint_header(buf, rect, &runs, theme);
+                let counts = diff_changes::header_counts(file_stats(doc, *file), theme)
+                    .into_iter()
+                    .map(|(text, style)| (format!(" {text}"), style));
+                let runs: Vec<_> = diff_changes::header_path(&doc.files[*file].rel_path, theme)
+                    .into_iter()
+                    .chain(counts)
+                    .collect();
+                paint_centered_header(buf, rect, &runs, theme);
             },
             PatchRow::Fold { hidden, scope } => {
                 paint_fold_row(*hidden, scope.as_deref(), theme, rect, buf, scene);
@@ -227,6 +229,26 @@ pub(crate) fn render_commit_patch(
             chrome::vline(buf, area.x + RULE_X, y, run.len() as u16, divider, scene);
         }
         y += run.len() as u16;
+    }
+}
+
+/// Fill `row` with the raised surface and write `runs` across it, centered,
+/// as the patch's File Header.
+///
+/// Runs wider than the row start at its left column and clip at its right
+/// edge, so the start of the file's path stays in view.
+fn paint_centered_header(buf: &mut Buffer, row: Rect, runs: &[(String, Style)], theme: &Theme) {
+    let fill = theme.get(scope::UI_SURFACE_RAISED);
+    let end_x = row.x + row.width;
+    for x in row.x..end_x {
+        buf[(x, row.y)].set_char(' ').set_style(fill);
+    }
+
+    let width: usize = runs.iter().map(|(text, _)| text::text_width(text)).sum();
+    let mut x = row.x + (row.width - width.min(usize::from(row.width)) as u16) / 2;
+    for (text, style) in runs {
+        text::write_str_clipped(buf, x, row.y, text, *style, end_x);
+        x = x.saturating_add(text::text_width(text) as u16);
     }
 }
 
