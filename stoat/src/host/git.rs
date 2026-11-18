@@ -97,7 +97,7 @@ pub struct FileChange {
 /// The kind compares HEAD with the working tree and reads the index only to
 /// tell a new file from an untracked one. So a staged file keeps its kind
 /// under every base a diff reads against.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum FileKind {
     /// HEAD and the working tree both hold the path.
     Modified,

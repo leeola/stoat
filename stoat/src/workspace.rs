@@ -1679,8 +1679,11 @@ impl Workspace {
 
     /// The repository tally the diff pipeline last installed, or `None` before
     /// the first tally lands and outside a repo.
-    pub(crate) fn repo_tallies(&self) -> Option<&HunkTallies> {
-        self.diff.repo_hunk_tallies.as_ref()
+    ///
+    /// The tally comes shared, so a caller holds it while it borrows the
+    /// workspace mutably, as a frame does through its pane loop.
+    pub(crate) fn repo_tallies(&self) -> Option<Arc<HunkTallies>> {
+        self.diff.repo_hunk_tallies.clone()
     }
 
     /// Files changed since the revision base, absolute, as the last tally read

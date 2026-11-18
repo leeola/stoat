@@ -12,8 +12,9 @@
 
 use crate::{
     buffer_registry::BufferRegistry,
-    diff_changes::{self, DiffChangesState, ExcerptStats},
+    diff_changes::{self, DiffChangesState, Excerpt, ExcerptStats},
     editor_state::{EditorId, EditorState},
+    host::git::FileKind,
     pane::Pane,
     render::{
         chrome,
@@ -30,6 +31,7 @@ use ratatui::{
     buffer::Buffer,
     layout::Rect,
     style::{Modifier, Style},
+    widgets::StatefulWidget,
 };
 use slotmap::SlotMap;
 use std::path::Path;
@@ -52,6 +54,18 @@ const HEADER_PAD: u16 = 20;
 /// The sixteenths between two of a File Header's counts, the diff boards'
 /// `gap: 8px`.
 const HEADER_COUNT_GAP: u16 = 16;
+
+/// The sixteenths between a File Kind Tag's box and its text on each side, the
+/// DiffKindsSpec board's `padding: 0 5px`.
+const TAG_INSET: u16 = 10;
+
+/// The height of a File Kind Tag's box, in sixteenths of a row, one in from the
+/// row's top, so the header's two hairlines stay clear of it.
+const TAG_HEIGHT: u16 = 14;
+
+/// The radius a File Kind Tag's box rounds its corners at, in logical pixels,
+/// the board's `border-radius: 4px`.
+const TAG_RADIUS: u8 = 4;
 
 /// How much of a page of the changes view's pool a paint covers.
 ///
@@ -348,12 +362,11 @@ pub(crate) fn paint_stack_rows(
         // A page replaces its decorations as one set, so a decorations-only
         // page emits the header's runs too.
         if let Some(row) = header_row(top) {
-            let stats = diff_changes::excerpt_stats(excerpt, buffers);
             paint_header(
                 buf,
                 row,
                 &header_path(&excerpt.rel_path, frame.theme),
-                &header_counts(stats, frame.theme),
+                &excerpt_header_left(excerpt, buffers, frame),
                 frame.theme,
                 match scene.live() {
                     true => Some(&mut *scene),
@@ -568,12 +581,11 @@ fn paint_pinned_header(
     chrome::cover_cells(cover, false, PanelShadow::Cast, scene);
 
     let row = Rect { height: 1, ..inner };
-    let stats = diff_changes::excerpt_stats(excerpt, buffers);
     paint_header(
         buf,
         row,
         &header_path(&excerpt.rel_path, frame.theme),
-        &header_counts(stats, frame.theme),
+        &excerpt_header_left(excerpt, buffers, frame),
         frame.theme,
         match scene.live() {
             true => Some(&mut *scene),
@@ -689,8 +701,14 @@ fn divide_bar(x: u16, color: [u8; 3]) -> Bar {
 /// The runs read the file's directory muted, its name bold, and its extension
 /// bold in the type's color.
 pub(crate) fn header_path(rel_path: &str, theme: &Theme) -> Vec<(String, Style)> {
+    path_runs(rel_path, theme.get(scope::UI_TEXT), theme)
+}
+
+/// The runs of `rel_path` as [`header_path`] reads them, with the file's name
+/// bold in `name`'s colors.
+fn path_runs(rel_path: &str, name: Style, theme: &Theme) -> Vec<(String, Style)> {
     let muted = theme.get(scope::UI_TEXT_MUTED);
-    let bold = theme.get(scope::UI_TEXT).add_modifier(Modifier::BOLD);
+    let bold = name.add_modifier(Modifier::BOLD);
     let (dir, name) = rel_path.split_at(rel_path.rfind('/').map_or(0, |slash| slash + 1));
     let mut runs = Vec::new();
     if !dir.is_empty() {
@@ -742,24 +760,107 @@ pub(crate) fn header_counts(stats: ExcerptStats, theme: &Theme) -> Vec<(String, 
     runs
 }
 
+/// The runs a File Header reads left of the divide, as [`header_left`] builds
+/// them for a file.
+///
+/// `from` names the path a moved file left, and reads at the row's left edge.
+/// `tag` names the file's kind in its File Kind Tag, and `counts` counts the
+/// diff or notes the file in their place. The tag and the counts read against
+/// the divide.
+struct HeaderLeft {
+    from: Vec<(String, Style)>,
+    tag: (String, Style),
+    counts: Vec<(String, Style)>,
+}
+
+/// The runs that a File Header of a file of `kind`, whose diff `stats` counts,
+/// reads left of the divide.
+///
+/// A moved file reads `from` and the path it left, muted with the name bold.
+/// The counts are [`header_counts`] of `stats`. In their place a move with no
+/// hunk reads `identical`, and an `empty` file reads `empty file`.
+fn header_left(kind: &FileKind, stats: ExcerptStats, empty: bool, theme: &Theme) -> HeaderLeft {
+    let muted = theme.get(scope::UI_TEXT_MUTED);
+    let from = match kind {
+        FileKind::Moved { from, .. } => {
+            let mut runs = vec![("from ".to_string(), muted)];
+            runs.extend(path_runs(&from.to_string_lossy(), muted, theme));
+            runs
+        },
+        _ => Vec::new(),
+    };
+    let counts = match kind {
+        _ if empty => vec![("empty file".to_string(), muted)],
+        FileKind::Moved { .. } if stats.hunks == 0 => vec![("identical".to_string(), muted)],
+        _ => header_counts(stats, theme),
+    };
+    HeaderLeft {
+        from,
+        tag: (kind_tag_text(kind), theme.kind_tag_style(kind)),
+        counts,
+    }
+}
+
+/// The text of the File Kind Tag that names `kind`.
+///
+/// A move that also edits names how alike the two files are, as `moved U+00B7
+/// 94%` does.
+pub(crate) fn kind_tag_text(kind: &FileKind) -> String {
+    match kind {
+        FileKind::Modified => "modified".to_string(),
+        FileKind::Moved { similarity, .. } if *similarity < 100 => {
+            format!("moved \u{b7} {similarity}%")
+        },
+        FileKind::Moved { .. } => "moved".to_string(),
+        FileKind::Untracked => "untracked".to_string(),
+        FileKind::New => "new".to_string(),
+        FileKind::Deleted => "deleted".to_string(),
+    }
+}
+
+/// The left half of `excerpt`'s File Header, its file's kind as the frame's
+/// tally names it.
+///
+/// A file with no tally entry reads as modified.
+fn excerpt_header_left(
+    excerpt: &Excerpt,
+    buffers: &BufferRegistry,
+    frame: FrameCtx<'_>,
+) -> HeaderLeft {
+    let modified = FileKind::Modified;
+    let kind = excerpt.file_kind(frame.tallies).unwrap_or(&modified);
+    header_left(
+        kind,
+        diff_changes::excerpt_stats(excerpt, buffers),
+        excerpt.empty,
+        frame.theme,
+    )
+}
+
 /// Fill `row` with the raised surface and lay a File Header across it, the
-/// file's `path` right of the diff's divide and its `counts` left of it.
+/// file's `path` right of the diff's divide and `left` left of it.
 ///
 /// The path starts a pad past the divide, over the editable side, and clips at
-/// the row's right edge. The counts end a pad before the divide. A row too
-/// narrow for the divide, as a unified diff lays it out, starts the path a pad
-/// in from its left and ends the counts a pad in from its right. There a count
-/// that does not clear the path takes no place.
+/// the row's right edge. The counts of `left` end a pad before the divide, and
+/// its File Kind Tag ends a gap before them, so both read against the divide.
+/// The path a moved file left starts a pad in from the row's left edge and
+/// clips a gap before the tag.
 ///
-/// With `scene` and colors in RGB, the text draws as runs, the path at the Ui
-/// scale and the counts at the Caption scale. Otherwise it fills cells. With
-/// `cells` false the row's cells stay as they are, for a page whose cells the
-/// terminal keeps.
-pub(crate) fn paint_header(
+/// A row too narrow for the divide, as a unified diff lays it out, starts the
+/// path a pad in from its left and follows it with the tag and the counts, a
+/// gap apart. It leaves the old path out, and a tag or a count that does not
+/// fit before the row's right pad takes no place.
+///
+/// With `scene` and colors in RGB, the text draws as runs: the path and the old
+/// path at the Ui scale, the counts at the Caption scale, and the tag at the
+/// Small scale over a rounded box in its background. Otherwise it fills cells.
+/// With `cells` false the row's cells stay as they are, for a page whose cells
+/// the terminal keeps.
+fn paint_header(
     buf: &mut Buffer,
     row: Rect,
     path: &[(String, Style)],
-    counts: &[(String, Style)],
+    left: &HeaderLeft,
     theme: &Theme,
     scene: Option<&mut ApcScene>,
     cells: bool,
@@ -771,73 +872,129 @@ pub(crate) fn paint_header(
         }
     }
 
-    let drawn = scene.is_some_and(|scene| emit_header_runs(row, path, counts, theme, scene));
+    let drawn = scene.is_some_and(|scene| emit_header_runs(row, path, left, theme, buf, scene));
     if !drawn && cells {
-        write_header_cells(row, path, counts, buf);
+        write_header_cells(row, path, left, buf);
     }
 }
 
-/// Emit a File Header's `path` and `counts` over `row` as runs into `scene`,
-/// laid out as [`paint_header`] describes.
+/// Emit a File Header's `path` and `left` over `row` as runs and a tag box
+/// into `scene`, laid out as [`paint_header`] describes.
 ///
-/// Emits nothing and answers false where a run's color lies outside RGB.
+/// Emits nothing and answers false where a run's color lies outside RGB. A tag
+/// whose style has no RGB background draws its text alone.
 fn emit_header_runs(
     row: Rect,
     path: &[(String, Style)],
-    counts: &[(String, Style)],
+    left: &HeaderLeft,
     theme: &Theme,
+    buf: &mut Buffer,
     scene: &mut ApcScene,
 ) -> bool {
-    let colors: Option<Vec<[u8; 3]>> = path
-        .iter()
-        .chain(counts)
-        .map(|(_, style)| style_rgb(style.fg))
-        .collect();
-    let Some(colors) = colors else {
+    let rgb = |runs: &[(String, Style)]| -> Option<Vec<[u8; 3]>> {
+        runs.iter().map(|(_, style)| style_rgb(style.fg)).collect()
+    };
+    let (Some(path_colors), Some(from_colors), Some(count_colors), Some(tag_color)) = (
+        rgb(path),
+        rgb(&left.from),
+        rgb(&left.counts),
+        style_rgb(left.tag.1.fg),
+    ) else {
         return false;
     };
-    let (path_colors, count_colors) = colors.split_at(path.len());
 
-    let (path_scale, count_scale) = (
+    let (ui, caption, small) = (
         theme.type_scale(TypeRole::Ui),
         theme.type_scale(TypeRole::Caption),
+        theme.type_scale(TypeRole::Small),
     );
+    let advance = |text: &str, scale| text_run::advance_sixteenths(text.chars().count(), scale);
     let width = row.width * 16;
     let divide = header_divide(row);
-    let (counts_end, path_start) = match divide {
-        Some(divide) => (divide.saturating_sub(HEADER_PAD), divide + HEADER_PAD),
-        None => (width.saturating_sub(HEADER_PAD), HEADER_PAD),
-    };
 
     let mut runs = TextRunBatch::default();
-    let mut col = path_start;
-    for ((text, style), &color) in path.iter().zip(path_colors) {
-        let text = fitting_prefix(text, width.saturating_sub(col), path_scale);
+    let mut col = divide.map_or(HEADER_PAD, |divide| divide + HEADER_PAD);
+    for ((text, style), &color) in path.iter().zip(&path_colors) {
+        let text = fitting_prefix(text, width.saturating_sub(col), ui);
         if text.is_empty() {
             break;
         }
-        runs.push(row, header_run(col, text, path_scale, color, *style));
-        col += text_run::advance_sixteenths(text.chars().count(), path_scale);
+        runs.push(row, header_run(col, text, ui, color, *style));
+        col += advance(text, ui);
     }
 
-    // The counts pack leftward from their end, so a count that does not clear
-    // the path, or the row's left edge past the divide, ends the packing.
-    let floor = match divide {
-        Some(_) => 0,
-        None => col + HEADER_PAD,
+    // The tag's box goes into the scene before the runs, so its text draws
+    // over it. It goes alone, because a bar batch drops the corner radius.
+    let (tag_text, tag_style) = &left.tag;
+    let tag_width = advance(tag_text, small) + 2 * TAG_INSET;
+    let mut tag = |start: u16, runs: &mut TextRunBatch| {
+        if let Some(bg) = style_rgb(tag_style.bg) {
+            let tag_box = Bar {
+                x: start as i16,
+                y: 1,
+                width: tag_width,
+                height: TAG_HEIGHT,
+                color: bg,
+                radius: TAG_RADIUS,
+                corners: 0,
+            };
+            StatefulWidget::render(tag_box, row, buf, scene);
+        }
+        let text = header_run(start + TAG_INSET, tag_text, small, tag_color, *tag_style);
+        runs.push(row, text);
     };
-    let mut end = counts_end;
-    let mut placed = Vec::new();
-    for ((text, style), &color) in counts.iter().zip(count_colors).rev() {
-        let advance = text_run::advance_sixteenths(text.chars().count(), count_scale);
-        let Some(start) = end.checked_sub(advance).filter(|&start| start >= floor) else {
-            break;
-        };
-        placed.push(header_run(start, text, count_scale, color, *style));
-        end = start.saturating_sub(HEADER_COUNT_GAP);
-    }
-    for count in placed.into_iter().rev() {
-        runs.push(row, count);
+
+    match divide {
+        Some(divide) => {
+            // The counts pack leftward from their end, and the tag ends a gap
+            // before the first count placed.
+            let counts_end = divide.saturating_sub(HEADER_PAD);
+            let mut end = counts_end;
+            let mut placed = Vec::new();
+            for ((text, style), &color) in left.counts.iter().zip(&count_colors).rev() {
+                let Some(start) = end.checked_sub(advance(text, caption)) else {
+                    break;
+                };
+                placed.push(header_run(start, text, caption, color, *style));
+                end = start.saturating_sub(HEADER_COUNT_GAP);
+            }
+            let tag_end = match placed.last() {
+                Some(first) => (first.col as u16).saturating_sub(HEADER_COUNT_GAP),
+                None => counts_end,
+            };
+            let tag_start = tag_end.saturating_sub(tag_width);
+            tag(tag_start, &mut runs);
+            for count in placed.into_iter().rev() {
+                runs.push(row, count);
+            }
+
+            let from_end = tag_start.saturating_sub(HEADER_COUNT_GAP);
+            let mut col = HEADER_PAD;
+            for ((text, style), &color) in left.from.iter().zip(&from_colors) {
+                let text = fitting_prefix(text, from_end.saturating_sub(col), ui);
+                if text.is_empty() {
+                    break;
+                }
+                runs.push(row, header_run(col, text, ui, color, *style));
+                col += advance(text, ui);
+            }
+        },
+        None => {
+            let limit = width.saturating_sub(HEADER_PAD);
+            let mut col = col + HEADER_COUNT_GAP;
+            if col + tag_width <= limit {
+                tag(col, &mut runs);
+                col += tag_width + HEADER_COUNT_GAP;
+                for ((text, style), &color) in left.counts.iter().zip(&count_colors) {
+                    let width = advance(text, caption);
+                    if col + width > limit {
+                        break;
+                    }
+                    runs.push(row, header_run(col, text, caption, color, *style));
+                    col += width + HEADER_COUNT_GAP;
+                }
+            }
+        },
     }
     runs.flush(scene);
     true
@@ -872,41 +1029,73 @@ fn fitting_prefix(text: &str, room: u16, scale: u16) -> &str {
         .map_or(text, |(at, _)| &text[..at])
 }
 
-/// Write a File Header's `path` and `counts` into the cells of `row`, laid out
-/// as [`paint_header`] describes, with one cell between two counts.
+/// Write a File Header's `path` and `left` into the cells of `row`, laid out
+/// as [`paint_header`] describes, with one cell for each gap.
 ///
-/// The counts end one cell before the divider's column, and the path starts
-/// two cells past it, the cells nearest the runs' pads.
-fn write_header_cells(
-    row: Rect,
-    path: &[(String, Style)],
-    counts: &[(String, Style)],
-    buf: &mut Buffer,
-) {
+/// The path starts two cells past the divider's column. The left half reads
+/// the old path, the tag's text in its foreground, and the counts, and ends
+/// one cell before the divider's column, the cells nearest the runs' pads. A
+/// left half wider than its room loses the cells left of the row's edge.
+fn write_header_cells(row: Rect, path: &[(String, Style)], left: &HeaderLeft, buf: &mut Buffer) {
     let divider = review::diff_divider_x(row);
-    let (counts_end, path_start) = match divider {
-        Some(divider) => (divider - 1, divider + 2),
-        None => (row.right() - 1, row.x + 1),
-    };
-
-    let mut x = path_start;
+    let mut x = divider.map_or(row.x + 1, |divider| divider + 2);
     for (text, style) in path {
         write_str_clipped(buf, x, row.y, text, *style, row.right());
         x = x.saturating_add(text_width(text) as u16);
     }
 
-    let floor = match divider {
-        Some(_) => row.x,
-        None => x.saturating_add(1),
+    let tag = (
+        left.tag.0.as_str(),
+        Style {
+            fg: left.tag.1.fg,
+            ..Style::default()
+        },
+    );
+    let Some(divider) = divider else {
+        let limit = row.right() - 1;
+        let mut x = x + 1;
+        let tag_width = text_width(tag.0) as u16;
+        if x + tag_width > limit {
+            return;
+        }
+        write_str(buf, x, row.y, tag.0, tag.1);
+        x += tag_width + 1;
+        for (text, style) in &left.counts {
+            let width = text_width(text) as u16;
+            if x + width > limit {
+                break;
+            }
+            write_str(buf, x, row.y, text, *style);
+            x += width + 1;
+        }
+        return;
     };
-    let mut end = counts_end;
-    for (text, style) in counts.iter().rev() {
-        let width = text_width(text) as u16;
-        let Some(start) = end.checked_sub(width).filter(|&start| start >= floor) else {
-            break;
-        };
-        write_str(buf, start, row.y, text, *style);
-        end = start.saturating_sub(1);
+
+    // Each piece and the cells of space before it.
+    let pieces: Vec<(&str, Style, u16)> = left
+        .from
+        .iter()
+        .map(|(text, style)| (text.as_str(), *style, 0))
+        .chain([(tag.0, tag.1, u16::from(!left.from.is_empty()))])
+        .chain(
+            left.counts
+                .iter()
+                .map(|(text, style)| (text.as_str(), *style, 1)),
+        )
+        .collect();
+    let total: u16 = pieces
+        .iter()
+        .map(|&(text, _, gap)| gap + text_width(text) as u16)
+        .sum();
+    let mut x = i32::from(divider - 1) - i32::from(total);
+    for (text, style, gap) in pieces {
+        x += i32::from(gap);
+        let skip = (i32::from(row.x) - x).max(0) as usize;
+        let shown: String = text.chars().skip(skip).collect();
+        if !shown.is_empty() {
+            write_str(buf, (x + skip as i32) as u16, row.y, &shown, style);
+        }
+        x += text_width(text) as i32;
     }
 }
 
@@ -1028,7 +1217,8 @@ pub(crate) fn replay_cursor(
 #[cfg(test)]
 mod tests {
     use super::{
-        header_counts, header_path, paint_header, paint_stack_page, paint_stack_rows, PagePaint,
+        header_counts, header_left, header_path, paint_header, paint_stack_page, paint_stack_rows,
+        PagePaint,
     };
     use crate::{
         action_handlers, apc_emit,
@@ -1036,6 +1226,7 @@ mod tests {
         buffer_registry::BufferRegistry,
         diff_changes::{self, DiffChangesState, ExcerptStats},
         editor_state::{EditorId, EditorState},
+        host::git::FileKind,
         pane::{DockPanel, DockSide, DockVisibility, FocusTarget, View},
         render::{
             commits::PreviewDials,
@@ -1048,7 +1239,7 @@ mod tests {
         test_fixture::drain_apc,
         test_harness::TestHarness,
         theme::{scope, TypeRole},
-        workspace::Workspace,
+        workspace::{diff::WorktreeBase, Workspace},
     };
     use crossterm::event::Event;
     use ratatui::{
@@ -1220,7 +1411,7 @@ mod tests {
         });
 
         let pair = |n: &str| (n.to_string(), n.to_string());
-        let counts = "+1 \u{2212}1 \u{b7} 1 hunk";
+        let counts = "modified +1 \u{2212}1 \u{b7} 1 hunk";
         let left = (
             counts.to_string(),
             Some(divider - 1 - counts.chars().count() as u16),
@@ -1349,11 +1540,11 @@ mod tests {
 
     /// A header names the directory, the bold name, and the bold extension in
     /// the type's color right of the divider. Left of it, against the
-    /// divider, it counts the lines in their diff colors and the hunks in
-    /// muted text. With no structural hunk the count names the hunks alone,
-    /// and a count of zero takes no run.
+    /// divider, it reads the file's kind in its tag and counts the lines in
+    /// their diff colors and the hunks in muted text. With no structural hunk
+    /// the count names the hunks alone, and a count of zero takes no run.
     ///
-    /// The cells of a 120-wide row end the counts at column 58, one before
+    /// The cells of a 120-wide row end the left half at column 58, one before
     /// the divider's column 59, and start the path at column 61.
     #[test]
     fn a_header_counts_its_lines_and_hunks_left_of_the_divider() {
@@ -1368,14 +1559,16 @@ mod tests {
         let painted = |path: &str, stats: ExcerptStats| {
             let row = Rect::new(0, 0, 120, 1);
             let mut buf = Buffer::empty(row);
-            let (path, counts) = (header_path(path, theme), header_counts(stats, theme));
-            paint_header(&mut buf, row, &path, &counts, theme, None, true);
+            let path = header_path(path, theme);
+            let left = header_left(&FileKind::Modified, stats, false, theme);
+            paint_header(&mut buf, row, &path, &left, theme, None, true);
             [header_text(&buf, 0, 59, 0), header_text(&buf, 60, 60, 0)]
         };
         let run = |text: &str, style: Style| (text.to_string(), style);
         let header = |counts: &str, path: &str| {
-            let start = (!counts.is_empty()).then(|| 58 - counts.chars().count() as u16);
-            [(counts.to_string(), start), (path.to_string(), Some(61))]
+            let left = format!("modified {counts}").trim_end().to_string();
+            let start = Some(58 - left.chars().count() as u16);
+            [(left, start), (path.to_string(), Some(61))]
         };
 
         assert_eq!(
@@ -1420,10 +1613,11 @@ mod tests {
     }
 
     /// A header too narrow for the divide starts its path one cell in from the
-    /// left and ends its counts one cell in from the right. A count that does
-    /// not clear the path takes no place, so the two never overlap.
+    /// left and follows it with the tag and the counts, a cell apart. A tag or
+    /// a count that does not fit before the row's last cell takes no place,
+    /// so none shows cut.
     #[test]
-    fn a_unified_header_drops_a_count_that_does_not_clear_its_path() {
+    fn a_unified_header_follows_its_path_with_its_tag_and_counts() {
         let h = TestHarness::with_size(40, 4);
         let theme = &h.stoat.theme;
         let stats = ExcerptStats {
@@ -1435,21 +1629,346 @@ mod tests {
         let painted = |width: u16| {
             let row = Rect::new(0, 0, width, 1);
             let mut buf = Buffer::empty(row);
-            let (path, counts) = (
-                header_path("src/lib.rs", theme),
-                header_counts(stats, theme),
-            );
-            paint_header(&mut buf, row, &path, &counts, theme, None, true);
-            cells(&buf, 0, width, 0)
+            let path = header_path("src/lib.rs", theme);
+            let left = header_left(&FileKind::Modified, stats, false, theme);
+            paint_header(&mut buf, row, &path, &left, theme, None, true);
+            (cells(&buf, 0, width, 0), buf[(1, 0)].symbol().to_string())
         };
 
         assert_eq!(
             [painted(40), painted(24), painted(16)],
             [
-                format!("{:<22}+12 \u{2212}3 \u{b7} 2 hunks", "src/lib.rs"),
-                format!("{:<13}\u{b7} 2 hunks", "src/lib.rs"),
-                "src/lib.rs".to_string(),
+                "src/lib.rs modified +12 \u{2212}3 \u{b7} 2 hunks",
+                "src/lib.rs modified",
+                "src/lib.rs",
+            ]
+            .map(|text| (text.to_string(), "s".to_string())),
+        );
+    }
+
+    /// The left half of each header reads its file's kind in a File Kind Tag,
+    /// in the tag's foreground, before its counts, and ends one cell before
+    /// the divider. A moved file reads `from` and the path it left before its
+    /// tag, and a move that also edits names how alike the two files are.
+    #[test]
+    fn a_header_tags_its_file_s_kind() {
+        let h = TestHarness::with_size(40, 4);
+        let theme = &h.stoat.theme;
+        let stats = ExcerptStats {
+            added: 1,
+            removed: 1,
+            hunks: 1,
+            structural: 0,
+        };
+        let painted = |kind: FileKind| {
+            let row = Rect::new(0, 0, 120, 1);
+            let mut buf = Buffer::empty(row);
+            let left = header_left(&kind, stats, false, theme);
+            let path = header_path("a.rs", theme);
+            paint_header(&mut buf, row, &path, &left, theme, None, true);
+            let (text, start) = header_text(&buf, 0, 59, 0);
+            let tag_x =
+                start.expect("a left half") as usize + text.find(&left.tag.0).expect("the tag");
+            let tag_fg = buf[(tag_x as u16, 0)].fg;
+            ((text, start), Some(tag_fg) == left.tag.1.fg)
+        };
+        let moved = FileKind::Moved {
+            from: PathBuf::from("src/old.rs"),
+            similarity: 94,
+        };
+
+        let left = |text: &str| {
+            let start = 58 - text.chars().count() as u16;
+            ((text.to_string(), Some(start)), true)
+        };
+        assert_eq!(
+            [
+                FileKind::Modified,
+                moved,
+                FileKind::Untracked,
+                FileKind::New,
+                FileKind::Deleted
+            ]
+            .map(painted),
+            [
+                left("modified +1 \u{2212}1 \u{b7} 1 hunk"),
+                left("from src/old.rs moved \u{b7} 94% +1 \u{2212}1 \u{b7} 1 hunk"),
+                left("untracked +1 \u{2212}1 \u{b7} 1 hunk"),
+                left("new +1 \u{2212}1 \u{b7} 1 hunk"),
+                left("deleted +1 \u{2212}1 \u{b7} 1 hunk"),
             ],
+        );
+    }
+
+    /// A stack's header reads the kind that the repository's tally names for
+    /// its file. A tally that changes the kind and nothing else, as a new
+    /// similarity for a move does, repaints the header.
+    #[test]
+    fn a_stack_header_reads_the_kind_its_repo_tally_names() {
+        let mut h = TestHarness::with_size(120, 16);
+        h.stoat.settings.editor_minimap = Some(MinimapMode::Off);
+        h.stoat.screen_hints_hidden = true;
+        h.stage_rename_scenario("/repo", "old.txt", "moved.txt", "one\n", "ONE\n");
+        h.fake_git().add_repo("/repo").similarity("moved.txt", 94);
+        h.stoat
+            .active_workspace_mut()
+            .set_worktree_base(WorktreeBase::Head);
+        h.open_file(Path::new("/repo/moved.txt"));
+        h.cover_with_diff_changes(false);
+        h.settle();
+        h.stoat.stoatty = false;
+        let left_half = |h: &mut TestHarness| {
+            let buf = h.render_composited();
+            let inner = {
+                let ws = h.stoat.active_workspace();
+                ws.panes.pane(ws.panes.focus()).area
+            };
+            let divider = review::diff_divider_x(inner).expect("a split stack");
+            header_text(&buf, inner.x, divider - inner.x, inner.y).0
+        };
+        // The first frame stores no pane cache key, so the frame after it is
+        // the one a replay matches.
+        left_half(&mut h);
+        let before = left_half(&mut h);
+
+        h.fake_git().add_repo("/repo").similarity("moved.txt", 80);
+        h.stoat.active_workspace_mut().stale_hunk_tally();
+        h.settle_diff_jobs();
+        let left = |similarity: u8| {
+            format!("from old.txt moved \u{b7} {similarity}% +1 \u{2212}1 \u{b7} 1 hunk")
+        };
+        assert_eq!((before, left_half(&mut h)), (left(94), left(80)));
+    }
+
+    /// A move with no edit reads `identical` in place of its counts, after
+    /// `from` and the path it left, muted with the name bold. An empty file
+    /// reads `empty file` there.
+    #[test]
+    fn a_move_with_no_edit_reads_identical() {
+        let h = TestHarness::with_size(40, 4);
+        let theme = &h.stoat.theme;
+        let muted = theme.get(scope::UI_TEXT_MUTED);
+        let moved = FileKind::Moved {
+            from: PathBuf::from("src/old.rs"),
+            similarity: 100,
+        };
+        let left = header_left(&moved, ExcerptStats::default(), false, theme);
+        let empty = header_left(&FileKind::Untracked, ExcerptStats::default(), true, theme);
+
+        let run = |text: &str, style: Style| (text.to_string(), style);
+        assert_eq!(
+            (left.from, left.tag.0, left.counts, empty.counts),
+            (
+                vec![
+                    run("from ", muted),
+                    run("src/", muted),
+                    run("old", muted.add_modifier(Modifier::BOLD)),
+                    run(
+                        ".rs",
+                        theme.get(scope::UI_TAG_RUST).add_modifier(Modifier::BOLD)
+                    ),
+                ],
+                "moved".to_string(),
+                vec![run("identical", muted)],
+                vec![run("empty file", muted)],
+            ),
+        );
+    }
+
+    /// Under a live scene the tag is a rounded bar 14 sixteenths tall in the
+    /// tag's background, which ends a gap before the first count's run, under
+    /// the tag's run at the Small scale ten sixteenths inside it.
+    #[test]
+    fn a_live_header_draws_its_tag_as_a_rounded_bar() {
+        let mut h = two_files(16);
+        h.stoat.render();
+        let width = {
+            let ws = h.stoat.active_workspace();
+            ws.panes.pane(ws.panes.focus()).area.width
+        };
+        let (bars, runs, small, tag) =
+            paint_directly(&mut h, |state, editors, buffers, frame, scene| {
+                let mut buf = Buffer::empty(Rect::new(0, 0, width, 6));
+                let area = buf.area;
+                paint_stack_rows(
+                    state,
+                    editors,
+                    buffers,
+                    true,
+                    frame.theme.get(scope::UI_TEXT),
+                    &mut UndercurlBatch::default(),
+                    frame,
+                    &mut buf,
+                    scene,
+                    0,
+                    area,
+                    PagePaint::Cells,
+                );
+                let commands = decode_stream(scene.bytes());
+                let bars: Vec<(i16, i16, u16, u16, [u8; 3], u8)> = commands
+                    .iter()
+                    .filter_map(|command| match command {
+                        Command::Bar(bar) if bar.y == 1 => {
+                            Some((bar.x, bar.y, bar.width, bar.height, bar.color, bar.radius))
+                        },
+                        _ => None,
+                    })
+                    .collect();
+                let mut runs: Vec<(i16, String, u16)> = commands
+                    .iter()
+                    .filter_map(|command| match command {
+                        Command::TextRun(run)
+                            if run.row == 0 && run.col < (width / 2 * 16) as i16 =>
+                        {
+                            Some((run.col, run.text.clone(), run.scale))
+                        },
+                        _ => None,
+                    })
+                    .collect();
+                runs.sort();
+                (
+                    bars,
+                    runs,
+                    frame.theme.type_scale(TypeRole::Small),
+                    frame.theme.get(scope::DIFF_KIND_MODIFIED),
+                )
+            });
+
+        let first_count = runs
+            .iter()
+            .find(|run| run.1 != "modified")
+            .map_or(0, |run| run.0 as u16);
+        let tag_width = text_run::advance_sixteenths(8, small) + 20;
+        let start = first_count - 16 - tag_width;
+        assert_eq!(
+            (bars, runs.first().cloned()),
+            (
+                vec![(
+                    start as i16,
+                    1,
+                    tag_width,
+                    14,
+                    paint::style_rgb(tag.bg).expect("an RGB tag box"),
+                    4
+                )],
+                Some((start as i16 + 10, "modified".to_string(), small)),
+            ),
+        );
+    }
+
+    /// Under a live scene a header too narrow for the divide lays its tag's
+    /// box a gap past the path's end and its counts a gap past the box, and
+    /// leaves out the path a moved file left.
+    ///
+    /// Every type scale advances a full cell under test, so the path takes 16
+    /// sixteenths a character from its pad of 20, and the box is the tag's
+    /// advance plus an inset of 10 each side.
+    #[test]
+    fn a_live_unified_header_follows_its_path_with_its_tag() {
+        let h = TestHarness::with_size(40, 4);
+        let theme = &h.stoat.theme;
+        let row = Rect::new(0, 0, 60, 1);
+        let mut buf = Buffer::empty(row);
+        let mut scene = ApcScene::new();
+        scene.set_live(true);
+        let moved = FileKind::Moved {
+            from: PathBuf::from("old.rs"),
+            similarity: 100,
+        };
+        let stats = ExcerptStats {
+            added: 1,
+            removed: 0,
+            hunks: 1,
+            structural: 0,
+        };
+        let left = header_left(&moved, stats, false, theme);
+        let path = header_path("a.rs", theme);
+        paint_header(&mut buf, row, &path, &left, theme, Some(&mut scene), true);
+
+        let commands = decode_stream(scene.bytes());
+        let runs: Vec<(i16, String)> = commands
+            .iter()
+            .filter_map(|command| match command {
+                Command::TextRun(run) => Some((run.col, run.text.clone())),
+                _ => None,
+            })
+            .collect();
+        let boxes: Vec<(i16, u16)> = frame_bars(commands)
+            .into_iter()
+            .map(|bar| (bar.0, bar.2))
+            .collect();
+        let run = |col: i16, text: &str| (col, text.to_string());
+        assert_eq!(
+            (runs, boxes),
+            (
+                vec![
+                    run(20, "a"),
+                    run(36, ".rs"),
+                    run(110, "moved"),
+                    run(216, "+1"),
+                    run(264, "\u{b7} 1 hunk"),
+                ],
+                vec![(100, 100)],
+            ),
+        );
+    }
+
+    /// Under a live scene the path a moved file left starts a pad in from the
+    /// row's left edge and loses the characters that pass a gap before the
+    /// tag's box.
+    ///
+    /// The row is 100 wide, so the divide sits 792 sixteenths in, the counts
+    /// end at 772, and the box of `moved` ends a gap before `+1` at 596.
+    #[test]
+    fn a_live_header_clips_the_old_path_a_gap_before_its_tag() {
+        let h = TestHarness::with_size(40, 4);
+        let theme = &h.stoat.theme;
+        let row = Rect::new(0, 0, 100, 1);
+        let mut buf = Buffer::empty(row);
+        let mut scene = ApcScene::new();
+        scene.set_live(true);
+        let moved = FileKind::Moved {
+            from: PathBuf::from("a/very/long/directory/path/to/the/old/file.rs"),
+            similarity: 100,
+        };
+        let stats = ExcerptStats {
+            added: 1,
+            removed: 0,
+            hunks: 1,
+            structural: 0,
+        };
+        let left = header_left(&moved, stats, false, theme);
+        let path = header_path("a.rs", theme);
+        paint_header(&mut buf, row, &path, &left, theme, Some(&mut scene), true);
+
+        let commands = decode_stream(scene.bytes());
+        let mut runs: Vec<(i16, String)> = commands
+            .iter()
+            .filter_map(|command| match command {
+                Command::TextRun(run) => Some((run.col, run.text.clone())),
+                _ => None,
+            })
+            .collect();
+        runs.sort();
+        let boxes: Vec<(i16, u16)> = frame_bars(commands)
+            .into_iter()
+            .map(|bar| (bar.0, bar.2))
+            .collect();
+        let run = |col: i16, text: &str| (col, text.to_string());
+        assert_eq!(
+            (runs, boxes),
+            (
+                vec![
+                    run(20, "from "),
+                    run(100, "a/very/long/directory/"),
+                    run(490, "moved"),
+                    run(596, "+1"),
+                    run(644, "\u{b7} 1 hunk"),
+                    run(812, "a"),
+                    run(828, ".rs"),
+                ],
+                vec![(480, 100)],
+            ),
         );
     }
 
@@ -1875,7 +2394,14 @@ mod tests {
         };
         let number =
             |at: usize, y: u16| gutter_number(&frames[at].1, cols.right_x, cols.right_text_x, y);
-        let named = |file: &str| ["+12 \u{2212}12 \u{b7} 1 hunk".to_string(), file.to_string()];
+        // The composite reads the live layout, where the tag's inset and the
+        // gap after it span two cells.
+        let named = |file: &str| {
+            [
+                "modified  +12 \u{2212}12 \u{b7} 1 hunk".to_string(),
+                file.to_string(),
+            ]
+        };
 
         assert_eq!(
             (
@@ -2258,6 +2784,7 @@ mod tests {
             lsp_servers: &[],
             diff_warm_busy: false,
             repo: None,
+            tallies: None,
             hunk_position: None,
             conflict_position: None,
             diff_base: None,

@@ -707,7 +707,7 @@ fn stack_cache_key(
             excerpt.buffer_id,
             excerpt.top,
             end,
-            &excerpt.rel_path,
+            (&excerpt.rel_path, excerpt.file_kind(frame.tallies)),
             excerpt.folded_version,
             excerpt.empty,
             shown.display_map.buffer_snapshot().version(),

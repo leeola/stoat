@@ -332,7 +332,7 @@ pub(crate) struct DiffState {
     /// An edit is not one of them. The tally reads what is on disk, which an
     /// unsaved edit has not touched, so re-walking the repository per keystroke
     /// costs a full three-diff repo scan for an answer that never changed.
-    pub(super) repo_hunk_tallies: Option<HunkTallies>,
+    pub(super) repo_hunk_tallies: Option<Arc<HunkTallies>>,
     /// The files changed since the revision base, absolute, as the last tally
     /// read them under one. `None` under any other base.
     ///
@@ -1145,7 +1145,7 @@ impl DiffState {
                 // A `None` answer means the root is outside a repo now, which
                 // says nothing about the last tally that was read inside one.
                 if let Some(tally) = tally {
-                    self.repo_hunk_tallies = Some(tally.tallies);
+                    self.repo_hunk_tallies = Some(Arc::new(tally.tallies));
                     self.rev_changed = tally.rev_changed;
                     self.repo_head = tally.head;
                     self.upstream = tally.upstream;

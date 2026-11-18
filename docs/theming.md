@@ -336,6 +336,12 @@ The typed UI scopes, by group (syntax scopes are open-ended):
   `conflict`, `review`, `submode`, `default`).
 - `diff.added`, `diff.deleted`, `diff.modified`, `diff.moved`, `diff.context`,
   `diff.current_hunk` -- the diff and review views.
+- `diff.kind.modified`, `diff.kind.moved`, `diff.kind.untracked`,
+  `diff.kind.new`, `diff.kind.deleted` -- the File Kind Tag that names a
+  changed file's kind in a changes view's File Header: the tag's text
+  (foreground) on its rounded box (background). An unset scope draws the text
+  alone, in the foreground of `diff.modified`, `diff.moved`, `diff.added`, or
+  `diff.deleted`.
 - `diff.fold` -- the fill (background) of a changes view's fold row, the row
   that names how many unchanged lines a fold hides. The row's text takes
   `ui.text.muted`. A foreground stripes the fill with a 135 degree hatch in

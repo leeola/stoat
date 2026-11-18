@@ -27,7 +27,7 @@ use crate::{
         FoldSnapshot, InlayPoint, InlaySnapshot, ScopeMark,
     },
     editor_state::{EditorId, EditorState},
-    host::git::FileKind,
+    host::git::{FileKind, HunkTallies},
     multi_buffer::MultiBufferSnapshot,
     pane::View,
     render,
@@ -313,6 +313,16 @@ impl Excerpt {
     /// staging keys pass it.
     pub(crate) fn shows_rows(&self) -> bool {
         self.folded_version.is_some() && !self.empty
+    }
+
+    /// The kind `tallies` names for the excerpt's file, or `None` when the
+    /// tally holds no entry for it.
+    ///
+    /// A file listed for an unsaved edit alone shows with no entry, and its
+    /// File Header reads it as modified.
+    pub(crate) fn file_kind<'a>(&self, tallies: Option<&'a HunkTallies>) -> Option<&'a FileKind> {
+        let change = tallies?.change(Path::new(&self.rel_path))?;
+        Some(&change.kind)
     }
 }
 
@@ -2042,9 +2052,9 @@ pub(crate) fn listed_files(stoat: &Stoat) -> BTreeMap<String, PathBuf> {
                 .iter()
                 .filter(|(_, count)| *count > 0)
                 .map(|(path, _)| workdir.join(path));
-            let unhunked = ws
-                .repo_tallies()
-                .into_iter()
+            let tallies = ws.repo_tallies();
+            let unhunked = tallies
+                .iter()
                 .flat_map(|tallies| &tallies.changes)
                 .filter(|change| {
                     matches!(

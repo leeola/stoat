@@ -5039,6 +5039,58 @@ fn an_unfocused_stack_page_shows_what_the_live_paint_shows() {
     );
 }
 
+/// A page of a changes view tags its file with the kind the repository's tally
+/// names. A tally that changes the kind and nothing else, as a new similarity
+/// for a move does, refills the page that holds the file's header.
+#[test]
+fn a_stack_page_tags_the_kind_its_tally_names_and_refills_when_it_changes() {
+    use stoatty_protocol::command::Command;
+
+    let mut h = crate::test_harness::TestHarness::with_size(120, 24);
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+    h.stoat.set_apc_tx(tx);
+    h.stoat.stoatty_protocol = RESIDENT_POOL_PROTOCOL;
+    h.stoat.settings.editor_minimap = Some(MinimapMode::Off);
+    h.stoat.screen_hints_hidden = true;
+    h.stage_rename_scenario("/repo", "old.txt", "moved.txt", "one\ntwo\n", "one\nTWO\n");
+    h.fake_git().add_repo("/repo").similarity("moved.txt", 94);
+    h.stoat
+        .active_workspace_mut()
+        .set_worktree_base(diff::WorktreeBase::Head);
+    h.open_file(&PathBuf::from("/repo/moved.txt"));
+    h.cover_with_diff_changes(false);
+    h.settle();
+    h.stoat.render();
+    let pool = {
+        let ws = h.stoat.active_workspace();
+        ws.panes.pane(ws.panes.focus()).index
+    };
+    let tags = |bytes: &[u8]| -> Vec<String> {
+        command::decode_stream(fill_payload(bytes, pool, 0))
+            .into_iter()
+            .filter_map(|command| match command {
+                Command::TextRun(run) if run.text.starts_with("moved ") => Some(run.text),
+                _ => None,
+            })
+            .collect()
+    };
+    let before = tags(&emit_raw(&mut h, &mut rx));
+
+    h.fake_git().add_repo("/repo").similarity("moved.txt", 80);
+    h.stoat.active_workspace_mut().stale_hunk_tally();
+    h.settle_diff_jobs();
+    h.stoat.render();
+    let after = tags(&emit_raw(&mut h, &mut rx));
+
+    assert_eq!(
+        (before, after),
+        (
+            vec!["moved \u{b7} 94%".to_string()],
+            vec!["moved \u{b7} 80%".to_string()]
+        ),
+    );
+}
+
 /// A page of a changes view under a modal that paints its own box holds the
 /// fade the live paint shows on its rows. The pool is resident, so its pages
 /// are what the terminal shows behind the modal.

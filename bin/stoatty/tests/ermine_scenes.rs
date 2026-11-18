@@ -525,6 +525,10 @@ fn the_viewport_band_rounds_its_corners() {
 /// of the header row. The path's runs take no background, so the top hairline
 /// runs unbroken over cells 77 to 86, where the path's name shows. The divide
 /// takes one pixel column of the divider's cell.
+///
+/// The file's File Kind Tag reads `modified` on its box left of the counts.
+/// The box is 14 sixteenths of the row tall and wider than its text, so the
+/// cells left of the divider hold at least 14 by 30 pixels of its color.
 #[test]
 fn the_changes_view_heads_each_file_on_the_raised_surface() {
     let mut home = support::scratch_home();
@@ -570,12 +574,19 @@ fn the_changes_view_heads_each_file_on_the_raised_surface() {
             .filter(|column| (cell_x..cell_x + cell_width).contains(column))
             .count()
     };
-    if counts_half_text > 0 || path_top != path_width as usize || path_text == 0 || divide != 1 {
+    let tag_box = pixels_of(&shot, cell_rect(1, 2, 74, 1), FOLD_BUTTON);
+    if counts_half_text > 0
+        || path_top != path_width as usize
+        || path_text == 0
+        || divide != 1
+        || tag_box < 14 * 30
+    {
         let frame = keep_frame(&shot, &mut home, "changes_header_layout");
         panic!(
             "the header reads {counts_half_text} text pixels in cells 10 to 40, {path_top} of \
              {path_width} hairline pixels over the path, {path_text} text pixels in the path's \
-             cells, and {divide} divide columns in cell 75; the frame is {}",
+             cells, {divide} divide columns in cell 75, and {tag_box} pixels of the tag's box \
+             left of the divider; the frame is {}",
             frame.display(),
         );
     }

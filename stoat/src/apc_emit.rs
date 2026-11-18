@@ -435,6 +435,7 @@ fn emit_window_content(stoat: &mut Stoat, out: &mut Vec<u8>) -> Vec<Vec<u8>> {
         .collect();
     let held_buffers = ws.held_buffer_labels();
     let repo_status = ws.repo_status();
+    let tallies = ws.repo_tallies();
     let run_cwd = crate::render::pane::focused_run_cwd(focus_target, &ws.panes, &ws.runs);
 
     let frame = crate::render::FrameCtx {
@@ -463,6 +464,7 @@ fn emit_window_content(stoat: &mut Stoat, out: &mut Vec<u8>) -> Vec<Vec<u8>> {
         lsp_servers: &[],
         diff_warm_busy: false,
         repo: repo_status.as_ref(),
+        tallies: tallies.as_deref(),
         hunk_position: diff::repo_hunk_position(ws),
         conflict_position: crate::conflict_session::conflict_position(ws),
         diff_base: diff_base_lead.as_deref(),
@@ -1623,6 +1625,7 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
         // resolve, so a terminal that reads decorations-only fills takes a
         // move of the line relative numbers count from as new runs alone.
         let split_gutter = decorate_pages && diff_rich;
+        let tallies = ws.repo_tallies();
         let no_pairs = std::collections::HashMap::new();
         // The fields the stack paint reads take the live frame's values, so a
         // page shows what the live paint shows on its rows. A page holds no
@@ -1654,6 +1657,7 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
             lsp_servers: &[],
             diff_warm_busy: false,
             repo: None,
+            tallies: tallies.as_deref(),
             hunk_position: None,
             conflict_position: None,
             diff_base: None,
@@ -3778,6 +3782,7 @@ fn stack_page_version(
             display_map_stamp(buffer_version, paint_version),
             editor.display_map.diff_version(),
             excerpt.scope_row.as_deref(),
+            excerpt.file_kind(frame.tallies),
         )
             .hash(&mut hasher);
         for flash in &editor.reveal_flashes {

@@ -274,6 +274,7 @@ theme ermine_night inherits default_dark {
     let tint_reveal      = "#1a2226";
     let tint_special     = "#2a2236";
     let tint_warning     = "#2e2a1e";
+    let tint_success     = "#1d2a1f";
     let readonly         = "#c9b383";
     let readonly_line    = "#8a7650";
     let conflict         = "#f59aa0";
@@ -408,6 +409,11 @@ theme ermine_night inherits default_dark {
 
     diff.modified.fg = accent;
     diff.moved.fg    = accent;
+    diff.kind.modified  = { fg: accent, bg: fold_button };
+    diff.kind.moved     = { fg: info, bg: tint_info };
+    diff.kind.untracked = { fg: warning, bg: tint_warning };
+    diff.kind.new       = { fg: success, bg: tint_success };
+    diff.kind.deleted   = { fg: danger, bg: chip_conflict };
     diff.staged.fg   = info;
     diff.unstaged.fg = disabled;
     diff.fold        = { fg: hatch, bg: base };

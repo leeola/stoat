@@ -70,6 +70,7 @@ use crate::{
     conflict_session::{self, ConflictPosition},
     diff_changes::{DiffChangesId, DiffChangesState},
     editor_state::{EditorId, EditorState},
+    host::git::HunkTallies,
     keymap::KeymapState,
     keymap_state::{
         active_modal, binding_display_desc, cursor_token, focus_flags, focused_pane_pinned,
@@ -415,6 +416,9 @@ pub(crate) struct FrameCtx<'a> {
     /// lands and outside a repo, which drops the segment back to the focused
     /// file's own hunk counts.
     pub(crate) repo: Option<&'a RepoStatus>,
+    /// The repository's tally, which names each changed file's kind. It is
+    /// `None` before the first tally lands and outside a repo.
+    pub(crate) tallies: Option<&'a HunkTallies>,
     /// Where the focused diff view stands among the repo's changed files and
     /// hunks, which the focused pane's bar names in its staged segment. `None`
     /// when the focused pane shows no diff view, which is what keeps the
@@ -1479,6 +1483,7 @@ pub(crate) fn frame(
         .collect();
     let held_buffers = ws.held_buffer_labels();
     let repo_status = ws.repo_status();
+    let tallies = ws.repo_tallies();
     // The hints box over the diff view reads the position too, after the pane
     // loop, where no FrameCtx is left to carry it. So does the box over the
     // conflict view.
@@ -1519,6 +1524,7 @@ pub(crate) fn frame(
         lsp_servers,
         diff_warm_busy,
         repo: repo_status.as_ref(),
+        tallies: tallies.as_deref(),
         hunk_position,
         conflict_position,
         diff_base: diff_base_lead.as_deref(),

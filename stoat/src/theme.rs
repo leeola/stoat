@@ -5,6 +5,7 @@
 //! use progressive-broadening fallback so tree-sitter captures like
 //! `syntax.keyword.control` inherit from `syntax.keyword` when unspecified.
 
+use crate::host::git::FileKind;
 use ratatui::style::{Color, Modifier, Style};
 use snafu::{OptionExt, Snafu};
 use std::{collections::HashMap, ops::RangeInclusive};
@@ -86,6 +87,27 @@ impl Theme {
         // child. The fallback lets a parent leave the list scopes unset.
         self.try_get(scope::UI_LIST_MATCH)
             .unwrap_or_else(|| self.get(scope::UI_SEARCH_MATCH))
+    }
+
+    /// The style of the File Kind Tag that names `kind` in a File Header, its
+    /// text (foreground) on its box (background).
+    ///
+    /// A theme that leaves the kind's `diff.kind` scope unset gives the tag no
+    /// box. The tag's text then takes the foreground of the kind's diff mark,
+    /// which is `diff.modified`, `diff.moved`, `diff.added` for an untracked or
+    /// a new file, or `diff.deleted`.
+    pub(crate) fn kind_tag_style(&self, kind: &FileKind) -> Style {
+        let (tag, mark) = match kind {
+            FileKind::Modified => (scope::DIFF_KIND_MODIFIED, scope::DIFF_MODIFIED),
+            FileKind::Moved { .. } => (scope::DIFF_KIND_MOVED, scope::DIFF_MOVED),
+            FileKind::Untracked => (scope::DIFF_KIND_UNTRACKED, scope::DIFF_ADDED),
+            FileKind::New => (scope::DIFF_KIND_NEW, scope::DIFF_ADDED),
+            FileKind::Deleted => (scope::DIFF_KIND_DELETED, scope::DIFF_DELETED),
+        };
+        self.try_get(tag).unwrap_or_else(|| Style {
+            fg: self.get(mark).fg,
+            ..Style::default()
+        })
     }
 
     /// The frame a panel in `role` draws with.
@@ -993,6 +1015,21 @@ pub mod scope {
     pub const DIFF_DELETED: &str = "diff.deleted";
     pub const DIFF_MODIFIED: &str = "diff.modified";
     pub const DIFF_MOVED: &str = "diff.moved";
+    /// The File Kind Tag of a modified file in a File Header, its text
+    /// (foreground) on its rounded box (background).
+    pub const DIFF_KIND_MODIFIED: &str = "diff.kind.modified";
+    /// The File Kind Tag of a file that moved, as [`DIFF_KIND_MODIFIED`] draws
+    /// a tag.
+    pub const DIFF_KIND_MOVED: &str = "diff.kind.moved";
+    /// The File Kind Tag of an untracked file, as [`DIFF_KIND_MODIFIED`] draws
+    /// a tag.
+    pub const DIFF_KIND_UNTRACKED: &str = "diff.kind.untracked";
+    /// The File Kind Tag of a file new in the index, as [`DIFF_KIND_MODIFIED`]
+    /// draws a tag.
+    pub const DIFF_KIND_NEW: &str = "diff.kind.new";
+    /// The File Kind Tag of a deleted file, as [`DIFF_KIND_MODIFIED`] draws a
+    /// tag.
+    pub const DIFF_KIND_DELETED: &str = "diff.kind.deleted";
     pub const DIFF_CONTEXT: &str = "diff.context";
     pub const DIFF_CURRENT_HUNK: &str = "diff.current_hunk";
     pub const DIFF_STAGED: &str = "diff.staged";
@@ -1153,6 +1190,7 @@ pub mod scope {
 mod tests {
     use super::*;
     use crate::render;
+    use std::path::PathBuf;
     use stoat_config::parse;
 
     fn load(source: &str, name: &str) -> Theme {
@@ -1658,6 +1696,53 @@ mod tests {
         assert_eq!(
             render::pane_badge_colors(&theme),
             ([0x63, 0x6d, 0x83], [0x28, 0x2c, 0x34]),
+        );
+    }
+
+    /// The ermine File Kind Tags take the DiffKindsSpec board's colors. A
+    /// theme that sets no `diff.kind` scope, as default_dark does, tags each
+    /// kind with its text alone, in the foreground of the kind's diff mark.
+    #[test]
+    fn a_kind_tag_without_its_scope_takes_its_diff_mark_s_text_color() {
+        let [ermine, dark] =
+            ["ermine_night", "default_dark"].map(|name| load(crate::app::DEFAULT_KEYMAP, name));
+        let kinds = [
+            FileKind::Modified,
+            FileKind::Moved {
+                from: PathBuf::from("a"),
+                similarity: 100,
+            },
+            FileKind::Untracked,
+            FileKind::New,
+            FileKind::Deleted,
+        ];
+        let tag = |fg: u32, bg: u32| Style::new().fg(rgb(fg)).bg(rgb(bg));
+        let mark = |scope: &str| Style {
+            fg: dark.get(scope).fg,
+            ..Style::default()
+        };
+
+        assert_eq!(
+            (
+                kinds.each_ref().map(|kind| ermine.kind_tag_style(kind)),
+                kinds.each_ref().map(|kind| dark.kind_tag_style(kind)),
+            ),
+            (
+                [
+                    tag(0x7fb0ff, 0x1f2a3d),
+                    tag(0x6cc7d6, 0x1e3237),
+                    tag(0xe8bd6a, 0x2e2a1e),
+                    tag(0x8fd18a, 0x1d2a1f),
+                    tag(0xf2777f, 0x33201f),
+                ],
+                [
+                    mark(scope::DIFF_MODIFIED),
+                    mark(scope::DIFF_MOVED),
+                    mark(scope::DIFF_ADDED),
+                    mark(scope::DIFF_ADDED),
+                    mark(scope::DIFF_DELETED),
+                ],
+            ),
         );
     }
 
