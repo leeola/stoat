@@ -205,6 +205,7 @@ pub(crate) fn render_editor_with_overlay(
     editor.ghost_cursor_cell = None;
     editor.minimap_rect = None;
     editor.text_rect = None;
+    editor.conflict_layout = None;
     editor.eol_cursor = None;
 
     if editor.diff_view {

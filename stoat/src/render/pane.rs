@@ -4,6 +4,7 @@ use crate::{
     blame::{self, LineBlame},
     buffer::BufferId,
     buffer_registry::{BufferRegistry, ReadOnly},
+    conflict_session::{ConflictLabels, ConflictPosition},
     diff_changes::{DiffChangesId, DiffChangesState, ExcerptStats},
     diff_map::MarkKind,
     display_map::FoldScope,
@@ -13,7 +14,9 @@ use crate::{
     pane::{Divider, DividerOrientation, FocusTarget, Pane, PaneTree, Placement, View},
     render::{
         blame::{BlameLines, BlamePaint},
-        chrome, commits, diff_changes,
+        chrome, commits,
+        conflict_view::ConflictLayout,
+        diff_changes,
         editor::{editor_cursor_position, render_editor_with_overlay, split_minimap_strip},
         paint::{dim_rgb, floor_rgb, luma, style_rgb, FAINT_CONTRAST_FLOOR},
         popout::{
@@ -1273,10 +1276,16 @@ pub(crate) fn status_row(
         View::Editor(id) => editors.get(id).is_some_and(|editor| pane.blames(editor)),
         _ => false,
     };
+    let layout = match pane.view {
+        View::Editor(id) => editors
+            .get(id)
+            .and_then(|editor| editor.conflict_layout.clone()),
+        _ => None,
+    };
     let mut badge = None;
     let runs = status_segments(
-        &pane.view, is_focused, blame, area, sides, frame, editors, buffers, terms, changes,
-        &mut badge,
+        &pane.view, is_focused, blame, area, sides, layout, frame, editors, buffers, terms,
+        changes, &mut badge,
     );
     StatusRow { runs, badge }
 }
@@ -1350,6 +1359,10 @@ pub(crate) struct PaneStatusCells {
 /// [`Pane::blames`](crate::pane::Pane::blames) reads it. The row then names it
 /// after the file name, and names the cursor line's commit left of the
 /// position, as [`status_row`] does in the main window.
+///
+/// A conflict view's row runs whole, as the cell layout's row does. The window
+/// streams the view's rows alone, so no paint places the grid's columns in the
+/// row's cells.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn pane_status_cells(
     view: &View,
@@ -1366,7 +1379,8 @@ pub(crate) fn pane_status_cells(
 ) -> PaneStatusCells {
     let sides = sides_layout(view, content, frame, editors);
     let mut runs = status_segments(
-        view, is_focused, blame, area, sides, frame, editors, buffers, terms, changes, &mut None,
+        view, is_focused, blame, area, sides, None, frame, editors, buffers, terms, changes,
+        &mut None,
     );
 
     if let (Some(digit), Some(first)) = (badge, runs.first_mut()) {
@@ -2098,6 +2112,14 @@ fn status_message_style(base_style: Style, theme: &crate::theme::Theme) -> Style
 /// With `blame`, the row names the commit of the cursor line left of the
 /// position, as [`blame_label`] words it. Before the blame lands, it names
 /// none.
+///
+/// A focused conflict view's row names the conflicted file in place of the
+/// scratch buffer that holds the merged result. With `layout`, the grid
+/// columns that the view's paint recorded, the row is three runs split at the
+/// merged column's edges. The ours third reads the merge's facts, measured at
+/// the Ui scale as [`merge_facts`] packs them. The merged third is the pane
+/// row, and the theirs third names theirs. With no layout, the row runs whole
+/// and reads the facts after the file name.
 #[allow(clippy::too_many_arguments)]
 fn status_segments(
     view: &View,
@@ -2105,6 +2127,7 @@ fn status_segments(
     blame: bool,
     area: Rect,
     sides: Option<SidesLayout>,
+    layout: Option<ConflictLayout>,
     frame: FrameCtx<'_>,
     editors: &mut SlotMap<EditorId, EditorState>,
     buffers: &BufferRegistry,
@@ -2125,11 +2148,29 @@ fn status_segments(
         Some(SidesLayout::Split(divider)) => Some(split_halves(area, divider, frame.badge_cover)),
         _ => None,
     };
+    let conflict = frame
+        .conflict_position
+        .filter(|_| is_focused && frame.screen == Some("conflict"))
+        .zip(match view {
+            View::Editor(id) => editors
+                .get(*id)
+                .and_then(|editor| editor.conflict_view.clone()),
+            _ => None,
+        });
+    let thirds = conflict
+        .as_ref()
+        .zip(layout)
+        .map(|((position, merge), layout)| {
+            let cells = split_thirds(area, layout.merged, frame.badge_cover);
+            (cells, *position, merge.clone())
+        });
     // A split row's pane segments fill its target half, since the base half
-    // holds the diff's metrics.
-    let (pane_x, pane_end) = match split {
-        Some([_, (_, target)]) => (target.x, target.right()),
-        None => (area.x, end_x),
+    // holds the diff's metrics. A conflict row's pane segments fill its merged
+    // third, since the outer thirds hold the merge's facts.
+    let (pane_x, pane_end) = match (split, &thirds) {
+        (Some([_, (_, target)]), _) => (target.x, target.right()),
+        (None, Some(([_, (_, merged), _], ..))) => (merged.x, merged.right()),
+        (None, None) => (area.x, end_x),
     };
 
     let mut left: Vec<(String, Style)> = Vec::new();
@@ -2141,12 +2182,6 @@ fn status_segments(
     // An open modal's label names what the keys reach, and the file under the
     // modal is not where they go, so the label stands alone.
     let modal = frame.modal_label.filter(|_| is_focused);
-    // The conflict screen's lead names the operation and the chunk at the
-    // cursor in place of the file name. The pane's buffer is the scratch
-    // merged result, which the grid's header already names after its file.
-    let conflict = frame
-        .conflict_position
-        .filter(|_| is_focused && frame.screen == Some("conflict"));
     // A changes view names the Scope under its cursor after the file name.
     // The Scope takes the room that the rest of the row leaves, so it goes in
     // at this index after the rest is in.
@@ -2183,20 +2218,6 @@ fn status_segments(
                     format!(" {modal_label} "),
                     bar_style,
                 );
-            } else if let Some(position) = conflict {
-                let at = position
-                    .chunk_at
-                    .map_or_else(|| "-".to_string(), |at| at.to_string());
-                push_left(
-                    &mut left,
-                    &mut cursor,
-                    pane_end,
-                    format!(
-                        " {} \u{b7} chunk {at} / {} ",
-                        position.operation, position.chunk_total
-                    ),
-                    tinted(bar_style, theme, crate::theme::scope::UI_TEXT),
-                );
             } else if let Some((screen_label, screen_color)) =
                 screen_segment(frame.screen, theme).filter(|_| sides.is_none())
             {
@@ -2223,10 +2244,13 @@ fn status_segments(
     let cursor_pos = status.cursor_pos;
     let metrics =
         sides.map(|_| diff_metrics(view, status.buffer_id, is_focused, frame, buffers, changes));
-    if let Some(name) = &status.filename
+    let name = match &conflict {
+        Some((_, merge)) => Some(merge.rel_path.as_str()),
+        None => status.filename.as_deref(),
+    };
+    if let Some(name) = name
         && prompt.is_none()
         && modal.is_none()
-        && conflict.is_none()
     {
         // A name that opens the row or meets the mode chip takes a pad cell,
         // so it stands clear of the row's edge or of the chip's box.
@@ -2251,6 +2275,15 @@ fn status_segments(
         );
         for (text, style) in segments {
             push_left(&mut left, &mut cursor, pane_end, text, style);
+        }
+        if let (Some((position, merge)), None) = (&conflict, &thirds) {
+            push_left(
+                &mut left,
+                &mut cursor,
+                pane_end,
+                merge_lead(position, &merge.labels, false),
+                muted_tint(bar_style, theme),
+            );
         }
         if is_focused && let View::DiffChanges(id) = view {
             scope_at = Some((*id, left.len()));
@@ -2542,8 +2575,8 @@ fn status_segments(
     let _ = cursor;
     let _ = right_anchor;
 
-    match split {
-        Some([(base, base_segments), (target, target_segments)]) => {
+    match (split, thirds) {
+        (Some([(base, base_segments), (target, target_segments)]), _) => {
             let (base_left, base_right) = metrics
                 .as_ref()
                 .map(|metrics| metrics_half(metrics, base_segments, bar_style, theme))
@@ -2574,7 +2607,43 @@ fn status_segments(
                 },
             ]
         },
-        None => vec![StatusRun {
+        (None, Some((cells, position, merge))) => {
+            let [(ours, ours_segments), (merged, merged_segments), (theirs, theirs_segments)] =
+                cells;
+            let (facts, open) =
+                merge_facts(&position, &merge.labels, ours_segments, bar_style, theme);
+            let theirs_label = format!(" {} ", merge.labels.theirs_label());
+            vec![
+                StatusRun {
+                    area: ours,
+                    segments: ours_segments,
+                    style: bar_style,
+                    left: facts,
+                    right: open,
+                    hairline: true,
+                    boxes: Vec::new(),
+                },
+                StatusRun {
+                    area: merged,
+                    segments: merged_segments,
+                    style: bar_style,
+                    left,
+                    right,
+                    hairline: true,
+                    boxes: mode_chip_box(chip_end.is_some()),
+                },
+                StatusRun {
+                    area: theirs,
+                    segments: theirs_segments,
+                    style: bar_style,
+                    left: vec![(theirs_label, muted_tint(bar_style, theme))],
+                    right: Vec::new(),
+                    hairline: true,
+                    boxes: Vec::new(),
+                },
+            ]
+        },
+        (None, None) => vec![StatusRun {
             area,
             segments,
             style: bar_style,
@@ -2874,6 +2943,65 @@ fn metrics_half(
     (left, right)
 }
 
+/// The ours third's segments of a conflict row, whose segment rect is
+/// `segments`.
+///
+/// The merge's facts read from the third's left edge, and the count of the
+/// session's open chunks packs against the divide. The count goes in only
+/// where it clears the facts, as a split diff row's counts clear its metrics,
+/// and only while a chunk stays open.
+///
+/// The thirds come only with the MergeGrid, which only a live scene paints.
+/// So the facts and the count measure at the Ui scale that the scene draws
+/// the row at. A measure in whole cells drops the count from a column with
+/// room for both at that scale.
+fn merge_facts(
+    position: &ConflictPosition,
+    labels: &ConflictLabels,
+    segments: Rect,
+    style: Style,
+    theme: &crate::theme::Theme,
+) -> (Vec<StatusSeg>, Vec<StatusSeg>) {
+    let facts = merge_lead(position, labels, true);
+    let scale = theme.type_scale(TypeRole::Ui);
+    let advance = |text: &str| u32::from(text_run::advance_sixteenths(text.chars().count(), scale));
+    let room = u32::from(segments.width) * 16;
+    let open = (position.chunks_open > 0)
+        .then(|| format!(" {} left ", position.chunks_open))
+        .filter(|open| advance(&facts) + advance(open) <= room)
+        .map(|open| {
+            let tone = tinted(style, theme, crate::theme::scope::VCS_CONFLICT_HEADER);
+            (open, tone)
+        });
+    (
+        vec![(facts, muted_tint(style, theme))],
+        open.into_iter().collect(),
+    )
+}
+
+/// The merge's facts as a conflict row reads them, what merges into what and
+/// the chunk at the cursor.
+///
+/// With `place`, the facts also give the shown file's place in the session.
+fn merge_lead(position: &ConflictPosition, labels: &ConflictLabels, place: bool) -> String {
+    let at = position
+        .chunk_at
+        .map_or_else(|| "-".to_string(), |at| at.to_string());
+    let mut parts = vec![format!(
+        "{} \u{2192} {}",
+        labels.theirs_short(),
+        labels.ours_short()
+    )];
+    if place {
+        parts.push(format!(
+            "file {} / {}",
+            position.file_at, position.file_total
+        ));
+    }
+    parts.push(format!("chunk {at} / {}", position.chunk_total));
+    format!(" {} ", parts.join(" \u{b7} "))
+}
+
 /// The runs that name `scope` in a changes view's status row, fitted to
 /// `room` cells with a pad cell at each side.
 ///
@@ -2931,6 +3059,31 @@ fn split_halves(row: Rect, divider: u16, cover: Option<Rect>) -> [(Rect, Rect); 
     [
         (base, status_segments_area(base_segments, cover)),
         (target, status_segments_area(target, cover)),
+    ]
+}
+
+/// The ours, merged, and theirs thirds of status row `row` split at the edges
+/// of the MergeGrid's `merged` column, each as its whole rect and the part of
+/// it that holds segments.
+///
+/// The grid draws the rules between its columns as hairlines on the merged
+/// column's edges, with no cell of their own, so the thirds meet with no cell
+/// between them. An edge outside the row leaves a third empty.
+fn split_thirds(row: Rect, merged: Range<u16>, cover: Option<Rect>) -> [(Rect, Rect); 3] {
+    let start = merged.start.clamp(row.left(), row.right());
+    let end = merged.end.clamp(start, row.right());
+    let third = |x: u16, end: u16| {
+        let rect = Rect {
+            x,
+            width: end - x,
+            ..row
+        };
+        (rect, status_segments_area(rect, cover))
+    };
+    [
+        third(row.x, start),
+        third(start, end),
+        third(end, row.right()),
     ]
 }
 
@@ -3772,9 +3925,9 @@ fn render_image_pane(
 #[cfg(test)]
 mod tests {
     use super::{
-        byte_size, diff_base_lead, focused_staged_label, metrics_half, muted_tint, name_segments,
-        paint_status_fallback, read_only_note, repo_segments, resolve_rich_segments, split_halves,
-        status_filename, tab_mark, DiffMetrics,
+        byte_size, diff_base_lead, focused_staged_label, merge_facts, metrics_half, muted_tint,
+        name_segments, paint_status_fallback, read_only_note, repo_segments, resolve_rich_segments,
+        split_halves, split_thirds, status_filename, tab_mark, DiffMetrics,
     };
     use crate::{
         action_handlers::{dispatch, focused_editor_mut},
@@ -3785,12 +3938,14 @@ mod tests {
         buffer_lifecycle,
         buffer_registry::ReadOnly,
         commit_picker,
+        conflict_session::{ConflictLabels, ConflictPosition},
         diff_map::{DiffMap, MarkKind},
         editor_state::EditorState,
         host::{git::FileKind, LspNotification},
         lsp::drain,
         pane::{DockPanel, DockSide, DockVisibility, FocusTarget, View},
         rebase::RebaseState,
+        render::conflict_view::ConflictLayout,
         term_session::TermId,
         workspace::{
             diff::{DiffBase, HunkPosition, RepoStatus, WorktreeBase, DIFF_SETTLE},
@@ -6603,11 +6758,112 @@ mod tests {
         );
     }
 
-    /// The conflict screen's row leads with the operation and the chunk at the
-    /// cursor, in the text color, in place of the scratch buffer's name.
+    /// The focused conflict view's row splits at the MergeGrid's merged
+    /// column, as the paint records it. At 160 cells the pane spans 153 beside
+    /// the minimap band, so the merged column takes cells 49 to 104, and the
+    /// theirs third runs on under the band.
+    ///
+    /// The ours third reads what merges into what, the file's place, and the
+    /// chunk at the cursor in the muted color. The open chunks fill its last
+    /// cells against the divide, in the conflict header's color. The merged
+    /// third is the pane row, with the mode chip at the column's first cell
+    /// and the conflicted file in place of the scratch buffer. The theirs third
+    /// names theirs in the muted color.
     #[test]
-    fn the_status_row_names_the_conflict_chunk_at_the_cursor() {
+    fn a_conflict_row_splits_in_thirds_under_the_grid_columns() {
+        let mut h = crate::test_harness::TestHarness::with_size(160, 12);
+        h.stoat.active_workspace_mut().git_root = PathBuf::from("/repo");
+        h.fake_git()
+            .add_repo("/repo")
+            .with_fs(h.fake_fs())
+            .set_head_branch("main")
+            .merge_in_progress("a1c4e9f00", Some("topic"), "Merge branch 'topic'")
+            .conflicted_file(
+                "src/f.txt",
+                Some("a\nb\nc\nd\ne\n"),
+                Some("a\nB\nc\nD\ne\n"),
+                Some("a\nX\nc\nY\ne\n"),
+            );
+        dispatch(&mut h.stoat, &Conflict);
+        h.settle();
+
+        let buf = h.render_composited();
+        let layout =
+            focused_editor_mut(&mut h.stoat).and_then(|editor| editor.conflict_layout.clone());
+        let theme = &h.stoat.theme;
+        let fg = |scope: &str| theme.get(scope).fg.expect("the theme colors the scope");
+        let muted = muted_tint(theme.get(crate::theme::scope::UI_STATUSBAR_FOCUSED), theme)
+            .fg
+            .expect("the row mutes text");
+        let row = buf.area.height - 1;
+        let facts = " topic \u{2192} main \u{b7} file 1 / 1 \u{b7} chunk 1 / 2 ";
+        assert_eq!(
+            (
+                layout,
+                status_row(&buf, buf.area),
+                [1, 42, 50, 105].map(|x| buf[(x, row)].fg),
+            ),
+            (
+                Some(ConflictLayout {
+                    ours: 0..49,
+                    merged: 49..104,
+                    theirs: 104..153,
+                    body: Rect::new(0, 2, 153, 9),
+                }),
+                format!(
+                    "{facts} 2 left {:<51}2:1 {:<56}",
+                    " NOR  repo src/f.txt", " topic \u{b7} a1c4e9f"
+                ),
+                [
+                    muted,
+                    fg(crate::theme::scope::VCS_CONFLICT_HEADER),
+                    fg(crate::theme::scope::UI_MODE_LABEL),
+                    muted,
+                ],
+            ),
+        );
+    }
+
+    /// A status message on a conflict row takes the room that the merged third
+    /// leaves between its file and its position. The row cuts the message to
+    /// that room, as a pane row cuts its message to the row's room.
+    #[test]
+    fn a_message_on_a_conflict_row_fits_the_merged_third() {
+        let mut h = crate::test_harness::TestHarness::with_size(160, 12);
+        h.stoat.active_workspace_mut().git_root = PathBuf::from("/repo");
+        h.fake_git()
+            .add_repo("/repo")
+            .with_fs(h.fake_fs())
+            .conflicted_file(
+                "f.txt",
+                Some("a\nbase\n"),
+                Some("a\nours\n"),
+                Some("a\ntheirs\n"),
+            );
+        dispatch(&mut h.stoat, &Conflict);
+        h.settle();
+        h.stoat
+            .set_status("resolution written to the working tree for f.txt");
+
+        let buf = h.render_composited();
+        let facts = " theirs \u{2192} HEAD \u{b7} file 1 / 1 \u{b7} chunk 1 / 1";
+        assert_eq!(
+            status_row(&buf, buf.area),
+            format!(
+                "{facts:<49} NOR  repo f.txt resolution written to the working 2:1 {:<56}",
+                " theirs"
+            ),
+        );
+    }
+
+    /// With no MergeGrid, as a terminal with no live scene paints the conflict
+    /// view, the focused conflict row runs whole. It names the conflicted file
+    /// and then reads what merges into what and the chunk at the cursor in the
+    /// muted color.
+    #[test]
+    fn a_conflict_row_with_no_grid_reads_the_merge_after_the_file() {
         let mut h = crate::test_harness::TestHarness::with_size(60, 12);
+        h.stoat.stoatty = false;
         h.stoat.active_workspace_mut().git_root = PathBuf::from("/repo");
         h.fake_git()
             .add_repo("/repo")
@@ -6622,32 +6878,103 @@ mod tests {
         h.settle();
 
         let buf = h.render_composited();
-        let lead = " NOR  repo  conflict \u{b7} chunk 1 / 1";
-        let at = lead.find("conflict").expect("the lead names the operation") as u16;
-        let text = h
-            .stoat
-            .theme
-            .get(crate::theme::scope::UI_TEXT)
-            .fg
-            .expect("the theme colors text");
+        let layout =
+            focused_editor_mut(&mut h.stoat).and_then(|editor| editor.conflict_layout.clone());
+        let lead = " NOR  repo f.txt  theirs \u{2192} HEAD \u{b7} chunk 1 / 1";
+        let at = lead.find("theirs").expect("the lead names theirs") as u16;
+        let theme = &h.stoat.theme;
+        let muted = muted_tint(theme.get(crate::theme::scope::UI_STATUSBAR_FOCUSED), theme).fg;
         assert_eq!(
             (
+                layout,
                 status_row(&buf, buf.area),
-                buf[(at, buf.area.height - 1)].fg
+                Some(buf[(at, buf.area.height - 1)].fg)
             ),
-            (format!("{lead:<56}2:1 "), text),
+            (None, format!("{lead:<56}2:1 "), muted),
         );
     }
 
-    /// The conflict pane's status row leads with the chunk while the conflict
-    /// view holds focus. Once focus moves to the pane beside it, that pane's
-    /// row leads with the mode chip and its file, and the conflict pane's row
-    /// names its scratch buffer, since only the focused conflict pane leads
-    /// with the chunk. The open widens its pane, so the layout unwidens to show
-    /// the other one.
+    /// The thirds meet at the merged column's edges with no cell between them.
+    /// An edge past the row leaves the third beyond it empty, and a badge box
+    /// over the row ends the segments of the third it covers.
     #[test]
-    fn the_conflict_lead_leaves_the_row_with_the_focus() {
-        let mut h = crate::test_harness::TestHarness::with_size(120, 12);
+    fn the_thirds_split_at_the_merged_column_s_edges() {
+        let row = Rect::new(10, 5, 100, 1);
+        let thirds = |start: u16, end: u16, cover: Option<Rect>| {
+            split_thirds(row, start..end, cover)
+                .map(|(rect, segments)| (rect.x, rect.width, segments.width))
+        };
+        let badge = Some(Rect::new(100, 5, 10, 1));
+
+        assert_eq!(
+            [
+                thirds(40, 70, None),
+                thirds(40, 130, None),
+                thirds(0, 30, None),
+                thirds(40, 70, badge),
+            ],
+            [
+                [(10, 30, 30), (40, 30, 30), (70, 40, 40)],
+                [(10, 30, 30), (40, 70, 70), (110, 0, 0)],
+                [(10, 0, 0), (10, 20, 20), (30, 80, 80)],
+                [(10, 30, 30), (40, 30, 30), (70, 40, 30)],
+            ],
+        );
+    }
+
+    /// The ours third counts the session's open chunks only while one stays
+    /// open, and only where the count clears the facts.
+    #[test]
+    fn the_merge_facts_count_open_chunks_that_clear_the_facts() {
+        use ratatui::style::Style;
+
+        let theme = crate::theme::Theme::empty();
+        let labels = ConflictLabels::new(Some("main".to_string()), None);
+        let texts = |segments: Vec<(String, Style)>| {
+            segments
+                .into_iter()
+                .map(|(text, _)| text)
+                .collect::<Vec<_>>()
+        };
+        let packed = |chunks_open: usize, width: u16| {
+            let position = ConflictPosition {
+                operation: "conflict",
+                chunk_at: Some(1),
+                chunk_total: 2,
+                file_at: 1,
+                file_total: 1,
+                file_open: chunks_open,
+                chunks_open,
+                files_open: usize::from(chunks_open > 0),
+            };
+            let segments = Rect::new(0, 0, width, 1);
+            let (facts, open) = merge_facts(&position, &labels, segments, Style::default(), &theme);
+            (texts(facts), texts(open))
+        };
+
+        let facts = vec![" theirs \u{2192} main \u{b7} file 1 / 1 \u{b7} chunk 1 / 2 ".to_string()];
+        assert_eq!(
+            [packed(2, 50), packed(2, 49), packed(0, 50)],
+            [
+                (facts.clone(), vec![" 2 left ".to_string()]),
+                (facts.clone(), Vec::new()),
+                (facts, Vec::new()),
+            ],
+        );
+    }
+
+    /// The conflict pane's status row splits in thirds and reads the merge
+    /// while the conflict view holds focus. Once focus moves to the pane beside
+    /// it, that pane's row leads with the mode chip and its file. The conflict
+    /// pane's row runs whole and names its scratch buffer, since only the
+    /// focused conflict pane reads the merge. The open widens its pane, so the
+    /// layout unwidens to show the other one.
+    ///
+    /// At 320 cells the conflict pane's row takes 163, of which the view spans
+    /// 156 beside the minimap band. So the thirds take 50, 56, and 57 cells.
+    #[test]
+    fn the_merge_facts_leave_the_row_with_the_focus() {
+        let mut h = crate::test_harness::TestHarness::with_size(320, 12);
         h.stoat.active_workspace_mut().git_root = PathBuf::from("/repo");
         h.fake_git()
             .add_repo("/repo")
@@ -6688,13 +7015,15 @@ mod tests {
         let on_file = rows(&mut h);
 
         let [left, right] = [on_conflict[0].0, on_conflict[1].0];
+        let facts = " theirs \u{2192} HEAD \u{b7} file 1 / 1 \u{b7} chunk 1 / 1 ";
+        let thirds = format!(
+            "{facts} 1 left {:<52}2:1 {:<57}",
+            " NOR  repo f.txt", " theirs"
+        );
         assert_eq!(
             [on_conflict, on_file],
             [
-                vec![
-                    pane_row(left, " f.txt", "1:1"),
-                    pane_row(right, " NOR  repo  conflict \u{b7} chunk 1 / 1", "2:1"),
-                ],
+                vec![pane_row(left, " f.txt", "1:1"), (right, thirds)],
                 vec![
                     pane_row(left, " NOR  repo f.txt", "1:1"),
                     pane_row(right, " scratch", "2:1"),

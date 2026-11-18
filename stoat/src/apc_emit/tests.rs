@@ -7160,6 +7160,68 @@ fn a_conflict_pane_pools_the_rows_below_its_header() {
     );
 }
 
+/// A detached conflict pane's row runs whole and reads the merge after the
+/// file's name, as the cell layout's row does.
+///
+/// The main window painted the MergeGrid before the detach, so the editor
+/// holds the columns in the main window's cells. The aux window streams the
+/// view's rows alone, and its row counts cells from its own edge.
+#[test]
+fn a_detached_conflict_pane_s_row_runs_whole() {
+    let mut h = crate::test_harness::TestHarness::with_size(160, 24);
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+    h.stoat.set_apc_tx(tx);
+    h.stoat.window_ipc_connected = true;
+    h.stoat.active_workspace_mut().git_root = PathBuf::from("/repo");
+    h.fake_git()
+        .add_repo("/repo")
+        .with_fs(h.fake_fs())
+        .conflicted_file(
+            "f.txt",
+            Some("a\nbase\n"),
+            Some("a\nours\n"),
+            Some("a\ntheirs\n"),
+        );
+    h.type_action("SplitRight()");
+    h.settle();
+    action_handlers::dispatch(&mut h.stoat, &Conflict);
+    h.settle();
+    h.stoat.render();
+    let painted = action_handlers::focused_editor_mut(&mut h.stoat)
+        .is_some_and(|editor| editor.conflict_layout.is_some());
+    action_handlers::dispatch(&mut h.stoat, &DetachPane);
+
+    let (window, pool) = {
+        let panes = &h.stoat.active_workspace().panes;
+        let pane = panes.pane(panes.focus());
+        let window = match &pane.placement {
+            Placement::Window(window) => *window,
+            other => panic!("the pane detaches into a window, got {other:?}"),
+        };
+        (
+            window,
+            crate::smooth_scroll::non_pane_pool::WINDOW_STATUS + pane.index,
+        )
+    };
+    app::deliver_window_event(
+        &mut h.stoat,
+        WindowIpcEvent::Resized {
+            window,
+            cols: 120,
+            rows: 10,
+        },
+    );
+    let bytes = emit_raw(&mut h, &mut rx);
+    let row: String = page_cells(fill_payload(&bytes, pool, 0), 120, 1)
+        .remove(0)
+        .into_iter()
+        .map(|cell| cell.0)
+        .collect();
+
+    let lead = " NOR  repo f.txt  theirs \u{2192} HEAD \u{b7} chunk 1 / 1";
+    assert_eq!((painted, row), (true, format!("{lead:<116}2:1 ")));
+}
+
 /// A 150x24 harness with a conflicted file in the conflict view, before its
 /// first emit, and the receiver of that emit's batches.
 fn conflict_pane() -> (

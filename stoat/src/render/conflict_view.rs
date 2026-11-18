@@ -35,6 +35,21 @@ pub(crate) struct GridPaint<'a> {
     pub(crate) cursor_row: Option<u32>,
 }
 
+/// Where the MergeGrid's columns and rows fell in the frame that painted it,
+/// in the frame's absolute cells.
+///
+/// The paint records it on the editor, so a reader outside the painter places
+/// itself against the columns the frame drew rather than laying out columns
+/// of its own. The status row splits its runs at the merged column's edges.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ConflictLayout {
+    pub(crate) ours: Range<u16>,
+    pub(crate) merged: Range<u16>,
+    pub(crate) theirs: Range<u16>,
+    /// The rows under the header, across all three columns.
+    pub(crate) body: Rect,
+}
+
 /// Column geometry for the conflict view's cell layout, the one a terminal with
 /// no live scene gets, resolved once per frame.
 ///
@@ -157,6 +172,12 @@ pub(crate) fn render_conflict_view(
         y: body.y,
         width: text.end.saturating_sub(text.start),
         height: body.height,
+    });
+    editor.conflict_layout = live.as_ref().map(|(_, grid)| ConflictLayout {
+        ours: grid.cols.ours.x..grid.cols.ours.right(),
+        merged: grid.cols.merged.x..grid.cols.merged.right(),
+        theirs: grid.cols.theirs.x..grid.cols.theirs.right(),
+        body,
     });
     let scroll_row = editor.scroll_row;
     let cursor = cursor_display(editor, &snapshot);

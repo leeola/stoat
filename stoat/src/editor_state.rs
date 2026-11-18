@@ -5,6 +5,7 @@ use crate::{
     display_map::{CachedHighlightEndpoints, DisplayMap},
     minimap::density::Density,
     multi_buffer::MultiBuffer,
+    render::conflict_view::ConflictLayout,
     selection::SelectionsCollection,
 };
 use ratatui::layout::Rect;
@@ -291,6 +292,14 @@ pub(crate) struct EditorState {
     /// render and after a render that painted no rows. Transient render state
     /// written by `render_editor`, not persisted.
     pub(crate) text_rect: Option<Rect>,
+    /// Where a conflict view's MergeGrid placed its columns in the last
+    /// render, which the status row splits its runs under.
+    ///
+    /// `None` before the first render and after a render that drew no grid,
+    /// such as a plain editor's or the cell layout a terminal with no live
+    /// scene gets. Transient render state written by `render_editor`, not
+    /// persisted.
+    pub(crate) conflict_layout: Option<ConflictLayout>,
     /// Absolute terminal cell `(col, row)` the last render reserved for this
     /// editor's primary cursor, so the terminal can position its own cursor
     /// there instead of the render painting a styled grid cell.
@@ -374,6 +383,7 @@ impl EditorState {
             minimap_rect: None,
             minimap_density: None,
             text_rect: None,
+            conflict_layout: None,
             cursor_screen_cell: None,
             ghost_cursor_cell: None,
         }
