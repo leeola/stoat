@@ -5091,6 +5091,30 @@ fn a_stack_page_tags_the_kind_its_tally_names_and_refills_when_it_changes() {
     );
 }
 
+/// A fold of the stack's last file refills the page that holds it. The fold
+/// moves no excerpt's header, so the page refills because the file shows its
+/// header alone.
+#[test]
+fn a_fold_of_the_last_file_refills_its_page() {
+    let (mut h, mut rx, pool) = resident_stack(TWO_FILES, MinimapMode::Off);
+    emit_raw(&mut h, &mut rx);
+    {
+        let ws = h.stoat.active_workspace_mut();
+        let id = ws.focused_diff_changes_id().expect("a changes view");
+        let Workspace {
+            diff_changes_views,
+            editors,
+            ..
+        } = ws;
+        let state = &mut diff_changes_views[id];
+        let last = state.excerpts.len() - 1;
+        diff_changes::toggle_file(state, editors, last);
+    }
+    h.stoat.render();
+
+    assert_eq!(pool_fills(&emit_raw(&mut h, &mut rx), pool), vec![0]);
+}
+
 /// A page of a changes view under a modal that paints its own box holds the
 /// fade the live paint shows on its rows. The pool is resident, so its pages
 /// are what the terminal shows behind the modal.

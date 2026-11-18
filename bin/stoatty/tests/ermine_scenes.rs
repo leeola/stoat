@@ -596,12 +596,13 @@ fn the_changes_view_heads_each_file_on_the_raised_surface() {
 /// edge to the stack's first row while the stack scrolls under it.
 ///
 /// The scene is 22 rows tall, and the tab bar's band and the status band take
-/// two rows each, so the stack shows 18. Two pages put the cursor on the
-/// stack's last row and the scroll on the last page, which starts inside
-/// hunks.txt, past its header and before its last row. The stack lists the
-/// staged move renamed-to.txt after hunks.txt, so its header row and fold row
-/// add to the page. Row 2 then shows hunks.txt's header on the raised surface
-/// over its bottom hairline. Where the cover fails, the resident pool's
+/// two rows each, so the stack shows 18. The two deleted files above
+/// hunks.txt fold to their headers, so hunks.txt takes stack rows 5 to 19 of
+/// 35. Two pages put the cursor on the stack's last row and the scroll on the
+/// last page, row 17, which lies inside hunks.txt, past its header and before
+/// its last row. The stack lists the staged move renamed-to.txt after
+/// hunks.txt, so its header row and fold row add to the page. Row 2 then shows hunks.txt's header
+/// on the raised surface over its bottom hairline. Where the cover fails, the resident pool's
 /// composite shows a stack row there.
 ///
 /// The pinned header casts its shadow on row 3, which the stack's pool
@@ -652,8 +653,9 @@ fn the_changes_view_pins_the_file_header_over_its_scrolling_stack() {
 /// The changes view folds the unchanged lines between two hunks into a fold
 /// row under the boards' hatch, and the divide's hairline runs through it.
 ///
-/// The diff-kinds stack lists hunks.txt fourth, and its fold row is row 20,
-/// under the row of its line 6 on the base surface. The fold hides seven
+/// The diff-kinds stack lists hunks.txt fourth, after the two deleted files,
+/// which fold to their headers. Its fold row is row 14, under the row of its
+/// line 6 on the base surface. The fold hides seven
 /// lines, so the row carries one Fold Button, whose box covers most of columns
 /// 1 and 2. The count and the range end against the divide, so the count's
 /// muted text shows in the cells from column 61 to column 74. The divide takes
@@ -670,28 +672,28 @@ fn the_changes_view_folds_unchanged_lines_into_a_hatched_row() {
     expect_region(
         &shot,
         &mut home,
-        cell_rect(2, 19, 30, 1),
+        cell_rect(2, 13, 30, 1),
         BASE,
         "changes_row_above_fold",
     );
     expect_region(
         &shot,
         &mut home,
-        cell_rect(1, 20, 2, 1),
+        cell_rect(1, 14, 2, 1),
         FOLD_BUTTON,
         "changes_fold_button",
     );
     for (rect, what) in [
-        (cell_rect(4, 20, 57, 1), "changes_fold_row"),
-        (cell_rect(77, 20, 72, 1), "changes_fold_row_right"),
+        (cell_rect(4, 14, 57, 1), "changes_fold_row"),
+        (cell_rect(77, 14, 72, 1), "changes_fold_row_right"),
     ] {
         expect_hatch(&shot, &mut home, rect, (BASE, HATCH), what);
     }
 
-    let (_, y, _, height) = cell_rect(0, 20, 1, 1);
-    let count = pixels_of(&shot, cell_rect(61, 20, 14, 1), MUTED);
+    let (_, y, _, height) = cell_rect(0, 14, 1, 1);
+    let count = pixels_of(&shot, cell_rect(61, 14, 14, 1), MUTED);
     let divide = {
-        let (cell_x, _, cell_width, _) = cell_rect(75, 20, 1, 1);
+        let (cell_x, _, cell_width, _) = cell_rect(75, 14, 1, 1);
         bar_columns(&shot, (y, height), HAIRLINE)
             .into_iter()
             .filter(|column| (cell_x..cell_x + cell_width).contains(column))

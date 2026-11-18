@@ -3743,8 +3743,9 @@ pub(crate) fn editor_page_content_version(
 ///
 /// It folds in the frame's inputs, and each excerpt's place in the stack and
 /// the versions of its text, folds, and diff. The Scope row under each header
-/// lives on the excerpt and not in the display map, so it folds in too. It
-/// also folds in the rows and the strength of each reveal mark, so a fading
+/// lives on the excerpt and not in the display map, so it folds in too, as
+/// do the file's kind and whether the file shows its header alone. It also
+/// folds in the rows and the strength of each reveal mark, so a fading
 /// mark refills its pages at each step. Which excerpt holds the focus, its
 /// selections, and its goto labels stay out, since a change of them reaches
 /// the pages it touches as row patches.
@@ -3777,6 +3778,7 @@ fn stack_page_version(
             excerpt.top,
             &excerpt.rel_path,
             excerpt.folded_version,
+            excerpt.collapsed,
             excerpt.empty,
             editor.display_map.wrap_width(),
             display_map_stamp(buffer_version, paint_version),

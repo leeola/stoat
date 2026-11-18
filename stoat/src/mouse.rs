@@ -279,7 +279,8 @@ pub(crate) fn screen_surfaces(stoat: &mut Stoat) -> Option<ScreenSurfaces> {
 /// runs goto definition. A right press puts the cursor there and runs hover.
 /// The view's excerpts are editors, so the buttons act as they do in an editor.
 /// A left, middle, or right press on a fold row's Fold Button opens the fold
-/// and runs neither.
+/// and runs neither. A press on a File Header folds or opens its file and runs
+/// neither too.
 fn handle_screen_mouse(stoat: &mut Stoat, mouse: MouseEvent) -> Option<UpdateEffect> {
     let surfaces = screen_surfaces(stoat).filter(|s| s.holds(mouse))?;
     if stoat.minimap_drag.is_some() || surfaces.presses_strip(mouse) {
@@ -300,7 +301,7 @@ fn handle_screen_mouse(stoat: &mut Stoat, mouse: MouseEvent) -> Option<UpdateEff
         ScreenKind::DiffChanges => {
             match action_handlers::diff_changes::diff_changes_press(stoat, index, mouse.column) {
                 StackPress::Missed => return Some(UpdateEffect::None),
-                StackPress::Opened => return Some(UpdateEffect::Redraw),
+                StackPress::Opened | StackPress::Folded => return Some(UpdateEffect::Redraw),
                 StackPress::Placed => {},
             }
             match button {
@@ -3404,8 +3405,7 @@ mod tests {
     }
 
     /// A press on an excerpt row puts that file's cursor on the cell under the
-    /// pointer, a press on a header row at the start of its excerpt's first
-    /// row, and a press left of the text at the start of the row.
+    /// pointer, and a press left of the text at the start of the row.
     #[test]
     fn a_press_over_the_changes_view_puts_the_cursor_on_its_cell() {
         let mut h = diff_changes_harness(MinimapMode::Single, 20);
@@ -3417,17 +3417,10 @@ mod tests {
         };
 
         // Each one-line file takes a header row, its changed row, and the empty
-        // row after its newline, so f01's header sits on row 3.
-        let pressed = [
-            press(text_x + 1, list.y + 4),
-            press(text_x + 1, list.y + 3),
-            press(list.x, list.y + 1),
-        ];
+        // row after its newline, so f01's changed row sits on row 4.
+        let pressed = [press(text_x + 1, list.y + 4), press(list.x, list.y + 1)];
         let at = |path: &str, column| (path.to_string(), Point::new(0, column));
-        assert_eq!(
-            pressed,
-            [at("f01.txt", 1), at("f01.txt", 0), at("f00.txt", 0)]
-        );
+        assert_eq!(pressed, [at("f01.txt", 1), at("f00.txt", 0)]);
     }
 
     /// A middle press runs goto definition and a right press runs hover, each
@@ -3513,11 +3506,54 @@ mod tests {
         );
     }
 
-    /// A press on the pinned header acts as a press on the header in place. The
-    /// cursor stays on its file's first row, and the stack scrolls back so that
-    /// row shows under the header in place.
+    /// A press on the pinned header folds its file to the header, as a press on
+    /// the header in place does. The file's rows leave the stack, the stack
+    /// scrolls back so the folded header is the view's first row, and the
+    /// focus moves to the next file's first row, under its header on row 1.
     #[test]
-    fn a_press_on_the_pinned_header_lands_on_its_files_first_row() {
+    fn a_press_on_the_pinned_header_folds_its_file() {
+        let mut h = two_changed_files();
+        diff_changes_stack(&mut h).0.scroll = 3;
+        let _ = h.stoat.render();
+        let (list, _) = diff_changes_columns(&mut h);
+
+        left_press(&mut h, list.x + 2, list.y);
+        let _ = h.stoat.render();
+        assert_eq!(
+            (
+                first_file_rows(&mut h),
+                diff_changes_place(&mut h),
+                diff_changes_cursor(&mut h).0,
+            ),
+            (0, (2, 0), "b.txt".to_string()),
+        );
+    }
+
+    /// A second press on a folded header opens its file, whose rows come back
+    /// under the header. The focus stays on the file it moved to at the fold.
+    #[test]
+    fn a_second_press_on_a_folded_header_opens_its_file() {
+        let mut h = two_changed_files();
+        let (list, _) = diff_changes_columns(&mut h);
+        let shown = first_file_rows(&mut h);
+
+        let press = |h: &mut crate::test_harness::TestHarness| {
+            left_press(h, list.x + 2, list.y);
+            let _ = h.stoat.render();
+            (first_file_rows(h), diff_changes_cursor(h).0)
+        };
+        let folded = press(&mut h);
+        let opened = press(&mut h);
+        assert_eq!(
+            (folded, opened),
+            ((0, "b.txt".to_string()), (shown, "b.txt".to_string())),
+            "a.txt shows {shown} rows open",
+        );
+    }
+
+    /// Two files of twelve changed lines under a focused changes view at 120 by
+    /// 14 with no minimap, painted.
+    fn two_changed_files() -> crate::test_harness::TestHarness {
         let mut h = crate::test_harness::TestHarness::with_size(120, 14);
         h.stoat.settings.editor_minimap = Some(MinimapMode::Off);
         let base: String = (1..=12).map(|n| format!("{n}\n")).collect();
@@ -3527,13 +3563,13 @@ mod tests {
         h.cover_with_diff_changes(false);
         h.settle();
         let _ = h.stoat.render();
-        diff_changes_stack(&mut h).0.scroll = 3;
-        let _ = h.stoat.render();
-        let (list, _) = diff_changes_columns(&mut h);
+        h
+    }
 
-        left_press(&mut h, list.x + 2, list.y);
-        let _ = h.stoat.render();
-        assert_eq!(diff_changes_place(&mut h), (1, 0));
+    /// The display rows the focused changes view's first file shows.
+    fn first_file_rows(h: &mut crate::test_harness::TestHarness) -> usize {
+        let (state, editors) = diff_changes_stack(h);
+        diff_changes::excerpt_rows(&state.excerpts[0], editors)
     }
 
     /// A press on the pinned Scope acts as a press on the fold row it repeats.

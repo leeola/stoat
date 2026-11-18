@@ -29,7 +29,7 @@ use crate::{
     editor_state::{EditorId, EditorState},
     git_status::Note,
     host::{
-        git::{HunkTallies, MergeState},
+        git::{FileChange, HunkTallies, MergeState},
         GitHost,
     },
     input_history::InputHistory,
@@ -1684,6 +1684,15 @@ impl Workspace {
     /// workspace mutably, as a frame does through its pane loop.
     pub(crate) fn repo_tallies(&self) -> Option<Arc<HunkTallies>> {
         self.diff.repo_hunk_tallies.clone()
+    }
+
+    /// How the file at the repo-relative `rel_path` stands against HEAD, as the
+    /// installed tally names it.
+    ///
+    /// `None` before the first tally lands, outside a repo, and for a file the
+    /// tally holds no change for.
+    pub(crate) fn file_change(&self, rel_path: &Path) -> Option<&FileChange> {
+        self.diff.repo_hunk_tallies.as_ref()?.change(rel_path)
     }
 
     /// Files changed since the revision base, absolute, as the last tally read

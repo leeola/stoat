@@ -39,6 +39,8 @@ pub(crate) enum StackPress {
     /// The press opened a fold through one of its Fold Buttons and left the
     /// cursor where it was.
     Opened,
+    /// The press folded a file to its header or opened it.
+    Folded,
     /// The press put the cursor on the pressed cell.
     Placed,
 }
@@ -536,14 +538,16 @@ pub(super) fn diff_changes_edge(stoat: &mut Stoat, last: bool) -> UpdateEffect {
 /// Act on a press at stack row `row` and screen column `column` of the
 /// focused changes view.
 ///
+/// A press on a File Header folds its file to the header, or opens a file that
+/// shows its header alone. A press on a pinned header acts on the header it
+/// repeats, and the stack scrolls back to that header. A fold of the focused
+/// file moves the focus to the nearest file that shows rows.
+///
 /// A press on a fold row's Fold Button opens the fold from the button's edge,
 /// on any excerpt of the stack. The cursor and the focus stay where they were.
 ///
 /// Any other press puts the cursor on the pressed cell, and the row's excerpt
-/// takes the focus, as a press in an editor does. A header row puts the cursor
-/// at the start of its excerpt's first row. A press on a pinned header acts as
-/// a press on the header it repeats, and the stack scrolls back until the
-/// cursor's row shows.
+/// takes the focus, as a press in an editor does.
 pub(crate) fn diff_changes_press(stoat: &mut Stoat, row: usize, column: u16) -> StackPress {
     let ws = stoat.active_workspace_mut();
     let Some(id) = ws.focused_diff_changes_id() else {
@@ -561,6 +565,10 @@ pub(crate) fn diff_changes_press(stoat: &mut Stoat, row: usize, column: u16) -> 
     };
     diff_changes::layout_stack(state, editors);
     let (row, pinned) = diff_changes::pinned_row(state, editors, row);
+    if let Some(index) = state.excerpts.iter().position(|excerpt| excerpt.top == row) {
+        diff_changes::toggle_file(state, editors, index);
+        return StackPress::Folded;
+    }
 
     // A pinned row draws no Fold Button, so a press there opens no fold.
     if !pinned
@@ -573,7 +581,7 @@ pub(crate) fn diff_changes_press(stoat: &mut Stoat, row: usize, column: u16) -> 
     if !diff_changes::press_cell(state, editors, row, column) {
         return StackPress::Missed;
     }
-    // A press on a pinned header puts the cursor above the view. The paint
+    // A press on a pinned Scope puts the cursor above the view. The paint
     // follows only a cursor that moved, and the cursor sometimes stood on that
     // row already, so the press scrolls the row into view itself.
     if let Some(cursor) = diff_changes::cursor_stack_row(state, editors) {
@@ -860,18 +868,29 @@ pub(super) fn land_pick(stoat: &mut Stoat, path: &Path) -> bool {
 ///
 /// The move places no cursor and pushes no jump. The caller places the cursor
 /// through [`super::focused_editor_mut`], which then answers that excerpt's
-/// editor.
+/// editor. A file folded to its header opens, since the move lands on it.
 pub(crate) fn focus_stack_buffer(stoat: &mut Stoat, buffer_id: BufferId) -> bool {
-    let Some(state) = stoat.active_workspace_mut().focused_diff_changes_mut() else {
+    let ws = stoat.active_workspace_mut();
+    let Some(id) = ws.focused_diff_changes_id() else {
         return false;
     };
-    let Some(index) = state
-        .excerpts
-        .iter()
-        .position(|excerpt| excerpt.buffer_id == buffer_id && excerpt.shows_rows())
-    else {
+    let Workspace {
+        diff_changes_views,
+        editors,
+        ..
+    } = ws;
+    let Some(state) = diff_changes_views.get_mut(id) else {
         return false;
     };
+    let Some(index) = state.excerpts.iter().position(|excerpt| {
+        excerpt.buffer_id == buffer_id && excerpt.folded_version.is_some() && !excerpt.empty
+    }) else {
+        return false;
+    };
+    if state.excerpts[index].collapsed {
+        state.excerpts[index].collapsed = false;
+        diff_changes::layout_stack(state, editors);
+    }
     if index != state.focused {
         state.focused = index;
         state.held_screen_row = None;
@@ -1684,6 +1703,40 @@ mod tests {
         assert_eq!(
             (crossed, h.stoat.current_view(), place(&mut h)),
             (at("b.txt", 0), Some("diff_changes"), at("a.txt", 0)),
+        );
+    }
+
+    /// A jump back into a file folded to its header opens the file, as every
+    /// landing on a file does, and the cursor takes the place the jump left.
+    #[test]
+    fn a_jump_back_into_a_folded_file_opens_it() {
+        let mut h = two_files();
+        h.cover_with_diff_changes(false);
+        h.settle();
+        jump::push_jump(&mut h.stoat);
+        h.type_keys("j j");
+        let crossed = place(&mut h);
+        let first_folded = |h: &mut TestHarness| {
+            let ws = h.stoat.active_workspace_mut();
+            let id = ws.focused_diff_changes_id().expect("a changes view");
+            ws.diff_changes_views[id].excerpts[0].collapsed
+        };
+        {
+            let ws = h.stoat.active_workspace_mut();
+            let id = ws.focused_diff_changes_id().expect("a changes view");
+            let Workspace {
+                diff_changes_views,
+                editors,
+                ..
+            } = ws;
+            diff_changes::toggle_file(&mut diff_changes_views[id], editors, 0);
+        }
+        let folded = first_folded(&mut h);
+
+        dispatch(&mut h.stoat, &stoat_action::JumpBackward);
+        assert_eq!(
+            (crossed, folded, first_folded(&mut h), place(&mut h)),
+            (at("b.txt", 0), true, false, at("a.txt", 0)),
         );
     }
 

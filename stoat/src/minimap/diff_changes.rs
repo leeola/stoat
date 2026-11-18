@@ -550,7 +550,9 @@ pub(crate) fn summarize_rows(
         if rows.contains(&excerpt.top) {
             lines.push(header_bar(table));
         }
-        if (excerpt.scope_row.is_some() || excerpt.empty) && rows.contains(&(excerpt.top + 1)) {
+        if (excerpt.shown_scope().is_some() || (excerpt.empty && !excerpt.collapsed))
+            && rows.contains(&(excerpt.top + 1))
+        {
             lines.push(LineRuns::default());
         }
         let display_rows = rows.start.max(first) - first..end.saturating_sub(first);
@@ -983,12 +985,12 @@ fn excerpt_keys(
                 inlay_set_version: snapshot.inlay_snapshot().inlay_set_version,
                 pairs_modified_hunks: snapshot.pairs_modified_hunks(),
                 lsp_token_version,
-                scope_row: excerpt.scope_row.is_some() || excerpt.empty,
+                scope_row: excerpt.shown_scope().is_some() || (excerpt.empty && !excerpt.collapsed),
             },
             None => ExcerptLayout {
                 rows,
                 lsp_token_version,
-                scope_row: excerpt.scope_row.is_some() || excerpt.empty,
+                scope_row: excerpt.shown_scope().is_some() || (excerpt.empty && !excerpt.collapsed),
                 ..ExcerptLayout::default()
             },
         };

@@ -362,11 +362,13 @@ pub(crate) fn paint_stack_rows(
         // A page replaces its decorations as one set, so a decorations-only
         // page emits the header's runs too.
         if let Some(row) = header_row(top) {
+            let (left, hidden) = excerpt_header(excerpt, buffers, frame);
             paint_header(
                 buf,
                 row,
                 &header_path(&excerpt.rel_path, frame.theme),
-                &excerpt_header_left(excerpt, buffers, frame),
+                &left,
+                hidden,
                 frame.theme,
                 match scene.live() {
                     true => Some(&mut *scene),
@@ -375,7 +377,7 @@ pub(crate) fn paint_stack_rows(
                 paint == PagePaint::Cells,
             );
         }
-        if let Some(scope) = &excerpt.scope_row
+        if let Some(scope) = excerpt.shown_scope()
             && let Some(row) = header_row(top + 1)
         {
             review::paint_scope_row(
@@ -393,6 +395,7 @@ pub(crate) fn paint_stack_rows(
             );
         }
         if excerpt.empty
+            && !excerpt.collapsed
             && let Some(row) = header_row(top + 1)
         {
             review::paint_note_row(
@@ -581,11 +584,13 @@ fn paint_pinned_header(
     chrome::cover_cells(cover, false, PanelShadow::Cast, scene);
 
     let row = Rect { height: 1, ..inner };
+    let (left, hidden) = excerpt_header(excerpt, buffers, frame);
     paint_header(
         buf,
         row,
         &header_path(&excerpt.rel_path, frame.theme),
-        &excerpt_header_left(excerpt, buffers, frame),
+        &left,
+        hidden,
         frame.theme,
         match scene.live() {
             true => Some(&mut *scene),
@@ -818,23 +823,36 @@ pub(crate) fn kind_tag_text(kind: &FileKind) -> String {
     }
 }
 
-/// The left half of `excerpt`'s File Header, its file's kind as the frame's
-/// tally names it.
+/// The left half of `excerpt`'s File Header and the lines its file hides, with
+/// the file's kind as the frame's tally names it.
 ///
-/// A file with no tally entry reads as modified.
-fn excerpt_header_left(
+/// A file with no tally entry reads as modified. The hidden lines are `None`
+/// for a file that shows its rows.
+fn excerpt_header(
     excerpt: &Excerpt,
     buffers: &BufferRegistry,
     frame: FrameCtx<'_>,
-) -> HeaderLeft {
+) -> (HeaderLeft, Option<u32>) {
     let modified = FileKind::Modified;
     let kind = excerpt.file_kind(frame.tallies).unwrap_or(&modified);
-    header_left(
+    let left = header_left(
         kind,
         diff_changes::excerpt_stats(excerpt, buffers),
         excerpt.empty,
         frame.theme,
-    )
+    );
+    let hidden = excerpt
+        .collapsed
+        .then(|| diff_changes::hidden_lines(excerpt, kind, buffers));
+    (left, hidden)
+}
+
+/// The text a folded File Header counts its `lines` with.
+fn hidden_text(lines: u32) -> String {
+    match lines {
+        1 => "1 line hidden".to_string(),
+        lines => format!("{lines} lines hidden"),
+    }
 }
 
 /// Fill `row` with the raised surface and lay a File Header across it, the
@@ -851,16 +869,23 @@ fn excerpt_header_left(
 /// gap apart. It leaves the old path out, and a tag or a count that does not
 /// fit before the row's right pad takes no place.
 ///
+/// The header of a file folded to it counts the `hidden` lines at the row's
+/// right edge, a pad in. The path stops a gap before the count, and so do the
+/// tag and the counts of a row with no divide. A row too narrow to start the
+/// count at or past the path's start leaves the count out.
+///
 /// With `scene` and colors in RGB, the text draws as runs: the path and the old
-/// path at the Ui scale, the counts at the Caption scale, and the tag at the
-/// Small scale over a rounded box in its background. Otherwise it fills cells.
-/// With `cells` false the row's cells stay as they are, for a page whose cells
-/// the terminal keeps.
+/// path at the Ui scale, the counts and the hidden count at the Caption scale,
+/// and the tag at the Small scale over a rounded box in its background.
+/// Otherwise it fills cells. With `cells` false the row's cells stay as they
+/// are, for a page whose cells the terminal keeps.
+#[allow(clippy::too_many_arguments)]
 fn paint_header(
     buf: &mut Buffer,
     row: Rect,
     path: &[(String, Style)],
     left: &HeaderLeft,
+    hidden: Option<u32>,
     theme: &Theme,
     scene: Option<&mut ApcScene>,
     cells: bool,
@@ -872,14 +897,17 @@ fn paint_header(
         }
     }
 
-    let drawn = scene.is_some_and(|scene| emit_header_runs(row, path, left, theme, buf, scene));
+    let hidden = hidden.map(|lines| (hidden_text(lines), theme.get(scope::UI_TEXT_DISABLED)));
+    let hidden = hidden.as_slice();
+    let drawn =
+        scene.is_some_and(|scene| emit_header_runs(row, path, left, hidden, theme, buf, scene));
     if !drawn && cells {
-        write_header_cells(row, path, left, buf);
+        write_header_cells(row, path, left, hidden, buf);
     }
 }
 
-/// Emit a File Header's `path` and `left` over `row` as runs and a tag box
-/// into `scene`, laid out as [`paint_header`] describes.
+/// Emit a File Header's `path`, `left`, and `hidden` count over `row` as runs
+/// and a tag box into `scene`, laid out as [`paint_header`] describes.
 ///
 /// Emits nothing and answers false where a run's color lies outside RGB. A tag
 /// whose style has no RGB background draws its text alone.
@@ -887,6 +915,7 @@ fn emit_header_runs(
     row: Rect,
     path: &[(String, Style)],
     left: &HeaderLeft,
+    hidden: &[(String, Style)],
     theme: &Theme,
     buf: &mut Buffer,
     scene: &mut ApcScene,
@@ -894,12 +923,20 @@ fn emit_header_runs(
     let rgb = |runs: &[(String, Style)]| -> Option<Vec<[u8; 3]>> {
         runs.iter().map(|(_, style)| style_rgb(style.fg)).collect()
     };
-    let (Some(path_colors), Some(from_colors), Some(count_colors), Some(tag_color)) = (
+    let (
+        Some(path_colors),
+        Some(from_colors),
+        Some(count_colors),
+        Some(tag_color),
+        Some(hidden_colors),
+    ) = (
         rgb(path),
         rgb(&left.from),
         rgb(&left.counts),
         style_rgb(left.tag.1.fg),
-    ) else {
+        rgb(hidden),
+    )
+    else {
         return false;
     };
 
@@ -911,11 +948,23 @@ fn emit_header_runs(
     let advance = |text: &str, scale| text_run::advance_sixteenths(text.chars().count(), scale);
     let width = row.width * 16;
     let divide = header_divide(row);
+    let path_start = divide.map_or(HEADER_PAD, |divide| divide + HEADER_PAD);
 
+    // The text that reads from the left stops at `end`, a gap before the
+    // hidden count where one shows, else at the row's right edge.
     let mut runs = TextRunBatch::default();
-    let mut col = divide.map_or(HEADER_PAD, |divide| divide + HEADER_PAD);
+    let mut end = width;
+    for ((text, style), &color) in hidden.iter().zip(&hidden_colors) {
+        let start = width.saturating_sub(HEADER_PAD + advance(text, caption));
+        if start >= path_start {
+            runs.push(row, header_run(start, text, caption, color, *style));
+            end = start.saturating_sub(HEADER_COUNT_GAP);
+        }
+    }
+
+    let mut col = path_start;
     for ((text, style), &color) in path.iter().zip(&path_colors) {
-        let text = fitting_prefix(text, width.saturating_sub(col), ui);
+        let text = fitting_prefix(text, end.saturating_sub(col), ui);
         if text.is_empty() {
             break;
         }
@@ -980,7 +1029,7 @@ fn emit_header_runs(
             }
         },
         None => {
-            let limit = width.saturating_sub(HEADER_PAD);
+            let limit = end.min(width.saturating_sub(HEADER_PAD));
             let mut col = col + HEADER_COUNT_GAP;
             if col + tag_width <= limit {
                 tag(col, &mut runs);
@@ -1029,18 +1078,35 @@ fn fitting_prefix(text: &str, room: u16, scale: u16) -> &str {
         .map_or(text, |(at, _)| &text[..at])
 }
 
-/// Write a File Header's `path` and `left` into the cells of `row`, laid out
-/// as [`paint_header`] describes, with one cell for each gap.
+/// Write a File Header's `path`, `left`, and `hidden` count into the cells of
+/// `row`, laid out as [`paint_header`] describes, with one cell for each gap.
 ///
 /// The path starts two cells past the divider's column. The left half reads
 /// the old path, the tag's text in its foreground, and the counts, and ends
 /// one cell before the divider's column, the cells nearest the runs' pads. A
-/// left half wider than its room loses the cells left of the row's edge.
-fn write_header_cells(row: Rect, path: &[(String, Style)], left: &HeaderLeft, buf: &mut Buffer) {
+/// left half wider than its room loses the cells left of the row's edge. The
+/// hidden count ends one cell before the row's right edge.
+fn write_header_cells(
+    row: Rect,
+    path: &[(String, Style)],
+    left: &HeaderLeft,
+    hidden: &[(String, Style)],
+    buf: &mut Buffer,
+) {
     let divider = review::diff_divider_x(row);
-    let mut x = divider.map_or(row.x + 1, |divider| divider + 2);
+    let path_start = divider.map_or(row.x + 1, |divider| divider + 2);
+    let mut end = row.right();
+    for (text, style) in hidden {
+        let start = (row.right() - 1).checked_sub(text_width(text) as u16);
+        if let Some(start) = start.filter(|&start| start >= path_start) {
+            write_str(buf, start, row.y, text, *style);
+            end = start - 1;
+        }
+    }
+
+    let mut x = path_start;
     for (text, style) in path {
-        write_str_clipped(buf, x, row.y, text, *style, row.right());
+        write_str_clipped(buf, x, row.y, text, *style, end);
         x = x.saturating_add(text_width(text) as u16);
     }
 
@@ -1052,7 +1118,7 @@ fn write_header_cells(row: Rect, path: &[(String, Style)], left: &HeaderLeft, bu
         },
     );
     let Some(divider) = divider else {
-        let limit = row.right() - 1;
+        let limit = (row.right() - 1).min(end);
         let mut x = x + 1;
         let tag_width = text_width(tag.0) as u16;
         if x + tag_width > limit {
@@ -1561,7 +1627,7 @@ mod tests {
             let mut buf = Buffer::empty(row);
             let path = header_path(path, theme);
             let left = header_left(&FileKind::Modified, stats, false, theme);
-            paint_header(&mut buf, row, &path, &left, theme, None, true);
+            paint_header(&mut buf, row, &path, &left, None, theme, None, true);
             [header_text(&buf, 0, 59, 0), header_text(&buf, 60, 60, 0)]
         };
         let run = |text: &str, style: Style| (text.to_string(), style);
@@ -1631,7 +1697,7 @@ mod tests {
             let mut buf = Buffer::empty(row);
             let path = header_path("src/lib.rs", theme);
             let left = header_left(&FileKind::Modified, stats, false, theme);
-            paint_header(&mut buf, row, &path, &left, theme, None, true);
+            paint_header(&mut buf, row, &path, &left, None, theme, None, true);
             (cells(&buf, 0, width, 0), buf[(1, 0)].symbol().to_string())
         };
 
@@ -1665,7 +1731,7 @@ mod tests {
             let mut buf = Buffer::empty(row);
             let left = header_left(&kind, stats, false, theme);
             let path = header_path("a.rs", theme);
-            paint_header(&mut buf, row, &path, &left, theme, None, true);
+            paint_header(&mut buf, row, &path, &left, None, theme, None, true);
             let (text, start) = header_text(&buf, 0, 59, 0);
             let tag_x =
                 start.expect("a left half") as usize + text.find(&left.tag.0).expect("the tag");
@@ -1883,7 +1949,16 @@ mod tests {
         };
         let left = header_left(&moved, stats, false, theme);
         let path = header_path("a.rs", theme);
-        paint_header(&mut buf, row, &path, &left, theme, Some(&mut scene), true);
+        paint_header(
+            &mut buf,
+            row,
+            &path,
+            &left,
+            None,
+            theme,
+            Some(&mut scene),
+            true,
+        );
 
         let commands = decode_stream(scene.bytes());
         let runs: Vec<(i16, String)> = commands
@@ -1939,7 +2014,16 @@ mod tests {
         };
         let left = header_left(&moved, stats, false, theme);
         let path = header_path("a.rs", theme);
-        paint_header(&mut buf, row, &path, &left, theme, Some(&mut scene), true);
+        paint_header(
+            &mut buf,
+            row,
+            &path,
+            &left,
+            None,
+            theme,
+            Some(&mut scene),
+            true,
+        );
 
         let commands = decode_stream(scene.bytes());
         let mut runs: Vec<(i16, String)> = commands
@@ -1968,6 +2052,188 @@ mod tests {
                     run(828, ".rs"),
                 ],
                 vec![(480, 100)],
+            ),
+        );
+    }
+
+    /// A folded header counts its hidden lines at the row's right edge, ending
+    /// one cell before it in the disabled text color. One line reads `1 line
+    /// hidden`, and a path too long for its room clips one cell before the
+    /// count.
+    #[test]
+    fn a_folded_header_counts_its_hidden_lines_at_its_right_edge() {
+        let h = TestHarness::with_size(40, 4);
+        let theme = &h.stoat.theme;
+        let right = |path: &str, hidden: u32| {
+            let row = Rect::new(0, 0, 120, 1);
+            let mut buf = Buffer::empty(row);
+            let left = header_left(&FileKind::Deleted, ExcerptStats::default(), false, theme);
+            let path = header_path(path, theme);
+            paint_header(&mut buf, row, &path, &left, Some(hidden), theme, None, true);
+            (header_text(&buf, 60, 60, 0), Some(buf[(118, 0)].fg))
+        };
+        let long = "n".repeat(60);
+
+        let disabled = theme.get(scope::UI_TEXT_DISABLED).fg;
+        assert_eq!(
+            [right("a.txt", 148), right("a.txt", 1), right(&long, 148)],
+            [
+                (format!("{:<42}148 lines hidden", "a.txt"), Some(61)),
+                (format!("{:<45}1 line hidden", "a.txt"), Some(61)),
+                (format!("{} 148 lines hidden", &long[..41]), Some(61)),
+            ]
+            .map(|text| (text, disabled)),
+        );
+    }
+
+    /// Under a live scene a folded header's hidden count is a run that ends a
+    /// pad before the row's right edge, in the disabled text color, and the
+    /// path's run stops a gap before it.
+    ///
+    /// The row is 100 wide, so the path starts at 812 sixteenths and the count
+    /// of 16 characters starts 20 plus 256 sixteenths before the edge at 1600.
+    #[test]
+    fn a_live_folded_header_ends_its_hidden_count_a_pad_before_its_edge() {
+        let h = TestHarness::with_size(40, 4);
+        let theme = &h.stoat.theme;
+        let row = Rect::new(0, 0, 100, 1);
+        let mut buf = Buffer::empty(row);
+        let mut scene = ApcScene::new();
+        scene.set_live(true);
+        let left = header_left(&FileKind::Deleted, ExcerptStats::default(), false, theme);
+        let path = header_path(&"n".repeat(60), theme);
+        paint_header(
+            &mut buf,
+            row,
+            &path,
+            &left,
+            Some(148),
+            theme,
+            Some(&mut scene),
+            true,
+        );
+
+        let mut runs: Vec<(i16, String, [u8; 3])> = decode_stream(scene.bytes())
+            .into_iter()
+            .filter_map(|command| match command {
+                Command::TextRun(run) if run.col > 792 => Some((run.col, run.text, run.color)),
+                _ => None,
+            })
+            .collect();
+        runs.sort();
+        let color = |name: &str| paint::style_rgb(theme.get(name).fg).expect("an RGB color");
+        assert_eq!(
+            runs,
+            vec![
+                (812, "n".repeat(31), color(scope::UI_TEXT)),
+                (
+                    1324,
+                    "148 lines hidden".to_string(),
+                    color(scope::UI_TEXT_DISABLED)
+                ),
+            ],
+        );
+    }
+
+    /// A fold of a file through its header repaints the stack, though the pane
+    /// cache held the frame before it. The folded header counts the file's two
+    /// lines at its right edge, and the next file's header shows under it.
+    #[test]
+    fn a_fold_of_a_file_repaints_the_stack() {
+        let mut h = two_files(16);
+        h.stoat.stoatty = false;
+        let inner = {
+            let ws = h.stoat.active_workspace();
+            ws.panes.pane(ws.panes.focus()).area
+        };
+        let divider = review::diff_divider_x(inner).expect("a split stack");
+        let right_half = |h: &mut TestHarness| {
+            let buf = h.render_composited();
+            let width = inner.right() - divider - 1;
+            [inner.y, inner.y + 1].map(|y| header_text(&buf, divider + 1, width, y).0)
+        };
+        right_half(&mut h);
+        let open = right_half(&mut h);
+
+        let (state, editors) = stack(&mut h);
+        diff_changes::toggle_file(state, editors, 0);
+        let pad = usize::from(inner.right() - 1 - 14 - (divider + 2));
+        assert_eq!(
+            (open[0].clone(), right_half(&mut h)),
+            (
+                "a.txt".to_string(),
+                [
+                    format!("{:<pad$}2 lines hidden", "a.txt"),
+                    "b.txt".to_string()
+                ],
+            ),
+        );
+    }
+
+    /// A file folded to its header hides the row under the header with its
+    /// rows, the bare Scope row of a Rust file and the note row of an empty
+    /// file alike, so the stack holds the header alone.
+    #[test]
+    fn a_folded_file_hides_the_row_under_its_header() {
+        let folded = |mut h: TestHarness| {
+            h.stoat.stoatty = false;
+            let (state, editors) = stack(&mut h);
+            let open = diff_changes::header_rows(&state.excerpts[0]);
+            diff_changes::toggle_file(state, editors, 0);
+            let rows = state.rows;
+            let buf = h.render_composited();
+            let inner = {
+                let ws = h.stoat.active_workspace();
+                ws.panes.pane(ws.panes.focus()).area
+            };
+            (
+                open,
+                rows,
+                header_text(&buf, inner.x, inner.width, inner.y + 1).0,
+            )
+        };
+        let scoped = parsed_stack(&[(
+            "a.rs",
+            "fn greet() {\n    let x = 1;\n}\n",
+            "fn greet() {\n    let x = 2;\n}\n",
+        )]);
+
+        assert_eq!(
+            [folded(scoped), folded(untracked_stack(16, 0))],
+            [(2, 1, String::new()), (2, 1, String::new())],
+        );
+    }
+
+    /// A fold of a file that waits on its diff map repaints its header with
+    /// the hidden count, though the pane cache held the frame before it. Such
+    /// a file shows no row either way, so no row of the stack moves.
+    #[test]
+    fn a_fold_of_a_waiting_file_repaints_its_header() {
+        let mut h = two_files(16);
+        h.stoat.stoatty = false;
+        stack(&mut h).0.excerpts[1].folded_version = None;
+        let inner = {
+            let ws = h.stoat.active_workspace();
+            ws.panes.pane(ws.panes.focus()).area
+        };
+        let divider = review::diff_divider_x(inner).expect("a split stack");
+        let header = |h: &mut TestHarness| {
+            let buf = h.render_composited();
+            let top = stack(h).0.excerpts[1].top as u16;
+            let width = inner.right() - divider - 1;
+            header_text(&buf, divider + 1, width, inner.y + top).0
+        };
+        header(&mut h);
+        let open = header(&mut h);
+
+        let (state, editors) = stack(&mut h);
+        diff_changes::toggle_file(state, editors, 1);
+        let pad = usize::from(inner.right() - 1 - 13 - (divider + 2));
+        assert_eq!(
+            (open, header(&mut h)),
+            (
+                "b.txt".to_string(),
+                format!("{:<pad$}1 line hidden", "b.txt")
             ),
         );
     }

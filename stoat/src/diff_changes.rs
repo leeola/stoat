@@ -302,17 +302,28 @@ pub(crate) struct Excerpt {
     /// Whether the file holds no line and has no base, so the stack shows one
     /// note row for it in place of rows. [`refold`] writes it at each cut.
     pub empty: bool,
+    /// Whether the stack shows the file as its header alone, because the
+    /// reader folded it or because the stack opened a deleted file.
+    ///
+    /// A press on the header flips it, and a landing on the file clears it.
+    pub collapsed: bool,
 }
 
 impl Excerpt {
     /// Whether the stack shows rows of the excerpt's editor, the rows a cursor
     /// stands on.
     ///
-    /// An excerpt that waits on its diff map shows none yet, and the excerpt of
-    /// an empty file shows its note row alone, so `j`, `k`, a search, and the
-    /// staging keys pass it.
+    /// An excerpt that waits on its diff map shows none yet, the excerpt of an
+    /// empty file shows its note row alone, and a folded file shows its header
+    /// alone, so `j`, `k`, a search, and the staging keys pass it.
     pub(crate) fn shows_rows(&self) -> bool {
-        self.folded_version.is_some() && !self.empty
+        self.folded_version.is_some() && !self.empty && !self.collapsed
+    }
+
+    /// The Scope that the row under the header shows, which a folded file
+    /// hides with its rows.
+    pub(crate) fn shown_scope(&self) -> Option<&Arc<FoldScope>> {
+        self.scope_row.as_ref().filter(|_| !self.collapsed)
     }
 
     /// The kind `tallies` names for the excerpt's file, or `None` when the
@@ -921,10 +932,11 @@ pub(crate) fn pump_diff_changes_stack(stoat: &mut Stoat) -> bool {
 /// Move the focus of `state` off a cut excerpt that shows no rows, and report
 /// whether it moved.
 ///
-/// The excerpt of an empty file shows its note row alone, so no cursor stands
-/// in it. The focus moves to the nearest excerpt that shows rows, the ones
-/// below it first. An excerpt that waits on its diff map keeps the focus,
-/// since it shows rows once its map lands.
+/// The excerpt of an empty file shows its note row alone, and a folded file
+/// its header alone, so no cursor stands in either. The focus moves to the
+/// nearest excerpt that shows rows, the ones below it first. An excerpt that
+/// waits on its diff map keeps the focus, since it shows rows once its map
+/// lands.
 fn settle_focus(state: &mut DiffChangesState) -> bool {
     let Some(focused) = state.focused_excerpt() else {
         return false;
@@ -943,6 +955,31 @@ fn settle_focus(state: &mut DiffChangesState) -> bool {
     state.focused = index;
     state.held_screen_row = None;
     true
+}
+
+/// Fold excerpt `index` of `state` to its header, or open it when it shows its
+/// header alone, as a press on its File Header does.
+///
+/// A fold of the focused excerpt moves the focus as [`settle_focus`] does. A
+/// header above the view's top, as under a pinned header, scrolls back into
+/// the view's first row, and the scroll stays within the stack's last page.
+pub(crate) fn toggle_file(
+    state: &mut DiffChangesState,
+    editors: &mut SlotMap<EditorId, EditorState>,
+    index: usize,
+) {
+    let Some(excerpt) = state.excerpts.get_mut(index) else {
+        return;
+    };
+    excerpt.collapsed = !excerpt.collapsed;
+    let rows = layout_stack(state, editors);
+    settle_focus(state);
+
+    let top = state.excerpts[index].top;
+    state.scroll = state
+        .scroll
+        .min(top)
+        .min(rows.saturating_sub(state.viewport_rows));
 }
 
 /// Lay the excerpts of `state` out in stack rows, and answer the total.
@@ -968,8 +1005,12 @@ pub(crate) fn layout_stack(
 /// row that [`Excerpt::scope_row`] holds a Scope for.
 ///
 /// The excerpt of an [`Excerpt::empty`] file takes its note row here too, the
-/// one row it shows under its header.
+/// one row it shows under its header. A [`Excerpt::collapsed`] file takes its
+/// header row alone.
 pub(crate) fn header_rows(excerpt: &Excerpt) -> usize {
+    if excerpt.collapsed {
+        return 1;
+    }
     1 + usize::from(excerpt.scope_row.is_some()) + usize::from(excerpt.empty)
 }
 
@@ -1059,8 +1100,8 @@ fn scope_row_at_or_above(
 ) -> Option<(usize, Arc<FoldScope>)> {
     let excerpt = state.excerpts.get(index)?;
     let bare = excerpt
-        .scope_row
-        .clone()
+        .shown_scope()
+        .cloned()
         .map(|scope| (excerpt.top + 1, scope));
     let rows_top = excerpt.top + header_rows(excerpt);
     if row < rows_top {
@@ -1154,6 +1195,23 @@ pub(crate) fn excerpt_stats(excerpt: &Excerpt, buffers: &BufferRegistry) -> Exce
         .diff_map
         .as_ref()
         .map_or_else(ExcerptStats::default, ExcerptStats::of)
+}
+
+/// The lines that a folded `excerpt` of a file of `kind` hides, which its File
+/// Header counts.
+///
+/// A deleted file hides the old text that its diff removes. Any other file
+/// hides its buffer's lines.
+pub(crate) fn hidden_lines(excerpt: &Excerpt, kind: &FileKind, buffers: &BufferRegistry) -> u32 {
+    if matches!(kind, FileKind::Deleted) {
+        return excerpt_stats(excerpt, buffers).removed;
+    }
+    let Some(buffer) = buffers.get(excerpt.buffer_id) else {
+        return 0;
+    };
+    let buffer = buffer.read().expect("buffer poisoned");
+    let rope = buffer.rope();
+    fold_lines(rope, &(0..rope.max_point().row + 1))
 }
 
 /// Whether the file of `excerpt` has no base, so its first row reads `no base`
@@ -2220,6 +2278,7 @@ fn open_excerpt(
     let opened_version = buffer.read().expect("buffer poisoned").version();
     let executor = stoat.executor.clone();
     let ws = stoat.active_workspace_mut();
+    let collapsed = opens_collapsed(ws, &rel_path);
     let mut editor = ws.seeded_editor(buffer_id, buffer, executor);
     editor.set_diff_view(true);
     let editor_id = ws.editors.insert(editor);
@@ -2239,7 +2298,15 @@ fn open_excerpt(
         reloaded: false,
         revealed: Vec::new(),
         empty: false,
+        collapsed,
     })
+}
+
+/// Whether a new excerpt of the file at `rel_path` starts folded to its
+/// header, as the excerpt of a file that `ws`'s tally names deleted does.
+fn opens_collapsed(ws: &Workspace, rel_path: &str) -> bool {
+    ws.file_change(Path::new(rel_path))
+        .is_some_and(|change| matches!(change.kind, FileKind::Deleted))
 }
 
 /// Add the excerpt of the file at `rel_path` to changes view `id` of the
@@ -2269,6 +2336,7 @@ pub(crate) fn adopt_excerpt(
     let opened_version = buffer.read().expect("buffer poisoned").version();
     let executor = stoat.executor.clone();
     let ws = stoat.active_workspace_mut();
+    let collapsed = opens_collapsed(ws, &rel_path);
     let mut editor = ws.seeded_editor(buffer_id, buffer, executor);
     editor.set_diff_view(true);
     let editor_id = ws.editors.insert(editor);
@@ -2300,6 +2368,7 @@ pub(crate) fn adopt_excerpt(
             reloaded: false,
             revealed: Vec::new(),
             empty: false,
+            collapsed,
         },
     );
     tracing::debug!(
@@ -2489,7 +2558,9 @@ fn land_pending(ws: &mut Workspace) -> bool {
 ///
 /// The excerpt of an [`Excerpt::empty`] file has no line for the cursor, so a
 /// landing there focuses it, scrolls its header's row into the view, and
-/// places no cursor.
+/// places no cursor. A landing on a [`Excerpt::collapsed`] file opens it
+/// first. A landing whose file the stack lacks falls on the first excerpt and
+/// opens nothing, so a deleted file that sorts first stays folded.
 fn land(
     state: &mut DiffChangesState,
     editors: &mut SlotMap<EditorId, EditorState>,
@@ -2507,13 +2578,19 @@ fn land(
         None if !settled => return false,
         None => (0, 0, 0, None),
     };
-    let Some(excerpt) = state.excerpts.get(index) else {
+    let Some(excerpt) = state.excerpts.get_mut(index) else {
         state.pending_landing = None;
         return true;
     };
     if excerpt.folded_version.is_none() {
         return false;
     }
+    if excerpt.collapsed && target.is_some() {
+        excerpt.collapsed = false;
+        layout_stack(state, editors);
+    }
+
+    let excerpt = &state.excerpts[index];
     if excerpt.empty {
         state.focused = index;
         state.pending_landing = None;
@@ -3271,10 +3348,11 @@ fn map_version(buffers: &BufferRegistry, id: BufferId) -> Option<usize> {
 mod tests {
     use super::{
         cursor_point, cursor_stack_row, excerpt_rows, expand_from_cursor, fold_edge, fold_excerpt,
-        follow_cursor, gap_fold, gaps, header_rows, kept_rows, kept_runs, landing_row,
-        layout_stack, listed_files, place_cursor, press_cell, pump_diff_changes_stack,
-        reveal_cursor, reveal_rows, scope_parts, select_row, DiffChangesState, Excerpt,
-        ExcerptStats, ExpandDir, FoldEdge, Landing, ScopeParse, ScopePart, ScopeRole, StackStamp,
+        follow_cursor, gap_fold, gaps, header_rows, hidden_lines, kept_rows, kept_runs,
+        landing_row, layout_stack, listed_files, place_cursor, press_cell, pump_diff_changes_stack,
+        reveal_cursor, reveal_rows, scope_parts, select_row, toggle_file, DiffChangesState,
+        Excerpt, ExcerptStats, ExpandDir, FoldEdge, Landing, ScopeParse, ScopePart, ScopeRole,
+        StackStamp,
     };
     use crate::{
         action_handlers::dispatch,
@@ -3284,7 +3362,7 @@ mod tests {
         diff_map::{DiffHunk, DiffHunkStatus, DiffMap, TokenDetail},
         display_map::{DisplayPoint, FoldEnd, FoldScope, InlayPoint, ScopeMark},
         editor_state::{EditorId, EditorState},
-        host::{DiffStatus, FakeRepoBuilder},
+        host::{git::FileKind, DiffStatus, FakeRepoBuilder},
         test_harness::TestHarness,
         theme::FULL_CELL_SCALE,
         workspace::{
@@ -4243,6 +4321,126 @@ fn hint_width() -> u32 {
                 ("b.txt".to_string(), true, 2, 0),
                 "c.txt".to_string(),
                 "c.txt".to_string()
+            ),
+        );
+    }
+
+    /// A deleted file opens folded to its header, which counts the lines of its
+    /// old text, and a focus that starts on it moves to the modified file
+    /// beside it at the next pump.
+    #[test]
+    fn a_deleted_file_opens_folded_to_its_header() {
+        let mut h = TestHarness::with_size(100, 24);
+        h.stage_review_scenario("/repo", &[("b.txt", "b\n", "B\n")]);
+        repo(&mut h).deleted("a.txt", "one\ntwo\nthree\n");
+        stacked(&mut h);
+
+        let folded = with_stack(&mut h, |state, editors| {
+            let excerpt = &state.excerpts[0];
+            let shape = (
+                excerpt.rel_path.clone(),
+                header_rows(excerpt),
+                excerpt_rows(excerpt, editors),
+            );
+            state.focused = 0;
+            shape
+        });
+        pump_diff_changes_stack(&mut h.stoat);
+        let hidden = {
+            let ws = h.stoat.active_workspace();
+            let state = ws.focused_diff_changes().expect("a changes view");
+            hidden_lines(&state.excerpts[0], &FileKind::Deleted, &ws.buffers)
+        };
+
+        assert_eq!(
+            (folded, focus(&mut h).0, hidden),
+            (("a.txt".to_string(), 1, 0), "b.txt".to_string(), 3),
+        );
+    }
+
+    /// A folded file is no stop for `j`, which steps from the last row of the
+    /// file above it to the first row of the file below it.
+    #[test]
+    fn a_folded_file_is_no_stop_for_a_row_walk() {
+        let mut h = TestHarness::with_size(100, 24);
+        h.stage_review_scenario(
+            "/repo",
+            &[
+                ("a.txt", "a\n", "A\n"),
+                ("b.txt", "b\n", "B\n"),
+                ("c.txt", "c\n", "C\n"),
+            ],
+        );
+        stacked(&mut h);
+        with_stack(&mut h, |state, editors| {
+            toggle_file(state, editors, 1);
+            state.focused = 0;
+            place_cursor(&mut editors[state.excerpts[0].editor_id], Point::new(1, 0));
+        });
+
+        h.type_keys("j");
+        assert_eq!(focus(&mut h), ("c.txt".to_string(), 0));
+    }
+
+    /// A landing on a folded file opens it, so the file shows its rows again,
+    /// and its cursor takes the landing's row.
+    #[test]
+    fn a_landing_on_a_folded_file_opens_it() {
+        let mut h = TestHarness::with_size(100, 24);
+        h.stage_review_scenario("/repo", &[("a.txt", "a\n", "A\n"), ("b.txt", "b\n", "B\n")]);
+        stacked(&mut h);
+        let (shown, folded) = with_stack(&mut h, |state, editors| {
+            let shown = excerpt_rows(&state.excerpts[1], editors);
+            toggle_file(state, editors, 1);
+            state.pending_landing = Some(Landing {
+                buffer_id: state.excerpts[1].buffer_id,
+                rel_path: "b.txt".to_string(),
+                row: 0,
+                column: 0,
+                screen_row: None,
+            });
+            (shown, excerpt_rows(&state.excerpts[1], editors))
+        });
+
+        pump_diff_changes_stack(&mut h.stoat);
+        let opened = with_stack(&mut h, |state, editors| {
+            excerpt_rows(&state.excerpts[1], editors)
+        });
+        assert_eq!(
+            (folded, opened, focus(&mut h)),
+            (0, shown, ("b.txt".to_string(), 0)),
+            "b.txt shows {shown} rows open",
+        );
+    }
+
+    /// A landing on a file outside the stack falls on the first file and opens
+    /// nothing, so a deleted file that sorts first stays folded, and the focus
+    /// moves on to the file below it.
+    #[test]
+    fn a_landing_outside_the_stack_leaves_a_deleted_first_file_folded() {
+        let mut h = TestHarness::with_size(100, 24);
+        h.stage_review_scenario("/repo", &[("b.txt", "b\n", "B\n")]);
+        repo(&mut h)
+            .deleted("a.txt", "one\n")
+            .head_file("d.txt", "same\n");
+        h.fake_fs().insert_file(Path::new("/repo/d.txt"), b"same\n");
+        h.open_file(Path::new("/repo/d.txt"));
+        dispatch(&mut h.stoat, &DiffChanges);
+        h.settle();
+
+        let folds = with_stack(&mut h, |state, _| {
+            state
+                .excerpts
+                .iter()
+                .map(|excerpt| (excerpt.rel_path.clone(), excerpt.collapsed))
+                .collect::<Vec<_>>()
+        });
+        let fold = |path: &str, collapsed| (path.to_string(), collapsed);
+        assert_eq!(
+            (folds, focus(&mut h).0),
+            (
+                vec![fold("a.txt", true), fold("b.txt", false)],
+                "b.txt".to_string()
             ),
         );
     }
