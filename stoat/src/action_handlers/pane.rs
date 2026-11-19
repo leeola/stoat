@@ -450,10 +450,10 @@ pub(crate) fn dispose_view(
         // view alone, so it goes too, as a list's does. The excerpts' editors
         // go with it, and the buffers the stack opened wait for its pump.
         View::DiffChanges(id) => {
-            let Some(state) = ws.diff_changes_views.remove(id) else {
+            let Some(mut state) = ws.diff_changes_views.remove(id) else {
                 return;
             };
-            crate::diff_changes::dispose_excerpts(ws, state.excerpts);
+            crate::diff_changes::dispose_excerpts(ws, state.drain_excerpts());
             match state.covered {
                 Some(View::Agent(term_id) | View::Terminal(term_id)) if ws.term_shown(term_id) => {
                 },

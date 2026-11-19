@@ -2279,13 +2279,16 @@ impl Workspace {
                     }
                 },
                 // An excerpt's diff map has to follow its buffer's edits and
-                // stages, since the excerpt refolds when the map moves.
+                // stages, since the excerpt refolds when the map moves. A
+                // dropped excerpt's map follows the undo that lists its file
+                // again.
                 View::DiffChanges(id) => {
-                    let excerpts = self
-                        .diff_changes_views
-                        .get(id)
-                        .map_or(&[][..], |state| &state.excerpts);
-                    for excerpt in excerpts {
+                    let state = self.diff_changes_views.get(id);
+                    let excerpts = state.map_or(&[][..], |state| &state.excerpts);
+                    let dropped = state
+                        .and_then(|state| state.dropped.as_ref())
+                        .map(|dropped| &dropped.excerpt);
+                    for excerpt in excerpts.iter().chain(dropped) {
                         if !visible.contains(&excerpt.buffer_id) {
                             visible.push(excerpt.buffer_id);
                         }

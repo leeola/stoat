@@ -97,9 +97,10 @@ pub(super) fn close_changes_view(stoat: &mut Stoat, to_covered_diff: bool) -> Up
 
     let ws = stoat.active_workspace_mut();
     let focus = ws.panes.focus();
-    let Some(state) = take_down(ws, focus) else {
+    let Some(mut state) = take_down(ws, focus) else {
         return UpdateEffect::None;
     };
+    let excerpts = state.drain_excerpts();
     let (covered, covered_diff) = (state.covered, state.covered_diff && to_covered_diff);
     match landing {
         Some(landing) => {
@@ -108,10 +109,10 @@ pub(super) fn close_changes_view(stoat: &mut Stoat, to_covered_diff: bool) -> Up
             }
             // After the landing, so the pane's editor holds the landed buffer
             // and the release leaves it open.
-            diff_changes::release_excerpts(stoat, state.excerpts);
+            diff_changes::release_excerpts(stoat, excerpts);
         },
         None => {
-            diff_changes::release_excerpts(stoat, state.excerpts);
+            diff_changes::release_excerpts(stoat, excerpts);
             put_back_covered(stoat, focus, covered, covered_diff);
         },
     }
@@ -181,8 +182,8 @@ fn park_diff_changes(stoat: &mut Stoat) {
     state.covered_diff = false;
     state.pending_landing = None;
     state.held_screen_row = None;
-    if let Some(displaced) = ws.parked_diff_changes.replace(state) {
-        diff_changes::release_excerpts(stoat, displaced.excerpts);
+    if let Some(mut displaced) = ws.parked_diff_changes.replace(state) {
+        diff_changes::release_excerpts(stoat, displaced.drain_excerpts());
     }
     put_back_covered(stoat, focus, covered, false);
     tracing::info!(
@@ -238,10 +239,10 @@ pub(crate) fn close_diff_changes_for_open(
     executor: &Executor,
     pane_id: PaneId,
 ) {
-    let Some(state) = take_down(ws, pane_id) else {
+    let Some(mut state) = take_down(ws, pane_id) else {
         return;
     };
-    diff_changes::dispose_excerpts(ws, state.excerpts);
+    diff_changes::dispose_excerpts(ws, state.drain_excerpts());
     let view = state
         .covered
         .filter(|view| pane::view_is_live(ws, Some(view)))

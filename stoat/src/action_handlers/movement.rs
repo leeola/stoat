@@ -2353,7 +2353,9 @@ where
     F: Fn(&mut crate::buffer::TextBuffer) -> Option<Arc<[Selection<Anchor>]>>,
 {
     let ws = stoat.active_workspace_mut();
-    let Some((editor_id, buffer_id)) = pane_editor_ids(ws) else {
+    let Some((editor_id, buffer_id)) =
+        crate::diff_changes::history_target(ws).or_else(|| pane_editor_ids(ws))
+    else {
         return UpdateEffect::None;
     };
 
