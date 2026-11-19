@@ -9,14 +9,14 @@ use crate::{
     diff_map::MarkKind,
     display_map::FoldScope,
     editor_state::{EditorId, EditorState},
-    host::git::{FileKind, HunkTallies},
+    host::git::FileKind,
     minimap::RAIL_MAX_COLUMNS,
     pane::{Divider, DividerOrientation, FocusTarget, Pane, PaneTree, Placement, View},
     render::{
         blame::{BlameLines, BlamePaint},
         chrome, commits,
         conflict_view::ConflictLayout,
-        diff_changes,
+        diff_changes::{self, MergeNote},
         editor::{editor_cursor_position, render_editor_with_overlay, split_minimap_strip},
         paint::{dim_rgb, floor_rgb, luma, style_rgb, FAINT_CONTRAST_FLOOR},
         popout::{
@@ -2773,8 +2773,9 @@ struct DiffMetrics {
 
 /// The git metrics of the diff that `view` shows.
 ///
-/// A changes view names its base, counts its files as [`stack_counts`] does,
-/// and names the hunk at the cursor. A per-file diff names its base, its
+/// A changes view names its base, then during a merge the branch the merge
+/// brings in, counts its files as [`stack_counts`] does, and names the hunk at
+/// the cursor. A per-file diff names its base, its
 /// screen's kind, and the hunk at the cursor. A per-file diff of a file that
 /// the tally names moved, untracked, new, or deleted names the kind in a File
 /// Kind Tag in place of the screen's, as [`kind_metrics`] reads it.
@@ -2805,8 +2806,14 @@ fn diff_metrics(
 
     if let View::DiffChanges(id) = view {
         let mut parts = vec![format!("vs {base}")];
+        parts.extend(
+            frame
+                .repo
+                .and_then(|repo| repo.merge_head.as_deref())
+                .map(|name| format!("merging {name}")),
+        );
         let (added, removed) = changes.get(*id).map_or((0, 0), |state| {
-            parts.extend(stack_counts(state, frame.tallies));
+            parts.extend(stack_counts(state, frame));
             state.line_counts(buffers)
         });
         parts.extend(hunk);
@@ -2871,14 +2878,27 @@ fn diff_metrics(
 /// lists, each for a count above zero.
 ///
 /// The parts count every file, then the moved files, the new files, and the
-/// deleted files, then the files folded to their headers. An untracked file
-/// counts as new. The kinds read `tallies`, so a file listed for an unsaved
-/// edit alone counts as a file and under no kind.
-fn stack_counts(state: &DiffChangesState, tallies: Option<&HunkTallies>) -> Vec<String> {
+/// deleted files, then during a merge the unmerged files and their conflict
+/// blocks, then the files folded to their headers. An untracked file counts as
+/// new. The kinds read the frame's tally, so a file listed for an unsaved edit
+/// alone counts as a file and under no kind.
+///
+/// During a merge a file reads as [`diff_changes::merge_note`] classifies it
+/// for its File Header. A new file that the merge brought counts under no
+/// kind, since the merge's own files are not the reader's changes.
+fn stack_counts(state: &DiffChangesState, frame: FrameCtx<'_>) -> Vec<String> {
     let (mut moved, mut new, mut deleted) = (0, 0, 0);
+    let (mut conflicted, mut conflicts) = (0, 0);
     for excerpt in &state.excerpts {
-        match excerpt.file_kind(tallies) {
+        let note = diff_changes::merge_note(excerpt, frame);
+        if let Some(MergeNote::Conflict { count, .. }) = note {
+            conflicted += 1;
+            conflicts += count as usize;
+        }
+        let from_merge = matches!(note, Some(MergeNote::FromBranch(_)));
+        match excerpt.file_kind(frame.tallies) {
             Some(FileKind::Moved { .. }) => moved += 1,
+            Some(FileKind::New) if from_merge => {},
             Some(FileKind::Untracked | FileKind::New) => new += 1,
             Some(FileKind::Deleted) => deleted += 1,
             Some(FileKind::Modified) | None => {},
@@ -2892,11 +2912,18 @@ fn stack_counts(state: &DiffChangesState, tallies: Option<&HunkTallies>) -> Vec<
 
     let files = state.excerpts.len();
     let noun = if files == 1 { "file" } else { "files" };
+    let conflict_noun = if conflicts == 1 {
+        "conflict"
+    } else {
+        "conflicts"
+    };
     [
         (files, noun),
         (moved, "moved"),
         (new, "new"),
         (deleted, "deleted"),
+        (conflicted, "conflicted"),
+        (conflicts, conflict_noun),
         (collapsed, "collapsed"),
     ]
     .into_iter()
@@ -6256,6 +6283,43 @@ mod tests {
         assert_eq!(
             row.split_whitespace().collect::<Vec<_>>().join(" "),
             format!("{lead} \u{b7} hunk 1 / 3 +2 \u{2212}2 NOR repo a.txt 1:1"),
+        );
+    }
+
+    /// During a merge a changes view's status row names the merge after its
+    /// base, and counts the unmerged files and their conflict blocks after its
+    /// files. A new file that the merge brought counts as a file and under no
+    /// kind.
+    #[test]
+    fn a_changes_view_s_status_row_names_the_merge() {
+        let block = |n: u32| format!("<<<<<<< HEAD\nours {n}\n=======\ntheirs {n}\n>>>>>>> main\n");
+        let mut h = crate::test_harness::TestHarness::with_size(200, 12);
+        h.stoat.set_diff_warm_auto(true);
+        h.stoat.active_workspace_mut().git_root = PathBuf::from("/repo");
+        h.fake_git()
+            .add_repo("/repo")
+            .with_fs(h.fake_fs())
+            .merge_in_progress("f00dfeed", Some("main"), "Merge branch 'main'")
+            .modified("a.txt", "x\n", &format!("{}x\n{}", block(1), block(2)))
+            .conflicted_file("a.txt", Some("x\n"), Some("ours\n"), Some("theirs\n"))
+            .modified("b.txt", "y\n", &format!("{}y\n", block(3)))
+            .conflicted_file("b.txt", Some("y\n"), Some("ours\n"), Some("theirs\n"))
+            .head_file("c.txt", "c\n")
+            .staged_file("c.txt", "C\n")
+            .staged_file("d.txt", "d\n");
+        h.stoat
+            .active_workspace_mut()
+            .set_worktree_base(WorktreeBase::Head);
+        h.open_file(Path::new("/repo/a.txt"));
+        h.cover_with_diff_changes(false);
+        h.settle_diff_jobs();
+
+        let row = bar_row(&h.render_composited()).replace('─', " ");
+        let lead =
+            "vs HEAD \u{b7} merging main \u{b7} 4 files \u{b7} 2 conflicted \u{b7} 3 conflicts";
+        assert_eq!(
+            row.split_whitespace().collect::<Vec<_>>().join(" "),
+            format!("{lead} \u{b7} hunk 1 / 5 +17 \u{2212}1 NOR repo a.txt 1:1"),
         );
     }
 
