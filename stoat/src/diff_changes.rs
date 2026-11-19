@@ -2653,10 +2653,14 @@ fn drop_excerpt(stoat: &mut Stoat, excerpt: Excerpt) {
 /// [`landing_row`], unless a landing waits on its file.
 ///
 /// A later cut keeps the cursor's row open where [`reveal_row`] holds it, if
-/// the cursor held a row before the cut or the reader's own edit in the
-/// focused excerpt hid the row. Any other hold moves the cursor to a shown row
-/// by [`landing_row`], because a diff that a base change or a reload moved
-/// under the cursor leaves a hold that the reader did not ask for.
+/// the cursor held a row before the cut or the reader's insert-mode edit in
+/// the focused excerpt hid the row. An edit outside insert mode that hid the
+/// row moves the cursor to the next change of the file, which is the first
+/// hunk start below its row, else the last one above. With no hunk left the
+/// cursor stays, and the stack drops the excerpt. Any other hold moves the
+/// cursor to a shown row by [`landing_row`], because a diff that a base change
+/// or a reload moved under the cursor leaves a hold that the reader did not
+/// ask for.
 fn refold(ws: &mut Workspace) -> bool {
     let cache = ws.diff_tree_cache();
     let Workspace {
@@ -2685,14 +2689,13 @@ fn refold(ws: &mut Workspace) -> bool {
             // A first cut comes before the cursor is placed, so no cursor holds
             // a row open yet.
             let first = excerpt.folded_version.is_none();
+            let insert = editor.mode == "insert";
             let hold = match first {
                 true => None,
-                false => {
-                    let insert = editor.mode == "insert";
-                    reveal_row(editor, insert, &excerpt.revealed)
-                },
+                false => reveal_row(editor, insert, &excerpt.revealed),
             };
-            let typed = index == focused && text != Some(excerpt.cut_text) && !excerpt.reloaded;
+            let edited = index == focused && text != Some(excerpt.cut_text) && !excerpt.reloaded;
+            let typed = edited && insert;
             let cursor = hold.filter(|_| excerpt.cursor_held || typed);
             let parse = ScopeParse::of(buffers, excerpt.buffer_id, &cache);
             let Some((folded, kept, _)) = fold_excerpt(
@@ -2733,8 +2736,18 @@ fn refold(ws: &mut Workspace) -> bool {
                 place_cursor(editor, Point::new(landing_row(&kept, row), 0));
             }
             if hold.is_some() && cursor.is_none() {
-                let row = landing_row(&kept, cursor_point(editor).row);
-                place_cursor(editor, Point::new(row, 0));
+                let row = cursor_point(editor).row;
+                let target = match edited {
+                    true => {
+                        let starts = hunk_starts(editor);
+                        let below = starts.iter().copied().find(|&start| start > row);
+                        below.or(starts.last().copied())
+                    },
+                    false => Some(landing_row(&kept, row)),
+                };
+                if let Some(target) = target {
+                    place_cursor(editor, Point::new(target, 0));
+                }
             }
         }
     }
@@ -5257,22 +5270,24 @@ fn hint_width() -> u32 {
         assert_eq!(focus(&mut h), at("e.txt", 22));
     }
 
-    /// The reader's own edit that takes the hunk around the cursor keeps the
-    /// cursor's row open.
+    /// The reader's own insert-mode edit that takes the hunk around the cursor
+    /// keeps the cursor's row open.
     #[test]
-    fn an_edit_that_hides_the_cursor_row_keeps_the_row_open() {
+    fn an_insert_edit_that_hides_the_cursor_row_keeps_the_row_open() {
         let mut h = work_row_stack(&["e.txt"]);
+        excerpt_editor(&mut h, "e.txt").mode = "insert".into();
         replace_first(&mut h, "e.txt", "work", "l0");
         settle_cut(&mut h);
         assert_eq!(focus(&mut h), at("e.txt", 2));
     }
 
     /// A later cut that no edit of the reader's moves keeps the hold that the
-    /// reader's edit took, because the excerpt carries the hold.
+    /// reader's insert-mode edit took, because the excerpt carries the hold.
     #[test]
-    fn an_edit_hold_lasts_through_a_base_switch() {
+    fn an_insert_edit_hold_lasts_through_a_base_switch() {
         let mut h = index_stack(&[(25, "staged")], &[(0, "work"), (25, "work")]);
         place_cursor(excerpt_editor(&mut h, "e.txt"), Point::new(2, 0));
+        excerpt_editor(&mut h, "e.txt").mode = "insert".into();
         replace_first(&mut h, "e.txt", "work", "l0");
         settle_cut(&mut h);
         let edited = focus(&mut h);
@@ -5302,13 +5317,14 @@ fn hint_width() -> u32 {
     }
 
     /// In a file with a grammar the parse of an edit lands before its diff
-    /// map, and the cut that the parse moves leaves the edit for the cut of
-    /// the diff map to see.
+    /// map, and the cut that the parse moves leaves the insert-mode edit for
+    /// the cut of the diff map to see.
     #[test]
-    fn an_edit_that_hides_the_cursor_row_keeps_it_open_past_the_parse() {
+    fn an_insert_edit_that_hides_the_cursor_row_keeps_it_open_past_the_parse() {
         let mut h = work_row_stack(&["e.rs"]);
         land_parse(&mut h);
         let before = cut_from(&h, "e.rs");
+        excerpt_editor(&mut h, "e.rs").mode = "insert".into();
         replace_first(&mut h, "e.rs", "work", "l0");
         land_parse(&mut h);
         let parsed = cut_from(&h, "e.rs");
@@ -5578,6 +5594,60 @@ fn hint_width() -> u32 {
             survivors(&before, &cut(&mut h)),
             [(true, 0..7), (false, 14..47), (true, 54..61)],
         );
+    }
+
+    /// The focused excerpt's editor.
+    fn focused_editor(h: &mut TestHarness) -> &mut EditorState {
+        let ws = h.stoat.active_workspace_mut();
+        let editor_id = ws
+            .focused_diff_changes()
+            .and_then(|state| state.focused_excerpt())
+            .expect("a focused excerpt")
+            .editor_id;
+        ws.editors.get_mut(editor_id).expect("an editor")
+    }
+
+    /// A normal-mode edit that takes the change under the cursor folds that
+    /// change's rows, and the cursor lands on the next change below.
+    #[test]
+    fn a_revert_under_the_cursor_lands_on_the_next_change() {
+        let mut h = three_hunk_stack();
+        let before = cut(&mut h);
+        place_cursor(focused_editor(&mut h), Point::new(30, 0));
+
+        edit(&mut h, "THIRTY-ONE", "31");
+        assert_eq!(
+            (focus(&mut h), survivors(&before, &cut(&mut h))),
+            (
+                at("a.txt", 50),
+                vec![(true, 0..7), (false, 14..47), (true, 54..61)]
+            ),
+        );
+    }
+
+    #[test]
+    fn a_revert_of_the_last_change_lands_on_the_change_above() {
+        let mut h = three_hunk_stack();
+        place_cursor(focused_editor(&mut h), Point::new(50, 0));
+
+        edit(&mut h, "FIFTY-ONE", "51");
+        assert_eq!(focus(&mut h), at("a.txt", 30));
+    }
+
+    /// Insert mode keeps the row that its edit hid open, so the keys typed
+    /// next land where the cursor stands.
+    #[test]
+    fn an_insert_mode_revert_keeps_its_row_open() {
+        let mut h = three_hunk_stack();
+        focused_editor(&mut h).mode = "insert".into();
+        place_cursor(focused_editor(&mut h), Point::new(30, 0));
+
+        edit(&mut h, "THIRTY-ONE", "31");
+        let open = cut(&mut h)
+            .folds
+            .iter()
+            .all(|(_, rows)| !rows.contains(&30));
+        assert_eq!((focus(&mut h), open), (at("a.txt", 30), true));
     }
 
     /// A row added inside a hunk moves the folds below it a row down, and every
