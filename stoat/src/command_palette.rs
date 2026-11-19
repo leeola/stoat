@@ -1843,7 +1843,10 @@ mod tests {
 
     #[test]
     fn case_insensitive_filter() {
-        assert_eq!(names_for("quit"), vec!["quit", "quit-all", "write-quit"]);
+        assert_eq!(
+            names_for("quit"),
+            vec!["quit", "quit-all", "force-quit", "write-quit"]
+        );
     }
 
     #[test]
@@ -1860,8 +1863,8 @@ mod tests {
             &mut match_indices,
             &mut selected,
         );
-        assert_eq!(filtered.len(), 3);
-        assert_eq!(selected, 2);
+        assert_eq!(filtered.len(), 4);
+        assert_eq!(selected, 3);
     }
 
     #[test]

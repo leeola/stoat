@@ -1890,7 +1890,7 @@ on key {
     # `+buffer`, and needs none.
     mode == space {
         Escape -> SetMode(normal);
-        q -> Quit() "quit";
+        q -> [Quit(), SetMode(normal)] "quit";
         a -> SetMode(space_pane_nav);
         t -> [OpenRun()] "run";
         c -> [SpawnClaude(), SetMode(normal)] "claude";

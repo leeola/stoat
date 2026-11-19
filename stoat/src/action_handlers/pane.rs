@@ -304,6 +304,75 @@ pub(super) fn quit_pane(stoat: &mut Stoat, id: PaneId) -> bool {
     quit
 }
 
+/// Close `id` as [`quit_pane`] closes it, or exit when it is the last pane.
+///
+/// Without `force`, the last pane does not exit while a buffer in any workspace
+/// holds unsaved edits, since the exit ends every workspace. The status names
+/// those buffers instead. A pane that shows a clean buffer switches to the
+/// first unsaved buffer of the active workspace, so the edits come into view.
+pub(super) fn quit_or_exit(stoat: &mut Stoat, id: PaneId, force: bool) -> UpdateEffect {
+    if quit_pane(stoat, id) {
+        return UpdateEffect::Redraw;
+    }
+    if force {
+        return UpdateEffect::Quit;
+    }
+
+    let unsaved: Vec<String> = stoat
+        .workspaces
+        .values()
+        .flat_map(|ws| ws.buffers.dirty_buffers())
+        .map(|buffer| match buffer.path {
+            Some(path) => super::file::display_name(&path),
+            None => "<scratch>".to_string(),
+        })
+        .collect();
+    if unsaved.is_empty() {
+        return UpdateEffect::Quit;
+    }
+
+    show_first_unsaved(stoat, id);
+    stoat.set_status(format!(
+        "{} unsaved buffer{} remaining: {}",
+        unsaved.len(),
+        if unsaved.len() == 1 { "" } else { "s" },
+        unsaved.join(", ")
+    ));
+    UpdateEffect::Redraw
+}
+
+/// Switch `id` to the first buffer of the active workspace with unsaved edits,
+/// when the pane shows a clean buffer.
+///
+/// A pane that shows unsaved edits already, or shows no editor, stays as it
+/// is. The switch reverses with a backward jump.
+fn show_first_unsaved(stoat: &mut Stoat, id: PaneId) {
+    let workspace = stoat.active_workspace;
+    let first = {
+        let ws = &stoat.workspaces[workspace];
+        let View::Editor(editor) = ws.panes.pane(id).view else {
+            return;
+        };
+        let Some(shown) = ws.editors.get(editor).map(|editor| editor.buffer_id) else {
+            return;
+        };
+        let unsaved = ws.buffers.dirty_buffers();
+        if unsaved.iter().any(|buffer| buffer.id == shown) {
+            return;
+        }
+        unsaved
+            .first()
+            .and_then(|buffer| Some((buffer.id, ws.buffers.get(buffer.id)?)))
+    };
+    let Some((buffer_id, buffer)) = first else {
+        return;
+    };
+
+    let executor = stoat.executor.clone();
+    super::jump::record_pane_switch(stoat, workspace, id, buffer_id);
+    buffer_lifecycle::show_buffer_in_pane(stoat, workspace, id, buffer_id, buffer, executor);
+}
+
 /// What to do with the editor behind a closing [`View::Editor`].
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum EditorDisposal {

@@ -10,9 +10,20 @@ define_action!(
     "Quit",
     ActionKind::Quit,
     "close pane or exit",
-    "Close the focused pane, or return it to the shell it covers. Exit the application when it is the last pane and covers no shell.",
+    "Close the focused pane, or return it to the shell it covers. Exit the application when it is the last pane and covers no shell. While a buffer in any workspace holds unsaved edits, the last pane does not exit, and the status names those buffers. A pane that shows a clean buffer switches to the first unsaved buffer of the active workspace. quit! exits and discards the edits.",
     ActionPriority::Common,
     aliases = &["q"]
+);
+
+define_action!(
+    ForceQuitDef,
+    ForceQuit,
+    "ForceQuit",
+    ActionKind::ForceQuit,
+    "close pane or exit, discarding unsaved edits",
+    "Close the focused pane or exit as Quit does. On the last pane, exit over the unsaved edits that Quit refuses over, and discard them, as w! is to w.",
+    ActionPriority::Common,
+    aliases = &["q!", "quit!"]
 );
 
 define_action!(

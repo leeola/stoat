@@ -19,6 +19,7 @@ macro_rules! action_kinds {
 
 action_kinds! {
     Quit,
+    ForceQuit,
     QuitAll,
     QuitAllConfirm,
     QuitAllCancel,

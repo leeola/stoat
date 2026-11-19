@@ -1,7 +1,9 @@
 use crate::{
     defs::{
         agent::SpawnClaude,
-        app::{OpenLogs, PinMode, Quit, QuitAll, QuitAllCancel, QuitAllConfirm, ShowVersion},
+        app::{
+            ForceQuit, OpenLogs, PinMode, Quit, QuitAll, QuitAllCancel, QuitAllConfirm, ShowVersion,
+        },
         blame::{
             BlameCard, BlameCardClose, BlameCheckout, BlameCopySha, BlameParent, BlamePreview,
             CheckoutConfirmAccept, CheckoutConfirmCancel, CommitPreviewClose,
@@ -207,6 +209,7 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
     };
 
     add(Quit::DEF, |_| Ok(Box::new(Quit)));
+    add(ForceQuit::DEF, |_| Ok(Box::new(ForceQuit)));
     add(QuitAll::DEF, |_| Ok(Box::new(QuitAll)));
     add(QuitAllConfirm::DEF, |_| Ok(Box::new(QuitAllConfirm)));
     add(QuitAllCancel::DEF, |_| Ok(Box::new(QuitAllCancel)));
@@ -1374,6 +1377,7 @@ mod tests {
 
     const ZERO_ARG_NAMES: &[&str] = &[
         "Quit",
+        "ForceQuit",
         "WriteQuit",
         "QuitAll",
         "QuitAllConfirm",
@@ -1818,6 +1822,13 @@ mod tests {
     }
 
     #[test]
+    fn force_quit_aliases_resolve() {
+        for token in ["q!", "quit!", "Q!"] {
+            assert_eq!(lookup_alias(token).expect(token).def.name(), "ForceQuit");
+        }
+    }
+
+    #[test]
     fn force_close_all_buffers_aliases_resolve() {
         for token in ["bca!", "buffer-close-all!", "BCA!"] {
             assert_eq!(
@@ -2250,7 +2261,8 @@ mod tests {
         // + 2 CheckoutConfirmAccept/CheckoutConfirmCancel.
         // + 1 BlameParent.
         // + 1 NewBuffer.
-        assert_eq!(all().count(), 511);
+        // + 1 ForceQuit.
+        assert_eq!(all().count(), 512);
     }
 
     #[test]

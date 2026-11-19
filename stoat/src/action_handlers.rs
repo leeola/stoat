@@ -240,11 +240,11 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
     let effect = match action.kind() {
         ActionKind::Quit => {
             let focused = stoat.active_workspace().panes.focus();
-            if pane::quit_pane(stoat, focused) {
-                UpdateEffect::Redraw
-            } else {
-                UpdateEffect::Quit
-            }
+            pane::quit_or_exit(stoat, focused, false)
+        },
+        ActionKind::ForceQuit => {
+            let focused = stoat.active_workspace().panes.focus();
+            pane::quit_or_exit(stoat, focused, true)
         },
         ActionKind::QuitAll => quit_all(stoat),
         ActionKind::QuitAllConfirm => quit_all_confirm(stoat),
@@ -2051,8 +2051,8 @@ mod tests {
     use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
     use std::{sync::Arc, time::Duration};
     use stoat_action::{
-        FocusPane, MoveDown, MovePaneLeft, MovePaneNext, MovePaneRight, Quit, QuitAll,
-        RenameWorkspace, SaveSelection, SetTheme, SplitNewRight, SplitRight,
+        FocusPane, ForceQuit, JumpBackward, MoveDown, MovePaneLeft, MovePaneNext, MovePaneRight,
+        Quit, QuitAll, RenameWorkspace, SaveSelection, SetTheme, SplitNewRight, SplitRight,
     };
     use stoat_config::Settings;
     use stoat_scheduler::TestScheduler;
@@ -2622,6 +2622,145 @@ mod tests {
         assert_eq!(stoat.active_workspace().panes.pane_count(), 2);
         assert_eq!(dispatch(&mut stoat, &Quit), UpdateEffect::Redraw);
         assert_eq!(stoat.active_workspace().panes.pane_count(), 1);
+    }
+
+    #[test]
+    fn quit_on_the_last_pane_refuses_over_unsaved_edits() {
+        let mut stoat = stoat();
+        editor::seed_focused_buffer(&mut stoat, "unsaved");
+        assert_eq!(
+            (
+                dispatch(&mut stoat, &Quit),
+                stoat.pending_message.as_deref()
+            ),
+            (
+                UpdateEffect::Redraw,
+                Some("1 unsaved buffer remaining: <scratch>")
+            )
+        );
+    }
+
+    #[test]
+    fn force_quit_exits_over_unsaved_edits() {
+        let mut stoat = stoat();
+        editor::seed_focused_buffer(&mut stoat, "unsaved");
+        assert_eq!(dispatch(&mut stoat, &ForceQuit), UpdateEffect::Quit);
+    }
+
+    #[test]
+    fn quit_closes_one_of_two_panes_over_unsaved_edits() {
+        let mut stoat = stoat();
+        dispatch(&mut stoat, &SplitRight);
+        editor::seed_focused_buffer(&mut stoat, "unsaved");
+        assert_eq!(
+            (
+                dispatch(&mut stoat, &Quit),
+                stoat.active_workspace().panes.pane_count(),
+                stoat.pending_message.as_deref()
+            ),
+            (UpdateEffect::Redraw, 1, None)
+        );
+    }
+
+    fn focused_buffer(stoat: &mut Stoat) -> BufferId {
+        focused_editor_mut(stoat).expect("an editor").buffer_id
+    }
+
+    /// Open `/quit/a.rs` and give it unsaved edits, then open the clean
+    /// `/quit/b.rs` over it in the same pane. Returns both buffer ids.
+    fn open_unsaved_then_clean(h: &mut crate::test_harness::TestHarness) -> (BufferId, BufferId) {
+        h.fake_fs().insert_file("/quit/a.rs", "a\n");
+        h.fake_fs().insert_file("/quit/b.rs", "b\n");
+        h.open_file(Path::new("/quit/a.rs"));
+        h.seed_focused_buffer("edited\n");
+        let unsaved = focused_buffer(&mut h.stoat);
+        h.open_file(Path::new("/quit/b.rs"));
+        (unsaved, focused_buffer(&mut h.stoat))
+    }
+
+    /// The refused quit brings the unsaved edits into view, and a backward
+    /// jump returns to the clean buffer, as Helix's switch records the jump.
+    #[test]
+    fn quit_on_a_clean_last_pane_shows_the_first_unsaved_buffer() {
+        let mut h = Stoat::test();
+        let (unsaved, clean) = open_unsaved_then_clean(&mut h);
+
+        let effect = dispatch(&mut h.stoat, &Quit);
+        let shown = focused_buffer(&mut h.stoat);
+        let status = h.stoat.pending_message.clone();
+        dispatch(&mut h.stoat, &JumpBackward);
+
+        assert_eq!(
+            (
+                effect,
+                shown,
+                status.as_deref(),
+                focused_buffer(&mut h.stoat)
+            ),
+            (
+                UpdateEffect::Redraw,
+                unsaved,
+                Some("1 unsaved buffer remaining: a.rs"),
+                clean
+            )
+        );
+    }
+
+    #[test]
+    fn quit_on_an_unsaved_last_pane_stays_on_it() {
+        let mut h = Stoat::test();
+        let (_, shown) = open_unsaved_then_clean(&mut h);
+        h.seed_focused_buffer("edited\n");
+        assert_eq!(
+            (
+                dispatch(&mut h.stoat, &Quit),
+                focused_buffer(&mut h.stoat),
+                h.stoat.pending_message.as_deref()
+            ),
+            (
+                UpdateEffect::Redraw,
+                shown,
+                Some("2 unsaved buffers remaining: a.rs, b.rs")
+            )
+        );
+    }
+
+    /// The exit ends every workspace, so unsaved edits in another one refuse
+    /// it too. The pane stays, since those edits are not in this workspace.
+    #[test]
+    fn quit_on_the_last_pane_refuses_over_another_workspaces_unsaved_edits() {
+        let mut h = Stoat::test();
+        let home = h.stoat.active_workspace;
+        let other = h.create_workspace();
+        h.set_active_workspace(other);
+        h.seed_focused_buffer("unsaved");
+        h.set_active_workspace(home);
+        let shown = focused_buffer(&mut h.stoat);
+        assert_eq!(
+            (
+                dispatch(&mut h.stoat, &Quit),
+                focused_buffer(&mut h.stoat),
+                h.stoat.pending_message.as_deref()
+            ),
+            (
+                UpdateEffect::Redraw,
+                shown,
+                Some("1 unsaved buffer remaining: <scratch>")
+            )
+        );
+    }
+
+    /// The space chord ends with a refused quit, as a Helix minor mode ends
+    /// after one key.
+    #[test]
+    fn a_refused_space_q_returns_to_normal_mode() {
+        let mut h = Stoat::test();
+        h.seed_focused_buffer("unsaved");
+        h.type_keys("space q");
+        assert_eq!(
+            (h.stoat.focused_mode(), h.stoat.pending_message.as_deref()),
+            ("normal", Some("1 unsaved buffer remaining: <scratch>"))
+        );
     }
 
     #[test]
