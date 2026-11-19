@@ -783,9 +783,20 @@ define_action!(
     "WriteQuit",
     ActionKind::WriteQuit,
     "save the focused buffer and quit",
-    "Write the focused buffer with SaveBuffer semantics, then close the focused pane, exiting when it is the last. The quit aborts when the buffer has no path, the file changed on disk since it was opened, or the write fails. With format_on_save enabled the quit waits for the deferred formatted write to land.",
+    "Write the focused buffer with SaveBuffer semantics, then close the focused pane, exiting when it is the last. The quit aborts when the buffer has no path, the file changed on disk since it was opened, or the write fails. While another buffer holds unsaved edits, the last pane does not exit, as Quit refuses. With format_on_save enabled the quit waits for the deferred formatted write to land. write-quit! writes over a change on disk and exits over unsaved buffers.",
     ActionPriority::Common,
     aliases = &["wq", "x"]
+);
+
+define_action!(
+    ForceWriteQuitDef,
+    ForceWriteQuit,
+    "ForceWriteQuit",
+    ActionKind::ForceWriteQuit,
+    "save the focused buffer over external changes and quit",
+    "Write the focused buffer as ForceSaveBuffer does, then close the focused pane or exit as ForceQuit does. The write overwrites a change on disk, and the last pane exits over other unsaved buffers. A read-only buffer still refuses the write, and the quit with it.",
+    ActionPriority::Common,
+    aliases = &["wq!", "x!", "write-quit!"]
 );
 
 define_action!(

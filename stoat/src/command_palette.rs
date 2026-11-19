@@ -1850,6 +1850,7 @@ mod tests {
                 "quit-all",
                 "force-quit",
                 "force-quit-all",
+                "force-write-quit",
                 "write-quit"
             ]
         );
@@ -1869,8 +1870,8 @@ mod tests {
             &mut match_indices,
             &mut selected,
         );
-        assert_eq!(filtered.len(), 5);
-        assert_eq!(selected, 4);
+        assert_eq!(filtered.len(), 6);
+        assert_eq!(selected, 5);
     }
 
     #[test]

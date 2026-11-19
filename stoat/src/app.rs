@@ -2273,20 +2273,21 @@ pub struct Stoat {
     /// burst does not queue duplicate writes.
     pub(crate) pending_saves: Vec<action_handlers::file::PendingSave>,
     /// The pane a `:wq` ([`action_handlers::file::write_quit`]) was pressed in,
-    /// with its workspace and the buffer it saves, while that buffer's write is
-    /// on its way.
+    /// with its workspace, the buffer it saves, and whether it is the forced
+    /// `:wq!`, while that buffer's write is on its way.
     ///
     /// The pump that lands that buffer's write takes it and closes the pane,
-    /// and sets [`Self::quit_requested`] only when the pane is the last. The
-    /// write of any other buffer leaves it alone. A buffer still dirty when its
-    /// write lands saves again first, so the quit waits for its latest text. A
-    /// failed write or a pane that is gone drops the quit and leaves the buffer
-    /// for the user.
-    pub(crate) quit_after_save: Option<(WorkspaceId, PaneId, BufferId)>,
+    /// and sets [`Self::quit_requested`] only when the pane is the last and
+    /// the quit is forced or no other buffer holds unsaved edits. The write of
+    /// any other buffer leaves it alone. A buffer still dirty when its write
+    /// lands saves again first, so the quit waits for its latest text. A
+    /// failed write or a pane that is gone drops the quit and leaves the
+    /// buffer for the user.
+    pub(crate) quit_after_save: Option<(WorkspaceId, PaneId, BufferId, bool)>,
     /// Set once a `:wq`-driven write has landed and the pane it closes is the
-    /// last. The run loop takes it right after [`Self::drive_background`] and
-    /// quits, so a quit deferred behind a write happens on the frame it
-    /// completes.
+    /// last, as [`Self::quit_after_save`] describes. The run loop takes it right
+    /// after [`Self::drive_background`] and quits, so a quit deferred behind a
+    /// write happens on the frame it completes.
     pub(crate) quit_requested: bool,
 
     /// Editor autocomplete popup waiting to be painted. Set by the

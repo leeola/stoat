@@ -205,6 +205,7 @@ action_kinds! {
     SaveBuffer,
     ForceSaveBuffer,
     WriteQuit,
+    ForceWriteQuit,
     CloseBuffer,
     CloseAllBuffers,
     ForceCloseAllBuffers,

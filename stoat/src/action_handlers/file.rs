@@ -52,40 +52,41 @@ pub(super) fn force_save_buffer(stoat: &mut Stoat) -> UpdateEffect {
 }
 
 /// Save the focused buffer, then quit its pane like [`Quit`](stoat_action::Quit).
-/// Backs the `:wq` command.
+/// Backs the `:wq` command, and `:wq!` with `force`.
 ///
 /// A pane that covers a live shell returns to that shell. Any other pane
-/// closes, and the last one exits the application.
+/// closes, and the last one exits the application. While another buffer holds
+/// unsaved edits, the last pane does not exit, as `Quit` refuses.
+///
+/// `force` writes over a file changed on disk since it was opened, as
+/// [`force_save_buffer`] does, and exits over the other unsaved buffers, as
+/// [`stoat_action::ForceQuit`] does. A read-only buffer still refuses.
 ///
 /// The quit aborts whenever the save did not land. A scratch buffer with no
-/// path, a read-only buffer, a file changed on disk since it was opened, or a
+/// path, a read-only buffer, an unforced write over a change on disk, or a
 /// write error all leave the app running with the failure in
 /// [`Stoat::pending_message`].
 ///
 /// A write that lands later, through format on save or the background write,
-/// defers the quit with it. [`Stoat::quit_after_save`] records the pane and the
-/// buffer, and the pump that lands that buffer's write quits the pane. A save
-/// of the same buffer already on its way stands in for this one, so the quit
-/// waits for it.
+/// defers the quit with it. [`Stoat::quit_after_save`] records the pane, the
+/// buffer, and `force`, and the pump that lands that buffer's write quits the
+/// pane. A save of the same buffer already on its way stands in for this one,
+/// so the quit waits for it.
 ///
 /// A write that lands with older text than the buffer holds, because the
 /// buffer moved after that write started, saves the buffer again first. The
 /// quit lands only once the buffer's latest text is on disk.
-pub(super) fn write_quit(stoat: &mut Stoat) -> UpdateEffect {
+pub(super) fn write_quit(stoat: &mut Stoat, force: bool) -> UpdateEffect {
     let buffer_id = super::focused_editor_mut(stoat).map(|editor| editor.buffer_id);
-    match save_flow(stoat, false) {
+    match save_flow(stoat, force) {
         SaveFlow::Wrote => {
             let focused = stoat.active_workspace().panes.focus();
-            if super::pane::quit_pane(stoat, focused) {
-                UpdateEffect::Redraw
-            } else {
-                UpdateEffect::Quit
-            }
+            super::pane::quit_or_exit(stoat, focused, force)
         },
         SaveFlow::Armed | SaveFlow::AlreadyPending => {
             let pane = stoat.active_workspace().panes.focus();
             stoat.quit_after_save =
-                buffer_id.map(|buffer_id| (stoat.active_workspace, pane, buffer_id));
+                buffer_id.map(|buffer_id| (stoat.active_workspace, pane, buffer_id, force));
             UpdateEffect::Redraw
         },
         SaveFlow::RefusedReadOnly | SaveFlow::RefusedDiskChanged | SaveFlow::Failed => {
@@ -112,13 +113,17 @@ pub(super) fn write_quit(stoat: &mut Stoat) -> UpdateEffect {
 /// the pane is gone or its workspace is not the active one. A pane id names a
 /// pane only within its own workspace, so after a switch it names no pane on
 /// screen.
+///
+/// The last pane exits as [`super::pane::quit_or_exit`] allows, so a `:wq`
+/// stays over another unsaved buffer and a `:wq!` does not. The follow-up save
+/// keeps the force of the `:wq!` too.
 fn finish_deferred_quit(
     stoat: &mut Stoat,
     wrote: bool,
     workspace: WorkspaceId,
     buffer_id: BufferId,
 ) {
-    let Some((quit_workspace, pane, quit_buffer)) = stoat.quit_after_save else {
+    let Some((quit_workspace, pane, quit_buffer, force)) = stoat.quit_after_save else {
         return;
     };
     if (quit_workspace, quit_buffer) != (workspace, buffer_id) {
@@ -139,9 +144,9 @@ fn finish_deferred_quit(
         .get(buffer_id)
         .is_some_and(|buffer| buffer.read().expect("buffer poisoned").dirty);
     if dirty {
-        match save_buffer_flow(stoat, buffer_id, false) {
+        match save_buffer_flow(stoat, buffer_id, force) {
             SaveFlow::Armed | SaveFlow::AlreadyPending => {
-                stoat.quit_after_save = Some((workspace, pane, buffer_id));
+                stoat.quit_after_save = Some((workspace, pane, buffer_id, force));
                 return;
             },
             SaveFlow::Wrote => {},
@@ -152,7 +157,7 @@ fn finish_deferred_quit(
         }
     }
 
-    if !super::pane::quit_pane(stoat, pane) {
+    if super::pane::quit_or_exit(stoat, pane, force) == UpdateEffect::Quit {
         stoat.quit_requested = true;
     }
 }
@@ -1087,8 +1092,8 @@ mod tests {
     };
     use std::path::{Path, PathBuf};
     use stoat_action::{
-        ForceSaveBuffer, GotoLastAccessed, NewWorkspace, OpenFile, SaveBuffer, SplitRight,
-        WriteQuit,
+        ForceSaveBuffer, ForceWriteQuit, GotoLastAccessed, NewWorkspace, OpenFile, SaveBuffer,
+        SplitRight, WriteQuit,
     };
     use stoat_config::Config;
     use stoatty_protocol::command;
@@ -2414,7 +2419,7 @@ mod tests {
         let pane = h.stoat.active_workspace().panes.focus();
         let workspace = h.stoat.active_workspace;
         let buffer_id = h.stoat.focused_editor_ids().expect("editor").1;
-        h.stoat.quit_after_save = Some((workspace, pane, buffer_id));
+        h.stoat.quit_after_save = Some((workspace, pane, buffer_id, false));
         let other = h.create_workspace();
         h.set_active_workspace(other);
 
@@ -2624,6 +2629,60 @@ mod tests {
     }
 
     #[test]
+    fn force_write_quit_overwrites_a_disk_change_and_quits() {
+        let mut h = Stoat::test();
+        let root = PathBuf::from("/wq-force-guard");
+        let path = open_edited(&mut h, &root, "a.txt", b"original\n");
+        h.fake_fs().insert_file(&path, b"external\n");
+
+        dispatch(&mut h.stoat, &ForceWriteQuit);
+        h.settle();
+
+        assert_eq!(
+            (on_disk(&h, &path), h.stoat.quit_requested),
+            (b"edited original\n".to_vec(), true)
+        );
+    }
+
+    /// The last pane writes its own buffer and then stays over another unsaved
+    /// one, which it brings into view. The forced form exits over it.
+    #[test]
+    fn write_quit_on_the_last_pane_stays_over_another_unsaved_buffer() {
+        let press = |action: &dyn stoat_action::Action| {
+            let mut h = Stoat::test();
+            let root = PathBuf::from("/wq-other");
+            open_edited(&mut h, &root, "a.txt", b"one\n");
+            let b = open_edited(&mut h, &root, "b.txt", b"two\n");
+
+            dispatch(&mut h.stoat, action);
+            h.settle();
+
+            let shown = h.stoat.focused_editor_ids().expect("editor").1;
+            let buffers = &h.stoat.active_workspace().buffers;
+            (
+                on_disk(&h, &b),
+                h.stoat.quit_requested,
+                h.stoat.pending_message.clone(),
+                buffers.path_for(shown).map(Path::to_path_buf),
+            )
+        };
+
+        let path = |name: &str| Some(Path::new("/wq-other").join(name));
+        assert_eq!(
+            [press(&WriteQuit), press(&ForceWriteQuit)],
+            [
+                (
+                    b"edited two\n".to_vec(),
+                    false,
+                    Some("1 unsaved buffer remaining: a.txt".to_string()),
+                    path("a.txt"),
+                ),
+                (b"edited two\n".to_vec(), true, None, path("b.txt")),
+            ],
+        );
+    }
+
+    #[test]
     fn write_quit_on_scratch_buffer_reports_nothing_to_write() {
         let mut h = Stoat::test();
 
@@ -2650,7 +2709,7 @@ mod tests {
         assert_eq!(dispatch(&mut h.stoat, &WriteQuit), UpdateEffect::Redraw);
         assert_eq!(
             h.stoat.quit_after_save,
-            Some((h.stoat.active_workspace, pane, buffer_id)),
+            Some((h.stoat.active_workspace, pane, buffer_id, false)),
             "the quit defers behind the formatted write"
         );
         assert!(!h.stoat.quit_requested);
@@ -2667,6 +2726,42 @@ mod tests {
             "the deferred quit is consumed"
         );
         assert!(h.stoat.quit_requested, "the landed write requests the quit");
+    }
+
+    /// The force rides the deferred quit, so the formatted write exits over
+    /// another unsaved buffer.
+    #[test]
+    fn force_write_quit_with_format_on_save_exits_over_another_unsaved_buffer() {
+        let mut h = Stoat::test();
+        enable_format_on_save(&mut h);
+        let root = PathBuf::from("/wq-fos-force");
+        let other = open_edited(&mut h, &root, "b.txt", b"two\n");
+        let path = open_rs(&mut h, &root, "a.rs", b"fn  main (){}\n");
+        h.fake_lsp().set_formatting(
+            path.to_str().unwrap(),
+            vec![whole_file_edit("fn main() {}\n")],
+        );
+
+        let pane = h.stoat.active_workspace().panes.focus();
+        let buffer_id = h.stoat.focused_editor_ids().expect("editor").1;
+        dispatch(&mut h.stoat, &ForceWriteQuit);
+        let deferred = h.stoat.quit_after_save;
+        h.settle();
+
+        assert_eq!(
+            (
+                deferred,
+                on_disk(&h, &path),
+                dirty_at(&h, &other),
+                h.stoat.quit_requested
+            ),
+            (
+                Some((h.stoat.active_workspace, pane, buffer_id, true)),
+                b"fn main() {}\n".to_vec(),
+                true,
+                true
+            ),
+        );
     }
 
     #[test]

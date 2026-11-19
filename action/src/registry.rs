@@ -47,12 +47,12 @@ use crate::{
             ExtendSearchNext, ExtendSearchPrev, ExtendTillNextChar, ExtendTillPrevChar,
             ExtendToFileStart, ExtendToLineBounds, ExtendToLineEnd, ExtendToLineStart,
             ExtendToWord, ExtendUp, FindNextChar, FindPrevChar, FlipSelections,
-            ForceCloseAllBuffers, GotoCallee, GotoCaller, GotoColumn, GotoDiffCalleeDown,
-            GotoDiffCallerUp, GotoFileStart, GotoFirstChange, GotoFirstDiagnostic,
-            GotoFirstNonwhitespace, GotoImplementors, GotoLastAccessed, GotoLastChange,
-            GotoLastDiagnostic, GotoLastLine, GotoLastModification, GotoLineEnd, GotoLineNumber,
-            GotoLineStart, GotoMark, GotoMarkExact, GotoNextChange, GotoNextClass, GotoNextComment,
-            GotoNextEntry, GotoNextFunction, GotoNextGitChange, GotoNextParagraph,
+            ForceCloseAllBuffers, ForceWriteQuit, GotoCallee, GotoCaller, GotoColumn,
+            GotoDiffCalleeDown, GotoDiffCallerUp, GotoFileStart, GotoFirstChange,
+            GotoFirstDiagnostic, GotoFirstNonwhitespace, GotoImplementors, GotoLastAccessed,
+            GotoLastChange, GotoLastDiagnostic, GotoLastLine, GotoLastModification, GotoLineEnd,
+            GotoLineNumber, GotoLineStart, GotoMark, GotoMarkExact, GotoNextChange, GotoNextClass,
+            GotoNextComment, GotoNextEntry, GotoNextFunction, GotoNextGitChange, GotoNextParagraph,
             GotoNextParameter, GotoNextTest, GotoNextXmlElement, GotoPrevChange, GotoPrevClass,
             GotoPrevComment, GotoPrevEntry, GotoPrevFunction, GotoPrevGitChange, GotoPrevParagraph,
             GotoPrevParameter, GotoPrevTest, GotoPrevXmlElement, GotoReferences, GotoWindowBottom,
@@ -647,6 +647,7 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
     add(DismissKeyHints::DEF, |_| Ok(Box::new(DismissKeyHints)));
     add(PinMode::DEF, |_| Ok(Box::new(PinMode)));
     add(WriteQuit::DEF, |_| Ok(Box::new(WriteQuit)));
+    add(ForceWriteQuit::DEF, |_| Ok(Box::new(ForceWriteQuit)));
     add(CloseBuffer::DEF, |_| Ok(Box::new(CloseBuffer)));
     add(CloseAllBuffers::DEF, |_| Ok(Box::new(CloseAllBuffers)));
     add(ForceCloseAllBuffers::DEF, |_| {
@@ -1381,6 +1382,7 @@ mod tests {
         "Quit",
         "ForceQuit",
         "WriteQuit",
+        "ForceWriteQuit",
         "QuitAll",
         "ForceQuitAll",
         "QuitAllConfirm",
@@ -1863,6 +1865,16 @@ mod tests {
     }
 
     #[test]
+    fn force_write_quit_aliases_resolve() {
+        for token in ["wq!", "x!", "write-quit!", "WQ!"] {
+            assert_eq!(
+                lookup_alias(token).expect(token).def.name(),
+                "ForceWriteQuit"
+            );
+        }
+    }
+
+    #[test]
     fn terminal_alias_resolves() {
         for token in ["term", "TERM"] {
             assert_eq!(lookup_alias(token).expect(token).def.name(), "terminal");
@@ -2273,7 +2285,8 @@ mod tests {
         // + 1 NewBuffer.
         // + 1 ForceQuit.
         // + 1 ForceQuitAll.
-        assert_eq!(all().count(), 513);
+        // + 1 ForceWriteQuit.
+        assert_eq!(all().count(), 514);
     }
 
     #[test]
