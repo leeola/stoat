@@ -1632,18 +1632,33 @@ pub(crate) fn render_tab_bar(
         segments.iter().map(|(text, _)| text.chars().count()).sum()
     };
 
-    // The chip takes its cells out of the run, and one blank cell ends the bar
-    // after it. It drops where the tabs leave it no room, as the diff chips do.
-    let chip = conflict_chip(ws, frame, scene.live())
-        .filter(|chip| chars(&left) + usize::from(chip.cells) < usize::from(area.width));
-    let segments = match &chip {
-        Some(chip) => Rect {
-            width: area.width - chip.cells - 1,
+    // The chip takes its cells out of the run. It stands one blank cell before
+    // the layout chips, which keep the bar's end, or with no layout chips one
+    // blank cell ends the bar after it. It drops first where the tabs leave it
+    // no room, and the layout chips drop after it.
+    let chip = conflict_chip(ws, frame, scene.live()).filter(|chip| {
+        let taken = match right.is_empty() {
+            true => usize::from(chip.cells),
+            false => chars(&right) + usize::from(chip.cells) + 2,
+        };
+        chars(&left) + taken < usize::from(area.width)
+    });
+    let chip_rect = chip.as_ref().map(|chip| {
+        let end = area.right() - chars(&right) as u16 - 1;
+        Rect::new(end - chip.cells, area.y, chip.cells, 1)
+    });
+    let segments = match chip_rect {
+        Some(rect) if !right.is_empty() => Rect {
+            width: rect.x - 1 - area.x,
+            ..area
+        },
+        Some(rect) => Rect {
+            width: rect.x - area.x,
             ..area
         },
         None => area,
     };
-    if chars(&left) + chars(&right) > usize::from(segments.width) {
+    if chars(&left) + chars(&right) > usize::from(area.width) {
         right.clear();
     }
 
@@ -1667,14 +1682,13 @@ pub(crate) fn render_tab_bar(
     }
     draw_layout_chips(
         &right,
-        segments,
+        area,
         inactive,
         rich.then(|| theme.type_scale(TypeRole::Caption)),
         buf,
         scene,
     );
-    if let Some(chip) = chip {
-        let rect = Rect::new(segments.right(), area.y, chip.cells, 1);
+    if let (Some(chip), Some(rect)) = (chip, chip_rect) {
         draw_conflict_chip(&chip, rect, theme, buf, scene);
     }
 
@@ -1797,10 +1811,11 @@ fn tab_mark(mark: TabConflictMark, style: Style, theme: &crate::theme::Theme) ->
     }
 }
 
-/// The chip the tab bar ends in while the conflict view is focused.
+/// The chip the tab bar ends in while the conflict view is focused, or holds
+/// left of its layout chips while a changes view is focused during a merge.
 struct ConflictChip {
-    /// The operation and what is left of it, as [`conflict_chip_text`] words
-    /// them.
+    /// The operation and what is left of it, as [`conflict_chip_text`] or
+    /// [`merge_badge_text`] words them.
     text: String,
     style: Style,
     /// The chip's text color under a live scene, where it paints as a panel
@@ -1809,7 +1824,11 @@ struct ConflictChip {
     cells: u16,
 }
 
-/// The tab bar's [`ConflictChip`], or `None` off the conflict screen.
+/// The tab bar's [`ConflictChip`], or `None` with no chip to show.
+///
+/// The conflict screen shows the chip that [`conflict_chip_text`] words. Any
+/// other screen shows the badge that [`merge_badge_text`] words, while a
+/// changes view is focused during a merge that leaves a file unmerged.
 ///
 /// Under a live scene the chip's text draws at the Caption scale, the board's
 /// 11 px chrome text, so its width follows that text and the board's 8 px of
@@ -1818,14 +1837,19 @@ fn conflict_chip(ws: &Workspace, frame: FrameCtx<'_>, live: bool) -> Option<Conf
     use crate::theme::scope;
     let position = frame
         .conflict_position
-        .filter(|_| frame.screen == Some("conflict"))?;
-    let session = ws.conflict.as_ref()?;
-    let view = ws
-        .editors
-        .get(session.file.editor_id)?
-        .conflict_view
-        .as_ref()?;
-    let text = conflict_chip_text(&position, &view.labels);
+        .filter(|_| frame.screen == Some("conflict"));
+    let text = match position {
+        Some(position) => {
+            let session = ws.conflict.as_ref()?;
+            let view = ws
+                .editors
+                .get(session.file.editor_id)?
+                .conflict_view
+                .as_ref()?;
+            conflict_chip_text(&position, &view.labels)
+        },
+        None => merge_badge_text(ws, frame)?,
+    };
 
     let theme = frame.theme;
     let style = theme
@@ -1870,6 +1894,42 @@ fn conflict_chip_text(position: &ConflictPosition, labels: &ConflictLabels) -> S
         "{lead} \u{b7} {} {noun} left \u{b7} {} of {} files",
         position.chunks_open, position.files_open, position.file_total
     )
+}
+
+/// The tab bar's badge over a focused changes view during a merge, which names
+/// the branch the merge brings in and counts what is left to resolve.
+///
+/// `None` off a changes view, with no merge in progress, and with no file that
+/// the tally lists as unmerged. The conflicts count the blocks that the stack's
+/// excerpts of the unmerged files hold, so a file whose excerpt waits on its
+/// diff adds none until its cut. The files count every unmerged file.
+fn merge_badge_text(ws: &Workspace, frame: FrameCtx<'_>) -> Option<String> {
+    let state = ws.focused_diff_changes()?;
+    let branch = frame.repo?.merge_head.as_deref()?;
+    let conflicted = &frame.tallies?.conflicted;
+    if conflicted.is_empty() {
+        return None;
+    }
+
+    let conflicts: u32 = state
+        .excerpts
+        .iter()
+        .filter(|excerpt| {
+            conflicted
+                .binary_search_by(|path| path.as_path().cmp(Path::new(&excerpt.rel_path)))
+                .is_ok()
+        })
+        .map(|excerpt| excerpt.conflicts)
+        .sum();
+    let count = |n: usize, noun: &str| match n {
+        1 => format!("1 {noun}"),
+        n => format!("{n} {noun}s"),
+    };
+    Some(format!(
+        "merge {branch} \u{b7} {} \u{b7} {}",
+        count(conflicts as usize, "conflict"),
+        count(conflicted.len(), "file"),
+    ))
 }
 
 /// Paint `chip` over `rect`, a one-row rounded panel with its text in a run
@@ -7913,6 +7973,84 @@ mod tests {
                 Some("conflict \u{b7} 1 conflict left \u{b7} 1 of 2 files".to_string()),
             ),
         );
+    }
+
+    /// During a merge a changes view's tab bar holds a badge that names the
+    /// merge and counts the conflict blocks of the unmerged files and the
+    /// files. It stands one blank cell before the layout chips, which keep the
+    /// bar's end.
+    ///
+    /// The badge's 34 characters and a cell a side take 36 cells, and the
+    /// layout chips the last 17, so the badge starts at cell 46. The block in
+    /// c.txt counts no conflict, since the tally leaves that file merged.
+    #[test]
+    fn a_changes_view_s_tab_bar_names_the_merge_left_of_its_layout_chips() {
+        let row = merge_tab_row(100, true, true);
+        assert_eq!(
+            row.chars().skip(46).collect::<String>(),
+            " merge main \u{b7} 3 conflicts \u{b7} 2 files   files  changes  ",
+        );
+    }
+
+    /// A changes view shows no merge badge over conflicted files with no merge
+    /// in progress, nor during a merge that leaves no file unmerged. A bar too
+    /// narrow for the badge drops it and keeps its layout chips.
+    #[test]
+    fn a_changes_view_with_no_merge_shows_no_badge() {
+        let tail = |row: String| row.chars().skip(46).collect::<String>();
+        let blank = format!("{:37} files  changes  ", "");
+        assert_eq!(
+            [
+                tail(merge_tab_row(100, false, true)),
+                tail(merge_tab_row(100, true, false)),
+                merge_tab_row(70, true, true),
+            ],
+            [
+                blank.clone(),
+                blank,
+                format!(
+                    "{:<53} files  changes  ",
+                    " ws   \u{b1} changes \u{b7} 3 files"
+                ),
+            ],
+        );
+    }
+
+    /// The tab bar of a changes view `width` cells wide, in cells, over a.txt,
+    /// whose text holds two conflict blocks, b.txt, which holds one, and c.txt,
+    /// which holds one too.
+    ///
+    /// With `merge` the repository merges `main`, and with `conflicted` the
+    /// tally lists a.txt and b.txt as unmerged.
+    fn merge_tab_row(width: u16, merge: bool, conflicted: bool) -> String {
+        let block = |n: u32| format!("<<<<<<< HEAD\nours {n}\n=======\ntheirs {n}\n>>>>>>> main\n");
+        let mut h = crate::test_harness::TestHarness::with_size(width, 30);
+        h.stoat.settings.ui_tab_bar = Some(stoat_config::TabBarMode::Always);
+        let ws = h.stoat.active_workspace_mut();
+        ws.name = "ws".to_string();
+        ws.git_root = PathBuf::from("/repo");
+        {
+            let mut repo = h.fake_git().add_repo("/repo").with_fs(h.fake_fs());
+            let files = [
+                ("a.txt", block(1) + &block(2)),
+                ("b.txt", block(3)),
+                ("c.txt", block(4)),
+            ];
+            for (file, text) in files {
+                repo.modified(file, "x\n", &text);
+                if conflicted && file != "c.txt" {
+                    repo.conflicted_file(file, Some("x\n"), Some("ours\n"), Some("theirs\n"));
+                }
+            }
+            if merge {
+                repo.merge_in_progress("f00dfeed", Some("main"), "Merge branch 'main'");
+            }
+        }
+        h.open_file(Path::new("/repo/a.txt"));
+        h.cover_with_diff_changes(false);
+        h.settle();
+        h.stoat.stoatty = false;
+        tab_bar_row(&h.render_composited())
     }
 
     /// The conflict chip names the operation, with theirs after a merge. It

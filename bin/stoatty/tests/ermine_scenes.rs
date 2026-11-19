@@ -2012,6 +2012,30 @@ fn the_tab_bar_ends_in_the_conflict_chip() {
     );
 }
 
+/// During a merge a changes view's tab bar holds the merge badge left of its
+/// layout chips.
+///
+/// The badge reads `merge theirs U+00B7 1 conflict U+00B7 1 file` at the
+/// Caption scale with 8 px of pad at each side. That is 31 cells, which end a
+/// blank cell before the 17 cells of the layout chips at the bar's end, so the
+/// badge takes cells 111 to 141, and cells 113 to 124 lie inside it on its
+/// fill. The row draws [`TAB_BAR_PAD`] px down in its band, so the check reads
+/// it there.
+#[test]
+fn the_changes_view_s_tab_bar_names_the_merge() {
+    let mut home = support::scratch_home();
+    let shot = settled_frame(home.path(), "conflict", "file.txt", "<Space>dc<Settle>");
+
+    let (x, y, width, height) = cell_rect(113, 0, 12, 1);
+    expect_region(
+        &shot,
+        &mut home,
+        (x, y + TAB_BAR_PAD, width, height),
+        CHIP_CONFLICT,
+        "merge_badge",
+    );
+}
+
 /// The git status panel names the merge in progress in its banner and leads
 /// its sections with the conflicted file.
 ///
