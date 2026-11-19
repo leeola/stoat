@@ -47,8 +47,8 @@ use crate::{
             ExtendSearchNext, ExtendSearchPrev, ExtendTillNextChar, ExtendTillPrevChar,
             ExtendToFileStart, ExtendToLineBounds, ExtendToLineEnd, ExtendToLineStart,
             ExtendToWord, ExtendUp, FindNextChar, FindPrevChar, FlipSelections,
-            ForceCloseAllBuffers, ForceWriteQuit, GotoCallee, GotoCaller, GotoColumn,
-            GotoDiffCalleeDown, GotoDiffCallerUp, GotoFileStart, GotoFirstChange,
+            ForceCloseAllBuffers, ForceCloseBuffer, ForceWriteQuit, GotoCallee, GotoCaller,
+            GotoColumn, GotoDiffCalleeDown, GotoDiffCallerUp, GotoFileStart, GotoFirstChange,
             GotoFirstDiagnostic, GotoFirstNonwhitespace, GotoImplementors, GotoLastAccessed,
             GotoLastChange, GotoLastDiagnostic, GotoLastLine, GotoLastModification, GotoLineEnd,
             GotoLineNumber, GotoLineStart, GotoMark, GotoMarkExact, GotoNextChange, GotoNextClass,
@@ -649,6 +649,7 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
     add(WriteQuit::DEF, |_| Ok(Box::new(WriteQuit)));
     add(ForceWriteQuit::DEF, |_| Ok(Box::new(ForceWriteQuit)));
     add(CloseBuffer::DEF, |_| Ok(Box::new(CloseBuffer)));
+    add(ForceCloseBuffer::DEF, |_| Ok(Box::new(ForceCloseBuffer)));
     add(CloseAllBuffers::DEF, |_| Ok(Box::new(CloseAllBuffers)));
     add(ForceCloseAllBuffers::DEF, |_| {
         Ok(Box::new(ForceCloseAllBuffers))
@@ -1721,6 +1722,7 @@ mod tests {
             ("buffer", "OpenBuffer"),
             ("new", "NewBuffer"),
             ("write", "SaveBuffer"),
+            ("buffer-close", "CloseBuffer"),
         ];
         for (token, action) in cases {
             assert_eq!(
@@ -1744,7 +1746,10 @@ mod tests {
             ("cd", "SetCwd"),
             ("ssh", "Ssh"),
             ("mosh", "Mosh"),
+            ("bc", "CloseBuffer"),
+            ("bclose", "CloseBuffer"),
             ("bca", "CloseAllBuffers"),
+            ("bcloseall", "CloseAllBuffers"),
         ] {
             assert_eq!(
                 lookup_alias(token).map(|e| e.def.name()),
@@ -1842,10 +1847,20 @@ mod tests {
 
     #[test]
     fn force_close_all_buffers_aliases_resolve() {
-        for token in ["bca!", "buffer-close-all!", "BCA!"] {
+        for token in ["bca!", "buffer-close-all!", "bcloseall!", "BCA!"] {
             assert_eq!(
                 lookup_alias(token).expect(token).def.name(),
                 "ForceCloseAllBuffers",
+            );
+        }
+    }
+
+    #[test]
+    fn force_close_buffer_aliases_resolve() {
+        for token in ["bc!", "buffer-close!", "bclose!", "BC!"] {
+            assert_eq!(
+                lookup_alias(token).expect(token).def.name(),
+                "ForceCloseBuffer",
             );
         }
     }
@@ -2286,7 +2301,8 @@ mod tests {
         // + 1 ForceQuit.
         // + 1 ForceQuitAll.
         // + 1 ForceWriteQuit.
-        assert_eq!(all().count(), 514);
+        // + 1 ForceCloseBuffer.
+        assert_eq!(all().count(), 515);
     }
 
     #[test]

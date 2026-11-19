@@ -1012,13 +1012,14 @@ pub(crate) fn goto_last_accessed(stoat: &mut Stoat) -> UpdateEffect {
 /// there. A pane that has shown nothing else still open gets a fresh scratch
 /// buffer, and so does an editor no pane of the active tab shows.
 ///
-/// Refuses to close when the buffer is dirty, so unsaved edits are not
-/// silently lost.
+/// Without `force`, refuses to close when the buffer is dirty, so unsaved
+/// edits are not silently lost. The status then names the buffer in the words
+/// of the `:q` refusal. With `force` the edits go with the buffer.
 ///
 /// Session state keyed by the buffer goes with it, buffer-local marks
 /// included. Global marks stay. They hold a path and an offset rather
 /// than an anchor into the closed buffer.
-pub(crate) fn close_buffer(stoat: &mut Stoat) -> UpdateEffect {
+pub(crate) fn close_buffer(stoat: &mut Stoat, force: bool) -> UpdateEffect {
     let Some(editor) = focused_editor_mut(stoat) else {
         return UpdateEffect::None;
     };
@@ -1027,11 +1028,34 @@ pub(crate) fn close_buffer(stoat: &mut Stoat) -> UpdateEffect {
         Some(b) => b,
         None => return UpdateEffect::None,
     };
-    if buffer.read().expect("buffer poisoned").dirty {
+    if !force && buffer.read().expect("buffer poisoned").dirty {
         tracing::warn!(target: "stoat::file", ?buffer_id, "refusing close of dirty buffer");
-        return UpdateEffect::None;
+        let path = stoat.active_workspace().buffers.path_for(buffer_id);
+        let status = unsaved_remaining_status([path]);
+        stoat.set_status(status);
+        return UpdateEffect::Redraw;
     }
     close_buffer_by_id(stoat, buffer_id)
+}
+
+/// The status a quit or a close sets when unsaved buffers refuse it, given one
+/// path per buffer.
+///
+/// A buffer goes by its file name, and one with no path by `<scratch>`, so two
+/// buffers read as `2 unsaved buffers remaining: a.rs, <scratch>`.
+pub(crate) fn unsaved_remaining_status<'a>(
+    paths: impl IntoIterator<Item = Option<&'a Path>>,
+) -> String {
+    let names: Vec<String> = paths
+        .into_iter()
+        .map(|path| path.map_or_else(|| "<scratch>".to_string(), display_name))
+        .collect();
+    format!(
+        "{} unsaved buffer{} remaining: {}",
+        names.len(),
+        if names.len() == 1 { "" } else { "s" },
+        names.join(", ")
+    )
 }
 
 /// Close every buffer that has a path, whether or not its file still exists,
@@ -1255,8 +1279,9 @@ mod tests {
         test_harness::{self, editor, TestHarness},
     };
     use stoat_action::{
-        CloseAllBuffers, CloseBuffer, DiffFiles, FocusLeft, ForceCloseAllBuffers, GotoLastAccessed,
-        JumpBackward, NewBuffer, OpenBuffer, OpenFile, SaveBuffer, SetMark, SplitRight,
+        CloseAllBuffers, CloseBuffer, DiffFiles, FocusLeft, ForceCloseAllBuffers, ForceCloseBuffer,
+        GotoLastAccessed, JumpBackward, NewBuffer, OpenBuffer, OpenFile, SaveBuffer, SetMark,
+        SplitRight,
     };
 
     fn focused_buffer_id(stoat: &mut Stoat) -> BufferId {
@@ -2480,10 +2505,38 @@ mod tests {
             let mut guard = buffer.write().expect("poisoned");
             guard.edit(0..0, "x");
         }
-        assert_eq!(dispatch(&mut h.stoat, &CloseBuffer), UpdateEffect::None);
-        assert!(
-            h.stoat.active_workspace().buffers.get(buffer_id).is_some(),
-            "dirty buffer should not be closed",
+        assert_eq!(
+            (
+                dispatch(&mut h.stoat, &CloseBuffer),
+                h.stoat.active_workspace().buffers.get(buffer_id).is_some(),
+                h.stoat.pending_message.as_deref(),
+            ),
+            (
+                UpdateEffect::Redraw,
+                true,
+                Some("1 unsaved buffer remaining: file.txt"),
+            ),
+            "a dirty buffer stays open, and the status names it",
+        );
+    }
+
+    #[test]
+    fn force_close_buffer_discards_unsaved_edits() {
+        let mut h = Stoat::test();
+        let (a, b) = open_two(&mut h);
+        h.edit_focused(0..0, "x");
+        dispatch(&mut h.stoat, &ForceCloseBuffer);
+
+        let focused = focused_buffer_id(&mut h.stoat);
+        let ws = h.stoat.active_workspace();
+        assert_eq!(
+            (
+                ws.buffers.open_paths(),
+                focused,
+                ws.buffers.get(b).is_some(),
+                h.stoat.pending_message.as_deref(),
+            ),
+            (vec![PathBuf::from("/last-accessed/a.txt")], a, false, None),
         );
     }
 

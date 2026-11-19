@@ -805,8 +805,21 @@ define_action!(
     "CloseBuffer",
     ActionKind::CloseBuffer,
     "close the focused buffer",
-    "Drop the focused buffer from the workspace's BufferRegistry and notify the LSP server via did_close. Editor panes that displayed the closed buffer are rebound to fresh scratch buffers so the pane layout stays coherent. Refuses to close when the buffer is dirty; save first.",
-    ActionPriority::Common
+    "Drop the focused buffer from the workspace's BufferRegistry and notify the LSP server via did_close. Editor panes that displayed the closed buffer are rebound to fresh scratch buffers so the pane layout stays coherent. Refuses to close when the buffer is dirty, and the status names it. buffer-close! closes it with the edits discarded.",
+    ActionPriority::Common,
+    aliases = &["bc", "bclose"],
+    command_name = "buffer-close"
+);
+
+define_action!(
+    ForceCloseBufferDef,
+    ForceCloseBuffer,
+    "ForceCloseBuffer",
+    ActionKind::ForceCloseBuffer,
+    "close the focused buffer, discarding unsaved edits",
+    "Close what CloseBuffer closes, and discard the unsaved edits that CloseBuffer refuses over, as w! is to w.",
+    ActionPriority::Common,
+    aliases = &["bc!", "buffer-close!", "bclose!"]
 );
 
 define_action!(
@@ -817,7 +830,7 @@ define_action!(
     "close every buffer that has a path",
     "Close every buffer that has a path, whether or not its file still exists, as CloseBuffer closes one. The tabs and the panes stay, and each pane shows the buffer it showed before or a scratch buffer. When any of the buffers has unsaved edits, nothing closes and the status names those buffers. buffer-close-all! closes them with the edits discarded.",
     ActionPriority::Common,
-    aliases = &["bca"],
+    aliases = &["bca", "bcloseall"],
     command_name = "buffer-close-all"
 );
 
@@ -829,7 +842,7 @@ define_action!(
     "close every buffer that has a path, discarding unsaved edits",
     "Close what CloseAllBuffers closes, and discard the unsaved edits that CloseAllBuffers refuses over, as w! is to w.",
     ActionPriority::Common,
-    aliases = &["bca!", "buffer-close-all!"]
+    aliases = &["bca!", "buffer-close-all!", "bcloseall!"]
 );
 
 define_action!(

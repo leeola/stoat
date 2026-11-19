@@ -318,26 +318,20 @@ pub(super) fn quit_or_exit(stoat: &mut Stoat, id: PaneId, force: bool) -> Update
         return UpdateEffect::Quit;
     }
 
-    let unsaved: Vec<String> = stoat
+    let unsaved: Vec<_> = stoat
         .workspaces
         .values()
         .flat_map(|ws| ws.buffers.dirty_buffers())
-        .map(|buffer| match buffer.path {
-            Some(path) => super::file::display_name(&path),
-            None => "<scratch>".to_string(),
-        })
         .collect();
     if unsaved.is_empty() {
         return UpdateEffect::Quit;
     }
 
     show_first_unsaved(stoat, id);
-    stoat.set_status(format!(
-        "{} unsaved buffer{} remaining: {}",
-        unsaved.len(),
-        if unsaved.len() == 1 { "" } else { "s" },
-        unsaved.join(", ")
-    ));
+    let status = buffer_lifecycle::unsaved_remaining_status(
+        unsaved.iter().map(|buffer| buffer.path.as_deref()),
+    );
+    stoat.set_status(status);
     UpdateEffect::Redraw
 }
 
