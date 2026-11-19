@@ -34,7 +34,7 @@ use crate::{
             AcceptCompletion, AddNewlineAbove, AddNewlineBelow, AddSelectionAbove,
             AddSelectionBelow, AlignSelections, AlignViewBottom, AlignViewCenter, AlignViewTop,
             AppendMode, ChangeSelection, ChangeSelectionNoYank, CloseAllBuffers, CloseBuffer,
-            CollapseSelection, CommitUndoCheckpoint, Decrement, DeleteSelection,
+            CloseOtherBuffers, CollapseSelection, CommitUndoCheckpoint, Decrement, DeleteSelection,
             DeleteSelectionNoYank, Earlier, EnsureSelectionsForward, EnterInsertMode,
             ExpandSelection, ExtendDown, ExtendFindNextChar, ExtendFindPrevChar, ExtendGotoColumn,
             ExtendGotoFileStart, ExtendGotoFirstNonwhitespace, ExtendGotoLastLine,
@@ -47,14 +47,15 @@ use crate::{
             ExtendSearchNext, ExtendSearchPrev, ExtendTillNextChar, ExtendTillPrevChar,
             ExtendToFileStart, ExtendToLineBounds, ExtendToLineEnd, ExtendToLineStart,
             ExtendToWord, ExtendUp, FindNextChar, FindPrevChar, FlipSelections,
-            ForceCloseAllBuffers, ForceCloseBuffer, ForceWriteQuit, GotoCallee, GotoCaller,
-            GotoColumn, GotoDiffCalleeDown, GotoDiffCallerUp, GotoFileStart, GotoFirstChange,
-            GotoFirstDiagnostic, GotoFirstNonwhitespace, GotoImplementors, GotoLastAccessed,
-            GotoLastChange, GotoLastDiagnostic, GotoLastLine, GotoLastModification, GotoLineEnd,
-            GotoLineNumber, GotoLineStart, GotoMark, GotoMarkExact, GotoNextChange, GotoNextClass,
-            GotoNextComment, GotoNextEntry, GotoNextFunction, GotoNextGitChange, GotoNextParagraph,
-            GotoNextParameter, GotoNextTest, GotoNextXmlElement, GotoPrevChange, GotoPrevClass,
-            GotoPrevComment, GotoPrevEntry, GotoPrevFunction, GotoPrevGitChange, GotoPrevParagraph,
+            ForceCloseAllBuffers, ForceCloseBuffer, ForceCloseOtherBuffers, ForceWriteQuit,
+            GotoCallee, GotoCaller, GotoColumn, GotoDiffCalleeDown, GotoDiffCallerUp,
+            GotoFileStart, GotoFirstChange, GotoFirstDiagnostic, GotoFirstNonwhitespace,
+            GotoImplementors, GotoLastAccessed, GotoLastChange, GotoLastDiagnostic, GotoLastLine,
+            GotoLastModification, GotoLineEnd, GotoLineNumber, GotoLineStart, GotoMark,
+            GotoMarkExact, GotoNextChange, GotoNextClass, GotoNextComment, GotoNextEntry,
+            GotoNextFunction, GotoNextGitChange, GotoNextParagraph, GotoNextParameter,
+            GotoNextTest, GotoNextXmlElement, GotoPrevChange, GotoPrevClass, GotoPrevComment,
+            GotoPrevEntry, GotoPrevFunction, GotoPrevGitChange, GotoPrevParagraph,
             GotoPrevParameter, GotoPrevTest, GotoPrevXmlElement, GotoReferences, GotoWindowBottom,
             GotoWindowCenter, GotoWindowTop, GotoWord, HalfPageDown, HalfPageUp, Increment,
             IndentSelection, InsertAtLineEnd, InsertAtLineStart, InsertRegister, InsertTab,
@@ -653,6 +654,10 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
     add(CloseAllBuffers::DEF, |_| Ok(Box::new(CloseAllBuffers)));
     add(ForceCloseAllBuffers::DEF, |_| {
         Ok(Box::new(ForceCloseAllBuffers))
+    });
+    add(CloseOtherBuffers::DEF, |_| Ok(Box::new(CloseOtherBuffers)));
+    add(ForceCloseOtherBuffers::DEF, |_| {
+        Ok(Box::new(ForceCloseOtherBuffers))
     });
     add(GotoLastAccessed::DEF, |_| Ok(Box::new(GotoLastAccessed)));
     add(AcceptCompletion::DEF, |_| Ok(Box::new(AcceptCompletion)));
@@ -1750,6 +1755,8 @@ mod tests {
             ("bclose", "CloseBuffer"),
             ("bca", "CloseAllBuffers"),
             ("bcloseall", "CloseAllBuffers"),
+            ("bco", "CloseOtherBuffers"),
+            ("bcloseother", "CloseOtherBuffers"),
         ] {
             assert_eq!(
                 lookup_alias(token).map(|e| e.def.name()),
@@ -1851,6 +1858,16 @@ mod tests {
             assert_eq!(
                 lookup_alias(token).expect(token).def.name(),
                 "ForceCloseAllBuffers",
+            );
+        }
+    }
+
+    #[test]
+    fn force_close_other_buffers_aliases_resolve() {
+        for token in ["bco!", "buffer-close-others!", "bcloseother!", "BCO!"] {
+            assert_eq!(
+                lookup_alias(token).expect(token).def.name(),
+                "ForceCloseOtherBuffers",
             );
         }
     }
@@ -2302,7 +2319,8 @@ mod tests {
         // + 1 ForceQuitAll.
         // + 1 ForceWriteQuit.
         // + 1 ForceCloseBuffer.
-        assert_eq!(all().count(), 515);
+        // + 2 CloseOtherBuffers/ForceCloseOtherBuffers.
+        assert_eq!(all().count(), 517);
     }
 
     #[test]

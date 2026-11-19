@@ -573,6 +573,10 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
         ActionKind::ForceCloseBuffer => crate::buffer_lifecycle::close_buffer(stoat, true),
         ActionKind::CloseAllBuffers => crate::buffer_lifecycle::close_all_buffers(stoat, false),
         ActionKind::ForceCloseAllBuffers => crate::buffer_lifecycle::close_all_buffers(stoat, true),
+        ActionKind::CloseOtherBuffers => crate::buffer_lifecycle::close_other_buffers(stoat, false),
+        ActionKind::ForceCloseOtherBuffers => {
+            crate::buffer_lifecycle::close_other_buffers(stoat, true)
+        },
         ActionKind::GotoLastAccessed => crate::buffer_lifecycle::goto_last_accessed(stoat),
         ActionKind::AutoReload => {
             let auto = action

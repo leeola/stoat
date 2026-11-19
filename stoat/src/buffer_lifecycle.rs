@@ -1104,6 +1104,63 @@ pub(crate) fn close_all_buffers(stoat: &mut Stoat, force: bool) -> UpdateEffect 
     UpdateEffect::Redraw
 }
 
+/// Close every buffer that [`close_all_buffers`] closes but the focused one.
+///
+/// Without `force`, each clean buffer closes and each one with unsaved edits
+/// stays. The status then names the buffers that stay in the words of the
+/// `:q` refusal, and a focused split pane on a clean buffer switches to the
+/// first of them. With `force` the edits go with their buffers.
+pub(crate) fn close_other_buffers(stoat: &mut Stoat, force: bool) -> UpdateEffect {
+    let Some(focused) = focused_editor_mut(stoat).map(|editor| editor.buffer_id) else {
+        return UpdateEffect::None;
+    };
+    let targets: Vec<_> = stoat
+        .active_workspace()
+        .buffers
+        .summaries()
+        .into_iter()
+        .filter(|summary| summary.path.is_some() && !summary.preview && summary.id != focused)
+        .collect();
+    if targets.is_empty() {
+        stoat.set_status("no other buffers open");
+        return UpdateEffect::Redraw;
+    }
+
+    let (unsaved, closing): (Vec<_>, Vec<_>) = targets
+        .into_iter()
+        .partition(|summary| summary.dirty && !force);
+    for summary in &closing {
+        close_buffer_by_id(stoat, summary.id);
+    }
+    if unsaved.is_empty() {
+        stoat.set_status(match closing.len() {
+            1 => "closed 1 buffer".to_string(),
+            count => format!("closed {count} buffers"),
+        });
+        return UpdateEffect::Redraw;
+    }
+
+    let first = unsaved[0].id;
+    let workspace = stoat.active_workspace;
+    let switch = {
+        let ws = &stoat.workspaces[workspace];
+        let focused_clean = ws
+            .buffers
+            .get(focused)
+            .is_some_and(|buffer| !buffer.read().expect("buffer poisoned").dirty);
+        let pane = matches!(ws.focus, FocusTarget::SplitPane).then(|| ws.panes.focus());
+        pane.filter(|_| focused_clean).zip(ws.buffers.get(first))
+    };
+    if let Some((target, buffer)) = switch {
+        let executor = stoat.executor.clone();
+        jump::record_pane_switch(stoat, workspace, target, first);
+        show_buffer_in_pane(stoat, workspace, target, first, buffer, executor);
+    }
+    let status = unsaved_remaining_status(unsaved.iter().map(|summary| summary.path.as_deref()));
+    stoat.set_status(status);
+    UpdateEffect::Redraw
+}
+
 /// Drop `buffer_id` from the active workspace, whatever its dirty state.
 ///
 /// The caller answers for unsaved edits. The panes, the session state, and the
@@ -1279,9 +1336,9 @@ mod tests {
         test_harness::{self, editor, TestHarness},
     };
     use stoat_action::{
-        CloseAllBuffers, CloseBuffer, DiffFiles, FocusLeft, ForceCloseAllBuffers, ForceCloseBuffer,
-        GotoLastAccessed, JumpBackward, NewBuffer, OpenBuffer, OpenFile, SaveBuffer, SetMark,
-        SplitRight,
+        CloseAllBuffers, CloseBuffer, CloseOtherBuffers, DiffFiles, FocusLeft,
+        ForceCloseAllBuffers, ForceCloseBuffer, ForceCloseOtherBuffers, GotoLastAccessed,
+        JumpBackward, NewBuffer, OpenBuffer, OpenFile, SaveBuffer, SetMark, SplitRight,
     };
 
     fn focused_buffer_id(stoat: &mut Stoat) -> BufferId {
@@ -2273,6 +2330,95 @@ mod tests {
                 h.stoat.pending_message.as_deref(),
             ),
             (Vec::<PathBuf>::new(), true, Some("closed 2 buffers")),
+        );
+    }
+
+    /// Open `a.txt` and `c.txt` under `/last-accessed`, then `b.txt`, so the
+    /// focus ends on `b.txt`. With `dirty`, `c.txt` takes an unsaved edit while
+    /// it has the focus. Returns the ids in name order.
+    fn open_three(h: &mut TestHarness, dirty: bool) -> [BufferId; 3] {
+        let a = open_named(h, "a.txt");
+        let c = open_named(h, "c.txt");
+        if dirty {
+            h.edit_focused(0..0, "x");
+        }
+        let b = open_named(h, "b.txt");
+        [a, b, c]
+    }
+
+    /// The paths of the open buffers that have one, in path order.
+    fn path_buffers(h: &TestHarness) -> Vec<PathBuf> {
+        h.stoat
+            .active_workspace()
+            .buffers
+            .summaries()
+            .into_iter()
+            .filter_map(|summary| summary.path)
+            .collect()
+    }
+
+    #[test]
+    fn close_other_buffers_leaves_the_focused_one() {
+        let mut h = Stoat::test();
+        let [_, b, _] = open_three(&mut h, false);
+        dispatch(&mut h.stoat, &CloseOtherBuffers);
+
+        assert_eq!(
+            (
+                path_buffers(&h),
+                focused_buffer_id(&mut h.stoat),
+                h.stoat.pending_message.as_deref(),
+            ),
+            (
+                vec![PathBuf::from("/last-accessed/b.txt")],
+                b,
+                Some("closed 2 buffers"),
+            ),
+        );
+    }
+
+    /// The plain form closes the clean buffers and keeps the unsaved one, which
+    /// the pane shows, since the focused buffer is clean.
+    #[test]
+    fn close_other_buffers_keeps_an_unsaved_one_and_shows_it() {
+        let mut h = Stoat::test();
+        let [_, _, c] = open_three(&mut h, true);
+        dispatch(&mut h.stoat, &CloseOtherBuffers);
+
+        assert_eq!(
+            (
+                path_buffers(&h),
+                focused_buffer_id(&mut h.stoat),
+                h.stoat.pending_message.as_deref(),
+            ),
+            (
+                vec![
+                    PathBuf::from("/last-accessed/b.txt"),
+                    PathBuf::from("/last-accessed/c.txt"),
+                ],
+                c,
+                Some("1 unsaved buffer remaining: c.txt"),
+            ),
+        );
+    }
+
+    #[test]
+    fn force_close_other_buffers_leaves_only_the_focused_one() {
+        let mut h = Stoat::test();
+        let [_, b, _] = open_three(&mut h, true);
+        dispatch(&mut h.stoat, &ForceCloseOtherBuffers);
+
+        assert_eq!(
+            (
+                path_buffers(&h),
+                focused_buffer_id(&mut h.stoat),
+                h.stoat.pending_message.as_deref(),
+            ),
+            (
+                vec![PathBuf::from("/last-accessed/b.txt")],
+                b,
+                Some("closed 2 buffers"),
+            ),
         );
     }
 

@@ -846,6 +846,29 @@ define_action!(
 );
 
 define_action!(
+    CloseOtherBuffersDef,
+    CloseOtherBuffers,
+    "CloseOtherBuffers",
+    ActionKind::CloseOtherBuffers,
+    "close every buffer but the focused one",
+    "Close every buffer that CloseAllBuffers closes, but the focused one. Each buffer with unsaved edits stays open, and the status names those buffers. When the focused buffer is clean, the pane shows the first of them. buffer-close-others! closes them with the edits discarded.",
+    ActionPriority::Common,
+    aliases = &["bco", "bcloseother"],
+    command_name = "buffer-close-others"
+);
+
+define_action!(
+    ForceCloseOtherBuffersDef,
+    ForceCloseOtherBuffers,
+    "ForceCloseOtherBuffers",
+    ActionKind::ForceCloseOtherBuffers,
+    "close every buffer but the focused one, discarding unsaved edits",
+    "Close what CloseOtherBuffers closes, and discard the unsaved edits that CloseOtherBuffers keeps open, as w! is to w.",
+    ActionPriority::Common,
+    aliases = &["bco!", "buffer-close-others!", "bcloseother!"]
+);
+
+define_action!(
     GotoLastAccessedDef,
     GotoLastAccessed,
     "GotoLastAccessed",

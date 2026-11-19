@@ -210,6 +210,8 @@ action_kinds! {
     ForceCloseBuffer,
     CloseAllBuffers,
     ForceCloseAllBuffers,
+    CloseOtherBuffers,
+    ForceCloseOtherBuffers,
     GotoLastAccessed,
     AutoReload,
     AutoReloadConfig,
