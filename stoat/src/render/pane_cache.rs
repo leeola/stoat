@@ -708,7 +708,7 @@ fn stack_cache_key(
             excerpt.top,
             end,
             (&excerpt.rel_path, excerpt.file_kind(frame.tallies)),
-            (excerpt.folded_version, excerpt.collapsed),
+            (excerpt.folded_version, excerpt.collapsed, excerpt.conflicts),
             excerpt.empty,
             shown.display_map.buffer_snapshot().version(),
             shown.display_map.snapshot().paint_version(),

@@ -302,6 +302,12 @@ pub(crate) struct Excerpt {
     /// Whether the file holds no line and has no base, so the stack shows one
     /// note row for it in place of rows. [`refold`] writes it at each cut.
     pub empty: bool,
+    /// The conflict blocks the file's text holds, as [`conflict_starts`]
+    /// counts them at each cut.
+    ///
+    /// The count reads the markers in any file's text, so it names real
+    /// conflicts only for a file that the tally lists as unmerged.
+    pub conflicts: u32,
     /// Whether the stack shows the file as its header alone, because the
     /// reader folded it or because the stack opened a deleted file.
     ///
@@ -2303,6 +2309,7 @@ fn open_excerpt(
         reloaded: false,
         revealed: Vec::new(),
         empty: false,
+        conflicts: 0,
         collapsed,
     })
 }
@@ -2373,6 +2380,7 @@ pub(crate) fn adopt_excerpt(
             reloaded: false,
             revealed: Vec::new(),
             empty: false,
+            conflicts: 0,
             collapsed,
         },
     );
@@ -2483,6 +2491,9 @@ fn refold(ws: &mut Workspace) -> bool {
                 && buffers.get(excerpt.buffer_id).is_some_and(|buffer| {
                     buffer.read().expect("buffer poisoned").rope().is_empty()
                 });
+            excerpt.conflicts = buffers.get(excerpt.buffer_id).map_or(0, |buffer| {
+                conflict_starts(buffer.read().expect("buffer poisoned").rope())
+            });
             excerpt.folded_syntax = syntax;
             excerpt.cursor_held = cursor.is_some();
             if new_map {
@@ -2508,6 +2519,30 @@ fn refold(ws: &mut Workspace) -> bool {
         }
     }
     any
+}
+
+/// The conflict blocks in `rope`, counted by the rows that open one.
+///
+/// A row opens a block when it starts with seven `<` and the next character
+/// is a space or the row's end, as git writes the marker. An indented marker
+/// and a longer run of `<` open none.
+fn conflict_starts(rope: &Rope) -> u32 {
+    let mut count = 0;
+    // The `<` that open the current row, or `None` once the row holds another
+    // byte first.
+    let mut run: Option<u8> = Some(0);
+    for byte in rope.chunks().flat_map(str::bytes) {
+        run = match (byte, run) {
+            (b'<', Some(n)) if n < 7 => Some(n + 1),
+            (b' ' | b'\n', Some(7)) => {
+                count += 1;
+                (byte == b'\n').then_some(0)
+            },
+            (b'\n', _) => Some(0),
+            _ => None,
+        };
+    }
+    count + u32::from(run == Some(7))
 }
 
 /// Land the cursor of each changes view of `ws` that waits on a landing, and
@@ -3352,12 +3387,12 @@ fn map_version(buffers: &BufferRegistry, id: BufferId) -> Option<usize> {
 #[cfg(test)]
 mod tests {
     use super::{
-        cursor_point, cursor_stack_row, excerpt_rows, expand_from_cursor, fold_edge, fold_excerpt,
-        follow_cursor, gap_fold, gaps, header_rows, hidden_lines, kept_rows, kept_runs,
-        landing_row, layout_stack, listed_files, place_cursor, press_cell, pump_diff_changes_stack,
-        reveal_cursor, reveal_rows, scope_parts, select_row, toggle_file, DiffChangesState,
-        Excerpt, ExcerptStats, ExpandDir, FoldEdge, Landing, ScopeParse, ScopePart, ScopeRole,
-        StackStamp,
+        conflict_starts, cursor_point, cursor_stack_row, excerpt_rows, expand_from_cursor,
+        fold_edge, fold_excerpt, follow_cursor, gap_fold, gaps, header_rows, hidden_lines,
+        kept_rows, kept_runs, landing_row, layout_stack, listed_files, place_cursor, press_cell,
+        pump_diff_changes_stack, reveal_cursor, reveal_rows, scope_parts, select_row, toggle_file,
+        DiffChangesState, Excerpt, ExcerptStats, ExpandDir, FoldEdge, Landing, ScopeParse,
+        ScopePart, ScopeRole, StackStamp,
     };
     use crate::{
         action_handlers::dispatch,
@@ -4716,6 +4751,56 @@ fn hint_width() -> u32 {
             .write()
             .expect("buffer poisoned")
             .edit(0..0, text);
+    }
+
+    /// An excerpt counts the conflict blocks its text holds at each cut. A
+    /// file whose working text holds two marker blocks counts 2, and an edit
+    /// that takes the first block out counts 1 once the next cut lands.
+    #[test]
+    fn an_excerpt_counts_the_conflict_blocks_of_its_text() {
+        let mut h = TestHarness::with_size(100, 24);
+        h.stoat.set_diff_warm_auto(true);
+        let block = |side: &str| format!("<<<<<<< HEAD\n{side}\n=======\ntheirs\n>>>>>>> theirs\n");
+        let working = format!("a\n{}b\n{}c\n", block("one"), block("two"));
+        h.stage_review_scenario("/repo", &[("a.txt", "a\nb\nc\n", &working)]);
+        h.open_file(Path::new("/repo/a.txt"));
+        let (_, buffer_id) = h.stoat.focused_editor_ids().expect("editor");
+        stacked(&mut h);
+        h.settle_diff_jobs();
+        let conflicts = |h: &mut TestHarness| with_stack(h, |state, _| state.excerpts[0].conflicts);
+        let opened = conflicts(&mut h);
+
+        h.stoat
+            .active_workspace()
+            .buffers
+            .get(buffer_id)
+            .expect("buffer")
+            .write()
+            .expect("buffer poisoned")
+            .edit(2..2 + block("one").len(), "one\n");
+        h.settle_diff_jobs();
+
+        assert_eq!((opened, conflicts(&mut h)), (2, 1));
+    }
+
+    /// A row opens a conflict block when it starts with seven `<` and a space
+    /// or the row's end. A longer run of `<`, an indented marker, and a marker
+    /// with another character after it open none. A marker on the last row
+    /// counts with no newline after it.
+    #[test]
+    fn conflict_starts_reads_marker_lines_alone() {
+        let count = |text: &str| conflict_starts(&Rope::from(text));
+        assert_eq!(
+            [
+                count("<<<<<<< HEAD\nx\n"),
+                count("x\n<<<<<<<\n"),
+                count("<<<<<<<< HEAD\n"),
+                count("  <<<<<<< HEAD\n"),
+                count("<<<<<<<x\n"),
+                count("<<<<<<< a\n<<<<<<<"),
+            ],
+            [1, 1, 0, 0, 0, 2],
+        );
     }
 
     /// An excerpt's rows follow its editor's display rows, after a refold and

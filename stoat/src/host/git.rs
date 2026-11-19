@@ -59,6 +59,12 @@ pub struct HunkTallies {
     /// The files the index leaves unmerged, sorted and repo-relative. Empty
     /// unless a merge, a rebase, or a cherry-pick stopped on a conflict.
     pub conflicted: Vec<PathBuf>,
+    /// The conflicted files that one side of the merge deleted, sorted and
+    /// repo-relative, each with the side that deleted it.
+    ///
+    /// A subset of [`Self::conflicted`]. A file that both sides hold is not
+    /// listed.
+    pub deleted_in_conflict: Vec<(PathBuf, DeletedBy)>,
     /// How each changed file stands against HEAD, sorted by path and
     /// repo-relative, with one entry per path.
     ///
@@ -76,6 +82,32 @@ impl HunkTallies {
             .binary_search_by(|change| change.path.as_path().cmp(rel_path))
             .ok()
             .map(|index| &self.changes[index])
+    }
+}
+
+/// The side of a merge that deleted a file the other side changed, as
+/// [`HunkTallies::deleted_in_conflict`] names it.
+///
+/// The index records such a conflict with no entry for the deleting side.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DeletedBy {
+    Ours,
+    Theirs,
+}
+
+impl DeletedBy {
+    /// The side that deleted a conflicted file whose index entry holds an ours
+    /// stage when `ours` is set and a theirs stage when `theirs` is set, or
+    /// `None` when both sides hold the file.
+    ///
+    /// An entry with neither stage answers [`DeletedBy::Ours`]. Git leaves such
+    /// an entry at the old path of a file that both sides renamed.
+    pub(crate) fn from_stages(ours: bool, theirs: bool) -> Option<Self> {
+        match (ours, theirs) {
+            (false, _) => Some(Self::Ours),
+            (true, false) => Some(Self::Theirs),
+            (true, true) => None,
+        }
     }
 }
 

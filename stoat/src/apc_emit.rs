@@ -3795,6 +3795,7 @@ fn stack_page_version(
             excerpt.top,
             &excerpt.rel_path,
             excerpt.folded_version,
+            excerpt.conflicts,
             excerpt.collapsed,
             excerpt.empty,
             editor.display_map.wrap_width(),

@@ -3,9 +3,9 @@ mod tree;
 
 use crate::host::git::{
     BackendSnafu, BlameCommit, BlameRun, ChangeLineStats, ChangedFile, CherryPickOutcome,
-    CommitChanges, CommitFileChange, CommitFileChangeKind, CommitInfo, ConflictedFile, FileBlame,
-    FileChange, FileKind, GitApplyError, GitHost, GitRepo, HunkTallies, MergeOutcome, MergeState,
-    RebaseError, RebaseTodo, RewriteResult, StagedKind,
+    CommitChanges, CommitFileChange, CommitFileChangeKind, CommitInfo, ConflictedFile, DeletedBy,
+    FileBlame, FileChange, FileKind, GitApplyError, GitHost, GitRepo, HunkTallies, MergeOutcome,
+    MergeState, RebaseError, RebaseTodo, RewriteResult, StagedKind,
 };
 use git2::{
     build::CheckoutBuilder, ApplyLocation, BlameOptions, Branch, BranchType, Commit, Delta, Diff,
@@ -394,18 +394,24 @@ impl GitRepo for LocalGitRepo {
         untracked.retain(|path| per_file.contains_key(path));
 
         let workdir = repo.workdir().map(Path::to_path_buf);
-        let mut conflicted: Vec<PathBuf> = conflicted_entries(&repo)
-            .unwrap_or_default()
-            .into_iter()
-            .map(|entry| match &workdir {
+        let mut conflicted: Vec<PathBuf> = Vec::new();
+        let mut deleted_in_conflict: Vec<(PathBuf, DeletedBy)> = Vec::new();
+        for entry in conflicted_entries(&repo).unwrap_or_default() {
+            let path = match &workdir {
                 Some(workdir) => entry
                     .path
                     .strip_prefix(workdir)
                     .map_or(entry.path.clone(), Path::to_path_buf),
                 None => entry.path,
-            })
-            .collect();
+            };
+            if let Some(side) = DeletedBy::from_stages(entry.ours.is_some(), entry.theirs.is_some())
+            {
+                deleted_in_conflict.push((path.clone(), side));
+            }
+            conflicted.push(path);
+        }
         conflicted.sort();
+        deleted_in_conflict.sort_by(|(a, _), (b, _)| a.cmp(b));
 
         HunkTallies {
             staged,
@@ -414,6 +420,7 @@ impl GitRepo for LocalGitRepo {
             unstaged_per_file: unstaged_per_file.into_iter().collect(),
             untracked,
             conflicted,
+            deleted_in_conflict,
             changes,
         }
     }

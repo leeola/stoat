@@ -8,7 +8,7 @@ use std::{
     path::{Path, PathBuf},
 };
 use stoat::host::{
-    git::{FileChange, FileKind, HunkTallies},
+    git::{DeletedBy, FileChange, FileKind, HunkTallies},
     CommitFileChangeKind, GitApplyError, GitHost, GitRepo, LocalGit, RebaseTodo, RebaseTodoOp,
 };
 
@@ -1692,4 +1692,42 @@ fn conflict_stages_add_add_conflict_has_no_ancestor() {
     assert_eq!(stages.ancestor, None);
     assert_eq!(stages.ours.as_deref(), Some("ours\n"));
     assert_eq!(stages.theirs.as_deref(), Some("theirs\n"));
+}
+
+/// The tally names the side that deleted a conflicted file the other side
+/// changed. A branch that removes `a.rs` and edits `b.rs`, merged into a head
+/// that edits both, leaves both unmerged. Only `a.rs` is named, for theirs,
+/// since both sides hold `b.rs`.
+#[test]
+fn hunk_tallies_name_the_side_that_deleted_a_conflicted_file() {
+    let tr = TestRepo::new();
+    tr.commit_file("a.rs", "a base\n");
+    tr.commit_file("b.rs", "b base\n");
+    let base = tr.head_sha();
+
+    let theirs = tr.commit_flat_tree_on(
+        "refs/heads/theirs",
+        &base,
+        &[("b.rs", "b theirs\n")],
+        "drop a, edit b",
+    );
+    tr.write_and_stage("a.rs", "a ours\n")
+        .write_and_stage("b.rs", "b ours\n")
+        .commit("edit both");
+
+    let annotated = tr
+        .repo
+        .find_annotated_commit(Oid::from_str(&theirs).unwrap())
+        .unwrap();
+    tr.repo.merge(&[&annotated], None, None).unwrap();
+    tr.repo.index().unwrap().write().unwrap();
+
+    let tallies = LocalGit::new().discover(tr.path()).unwrap().hunk_tallies();
+    assert_eq!(
+        (tallies.conflicted, tallies.deleted_in_conflict),
+        (
+            vec![PathBuf::from("a.rs"), PathBuf::from("b.rs")],
+            vec![(PathBuf::from("a.rs"), DeletedBy::Theirs)],
+        ),
+    );
 }

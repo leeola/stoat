@@ -6,9 +6,9 @@ use crate::{
         fake::FakeFs,
         git::{
             BackendSnafu, BlameCommit, BlameRun, ChangeLineStats, ChangedFile, CherryPickOutcome,
-            CommitFileChange, CommitFileChangeKind, CommitInfo, ConflictedFile, FileBlame,
-            FileChange, FileKind, GitApplyError, GitHost, GitRepo, HunkTallies, MergeOutcome,
-            MergeState, RebaseError, RebaseTodo, RewriteResult, StagedKind,
+            CommitFileChange, CommitFileChangeKind, CommitInfo, ConflictedFile, DeletedBy,
+            FileBlame, FileChange, FileKind, GitApplyError, GitHost, GitRepo, HunkTallies,
+            MergeOutcome, MergeState, RebaseError, RebaseTodo, RewriteResult, StagedKind,
         },
     },
 };
@@ -1587,6 +1587,15 @@ impl GitRepo for FakeGitRepo {
             .map(|file| relative(&file.path))
             .collect();
         conflicted.sort();
+        let mut deleted_in_conflict: Vec<(PathBuf, DeletedBy)> = state
+            .conflicts
+            .iter()
+            .filter_map(|file| {
+                let side = DeletedBy::from_stages(file.ours.is_some(), file.theirs.is_some())?;
+                Some((relative(&file.path), side))
+            })
+            .collect();
+        deleted_in_conflict.sort_by(|(a, _), (b, _)| a.cmp(b));
 
         HunkTallies {
             staged: side(true),
@@ -1595,6 +1604,7 @@ impl GitRepo for FakeGitRepo {
             unstaged_per_file: unstaged_per_file.into_iter().collect(),
             untracked,
             conflicted,
+            deleted_in_conflict,
             changes: state.file_changes(&self.workdir),
         }
     }
@@ -2956,6 +2966,31 @@ mod tests {
         assert_eq!(
             changed[0].renamed_from.as_deref(),
             Some(workdir().join("old.rs").as_path())
+        );
+    }
+
+    /// A conflict whose ours stage is absent names ours as the side that
+    /// deleted the file, and one whose theirs stage is absent names theirs. A
+    /// conflict that both sides hold names no side, though it stays unmerged.
+    #[test]
+    fn a_conflict_with_an_absent_stage_names_the_side_that_deleted_it() {
+        let host = FakeGit::new();
+        host.add_repo(workdir())
+            .conflicted_file("c.rs", Some("base\n"), Some("ours\n"), Some("theirs\n"))
+            .conflicted_file("b.rs", Some("base\n"), Some("ours\n"), None)
+            .conflicted_file("a.rs", Some("base\n"), None, Some("theirs\n"));
+        let tallies = host.discover(&workdir()).unwrap().hunk_tallies();
+
+        let path = PathBuf::from;
+        assert_eq!(
+            (tallies.conflicted, tallies.deleted_in_conflict),
+            (
+                vec![path("a.rs"), path("b.rs"), path("c.rs")],
+                vec![
+                    (path("a.rs"), DeletedBy::Ours),
+                    (path("b.rs"), DeletedBy::Theirs)
+                ],
+            ),
         );
     }
 
