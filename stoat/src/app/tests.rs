@@ -7799,10 +7799,10 @@ fn a_scroll_past_the_last_page_is_clamped_on_every_frame() {
 }
 
 /// A parse that restyles an excerpt scrolled out of the changes view's window
-/// earns a frame only through the changes strip, which shows every excerpt's
-/// rows. The pane replays on that frame.
+/// earns no frame, with or without the changes strip, since the strip draws
+/// every row in one gray. A render after it replays the pane.
 #[test]
-fn a_landing_in_a_scrolled_off_excerpt_earns_a_frame_only_for_the_strip() {
+fn a_landing_in_a_scrolled_off_excerpt_earns_no_frame() {
     let outcomes: Vec<(bool, u64)> = [false, true]
         .into_iter()
         .map(|minimap| {
@@ -7836,7 +7836,7 @@ fn a_landing_in_a_scrolled_off_excerpt_earns_a_frame_only_for_the_strip() {
         .collect();
     assert_eq!(
         outcomes,
-        [(false, 0), (true, 0)],
+        [(false, 0), (false, 0)],
         "(earned, panes painted) without and with the changes strip",
     );
 }

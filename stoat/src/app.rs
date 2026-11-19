@@ -9710,42 +9710,19 @@ impl Stoat {
         // Tell each strip which rows the parse restained, so its recolor sweep
         // covers those instead of re-summarizing the whole file. A buffer with
         // no strip yet needs nothing, since a strip's initial build reads
-        // whatever tokens are current by the time it runs.
+        // whatever tokens are current by the time it runs. The diff strips
+        // draw every row in one gray, so a parse recolors none of them.
         let ws_id = self.active_workspace;
-        // The changes strip summarizes every excerpt's rows, so a landing in an
-        // excerpt the window does not show still recolors the strip, while the
-        // pane replays. The strip resends only the rows the landing reports.
-        // The strip keeps a parked stack's lines for the flip back, so its
-        // excerpts count too.
-        let stacked: Vec<BufferId> = match self.diff_changes_strips.contains_key(&ws_id) {
-            true => self
-                .active_workspace()
-                .diff_changes_views
-                .values()
-                .chain(&self.active_workspace().parked_diff_changes)
-                .flat_map(|state| state.excerpts.iter().map(|excerpt| excerpt.buffer_id))
-                .collect(),
-            false => Vec::new(),
-        };
         let mut earned = false;
         for landing in installed {
             let strip = self.minimap_content.get_mut(&(ws_id, landing.buffer_id));
             earned |= match landing.restyle {
                 ParseRestyle::Unchanged => false,
-                ParseRestyle::Offscreen => strip.is_some() || stacked.contains(&landing.buffer_id),
+                ParseRestyle::Offscreen => strip.is_some(),
                 ParseRestyle::Onscreen => true,
             };
             if let Some(content) = strip {
-                content.note_syntax_rows(landing.changed_rows.clone());
-            }
-            if stacked.contains(&landing.buffer_id) {
-                let version = self
-                    .active_workspace()
-                    .buffers
-                    .syntax_version(landing.buffer_id);
-                if let Some(strip) = self.diff_changes_strips.get_mut(&ws_id) {
-                    strip.note_syntax_rows(landing.buffer_id, landing.changed_rows, version);
-                }
+                content.note_syntax_rows(landing.changed_rows);
             }
         }
         earned

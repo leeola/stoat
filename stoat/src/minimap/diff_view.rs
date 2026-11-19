@@ -59,7 +59,7 @@ pub(crate) struct DiffViewStrip {
     classes: u64,
     /// How many display rows each row stands for.
     density: Density,
-    /// A hash of the display, text, diff, and parse versions the rows show.
+    /// A hash of the display, text, and diff versions the rows show.
     versions: u64,
     /// The first row the pass in flight has not summarized yet, or `None` once
     /// the held rows show what the inputs ask for.
@@ -139,11 +139,14 @@ impl BandSource for DisplayRows<'_> {
 /// A conflict view editor's strip syncs here too. Its rows take the conflict
 /// marks of its open chunks in place of a diff's Change Marks.
 ///
-/// A change of the class table, the density, the display, the text, the diff,
-/// or the parse starts a pass over every row. Each sync summarizes the pass's
-/// rows in slices of at most [`SYNC_SLICE`] until its time budget runs out,
-/// and sends the runs of rows that differ from the held ones. The pass ends by
-/// cutting the held rows past the display's last row.
+/// A change of the class table, the density, the display, the text, or the
+/// diff starts a pass over every row. A parse or arrived LSP tokens start
+/// none, since every row draws its text in one gray and reads no syntax token.
+///
+/// Each sync summarizes the pass's rows in slices of at most [`SYNC_SLICE`]
+/// until its time budget runs out, and sends the runs of rows that differ from
+/// the held ones. The pass ends by cutting the held rows past the display's
+/// last row.
 ///
 /// The strip's density lands on the editor, which places the strip's thumb
 /// and maps a press on the strip.
@@ -199,8 +202,6 @@ pub(crate) fn sync_diff_view_strip(
         snapshot.buffer_snapshot().version().hash(&mut hasher);
         snapshot.paint_version().hash(&mut hasher);
         editor.display_map.diff_version().hash(&mut hasher);
-        buffers.syntax_version(buffer_id).hash(&mut hasher);
-        buffers.lsp_token_version(buffer_id).hash(&mut hasher);
         hasher.finish()
     };
     let classes = minimap_class_table.class_version;
@@ -362,6 +363,8 @@ mod tests {
     use crate::{
         action_handlers::{dispatch, focused_editor_mut, review::enter_diff_view},
         apc_emit,
+        buffer_registry::RetainedLspTokens,
+        display_map::highlights::BufferSemanticTokens,
         editor_state::EditorId,
         minimap::{density, emit, EdgeClass},
         mouse::MinimapDrag,
@@ -373,7 +376,7 @@ mod tests {
     };
     use crossterm::event::{MouseButton, MouseEventKind};
     use ratatui::layout::Rect;
-    use std::path::Path;
+    use std::{path::Path, sync::Arc, time::Duration};
     use stoat_action::{Conflict, ConflictPickOurs, DiffSyntax, DiffTintUp};
     use stoat_config::MinimapMode;
     use stoatty_protocol::{
@@ -594,6 +597,81 @@ mod tests {
         assert_eq!(
             (h.stoat.diff_tint, h.stoat.diff_syntax, sent),
             (2, false, 0)
+        );
+    }
+
+    /// A parse and arrived LSP tokens start no pass over the strip's rows,
+    /// since every row draws its text in one gray, and the parse moves no part
+    /// of the display's paint version. An edit starts a pass.
+    ///
+    /// A Thumb Minimum past the viewport's rows caps a strip row at one display
+    /// row, so the 600 rows take two slices, and a pass that starts at a zero
+    /// budget leaves rows unsent after its frame.
+    #[test]
+    fn a_parse_or_lsp_tokens_start_no_pass_over_the_strip() {
+        let base: Vec<String> = (0..600).map(|n| format!("let x{n} = {n};")).collect();
+        let mut live = base.clone();
+        live[300] = "let changed = 1;".to_string();
+        let (mut h, mut rx) = diff_view_of("long.rs", &base, &live);
+        h.stoat.settings.editor_minimap_thumb_min_rows = Some(100);
+        let (editor_id, buffer_id) = h.stoat.focused_editor_ids().expect("an editor");
+        let key = (h.stoat.active_workspace, editor_id);
+        for _ in 0..4 {
+            frame(&mut h, &mut rx);
+        }
+        let settled = !h.stoat.diff_view_strips[&key].build_pending();
+        h.stoat
+            .diff_view_strips
+            .get_mut(&key)
+            .expect("the strip")
+            .budget = Duration::ZERO;
+        let pending = |h: &mut TestHarness, rx: &mut UnboundedReceiver<Vec<u8>>| {
+            frame(h, rx);
+            h.stoat.diff_view_strips[&key].build_pending()
+        };
+        let paint = |h: &mut TestHarness| {
+            focused_editor_mut(&mut h.stoat)
+                .expect("an editor")
+                .display_map
+                .snapshot()
+                .paint_version()
+        };
+        let painted = paint(&mut h);
+        let parsed = h
+            .stoat
+            .active_workspace()
+            .buffers
+            .syntax_version(buffer_id)
+            .is_some();
+
+        h.stoat
+            .active_workspace_mut()
+            .buffers
+            .clear_syntax(buffer_id);
+        let after_parse = (pending(&mut h, &mut rx), paint(&mut h) == painted);
+        let interner = h.stoat.syntax_styles.interner.clone();
+        let channel = BufferSemanticTokens::new(Arc::from(Vec::new()), interner, |_| 0);
+        h.stoat.active_workspace_mut().buffers.store_lsp_tokens(
+            buffer_id,
+            RetainedLspTokens {
+                version: 0,
+                channel,
+            },
+        );
+        let after_tokens = pending(&mut h, &mut rx);
+        h.stoat
+            .active_workspace()
+            .buffers
+            .get(buffer_id)
+            .expect("buffer")
+            .write()
+            .expect("buffer poisoned")
+            .edit(0..0, "x");
+        let after_edit = pending(&mut h, &mut rx);
+
+        assert_eq!(
+            (settled, parsed, after_parse, after_tokens, after_edit),
+            (true, true, (false, true), false, true),
         );
     }
 
