@@ -2150,6 +2150,11 @@ fn relist(stoat: &mut Stoat) -> bool {
 /// file that a commit cleaned then leaves the list when the tally lands. Under
 /// the index base only an unstaged hunk counts, as the tally counts.
 ///
+/// The stack shows the buffer's text, so an open buffer with an unsaved edit
+/// that leaves its current diff map with no counted hunk takes its file off the
+/// list, though the disk still differs. A file that the tally names for a move
+/// or as new stays, since its place on the list needs no hunk.
+///
 /// Outside a repository the list is empty. The working directory is the
 /// workspace's resolved [`Workspace::repo_root`], so a list opens no
 /// repository.
@@ -2159,11 +2164,29 @@ pub(crate) fn listed_files(stoat: &Stoat) -> BTreeMap<String, PathBuf> {
         return BTreeMap::new();
     };
     let index_base = ws.diff_base().is_none();
+    let reverted = |path: &PathBuf| {
+        let Some(id) = ws.buffers.id_for_path(path) else {
+            return false;
+        };
+        let current = ws.diff_map_current(id) || ws.hunks_installed(id);
+        current
+            && ws.buffers.get(id).is_some_and(|buffer| {
+                let buffer = buffer.read().expect("buffer poisoned");
+                buffer.dirty
+                    && buffer
+                        .diff_map
+                        .as_ref()
+                        .is_some_and(|map| !map.hunks().any(|hunk| !index_base || !hunk.staged()))
+            })
+    };
     let listed: Vec<PathBuf> = match ws.diff_base() {
         Some(DiffBase::Rev { sha: Some(_), .. }) => ws
             .rev_changed_files()
             .map(<[PathBuf]>::to_vec)
-            .unwrap_or_default(),
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|path| !reverted(path))
+            .collect(),
         _ => {
             let totals = match index_base {
                 true => ws.repo_unstaged_hunk_totals(),
@@ -2173,7 +2196,8 @@ pub(crate) fn listed_files(stoat: &Stoat) -> BTreeMap<String, PathBuf> {
                 .unwrap_or_default()
                 .iter()
                 .filter(|(_, count)| *count > 0)
-                .map(|(path, _)| workdir.join(path));
+                .map(|(path, _)| workdir.join(path))
+                .filter(|path| !reverted(path));
             let tallies = ws.repo_tallies();
             let unhunked = tallies
                 .iter()
@@ -5803,6 +5827,52 @@ fn hint_width() -> u32 {
                 h.stoat.active_workspace().editors.contains_key(editor_id),
             ),
             ("same\n".to_string(), false),
+        );
+    }
+
+    /// An unsaved edit that takes a file's last change takes the file off the
+    /// stack though the disk still differs, and the cursor lands on the next
+    /// change.
+    #[test]
+    fn an_unsaved_revert_of_a_listed_file_drops_its_excerpt() {
+        let mut h = TestHarness::with_size(100, 24);
+        h.stoat.set_diff_warm_auto(true);
+        h.stage_review_scenario("/repo", &[("a.txt", "a\n", "A\n"), ("b.txt", "b\n", "B\n")]);
+        h.open_file(Path::new("/repo/a.txt"));
+        dispatch(&mut h.stoat, &DiffChanges);
+        h.settle();
+
+        h.edit_focused(0..1, "a");
+        h.settle_diff_jobs();
+        assert_eq!(
+            (excerpts(&h), focus(&mut h)),
+            (listed(&["b.txt"]), at("b.txt", 0)),
+        );
+    }
+
+    /// A file the tally names for a move stays listed through an unsaved edit
+    /// that takes its buffer back to the base, since its place needs no hunk.
+    ///
+    /// The changes view's pump drives the tally, so the file stacks first.
+    #[test]
+    fn an_unsaved_edit_of_a_moved_file_keeps_it_listed() {
+        let mut h = TestHarness::with_size(100, 24);
+        h.stoat.set_diff_warm_auto(true);
+        h.stage_rename_scenario("/repo", "old.txt", "moved.txt", "same\n", "same\nmore\n");
+        h.stoat
+            .active_workspace_mut()
+            .set_worktree_base(WorktreeBase::Head);
+        h.open_file(Path::new("/repo/moved.txt"));
+        stacked(&mut h);
+
+        h.edit_focused(5..10, "");
+        h.settle_diff_jobs();
+        assert_eq!(
+            (
+                h.buffer_text_at(Path::new("/repo/moved.txt")),
+                listed_rel_paths(&h)
+            ),
+            ("same\n".to_string(), vec!["moved.txt".to_string()]),
         );
     }
 
