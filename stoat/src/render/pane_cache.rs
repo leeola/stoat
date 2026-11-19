@@ -50,7 +50,7 @@ use crate::{
     editor_state::{EditorId, EditorState},
     pane::{Pane, PaneId, Placement, View},
     render::{
-        diff_changes::stack_composited,
+        diff_changes::{merge_note, stack_composited},
         review::DiffDials,
         undercurl::{UndercurlBatch, UnderlineKind},
         FrameCtx, Hold,
@@ -707,7 +707,11 @@ fn stack_cache_key(
             excerpt.buffer_id,
             excerpt.top,
             end,
-            (&excerpt.rel_path, excerpt.file_kind(frame.tallies)),
+            (
+                &excerpt.rel_path,
+                excerpt.file_kind(frame.tallies),
+                merge_note(excerpt, frame),
+            ),
             (excerpt.folded_version, excerpt.collapsed, excerpt.conflicts),
             excerpt.empty,
             shown.display_map.buffer_snapshot().version(),

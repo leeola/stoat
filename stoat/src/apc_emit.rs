@@ -24,7 +24,7 @@ use crate::{
     minimap::{density, diff_view::diff_view_window, emit::minimap_view_window, LINES_PER_CELL},
     pane::{FocusTarget, PaneId, Placement, View},
     render::{
-        diff_changes::PagePaint,
+        diff_changes::{merge_note, PagePaint},
         editor::EolCursor,
         hover::HoverFrame,
         rail_strip_id,
@@ -1642,6 +1642,7 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
         // move of the line relative numbers count from as new runs alone.
         let split_gutter = decorate_pages && diff_rich;
         let tallies = ws.repo_tallies();
+        let repo_status = ws.repo_status();
         let no_pairs = std::collections::HashMap::new();
         // The fields the stack paint reads take the live frame's values, so a
         // page shows what the live paint shows on its rows. A page holds no
@@ -1672,7 +1673,7 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
             spinner_phase: 0,
             lsp_servers: &[],
             diff_warm_busy: false,
-            repo: None,
+            repo: repo_status.as_ref(),
             tallies: tallies.as_deref(),
             repo_root: ws.repo_root.as_deref(),
             hunk_position: None,
@@ -3802,7 +3803,7 @@ fn stack_page_version(
             display_map_stamp(buffer_version, paint_version),
             editor.display_map.diff_version(),
             excerpt.scope_row.as_deref(),
-            excerpt.file_kind(frame.tallies),
+            (excerpt.file_kind(frame.tallies), merge_note(excerpt, frame)),
         )
             .hash(&mut hasher);
         for flash in &editor.reveal_flashes {

@@ -89,7 +89,7 @@ impl HunkTallies {
 /// [`HunkTallies::deleted_in_conflict`] names it.
 ///
 /// The index records such a conflict with no entry for the deleting side.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum DeletedBy {
     Ours,
     Theirs,

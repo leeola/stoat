@@ -104,6 +104,32 @@ impl Theme {
             FileKind::New => (scope::DIFF_KIND_NEW, scope::DIFF_ADDED),
             FileKind::Deleted => (scope::DIFF_KIND_DELETED, scope::DIFF_DELETED),
         };
+        self.tag_style(tag, mark)
+    }
+
+    /// The style of the tag a File Header gives a file that a merge in progress
+    /// left unmerged, `vcs.conflict.tag`.
+    ///
+    /// A theme that leaves the scope unset gives the tag no box, and its text
+    /// takes the foreground of `vcs.conflict.header`, as the conflict view's
+    /// own tag falls back to the conflict header's color.
+    pub(crate) fn conflict_tag_style(&self) -> Style {
+        self.tag_style(scope::VCS_CONFLICT_TAG, scope::VCS_CONFLICT_HEADER)
+    }
+
+    /// The style of the tag a File Header gives a modified file that a merge in
+    /// progress changed clean, `diff.kind.merged`.
+    ///
+    /// A theme that leaves the scope unset gives the tag no box, and its text
+    /// takes the foreground of `vcs.conflict.theirs`, the side a merge brings
+    /// in.
+    pub(crate) fn merged_tag_style(&self) -> Style {
+        self.tag_style(scope::DIFF_KIND_MERGED, scope::VCS_CONFLICT_THEIRS)
+    }
+
+    /// The style of `tag`, or with `tag` unset the foreground of `mark` alone,
+    /// so the tag draws its text with no box.
+    fn tag_style(&self, tag: &str, mark: &str) -> Style {
         self.try_get(tag).unwrap_or_else(|| Style {
             fg: self.get(mark).fg,
             ..Style::default()
@@ -1030,6 +1056,9 @@ pub mod scope {
     /// The File Kind Tag of a deleted file, as [`DIFF_KIND_MODIFIED`] draws a
     /// tag.
     pub const DIFF_KIND_DELETED: &str = "diff.kind.deleted";
+    /// The tag of a modified file that a merge in progress changed clean, in
+    /// place of its File Kind Tag, as [`DIFF_KIND_MODIFIED`] draws a tag.
+    pub const DIFF_KIND_MERGED: &str = "diff.kind.merged";
     pub const DIFF_CONTEXT: &str = "diff.context";
     pub const DIFF_CURRENT_HUNK: &str = "diff.current_hunk";
     pub const DIFF_STAGED: &str = "diff.staged";
@@ -1759,6 +1788,34 @@ mod tests {
                     mark(scope::DIFF_DELETED),
                 ],
             ),
+        );
+    }
+
+    /// The ermine merge tags take the MergeKindsChanges board's colors, the
+    /// conflict tag #f59aa0 on #3a2026 and the merged tag #c59af0 on #2a2236.
+    /// A theme that sets neither scope, as default_dark does, draws each tag's
+    /// text alone, the conflict tag in the conflict header's color and the
+    /// merged tag in the color of theirs.
+    #[test]
+    fn a_merge_tag_without_its_scope_takes_its_fallback_text_color() {
+        let [ermine, dark] =
+            ["ermine_night", "default_dark"].map(|name| load(crate::app::DEFAULT_KEYMAP, name));
+        let tag = |fg: u32, bg: u32| Style::new().fg(rgb(fg)).bg(rgb(bg));
+        let text = |fg: u32| Style::new().fg(rgb(fg));
+
+        assert_eq!(
+            [
+                ermine.conflict_tag_style(),
+                ermine.merged_tag_style(),
+                dark.conflict_tag_style(),
+                dark.merged_tag_style(),
+            ],
+            [
+                tag(0xf59aa0, 0x3a2026),
+                tag(0xc59af0, 0x2a2236),
+                text(0xe06c75),
+                text(0xc678dd),
+            ],
         );
     }
 

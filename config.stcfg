@@ -424,6 +424,7 @@ theme ermine_night inherits default_dark {
     diff.kind.untracked = { fg: warning, bg: tint_warning };
     diff.kind.new       = { fg: success, bg: tint_success };
     diff.kind.deleted   = { fg: danger, bg: chip_conflict };
+    diff.kind.merged    = { fg: special, bg: tint_special };
     diff.staged.fg   = info;
     diff.unstaged.fg = disabled;
     diff.fold        = { fg: hatch, bg: base };

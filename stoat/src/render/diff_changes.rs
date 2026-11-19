@@ -14,7 +14,7 @@ use crate::{
     buffer_registry::BufferRegistry,
     diff_changes::{self, DiffChangesState, Excerpt, ExcerptStats},
     editor_state::{EditorId, EditorState},
-    host::git::FileKind,
+    host::git::{DeletedBy, FileKind},
     pane::Pane,
     render::{
         chrome,
@@ -738,16 +738,7 @@ fn path_runs(rel_path: &str, name: Style, theme: &Theme) -> Vec<(String, Style)>
 /// names the git hunks and then the structural ones. With no structural count
 /// to tell them from, the count names the hunks alone.
 pub(crate) fn header_counts(stats: ExcerptStats, theme: &Theme) -> Vec<(String, Style)> {
-    let mut runs = Vec::new();
-    if stats.added > 0 {
-        runs.push((format!("+{}", stats.added), theme.get(scope::DIFF_ADDED)));
-    }
-    if stats.removed > 0 {
-        runs.push((
-            format!("\u{2212}{}", stats.removed),
-            theme.get(scope::DIFF_DELETED),
-        ));
-    }
+    let mut runs = line_counts(stats, theme);
     if stats.hunks > 0 {
         let count = |n: usize, noun: &str| match n {
             1 => format!("1 {noun}"),
@@ -763,6 +754,35 @@ pub(crate) fn header_counts(stats: ExcerptStats, theme: &Theme) -> Vec<(String, 
         runs.push((format!("\u{b7} {hunks}"), theme.get(scope::UI_TEXT_MUTED)));
     }
     runs
+}
+
+/// The added and the removed lines of `stats`, each in its diff color, the
+/// runs of [`header_counts`] before its hunk count.
+fn line_counts(stats: ExcerptStats, theme: &Theme) -> Vec<(String, Style)> {
+    let mut runs = Vec::new();
+    if stats.added > 0 {
+        runs.push((format!("+{}", stats.added), theme.get(scope::DIFF_ADDED)));
+    }
+    if stats.removed > 0 {
+        runs.push((
+            format!("\u{2212}{}", stats.removed),
+            theme.get(scope::DIFF_DELETED),
+        ));
+    }
+    runs
+}
+
+/// What a merge in progress adds to a File Header.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub(crate) enum MergeNote<'a> {
+    /// The index leaves the file unmerged. `count` is the conflict blocks its
+    /// text holds, and `deleted_by` the side that deleted it, if one did.
+    Conflict {
+        count: u32,
+        deleted_by: Option<DeletedBy>,
+    },
+    /// The merge changed the file clean, from the named branch it brings in.
+    FromBranch(&'a str),
 }
 
 /// The runs a File Header reads left of the divide, as [`header_left`] builds
@@ -784,7 +804,19 @@ struct HeaderLeft {
 /// A moved file reads `from` and the path it left, muted with the name bold.
 /// The counts are [`header_counts`] of `stats`. In their place a move with no
 /// hunk reads `identical`, and an `empty` file reads `empty file`.
-fn header_left(kind: &FileKind, stats: ExcerptStats, empty: bool, theme: &Theme) -> HeaderLeft {
+///
+/// During a merge, `merge` names what the merge adds. A conflicted file's tag
+/// reads `conflict` and the file's conflict blocks, and reads `conflict` alone
+/// for a file with none or one that a side deleted. A modified file that the
+/// merge changed clean reads `merged`. A side that deleted the file, or the
+/// branch the merge brought a change from, takes the place of the hunk count.
+fn header_left(
+    kind: &FileKind,
+    stats: ExcerptStats,
+    empty: bool,
+    merge: Option<MergeNote<'_>>,
+    theme: &Theme,
+) -> HeaderLeft {
     let muted = theme.get(scope::UI_TEXT_MUTED);
     let from = match kind {
         FileKind::Moved { from, .. } => {
@@ -794,15 +826,44 @@ fn header_left(kind: &FileKind, stats: ExcerptStats, empty: bool, theme: &Theme)
         },
         _ => Vec::new(),
     };
-    let counts = match kind {
+    let note = match merge {
+        Some(MergeNote::Conflict {
+            deleted_by: Some(side),
+            ..
+        }) => Some((delete_note(side).to_string(), muted)),
+        Some(MergeNote::FromBranch(branch)) => Some((format!("from {branch}"), muted)),
+        _ => None,
+    };
+    let mut counts = match kind {
         _ if empty => vec![("empty file".to_string(), muted)],
         FileKind::Moved { .. } if stats.hunks == 0 => vec![("identical".to_string(), muted)],
+        _ if note.is_some() => line_counts(stats, theme),
         _ => header_counts(stats, theme),
     };
-    HeaderLeft {
-        from,
-        tag: (kind_tag_text(kind), theme.kind_tag_style(kind)),
-        counts,
+    counts.extend(note);
+    let tag = match merge {
+        Some(MergeNote::Conflict {
+            count,
+            deleted_by: None,
+        }) if count > 0 => (
+            format!("conflict \u{b7} {count}"),
+            theme.conflict_tag_style(),
+        ),
+        Some(MergeNote::Conflict { .. }) => ("conflict".to_string(), theme.conflict_tag_style()),
+        Some(MergeNote::FromBranch(_)) if *kind == FileKind::Modified => {
+            ("merged".to_string(), theme.merged_tag_style())
+        },
+        _ => (kind_tag_text(kind), theme.kind_tag_style(kind)),
+    };
+    HeaderLeft { from, tag, counts }
+}
+
+/// The note a File Header reads for a conflicted file that `side` deleted,
+/// what ours did to the file and then what theirs did.
+fn delete_note(side: DeletedBy) -> &'static str {
+    match side {
+        DeletedBy::Theirs => "modify / delete",
+        DeletedBy::Ours => "delete / modify",
     }
 }
 
@@ -839,12 +900,44 @@ fn excerpt_header(
         kind,
         diff_changes::excerpt_stats(excerpt, buffers),
         excerpt.empty,
+        merge_note(excerpt, frame),
         frame.theme,
     );
     let hidden = excerpt
         .collapsed
         .then(|| diff_changes::hidden_lines(excerpt, kind, buffers));
     (left, hidden)
+}
+
+/// What the merge in progress adds to `excerpt`'s File Header, or `None` with
+/// no merge in progress and for a file the merge leaves alone.
+///
+/// A file the tally lists as unmerged is a conflict. A modified or a new file
+/// that the index changes with no working change reads as the merge's, since a
+/// merge writes its clean results to the index. A change that the reader
+/// staged before the merge reads the same.
+pub(crate) fn merge_note<'a>(excerpt: &Excerpt, frame: FrameCtx<'a>) -> Option<MergeNote<'a>> {
+    let branch = frame.repo?.merge_head.as_deref()?;
+    let tallies = frame.tallies?;
+    let path = Path::new(&excerpt.rel_path);
+    if tallies
+        .conflicted
+        .binary_search_by(|conflicted| conflicted.as_path().cmp(path))
+        .is_ok()
+    {
+        let deleted_by = tallies
+            .deleted_in_conflict
+            .binary_search_by(|(deleted, _)| deleted.as_path().cmp(path))
+            .ok()
+            .map(|index| tallies.deleted_in_conflict[index].1);
+        return Some(MergeNote::Conflict {
+            count: excerpt.conflicts,
+            deleted_by,
+        });
+    }
+    let change = tallies.change(path)?;
+    let merged = matches!(change.kind, FileKind::Modified | FileKind::New) && !change.unstaged;
+    merged.then_some(MergeNote::FromBranch(branch))
 }
 
 /// The text a folded File Header counts its `lines` with.
@@ -1292,7 +1385,10 @@ mod tests {
         buffer_registry::BufferRegistry,
         diff_changes::{self, DiffChangesState, ExcerptStats},
         editor_state::{EditorId, EditorState},
-        host::git::FileKind,
+        host::{
+            git::{FileKind, GitHost},
+            FakeRepoBuilder,
+        },
         pane::{DockPanel, DockSide, DockVisibility, FocusTarget, View},
         render::{
             commits::PreviewDials,
@@ -1626,7 +1722,7 @@ mod tests {
             let row = Rect::new(0, 0, 120, 1);
             let mut buf = Buffer::empty(row);
             let path = header_path(path, theme);
-            let left = header_left(&FileKind::Modified, stats, false, theme);
+            let left = header_left(&FileKind::Modified, stats, false, None, theme);
             paint_header(&mut buf, row, &path, &left, None, theme, None, true);
             [header_text(&buf, 0, 59, 0), header_text(&buf, 60, 60, 0)]
         };
@@ -1696,7 +1792,7 @@ mod tests {
             let row = Rect::new(0, 0, width, 1);
             let mut buf = Buffer::empty(row);
             let path = header_path("src/lib.rs", theme);
-            let left = header_left(&FileKind::Modified, stats, false, theme);
+            let left = header_left(&FileKind::Modified, stats, false, None, theme);
             paint_header(&mut buf, row, &path, &left, None, theme, None, true);
             (cells(&buf, 0, width, 0), buf[(1, 0)].symbol().to_string())
         };
@@ -1729,7 +1825,7 @@ mod tests {
         let painted = |kind: FileKind| {
             let row = Rect::new(0, 0, 120, 1);
             let mut buf = Buffer::empty(row);
-            let left = header_left(&kind, stats, false, theme);
+            let left = header_left(&kind, stats, false, None, theme);
             let path = header_path("a.rs", theme);
             paint_header(&mut buf, row, &path, &left, None, theme, None, true);
             let (text, start) = header_text(&buf, 0, 59, 0);
@@ -1806,6 +1902,145 @@ mod tests {
         assert_eq!((before, left_half(&mut h)), (left(94), left(80)));
     }
 
+    /// During a merge, a conflicted file's header tags it `conflict` with the
+    /// conflict blocks its text holds. A file the index changes with no
+    /// working change reads as the merge's. A modified one tags `merged`, and
+    /// it and a new one name the branch the merge brings in after their line
+    /// counts, in place of the hunk count.
+    #[test]
+    fn a_merge_tags_its_conflicted_and_its_merged_files() {
+        let block = |n: u32| format!("<<<<<<< HEAD\nours {n}\n=======\ntheirs {n}\n>>>>>>> main\n");
+        let conflicted = format!("{}x\n{}", block(1), block(2));
+        let mut h = merge_stack(|repo| {
+            repo.modified("a.txt", "x\n", &conflicted)
+                .conflicted_file("a.txt", Some("x\n"), Some("x\nours\n"), Some("x\ntheirs\n"))
+                .head_file("b.txt", "b\n")
+                .staged_file("b.txt", "B\n")
+                .staged_file("c.txt", "c\n");
+        });
+
+        assert_eq!(
+            header_lefts(&mut h),
+            [
+                "conflict \u{b7} 2 +10 \u{b7} 2 hunks",
+                "merged +1 \u{2212}1 from main",
+                "new +1 from main",
+            ],
+        );
+    }
+
+    /// A conflicted file that one side deleted tags `conflict` alone. In place
+    /// of the hunk count it notes what ours did to the file and then what
+    /// theirs did.
+    #[test]
+    fn a_conflict_one_side_deleted_reads_modify_delete() {
+        let mut h = merge_stack(|repo| {
+            repo.modified("a.txt", "a\n", "A\n")
+                .conflicted_file("a.txt", Some("a\n"), Some("A\n"), None)
+                .unstaged_file("b.txt", "B\n")
+                .conflicted_file("b.txt", Some("b\n"), None, Some("B\n"));
+        });
+
+        assert_eq!(
+            header_lefts(&mut h),
+            [
+                "conflict +1 \u{2212}1 modify / delete",
+                "conflict +1 delete / modify",
+            ],
+        );
+    }
+
+    /// During a merge, a file that the working tree changes keeps its own File
+    /// Kind Tag and hunk count, since the change is the reader's rather than
+    /// the merge's.
+    #[test]
+    fn a_file_changed_in_the_working_tree_keeps_its_own_tag_during_a_merge() {
+        let mut h = merge_stack(|repo| {
+            repo.modified("a.txt", "a\n", "A\n");
+        });
+
+        assert_eq!(
+            header_lefts(&mut h),
+            ["modified +1 \u{2212}1 \u{b7} 1 hunk"]
+        );
+    }
+
+    /// A resolve stages the file and takes it off the tally's unmerged list,
+    /// and its kind stays modified. Its header repaints from the conflict tag
+    /// to the merged one.
+    #[test]
+    fn a_resolve_repaints_the_header_s_merge_tag() {
+        let mut h = merge_stack(|repo| {
+            repo.modified("a.txt", "a\n", "A\n").conflicted_file(
+                "a.txt",
+                Some("a\n"),
+                Some("A\n"),
+                Some("Z\n"),
+            );
+        });
+        // The first frame stores no pane cache key, so the frame after it is
+        // the one a replay matches.
+        header_lefts(&mut h);
+        let before = header_lefts(&mut h);
+
+        h.fake_git()
+            .discover(Path::new("/repo"))
+            .expect("the repo")
+            .mark_resolved(Path::new("a.txt"))
+            .expect("a resolve");
+        h.stoat.active_workspace_mut().stale_hunk_tally();
+        h.settle_diff_jobs();
+
+        assert_eq!(
+            (before, header_lefts(&mut h)),
+            (
+                vec!["conflict +1 \u{2212}1 \u{b7} 1 hunk".to_string()],
+                vec!["merged +1 \u{2212}1 from main".to_string()]
+            ),
+        );
+    }
+
+    /// A changes view in cell layout over the files `seed` registers in /repo,
+    /// during a merge of `main`, under the HEAD base, opened over `a.txt`.
+    fn merge_stack(seed: impl FnOnce(&mut FakeRepoBuilder<'_>)) -> TestHarness {
+        let mut h = TestHarness::with_size(120, 40);
+        h.stoat.settings.editor_minimap = Some(MinimapMode::Off);
+        h.stoat.screen_hints_hidden = true;
+        h.stoat.active_workspace_mut().git_root = PathBuf::from("/repo");
+        {
+            let mut repo = h.fake_git().add_repo("/repo").with_fs(h.fake_fs());
+            repo.merge_in_progress("f00dfeed", Some("main"), "Merge branch 'main'");
+            seed(&mut repo);
+        }
+        h.stoat
+            .active_workspace_mut()
+            .set_worktree_base(WorktreeBase::Head);
+        h.open_file(Path::new("/repo/a.txt"));
+        h.cover_with_diff_changes(false);
+        h.settle();
+        h.stoat.stoatty = false;
+        h
+    }
+
+    /// The left half of each File Header of the focused stack, in stack order.
+    fn header_lefts(h: &mut TestHarness) -> Vec<String> {
+        let buf = h.render_composited();
+        let inner = {
+            let ws = h.stoat.active_workspace();
+            ws.panes.pane(ws.panes.focus()).area
+        };
+        let divider = review::diff_divider_x(inner).expect("a split stack");
+        let (state, _) = stack(h);
+        let rows: Vec<u16> = state
+            .excerpts
+            .iter()
+            .map(|excerpt| (excerpt.top - state.scroll) as u16)
+            .collect();
+        rows.into_iter()
+            .map(|row| header_text(&buf, inner.x, divider - inner.x, inner.y + row).0)
+            .collect()
+    }
+
     /// A move with no edit reads `identical` in place of its counts, after
     /// `from` and the path it left, muted with the name bold. An empty file
     /// reads `empty file` there.
@@ -1818,8 +2053,14 @@ mod tests {
             from: PathBuf::from("src/old.rs"),
             similarity: 100,
         };
-        let left = header_left(&moved, ExcerptStats::default(), false, theme);
-        let empty = header_left(&FileKind::Untracked, ExcerptStats::default(), true, theme);
+        let left = header_left(&moved, ExcerptStats::default(), false, None, theme);
+        let empty = header_left(
+            &FileKind::Untracked,
+            ExcerptStats::default(),
+            true,
+            None,
+            theme,
+        );
 
         let run = |text: &str, style: Style| (text.to_string(), style);
         assert_eq!(
@@ -1947,7 +2188,7 @@ mod tests {
             hunks: 1,
             structural: 0,
         };
-        let left = header_left(&moved, stats, false, theme);
+        let left = header_left(&moved, stats, false, None, theme);
         let path = header_path("a.rs", theme);
         paint_header(
             &mut buf,
@@ -2012,7 +2253,7 @@ mod tests {
             hunks: 1,
             structural: 0,
         };
-        let left = header_left(&moved, stats, false, theme);
+        let left = header_left(&moved, stats, false, None, theme);
         let path = header_path("a.rs", theme);
         paint_header(
             &mut buf,
@@ -2067,7 +2308,13 @@ mod tests {
         let right = |path: &str, hidden: u32| {
             let row = Rect::new(0, 0, 120, 1);
             let mut buf = Buffer::empty(row);
-            let left = header_left(&FileKind::Deleted, ExcerptStats::default(), false, theme);
+            let left = header_left(
+                &FileKind::Deleted,
+                ExcerptStats::default(),
+                false,
+                None,
+                theme,
+            );
             let path = header_path(path, theme);
             paint_header(&mut buf, row, &path, &left, Some(hidden), theme, None, true);
             (header_text(&buf, 60, 60, 0), Some(buf[(118, 0)].fg))
@@ -2100,7 +2347,13 @@ mod tests {
         let mut buf = Buffer::empty(row);
         let mut scene = ApcScene::new();
         scene.set_live(true);
-        let left = header_left(&FileKind::Deleted, ExcerptStats::default(), false, theme);
+        let left = header_left(
+            &FileKind::Deleted,
+            ExcerptStats::default(),
+            false,
+            None,
+            theme,
+        );
         let path = header_path(&"n".repeat(60), theme);
         paint_header(
             &mut buf,

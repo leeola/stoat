@@ -5091,6 +5091,66 @@ fn a_stack_page_tags_the_kind_its_tally_names_and_refills_when_it_changes() {
     );
 }
 
+/// A page of a changes view tags a conflicted file during a merge, as the live
+/// paint does. A resolve that takes the file off the unmerged list and keeps
+/// its kind refills the page that holds the file's header with the merged tag.
+#[test]
+fn a_stack_page_tags_a_merge_and_refills_when_a_resolve_lands() {
+    use crate::host::git::GitHost;
+    use std::path::Path;
+    use stoatty_protocol::command::Command;
+
+    let mut h = crate::test_harness::TestHarness::with_size(120, 24);
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+    h.stoat.set_apc_tx(tx);
+    h.stoat.stoatty_protocol = RESIDENT_POOL_PROTOCOL;
+    h.stoat.settings.editor_minimap = Some(MinimapMode::Off);
+    h.stoat.screen_hints_hidden = true;
+    h.stage_review_scenario("/repo", &[("a.txt", "a\n", "A\n")]);
+    h.fake_git()
+        .add_repo("/repo")
+        .merge_in_progress("f00dfeed", Some("main"), "Merge branch 'main'")
+        .conflicted_file("a.txt", Some("a\n"), Some("A\n"), Some("Z\n"));
+    h.stoat
+        .active_workspace_mut()
+        .set_worktree_base(diff::WorktreeBase::Head);
+    h.open_file(&PathBuf::from("/repo/a.txt"));
+    h.cover_with_diff_changes(false);
+    h.settle();
+    h.stoat.render();
+    let pool = {
+        let ws = h.stoat.active_workspace();
+        ws.panes.pane(ws.panes.focus()).index
+    };
+    let tags = |bytes: &[u8]| -> Vec<String> {
+        command::decode_stream(fill_payload(bytes, pool, 0))
+            .into_iter()
+            .filter_map(|command| match command {
+                Command::TextRun(run) if ["conflict", "merged"].contains(&run.text.as_str()) => {
+                    Some(run.text)
+                },
+                _ => None,
+            })
+            .collect()
+    };
+    let before = tags(&emit_raw(&mut h, &mut rx));
+
+    h.fake_git()
+        .discover(Path::new("/repo"))
+        .expect("the repo")
+        .mark_resolved(Path::new("a.txt"))
+        .expect("a resolve");
+    h.stoat.active_workspace_mut().stale_hunk_tally();
+    h.settle_diff_jobs();
+    h.stoat.render();
+    let after = tags(&emit_raw(&mut h, &mut rx));
+
+    assert_eq!(
+        (before, after),
+        (vec!["conflict".to_string()], vec!["merged".to_string()]),
+    );
+}
+
 /// A fold of the stack's last file refills the page that holds it. The fold
 /// moves no excerpt's header, so the page refills because the file shows its
 /// header alone.

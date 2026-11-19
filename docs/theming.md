@@ -342,6 +342,10 @@ The typed UI scopes, by group (syntax scopes are open-ended):
   (foreground) on its rounded box (background). An unset scope draws the text
   alone, in the foreground of `diff.modified`, `diff.moved`, `diff.added`, or
   `diff.deleted`.
+- `diff.kind.merged` -- the tag that replaces the File Kind Tag of a modified
+  file that a merge in progress changed clean, as the kind scopes draw a tag.
+  An unset scope draws the text alone, in the foreground of
+  `vcs.conflict.theirs`.
 - `diff.fold` -- the fill (background) of a changes view's fold row, the row
   that names how many unchanged lines a fold hides. The row's text takes
   `ui.text.muted`. A foreground stripes the fill with a 135 degree hatch in
@@ -407,8 +411,11 @@ The typed UI scopes, by group (syntax scopes are open-ended):
   which falls back to `diff.fold.button`. `vcs.conflict.tag` colors the
   File Header's tag while the shown file holds an open conflict, and
   `vcs.conflict.tag.resolved` once it holds none. They fall back to
-  `vcs.conflict.chip` and `vcs.conflict.chip.ours`. The ermine_night theme
-  sets these, and default_dark leaves them unset.
+  `vcs.conflict.chip` and `vcs.conflict.chip.ours`. During a merge a changes
+  view's File Header tags each conflicted file in `vcs.conflict.tag` too, and
+  there an unset scope draws the text alone, in the foreground of
+  `vcs.conflict.header`. The ermine_night theme sets these, and default_dark
+  leaves them unset.
 - `vcs.merge.banner`, `vcs.rebase.banner` -- the banner row of a merge in
   progress and of a rebase paused on a conflict.
 - `vcs.checkout.banner` -- the banner row under the tab bar that names a blame
