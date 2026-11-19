@@ -1480,14 +1480,14 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
         if let Some(strip_id) = view_strip {
             // The strip is one row per buffer line, or per band under a fold,
             // while the editor scrolls in display rows, so the window converts
-            // before it ships. A diff view's strip is one row per display row,
-            // so its window needs no conversion. The conversion is deferred
-            // into the closure because an idle frame has nothing to convert
-            // that the last one did not. A fold or a Thumb Minimum that moves
-            // converts again.
+            // before it ships. A diff view's or a conflict view's strip is one row
+            // per display row, so its window needs no conversion. The conversion
+            // is deferred into the closure because an idle frame has nothing to
+            // convert that the last one did not. A fold or a Thumb Minimum that
+            // moves converts again.
             let rows = region.height as u32;
             let density = editor.minimap_density;
-            let diff_view = editor.diff_view;
+            let display_rows = editor.display_row_strip();
             let stamp = {
                 let mut hasher = DefaultHasher::new();
                 display_map_stamp(buffer_version, paint_version).hash(&mut hasher);
@@ -1501,7 +1501,7 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
             stoat
                 .smooth_scroll
                 .emit_minimap_view(&mut out, strip_id, region.pool, inputs, || {
-                    let (top, visible) = match diff_view {
+                    let (top, visible) = match display_rows {
                         true => diff_view_window(&snapshot, scroll_offset, rows),
                         false => minimap_view_window(&snapshot, scroll_offset, rows),
                     };
@@ -1521,7 +1521,8 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
 
             // A strip that does not fit scrolls, and its Coverage Rail shows
             // the whole file, so the rail's thumb covers the rows the strip
-            // shows. A diff view's rail counts display rows, as its strip does.
+            // shows. A diff view's or a conflict view's rail counts display
+            // rows, as its strip does.
             let strip = match single_minimap {
                 true => single_band,
                 false => editor.minimap_rect,
@@ -1536,7 +1537,7 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
                     region.pool,
                     inputs,
                     || {
-                        let ((top, visible), file_lines) = match diff_view {
+                        let ((top, visible), file_lines) = match display_rows {
                             true => (
                                 diff_view_window(&snapshot, scroll_offset, rows),
                                 snapshot.line_count(),

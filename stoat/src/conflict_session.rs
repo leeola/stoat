@@ -11,11 +11,12 @@ use crate::{
 use std::{
     cell::Cell,
     collections::{HashMap, HashSet},
+    ops::Range,
     path::PathBuf,
     sync::Arc,
 };
 use stoat_action::ActionKind;
-use stoat_text::{Anchor, BufferId};
+use stoat_text::{Anchor, BufferId, Point};
 
 /// A live three-way conflict resolution across a repository's conflicted files.
 ///
@@ -403,6 +404,32 @@ pub(crate) fn open_chunks(file: &FileResolveState, buffers: &BufferRegistry) -> 
         .count();
     file.open_chunks.set(Some((version, count)));
     count
+}
+
+/// The display rows of each open chunk's center region in the merged column
+/// that `snapshot` shows, in chunk order.
+///
+/// A chunk is open while its region still holds its conflict markers, as
+/// [`open_chunks`] counts it, so a pick or a hand edit takes its rows off. The
+/// conflict view's strip marks these rows.
+pub(crate) fn open_rows(state: &ConflictViewState, snapshot: &DisplaySnapshot) -> Vec<Range<u32>> {
+    let buffer_snapshot = snapshot.buffer_snapshot();
+    let rope = buffer_snapshot.rope();
+    let display_row = |anchor: &Anchor| {
+        let row = rope
+            .offset_to_point(buffer_snapshot.resolve_anchor(anchor))
+            .row;
+        snapshot.buffer_to_display(Point::new(row, 0)).row
+    };
+    let states = chunk_states(snapshot, &state.doc, &state.chunk_anchors, &state.picks);
+
+    state
+        .chunk_anchors
+        .iter()
+        .zip(states)
+        .filter(|(_, chunk)| *chunk == ChunkState::Unresolved)
+        .map(|((start, end), _)| display_row(start)..display_row(end))
+        .collect()
 }
 
 /// The index of the chunk in `chunk_anchors` whose center region holds byte

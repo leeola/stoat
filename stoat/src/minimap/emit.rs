@@ -17,7 +17,7 @@ use crate::{
     buffer_registry::BufferRegistry,
     diff_changes::DiffChangesId,
     display_map::{DisplayPoint, DisplaySnapshot},
-    editor_state::EditorId,
+    editor_state::{EditorId, EditorState},
     minimap::{
         density::{self, Density, Tier},
         diff_changes::{self, DiffChangesStrip},
@@ -44,9 +44,9 @@ use stoat_language::{extract_symbols, SymbolDef};
 use stoat_text::{Bias, Rope};
 
 /// Assign a `content_id` to each visible split-editor buffer that a minimap
-/// strip renders, to each visible diff view editor's strip, and to the active
-/// workspace's changes view strip while an changes view shows, so the declare
-/// widget reads the id while the frame paints.
+/// strip renders, to the strip of each visible diff view or conflict view
+/// editor, and to the active workspace's changes view strip while an changes
+/// view shows, so the declare widget reads the id while the frame paints.
 ///
 /// The summaries themselves sync afterward at the frame seam in
 /// [`emit_minimap`]. A no-op with the minimap off.
@@ -88,7 +88,7 @@ pub(crate) fn ensure_minimap_content_ids(stoat: &mut Stoat) {
         let Some(editor) = ws.editors.get(editor_id) else {
             continue;
         };
-        if editor.diff_view {
+        if editor.display_row_strip() {
             if let Entry::Vacant(slot) = diff_view_strips.entry((ws_id, editor_id)) {
                 let id = *minimap_next_content_id;
                 slot.insert(DiffViewStrip::new(id, id + 1));
@@ -197,7 +197,7 @@ pub(crate) fn emit_minimap(stoat: &mut Stoat) {
                 };
                 let editor = ws.editors.get(editor_id)?;
                 let included = single || editor.minimap_rect.is_some();
-                included.then_some((editor.buffer_id, editor_id, editor.diff_view))
+                included.then_some((editor.buffer_id, editor_id, editor.display_row_strip()))
             })
             .collect()
     };
@@ -225,8 +225,8 @@ pub(crate) fn emit_minimap(stoat: &mut Stoat) {
     };
 
     let mut out = Vec::new();
-    for (buffer_id, editor_id, diff_view) in strips {
-        if diff_view {
+    for (buffer_id, editor_id, display_rows) in strips {
+        if display_rows {
             diff_view::sync_diff_view_strip(stoat, ws_id, editor_id, &mut out);
             stoat.minimap_build_pending |= stoat
                 .diff_view_strips
@@ -287,7 +287,7 @@ pub(crate) fn emit_minimap(stoat: &mut Stoat) {
                 && !stoat.workspaces[ws_id]
                     .editors
                     .get(*editor_id)
-                    .is_some_and(|editor| editor.diff_view)
+                    .is_some_and(EditorState::display_row_strip)
         })
         .copied()
         .collect();

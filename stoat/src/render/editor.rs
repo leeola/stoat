@@ -249,6 +249,7 @@ pub(crate) fn render_editor_with_overlay(
     }
 
     if editor.conflict_view.is_some() {
+        let inner = reserve_minimap_strip(editor, inner, minimap_enabled);
         editor.display_map.set_wrap_width(None);
         // The terminal draws the cursor on the same condition the main editor
         // path delegates on.
@@ -3201,7 +3202,7 @@ mod tests {
         style::{Color, Modifier},
     };
     use std::path::PathBuf;
-    use stoat_action::{ExtendToLineEnd, MoveDown, MoveRight, OpenFile, OpenFileFinder};
+    use stoat_action::{Conflict, ExtendToLineEnd, MoveDown, MoveRight, OpenFile, OpenFileFinder};
     use stoat_config::{LineNumbers, WrapMode};
     use stoat_text::{Bias, Point, SelectionGoal};
     use stoatty_protocol::command::{decode_stream, Command};
@@ -5167,6 +5168,33 @@ mod tests {
         assert!(
             strip.iter().all(|row| row.chars().all(|c| c == ' ')),
             "the diff paint never reaches the reserved strip: {strip:?}"
+        );
+    }
+
+    /// A conflict view reserves the minimap strip at the right edge, as a diff
+    /// view does, so its grid ends where the strip starts.
+    #[test]
+    fn the_conflict_view_reserves_the_minimap_strip() {
+        let mut h = Stoat::test();
+        let git_root = h.stoat.active_workspace().git_root.clone();
+        h.fake_git().add_repo(git_root).conflicted_file(
+            "f.txt",
+            Some("base\n"),
+            Some("ours\n"),
+            Some("theirs\n"),
+        );
+        dispatch(&mut h.stoat, &Conflict);
+        h.settle();
+
+        let (rect, strip) = render_minimap(&mut h.stoat, true, 120, 3);
+        assert_eq!(
+            rect,
+            Some(Rect::new(113, 0, super::MINIMAP_STRIP_COLS, 3)),
+            "the strip pins to the right edge"
+        );
+        assert!(
+            strip.iter().all(|row| row.chars().all(|c| c == ' ')),
+            "the conflict paint never reaches the reserved strip: {strip:?}"
         );
     }
 

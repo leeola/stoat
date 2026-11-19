@@ -11,17 +11,22 @@
 //! that the Thumb Minimum's cap stops from fitting scrolls on the strip, with
 //! a Coverage Rail beside it that marks each band of display rows holding a
 //! hunk.
+//!
+//! A conflict view's strip follows its merged column the same way. Its rows
+//! draw the merged text in the same gray, and its one Change Mark is the
+//! conflict pink across each line of a chunk that still holds its markers.
 
 use super::{
     band::{self, BandSource, LineStat},
     density::{self, Density, Tier},
-    diff_changes::{display_row, display_row_mark, row_changes},
+    diff_changes::{conflict_changes, display_row, display_row_mark, row_changes},
     emit::{convert_minimap_runs, encode_rail_update, strip_density, WEIGHTED_RUN_PROTOCOL},
     rows::PassRail,
     LineRuns, RowMark, SYNC_BUDGET, SYNC_SLICE,
 };
 use crate::{
     app::Stoat,
+    conflict_session,
     display_map::DisplaySnapshot,
     editor_state::EditorId,
     workspace::{Workspace, WorkspaceId},
@@ -131,6 +136,9 @@ impl BandSource for DisplayRows<'_> {
 /// Bring the strip of diff view editor `editor_id` in workspace `ws_id` in step
 /// with the editor's display rows, and append its splices to `out`.
 ///
+/// A conflict view editor's strip syncs here too. Its rows take the conflict
+/// marks of its open chunks in place of a diff's Change Marks.
+///
 /// A change of the class table, the density, the display, the text, the diff,
 /// or the parse starts a pass over every row. Each sync summarizes the pass's
 /// rows in slices of at most [`SYNC_SLICE`] until its time budget runs out,
@@ -215,6 +223,10 @@ pub(crate) fn sync_diff_view_strip(
         .map_or(&[][..], |language| language.line_comments);
     let buffer_rows = 0..snapshot.buffer_line_count();
     let kept = slice::from_ref(&buffer_rows);
+    let open = editor
+        .conflict_view
+        .as_deref()
+        .map(|state| conflict_session::open_rows(state, &snapshot));
     let target = density::rows(display_rows, density.lines_per_row);
     let content_id = strip.content_id;
     let mut send = |start: u32, removed: u32, lines: Vec<LineRuns>| {
@@ -236,7 +248,12 @@ pub(crate) fn sync_diff_view_strip(
         let bands = row..end;
         let display = bands.start * density.lines_per_row
             ..(bands.end * density.lines_per_row).min(display_rows);
-        let changes = row_changes(&snapshot, display.clone(), kept, minimap_class_table);
+        let changes = match &open {
+            Some(open) => {
+                conflict_changes(&snapshot, display.clone(), kept, open, minimap_class_table)
+            },
+            None => row_changes(&snapshot, display.clone(), kept, minimap_class_table),
+        };
         let marks = changes
             .iter()
             .map(|line| display_row_mark(line, minimap_class_table))
@@ -357,7 +374,7 @@ mod tests {
     use crossterm::event::{MouseButton, MouseEventKind};
     use ratatui::layout::Rect;
     use std::path::Path;
-    use stoat_action::{DiffSyntax, DiffTintUp};
+    use stoat_action::{Conflict, ConflictPickOurs, DiffSyntax, DiffTintUp};
     use stoat_config::MinimapMode;
     use stoatty_protocol::{
         command::{Command, LineSummary},
@@ -485,6 +502,74 @@ mod tests {
             })
             .collect();
         assert_eq!(store.iter().map(classes).collect::<Vec<_>>(), expected);
+    }
+
+    /// A conflict view's strip holds a row per display row of its merged
+    /// column, each in the diff gray, and the pane declares that strip. The
+    /// rows of both open chunks, merged rows 1 to 5 and 7 to 11, end in a
+    /// conflict mark. A pick of ours settles the first chunk to its one line,
+    /// so the second chunk's rows, then 3 to 7, keep the only marks.
+    ///
+    /// The merged text ends in a newline, so its last display row is empty and
+    /// holds no run.
+    #[test]
+    fn a_conflict_view_strip_marks_its_open_chunk_alone() {
+        let mut h = TestHarness::with_size(120, 24);
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        h.stoat.set_apc_tx(tx);
+        h.stoat.stoatty_protocol = 13;
+        h.stoat.settings.editor_minimap = Some(MinimapMode::PerPane);
+        let git_root = h.stoat.active_workspace().git_root.clone();
+        h.fake_git().add_repo(git_root).conflicted_file(
+            "f.txt",
+            Some("a\nb\nc\nd\ne\n"),
+            Some("a\nB\nc\nD\ne\n"),
+            Some("a\nX\nc\nY\ne\n"),
+        );
+        dispatch(&mut h.stoat, &Conflict);
+        h.settle();
+        let mut store = Vec::new();
+        let commands = frame(&mut h, &mut rx);
+        apply_minimap(&mut store, strip_id(&h), &commands);
+        let opened: Vec<Vec<u8>> = store.iter().map(classes).collect();
+        let (_, pane, strip, _) = focused_strip(&mut h);
+        let declared = (
+            minimap_declarations(&commands),
+            vec![(pane, strip.x, strip.width, strip_id(&h))],
+        );
+
+        dispatch(&mut h.stoat, &ConflictPickOurs);
+        h.settle();
+        let commands = frame(&mut h, &mut rx);
+        apply_minimap(&mut store, strip_id(&h), &commands);
+
+        let table = &h.stoat.minimap_class_table;
+        let (text, conflict) = (
+            table.edge_class(EdgeClass::DiffText),
+            table.edge_class(EdgeClass::MarkConflict),
+        );
+        let rows = |lines: u32, marked: &[(u32, u32)]| -> Vec<Vec<u8>> {
+            (0..lines)
+                .map(|row| {
+                    match marked
+                        .iter()
+                        .any(|&(start, end)| (start..end).contains(&row))
+                    {
+                        true => vec![text, conflict],
+                        false => vec![text],
+                    }
+                })
+                .chain([Vec::new()])
+                .collect()
+        };
+        assert_eq!(
+            declared.0, declared.1,
+            "the pane declares the conflict strip"
+        );
+        assert_eq!(
+            (opened, store.iter().map(classes).collect::<Vec<_>>()),
+            (rows(13, &[(1, 6), (7, 12)]), rows(9, &[(3, 8)])),
+        );
     }
 
     /// A step of the tint dial or of the syntax toggle sends no row, since the

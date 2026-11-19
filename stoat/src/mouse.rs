@@ -1374,8 +1374,8 @@ fn scrub_minimap(stoat: &mut Stoat, drag: MinimapDrag, strip: Rect, screen_row: 
 /// with the view in rows as the thumb ships it, and lands on the middle line
 /// of that row's band.
 ///
-/// A diff view's strip holds one row per display row, so its press resolves in
-/// display rows and lands on the display row itself.
+/// A diff view's or a conflict view's strip holds one row per display row, so
+/// its press resolves in display rows and lands on the display row itself.
 fn scrub_minimap_editor(stoat: &mut Stoat, editor_id: EditorId, strip: Rect, screen_row: u16) {
     let thumb_min_rows = stoat.minimap_thumb_min_rows();
     let ws = &mut stoat.workspaces[stoat.active_workspace];
@@ -1396,7 +1396,7 @@ fn scrub_minimap_editor(stoat: &mut Stoat, editor_id: EditorId, strip: Rect, scr
         ScrollGlide::None => rest,
         ScrollGlide::Page | ScrollGlide::Wheel => editor.scroll_offset,
     };
-    let (view_top, view_visible, total) = match editor.diff_view {
+    let (view_top, view_visible, total) = match editor.display_row_strip() {
         true => {
             let (top, visible) = diff_view_window(&snapshot, shown_offset, viewport);
             (top, visible, snapshot.line_count())
@@ -1435,7 +1435,7 @@ fn scrub_minimap_editor(stoat: &mut Stoat, editor_id: EditorId, strip: Rect, scr
         },
     };
 
-    match editor.diff_view {
+    match editor.display_row_strip() {
         true => scrub_to_display_row(editor, &snapshot, target, viewport),
         false => scrub_to_line(editor, &snapshot, target, viewport),
     }
@@ -1471,8 +1471,8 @@ fn rail_drag(stoat: &Stoat, drag: MinimapDrag, strip: Rect, column: u16) -> Mini
 /// Ease `editor_id`'s viewport onto the line its Coverage Rail shows under
 /// `screen_row`, centered in the viewport.
 ///
-/// A diff view's rail counts display rows, as its strip does, so its press
-/// lands on the display row itself.
+/// A diff view's or a conflict view's rail counts display rows, as its strip
+/// does, so its press lands on the display row itself.
 fn scrub_minimap_rail(stoat: &mut Stoat, editor_id: EditorId, strip: Rect, screen_row: u16) {
     let ws = &mut stoat.workspaces[stoat.active_workspace];
     let Some(editor) = ws.editors.get_mut(editor_id) else {
@@ -1485,7 +1485,7 @@ fn scrub_minimap_rail(stoat: &mut Stoat, editor_id: EditorId, strip: Rect, scree
     let snapshot = editor.display_map.snapshot();
     let viewport = editor.viewport_rows.unwrap_or(strip.height as u32).max(1);
     let target = rail_target(strip, screen_row, fold.whole_lines_per_row);
-    match editor.diff_view {
+    match editor.display_row_strip() {
         true => scrub_to_display_row(editor, &snapshot, target, viewport),
         false => scrub_to_line(editor, &snapshot, target, viewport),
     }

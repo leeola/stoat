@@ -398,6 +398,17 @@ impl EditorState {
         self.display_map.set_show_deleted_blocks(on);
     }
 
+    /// Whether the editor's minimap strip holds one row per display row,
+    /// rather than one per buffer line.
+    ///
+    /// A diff view's strip follows the base rows its display splices in, and a
+    /// conflict view's strip follows its merged column. Both sync through
+    /// [`sync_diff_view_strip`](crate::minimap::diff_view::sync_diff_view_strip),
+    /// so the strip's thumb and a press on it count display rows too.
+    pub(crate) fn display_row_strip(&self) -> bool {
+        self.diff_view || self.conflict_view.is_some()
+    }
+
     pub(crate) fn snapshot(&self) -> EditorStateSnapshot {
         EditorStateSnapshot {
             buffer_id: self.buffer_id,

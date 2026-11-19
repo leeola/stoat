@@ -1244,24 +1244,7 @@ pub(super) fn row_changes(
 ) -> Vec<LineRuns> {
     let mut cache = None;
     let states = review::diff_row_states(snapshot, rows.clone(), &mut cache);
-    let mark = |class: EdgeClass, start: u32, end: u32| {
-        let (start, end) = (start.min(MAX_COLUMNS), end.min(MAX_COLUMNS));
-        (start < end).then(|| Run {
-            start_col: start as u8,
-            len: (end - start) as u8,
-            class: table.edge_class(class),
-            weight: u8::MAX,
-        })
-    };
-    let across_text = |row: u32, class: EdgeClass| {
-        let text = display_row(snapshot, row, kept);
-        let runs = text.as_slice();
-        let start = runs.first().map_or(0, |run| u32::from(run.start_col));
-        let end = runs
-            .last()
-            .map_or(0, |run| u32::from(run.start_col) + u32::from(run.len));
-        mark(class, start, end)
-    };
+    let across_text = |row: u32, class: EdgeClass| text_mark(snapshot, row, kept, class, table);
 
     rows.zip(states)
         .map(|(row, state)| {
@@ -1279,10 +1262,11 @@ pub(super) fn row_changes(
                         .change_spans
                         .iter()
                         .filter_map(|(span, ..)| {
-                            mark(
+                            mark_run(
                                 EdgeClass::MarkAdded,
                                 CONTENT_COL + span.start as u32,
                                 CONTENT_COL + span.end as u32,
+                                table,
                             )
                         })
                         .collect(),
@@ -1297,11 +1281,38 @@ pub(super) fn row_changes(
         .collect()
 }
 
+/// The Change Marks of each display row in `rows` of a conflict view whose
+/// merged column is `snapshot`, with the buffer rows `kept` showing.
+///
+/// A row that `open` holds, a row of a chunk that still holds its conflict
+/// markers, takes one conflict mark across its text, as [`row_changes`] marks
+/// a removed row. Every other row takes none, so a chunk that a pick or a
+/// hand edit settled shows its text alone.
+pub(super) fn conflict_changes(
+    snapshot: &DisplaySnapshot,
+    rows: Range<u32>,
+    kept: &[Range<u32>],
+    open: &[Range<u32>],
+    table: &ClassTable,
+) -> Vec<LineRuns> {
+    rows.map(|row| {
+        let mark = open
+            .iter()
+            .any(|open| open.contains(&row))
+            .then(|| text_mark(snapshot, row, kept, EdgeClass::MarkConflict, table))
+            .flatten();
+        band::band_marks(mark.into_iter(), table)
+    })
+    .collect()
+}
+
 /// The Coverage Rail's mark of a display row whose Change Marks are
 /// `changes`.
 ///
 /// A row with an added mark takes the added lane, and a row with removed marks
-/// alone the removed lane, so the rail speaks the strip's two colors.
+/// alone the removed lane, so the rail speaks the strip's two colors. A
+/// conflict view's marked row takes the removed lane too, since the rail has
+/// no lane of its own for a conflict.
 pub(super) fn display_row_mark(changes: &LineRuns, table: &ClassTable) -> RowMark {
     let holds = |kind: EdgeClass| {
         let class = table.edge_class(kind);
@@ -1309,7 +1320,7 @@ pub(super) fn display_row_mark(changes: &LineRuns, table: &ClassTable) -> RowMar
     };
     let lane = if holds(EdgeClass::MarkAdded) {
         Some(EdgeClass::Added)
-    } else if holds(EdgeClass::MarkRemoved) {
+    } else if holds(EdgeClass::MarkRemoved) || holds(EdgeClass::MarkConflict) {
         Some(EdgeClass::Removed)
     } else {
         None
@@ -1318,6 +1329,37 @@ pub(super) fn display_row_mark(changes: &LineRuns, table: &ClassTable) -> RowMar
         lane: lane.map(|kind| table.edge_class(kind)),
         tick: None,
     }
+}
+
+/// One mark of `class` across display row `row`'s text, from its first run's
+/// start to its last run's end, so it lies over the gray text column for
+/// column. `None` for a row with no text.
+fn text_mark(
+    snapshot: &DisplaySnapshot,
+    row: u32,
+    kept: &[Range<u32>],
+    class: EdgeClass,
+    table: &ClassTable,
+) -> Option<Run> {
+    let text = display_row(snapshot, row, kept);
+    let runs = text.as_slice();
+    let start = runs.first().map_or(0, |run| u32::from(run.start_col));
+    let end = runs
+        .last()
+        .map_or(0, |run| u32::from(run.start_col) + u32::from(run.len));
+    mark_run(class, start, end, table)
+}
+
+/// A full-weight mark of `class` over strip columns `start..end`, clamped to
+/// the strip's columns, or `None` when no column of it is left.
+fn mark_run(class: EdgeClass, start: u32, end: u32, table: &ClassTable) -> Option<Run> {
+    let (start, end) = (start.min(MAX_COLUMNS), end.min(MAX_COLUMNS));
+    (start < end).then(|| Run {
+        start_col: start as u8,
+        len: (end - start) as u8,
+        class: table.edge_class(class),
+        weight: u8::MAX,
+    })
 }
 
 /// What display row `row` of `snapshot` shows, with the buffer rows `kept`
@@ -1965,8 +2007,8 @@ mod tests {
 
     /// A row's Coverage Rail lane reads its Change Marks. An added mark takes
     /// the added lane over any removed mark, removed marks alone take the
-    /// removed lane, and a row with no mark takes no lane. No row takes a
-    /// tick.
+    /// removed lane, a conflict mark takes the removed lane, and a row with no
+    /// mark takes no lane. No row takes a tick.
     #[test]
     fn each_diff_status_takes_its_mark() {
         let table = ClassTable::from_theme(&Theme::empty());
@@ -1990,11 +2032,13 @@ mod tests {
             [
                 marks(&[EdgeClass::MarkRemoved, EdgeClass::MarkAdded]),
                 marks(&[EdgeClass::MarkRemoved]),
+                marks(&[EdgeClass::MarkConflict]),
                 marks(&[]),
             ]
             .map(|line| display_row_mark(&line, &table)),
             [
                 lane(EdgeClass::Added),
+                lane(EdgeClass::Removed),
                 lane(EdgeClass::Removed),
                 RowMark::NONE
             ],

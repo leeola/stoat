@@ -200,8 +200,8 @@ pub(crate) struct MinimapChrome<'a> {
     pub(crate) workspace: WorkspaceId,
     /// Content stores this session declared, read for each strip's `content_id`.
     pub(crate) content: &'a HashMap<(WorkspaceId, BufferId), MinimapContent>,
-    /// The strip of each diff view editor, which a diff view's strip shows in
-    /// place of its buffer's content store.
+    /// The strip of each diff view and conflict view editor, which the editor's
+    /// strip shows in place of its buffer's content store.
     pub(crate) diff_view_strips: &'a HashMap<(WorkspaceId, EditorId), DiffViewStrip>,
     /// Syntax-scope palette a plain editor's strip declares and its run
     /// summaries index.
@@ -229,8 +229,8 @@ pub(crate) struct MinimapChrome<'a> {
     pub(crate) rule_class: u8,
     /// The first class whose runs every strip draws as a Change Mark, the
     /// class table's [`mark_class`](crate::minimap::ClassTable::mark_class).
-    /// Only a diff view's rows reach it, since every other class lies under
-    /// it.
+    /// Only the rows of a diff view's or a conflict view's strip reach it,
+    /// since every other class lies under it.
     pub(crate) mark_class: u8,
     /// The ground of a Coverage Rail, rgba, the background of
     /// `ui.minimap.rail` made opaque.
@@ -244,16 +244,16 @@ impl MinimapChrome<'_> {
     /// The content store that editor `editor_id`'s strip shows and the
     /// Coverage Rail beside it, or `None` before the store exists.
     ///
-    /// A diff view's strip shows the editor's display rows, with the rail its
-    /// strip holds while the display does not fit. Any other editor's strip
-    /// shows its buffer's lines, with the rail its buffer's store holds while
-    /// the file does not fit.
+    /// A diff view's or a conflict view's strip shows the editor's display
+    /// rows, with the rail its strip holds while the display does not fit. Any
+    /// other editor's strip shows its buffer's lines, with the rail its
+    /// buffer's store holds while the file does not fit.
     pub(crate) fn editor_strip(
         &self,
         editor_id: EditorId,
         editor: &EditorState,
     ) -> Option<(u32, Option<u32>)> {
-        match editor.diff_view {
+        match editor.display_row_strip() {
             true => self
                 .diff_view_strips
                 .get(&(self.workspace, editor_id))

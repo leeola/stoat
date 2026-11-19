@@ -96,6 +96,13 @@ const BAND_STRIP_TEXT: [u8; 3] = [0x46, 0x53, 0x6a];
 /// [`SUCCESS`] under the viewport band, as an added Change Mark draws there.
 const BAND_MARK_ADDED: [u8; 3] = [0x8c, 0xcb, 0x9f];
 
+/// [`DANGER`] under the viewport band, as a removed Change Mark draws there.
+const BAND_MARK_REMOVED: [u8; 3] = [0xdd, 0x81, 0x96];
+
+/// [`CONFLICT`] under the viewport band, as a conflict view's mark draws
+/// there.
+const BAND_MARK_CONFLICT: [u8; 3] = [0xe0, 0x9e, 0xb1];
+
 /// The wait for rust-analyzer to load the fixture crate and answer, the bound
 /// the live LSP tests allow.
 const LSP_DEADLINE: Duration = Duration::from_secs(90);
@@ -1910,6 +1917,71 @@ fn the_conflict_view_paints_the_merge_grid() {
         cell_rect(103 - 12, 5, 10, 1),
         CHIP_CONFLICT,
         "conflict_chip",
+    );
+}
+
+/// The conflict view's strip follows the merged column and marks the open
+/// chunk's lines in the conflict pink, with no added or removed mark, as the
+/// MergeKindsView board draws the strip.
+///
+/// The merged file's open chunk holds its marker block on display rows 1 to 5.
+/// The strip's lines start at row 2's top at a 3 px pitch, so the block's
+/// marks take full pixel rows 3 and 4 below that top through rows 15 and 16.
+/// Each marker line's text is narrower than the 12 px a mark takes at least,
+/// so each mark is 12 px wide. It starts at a fractional x, so it covers 11
+/// pixels whole. The viewport band covers the whole file, so a mark reads
+/// [`BAND_MARK_CONFLICT`]. No pixel of the band reads an added or a removed
+/// mark, bare or under the viewport band.
+#[test]
+fn the_conflict_view_s_strip_marks_the_open_conflict() {
+    let mut home = support::scratch_home();
+    let shot = settled_frame(
+        home.path(),
+        "conflict",
+        "file.txt",
+        "<C-;>Conflict<Enter><Settle>",
+    );
+    let (x, y, width, height) = cell_rect(152, 2, 7, 2);
+
+    let runs: Vec<(u32, u32)> = (y..y + height)
+        .map(|row| {
+            (
+                row - y,
+                longest_run(&shot, (x, row, width), BAND_MARK_CONFLICT),
+            )
+        })
+        .filter(|&(_, run)| run > 0)
+        .collect();
+    let marked: Vec<u32> = runs
+        .iter()
+        .filter(|&&(_, run)| run >= 11)
+        .map(|&(row, _)| row)
+        .collect();
+    let other_marks = (y..y + height)
+        .flat_map(|row| (x..x + width).map(move |col| (col, row)))
+        .map(|(col, row)| pixel(&shot, col, row))
+        .filter(|&color| {
+            [SUCCESS, BAND_MARK_ADDED, DANGER, BAND_MARK_REMOVED]
+                .into_iter()
+                .any(|mark| {
+                    color
+                        .into_iter()
+                        .zip(mark)
+                        .all(|(got, want)| got.abs_diff(want) <= 6)
+                })
+        })
+        .count();
+    let want: &[u32] = &[3, 4, 6, 7, 9, 10, 12, 13, 15, 16];
+    if (marked.as_slice(), other_marks) == (want, 0) {
+        return;
+    }
+
+    let frame = keep_frame(&shot, &mut home, "conflict_strip_marks");
+    panic!(
+        "the strip's pixel rows with 11 px of {} read {marked:?}, not {want:?}, from the runs \
+         {runs:?}, with {other_marks} pixels of an added or a removed mark; the frame is {}",
+        hex(BAND_MARK_CONFLICT),
+        frame.display(),
     );
 }
 
