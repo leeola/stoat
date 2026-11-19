@@ -247,6 +247,7 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
             pane::quit_or_exit(stoat, focused, true)
         },
         ActionKind::QuitAll => quit_all(stoat),
+        ActionKind::ForceQuitAll => UpdateEffect::Quit,
         ActionKind::QuitAllConfirm => quit_all_confirm(stoat),
         ActionKind::QuitAllCancel => quit_all_cancel(stoat),
         ActionKind::ShowVersion => show_version(stoat),
@@ -2051,8 +2052,9 @@ mod tests {
     use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
     use std::{sync::Arc, time::Duration};
     use stoat_action::{
-        FocusPane, ForceQuit, JumpBackward, MoveDown, MovePaneLeft, MovePaneNext, MovePaneRight,
-        Quit, QuitAll, RenameWorkspace, SaveSelection, SetTheme, SplitNewRight, SplitRight,
+        FocusPane, ForceQuit, ForceQuitAll, JumpBackward, MoveDown, MovePaneLeft, MovePaneNext,
+        MovePaneRight, Quit, QuitAll, RenameWorkspace, SaveSelection, SetTheme, SplitNewRight,
+        SplitRight,
     };
     use stoat_config::Settings;
     use stoat_scheduler::TestScheduler;
@@ -2989,6 +2991,19 @@ mod tests {
         editor::seed_focused_buffer(&mut stoat, "unsaved");
         assert_eq!(dispatch(&mut stoat, &QuitAll), UpdateEffect::Redraw);
         assert!(stoat.quit_all_confirm.is_some());
+    }
+
+    #[test]
+    fn force_quit_all_exits_over_unsaved_edits_with_no_prompt() {
+        let mut stoat = stoat();
+        editor::seed_focused_buffer(&mut stoat, "unsaved");
+        assert_eq!(
+            (
+                dispatch(&mut stoat, &ForceQuitAll),
+                stoat.quit_all_confirm.is_none()
+            ),
+            (UpdateEffect::Quit, true)
+        );
     }
 
     #[test]

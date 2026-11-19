@@ -21,6 +21,7 @@ action_kinds! {
     Quit,
     ForceQuit,
     QuitAll,
+    ForceQuitAll,
     QuitAllConfirm,
     QuitAllCancel,
     ShowVersion,

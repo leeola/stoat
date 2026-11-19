@@ -2,7 +2,8 @@ use crate::{
     defs::{
         agent::SpawnClaude,
         app::{
-            ForceQuit, OpenLogs, PinMode, Quit, QuitAll, QuitAllCancel, QuitAllConfirm, ShowVersion,
+            ForceQuit, ForceQuitAll, OpenLogs, PinMode, Quit, QuitAll, QuitAllCancel,
+            QuitAllConfirm, ShowVersion,
         },
         blame::{
             BlameCard, BlameCardClose, BlameCheckout, BlameCopySha, BlameParent, BlamePreview,
@@ -211,6 +212,7 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
     add(Quit::DEF, |_| Ok(Box::new(Quit)));
     add(ForceQuit::DEF, |_| Ok(Box::new(ForceQuit)));
     add(QuitAll::DEF, |_| Ok(Box::new(QuitAll)));
+    add(ForceQuitAll::DEF, |_| Ok(Box::new(ForceQuitAll)));
     add(QuitAllConfirm::DEF, |_| Ok(Box::new(QuitAllConfirm)));
     add(QuitAllCancel::DEF, |_| Ok(Box::new(QuitAllCancel)));
     add(ShowVersion::DEF, |_| Ok(Box::new(ShowVersion)));
@@ -1380,6 +1382,7 @@ mod tests {
         "ForceQuit",
         "WriteQuit",
         "QuitAll",
+        "ForceQuitAll",
         "QuitAllConfirm",
         "QuitAllCancel",
         "ShowVersion",
@@ -1829,6 +1832,13 @@ mod tests {
     }
 
     #[test]
+    fn force_quit_all_aliases_resolve() {
+        for token in ["qa!", "quit-all!", "QA!"] {
+            assert_eq!(lookup_alias(token).expect(token).def.name(), "ForceQuitAll");
+        }
+    }
+
+    #[test]
     fn force_close_all_buffers_aliases_resolve() {
         for token in ["bca!", "buffer-close-all!", "BCA!"] {
             assert_eq!(
@@ -2262,7 +2272,8 @@ mod tests {
         // + 1 BlameParent.
         // + 1 NewBuffer.
         // + 1 ForceQuit.
-        assert_eq!(all().count(), 512);
+        // + 1 ForceQuitAll.
+        assert_eq!(all().count(), 513);
     }
 
     #[test]

@@ -32,9 +32,20 @@ define_action!(
     "QuitAll",
     ActionKind::QuitAll,
     "exit stoat, closing all panes",
-    "Exit the application immediately, closing every pane and viewport. See also Quit, which closes the current pane and only exits when it is the last.",
+    "Exit the application, closing every pane and viewport. While a buffer holds unsaved edits, a prompt asks before the exit. quit-all! exits with no prompt. See also Quit, which closes the current pane and only exits when it is the last.",
     ActionPriority::Common,
     aliases = &["qa"]
+);
+
+define_action!(
+    ForceQuitAllDef,
+    ForceQuitAll,
+    "ForceQuitAll",
+    ActionKind::ForceQuitAll,
+    "exit stoat, discarding unsaved edits",
+    "Exit the application as QuitAll does, with no prompt over unsaved buffers. The exit discards their edits, as w! is to w.",
+    ActionPriority::Common,
+    aliases = &["qa!", "quit-all!"]
 );
 
 define_action!(

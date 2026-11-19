@@ -1845,7 +1845,13 @@ mod tests {
     fn case_insensitive_filter() {
         assert_eq!(
             names_for("quit"),
-            vec!["quit", "quit-all", "force-quit", "write-quit"]
+            vec![
+                "quit",
+                "quit-all",
+                "force-quit",
+                "force-quit-all",
+                "write-quit"
+            ]
         );
     }
 
@@ -1863,8 +1869,8 @@ mod tests {
             &mut match_indices,
             &mut selected,
         );
-        assert_eq!(filtered.len(), 4);
-        assert_eq!(selected, 3);
+        assert_eq!(filtered.len(), 5);
+        assert_eq!(selected, 4);
     }
 
     #[test]
@@ -3959,7 +3965,7 @@ mod tests {
     #[test]
     fn snapshot_command_palette_filter_narrows_to_one() {
         let mut h = Stoat::test();
-        h.type_text(":quitall");
+        h.type_text(":reloadenv");
         h.assert_snapshot("command_palette_filter_narrows_to_one");
     }
 
