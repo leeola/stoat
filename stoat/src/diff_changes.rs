@@ -100,7 +100,8 @@ new_key_type! {
 /// changes view replaced in that pane.
 pub(crate) struct DiffChangesState {
     /// One excerpt per changed file, in path order. The focused excerpt stays
-    /// though an edit took its file off the list, until the focus moves off it.
+    /// though its file left the list while its editor is in insert mode,
+    /// because a drop then sends the keys typed after it to another file.
     pub excerpts: Vec<Excerpt>,
     /// The index in [`Self::excerpts`] of the excerpt whose editor has focus.
     pub focused: usize,
@@ -117,12 +118,15 @@ pub(crate) struct DiffChangesState {
     /// The focused excerpt's path as of the last list, or `None` before the
     /// first list and on an empty stack.
     ///
-    /// A relist keeps that excerpt though its file is off the list, while its
-    /// buffer holds an edit made since the excerpt opened. An edit that removes
-    /// the file's last change thus leaves the cursor where it is. A focus move
-    /// to another excerpt makes the list stale, and the next relist drops the
-    /// excerpt if its file is still off the list.
+    /// A focus move to another excerpt makes the list stale, so the next
+    /// relist drops an excerpt that only insert mode kept.
     pub listed_focus: Option<String>,
+    /// Whether the focused excerpt's file is off the list, and the excerpt
+    /// stays because its editor is in insert mode.
+    ///
+    /// The list is stale once that mode ends, so the next relist drops the
+    /// excerpt.
+    pub insert_kept: bool,
     /// Rows visible on the most recent paint. Zero until the first paint.
     pub viewport_rows: usize,
     /// The minimap strip the most recent paint reserved at the pane's right
@@ -262,13 +266,6 @@ pub(crate) struct Excerpt {
     /// Whether the stack opened the buffer, so the buffer closes with the
     /// excerpt. A buffer that was open before the excerpt stays open.
     pub owns_buffer: bool,
-    /// The buffer's text version when the excerpt opened.
-    ///
-    /// A focused excerpt whose buffer moved past this version stays though its
-    /// file left the list, because an edit there took the file's last change.
-    /// A file that a commit or a base change took off the list took no edit,
-    /// so its excerpt goes though it holds the focus.
-    pub opened_version: u64,
     /// The buffer's text version at the last cut from a new diff map.
     ///
     /// A cut compares it with the text now, to tell a diff that an edit moved
@@ -868,6 +865,7 @@ impl Default for DiffChangesState {
             rows: 0,
             synced: None,
             listed_focus: None,
+            insert_kept: false,
             viewport_rows: 0,
             minimap_rect: None,
             content_rect: None,
@@ -898,9 +896,10 @@ impl StackStamp {
 /// Bring every changes view of the active workspace in step with the
 /// workspace, and report whether anything moved.
 ///
-/// A moved stamp or a moved focus lists each stale stack's files anew. An
-/// excerpt whose file left the list goes, unless an edit there took the file
-/// off the list and the focus is still on it. A file with no excerpt gets one.
+/// A moved stamp, a moved focus, or an ended insert mode lists each stale
+/// stack's files anew. An excerpt whose file left the list goes, and a focus on
+/// it moves to the first change of the next excerpt. Only insert mode keeps
+/// the focused excerpt, until the mode ends. A file with no excerpt gets one.
 /// An excerpt whose buffer's diff map moved refolds, and each waiting landing
 /// lands once its excerpt is folded. A focus on an excerpt that shows no rows
 /// moves to one that does, as [`settle_focus`] moves it. The list reads the
@@ -2034,9 +2033,10 @@ pub(crate) fn landing_row(kept: &[Range<u32>], row: u32) -> u32 {
 /// List the changed files anew for every changes view whose list is stale, and
 /// report whether any was.
 ///
-/// A list is stale when the workspace stamp moved since it, or when the focus
-/// moved to another excerpt since it. The second case drops an excerpt that
-/// only the focus kept, once the focus leaves it.
+/// A list is stale when the workspace stamp moved since it, when the focus
+/// moved to another excerpt since it, or when the insert mode that kept the
+/// focused excerpt ended. The last two drop an excerpt that only insert mode
+/// kept.
 fn relist(stoat: &mut Stoat) -> bool {
     let stale: Vec<DiffChangesId> = {
         let ws = stoat.active_workspace();
@@ -2045,7 +2045,12 @@ fn relist(stoat: &mut Stoat) -> bool {
             .iter()
             .filter(|(_, state)| {
                 let focus = state.focused_excerpt().map(|excerpt| &excerpt.rel_path);
-                state.synced != Some(stamp) || focus != state.listed_focus.as_ref()
+                let insert_ended = state.insert_kept
+                    && !state
+                        .focused_excerpt()
+                        .and_then(|excerpt| ws.editors.get(excerpt.editor_id))
+                        .is_some_and(|editor| editor.mode == "insert");
+                state.synced != Some(stamp) || focus != state.listed_focus.as_ref() || insert_ended
             })
             .map(|(id, _)| id)
             .collect()
@@ -2169,14 +2174,16 @@ pub(crate) fn listed_files(stoat: &Stoat) -> BTreeMap<String, PathBuf> {
 /// Bring the excerpts of changes view `id` in step with `listed`.
 ///
 /// An excerpt whose file left the list goes, as [`drop_excerpt`] drops it,
-/// unless it holds the focus and its buffer took an edit since it opened, as
-/// [`Excerpt::opened_version`] tells. A listed file with no excerpt gets one.
-/// The excerpts sort by path, the focus stays on its file, and
-/// [`DiffChangesState::listed_focus`] records that file.
+/// unless it holds the focus and its editor is in insert mode. A listed file
+/// with no excerpt gets one. The excerpts sort by path, and the focus stays on
+/// its file. A focus whose excerpt went moves as [`focus_after_drop`] moves it.
+///
+/// [`DiffChangesState::listed_focus`] records the focused file, and
+/// [`DiffChangesState::insert_kept`] whether only insert mode keeps it.
 fn sync_excerpts(stoat: &mut Stoat, id: DiffChangesId, listed: &BTreeMap<String, PathBuf>) {
     let Workspace {
         diff_changes_views,
-        buffers,
+        editors,
         ..
     } = stoat.active_workspace_mut();
     let Some(state) = diff_changes_views.get_mut(id) else {
@@ -2190,7 +2197,9 @@ fn sync_excerpts(stoat: &mut Stoat, id: DiffChangesId, listed: &BTreeMap<String,
         .partition(|excerpt| {
             listed.contains_key(&excerpt.rel_path)
                 || (focused_path.as_ref() == Some(&excerpt.rel_path)
-                    && edited_since_open(excerpt, buffers))
+                    && editors
+                        .get(excerpt.editor_id)
+                        .is_some_and(|editor| editor.mode == "insert"))
         });
     let held_before = kept.len() + gone.len();
     let kept_count = kept.len();
@@ -2227,23 +2236,42 @@ fn sync_excerpts(stoat: &mut Stoat, id: DiffChangesId, listed: &BTreeMap<String,
         }
     }
 
-    let Some(state) = stoat.active_workspace_mut().diff_changes_views.get_mut(id) else {
+    let Workspace {
+        diff_changes_views,
+        editors,
+        ..
+    } = stoat.active_workspace_mut();
+    let Some(state) = diff_changes_views.get_mut(id) else {
         return;
     };
     state.excerpts.sort_by(|a, b| a.rel_path.cmp(&b.rel_path));
-    state.focused = focused_path
-        .as_deref()
-        .and_then(|path| {
-            state
-                .excerpts
-                .iter()
-                .position(|excerpt| excerpt.rel_path == path)
-        })
-        .unwrap_or(state.focused)
-        .min(state.excerpts.len().saturating_sub(1));
+    let dropped = focused_path.as_deref().filter(|path| {
+        !state
+            .excerpts
+            .iter()
+            .any(|excerpt| excerpt.rel_path == *path)
+    });
+    match dropped {
+        Some(path) => focus_after_drop(state, editors, path),
+        None => {
+            state.focused = focused_path
+                .as_deref()
+                .and_then(|path| {
+                    state
+                        .excerpts
+                        .iter()
+                        .position(|excerpt| excerpt.rel_path == path)
+                })
+                .unwrap_or(state.focused)
+                .min(state.excerpts.len().saturating_sub(1));
+        },
+    }
     state.listed_focus = state
         .focused_excerpt()
         .map(|excerpt| excerpt.rel_path.clone());
+    state.insert_kept = state
+        .focused_excerpt()
+        .is_some_and(|excerpt| !listed.contains_key(&excerpt.rel_path));
 
     tracing::debug!(
         target: "stoat::diff_changes",
@@ -2260,11 +2288,44 @@ fn sync_excerpts(stoat: &mut Stoat, id: DiffChangesId, listed: &BTreeMap<String,
     }
 }
 
-/// Whether `excerpt`'s buffer took an edit since the excerpt opened.
-fn edited_since_open(excerpt: &Excerpt, buffers: &BufferRegistry) -> bool {
-    buffers.get(excerpt.buffer_id).is_some_and(|buffer| {
-        buffer.read().expect("buffer poisoned").version() != excerpt.opened_version
-    })
+/// Move the focus of `state` from the dropped excerpt of `path` to the first
+/// change of the next excerpt.
+///
+/// The next excerpt is the first below `path` in path order that shows rows
+/// and holds a hunk, else the nearest above. Its cursor lands on the first row
+/// of its first hunk, the row a change hop lands on. With no such excerpt the
+/// focus takes the dropped excerpt's place, held inside the stack, and
+/// [`settle_focus`] and the empty stack take over.
+fn focus_after_drop(
+    state: &mut DiffChangesState,
+    editors: &mut SlotMap<EditorId, EditorState>,
+    path: &str,
+) {
+    let len = state.excerpts.len();
+    let from = state
+        .excerpts
+        .iter()
+        .position(|excerpt| excerpt.rel_path.as_str() > path)
+        .unwrap_or(len);
+    let landing = (from..len).chain((0..from).rev()).find_map(|index| {
+        let excerpt = &state.excerpts[index];
+        if !excerpt.shows_rows() {
+            return None;
+        }
+        let editor = editors.get_mut(excerpt.editor_id)?;
+        let first = *hunk_starts(editor).first()?;
+        Some((index, first))
+    });
+    let Some((index, first)) = landing else {
+        state.focused = from.min(len.saturating_sub(1));
+        return;
+    };
+
+    if let Some(editor) = editors.get_mut(state.excerpts[index].editor_id) {
+        place_cursor(editor, Point::new(first, 0));
+    }
+    state.focused = index;
+    state.held_screen_row = None;
 }
 
 /// An excerpt of changes view `id` over the file at `path`, in the diff view,
@@ -2286,7 +2347,7 @@ fn open_excerpt(
     }
     let (buffer_id, buffer) =
         buffer_lifecycle::open_buffer_unshown(stoat, workspace, path, OpenOrigin::Visited)?;
-    let opened_version = buffer.read().expect("buffer poisoned").version();
+    let text_version = buffer.read().expect("buffer poisoned").version();
     let executor = stoat.executor.clone();
     let ws = stoat.active_workspace_mut();
     let collapsed = opens_collapsed(ws, &rel_path);
@@ -2303,8 +2364,7 @@ fn open_excerpt(
         scope_row: None,
         top: 0,
         owns_buffer,
-        opened_version,
-        cut_text: opened_version,
+        cut_text: text_version,
         cursor_held: false,
         reloaded: false,
         revealed: Vec::new(),
@@ -2345,7 +2405,7 @@ pub(crate) fn adopt_excerpt(
         return;
     }
 
-    let opened_version = buffer.read().expect("buffer poisoned").version();
+    let text_version = buffer.read().expect("buffer poisoned").version();
     let executor = stoat.executor.clone();
     let ws = stoat.active_workspace_mut();
     let collapsed = opens_collapsed(ws, &rel_path);
@@ -2374,8 +2434,7 @@ pub(crate) fn adopt_excerpt(
             scope_row: None,
             top: 0,
             owns_buffer: true,
-            opened_version,
-            cut_text: opened_version,
+            cut_text: text_version,
             cursor_held: false,
             reloaded: false,
             revealed: Vec::new(),
@@ -3417,7 +3476,7 @@ mod tests {
         path::{Path, PathBuf},
         sync::{Arc, RwLock},
     };
-    use stoat_action::{CloseDiffChanges, DiffChanges, DiffChangesPrev};
+    use stoat_action::{CloseDiffChanges, DiffChanges};
     use stoat_config::MinimapMode;
     use stoat_language::{
         parse_rope,
@@ -5373,53 +5432,93 @@ fn hint_width() -> u32 {
         );
     }
 
-    /// An edit that takes the focused file's last hunk leaves its excerpt in
-    /// the stack, with the cursor where the edit was.
+    /// An edit that takes the focused file's last hunk drops its excerpt, and
+    /// the cursor lands on the first change of the next excerpt.
     #[test]
-    fn a_revert_of_a_files_last_hunk_keeps_its_excerpt_under_the_cursor() {
+    fn a_revert_of_a_files_last_hunk_drops_its_excerpt_and_lands_on_the_next_change() {
         let mut h = TestHarness::with_size(100, 24);
-        stack_on_an_unsaved_edit(&mut h);
-        let before = focus(&mut h);
+        stack_on_an_unsaved_edit(&mut h, &[("a.txt", "a\n", "A\n")]);
 
         h.edit_focused(0..4, "");
         h.settle_diff_jobs();
         assert_eq!(
-            (before, excerpts(&h), focus(&mut h)),
-            (at("d.txt", 0), listed(&["a.txt", "d.txt"]), at("d.txt", 0)),
+            (excerpts(&h), focus(&mut h)),
+            (listed(&["a.txt"]), at("a.txt", 0)),
         );
     }
 
-    /// The excerpt the stack kept for the focus goes once the focus moves to
-    /// another excerpt.
+    /// Insert mode keeps the excerpt that its edit took off the list, since a
+    /// drop sends the keys typed after it to another file. The excerpt goes
+    /// once the mode ends.
     #[test]
-    fn a_hunkless_excerpt_leaves_once_the_focus_moves_off() {
+    fn an_insert_keeps_a_hunkless_excerpt_until_the_mode_ends() {
         let mut h = TestHarness::with_size(100, 24);
-        stack_on_an_unsaved_edit(&mut h);
+        stack_on_an_unsaved_edit(&mut h, &[("a.txt", "a\n", "A\n")]);
+
+        h.type_keys("i");
         h.edit_focused(0..4, "");
         h.settle_diff_jobs();
-        let kept = excerpts(&h);
+        let inserting = (excerpts(&h), focus(&mut h));
 
-        dispatch(&mut h.stoat, &DiffChangesPrev);
+        h.type_keys("Escape");
         h.settle();
         assert_eq!(
-            (kept, excerpts(&h), focus(&mut h).0),
+            (inserting, excerpts(&h), focus(&mut h)),
             (
-                listed(&["a.txt", "d.txt"]),
+                (listed(&["a.txt", "d.txt"]), at("d.txt", 0)),
                 listed(&["a.txt"]),
-                "a.txt".to_string()
+                at("a.txt", 0),
             ),
         );
     }
 
-    /// A changes view over the changed a.txt and the clean d.txt, which an
+    #[test]
+    fn a_dropped_excerpt_lands_on_the_file_below_it() {
+        let mut h = TestHarness::with_size(100, 24);
+        stack_on_an_unsaved_edit(
+            &mut h,
+            &[
+                ("a.txt", "a\n", "A\n"),
+                ("z.txt", "1\n2\n3\n", "1\n2\nTHREE\n"),
+            ],
+        );
+
+        h.edit_focused(0..4, "");
+        h.settle_diff_jobs();
+        assert_eq!(
+            (excerpts(&h), focus(&mut h)),
+            (listed(&["a.txt", "z.txt"]), at("z.txt", 2)),
+        );
+    }
+
+    #[test]
+    fn a_dropped_last_excerpt_leaves_an_empty_stack() {
+        let mut h = TestHarness::with_size(100, 24);
+        stack_on_an_unsaved_edit(&mut h, &[]);
+
+        h.edit_focused(0..4, "");
+        h.settle_diff_jobs();
+        let state = h
+            .stoat
+            .active_workspace()
+            .focused_diff_changes()
+            .expect("a changes view");
+        assert_eq!(
+            (excerpts(&h), state.focused_excerpt().is_none()),
+            (Vec::new(), true),
+        );
+    }
+
+    /// A changes view over the `changed` files and the clean d.txt, which an
     /// unsaved edit puts in the list, with the cursor on d.txt's edit.
     ///
-    /// The tally reads the disk, so the list holds d.txt through its buffer's
-    /// diff map alone, and an edit that takes the map's last hunk takes the
-    /// file off the list.
-    fn stack_on_an_unsaved_edit(h: &mut TestHarness) {
+    /// Each of `changed` is a path with its text at HEAD and on disk. The tally
+    /// reads the disk, so the list holds d.txt through its buffer's diff map
+    /// alone, and an edit that takes the map's last hunk takes the file off the
+    /// list.
+    fn stack_on_an_unsaved_edit(h: &mut TestHarness, changed: &[(&str, &str, &str)]) {
         h.stoat.set_diff_warm_auto(true);
-        h.stage_review_scenario("/repo", &[("a.txt", "a\n", "A\n")]);
+        h.stage_review_scenario("/repo", changed);
         repo(h).head_file("d.txt", "same\n");
         h.fake_fs().insert_file(Path::new("/repo/d.txt"), b"same\n");
         h.open_file(Path::new("/repo/d.txt"));

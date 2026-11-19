@@ -5528,7 +5528,6 @@ fn a_click_away_rests_a_run_commits_diff_changes_or_docked_view() {
             scope_row: None,
             top: 0,
             owns_buffer: false,
-            opened_version: 0,
             cut_text: 0,
             cursor_held: false,
             reloaded: false,
