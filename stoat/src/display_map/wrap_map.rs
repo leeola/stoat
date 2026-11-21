@@ -943,22 +943,31 @@ fn compute_wrap_columns(
         // The indent is finalized well before the first break, since a break
         // needs `width` columns and the indent caps at half of it.
         let indent = leading_ws.min(width / 2);
+        let continuation_budget = width - indent;
         let budget = if breaks.len() == 1 {
             width
         } else {
-            width - indent
+            continuation_budget
         };
         let segment_start = *breaks.last().expect("breaks starts with [0]");
         if expanded_col - segment_start >= budget {
             // A word boundary is where a reader would break, so it wins
             // whenever there is one that fits. A candidate past the budget is
             // not one, since breaking there would leave cells on a row too
-            // narrow to show them. Failing that, a character ending exactly on
-            // the budget fills the row rather than overrunning it and keeps its
-            // place, and only one that would overrun falls back to starting the
-            // next row.
+            // narrow to show them. Nor is one whose text after it already
+            // fills a continuation row. A break there leaves no cell for the
+            // next character, which then runs past the pane. Failing that, a
+            // character ending exactly on the budget fills the row rather than
+            // overrunning it and keeps its place, and only one that would
+            // overrun falls back to starting the next row.
             let break_at = match last_break_candidate {
-                Some(b) if b > segment_start && b <= segment_start + budget => b,
+                Some(b)
+                    if b > segment_start
+                        && b <= segment_start + budget
+                        && expanded_col - b < continuation_budget =>
+                {
+                    b
+                },
                 _ if expanded_col - segment_start == budget => expanded_col,
                 _ => match wide_escape {
                     Some(b) if b > segment_start => b,
@@ -966,6 +975,12 @@ fn compute_wrap_columns(
                 },
             };
             breaks.push(break_at);
+            // A character that moves down whole and fills the row it starts
+            // ends that row too, so the character after it opens the next row
+            // rather than running past the pane.
+            if expanded_col - break_at >= continuation_budget {
+                breaks.push(expanded_col);
+            }
             last_break_candidate = None;
             wide_escape = None;
         }
@@ -2184,6 +2199,18 @@ mod tests {
         );
     }
 
+    /// A tab that moves down whole and fills the continuation row it starts
+    /// ends that row, so the letter after it opens a row of its own.
+    #[test]
+    fn a_tab_that_fills_a_continuation_row_ends_it() {
+        // Three leading spaces indent a continuation row three cells on a
+        // six-cell pane, so the row holds three cells, and the tab from column
+        // 5 to 8 fills them.
+        let snap = make_snapshot("   ab\tZ", Some(6));
+        let widths: Vec<u32> = (0..snap.line_count()).map(|r| snap.line_len(r)).collect();
+        assert_eq!(widths, [5, 6, 4], "no row is wider than the pane");
+    }
+
     /// A tab ending exactly on the width fills its row rather than moving down.
     ///
     /// The escape only applies to a tab that does not fit, so the boundary
@@ -2392,6 +2419,25 @@ mod tests {
         assert_eq!(snap.line_count(), 2);
         assert_eq!(snap.line_len(0), 8);
         assert_eq!(snap.line_len(1), 7);
+    }
+
+    /// A word longer than a continuation row breaks on the row it starts on
+    /// rather than moving down whole.
+    ///
+    /// The only word boundary on the first row ends the leading whitespace. A
+    /// break there moves six cells of the word onto a continuation row that
+    /// holds six, so the next letter runs past the pane.
+    #[test]
+    fn a_word_too_long_for_a_continuation_row_breaks_on_the_first_row() {
+        let snap = make_snapshot("      abcdefghijklmnopqr", Some(12));
+        let rows: Vec<_> = (0..snap.line_count())
+            .map(|row| snap.display_line(row))
+            .collect();
+        assert_eq!(
+            rows,
+            ["      abcdef", "      ghijkl", "      mnopqr"],
+            "every row fills the pane and none runs past it",
+        );
     }
 
     #[test]
