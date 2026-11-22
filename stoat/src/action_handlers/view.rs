@@ -2001,7 +2001,7 @@ mod tests {
         // display row too narrow to hold the goal column. The rows this gives
         // are all wide enough, so nothing clips and the column is preserved
         // exactly.
-        let body: String = (0..60).map(|_| format!("{}\n", "x".repeat(63))).collect();
+        let body: String = (0..60).map(|_| format!("{}\n", "x".repeat(62))).collect();
 
         let mut h = TestHarness::with_size(40, 12);
         let path = h.write_file("wrapped.rs", &body);
@@ -2027,7 +2027,7 @@ mod tests {
         }
         assert_eq!(
             visual_column(&mut h),
-            14,
+            18,
             "the cursor starts part way along a wrapped row",
         );
 
@@ -2039,14 +2039,14 @@ mod tests {
         }
         assert_eq!(
             visual_column(&mut h),
-            14,
+            18,
             "the clamp moves the cursor down its rows, not across its columns",
         );
 
         dispatch(&mut h.stoat, &stoat_action::MoveDown);
         assert_eq!(
             visual_column(&mut h),
-            14,
+            18,
             "and the goal it left behind is the one a motion reads",
         );
     }

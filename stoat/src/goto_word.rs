@@ -318,7 +318,7 @@ mod tests {
             editor.viewport_rows = Some(2);
             editor.display_map.set_wrap_width(Some(10));
             crate::action_handlers::movement::set_cursor_row(editor, 1);
-            editor.scroll_row = 3;
+            editor.scroll_row = 5;
         }
 
         crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::GotoWord);

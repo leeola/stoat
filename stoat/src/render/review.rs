@@ -7799,7 +7799,8 @@ mod tests {
     #[test]
     fn a_change_span_on_a_continuation_row_marks_only_its_own_cells() {
         // 44 a's wrap the line before `TWO`, whichever gutter the harness
-        // paints, so the changed word starts the continuation row.
+        // paints, so the changed word starts the continuation row's text, 4
+        // cells in.
         let a = "a".repeat(44);
         let mut h = diff_harness(
             &format!("// {a} one two three\n"),
@@ -7809,7 +7810,7 @@ mod tests {
         h.snapshot();
         let buf = h.rendered_buffer();
         let cols = harness_columns(&h);
-        let y = row_holding(buf, right_text(&cols), "TWO three");
+        let y = row_holding(buf, right_text(&cols), "    TWO three");
         let underlined = |y| {
             (right_text(&cols))
                 .filter(|&x| buf[(x, y)].modifier.contains(Modifier::UNDERLINED))
@@ -7817,7 +7818,10 @@ mod tests {
         };
         assert_eq!(
             [underlined(y - 1), underlined(y)],
-            [vec![], (cols.right_text_x..cols.right_text_x + 3).collect()]
+            [
+                vec![],
+                (cols.right_text_x + 4..cols.right_text_x + 7).collect()
+            ]
         );
     }
 
@@ -7913,8 +7917,8 @@ mod tests {
         );
         assert_eq!(
             editor.cursor_screen_cell,
-            Some((wide_columns().right_text_x + 4, 1)),
-            "byte 50 is the fifth cell of the continuation row",
+            Some((wide_columns().right_text_x + 8, 1)),
+            "byte 50 is the fifth text cell of the continuation row, past its 4-cell indent",
         );
     }
 
@@ -8435,7 +8439,7 @@ mod tests {
             &format!("{line}\nkeep\n"),
         );
         editor.display_map.set_wrap_width(Some(51));
-        let area = Rect::new(0, 0, 120, 14);
+        let area = Rect::new(0, 0, 120, 16);
         let mut buf = Buffer::empty(area);
         render_diff_view(
             &mut editor,
@@ -8459,10 +8463,10 @@ mod tests {
                 .collect::<Vec<_>>()
         };
         let (left, right) = (column(left_text(&cols)), column(right_text(&cols)));
-        assert_eq!(right[6], "keep", "the live line takes six rows");
+        assert_eq!(right[7], "keep", "the live line takes seven rows");
         assert_eq!(
-            [&left[..6], &left[7..13]],
-            [&right[..6], &right[..6]],
+            [&left[..7], &left[8..15]],
+            [&right[..7], &right[..7]],
             "the unchanged copy and the removed one read as the live rows",
         );
     }

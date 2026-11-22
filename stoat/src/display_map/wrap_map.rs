@@ -87,11 +87,11 @@ struct Transform {
     /// The wrapped line's tab-expanded length. Zero on a run, whose rows are
     /// measured through the tab layer instead.
     tab_line_len: u32,
-    /// Display columns each continuation row is indented by, matching the
-    /// line's leading whitespace capped at half the wrap width. Zero on a
-    /// non-wrapping or single-row transform. Baked into the display columns of
-    /// every `sub_row > 0`, so the synthetic margin needs no special casing
-    /// downstream.
+    /// Display columns each continuation row is indented by, the line's
+    /// leading whitespace plus [`CONTINUATION_INDENT`] capped at half the wrap
+    /// width. Zero on a non-wrapping or single-row transform. Baked into the
+    /// display columns of every `sub_row > 0`, so the synthetic margin needs no
+    /// special casing downstream.
     indent: u32,
 }
 
@@ -235,6 +235,12 @@ const WRAP_SYNC_THRESHOLD: u32 = 100;
 /// whole line inline, that line being a single row. What the rewrap costs is
 /// the text it walks, so the gate reads both.
 const WRAP_SYNC_MAX_BYTES: usize = 64 * 1024;
+
+/// Cells a continuation row stands past its line's leading whitespace.
+///
+/// The cells set the row off from the start of its line, and the last two of
+/// them leave room for the Wrap Mark and the space after it.
+const CONTINUATION_INDENT: u32 = 4;
 
 pub struct WrapMap {
     snapshot: WrapSnapshot,
@@ -882,9 +888,11 @@ fn sync_incremental(
 /// allocation-free spelling of the same single row (see
 /// [`Transform::wrap_columns`]).
 ///
-/// The indent is the line's leading-whitespace display width capped at
-/// `width / 2`, and continuation rows wrap at `width - indent` so the indent
-/// plus text fills the pane. It is zero when the line does not wrap.
+/// The indent is the line's leading-whitespace display width plus
+/// [`CONTINUATION_INDENT`], capped at `width / 2` so a narrow pane still shows
+/// text on a continuation row. Continuation rows wrap at `width - indent`, so
+/// the indent plus the text fills the pane. The indent is zero when the line
+/// does not wrap.
 fn compute_wrap_columns(
     chars: impl Iterator<Item = char>,
     tab_line_len: u32,
@@ -942,7 +950,7 @@ fn compute_wrap_columns(
 
         // The indent is finalized well before the first break, since a break
         // needs `width` columns and the indent caps at half of it.
-        let indent = leading_ws.min(width / 2);
+        let indent = continuation_indent(leading_ws, width);
         let continuation_budget = width - indent;
         let budget = if breaks.len() == 1 {
             width
@@ -990,8 +998,14 @@ fn compute_wrap_columns(
         breaks.pop();
     }
 
-    let indent = leading_ws.min(width / 2);
+    let indent = continuation_indent(leading_ws, width);
     (breaks, indent)
+}
+
+/// The continuation indent of a line whose leading whitespace spans
+/// `leading_ws` columns.
+fn continuation_indent(leading_ws: u32, width: u32) -> u32 {
+    (leading_ws + CONTINUATION_INDENT).min(width / 2)
 }
 
 /// The width a wrap snapshot breaks its lines at, and the tab rule its columns
@@ -1533,7 +1547,7 @@ struct RowChunksState<'a> {
     target_end: Option<u32>,
     done: bool,
     /// Synthetic leading spaces yielded before this continuation row's text, so
-    /// its columns line up with the parent's indent. Zero on a primary row.
+    /// the text starts at the row's continuation indent. Zero on a primary row.
     indent: u32,
     /// The part of the last chunk that fell past this sub-row's window or its
     /// line break.
@@ -2094,7 +2108,7 @@ mod tests {
     #[test]
     fn single_long_line_wraps() {
         let snap = make_snapshot("abcdefghij", Some(5));
-        assert_eq!(snap.line_count(), 2);
+        assert_eq!(snap.line_count(), 3);
 
         assert_eq!(
             snap.to_wrap_point(TabPoint::new(0, 0)),
@@ -2106,28 +2120,28 @@ mod tests {
         );
         assert_eq!(
             snap.to_wrap_point(TabPoint::new(0, 5)),
-            WrapPoint::new(1, 0)
+            WrapPoint::new(1, 2)
         );
         assert_eq!(
             snap.to_wrap_point(TabPoint::new(0, 8)),
-            WrapPoint::new(1, 3)
+            WrapPoint::new(2, 2)
         );
 
         assert_eq!(snap.to_tab_point(WrapPoint::new(0, 3)), TabPoint::new(0, 3));
-        assert_eq!(snap.to_tab_point(WrapPoint::new(1, 0)), TabPoint::new(0, 5));
-        assert_eq!(snap.to_tab_point(WrapPoint::new(1, 3)), TabPoint::new(0, 8));
+        assert_eq!(snap.to_tab_point(WrapPoint::new(1, 2)), TabPoint::new(0, 5));
+        assert_eq!(snap.to_tab_point(WrapPoint::new(2, 2)), TabPoint::new(0, 8));
     }
 
     #[test]
     fn multiple_wraps_one_line() {
         let snap = make_snapshot("abcdefghijklmno", Some(5));
-        assert_eq!(snap.line_count(), 3);
+        assert_eq!(snap.line_count(), 5);
     }
 
     #[test]
     fn mixed_lines() {
         let snap = make_snapshot("ab\nabcdefghij\ncd", Some(5));
-        assert_eq!(snap.line_count(), 4);
+        assert_eq!(snap.line_count(), 5);
 
         assert_eq!(
             snap.to_wrap_point(TabPoint::new(0, 1)),
@@ -2135,11 +2149,11 @@ mod tests {
         );
         assert_eq!(
             snap.to_wrap_point(TabPoint::new(1, 7)),
-            WrapPoint::new(2, 2)
+            WrapPoint::new(2, 4)
         );
         assert_eq!(
             snap.to_wrap_point(TabPoint::new(2, 1)),
-            WrapPoint::new(3, 1)
+            WrapPoint::new(4, 1)
         );
     }
 
@@ -2168,7 +2182,7 @@ mod tests {
     fn line_len_wrapped_remainder() {
         let snap = make_snapshot("abcdefgh", Some(5));
         assert_eq!(snap.line_len(0), 5);
-        assert_eq!(snap.line_len(1), 3);
+        assert_eq!(snap.line_len(1), 5, "the 2-cell indent and fgh");
     }
 
     #[test]
@@ -2178,7 +2192,7 @@ mod tests {
         let snap = make_snapshot("\u{6c49}\u{6c49}x", Some(4));
         assert_eq!(snap.line_count(), 2);
         assert_eq!(snap.line_len(0), 4);
-        assert_eq!(snap.line_len(1), 1);
+        assert_eq!(snap.line_len(1), 3, "the 2-cell indent and x");
     }
 
     /// A tab that would run past the pane starts the next row rather than
@@ -2189,12 +2203,14 @@ mod tests {
     /// cells on a row too narrow to show them, where a caret is never painted.
     #[test]
     fn a_tab_that_would_overrun_the_width_starts_the_next_row() {
-        // The tab starts at column 5 and runs to 8 on a six-column pane.
+        // The tab starts at column 5 and runs to 8 on a six-column pane. A
+        // continuation row holds three cells past its indent, so the tab fills
+        // one and Z starts another.
         let snap = make_snapshot("abcde\tZ", Some(6));
         let widths: Vec<u32> = (0..snap.line_count()).map(|r| snap.line_len(r)).collect();
         assert_eq!(
             widths,
-            [5, 4],
+            [5, 6, 4],
             "the tab moves down whole, and no row is wider than the pane",
         );
     }
@@ -2221,7 +2237,7 @@ mod tests {
         // The tab starts at column 5 and runs to 8, which is the whole pane.
         let snap = make_snapshot("abcde\tZ", Some(8));
         let widths: Vec<u32> = (0..snap.line_count()).map(|r| snap.line_len(r)).collect();
-        assert_eq!(widths, [8, 1], "the tab fills the row it started on");
+        assert_eq!(widths, [8, 5], "the tab fills the row it started on");
     }
 
     /// A combining mark landing on the wrap break rides with its base
@@ -2241,11 +2257,15 @@ mod tests {
             "aaaae\u{301}",
             "the accent belongs to the e that ends the row",
         );
-        assert_eq!(snap.display_line(1), "bbb");
+        assert_eq!(snap.display_line(1), "  bbb");
         assert_eq!(
-            format!("{}{}", snap.display_line(0), snap.display_line(1)),
+            format!(
+                "{}{}",
+                snap.display_line(0),
+                snap.display_line(1).trim_start()
+            ),
             "aaaae\u{301}bbb",
-            "and the rows together are still the source text",
+            "and the rows past the indent are still the source text",
         );
     }
 
@@ -2308,17 +2328,19 @@ mod tests {
         let snap = make_snapshot("\u{6c49}\u{6c49}\u{6c49}", Some(4));
         assert_eq!(snap.line_count(), 2, "two then one, not one each");
         assert_eq!(snap.line_len(0), 4);
-        assert_eq!(snap.line_len(1), 2);
+        assert_eq!(snap.line_len(1), 4, "the 2-cell indent and one ideograph");
     }
 
     #[test]
     fn a_wide_character_that_would_overrun_starts_the_next_row() {
         // The escape the exact-fit case must not disturb. One column is left
         // and the ideograph needs two, so it moves rather than being split.
-        let snap = make_snapshot("x\u{6c49}", Some(2));
+        // Width 4 leaves a continuation row two cells past its indent, which
+        // the ideograph fills.
+        let snap = make_snapshot("xxx\u{6c49}", Some(4));
         assert_eq!(snap.line_count(), 2);
-        assert_eq!(snap.line_len(0), 1);
-        assert_eq!(snap.line_len(1), 2);
+        assert_eq!(snap.line_len(0), 3);
+        assert_eq!(snap.line_len(1), 4);
     }
 
     #[test]
@@ -2326,18 +2348,20 @@ mod tests {
         // The second o lands exactly on the width, but a reader breaks at the
         // space before it rather than mid-word.
         let snap = make_snapshot("hello world", Some(8));
-        assert_eq!(snap.line_count(), 2);
+        assert_eq!(snap.line_count(), 3);
         assert_eq!(snap.line_len(0), 6, "hello and its space");
-        assert_eq!(snap.line_len(1), 5);
+        assert_eq!(snap.line_len(1), 8, "the 4-cell indent and worl");
+        assert_eq!(snap.line_len(2), 5, "the 4-cell indent and d");
     }
 
     #[test]
     fn word_boundary_wrap() {
-        let snap = make_snapshot("hello world foo", Some(8));
+        // Width 10 leaves a continuation row six cells, which holds each word.
+        let snap = make_snapshot("hello world foo", Some(10));
         assert_eq!(snap.line_count(), 3);
         assert_eq!(snap.line_len(0), 6);
-        assert_eq!(snap.line_len(1), 6);
-        assert_eq!(snap.line_len(2), 3);
+        assert_eq!(snap.line_len(1), 10);
+        assert_eq!(snap.line_len(2), 7);
     }
 
     fn geometry(width: u32) -> WrapGeometry {
@@ -2350,14 +2374,17 @@ mod tests {
 
     #[test]
     fn wrap_windows_break_at_a_word_and_indent_the_continuation() {
-        assert_eq!(geometry(8).windows("  hello world"), (vec![0..8, 8..13], 2));
+        assert_eq!(
+            geometry(12).windows("  hello world"),
+            (vec![0..8, 8..13], 6)
+        );
     }
 
     #[test]
     fn wrap_windows_hard_wrap_a_word_longer_than_the_width() {
         assert_eq!(
             geometry(4).windows("abcdefghij"),
-            (vec![0..4, 4..8, 8..10], 0)
+            (vec![0..4, 4..6, 6..8, 8..10], 2)
         );
     }
 
@@ -2395,7 +2422,7 @@ mod tests {
 
     #[test]
     fn word_boundary_roundtrip() {
-        let snap = make_snapshot("hello world foo", Some(8));
+        let snap = make_snapshot("hello world foo", Some(10));
 
         let wp = snap.to_wrap_point(TabPoint::new(0, 0));
         assert_eq!(wp, WrapPoint::new(0, 0));
@@ -2405,20 +2432,21 @@ mod tests {
         assert_eq!(wp, WrapPoint::new(0, 5));
 
         let wp = snap.to_wrap_point(TabPoint::new(0, 6));
-        assert_eq!(wp, WrapPoint::new(1, 0));
+        assert_eq!(wp, WrapPoint::new(1, 4));
         assert_eq!(snap.to_tab_point(wp), TabPoint::new(0, 6));
 
         let wp = snap.to_wrap_point(TabPoint::new(0, 12));
-        assert_eq!(wp, WrapPoint::new(2, 0));
+        assert_eq!(wp, WrapPoint::new(2, 4));
         assert_eq!(snap.to_tab_point(wp), TabPoint::new(0, 12));
     }
 
     #[test]
     fn long_word_hard_wraps() {
         let snap = make_snapshot("abcdefghijklmno", Some(8));
-        assert_eq!(snap.line_count(), 2);
+        assert_eq!(snap.line_count(), 3);
         assert_eq!(snap.line_len(0), 8);
-        assert_eq!(snap.line_len(1), 7);
+        assert_eq!(snap.line_len(1), 8, "the 4-cell indent and four letters");
+        assert_eq!(snap.line_len(2), 7);
     }
 
     /// A word longer than a continuation row breaks on the row it starts on
@@ -2448,11 +2476,28 @@ mod tests {
 
     #[test]
     fn soft_wrap_indent_continuation() {
-        // Four leading spaces at width 8 give an indent equal to the whitespace,
-        // sitting exactly at the width/2 cap.
+        // Four leading spaces plus the four continuation cells pass the width/2
+        // cap at width 8, so the indent sits at the cap.
         let snap = make_snapshot("    hello world foo", Some(8));
         assert!(snap.line_count() > 1);
         assert_eq!(snap.soft_wrap_indent(1), 4);
+    }
+
+    #[test]
+    fn a_continuation_row_stands_four_cells_past_the_leading_whitespace() {
+        let snap = make_snapshot("  alpha beta gamma delta", Some(12));
+        let rows: Vec<_> = (0..snap.line_count())
+            .map(|row| snap.display_line(row))
+            .collect();
+        assert_eq!(
+            rows,
+            ["  alpha ", "      beta ", "      gamma ", "      delta"],
+            "each continuation row opens 2 + 4 cells in",
+        );
+        let indents: Vec<_> = (0..snap.line_count())
+            .map(|row| snap.soft_wrap_indent(row))
+            .collect();
+        assert_eq!(indents, [0, 6, 6, 6], "indent of each display row");
     }
 
     #[test]
@@ -2461,14 +2506,14 @@ mod tests {
         assert!(snap.line_count() > 1);
         let indent = snap.soft_wrap_indent(1) as usize;
         assert_eq!(
-            indent, 4,
-            "continuation indent matches the four leading spaces"
+            indent, 6,
+            "the four leading spaces plus four, capped at half of 12"
         );
 
         let line = snap.display_line(1);
         assert_eq!(
             &line[..indent],
-            "    ",
+            "      ",
             "the row opens with the indent spaces"
         );
         assert_ne!(
@@ -2522,7 +2567,7 @@ mod tests {
     #[test]
     fn a_leftward_clip_of_a_break_column_stays_above_the_break() {
         let snap = make_snapshot(&"a".repeat(20), Some(10));
-        assert_eq!(snap.line_count(), 2, "the line wraps into two rows");
+        assert_eq!(snap.line_count(), 3, "the line wraps into three rows");
 
         assert_eq!(
             snap.clip_point(WrapPoint::new(0, 10), Bias::Left),
@@ -2531,8 +2576,8 @@ mod tests {
         );
         assert_eq!(
             snap.clip_point(WrapPoint::new(0, 10), Bias::Right),
-            WrapPoint::new(1, 0),
-            "clipping right takes the continuation's first cell",
+            WrapPoint::new(1, 4),
+            "clipping right takes the continuation's first cell past its indent",
         );
     }
 
@@ -2558,7 +2603,7 @@ mod tests {
         );
         assert_eq!(
             snap.clip_point(WrapPoint::new(1, 0), Bias::Right),
-            WrapPoint::new(1, 1),
+            WrapPoint::new(1, 5),
             "clipping right steps forward onto the cell past the placeholder",
         );
     }
@@ -2731,19 +2776,19 @@ mod tests {
         // Rows that fit either side of one that wraps, so a run sits on both
         // sides of a wrapped transform.
         let snap = make_snapshot("aa\nbbb\ncccc\nd\nabcdefghij\ne\nff\nggg\nhhhh", Some(5));
-        assert_eq!(snap.line_count(), 10, "the long line takes two rows");
+        assert_eq!(snap.line_count(), 11, "the long line takes three rows");
 
         assert_eq!(
             (0..snap.line_count())
                 .map(|row| snap.display_line(row))
                 .collect::<Vec<_>>(),
-            ["aa", "bbb", "cccc", "d", "abcde", "fghij", "e", "ff", "ggg", "hhhh"],
+            ["aa", "bbb", "cccc", "d", "abcde", "  fgh", "  ij", "e", "ff", "ggg", "hhhh"],
         );
         assert_eq!(
             (0..snap.line_count())
                 .map(|row| snap.line_len(row))
                 .collect::<Vec<_>>(),
-            [2, 3, 4, 1, 5, 5, 1, 2, 3, 4],
+            [2, 3, 4, 1, 5, 5, 4, 1, 2, 3, 4],
         );
         assert_eq!(
             (0..snap.line_count())
@@ -2756,6 +2801,7 @@ mod tests {
                 WrapRowKind::Primary,
                 WrapRowKind::Primary,
                 WrapRowKind::Continuation,
+                WrapRowKind::Continuation,
                 WrapRowKind::Primary,
                 WrapRowKind::Primary,
                 WrapRowKind::Primary,
@@ -2763,8 +2809,10 @@ mod tests {
             ],
         );
 
+        // A continuation row's text starts past its indent, and a column in
+        // the indent resolves to that first cell instead of itself.
         for row in 0..snap.line_count() {
-            let point = WrapPoint::new(row, 0);
+            let point = WrapPoint::new(row, snap.soft_wrap_indent(row));
             assert_eq!(
                 snap.to_wrap_point(snap.to_tab_point(point)),
                 point,
@@ -2892,13 +2940,14 @@ mod tests {
     /// the point conversions each reader feeds.
     #[test]
     fn lines_that_do_not_wrap_render_beside_lines_that_do() {
-        // The first line wraps into "ab cd" and "ef". The rest each stay whole.
+        // The first line wraps into "ab cd" and "ef" behind a 3-cell indent. The
+        // rest each stay whole.
         let snap = make_snapshot("ab cd ef\nshort\n\nxy", Some(6));
 
         let rendered: Vec<String> = (0..snap.line_count())
             .map(|row| snap.display_line(row))
             .collect();
-        assert_eq!(rendered, vec!["ab cd ", "ef", "short", "", "xy"]);
+        assert_eq!(rendered, vec!["ab cd ", "   ef", "short", "", "xy"]);
 
         let lens: Vec<u32> = (0..snap.line_count())
             .map(|row| snap.line_len(row))
@@ -3342,12 +3391,12 @@ mod tests {
         use std::collections::HashMap;
         use stoat_text::Anchor;
 
-        // Wrap "abcdefghij" at width 5 -> two wrap rows: "abcde", "fghij".
-        // A highlight on bytes 2..8 (Red) should appear:
+        // Wrap "abcdefghij" at width 5 -> three wrap rows: "abcde", "  fgh",
+        // "  ij". A highlight on bytes 2..8 (Red) should appear:
         //   row 0: bytes 2..5 styled (chars c, d, e)
-        //   row 1: bytes 0..3 styled (chars f, g, h)
+        //   row 1: bytes 5..8 styled (chars f, g, h), after the bare indent
         let snap = make_snapshot("abcdefghij", Some(5));
-        assert_eq!(snap.line_count(), 2);
+        assert_eq!(snap.line_count(), 3);
 
         let red = HighlightStyle {
             foreground: Some(Color::Red),
@@ -3381,7 +3430,7 @@ mod tests {
             &resolver,
         ));
 
-        let chunks: Vec<_> = snap.chunks(0..2, endpoints).collect();
+        let chunks: Vec<_> = snap.chunks(0..3, endpoints).collect();
         let mut chars_with_style: Vec<(char, Option<Color>)> = Vec::new();
         for chunk in &chunks {
             let color = chunk.highlight_style.as_ref().and_then(|s| s.foreground);
@@ -3390,10 +3439,14 @@ mod tests {
             }
         }
         let recovered: String = chars_with_style.iter().map(|(c, _)| c).collect();
-        assert_eq!(recovered, "abcde\nfghij", "wrap reconstruction must match");
+        assert_eq!(
+            recovered, "abcde\n  fgh\n  ij",
+            "wrap reconstruction must match"
+        );
 
         // 'c','d','e' are red (bytes 2,3,4 of source) and 'f','g','h'
-        // are red (bytes 5,6,7 of source, on wrap row 1 at cols 0,1,2).
+        // are red (bytes 5,6,7 of source, on wrap row 1 at cols 2,3,4). The
+        // indent inside the span carries no style.
         let expected_colors = [
             ('a', None),
             ('b', None),
@@ -3401,9 +3454,14 @@ mod tests {
             ('d', Some(Color::Red)),
             ('e', Some(Color::Red)),
             ('\n', None),
+            (' ', None),
+            (' ', None),
             ('f', Some(Color::Red)),
             ('g', Some(Color::Red)),
             ('h', Some(Color::Red)),
+            ('\n', None),
+            (' ', None),
+            (' ', None),
             ('i', None),
             ('j', None),
         ];

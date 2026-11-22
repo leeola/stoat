@@ -4766,10 +4766,14 @@ mod tests {
 
         assert_eq!(
             blocks(1),
-            [(BlockPlacement::Below(3), 1, vec!["gamma delta".to_string()])],
+            [(
+                BlockPlacement::Below(3),
+                1,
+                vec!["    gamma ".to_string(), "    delta".to_string()]
+            )],
         );
         assert_eq!(
-            blocks(2),
+            blocks(3),
             [],
             "a live line with a row per segment leaves nothing to overflow"
         );
@@ -4797,7 +4801,10 @@ mod tests {
                 .iter()
                 .map(|group| group.iter().map(block_rows).collect::<Vec<_>>())
                 .collect::<Vec<_>>(),
-            [vec![vec!["alpha beta ", "gamma delta"], vec!["short"]]],
+            [vec![
+                vec!["alpha beta ", "    gamma ", "    delta"],
+                vec!["short"]
+            ]],
         );
     }
 

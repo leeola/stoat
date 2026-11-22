@@ -4522,8 +4522,9 @@ mod tests {
 
         assert_eq!(buffer_rows, 1, "the buffer is one line");
         assert_eq!(
-            display_rows, 3,
-            "a line three times the bound spans three display rows",
+            display_rows, 4,
+            "a line three times the bound spans four display rows, since each \
+             continuation row holds four cells less than the bound",
         );
     }
 
@@ -4538,7 +4539,10 @@ mod tests {
             Some(20),
             "bounded caps at the wrap column below the pane width",
         );
-        assert_eq!(display_rows, 10, "200 columns wrap into ten 20-column rows");
+        assert_eq!(
+            display_rows, 13,
+            "200 columns wrap into a 20-column row and twelve of 16 past the indent"
+        );
     }
 
     #[test]
@@ -4554,7 +4558,7 @@ mod tests {
     }
 
     #[test]
-    fn wrapped_continuation_row_paints_the_parent_indent() {
+    fn a_wrapped_continuation_row_paints_its_indent() {
         let mut h = Stoat::test();
         let root = PathBuf::from("/wrap-indent");
         let path = root.join("a.txt");
@@ -4605,10 +4609,10 @@ mod tests {
                 .map(|x| buf[(x, y)].symbol().chars().next().unwrap_or(' '))
                 .collect()
         };
-        let continuation = row_text(1);
-        assert!(
-            continuation.starts_with("    ") && !continuation.trim_start().is_empty(),
-            "the continuation row is indented under the parent's whitespace: {continuation:?}",
+        assert_eq!(
+            row_text(1).trim_end(),
+            format!("{}{}", " ".repeat(8), ["word"; 6].join(" ")),
+            "the continuation row starts 4 cells past the line's 4-space indent",
         );
     }
 
@@ -5828,11 +5832,11 @@ mod tests {
         );
 
         assert!(
-            buf[(1, 1)]
+            buf[(5, 1)]
                 .style()
                 .add_modifier
                 .contains(Modifier::REVERSED),
-            "the block paints on the newline cell after the wrapped l",
+            "the block paints on the newline cell after the wrapped l and its indent",
         );
     }
 

@@ -1864,7 +1864,7 @@ fn count_vertical_motion_clamps_at_buffer_edge() {
 /// clobbers it.
 fn wrapped_pane_cursor_on_short_line() -> TestHarness {
     let mut h = TestHarness::with_size(40, 12);
-    let path = h.write_file("wrap.rs", &format!("{}\nshort\n", "a".repeat(30)));
+    let path = h.write_file("wrap.rs", &format!("{}\nshort\n", "a".repeat(34)));
     h.open_file(&path);
     let editor = focused_editor_mut(&mut h.stoat).expect("focused editor");
     editor.viewport_rows = Some(10);
@@ -1876,14 +1876,15 @@ fn wrapped_pane_cursor_on_short_line() -> TestHarness {
 /// `k` steps one screen row, so it lands in the wrapped line's tail rather
 /// than skipping the whole line to its start.
 ///
-/// The 30-character line wraps at width 10 into three rows, and the cursor
-/// starts on the short line below them. One press reaches the last of the
-/// three, which is column 20 of the buffer line.
+/// The 34-character line wraps at width 10 into a 10-cell row and four 6-cell
+/// rows behind a 4-cell indent, and the cursor starts on the short line below
+/// them. One press reaches the last of the five, which starts at column 28 of
+/// the buffer line.
 #[test]
 fn move_up_under_wrap_lands_in_the_wrapped_tail() {
     let mut h = wrapped_pane_cursor_on_short_line();
     move_vertical(&mut h.stoat, -1, false);
-    assert_eq!(focused_cursor_point(&mut h.stoat), Point::new(0, 20));
+    assert_eq!(focused_cursor_point(&mut h.stoat), Point::new(0, 28));
 }
 
 /// The goal column is counted along the display row, so a step up and back
@@ -1894,7 +1895,7 @@ fn vertical_motion_under_wrap_round_trips() {
     move_vertical(&mut h.stoat, -1, false);
     assert_eq!(
         focused_cursor_point(&mut h.stoat),
-        Point::new(0, 20),
+        Point::new(0, 28),
         "k reaches the wrapped line's last row",
     );
     move_vertical(&mut h.stoat, 1, false);
@@ -1908,42 +1909,43 @@ fn vertical_motion_under_wrap_round_trips() {
 /// From the end of a wrapped line, `k` steps onto the row above rather than
 /// back to the start of the row it is on.
 ///
-/// The end of the 30-character line is display column 10 of its last row, and
+/// The end of the 34-character line is display column 10 of its last row, and
 /// that column is where the row above breaks. The break belongs to the row
 /// after it, so the leftward clip must step back over it. The forward answer
-/// lands on column 20, one cell into the row `k` started from.
+/// lands on column 28, the first text cell of the row `k` started from.
 #[test]
 fn move_up_from_a_wrapped_line_end_crosses_the_break() {
     let mut h = wrapped_pane_cursor_on_short_line();
     {
         let editor = focused_editor_mut(&mut h.stoat).expect("focused editor");
-        place_cursor(editor, 0, 30);
+        place_cursor(editor, 0, 34);
     }
     move_vertical(&mut h.stoat, -1, false);
-    assert_eq!(focused_cursor_point(&mut h.stoat), Point::new(0, 19));
+    assert_eq!(focused_cursor_point(&mut h.stoat), Point::new(0, 27));
 }
 
-/// A count crosses that many screen rows, so three presses cover the whole
-/// wrapped line where one covers a third of it.
+/// A count crosses that many screen rows, so five presses cover the whole
+/// wrapped line where one covers a fifth of it.
 #[test]
 fn count_up_under_wrap_crosses_that_many_screen_rows() {
     let mut h = wrapped_pane_cursor_on_short_line();
-    h.stoat.pending_count = Some(3);
+    h.stoat.pending_count = Some(5);
     move_vertical(&mut h.stoat, -1, false);
     assert_eq!(
         focused_cursor_point(&mut h.stoat),
         Point::new(0, 0),
-        "3k reaches the wrapped line's first row",
+        "5k reaches the wrapped line's first row",
     );
 }
 
 /// The goal column counts cells along the display row, not along the buffer
 /// line.
 ///
-/// From column 25 of a line wrapped every 10 cells, the cursor sits 5 cells
-/// into its third row. One step up holds those 5 cells and lands on column 15.
-/// A goal counted along the buffer line carries 25 instead, which the row
-/// above clips to its own end at column 19.
+/// From column 25, the cursor sits at display column 7 of the line's fourth
+/// row, which shows columns 22 to 28 behind a 4-cell indent. One step up holds
+/// display column 7 and lands on column 19. A goal counted along the buffer
+/// line carries 25 instead, which the row above clips to its own end at
+/// column 21.
 #[test]
 fn the_vertical_goal_counts_cells_along_the_display_row() {
     let mut h = wrapped_pane_cursor_on_short_line();
@@ -1955,7 +1957,7 @@ fn the_vertical_goal_counts_cells_along_the_display_row() {
             .set_block_cursor(25, snapshot.buffer_snapshot());
     }
     move_vertical(&mut h.stoat, -1, false);
-    assert_eq!(focused_cursor_point(&mut h.stoat), Point::new(0, 15));
+    assert_eq!(focused_cursor_point(&mut h.stoat), Point::new(0, 19));
 }
 
 /// The text-line step crosses a wrapped line whole, where the screen-row step
@@ -1989,7 +1991,7 @@ fn extend_up_under_wrap_extends_the_head_by_a_screen_row() {
     move_vertical(&mut h.stoat, -1, true);
     assert_eq!(
         focused_cursor_point(&mut h.stoat),
-        Point::new(0, 20),
+        Point::new(0, 28),
         "extend-up reaches the wrapped line's last row, as a plain move does",
     );
 }

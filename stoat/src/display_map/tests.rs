@@ -296,14 +296,15 @@ fn a_refresh_finding_a_new_hunk_keeps_the_other_blocks() {
 }
 
 /// A buffer whose text from row 3 on is `from_row_3`, then "five", with row 3
-/// paired as a Modified hunk against the base line "alpha beta gamma delta",
-/// and deleted blocks shown at wrap width 12.
+/// paired as a Modified hunk against the base line "alpha beta gamma", and
+/// deleted blocks shown at wrap width 12.
 ///
-/// At that width the base line breaks into "alpha beta " and "gamma delta".
-/// So the second segment overflows below a live line that takes one row, and
-/// sits beside the second row of one that takes two.
+/// At that width the base line breaks into "alpha beta " and "gamma", which
+/// shows behind the 4-cell continuation indent. So the second segment
+/// overflows below a live line that takes one row, and sits beside the second
+/// row of one that takes two.
 fn paired_view(from_row_3: &str) -> (Arc<RwLock<TextBuffer>>, DisplayMap) {
-    let base = "alpha beta gamma delta\n";
+    let base = "alpha beta gamma\n";
     let text = format!("one\ntwo\nthree\n{from_row_3}\nfive\n");
     let mut buffer = TextBuffer::with_text(BufferId::new(0), &text);
     buffer.diff_map = Some(DiffMap::from_hunks(
@@ -339,15 +340,7 @@ fn typing_a_paired_line_onto_a_second_row_moves_its_overflow() {
     let (shared, mut map) = paired_view("alpha beta x");
     assert_eq!(
         block_rows(&mut map),
-        [
-            "buf0",
-            "buf1",
-            "buf2",
-            "buf3",
-            "gamma delta",
-            "buf4",
-            "buf5"
-        ],
+        ["buf0", "buf1", "buf2", "buf3", "    gamma", "buf4", "buf5"],
         "the live line takes one row, so the base line's second segment overflows below it",
     );
 
@@ -393,7 +386,7 @@ fn rewriting_a_paired_line_and_its_neighbor_moves_its_overflow() {
             "buf1",
             "buf2",
             "buf3",
-            "gamma delta",
+            "    gamma",
             "buf4",
             "buf4",
             "buf5",
@@ -422,15 +415,7 @@ fn an_inlay_wrapping_a_paired_line_moves_its_overflow() {
     let (_shared, mut map) = paired_view("alpha beta");
     assert_eq!(
         block_rows(&mut map),
-        [
-            "buf0",
-            "buf1",
-            "buf2",
-            "buf3",
-            "gamma delta",
-            "buf4",
-            "buf5"
-        ],
+        ["buf0", "buf1", "buf2", "buf3", "    gamma", "buf4", "buf5"],
         "the live line takes one row before the hint",
     );
 
@@ -1468,8 +1453,9 @@ fn toggle_fold_folds_then_unfolds() {
 /// a block interrupts the run entirely.
 #[test]
 fn the_chunk_stream_over_wraps_folds_inlays_and_blocks() {
-    // Row 1 is indented, so its continuation rows carry an indent. Row 3 is
-    // long enough to wrap after the fold collapses part of it.
+    // Row 1 is indented, so its continuation rows carry a deeper indent than
+    // the other rows' continuations. Row 3 is long enough to wrap after the
+    // fold collapses part of it.
     let text = "fn alpha() { let x = 1; }\n\
                     \x20   indented line that wraps a few times\n\
                     short\n\
@@ -1519,14 +1505,17 @@ fn the_chunk_stream_over_wraps_folds_inlays_and_blocks() {
             // Row 0 wraps mid-hint, so the hint arrives as two chunks
             // either side of the break. The hint's cells count toward the
             // width, filling the first sub-row exactly and pushing the rest
-            // of the line onto a third.
+            // of the line onto a third. Each continuation opens with the
+            // 4-cell indent.
             r#""fn alpha() {""#,
             r#"": " inlay"#,
             r#""\n""#,
+            r#""    ""#,
             r#""u32" inlay"#,
-            r#"" let x = ""#,
+            r#"" let x ""#,
             r#""\n""#,
-            r#""1; }""#,
+            r#""    ""#,
+            r#""= 1; }""#,
             r#""\n""#,
             // Row 1's first sub-row, then the block near it splitting it.
             r#""    indented ""#,
@@ -1535,25 +1524,34 @@ fn the_chunk_stream_over_wraps_folds_inlays_and_blocks() {
             r#""\n""#,
             r#""and another""#,
             r#""\n""#,
-            // Its remaining sub-rows, each opening with the carried indent.
-            r#""    ""#,
-            r#""line that ""#,
+            // Its remaining sub-rows, each opening with the line's indent plus
+            // four, capped at half the width.
+            r#""       ""#,
+            r#""line ""#,
             r#""\n""#,
-            r#""    ""#,
-            r#""wraps a ""#,
+            r#""       ""#,
+            r#""that ""#,
             r#""\n""#,
-            r#""    ""#,
-            r#""few times""#,
+            r#""       ""#,
+            r#""wraps ""#,
+            r#""\n""#,
+            r#""       ""#,
+            r#""a few ""#,
+            r#""\n""#,
+            r#""       ""#,
+            r#""times""#,
             r#""\n""#,
             r#""short""#,
             r#""\n""#,
             // Row 3, whose fold placeholder is a chunk of its own.
             r#""fn gamma() ""#,
             r#""\n""#,
+            r#""    ""#,
             r#""{""#,
             r#""...""#,
             r#""} and ""#,
             r#""\n""#,
+            r#""    ""#,
             r#""more text""#,
             r#""\n""#,
         ]
@@ -2346,8 +2344,10 @@ fn cjk_wrap_at_correct_column() {
     let mut display_map = create_display_map("ab\u{4f60}\u{597d}cd");
     display_map.set_wrap_width(Some(5));
     let snapshot = display_map.snapshot();
-    // "ab你" = 4 cols, "好cd" = 4 cols -> wraps after 你
-    assert_eq!(snapshot.line_count(), 2);
+    // "ab你" = 4 cols and 好 overruns the row, so the line wraps after 你. A
+    // continuation row holds 3 cols past its 2-col indent, so the rows after
+    // the first hold "好c" and then "d".
+    assert_eq!(snapshot.line_count(), 3);
 }
 
 #[test]
