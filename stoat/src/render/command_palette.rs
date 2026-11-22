@@ -1,9 +1,10 @@
 use crate::{
-    command_palette::{ArgPicker, CommandPalette, PaletteScope},
+    command_palette::{ArgPicker, CommandPalette},
     input_view::InputView,
     render::{
         chrome::{ISLAND_BOTTOM, ISLAND_GAP, ISLAND_SIDE, ISLAND_TOP},
-        picker::{FilterHeader, Footer, PathRows, RowMarks, RowStart, FOOTER_ROWS},
+        cmd_line::{self, CmdLine, CmdStatus},
+        picker::{Footer, PathRows, RowMarks, RowStart, FOOTER_ROWS},
         text::{wrap_text, write_str, write_str_clipped},
     },
     workspace::Workspace,
@@ -14,7 +15,7 @@ use ratatui::{
     style::Style,
     widgets::{Block, Borders},
 };
-use std::{borrow::Cow, path::Path};
+use std::path::Path;
 use stoat_action::registry::RegistryEntry;
 
 const LIST_ROWS: u16 = 10;
@@ -238,11 +239,10 @@ pub(crate) fn render_command_palette(
     if let Some(entry) = palette.command
         && palette.arg_source().is_none()
     {
-        render_palette_free_arg(palette, entry, ws, theme, chrome, area, zoom, buf, scene);
+        render_palette_free_arg(palette, entry, ws, home, theme, area, zoom, buf, scene);
         return;
     }
 
-    let scope = palette.scope();
     let content_rows = palette.list_rows_hint();
     if palette.command.is_none()
         && let Some(layout) = palette_filter_layout(area, content_rows, zoom)
@@ -253,16 +253,14 @@ pub(crate) fn render_command_palette(
     render_palette_filter(
         &palette.input,
         &palette.filtered,
-        palette.offering,
         &palette.match_indices,
         palette.selected,
-        scope,
         palette.group,
         content_rows,
         zoom,
         ws,
+        home,
         theme,
-        chrome,
         area,
         buf,
         scene,
@@ -292,33 +290,35 @@ fn render_palette_arg_picker(
     buf: &mut Buffer,
     scene: &mut stoat_widgets::ApcScene,
 ) {
-    let entry = palette.command.expect("arg picker requires a command");
     let fallback_active = palette
         .arg_picker
         .as_ref()
         .is_some_and(|picker| picker.fallback_active());
-    let label = if fallback_active {
-        format!("Palette \u{00B7} {}, ignored", entry.command_name)
-    } else {
-        format!("Palette \u{00B7} {}", entry.command_name)
-    };
-    let count = palette.arg_picker.as_ref().map(|picker| {
-        let list = &picker.active_core_ref().picklist;
-        (list.filtered.len(), list.base.len())
-    });
+    let status = palette
+        .arg_picker
+        .as_ref()
+        .map(|picker| {
+            let list = &picker.active_core_ref().picklist;
+            let ignored = match fallback_active {
+                true => " ignored",
+                false => "",
+            };
+            let rest = format!(" of {}{ignored}", grouped(list.base.len()));
+            count_status(list.filtered.len(), &rest, theme)
+        })
+        .unwrap_or_default();
     let Some(layout) = palette_arg_layout(area, palette, home, zoom, preview_min) else {
         return;
     };
     palette.arg_plate_width = layout.plate_base;
     render_palette_prelude(
         &palette.input,
-        &label,
-        count,
+        CmdStatus::Text(&status),
         layout.modal,
         layout.inner,
+        home,
         ws,
         theme,
-        chrome,
         buf,
         &mut *scene,
     );
@@ -416,26 +416,24 @@ fn render_palette_free_arg(
     palette: &mut CommandPalette,
     entry: &'static RegistryEntry,
     ws: &mut Workspace,
+    home: Option<&Path>,
     theme: &crate::theme::Theme,
-    chrome: &crate::render::editor::ResolvedChrome,
     area: Rect,
     zoom: i8,
     buf: &mut Buffer,
     scene: &mut stoat_widgets::ApcScene,
 ) {
-    let label = format!("Palette \u{00B7} {}", entry.command_name);
     let Some(layout) = palette_filter_layout(area, palette.list_rows_hint(), zoom) else {
         return;
     };
     render_palette_prelude(
         &palette.input,
-        &label,
-        None,
+        CmdStatus::None,
         layout.modal,
         layout.inner,
+        home,
         ws,
         theme,
-        chrome,
         buf,
         scene,
     );
@@ -494,92 +492,108 @@ fn render_palette_free_arg(
 }
 
 /// Render the chrome every palette modal shares, which is the frame over
-/// `modal`, the header row with its label, the `:` prompt, and the live input,
-/// and the separator beneath it, inside `inner`.
+/// `modal` and the Cmd Line in `inner`'s first two rows.
 ///
 /// The caller lays the box out and paints its body. The command list and the
 /// free-typed argument hint take the box of [`palette_filter_layout`], and an
 /// inline picker takes the box of [`palette_arg_layout`].
 ///
-/// `label` names the palette and its state, which is the scope, the group, or
-/// the command that takes the argument.
-///
-/// `count` is the header's count of the listed candidates, `None` for the
-/// free-typed argument, which lists none.
+/// The Cmd Line names the workspace's root, abbreviated against `home`, and
+/// shows the live input with its caret and `status` at its right end.
 ///
 /// See also:
+/// - [`cmd_line::cmd_line`] for the row itself.
 /// - [`render_palette_filter`] for the command-list body.
 /// - [`render_palette_arg_picker`] for the inline-picker body.
 /// - [`render_palette_free_arg`] for the free-typed argument body.
 #[allow(clippy::too_many_arguments)]
 fn render_palette_prelude(
     input: &InputView,
-    label: &str,
-    count: Option<(usize, usize)>,
+    status: CmdStatus<'_>,
     modal: Rect,
     inner: Rect,
+    home: Option<&Path>,
     ws: &mut Workspace,
     theme: &crate::theme::Theme,
-    chrome: &crate::render::editor::ResolvedChrome,
     buf: &mut Buffer,
     scene: &mut stoat_widgets::ApcScene,
 ) {
     let modal_style = theme.get(crate::theme::scope::UI_MODAL_PALETTE);
     crate::render::chrome::list_plate(buf, modal, modal_style, theme, &mut *scene);
 
-    crate::render::picker::filter_header(
-        buf,
-        inner,
-        &FilterHeader {
-            label,
-            prompt: ":",
-            count,
-            chips: &[],
-        },
-        input,
-        ws,
-        theme,
-        chrome,
-        scene,
-    );
+    let cwd = crate::run::abbreviate_path(&ws.git_root, home);
+    let (text, caret) = input.caret(ws);
+    let input = [(text, theme.get(crate::theme::scope::UI_TEXT))];
+    let line = CmdLine {
+        cwd: &cwd,
+        input: &input,
+        caret: Some(caret),
+        status,
+    };
+    cmd_line::cmd_line(buf, inner, &line, theme, scene);
+}
+
+/// The Cmd Line status that counts `shown` entries, the count and then `rest`,
+/// in `ui.text.muted`.
+///
+/// The count groups its thousands as [`grouped`] does. A shown count of 0
+/// paints its `0` in `diff.deleted`'s foreground, which flags a query that
+/// matches nothing.
+fn count_status(shown: usize, rest: &str, theme: &crate::theme::Theme) -> Vec<(String, Style)> {
+    let muted = theme.get(crate::theme::scope::UI_TEXT_MUTED);
+    if shown > 0 {
+        return vec![(format!("{}{rest}", grouped(shown)), muted)];
+    }
+
+    let zero = match theme.get(crate::theme::scope::DIFF_DELETED).fg {
+        Some(fg) => muted.fg(fg),
+        None => muted,
+    };
+    vec![("0".to_owned(), zero), (rest.to_owned(), muted)]
+}
+
+/// `count` with its thousands grouped by `,`, as the boards write `1,284`.
+fn grouped(count: usize) -> String {
+    let digits = count.to_string();
+    let mut out = String::with_capacity(digits.len() + digits.len() / 3);
+    for (index, digit) in digits.chars().enumerate() {
+        if index > 0 && (digits.len() - index).is_multiple_of(3) {
+            out.push(',');
+        }
+        out.push(digit);
+    }
+    out
 }
 
 #[allow(clippy::too_many_arguments)]
 fn render_palette_filter(
     input: &InputView,
     filtered: &[&'static RegistryEntry],
-    offering: usize,
     match_indices: &[Vec<u32>],
     selected: usize,
-    scope: PaletteScope,
     group: Option<&str>,
     content_rows: u16,
     zoom: i8,
     ws: &mut Workspace,
+    home: Option<&Path>,
     theme: &crate::theme::Theme,
-    chrome: &crate::render::editor::ResolvedChrome,
     area: Rect,
     buf: &mut Buffer,
     scene: &mut stoat_widgets::ApcScene,
 ) {
-    let label: Cow<'static, str> = match (group, scope) {
-        (Some(group), _) => Cow::Owned(format!("Palette \u{00B7} {group}")),
-        (None, PaletteScope::Active) => Cow::Borrowed("Palette \u{00B7} applicable"),
-        (None, PaletteScope::All) => Cow::Borrowed("Palette \u{00B7} all"),
-    };
     let name_offset = group.map_or(0, |group| group.len() + 1);
     let Some(layout) = palette_filter_layout(area, content_rows, zoom) else {
         return;
     };
+    let status = count_status(filtered.len(), " commands", theme);
     render_palette_prelude(
         input,
-        &label,
-        Some((filtered.len(), offering)),
+        CmdStatus::Text(&status),
         layout.modal,
         layout.inner,
+        home,
         ws,
         theme,
-        chrome,
         buf,
         &mut *scene,
     );
@@ -806,20 +820,54 @@ fn shown_name(entry: &RegistryEntry, offset: usize) -> &str {
 #[cfg(test)]
 mod tests {
     use super::{
-        doc_lines, paint_doc_lines, paint_palette_rows, palette_filter_layout,
-        render_command_palette, usage_line, DOC_ROWS, ISLAND_BOTTOM, ISLAND_GAP, ISLAND_SIDE,
-        ISLAND_TOP, LIST_ROWS,
+        count_status, doc_lines, grouped, paint_doc_lines, paint_palette_rows,
+        palette_filter_layout, render_command_palette, usage_line, DOC_ROWS, ISLAND_BOTTOM,
+        ISLAND_GAP, ISLAND_SIDE, ISLAND_TOP, LIST_ROWS,
     };
     use crate::{
         render::editor::ResolvedChrome,
         test_fixture::{plate_islands, row_rules},
         theme::Theme,
     };
-    use ratatui::{buffer::Buffer, layout::Rect, style::Style};
+    use ratatui::{
+        buffer::Buffer,
+        layout::Rect,
+        style::{Color, Style},
+    };
     use stoat_action::registry;
 
     fn layout(area: Rect, content_rows: u16, zoom: i8) -> super::PaletteFilterLayout {
         palette_filter_layout(area, content_rows, zoom).expect("the area hosts the palette")
+    }
+
+    /// A Cmd Line count groups its thousands with `,`, as the boards write
+    /// `1,284`, and reads muted. A count of nothing paints its `0` in the
+    /// deleted color.
+    #[test]
+    fn a_count_status_groups_its_thousands_and_flags_a_zero() {
+        let theme = {
+            let src = r##"theme t {
+                ui.text.muted.fg = "#050505";
+                diff.deleted.fg = "#080808";
+            }"##;
+            let (config, _) = stoat_config::parse(src);
+            Theme::from_config(&config.expect("theme parses"), "t").expect("theme loads")
+        };
+        let muted = Style::default().fg(Color::Rgb(5, 5, 5));
+        let deleted = Style::default().fg(Color::Rgb(8, 8, 8));
+
+        assert_eq!(
+            (
+                [0, 999, 1_284, 1_234_567].map(grouped),
+                count_status(1_284, " commands", &theme),
+                count_status(0, " of 12", &theme),
+            ),
+            (
+                ["0", "999", "1,284", "1,234,567"].map(String::from),
+                vec![("1,284 commands".to_owned(), muted)],
+                vec![("0".to_owned(), deleted), (" of 12".to_owned(), muted)],
+            ),
+        );
     }
 
     /// Paint one row of `list_width` cells at x=2 inside a buffer with room to

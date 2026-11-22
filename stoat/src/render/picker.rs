@@ -42,25 +42,24 @@ use stoat_widgets::{
 use stoatty_protocol::command::Edge;
 use unicode_width::UnicodeWidthStr;
 
-/// The glyph before a filter modal's query. The command palette keeps `:` in
-/// its place, the command-line prompt that its commands follow.
+/// The glyph before a filter modal's query.
 pub(crate) const FILTER_PROMPT: &str = "\u{203A}";
 
 /// Columns the query keeps on a filter modal's header row. A row too narrow
 /// for the query and the words right of it drops the chip first, then the
 /// count.
-const MIN_QUERY_COLUMNS: u16 = 12;
+pub(super) const MIN_QUERY_COLUMNS: u16 = 12;
 
 /// The logical px a plate's header row draws right and down of its cells.
 ///
 /// The plate's side stands 11 px outside the row, so 1 px right sets the row's
 /// text 12 px in from the side, as the boards pad the header. 7 px down centers
 /// an 18 px row in the boards' 32 px band.
-const PLATE_HEADER_NUDGE: [i16; 2] = [1, 7];
+pub(super) const PLATE_HEADER_NUDGE: [i16; 2] = [1, 7];
 
 /// Sixteenths between two parts of a plate's header row, the boards' 8 px gap
 /// at a 9 px cell.
-const PLATE_HEADER_GAP: u16 = 14;
+pub(super) const PLATE_HEADER_GAP: u16 = 14;
 
 /// Sixteenths of fill on each side of an active chip's text, the boards' 6 px
 /// padding at a 9 px cell.
@@ -100,7 +99,7 @@ pub(crate) const PICKER_HINTS: [(&str, &str); 3] = [
 pub(crate) struct FilterHeader<'a> {
     /// The modal's name, painted first.
     pub(crate) label: &'a str,
-    /// The glyph before the query, [`FILTER_PROMPT`] in all but the palette.
+    /// The glyph before the query, [`FILTER_PROMPT`] in every filter modal.
     pub(crate) prompt: &'a str,
     /// How many entries the query keeps, and how many the list holds.
     pub(crate) count: Option<(usize, usize)>,
@@ -393,7 +392,7 @@ fn paint_plate_header(
 
 /// Blank `row`'s cells to the plate's `ground`, under the runs of a plate's
 /// header or key line.
-fn blank_plate_row(buf: &mut Buffer, row: Rect, ground: [u8; 3]) {
+pub(super) fn blank_plate_row(buf: &mut Buffer, row: Rect, ground: [u8; 3]) {
     let [r, g, b] = ground;
     for x in row.left()..row.right() {
         buf[(x, row.y)]
@@ -429,13 +428,13 @@ fn plate_chip_boxes(
 
 /// The places of a plate header's count and chips, which end at its right.
 #[derive(Debug, PartialEq)]
-struct PlateTrailing {
+pub(super) struct PlateTrailing {
     /// The count's run start, in sixteenths from the row's left.
-    count: Option<u16>,
+    pub(super) count: Option<u16>,
     /// Each kept chip's run start, and the cells its box covers.
-    chips: Vec<(u16, Option<Range<u16>>)>,
+    pub(super) chips: Vec<(u16, Option<Range<u16>>)>,
     /// The sixteenth the query ends by.
-    query_end: u16,
+    pub(super) query_end: u16,
 }
 
 /// Place a plate header's `count` and `chips` right to left from `end`
@@ -451,7 +450,7 @@ struct PlateTrailing {
 /// still does, the count drops too, as [`paint_header_row`] drops them.
 ///
 /// A [`PlateHeader`]'s meta takes the count's place, and its title the query's.
-fn plate_trailing(
+pub(super) fn plate_trailing(
     count: Option<&str>,
     chips: &[(&str, bool)],
     boxed: bool,
@@ -509,7 +508,7 @@ fn plate_trailing(
 /// chars after it. A caret past the query's end covers a space. The window keeps the query's
 /// tail, but it starts at the caret when the caret stands left of that tail,
 /// so the caret stays in view. A window too narrow for the caret shows nothing.
-fn query_window(query: &str, caret: usize, room: usize) -> (&str, Option<&str>, &str) {
+pub(super) fn query_window(query: &str, caret: usize, room: usize) -> (&str, Option<&str>, &str) {
     let len = query.chars().count();
     let caret = caret.min(len);
     let start = (len + 1).saturating_sub(room).min(caret);
@@ -913,7 +912,7 @@ fn paint_plate_footer(
 
 /// A run of `text` that starts `col` sixteenths into a plate's header or key
 /// line row, in `color` over an opaque `bg`, at `scale`.
-fn plate_run(
+pub(super) fn plate_run(
     col: u16,
     text: &str,
     scale: u16,

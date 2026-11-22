@@ -963,6 +963,12 @@ pub mod scope {
 
     pub const UI_PROMPT: &str = "ui.prompt";
     pub const UI_KEY_LABEL: &str = "ui.key_label";
+    /// The directory a Cmd Line's command runs in, which leads the row. A
+    /// theme that leaves it unset paints the directory in [`UI_KEY_LABEL`].
+    pub const UI_CMD_CWD: &str = "ui.cmd.cwd";
+    /// The prompt glyph between a Cmd Line's directory and its input. A theme
+    /// that leaves it unset paints the glyph in [`UI_TEXT_DIM`].
+    pub const UI_CMD_PROMPT: &str = "ui.cmd.prompt";
     /// The mark the key hints box draws beside a key whose toggle is on.
     /// [`UI_TOGGLE_INACTIVE`] is its sibling for a toggle that is off.
     pub const UI_TOGGLE_ACTIVE: &str = "ui.toggle.active";

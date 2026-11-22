@@ -1206,6 +1206,83 @@ fn the_argument_picker_plate_stops_one_cell_inside_each_side_of_the_window() {
     expect_islands_apart(&shot, &mut home, 98, 30, "capped_argument_islands");
 }
 
+/// The palette's header is the Cmd Line on the plate's ground, with no title.
+///
+/// The palette's modal rect is the 128 by 25 cells from cell (16, 12), so the
+/// inner rect starts at cell (17, 13), the header band is the pixel rows 234
+/// to 265, and the header text draws 1 px right and 7 px down of its cells.
+/// The 24-char cwd advances 348 sixteenths at the Ui scale of 232, the glyph
+/// starts at 362, and the empty input starts at 391. So the caret block, the
+/// one box of the text color in the band, covers the pixels from (374, 241) to
+/// (381, 258).
+///
+/// The cwd in the info color and the dim glyph peak above the ground and at
+/// most at 0xd6, where a bold title in `#c59af0` peaks at 0xf0. The row's
+/// middle reads the ground, and the muted count ends at the inner rect's right
+/// edge. The list Island's top edge stands under the 32 px band.
+#[test]
+fn the_palette_header_is_the_cmd_line_on_the_ground() {
+    let mut home = support::scratch_home();
+    let shot = palette_frame(home.path(), ":<Settle>");
+
+    expect_color_box(
+        &shot,
+        &mut home,
+        TEXT,
+        234..266,
+        (374, 241, 381, 258),
+        "cmd_line_caret",
+    );
+    expect_region(
+        &shot,
+        &mut home,
+        cell_rect(60, 13, 40, 1),
+        GROUND,
+        "cmd_line_middle",
+    );
+
+    let lead = brightest(&shot, (154, 234, 219, 32));
+    let count = brightest(&shot, (1230, 241, 56, 18));
+    let edge = [pixel(&shot, 700, 265), pixel(&shot, 700, 266)];
+    if !(0x12..=0xd6).contains(&lead) || !(0x12..=0x98).contains(&count) || edge != [GROUND, BASE] {
+        let frame = keep_frame(&shot, &mut home, "cmd_line");
+        panic!(
+            "the cwd and the glyph peak at {lead:#04x}, the count peaks at {count:#04x}, and \
+             the pixels (700, 265) and (700, 266) read {} and {}, where the cwd and glyph peak \
+             in 0x12 to 0xd6, the count in 0x12 to 0x98, and the band's ground {} meets the \
+             list's base {}; the frame is {}",
+            hex(edge[0]),
+            hex(edge[1]),
+            hex(GROUND),
+            hex(BASE),
+            frame.display(),
+        );
+    }
+}
+
+/// The frame the basic-diff scene settles on after `keys` play, where the
+/// child's home is `home` and its temporary files go under `home/t`.
+///
+/// The fixture then lives at `<home>/t/stoat-fixture-` and six more chars, so a
+/// Cmd Line's cwd reads `~/t/stoat-fixture-` and those six chars, 24 chars on
+/// every host. The home is canonical, as the fixture's own path is. The
+/// session ends before this returns, as in [`settled_frame`].
+fn palette_frame(home: &Path, keys: &str) -> Snapshot {
+    let home = home.canonicalize().expect("a canonical scratch home");
+    let temp = home.join("t");
+    std::fs::create_dir(&temp).expect("the scratch temporary directory");
+
+    let mut scene = ermine_scene("basic-diff", "unstaged.txt", &home);
+    scene.extra_env.extend([
+        ("HOME".to_owned(), home.to_string_lossy().into_owned()),
+        ("TMPDIR".to_owned(), temp.to_string_lossy().into_owned()),
+    ]);
+    let mut session = spawn_scene(scene);
+    wait_for_diff(&mut session);
+    play(&mut session, keys);
+    session.snapshot().expect("a snapshot")
+}
+
 /// Panics unless a plate's ground on pixel row 455 runs from pixel `left` to
 /// pixel `right`, where the pixel outside each of them reads off the plate.
 fn expect_plate_sides(shot: &Snapshot, home: &mut TempDir, (left, right): (u32, u32), what: &str) {

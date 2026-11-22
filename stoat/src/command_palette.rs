@@ -665,10 +665,6 @@ impl CommandPalette {
         }
     }
 
-    pub(crate) fn scope(&self) -> PaletteScope {
-        self.scope
-    }
-
     /// The bytes at the start of each listed command name that the group's
     /// title already shows, the group token and its space, which the rows
     /// leave out. Zero outside a group.
@@ -1674,11 +1670,45 @@ mod tests {
         );
     }
 
-    /// A group names itself in the header's label and lists each command by its
-    /// subcommand token alone. Narrowed to `l`, the row paints the `l` of `log`
-    /// as a match and the `o` beside it as plain text.
+    /// The palette's header is the Cmd Line. It reads the workspace root,
+    /// abbreviated against the home, the prompt glyph, and the count of the
+    /// commands on show at its right end, and no row names the palette.
     #[test]
-    fn a_group_labels_the_header_and_drops_its_token_from_each_row() {
+    fn the_palette_header_reads_the_cwd_the_prompt_glyph_and_the_count() {
+        let mut h = Stoat::test();
+        h.stoat.home = Some(PathBuf::from("/home/u"));
+        h.stoat.active_workspace_mut().git_root = PathBuf::from("/home/u/code/stoat");
+        h.type_text(":");
+        let _ = h.snapshot();
+
+        let text = h.rendered_text();
+        let shown = h
+            .stoat
+            .command_palette
+            .as_ref()
+            .expect("the palette is open")
+            .filtered
+            .len();
+        let cmd_line = text
+            .lines()
+            .find(|line| line.contains('\u{276f}'))
+            .unwrap_or_default();
+        assert_eq!(
+            (
+                cmd_line.contains("\u{2502}~/c/stoat \u{276f}"),
+                cmd_line.contains(&format!("{shown} commands\u{2502}")),
+                text.contains("Palette"),
+            ),
+            (true, true, false),
+            "the header reads {cmd_line:?}",
+        );
+    }
+
+    /// A group shows in the Cmd Line's input after the prompt glyph and lists
+    /// each command by its subcommand token alone. Narrowed to `l`, the row
+    /// paints the `l` of `log` as a match and the `o` beside it as plain text.
+    #[test]
+    fn a_group_shows_in_the_cmd_line_and_drops_its_token_from_each_row() {
         let mut h = repo_harness();
         h.type_text(":git ");
         let _ = h.snapshot();
@@ -1702,9 +1732,7 @@ mod tests {
             .lines()
             .find(|line| line.contains(top.def.short_desc()))
             .unwrap_or_default();
-        let labeled = text
-            .lines()
-            .any(|line| line.contains("Palette \u{00B7} git :"));
+        let in_cmd_line = text.lines().any(|line| line.contains("\u{276f} git"));
         let subcommand = &top.command_name["git ".len()..];
         // The name starts one cell in from the box's left border.
         let shown = (
@@ -1726,7 +1754,7 @@ mod tests {
         let buf = h.rendered_buffer();
         let style = |x: usize| buf[(x as u16, y as u16)].style();
         assert_eq!(
-            (labeled, shown, style(x) == style(x + 1)),
+            (in_cmd_line, shown, style(x) == style(x + 1)),
             (true, (true, false), false),
         );
     }
@@ -3913,17 +3941,17 @@ mod tests {
         let mut h = Stoat::test();
         h.type_text(":");
         assert_eq!(
-            h.stoat.command_palette.as_ref().unwrap().scope(),
+            h.stoat.command_palette.as_ref().unwrap().scope,
             PaletteScope::Active
         );
         h.type_keys("backtab");
         assert_eq!(
-            h.stoat.command_palette.as_ref().unwrap().scope(),
+            h.stoat.command_palette.as_ref().unwrap().scope,
             PaletteScope::All
         );
         h.type_keys("backtab");
         assert_eq!(
-            h.stoat.command_palette.as_ref().unwrap().scope(),
+            h.stoat.command_palette.as_ref().unwrap().scope,
             PaletteScope::Active
         );
     }
@@ -4268,9 +4296,10 @@ mod tests {
         assert_eq!(editor::focused_buffer_path(&h.stoat), toml);
     }
 
-    /// While ignored files stand in for the list, the header's label says so.
+    /// While ignored files stand in for the list, the Cmd Line's count says so
+    /// at the row's right end.
     #[test]
-    fn an_open_tail_fallback_marks_the_label_ignored() {
+    fn an_open_tail_fallback_marks_the_count_ignored() {
         let mut h = Stoat::test();
         seed_palette_workspace(
             &mut h,
@@ -4284,9 +4313,13 @@ mod tests {
         settle_arg_fallback(&mut h);
         let _ = h.snapshot();
         let text = h.rendered_text();
+        let cmd_line = text
+            .lines()
+            .find(|line| line.contains('\u{276f}'))
+            .unwrap_or_default();
         assert!(
-            text.contains("Palette \u{00B7} open, ignored :"),
-            "the label names the fallback:\n{text}"
+            cmd_line.contains(" ignored\u{2502}"),
+            "the count names the fallback before the border:\n{text}"
         );
     }
 

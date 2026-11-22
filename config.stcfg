@@ -372,6 +372,8 @@ theme ermine_night inherits default_dark {
 
     ui.prompt.fg       = accent;
     ui.key_label.fg    = info;
+    ui.cmd.cwd.fg      = info;
+    ui.cmd.prompt.fg   = dim;
     ui.hints.submenu.fg = accent;
     ui.badge.active.fg = warning;
 

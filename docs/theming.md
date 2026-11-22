@@ -309,6 +309,10 @@ The typed UI scopes, by group (syntax scopes are open-ended):
   the variable badge. An item of any other kind leaves the cell blank.
 - `ui.prompt`, `ui.key_label`, `ui.heading`, `ui.error`, `ui.message.error` --
   chrome accents.
+- `ui.cmd.cwd`, `ui.cmd.prompt` -- the directory that leads a Cmd Line, such
+  as the command palette's header row, and the U+276F prompt glyph after it.
+  Unset, the directory takes `ui.key_label` and the glyph takes
+  `ui.text.dim`.
 - `ui.toggle.active`, `ui.toggle.inactive` -- the on and off marks beside a
   toggle's key in the key hints box.
 - `ui.hints.submenu` -- the label of a key hints row whose keys open a
