@@ -2031,8 +2031,9 @@ pub struct PoolRegion {
     pub left: u16,
     pub width: u16,
     pub height: u16,
-    /// Whether the pool's pages hold grid cells or terminal-pane cells at the
-    /// terminal font size, which sets the cell grid its pages are built at.
+    /// Whether the pool's pages hold grid cells, terminal-pane cells at the
+    /// terminal font size, or cells at a scale of the grid cell, which sets the
+    /// cell grid its pages are built at.
     pub kind: PoolKind,
     /// How far the renderer fades the pool's composite toward the clear color,
     /// from 0 (no fade) to 255 (the clear color alone).

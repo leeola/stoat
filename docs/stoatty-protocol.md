@@ -147,7 +147,7 @@ session control. "Head" is the fixed prefix of the first argument.
 | `fill` | P | 12 B | + streamed page, closed by `fill_end` |
 | `fill_rows` | P | 20 B | + streamed rows, closed by `fill_end` |
 | `fill_end` | P | -- | Commits the page onto its pool slot |
-| `pool_region` | P | 19 B | Declares a smooth-scroll pool |
+| `pool_region` | P | 25 B | Declares a smooth-scroll pool, ending in a scaled pool's scale and grid |
 | `scroll` | P | 14 B | Pool scroll target, page plus fraction |
 | `pool_cursor` | P | 14 B | Anchors the cursor to a gliding pool |
 | `pool_cursor_release` | P | 4 B | Takes the cursor anchor off a pool |
@@ -242,6 +242,19 @@ From protocol version 36, bit 1 of the flags byte that ends a `text_run` head,
 and of the one in a `text_runs` batch's shared fields, draws the run in the
 italic face, and bit 0 in the bold face. A terminal below version 36 reads bit
 0 alone and draws the run upright, so a program sends the bit to any terminal.
+
+From protocol version 38, every `pool_region` carries a fixed 25-byte head: the
+19 bytes of version 14, then a scale, a page row count, and a page column
+count, each a big-endian u16. Kind 2 declares a scaled pool, and the other
+kinds send zeros there. A scaled pool's pages hold that grid of cells. Each
+side of a cell is the grid cell's side times scale / 256, rounded to the
+nearest whole pixel and at least one (`scaled_cell_side`). A scaled pool is
+resident by kind, and a viewport resize keeps its pages. The terminal clamps
+the grid and the region to twice the viewport's rows and columns. A kind 2
+head with a zero scale, row count, or column count reads as a grid pool. A
+terminal below version 38 reads kind 2 as a grid pool, so declare a scaled
+pool only to a terminal at version 38 or later. A terminal at version 38 or
+later drops a shorter head.
 
 `ident` travels the other way, terminal to program, and arrives as input bytes
 on stdin. `decode` never yields it; use `decode_ident_reply`.

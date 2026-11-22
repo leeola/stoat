@@ -979,8 +979,9 @@ pub struct PoolView {
     /// The `(rows, cols)` the pool's pages are built at.
     ///
     /// A grid pool's pages match its region. A terminal pool's hold the
-    /// terminal-size cells its region fits, which [`PoolRegion::kind`] marks, so
-    /// a renderer reads its pages at that size rather than the region's.
+    /// terminal-size cells its region fits, and a scaled pool's hold the grid
+    /// it declares. [`PoolRegion::kind`] marks both, so a renderer reads their
+    /// pages at this size rather than the region's.
     pub grid: (usize, usize),
     /// Which declaration of [`Self::id`] this pool is.
     ///
@@ -1052,11 +1053,12 @@ impl Pool {
 
 /// The `(rows, cols)` a pool over `region` builds its pages at.
 ///
-/// A grid pool's pages match its region. A terminal pool's hold the cells of
-/// `terminal_cell_pixels` that fit the pixels its region spans in cells of
-/// `cell_pixels`, floored and at least one each way. While either size has a
-/// zero side, the terminal pool takes the grid answer, because the ratio of the
-/// two cells is unknown until the app sets both.
+/// A grid pool's pages match its region, and a scaled pool's hold the grid it
+/// declares. A terminal pool's hold the cells of `terminal_cell_pixels` that
+/// fit the pixels its region spans in cells of `cell_pixels`, floored and at
+/// least one each way. While either size has a zero side, the terminal pool
+/// takes the grid answer, because the ratio of the two cells is unknown until
+/// the app sets both.
 ///
 /// In the primary window, `row_anchor` places the rows as the renderer does,
 /// with the last row hung from its recorded pixel y. A region that ends at the
@@ -1069,6 +1071,10 @@ fn pool_grid(
     terminal_cell_pixels: (u16, u16),
     row_anchor: Option<(u32, usize)>,
 ) -> (usize, usize) {
+    if let PoolKind::Scaled { rows, cols, .. } = region.kind {
+        return (usize::from(rows.max(1)), usize::from(cols.max(1)));
+    }
+
     let rows = usize::from(region.height.max(1));
     let cols = usize::from(region.width.max(1));
     let sizes = [
@@ -2769,9 +2775,10 @@ impl Terminal {
     /// or `None` to fall back to the live grid.
     ///
     /// `doc_scroll` is the pool's live smooth-scroll position in document pages.
-    /// Sizes `out` to the pool's region plus one straddle row and fills it from
-    /// the pooled pages straddling the offset, returning the sub-cell fraction to
-    /// shift the rendered rows by and the top document row composed.
+    /// Sizes `out` to the pool's page grid plus one straddle row and fills it
+    /// from the pooled pages straddling the offset, returning the sub-cell
+    /// fraction to shift the rendered rows by and the top document row
+    /// composed.
     ///
     /// Returns `None` for an unknown id, or when the straddled pages are not all
     /// buffered -- the degradation path taken whenever no pool window covers the
@@ -2779,9 +2786,8 @@ impl Terminal {
     /// holes.
     pub fn project_pool(&self, id: u32, out: &mut Grid, doc_scroll: f32) -> Option<(f32, i64)> {
         let pool = self.pools.get(&id)?;
-        let page_rows = pool.region.height as usize;
-        let cols = pool.region.width as usize;
-        if page_rows == 0 {
+        let (page_rows, cols) = pool.grid;
+        if pool.region.height == 0 {
             return None;
         }
 
@@ -2998,8 +3004,9 @@ impl Terminal {
         Some(frac - 1.0)
     }
 
-    /// Bound `region`'s dimensions to [`MAX_REGION_VIEWPORTS`] times the live
-    /// viewport, warning the first time anything is cut.
+    /// Bound `region`'s dimensions and a scaled pool's page grid to
+    /// [`MAX_REGION_VIEWPORTS`] times the live viewport, warning the first time
+    /// anything is cut.
     ///
     /// The dimensions arrive from the wire and are multiplied by
     /// [`PAGE_POOL_CAPACITY`] grids of cells, so a writer that names the `u16`
@@ -3008,13 +3015,18 @@ impl Terminal {
     /// nothing, since a region that far past the viewport paints nothing that
     /// could be shown.
     ///
+    /// A scaled pool's pages hold the grid it declares, so that grid takes the
+    /// same bound. A grid that fills a region inside the viewport, at half the
+    /// grid cell or more, never meets it.
+    ///
     /// The warning is once per session because a hostile writer sends these in
     /// a flood, and a line per command is its own way to bring the session
     /// down.
     fn clamp_region(&mut self, region: PoolRegionCommand) -> PoolRegionCommand {
         let rows = (self.term.screen_lines() * MAX_REGION_VIEWPORTS).min(u16::MAX as usize) as u16;
         let cols = (self.term.columns() * MAX_REGION_VIEWPORTS).min(u16::MAX as usize) as u16;
-        if region.height <= rows && region.width <= cols {
+        let fits = |height: u16, width: u16| height <= rows && width <= cols;
+        if fits(region.height, region.width) && fits(region.page_rows(), region.page_cols()) {
             return region;
         }
 
@@ -3023,14 +3035,29 @@ impl Terminal {
             tracing::warn!(
                 asked_width = region.width,
                 asked_height = region.height,
+                asked_page_cols = region.page_cols(),
+                asked_page_rows = region.page_rows(),
                 max_width = cols,
                 max_height = rows,
                 "pool region past the viewport, clamping"
             );
         }
+        let kind = match region.kind {
+            PoolKind::Scaled {
+                scale,
+                rows: page_rows,
+                cols: page_cols,
+            } => PoolKind::Scaled {
+                scale,
+                rows: page_rows.min(rows),
+                cols: page_cols.min(cols),
+            },
+            kind => kind,
+        };
         PoolRegionCommand {
             width: region.width.min(cols),
             height: region.height.min(rows),
+            kind,
             ..region
         }
     }
@@ -3470,11 +3497,13 @@ impl Terminal {
         // A terminal pool's pages hold its region's terminal-cell grid, which
         // only a re-declare or a cell size change moves, and both rebuild the
         // pages and reach the app. Its pages and its page in flight stay, so a
-        // row patch lands on the page the app last filled.
+        // row patch lands on the page the app last filled. A scaled pool's
+        // pages hold the grid it declares, which only a re-declare moves, so
+        // they stay too.
         for pool in self
             .pools
             .values_mut()
-            .filter(|pool| pool.region.window == 0 && pool.region.kind != PoolKind::Terminal)
+            .filter(|pool| pool.region.window == 0 && pool.region.kind == PoolKind::Grid)
         {
             pool.page_pool.invalidate();
             pool.content_version = pool.content_version.wrapping_add(1);
@@ -3485,9 +3514,10 @@ impl Terminal {
         // and paint the screen. This viewport does not set the size of an aux
         // window's pool, so its page in flight still lands.
         if let Some(fill) = &mut self.fill
-            && self.pools.get(&fill.pool).is_none_or(|pool| {
-                pool.region.window == 0 && pool.region.kind != PoolKind::Terminal
-            })
+            && self
+                .pools
+                .get(&fill.pool)
+                .is_none_or(|pool| pool.region.window == 0 && pool.region.kind == PoolKind::Grid)
         {
             fill.discard = true;
         }

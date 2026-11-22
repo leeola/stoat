@@ -91,9 +91,9 @@ pub use pool::{
     encode_pool_cursor_into, encode_pool_cursor_release, encode_pool_cursor_release_into,
     encode_pool_drop, encode_pool_drop_into, encode_pool_region, encode_pool_region_into,
     encode_reposition, encode_reposition_into, encode_scroll, encode_scroll_into, fill_batch_key,
-    FillBatchKey, FillCommand, FillRowsCommand, PoolAnchorCommand, PoolCursorCommand,
-    PoolCursorReleaseCommand, PoolDropCommand, PoolKind, PoolRegionCommand, RepositionCommand,
-    ScrollCommand, NON_PANE_POOL_BASE,
+    scaled_cell_side, FillBatchKey, FillCommand, FillRowsCommand, PoolAnchorCommand,
+    PoolCursorCommand, PoolCursorReleaseCommand, PoolDropCommand, PoolKind, PoolRegionCommand,
+    RepositionCommand, ScrollCommand, NON_PANE_POOL_BASE,
 };
 pub use popover::{
     encode_popover, encode_popover_end, encode_popover_end_into, encode_popover_into,

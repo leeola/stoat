@@ -10,9 +10,12 @@ use crate::frame;
 const POOL_KIND_GRID: u8 = 0;
 
 /// The kind byte of a [`PoolKind::Terminal`] pool.
-///
-/// A decoder reads any other byte as a grid pool.
 const POOL_KIND_TERMINAL: u8 = 1;
+
+/// The kind byte of a [`PoolKind::Scaled`] pool.
+///
+/// A decoder reads any byte past it as a grid pool.
+const POOL_KIND_SCALED: u8 = 2;
 
 /// Declare the sub-rectangle a smooth-scroll document pool composites into.
 ///
@@ -41,7 +44,10 @@ pub struct PoolRegionCommand {
     /// grid.
     pub window: u32,
     /// How the terminal draws the pool, which rides the frame as the byte
-    /// after the head.
+    /// after the placement.
+    ///
+    /// The last six bytes of the head carry a scaled pool's scale and grid,
+    /// and zeros for the other kinds.
     pub kind: PoolKind,
     /// How far the terminal fades the pool's composite toward its clear color,
     /// from 0 (no fade) to 255 (the clear color alone).
@@ -53,8 +59,9 @@ pub struct PoolRegionCommand {
     /// Whether the pool's pages are the region's content at rest.
     ///
     /// The terminal keeps a resident pool's composite when a glide settles,
-    /// instead of handing the region back to the live grid. A terminal pool is
-    /// resident by kind. The byte rides the frame after the dim.
+    /// instead of handing the region back to the live grid. A terminal pool and
+    /// a scaled pool are resident by kind. The byte rides the frame after the
+    /// dim.
     pub resident: bool,
 }
 
@@ -69,6 +76,27 @@ impl PoolRegionCommand {
             ..*self
         } == *other
     }
+
+    /// The rows of each page of the pool's document.
+    ///
+    /// A scaled pool declares its page grid, and a grid pool's page is its
+    /// region. A terminal pool answers its region's height too, although the
+    /// terminal builds its pages at the grid it reports for the pool.
+    pub fn page_rows(&self) -> u16 {
+        match self.kind {
+            PoolKind::Scaled { rows, .. } => rows,
+            PoolKind::Grid | PoolKind::Terminal => self.height,
+        }
+    }
+
+    /// The columns of each page of the pool's document, which pair with
+    /// [`Self::page_rows`].
+    pub fn page_cols(&self) -> u16 {
+        match self.kind {
+            PoolKind::Scaled { cols, .. } => cols,
+            PoolKind::Grid | PoolKind::Terminal => self.width,
+        }
+    }
 }
 
 /// How the terminal draws a pool declared by a [`PoolRegionCommand`].
@@ -81,6 +109,13 @@ pub enum PoolKind {
     /// size. The terminal reports the cell grid the region holds at that size
     /// over the window socket, so the program sizes the pane's emulator to it.
     Terminal,
+    /// A smooth-scroll document pool whose pages hold `rows` by `cols` cells,
+    /// each `scale` 256ths of the grid cell's size.
+    ///
+    /// The terminal composites it on every frame, because the live grid holds
+    /// no cells of that size. See [`scaled_cell_side`] for the pixels of each
+    /// cell.
+    Scaled { scale: u16, rows: u16, cols: u16 },
 }
 
 /// First pool id reserved for non-pane surfaces. Split-pane editor pools
@@ -231,6 +266,17 @@ pub struct PoolDropCommand {
     pub pool: u32,
 }
 
+/// The pixels that one side of a [`PoolKind::Scaled`] pool's cell takes from
+/// the same side of the grid cell.
+///
+/// The program and the terminal both size a scaled pool's cells by it, so they
+/// agree on where each cell falls. The side rounds to the nearest whole pixel,
+/// is at least one, and stops at the `u16` maximum.
+pub fn scaled_cell_side(side: u16, scale: u16) -> u16 {
+    let pixels = (u32::from(side) * u32::from(scale) + 128) / 256;
+    pixels.clamp(1, u32::from(u16::MAX)) as u16
+}
+
 /// Encode a [`PoolRegionCommand`] as a full `Gstoatty;pool_region` frame for an
 /// emitter.
 pub fn encode_pool_region(command: &PoolRegionCommand) -> Vec<u8> {
@@ -250,11 +296,15 @@ pub fn encode_pool_region_into(out: &mut Vec<u8>, command: &PoolRegionCommand) {
         w.write_all(&command.width.to_be_bytes())?;
         w.write_all(&command.height.to_be_bytes())?;
         w.write_all(&command.window.to_be_bytes())?;
-        let kind = match command.kind {
-            PoolKind::Grid => POOL_KIND_GRID,
-            PoolKind::Terminal => POOL_KIND_TERMINAL,
+        let (kind, scale, rows, cols) = match command.kind {
+            PoolKind::Grid => (POOL_KIND_GRID, 0, 0, 0),
+            PoolKind::Terminal => (POOL_KIND_TERMINAL, 0, 0, 0),
+            PoolKind::Scaled { scale, rows, cols } => (POOL_KIND_SCALED, scale, rows, cols),
         };
-        w.write_all(&[kind, command.dim, u8::from(command.resident)])
+        w.write_all(&[kind, command.dim, u8::from(command.resident)])?;
+        w.write_all(&scale.to_be_bytes())?;
+        w.write_all(&rows.to_be_bytes())?;
+        w.write_all(&cols.to_be_bytes())
     });
     frame::end(out);
 }
@@ -538,11 +588,20 @@ pub fn encode_pool_drop_into(out: &mut Vec<u8>, pool: u32) {
 }
 
 pub(super) fn decode_pool_region(args: &[Vec<u8>]) -> Option<PoolRegionCommand> {
-    let arg: &[u8; 19] = args.first()?.get(..19)?.try_into().ok()?;
+    let arg: &[u8; 25] = args.first()?.get(..25)?.try_into().ok()?;
+    let (scale, rows, cols) = (
+        u16::from_be_bytes([arg[19], arg[20]]),
+        u16::from_be_bytes([arg[21], arg[22]]),
+        u16::from_be_bytes([arg[23], arg[24]]),
+    );
     // A kind from a later version reads as a grid pool, so a new kind never
-    // makes the frame drop.
+    // makes the frame drop. A scaled kind with a zero scale, row count, or
+    // column count has no cell to build, so it reads as a grid pool too.
     let kind = match arg[16] {
         POOL_KIND_TERMINAL => PoolKind::Terminal,
+        POOL_KIND_SCALED if ![scale, rows, cols].contains(&0) => {
+            PoolKind::Scaled { scale, rows, cols }
+        },
         _ => PoolKind::Grid,
     };
 
@@ -651,28 +710,40 @@ mod tests {
     use super::*;
     use crate::command::{decode, decode_stream, encode_bar, BarCommand, Command};
 
+    /// A grid pool's region, which a test copies with one field changed.
+    const REGION: PoolRegionCommand = PoolRegionCommand {
+        pool: 4,
+        top: 1,
+        left: 2,
+        width: 76,
+        height: 22,
+        window: 2,
+        kind: PoolKind::Grid,
+        dim: 0,
+        resident: true,
+    };
+
+    /// The scaled kind the tests declare, a 16 by 36 grid at Preview Scale.
+    const SCALED: PoolKind = PoolKind::Scaled {
+        scale: 154,
+        rows: 16,
+        cols: 36,
+    };
+
     #[test]
-    fn pool_region_round_trips() {
-        let command = PoolRegionCommand {
-            pool: 4,
-            top: 1,
-            left: 2,
-            width: 76,
-            height: 22,
-            window: 2,
-            kind: PoolKind::Grid,
-            dim: 0,
-            resident: true,
-        };
+    fn a_pool_region_round_trips_each_kind() {
+        let commands = [PoolKind::Grid, PoolKind::Terminal, SCALED]
+            .map(|kind| PoolRegionCommand { kind, ..REGION });
 
         assert_eq!(
-            decode(&encode_pool_region(&command)),
-            Some(Command::PoolRegion(command))
+            commands.map(|command| decode(&encode_pool_region(&command))),
+            commands.map(|command| Some(Command::PoolRegion(command))),
         );
     }
 
-    /// Every pool's frame is the 19-byte head that ends in its kind, dim, and
-    /// resident bytes, and decodes to what was declared.
+    /// Every pool's frame is the 25-byte head whose last nine bytes are its
+    /// kind, dim, resident byte, and a scaled pool's scale and grid, and
+    /// decodes to what was declared.
     #[test]
     fn every_pool_region_carries_kind_dim_and_resident() {
         let grid = PoolRegionCommand {
@@ -692,6 +763,10 @@ mod tests {
             resident: true,
             ..grid
         };
+        let scaled = PoolRegionCommand {
+            kind: SCALED,
+            ..grid
+        };
         let read = |command: &PoolRegionCommand| {
             let encoded = encode_pool_region(command);
             let tail = frame::decode(&encoded).map(|frame| frame.args[0][16..].to_vec());
@@ -699,19 +774,30 @@ mod tests {
         };
 
         assert_eq!(
-            [read(&grid), read(&terminal)],
+            [read(&grid), read(&terminal), read(&scaled)],
             [
-                (Some(Command::PoolRegion(grid)), Some(vec![0, 0, 0])),
-                (Some(Command::PoolRegion(terminal)), Some(vec![1, 64, 1])),
+                (
+                    Some(Command::PoolRegion(grid)),
+                    Some(vec![0, 0, 0, 0, 0, 0, 0, 0, 0])
+                ),
+                (
+                    Some(Command::PoolRegion(terminal)),
+                    Some(vec![1, 64, 1, 0, 0, 0, 0, 0, 0])
+                ),
+                (
+                    Some(Command::PoolRegion(scaled)),
+                    Some(vec![2, 0, 0, 0, 154, 0, 16, 0, 36])
+                ),
             ],
         );
     }
 
-    /// A head short of nineteen bytes is rejected. A whole head reads its kind,
+    /// A head short of 25 bytes is ignored, which is what becomes of a 19-byte
+    /// head from an emitter before version 38. A whole head reads its kind,
     /// dim, and resident bytes, and a kind from a later version reads as a grid
     /// pool.
     #[test]
-    fn a_head_short_of_nineteen_bytes_is_rejected() {
+    fn a_pool_region_with_a_short_head_is_ignored() {
         let head = vec![0, 0, 0, 4, 0, 1, 0, 2, 0, 76, 0, 22, 0, 0, 0, 2];
         let read = |tail: &[u8]| {
             decode_pool_region(&[[head.as_slice(), tail].concat()])
@@ -724,15 +810,81 @@ mod tests {
                 read(&[1]),
                 read(&[1, 64]),
                 read(&[1, 64, 1]),
-                read(&[2, 64, 0])
+                read(&[1, 64, 1, 0, 0, 0, 0, 0]),
+                read(&[1, 64, 1, 0, 0, 0, 0, 0, 0]),
+                read(&[3, 64, 0, 0, 0, 0, 0, 0, 0])
             ],
             [
+                None,
+                None,
                 None,
                 None,
                 None,
                 Some((PoolKind::Terminal, 64, true)),
                 Some((PoolKind::Grid, 64, false)),
             ],
+        );
+    }
+
+    /// A scaled kind with a zero scale, row count, or column count names no
+    /// cell to build, so it reads as a grid pool.
+    #[test]
+    fn a_scaled_kind_without_a_grid_reads_as_a_grid_pool() {
+        let read = |scale: u16, rows: u16, cols: u16| {
+            let kind = PoolKind::Scaled { scale, rows, cols };
+            match decode(&encode_pool_region(&PoolRegionCommand { kind, ..REGION })) {
+                Some(Command::PoolRegion(region)) => Some(region.kind),
+                _ => None,
+            }
+        };
+
+        assert_eq!(
+            [
+                read(0, 16, 36),
+                read(154, 0, 36),
+                read(154, 16, 0),
+                read(154, 16, 36)
+            ],
+            [
+                Some(PoolKind::Grid),
+                Some(PoolKind::Grid),
+                Some(PoolKind::Grid),
+                Some(SCALED)
+            ],
+        );
+    }
+
+    /// A scaled side rounds to the nearest whole pixel, is at least one, and
+    /// stops at the `u16` maximum.
+    #[test]
+    fn scaled_cell_side_rounds_to_whole_pixels() {
+        let sides = [
+            (9, 154),
+            (18, 154),
+            (8, 154),
+            (17, 154),
+            (1, 1),
+            (u16::MAX, 512),
+        ];
+
+        assert_eq!(
+            sides.map(|(side, scale)| scaled_cell_side(side, scale)),
+            [5, 11, 5, 10, 1, u16::MAX],
+        );
+    }
+
+    /// A scaled pool pages by the grid it declares, and the other kinds by
+    /// their region.
+    #[test]
+    fn page_rows_and_cols_answer_the_declared_grid() {
+        let page = |kind: PoolKind| {
+            let region = PoolRegionCommand { kind, ..REGION };
+            (region.page_rows(), region.page_cols())
+        };
+
+        assert_eq!(
+            [page(PoolKind::Grid), page(PoolKind::Terminal), page(SCALED)],
+            [(22, 76), (22, 76), (16, 36)],
         );
     }
 
@@ -771,7 +923,7 @@ mod tests {
 
     #[test]
     fn rejects_wrong_length_pool_region_payload() {
-        // The single arg here decodes to 3 bytes, not the 19 a pool region needs.
+        // The single arg here decodes to 3 bytes, not the 25 a pool region needs.
         assert!(decode(b"Gstoatty;pool_region;YWJj").is_none());
     }
 

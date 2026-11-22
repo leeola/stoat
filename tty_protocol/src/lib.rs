@@ -236,9 +236,16 @@
 /// terminal that predates it reads the first 33 bytes and draws such a run as a
 /// block. This version drops a shorter head.
 ///
+/// Version 38 reads a fixed 25-byte `pool_region` head, which ends in a scale
+/// and a page grid. Kind 2 declares a scaled pool, whose pages hold that grid
+/// of cells at that scale of the grid cell. A terminal that predates it reads
+/// the first 19 bytes and takes the kind as a grid pool, so an emitter declares
+/// a scaled pool only to a terminal at [`POOL_SCALE_PROTOCOL`] or later. This
+/// version drops a shorter head.
+///
 /// Zero is reserved for a peer whose handshake carries no version at all, which
 /// is every build from before the field existed.
-pub const PROTOCOL_VERSION: u32 = 37;
+pub const PROTOCOL_VERSION: u32 = 38;
 
 /// The first [`PROTOCOL_VERSION`] whose terminal reads the `text_runs` and
 /// `bars` batches.
@@ -317,6 +324,14 @@ pub const ITALIC_RUN_PROTOCOL: u32 = 36;
 /// An earlier terminal reads the head's first 33 bytes and draws such a run as
 /// a block, so an emitter sends the mark class to any terminal.
 pub const MINIMAP_MARK_PROTOCOL: u32 = 37;
+
+/// The first [`PROTOCOL_VERSION`] whose terminal builds a scaled pool's pages
+/// at the grid its `pool_region` head declares.
+///
+/// An earlier terminal takes a scaled pool as a grid pool and pages it by its
+/// region, so an emitter declares a scaled pool only to a terminal at this
+/// version or later.
+pub const POOL_SCALE_PROTOCOL: u32 = 38;
 
 pub mod command;
 pub mod detect;

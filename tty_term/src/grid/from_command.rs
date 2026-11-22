@@ -19,7 +19,7 @@ use crate::grid::{
 };
 use std::sync::Arc;
 use stoatty_protocol::command::{
-    self, BarCommand, IconCommand, MinimapCommand, PanelCommand, PolylineCommand,
+    self, BarCommand, IconCommand, MinimapCommand, PanelCommand, PolylineCommand, PoolKind,
     PoolRegionCommand, PopoverCommand, TextRunCommand,
 };
 
@@ -157,7 +157,9 @@ pub(crate) fn pool_region_from_command(command: PoolRegionCommand) -> PoolRegion
         height: command.height,
         kind: command.kind,
         dim: command.dim,
-        resident: command.resident,
+        // The live grid holds no cells of a scaled pool's size, so its region
+        // never goes back to the live grid at rest.
+        resident: command.resident || matches!(command.kind, PoolKind::Scaled { .. }),
     }
 }
 

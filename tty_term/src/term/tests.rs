@@ -3991,6 +3991,132 @@ fn page_state(terminal: &Terminal, before: u64) -> (Option<Vec<String>>, bool) {
     (page, terminal.pool_content_version(1) != Some(before))
 }
 
+/// Declare scaled pool `id` over a `rows` by `cols` region at the origin,
+/// whose pages hold `grid` at Preview Scale. The declare asks for no
+/// residency, which the kind supplies.
+fn declare_scaled_pool(terminal: &mut Terminal, id: u32, rows: u16, cols: u16, grid: (u16, u16)) {
+    terminal.advance(&encode_pool_region(&PoolRegionCommand {
+        pool: id,
+        top: 0,
+        left: 0,
+        width: cols,
+        height: rows,
+        window: 0,
+        kind: PoolKind::Scaled {
+            scale: 154,
+            rows: grid.0,
+            cols: grid.1,
+        },
+        dim: 0,
+        resident: false,
+    }));
+}
+
+/// Fill page `index` of pool `id` with `text`.
+fn fill_page(terminal: &mut Terminal, id: u32, index: u64, text: &[u8]) {
+    let mut stream = encode_fill(&FillCommand { pool: id, index });
+    stream.extend_from_slice(text);
+    stream.extend_from_slice(&encode_fill_end());
+    terminal.advance(&stream);
+}
+
+/// A 10 by 20 region that declares a 16 by 36 grid builds its pages at that
+/// grid, so a page holds 16 rows of 36 cells and the compose reads them whole.
+#[test]
+fn a_scaled_pool_builds_its_pages_at_the_declared_grid() {
+    let mut terminal = Terminal::new(24, 80, Theme::default());
+    declare_scaled_pool(&mut terminal, 1, 10, 20, (16, 36));
+    let rows: Vec<String> = (0..16)
+        .map(|row| format!("{row:02}{}", "x".repeat(34)))
+        .collect();
+    fill_page(&mut terminal, 1, 0, rows.join("\r\n").as_bytes());
+    fill_page(&mut terminal, 1, 1, b"next");
+
+    let mut out = Grid::new(1, 1);
+    let composed = terminal.project_pool(1, &mut out, 0.0);
+
+    let expected: Vec<String> = rows.into_iter().chain(["next".to_owned()]).collect();
+    assert_eq!(
+        (composed, (out.rows(), out.cols()), row_texts(&out)),
+        (Some((0.0, 0)), (17, 36), expected),
+        "page 0's 16 rows of 36 cells, then the straddle row from page 1",
+    );
+}
+
+/// A scaled pool is resident whatever its declare asks, because the live grid
+/// holds no cells of its size. A grid pool keeps the residency it declares.
+#[test]
+fn a_scaled_pool_is_resident() {
+    let mut terminal = Terminal::new(24, 80, Theme::default());
+    declare_pool(&mut terminal, 1, 10, 20);
+    declare_scaled_pool(&mut terminal, 2, 10, 20, (16, 36));
+
+    let resident: Vec<(u32, bool)> = terminal
+        .pools()
+        .iter()
+        .map(|view| (view.id, view.region.resident))
+        .collect();
+    assert_eq!(resident, [(1, false), (2, true)]);
+}
+
+/// A scaled pool's grid past twice the viewport clamps there, as its region
+/// does, so a crafted grid builds no unbounded pages.
+#[test]
+fn a_scaled_pool_grid_past_the_viewport_clamps() {
+    let mut terminal = Terminal::new(24, 80, Theme::default());
+    declare_scaled_pool(&mut terminal, 1, 10, 20, (100, 200));
+
+    let view = terminal.pools().remove(0);
+    assert_eq!(
+        (view.region.kind, view.grid),
+        (
+            PoolKind::Scaled {
+                scale: 154,
+                rows: 48,
+                cols: 160
+            },
+            (48, 160)
+        ),
+    );
+}
+
+/// A viewport resize keeps a scaled pool's page, since no viewport sets the
+/// grid the pool declares.
+#[test]
+fn a_viewport_resize_keeps_a_scaled_pools_page() {
+    let mut terminal = Terminal::new(24, 80, Theme::default());
+    declare_scaled_pool(&mut terminal, 1, 3, 4, (3, 4));
+    fill_page(&mut terminal, 1, 0, b"a\r\nb\r\nc");
+    let before = terminal.pool_content_version(1).expect("pool declared");
+    terminal.resize(20, 60);
+
+    assert_eq!(
+        page_state(&terminal, before),
+        (Some(filled_rows()), false),
+        "the page and its version both hold",
+    );
+}
+
+/// A viewport resize leaves a scaled pool's grid where it was, so its page in
+/// flight lands whole.
+#[test]
+fn a_resize_mid_fill_keeps_a_scaled_pools_page() {
+    let mut terminal = Terminal::new(24, 80, Theme::default());
+    declare_scaled_pool(&mut terminal, 1, 3, 4, (3, 4));
+
+    terminal.advance(&encode_fill(&FillCommand { pool: 1, index: 0 }));
+    terminal.advance(b"pa");
+    terminal.resize(20, 60);
+    terminal.advance(b"ge");
+    terminal.advance(&encode_fill_end());
+
+    assert_eq!(
+        row_texts(pool_page(&terminal, 1, 0)),
+        ["page", "", ""].map(String::from),
+        "the page in flight lands whole on the scaled pool",
+    );
+}
+
 #[test]
 fn a_fill_on_a_window_pool_marks_the_window_dirty_once() {
     let mut terminal = Terminal::new(4, 8, Theme::default());
