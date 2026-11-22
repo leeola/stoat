@@ -1,5 +1,5 @@
 use crate::{
-    command_palette::{ArgPicker, CommandPalette},
+    command_palette::{ArgPicker, CommandPalette, ResolvedCommand},
     input_view::InputView,
     render::{
         chrome::{ISLAND_BOTTOM, ISLAND_GAP, ISLAND_SIDE, ISLAND_TOP},
@@ -270,6 +270,7 @@ pub(crate) fn render_command_palette(
         content_rows,
         zoom,
         &mut palette.header_rows,
+        palette.resolved.as_ref(),
         ws,
         home,
         theme,
@@ -331,6 +332,7 @@ fn render_palette_arg_picker(
     palette.arg_plate_width = layout.plate_base;
     palette.header_rows = render_palette_prelude(
         &palette.input,
+        palette.resolved.as_ref(),
         CmdStatus::Text(&status),
         layout.modal,
         layout.inner,
@@ -450,6 +452,7 @@ fn render_palette_free_arg(
     };
     palette.header_rows = render_palette_prelude(
         &palette.input,
+        palette.resolved.as_ref(),
         CmdStatus::None,
         layout.modal,
         layout.inner,
@@ -523,7 +526,9 @@ fn render_palette_free_arg(
 /// rows, because a long input wraps onto more rows than the last frame drew.
 ///
 /// The Cmd Line names the workspace's root, abbreviated against `home`, and
-/// shows the live input with its caret and `status` at its right end.
+/// shows the live input with its caret and `status` at its right end. A
+/// `resolved` command token draws with its ghost, as [`input_spans`] gives
+/// them.
 ///
 /// See also:
 /// - [`cmd_line::cmd_line`] for the row itself.
@@ -533,6 +538,7 @@ fn render_palette_free_arg(
 #[allow(clippy::too_many_arguments)]
 fn render_palette_prelude(
     input: &InputView,
+    resolved: Option<&ResolvedCommand>,
     status: CmdStatus<'_>,
     modal: Rect,
     inner: Rect,
@@ -547,7 +553,7 @@ fn render_palette_prelude(
 
     let cwd = crate::run::abbreviate_path(&ws.git_root, home);
     let (text, caret) = input.caret(ws);
-    let input = [(text, theme.get(crate::theme::scope::UI_TEXT))];
+    let (input, caret) = input_spans(&text, caret, resolved, theme);
     let line = CmdLine {
         cwd: &cwd,
         input: &input,
@@ -558,6 +564,55 @@ fn render_palette_prelude(
 
     let plate = crate::render::chrome::plate_colors(theme, scene).is_some();
     cmd_line::cmd_line_rows(&line, inner.width, plate, theme)
+}
+
+/// The palette input `text` as Cmd Line spans, and the display caret for the
+/// typed caret at char `caret`.
+///
+/// A `resolved` head draws in `ui.cmd.command`, its ghost follows in
+/// `ui.cmd.ghost`, and the rest of the text draws in `ui.text`. A theme that
+/// leaves `ui.cmd.command` unset draws the head as the rest, and a theme that
+/// leaves `ui.cmd.ghost` unset draws no ghost.
+///
+/// The ghost is display only, so the caret stays on the typed text. A caret
+/// past the head moves right by the ghost's chars, and a caret at the head's
+/// end covers the ghost's first char, as a shell draws a suggestion.
+fn input_spans(
+    text: &str,
+    caret: usize,
+    resolved: Option<&ResolvedCommand>,
+    theme: &crate::theme::Theme,
+) -> (Vec<(String, Style)>, usize) {
+    let plain = theme.get(crate::theme::scope::UI_TEXT);
+    let Some(resolved) = resolved else {
+        return (vec![(text.to_owned(), plain)], caret);
+    };
+
+    let split = text
+        .char_indices()
+        .nth(resolved.head_chars)
+        .map_or(text.len(), |(at, _)| at);
+    let (head, rest) = text.split_at(split);
+    let command = theme
+        .try_get(crate::theme::scope::UI_CMD_COMMAND)
+        .unwrap_or(plain);
+    let mut spans = vec![(head.to_owned(), command)];
+
+    let mut shown = caret;
+    let ghost = theme
+        .try_get(crate::theme::scope::UI_CMD_GHOST)
+        .filter(|_| !resolved.ghost.is_empty());
+    if let Some(ghost) = ghost {
+        spans.push((resolved.ghost.clone(), ghost));
+        if caret > resolved.head_chars {
+            shown += resolved.ghost.chars().count();
+        }
+    }
+
+    if !rest.is_empty() {
+        spans.push((rest.to_owned(), plain));
+    }
+    (spans, shown)
 }
 
 /// The Cmd Line status that counts `shown` entries, the count and then `rest`,
@@ -606,6 +661,7 @@ fn render_palette_filter(
     content_rows: u16,
     zoom: i8,
     header_rows: &mut u16,
+    resolved: Option<&ResolvedCommand>,
     ws: &mut Workspace,
     home: Option<&Path>,
     theme: &crate::theme::Theme,
@@ -620,6 +676,7 @@ fn render_palette_filter(
     let status = count_status(filtered.len(), " commands", theme);
     *header_rows = render_palette_prelude(
         input,
+        resolved,
         CmdStatus::Text(&status),
         layout.modal,
         layout.inner,
@@ -855,11 +912,12 @@ fn shown_name(entry: &RegistryEntry, offset: usize) -> &str {
 #[cfg(test)]
 mod tests {
     use super::{
-        count_status, doc_lines, grouped, paint_doc_lines, paint_palette_rows,
+        count_status, doc_lines, grouped, input_spans, paint_doc_lines, paint_palette_rows,
         palette_filter_layout, render_command_palette, usage_line, DOC_ROWS, ISLAND_BOTTOM,
         ISLAND_GAP, ISLAND_SIDE, ISLAND_TOP, LIST_ROWS,
     };
     use crate::{
+        command_palette::ResolvedCommand,
         render::editor::ResolvedChrome,
         test_fixture::{plate_islands, row_rules},
         theme::Theme,
@@ -902,6 +960,57 @@ mod tests {
                 vec![("1,284 commands".to_owned(), muted)],
                 vec![("0".to_owned(), deleted), (" of 12".to_owned(), muted)],
             ),
+        );
+    }
+
+    /// The ghost follows the head in its own color, and the caret stays on the
+    /// typed text. A caret past the head moves right by the ghost, a caret at
+    /// the head's end covers the ghost's first char, and a theme without the
+    /// ghost's scope draws no ghost.
+    #[test]
+    fn the_ghost_follows_the_head_and_the_caret_stays_on_the_typed_text() {
+        let theme = {
+            let src = r##"theme t {
+                ui.text.fg = "#040404";
+                ui.cmd.command.fg = "#050505";
+                ui.cmd.ghost.fg = "#060606";
+            }"##;
+            let (config, _) = stoat_config::parse(src);
+            Theme::from_config(&config.expect("theme parses"), "t").expect("theme loads")
+        };
+        let open = ResolvedCommand {
+            head_chars: 1,
+            ghost: "pen".to_owned(),
+        };
+        let spans = |parts: &[(&str, u8)]| -> Vec<(String, Style)> {
+            parts
+                .iter()
+                .map(|&(text, gray)| {
+                    (
+                        text.to_owned(),
+                        Style::default().fg(Color::Rgb(gray, gray, gray)),
+                    )
+                })
+                .collect()
+        };
+        let plain = |text: &str| {
+            (
+                text.to_owned(),
+                Theme::empty().get(crate::theme::scope::UI_TEXT),
+            )
+        };
+
+        assert_eq!(
+            [
+                input_spans("o src", 5, Some(&open), &theme),
+                input_spans("o", 1, Some(&open), &theme),
+                input_spans("o src", 5, Some(&open), &Theme::empty()),
+            ],
+            [
+                (spans(&[("o", 5), ("pen", 6), (" src", 4)]), 8),
+                (spans(&[("o", 5), ("pen", 6)]), 1),
+                (vec![plain("o"), plain(" src")], 5),
+            ],
         );
     }
 

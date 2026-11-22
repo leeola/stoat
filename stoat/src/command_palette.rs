@@ -97,6 +97,24 @@ pub struct CommandPalette {
     /// and the hit test and the smooth-scroll emit read the body after the
     /// paint, so they find the rects the frame drew.
     pub(crate) header_rows: u16,
+    /// The command token at the input's start and its ghost, as the Cmd Line
+    /// draws them, or `None` for an input that names no command.
+    ///
+    /// Each change of the input sets it, so an idle frame walks no registry.
+    pub(crate) resolved: Option<ResolvedCommand>,
+}
+
+/// A command token that the palette's input names, and the ghost that the Cmd
+/// Line draws after it.
+///
+/// The ghost is the rest of the command's name that the user did not type, so
+/// a typed `o` reads as `open`. It is display only: the input, its caret, Tab,
+/// and Enter never see it.
+pub(crate) struct ResolvedCommand {
+    /// The typed head's length in chars, from the input's start.
+    pub(crate) head_chars: usize,
+    /// The text after the head, empty for a head that spells the whole name.
+    pub(crate) ghost: String,
 }
 
 /// The inline value-picker the palette shows while collecting an argument
@@ -658,6 +676,7 @@ impl CommandPalette {
             offering,
             arg_plate_width: 0,
             header_rows: 1,
+            resolved: None,
         }
     }
 
@@ -843,6 +862,7 @@ impl CommandPalette {
         self.last_filter_key = key;
         self.generation = picker::next_generation();
 
+        self.resolved = resolve_typed(&text, self.scope, &self.availability);
         let parsed = parse_command(&text, &self.availability);
         self.command = parsed.map(|(entry, _)| entry);
         self.typed_arg = parsed.map_or(0, |(_, arg)| arg_index(arg));
@@ -1084,6 +1104,71 @@ pub(crate) fn split_head<'a>(
         let head = &text[..i];
         resolve(head).map(|entry| (entry, head, &text[i + 1..]))
     })
+}
+
+/// The command token that palette input `text` names, as the Cmd Line draws
+/// it, or `None` when the text names no command.
+///
+/// The head follows [`typed_head`], and the ghost follows [`ghost_of`].
+fn resolve_typed(text: &str, scope: PaletteScope, ctx: &Availability) -> Option<ResolvedCommand> {
+    let (entry, head) = typed_head(text, scope, ctx)?;
+    Some(ResolvedCommand {
+        head_chars: head.chars().count(),
+        ghost: ghost_of(head, &entry.command_name),
+    })
+}
+
+/// The command that the typed head of palette input `text` names, and the
+/// head, or `None` when no head names a command.
+///
+/// A head that [`split_head`] finds names its command first. Else the whole
+/// text less its trailing whitespace names a command, as a conditional
+/// command, a name, or an alias. Else a text with no whitespace names the one
+/// command that `scope` offers whose command name starts with it, ASCII case
+/// ignored. So `quit-al` names `quit-all`, and `wri` names none of the
+/// commands that start with it.
+fn typed_head<'a>(
+    text: &'a str,
+    scope: PaletteScope,
+    ctx: &Availability,
+) -> Option<(&'static registry::RegistryEntry, &'a str)> {
+    if let Some((entry, head, _)) = split_head(text, ctx) {
+        return Some((entry, head));
+    }
+
+    let whole = text.trim_end();
+    if let Some(entry) = resolve_conditional(whole, ctx).or_else(|| registry::lookup_alias(whole)) {
+        return Some((entry, whole));
+    }
+
+    if text.is_empty() || text.contains(char::is_whitespace) {
+        return None;
+    }
+    let mut named = registry::all().filter(|entry| {
+        offers(entry, scope, ctx)
+            && entry
+                .command_name
+                .get(..text.len())
+                .is_some_and(|prefix| prefix.eq_ignore_ascii_case(text))
+    });
+    match (named.next(), named.next()) {
+        (Some(entry), None) => Some((entry, text)),
+        _ => None,
+    }
+}
+
+/// The ghost that the Cmd Line draws after `head`, the typed head of the
+/// command named `name`.
+///
+/// A head that starts the name, ASCII case ignored, has the rest of the name,
+/// so `o` gives `pen`, and a head that spells the whole name has no ghost. Any
+/// other head is an alias with no rest to show, so its ghost is a space,
+/// U+00B7, a space, and the whole name.
+fn ghost_of(head: &str, name: &str) -> String {
+    match name.get(..head.len()) {
+        Some(prefix) if prefix.eq_ignore_ascii_case(head) => name[head.len()..].to_owned(),
+        _ => format!(" \u{b7} {name}"),
+    }
 }
 
 /// Which parameter the token being typed at the end of `tail` fills, counting
@@ -1356,7 +1441,10 @@ mod tests {
         test_harness::{editor, TestHarness},
     };
     use crossterm::event::Event;
-    use ratatui::buffer::Buffer;
+    use ratatui::{
+        buffer::Buffer,
+        style::{Color, Modifier},
+    };
     use stoat_action::ParamKind;
 
     /// Seed `files` into the harness' fake fs under a fixed virtual root and
@@ -1801,6 +1889,100 @@ mod tests {
 
         let (rows, first, next) = pasted_frames(&mut h, &format!("{}q", " ".repeat(80)));
         assert_eq!((rows, first), (2, next));
+    }
+
+    /// A typed head names its command by the head that `split_head` finds, by
+    /// the whole text as a name or an alias, or as the one command whose name
+    /// it starts. A prefix with whitespace in it names no command, so `git lo`
+    /// names none although only `git log` starts with it. The ghost completes
+    /// the command's name, or names it after a separator when the head is no
+    /// prefix of it.
+    #[test]
+    fn a_typed_head_resolves_by_name_alias_or_unique_prefix() {
+        let ctx = Availability::default();
+        let resolved = |text: &str| {
+            let name = typed_head(text, PaletteScope::All, &ctx).map(|(entry, _)| entry.def.name());
+            let shown = resolve_typed(text, PaletteScope::All, &ctx);
+            name.zip(shown)
+                .map(|(name, shown)| (name, shown.head_chars, shown.ghost))
+        };
+        let texts = [
+            "o",
+            "open",
+            "o src",
+            "wq",
+            "git ls main",
+            "git st",
+            "quit-al",
+            "wri",
+            "zz",
+            "git ",
+            "git lo",
+        ];
+
+        assert_eq!(
+            texts.map(resolved),
+            [
+                Some(("OpenFile", 1, "pen".to_owned())),
+                Some(("OpenFile", 4, String::new())),
+                Some(("OpenFile", 1, "pen".to_owned())),
+                Some(("WriteQuit", 2, " \u{b7} write-quit".to_owned())),
+                Some(("GitLs", 6, " \u{b7} git log".to_owned())),
+                Some(("GitStatus", 6, "atus".to_owned())),
+                Some(("QuitAll", 7, "l".to_owned())),
+                None,
+                None,
+                None,
+                None,
+            ],
+        );
+    }
+
+    /// A typed alias draws bold in the command color with the rest of the
+    /// command's name as a ghost after it, and the input holds only what the
+    /// user typed.
+    #[test]
+    fn an_alias_draws_bold_with_its_ghost_and_leaves_the_buffer_alone() {
+        let mut h = Stoat::test();
+        h.type_text(":o");
+        let _ = h.snapshot();
+
+        let buf = h.rendered_buffer();
+        let (glyph, y) = (0..buf.area.height)
+            .find_map(|y| {
+                (0..buf.area.width)
+                    .find(|&x| buf[(x, y)].symbol() == "\u{276f}")
+                    .map(|x| (x, y))
+            })
+            .expect("the Cmd Line draws its glyph");
+        let header: String = (glyph..glyph + 6).map(|x| buf[(x, y)].symbol()).collect();
+        let (token, ghost) = (&buf[(glyph + 2, y)], &buf[(glyph + 4, y)]);
+        assert_eq!(
+            (
+                header,
+                (token.fg, token.modifier.contains(Modifier::BOLD)),
+                ghost.fg,
+                palette_text(&h),
+            ),
+            (
+                "\u{276f} open".to_owned(),
+                (Color::Rgb(197, 154, 240), true),
+                Color::Rgb(105, 84, 129),
+                "o".to_owned(),
+            ),
+        );
+    }
+
+    /// Tab completes the selected command past the ghost, which the input never
+    /// held.
+    #[test]
+    fn tab_completes_the_command_past_its_ghost() {
+        let mut h = Stoat::test();
+        h.type_text(":o");
+        let _ = h.snapshot();
+        h.type_keys("tab");
+
+        assert_eq!(palette_text(&h), "open ");
     }
 
     /// A group shows in the Cmd Line's input after the prompt glyph and lists

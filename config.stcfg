@@ -292,6 +292,7 @@ theme ermine_night inherits default_dark {
     let shape            = "#8b919c";
     let shape_comment    = "#6d727c";
     let strip_text       = "#3a3f49";
+    let cmd_ghost        = "#695481";
 
     let black     = base;
     let white     = "#dfe2e8";
@@ -374,6 +375,8 @@ theme ermine_night inherits default_dark {
     ui.key_label.fg    = info;
     ui.cmd.cwd.fg      = info;
     ui.cmd.prompt.fg   = dim;
+    ui.cmd.command     = { fg: special, modifiers: [bold] };
+    ui.cmd.ghost.fg    = cmd_ghost;
     ui.hints.submenu.fg = accent;
     ui.badge.active.fg = warning;
 

@@ -1309,6 +1309,44 @@ fn a_long_palette_line_adds_a_header_row() {
     }
 }
 
+/// A palette line whose head names a command draws the token at full strength
+/// and the rest of the command's name after it as a ghost at half strength.
+///
+/// `:o x` opens the argument picker on a plate of its own. `list_rows_hint`
+/// answers the 2 files of `basic-diff`, so the box is the recommended 22 rows
+/// from cell row 14. No label is over 30 chars, so the plate is the smallest
+/// argument plate, the 95 cells from cell 32. The inner rect starts at cell
+/// (33, 15), 16 cells right of and 2 rows under the inner rect of the root box,
+/// so the header text stands 144 px right of and 36 px under its place there.
+///
+/// The token `o` stands in the pixel columns 518 to 525, the ghost `pen` in 526
+/// to 550, and the caret block in 567 to 574, on the pixel rows 277 to 294. The
+/// token peaks at the 0xf0 of `#c59af0`, and the ghost peaks at the 0x81 of
+/// `#695481`.
+#[test]
+fn the_cmd_line_draws_an_alias_with_its_ghost() {
+    let mut home = support::scratch_home();
+    let shot = palette_frame(home.path(), ":o x<Settle>");
+
+    let token = brightest(&shot, (518, 277, 8, 18));
+    let ghost = brightest(&shot, (528, 277, 20, 18));
+    if token <= 0x81 || !(0x12..=0x81).contains(&ghost) {
+        let frame = keep_frame(&shot, &mut home, "cmd_line_ghost");
+        panic!(
+            "the token peaks at {token:#04x} and the ghost at {ghost:#04x}, where the token \
+             peaks above 0x81 and the ghost in 0x12 to 0x81; the frame is {}",
+            frame.display(),
+        );
+    }
+    expect_region(
+        &shot,
+        &mut home,
+        (567, 277, 8, 18),
+        TEXT,
+        "cmd_line_ghost_caret",
+    );
+}
+
 /// The frame the basic-diff scene settles on after `keys` play, where the
 /// child's home is `home` and its temporary files go under `home/t`.
 ///

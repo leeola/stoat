@@ -313,6 +313,11 @@ The typed UI scopes, by group (syntax scopes are open-ended):
   as the command palette's header row, and the U+276F prompt glyph after it.
   Unset, the directory takes `ui.key_label` and the glyph takes
   `ui.text.dim`.
+- `ui.cmd.command`, `ui.cmd.ghost` -- a command token that a Cmd Line's input
+  names, such as the `o` of `o src`, and the ghost after it, the rest of the
+  command's name that the user did not type. The ghost is display only: the
+  input, Tab, and Enter never see it. Unset, the token takes `ui.text`, and
+  no ghost draws.
 - `ui.toggle.active`, `ui.toggle.inactive` -- the on and off marks beside a
   toggle's key in the key hints box.
 - `ui.hints.submenu` -- the label of a key hints row whose keys open a

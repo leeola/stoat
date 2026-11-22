@@ -500,7 +500,7 @@ mod tests {
     use ratatui::{
         buffer::Buffer,
         layout::Rect,
-        style::{Color, Modifier},
+        style::{Color, Modifier, Style},
     };
     use stoat_widgets::ApcScene;
     use stoatty_protocol::command::{decode_stream, Command, TextRunCommand};
@@ -540,12 +540,21 @@ mod tests {
     /// Paint the line of `parts` into `inner` of a 64 by 6 buffer under
     /// `theme`, by a scene that reads nudges where `nudges` holds.
     fn painted(parts: Parts<'_>, inner: Rect, theme: &Theme, nudges: bool) -> (Buffer, ApcScene) {
+        with_line(parts, theme, |line| paint_line(line, inner, theme, nudges))
+    }
+
+    /// Paint `line` into `inner` of a 64 by 6 buffer under `theme`, by a scene
+    /// that reads nudges where `nudges` holds.
+    fn paint_line(
+        line: &CmdLine<'_>,
+        inner: Rect,
+        theme: &Theme,
+        nudges: bool,
+    ) -> (Buffer, ApcScene) {
         let mut buf = Buffer::empty(Rect::new(0, 0, 64, 6));
         let mut scene = ApcScene::new();
         scene.set_nudge_protocol(nudges);
-        with_line(parts, theme, |line| {
-            cmd_line(&mut buf, inner, line, theme, &mut scene)
-        });
+        cmd_line(&mut buf, inner, line, theme, &mut scene);
         (buf, scene)
     }
 
@@ -898,5 +907,63 @@ mod tests {
                 .count()
         };
         assert_eq!([1, 2, 3].map(blanked), [60, 60, 0]);
+    }
+
+    /// Under the plate each span of the input draws as its own run in its own
+    /// style, as a command token, its ghost, and the argument after them do. A
+    /// caret inside a span splits it around the caret's char.
+    #[test]
+    fn a_plate_cmd_line_draws_each_span_as_its_own_run() {
+        let theme = plate_theme();
+        let (token, ghost) = ([12; 3], [13; 3]);
+        let input = [
+            (
+                "o".to_owned(),
+                Style::default()
+                    .fg(Color::Rgb(12, 12, 12))
+                    .add_modifier(Modifier::BOLD),
+            ),
+            (
+                "pen".to_owned(),
+                Style::default().fg(Color::Rgb(13, 13, 13)),
+            ),
+            (" x".to_owned(), theme.get(scope::UI_TEXT)),
+        ];
+        let status = [("14 of 890".to_owned(), theme.get(scope::UI_TEXT_MUTED))];
+        let runs = |caret| {
+            let line = CmdLine {
+                cwd: "~/p/stoat",
+                input: &input,
+                caret: Some(caret),
+                status: CmdStatus::Text(&status),
+            };
+            commands(&paint_line(&line, Rect::new(2, 1, 60, 4), &theme, true).1)
+        };
+
+        assert_eq!(
+            [runs(6), runs(1)],
+            [
+                framed(vec![
+                    bold(run(220, "o", token, GROUND)),
+                    run(236, "pen", ghost, GROUND),
+                    run(284, " x", TEXT, GROUND),
+                    run(316, " ", GROUND, TEXT),
+                ]),
+                framed(vec![
+                    bold(run(220, "o", token, GROUND)),
+                    run(236, "p", GROUND, TEXT),
+                    run(252, "en", ghost, GROUND),
+                    run(284, " x", TEXT, GROUND),
+                ]),
+            ],
+        );
+    }
+
+    /// `command`, a text run, in the bold face.
+    fn bold(command: Command) -> Command {
+        match command {
+            Command::TextRun(run) => Command::TextRun(TextRunCommand { bold: true, ..run }),
+            command => command,
+        }
     }
 }

@@ -969,6 +969,14 @@ pub mod scope {
     /// The prompt glyph between a Cmd Line's directory and its input. A theme
     /// that leaves it unset paints the glyph in [`UI_TEXT_DIM`].
     pub const UI_CMD_PROMPT: &str = "ui.cmd.prompt";
+    /// A command token that a Cmd Line's input resolves, such as the `o` of
+    /// `o src`. A theme that leaves it unset paints the token as plain input
+    /// text in [`UI_TEXT`].
+    pub const UI_CMD_COMMAND: &str = "ui.cmd.command";
+    /// The ghost after a resolved command token, the rest of the command's
+    /// name that the user did not type. A theme that leaves it unset draws no
+    /// ghost.
+    pub const UI_CMD_GHOST: &str = "ui.cmd.ghost";
     /// The mark the key hints box draws beside a key whose toggle is on.
     /// [`UI_TOGGLE_INACTIVE`] is its sibling for a toggle that is off.
     pub const UI_TOGGLE_ACTIVE: &str = "ui.toggle.active";
