@@ -47,7 +47,7 @@ use stoat_scheduler::Executor;
 use stoat_text::{patch::Patch, Anchor, Bias, CharsAt, Point, ReversedCharsAt, Rope};
 pub use tab_map::{TabMap, TabPoint, TabRow, TabSnapshot};
 use tokio::sync::Notify;
-pub(crate) use wrap_map::{BaseLineLayout, WrapGeometry};
+pub(crate) use wrap_map::{BaseLineLayout, WrapGeometry, WRAP_MARK};
 pub use wrap_map::{WrapMap, WrapPoint, WrapSnapshot};
 
 /// Columns a tab runs to in every editor's display map.

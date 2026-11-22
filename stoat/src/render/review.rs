@@ -1133,6 +1133,7 @@ pub(crate) fn paint_diff_rows(
     let add_style = fallback_style.patch(theme.get(s::DIFF_ADDED));
     let moved_style = fallback_style.patch(theme.get(s::DIFF_MOVED));
     let inlay_style = fallback_style.patch(theme.get(s::UI_VIRTUAL_INLAY));
+    let wrap_style = fallback_style.patch(editor::wrap_mark_style(theme));
     // The unified layout has no second half to fill, and a decorations-only
     // page keeps the cells the terminal holds.
     let absent = HatchedSurface::of(theme.get(s::DIFF_ABSENT), rich.is_some());
@@ -1383,6 +1384,7 @@ pub(crate) fn paint_diff_rows(
                         gap_fallback,
                         moved_style,
                         inlay_style,
+                        wrap_style,
                         changes,
                         tints.as_ref(),
                         soften_row,
@@ -1506,6 +1508,16 @@ pub(crate) fn paint_diff_rows(
                             false => 0,
                         };
                         let token_spans = base_token_spans(snapshot, line_base);
+                        if continuation {
+                            editor::paint_wrap_mark(
+                                buf,
+                                left_text_x,
+                                y,
+                                indent as u16,
+                                left_text_x + left_content_w as u16,
+                                wrap_style,
+                            );
+                        }
                         paint_base_segment(
                             buf,
                             left_text_x + indent as u16,
@@ -3142,6 +3154,16 @@ fn paint_base_side(
             (false, true) => text_style,
             (false, false) => del_style,
         };
+        if !row.first {
+            editor::paint_wrap_mark(
+                buf,
+                text_x,
+                y,
+                row.indent as u16,
+                text_x + content_w as u16,
+                text_style.patch(editor::wrap_mark_style(theme)),
+            );
+        }
         paint_base_segment(
             buf,
             text_x + row.indent as u16,
@@ -3452,6 +3474,7 @@ pub(crate) fn paint_highlighted_row(
     gap_fallback: Style,
     moved_fallback: Style,
     inlay_style: Style,
+    wrap_style: Style,
     change_spans: &[(std::ops::Range<usize>, ChangeKind, ProseChange)],
     tints: Option<&DiffTints>,
     soften_row: Option<[u8; 3]>,
@@ -3489,9 +3512,10 @@ pub(crate) fn paint_highlighted_row(
     let mut col = 0usize;
     let mut span_cursor = 0;
     for chunk in snapshot.row_chunks(display_row, row_cursor) {
-        let token = match chunk.is_inlay {
-            true => Some(inlay_style),
-            false => chunk
+        let token = match (chunk.is_wrap_mark, chunk.is_inlay) {
+            (true, _) => Some(wrap_style),
+            (false, true) => Some(inlay_style),
+            (false, false) => chunk
                 .highlight_style
                 .as_ref()
                 .map(|hs| hs.to_ratatui_style()),
@@ -7704,6 +7728,12 @@ mod tests {
         format!("{} {}", "a".repeat(a), "b".repeat(b))
     }
 
+    /// The trimmed glyphs of a continuation row whose text is `text`, which
+    /// open with the Wrap Mark and the space after it.
+    fn continued(text: String) -> String {
+        format!("\u{21b3} {text}")
+    }
+
     /// Row `y`'s trimmed glyphs across each of `cols`.
     ///
     /// A rich side's lanes and removal tick replay as `│` and `─` in the side's
@@ -7731,7 +7761,7 @@ mod tests {
             [y, y + 1].map(|y| cells(buf, y, [right_num(&cols), right_text(&cols)])),
             [
                 ["2".to_string(), "a".repeat(45)],
-                [String::new(), "b".repeat(44)],
+                [String::new(), continued("b".repeat(44))],
             ],
         );
     }
@@ -7768,7 +7798,7 @@ mod tests {
             [y, y + 1].map(|y| cells(buf, y, [left_text(&cols), right_text(&cols)])),
             [
                 ["a".repeat(45), "a".repeat(45)],
-                ["b".repeat(44), "b".repeat(44)],
+                [continued("b".repeat(44)), continued("b".repeat(44))],
             ],
             "each left row holds the segment the right row beside it holds",
         );
@@ -7787,7 +7817,7 @@ mod tests {
                 .collect::<Vec<_>>(),
             [
                 ["1".to_string(), "a".repeat(45)],
-                [String::new(), "b".repeat(44)],
+                [String::new(), continued("b".repeat(44))],
                 ["2".to_string(), "old".to_string()],
             ],
             "the continuation takes no base line, so the paired row reads line 2",
@@ -7810,7 +7840,7 @@ mod tests {
         h.snapshot();
         let buf = h.rendered_buffer();
         let cols = harness_columns(&h);
-        let y = row_holding(buf, right_text(&cols), "    TWO three");
+        let y = row_holding(buf, right_text(&cols), "  \u{21b3} TWO three");
         let underlined = |y| {
             (right_text(&cols))
                 .filter(|&x| buf[(x, y)].modifier.contains(Modifier::UNDERLINED))
@@ -8166,7 +8196,7 @@ mod tests {
                 .collect::<Vec<_>>(),
             [
                 ["2".to_string(), "a".repeat(45)],
-                [String::new(), "b".repeat(44)],
+                [String::new(), continued("b".repeat(44))],
                 ["3".to_string(), "tail".to_string()],
             ],
         );
@@ -8196,7 +8226,12 @@ mod tests {
                 .collect::<Vec<_>>(),
             [
                 ["1".into(), "a".repeat(45), "1".into(), "a".repeat(45)],
-                [String::new(), "b".repeat(44), String::new(), "b".repeat(44)],
+                [
+                    String::new(),
+                    continued("b".repeat(44)),
+                    String::new(),
+                    continued("b".repeat(44))
+                ],
                 ["2".into(), "gone".into(), String::new(), String::new()],
                 ["3".into(), "tail".into(), "2".into(), "tail".into()],
             ],
@@ -8221,7 +8256,7 @@ mod tests {
             [
                 ["2".to_string(), "short".to_string()],
                 ["3".to_string(), "a".repeat(45)],
-                [String::new(), "b".repeat(44)],
+                [String::new(), continued("b".repeat(44))],
                 ["4".to_string(), "tail".to_string()],
             ],
         );
@@ -8248,7 +8283,7 @@ mod tests {
         h.snapshot();
         assert_eq!(
             rows(&h),
-            ["a".repeat(40), "b".repeat(7)],
+            ["a".repeat(40), continued("b".repeat(7))],
             "the standing block grows a row at the narrower width",
         );
     }
@@ -8280,7 +8315,12 @@ mod tests {
                 .collect::<Vec<_>>(),
             [
                 ["2".into(), "a".repeat(45), "2".into(), "c".repeat(45)],
-                [String::new(), "b".repeat(44), String::new(), "d".repeat(44)],
+                [
+                    String::new(),
+                    continued("b".repeat(44)),
+                    String::new(),
+                    continued("d".repeat(44))
+                ],
                 ["3".into(), "tail".into(), "3".into(), "tail".into()],
             ],
             "the base fits beside the live rows, so no block row follows",
@@ -8314,8 +8354,18 @@ mod tests {
                 .collect::<Vec<_>>(),
             [
                 ["2".into(), "a".repeat(45), "2".into(), "x".repeat(40)],
-                [String::new(), "b".repeat(45), String::new(), String::new()],
-                [String::new(), "c".repeat(20), String::new(), String::new()],
+                [
+                    String::new(),
+                    continued("b".repeat(45)),
+                    String::new(),
+                    String::new()
+                ],
+                [
+                    String::new(),
+                    continued("c".repeat(20)),
+                    String::new(),
+                    String::new()
+                ],
                 ["3".into(), "tail".into(), "3".into(), "tail".into()],
             ],
         );
@@ -8348,8 +8398,18 @@ mod tests {
                 .collect::<Vec<_>>(),
             [
                 ["2".into(), "p".repeat(45), "2".into(), "a".repeat(45)],
-                [String::new(), "q".repeat(45), String::new(), "b".repeat(44)],
-                [String::new(), "r".repeat(20), String::new(), String::new()],
+                [
+                    String::new(),
+                    continued("q".repeat(45)),
+                    String::new(),
+                    continued("b".repeat(44))
+                ],
+                [
+                    String::new(),
+                    continued("r".repeat(20)),
+                    String::new(),
+                    String::new()
+                ],
                 ["3".into(), "tail".into(), "3".into(), "tail".into()],
             ],
         );
@@ -8379,7 +8439,12 @@ mod tests {
                 .collect::<Vec<_>>(),
             [
                 ["2".into(), "x".repeat(40), "2".into(), "a".repeat(45)],
-                [String::new(), String::new(), String::new(), "b".repeat(44)],
+                [
+                    String::new(),
+                    String::new(),
+                    String::new(),
+                    continued("b".repeat(44))
+                ],
                 ["3".into(), "tail".into(), "3".into(), "tail".into()],
             ],
         );
@@ -8422,7 +8487,7 @@ mod tests {
 
         assert_eq!(
             [0, 1].map(|y| line_text(&buf, y, left_text(&cols)).trim().to_string()),
-            ["\u{e9}".repeat(50), "\u{e9}".repeat(10)],
+            ["\u{e9}".repeat(50), continued("\u{e9}".repeat(10))],
         );
     }
 
@@ -8471,6 +8536,44 @@ mod tests {
         );
     }
 
+    /// A wrapped base line opens each continuation row with the Wrap Mark, two
+    /// cells before its text, as the live column does. The mirror of an
+    /// unchanged line and the block of a removed line both show it.
+    #[test]
+    fn a_wrapped_base_row_shows_the_wrap_mark() {
+        let cols = wide_columns();
+        let long = long_line(45, 44);
+        let mut editor = diff_editor(
+            &format!("{long}\nkeep\n{long}\n"),
+            &format!("{long}\nkeep\n"),
+        );
+        editor.display_map.set_wrap_width(Some(51));
+        let area = Rect::new(0, 0, 120, 8);
+        let mut buf = Buffer::empty(area);
+        render_diff_view(
+            &mut editor,
+            area,
+            Style::default(),
+            &Theme::empty(),
+            &mut buf,
+            true,
+            None,
+            None,
+            true,
+            DiffDials::shipped(),
+            BufferNumbering::Absolute,
+            &[],
+            false,
+        );
+
+        let continuation = format!("  \u{21b3} {}", "b".repeat(44));
+        assert_eq!(
+            [1, 4].map(|y| line_text(&buf, y, left_text(&cols)).trim_end().to_string()),
+            [continuation.clone(), continuation],
+            "the unchanged line's mirror and the removed line's block",
+        );
+    }
+
     /// At width 80 both sides share one column, which wraps at the width past
     /// its one gutter.
     #[test]
@@ -8483,7 +8586,7 @@ mod tests {
             [y, y + 1].map(|y| cells(buf, y, [left_num(&cols), right_text(&cols)])),
             [
                 ["2".to_string(), "a".repeat(65)],
-                [String::new(), "b".repeat(24)],
+                [String::new(), continued("b".repeat(24))],
             ],
         );
     }

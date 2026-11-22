@@ -5,6 +5,7 @@ use crate::{
     editor_state::EditorState,
     merge_view::{AlignRow, ChunkState, MergeDoc, Side},
     render::{
+        editor::wrap_mark_style,
         paint::{
             dim_rgb, fill_line_tint, render_empty_num, render_side_num, render_side_text, style_rgb,
         },
@@ -529,6 +530,7 @@ fn paint_conflict_rows(
     let ours_style = theme.get(s::VCS_CONFLICT_OURS);
     let theirs_style = theme.get(s::VCS_CONFLICT_THEIRS);
     let inlay_style = fallback_style.patch(theme.get(s::UI_VIRTUAL_INLAY));
+    let wrap_style = fallback_style.patch(wrap_mark_style(theme));
 
     let unresolved_tint = {
         let bg = style_rgb(theme.try_get(s::UI_BACKGROUND).and_then(|st| st.bg));
@@ -603,6 +605,7 @@ fn paint_conflict_rows(
                     fallback_style,
                     fallback_style,
                     inlay_style,
+                    wrap_style,
                     &[],
                     // No change span reaches a conflict row, so the span mark
                     // and the tint that rides it never engage.

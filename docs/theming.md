@@ -228,6 +228,9 @@ The typed UI scopes, by group (syntax scopes are open-ended):
   in the severity color.
 - `ui.text`, `ui.text.muted`, `ui.text.dim`, `ui.text.disabled` -- body text at
   descending emphasis.
+- `ui.virtual.wrap` -- the Wrap Mark (U+21B3) that opens each continuation row
+  of a soft-wrapped line, two cells before its text. A theme that gives it no
+  foreground draws the mark in `ui.text.disabled`.
 - `ui.cursor`, `ui.cursor.input` -- the block cursor in a buffer and in an input
   field.
 - `ui.selection`, `ui.selection.editor`, `ui.selection.reversed` -- selected

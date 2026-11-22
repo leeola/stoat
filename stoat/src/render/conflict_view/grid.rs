@@ -965,6 +965,7 @@ pub(super) fn paint_rows(
         row_cache.unwrap_or(&mut local_row_cache),
     );
     let inlay_style = fallback_style.patch(theme.get(s::UI_VIRTUAL_INLAY));
+    let wrap_style = fallback_style.patch(editor::wrap_mark_style(theme));
     let span_style = |[r, g, b]: [u8; 3]| Style::default().fg(Color::Rgb(r, g, b));
 
     let mut painter = RowPainter {
@@ -1071,6 +1072,7 @@ pub(super) fn paint_rows(
                 fallback_style,
                 fallback_style,
                 inlay_style,
+                wrap_style,
                 &[],
                 // No change span reaches a conflict row, so the span mark and
                 // the tint that rides it never engage.

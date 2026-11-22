@@ -9,7 +9,7 @@ use crate::{
     diff_map::{DiffHunkStatus, GutterMark, MarkState},
     display_map::{
         display_width, tab_map, BlockChunks, BlockRowKind, DisplayPoint, DisplaySnapshot,
-        PaintVersion, TabPoint,
+        PaintVersion, TabPoint, WRAP_MARK,
     },
     editor_state::EditorState,
     minimap::color_to_rgb,
@@ -478,6 +478,7 @@ pub(crate) fn render_editor_with_overlay(
         bottom,
         fallback_style,
         fallback_style.patch(theme.get(crate::theme::scope::UI_VIRTUAL_INLAY)),
+        fallback_style.patch(wrap_mark_style(theme)),
         buf,
     );
 
@@ -1040,11 +1041,11 @@ fn wrap_width_for(mode: WrapMode, text_width: u32, wrap_column: u32) -> Option<u
 /// The live editor and a pooled smooth-scroll page both paint their text
 /// through this, so a glide and the grid it settles onto agree cell for cell.
 /// They differ only in what they hand over, which is why the chunk iterator,
-/// the inlay style, and the geometry all arrive as arguments.
+/// the inlay and wrap styles, and the geometry all arrive as arguments.
 ///
 /// `left` is both the first column and the column a newline returns to, so a
 /// caller reserving a gutter passes the column just past it.
-// Eight arguments, because the geometry is four independent columns and rows
+// Nine arguments, because the geometry is four independent columns and rows
 // rather than a Rect. `left` is the newline reset column, which a region's own
 // left edge is not once a gutter is reserved.
 #[allow(clippy::too_many_arguments)]
@@ -1056,6 +1057,7 @@ pub(crate) fn paint_chunk_rows(
     bottom: u16,
     fallback_style: Style,
     inlay_style: Style,
+    wrap_style: Style,
     buf: &mut Buffer,
 ) {
     let mut x = left;
@@ -1072,7 +1074,9 @@ pub(crate) fn paint_chunk_rows(
     // on a guard elsewhere.
     let mut base_cell: Option<u16> = None;
     'chunks: for chunk in chunks {
-        let style = if chunk.is_inlay {
+        let style = if chunk.is_wrap_mark {
+            wrap_style
+        } else if chunk.is_inlay {
             inlay_style
         } else {
             chunk
@@ -1134,6 +1138,44 @@ pub(crate) fn paint_chunk_rows(
             x += w as u16;
         }
     }
+}
+
+/// The style a continuation row's Wrap Mark paints with.
+///
+/// A theme that gives `ui.virtual.wrap` no foreground paints the mark in
+/// `ui.text.disabled`. Every theme draws the mark, because the mark is how a
+/// reader tells a continuation row from a new line.
+pub(crate) fn wrap_mark_style(theme: &Theme) -> Style {
+    let style = theme.get(crate::theme::scope::UI_VIRTUAL_WRAP);
+    if style.fg.is_some() {
+        return style;
+    }
+    theme.get(crate::theme::scope::UI_TEXT_DISABLED)
+}
+
+/// Paints the Wrap Mark of a continuation row whose text starts `indent` cells
+/// past `text_x`, for a painter that lays out its own rows rather than reading
+/// the chunk stream.
+///
+/// The mark takes the indent's second-to-last cell, as the chunk stream places
+/// it. An indent under two cells takes no mark, and a mark cell at or past
+/// `right` is not painted.
+pub(crate) fn paint_wrap_mark(
+    buf: &mut Buffer,
+    text_x: u16,
+    y: u16,
+    indent: u16,
+    right: u16,
+    style: Style,
+) {
+    if indent < 2 {
+        return;
+    }
+    let x = text_x + indent - 2;
+    if x >= right {
+        return;
+    }
+    buf[(x, y)].set_symbol(WRAP_MARK).set_style(style);
 }
 
 /// Cached gutter severity map for one diagnostic set against one buffer.
@@ -4568,7 +4610,7 @@ mod tests {
         dispatch(&mut h.stoat, &OpenFile { path });
         h.settle();
 
-        let theme = crate::theme::Theme::empty();
+        let theme = h.stoat.theme.clone();
         let fallback = theme.get(crate::theme::scope::UI_TEXT);
         let chrome = crate::render::editor::ResolvedChrome::resolve(&theme);
         let area = Rect::new(0, 0, 40, 10);
@@ -4611,9 +4653,32 @@ mod tests {
         };
         assert_eq!(
             row_text(1).trim_end(),
-            format!("{}{}", " ".repeat(8), ["word"; 6].join(" ")),
-            "the continuation row starts 4 cells past the line's 4-space indent",
+            format!("{}\u{21b3} {}", " ".repeat(6), ["word"; 6].join(" ")),
+            "the Wrap Mark and a space close the indent, and the text starts 4 cells \
+             past the line's 4-space indent",
         );
+        assert_eq!(
+            Some(buf[(6, 1)].fg),
+            fallback.patch(super::wrap_mark_style(&theme)).fg,
+            "the mark paints in the wrap style",
+        );
+    }
+
+    /// The shipped theme draws the Wrap Mark in its disabled color.
+    #[test]
+    fn the_wrap_mark_draws_in_the_disabled_color_under_ermine() {
+        let mut h = crate::test_harness::TestHarness::with_size(40, 6);
+        let path = h.write_file("wrap.txt", &format!("{}\n", "word ".repeat(20)));
+        h.open_file(&path);
+        h.snapshot();
+
+        let mark = h
+            .rendered_buffer()
+            .content()
+            .iter()
+            .find(|cell| cell.symbol() == "\u{21b3}")
+            .expect("a continuation row paints the Wrap Mark");
+        assert_eq!(mark.fg, Color::Rgb(0x5b, 0x61, 0x6d));
     }
 
     /// Paint the focused editor's line-number gutter and return its

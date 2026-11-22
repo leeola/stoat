@@ -1491,10 +1491,11 @@ fn the_chunk_stream_over_wraps_folds_inlays_and_blocks() {
         .highlighted_chunks(0..snapshot.line_count())
         .map(|chunk| {
             format!(
-                "{:?}{}{}",
+                "{:?}{}{}{}",
                 chunk.text,
                 if chunk.is_inlay { " inlay" } else { "" },
                 if chunk.is_tab { " tab" } else { "" },
+                if chunk.is_wrap_mark { " wrap" } else { "" },
             )
         })
         .collect();
@@ -1506,15 +1507,20 @@ fn the_chunk_stream_over_wraps_folds_inlays_and_blocks() {
             // either side of the break. The hint's cells count toward the
             // width, filling the first sub-row exactly and pushing the rest
             // of the line onto a third. Each continuation opens with the
-            // 4-cell indent.
+            // 4-cell indent, whose last two cells are the Wrap Mark and a
+            // space.
             r#""fn alpha() {""#,
             r#"": " inlay"#,
             r#""\n""#,
-            r#""    ""#,
+            r#""  ""#,
+            "\"\u{21b3}\" wrap",
+            r#"" ""#,
             r#""u32" inlay"#,
             r#"" let x ""#,
             r#""\n""#,
-            r#""    ""#,
+            r#""  ""#,
+            "\"\u{21b3}\" wrap",
+            r#"" ""#,
             r#""= 1; }""#,
             r#""\n""#,
             // Row 1's first sub-row, then the block near it splitting it.
@@ -1526,19 +1532,29 @@ fn the_chunk_stream_over_wraps_folds_inlays_and_blocks() {
             r#""\n""#,
             // Its remaining sub-rows, each opening with the line's indent plus
             // four, capped at half the width.
-            r#""       ""#,
+            r#""     ""#,
+            "\"\u{21b3}\" wrap",
+            r#"" ""#,
             r#""line ""#,
             r#""\n""#,
-            r#""       ""#,
+            r#""     ""#,
+            "\"\u{21b3}\" wrap",
+            r#"" ""#,
             r#""that ""#,
             r#""\n""#,
-            r#""       ""#,
+            r#""     ""#,
+            "\"\u{21b3}\" wrap",
+            r#"" ""#,
             r#""wraps ""#,
             r#""\n""#,
-            r#""       ""#,
+            r#""     ""#,
+            "\"\u{21b3}\" wrap",
+            r#"" ""#,
             r#""a few ""#,
             r#""\n""#,
-            r#""       ""#,
+            r#""     ""#,
+            "\"\u{21b3}\" wrap",
+            r#"" ""#,
             r#""times""#,
             r#""\n""#,
             r#""short""#,
@@ -1546,12 +1562,16 @@ fn the_chunk_stream_over_wraps_folds_inlays_and_blocks() {
             // Row 3, whose fold placeholder is a chunk of its own.
             r#""fn gamma() ""#,
             r#""\n""#,
-            r#""    ""#,
+            r#""  ""#,
+            "\"\u{21b3}\" wrap",
+            r#"" ""#,
             r#""{""#,
             r#""...""#,
             r#""} and ""#,
             r#""\n""#,
-            r#""    ""#,
+            r#""  ""#,
+            "\"\u{21b3}\" wrap",
+            r#"" ""#,
             r#""more text""#,
             r#""\n""#,
         ]

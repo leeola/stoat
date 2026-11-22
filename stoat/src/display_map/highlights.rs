@@ -569,6 +569,9 @@ pub struct Chunk<'a> {
     pub inlay_kind: Option<InlayKind>,
     pub diagnostic_severity: Option<DiagnosticSeverity>,
     pub renderer: Option<ChunkRenderer>,
+    /// The chunk is the Wrap Mark a continuation row opens with, which a
+    /// painter draws in the wrap style and which is no buffer text.
+    pub is_wrap_mark: bool,
 }
 
 impl Default for Chunk<'_> {
@@ -581,6 +584,7 @@ impl Default for Chunk<'_> {
             inlay_kind: None,
             diagnostic_severity: None,
             renderer: None,
+            is_wrap_mark: false,
         }
     }
 }

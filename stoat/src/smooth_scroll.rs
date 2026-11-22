@@ -36,7 +36,7 @@ use crate::{
             draw_fallback_line_numbers, gutter_background, gutter_component_lines,
             gutter_diff_marks, gutter_digits, gutter_geometry, measure_gutter_width,
             paint_chunk_rows, paint_diagnostic_spans, paint_line_diagnostics,
-            paint_severity_column, rich_gutter, severity_rows, visible_byte_range,
+            paint_severity_column, rich_gutter, severity_rows, visible_byte_range, wrap_mark_style,
             DiagnosticPaintScratch, EolCursor, RichGutterColors, RowSeverity, SeverityColors,
         },
         file_finder::paint_finder_rows,
@@ -363,6 +363,7 @@ pub(crate) fn render_page_from_snapshot(
             area.y + area.height,
             fallback_style,
             fallback_style.patch(gutter.theme().get(crate::theme::scope::UI_VIRTUAL_INLAY)),
+            fallback_style.patch(wrap_mark_style(gutter.theme())),
             &mut buf,
         );
 
@@ -1402,6 +1403,9 @@ mod tests {
     /// path, an unfocused `render_editor` over the same rows. Covers the first
     /// page, a mid page, the partial last page, and a page past the document end,
     /// exercising the page offset and the bottom/right clipping.
+    ///
+    /// Each page paints unwrapped and wrapped at the pane width, so a
+    /// continuation row's Wrap Mark lands on the page as it lands live.
     #[test]
     fn page_from_snapshot_matches_unfocused_render_editor() {
         use super::{page_buffer, render_page_from_snapshot, serialize_buffer, PageGutter, Rect};
@@ -1423,7 +1427,13 @@ mod tests {
         dispatch(&mut h.stoat, &OpenFile { path });
         h.settle();
 
-        let theme = Theme::empty();
+        // The mark's own color, so a page that paints it in another style shows.
+        let theme = {
+            let (config, _) =
+                stoat_config::parse(r##"theme marked { ui.text.disabled.fg = "#5b616d"; }"##);
+            Theme::from_config(&config.expect("the theme parses"), "marked")
+                .expect("the theme builds")
+        };
         let fallback = theme.get(scope::UI_TEXT);
         let chrome = crate::render::editor::ResolvedChrome::resolve(&theme);
         let editor = action_handlers::focused_editor_mut(&mut h.stoat).expect("focused editor");
@@ -1438,7 +1448,10 @@ mod tests {
             None,
         );
 
-        for top_row in [0u32, 4, 8, 40] {
+        let pages = [WrapMode::None, WrapMode::EditorWidth]
+            .into_iter()
+            .flat_map(|wrap| [0u32, 4, 8, 40].map(|top_row| (wrap, top_row)));
+        for (wrap, top_row) in pages {
             let area = Rect::new(0, 0, 12, 4);
             let mut expected = page_buffer(area, &theme);
             let saved = editor.scroll_row;
@@ -1462,7 +1475,7 @@ mod tests {
                 None,
                 0.0,
                 DiffDials::shipped(),
-                WrapMode::None,
+                wrap,
                 80,
                 0,
                 &[],
@@ -1489,7 +1502,7 @@ mod tests {
                 None,
             );
 
-            assert_eq!(got, expected, "page at top_row {top_row}");
+            assert_eq!(got, expected, "{wrap:?} page at top_row {top_row}");
         }
     }
 

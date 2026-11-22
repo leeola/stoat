@@ -814,6 +814,11 @@ pub mod scope {
     /// visually distinct from the surrounding source.
     pub const UI_VIRTUAL_INLAY: &str = "ui.virtual.inlay";
 
+    /// The Wrap Mark that opens each continuation row of a soft-wrapped line.
+    /// A theme that gives it no foreground draws the mark in
+    /// [`UI_TEXT_DISABLED`].
+    pub const UI_VIRTUAL_WRAP: &str = "ui.virtual.wrap";
+
     pub const UI_CURSOR: &str = "ui.cursor";
     pub const UI_CURSOR_INPUT: &str = "ui.cursor.input";
 

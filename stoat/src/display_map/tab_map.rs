@@ -494,6 +494,7 @@ impl<'a> TabChunks<'a> {
                     inlay_kind: metadata.inlay_kind,
                     diagnostic_severity: metadata.diagnostic_severity,
                     renderer: metadata.renderer.clone(),
+                    is_wrap_mark: metadata.is_wrap_mark,
                 });
                 advance_display_column(&prefix, &mut self.display_column);
                 Some(Chunk {
@@ -514,6 +515,7 @@ fn clone_chunk_metadata<'a>(chunk: &Chunk<'a>) -> Chunk<'a> {
         inlay_kind: chunk.inlay_kind,
         diagnostic_severity: chunk.diagnostic_severity,
         renderer: chunk.renderer.clone(),
+        is_wrap_mark: chunk.is_wrap_mark,
     }
 }
 

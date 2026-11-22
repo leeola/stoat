@@ -242,6 +242,10 @@ const WRAP_SYNC_MAX_BYTES: usize = 64 * 1024;
 /// them leave room for the Wrap Mark and the space after it.
 const CONTINUATION_INDENT: u32 = 4;
 
+/// The Wrap Mark, U+21B3, which opens a continuation row two cells before its
+/// text so a reader tells the row from a new line.
+pub(crate) const WRAP_MARK: &str = "\u{21b3}";
+
 pub struct WrapMap {
     snapshot: WrapSnapshot,
     pending_edits: VecDeque<(TabSnapshot, Patch<u32>)>,
@@ -1352,6 +1356,11 @@ impl WrapSnapshot {
             })
     }
 
+    /// Appends the text wrap row `wrap_row` shows to `buf`.
+    ///
+    /// A continuation row opens with its indent as spaces. The Wrap Mark that
+    /// the chunk stream yields in the indent is paint only, so the minimap
+    /// strips and the other readers of display text count no glyph there.
     pub fn write_display_line(&self, buf: &mut String, wrap_row: u32) {
         if self.wrap_width.is_none() {
             self.tab_snapshot.write_expand_line(buf, wrap_row);
@@ -1546,9 +1555,13 @@ struct RowChunksState<'a> {
     target_start: u32,
     target_end: Option<u32>,
     done: bool,
-    /// Synthetic leading spaces yielded before this continuation row's text, so
-    /// the text starts at the row's continuation indent. Zero on a primary row.
+    /// Blank cells still to yield before this continuation row's Wrap Mark, or
+    /// before its text when the row takes no mark. Zero on a primary row.
     indent: u32,
+    /// The part of the row's Wrap Mark still to yield. The mark and the space
+    /// after it fill the last two cells of the indent, so the text starts at
+    /// the row's continuation indent.
+    mark: MarkStep,
     /// The part of the last chunk that fell past this sub-row's window or its
     /// line break.
     ///
@@ -1611,6 +1624,24 @@ impl<'a> WrappedChunksInner<'a> {
                     ..Default::default()
                 });
             }
+            match state.mark {
+                MarkStep::None => {},
+                MarkStep::Mark => {
+                    state.mark = MarkStep::Gap;
+                    return Some(Chunk {
+                        text: Cow::Borrowed(WRAP_MARK),
+                        is_wrap_mark: true,
+                        ..Default::default()
+                    });
+                },
+                MarkStep::Gap => {
+                    state.mark = MarkStep::None;
+                    return Some(Chunk {
+                        text: Cow::Borrowed(" "),
+                        ..Default::default()
+                    });
+                },
+            }
 
             let next = match state.carried.take() {
                 Some(chunk) => Some(chunk),
@@ -1649,7 +1680,7 @@ impl<'a> WrappedChunksInner<'a> {
                 let state = self.row_state.as_mut().expect("checked by continues_run");
                 state.target_start = window.target_start;
                 state.target_end = window.target_end;
-                state.indent = window.indent;
+                (state.indent, state.mark) = indent_steps(window.indent);
                 state.done = false;
             },
             Some((tab_row, window)) if self.continues_line(tab_row) => {
@@ -1658,7 +1689,7 @@ impl<'a> WrappedChunksInner<'a> {
                 state.column = 0;
                 state.target_start = window.target_start;
                 state.target_end = window.target_end;
-                state.indent = window.indent;
+                (state.indent, state.mark) = indent_steps(window.indent);
                 state.done = false;
                 state.line_ended = false;
             },
@@ -1755,6 +1786,7 @@ impl<'a> WrappedChunksInner<'a> {
             Some(&self.cursor),
         );
 
+        let (indent, mark) = indent_steps(window.indent);
         Some(RowChunksState {
             tab_chunks,
             tab_row,
@@ -1762,11 +1794,31 @@ impl<'a> WrappedChunksInner<'a> {
             target_start: window.target_start,
             target_end: window.target_end,
             done: false,
-            indent: window.indent,
+            indent,
+            mark,
             carried: None,
             line_ended: false,
         })
     }
+}
+
+/// The part of a continuation row's Wrap Mark that its chunk stream still owes.
+enum MarkStep {
+    None,
+    Mark,
+    Gap,
+}
+
+/// The blank cells and the mark step that open a row indented `indent` cells.
+///
+/// The mark and the space after it take the indent's last two cells, so an
+/// indent under two cells, which only a pane under four cells wide gives,
+/// takes no mark.
+fn indent_steps(indent: u32) -> (u32, MarkStep) {
+    if indent < 2 {
+        return (indent, MarkStep::None);
+    }
+    (indent - 2, MarkStep::Mark)
 }
 
 /// The display-column span one wrap row covers of its tab row, and the indent it
@@ -1932,8 +1984,8 @@ mod tests {
         display_map::{
             fold_map::{FoldMap, FoldPlaceholder},
             highlights::{
-                create_highlight_endpoints, AnchorResolver, HighlightEndpoints, HighlightKey,
-                HighlightLayer, HighlightStyle,
+                create_highlight_endpoints, AnchorResolver, Chunk, HighlightEndpoints,
+                HighlightKey, HighlightLayer, HighlightStyle,
             },
             inlay_map::{InlayMap, InlaySnapshot},
             sampler::{self, Sampler},
@@ -1944,6 +1996,7 @@ mod tests {
     use futures::{channel::oneshot, FutureExt};
     use ratatui::style::Color;
     use std::{
+        borrow::Cow,
         collections::HashMap,
         ops::Range,
         sync::{Arc, RwLock},
@@ -2290,8 +2343,7 @@ mod tests {
                 "width {width}: the line wraps into rows past the fold",
             );
             for row in 0..snap.line_count() {
-                let chunks: Vec<_> = snap.chunks(row..row + 1, endpoints.clone()).collect();
-                let recovered: String = chunks.iter().flat_map(|c| c.text.chars()).collect();
+                let recovered = display_text(snap.chunks(row..row + 1, endpoints.clone()));
                 assert_eq!(
                     recovered,
                     snap.display_line(row),
@@ -2313,8 +2365,7 @@ mod tests {
         let endpoints = HighlightEndpoints::shared(Vec::new());
 
         for row in 0..snap.line_count() {
-            let chunks: Vec<_> = snap.chunks(row..row + 1, endpoints.clone()).collect();
-            let recovered: String = chunks.iter().flat_map(|c| c.text.chars()).collect();
+            let recovered = display_text(snap.chunks(row..row + 1, endpoints.clone()));
             assert_eq!(
                 recovered,
                 snap.display_line(row),
@@ -2619,29 +2670,62 @@ mod tests {
     }
 
     #[test]
-    fn continuation_chunk_prepends_an_unstyled_indent() {
-        let snap = make_snapshot("    hello world example text", Some(12));
-        let indent = snap.soft_wrap_indent(1) as usize;
-        assert!(indent > 0);
-
+    fn a_continuation_row_opens_with_its_indent_then_the_wrap_mark() {
+        let snap = make_snapshot("  alpha beta gamma delta", Some(12));
         let endpoints = HighlightEndpoints::shared(Vec::new());
         let chunks: Vec<_> = snap.chunks(1..2, endpoints).collect();
-        let recovered: String = chunks.iter().flat_map(|c| c.text.chars()).collect();
         assert_eq!(
-            recovered,
+            mark_runs(&chunks),
+            [
+                ("    ".to_string(), false),
+                ("\u{21b3}".to_string(), true),
+                (" beta ".to_string(), false),
+            ],
+            "the blank cells, the mark, then the space and the text",
+        );
+        assert!(
+            chunks[..3]
+                .iter()
+                .all(|chunk| chunk.highlight_style.is_none()),
+            "the synthetic indent and its mark carry no style",
+        );
+        assert_eq!(
             snap.display_line(1),
-            "the chunks reconstruct the indented continuation row",
+            "      beta ",
+            "the display text holds a space where the mark paints",
         );
+    }
 
-        let first = &chunks[0];
-        assert!(
-            first.text.chars().count() == indent && first.text.chars().all(|c| c == ' '),
-            "the first chunk is exactly the indent spaces",
-        );
-        assert!(
-            first.highlight_style.is_none(),
-            "the synthetic indent carries no style",
-        );
+    #[test]
+    fn an_indent_under_two_cells_takes_no_wrap_mark() {
+        let snap = make_snapshot("abcdef", Some(3));
+        let endpoints = HighlightEndpoints::shared(Vec::new());
+        let chunks: Vec<_> = snap.chunks(1..2, endpoints).collect();
+        assert_eq!(mark_runs(&chunks), [(" de".to_string(), false)]);
+    }
+
+    /// The text of `chunks` with each run of neighbours that agree on
+    /// [`Chunk::is_wrap_mark`] joined, tagged with that flag.
+    fn mark_runs(chunks: &[Chunk<'_>]) -> Vec<(String, bool)> {
+        let mut runs: Vec<(String, bool)> = Vec::new();
+        for chunk in chunks {
+            match runs.last_mut() {
+                Some((text, mark)) if *mark == chunk.is_wrap_mark => text.push_str(&chunk.text),
+                _ => runs.push((chunk.text.to_string(), chunk.is_wrap_mark)),
+            }
+        }
+        runs
+    }
+
+    /// The text `chunks` paint, with the Wrap Mark read as the space that
+    /// [`super::WrapSnapshot::display_line`] holds in its cell.
+    fn display_text<'a>(chunks: impl Iterator<Item = Chunk<'a>>) -> String {
+        chunks
+            .map(|chunk| match chunk.is_wrap_mark {
+                true => Cow::Borrowed(" "),
+                false => chunk.text,
+            })
+            .collect()
     }
 
     fn make_wrap_map(
@@ -3391,10 +3475,11 @@ mod tests {
         use std::collections::HashMap;
         use stoat_text::Anchor;
 
-        // Wrap "abcdefghij" at width 5 -> three wrap rows: "abcde", "  fgh",
-        // "  ij". A highlight on bytes 2..8 (Red) should appear:
+        // Wrap "abcdefghij" at width 5 -> three wrap rows, "abcde", "fgh", and
+        // "ij", each continuation behind the Wrap Mark and a space. A
+        // highlight on bytes 2..8 (Red) styles these chars:
         //   row 0: bytes 2..5 styled (chars c, d, e)
-        //   row 1: bytes 5..8 styled (chars f, g, h), after the bare indent
+        //   row 1: bytes 5..8 styled (chars f, g, h), after the mark
         let snap = make_snapshot("abcdefghij", Some(5));
         assert_eq!(snap.line_count(), 3);
 
@@ -3440,13 +3525,13 @@ mod tests {
         }
         let recovered: String = chars_with_style.iter().map(|(c, _)| c).collect();
         assert_eq!(
-            recovered, "abcde\n  fgh\n  ij",
+            recovered, "abcde\n\u{21b3} fgh\n\u{21b3} ij",
             "wrap reconstruction must match"
         );
 
         // 'c','d','e' are red (bytes 2,3,4 of source) and 'f','g','h'
         // are red (bytes 5,6,7 of source, on wrap row 1 at cols 2,3,4). The
-        // indent inside the span carries no style.
+        // mark and the space after it carry no style inside the span.
         let expected_colors = [
             ('a', None),
             ('b', None),
@@ -3454,13 +3539,13 @@ mod tests {
             ('d', Some(Color::Red)),
             ('e', Some(Color::Red)),
             ('\n', None),
-            (' ', None),
+            ('\u{21b3}', None),
             (' ', None),
             ('f', Some(Color::Red)),
             ('g', Some(Color::Red)),
             ('h', Some(Color::Red)),
             ('\n', None),
-            (' ', None),
+            ('\u{21b3}', None),
             (' ', None),
             ('i', None),
             ('j', None),
