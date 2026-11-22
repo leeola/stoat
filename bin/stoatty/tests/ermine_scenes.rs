@@ -1175,11 +1175,11 @@ fn the_file_finder_box_casts_the_modal_shadow() {
 /// editor surface draws. The pixel row above it reads the base surface.
 ///
 /// The preview draws at Preview Scale from pixel (612, 252), cell (68, 14), and
-/// numbers its lines in a column of five 5 px cells, pixels 612 to 636. Its
-/// first 11 px row, pixel rows 252 to 262, holds the number in the muted color
-/// and no text, so it peaks above the base surface and at most at the muted
-/// color. Its eighth row, pixel rows 329 to 339, is the first past the file's
-/// seven lines, and the column holds no number there.
+/// numbers its lines in four 5 px digit cells, pixels 612 to 631, before its
+/// rule. Their first 11 px row, pixel rows 252 to 262, holds the number in the
+/// muted color and no text, so it peaks above the base surface and at most at
+/// the muted color. Their eighth row, pixel rows 329 to 339, is the first past
+/// the file's seven lines, and holds no number.
 #[test]
 fn the_file_finder_box_draws_as_the_ground_plate() {
     let mut home = support::scratch_home();
@@ -1265,8 +1265,8 @@ fn the_file_finder_box_draws_as_the_ground_plate() {
     );
 
     let peak = |color: [u8; 3]| color.into_iter().max().expect("a color has channels");
-    let first = brightest(&shot, (612, 252, 25, 11));
-    let past_end = brightest(&shot, (612, 329, 25, 11));
+    let first = brightest(&shot, (612, 252, 20, 11));
+    let past_end = brightest(&shot, (612, 329, 20, 11));
     if !(peak(BASE) + 1..=peak(MUTED)).contains(&first) || past_end != peak(BASE) {
         let frame = keep_frame(&shot, &mut home, "preview_numbers");
         panic!(
@@ -1281,10 +1281,10 @@ fn the_file_finder_box_draws_as_the_ground_plate() {
 /// 11 px pitch of a 5 by 11 px cell, where the grid's 9 by 18 px cell stands
 /// them 18 px apart.
 ///
-/// The preview starts at cell (68, 14), pixel (612, 252), and its number column
-/// is its first five scaled cells, pixels 612 to 636, which hold no text. The
-/// pixel rows there that hold a digit form one band per line, and the first
-/// five bands start at pixel rows 254, 265, 276, 287, and 298.
+/// The preview starts at cell (68, 14), pixel (612, 252), and its digits take
+/// its first four scaled cells, pixels 612 to 631, which hold no rule and no
+/// text. The pixel rows there that hold a digit form one band per line, and the
+/// first five bands start at pixel rows 254, 265, 276, 287, and 298.
 #[test]
 fn the_finder_preview_draws_at_preview_scale() {
     let mut home = support::scratch_home();
@@ -1296,7 +1296,7 @@ fn the_finder_preview_draws_at_preview_scale() {
     );
 
     let base = BASE.into_iter().max().expect("a color has channels");
-    let lit = |y: u32| brightest(&shot, (612, y, 25, 1)) > base;
+    let lit = |y: u32| brightest(&shot, (612, y, 20, 1)) > base;
     let tops: Vec<u32> = (252..400)
         .filter(|&y| lit(y) && !lit(y - 1))
         .take(5)
@@ -1306,6 +1306,39 @@ fn the_finder_preview_draws_at_preview_scale() {
         panic!(
             "the preview's number bands start at pixel rows {tops:?}, not 11 px apart from row \
              254; the frame is {}",
+            frame.display(),
+        );
+    }
+}
+
+/// The file finder's preview rules its number column off from its text as the
+/// PreviewZoom board does, with a 1 px rule in the divider color 24 px right of
+/// the preview's left edge.
+///
+/// The preview starts at pixel (612, 252), so the rule stands in pixel column
+/// 636. On the first line's row, pixel row 257, that pixel reads the divider,
+/// and the pixel on each side of it reads the base surface.
+#[test]
+fn the_finder_preview_rules_off_its_numbers() {
+    let mut home = support::scratch_home();
+    let shot = settled_frame(
+        home.path(),
+        "basic-diff",
+        "unstaged.txt",
+        "<Space>p<Settle>",
+    );
+
+    let row = [635, 636, 637].map(|x| pixel(&shot, x, 257));
+    if row != [BASE, DIVIDER, BASE] {
+        let frame = keep_frame(&shot, &mut home, "preview_rule");
+        panic!(
+            "pixels 635 to 637 of pixel row 257 read {}, {}, and {}, where the divider {} \
+             stands between two pixels of the base {}; the frame is {}",
+            hex(row[0]),
+            hex(row[1]),
+            hex(row[2]),
+            hex(DIVIDER),
+            hex(BASE),
             frame.display(),
         );
     }

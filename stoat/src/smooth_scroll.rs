@@ -42,7 +42,7 @@ use crate::{
         file_finder::paint_finder_rows,
         help::{paint_help_detail_rows, paint_help_list_rows},
         paint::dim_rgb,
-        picker::paint_preview_numbers,
+        picker::{paint_preview_numbers, NumberColumn},
         review::{diff_gutter_digits, paint_diff_rows, BufferNumbering, DiffDials},
         serialize_buffer,
         symbol_finder::paint_symbol_rows,
@@ -517,9 +517,9 @@ pub(crate) struct PageGutter {
     icons: bool,
     /// The diagnostics a plain editor page paints over its text.
     diagnostics: PageDiagnostics,
-    /// Whether the page numbers its lines as a picker preview does, in place
-    /// of the line-number gutter and the severity column.
-    number_column: bool,
+    /// The column the page numbers its lines in as a picker preview does, in
+    /// place of the line-number gutter and the severity column.
+    number_column: NumberColumn,
     /// The Blame Column of a blamed pane's page, or `None` for a page that
     /// shows no column.
     blame: Option<PageBlame>,
@@ -575,7 +575,7 @@ impl PageGutter {
             batch: false,
             icons: false,
             diagnostics: PageDiagnostics::default(),
-            number_column: false,
+            number_column: NumberColumn::None,
             blame: None,
             cursor_line: None,
         }
@@ -617,17 +617,17 @@ impl PageGutter {
         }
     }
 
-    /// This gutter numbering a picker preview's lines when `on`.
+    /// This gutter numbering a picker preview's lines in `column`.
     ///
-    /// Off until set. With it on, the page paints the column the live preview
-    /// paints and no line-number gutter or severity column, whatever
-    /// [`Self::new`] took.
+    /// [`NumberColumn::None`] until set. With any other column the page paints
+    /// the column the live preview paints and no line-number gutter or
+    /// severity column, whatever [`Self::new`] took.
     ///
     /// See also:
     /// - [`paint_preview_numbers`] for the column's numbers.
-    pub(crate) fn number_column(self, on: bool) -> PageGutter {
+    pub(crate) fn number_column(self, column: NumberColumn) -> PageGutter {
         PageGutter {
-            number_column: on,
+            number_column: column,
             ..self
         }
     }
@@ -723,9 +723,18 @@ fn paint_page_gutter(
     dim: f32,
     live: Option<&crate::diff_map::LiveHunks<'_>>,
 ) -> (u16, Vec<u8>) {
-    if gutter.number_column {
+    if gutter.number_column != NumberColumn::None {
         let mut scene = gutter.scene();
-        let width = paint_preview_numbers(snapshot, top_row, area, gutter.theme(), buf, &mut scene);
+        let scaled = gutter.number_column == NumberColumn::Scaled;
+        let width = paint_preview_numbers(
+            snapshot,
+            top_row,
+            area,
+            gutter.theme(),
+            buf,
+            &mut scene,
+            scaled,
+        );
         return (width, scene.buffer().clone());
     }
 
@@ -3538,14 +3547,15 @@ mod tests {
     /// The three lines fill the first page and end on the first row of the page
     /// at row 2, and the page past the end draws no number. Under a dead scene
     /// the digits go into the column's cells, right-aligned before one blank
-    /// cell.
+    /// cell. A page at Preview Scale draws the numbers and the rule that a live
+    /// paint of the scaled column draws.
     #[test]
     fn a_preview_page_numbers_its_lines_as_the_live_preview_does() {
         use super::{page_buffer, render_page_from_snapshot, serialize_buffer, Rect};
         use crate::{
             render::{
                 editor::{ResolvedChrome, RowSeverity},
-                picker::render_picker_preview,
+                picker::{paint_preview_numbers, render_picker_preview, NumberColumn},
             },
             test_harness::TestHarness,
             theme::scope,
@@ -3573,7 +3583,7 @@ mod tests {
             None,
             None,
         )
-        .number_column(true);
+        .number_column(NumberColumn::Grid);
         let area = Rect::new(0, 0, 16, 2);
         let mut finder = h.stoat.file_finder.take().expect("the finder is open");
         let editor_id = finder.active_core_ref().preview.editor;
@@ -3640,6 +3650,49 @@ mod tests {
             first_row.trim_end(),
             "   1 alpha",
             "the first row under a dead scene"
+        );
+
+        let snapshot = ws
+            .editors
+            .get_mut(editor_id)
+            .expect("the preview's editor")
+            .display_map
+            .snapshot();
+        let scaled = render_page_from_snapshot(
+            &snapshot,
+            0,
+            fallback,
+            area.width,
+            area.height,
+            &gutter.clone().number_column(NumberColumn::Scaled),
+            false,
+            0.0,
+            DiffDials::shipped(),
+            page_endpoints(&snapshot, 0, area.height),
+            None,
+            None,
+        );
+        let mut live = ApcScene::new();
+        let mut cells = page_buffer(area, &theme);
+        paint_preview_numbers(&snapshot, 0, area, &theme, &mut cells, &mut live, true);
+        let live = live.buffer().clone();
+        let marks = |bytes: &[u8]| {
+            decode_stream(bytes)
+                .into_iter()
+                .filter(|command| matches!(command, Command::TextRun(_) | Command::Bar(_)))
+                .collect::<Vec<_>>()
+        };
+        let page_marks = marks(&scaled);
+        assert_eq!(
+            (
+                page_marks
+                    .iter()
+                    .filter(|command| matches!(command, Command::Bar(_)))
+                    .count(),
+                page_marks
+            ),
+            (1, marks(&live)),
+            "a scaled page rules its numbers off where the live scaled column does",
         );
     }
 }

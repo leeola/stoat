@@ -6364,6 +6364,31 @@ fn a_selection_step_refills_the_scaled_preview_in_the_same_emit() {
     );
 }
 
+/// Page 0 of the scaled preview's pool rules off its number column. One bar
+/// goes down the whole page, 13 sixteenths into the cell past the four digit
+/// cells.
+#[test]
+fn a_scaled_preview_page_rules_off_its_numbers() {
+    use stoatty_protocol::command::Command;
+
+    let (mut h, mut rx) = scaled_preview_harness(stoatty_protocol::POOL_SCALE_PROTOCOL);
+    let preview = finder_layout(&h)
+        .preview
+        .expect("the test terminal is wide enough for a preview");
+    let (rows, _) = pool::scaled_grid(preview.width, preview.height, [9, 18], 154);
+    let bytes = emit_raw(&mut h, &mut rx);
+
+    let pool = crate::smooth_scroll::non_pane_pool::MODAL_PREVIEW;
+    let bars: Vec<_> = command::decode_stream(fill_payload(&bytes, pool, 0))
+        .into_iter()
+        .filter_map(|command| match command {
+            Command::Bar(bar) => Some((bar.x, bar.y, bar.width, bar.height)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(bars, vec![(77, 0, 3, rows * 16)]);
+}
+
 /// The preview's half-page keys step by the scaled rows its render laid out,
 /// which a scaled preview holds more of than its rect has grid rows.
 #[test]

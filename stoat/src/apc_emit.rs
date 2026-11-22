@@ -2085,7 +2085,8 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
             let diff_view = editor.diff_view;
             // The live paint records the preview's number column as its gutter,
             // and a preview takes that column whatever the panes' setting is.
-            let number_column = editor.gutter_width > 0;
+            let number_column =
+                crate::render::picker::NumberColumn::new(editor.gutter_width > 0, scaled.is_some());
             let gutter = crate::smooth_scroll::PageGutter::new(
                 false,
                 severity,

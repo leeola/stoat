@@ -1405,8 +1405,9 @@ pub(crate) fn render_picker_preview(
     };
 
     let grid = preview_grid(area, scene.scaled_cell()).filter(|_| scene.live());
+    let column = NumberColumn::new(numbers, grid.is_some());
     let Some((rows, cols)) = grid else {
-        paint_preview_editor(editor, numbers, area, theme, chrome, buf, scene);
+        paint_preview_editor(editor, column, area, theme, chrome, buf, scene);
         return area.height;
     };
 
@@ -1418,7 +1419,7 @@ pub(crate) fn render_picker_preview(
     dead.set_live(false);
     paint_preview_editor(
         editor,
-        numbers,
+        column,
         laid_out,
         theme,
         chrome,
@@ -1443,10 +1444,10 @@ fn preview_grid(area: Rect, cell: Option<[u16; 2]>) -> Option<(u16, u16)> {
 }
 
 /// Paint `editor` into `area` of `buf` as a preview, and record in its
-/// `gutter_width` the number column `numbers` leads its lines with.
+/// `gutter_width` the number column `column` leads its lines with.
 fn paint_preview_editor(
     editor: &mut EditorState,
-    numbers: bool,
+    column: NumberColumn,
     area: Rect,
     theme: &Theme,
     chrome: &ResolvedChrome,
@@ -1457,13 +1458,18 @@ fn paint_preview_editor(
 
     // The paint writes `gutter_width` on most paths, but a scroll past the end
     // returns before the write, so the column is set here on both branches.
-    if !numbers {
-        render_editor(editor, area, fallback, theme, Some(chrome), buf, false);
-        editor.gutter_width = 0;
-        return;
-    }
+    let scaled = match column {
+        NumberColumn::None => {
+            render_editor(editor, area, fallback, theme, Some(chrome), buf, false);
+            editor.gutter_width = 0;
+            return;
+        },
+        NumberColumn::Grid => false,
+        NumberColumn::Scaled => true,
+    };
 
-    let columns = preview_number_columns(editor.display_map.buffer_snapshot().line_count());
+    let line_count = editor.display_map.buffer_snapshot().line_count();
+    let columns = preview_number_columns(line_count, scaled);
     let text = Rect {
         x: area.x + columns,
         width: area.width.saturating_sub(columns),
@@ -1471,8 +1477,42 @@ fn paint_preview_editor(
     };
     render_editor(editor, text, fallback, theme, Some(chrome), buf, false);
     let snapshot = editor.display_map.snapshot();
-    paint_preview_numbers(&snapshot, editor.scroll_row, area, theme, buf, scene);
+    paint_preview_numbers(
+        &snapshot,
+        editor.scroll_row,
+        area,
+        theme,
+        buf,
+        scene,
+        scaled,
+    );
     editor.gutter_width = columns;
+}
+
+/// The column a picker preview numbers its lines in, which a page that glides
+/// the preview paints in place of a pane's line-number gutter.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum NumberColumn {
+    /// No column. A preview of a directory listing, a terminal screen, or a
+    /// picker's own text numbers nothing, and a pane's page keeps its
+    /// line-number gutter.
+    None,
+    /// The column at the grid's cell.
+    Grid,
+    /// The column at Preview Scale, ruled off from the text.
+    Scaled,
+}
+
+impl NumberColumn {
+    /// The column of a preview that numbers its lines when `numbers` is set,
+    /// at Preview Scale when `scaled` is.
+    pub(crate) fn new(numbers: bool, scaled: bool) -> NumberColumn {
+        match (numbers, scaled) {
+            (false, _) => NumberColumn::None,
+            (true, false) => NumberColumn::Grid,
+            (true, true) => NumberColumn::Scaled,
+        }
+    }
 }
 
 /// Sixteenths between a preview number's right edge and its line's text, the
@@ -1485,12 +1525,30 @@ const PREVIEW_NUMBER_GAP: u16 = 24;
 /// a short file's text starts where a long file's does.
 const PREVIEW_NUMBER_DIGITS: u16 = 4;
 
+/// Cells a scaled preview's number column takes past its digits, which hold
+/// its rule and the gap from the rule to the text.
+const PREVIEW_RULE_CELLS: u16 = 2;
+
+/// Sixteenths of a cell from a scaled preview's digits to its rule, the
+/// board's 4 px at the 5 px Preview Scale cell.
+const PREVIEW_RULE_INSET: u16 = 13;
+
+/// Sixteenths of a cell that a scaled preview's rule is wide, the board's 1 px
+/// at the 5 px Preview Scale cell.
+const PREVIEW_RULE_WIDTH: u16 = 3;
+
 /// Cells the number column of a preview over `line_count` lines takes.
 ///
 /// The column holds the widest number, at least [`PREVIEW_NUMBER_DIGITS`]
-/// wide, and one cell before the text.
-pub(crate) fn preview_number_columns(line_count: u32) -> u16 {
-    editor::gutter_digits(line_count).max(PREVIEW_NUMBER_DIGITS) + 1
+/// wide, and one cell before the text. A `scaled` column, at Preview Scale,
+/// takes [`PREVIEW_RULE_CELLS`] there for its rule, the board's 4 px, 1 px,
+/// and 4 px.
+pub(crate) fn preview_number_columns(line_count: u32, scaled: bool) -> u16 {
+    let before_text = match scaled {
+        true => PREVIEW_RULE_CELLS,
+        false => 1,
+    };
+    editor::gutter_digits(line_count).max(PREVIEW_NUMBER_DIGITS) + before_text
 }
 
 /// Paint the numbers of a preview's lines from display row `top_row` into the
@@ -1505,6 +1563,9 @@ pub(crate) fn preview_number_columns(line_count: u32) -> u16 {
 /// before the text. Any other paint writes the digits in that style into the
 /// column's cells, right-aligned before one blank cell.
 ///
+/// A `scaled` column, at Preview Scale, ends its numbers where its digits end
+/// and rules them off from the text, as [`paint_preview_rule`] draws it.
+///
 /// The live preview and the pages that glide it both paint their numbers
 /// through this, so the numbers hold still across the handoff between the two.
 pub(crate) fn paint_preview_numbers(
@@ -1514,8 +1575,9 @@ pub(crate) fn paint_preview_numbers(
     theme: &Theme,
     buf: &mut Buffer,
     scene: &mut stoat_widgets::ApcScene,
+    scaled: bool,
 ) -> u16 {
-    let width = preview_number_columns(snapshot.buffer_line_count());
+    let width = preview_number_columns(snapshot.buffer_line_count(), scaled);
     let visible = snapshot
         .line_count()
         .saturating_sub(top_row)
@@ -1525,8 +1587,13 @@ pub(crate) fn paint_preview_numbers(
     let muted = theme.get(scope::UI_TEXT_MUTED);
     let color = style_rgb(muted.fg).filter(|_| scene.live());
     let scale = theme.type_scale(TypeRole::Caption);
-    let run_end = width * 16 - PREVIEW_NUMBER_GAP;
-    let digits_end = area.x + width - 1;
+    let (run_end, digits_end) = match scaled {
+        true => (
+            (width - PREVIEW_RULE_CELLS) * 16,
+            area.x + width - PREVIEW_RULE_CELLS,
+        ),
+        false => (width * 16 - PREVIEW_NUMBER_GAP, area.x + width - 1),
+    };
 
     let mut runs = TextRunBatch::default();
     let mut number = String::new();
@@ -1563,8 +1630,46 @@ pub(crate) fn paint_preview_numbers(
         y += height;
     }
     runs.flush(scene);
+    if scaled {
+        paint_preview_rule(width, area, theme, buf, scene);
+    }
 
     width
+}
+
+/// Rule off a scaled preview's number column, `columns` cells wide, down all
+/// of `area`'s rows, as the PreviewZoom board does.
+///
+/// The rule is a bar [`PREVIEW_RULE_WIDTH`] sixteenths wide and
+/// [`PREVIEW_RULE_INSET`] sixteenths past the digits. It takes `ui.divider`,
+/// or `ui.border.inactive` where that sets no color, as the finder header's
+/// rule does. A dead scene draws no rule, and neither does a theme with
+/// neither color.
+fn paint_preview_rule(
+    columns: u16,
+    area: Rect,
+    theme: &Theme,
+    buf: &mut Buffer,
+    scene: &mut stoat_widgets::ApcScene,
+) {
+    let rule = theme
+        .try_get(scope::UI_DIVIDER)
+        .filter(|style| style.fg.is_some())
+        .unwrap_or_else(|| theme.get(scope::UI_BORDER_INACTIVE));
+    let Some(color) = style_rgb(rule.fg).filter(|_| scene.live()) else {
+        return;
+    };
+
+    Bar {
+        x: ((columns - PREVIEW_RULE_CELLS) * 16 + PREVIEW_RULE_INSET) as i16,
+        y: 0,
+        width: PREVIEW_RULE_WIDTH,
+        height: area.height.saturating_mul(16),
+        color,
+        radius: 0,
+        corners: 0,
+    }
+    .render(area, buf, scene);
 }
 
 /// Share of a modal's body its list pane takes, before the user drags the
@@ -1626,6 +1731,10 @@ mod tests {
         count: Some((14, 890)),
         chips: &[("S-Tab \u{00B7} git only", true)],
     };
+
+    /// A bar a paint draws, as `(x, y, width, height, color)` in sixteenths of
+    /// a cell from the paint's area.
+    type BarDraw = (i16, i16, u16, u16, [u8; 3]);
 
     /// The text of a finder-like header painted `width` columns wide, and the
     /// rect it leaves the query.
@@ -2957,5 +3066,71 @@ mod tests {
         let blanked = (area.top()..area.bottom())
             .all(|y| (area.left()..area.right()).all(|x| buf[(x, y)] == blank));
         (rows, viewport, preview.scaled, blanked)
+    }
+
+    /// At Preview Scale a 10-line file's column takes its four digit cells and
+    /// two more. Each number's run ends at the digits' edge, 64 sixteenths, and
+    /// one bar rules the column off 13 sixteenths into the fifth cell, 3
+    /// sixteenths wide, down the four rows, in the divider color.
+    #[test]
+    fn a_scaled_preview_rules_off_its_numbers() {
+        let (width, ends, bars, divider) = numbered_preview(true);
+
+        assert_eq!(
+            (width, ends, bars),
+            (6, vec![64; 4], vec![(77, 0, 3, 64, divider)]),
+        );
+    }
+
+    /// At the grid's cell the column keeps its one cell before the text, its
+    /// numbers end 24 sixteenths short of the text, and nothing rules it off.
+    #[test]
+    fn a_grid_preview_keeps_its_column_and_draws_no_rule() {
+        let (width, ends, bars, _) = numbered_preview(false);
+
+        assert_eq!((width, ends, bars), (5, vec![56; 4], vec![]));
+    }
+
+    /// Number the first four rows of a finder's preview of a 10-line file under
+    /// a live scene, `scaled` or at the grid's cell. Answers the column's width,
+    /// the right edge of each number's run in sixteenths, each bar the paint
+    /// draws, and the theme's divider color.
+    fn numbered_preview(scaled: bool) -> (u16, Vec<i16>, Vec<BarDraw>, [u8; 3]) {
+        let mut h = crate::test_harness::TestHarness::with_size(120, 40);
+        let root = PathBuf::from("/numbered-preview");
+        let text: String = (1..=10).map(|n| format!("line {n}\n")).collect();
+        h.fake_fs().insert_file(root.join("a.txt"), text.as_bytes());
+        h.stoat.active_workspace_mut().git_root = root;
+        h.type_keys("space p");
+        h.settle();
+
+        let theme = h.stoat.theme.clone();
+        let finder = h.stoat.file_finder.take().expect("the finder is open");
+        let snapshot = h
+            .stoat
+            .active_workspace_mut()
+            .editors
+            .get_mut(finder.active_core_ref().preview.editor)
+            .expect("the preview's editor")
+            .display_map
+            .snapshot();
+        let area = Rect::new(0, 0, 40, 4);
+        let mut buf = Buffer::empty(area);
+        let mut scene = stoat_widgets::ApcScene::new();
+        let width = paint_preview_numbers(&snapshot, 0, area, &theme, &mut buf, &mut scene, scaled);
+
+        let (mut ends, mut bars) = (Vec::new(), Vec::new());
+        for command in decode_stream(scene.bytes()) {
+            match command {
+                Command::TextRun(run) => {
+                    let advance = text_run::advance_sixteenths(run.text.len(), run.scale);
+                    ends.push(run.col + advance as i16);
+                },
+                Command::Bar(bar) => bars.push((bar.x, bar.y, bar.width, bar.height, bar.color)),
+                _ => {},
+            }
+        }
+        let divider = style_rgb(theme.get(scope::UI_DIVIDER).fg).expect("the theme sets a divider");
+        (width, ends, bars, divider)
     }
 }
