@@ -1798,6 +1798,13 @@ pub(crate) struct Preview {
     /// The area is less than the preview's rect when a doc pane above the
     /// source takes the rect's top rows.
     pub(crate) scaled: Option<ScaledPreview>,
+    /// The 0-based line the picker's selection lands on, which the pane
+    /// marks, or `None` for a source the selection names as a whole.
+    ///
+    /// [`Preview::sync_at_line`] sets it. [`Preview::sync`] and
+    /// [`Preview::clear`] drop it, so a pane never marks a line that the
+    /// selection after it does not name.
+    pub(crate) target_line: Option<u32>,
 }
 
 /// Where a preview lays its editor out at Preview Scale.
@@ -1824,6 +1831,7 @@ impl Preview {
             texts: PreviewTextCache::default(),
             scratch: Buffer::empty(Rect::ZERO),
             scaled: None,
+            target_line: None,
         }
     }
 
@@ -1844,6 +1852,7 @@ impl Preview {
         language_registry: &LanguageRegistry,
         source: PreviewSource,
     ) {
+        self.target_line = None;
         if self.rendered_for.as_ref() == Some(&source) {
             return;
         }
@@ -1932,6 +1941,7 @@ impl Preview {
 
     /// Blank the preview when nothing is selected. No-op when already empty.
     pub(crate) fn clear(&mut self, ws: &mut Workspace) {
+        self.target_line = None;
         if self.rendered_for.is_some() {
             replace_preview_text(ws, self.editor, self.buffer, "");
             ws.reset_preview_syntax(self.buffer);
@@ -1947,7 +1957,8 @@ impl Preview {
     pub(crate) const ROWS_FALLBACK: usize = 24;
 
     /// Load `source` and scroll it so 0-based `line` sits a third of the way
-    /// down a pane `rows` tall.
+    /// down a pane `rows` tall, and record `line` as the pane's
+    /// [`Preview::target_line`].
     ///
     /// For a picker whose selection names a line rather than a whole file. The
     /// third leaves the lines above the match in view as context while keeping
@@ -1963,6 +1974,7 @@ impl Preview {
         rows: usize,
     ) {
         self.sync(ws, fs_host, language_registry, source);
+        self.target_line = Some(line);
         if let Some(editor) = ws.editors.get_mut(self.editor) {
             let scroll_row = line.saturating_sub((rows / 3) as u32);
             editor.scroll_row = scroll_row;
@@ -1993,6 +2005,7 @@ impl Preview {
             texts: PreviewTextCache::default(),
             scratch: Buffer::empty(Rect::ZERO),
             scaled: None,
+            target_line: None,
         }
     }
 }
@@ -2724,6 +2737,34 @@ mod tests {
             [language_after("/repo/a.rs"), language_after("/repo/b.txt")],
             [Some("rust"), None],
         );
+    }
+
+    /// A sync to a line records the line as the pane's target. A plain sync of
+    /// the same source drops it, and so does a clear, so the pane marks no line
+    /// that the selection after it does not name.
+    #[test]
+    fn sync_at_line_records_its_line_and_sync_forgets_it() {
+        let mut h = crate::Stoat::test();
+        let executor = h.stoat.executor.clone();
+        let language_registry = h.stoat.language_registry.clone();
+        let fs = crate::host::FakeFs::new();
+        fs.insert_files([("/repo/a.txt", "one\ntwo\nthree\nfour\n")]);
+
+        let ws = h.stoat.active_workspace_mut();
+        let mut preview = Preview::new(ws, executor);
+        let source = || PreviewSource::File(p("/repo/a.txt"));
+        let mut targets = Vec::new();
+
+        preview.sync_at_line(ws, &fs, &language_registry, source(), 2, 24);
+        targets.push(preview.target_line);
+        preview.sync(ws, &fs, &language_registry, source());
+        targets.push(preview.target_line);
+        preview.sync_at_line(ws, &fs, &language_registry, source(), 3, 24);
+        targets.push(preview.target_line);
+        preview.clear(ws);
+        targets.push(preview.target_line);
+
+        assert_eq!(targets, [Some(2), None, Some(3), None]);
     }
 
     /// A picker composes markdown with no file behind it, so the language

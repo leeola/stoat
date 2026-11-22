@@ -6389,6 +6389,52 @@ fn a_scaled_preview_page_rules_off_its_numbers() {
     assert_eq!(bars, vec![(77, 0, 3, rows * 16)]);
 }
 
+/// A step between two matches in one file refills the scaled preview's page,
+/// and the page marks the new match's row.
+///
+/// Both matches sit near the file's top, so the step leaves the preview's
+/// scroll at row 0, and only the mark's line tells the two pages apart. The
+/// mark's bar is the one 6 sixteenths wide.
+#[test]
+fn a_step_between_matches_in_one_file_moves_the_preview_mark() {
+    use stoat_action::OpenCodeSearch;
+    use stoatty_protocol::command::Command;
+
+    let mut h = crate::test_harness::TestHarness::with_size(160, 40);
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+    h.stoat.set_apc_tx(tx);
+    h.stoat.stoatty = true;
+    h.stoat.stoatty_protocol = stoatty_protocol::POOL_SCALE_PROTOCOL;
+    h.stoat.cell_pixels = Some((9, 18));
+    let root = PathBuf::from("/marked-step");
+    h.fake_fs()
+        .insert_file(root.join("a.txt"), b"one\nneedle two\nthree\nneedle four\n");
+    h.stoat.active_workspace_mut().git_root = root;
+    action_handlers::dispatch(&mut h.stoat, &OpenCodeSearch);
+    h.type_text("needle");
+    h.settle();
+    h.advance_clock(debounce::CODE_SEARCH_DEBOUNCE);
+    h.stoat.render();
+    let first = emit_raw(&mut h, &mut rx);
+
+    h.type_keys("down");
+    h.settle();
+    h.stoat.render();
+    let second = emit_raw(&mut h, &mut rx);
+
+    let pool = crate::smooth_scroll::non_pane_pool::MODAL_PREVIEW;
+    let marks = |bytes: &[u8]| {
+        command::decode_stream(fill_payload(bytes, pool, 0))
+            .into_iter()
+            .filter_map(|command| match command {
+                Command::Bar(bar) if bar.width == 6 => Some(bar.y),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+    };
+    assert_eq!((marks(&first), marks(&second)), (vec![16], vec![48]));
+}
+
 /// The preview's half-page keys step by the scaled rows its render laid out,
 /// which a scaled preview holds more of than its rect has grid rows.
 #[test]

@@ -32,6 +32,7 @@ use std::{
     ops::Range,
     path::{Path, PathBuf},
 };
+use stoat_text::Point;
 use stoat_widgets::{
     bar::Bar,
     panel::Panel,
@@ -1380,7 +1381,8 @@ pub(crate) fn name_start(label: &str) -> usize {
 /// A file's or a buffer's text leads each line with its number, in a column
 /// of [`preview_number_columns`] cells at the pane's left. The editor's
 /// `gutter_width` records the column, so the pool that glides the pane pages
-/// the same numbers.
+/// the same numbers. Such a pane marks its [`Preview::target_line`] as
+/// [`paint_target_row`] draws it.
 ///
 /// A live scene with a scaled cell lays the editor out at Preview Scale, in
 /// the grid [`preview_grid`] gives, and records it in [`Preview::scaled`]. The
@@ -1400,6 +1402,7 @@ pub(crate) fn render_picker_preview(
         return area.height;
     }
     let numbers = preview.numbers_lines();
+    let target_line = preview.target_line;
     let Some(editor) = ws.editors.get_mut(preview.editor) else {
         return area.height;
     };
@@ -1407,7 +1410,7 @@ pub(crate) fn render_picker_preview(
     let grid = preview_grid(area, scene.scaled_cell()).filter(|_| scene.live());
     let column = NumberColumn::new(numbers, grid.is_some());
     let Some((rows, cols)) = grid else {
-        paint_preview_editor(editor, column, area, theme, chrome, buf, scene);
+        paint_preview_editor(editor, column, target_line, area, theme, chrome, buf, scene);
         return area.height;
     };
 
@@ -1420,6 +1423,7 @@ pub(crate) fn render_picker_preview(
     paint_preview_editor(
         editor,
         column,
+        target_line,
         laid_out,
         theme,
         chrome,
@@ -1445,9 +1449,14 @@ fn preview_grid(area: Rect, cell: Option<[u16; 2]>) -> Option<(u16, u16)> {
 
 /// Paint `editor` into `area` of `buf` as a preview, and record in its
 /// `gutter_width` the number column `column` leads its lines with.
+///
+/// A preview with a number column marks the row of 0-based `target_line` as
+/// [`paint_target_row`] draws it.
+#[allow(clippy::too_many_arguments)]
 fn paint_preview_editor(
     editor: &mut EditorState,
     column: NumberColumn,
+    target_line: Option<u32>,
     area: Rect,
     theme: &Theme,
     chrome: &ResolvedChrome,
@@ -1477,14 +1486,26 @@ fn paint_preview_editor(
     };
     render_editor(editor, text, fallback, theme, Some(chrome), buf, false);
     let snapshot = editor.display_map.snapshot();
+    let top_row = editor.scroll_row;
     paint_preview_numbers(
         &snapshot,
-        editor.scroll_row,
+        top_row,
         area,
         theme,
         buf,
         scene,
         scaled,
+        target_line,
+    );
+    paint_target_row(
+        &snapshot,
+        top_row,
+        area,
+        target_line,
+        scaled,
+        theme,
+        buf,
+        scene,
     );
     editor.gutter_width = columns;
 }
@@ -1537,6 +1558,14 @@ const PREVIEW_RULE_INSET: u16 = 13;
 /// at the 5 px Preview Scale cell.
 const PREVIEW_RULE_WIDTH: u16 = 3;
 
+/// Sixteenths of a cell that the accent bar on a scaled preview's target row
+/// is wide, the board's 2 px at the 5 px Preview Scale cell.
+const TARGET_BAR_SCALED: u16 = 6;
+
+/// Sixteenths of a cell that the accent bar on a grid preview's target row is
+/// wide, the board's 2 px at the 9 px grid cell.
+const TARGET_BAR_GRID: u16 = 4;
+
 /// Cells the number column of a preview over `line_count` lines takes.
 ///
 /// The column holds the widest number, at least [`PREVIEW_NUMBER_DIGITS`]
@@ -1566,8 +1595,12 @@ pub(crate) fn preview_number_columns(line_count: u32, scaled: bool) -> u16 {
 /// A `scaled` column, at Preview Scale, ends its numbers where its digits end
 /// and rules them off from the text, as [`paint_preview_rule`] draws it.
 ///
+/// The number on the row that [`paint_target_row`] marks for 0-based
+/// `target_line` takes `ui.text` in place of `ui.text.muted`.
+///
 /// The live preview and the pages that glide it both paint their numbers
 /// through this, so the numbers hold still across the handoff between the two.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn paint_preview_numbers(
     snapshot: &DisplaySnapshot,
     top_row: u32,
@@ -1576,6 +1609,7 @@ pub(crate) fn paint_preview_numbers(
     buf: &mut Buffer,
     scene: &mut stoat_widgets::ApcScene,
     scaled: bool,
+    target_line: Option<u32>,
 ) -> u16 {
     let width = preview_number_columns(snapshot.buffer_line_count(), scaled);
     let visible = snapshot
@@ -1586,6 +1620,9 @@ pub(crate) fn paint_preview_numbers(
 
     let muted = theme.get(scope::UI_TEXT_MUTED);
     let color = style_rgb(muted.fg).filter(|_| scene.live());
+    let target = theme.get(scope::UI_TEXT);
+    let target_color = style_rgb(target.fg);
+    let target_y = target_line.and_then(|line| target_row(snapshot, top_row, area, line));
     let scale = theme.type_scale(TypeRole::Caption);
     let (run_end, digits_end) = match scaled {
         true => (
@@ -1601,6 +1638,7 @@ pub(crate) fn paint_preview_numbers(
     for (line, height) in lines {
         number.clear();
         write!(number, "{line}").expect("writing to a String is infallible");
+        let on_target = target_y == Some(y);
 
         match color {
             Some(color) => {
@@ -1611,7 +1649,7 @@ pub(crate) fn paint_preview_numbers(
                         col: run_end.saturating_sub(advance) as i16,
                         row: 0,
                         scale,
-                        color,
+                        color: target_color.filter(|_| on_target).unwrap_or(color),
                         bg: None,
                         text: &number,
                         bold: false,
@@ -1624,7 +1662,11 @@ pub(crate) fn paint_preview_numbers(
             None => {
                 let x = digits_end.saturating_sub(number.len() as u16);
                 let end_x = digits_end.min(area.x + area.width);
-                write_str_clipped(buf, x, y, &number, muted, end_x);
+                let style = match on_target {
+                    true => target,
+                    false => muted,
+                };
+                write_str_clipped(buf, x, y, &number, style, end_x);
             },
         }
         y += height;
@@ -1672,6 +1714,76 @@ fn paint_preview_rule(
     .render(area, buf, scene);
 }
 
+/// Mark the row that 0-based `target_line` starts on, in a preview painted from
+/// display row `top_row` into `area`, as the row a picker's result lands on.
+///
+/// The row's cells across `area` take the background of
+/// [`Theme::list_selected`]. A live scene also draws an accent bar in
+/// `ui.border.focused` at the row's left edge. The bar is the PreviewZoom
+/// board's 2 px, [`TARGET_BAR_SCALED`] sixteenths of a `scaled` cell or
+/// [`TARGET_BAR_GRID`] of a grid cell. A `None` line, or one that starts on no
+/// row of `area`, draws nothing.
+///
+/// The live preview and the pages that glide it both mark the row through
+/// this, after their text, so the mark holds still across the handoff.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn paint_target_row(
+    snapshot: &DisplaySnapshot,
+    top_row: u32,
+    area: Rect,
+    target_line: Option<u32>,
+    scaled: bool,
+    theme: &Theme,
+    buf: &mut Buffer,
+    scene: &mut stoat_widgets::ApcScene,
+) {
+    let Some(y) = target_line.and_then(|line| target_row(snapshot, top_row, area, line)) else {
+        return;
+    };
+
+    if let Some(bg) = theme.list_selected(scope::UI_SELECTION).bg {
+        for x in area.left()..area.right() {
+            buf[(x, y)].set_bg(bg);
+        }
+    }
+
+    let accent = theme.get(scope::UI_BORDER_FOCUSED);
+    let Some(color) = style_rgb(accent.fg).filter(|_| scene.live()) else {
+        return;
+    };
+    let width = match scaled {
+        true => TARGET_BAR_SCALED,
+        false => TARGET_BAR_GRID,
+    };
+    Bar {
+        x: 0,
+        y: 0,
+        width,
+        height: 16,
+        color,
+        radius: 0,
+        corners: 0,
+    }
+    .render(Rect::new(area.x, y, 1, 1), buf, scene);
+}
+
+/// The row of `area` that 0-based buffer `line` starts on, in a preview painted
+/// from display row `top_row`, or `None` when that row is not in `area`.
+///
+/// A line past the buffer's end starts on no row, and neither does a wrapped
+/// line that the pane opens partway down.
+fn target_row(snapshot: &DisplaySnapshot, top_row: u32, area: Rect, line: u32) -> Option<u16> {
+    if line >= snapshot.buffer_line_count() {
+        return None;
+    }
+
+    let offset = snapshot
+        .buffer_to_display(Point::new(line, 0))
+        .row
+        .checked_sub(top_row)?;
+    (offset < u32::from(area.height)).then(|| area.y + offset as u16)
+}
+
 /// Share of a modal's body its list pane takes, before the user drags the
 /// separator to a share of their own.
 ///
@@ -1716,9 +1828,13 @@ pub(crate) fn split_list_preview(
 #[cfg(test)]
 mod tests {
     use super::{test_support::match_theme, *};
-    use crate::{input_view::SubmitTarget, picker::INDEXED_ROWS, test_fixture};
+    use crate::{
+        input_view::SubmitTarget,
+        picker::{PreviewSource, INDEXED_ROWS},
+        test_fixture,
+    };
     use ratatui::{buffer::Cell, style::Color};
-    use std::path::PathBuf;
+    use std::{path::PathBuf, sync::Arc};
     use stoatty_protocol::command::{
         decode_stream, encode_bar, BarCommand, BorderStyle, Command, Edge, PanelCommand,
         PanelShadow, TextRunCommand,
@@ -1735,6 +1851,11 @@ mod tests {
     /// A bar a paint draws, as `(x, y, width, height, color)` in sixteenths of
     /// a cell from the paint's area.
     type BarDraw = (i16, i16, u16, u16, [u8; 3]);
+
+    /// What a preview's paint marks: the rows whose every cell takes the list's
+    /// selected background, each bar it draws, and the color of each number's
+    /// run, top down.
+    type PreviewMarks = (Vec<u16>, Vec<BarDraw>, Vec<[u8; 3]>);
 
     /// The text of a finder-like header painted `width` columns wide, and the
     /// rect it leaves the query.
@@ -3117,7 +3238,9 @@ mod tests {
         let area = Rect::new(0, 0, 40, 4);
         let mut buf = Buffer::empty(area);
         let mut scene = stoat_widgets::ApcScene::new();
-        let width = paint_preview_numbers(&snapshot, 0, area, &theme, &mut buf, &mut scene, scaled);
+        let width = paint_preview_numbers(
+            &snapshot, 0, area, &theme, &mut buf, &mut scene, scaled, None,
+        );
 
         let (mut ends, mut bars) = (Vec::new(), Vec::new());
         for command in decode_stream(scene.bytes()) {
@@ -3132,5 +3255,76 @@ mod tests {
         }
         let divider = style_rgb(theme.get(scope::UI_DIVIDER).fg).expect("the theme sets a divider");
         (width, ends, bars, divider)
+    }
+
+    /// A grid preview marks the row its target line starts on. Line 3, synced a
+    /// third of the way down six rows, scrolls the pane one line, so the mark
+    /// sits on row 2. That row's cells take the list's selected background, an
+    /// accent bar 4 sixteenths wide stands at its left edge, and its number
+    /// draws in the text color. A preview with no target marks nothing.
+    #[test]
+    fn a_preview_marks_its_target_row() {
+        let (theme, marked) = marked_preview(Some(3));
+        let (_, unmarked) = marked_preview(None);
+        let rgb = |name: &str| style_rgb(theme.get(name).fg).expect("an RGB color");
+        let (text, muted) = (rgb(scope::UI_TEXT), rgb(scope::UI_TEXT_MUTED));
+        let accent = rgb(scope::UI_BORDER_FOCUSED);
+
+        assert_eq!(
+            marked,
+            (
+                vec![2],
+                vec![(0, 32, 4, 16, accent)],
+                vec![muted, muted, text, muted, muted, muted],
+            ),
+        );
+        assert_eq!(unmarked, (vec![], vec![], vec![muted; 6]));
+    }
+
+    /// Paint a finder's live grid preview of a 10-line file into six rows,
+    /// synced to 0-based `target` when it is set. Answers the theme and what
+    /// the paint marks.
+    fn marked_preview(target: Option<u32>) -> (Arc<Theme>, PreviewMarks) {
+        let mut h = crate::test_harness::TestHarness::with_size(120, 40);
+        let root = PathBuf::from("/marked-preview");
+        let file = root.join("a.txt");
+        let text: String = (1..=10).map(|n| format!("line {n}\n")).collect();
+        h.fake_fs().insert_file(file.clone(), text.as_bytes());
+        h.stoat.active_workspace_mut().git_root = root;
+        h.type_keys("space p");
+        h.settle();
+
+        let theme = h.stoat.theme.clone();
+        let chrome = ResolvedChrome::resolve(&theme);
+        let area = Rect::new(0, 0, 40, 6);
+        let mut finder = h.stoat.file_finder.take().expect("the finder is open");
+        let preview = &mut finder.active_core().preview;
+        let index = h.stoat.active_workspace;
+        let ws = &mut h.stoat.workspaces[index];
+        if let Some(line) = target {
+            let (fs, languages) = (&*h.stoat.fs_host, &h.stoat.language_registry);
+            let source = PreviewSource::File(file);
+            preview.sync_at_line(ws, fs, languages, source, line, usize::from(area.height));
+        }
+        let mut buf = Buffer::empty(area);
+        let mut scene = stoat_widgets::ApcScene::new();
+        render_picker_preview(preview, area, &theme, &chrome, ws, &mut buf, &mut scene);
+
+        let selected = theme.list_selected(scope::UI_SELECTION).bg;
+        let marked_rows = (area.top()..area.bottom())
+            .filter(|&y| (area.left()..area.right()).all(|x| Some(buf[(x, y)].bg) == selected))
+            .collect();
+        let (mut bars, mut runs) = (Vec::new(), Vec::new());
+        for command in decode_stream(scene.bytes()) {
+            match command {
+                Command::Bar(bar) => bars.push((bar.x, bar.y, bar.width, bar.height, bar.color)),
+                Command::TextRun(run) => runs.push((run.row, run.color)),
+                _ => {},
+            }
+        }
+        // A run batch groups its runs by color, so the stream is not top down.
+        runs.sort_unstable();
+        let colors = runs.into_iter().map(|(_, color)| color).collect();
+        (theme, (marked_rows, bars, colors))
     }
 }

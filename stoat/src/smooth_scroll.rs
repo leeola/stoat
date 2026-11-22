@@ -42,7 +42,7 @@ use crate::{
         file_finder::paint_finder_rows,
         help::{paint_help_detail_rows, paint_help_list_rows},
         paint::dim_rgb,
-        picker::{paint_preview_numbers, NumberColumn},
+        picker::{paint_preview_numbers, paint_target_row, NumberColumn},
         review::{diff_gutter_digits, paint_diff_rows, BufferNumbering, DiffDials},
         serialize_buffer,
         symbol_finder::paint_symbol_rows,
@@ -274,6 +274,9 @@ pub(crate) fn render_page_decorations(
 /// stay blank, and the [`serialize_buffer`] bytes fully repaint the slot
 /// regardless of its prior contents.
 ///
+/// A page with a picker preview's number column then marks the row of the line
+/// that [`PageGutter::target_line`] sets, as the live preview marks it.
+///
 /// Inside stoatty the rich gutter's sub-cell components ride as APC frames
 /// appended after the serialized cells, so the terminal captures them onto the
 /// page slot. Every other terminal gets degraded cell numbers in the buffer.
@@ -413,6 +416,24 @@ pub(crate) fn render_page_from_snapshot(
         }
     }
 
+    // A text style that sets a background writes it into the cells the text
+    // takes, so the mark comes after the text.
+    let marked = gutter.number_column != NumberColumn::None && gutter.target_line.is_some();
+    let mark = marked.then(|| {
+        let mut scene = gutter.scene();
+        paint_target_row(
+            snapshot,
+            top_row,
+            area,
+            gutter.target_line,
+            gutter.number_column == NumberColumn::Scaled,
+            gutter.theme(),
+            &mut buf,
+            &mut scene,
+        );
+        scene.buffer().clone()
+    });
+
     dim_page(&mut buf, area, gutter.theme(), dim);
     if let Some(spotlight) = spotlight {
         dim_page(&mut buf, area, gutter.theme(), spotlight.dim);
@@ -422,6 +443,9 @@ pub(crate) fn render_page_from_snapshot(
     let mut bytes = serialize_buffer(&buf);
     bytes.extend(undercurl::build(&buf, undercurls.spans()));
     bytes.extend_from_slice(&apc);
+    if let Some(mark) = mark {
+        bytes.extend_from_slice(&mark);
+    }
     bytes
 }
 
@@ -520,6 +544,9 @@ pub(crate) struct PageGutter {
     /// The column the page numbers its lines in as a picker preview does, in
     /// place of the line-number gutter and the severity column.
     number_column: NumberColumn,
+    /// The 0-based line a picker preview's result lands on, which a page with
+    /// a number column marks, or `None` for no mark.
+    target_line: Option<u32>,
     /// The Blame Column of a blamed pane's page, or `None` for a page that
     /// shows no column.
     blame: Option<PageBlame>,
@@ -576,6 +603,7 @@ impl PageGutter {
             icons: false,
             diagnostics: PageDiagnostics::default(),
             number_column: NumberColumn::None,
+            target_line: None,
             blame: None,
             cursor_line: None,
         }
@@ -628,6 +656,21 @@ impl PageGutter {
     pub(crate) fn number_column(self, column: NumberColumn) -> PageGutter {
         PageGutter {
             number_column: column,
+            ..self
+        }
+    }
+
+    /// This gutter marking 0-based `line` as the row a picker preview's result
+    /// lands on.
+    ///
+    /// `None` until set. A page with a [`Self::number_column`] marks the row
+    /// as the live preview marks it, and any other page ignores the line.
+    ///
+    /// See also:
+    /// - [`paint_target_row`] for the mark.
+    pub(crate) fn target_line(self, line: Option<u32>) -> PageGutter {
+        PageGutter {
+            target_line: line,
             ..self
         }
     }
@@ -734,6 +777,7 @@ fn paint_page_gutter(
             buf,
             &mut scene,
             scaled,
+            gutter.target_line,
         );
         return (width, scene.buffer().clone());
     }
@@ -3674,7 +3718,9 @@ mod tests {
         );
         let mut live = ApcScene::new();
         let mut cells = page_buffer(area, &theme);
-        paint_preview_numbers(&snapshot, 0, area, &theme, &mut cells, &mut live, true);
+        paint_preview_numbers(
+            &snapshot, 0, area, &theme, &mut cells, &mut live, true, None,
+        );
         let live = live.buffer().clone();
         let marks = |bytes: &[u8]| {
             decode_stream(bytes)
@@ -3693,6 +3739,115 @@ mod tests {
             ),
             (1, marks(&live)),
             "a scaled page rules its numbers off where the live scaled column does",
+        );
+    }
+
+    /// A page of a preview synced to a line marks that line's row as the live
+    /// preview marks it, cell for cell and component for component.
+    ///
+    /// Line 1 of three, synced a third of the way down a 3-row pane, stays on
+    /// row 1. A page at Preview Scale draws the mark's bar 6 sixteenths wide,
+    /// the board's 2 px at the scaled cell, after the column's rule. A line
+    /// past the file's end marks no row.
+    #[test]
+    fn a_page_marks_the_target_row_as_the_live_paint_does() {
+        use super::{page_buffer, render_page_from_snapshot, serialize_buffer, Rect};
+        use crate::{
+            picker::PreviewSource,
+            render::{
+                editor::{ResolvedChrome, RowSeverity},
+                picker::{render_picker_preview, NumberColumn},
+            },
+            test_harness::TestHarness,
+            theme::scope,
+        };
+        use std::path::PathBuf;
+        use stoat_widgets::ApcScene;
+        use stoatty_protocol::command::decode_stream;
+
+        let mut h = TestHarness::with_size(120, 30);
+        let root = PathBuf::from("/preview-mark");
+        let file = root.join("a.txt");
+        h.fake_fs().insert_file(file.clone(), b"alpha\nbeta\ngamma");
+        h.stoat.active_workspace_mut().git_root = root;
+        h.type_keys("space p");
+        h.settle();
+
+        let theme = h.stoat.theme.clone();
+        let fallback = theme.get(scope::UI_TEXT);
+        let chrome = ResolvedChrome::resolve(&theme);
+        let area = Rect::new(0, 0, 16, 3);
+        let mut finder = h.stoat.file_finder.take().expect("the finder is open");
+        let preview = &mut finder.active_core().preview;
+        let index = h.stoat.active_workspace;
+        let ws = &mut h.stoat.workspaces[index];
+        let (fs, languages) = (&*h.stoat.fs_host, &h.stoat.language_registry);
+        let source = PreviewSource::File(file);
+        preview.sync_at_line(ws, fs, languages, source, 1, usize::from(area.height));
+
+        let mut live = page_buffer(area, &theme);
+        let mut scene = ApcScene::new();
+        render_picker_preview(preview, area, &theme, &chrome, ws, &mut live, &mut scene);
+        let mut expected = serialize_buffer(&live);
+        expected.extend_from_slice(scene.buffer());
+
+        let snapshot = ws
+            .editors
+            .get_mut(preview.editor)
+            .expect("the preview's editor")
+            .display_map
+            .snapshot();
+        let gutter = PageGutter::new(
+            false,
+            Arc::new(RowSeverity::default()),
+            theme.clone(),
+            None,
+            None,
+        );
+        let page = |column: NumberColumn, target_line: Option<u32>| {
+            render_page_from_snapshot(
+                &snapshot,
+                0,
+                fallback,
+                area.width,
+                area.height,
+                &gutter
+                    .clone()
+                    .number_column(column)
+                    .target_line(target_line),
+                false,
+                0.0,
+                DiffDials::shipped(),
+                page_endpoints(&snapshot, 0, area.height),
+                None,
+                None,
+            )
+        };
+        let bars = |bytes: &[u8]| {
+            decode_stream(bytes)
+                .into_iter()
+                .filter_map(|command| match command {
+                    Command::Bar(bar) => Some((bar.x, bar.y, bar.width, bar.height)),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+        };
+
+        let grid = page(NumberColumn::Grid, preview.target_line);
+        assert_eq!(
+            (bars(&grid), grid == expected),
+            (vec![(0, 16, 4, 16)], true),
+            "the grid page marks row 1 as the live preview does",
+        );
+        assert_eq!(
+            bars(&page(NumberColumn::Scaled, preview.target_line)),
+            vec![(77, 0, 3, 48), (0, 16, 6, 16)],
+            "a scaled page rules its numbers off, then marks row 1 with the wider bar",
+        );
+        assert_eq!(
+            bars(&page(NumberColumn::Grid, Some(9))),
+            vec![],
+            "a line past the file's end marks no row",
         );
     }
 }

@@ -827,7 +827,12 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
         .then(|| {
             let rect = crate::mouse::boxed_modal_surfaces(stoat)?.preview?;
             let preview = crate::mouse::modal_preview_pane(stoat)?;
-            (rect.width > 0 && rect.height > 0).then_some((rect, preview.editor, preview.scaled))
+            (rect.width > 0 && rect.height > 0).then_some((
+                rect,
+                preview.editor,
+                preview.scaled,
+                preview.target_line,
+            ))
         })
         .flatten();
 
@@ -2020,7 +2025,7 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
     // render laid out, which leaves out a doc pane above the source. The pool
     // is the pane at rest and the live cells under it are blank, so it holds
     // nothing, and the pages a composite reads render in this emit.
-    if let Some((rect, editor_id, scaled)) = modal_preview {
+    if let Some((rect, editor_id, scaled, target_line)) = modal_preview {
         let (area, kind) = match scaled {
             Some(scaled) => (
                 scaled.area,
@@ -2076,6 +2081,14 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
                 None,
                 None,
             );
+            // A step between two matches in one file moves the mark and leaves
+            // the text as it was, so the mark's line versions the pages too.
+            let content_version = {
+                let mut hasher = DefaultHasher::new();
+                content_version.hash(&mut hasher);
+                target_line.hash(&mut hasher);
+                hasher.finish()
+            };
             let snapshot = editor.display_map.snapshot();
             let severity = editor
                 .gutter_severity_cache
@@ -2096,7 +2109,8 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
             )
             .batched(batch_decorations)
             .page_icons(page_icons)
-            .number_column(number_column);
+            .number_column(number_column)
+            .target_line(target_line);
 
             let mut rendered = Vec::new();
             let mut entered = pool::emit_into(

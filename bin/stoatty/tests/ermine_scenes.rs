@@ -1344,6 +1344,42 @@ fn the_finder_preview_rules_off_its_numbers() {
     }
 }
 
+/// The code search preview marks the line its selected match lands on, as the
+/// PreviewZoom board draws that row.
+///
+/// The preview starts at pixel (585, 90), cell (65, 5), and lays its lines on
+/// the 11 px Preview Scale row. The query matches the sixth line of
+/// staged.txt, so the mark takes pixel rows 145 to 155. On pixel row 150 a
+/// 2 px accent bar fills pixel columns 585 and 586, and the tab wash follows
+/// it out to the text. Pixel row 144, above the mark, reads the base surface.
+#[test]
+fn the_code_search_preview_marks_the_match_line() {
+    let mut home = support::scratch_home();
+    let shot = settled_frame(
+        home.path(),
+        "basic-diff",
+        "unstaged.txt",
+        "<Space>/foxtrot<Settle>",
+    );
+
+    let mark = [585, 586, 587, 700].map(|x| pixel(&shot, x, 150));
+    let above = [585, 587, 700].map(|x| pixel(&shot, x, 144));
+    if mark != [ACCENT, ACCENT, TAB_WASH, TAB_WASH] || above != [BASE; 3] {
+        let frame = keep_frame(&shot, &mut home, "preview_mark");
+        panic!(
+            "pixel row 150 reads {} at columns 585, 586, 587, and 700, where the mark is \
+             two pixels of the accent {} and then the tab wash {}; pixel row 144 reads {} at \
+             columns 585, 587, and 700, where the base is {}; the frame is {}",
+            mark.map(hex).join(", "),
+            hex(ACCENT),
+            hex(TAB_WASH),
+            above.map(hex).join(", "),
+            hex(BASE),
+            frame.display(),
+        );
+    }
+}
+
 /// The Pane Picker draws its badge as the board draws it.
 ///
 /// The badge is an accent box of 9 by 6 cells with 10 px corners and a 2 px
