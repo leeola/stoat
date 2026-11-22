@@ -1179,6 +1179,10 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
         .chrome
         .as_ref()
         .and_then(|(_, chrome)| Some((chrome.blame.clone()?, chrome.gutter_bg)));
+    let cursor_line_fill = stoat
+        .chrome
+        .as_ref()
+        .and_then(|(_, chrome)| crate::render::paint::style_rgb(chrome.cursor_line));
     let now_epoch = crate::commit_picker::now_epoch(&stoat.executor);
     // A diff page draws its gutter as runs only when the page gutter colors and
     // the diff colors both resolve. The dim only fades the colors, so one answer
@@ -1300,11 +1304,20 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
             && base_rich.is_some()
             && editor.conflict_view.is_none()
             && (!editor.diff_view || diff_rich);
+        // A plain editor's page fills its cursor line with a bar among its
+        // decorations, so a cursor step redecorates the window and refills no
+        // page. A page whose gutter does not split takes no decorations-only
+        // fill, so a fill there costs a whole refill per step, and it draws
+        // none.
+        let fill_line = cursor_line
+            .filter(|_| split_gutter && !editor.diff_view && editor.conflict_view.is_none())
+            .zip(cursor_line_fill);
         let decoration_version = match split_gutter {
             true => {
                 let mut hasher = DefaultHasher::new();
                 current_line.hash(&mut hasher);
                 blame_selected.hash(&mut hasher);
+                fill_line.hash(&mut hasher);
                 hasher.finish()
             },
             false => 0,
@@ -1418,7 +1431,8 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
                     now_epoch,
                     selected: blame_selected,
                 }),
-        );
+        )
+        .cursor_line(fill_line);
         let diff_view = editor.diff_view;
         let mut rendered = Vec::new();
         let Refill {

@@ -42,7 +42,7 @@ use std::{
     sync::Arc,
 };
 use stoat_config::{LineNumbers, WrapMode};
-use stoat_text::{cursor_offset, Anchor, Bias, Rope};
+use stoat_text::{cursor_offset, Anchor, Bias, Point, Rope};
 use stoat_widgets::{
     bar::Bar,
     gutter::{Diagnostic, GitMark, Gutter, GutterLine},
@@ -145,6 +145,7 @@ pub(crate) fn render_editor(
         false,
         None,
         None,
+        false,
     );
 }
 
@@ -172,6 +173,11 @@ pub(crate) fn render_editor(
 /// With `blame`, a plain editor shows the Blame Column left of its gutter,
 /// when the pane has the room that [`blame::blame_cells`] asks for. The column
 /// moves the text right, and `gutter_width` counts it.
+///
+/// With `cursor_line`, a focused plain editor fills every row of its cursor
+/// line in `ui.cursorline`, from the pane's left edge to the text's right edge.
+/// A cell with a background of its own keeps it, such as a selection wash, a
+/// search match, or an inlay hint.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn render_editor_with_overlay(
     editor: &mut EditorState,
@@ -199,6 +205,7 @@ pub(crate) fn render_editor_with_overlay(
     decorations_only: bool,
     step_origin: Option<i64>,
     blame: Option<BlamePaint<'_>>,
+    cursor_line: bool,
 ) {
     editor.viewport_rows = Some(inner.height as u32);
     editor.cursor_screen_cell = None;
@@ -368,6 +375,10 @@ pub(crate) fn render_editor_with_overlay(
             );
             rope.offset_to_point(cursor).row + 1
         });
+    // The 1-based line the paint fills, which the gutter's runs composite over.
+    let fill_line = (cursor_line && is_focused && chrome.cursor_line.is_some())
+        .then(|| editor_cursor_position(editor).map(|(line, _)| line))
+        .flatten();
 
     let severity_version = diagnostic_info.map_or(0, |(path, set)| set.version_for(path));
 
@@ -406,6 +417,7 @@ pub(crate) fn render_editor_with_overlay(
             theme,
             chrome,
             current_line,
+            fill_line,
             severity_version,
             &mut editor.gutter_geometry_cache,
             scene.as_deref_mut(),
@@ -555,6 +567,27 @@ pub(crate) fn render_editor_with_overlay(
         scene.is_some() && delegates_cursor,
     );
 
+    if let (Some(line), Some(fill)) = (fill_line, chrome.cursor_line) {
+        let rows = line_display_rows(&snapshot, line);
+        let shown = rows.start.max(editor.scroll_row)..rows.end.min(end_row);
+        let top = |row: u32| content_area.y + (row - editor.scroll_row) as u16;
+        let body = fallback_style
+            .bg
+            .or_else(|| {
+                theme
+                    .try_get(crate::theme::scope::UI_BACKGROUND)
+                    .and_then(|style| style.bg)
+            })
+            .unwrap_or(Color::Reset);
+        fill_cursor_line(
+            buf,
+            content_area.x..right,
+            top(shown.start)..top(shown.end.max(shown.start)),
+            body,
+            fill,
+        );
+    }
+
     if let Some((path, set)) = diagnostic_info {
         let rope = buffer_snapshot.rope();
         build_diagnostic_span_cache(editor, set, path, buffer_snapshot);
@@ -659,6 +692,28 @@ pub(crate) fn render_editor_with_overlay(
             fallback_style,
             buf,
         );
+    }
+}
+
+/// Fills each cell of `rows` across `columns` that shows the editor surface
+/// `body` with `fill`.
+///
+/// A cell that carries a background of its own keeps it, so a selection wash,
+/// a search match, an inlay hint, and the Blame Column stay as they paint.
+fn fill_cursor_line(
+    buf: &mut Buffer,
+    columns: Range<u16>,
+    rows: Range<u16>,
+    body: Color,
+    fill: Color,
+) {
+    for y in rows {
+        for x in columns.clone() {
+            let cell = &mut buf[(x, y)];
+            if cell.bg == body {
+                cell.set_bg(fill);
+            }
+        }
     }
 }
 
@@ -1614,6 +1669,9 @@ pub(crate) struct ResolvedChrome {
     /// The Blame Column's colors. `None` when the theme holds no RGB surface,
     /// and then a blamed pane shows no column.
     pub(crate) blame: Option<BlameColors>,
+    /// The fill behind the focused plain editor's cursor line, or `None` when
+    /// the theme gives `ui.cursorline` no background and the line takes none.
+    pub(crate) cursor_line: Option<Color>,
 }
 
 impl ResolvedChrome {
@@ -1625,6 +1683,9 @@ impl ResolvedChrome {
             diff_marks: DiffMarkColors::resolve(theme),
             gutter_bg: gutter_background(theme, fallback_style),
             blame: BlameColors::resolve(theme),
+            cursor_line: theme
+                .try_get(crate::theme::scope::UI_CURSORLINE)
+                .and_then(|style| style.bg),
         }
     }
 }
@@ -1955,6 +2016,10 @@ pub(crate) fn gutter_diff_marks_from(
 ///
 /// `current_line` selects relative numbering per [`gutter_display_number`]. The
 /// diagnostic mark stays keyed to the absolute buffer line.
+///
+/// `cursor_fill` names the 1-based cursor line that the editor fills, with the
+/// fill's color. That line's runs composite over the fill, so their boxes match
+/// the row beneath them.
 pub(crate) fn gutter_component_lines(
     folded: &[(u32, u16)],
     row_severity: &RowSeverity,
@@ -1962,6 +2027,7 @@ pub(crate) fn gutter_component_lines(
     diff_colors: &DiffMarkColors,
     colors: &SeverityColors,
     current_line: Option<u32>,
+    cursor_fill: Option<(u32, [u8; 3])>,
 ) -> Vec<GutterLine> {
     folded
         .iter()
@@ -1979,6 +2045,9 @@ pub(crate) fn gutter_component_lines(
                 color: severity_color(sev, colors),
                 kind: gutter_icon(sev),
             }),
+            bg: cursor_fill
+                .filter(|&(line, _)| line == number)
+                .map(|(_, fill)| fill),
         })
         .collect()
 }
@@ -2063,17 +2132,20 @@ fn gutter_geometry_key(
 /// Hash the inputs the rich component lines are built from into a cache key.
 ///
 /// `geometry_key` is folded in because the lines are built from the geometry it
-/// guards, so a geometry rebuild has to rebuild them too. The two inputs of
-/// their own are the relative-numbering line and the colors they bake in, which
-/// is what makes a theme change and a cursor move both show up here.
+/// guards, so a geometry rebuild has to rebuild them too. The inputs of their
+/// own are the relative-numbering line, the filled cursor line, and the colors
+/// they bake in, which is what makes a theme change and a cursor move both show
+/// up here.
 fn gutter_lines_key(
     geometry_key: u64,
     current_line: Option<u32>,
+    cursor_fill: Option<(u32, [u8; 3])>,
     colors: (DiffMarkColors, &SeverityColors),
 ) -> u64 {
     let mut hasher = DefaultHasher::new();
     geometry_key.hash(&mut hasher);
     current_line.hash(&mut hasher);
+    cursor_fill.hash(&mut hasher);
     colors.hash(&mut hasher);
     hasher.finish()
 }
@@ -2105,6 +2177,9 @@ fn gutter_scene_key(
 /// one, or with a theme whose colors are not RGB, gets right-aligned cell
 /// numbers and a one-column severity mark styled from the theme, so the numbers
 /// still show.
+///
+/// `fill_line` is the 1-based cursor line whose rows the editor fills, whose
+/// rich runs then composite over the fill.
 #[allow(clippy::too_many_arguments)]
 fn draw_line_number_gutter(
     snapshot: &DisplaySnapshot,
@@ -2115,6 +2190,7 @@ fn draw_line_number_gutter(
     theme: &Theme,
     chrome: &ResolvedChrome,
     current_line: Option<u32>,
+    fill_line: Option<u32>,
     severity_version: u64,
     cache: &mut Option<GutterGeometryCache>,
     scene: Option<&mut ApcScene>,
@@ -2177,8 +2253,18 @@ fn draw_line_number_gutter(
 
     // Only the rich path paints from the lines, so the fallback never builds
     // them and its cache keeps the empty vec the geometry rebuild left.
-    if let Some((colors, ..)) = gutter_rgb {
-        let lines_key = gutter_lines_key(geometry_key, current_line, (diff_colors, colors));
+    if let Some((colors, .., bg, _)) = gutter_rgb {
+        // The pane's fade dims the filled cells toward the gutter background
+        // as `dimmed` dims the gutter's colors, so the runs' boxes fade alike.
+        let cursor_fill = fill_line
+            .zip(style_rgb(chrome.cursor_line))
+            .map(|(line, fill)| (line, dim_rgb(fill, bg, dim)));
+        let lines_key = gutter_lines_key(
+            geometry_key,
+            current_line,
+            cursor_fill,
+            (diff_colors, colors),
+        );
         if geometry.lines_key != Some(lines_key) {
             geometry.lines = gutter_component_lines(
                 &geometry.folded,
@@ -2187,6 +2273,7 @@ fn draw_line_number_gutter(
                 &diff_colors,
                 colors,
                 current_line,
+                cursor_fill,
             );
             geometry.lines_key = Some(lines_key);
         }
@@ -3218,6 +3305,19 @@ pub(crate) fn editor_cursor_position(editor: &EditorState) -> Option<(u32, u32)>
     Some((point.row + 1, point.column + 1))
 }
 
+/// The display rows that 1-based buffer line `line` shows on, from the row of
+/// its first character to the row of its last.
+///
+/// A folded line is the one row its fold shows on, and the block rows below a
+/// line are not its own.
+pub(crate) fn line_display_rows(snapshot: &DisplaySnapshot, line: u32) -> Range<u32> {
+    let row = line.saturating_sub(1);
+    let len = snapshot.buffer_snapshot().rope().line_len(row);
+    let first = snapshot.buffer_to_display(Point::new(row, 0)).row;
+    let last = snapshot.buffer_to_display(Point::new(row, len)).row;
+    first..last + 1
+}
+
 #[cfg(test)]
 mod tests {
     use super::RowSeverity;
@@ -3571,6 +3671,7 @@ mod tests {
             false,
             None,
             None,
+            false,
         );
 
         let italic: String = (0..area.width)
@@ -3651,6 +3752,7 @@ mod tests {
                 false,
                 None,
                 None,
+                false,
             );
             (0..area.width).map(|x| buf[(x, 1)].clone()).collect()
         }
@@ -3749,6 +3851,7 @@ mod tests {
                 false,
                 None,
                 None,
+                false,
             );
             buf
         }
@@ -4155,6 +4258,7 @@ mod tests {
             false,
             None,
             None,
+            false,
         );
         (0..area.width).map(|x| buf[(x, 0)].clone()).collect()
     }
@@ -4278,6 +4382,7 @@ mod tests {
             false,
             None,
             None,
+            false,
         );
 
         let washed: Vec<bool> = (0..4).map(|x| Some(buf[(x, 0)].bg) == sel_bg).collect();
@@ -4322,6 +4427,7 @@ mod tests {
             false,
             None,
             None,
+            false,
         );
 
         assert!(
@@ -4463,6 +4569,7 @@ mod tests {
             false,
             None,
             None,
+            false,
         );
         let snapshot = editor.display_map.snapshot();
         (
@@ -4643,6 +4750,7 @@ mod tests {
                 false,
                 None,
                 None,
+                false,
             );
         }
 
@@ -4681,6 +4789,178 @@ mod tests {
         assert_eq!(mark.fg, Color::Rgb(0x5b, 0x61, 0x6d));
     }
 
+    #[test]
+    fn a_focused_pane_fills_every_row_of_its_cursor_line() {
+        let (rows, text_x) = cursor_line_rows(&shipped_theme("ermine_night"), true);
+        assert_eq!(
+            rows,
+            [
+                "b".repeat(40),
+                format!("{}ssc{}", "f".repeat(text_x), "f".repeat(37 - text_x)),
+                "f".repeat(40),
+                "b".repeat(40),
+            ],
+            "both rows of the cursor line fill across the gutter, and its selection keeps the wash",
+        );
+    }
+
+    #[test]
+    fn an_unfocused_pane_fills_no_cursor_line() {
+        let (rows, _) = cursor_line_rows(&shipped_theme("ermine_night"), false);
+        assert_eq!(rows, vec!["b".repeat(40); 4]);
+    }
+
+    #[test]
+    fn a_theme_without_the_scope_fills_no_cursor_line() {
+        let (rows, text_x) = cursor_line_rows(&shipped_theme("default_dark"), true);
+        assert_eq!(
+            rows,
+            [
+                "b".repeat(40),
+                format!("{}ss{}", "b".repeat(text_x), "b".repeat(38 - text_x)),
+                "b".repeat(40),
+                "b".repeat(40),
+            ],
+            "no row fills, and the cursor reverses a base cell, so it reads as the base",
+        );
+    }
+
+    /// The rich gutter boxes the cursor line's number in the fill, so the digits
+    /// stand on the fill as the rest of the row does.
+    #[test]
+    fn the_cursor_line_number_composites_over_the_fill() {
+        let theme = shipped_theme("ermine_night");
+        let mut h = crate::test_harness::TestHarness::with_size(40, 8);
+        let path = h.write_file("lines.txt", "one\ntwo\nthree\n");
+        h.open_file(&path);
+        h.type_keys("j");
+
+        let chrome = crate::render::editor::ResolvedChrome::resolve(&theme);
+        let area = Rect::new(0, 0, 40, 4);
+        let mut buf = Buffer::filled(area, crate::render::surface_blank(&theme));
+        let mut scene = super::ApcScene::new();
+        let editor = action_handlers::focused_editor_mut(&mut h.stoat).expect("focused editor");
+        super::render_editor_with_overlay(
+            editor,
+            area,
+            theme.get(crate::theme::scope::UI_TEXT),
+            &theme,
+            &chrome,
+            &mut buf,
+            true,
+            false,
+            LineNumbers::Absolute,
+            false,
+            None,
+            None,
+            None,
+            Some(&mut scene),
+            true,
+            None,
+            0.0,
+            DiffDials::shipped(),
+            WrapMode::EditorWidth,
+            80,
+            0,
+            &[],
+            false,
+            None,
+            None,
+            true,
+        );
+
+        let mut boxes: Vec<_> = decode_stream(scene.buffer())
+            .into_iter()
+            .filter_map(|command| match command {
+                Command::TextRun(run) => Some((run.text, run.bg)),
+                _ => None,
+            })
+            .collect();
+        boxes.sort();
+        let (gutter, fill) = (chrome.gutter_bg, Some([0x1b, 0x1e, 0x24]));
+        assert_eq!(
+            boxes,
+            [
+                ("1".to_string(), gutter),
+                ("2".to_string(), fill),
+                ("3".to_string(), gutter),
+                ("4".to_string(), gutter),
+            ],
+            "only the cursor line's number takes the fill as its box",
+        );
+    }
+
+    /// The theme `name` of the shipped config.
+    fn shipped_theme(name: &str) -> crate::theme::Theme {
+        let (config, _) = stoat_config::parse(crate::app::DEFAULT_KEYMAP);
+        crate::theme::Theme::from_config(&config.expect("the shipped config parses"), name)
+            .expect("the shipped theme builds")
+    }
+
+    /// The kind of each cell's background over the four rows of a 40-cell pane
+    /// that shows "above", a cursor line that wraps onto a second row, and
+    /// "below", painted under `theme`, with the column the text starts at.
+    ///
+    /// The cursor line selects its first three cells. A cell reads `f` for the
+    /// cursor line fill, `b` for the base, `s` for the selection wash, `c` for
+    /// the cursor, and `?` for any other color.
+    fn cursor_line_rows(theme: &crate::theme::Theme, focused: bool) -> (Vec<String>, usize) {
+        let mut h = crate::test_harness::TestHarness::with_size(40, 8);
+        let text = format!("above\n{}\nbelow\n", "word ".repeat(10));
+        let path = h.write_file("line.txt", &text);
+        h.open_file(&path);
+        h.type_keys("j v l l");
+
+        let fallback = theme.get(crate::theme::scope::UI_TEXT);
+        let chrome = crate::render::editor::ResolvedChrome::resolve(theme);
+        let area = Rect::new(0, 0, 40, 4);
+        let base = crate::render::surface_blank(theme);
+        let mut buf = Buffer::filled(area, base.clone());
+        let editor = action_handlers::focused_editor_mut(&mut h.stoat).expect("focused editor");
+        super::render_editor_with_overlay(
+            editor,
+            area,
+            fallback,
+            theme,
+            &chrome,
+            &mut buf,
+            focused,
+            false,
+            LineNumbers::Absolute,
+            false,
+            None,
+            None,
+            None,
+            None,
+            true,
+            None,
+            0.0,
+            DiffDials::shipped(),
+            WrapMode::EditorWidth,
+            80,
+            0,
+            &[],
+            false,
+            None,
+            None,
+            true,
+        );
+
+        let wash = theme.get(crate::theme::scope::UI_SELECTION_EDITOR).bg;
+        let cursor = theme.cursor_style().bg;
+        let kind = |color: Color| match color {
+            Color::Rgb(0x1b, 0x1e, 0x24) => 'f',
+            color if color == base.bg => 'b',
+            color if Some(color) == wash => 's',
+            color if Some(color) == cursor => 'c',
+            _ => '?',
+        };
+        let rows = (0..area.height)
+            .map(|y| (0..area.width).map(|x| kind(buf[(x, y)].bg)).collect())
+            .collect();
+        (rows, editor.text_rect.expect("the text painted").x as usize)
+    }
+
     /// Paint the focused editor's line-number gutter and return its
     /// geometry-cache key.
     fn paint_gutter_key(stoat: &mut Stoat, rows: u16, wrap: WrapMode) -> u64 {
@@ -4716,6 +4996,7 @@ mod tests {
             false,
             None,
             None,
+            false,
         );
         editor
             .gutter_geometry_cache
@@ -4882,6 +5163,7 @@ mod tests {
             false,
             None,
             None,
+            false,
         );
         editor
             .gutter_geometry_cache
@@ -4967,6 +5249,7 @@ mod tests {
             false,
             None,
             None,
+            false,
         );
         String::from_utf8_lossy(scene.bytes()).into_owned()
     }
@@ -5125,6 +5408,7 @@ mod tests {
             false,
             None,
             None,
+            false,
         );
         buf
     }
@@ -5170,6 +5454,7 @@ mod tests {
             false,
             None,
             None,
+            false,
         );
         let rect = editor.minimap_rect;
         let cols = rect.map_or(width..width, |rect| rect.x..rect.x + rect.width);
@@ -5347,6 +5632,7 @@ mod tests {
             false,
             None,
             None,
+            false,
         );
         let glyph_x = editor.gutter_width - 2;
         (0..rows)
@@ -5625,6 +5911,7 @@ mod tests {
             &distinct_mark_colors(),
             &no_severity(),
             None,
+            None,
         );
 
         let modified = Some(([Some([40, 50, 60]), Some([160, 170, 180])], false));
@@ -5829,6 +6116,7 @@ mod tests {
             false,
             None,
             None,
+            false,
         );
 
         // Row 1 is the line the trailing newline opens, and the gutter takes
@@ -5894,6 +6182,7 @@ mod tests {
             false,
             None,
             None,
+            false,
         );
 
         assert!(
@@ -6335,13 +6624,16 @@ mod tests {
         assert_eq!(first, second, "nothing moved, so the paint repeats exactly");
     }
 
-    /// A harness over the open file `abc\nxyz\n`, with its second line washed by
-    /// a reload flash, and the diff view on when `diff_view` says so.
+    /// A harness over the open file `abc\nxyz\nend\n`, with its second line
+    /// washed by a reload flash, and the diff view on when `diff_view` says so.
+    ///
+    /// The cursor rests on the third line, so the cursor line's fill reaches
+    /// neither of the first two.
     fn flashing_file(diff_view: bool) -> crate::test_harness::TestHarness {
         let mut h = Stoat::test();
         let root = PathBuf::from("/reload-flash");
         let path = root.join("a.txt");
-        h.fake_fs().insert_file(&path, b"abc\nxyz\n");
+        h.fake_fs().insert_file(&path, b"abc\nxyz\nend\n");
         h.stoat.active_workspace_mut().git_root = root;
         dispatch(&mut h.stoat, &OpenFile { path });
         h.settle();
@@ -6349,6 +6641,7 @@ mod tests {
             action_handlers::review::enter_diff_view(&mut h.stoat);
             h.settle();
         }
+        h.stoat.collapse_focused_cursor_to("abc\nxyz\n".len());
 
         let buffer = h.stoat.focused_editor_ids().expect("editor").1;
         flash_over(&mut h, buffer, (4, 7));

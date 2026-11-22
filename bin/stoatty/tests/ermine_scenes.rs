@@ -63,6 +63,7 @@ const SUCCESS: [u8; 3] = [0x8f, 0xd1, 0x8a];
 const WASH: [u8; 3] = [0x2a, 0x3c, 0x5a];
 const TAB_WASH: [u8; 3] = [0x24, 0x35, 0x52];
 const CURSOR_SECONDARY: [u8; 3] = [0x8a, 0x90, 0x9c];
+const CURSOR_LINE: [u8; 3] = [0x1b, 0x1e, 0x24];
 const READONLY_FRAME: [u8; 3] = [0x8a, 0x76, 0x50];
 const TINT_OURS: [u8; 3] = [0x18, 0x24, 0x1b];
 const TINT_THEIRS: [u8; 3] = [0x23, 0x1d, 0x2e];
@@ -861,7 +862,8 @@ fn side_by_side_panes_stand_eight_pixels_apart() {
 /// panes, where the row holds no text. Down that column, pixel row 443 reads
 /// the base surface, the band's 24 pixel rows read the ground, and 468 reads
 /// the base surface again. The upper pane's name draws in the status row's
-/// first cells.
+/// first cells. `j` moves the focused lower pane's cursor off its first row,
+/// so that row carries no cursor line fill.
 #[test]
 fn stacked_panes_meet_at_the_upper_pane_s_status_row() {
     let mut home = support::scratch_home();
@@ -869,7 +871,7 @@ fn stacked_panes_meet_at_the_upper_pane_s_status_row() {
         home.path(),
         "basic-diff",
         "unstaged.txt",
-        "<Space>av<Settle>",
+        "<Space>avj<Settle>",
     );
     let column: Vec<[u8; 3]> = (443..469).map(|y| pixel(&shot, 720, y)).collect();
     let name = brightest(&shot, cell_rect(1, 25, 12, 1));
@@ -900,7 +902,9 @@ fn stacked_panes_meet_at_the_upper_pane_s_status_row() {
 /// base surface too.
 ///
 /// The lower arc lies inside the lower pane's first cell, where only the
-/// ground the island paints over its corner clears the cell.
+/// ground the island paints over its corner clears the cell. `j` moves the
+/// focused lower pane's cursor off its first row, so that row carries no
+/// cursor line fill.
 #[test]
 fn an_island_rounds_its_corners_against_the_ground() {
     let mut home = support::scratch_home();
@@ -908,7 +912,7 @@ fn an_island_rounds_its_corners_against_the_ground() {
         home.path(),
         "basic-diff",
         "unstaged.txt",
-        "<Space>av<Settle>",
+        "<Space>avj<Settle>",
     );
     let corners = [32, 468].map(|top| {
         [(8, top), (9, top), (16, top - 1), (16, top), (8, top + 8)]
@@ -1838,6 +1842,26 @@ fn the_selection_scene_paints_the_wash_and_both_cursor_kinds() {
     );
 }
 
+/// The focused editor fills its cursor line across the gutter and the text,
+/// and the row above keeps the base surface.
+///
+/// The tab bar's band takes rows 0 and 1, so `jj` puts the cursor on row 4,
+/// `3 three`, a row with no git lane. Cell 1 holds the lanes, and cell 80 lies
+/// past the line's end.
+#[test]
+fn the_cursor_line_carries_its_fill() {
+    let mut home = support::scratch_home();
+    let shot = settled_frame(home.path(), "basic-diff", "unstaged.txt", "jj");
+
+    for (rect, want, what) in [
+        (cell_rect(80, 4, 1, 1), CURSOR_LINE, "cursor_line_text"),
+        (cell_rect(1, 4, 1, 1), CURSOR_LINE, "cursor_line_gutter"),
+        (cell_rect(80, 3, 1, 1), BASE, "row_above_the_cursor_line"),
+    ] {
+        expect_region(&shot, &mut home, rect, want, what);
+    }
+}
+
 /// A gzip file's pane rings its text in the dashed read-only hairline.
 ///
 /// The tab bar's band takes rows 0 and 1, so the first content row is row 2,
@@ -1845,11 +1869,12 @@ fn the_selection_scene_paints_the_wash_and_both_cursor_kinds() {
 /// five carry the dashed stroke, so the stroke's color leads a run of them,
 /// and the run two pixels down lies under the stroke on the editor surface.
 /// Cells 20 to 60 lie clear of the ring's rounded corners and of the label at
-/// its right end.
+/// its right end. `j` moves the cursor to row 3, so row 2 carries no cursor
+/// line fill.
 #[test]
 fn a_read_only_pane_draws_the_dashed_ring_over_its_text() {
     let mut home = support::scratch_home();
-    let shot = settled_frame(home.path(), "read-only", "CHANGELOG.md.gz", "");
+    let shot = settled_frame(home.path(), "read-only", "CHANGELOG.md.gz", "j");
     let (x, y, width, _) = cell_rect(20, 2, 40, 1);
 
     expect_region(

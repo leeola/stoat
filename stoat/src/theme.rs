@@ -822,6 +822,10 @@ pub mod scope {
     pub const UI_CURSOR: &str = "ui.cursor";
     pub const UI_CURSOR_INPUT: &str = "ui.cursor.input";
 
+    /// The fill behind every row of the focused plain editor's cursor line,
+    /// across its gutter. A theme that gives it no background fills no line.
+    pub const UI_CURSORLINE: &str = "ui.cursorline";
+
     pub const UI_SELECTION: &str = "ui.selection";
     pub const UI_SELECTION_EDITOR: &str = "ui.selection.editor";
     pub const UI_SELECTION_REVERSED: &str = "ui.selection.reversed";

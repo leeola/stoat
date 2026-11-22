@@ -115,6 +115,12 @@ pub struct GutterLine {
     /// The diagnostic drawn in the icon cell of the line's first row, or
     /// `None` for a line without one.
     pub diagnostic: Option<Diagnostic>,
+    /// The background the line's runs composite over in place of
+    /// [`Gutter::bg`], or `None` for the gutter's own.
+    ///
+    /// A run's box must match the row beneath it, so a row the editor fills,
+    /// such as the cursor line, hands its fill here.
+    pub bg: Option<[u8; 3]>,
 }
 
 /// A line's diagnostic: the mark color and the icon kind.
@@ -235,6 +241,7 @@ impl Gutter<'_> {
             let col = cells::signed_sixteenths(
                 number_right.saturating_sub(self.number_advance(text.len())),
             );
+            let bg = line.bg.unwrap_or(self.bg);
             numbers.push(
                 area,
                 TextRun {
@@ -242,7 +249,7 @@ impl Gutter<'_> {
                     row,
                     scale: self.number_scale,
                     color: self.number_fg,
-                    bg: Some(self.bg),
+                    bg: Some(bg),
                     text,
                     bold: false,
                     italic: false,
@@ -252,7 +259,7 @@ impl Gutter<'_> {
             );
 
             if let Some(diag) = line.diagnostic {
-                self.draw_diagnostic(diag, area, (top, row), &mut numbers, scene);
+                self.draw_diagnostic(diag, bg, area, (top, row), &mut numbers, scene);
             }
             if let Some(git) = line.git {
                 for (slot, color) in (0u16..).zip(git.slots) {
@@ -308,6 +315,7 @@ impl Gutter<'_> {
     fn draw_diagnostic(
         &self,
         diag: Diagnostic,
+        bg: [u8; 3],
         area: Rect,
         (top, row): (u16, i16),
         numbers: &mut TextRunBatch,
@@ -339,7 +347,7 @@ impl Gutter<'_> {
                         row,
                         scale: self.number_scale,
                         color: diag.color,
-                        bg: Some(self.bg),
+                        bg: Some(bg),
                         text: HINT_DOT,
                         bold: false,
                         italic: false,
@@ -387,7 +395,7 @@ impl Gutter<'_> {
                 max,
                 Style::default()
                     .fg(cells::rgb(self.number_fg))
-                    .bg(cells::rgb(self.bg)),
+                    .bg(cells::rgb(line.bg.unwrap_or(self.bg))),
             );
 
             top += line.height;
@@ -412,7 +420,7 @@ fn format_u32(buf: &mut [u8; 10], mut n: u32) -> &str {
 
 #[cfg(test)]
 mod tests {
-    use super::{Diagnostic, GitMark, Gutter, GutterLine};
+    use super::{Diagnostic, GitMark, Gutter, GutterLine, HINT_DOT};
     use crate::ApcScene;
     use ratatui::{buffer::Buffer, layout::Rect, widgets::StatefulWidget};
     use stoatty_protocol::command::{
@@ -451,6 +459,7 @@ mod tests {
             height: 1,
             git,
             diagnostic,
+            bg: None,
         }
     }
 
@@ -714,6 +723,42 @@ mod tests {
             ),
             (true, false),
             "the dot draws, and no icon does",
+        );
+    }
+
+    /// A line's own background boxes its runs in place of the gutter's, so a
+    /// row the editor fills keeps the fill behind its number and its hint dot.
+    #[test]
+    fn a_line_background_boxes_its_runs() {
+        let fill = [27, 30, 36];
+        let hint = Some(Diagnostic {
+            color: BLUE,
+            kind: None,
+        });
+        let lines = [
+            line(1, None, hint),
+            GutterLine {
+                bg: Some(fill),
+                ..line(2, None, hint)
+            },
+        ];
+        let mut boxes: Vec<_> = singles(&emit(&config(&lines), 2))
+            .into_iter()
+            .filter_map(|command| match command {
+                Command::TextRun(run) => Some((run.row, run.text, run.bg)),
+                _ => None,
+            })
+            .collect();
+        boxes.sort();
+        let gutter = Some([40, 44, 52]);
+        assert_eq!(
+            boxes,
+            [
+                (0, "1".to_owned(), gutter),
+                (0, HINT_DOT.to_owned(), gutter),
+                (16, "2".to_owned(), Some(fill)),
+                (16, HINT_DOT.to_owned(), Some(fill)),
+            ],
         );
     }
 

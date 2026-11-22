@@ -262,6 +262,7 @@ theme ermine_night inherits default_dark {
     let wash             = "#2a3c5a";
     let tab_wash         = "#243552";
     let cursor_secondary = "#8a909c";
+    let cursor_line      = "#1b1e24";
     let divider          = "#22252b";
     let hatch            = "#1b1d22";
     let fold_button      = "#1f2a3d";
@@ -331,6 +332,7 @@ theme ermine_night inherits default_dark {
     ui.selection.reversed  = { fg: text, bg: select, modifiers: [] };
     ui.selection.editor.bg = wash;
     ui.cursor              = { fg: base, bg: cursor_secondary, modifiers: [] };
+    ui.cursorline.bg       = cursor_line;
     ui.virtual.inlay       = { fg: dim, bg: hover, modifiers: [italic] };
     ui.virtual.wrap.fg     = disabled;
 

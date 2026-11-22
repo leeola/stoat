@@ -1221,6 +1221,41 @@ fn a_move_onto_another_commit_redecorates_the_blamed_window() {
     );
 }
 
+/// A step onto the next line moves the cursor line's fill, which a page holds
+/// among its decorations. Once the target moves, the window takes it as
+/// decorations-only fills over the cells it keeps and refills no page.
+///
+/// The lines number absolutely and no column blames, so the fill is the only
+/// decoration the step moves.
+#[test]
+fn a_cursor_step_redecorates_the_held_pages_and_refills_none() {
+    let text: String = (0..40).map(|i| format!("line {i}\n")).collect();
+    let mut h = crate::test_harness::TestHarness::with_size(120, 24);
+    h.stoat.stoatty_protocol = stoatty_protocol::PROTOCOL_VERSION;
+    h.stoat.settings.editor_line_numbers = Some(LineNumbers::Absolute);
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+    h.stoat.set_apc_tx(tx);
+    let path = h.write_file("a.rs", &text);
+    h.open_file(&path);
+    h.settle();
+    h.stoat.render();
+    emit_smooth_scroll(&mut h.stoat);
+    let _ = drain_apc(&mut rx);
+
+    h.stoat.collapse_focused_cursor_to("line 0\n".len());
+    {
+        let editor = action_handlers::focused_editor_mut(&mut h.stoat).expect("focused editor");
+        editor.scroll_row = 1;
+        editor.scroll_glide = ScrollGlide::None;
+    }
+    emit_smooth_scroll(&mut h.stoat);
+    assert_eq!(
+        fill_pages(drain_apc(&mut rx)),
+        (Vec::new(), vec![0, 1]),
+        "the whole fills, then the decorations-only fills",
+    );
+}
+
 /// Before the decorations-only fill, the window takes a move of the
 /// selection as a refill of the pages the move composites.
 #[test]
@@ -1314,8 +1349,8 @@ fn blame_selection_fills(protocol: u32) -> Vec<(Vec<u64>, Vec<u64>)> {
 /// the pane's pool window buffered and the receiver drained.
 ///
 /// The Blame Column is on and the cursor rests on line 1. The lines number
-/// absolutely, so a cursor move reaches a page only through the commit the
-/// column selects.
+/// absolutely and the theme fills no cursor line, so a cursor move reaches a
+/// page only through the commit the column selects.
 fn buffered_blamed_pool(
     protocol: u32,
     base: &str,
@@ -1325,6 +1360,7 @@ fn buffered_blamed_pool(
     tokio::sync::mpsc::UnboundedReceiver<Vec<u8>>,
 ) {
     let mut h = crate::test_harness::TestHarness::with_size(120, 24);
+    h.stoat.theme = Arc::new(ermine_without_cursor_line());
     h.stoat.stoatty_protocol = protocol;
     h.stoat.settings.editor_line_numbers = Some(LineNumbers::Absolute);
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
@@ -1345,6 +1381,21 @@ fn buffered_blamed_pool(
     emit_smooth_scroll(&mut h.stoat);
     let _ = drain_apc(&mut rx);
     (h, rx)
+}
+
+/// The shipped ermine_night with no cursor line fill, for a test of the
+/// decorations that a moving fill also redecorates.
+fn ermine_without_cursor_line() -> crate::theme::Theme {
+    let line = "    ui.cursorline.bg       = cursor_line;\n";
+    let src = app::DEFAULT_KEYMAP.replacen(line, "", 1);
+    assert_ne!(
+        src,
+        app::DEFAULT_KEYMAP,
+        "the shipped config fills the cursor line"
+    );
+    let (config, _) = stoat_config::parse(&src);
+    crate::theme::Theme::from_config(&config.expect("the config parses"), "ermine_night")
+        .expect("the theme builds")
 }
 
 /// The pages that the whole fills of `commands` name, and then the pages that

@@ -466,6 +466,7 @@ pub(crate) fn paint_stack_rows(
             paint == PagePaint::DecorationsOnly,
             origins.as_ref().map(|origins| origins[index]),
             None,
+            false,
         );
         if editor.scroll_row == 0
             && diff_changes::excerpt_no_base(excerpt, buffers)

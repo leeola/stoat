@@ -214,6 +214,7 @@ pub(crate) fn render_pane(
                     false,
                     None,
                     blame,
+                    true,
                 );
                 if let Some(cell) = editor.ghost_cursor_cell.filter(|_| scene.live()) {
                     review::emit_ghost_cursor(

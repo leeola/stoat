@@ -331,6 +331,7 @@ fn gutter_lines() -> Vec<GutterLine> {
                 color: diag_color(diag),
                 kind: Some(diag_kind(diag)),
             }),
+            bg: None,
         })
         .collect()
 }

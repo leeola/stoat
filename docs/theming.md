@@ -233,6 +233,10 @@ The typed UI scopes, by group (syntax scopes are open-ended):
   foreground draws the mark in `ui.text.disabled`.
 - `ui.cursor`, `ui.cursor.input` -- the block cursor in a buffer and in an input
   field.
+- `ui.cursorline` -- the background of every row of the focused plain
+  editor's cursor line, across its gutter. A selection, a search match, or an
+  inlay hint on the line keeps its own background. A theme that leaves it
+  unset fills no line.
 - `ui.selection`, `ui.selection.editor`, `ui.selection.reversed` -- selected
   ranges. The editor lifts text under the `ui.selection.editor` wash toward
   white or black when the two are close in brightness, so selected text stays

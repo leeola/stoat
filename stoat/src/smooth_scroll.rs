@@ -34,13 +34,14 @@ use crate::{
         conflict_view::{render_conflict_rows, GridPaint},
         editor::{
             draw_fallback_line_numbers, gutter_background, gutter_component_lines,
-            gutter_diff_marks, gutter_digits, gutter_geometry, measure_gutter_width,
-            paint_chunk_rows, paint_diagnostic_spans, paint_line_diagnostics,
+            gutter_diff_marks, gutter_digits, gutter_geometry, line_display_rows,
+            measure_gutter_width, paint_chunk_rows, paint_diagnostic_spans, paint_line_diagnostics,
             paint_severity_column, rich_gutter, severity_rows, visible_byte_range, wrap_mark_style,
             DiagnosticPaintScratch, EolCursor, RichGutterColors, RowSeverity, SeverityColors,
         },
         file_finder::paint_finder_rows,
         help::{paint_help_detail_rows, paint_help_list_rows},
+        paint::dim_rgb,
         picker::paint_preview_numbers,
         review::{diff_gutter_digits, paint_diff_rows, BufferNumbering, DiffDials},
         serialize_buffer,
@@ -54,10 +55,11 @@ use ratatui::{
     buffer::Buffer,
     layout::Rect,
     style::{Color, Style},
+    widgets::StatefulWidget,
 };
 use std::{ops::Range, path::Path, sync::Arc};
 use stoat_action::registry::RegistryEntry;
-use stoat_widgets::ApcScene;
+use stoat_widgets::{bar::Bar, ApcScene};
 use stoatty_protocol::command::{encode_fill_decorations_scope, encode_fill_scope};
 
 /// Pool ids for the non-pane smooth-scroll surfaces (overlays and popups).
@@ -521,6 +523,9 @@ pub(crate) struct PageGutter {
     /// The Blame Column of a blamed pane's page, or `None` for a page that
     /// shows no column.
     blame: Option<PageBlame>,
+    /// The 1-based cursor line a plain editor's page fills, with the fill
+    /// color, or `None` for a page that fills no line.
+    cursor_line: Option<(u32, [u8; 3])>,
 }
 
 /// The Blame Column inputs that a blamed pane's page paints from, resolved on
@@ -572,6 +577,7 @@ impl PageGutter {
             diagnostics: PageDiagnostics::default(),
             number_column: false,
             blame: None,
+            cursor_line: None,
         }
     }
 
@@ -597,6 +603,18 @@ impl PageGutter {
     /// [`blame::blame_cells`] asks for, as the live grid does.
     pub(crate) fn blamed(self, blame: Option<PageBlame>) -> PageGutter {
         PageGutter { blame, ..self }
+    }
+
+    /// This gutter filling the rows of `cursor_line`, the 1-based line and the
+    /// fill color, with one bar under the page's text.
+    ///
+    /// Off until set. Only a page whose gutter draws rich runs draws the bar,
+    /// and the line's number composites over the fill.
+    pub(crate) fn cursor_line(self, cursor_line: Option<(u32, [u8; 3])>) -> PageGutter {
+        PageGutter {
+            cursor_line,
+            ..self
+        }
     }
 
     /// This gutter numbering a picker preview's lines when `on`.
@@ -690,6 +708,9 @@ impl PageDiagnostics {
 ///
 /// A gutter with [`PageGutter::number_column`] set paints a picker preview's
 /// number column in its place, with the numbers in the returned frames.
+///
+/// A gutter with a [`PageGutter::cursor_line`] opens the frames with the bar
+/// that fills the line's rows, so the gutter and the page's text draw over it.
 #[allow(clippy::too_many_arguments)]
 fn paint_page_gutter(
     snapshot: &DisplaySnapshot,
@@ -708,11 +729,12 @@ fn paint_page_gutter(
         return (width, scene.buffer().clone());
     }
 
+    let mut frames = cursor_line_bar(snapshot, top_row..end_row, area, gutter, dim, buf);
     let blame_w = gutter.blame.as_ref().map_or(0, |_| {
         blame::blame_cells(area.width, line_gutter_width(snapshot, gutter))
     });
     let Some(blame) = gutter.blame.as_ref().filter(|_| blame_w > 0) else {
-        return paint_page_line_gutter(
+        let (width, components) = paint_page_line_gutter(
             snapshot,
             top_row,
             end_row,
@@ -723,6 +745,8 @@ fn paint_page_gutter(
             dim,
             live,
         );
+        frames.extend_from_slice(&components);
+        return (width, frames);
     };
 
     let mut scene = gutter.scene();
@@ -762,9 +786,46 @@ fn paint_page_gutter(
         dim,
         live,
     );
-    let mut frames = scene.buffer().clone();
+    frames.extend_from_slice(scene.buffer());
     frames.extend_from_slice(&components);
     (blame_w + width, frames)
+}
+
+/// The APC bytes of the bar that fills the rows of the gutter's cursor line
+/// that `rows` shows, across the page's whole width.
+///
+/// The bar fades toward the gutter's background by `dim`, as the gutter's
+/// other colors fade. A gutter with no cursor line or no rich colors, or a
+/// line outside `rows`, gives none.
+fn cursor_line_bar(
+    snapshot: &DisplaySnapshot,
+    rows: Range<u32>,
+    area: Rect,
+    gutter: &PageGutter,
+    dim: f32,
+    buf: &mut Buffer,
+) -> Vec<u8> {
+    let (Some((line, fill)), Some(rich)) = (gutter.cursor_line, gutter.rich.as_ref()) else {
+        return Vec::new();
+    };
+    let line_rows = line_display_rows(snapshot, line);
+    let (first, last) = (line_rows.start.max(rows.start), line_rows.end.min(rows.end));
+    if first >= last {
+        return Vec::new();
+    }
+
+    let mut scene = gutter.scene();
+    Bar {
+        x: 0,
+        y: ((first - rows.start) * 16) as i16,
+        width: area.width * 16,
+        height: ((last - first) * 16) as u16,
+        color: dim_rgb(fill, rich.bg, dim),
+        radius: 0,
+        corners: 0,
+    }
+    .render(area, buf, &mut scene);
+    scene.buffer().clone()
 }
 
 /// The cells that the line-number gutter or the severity column of `gutter`
@@ -845,6 +906,9 @@ fn paint_page_line_gutter(
                 &rich.diff,
                 &rich.colors,
                 gutter.current_line,
+                gutter
+                    .cursor_line
+                    .map(|(line, fill)| (line, dim_rgb(fill, rich.bg, dim))),
             );
             // A terminal before the page icon protocol drops the icons a page
             // declares. A page for such a terminal marks each diagnostic with
@@ -1482,6 +1546,7 @@ mod tests {
                 false,
                 None,
                 None,
+                false,
             );
             editor.scroll_row = saved;
             let expected = serialize_buffer(&expected);
@@ -1863,6 +1928,7 @@ mod tests {
                         selected,
                     }),
                 }),
+                false,
             );
             editor.scroll_row = saved;
 
@@ -2027,6 +2093,7 @@ mod tests {
                     false,
                     None,
                     None,
+                    false,
                 );
                 editor.scroll_row = saved;
                 undercurl::snapshot_cells(&live, undercurls.spans_mut());
@@ -2142,6 +2209,7 @@ mod tests {
             false,
             None,
             None,
+            false,
         );
         let expected = serialize_buffer(&expected);
 
@@ -2238,6 +2306,7 @@ mod tests {
             false,
             None,
             None,
+            false,
         );
         let expected = serialize_buffer(&expected);
 
@@ -3250,6 +3319,77 @@ mod tests {
             ],
             [true; 4],
             "both lanes on rows 1 and 2, the hunk bar at full color on both",
+        );
+    }
+
+    /// A plain editor's page fills the rows of its cursor line with one bar
+    /// across the page, ahead of the gutter's own bars, and a page with no
+    /// cursor line draws no such bar.
+    #[test]
+    fn a_page_draws_its_cursor_line_as_one_bar() {
+        use super::{render_page_decorations, PageGutter};
+        use crate::{
+            action_handlers::{self, dispatch},
+            render::editor::{resolve_rich_gutter, RowSeverity},
+            theme::scope,
+            Stoat,
+        };
+        use std::path::PathBuf;
+        use stoat_action::OpenFile;
+        use stoatty_protocol::command::{decode_stream, Command};
+
+        let mut h = Stoat::test();
+        let root = PathBuf::from("/page-cursor-line");
+        let path = root.join("doc.txt");
+        h.fake_fs().insert_file(&path, b"a\nabcdefghij\nc\n");
+        h.stoat.active_workspace_mut().git_root = root;
+        dispatch(&mut h.stoat, &OpenFile { path });
+        h.settle();
+
+        let theme = h.stoat.theme.clone();
+        let fallback = theme.get(scope::UI_TEXT);
+        let rich = resolve_rich_gutter(&theme, fallback)
+            .expect("the shipped theme resolves the rich gutter colors");
+        let editor = action_handlers::focused_editor_mut(&mut h.stoat).expect("focused editor");
+        // Line 2 breaks into two rows at width 8.
+        editor.display_map.set_wrap_width(Some(8));
+        let snapshot = editor.display_map.snapshot();
+
+        let fill = [0x1b, 0x1e, 0x24];
+        let bars = |cursor_line| -> Vec<_> {
+            let gutter = PageGutter::new(
+                true,
+                Arc::new(RowSeverity::default()),
+                theme.clone(),
+                Some(rich.clone()),
+                None,
+            )
+            .cursor_line(cursor_line);
+            let decorations = render_page_decorations(
+                &snapshot,
+                3,
+                0,
+                12,
+                4,
+                &gutter,
+                false,
+                fallback,
+                0.0,
+                DiffDials::shipped(),
+                None,
+            );
+            decode_stream(&decorations)
+                .into_iter()
+                .filter_map(|command| match command {
+                    Command::Bar(bar) => Some((bar.x, bar.y, bar.width, bar.height, bar.color)),
+                    _ => None,
+                })
+                .collect()
+        };
+        assert_eq!(
+            bars(Some((2, fill))),
+            [vec![(0, 16, 12 * 16, 32, fill)], bars(None)].concat(),
+            "the fill spans the page over line 2's two rows, ahead of the gutter's own bars",
         );
     }
 
