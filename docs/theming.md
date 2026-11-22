@@ -253,8 +253,8 @@ The typed UI scopes, by group (syntax scopes are open-ended):
   carries an accent bar at its left edge, in the `ui.border.focused` color.
 - `ui.list.current` -- the row of a list that another pane shows, such as the
   file the commits view's diff preview stands on in its files table.
-- `ui.chip` -- the chip at the right end of a filter modal's header row, such
-  as the file finder's note of what Shift-Tab switches its list to.
+- `ui.chip` -- the chip at the right end of a filter modal's header row that
+  names the active scope, such as the file finder's pill of the list on show.
 - `ui.highlight.read`, `ui.highlight.write` -- symbol-occurrence highlights.
 - `ui.border.focused`, `ui.border.inactive` -- pane and modal borders.
 - `ui.readonly.label`, `ui.readonly.frame` -- the label and the dashed ring

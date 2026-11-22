@@ -171,11 +171,14 @@ pub(crate) fn render_file_finder(
     let separator_style = theme.get(crate::theme::scope::UI_BORDER_INACTIVE);
 
     let label = finder_label(finder);
-    let chip = finder
-        .browse
-        .is_none()
-        .then(|| format!("S-Tab \u{00B7} {}", scope_words(&finder.next_scope())));
-    let chips = chip.as_deref().map(|chip| [(chip, true)]);
+    let cycle = finder.scope_cycle();
+    let chips: Vec<(&str, bool)> = match finder.browse {
+        Some(_) => Vec::new(),
+        None => cycle
+            .iter()
+            .map(|scope| (scope_words(scope), scope == finder.scope()))
+            .collect(),
+    };
     let count = {
         let list = &finder.active_core_ref().picklist;
         (list.filtered.len(), list.base.len())
@@ -187,7 +190,7 @@ pub(crate) fn render_file_finder(
             label: &label,
             prompt: FILTER_PROMPT,
             count: Some(count),
-            chips: chips.as_ref().map_or(&[][..], |chips| &chips[..]),
+            chips: &chips,
         },
         &finder.input,
         ws,
@@ -300,17 +303,12 @@ fn paint_no_preview(pane: Rect, theme: &crate::theme::Theme, buf: &mut Buffer) {
     write_str_clipped(buf, x, y, NO_PREVIEW, disabled, pane.x + pane.width);
 }
 
-/// The finder's header label, which names the list on show unless it is the
-/// plain list of every file.
+/// The finder's header label, `Files` and the words the pills do not say.
 ///
-/// The words after `Files` name the scope or browse mode, and then a fallback
-/// of ignored files or buffers listed over a diff.
+/// The pills name the scope, so the words after `Files` name only a browse,
+/// and then a fallback of ignored files or buffers listed over a diff.
 fn finder_label(finder: &FileFinder) -> String {
-    let scope = match (finder.browse.is_some(), finder.scope()) {
-        (true, _) => Some("browse"),
-        (false, FinderScope::All) => None,
-        (false, scope) => Some(scope_words(scope)),
-    };
+    let scope = finder.browse.is_some().then_some("browse");
     let suffix = if finder.fallback_active() {
         Some("ignored")
     } else if finder.diff_paths.is_some()
@@ -330,17 +328,18 @@ fn finder_label(finder: &FileFinder) -> String {
     }
 }
 
-/// The words the finder's header gives `scope`, in its label and in the chip
-/// that names where Shift-Tab goes next.
+/// The word in the pill that names `scope` in the finder's header.
+///
+/// The pill of [`FinderScope::AllWorkspaces`] reads `workspaces`, since `all
+/// workspaces` beside `all` reads as the same scope twice.
 fn scope_words(scope: &FinderScope) -> &str {
     match scope {
-        FinderScope::All => "all files",
-        FinderScope::Modified => "git only",
+        FinderScope::All => "all",
+        FinderScope::Modified | FinderScope::ModifiedBuffers => "modified",
         FinderScope::Diff => "diff",
         FinderScope::Buffers => "buffers",
-        FinderScope::ModifiedBuffers => "modified buffers",
         FinderScope::Named(name) => name.as_str(),
-        FinderScope::AllWorkspaces => "all workspaces",
+        FinderScope::AllWorkspaces => "workspaces",
     }
 }
 
@@ -530,15 +529,20 @@ fn shown_lines(editor: &mut EditorState) -> Option<(u32, u32)> {
 mod tests {
     use super::{file_finder_layout, file_finder_layout_with_chrome, render_file_finder};
     use crate::{
+        file_finder::FileFinder,
         render::{
             chrome::{ISLAND_BOTTOM, ISLAND_GAP, ISLAND_SIDE, ISLAND_TOP},
             editor::ResolvedChrome,
             picker::DEFAULT_LIST_PERCENT,
         },
         test_fixture::{column_rules, plate_islands},
-        theme::scope,
+        theme::{scope, Theme},
+        workspace::Workspace,
     };
-    use ratatui::{buffer::Buffer, layout::Rect};
+    use ratatui::{
+        buffer::{Buffer, Cell},
+        layout::Rect,
+    };
     use std::path::PathBuf;
     use stoat_widgets::ApcScene;
 
@@ -634,6 +638,68 @@ mod tests {
                 fg(scope::UI_TEXT_DISABLED).unwrap(),
             ),
         );
+    }
+
+    /// The header ends in one pill per scope, `all`, `modified`, and
+    /// `workspaces` for a finder over files. Under a dead scene the active
+    /// scope's pill takes the `ui.chip` background, and each other pill reads in
+    /// `ui.text.muted` with no chip background. Shift-Tab moves the chip
+    /// background to `modified`.
+    #[test]
+    fn the_header_names_each_scope_and_boxes_the_active_one() {
+        let mut h = crate::Stoat::test();
+        let root = PathBuf::from("/pills");
+        h.fake_fs()
+            .insert_files([(root.join("a.rs"), "fn a() {}".as_bytes())]);
+        h.stoat.active_workspace_mut().git_root = root;
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::OpenFileFinder);
+        h.settle();
+        let mut finder = h.stoat.file_finder.take().expect("the finder is open");
+        let theme = h.stoat.theme.clone();
+        let chip = theme.get(scope::UI_CHIP).bg.expect("a chip background");
+        let muted = theme.get(scope::UI_TEXT_MUTED).fg.expect("a muted color");
+
+        let before = header_end(&mut finder, h.stoat.active_workspace_mut(), &theme);
+        finder.toggle_scope();
+        let after = header_end(&mut finder, h.stoat.active_workspace_mut(), &theme);
+
+        let text: String = before.iter().map(Cell::symbol).collect();
+        let chipped = |cells: &[Cell]| cells.iter().all(|cell| cell.bg == chip);
+        let plain = before[6..16]
+            .iter()
+            .all(|cell| cell.fg == muted && cell.bg != chip);
+        assert_eq!(
+            (text, chipped(&before[..5]), plain, chipped(&after[6..16])),
+            (" all   modified   workspaces ".to_owned(), true, true, true),
+        );
+    }
+
+    /// The 29 cells that end the header row of `finder`, painted into a 200 by
+    /// 40 area under a dead scene.
+    fn header_end(finder: &mut FileFinder, ws: &mut Workspace, theme: &Theme) -> Vec<Cell> {
+        let area = Rect::new(0, 0, 200, 40);
+        let chrome = ResolvedChrome::resolve(theme);
+        let mut buf = Buffer::empty(area);
+        let mut scene = ApcScene::new();
+        scene.set_live(false);
+        render_file_finder(
+            finder,
+            ws,
+            None,
+            theme,
+            &chrome,
+            area,
+            0,
+            DEFAULT_LIST_PERCENT,
+            &mut buf,
+            &mut scene,
+        );
+        let inner =
+            file_finder_layout_with_chrome(area, finder.content_size, 0, DEFAULT_LIST_PERCENT)
+                .expect("the finder fits")
+                .inner;
+        let end = inner.x + inner.width;
+        (end - 29..end).map(|x| buf[(x, inner.y)].clone()).collect()
     }
 
     #[test]

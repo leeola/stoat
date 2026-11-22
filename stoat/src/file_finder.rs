@@ -553,7 +553,41 @@ impl FileFinder {
     /// -> AllWorkspaces -> All. A finder over a diff has Diff in Modified's
     /// place. Buffers and ModifiedBuffers flip with each other.
     pub(crate) fn next_scope(&self) -> FinderScope {
-        match &self.scope {
+        self.next_scope_from(&self.scope)
+    }
+
+    /// The scopes that the header names as pills, in the order Shift-Tab walks
+    /// them.
+    ///
+    /// The walk starts at [`FinderScope::Buffers`] for the buffer picker and at
+    /// [`FinderScope::All`] for every file scope, and it steps until it comes
+    /// back to its start. The header always names the scope on show, so a
+    /// scope that the walk does not reach, such as a [`FinderScope::Modified`]
+    /// that an open forced over a diff, takes the place after the first pill.
+    pub(crate) fn scope_cycle(&self) -> Vec<FinderScope> {
+        let start = match self.scope {
+            FinderScope::Buffers | FinderScope::ModifiedBuffers => FinderScope::Buffers,
+            _ => FinderScope::All,
+        };
+        let mut cycle = vec![start.clone()];
+        let mut scope = self.next_scope_from(&start);
+        // The walk returns to its start. The bound ends a walk that does not,
+        // so the header still paints.
+        while scope != start && cycle.len() <= self.named_scopes.len() + 4 {
+            let next = self.next_scope_from(&scope);
+            cycle.push(scope);
+            scope = next;
+        }
+        if !cycle.contains(&self.scope) {
+            cycle.insert(1, self.scope.clone());
+        }
+        cycle
+    }
+
+    /// The scope Shift-Tab lands on from `from`, by the cycle that
+    /// [`Self::next_scope`] describes.
+    fn next_scope_from(&self, from: &FinderScope) -> FinderScope {
+        match from {
             FinderScope::All if self.diff_paths.is_some() => FinderScope::Diff,
             FinderScope::All => FinderScope::Modified,
             FinderScope::Modified | FinderScope::Diff => self
@@ -1300,8 +1334,8 @@ mod tests {
             (FinderScope::Diff, repo_paths(&["a.txt", "b.txt", "d.txt"]))
         );
         assert!(
-            h.snapshot().content.contains("Files \u{00B7} diff"),
-            "the header names the diff scope"
+            h.snapshot().content.contains(" all   diff   workspaces "),
+            "the header's pills name the diff scope in Modified's place"
         );
     }
 
@@ -1929,6 +1963,51 @@ mod tests {
             h.stoat.file_finder.as_ref().unwrap().scope(),
             &FinderScope::All,
             "backtab past AllWorkspaces wraps to All"
+        );
+    }
+
+    /// The header's pills walk the file scopes from All in the order Shift-Tab
+    /// takes, with Diff in Modified's place over a diff, and the buffer
+    /// picker's two scopes on their own. A Modified forced over a diff takes
+    /// the place after All, so the scope on show always has a pill.
+    #[test]
+    fn the_scope_cycle_walks_the_file_scopes_from_all() {
+        use FinderScope::{All, AllWorkspaces, Buffers, Diff, Modified, ModifiedBuffers, Named};
+
+        let mut h = crate::Stoat::test();
+        seed_finder_workspace(&mut h, &[("src/a.rs", "")]);
+        h.type_keys("space p");
+        let finder = h.stoat.file_finder.as_mut().expect("the finder is open");
+        let plain = finder.scope_cycle();
+        finder.named_scopes = compile_named_scopes(&BTreeMap::from([
+            ("docs".to_string(), vec!["docs/**".to_string()]),
+            ("src".to_string(), vec!["src/**".to_string()]),
+        ]));
+        let named = finder.scope_cycle();
+        finder.named_scopes.clear();
+        finder.diff_paths = Some(Vec::new());
+        let over_diff = finder.scope_cycle();
+        finder.scope = Modified;
+        let forced = finder.scope_cycle();
+        finder.diff_paths = None;
+        finder.scope = Buffers;
+        let buffers = finder.scope_cycle();
+
+        assert_eq!(
+            [plain, named, over_diff, buffers, forced],
+            [
+                vec![All, Modified, AllWorkspaces],
+                vec![
+                    All,
+                    Modified,
+                    Named("docs".to_string()),
+                    Named("src".to_string()),
+                    AllWorkspaces,
+                ],
+                vec![All, Diff, AllWorkspaces],
+                vec![Buffers, ModifiedBuffers],
+                vec![All, Modified, Diff, AllWorkspaces],
+            ],
         );
     }
 
@@ -3038,6 +3117,18 @@ mod tests {
         assert!(
             content.contains("Files \u{00B7} browse"),
             "browse label missing:\n{content}"
+        );
+        let header = content
+            .lines()
+            .find(|line| line.contains("Files \u{00B7} browse"))
+            .expect("the header row");
+        assert!(
+            header
+                .trim_end()
+                .trim_end_matches('\u{2502}')
+                .trim_end()
+                .ends_with("2 of 2"),
+            "a browse ends its header at the count, with no scope pill:\n{header}"
         );
         assert_eq!(browse_root(&h), home);
         let finder = h.stoat.file_finder.as_ref().expect("finder open");

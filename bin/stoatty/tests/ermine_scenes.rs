@@ -1824,31 +1824,40 @@ fn the_finder_marks_its_selected_row_with_a_rounded_wash() {
     }
 }
 
-/// The finder's header ends in its scope chip, a box on the tab wash.
+/// The finder's header names its scopes as pills, and the active scope's pill
+/// is the one box on the tab wash.
 ///
-/// The box takes whole cells, the fewest that hold `S-Tab · git only` with
-/// 6 px of padding at each end. Those are the 15 cells that end at the inner
-/// rect's right edge, cell 143. The header row is cell row 10, and the box
-/// draws 1 px right and 7 px down of its cells. So the tab wash fills the
-/// pixels from (1153, 187) to (1287, 204), and no other pixel of the header's
-/// 32 px band, pixel rows 180 to 211, takes it.
+/// The header row is cell row 10, and a box draws 1 px right and 7 px down of
+/// its cells. With `all` active, its box is the 4 cells from cell 122, so the
+/// tab wash fills the pixels from (1099, 187) to (1134, 204) and no other pixel
+/// of the header's 32 px band, pixel rows 180 to 211. After Shift-Tab the box
+/// moves to `modified`, the 9 cells from cell 124, from (1117, 187) to (1197,
+/// 204).
 #[test]
-fn the_finder_header_ends_in_a_chip_on_the_tab_wash() {
+fn the_finder_header_boxes_its_active_scope_pill() {
     let mut home = support::scratch_home();
-    let shot = settled_frame(
-        home.path(),
-        "many-files",
-        "src/alpha.txt",
-        "<Space>p<Settle>",
-    );
+    let mut session = spawn_settled(home.path(), "many-files", "src/alpha.txt");
 
+    play(&mut session, "<Space>p<Settle>");
+    let all = session.snapshot().expect("a snapshot");
     expect_color_box(
-        &shot,
+        &all,
         &mut home,
         TAB_WASH,
         180..212,
-        (1153, 187, 1287, 204),
-        "header_chip",
+        (1099, 187, 1134, 204),
+        "header_pill_all",
+    );
+
+    play(&mut session, "<S-Tab><Settle>");
+    let modified = session.snapshot().expect("a snapshot");
+    expect_color_box(
+        &modified,
+        &mut home,
+        TAB_WASH,
+        180..212,
+        (1117, 187, 1197, 204),
+        "header_pill_modified",
     );
 }
 

@@ -844,8 +844,8 @@ pub mod scope {
     /// It marks where the reader is without taking the selection's look, since
     /// the keys move the preview rather than this row.
     pub const UI_LIST_CURRENT: &str = "ui.list.current";
-    /// The chip at the right end of a filter modal's header row, such as the
-    /// file finder's note of what Shift-Tab switches its list to.
+    /// The chip at the right end of a filter modal's header row that names the
+    /// active scope, such as the file finder's pill of the list on show.
     pub const UI_CHIP: &str = "ui.chip";
 
     pub const UI_HIGHLIGHT_READ: &str = "ui.highlight.read";
