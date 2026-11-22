@@ -2490,6 +2490,7 @@ pub(crate) fn frame(
                     chrome,
                     full,
                     zoom,
+                    preview_min,
                     buf,
                     &mut *scene,
                 );

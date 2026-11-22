@@ -96,7 +96,8 @@ fn rgb_border_theme() -> crate::theme::Theme {
 use crate::{
     action_handlers, app, auto_reload,
     test_fixture::{
-        drain_apc, finder_layout, help_layout, open_with_minimap_strip, palette_sizing,
+        drain_apc, finder_layout, help_layout, open_with_minimap_strip, palette_arg_layout,
+        palette_sizing,
     },
     ui::FrameBatches,
 };
@@ -6271,9 +6272,7 @@ fn a_wrapped_argument_list_scrolls_its_pool_by_document_rows() {
     let _ = drain_apc(&mut rx);
     emit_smooth_scroll(&mut h.stoat);
 
-    let (hint, zoom) = palette_sizing(&h);
-    let list = crate::render::command_palette::palette_arg_list_rect(h.stoat.size(), hint, zoom)
-        .expect("the arg picker fits the test terminal");
+    let list = palette_arg_layout(&h).list;
     let rows = 1 + 305usize.div_ceil(crate::render::picker::label_columns(list.width) - 4);
     let first = 11 - (usize::from(list.height) / rows).max(1);
     let pool = crate::smooth_scroll::non_pane_pool::PALETTE;
@@ -7033,9 +7032,7 @@ fn palette_arg_list_is_pooled_and_retired() {
     let _ = drain_apc(&mut rx);
 
     emit_smooth_scroll(&mut h.stoat);
-    let (rows, zoom) = palette_sizing(&h);
-    let list = crate::render::command_palette::palette_arg_list_rect(h.stoat.size(), rows, zoom)
-        .expect("the arg picker fits the test terminal");
+    let list = palette_arg_layout(&h).list;
     let expected = PoolRegionCommand {
         pool: crate::smooth_scroll::non_pane_pool::PALETTE,
         top: list.y,
@@ -7091,10 +7088,7 @@ fn palette_filter_to_arg_flip_repools() {
     h.stoat.active_workspace_mut().layout(size);
     emit_smooth_scroll(&mut h.stoat);
 
-    let (rows, zoom) = palette_sizing(&h);
-    let arg_list =
-        crate::render::command_palette::palette_arg_list_rect(h.stoat.size(), rows, zoom)
-            .expect("the arg picker fits the test terminal");
+    let arg_list = palette_arg_layout(&h).list;
     let expected = PoolRegionCommand {
         pool: crate::smooth_scroll::non_pane_pool::PALETTE,
         top: arg_list.y,

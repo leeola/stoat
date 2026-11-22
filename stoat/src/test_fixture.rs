@@ -64,6 +64,18 @@ pub(crate) fn palette_sizing(h: &TestHarness) -> (u16, i8) {
     )
 }
 
+/// The open argument picker's layout, sized from the same inputs the renderer
+/// reads, so a test rect matches the painted one.
+pub(crate) fn palette_arg_layout(
+    h: &TestHarness,
+) -> crate::render::command_palette::PaletteArgLayout {
+    crate::mouse::open_palette_arg_layout(
+        &h.stoat,
+        modal_zoom_steps(&h.stoat.modal_zoom, ModalKind::Palette),
+    )
+    .expect("the open argument picker fits the test terminal")
+}
+
 /// The open finder's layout, sized from the same content and zoom the
 /// renderer would read, so a test rect matches the painted one.
 pub(crate) fn finder_layout(h: &TestHarness) -> crate::render::file_finder::FinderLayout {

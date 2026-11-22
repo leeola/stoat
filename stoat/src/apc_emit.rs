@@ -889,13 +889,13 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
         .then_some(stoat.command_palette.as_ref())
         .flatten()
         .filter(|p| p.arg_picker.is_some() && p.arg_source().is_some())
-        .and_then(|p| {
-            crate::render::command_palette::palette_arg_list_rect(
-                stoat.size(),
-                p.list_rows_hint(),
+        .and_then(|_| {
+            crate::mouse::open_palette_arg_layout(
+                stoat,
                 modal_zoom_steps(&stoat.modal_zoom, ModalKind::Palette),
             )
-        });
+        })
+        .map(|layout| layout.list);
 
     // The commits screen renders into the focused pane. Its left list pools as
     // a non-pane surface, while the editor panes stay suppressed under it.

@@ -32,7 +32,7 @@ use crate::{
     run::GridSelection,
     test_fixture::{
         fake_term_session, finder_layout, focused_editor_pane_area, mouse_event,
-        open_indent_buffer, open_scratch_file, open_with_minimap_strip, palette_sizing,
+        open_indent_buffer, open_scratch_file, open_with_minimap_strip, palette_arg_layout,
         picker_layout, seed, store_two_tours, target_picker_rows,
     },
     test_harness::{
@@ -2101,9 +2101,8 @@ fn wheel_over_palette_arg_preview_scrolls_it_not_the_list() {
     h.type_text(":o ");
     h.settle();
 
-    let (rows, zoom) = palette_sizing(&h);
-    let preview = crate::render::command_palette::palette_arg_body(h.stoat.size(), rows, zoom)
-        .and_then(|(_, preview)| preview)
+    let preview = palette_arg_layout(&h)
+        .preview
         .expect("the arg preview pane is present at this width");
     let preview_id = h
         .stoat

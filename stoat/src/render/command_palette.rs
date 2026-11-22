@@ -3,9 +3,7 @@ use crate::{
     input_view::InputView,
     render::{
         chrome::{ISLAND_BOTTOM, ISLAND_GAP, ISLAND_SIDE, ISLAND_TOP},
-        picker::{
-            FilterHeader, Footer, PathRows, RowMarks, RowStart, DEFAULT_LIST_SHARE, FOOTER_ROWS,
-        },
+        picker::{FilterHeader, Footer, PathRows, RowMarks, RowStart, FOOTER_ROWS},
         text::{wrap_text, write_str, write_str_clipped},
     },
     workspace::Workspace,
@@ -54,6 +52,29 @@ pub(crate) struct PaletteFilterLayout {
     /// The key line under the doc, as
     /// [`footer_rect`](crate::render::picker::footer_rect) gives it.
     pub(crate) footer: Rect,
+}
+
+/// The on-screen rectangles of the palette's argument picker, derived from a
+/// terminal `area` by [`palette_arg_layout`].
+///
+/// Shared by the renderer, the hit test, and the smooth-scroll emit, so the
+/// pooled list region matches the painted one exactly.
+pub(crate) struct PaletteArgLayout {
+    /// The bordered modal box.
+    pub(crate) modal: Rect,
+    /// Inside the border, the `:` input, its rule, and the body.
+    pub(crate) inner: Rect,
+    /// The result list, also the smooth-scroll pool region.
+    pub(crate) list: Rect,
+    /// The preview beside the list, present only when the body is wide enough.
+    pub(crate) preview: Option<Rect>,
+    /// The key line under the body, as
+    /// [`footer_rect`](crate::render::picker::footer_rect) gives it.
+    pub(crate) footer: Rect,
+    /// The plate's width before zoom steps, in columns, which the palette
+    /// keeps as [`CommandPalette::arg_plate_width`] so the plate does not
+    /// narrow while the palette is open.
+    pub(crate) plate_base: u16,
 }
 
 /// Lay out the command-palette filter modal within `area`, or `None` when
@@ -110,51 +131,75 @@ pub(crate) fn palette_filter_layout(
     })
 }
 
-/// The arg-picker result-list rect, which is the smooth-scroll pool region for
-/// argument mode (`:o `/`:cd `/`:b `). `None` when the modal does not fit or the
-/// body has no rows.
+/// Lay out the palette's argument picker (`:o `, `:cd `, `:b `) within `area`,
+/// its plate fitted to the widest label that its list shows, or `None` when
+/// `area` is too small to host it or no argument picker is open.
 ///
-/// Shared with [`render_palette_arg_picker`] through [`arg_body_split`] so the
-/// pooled region and the painted list are the same rect.
-pub(crate) fn palette_arg_list_rect(area: Rect, content_rows: u16, zoom: i8) -> Option<Rect> {
-    palette_arg_body(area, content_rows, zoom).map(|(list, _)| list)
-}
-
-/// The arg-picker body split into its result-list rect and optional preview
-/// rect, sharing [`arg_body_split`] with the painter so hit-testing and
-/// rendering agree. `None` when the modal does not fit or the body has no rows.
-pub(crate) fn palette_arg_body(
+/// The plate follows the rule of the finder's plate. The list takes the widest
+/// label among the rows on show, at least 30 columns, with its pad and mark
+/// cells, and the preview takes one and a half times the list and at least
+/// `preview_min` columns. The plate does not narrow below
+/// [`CommandPalette::arg_plate_width`], the widest plate the picker has drawn
+/// since the palette opened, and it stops one column inside each side of
+/// `area`. `zoom` steps then move the width by a tenth of the area each.
+///
+/// The height is the height of [`palette_filter_layout`]. The palette's
+/// separator takes no drag, so the list keeps its fitted width.
+pub(crate) fn palette_arg_layout(
     area: Rect,
-    content_rows: u16,
+    palette: &CommandPalette,
+    home: Option<&Path>,
     zoom: i8,
-) -> Option<(Rect, Option<Rect>)> {
-    let layout = palette_filter_layout(area, content_rows, zoom)?;
-    arg_body_split(layout.inner)
+    preview_min: u16,
+) -> Option<PaletteArgLayout> {
+    let picker = palette.arg_picker.as_ref()?;
+    let rows = palette_filter_layout(area, palette.list_rows_hint(), zoom)?.modal;
+    let list = {
+        let (_, list_rows) = arg_body_rows(Block::default().borders(Borders::ALL).inner(rows))?;
+        let widest = crate::render::picker::widest_label(&arg_rows(picker, home), list_rows);
+        crate::render::picker::list_columns(widest)
+    };
+
+    let fitted = crate::render::picker::fitted_plate_width(list, preview_min);
+    let base =
+        crate::render::chrome::fitted_width(area.width, palette.arg_plate_width.max(fitted), 0, 0);
+    let width = crate::render::chrome::fitted_width(area.width, base, 20, zoom);
+    let modal = Rect {
+        x: area.x + (area.width - width) / 2,
+        width,
+        ..rows
+    };
+    let inner = Block::default().borders(Borders::ALL).inner(modal);
+
+    let (top, height) = arg_body_rows(inner)?;
+    let (list, preview) = crate::render::picker::fitted_split(
+        inner.x,
+        top,
+        inner.width,
+        height,
+        list,
+        preview_min,
+        None,
+    );
+    Some(PaletteArgLayout {
+        modal,
+        inner,
+        list,
+        preview,
+        footer: crate::render::picker::footer_rect(modal),
+        plate_base: base,
+    })
 }
 
-/// Split the arg-picker body below the `:` input and above the key line into a
-/// result-list rect and an optional preview rect. `None` when the body has no
-/// rows.
-///
-/// The split stays at [`DEFAULT_LIST_SHARE`], because the palette's separator
-/// is not draggable.
-fn arg_body_split(inner: Rect) -> Option<(Rect, Option<Rect>)> {
-    let body_top = inner.y + 2;
-    let body_height = (inner.y + inner.height)
+/// The top row and the rows of the argument picker's body inside `inner`,
+/// below the `:` input and its rule and above the key line, or `None` when the
+/// body has no rows.
+fn arg_body_rows(inner: Rect) -> Option<(u16, u16)> {
+    let top = inner.y + 2;
+    let height = (inner.y + inner.height)
         .saturating_sub(FOOTER_ROWS - 1)
-        .saturating_sub(body_top);
-    if body_height == 0 {
-        return None;
-    }
-    Some(crate::render::picker::split_list_preview(
-        inner.x,
-        body_top,
-        inner.width,
-        body_height,
-        50,
-        20,
-        DEFAULT_LIST_SHARE,
-    ))
+        .saturating_sub(top);
+    (height > 0).then_some((top, height))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -166,11 +211,23 @@ pub(crate) fn render_command_palette(
     chrome: &crate::render::editor::ResolvedChrome,
     area: Rect,
     zoom: i8,
+    preview_min: u16,
     buf: &mut Buffer,
     scene: &mut stoat_widgets::ApcScene,
 ) {
     if palette.arg_picker.is_some() && palette.arg_source().is_some() {
-        render_palette_arg_picker(palette, ws, home, theme, chrome, area, zoom, buf, scene);
+        render_palette_arg_picker(
+            palette,
+            ws,
+            home,
+            theme,
+            chrome,
+            area,
+            zoom,
+            preview_min,
+            buf,
+            scene,
+        );
         return;
     }
 
@@ -215,9 +272,12 @@ pub(crate) fn render_command_palette(
 /// Render the inline file picker shown while collecting a `Files` argument
 /// (e.g. `:o `).
 ///
-/// Reuses the filter modal's box and `:` input row unchanged, then replaces the
+/// Keeps the filter modal's height and `:` input row, then replaces the
 /// command list + doc body with a result list beside a live preview, mirroring
-/// the standalone file finder. State is synced before the frame by
+/// the standalone file finder. The plate's width follows
+/// [`palette_arg_layout`], and the paint keeps it in
+/// [`CommandPalette::arg_plate_width`], so the next frame draws a plate at
+/// least as wide. State is synced before the frame by
 /// [`crate::action_handlers::sync_palette_picker`], so this only paints.
 #[allow(clippy::too_many_arguments)]
 fn render_palette_arg_picker(
@@ -228,6 +288,7 @@ fn render_palette_arg_picker(
     chrome: &crate::render::editor::ResolvedChrome,
     area: Rect,
     zoom: i8,
+    preview_min: u16,
     buf: &mut Buffer,
     scene: &mut stoat_widgets::ApcScene,
 ) {
@@ -245,27 +306,24 @@ fn render_palette_arg_picker(
         let list = &picker.active_core_ref().picklist;
         (list.filtered.len(), list.base.len())
     });
-    let Some(layout) = render_palette_prelude(
+    let Some(layout) = palette_arg_layout(area, palette, home, zoom, preview_min) else {
+        return;
+    };
+    palette.arg_plate_width = layout.plate_base;
+    render_palette_prelude(
         &palette.input,
         &label,
         count,
-        palette.list_rows_hint(),
+        layout.modal,
+        layout.inner,
         ws,
         theme,
         chrome,
-        area,
-        zoom,
         buf,
         &mut *scene,
-    ) else {
-        return;
-    };
-    let inner = layout.inner;
+    );
     let separator_style = theme.get(crate::theme::scope::UI_BORDER_INACTIVE);
-
-    let Some((list, preview)) = arg_body_split(inner) else {
-        return;
-    };
+    let (list, preview) = (layout.list, layout.preview);
 
     let Some(picker) = palette.arg_picker.as_mut() else {
         return;
@@ -366,21 +424,21 @@ fn render_palette_free_arg(
     scene: &mut stoat_widgets::ApcScene,
 ) {
     let label = format!("Palette \u{00B7} {}", entry.command_name);
-    let Some(layout) = render_palette_prelude(
+    let Some(layout) = palette_filter_layout(area, palette.list_rows_hint(), zoom) else {
+        return;
+    };
+    render_palette_prelude(
         &palette.input,
         &label,
         None,
-        palette.list_rows_hint(),
+        layout.modal,
+        layout.inner,
         ws,
         theme,
         chrome,
-        area,
-        zoom,
         buf,
         scene,
-    ) else {
-        return;
-    };
+    );
     let inner = layout.inner;
 
     let body_top = inner.y + 2;
@@ -435,19 +493,16 @@ fn render_palette_free_arg(
     crate::render::picker::modal_footer(buf, layout.footer, &parts, plate, theme, scene);
 }
 
-/// Render the chrome every palette modal shares, which is the frame, the header
-/// row with its label, the `:` prompt, and the live input, and the separator
-/// beneath it.
+/// Render the chrome every palette modal shares, which is the frame over
+/// `modal`, the header row with its label, the `:` prompt, and the live input,
+/// and the separator beneath it, inside `inner`.
 ///
-/// Returns the modal layout so the caller paints its body -- the command list,
-/// an inline picker, or the free-typed argument hint -- or `None` when the
-/// modal does not fit `area`.
+/// The caller lays the box out and paints its body. The command list and the
+/// free-typed argument hint take the box of [`palette_filter_layout`], and an
+/// inline picker takes the box of [`palette_arg_layout`].
 ///
 /// `label` names the palette and its state, which is the scope, the group, or
 /// the command that takes the argument.
-///
-/// `content_rows` sizes the box, and the argument modals derive it from
-/// [`CommandPalette::list_rows_hint`] while the filter modal is handed it.
 ///
 /// `count` is the header's count of the listed candidates, `None` for the
 /// free-typed argument, which lists none.
@@ -461,23 +516,20 @@ fn render_palette_prelude(
     input: &InputView,
     label: &str,
     count: Option<(usize, usize)>,
-    content_rows: u16,
+    modal: Rect,
+    inner: Rect,
     ws: &mut Workspace,
     theme: &crate::theme::Theme,
     chrome: &crate::render::editor::ResolvedChrome,
-    area: Rect,
-    zoom: i8,
     buf: &mut Buffer,
     scene: &mut stoat_widgets::ApcScene,
-) -> Option<PaletteFilterLayout> {
-    let layout = palette_filter_layout(area, content_rows, zoom)?;
-
+) {
     let modal_style = theme.get(crate::theme::scope::UI_MODAL_PALETTE);
-    crate::render::chrome::list_plate(buf, layout.modal, modal_style, theme, &mut *scene);
+    crate::render::chrome::list_plate(buf, modal, modal_style, theme, &mut *scene);
 
     crate::render::picker::filter_header(
         buf,
-        layout.inner,
+        inner,
         &FilterHeader {
             label,
             prompt: ":",
@@ -490,8 +542,6 @@ fn render_palette_prelude(
         chrome,
         scene,
     );
-
-    Some(layout)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -518,21 +568,21 @@ fn render_palette_filter(
         (None, PaletteScope::All) => Cow::Borrowed("Palette \u{00B7} all"),
     };
     let name_offset = group.map_or(0, |group| group.len() + 1);
-    let Some(layout) = render_palette_prelude(
+    let Some(layout) = palette_filter_layout(area, content_rows, zoom) else {
+        return;
+    };
+    render_palette_prelude(
         input,
         &label,
         Some((filtered.len(), offering)),
-        content_rows,
+        layout.modal,
+        layout.inner,
         ws,
         theme,
         chrome,
-        area,
-        zoom,
         buf,
         &mut *scene,
-    ) else {
-        return;
-    };
+    );
 
     let inner = layout.inner;
     let separator_style = theme.get(crate::theme::scope::UI_BORDER_INACTIVE);
@@ -970,6 +1020,7 @@ mod tests {
             &chrome,
             area,
             0,
+            crate::render::picker::preview_min_columns(None),
             &mut buf,
             &mut scene,
         );

@@ -81,6 +81,14 @@ pub struct CommandPalette {
     /// typing a query cannot resize the box out from under the user typing it.
     /// Only a scope flip changes it.
     pub(crate) offering: usize,
+    /// The widest plate, in columns, that the argument picker has drawn since
+    /// the palette opened.
+    ///
+    /// The plate fits the widest label on show, and a tail that narrows the
+    /// list does not pull the plate in under the user typing it. The width
+    /// outlasts a change of the argument's source, and each open starts over
+    /// at 0.
+    pub(crate) arg_plate_width: u16,
 }
 
 /// The inline value-picker the palette shows while collecting an argument
@@ -640,6 +648,7 @@ impl CommandPalette {
             generation: picker::next_generation(),
             last_filter_key: 0,
             offering,
+            arg_plate_width: 0,
         }
     }
 
@@ -3978,6 +3987,106 @@ mod tests {
         let mut h = repo_harness();
         h.type_text(":git log");
         h.assert_snapshot("command_palette_group_doc");
+    }
+
+    /// The argument picker's plate fits the widest label on show. The tail
+    /// `zz` shows the 66-char path, so the plate grows from 136 to 176
+    /// columns. Clearing the tail fits the list back to 33 columns, and the
+    /// plate keeps its width.
+    #[test]
+    fn the_argument_plate_grows_with_its_widest_row_and_keeps_its_width() {
+        let mut h = argument_plate_harness();
+        let open = palette_plate(&h);
+        h.type_text("zz");
+        h.settle();
+        h.stoat.render();
+        let grown = palette_plate(&h);
+        h.type_keys("backspace backspace");
+        h.settle();
+        h.stoat.render();
+
+        assert_eq!(
+            [open, grown, palette_plate(&h)],
+            [(136, 33), (176, 69), (176, 33)],
+        );
+    }
+
+    /// The palette keeps its widest argument plate only while it stays open,
+    /// so the next open fits the plate to the labels on show again.
+    #[test]
+    fn the_argument_plate_starts_over_when_the_palette_opens() {
+        let mut h = argument_plate_harness();
+        h.type_text("zz");
+        h.settle();
+        h.stoat.render();
+        let grown = palette_plate(&h).0;
+        h.type_keys("escape");
+        h.type_text(":o ");
+        h.settle();
+        h.stoat.render();
+
+        assert_eq!((grown, palette_plate(&h).0), (176, 136));
+    }
+
+    /// The zoom steps walk the box on show, so the argument picker's zoom box
+    /// is its fitted plate and not the box of the command list.
+    #[test]
+    fn the_zoom_box_of_the_argument_picker_is_its_fitted_plate() {
+        let h = argument_plate_harness();
+        let zoom_box = crate::mouse::open_modal_box(&h.stoat, crate::app::ModalKind::Palette, 0);
+
+        assert_eq!(
+            zoom_box,
+            Some(crate::test_fixture::palette_arg_layout(&h).modal)
+        );
+    }
+
+    /// Zoom steps shrink the argument picker's box down to the palette's
+    /// 20-column minimum. On a 300-column window four steps out take the
+    /// 136-column plate past it.
+    #[test]
+    fn zooming_out_stops_the_argument_box_at_twenty_columns() {
+        let mut h = TestHarness::with_size(300, 40);
+        h.type_text(":o ");
+        h.settle();
+
+        let width = crate::mouse::open_modal_box(&h.stoat, crate::app::ModalKind::Palette, -4)
+            .map(|modal| modal.width);
+        assert_eq!(width, Some(20));
+    }
+
+    /// The command list keeps the list modal's width, 160 columns of a
+    /// 200-column window, since only the argument picker fits its plate.
+    #[test]
+    fn the_command_list_keeps_the_list_modal_width() {
+        let mut h = TestHarness::with_size(200, 40);
+        h.type_text(":");
+        h.settle();
+
+        let modal = crate::mouse::open_modal_box(&h.stoat, crate::app::ModalKind::Palette, 0);
+        assert_eq!(modal.map(|modal| modal.width), Some(160));
+    }
+
+    /// A 200 by 40 harness with `:o ` open over 35 short paths and one path of
+    /// 66 chars, which the list shows only under the tail `zz`.
+    fn argument_plate_harness() -> TestHarness {
+        let mut h = TestHarness::with_size(200, 40);
+        let names: Vec<String> = (0..35)
+            .map(|n| format!("a{n:02}.rs"))
+            .chain([format!("zz/{}.rs", "x".repeat(60))])
+            .collect();
+        let files: Vec<(&str, &str)> = names.iter().map(|name| (name.as_str(), "")).collect();
+        seed_palette_workspace(&mut h, &files);
+        h.type_text(":o ");
+        h.settle();
+        h.stoat.render();
+        h
+    }
+
+    /// The open argument picker's modal width and list width.
+    fn palette_plate(h: &TestHarness) -> (u16, u16) {
+        let layout = crate::test_fixture::palette_arg_layout(h);
+        (layout.modal.width, layout.list.width)
     }
 
     /// `:o ` with no query lists every workspace file beside a live preview of

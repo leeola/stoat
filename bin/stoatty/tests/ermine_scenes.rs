@@ -1138,7 +1138,7 @@ fn the_finder_plate_stops_one_cell_inside_each_side_of_the_window() {
     let mut home = support::scratch_home();
     let shot = settled_frame(home.path(), "deep-paths", "src/main.rs", "<Space>p<Settle>");
 
-    expect_plate_at_the_cap(&shot, &mut home, "capped_plate");
+    expect_plate_sides(&shot, &mut home, (7, 1432), "capped_plate");
     expect_islands_apart(&shot, &mut home, 98, 30, "capped_islands");
 }
 
@@ -1159,22 +1159,67 @@ fn the_finder_keeps_its_widest_plate_when_its_results_narrow() {
         "<Space>p<Settle>q<Settle>",
     );
 
-    expect_plate_at_the_cap(&shot, &mut home, "kept_plate");
+    expect_plate_sides(&shot, &mut home, (7, 1432), "kept_plate");
     expect_islands_apart(&shot, &mut home, 49, 30, "kept_islands");
 }
 
-/// Panics unless the finder's plate on pixel row 455 runs from pixel 7 to pixel
-/// 1432 of the 1440 px window, one cell inside each side.
-fn expect_plate_at_the_cap(shot: &Snapshot, home: &mut TempDir, what: &str) {
-    let reads = [6, 7, 1432, 1433].map(|x| pixel(shot, x, 455));
+/// The palette's argument picker opens at its smallest plate.
+///
+/// The labels of `many-files` are all shorter than 30 chars, so the plate
+/// holds a 33-cell list and the 59-cell minimum of a preview at Preview Scale.
+/// The modal rect is the 95 cells from cell 32, and the box is 24 rows from
+/// cell row 13. So on pixel row 455, in the box's body, the plate's ground runs
+/// from pixel 286 to pixel 1144, and the list's Island and the preview's stand
+/// 8 px apart across the separator column, cell 66.
+#[test]
+fn the_argument_picker_opens_at_its_smallest_plate() {
+    let mut home = support::scratch_home();
+    let shot = settled_frame(
+        home.path(),
+        "many-files",
+        "src/alpha.txt",
+        ":o<Space><Settle>",
+    );
+
+    expect_plate_sides(&shot, &mut home, (286, 1144), "argument_plate");
+    expect_islands_apart(&shot, &mut home, 66, 30, "argument_islands");
+}
+
+/// The palette's argument picker stops its plate one cell inside each side of
+/// the window.
+///
+/// The `deep-paths` list holds a 161-char path, so the plate reaches the cap,
+/// as the finder's plate does there. The box is 22 rows from cell row 14, so
+/// pixel row 455 lies in its body, and the list is cells 2 to 97, before the
+/// separator column, cell 98.
+#[test]
+fn the_argument_picker_plate_stops_one_cell_inside_each_side_of_the_window() {
+    let mut home = support::scratch_home();
+    let shot = settled_frame(
+        home.path(),
+        "deep-paths",
+        "src/main.rs",
+        ":o<Space><Settle>",
+    );
+
+    expect_plate_sides(&shot, &mut home, (7, 1432), "capped_argument_plate");
+    expect_islands_apart(&shot, &mut home, 98, 30, "capped_argument_islands");
+}
+
+/// Panics unless a plate's ground on pixel row 455 runs from pixel `left` to
+/// pixel `right`, where the pixel outside each of them reads off the plate.
+fn expect_plate_sides(shot: &Snapshot, home: &mut TempDir, (left, right): (u32, u32), what: &str) {
+    let reads = [left - 1, left, right, right + 1].map(|x| pixel(shot, x, 455));
     if reads.map(|color| color == GROUND) == [false, true, true, false] {
         return;
     }
 
     let frame = keep_frame(shot, home, what);
     panic!(
-        "{what}: the pixels 6, 7, 1432, and 1433 of pixel row 455 read {}, where only 7 and \
-         1432 belong to the ground {}; the frame is {}",
+        "{what}: the pixels {}, {left}, {right}, and {} of pixel row 455 read {}, where only \
+         {left} and {right} belong to the ground {}; the frame is {}",
+        left - 1,
+        right + 1,
         reads.map(hex).join(", "),
         hex(GROUND),
         frame.display(),

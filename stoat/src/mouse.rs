@@ -520,12 +520,11 @@ pub(crate) fn boxed_modal_surfaces(stoat: &Stoat) -> Option<ModalSurfaces> {
                 .arg_picker
                 .as_ref()
                 .filter(|_| palette.arg_source().is_some())?;
-            let list = crate::render::command_palette::palette_arg_list_rect(size, rows, zoom)?;
+            let layout = open_palette_arg_layout(stoat, zoom)?;
             let core = picker.active_core_ref();
             Some(ModalSurfaces {
-                list,
-                preview: crate::render::command_palette::palette_arg_body(size, rows, zoom)
-                    .and_then(|(_, preview)| preview),
+                list: layout.list,
+                preview: layout.preview,
                 len: core.picklist.filtered.len(),
                 selected: core.picklist.selected,
                 rows: ListRows::PaletteArg,
@@ -782,6 +781,26 @@ pub(crate) fn open_finder_layout(
     )
 }
 
+/// The open palette's argument picker layout at `zoom`, from the same inputs
+/// its renderer reads, or `None` when no argument picker is open or the
+/// terminal is too small to host it.
+pub(crate) fn open_palette_arg_layout(
+    stoat: &Stoat,
+    zoom: i8,
+) -> Option<crate::render::command_palette::PaletteArgLayout> {
+    let palette = stoat
+        .command_palette
+        .as_ref()
+        .filter(|palette| palette.arg_source().is_some())?;
+    crate::render::command_palette::palette_arg_layout(
+        stoat.size(),
+        palette,
+        stoat.home.as_deref(),
+        zoom,
+        stoat.preview_min_columns(),
+    )
+}
+
 /// The bordered box `kind`'s modal would occupy at `zoom`, sized from the
 /// same inputs its renderer reads.
 ///
@@ -826,16 +845,22 @@ pub(crate) fn open_modal_box(stoat: &Stoat, kind: ModalKind, zoom: i8) -> Option
             crate::render::file_finder::file_finder_layout(size, (u16::MAX, u16::MAX), zoom, split)?
                 .modal
         },
-        // Filter mode and argument mode share one box, so the hint alone
-        // sizes both.
+        // The argument picker fits its plate to its labels, as the finder
+        // does, and the command list and the free-typed argument keep the
+        // list modal's box.
         ModalKind::Palette => {
             let palette = stoat.command_palette.as_ref()?;
-            crate::render::command_palette::palette_filter_layout(
-                size,
-                palette.list_rows_hint(),
-                zoom,
-            )?
-            .modal
+            match palette.arg_picker.is_some() && palette.arg_source().is_some() {
+                true => open_palette_arg_layout(stoat, zoom)?.modal,
+                false => {
+                    crate::render::command_palette::palette_filter_layout(
+                        size,
+                        palette.list_rows_hint(),
+                        zoom,
+                    )?
+                    .modal
+                },
+            }
         },
         ModalKind::CommitPicker => {
             let picker = stoat.commit_picker.as_ref()?;
