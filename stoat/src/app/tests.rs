@@ -1291,26 +1291,56 @@ fn modal_zoom_steps_clamp_at_both_ends() {
 /// Kinds read their share independently, so one modal's dragged separator
 /// must not move another's, and a kind never dragged keeps the layout's own
 /// default.
+/// A dragged separator lands on the column its pointer left at any body width.
+/// The share of every column that a 134-column body lets the list take reads
+/// back as that column, where a whole percent, 1.34 columns wide, skips a third
+/// of them.
+#[test]
+fn every_dragged_column_of_a_wide_body_reads_back() {
+    let separator = SplitSeparator {
+        axis: SeparatorAxis::Columns,
+        line: 33,
+        span: 0..30,
+        body: 0..134,
+        min_list: crate::render::picker::MIN_PANE_COLUMNS,
+        min_preview: crate::render::picker::MIN_PANE_COLUMNS,
+    };
+    let landed: Vec<u16> = (24..=109)
+        .map(|column| {
+            let mouse = MouseEvent {
+                kind: MouseEventKind::Drag(MouseButton::Left),
+                column,
+                row: 5,
+                modifiers: KeyModifiers::NONE,
+            };
+            let share = separator.share_at(&mouse).expect("the body splits");
+            crate::render::picker::share_of(134, share)
+        })
+        .collect();
+
+    assert_eq!(landed, (24..=109).collect::<Vec<u16>>());
+}
+
 #[test]
 fn a_dragged_share_is_read_back_per_kind() {
     let mut h = crate::test_harness::TestHarness::with_size(101, 40);
 
     assert_eq!(
-        modal_split_percent(&h.stoat.modal_split, ModalKind::FileFinder),
-        crate::render::picker::DEFAULT_LIST_PERCENT,
+        modal_split_share(&h.stoat.modal_split, ModalKind::FileFinder),
+        crate::render::picker::DEFAULT_LIST_SHARE,
         "an untouched kind sits at the default"
     );
 
-    h.stoat.modal_split.insert(ModalKind::FileFinder, 65);
+    h.stoat.modal_split.insert(ModalKind::FileFinder, 6_500);
 
     assert_eq!(
-        modal_split_percent(&h.stoat.modal_split, ModalKind::FileFinder),
-        65,
+        modal_split_share(&h.stoat.modal_split, ModalKind::FileFinder),
+        6_500,
         "the stored share reads back"
     );
     assert_eq!(
-        modal_split_percent(&h.stoat.modal_split, ModalKind::CommitPicker),
-        crate::render::picker::DEFAULT_LIST_PERCENT,
+        modal_split_share(&h.stoat.modal_split, ModalKind::CommitPicker),
+        crate::render::picker::DEFAULT_LIST_SHARE,
         "and its sibling kinds are untouched"
     );
 }
@@ -12356,7 +12386,7 @@ fn side_by_side_layout(h: &crate::test_harness::TestHarness, kind: ModalKind) ->
                 h.stoat.size(),
                 finder.content_rows,
                 modal_zoom_steps(&h.stoat.modal_zoom, kind),
-                modal_split_percent(&h.stoat.modal_split, kind),
+                modal_split_share(&h.stoat.modal_split, kind),
             )
             .expect("fits");
             (list, preview)
@@ -12370,7 +12400,7 @@ fn side_by_side_layout(h: &crate::test_harness::TestHarness, kind: ModalKind) ->
                 h.stoat.size(),
                 (u16::MAX, u16::MAX),
                 modal_zoom_steps(&h.stoat.modal_zoom, kind),
-                modal_split_percent(&h.stoat.modal_split, kind),
+                modal_split_share(&h.stoat.modal_split, kind),
             )
             .expect("fits");
             (layout.list, layout.preview)

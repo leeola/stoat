@@ -9,7 +9,7 @@
 use crate::{
     action_handlers::{self, commits::CommitStep, diff_changes::StackPress, rebase::RebaseMove},
     app::{
-        modal_split_percent, modal_zoom_steps, ModalKind, PanelHit, SeparatorAxis, SplitSeparator,
+        modal_split_share, modal_zoom_steps, ModalKind, PanelHit, SeparatorAxis, SplitSeparator,
         Stoat, UpdateEffect, MIN_PREVIEW_ROWS, MODAL_ZOOM_MAX, MODAL_ZOOM_MIN, PREVIEW_WHEEL_ROWS,
         WHEEL_BINDING_COOLDOWN,
     },
@@ -434,7 +434,7 @@ pub(crate) fn modal_preview_editor(stoat: &Stoat) -> Option<EditorId> {
 pub(crate) fn boxed_modal_surfaces(stoat: &Stoat) -> Option<ModalSurfaces> {
     let size = stoat.size();
     let zoom = |kind| modal_zoom_steps(&stoat.modal_zoom, kind);
-    let split = |kind| modal_split_percent(&stoat.modal_split, kind);
+    let split = |kind| modal_split_share(&stoat.modal_split, kind);
 
     match active_modal(stoat)? {
         ActiveModal::FileFinder => {
@@ -783,7 +783,7 @@ fn press_git_status_row(stoat: &mut Stoat, mouse: MouseEvent) -> UpdateEffect {
 ///   move the box.
 pub(crate) fn open_modal_box(stoat: &Stoat, kind: ModalKind, zoom: i8) -> Option<Rect> {
     let size = stoat.size();
-    let split = modal_split_percent(&stoat.modal_split, kind);
+    let split = modal_split_share(&stoat.modal_split, kind);
 
     let modal = match kind {
         ModalKind::Help => {
@@ -910,7 +910,7 @@ pub(crate) fn open_modal_separator(stoat: &Stoat) -> Option<(ModalKind, SplitSep
             size,
             picker.graph_lanes,
             modal_zoom_steps(&stoat.modal_zoom, ModalKind::CommitPicker),
-            modal_split_percent(&stoat.modal_split, ModalKind::CommitPicker),
+            modal_split_share(&stoat.modal_split, ModalKind::CommitPicker),
         )?;
         let preview = layout.preview?;
         let inner = layout.inner;
@@ -935,7 +935,7 @@ pub(crate) fn open_modal_separator(stoat: &Stoat) -> Option<(ModalKind, SplitSep
             size,
             finder.content_size,
             modal_zoom_steps(&stoat.modal_zoom, kind),
-            modal_split_percent(&stoat.modal_split, kind),
+            modal_split_share(&stoat.modal_split, kind),
         )?;
         (kind, layout.inner, layout.list, layout.preview)
     } else if stoat.code_search.is_some() {
@@ -946,7 +946,7 @@ pub(crate) fn open_modal_separator(stoat: &Stoat) -> Option<(ModalKind, SplitSep
             size,
             (u16::MAX, u16::MAX),
             modal_zoom_steps(&stoat.modal_zoom, kind),
-            modal_split_percent(&stoat.modal_split, kind),
+            modal_split_share(&stoat.modal_split, kind),
         )?;
         (kind, layout.inner, layout.list, layout.preview)
     } else {
@@ -956,7 +956,7 @@ pub(crate) fn open_modal_separator(stoat: &Stoat) -> Option<(ModalKind, SplitSep
             size,
             finder.content_rows,
             modal_zoom_steps(&stoat.modal_zoom, kind),
-            modal_split_percent(&stoat.modal_split, kind),
+            modal_split_share(&stoat.modal_split, kind),
         )?;
         (kind, inner, list, preview)
     };

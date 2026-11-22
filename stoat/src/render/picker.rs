@@ -1054,11 +1054,7 @@ pub(crate) struct PickerLayout {
 ///
 /// Painting and hit-testing both go through this, so a clicked row names the
 /// row drawn there.
-pub(crate) fn target_picker_layout(
-    area: Rect,
-    zoom: i8,
-    list_percent: u16,
-) -> Option<PickerLayout> {
+pub(crate) fn target_picker_layout(area: Rect, zoom: i8, list_share: u16) -> Option<PickerLayout> {
     let modal = crate::render::chrome::modal_box(
         area,
         (120, 32u16.saturating_add(CHROME_ROWS)),
@@ -1081,7 +1077,7 @@ pub(crate) fn target_picker_layout(
         body_height,
         80,
         MIN_PANE_COLUMNS,
-        list_percent,
+        list_share,
     );
     Some(PickerLayout {
         modal,
@@ -2177,12 +2173,33 @@ fn target_row(snapshot: &DisplaySnapshot, top_row: u32, area: Rect, line: u32) -
     (offset < u32::from(area.height)).then(|| area.y + offset as u16)
 }
 
-/// Share of a modal's body its list pane takes, before the user drags the
-/// separator to a share of their own.
+/// The units of a list pane's share of its body, which ten thousand of make
+/// the whole body.
+///
+/// A dragged separator stores the share its pointer lands on, and the layout
+/// reads it back as columns. A unit finer than one column of the widest body
+/// lets the layout recover the exact column the pointer left. A whole percent
+/// is coarser than a column on a body wider than 100 columns, so it moves the
+/// separator a column off the pointer there.
+pub(crate) const SHARE_SCALE: u32 = 10_000;
+
+/// Share of a modal's body its list pane takes, in [`SHARE_SCALE`] units,
+/// before the user drags the separator to a share of their own.
 ///
 /// One value for the whole modal family, so an untouched finder, symbol list,
 /// code search, and commit picker all divide their body the same way.
-pub(crate) const DEFAULT_LIST_PERCENT: u16 = 40;
+pub(crate) const DEFAULT_LIST_SHARE: u16 = 4_000;
+
+/// The cells that `share`, in [`SHARE_SCALE`] units, takes of `extent` cells,
+/// rounded down.
+///
+/// See also:
+/// - [`SplitSeparator::share_at`](crate::app::SplitSeparator::share_at), which rounds a dragged
+///   share up against this rounding down.
+pub(crate) fn share_of(extent: u16, share: u16) -> u16 {
+    let cells = u32::from(extent) * u32::from(share) / SHARE_SCALE;
+    u16::try_from(cells).unwrap_or(u16::MAX)
+}
 
 /// Columns each pane of a side-by-side modal keeps.
 ///
@@ -2194,9 +2211,9 @@ pub(crate) const MIN_PANE_COLUMNS: u16 = 24;
 /// Split a picker body rect into a result list and an optional preview pane.
 ///
 /// The preview appears only when `width >= wide_threshold`, where the list
-/// takes `list_percent` of the width (floored at `min_list`) and the preview the
-/// rest past a one-cell separator. Below the threshold the list takes the full
-/// width and there is no preview.
+/// takes `list_share` of the width, in [`SHARE_SCALE`] units, floored at
+/// `min_list`, and the preview the rest past a one-cell separator. Below the
+/// threshold the list takes the full width and there is no preview.
 pub(crate) fn split_list_preview(
     x: u16,
     y: u16,
@@ -2204,10 +2221,10 @@ pub(crate) fn split_list_preview(
     height: u16,
     wide_threshold: u16,
     min_list: u16,
-    list_percent: u16,
+    list_share: u16,
 ) -> (Rect, Option<Rect>) {
     if width >= wide_threshold {
-        let list_width = (width * list_percent / 100).max(min_list);
+        let list_width = share_of(width, list_share).max(min_list);
         let preview_width = width.saturating_sub(list_width + 1);
         (
             Rect::new(x, y, list_width, height),
@@ -3141,20 +3158,20 @@ mod tests {
     /// where it landed before the share was a parameter at all.
     #[test]
     fn the_list_takes_the_share_it_is_given() {
-        let split = |percent| split_list_preview(0, 0, 100, 10, 80, 24, percent);
+        let split = |share| split_list_preview(0, 0, 100, 10, 80, 24, share);
 
         assert_eq!(
-            split(DEFAULT_LIST_PERCENT),
+            split(DEFAULT_LIST_SHARE),
             (Rect::new(0, 0, 40, 10), Some(Rect::new(41, 0, 59, 10))),
             "the default share splits the body where it always has"
         );
         assert_eq!(
-            split(60),
+            split(6_000),
             (Rect::new(0, 0, 60, 10), Some(Rect::new(61, 0, 39, 10))),
             "a wider share moves the boundary and the preview takes the rest"
         );
         assert_eq!(
-            split(5),
+            split(500),
             (Rect::new(0, 0, 24, 10), Some(Rect::new(25, 0, 75, 10))),
             "a share under the minimum still leaves the list its floor"
         );
@@ -3165,7 +3182,7 @@ mod tests {
     #[test]
     fn a_narrow_body_ignores_the_share_and_stays_list_only() {
         assert_eq!(
-            split_list_preview(0, 0, 79, 10, 80, 24, 60),
+            split_list_preview(0, 0, 79, 10, 80, 24, 6_000),
             (Rect::new(0, 0, 79, 10), None),
             "below the wide threshold the list takes everything"
         );

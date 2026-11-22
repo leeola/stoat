@@ -4,7 +4,7 @@ use crate::{
     render::{
         chrome::{ISLAND_BOTTOM, ISLAND_GAP, ISLAND_SIDE, ISLAND_TOP},
         picker::{
-            FilterHeader, Footer, PathRows, RowMarks, RowStart, DEFAULT_LIST_PERCENT, FOOTER_ROWS,
+            FilterHeader, Footer, PathRows, RowMarks, RowStart, DEFAULT_LIST_SHARE, FOOTER_ROWS,
         },
         text::{wrap_text, write_str, write_str_clipped},
     },
@@ -136,7 +136,7 @@ pub(crate) fn palette_arg_body(
 /// result-list rect and an optional preview rect. `None` when the body has no
 /// rows.
 ///
-/// The split stays at [`DEFAULT_LIST_PERCENT`], because the palette's separator
+/// The split stays at [`DEFAULT_LIST_SHARE`], because the palette's separator
 /// is not draggable.
 fn arg_body_split(inner: Rect) -> Option<(Rect, Option<Rect>)> {
     let body_top = inner.y + 2;
@@ -153,7 +153,7 @@ fn arg_body_split(inner: Rect) -> Option<(Rect, Option<Rect>)> {
         body_height,
         50,
         20,
-        DEFAULT_LIST_PERCENT,
+        DEFAULT_LIST_SHARE,
     ))
 }
 

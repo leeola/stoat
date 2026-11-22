@@ -1587,7 +1587,7 @@ mod tests {
             h.stoat.size(),
             lanes,
             0,
-            crate::app::modal_split_percent(&h.stoat.modal_split, ModalKind::CommitPicker),
+            crate::app::modal_split_share(&h.stoat.modal_split, ModalKind::CommitPicker),
         )
         .expect("the picker fits the test terminal")
     }
@@ -2117,7 +2117,7 @@ mod tests {
         let h = seeded_picker_harness();
         let size = h.stoat.size();
 
-        let default_split = crate::render::picker::DEFAULT_LIST_PERCENT;
+        let default_split = crate::render::picker::DEFAULT_LIST_SHARE;
         let without =
             crate::render::commit_picker::commit_picker_layout(size, None, 0, default_split)
                 .expect("fits");
@@ -2143,13 +2143,12 @@ mod tests {
     #[test]
     fn the_share_moves_the_table_diff_boundary_down_to_its_floor() {
         let size = seeded_picker_harness().stoat.size();
-        let layout = |percent| {
-            crate::render::commit_picker::commit_picker_layout(size, None, 0, percent)
-                .expect("fits")
+        let layout = |share| {
+            crate::render::commit_picker::commit_picker_layout(size, None, 0, share).expect("fits")
         };
 
-        let default = layout(crate::render::picker::DEFAULT_LIST_PERCENT);
-        let tall = layout(70);
+        let default = layout(crate::render::picker::DEFAULT_LIST_SHARE);
+        let tall = layout(7_000);
         assert!(
             tall.list.height > default.list.height,
             "a larger share gives the table more rows: {} vs {}",
@@ -2303,7 +2302,7 @@ mod tests {
             &chrome,
             area,
             0,
-            crate::render::picker::DEFAULT_LIST_PERCENT,
+            crate::render::picker::DEFAULT_LIST_SHARE,
             dials,
             &mut buf,
             &mut scene,
@@ -2685,7 +2684,7 @@ mod tests {
             h.stoat.size(),
             lanes,
             crate::app::modal_zoom_steps(&h.stoat.modal_zoom, ModalKind::CommitPicker),
-            crate::app::modal_split_percent(&h.stoat.modal_split, ModalKind::CommitPicker),
+            crate::app::modal_split_share(&h.stoat.modal_split, ModalKind::CommitPicker),
         )
         .expect("the picker lays out");
 

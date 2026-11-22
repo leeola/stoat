@@ -34,13 +34,13 @@ const CHROME_ROWS: u16 = 5;
 ///
 /// `content_rows` is the symbols the list holds, which the box grows to fit past
 /// its recommended 32 rows. `zoom` is the user's step count from
-/// [`modal_zoom`](crate::app::Stoat::modal_zoom), and `list_percent` the width
+/// [`modal_zoom`](crate::app::Stoat::modal_zoom), and `list_share` the width
 /// the list takes from [`modal_split`](crate::app::Stoat::modal_split).
 pub(crate) fn symbol_finder_layout(
     area: Rect,
     content_rows: u16,
     zoom: i8,
-    list_percent: u16,
+    list_share: u16,
 ) -> Option<(Rect, Rect, Rect, Option<Rect>)> {
     let modal = crate::render::chrome::modal_box(
         area,
@@ -65,7 +65,7 @@ pub(crate) fn symbol_finder_layout(
         body_height,
         80,
         crate::render::picker::MIN_PANE_COLUMNS,
-        list_percent,
+        list_share,
     );
     Some((modal, inner, list, preview))
 }
@@ -80,12 +80,12 @@ pub(crate) fn render_symbol_finder(
     languages: &LanguageRegistry,
     area: Rect,
     zoom: i8,
-    list_percent: u16,
+    list_share: u16,
     buf: &mut Buffer,
     scene: &mut stoat_widgets::ApcScene,
 ) {
     let Some((modal, inner, list, preview)) =
-        symbol_finder_layout(area, finder.content_rows, zoom, list_percent)
+        symbol_finder_layout(area, finder.content_rows, zoom, list_share)
     else {
         return;
     };
@@ -363,7 +363,7 @@ fn symbol_kind_label(kind: Option<SymbolKind>) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::{render_doc_pane, symbol_finder_layout};
-    use crate::render::picker::DEFAULT_LIST_PERCENT;
+    use crate::render::picker::DEFAULT_LIST_SHARE;
     use ratatui::{buffer::Buffer, layout::Rect, style::Style};
 
     /// The doc pane used to pass no scene, so its separator fell back to dash
@@ -396,9 +396,8 @@ mod tests {
 
     #[test]
     fn a_short_symbol_list_keeps_the_recommended_box() {
-        let (modal, ..) =
-            symbol_finder_layout(Rect::new(0, 0, 200, 60), 5, 0, DEFAULT_LIST_PERCENT)
-                .expect("the area hosts the finder");
+        let (modal, ..) = symbol_finder_layout(Rect::new(0, 0, 200, 60), 5, 0, DEFAULT_LIST_SHARE)
+            .expect("the area hosts the finder");
         assert_eq!(
             modal,
             Rect::new(20, 14, 160, 32),
@@ -411,7 +410,7 @@ mod tests {
     #[test]
     fn a_long_symbol_list_grows_the_box_to_show_every_row() {
         let (modal, _, list, _) =
-            symbol_finder_layout(Rect::new(0, 0, 200, 60), 40, 0, DEFAULT_LIST_PERCENT)
+            symbol_finder_layout(Rect::new(0, 0, 200, 60), 40, 0, DEFAULT_LIST_SHARE)
                 .expect("the area hosts the finder");
         assert_eq!(modal.height, 45, "forty symbols plus five chrome rows");
         assert_eq!(
@@ -423,7 +422,7 @@ mod tests {
     #[test]
     fn a_list_larger_than_the_area_stops_at_the_margin() {
         let (modal, ..) =
-            symbol_finder_layout(Rect::new(0, 0, 200, 60), u16::MAX, 0, DEFAULT_LIST_PERCENT)
+            symbol_finder_layout(Rect::new(0, 0, 200, 60), u16::MAX, 0, DEFAULT_LIST_SHARE)
                 .expect("the area hosts the finder");
         assert_eq!(modal.height, 56, "growth stops at the area less its margin");
     }

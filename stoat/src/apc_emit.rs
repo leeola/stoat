@@ -13,7 +13,7 @@
 
 use crate::{
     action_handlers::view,
-    app::{modal_split_percent, modal_zoom_steps, ModalKind, Stoat},
+    app::{modal_split_share, modal_zoom_steps, ModalKind, Stoat},
     buffer_registry::BufferRegistry,
     commit_list::Preview,
     diagnostic_spans::{self, ResolvedDiag},
@@ -812,7 +812,7 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
                 stoat.size(),
                 finder.content_size,
                 modal_zoom_steps(&stoat.modal_zoom, ModalKind::FileFinder),
-                modal_split_percent(&stoat.modal_split, ModalKind::FileFinder),
+                modal_split_share(&stoat.modal_split, ModalKind::FileFinder),
             )
         })
         .map(|layout| layout.list)
@@ -847,7 +847,7 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
                 stoat.size(),
                 (u16::MAX, u16::MAX),
                 modal_zoom_steps(&stoat.modal_zoom, ModalKind::CodeSearch),
-                modal_split_percent(&stoat.modal_split, ModalKind::CodeSearch),
+                modal_split_share(&stoat.modal_split, ModalKind::CodeSearch),
             )
         })
         .map(|layout| layout.list);
@@ -862,7 +862,7 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
                 stoat.size(),
                 finder.content_rows,
                 modal_zoom_steps(&stoat.modal_zoom, ModalKind::SymbolFinder),
-                modal_split_percent(&stoat.modal_split, ModalKind::SymbolFinder),
+                modal_split_share(&stoat.modal_split, ModalKind::SymbolFinder),
             )
         })
         .map(|(_, _, list, _)| list);
@@ -923,7 +923,7 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
                 stoat.size(),
                 picker.graph_lanes,
                 modal_zoom_steps(&stoat.modal_zoom, ModalKind::CommitPicker),
-                modal_split_percent(&stoat.modal_split, ModalKind::CommitPicker),
+                modal_split_share(&stoat.modal_split, ModalKind::CommitPicker),
             )
         })
         .map(|layout| layout.body());
@@ -945,7 +945,7 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
                 stoat.size(),
                 picker.graph_lanes,
                 modal_zoom_steps(&stoat.modal_zoom, ModalKind::CommitPicker),
-                modal_split_percent(&stoat.modal_split, ModalKind::CommitPicker),
+                modal_split_share(&stoat.modal_split, ModalKind::CommitPicker),
             )
         })
         .and_then(|layout| layout.preview);

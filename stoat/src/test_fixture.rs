@@ -12,7 +12,7 @@
 
 use crate::{
     action_handlers,
-    app::{modal_split_percent, modal_zoom_steps, ModalKind},
+    app::{modal_split_share, modal_zoom_steps, ModalKind},
     editor_state::EditorId,
     host::{lsp::IncomingRequest, FakeTerminalSession},
     lsp::drain,
@@ -72,7 +72,7 @@ pub(crate) fn finder_layout(h: &TestHarness) -> crate::render::file_finder::Find
         h.stoat.size(),
         finder.content_size,
         modal_zoom_steps(&h.stoat.modal_zoom, ModalKind::FileFinder),
-        modal_split_percent(&h.stoat.modal_split, ModalKind::FileFinder),
+        modal_split_share(&h.stoat.modal_split, ModalKind::FileFinder),
     )
     .expect("the finder fits the test terminal")
 }
@@ -86,7 +86,7 @@ pub(crate) fn picker_layout(
     crate::render::picker::target_picker_layout(
         h.stoat.size(),
         modal_zoom_steps(&h.stoat.modal_zoom, kind),
-        modal_split_percent(&h.stoat.modal_split, kind),
+        modal_split_share(&h.stoat.modal_split, kind),
     )
     .expect("picker laid out")
 }

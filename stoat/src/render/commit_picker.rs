@@ -115,13 +115,13 @@ pub(crate) fn graph_width(lanes: u16) -> u16 {
 ///
 /// `lanes` reserves the graph column, and comes from
 /// [`CommitPicker::graph_lanes`] so every caller agrees on whether it is
-/// showing. `list_percent` is the share of the body the table takes, from
+/// showing. `list_share` is the share of the body the table takes, from
 /// [`modal_split`](crate::app::Stoat::modal_split).
 pub(crate) fn commit_picker_layout(
     area: Rect,
     lanes: Option<u16>,
     zoom: i8,
-    list_percent: u16,
+    list_share: u16,
 ) -> Option<CommitPickerLayout> {
     // A commit row plus its diff preview both want room, and the history behind
     // them is arbitrarily long, so the picker asks for the whole area rather
@@ -131,7 +131,7 @@ pub(crate) fn commit_picker_layout(
         area,
         (u16::MAX, u16::MAX),
         zoom,
-        crate::render::picker::DEFAULT_LIST_PERCENT,
+        crate::render::picker::DEFAULT_LIST_SHARE,
     )?;
     let inner = box_layout.inner;
     let body_end = box_layout
@@ -142,7 +142,7 @@ pub(crate) fn commit_picker_layout(
     let body_top = header.y + 1;
     let body_height = body_end.saturating_sub(body_top);
 
-    let list_height = (body_height * list_percent / 100)
+    let list_height = crate::render::picker::share_of(body_height, list_share)
         .max(MIN_LIST_ROWS)
         .min(body_height);
 
@@ -188,12 +188,12 @@ pub(crate) fn render_commit_picker(
     chrome: &crate::render::editor::ResolvedChrome,
     area: Rect,
     zoom: i8,
-    list_percent: u16,
+    list_share: u16,
     dials: crate::render::commits::PreviewDials,
     buf: &mut Buffer,
     scene: &mut ApcScene,
 ) {
-    let Some(layout) = commit_picker_layout(area, picker.graph_lanes, zoom, list_percent) else {
+    let Some(layout) = commit_picker_layout(area, picker.graph_lanes, zoom, list_share) else {
         return;
     };
 

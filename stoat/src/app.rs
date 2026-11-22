@@ -795,14 +795,15 @@ impl SplitSeparator {
         self.axis.along(mouse) == self.line && self.span.contains(&self.axis.across(mouse))
     }
 
-    /// The list's share of the body once the separator lands at `mouse`, or
-    /// `None` when the body cannot host both floors and so cannot be split.
+    /// The list's share of the body once the separator lands at `mouse`, in
+    /// [`SHARE_SCALE`](crate::render::picker::SHARE_SCALE) units, or `None` when
+    /// the body is too narrow to hold both floors and so has no split.
     ///
-    /// Clamping happens in the axis's own units rather than in percent, because a
-    /// percent that round-trips through the layout's truncating division lands
+    /// Clamping happens in the axis's own units rather than in shares, because a
+    /// share that round-trips through the layout's truncating division lands
     /// the separator a cell short of the pointer. The extent is clamped to leave
-    /// both panes their floor, and the percent is rounded up so the layout
-    /// recovers exactly that extent.
+    /// both panes their floor, and the share is rounded up so the layout
+    /// recovers exactly that extent on a body under 10,000 cells.
     pub(crate) fn share_at(&self, mouse: &MouseEvent) -> Option<u16> {
         let extent = self.body.end.saturating_sub(self.body.start);
         let widest_list = extent.saturating_sub(self.min_preview + 1);
@@ -816,7 +817,9 @@ impl SplitSeparator {
             .saturating_sub(self.body.start)
             .clamp(self.min_list, widest_list);
 
-        Some((list * 100).div_ceil(extent))
+        let share =
+            (u32::from(list) * crate::render::picker::SHARE_SCALE).div_ceil(u32::from(extent));
+        Some(u16::try_from(share).unwrap_or(u16::MAX))
     }
 }
 
@@ -843,19 +846,20 @@ pub(crate) fn modal_zoom_steps(
     zooms.get(&kind).copied().unwrap_or(0)
 }
 
-/// Share of its body `kind`'s list pane takes, as a percentage.
+/// Share of its body `kind`'s list pane takes, in
+/// [`SHARE_SCALE`](crate::render::picker::SHARE_SCALE) units.
 ///
 /// A kind whose separator the user never dragged reads the layout family's own
 /// default. Free rather than a [`Stoat`] method for the same reason
 /// [`modal_zoom_steps`] is.
-pub(crate) fn modal_split_percent(
+pub(crate) fn modal_split_share(
     splits: &std::collections::BTreeMap<ModalKind, u16>,
     kind: ModalKind,
 ) -> u16 {
     splits
         .get(&kind)
         .copied()
-        .unwrap_or(crate::render::picker::DEFAULT_LIST_PERCENT)
+        .unwrap_or(crate::render::picker::DEFAULT_LIST_SHARE)
 }
 
 /// One key press's keymap lookup, derived on demand.
@@ -1046,17 +1050,19 @@ pub struct Stoat {
     /// Session-scoped and deliberately not persisted, for the same reason as
     /// [`Self::diff_soften`]. It answers what is on screen right now.
     pub(crate) diff_underline: bool,
-    /// Share of its body each modal's list pane takes, as a percentage, for the
-    /// kinds whose list/preview separator the user has dragged. An absent kind
-    /// sits at [`crate::render::picker::DEFAULT_LIST_PERCENT`].
+    /// Share of its body each modal's list pane takes, in
+    /// [`crate::render::picker::SHARE_SCALE`] units, for the kinds whose
+    /// list/preview separator the user has dragged. An absent kind sits at
+    /// [`crate::render::picker::DEFAULT_LIST_SHARE`].
     ///
     /// Stored per kind and session-scoped for [`Self::modal_zoom`]'s reasons. A
     /// share the user chose outlives the modal it was chosen in, so reopening
     /// that modal restores the split. It is never persisted, because the choice
     /// answers what is on screen right now.
     pub(crate) modal_split: std::collections::BTreeMap<ModalKind, u16>,
-    /// Share of its body the commits screen's list pane takes, as a
-    /// percentage, once the reader has dragged the list/detail separator.
+    /// Share of its body the commits screen's list pane takes, in
+    /// [`crate::render::picker::SHARE_SCALE`] units, once the reader has
+    /// dragged the list/detail separator.
     ///
     /// `None` until the first drag, which leaves the width to the renderer's
     /// own formula. Session-scoped for [`Self::modal_split`]'s reasons: a

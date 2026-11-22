@@ -26,7 +26,7 @@ pub(crate) fn render_code_search(
     chrome: &crate::render::editor::ResolvedChrome,
     area: Rect,
     zoom: i8,
-    list_percent: u16,
+    list_share: u16,
     buf: &mut Buffer,
     scene: &mut stoat_widgets::ApcScene,
 ) {
@@ -37,7 +37,7 @@ pub(crate) fn render_code_search(
         area,
         (u16::MAX, u16::MAX),
         zoom,
-        list_percent,
+        list_share,
     ) else {
         return;
     };

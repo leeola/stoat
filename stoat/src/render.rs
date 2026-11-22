@@ -60,7 +60,7 @@ use crate::{
     },
     apc_emit,
     app::{
-        self, modal_split_percent, modal_zoom_steps, ModalKind, Stoat, STATUS_ROW_PAD, TAB_BAR_PAD,
+        self, modal_split_share, modal_zoom_steps, ModalKind, Stoat, STATUS_ROW_PAD, TAB_BAR_PAD,
     },
     auto_reload::ReloadFlash,
     blame::BlameState,
@@ -361,9 +361,10 @@ pub(crate) struct FrameCtx<'a> {
     /// editor with no screen over it.
     pub(crate) screen: Option<&'static str>,
     pub(crate) theme: &'a crate::theme::Theme,
-    /// The commits screen's dragged list share, as a percentage of the pane
-    /// body. `None` until the reader drags that screen's separator, which
-    /// leaves the width to the renderer's own formula.
+    /// The commits screen's dragged list share of the pane body, in
+    /// [`crate::render::picker::SHARE_SCALE`] units. `None` until the reader
+    /// drags that screen's separator, which leaves the width to the renderer's
+    /// own formula.
     pub(crate) commits_split: Option<u16>,
     /// The diff view's styling dials, resolved for the commit previews. Those
     /// previews paint through `:diff-files`'s own painter, so they answer the
@@ -2158,7 +2159,7 @@ pub(crate) fn frame(
         Some(ActiveModal::Jumplist) => {
             if let Some(picker) = &mut stoat.jumplist_picker {
                 let zoom = modal_zoom_steps(&stoat.modal_zoom, ModalKind::JumplistPicker);
-                let split = modal_split_percent(&stoat.modal_split, ModalKind::JumplistPicker);
+                let split = modal_split_share(&stoat.modal_split, ModalKind::JumplistPicker);
                 jumplist_picker::render_jumplist_picker(
                     picker,
                     ws,
@@ -2193,7 +2194,7 @@ pub(crate) fn frame(
         Some(ActiveModal::WalkthroughPicker) => {
             if let Some(picker) = &mut stoat.walkthrough_picker {
                 let zoom = modal_zoom_steps(&stoat.modal_zoom, ModalKind::WalkthroughPicker);
-                let split = modal_split_percent(&stoat.modal_split, ModalKind::WalkthroughPicker);
+                let split = modal_split_share(&stoat.modal_split, ModalKind::WalkthroughPicker);
                 walkthrough_picker::render_walkthrough_picker(
                     picker,
                     ws,
@@ -2228,7 +2229,7 @@ pub(crate) fn frame(
         Some(ActiveModal::PaneFinder) => {
             if let Some(finder) = &mut stoat.pane_finder {
                 let zoom = modal_zoom_steps(&stoat.modal_zoom, ModalKind::PaneFinder);
-                let split = modal_split_percent(&stoat.modal_split, ModalKind::PaneFinder);
+                let split = modal_split_share(&stoat.modal_split, ModalKind::PaneFinder);
                 pane_finder::render_pane_finder(
                     finder,
                     ws,
@@ -2263,7 +2264,7 @@ pub(crate) fn frame(
         Some(ActiveModal::Diagnostics) => {
             if let Some(picker) = &mut stoat.diagnostics_picker {
                 let zoom = modal_zoom_steps(&stoat.modal_zoom, ModalKind::DiagnosticsPicker);
-                let split = modal_split_percent(&stoat.modal_split, ModalKind::DiagnosticsPicker);
+                let split = modal_split_share(&stoat.modal_split, ModalKind::DiagnosticsPicker);
                 let git_root = ws.git_root.clone();
                 diagnostics_picker::render_diagnostics_picker(
                     picker,
@@ -2300,7 +2301,7 @@ pub(crate) fn frame(
         Some(ActiveModal::CommitPicker) => {
             if let Some(picker) = &mut stoat.commit_picker {
                 let zoom = modal_zoom_steps(&stoat.modal_zoom, ModalKind::CommitPicker);
-                let split = modal_split_percent(&stoat.modal_split, ModalKind::CommitPicker);
+                let split = modal_split_share(&stoat.modal_split, ModalKind::CommitPicker);
                 commit_picker::render_commit_picker(
                     picker,
                     ws,
@@ -2336,7 +2337,7 @@ pub(crate) fn frame(
         Some(ActiveModal::Location) => {
             if let Some(picker) = &mut stoat.location_picker {
                 let zoom = modal_zoom_steps(&stoat.modal_zoom, ModalKind::LocationPicker);
-                let split = modal_split_percent(&stoat.modal_split, ModalKind::LocationPicker);
+                let split = modal_split_share(&stoat.modal_split, ModalKind::LocationPicker);
                 let git_root = ws.git_root.clone();
                 location_picker::render_location_picker(
                     picker,
@@ -2373,7 +2374,7 @@ pub(crate) fn frame(
         Some(ActiveModal::FileFinder) => {
             if let Some(finder) = &mut stoat.file_finder {
                 let zoom = modal_zoom_steps(&stoat.modal_zoom, ModalKind::FileFinder);
-                let split = modal_split_percent(&stoat.modal_split, ModalKind::FileFinder);
+                let split = modal_split_share(&stoat.modal_split, ModalKind::FileFinder);
                 file_finder::render_file_finder(
                     finder,
                     ws,
@@ -2417,7 +2418,7 @@ pub(crate) fn frame(
                     &stoat.language_registry,
                     full,
                     modal_zoom_steps(&stoat.modal_zoom, ModalKind::SymbolFinder),
-                    modal_split_percent(&stoat.modal_split, ModalKind::SymbolFinder),
+                    modal_split_share(&stoat.modal_split, ModalKind::SymbolFinder),
                     buf,
                     &mut *scene,
                 );
@@ -2444,7 +2445,7 @@ pub(crate) fn frame(
         Some(ActiveModal::CodeSearch) => {
             if let Some(finder) = &mut stoat.code_search {
                 let zoom = modal_zoom_steps(&stoat.modal_zoom, ModalKind::CodeSearch);
-                let split = modal_split_percent(&stoat.modal_split, ModalKind::CodeSearch);
+                let split = modal_split_share(&stoat.modal_split, ModalKind::CodeSearch);
                 code_search::render_code_search(
                     finder,
                     ws,

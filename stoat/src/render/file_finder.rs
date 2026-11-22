@@ -64,7 +64,7 @@ const BUFFER_FINDER_HINTS: [(&str, &str); 3] =
 /// recommended box, [`list_modal_width`](crate::render::chrome::list_modal_width)
 /// by 32 rows, it changes nothing, and a data-heavy caller passes [`u16::MAX`]
 /// to ask for the whole area. `zoom` is the caller's step count
-/// from [`modal_zoom`](crate::app::Stoat::modal_zoom), and `list_percent` the
+/// from [`modal_zoom`](crate::app::Stoat::modal_zoom), and `list_share` the
 /// width its list takes from
 /// [`modal_split`](crate::app::Stoat::modal_split).
 ///
@@ -78,7 +78,7 @@ pub(crate) fn file_finder_layout(
     area: Rect,
     content: (u16, u16),
     zoom: i8,
-    list_percent: u16,
+    list_share: u16,
 ) -> Option<FinderLayout> {
     let modal = crate::render::chrome::modal_box(
         area,
@@ -106,7 +106,7 @@ pub(crate) fn file_finder_layout(
         body_height,
         80,
         crate::render::picker::MIN_PANE_COLUMNS,
-        list_percent,
+        list_share,
     );
 
     Some(FinderLayout {
@@ -132,9 +132,9 @@ pub(crate) fn file_finder_layout_with_chrome(
     area: Rect,
     content: (u16, u16),
     zoom: i8,
-    list_percent: u16,
+    list_share: u16,
 ) -> Option<FinderLayout> {
-    let mut layout = file_finder_layout(area, content, zoom, list_percent)?;
+    let mut layout = file_finder_layout(area, content, zoom, list_share)?;
     if let Some(preview) = layout.preview.filter(|p| p.height > PREVIEW_HEADER_ROWS) {
         layout.preview_header = Some(Rect {
             height: PREVIEW_HEADER_ROWS,
@@ -158,12 +158,11 @@ pub(crate) fn render_file_finder(
     chrome: &crate::render::editor::ResolvedChrome,
     area: Rect,
     zoom: i8,
-    list_percent: u16,
+    list_share: u16,
     buf: &mut Buffer,
     scene: &mut stoat_widgets::ApcScene,
 ) {
-    let Some(layout) =
-        file_finder_layout_with_chrome(area, finder.content_size, zoom, list_percent)
+    let Some(layout) = file_finder_layout_with_chrome(area, finder.content_size, zoom, list_share)
     else {
         return;
     };
@@ -561,7 +560,7 @@ mod tests {
         render::{
             chrome::{ISLAND_BOTTOM, ISLAND_GAP, ISLAND_SIDE, ISLAND_TOP},
             editor::ResolvedChrome,
-            picker::DEFAULT_LIST_PERCENT,
+            picker::DEFAULT_LIST_SHARE,
         },
         test_fixture::{column_rules, plate_islands},
         theme::{scope, Theme},
@@ -577,7 +576,7 @@ mod tests {
     /// Every caller of this layout must fit inside the same area, so the box a
     /// short list gets and the box a data-heavy modal gets are checked together.
     fn box_of(area: Rect, content: (u16, u16)) -> Rect {
-        file_finder_layout(area, content, 0, DEFAULT_LIST_PERCENT)
+        file_finder_layout(area, content, 0, DEFAULT_LIST_SHARE)
             .expect("the area hosts the finder")
             .modal
     }
@@ -630,13 +629,13 @@ mod tests {
             &chrome,
             area,
             0,
-            DEFAULT_LIST_PERCENT,
+            DEFAULT_LIST_SHARE,
             &mut buf,
             &mut ApcScene::new(),
         );
 
         let layout =
-            file_finder_layout_with_chrome(area, finder.content_size, 0, DEFAULT_LIST_PERCENT)
+            file_finder_layout_with_chrome(area, finder.content_size, 0, DEFAULT_LIST_SHARE)
                 .expect("the finder fits");
         let preview = layout.preview.expect("a preview beside the list");
         let pane = layout
@@ -798,12 +797,12 @@ mod tests {
             &chrome,
             area,
             0,
-            DEFAULT_LIST_PERCENT,
+            DEFAULT_LIST_SHARE,
             &mut buf,
             &mut scene,
         );
         let layout =
-            file_finder_layout_with_chrome(area, finder.content_size, 0, DEFAULT_LIST_PERCENT)
+            file_finder_layout_with_chrome(area, finder.content_size, 0, DEFAULT_LIST_SHARE)
                 .expect("the finder fits");
         (buf, layout)
     }
@@ -823,12 +822,11 @@ mod tests {
     #[test]
     fn an_area_too_small_for_the_minimum_hosts_nothing() {
         assert!(
-            file_finder_layout(Rect::new(0, 0, 41, 60), (120, 32), 0, DEFAULT_LIST_PERCENT)
-                .is_none(),
+            file_finder_layout(Rect::new(0, 0, 41, 60), (120, 32), 0, DEFAULT_LIST_SHARE).is_none(),
             "a width under the 40-column minimum plus its thinnest margin fails"
         );
         assert!(
-            file_finder_layout(Rect::new(0, 0, 200, 13), (120, 32), 0, DEFAULT_LIST_PERCENT)
+            file_finder_layout(Rect::new(0, 0, 200, 13), (120, 32), 0, DEFAULT_LIST_SHARE)
                 .is_none(),
             "so does a height under the 12-row minimum plus its thinnest margin"
         );
@@ -861,13 +859,13 @@ mod tests {
             &chrome,
             area,
             0,
-            DEFAULT_LIST_PERCENT,
+            DEFAULT_LIST_SHARE,
             &mut buf,
             &mut scene,
         );
 
         let layout =
-            file_finder_layout_with_chrome(area, finder.content_size, 0, DEFAULT_LIST_PERCENT)
+            file_finder_layout_with_chrome(area, finder.content_size, 0, DEFAULT_LIST_SHARE)
                 .expect("the finder fits");
         let preview = layout.preview.expect("a preview beside the list");
         let pane = layout

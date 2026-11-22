@@ -190,7 +190,8 @@ const LANE_BAR_WIDTH: u16 = 6;
 /// [`commits_header_rect`] places. So a glide leaves the header out of the
 /// pooled region, and a press maps to the row under the pointer.
 ///
-/// `split` is the dragged share of the body as a percentage, `None` until the
+/// `split` is the dragged share of the body, in
+/// [`SHARE_SCALE`](crate::render::picker::SHARE_SCALE) units, `None` until the
 /// reader drags the separator.
 pub(crate) fn commits_list_rect(pane_area: Rect, split: Option<u16>) -> Option<Rect> {
     let inner = pane_area;
@@ -254,13 +255,13 @@ pub(crate) fn commits_separator(pane_area: Rect, split: Option<u16>) -> Option<S
 /// With no dragged share the list takes four sevenths, the share the Commits
 /// board gives its graph island, so a summary reads whole beside its graph.
 ///
-/// The percentage divides truncating, which is what [`SplitSeparator::share_at`]
+/// The share divides truncating, which is what [`SplitSeparator::share_at`]
 /// rounds up against, so a dragged separator lands on the cell the pointer left
 /// it on rather than a column short.
 fn commit_list_width(total: u16, split: Option<u16>) -> u16 {
     let widest = total.saturating_sub(MIN_DETAIL_COLUMNS + 1);
     let target = match split {
-        Some(pct) => (total as u32 * pct as u32 / 100) as u16,
+        Some(share) => crate::render::picker::share_of(total, share),
         None => (total as u32 * 4 / 7) as u16,
     };
     target.max(MIN_LIST_COLUMNS).min(widest)
@@ -3330,9 +3331,9 @@ mod tests {
     fn a_dragged_share_holds_between_both_floors() {
         assert_eq!(
             [
-                commit_list_width(100, Some(50)),
-                commit_list_width(100, Some(1)),
-                commit_list_width(100, Some(99)),
+                commit_list_width(100, Some(5_000)),
+                commit_list_width(100, Some(100)),
+                commit_list_width(100, Some(9_900)),
             ],
             [50, MIN_LIST_COLUMNS, 100 - (MIN_DETAIL_COLUMNS + 1)],
             "the share is honored between the two floors, and clamped outside",

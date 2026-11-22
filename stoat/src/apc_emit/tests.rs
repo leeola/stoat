@@ -6608,7 +6608,7 @@ fn code_search_list_is_pooled_and_retired() {
         size,
         (u16::MAX, u16::MAX),
         modal_zoom_steps(&h.stoat.modal_zoom, ModalKind::CodeSearch),
-        modal_split_percent(&h.stoat.modal_split, ModalKind::CodeSearch),
+        modal_split_share(&h.stoat.modal_split, ModalKind::CodeSearch),
     )
     .expect("code search fits the test terminal")
     .list;
@@ -6739,7 +6739,7 @@ fn symbol_finder_list_is_pooled_and_retired() {
             size,
             finder.content_rows,
             modal_zoom_steps(&h.stoat.modal_zoom, ModalKind::SymbolFinder),
-            modal_split_percent(&h.stoat.modal_split, ModalKind::SymbolFinder),
+            modal_split_share(&h.stoat.modal_split, ModalKind::SymbolFinder),
         )
         .expect("the finder fits the test terminal")
         .2
