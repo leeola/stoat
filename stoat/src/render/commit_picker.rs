@@ -830,6 +830,13 @@ fn dimmed(style: ratatui::style::Style, muted: ratatui::style::Style) -> ratatui
 /// The stored scroll is clamped here, where the diff's row count is known.
 /// Stopping a page short of the end is what keeps the wheel from scrolling the
 /// diff off into blank space.
+///
+/// A live scene with a scaled cell lays a built diff out at Preview Scale, in
+/// the grid [`preview_grid`] gives. The scroll then clamps by that grid's rows,
+/// and `area` blanks to the editor surface, since the preview's resident pool
+/// draws the diff. The placeholders keep the grid's cells.
+///
+/// [`preview_grid`]: crate::render::picker::preview_grid
 fn render_preview(
     picker: &mut CommitPicker,
     area: Rect,
@@ -848,6 +855,15 @@ fn render_preview(
     };
     match preview {
         Some(Some(document)) => {
+            let grid = crate::render::picker::preview_grid(area, scene.scaled_cell())
+                .filter(|_| scene.live());
+            if let Some((rows, _)) = grid {
+                picker.preview_scroll =
+                    clamped_preview_scroll(picker.preview_scroll, &document, rows);
+                crate::render::clear_surface(area, buf, theme);
+                return;
+            }
+
             picker.preview_scroll =
                 clamped_preview_scroll(picker.preview_scroll, &document, area.height);
             crate::render::commits::render_commit_preview(

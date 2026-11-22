@@ -334,16 +334,25 @@ fn handle_screen_mouse(stoat: &mut Stoat, mouse: MouseEvent) -> Option<UpdateEff
     })
 }
 
-/// Rows the open modal's preview pane lays its editor out in, or [`None`]
+/// Rows the open modal's preview pane lays its source out in, or [`None`]
 /// without one.
 ///
 /// The keyboard's preview scrolling sizes its step from this, so a half-pane
 /// key step and a wheel over the same pane read one geometry. A pane at
-/// Preview Scale lays out the scaled rows its last render recorded.
+/// Preview Scale lays out the scaled rows its last render recorded. The commit
+/// picker's diff records no layout, and it lays out the scaled grid of its rect
+/// whenever the terminal draws scaled pools.
 pub(crate) fn modal_preview_rows(stoat: &Stoat) -> Option<usize> {
     let rect = boxed_modal_surfaces(stoat).and_then(|surfaces| surfaces.preview)?;
-    let scaled = modal_preview_pane(stoat).and_then(|preview| preview.scaled);
-    Some(scaled.map_or(rect.height, |scaled| scaled.rows) as usize)
+    let scaled_rows = match active_modal(stoat) {
+        Some(ActiveModal::CommitPicker) => {
+            crate::render::picker::preview_grid(rect, stoat.scaled_cell()).map(|(rows, _)| rows)
+        },
+        _ => modal_preview_pane(stoat)
+            .and_then(|preview| preview.scaled)
+            .map(|scaled| scaled.rows),
+    };
+    Some(scaled_rows.unwrap_or(rect.height) as usize)
 }
 
 /// The open modal's preview pane, or [`None`] when no modal is open or its

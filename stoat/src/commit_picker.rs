@@ -1639,7 +1639,50 @@ mod tests {
     /// The picker's selected commit with its diff built, so the preview has
     /// something to pool. Panics if the background build never lands.
     fn harness_with_preview() -> crate::test_harness::TestHarness {
-        let mut h = seeded_picker_harness();
+        built_preview(seeded_picker_harness())
+    }
+
+    /// A picker over one commit that adds a 60-line file, with its diff built.
+    /// The diff outgrows the preview pane at both cell sizes, so a scroll past
+    /// its end clamps short of row 0.
+    fn long_diff_harness() -> crate::test_harness::TestHarness {
+        let mut h = crate::app::Stoat::test();
+        h.resize(100, 24);
+        let text: String = (1..=60).map(|n| format!("line {n}\n")).collect();
+        h.seed_linear_history(
+            "/repo",
+            &[("a1b2c3d4", "feat: add a.txt", &[("a.txt", text.as_str())])],
+        );
+        h.fake_git()
+            .add_repo("/repo")
+            .branch("main", "a1b2c3d4")
+            .set_head_branch("main");
+        h.stoat.active_workspace_mut().git_root = "/repo".into();
+
+        let repo = h
+            .stoat
+            .git_host
+            .discover(std::path::Path::new("/repo"))
+            .expect("seeded repo");
+        let commits = repo.log_from("a1b2c3d4", 100);
+        let executor = h.stoat.executor.clone();
+        let mut picker = CommitPicker::new(
+            h.stoat.active_workspace_mut(),
+            executor,
+            CommitPickerRole::PickBase,
+            PathBuf::from("/repo"),
+            repo,
+            "a1b2c3d4".to_string(),
+            SEEDED_NOW_EPOCH,
+        );
+        picker.set_commits(commits, HashMap::new(), "");
+        h.stoat.commit_picker = Some(picker);
+        built_preview(h)
+    }
+
+    /// `h` once its picker's selected commit has its diff built. Panics if the
+    /// background build never lands.
+    fn built_preview(mut h: crate::test_harness::TestHarness) -> crate::test_harness::TestHarness {
         h.settle();
         h.snapshot();
         h.settle();
@@ -1690,6 +1733,219 @@ mod tests {
             })),
             "closing the picker retires it"
         );
+    }
+
+    /// A stoatty that draws scaled pools takes the diff as a resident pool at
+    /// Preview Scale, and the emit paints its pages at the scaled grid.
+    /// Scrolled past its end, the pool rests where the diff's last row meets
+    /// the bottom of the scaled rows.
+    #[test]
+    fn the_commit_picker_preview_declares_a_scaled_pool() {
+        use stoatty_protocol::command::PoolKind;
+
+        let preview = layout(&long_diff_harness())
+            .preview
+            .expect("the diff pane is present");
+        let (rows, cols) = scaled_preview_grid(preview);
+        let emitted = emitted_preview_pool(stoatty_protocol::POOL_SCALE_PROTOCOL);
+        let (filled, painted) = &emitted.first_page;
+
+        assert!(
+            emitted.diff_rows > usize::from(rows) && !painted.is_empty(),
+            "the diff outgrows the scaled pane and draws components on its page"
+        );
+        assert_eq!(
+            (
+                emitted.region.kind,
+                emitted.region.resident,
+                emitted.row,
+                filled == painted,
+            ),
+            (
+                PoolKind::Scaled {
+                    scale: crate::render::picker::PREVIEW_SCALE,
+                    rows,
+                    cols,
+                },
+                true,
+                Some(emitted.diff_rows - usize::from(rows)),
+                true,
+            ),
+        );
+    }
+
+    /// A stoatty before the scaled pool protocol draws no scaled pool, so the
+    /// diff keeps its grid pool.
+    #[test]
+    fn the_commit_picker_preview_keeps_a_grid_pool_before_protocol_38() {
+        use stoatty_protocol::command::PoolKind;
+
+        let emitted = emitted_preview_pool(stoatty_protocol::POOL_SCALE_PROTOCOL - 1);
+
+        assert_eq!(
+            (emitted.region.kind, emitted.region.resident),
+            (PoolKind::Grid, false),
+        );
+    }
+
+    /// At Preview Scale the live diff leaves its cells blank for the resident
+    /// pool, and the render clamps the scroll by the scaled rows the pool shows
+    /// rather than by the rect's grid rows.
+    #[test]
+    fn a_scaled_diff_preview_blanks_its_cells_and_clamps_by_scaled_rows() {
+        let mut h = long_diff_harness();
+        draws_scaled_pools(&mut h, stoatty_protocol::POOL_SCALE_PROTOCOL);
+        h.stoat.commit_picker.as_mut().expect("open").preview_scroll = usize::MAX;
+        let buf = h.stoat.render();
+
+        let preview = layout(&h).preview.expect("the diff pane is present");
+        let (rows, _) = scaled_preview_grid(preview);
+        let diff_rows = selected_diff_rows(&h);
+        let blank = crate::render::surface_blank(&h.stoat.theme);
+        let blanked = (preview.top()..preview.bottom())
+            .all(|y| (preview.left()..preview.right()).all(|x| buf[(x, y)] == blank));
+        let scroll = h.stoat.commit_picker.as_ref().expect("open").preview_scroll;
+
+        assert!(
+            diff_rows > usize::from(rows),
+            "the diff outgrows the scaled pane"
+        );
+        assert_eq!((scroll, blanked), (diff_rows - usize::from(rows), true));
+    }
+
+    /// The detail keys step the diff by half the rows on show. Those are the
+    /// rect's grid rows before the scaled pool protocol and the scaled rows
+    /// from it on.
+    #[test]
+    fn the_preview_rows_are_the_scaled_rows_at_preview_scale() {
+        let mut h = harness_with_preview();
+        let preview = layout(&h).preview.expect("the diff pane is present");
+        let (rows, _) = scaled_preview_grid(preview);
+
+        let mut answered = Vec::new();
+        for protocol in [
+            stoatty_protocol::POOL_SCALE_PROTOCOL - 1,
+            stoatty_protocol::POOL_SCALE_PROTOCOL,
+        ] {
+            draws_scaled_pools(&mut h, protocol);
+            answered.push(crate::mouse::modal_preview_rows(&h.stoat));
+        }
+
+        assert_eq!(
+            answered,
+            [Some(usize::from(preview.height)), Some(usize::from(rows))],
+        );
+    }
+
+    /// Make `h`'s terminal a stoatty at `protocol` with a 9 by 18 px cell.
+    fn draws_scaled_pools(h: &mut crate::test_harness::TestHarness, protocol: u32) {
+        h.stoat.stoatty = true;
+        h.stoat.stoatty_protocol = protocol;
+        h.stoat.cell_pixels = Some((9, 18));
+    }
+
+    /// The `(rows, cols)` of Preview Scale cells over `preview` at a 9 by 18 px
+    /// cell.
+    fn scaled_preview_grid(preview: ratatui::layout::Rect) -> (u16, u16) {
+        stoat_widgets::pool::scaled_grid(
+            preview.width,
+            preview.height,
+            [9, 18],
+            crate::render::picker::PREVIEW_SCALE,
+        )
+    }
+
+    /// The row count of the selected commit's built diff.
+    fn selected_diff_rows(h: &crate::test_harness::TestHarness) -> usize {
+        let picker = h.stoat.commit_picker.as_ref().expect("open");
+        let sha = &picker.selected_commit().expect("a row is selected").sha;
+        let Preview::Built(session) = picker.preview_sessions.get(sha) else {
+            panic!("the selected commit's diff is built");
+        };
+        crate::render::commits::preview_row_count(session)
+    }
+
+    /// What an emit from a stoatty sends for the diff's pool.
+    struct EmittedPreview {
+        region: command::PoolRegionCommand,
+        /// The row the pool's scroll target lands on, when the emit sends one.
+        row: Option<usize>,
+        /// The row count of the selected commit's diff.
+        diff_rows: usize,
+        /// The components of the first page the emit fills, then those of the
+        /// same page painted at the region's page grid.
+        first_page: (Vec<command::Command>, Vec<command::Command>),
+    }
+
+    /// What an emit from a stoatty at `protocol` sends for the long diff's pool,
+    /// with the preview scrolled past its end.
+    fn emitted_preview_pool(protocol: u32) -> EmittedPreview {
+        use stoatty_protocol::command::Command;
+
+        let mut h = long_diff_harness();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+        h.stoat.set_apc_tx(tx);
+        draws_scaled_pools(&mut h, protocol);
+        h.stoat.commit_picker.as_mut().expect("open").preview_scroll = usize::MAX;
+        apc_emit::emit_smooth_scroll(&mut h.stoat);
+
+        let pool = crate::smooth_scroll::non_pane_pool::COMMIT_PICKER_PREVIEW;
+        let commands = drained_apc(&mut rx);
+        let region = commands
+            .iter()
+            .find_map(|command| match command {
+                Command::PoolRegion(region) if region.pool == pool => Some(*region),
+                _ => None,
+            })
+            .expect("the diff declares its pool");
+        let rows = usize::from(region.page_rows());
+        let row = commands.iter().find_map(|command| match command {
+            Command::Scroll(scroll) if scroll.pool == pool => {
+                let within = (usize::from(scroll.fraction) * rows + 32768) / 65536;
+                Some(scroll.page as usize * rows + within)
+            },
+            _ => None,
+        });
+
+        let fill_at = commands
+            .iter()
+            .position(|command| matches!(command, Command::Fill(fill) if fill.pool == pool));
+        let first_page = fill_at.map_or_else(
+            || (Vec::new(), Vec::new()),
+            |at| {
+                let Command::Fill(fill) = &commands[at] else {
+                    unreachable!("the position matched a fill");
+                };
+                let filled = commands[at + 1..]
+                    .iter()
+                    .take_while(|command| !matches!(command, Command::FillEnd))
+                    .cloned()
+                    .collect();
+                let picker = h.stoat.commit_picker.as_ref().expect("open");
+                let sha = &picker.selected_commit().expect("a row is selected").sha;
+                let Preview::Built(session) = picker.preview_sessions.get(sha) else {
+                    panic!("the selected commit's diff is built");
+                };
+                let painted = command::decode_stream(
+                    &crate::smooth_scroll::render_commit_picker_preview_page(
+                        session,
+                        fill.index,
+                        &h.stoat.theme,
+                        crate::render::commits::PreviewDials::from_stoat(&h.stoat),
+                        region.page_cols(),
+                        region.page_rows(),
+                    ),
+                );
+                (filled, painted)
+            },
+        );
+
+        EmittedPreview {
+            region,
+            row,
+            diff_rows: selected_diff_rows(&h),
+            first_page,
+        }
     }
 
     /// A page and the live painter show the same diff rows for the same offset,

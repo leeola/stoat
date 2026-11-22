@@ -2510,6 +2510,18 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
                     Preview::Empty | Preview::Unbuilt => None,
                 })
     {
+        // A diff at Preview Scale is a resident scaled pool, as a modal's source
+        // preview is. The live cells under it are blank, so the pool draws the
+        // pane at rest as well as in a glide.
+        let grid = crate::render::picker::preview_grid(rect, stoat.scaled_cell());
+        let kind = match grid {
+            Some((rows, cols)) => PoolKind::Scaled {
+                scale: crate::render::picker::PREVIEW_SCALE,
+                rows,
+                cols,
+            },
+            None => PoolKind::Grid,
+        };
         let region = PoolRegionCommand {
             pool: crate::smooth_scroll::non_pane_pool::COMMIT_PICKER_PREVIEW,
             top: rect.y,
@@ -2517,16 +2529,17 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
             width: rect.width,
             height: rect.height,
             window: 0,
-            kind: PoolKind::Grid,
+            kind,
             dim: 0,
-            resident: false,
+            resident: grid.is_some(),
         };
+        let (page_rows, page_cols) = (region.page_rows(), region.page_cols());
         // Clamped through the same helper the renderer uses, so the pool
         // scrolls to the row the diff actually lands on.
         let scroll_row = crate::render::commit_picker::clamped_preview_scroll(
             picker.preview_scroll,
             &session,
-            rect.height,
+            page_rows,
         );
         // A different commit means a different diff, and a rebuilt session
         // changes its length, so both refill the pages. A dial step repaints
@@ -2556,12 +2569,7 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
             false,
             |page| {
                 crate::smooth_scroll::render_commit_picker_preview_page(
-                    &session,
-                    page,
-                    theme,
-                    dials,
-                    region.width,
-                    region.height,
+                    &session, page, theme, dials, page_cols, page_rows,
                 )
             },
         );

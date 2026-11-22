@@ -1442,8 +1442,8 @@ pub(crate) fn render_picker_preview(
 pub(crate) const PREVIEW_SCALE: u16 = 154;
 
 /// The `(rows, cols)` of Preview Scale cells that a preview over `area` lays
-/// its editor out in, or `None` without a scaled cell, where it keeps the grid.
-fn preview_grid(area: Rect, cell: Option<[u16; 2]>) -> Option<(u16, u16)> {
+/// its source out in, or `None` without a scaled cell, where it keeps the grid.
+pub(crate) fn preview_grid(area: Rect, cell: Option<[u16; 2]>) -> Option<(u16, u16)> {
     cell.map(|cell| pool::scaled_grid(area.width, area.height, cell, PREVIEW_SCALE))
 }
 

@@ -1380,6 +1380,40 @@ fn the_code_search_preview_marks_the_match_line() {
     }
 }
 
+/// The commit picker's diff preview draws at Preview Scale, so its rows stand
+/// on the 11 px pitch of a 5 by 11 px cell, where the grid's 9 by 18 px cell
+/// stands them 18 px apart.
+///
+/// The initial commit's diff shows staged.txt's six lines in its right column,
+/// and pixels 740 to 799 of that column hold their numbers and text. The pixel
+/// rows there that hold text form one band per row, and the first five bands
+/// start at pixel rows 427, 438, 449, 460, and 471.
+#[test]
+fn the_commit_picker_preview_draws_at_preview_scale() {
+    let mut home = support::scratch_home();
+    let shot = settled_frame(
+        home.path(),
+        "basic-diff",
+        "unstaged.txt",
+        "<Space>hl<Settle>",
+    );
+
+    let base = BASE.into_iter().max().expect("a color has channels");
+    let lit = |y: u32| brightest(&shot, (740, y, 60, 1)) > base;
+    let tops: Vec<u32> = (405..600)
+        .filter(|&y| lit(y) && !lit(y - 1))
+        .take(5)
+        .collect();
+    if tops != [427, 438, 449, 460, 471] {
+        let frame = keep_frame(&shot, &mut home, "commit_preview_scale");
+        panic!(
+            "the commit diff's text bands start at pixel rows {tops:?}, not 11 px apart from \
+             row 427; the frame is {}",
+            frame.display(),
+        );
+    }
+}
+
 /// The Pane Picker draws its badge as the board draws it.
 ///
 /// The badge is an accent box of 9 by 6 cells with 10 px corners and a 2 px
