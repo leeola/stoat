@@ -96,7 +96,7 @@ use stoat_text::{
 use stoat_widgets::{pool::SmoothScrollState, ApcScene};
 use stoatty_protocol::{
     window_ipc::{MouseButton as IpcMouseButton, MouseKind, WindowIpcEvent},
-    BACKDROP_PANEL_PROTOCOL, BATCHED_DECORATIONS_PROTOCOL, NUDGE_PROTOCOL,
+    BACKDROP_PANEL_PROTOCOL, BATCHED_DECORATIONS_PROTOCOL, NUDGE_PROTOCOL, POOL_SCALE_PROTOCOL,
 };
 use tokio::{
     io::AsyncBufReadExt,
@@ -4070,6 +4070,20 @@ impl Stoat {
 
     pub(crate) fn size(&self) -> Rect {
         self.size
+    }
+
+    /// The grid cell's pixel size `[width, height]` while the terminal draws
+    /// scaled pools, or `None` when it draws none or has not said how large a
+    /// cell is.
+    ///
+    /// A stoatty at [`POOL_SCALE_PROTOCOL`] or later draws them. A preview lays
+    /// its scaled grid out from this, so it lays out the cells the terminal
+    /// draws.
+    pub(crate) fn scaled_cell(&self) -> Option<[u16; 2]> {
+        let capable = self.stoatty && self.stoatty_protocol >= POOL_SCALE_PROTOCOL;
+        self.cell_pixels
+            .filter(|_| capable)
+            .map(|(width, height)| [width, height])
     }
 
     /// The area the last paint laid the workspace split panes out in.
@@ -9834,6 +9848,7 @@ impl Stoat {
         scene.set_live(self.stoatty);
         scene.set_batch_protocol(self.stoatty_protocol >= BATCHED_DECORATIONS_PROTOCOL);
         scene.set_nudge_protocol(self.stoatty_protocol >= NUDGE_PROTOCOL);
+        scene.set_scaled_cell(self.scaled_cell());
         let mut undercurls = std::mem::take(&mut self.pending_undercurls);
         undercurls.begin();
         let painted = crate::render::frame(self, buf, &mut scene, &mut undercurls, holds);

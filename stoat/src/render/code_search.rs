@@ -70,6 +70,7 @@ pub(crate) fn render_code_search(
     if let Some(plate) = plate {
         crate::render::chrome::list_islands(layout.list, layout.preview, plate, theme, buf, scene);
     }
+    finder.preview_rows = None;
     if let Some(preview_rect) = layout.preview {
         if plate.is_none() {
             crate::render::chrome::vline(
@@ -81,8 +82,8 @@ pub(crate) fn render_code_search(
                 scene,
             );
         }
-        crate::render::picker::render_picker_preview(
-            &finder.preview,
+        let rows = crate::render::picker::render_picker_preview(
+            &mut finder.preview,
             preview_rect,
             theme,
             chrome,
@@ -90,10 +91,10 @@ pub(crate) fn render_code_search(
             buf,
             scene,
         );
+        finder.preview_rows = Some(rows as usize);
     }
 
     finder.viewport_rows = Some(layout.list.height as usize);
-    finder.preview_rows = layout.preview.map(|rect| rect.height as usize);
     let start_row =
         crate::render::picker::window_start(finder.selected, layout.list.height as usize);
     paint_match_rows(

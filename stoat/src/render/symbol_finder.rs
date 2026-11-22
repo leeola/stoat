@@ -131,7 +131,6 @@ pub(crate) fn render_symbol_finder(
                 scene,
             );
         }
-        finder.preview_rows = Some(preview_rect.height as usize);
         // Under the plate the rule sits inside the preview's Island, on the
         // editor surface, so it takes the color of a rule there.
         let doc_rule = match plate {
@@ -145,8 +144,8 @@ pub(crate) fn render_symbol_finder(
             Some(lines) => render_doc_pane(lines, preview_rect, doc_rule, buf, scene),
             None => preview_rect,
         };
-        crate::render::picker::render_picker_preview(
-            &finder.preview,
+        let rows = crate::render::picker::render_picker_preview(
+            &mut finder.preview,
             source_rect,
             theme,
             chrome,
@@ -154,6 +153,7 @@ pub(crate) fn render_symbol_finder(
             buf,
             scene,
         );
+        finder.preview_rows = Some(rows as usize);
     }
 
     let git_root = ws.git_root.clone();

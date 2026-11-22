@@ -284,7 +284,7 @@ fn render_palette_arg_picker(
             );
         }
         crate::render::picker::render_picker_preview(
-            &picker.active_core_ref().preview,
+            &mut picker.active_core().preview,
             preview_rect,
             theme,
             chrome,

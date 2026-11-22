@@ -24,8 +24,8 @@ use std::{
 };
 use stoatty_protocol::command::{
     encode_fill_scope, encode_minimap_view_into, encode_pool_drop_into, encode_pool_region_into,
-    encode_reposition_into, encode_scroll_into, MinimapViewCommand, PoolKind, PoolRegionCommand,
-    ScrollCommand,
+    encode_reposition_into, encode_scroll_into, scaled_cell_side, MinimapViewCommand, PoolKind,
+    PoolRegionCommand, ScrollCommand,
 };
 
 /// Pages kept buffered around each pool's visible page, the pool's working
@@ -663,6 +663,22 @@ pub fn emit_pages_into(
     }
 }
 
+/// The `(rows, cols)` of scaled cells that a `width` by `height` rect of grid
+/// cells holds, for grid cells of `cell` pixels `[width, height]` at `scale`
+/// 256ths.
+///
+/// A program sizes a scaled pool's grid by this, so its pages fill the rect the
+/// terminal composites them over. Each side counts the whole scaled cells that
+/// the rect's pixels hold, at least one, up to the `u16` maximum.
+pub fn scaled_grid(width: u16, height: u16, cell: [u16; 2], scale: u16) -> (u16, u16) {
+    let fit = |cells: u16, side: u16| {
+        let pixels = u32::from(cells) * u32::from(side);
+        let scaled = u32::from(scaled_cell_side(side, scale));
+        (pixels / scaled).clamp(1, u32::from(u16::MAX)) as u16
+    };
+    (fit(height, cell[1]), fit(width, cell[0]))
+}
+
 /// Request a fill for every page in `window` not already requested, record `window`
 /// as the requested range, and return the newly-entered page indices in ascending
 /// order.
@@ -798,8 +814,8 @@ fn scroll_target(pool: u32, scroll_offset: f32, page_rows: u16) -> ScrollCommand
 #[cfg(test)]
 mod tests {
     use super::{
-        emit_into, emit_pages_into, scroll_target, window_range, MinimapWindowInputs, PageVersions,
-        Refill, SmoothScrollState, WINDOW_PAGES,
+        emit_into, emit_pages_into, scaled_grid, scroll_target, window_range, MinimapWindowInputs,
+        PageVersions, Refill, SmoothScrollState, WINDOW_PAGES,
     };
     use stoatty_protocol::command::{
         decode, Command, MinimapViewCommand, PoolDropCommand, PoolKind, PoolRegionCommand,
@@ -989,6 +1005,19 @@ mod tests {
                 (target(1, 11565), vec![0, 1, 2, 3, 4]),
                 (target(3, 34696), vec![1, 2, 3, 4, 5]),
             ],
+        );
+    }
+
+    /// A 60 by 30 rect of 9 by 18 pixel cells holds 108 by 49 cells of 5 by 11
+    /// pixels at scale 154, and an empty rect still holds one cell.
+    #[test]
+    fn scaled_grid_counts_the_scaled_cells_a_rect_holds() {
+        assert_eq!(
+            [
+                scaled_grid(60, 30, [9, 18], 154),
+                scaled_grid(0, 0, [9, 18], 154)
+            ],
+            [(49, 108), (1, 1)],
         );
     }
 

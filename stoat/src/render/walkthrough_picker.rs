@@ -85,9 +85,8 @@ pub(crate) fn render_walkthrough_picker(
                 scene,
             );
         }
-        picker.picker.preview_rows = Some(preview_rect.height as usize);
-        crate::render::picker::render_picker_preview(
-            &picker.picker.preview,
+        let rows = crate::render::picker::render_picker_preview(
+            &mut picker.picker.preview,
             preview_rect,
             theme,
             chrome,
@@ -95,6 +94,7 @@ pub(crate) fn render_walkthrough_picker(
             buf,
             scene,
         );
+        picker.picker.preview_rows = Some(rows as usize);
     }
 
     paint_tour_rows(picker, layout.list, theme, buf, scene);

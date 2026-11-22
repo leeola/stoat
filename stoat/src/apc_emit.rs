@@ -826,8 +826,8 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
     let modal_preview = (!overlay)
         .then(|| {
             let rect = crate::mouse::boxed_modal_surfaces(stoat)?.preview?;
-            let editor = crate::mouse::modal_preview_editor(stoat)?;
-            (rect.width > 0 && rect.height > 0).then_some((rect, editor))
+            let preview = crate::mouse::modal_preview_pane(stoat)?;
+            (rect.width > 0 && rect.height > 0).then_some((rect, preview.editor, preview.scaled))
         })
         .flatten();
 
@@ -2015,18 +2015,35 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
     // The preview pane is an editor, so it pools exactly as a split pane does:
     // the same eased scroll target, the same content version, and pages filled
     // asynchronously through the editor fill path below.
-    if let Some((rect, editor_id)) = modal_preview {
+    //
+    // A preview at Preview Scale is a resident scaled pool over the area its
+    // render laid out, which leaves out a doc pane above the source. The pool
+    // is the pane at rest and the live cells under it are blank, so it holds
+    // nothing, and the pages a composite reads render in this emit.
+    if let Some((rect, editor_id, scaled)) = modal_preview {
+        let (area, kind) = match scaled {
+            Some(scaled) => (
+                scaled.area,
+                PoolKind::Scaled {
+                    scale: crate::render::picker::PREVIEW_SCALE,
+                    rows: scaled.rows,
+                    cols: scaled.cols,
+                },
+            ),
+            None => (rect, PoolKind::Grid),
+        };
         let region = PoolRegionCommand {
             pool: crate::smooth_scroll::non_pane_pool::MODAL_PREVIEW,
-            top: rect.y,
-            left: rect.x,
-            width: rect.width,
-            height: rect.height,
+            top: area.y,
+            left: area.x,
+            width: area.width,
+            height: area.height,
             window: 0,
-            kind: PoolKind::Grid,
+            kind,
             dim: 0,
-            resident: false,
+            resident: scaled.is_some(),
         };
+        let (page_rows, page_cols) = (region.page_rows(), region.page_cols());
         let active_idx = stoat.active_workspace;
         if let Some(editor) = stoat.workspaces[active_idx].editors.get_mut(editor_id) {
             // The pane loop uses the same rule. At rest the target is
@@ -2069,38 +2086,61 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
             // The live paint records the preview's number column as its gutter,
             // and a preview takes that column whatever the panes' setting is.
             let number_column = editor.gutter_width > 0;
+            let gutter = crate::smooth_scroll::PageGutter::new(
+                false,
+                severity,
+                theme.clone(),
+                base_rich.clone(),
+                None,
+            )
+            .batched(batch_decorations)
+            .page_icons(page_icons)
+            .number_column(number_column);
 
-            let entered = pool::emit_into(
+            let mut rendered = Vec::new();
+            let mut entered = pool::emit_into(
                 &mut out,
                 &mut stoat.smooth_scroll,
                 region,
                 scroll_offset,
                 content_version,
-                // A preview reloads on every selection step, so it holds the
-                // window until the glide starts, as an editor pane does.
-                true,
-                |_| Vec::new(),
+                // A grid preview reloads on every selection step, so it holds
+                // the window until the glide starts, as an editor pane does.
+                scaled.is_none(),
+                |index| {
+                    let composited = composited_pages(scroll_offset, page_rows);
+                    if scaled.is_none() || !composited.contains(&index) {
+                        return Vec::new();
+                    }
+                    rendered.push(index);
+                    let top_row = crate::smooth_scroll::page_top_row(index, page_rows);
+                    let bottom = top_row.saturating_add(u32::from(page_rows));
+                    crate::smooth_scroll::render_page_from_snapshot(
+                        &snapshot,
+                        top_row,
+                        fallback_style,
+                        page_cols,
+                        page_rows,
+                        &gutter,
+                        diff_view,
+                        0.0,
+                        DiffDials::shipped(),
+                        snapshot.highlighted_endpoints(top_row..bottom),
+                        None,
+                        None,
+                    )
+                },
             );
+            entered.retain(|page| !rendered.contains(page));
             if !entered.is_empty() {
                 async_jobs.push(PoolFill::Editor {
                     snapshot,
                     pages: entered,
                     redecorate: Vec::new(),
                     pool: region.pool,
-                    width: region.width,
-                    height: region.height,
-                    gutter: Box::new(
-                        crate::smooth_scroll::PageGutter::new(
-                            false,
-                            severity,
-                            theme.clone(),
-                            base_rich.clone(),
-                            None,
-                        )
-                        .batched(batch_decorations)
-                        .page_icons(page_icons)
-                        .number_column(number_column),
-                    ),
+                    width: page_cols,
+                    height: page_rows,
+                    gutter: Box::new(gutter),
                     diff_view,
                     // A modal preview is not the diff view the knobs turn, so
                     // it paints at the shipped dials.

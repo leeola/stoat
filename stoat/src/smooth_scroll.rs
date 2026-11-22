@@ -3575,12 +3575,13 @@ mod tests {
         )
         .number_column(true);
         let area = Rect::new(0, 0, 16, 2);
-        let finder = h.stoat.file_finder.take().expect("the finder is open");
-        let preview = &finder.active_core_ref().preview;
+        let mut finder = h.stoat.file_finder.take().expect("the finder is open");
+        let editor_id = finder.active_core_ref().preview.editor;
+        let preview = &mut finder.active_core().preview;
         let ws = h.stoat.active_workspace_mut();
 
-        let paint = |ws: &mut Workspace, top_row: u32, live: bool| {
-            if let Some(editor) = ws.editors.get_mut(preview.editor) {
+        let mut paint = |ws: &mut Workspace, top_row: u32, live: bool| {
+            if let Some(editor) = ws.editors.get_mut(editor_id) {
                 editor.scroll_row = top_row;
             }
             let mut buf = page_buffer(area, &theme);
@@ -3607,7 +3608,7 @@ mod tests {
 
             let snapshot = ws
                 .editors
-                .get_mut(preview.editor)
+                .get_mut(editor_id)
                 .expect("the preview's editor")
                 .display_map
                 .snapshot();

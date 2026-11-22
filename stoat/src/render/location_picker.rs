@@ -81,9 +81,8 @@ pub(crate) fn render_location_picker(
                 scene,
             );
         }
-        picker.preview_rows = Some(preview_rect.height as usize);
-        crate::render::picker::render_picker_preview(
-            &picker.preview,
+        let rows = crate::render::picker::render_picker_preview(
+            &mut picker.preview,
             preview_rect,
             theme,
             chrome,
@@ -91,6 +90,7 @@ pub(crate) fn render_location_picker(
             buf,
             scene,
         );
+        picker.preview_rows = Some(rows as usize);
     }
 
     paint_candidate_rows(picker, git_root, layout.list, theme, buf, scene);

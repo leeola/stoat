@@ -11,6 +11,7 @@ use crate::{
     term_session::TermId,
     workspace::Workspace,
 };
+use ratatui::{buffer::Buffer, layout::Rect};
 use std::{
     collections::{HashMap, VecDeque},
     io::Read,
@@ -1784,6 +1785,29 @@ pub(crate) struct Preview {
     rendered_for: Option<PreviewSource>,
     /// Texts read this session, so a walk back up the list reads nothing.
     texts: PreviewTextCache,
+    /// The cells a render at Preview Scale paints the editor into.
+    ///
+    /// Nothing reads them. The paint lays the editor out at the scaled grid,
+    /// which sets its viewport rows, its scroll clamp, and its number column.
+    /// The preview's pool pages the editor itself.
+    pub(crate) scratch: Buffer,
+    /// Where the last render laid the editor out at Preview Scale, or `None`
+    /// when it drew at the grid size.
+    ///
+    /// The pool that draws the preview and the keys that page it read this.
+    /// The area is less than the preview's rect when a doc pane above the
+    /// source takes the rect's top rows.
+    pub(crate) scaled: Option<ScaledPreview>,
+}
+
+/// Where a preview lays its editor out at Preview Scale.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) struct ScaledPreview {
+    /// The grid cells the preview covers.
+    pub(crate) area: Rect,
+    /// The scaled grid the editor is laid out in over [`Self::area`].
+    pub(crate) rows: u16,
+    pub(crate) cols: u16,
 }
 
 impl Preview {
@@ -1798,6 +1822,8 @@ impl Preview {
             buffer,
             rendered_for: None,
             texts: PreviewTextCache::default(),
+            scratch: Buffer::empty(Rect::ZERO),
+            scaled: None,
         }
     }
 
@@ -1965,6 +1991,8 @@ impl Preview {
             buffer: BufferId::new(0),
             rendered_for: None,
             texts: PreviewTextCache::default(),
+            scratch: Buffer::empty(Rect::ZERO),
+            scaled: None,
         }
     }
 }

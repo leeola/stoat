@@ -6272,6 +6272,142 @@ fn a_finder_with_no_match_retires_its_preview_pool() {
     );
 }
 
+/// A terminal that draws scaled pools takes the finder's preview as a resident
+/// pool at Preview Scale over the preview rect, in the grid of scaled cells the
+/// rect holds. The emit that declares it fills the two pages its composite
+/// reads in its own batch, since the live cells under the pool are blank.
+#[test]
+fn a_modal_preview_declares_a_scaled_resident_pool() {
+    use stoatty_protocol::command::{Command, FillCommand, PoolKind, PoolRegionCommand};
+
+    let (mut h, mut rx) = scaled_preview_harness(stoatty_protocol::POOL_SCALE_PROTOCOL);
+    let preview = finder_layout(&h)
+        .preview
+        .expect("the test terminal is wide enough for a preview");
+    let (rows, cols) = pool::scaled_grid(preview.width, preview.height, [9, 18], 154);
+    let pool = crate::smooth_scroll::non_pane_pool::MODAL_PREVIEW;
+    let batches = emit_batches(&mut h, &mut rx);
+
+    let region = PoolRegionCommand {
+        pool,
+        top: preview.y,
+        left: preview.x,
+        width: preview.width,
+        height: preview.height,
+        window: 0,
+        kind: PoolKind::Scaled {
+            scale: 154,
+            rows,
+            cols,
+        },
+        dim: 0,
+        resident: true,
+    };
+    let fill = |index| Command::Fill(FillCommand { pool, index });
+    assert_eq!(
+        batches.first().map(|batch| pool_commands(batch, pool)),
+        Some(vec![Command::PoolRegion(region), fill(0), fill(1)]),
+    );
+}
+
+/// A terminal below the scaled pool protocol keeps the grid preview pool, over
+/// the preview rect and not resident.
+#[test]
+fn an_older_terminal_keeps_the_grid_preview_pool() {
+    use stoatty_protocol::command::{Command, PoolKind, PoolRegionCommand};
+
+    let (mut h, mut rx) = scaled_preview_harness(stoatty_protocol::POOL_SCALE_PROTOCOL - 1);
+    let preview = finder_layout(&h)
+        .preview
+        .expect("the test terminal is wide enough for a preview");
+    let pool = crate::smooth_scroll::non_pane_pool::MODAL_PREVIEW;
+
+    let regions: Vec<Command> = pool_commands(&emit_raw(&mut h, &mut rx), pool)
+        .into_iter()
+        .filter(|command| matches!(command, Command::PoolRegion(_)))
+        .collect();
+    assert_eq!(
+        regions,
+        vec![Command::PoolRegion(PoolRegionCommand {
+            pool,
+            top: preview.y,
+            left: preview.x,
+            width: preview.width,
+            height: preview.height,
+            window: 0,
+            kind: PoolKind::Grid,
+            dim: 0,
+            resident: false,
+        })],
+    );
+}
+
+/// A selection step loads another file into the scaled preview, and the next
+/// emit refills the page on show in its own batch. A grid preview holds its
+/// pages at rest, but under a scaled pool the live cells are blank. The rest
+/// on the first row shows no row of page 1, so page 1 keeps its fill until a
+/// move reads it.
+#[test]
+fn a_selection_step_refills_the_scaled_preview_in_the_same_emit() {
+    let (mut h, mut rx) = scaled_preview_harness(stoatty_protocol::POOL_SCALE_PROTOCOL);
+    emit_raw(&mut h, &mut rx);
+
+    h.type_keys("down");
+    h.settle();
+    h.stoat.render();
+    let batches = emit_batches(&mut h, &mut rx);
+
+    let pool = crate::smooth_scroll::non_pane_pool::MODAL_PREVIEW;
+    assert_eq!(
+        batches.first().map(|batch| pool_fills(batch, pool)),
+        Some(vec![0]),
+    );
+}
+
+/// The preview's half-page keys step by the scaled rows its render laid out,
+/// which a scaled preview holds more of than its rect has grid rows.
+#[test]
+fn the_preview_keys_page_by_the_scaled_rows() {
+    let (h, _rx) = scaled_preview_harness(stoatty_protocol::POOL_SCALE_PROTOCOL);
+    let preview = finder_layout(&h)
+        .preview
+        .expect("the test terminal is wide enough for a preview");
+    let (rows, _) = pool::scaled_grid(preview.width, preview.height, [9, 18], 154);
+
+    assert_eq!(
+        crate::mouse::modal_preview_rows(&h.stoat),
+        Some(rows as usize)
+    );
+}
+
+/// A 160 by 40 harness under a stoatty at `protocol` with 9 by 18 pixel cells,
+/// its file finder open over two 120-line files and painted, and the channel
+/// its emits go to.
+fn scaled_preview_harness(
+    protocol: u32,
+) -> (
+    crate::test_harness::TestHarness,
+    tokio::sync::mpsc::UnboundedReceiver<Vec<u8>>,
+) {
+    let mut h = crate::test_harness::TestHarness::with_size(160, 40);
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+    h.stoat.set_apc_tx(tx);
+    h.stoat.stoatty = true;
+    h.stoat.stoatty_protocol = protocol;
+    h.stoat.cell_pixels = Some((9, 18));
+
+    let root = PathBuf::from("/scaled-preview");
+    for name in ["a.txt", "b.txt"] {
+        let text: String = (1..=120).map(|n| format!("{name} line {n}\n")).collect();
+        h.fake_fs().insert_file(root.join(name), text.as_bytes());
+    }
+    h.stoat.active_workspace_mut().git_root = root;
+    h.type_keys("space p");
+    h.settle();
+    h.stoat.render();
+    (h, rx)
+}
+
 #[test]
 fn code_search_list_is_pooled_and_retired() {
     use stoat_action::OpenCodeSearch;

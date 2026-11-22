@@ -80,9 +80,8 @@ pub(crate) fn render_pane_finder(
                 scene,
             );
         }
-        finder.picker.preview_rows = Some(preview_rect.height as usize);
-        crate::render::picker::render_picker_preview(
-            &finder.picker.preview,
+        let rows = crate::render::picker::render_picker_preview(
+            &mut finder.picker.preview,
             preview_rect,
             theme,
             chrome,
@@ -90,6 +89,7 @@ pub(crate) fn render_pane_finder(
             buf,
             scene,
         );
+        finder.picker.preview_rows = Some(rows as usize);
     }
 
     paint_view_rows(finder, layout.list, theme, buf, scene);

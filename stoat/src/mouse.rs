@@ -29,6 +29,7 @@ use crate::{
         LINES_PER_CELL,
     },
     pane::{FocusTarget, Placement, View},
+    picker::Preview,
     rebase::RebasePause,
     render::{
         commit_picker::MIN_LIST_ROWS,
@@ -333,52 +334,53 @@ fn handle_screen_mouse(stoat: &mut Stoat, mouse: MouseEvent) -> Option<UpdateEff
     })
 }
 
-/// Rows the open modal's preview pane covers, or [`None`] without one.
+/// Rows the open modal's preview pane lays its editor out in, or [`None`]
+/// without one.
 ///
 /// The keyboard's preview scrolling sizes its step from this, so a half-pane
-/// key step and a wheel over the same pane read one geometry.
+/// key step and a wheel over the same pane read one geometry. A pane at
+/// Preview Scale lays out the scaled rows its last render recorded.
 pub(crate) fn modal_preview_rows(stoat: &Stoat) -> Option<usize> {
-    boxed_modal_surfaces(stoat)
-        .and_then(|surfaces| surfaces.preview)
-        .map(|rect| rect.height as usize)
+    let rect = boxed_modal_surfaces(stoat).and_then(|surfaces| surfaces.preview)?;
+    let scaled = modal_preview_pane(stoat).and_then(|preview| preview.scaled);
+    Some(scaled.map_or(rect.height, |scaled| scaled.rows) as usize)
 }
 
-/// The editor backing the open modal's preview pane, or [`None`] when no modal
-/// is open or its preview is not an editor.
+/// The open modal's preview pane, or [`None`] when no modal is open or its
+/// preview is not an editor.
 ///
 /// Every target list previews through a scratch editor, so a wheel, a keyboard
 /// half-page, and a pooled page all want the same one. The commit picker, help,
-/// and the run modal keep their own row offset instead and are absent here; each
-/// caller handles those where it handles this.
-pub(crate) fn modal_preview_editor(stoat: &Stoat) -> Option<EditorId> {
+/// and the run modal keep their own row offset instead and are absent here.
+/// Each caller handles those where it handles this.
+pub(crate) fn modal_preview_pane(stoat: &Stoat) -> Option<&Preview> {
     match active_modal(stoat)? {
         ActiveModal::FileFinder => stoat
             .file_finder
             .as_ref()
-            .map(|f| f.active_core_ref().preview.editor),
-        ActiveModal::CodeSearch => stoat.code_search.as_ref().map(|f| f.preview.editor),
-        ActiveModal::SymbolFinder => stoat.symbol_finder.as_ref().map(|f| f.preview.editor),
+            .map(|f| &f.active_core_ref().preview),
+        ActiveModal::CodeSearch => stoat.code_search.as_ref().map(|f| &f.preview),
+        ActiveModal::SymbolFinder => stoat.symbol_finder.as_ref().map(|f| &f.preview),
         ActiveModal::Palette => stoat
             .command_palette
             .as_ref()
             .and_then(|p| p.arg_picker.as_ref())
-            .map(|p| p.active_core_ref().preview.editor),
-        ActiveModal::Location => stoat.location_picker.as_ref().map(|p| p.preview.editor),
-        ActiveModal::Diagnostics => stoat
-            .diagnostics_picker
-            .as_ref()
-            .map(|p| p.picker.preview.editor),
-        ActiveModal::Jumplist => stoat
-            .jumplist_picker
-            .as_ref()
-            .map(|p| p.picker.preview.editor),
-        ActiveModal::WalkthroughPicker => stoat
-            .walkthrough_picker
-            .as_ref()
-            .map(|p| p.picker.preview.editor),
-        ActiveModal::PaneFinder => stoat.pane_finder.as_ref().map(|f| f.picker.preview.editor),
+            .map(|p| &p.active_core_ref().preview),
+        ActiveModal::Location => stoat.location_picker.as_ref().map(|p| &p.preview),
+        ActiveModal::Diagnostics => stoat.diagnostics_picker.as_ref().map(|p| &p.picker.preview),
+        ActiveModal::Jumplist => stoat.jumplist_picker.as_ref().map(|p| &p.picker.preview),
+        ActiveModal::WalkthroughPicker => {
+            stoat.walkthrough_picker.as_ref().map(|p| &p.picker.preview)
+        },
+        ActiveModal::PaneFinder => stoat.pane_finder.as_ref().map(|f| &f.picker.preview),
         _ => None,
     }
+}
+
+/// The editor backing the open modal's preview pane, as [`modal_preview_pane`]
+/// names it.
+pub(crate) fn modal_preview_editor(stoat: &Stoat) -> Option<EditorId> {
+    modal_preview_pane(stoat).map(|preview| preview.editor)
 }
 
 /// The open boxed modal's surfaces, or [`None`] when none is open.

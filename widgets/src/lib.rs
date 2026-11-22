@@ -100,6 +100,9 @@ pub struct ApcScene {
     /// Whether the host reads `nudge` frames, as [`Self::set_nudge_protocol`]
     /// set.
     nudges: bool,
+    /// The grid cell's pixel size `[width, height]` while the host draws scaled
+    /// pools, as [`Self::set_scaled_cell`] set.
+    scaled_cell: Option<[u16; 2]>,
     /// Whether the next flush resets the terminal and sends the whole scene.
     ///
     /// Set by a switch of the lane protocol, since a flush in the other mode
@@ -125,6 +128,7 @@ impl ApcScene {
             lanes_enabled: false,
             batches: false,
             nudges: false,
+            scaled_cell: None,
             resync: false,
             dynamic_current: Vec::new(),
             dynamic_previous: Vec::new(),
@@ -187,6 +191,24 @@ impl ApcScene {
     /// declared.
     pub fn nudges(&self) -> bool {
         self.nudges
+    }
+
+    /// Declare the grid cell's pixel size `[width, height]` while the host draws
+    /// scaled pools, which a stoatty at
+    /// [`POOL_SCALE_PROTOCOL`](stoatty_protocol::POOL_SCALE_PROTOCOL) or later
+    /// does, or `None` when it draws none or has not said how large a cell is.
+    ///
+    /// Expected once per frame like [`Self::set_live`]. A widget that lays a
+    /// scaled pool's grid out reads it through [`Self::scaled_cell`] before it
+    /// paints.
+    pub fn set_scaled_cell(&mut self, cell: Option<[u16; 2]>) {
+        self.scaled_cell = cell;
+    }
+
+    /// The grid cell's pixel size while the host draws scaled pools, as
+    /// [`Self::set_scaled_cell`] declared.
+    pub fn scaled_cell(&self) -> Option<[u16; 2]> {
+        self.scaled_cell
     }
 
     /// Empty every lane so widgets build the next frame from scratch, and send

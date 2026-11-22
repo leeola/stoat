@@ -1174,11 +1174,12 @@ fn the_file_finder_box_casts_the_modal_shadow() {
 /// cell row 12, the header's first row, in the divider color, as a rule on the
 /// editor surface draws. The pixel row above it reads the base surface.
 ///
-/// The preview numbers its lines in a column from cell 68. On the first row,
-/// cell row 14, the column's first four cells hold the number in the muted
-/// color and no text, so they peak above the base surface and at most at the
-/// muted color. Cell row 21 is the first row past the file's seven lines, and
-/// its column holds no number.
+/// The preview draws at Preview Scale from pixel (612, 252), cell (68, 14), and
+/// numbers its lines in a column of five 5 px cells, pixels 612 to 636. Its
+/// first 11 px row, pixel rows 252 to 262, holds the number in the muted color
+/// and no text, so it peaks above the base surface and at most at the muted
+/// color. Its eighth row, pixel rows 329 to 339, is the first past the file's
+/// seven lines, and the column holds no number there.
 #[test]
 fn the_file_finder_box_draws_as_the_ground_plate() {
     let mut home = support::scratch_home();
@@ -1264,13 +1265,47 @@ fn the_file_finder_box_draws_as_the_ground_plate() {
     );
 
     let peak = |color: [u8; 3]| color.into_iter().max().expect("a color has channels");
-    let first = brightest(&shot, cell_rect(68, 14, 4, 1));
-    let past_end = brightest(&shot, cell_rect(68, 21, 5, 1));
+    let first = brightest(&shot, (612, 252, 25, 11));
+    let past_end = brightest(&shot, (612, 329, 25, 11));
     if !(peak(BASE) + 1..=peak(MUTED)).contains(&first) || past_end != peak(BASE) {
         let frame = keep_frame(&shot, &mut home, "preview_numbers");
         panic!(
             "the number column peaks at {first:#04x} on the first row and at {past_end:#04x} \
              past the file's end; the frame is {}",
+            frame.display(),
+        );
+    }
+}
+
+/// The file finder's preview draws at Preview Scale, so its lines stand on the
+/// 11 px pitch of a 5 by 11 px cell, where the grid's 9 by 18 px cell stands
+/// them 18 px apart.
+///
+/// The preview starts at cell (68, 14), pixel (612, 252), and its number column
+/// is its first five scaled cells, pixels 612 to 636, which hold no text. The
+/// pixel rows there that hold a digit form one band per line, and the first
+/// five bands start at pixel rows 254, 265, 276, 287, and 298.
+#[test]
+fn the_finder_preview_draws_at_preview_scale() {
+    let mut home = support::scratch_home();
+    let shot = settled_frame(
+        home.path(),
+        "basic-diff",
+        "unstaged.txt",
+        "<Space>p<Settle>",
+    );
+
+    let base = BASE.into_iter().max().expect("a color has channels");
+    let lit = |y: u32| brightest(&shot, (612, y, 25, 1)) > base;
+    let tops: Vec<u32> = (252..400)
+        .filter(|&y| lit(y) && !lit(y - 1))
+        .take(5)
+        .collect();
+    if tops != [254, 265, 276, 287, 298] {
+        let frame = keep_frame(&shot, &mut home, "preview_scale");
+        panic!(
+            "the preview's number bands start at pixel rows {tops:?}, not 11 px apart from row \
+             254; the frame is {}",
             frame.display(),
         );
     }

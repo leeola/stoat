@@ -233,7 +233,7 @@ pub(crate) fn render_file_finder(
             },
             false => {
                 crate::render::picker::render_picker_preview(
-                    &finder.active_core_ref().preview,
+                    &mut finder.active_core().preview,
                     preview_rect,
                     theme,
                     chrome,

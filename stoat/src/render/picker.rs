@@ -7,9 +7,10 @@
 
 use crate::{
     display_map::DisplaySnapshot,
+    editor_state::EditorState,
     fuzzy,
     input_view::InputView,
-    picker::{write_row_display, PickList, Preview},
+    picker::{write_row_display, PickList, Preview, ScaledPreview},
     render::{
         chrome::{PlateColors, TypeTag},
         editor::{self, render_editor, ResolvedChrome},
@@ -34,6 +35,7 @@ use std::{
 use stoat_widgets::{
     bar::Bar,
     panel::Panel,
+    pool,
     text_run::{self, TextRun, TextRunBatch},
 };
 use stoatty_protocol::command::Edge;
@@ -1372,33 +1374,90 @@ pub(crate) fn name_start(label: &str) -> usize {
     }
 }
 
-/// Paint the picker's preview pane by rendering its scratch editor into `area`.
-/// A no-op for an empty rect.
+/// Paint the picker's preview pane by rendering its scratch editor into `area`,
+/// and return the rows the editor is laid out in. A no-op for an empty rect.
 ///
 /// A file's or a buffer's text leads each line with its number, in a column
 /// of [`preview_number_columns`] cells at the pane's left. The editor's
 /// `gutter_width` records the column, so the pool that glides the pane pages
 /// the same numbers.
+///
+/// A live scene with a scaled cell lays the editor out at Preview Scale, in
+/// the grid [`preview_grid`] gives, and records it in [`Preview::scaled`]. The
+/// paint goes into [`Preview::scratch`] for the layout alone, and `area` blanks
+/// to the editor surface, since the preview's resident pool draws the text.
 pub(crate) fn render_picker_preview(
-    preview: &Preview,
+    preview: &mut Preview,
     area: Rect,
     theme: &Theme,
     chrome: &ResolvedChrome,
     ws: &mut Workspace,
     buf: &mut Buffer,
     scene: &mut stoat_widgets::ApcScene,
-) {
+) -> u16 {
+    preview.scaled = None;
     if area.width == 0 || area.height == 0 {
-        return;
+        return area.height;
     }
+    let numbers = preview.numbers_lines();
     let Some(editor) = ws.editors.get_mut(preview.editor) else {
-        return;
+        return area.height;
     };
+
+    let grid = preview_grid(area, scene.scaled_cell()).filter(|_| scene.live());
+    let Some((rows, cols)) = grid else {
+        paint_preview_editor(editor, numbers, area, theme, chrome, buf, scene);
+        return area.height;
+    };
+
+    let laid_out = Rect::new(0, 0, cols, rows);
+    if preview.scratch.area != laid_out {
+        preview.scratch.resize(laid_out);
+    }
+    let mut dead = stoat_widgets::ApcScene::new();
+    dead.set_live(false);
+    paint_preview_editor(
+        editor,
+        numbers,
+        laid_out,
+        theme,
+        chrome,
+        &mut preview.scratch,
+        &mut dead,
+    );
+    crate::render::clear_surface(area, buf, theme);
+    preview.scaled = Some(ScaledPreview { area, rows, cols });
+    rows
+}
+
+/// The 256ths of the grid cell that a cell of a preview at Preview Scale takes.
+///
+/// 154 is the step nearest the boards' 0.6, and gives a 5 by 11 pixel cell at
+/// the 9 by 18 pixel grid cell, the boards' 11 px row.
+pub(crate) const PREVIEW_SCALE: u16 = 154;
+
+/// The `(rows, cols)` of Preview Scale cells that a preview over `area` lays
+/// its editor out in, or `None` without a scaled cell, where it keeps the grid.
+fn preview_grid(area: Rect, cell: Option<[u16; 2]>) -> Option<(u16, u16)> {
+    cell.map(|cell| pool::scaled_grid(area.width, area.height, cell, PREVIEW_SCALE))
+}
+
+/// Paint `editor` into `area` of `buf` as a preview, and record in its
+/// `gutter_width` the number column `numbers` leads its lines with.
+fn paint_preview_editor(
+    editor: &mut EditorState,
+    numbers: bool,
+    area: Rect,
+    theme: &Theme,
+    chrome: &ResolvedChrome,
+    buf: &mut Buffer,
+    scene: &mut stoat_widgets::ApcScene,
+) {
     let fallback = theme.get(scope::UI_TEXT);
 
     // The paint writes `gutter_width` on most paths, but a scroll past the end
     // returns before the write, so the column is set here on both branches.
-    if !preview.numbers_lines() {
+    if !numbers {
         render_editor(editor, area, fallback, theme, Some(chrome), buf, false);
         editor.gutter_width = 0;
         return;
@@ -2829,5 +2888,74 @@ mod tests {
         let layout = target_picker_layout(Rect::new(0, 0, 200, 60), 0, 40)
             .expect("the area hosts the picker");
         assert_eq!(layout.modal, Rect::new(20, 12, 160, 36));
+    }
+
+    /// A live scene with a scaled cell lays the preview out at Preview Scale. A
+    /// 60 by 30 area of 9 by 18 pixel cells holds 49 rows of 5 by 11 pixel
+    /// cells, which the call returns, the editor's viewport takes, and the
+    /// preview records. The area's own cells blank to the editor surface.
+    #[test]
+    fn a_scaled_preview_lays_out_at_the_scaled_grid_and_blanks_its_cells() {
+        let area = Rect::new(4, 2, 60, 30);
+
+        assert_eq!(
+            painted_preview(area, Some([9, 18])),
+            (
+                49,
+                Some(49),
+                Some(ScaledPreview {
+                    area,
+                    rows: 49,
+                    cols: 108
+                }),
+                true
+            ),
+        );
+    }
+
+    /// Without a scaled cell the preview keeps the grid. It lays out the area's
+    /// 30 rows, records nothing, and paints its text into the area's cells.
+    #[test]
+    fn a_preview_with_no_scaled_cell_paints_its_cells() {
+        assert_eq!(
+            painted_preview(Rect::new(4, 2, 60, 30), None),
+            (30, Some(30), None, false),
+        );
+    }
+
+    /// Paint a file finder's preview into `area` under a live scene whose scaled
+    /// cell is `cell`. Answers the rows the call returns, the editor's viewport
+    /// rows, what the preview records, and whether every cell of `area` is a
+    /// blank on the editor surface.
+    fn painted_preview(
+        area: Rect,
+        cell: Option<[u16; 2]>,
+    ) -> (u16, Option<u32>, Option<ScaledPreview>, bool) {
+        let mut h = crate::test_harness::TestHarness::with_size(120, 40);
+        let root = PathBuf::from("/scaled-preview");
+        let text: String = (1..=80).map(|n| format!("line {n}\n")).collect();
+        h.fake_fs().insert_file(root.join("a.txt"), text.as_bytes());
+        h.stoat.active_workspace_mut().git_root = root;
+        h.type_keys("space p");
+        h.settle();
+
+        let theme = h.stoat.theme.clone();
+        let chrome = ResolvedChrome::resolve(&theme);
+        let mut buf = Buffer::empty(Rect::new(0, 0, 70, 34));
+        let mut scene = stoat_widgets::ApcScene::new();
+        scene.set_scaled_cell(cell);
+        let mut finder = h.stoat.file_finder.take().expect("the finder is open");
+        let preview = &mut finder.active_core().preview;
+        let ws = h.stoat.active_workspace_mut();
+        let rows = render_picker_preview(preview, area, &theme, &chrome, ws, &mut buf, &mut scene);
+
+        let viewport = ws
+            .editors
+            .get(preview.editor)
+            .and_then(|editor| editor.viewport_rows);
+        let blank = crate::render::surface_blank(&theme);
+        let blanked = (area.top()..area.bottom())
+            .all(|y| (area.left()..area.right()).all(|x| buf[(x, y)] == blank));
+        (rows, viewport, preview.scaled, blanked)
     }
 }
