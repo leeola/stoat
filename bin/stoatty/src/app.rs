@@ -3781,23 +3781,13 @@ fn redraw_aux(
         aux.pool_scratch = pools;
     }
 
-    // Composite each gliding pool from its region-sized grid, placed at the
-    // region origin, scissored to it and shifted by the sub-cell fraction.
+    // Composite each gliding pool from the rows its glide composed, placed at
+    // the region origin, scissored to it and shifted by the sub-cell fraction.
     let composites = active
         .iter()
-        .map(|pool| PoolComposite {
-            id: pool.id,
-            grid: &aux.pool_anims[&pool.id].document_grid,
-            cell: PoolCell::Live,
-            origin_cells: [pool.region.left as f32, pool.region.top as f32],
-            scissor: region_scissor(pool.region, layout, cw, ch),
-            shift_rows: -snap_shift_to_pixels(pool.frac, ch),
-            content_changed: pool.content_changed,
-            scrolled_rows: pool.scrolled_rows,
-            occludable: pool.id < NON_PANE_POOL_BASE,
-            skip_clear: false,
-            changed_rows: None,
-            dim: 0.0,
+        .map(|pool| {
+            let grid = &aux.pool_anims[&pool.id].document_grid;
+            aux_pool_composite(pool, grid, [cw, ch], layout)
         })
         .collect::<Vec<_>>();
 
@@ -3829,6 +3819,38 @@ fn redraw_aux(
     );
     latch_skipped(&mut aux.force_full, aux.window.as_ref(), outcome);
     easing || sketch_step.animating || outcome.atlas_stale
+}
+
+/// The composite that draws aux window pool `pool` from `grid`, the rows its
+/// glide composed, on a grid of `cell`-sized cells whose rows `layout` places.
+///
+/// Every pool but a scaled one draws at the live cell, and no pool fades or
+/// leaves a cell to the clear. A scaled pool draws at its scale, and its shift
+/// counts rows of its own cell.
+fn aux_pool_composite<'a>(
+    pool: &ActivePool,
+    grid: &'a Grid,
+    [cw, ch]: [f32; 2],
+    layout: GridLayout,
+) -> PoolComposite<'a> {
+    let region = pool.region;
+    PoolComposite {
+        id: pool.id,
+        grid,
+        cell: match region.kind {
+            PoolKind::Scaled { scale, .. } => PoolCell::Scaled(scale),
+            PoolKind::Grid | PoolKind::Terminal => PoolCell::Live,
+        },
+        origin_cells: [region.left as f32, region.top as f32],
+        scissor: region_scissor(region, layout, cw, ch),
+        shift_rows: -snap_shift_to_pixels(pool.frac, pool_cell_height(region.kind, ch)),
+        content_changed: pool.content_changed,
+        scrolled_rows: pool.scrolled_rows,
+        occludable: pool.id < NON_PANE_POOL_BASE,
+        skip_clear: false,
+        changed_rows: None,
+        dim: 0.0,
+    }
 }
 
 /// Whether the next frame must redraw the whole grid.
@@ -3965,6 +3987,11 @@ fn aux_content_hash(pools: &[PoolView], covered: &[ActivePool]) -> u64 {
 /// target directly, with no sub-cell glide, so only the region's own rows are
 /// copied and the straddle row `project_pool` composes is dropped.
 ///
+/// A scaled pool is left out. Its composite stays on screen at rest and draws
+/// its region, and its cells, a scale of the live cell, have no place among
+/// this grid's live cells. A copy of them at the live cell paints past the
+/// region's edge.
+///
 /// `damage` says how much of the last compose survives, and collects what this
 /// one changed. Under a [`Damage::Full`] the grid is blanked first, so a cell no
 /// pool covers shows the window background. Under a partial one the cells stand
@@ -3993,6 +4020,9 @@ fn compose_aux_grid(
     }
 
     for pool in pools {
+        if matches!(pool.region.kind, PoolKind::Scaled { .. }) {
+            continue;
+        }
         if terminal
             .project_pool(pool.id, scratch, pool.scroll_target.pages())
             .is_none()
@@ -4528,14 +4558,14 @@ fn selection_copy_text(terminal: &FairMutex<Terminal>) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        app_has_focus, aux_content_hash, aux_drag_event, aux_geometry_hash, bell_should_ring,
-        classify_window_open, compose_aux_grid, earliest, forced_damage, grid_pixels,
-        grid_window_size, net_font_step, notification_should_show, pool_cell, pool_composite,
-        pool_grid_reports, selection_copy_text, side_button_event, snap_shift_to_pixels,
-        step_popovers, swallow_super_combo, sync_row_anchor, terminal_pool_at, update_cell_pixels,
-        wheel_upstream, zoom_route, ActivePool, ForceFull, FrameOutcome, Input, PendingResize,
-        PoolView, PtyWrite, TermEvent, Visibility, WindowIpcEvent, WindowOpenVerdict, ZoomRoute,
-        MAX_AUX_WINDOWS,
+        app_has_focus, aux_content_hash, aux_drag_event, aux_geometry_hash, aux_pool_composite,
+        bell_should_ring, classify_window_open, compose_aux_grid, earliest, forced_damage,
+        grid_pixels, grid_window_size, net_font_step, notification_should_show, pool_cell,
+        pool_composite, pool_grid_reports, selection_copy_text, side_button_event,
+        snap_shift_to_pixels, step_popovers, swallow_super_combo, sync_row_anchor,
+        terminal_pool_at, update_cell_pixels, wheel_upstream, zoom_route, ActivePool, ForceFull,
+        FrameOutcome, Input, PendingResize, PoolView, PtyWrite, TermEvent, Visibility,
+        WindowIpcEvent, WindowOpenVerdict, ZoomRoute, MAX_AUX_WINDOWS,
     };
     #[cfg(unix)]
     use super::{
@@ -5000,6 +5030,52 @@ mod tests {
         assert!(
             matches!(damage, Damage::Full),
             "a grid that came back a different size has no clean rows to keep",
+        );
+    }
+
+    /// A scaled pool's own composite draws its region, so the base holds none
+    /// of its cells. At the live cell, its four-column grid paints past its
+    /// two-column region.
+    #[test]
+    fn the_aux_base_holds_no_cells_of_a_scaled_pool() {
+        let mut terminal = Terminal::new(4, 8, Theme::default());
+        terminal.advance(&encode_pool_region(&PoolRegionCommand {
+            pool: 1,
+            top: 0,
+            left: 0,
+            width: 2,
+            height: 2,
+            window: 1,
+            kind: PoolKind::Scaled {
+                scale: 128,
+                rows: 4,
+                cols: 4,
+            },
+            dim: 0,
+            resident: true,
+        }));
+        fill_page(&mut terminal, 1, 0, b"abcd");
+        fill_page(&mut terminal, 1, 1, b"....");
+        let pools = terminal.window_pools(1);
+        let (mut grid, mut scratch) = (Grid::new(4, 8), Grid::new(1, 1));
+
+        compose_aux_grid(
+            &terminal,
+            &pools,
+            &mut grid,
+            &mut scratch,
+            4,
+            8,
+            &mut Damage::Full,
+        );
+
+        let rows: Vec<String> = (0..grid.rows())
+            .map(|row| grid.row(row).iter().map(|cell| cell.ch).collect())
+            .collect();
+        assert_eq!(
+            rows,
+            vec![" ".repeat(8); 4],
+            "no cell of the scaled pool lands"
         );
     }
 
@@ -5551,6 +5627,58 @@ mod tests {
                 [24, 24, 48, 48],
                 false,
                 -4.0 / 12.0
+            ),
+        );
+    }
+
+    /// An aux window composites a scaled pool at its scale, with its glide shift
+    /// snapped to its own 12-pixel cell, and a grid pool at the live cell, with
+    /// its shift snapped to the live 24-pixel cell.
+    #[test]
+    fn an_aux_scaled_pool_composites_at_its_scale() {
+        let grid = Grid::new(1, 1);
+        let drawn = |kind| {
+            let tile = ActivePool {
+                id: 1,
+                region: PoolRegion {
+                    pool: 1,
+                    window: 1,
+                    top: 1,
+                    left: 2,
+                    width: 4,
+                    height: 2,
+                    kind,
+                    dim: 0,
+                    resident: true,
+                },
+                frac: 0.3,
+                content_changed: true,
+                scrolled_rows: None,
+            };
+            let composite = aux_pool_composite(&tile, &grid, [12.0, 24.0], FLOORED);
+            (
+                composite.cell,
+                composite.origin_cells,
+                composite.scissor,
+                composite.shift_rows,
+            )
+        };
+        let scaled = PoolKind::Scaled {
+            scale: 128,
+            rows: 4,
+            cols: 8,
+        };
+
+        assert_eq!(
+            (drawn(scaled), drawn(PoolKind::Grid)),
+            (
+                (
+                    PoolCell::Scaled(128),
+                    [2.0, 1.0],
+                    [24, 24, 48, 48],
+                    -4.0 / 12.0
+                ),
+                (PoolCell::Live, [2.0, 1.0], [24, 24, 48, 48], -7.0 / 24.0),
             ),
         );
     }
