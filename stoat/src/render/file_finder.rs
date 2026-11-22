@@ -18,7 +18,7 @@ use std::path::Path;
 use unicode_width::UnicodeWidthStr;
 
 /// The on-screen rectangles of the file finder modal, derived from a terminal
-/// `area` by [`file_finder_layout`] or [`file_finder_layout_with_chrome`].
+/// `area` by [`file_finder_layout`] or [`finder_layout`].
 ///
 /// Shared by the renderer and the smooth-scroll emit so the pooled list region
 /// matches the painted one exactly.
@@ -32,12 +32,27 @@ pub(crate) struct FinderLayout {
     /// The preview pane's editor, present only when the body is wide enough.
     pub(crate) preview: Option<Rect>,
     /// The path header over the preview and the rule under it, which only
-    /// [`file_finder_layout_with_chrome`] sets. The preview starts below it.
+    /// [`finder_layout`] sets. The preview starts below it.
     pub(crate) preview_header: Option<Rect>,
     /// The key line, on the inner rect's last row and the box's bottom row,
     /// with the list and the preview ending above it. A body of one row keeps
     /// none.
     pub(crate) footer: Option<Rect>,
+    /// The plate's width before zoom steps, in columns.
+    ///
+    /// [`finder_layout`] answers the fitted width, which the finder keeps as
+    /// [`FileFinder::plate_width`] so its plate does not narrow while it is
+    /// open. [`file_finder_layout`] answers its modal's width.
+    pub(crate) plate_base: u16,
+}
+
+/// The inner rect of a box of the finder family, its body under the query row
+/// and its rule, and its key line.
+struct BodyRows {
+    inner: Rect,
+    top: u16,
+    height: u16,
+    footer: Option<Rect>,
 }
 
 /// Rows the finder's preview gives its path header, the header row and the
@@ -87,23 +102,13 @@ pub(crate) fn file_finder_layout(
         (40, 12),
         zoom,
     )?;
-    // The title rides the top border, so it does not shrink the inner rect.
-    let inner = Block::default().borders(Borders::ALL).inner(modal);
-
-    let body_top = inner.y + 2;
-    let body_height = (inner.y + inner.height).saturating_sub(body_top);
-    if body_height == 0 {
-        return None;
-    }
-    let footer = (body_height > 1).then(|| crate::render::picker::footer_rect(modal));
-    let body_height = body_height - u16::from(footer.is_some());
-    let body_width = inner.width;
+    let body = body_rows(modal)?;
 
     let (list, preview) = crate::render::picker::split_list_preview(
-        inner.x,
-        body_top,
-        body_width,
-        body_height,
+        body.inner.x,
+        body.top,
+        body.inner.width,
+        body.height,
         80,
         crate::render::picker::MIN_PANE_COLUMNS,
         list_share,
@@ -111,44 +116,132 @@ pub(crate) fn file_finder_layout(
 
     Some(FinderLayout {
         modal,
-        inner,
+        inner: body.inner,
         list,
         preview,
         preview_header: None,
+        footer: body.footer,
+        plate_base: modal.width,
+    })
+}
+
+/// Lay out the File Finder or the Buffer Finder within `area`, its plate
+/// fitted to the widest label that its list shows, or `None` when `area` is
+/// too small to host it.
+///
+/// The list takes the widest label among the rows on show, at least 30
+/// columns, with its pad and mark cells, as [`list_columns`] gives them. The
+/// preview takes one and a half times the list, and at least `preview_min`
+/// columns. The plate does not narrow below [`FileFinder::plate_width`], the
+/// widest plate the finder has drawn since it opened, and it stops one column
+/// inside each side of `area`. `zoom` steps then move the width by a tenth of
+/// the area each. The height follows the list's rows as the height of
+/// [`file_finder_layout`] does.
+///
+/// A query that matches no file keeps this box, so the query row stays in
+/// place while a query loses and regains its matches.
+///
+/// A dragged `split` share replaces the list's fitted width, as
+/// [`fitted_split`] describes. The preview's top two rows hold its path
+/// header, so the preview rect covers only the editor below it, which is the
+/// rect the pooled preview page fills and a wheel scrolls. A preview too short
+/// to keep an editor row under the header gets no header.
+///
+/// [`list_columns`]: crate::render::picker::list_columns
+/// [`fitted_split`]: crate::render::picker::fitted_split
+pub(crate) fn finder_layout(
+    area: Rect,
+    finder: &FileFinder,
+    home: Option<&Path>,
+    zoom: i8,
+    split: Option<u16>,
+    preview_min: u16,
+) -> Option<FinderLayout> {
+    let rows =
+        crate::render::chrome::modal_box(area, (0, finder.content_rows), (0, 32), (40, 12), zoom)?;
+    let list = {
+        let list_rows = body_rows(rows)?.height;
+        let widest = crate::render::picker::widest_label(&finder_rows(finder, home), list_rows);
+        crate::render::picker::list_columns(widest)
+    };
+
+    let fitted = crate::render::picker::fitted_plate_width(list, preview_min);
+    let base =
+        crate::render::chrome::fitted_width(area.width, finder.plate_width.max(fitted), 0, 0);
+    let width = crate::render::chrome::fitted_width(area.width, base, 40, zoom);
+    let modal = Rect {
+        x: area.x + (area.width - width) / 2,
+        width,
+        ..rows
+    };
+    let body = body_rows(modal)?;
+
+    let (list, preview) = crate::render::picker::fitted_split(
+        body.inner.x,
+        body.top,
+        body.inner.width,
+        body.height,
+        list,
+        preview_min,
+        split,
+    );
+    let (preview_header, preview) = match preview.filter(|p| p.height > PREVIEW_HEADER_ROWS) {
+        Some(preview) => (
+            Some(Rect {
+                height: PREVIEW_HEADER_ROWS,
+                ..preview
+            }),
+            Some(Rect {
+                y: preview.y + PREVIEW_HEADER_ROWS,
+                height: preview.height - PREVIEW_HEADER_ROWS,
+                ..preview
+            }),
+        ),
+        None => (None, preview),
+    };
+
+    Some(FinderLayout {
+        modal,
+        inner: body.inner,
+        list,
+        preview,
+        preview_header,
+        footer: body.footer,
+        plate_base: base,
+    })
+}
+
+/// The [`BodyRows`] of a finder-family box `modal`, or `None` when the box
+/// holds no body row.
+///
+/// The body starts two rows into the inner rect, under the query row and its
+/// rule. The key line takes the inner rect's last row and the bottom border's
+/// row, as [`footer_rect`](crate::render::picker::footer_rect) gives them,
+/// once the body has more than one row.
+fn body_rows(modal: Rect) -> Option<BodyRows> {
+    // The title rides the top border, so it does not shrink the inner rect.
+    let inner = Block::default().borders(Borders::ALL).inner(modal);
+
+    let top = inner.y + 2;
+    let height = (inner.y + inner.height).saturating_sub(top);
+    if height == 0 {
+        return None;
+    }
+    let footer = (height > 1).then(|| crate::render::picker::footer_rect(modal));
+    Some(BodyRows {
+        inner,
+        top,
+        height: height - u16::from(footer.is_some()),
         footer,
     })
 }
 
-/// Lay out the file finder as [`file_finder_layout`] does, plus the path header
-/// over its preview, which only the finder shows.
+/// Paint the File Finder or the Buffer Finder into `area`, laid out as
+/// [`finder_layout`] lays it out.
 ///
-/// The preview then covers only the editor below its header, which is the rect
-/// the pooled preview page fills and a wheel scrolls. A preview too short to
-/// keep an editor row under the header gets no header.
-///
-/// A query that matches no file keeps this box, so the query row stays in
-/// place while a query loses and regains its matches.
-pub(crate) fn file_finder_layout_with_chrome(
-    area: Rect,
-    content: (u16, u16),
-    zoom: i8,
-    list_share: u16,
-) -> Option<FinderLayout> {
-    let mut layout = file_finder_layout(area, content, zoom, list_share)?;
-    if let Some(preview) = layout.preview.filter(|p| p.height > PREVIEW_HEADER_ROWS) {
-        layout.preview_header = Some(Rect {
-            height: PREVIEW_HEADER_ROWS,
-            ..preview
-        });
-        layout.preview = Some(Rect {
-            y: preview.y + PREVIEW_HEADER_ROWS,
-            height: preview.height - PREVIEW_HEADER_ROWS,
-            ..preview
-        });
-    }
-    Some(layout)
-}
-
+/// The paint keeps the plate's width before zoom steps in
+/// [`FileFinder::plate_width`], so the next frame draws a plate at least as
+/// wide while the finder stays open.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn render_file_finder(
     finder: &mut FileFinder,
@@ -158,14 +251,15 @@ pub(crate) fn render_file_finder(
     chrome: &crate::render::editor::ResolvedChrome,
     area: Rect,
     zoom: i8,
-    list_share: u16,
+    split: Option<u16>,
+    preview_min: u16,
     buf: &mut Buffer,
     scene: &mut stoat_widgets::ApcScene,
 ) {
-    let Some(layout) = file_finder_layout_with_chrome(area, finder.content_size, zoom, list_share)
-    else {
+    let Some(layout) = finder_layout(area, finder, home, zoom, split, preview_min) else {
         return;
     };
+    finder.plate_width = layout.plate_base;
     let no_match = finder.shows_no_match();
 
     let modal_style = theme.get(crate::theme::scope::UI_MODAL_PALETTE);
@@ -552,15 +646,13 @@ fn shown_lines(editor: &mut EditorState) -> Option<(u32, u32)> {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        file_finder_layout, file_finder_layout_with_chrome, render_file_finder, FinderLayout,
-    };
+    use super::{file_finder_layout, finder_layout, render_file_finder, FinderLayout};
     use crate::{
         file_finder::FileFinder,
         render::{
             chrome::{ISLAND_BOTTOM, ISLAND_GAP, ISLAND_SIDE, ISLAND_TOP},
             editor::ResolvedChrome,
-            picker::DEFAULT_LIST_SHARE,
+            picker::{preview_min_columns, DEFAULT_LIST_SHARE},
         },
         test_fixture::{column_rules, plate_islands},
         theme::{scope, Theme},
@@ -629,14 +721,14 @@ mod tests {
             &chrome,
             area,
             0,
-            DEFAULT_LIST_SHARE,
+            None,
+            preview_min_columns(None),
             &mut buf,
             &mut ApcScene::new(),
         );
 
-        let layout =
-            file_finder_layout_with_chrome(area, finder.content_size, 0, DEFAULT_LIST_SHARE)
-                .expect("the finder fits");
+        let layout = finder_layout(area, &finder, None, 0, None, preview_min_columns(None))
+            .expect("the finder fits");
         let preview = layout.preview.expect("a preview beside the list");
         let pane = layout
             .preview_header
@@ -797,13 +889,13 @@ mod tests {
             &chrome,
             area,
             0,
-            DEFAULT_LIST_SHARE,
+            None,
+            preview_min_columns(None),
             &mut buf,
             &mut scene,
         );
-        let layout =
-            file_finder_layout_with_chrome(area, finder.content_size, 0, DEFAULT_LIST_SHARE)
-                .expect("the finder fits");
+        let layout = finder_layout(area, finder, None, 0, None, preview_min_columns(None))
+            .expect("the finder fits");
         (buf, layout)
     }
 
@@ -859,14 +951,14 @@ mod tests {
             &chrome,
             area,
             0,
-            DEFAULT_LIST_SHARE,
+            None,
+            preview_min_columns(None),
             &mut buf,
             &mut scene,
         );
 
-        let layout =
-            file_finder_layout_with_chrome(area, finder.content_size, 0, DEFAULT_LIST_SHARE)
-                .expect("the finder fits");
+        let layout = finder_layout(area, &finder, None, 0, None, preview_min_columns(None))
+            .expect("the finder fits");
         let preview = layout.preview.expect("a preview beside the list");
         let pane = layout
             .preview_header

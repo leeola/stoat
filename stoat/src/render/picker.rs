@@ -2235,6 +2235,110 @@ pub(crate) fn split_list_preview(
     }
 }
 
+/// Label columns a list fitted to its labels keeps, however short its labels
+/// are.
+const LIST_MIN_COLUMNS: u16 = 30;
+
+/// Columns of text a fitted preview keeps, so a line of code reads whole beside
+/// a list of short labels.
+const PREVIEW_TEXT_COLUMNS: u16 = 100;
+
+/// Body columns under which a fitted finder shows its list alone, with no
+/// preview beside it.
+const FITTED_SPLIT_MIN_COLUMNS: u16 = 80;
+
+/// The columns of a list fitted to its labels, where `widest` is the most chars
+/// of a label on show.
+///
+/// The labels keep [`LIST_MIN_COLUMNS`] however short they are. The list adds
+/// the pad cell before each label and the two mark cells after it.
+pub(crate) fn list_columns(widest: u16) -> u16 {
+    widest
+        .max(LIST_MIN_COLUMNS)
+        .saturating_add(LABEL_PAD + MARK_COLUMNS)
+}
+
+/// The width of a plate fitted to a list of `list` columns.
+///
+/// The preview beside the list takes one and a half times the list, and at
+/// least `preview_min` columns. The plate holds the list, the separator column,
+/// the preview, and its two border columns.
+pub(crate) fn fitted_plate_width(list: u16, preview_min: u16) -> u16 {
+    let list = u32::from(list);
+    let preview = (list * 3).div_ceil(2).max(u32::from(preview_min));
+    u16::try_from(list + 1 + preview + 2).unwrap_or(u16::MAX)
+}
+
+/// The fewest columns a fitted preview takes.
+///
+/// `scaled` is the pixel width of a Preview Scale cell and of a grid cell where
+/// the preview draws at Preview Scale, or `None` where it draws at the grid
+/// size. A grid preview keeps [`PREVIEW_TEXT_COLUMNS`]. A scaled preview keeps
+/// that many scaled cells of text and the scaled cells of its ruled number
+/// column, and fits them into grid columns.
+pub(crate) fn preview_min_columns(scaled: Option<(u16, u16)>) -> u16 {
+    let Some((scaled_width, grid_width)) = scaled else {
+        return PREVIEW_TEXT_COLUMNS;
+    };
+    let cells = PREVIEW_TEXT_COLUMNS + PREVIEW_NUMBER_DIGITS + PREVIEW_RULE_CELLS;
+    let pixels = u32::from(cells) * u32::from(scaled_width);
+    u16::try_from(pixels.div_ceil(u32::from(grid_width.max(1)))).unwrap_or(u16::MAX)
+}
+
+/// The most chars of a label among the `list_rows` results that a list shows
+/// from [`window_start`].
+///
+/// A fitted list sizes its plate from this. Below the plate's cap no label
+/// wraps, so the results from the window's start are the rows on show.
+pub(crate) fn widest_label(rows: &PathRows<'_>, list_rows: u16) -> u16 {
+    let first = window_start(rows.picklist.selected, usize::from(list_rows));
+    let mut label = String::new();
+    let widest = (first..first.saturating_add(usize::from(list_rows)))
+        .map_while(|result| {
+            rows.label(result, &mut label)?;
+            Some(label.chars().count())
+        })
+        .max()
+        .unwrap_or(0);
+    u16::try_from(widest).unwrap_or(u16::MAX)
+}
+
+/// Split a fitted finder body, the `width` by `height` cells from `(x, y)`,
+/// into its list and its preview.
+///
+/// A body under [`FITTED_SPLIT_MIN_COLUMNS`] shows the list alone. Otherwise a
+/// dragged `split` share, in [`SHARE_SCALE`] units, sets the list as that share
+/// of the body, and each pane keeps [`MIN_PANE_COLUMNS`]. With no share the
+/// list takes its fitted `list` columns, as [`list_columns`] gives them, and
+/// the preview keeps `preview_min` columns. In a body too narrow for both, the
+/// preview's minimum yields before the list's own minimum does. The preview
+/// takes the cells past one separator column.
+pub(crate) fn fitted_split(
+    x: u16,
+    y: u16,
+    width: u16,
+    height: u16,
+    list: u16,
+    preview_min: u16,
+    split: Option<u16>,
+) -> (Rect, Option<Rect>) {
+    if width < FITTED_SPLIT_MIN_COLUMNS {
+        return (Rect::new(x, y, width, height), None);
+    }
+
+    let list = match split {
+        Some(share) => share_of(width, share).clamp(MIN_PANE_COLUMNS, width - 1 - MIN_PANE_COLUMNS),
+        None => {
+            let floor = preview_min.min(width - 1 - list_columns(0));
+            list.min(width - 1 - floor)
+        },
+    };
+    (
+        Rect::new(x, y, list, height),
+        Some(Rect::new(x + list + 1, y, width - list - 1, height)),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
@@ -3185,6 +3289,58 @@ mod tests {
             split_list_preview(0, 0, 79, 10, 80, 24, 6_000),
             (Rect::new(0, 0, 79, 10), None),
             "below the wide threshold the list takes everything"
+        );
+    }
+
+    /// A fitted list holds its widest label, at least 30 columns, and its pad
+    /// and mark cells. The plate holds the list, the separator, the larger of
+    /// one and a half lists and the preview's minimum, and two borders. A
+    /// scaled preview's minimum fits 100 text cells and the ruled number column
+    /// of 5 px cells into 9 px grid columns.
+    #[test]
+    fn a_fitted_plate_holds_its_list_and_the_larger_preview() {
+        assert_eq!(
+            (
+                [list_columns(0), list_columns(75)],
+                [(33, 59), (47, 59), (33, 100)].map(|(list, min)| fitted_plate_width(list, min)),
+                [preview_min_columns(None), preview_min_columns(Some((5, 9)))],
+            ),
+            ([33, 78], [95, 121, 136], [100, 59]),
+        );
+    }
+
+    /// With no share the list takes its fitted columns, up to the room that the
+    /// preview's minimum leaves, and the preview takes the rest past the
+    /// separator. In a body too narrow for both minimums the preview yields to
+    /// a 30-column list. A share sets the list as that share of the body, and a
+    /// body under 80 columns shows no preview.
+    #[test]
+    fn a_fitted_split_gives_the_list_its_label_and_the_preview_the_rest() {
+        let body = |width, list, min, split| fitted_split(0, 0, width, 27, list, min, split);
+        let panes = |list, preview: Option<(u16, u16)>| {
+            (
+                Rect::new(0, 0, list, 27),
+                preview.map(|(x, width)| Rect::new(x, 0, width, 27)),
+            )
+        };
+
+        assert_eq!(
+            [
+                body(93, 33, 59, None),
+                body(156, 164, 59, None),
+                body(156, 78, 59, None),
+                body(116, 60, 100, None),
+                body(156, 96, 59, Some(6_000)),
+                body(79, 33, 59, None),
+            ],
+            [
+                panes(33, Some((34, 59))),
+                panes(96, Some((97, 59))),
+                panes(78, Some((79, 77))),
+                panes(33, Some((34, 82))),
+                panes(93, Some((94, 62))),
+                panes(79, None),
+            ],
         );
     }
 

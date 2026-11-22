@@ -95,6 +95,7 @@ use stoat_text::{
 };
 use stoat_widgets::{pool::SmoothScrollState, ApcScene};
 use stoatty_protocol::{
+    command,
     window_ipc::{MouseButton as IpcMouseButton, MouseKind, WindowIpcEvent},
     BACKDROP_PANEL_PROTOCOL, BATCHED_DECORATIONS_PROTOCOL, NUDGE_PROTOCOL, POOL_SCALE_PROTOCOL,
 };
@@ -1053,12 +1054,15 @@ pub struct Stoat {
     /// Share of its body each modal's list pane takes, in
     /// [`crate::render::picker::SHARE_SCALE`] units, for the kinds whose
     /// list/preview separator the user has dragged. An absent kind sits at
-    /// [`crate::render::picker::DEFAULT_LIST_SHARE`].
+    /// [`crate::render::picker::DEFAULT_LIST_SHARE`], except the File Finder,
+    /// whose list then fits its labels.
     ///
     /// Stored per kind and session-scoped for [`Self::modal_zoom`]'s reasons. A
     /// share the user chose outlives the modal it was chosen in, so reopening
-    /// that modal restores the split. It is never persisted, because the choice
-    /// answers what is on screen right now.
+    /// that modal restores the split. The File Finder's share is the exception.
+    /// It holds until the finder closes, so the next open fits the list to its
+    /// labels again. No share is persisted, because the choice answers what is
+    /// on screen right now.
     pub(crate) modal_split: std::collections::BTreeMap<ModalKind, u16>,
     /// Share of its body the commits screen's list pane takes, in
     /// [`crate::render::picker::SHARE_SCALE`] units, once the reader has
@@ -4090,6 +4094,20 @@ impl Stoat {
         self.cell_pixels
             .filter(|_| capable)
             .map(|(width, height)| [width, height])
+    }
+
+    /// The fewest columns the finder's preview takes, which hold 100 columns
+    /// of its text at the size the terminal draws the preview.
+    ///
+    /// A terminal that draws scaled pools draws the preview at Preview Scale,
+    /// so the minimum fits that many scaled cells into grid columns.
+    pub(crate) fn preview_min_columns(&self) -> u16 {
+        let scaled = self.scaled_cell().map(|[width, _]| {
+            let scaled_width =
+                command::scaled_cell_side(width, crate::render::picker::PREVIEW_SCALE);
+            (scaled_width, width)
+        });
+        crate::render::picker::preview_min_columns(scaled)
     }
 
     /// The area the last paint laid the workspace split panes out in.

@@ -1966,6 +1966,7 @@ pub(crate) fn frame(
     let mode = stoat.frame_mode.as_str();
     let toggles = ToggleStates::read(stoat);
     let app = AppFlags::from_stoat(stoat);
+    let preview_min = stoat.preview_min_columns();
     // An armed one-char chord waits on its char in a primary mode. The hints
     // box below lists the chars it takes, and a pinned pane shows that box too,
     // since the capture is one press. The read comes before the workspace
@@ -2374,7 +2375,7 @@ pub(crate) fn frame(
         Some(ActiveModal::FileFinder) => {
             if let Some(finder) = &mut stoat.file_finder {
                 let zoom = modal_zoom_steps(&stoat.modal_zoom, ModalKind::FileFinder);
-                let split = modal_split_share(&stoat.modal_split, ModalKind::FileFinder);
+                let split = stoat.modal_split.get(&ModalKind::FileFinder).copied();
                 file_finder::render_file_finder(
                     finder,
                     ws,
@@ -2384,6 +2385,7 @@ pub(crate) fn frame(
                     full,
                     zoom,
                     split,
+                    preview_min,
                     buf,
                     &mut *scene,
                 );

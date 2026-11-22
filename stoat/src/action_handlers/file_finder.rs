@@ -1,5 +1,5 @@
 use crate::{
-    app::{Stoat, UpdateEffect},
+    app::{ModalKind, Stoat, UpdateEffect},
     diff_changes,
     file_finder::{Browse, FileFinder, FinderPathCache, FinderScope, OpenIntent, BROWSE_PATH_CAP},
     pane::{FocusTarget, View},
@@ -779,6 +779,7 @@ pub(crate) fn close_file_finder(stoat: &mut Stoat) {
         stoat.workspaces[active_idx].last_finder_scope = Some(name);
     }
     finder.dispose(&mut stoat.workspaces[active_idx]);
+    stoat.modal_split.remove(&ModalKind::FileFinder);
 
     // A cross-workspace list spans several roots, so it cannot be filed under
     // the one this finder was rooted at. `display_roots` is set exactly while

@@ -24,11 +24,6 @@ use tokio::sync::mpsc::UnboundedReceiver;
 /// bounded.
 pub(crate) const BROWSE_PATH_CAP: usize = 100_000;
 
-/// Columns [`FileFinder::content_size`] always asks for, matching the recommended
-/// box width the renderer sizes against. The list is one path per row, so its
-/// length drives height alone and the box only ever widens through zoom.
-const FINDER_CONTENT_COLS: u16 = 120;
-
 /// Rows the finder's chrome occupies above and below its list: the two border
 /// rows, the input row, and the separator under it. Content rows plus this is
 /// the box height that shows the whole list.
@@ -270,14 +265,20 @@ pub struct FileFinder {
     /// Glob-filtered base for the active [`FinderScope::Named`] scope, or
     /// `None` before one is built.
     pub(crate) named_cache: Option<NamedCache>,
-    /// Cells the modal would need to show the whole unfiltered list, which the
-    /// renderer sizes the box against.
+    /// Rows the modal needs to show the whole unfiltered list, which the
+    /// renderer sizes the box's height against.
     ///
     /// Derived from the candidate base rather than the filtered rows, so
     /// narrowing a query never moves the box out from under the user typing it.
     /// The base grows while the background walk streams in, so a large workspace
     /// settles at its full size over the first frames after opening.
-    pub(crate) content_size: (u16, u16),
+    pub(crate) content_rows: u16,
+    /// The widest plate, in columns, that the finder has drawn since it opened.
+    ///
+    /// The plate fits the widest label on show, and a query that narrows the
+    /// list does not pull the plate in under the user typing it. Each open
+    /// starts over at 0, so the plate fits the next list afresh.
+    pub(crate) plate_width: u16,
 }
 
 /// Source tags for [`base_id`], so two scopes carrying the same generation
@@ -368,7 +369,8 @@ impl FileFinder {
             browse: None,
             named_scopes: compile_named_scopes(finder_scopes),
             named_cache: None,
-            content_size: (FINDER_CONTENT_COLS, 0),
+            content_rows: 0,
+            plate_width: 0,
         };
         // Uniformly seed the initial (empty-query) list for whatever scope
         // opened, including a named scope's glob filter.
@@ -791,15 +793,15 @@ impl FileFinder {
         }
     }
 
-    /// Re-derive [`Self::content_size`] from the active picker's candidate base.
+    /// Re-derive [`Self::content_rows`] from the active picker's candidate base.
     ///
     /// The base is the scope's whole list, not the filtered rows, so this lands
     /// the same answer for every query and only moves when the walk delivers or
     /// the scope flips. A list longer than [`u16::MAX`] just asks for the
-    /// largest box there is.
+    /// tallest box there is.
     fn remeasure_content(&mut self) {
         let rows = u16::try_from(self.active_core_ref().picklist.base.len()).unwrap_or(u16::MAX);
-        self.content_size = (FINDER_CONTENT_COLS, rows.saturating_add(FINDER_CHROME_ROWS));
+        self.content_rows = rows.saturating_add(FINDER_CHROME_ROWS);
     }
 
     /// Bring [`Self::named_cache`] up to date with the walk under `name`.
@@ -991,7 +993,7 @@ pub(crate) fn query_modified(git_host: &dyn GitHost, git_root: &Path) -> Vec<Pat
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{test_fixture, test_harness::keys};
+    use crate::{app::ModalKind, test_fixture, test_harness::keys};
     use crossterm::event::{Event, KeyCode};
     use ratatui::style::{Color, Modifier};
 
@@ -2011,6 +2013,119 @@ mod tests {
                 vec![All, Modified, Diff, AllWorkspaces],
             ],
         );
+    }
+
+    /// The plate fits the widest label on show. The query `zz` shows the
+    /// 66-char path, so the list grows to 69 columns and the preview to one and
+    /// a half times it. Clearing the query fits the list back to 33 columns,
+    /// and the preview takes the rest of the kept plate.
+    #[test]
+    fn the_finder_plate_grows_with_its_widest_row_and_keeps_its_width() {
+        let mut h = fitted_plate_harness();
+        let open = plate_widths(&h);
+        h.type_text("zz");
+        h.settle();
+        h.stoat.render();
+        let grown = plate_widths(&h);
+        h.type_keys("backspace backspace");
+        h.settle();
+        h.stoat.render();
+
+        assert_eq!(
+            [open, grown, plate_widths(&h)],
+            [
+                (136, 33, Some(100)),
+                (176, 69, Some(104)),
+                (176, 33, Some(140)),
+            ],
+        );
+    }
+
+    /// The plate measures the labels in the list's window, so a selection that
+    /// scrolls the long path into view grows the plate to fit it.
+    #[test]
+    fn a_selection_that_scrolls_a_long_label_into_view_grows_the_plate() {
+        let mut h = fitted_plate_harness();
+        let open = plate_widths(&h).0;
+        for _ in 0..35 {
+            h.type_keys("down");
+        }
+
+        assert_eq!((open, plate_widths(&h)), (136, (176, 69, Some(104))));
+    }
+
+    /// The finder keeps its widest plate only while it stays open, so the next
+    /// open fits the plate to the labels on show again.
+    #[test]
+    fn the_finder_plate_starts_over_at_each_open() {
+        let mut h = fitted_plate_harness();
+        h.type_text("zz");
+        h.settle();
+        h.stoat.render();
+        let grown = plate_widths(&h).0;
+        h.type_keys("escape");
+        h.type_keys("space p");
+        h.settle();
+        h.stoat.render();
+
+        assert_eq!((grown, plate_widths(&h).0), (176, 136));
+    }
+
+    /// A dragged share sets the list while the finder stays open, and the
+    /// close drops it, so the next open fits the list to its labels again.
+    #[test]
+    fn a_dragged_split_holds_until_the_finder_closes() {
+        let mut h = fitted_plate_harness();
+        h.stoat.modal_split.insert(ModalKind::FileFinder, 5_000);
+        let dragged = plate_widths(&h);
+        h.type_keys("escape");
+        let share = h.stoat.modal_split.get(&ModalKind::FileFinder).copied();
+        h.type_keys("space p");
+        h.settle();
+
+        assert_eq!(
+            (dragged, share, plate_widths(&h)),
+            ((136, 67, Some(66)), None, (136, 33, Some(100))),
+        );
+    }
+
+    /// A window too narrow for a preview of 100 columns beside a list of 33
+    /// keeps the list at its minimum. The plate stops one column inside each
+    /// side of the window, and the preview takes the rest of it.
+    #[test]
+    fn a_window_too_narrow_for_both_minimums_keeps_the_list_at_thirty_columns() {
+        let mut h = TestHarness::with_size(120, 30);
+        seed_finder_workspace(&mut h, &[("a.rs", "")]);
+        h.type_keys("space p");
+        h.settle();
+
+        assert_eq!(plate_widths(&h), (118, 33, Some(82)));
+    }
+
+    /// A 200 by 40 harness with the finder open over 35 short paths and one
+    /// path of 66 chars, which the list shows only under the query `zz`.
+    fn fitted_plate_harness() -> TestHarness {
+        let mut h = TestHarness::with_size(200, 40);
+        let names: Vec<String> = (0..35)
+            .map(|n| format!("a{n:02}.rs"))
+            .chain([format!("zz/{}.rs", "x".repeat(60))])
+            .collect();
+        let files: Vec<(&str, &str)> = names.iter().map(|name| (name.as_str(), "")).collect();
+        seed_finder_workspace(&mut h, &files);
+        h.type_keys("space p");
+        h.settle();
+        h.stoat.render();
+        h
+    }
+
+    /// The open finder's modal width and the widths of its list and preview.
+    fn plate_widths(h: &TestHarness) -> (u16, u16, Option<u16>) {
+        let layout = test_fixture::finder_layout(h);
+        (
+            layout.modal.width,
+            layout.list.width,
+            layout.preview.map(|preview| preview.width),
+        )
     }
 
     /// A directory browse walks to the same cap as the repo walk, so its

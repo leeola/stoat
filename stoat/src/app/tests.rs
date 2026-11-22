@@ -1136,9 +1136,10 @@ fn a_macro_recorded_around_an_inband_zoom_press_does_not_carry_it() {
     );
 }
 
-/// A finder over a terminal and a content size that pin its box arithmetic:
-/// `modal_box` gives it width `(56 + 6z).clamp(40, 58)` and height
-/// `(32 + 7z).clamp(12, 68)`, so the box stops growing at level 6 and stops
+/// A finder over a terminal and a content height that pin its box arithmetic.
+/// Its fitted plate stops at the 58-column ceiling, so the width is
+/// `(58 + 6z).clamp(40, 58)`, and `modal_box` gives it height
+/// `(32 + 7z).clamp(12, 68)`. The box stops growing at level 6 and stops
 /// shrinking at level -3, both well inside the ledger's own range.
 fn zoomable_finder() -> crate::test_harness::TestHarness {
     use stoat_action::OpenFileFinder;
@@ -1150,7 +1151,7 @@ fn zoomable_finder() -> crate::test_harness::TestHarness {
         .file_finder
         .as_mut()
         .expect("finder open")
-        .content_size = (120, 8);
+        .content_rows = 8;
     h
 }
 
@@ -1225,7 +1226,7 @@ fn zoom_steps_stop_where_the_modal_box_stops_shrinking() {
     );
     assert_eq!(
         finder_box(&h),
-        Some(Rect::new(8, 26, 44, 18)),
+        Some(Rect::new(7, 26, 46, 18)),
         "and grows the modal on that first press"
     );
 }

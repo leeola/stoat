@@ -67,14 +67,11 @@ pub(crate) fn palette_sizing(h: &TestHarness) -> (u16, i8) {
 /// The open finder's layout, sized from the same content and zoom the
 /// renderer would read, so a test rect matches the painted one.
 pub(crate) fn finder_layout(h: &TestHarness) -> crate::render::file_finder::FinderLayout {
-    let finder = h.stoat.file_finder.as_ref().expect("the finder is open");
-    crate::render::file_finder::file_finder_layout_with_chrome(
-        h.stoat.size(),
-        finder.content_size,
+    crate::mouse::open_finder_layout(
+        &h.stoat,
         modal_zoom_steps(&h.stoat.modal_zoom, ModalKind::FileFinder),
-        modal_split_share(&h.stoat.modal_split, ModalKind::FileFinder),
     )
-    .expect("the finder fits the test terminal")
+    .expect("the open finder fits the test terminal")
 }
 
 /// The layout of the open target picker of `kind`, sized from the same zoom

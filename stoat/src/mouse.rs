@@ -439,12 +439,7 @@ pub(crate) fn boxed_modal_surfaces(stoat: &Stoat) -> Option<ModalSurfaces> {
     match active_modal(stoat)? {
         ActiveModal::FileFinder => {
             let finder = stoat.file_finder.as_ref()?;
-            let layout = crate::render::file_finder::file_finder_layout_with_chrome(
-                size,
-                finder.content_size,
-                zoom(ModalKind::FileFinder),
-                split(ModalKind::FileFinder),
-            )?;
+            let layout = open_finder_layout(stoat, zoom(ModalKind::FileFinder))?;
             let core = finder.active_core_ref();
             // A query that matches no file shows no preview in the preview's
             // cells, so there is nothing to pool or scroll there.
@@ -769,6 +764,24 @@ fn press_git_status_row(stoat: &mut Stoat, mouse: MouseEvent) -> UpdateEffect {
     UpdateEffect::Redraw
 }
 
+/// The open File Finder's or Buffer Finder's layout at `zoom`, from the same
+/// inputs its renderer reads, or `None` when no finder is open or the terminal
+/// is too small to host it.
+pub(crate) fn open_finder_layout(
+    stoat: &Stoat,
+    zoom: i8,
+) -> Option<crate::render::file_finder::FinderLayout> {
+    let finder = stoat.file_finder.as_ref()?;
+    crate::render::file_finder::finder_layout(
+        stoat.size(),
+        finder,
+        stoat.home.as_deref(),
+        zoom,
+        stoat.modal_split.get(&ModalKind::FileFinder).copied(),
+        stoat.preview_min_columns(),
+    )
+}
+
 /// The bordered box `kind`'s modal would occupy at `zoom`, sized from the
 /// same inputs its renderer reads.
 ///
@@ -795,11 +808,7 @@ pub(crate) fn open_modal_box(stoat: &Stoat, kind: ModalKind, zoom: i8) -> Option
             )?
             .modal
         },
-        ModalKind::FileFinder => {
-            let finder = stoat.file_finder.as_ref()?;
-            crate::render::file_finder::file_finder_layout(size, finder.content_size, zoom, split)?
-                .modal
-        },
+        ModalKind::FileFinder => open_finder_layout(stoat, zoom)?.modal,
         ModalKind::SymbolFinder => {
             let finder = stoat.symbol_finder.as_ref()?;
             crate::render::symbol_finder::symbol_finder_layout(
@@ -929,14 +938,9 @@ pub(crate) fn open_modal_separator(stoat: &Stoat) -> Option<(ModalKind, SplitSep
 
     // The finder family puts its preview beside the list, so the separator
     // runs down the body and a drag redistributes columns.
-    let (kind, inner, list, preview) = if let Some(finder) = stoat.file_finder.as_ref() {
+    let (kind, inner, list, preview) = if stoat.file_finder.is_some() {
         let kind = ModalKind::FileFinder;
-        let layout = crate::render::file_finder::file_finder_layout_with_chrome(
-            size,
-            finder.content_size,
-            modal_zoom_steps(&stoat.modal_zoom, kind),
-            modal_split_share(&stoat.modal_split, kind),
-        )?;
+        let layout = open_finder_layout(stoat, modal_zoom_steps(&stoat.modal_zoom, kind))?;
         (kind, layout.inner, layout.list, layout.preview)
     } else if stoat.code_search.is_some() {
         // Search hits are unbounded, so code search declares the whole area

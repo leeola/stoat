@@ -807,12 +807,10 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
         .then_some(stoat.file_finder.as_ref())
         .flatten()
         .filter(|finder| !finder.shows_no_match())
-        .and_then(|finder| {
-            crate::render::file_finder::file_finder_layout_with_chrome(
-                stoat.size(),
-                finder.content_size,
+        .and_then(|_| {
+            crate::mouse::open_finder_layout(
+                stoat,
                 modal_zoom_steps(&stoat.modal_zoom, ModalKind::FileFinder),
-                modal_split_share(&stoat.modal_split, ModalKind::FileFinder),
             )
         })
         .map(|layout| layout.list)

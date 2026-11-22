@@ -218,6 +218,21 @@ fn zoomed(area: u16, content: u16, recommended: u16, min: u16, ceiling: u16, zoo
     (i32::from(base) + step).clamp(i32::from(min), i32::from(ceiling)) as u16
 }
 
+/// The width of a modal that fits `base` columns into an area `area_width`
+/// columns wide, after `zoom` steps.
+///
+/// The ceiling is the area less [`MODAL_MARGIN_MIN`], one bare column at each
+/// side, and `base` stops there. Each zoom step then moves the width by a tenth
+/// of the area, as a [`modal_box`] step does. The result stays between `min` and
+/// the ceiling, and the ceiling wins in an area too narrow for `min`.
+pub(crate) fn fitted_width(area_width: u16, base: u16, min: u16, zoom: i8) -> u16 {
+    let ceiling = area_width.saturating_sub(MODAL_MARGIN_MIN);
+    let step = i32::from(area_width / ZOOM_STEP_DIVISOR) * i32::from(zoom);
+
+    (i32::from(base.min(ceiling)) + step).clamp(i32::from(min.min(ceiling)), i32::from(ceiling))
+        as u16
+}
+
 /// The recommended width of a modal whose body is a list beside a preview.
 ///
 /// The width is 120 columns on a terminal up to 150 wide, and 80 percent of
@@ -1026,7 +1041,7 @@ pub(crate) fn text(
 #[cfg(test)]
 mod tests {
     use super::{
-        hline, hline_edge, list_modal_width, list_plate, modal_box, modal_frame,
+        fitted_width, hline, hline_edge, list_modal_width, list_plate, modal_box, modal_frame,
         modal_frame_above_pools, modal_frame_anchored, modal_island, modal_plate, plate_colors,
         popout_frame, selected_row, tagged_name, text, toggle_mark, type_tag, vline, TypeTag,
         CONFIRM_EDGES, ISLAND_BOTTOM, ISLAND_GAP, ISLAND_SIDE, ISLAND_TOP,
@@ -1168,6 +1183,18 @@ mod tests {
             modal_box(Rect::new(0, 0, 42, 14), (10, 5), RECOMMENDED, MIN, 0),
             Some(Rect::new(1, 1, 40, 12)),
             "the smallest hostable area yields the minimum box"
+        );
+    }
+
+    /// A fitted width keeps its base below the ceiling, one column inside each
+    /// side of a 160-column area. A zoom step moves it 16 columns, between the
+    /// 40-column minimum and that ceiling.
+    #[test]
+    fn a_fitted_width_stops_one_cell_inside_each_side_of_the_area() {
+        assert_eq!(
+            [(95, 0), (413, 0), (95, 1), (95, -4), (158, 2)]
+                .map(|(base, zoom)| fitted_width(160, base, 40, zoom)),
+            [95, 158, 111, 40, 158],
         );
     }
 
