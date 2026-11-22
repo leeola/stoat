@@ -877,6 +877,7 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
                 stoat.size(),
                 p.list_rows_hint(),
                 modal_zoom_steps(&stoat.modal_zoom, ModalKind::Palette),
+                p.header_rows,
             )
         })
         .map(|layout| layout.list);

@@ -33,7 +33,7 @@ use crate::{
     test_fixture::{
         fake_term_session, finder_layout, focused_editor_pane_area, mouse_event,
         open_indent_buffer, open_scratch_file, open_with_minimap_strip, palette_arg_layout,
-        picker_layout, seed, store_two_tours, target_picker_rows,
+        palette_sizing, picker_layout, seed, store_two_tours, target_picker_rows,
     },
     test_harness::{
         keys::{ctrl, key},
@@ -1887,6 +1887,71 @@ fn wheel_moves_palette_arg_picker_selection() {
     assert_eq!(
         selected, 1,
         "a wheel notch moves the arg picker selection down"
+    );
+}
+
+/// A Cmd Line that wraps onto a second row lowers the argument list, and a
+/// press on the list's second row, four rows under the box's top, selects
+/// that row.
+#[test]
+fn a_press_under_a_wrapped_header_selects_the_row_under_the_pointer() {
+    let mut h = Stoat::test();
+    let root = std::path::PathBuf::from("/wrap-press");
+    for name in ["a.rs", "ab.rs", "abc.rs"] {
+        h.fake_fs().insert_file(root.join(name), b"x\n");
+    }
+    h.stoat.active_workspace_mut().git_root = root;
+    h.type_text(&format!(":o a{}", " ".repeat(80)));
+    h.settle();
+    h.snapshot();
+
+    let layout = palette_arg_layout(&h);
+    h.stoat.update(mouse_event(
+        MouseEventKind::Down(MouseButton::Left),
+        layout.list.x + 2,
+        layout.inner.y + 4,
+    ));
+
+    let palette = h.stoat.command_palette.as_ref().expect("palette open");
+    let selected = palette
+        .arg_picker
+        .as_ref()
+        .expect("arg picker active")
+        .active_core_ref()
+        .picklist
+        .selected;
+    assert_eq!((palette.header_rows, selected), (2, 1));
+}
+
+/// A Cmd Line that wraps onto a second row lowers the command list, and a
+/// press on the list's second row, four rows under the box's top, selects
+/// that command.
+#[test]
+fn a_press_under_a_wrapped_query_selects_the_command_under_the_pointer() {
+    let mut h = Stoat::test();
+    h.type_text(&format!(":{}q", " ".repeat(80)));
+    h.settle();
+    h.snapshot();
+
+    let (rows, zoom, header_rows) = palette_sizing(&h);
+    let inner = crate::render::command_palette::palette_filter_layout(
+        h.stoat.size(),
+        rows,
+        zoom,
+        header_rows,
+    )
+    .expect("the palette fits the test terminal")
+    .inner;
+    h.stoat.update(mouse_event(
+        MouseEventKind::Down(MouseButton::Left),
+        inner.x + 2,
+        inner.y + 4,
+    ));
+
+    let palette = h.stoat.command_palette.as_ref().expect("palette open");
+    assert_eq!(
+        (palette.command.is_none(), header_rows, palette.selected),
+        (true, 2, 1)
     );
 }
 

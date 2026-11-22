@@ -506,8 +506,12 @@ pub(crate) fn boxed_modal_surfaces(stoat: &Stoat) -> Option<ModalSurfaces> {
             let rows = palette.list_rows_hint();
             let zoom = zoom(ModalKind::Palette);
             if palette.command.is_none() {
-                let layout =
-                    crate::render::command_palette::palette_filter_layout(size, rows, zoom)?;
+                let layout = crate::render::command_palette::palette_filter_layout(
+                    size,
+                    rows,
+                    zoom,
+                    palette.header_rows,
+                )?;
                 return Some(ModalSurfaces {
                     list: layout.list,
                     preview: None,
@@ -857,6 +861,7 @@ pub(crate) fn open_modal_box(stoat: &Stoat, kind: ModalKind, zoom: i8) -> Option
                         size,
                         palette.list_rows_hint(),
                         zoom,
+                        palette.header_rows,
                     )?
                     .modal
                 },

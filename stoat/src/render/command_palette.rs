@@ -21,9 +21,12 @@ use stoat_action::registry::RegistryEntry;
 const LIST_ROWS: u16 = 10;
 const DOC_ROWS: u16 = 6;
 
-/// Box rows the chrome takes around the list. Two borders, the `:` input, the
-/// separator under it, the doc separator, the doc region itself, and the key
-/// line's row inside the bottom border.
+/// Box rows the chrome takes around the list. Two borders, the Cmd Line's first
+/// row, the separator under it, the doc separator, the doc region itself, and
+/// the key line's row inside the bottom border.
+///
+/// A Cmd Line that wraps onto more rows takes them from the body, so the box
+/// keeps the height it opened with.
 const CHROME_ROWS: u16 = 6 + DOC_ROWS;
 
 /// The palette's key line, each a bound key and the word for what it does.
@@ -63,7 +66,7 @@ pub(crate) struct PaletteFilterLayout {
 pub(crate) struct PaletteArgLayout {
     /// The bordered modal box.
     pub(crate) modal: Rect,
-    /// Inside the border, the `:` input, its rule, and the body.
+    /// Inside the border, the Cmd Line, the row under it, and the body.
     pub(crate) inner: Rect,
     /// The result list, also the smooth-scroll pool region.
     pub(crate) list: Rect,
@@ -93,10 +96,16 @@ pub(crate) struct PaletteArgLayout {
 ///
 /// A box too short for everything shrinks the doc region first and the list
 /// last, since the list is the primary content.
+///
+/// The body starts under the `header_rows` rows of the Cmd Line, as
+/// [`CommandPalette::header_rows`] holds them, and the row under them. The box
+/// does not follow `header_rows`, so a wrapped header takes its rows from the
+/// body, and the doc region gives up its rows first.
 pub(crate) fn palette_filter_layout(
     area: Rect,
     content_rows: u16,
     zoom: i8,
+    header_rows: u16,
 ) -> Option<PaletteFilterLayout> {
     if area.width < 30 || area.height < 10 {
         return None;
@@ -115,12 +124,14 @@ pub(crate) fn palette_filter_layout(
     )?;
     let inner = Block::default().borders(Borders::ALL).inner(modal);
 
-    // The input, its separator, the doc separator, and the key line's row.
-    let body = inner.height.saturating_sub(3 + FOOTER_ROWS - 1);
+    // The header, its separator, the doc separator, and the key line's row.
+    let body = inner
+        .height
+        .saturating_sub(2 + header_rows + FOOTER_ROWS - 1);
     let list_height = body.saturating_sub(DOC_ROWS).max(LIST_ROWS).min(body);
     let doc_height = DOC_ROWS.min(body.saturating_sub(list_height));
 
-    let list = Rect::new(inner.x, inner.y + 2, inner.width, list_height);
+    let list = Rect::new(inner.x, inner.y + 1 + header_rows, inner.width, list_height);
     let doc = Rect::new(inner.x, list.y + list_height + 1, inner.width, doc_height);
 
     Some(PaletteFilterLayout {
@@ -146,6 +157,10 @@ pub(crate) fn palette_filter_layout(
 ///
 /// The height is the height of [`palette_filter_layout`]. The palette's
 /// separator takes no drag, so the list keeps its fitted width.
+///
+/// The body starts under the [`CommandPalette::header_rows`] rows of the Cmd
+/// Line and the row under them. The widest label comes from the body rows
+/// under a one-row header, because the header's rows follow the plate's width.
 pub(crate) fn palette_arg_layout(
     area: Rect,
     palette: &CommandPalette,
@@ -154,9 +169,11 @@ pub(crate) fn palette_arg_layout(
     preview_min: u16,
 ) -> Option<PaletteArgLayout> {
     let picker = palette.arg_picker.as_ref()?;
-    let rows = palette_filter_layout(area, palette.list_rows_hint(), zoom)?.modal;
+    let rows =
+        palette_filter_layout(area, palette.list_rows_hint(), zoom, palette.header_rows)?.modal;
     let list = {
-        let (_, list_rows) = arg_body_rows(Block::default().borders(Borders::ALL).inner(rows))?;
+        let inner = Block::default().borders(Borders::ALL).inner(rows);
+        let (_, list_rows) = arg_body_rows(inner, 1)?;
         let widest = crate::render::picker::widest_label(&arg_rows(picker, home), list_rows);
         crate::render::picker::list_columns(widest)
     };
@@ -172,7 +189,7 @@ pub(crate) fn palette_arg_layout(
     };
     let inner = Block::default().borders(Borders::ALL).inner(modal);
 
-    let (top, height) = arg_body_rows(inner)?;
+    let (top, height) = arg_body_rows(inner, palette.header_rows)?;
     let (list, preview) = crate::render::picker::fitted_split(
         inner.x,
         top,
@@ -193,10 +210,10 @@ pub(crate) fn palette_arg_layout(
 }
 
 /// The top row and the rows of the argument picker's body inside `inner`,
-/// below the `:` input and its rule and above the key line, or `None` when the
-/// body has no rows.
-fn arg_body_rows(inner: Rect) -> Option<(u16, u16)> {
-    let top = inner.y + 2;
+/// below the `header_rows` rows of the Cmd Line and the row under them and
+/// above the key line, or `None` when the body has no rows.
+fn arg_body_rows(inner: Rect, header_rows: u16) -> Option<(u16, u16)> {
+    let top = inner.y + 1 + header_rows;
     let height = (inner.y + inner.height)
         .saturating_sub(FOOTER_ROWS - 1)
         .saturating_sub(top);
@@ -244,12 +261,6 @@ pub(crate) fn render_command_palette(
     }
 
     let content_rows = palette.list_rows_hint();
-    if palette.command.is_none()
-        && let Some(layout) = palette_filter_layout(area, content_rows, zoom)
-    {
-        palette.viewport_rows = Some(layout.list.height as usize);
-    }
-
     render_palette_filter(
         &palette.input,
         &palette.filtered,
@@ -258,6 +269,7 @@ pub(crate) fn render_command_palette(
         palette.group,
         content_rows,
         zoom,
+        &mut palette.header_rows,
         ws,
         home,
         theme,
@@ -265,12 +277,18 @@ pub(crate) fn render_command_palette(
         buf,
         scene,
     );
+
+    if palette.command.is_none()
+        && let Some(layout) = palette_filter_layout(area, content_rows, zoom, palette.header_rows)
+    {
+        palette.viewport_rows = Some(layout.list.height as usize);
+    }
 }
 
 /// Render the inline file picker shown while collecting a `Files` argument
 /// (e.g. `:o `).
 ///
-/// Keeps the filter modal's height and `:` input row, then replaces the
+/// Keeps the filter modal's height and its Cmd Line, then replaces the
 /// command list + doc body with a result list beside a live preview, mirroring
 /// the standalone file finder. The plate's width follows
 /// [`palette_arg_layout`], and the paint keeps it in
@@ -311,7 +329,7 @@ fn render_palette_arg_picker(
         return;
     };
     palette.arg_plate_width = layout.plate_base;
-    render_palette_prelude(
+    palette.header_rows = render_palette_prelude(
         &palette.input,
         CmdStatus::Text(&status),
         layout.modal,
@@ -322,6 +340,9 @@ fn render_palette_arg_picker(
         buf,
         &mut *scene,
     );
+    let Some(layout) = palette_arg_layout(area, palette, home, zoom, preview_min) else {
+        return;
+    };
     let separator_style = theme.get(crate::theme::scope::UI_BORDER_INACTIVE);
     let (list, preview) = (layout.list, layout.preview);
 
@@ -423,10 +444,11 @@ fn render_palette_free_arg(
     buf: &mut Buffer,
     scene: &mut stoat_widgets::ApcScene,
 ) {
-    let Some(layout) = palette_filter_layout(area, palette.list_rows_hint(), zoom) else {
+    let rows_hint = palette.list_rows_hint();
+    let Some(layout) = palette_filter_layout(area, rows_hint, zoom, palette.header_rows) else {
         return;
     };
-    render_palette_prelude(
+    palette.header_rows = render_palette_prelude(
         &palette.input,
         CmdStatus::None,
         layout.modal,
@@ -439,7 +461,7 @@ fn render_palette_free_arg(
     );
     let inner = layout.inner;
 
-    let body_top = inner.y + 2;
+    let body_top = inner.y + 1 + palette.header_rows;
     let body_bottom = layout.footer.y;
     if body_top >= body_bottom {
         return;
@@ -492,11 +514,13 @@ fn render_palette_free_arg(
 }
 
 /// Render the chrome every palette modal shares, which is the frame over
-/// `modal` and the Cmd Line in `inner`'s first two rows.
+/// `modal` and the Cmd Line at `inner`'s top, and answer the Cmd Line's rows.
 ///
 /// The caller lays the box out and paints its body. The command list and the
 /// free-typed argument hint take the box of [`palette_filter_layout`], and an
-/// inline picker takes the box of [`palette_arg_layout`].
+/// inline picker takes the box of [`palette_arg_layout`]. The caller keeps the
+/// answer in [`CommandPalette::header_rows`] and lays its body out under those
+/// rows, because a long input wraps onto more rows than the last frame drew.
 ///
 /// The Cmd Line names the workspace's root, abbreviated against `home`, and
 /// shows the live input with its caret and `status` at its right end.
@@ -517,7 +541,7 @@ fn render_palette_prelude(
     theme: &crate::theme::Theme,
     buf: &mut Buffer,
     scene: &mut stoat_widgets::ApcScene,
-) {
+) -> u16 {
     let modal_style = theme.get(crate::theme::scope::UI_MODAL_PALETTE);
     crate::render::chrome::list_plate(buf, modal, modal_style, theme, &mut *scene);
 
@@ -531,6 +555,9 @@ fn render_palette_prelude(
         status,
     };
     cmd_line::cmd_line(buf, inner, &line, theme, scene);
+
+    let plate = crate::render::chrome::plate_colors(theme, scene).is_some();
+    cmd_line::cmd_line_rows(&line, inner.width, plate, theme)
 }
 
 /// The Cmd Line status that counts `shown` entries, the count and then `rest`,
@@ -565,6 +592,10 @@ fn grouped(count: usize) -> String {
     out
 }
 
+/// Render the command list and the selected command's doc under the Cmd Line.
+///
+/// `header_rows` holds the rows that the Cmd Line took in the last frame, and
+/// the paint stores there the rows that it draws.
 #[allow(clippy::too_many_arguments)]
 fn render_palette_filter(
     input: &InputView,
@@ -574,6 +605,7 @@ fn render_palette_filter(
     group: Option<&str>,
     content_rows: u16,
     zoom: i8,
+    header_rows: &mut u16,
     ws: &mut Workspace,
     home: Option<&Path>,
     theme: &crate::theme::Theme,
@@ -582,11 +614,11 @@ fn render_palette_filter(
     scene: &mut stoat_widgets::ApcScene,
 ) {
     let name_offset = group.map_or(0, |group| group.len() + 1);
-    let Some(layout) = palette_filter_layout(area, content_rows, zoom) else {
+    let Some(layout) = palette_filter_layout(area, content_rows, zoom, *header_rows) else {
         return;
     };
     let status = count_status(filtered.len(), " commands", theme);
-    render_palette_prelude(
+    *header_rows = render_palette_prelude(
         input,
         CmdStatus::Text(&status),
         layout.modal,
@@ -597,6 +629,9 @@ fn render_palette_filter(
         buf,
         &mut *scene,
     );
+    let Some(layout) = palette_filter_layout(area, content_rows, zoom, *header_rows) else {
+        return;
+    };
 
     let inner = layout.inner;
     let separator_style = theme.get(crate::theme::scope::UI_BORDER_INACTIVE);
@@ -837,7 +872,7 @@ mod tests {
     use stoat_action::registry;
 
     fn layout(area: Rect, content_rows: u16, zoom: i8) -> super::PaletteFilterLayout {
-        palette_filter_layout(area, content_rows, zoom).expect("the area hosts the palette")
+        palette_filter_layout(area, content_rows, zoom, 1).expect("the area hosts the palette")
     }
 
     /// A Cmd Line count groups its thousands with `,`, as the boards write
@@ -998,6 +1033,29 @@ mod tests {
             (laid.list.height, laid.doc.height),
             (6, 0),
             "every remaining body row goes to the list"
+        );
+    }
+
+    /// A Cmd Line that wraps onto a second row lowers the list by that row. The
+    /// box keeps its height, so the doc gives up the row.
+    #[test]
+    fn a_wrapped_header_lowers_the_list_and_takes_the_doc_rows_first() {
+        let area = Rect::new(0, 0, 200, 60);
+        let one = layout(area, 4, 0);
+        let two = palette_filter_layout(area, 4, 0, 2).expect("the area hosts the palette");
+
+        let inner = one.inner;
+        let list_y = inner.y + 3;
+        assert_eq!(
+            (two.modal, two.inner, two.list, two.doc, two.footer),
+            (
+                one.modal,
+                inner,
+                Rect::new(inner.x, list_y, inner.width, LIST_ROWS),
+                Rect::new(inner.x, list_y + LIST_ROWS + 1, inner.width, DOC_ROWS - 1),
+                one.footer,
+            ),
+            "the box holds, the list starts a row lower, and the doc gives up the row"
         );
     }
 

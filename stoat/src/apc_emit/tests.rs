@@ -6980,10 +6980,15 @@ fn palette_list_is_pooled_and_retired() {
     h.stoat.active_workspace_mut().layout(size);
 
     emit_smooth_scroll(&mut h.stoat);
-    let (rows, zoom) = palette_sizing(&h);
-    let list = crate::render::command_palette::palette_filter_layout(h.stoat.size(), rows, zoom)
-        .expect("the palette fits the test terminal")
-        .list;
+    let (rows, zoom, header_rows) = palette_sizing(&h);
+    let list = crate::render::command_palette::palette_filter_layout(
+        h.stoat.size(),
+        rows,
+        zoom,
+        header_rows,
+    )
+    .expect("the palette fits the test terminal")
+    .list;
     let expected = PoolRegionCommand {
         pool: crate::smooth_scroll::non_pane_pool::PALETTE,
         top: list.y,
@@ -7057,6 +7062,92 @@ fn palette_arg_list_is_pooled_and_retired() {
         })),
         "closing the palette retires its pool"
     );
+}
+
+/// A Cmd Line that wraps onto a second row lowers the argument list's pool
+/// with the list. The region keeps its columns, starts one row lower, and is
+/// one row shorter.
+#[test]
+fn the_palette_pool_follows_a_wrapped_header() {
+    let mut h = Stoat::test();
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+    h.stoat.set_apc_tx(tx);
+
+    let root = PathBuf::from("/wrappool");
+    for name in ["a.rs", "b.rs", "c.rs"] {
+        h.fake_fs().insert_file(root.join(name), b"x\n");
+    }
+    h.stoat.active_workspace_mut().git_root = root;
+
+    let (one_rows, one) = typed_palette_region(&mut h, &mut rx, ":o a");
+    let (two_rows, two) = typed_palette_region(&mut h, &mut rx, &" ".repeat(80));
+    assert_eq!(
+        (
+            (one_rows, two_rows),
+            (two.left, two.width),
+            two.top,
+            two.height
+        ),
+        ((1, 2), (one.left, one.width), one.top + 1, one.height - 1),
+    );
+}
+
+/// A Cmd Line that wraps onto a second row lowers the command list's pool
+/// with the list. The region keeps its columns and its height and starts one
+/// row lower, because the doc region under the list gives up the row.
+#[test]
+fn the_command_list_pool_follows_a_wrapped_header() {
+    let mut h = Stoat::test();
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+    h.stoat.set_apc_tx(tx);
+
+    let (one_rows, one) = typed_palette_region(&mut h, &mut rx, ":");
+    let query = format!("{}q", " ".repeat(80));
+    let (two_rows, two) = typed_palette_region(&mut h, &mut rx, &query);
+    assert_eq!(
+        (
+            (one_rows, two_rows),
+            (two.left, two.width, two.height),
+            two.top
+        ),
+        ((1, 2), (one.left, one.width, one.height), one.top + 1),
+    );
+}
+
+/// The rows of the palette's header and the pool region that the palette's
+/// list declares, after `text` types into `h` and a frame paints.
+fn typed_palette_region(
+    h: &mut crate::test_harness::TestHarness,
+    rx: &mut tokio::sync::mpsc::UnboundedReceiver<Vec<u8>>,
+    text: &str,
+) -> (u16, PoolRegionCommand) {
+    use stoatty_protocol::command::Command;
+
+    h.type_text(text);
+    h.settle();
+    h.snapshot();
+    let size = h.stoat.size();
+    h.stoat.active_workspace_mut().layout(size);
+    let _ = drain_apc(rx);
+
+    emit_smooth_scroll(&mut h.stoat);
+    let region = drain_apc(rx)
+        .into_iter()
+        .find_map(|command| match command {
+            Command::PoolRegion(region)
+                if region.pool == crate::smooth_scroll::non_pane_pool::PALETTE =>
+            {
+                Some(region)
+            },
+            _ => None,
+        })
+        .expect("the palette's list declares its pool");
+    let palette = h
+        .stoat
+        .command_palette
+        .as_ref()
+        .expect("the palette is open");
+    (palette.header_rows, region)
 }
 
 #[test]

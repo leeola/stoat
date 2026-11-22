@@ -1260,6 +1260,55 @@ fn the_palette_header_is_the_cmd_line_on_the_ground() {
     }
 }
 
+/// A palette line wider than the Cmd Line's row adds a header row, and the
+/// body Island under the header starts one row lower.
+///
+/// A free-typed argument has no status, so a row holds 112 chars from the
+/// input's column at 391 sixteenths. The first row breaks after the last space
+/// that fits, so `run`, a space, the 60 `a`, and a space fill its 65 chars.
+/// The second row holds the 56 `b` and the caret, which starts 812 sixteenths
+/// into the row, at pixel 831 of the row from pixel 259.
+///
+/// The end of the first row reads the ground, where a wrap at the row's last
+/// cell puts `b` chars. The pixels (700, 283) and (700, 284) read the band's
+/// ground and the list's base, 18 px under the edge of a one-row header.
+#[test]
+fn a_long_palette_line_adds_a_header_row() {
+    let mut home = support::scratch_home();
+    let keys = format!(":run {} {}<Settle>", "a".repeat(60), "b".repeat(56));
+    let shot = palette_frame(home.path(), &keys);
+
+    expect_region(&shot, &mut home, (831, 259, 8, 18), TEXT, "wrapped_caret");
+    expect_region(
+        &shot,
+        &mut home,
+        (841, 259, 8, 18),
+        GROUND,
+        "wrapped_caret_end",
+    );
+    expect_region(
+        &shot,
+        &mut home,
+        (945, 241, 60, 18),
+        GROUND,
+        "wrapped_first_row_end",
+    );
+
+    let edge = [pixel(&shot, 700, 283), pixel(&shot, 700, 284)];
+    if edge != [GROUND, BASE] {
+        let frame = keep_frame(&shot, &mut home, "wrapped_header");
+        panic!(
+            "the pixels (700, 283) and (700, 284) read {} and {}, where the band's ground {} \
+             meets the list's base {}; the frame is {}",
+            hex(edge[0]),
+            hex(edge[1]),
+            hex(GROUND),
+            hex(BASE),
+            frame.display(),
+        );
+    }
+}
+
 /// The frame the basic-diff scene settles on after `keys` play, where the
 /// child's home is `home` and its temporary files go under `home/t`.
 ///

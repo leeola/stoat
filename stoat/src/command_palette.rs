@@ -89,6 +89,14 @@ pub struct CommandPalette {
     /// outlasts a change of the argument's source, and each open starts over
     /// at 0.
     pub(crate) arg_plate_width: u16,
+    /// The rows that the Cmd Line took at the box's top in the last frame, 1
+    /// before the first.
+    ///
+    /// An input wider than its row wraps onto more rows, and the body under
+    /// them starts lower. The renderer measures the rows as it paints them,
+    /// and the hit test and the smooth-scroll emit read the body after the
+    /// paint, so they find the rects the frame drew.
+    pub(crate) header_rows: u16,
 }
 
 /// The inline value-picker the palette shows while collecting an argument
@@ -649,6 +657,7 @@ impl CommandPalette {
             last_filter_key: 0,
             offering,
             arg_plate_width: 0,
+            header_rows: 1,
         }
     }
 
@@ -1346,6 +1355,8 @@ mod tests {
         picker::PREVIEW_DIR_LIMIT,
         test_harness::{editor, TestHarness},
     };
+    use crossterm::event::Event;
+    use ratatui::buffer::Buffer;
     use stoat_action::ParamKind;
 
     /// Seed `files` into the harness' fake fs under a fixed virtual root and
@@ -1702,6 +1713,94 @@ mod tests {
             (true, true, false),
             "the header reads {cmd_line:?}",
         );
+    }
+
+    /// A line wider than the Cmd Line's row breaks after its last space that
+    /// fits, and its second row starts at the input's column. The rule and the
+    /// argument's usage line follow under the second row, and the palette keeps
+    /// the count of the rows for the layouts of the body.
+    #[test]
+    fn a_long_palette_line_wraps_the_header() {
+        let mut h = Stoat::test();
+        h.type_text(&format!(":run {} {}", "x".repeat(30), "y".repeat(50)));
+        let _ = h.snapshot();
+
+        let buf = h.rendered_buffer();
+        let cells = |x: u16, y: u16, len: u16| -> String {
+            (x..x + len).map(|x| buf[(x, y)].symbol()).collect()
+        };
+        let palette = h
+            .stoat
+            .command_palette
+            .as_ref()
+            .expect("the palette is open");
+        assert_eq!(
+            (
+                palette.header_rows,
+                [
+                    cells(5, 3, 35),
+                    cells(5, 4, 50),
+                    cells(3, 5, 74),
+                    cells(4, 6, 13)
+                ],
+            ),
+            (
+                2,
+                [
+                    format!("run {} ", "x".repeat(30)),
+                    "y".repeat(50),
+                    "\u{2500}".repeat(74),
+                    "run <command>".to_owned(),
+                ],
+            ),
+            "the header and the body read {:?}",
+            h.rendered_text()
+                .lines()
+                .skip(3)
+                .take(4)
+                .collect::<Vec<_>>(),
+        );
+    }
+
+    /// Paste `text` into the open palette, and answer the palette's header rows
+    /// with the frame that first draws the paste and the frame after it.
+    fn pasted_frames(h: &mut TestHarness, text: &str) -> (u16, Buffer, Buffer) {
+        h.stoat.update(Event::Paste(text.to_owned()));
+        let first = h.stoat.render();
+        let next = h.stoat.render();
+        let palette = h
+            .stoat
+            .command_palette
+            .as_ref()
+            .expect("the palette is open");
+        (palette.header_rows, first, next)
+    }
+
+    /// A paste that wraps the Cmd Line over the argument list lowers the list
+    /// in the frame that first draws the wrap, so that frame paints as the
+    /// next one does.
+    #[test]
+    fn a_pasted_argument_lays_its_list_under_the_wrap_at_once() {
+        let mut h = Stoat::test();
+        seed_palette_workspace(&mut h, &[("a.rs", "x\n"), ("ab.rs", "x\n")]);
+        h.type_text(":o a");
+        h.settle();
+
+        let (rows, first, next) = pasted_frames(&mut h, &" ".repeat(80));
+        assert_eq!((rows, first), (2, next));
+    }
+
+    /// A paste that wraps the Cmd Line over the command list lowers the list
+    /// in the frame that first draws the wrap, so that frame paints as the
+    /// next one does.
+    #[test]
+    fn a_pasted_query_lays_its_list_under_the_wrap_at_once() {
+        let mut h = Stoat::test();
+        h.type_text(":");
+        h.settle();
+
+        let (rows, first, next) = pasted_frames(&mut h, &format!("{}q", " ".repeat(80)));
+        assert_eq!((rows, first), (2, next));
     }
 
     /// A group shows in the Cmd Line's input after the prompt glyph and lists

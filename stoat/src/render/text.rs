@@ -1,4 +1,5 @@
 use ratatui::{buffer::Buffer, style::Style};
+use std::ops::Range;
 
 pub(crate) fn write_cell(buf: &mut Buffer, x: u16, y: u16, ch: char, style: Style) {
     if x < buf.area.x + buf.area.width && y < buf.area.y + buf.area.height {
@@ -256,6 +257,42 @@ pub(crate) fn wrap_text(text: &str, width: usize) -> Vec<String> {
     lines
 }
 
+/// The cell range of each row that `cells` wraps onto in rows of `room`
+/// cells, one row at least, as CSS `white-space: pre-wrap` with
+/// `overflow-wrap: anywhere` wraps a line of text.
+///
+/// With `caret_cell`, one more cell follows the last char, the cell of a caret
+/// past the text's end. A break stands after each space and before the caret
+/// cell. When the cells left fit in `room`, they are the last row. Otherwise a
+/// row takes the cells up to the last break that fits in `room`, or `room`
+/// cells when no break stands in its first `room` cells. A space takes a cell
+/// as any char does, and none hangs past its row. A `room` of 0 counts as 1.
+///
+/// The ranges keep every cell, its spaces among them, so a caller places each
+/// char and the caret in its row, which [`wrap_text`] and [`wrap_styled`]
+/// lose when they drop the spaces at a break.
+pub(crate) fn pre_wrap_rows(cells: &[char], room: usize, caret_cell: bool) -> Vec<Range<usize>> {
+    let room = room.max(1);
+    let total = cells.len() + usize::from(caret_cell);
+    let breaks_at = |end: usize| {
+        (end > 0 && end <= cells.len() && cells[end - 1] == ' ')
+            || (caret_cell && end == cells.len())
+    };
+
+    let mut rows = Vec::new();
+    let mut start = 0;
+    while total - start > room {
+        let end = (start + 1..=start + room)
+            .rev()
+            .find(|&end| breaks_at(end))
+            .unwrap_or(start + room);
+        rows.push(start..end);
+        start = end;
+    }
+    rows.push(start..total);
+    rows
+}
+
 /// Cut `line` to at most `width` characters.
 ///
 /// Counts characters, not display columns, so a wide glyph still counts once.
@@ -303,8 +340,58 @@ pub(crate) fn truncate_to_cols(text: &str, max_cols: usize) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{clip_to_width, text_width, wrap_styled};
+    use super::{clip_to_width, pre_wrap_rows, text_width, wrap_styled};
     use ratatui::style::Style;
+
+    /// The rows that `text` wraps onto at `room`, with a caret cell past its end
+    /// where `caret` holds, each as its first cell and the cell past its last.
+    ///
+    /// Tuples in place of ranges keep a one-row answer clear of clippy's
+    /// `single_range_in_vec_init`.
+    fn rows(text: &str, room: usize, caret: bool) -> Vec<(usize, usize)> {
+        pre_wrap_rows(&text.chars().collect::<Vec<_>>(), room, caret)
+            .into_iter()
+            .map(|row| (row.start, row.end))
+            .collect()
+    }
+
+    /// A row breaks after the last space that fits, and the space stays in its
+    /// row.
+    #[test]
+    fn a_row_breaks_after_the_last_space_that_fits() {
+        assert_eq!(rows("aaaa bbbb cc", 6, false), [(0, 5), (5, 10), (10, 12)]);
+    }
+
+    /// A word longer than a row breaks at the row's last cell.
+    #[test]
+    fn a_word_longer_than_a_row_breaks_at_the_last_cell() {
+        assert_eq!(rows(&"x".repeat(10), 4, false), [(0, 4), (4, 8), (8, 10)]);
+    }
+
+    /// A caret past the end is a word of its own, so a line that fills its row
+    /// leaves the caret alone on the next row.
+    #[test]
+    fn a_caret_cell_is_a_word_of_its_own() {
+        assert_eq!(
+            [rows("aa bb", 5, true), rows("aaaa", 4, true)],
+            [vec![(0, 5), (5, 6)], vec![(0, 4), (4, 5)]],
+        );
+    }
+
+    /// An empty input takes one row, the caret cell's when it has one.
+    #[test]
+    fn an_empty_input_takes_one_row() {
+        assert_eq!(
+            [rows("", 4, false), rows("", 4, true)],
+            [vec![(0, 0)], vec![(0, 1)]]
+        );
+    }
+
+    /// A room of 0 counts as 1, so each cell takes a row of its own.
+    #[test]
+    fn a_room_of_zero_counts_as_one() {
+        assert_eq!(rows("ab", 0, true), [(0, 1), (1, 2), (2, 3)]);
+    }
 
     /// The clip is a byte slice of its input, so a width landing inside a
     /// multi-byte character has to cut on the character boundary rather than

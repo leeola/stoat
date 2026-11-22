@@ -508,7 +508,7 @@ pub(super) fn plate_trailing(
 /// chars after it. A caret past the query's end covers a space. The window keeps the query's
 /// tail, but it starts at the caret when the caret stands left of that tail,
 /// so the caret stays in view. A window too narrow for the caret shows nothing.
-pub(super) fn query_window(query: &str, caret: usize, room: usize) -> (&str, Option<&str>, &str) {
+fn query_window(query: &str, caret: usize, room: usize) -> (&str, Option<&str>, &str) {
     let len = query.chars().count();
     let caret = caret.min(len);
     let start = (len + 1).saturating_sub(room).min(caret);
