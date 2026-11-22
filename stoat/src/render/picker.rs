@@ -1270,6 +1270,21 @@ pub(crate) struct RowStart {
     pub(crate) skip: u16,
 }
 
+/// The paths whose results end their first row in a mark, and the mark they
+/// take.
+///
+/// A row has one mark cell, so a list takes one kind of mark. Each slice is
+/// sorted, because [`paint_path_rows`] finds a path in it by binary search.
+#[derive(Clone, Copy)]
+pub(crate) enum RowMarks<'a> {
+    /// Files with changes in the work tree, which end in an `M` in the
+    /// `diff.modified` color.
+    Modified(&'a [PathBuf]),
+    /// Open buffers with unsaved edits, which end in a dot in the
+    /// `ui.list.dirty` foreground.
+    Dirty(&'a [PathBuf]),
+}
+
 /// The results that the window of a path list shows, from `first`, with the
 /// cell rows that each takes.
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -1331,16 +1346,21 @@ impl ListWindow {
 /// A path paints its directory in `ui.text.muted` and its name bold in the
 /// row's style. The extension that [`chrome::tagged_name`] splits off also
 /// takes its tag's color, and a match paints over both, on every line. A path
-/// found in `marks`, which is sorted, ends its first row in an `M` in the
-/// `diff.modified` color. A relative entry, such as a branch name, gets none of
-/// these.
+/// found in `marks` ends its first row in the mark that [`RowMarks`] names. A
+/// relative entry, such as a branch name, gets none of these.
+///
+/// The dot of [`RowMarks::Dirty`] is a round bar under a live scene with an RGB
+/// `ui.list.dirty` foreground. The bar straddles the left edge of the row's
+/// last cell, so it stands inside the box of a selected row. Otherwise the
+/// last cell holds `●` in that scope's style. A theme that leaves the scope
+/// unset draws no dot.
 ///
 /// [`chrome::selected_row`]: crate::render::chrome::selected_row
 /// [`chrome::tagged_name`]: crate::render::chrome::tagged_name
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn paint_path_rows(
     rows: &PathRows<'_>,
-    marks: &[PathBuf],
+    marks: RowMarks<'_>,
     area: Rect,
     start: RowStart,
     theme: &Theme,
@@ -1472,16 +1492,53 @@ pub(crate) fn paint_path_rows(
             }
         }
 
-        let marked =
-            is_path && area.width > LABEL_PAD + MARK_COLUMNS && marks.binary_search(path).is_ok();
-        if marked && shown.contains(&top) {
-            buf[(area_end - 1, top as u16)]
-                .set_char('M')
-                .set_style(mark_style);
+        if is_path && area.width > LABEL_PAD + MARK_COLUMNS && shown.contains(&top) {
+            let (x, y) = (area_end - 1, top as u16);
+            match marks {
+                RowMarks::Modified(paths) if paths.binary_search(path).is_ok() => {
+                    buf[(x, y)].set_char('M').set_style(mark_style);
+                },
+                RowMarks::Dirty(paths) if paths.binary_search(path).is_ok() => {
+                    dirty_mark(x, y, theme, buf, scene);
+                },
+                RowMarks::Modified(_) | RowMarks::Dirty(_) => {},
+            }
         }
 
         top = bottom;
         result += 1;
+    }
+}
+
+/// Draw the dot of an unsaved buffer's result in the cell at column `x` and
+/// row `y`, as [`paint_path_rows`] describes it.
+fn dirty_mark(
+    x: u16,
+    y: u16,
+    theme: &Theme,
+    buf: &mut Buffer,
+    scene: &mut stoat_widgets::ApcScene,
+) {
+    let Some(style) = theme.try_get(scope::UI_LIST_DIRTY) else {
+        return;
+    };
+    match style_rgb(style.fg).filter(|_| scene.live()) {
+        // Sixteenths run along each axis of the 9 by 18 px cell, so 11 across
+        // and 6 down are close to 6 px each way, and a 3 px radius rounds the
+        // bar to a dot. The bar starts 5 sixteenths left of the cell.
+        Some(color) => Bar {
+            x: -5,
+            y: 5,
+            width: 11,
+            height: 6,
+            color,
+            radius: 3,
+            corners: 0,
+        }
+        .render(Rect::new(x, y, 1, 1), buf, scene),
+        None => {
+            buf[(x, y)].set_char('\u{25cf}').set_style(style);
+        },
     }
 }
 
@@ -3163,7 +3220,7 @@ mod tests {
         let mut buf = Buffer::empty(area);
         paint_path_rows(
             &rows_of(list, None),
-            &[],
+            RowMarks::Modified(&[]),
             area,
             start,
             theme,
@@ -3237,7 +3294,7 @@ mod tests {
             let mut buf = Buffer::empty(area);
             paint_path_rows(
                 &rows_of(&list, home),
-                &[],
+                RowMarks::Modified(&[]),
                 area,
                 from_result(0),
                 &Theme::empty(),
@@ -3356,7 +3413,7 @@ mod tests {
         let muted = Color::Rgb(1, 2, 3);
         paint_path_rows(
             &rows_of(&list, None),
-            &[],
+            RowMarks::Modified(&[]),
             area,
             from_result(0),
             &Theme::empty(),
@@ -3376,6 +3433,136 @@ mod tests {
             (vec![muted; 8], vec![Color::Reset; 8]),
             "the plain row paints in the caller's style and the selected row in the theme's",
         );
+    }
+
+    /// The row of an unsaved buffer ends in a round bar in the `ui.list.dirty`
+    /// foreground under a live scene. The bar straddles the left edge of the
+    /// row's last cell, and the cell stays blank.
+    #[test]
+    fn a_dirty_row_ends_in_a_round_bar_under_a_live_scene() {
+        let (commands, buf) = marked_rows(
+            RowMarks::Dirty(&[PathBuf::from("/r/a.rs")]),
+            &dirty_theme(),
+            true,
+        );
+
+        assert_eq!(
+            (commands, buf[(19, 0)].symbol()),
+            (
+                vec![Command::Bar(BarCommand {
+                    x: 19 * 16 - 5,
+                    y: 5,
+                    width: 11,
+                    height: 6,
+                    color: [1, 2, 3],
+                    occludes: false,
+                    hatch: None,
+                    radius: 3,
+                    corners: 0,
+                })],
+                " ",
+            ),
+        );
+    }
+
+    /// A plain terminal shows the dot of an unsaved buffer as a glyph in the
+    /// row's last cell, in the `ui.list.dirty` foreground.
+    #[test]
+    fn a_dirty_row_ends_in_a_dot_glyph_on_a_plain_terminal() {
+        let (commands, buf) = marked_rows(
+            RowMarks::Dirty(&[PathBuf::from("/r/a.rs")]),
+            &dirty_theme(),
+            false,
+        );
+
+        assert_eq!(
+            (commands, buf[(19, 0)].symbol(), buf[(19, 0)].fg),
+            (vec![], "\u{25cf}", Color::Rgb(1, 2, 3)),
+        );
+    }
+
+    /// A theme that leaves `ui.list.dirty` unset draws no dot, as a bar or as a
+    /// glyph.
+    #[test]
+    fn a_theme_without_the_dirty_scope_draws_no_dot() {
+        let mark = |live| {
+            let (commands, buf) = marked_rows(
+                RowMarks::Dirty(&[PathBuf::from("/r/a.rs")]),
+                &Theme::empty(),
+                live,
+            );
+            (commands, buf[(19, 0)].symbol().to_owned())
+        };
+
+        assert_eq!(
+            [mark(true), mark(false)],
+            [(vec![], " ".to_owned()), (vec![], " ".to_owned())],
+        );
+    }
+
+    /// The marks of modified files end the row in an `M` and draw no dot, even
+    /// under a theme that sets `ui.list.dirty`.
+    #[test]
+    fn a_modified_row_keeps_its_mark_under_the_modified_marks() {
+        let (commands, buf) = marked_rows(
+            RowMarks::Modified(&[PathBuf::from("/r/a.rs")]),
+            &dirty_theme(),
+            true,
+        );
+
+        assert_eq!((commands, buf[(19, 0)].symbol()), (vec![], "M"));
+    }
+
+    /// A result that wraps ends its first line in the dot, and its later lines
+    /// end blank.
+    #[test]
+    fn a_wrapped_dirty_row_ends_its_first_line_in_the_dot() {
+        let (_, buf) = marked_rows(
+            RowMarks::Dirty(&[PathBuf::from(LONG_PATH)]),
+            &dirty_theme(),
+            false,
+        );
+
+        assert_eq!(
+            row_texts(&buf, buf.area),
+            [
+                " very/deeply/      \u{25cf}",
+                "   \u{21b3} nested/dir/",
+                "   \u{21b3} module/",
+                "   \u{21b3} file_name.rs",
+            ],
+        );
+    }
+
+    /// A theme whose `ui.list.dirty` foreground is `#010203`.
+    fn dirty_theme() -> Theme {
+        theme_of(r##"ui.list.dirty.fg = "#010203";"##)
+    }
+
+    /// Paint the paths that `marks` holds as the unselected rows of a list 20
+    /// cells wide and 4 rows tall, under `theme` and a scene that is `live` or
+    /// not.
+    ///
+    /// Returns the commands the scene holds and the painted cells.
+    fn marked_rows(marks: RowMarks<'_>, theme: &Theme, live: bool) -> (Vec<Command>, Buffer) {
+        let (RowMarks::Modified(paths) | RowMarks::Dirty(paths)) = marks;
+        let list = list_of(paths.to_vec(), vec![vec![]; paths.len()]);
+        let area = Rect::new(0, 0, 20, 4);
+        let mut buf = Buffer::empty(area);
+        let mut scene = stoat_widgets::ApcScene::new();
+        scene.set_live(live);
+        paint_path_rows(
+            &rows_of(&list, None),
+            marks,
+            area,
+            from_result(0),
+            theme,
+            Style::default(),
+            false,
+            &mut buf,
+            &mut scene,
+        );
+        (decode_stream(scene.bytes()), buf)
     }
 
     /// A path row starts its label one cell in, with no tag column before it.
@@ -3797,7 +3984,7 @@ mod tests {
         let mut scene = stoat_widgets::ApcScene::new();
         paint_path_rows(
             &rows_of(&list, None),
-            &[],
+            RowMarks::Modified(&[]),
             area,
             from_result(0),
             &rounded_row_theme(),

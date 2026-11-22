@@ -3,7 +3,9 @@ use crate::{
     input_view::InputView,
     render::{
         chrome::{ISLAND_BOTTOM, ISLAND_GAP, ISLAND_SIDE, ISLAND_TOP},
-        picker::{FilterHeader, Footer, PathRows, RowStart, DEFAULT_LIST_PERCENT, FOOTER_ROWS},
+        picker::{
+            FilterHeader, Footer, PathRows, RowMarks, RowStart, DEFAULT_LIST_PERCENT, FOOTER_ROWS,
+        },
         text::{wrap_text, write_str, write_str_clipped},
     },
     workspace::Workspace,
@@ -304,7 +306,7 @@ fn render_palette_arg_picker(
     };
     crate::render::picker::paint_path_rows(
         &arg_rows(picker, home),
-        &[],
+        RowMarks::Modified(&[]),
         list,
         RowStart {
             result: window.first,

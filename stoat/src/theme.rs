@@ -844,6 +844,11 @@ pub mod scope {
     /// It marks where the reader is without taking the selection's look, since
     /// the keys move the preview rather than this row.
     pub const UI_LIST_CURRENT: &str = "ui.list.current";
+    /// The dot at the right end of a list row that names an open buffer with
+    /// unsaved edits, such as a row of the Buffer Finder.
+    ///
+    /// A theme that leaves it unset draws no dot.
+    pub const UI_LIST_DIRTY: &str = "ui.list.dirty";
     /// The chip at the right end of a filter modal's header row that names the
     /// active scope, such as the file finder's pill of the list on show.
     pub const UI_CHIP: &str = "ui.chip";

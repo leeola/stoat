@@ -237,6 +237,8 @@ pub struct FileFinder {
     /// Absolute paths of the open buffers with unsaved edits, the
     /// [`FinderScope::ModifiedBuffers`] base. Captured once at open time like
     /// [`Self::buffer_paths`].
+    ///
+    /// Sorted, because the row paint finds a row's dot here by binary search.
     pub(crate) dirty_buffer_paths: Vec<PathBuf>,
     /// The [`crate::app::Stoat::finder_path_epoch`] this finder's walk started
     /// under, carried into [`FinderPathCache`] on close.

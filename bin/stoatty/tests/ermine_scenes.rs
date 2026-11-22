@@ -60,6 +60,7 @@ const DISABLED: [u8; 3] = [0x5b, 0x61, 0x6d];
 const TINT_ACCENT: [u8; 3] = [0x22, 0x30, 0x49];
 const DANGER: [u8; 3] = [0xf2, 0x77, 0x7f];
 const SUCCESS: [u8; 3] = [0x8f, 0xd1, 0x8a];
+const WARNING: [u8; 3] = [0xe8, 0xbd, 0x6a];
 const WASH: [u8; 3] = [0x2a, 0x3c, 0x5a];
 const TAB_WASH: [u8; 3] = [0x24, 0x35, 0x52];
 const CURSOR_SECONDARY: [u8; 3] = [0x8a, 0x90, 0x9c];
@@ -1858,6 +1859,53 @@ fn the_finder_header_boxes_its_active_scope_pill() {
         180..212,
         (1117, 187, 1197, 204),
         "header_pill_modified",
+    );
+}
+
+/// The Buffer Finder ends the row of an unsaved buffer in a round dot in the
+/// warning color, and its header boxes the `buffers` pill.
+///
+/// The one row is the selected row on cell row 12, and its mark cell is cell
+/// 66. The dot covers the pixels 591 to 596 by 222 to 227, 3 px inside the box
+/// of the row. Its pixels (593, 224) and (594, 225) read the warning color, and
+/// the pixels (590, 224) and (597, 224) at its sides read the tab wash. Its
+/// round corner leaves the pixel (591, 222) clear of the warning color. The
+/// `buffers` pill is the 8 cells from cell 127 on cell row 10, so its box fills
+/// the pixels from (1144, 187) to (1215, 204).
+#[test]
+fn the_buffer_finder_marks_an_unsaved_buffer_with_a_dot() {
+    let mut home = support::scratch_home();
+    let shot = settled_frame(
+        home.path(),
+        "many-files",
+        "src/alpha.txt",
+        "ix<Esc><Space>bb<Settle>",
+    );
+
+    let dot = [(593, 224), (594, 225), (590, 224), (597, 224)].map(|(x, y)| pixel(&shot, x, y));
+    let corner = pixel(&shot, 591, 222);
+    if dot != [WARNING, WARNING, TAB_WASH, TAB_WASH] || corner == WARNING {
+        let frame = keep_frame(&shot, &mut home, "buffer_dot");
+        panic!(
+            "the pixels (593, 224), (594, 225), (590, 224), and (597, 224) read {}, where the \
+             dot is two pixels of the warning {} between two of the tab wash {}; the corner \
+             pixel (591, 222) reads {}, which the round dot leaves clear of the warning; the \
+             frame is {}",
+            dot.map(hex).join(", "),
+            hex(WARNING),
+            hex(TAB_WASH),
+            hex(corner),
+            frame.display(),
+        );
+    }
+
+    expect_color_box(
+        &shot,
+        &mut home,
+        TAB_WASH,
+        180..212,
+        (1144, 187, 1215, 204),
+        "buffers_pill",
     );
 }
 

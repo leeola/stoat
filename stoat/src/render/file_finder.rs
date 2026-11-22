@@ -4,7 +4,7 @@ use crate::{
     file_finder::{FileFinder, FinderScope},
     picker::{write_row_display, PreviewSource},
     render::{
-        picker::{FilterHeader, Footer, PathRows, RowStart, FILTER_PROMPT},
+        picker::{FilterHeader, Footer, PathRows, RowMarks, RowStart, FILTER_PROMPT},
         text::write_str_clipped,
     },
     workspace::Workspace,
@@ -51,6 +51,11 @@ const FINDER_HINTS: [(&str, &str); 4] = [
     ("C-f/C-b", "page"),
     ("S-Tab", "scope"),
 ];
+
+/// The footer hints of the Buffer Finder's two scopes, where Enter switches to
+/// a buffer that is already open.
+const BUFFER_FINDER_HINTS: [(&str, &str); 3] =
+    [("Enter", "switch"), ("S-Tab", "scope"), ("Esc", "close")];
 
 /// Lay out the file finder modal within `area`, or `None` when `area` is too
 /// small to host it.
@@ -261,8 +266,12 @@ pub(crate) fn render_file_finder(
     finder.active_core().picklist.viewport_rows = Some(whole.max(1));
 
     if let Some(footer) = layout.footer {
+        let hints: &[(&str, &str)] = match lists_buffers(finder) {
+            true => &BUFFER_FINDER_HINTS,
+            false => &FINDER_HINTS,
+        };
         let parts = Footer {
-            hints: &FINDER_HINTS,
+            hints,
             ..Footer::default()
         };
         crate::render::picker::modal_footer(buf, footer, &parts, plate, theme, scene);
@@ -303,29 +312,39 @@ fn paint_no_preview(pane: Rect, theme: &crate::theme::Theme, buf: &mut Buffer) {
     write_str_clipped(buf, x, y, NO_PREVIEW, disabled, pane.x + pane.width);
 }
 
-/// The finder's header label, `Files` and the words the pills do not say.
+/// The finder's header label, its name and the words the pills do not say.
 ///
-/// The pills name the scope, so the words after `Files` name only a browse,
-/// and then a fallback of ignored files or buffers listed over a diff.
+/// The name is `Buffers` in the Buffer Finder's two scopes and `Files` in
+/// every other scope. The pills name the scope, so after the name the label
+/// adds only a browse, and then a fallback of ignored files or buffers listed
+/// over a diff.
 fn finder_label(finder: &FileFinder) -> String {
+    let name = match lists_buffers(finder) {
+        true => "Buffers",
+        false => "Files",
+    };
     let scope = finder.browse.is_some().then_some("browse");
     let suffix = if finder.fallback_active() {
         Some("ignored")
-    } else if finder.diff_paths.is_some()
-        && matches!(
-            finder.scope(),
-            FinderScope::Buffers | FinderScope::ModifiedBuffers
-        )
-    {
+    } else if finder.diff_paths.is_some() && lists_buffers(finder) {
         Some("diff")
     } else {
         None
     };
     match (scope, suffix) {
-        (None, None) => "Files".to_owned(),
-        (Some(words), None) | (None, Some(words)) => format!("Files \u{00B7} {words}"),
-        (Some(scope), Some(suffix)) => format!("Files \u{00B7} {scope}, {suffix}"),
+        (None, None) => name.to_owned(),
+        (Some(words), None) | (None, Some(words)) => format!("{name} \u{00B7} {words}"),
+        (Some(scope), Some(suffix)) => format!("{name} \u{00B7} {scope}, {suffix}"),
     }
+}
+
+/// Whether `finder` shows one of the Buffer Finder's two scopes, which list
+/// the open buffers.
+fn lists_buffers(finder: &FileFinder) -> bool {
+    matches!(
+        finder.scope(),
+        FinderScope::Buffers | FinderScope::ModifiedBuffers
+    )
 }
 
 /// The word in the pill that names `scope` in the finder's header.
@@ -389,6 +408,9 @@ pub(crate) fn finder_rows<'a>(finder: &'a FileFinder, home: Option<&'a Path>) ->
 ///
 /// The rows paint muted while a fallback of ignored files stands in for the
 /// list, so they read apart from the files the list holds.
+///
+/// In the Buffer Finder's two scopes the row of an unsaved buffer ends in a
+/// dot. In every other scope the row of a modified file ends in an `M`.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn paint_finder_rows(
     finder: &FileFinder,
@@ -405,9 +427,13 @@ pub(crate) fn paint_finder_rows(
     } else {
         theme.get(crate::theme::scope::UI_TEXT)
     };
+    let marks = match lists_buffers(finder) {
+        true => RowMarks::Dirty(&finder.dirty_buffer_paths),
+        false => RowMarks::Modified(&finder.modified_paths),
+    };
     crate::render::picker::paint_path_rows(
         &finder_rows(finder, home),
-        &finder.modified_paths,
+        marks,
         area,
         start,
         theme,
@@ -527,7 +553,9 @@ fn shown_lines(editor: &mut EditorState) -> Option<(u32, u32)> {
 
 #[cfg(test)]
 mod tests {
-    use super::{file_finder_layout, file_finder_layout_with_chrome, render_file_finder};
+    use super::{
+        file_finder_layout, file_finder_layout_with_chrome, render_file_finder, FinderLayout,
+    };
     use crate::{
         file_finder::FileFinder,
         render::{
@@ -543,7 +571,7 @@ mod tests {
         buffer::{Buffer, Cell},
         layout::Rect,
     };
-    use std::path::PathBuf;
+    use std::{ops::Range, path::PathBuf};
     use stoat_widgets::ApcScene;
 
     /// Every caller of this layout must fit inside the same area, so the box a
@@ -674,9 +702,89 @@ mod tests {
         );
     }
 
+    /// The Buffer Finder names itself `Buffers` and pills its two scopes. The
+    /// rows of the two unsaved buffers end in a dot, a glyph under a dead scene,
+    /// and the row of the saved one ends blank. The key line names the Buffer
+    /// Finder's own keys.
+    #[test]
+    fn the_buffer_finder_reads_buffers_and_names_its_keys() {
+        let mut h = crate::Stoat::test();
+        let root = PathBuf::from("/buffers");
+        h.fake_fs().insert_files([
+            (root.join("a.rs"), "fn a() {}".as_bytes()),
+            (root.join("b.rs"), "fn b() {}".as_bytes()),
+            (root.join("c.rs"), "fn c() {}".as_bytes()),
+        ]);
+        h.stoat.active_workspace_mut().git_root = root.clone();
+        for name in ["a.rs", "b.rs", "c.rs"] {
+            let path = root.join(name);
+            crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::OpenFile { path });
+        }
+        h.settle();
+        for name in ["a.rs", "c.rs"] {
+            let buffers = &h.stoat.active_workspace().buffers;
+            let id = buffers
+                .id_for_path(&root.join(name))
+                .expect("an open buffer");
+            let buffer = buffers.get(id).expect("a buffer");
+            buffer.write().expect("poisoned").edit(0..0, "// ");
+        }
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::OpenBufferPicker);
+        h.settle();
+        let mut finder = h.stoat.file_finder.take().expect("the finder is open");
+        let theme = h.stoat.theme.clone();
+
+        let (buf, layout) = painted_finder(&mut finder, h.stoat.active_workspace_mut(), &theme);
+
+        let text = |y: u16, xs: Range<u16>| xs.map(|x| buf[(x, y)].symbol()).collect::<String>();
+        let (inner, list) = (layout.inner, layout.list);
+        let header = text(inner.y, inner.left()..inner.right());
+        let rows: Vec<(String, String)> = (list.y..list.y + 3)
+            .map(|y| {
+                let label = text(y, list.left()..list.right() - 1).trim().to_owned();
+                (label, buf[(list.right() - 1, y)].symbol().to_owned())
+            })
+            .collect();
+        let footer = layout.footer.expect("a key line");
+        let keys = text(footer.y, footer.left()..footer.right());
+        assert_eq!(
+            (
+                header.starts_with("Buffers "),
+                header.ends_with(" buffers   modified "),
+                rows,
+                keys.trim_end(),
+            ),
+            (
+                true,
+                true,
+                vec![
+                    ("a.rs".to_owned(), "\u{25cf}".to_owned()),
+                    ("b.rs".to_owned(), " ".to_owned()),
+                    ("c.rs".to_owned(), "\u{25cf}".to_owned()),
+                ],
+                " Enter switch  S-Tab scope  Esc close",
+            ),
+            "the header reads {header:?}",
+        );
+    }
+
     /// The 29 cells that end the header row of `finder`, painted into a 200 by
     /// 40 area under a dead scene.
     fn header_end(finder: &mut FileFinder, ws: &mut Workspace, theme: &Theme) -> Vec<Cell> {
+        let (buf, layout) = painted_finder(finder, ws, theme);
+        let end = layout.inner.right();
+        (end - 29..end)
+            .map(|x| buf[(x, layout.inner.y)].clone())
+            .collect()
+    }
+
+    /// Paint `finder` into a 200 by 40 area under a dead scene, and return the
+    /// cells and the finder's layout in that area.
+    fn painted_finder(
+        finder: &mut FileFinder,
+        ws: &mut Workspace,
+        theme: &Theme,
+    ) -> (Buffer, FinderLayout) {
         let area = Rect::new(0, 0, 200, 40);
         let chrome = ResolvedChrome::resolve(theme);
         let mut buf = Buffer::empty(area);
@@ -694,12 +802,10 @@ mod tests {
             &mut buf,
             &mut scene,
         );
-        let inner =
+        let layout =
             file_finder_layout_with_chrome(area, finder.content_size, 0, DEFAULT_LIST_PERCENT)
-                .expect("the finder fits")
-                .inner;
-        let end = inner.x + inner.width;
-        (end - 29..end).map(|x| buf[(x, inner.y)].clone()).collect()
+                .expect("the finder fits");
+        (buf, layout)
     }
 
     #[test]

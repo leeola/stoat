@@ -253,6 +253,10 @@ The typed UI scopes, by group (syntax scopes are open-ended):
   carries an accent bar at its left edge, in the `ui.border.focused` color.
 - `ui.list.current` -- the row of a list that another pane shows, such as the
   file the commits view's diff preview stands on in its files table.
+- `ui.list.dirty` -- the dot at the right end of a list row that names an
+  open buffer with unsaved edits, such as a row of the Buffer Finder. Inside
+  stoatty the dot is round. A plain terminal shows `●` in this foreground. A
+  theme that leaves it unset draws no dot, which is the look of default_dark.
 - `ui.chip` -- the chip at the right end of a filter modal's header row that
   names the active scope, such as the file finder's pill of the list on show.
 - `ui.highlight.read`, `ui.highlight.write` -- symbol-occurrence highlights.

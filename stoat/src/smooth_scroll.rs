@@ -42,7 +42,7 @@ use crate::{
         file_finder::paint_finder_rows,
         help::{paint_help_detail_rows, paint_help_list_rows},
         paint::dim_rgb,
-        picker::{page_start, paint_preview_numbers, paint_target_row, NumberColumn},
+        picker::{page_start, paint_preview_numbers, paint_target_row, NumberColumn, RowMarks},
         review::{diff_gutter_digits, paint_diff_rows, BufferNumbering, DiffDials},
         serialize_buffer,
         symbol_finder::paint_symbol_rows,
@@ -1261,7 +1261,7 @@ pub(crate) fn render_arg_page(
             };
             crate::render::picker::paint_path_rows(
                 &arg_rows(picker, home),
-                &[],
+                RowMarks::Modified(&[]),
                 area,
                 start,
                 theme,

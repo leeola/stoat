@@ -245,13 +245,17 @@ pub(super) fn open_file_finder(
         let ws = stoat.active_workspace();
         ws.buffers.listed_paths(&ws.held_buffers())
     };
-    let dirty_buffer_paths: Vec<PathBuf> = stoat
-        .active_workspace()
-        .buffers
-        .dirty_buffers()
-        .into_iter()
-        .filter_map(|buffer| buffer.path)
-        .collect();
+    let dirty_buffer_paths = {
+        let mut paths: Vec<PathBuf> = stoat
+            .active_workspace()
+            .buffers
+            .dirty_buffers()
+            .into_iter()
+            .filter_map(|buffer| buffer.path)
+            .collect();
+        paths.sort();
+        paths
+    };
     let finder_scopes = stoat.settings.finder_scopes.clone();
     tracing::debug!(
         target: "stoat::picker",
