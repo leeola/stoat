@@ -1417,6 +1417,108 @@ fn the_finder_row_colors_its_directory_name_and_extension() {
     }
 }
 
+/// A selected finder result that wraps draws one box over all of its cell rows,
+/// and each continuation line starts with the Wrap Mark two cells in.
+///
+/// The query `z` keeps only the 161-char path, which takes the six cell rows 12
+/// to 17 of the list, cells 17 to 66, with lines of 39, 21, 42, 8, 43, and 8
+/// chars. Cell 65 stays blank, so its middle pixel on each of those rows reads
+/// the tab wash. The box's corners round off, so the pixels at x 154 and 599 on
+/// pixel rows 216 and 323 read the base. The pixels at (154, 233) and (154,
+/// 234), on each side of a row edge, read the wash, so one box fills the rows
+/// with no gap between them. On each continuation row, cell 18 holds one color,
+/// and cell 20 holds the mark, brighter than the wash's 0x52 and at most 2
+/// above the 0x6d of the mark's color. The row under the result holds the base
+/// alone.
+#[test]
+fn the_finder_boxes_every_row_of_a_wrapped_selection() {
+    let mut home = support::scratch_home();
+    let shot = settled_frame(
+        home.path(),
+        "deep-paths",
+        "src/main.rs",
+        "<Space>pz<Settle>",
+    );
+
+    let mut failed = Vec::new();
+    for k in 0..6 {
+        if pixel(&shot, 590, 225 + 18 * k) != TAB_WASH {
+            failed.push(format!("the wash in cell 65 of row {}", 12 + k));
+        }
+    }
+    for (x, y) in [(154, 216), (599, 216), (154, 323), (599, 323)] {
+        if pixel(&shot, x, y) != BASE {
+            failed.push(format!("the base at the corner pixel ({x}, {y})"));
+        }
+    }
+    for (x, y) in [(154, 233), (154, 234)] {
+        if pixel(&shot, x, y) != TAB_WASH {
+            failed.push(format!("the wash at the row-edge pixel ({x}, {y})"));
+        }
+    }
+    for row in 13..18 {
+        if distinct_colors(&shot, cell_rect(18, row, 1, 1)) != 1 {
+            failed.push(format!("one color in cell 18 of row {row}"));
+        }
+        if !(0x53..=0x6f).contains(&brightest(&shot, cell_rect(20, row, 1, 1))) {
+            failed.push(format!("the Wrap Mark in cell 20 of row {row}"));
+        }
+    }
+    let under = cell_rect(17, 18, 50, 1);
+    if distinct_colors(&shot, under) != 1 || pixel(&shot, under.0, under.1) != BASE {
+        failed.push("the base alone over row 18".to_owned());
+    }
+    if !failed.is_empty() {
+        let frame = keep_frame(&shot, &mut home, "wrapped_selection");
+        panic!(
+            "these checks fail: {failed:?}; the frame is {}",
+            frame.display(),
+        );
+    }
+}
+
+/// A finder result that wraps leaves each neighbour one row of its own.
+///
+/// The query `v` keeps the three long paths, which take 2, 2, and 6 rows. Each
+/// of cell rows 12 to 38 is one kind of row. A first line holds more than one
+/// color in cell 18, where its label starts. A continuation line holds one
+/// color in cell 18 and more than one in cell 20, its Wrap Mark. An empty row
+/// holds one color over the label cells 18 to 64. The list holds 3 first lines,
+/// 7 continuation lines, and 17 empty rows.
+#[test]
+fn a_wrapped_finder_row_leaves_its_neighbours_one_row() {
+    let mut home = support::scratch_home();
+    let shot = settled_frame(
+        home.path(),
+        "deep-paths",
+        "src/main.rs",
+        "<Space>pv<Settle>",
+    );
+
+    let mut counts = [0; 3];
+    for row in 12..39 {
+        let colors = |col, cols| distinct_colors(&shot, cell_rect(col, row, cols, 1));
+        if colors(18, 1) > 1 {
+            counts[0] += 1;
+        } else if colors(20, 1) > 1 {
+            counts[1] += 1;
+        } else if colors(18, 47) == 1 {
+            counts[2] += 1;
+        }
+    }
+    if counts != [3, 7, 17] {
+        let frame = keep_frame(&shot, &mut home, "wrapped_neighbours");
+        panic!(
+            "rows 12 to 38 hold {} first lines, {} continuation lines, and {} empty rows, \
+             where the list holds 3, 7, and 17; the frame is {}",
+            counts[0],
+            counts[1],
+            counts[2],
+            frame.display(),
+        );
+    }
+}
+
 /// The code search preview marks the line its selected match lands on, as the
 /// PreviewZoom board draws that row.
 ///

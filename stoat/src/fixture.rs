@@ -329,6 +329,35 @@ fn emphasize(text: &str) -> String {
 
 const RUST_DIFF_GITIGNORE: &str = "/target\n";
 
+/// The five files the `deep-paths` fixture commits, one line each.
+///
+/// A finder row 50 cells wide gives a label 47 cells, so the first two paths
+/// fit a row and the last three wrap. The 71-char and 75-char paths wrap onto
+/// two rows, and the 161-char path onto six. Each query the scenes type picks
+/// a known set of them. `z` matches the 161-char path alone, `v` the three
+/// long paths, and `q` the `q/` path alone.
+const DEEP_PATHS: &[(&str, &str)] = &[
+    ("src/main.rs", "fn main() {}\n"),
+    (
+        "q/render/editor/minimap/emit/quick_marker.rs",
+        "pub fn quick_marker() {}\n",
+    ),
+    (
+        "docs/design/ermine/diff-views/moved-and-new-files/scene-decision-log.md",
+        "# Scene decision log\n",
+    ),
+    (
+        "stoat/src/workspace/session_persistence/migrations/v4_split_scene_layout.rs",
+        "pub fn migrate() {}\n",
+    ),
+    (
+        "vendor/github.com/tree-sitter-grammars/tree-sitter-markdown/\
+         tree-sitter-markdown-inline/src/generated/scanner/\
+         scene_external_scanner_state_serialization_tables.c",
+        "int tables;\n",
+    ),
+];
+
 /// The markdown changelog the `read-only` fixture commits gzipped, long enough
 /// to fill every row of a 50-row scene.
 const READ_ONLY_CHANGELOG: &str = "\
@@ -664,6 +693,9 @@ pub enum FixtureError {
 ///   staged and five unstaged modifications with two left clean, so
 ///   [`crate::host::GitRepo::changed_files`] reports ten changed files spanning nested directories
 ///   for file-list navigation and scale testing.
+/// - `deep-paths`: one clean commit of five one-line files, three of them under paths longer than a
+///   finder row, the longest 161 chars. Their labels wrap at `/` under the Wrap Mark, and the
+///   queries `z`, `v`, and `q` each pick a known set of the rows.
 /// - `history`: a four-commit linear chain, each commit adding a distinct file, giving
 ///   [`crate::host::GitRepo::log_commits`] and [`crate::host::GitRepo::commit_file_changes`] real
 ///   history to walk.
@@ -739,6 +771,7 @@ pub fn materialize(name: &str, dest: &Path) -> Result<(), FixtureError> {
         "basic-diff" => materialize_basic_diff(dest),
         "diff-kinds" => materialize_diff_kinds(dest),
         "many-files" => materialize_many_files(dest),
+        "deep-paths" => materialize_deep_paths(dest),
         "history" => materialize_history(dest),
         "blame" => materialize_blame(dest),
         "conflict" => materialize_conflict(dest),
@@ -841,6 +874,12 @@ fn materialize_many_files(dest: &Path) -> Result<(), FixtureError> {
     for &(path, _head, work) in MANY_FILES_UNSTAGED {
         repo.unstaged_file(path, work)?;
     }
+    Ok(())
+}
+
+fn materialize_deep_paths(dest: &Path) -> Result<(), FixtureError> {
+    let mut repo = FixtureRepo::init(dest)?;
+    repo.commit("initial commit", DEEP_PATHS)?;
     Ok(())
 }
 
@@ -1465,6 +1504,44 @@ mod tests {
             head, main,
             "the merge is paused, so HEAD is still main's tip"
         );
+    }
+
+    #[test]
+    fn deep_paths_commits_five_files_and_leaves_no_change() {
+        let dir = tempfile::tempdir().unwrap();
+        materialize("deep-paths", dir.path()).unwrap();
+
+        let repo = LocalGit::new().discover(dir.path()).unwrap();
+        let missing: Vec<&str> = DEEP_PATHS
+            .iter()
+            .map(|&(path, _)| path)
+            .filter(|path| !dir.path().join(path).is_file())
+            .collect();
+        assert_eq!(
+            (repo.changed_files().len(), missing),
+            (0, Vec::<&str>::new())
+        );
+    }
+
+    /// Each query that a deep-paths scene types picks a known set of the
+    /// fixture's rows. `z` picks the 161-char path, `v` the three long paths,
+    /// and `q` the `q/` path.
+    #[test]
+    fn the_deep_paths_queries_match_their_rows() {
+        let root = Path::new("/deep");
+        let mut list = crate::picker::PickList::default();
+        list.set_base(
+            DEEP_PATHS
+                .iter()
+                .map(|&(path, _)| root.join(path))
+                .collect(),
+        );
+        let mut matches = |query: &str| {
+            list.refilter(query, root);
+            list.filtered.len()
+        };
+
+        assert_eq!([matches("z"), matches("v"), matches("q")], [1, 3, 1]);
     }
 
     #[test]

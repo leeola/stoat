@@ -33,6 +33,10 @@ pub const FIXTURES: &[(&str, &str)] = &[
         "twelve files, ten changed across nested directories, for scale",
     ),
     (
+        "deep-paths",
+        "five files, three of them under paths longer than a finder row",
+    ),
+    (
         "history",
         "a four-commit linear chain for walking log and history",
     ),
