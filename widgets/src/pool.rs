@@ -7,9 +7,10 @@
 //! toward its target at sub-cell granularity, so several surfaces glide
 //! independently and at once while the chrome around them stays fixed.
 //!
-//! A "page" is one region-sized screen of the content: `region.height` rows of
-//! `region.width` columns, the page at index `p` starting at content row
-//! `p * region.height`. Each pool is addressed by this page index, the same key
+//! A "page" is one screen of the content: [`PoolRegionCommand::page_rows`]
+//! rows of [`PoolRegionCommand::page_cols`] columns, which is the region's size
+//! for every pool but a scaled one. The page at index `p` starts at content row
+//! `p * page_rows`. Each pool is addressed by this page index, the same key
 //! [`ScrollCommand::page`] and `fill` carry.
 //!
 //! [`SmoothScrollState`] holds what has been declared per pool, so a frame emits
@@ -419,7 +420,7 @@ impl SmoothScrollState {
 /// `scroll_offset` is the surface's fractional top visible content row. Its
 /// integer part selects the page and its fraction drives the sub-row glide. The
 /// closure `render_page` returns the self-contained VT bytes painting page
-/// `index`, which covers content rows `index * region.height ..`.
+/// `index`, which covers content rows `index * region.page_rows() ..`.
 ///
 /// `content_version` changes whenever the surface's content changes, such as a
 /// re-filtered list or a regenerated diff. After a change, a buffered page
@@ -565,21 +566,21 @@ pub fn emit_pages_into(
         entry.content_version = versions.cells;
     }
 
-    let region_height = region.height.max(1) as u64;
+    let page_rows = region.page_rows().max(1) as u64;
     let top = scroll_offset.floor() as u64;
-    let page = top / region_height;
-    // A composite reads `region.height + 1` rows from the floored top row, so a
+    let page = top / page_rows;
+    // A composite reads `page_rows + 1` rows from the floored top row, so a
     // rest between two rows reads into the page after the visible one. A
     // resident pool composites at a rest on a whole row too, which shows rows
     // of the next page unless the top row starts a page.
     let needed = match (scroll_offset.fract() == 0.0, region.resident) {
         (false, _) => page..page + 2,
-        (true, true) => page..top.div_ceil(region_height) + 1,
+        (true, true) => page..top.div_ceil(page_rows) + 1,
         (true, false) => page..page + 1,
     };
-    let last_page = (content_rows / region_height).max(page + 1);
+    let last_page = (content_rows / page_rows).max(page + 1);
     let composited = match last_target {
-        Some(from) if scrolling => pages_composited(from, scroll_offset, region_height),
+        Some(from) if scrolling => pages_composited(from, scroll_offset, page_rows),
         _ => needed.clone(),
     };
     let window = match (idle, &entry.requested) {
@@ -629,7 +630,7 @@ pub fn emit_pages_into(
     // the whole fill a later move owes it carries them.
     let mut redecorated = Vec::new();
     if !hold {
-        let ahead = pages_ahead(window, last_target, scroll_offset, region_height);
+        let ahead = pages_ahead(window, last_target, scroll_offset, page_rows);
         for held in &mut entry.pages {
             if ahead.contains(&held.page)
                 && held.decorations != versions.decorations
@@ -652,7 +653,7 @@ pub fn emit_pages_into(
     }
 
     if entry.last_scroll_offset != Some(scroll_offset) {
-        encode_scroll_into(out, &scroll_target(pool, scroll_offset, region.height));
+        encode_scroll_into(out, &scroll_target(pool, scroll_offset, region.page_rows()));
         entry.last_scroll_offset = Some(scroll_offset);
     }
 
@@ -725,8 +726,8 @@ fn refill(
 /// composites or heads toward.
 ///
 /// The terminal composites every row it eases through between the two
-/// targets, and a moving composite reads `region_height + 1` rows from its
-/// floored top row. The range therefore starts at the pages under those rows
+/// targets, and a moving composite reads `page_rows + 1` rows from its floored
+/// top row. The range therefore starts at the pages under those rows
 /// at `from` and runs to the window's edge in the direction of the move. A
 /// move without a direction, or a first target, covers the whole window.
 ///
@@ -735,16 +736,16 @@ fn refill(
 /// while the pool moves therefore shows that page's older decorations for
 /// those frames. A jump from a still view starts with the terminal on the last
 /// target, so a page glide's change has no such page.
-fn pages_ahead(window: Range<u64>, from: Option<f32>, to: f32, region_height: u64) -> Range<u64> {
+fn pages_ahead(window: Range<u64>, from: Option<f32>, to: f32, page_rows: u64) -> Range<u64> {
     let Some(from) = from else {
         return window;
     };
 
     let top = from.floor() as u64;
     if to > from {
-        top / region_height..window.end
+        top / page_rows..window.end
     } else if to < from {
-        window.start..(top + region_height) / region_height + 1
+        window.start..(top + page_rows) / page_rows + 1
     } else {
         window
     }
@@ -753,13 +754,13 @@ fn pages_ahead(window: Range<u64>, from: Option<f32>, to: f32, region_height: u6
 /// The pages a move of the scroll target from `from` to `to` composites.
 ///
 /// The terminal eases through every row between the two targets, and a
-/// composite at each reads `region_height + 1` rows from its floored top row.
+/// composite at each reads `page_rows + 1` rows from its floored top row.
 /// So the range runs from the page under the lower target's top row to the
 /// page under the row past the higher target's last row, the straddle row.
-fn pages_composited(from: f32, to: f32, region_height: u64) -> Range<u64> {
+fn pages_composited(from: f32, to: f32, page_rows: u64) -> Range<u64> {
     let low = from.min(to).floor() as u64;
     let high = from.max(to).floor() as u64;
-    low / region_height..(high + region_height) / region_height + 1
+    low / page_rows..(high + page_rows) / page_rows + 1
 }
 
 /// The half-open page window centered on `page`, clamped at the content start
@@ -778,12 +779,12 @@ fn window_range(page: u64, last_page: u64) -> Range<u64> {
 /// Map a fractional top visible content row to pool `pool`'s scroll target, a
 /// page index plus a sub-page fraction in 1/65536ths of a page.
 ///
-/// `region_height` is the pool region's row count, the rows per page. The page
-/// is the integer number of full regions scrolled past. The fraction is how far
-/// into the next page the partial offset sits, carrying the sub-row part so the
-/// terminal eases the pool below a whole row.
-fn scroll_target(pool: u32, scroll_offset: f32, region_height: u16) -> ScrollCommand {
-    let height = region_height.max(1) as f32;
+/// `page_rows` is the rows per page, [`PoolRegionCommand::page_rows`]. The
+/// page is the integer number of full pages scrolled past. The fraction is how
+/// far into the next page the partial offset sits, carrying the sub-row part so
+/// the terminal eases the pool below a whole row.
+fn scroll_target(pool: u32, scroll_offset: f32, page_rows: u16) -> ScrollCommand {
+    let height = page_rows.max(1) as f32;
     let page = (scroll_offset / height).floor();
     let within = scroll_offset - page * height;
     let fraction = (within / height * 65536.0).round().clamp(0.0, 65535.0) as u16;
@@ -966,6 +967,76 @@ mod tests {
             ],
             [0..5, 0..5, 8..13, 1..6, 1..6, 0..2],
         );
+    }
+
+    /// A scaled region 10 rows tall that declares 17-row pages scrolls by them.
+    /// Row 20 is page 1 and 3/17 of a page, and row 60 is page 3, whose
+    /// buffered window starts at page 1.
+    #[test]
+    fn a_scaled_region_pages_by_its_declared_grid() {
+        let scaled = PoolRegionCommand {
+            kind: PoolKind::Scaled {
+                scale: 154,
+                rows: 17,
+                cols: 30,
+            },
+            ..region(1, 10)
+        };
+
+        assert_eq!(
+            [first_emit(scaled, 20.0), first_emit(scaled, 60.0)],
+            [
+                (target(1, 11565), vec![0, 1, 2, 3, 4]),
+                (target(3, 34696), vec![1, 2, 3, 4, 5]),
+            ],
+        );
+    }
+
+    /// A grid region scrolls by its own height. At 10 rows a page, row 20 is
+    /// page 2, and row 60 is page 6, whose buffered window starts at page 4.
+    #[test]
+    fn a_grid_region_still_pages_by_its_height() {
+        assert_eq!(
+            [
+                first_emit(region(1, 10), 20.0),
+                first_emit(region(1, 10), 60.0)
+            ],
+            [
+                (target(2, 0), vec![0, 1, 2, 3, 4]),
+                (target(6, 0), vec![4, 5, 6, 7, 8]),
+            ],
+        );
+    }
+
+    /// The scroll frame and the filled pages of a first emit of `region` at
+    /// `offset`.
+    fn first_emit(region: PoolRegionCommand, offset: f32) -> (Option<ScrollCommand>, Vec<u64>) {
+        let mut out = Vec::new();
+        let filled = emit_into(
+            &mut out,
+            &mut SmoothScrollState::default(),
+            region,
+            offset,
+            0,
+            false,
+            |_| Vec::new(),
+        );
+        let scroll = commands(&out)
+            .into_iter()
+            .find_map(|command| match command {
+                Command::Scroll(scroll) => Some(scroll),
+                _ => None,
+            });
+        (scroll, filled)
+    }
+
+    /// Pool 1's scroll target at `page` plus `fraction` 65536ths of a page.
+    fn target(page: u64, fraction: u16) -> Option<ScrollCommand> {
+        Some(ScrollCommand {
+            pool: 1,
+            page,
+            fraction,
+        })
     }
 
     #[test]
