@@ -6182,6 +6182,113 @@ fn file_finder_list_is_pooled_and_retired() {
     );
 }
 
+/// A selected result that wraps across a page edge stamps each page that its
+/// rows meet, and no other.
+///
+/// With pages 4 rows tall, result 1 starts on document row 3 and takes 3 rows,
+/// so its rows meet pages 0 and 1 and miss page 2. A result past the measured
+/// ones takes the one row after the last entry.
+#[test]
+fn a_wrapped_selection_stamps_each_page_its_rows_meet() {
+    let tops = [0, 3, 6, 7];
+    let rows = selected_result_rows(&tops, 1);
+    let stamps = [0, 1, 2].map(|page| rows_page_stamp(1, rows.clone(), page, 4));
+
+    assert_eq!(
+        (rows, stamps, selected_result_rows(&tops, 5)),
+        (3..6, [2, 2, 0], 7..8),
+    );
+}
+
+/// A finder list whose labels wrap scrolls its pool by document rows.
+///
+/// Each of the 30 files wraps onto `h` rows at any list width. With result 10
+/// selected, the window starts at the first result that keeps result 10 whole
+/// at the bottom of the list, and the pool's scroll target names that result's
+/// first document row, `first * h`.
+#[test]
+fn a_wrapped_finder_list_scrolls_its_pool_by_document_rows() {
+    use stoat_action::OpenFileFinder;
+    use stoatty_protocol::command::Command;
+
+    let mut h = Stoat::test();
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+    h.stoat.set_apc_tx(tx);
+    let root = PathBuf::from("/wrapped");
+    let stem = "x".repeat(300);
+    for n in 0..30 {
+        let name = format!("d/{stem}{n:02}.rs");
+        h.fake_fs().insert_file(root.join(name), b"x\n");
+    }
+    h.stoat.active_workspace_mut().git_root = root;
+    action_handlers::dispatch(&mut h.stoat, &OpenFileFinder);
+    h.settle();
+    let finder = h.stoat.file_finder.as_mut().expect("the finder is open");
+    finder.active_core().picklist.selected = 10;
+    emit_smooth_scroll(&mut h.stoat);
+
+    let list = finder_layout(&h).list;
+    let rows = 1 + 305usize.div_ceil(crate::render::picker::label_columns(list.width) - 4);
+    let first = 11 - (usize::from(list.height) / rows).max(1);
+    let pool = crate::smooth_scroll::non_pane_pool::FINDER;
+    let scroll = drain_apc(&mut rx)
+        .into_iter()
+        .find_map(|command| match command {
+            Command::Scroll(scroll) if scroll.pool == pool => Some(scroll),
+            _ => None,
+        })
+        .expect("the finder pool takes a scroll target");
+    let height = u64::from(list.height);
+    let row = scroll.page * height + (u64::from(scroll.fraction) * height + 32768) / 65536;
+    assert_eq!(row, (first * rows) as u64);
+}
+
+/// The palette's argument list scrolls its pool by document rows when its
+/// labels wrap, as the finder's list does.
+#[test]
+fn a_wrapped_argument_list_scrolls_its_pool_by_document_rows() {
+    use stoatty_protocol::command::Command;
+
+    let mut h = Stoat::test();
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+    h.stoat.set_apc_tx(tx);
+    let root = PathBuf::from("/wrapped-arg");
+    let stem = "x".repeat(300);
+    for n in 0..30 {
+        let name = format!("d/{stem}{n:02}.rs");
+        h.fake_fs().insert_file(root.join(name), b"x\n");
+    }
+    h.stoat.active_workspace_mut().git_root = root;
+    h.type_text(":o ");
+    h.snapshot();
+    let picker = h
+        .stoat
+        .command_palette
+        .as_mut()
+        .and_then(|palette| palette.arg_picker.as_mut())
+        .expect("the argument picker is open");
+    picker.active_core().picklist.selected = 10;
+    let _ = drain_apc(&mut rx);
+    emit_smooth_scroll(&mut h.stoat);
+
+    let (hint, zoom) = palette_sizing(&h);
+    let list = crate::render::command_palette::palette_arg_list_rect(h.stoat.size(), hint, zoom)
+        .expect("the arg picker fits the test terminal");
+    let rows = 1 + 305usize.div_ceil(crate::render::picker::label_columns(list.width) - 4);
+    let first = 11 - (usize::from(list.height) / rows).max(1);
+    let pool = crate::smooth_scroll::non_pane_pool::PALETTE;
+    let scroll = drain_apc(&mut rx)
+        .into_iter()
+        .find_map(|command| match command {
+            Command::Scroll(scroll) if scroll.pool == pool => Some(scroll),
+            _ => None,
+        })
+        .expect("the argument pool takes a scroll target");
+    let height = u64::from(list.height);
+    let row = scroll.page * height + (u64::from(scroll.fraction) * height + 32768) / 65536;
+    assert_eq!(row, (first * rows) as u64);
+}
+
 /// A finder whose query matches nothing paints a message in place of its
 /// rows. The emit then declares no list pool and retires the one the matches
 /// had.

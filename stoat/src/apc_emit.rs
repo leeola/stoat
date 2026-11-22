@@ -44,7 +44,7 @@ use slotmap::SlotMap;
 use std::{
     collections::hash_map::DefaultHasher,
     hash::{Hash, Hasher},
-    ops::RangeInclusive,
+    ops::{Range, RangeInclusive},
     sync::Arc,
 };
 use stoat_config::{LineNumbers, WrapMode};
@@ -1958,7 +1958,7 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
         }
     }
 
-    if let (Some(list), Some(finder)) = (finder_list, stoat.file_finder.as_ref()) {
+    if let (Some(list), Some(finder)) = (finder_list, stoat.file_finder.as_mut()) {
         let region = PoolRegionCommand {
             pool: crate::smooth_scroll::non_pane_pool::FINDER,
             top: list.y,
@@ -1970,11 +1970,40 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
             dim: 0,
             resident: false,
         };
+        // A wrapped label takes more than one row, so the pool pages by the
+        // document rows that the table sums. The prefix is copied out first,
+        // since the active picker borrows the whole finder.
+        let prefix = finder
+            .browse
+            .as_ref()
+            .map(|browse| browse.typed_dir.clone())
+            .unwrap_or_default();
+        let home = stoat.home.as_deref();
+        {
+            let core = finder.active_core();
+            let through = core
+                .picklist
+                .selected
+                .saturating_add(4 * usize::from(list.height));
+            crate::render::picker::ensure_row_tops(
+                &mut core.picklist,
+                &core.git_root,
+                home,
+                &prefix,
+                list.width,
+                through,
+            );
+        }
+        let finder = &*finder;
         let core = finder.active_core_ref();
-        let scroll_row = core
-            .picklist
-            .selected
-            .saturating_sub(list.height.saturating_sub(1) as usize) as u32;
+        let window = crate::render::picker::list_window(
+            &crate::render::file_finder::finder_rows(finder, home),
+            list.width,
+            list.height,
+        );
+        let tops =
+            crate::render::picker::row_tops(&core.picklist, list.width, &prefix).unwrap_or(&[0]);
+        let scroll_row = tops.get(window.first).copied().unwrap_or(0);
         // The visible rows are the active picker's filtered indices, and in
         // browse mode the typed directory re-roots them, so both feed the
         // pool's content version: a re-filter or a re-root refills it.
@@ -1990,8 +2019,8 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
             core.picklist.filter_generation.hash(&mut hasher);
             hasher.finish()
         };
-        let home = stoat.home.as_deref();
         let selected = core.picklist.selected;
+        let selected_rows = selected_result_rows(tops, selected);
         pool::emit_pages_into(
             &mut out,
             &mut stoat.smooth_scroll,
@@ -2002,12 +2031,13 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
                 cells: content_version,
                 decorations: 0,
             },
-            |page| selection_page_stamp(selected, page, region.height),
+            |page| rows_page_stamp(selected, selected_rows.clone(), page, region.height),
             true,
             |page| {
                 crate::smooth_scroll::render_finder_page(
                     finder,
                     home,
+                    tops,
                     page,
                     theme,
                     region.width,
@@ -2328,8 +2358,8 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
         palette_arg_list,
         stoat
             .command_palette
-            .as_ref()
-            .and_then(|palette| palette.arg_picker.as_ref()),
+            .as_mut()
+            .and_then(|palette| palette.arg_picker.as_mut()),
     ) {
         let region = PoolRegionCommand {
             pool: crate::smooth_scroll::non_pane_pool::PALETTE,
@@ -2342,11 +2372,39 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
             dim: 0,
             resident: false,
         };
+        // The pool pages by document rows, as the finder's does. The prefix is
+        // copied out first, since the active picker borrows the whole picker.
+        let prefix = picker
+            .browse
+            .as_ref()
+            .map(|browse| browse.typed_dir.clone())
+            .unwrap_or_default();
+        let home = stoat.home.as_deref();
+        {
+            let core = picker.active_core();
+            let through = core
+                .picklist
+                .selected
+                .saturating_add(4 * usize::from(list.height));
+            crate::render::picker::ensure_row_tops(
+                &mut core.picklist,
+                &core.git_root,
+                home,
+                &prefix,
+                list.width,
+                through,
+            );
+        }
+        let picker = &*picker;
         let core = picker.active_core_ref();
-        let scroll_row = core
-            .picklist
-            .selected
-            .saturating_sub(list.height.saturating_sub(1) as usize) as u32;
+        let window = crate::render::picker::list_window(
+            &crate::render::command_palette::arg_rows(picker, home),
+            list.width,
+            list.height,
+        );
+        let tops =
+            crate::render::picker::row_tops(&core.picklist, list.width, &prefix).unwrap_or(&[0]);
+        let scroll_row = tops.get(window.first).copied().unwrap_or(0);
         // The visible rows are the active picker's filtered paths, so their
         // hash is the pool's content version and a re-filter refills it. The
         // leading discriminant keeps this arg-mode list from aliasing a
@@ -2366,8 +2424,8 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
             core.picklist.filter_generation.hash(&mut hasher);
             hasher.finish()
         };
-        let home = stoat.home.as_deref();
         let selected = core.picklist.selected;
+        let selected_rows = selected_result_rows(tops, selected);
         pool::emit_pages_into(
             &mut out,
             &mut stoat.smooth_scroll,
@@ -2378,12 +2436,13 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
                 cells: content_version,
                 decorations: 0,
             },
-            |page| selection_page_stamp(selected, page, region.height),
+            |page| rows_page_stamp(selected, selected_rows.clone(), page, region.height),
             true,
             |page| {
                 crate::smooth_scroll::render_arg_page(
                     picker,
                     home,
+                    tops,
                     page,
                     theme,
                     region.width,
@@ -4084,6 +4143,35 @@ fn selection_page_stamp(selected: usize, index: u64, height: u16) -> u64 {
         true => selected + 1,
         false => 0,
     }
+}
+
+/// The cells stamp that a list's selected result, on the document rows
+/// `rows`, gives list page `index` of a pool whose regions are `height` rows
+/// tall.
+///
+/// The sibling of [`selection_page_stamp`] for a list whose results take more
+/// than one row. A page answers `selected + 1` while its rows meet the selected
+/// result's rows, and 0 while they meet none of them. A selection step
+/// therefore refills each page that the selection leaves or enters.
+fn rows_page_stamp(selected: usize, rows: Range<u32>, index: u64, height: u16) -> u64 {
+    let top_row = crate::smooth_scroll::page_top_row(index, height);
+    let page = top_row..top_row.saturating_add(u32::from(height));
+    match rows.start < page.end && page.start < rows.end {
+        true => selected as u64 + 1,
+        false => 0,
+    }
+}
+
+/// The document rows that result `selected` takes, from the document rows
+/// `tops` of each measured result.
+///
+/// A result past the measured ones takes the one row after the last entry, so
+/// its stamp still moves the pages as the selection moves.
+fn selected_result_rows(tops: &[u32], selected: usize) -> Range<u32> {
+    let last = tops.last().copied().unwrap_or(0);
+    let top = tops.get(selected).copied().unwrap_or(last);
+    let end = tops.get(selected + 1).copied().unwrap_or(top + 1);
+    top..end
 }
 
 #[cfg(test)]

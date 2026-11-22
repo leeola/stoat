@@ -97,21 +97,51 @@ pub(crate) struct ModalSurfaces {
     len: usize,
     /// The selected row, which fixes the list's scroll window.
     selected: usize,
+    /// How the list lays its results out in rows.
+    rows: ListRows,
+}
+
+/// How a modal's list lays its results out in rows, which is what a press
+/// reads to name the result under the pointer.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum ListRows {
+    /// One row per result, in the window that `window_start` derives.
+    OnePerResult,
+    /// The file finder's results, whose long labels wrap onto more rows.
+    Finder,
+    /// The palette argument picker's results, which wrap as the finder's do.
+    PaletteArg,
 }
 
 impl ModalSurfaces {
-    /// The list row `mouse` lands on, or [`None`] off the list and past its
-    /// last row.
+    /// The result that `mouse` lands on, or [`None`] off the list and past its
+    /// last result.
     ///
-    /// The window start comes from the same helper the paint uses, so the
-    /// resolved row is the one drawn under the pointer.
-    fn row_at(&self, mouse: MouseEvent) -> Option<usize> {
+    /// The window comes from the same function the paint uses, so the resolved
+    /// result is the one drawn under the pointer. A press on any row of a
+    /// wrapped result names that result.
+    fn row_at(&self, stoat: &Stoat, mouse: MouseEvent) -> Option<usize> {
         if !self.list.contains(Position::new(mouse.column, mouse.row)) {
             return None;
         }
-        let start = crate::render::picker::window_start(self.selected, self.list.height as usize);
-        let index = start + (mouse.row - self.list.y) as usize;
-        (index < self.len).then_some(index)
+        let row = mouse.row - self.list.y;
+        let home = stoat.home.as_deref();
+        let rows = match self.rows {
+            ListRows::OnePerResult => {
+                let start =
+                    crate::render::picker::window_start(self.selected, self.list.height as usize);
+                let index = start + row as usize;
+                return (index < self.len).then_some(index);
+            },
+            ListRows::Finder => {
+                crate::render::file_finder::finder_rows(stoat.file_finder.as_ref()?, home)
+            },
+            ListRows::PaletteArg => {
+                let picker = stoat.command_palette.as_ref()?.arg_picker.as_ref()?;
+                crate::render::command_palette::arg_rows(picker, home)
+            },
+        };
+        crate::render::picker::list_window(&rows, self.list.width, self.list.height).result_at(row)
     }
 }
 
@@ -423,6 +453,7 @@ pub(crate) fn boxed_modal_surfaces(stoat: &Stoat) -> Option<ModalSurfaces> {
                 preview: layout.preview.filter(|_| !finder.shows_no_match()),
                 len: core.picklist.filtered.len(),
                 selected: core.picklist.selected,
+                rows: ListRows::Finder,
             })
         },
         ActiveModal::CodeSearch => {
@@ -440,6 +471,7 @@ pub(crate) fn boxed_modal_surfaces(stoat: &Stoat) -> Option<ModalSurfaces> {
                 preview: layout.preview,
                 len: finder.matches.len(),
                 selected: finder.selected,
+                rows: ListRows::OnePerResult,
             })
         },
         ActiveModal::SymbolFinder => {
@@ -455,6 +487,7 @@ pub(crate) fn boxed_modal_surfaces(stoat: &Stoat) -> Option<ModalSurfaces> {
                 preview,
                 len: finder.filtered.len(),
                 selected: finder.selected,
+                rows: ListRows::OnePerResult,
             })
         },
         ActiveModal::CommitPicker => {
@@ -470,6 +503,7 @@ pub(crate) fn boxed_modal_surfaces(stoat: &Stoat) -> Option<ModalSurfaces> {
                 preview: layout.preview,
                 len: picker.filtered.len(),
                 selected: picker.selected,
+                rows: ListRows::OnePerResult,
             })
         },
         ActiveModal::Palette => {
@@ -484,6 +518,7 @@ pub(crate) fn boxed_modal_surfaces(stoat: &Stoat) -> Option<ModalSurfaces> {
                     preview: None,
                     len: palette.filtered.len(),
                     selected: palette.selected,
+                    rows: ListRows::OnePerResult,
                 });
             }
             let picker = palette
@@ -498,6 +533,7 @@ pub(crate) fn boxed_modal_surfaces(stoat: &Stoat) -> Option<ModalSurfaces> {
                     .and_then(|(_, preview)| preview),
                 len: core.picklist.filtered.len(),
                 selected: core.picklist.selected,
+                rows: ListRows::PaletteArg,
             })
         },
         ActiveModal::Help => {
@@ -512,6 +548,7 @@ pub(crate) fn boxed_modal_surfaces(stoat: &Stoat) -> Option<ModalSurfaces> {
                 preview: Some(layout.detail),
                 len: help.filtered().len(),
                 selected: help.selected(),
+                rows: ListRows::OnePerResult,
             })
         },
         ActiveModal::Jumplist => {
@@ -526,6 +563,7 @@ pub(crate) fn boxed_modal_surfaces(stoat: &Stoat) -> Option<ModalSurfaces> {
                 preview: layout.preview,
                 len: picker.filtered().len(),
                 selected: picker.selected(),
+                rows: ListRows::OnePerResult,
             })
         },
         ActiveModal::WalkthroughPicker => {
@@ -540,6 +578,7 @@ pub(crate) fn boxed_modal_surfaces(stoat: &Stoat) -> Option<ModalSurfaces> {
                 preview: layout.preview,
                 len: picker.filtered().len(),
                 selected: picker.selected(),
+                rows: ListRows::OnePerResult,
             })
         },
         ActiveModal::PaneFinder => {
@@ -554,6 +593,7 @@ pub(crate) fn boxed_modal_surfaces(stoat: &Stoat) -> Option<ModalSurfaces> {
                 preview: layout.preview,
                 len: finder.filtered().len(),
                 selected: finder.selected(),
+                rows: ListRows::OnePerResult,
             })
         },
         ActiveModal::Diagnostics => {
@@ -568,6 +608,7 @@ pub(crate) fn boxed_modal_surfaces(stoat: &Stoat) -> Option<ModalSurfaces> {
                 preview: layout.preview,
                 len: picker.filtered().len(),
                 selected: picker.selected(),
+                rows: ListRows::OnePerResult,
             })
         },
         ActiveModal::Location => {
@@ -582,6 +623,7 @@ pub(crate) fn boxed_modal_surfaces(stoat: &Stoat) -> Option<ModalSurfaces> {
                 preview: layout.preview,
                 len: picker.filtered().len(),
                 selected: picker.selected(),
+                rows: ListRows::OnePerResult,
             })
         },
         ActiveModal::WorkspacePicker => {
@@ -595,6 +637,7 @@ pub(crate) fn boxed_modal_surfaces(stoat: &Stoat) -> Option<ModalSurfaces> {
                 preview: None,
                 len: picker.filtered().len(),
                 selected: picker.selected(),
+                rows: ListRows::OnePerResult,
             })
         },
         // The run modal is all output, so the whole screen reads as its
@@ -604,6 +647,7 @@ pub(crate) fn boxed_modal_surfaces(stoat: &Stoat) -> Option<ModalSurfaces> {
             preview: Some(size),
             len: 0,
             selected: 0,
+            rows: ListRows::OnePerResult,
         }),
         // The panel's rows interleave its section heads, so no list of one
         // row per line maps a press to its file, and `press_git_status_row`
@@ -614,6 +658,7 @@ pub(crate) fn boxed_modal_surfaces(stoat: &Stoat) -> Option<ModalSurfaces> {
             preview: None,
             len: 0,
             selected: 0,
+            rows: ListRows::OnePerResult,
         }),
         // The patch is the one surface the preview scrolls. The box has no list,
         // so a press or a wheel off the patch does nothing.
@@ -625,6 +670,7 @@ pub(crate) fn boxed_modal_surfaces(stoat: &Stoat) -> Option<ModalSurfaces> {
             ),
             len: 0,
             selected: 0,
+            rows: ListRows::OnePerResult,
         }),
         // Nothing to point at. It owns the pointer all the same, so a press
         // never reaches the panes it covers, and keys alone answer it.
@@ -633,6 +679,7 @@ pub(crate) fn boxed_modal_surfaces(stoat: &Stoat) -> Option<ModalSurfaces> {
             preview: None,
             len: 0,
             selected: 0,
+            rows: ListRows::OnePerResult,
         }),
         // The bottom-line prompts leave the editor visible, so the pointer
         // stays the editor's.
@@ -676,7 +723,7 @@ fn handle_modal_mouse(stoat: &mut Stoat, mouse: MouseEvent) -> UpdateEffect {
     let Some(surfaces) = boxed_modal_surfaces(stoat) else {
         return UpdateEffect::None;
     };
-    let Some(index) = surfaces.row_at(mouse) else {
+    let Some(index) = surfaces.row_at(stoat, mouse) else {
         return UpdateEffect::None;
     };
 
@@ -5321,5 +5368,71 @@ mod tests {
             0,
             "the wheel walks the run output's own offset"
         );
+    }
+
+    /// A press on a continuation line of a wrapped result selects that result,
+    /// and a press on the first row under it changes nothing.
+    ///
+    /// `a.rs` takes the list's first row. The long file under it wraps onto
+    /// `h` rows, so the list's third row is one of its continuation lines.
+    #[test]
+    fn a_press_on_a_continuation_line_selects_its_result() {
+        let mut h = crate::test_harness::TestHarness::with_size(120, 30);
+        let root = PathBuf::from("/wrapped-press");
+        h.fake_fs().insert_file(root.join("a.rs"), b"a\n");
+        let long = format!("d/{}.rs", "x".repeat(300));
+        h.fake_fs().insert_file(root.join(long), b"x\n");
+        h.stoat.active_workspace_mut().git_root = root;
+        h.type_keys("space p");
+        h.settle();
+        h.stoat.render();
+
+        let list = boxed_modal_surfaces(&h.stoat)
+            .expect("the finder is open")
+            .list;
+        let width = crate::render::picker::label_columns(list.width);
+        let rows = 1 + 303usize.div_ceil(width - 4) as u16;
+        let selected = |h: &crate::test_harness::TestHarness| {
+            let finder = h.stoat.file_finder.as_ref().expect("the finder is open");
+            finder.active_core_ref().picklist.selected
+        };
+        let before = selected(&h);
+        left_press(&mut h, list.x + 1, list.y + 2);
+        let on_continuation = selected(&h);
+        left_press(&mut h, list.x + 1, list.y + 1 + rows);
+        let under = selected(&h);
+
+        assert_eq!((before, on_continuation, under), (0, 1, 1));
+    }
+
+    /// A press on a continuation line of the palette's argument list selects
+    /// the result that wraps there, as the finder's list does.
+    #[test]
+    fn a_press_on_an_argument_continuation_line_selects_its_result() {
+        let mut h = crate::test_harness::TestHarness::with_size(120, 30);
+        let root = PathBuf::from("/wrapped-arg-press");
+        h.fake_fs().insert_file(root.join("a.rs"), b"a\n");
+        let long = format!("d/{}.rs", "x".repeat(300));
+        h.fake_fs().insert_file(root.join(long), b"x\n");
+        h.stoat.active_workspace_mut().git_root = root;
+        h.type_text(":o ");
+        h.snapshot();
+
+        let list = boxed_modal_surfaces(&h.stoat)
+            .expect("the palette is open")
+            .list;
+        let selected = |h: &crate::test_harness::TestHarness| {
+            let palette = h
+                .stoat
+                .command_palette
+                .as_ref()
+                .expect("the palette is open");
+            let picker = palette.arg_picker.as_ref().expect("the argument picker");
+            picker.active_core_ref().picklist.selected
+        };
+        let before = selected(&h);
+        left_press(&mut h, list.x + 1, list.y + 2);
+
+        assert_eq!((before, selected(&h)), (0, 1));
     }
 }

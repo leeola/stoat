@@ -4,7 +4,7 @@ use crate::{
     file_finder::{FileFinder, FinderScope},
     picker::{write_row_display, PreviewSource},
     render::{
-        picker::{FilterHeader, Footer, FILTER_PROMPT},
+        picker::{FilterHeader, Footer, PathRows, RowStart, FILTER_PROMPT},
         text::write_str_clipped,
     },
     workspace::Workspace,
@@ -248,11 +248,14 @@ pub(crate) fn render_file_finder(
         }
     }
 
-    finder.active_core().picklist.viewport_rows = Some(layout.list.height as usize);
-    match no_match {
-        true => paint_no_match(&finder.input.text(ws), layout.list, theme, buf),
+    let whole = match no_match {
+        true => {
+            paint_no_match(&finder.input.text(ws), layout.list, theme, buf);
+            0
+        },
         false => render_list(finder, home, layout.list, theme, buf, scene),
-    }
+    };
+    finder.active_core().picklist.viewport_rows = Some(whole.max(1));
 
     if let Some(footer) = layout.footer {
         let parts = Footer {
@@ -341,6 +344,11 @@ fn scope_words(scope: &FinderScope) -> &str {
     }
 }
 
+/// Paint the finder's results into `area` as the window that
+/// [`list_window`] derives shows them, and return the count of results that
+/// the window shows whole.
+///
+/// [`list_window`]: crate::render::picker::list_window
 fn render_list(
     finder: &FileFinder,
     home: Option<&Path>,
@@ -348,14 +356,33 @@ fn render_list(
     theme: &crate::theme::Theme,
     buf: &mut Buffer,
     scene: &mut stoat_widgets::ApcScene,
-) {
-    let rows = area.height as usize;
-    let start_row =
-        crate::render::picker::window_start(finder.active_core_ref().picklist.selected, rows);
-    paint_finder_rows(finder, home, area, start_row, theme, true, buf, scene);
+) -> usize {
+    let window =
+        crate::render::picker::list_window(&finder_rows(finder, home), area.width, area.height);
+    let start = RowStart {
+        result: window.first,
+        skip: 0,
+    };
+    paint_finder_rows(finder, home, area, start, theme, true, buf, scene);
+    window.whole(area.height)
 }
 
-/// Paint finder result rows into `area` starting at `start_row`.
+/// The finder's results as its list paints them, the active picker's rows
+/// under the typed directory of a browse.
+///
+/// The live list, its pooled pages, and the hit test all read the rows through
+/// this, so they measure every result alike.
+pub(crate) fn finder_rows<'a>(finder: &'a FileFinder, home: Option<&'a Path>) -> PathRows<'a> {
+    let core = finder.active_core_ref();
+    PathRows {
+        picklist: &core.picklist,
+        git_root: &core.git_root,
+        home,
+        prefix: row_prefix(finder),
+    }
+}
+
+/// Paint finder result rows into `area` from `start`.
 ///
 /// A thin adapter over [`crate::render::picker::paint_path_rows`], kept because
 /// the smooth-scroll pool paints pages through a `&FileFinder`. A page passes
@@ -368,27 +395,22 @@ pub(crate) fn paint_finder_rows(
     finder: &FileFinder,
     home: Option<&Path>,
     area: Rect,
-    start_row: usize,
+    start: RowStart,
     theme: &crate::theme::Theme,
     panels: bool,
     buf: &mut Buffer,
     scene: &mut stoat_widgets::ApcScene,
 ) {
-    let core = finder.active_core_ref();
-    let prefix = row_prefix(finder);
     let row_style = if finder.fallback_active() {
         theme.get(crate::theme::scope::UI_TEXT_MUTED)
     } else {
         theme.get(crate::theme::scope::UI_TEXT)
     };
     crate::render::picker::paint_path_rows(
-        &core.picklist,
-        &core.git_root,
-        home,
-        prefix,
+        &finder_rows(finder, home),
         &finder.modified_paths,
         area,
-        start_row,
+        start,
         theme,
         row_style,
         panels,

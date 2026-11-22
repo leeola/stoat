@@ -1,9 +1,9 @@
 use crate::{
-    command_palette::{CommandPalette, PaletteScope},
+    command_palette::{ArgPicker, CommandPalette, PaletteScope},
     input_view::InputView,
     render::{
         chrome::{ISLAND_BOTTOM, ISLAND_GAP, ISLAND_SIDE, ISLAND_TOP},
-        picker::{FilterHeader, Footer, DEFAULT_LIST_PERCENT, FOOTER_ROWS},
+        picker::{FilterHeader, Footer, PathRows, RowStart, DEFAULT_LIST_PERCENT, FOOTER_ROWS},
         text::{wrap_text, write_str, write_str_clipped},
     },
     workspace::Workspace,
@@ -294,28 +294,22 @@ fn render_palette_arg_picker(
         );
     }
 
-    let prefix = picker
-        .browse
-        .as_ref()
-        .map(|browse| browse.typed_dir.clone())
-        .unwrap_or_default();
-    picker.active_core().picklist.viewport_rows = Some(list.height as usize);
-    let rows = list.height as usize;
-    let core = picker.active_core_ref();
-    let start_row = crate::render::picker::window_start(core.picklist.selected, rows);
+    let window =
+        crate::render::picker::list_window(&arg_rows(picker, home), list.width, list.height);
+    picker.active_core().picklist.viewport_rows = Some(window.whole(list.height).max(1));
     let row_style = if fallback_active {
         theme.get(crate::theme::scope::UI_TEXT_MUTED)
     } else {
         theme.get(crate::theme::scope::UI_TEXT)
     };
     crate::render::picker::paint_path_rows(
-        &core.picklist,
-        &core.git_root,
-        home,
-        &prefix,
+        &arg_rows(picker, home),
         &[],
         list,
-        start_row,
+        RowStart {
+            result: window.first,
+            skip: 0,
+        },
         theme,
         row_style,
         true,
@@ -328,6 +322,26 @@ fn render_palette_arg_picker(
         ..Footer::default()
     };
     crate::render::picker::modal_footer(buf, layout.footer, &parts, plate, theme, scene);
+}
+
+/// The results of the argument picker as its list paints them, the active
+/// picker's rows under the typed directory of a browse.
+///
+/// The live list, its pooled pages, and the hit test all read the rows through
+/// this, so they measure every result alike.
+pub(crate) fn arg_rows<'a>(picker: &'a ArgPicker, home: Option<&'a Path>) -> PathRows<'a> {
+    let core = picker.active_core_ref();
+    let prefix = picker
+        .browse
+        .as_ref()
+        .map(|browse| browse.typed_dir.as_str())
+        .unwrap_or_default();
+    PathRows {
+        picklist: &core.picklist,
+        git_root: &core.git_root,
+        home,
+        prefix,
+    }
 }
 
 /// Render the body for a free-typed argument, one with no inline picker

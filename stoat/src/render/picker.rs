@@ -10,7 +10,7 @@ use crate::{
     editor_state::EditorState,
     fuzzy,
     input_view::InputView,
-    picker::{write_row_display, PickList, Preview, ScaledPreview},
+    picker::{write_row_display, PickList, Preview, RowTops, ScaledPreview},
     render::{
         chrome::PlateColors,
         editor::{self, render_editor, ResolvedChrome},
@@ -1178,112 +1178,239 @@ pub(crate) mod test_support {
     }
 }
 
-/// Paint a picker's result rows into `area`, one repo-relative path per row,
-/// with the selected row and fuzzy-match characters highlighted.
+/// Cells before the label of a list row.
+const LABEL_PAD: u16 = 1;
+
+/// Cells that every list row keeps at its right, a blank and the cell of the
+/// modified mark, whether the row holds a mark or not.
 ///
-/// `start_row` is the first filtered index to show, so the live list can derive
-/// it from the selection while the smooth-scroll pool paints absolute pages, and
-/// both render identical rows. Rows are read from `picklist.base`, which every
-/// caller keeps in sync with its display set on refilter.
+/// So the height of a result depends on the list width and its label, and on
+/// nothing else, which is what lets a pool measure rows it never paints.
+const MARK_COLUMNS: u16 = 2;
+
+/// Cells from the start of a label to the chars of its later lines, which
+/// hold two blanks, the Wrap Mark, and one blank.
+const WRAP_INDENT: u16 = 4;
+
+/// The cells a list `list_width` cells wide gives each label, at least one.
 ///
-/// `row_style` paints every row but the selected one. A caller passes its own
-/// style to set a whole list apart, such as a list of ignored files.
+/// A label takes all of a row but the [`LABEL_PAD`] before it and the
+/// [`MARK_COLUMNS`] after it.
+pub(crate) fn label_columns(list_width: u16) -> usize {
+    usize::from(list_width.saturating_sub(LABEL_PAD + MARK_COLUMNS)).max(1)
+}
+
+/// The results of a path list, and what each label reads from.
 ///
-/// The selected row draws through [`chrome::selected_row`]. With `panels` it
-/// is a rounded box in a live scene. A pool page passes `panels` false,
-/// because a page captures no panel, and keeps the row's cells in
-/// [`Theme::list_selected`] with the accent bar.
+/// The live list, the pages that glide it, and the hit test all measure and
+/// paint a result through this, so the three agree on the rows it takes.
+pub(crate) struct PathRows<'a> {
+    pub(crate) picklist: &'a PickList,
+    pub(crate) git_root: &'a Path,
+    pub(crate) home: Option<&'a Path>,
+    /// The text before every label, the typed directory of a browse.
+    pub(crate) prefix: &'a str,
+}
+
+impl PathRows<'_> {
+    /// The path of result `result`, or `None` past the last result.
+    fn path(&self, result: usize) -> Option<&PathBuf> {
+        let &index = self.picklist.filtered.get(result)?;
+        self.picklist.base.get(index)
+    }
+
+    /// Write the label of result `result` into `out`, and answer whether the
+    /// result is a path rather than a relative entry, or `None` past the last
+    /// result.
+    ///
+    /// The label is the prefix, then the path as the list displays it.
+    fn label(&self, result: usize, out: &mut String) -> Option<bool> {
+        let path = self.path(result)?;
+        out.clear();
+        out.push_str(self.prefix);
+        write_row_display(
+            out,
+            path,
+            self.git_root,
+            self.picklist.display_roots.as_deref(),
+            self.home,
+        );
+        Some(path.is_absolute())
+    }
+
+    /// The cell rows that result `result` takes where labels are `width`
+    /// cells wide, or 0 past the last result.
+    ///
+    /// `label` and `starts` are scratch that a caller measuring many results
+    /// keeps across the calls.
+    fn height(
+        &self,
+        result: usize,
+        width: usize,
+        label: &mut String,
+        starts: &mut Vec<usize>,
+    ) -> u16 {
+        let Some(is_path) = self.label(result, label) else {
+            return 0;
+        };
+        label_lines(label, is_path, width, starts);
+        starts.len() as u16
+    }
+}
+
+/// The first result that a paint of a path list shows, with the count of that
+/// result's cell rows above the paint's area.
 ///
-/// Every row's label starts one cell in from the list's left edge. A path row
-/// paints its directory in `ui.text.muted` and its name bold in the row's
-/// style. The extension that [`chrome::tagged_name`] splits off also takes its
-/// tag's color, and a match paints over both. A path found in `marks`, which
-/// is sorted, ends in an `M` in the `diff.modified` color. A relative entry,
-/// such as a branch name, gets none of these.
+/// The live list starts on a whole result. A pooled page starts wherever its
+/// first document row falls, and that row is partway through a label when the
+/// label wraps across the page's top edge.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) struct RowStart {
+    pub(crate) result: usize,
+    pub(crate) skip: u16,
+}
+
+/// The results that the window of a path list shows, from `first`, with the
+/// cell rows that each takes.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub(crate) struct ListWindow {
+    pub(crate) first: usize,
+    heights: Vec<u16>,
+}
+
+impl ListWindow {
+    /// The result that window row `row` shows, or `None` past the window's
+    /// results.
+    pub(crate) fn result_at(&self, row: u16) -> Option<usize> {
+        let mut bottom = 0u32;
+        for (offset, &height) in self.heights.iter().enumerate() {
+            bottom += u32::from(height);
+            if u32::from(row) < bottom {
+                return Some(self.first + offset);
+            }
+        }
+        None
+    }
+
+    /// The count of results that the window shows whole within `rows` rows.
+    pub(crate) fn whole(&self, rows: u16) -> usize {
+        let mut bottom = 0u32;
+        self.heights
+            .iter()
+            .take_while(|&&height| {
+                bottom += u32::from(height);
+                bottom <= u32::from(rows)
+            })
+            .count()
+    }
+}
+
+/// Paint the results of a path list into `area`, each label on as many rows
+/// as it needs, with the selected result and fuzzy-match characters
+/// highlighted.
+///
+/// `start` names the first result to show and its rows above `area`. The live
+/// list paints the window that [`list_window`] derives, and a pooled page
+/// paints from where [`page_start`] puts its first row, so both render
+/// identical rows.
+///
+/// `row_style` paints every result but the selected one. A caller passes its
+/// own style to set a whole list apart, such as a list of ignored files.
+///
+/// The selected result draws through [`chrome::selected_row`] over all of its
+/// rows in `area`. With `panels` it is a rounded box in a live scene. A pool
+/// page passes `panels` false, because a page captures no panel, and keeps the
+/// cells in [`Theme::list_selected`] with an accent bar on each row.
+///
+/// Every label starts one cell in from the list's left edge, and every row
+/// keeps its last [`MARK_COLUMNS`] cells clear of the label. A label wider than
+/// its row breaks as [`label_lines`] breaks it, and each later line starts
+/// [`WRAP_INDENT`] cells in, under the Wrap Mark in the foreground of
+/// [`editor::wrap_mark_style`].
+///
+/// A path paints its directory in `ui.text.muted` and its name bold in the
+/// row's style. The extension that [`chrome::tagged_name`] splits off also
+/// takes its tag's color, and a match paints over both, on every line. A path
+/// found in `marks`, which is sorted, ends its first row in an `M` in the
+/// `diff.modified` color. A relative entry, such as a branch name, gets none of
+/// these.
 ///
 /// [`chrome::selected_row`]: crate::render::chrome::selected_row
 /// [`chrome::tagged_name`]: crate::render::chrome::tagged_name
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn paint_path_rows(
-    picklist: &PickList,
-    git_root: &Path,
-    home: Option<&Path>,
-    prefix: &str,
+    rows: &PathRows<'_>,
     marks: &[PathBuf],
     area: Rect,
-    start_row: usize,
+    start: RowStart,
     theme: &Theme,
     row_style: Style,
     panels: bool,
     buf: &mut Buffer,
     scene: &mut stoat_widgets::ApcScene,
 ) {
-    let rows = area.height as usize;
-    if rows == 0 {
+    if area.height == 0 || area.width == 0 {
         return;
     }
     let match_style = theme.list_match();
     let dir_style = theme.get(scope::UI_TEXT_MUTED);
     let mark_style = theme.get(scope::DIFF_MODIFIED);
+    let wrap_fg = editor::wrap_mark_style(theme).fg;
 
     let area_end = area.x + area.width;
-    let prefix_len = prefix.chars().count() as u32;
-    let mut label = String::new();
+    let text_end = area_end.saturating_sub(MARK_COLUMNS);
+    let width = label_columns(area.width);
+    let prefix_len = rows.prefix.chars().count() as u32;
+    let (mut label, mut starts) = (String::new(), Vec::new());
 
     // Rows past the eagerly indexed block derive their offsets here, one row at
     // a time into buffers the whole window shares.
     let mut derived = Vec::new();
     let mut matching = fuzzy::Scratch::default();
 
-    for (row_idx, &idx) in picklist
-        .filtered
-        .iter()
-        .skip(start_row)
-        .take(rows)
-        .enumerate()
-    {
-        let indices = picklist.row_indices(start_row + row_idx, &mut derived, &mut matching);
-        let row = area.y + row_idx as u16;
-        let style = match start_row + row_idx == picklist.selected {
-            true => crate::render::chrome::selected_row(
-                Rect::new(area.x, row, area.width, 1),
-                row_style,
-                panels,
-                theme,
-                buf,
-                scene,
-            ),
+    let mut top = i32::from(area.y) - i32::from(start.skip);
+    let mut result = start.result;
+    while top < i32::from(area.bottom()) {
+        let Some(is_path) = rows.label(result, &mut label) else {
+            break;
+        };
+        let Some(path) = rows.path(result) else {
+            break;
+        };
+        label_lines(&label, is_path, width, &mut starts);
+        let bottom = top + starts.len() as i32;
+        let shown = top.max(i32::from(area.y))..bottom.min(i32::from(area.bottom()));
+        if shown.is_empty() {
+            top = bottom;
+            result += 1;
+            continue;
+        }
+
+        let cells = Rect::new(
+            area.x,
+            shown.start as u16,
+            area.width,
+            (shown.end - shown.start) as u16,
+        );
+        let style = match result == rows.picklist.selected {
+            true => {
+                crate::render::chrome::selected_row(cells, row_style, panels, theme, buf, scene)
+            },
             false => {
-                for col in area.x..area_end {
-                    buf[(col, row)].set_char(' ').set_style(row_style);
+                for y in cells.top()..cells.bottom() {
+                    for x in cells.left()..cells.right() {
+                        buf[(x, y)].set_char(' ').set_style(row_style);
+                    }
                 }
                 row_style
             },
         };
-
-        let path = &picklist.base[idx];
-        let is_path = path.is_absolute();
-        let label_x = area.x + 1;
-        let marked = is_path && area_end >= label_x + 3 && marks.binary_search(path).is_ok();
-        let end_x = match marked {
-            true => {
-                buf[(area_end - 1, row)].set_char('M').set_style(mark_style);
-                area_end - 2
-            },
-            false => area_end,
+        let wrap_style = match wrap_fg {
+            Some(fg) => style.fg(fg),
+            None => style,
         };
 
-        label.clear();
-        label.push_str(prefix);
-        write_row_display(
-            &mut label,
-            path,
-            git_root,
-            picklist.display_roots.as_deref(),
-            home,
-        );
         let name_col = if is_path { name_start(&label) } else { 0 };
-        let width = end_x.saturating_sub(label_x) as usize;
         let label_len = label.chars().count();
         let ext = match is_path {
             true => crate::render::chrome::tagged_name(path),
@@ -1293,58 +1420,286 @@ pub(crate) fn paint_path_rows(
             let ext_col = label_len.saturating_sub(tagged.suffix.chars().count());
             (ext_col, theme.get(tagged.tag.scope))
         });
+        let indices = rows
+            .picklist
+            .row_indices(result, &mut derived, &mut matching);
 
-        // A row wider than its column gives up chars to an ellipsis in one cell,
-        // leaving `width - 1` cells for the rest. A path is start-truncated
-        // helix-style so the file name at the tail stays on screen. A relative
-        // entry is a label rather than a path, such as a branch name of the
-        // palette's argument list, and its head names it, so its tail goes
-        // instead.
-        let (dropped, text_x, text_end) = if label_len > width && width > 1 {
-            if is_path {
-                let dropped = label_len - (width - 1);
-                buf[(label_x, row)].set_char('\u{2026}').set_style(style);
-                let tail_start = label
-                    .char_indices()
-                    .nth(dropped)
-                    .map_or(label.len(), |(byte, _)| byte);
-                write_str_clipped(buf, label_x + 1, row, &label[tail_start..], style, end_x);
-                (dropped, label_x + 1, end_x)
-            } else {
-                let ellipsis_x = end_x - 1;
-                write_str_clipped(buf, label_x, row, &label, style, ellipsis_x);
-                buf[(ellipsis_x, row)].set_char('\u{2026}').set_style(style);
-                (0, label_x, ellipsis_x)
+        for (line, &line_start) in starts.iter().enumerate() {
+            let y = top + line as i32;
+            if !shown.contains(&y) {
+                continue;
             }
-        } else {
-            write_str_clipped(buf, label_x, row, &label, style, end_x);
-            (0, label_x, end_x)
-        };
+            let y = y as u16;
+            let line_end = starts.get(line + 1).copied().unwrap_or(label_len);
+            let text_x = match line {
+                0 => area.x + LABEL_PAD,
+                _ => {
+                    let mark_x = area.x + LABEL_PAD + 2;
+                    if mark_x < text_end {
+                        buf[(mark_x, y)].set_char('\u{21b3}').set_style(wrap_style);
+                    }
+                    area.x + LABEL_PAD + WRAP_INDENT
+                },
+            };
+            let text = &label[char_byte(&label, line_start)..char_byte(&label, line_end)];
+            write_str_clipped(buf, text_x, y, text, style, text_end);
 
-        for (label_col, _) in label.chars().enumerate().skip(dropped) {
-            let col = text_x + (label_col - dropped) as u16;
-            if col >= text_end {
-                break;
-            }
-            let cell = &mut buf[(col, row)];
-            if label_col < name_col {
-                cell.set_style(dir_style);
-            } else if is_path {
-                cell.set_style(Style::default().add_modifier(Modifier::BOLD));
-            }
-            if let Some((ext_col, ext_style)) = ext
-                && label_col >= ext_col
-            {
-                cell.set_style(ext_style);
-            }
-            let label_col = label_col as u32;
-            // The literal `prefix` is never matched. The picklist's indices are
-            // offsets into the part after it, so shift them past the prefix.
-            if label_col >= prefix_len && indices.binary_search(&(label_col - prefix_len)).is_ok() {
-                cell.set_style(match_style);
+            for (offset, label_col) in (line_start..line_end).enumerate() {
+                let col = text_x + offset as u16;
+                if col >= text_end {
+                    break;
+                }
+                let cell = &mut buf[(col, y)];
+                if label_col < name_col {
+                    cell.set_style(dir_style);
+                } else if is_path {
+                    cell.set_style(Style::default().add_modifier(Modifier::BOLD));
+                }
+                if let Some((ext_col, ext_style)) = ext
+                    && label_col >= ext_col
+                {
+                    cell.set_style(ext_style);
+                }
+                let label_col = label_col as u32;
+                // The literal `prefix` is never matched. The picklist's indices
+                // are offsets into the part after it, so shift them past the
+                // prefix.
+                if label_col >= prefix_len
+                    && indices.binary_search(&(label_col - prefix_len)).is_ok()
+                {
+                    cell.set_style(match_style);
+                }
             }
         }
+
+        let marked =
+            is_path && area.width > LABEL_PAD + MARK_COLUMNS && marks.binary_search(path).is_ok();
+        if marked && shown.contains(&top) {
+            buf[(area_end - 1, top as u16)]
+                .set_char('M')
+                .set_style(mark_style);
+        }
+
+        top = bottom;
+        result += 1;
     }
+}
+
+/// Break `label` into the lines that a list row shows it on, where the first
+/// line holds `width` chars, and write the char index each line starts at into
+/// `starts`.
+///
+/// Each later line holds [`WRAP_INDENT`] chars fewer, at least one. A path
+/// breaks only after a `/`. A line takes the segments that fit whole, where a
+/// segment ends after its `/`. A segment longer than a whole line starts on a
+/// fresh line and breaks at the last cell of each line, so no char is cut. A
+/// relative entry is one segment, so it breaks at the last cell of each line.
+fn label_lines(label: &str, is_path: bool, width: usize, starts: &mut Vec<usize>) {
+    starts.clear();
+    starts.push(0);
+    let total = label.chars().count();
+    if total <= width {
+        return;
+    }
+
+    let later = width.saturating_sub(usize::from(WRAP_INDENT)).max(1);
+    let (mut budget, mut used) = (width.max(1), 0);
+    let mut segment_start = 0;
+    for (index, ch) in label.chars().enumerate() {
+        let end = index + 1;
+        if end < total && !(is_path && ch == '/') {
+            continue;
+        }
+
+        let len = end - segment_start;
+        if used + len <= budget {
+            used += len;
+        } else {
+            let (mut at, mut rest) = (segment_start, len);
+            if used > 0 {
+                starts.push(at);
+                budget = later;
+            }
+            while rest > budget {
+                at += budget;
+                rest -= budget;
+                starts.push(at);
+                budget = later;
+            }
+            used = rest;
+        }
+        segment_start = end;
+    }
+}
+
+/// The byte offset of char `index` of `text`, or the length of `text` past its
+/// last char.
+fn char_byte(text: &str, index: usize) -> usize {
+    text.char_indices()
+        .nth(index)
+        .map_or(text.len(), |(byte, _)| byte)
+}
+
+/// The window of a path list `list_rows` rows tall whose labels take
+/// [`label_columns`] of `list_width`.
+///
+/// The live list paints this window, the hit test reads it, and the pool
+/// scrolls to its first result, so the three agree on what each row shows. It
+/// measures only the results it shows.
+///
+/// See also:
+/// - [`window_from`] for the rule that picks the results.
+pub(crate) fn list_window(rows: &PathRows<'_>, list_width: u16, list_rows: u16) -> ListWindow {
+    let width = label_columns(list_width);
+    let (mut label, mut starts) = (String::new(), Vec::new());
+    window_from(
+        rows.picklist.filtered.len(),
+        rows.picklist.selected,
+        list_rows,
+        |result| rows.height(result, width, &mut label, &mut starts),
+    )
+}
+
+/// The window of `len` results in `rows` rows around result `selected`, where
+/// result `i` takes `height(i)` rows.
+///
+/// The window ends with the selected result and holds that result whole. It
+/// starts at the first result when the results from the first fit, and it
+/// keeps no state, as [`window_start`] keeps none. From the selected result it
+/// takes each result above while the rows stay at most `rows`, then the results
+/// after the selected one until the rows reach `rows`. A selection past the
+/// last result counts as the last result.
+fn window_from(
+    len: usize,
+    selected: usize,
+    rows: u16,
+    mut height: impl FnMut(usize) -> u16,
+) -> ListWindow {
+    let Some(last) = len.checked_sub(1) else {
+        return ListWindow {
+            first: 0,
+            heights: Vec::new(),
+        };
+    };
+    let selected = selected.min(last);
+    let rows = u32::from(rows);
+
+    let selected_height = height(selected);
+    let mut used = u32::from(selected_height);
+    let mut heights = Vec::new();
+    let mut first = selected;
+    while first > 0 {
+        let above = height(first - 1);
+        if used + u32::from(above) > rows {
+            break;
+        }
+        used += u32::from(above);
+        heights.push(above);
+        first -= 1;
+    }
+    heights.reverse();
+    heights.push(selected_height);
+
+    let mut next = selected + 1;
+    while next <= last && used < rows {
+        let below = height(next);
+        used += u32::from(below);
+        heights.push(below);
+        next += 1;
+    }
+    ListWindow { first, heights }
+}
+
+/// Measure the document rows of `picklist`'s results through result `through`
+/// into its [`RowTops`], for a list `list_width` cells wide whose labels start
+/// with `prefix`.
+///
+/// The table measures each result once. A refilter, a new list width, or a new
+/// prefix starts it over, since each changes the rows a result takes. A pool
+/// calls this before it pages the list, with `through` far enough past the
+/// selection to cover the pages it reads.
+pub(crate) fn ensure_row_tops(
+    picklist: &mut PickList,
+    git_root: &Path,
+    home: Option<&Path>,
+    prefix: &str,
+    list_width: u16,
+    through: usize,
+) {
+    let len = picklist.filtered.len();
+    let generation = picklist.filter_generation;
+    let mut table = picklist
+        .row_tops
+        .take()
+        .filter(|table| table.holds(generation, len, list_width, prefix))
+        .unwrap_or_else(|| RowTops {
+            generation,
+            len,
+            width: list_width,
+            prefix: prefix.to_owned(),
+            tops: vec![0],
+        });
+
+    let rows = PathRows {
+        picklist,
+        git_root,
+        home,
+        prefix,
+    };
+    let width = label_columns(list_width);
+    let (mut label, mut starts) = (String::new(), Vec::new());
+    let end = through.saturating_add(1).min(len);
+    while let Some(&top) = table.tops.last()
+        && table.tops.len() <= end
+    {
+        let result = table.tops.len() - 1;
+        let height = rows.height(result, width, &mut label, &mut starts);
+        table.tops.push(top + u32::from(height));
+    }
+    picklist.row_tops = Some(table);
+}
+
+/// The document row of each result of `picklist` measured so far, for a list
+/// `list_width` cells wide whose labels start with `prefix`, or `None` when no
+/// table holds for those.
+///
+/// Entry `i` is the row that result `i` starts on, and the last entry is the
+/// row after the last measured result.
+pub(crate) fn row_tops<'a>(
+    picklist: &'a PickList,
+    list_width: u16,
+    prefix: &str,
+) -> Option<&'a [u32]> {
+    picklist
+        .row_tops
+        .as_ref()
+        .filter(|table| {
+            table.holds(
+                picklist.filter_generation,
+                picklist.filtered.len(),
+                list_width,
+                prefix,
+            )
+        })
+        .map(|table| table.tops.as_slice())
+}
+
+/// Where a pooled page whose first document row is `row` starts, from the
+/// document rows `tops` of [`row_tops`], or `None` at or past the row after the
+/// last measured result.
+///
+/// The page starts on the last result whose first row is at most `row`, with
+/// the rows of that result above `row` skipped.
+pub(crate) fn page_start(tops: &[u32], row: u32) -> Option<RowStart> {
+    let &end = tops.last()?;
+    if row >= end {
+        return None;
+    }
+    let result = tops.partition_point(|&top| top <= row) - 1;
+    Some(RowStart {
+        result,
+        skip: (row - tops[result]) as u16,
+    })
 }
 
 /// The char index where `label`'s last path component starts, which is the
@@ -1808,7 +2163,10 @@ pub(crate) fn split_list_preview(
 
 #[cfg(test)]
 mod tests {
-    use super::{test_support::match_theme, *};
+    use super::{
+        test_support::{match_theme, rounded_row_boxes, rounded_row_theme, row_boxes, ROW_SELECT},
+        *,
+    };
     use crate::{
         input_view::SubmitTarget,
         picker::{PreviewSource, INDEXED_ROWS},
@@ -1820,6 +2178,11 @@ mod tests {
         decode_stream, encode_bar, BarCommand, BorderStyle, Command, Edge, PanelCommand,
         PanelShadow, TextRunCommand,
     };
+
+    /// A path whose 42-char label wraps at its slashes onto four lines of a
+    /// list 20 cells wide, `very/deeply/`, `nested/dir/`, `module/`, and
+    /// `file_name.rs`.
+    const LONG_PATH: &str = "/r/very/deeply/nested/dir/module/file_name.rs";
 
     /// The header a finder-like modal paints, its chip at the row's end.
     const FINDER_HEADER: FilterHeader<'static> = FilterHeader {
@@ -2769,72 +3132,97 @@ mod tests {
         }
     }
 
-    #[test]
-    fn long_path_start_truncates_keeping_the_file_name() {
-        let git_root = Path::new("/r");
-        let list = list_of(
-            vec![PathBuf::from(
-                "/r/very/deeply/nested/dir/module/file_name.rs",
-            )],
-            vec![vec![]],
-        );
-        // Column width 20 leaves a 19-cell label area after the one-cell pad.
-        let area = Rect::new(0, 0, 20, 1);
+    /// The results of `list` under the root `/r`, with no prefix.
+    fn rows_of<'a>(list: &'a PickList, home: Option<&'a Path>) -> PathRows<'a> {
+        PathRows {
+            picklist: list,
+            git_root: Path::new("/r"),
+            home,
+            prefix: "",
+        }
+    }
+
+    /// A paint that starts on the first row of result `result`.
+    fn from_result(result: usize) -> RowStart {
+        RowStart { result, skip: 0 }
+    }
+
+    /// The cells of `area` in `buf` that hold the match color of
+    /// [`match_theme`], as `(column, row)`, row by row.
+    fn lit_cells(buf: &Buffer, area: Rect) -> Vec<(u16, u16)> {
+        let match_fg = Color::Rgb(255, 0, 0);
+        (area.top()..area.bottom())
+            .flat_map(|row| (area.left()..area.right()).map(move |col| (col, row)))
+            .filter(|&(col, row)| buf[(col, row)].fg == match_fg)
+            .collect()
+    }
+
+    /// Paint `list` under `theme` into `area` from `start`, with no selection
+    /// box and the default row style, and return the cells.
+    fn painted_list(list: &PickList, area: Rect, start: RowStart, theme: &Theme) -> Buffer {
         let mut buf = Buffer::empty(area);
         paint_path_rows(
-            &list,
-            git_root,
-            None,
-            "",
+            &rows_of(list, None),
             &[],
             area,
-            0,
-            &Theme::empty(),
+            start,
+            theme,
             Style::default(),
             false,
             &mut buf,
             &mut stoat_widgets::ApcScene::new(),
         );
+        buf
+    }
+
+    /// The text of each row of `area` in `buf`, with trailing blanks trimmed.
+    fn row_texts(buf: &Buffer, area: Rect) -> Vec<String> {
+        (area.top()..area.bottom())
+            .map(|row| row_text(buf, row, area).trim_end().to_owned())
+            .collect()
+    }
+
+    /// A 42-char path wraps at its slashes onto four rows of a list 20 cells
+    /// wide. Each later line starts three cells in with the Wrap Mark and one
+    /// blank, and no row draws an ellipsis.
+    #[test]
+    fn a_long_path_wraps_under_the_wrap_mark() {
+        let list = list_of(vec![PathBuf::from(LONG_PATH)], vec![vec![]]);
+        let area = Rect::new(0, 0, 20, 4);
+        let buf = painted_list(&list, area, from_result(0), &Theme::empty());
 
         assert_eq!(
-            row_text(&buf, 0, area),
-            " \u{2026}odule/file_name.rs",
-            "an ellipsis stands in for the dropped head, and the file name at the tail stays",
+            row_texts(&buf, area),
+            [
+                " very/deeply/",
+                "   \u{21b3} nested/dir/",
+                "   \u{21b3} module/",
+                "   \u{21b3} file_name.rs",
+            ],
         );
     }
 
-    /// A relative entry is a label rather than a path, such as a branch name of
-    /// the palette's argument list, and its head names it. So a cut keeps the
-    /// head, and a match in the cut tail paints nothing over the ellipsis.
+    /// A relative entry is a label, such as a branch name of the palette's
+    /// argument list, and not a path, so it breaks at the last cell of each
+    /// line rather than at its slashes. A match keeps its highlight on the
+    /// line it falls on.
     #[test]
-    fn a_long_label_keeps_its_head() {
+    fn a_long_label_that_is_no_path_wraps_at_the_last_cell() {
         let label = "feature/a-long-branch-name-for-the-cut";
         let list = list_of(vec![PathBuf::from(label)], vec![vec![0, 18]]);
-        // Column width 20 leaves a 19-cell label area after the one-cell pad.
-        let area = Rect::new(0, 0, 20, 1);
-        let mut buf = Buffer::empty(area);
-        paint_path_rows(
-            &list,
-            Path::new("/r"),
-            None,
-            "",
-            &[],
-            area,
-            0,
-            &match_theme(),
-            Style::default(),
-            false,
-            &mut buf,
-            &mut stoat_widgets::ApcScene::new(),
-        );
+        let area = Rect::new(0, 0, 20, 3);
+        let buf = painted_list(&list, area, from_result(0), &match_theme());
 
-        let match_fg = Color::Rgb(255, 0, 0);
-        let highlighted: Vec<u16> = (area.x..area.x + area.width)
-            .filter(|&c| buf[(c, 0)].fg == match_fg)
-            .collect();
         assert_eq!(
-            (row_text(&buf, 0, area), highlighted),
-            (format!(" {}\u{2026}", &label[..18]), vec![1]),
+            (row_texts(&buf, area), lit_cells(&buf, area)),
+            (
+                vec![
+                    " feature/a-long-br".to_owned(),
+                    "   \u{21b3} anch-name-for".to_owned(),
+                    "   \u{21b3} -the-cut".to_owned(),
+                ],
+                vec![(1, 0), (6, 1)],
+            ),
         );
     }
 
@@ -2842,20 +3230,16 @@ mod tests {
     /// which is what keeps the row paint from resolving one itself.
     #[test]
     fn a_row_outside_the_repo_abbreviates_against_the_given_home() {
-        let git_root = Path::new("/r");
         let list = list_of(vec![PathBuf::from("/fixture-home/a.rs")], vec![vec![]]);
         let area = Rect::new(0, 0, 24, 1);
 
         let paint = |home: Option<&Path>| {
             let mut buf = Buffer::empty(area);
             paint_path_rows(
-                &list,
-                git_root,
-                home,
-                "",
+                &rows_of(&list, home),
                 &[],
                 area,
-                0,
+                from_result(0),
                 &Theme::empty(),
                 Style::default(),
                 false,
@@ -2873,74 +3257,27 @@ mod tests {
         );
     }
 
+    /// A path that fits its row takes that one row, whole, and leaves the row
+    /// under it to the next result.
     #[test]
-    fn short_path_renders_in_full_without_an_ellipsis() {
-        let git_root = Path::new("/r");
+    fn a_path_that_fits_takes_one_row() {
         let list = list_of(vec![PathBuf::from("/r/a.rs")], vec![vec![]]);
-        let area = Rect::new(0, 0, 20, 1);
-        let mut buf = Buffer::empty(area);
-        paint_path_rows(
-            &list,
-            git_root,
-            None,
-            "",
-            &[],
-            area,
-            0,
-            &Theme::empty(),
-            Style::default(),
-            false,
-            &mut buf,
-            &mut stoat_widgets::ApcScene::new(),
-        );
+        let area = Rect::new(0, 0, 20, 2);
+        let buf = painted_list(&list, area, from_result(0), &Theme::empty());
 
-        let text = row_text(&buf, 0, area);
-        assert!(
-            !text.contains('\u{2026}'),
-            "no ellipsis for a path that fits: {text:?}"
-        );
-        assert_eq!(text.trim(), "a.rs", "the whole path renders: {text:?}");
+        assert_eq!(row_texts(&buf, area), [" a.rs", ""]);
     }
 
+    /// A match keeps its highlight on whichever line of a wrapped path it falls
+    /// on. Offset 0 lights the first cell of the first line, and offset 30, the
+    /// `f` of `file_name`, lights the first cell of the fourth.
     #[test]
-    fn match_highlight_follows_the_truncated_tail() {
-        let git_root = Path::new("/r");
-        // The 42-char label loses its leading 24 chars in the 19-cell area past
-        // the pad, so the tail starts at char 24. Match offset 0 lands in the
-        // dropped head and offset 30 (the `f` of `file_name`) in the visible
-        // tail.
-        let list = list_of(
-            vec![PathBuf::from(
-                "/r/very/deeply/nested/dir/module/file_name.rs",
-            )],
-            vec![vec![0, 30]],
-        );
-        let area = Rect::new(0, 0, 20, 1);
-        let mut buf = Buffer::empty(area);
-        paint_path_rows(
-            &list,
-            git_root,
-            None,
-            "",
-            &[],
-            area,
-            0,
-            &match_theme(),
-            Style::default(),
-            false,
-            &mut buf,
-            &mut stoat_widgets::ApcScene::new(),
-        );
+    fn a_match_keeps_its_highlight_on_a_continuation_line() {
+        let list = list_of(vec![PathBuf::from(LONG_PATH)], vec![vec![0, 30]]);
+        let area = Rect::new(0, 0, 20, 4);
+        let buf = painted_list(&list, area, from_result(0), &match_theme());
 
-        let match_fg = Color::Rgb(255, 0, 0);
-        let highlighted: Vec<u16> = (area.x..area.x + area.width)
-            .filter(|&c| buf[(c, 0)].fg == match_fg)
-            .collect();
-        assert_eq!(
-            highlighted,
-            vec![8],
-            "only the tail match highlights at its shifted column; the dropped-head match paints nothing"
-        );
+        assert_eq!(lit_cells(&buf, area), [(1, 0), (5, 3)]);
     }
 
     #[test]
@@ -2963,21 +3300,7 @@ mod tests {
         );
 
         let area = Rect::new(0, 0, 40, 1);
-        let mut buf = Buffer::empty(area);
-        paint_path_rows(
-            &list,
-            git_root,
-            None,
-            "",
-            &[],
-            area,
-            deep,
-            &match_theme(),
-            Style::default(),
-            false,
-            &mut buf,
-            &mut stoat_widgets::ApcScene::new(),
-        );
+        let buf = painted_list(&list, area, from_result(deep), &match_theme());
 
         let match_fg = Color::Rgb(255, 0, 0);
         let highlighted = (area.x..area.x + area.width)
@@ -3008,21 +3331,7 @@ mod tests {
         );
 
         let area = Rect::new(0, 0, 40, 1);
-        let mut buf = Buffer::empty(area);
-        paint_path_rows(
-            &list,
-            git_root,
-            None,
-            "",
-            &[],
-            area,
-            550,
-            &match_theme(),
-            Style::default(),
-            false,
-            &mut buf,
-            &mut stoat_widgets::ApcScene::new(),
-        );
+        let buf = painted_list(&list, area, from_result(550), &match_theme());
 
         let match_fg = Color::Rgb(255, 0, 0);
         let highlighted: Vec<u16> = (area.x..area.x + area.width)
@@ -3046,13 +3355,10 @@ mod tests {
         let mut buf = Buffer::empty(area);
         let muted = Color::Rgb(1, 2, 3);
         paint_path_rows(
-            &list,
-            Path::new("/r"),
-            None,
-            "",
+            &rows_of(&list, None),
             &[],
             area,
-            0,
+            from_result(0),
             &Theme::empty(),
             Style::default().fg(muted),
             false,
@@ -3153,23 +3459,7 @@ mod tests {
     /// row of a list `width` cells wide under `theme`.
     fn painted_row(path: &str, indices: Vec<u32>, width: u16, theme: &Theme) -> Buffer {
         let list = list_of(vec![PathBuf::from(path)], vec![indices]);
-        let area = Rect::new(0, 0, width, 1);
-        let mut buf = Buffer::empty(area);
-        paint_path_rows(
-            &list,
-            Path::new("/r"),
-            None,
-            "",
-            &[],
-            area,
-            0,
-            theme,
-            Style::default(),
-            false,
-            &mut buf,
-            &mut stoat_widgets::ApcScene::new(),
-        );
-        buf
+        painted_list(&list, Rect::new(0, 0, width, 1), from_result(0), theme)
     }
 
     /// The foreground of cell `col` of `buf`'s first row, and whether it is
@@ -3413,5 +3703,191 @@ mod tests {
         runs.sort_unstable();
         let colors = runs.into_iter().map(|(_, color)| color).collect();
         (theme, (marked_rows, bars, colors))
+    }
+
+    /// A path breaks only after a `/`, so each line takes the whole segments
+    /// that fit, and a path that fits takes one line.
+    #[test]
+    fn a_path_breaks_into_lines_at_its_slashes() {
+        let lines = |label: &str| {
+            let mut starts = Vec::new();
+            label_lines(label, true, 55, &mut starts);
+            starts
+        };
+
+        assert_eq!(
+            [
+                lines("stoat/src/render/editor/minimap/emit/apc_pool_scene_builder.rs"),
+                lines(
+                    "vendor/tree-sitter-markdown/tree-sitter-markdown-inline/src/scene_scanner.c"
+                ),
+                lines("stoat/src/render/editor/minimap/emit/scene.rs"),
+            ],
+            [vec![0, 37], vec![0, 28], vec![0]],
+        );
+    }
+
+    /// A segment longer than a whole line starts on a fresh line and breaks at
+    /// the last cell of each line, so no char is cut. This path at width 47
+    /// breaks at its slashes up to its 51-char file name, which fills a fresh
+    /// line of 43 chars and leaves 8 for the next.
+    #[test]
+    fn a_segment_longer_than_a_line_breaks_at_the_last_cell_of_each_line() {
+        let path = "vendor/github.com/tree-sitter-grammars/tree-sitter-markdown/\
+                    tree-sitter-markdown-inline/src/generated/scanner/\
+                    scene_external_scanner_state_serialization_tables.c";
+        let mut starts = Vec::new();
+        label_lines(path, true, 47, &mut starts);
+
+        assert_eq!((path.len(), starts), (161, vec![0, 39, 60, 102, 110, 153]));
+    }
+
+    /// A relative entry is one segment, so it breaks at the last cell of each
+    /// line, 17 chars on the first line and 13 on each later one. A label one
+    /// char too long for its line puts that char on a line of its own.
+    #[test]
+    fn a_label_that_is_no_path_breaks_at_the_last_cell_of_each_line() {
+        let lines = |label: &str| {
+            let mut starts = Vec::new();
+            label_lines(label, false, 17, &mut starts);
+            starts
+        };
+
+        assert_eq!(
+            [
+                lines("feature/a-long-branch-name-for-the-cut"),
+                lines("feature/a-long-bra"),
+            ],
+            [vec![0, 17, 30], vec![0, 17]],
+        );
+    }
+
+    /// The Wrap Mark of a continuation line takes the foreground of
+    /// `ui.virtual.wrap`, or that of `ui.text.disabled` in a theme that leaves
+    /// the wrap scope unset.
+    #[test]
+    fn the_wrap_mark_reads_in_the_wrap_scope_or_in_the_disabled_text() {
+        let list = list_of(vec![PathBuf::from(LONG_PATH)], vec![vec![]]);
+        let area = Rect::new(0, 0, 20, 2);
+        let mark = |body: &str| {
+            let buf = painted_list(&list, area, from_result(0), &theme_of(body));
+            (buf[(3, 1)].symbol().to_owned(), buf[(3, 1)].fg)
+        };
+
+        assert_eq!(
+            [
+                mark(r##"ui.virtual.wrap.fg = "#010203";"##),
+                mark(r##"ui.text.disabled.fg = "#040506";"##),
+            ],
+            [
+                ("\u{21b3}".to_owned(), Color::Rgb(1, 2, 3)),
+                ("\u{21b3}".to_owned(), Color::Rgb(4, 5, 6)),
+            ],
+        );
+    }
+
+    /// A selected result that wraps draws one rounded box over all of its rows
+    /// in a live scene.
+    #[test]
+    fn a_selected_result_boxes_all_of_its_rows() {
+        let mut list = list_of(vec![PathBuf::from(LONG_PATH)], vec![vec![]]);
+        list.selected = 0;
+        let area = Rect::new(0, 0, 20, 4);
+        let mut buf = Buffer::empty(area);
+        let mut scene = stoat_widgets::ApcScene::new();
+        paint_path_rows(
+            &rows_of(&list, None),
+            &[],
+            area,
+            from_result(0),
+            &rounded_row_theme(),
+            Style::default(),
+            true,
+            &mut buf,
+            &mut scene,
+        );
+
+        assert_eq!(
+            row_boxes(scene.bytes(), area),
+            rounded_row_boxes(ROW_SELECT)
+        );
+    }
+
+    /// A page that starts two rows into a wrapped result paints that result's
+    /// later lines from its top row.
+    #[test]
+    fn a_page_that_starts_inside_a_result_paints_its_later_lines() {
+        let list = list_of(vec![PathBuf::from(LONG_PATH)], vec![vec![]]);
+        let area = Rect::new(0, 0, 20, 2);
+        let start = RowStart { result: 0, skip: 2 };
+        let buf = painted_list(&list, area, start, &Theme::empty());
+
+        assert_eq!(
+            row_texts(&buf, area),
+            ["   \u{21b3} module/", "   \u{21b3} file_name.rs"]
+        );
+    }
+
+    /// The window ends with the selected result and holds it whole, and it
+    /// starts at the first result while the results from the first fit.
+    #[test]
+    fn the_window_ends_with_the_selected_result_and_holds_it_whole() {
+        let ones = |selected| window_from(20, selected, 12, |_| 1).first;
+        let mixed = [1, 3, 1, 2, 1, 1];
+        let wrapped = window_from(mixed.len(), 3, 4, |result| mixed[result]);
+        let tall = [1, 6, 1];
+        let taller = window_from(tall.len(), 1, 4, |result| tall[result]);
+
+        assert_eq!((ones(3), ones(14)), (0, 3));
+        assert_eq!(
+            (
+                wrapped.clone(),
+                (0..4).map(|row| wrapped.result_at(row)).collect::<Vec<_>>(),
+                wrapped.whole(4),
+            ),
+            (
+                ListWindow {
+                    first: 2,
+                    heights: vec![1, 2, 1],
+                },
+                vec![Some(2), Some(3), Some(3), Some(4)],
+                3,
+            ),
+        );
+        assert_eq!(
+            (taller.first, taller.result_at(3), taller.whole(4)),
+            (1, Some(1), 0)
+        );
+    }
+
+    /// The row tops sum the heights of the results before each one, and a
+    /// page starts on the result its first row falls in. A refilter or another
+    /// list width leaves the table unanswered until a pool measures again.
+    #[test]
+    fn the_row_tops_sum_the_heights_before_each_result() {
+        let base = [
+            Path::new("/r/a.rs"),
+            Path::new(LONG_PATH),
+            Path::new("/r/b.rs"),
+        ];
+        let mut list = list_of(base.map(PathBuf::from).to_vec(), vec![vec![]; 3]);
+        ensure_row_tops(&mut list, Path::new("/r"), None, "", 20, 2);
+        let tops = row_tops(&list, 20, "").map(<[u32]>::to_vec);
+        let starts = tops
+            .as_deref()
+            .map(|tops| (page_start(tops, 3), page_start(tops, 6)));
+        let other_width = row_tops(&list, 21, "").is_some();
+        list.filter_generation += 1;
+        let refiltered = row_tops(&list, 20, "").is_some();
+
+        assert_eq!(
+            (tops, starts, other_width, refiltered),
+            (
+                Some(vec![0, 1, 5, 6]),
+                Some((Some(RowStart { result: 1, skip: 2 }), None)),
+                false,
+                false,
+            ),
+        );
     }
 }

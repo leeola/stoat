@@ -28,7 +28,7 @@ use crate::{
     render::{
         blame::{self, BlameColors, BlameLines, BLAME_COLUMN_CELLS},
         code_search::paint_match_rows,
-        command_palette::paint_palette_rows,
+        command_palette::{arg_rows, paint_palette_rows},
         commits::paint_commit_rows,
         completion::paint_completion_rows,
         conflict_view::{render_conflict_rows, GridPaint},
@@ -42,7 +42,7 @@ use crate::{
         file_finder::paint_finder_rows,
         help::{paint_help_detail_rows, paint_help_list_rows},
         paint::dim_rgb,
-        picker::{paint_preview_numbers, paint_target_row, NumberColumn},
+        picker::{page_start, paint_preview_numbers, paint_target_row, NumberColumn},
         review::{diff_gutter_digits, paint_diff_rows, BufferNumbering, DiffDials},
         serialize_buffer,
         symbol_finder::paint_symbol_rows,
@@ -1103,16 +1103,21 @@ fn render_rows_page(
     bytes
 }
 
-/// Render `region_height` rows of the file finder list starting at row
-/// `page * region_height` into a fresh region-sized [`Buffer`], returning the
-/// page's self-contained VT byte stream.
+/// Render `region_height` rows of the file finder list starting at document
+/// row `page * region_height` into a fresh region-sized [`Buffer`], returning
+/// the page's self-contained VT byte stream.
 ///
 /// Mirrors [`render_editor_page`] but paints finder result rows, so a pooled
-/// page matches the live list at that scroll position. The finder is read-only
-/// here -- the page index alone selects the rows.
+/// page matches the live list at that scroll position. A wrapped label takes
+/// more than one row, so `tops`, the document row of each measured result from
+/// [`row_tops`], places the page's first row, and a page past them paints no
+/// row. The finder is read-only here.
+///
+/// [`row_tops`]: crate::render::picker::row_tops
 pub(crate) fn render_finder_page(
     finder: &FileFinder,
     home: Option<&Path>,
+    tops: &[u32],
     page: u64,
     theme: &crate::theme::Theme,
     region_width: u16,
@@ -1123,8 +1128,11 @@ pub(crate) fn render_finder_page(
         region_height,
         page,
         theme,
-        |buf, area, start_row, scene| {
-            paint_finder_rows(finder, home, area, start_row, theme, false, buf, scene)
+        |buf, area, _, scene| {
+            let Some(start) = page_start(tops, page_top_row(page, region_height)) else {
+                return;
+            };
+            paint_finder_rows(finder, home, area, start, theme, false, buf, scene)
         },
     )
 }
@@ -1221,15 +1229,17 @@ pub(crate) fn render_palette_page(
 }
 
 /// Render `region_height` rows of the palette's inline argument-picker list
-/// starting at row `page * region_height` into a fresh region-sized [`Buffer`],
-/// returning the page's self-contained VT byte stream.
+/// starting at document row `page * region_height` into a fresh region-sized
+/// [`Buffer`], returning the page's self-contained VT byte stream.
 ///
 /// Mirrors [`render_finder_page`] but paints the picker's path rows through the
 /// shared [`crate::render::picker::paint_path_rows`], so a pooled page matches
-/// the live inline picker. The picker is read-only here.
+/// the live inline picker. `tops` places the page's first row as it does for
+/// the finder. The picker is read-only here.
 pub(crate) fn render_arg_page(
     picker: &ArgPicker,
     home: Option<&Path>,
+    tops: &[u32],
     page: u64,
     theme: &crate::theme::Theme,
     region_width: u16,
@@ -1240,26 +1250,20 @@ pub(crate) fn render_arg_page(
         region_height,
         page,
         theme,
-        |buf, area, start_row, scene| {
-            let core = picker.active_core_ref();
-            let prefix = picker
-                .browse
-                .as_ref()
-                .map(|browse| browse.typed_dir.as_str())
-                .unwrap_or_default();
+        |buf, area, _, scene| {
+            let Some(start) = page_start(tops, page_top_row(page, region_height)) else {
+                return;
+            };
             let row_style = if picker.fallback_active() {
                 theme.get(crate::theme::scope::UI_TEXT_MUTED)
             } else {
                 theme.get(crate::theme::scope::UI_TEXT)
             };
             crate::render::picker::paint_path_rows(
-                &core.picklist,
-                &core.git_root,
-                home,
-                prefix,
+                &arg_rows(picker, home),
                 &[],
                 area,
-                start_row,
+                start,
                 theme,
                 row_style,
                 false,

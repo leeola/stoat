@@ -3279,6 +3279,40 @@ mod tests {
         );
     }
 
+    /// The window of a list whose labels wrap shows fewer results than it has
+    /// rows, so a page step moves by half the results that it shows whole,
+    /// rounded up.
+    ///
+    /// Each of the 30 files wraps onto `h` rows at any list width, so the list
+    /// shows `list.height / h` of them whole, at least one.
+    #[test]
+    fn a_page_step_moves_by_half_the_results_that_the_window_shows() {
+        let mut h = crate::Stoat::test();
+        let stem = "x".repeat(300);
+        let names: Vec<String> = (0..30).map(|n| format!("d/{stem}{n:02}.rs")).collect();
+        let files: Vec<(&str, &str)> = names.iter().map(|name| (name.as_str(), "x")).collect();
+        seed_finder_workspace(&mut h, &files);
+        h.type_keys("space p");
+        h.settle();
+        h.stoat.render();
+
+        let list = test_fixture::finder_layout(&h).list;
+        let rows = 1 + 305usize.div_ceil(crate::render::picker::label_columns(list.width) - 4);
+        let shown = (usize::from(list.height) / rows).max(1);
+        let picklist = |h: &TestHarness| {
+            let finder = h.stoat.file_finder.as_ref().expect("the finder is open");
+            let list = &finder.active_core_ref().picklist;
+            (list.viewport_rows, list.selected)
+        };
+        let rendered = picklist(&h);
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::PickerPageDown);
+
+        assert_eq!(
+            (rendered, picklist(&h)),
+            ((Some(shown), 0), (Some(shown), shown.div_ceil(2))),
+        );
+    }
+
     /// The preview opens with the shown file's directory and name, and the
     /// lines the pane shows one column from its right edge.
     #[test]

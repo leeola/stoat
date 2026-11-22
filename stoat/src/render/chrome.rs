@@ -864,9 +864,10 @@ pub(crate) fn chip_cells(cells: Rect, style: Style, scene: &mut ApcScene) -> Sty
 /// row's background.
 ///
 /// Otherwise the cells take the selected style and [`selection_bar`] marks
-/// the row's first cell, as a plain terminal draws the row. A pool page
-/// captures no panel, so a painter of pages passes `panels` false and the
-/// page keeps this cell form.
+/// the first cell of each row of `rect`, so a result that wraps onto more
+/// rows reads as one selection over its whole height. A pool page captures no
+/// panel, so a painter of pages passes `panels` false and the page keeps this
+/// cell form.
 pub(crate) fn selected_row(
     rect: Rect,
     row_style: Style,
@@ -878,7 +879,9 @@ pub(crate) fn selected_row(
     let selected = theme.list_selected(scope::UI_SELECTION);
     let Some(fill) = style_rgb(selected.bg).filter(|_| panels && scene.live()) else {
         fill_cells(rect, selected, buf);
-        selection_bar(rect.x, rect.y, theme, buf, scene);
+        for y in rect.top()..rect.bottom() {
+            selection_bar(rect.x, y, theme, buf, scene);
+        }
         return selected;
     };
 
@@ -1809,6 +1812,37 @@ mod tests {
                 (selected, vec![selected_bg; 10], Vec::new()),
             ],
         );
+    }
+
+    /// A selected row three cells tall bars each of its rows in the cell form,
+    /// so a result that wraps reads as one selection over its whole height.
+    #[test]
+    fn a_tall_selected_row_bars_each_of_its_rows_in_the_cell_form() {
+        let (config, errors) = parse(r##"theme t { ui.border.focused.fg = "#070809"; }"##);
+        assert!(errors.is_empty(), "parse errors: {errors:?}");
+        let theme = Theme::from_config(&config.expect("a config"), "t").expect("the theme");
+        let mut buf = Buffer::empty(Rect::new(0, 0, 14, 8));
+        let mut scene = ApcScene::new();
+        let rect = Rect::new(2, 3, 10, 3);
+        selected_row(rect, Style::default(), false, &theme, &mut buf, &mut scene);
+
+        let bars: Vec<u8> = [48, 64, 80]
+            .into_iter()
+            .flat_map(|y| {
+                encode_bar(&BarCommand {
+                    x: 32,
+                    y,
+                    width: 3,
+                    height: 16,
+                    color: [7, 8, 9],
+                    occludes: false,
+                    hatch: None,
+                    radius: 0,
+                    corners: 0,
+                })
+            })
+            .collect();
+        assert_eq!(scene.bytes(), bars);
     }
 
     /// The hover popup and the popout card take their frames from the theme's

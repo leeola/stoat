@@ -240,10 +240,19 @@ pub(crate) struct PickList {
     /// each derives the offsets of its `./` anchor on demand.
     pub(crate) indexed: usize,
     pub(crate) selected: usize,
-    /// Rendered list height in rows, refreshed each frame by the owner's render
-    /// so [`PickList::page`] can size its half-page step. `None` before the
-    /// first render, where the step falls back to a single row.
+    /// The count of results that the rendered list shows whole, refreshed each
+    /// frame by the owner's render so [`PickList::page`] steps by results.
+    ///
+    /// A wrapped label takes more than one row, so this counts results and not
+    /// rows. `None` before the first render, where the step falls back to a
+    /// single result.
     pub(crate) viewport_rows: Option<usize>,
+    /// The document rows of the results that a pool has measured, or `None`
+    /// before a pool asks.
+    ///
+    /// Derived state. `render::picker::ensure_row_tops` builds and extends it,
+    /// and `render::picker::row_tops` answers it only while its key holds.
+    pub(crate) row_tops: Option<RowTops>,
     /// Process-monotonic stamp bumped on construction and every refilter, so a
     /// render pool versions the filter state in O(1) instead of hashing the
     /// whole filtered index.
@@ -587,6 +596,32 @@ pub(crate) struct BaseId {
     pub(crate) len: usize,
 }
 
+/// The document row that each result of a [`PickList`] starts on in a list of
+/// one width, measured as far as a pool has asked.
+///
+/// A wrapped label takes more than one row, so a pool that pages the list needs
+/// the sum of the heights before each result. The key names what those heights
+/// depend on, which is the rows of a filter, the list width, and the browse
+/// prefix. A change to any of them starts the table over.
+pub(crate) struct RowTops {
+    pub(crate) generation: u64,
+    pub(crate) len: usize,
+    pub(crate) width: u16,
+    pub(crate) prefix: String,
+    /// The row that result `i` starts on at index `i`, then the row after the
+    /// last measured result.
+    pub(crate) tops: Vec<u32>,
+}
+
+impl RowTops {
+    /// Whether the table holds for the rows of filter `generation`, `len`
+    /// results long, in a list `width` cells wide whose labels start with
+    /// `prefix`.
+    pub(crate) fn holds(&self, generation: u64, len: usize, width: u16, prefix: &str) -> bool {
+        (self.generation, self.len, self.width) == (generation, len, width) && self.prefix == prefix
+    }
+}
+
 impl Default for PickList {
     fn default() -> Self {
         Self {
@@ -597,6 +632,7 @@ impl Default for PickList {
             indexed: 0,
             selected: 0,
             viewport_rows: None,
+            row_tops: None,
             filter_generation: next_generation(),
             display_roots: None,
             keeps_base_order: false,
@@ -622,9 +658,9 @@ impl PickList {
         nav_move(self.filtered.len(), &mut self.selected, delta);
     }
 
-    /// Page the selection by half the rendered list height in `dir` (negative
-    /// up, positive down). Before the first render sets [`Self::viewport_rows`]
-    /// the step falls back to a single row.
+    /// Page the selection in `dir` (negative up, positive down) by half the
+    /// results that the rendered list shows whole. Before the first render sets
+    /// [`Self::viewport_rows`] the step falls back to a single result.
     pub(crate) fn page(&mut self, dir: i32) {
         self.move_selection(dir * nav_page_step(self.viewport_rows));
     }
