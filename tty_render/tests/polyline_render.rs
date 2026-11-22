@@ -9,7 +9,7 @@
 
 use stoatty_protocol::command::Edge;
 use stoatty_render::{
-    gpu::{build_font_system, FontConfig, Renderer},
+    gpu::{build_font_system, FontConfig, PoolCell, Renderer},
     render::cell_size,
     test_support::{offscreen_target, pixel, read_back, require_headless_device, still_frame},
 };
@@ -273,7 +273,7 @@ impl Harness {
             &self.queue,
             &self.view,
             pool,
-            None,
+            PoolCell::Live,
             &[],
             full,
             shift,

@@ -61,7 +61,7 @@ use stoatty_protocol::{
 use stoatty_render::{
     gpu::{
         fontdb::Database as FontDatabase, FontConfig, FontLoad, Frame, FrameOutcome, GpuContext,
-        PoolComposite, Scroll, SharedFonts, SharedGpu, SketchReveal,
+        PoolCell, PoolComposite, Scroll, SharedFonts, SharedGpu, SketchReveal,
     },
     render::{self, background::CursorFill, GridLayout},
 };
@@ -3573,6 +3573,9 @@ pub(crate) fn redraw(state: &mut State) {
 /// it holds only blanks of the clear color, so it leaves its own cells of
 /// that color to the clear.
 ///
+/// A scaled pool's page holds cells at its scale of the live cell, so it
+/// draws at that scale, and its shift counts rows of its own cell.
+///
 /// The composite fades toward the clear color by the region's dim, which is
 /// how the program fades an unfocused terminal pane without a new page.
 ///
@@ -3595,6 +3598,7 @@ fn pool_composite<'a>(
     // into the next.
     let region = pool.region;
     let region_rect = region_scissor(region, layout, cw, ch);
+    let cell_h = pool_cell_height(region.kind, ch);
 
     let (ride_rows, scissor) = match ride {
         Some(ride) => {
@@ -3605,7 +3609,7 @@ fn pool_composite<'a>(
                 ch,
             );
             (
-                dy_px / ch,
+                dy_px / cell_h,
                 intersect_scissor(
                     shift_scissor(region_rect, dy_px),
                     region_scissor(ride.host_region, layout, cw, ch),
@@ -3618,7 +3622,11 @@ fn pool_composite<'a>(
     PoolComposite {
         id: pool.id,
         grid,
-        font_size: (region.kind == PoolKind::Terminal).then_some(terminal_font_size),
+        cell: match region.kind {
+            PoolKind::Grid => PoolCell::Live,
+            PoolKind::Terminal => PoolCell::Font(terminal_font_size),
+            PoolKind::Scaled { scale, .. } => PoolCell::Scaled(scale),
+        },
         // The ride rides the shift below rather than this origin. Every
         // composite shader snaps against the origin and adds its shift after, so
         // the two land in the same pixel, while an origin left on the whole-cell
@@ -3628,7 +3636,7 @@ fn pool_composite<'a>(
         scissor,
         // Snapped once over the sum. Two roundings of two fractions land a pixel
         // from where their sum does.
-        shift_rows: snap_shift_to_pixels(ride_rows - pool.frac, ch),
+        shift_rows: snap_shift_to_pixels(ride_rows - pool.frac, cell_h),
         content_changed: pool.content_changed,
         scrolled_rows: pool.scrolled_rows,
         occludable: pool.id < NON_PANE_POOL_BASE,
@@ -3636,6 +3644,19 @@ fn pool_composite<'a>(
         changed_rows,
         dim: f32::from(region.dim) / 255.0,
     }
+}
+
+/// The pixel height of the cell a pool of `kind` composites at, over live
+/// cells `ch` pixels tall, which its sub-cell shift counts rows of.
+///
+/// A terminal pool never shifts, so only a scaled pool's height differs from
+/// `ch`.
+fn pool_cell_height(kind: PoolKind, ch: f32) -> f32 {
+    let PoolKind::Scaled { scale, .. } = kind else {
+        return ch;
+    };
+    let side = stoatty_protocol::command::scaled_cell_side(ch as u16, scale);
+    f32::from(side)
 }
 
 /// Redraw one aux window, easing its window-bound pools toward their scroll
@@ -3767,7 +3788,7 @@ fn redraw_aux(
         .map(|pool| PoolComposite {
             id: pool.id,
             grid: &aux.pool_anims[&pool.id].document_grid,
-            font_size: None,
+            cell: PoolCell::Live,
             origin_cells: [pool.region.left as f32, pool.region.top as f32],
             scissor: region_scissor(pool.region, layout, cw, ch),
             shift_rows: -snap_shift_to_pixels(pool.frac, ch),
@@ -4540,7 +4561,7 @@ mod tests {
         encode_scroll, FillCommand, PoolAnchorCommand, PoolDropCommand, PoolKind,
         PoolRegionCommand, ScrollCommand,
     };
-    use stoatty_render::render::GridLayout;
+    use stoatty_render::{gpu::PoolCell, render::GridLayout};
     use stoatty_term::{
         grid::{Damage, DocumentOffset, Grid, PoolRegion},
         term::Terminal,
@@ -5467,7 +5488,7 @@ mod tests {
             };
             let composite = pool_composite(&tile, &grid, None, None, [12.0, 24.0], FLOORED, 10);
             (
-                composite.font_size,
+                composite.cell,
                 composite.origin_cells,
                 composite.scissor,
                 composite.skip_clear,
@@ -5478,11 +5499,59 @@ mod tests {
         assert_eq!(
             (drawn(PoolKind::Terminal, 51), drawn(PoolKind::Grid, 0)),
             (
-                (Some(10), [2.0, 1.0], [24, 24, 48, 48], true, 0.2),
-                (None, [2.0, 1.0], [24, 24, 48, 48], false, 0.0)
+                (PoolCell::Font(10), [2.0, 1.0], [24, 24, 48, 48], true, 0.2),
+                (PoolCell::Live, [2.0, 1.0], [24, 24, 48, 48], false, 0.0)
             ),
             "only the terminal pool takes its size and skips the clear, both cover the \
              region, and each fades by its region's dim",
+        );
+    }
+
+    /// A scaled pool composites at its scale over its own region and paints
+    /// every cell. Its glide shift counts rows of its own 12-pixel cell, so a
+    /// shift of 0.3 rows snaps to 4 of those pixels where the live 24-pixel cell
+    /// takes 7.
+    #[test]
+    fn a_scaled_pool_composites_at_its_scale() {
+        let grid = Grid::new(1, 1);
+        let tile = ActivePool {
+            id: 1,
+            region: PoolRegion {
+                pool: 1,
+                window: 0,
+                top: 1,
+                left: 2,
+                width: 4,
+                height: 2,
+                kind: PoolKind::Scaled {
+                    scale: 128,
+                    rows: 4,
+                    cols: 8,
+                },
+                dim: 0,
+                resident: true,
+            },
+            frac: 0.3,
+            content_changed: true,
+            scrolled_rows: None,
+        };
+        let composite = pool_composite(&tile, &grid, None, None, [12.0, 24.0], FLOORED, 10);
+
+        assert_eq!(
+            (
+                composite.cell,
+                composite.origin_cells,
+                composite.scissor,
+                composite.skip_clear,
+                composite.shift_rows,
+            ),
+            (
+                PoolCell::Scaled(128),
+                [2.0, 1.0],
+                [24, 24, 48, 48],
+                false,
+                -4.0 / 12.0
+            ),
         );
     }
 

@@ -9,7 +9,7 @@
 
 use stoatty_protocol::command::Edge;
 use stoatty_render::{
-    gpu::{HostRide, PoolComposite},
+    gpu::{HostRide, PoolCell, PoolComposite},
     render::cell_size,
     test_support::{
         self, offscreen_target, pixel, read_back, require_headless_device, still_frame,
@@ -101,7 +101,7 @@ fn render_scene_over(
             let pool = PoolComposite {
                 id: 0,
                 grid: &pool_grid,
-                font_size: None,
+                cell: PoolCell::Live,
                 origin_cells: [0.0; 2],
                 scissor: [0, 0, width, height],
                 shift_rows: 0.0,

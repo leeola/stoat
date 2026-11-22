@@ -14,7 +14,7 @@
 use futures::executor;
 use stoatty_protocol::command::Edge;
 use stoatty_render::{
-    gpu::Renderer,
+    gpu::{PoolCell, Renderer},
     render::{cell_size, HostRide},
     test_support::{self, require_headless_device, still_frame},
 };
@@ -107,7 +107,7 @@ fn oversized_scissors_are_clamped_not_validated() {
         &queue,
         &view,
         &pool,
-        None,
+        PoolCell::Live,
         &[],
         oversized,
         0.0,

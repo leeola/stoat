@@ -169,6 +169,21 @@ impl CellMetrics {
             scale_factor,
         }
     }
+
+    /// The cell box of a scaled pool, `scale` 256ths of this one.
+    ///
+    /// The rasterization size scales exactly. Each side goes through
+    /// [`command::scaled_cell_side`], which a program sizes a scaled pool's
+    /// grid by, so the two agree on where each cell falls.
+    pub(crate) fn scaled(self, scale: u16) -> CellMetrics {
+        let side = |pixels: f32| f32::from(command::scaled_cell_side(pixels as u16, scale));
+        CellMetrics {
+            font_size: self.font_size * f32::from(scale) / 256.0,
+            width: side(self.width),
+            height: side(self.height),
+            scale_factor: self.scale_factor,
+        }
+    }
 }
 
 /// The cell grid a surface holds, and the pixel y its last row paints at.

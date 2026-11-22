@@ -5,12 +5,13 @@
 //! A terminal pane draws at a smaller font than the editor's, so its pool's
 //! cells are smaller than the live grid's. Each test draws a pool at half the
 //! live size over a region inset from the corner of the surface, and reads back
-//! the center pixel of every pool cell it names.
+//! the pixels of the pool cells it names. A scaled pool takes its size as a
+//! scale of the live cell instead of a font size of its own.
 //! Fails without a GPU adapter, since a test that draws nothing proves nothing.
 
 use stoatty_protocol::command::Edge;
 use stoatty_render::{
-    gpu::{build_font_system, FontConfig, PoolComposite, Renderer},
+    gpu::{build_font_system, FontConfig, PoolCell, PoolComposite, Renderer},
     render::cell_size,
     test_support::{offscreen_target, pixel, read_back, require_headless_device, still_frame},
 };
@@ -99,7 +100,7 @@ fn drawn_pool_cells(dim: f32) -> Vec<([u8; 3], Rgb)> {
         &[PoolComposite {
             id: 0,
             grid: &pool,
-            font_size: Some(POOL_FONT),
+            cell: PoolCell::Font(POOL_FONT),
             origin_cells: [left as f32, top as f32],
             scissor: [left * live_w, top * live_h, 4 * live_w, 2 * live_h],
             shift_rows: 0.0,
@@ -221,7 +222,7 @@ fn the_live_grid_boxes_occlude_a_pool_at_its_own_font_size() {
         &queue,
         &view,
         &pool,
-        Some(POOL_FONT),
+        PoolCell::Font(POOL_FONT),
         &panels,
         [left * live_w, top * live_h, 6 * live_w, 2 * live_h],
         0.0,
@@ -255,6 +256,63 @@ fn the_live_grid_boxes_occlude_a_pool_at_its_own_font_size() {
             "the {what} hides under the box where it sits on the live grid",
         );
     }
+}
+
+/// A pool at scale 128 of the 12 by 24 live cell has 6 by 12 pixel cells, so
+/// pool cell (2, 3) fills x 18 to 23 and y 24 to 35 from the region's corner.
+#[test]
+fn a_scaled_pool_draws_its_cells_at_the_scaled_size() {
+    let (device, queue) = require_headless_device();
+    let (target, view) = offscreen_target(&device, WIDTH, HEIGHT);
+    let mut renderer = renderer(&device);
+    let [live_w, live_h] = cells(LIVE_FONT);
+
+    // Four by two live cells from live cell (2, 1) hold eight by four pool
+    // cells, of which one is red.
+    let (left, top) = (2, 1);
+    let red = Rgb::new(255, 0, 0);
+    let mut pool = Grid::new(4, 8);
+    pool.get_mut(2, 3).bg = red;
+
+    let live = Grid::new((HEIGHT / live_h) as usize, (WIDTH / live_w) as usize);
+    let (full, none) = (Damage::Full, Damage::Partial(Vec::new()));
+    renderer.render_pools_into(
+        &device,
+        &queue,
+        &view,
+        &live,
+        still_frame(&full, &none),
+        &[PoolComposite {
+            id: 0,
+            grid: &pool,
+            cell: PoolCell::Scaled(128),
+            origin_cells: [left as f32, top as f32],
+            scissor: [left * live_w, top * live_h, 4 * live_w, 2 * live_h],
+            shift_rows: 0.0,
+            content_changed: true,
+            scrolled_rows: None,
+            occludable: true,
+            skip_clear: false,
+            changed_rows: None,
+            dim: 0.0,
+        }],
+        &[],
+    );
+    let pixels = read_back(&device, &queue, &target, WIDTH, HEIGHT);
+
+    let red_at =
+        |x: u32, y: u32| pixel(&pixels, WIDTH, left * live_w + x, top * live_h + y) == rgb(red);
+    assert_eq!(
+        (
+            (17..=24).map(|x| red_at(x, 30)).collect::<Vec<_>>(),
+            (23..=36).map(|y| red_at(20, y)).collect::<Vec<_>>(),
+        ),
+        (
+            [vec![false], vec![true; 6], vec![false]].concat(),
+            [vec![false], vec![true; 12], vec![false]].concat(),
+        ),
+        "the red cell spans x 18 to 23 along its row and y 24 to 35 down its column",
+    );
 }
 
 /// A renderer over the whole surface at the live font size, clearing to black.

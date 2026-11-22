@@ -9,7 +9,7 @@
 //! Fails without a GPU adapter, since a test that draws nothing proves nothing.
 
 use stoatty_render::{
-    gpu::{PoolComposite, Renderer},
+    gpu::{PoolCell, PoolComposite, Renderer},
     render::{background::CursorFill, cell_size},
     test_support::{
         self, offscreen_target, pixel, read_back, require_headless_device, still_frame,
@@ -286,7 +286,7 @@ fn whole_pool(id: u32, grid: &Grid, occludable: bool) -> PoolComposite<'_> {
     PoolComposite {
         id,
         grid,
-        font_size: None,
+        cell: PoolCell::Live,
         origin_cells: [0.0; 2],
         scissor: [0, 0, WIDTH, HEIGHT],
         shift_rows: 0.0,

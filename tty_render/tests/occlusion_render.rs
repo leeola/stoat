@@ -11,7 +11,7 @@
 
 use stoatty_protocol::command::Edge;
 use stoatty_render::{
-    gpu::{build_font_system, FontConfig, HostRide, PoolComposite, Renderer},
+    gpu::{build_font_system, FontConfig, HostRide, PoolCell, PoolComposite, Renderer},
     render::cell_size,
     test_support::{
         offscreen_target, pixel, read_back, renderer, require_headless_device, still_frame,
@@ -323,7 +323,20 @@ fn a_box_occludes_the_pool_composite_beneath_it() {
 
     render_live(&mut renderer);
     renderer.composite_pool(
-        &device, &queue, &view, &pool, None, &panels, full, 0.0, [0.0; 2], true, None, true, 0, 0,
+        &device,
+        &queue,
+        &view,
+        &pool,
+        PoolCell::Live,
+        &panels,
+        full,
+        0.0,
+        [0.0; 2],
+        true,
+        None,
+        true,
+        0,
+        0,
     );
     let occluded = read_back(&device, &queue, &target, width, height);
     assert_eq!(
@@ -341,7 +354,20 @@ fn a_box_occludes_the_pool_composite_beneath_it() {
     // composited with occludable=false paints through the box.
     render_live(&mut renderer);
     renderer.composite_pool(
-        &device, &queue, &view, &pool, None, &panels, full, 0.0, [0.0; 2], true, None, false, 0, 0,
+        &device,
+        &queue,
+        &view,
+        &pool,
+        PoolCell::Live,
+        &panels,
+        full,
+        0.0,
+        [0.0; 2],
+        true,
+        None,
+        false,
+        0,
+        0,
     );
     let bled = read_back(&device, &queue, &target, width, height);
     assert_eq!(
@@ -486,7 +512,7 @@ fn a_pool_prepared_in_the_same_frame_leaves_the_live_occluders_alone() {
         PoolComposite {
             id: 0,
             grid: &pane,
-            font_size: None,
+            cell: PoolCell::Live,
             origin_cells: [0.0; 2],
             scissor: [0, cell_h * 4, width, cell_h],
             shift_rows: 0.0,
@@ -500,7 +526,7 @@ fn a_pool_prepared_in_the_same_frame_leaves_the_live_occluders_alone() {
         PoolComposite {
             id: 1,
             grid: &content,
-            font_size: None,
+            cell: PoolCell::Live,
             origin_cells: [0.0; 2],
             scissor: [0, 0, cell_w, cell_h],
             shift_rows: 0.0,
@@ -643,7 +669,7 @@ fn a_box_riding_a_pool_stops_occluding_it() {
     let pools = [PoolComposite {
         id: host,
         grid: &pool,
-        font_size: None,
+        cell: PoolCell::Live,
         origin_cells: [0.0; 2],
         scissor: full,
         shift_rows: 0.0,
@@ -961,7 +987,7 @@ fn an_occluding_bar_hides_the_run_beneath_it_and_holds_over_a_pane_pool() {
     let pools = [PoolComposite {
         id: 0,
         grid: &pool,
-        font_size: None,
+        cell: PoolCell::Live,
         origin_cells: [0.0, 3.0],
         scissor: [0, 3 * cell_h, width, 2 * cell_h],
         shift_rows: 0.0,

@@ -15,7 +15,7 @@
 
 use std::ops::Range;
 use stoatty_render::{
-    gpu::{build_font_system, FontConfig, Frame, Renderer, Scroll},
+    gpu::{build_font_system, FontConfig, Frame, PoolCell, Renderer, Scroll},
     render::cell_size,
     test_support::{offscreen_target, pixel, read_back, require_headless_device},
 };
@@ -537,7 +537,7 @@ impl Harness {
             queue,
             &self.view,
             pool,
-            None,
+            PoolCell::Live,
             &[],
             [0, 0, self.width, self.height],
             shift_rows,

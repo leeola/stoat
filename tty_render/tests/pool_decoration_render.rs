@@ -9,7 +9,7 @@
 //! Fails without a GPU adapter, since a test that draws nothing proves nothing.
 
 use stoatty_render::{
-    gpu::{build_font_system, FontConfig, Renderer},
+    gpu::{build_font_system, FontConfig, PoolCell, Renderer},
     render::cell_size,
     test_support::{offscreen_target, pixel, read_back, require_headless_device, still_frame},
 };
@@ -104,7 +104,7 @@ fn pool_decorations_composite_and_glide_with_the_shift() {
             &queue,
             &view,
             &pool,
-            None,
+            PoolCell::Live,
             &[],
             full,
             shift,

@@ -1046,7 +1046,7 @@ pub(crate) struct PoolAnim {
     /// The rows per page that [`Self::scroll`] and [`Self::last_scroll_target`]
     /// use, as of the last glide step.
     ///
-    /// A region that changes height changes the size of a page, so the next
+    /// A page grid that changes height changes the size of a page, so the next
     /// step rescales both offsets to the new size. `None` until the first step.
     page_rows: Option<f32>,
     /// Wall time since [`Self::last_scroll_target`] last changed. The follower
@@ -1056,11 +1056,11 @@ pub(crate) struct PoolAnim {
     /// and the region hands back to the live grid. A target still moving holds
     /// the pool composited. Seeded so a fresh at-rest pool hands off at once.
     pub(crate) target_stable_for: Duration,
-    /// The region's pooled rows composed at [`Self::scroll`], sized to the
-    /// region plus one straddle row. Reused across frames.
+    /// The pool's pooled rows composed at [`Self::scroll`], sized to its page
+    /// grid plus one straddle row. Reused across frames.
     pub(crate) document_grid: Grid,
     /// The integer document top row [`Self::document_grid`] was last composed
-    /// at. While no page under those rows changes and [`Self::last_region_dims`]
+    /// at. While no page under those rows changes and [`Self::last_grid_dims`]
     /// holds, the composed rows still describe the document. A frame at the
     /// same top then skips the recompose, and a frame at another top carries
     /// the rows it keeps. `None` until the first composed frame.
@@ -1071,9 +1071,9 @@ pub(crate) struct PoolAnim {
     /// which forces a recompose even when the top row held steady. A fill on
     /// any other page leaves the composed rows as they are.
     pub(crate) last_stamp: Option<u64>,
-    /// The region dimensions (width, height) last composed at, so a resize that
-    /// reshapes the grids forces a recompose.
-    pub(crate) last_region_dims: Option<(u16, u16)>,
+    /// The page grid `(rows, cols)` last composed at, so a resize that reshapes
+    /// the grids forces a recompose.
+    pub(crate) last_grid_dims: Option<(usize, usize)>,
     /// Whether the last composed window was buffered. A skip frame reuses this
     /// verdict rather than re-testing, so an unbuffered pool stays degraded to
     /// the live grid without recomposing.
@@ -1122,7 +1122,7 @@ impl PoolAnim {
             document_grid: Grid::new(0, 0),
             last_top: None,
             last_stamp: None,
-            last_region_dims: None,
+            last_grid_dims: None,
             last_buffered: false,
             held_frac: None,
             last_version: None,
@@ -1199,7 +1199,7 @@ pub(crate) struct ComposeGate {
     top: i64,
     /// The [`grid::page_stamp_now`] read with this frame's pages.
     stamp: u64,
-    region_dims: (u16, u16),
+    grid_dims: (usize, usize),
     /// Whether the rows have to be composed again.
     pub(crate) content_changed: bool,
     /// Rows the content moved since the last compose, or `None` when nothing
@@ -1210,7 +1210,7 @@ pub(crate) struct ComposeGate {
 /// Whether `anim`'s composed rows still describe the pool at `scroll`.
 ///
 /// The rows rest on the integer top document row, the pages under them, and
-/// the region size, and on nothing else. While all three hold, the offset moved
+/// the page grid, and on nothing else. While all three hold, the offset moved
 /// only within a cell, so last frame's composite still describes the content
 /// and neither the projection here nor the copy downstream has to run.
 ///
@@ -1227,16 +1227,16 @@ pub(crate) fn compose_gate(
     terminal: &Terminal,
     scroll: f32,
 ) -> ComposeGate {
-    let page_rows = (pool.region.height as f32).max(1.0);
+    let page_rows = (pool.grid.0 as f32).max(1.0);
     let doc_rows = scroll * page_rows;
     let top = doc_rows.floor() as i64;
     let stamp = grid::page_stamp_now();
-    let region_dims = (pool.region.width, pool.region.height);
+    let grid_dims = pool.grid;
 
-    // A composite holds the region's rows plus the straddle row. A window the
+    // A composite holds a page's rows plus the straddle row. A window the
     // pool no longer buffers answers no stamp, so nothing it held carries.
-    let composed_rows = usize::from(pool.region.height) + 1;
-    let carries = anim.last_region_dims == Some(region_dims)
+    let composed_rows = pool.grid.0 + 1;
+    let carries = anim.last_grid_dims == Some(grid_dims)
         && anim
             .last_top
             .zip(anim.last_stamp)
@@ -1249,7 +1249,7 @@ pub(crate) fn compose_gate(
         frac: doc_rows - top as f32,
         top,
         stamp,
-        region_dims,
+        grid_dims,
         content_changed: !carries || anim.last_top != Some(top),
         // The distance from where the rows were to where they land. A changed
         // page under them or a resize means the rows describe something else,
@@ -1266,7 +1266,7 @@ impl PoolAnim {
     pub(crate) fn record_compose(&mut self, gate: &ComposeGate, buffered: bool) {
         self.last_top = Some(gate.top);
         self.last_stamp = Some(gate.stamp);
-        self.last_region_dims = Some(gate.region_dims);
+        self.last_grid_dims = Some(gate.grid_dims);
         self.last_buffered = buffered;
     }
 }
@@ -1302,7 +1302,7 @@ pub(crate) fn advance_pool_glide(
     reposition: Option<u64>,
     dt: Duration,
 ) -> PoolStep {
-    let page_rows = (pool.region.height as f32).max(1.0);
+    let page_rows = (pool.grid.0 as f32).max(1.0);
 
     // A height change re-pages the document, and the app sends the same row
     // again in pages of the new height. Offsets left in the old pages read that
@@ -1355,9 +1355,9 @@ pub(crate) fn advance_pool_glide(
 
     let gate = compose_gate(anim, pool, terminal, scroll);
 
-    // A resize reshapes document_grid, so a held composite from the old
-    // dimensions no longer fits the region.
-    if anim.last_region_dims != Some(gate.region_dims) {
+    // A page grid change reshapes document_grid, so a held composite of the
+    // old grid no longer fits.
+    if anim.last_grid_dims != Some(gate.grid_dims) {
         anim.held_frac = None;
     }
 
@@ -1702,8 +1702,8 @@ fn earliest_instant(a: Option<Instant>, b: Option<Instant>) -> Option<Instant> {
 mod tests {
     use super::*;
     use stoatty_protocol::command::{
-        encode_fill, encode_fill_end, encode_pool_region, FillCommand, PoolKind, PoolRegionCommand,
-        SketchBounds, SketchCommand, SketchShape, SketchStyle,
+        encode_fill, encode_fill_end, encode_pool_region, encode_scroll, FillCommand, PoolKind,
+        PoolRegionCommand, ScrollCommand, SketchBounds, SketchCommand, SketchShape, SketchStyle,
     };
     use stoatty_term::{
         grid::{DocumentOffset, PopoverChrome, Rgb},
@@ -1928,6 +1928,7 @@ mod tests {
 
         // Row 16 is page 2 at eight rows to a page, and page 1 at sixteen.
         view.region.height = 16;
+        view.grid.0 = 16;
         view.scroll_target = DocumentOffset {
             page: 1,
             fraction: 0.0,
@@ -1957,6 +1958,7 @@ mod tests {
 
         let mut narrower = view;
         narrower.region.width = 2;
+        narrower.grid.1 = 2;
         assert!(
             compose_gate(&anim, &narrower, &terminal, 0.0).content_changed,
             "a resized region reshapes the rows",
@@ -2008,6 +2010,131 @@ mod tests {
             (true, None),
             "(composes again, carries nothing)",
         );
+    }
+
+    /// A region 10 rows tall that declares a 16-row grid pages by its own 16
+    /// rows, so a scroll target of one page moves the composed rows 16 rows
+    /// down. The pool is resident by kind, so it stays composited once the
+    /// glide arrives.
+    #[test]
+    fn a_scaled_pool_glides_by_its_own_rows_and_rests_composited() {
+        let mut terminal = scaled_terminal();
+        let mut grid = Grid::new(24, 80);
+        let mut frame = PoolFrame::default();
+        let mut project = |terminal: &mut Terminal, frame: &mut PoolFrame| {
+            project_frame(terminal, &mut grid, frame, false, EASE_BASELINE_FRAME)
+        };
+        project(&mut terminal, &mut frame);
+
+        terminal.advance(&encode_scroll(&ScrollCommand {
+            pool: 1,
+            page: 1,
+            fraction: 0,
+        }));
+        let arrived = (1..=600).any(|_| !project(&mut terminal, &mut frame).pool_easing);
+        let rested = project(&mut terminal, &mut frame);
+
+        let anim = &frame.anims[&1];
+        let top_row: String = anim
+            .document_grid
+            .row(0)
+            .iter()
+            .map(|cell| cell.ch)
+            .collect();
+        assert_eq!(
+            (
+                arrived,
+                rested
+                    .active
+                    .iter()
+                    .map(|tile| (tile.id, tile.frac))
+                    .collect::<Vec<_>>(),
+                anim.last_top,
+                top_row.trim_end(),
+            ),
+            (true, vec![(1, 0.0)], Some(16), "page 1"),
+            "(arrived, the tiles a frame later, the composed top row, its text)",
+        );
+    }
+
+    /// A scaled pool's composed rows rest on its page grid. A fill under the
+    /// straddle row, past the region's ten rows, composes them again, and so
+    /// does a new grid. A resized region over the same grid carries them.
+    #[test]
+    fn a_scaled_pool_composes_by_its_page_grid() {
+        let mut terminal = scaled_terminal();
+        let view = terminal.pools().remove(0);
+        let mut anim = PoolAnim::new(0.0);
+        anim.record_compose(&compose_gate(&anim, &view, &terminal, 0.0), true);
+        let composes = |view: &PoolView, terminal: &Terminal| {
+            compose_gate(&anim, view, terminal, 0.0).content_changed
+        };
+
+        let (mut wider, mut shorter) = (view, view);
+        wider.grid.1 = 40;
+        shorter.region.height = 6;
+        let reshaped = [composes(&wider, &terminal), composes(&shorter, &terminal)];
+        fill_page(&mut terminal, 1, 1, b"straddle");
+
+        assert_eq!(
+            (reshaped, composes(&view, &terminal)),
+            ([true, false], true),
+            "(a new grid, a shorter region over the same grid), then a fill under the \
+             straddle row",
+        );
+    }
+
+    /// A scaled pool pages by its declared grid, so a re-declare that changes
+    /// only the grid's height re-pages the document under a region that stays.
+    #[test]
+    fn a_scaled_grid_height_change_keeps_the_document_row() {
+        let terminal = scaled_terminal();
+        let mut view = terminal.pools().remove(0);
+        view.scroll_target = DocumentOffset {
+            page: 1,
+            fraction: 0.0,
+        };
+        let mut anim = PoolAnim::new(1.0);
+        advance_pool_glide(&mut anim, &view, &terminal, None, HANDOFF_STABLE_TIME);
+
+        // Row 16 is page 1 at sixteen rows to a page, and page 2 at eight.
+        view.grid.0 = 8;
+        view.scroll_target = DocumentOffset {
+            page: 2,
+            fraction: 0.0,
+        };
+        advance_pool_glide(&mut anim, &view, &terminal, None, Duration::from_millis(16));
+
+        assert_eq!(
+            (anim.scroll, anim.last_scroll_target),
+            (2.0, 2.0),
+            "(eased offset, last target) in pages of eight rows",
+        );
+    }
+
+    /// A terminal with scaled pool 1 over a region 10 rows tall, whose pages
+    /// hold a 16-row grid, and pages 0 to 2 filled with their own numbers.
+    fn scaled_terminal() -> Terminal {
+        let mut terminal = Terminal::new(24, 80, Theme::default());
+        terminal.advance(&encode_pool_region(&PoolRegionCommand {
+            pool: 1,
+            top: 0,
+            left: 0,
+            width: 20,
+            height: 10,
+            window: 0,
+            kind: PoolKind::Scaled {
+                scale: 154,
+                rows: 16,
+                cols: 36,
+            },
+            dim: 0,
+            resident: false,
+        }));
+        for page in 0..3 {
+            fill_page(&mut terminal, 1, page, format!("page {page}").as_bytes());
+        }
+        terminal
     }
 
     fn fill_page(terminal: &mut Terminal, pool: u32, index: u64, text: &[u8]) {

@@ -11,7 +11,7 @@
 //! Fails without a GPU adapter, since a test that draws nothing proves nothing.
 
 use stoatty_render::{
-    gpu::Renderer,
+    gpu::{PoolCell, Renderer},
     render::cell_size,
     test_support::{
         self, offscreen_target, pixel, read_back, require_headless_device, still_frame,
@@ -63,7 +63,7 @@ fn cursor_draws_over_pool_and_obeys_its_scissor() {
             &queue,
             &view,
             &pool,
-            None,
+            PoolCell::Live,
             &[],
             full,
             0.0,

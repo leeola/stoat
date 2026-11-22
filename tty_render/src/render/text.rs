@@ -51,6 +51,12 @@ const INITIAL_CAPACITY: usize = 2048;
 /// to a single glyph in nearly every font, so it grows only past that.
 const CURSOR_GLYPH_CAPACITY: usize = 4;
 
+/// How many sizes other than the live one keep a pool face across frames.
+///
+/// A frame composites pools at up to this many other sizes, such as a terminal
+/// pane's font and a scaled pool's scale, and builds no face for any of them.
+const POOL_FACES: usize = 4;
+
 /// Atlas selector packed into each instance, matching the shader's constants.
 const KIND_MASK: u32 = 0;
 const KIND_COLOR: u32 = 1;
@@ -657,6 +663,10 @@ pub struct TextPass {
     /// [`Self::run_builds`].
     #[cfg(test)]
     riding_builds: usize,
+    /// How many pool faces [`Self::take_pool_face`] has built. See
+    /// [`Self::run_builds`].
+    #[cfg(test)]
+    pool_face_builds: usize,
     /// The [`Atlas::content_epoch`] the cached grid-glyph instances were last
     /// built against. An eviction reuses a slot without moving the texture size,
     /// and one can come from any earlier pass, such as a pool composite between
@@ -791,11 +801,13 @@ pub struct TextPass {
     /// The size the grid shapes and rasterizes at, with everything that bakes it
     /// in.
     face: SizedFace,
-    /// The face of the last size other than the live one a pool composited at.
+    /// The faces of the last sizes other than the live one that pools
+    /// composited at, the most recent first.
     ///
-    /// One face serves every pool at that size. Pools at two sizes other than the
-    /// live one in a frame build a face for each pool, every frame.
-    pool_face: Option<SizedFace>,
+    /// One face serves every pool at its size. Pools at up to [`POOL_FACES`]
+    /// sizes keep their faces across frames. A size past that drops the face
+    /// that served least recently.
+    pool_faces: Vec<SizedFace>,
     /// Every codepoint some face in the font database maps, built on the first
     /// character both bundled charmaps miss and `None` until then.
     ///
@@ -1218,6 +1230,8 @@ impl TextPass {
             overlay_builds: 0,
             #[cfg(test)]
             riding_builds: 0,
+            #[cfg(test)]
+            pool_face_builds: 0,
             // Never a real content epoch, so the first prepare always builds.
             grid_atlas_epoch: u64::MAX,
             overlay_instances,
@@ -1273,7 +1287,7 @@ impl TextPass {
             ligatures,
             swash_cache,
             face,
-            pool_face: None,
+            pool_faces: Vec::new(),
             covered: None,
             glyph_row_cache: Vec::new(),
             exposed_from: None,
@@ -1361,7 +1375,7 @@ impl TextPass {
             .map(font::substitution_rules)
             .unwrap_or_default();
 
-        self.pool_face = None;
+        self.pool_faces.clear();
         self.covered = None;
     }
 
@@ -2133,24 +2147,35 @@ impl TextPass {
         );
 
         if let Some(live) = live {
-            self.pool_face = Some(mem::replace(&mut self.face, live));
+            let face = mem::replace(&mut self.face, live);
+            self.pool_faces.insert(0, face);
+            self.pool_faces.truncate(POOL_FACES);
         }
     }
 
     /// Take the face a pool at `metrics` shapes under.
     ///
-    /// The face kept from the last pool at another size serves when its size
-    /// matches. Any other size gets a fresh face.
+    /// A kept face of that size serves when there is one. Any other size gets a
+    /// fresh face.
     fn take_pool_face(&mut self, metrics: CellMetrics) -> SizedFace {
-        match self.pool_face.take() {
-            Some(face) if face.metrics == metrics => face,
-            _ => SizedFace::new(
-                &mut self.font_system,
-                self.family.as_deref(),
-                self.primary_font.as_deref(),
-                metrics,
-            ),
+        if let Some(at) = self
+            .pool_faces
+            .iter()
+            .position(|face| face.metrics == metrics)
+        {
+            return self.pool_faces.remove(at);
         }
+
+        #[cfg(test)]
+        {
+            self.pool_face_builds += 1;
+        }
+        SizedFace::new(
+            &mut self.font_system,
+            self.family.as_deref(),
+            self.primary_font.as_deref(),
+            metrics,
+        )
     }
 
     /// The body of [`Self::prepare_composite`], which shapes and lays out under

@@ -593,7 +593,7 @@ impl Renderer {
                 device,
                 queue,
                 pool.grid,
-                self.pool_metrics(pool.font_size),
+                self.pool_metrics(pool.cell),
                 panels,
                 grid.bars(),
                 &riding,
@@ -1023,8 +1023,8 @@ impl Renderer {
     /// composite buffers. Two entries sharing an id would have the later one's
     /// instances drawn for both, so callers pass each pool its own.
     ///
-    /// `font_size` is the logical size `pool_grid` lays out and rasterizes at,
-    /// `None` for the live grid's. See [`PoolComposite::font_size`].
+    /// `cell` is the cell `pool_grid` lays out and rasterizes at. See
+    /// [`PoolComposite::cell`].
     #[allow(clippy::too_many_arguments)]
     pub fn composite_pool(
         &mut self,
@@ -1032,7 +1032,7 @@ impl Renderer {
         queue: &Queue,
         view: &TextureView,
         pool_grid: &Grid,
-        font_size: Option<u32>,
+        cell: PoolCell,
         panels: &[Panel],
         scissor: [u32; 4],
         shift_rows: f32,
@@ -1051,7 +1051,7 @@ impl Renderer {
             device,
             queue,
             pool_grid,
-            self.pool_metrics(font_size),
+            self.pool_metrics(cell),
             panels,
             // A standalone composite has no live grid, so no bar occludes it.
             &[],
@@ -1270,14 +1270,13 @@ impl Renderer {
         clamp_scissor(scissor, self.width, self.height)
     }
 
-    /// The cell box a pool drawn at `font_size` lays out in.
-    ///
-    /// `None` gives the live grid's. A size gives that logical size at the live
-    /// display scale, since a pool shares the display the live grid draws on.
-    pub(crate) fn pool_metrics(&self, font_size: Option<u32>) -> CellMetrics {
-        font_size.map_or(self.metrics, |size| {
-            CellMetrics::from_font_size(size, self.metrics.scale_factor)
-        })
+    /// The cell box a pool drawn at `cell` lays out in.
+    pub(crate) fn pool_metrics(&self, cell: PoolCell) -> CellMetrics {
+        match cell {
+            PoolCell::Live => self.metrics,
+            PoolCell::Font(size) => CellMetrics::from_font_size(size, self.metrics.scale_factor),
+            PoolCell::Scaled(scale) => self.metrics.scaled(scale),
+        }
     }
 
     /// Issue one pool's composite draws into `render_pass`, clipped to `scissor`.
@@ -1495,6 +1494,22 @@ impl Renderer {
     }
 }
 
+/// The cell a pool's grid lays out and rasterizes at.
+///
+/// A pool shares the live grid's cell, draws at a logical font size of its
+/// own, or draws at a scale of the live cell. Either size applies at the live
+/// display scale, since a pool shares the display the live grid draws on.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum PoolCell {
+    Live,
+    /// A logical font size, which a terminal pane's pool draws at.
+    Font(u32),
+    /// A scale in 256ths of the live cell, which a scaled pool draws at. Each
+    /// side rounds by
+    /// [`scaled_cell_side`](stoatty_protocol::command::scaled_cell_side).
+    Scaled(u16),
+}
+
 /// One pool's contribution to a multi-pool frame: the grid to draw, the pixel
 /// rectangle to clip it to, and the sub-cell row shift to glide it by.
 ///
@@ -1508,13 +1523,12 @@ pub struct PoolComposite<'a> {
     /// The grid holding the pool's composed page rows, sized to its region
     /// rather than to the viewport.
     pub grid: &'a Grid,
-    /// The logical font size [`Self::grid`] lays out and rasterizes at, or
-    /// `None` for the live grid's.
+    /// The cell [`Self::grid`] lays out and rasterizes at.
     ///
-    /// A pool at its own size still starts on the screen cell
+    /// A pool at a cell of its own still starts on the screen cell
     /// [`Self::origin_cells`] names and ends at the scissor, however many of its
     /// own cells fall between. The live grid's boxes occlude it where they sit.
-    pub font_size: Option<u32>,
+    pub cell: PoolCell,
     /// The screen cell [`Self::grid`]'s own (0, 0) draws at, which is the
     /// region's top-left. The passes add it in their vertex stages, so the grid
     /// never has to be copied into a viewport-sized one to be placed.
@@ -1575,19 +1589,19 @@ pub struct PoolComposite<'a> {
 
 impl PoolComposite<'_> {
     /// The pool's own cell under the frame's eased cursor block, per
-    /// [`pool_cursor_cell`], or `None` for a pool at its own font size.
+    /// [`pool_cursor_cell`], or `None` for a pool at a cell of its own.
     ///
-    /// A pool at its own size is a terminal pane's, which holds no delegated
-    /// cursor.
+    /// A pool at a cell of its own is a terminal pane's or a scaled pool's, and
+    /// neither holds a delegated cursor.
     fn cursor_cell(&self, cursor: Option<[f32; 2]>) -> Option<(usize, usize)> {
-        match self.font_size {
-            None => pool_cursor_cell(
+        match self.cell {
+            PoolCell::Live => pool_cursor_cell(
                 cursor,
                 self.origin_cells,
                 self.grid.rows(),
                 self.grid.cols(),
             ),
-            Some(_) => None,
+            PoolCell::Font(_) | PoolCell::Scaled(_) => None,
         }
     }
 }
@@ -2841,7 +2855,7 @@ impl GpuContext {
                 &self.device,
                 &self.queue,
                 pool.grid,
-                self.renderer.pool_metrics(pool.font_size),
+                self.renderer.pool_metrics(pool.cell),
                 panels,
                 live_grid.bars(),
                 &riding,
@@ -3166,8 +3180,9 @@ mod tests {
     use super::{
         build_font_system, clamp_scissor, covered_rects, needs_configure, pool_cursor_cell,
         surface_formats, CommandEncoderDescriptor, CursorLayer, DisplayTransfer, FontConfig,
-        FontSystem, Frame, FrameOutcome, GpuContext, PoolComposite, Renderer, SharedFonts,
-        SharedGpu, SurfaceColorSpace, SurfaceConfiguration, TextureFormat, MAX_COVERED,
+        FontSystem, Frame, FrameOutcome, GpuContext, PoolCell, PoolComposite, Renderer,
+        SharedFonts, SharedGpu, SurfaceColorSpace, SurfaceConfiguration, TextureFormat,
+        MAX_COVERED,
     };
     use crate::test_support::{
         self, pixel, read_back, require_headless_device, require_headless_gpu, still_frame,
@@ -3289,7 +3304,7 @@ mod tests {
             PoolComposite {
                 id: 7,
                 grid: &gray_pool,
-                font_size: None,
+                cell: PoolCell::Live,
                 origin_cells: [0.0; 2],
                 scissor: [0, band, width, band],
                 shift_rows: 0.0,
@@ -3303,7 +3318,7 @@ mod tests {
             PoolComposite {
                 id: 4,
                 grid: &white_pool,
-                font_size: None,
+                cell: PoolCell::Live,
                 origin_cells: [0.0; 2],
                 scissor: [0, band * 2, width, band],
                 shift_rows: 0.0,
@@ -3862,7 +3877,7 @@ mod tests {
         PoolComposite {
             id: 3,
             grid,
-            font_size: None,
+            cell: PoolCell::Live,
             origin_cells: [0.0; 2],
             scissor: WHOLE,
             shift_rows: 0.0,
@@ -4188,19 +4203,27 @@ mod tests {
         );
     }
 
-    /// A pool at its own font size is a terminal pane's, which holds no
-    /// delegated cursor, so only a pool at the live size takes the frame's.
+    /// A pool at its own font size is a terminal pane's, and a pool at a scale is
+    /// a scaled pool's. Neither holds a delegated cursor, so only a pool at the
+    /// live size takes the frame's.
     #[test]
     fn only_a_pool_at_the_live_size_takes_the_cursor() {
         let grid = Grid::new(2, 6);
-        let cell = |font_size| {
+        let cursor = |cell| {
             PoolComposite {
-                font_size,
+                cell,
                 ..whole_pool(&grid)
             }
             .cursor_cell(Some([3.0, 1.0]))
         };
-        assert_eq!([cell(None), cell(Some(10))], [Some((1, 3)), None]);
+        assert_eq!(
+            [
+                cursor(PoolCell::Live),
+                cursor(PoolCell::Font(10)),
+                cursor(PoolCell::Scaled(154))
+            ],
+            [Some((1, 3)), None, None],
+        );
     }
 
     /// The page composited over the live grid breaks the ligature under the

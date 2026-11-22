@@ -2106,6 +2106,47 @@ fn composite_runs_reresolve_when_the_row_pack_grows_the_atlas() {
     assert_composite_runs_healed(&mut pass, &device, &queue, &grid);
 }
 
+/// Pools at two sizes other than the live one keep a face each, so a second
+/// frame of both composites shapes under the faces the first frame built.
+#[test]
+fn pools_at_two_sizes_keep_both_faces() {
+    let (device, queue, mut pass) = headless_text_pass_font(20);
+    let mut grid = Grid::new(1, 4);
+    grid.get_mut(0, 0).ch = 'a';
+    let sizes = [pass.face.metrics.scaled(128), pass.face.metrics.scaled(154)];
+
+    let builds: Vec<usize> = (0..2)
+        .map(|_| {
+            for (slot, metrics) in sizes.into_iter().enumerate() {
+                pass.prepare_composite(
+                    &device,
+                    &queue,
+                    &grid,
+                    metrics,
+                    PoolOccluders::new(&[], 0, true),
+                    [640.0, 480.0],
+                    0.0,
+                    [0.0; 2],
+                    true,
+                    None,
+                    None,
+                    None,
+                    [0.0; 4],
+                    slot as u32,
+                    slot,
+                );
+            }
+            pass.pool_face_builds
+        })
+        .collect();
+
+    assert_eq!(
+        builds,
+        [2, 2],
+        "the first frame builds a face per size, and the second builds none",
+    );
+}
+
 #[test]
 fn caches_clean_rows_and_rebuilds_damaged() {
     let (device, queue, mut pass) = headless_text_pass();
