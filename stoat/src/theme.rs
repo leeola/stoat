@@ -1012,9 +1012,9 @@ pub mod scope {
     pub const UI_TABBAR_TOGGLE_ACTIVE: &str = "ui.tabbar.toggle.active";
     pub const UI_TABBAR_TOGGLE_INACTIVE: &str = "ui.tabbar.toggle.inactive";
 
-    /// The color of the type tag beside a Rust file's name in a tab or a finder
-    /// row. [`UI_TAG_MARKDOWN`] and [`UI_TAG_CONFIG`] are its siblings for the
-    /// other tagged file types.
+    /// The color of a Rust file's extension in a tab, a status row, a file
+    /// header of the changes view, and a finder row. [`UI_TAG_MARKDOWN`] and
+    /// [`UI_TAG_CONFIG`] are its siblings for the other tagged file types.
     pub const UI_TAG_RUST: &str = "ui.tag.rust";
     pub const UI_TAG_MARKDOWN: &str = "ui.tag.markdown";
     pub const UI_TAG_CONFIG: &str = "ui.tag.config";

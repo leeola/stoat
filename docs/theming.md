@@ -312,8 +312,9 @@ The typed UI scopes, by group (syntax scopes are open-ended):
   `ui.key_label`.
 - `ui.badge.active`, `ui.badge.complete`, `ui.badge.error` -- transient status
   badges.
-- `ui.tag.rust`, `ui.tag.markdown`, `ui.tag.config` -- the file-type tag colors
-  for Rust, Markdown, and config files.
+- `ui.tag.rust`, `ui.tag.markdown`, `ui.tag.config` -- the color of the
+  extension of a Rust, Markdown, or config file in a tab, a status row, a file
+  header of the changes view, and a finder row.
 - `ui.panel.*`, `ui.type.*` -- panel frames and text sizes, set by the fields in
   [Panel and type metrics](#panel-and-type-metrics).
 - `ui.walkthrough.focus`, `ui.walkthrough.card`, `ui.walkthrough.marker1`

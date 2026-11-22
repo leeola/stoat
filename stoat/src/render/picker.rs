@@ -12,7 +12,7 @@ use crate::{
     input_view::InputView,
     picker::{write_row_display, PickList, Preview, ScaledPreview},
     render::{
-        chrome::{PlateColors, TypeTag},
+        chrome::PlateColors,
         editor::{self, render_editor, ResolvedChrome},
         paint::style_rgb,
         text::{clip_to_width, write_str, write_str_clipped},
@@ -1194,15 +1194,15 @@ pub(crate) mod test_support {
 /// because a page captures no panel, and keeps the row's cells in
 /// [`Theme::list_selected`] with the accent bar.
 ///
-/// A path row keeps columns 1 and 2 for its [`chrome::type_tag`], so tagged and
-/// untagged rows align, and a wider tag pushes only its own row's label right.
-/// Its directory paints in `ui.text.muted` and its name in the row's style. A
-/// path found in `marks`, which is sorted, ends in an `M` in the
-/// `diff.modified` color. A relative entry, such as a branch name, gets none
-/// of these.
+/// Every row's label starts one cell in from the list's left edge. A path row
+/// paints its directory in `ui.text.muted` and its name bold in the row's
+/// style. The extension that [`chrome::tagged_name`] splits off also takes its
+/// tag's color, and a match paints over both. A path found in `marks`, which
+/// is sorted, ends in an `M` in the `diff.modified` color. A relative entry,
+/// such as a branch name, gets none of these.
 ///
 /// [`chrome::selected_row`]: crate::render::chrome::selected_row
-/// [`chrome::type_tag`]: crate::render::chrome::type_tag
+/// [`chrome::tagged_name`]: crate::render::chrome::tagged_name
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn paint_path_rows(
     picklist: &PickList,
@@ -1263,10 +1263,7 @@ pub(crate) fn paint_path_rows(
 
         let path = &picklist.base[idx];
         let is_path = path.is_absolute();
-        let label_x = match is_path {
-            true => paint_type_tag(path, area.x + 1, row, style, theme, buf, area_end),
-            false => area.x + 1,
-        };
+        let label_x = area.x + 1;
         let marked = is_path && area_end >= label_x + 3 && marks.binary_search(path).is_ok();
         let end_x = match marked {
             true => {
@@ -1288,6 +1285,14 @@ pub(crate) fn paint_path_rows(
         let name_col = if is_path { name_start(&label) } else { 0 };
         let width = end_x.saturating_sub(label_x) as usize;
         let label_len = label.chars().count();
+        let ext = match is_path {
+            true => crate::render::chrome::tagged_name(path),
+            false => None,
+        }
+        .map(|tagged| {
+            let ext_col = label_len.saturating_sub(tagged.suffix.chars().count());
+            (ext_col, theme.get(tagged.tag.scope))
+        });
 
         // A row wider than its column gives up chars to an ellipsis in one cell,
         // leaving `width - 1` cells for the rest. A path is start-truncated
@@ -1321,49 +1326,25 @@ pub(crate) fn paint_path_rows(
             if col >= text_end {
                 break;
             }
+            let cell = &mut buf[(col, row)];
             if label_col < name_col {
-                buf[(col, row)].set_style(dir_style);
+                cell.set_style(dir_style);
+            } else if is_path {
+                cell.set_style(Style::default().add_modifier(Modifier::BOLD));
+            }
+            if let Some((ext_col, ext_style)) = ext
+                && label_col >= ext_col
+            {
+                cell.set_style(ext_style);
             }
             let label_col = label_col as u32;
             // The literal `prefix` is never matched. The picklist's indices are
             // offsets into the part after it, so shift them past the prefix.
             if label_col >= prefix_len && indices.binary_search(&(label_col - prefix_len)).is_ok() {
-                buf[(col, row)].set_style(match_style);
+                cell.set_style(match_style);
             }
         }
     }
-}
-
-/// Columns a path row keeps for its type tag, which fit a two-letter tag such
-/// as `rs`.
-const TAG_COLUMNS: u16 = 2;
-
-/// Paint `path`'s type tag from column `x` of `row`, and return the column its
-/// label starts at.
-///
-/// The label starts one blank column past [`TAG_COLUMNS`], or past a tag wider
-/// than them.
-fn paint_type_tag(
-    path: &Path,
-    x: u16,
-    row: u16,
-    style: Style,
-    theme: &Theme,
-    buf: &mut Buffer,
-    end_x: u16,
-) -> u16 {
-    let width = match crate::render::chrome::type_tag(path) {
-        Some(TypeTag {
-            tag,
-            scope: tag_scope,
-            ..
-        }) => {
-            write_str_clipped(buf, x, row, tag, style.patch(theme.get(tag_scope)), end_x);
-            tag.width() as u16
-        },
-        None => 0,
-    };
-    x + width.max(TAG_COLUMNS) + 1
 }
 
 /// The char index where `label`'s last path component starts, which is the
@@ -2797,8 +2778,7 @@ mod tests {
             )],
             vec![vec![]],
         );
-        // Column width 20 leaves a 16-cell label area after the pad and the tag
-        // slot.
+        // Column width 20 leaves a 19-cell label area after the one-cell pad.
         let area = Rect::new(0, 0, 20, 1);
         let mut buf = Buffer::empty(area);
         paint_path_rows(
@@ -2818,7 +2798,7 @@ mod tests {
 
         assert_eq!(
             row_text(&buf, 0, area),
-            " rs \u{2026}le/file_name.rs",
+            " \u{2026}odule/file_name.rs",
             "an ellipsis stands in for the dropped head, and the file name at the tail stays",
         );
     }
@@ -2885,10 +2865,10 @@ mod tests {
             row_text(&buf, 0, area).trim().to_string()
         };
 
-        assert_eq!(paint(Some(Path::new("/fixture-home"))), "rs ~/a.rs");
+        assert_eq!(paint(Some(Path::new("/fixture-home"))), "~/a.rs");
         assert_eq!(
             paint(None),
-            "rs /fixture-home/a.rs",
+            "/fixture-home/a.rs",
             "and stays whole with no home to measure against"
         );
     }
@@ -2919,16 +2899,16 @@ mod tests {
             !text.contains('\u{2026}'),
             "no ellipsis for a path that fits: {text:?}"
         );
-        assert_eq!(text.trim(), "rs a.rs", "the whole path renders: {text:?}");
+        assert_eq!(text.trim(), "a.rs", "the whole path renders: {text:?}");
     }
 
     #[test]
     fn match_highlight_follows_the_truncated_tail() {
         let git_root = Path::new("/r");
-        // The 42-char label loses its leading 27 chars in the 16-cell area past
-        // the tag slot, so the tail starts at char 27. Match offset 0 lands in
-        // the dropped head and offset 30 (the `f` of `file_name`) in the
-        // visible tail.
+        // The 42-char label loses its leading 24 chars in the 19-cell area past
+        // the pad, so the tail starts at char 24. Match offset 0 lands in the
+        // dropped head and offset 30 (the `f` of `file_name`) in the visible
+        // tail.
         let list = list_of(
             vec![PathBuf::from(
                 "/r/very/deeply/nested/dir/module/file_name.rs",
@@ -3050,7 +3030,7 @@ mod tests {
             .collect();
         assert_eq!(
             highlighted,
-            vec![4, 5, 6, 7],
+            vec![1, 2, 3, 4],
             "the anchor's four characters highlight on a row past the block"
         );
     }
@@ -3090,6 +3070,113 @@ mod tests {
             (vec![muted; 8], vec![Color::Reset; 8]),
             "the plain row paints in the caller's style and the selected row in the theme's",
         );
+    }
+
+    /// A path row starts its label one cell in, with no tag column before it.
+    /// The directory reads muted, the name bold, and the extension bold in the
+    /// tag color of the file type.
+    #[test]
+    fn a_path_row_reads_its_directory_muted_its_name_bold_and_its_extension_in_the_tag_color() {
+        let theme = theme_of(r##"ui.text.muted.fg = "#010203"; ui.tag.rust.fg = "#040506";"##);
+        let buf = painted_row("/r/src/a.rs", vec![], 12, &theme);
+        let (muted, tag) = (Color::Rgb(1, 2, 3), Color::Rgb(4, 5, 6));
+
+        assert_eq!(
+            (
+                row_text(&buf, 0, buf.area),
+                (1..9).map(|col| fg_and_bold(&buf, col)).collect()
+            ),
+            (
+                " src/a.rs   ".to_owned(),
+                vec![
+                    (muted, false),
+                    (muted, false),
+                    (muted, false),
+                    (muted, false),
+                    (Color::Reset, true),
+                    (tag, true),
+                    (tag, true),
+                    (tag, true),
+                ],
+            ),
+        );
+    }
+
+    /// A gzip name takes the tag color on both of its extensions, the ones that
+    /// `chrome::tagged_name` splits off, and its stem keeps the name's style.
+    #[test]
+    fn a_gzip_name_colors_both_of_its_extensions() {
+        let theme = theme_of(r##"ui.tag.markdown.fg = "#040506";"##);
+        let buf = painted_row("/r/CHANGELOG.md.gz", vec![], 20, &theme);
+        let fgs: Vec<Color> = (1..16).map(|col| buf[(col, 0)].fg).collect();
+
+        assert_eq!(
+            fgs,
+            [vec![Color::Reset; 9], vec![Color::Rgb(4, 5, 6); 6]].concat()
+        );
+    }
+
+    /// A matched char of the extension reads in the match color, which outranks
+    /// the tag color the rest of the extension takes.
+    #[test]
+    fn a_match_outranks_the_extension_color() {
+        let theme = theme_of(r##"ui.search.match.fg = "#ff0000"; ui.tag.rust.fg = "#040506";"##);
+        let buf = painted_row("/r/a.rs", vec![2], 12, &theme);
+        let fgs: Vec<Color> = (1..5).map(|col| buf[(col, 0)].fg).collect();
+        let tag = Color::Rgb(4, 5, 6);
+
+        assert_eq!(fgs, [Color::Reset, tag, Color::Rgb(255, 0, 0), tag]);
+    }
+
+    /// A relative entry is a label, such as a branch name, and not a path, so
+    /// it keeps the row's style whole: no muted directory, no bold name, and no
+    /// tag color, even when it ends in a tagged extension.
+    #[test]
+    fn a_label_that_is_no_path_keeps_the_row_style() {
+        let theme = theme_of(r##"ui.text.muted.fg = "#010203"; ui.tag.rust.fg = "#040506";"##);
+        let buf = painted_row("feature/x.rs", vec![], 16, &theme);
+        let cells: Vec<(Color, bool)> = (1..13).map(|col| fg_and_bold(&buf, col)).collect();
+
+        assert_eq!(
+            (row_text(&buf, 0, buf.area).trim().to_owned(), cells),
+            ("feature/x.rs".to_owned(), vec![(Color::Reset, false); 12]),
+        );
+    }
+
+    /// A theme `t` that sets only the scopes `body` assigns.
+    fn theme_of(body: &str) -> Theme {
+        let (config, _) = stoat_config::parse(&format!("theme t {{ {body} }}"));
+        Theme::from_config(&config.expect("theme parses"), "t").expect("theme loads")
+    }
+
+    /// Paint `path`, unselected and with its matches at `indices`, as the one
+    /// row of a list `width` cells wide under `theme`.
+    fn painted_row(path: &str, indices: Vec<u32>, width: u16, theme: &Theme) -> Buffer {
+        let list = list_of(vec![PathBuf::from(path)], vec![indices]);
+        let area = Rect::new(0, 0, width, 1);
+        let mut buf = Buffer::empty(area);
+        paint_path_rows(
+            &list,
+            Path::new("/r"),
+            None,
+            "",
+            &[],
+            area,
+            0,
+            theme,
+            Style::default(),
+            false,
+            &mut buf,
+            &mut stoat_widgets::ApcScene::new(),
+        );
+        buf
+    }
+
+    /// The foreground of cell `col` of `buf`'s first row, and whether it is
+    /// bold.
+    fn fg_and_bold(buf: &Buffer, col: u16) -> (Color, bool) {
+        let cell = &buf[(col, 0)];
+        (cell.fg, cell.modifier.contains(Modifier::BOLD))
     }
 
     /// The box asks for a fixed size rather than growing with its candidates,

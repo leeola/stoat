@@ -3181,14 +3181,16 @@ mod tests {
         h.assert_snapshot("file_finder_multi_token_highlight");
     }
 
-    /// Under ermine_night the finder's selected row fills with the tab wash,
-    /// and a matched char reads warning in bold over that fill.
+    /// Under ermine_night the finder's selected row fills with the tab wash.
+    /// Over that fill the directory reads muted, the name bold in the text
+    /// color, a matched char warning in bold, and the extension bold in the
+    /// Rust tag color.
     #[test]
     fn the_finder_paints_its_rows_in_the_list_scopes() {
         let mut h = crate::Stoat::test();
         seed_finder_workspace(&mut h, &[("src/foo.rs", "fn foo() {}")]);
         h.type_keys("space p");
-        h.type_text("foo");
+        h.type_text("fo");
         h.settle();
 
         let list = test_fixture::finder_layout(&h).list;
@@ -3198,23 +3200,28 @@ mod tests {
             (cell.fg, cell.bg, cell.modifier)
         };
         let wash = Color::Rgb(0x24, 0x35, 0x52);
+        let muted = Color::Rgb(0x83, 0x8a, 0x98);
+        let warning = Color::Rgb(0xe8, 0xbd, 0x6a);
+        let text = Color::Rgb(0xdf, 0xe2, 0xe8);
 
         assert_eq!(
-            [style(12), style(8)],
+            [style(1), style(5), style(7), style(9)],
             [
-                (Color::Rgb(0xdf, 0xe2, 0xe8), wash, Modifier::empty()),
-                (Color::Rgb(0xe8, 0xbd, 0x6a), wash, Modifier::BOLD),
+                (muted, wash, Modifier::empty()),
+                (warning, wash, Modifier::BOLD),
+                (text, wash, Modifier::BOLD),
+                (warning, wash, Modifier::BOLD),
             ],
-            "the r of .rs and the f of foo.rs on the selected first row",
+            "the s of src/, the matched f, the unmatched second o, and the r of .rs",
         );
     }
 
-    /// A row shows its type tag in the tag color, its directory muted, and its
-    /// name in the text color, and a modified file's row ends in an `M`. A file
-    /// with no tag keeps the slot blank, so both rows start their names in the
-    /// same column.
+    /// A row shows its directory muted, its name bold in the text color, and
+    /// its extension bold in the tag color, and a modified file's row ends in
+    /// an `M`. A file with no tag keeps its extension in the style of its
+    /// name, and both rows start their labels in the same column.
     #[test]
-    fn a_row_shows_its_type_tag_directory_name_and_modified_mark() {
+    fn a_row_shows_its_directory_name_extension_and_modified_mark() {
         let mut h = crate::Stoat::test();
         let root = seed_finder_workspace(&mut h, &[("src/a.rs", "v2\n"), ("b.txt", "b\n")]);
         h.fake_git()
@@ -3240,7 +3247,8 @@ mod tests {
         let (a, b) = (row_of("src/a.rs"), row_of("b.txt"));
         let glyph = |col: u16, y: u16| {
             let cell = &buf[(list.x + col, y)];
-            (cell.symbol().to_owned(), cell.fg)
+            let bold = cell.modifier.contains(Modifier::BOLD);
+            (cell.symbol().to_owned(), cell.fg, bold)
         };
 
         let warning = Color::Rgb(0xe8, 0xbd, 0x6a);
@@ -3251,23 +3259,23 @@ mod tests {
         assert_eq!(
             [
                 glyph(1, a),
-                glyph(4, a),
-                glyph(8, a),
+                glyph(5, a),
+                glyph(7, a),
                 glyph(last, a),
                 glyph(1, b),
-                glyph(4, b),
+                glyph(2, b),
                 glyph(last, b),
             ],
             [
-                ("r".to_owned(), warning),
-                ("s".to_owned(), muted),
-                ("a".to_owned(), body),
-                ("M".to_owned(), accent),
-                (" ".to_owned(), body),
-                ("b".to_owned(), body),
-                (" ".to_owned(), body),
+                ("s".to_owned(), muted, false),
+                ("a".to_owned(), body, true),
+                ("r".to_owned(), warning, true),
+                ("M".to_owned(), accent, false),
+                ("b".to_owned(), body, true),
+                (".".to_owned(), body, true),
+                (" ".to_owned(), body, false),
             ],
-            "the tag, the s of src/, the a of a.rs, and the mark, then the untagged clean row",
+            "the s of src/, the a of a.rs, the r of .rs, and the mark, then the untagged clean row",
         );
     }
 

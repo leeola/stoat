@@ -1344,6 +1344,79 @@ fn the_finder_preview_rules_off_its_numbers() {
     }
 }
 
+/// A finder row draws no type-tag column. Its label starts one cell into the
+/// list and reads its directory muted, its name bold in the text color, and
+/// its extension bold in the tag color of the file type, as FinderShared draws
+/// a row.
+///
+/// The list is cells 17 to 66 from cell row 12, a label starts at cell 18,
+/// and the `M` of a modified file stands in cell 66 in the accent. The first
+/// row from 13 with an accent pixel in cell 66 is `src/main.rs`. Its cells 18
+/// to 21, `src/`, hold muted ink and no pixel of the text or warm colors.
+/// Cells 22 to 25, `main`, hold a pixel of the near-white text. Cells 26 to 28,
+/// `.rs`, hold a pixel of the warm Rust tag color. On the row above it,
+/// `Cargo.toml`, cells 23 to 27, `.toml`, hold a pixel of the violet config tag
+/// color.
+#[test]
+fn the_finder_row_colors_its_directory_name_and_extension() {
+    let mut home = support::scratch_home();
+    let shot = settled_frame(home.path(), "rust-diff", "Cargo.toml", "<Space>p<Settle>");
+
+    let count = |col, row, cols, pred: fn([u8; 3]) -> bool| {
+        pixels_where(&shot, cell_rect(col, row, cols, 1), pred)
+    };
+    fn gap(a: u8, b: u8) -> i32 {
+        i32::from(a) - i32::from(b)
+    }
+    let Some(row) = (13..39).find(|&row| count(66, row, 1, |[r, _, b]| gap(b, r) > 40) > 0) else {
+        let frame = keep_frame(&shot, &mut home, "finder_row_colors");
+        panic!(
+            "no list row from cell row 13 holds an accent mark in cell 66; the frame is {}",
+            frame.display(),
+        );
+    };
+
+    let checks = [
+        (
+            "src/ holds ink",
+            brightest(&shot, cell_rect(18, row, 4, 1)) > 0x40,
+        ),
+        (
+            "src/ holds no text-bright pixel",
+            count(18, row, 4, |[r, _, _]| r > 0xa0) == 0,
+        ),
+        (
+            "src/ holds no warm pixel",
+            count(18, row, 4, |[r, _, b]| gap(r, b) > 40) == 0,
+        ),
+        (
+            "main holds the near-white text",
+            count(22, row, 4, |[r, _, b]| r > 0xa0 && gap(r, b).abs() <= 24) > 0,
+        ),
+        (
+            ".rs holds the warm Rust tag color",
+            count(26, row, 3, |[r, _, b]| gap(r, b) > 40) > 0,
+        ),
+        (
+            ".toml holds the violet config tag color",
+            count(23, row - 1, 5, |[r, g, b]| gap(b, g) > 30 && gap(r, g) > 20) > 0,
+        ),
+    ];
+    let failed: Vec<&str> = checks
+        .iter()
+        .filter(|(_, held)| !held)
+        .map(|(check, _)| *check)
+        .collect();
+    if !failed.is_empty() {
+        let frame = keep_frame(&shot, &mut home, "finder_row_colors");
+        panic!(
+            "on cell row {row}, src/main.rs, and the row above it, these checks fail: \
+             {failed:?}; the frame is {}",
+            frame.display(),
+        );
+    }
+}
+
 /// The code search preview marks the line its selected match lands on, as the
 /// PreviewZoom board draws that row.
 ///
@@ -2852,6 +2925,25 @@ fn brightest(shot: &Snapshot, (x, y, width, height): PixelRect) -> u8 {
         })
         .max()
         .expect("the rectangle holds pixels")
+}
+
+/// The count of pixels of `rect` in `shot` whose `[red, green, blue]` passes
+/// `pred`.
+fn pixels_where(
+    shot: &Snapshot,
+    (x, y, width, height): PixelRect,
+    pred: impl Fn([u8; 3]) -> bool,
+) -> usize {
+    (y..y + height)
+        .flat_map(|row| {
+            let start = ((row * shot.width + x) * 4) as usize;
+            let end = start + (width * 4) as usize;
+            shot.rgba[start..end]
+                .chunks_exact(4)
+                .map(|pixel| [pixel[0], pixel[1], pixel[2]])
+        })
+        .filter(|&rgb| pred(rgb))
+        .count()
 }
 
 /// The pixels of `rect` in `shot` that draw a diff strip's text, within 6 of

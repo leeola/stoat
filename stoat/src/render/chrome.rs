@@ -126,13 +126,16 @@ pub(crate) struct PlateColors {
     pub(crate) surface: [u8; 3],
 }
 
-/// The small colored tag a finder row or a changes header shows in place of a
-/// file's extension, and the theme scope that colors it.
+/// The theme scope that colors the extension of a file whose type takes a
+/// color of its own.
+///
+/// A tab, a status row, a file header of the changes view, and a finder row
+/// read such a file's extension in this scope, so the type reads the same
+/// wherever the file is named.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct TypeTag {
-    pub(crate) tag: &'static str,
     pub(crate) scope: &'static str,
-    /// Whether the name ends in `.gz`. The tag is then the inner extension's.
+    /// Whether the name ends in `.gz`. The scope is then the inner extension's.
     pub(crate) gzip: bool,
 }
 
@@ -685,27 +688,24 @@ pub(crate) fn popout_frame(
     }
 }
 
-/// The [`TypeTag`] of the file at `path`.
+/// The [`TypeTag`] of the file at `path`, or `None` for a file whose extension
+/// takes no color of its own.
 ///
-/// A gzip name takes the tag of the extension inside its `.gz`. `None` for a
-/// file whose extension takes no tag, so its name keeps the extension. A gzip
-/// name whose inner extension takes no tag keeps both extensions.
+/// A gzip name takes the tag of the extension inside its `.gz`, and one whose
+/// inner extension takes no tag answers `None`.
 pub(crate) fn type_tag(path: &Path) -> Option<TypeTag> {
     let gzip = buffer_lifecycle::is_gzip_name(path);
     let named = match gzip {
         true => Path::new(path.file_stem()?),
         false => path,
     };
-    let (tag, tag_scope) = match named.extension()?.to_str()? {
-        "rs" => ("rs", scope::UI_TAG_RUST),
-        "md" => ("md", scope::UI_TAG_MARKDOWN),
-        "toml" => ("toml", scope::UI_TAG_CONFIG),
-        "stcfg" => ("stcfg", scope::UI_TAG_CONFIG),
-        "cfg" => ("cfg", scope::UI_TAG_CONFIG),
+    let tag_scope = match named.extension()?.to_str()? {
+        "rs" => scope::UI_TAG_RUST,
+        "md" => scope::UI_TAG_MARKDOWN,
+        "toml" | "stcfg" | "cfg" => scope::UI_TAG_CONFIG,
         _ => return None,
     };
     Some(TypeTag {
-        tag,
         scope: tag_scope,
         gzip,
     })
@@ -1053,9 +1053,8 @@ mod tests {
     /// extension takes no tag answers `None`.
     #[test]
     fn type_tag_names_the_rust_markdown_and_config_files() {
-        let tagged = |tag, tag_scope, gzip| {
+        let tagged = |tag_scope, gzip| {
             Some(TypeTag {
-                tag,
                 scope: tag_scope,
                 gzip,
             })
@@ -1072,11 +1071,11 @@ mod tests {
         assert_eq!(
             names.map(|name| type_tag(Path::new(name))),
             [
-                tagged("rs", scope::UI_TAG_RUST, false),
-                tagged("md", scope::UI_TAG_MARKDOWN, false),
-                tagged("stcfg", scope::UI_TAG_CONFIG, false),
+                tagged(scope::UI_TAG_RUST, false),
+                tagged(scope::UI_TAG_MARKDOWN, false),
+                tagged(scope::UI_TAG_CONFIG, false),
                 None,
-                tagged("md", scope::UI_TAG_MARKDOWN, true),
+                tagged(scope::UI_TAG_MARKDOWN, true),
                 None,
             ],
         );
