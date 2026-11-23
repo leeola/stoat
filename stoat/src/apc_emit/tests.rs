@@ -7102,7 +7102,7 @@ fn the_command_list_pool_follows_a_wrapped_header() {
     h.stoat.set_apc_tx(tx);
 
     let (one_rows, one) = typed_palette_region(&mut h, &mut rx, ":");
-    let query = format!("{}q", " ".repeat(80));
+    let query = format!("{}q", " ".repeat(50));
     let (two_rows, two) = typed_palette_region(&mut h, &mut rx, &query);
     assert_eq!(
         (

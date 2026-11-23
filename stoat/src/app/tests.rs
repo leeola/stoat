@@ -1929,7 +1929,7 @@ fn a_press_under_a_wrapped_header_selects_the_row_under_the_pointer() {
 #[test]
 fn a_press_under_a_wrapped_query_selects_the_command_under_the_pointer() {
     let mut h = Stoat::test();
-    h.type_text(&format!(":{}q", " ".repeat(80)));
+    h.type_text(&format!(":{}q", " ".repeat(50)));
     h.settle();
     h.snapshot();
 

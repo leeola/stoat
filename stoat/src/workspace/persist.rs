@@ -21,6 +21,7 @@ use crate::{
     badge::{Anchor as BadgeAnchor, Badge, BadgeSource, BadgeState},
     buffer::{BufferId, BufferOp, TextBuffer},
     buffer_registry::{BufferRegistry, BufferRegistrySnapshot},
+    command_palette,
     commit_list::{CommitListId, CommitListSnap},
     dump::snapshot::ActiveRebaseSnap,
     editor_state::{EditorId, EditorState, EditorStateSnapshot},
@@ -611,7 +612,13 @@ impl Workspace {
         self.parent = state.parent;
         self.last_finder_scope = state.last_finder_scope;
         self.remote = state.remote;
-        self.palette_history = InputHistory::from_entries(state.palette_history);
+        self.palette_history = InputHistory::from_entries(
+            state
+                .palette_history
+                .into_iter()
+                .map(command_palette::migrate_history_line)
+                .collect(),
+        );
         self.search_history = InputHistory::from_entries(state.search_history);
         self.code_search_history = InputHistory::from_entries(state.code_search_history);
         self.last_search = state

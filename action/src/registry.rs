@@ -174,6 +174,18 @@ pub struct RegistryEntry {
     pub command_name: String,
 }
 
+impl RegistryEntry {
+    /// Whether the command palette's root lists this action as a command, which
+    /// an alias or an explicit [`ActionDef::command_name`] makes it.
+    ///
+    /// The palette lists every other visible action under its `action` row,
+    /// the lower-level API. So a user names a command by a word chosen for it,
+    /// and reaches any other action by its own name under that row.
+    pub fn is_command(&self) -> bool {
+        self.def.command_name().is_some() || !self.def.aliases().is_empty()
+    }
+}
+
 static REGISTRY: OnceLock<HashMap<&'static str, RegistryEntry>> = OnceLock::new();
 
 /// Rewrite a PascalCase action name as the kebab-case token a user types, so
@@ -1736,6 +1748,26 @@ mod tests {
                 "{token} must still reach {action}"
             );
         }
+    }
+
+    /// A command carries an alias or a command name of its own, and an action
+    /// with neither is no command.
+    #[test]
+    fn a_command_carries_an_alias_or_a_command_name() {
+        let is_command = |name| lookup(name).expect("a registered action").is_command();
+        assert_eq!(
+            [
+                "OpenFile",
+                "SetCwd",
+                "ShowCwd",
+                "Run",
+                "AutoReload",
+                "FocusLeft",
+                "PickerNext"
+            ]
+            .map(is_command),
+            [true, true, true, true, true, false, false],
+        );
     }
 
     /// The short forms kept or added alongside the curated names.

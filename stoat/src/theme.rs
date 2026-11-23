@@ -981,6 +981,13 @@ pub mod scope {
     /// its label (foreground) on its box (background). A theme that leaves it
     /// unset draws no tag.
     pub const UI_CMD_SOURCE_BUILTIN: &str = "ui.cmd.source.builtin";
+    /// The Source Tag that ends the palette's `action` row, the row that opens
+    /// the internal actions. A theme that leaves it unset draws no tag.
+    pub const UI_CMD_SOURCE_INTERNAL: &str = "ui.cmd.source.internal";
+    /// The name of an internal action, one that is no command, and the typed
+    /// `action` token in a Cmd Line. A theme that leaves it unset draws the
+    /// name and the token as a command's.
+    pub const UI_CMD_ACTION: &str = "ui.cmd.action";
     /// The mark the key hints box draws beside a key whose toggle is on.
     /// [`UI_TOGGLE_INACTIVE`] is its sibling for a toggle that is off.
     pub const UI_TOGGLE_ACTIVE: &str = "ui.toggle.active";

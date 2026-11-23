@@ -11,7 +11,8 @@ define_action!(
      on-disk index stages. From a changes view or the per-file diff it closes \
      that view first. Re-dispatch to close the view and return to the plain \
      file.",
-    ActionPriority::Common
+    ActionPriority::Common,
+    command_name = "conflict"
 );
 
 define_action!(

@@ -170,6 +170,7 @@ define_action_def!(
     "follow the focused buffer's file",
     "Set auto-reload for the focused buffer. \"on\" re-reads the file as new content is appended and follows the tail. \"follow\" re-reads and jumps the cursor to the first region each change touches, for watching in-place edits live. \"off\" stops it, as does running :auto-reload follow a second time. Follow is per-buffer and opt-in, so opening :diff never enables it. Only file-backed buffers can reload.",
     ActionPriority::Normal,
+    command_name = "auto-reload",
     params = AUTO_RELOAD_PARAMS
 );
 
@@ -207,6 +208,7 @@ define_action_def!(
     "toggle config auto-reload",
     "Flip the running value of the `config.auto_reload` setting, which decides whether saving a config file re-applies it right away instead of waiting for a restart. Covers saves of both stoat's own config and the terminal's. The change lasts until stoat exits, or until a later reload of stoat's config re-reads the value written in the file.",
     ActionPriority::Normal,
+    command_name = "auto-reload-config",
     params = AUTO_RELOAD_CONFIG_PARAMS
 );
 

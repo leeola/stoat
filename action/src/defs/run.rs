@@ -76,6 +76,8 @@ define_action_def!(
     "run command",
     "Run a shell command in a temporary modal overlay. The modal shows output while running and can be dismissed when done.",
     ActionPriority::Common,
+    aliases = &["r"],
+    command_name = "run",
     params = RUN_PARAMS
 );
 

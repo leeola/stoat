@@ -318,6 +318,10 @@ The typed UI scopes, by group (syntax scopes are open-ended):
   command's name that the user did not type. The ghost is display only: the
   input, Tab, and Enter never see it. Unset, the token takes `ui.text`, and
   no ghost draws.
+- `ui.cmd.action` -- the name of an internal action, one with no alias and
+  no command name of its own. The scope also styles the typed `action` token
+  that opens their list in the command palette. Unset, both draw as a
+  command's name and token do.
 - `ui.cmd.source.builtin`, `ui.cmd.source.config`, `ui.cmd.source.cli`,
   `ui.cmd.source.script`, `ui.cmd.source.internal` -- the Source Tag that ends
   a command palette row and names where its command comes from, its label

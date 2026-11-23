@@ -33,6 +33,7 @@ define_action_def!(
      hunk. With a revision, `index`, or `HEAD` the changes view stays and \
      shows the changes against that base.",
     ActionPriority::Common,
+    command_name = "diff-files",
     params = DIFF_PARAMS
 );
 

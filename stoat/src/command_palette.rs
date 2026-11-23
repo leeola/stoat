@@ -14,9 +14,14 @@ use crate::{
 use std::{
     collections::hash_map::DefaultHasher,
     hash::{Hash, Hasher},
+    iter,
     path::{Path, PathBuf},
+    ptr,
+    sync::OnceLock,
 };
-use stoat_action::{registry, ActionKind, ParamDef, ParamValue, ValueSource};
+use stoat_action::{
+    registry, ActionDef, ActionKind, ParamDef, ParamError, ParamKind, ParamValue, ValueSource,
+};
 use stoat_language::LanguageRegistry;
 use stoat_scheduler::{Executor, Task};
 use tokio::sync::mpsc::UnboundedReceiver;
@@ -75,13 +80,20 @@ pub struct CommandPalette {
     /// every per-frame refilter.
     last_filter_key: u64,
     /// Commands the current scope offers before any query narrows them. The
-    /// renderer sizes the modal's list against it, and the header counts the
-    /// filtered commands out of it.
+    /// renderer sizes the modal's list against it and the `action` row.
     ///
-    /// Captured from the unfiltered set rather than [`Self::filtered`], so
-    /// typing a query cannot resize the box out from under the user typing it.
-    /// Only a scope flip changes it.
+    /// Captured from the unfiltered set rather than [`Self::filtered`], so a
+    /// typed query leaves the box's size alone under the user typing it. Only
+    /// a scope flip changes it.
     pub(crate) offering: usize,
+    /// Internal actions the current scope offers, the actions that are no
+    /// command, which the header counts as the actions under the `action` row.
+    ///
+    /// Only a scope flip changes it, as it changes [`Self::offering`].
+    pub(crate) action_offering: usize,
+    /// Whether the input lists the commands or the internal actions, which a
+    /// leading `action ` token opens.
+    pub(crate) namespace: Namespace,
     /// The widest plate, in columns, that the argument picker has drawn since
     /// the palette opened.
     ///
@@ -119,10 +131,102 @@ pub struct CommandPalette {
 /// a typed `o` reads as `open`. It is display only: the input, its caret, Tab,
 /// and Enter never see it.
 pub(crate) struct ResolvedCommand {
+    /// The entry that the head names, which decides whether the head draws as
+    /// a command or as an internal action.
+    pub(crate) entry: &'static registry::RegistryEntry,
     /// The typed head's length in chars, from the input's start.
     pub(crate) head_chars: usize,
     /// The text after the head, empty for a head that spells the whole name.
     pub(crate) ghost: String,
+}
+
+/// The list that the palette's input names, the commands at the root or the
+/// internal actions under the `action` token.
+///
+/// A command is an action with an alias or a command name of its own, as
+/// [`registry::RegistryEntry::is_command`] decides. The internal actions are
+/// the lower-level API, so the root keeps them out of the way of the words a
+/// user types every day.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Namespace {
+    Commands,
+    Actions,
+}
+
+/// The token that opens the internal actions, typed and then a space.
+pub(crate) const ACTION_TOKEN: &str = "action";
+
+/// The def of the palette's `action` row, the one root row that opens the
+/// internal actions instead of running an action of its own.
+///
+/// It lives outside the registry, as the def that [`crate::help`] holds for
+/// `SetMode` does. With a def, the list, the pool page, the doc region, Tab,
+/// and Enter read the row as any other. Its kind is a placeholder, because
+/// nothing dispatches the row.
+#[derive(Debug)]
+struct ActionRowDef;
+
+impl ActionDef for ActionRowDef {
+    fn name(&self) -> &'static str {
+        ACTION_TOKEN
+    }
+
+    fn kind(&self) -> ActionKind {
+        ActionKind::OpenCommandPalette
+    }
+
+    fn params(&self) -> &'static [ParamDef] {
+        ACTION_ROW_PARAMS
+    }
+
+    fn short_desc(&self) -> &'static str {
+        "Stoat's internal actions, the lower-level API"
+    }
+
+    fn long_desc(&self) -> &'static str {
+        "List every action that is no command, the lower-level API that key \
+         bindings and config files name. Type an action's name after the \
+         token to narrow the list. Type its arguments after the name to run \
+         it."
+    }
+}
+
+static ACTION_ROW_PARAMS: &[ParamDef] = &[
+    ParamDef {
+        name: "action",
+        kind: ParamKind::String,
+        value_source: ValueSource::None,
+        required: true,
+        description: "The internal action to run, by its kebab or its PascalCase name.",
+    },
+    ParamDef {
+        name: "args",
+        kind: ParamKind::String,
+        value_source: ValueSource::None,
+        required: false,
+        description: "The action's arguments.",
+    },
+];
+
+/// The palette's `action` row, which ends the root list and opens the list of
+/// the internal actions.
+pub(crate) fn action_row() -> &'static registry::RegistryEntry {
+    static ROW: OnceLock<registry::RegistryEntry> = OnceLock::new();
+    ROW.get_or_init(|| registry::RegistryEntry {
+        def: &ActionRowDef,
+        create: |_| {
+            Err(ParamError::Missing {
+                name: "action",
+                location: snafu::location!(),
+            })
+        },
+        command_name: ACTION_TOKEN.to_owned(),
+    })
+}
+
+/// Whether `entry` is the palette's `action` row.
+pub(crate) fn is_action_row(entry: &registry::RegistryEntry) -> bool {
+    ptr::eq(entry, action_row())
 }
 
 /// The inline value-picker the palette shows while collecting an argument
@@ -669,9 +773,7 @@ impl CommandPalette {
             &mut match_indices,
             &mut selected,
         );
-        // The empty-query refilter above leaves `filtered` holding the scope's
-        // whole offering, which is exactly the base the box sizes to.
-        let offering = filtered.len();
+        let (offering, action_offering) = scope_offering(scope, &availability);
         Self {
             input,
             filtered,
@@ -687,6 +789,8 @@ impl CommandPalette {
             generation: picker::next_generation(),
             last_filter_key: 0,
             offering,
+            action_offering,
+            namespace: Namespace::Commands,
             arg_plate_width: 0,
             header_rows: 1,
             resolved: None,
@@ -694,8 +798,12 @@ impl CommandPalette {
         }
     }
 
-    /// Rows the modal's list would need for the whole candidate set behind it,
+    /// Rows the modal's list needs for the whole candidate set behind it,
     /// whichever list is showing.
+    ///
+    /// The command list counts its `action` row with the commands. The list of
+    /// the internal actions keeps the command list's box, so the box holds its
+    /// place when `action ` opens that list.
     ///
     /// Arg mode lists the argument picker's candidates, so `:o ` over a large
     /// workspace sizes to the file count rather than the command count. Both
@@ -703,7 +811,7 @@ impl CommandPalette {
     pub(crate) fn list_rows_hint(&self) -> u16 {
         match self.arg_picker.as_ref().filter(|_| self.command.is_some()) {
             Some(picker) => rows_of(picker.active_core_ref().picklist.base.len()),
-            None => rows_of(self.offering),
+            None => rows_of(self.offering + 1),
         }
     }
 
@@ -722,7 +830,7 @@ impl CommandPalette {
             PaletteScope::Active => PaletteScope::All,
             PaletteScope::All => PaletteScope::Active,
         };
-        self.offering = scope_offering(self.scope, &self.availability);
+        (self.offering, self.action_offering) = scope_offering(self.scope, &self.availability);
         self.refilter_from_input(ws);
     }
 
@@ -876,6 +984,10 @@ impl CommandPalette {
         self.last_filter_key = key;
         self.generation = picker::next_generation();
 
+        self.namespace = match action_query(&text) {
+            Some(_) => Namespace::Actions,
+            None => Namespace::Commands,
+        };
         self.resolved = resolve_typed(&text, self.scope, &self.availability);
         let parsed = parse_command(&text, &self.availability);
         self.command = parsed.map(|(entry, _)| entry);
@@ -996,33 +1108,29 @@ impl CommandPalette {
         // A conditional token resolves ahead of the alias table so an active
         // context wins, and falls through to it when no context claims the
         // token. Zero-argument commands never reach `parse_command`, so this is
-        // where a bare `next` or `done` is resolved.
+        // where a bare `next` or `done` is resolved. The root resolves only
+        // commands, so a bare internal action runs under the `action` token.
         let bare = text.trim();
         if self.selected == 0
-            && let Some(entry) = resolve_conditional(bare, &self.availability)
-                .or_else(|| registry::lookup_alias(bare))
+            && let Some(entry) = resolve_head(bare, &self.availability)
         {
             if dispatches_bare(entry) {
                 self.input.dispose(ws);
-                return PaletteOutcome::Dispatch(
-                    entry,
-                    Vec::new(),
-                    history_head(entry).to_string(),
-                );
+                return PaletteOutcome::Dispatch(entry, Vec::new(), history_head(entry));
             }
             self.input
-                .replace_text(ws, &format!("{} ", entry.command_name));
+                .replace_text(ws, &format!("{} ", typed_head(entry)));
             return PaletteOutcome::None;
         }
 
         match self.filtered.get(self.selected).copied() {
             Some(entry) if dispatches_bare(entry) => {
                 self.input.dispose(ws);
-                PaletteOutcome::Dispatch(entry, Vec::new(), history_head(entry).to_string())
+                PaletteOutcome::Dispatch(entry, Vec::new(), history_head(entry))
             },
             Some(entry) => {
                 self.input
-                    .replace_text(ws, &format!("{} ", entry.command_name));
+                    .replace_text(ws, &format!("{} ", typed_head(entry)));
                 PaletteOutcome::None
             },
             None => {
@@ -1096,10 +1204,9 @@ fn parse_command<'a>(
 /// after the space that ends the head.
 ///
 /// A command name such as `git log` holds spaces, so the head is the longest
-/// run of leading tokens that names a command. A head resolves as a
-/// conditional command first, then through [`registry::lookup_alias`].
-/// Returns `None` when neither the whole text nor a head that a space ends
-/// names a command.
+/// run of leading tokens that names a command, as [`resolve_head`] resolves
+/// one. Returns `None` when neither the whole text nor a head that a space
+/// ends names a command.
 ///
 /// The whole text is tried first as a command that takes no argument, and it
 /// answers with an empty tail. So `review done` ends a review where `review
@@ -1109,39 +1216,125 @@ pub(crate) fn split_head<'a>(
     text: &'a str,
     ctx: &Availability,
 ) -> Option<(&'static registry::RegistryEntry, &'a str, &'a str)> {
-    let resolve =
-        |head: &str| resolve_conditional(head, ctx).or_else(|| registry::lookup_alias(head));
-    if let Some(entry) = resolve(text).filter(|entry| entry.def.params().is_empty()) {
+    if let Some(entry) = resolve_head(text, ctx).filter(|entry| entry.def.params().is_empty()) {
         return Some((entry, text, ""));
     }
     text.rmatch_indices(' ').find_map(|(i, _)| {
         let head = &text[..i];
-        resolve(head).map(|entry| (entry, head, &text[i + 1..]))
+        resolve_head(head, ctx).map(|entry| (entry, head, &text[i + 1..]))
     })
+}
+
+/// The entry that the palette head `head` names.
+///
+/// Under the `action` token the head names an internal action, as
+/// [`lookup_action`] finds one. Otherwise it names a command: a conditional
+/// command whose context is active first, then a command as [`lookup_root`]
+/// finds one.
+fn resolve_head(head: &str, ctx: &Availability) -> Option<&'static registry::RegistryEntry> {
+    match action_query(head) {
+        Some(name) => lookup_action(name),
+        None => resolve_conditional(head, ctx).or_else(|| lookup_root(head)),
+    }
+}
+
+/// The text after a leading `action` token and its space, ASCII case ignored,
+/// or `None` for a text that lists the commands.
+fn action_query(text: &str) -> Option<&str> {
+    let (token, rest) = text.split_once(' ')?;
+    token.eq_ignore_ascii_case(ACTION_TOKEN).then_some(rest)
+}
+
+/// The visible command that `token` names, by its exact name, its command
+/// name, or an alias, in the order [`registry::lookup_alias`] ranks them.
+///
+/// Only commands take part, so an internal action's name never hides a
+/// command's alias, and a hidden action resolves nowhere in the palette.
+fn lookup_root(token: &str) -> Option<&'static registry::RegistryEntry> {
+    let command = |entry: &&'static registry::RegistryEntry| {
+        entry.is_command() && entry.def.palette_visible()
+    };
+    registry::lookup(token)
+        .filter(command)
+        .or_else(|| {
+            registry::all()
+                .filter(command)
+                .find(|entry| entry.command_name.eq_ignore_ascii_case(token))
+        })
+        .or_else(|| {
+            registry::all().filter(command).find(|entry| {
+                entry
+                    .def
+                    .aliases()
+                    .iter()
+                    .any(|alias| alias.eq_ignore_ascii_case(token))
+            })
+        })
+}
+
+/// The visible internal action that `name` names, by its exact name or its
+/// command name, ASCII case ignored.
+fn lookup_action(name: &str) -> Option<&'static registry::RegistryEntry> {
+    registry::all().find(|entry| {
+        !entry.is_command()
+            && entry.def.palette_visible()
+            && (entry.def.name().eq_ignore_ascii_case(name)
+                || entry.command_name.eq_ignore_ascii_case(name))
+    })
+}
+
+/// The text that names `entry` in the palette's input, which Enter and Tab
+/// write.
+///
+/// A command and the `action` row read by their command name. An internal
+/// action reads as the `action` token and its kebab name, because only that
+/// form resolves it.
+pub(crate) fn typed_head(entry: &registry::RegistryEntry) -> String {
+    match entry.is_command() || is_action_row(entry) {
+        true => entry.command_name.clone(),
+        false => format!("{ACTION_TOKEN} {}", entry.command_name),
+    }
 }
 
 /// The command token that palette input `text` names, as the Cmd Line draws
 /// it, or `None` when the text names no command.
 ///
-/// The head follows [`typed_head`], and the ghost follows [`ghost_of`].
+/// At the root the head follows [`named_command`], and the ghost follows
+/// [`ghost_of`]. Under the `action` token the head is the token and the
+/// action's name when the name resolves. Else the head is the token alone,
+/// which names the `action` row. Neither has a ghost.
 fn resolve_typed(text: &str, scope: PaletteScope, ctx: &Availability) -> Option<ResolvedCommand> {
-    let (entry, head) = typed_head(text, scope, ctx)?;
+    if let Some(name) = action_query(text) {
+        let (entry, head) = split_head(text, ctx)
+            .map(|(entry, head, _)| (entry, head))
+            .or_else(|| lookup_action(name.trim_end()).map(|entry| (entry, text.trim_end())))
+            .unwrap_or((action_row(), &text[..ACTION_TOKEN.len()]));
+        return Some(ResolvedCommand {
+            entry,
+            head_chars: head.chars().count(),
+            ghost: String::new(),
+        });
+    }
+
+    let (entry, head) = named_command(text, scope, ctx)?;
     Some(ResolvedCommand {
+        entry,
         head_chars: head.chars().count(),
         ghost: ghost_of(head, &entry.command_name),
     })
 }
 
-/// The command that the typed head of palette input `text` names, and the
-/// head, or `None` when no head names a command.
+/// The command that the typed head of palette input `text` names at the root,
+/// and the head, or `None` when no head names a command.
 ///
 /// A head that [`split_head`] finds names its command first. Else the whole
-/// text less its trailing whitespace names a command, as a conditional
-/// command, a name, or an alias. Else a text with no whitespace names the one
-/// command that `scope` offers whose command name starts with it, ASCII case
-/// ignored. So `quit-al` names `quit-all`, and `wri` names none of the
+/// text less its trailing whitespace names a command, as [`resolve_head`]
+/// resolves one. Else a text with no whitespace names the one command that
+/// `scope` offers whose command name starts with it, ASCII case ignored. The
+/// `action` row takes part as one more command. So `quit-al` names
+/// `quit-all`, `act` names the `action` row, and `wri` names none of the
 /// commands that start with it.
-fn typed_head<'a>(
+fn named_command<'a>(
     text: &'a str,
     scope: PaletteScope,
     ctx: &Availability,
@@ -1151,20 +1344,23 @@ fn typed_head<'a>(
     }
 
     let whole = text.trim_end();
-    if let Some(entry) = resolve_conditional(whole, ctx).or_else(|| registry::lookup_alias(whole)) {
+    if let Some(entry) = resolve_head(whole, ctx) {
         return Some((entry, whole));
     }
 
     if text.is_empty() || text.contains(char::is_whitespace) {
         return None;
     }
-    let mut named = registry::all().filter(|entry| {
-        offers(entry, scope, ctx)
-            && entry
-                .command_name
-                .get(..text.len())
-                .is_some_and(|prefix| prefix.eq_ignore_ascii_case(text))
-    });
+    let starts = |entry: &&'static registry::RegistryEntry| {
+        entry
+            .command_name
+            .get(..text.len())
+            .is_some_and(|prefix| prefix.eq_ignore_ascii_case(text))
+    };
+    let mut named = registry::all()
+        .filter(|entry| entry.is_command() && offers(entry, scope, ctx))
+        .chain(iter::once(action_row()))
+        .filter(starts);
     match (named.next(), named.next()) {
         (Some(entry), None) => Some((entry, text)),
         _ => None,
@@ -1263,8 +1459,11 @@ fn parse_args(
 
 /// The command group the palette lists for `text`, which the text's first token
 /// names while the text parses as no command.
+///
+/// The list under the `action` token holds no group, so a text there answers
+/// `None`.
 fn input_group(text: &str, ctx: &Availability) -> Option<&'static str> {
-    if parse_command(text, ctx).is_some() {
+    if action_query(text).is_some() || parse_command(text, ctx).is_some() {
         return None;
     }
     let (token, _) = text.split_once(' ')?;
@@ -1286,19 +1485,33 @@ fn dispatches_bare(entry: &registry::RegistryEntry) -> bool {
         .is_none_or(|param| !param.required)
 }
 
-/// The head token to record for `entry` in palette history. It is the first
-/// alias when one exists, else the name.
+/// The head to record for `entry` in palette history, its first alias when it
+/// has one, else its [`typed_head`].
 ///
-/// Both re-resolve through [`parse_command`]'s [`registry::lookup_alias`], so a
-/// recalled `head [arg]` line replays. The alias is preferred because it reads
-/// like the short form a user types (`cd`, not `SetCwd`).
-fn history_head(entry: &registry::RegistryEntry) -> &'static str {
-    entry
-        .def
-        .aliases()
-        .first()
-        .copied()
-        .unwrap_or_else(|| entry.def.name())
+/// Each re-resolves through [`parse_command`], so a recalled `head [arg]` line
+/// runs again. A command without an alias records its command name. An
+/// internal action records the `action` token and its kebab name, because the
+/// root resolves no internal action. The alias is preferred because it reads
+/// like the short form a user types (`cd`, not `set-cwd`).
+fn history_head(entry: &registry::RegistryEntry) -> String {
+    match entry.def.aliases().first() {
+        Some(alias) => (*alias).to_owned(),
+        None => typed_head(entry),
+    }
+}
+
+/// `line`, a palette history line from a saved state, in the form that the
+/// palette runs.
+///
+/// A line whose first word names an internal action and no command gains the
+/// `action` token. The root resolves no internal action, so a saved line that
+/// names one bare runs nothing. Any other line stays as it is.
+pub(crate) fn migrate_history_line(line: String) -> String {
+    let first = line.split_whitespace().next().unwrap_or("");
+    match lookup_action(first).is_some() && lookup_root(first).is_none() {
+        true => format!("{ACTION_TOKEN} {line}"),
+        false => line,
+    }
 }
 
 /// The value a picker row under `source` stands for.
@@ -1328,11 +1541,17 @@ fn offers(
         && (scope != PaletteScope::Active || action_is_available(entry.def.kind(), availability))
 }
 
-/// How many commands `scope` offers before any query narrows them.
-fn scope_offering(scope: PaletteScope, availability: &Availability) -> usize {
+/// How many commands and how many internal actions `scope` offers before any
+/// query narrows them.
+fn scope_offering(scope: PaletteScope, availability: &Availability) -> (usize, usize) {
     registry::all()
         .filter(|entry| offers(entry, scope, availability))
-        .count()
+        .fold((0, 0), |(commands, actions), entry| {
+            match entry.is_command() {
+                true => (commands + 1, actions),
+                false => (commands, actions + 1),
+            }
+        })
 }
 
 /// A candidate count as list rows, saturating past what any screen could show.
@@ -1340,12 +1559,16 @@ fn rows_of(count: usize) -> u16 {
     u16::try_from(count).unwrap_or(u16::MAX)
 }
 
-/// Rank the commands `scope` offers for palette input `input` into `filtered`
-/// and `match_indices`, and clamp `selected` to the result.
+/// Rank the entries that palette input `input` lists under `scope` into
+/// `filtered` and `match_indices`, and clamp `selected` to the result.
 ///
-/// Under `group` only the group's commands appear, and the text after the
-/// group token narrows them. Each match position indexes the whole command
-/// name either way.
+/// At the root the list holds the commands. Under `group` only the group's
+/// commands appear, and the text after the group token narrows them. With no
+/// group the `action` row ends the list when the query holds no atom or
+/// matches the row's name. The row leads the list when the query is the word
+/// `action`. Under the `action` token the list holds the internal actions,
+/// which the text after the token narrows by their kebab names. Each match
+/// position indexes the whole command name either way.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn refilter(
     input: &str,
@@ -1356,8 +1579,10 @@ pub(crate) fn refilter(
     match_indices: &mut Vec<Vec<u32>>,
     selected: &mut usize,
 ) {
+    let actions = action_query(input);
     let visible: Vec<&'static registry::RegistryEntry> = registry::all()
         .filter(|entry| offers(entry, scope, availability))
+        .filter(|entry| entry.is_command() == actions.is_none())
         .filter(|entry| {
             group.is_none_or(|group| {
                 entry
@@ -1368,18 +1593,79 @@ pub(crate) fn refilter(
         })
         .collect();
 
-    filtered.clear();
-    match_indices.clear();
-
     // A group's members match by their subcommand token, since the letters of
     // the group token, which every member shares, narrow nothing.
-    let (query, offset) = match group {
-        Some(group) => (
+    let (query, offset) = match (actions, group) {
+        (Some(rest), _) => (rest, 0),
+        (None, Some(group)) => (
             input.split_once(' ').map_or("", |(_, rest)| rest),
             group.len() + 1,
         ),
-        None => (input, 0),
+        (None, None) => (input, 0),
     };
+    filtered.clear();
+    match_indices.clear();
+    rank_entries(query, offset, visible, filtered, match_indices);
+
+    // Pin an exact name or alias match to the top so the displayed list agrees
+    // with what Enter dispatches. `w` (SaveBuffer) and `o` (OpenFile) resolve by
+    // alias, which the name-only fuzzy rank never surfaces first -- or at all,
+    // when the name lacks the typed characters.
+    let needle = actions.unwrap_or(input).trim();
+    let pinned = match actions {
+        Some(_) => lookup_action(needle),
+        None => lookup_root(needle),
+    };
+    if let Some(pinned) = pinned.filter(|pinned| offers(pinned, scope, availability)) {
+        let indices = match filtered
+            .iter()
+            .position(|e| e.def.name() == pinned.def.name())
+        {
+            Some(pos) => {
+                filtered.remove(pos);
+                match_indices.remove(pos)
+            },
+            None if pinned.command_name.eq_ignore_ascii_case(needle) => {
+                (0..pinned.command_name.chars().count() as u32).collect()
+            },
+            None => Vec::new(),
+        };
+        filtered.insert(0, pinned);
+        match_indices.insert(0, indices);
+    }
+
+    if actions.is_none() && group.is_none() {
+        let row = action_row();
+        if needle.eq_ignore_ascii_case(ACTION_TOKEN) {
+            filtered.insert(0, row);
+            match_indices.insert(0, (0..ACTION_TOKEN.len() as u32).collect());
+        } else {
+            let matched = match fuzzy::match_and_rank(query, iter::once((row, ACTION_TOKEN))) {
+                None => Some(Vec::new()),
+                Some(matches) => matches.into_iter().next().map(|m| m.matched_indices),
+            };
+            if let Some(indices) = matched {
+                filtered.push(row);
+                match_indices.push(indices);
+            }
+        }
+    }
+
+    picker::nav_clamp(filtered.len(), selected);
+}
+
+/// Rank `visible` against `query` into `filtered` and `match_indices`, each
+/// name matched past its first `offset` bytes.
+///
+/// A query with no atom lists every entry by priority and then by name. A
+/// match ranks by its score, then by priority, then by name.
+fn rank_entries(
+    query: &str,
+    offset: usize,
+    visible: Vec<&'static registry::RegistryEntry>,
+    filtered: &mut Vec<&'static registry::RegistryEntry>,
+    match_indices: &mut Vec<Vec<u32>>,
+) {
     let items = visible
         .iter()
         .copied()
@@ -1391,7 +1677,6 @@ pub(crate) fn refilter(
             filtered.push(entry);
             match_indices.push(Vec::new());
         }
-        picker::nav_clamp(filtered.len(), selected);
         return;
     };
 
@@ -1414,33 +1699,6 @@ pub(crate) fn refilter(
                 .collect(),
         );
     }
-
-    // Pin an exact name or alias match to the top so the displayed list agrees
-    // with what Enter dispatches. `w` (SaveBuffer) and `o` (OpenFile) resolve by
-    // alias, which the name-only fuzzy rank never surfaces first -- or at all,
-    // when the name lacks the typed characters.
-    let needle = input.trim();
-    if let Some(pinned) = registry::lookup_alias(needle)
-        && offers(pinned, scope, availability)
-    {
-        let indices = match filtered
-            .iter()
-            .position(|e| e.def.name() == pinned.def.name())
-        {
-            Some(pos) => {
-                filtered.remove(pos);
-                match_indices.remove(pos)
-            },
-            None if pinned.command_name.eq_ignore_ascii_case(needle) => {
-                (0..pinned.command_name.chars().count() as u32).collect()
-            },
-            None => Vec::new(),
-        };
-        filtered.insert(0, pinned);
-        match_indices.insert(0, indices);
-    }
-
-    picker::nav_clamp(filtered.len(), selected);
 }
 
 #[cfg(test)]
@@ -1543,16 +1801,19 @@ mod tests {
             .collect()
     }
 
-    /// The action names the palette lists under `scope`. Use this for
-    /// availability assertions, which are about which actions appear rather
-    /// than how they are spelled.
+    /// The action names the palette lists under `scope` for `text`, at the root
+    /// and then under the `action` token. Use this for availability
+    /// assertions, which are about which actions appear rather than how they
+    /// are spelled or which list holds them.
     fn action_names_for_scope(
         text: &str,
         scope: PaletteScope,
         availability: &Availability,
     ) -> Vec<&'static str> {
+        let actions = format!("{ACTION_TOKEN} {text}");
         entries_for(text, scope, availability)
-            .iter()
+            .into_iter()
+            .chain(entries_for(&actions, scope, availability))
             .map(|e| e.def.name())
             .collect()
     }
@@ -1599,9 +1860,15 @@ mod tests {
         assert!(listed.contains(&"quit"));
         assert!(listed.contains(&"open"));
         assert!(!listed.contains(&"open-command-palette"));
+        assert_eq!(
+            listed.last(),
+            Some(&"action"),
+            "the action row ends the list"
+        );
 
+        let commands = &listed[..listed.len() - 1];
         let listed_with_prio: Vec<(u8, &&'static str)> =
-            listed.iter().map(|n| (priority_ord_of(n), n)).collect();
+            commands.iter().map(|n| (priority_ord_of(n), n)).collect();
         let mut sorted = listed_with_prio.clone();
         sorted.sort();
         assert_eq!(
@@ -1613,19 +1880,18 @@ mod tests {
     #[test]
     fn priority_orders_within_prefix_tier() {
         let listed = names_for("");
-        // `Run` is Common; `CloseCommits` is Normal. Alphabetically
-        // `CloseCommits` < `Run`, so without priority it would come first.
-        assert!(pos_in(&listed, "run") < pos_in(&listed, "close-commits"));
+        // `write` is Common and `version` is Normal. Alphabetically `version`
+        // comes first, so priority alone puts `write` ahead of it.
+        assert!(pos_in(&listed, "write") < pos_in(&listed, "version"));
     }
 
     #[test]
     fn tier_boundary_dominates_priority() {
-        // `OpenRun` is Common but matches `"Run"` only as a substring, so it
-        // must sink below every prefix-tier match regardless of that match's
-        // priority (Common `Run`, Normal `RunSubmit`, etc.).
-        let listed = names_for("run");
+        // `OpenRun` is Common but matches `run` only as a substring. So it
+        // sinks below every prefix-tier match regardless of that match's
+        // priority, such as the Normal `RunSubmit`.
+        let listed = names_for("action run");
         let open_run = pos_in(&listed, "open-run");
-        assert!(pos_in(&listed, "run") < open_run);
         assert!(pos_in(&listed, "run-submit") < open_run);
         assert!(pos_in(&listed, "run-history-next") < open_run);
     }
@@ -1644,13 +1910,13 @@ mod tests {
     #[test]
     fn tiers_order_prefix_then_substring_then_fuzzy() {
         // For query `re`:
-        // - `Reload` starts with "re" (prefix).
-        // - `GitReview` contains "re" as a non-prefix substring.
-        // - `RunInterrupt` has r(0),e(6) as a subsequence, no "re" substring.
+        // - `reload` starts with "re" (prefix).
+        // - `git review` contains "re" as a non-prefix substring.
+        // - `write` has r(1),e(4) as a subsequence, no "re" substring.
         let listed = names_for("re");
         let prefix = pos_in(&listed, "reload");
         let substring = pos_in(&listed, "git review");
-        let fuzzy = pos_in(&listed, "run-interrupt");
+        let fuzzy = pos_in(&listed, "write");
         assert!(prefix < substring, "prefix ranks above substring");
         assert!(substring < fuzzy, "substring ranks above fuzzy");
     }
@@ -1678,13 +1944,13 @@ mod tests {
     #[test]
     fn alphabetical_within_same_priority() {
         let listed = names_for("");
-        assert!(pos_in(&listed, "close-commits") < pos_in(&listed, "close-conflict"));
-        assert!(pos_in(&listed, "close-conflict") < pos_in(&listed, "close-workspace"));
+        assert!(pos_in(&listed, "minimap") < pos_in(&listed, "open"));
+        assert!(pos_in(&listed, "open") < pos_in(&listed, "write"));
     }
 
     #[test]
     fn prefix_filter_ranks_first() {
-        let listed = names_for("foc");
+        let listed = names_for("action foc");
         assert!(listed.contains(&"focus-left"));
         let first_non_prefix = listed.iter().position(|n| !n.starts_with("focus"));
         if let Some(idx) = first_non_prefix {
@@ -1784,8 +2050,9 @@ mod tests {
     }
 
     /// The palette's header is the Cmd Line. It reads the workspace root,
-    /// abbreviated against the home, the prompt glyph, and the count of the
-    /// commands on show at its right end, and no row names the palette.
+    /// abbreviated against the home, and the prompt glyph. At its right end it
+    /// counts the commands on show and the actions behind the `action` row. No
+    /// row names the palette.
     #[test]
     fn the_palette_header_reads_the_cwd_the_prompt_glyph_and_the_count() {
         let mut h = Stoat::test();
@@ -1795,25 +2062,211 @@ mod tests {
         let _ = h.snapshot();
 
         let text = h.rendered_text();
-        let shown = h
+        let palette = h
             .stoat
             .command_palette
             .as_ref()
-            .expect("the palette is open")
-            .filtered
-            .len();
+            .expect("the palette is open");
+        let (shown, more) = (palette.filtered.len() - 1, palette.action_offering);
         let cmd_line = text
             .lines()
             .find(|line| line.contains('\u{276f}'))
             .unwrap_or_default();
+        let count = format!("{shown} commands \u{b7} action for {more} more\u{2502}");
         assert_eq!(
             (
                 cmd_line.contains("\u{2502}~/c/stoat \u{276f}"),
-                cmd_line.contains(&format!("{shown} commands\u{2502}")),
+                cmd_line.contains(&count),
                 text.contains("Palette"),
             ),
             (true, true, false),
             "the header reads {cmd_line:?}",
+        );
+    }
+
+    /// The root lists the commands and ends in the `action` row, and it lists
+    /// no internal action.
+    #[test]
+    fn the_root_lists_commands_and_ends_in_the_action_row() {
+        let listed = names_for("");
+        assert_eq!(
+            (
+                ["open", "quit", "run"].map(|name| listed.contains(&name)),
+                listed.contains(&"focus-left"),
+                listed.last(),
+            ),
+            ([true; 3], false, Some(&"action")),
+        );
+    }
+
+    /// The word `action` puts the `action` row first, ahead of a command whose
+    /// name also matches it, such as `walkthrough-description`. So Enter opens
+    /// the list of the internal actions.
+    #[test]
+    fn the_word_action_puts_the_action_row_first() {
+        assert_eq!(names_for("action").first(), Some(&"action"));
+    }
+
+    /// The `action` token lists the internal actions, and neither the commands
+    /// nor the `action` row.
+    #[test]
+    fn the_action_token_lists_the_internal_actions() {
+        let listed = names_for("action ");
+        assert_eq!(
+            (
+                ["focus-left", "close-pane"].map(|name| listed.contains(&name)),
+                ["open", "action"].map(|name| listed.contains(&name)),
+            ),
+            ([true; 2], [false; 2]),
+        );
+    }
+
+    /// An internal action resolves under the `action` token, by its kebab or
+    /// its PascalCase name, and nowhere else. A hidden action resolves under no
+    /// token, and a command resolves at the root.
+    #[test]
+    fn an_internal_action_resolves_only_under_the_action_token() {
+        let ctx = Availability::default();
+        let split =
+            |text| split_head(text, &ctx).map(|(entry, head, tail)| (entry.def.name(), head, tail));
+        assert_eq!(
+            [
+                "focus-left",
+                "action open x",
+                "action ",
+                "action picker-next",
+                "action focus-left",
+                "action rename-workspace new name",
+                "action RenameWorkspace x",
+                "OpenFile a",
+            ]
+            .map(split),
+            [
+                None,
+                None,
+                None,
+                None,
+                Some(("FocusLeft", "action focus-left", "")),
+                Some(("RenameWorkspace", "action rename-workspace", "new name")),
+                Some(("RenameWorkspace", "action RenameWorkspace", "x")),
+                Some(("OpenFile", "OpenFile", "a")),
+            ],
+        );
+    }
+
+    /// Enter on the `action` row writes its token and a space, which opens the
+    /// list of the internal actions.
+    #[test]
+    fn enter_on_the_action_row_opens_the_action_list() {
+        let mut h = Stoat::test();
+        h.type_text(":action");
+        h.type_keys("enter");
+
+        let palette = h.stoat.command_palette.as_ref().expect("palette open");
+        assert_eq!(
+            (palette_text(&h), palette.namespace),
+            ("action ".to_owned(), Namespace::Actions),
+        );
+    }
+
+    /// Tab under the `action` token completes an internal action with the
+    /// token kept. For an action that takes an argument, Tab also adds the
+    /// space that opens it.
+    #[test]
+    fn tab_completes_an_internal_action_under_the_action_token() {
+        let completed = |text: &str| {
+            let mut h = Stoat::test();
+            h.type_text(text);
+            let _ = h.snapshot();
+            h.type_keys("tab");
+            palette_text(&h)
+        };
+        assert_eq!(
+            [completed(":action rename-w"), completed(":action focus-l")],
+            ["action rename-workspace ", "action focus-left"].map(String::from),
+        );
+    }
+
+    /// History records a command by its alias or its command name, so the
+    /// recalled line runs again at the root.
+    #[test]
+    fn a_command_records_its_alias_or_its_command_name() {
+        let mut h = Stoat::test();
+        h.type_text(":pwd");
+        h.type_keys("enter");
+
+        let head = |name| history_head(registry::lookup(name).expect("a registered action"));
+        assert_eq!(
+            (
+                h.stoat.active_workspace().palette_history.entries(),
+                ["SetCwd", "ShowCwd", "FocusLeft"].map(head),
+            ),
+            (
+                &["pwd".to_owned()][..],
+                ["cd", "pwd", "action focus-left"].map(String::from),
+            ),
+        );
+    }
+
+    /// A saved line whose first word names an internal action and no command
+    /// gains the `action` token, and any other line stays as it is.
+    #[test]
+    fn an_old_history_line_of_an_internal_action_gains_the_action_token() {
+        let lines = [
+            "FocusLeft",
+            "RenameWorkspace foo",
+            "cd /x",
+            "w",
+            "git log main",
+            "nonsense",
+        ];
+        assert_eq!(
+            lines.map(|line| migrate_history_line(line.to_owned())),
+            [
+                "action FocusLeft",
+                "action RenameWorkspace foo",
+                "cd /x",
+                "w",
+                "git log main",
+                "nonsense",
+            ]
+            .map(String::from),
+        );
+    }
+
+    /// At the root the header counts the commands on show and the internal
+    /// actions behind the `action` row. Under the token it counts the actions
+    /// on show out of those the scope offers.
+    #[test]
+    fn the_header_counts_the_commands_and_the_actions() {
+        let mut h = Stoat::test();
+        let mut header = |text: &str| {
+            h.type_text(text);
+            let _ = h.snapshot();
+            let palette = h.stoat.command_palette.as_ref().expect("palette open");
+            let counts = (palette.filtered.len(), palette.action_offering);
+            let text = h.rendered_text();
+            let line = text
+                .lines()
+                .find(|line| line.contains('\u{276f}'))
+                .unwrap_or_default()
+                .trim_end_matches('\u{2502}')
+                .to_owned();
+            (counts, line)
+        };
+        let ((listed, more), root) = header(":");
+        let ((_, actions), namespace) = header("action ");
+
+        assert_eq!(
+            (
+                root.ends_with(&format!(
+                    "{} commands \u{b7} action for {more} more",
+                    listed - 1
+                )),
+                namespace.ends_with(&format!("{actions} of {actions} actions")),
+            ),
+            (true, true),
+            "the header reads {root:?} and then {namespace:?}",
         );
     }
 
@@ -1901,21 +2354,24 @@ mod tests {
         h.type_text(":");
         h.settle();
 
-        let (rows, first, next) = pasted_frames(&mut h, &format!("{}q", " ".repeat(80)));
+        let (rows, first, next) = pasted_frames(&mut h, &format!("{}q", " ".repeat(50)));
         assert_eq!((rows, first), (2, next));
     }
 
     /// A typed head names its command by the head that `split_head` finds, by
     /// the whole text as a name or an alias, or as the one command whose name
     /// it starts. A prefix with whitespace in it names no command, so `git lo`
-    /// names none although only `git log` starts with it. The ghost completes
-    /// the command's name, or names it after a separator when the head is no
+    /// names none although only `git log` starts with it. The `action` row
+    /// takes part as a command, so `act` names it, and an internal action such
+    /// as `focus-left` names nothing at the root. The ghost completes the
+    /// command's name, or names it after a separator when the head is no
     /// prefix of it.
     #[test]
     fn a_typed_head_resolves_by_name_alias_or_unique_prefix() {
         let ctx = Availability::default();
         let resolved = |text: &str| {
-            let name = typed_head(text, PaletteScope::All, &ctx).map(|(entry, _)| entry.def.name());
+            let name =
+                named_command(text, PaletteScope::All, &ctx).map(|(entry, _)| entry.def.name());
             let shown = resolve_typed(text, PaletteScope::All, &ctx);
             name.zip(shown)
                 .map(|(name, shown)| (name, shown.head_chars, shown.ghost))
@@ -1932,6 +2388,8 @@ mod tests {
             "zz",
             "git ",
             "git lo",
+            "act",
+            "focus-left",
         ];
 
         assert_eq!(
@@ -1947,6 +2405,8 @@ mod tests {
                 None,
                 None,
                 None,
+                None,
+                Some(("action", 3, "ion".to_owned())),
                 None,
             ],
         );
@@ -2198,7 +2658,7 @@ mod tests {
 
     #[test]
     fn substring_filter_after_prefix() {
-        let listed = names_for("pane");
+        let listed = names_for("action pane");
         // ClosePane has "Pane" as a substring but not as a prefix.
         assert!(listed.contains(&"close-pane"));
     }
@@ -2665,7 +3125,7 @@ mod tests {
     #[test]
     fn command_palette_ctrl_n_then_enter_dispatches_selection() {
         let mut h = Stoat::test();
-        h.type_text(":focus");
+        h.type_text(":action focus");
         h.type_keys("ctrl-n enter");
         assert!(h.stoat.command_palette.is_none());
     }
@@ -2802,7 +3262,7 @@ mod tests {
     #[test]
     fn a_fuzzy_list_submit_records_the_entry_head() {
         let mut h = Stoat::test();
-        h.type_text(":focus");
+        h.type_text(":action focus");
         h.type_keys("ctrl-n enter");
 
         let history = h
@@ -2813,8 +3273,9 @@ mod tests {
             .to_vec();
         assert_eq!(history.len(), 1, "the submitted entry is recorded");
         assert!(
-            registry::lookup_alias(&history[0]).is_some(),
-            "the recorded head re-resolves through lookup_alias, got {:?}",
+            history[0].starts_with("action focus-")
+                && split_head(&history[0], &Availability::default()).is_some(),
+            "the recorded head names the action under its token and re-resolves, got {:?}",
             history[0]
         );
     }
@@ -4012,7 +4473,7 @@ mod tests {
         let PaletteOutcome::Dispatch(_, _, line) = palette.handle_submit(ws) else {
             panic!("next must dispatch during a walk");
         };
-        assert_eq!(line, "ReviewNextCommit");
+        assert_eq!(line, "review-next-commit");
         assert_eq!(
             registry::lookup_alias(&line).map(|e| e.def.name()),
             Some("ReviewNextCommit"),
@@ -4149,7 +4610,7 @@ mod tests {
     #[test]
     fn snapshot_command_palette_free_arg() {
         let mut h = TestHarness::with_size(120, 30);
-        h.type_text(":RenameWorkspace ");
+        h.type_text(":action rename-workspace ");
         h.assert_snapshot("command_palette_free_arg");
     }
 
@@ -4157,7 +4618,7 @@ mod tests {
     fn free_arg_submit_dispatches() {
         let mut h = Stoat::test();
         assert_eq!(
-            palette_dispatch_name(&mut h, ":RenameWorkspace newname"),
+            palette_dispatch_name(&mut h, ":action rename-workspace newname"),
             Some("RenameWorkspace"),
         );
     }
@@ -4328,7 +4789,7 @@ mod tests {
     #[test]
     fn abort_rebase_hidden_by_default_visible_after_backtab() {
         let mut h = Stoat::test();
-        h.type_text(":abort");
+        h.type_text(":action abort");
         {
             let palette = h.stoat.command_palette.as_ref().unwrap();
             let names: Vec<_> = palette.filtered.iter().map(|e| e.def.name()).collect();
@@ -5343,7 +5804,7 @@ mod tests {
     #[test]
     fn snapshot_command_palette_multi_token_highlight() {
         let mut h = Stoat::test();
-        h.type_text(":file open");
+        h.type_text(":action file open");
         h.assert_snapshot("command_palette_multi_token_highlight");
     }
 

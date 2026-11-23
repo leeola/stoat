@@ -641,9 +641,9 @@ pub(super) fn palette_complete(stoat: &mut Stoat) -> UpdateEffect {
             let Some(entry) = palette.filtered.get(palette.selected).copied() else {
                 return UpdateEffect::None;
             };
-            let token = &entry.command_name;
+            let token = command_palette::typed_head(entry);
             let completed = if entry.def.params().is_empty() {
-                token.clone()
+                token
             } else {
                 format!("{token} ")
             };

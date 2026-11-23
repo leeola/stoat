@@ -58,6 +58,7 @@ const DIVIDER: [u8; 3] = [0x22, 0x25, 0x2b];
 const STRONG: [u8; 3] = [0x3e, 0x43, 0x4e];
 const DISABLED: [u8; 3] = [0x5b, 0x61, 0x6d];
 const TINT_ACCENT: [u8; 3] = [0x22, 0x30, 0x49];
+const TINT_INTERNAL: [u8; 3] = [0x1b, 0x2a, 0x2d];
 const DANGER: [u8; 3] = [0xf2, 0x77, 0x7f];
 const SUCCESS: [u8; 3] = [0x8f, 0xd1, 0x8a];
 const WARNING: [u8; 3] = [0xe8, 0xbd, 0x6a];
@@ -1406,6 +1407,55 @@ fn the_doc_island_tags_the_selected_command() {
         522..540,
         (216, 523, 285, 538),
         "doc_tag",
+    );
+}
+
+/// The root list ends in the `action` row under a 1 px rule, and the row's
+/// Source Tag reads `internal` on the internal tint.
+///
+/// Twenty pages down select the last row, so the `action` row stands on the
+/// list's last cell row, 27, the pixel rows 486 to 503. The rule runs along
+/// the row's top pixel row, and its tag's box covers the pixels from (1208,
+/// 487) to (1277, 502). The row above keeps its `built-in` tag. The selected
+/// row reads the tab wash in the gap from its signature's end at x 512 to its
+/// description's start at x 639.
+#[test]
+fn the_root_list_ends_in_the_action_row_under_a_rule() {
+    let mut home = support::scratch_home();
+    let keys = format!(":{}<Settle>", "<PageDown>".repeat(20));
+    let shot = palette_frame(home.path(), &keys);
+
+    let rule = longest_run(&shot, (170, 486, 1000), DIVIDER);
+    if rule != 1000 {
+        let frame = keep_frame(&shot, &mut home, "action_rule");
+        panic!(
+            "the longest run of the divider color {} on the pixel row 486 is {rule} px, where \
+             the rule runs 1000 px from x 170; the frame is {}",
+            hex(DIVIDER),
+            frame.display(),
+        );
+    }
+    expect_color_box(
+        &shot,
+        &mut home,
+        TINT_INTERNAL,
+        486..504,
+        (1208, 487, 1277, 502),
+        "internal_tag",
+    );
+    expect_region(
+        &shot,
+        &mut home,
+        (1209, 476, 4, 2),
+        OVERLAY,
+        "built_in_tag_above",
+    );
+    expect_region(
+        &shot,
+        &mut home,
+        (560, 495, 1, 1),
+        TAB_WASH,
+        "action_row_wash",
     );
 }
 

@@ -246,7 +246,8 @@ define_action!(
     ActionKind::ReloadEnv,
     "reload the project environment",
     "Re-run direnv against the active workspace's root and replace its stored environment diff. Runs even when `direnv.load` is disabled, since invoking it is explicit intent. Child processes spawned after the reload pick up the new environment; already-running ones keep theirs.",
-    ActionPriority::Common
+    ActionPriority::Common,
+    command_name = "reload-env"
 );
 
 #[cfg(test)]
@@ -289,8 +290,8 @@ mod tests {
         assert_eq!(ReloadEnv.def().name(), "ReloadEnv");
         assert_eq!(
             ReloadEnv.def().command_name(),
-            None,
-            "reload-env is the derived name"
+            Some("reload-env"),
+            "reload-env names the command, so the palette's root lists it"
         );
     }
 

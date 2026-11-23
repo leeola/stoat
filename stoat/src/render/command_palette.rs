@@ -1,5 +1,7 @@
 use crate::{
-    command_palette::{ArgPicker, CommandPalette, ResolvedCommand},
+    command_palette::{
+        is_action_row, ArgPicker, CommandPalette, Namespace, ResolvedCommand, ACTION_TOKEN,
+    },
     input_view::InputView,
     keymap::ActionKeys,
     render::{
@@ -51,10 +53,6 @@ const SOURCE_TAG_HEIGHT: u16 = 14;
 /// The radius a Source Tag's box rounds its corners at, in logical pixels,
 /// the board's `border-radius: 4px`.
 const SOURCE_TAG_RADIUS: u8 = 4;
-
-/// The label and the color scope of the Source Tag that ends every root row,
-/// because every command in the registry ships with stoat.
-const BUILT_IN_TAG: (&str, &str) = ("built-in", crate::theme::scope::UI_CMD_SOURCE_BUILTIN);
 
 /// Box rows the chrome takes around the list. Two borders, the Cmd Line's first
 /// row, the separator under it, the doc separator, the doc region itself, and
@@ -296,6 +294,7 @@ pub(crate) fn render_command_palette(
     }
 
     let content_rows = palette.list_rows_hint();
+    let status = filter_status(palette, theme);
     render_palette_filter(
         &palette.input,
         &palette.filtered,
@@ -306,6 +305,7 @@ pub(crate) fn render_command_palette(
         zoom,
         &mut palette.header_rows,
         palette.resolved.as_ref(),
+        &status,
         &palette.keys,
         ws,
         home,
@@ -605,10 +605,12 @@ fn render_palette_prelude(
 /// The palette input `text` as Cmd Line spans, and the display caret for the
 /// typed caret at char `caret`.
 ///
-/// A `resolved` head draws in `ui.cmd.command`, its ghost follows in
-/// `ui.cmd.ghost`, and the rest of the text draws in `ui.text`. A theme that
-/// leaves `ui.cmd.command` unset draws the head as the rest, and a theme that
-/// leaves `ui.cmd.ghost` unset draws no ghost.
+/// A `resolved` head draws in `ui.cmd.command`, or in `ui.cmd.action` when it
+/// names no command. Its ghost follows in `ui.cmd.ghost`, and the rest of the
+/// text draws in `ui.text`. A theme that leaves `ui.cmd.action` unset draws an
+/// action's head as a command's. A theme that leaves `ui.cmd.command` unset
+/// draws a command's head as the rest, and one that leaves `ui.cmd.ghost`
+/// unset draws no ghost.
 ///
 /// The ghost is display only, so the caret stays on the typed text. A caret
 /// past the head moves right by the ghost's chars, and a caret at the head's
@@ -632,7 +634,13 @@ fn input_spans(
     let command = theme
         .try_get(crate::theme::scope::UI_CMD_COMMAND)
         .unwrap_or(plain);
-    let mut spans = vec![(head.to_owned(), command)];
+    let head_style = match resolved.entry.is_command() {
+        true => command,
+        false => theme
+            .try_get(crate::theme::scope::UI_CMD_ACTION)
+            .unwrap_or(command),
+    };
+    let mut spans = vec![(head.to_owned(), head_style)];
 
     let mut shown = caret;
     let ghost = theme
@@ -649,6 +657,42 @@ fn input_spans(
         spans.push((rest.to_owned(), plain));
     }
     (spans, shown)
+}
+
+/// The Cmd Line status over `palette`'s list.
+///
+/// At the root it counts the commands on show. Then it names the `action` row
+/// and the internal actions that the scope offers behind it, as `11 commands ·
+/// action for 1,204 more`. Under the `action` token it counts the actions on
+/// show out of those that the scope offers, as `8 of 1,204 actions`. The
+/// `action` token reads in the `ui.cmd.action` foreground.
+fn filter_status(palette: &CommandPalette, theme: &crate::theme::Theme) -> Vec<(String, Style)> {
+    let more = grouped(palette.action_offering);
+    if palette.namespace == Namespace::Actions {
+        let rest = format!(" of {more} actions");
+        return count_status(palette.filtered.len(), &rest, theme);
+    }
+
+    let muted = theme.get(crate::theme::scope::UI_TEXT_MUTED);
+    let token = match theme
+        .try_get(crate::theme::scope::UI_CMD_ACTION)
+        .and_then(|style| style.fg)
+    {
+        Some(fg) => muted.fg(fg),
+        None => muted,
+    };
+    let shown = palette
+        .filtered
+        .iter()
+        .filter(|entry| !is_action_row(entry))
+        .count();
+    let mut spans = count_status(shown, " commands", theme);
+    spans.extend([
+        (" \u{b7} ".to_owned(), muted),
+        (ACTION_TOKEN.to_owned(), token),
+        (format!(" for {more} more"), muted),
+    ]);
+    spans
 }
 
 /// The Cmd Line status that counts `shown` entries, the count and then `rest`,
@@ -686,8 +730,9 @@ fn grouped(count: usize) -> String {
 /// Render the command list and the selected command's doc under the Cmd Line.
 ///
 /// `header_rows` holds the rows that the Cmd Line took in the last frame, and
-/// the paint stores there the rows that it draws. The doc names the keys of
-/// `keys` that run the selected command's action.
+/// the paint stores there the rows that it draws. The Cmd Line ends in
+/// `status`, and the doc names the keys of `keys` that run the selected
+/// command's action.
 #[allow(clippy::too_many_arguments)]
 fn render_palette_filter(
     input: &InputView,
@@ -699,6 +744,7 @@ fn render_palette_filter(
     zoom: i8,
     header_rows: &mut u16,
     resolved: Option<&ResolvedCommand>,
+    status: &[(String, Style)],
     keys: &ActionKeys,
     ws: &mut Workspace,
     home: Option<&Path>,
@@ -711,11 +757,10 @@ fn render_palette_filter(
     let Some(layout) = palette_filter_layout(area, content_rows, zoom, *header_rows) else {
         return;
     };
-    let status = count_status(filtered.len(), " commands", theme);
     *header_rows = render_palette_prelude(
         input,
         resolved,
-        CmdStatus::Text(&status),
+        CmdStatus::Text(status),
         layout.modal,
         layout.inner,
         home,
@@ -772,11 +817,12 @@ fn render_palette_filter(
             );
         }
         let width = usize::from(inner.width.saturating_sub(1));
-        let lines = filtered
-            .get(selected)
+        let entry = filtered.get(selected).copied();
+        let lines = entry
             .map(|entry| doc_lines(entry, keys, width, theme))
             .unwrap_or_default();
-        paint_doc_lines(buf, doc, &lines, theme, scene);
+        let tag = entry.and_then(source_tag);
+        paint_doc_lines(buf, doc, &lines, tag, theme, scene);
     }
 
     let parts = Footer {
@@ -790,12 +836,14 @@ fn render_palette_filter(
 /// line's spans one after another from the region's second cell, clipped at
 /// its right edge.
 ///
-/// The first line ends in the built-in Source Tag one cell after its text, as
-/// [`paint_doc_tag`] places it.
+/// The first line ends in `tag` one cell after its text, as [`paint_doc_tag`]
+/// places it. The tag is a Source Tag's label and color scope, as
+/// [`source_tag`] gives them.
 fn paint_doc_lines(
     buf: &mut Buffer,
     doc: Rect,
     lines: &[Vec<(String, Style)>],
+    tag: Option<(&str, &str)>,
     theme: &crate::theme::Theme,
     scene: &mut stoat_widgets::ApcScene,
 ) {
@@ -807,26 +855,32 @@ fn paint_doc_lines(
             x = x.saturating_add(text.chars().count() as u16);
         }
 
-        if row == doc.y {
-            paint_doc_tag(buf, x.saturating_add(1), row, end, theme, scene);
+        if let Some((label, scope)) = tag.filter(|_| row == doc.y) {
+            paint_doc_tag(
+                buf,
+                (x.saturating_add(1), row, end),
+                label,
+                scope,
+                theme,
+                scene,
+            );
         }
     }
 }
 
-/// Paint the built-in Source Tag of a doc region's first line from cell `x`
-/// of `row`, as [`paint_source_tag`] draws it.
+/// Paint the Source Tag `label` in the colors of `scope` on a doc region's
+/// first line, from cell `x` of `row`, as [`paint_source_tag`] draws it.
 ///
-/// A theme that leaves the tag's scope unset draws no tag, and neither does a
-/// tag that does not end one cell inside `end`, the region's right edge.
+/// A theme that leaves `scope` unset draws no tag. A tag that does not end one
+/// cell inside `end`, the region's right edge, does not draw.
 fn paint_doc_tag(
     buf: &mut Buffer,
-    x: u16,
-    row: u16,
-    end: u16,
+    (x, row, end): (u16, u16, u16),
+    label: &str,
+    scope: &str,
     theme: &crate::theme::Theme,
     scene: &mut stoat_widgets::ApcScene,
 ) {
-    let (label, scope) = BUILT_IN_TAG;
     let Some(style) = theme.try_get(scope) else {
         return;
     };
@@ -849,8 +903,9 @@ fn paint_doc_tag(
 /// cell, and [`paint_doc_lines`] ends it in the command's Source Tag. The
 /// [`usage_line`] follows, then the long description wrapped to `width`, and
 /// last the action the command runs with the keys of `keys` that reach it.
-/// The argument stage names the parameter that it collects, so no line names
-/// a parameter.
+/// The `action` row runs no action of its own, so its doc ends in the
+/// description. The argument stage names the parameter that it collects, so
+/// no line names a parameter.
 fn doc_lines(
     entry: &RegistryEntry,
     keys: &ActionKeys,
@@ -877,6 +932,9 @@ fn doc_lines(
             .into_iter()
             .map(|line| vec![(line, dim)]),
     );
+    if is_action_row(entry) {
+        return lines;
+    }
 
     let action = entry.def.name();
     let mut runs = vec![
@@ -933,6 +991,11 @@ fn signature(entry: &RegistryEntry) -> String {
 /// clips at [`SIGNATURE_COLUMNS`], because the doc region shows the whole
 /// usage line.
 ///
+/// The name of an entry that is no command, an internal action or the
+/// `action` row, draws in `ui.cmd.action`. Under a live scene a 1 px rule in
+/// `ui.divider` sets the `action` row off from the commands above it. No rule
+/// draws when the row leads the whole list.
+///
 /// Each name leaves out its first `name_offset` bytes, the group token and
 /// space a grouped list's title already shows, and so does an alias that
 /// starts with them. A match position indexes the whole name, so one inside
@@ -975,20 +1038,21 @@ pub(crate) fn paint_palette_rows(
     let name_cols = widest(shown_name, NAME_COLUMNS);
     let alias_cols = widest(shown_alias, ALIAS_COLUMNS);
 
-    let (tag_label, tag_scope) = BUILT_IN_TAG;
-    let tag = theme.try_get(tag_scope).map(|style| {
+    let action_style = theme
+        .try_get(crate::theme::scope::UI_CMD_ACTION)
+        .unwrap_or(name_style);
+    let divider = style_rgb(theme.get(crate::theme::scope::UI_DIVIDER).fg).filter(|_| scene.live());
+    let tag_of = |entry: &RegistryEntry| {
+        let (label, scope) = source_tag(entry)?;
+        let style = theme.try_get(scope)?;
         let start = area
             .width
             .saturating_sub(1)
             .saturating_mul(16)
-            .saturating_sub(source_tag_width(tag_label, theme));
-        (start, style)
-    });
-    let end_x = area.x + area.width;
-    let desc_end = match tag {
-        Some((start, _)) => area.x + (start / 16).saturating_sub(1),
-        None => end_x.saturating_sub(1),
+            .saturating_sub(source_tag_width(label, theme));
+        Some((label, start, style))
     };
+    let end_x = area.x + area.width;
     let empty_indices: Vec<u32> = Vec::new();
 
     for (row_idx, entry) in on_show().enumerate() {
@@ -1012,10 +1076,29 @@ pub(crate) fn paint_palette_rows(
             },
             (true, false) => style,
         };
+        if is_action_row(entry)
+            && abs > 0
+            && let Some(color) = divider
+        {
+            let rule = Bar {
+                x: 2,
+                y: 0,
+                width: area.width.saturating_mul(16).saturating_sub(4),
+                height: 1,
+                color,
+                radius: 0,
+                corners: 0,
+            };
+            StatefulWidget::render(rule, row, buf, scene);
+        }
 
         let name = shown_name(entry, name_offset);
         let name_x = area.x + 1;
-        write_str_clipped(buf, name_x, row.y, name, column(name_style), end_x);
+        let own_name = match entry.is_command() {
+            true => name_style,
+            false => action_style,
+        };
+        write_str_clipped(buf, name_x, row.y, name, column(own_name), end_x);
         let indices = match_indices.get(abs).unwrap_or(&empty_indices);
         for (name_col, _) in name.chars().enumerate() {
             let col = name_x + name_col as u16;
@@ -1046,12 +1129,17 @@ pub(crate) fn paint_palette_rows(
             signature_end,
         );
 
+        let tag = tag_of(entry);
+        let desc_end = match tag {
+            Some((_, start, _)) => area.x + (start / 16).saturating_sub(1),
+            None => end_x.saturating_sub(1),
+        };
         let desc_x = signature_x.saturating_add(SIGNATURE_COLUMNS + 1);
         let desc = entry.def.short_desc();
         write_str_clipped(buf, desc_x, row.y, desc, column(dim), desc_end);
 
-        if let Some((start, style)) = tag {
-            paint_source_tag(buf, row, start, tag_label, style, theme, scene);
+        if let Some((label, start, style)) = tag {
+            paint_source_tag(buf, row, start, label, style, theme, scene);
         }
     }
 }
@@ -1074,6 +1162,20 @@ fn shown_alias(entry: &RegistryEntry, offset: usize) -> &str {
         .get(..offset)
         .and_then(|token| alias.strip_prefix(token))
         .unwrap_or(alias)
+}
+
+/// The label and the color scope of the Source Tag that ends `entry`'s row, or
+/// `None` for an internal action, whose list names no source.
+///
+/// The `action` row reads `internal`. A command reads `built-in`, because every
+/// command in the registry ships with stoat.
+fn source_tag(entry: &RegistryEntry) -> Option<(&'static str, &'static str)> {
+    if is_action_row(entry) {
+        return Some(("internal", crate::theme::scope::UI_CMD_SOURCE_INTERNAL));
+    }
+    entry
+        .is_command()
+        .then_some(("built-in", crate::theme::scope::UI_CMD_SOURCE_BUILTIN))
 }
 
 /// The width of a Source Tag's box for `label`, in sixteenths of a cell.
@@ -1143,11 +1245,11 @@ fn paint_source_tag(
 mod tests {
     use super::{
         count_status, doc_lines, grouped, input_spans, paint_doc_lines, paint_palette_rows,
-        palette_filter_layout, render_command_palette, usage_line, wrap_text, DOC_ROWS,
+        palette_filter_layout, render_command_palette, source_tag, usage_line, wrap_text, DOC_ROWS,
         ISLAND_BOTTOM, ISLAND_GAP, ISLAND_SIDE, ISLAND_TOP, LIST_ROWS,
     };
     use crate::{
-        command_palette::ResolvedCommand,
+        command_palette::{action_row, ResolvedCommand},
         keymap::ActionKeys,
         render::editor::ResolvedChrome,
         test_fixture::{plate_islands, row_rules},
@@ -1211,6 +1313,7 @@ mod tests {
             Theme::from_config(&config.expect("theme parses"), "t").expect("theme loads")
         };
         let open = ResolvedCommand {
+            entry: registry::lookup_alias("open").expect("a command"),
             head_chars: 1,
             ghost: "pen".to_owned(),
         };
@@ -1627,6 +1730,82 @@ mod tests {
         );
     }
 
+    /// A 1 px rule in `ui.divider` runs along the top of the `action` row, 1 px
+    /// inside the list on each side. The rule draws only where a row stands
+    /// above the `action` row.
+    #[test]
+    fn a_rule_sets_the_action_row_off_from_the_commands() {
+        let theme = {
+            let src = r##"theme t { ui.divider.fg = "#070707"; }"##;
+            let (config, _) = stoat_config::parse(src);
+            Theme::from_config(&config.expect("theme parses"), "t").expect("theme loads")
+        };
+        let rules = |entries: &[&'static registry::RegistryEntry]| {
+            let list = Rect::new(0, 0, 40, entries.len() as u16);
+            let mut buf = Buffer::empty(list);
+            let mut scene = stoat_widgets::ApcScene::new();
+            let indices = vec![Vec::new(); entries.len()];
+            paint_palette_rows(
+                entries,
+                &indices,
+                usize::MAX,
+                0,
+                list,
+                0,
+                &theme,
+                false,
+                &mut buf,
+                &mut scene,
+            );
+            decode_stream(scene.bytes())
+                .into_iter()
+                .filter_map(|command| match command {
+                    Command::Bar(bar) => Some(bar),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+        };
+        let command = |name| registry::lookup_alias(name).expect("a command");
+        let rows = [command("open"), command("quit"), action_row()];
+
+        assert_eq!(
+            (rules(&rows), rules(&[action_row()])),
+            (
+                vec![BarCommand {
+                    x: 2,
+                    y: 32,
+                    width: 40 * 16 - 4,
+                    height: 1,
+                    color: [7, 7, 7],
+                    occludes: false,
+                    hatch: None,
+                    radius: 0,
+                    corners: 0,
+                }],
+                Vec::new(),
+            ),
+        );
+    }
+
+    /// The `action` row runs no action of its own, so its doc ends in its
+    /// description with no `runs action` line.
+    #[test]
+    fn the_action_row_doc_ends_in_its_description() {
+        let lines = doc_lines(action_row(), &ActionKeys::new(), 400, &Theme::empty());
+        let texts: Vec<Vec<String>> = lines
+            .into_iter()
+            .map(|line| line.into_iter().map(|(text, _)| text).collect())
+            .collect();
+        assert_eq!(
+            texts,
+            [
+                vec!["action".to_owned()],
+                vec!["action <action> [args]".to_owned()],
+                vec![action_row().def.long_desc().to_owned()],
+            ],
+        );
+    }
+
     /// A doc line wider than the doc region stops at the region's right edge,
     /// so it paints nothing onto the border or the editor behind.
     #[test]
@@ -1639,6 +1818,7 @@ mod tests {
             &mut buf,
             doc,
             &lines,
+            None,
             &Theme::empty(),
             &mut stoat_widgets::ApcScene::new(),
         );
@@ -1695,7 +1875,7 @@ mod tests {
             let mut scene = stoat_widgets::ApcScene::new();
             scene.set_live(false);
             let doc = Rect::new(0, 0, width, 6);
-            paint_doc_lines(&mut buf, doc, &lines, &theme, &mut scene);
+            paint_doc_lines(&mut buf, doc, &lines, source_tag(entry), &theme, &mut scene);
             row_text(&buf, 0)
         };
 

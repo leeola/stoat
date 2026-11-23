@@ -378,6 +378,7 @@ theme ermine_night inherits default_dark {
     ui.cmd.prompt.fg   = dim;
     ui.cmd.command     = { fg: special, modifiers: [bold] };
     ui.cmd.ghost.fg    = cmd_ghost;
+    ui.cmd.action      = { fg: info, modifiers: [bold] };
     ui.cmd.source.builtin  = { fg: dim, bg: overlay };
     ui.cmd.source.config   = { fg: special, bg: tint_special };
     ui.cmd.source.cli      = { fg: success, bg: tint_success };
