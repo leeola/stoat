@@ -200,41 +200,8 @@ pub struct FileFinder {
     pub(crate) input: InputView,
     /// What submit should do with the selected file.
     pub(crate) open_intent: OpenIntent,
-    pub(crate) scope: FinderScope,
-    /// Absolute paths of currently-modified files. Re-queried on scope toggle.
-    ///
-    /// Empty until the first background query lands, and thereafter the
-    /// previous answer while a re-query is in flight, so a refresh never blinks
-    /// the rows empty.
-    pub(crate) modified_paths: Vec<PathBuf>,
-    /// The in-flight git-status query feeding [`Self::modified_paths`], and the
-    /// task running it.
-    ///
-    /// The query is a full status pass with untracked recursion, far too slow
-    /// to run where a keystroke waits on it, so it runs on the blocking pool and
-    /// reports back here. `None` once its answer has been taken. The task is
-    /// held so dropping the finder drops the query with it.
-    modified: Option<(UnboundedReceiver<Vec<PathBuf>>, Task<()>)>,
-    /// Absolute paths of the [`FinderScope::Diff`] base, or `None` when the
-    /// finder opened over no diff. Captured once at open time.
-    pub(crate) diff_paths: Option<Vec<PathBuf>>,
-    /// Which generation of [`Self::modified_paths`], [`Self::diff_paths`],
-    /// [`Self::buffer_paths`], and [`Self::dirty_buffer_paths`] the pick list
-    /// shows.
-    ///
-    /// The lists are fixed between the moments they are replaced, so the
-    /// picker only has to be told when one is, and otherwise keeps the rows it
-    /// derived from them. Restamped wherever one is rebuilt.
-    base_generation: u64,
-    /// Absolute paths of currently-open buffers. Captured once at open time;
-    /// not re-queried on scope toggle.
-    pub(crate) buffer_paths: Vec<PathBuf>,
-    /// Absolute paths of the open buffers with unsaved edits, the
-    /// [`FinderScope::ModifiedBuffers`] base. Captured once at open time like
-    /// [`Self::buffer_paths`].
-    ///
-    /// Sorted, because the row paint finds a row's dot here by binary search.
-    pub(crate) dirty_buffer_paths: Vec<PathBuf>,
+    /// The scope on show, the lists that its scopes read, and the named scopes.
+    pub(crate) scopes: FileScopes,
     /// The [`crate::app::Stoat::finder_path_epoch`] this finder's walk started
     /// under, carried into [`FinderPathCache`] on close.
     ///
@@ -259,12 +226,6 @@ pub struct FileFinder {
     pub(crate) ignored: Option<PathPicker>,
     /// Active directory-browse mode, or `None` for the normal workspace list.
     pub(crate) browse: Option<Browse>,
-    /// Config-defined named scopes, compiled at open time in alphabetical
-    /// (BTreeMap) order. Shift-Tab cycles through them after Modified.
-    pub(crate) named_scopes: Vec<(String, GlobSet)>,
-    /// Glob-filtered base for the active [`FinderScope::Named`] scope, or
-    /// `None` before one is built.
-    pub(crate) named_cache: Option<NamedCache>,
     /// Rows the modal needs to show the whole unfiltered list, which the
     /// renderer sizes the box's height against.
     ///
@@ -356,19 +317,18 @@ impl FileFinder {
         let mut finder = Self {
             input,
             open_intent,
-            scope: initial_scope,
-            modified_paths: Vec::new(),
-            modified: Some(modified),
-            diff_paths,
-            buffer_paths,
-            dirty_buffer_paths,
+            scopes: FileScopes::new(
+                initial_scope,
+                modified,
+                diff_paths,
+                buffer_paths,
+                dirty_buffer_paths,
+                finder_scopes,
+            ),
             walk_epoch,
-            base_generation: crate::picker::next_generation(),
             core,
             ignored: None,
             browse: None,
-            named_scopes: compile_named_scopes(finder_scopes),
-            named_cache: None,
             content_rows: 0,
             plate_width: 0,
         };
@@ -379,7 +339,7 @@ impl FileFinder {
     }
 
     pub(crate) fn scope(&self) -> &FinderScope {
-        &self.scope
+        &self.scopes.scope
     }
 
     /// The picker currently driving the list. Browse mode (a `/` or `~/`
@@ -419,7 +379,7 @@ impl FileFinder {
     /// that holds nothing keeps its empty rows, and a fallback built under All
     /// stays through a flip away, so a return to All reuses it.
     pub(crate) fn fallback_active(&self) -> bool {
-        if self.browse.is_none() && self.scope != FinderScope::All {
+        if self.browse.is_none() && self.scopes.scope != FinderScope::All {
             return false;
         }
         let (list, fallback) = self.list_and_fallback();
@@ -438,7 +398,7 @@ impl FileFinder {
         }
         match &self.browse {
             Some(browse) => Some(browse.root.clone()),
-            None if self.scope == FinderScope::All => Some(self.core.git_root.clone()),
+            None if self.scopes.scope == FinderScope::All => Some(self.core.git_root.clone()),
             None => None,
         }
     }
@@ -492,124 +452,25 @@ impl FileFinder {
         self.active_core().move_selection(delta);
     }
 
-    /// Flip the scope and rerun the filter against the new base.
-    ///
-    /// Landing on [`FinderScope::Modified`] wants a fresh git status, but that
-    /// query is the caller's to spawn via [`Self::set_modified_source`], since
-    /// it belongs off this thread.
-    ///
-    /// The file scopes and the buffer scopes are separate cycles. The file
-    /// scopes go All -> Modified -> each named scope -> AllWorkspaces -> All.
-    /// A finder over a diff has [`FinderScope::Diff`] in Modified's place.
-    /// [`FinderScope::Buffers`] and [`FinderScope::ModifiedBuffers`] flip with
-    /// each other, so the buffer picker never enters a file scope. A finder
-    /// reaches the buffer pair only through the dedicated `OpenBufferPicker`
-    /// action.
+    /// Flip the scope of [`Self::core`], as [`FileScopes::toggle`] flips it.
     pub(crate) fn toggle_scope(&mut self) {
-        self.scope = self.next_scope();
-        self.core.picklist.selected = 0;
-        // Force refilter + preview resync on next render against the new base.
-        self.core.invalidate();
+        self.scopes.toggle(&mut self.core);
     }
 
-    /// Point the Modified list at a freshly spawned git-status query, replacing
-    /// any query still in flight.
-    ///
-    /// The paths already shown stay until the new answer lands, so a refresh
-    /// never blinks the rows empty.
+    /// Point the Modified list at a freshly spawned git-status query, as
+    /// [`FileScopes::set_modified_source`] does.
     pub(crate) fn set_modified_source(
         &mut self,
         rx: UnboundedReceiver<Vec<PathBuf>>,
         task: Task<()>,
     ) {
-        self.modified = Some((rx, task));
+        self.scopes.set_modified_source(rx, task);
     }
 
-    /// Take the background git-status answer if it has arrived, replacing the
-    /// modified list.
-    ///
-    /// Restamping the generation alone would not show the new list. The
-    /// Modified base id keys on that generation, but
-    /// [`PathPicker::refilter_with_base`] returns early while the query is
-    /// unchanged and the filter still valid, which is exactly the state a
-    /// finder sits in after opening. Invalidating is what that method exists
-    /// for. Only the scope actually reading the list needs it, since every
-    /// other scope re-runs from [`Self::toggle_scope`]'s own invalidate on the
-    /// way in.
-    fn pump_modified(&mut self) {
-        let Some((rx, _)) = self.modified.as_mut() else {
-            return;
-        };
-        let Ok(paths) = rx.try_recv() else {
-            return;
-        };
-        self.modified = None;
-        self.modified_paths = paths;
-        self.base_generation = crate::picker::next_generation();
-        if self.scope == FinderScope::Modified {
-            self.core.invalidate();
-        }
-    }
-
-    /// The scope Shift-Tab lands on next.
-    ///
-    /// The file scopes cycle All -> Modified -> each named scope (alphabetical)
-    /// -> AllWorkspaces -> All. A finder over a diff has Diff in Modified's
-    /// place. Buffers and ModifiedBuffers flip with each other.
-    pub(crate) fn next_scope(&self) -> FinderScope {
-        self.next_scope_from(&self.scope)
-    }
-
-    /// The scopes that the header names as pills, in the order Shift-Tab walks
-    /// them.
-    ///
-    /// The walk starts at [`FinderScope::Buffers`] for the buffer picker and at
-    /// [`FinderScope::All`] for every file scope, and it steps until it comes
-    /// back to its start. The header always names the scope on show, so a
-    /// scope that the walk does not reach, such as a [`FinderScope::Modified`]
-    /// that an open forced over a diff, takes the place after the first pill.
+    /// The scopes that the header names as pills, as
+    /// [`FileScopes::scope_cycle`] orders them.
     pub(crate) fn scope_cycle(&self) -> Vec<FinderScope> {
-        let start = match self.scope {
-            FinderScope::Buffers | FinderScope::ModifiedBuffers => FinderScope::Buffers,
-            _ => FinderScope::All,
-        };
-        let mut cycle = vec![start.clone()];
-        let mut scope = self.next_scope_from(&start);
-        // The walk returns to its start. The bound ends a walk that does not,
-        // so the header still paints.
-        while scope != start && cycle.len() <= self.named_scopes.len() + 4 {
-            let next = self.next_scope_from(&scope);
-            cycle.push(scope);
-            scope = next;
-        }
-        if !cycle.contains(&self.scope) {
-            cycle.insert(1, self.scope.clone());
-        }
-        cycle
-    }
-
-    /// The scope Shift-Tab lands on from `from`, by the cycle that
-    /// [`Self::next_scope`] describes.
-    fn next_scope_from(&self, from: &FinderScope) -> FinderScope {
-        match from {
-            FinderScope::All if self.diff_paths.is_some() => FinderScope::Diff,
-            FinderScope::All => FinderScope::Modified,
-            FinderScope::Modified | FinderScope::Diff => self
-                .named_scopes
-                .first()
-                .map(|(name, _)| FinderScope::Named(name.clone()))
-                .unwrap_or(FinderScope::AllWorkspaces),
-            FinderScope::Named(current) => self
-                .named_scopes
-                .iter()
-                .position(|(name, _)| name == current)
-                .and_then(|idx| self.named_scopes.get(idx + 1))
-                .map(|(name, _)| FinderScope::Named(name.clone()))
-                .unwrap_or(FinderScope::AllWorkspaces),
-            FinderScope::AllWorkspaces => FinderScope::All,
-            FinderScope::Buffers => FinderScope::ModifiedBuffers,
-            FinderScope::ModifiedBuffers => FinderScope::Buffers,
-        }
+        self.scopes.scope_cycle()
     }
 
     /// Re-run the matcher if the input text or scope has changed since last
@@ -623,7 +484,7 @@ impl FileFinder {
     pub(crate) fn refilter_from_input(&mut self, ws: &Workspace) -> Vec<PendingScan> {
         // Ahead of the browse branch so a git-status answer landing while a
         // directory query is typed is taken rather than left in the channel.
-        self.pump_modified();
+        self.scopes.pump_modified(&mut self.core);
         let mut pending = Vec::new();
 
         let fallback_query = if let Some(browse) = &mut self.browse {
@@ -637,8 +498,8 @@ impl FileFinder {
             self.core.pump_walk();
             self.core.pump_scan();
             let text = self.input.text(ws);
-            pending.extend(ScanTarget::List.tag(self.refilter_scope(&text)));
-            (self.scope == FinderScope::All).then_some(text)
+            pending.extend(ScanTarget::List.tag(self.scopes.refilter(&mut self.core, &text)));
+            (self.scopes.scope == FinderScope::All).then_some(text)
         };
 
         if let Some(query) = fallback_query {
@@ -646,75 +507,6 @@ impl FileFinder {
         }
         self.remeasure_content();
         pending
-    }
-
-    /// Refilter [`Self::core`] against the scope's base, handing back the scan
-    /// of a scope that ranks on a worker.
-    fn refilter_scope(&mut self, text: &str) -> Option<(u64, Scan)> {
-        match self.scope.clone() {
-            // The uncapped scopes are the whole repo walk, so their scan goes to
-            // a worker and the caller spawns what this hands back.
-            FinderScope::All | FinderScope::AllWorkspaces => self.core.begin_scan(text),
-            FinderScope::Modified
-            | FinderScope::Diff
-            | FinderScope::Buffers
-            | FinderScope::ModifiedBuffers => {
-                self.refilter_listed(text);
-                None
-            },
-            // A glob over the whole walk can keep most of it, so this scans
-            // elsewhere like the uncapped scopes. A base small enough not to
-            // need it costs one hop through the worker instead.
-            FinderScope::Named(name) => {
-                self.sync_named_cache(&name);
-                // `named_cache` and `core` are disjoint fields, so the matcher
-                // reads the cached base in place rather than cloning it.
-                match &self.named_cache {
-                    Some(cache) => {
-                        let id = base_id(NAMED_BASE, cache.epoch, cache.filtered.len());
-                        self.core.begin_scan_with_base(text, &cache.filtered, id)
-                    },
-                    None => None,
-                }
-            },
-        }
-    }
-
-    /// Refilter [`Self::core`] on this thread against the modified files, the
-    /// diff's files, the open buffers, or the modified buffers, whichever list
-    /// the scope shows.
-    fn refilter_listed(&mut self, query: &str) {
-        // The tag stops two lists that share the finder's generation from
-        // reading as each other. A scope flip invalidates too, but the tag does
-        // not depend on that.
-        let (base, id): (&[PathBuf], BaseId) = match &self.scope {
-            FinderScope::Modified => (
-                &self.modified_paths,
-                base_id(
-                    MODIFIED_BASE,
-                    self.base_generation,
-                    self.modified_paths.len(),
-                ),
-            ),
-            FinderScope::Diff => {
-                let paths = self.diff_paths.as_deref().unwrap_or_default();
-                (paths, base_id(DIFF_BASE, self.base_generation, paths.len()))
-            },
-            FinderScope::Buffers => (
-                &self.buffer_paths,
-                base_id(BUFFERS_BASE, self.base_generation, self.buffer_paths.len()),
-            ),
-            FinderScope::ModifiedBuffers => (
-                &self.dirty_buffer_paths,
-                base_id(
-                    DIRTY_BUFFERS_BASE,
-                    self.base_generation,
-                    self.dirty_buffer_paths.len(),
-                ),
-            ),
-            FinderScope::All | FinderScope::AllWorkspaces | FinderScope::Named(_) => return,
-        };
-        self.core.refilter_with_base(query, base, id);
     }
 
     /// Bring the fallback of the list on display up to date with `query`, and
@@ -766,30 +558,12 @@ impl FileFinder {
             }
             return;
         }
-        match self.scope.clone() {
-            FinderScope::All => {
-                self.core.settle_scan(query);
-                if self.core.lists_nothing()
-                    && let Some(ignored) = &mut self.ignored
-                {
-                    ignored.settle_scan(query);
-                }
-            },
-            FinderScope::AllWorkspaces => self.core.settle_scan(query),
-            FinderScope::Named(name) => {
-                self.sync_named_cache(&name);
-                if let Some(cache) = &self.named_cache {
-                    let id = base_id(NAMED_BASE, cache.epoch, cache.filtered.len());
-                    self.core.settle_scan_with_base(query, &cache.filtered, id);
-                }
-            },
-            FinderScope::Modified
-            | FinderScope::Diff
-            | FinderScope::Buffers
-            | FinderScope::ModifiedBuffers => {
-                self.pump_modified();
-                self.refilter_listed(query);
-            },
+        self.scopes.settle(&mut self.core, query);
+        if self.scopes.scope == FinderScope::All
+            && self.core.lists_nothing()
+            && let Some(ignored) = &mut self.ignored
+        {
+            ignored.settle_scan(query);
         }
     }
 
@@ -802,50 +576,6 @@ impl FileFinder {
     fn remeasure_content(&mut self) {
         let rows = u16::try_from(self.active_core_ref().picklist.base.len()).unwrap_or(u16::MAX);
         self.content_rows = rows.saturating_add(FINDER_CHROME_ROWS);
-    }
-
-    /// Bring [`Self::named_cache`] up to date with the walk under `name`.
-    ///
-    /// Tests only the paths the cache has not seen, so a streaming walk costs
-    /// each path once across every batch rather than the whole list per batch.
-    /// A scope name with no compiled globset matches nothing, and still marks
-    /// its paths seen so they are not retested.
-    fn sync_named_cache(&mut self, name: &str) {
-        let walked = self.core.all_paths.len();
-        let reusable = self
-            .named_cache
-            .as_ref()
-            .is_some_and(|cache| cache.name == name && cache.consumed <= walked);
-        if !reusable {
-            self.named_cache = Some(NamedCache {
-                name: name.to_string(),
-                filtered: Vec::new(),
-                consumed: 0,
-                epoch: crate::picker::next_generation(),
-            });
-        }
-
-        let cache = self.named_cache.as_mut().expect("built above when absent");
-        if cache.consumed == walked {
-            return;
-        }
-
-        let Some((_, globset)) = self.named_scopes.iter().find(|(n, _)| n == name) else {
-            cache.consumed = walked;
-            return;
-        };
-
-        // Resolved once for the batch. `display_relative` reads the environment
-        // and allocates for the home directory on every call.
-        let home = paths::home_dir();
-        let git_root = &self.core.git_root;
-        for path in &self.core.all_paths[cache.consumed..] {
-            let display = paths::display_relative_with_home(path, git_root, home.as_deref());
-            if globset.is_match(display) {
-                cache.filtered.push(path.clone());
-            }
-        }
-        cache.consumed = walked;
     }
 
     /// Sync the preview pane to the current selection. Clears the pane when
@@ -864,7 +594,7 @@ impl FileFinder {
         let policy = if self.browse.is_some() {
             PreviewPolicy::File
         } else if matches!(
-            self.scope,
+            self.scopes.scope,
             FinderScope::Buffers | FinderScope::ModifiedBuffers
         ) {
             PreviewPolicy::LiveBufferThenFile
@@ -898,6 +628,343 @@ impl FileFinder {
         if let Some(browse) = self.browse.take() {
             browse.dispose(ws);
         }
+    }
+}
+
+/// The scope state of a file list.
+///
+/// It holds the scope on show, the lists that the listed scopes read, and the
+/// config's named scopes with their cache. [`FileFinder`] owns one over its
+/// workspace list. Each method that filters takes the [`PathPicker`] that it
+/// filters, so another owner of a file list passes its own picker.
+pub(crate) struct FileScopes {
+    pub(crate) scope: FinderScope,
+    /// Absolute paths of currently-modified files. Re-queried on scope toggle.
+    ///
+    /// Empty until the first background query lands, and thereafter the
+    /// previous answer while a re-query is in flight, so a refresh never blinks
+    /// the rows empty.
+    pub(crate) modified_paths: Vec<PathBuf>,
+    /// The in-flight git-status query feeding [`Self::modified_paths`], and the
+    /// task running it.
+    ///
+    /// The query is a full status pass with untracked recursion, far too slow
+    /// to run where a keystroke waits on it, so it runs on the blocking pool and
+    /// reports back here. `None` once its answer has been taken. The task is
+    /// held so dropping the finder drops the query with it.
+    modified: Option<(UnboundedReceiver<Vec<PathBuf>>, Task<()>)>,
+    /// Absolute paths of the [`FinderScope::Diff`] base, or `None` when the
+    /// finder opened over no diff. Captured once at open time.
+    pub(crate) diff_paths: Option<Vec<PathBuf>>,
+    /// Which generation of [`Self::modified_paths`], [`Self::diff_paths`],
+    /// [`Self::buffer_paths`], and [`Self::dirty_buffer_paths`] the pick list
+    /// shows.
+    ///
+    /// The lists are fixed between the moments they are replaced, so the
+    /// picker only has to be told when one is, and otherwise keeps the rows it
+    /// derived from them. Restamped wherever one is rebuilt.
+    base_generation: u64,
+    /// Absolute paths of currently-open buffers. Captured once at open time;
+    /// not re-queried on scope toggle.
+    pub(crate) buffer_paths: Vec<PathBuf>,
+    /// Absolute paths of the open buffers with unsaved edits, the
+    /// [`FinderScope::ModifiedBuffers`] base. Captured once at open time like
+    /// [`Self::buffer_paths`].
+    ///
+    /// Sorted, because the row paint finds a row's dot here by binary search.
+    pub(crate) dirty_buffer_paths: Vec<PathBuf>,
+    /// Config-defined named scopes, compiled at open time in alphabetical
+    /// (BTreeMap) order. Shift-Tab cycles through them after Modified.
+    pub(crate) named_scopes: Vec<(String, GlobSet)>,
+    /// Glob-filtered base for the active [`FinderScope::Named`] scope, or
+    /// `None` before one is built.
+    pub(crate) named_cache: Option<NamedCache>,
+}
+
+impl FileScopes {
+    /// Build the scope state of a list that opens on `scope`.
+    ///
+    /// `modified` is the git-status query that feeds the Modified list, and
+    /// `finder_scopes` holds the glob lists of the config's named scopes.
+    pub(crate) fn new(
+        scope: FinderScope,
+        modified: (UnboundedReceiver<Vec<PathBuf>>, Task<()>),
+        diff_paths: Option<Vec<PathBuf>>,
+        buffer_paths: Vec<PathBuf>,
+        dirty_buffer_paths: Vec<PathBuf>,
+        finder_scopes: &BTreeMap<String, Vec<String>>,
+    ) -> Self {
+        Self {
+            scope,
+            modified_paths: Vec::new(),
+            modified: Some(modified),
+            diff_paths,
+            base_generation: crate::picker::next_generation(),
+            buffer_paths,
+            dirty_buffer_paths,
+            named_scopes: compile_named_scopes(finder_scopes),
+            named_cache: None,
+        }
+    }
+
+    /// Flip the scope and make `core` rerun its filter against the new base.
+    ///
+    /// Landing on [`FinderScope::Modified`] wants a fresh git status, but that
+    /// query is the caller's to spawn via [`Self::set_modified_source`], since
+    /// it belongs off this thread.
+    ///
+    /// The file scopes and the buffer scopes are separate cycles. The file
+    /// scopes go All -> Modified -> each named scope -> AllWorkspaces -> All.
+    /// A finder over a diff has [`FinderScope::Diff`] in Modified's place.
+    /// [`FinderScope::Buffers`] and [`FinderScope::ModifiedBuffers`] flip with
+    /// each other, so the buffer picker never enters a file scope. A finder
+    /// reaches the buffer pair only through the dedicated `OpenBufferPicker`
+    /// action.
+    pub(crate) fn toggle(&mut self, core: &mut PathPicker) {
+        self.scope = self.next_scope();
+        core.picklist.selected = 0;
+        // Force refilter + preview resync on next render against the new base.
+        core.invalidate();
+    }
+
+    /// Point the Modified list at a freshly spawned git-status query, replacing
+    /// any query still in flight.
+    ///
+    /// The paths already shown stay until the new answer lands, so a refresh
+    /// never blinks the rows empty.
+    pub(crate) fn set_modified_source(
+        &mut self,
+        rx: UnboundedReceiver<Vec<PathBuf>>,
+        task: Task<()>,
+    ) {
+        self.modified = Some((rx, task));
+    }
+
+    /// Take the background git-status answer if it has arrived, replacing the
+    /// modified list.
+    ///
+    /// Restamping the generation alone does not show the new list. The
+    /// Modified base id keys on that generation, but
+    /// [`PathPicker::refilter_with_base`] returns early while the query is
+    /// unchanged and the filter still valid, which is exactly the state of
+    /// `core` after an open. Invalidating `core` is what that method exists
+    /// for. Only the scope actually reading the list needs it, since every
+    /// other scope re-runs from [`Self::toggle`]'s own invalidate on the way
+    /// in.
+    pub(crate) fn pump_modified(&mut self, core: &mut PathPicker) {
+        let Some((rx, _)) = self.modified.as_mut() else {
+            return;
+        };
+        let Ok(paths) = rx.try_recv() else {
+            return;
+        };
+        self.modified = None;
+        self.modified_paths = paths;
+        self.base_generation = crate::picker::next_generation();
+        if self.scope == FinderScope::Modified {
+            core.invalidate();
+        }
+    }
+
+    /// The scope Shift-Tab lands on next.
+    ///
+    /// The file scopes cycle All -> Modified -> each named scope (alphabetical)
+    /// -> AllWorkspaces -> All. A finder over a diff has Diff in Modified's
+    /// place. Buffers and ModifiedBuffers flip with each other.
+    pub(crate) fn next_scope(&self) -> FinderScope {
+        self.next_scope_from(&self.scope)
+    }
+
+    /// The scopes that the header names as pills, in the order Shift-Tab walks
+    /// them.
+    ///
+    /// The walk starts at [`FinderScope::Buffers`] for the buffer picker and at
+    /// [`FinderScope::All`] for every file scope, and it steps until it comes
+    /// back to its start. The header always names the scope on show, so a
+    /// scope that the walk does not reach, such as a [`FinderScope::Modified`]
+    /// that an open forced over a diff, takes the place after the first pill.
+    pub(crate) fn scope_cycle(&self) -> Vec<FinderScope> {
+        let start = match self.scope {
+            FinderScope::Buffers | FinderScope::ModifiedBuffers => FinderScope::Buffers,
+            _ => FinderScope::All,
+        };
+        let mut cycle = vec![start.clone()];
+        let mut scope = self.next_scope_from(&start);
+        // The walk returns to its start. The bound ends a walk that does not,
+        // so the header still paints.
+        while scope != start && cycle.len() <= self.named_scopes.len() + 4 {
+            let next = self.next_scope_from(&scope);
+            cycle.push(scope);
+            scope = next;
+        }
+        if !cycle.contains(&self.scope) {
+            cycle.insert(1, self.scope.clone());
+        }
+        cycle
+    }
+
+    /// Refilter `core` against the scope's base, handing back the scan of a
+    /// scope that ranks on a worker.
+    pub(crate) fn refilter(&mut self, core: &mut PathPicker, text: &str) -> Option<(u64, Scan)> {
+        match self.scope.clone() {
+            // The uncapped scopes are the whole repo walk, so their scan goes to
+            // a worker and the caller spawns what this hands back.
+            FinderScope::All | FinderScope::AllWorkspaces => core.begin_scan(text),
+            FinderScope::Modified
+            | FinderScope::Diff
+            | FinderScope::Buffers
+            | FinderScope::ModifiedBuffers => {
+                self.refilter_listed(core, text);
+                None
+            },
+            // A glob over the whole walk keeps up to all of it, so this scans
+            // elsewhere like the uncapped scopes. A base small enough not to
+            // need it costs one hop through the worker instead.
+            FinderScope::Named(name) => {
+                self.sync_named_cache(core, &name);
+                // `core` is no part of the scopes, so the matcher reads the
+                // cached base in place rather than cloning it.
+                match &self.named_cache {
+                    Some(cache) => {
+                        let id = base_id(NAMED_BASE, cache.epoch, cache.filtered.len());
+                        core.begin_scan_with_base(text, &cache.filtered, id)
+                    },
+                    None => None,
+                }
+            },
+        }
+    }
+
+    /// Bring the rows of `core` up to date with `query` on this thread, by the
+    /// scope on show.
+    ///
+    /// A named scope catches up against the cache it filters rather than the
+    /// walk, which holds a different set of paths. A listed scope first takes
+    /// a git-status answer that has landed.
+    pub(crate) fn settle(&mut self, core: &mut PathPicker, query: &str) {
+        match self.scope.clone() {
+            FinderScope::All | FinderScope::AllWorkspaces => core.settle_scan(query),
+            FinderScope::Named(name) => {
+                self.sync_named_cache(core, &name);
+                if let Some(cache) = &self.named_cache {
+                    let id = base_id(NAMED_BASE, cache.epoch, cache.filtered.len());
+                    core.settle_scan_with_base(query, &cache.filtered, id);
+                }
+            },
+            FinderScope::Modified
+            | FinderScope::Diff
+            | FinderScope::Buffers
+            | FinderScope::ModifiedBuffers => {
+                self.pump_modified(core);
+                self.refilter_listed(core, query);
+            },
+        }
+    }
+
+    /// The scope Shift-Tab lands on from `from`, by the cycle that
+    /// [`Self::next_scope`] describes.
+    fn next_scope_from(&self, from: &FinderScope) -> FinderScope {
+        match from {
+            FinderScope::All if self.diff_paths.is_some() => FinderScope::Diff,
+            FinderScope::All => FinderScope::Modified,
+            FinderScope::Modified | FinderScope::Diff => self
+                .named_scopes
+                .first()
+                .map(|(name, _)| FinderScope::Named(name.clone()))
+                .unwrap_or(FinderScope::AllWorkspaces),
+            FinderScope::Named(current) => self
+                .named_scopes
+                .iter()
+                .position(|(name, _)| name == current)
+                .and_then(|idx| self.named_scopes.get(idx + 1))
+                .map(|(name, _)| FinderScope::Named(name.clone()))
+                .unwrap_or(FinderScope::AllWorkspaces),
+            FinderScope::AllWorkspaces => FinderScope::All,
+            FinderScope::Buffers => FinderScope::ModifiedBuffers,
+            FinderScope::ModifiedBuffers => FinderScope::Buffers,
+        }
+    }
+
+    /// Refilter `core` on this thread against the modified files, the diff's
+    /// files, the open buffers, or the modified buffers, whichever list the
+    /// scope shows.
+    fn refilter_listed(&self, core: &mut PathPicker, query: &str) {
+        // The tag stops two lists that share the finder's generation from
+        // reading as each other. A scope flip invalidates too, but the tag does
+        // not depend on that.
+        let (base, id): (&[PathBuf], BaseId) = match &self.scope {
+            FinderScope::Modified => (
+                &self.modified_paths,
+                base_id(
+                    MODIFIED_BASE,
+                    self.base_generation,
+                    self.modified_paths.len(),
+                ),
+            ),
+            FinderScope::Diff => {
+                let paths = self.diff_paths.as_deref().unwrap_or_default();
+                (paths, base_id(DIFF_BASE, self.base_generation, paths.len()))
+            },
+            FinderScope::Buffers => (
+                &self.buffer_paths,
+                base_id(BUFFERS_BASE, self.base_generation, self.buffer_paths.len()),
+            ),
+            FinderScope::ModifiedBuffers => (
+                &self.dirty_buffer_paths,
+                base_id(
+                    DIRTY_BUFFERS_BASE,
+                    self.base_generation,
+                    self.dirty_buffer_paths.len(),
+                ),
+            ),
+            FinderScope::All | FinderScope::AllWorkspaces | FinderScope::Named(_) => return,
+        };
+        core.refilter_with_base(query, base, id);
+    }
+
+    /// Bring [`Self::named_cache`] up to date with the walk of `core` under
+    /// `name`.
+    ///
+    /// Tests only the paths the cache has not seen, so a streaming walk costs
+    /// each path once across every batch rather than the whole list per batch.
+    /// A scope name with no compiled globset matches nothing, and still marks
+    /// its paths seen so they are not retested.
+    fn sync_named_cache(&mut self, core: &PathPicker, name: &str) {
+        let walked = core.all_paths.len();
+        let reusable = self
+            .named_cache
+            .as_ref()
+            .is_some_and(|cache| cache.name == name && cache.consumed <= walked);
+        if !reusable {
+            self.named_cache = Some(NamedCache {
+                name: name.to_string(),
+                filtered: Vec::new(),
+                consumed: 0,
+                epoch: crate::picker::next_generation(),
+            });
+        }
+
+        let cache = self.named_cache.as_mut().expect("built above when absent");
+        if cache.consumed == walked {
+            return;
+        }
+
+        let Some((_, globset)) = self.named_scopes.iter().find(|(n, _)| n == name) else {
+            cache.consumed = walked;
+            return;
+        };
+
+        // Resolved once for the batch. `display_relative` reads the environment
+        // and allocates for the home directory on every call.
+        let home = paths::home_dir();
+        let git_root = &core.git_root;
+        for path in &core.all_paths[cache.consumed..] {
+            let display = paths::display_relative_with_home(path, git_root, home.as_deref());
+            if globset.is_match(display) {
+                cache.filtered.push(path.clone());
+            }
+        }
+        cache.consumed = walked;
     }
 }
 
@@ -1921,6 +1988,94 @@ mod tests {
         assert!(base[0].ends_with("b.rs"));
     }
 
+    /// The scope state filters a picker that no finder owns. All lists the
+    /// walk, and a toggle lands on Modified at the first row. The git-status
+    /// answer then becomes the base that a later query settles against.
+    #[test]
+    fn the_modified_scope_lists_the_modified_paths_in_a_picker_that_no_finder_owns() {
+        let mut h = crate::Stoat::test();
+        let (mut core, mut scopes, [a, b]) = scopes_over_two_files(&mut h, FinderScope::All);
+        let rows = |core: &PathPicker| -> Vec<PathBuf> {
+            let list = &core.picklist;
+            list.filtered
+                .iter()
+                .map(|&i| list.base[i].clone())
+                .collect()
+        };
+
+        scopes.refilter(&mut core, "");
+        let all = rows(&core);
+        core.move_selection(1);
+        scopes.toggle(&mut core);
+        let toggled = (scopes.scope.clone(), core.picklist.selected);
+        scopes.pump_modified(&mut core);
+        scopes.refilter(&mut core, "");
+        let base = core.picklist.base.clone();
+        scopes.settle(&mut core, "a");
+
+        assert_eq!(
+            (all, toggled, base, rows(&core)),
+            (
+                vec![a, b.clone()],
+                (FinderScope::Modified, 0),
+                vec![b],
+                Vec::new()
+            ),
+        );
+    }
+
+    /// A settle in a listed scope takes a git-status answer that landed since
+    /// the last refilter, so an action between two frames lists the answer.
+    #[test]
+    fn a_settle_takes_a_git_status_answer_that_landed_since_the_last_refilter() {
+        let mut h = crate::Stoat::test();
+        let (mut core, mut scopes, [_, b]) = scopes_over_two_files(&mut h, FinderScope::Modified);
+        scopes.settle(&mut core, "");
+        assert_eq!(core.picklist.base, [b]);
+    }
+
+    /// A settle in a named scope settles against the walked paths that the
+    /// scope's globs keep, and never against the whole walk.
+    #[test]
+    fn a_settle_in_a_named_scope_lists_only_the_paths_its_globs_keep() {
+        let mut h = crate::Stoat::test();
+        let named = FinderScope::Named("b".to_owned());
+        let (mut core, mut scopes, [_, b]) = scopes_over_two_files(&mut h, named);
+        scopes.named_scopes =
+            compile_named_scopes(&BTreeMap::from([("b".to_owned(), vec!["b.*".to_owned()])]));
+        scopes.settle(&mut core, "");
+        assert_eq!(core.picklist.base, [b]);
+    }
+
+    /// A picker over `/scopes/a.rs` and `/scopes/b.rs`, the scope state at
+    /// `scope`, and the two paths. The scope state's git-status answer holds
+    /// `b.rs` and waits for a pump to take it.
+    fn scopes_over_two_files(
+        h: &mut TestHarness,
+        scope: FinderScope,
+    ) -> (PathPicker, FileScopes, [PathBuf; 2]) {
+        let root = PathBuf::from("/scopes");
+        let paths = [root.join("a.rs"), root.join("b.rs")];
+        let executor = h.stoat.executor.clone();
+        let ws = h.stoat.active_workspace_mut();
+        let mut core = PathPicker::new(ws, executor.clone(), root, None);
+        core.all_paths = paths.to_vec();
+
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        tx.send(vec![paths[1].clone()])
+            .expect("the receiver is open");
+        let modified = (rx, executor.spawn(async {}));
+        let scopes = FileScopes::new(
+            scope,
+            modified,
+            None,
+            Vec::new(),
+            Vec::new(),
+            &BTreeMap::new(),
+        );
+        (core, scopes, paths)
+    }
+
     #[test]
     fn backtab_cycles_through_named_scopes() {
         let mut h = crate::Stoat::test();
@@ -1983,18 +2138,18 @@ mod tests {
         h.type_keys("space p");
         let finder = h.stoat.file_finder.as_mut().expect("the finder is open");
         let plain = finder.scope_cycle();
-        finder.named_scopes = compile_named_scopes(&BTreeMap::from([
+        finder.scopes.named_scopes = compile_named_scopes(&BTreeMap::from([
             ("docs".to_string(), vec!["docs/**".to_string()]),
             ("src".to_string(), vec!["src/**".to_string()]),
         ]));
         let named = finder.scope_cycle();
-        finder.named_scopes.clear();
-        finder.diff_paths = Some(Vec::new());
+        finder.scopes.named_scopes.clear();
+        finder.scopes.diff_paths = Some(Vec::new());
         let over_diff = finder.scope_cycle();
-        finder.scope = Modified;
+        finder.scopes.scope = Modified;
         let forced = finder.scope_cycle();
-        finder.diff_paths = None;
-        finder.scope = Buffers;
+        finder.scopes.diff_paths = None;
+        finder.scopes.scope = Buffers;
         let buffers = finder.scope_cycle();
 
         assert_eq!(
@@ -2705,6 +2860,40 @@ mod tests {
         );
     }
 
+    /// A fallback built under All stays through a flip to Modified, and it
+    /// stands in for no list but the one of All.
+    #[test]
+    fn a_fallback_built_under_all_stands_in_for_all_alone() {
+        let mut h = crate::Stoat::test();
+        seed_finder_workspace(
+            &mut h,
+            &[
+                ("src/main.rs", ""),
+                (".gitignore", "out/\n"),
+                ("out/main.toml", ""),
+            ],
+        );
+        h.type_keys("space p");
+        h.type_text("main.toml");
+        settle_fallback(&mut h);
+        h.type_keys("backtab");
+        for _ in 0..2 {
+            let _ = h.snapshot();
+            h.settle();
+        }
+
+        let finder = h.stoat.file_finder.as_ref().expect("finder open");
+        assert_eq!(
+            (
+                finder.scope(),
+                finder.ignored.is_some(),
+                finder.fallback_active(),
+                finder_rows(&h)
+            ),
+            (&FinderScope::Modified, true, false, Vec::<String>::new()),
+        );
+    }
+
     #[test]
     fn closing_with_a_fallback_leaves_the_registry_at_its_pre_open_size() {
         let mut h = crate::Stoat::test();
@@ -2786,6 +2975,16 @@ mod tests {
         let finder = h.stoat.file_finder.as_mut().expect("finder open");
         finder.settle_scan("main");
         assert_eq!(fallback_query(&h), Some(String::new()));
+    }
+
+    /// A settle of a query that no listed file matches settles the fallback
+    /// too. An action then reads the row that stands in for the list.
+    #[test]
+    fn settling_a_query_no_listed_file_matches_settles_the_fallback() {
+        let mut h = finder_back_on_a_listed_match();
+        let finder = h.stoat.file_finder.as_mut().expect("finder open");
+        finder.settle_scan("toml");
+        assert_eq!(fallback_query(&h), Some("toml".to_owned()));
     }
 
     /// A browse settles its fallback by the same rule. `md` lists `notes.md`,

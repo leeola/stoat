@@ -417,7 +417,7 @@ fn finder_label(finder: &FileFinder) -> String {
     let scope = finder.browse.is_some().then_some("browse");
     let suffix = if finder.fallback_active() {
         Some("ignored")
-    } else if finder.diff_paths.is_some() && lists_buffers(finder) {
+    } else if finder.scopes.diff_paths.is_some() && lists_buffers(finder) {
         Some("diff")
     } else {
         None
@@ -519,8 +519,8 @@ pub(crate) fn paint_finder_rows(
         theme.get(crate::theme::scope::UI_TEXT)
     };
     let marks = match lists_buffers(finder) {
-        true => RowMarks::Dirty(&finder.dirty_buffer_paths),
-        false => RowMarks::Modified(&finder.modified_paths),
+        true => RowMarks::Dirty(&finder.scopes.dirty_buffer_paths),
+        false => RowMarks::Modified(&finder.scopes.modified_paths),
     };
     crate::render::picker::paint_path_rows(
         &finder_rows(finder, home),
