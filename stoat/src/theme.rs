@@ -999,6 +999,9 @@ pub mod scope {
     pub const UI_HEADING: &str = "ui.heading";
     pub const UI_ERROR: &str = "ui.error";
     pub const UI_MESSAGE_ERROR: &str = "ui.message.error";
+    /// A status message of the info kind, such as the text of a `Notify` step.
+    /// A theme that leaves it unset draws that kind in [`UI_MESSAGE_ERROR`].
+    pub const UI_MESSAGE_INFO: &str = "ui.message.info";
 
     pub const UI_BADGE_ACTIVE: &str = "ui.badge.active";
     pub const UI_BADGE_COMPLETE: &str = "ui.badge.complete";

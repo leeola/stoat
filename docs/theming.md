@@ -307,8 +307,11 @@ The typed UI scopes, by group (syntax scopes are open-ended):
   glyph (foreground) on a tinted cell (background). Methods take the function
   badge, enums, classes, and structs take the constant badge, and fields take
   the variable badge. An item of any other kind leaves the cell blank.
-- `ui.prompt`, `ui.key_label`, `ui.heading`, `ui.error`, `ui.message.error` --
-  chrome accents.
+- `ui.prompt`, `ui.key_label`, `ui.heading`, `ui.error`, `ui.message.error`,
+  `ui.message.info` -- chrome accents. `ui.message.error` colors a status
+  message, and `ui.message.info` colors a plain one, such as the text of a
+  `Notify` step. A theme that leaves `ui.message.info` unset draws that kind
+  as `ui.message.error`.
 - `ui.cmd.cwd`, `ui.cmd.prompt` -- the directory that leads a Cmd Line, such
   as the command palette's header row, and the U+276F prompt glyph after it.
   Unset, the directory takes `ui.key_label` and the glyph takes

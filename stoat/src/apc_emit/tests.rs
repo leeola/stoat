@@ -3175,6 +3175,67 @@ fn detached_pane_status_row_names_its_file_and_no_sides() {
     );
 }
 
+/// A detached pane's status row paints a message in the color of its kind.
+#[test]
+fn a_window_status_row_paints_a_message_in_the_color_of_its_kind() {
+    let (config, _) = stoat_config::parse(app::DEFAULT_KEYMAP);
+    let theme = Arc::new(
+        crate::theme::Theme::from_config(&config.expect("the config parses"), "ermine_night")
+            .expect("the theme loads"),
+    );
+    let ink = |kind: MessageKind| {
+        let mut h = crate::test_harness::TestHarness::with_size(120, 24);
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+        h.stoat.set_apc_tx(tx);
+        h.stoat.window_ipc_connected = true;
+        h.stoat.theme = theme.clone();
+        let path = PathBuf::from("/detach-message/a.txt");
+        h.fake_fs().insert_file(&path, b"hello\n");
+        action_handlers::dispatch(&mut h.stoat, &OpenFile { path });
+        h.settle();
+        h.type_action("SplitRight()");
+        h.settle();
+        action_handlers::dispatch(&mut h.stoat, &DetachPane);
+
+        let (window, pool) = focused_window_status_pool(&h);
+        app::deliver_window_event(
+            &mut h.stoat,
+            WindowIpcEvent::Resized {
+                window,
+                cols: 120,
+                rows: 10,
+            },
+        );
+        h.stoat.notify(kind, "zq");
+        let row = page_cells(fill_payload(&emit_raw(&mut h, &mut rx), pool, 0), 120, 1).remove(0);
+        row.windows(2)
+            .find(|pair| (pair[0].0, pair[1].0) == ('z', 'q'))
+            .and_then(|pair| pair[0].1)
+    };
+
+    let rgb = |[r, g, b]: [u8; 3]| Some(Color::Rgb(r, g, b));
+    assert_eq!(
+        [ink(MessageKind::Alert), ink(MessageKind::Info)],
+        [rgb([0xf2, 0x77, 0x7f]), rgb([0xa3, 0xa9, 0xb5])],
+        "ermine_night's ui.message.error, then its ui.message.info",
+    );
+}
+
+/// The window that the focused pane detached into, and the pool of that
+/// window's status row.
+fn focused_window_status_pool(h: &crate::test_harness::TestHarness) -> (u32, u32) {
+    let panes = &h.stoat.active_workspace().panes;
+    let pane = panes.pane(panes.focus());
+    let window = match &pane.placement {
+        Placement::Window(window) => *window,
+        other => panic!("the pane detaches into a window, got {other:?}"),
+    };
+    (
+        window,
+        crate::smooth_scroll::non_pane_pool::WINDOW_STATUS + pane.index,
+    )
+}
+
 /// A detached diff view's status row splits at the diff's divider into the
 /// diff's metrics and the pane's own row, as a split row in the main window
 /// does, and so does a detached changes view's row. Both halves and the
@@ -3231,16 +3292,7 @@ fn detached_diff_row(
     show(&mut h);
     action_handlers::dispatch(&mut h.stoat, &DetachPane);
 
-    let (window, pool) = {
-        let panes = &h.stoat.active_workspace().panes;
-        let pane = panes.pane(panes.focus());
-        let window = match &pane.placement {
-            Placement::Window(window) => *window,
-            other => panic!("the pane detaches into a window, got {other:?}"),
-        };
-        let pool = crate::smooth_scroll::non_pane_pool::WINDOW_STATUS + pane.index;
-        (window, pool)
-    };
+    let (window, pool) = focused_window_status_pool(&h);
     app::deliver_window_event(
         &mut h.stoat,
         WindowIpcEvent::Resized {

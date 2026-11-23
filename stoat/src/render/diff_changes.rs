@@ -1382,7 +1382,7 @@ mod tests {
     };
     use crate::{
         action_handlers, apc_emit,
-        app::Stoat,
+        app::{MessageKind, Stoat},
         buffer_registry::BufferRegistry,
         diff_changes::{self, DiffChangesState, ExcerptStats},
         editor_state::{EditorId, EditorState},
@@ -3314,6 +3314,7 @@ mod tests {
             lsp_pending: None,
             lsp_message: None,
             status_message: None,
+            status_kind: MessageKind::Alert,
             goto_word_labels: None,
             mode_label: ("", Color::Reset),
             modal_label: None,

@@ -353,6 +353,7 @@ theme ermine_night inherits default_dark {
     ui.statusbar.unfocused = { fg: dim, bg: ground };
     ui.mode_label          = { fg: chrome, modifiers: [bold] };
     ui.statusbar.separator.fg = ground;
+    ui.message.info.fg = dim;
 
     ui.statusline.normal.fg  = accent;
     ui.statusline.submode.fg = muted;

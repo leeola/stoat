@@ -2,7 +2,7 @@ use crate::{
     defs::{
         agent::SpawnClaude,
         app::{
-            ForceQuit, ForceQuitAll, OpenLogs, PinMode, Quit, QuitAll, QuitAllCancel,
+            ForceQuit, ForceQuitAll, Notify, OpenLogs, PinMode, Quit, QuitAll, QuitAllCancel,
             QuitAllConfirm, ShowVersion,
         },
         blame::{
@@ -245,6 +245,19 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
             .filter(|target| !target.is_empty())
             .map(str::to_owned);
         Ok(Box::new(OpenLogs { target }))
+    });
+    add(Notify::DEF, |params| {
+        let text = params
+            .first()
+            .context(MissingSnafu { name: "text" })?
+            .as_string()
+            .context(WrongKindSnafu {
+                name: "text",
+                expected: ParamKind::String,
+            })?;
+        Ok(Box::new(Notify {
+            text: text.to_owned(),
+        }))
     });
     add(SplitRight::DEF, |_| Ok(Box::new(SplitRight)));
     add(SplitDown::DEF, |_| Ok(Box::new(SplitDown)));
@@ -2020,6 +2033,23 @@ mod tests {
     }
 
     #[test]
+    fn notify_factory_keeps_the_whole_text() {
+        let entry = lookup("Notify").expect("Notify");
+        let text = (entry.create)(&[ParamValue::String("shipped it".into())])
+            .expect("create")
+            .as_any()
+            .downcast_ref::<Notify>()
+            .expect("downcast")
+            .text
+            .clone();
+        let missing = matches!(
+            (entry.create)(&[]).err(),
+            Some(ParamError::Missing { name: "text", .. })
+        );
+        assert_eq!((text.as_str(), missing), ("shipped it", true));
+    }
+
+    #[test]
     fn open_file_factory_consumes_path() {
         let entry = lookup("OpenFile").expect("OpenFile");
         let params = vec![ParamValue::String("/tmp/x.rs".into())];
@@ -2354,7 +2384,8 @@ mod tests {
         // + 1 ForceWriteQuit.
         // + 1 ForceCloseBuffer.
         // + 2 CloseOtherBuffers/ForceCloseOtherBuffers.
-        assert_eq!(all().count(), 518);
+        // + 1 Notify.
+        assert_eq!(all().count(), 519);
     }
 
     #[test]

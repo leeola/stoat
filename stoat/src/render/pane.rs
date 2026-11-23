@@ -1,6 +1,6 @@
 use crate::{
     action_handlers::search::StatusPrompt,
-    app::{SPINNER_FRAMES, STATUS_ROW_PAD, TAB_BAR_PAD},
+    app::{MessageKind, SPINNER_FRAMES, STATUS_ROW_PAD, TAB_BAR_PAD},
     blame::{self, LineBlame},
     buffer::BufferId,
     buffer_registry::{BufferRegistry, ReadOnly},
@@ -946,7 +946,7 @@ pub(crate) fn render_overlay_status(
         if available > 0 {
             right.push((
                 message.chars().take(available).collect(),
-                status_message_style(base_style, frame.theme),
+                status_message_style(base_style, frame.status_kind, frame.theme),
             ));
         }
     }
@@ -2154,16 +2154,27 @@ fn name_segments(
 }
 
 /// Resolve the style for the transient status message segment from the bar's
-/// base style plus the theme's `ui.message.error` override.
+/// base style plus the theme's scope for the message's kind.
 ///
-/// Falls back to red when the theme leaves that scope undefined, so the message
-/// always reads as an alert rather than blending into the bar.
+/// An alert takes `ui.message.error`. It falls back to red when the theme
+/// leaves that scope undefined, so the message never blends into the bar. An
+/// info message takes `ui.message.info`, and the alert style when the theme
+/// leaves that scope undefined.
 ///
 /// That fallback is an RGB red rather than a named one because
 /// [`render_status_segments`] drops the whole bar to the cell fallback on any
 /// non-RGB segment color. A theme missing this scope must degrade only the
 /// message's color, never the bar's rendering mode.
-fn status_message_style(base_style: Style, theme: &crate::theme::Theme) -> Style {
+fn status_message_style(
+    base_style: Style,
+    kind: MessageKind,
+    theme: &crate::theme::Theme,
+) -> Style {
+    if kind == MessageKind::Info
+        && let Some(info) = theme.try_get(crate::theme::scope::UI_MESSAGE_INFO)
+    {
+        return base_style.patch(info);
+    }
     base_style.patch(
         theme
             .try_get(crate::theme::scope::UI_MESSAGE_ERROR)
@@ -2615,7 +2626,10 @@ fn status_segments(
                 let text: String = message.chars().take(available).collect();
                 let width = text.chars().count() as u16;
                 let start = right_anchor.saturating_sub(width);
-                right.push((text, status_message_style(bar_style, theme)));
+                right.push((
+                    text,
+                    status_message_style(bar_style, frame.status_kind, theme),
+                ));
                 right_anchor = start;
             }
         }
@@ -4037,11 +4051,12 @@ mod tests {
         byte_size, conflict_chip_text, diff_base_lead, focused_staged_label, merge_facts,
         metrics_half, muted_tint, name_segments, paint_status_fallback, read_only_note,
         repo_segments, resolve_rich_segments, split_halves, split_thirds, status_filename,
-        tab_mark, DiffMetrics,
+        status_message_style, tab_mark, DiffMetrics,
     };
     use crate::{
         action_handlers::{dispatch, focused_editor_mut},
         agent_ipc::AgentControl,
+        app::MessageKind,
         badge::{Anchor, Badge, BadgeSource, BadgeState},
         blame,
         buffer::{BufferId, TextBuffer},
@@ -4420,6 +4435,78 @@ mod tests {
                 [rgb([0x83, 0x8a, 0x98]), rgb([0x83, 0x8a, 0x98])],
             ],
         );
+    }
+
+    /// A status message takes the scope of its kind. A theme that leaves
+    /// `ui.message.info` unset draws an info message as an alert.
+    #[test]
+    fn a_status_message_takes_the_color_of_its_kind() {
+        use ratatui::style::{Color, Style};
+
+        let foregrounds = |source: &str| {
+            let (config, _) = stoat_config::parse(source);
+            let config = config.expect("the theme parses");
+            let theme = crate::theme::Theme::from_config(&config, "t").expect("the theme loads");
+            [MessageKind::Alert, MessageKind::Info]
+                .map(|kind| status_message_style(Style::default(), kind, &theme).fg)
+        };
+        let red = Some(Color::Rgb(0xff, 0, 0));
+
+        assert_eq!(
+            [
+                foregrounds(
+                    r##"theme t { ui.message.error.fg = "#ff0000"; ui.message.info.fg = "#00ff00"; }"##
+                ),
+                foregrounds(r##"theme t { ui.message.error.fg = "#ff0000"; }"##),
+            ],
+            [[red, Some(Color::Rgb(0, 0xff, 0))], [red, red]],
+        );
+    }
+
+    /// The bar paints a message in the color of its kind, on a pane and on an
+    /// overlay screen.
+    #[test]
+    fn the_status_bar_paints_a_message_in_the_color_of_its_kind() {
+        use ratatui::style::Color;
+
+        let (config, _) = stoat_config::parse(
+            r##"theme t { ui.message.error.fg = "#ff0000"; ui.message.info.fg = "#00ff00"; }"##,
+        );
+        let theme = Arc::new(
+            crate::theme::Theme::from_config(&config.expect("the theme parses"), "t")
+                .expect("the theme loads"),
+        );
+        let inks = |overlay: bool| {
+            let mut h = crate::test_harness::TestHarness::with_size(60, 12);
+            h.stoat.stoatty = false;
+            h.stoat.theme = theme.clone();
+            if overlay {
+                h.stoat.active_workspace_mut().rebase = Some(RebaseState::new(
+                    PathBuf::from("/overlay"),
+                    "onto".into(),
+                    vec![],
+                ));
+            }
+            [MessageKind::Alert, MessageKind::Info].map(|kind| {
+                h.stoat.notify(kind, "zq");
+                ink_of(&h.render_composited(), "zq")
+            })
+        };
+
+        let [red, green] = [Color::Rgb(0xff, 0, 0), Color::Rgb(0, 0xff, 0)].map(Some);
+        assert_eq!([inks(false), inks(true)], [[red, green], [red, green]]);
+    }
+
+    /// The foreground of the first cell of `text` in `buf`, read row by row.
+    fn ink_of(buf: &Buffer, text: &str) -> Option<ratatui::style::Color> {
+        (0..buf.area.height).find_map(|y| {
+            let row: String = (0..buf.area.width)
+                .map(|x| buf[(x, y)].symbol())
+                .collect::<String>()
+                .replace('─', " ");
+            let at = row[..row.find(text)?].chars().count() as u16;
+            Some(buf[(at, y)].fg)
+        })
     }
 
     /// default_dark's focused status row inks its directory and its position

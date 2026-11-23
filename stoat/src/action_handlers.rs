@@ -48,7 +48,7 @@ pub(crate) mod yank;
 use crate::{
     agent_ipc::BridgeOutcome,
     apc_emit,
-    app::{Stoat, UpdateEffect},
+    app::{MessageKind, Stoat, UpdateEffect},
     auto_reload,
     buffer_registry::OpenOrigin,
     checkout_confirm,
@@ -76,9 +76,9 @@ pub(crate) use pane::{
 use std::{io::Read, path::Path, sync::Arc};
 use stoat_action::{
     Action, ActionKind, AutoReload, AutoReloadConfig, DiffFiles, Dump, FocusPane, GitCheckout,
-    GitLs, GitMerge, GitRebase, GitReview, GitStashPush, GotoTab, Mosh, OpenBuffer, OpenConfig,
-    OpenFile, OpenLogs, OpenReviewAgentEdits, RenameTab, RenameWorkspace, Review, Run, SetCwd,
-    SetTheme, Ssh, WalkthroughOpen,
+    GitLs, GitMerge, GitRebase, GitReview, GitStashPush, GotoTab, Mosh, Notify, OpenBuffer,
+    OpenConfig, OpenFile, OpenLogs, OpenReviewAgentEdits, RenameTab, RenameWorkspace, Review, Run,
+    SetCwd, SetTheme, Ssh, WalkthroughOpen,
 };
 use stoat_text::{Anchor, BufferId, LineEnding, Rope, Selection};
 pub(crate) use terminal::respawn_terminal_panes;
@@ -257,6 +257,14 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
                 .downcast_ref::<OpenLogs>()
                 .expect("OpenLogs action downcast");
             auto_reload::open_logs(stoat, open.target.as_deref())
+        },
+        ActionKind::Notify => {
+            let notify = action
+                .as_any()
+                .downcast_ref::<Notify>()
+                .expect("Notify action downcast");
+            stoat.notify(MessageKind::Info, notify.text.clone());
+            UpdateEffect::Redraw
         },
         ActionKind::SplitRight => pane::split_pane(stoat, Axis::Vertical),
         ActionKind::SplitDown => pane::split_pane(stoat, Axis::Horizontal),

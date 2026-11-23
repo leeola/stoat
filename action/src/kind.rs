@@ -26,6 +26,7 @@ action_kinds! {
     QuitAllCancel,
     ShowVersion,
     OpenLogs,
+    Notify,
     SplitRight,
     SplitDown,
     SplitNewRight,

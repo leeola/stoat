@@ -61,7 +61,8 @@ use crate::{
     },
     apc_emit,
     app::{
-        self, modal_split_share, modal_zoom_steps, ModalKind, Stoat, STATUS_ROW_PAD, TAB_BAR_PAD,
+        self, modal_split_share, modal_zoom_steps, MessageKind, ModalKind, Stoat, STATUS_ROW_PAD,
+        TAB_BAR_PAD,
     },
     auto_reload::ReloadFlash,
     blame::BlameState,
@@ -464,8 +465,12 @@ pub(crate) struct FrameCtx<'a> {
     pub(crate) lsp_message: Option<(lsp_types::MessageType, &'a str)>,
     /// The transient status message ([`Stoat::pending_message`]), already
     /// checked against its TTL deadline. Painted in the focused pane's status
-    /// bar just left of the diagnostics badge, styled as an error.
+    /// bar just left of the diagnostics badge, in the color of
+    /// [`Self::status_kind`].
     pub(crate) status_message: Option<&'a str>,
+    /// The kind of [`Self::status_message`], from
+    /// [`Stoat::pending_message_kind`].
+    pub(crate) status_kind: MessageKind,
     /// Active labels for an in-progress `GotoWord` jump, keyed by label
     /// string with byte-offset values. Painted by the focused editor's
     /// render path; non-focused panes ignore this field.
@@ -1553,6 +1558,7 @@ pub(crate) fn frame(
             .as_ref()
             .map(|(typ, message)| (*typ, message.as_str())),
         status_message: stoat.pending_message.as_deref(),
+        status_kind: stoat.pending_message_kind,
         goto_word_labels: stoat.pending_goto_word.as_ref(),
         mode_label: pane::mode_segment(
             match (modal_label, run_cwd) {

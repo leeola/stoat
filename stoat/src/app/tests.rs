@@ -10822,6 +10822,47 @@ fn status_message_expires_after_its_ttl() {
     );
 }
 
+/// A `Notify` action shows its text as an info message, and a later
+/// [`Stoat::set_status`] message reads as an alert again.
+#[test]
+fn notify_shows_its_text_as_an_info_message() {
+    let mut h = crate::test_harness::TestHarness::with_size(40, 12);
+    action_handlers::dispatch(
+        &mut h.stoat,
+        &stoat_action::Notify {
+            text: "shipped".into(),
+        },
+    );
+    let notified = (
+        h.stoat.pending_message.clone(),
+        h.stoat.pending_message_kind,
+    );
+
+    h.stoat.set_status("x");
+    assert_eq!(
+        (notified, h.stoat.pending_message_kind),
+        (
+            (Some("shipped".to_owned()), MessageKind::Info),
+            MessageKind::Alert
+        ),
+    );
+}
+
+#[test]
+fn a_notification_expires_as_a_status_message_does() {
+    let mut h = crate::test_harness::TestHarness::with_size(40, 12);
+    h.stoat.notify(MessageKind::Info, "ok");
+    h.stoat.render();
+    let shown = h.stoat.pending_message.clone();
+
+    h.advance_clock(STATUS_MESSAGE_TTL);
+    h.stoat.render();
+    assert_eq!(
+        (shown, h.stoat.pending_message.clone()),
+        (Some("ok".to_owned()), None),
+    );
+}
+
 #[test]
 fn the_status_message_shows_only_on_the_focused_pane_bar() {
     let mut h = Stoat::test();

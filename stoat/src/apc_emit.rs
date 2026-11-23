@@ -13,7 +13,7 @@
 
 use crate::{
     action_handlers::view,
-    app::{modal_split_share, modal_zoom_steps, ModalKind, Stoat},
+    app::{modal_split_share, modal_zoom_steps, MessageKind, ModalKind, Stoat},
     buffer_registry::BufferRegistry,
     commit_list::Preview,
     diagnostic_spans::{self, ResolvedDiag},
@@ -477,6 +477,7 @@ fn emit_window_content(stoat: &mut Stoat, out: &mut Vec<u8>) -> Vec<Vec<u8>> {
             .as_ref()
             .map(|(typ, message)| (*typ, message.as_str())),
         status_message: stoat.pending_message.as_deref(),
+        status_kind: stoat.pending_message_kind,
         goto_word_labels: None,
         mode_label: crate::render::pane::mode_segment(
             match run_cwd {
@@ -1704,6 +1705,7 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
             lsp_pending: None,
             lsp_message: None,
             status_message: None,
+            status_kind: MessageKind::Alert,
             goto_word_labels: stoat.pending_goto_word.as_ref(),
             mode_label: ("", Color::Reset),
             modal_label: None,

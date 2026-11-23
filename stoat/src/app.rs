@@ -549,6 +549,18 @@ pub(crate) const AUTO_RELOAD_POLL: std::time::Duration = std::time::Duration::fr
 /// wakes the run loop so [`crate::render::frame`] can clear the expired message.
 const STATUS_MESSAGE_TTL: std::time::Duration = std::time::Duration::from_secs(4);
 
+/// The kind of a status message, which picks its color in the status bar.
+///
+/// [`Stoat::set_status`] gives every message the alert kind. The info kind
+/// marks plain news, such as the text of a `Notify` step. A theme that leaves
+/// `ui.message.info` unset draws it as an alert.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) enum MessageKind {
+    #[default]
+    Alert,
+    Info,
+}
+
 /// Shortest gap between two `stoat::session` snapshot lines that saves log.
 ///
 /// A save follows every pause in the user's input, far too often for a line
@@ -1524,6 +1536,10 @@ pub struct Stoat {
     /// stays visible until that deadline passes or a newer message
     /// replaces it, and input no longer clears it.
     pub(crate) pending_message: Option<String>,
+    /// The kind of [`Self::pending_message`], which picks its color.
+    /// [`Self::set_status`] sets [`MessageKind::Alert`], and
+    /// [`Self::notify`] sets the kind it takes.
+    pub(crate) pending_message_kind: MessageKind,
     /// When the current [`Self::pending_message`] expires, on the
     /// scheduler clock. [`crate::render::frame`] clears the message
     /// once [`Executor::now`] reaches this.
@@ -2905,6 +2921,7 @@ impl Stoat {
             render_tick: 0,
             completion_layout: None,
             pending_message: None,
+            pending_message_kind: MessageKind::Alert,
             pending_message_deadline: None,
             pending_message_expiry: None,
             walkthrough_exit_timer: None,
@@ -6120,17 +6137,30 @@ impl Stoat {
     ///
     /// Each call logs the flattened text at `info` on `stoat::status`, so the
     /// session log holds every message the user saw.
+    ///
+    /// The message takes the alert kind. [`Self::notify`] shows a message of
+    /// another kind.
     pub(crate) fn set_status(&mut self, text: impl Into<String>) {
         let shown = self
             .pending_message
             .insert(sanitize::sanitize_status_text(&text.into()));
         tracing::info!(target: "stoat::status", text = %shown, "status message");
+        self.pending_message_kind = MessageKind::Alert;
         self.pending_message_deadline = Some(self.executor.now() + STATUS_MESSAGE_TTL);
 
         let timer = self.executor.timer(STATUS_MESSAGE_TTL);
         self.pending_message_expiry = Some(self.spawn_woken(async move {
             timer.await;
         }));
+    }
+
+    /// Show `text` as the transient status message, in the color of `kind`.
+    ///
+    /// The message expires, logs, and flattens as a [`Self::set_status`]
+    /// message does.
+    pub(crate) fn notify(&mut self, kind: MessageKind, text: impl Into<String>) {
+        self.set_status(text);
+        self.pending_message_kind = kind;
     }
 
     /// Whether any background diff warm is in flight, driving the status bar's

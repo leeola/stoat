@@ -136,6 +136,44 @@ impl Action for OpenLogs {
     }
 }
 
+const NOTIFY_PARAMS: &[ParamDef] = &[ParamDef {
+    name: "text",
+    kind: ParamKind::String,
+    value_source: ValueSource::None,
+    required: true,
+    description: "The message to show.",
+}];
+
+define_action_def!(
+    NotifyDef,
+    "Notify",
+    ActionKind::Notify,
+    "show a message",
+    "Show the text as a status message for a few seconds. A step of a command's run uses it.",
+    ActionPriority::Normal,
+    palette_visible = false,
+    params = NOTIFY_PARAMS
+);
+
+#[derive(Debug)]
+pub struct Notify {
+    pub text: String,
+}
+
+impl Notify {
+    pub const DEF: &NotifyDef = &NotifyDef;
+}
+
+impl Action for Notify {
+    fn def(&self) -> &'static dyn ActionDef {
+        Self::DEF
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -161,5 +199,21 @@ mod tests {
     fn downcast() {
         let action: Box<dyn Action> = Box::new(Quit);
         assert!(action.as_any().downcast_ref::<Quit>().is_some());
+    }
+
+    /// `Notify` takes its whole text as one parameter and stays off the
+    /// palette.
+    #[test]
+    fn notify_takes_one_required_text() {
+        let def = Notify::DEF;
+        let params: Vec<(&str, bool)> = def
+            .params()
+            .iter()
+            .map(|param| (param.name, param.required))
+            .collect();
+        assert_eq!(
+            (def.kind(), def.name(), params, def.palette_visible()),
+            (ActionKind::Notify, "Notify", vec![("text", true)], false),
+        );
     }
 }
