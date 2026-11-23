@@ -23,7 +23,7 @@ use ratatui::{
     widgets::{Block, Borders, StatefulWidget},
 };
 use std::{borrow::Cow, ops::Range, path::Path};
-use stoat_action::registry::RegistryEntry;
+use stoat_action::{registry::RegistryEntry, ValueSource};
 use stoat_widgets::{
     bar::Bar,
     text_run::{self, TextRun},
@@ -78,6 +78,18 @@ const CHROME_ROWS: u16 = 6 + DOC_ROWS;
 /// The palette's key line, each a bound key and the word for what it does.
 const PALETTE_HINTS: [(&str, &str); 4] = [
     ("Enter", "run"),
+    ("Tab", "complete"),
+    ("S-Tab", "scope"),
+    ("\u{2191}", "history"),
+];
+
+/// The key line of a file argument's list, each a bound key and the word for
+/// what it does.
+///
+/// A file argument opens the file, as the File Finder does, so Enter reads
+/// `open`. Every other argument list reads [`PALETTE_HINTS`].
+const ARG_FILE_HINTS: [(&str, &str); 4] = [
+    ("Enter", "open"),
     ("Tab", "complete"),
     ("S-Tab", "scope"),
     ("\u{2191}", "history"),
@@ -513,8 +525,12 @@ fn render_palette_arg_picker(
         scene,
     );
 
+    let hints: &[(&str, &str)] = match picker.source() {
+        ValueSource::Files => &ARG_FILE_HINTS,
+        _ => &PALETTE_HINTS,
+    };
     let parts = Footer {
-        hints: &PALETTE_HINTS,
+        hints,
         ..Footer::default()
     };
     crate::render::picker::modal_footer(buf, layout.footer, &parts, plate, theme, scene);
@@ -1941,9 +1957,10 @@ fn paint_source_tag(
 mod tests {
     use super::{
         count_status, doc_lines, grouped, history_age, history_window, input_spans,
-        paint_doc_lines, paint_history_rows, paint_palette_rows, palette_filter_layout,
-        pascal_matches, render_command_palette, source_tag, usage_line, wrap_text, HistoryEntry,
-        DOC_ROWS, ISLAND_BOTTOM, ISLAND_GAP, ISLAND_SIDE, ISLAND_TOP, LIST_ROWS,
+        paint_doc_lines, paint_history_rows, paint_palette_rows, palette_arg_layout,
+        palette_filter_layout, pascal_matches, render_command_palette, source_tag, usage_line,
+        wrap_text, HistoryEntry, DOC_ROWS, ISLAND_BOTTOM, ISLAND_GAP, ISLAND_SIDE, ISLAND_TOP,
+        LIST_ROWS,
     };
     use crate::{
         command_palette::{action_row, Availability, Namespace, ResolvedCommand},
@@ -2967,6 +2984,63 @@ mod tests {
                 placed(40, &[(1, "open o, edit")]),
             ],
         );
+    }
+
+    /// The list of a file argument names its open, completion, scope, and
+    /// history keys.
+    #[test]
+    fn the_file_argument_key_line_reads_open_complete_scope_and_history() {
+        assert_eq!(
+            arg_key_line(":o "),
+            " Enter open  Tab complete  S-Tab scope  \u{2191} history",
+        );
+    }
+
+    /// Every other argument list keeps the palette's key line, whose Enter
+    /// runs the command.
+    #[test]
+    fn any_other_argument_keeps_the_palette_key_line() {
+        assert_eq!(
+            arg_key_line(":cd "),
+            " Enter run  Tab complete  S-Tab scope  \u{2191} history",
+        );
+    }
+
+    /// The key line of the palette after `keys`, painted into a 200 by 40 area
+    /// under a dead scene, with its trailing blanks cut.
+    fn arg_key_line(keys: &str) -> String {
+        let mut h = crate::Stoat::test();
+        h.type_text(keys);
+        h.settle();
+        let mut palette = h.stoat.command_palette.take().expect("the palette is open");
+        let theme = h.stoat.theme.clone();
+        let chrome = ResolvedChrome::resolve(&theme);
+        let area = Rect::new(0, 0, 200, 40);
+        let preview_min = crate::render::picker::preview_min_columns(None);
+        let mut buf = Buffer::empty(area);
+        let mut scene = stoat_widgets::ApcScene::new();
+        scene.set_live(false);
+        render_command_palette(
+            &mut palette,
+            h.stoat.active_workspace_mut(),
+            None,
+            &theme,
+            &chrome,
+            area,
+            0,
+            preview_min,
+            0,
+            &mut buf,
+            &mut scene,
+        );
+
+        let footer = palette_arg_layout(area, &palette, None, 0, preview_min)
+            .expect("the palette fits")
+            .footer;
+        let text: String = (footer.left()..footer.right())
+            .map(|x| buf[(x, footer.y)].symbol())
+            .collect();
+        text.trim_end().to_owned()
     }
 
     /// Under the plate look the command list and the doc pane draw as Islands

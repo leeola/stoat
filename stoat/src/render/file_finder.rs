@@ -60,12 +60,10 @@ struct BodyRows {
 const PREVIEW_HEADER_ROWS: u16 = 2;
 
 /// The finder's footer hints, each a bound key and the word for what it does.
-const FINDER_HINTS: [(&str, &str); 4] = [
-    ("Enter", "open"),
-    ("C-d/C-u", "preview"),
-    ("C-f/C-b", "page"),
-    ("S-Tab", "scope"),
-];
+///
+/// The line names the keys that open a file, step the scope, and close the
+/// finder. The preview and page keys stay bound with no hint.
+const FINDER_HINTS: [(&str, &str); 3] = [("Enter", "open"), ("S-Tab", "scope"), ("Esc", "close")];
 
 /// The footer hints of the Buffer Finder's two scopes, where Enter switches to
 /// a buffer that is already open.
@@ -857,6 +855,23 @@ mod tests {
             ),
             "the header reads {header:?}",
         );
+    }
+
+    /// The File Finder's key line names its open, scope, and close keys.
+    #[test]
+    fn the_file_finder_key_line_reads_open_scope_and_close() {
+        let mut h = crate::Stoat::test();
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::OpenFileFinder);
+        h.settle();
+        let mut finder = h.stoat.file_finder.take().expect("the finder is open");
+        let theme = h.stoat.theme.clone();
+
+        let (buf, layout) = painted_finder(&mut finder, h.stoat.active_workspace_mut(), &theme);
+        let footer = layout.footer.expect("a key line");
+        let keys: String = (footer.left()..footer.right())
+            .map(|x| buf[(x, footer.y)].symbol())
+            .collect();
+        assert_eq!(keys.trim_end(), " Enter open  S-Tab scope  Esc close");
     }
 
     /// The 29 cells that end the header row of `finder`, painted into a 200 by
