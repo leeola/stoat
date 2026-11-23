@@ -1847,7 +1847,7 @@ on key {
         BackTab -> CodeSearchModeToggle();
     }
     modal == palette && mode == insert {
-        Up -> PickerPrev();
+        Up -> PaletteUp();
         Down -> PickerNext();
         Ctrl-Up -> PromptHistoryPrev();
         Ctrl-Down -> PromptHistoryNext();

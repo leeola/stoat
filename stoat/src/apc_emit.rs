@@ -867,8 +867,10 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
 
     // The command palette is a modal over normal mode like the finder. Its
     // fixed list region pools as a non-pane surface. Command-filter mode
-    // pools the command list.
-    let palette_list = (!overlay)
+    // pools the command list. History draws on the live grid with no pool,
+    // because its rows differ in height, so a walk retires the pool.
+    let pools_palette = !overlay && !stoat.active_workspace().palette_history.is_walking();
+    let palette_list = pools_palette
         .then_some(stoat.command_palette.as_ref())
         .flatten()
         .filter(|p| p.command.is_none())
@@ -886,7 +888,7 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
     // the command list, and its result list pools into the same PALETTE id.
     // Filter and arg modes are mutually exclusive -- arg mode needs a parsed
     // command, filter mode needs none -- so one pool id serves both.
-    let palette_arg_list = (!overlay)
+    let palette_arg_list = pools_palette
         .then_some(stoat.command_palette.as_ref())
         .flatten()
         .filter(|p| p.arg_picker.is_some() && p.arg_source().is_some())

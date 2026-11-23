@@ -78,3 +78,19 @@ define_action!(
     ActionPriority::Normal,
     palette_visible = false
 );
+
+define_action!(
+    PaletteUpDef,
+    PaletteUp,
+    "PaletteUp",
+    ActionKind::PaletteUp,
+    "move up or recall palette history",
+    "Move the command palette's selection up one row. On the first row of \
+     the command list or of the argument list, and over a free-typed \
+     argument, recall the palette's history instead. The typed text is the \
+     needle, and the newest line that holds it goes into the input. While \
+     the history walks, recall the next older match. Bound by default to Up \
+     while the palette is open.",
+    ActionPriority::Normal,
+    palette_visible = false
+);

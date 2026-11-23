@@ -1,7 +1,7 @@
 use crate::{
     command_palette::{
-        is_action_row, typed_head, ArgPicker, CommandPalette, Namespace, PaletteScope,
-        ResolvedCommand, ACTION_TOKEN,
+        is_action_row, split_head, typed_head, ArgPicker, Availability, CommandPalette, Namespace,
+        PaletteScope, ResolvedCommand, ACTION_TOKEN,
     },
     input_view::InputView,
     keymap::ActionKeys,
@@ -10,7 +10,7 @@ use crate::{
         cmd_line::{self, CmdLine, CmdStatus},
         paint::style_rgb,
         picker::{Footer, PathRows, RowMarks, RowStart, FOOTER_ROWS},
-        text::{wrap_text, write_str, write_str_clipped},
+        text::{pre_wrap_rows, wrap_text, write_str, write_str_clipped},
     },
     theme::TypeRole,
     workspace::Workspace,
@@ -21,7 +21,7 @@ use ratatui::{
     style::{Modifier, Style},
     widgets::{Block, Borders, StatefulWidget},
 };
-use std::path::Path;
+use std::{borrow::Cow, path::Path};
 use stoat_action::registry::RegistryEntry;
 use stoat_widgets::{
     bar::Bar,
@@ -79,8 +79,16 @@ const PALETTE_HINTS: [(&str, &str); 4] = [
     ("Enter", "run"),
     ("Tab", "complete"),
     ("S-Tab", "scope"),
-    ("C-Up/C-Down", "history"),
+    ("\u{2191}", "history"),
 ];
+
+/// The cell of a History row that holds its U+21BA mark, the row's second.
+const HISTORY_MARK_COLUMN: u16 = 1;
+
+/// The cell of a History row that its line starts in, the row's fifth.
+///
+/// Each next cell row of a wrapped line starts in this cell too.
+const HISTORY_LINE_COLUMN: u16 = 4;
 
 /// The on-screen rectangles of the command-palette filter modal, derived from a
 /// terminal `area` by [`palette_filter_layout`].
@@ -126,13 +134,39 @@ pub(crate) struct PaletteArgLayout {
     pub(crate) plate_base: u16,
 }
 
-/// The parts of the key line under the command list or the `action` list, as
+/// The parts of the palette's key line in one stage, as
 /// [`palette_footer_parts`] gives them.
 struct PaletteFooterParts {
-    /// The key hints, each a bound key and the word for what it does.
-    hints: [(&'static str, &'static str); 4],
-    /// The note's spans, empty for a list with no note.
+    /// The key hints, each a bound key and the word for what it does. A word
+    /// that names the walk's needle is owned.
+    hints: Vec<(&'static str, Cow<'static, str>)>,
+    /// The note's spans, empty for a stage with no note.
     note: Vec<(&'static str, Style)>,
+}
+
+/// The stage of the palette whose keys its key line names.
+enum KeyStage<'a> {
+    /// A list of commands, the root or a group. `typed` holds while the input
+    /// holds text, and `recallable` while the history holds a line.
+    Commands {
+        scope: PaletteScope,
+        typed: bool,
+        recallable: bool,
+    },
+    /// The `action` list.
+    Actions,
+    /// History, with the needle of the walk that shows it.
+    History { needle: &'a str },
+}
+
+/// One entry of History, a line of the palette history that the walk visits.
+struct HistoryEntry<'a> {
+    /// The index of the line in the palette history.
+    index: usize,
+    line: &'a str,
+    /// The time the line last ran at, in unix seconds, or `None` for a line
+    /// with no known time.
+    at: Option<i64>,
 }
 
 /// Lay out the command-palette filter modal within `area`, or `None` when
@@ -274,6 +308,13 @@ fn arg_body_rows(inner: Rect, header_rows: u16) -> Option<(u16, u16)> {
     (height > 0).then_some((top, height))
 }
 
+/// Render the open command palette into `area`.
+///
+/// While the palette history walks, the palette shows History, as
+/// [`render_palette_history`] paints it. The ages of its lines count from
+/// `now`, the clock in unix seconds. Otherwise the palette shows the argument
+/// picker, the free-typed argument's hint, or the command list, by the stage
+/// that the input names.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn render_command_palette(
     palette: &mut CommandPalette,
@@ -284,9 +325,16 @@ pub(crate) fn render_command_palette(
     area: Rect,
     zoom: i8,
     preview_min: u16,
+    now: i64,
     buf: &mut Buffer,
     scene: &mut stoat_widgets::ApcScene,
 ) {
+    if ws.palette_history.is_walking() {
+        render_palette_history(palette, ws, home, theme, area, zoom, now, buf, scene);
+        return;
+    }
+    palette.history_rows.clear();
+
     if palette.arg_picker.is_some() && palette.arg_source().is_some() {
         render_palette_arg_picker(
             palette,
@@ -576,6 +624,278 @@ fn render_palette_free_arg(
     crate::render::picker::modal_footer(buf, layout.footer, &parts, plate, theme, scene);
 }
 
+/// Render History, the lines of the palette history that the walk visits,
+/// under a Cmd Line that holds the recalled line and the walk's place.
+///
+/// History draws in the box of [`palette_filter_layout`]. One Island covers
+/// the list rows, the doc rows, and the row between them, and
+/// [`paint_history_rows`] paints the rows on it. The Cmd Line's status is the
+/// chip `history N / M`. N is the place of the recalled line among the
+/// matches, with the newest as 1, and M counts the matches. A needle that
+/// holds a word stands in the chip between the word `history` and the count.
+/// The rows that the paint draws go to [`CommandPalette::history_rows`] for
+/// the pointer.
+///
+/// History draws on the live grid with no pool, because its rows differ in
+/// height. Each step of the walk also changes the input and the chip with the
+/// rows.
+#[allow(clippy::too_many_arguments)]
+fn render_palette_history(
+    palette: &mut CommandPalette,
+    ws: &mut Workspace,
+    home: Option<&Path>,
+    theme: &crate::theme::Theme,
+    area: Rect,
+    zoom: i8,
+    now: i64,
+    buf: &mut Buffer,
+    scene: &mut stoat_widgets::ApcScene,
+) {
+    let content_rows = palette.list_rows_hint();
+    let Some(layout) = palette_filter_layout(area, content_rows, zoom, palette.header_rows) else {
+        return;
+    };
+
+    let matches = ws.palette_history.matches();
+    let place = ws
+        .palette_history
+        .cursor()
+        .and_then(|cursor| matches.iter().position(|&index| index == cursor))
+        .unwrap_or(0);
+    let chip = {
+        let count = format!("{} / {}", place + 1, matches.len());
+        match ws.palette_history.needle().trim() {
+            "" => format!("history {count}"),
+            needle => format!("history \u{b7} {needle} \u{b7} {count}"),
+        }
+    };
+    palette.header_rows = render_palette_prelude(
+        &palette.input,
+        palette.resolved.as_ref(),
+        CmdStatus::Chip(&chip),
+        layout.modal,
+        layout.inner,
+        home,
+        ws,
+        theme,
+        buf,
+        scene,
+    );
+    let Some(layout) = palette_filter_layout(area, content_rows, zoom, palette.header_rows) else {
+        return;
+    };
+
+    let body = Rect::new(
+        layout.list.x,
+        layout.list.y,
+        layout.list.width,
+        layout.footer.y.saturating_sub(layout.list.y),
+    );
+    let plate = crate::render::chrome::plate_colors(theme, scene);
+    if let Some(plate) = plate {
+        let edges = [ISLAND_TOP, ISLAND_SIDE, ISLAND_BOTTOM, ISLAND_SIDE];
+        crate::render::chrome::modal_island(body, edges, plate, theme, buf, scene);
+    }
+
+    let history = &ws.palette_history;
+    let entries: Vec<HistoryEntry<'_>> = matches
+        .iter()
+        .map(|&index| HistoryEntry {
+            index,
+            line: &history.entries()[index],
+            at: history.times()[index],
+        })
+        .collect();
+    palette.history_rows = paint_history_rows(
+        &entries,
+        place,
+        now,
+        body,
+        &palette.availability,
+        theme,
+        buf,
+        scene,
+    );
+
+    let stage = palette_footer_parts(
+        KeyStage::History {
+            needle: history.needle(),
+        },
+        theme,
+    );
+    let hints: Vec<(&str, &str)> = stage
+        .hints
+        .iter()
+        .map(|(key, word)| (*key, word.as_ref()))
+        .collect();
+    let parts = Footer {
+        hints: &hints,
+        note: &stage.note,
+        ..Footer::default()
+    };
+    crate::render::picker::modal_footer(buf, layout.footer, &parts, plate, theme, scene);
+}
+
+/// Paint History's `entries`, newest first, into `area`, with the entry at
+/// `selected` as the selected row.
+///
+/// An entry's first row holds U+21BA in `ui.text.disabled` in its second cell
+/// and its line from its fifth cell. The line's head draws bold in `ui.text`,
+/// and the rest draws in `ui.text.dim`, as [`history_head_chars`] splits them.
+/// The line's age against `now`, as [`history_age`] words it, draws in
+/// `ui.text.muted` on the first row. The age ends one cell inside the right
+/// edge.
+///
+/// The line wraps as [`pre_wrap_rows`] breaks it, in the cells from the fifth
+/// cell to one blank cell before the age. Each next row starts under the head.
+/// A line with no time wraps one cell inside the right edge. The window starts
+/// where [`history_window`] keeps the selected entry whole.
+///
+/// Answers the cells of each entry on show with the index of its line.
+#[allow(clippy::too_many_arguments)]
+fn paint_history_rows(
+    entries: &[HistoryEntry<'_>],
+    selected: usize,
+    now: i64,
+    area: Rect,
+    availability: &Availability,
+    theme: &crate::theme::Theme,
+    buf: &mut Buffer,
+    scene: &mut stoat_widgets::ApcScene,
+) -> Vec<(Rect, usize)> {
+    let row_style = theme.get(crate::theme::scope::UI_TEXT);
+    let head_style = row_style.add_modifier(Modifier::BOLD);
+    let dim = theme.get(crate::theme::scope::UI_TEXT_DIM);
+    let muted = theme.get(crate::theme::scope::UI_TEXT_MUTED);
+    let mark = theme.get(crate::theme::scope::UI_TEXT_DISABLED);
+    let keeps_columns = theme
+        .try_get(crate::theme::scope::UI_LIST_SELECTED)
+        .is_some();
+
+    let laid: Vec<_> = entries
+        .iter()
+        .map(|entry| {
+            let chars: Vec<char> = entry.line.chars().collect();
+            let age = entry.at.map(|at| history_age(now, at));
+            let age_cells = age.as_ref().map_or(0, |age| age.chars().count() as u16 + 1);
+            let room = area
+                .width
+                .saturating_sub(HISTORY_LINE_COLUMN + 1 + age_cells);
+            let rows = pre_wrap_rows(&chars, usize::from(room), false);
+            let head = history_head_chars(entry.line, availability);
+            (chars, age, rows, head)
+        })
+        .collect();
+    let heights: Vec<usize> = laid.iter().map(|(_, _, rows, _)| rows.len()).collect();
+    let start = history_window(&heights, selected, usize::from(area.height));
+
+    let mut drawn = Vec::new();
+    let mut y = area.y;
+    for (place, (entry, (chars, age, rows, head))) in
+        entries.iter().zip(&laid).enumerate().skip(start)
+    {
+        if y >= area.bottom() {
+            break;
+        }
+        let height = (rows.len() as u16).min(area.bottom() - y);
+        let rect = Rect::new(area.x, y, area.width, height);
+        let is_selected = place == selected;
+        let style = match is_selected {
+            true => crate::render::chrome::selected_row(rect, row_style, true, theme, buf, scene),
+            false => {
+                for row_y in rect.top()..rect.bottom() {
+                    for col in rect.left()..rect.right() {
+                        buf[(col, row_y)].set_char(' ').set_style(row_style);
+                    }
+                }
+                row_style
+            },
+        };
+        let column = |own: Style| match (is_selected, keeps_columns) {
+            (false, _) => own,
+            (true, true) => Style {
+                bg: style.bg,
+                ..own
+            },
+            (true, false) => style,
+        };
+
+        write_str(
+            buf,
+            area.x + HISTORY_MARK_COLUMN,
+            y,
+            "\u{21ba}",
+            column(mark),
+        );
+        for (row_y, row) in (y..y + height).zip(rows) {
+            let head_end = (*head).clamp(row.start, row.end);
+            let head_text: String = chars[row.start..head_end].iter().collect();
+            let rest: String = chars[head_end..row.end].iter().collect();
+            let x = area.x + HISTORY_LINE_COLUMN;
+            write_str(buf, x, row_y, &head_text, column(head_style));
+            let rest_x = x + (head_end - row.start) as u16;
+            write_str(buf, rest_x, row_y, &rest, column(dim));
+        }
+        if let Some(age) = age {
+            let age_x = area.right().saturating_sub(1 + age.chars().count() as u16);
+            write_str(buf, age_x, y, age, column(muted));
+        }
+
+        drawn.push((rect, entry.index));
+        y += height;
+    }
+    drawn
+}
+
+/// The chars at the start of History line `line` that its head takes, the
+/// head that [`split_head`] finds against `availability`, else the line's
+/// first word.
+fn history_head_chars(line: &str, availability: &Availability) -> usize {
+    let head = match split_head(line, availability) {
+        Some((_, head, _)) => head,
+        None => line.split(' ').next().unwrap_or(""),
+    };
+    head.chars().count()
+}
+
+/// The age that a History row shows for a line that ran at `at`, with the
+/// clock at `now`, both in unix seconds.
+///
+/// A line under a minute old reads `now`. An older line reads its whole
+/// minutes, hours, days, 30-day months, or 365-day years, and an age of 24 to
+/// 48 hours reads `yesterday`. That day is a span of hours and no calendar
+/// day, so the rule needs no time zone. A time after `now` reads as an age of
+/// 0.
+fn history_age(now: i64, at: i64) -> String {
+    let age = (now - at).max(0);
+    match age {
+        0..60 => "now".to_owned(),
+        60..3_600 => format!("{}m", age / 60),
+        3_600..86_400 => format!("{}h", age / 3_600),
+        86_400..172_800 => "yesterday".to_owned(),
+        172_800..2_592_000 => format!("{}d", age / 86_400),
+        2_592_000..31_536_000 => format!("{}mo", age / 2_592_000),
+        _ => format!("{}y", age / 31_536_000),
+    }
+}
+
+/// The first History entry on show, so that the selected entry ends on or
+/// above the list's last row.
+///
+/// The window starts at the newest entry from which the entries through
+/// `selected` fit in `rows` rows. `heights` holds the rows of each entry,
+/// newest first. A selected entry taller than the list starts the window
+/// itself, and a selection past the last entry counts as the last.
+fn history_window(heights: &[usize], selected: usize, rows: usize) -> usize {
+    let Some(last) = heights.len().checked_sub(1) else {
+        return 0;
+    };
+    let selected = selected.min(last);
+    (0..=selected)
+        .find(|&start| heights[start..=selected].iter().sum::<usize>() <= rows)
+        .unwrap_or(selected)
+}
+
 /// Render the chrome every palette modal shares, which is the frame over
 /// `modal` and the Cmd Line at `inner`'s top, and answer the Cmd Line's rows.
 ///
@@ -595,6 +915,7 @@ fn render_palette_free_arg(
 /// - [`render_palette_filter`] for the command-list body.
 /// - [`render_palette_arg_picker`] for the inline-picker body.
 /// - [`render_palette_free_arg`] for the free-typed argument body.
+/// - [`render_palette_history`] for History.
 #[allow(clippy::too_many_arguments)]
 fn render_palette_prelude(
     input: &InputView,
@@ -866,39 +1187,62 @@ fn render_palette_filter(
         paint_doc_lines(buf, doc, shown, tag, theme, scene);
     }
 
-    let stage = palette_footer_parts(namespace, scope, theme);
+    let key_stage = match namespace {
+        Namespace::Commands => KeyStage::Commands {
+            scope,
+            typed: !input.text(ws).is_empty(),
+            recallable: !ws.palette_history.entries().is_empty(),
+        },
+        Namespace::Actions => KeyStage::Actions,
+    };
+    let stage = palette_footer_parts(key_stage, theme);
+    let hints: Vec<(&str, &str)> = stage
+        .hints
+        .iter()
+        .map(|(key, word)| (*key, word.as_ref()))
+        .collect();
     let parts = Footer {
-        hints: &stage.hints,
+        hints: &hints,
         note: &stage.note,
         ..Footer::default()
     };
     crate::render::picker::modal_footer(buf, layout.footer, &parts, plate, theme, scene);
 }
 
-/// The key hints and the note of the key line under the list that `namespace`
-/// names, with the palette in `scope`.
+/// The key hints and the note of the palette's key line in `stage`.
 ///
-/// The root names its run, completion, history, and scope keys, and the scope
-/// hint names the scopes that `S-Tab` reaches next. Its note names the two
-/// namespaces, with `:action` in `ui.key_label`, so a user learns where the
-/// internal actions went. The `action` list names its run, completion, doc
-/// scroll, and back keys, with no note.
-fn palette_footer_parts(
-    namespace: Namespace,
-    scope: PaletteScope,
-    theme: &crate::theme::Theme,
-) -> PaletteFooterParts {
-    match namespace {
-        Namespace::Commands => {
+/// A list of commands names its run, completion, history, and scope keys,
+/// and the scope hint names the scopes that `S-Tab` reaches next. The history
+/// hint reads U+2191 `last command` over an empty input and U+2191 `history`
+/// over typed text. It drops out while the history holds no line. The
+/// note names the two namespaces, with `:action` in `ui.key_label`, so a user
+/// learns where the internal actions went.
+///
+/// The `action` list names its run, completion, doc scroll, and back keys.
+/// History names its walk, run, edit, and back keys. With a needle that holds
+/// a word, it names the matches and the needle that `Esc` restores. Neither
+/// has a note.
+fn palette_footer_parts(stage: KeyStage<'_>, theme: &crate::theme::Theme) -> PaletteFooterParts {
+    let hint = |key, word: &'static str| (key, Cow::Borrowed(word));
+    match stage {
+        KeyStage::Commands {
+            scope,
+            typed,
+            recallable,
+        } => {
             let muted = theme.get(crate::theme::scope::UI_TEXT_MUTED);
             let key = theme.get(crate::theme::scope::UI_KEY_LABEL);
+            let mut hints = vec![hint("Enter", "run"), hint("Tab", "complete")];
+            if recallable {
+                let word = match typed {
+                    true => "history",
+                    false => "last command",
+                };
+                hints.push(hint("\u{2191}", word));
+            }
+            hints.push(hint("S-Tab", scope.next_names()));
             PaletteFooterParts {
-                hints: [
-                    ("Enter", "run"),
-                    ("Tab", "complete"),
-                    ("C-Up", "history"),
-                    ("S-Tab", scope.next_names()),
-                ],
+                hints,
                 note: vec![
                     ("root = commands \u{b7} ", muted),
                     (":action", key),
@@ -906,14 +1250,33 @@ fn palette_footer_parts(
                 ],
             }
         },
-        Namespace::Actions => PaletteFooterParts {
-            hints: [
-                ("Enter", "run"),
-                ("Tab", "complete"),
-                ("C-d", "doc"),
-                ("Esc", "back"),
+        KeyStage::Actions => PaletteFooterParts {
+            hints: vec![
+                hint("Enter", "run"),
+                hint("Tab", "complete"),
+                hint("C-d", "doc"),
+                hint("Esc", "back"),
             ],
             note: Vec::new(),
+        },
+        KeyStage::History { needle } => {
+            let hints = match needle.trim() {
+                "" => vec![
+                    hint("\u{2191}\u{2193}", "older / newer"),
+                    hint("Enter", "run"),
+                    hint("type", "edit it"),
+                    hint("Esc", "back to commands"),
+                ],
+                needle => vec![
+                    hint("\u{2191}\u{2193}", "older / newer match"),
+                    hint("Enter", "run"),
+                    ("Esc", Cow::Owned(format!("back to \"{needle}\""))),
+                ],
+            };
+            PaletteFooterParts {
+                hints,
+                note: Vec::new(),
+            }
         },
     }
 }
@@ -1512,12 +1875,13 @@ fn paint_source_tag(
 #[cfg(test)]
 mod tests {
     use super::{
-        count_status, doc_lines, grouped, input_spans, paint_doc_lines, paint_palette_rows,
-        palette_filter_layout, pascal_matches, render_command_palette, source_tag, usage_line,
-        wrap_text, DOC_ROWS, ISLAND_BOTTOM, ISLAND_GAP, ISLAND_SIDE, ISLAND_TOP, LIST_ROWS,
+        count_status, doc_lines, grouped, history_age, history_window, input_spans,
+        paint_doc_lines, paint_history_rows, paint_palette_rows, palette_filter_layout,
+        pascal_matches, render_command_palette, source_tag, usage_line, wrap_text, HistoryEntry,
+        DOC_ROWS, ISLAND_BOTTOM, ISLAND_GAP, ISLAND_SIDE, ISLAND_TOP, LIST_ROWS,
     };
     use crate::{
-        command_palette::{action_row, Namespace, ResolvedCommand},
+        command_palette::{action_row, Availability, Namespace, ResolvedCommand},
         keymap::ActionKeys,
         render::editor::ResolvedChrome,
         test_fixture::{plate_islands, row_rules},
@@ -1526,7 +1890,7 @@ mod tests {
     use ratatui::{
         buffer::Buffer,
         layout::Rect,
-        style::{Color, Style},
+        style::{Color, Modifier, Style},
     };
     use stoat_action::registry;
     use stoatty_protocol::command::{decode_stream, BarCommand, Command, TextRunCommand};
@@ -2225,6 +2589,137 @@ mod tests {
         );
     }
 
+    /// A History age reads `now` under a minute, then whole minutes, hours,
+    /// `yesterday`, days, months, and years. A time after the clock reads
+    /// `now`.
+    #[test]
+    fn history_ages_fall_into_their_buckets() {
+        let now = 1_000_000_000;
+        let ages = [
+            0, 59, 60, 3_599, 3_600, 86_399, 86_400, 172_799, 172_800, 2_591_999, 2_592_000,
+            31_536_000, -5,
+        ]
+        .map(|age| history_age(now, now - age));
+        assert_eq!(
+            ages,
+            [
+                "now",
+                "now",
+                "1m",
+                "59m",
+                "1h",
+                "23h",
+                "yesterday",
+                "yesterday",
+                "2d",
+                "29d",
+                "1mo",
+                "1y",
+                "now"
+            ],
+        );
+    }
+
+    /// A History row holds U+21BA in its second cell and its line from its
+    /// fifth, with the head bold and the rest after it. Its age ends one cell
+    /// inside the right edge.
+    #[test]
+    fn a_history_row_draws_its_mark_its_head_and_its_age() {
+        let entries = [HistoryEntry {
+            index: 0,
+            line: "cd /alpha",
+            at: Some(0),
+        }];
+        let (buf, _) = painted_history(&entries);
+        let bold: Vec<bool> = (4..7)
+            .map(|x| buf[(x, 0)].modifier.contains(Modifier::BOLD))
+            .collect();
+        assert_eq!(
+            (row_text(&buf, 0), bold),
+            (
+                placed(40, &[(1, "\u{21ba}"), (4, "cd /alpha"), (37, "2m")]),
+                vec![true, true, false],
+            ),
+        );
+    }
+
+    /// A History line wraps after the last space that fits before its age, and
+    /// each next row starts under its head. A word longer than the room breaks
+    /// at the room's last cell. The row map holds the cells of each entry with
+    /// the index of its line.
+    #[test]
+    fn a_long_history_line_wraps_under_its_head() {
+        let long = format!("run {} {}", "a".repeat(20), "b".repeat(20));
+        let entries = [
+            HistoryEntry {
+                index: 7,
+                line: &long,
+                at: Some(0),
+            },
+            HistoryEntry {
+                index: 3,
+                line: "cd /alpha",
+                at: Some(0),
+            },
+        ];
+        let (buf, rows) = painted_history(&entries);
+        let word = "x".repeat(40);
+        let (word_buf, _) = painted_history(&[HistoryEntry {
+            index: 0,
+            line: &word,
+            at: Some(0),
+        }]);
+
+        let first = format!("run {} ", "a".repeat(20));
+        assert_eq!(
+            (
+                [row_text(&buf, 0), row_text(&buf, 1)],
+                rows,
+                [row_text(&word_buf, 0), row_text(&word_buf, 1)],
+            ),
+            (
+                [
+                    placed(40, &[(1, "\u{21ba}"), (4, &first), (37, "2m")]),
+                    placed(40, &[(4, &"b".repeat(20))]),
+                ],
+                vec![(Rect::new(0, 0, 40, 2), 7), (Rect::new(0, 2, 40, 1), 3)],
+                [
+                    placed(40, &[(1, "\u{21ba}"), (4, &"x".repeat(32)), (37, "2m")]),
+                    placed(40, &[(4, &"x".repeat(8))]),
+                ],
+            ),
+        );
+    }
+
+    /// The History window starts at the newest entry that lets the selected
+    /// entry end on or above the list's last row.
+    #[test]
+    fn the_history_window_keeps_the_selected_entry_whole() {
+        let heights = [1, 2, 1, 3];
+        assert_eq!(
+            [0, 2, 3].map(|selected| history_window(&heights, selected, 4)),
+            [0, 0, 2],
+        );
+    }
+
+    /// Paint History `entries` into a list 40 cells wide and 4 rows tall, two
+    /// minutes after the time 0, with no entry selected.
+    fn painted_history(entries: &[HistoryEntry<'_>]) -> (Buffer, Vec<(Rect, usize)>) {
+        let list = Rect::new(0, 0, 40, 4);
+        let mut buf = Buffer::empty(list);
+        let rows = paint_history_rows(
+            entries,
+            usize::MAX,
+            125,
+            list,
+            &Availability::default(),
+            &Theme::empty(),
+            &mut buf,
+            &mut stoat_widgets::ApcScene::new(),
+        );
+        (buf, rows)
+    }
+
     /// A doc line wider than the doc region stops at the region's right edge,
     /// so it paints nothing onto the border or the editor behind.
     #[test]
@@ -2329,6 +2824,7 @@ mod tests {
             area,
             0,
             crate::render::picker::preview_min_columns(None),
+            0,
             &mut buf,
             &mut scene,
         );

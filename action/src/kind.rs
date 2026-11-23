@@ -529,6 +529,7 @@ action_kinds! {
     PromptHistoryPrev,
     PromptHistoryNext,
     PaletteScopeToggle,
+    PaletteUp,
     RunHistoryPrev,
     RunHistoryNext,
     HelpScopeToggle,

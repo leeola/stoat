@@ -59,6 +59,7 @@ const STRONG: [u8; 3] = [0x3e, 0x43, 0x4e];
 const DISABLED: [u8; 3] = [0x5b, 0x61, 0x6d];
 const TINT_ACCENT: [u8; 3] = [0x22, 0x30, 0x49];
 const TINT_INTERNAL: [u8; 3] = [0x1b, 0x2a, 0x2d];
+const TINT_SPECIAL: [u8; 3] = [0x2a, 0x22, 0x36];
 const DANGER: [u8; 3] = [0xf2, 0x77, 0x7f];
 const SUCCESS: [u8; 3] = [0x8f, 0xd1, 0x8a];
 const WARNING: [u8; 3] = [0xe8, 0xbd, 0x6a];
@@ -1506,6 +1507,51 @@ fn the_palette_key_line_ends_in_the_namespace_note() {
         panic!(
             "the brightest channel at the key line's right end is {note:#04x}, where the note \
              draws brighter than 0x11; the frame is {}",
+            frame.display(),
+        );
+    }
+}
+
+/// Up on the palette's first row lists History under a `history` chip.
+///
+/// Two commands run first, so History holds two lines. The chip
+/// `history 1 / 2` advances 176 sixteenths at the Caption scale of 216, so its
+/// box is the 13 cells that end at cell 143. The selected first row reads the
+/// tab wash, and one Island covers the gap that the root list leaves between
+/// its list and its doc. The second row's U+21BA mark draws in the disabled
+/// color from cell 18, and its age `now` draws muted from cell 139.
+#[test]
+fn up_lists_history_under_a_chip() {
+    let mut home = support::scratch_home();
+    let shot = palette_frame(
+        home.path(),
+        ":pwd<Enter><Settle>:wrap<Enter><Settle>:<Up><Settle>",
+    );
+
+    expect_color_box(
+        &shot,
+        &mut home,
+        TINT_SPECIAL,
+        234..266,
+        (1171, 241, 1287, 258),
+        "history_chip",
+    );
+    expect_region(
+        &shot,
+        &mut home,
+        (500, 279, 1, 1),
+        TAB_WASH,
+        "history_selected_row",
+    );
+    expect_region(&shot, &mut home, (700, 513, 1, 1), BASE, "history_island");
+    let mark = brightest(&shot, cell_rect(18, 16, 1, 1));
+    let age = brightest(&shot, cell_rect(139, 16, 3, 1));
+    if !(0x1e < mark && mark <= 0x6d && 0x1e < age && age <= 0x98) {
+        let frame = keep_frame(&shot, &mut home, "history_rows");
+        panic!(
+            "the second row's mark reads {mark:#04x}, where it draws above 0x1e and at most \
+             0x6d, and its age reads {age:#04x}, where it draws above 0x1e and at most 0x98; \
+             the frame is {}",
             frame.display(),
         );
     }

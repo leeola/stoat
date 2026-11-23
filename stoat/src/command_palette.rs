@@ -11,6 +11,7 @@ use crate::{
     rebase::RebasePause,
     workspace::Workspace,
 };
+use ratatui::layout::Rect;
 use std::{
     collections::hash_map::DefaultHasher,
     hash::{Hash, Hasher},
@@ -130,6 +131,13 @@ pub struct CommandPalette {
     /// scroll where the doc's last line stands on the island's last row, so a
     /// press past the end shows nothing new.
     pub(crate) doc_scroll: u16,
+    /// The cells of each History entry that the last frame drew, with the
+    /// index of the entry's line in the palette history, for the pointer.
+    ///
+    /// The paint stores it, because a row's height comes from the wrap in the
+    /// cells before its age, and the age follows the clock. Empty after a
+    /// frame that draws no History.
+    pub(crate) history_rows: Vec<(Rect, usize)>,
 }
 
 /// A command token that the palette's input names, and the ghost that the Cmd
@@ -822,6 +830,7 @@ impl CommandPalette {
             resolved: None,
             keys,
             doc_scroll: 0,
+            history_rows: Vec::new(),
         }
     }
 
@@ -1048,16 +1057,21 @@ impl CommandPalette {
     /// immediately, while a parameter-taking action rewrites the input to
     /// `"<name> "` to begin inline argument entry. Called from the
     /// `SubmitPromptInput` action handler while the palette is open.
+    ///
+    /// While the history walks, Enter runs the recalled line as typed. No row
+    /// of an argument list stands in for its argument, and the line runs at
+    /// any selection. A recalled line that names no command runs nothing,
+    /// because History shows no list row to fall back to.
     pub(crate) fn handle_submit(&mut self, ws: &mut Workspace) -> PaletteOutcome {
+        let walking = ws.palette_history.is_walking();
+        let arg_picker = self.arg_picker.as_ref().filter(|_| !walking);
         let text = self.input.text(ws);
         if let Some((entry, arg)) = parse_command(&text, &self.availability) {
             let params = entry.def.params();
             if params.len() > 1 {
                 let picked = param_at(params, arg_index(arg)).and_then(|param| {
-                    let picker = self
-                        .arg_picker
-                        .as_ref()
-                        .filter(|picker| picker.source() == param.value_source)?;
+                    let picker =
+                        arg_picker.filter(|picker| picker.source() == param.value_source)?;
                     let row = picker.selected_path()?.to_string_lossy();
                     Some(chosen_value(param.value_source, &row).to_string())
                 });
@@ -1090,15 +1104,13 @@ impl CommandPalette {
                 arg.starts_with('/') || arg.starts_with('~')
             };
             let chosen = if explicit_path {
-                self.arg_picker
-                    .as_ref()
+                arg_picker
                     .filter(|picker| picker.source() == param.value_source)
                     .and_then(|picker| picker.browse_selected_path())
                     .map(|path| path.to_string_lossy().into_owned())
                     .unwrap_or_else(|| arg.to_string())
             } else {
-                self.arg_picker
-                    .as_ref()
+                arg_picker
                     .filter(|picker| picker.source() == param.value_source)
                     .and_then(|picker| picker.selected_path())
                     .map(|path| {
@@ -1139,7 +1151,7 @@ impl CommandPalette {
         // where a bare `next` or `done` is resolved. The root resolves only
         // commands, so a bare internal action runs under the `action` token.
         let bare = text.trim();
-        if self.selected == 0
+        if (self.selected == 0 || walking)
             && let Some(entry) = resolve_head(bare, &self.availability)
         {
             if dispatches_bare(entry) {
@@ -1148,6 +1160,10 @@ impl CommandPalette {
             }
             self.input
                 .replace_text(ws, &format!("{} ", typed_head(entry)));
+            return PaletteOutcome::None;
+        }
+        if walking {
+            tracing::info!(target: "stoat::command", text = %text, "no command matched");
             return PaletteOutcome::None;
         }
 
@@ -1745,7 +1761,8 @@ mod tests {
         buffer::Buffer,
         style::{Color, Modifier},
     };
-    use stoat_action::ParamKind;
+    use std::time::Duration;
+    use stoat_action::{Action, ParamKind};
 
     /// Seed `files` into the harness' fake fs under a fixed virtual root and
     /// point the active workspace at it, so the palette's inline file picker
@@ -3258,10 +3275,16 @@ mod tests {
             "Ctrl-P moves the list selection up"
         );
         assert_eq!(palette_text(&h), "", "the Ctrl keys never recall history");
+        h.type_keys("ctrl-p");
+        assert_eq!(
+            palette_place(&h),
+            (0, String::new()),
+            "Ctrl-P on the first row recalls no history"
+        );
     }
 
     #[test]
-    fn palette_arrows_move_the_list_not_history() {
+    fn palette_arrows_move_the_list_and_up_on_the_first_row_recalls_history() {
         let mut h = Stoat::test();
         h.stoat.active_workspace_mut().palette_history =
             InputHistory::from_entries(vec!["w".to_string()]);
@@ -3278,6 +3301,12 @@ mod tests {
             palette_place(&h),
             (0, String::new()),
             "Up moves the list selection up and recalls no history"
+        );
+        h.type_keys("up");
+        assert_eq!(
+            palette_place(&h),
+            (0, "w".to_string()),
+            "Up on the first row recalls the history"
         );
     }
 
@@ -4984,13 +5013,15 @@ mod tests {
         assert_eq!((scrolled, doc_scroll(&h)), (3, 0));
     }
 
-    /// The root's key line names its run, completion, history, and scope keys,
-    /// and the scope hint names the scope that `S-Tab` reaches next. The note
-    /// at its right end names the two namespaces, with `:action` in the key
-    /// color.
+    /// The root's key line names its run, completion, history, and scope keys.
+    /// Over an empty input the history hint names the last command, and the
+    /// scope hint names the scope that `S-Tab` reaches next. The note at its
+    /// right end names the two namespaces, with `:action` in the key color.
     #[test]
     fn the_root_key_line_names_its_keys_the_next_scope_and_the_namespaces() {
         let mut h = TestHarness::with_size(160, 50);
+        h.stoat.active_workspace_mut().palette_history =
+            InputHistory::from_entries(vec!["w".to_string()]);
         h.type_text(":");
         let _ = h.snapshot();
 
@@ -5000,7 +5031,7 @@ mod tests {
         let key = h.stoat.theme.get(crate::theme::scope::UI_KEY_LABEL).fg;
         assert_eq!(
             (
-                line.contains("Enter run  Tab complete  C-Up history  S-Tab all"),
+                line.contains("Enter run  Tab complete  \u{2191} last command  S-Tab all"),
                 line.ends_with("root = commands \u{b7} :action = internals"),
                 colors[action..action + 7]
                     .iter()
@@ -5013,7 +5044,8 @@ mod tests {
     }
 
     /// After `S-Tab` the scope hint names `applicable`, the scope that the key
-    /// reaches next from `all`.
+    /// reaches next from `all`. With no history line, the history hint drops
+    /// out.
     #[test]
     fn the_scope_hint_names_the_scope_that_shift_tab_reaches_next() {
         let mut h = TestHarness::with_size(160, 50);
@@ -5023,7 +5055,7 @@ mod tests {
 
         let (text, _) = key_line(&h);
         assert!(
-            text.contains("Enter run  Tab complete  C-Up history  S-Tab applicable"),
+            text.contains("Enter run  Tab complete  S-Tab applicable"),
             "the key line reads {text:?}",
         );
     }
@@ -5043,16 +5075,18 @@ mod tests {
     }
 
     /// A key line too narrow for the root's note keeps its hints and leaves
-    /// the note out.
+    /// the note out. Over typed text the history hint names `history`.
     #[test]
     fn a_narrow_palette_keeps_its_hints_and_drops_the_note() {
         let mut h = Stoat::test();
-        h.type_text(":");
+        h.stoat.active_workspace_mut().palette_history =
+            InputHistory::from_entries(vec!["pwd".to_string()]);
+        h.type_text(":w");
         let _ = h.snapshot();
 
         assert_eq!(
             key_line(&h).0.trim(),
-            "Enter run  Tab complete  C-Up history  S-Tab all"
+            "Enter run  Tab complete  \u{2191} history  S-Tab all"
         );
     }
 
@@ -5092,6 +5126,387 @@ mod tests {
                 "normal"
             ),
         );
+    }
+
+    /// Up on the first row recalls the newest line and lists History, newest
+    /// first, under the chip `history 1 / 2`.
+    #[test]
+    fn up_on_the_first_row_recalls_the_newest_line_and_lists_history() {
+        let mut h = history_harness();
+        h.type_text(":");
+        h.type_keys("up");
+        let _ = h.snapshot();
+
+        assert_eq!(
+            (
+                palette_text(&h),
+                [history_list_row(&h, 0), history_list_row(&h, 1)],
+                h.rendered_text().contains("history 1 / 2"),
+            ),
+            (
+                "cd /beta".to_owned(),
+                [
+                    "\u{21ba}  cd /beta".to_owned(),
+                    "\u{21ba}  cd /alpha".to_owned()
+                ],
+                true,
+            ),
+        );
+    }
+
+    /// Up and Down walk History older and newer. Down past the newest line
+    /// ends the walk, restores the typed text, and returns the list.
+    #[test]
+    fn up_and_down_walk_history_and_down_past_the_newest_returns_the_list() {
+        let mut h = history_harness();
+        h.type_text(":");
+        h.type_keys("up up");
+        let _ = h.snapshot();
+        let oldest = (
+            palette_text(&h),
+            h.rendered_text().contains("history 2 / 2"),
+        );
+        h.type_keys("down");
+        let newer = palette_text(&h);
+        h.type_keys("down");
+        let _ = h.snapshot();
+
+        let last = h
+            .stoat
+            .command_palette
+            .as_ref()
+            .expect("palette open")
+            .filtered
+            .last()
+            .map(|&entry| entry.command_name.as_str());
+        assert_eq!(
+            (oldest, newer, palette_text(&h), walking(&h), last),
+            (
+                ("cd /alpha".to_owned(), true),
+                "cd /beta".to_owned(),
+                String::new(),
+                false,
+                Some(ACTION_TOKEN),
+            ),
+        );
+    }
+
+    /// An edit of the recalled line ends the walk, and the palette shows the
+    /// list for the edited line in place of History.
+    #[test]
+    fn typing_in_history_returns_the_list_for_the_edited_line() {
+        let mut h = history_harness();
+        h.type_text(":");
+        h.type_keys("up");
+        h.type_text("x");
+        let _ = h.snapshot();
+
+        let palette = h.stoat.command_palette.as_ref().expect("palette open");
+        assert_eq!(
+            (
+                palette_text(&h),
+                walking(&h),
+                palette.history_rows.is_empty()
+            ),
+            ("cd /betax".to_owned(), false, true),
+        );
+    }
+
+    /// `Esc` in History ends the walk, restores the typed text, and keeps the
+    /// palette open. A second `Esc` closes it.
+    #[test]
+    fn escape_in_history_restores_the_typed_text_and_keeps_the_palette_open() {
+        let mut h = history_harness();
+        h.type_text(":cd");
+        h.type_keys("up escape");
+        let restored = (palette_text(&h), walking(&h));
+        h.type_keys("escape");
+
+        assert_eq!(
+            (restored, h.stoat.command_palette.is_none()),
+            (("cd".to_owned(), false), true),
+        );
+    }
+
+    /// `C-Up` from a lower row starts the walk, which shows History as Up's
+    /// walk does.
+    #[test]
+    fn ctrl_up_from_a_lower_row_shows_history() {
+        let mut h = history_harness();
+        h.type_text(":");
+        h.type_keys("down ctrl-up");
+        let _ = h.snapshot();
+
+        let palette = h.stoat.command_palette.as_ref().expect("palette open");
+        assert_eq!(
+            (palette_text(&h), palette.history_rows.len()),
+            ("cd /beta".to_owned(), 2),
+        );
+    }
+
+    /// Tab in History completes nothing, so the recalled line and the walk
+    /// stay.
+    #[test]
+    fn tab_in_history_leaves_the_recalled_line() {
+        let mut h = history_harness();
+        h.type_text(":");
+        h.type_keys("up tab");
+        assert_eq!(
+            (palette_text(&h), walking(&h)),
+            ("cd /beta".to_owned(), true)
+        );
+    }
+
+    /// Tab, `S-Tab`, the page keys, and `C-d` change nothing in History. The
+    /// recalled line is the start of the name `pwd`, so Tab has a name to
+    /// complete. The line names no argument, so `C-d` reaches the doc scroll
+    /// of the command list.
+    #[test]
+    fn tab_scope_page_and_doc_keys_do_nothing_in_history() {
+        let mut h = TestHarness::with_size(160, 50);
+        h.stoat.active_workspace_mut().palette_history =
+            InputHistory::from_entries(vec!["pw".to_string()]);
+        h.type_text(":");
+        h.type_keys("up");
+        let scope = h
+            .stoat
+            .command_palette
+            .as_ref()
+            .expect("palette open")
+            .scope;
+        h.type_keys("tab backtab pagedown pageup ctrl-d");
+
+        let palette = h.stoat.command_palette.as_ref().expect("palette open");
+        assert_eq!(
+            (
+                palette_text(&h),
+                walking(&h),
+                palette.scope,
+                palette.doc_scroll
+            ),
+            ("pw".to_owned(), true, scope, 0),
+        );
+    }
+
+    /// History's key line names its walk, run, edit, and back keys. Over a
+    /// needle that holds a word, the chip and the back hint name the needle,
+    /// and the walk hint names the matches.
+    #[test]
+    fn history_names_its_keys_and_its_needle() {
+        let mut h = history_harness();
+        h.type_text(":");
+        h.type_keys("up");
+        let _ = h.snapshot();
+        let bare = key_line(&h).0.trim().to_owned();
+        h.type_keys("escape");
+        h.type_text("cd");
+        h.type_keys("up");
+        let _ = h.snapshot();
+
+        assert_eq!(
+            (
+                bare,
+                key_line(&h).0.trim().to_owned(),
+                h.rendered_text().contains("history \u{b7} cd \u{b7} 1 / 2"),
+            ),
+            (
+                "\u{2191}\u{2193} older / newer  Enter run  type edit it  Esc back to commands"
+                    .to_owned(),
+                "\u{2191}\u{2193} older / newer match  Enter run  Esc back to \"cd\"".to_owned(),
+                true,
+            ),
+        );
+    }
+
+    /// A walk out of an argument list drops its picker, so the box keeps the
+    /// rows of the command list for every recalled line. `Esc` restores the
+    /// typed argument and installs its picker again.
+    #[test]
+    fn a_walk_out_of_an_argument_list_keeps_the_box_of_the_command_list() {
+        let mut h = Stoat::test();
+        seed_palette_workspace(&mut h, &[("a.rs", "a\n"), ("b.rs", "b\n")]);
+        h.stoat.active_workspace_mut().palette_history =
+            InputHistory::from_entries(vec!["zoo x".to_string(), "o b.rs".to_string()]);
+        let palette = |h: &TestHarness| -> (String, Option<bool>, u16) {
+            let palette = h.stoat.command_palette.as_ref().expect("palette open");
+            (
+                palette_text(h),
+                palette.arg_source().map(|_| palette.arg_picker.is_some()),
+                palette.list_rows_hint(),
+            )
+        };
+
+        h.type_text(":");
+        let commands = palette(&h).2;
+        h.type_text("o ");
+        h.settle();
+        let files = palette(&h).2;
+        h.type_keys("up");
+        h.settle();
+        let newest = palette(&h);
+        h.type_keys("up");
+        h.settle();
+        let oldest = palette(&h);
+        h.type_keys("escape");
+        h.settle();
+
+        assert_eq!(
+            (files, newest, oldest, palette(&h)),
+            (
+                2,
+                ("o b.rs".to_owned(), Some(false), commands),
+                ("zoo x".to_owned(), None, commands),
+                ("o ".to_owned(), Some(true), 2),
+            ),
+        );
+    }
+
+    /// Enter in History runs the recalled line as typed. The argument list's
+    /// selected row stands in for no argument, so the line opens `a/b.rs`
+    /// although `a.rs` heads the list. Up dispatches with no frame after it,
+    /// so the argument picker is still installed when Enter runs.
+    #[test]
+    fn enter_in_history_runs_the_recalled_line_as_typed() {
+        let mut h = Stoat::test();
+        seed_palette_workspace(&mut h, &[("a.rs", "a\n"), ("a/b.rs", "b\n")]);
+        h.stoat.active_workspace_mut().palette_history =
+            InputHistory::from_entries(vec!["o a/b.rs".to_string()]);
+        h.type_text(":o a");
+        h.settle();
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::PaletteUp);
+
+        let mut palette = h.stoat.command_palette.take().expect("palette open");
+        let installed = palette.arg_picker.is_some();
+        let dispatched = match palette.handle_submit(h.stoat.active_workspace_mut()) {
+            PaletteOutcome::Dispatch(entry, values, _) => Some((entry.def.name(), values)),
+            _ => None,
+        };
+        assert_eq!(
+            (installed, dispatched),
+            (
+                true,
+                Some(("OpenFile", vec![ParamValue::String("a/b.rs".to_owned())]))
+            ),
+        );
+    }
+
+    /// Enter in History runs the recalled line at any selection, and never a
+    /// list row in its place. `C-Up` from the third row recalls `w`, whose
+    /// filter keeps that row, and Enter saves. The line `pw` names no command,
+    /// so Enter runs nothing, although its filter lists `pwd` first.
+    #[test]
+    fn enter_in_history_runs_the_line_and_never_a_list_row() {
+        assert_eq!(
+            [
+                history_submit("w", "down down ctrl-up"),
+                history_submit("pw", "up")
+            ],
+            [(2, Some("SaveBuffer")), (0, None)],
+        );
+    }
+
+    /// A step that follows an edit in the same frame ends the old walk first.
+    /// Up then walks under the edited text, and Down finds no walk to step.
+    #[test]
+    fn a_step_after_an_edit_in_the_same_frame_ends_the_old_walk() {
+        assert_eq!(
+            [
+                stepped_after_an_edit("up", &stoat_action::PaletteUp),
+                stepped_after_an_edit("up up", &stoat_action::PickerNext),
+            ],
+            ["cd /beta", "cd"],
+        );
+    }
+
+    /// A History row ends in the age of its line, two minutes after the line
+    /// ran.
+    #[test]
+    fn a_history_row_shows_its_age() {
+        let mut h = TestHarness::with_size(160, 50);
+        h.type_text(":pwd");
+        h.type_keys("enter");
+        h.advance_clock(Duration::from_secs(125));
+        h.type_text(":");
+        h.type_keys("up");
+        let _ = h.snapshot();
+
+        let row = history_list_row(&h, 0);
+        assert_eq!(
+            (row.starts_with("\u{21ba}  pwd"), row.ends_with("2m")),
+            (true, true),
+            "the History row reads {row:?}",
+        );
+    }
+
+    /// A harness 160 by 50 whose palette history holds `cd /alpha` and then
+    /// `cd /beta`.
+    fn history_harness() -> TestHarness {
+        let mut h = TestHarness::with_size(160, 50);
+        h.stoat.active_workspace_mut().palette_history =
+            InputHistory::from_entries(vec!["cd /alpha".to_string(), "cd /beta".to_string()]);
+        h
+    }
+
+    /// Whether the palette history walks.
+    fn walking(h: &TestHarness) -> bool {
+        h.stoat.active_workspace().palette_history.is_walking()
+    }
+
+    /// The selection, and the name of the action that Enter dispatches, after
+    /// `keys` typed after `:` over a palette history that holds only `line`.
+    fn history_submit(line: &str, keys: &str) -> (usize, Option<&'static str>) {
+        let mut h = Stoat::test();
+        h.stoat.active_workspace_mut().palette_history =
+            InputHistory::from_entries(vec![line.to_string()]);
+        h.type_text(":");
+        h.type_keys(keys);
+
+        let mut palette = h.stoat.command_palette.take().expect("palette open");
+        let selected = palette.selected;
+        match palette.handle_submit(h.stoat.active_workspace_mut()) {
+            PaletteOutcome::Dispatch(entry, _, _) => (selected, Some(entry.def.name())),
+            _ => (selected, None),
+        }
+    }
+
+    /// The palette input after `walk`, an edit of the input to `cd`, and
+    /// `action`, with no frame between the edit and the action.
+    ///
+    /// The history holds `cd /alpha`, `pwd`, and `cd /beta`.
+    fn stepped_after_an_edit(walk: &str, action: &dyn Action) -> String {
+        let mut h = Stoat::test();
+        h.stoat.active_workspace_mut().palette_history = InputHistory::from_entries(vec![
+            "cd /alpha".to_string(),
+            "pwd".to_string(),
+            "cd /beta".to_string(),
+        ]);
+        h.type_text(":");
+        h.type_keys(walk);
+
+        let ws = &mut h.stoat.workspaces[h.stoat.active_workspace];
+        let palette = h.stoat.command_palette.as_mut().expect("palette open");
+        palette.input.replace_text(ws, "cd");
+        crate::action_handlers::dispatch(&mut h.stoat, action);
+        palette_text(&h)
+    }
+
+    /// The text of the palette list's row `row`, from its second cell, with
+    /// its trailing blanks cut. The first cell holds the selected row's bar.
+    fn history_list_row(h: &TestHarness, row: u16) -> String {
+        let (rows, zoom, header_rows) = crate::test_fixture::palette_sizing(h);
+        let list = crate::render::command_palette::palette_filter_layout(
+            h.stoat.size(),
+            rows,
+            zoom,
+            header_rows,
+        )
+        .expect("the palette fits the test terminal")
+        .list;
+        let buf = h.rendered_buffer();
+        let text: String = (list.x + 1..list.right())
+            .map(|x| buf[(x, list.y + row)].symbol())
+            .collect();
+        text.trim_end().to_owned()
     }
 
     /// The text of the palette's key line, and the foreground of each of its

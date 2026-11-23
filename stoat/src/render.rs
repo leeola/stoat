@@ -2483,6 +2483,7 @@ pub(crate) fn frame(
         Some(ActiveModal::Palette) => {
             if let Some(palette) = &mut stoat.command_palette {
                 let zoom = modal_zoom_steps(&stoat.modal_zoom, ModalKind::Palette);
+                let now = crate::commit_picker::now_epoch(&stoat.executor);
                 command_palette::render_command_palette(
                     palette,
                     ws,
@@ -2492,6 +2493,7 @@ pub(crate) fn frame(
                     full,
                     zoom,
                     preview_min,
+                    now,
                     buf,
                     &mut *scene,
                 );

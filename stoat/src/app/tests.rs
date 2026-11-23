@@ -2248,6 +2248,108 @@ fn ctrl_d_still_scrolls_the_preview_of_an_argument_list() {
     );
 }
 
+/// A press on a History row recalls its line, and a press on the recalled row
+/// runs it as Enter does.
+#[test]
+fn a_press_on_a_history_row_recalls_it_and_a_press_on_the_recalled_row_runs_it() {
+    let mut h = history_rows_harness();
+    let press = |h: &mut crate::test_harness::TestHarness| {
+        h.stoat
+            .update(mouse_event(MouseEventKind::Down(MouseButton::Left), 10, 8));
+    };
+    press(&mut h);
+    let _ = h.snapshot();
+    let recalled = (
+        palette_input(&h),
+        h.rendered_text().contains("history 3 / 3"),
+    );
+    press(&mut h);
+
+    let history = h.stoat.active_workspace().palette_history.entries();
+    assert_eq!(
+        (
+            recalled,
+            h.stoat.command_palette.is_none(),
+            history.len(),
+            history.last().map(String::as_str),
+        ),
+        (("pwd".to_owned(), true), true, 4, Some("pwd")),
+    );
+}
+
+/// A press on a later cell row of a wrapped History line recalls that line.
+#[test]
+fn a_press_on_a_later_cell_row_of_a_wrapped_history_line_recalls_that_line() {
+    let mut h = history_rows_harness();
+    h.stoat
+        .update(mouse_event(MouseEventKind::Down(MouseButton::Left), 10, 7));
+    assert_eq!(palette_input(&h), long_history_line());
+}
+
+/// A wheel notch over History steps it in list order. A notch down goes to the
+/// next older line, a notch up goes to the next newer, and no notch leaves
+/// History.
+#[test]
+fn a_wheel_notch_over_history_steps_it_in_list_order() {
+    let mut h = history_rows_harness();
+    let notch = |h: &mut crate::test_harness::TestHarness, kind| {
+        h.stoat.update(mouse_event(kind, 10, 6));
+        palette_input(h)
+    };
+    let down = notch(&mut h, MouseEventKind::ScrollDown);
+    let up = notch(&mut h, MouseEventKind::ScrollUp);
+    let held = notch(&mut h, MouseEventKind::ScrollUp);
+
+    assert_eq!(
+        (
+            down,
+            up,
+            held,
+            h.stoat.active_workspace().palette_history.is_walking()
+        ),
+        (
+            long_history_line(),
+            "cd /beta".to_owned(),
+            "cd /beta".to_owned(),
+            true
+        ),
+    );
+}
+
+/// A harness whose palette shows History after `:` and Up, over the history
+/// `pwd`, then [`long_history_line`], then `cd /beta`.
+///
+/// The header takes one row, so History starts on row 5. `cd /beta` stands on
+/// row 5, the long line on rows 6 and 7, and `pwd` on row 8.
+fn history_rows_harness() -> crate::test_harness::TestHarness {
+    let mut h = Stoat::test();
+    h.stoat.active_workspace_mut().palette_history =
+        crate::input_history::InputHistory::from_entries(vec![
+            "pwd".to_string(),
+            long_history_line(),
+            "cd /beta".to_string(),
+        ]);
+    h.type_text(":");
+    h.type_keys("up");
+    let _ = h.snapshot();
+    h
+}
+
+/// A History line that wraps onto two rows of the 80-column harness.
+fn long_history_line() -> String {
+    format!("run {} {}", "x".repeat(30), "y".repeat(50))
+}
+
+/// The text of the open palette's input.
+fn palette_input(h: &crate::test_harness::TestHarness) -> String {
+    h.stoat
+        .command_palette
+        .as_ref()
+        .expect("palette open")
+        .input
+        .text(h.stoat.active_workspace())
+}
+
 #[test]
 fn preview_scroll_resets_on_selection_change() {
     let mut h = crate::test_harness::TestHarness::with_size(100, 30);

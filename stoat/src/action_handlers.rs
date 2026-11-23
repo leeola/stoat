@@ -1425,6 +1425,7 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
         ActionKind::PromptHistoryPrev => prompt::prompt_history_prev(stoat),
         ActionKind::PromptHistoryNext => prompt::prompt_history_next(stoat),
         ActionKind::PaletteScopeToggle => palette::palette_scope_toggle(stoat),
+        ActionKind::PaletteUp => palette::palette_up(stoat),
         ActionKind::OpenLastPicker => open_last_picker(stoat),
     };
     end_action_group(stoat, group_buffer);

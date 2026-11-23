@@ -7256,6 +7256,43 @@ fn the_action_list_pool_prints_pascal_case_names_and_keys() {
     );
 }
 
+/// A walk of the palette history retires the palette's pool, because History
+/// draws on the live grid with no pool.
+#[test]
+fn history_retires_the_palette_pool() {
+    use stoatty_protocol::command::{Command, PoolDropCommand};
+
+    let mut h = Stoat::test();
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+    h.stoat.set_apc_tx(tx);
+    h.stoat.active_workspace_mut().palette_history =
+        crate::input_history::InputHistory::from_entries(vec!["pwd".to_string()]);
+    let mut emitted = |h: &mut crate::test_harness::TestHarness, keys: &str| {
+        h.type_text(keys);
+        h.snapshot();
+        let size = h.stoat.size();
+        h.stoat.active_workspace_mut().layout(size);
+        emit_smooth_scroll(&mut h.stoat);
+        drain_apc(&mut rx)
+    };
+
+    let opened = emitted(&mut h, ":");
+    h.type_keys("up");
+    let walked = emitted(&mut h, "");
+
+    let palette = crate::smooth_scroll::non_pane_pool::PALETTE;
+    let declares = |commands: &[Command]| {
+        commands
+            .iter()
+            .any(|command| matches!(command, Command::PoolRegion(region) if region.pool == palette))
+    };
+    let drop = Command::PoolDrop(PoolDropCommand { pool: palette });
+    assert_eq!(
+        (declares(&opened), declares(&walked), walked.contains(&drop)),
+        (true, false, true),
+    );
+}
+
 #[test]
 fn completion_popup_is_pooled_and_retired() {
     use crate::completion::{CompletionItem, CompletionPopup, CompletionSource};

@@ -203,6 +203,10 @@ pub(super) fn open_palette_seeded(stoat: &mut Stoat, seed: &str) -> UpdateEffect
 /// syncs the preview. A no-op when no palette is open or the input is not in
 /// file-argument mode.
 ///
+/// While the history walks, the palette shows History and no argument list.
+/// The sync then drops an installed argument picker and starts no scan. Thus
+/// the box keeps the size of the command list for every recalled line.
+///
 /// Lives here rather than on [`crate::command_palette::CommandPalette`] because
 /// spawning the walk needs [`Stoat`]-level resources (the executor, fs host, and
 /// redraw notifier) that a palette method does not see.
@@ -220,6 +224,10 @@ pub(crate) fn sync_palette_picker(stoat: &mut Stoat) {
         let current = palette.input.text(ws);
         ws.palette_history.reset_if_edited(&current);
         palette.refilter_from_input(ws);
+        if ws.palette_history.is_walking() {
+            palette.dispose_arg_picker(ws);
+            return;
+        }
         palette.arg_source().zip(palette.arg_tail(ws))
     };
     let Some((source, tail)) = resolved else {
@@ -511,10 +519,18 @@ pub(super) fn palette_submit(stoat: &mut Stoat) -> Option<UpdateEffect> {
 /// Under the `action` token the palette steps back to the root list instead.
 /// The input clears, so the root lists every command as it does at open, and
 /// a second `Esc` closes the palette.
+///
+/// While the history walks, `Esc` ends the walk and writes the typed text
+/// back, and the palette stays open on the list for that text.
 pub(super) fn palette_cancel(stoat: &mut Stoat) -> Option<UpdateEffect> {
     let active_idx = stoat.active_workspace;
     let palette = stoat.command_palette.as_mut()?;
     let ws = &mut stoat.workspaces[active_idx];
+    if let Some(typed) = ws.palette_history.leave() {
+        palette.input.replace_text(ws, &typed);
+        sync_palette_picker(stoat);
+        return Some(UpdateEffect::Redraw);
+    }
     if command_palette::action_query(&palette.input.text(ws)).is_none() {
         return close_palette(stoat).then_some(UpdateEffect::Redraw);
     }
@@ -540,8 +556,17 @@ pub(super) fn palette_insert_newline(stoat: &mut Stoat) -> Option<UpdateEffect> 
 /// Move the action-list selection. Returns `None` when the palette is closed.
 ///
 /// A move to another entry starts the doc island at the new entry's first
-/// line.
+/// line. While the history walks, the palette lists History, so a negative
+/// `delta` recalls the next older match and a positive one the next newer.
 pub(crate) fn palette_move_selection(stoat: &mut Stoat, delta: i32) -> Option<UpdateEffect> {
+    stoat.command_palette.as_ref()?;
+    if stoat.active_workspace().palette_history.is_walking() {
+        return match delta < 0 {
+            true => palette_history_prev(stoat),
+            false => palette_history_next(stoat),
+        };
+    }
+
     let palette = stoat.command_palette.as_mut()?;
     if palette.arg_source().is_some()
         && let Some(picker) = palette.arg_picker.as_mut()
@@ -557,14 +582,51 @@ pub(crate) fn palette_move_selection(stoat: &mut Stoat, delta: i32) -> Option<Up
     Some(UpdateEffect::Redraw)
 }
 
+/// Move the palette's selection up one row, or start the history walk from
+/// the list's first row.
+///
+/// On the first row of the command list or of the argument list, Up starts the
+/// walk as [`palette_history_prev`] starts it. A free-typed argument lists
+/// nothing, so Up over it starts the walk too. The typed text is the needle,
+/// and the newest match goes into the input. With no match the palette stays
+/// as it is. While the history walks, Up recalls the next older match. On a
+/// lower row Up moves the selection up.
+pub(super) fn palette_up(stoat: &mut Stoat) -> UpdateEffect {
+    let Some(palette) = stoat.command_palette.as_ref() else {
+        return UpdateEffect::None;
+    };
+    let picker_row = palette
+        .arg_picker
+        .as_ref()
+        .filter(|_| palette.arg_source().is_some())
+        .map(|picker| picker.active_core_ref().picklist.selected);
+    let first_row = match (palette.command, picker_row) {
+        (_, Some(row)) => row == 0,
+        (Some(_), None) => true,
+        (None, None) => palette.selected == 0,
+    };
+
+    let walking = stoat.active_workspace().palette_history.is_walking();
+    let effect = match walking || first_row {
+        true => palette_history_prev(stoat),
+        false => palette_move_selection(stoat, -1),
+    };
+    effect.unwrap_or(UpdateEffect::None)
+}
+
 /// Scroll the palette's doc island by [`command_palette::DOC_SCROLL_STEP`]
 /// lines in `dir` (-1 up, 1 down), or answer `None` when the palette shows no
 /// doc island.
 ///
 /// The command list and the `action` list show the selected entry's doc. An
 /// argument stage shows none, so `C-d` and `C-u` keep to its preview there.
-/// The paint holds a scroll past the doc's end at its last line.
+/// The paint holds a scroll past the doc's end at its last line. History
+/// shows no doc, so the keys change nothing while the history walks.
 pub(super) fn palette_doc_scroll(stoat: &mut Stoat, dir: i32) -> Option<UpdateEffect> {
+    stoat.command_palette.as_ref()?;
+    if stoat.active_workspace().palette_history.is_walking() {
+        return Some(UpdateEffect::None);
+    }
     let palette = stoat
         .command_palette
         .as_mut()
@@ -585,12 +647,15 @@ pub(super) fn palette_doc_scroll(stoat: &mut Stoat, dir: i32) -> Option<UpdateEf
 ///
 /// The already-typed text is the substring needle. A saturated or empty walk
 /// leaves the input unchanged. The every-frame refilter re-parses the recalled
-/// line into command or argument mode, so no extra wiring is needed here.
+/// line into command or argument mode, so no extra wiring is needed here. An
+/// edit of the recalled line ends the walk first, so the edited text is the
+/// needle of a new one.
 pub(crate) fn palette_history_prev(stoat: &mut Stoat) -> Option<UpdateEffect> {
     let active_idx = stoat.active_workspace;
     let palette = stoat.command_palette.as_mut()?;
     let ws = &mut stoat.workspaces[active_idx];
     let current = palette.input.text(ws);
+    ws.palette_history.reset_if_edited(&current);
     if let Some(recalled) = ws.palette_history.prev(&current) {
         palette.input.replace_text(ws, &recalled);
     }
@@ -605,6 +670,7 @@ pub(crate) fn palette_history_next(stoat: &mut Stoat) -> Option<UpdateEffect> {
     let palette = stoat.command_palette.as_mut()?;
     let ws = &mut stoat.workspaces[active_idx];
     let current = palette.input.text(ws);
+    ws.palette_history.reset_if_edited(&current);
     if let Some(recalled) = ws.palette_history.next(&current) {
         palette.input.replace_text(ws, &recalled);
     }
@@ -613,8 +679,12 @@ pub(crate) fn palette_history_next(stoat: &mut Stoat) -> Option<UpdateEffect> {
 
 /// Page the action-list selection by half its rendered list height in `dir`
 /// (-1 up, 1 down). Before the first render the viewport is unset and the step
-/// falls back to a single row. Delegates to [`palette_move_selection`].
+/// falls back to a single row. Delegates to [`palette_move_selection`]. History
+/// pages nothing, so the page keys change nothing while the history walks.
 pub(super) fn palette_page(stoat: &mut Stoat, dir: i32) -> UpdateEffect {
+    if stoat.active_workspace().palette_history.is_walking() {
+        return UpdateEffect::None;
+    }
     if let Some(palette) = stoat.command_palette.as_mut()
         && palette.arg_source().is_some()
         && let Some(picker) = palette.arg_picker.as_mut()
@@ -630,8 +700,12 @@ pub(super) fn palette_page(stoat: &mut Stoat, dir: i32) -> UpdateEffect {
 }
 
 /// Flip the palette's [`crate::command_palette::PaletteScope`] and re-filter.
-/// No-op when the palette is closed.
+/// No-op when the palette is closed, and while the history walks, because
+/// History holds no scope.
 pub(super) fn palette_scope_toggle(stoat: &mut Stoat) -> UpdateEffect {
+    if stoat.active_workspace().palette_history.is_walking() {
+        return UpdateEffect::None;
+    }
     let active_idx = stoat.active_workspace;
     let workspaces = &mut stoat.workspaces;
     let Some(palette) = stoat.command_palette.as_mut() else {
@@ -666,8 +740,13 @@ pub(super) fn palette_scope_toggle(stoat: &mut Stoat) -> UpdateEffect {
 /// No-op when no palette is open, or when the list it would complete from is
 /// empty. The picker is refiltered synchronously against the completed tail and
 /// its selection reset to the top row, so an Enter arriving before the next
-/// render still reads the completed entry rather than its first child.
+/// render still reads the completed entry rather than its first child. History
+/// lists no candidate, so the key leaves the recalled line alone while the
+/// history walks.
 pub(super) fn palette_complete(stoat: &mut Stoat) -> UpdateEffect {
+    if stoat.active_workspace().palette_history.is_walking() {
+        return UpdateEffect::None;
+    }
     let active_idx = stoat.active_workspace;
     settle_command_list(stoat);
 

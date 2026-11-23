@@ -119,7 +119,7 @@ use crate::{
             PickerRename,
         },
         prompt::{
-            CancelPromptInput, PaletteScopeToggle, PromptHistoryNext, PromptHistoryPrev,
+            CancelPromptInput, PaletteScopeToggle, PaletteUp, PromptHistoryNext, PromptHistoryPrev,
             PromptInsertNewline, SubmitPromptInput,
         },
         rebase::{
@@ -1315,6 +1315,7 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
     add(PaletteScopeToggle::DEF, |_| {
         Ok(Box::new(PaletteScopeToggle))
     });
+    add(PaletteUp::DEF, |_| Ok(Box::new(PaletteUp)));
 
     map
 }
@@ -1654,6 +1655,7 @@ mod tests {
         "CancelPromptInput",
         "PromptInsertNewline",
         "PaletteScopeToggle",
+        "PaletteUp",
         "ReloadBuffer",
         "ForceReloadBuffer",
         "ReloadAll",
@@ -2104,7 +2106,7 @@ mod tests {
     fn all_returns_complete_list() {
         // 70 previous + 13 Phase-5 rebase primitives + 1 Dump + 1 OpenHelp
         // + 4 workspace actions + 5 prompt-input plumbing actions
-        // + 1 PaletteScopeToggle + 2 run-history actions
+        // + 1 PaletteScopeToggle + 1 PaletteUp + 2 run-history actions
         // + 7 help plumbing actions + 1 CloseHelp + 1 QuitAll
         // + 7 extend-selection variants + 1 CloseOtherPanes
         // + 2 goto-line-boundary actions + 3 goto-file/line/nonwhitespace
@@ -2352,7 +2354,7 @@ mod tests {
         // + 1 ForceWriteQuit.
         // + 1 ForceCloseBuffer.
         // + 2 CloseOtherBuffers/ForceCloseOtherBuffers.
-        assert_eq!(all().count(), 517);
+        assert_eq!(all().count(), 518);
     }
 
     #[test]

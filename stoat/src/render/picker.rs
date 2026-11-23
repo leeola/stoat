@@ -406,7 +406,7 @@ pub(super) fn blank_plate_row(buf: &mut Buffer, row: Rect, ground: [u8; 3]) {
 ///
 /// The panels must follow the row's [`PLATE_HEADER_NUDGE`], so they stand off
 /// the cells as the chips' runs do.
-fn plate_chip_boxes(
+pub(super) fn plate_chip_boxes(
     trailing: &PlateTrailing,
     fill: [u8; 3],
     inner: Rect,

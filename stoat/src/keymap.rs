@@ -3430,11 +3430,14 @@ mod tests {
             for (code, mods, action) in expected {
                 // The workspace picker's Ctrl-f enters the selected row, so the
                 // doubled `Ctrl-a Ctrl-f` chord toggles sessions. PageDown keeps
-                // the page step there.
+                // the page step there. The palette's Up walks into its history
+                // from the list's first row and steps the list from a lower
+                // one. Ctrl-p keeps the plain step.
                 let action = match (modal, code, mods) {
                     ("workspace_picker", KeyCode::Char('f'), KeyModifiers::CONTROL) => {
                         "SubmitPromptInput"
                     },
+                    ("palette", KeyCode::Up, KeyModifiers::NONE) => "PaletteUp",
                     _ => action,
                 };
                 let bound = keymap

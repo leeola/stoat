@@ -12,8 +12,8 @@ use crate::{
         chrome,
         paint::style_rgb,
         picker::{
-            blank_plate_row, plate_run, plate_trailing, window_start, PlateTrailing,
-            MIN_QUERY_COLUMNS, PLATE_HEADER_GAP, PLATE_HEADER_NUDGE,
+            blank_plate_row, plate_chip_boxes, plate_run, plate_trailing, window_start,
+            PlateTrailing, MIN_QUERY_COLUMNS, PLATE_HEADER_GAP, PLATE_HEADER_NUDGE,
         },
         text::{pre_wrap_rows, write_str, write_str_clipped},
     },
@@ -42,6 +42,11 @@ pub(crate) enum CmdStatus<'a> {
     None,
     /// Styled spans set flush right, such as the count of the list below.
     Text(&'a [(String, Style)]),
+    /// A chip that names the mode of the body below, such as the place of a
+    /// history walk.
+    ///
+    /// It draws in `ui.preview.chip`, as a filter header draws its chip.
+    Chip(&'a str),
 }
 
 /// The parts of one Cmd Line, for [`cmd_line`].
@@ -77,6 +82,11 @@ struct Piece<'a> {
 /// [`MIN_QUERY_COLUMNS`] of input, and the status drops the status first and
 /// the cwd second, because the input is the part the user types in.
 ///
+/// A chip status draws in `ui.preview.chip`, as a filter header draws its chip.
+/// Under the plate it is a box of whole cells with its run centered in it. In
+/// cells its text stands between two blank cells. A theme without the scope
+/// draws the chip's text in `ui.text.muted`.
+///
 /// The input wraps as [`pre_wrap_rows`] breaks it, and each of its rows spans
 /// from the input's column to the status's slot. The cwd, the glyph, and the
 /// status stay on the first row. An input of more than [`MAX_CMD_ROWS`] rows
@@ -105,7 +115,7 @@ pub(crate) fn cmd_line(
         return;
     }
 
-    let rows = paint_cell_rows(buf, inner, line, theme);
+    let rows = paint_cell_rows(buf, inner, line, theme, scene);
     let rule = inner.y.saturating_add(rows);
     if rule < inner.bottom() {
         chrome::hline(
@@ -148,10 +158,7 @@ struct CellMeasure {
 /// The cwd, the glyph, and the input stand one blank cell apart. The status
 /// ends flush with the row's right end, one blank cell clear of the input.
 fn cell_measure(line: &CmdLine<'_>, width: u16) -> CellMeasure {
-    let status_width: u16 = status_spans(&line.status)
-        .iter()
-        .map(|(text, _)| text.width() as u16)
-        .sum();
+    let status_width = status_cells(&line.status);
     let cwd_width = line.cwd.width() as u16;
     let glyph_width = PROMPT_GLYPH.width() as u16;
 
@@ -205,7 +212,23 @@ fn plate_measure(line: &CmdLine<'_>, width: u16, theme: &Theme) -> PlateMeasure 
         .iter()
         .map(|(text, _)| text.as_str())
         .collect();
+    let chip = match line.status {
+        CmdStatus::Chip(chip) => Some(chip),
+        _ => None,
+    };
+    let boxed = theme
+        .try_get(scope::UI_PREVIEW_CHIP)
+        .and_then(|style| style_rgb(style.bg))
+        .is_some();
     let end = width.saturating_mul(16);
+    let status_trail = match chip {
+        Some(chip) => {
+            let alone = plate_trailing(None, &[(chip, true)], boxed, end, 0, caption);
+            end.saturating_sub(alone.query_end)
+        },
+        None if status.is_empty() => 0,
+        None => advance(&status, caption).saturating_add(PLATE_HEADER_GAP),
+    };
 
     let glyph_at = |cwd: bool| match cwd && !line.cwd.is_empty() {
         true => advance(line.cwd, ui).saturating_add(PLATE_HEADER_GAP),
@@ -218,15 +241,27 @@ fn plate_measure(line: &CmdLine<'_>, width: u16, theme: &Theme) -> PlateMeasure 
     };
     let query_min = |cwd: bool| input_at(cwd).saturating_add(MIN_QUERY_COLUMNS * 16);
     let fits = |cwd: bool, shown: bool| {
-        let trail = match shown && !status.is_empty() {
-            true => advance(&status, caption).saturating_add(PLATE_HEADER_GAP),
+        let trail = match shown {
+            true => status_trail,
             false => 0,
         };
         u32::from(query_min(cwd)) + u32::from(trail) <= u32::from(end)
     };
     let (show_cwd, show_status) = parts_kept(fits);
-    let shown = Some(status.as_str()).filter(|status| show_status && !status.is_empty());
-    let trailing = plate_trailing(shown, &[], false, end, query_min(show_cwd), caption);
+    let trailing = match chip.filter(|_| show_status) {
+        Some(chip) => plate_trailing(
+            None,
+            &[(chip, true)],
+            boxed,
+            end,
+            query_min(show_cwd),
+            caption,
+        ),
+        None => {
+            let shown = Some(status.as_str()).filter(|status| show_status && !status.is_empty());
+            plate_trailing(shown, &[], false, end, query_min(show_cwd), caption)
+        },
+    };
 
     let input_x = input_at(show_cwd);
     let room =
@@ -242,7 +277,13 @@ fn plate_measure(line: &CmdLine<'_>, width: u16, theme: &Theme) -> PlateMeasure 
 
 /// Paint `line` into `inner`'s first rows as cells, for [`cmd_line`], and
 /// answer how many rows the input takes.
-fn paint_cell_rows(buf: &mut Buffer, inner: Rect, line: &CmdLine<'_>, theme: &Theme) -> u16 {
+fn paint_cell_rows(
+    buf: &mut Buffer,
+    inner: Rect,
+    line: &CmdLine<'_>,
+    theme: &Theme,
+    scene: &mut ApcScene,
+) -> u16 {
     let (y, end) = (inner.y, inner.right());
     let measure = cell_measure(line, inner.width);
 
@@ -254,6 +295,15 @@ fn paint_cell_rows(buf: &mut Buffer, inner: Rect, line: &CmdLine<'_>, theme: &Th
     write_str_clipped(buf, x, y, PROMPT_GLYPH, prompt_style(theme), end);
     if let Some(col) = measure.status_col {
         let mut at = inner.x + col;
+        if let CmdStatus::Chip(chip) = line.status {
+            let text = format!(" {chip} ");
+            let cells = Rect::new(at, y, text.width() as u16, 1);
+            let style = match theme.try_get(scope::UI_PREVIEW_CHIP) {
+                Some(style) => chrome::chip_cells(cells, style, scene),
+                None => theme.get(scope::UI_TEXT_MUTED),
+            };
+            write_str(buf, at, y, &text, style);
+        }
         for (text, style) in status_spans(&line.status) {
             write_str(buf, at, y, text, *style);
             at += text.width() as u16;
@@ -305,8 +355,13 @@ fn paint_plate_rows(
     );
     let text = style_rgb(theme.get(scope::UI_TEXT).fg);
     let bold = |style: Style| style.add_modifier.contains(Modifier::BOLD);
+    let chip_style = theme.try_get(scope::UI_PREVIEW_CHIP);
+    let fill = chip_style.and_then(|style| style_rgb(style.bg));
 
     scene.nudge(PLATE_HEADER_NUDGE);
+    if let Some(fill) = fill {
+        plate_chip_boxes(&measure.trailing, fill, inner, scene);
+    }
     let mut run =
         |y: u16, col: u16, part: &str, scale: u16, colors: (Option<[u8; 3]>, [u8; 3]), bold| {
             if let (Some(color), false) = (colors.0, part.is_empty()) {
@@ -371,6 +426,16 @@ fn paint_plate_rows(
             col = col.saturating_add(text_run::advance_sixteenths(part.chars().count(), caption));
         }
     }
+    if let CmdStatus::Chip(chip) = line.status
+        && let Some((col, cells)) = measure.trailing.chips.first()
+    {
+        let colors = match (chip_style, cells) {
+            (Some(style), Some(_)) => (style_rgb(style.fg), fill.unwrap_or(ground)),
+            (Some(style), None) => (style_rgb(style.fg), ground),
+            (None, _) => (style_rgb(theme.get(scope::UI_TEXT_MUTED).fg), ground),
+        };
+        run(inner.y, *col, chip, caption, colors, false);
+    }
     scene.nudge([0, 0]);
 }
 
@@ -387,11 +452,24 @@ fn parts_kept(fits: impl Fn(bool, bool) -> bool) -> (bool, bool) {
     }
 }
 
-/// The spans of `status`, empty for a row with none.
+/// The spans of `status`, empty for a row with none and for a chip, which
+/// draws apart from the spans.
 fn status_spans<'a>(status: &CmdStatus<'a>) -> &'a [(String, Style)] {
     match status {
-        CmdStatus::None => &[],
+        CmdStatus::None | CmdStatus::Chip(_) => &[],
         CmdStatus::Text(spans) => spans,
+    }
+}
+
+/// The cells that `status` takes in the cell look. A chip takes a blank cell
+/// on each side of its text, as a filter header's chip does.
+fn status_cells(status: &CmdStatus<'_>) -> u16 {
+    match status {
+        CmdStatus::Chip(chip) => chip.width() as u16 + 2,
+        _ => status_spans(status)
+            .iter()
+            .map(|(text, _)| text.width() as u16)
+            .sum(),
     }
 }
 
@@ -521,6 +599,7 @@ mod tests {
             ui.text.muted.fg = "#050505";
             ui.cmd.cwd.fg = "#0a0a0a";
             ui.cmd.prompt.fg = "#0b0b0b";
+            ui.preview.chip = { fg: "#0c0c0c", bg: "#0d0d0d" };
         }"##;
         let (config, _) = stoat_config::parse(src);
         Theme::from_config(&config.expect("theme parses"), "t").expect("theme loads")
@@ -662,6 +741,41 @@ mod tests {
                 run(848, "14 of 890", MUTED, GROUND),
                 Command::Nudge([0, 0]),
             ],
+        );
+    }
+
+    /// A chip status draws its box as a panel of whole cells and centers its
+    /// run in the box, in the chip's colors. The chip `history 1 / 24` takes
+    /// the 16 cells that end at the row's right, from cell 46.
+    #[test]
+    fn a_chip_status_draws_its_box_and_its_run() {
+        let theme = plate_theme();
+        let input = [("ab".to_owned(), theme.get(scope::UI_TEXT))];
+        let line = CmdLine {
+            cwd: "~/p/stoat",
+            input: &input,
+            caret: Some(2),
+            status: CmdStatus::Chip("history 1 / 24"),
+        };
+        let (_, scene) = paint_line(&line, Rect::new(2, 1, 60, 4), &theme, true);
+
+        let decoded = commands(&scene);
+        let panel = decoded.iter().find_map(|command| match command {
+            Command::Panel(panel) => Some((panel.left, panel.width)),
+            _ => None,
+        });
+        let chip = decoded.iter().find_map(|command| match command {
+            Command::TextRun(run) if run.text == "history 1 / 24" => {
+                Some((run.col, run.color, run.bg))
+            },
+            _ => None,
+        });
+        assert_eq!(
+            (panel, chip),
+            (
+                Some((46, 16)),
+                Some((752, [12, 12, 12], Some([13, 13, 13])))
+            ),
         );
     }
 

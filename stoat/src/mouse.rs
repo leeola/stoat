@@ -503,6 +503,17 @@ pub(crate) fn boxed_modal_surfaces(stoat: &Stoat) -> Option<ModalSurfaces> {
         },
         ActiveModal::Palette => {
             let palette = stoat.command_palette.as_ref()?;
+            // History's rows take the height of the wrap before each age, so
+            // its press and its wheel read the row map of the paint instead.
+            if stoat.active_workspace().palette_history.is_walking() {
+                return Some(ModalSurfaces {
+                    list: Rect::default(),
+                    preview: None,
+                    len: 0,
+                    selected: 0,
+                    rows: ListRows::OnePerResult,
+                });
+            }
             let rows = palette.list_rows_hint();
             let zoom = zoom(ModalKind::Palette);
             if palette.command.is_none() {
@@ -717,6 +728,9 @@ fn handle_modal_mouse(stoat: &mut Stoat, mouse: MouseEvent) -> UpdateEffect {
     if active_modal(stoat) == Some(ActiveModal::GitStatus) {
         return press_git_status_row(stoat, mouse);
     }
+    if let Some(effect) = press_history_row(stoat, mouse) {
+        return effect;
+    }
 
     let Some(surfaces) = boxed_modal_surfaces(stoat) else {
         return UpdateEffect::None;
@@ -764,6 +778,78 @@ fn press_git_status_row(stoat: &mut Stoat, mouse: MouseEvent) -> UpdateEffect {
         return action_handlers::dispatch(stoat, &GitStatusOpen);
     }
     panel.selected = index;
+    UpdateEffect::Redraw
+}
+
+/// Recall the palette's History line under a left press.
+///
+/// A press on the line that the walk recalls runs it, as a list row takes a
+/// second press. A press off every row does nothing. Answers `None` when no
+/// palette is open and while its history does not walk.
+///
+/// The press reads the row map that the paint keeps in
+/// [`CommandPalette::history_rows`](crate::command_palette::CommandPalette::history_rows).
+/// A row's height comes from the wrap before its age. The age follows the
+/// clock, which moves between the paint and the press.
+fn press_history_row(stoat: &mut Stoat, mouse: MouseEvent) -> Option<UpdateEffect> {
+    let palette = stoat.command_palette.as_ref()?;
+    let history = &stoat.active_workspace().palette_history;
+    if !history.is_walking() {
+        return None;
+    }
+    let at = Position::new(mouse.column, mouse.row);
+    let Some(&(_, index)) = palette
+        .history_rows
+        .iter()
+        .find(|(rect, _)| rect.contains(at))
+    else {
+        return Some(UpdateEffect::None);
+    };
+
+    if history.cursor() == Some(index) {
+        return Some(action_handlers::prompt::submit_prompt_input(stoat));
+    }
+    Some(recall_history_line(stoat, index))
+}
+
+/// Step the palette's History by `steps` wheel notches in list order.
+///
+/// A notch down goes to the next older line, and a notch up goes to the next
+/// newer line. Answers `None` when no palette is open and while its history
+/// does not walk. The step holds to the newest and the oldest match, so no
+/// notch leaves History, and a notch that moves nothing answers
+/// [`UpdateEffect::None`].
+fn wheel_history_rows(stoat: &mut Stoat, steps: i32) -> Option<UpdateEffect> {
+    stoat.command_palette.as_ref()?;
+    let history = &stoat.active_workspace().palette_history;
+    if !history.is_walking() {
+        return None;
+    }
+    let matches = history.matches();
+    let place = history
+        .cursor()
+        .and_then(|cursor| matches.iter().position(|&index| index == cursor))?;
+    let target = place
+        .saturating_add_signed(steps as isize)
+        .min(matches.len() - 1);
+    if target == place {
+        return Some(UpdateEffect::None);
+    }
+    Some(recall_history_line(stoat, matches[target]))
+}
+
+/// Move the palette's history walk to the line at `index` and write the line
+/// into the palette's input.
+fn recall_history_line(stoat: &mut Stoat, index: usize) -> UpdateEffect {
+    let active_idx = stoat.active_workspace;
+    let Some(palette) = stoat.command_palette.as_ref() else {
+        return UpdateEffect::None;
+    };
+    let ws = &mut stoat.workspaces[active_idx];
+    let Some(line) = ws.palette_history.recall(index) else {
+        return UpdateEffect::None;
+    };
+    palette.input.replace_text(ws, &line);
     UpdateEffect::Redraw
 }
 
@@ -2038,6 +2124,9 @@ pub(crate) fn handle_mouse_scroll(
             for _ in 0..steps.unsigned_abs() {
                 effect = scroll_modal_preview(stoat, down);
             }
+            return effect;
+        }
+        if let Some(effect) = wheel_history_rows(stoat, steps) {
             return effect;
         }
         return action_handlers::picker::picker_step(stoat, steps);

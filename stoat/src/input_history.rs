@@ -179,6 +179,60 @@ impl InputHistory {
             self.reset();
         }
     }
+
+    /// Whether a recall walk is active, which the palette shows as History.
+    pub(crate) fn is_walking(&self) -> bool {
+        self.cursor.is_some()
+    }
+
+    /// The needle of the active walk, the text typed before the walk started,
+    /// or `""` with no walk.
+    pub(crate) fn needle(&self) -> &str {
+        self.pending
+            .as_deref()
+            .filter(|_| self.is_walking())
+            .unwrap_or("")
+    }
+
+    /// The index into [`Self::entries`] of the line that the walk recalls, or
+    /// `None` with no walk.
+    pub(crate) fn cursor(&self) -> Option<usize> {
+        self.cursor
+    }
+
+    /// The indices into [`Self::entries`] of the lines that hold the walk's
+    /// needle, newest first, in the order that the walk visits them.
+    ///
+    /// With no walk the needle is empty, so every line matches.
+    pub(crate) fn matches(&self) -> Vec<usize> {
+        let needle = self.needle();
+        (0..self.entries.len())
+            .rev()
+            .filter(|&index| self.entries[index].contains(needle))
+            .collect()
+    }
+
+    /// End an active walk and answer the text typed before it started, or
+    /// `None` with no walk.
+    pub(crate) fn leave(&mut self) -> Option<String> {
+        self.cursor?;
+        let typed = self.pending.take().unwrap_or_default();
+        self.reset();
+        Some(typed)
+    }
+
+    /// Move an active walk to the entry at `index` and answer its line, which
+    /// the walk then holds as the recalled line.
+    ///
+    /// With no walk, or with an `index` past the last entry, it answers `None`
+    /// and the walk stays as it is.
+    pub(crate) fn recall(&mut self, index: usize) -> Option<String> {
+        self.cursor?;
+        let line = self.entries.get(index)?.clone();
+        self.cursor = Some(index);
+        self.last_recalled = Some(line.clone());
+        Some(line)
+    }
 }
 
 #[cfg(test)]
@@ -279,6 +333,63 @@ mod tests {
             h.push_at(format!("cmd{i}"), Some(i));
         }
         assert_eq!(h.times(), (50..150).map(Some).collect::<Vec<_>>());
+    }
+
+    /// A walk reports its needle, the lines that hold it newest first, and the
+    /// index of the recalled line. With no walk every line matches.
+    #[test]
+    fn a_walk_reports_its_matches_newest_first_and_its_place() {
+        let mut h = history(&["cd a", "ls", "cd b"]);
+        let state = |h: &InputHistory| {
+            (
+                h.is_walking(),
+                h.needle().to_owned(),
+                h.cursor(),
+                h.matches(),
+            )
+        };
+        let idle = state(&h);
+        h.prev("cd");
+        let newest = state(&h);
+        h.prev("cd b");
+        assert_eq!(
+            [idle, newest, state(&h)],
+            [
+                (false, String::new(), None, vec![2, 1, 0]),
+                (true, "cd".to_owned(), Some(2), vec![2, 0]),
+                (true, "cd".to_owned(), Some(0), vec![2, 0]),
+            ],
+        );
+    }
+
+    /// Leaving a walk ends it and answers the text typed before it started. A
+    /// second leave finds no walk.
+    #[test]
+    fn leaving_a_walk_returns_the_typed_text() {
+        let mut h = history(&["cd a", "cd b"]);
+        h.prev("cd");
+        let left = h.leave();
+        assert_eq!(
+            (left, h.is_walking(), h.leave()),
+            (Some("cd".to_owned()), false, None)
+        );
+    }
+
+    /// `recall` moves an active walk to an entry and holds its line as the
+    /// recalled line, so an untouched input keeps the walk. It answers `None`
+    /// with no walk and past the last entry.
+    #[test]
+    fn recall_moves_a_walk_to_an_entry() {
+        let mut h = history(&["a", "b", "c"]);
+        let idle = h.recall(0);
+        h.prev("");
+        let recalled = h.recall(0);
+        h.reset_if_edited("a");
+        let past = h.recall(3);
+        assert_eq!(
+            (idle, recalled, past, h.cursor(), h.is_walking()),
+            (None, Some("a".to_owned()), None, Some(0), true),
+        );
     }
 
     /// Restored times shorter than the lines pad with `None`, and times past
