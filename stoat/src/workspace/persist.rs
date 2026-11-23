@@ -111,6 +111,13 @@ pub(crate) struct WorkspaceStateV1 {
     /// survives a restart. Empty on legacy files that predate the field.
     #[serde(default)]
     pub palette_history: Vec<String>,
+    /// The time each line of [`Self::palette_history`] last ran at, in unix
+    /// seconds, at the same index, or `None` for a line with no known time.
+    ///
+    /// A separate field keeps the lines' form, so a file that predates it
+    /// loads as it is. Its lines then take no time.
+    #[serde(default)]
+    pub palette_history_times: Vec<Option<i64>>,
     /// Search patterns the `/` and `?` prompts recall, oldest first. Empty on
     /// legacy files that predate the field.
     #[serde(default)]
@@ -405,6 +412,7 @@ impl Workspace {
             parent: self.parent,
             last_finder_scope: self.last_finder_scope.clone(),
             palette_history: self.palette_history.entries().to_vec(),
+            palette_history_times: self.palette_history.times().to_vec(),
             search_history: self.search_history.entries().to_vec(),
             code_search_history: self.code_search_history.entries().to_vec(),
             last_search: self.last_search.as_ref().map(|last| LastSearchSnap {
@@ -612,12 +620,13 @@ impl Workspace {
         self.parent = state.parent;
         self.last_finder_scope = state.last_finder_scope;
         self.remote = state.remote;
-        self.palette_history = InputHistory::from_entries(
+        self.palette_history = InputHistory::from_timed(
             state
                 .palette_history
                 .into_iter()
                 .map(command_palette::migrate_history_line)
                 .collect(),
+            state.palette_history_times,
         );
         self.search_history = InputHistory::from_entries(state.search_history);
         self.code_search_history = InputHistory::from_entries(state.code_search_history);
@@ -3302,6 +3311,67 @@ mod tests {
         );
         fresh.restore_state(&state_path, &fake, &exec).unwrap();
         assert_eq!(fresh.palette_history.entries().to_vec(), ["cd ~/work", "w"]);
+    }
+
+    /// The time of each palette history line saves and restores with its
+    /// line, and a line with no time restores with none.
+    #[test]
+    fn palette_history_times_round_trip_through_save_and_restore() {
+        let fake = FakeFs::new();
+        let ws_dir = PathBuf::from("/test");
+        let exec = executor();
+
+        let mut ws = new_laid_out_workspace(ws_dir.clone(), &exec);
+        ws.palette_history =
+            InputHistory::from_timed(vec!["cd ~/work".into(), "w".into()], vec![Some(100), None]);
+        let state_path = ws_dir.join("state.ron");
+        ws.save_state(&state_path, &fake).unwrap();
+
+        let mut fresh = Workspace::new(ws_dir.clone(), &exec, crate::test_notify());
+        fresh.restore_state(&state_path, &fake, &exec).unwrap();
+        assert_eq!(
+            (
+                fresh.palette_history.entries().to_vec(),
+                fresh.palette_history.times().to_vec()
+            ),
+            (
+                vec!["cd ~/work".to_string(), "w".to_string()],
+                vec![Some(100), None]
+            ),
+        );
+    }
+
+    /// A state file whose palette history holds lines and no times restores
+    /// each line with no time.
+    #[test]
+    fn history_lines_without_times_restore_with_no_time() {
+        let fake = FakeFs::new();
+        let ws_dir = PathBuf::from("/test");
+        let exec = executor();
+
+        let mut ws = new_laid_out_workspace(ws_dir.clone(), &exec);
+        ws.palette_history = InputHistory::from_timed(
+            vec!["cd ~/work".into(), "w".into()],
+            vec![Some(100), Some(200)],
+        );
+        let mut state = ws.to_state();
+        state.palette_history_times.clear();
+        let state_path = ws_dir.join("state.ron");
+        let body = ron::ser::to_string(&state).unwrap();
+        fake.write(&state_path, body.as_bytes()).unwrap();
+
+        let mut fresh = Workspace::new(ws_dir.clone(), &exec, crate::test_notify());
+        fresh.restore_state(&state_path, &fake, &exec).unwrap();
+        assert_eq!(
+            (
+                fresh.palette_history.entries().to_vec(),
+                fresh.palette_history.times().to_vec()
+            ),
+            (
+                vec!["cd ~/work".to_string(), "w".to_string()],
+                vec![None, None]
+            ),
+        );
     }
 
     #[test]

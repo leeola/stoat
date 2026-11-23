@@ -2236,6 +2236,21 @@ mod tests {
         );
     }
 
+    /// A submitted line records the time that the executor's clock reads, so
+    /// the palette's History names the line's age.
+    #[test]
+    fn a_submitted_line_records_the_clock() {
+        let mut h = Stoat::test();
+        h.type_text(":pwd");
+        h.type_keys("enter");
+
+        let now = crate::commit_picker::now_epoch(&h.stoat.executor);
+        assert_eq!(
+            h.stoat.active_workspace().palette_history.times(),
+            [Some(now)]
+        );
+    }
+
     /// A saved line whose first word names an internal action and no command
     /// gains the `action` token, and any other line stays as it is.
     #[test]

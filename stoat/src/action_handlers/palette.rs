@@ -1,6 +1,7 @@
 use crate::{
     app::{Stoat, UpdateEffect},
     command_palette::{self, Availability, CommandPalette, PaletteOutcome},
+    commit_picker,
     file_finder::Browse,
     host::FsHost,
     keymap_state::StoatKeymapState,
@@ -765,7 +766,11 @@ fn apply_outcome(stoat: &mut Stoat, outcome: PaletteOutcome) -> UpdateEffect {
                 action = entry.def.name(),
                 "command"
             );
-            stoat.active_workspace_mut().palette_history.push(line);
+            let ran_at = commit_picker::now_epoch(&stoat.executor);
+            stoat
+                .active_workspace_mut()
+                .palette_history
+                .push_at(line, Some(ran_at));
             close_palette(stoat);
             match (entry.create)(&params) {
                 Ok(action) => super::dispatch(stoat, &*action),

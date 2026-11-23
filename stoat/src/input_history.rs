@@ -10,10 +10,18 @@
 /// originally-typed text.
 ///
 /// The type is pure. [`Self::prev`] and [`Self::next`] return the line to show
-/// rather than mutating any input, so the caller owns the input swap.
+/// rather than mutating any input, so the caller owns the input swap. It reads
+/// no clock, so a caller that keeps ages passes each line's time to
+/// [`Self::push_at`].
 #[derive(Debug, Default)]
 pub(crate) struct InputHistory {
     entries: Vec<String>,
+    /// The time each line of [`Self::entries`] last ran at, in unix seconds,
+    /// at the same index, or `None` for a line with no known time.
+    ///
+    /// It holds one time per line, so a line and its time leave the history
+    /// together.
+    times: Vec<Option<i64>>,
     /// Index into [`Self::entries`] of the entry currently recalled, or `None`
     /// when no recall walk is active.
     cursor: Option<usize>,
@@ -29,11 +37,24 @@ pub(crate) struct InputHistory {
 const MAX_ENTRIES: usize = 100;
 
 impl InputHistory {
-    /// Restore a history from persisted entries, oldest-first, with no active
-    /// recall walk.
+    /// Restore a history from persisted entries, oldest-first, with no known
+    /// times and no active recall walk.
     pub(crate) fn from_entries(entries: Vec<String>) -> Self {
+        let times = vec![None; entries.len()];
+        Self::from_timed(entries, times)
+    }
+
+    /// Restore a history from persisted entries, oldest-first, and the time
+    /// each one last ran at, with no active recall walk.
+    ///
+    /// The times line up with the entries by index. A list shorter than the
+    /// entries pads with `None`, as a state file that predates the times holds
+    /// none. Times past the last entry drop.
+    pub(crate) fn from_timed(entries: Vec<String>, mut times: Vec<Option<i64>>) -> Self {
+        times.resize(entries.len(), None);
         Self {
             entries,
+            times,
             cursor: None,
             pending: None,
             last_recalled: None,
@@ -45,18 +66,41 @@ impl InputHistory {
         &self.entries
     }
 
-    /// Record an executed `entry` as the newest.
-    ///
-    /// Empty lines and a line equal to the current newest are dropped, so
-    /// re-running the same command does not stack duplicates. Retention is
-    /// capped at [`MAX_ENTRIES`] by evicting the oldest.
+    /// The time each retained entry last ran at, in unix seconds, at the index
+    /// of its entry in [`Self::entries`].
+    pub(crate) fn times(&self) -> &[Option<i64>] {
+        &self.times
+    }
+
+    /// Record an executed `entry` as the newest, with no time, as
+    /// [`Self::push_at`] records it.
     pub(crate) fn push(&mut self, entry: String) {
-        if entry.is_empty() || self.entries.last() == Some(&entry) {
+        self.push_at(entry, None);
+    }
+
+    /// Record an executed `entry` as the newest, run at `at` in unix seconds.
+    ///
+    /// Empty lines are dropped. A line equal to the current newest is not
+    /// stored a second time, so re-running the same command does not stack
+    /// duplicates. The newest line takes `at` instead, because its age names
+    /// its last run. Retention is capped at [`MAX_ENTRIES`] by evicting the
+    /// oldest line with its time.
+    pub(crate) fn push_at(&mut self, entry: String, at: Option<i64>) {
+        if entry.is_empty() {
             return;
         }
+        if self.entries.last() == Some(&entry) {
+            if let Some(newest) = self.times.last_mut() {
+                *newest = at;
+            }
+            return;
+        }
+
         self.entries.push(entry);
+        self.times.push(at);
         if self.entries.len() > MAX_ENTRIES {
             self.entries.remove(0);
+            self.times.remove(0);
         }
     }
 
@@ -211,6 +255,43 @@ mod tests {
         assert_eq!(h.entries().len(), 100);
         assert_eq!(h.entries().first().map(String::as_str), Some("cmd50"));
         assert_eq!(h.entries().last().map(String::as_str), Some("cmd149"));
+    }
+
+    /// A pushed line keeps its time, and a repeat of the newest line stores no
+    /// second line but gives the newest its new time.
+    #[test]
+    fn a_pushed_line_keeps_its_time_and_a_repeat_takes_the_new_time() {
+        let mut h = InputHistory::default();
+        h.push_at("a".to_string(), Some(10));
+        h.push_at("a".to_string(), Some(20));
+        assert_eq!(
+            (h.entries().to_vec(), h.times().to_vec()),
+            (vec!["a".to_string()], vec![Some(20)]),
+        );
+    }
+
+    /// The cap evicts the oldest time with the oldest line, so each kept line
+    /// keeps its own time.
+    #[test]
+    fn the_cap_drops_the_oldest_time_with_its_line() {
+        let mut h = InputHistory::default();
+        for i in 0..150 {
+            h.push_at(format!("cmd{i}"), Some(i));
+        }
+        assert_eq!(h.times(), (50..150).map(Some).collect::<Vec<_>>());
+    }
+
+    /// Restored times shorter than the lines pad with `None`, and times past
+    /// the last line drop, so the history holds one time per line.
+    #[test]
+    fn lines_without_times_pad_with_none() {
+        let lines = |count: usize| (0..count).map(|i| format!("line{i}")).collect();
+        let padded = InputHistory::from_timed(lines(2), vec![Some(1)]);
+        let cut = InputHistory::from_timed(lines(1), vec![Some(1), Some(2)]);
+        assert_eq!(
+            (padded.times(), cut.times()),
+            (&[Some(1), None][..], &[Some(1)][..]),
+        );
     }
 
     #[test]
