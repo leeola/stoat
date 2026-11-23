@@ -803,17 +803,58 @@ fn command_item<'src, E: ConfigExtra<'src>>(
         .map_with(|node, e| Spanned::new(node, span_to_range(e.span())))
 }
 
+/// A `command` item that [`command_item`] fails to read, read to its end so the
+/// items after it still parse.
+///
+/// The item ends at the first `;` outside braces, or at the close of its
+/// first brace group. String literals and comments read whole, so a `}` or a
+/// `;` inside either ends nothing. An item with no such end, such as one with
+/// an unclosed brace or quote, fails as any other item does. A guess at its
+/// end drops the items after it with no report.
+fn bad_command<'src, E: ConfigExtra<'src>>() -> impl Parser<'src, &'src str, (), E> + Clone {
+    let group = recursive(|group| {
+        let inner = choice((
+            string_literal().ignored(),
+            comment(),
+            group,
+            none_of("{}\"#").ignored(),
+        ));
+        just('{')
+            .ignore_then(inner.repeated().count().ignored())
+            .then_ignore(just('}'))
+    });
+
+    let head = choice((
+        string_literal().ignored(),
+        comment(),
+        none_of("{}\"#;").ignored(),
+    ));
+
+    just("command")
+        .ignore_then(required_ws())
+        .ignore_then(head.repeated().count().ignored())
+        .ignore_then(just(';').ignored().or(group))
+}
+
 enum TopLevel {
     Event(Spanned<EventBlock>),
     Theme(Spanned<ThemeBlock>),
     Command(Spanned<CommandDecl>),
+    /// A `command` item that did not parse. Its error stands in the parse's
+    /// errors, and the config holds no entry for it.
+    BadCommand,
 }
 
 fn config<'src, E: ConfigExtra<'src>>() -> impl Parser<'src, &'src str, Config, E> {
+    // A bad command item reports its error and gives way to the items after
+    // it. Every other item still fails the whole parse.
+    let command = command_item()
+        .map(TopLevel::Command)
+        .recover_with(via_parser(bad_command().map(|()| TopLevel::BadCommand)));
     let item = choice((
         theme_block().map(TopLevel::Theme),
         event_block().map(TopLevel::Event),
-        command_item().map(TopLevel::Command),
+        command,
     ));
 
     ws().ignore_then(item.padded_by(ws()).repeated().collect::<Vec<_>>())
@@ -827,6 +868,7 @@ fn config<'src, E: ConfigExtra<'src>>() -> impl Parser<'src, &'src str, Config, 
                     TopLevel::Event(b) => blocks.push(b),
                     TopLevel::Theme(t) => themes.push(t),
                     TopLevel::Command(c) => commands.push(c),
+                    TopLevel::BadCommand => {},
                 }
             }
             Config {
@@ -905,7 +947,13 @@ pub fn parse(source: &str) -> (Option<Config>, Vec<ParseError>) {
     // expected-token set at every failed alternative, including the ones a
     // successful parse backtracks out of, and that bookkeeping is most of what
     // a parse of a good config costs.
-    if let Some(config) = parser::<extra::Default>().parse(source).into_output() {
+    //
+    // A recognizer pass that recovered from a bad command item holds an output
+    // and an error with no text. So only a pass with no error answers here.
+    let recognized = parser::<extra::Default>().parse(source);
+    if !recognized.has_errors()
+        && let Some(config) = recognized.into_output()
+    {
         return (Some(config), Vec::new());
     }
 

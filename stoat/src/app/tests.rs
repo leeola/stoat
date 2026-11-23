@@ -10413,6 +10413,76 @@ fn broken_user_config_falls_back_to_embedded_with_status() {
     );
 }
 
+/// A user config that sets `editor.scrolloff` on its first line and holds a
+/// `command` item that does not parse on its second.
+const BROKEN_COMMAND_CONFIG: &str = "on init { editor.scrolloff = 7; }\ncommand broken { doc = ; }";
+
+/// A `command` item that does not parse leaves the rest of the user config
+/// in force, and the status names the line of its error.
+#[test]
+fn a_broken_command_keeps_the_rest_of_the_user_config() {
+    let scheduler = Arc::new(stoat_scheduler::TestScheduler::new());
+    let stoat = Stoat::new_with_user_config(
+        scheduler.executor(),
+        Settings::default(),
+        PathBuf::new(),
+        Some(BROKEN_COMMAND_CONFIG.to_string()),
+        Vec::new(),
+        None,
+    );
+
+    let status = stoat.pending_message.clone().unwrap_or_default();
+    assert_eq!(
+        (
+            stoat.settings.scrolloff,
+            status.starts_with("config.stcfg:2: expected ")
+        ),
+        (Some(7), true),
+        "the status reads {status:?}",
+    );
+}
+
+/// A reload of a config whose `command` item does not parse applies the
+/// rest, and the status names the line of the error.
+#[test]
+fn a_reload_with_a_broken_command_applies_the_rest() {
+    let scheduler = Arc::new(stoat_scheduler::TestScheduler::new());
+    let mut stoat = Stoat::new(
+        scheduler.executor(),
+        Settings::default(),
+        PathBuf::from("/repo"),
+    );
+    stoat.reload_user_config(BROKEN_COMMAND_CONFIG);
+
+    let status = stoat.pending_message.clone().unwrap_or_default();
+    assert_eq!(
+        (
+            stoat.settings.scrolloff,
+            status.starts_with("config.stcfg:2: ")
+        ),
+        (Some(7), true),
+        "the status reads {status:?}",
+    );
+}
+
+/// The config error status names the error that starts first, by its line,
+/// and counts the rest.
+#[test]
+fn the_config_error_status_names_the_earliest_error_and_counts_the_rest() {
+    let source = "line one\nline two\nline three";
+    let errors = [
+        stoat_config::ParseError::new(20..21, "later"),
+        stoat_config::ParseError::new(12..13, "earlier"),
+    ];
+    assert_eq!(
+        [
+            config_error_status(source, &errors),
+            config_error_status(source, &errors[..1]),
+        ],
+        ["config.stcfg:2: earlier (+1 more)", "config.stcfg:3: later"],
+    );
+}
+
 /// A config naming an action the registry dropped parses clean, so nothing
 /// but this badge tells the user why the key does nothing.
 #[test]

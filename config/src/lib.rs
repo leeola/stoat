@@ -15,6 +15,13 @@ pub use settings::{
     LineNumbers, MinimapMode, MouseCapturePolicy, RepeatButton, Settings, TabBarMode, WrapMode,
 };
 
+/// Parse a config source into its items, and the errors of the items that do
+/// not parse.
+///
+/// A source that parses answers `(Some(config), [])`. A source whose only
+/// errors sit in `command` items answers `(Some(config), errors)`. Its config
+/// holds every other item and no entry for a bad command. A source with any
+/// other error answers `(None, errors)`.
 pub fn parse(source: &str) -> (Option<Config>, Vec<ParseError>) {
     parser::parse(source)
 }
@@ -1448,6 +1455,96 @@ mod tests {
             ],
             [(true, true); 2],
         );
+    }
+
+    /// A bad command item between two other items reports one error at the
+    /// token that broke it, and the items around it parse.
+    #[test]
+    fn a_broken_command_between_two_items_is_reported_and_skipped() {
+        let source = concat!(
+            "on init { editor.scrolloff = 3; }\n",
+            "command broken { doc = ; }\n",
+            "theme t { ui.text.fg = red; }",
+        );
+        let (config, errors) = parse(source);
+        let config = config.expect("the other items parse");
+        let semicolon = at(source, "= ;", 0).start + "= ".len();
+
+        let items = (
+            config.blocks.len(),
+            config.themes.len(),
+            config.commands.len(),
+        );
+        let spans: Vec<(usize, usize)> = errors
+            .iter()
+            .map(|error| (error.span.start, error.span.end))
+            .collect();
+        let expected = errors
+            .iter()
+            .all(|error| error.message.starts_with("expected "));
+        assert_eq!(
+            (items, spans, expected),
+            ((1, 1, 0), vec![(semicolon, semicolon + 1)], true),
+        );
+    }
+
+    /// A bad wrapped command ends at its semicolon, so the command after it
+    /// parses. The error stands at the `=` where a named argument takes a
+    /// colon.
+    #[test]
+    fn a_broken_wrap_command_recovers_at_its_semicolon() {
+        let source = concat!(
+            r#"command rg = cli("rg", output = locations);"#,
+            "\n",
+            r#"command jj = cli("jj");"#,
+        );
+        let (config, errors) = parse(source);
+        let names: Vec<String> = config
+            .expect("the second command parses")
+            .commands
+            .iter()
+            .map(|command| command.node.name.node.clone())
+            .collect();
+        let equals = at(source, "= locations", 0).start;
+
+        let spans: Vec<(usize, usize)> = errors
+            .iter()
+            .map(|error| (error.span.start, error.span.end))
+            .collect();
+        assert_eq!(
+            (names, spans),
+            (vec!["jj".to_owned()], vec![(equals, equals + 1)]),
+        );
+    }
+
+    /// The end of a bad command reads past a `}` in a string and in a
+    /// comment. The item then ends at the close of its brace group.
+    #[test]
+    fn recovery_reads_past_a_brace_in_a_string_and_in_a_comment() {
+        let source = concat!(
+            r#"command a { doc = "}"; # }"#,
+            "\n",
+            "run = ; }\n",
+            "on key { q -> Quit(); }",
+        );
+        let (config, errors) = parse(source);
+        let config = config.expect("the key block parses");
+        assert_eq!(
+            (config.blocks.len(), config.commands.len(), errors.len()),
+            (1, 0, 1),
+        );
+    }
+
+    /// A bad command with no end, such as an unclosed brace, fails the whole
+    /// parse.
+    #[test]
+    fn a_command_with_no_end_fails_the_parse() {
+        let (config, errors) = parse(concat!(
+            r#"command a { run = shell("x");"#,
+            "\n",
+            "on key { q -> Quit(); }",
+        ));
+        assert_eq!((config.is_none(), errors.is_empty()), (true, false));
     }
 
     /// The span of the `nth` occurrence of `needle` in `source`, counting

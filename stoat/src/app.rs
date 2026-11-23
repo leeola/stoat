@@ -398,6 +398,26 @@ fn apply_log_level(settings: &Settings) {
     }
 }
 
+/// The status that names the first parse error of the user config `source`
+/// by its line, as `config.stcfg:<line>: <message>`.
+///
+/// The first error is the one that starts earliest in `source`, and its line
+/// counts from 1. When `errors` holds more than one, ` (+<n> more)` follows
+/// with the count of the rest. `errors` holds at least one error.
+fn config_error_status(source: &str, errors: &[stoat_config::ParseError]) -> String {
+    let first = errors
+        .iter()
+        .min_by_key(|error| error.span.start)
+        .expect("a config with errors names one");
+    let before = &source.as_bytes()[..first.span.start.min(source.len())];
+    let line = before.iter().filter(|&&byte| byte == b'\n').count() + 1;
+    let more = match errors.len() {
+        1 => String::new(),
+        count => format!(" (+{} more)", count - 1),
+    };
+    format!("config.stcfg:{line}: {}{more}", first.message)
+}
+
 /// Point every registered language's highlight map at `styles`' theme keys.
 ///
 /// Must run again after a theme swap, since the keys a capture name maps onto
@@ -2627,15 +2647,17 @@ impl Stoat {
     }
 
     /// Construct a [`Stoat`], layering `user_config` over the embedded default
-    /// when it parses clean.
+    /// when it parses.
     ///
     /// `user_config` is the raw text of the user's `config.stcfg` (located via
     /// [`user_config_path`](crate::user_config_path)), or [`None`] to use only the
     /// built-in default. A user source that parses without errors ranks ahead of
     /// the embedded config, which still supplies every key and setting the user
-    /// never mentions. One that fails to parse is discarded in favour of the
-    /// embedded default, logged, and surfaced as a transient status message.
-    /// CLI settings layer over the resolved config either way.
+    /// never mentions. A source whose only errors sit in `command` items applies
+    /// with those items left out. A transient status then names the first
+    /// error by its line. Any other source that fails to parse is discarded in
+    /// favor of the embedded default, logged, and surfaced as a transient
+    /// status message. CLI settings layer over the resolved config either way.
     ///
     /// `user_themes` are `(stem, JSON)` pairs of VSCode color themes from the
     /// user's theme dir. They join the pool after the built-in themes and before
@@ -2657,11 +2679,16 @@ impl Stoat {
         env_theme: Option<String>,
     ) -> Self {
         let (config, config_error) = match user_config {
-            Some(source) => {
-                let (parsed, errors) = stoat_config::parse(&source);
-                if errors.is_empty() {
-                    (parsed, None)
-                } else {
+            Some(source) => match stoat_config::parse(&source) {
+                (parsed, errors) if errors.is_empty() => (parsed, None),
+                (Some(parsed), errors) => {
+                    tracing::error!(
+                        "user config has errors; applying the items that parse: {}",
+                        stoat_config::format_errors(&source, &errors)
+                    );
+                    (Some(parsed), Some(config_error_status(&source, &errors)))
+                },
+                (None, errors) => {
                     tracing::error!(
                         "user config parse failed; using built-in defaults: {}",
                         stoat_config::format_errors(&source, &errors)
@@ -2670,7 +2697,7 @@ impl Stoat {
                         None,
                         Some("user config parse failed; using built-in defaults".to_string()),
                     )
-                }
+                },
             },
             None => (None, None),
         };
@@ -3083,7 +3110,9 @@ impl Stoat {
     /// A source that fails to parse leaves everything as it was and reports the
     /// failure. Falling back to the built-in defaults is right at startup, where
     /// there is nothing to lose, but mid-session it would tear down a working
-    /// setup over a half-typed edit.
+    /// setup over a half-typed edit. A source whose only errors sit in
+    /// `command` items applies with those items left out, and the status names
+    /// the first error by its line.
     ///
     /// CLI overrides are re-applied on top, so a flag passed at launch keeps
     /// outranking the file. Runtime state (open buffers, the current mode, user
@@ -3092,13 +3121,19 @@ impl Stoat {
     /// terminal shell, direnv) wait for the next start.
     pub(crate) fn reload_user_config(&mut self, source: &str) {
         let (config, errors) = stoat_config::parse(source);
-        if !errors.is_empty() {
+        let Some(config) = config else {
             tracing::error!(
                 "config reload parse failed; keeping the current config: {}",
                 stoat_config::format_errors(source, &errors)
             );
             self.set_status("config parse failed; keeping the current config");
             return;
+        };
+        if !errors.is_empty() {
+            tracing::error!(
+                "config reload has errors; applying the items that parse: {}",
+                stoat_config::format_errors(source, &errors)
+            );
         }
 
         let ConfigArtifacts {
@@ -3110,7 +3145,7 @@ impl Stoat {
             syntax_styles,
             minimap_class_table,
         } = build_config_artifacts(
-            config,
+            Some(config),
             embedded_config(),
             &self.imported_themes,
             self.cli_settings.clone(),
@@ -3131,7 +3166,10 @@ impl Stoat {
         // touching any of them.
         self.paint_generation += 1;
         self.raise_config_actions_badge(&unknown_actions);
-        self.set_status("config reloaded");
+        match errors.is_empty() {
+            true => self.set_status("config reloaded"),
+            false => self.set_status(config_error_status(source, &errors)),
+        }
     }
 
     /// Stand up the notice that the config binds `unknown_actions`, replacing

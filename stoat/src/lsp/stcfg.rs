@@ -264,6 +264,9 @@ fn complete(text: &str, offset: usize) -> Vec<CompletionItem> {
 /// setting" warning spanning its path. Each action in an `on key` block that
 /// [`stoat_action::registry`] does not know becomes an "unknown action" warning
 /// spanning its call, since the keymap drops that binding.
+///
+/// A `command` item that does not parse reports its error, and the checks go
+/// on over the items that parse.
 fn diagnose(text: &str) -> Vec<Diagnostic> {
     let (config, errors) = stoat_config::parse(text);
     let lines = LineIndex::new(text);
@@ -582,6 +585,9 @@ const TK_COMMENT: u32 = 9;
 /// keeps its last-good colors during a broken mid-edit state rather than
 /// clearing them. Token type indices match the legend order declared in
 /// [`STCFG_CAPABILITIES`].
+///
+/// A text whose only errors sit in `command` items parses to a config, so its
+/// tokens color the items that parse.
 fn semantic_tokens(text: &str) -> Option<Vec<SemanticToken>> {
     let (config, _errors) = stoat_config::parse(text);
     let config = config?;
