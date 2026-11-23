@@ -7228,6 +7228,34 @@ fn a_grouped_palette_pool_prints_subcommand_tokens() {
     );
 }
 
+/// The pooled `action` list prints each action's PascalCase name and the keys
+/// bound to it beside its description, as the live list does.
+#[test]
+fn the_action_list_pool_prints_pascal_case_names_and_keys() {
+    let mut h = crate::test_harness::TestHarness::with_size(160, 40);
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+    h.stoat.set_apc_tx(tx);
+
+    h.type_text(":action keep-selections");
+    h.snapshot();
+    let size = h.stoat.size();
+    h.stoat.active_workspace_mut().layout(size);
+    emit_smooth_scroll(&mut h.stoat);
+
+    let raw: Vec<u8> = std::iter::from_fn(|| rx.try_recv().ok())
+        .flatten()
+        .collect();
+    let text = String::from_utf8_lossy(&raw);
+    let short = stoat_action::registry::lookup("KeepSelections")
+        .expect("KeepSelections is registered")
+        .def
+        .short_desc();
+    assert_eq!(
+        [short, "KeepSelections", "A-k \u{b7} v A-k"].map(|part| text.contains(part)),
+        [true; 3],
+    );
+}
+
 #[test]
 fn completion_popup_is_pooled_and_retired() {
     use crate::completion::{CompletionItem, CompletionPopup, CompletionSource};

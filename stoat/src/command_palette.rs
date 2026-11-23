@@ -4786,6 +4786,48 @@ mod tests {
         );
     }
 
+    /// A row of the `action` list reads the PascalCase name, the kebab name,
+    /// and the keys bound to the action. The query's letters mark both names
+    /// in `ui.list.match`.
+    #[test]
+    fn the_action_list_shows_both_names_and_the_bound_keys() {
+        let mut h = TestHarness::with_size(160, 50);
+        h.type_text(":action undo");
+        let _ = h.snapshot();
+
+        let buf = h.rendered_buffer();
+        let cells = |x: u16, y: u16, len: u16| -> String {
+            (x..x + len).map(|x| buf[(x, y)].symbol()).collect()
+        };
+        let (x, y) = (0..buf.area.height)
+            .find_map(|y| {
+                (0..buf.area.width - 4)
+                    .find(|&x| cells(x, y, 4) == "Undo")
+                    .map(|x| (x, y))
+            })
+            .expect("a list row names Undo");
+        let kebab = (x + 4..buf.area.width - 4)
+            .find(|&kebab| cells(kebab, y, 4) == "undo")
+            .expect("the row names undo");
+        let words: Vec<String> = cells(x, y, buf.area.width - x)
+            .split_whitespace()
+            .take(3)
+            .map(String::from)
+            .collect();
+        let marks: Vec<Option<Color>> = (x..x + 4)
+            .chain(kebab..kebab + 4)
+            .map(|x| Some(buf[(x, y)].fg))
+            .collect();
+
+        assert_eq!(
+            (words, marks),
+            (
+                ["Undo", "undo", "u"].map(String::from).to_vec(),
+                vec![h.stoat.theme.list_match().fg; 8],
+            ),
+        );
+    }
+
     #[test]
     fn abort_rebase_hidden_by_default_visible_after_backtab() {
         let mut h = Stoat::test();

@@ -1459,6 +1459,35 @@ fn the_root_list_ends_in_the_action_row_under_a_rule() {
     );
 }
 
+/// The `action` list draws each PascalCase name bold in the info color, and
+/// no row ends in a Source Tag.
+///
+/// The bare token lists the internal actions from the list's first cell row,
+/// 15. The second row's name then stands in the cells from 18 on row 16. A
+/// root row's tag stands in the pixels from x 1200 to 1287 over the rows 15
+/// to 27. Those pixels hold no tag box of either tint.
+#[test]
+fn the_action_list_draws_names_in_the_info_color_and_no_tag() {
+    let mut home = support::scratch_home();
+    let shot = palette_frame(home.path(), ":action <Settle>");
+
+    let name = pixels_of(&shot, cell_rect(18, 16, 22, 1), INFO);
+    let tags = [OVERLAY, TINT_INTERNAL].map(|tint| pixels_of(&shot, (1200, 270, 87, 234), tint));
+    if name == 0 || tags != [0, 0] {
+        let frame = keep_frame(&shot, &mut home, "action_list");
+        panic!(
+            "the second row's name holds {name} pixels of {}, where it holds some, and the tag \
+             column holds {} pixels of {} and {} of {}, where it holds none; the frame is {}",
+            hex(INFO),
+            tags[0],
+            hex(OVERLAY),
+            tags[1],
+            hex(TINT_INTERNAL),
+            frame.display(),
+        );
+    }
+}
+
 /// The frame the basic-diff scene settles on after `keys` play, where the
 /// child's home is `home` and its temporary files go under `home/t`.
 ///

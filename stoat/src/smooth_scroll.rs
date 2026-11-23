@@ -17,7 +17,7 @@
 use crate::{
     blame::{BlameBase, BlameRows},
     code_search::CodeSearchFinder,
-    command_palette::ArgPicker,
+    command_palette::{ArgPicker, Namespace},
     commit_list::CommitListState,
     completion::CompletionPopup,
     conflict_session::ConflictViewState,
@@ -25,6 +25,7 @@ use crate::{
     display_map::{highlights::HighlightEndpoints, DisplayPoint, DisplaySnapshot},
     file_finder::FileFinder,
     help::Help,
+    keymap::ActionKeys,
     render::{
         blame::{self, BlameColors, BlameLines, BLAME_COLUMN_CELLS},
         code_search::paint_match_rows,
@@ -1194,13 +1195,16 @@ pub(crate) fn render_symbol_finder_page(
 /// Mirrors [`render_finder_page`] but paints palette result rows. The page
 /// index alone selects the rows, and the list is read-only here. Each name
 /// leaves out its first `name_offset` bytes, as the live list does under a
-/// group.
+/// group. The rows of the `action` list that `namespace` names read their
+/// keys from `keys`, as the live list reads them.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn render_palette_page(
     filtered: &[&'static RegistryEntry],
     match_indices: &[Vec<u32>],
     selected: usize,
     name_offset: usize,
+    namespace: Namespace,
+    keys: &ActionKeys,
     page: u64,
     theme: &crate::theme::Theme,
     region_width: u16,
@@ -1217,6 +1221,8 @@ pub(crate) fn render_palette_page(
                 match_indices,
                 selected,
                 name_offset,
+                namespace,
+                keys,
                 area,
                 start_row,
                 theme,
@@ -3561,7 +3567,7 @@ mod tests {
     #[test]
     fn a_palette_page_leaves_the_group_token_out() {
         use super::render_palette_page;
-        use crate::theme::Theme;
+        use crate::{command_palette::Namespace, keymap::ActionKeys, theme::Theme};
         use stoat_action::registry;
 
         let entry = registry::lookup_alias("git log").expect("git log is a command");
@@ -3571,6 +3577,8 @@ mod tests {
                 &[Vec::new()],
                 0,
                 name_offset,
+                Namespace::Commands,
+                &ActionKeys::new(),
                 0,
                 &Theme::empty(),
                 100,
