@@ -187,9 +187,10 @@ pub(crate) fn render_help(
     );
 
     let note = footer_note(help);
+    let note = [(note.as_str(), theme.get(crate::theme::scope::UI_TEXT_MUTED))];
     let parts = Footer {
         hints: &HELP_HINTS,
-        note: Some(&note),
+        note: &note,
         ..Footer::default()
     };
     crate::render::picker::modal_footer(buf, layout.footer, &parts, plate, theme, scene);

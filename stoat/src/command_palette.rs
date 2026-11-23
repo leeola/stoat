@@ -579,6 +579,20 @@ pub enum PaletteScope {
     All,
 }
 
+impl PaletteScope {
+    /// The names of the scopes that `S-Tab` reaches from this one, joined by
+    /// ` / `, as the palette's key line names them. The names stand in the
+    /// order that the key reaches the scopes.
+    ///
+    /// The cycle holds two scopes, so the answer names the other one.
+    pub(crate) fn next_names(self) -> &'static str {
+        match self {
+            PaletteScope::Active => "all",
+            PaletteScope::All => "applicable",
+        }
+    }
+}
+
 /// Snapshot of stoat state relevant to per-action availability. Booleans are
 /// derived once at palette-open via [`Availability::from_stoat`] so the scope
 /// filter is a cheap lookup on every keystroke.
@@ -1254,7 +1268,7 @@ fn resolve_head(head: &str, ctx: &Availability) -> Option<&'static registry::Reg
 
 /// The text after a leading `action` token and its space, ASCII case ignored,
 /// or `None` for a text that lists the commands.
-fn action_query(text: &str) -> Option<&str> {
+pub(crate) fn action_query(text: &str) -> Option<&str> {
     let (token, rest) = text.split_once(' ')?;
     token.eq_ignore_ascii_case(ACTION_TOKEN).then_some(rest)
 }
@@ -4953,6 +4967,138 @@ mod tests {
         h.type_keys("backspace");
         let _ = h.snapshot();
         assert_eq!((scrolled, doc_scroll(&h)), (3, 0));
+    }
+
+    /// The root's key line names its run, completion, history, and scope keys,
+    /// and the scope hint names the scope that `S-Tab` reaches next. The note
+    /// at its right end names the two namespaces, with `:action` in the key
+    /// color.
+    #[test]
+    fn the_root_key_line_names_its_keys_the_next_scope_and_the_namespaces() {
+        let mut h = TestHarness::with_size(160, 50);
+        h.type_text(":");
+        let _ = h.snapshot();
+
+        let (text, colors) = key_line(&h);
+        let line = text.trim_end();
+        let action = line.chars().count() - " = internals".len() - ":action".len();
+        let key = h.stoat.theme.get(crate::theme::scope::UI_KEY_LABEL).fg;
+        assert_eq!(
+            (
+                line.contains("Enter run  Tab complete  C-Up history  S-Tab all"),
+                line.ends_with("root = commands \u{b7} :action = internals"),
+                colors[action..action + 7]
+                    .iter()
+                    .map(|&color| Some(color))
+                    .collect::<Vec<_>>(),
+            ),
+            (true, true, vec![key; 7]),
+            "the key line reads {text:?}",
+        );
+    }
+
+    /// After `S-Tab` the scope hint names `applicable`, the scope that the key
+    /// reaches next from `all`.
+    #[test]
+    fn the_scope_hint_names_the_scope_that_shift_tab_reaches_next() {
+        let mut h = TestHarness::with_size(160, 50);
+        h.type_text(":");
+        h.type_keys("backtab");
+        let _ = h.snapshot();
+
+        let (text, _) = key_line(&h);
+        assert!(
+            text.contains("Enter run  Tab complete  C-Up history  S-Tab applicable"),
+            "the key line reads {text:?}",
+        );
+    }
+
+    /// The `action` list's key line names its run, completion, doc scroll,
+    /// and back keys, with no note.
+    #[test]
+    fn the_action_list_key_line_names_run_complete_doc_and_back() {
+        let mut h = TestHarness::with_size(160, 50);
+        h.type_text(":action ");
+        let _ = h.snapshot();
+
+        assert_eq!(
+            key_line(&h).0.trim(),
+            "Enter run  Tab complete  C-d doc  Esc back"
+        );
+    }
+
+    /// A key line too narrow for the root's note keeps its hints and leaves
+    /// the note out.
+    #[test]
+    fn a_narrow_palette_keeps_its_hints_and_drops_the_note() {
+        let mut h = Stoat::test();
+        h.type_text(":");
+        let _ = h.snapshot();
+
+        assert_eq!(
+            key_line(&h).0.trim(),
+            "Enter run  Tab complete  C-Up history  S-Tab all"
+        );
+    }
+
+    /// `Esc` under the `action` token returns to the root list. The palette
+    /// stays open with an empty input, and the root ends in the `action` row.
+    /// A second `Esc` closes the palette.
+    ///
+    /// The first `Esc` dispatches with no frame after it. An `Enter` right
+    /// after the `Esc` reads the list, so the list follows the cleared input
+    /// at once.
+    #[test]
+    fn escape_in_the_action_list_returns_to_the_root_list() {
+        let mut h = Stoat::test();
+        h.type_text(":action foc");
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::CancelPromptInput);
+        let root = {
+            let palette = h
+                .stoat
+                .command_palette
+                .as_ref()
+                .expect("the palette stays open");
+            let last = palette
+                .filtered
+                .last()
+                .map(|&entry| entry.command_name.as_str());
+            (palette_text(&h), palette.namespace, last)
+        };
+
+        h.type_keys("escape");
+        let closed = h.stoat.command_palette.is_none();
+        let mode = h.snapshot().mode.clone();
+        assert_eq!(
+            (root, closed, mode.as_str()),
+            (
+                (String::new(), Namespace::Commands, Some(ACTION_TOKEN)),
+                true,
+                "normal"
+            ),
+        );
+    }
+
+    /// The text of the palette's key line, and the foreground of each of its
+    /// cells. The text reads U+2500 as a space, because the cell look's rule
+    /// fills the line's blank cells with it.
+    fn key_line(h: &TestHarness) -> (String, Vec<Color>) {
+        let (rows, zoom, header_rows) = crate::test_fixture::palette_sizing(h);
+        let footer = crate::render::command_palette::palette_filter_layout(
+            h.stoat.size(),
+            rows,
+            zoom,
+            header_rows,
+        )
+        .expect("the palette fits the test terminal")
+        .footer;
+        let buf = h.rendered_buffer();
+        let cells = || (footer.x..footer.right()).map(|x| &buf[(x, footer.y)]);
+        let text = cells()
+            .map(|cell| cell.symbol())
+            .collect::<String>()
+            .replace('\u{2500}', " ");
+        (text, cells().map(|cell| cell.fg).collect())
     }
 
     /// The doc lines that the palette's doc island scrolls past.

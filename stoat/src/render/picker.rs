@@ -754,8 +754,9 @@ pub(crate) struct Footer<'a> {
     pub(crate) hints: &'a [(&'a str, &'a str)],
     /// Styled spans set flush right, such as a legend of the row marks.
     pub(crate) legend: &'a [(&'a str, Style)],
-    /// A note that ends the line, such as the context a modal opened in.
-    pub(crate) note: Option<&'a str>,
+    /// Styled spans that end the line, such as the context a modal opened in.
+    /// Empty for a line with no note.
+    pub(crate) note: &'a [(&'a str, Style)],
 }
 
 /// The rect of `modal`'s key line, the inner rect's last row and the bottom
@@ -777,8 +778,8 @@ pub(crate) fn footer_rect(modal: Rect) -> Rect {
 /// key hints from the left and its legend and note at the right.
 ///
 /// Each hint is a key in `ui.key_label` and the word it does in
-/// `ui.text.muted`. The legend's spans keep their own styles, and the note
-/// reads in `ui.text.muted`. The legend is always kept, and the first hint
+/// `ui.text.muted`. The spans of the legend and of the note keep their own
+/// styles. The legend is always kept, and the first hint
 /// that does not clear it, and every hint after it, is left out. The note
 /// ends the line, with the legend before it, only when it clears the hints.
 ///
@@ -855,8 +856,11 @@ fn paint_cell_footer(
             at += text.width() as u16;
         }
     }
-    if let (Some(note), Some(at)) = (footer.note, places.note) {
-        write_str_clipped(buf, x + at, y, note, word_style, row_end);
+    if let Some(mut at) = places.note {
+        for &(text, span_style) in footer.note {
+            write_str_clipped(buf, x + at, y, text, span_style, row_end);
+            at += text.width() as u16;
+        }
     }
 }
 
@@ -904,8 +908,11 @@ fn paint_plate_footer(
             at += width(text);
         }
     }
-    if let (Some(note), Some(at)) = (footer.note, places.note) {
-        run(at, note, muted);
+    if let Some(mut at) = places.note {
+        for &(text, span_style) in footer.note {
+            run(at, text, style_rgb(span_style.fg));
+            at += width(text);
+        }
     }
     scene.nudge([0, 0]);
 }
@@ -980,10 +987,8 @@ fn place_footer(
         x = hint_end + hint_gap;
     }
 
-    let note = footer
-        .note
-        .filter(|&note| width(note) <= end)
-        .map(|note| end - width(note));
+    let note_width: u16 = footer.note.iter().map(|&(text, _)| width(text)).sum();
+    let note = (!footer.note.is_empty() && note_width <= end).then(|| end - note_width);
     let leftmost = note.map(|note_x| match has_legend {
         true => note_x
             .saturating_sub(group_gap)
@@ -3013,11 +3018,12 @@ mod tests {
     }
 
     /// The first row's text of the cell look's footer of [`FOOTER_HINTS`] and
-    /// `note`, painted `width` columns wide.
-    fn cell_footer_line(width: u16, note: Option<&str>) -> String {
+    /// the one-span note `note`, painted `width` columns wide.
+    fn cell_footer_line(width: u16, note: &str) -> String {
+        let note = [(note, Style::default())];
         let footer = Footer {
             hints: &FOOTER_HINTS,
-            note,
+            note: &note,
             ..Footer::default()
         };
         cell_footer(width, 1, &footer).0[0].0.clone()
@@ -3073,8 +3079,8 @@ mod tests {
     fn the_footer_sets_its_note_right_of_the_hints() {
         assert_eq!(
             [
-                cell_footer_line(40, Some("normal")),
-                cell_footer_line(30, Some("normal")),
+                cell_footer_line(40, "normal"),
+                cell_footer_line(30, "normal")
             ],
             [
                 format!(" Enter open  C-f/C-b page{}normal ", " ".repeat(8)),
@@ -3122,10 +3128,11 @@ mod tests {
     #[test]
     fn the_footer_note_yields_to_the_hints_and_the_legend() {
         let legend = [("L", Style::default())];
+        let note = [("n", Style::default()), ("n", Style::default())];
         let footer = Footer {
             hints: &[("ab", "cd")],
             legend: &legend,
-            note: Some("nn"),
+            note: &note,
         };
         let chars = |text: &str| text.chars().count() as u16;
         assert_eq!(
@@ -3155,10 +3162,11 @@ mod tests {
     fn a_plate_footer_keeps_its_groups_18_sixteenths_apart() {
         let theme = footer_theme();
         let legend = [("L", Style::default().fg(Color::Rgb(5, 5, 5)))];
+        let note = [("nn", Style::default().fg(Color::Rgb(4, 4, 4)))];
         let footer = Footer {
             hints: &FOOTER_HINTS[..1],
             legend: &legend,
-            note: Some("nn"),
+            note: &note,
         };
         let plate = PlateColors {
             ground: [1, 1, 1],
@@ -3179,6 +3187,48 @@ mod tests {
         assert_eq!(
             texts,
             [(32, "Enter"), (128, "open"), (256, "L")].map(|(col, text)| (col, text.to_owned())),
+        );
+    }
+
+    /// A plate's note ends the line as one run per span, each in its span's
+    /// color, the spans one after another.
+    #[test]
+    fn a_plate_footer_draws_each_note_span_in_its_color() {
+        let theme = footer_theme();
+        let note = [
+            ("a", Style::default().fg(Color::Rgb(5, 5, 5))),
+            ("bc", Style::default().fg(Color::Rgb(6, 6, 6))),
+        ];
+        let footer = Footer {
+            hints: &FOOTER_HINTS[..1],
+            note: &note,
+            ..Footer::default()
+        };
+        let plate = PlateColors {
+            ground: [1, 1, 1],
+            surface: [2, 2, 2],
+        };
+        let mut buf = Buffer::empty(Rect::new(0, 0, 44, 8));
+        let mut scene = stoat_widgets::ApcScene::new();
+        let rect = Rect::new(2, 5, 40, 2);
+        modal_footer(&mut buf, rect, &footer, Some(plate), &theme, &mut scene);
+
+        let runs: Vec<(i16, String, [u8; 3])> = plate_commands(&scene)
+            .into_iter()
+            .filter_map(|command| match command {
+                Command::TextRun(run) => Some((run.col, run.text, run.color)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            runs,
+            [
+                (32, "Enter", [3, 3, 3]),
+                (128, "open", [4, 4, 4]),
+                (624, "a", [5, 5, 5]),
+                (640, "bc", [6, 6, 6]),
+            ]
+            .map(|(col, text, color)| (col, text.to_owned(), color)),
         );
     }
 

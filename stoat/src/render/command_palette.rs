@@ -1,7 +1,7 @@
 use crate::{
     command_palette::{
-        is_action_row, typed_head, ArgPicker, CommandPalette, Namespace, ResolvedCommand,
-        ACTION_TOKEN,
+        is_action_row, typed_head, ArgPicker, CommandPalette, Namespace, PaletteScope,
+        ResolvedCommand, ACTION_TOKEN,
     },
     input_view::InputView,
     keymap::ActionKeys,
@@ -124,6 +124,15 @@ pub(crate) struct PaletteArgLayout {
     /// keeps as [`CommandPalette::arg_plate_width`] so the plate does not
     /// narrow while the palette is open.
     pub(crate) plate_base: u16,
+}
+
+/// The parts of the key line under the command list or the `action` list, as
+/// [`palette_footer_parts`] gives them.
+struct PaletteFooterParts {
+    /// The key hints, each a bound key and the word for what it does.
+    hints: [(&'static str, &'static str); 4],
+    /// The note's spans, empty for a list with no note.
+    note: Vec<(&'static str, Style)>,
 }
 
 /// Lay out the command-palette filter modal within `area`, or `None` when
@@ -314,6 +323,7 @@ pub(crate) fn render_command_palette(
         palette.selected,
         palette.group,
         palette.namespace,
+        palette.scope,
         content_rows,
         zoom,
         &mut palette.header_rows,
@@ -751,6 +761,9 @@ fn grouped(count: usize) -> String {
 /// The doc shows from line `doc_scroll` of the selected entry's doc. The
 /// paint holds `doc_scroll` where the doc's last line stands on the doc
 /// region's last row, so the doc never scrolls past its end.
+///
+/// The key line names the keys of the list that `namespace` names, as
+/// [`palette_footer_parts`] gives them under `scope`.
 #[allow(clippy::too_many_arguments)]
 fn render_palette_filter(
     input: &InputView,
@@ -759,6 +772,7 @@ fn render_palette_filter(
     selected: usize,
     group: Option<&str>,
     namespace: Namespace,
+    scope: PaletteScope,
     content_rows: u16,
     zoom: i8,
     header_rows: &mut u16,
@@ -852,11 +866,56 @@ fn render_palette_filter(
         paint_doc_lines(buf, doc, shown, tag, theme, scene);
     }
 
+    let stage = palette_footer_parts(namespace, scope, theme);
     let parts = Footer {
-        hints: &PALETTE_HINTS,
+        hints: &stage.hints,
+        note: &stage.note,
         ..Footer::default()
     };
     crate::render::picker::modal_footer(buf, layout.footer, &parts, plate, theme, scene);
+}
+
+/// The key hints and the note of the key line under the list that `namespace`
+/// names, with the palette in `scope`.
+///
+/// The root names its run, completion, history, and scope keys, and the scope
+/// hint names the scopes that `S-Tab` reaches next. Its note names the two
+/// namespaces, with `:action` in `ui.key_label`, so a user learns where the
+/// internal actions went. The `action` list names its run, completion, doc
+/// scroll, and back keys, with no note.
+fn palette_footer_parts(
+    namespace: Namespace,
+    scope: PaletteScope,
+    theme: &crate::theme::Theme,
+) -> PaletteFooterParts {
+    match namespace {
+        Namespace::Commands => {
+            let muted = theme.get(crate::theme::scope::UI_TEXT_MUTED);
+            let key = theme.get(crate::theme::scope::UI_KEY_LABEL);
+            PaletteFooterParts {
+                hints: [
+                    ("Enter", "run"),
+                    ("Tab", "complete"),
+                    ("C-Up", "history"),
+                    ("S-Tab", scope.next_names()),
+                ],
+                note: vec![
+                    ("root = commands \u{b7} ", muted),
+                    (":action", key),
+                    (" = internals", muted),
+                ],
+            }
+        },
+        Namespace::Actions => PaletteFooterParts {
+            hints: [
+                ("Enter", "run"),
+                ("Tab", "complete"),
+                ("C-d", "doc"),
+                ("Esc", "back"),
+            ],
+            note: Vec::new(),
+        },
+    }
 }
 
 /// Paint `lines` into the doc region `doc`, one per row from its top, each

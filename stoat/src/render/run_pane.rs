@@ -377,8 +377,12 @@ pub(crate) fn render_modal_run(
     } else {
         "running...".to_owned()
     };
+    let note = [(
+        status.as_str(),
+        theme.get(crate::theme::scope::UI_TEXT_MUTED),
+    )];
     let footer = Footer {
-        note: Some(&status),
+        note: &note,
         ..Footer::default()
     };
     let footer_rows = crate::render::picker::footer_rect(modal_area);

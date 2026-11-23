@@ -506,8 +506,21 @@ pub(super) fn palette_submit(stoat: &mut Stoat) -> Option<UpdateEffect> {
 
 /// Cancel the currently open palette, closing it and restoring the previous
 /// mode.
+///
+/// Under the `action` token the palette steps back to the root list instead.
+/// The input clears, so the root lists every command as it does at open, and
+/// a second `Esc` closes the palette.
 pub(super) fn palette_cancel(stoat: &mut Stoat) -> Option<UpdateEffect> {
-    close_palette(stoat).then_some(UpdateEffect::Redraw)
+    let active_idx = stoat.active_workspace;
+    let palette = stoat.command_palette.as_mut()?;
+    let ws = &mut stoat.workspaces[active_idx];
+    if command_palette::action_query(&palette.input.text(ws)).is_none() {
+        return close_palette(stoat).then_some(UpdateEffect::Redraw);
+    }
+
+    palette.input.replace_text(ws, "");
+    sync_palette_picker(stoat);
+    Some(UpdateEffect::Redraw)
 }
 
 /// Insert a literal newline in the palette's active [`InputView`].

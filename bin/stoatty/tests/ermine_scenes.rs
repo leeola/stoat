@@ -1488,6 +1488,29 @@ fn the_action_list_draws_names_in_the_info_color_and_no_tag() {
     }
 }
 
+/// The palette's key line ends in the note that names the two namespaces.
+///
+/// The key line is the plate's, on cell row 35, and its text draws 7 px down.
+/// The ground shows behind the line's middle, between the hints at its left
+/// end and the note at its right end. The note brightens the pixels from x
+/// 1010 to 1280.
+#[test]
+fn the_palette_key_line_ends_in_the_namespace_note() {
+    let mut home = support::scratch_home();
+    let shot = palette_frame(home.path(), ":<Settle>");
+
+    expect_key_line(&shot, &mut home, 35, (17, 143), 800, "palette_key_line");
+    let note = brightest(&shot, (1010, 637, 270, 18));
+    if note <= 0x11 {
+        let frame = keep_frame(&shot, &mut home, "palette_note");
+        panic!(
+            "the brightest channel at the key line's right end is {note:#04x}, where the note \
+             draws brighter than 0x11; the frame is {}",
+            frame.display(),
+        );
+    }
+}
+
 /// The frame the basic-diff scene settles on after `keys` play, where the
 /// child's home is `home` and its temporary files go under `home/t`.
 ///
