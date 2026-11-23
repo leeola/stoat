@@ -1557,6 +1557,31 @@ fn up_lists_history_under_a_chip() {
     }
 }
 
+/// The words typed before Up narrow History in any order, under a chip that
+/// names them.
+///
+/// The command `:o unstaged.txt` runs first. The needle `txt o` holds the two
+/// words of that line in the other order, so only the word rule finds the
+/// line. The chip `history · txt o · 1 / 1` is 23 chars, which advance 311
+/// sixteenths, so its box is the 21 cells that end at cell 143.
+#[test]
+fn keywords_narrow_history_under_a_wider_chip() {
+    let mut home = support::scratch_home();
+    let shot = palette_frame(
+        home.path(),
+        ":o unstaged.txt<Enter><Settle>:txt o<Up><Settle>",
+    );
+
+    expect_color_box(
+        &shot,
+        &mut home,
+        TINT_SPECIAL,
+        234..266,
+        (1099, 241, 1287, 258),
+        "keyword_chip",
+    );
+}
+
 /// The frame the basic-diff scene settles on after `keys` play, where the
 /// child's home is `home` and its temporary files go under `home/t`.
 ///

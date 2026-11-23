@@ -5318,6 +5318,42 @@ mod tests {
         );
     }
 
+    /// The words typed before Up narrow History to the lines that hold each of
+    /// them, in any order. The chip names the words one space apart, although
+    /// the input holds two spaces. The words mark their chars in the recalled
+    /// input and in the row.
+    #[test]
+    fn typed_words_narrow_history_in_any_order() {
+        let mut h = TestHarness::with_size(160, 50);
+        h.stoat.active_workspace_mut().palette_history = InputHistory::from_entries(vec![
+            "git checkout -b foo-stoat-bar".to_string(),
+            "git log".to_string(),
+            "cd /x".to_string(),
+        ]);
+        h.type_text(":stoat  git");
+        h.type_keys("up");
+        let _ = h.snapshot();
+
+        let palette = h.stoat.command_palette.as_ref().expect("palette open");
+        assert_eq!(
+            (
+                palette_text(&h),
+                palette.history_rows.len(),
+                history_list_row(&h, 0),
+                h.rendered_text()
+                    .contains("history \u{b7} stoat git \u{b7} 1 / 1"),
+                palette_marks(&h),
+            ),
+            (
+                "git checkout -b foo-stoat-bar".to_owned(),
+                1,
+                "\u{21ba}  git checkout -b foo-stoat-bar".to_owned(),
+                true,
+                ["gitstoat".to_owned(), "gitstoat".to_owned()],
+            ),
+        );
+    }
+
     /// A walk out of an argument list drops its picker, so the box keeps the
     /// rows of the command list for every recalled line. `Esc` restores the
     /// typed argument and installs its picker again.
@@ -5450,6 +5486,27 @@ mod tests {
     /// Whether the palette history walks.
     fn walking(h: &TestHarness) -> bool {
         h.stoat.active_workspace().palette_history.is_walking()
+    }
+
+    /// The chars that draw in the foreground of `ui.list.match` on the Cmd
+    /// Line's first row and on the first row of the palette list.
+    fn palette_marks(h: &TestHarness) -> [String; 2] {
+        let (rows, zoom, header_rows) = crate::test_fixture::palette_sizing(h);
+        let layout = crate::render::command_palette::palette_filter_layout(
+            h.stoat.size(),
+            rows,
+            zoom,
+            header_rows,
+        )
+        .expect("the palette fits the test terminal");
+        let fg = h.stoat.theme.list_match().fg;
+        let buf = h.rendered_buffer();
+        [layout.inner.y, layout.list.y].map(|y| {
+            (layout.inner.x..layout.inner.right())
+                .filter(|&x| Some(buf[(x, y)].fg) == fg)
+                .map(|x| buf[(x, y)].symbol())
+                .collect()
+        })
     }
 
     /// The selection, and the name of the action that Enter dispatches, after

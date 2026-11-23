@@ -152,8 +152,9 @@ pub(crate) fn code_search_select(stoat: &mut Stoat) -> bool {
 /// fish-style.
 ///
 /// Returns `None` when the modal is closed. The already-typed text is the
-/// substring needle. The per-frame sync re-arms the scan for the recalled text,
-/// so a recall searches exactly as typing the same query would.
+/// needle, and a query matches when it holds each of its words. The per-frame
+/// sync re-arms the scan for the recalled text, so a recall searches exactly
+/// as a typed query does.
 pub(crate) fn code_search_history_prev(stoat: &mut Stoat) -> Option<UpdateEffect> {
     recall(stoat, |history, current| history.prev(current))
 }

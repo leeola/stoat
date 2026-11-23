@@ -482,8 +482,9 @@ pub(crate) fn search_submit(stoat: &mut Stoat) -> bool {
 /// Recall the previous submitted pattern into the search prompt, fish-style.
 ///
 /// Returns `None` when no search prompt is open. The already-typed text is the
-/// substring needle. The live preview reads the prompt's text on the next sync,
-/// so a recalled pattern previews exactly as a typed one does.
+/// needle, and a pattern matches when it holds each of its words. The live
+/// preview reads the prompt's text on the next sync, so a recalled pattern
+/// previews exactly as a typed one does.
 pub(crate) fn search_history_prev(stoat: &mut Stoat) -> Option<UpdateEffect> {
     recall(stoat, |history, current| history.prev(current))
 }

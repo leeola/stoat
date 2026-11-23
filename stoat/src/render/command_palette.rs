@@ -3,6 +3,7 @@ use crate::{
         is_action_row, split_head, typed_head, ArgPicker, Availability, CommandPalette, Namespace,
         PaletteScope, ResolvedCommand, ACTION_TOKEN,
     },
+    input_history,
     input_view::InputView,
     keymap::ActionKeys,
     render::{
@@ -21,7 +22,7 @@ use ratatui::{
     style::{Modifier, Style},
     widgets::{Block, Borders, StatefulWidget},
 };
-use std::{borrow::Cow, path::Path};
+use std::{borrow::Cow, ops::Range, path::Path};
 use stoat_action::registry::RegistryEntry;
 use stoat_widgets::{
     bar::Bar,
@@ -167,6 +168,9 @@ struct HistoryEntry<'a> {
     /// The time the line last ran at, in unix seconds, or `None` for a line
     /// with no known time.
     at: Option<i64>,
+    /// The chars of `line` that the words of the walk's needle mark, as the
+    /// char ranges of [`input_history::word_spans`].
+    marks: Vec<Range<usize>>,
 }
 
 /// Lay out the command-palette filter modal within `area`, or `None` when
@@ -441,6 +445,7 @@ fn render_palette_arg_picker(
     palette.header_rows = render_palette_prelude(
         &palette.input,
         palette.resolved.as_ref(),
+        &[],
         CmdStatus::Text(&status),
         layout.modal,
         layout.inner,
@@ -561,6 +566,7 @@ fn render_palette_free_arg(
     palette.header_rows = render_palette_prelude(
         &palette.input,
         palette.resolved.as_ref(),
+        &[],
         CmdStatus::None,
         layout.modal,
         layout.inner,
@@ -631,10 +637,11 @@ fn render_palette_free_arg(
 /// the list rows, the doc rows, and the row between them, and
 /// [`paint_history_rows`] paints the rows on it. The Cmd Line's status is the
 /// chip `history N / M`. N is the place of the recalled line among the
-/// matches, with the newest as 1, and M counts the matches. A needle that
-/// holds a word stands in the chip between the word `history` and the count.
-/// The rows that the paint draws go to [`CommandPalette::history_rows`] for
-/// the pointer.
+/// matches, with the newest as 1, and M counts the matches. The words of a
+/// needle stand in the chip one space apart, between the word `history` and
+/// the count. Each word marks its chars in the rows and in the input, as
+/// [`input_history::word_spans`] finds them. The rows that the paint draws go
+/// to [`CommandPalette::history_rows`] for the pointer.
 ///
 /// History draws on the live grid with no pool, because its rows differ in
 /// height. Each step of the walk also changes the input and the chip with the
@@ -662,16 +669,20 @@ fn render_palette_history(
         .cursor()
         .and_then(|cursor| matches.iter().position(|&index| index == cursor))
         .unwrap_or(0);
+    let needle = ws.palette_history.needle();
     let chip = {
         let count = format!("{} / {}", place + 1, matches.len());
-        match ws.palette_history.needle().trim() {
+        let words = needle.split_whitespace().collect::<Vec<_>>().join(" ");
+        match words.as_str() {
             "" => format!("history {count}"),
-            needle => format!("history \u{b7} {needle} \u{b7} {count}"),
+            words => format!("history \u{b7} {words} \u{b7} {count}"),
         }
     };
+    let input_marks = input_history::word_spans(&palette.input.text(ws), needle);
     palette.header_rows = render_palette_prelude(
         &palette.input,
         palette.resolved.as_ref(),
+        &input_marks,
         CmdStatus::Chip(&chip),
         layout.modal,
         layout.inner,
@@ -698,12 +709,17 @@ fn render_palette_history(
     }
 
     let history = &ws.palette_history;
+    let needle = history.needle();
     let entries: Vec<HistoryEntry<'_>> = matches
         .iter()
-        .map(|&index| HistoryEntry {
-            index,
-            line: &history.entries()[index],
-            at: history.times()[index],
+        .map(|&index| {
+            let line = history.entries()[index].as_str();
+            HistoryEntry {
+                index,
+                line,
+                at: history.times()[index],
+                marks: input_history::word_spans(line, needle),
+            }
         })
         .collect();
     palette.history_rows = paint_history_rows(
@@ -717,12 +733,7 @@ fn render_palette_history(
         scene,
     );
 
-    let stage = palette_footer_parts(
-        KeyStage::History {
-            needle: history.needle(),
-        },
-        theme,
-    );
+    let stage = palette_footer_parts(KeyStage::History { needle }, theme);
     let hints: Vec<(&str, &str)> = stage
         .hints
         .iter()
@@ -742,6 +753,8 @@ fn render_palette_history(
 /// An entry's first row holds U+21BA in `ui.text.disabled` in its second cell
 /// and its line from its fifth cell. The line's head draws bold in `ui.text`,
 /// and the rest draws in `ui.text.dim`, as [`history_head_chars`] splits them.
+/// The chars inside the entry's marks take
+/// [`Theme::list_match`](crate::theme::Theme::list_match) over their style.
 /// The line's age against `now`, as [`history_age`] words it, draws in
 /// `ui.text.muted` on the first row. The age ends one cell inside the right
 /// edge.
@@ -768,6 +781,7 @@ fn paint_history_rows(
     let dim = theme.get(crate::theme::scope::UI_TEXT_DIM);
     let muted = theme.get(crate::theme::scope::UI_TEXT_MUTED);
     let mark = theme.get(crate::theme::scope::UI_TEXT_DISABLED);
+    let matched = theme.list_match();
     let keeps_columns = theme
         .try_get(crate::theme::scope::UI_LIST_SELECTED)
         .is_some();
@@ -835,6 +849,7 @@ fn paint_history_rows(
             write_str(buf, x, row_y, &head_text, column(head_style));
             let rest_x = x + (head_end - row.start) as u16;
             write_str(buf, rest_x, row_y, &rest, column(dim));
+            paint_history_marks(buf, (x, row_y), row, &entry.marks, matched);
         }
         if let Some(age) = age {
             let age_x = area.right().saturating_sub(1 + age.chars().count() as u16);
@@ -845,6 +860,23 @@ fn paint_history_rows(
         y += height;
     }
     drawn
+}
+
+/// Patch `style` over each cell of a History row whose char is inside `marks`.
+///
+/// The row shows the chars `row` of its line from cell `x` of screen row `y`.
+fn paint_history_marks(
+    buf: &mut Buffer,
+    (x, y): (u16, u16),
+    row: &Range<usize>,
+    marks: &[Range<usize>],
+    style: Style,
+) {
+    for mark in marks {
+        for index in mark.start.max(row.start)..mark.end.min(row.end) {
+            buf[(x + (index - row.start) as u16, y)].set_style(style);
+        }
+    }
 }
 
 /// The chars at the start of History line `line` that its head takes, the
@@ -907,8 +939,8 @@ fn history_window(heights: &[usize], selected: usize, rows: usize) -> usize {
 ///
 /// The Cmd Line names the workspace's root, abbreviated against `home`, and
 /// shows the live input with its caret and `status` at its right end. A
-/// `resolved` command token draws with its ghost, as [`input_spans`] gives
-/// them.
+/// `resolved` command token draws with its ghost, and the chars inside `marks`
+/// draw marked, as [`input_spans`] gives them.
 ///
 /// See also:
 /// - [`cmd_line::cmd_line`] for the row itself.
@@ -920,6 +952,7 @@ fn history_window(heights: &[usize], selected: usize, rows: usize) -> usize {
 fn render_palette_prelude(
     input: &InputView,
     resolved: Option<&ResolvedCommand>,
+    marks: &[Range<usize>],
     status: CmdStatus<'_>,
     modal: Rect,
     inner: Rect,
@@ -934,7 +967,7 @@ fn render_palette_prelude(
 
     let cwd = crate::run::abbreviate_path(&ws.git_root, home);
     let (text, caret) = input.caret(ws);
-    let (input, caret) = input_spans(&text, caret, resolved, theme);
+    let (input, caret) = input_spans(&text, caret, resolved, marks, theme);
     let line = CmdLine {
         cwd: &cwd,
         input: &input,
@@ -960,15 +993,22 @@ fn render_palette_prelude(
 /// The ghost is display only, so the caret stays on the typed text. A caret
 /// past the head moves right by the ghost's chars, and a caret at the head's
 /// end covers the ghost's first char, as a shell draws a suggestion.
+///
+/// The chars inside `marks`, char ranges of `text`, take
+/// [`Theme::list_match`](crate::theme::Theme::list_match) over the style they
+/// draw in. So a mark wins over the head's token color. The ghost takes no
+/// mark, because it is no part of the typed text.
 fn input_spans(
     text: &str,
     caret: usize,
     resolved: Option<&ResolvedCommand>,
+    marks: &[Range<usize>],
     theme: &crate::theme::Theme,
 ) -> (Vec<(String, Style)>, usize) {
     let plain = theme.get(crate::theme::scope::UI_TEXT);
+    let mark = theme.list_match();
     let Some(resolved) = resolved else {
-        return (vec![(text.to_owned(), plain)], caret);
+        return (marked_spans(text, 0, plain, marks, mark), caret);
     };
 
     let split = text
@@ -985,7 +1025,7 @@ fn input_spans(
             .try_get(crate::theme::scope::UI_CMD_ACTION)
             .unwrap_or(command),
     };
-    let mut spans = vec![(head.to_owned(), head_style)];
+    let mut spans = marked_spans(head, 0, head_style, marks, mark);
 
     let mut shown = caret;
     let ghost = theme
@@ -998,10 +1038,34 @@ fn input_spans(
         }
     }
 
-    if !rest.is_empty() {
-        spans.push((rest.to_owned(), plain));
-    }
+    spans.extend(marked_spans(rest, resolved.head_chars, plain, marks, mark));
     (spans, shown)
+}
+
+/// `text` as spans in `base`, with `mark` patched over each char inside
+/// `marks`, and one span for each run of chars in one style.
+///
+/// `marks` holds char ranges of the input that `text` is part of. `first` is
+/// the index in the input of the first char of `text`.
+fn marked_spans(
+    text: &str,
+    first: usize,
+    base: Style,
+    marks: &[Range<usize>],
+    mark: Style,
+) -> Vec<(String, Style)> {
+    let mut spans: Vec<(String, Style)> = Vec::new();
+    for (index, ch) in (first..).zip(text.chars()) {
+        let style = match marks.iter().any(|range| range.contains(&index)) {
+            true => base.patch(mark),
+            false => base,
+        };
+        match spans.last_mut() {
+            Some((run, run_style)) if *run_style == style => run.push(ch),
+            _ => spans.push((ch.to_string(), style)),
+        }
+    }
+    spans
 }
 
 /// The Cmd Line status over `palette`'s list.
@@ -1115,6 +1179,7 @@ fn render_palette_filter(
     *header_rows = render_palette_prelude(
         input,
         resolved,
+        &[],
         CmdStatus::Text(status),
         layout.modal,
         layout.inner,
@@ -1882,6 +1947,7 @@ mod tests {
     };
     use crate::{
         command_palette::{action_row, Availability, Namespace, ResolvedCommand},
+        input_history,
         keymap::ActionKeys,
         render::editor::ResolvedChrome,
         test_fixture::{plate_islands, row_rules},
@@ -1969,9 +2035,9 @@ mod tests {
 
         assert_eq!(
             [
-                input_spans("o src", 5, Some(&open), &theme),
-                input_spans("o", 1, Some(&open), &theme),
-                input_spans("o src", 5, Some(&open), &Theme::empty()),
+                input_spans("o src", 5, Some(&open), &[], &theme),
+                input_spans("o", 1, Some(&open), &[], &theme),
+                input_spans("o src", 5, Some(&open), &[], &Theme::empty()),
             ],
             [
                 (spans(&[("o", 5), ("pen", 6), (" src", 4)]), 8),
@@ -2629,8 +2695,9 @@ mod tests {
             index: 0,
             line: "cd /alpha",
             at: Some(0),
+            marks: Vec::new(),
         }];
-        let (buf, _) = painted_history(&entries);
+        let (buf, _) = painted_history(&entries, &Theme::empty());
         let bold: Vec<bool> = (4..7)
             .map(|x| buf[(x, 0)].modifier.contains(Modifier::BOLD))
             .collect();
@@ -2655,20 +2722,26 @@ mod tests {
                 index: 7,
                 line: &long,
                 at: Some(0),
+                marks: Vec::new(),
             },
             HistoryEntry {
                 index: 3,
                 line: "cd /alpha",
                 at: Some(0),
+                marks: Vec::new(),
             },
         ];
-        let (buf, rows) = painted_history(&entries);
+        let (buf, rows) = painted_history(&entries, &Theme::empty());
         let word = "x".repeat(40);
-        let (word_buf, _) = painted_history(&[HistoryEntry {
-            index: 0,
-            line: &word,
-            at: Some(0),
-        }]);
+        let (word_buf, _) = painted_history(
+            &[HistoryEntry {
+                index: 0,
+                line: &word,
+                at: Some(0),
+                marks: Vec::new(),
+            }],
+            &Theme::empty(),
+        );
 
         let first = format!("run {} ", "a".repeat(20));
         assert_eq!(
@@ -2702,9 +2775,103 @@ mod tests {
         );
     }
 
-    /// Paint History `entries` into a list 40 cells wide and 4 rows tall, two
-    /// minutes after the time 0, with no entry selected.
-    fn painted_history(entries: &[HistoryEntry<'_>]) -> (Buffer, Vec<(Rect, usize)>) {
+    /// A History row gives `ui.list.match` to the chars of each word of the
+    /// needle at the word's first place in the line. No other cell takes it.
+    #[test]
+    fn a_history_row_marks_the_matched_words() {
+        let line = "git log --graph stoat/src";
+        let entries = [HistoryEntry {
+            index: 0,
+            line,
+            at: None,
+            marks: input_history::word_spans(line, "stoat git"),
+        }];
+        let (buf, _) = painted_history(&entries, &match_theme());
+        assert_eq!(marked_cells(&buf, 0), [4, 5, 6, 20, 21, 22, 23, 24]);
+    }
+
+    /// The recalled input gives `ui.list.match` to the chars that the needle's
+    /// words mark, and plain text to the runs between them. A mark wins over
+    /// the head's command color, and the ghost takes no mark.
+    #[test]
+    fn the_recalled_input_marks_the_matched_words() {
+        let line = "git log --graph stoat/src";
+        let typed = "o src/main";
+        let open = ResolvedCommand {
+            entry: registry::lookup_alias("open").expect("a command"),
+            head_chars: 1,
+            ghost: "pen".to_owned(),
+        };
+        let marked = |text: &str, needle: &str, resolved: Option<&ResolvedCommand>| {
+            let marks = input_history::word_spans(text, needle);
+            input_spans(text, 0, resolved, &marks, &match_theme()).0
+        };
+        let spans = |parts: &[(&str, u8)]| -> Vec<(String, Style)> {
+            parts
+                .iter()
+                .map(|&(text, gray)| {
+                    let style = Style::default().fg(Color::Rgb(gray, gray, gray));
+                    (text.to_owned(), style)
+                })
+                .collect()
+        };
+
+        assert_eq!(
+            [
+                marked(line, "stoat git", None),
+                marked(typed, "main o", Some(&open)),
+            ],
+            [
+                spans(&[("git", 7), (" log --graph ", 4), ("stoat", 7), ("/src", 4)]),
+                spans(&[("o", 7), ("pen", 6), (" src/", 4), ("main", 7)]),
+            ],
+        );
+    }
+
+    /// A mark that crosses a wrap marks its chars on each row that it reaches.
+    #[test]
+    fn a_mark_across_a_wrap_marks_each_row() {
+        let line = "x".repeat(40);
+        let entries = [HistoryEntry {
+            index: 0,
+            line: &line,
+            at: Some(0),
+            marks: input_history::word_spans(&line, &"x".repeat(34)),
+        }];
+        let (buf, _) = painted_history(&entries, &match_theme());
+        assert_eq!(
+            (marked_cells(&buf, 0), marked_cells(&buf, 1)),
+            ((4..36).collect(), vec![4, 5]),
+        );
+    }
+
+    /// The cells of row `y` of `buf` that draw in the `ui.list.match` of
+    /// [`match_theme`].
+    fn marked_cells(buf: &Buffer, y: u16) -> Vec<u16> {
+        (buf.area.left()..buf.area.right())
+            .filter(|&x| buf[(x, y)].fg == Color::Rgb(7, 7, 7))
+            .collect()
+    }
+
+    /// A theme whose `ui.text`, `ui.cmd.command`, `ui.cmd.ghost`, and
+    /// `ui.list.match` read `#040404`, `#050505`, `#060606`, and `#070707`.
+    fn match_theme() -> Theme {
+        let src = r##"theme t {
+            ui.text.fg = "#040404";
+            ui.cmd.command.fg = "#050505";
+            ui.cmd.ghost.fg = "#060606";
+            ui.list.match.fg = "#070707";
+        }"##;
+        let (config, _) = stoat_config::parse(src);
+        Theme::from_config(&config.expect("theme parses"), "t").expect("theme loads")
+    }
+
+    /// Paint History `entries` in `theme` into a list 40 cells wide and 4 rows
+    /// tall, two minutes after the time 0, with no entry selected.
+    fn painted_history(
+        entries: &[HistoryEntry<'_>],
+        theme: &Theme,
+    ) -> (Buffer, Vec<(Rect, usize)>) {
         let list = Rect::new(0, 0, 40, 4);
         let mut buf = Buffer::empty(list);
         let rows = paint_history_rows(
@@ -2713,7 +2880,7 @@ mod tests {
             125,
             list,
             &Availability::default(),
-            &Theme::empty(),
+            theme,
             &mut buf,
             &mut stoat_widgets::ApcScene::new(),
         );

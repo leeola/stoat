@@ -43,10 +43,11 @@ define_action!(
     "PromptHistoryPrev",
     ActionKind::PromptHistoryPrev,
     "recall older prompt history",
-    "Recall the previous entry from the open prompt's history, fish-style: \
-     the already-typed text is a substring needle that filters matches. A \
-     prompt that keeps no history does nothing. Bound by default to Alt-Up, \
-     and in the command palette to Ctrl-Up as well.",
+    "Recall the previous entry from the open prompt's history, fish-style. \
+     An entry matches when it holds every word of the already-typed text, in \
+     any order, with ASCII case ignored. A prompt that keeps no history does \
+     nothing. Bound by default to Alt-Up, and in the command palette to \
+     Ctrl-Up as well.",
     ActionPriority::Normal,
     palette_visible = false
 );
@@ -58,7 +59,7 @@ define_action!(
     ActionKind::PromptHistoryNext,
     "recall newer prompt history",
     "Recall the next entry toward the newest in the open prompt's history, \
-     under the same substring needle. Stepping past the newest restores the \
+     under the same needle. Stepping past the newest restores the \
      originally-typed text. Bound by default to Alt-Down, and in the command \
      palette to Ctrl-Down as well.",
     ActionPriority::Normal,
@@ -88,9 +89,9 @@ define_action!(
     "Move the command palette's selection up one row. On the first row of \
      the command list or of the argument list, and over a free-typed \
      argument, recall the palette's history instead. The typed text is the \
-     needle, and the newest line that holds it goes into the input. While \
-     the history walks, recall the next older match. Bound by default to Up \
-     while the palette is open.",
+     needle, and the newest line that holds each of its words goes into the \
+     input. While the history walks, recall the next older match. Bound by \
+     default to Up while the palette is open.",
     ActionPriority::Normal,
     palette_visible = false
 );

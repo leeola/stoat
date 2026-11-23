@@ -1,13 +1,16 @@
+use std::ops::Range;
+
 /// Fish-style recall history for a single-line input, such as the command
 /// palette.
 ///
 /// Executed lines are remembered oldest-first (the newest is [`Vec::last`]).
-/// Recall walks them newest-to-oldest under a substring needle. The text
-/// already typed at the first [`Self::prev`] press is captured as `pending` and
-/// used to filter matches, so typing `view` then pressing Up recalls
-/// `cd ~/work/viewership`. The needle stays fixed across a walk even as the
-/// recalled text changes, and walking back past the newest match restores the
-/// originally-typed text.
+/// Recall walks them newest-to-oldest under a needle, the text already typed
+/// at the first [`Self::prev`] press. A line matches when it holds every word
+/// of the needle, in any order, with ASCII case ignored. So the needle `view`
+/// recalls `cd ~/work/viewership`, and the needle `stoat git` recalls
+/// `git checkout -b foo-stoat-bar`. The needle stays fixed across a walk even
+/// as the recalled text changes, and walking back past the newest match
+/// restores the originally-typed text.
 ///
 /// The type is pure. [`Self::prev`] and [`Self::next`] return the line to show
 /// rather than mutating any input, so the caller owns the input swap. It reads
@@ -25,8 +28,8 @@ pub(crate) struct InputHistory {
     /// Index into [`Self::entries`] of the entry currently recalled, or `None`
     /// when no recall walk is active.
     cursor: Option<usize>,
-    /// The text typed before the walk began. It is both the substring needle
-    /// and the value restored when the walk steps past the newest match.
+    /// The text typed before the walk started. It is both the needle and the
+    /// value restored when the walk steps past the newest match.
     pending: Option<String>,
     /// The last line [`Self::prev`] or [`Self::next`] returned, so
     /// [`Self::reset_if_edited`] can tell an edit from an untouched recall.
@@ -127,7 +130,7 @@ impl InputHistory {
         let needle = self.pending.as_deref().unwrap_or("");
         let found = (0..=start)
             .rev()
-            .find(|&i| self.entries[i].contains(needle))?;
+            .find(|&i| holds_every_word(&self.entries[i], needle))?;
 
         self.cursor = Some(found);
         self.last_recalled = Some(self.entries[found].clone());
@@ -145,7 +148,8 @@ impl InputHistory {
         let cursor = self.cursor?;
 
         let needle = self.pending.as_deref().unwrap_or("");
-        let found = ((cursor + 1)..self.entries.len()).find(|&i| self.entries[i].contains(needle));
+        let found = ((cursor + 1)..self.entries.len())
+            .find(|&i| holds_every_word(&self.entries[i], needle));
 
         match found {
             Some(i) => {
@@ -200,15 +204,15 @@ impl InputHistory {
         self.cursor
     }
 
-    /// The indices into [`Self::entries`] of the lines that hold the walk's
-    /// needle, newest first, in the order that the walk visits them.
+    /// The indices into [`Self::entries`] of the lines that hold every word of
+    /// the walk's needle, newest first, in the order that the walk visits them.
     ///
     /// With no walk the needle is empty, so every line matches.
     pub(crate) fn matches(&self) -> Vec<usize> {
         let needle = self.needle();
         (0..self.entries.len())
             .rev()
-            .filter(|&index| self.entries[index].contains(needle))
+            .filter(|&index| holds_every_word(&self.entries[index], needle))
             .collect()
     }
 
@@ -235,12 +239,124 @@ impl InputHistory {
     }
 }
 
+/// The char ranges of `line` that the words of `needle` mark, in order, with
+/// ranges that touch or overlap joined into one.
+///
+/// Each whitespace-separated word of `needle` marks its first place in `line`,
+/// found with ASCII case ignored as a walk of [`InputHistory`] matches it. A
+/// word that `line` does not hold marks nothing. The palette draws the ranges
+/// in its History rows and in the recalled input.
+pub(crate) fn word_spans(line: &str, needle: &str) -> Vec<Range<usize>> {
+    let mut spans: Vec<Range<usize>> = needle
+        .split_whitespace()
+        .filter_map(|word| {
+            let at = find_word(line, word)?;
+            let start = line[..at].chars().count();
+            Some(start..start + word.chars().count())
+        })
+        .collect();
+    spans.sort_by_key(|span| span.start);
+
+    let mut joined: Vec<Range<usize>> = Vec::with_capacity(spans.len());
+    for span in spans {
+        match joined.last_mut() {
+            Some(last) if span.start <= last.end => last.end = last.end.max(span.end),
+            _ => joined.push(span),
+        }
+    }
+    joined
+}
+
+/// Whether `line` holds every whitespace-separated word of `needle`, in any
+/// order, with ASCII case ignored. A needle with no word matches every line.
+///
+/// The match ignores ASCII case only, because ASCII folding keeps each char's
+/// offset. So the char ranges that [`word_spans`] gives line up with the chars
+/// of `line` one to one.
+fn holds_every_word(line: &str, needle: &str) -> bool {
+    needle
+        .split_whitespace()
+        .all(|word| find_word(line, word).is_some())
+}
+
+/// The byte offset of the first place in `line` that holds `word`, with ASCII
+/// case ignored.
+///
+/// A window of `line` that equals a valid UTF-8 `word` starts on a char
+/// boundary. ASCII folding leaves every byte above 0x7F as it is, so the first
+/// byte of the window is never a continuation byte. An empty `word` panics,
+/// because a byte window needs a size above 0.
+fn find_word(line: &str, word: &str) -> Option<usize> {
+    line.as_bytes()
+        .windows(word.len())
+        .position(|window| window.eq_ignore_ascii_case(word.as_bytes()))
+}
+
 #[cfg(test)]
 mod tests {
-    use super::InputHistory;
+    use super::{word_spans, InputHistory};
 
     fn history(entries: &[&str]) -> InputHistory {
         InputHistory::from_entries(entries.iter().map(|s| s.to_string()).collect())
+    }
+
+    /// A line matches when it holds every word of the needle, in any order.
+    #[test]
+    fn every_word_of_the_needle_is_needed_in_any_order() {
+        let mut h = history(&["git checkout -b foo-stoat-bar", "git status", "ls"]);
+        let first = h.prev("stoat git");
+        assert_eq!(
+            (first.as_deref(), h.prev("git checkout -b foo-stoat-bar")),
+            (Some("git checkout -b foo-stoat-bar"), None),
+        );
+    }
+
+    /// `next` steps toward the newest line that holds every word, as `prev`
+    /// steps toward the oldest.
+    #[test]
+    fn next_steps_newer_under_the_word_rule() {
+        let mut h = history(&["stoat log git", "ls", "git stoat"]);
+        h.prev("stoat git");
+        h.prev("git stoat");
+        assert_eq!(h.next("stoat log git").as_deref(), Some("git stoat"));
+    }
+
+    /// The word match ignores ASCII case.
+    #[test]
+    fn the_word_match_ignores_ascii_case() {
+        let mut h = history(&["git checkout -b foo-stoat-bar", "git status", "ls"]);
+        assert_eq!(
+            h.prev("GIT Stoat").as_deref(),
+            Some("git checkout -b foo-stoat-bar"),
+        );
+    }
+
+    /// Each word of the needle marks its first place in the line, and the
+    /// marks come in line order. A mark counts chars, so a char of two bytes
+    /// takes one place.
+    #[test]
+    fn word_spans_mark_the_first_place_of_each_word() {
+        assert_eq!(
+            [
+                word_spans("git log --graph stoat/src", "stoat git"),
+                word_spans("stoat git stoat", "git stoat"),
+                word_spans("caf\u{e9} git", "git caf\u{e9}"),
+            ],
+            [[0..3, 16..21], [0..5, 6..9], [0..4, 5..8]],
+        );
+    }
+
+    /// Marks that touch, overlap, or hold one another join into one range.
+    #[test]
+    fn touching_and_overlapping_marks_join() {
+        assert_eq!(
+            [
+                word_spans("foobar baz", "baz bar foo"),
+                word_spans("stoat git", "toa git sto"),
+                word_spans("stoat git", "git to stoat"),
+            ],
+            [[0..6, 7..10], [0..4, 6..9], [0..5, 6..9]],
+        );
     }
 
     #[test]

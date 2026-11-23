@@ -645,11 +645,11 @@ pub(super) fn palette_doc_scroll(stoat: &mut Stoat, dir: i32) -> Option<UpdateEf
 /// Recall the previous palette-history command into the input, fish-style.
 /// Returns `None` when the palette is closed.
 ///
-/// The already-typed text is the substring needle. A saturated or empty walk
-/// leaves the input unchanged. The every-frame refilter re-parses the recalled
-/// line into command or argument mode, so no extra wiring is needed here. An
-/// edit of the recalled line ends the walk first, so the edited text is the
-/// needle of a new one.
+/// The already-typed text is the needle, and a line matches when it holds each
+/// of its words. A saturated or empty walk leaves the input unchanged. The
+/// every-frame refilter re-parses the recalled line into command or argument
+/// mode, so no extra wiring is needed here. An edit of the recalled line ends
+/// the walk first, so the edited text is the needle of a new one.
 pub(crate) fn palette_history_prev(stoat: &mut Stoat) -> Option<UpdateEffect> {
     let active_idx = stoat.active_workspace;
     let palette = stoat.command_palette.as_mut()?;
