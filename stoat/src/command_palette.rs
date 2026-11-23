@@ -122,6 +122,14 @@ pub struct CommandPalette {
     /// [`keys_by_action`](crate::keymap::Keymap::keys_by_action) builds it, so
     /// a frame walks no keymap.
     pub(crate) keys: ActionKeys,
+    /// The lines of the selected entry's doc that the doc island scrolls
+    /// past, 0 for a doc that shows from its first line.
+    ///
+    /// `C-d` and `C-u` move it by [`DOC_SCROLL_STEP`]. A new selection and a
+    /// new filter start the doc at its first line again. The paint holds the
+    /// scroll where the doc's last line stands on the island's last row, so a
+    /// press past the end shows nothing new.
+    pub(crate) doc_scroll: u16,
 }
 
 /// A command token that the palette's input names, and the ghost that the Cmd
@@ -155,6 +163,10 @@ pub(crate) enum Namespace {
 
 /// The token that opens the internal actions, typed and then a space.
 pub(crate) const ACTION_TOKEN: &str = "action";
+
+/// The lines that one `C-d` or `C-u` scrolls the doc island, half of its
+/// six rows. A press keeps half of the lines that it shows in view.
+pub(crate) const DOC_SCROLL_STEP: u16 = 3;
 
 /// The def of the palette's `action` row, the one root row that opens the
 /// internal actions instead of running an action of its own.
@@ -795,6 +807,7 @@ impl CommandPalette {
             header_rows: 1,
             resolved: None,
             keys,
+            doc_scroll: 0,
         }
     }
 
@@ -983,6 +996,7 @@ impl CommandPalette {
         }
         self.last_filter_key = key;
         self.generation = picker::next_generation();
+        self.doc_scroll = 0;
 
         self.namespace = match action_query(&text) {
             Some(_) => Namespace::Actions,
@@ -4826,6 +4840,128 @@ mod tests {
                 vec![h.stoat.theme.list_match().fg; 8],
             ),
         );
+    }
+
+    /// `C-d` scrolls the doc island down three lines, past the usage line, and
+    /// `C-u` scrolls it back to the doc's first line.
+    #[test]
+    fn ctrl_d_scrolls_the_doc_island_and_ctrl_u_scrolls_it_back() {
+        let mut h = TestHarness::with_size(160, 50);
+        h.type_text(":diff-files");
+        let _ = h.snapshot();
+        let first = h.rendered_text().contains("diff-files [rev]");
+
+        h.type_keys("ctrl-d");
+        let _ = h.snapshot();
+        let scrolled = (
+            doc_scroll(&h),
+            h.rendered_text().contains("diff-files [rev]"),
+        );
+
+        h.type_keys("ctrl-u");
+        assert_eq!((first, scrolled, doc_scroll(&h)), (true, (3, false), 0));
+    }
+
+    /// A doc scrolled one line shows its usage line on top with no Source Tag
+    /// after it. The tag ends the name line, which the scroll moved off. The
+    /// `built-in` tag of the list's one row stays.
+    #[test]
+    fn a_scrolled_doc_shows_no_source_tag() {
+        let mut h = TestHarness::with_size(160, 50);
+        h.type_text(":diff-files");
+        let _ = h.snapshot();
+        let tags = h.rendered_text().matches("built-in").count();
+
+        h.stoat
+            .command_palette
+            .as_mut()
+            .expect("palette open")
+            .doc_scroll = 1;
+        let _ = h.snapshot();
+        let text = h.rendered_text();
+        assert_eq!(
+            (
+                tags,
+                text.contains("diff-files [rev]"),
+                text.matches("built-in").count()
+            ),
+            (2, true, 1),
+        );
+    }
+
+    /// The doc island holds its scroll where the doc's last line, the action
+    /// that `diff-files` runs, stands on the island's last row.
+    #[test]
+    fn the_doc_scroll_stops_at_the_last_line() {
+        let mut h = TestHarness::with_size(160, 50);
+        h.type_text(":diff-files");
+        for _ in 0..10 {
+            h.type_keys("ctrl-d");
+            let _ = h.snapshot();
+        }
+
+        let (rows, zoom, header_rows) = crate::test_fixture::palette_sizing(&h);
+        let doc = crate::render::command_palette::palette_filter_layout(
+            h.stoat.size(),
+            rows,
+            zoom,
+            header_rows,
+        )
+        .expect("the palette fits the test terminal")
+        .doc;
+        let text = h.rendered_text();
+        let last_row = text
+            .lines()
+            .nth(usize::from(doc.bottom() - 1))
+            .unwrap_or_default();
+        assert!(
+            last_row.contains("runs action DiffFiles"),
+            "the island's last row holds the doc's last line, got:\n{text}",
+        );
+    }
+
+    /// A new selection starts the doc island at the new entry's first line. A
+    /// step that the list's top stops keeps the doc where it is. The
+    /// query `diff-f` lists `diff-files` and then `diff-forward`, so a step
+    /// down moves the selection off the scrolled doc.
+    ///
+    /// The steps dispatch with no frame after them, because a paint holds the
+    /// scroll inside the short doc of `diff-forward` and hides a missed reset.
+    #[test]
+    fn a_new_selection_starts_its_doc_at_the_top() {
+        let mut h = TestHarness::with_size(160, 50);
+        h.type_text(":diff-f");
+        h.type_keys("ctrl-d");
+        let _ = h.snapshot();
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::PickerPrev);
+        let held = doc_scroll(&h);
+
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::PickerNext);
+        assert_eq!((held, doc_scroll(&h)), (3, 0));
+    }
+
+    /// A new filter starts the doc island at its first line, although the
+    /// same entry stays selected.
+    #[test]
+    fn a_new_filter_starts_the_doc_at_the_top() {
+        let mut h = TestHarness::with_size(160, 50);
+        h.type_text(":diff-files");
+        h.type_keys("ctrl-d");
+        let _ = h.snapshot();
+        let scrolled = doc_scroll(&h);
+
+        h.type_keys("backspace");
+        let _ = h.snapshot();
+        assert_eq!((scrolled, doc_scroll(&h)), (3, 0));
+    }
+
+    /// The doc lines that the palette's doc island scrolls past.
+    fn doc_scroll(h: &TestHarness) -> u16 {
+        h.stoat
+            .command_palette
+            .as_ref()
+            .expect("palette open")
+            .doc_scroll
     }
 
     #[test]

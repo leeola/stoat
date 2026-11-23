@@ -2212,6 +2212,42 @@ fn wheel_over_palette_arg_preview_scrolls_it_not_the_list() {
     assert!(scroll_row > 0, "the wheel scrolls the preview down");
 }
 
+/// Over an argument list, `C-d` scrolls the preview pane by half its rows.
+/// The argument stage shows no doc island, so the doc scroll stays at 0.
+#[test]
+fn ctrl_d_still_scrolls_the_preview_of_an_argument_list() {
+    let mut h = crate::test_harness::TestHarness::with_size(100, 30);
+    let root = std::path::PathBuf::from("/arg-preview");
+    let long: String = (0..80).map(|i| format!("line {i}\n")).collect();
+    h.fake_fs().insert_file(root.join("a.rs"), long.as_bytes());
+    h.stoat.active_workspace_mut().git_root = root;
+    h.type_text(":o ");
+    h.settle();
+    let rows = mouse::modal_preview_rows(&h.stoat).expect("the arg preview pane is present");
+
+    h.type_keys("ctrl-d");
+
+    let palette = h.stoat.command_palette.as_ref().expect("palette open");
+    let preview_id = palette
+        .arg_picker
+        .as_ref()
+        .expect("arg picker active")
+        .active_core_ref()
+        .preview
+        .editor;
+    let scroll_row = h
+        .stoat
+        .active_workspace()
+        .editors
+        .get(preview_id)
+        .expect("preview editor")
+        .scroll_row;
+    assert_eq!(
+        (scroll_row, palette.doc_scroll),
+        ((rows / 2).max(1) as u32, 0),
+    );
+}
+
 #[test]
 fn preview_scroll_resets_on_selection_change() {
     let mut h = crate::test_harness::TestHarness::with_size(100, 30);

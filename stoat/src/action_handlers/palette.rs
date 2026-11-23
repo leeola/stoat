@@ -524,6 +524,9 @@ pub(super) fn palette_insert_newline(stoat: &mut Stoat) -> Option<UpdateEffect> 
 }
 
 /// Move the action-list selection. Returns `None` when the palette is closed.
+///
+/// A move to another entry starts the doc island at the new entry's first
+/// line.
 pub(crate) fn palette_move_selection(stoat: &mut Stoat, delta: i32) -> Option<UpdateEffect> {
     let palette = stoat.command_palette.as_mut()?;
     if palette.arg_source().is_some()
@@ -532,7 +535,34 @@ pub(crate) fn palette_move_selection(stoat: &mut Stoat, delta: i32) -> Option<Up
         picker.move_selection(delta);
         return Some(UpdateEffect::Redraw);
     }
+    let before = palette.selected;
     crate::picker::nav_move(palette.filtered.len(), &mut palette.selected, delta);
+    if palette.selected != before {
+        palette.doc_scroll = 0;
+    }
+    Some(UpdateEffect::Redraw)
+}
+
+/// Scroll the palette's doc island by [`command_palette::DOC_SCROLL_STEP`]
+/// lines in `dir` (-1 up, 1 down), or answer `None` when the palette shows no
+/// doc island.
+///
+/// The command list and the `action` list show the selected entry's doc. An
+/// argument stage shows none, so `C-d` and `C-u` keep to its preview there.
+/// The paint holds a scroll past the doc's end at its last line.
+pub(super) fn palette_doc_scroll(stoat: &mut Stoat, dir: i32) -> Option<UpdateEffect> {
+    let palette = stoat
+        .command_palette
+        .as_mut()
+        .filter(|palette| palette.command.is_none())?;
+    palette.doc_scroll = match dir > 0 {
+        true => palette
+            .doc_scroll
+            .saturating_add(command_palette::DOC_SCROLL_STEP),
+        false => palette
+            .doc_scroll
+            .saturating_sub(command_palette::DOC_SCROLL_STEP),
+    };
     Some(UpdateEffect::Redraw)
 }
 

@@ -126,7 +126,15 @@ pub(super) fn picker_rename(stoat: &mut Stoat) -> UpdateEffect {
 ///
 /// The pane's height comes from the same surfaces lookup the pointer uses, so
 /// a half-pane step matches the pane on screen.
+///
+/// The palette's command list and `action` list have no preview pane. There
+/// the keys scroll the doc island under the list, as
+/// [`super::palette::palette_doc_scroll`] scrolls it.
 pub(super) fn picker_detail(stoat: &mut Stoat, dir: i32) -> UpdateEffect {
+    if let Some(effect) = super::palette::palette_doc_scroll(stoat, dir) {
+        return effect;
+    }
+
     let Some(rows) = crate::mouse::modal_preview_rows(stoat) else {
         return UpdateEffect::None;
     };

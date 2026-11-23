@@ -317,6 +317,7 @@ pub(crate) fn render_command_palette(
         content_rows,
         zoom,
         &mut palette.header_rows,
+        &mut palette.doc_scroll,
         palette.resolved.as_ref(),
         &status,
         &palette.keys,
@@ -746,6 +747,10 @@ fn grouped(count: usize) -> String {
 /// the paint stores there the rows that it draws. The Cmd Line ends in
 /// `status`. The rows of the `action` list that `namespace` names, and the
 /// doc, name the keys of `keys` that run each action.
+///
+/// The doc shows from line `doc_scroll` of the selected entry's doc. The
+/// paint holds `doc_scroll` where the doc's last line stands on the doc
+/// region's last row, so the doc never scrolls past its end.
 #[allow(clippy::too_many_arguments)]
 fn render_palette_filter(
     input: &InputView,
@@ -757,6 +762,7 @@ fn render_palette_filter(
     content_rows: u16,
     zoom: i8,
     header_rows: &mut u16,
+    doc_scroll: &mut u16,
     resolved: Option<&ResolvedCommand>,
     status: &[(String, Style)],
     keys: &ActionKeys,
@@ -837,8 +843,13 @@ fn render_palette_filter(
         let lines = entry
             .map(|entry| doc_lines(entry, keys, width, theme))
             .unwrap_or_default();
-        let tag = entry.map(doc_tag);
-        paint_doc_lines(buf, doc, &lines, tag, theme, scene);
+        let last_top = lines.len().saturating_sub(usize::from(doc.height));
+        *doc_scroll = (*doc_scroll).min(last_top as u16);
+
+        // The Source Tag ends the name line, which a scroll moves off the doc.
+        let tag = entry.map(doc_tag).filter(|_| *doc_scroll == 0);
+        let shown = &lines[usize::from(*doc_scroll)..];
+        paint_doc_lines(buf, doc, shown, tag, theme, scene);
     }
 
     let parts = Footer {
