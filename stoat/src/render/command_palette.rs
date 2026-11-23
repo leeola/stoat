@@ -4,22 +4,56 @@ use crate::{
     render::{
         chrome::{ISLAND_BOTTOM, ISLAND_GAP, ISLAND_SIDE, ISLAND_TOP},
         cmd_line::{self, CmdLine, CmdStatus},
+        paint::style_rgb,
         picker::{Footer, PathRows, RowMarks, RowStart, FOOTER_ROWS},
         text::{wrap_text, write_str, write_str_clipped},
     },
+    theme::TypeRole,
     workspace::Workspace,
 };
 use ratatui::{
     buffer::Buffer,
     layout::Rect,
-    style::Style,
-    widgets::{Block, Borders},
+    style::{Modifier, Style},
+    widgets::{Block, Borders, StatefulWidget},
 };
 use std::path::Path;
 use stoat_action::registry::RegistryEntry;
+use stoat_widgets::{
+    bar::Bar,
+    text_run::{self, TextRun},
+};
 
 const LIST_ROWS: u16 = 10;
 const DOC_ROWS: u16 = 6;
+
+/// The cells a root row's name column takes at least, the CmdRoot board's
+/// `width: 13ch`.
+const NAME_COLUMNS: u16 = 13;
+
+/// The cells a root row's alias column takes at least, the board's
+/// `width: 3ch`.
+const ALIAS_COLUMNS: u16 = 3;
+
+/// The cells of a root row's signature column, the board's `width: 28ch`.
+const SIGNATURE_COLUMNS: u16 = 28;
+
+/// The sixteenths between a Source Tag's box and its label on each side, the
+/// board's `padding: 0 5px`.
+const SOURCE_TAG_INSET: u16 = 10;
+
+/// The height of a Source Tag's box, in sixteenths of a row, one in from the
+/// row's top. It is the whole sixteenth nearest the board's
+/// `line-height: 16px` in an 18 px row.
+const SOURCE_TAG_HEIGHT: u16 = 14;
+
+/// The radius a Source Tag's box rounds its corners at, in logical pixels,
+/// the board's `border-radius: 4px`.
+const SOURCE_TAG_RADIUS: u8 = 4;
+
+/// The label and the color scope of the Source Tag that ends every root row,
+/// because every command in the registry ships with stoat.
+const BUILT_IN_TAG: (&str, &str) = ("built-in", crate::theme::scope::UI_CMD_SOURCE_BUILTIN);
 
 /// Box rows the chrome takes around the list. Two borders, the Cmd Line's first
 /// row, the separator under it, the doc separator, the doc region itself, and
@@ -788,26 +822,33 @@ fn doc_lines(entry: &RegistryEntry, width: usize) -> Vec<String> {
     lines
 }
 
-/// The command name of `entry` followed by each parameter, as `<name>` when
-/// the parameter is required and `[name]` when it is optional.
+/// The command name of `entry` followed by its [`signature`].
 fn usage_line(entry: &RegistryEntry) -> String {
-    let mut line = entry.command_name.clone();
-    for param in entry.def.params() {
-        let (open, close) = match param.required {
-            true => ('<', '>'),
-            false => ('[', ']'),
-        };
-        line.push(' ');
-        line.push(open);
-        line.push_str(param.name);
-        line.push(close);
+    let signature = signature(entry);
+    match signature.is_empty() {
+        true => entry.command_name.clone(),
+        false => format!("{} {signature}", entry.command_name),
     }
-    line
+}
+
+/// Each parameter of `entry`, as `<name>` when the parameter is required and
+/// `[name]` when it is optional, one space apart.
+fn signature(entry: &RegistryEntry) -> String {
+    let params: Vec<String> = entry
+        .def
+        .params()
+        .iter()
+        .map(|param| match param.required {
+            true => format!("<{}>", param.name),
+            false => format!("[{}]", param.name),
+        })
+        .collect();
+    params.join(" ")
 }
 
 /// Paint command-palette result rows into `area` starting at `start_row`, one
-/// row per entry, with the selected row, fuzzy-match characters, and each
-/// entry's short description highlighted.
+/// row per entry, with the selected row and the fuzzy-match characters
+/// highlighted.
 ///
 /// Shared by the live list, which derives `start_row` from the selection, and
 /// the smooth-scroll pool, which paints absolute pages, so both render
@@ -815,9 +856,18 @@ fn usage_line(entry: &RegistryEntry) -> String {
 /// [`chrome::selected_row`](crate::render::chrome::selected_row) with
 /// `panels`, which a pool page passes false.
 ///
+/// A row reads the command's name in bold, its first alias, its
+/// [`signature`], and its short description, one cell apart, and ends in its
+/// Source Tag as [`paint_source_tag`] draws it. The name and alias columns
+/// take [`NAME_COLUMNS`] and [`ALIAS_COLUMNS`] cells and grow to the longest
+/// name and alias on show, because a cut name names nothing. The signature
+/// clips at [`SIGNATURE_COLUMNS`], because the doc region shows the whole
+/// usage line.
+///
 /// Each name leaves out its first `name_offset` bytes, the group token and
-/// space a grouped list's title already shows. A match position indexes the
-/// whole name, so one inside the left-out part paints nothing.
+/// space a grouped list's title already shows, and so does an alias that
+/// starts with them. A match position indexes the whole name, so one inside
+/// the left-out part paints nothing.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn paint_palette_rows(
     filtered: &[&'static RegistryEntry],
@@ -837,44 +887,66 @@ pub(crate) fn paint_palette_rows(
     }
 
     let row_style = theme.get(crate::theme::scope::UI_TEXT);
-    let desc_style = theme.get(crate::theme::scope::UI_TEXT_MUTED);
+    let name_style = row_style.add_modifier(Modifier::BOLD);
+    let muted = theme.get(crate::theme::scope::UI_TEXT_MUTED);
+    let dim = theme.get(crate::theme::scope::UI_TEXT_DIM);
     let match_style = theme.list_match();
+    let keeps_columns = theme
+        .try_get(crate::theme::scope::UI_LIST_SELECTED)
+        .is_some();
 
-    let name_col_width: usize = filtered
-        .iter()
-        .skip(start_row)
-        .take(rows)
-        .map(|e| shown_name(e, name_offset).len())
-        .max()
-        .unwrap_or(0);
+    let on_show = || filtered.iter().skip(start_row).take(rows);
+    let widest = |cells: fn(&RegistryEntry, usize) -> &str, least: u16| {
+        on_show()
+            .map(|entry| cells(entry, name_offset).chars().count())
+            .max()
+            .unwrap_or(0)
+            .max(usize::from(least)) as u16
+    };
+    let name_cols = widest(shown_name, NAME_COLUMNS);
+    let alias_cols = widest(shown_alias, ALIAS_COLUMNS);
 
+    let (tag_label, tag_scope) = BUILT_IN_TAG;
+    let tag = theme.try_get(tag_scope).map(|style| {
+        let start = area
+            .width
+            .saturating_sub(1)
+            .saturating_mul(16)
+            .saturating_sub(source_tag_width(tag_label, theme));
+        (start, style)
+    });
     let end_x = area.x + area.width;
+    let desc_end = match tag {
+        Some((start, _)) => area.x + (start / 16).saturating_sub(1),
+        None => end_x.saturating_sub(1),
+    };
     let empty_indices: Vec<u32> = Vec::new();
 
-    for (row_idx, entry) in filtered.iter().skip(start_row).take(rows).enumerate() {
+    for (row_idx, entry) in on_show().enumerate() {
         let abs = start_row + row_idx;
-        let row = area.y + row_idx as u16;
+        let row = Rect::new(area.x, area.y + row_idx as u16, area.width, 1);
         let is_selected = abs == selected;
         let style = match is_selected {
-            true => crate::render::chrome::selected_row(
-                Rect::new(area.x, row, area.width, 1),
-                row_style,
-                panels,
-                theme,
-                buf,
-                scene,
-            ),
+            true => crate::render::chrome::selected_row(row, row_style, panels, theme, buf, scene),
             false => {
-                for col in area.x..end_x {
-                    buf[(col, row)].set_char(' ').set_style(row_style);
+                for col in row.left()..row.right() {
+                    buf[(col, row.y)].set_char(' ').set_style(row_style);
                 }
                 row_style
             },
         };
+        let column = |own: Style| match (is_selected, keeps_columns) {
+            (false, _) => own,
+            (true, true) => Style {
+                bg: style.bg,
+                ..own
+            },
+            (true, false) => style,
+        };
 
         let name = shown_name(entry, name_offset);
         let name_x = area.x + 1;
-        write_str_clipped(buf, name_x, row, name, style, end_x);
+        write_str_clipped(buf, name_x, row.y, name, column(name_style), end_x);
         let indices = match_indices.get(abs).unwrap_or(&empty_indices);
         for (name_col, _) in name.chars().enumerate() {
             let col = name_x + name_col as u16;
@@ -885,20 +957,32 @@ pub(crate) fn paint_palette_rows(
                 .binary_search(&((name_offset + name_col) as u32))
                 .is_ok()
             {
-                buf[(col, row)].set_style(match_style);
+                buf[(col, row.y)].set_style(match_style);
             }
         }
-        let desc_col = area.x + 1 + name_col_width as u16 + 2;
-        if desc_col < end_x {
-            let desc_style = if is_selected { style } else { desc_style };
-            write_str_clipped(
-                buf,
-                desc_col,
-                row,
-                entry.def.short_desc(),
-                desc_style,
-                end_x,
-            );
+
+        let alias_x = name_x.saturating_add(name_cols + 1);
+        let alias = shown_alias(entry, name_offset);
+        write_str_clipped(buf, alias_x, row.y, alias, column(muted), end_x);
+
+        let signature_x = alias_x.saturating_add(alias_cols + 1);
+        let signature_end = signature_x.saturating_add(SIGNATURE_COLUMNS).min(end_x);
+        let signature = signature(entry);
+        write_str_clipped(
+            buf,
+            signature_x,
+            row.y,
+            &signature,
+            column(muted),
+            signature_end,
+        );
+
+        let desc_x = signature_x.saturating_add(SIGNATURE_COLUMNS + 1);
+        let desc = entry.def.short_desc();
+        write_str_clipped(buf, desc_x, row.y, desc, column(dim), desc_end);
+
+        if let Some((start, style)) = tag {
+            paint_source_tag(buf, row, start, tag_label, style, theme, scene);
         }
     }
 }
@@ -907,6 +991,83 @@ pub(crate) fn paint_palette_rows(
 /// bytes.
 fn shown_name(entry: &RegistryEntry, offset: usize) -> &str {
     entry.command_name.get(offset..).unwrap_or("")
+}
+
+/// The first alias of `entry` as a row shows it, or `""` for a command with no
+/// alias.
+///
+/// An alias that starts with the first `offset` bytes of the command name, the
+/// group token and its space, leaves them out as [`shown_name`] does.
+fn shown_alias(entry: &RegistryEntry, offset: usize) -> &str {
+    let alias = entry.def.aliases().first().copied().unwrap_or("");
+    entry
+        .command_name
+        .get(..offset)
+        .and_then(|token| alias.strip_prefix(token))
+        .unwrap_or(alias)
+}
+
+/// The width of a Source Tag's box for `label`, in sixteenths of a cell.
+///
+/// The box holds the label at the [`TypeRole::Small`] size with
+/// [`SOURCE_TAG_INSET`] on each side.
+fn source_tag_width(label: &str, theme: &crate::theme::Theme) -> u16 {
+    let small = theme.type_scale(TypeRole::Small);
+    text_run::advance_sixteenths(label.chars().count(), small) + 2 * SOURCE_TAG_INSET
+}
+
+/// Paint the Source Tag `label` in `style` over `row`, its box from `start`
+/// sixteenths, as [`source_tag_width`] sizes it.
+///
+/// A live scene draws the box as a rounded [`Bar`] when the style's background
+/// is RGB, and the label as a [`TypeRole::Small`] run over it with no
+/// background. A pool page keeps the same form, because it captures bars and
+/// runs but no panel. A dead scene, or a label color outside RGB, writes the
+/// label in cells in `style`, in the cells that end one cell inside the row's
+/// right edge.
+fn paint_source_tag(
+    buf: &mut Buffer,
+    row: Rect,
+    start: u16,
+    label: &str,
+    style: Style,
+    theme: &crate::theme::Theme,
+    scene: &mut stoat_widgets::ApcScene,
+) {
+    let Some(color) = style_rgb(style.fg).filter(|_| scene.live()) else {
+        let cells = label.chars().count() as u16;
+        let x = row.right().saturating_sub(1 + cells).max(row.x);
+        write_str_clipped(buf, x, row.y, label, style, row.right());
+        return;
+    };
+
+    // The box goes into the scene before the label, so the label draws over
+    // it. It goes alone, because a bar batch drops the corner radius.
+    if let Some(fill) = style_rgb(style.bg) {
+        let tag_box = Bar {
+            x: start as i16,
+            y: 1,
+            width: source_tag_width(label, theme),
+            height: SOURCE_TAG_HEIGHT,
+            color: fill,
+            radius: SOURCE_TAG_RADIUS,
+            corners: 0,
+        };
+        StatefulWidget::render(tag_box, row, buf, scene);
+    }
+    let run = TextRun {
+        col: (start + SOURCE_TAG_INSET) as i16,
+        row: 0,
+        scale: theme.type_scale(TypeRole::Small),
+        color,
+        bg: None,
+        text: label,
+        bold: false,
+        italic: false,
+        follow: 0,
+        anchor: None,
+    };
+    StatefulWidget::render(run, row, buf, scene);
 }
 
 #[cfg(test)]
@@ -928,6 +1089,7 @@ mod tests {
         style::{Color, Style},
     };
     use stoat_action::registry;
+    use stoatty_protocol::command::{decode_stream, BarCommand, Command, TextRunCommand};
 
     fn layout(area: Rect, content_rows: u16, zoom: i8) -> super::PaletteFilterLayout {
         palette_filter_layout(area, content_rows, zoom, 1).expect("the area hosts the palette")
@@ -1059,16 +1221,16 @@ mod tests {
             "the widest entry needs a description to overrun with"
         );
 
-        // The name fits with the two-column gap after it, so the description
-        // starts on screen and runs off the end.
+        // The name fits with the gap after it, so the alias starts on screen
+        // and the columns after the name run off the end.
         assert_eq!(
             cells_painted_outside(entry, name_len + 4),
             Vec::new(),
-            "a description longer than the room left for it stays inside"
+            "columns longer than the room left for them stay inside"
         );
 
-        // Narrower than the name itself, which suppresses the description
-        // entirely and leaves the name as the only thing that can overrun.
+        // Narrower than the name itself, which puts every column after the
+        // name past the edge, so only the name runs past the list's end.
         assert_eq!(
             cells_painted_outside(entry, name_len),
             Vec::new(),
@@ -1176,6 +1338,222 @@ mod tests {
         assert_eq!(
             ["git log", "git review", "quit"].map(usage),
             ["git log [rev]", "git review <reference>", "quit"],
+        );
+    }
+
+    /// Paint the rows of the commands named `names` into the list `list` under
+    /// `theme`, with no row selected, by a scene that is live where `live`
+    /// holds.
+    fn painted_rows(
+        names: &[&str],
+        name_offset: usize,
+        list: Rect,
+        theme: &Theme,
+        live: bool,
+    ) -> (Buffer, stoat_widgets::ApcScene) {
+        let entries: Vec<&'static registry::RegistryEntry> = names
+            .iter()
+            .map(|name| registry::lookup_alias(name).expect("a command"))
+            .collect();
+        let mut buf = Buffer::empty(list);
+        let mut scene = stoat_widgets::ApcScene::new();
+        scene.set_live(live);
+        paint_palette_rows(
+            &entries,
+            &vec![Vec::new(); entries.len()],
+            usize::MAX,
+            name_offset,
+            list,
+            0,
+            theme,
+            false,
+            &mut buf,
+            &mut scene,
+        );
+        (buf, scene)
+    }
+
+    /// The text of `buf`'s row `y`.
+    fn row_text(buf: &Buffer, y: u16) -> String {
+        (buf.area.left()..buf.area.right())
+            .map(|x| buf[(x, y)].symbol())
+            .collect()
+    }
+
+    /// A row of `width` blanks with each of `parts` from its cell.
+    fn placed(width: usize, parts: &[(usize, &str)]) -> String {
+        let mut row = " ".repeat(width);
+        for &(at, text) in parts {
+            row.replace_range(at..at + text.len(), text);
+        }
+        row
+    }
+
+    /// A theme that sets only the built-in Source Tag's scope.
+    fn tag_theme() -> Theme {
+        let src = r##"theme t { ui.cmd.source.builtin = { fg: "#010203", bg: "#040506" }; }"##;
+        let (config, _) = stoat_config::parse(src);
+        Theme::from_config(&config.expect("theme parses"), "t").expect("theme loads")
+    }
+
+    /// A root row reads the command's name from its second cell, its first
+    /// alias, its signature, and its short description, one cell apart in
+    /// columns of 13, 3, and 28 cells.
+    #[test]
+    fn a_root_row_reads_its_name_alias_signature_and_description() {
+        let list = Rect::new(0, 0, 100, 1);
+        let (buf, _) = painted_rows(&["open"], 0, list, &Theme::empty(), true);
+        assert_eq!(
+            row_text(&buf, 0),
+            placed(
+                100,
+                &[(1, "open"), (15, "o"), (19, "<path>"), (48, "open a file")]
+            ),
+        );
+    }
+
+    /// The name and alias columns grow to the longest name and alias on show,
+    /// so the alias and the signature start past a long name.
+    #[test]
+    fn a_long_name_and_a_long_alias_widen_their_columns() {
+        let names = ["git log", "walkthrough-next-annotation"];
+        let (buf, _) = painted_rows(&names, 0, Rect::new(0, 0, 100, 2), &Theme::empty(), true);
+        assert_eq!(
+            &row_text(&buf, 0)[..65],
+            placed(65, &[(1, "git log"), (29, "git ls"), (36, "[rev]")]),
+        );
+    }
+
+    /// Under a group the name and an alias that starts with the group token
+    /// leave the token and its space out.
+    #[test]
+    fn a_grouped_row_leaves_the_group_token_out_of_its_name_and_alias() {
+        let list = Rect::new(0, 0, 100, 1);
+        let (buf, _) = painted_rows(&["git log"], 4, list, &Theme::empty(), true);
+        assert_eq!(
+            &row_text(&buf, 0)[..19],
+            placed(19, &[(1, "log"), (15, "ls")])
+        );
+    }
+
+    /// A theme that sets the built-in tag's scope ends a row in a rounded box
+    /// in the scope's background, one cell inside the list's right edge, and
+    /// the label over the box in the scope's foreground.
+    #[test]
+    fn a_root_row_ends_in_its_source_tag() {
+        let list = Rect::new(0, 0, 100, 1);
+        let (_, scene) = painted_rows(&["open"], 0, list, &tag_theme(), true);
+        let commands: Vec<Command> = decode_stream(scene.bytes())
+            .into_iter()
+            .filter(|command| *command != Command::TextRunEnd)
+            .collect();
+        assert_eq!(
+            commands,
+            [
+                Command::Bar(BarCommand {
+                    x: 1436,
+                    y: 1,
+                    width: 148,
+                    height: 14,
+                    color: [4, 5, 6],
+                    occludes: false,
+                    hatch: None,
+                    radius: 4,
+                    corners: 0,
+                }),
+                Command::TextRun(TextRunCommand {
+                    col: 1446,
+                    row: 0,
+                    scale: 256,
+                    color: [1, 2, 3],
+                    bg: None,
+                    bold: false,
+                    italic: false,
+                    follow: 0,
+                    anchor: None,
+                    text: "built-in".to_owned(),
+                }),
+            ],
+        );
+    }
+
+    /// A dead scene writes the tag's label in cells in the scope's style, in
+    /// the cells that end one cell inside the list's right edge.
+    #[test]
+    fn a_dead_scene_writes_the_source_tag_in_cells() {
+        let list = Rect::new(0, 0, 100, 1);
+        let (buf, _) = painted_rows(&["open"], 0, list, &tag_theme(), false);
+        let styles: Vec<(Color, Color)> =
+            (91..99).map(|x| (buf[(x, 0)].fg, buf[(x, 0)].bg)).collect();
+        assert_eq!(
+            (&row_text(&buf, 0)[89..], styles),
+            (
+                "  built-in ",
+                vec![(Color::Rgb(1, 2, 3), Color::Rgb(4, 5, 6)); 8],
+            ),
+        );
+    }
+
+    /// A theme that leaves the tag's scope unset draws no tag, in the scene or
+    /// in cells, and a long description stops one cell inside the list's right
+    /// edge, the inset that a tag keeps.
+    #[test]
+    fn a_theme_without_the_tag_scope_draws_no_tag() {
+        let list = Rect::new(0, 0, 60, 1);
+        let (buf, scene) = painted_rows(&["git log"], 0, list, &Theme::empty(), true);
+        assert_eq!(
+            (decode_stream(scene.bytes()), row_text(&buf, 0)),
+            (
+                Vec::new(),
+                placed(
+                    60,
+                    &[
+                        (1, "git log"),
+                        (15, "git ls"),
+                        (22, "[rev]"),
+                        (51, "browse c")
+                    ]
+                ),
+            ),
+        );
+    }
+
+    /// A theme that leaves `ui.list.selected` unset paints the whole selected
+    /// row in its selected style, so every column reads in the selection's
+    /// colors, as `default_dark` selects in black on its accent.
+    #[test]
+    fn a_selected_row_without_the_list_scope_takes_one_style() {
+        let theme = {
+            let src = r##"theme t {
+                ui.selection = { fg: "#000000", bg: "#7fb0ff" };
+                ui.text.muted.fg = "#050505";
+                ui.text.dim.fg = "#060606";
+            }"##;
+            let (config, _) = stoat_config::parse(src);
+            Theme::from_config(&config.expect("theme parses"), "t").expect("theme loads")
+        };
+        let entries = [registry::lookup_alias("open").expect("a command")];
+        let list = Rect::new(0, 0, 100, 1);
+        let mut buf = Buffer::empty(list);
+        paint_palette_rows(
+            &entries,
+            &[Vec::new()],
+            0,
+            0,
+            list,
+            0,
+            &theme,
+            false,
+            &mut buf,
+            &mut stoat_widgets::ApcScene::new(),
+        );
+
+        let colors: Vec<(Color, Color)> = [1, 15, 19, 48]
+            .map(|x| (buf[(x, 0)].fg, buf[(x, 0)].bg))
+            .to_vec();
+        assert_eq!(
+            colors,
+            vec![(Color::Rgb(0, 0, 0), Color::Rgb(0x7f, 0xb0, 0xff)); 4]
         );
     }
 

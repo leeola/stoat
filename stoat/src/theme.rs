@@ -977,6 +977,10 @@ pub mod scope {
     /// name that the user did not type. A theme that leaves it unset draws no
     /// ghost.
     pub const UI_CMD_GHOST: &str = "ui.cmd.ghost";
+    /// The Source Tag that ends a palette row whose command ships with stoat,
+    /// its label (foreground) on its box (background). A theme that leaves it
+    /// unset draws no tag.
+    pub const UI_CMD_SOURCE_BUILTIN: &str = "ui.cmd.source.builtin";
     /// The mark the key hints box draws beside a key whose toggle is on.
     /// [`UI_TOGGLE_INACTIVE`] is its sibling for a toggle that is off.
     pub const UI_TOGGLE_ACTIVE: &str = "ui.toggle.active";

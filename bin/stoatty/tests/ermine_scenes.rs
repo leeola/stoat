@@ -1347,6 +1347,47 @@ fn the_cmd_line_draws_an_alias_with_its_ghost() {
     );
 }
 
+/// A root row ends in its Source Tag, a rounded box in the overlay color with
+/// the `built-in` label over it, one cell inside the list's right edge.
+///
+/// The list is the 126 cells from cell 17 on the cell rows 15 to 27. At the
+/// Small scale of 208 the label `built-in` advances 104 sixteenths, so its box
+/// is 124 sixteenths wide and ends at cell 142. On cell row 16 the box covers
+/// the pixels from (1208, 289) to (1277, 304). On the selected row 15 the box
+/// stands over the row's wash, and the label's left pad reads the box's color.
+/// The bold name of row 16 draws in the text color.
+#[test]
+fn a_root_row_ends_in_a_built_in_tag() {
+    let mut home = support::scratch_home();
+    let shot = palette_frame(home.path(), ":<Settle>");
+
+    expect_color_box(
+        &shot,
+        &mut home,
+        OVERLAY,
+        288..306,
+        (1208, 289, 1277, 304),
+        "built_in_tag",
+    );
+    expect_region(
+        &shot,
+        &mut home,
+        (1209, 278, 4, 2),
+        OVERLAY,
+        "built_in_tag_over_the_wash",
+    );
+
+    let name = pixels_of(&shot, cell_rect(18, 16, 13, 1), TEXT);
+    if name == 0 {
+        let frame = keep_frame(&shot, &mut home, "root_row_name");
+        panic!(
+            "the name column of cell row 16 holds no pixel in the text color {}; the frame is {}",
+            hex(TEXT),
+            frame.display(),
+        );
+    }
+}
+
 /// The frame the basic-diff scene settles on after `keys` play, where the
 /// child's home is `home` and its temporary files go under `home/t`.
 ///

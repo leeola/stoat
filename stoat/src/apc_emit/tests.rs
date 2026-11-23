@@ -7202,7 +7202,7 @@ fn palette_filter_to_arg_flip_repools() {
 /// Active scope lists the git group only inside one.
 #[test]
 fn a_grouped_palette_pool_prints_subcommand_tokens() {
-    let mut h = Stoat::test();
+    let mut h = crate::test_harness::TestHarness::with_size(160, 40);
     h.fake_git().add_repo("/repo");
     h.stoat.active_workspace_mut().git_root = "/repo".into();
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();

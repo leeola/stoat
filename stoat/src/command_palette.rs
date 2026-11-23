@@ -1985,12 +1985,42 @@ mod tests {
         assert_eq!(palette_text(&h), "open ");
     }
 
+    /// Every row of the root list ends in the `built-in` Source Tag, because
+    /// every command in the registry ships with stoat.
+    #[test]
+    fn the_root_list_tags_each_command_built_in() {
+        let mut h = Stoat::test();
+        h.type_text(":");
+        let _ = h.snapshot();
+
+        let (rows, zoom, header_rows) = crate::test_fixture::palette_sizing(&h);
+        let list = crate::render::command_palette::palette_filter_layout(
+            h.stoat.size(),
+            rows,
+            zoom,
+            header_rows,
+        )
+        .expect("the palette fits the test terminal")
+        .list;
+        let tagged: Vec<bool> = h
+            .rendered_text()
+            .lines()
+            .skip(usize::from(list.y))
+            .take(usize::from(list.height))
+            .map(|line| line.contains("built-in"))
+            .collect();
+        assert_eq!(tagged, vec![true; usize::from(list.height)]);
+    }
+
     /// A group shows in the Cmd Line's input after the prompt glyph and lists
     /// each command by its subcommand token alone. Narrowed to `l`, the row
     /// paints the `l` of `log` as a match and the `o` beside it as plain text.
     #[test]
     fn a_group_shows_in_the_cmd_line_and_drops_its_token_from_each_row() {
         let mut h = repo_harness();
+        // A description starts past the name, alias, and signature columns,
+        // so the test finds each row by a description the window shows whole.
+        h.resize(160, 40);
         h.type_text(":git ");
         let _ = h.snapshot();
         let text = h.rendered_text();
@@ -1998,8 +2028,8 @@ mod tests {
             .expect("git log is a command")
             .def
             .short_desc();
-        // The top row always shows. A lower row moves down as the group grows,
-        // and in this window the key hints box covers the lowest rows.
+        // The top row always shows, and a lower row moves down as the group
+        // grows, so the test reads the top row.
         let top = h
             .stoat
             .command_palette

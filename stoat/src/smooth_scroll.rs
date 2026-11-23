@@ -3573,7 +3573,7 @@ mod tests {
                 name_offset,
                 0,
                 &Theme::empty(),
-                60,
+                100,
                 1,
             );
             String::from_utf8_lossy(&bytes).into_owned()

@@ -318,6 +318,10 @@ The typed UI scopes, by group (syntax scopes are open-ended):
   command's name that the user did not type. The ghost is display only: the
   input, Tab, and Enter never see it. Unset, the token takes `ui.text`, and
   no ghost draws.
+- `ui.cmd.source.builtin`, `ui.cmd.source.config`, `ui.cmd.source.cli`,
+  `ui.cmd.source.script`, `ui.cmd.source.internal` -- the Source Tag that ends
+  a command palette row and names where its command comes from, its label
+  (foreground) on its box (background). Unset, the row draws no tag.
 - `ui.toggle.active`, `ui.toggle.inactive` -- the on and off marks beside a
   toggle's key in the key hints box.
 - `ui.hints.submenu` -- the label of a key hints row whose keys open a
