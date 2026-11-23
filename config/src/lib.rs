@@ -3,6 +3,7 @@ mod error;
 mod parser;
 mod schema;
 mod settings;
+mod template;
 
 pub use ast::{
     Action, ActionExpr, Arg, Binding, Call, CallArg, CallValue, CommandBody, CommandDecl,
@@ -14,6 +15,7 @@ pub use schema::{settings_schema, PathSeg, SettingDef, ValueShape};
 pub use settings::{
     LineNumbers, MinimapMode, MouseCapturePolicy, RepeatButton, Settings, TabBarMode, WrapMode,
 };
+pub use template::Template;
 
 /// Parse a config source into its items, and the errors of the items that do
 /// not parse.
