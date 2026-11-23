@@ -1,8 +1,8 @@
 use crate::{
     app::{Stoat, UpdateEffect},
-    command_palette::{self, Availability, CommandPalette, PaletteOutcome},
+    command_palette::{self, ArgPicker, Availability, CommandPalette, PaletteOutcome},
     commit_picker,
-    file_finder::Browse,
+    file_finder::{Browse, FileScopes, FinderScope},
     host::FsHost,
     keymap_state::StoatKeymapState,
     picker::{PathPicker, PendingScan},
@@ -256,6 +256,16 @@ pub(crate) fn sync_palette_picker(stoat: &mut Stoat) {
     if needs_picker {
         let git_root = stoat.workspaces[active_idx].git_root.clone();
         let candidates = arg_candidates(stoat, source);
+        let scopes = (source == ValueSource::Files).then(|| {
+            FileScopes::new(
+                FinderScope::All,
+                super::file_finder::spawn_modified_query(stoat, git_root.clone()),
+                super::file_finder::diff_scope_paths(stoat),
+                Vec::new(),
+                Vec::new(),
+                &stoat.settings.finder_scopes,
+            )
+        });
         let executor = stoat.executor.clone();
         let ws = &mut stoat.workspaces[active_idx];
         if let Some(palette) = stoat.command_palette.as_mut() {
@@ -267,9 +277,10 @@ pub(crate) fn sync_palette_picker(stoat: &mut Stoat) {
                     git_root,
                     Some((rx, task)),
                     Vec::new(),
+                    scopes,
                 ),
                 Some(ArgCandidates::Paths(paths)) => {
-                    palette.install_arg_picker(ws, executor, source, git_root, None, paths)
+                    palette.install_arg_picker(ws, executor, source, git_root, None, paths, scopes)
                 },
                 None => {},
             }
@@ -702,9 +713,22 @@ pub(super) fn palette_page(stoat: &mut Stoat, dir: i32) -> UpdateEffect {
 /// Flip the palette's [`crate::command_palette::PaletteScope`] and re-filter.
 /// No-op when the palette is closed, and while the history walks, because
 /// History holds no scope.
+///
+/// In the list of a file argument the key steps the file scope instead, as
+/// [`arg_scope_toggle`] steps it.
 pub(super) fn palette_scope_toggle(stoat: &mut Stoat) -> UpdateEffect {
     if stoat.active_workspace().palette_history.is_walking() {
         return UpdateEffect::None;
+    }
+    let file_argument = stoat.command_palette.as_ref().is_some_and(|palette| {
+        palette.arg_source() == Some(ValueSource::Files)
+            && palette
+                .arg_picker
+                .as_ref()
+                .is_some_and(|picker| picker.scopes.is_some())
+    });
+    if file_argument {
+        return arg_scope_toggle(stoat);
     }
     let active_idx = stoat.active_workspace;
     let workspaces = &mut stoat.workspaces;
@@ -713,6 +737,56 @@ pub(super) fn palette_scope_toggle(stoat: &mut Stoat) -> UpdateEffect {
     };
     palette.toggle_scope(&workspaces[active_idx]);
     UpdateEffect::Redraw
+}
+
+/// Step the file scope of the palette's file argument, as the File Finder's
+/// Shift-Tab steps its scope.
+///
+/// A landing on [`FinderScope::Modified`] asks git again. An entry to
+/// [`FinderScope::AllWorkspaces`] walks every known workspace root and shows
+/// each row under its root. A leave walks the workspace again, and reads the
+/// cached path list while that list is current.
+fn arg_scope_toggle(stoat: &mut Stoat) -> UpdateEffect {
+    let Some((left, landed, git_root)) = arg_picker_mut(stoat).and_then(|picker| {
+        let scopes = picker.scopes.as_mut()?;
+        let left = scopes.scope.clone();
+        scopes.toggle(&mut picker.core);
+        Some((left, scopes.scope.clone(), picker.core.git_root.clone()))
+    }) else {
+        return UpdateEffect::None;
+    };
+
+    if landed == FinderScope::Modified {
+        let (rx, task) = super::file_finder::spawn_modified_query(stoat, git_root);
+        if let Some(scopes) = arg_picker_mut(stoat).and_then(|picker| picker.scopes.as_mut()) {
+            scopes.set_modified_source(rx, task);
+        }
+    }
+
+    let walks_every_root = landed == FinderScope::AllWorkspaces;
+    if walks_every_root != (left == FinderScope::AllWorkspaces) {
+        let (walk, roots) = match walks_every_root {
+            true => {
+                let roots = super::file_finder::collect_workspace_roots(stoat);
+                let walk = super::file_finder::spawn_multi_workspace_walk(stoat, roots.clone());
+                (Some(walk), Some(roots))
+            },
+            false => match arg_candidates(stoat, ValueSource::Files) {
+                Some(ArgCandidates::Walk { rx, task }) => (Some((rx, task)), None),
+                _ => (None, None),
+            },
+        };
+        if let (Some((rx, task)), Some(picker)) = (walk, arg_picker_mut(stoat)) {
+            picker.core.reset_walk(rx, task);
+            picker.core.picklist.display_roots = roots;
+        }
+    }
+    UpdateEffect::Redraw
+}
+
+/// The palette's argument picker, while one is installed.
+fn arg_picker_mut(stoat: &mut Stoat) -> Option<&mut ArgPicker> {
+    stoat.command_palette.as_mut()?.arg_picker.as_mut()
 }
 
 /// Complete the highlighted candidate into the palette input, replacing the

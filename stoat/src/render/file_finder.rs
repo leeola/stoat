@@ -442,7 +442,7 @@ fn lists_buffers(finder: &FileFinder) -> bool {
 ///
 /// The pill of [`FinderScope::AllWorkspaces`] reads `workspaces`, since `all
 /// workspaces` beside `all` reads as the same scope twice.
-fn scope_words(scope: &FinderScope) -> &str {
+pub(crate) fn scope_words(scope: &FinderScope) -> &str {
     match scope {
         FinderScope::All => "all",
         FinderScope::Modified | FinderScope::ModifiedBuffers => "modified",

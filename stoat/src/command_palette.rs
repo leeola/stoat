@@ -1,6 +1,6 @@
 use crate::{
     app::Stoat,
-    file_finder::{self, Browse},
+    file_finder::{self, Browse, FileScopes, FinderScope},
     fuzzy,
     host::FsHost,
     input_view::{InputView, SubmitTarget},
@@ -279,6 +279,13 @@ pub(crate) struct ArgPicker {
     /// Installed once [`Self::core`] lists nothing for a tail that names no
     /// explicit path, and kept until the picker is torn down.
     pub(crate) ignored: Option<PathPicker>,
+    /// The file scope of a [`ValueSource::Files`] argument, or `None` for
+    /// every other source.
+    ///
+    /// It starts at [`FinderScope::All`] at each install, and Shift-Tab steps
+    /// it through the cycle of the File Finder. The palette keeps no scope
+    /// across opens, so the finder's remembered scope stays its own.
+    pub(crate) scopes: Option<FileScopes>,
     /// Position within a run of Tab presses, or `None` when the last Tab did
     /// not complete or its result has since been edited. Driven entirely by
     /// [`Self::advance_tab_cycle`].
@@ -311,6 +318,7 @@ impl ArgPicker {
         git_root: PathBuf,
         walk: Option<(UnboundedReceiver<Vec<PathBuf>>, Task<()>)>,
         all_paths: Vec<PathBuf>,
+        scopes: Option<FileScopes>,
     ) -> Self {
         let mut core = PathPicker::new(ws, executor, git_root, walk);
         core.all_paths = all_paths;
@@ -321,6 +329,7 @@ impl ArgPicker {
             core,
             browse: None,
             ignored: None,
+            scopes,
             cycle: None,
         }
     }
@@ -345,7 +354,14 @@ impl ArgPicker {
 
         let (query, index) = match resumed {
             Some((query, previous)) => {
-                self.active_core().refilter(&query);
+                // A refilter points the list at the walk, so a scope with a
+                // base of its own settles through the scope instead.
+                let scoped = self.browse.is_none() && !self.takes_fallback();
+                if scoped && let Some(scopes) = &mut self.scopes {
+                    scopes.settle(&mut self.core, &query);
+                } else {
+                    self.active_core().refilter(&query);
+                }
                 let matches = self.active_core_ref().picklist.filtered.len();
                 if matches == 0 {
                     self.cycle = None;
@@ -396,7 +412,10 @@ impl ArgPicker {
 
     /// Whether the fallback of ignored files stands in for the workspace list.
     pub(crate) fn fallback_active(&self) -> bool {
-        self.browse.is_none() && self.ignored.is_some() && self.core.lists_nothing()
+        self.takes_fallback()
+            && self.browse.is_none()
+            && self.ignored.is_some()
+            && self.core.lists_nothing()
     }
 
     /// The root to walk for a fallback of ignored files, when `tail` needs one
@@ -405,11 +424,13 @@ impl ArgPicker {
     /// Only a [`ValueSource::Files`] argument falls back, and only once the
     /// workspace list holds nothing for `tail`. A tail that starts with `/` or
     /// `~` names an explicit path, which submit dispatches as typed, so a walk
-    /// serves nothing there.
+    /// serves nothing there. A file scope other than [`FinderScope::All`]
+    /// takes no fallback, as in the File Finder.
     pub(crate) fn wants_ignored_fallback(&self, tail: &str) -> Option<PathBuf> {
         let tail = tail.trim_start();
         let explicit_path = tail.starts_with('/') || tail.starts_with('~');
         if self.source != ValueSource::Files
+            || !self.takes_fallback()
             || self.ignored.is_some()
             || explicit_path
             || !self.core.lists_nothing()
@@ -417,6 +438,17 @@ impl ArgPicker {
             return None;
         }
         Some(self.core.git_root.clone())
+    }
+
+    /// Whether the list falls back to ignored files when it lists nothing.
+    ///
+    /// A picker with no file scope falls back by its source alone. A file
+    /// argument falls back only under [`FinderScope::All`], because every
+    /// other scope lists a set that the ignored files are no part of.
+    fn takes_fallback(&self) -> bool {
+        self.scopes
+            .as_ref()
+            .is_none_or(|scopes| scopes.scope == FinderScope::All)
     }
 
     /// The picker a scan for `target` reports back to.
@@ -441,6 +473,17 @@ impl ArgPicker {
     /// stale picker after the command head is edited.
     pub(crate) fn source(&self) -> ValueSource {
         self.source
+    }
+
+    /// The modified files, whose rows end in the `M` mark, or no file for a
+    /// picker with no file scope.
+    ///
+    /// The list comes from the git-status query of the file scope, so it is
+    /// empty until that answer lands.
+    pub(crate) fn modified_paths(&self) -> &[PathBuf] {
+        self.scopes
+            .as_ref()
+            .map_or(&[], |scopes| scopes.modified_paths.as_slice())
     }
 
     /// Absolute path of the currently selected filtered row, if any.
@@ -486,21 +529,30 @@ impl ArgPicker {
     ///
     /// The fallback ranks the tail only while the list shows no row, or while
     /// its own walk still streams. Otherwise it forgets its results and costs
-    /// nothing per keystroke.
+    /// nothing per keystroke. A file scope refilters the list against its own
+    /// base, and a scope other than [`FinderScope::All`] leaves the fallback
+    /// alone.
     fn begin_refilter(&mut self, query: &str) -> Vec<PendingScan> {
-        let begun = match &mut self.browse {
-            Some(browse) => {
+        let begun = match (&mut self.browse, &mut self.scopes) {
+            (Some(browse), _) => {
                 browse.picker.pump_scan();
                 let partial = browse.partial.clone();
                 browse.picker.begin_scan(&partial)
             },
-            None => {
+            (None, Some(scopes)) => {
+                self.core.pump_scan();
+                scopes.pump_modified(&mut self.core);
+                scopes.refilter(&mut self.core, query)
+            },
+            (None, None) => {
                 self.core.pump_scan();
                 self.core.begin_scan(query)
             },
         };
         let mut pending: Vec<PendingScan> = ScanTarget::List.tag(begun).into_iter().collect();
-        if let Some(ignored) = &mut self.ignored {
+        if self.takes_fallback()
+            && let Some(ignored) = &mut self.ignored
+        {
             ignored.pump_scan();
             if !self.core.rows_empty() && !ignored.walking() {
                 ignored.forget_results();
@@ -515,16 +567,19 @@ impl ArgPicker {
     /// caller about to act on the selection rather than paint it.
     ///
     /// The fallback settles only when the list settles to no row, which is
-    /// when it stands in for the list.
+    /// when it stands in for the list. A file scope settles the list against
+    /// its own base.
     fn settle_scan(&mut self, query: &str) {
-        match &mut self.browse {
-            Some(browse) => {
+        match (&mut self.browse, &mut self.scopes) {
+            (Some(browse), _) => {
                 let partial = browse.partial.clone();
                 browse.picker.settle_scan(&partial);
             },
-            None => self.core.settle_scan(query),
+            (None, Some(scopes)) => scopes.settle(&mut self.core, query),
+            (None, None) => self.core.settle_scan(query),
         }
-        if self.core.lists_nothing()
+        if self.takes_fallback()
+            && self.core.lists_nothing()
             && let Some(ignored) = &mut self.ignored
         {
             ignored.settle_scan(query);
@@ -941,8 +996,11 @@ impl CommandPalette {
 
     /// Install the inline picker for `source`. A file picker is fed by an
     /// already-spawned workspace `walk`. A buffer picker is fed by the fixed
-    /// `all_paths` set with no walk. No-op when a picker already exists, so the
-    /// per-frame sync can call this unconditionally on entering argument mode.
+    /// `all_paths` set with no walk. `scopes` is the file scope of a file
+    /// argument, and `None` for every other source. No-op when a picker
+    /// already exists, so the per-frame sync calls this unconditionally on
+    /// entering argument mode.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn install_arg_picker(
         &mut self,
         ws: &mut Workspace,
@@ -951,10 +1009,11 @@ impl CommandPalette {
         git_root: PathBuf,
         walk: Option<(UnboundedReceiver<Vec<PathBuf>>, Task<()>)>,
         all_paths: Vec<PathBuf>,
+        scopes: Option<FileScopes>,
     ) {
         if self.arg_picker.is_none() {
             self.arg_picker = Some(ArgPicker::new(
-                ws, executor, source, git_root, walk, all_paths,
+                ws, executor, source, git_root, walk, all_paths, scopes,
             ));
         }
     }
@@ -1761,7 +1820,7 @@ mod tests {
         buffer::Buffer,
         style::{Color, Modifier},
     };
-    use std::time::Duration;
+    use std::{collections::BTreeMap, time::Duration};
     use stoat_action::{Action, ParamKind};
 
     /// Seed `files` into the harness' fake fs under a fixed virtual root and
@@ -1834,6 +1893,50 @@ mod tests {
             .arg_picker
             .as_ref()
             .expect("arg picker active")
+    }
+
+    /// A harness over `a.rs` and `b.rs` in a fake repository in which `b.rs`
+    /// is modified.
+    fn modified_harness() -> TestHarness {
+        let mut h = Stoat::test();
+        let root = seed_palette_workspace(&mut h, &[("a.rs", "v1\n"), ("b.rs", "v1\n")]);
+        h.fake_git()
+            .add_repo(&root)
+            .with_fs(h.fake_fs())
+            .head_file("a.rs", "v1\n")
+            .modified("b.rs", "v1\n", "v2\n");
+        h
+    }
+
+    /// The file scope of the argument list, and the files it lists, relative
+    /// to the workspace root and sorted.
+    fn file_scope(h: &TestHarness) -> (FinderScope, Vec<String>) {
+        let picker = arg_picker(h);
+        let scope = picker.scopes.as_ref().expect("a file scope").scope.clone();
+        let list = &picker.active_core_ref().picklist;
+        let mut files: Vec<String> = list
+            .filtered
+            .iter()
+            .map(|&i| {
+                let path = &list.base[i];
+                let relative = path.strip_prefix(&picker.core.git_root).unwrap_or(path);
+                relative.display().to_string()
+            })
+            .collect();
+        files.sort();
+        (scope, files)
+    }
+
+    /// The Cmd Line row of the argument list as the frame paints it, with its
+    /// trailing blanks cut.
+    fn arg_header(h: &mut TestHarness) -> String {
+        let _ = h.snapshot();
+        let inner = crate::test_fixture::palette_arg_layout(h).inner;
+        let buf = h.rendered_buffer();
+        let row: String = (inner.x..inner.right())
+            .map(|x| buf[(x, inner.y)].symbol())
+            .collect();
+        row.trim_end().to_owned()
     }
 
     /// The command names the palette lists for `text`, in display order. Use
@@ -4814,6 +4917,304 @@ mod tests {
         );
     }
 
+    /// S-Tab in the list of a file argument steps the file scope through the
+    /// cycle of the File Finder. Each step puts the selection on the first
+    /// row. AllWorkspaces shows each row under its root, and the return to
+    /// All drops the roots. A named scope stands after Modified. The palette
+    /// scope stays Active.
+    #[test]
+    fn backtab_in_the_file_argument_steps_the_file_scope() {
+        let mut h = modified_harness();
+        h.type_text(":o ");
+        h.settle();
+        let all = file_scope(&h);
+        h.type_keys("down");
+        let mut steps = Vec::new();
+        for _ in 0..3 {
+            h.type_keys("backtab");
+            h.settle();
+            let picker = arg_picker(&h);
+            let selected = picker.active_core_ref().picklist.selected;
+            let rooted = picker.core.picklist.display_roots.is_some();
+            steps.push((file_scope(&h), selected, rooted));
+        }
+        let palette_scope = h
+            .stoat
+            .command_palette
+            .as_ref()
+            .expect("palette open")
+            .scope;
+
+        let mut named = modified_harness();
+        named.stoat.settings.finder_scopes =
+            BTreeMap::from([("code".to_owned(), vec!["*.rs".to_owned()])]);
+        named.type_text(":o ");
+        let mut cycle = vec![file_scope(&named).0];
+        for _ in 0..4 {
+            named.type_keys("backtab");
+            cycle.push(file_scope(&named).0);
+        }
+
+        let both = || vec!["a.rs".to_owned(), "b.rs".to_owned()];
+        assert_eq!(
+            (all, steps, cycle, palette_scope),
+            (
+                (FinderScope::All, both()),
+                vec![
+                    ((FinderScope::Modified, vec!["b.rs".to_owned()]), 0, false),
+                    ((FinderScope::AllWorkspaces, both()), 0, true),
+                    ((FinderScope::All, both()), 0, false),
+                ],
+                vec![
+                    FinderScope::All,
+                    FinderScope::Modified,
+                    FinderScope::Named("code".to_owned()),
+                    FinderScope::AllWorkspaces,
+                    FinderScope::All,
+                ],
+                PaletteScope::Active,
+            ),
+        );
+    }
+
+    /// S-Tab flips the palette scope at the root and in the list of an
+    /// argument with no file scope, which keeps its rows.
+    #[test]
+    fn backtab_in_any_other_palette_stage_flips_the_palette_scope() {
+        let mut h = Stoat::test();
+        seed_palette_workspace(&mut h, &[("src/a.rs", "")]);
+        h.type_text(":");
+        h.type_keys("backtab");
+        let root = h
+            .stoat
+            .command_palette
+            .as_ref()
+            .expect("palette open")
+            .scope;
+        h.type_keys("escape");
+        h.type_text(":cd ");
+        h.settle();
+        let dirs = arg_rows(&h);
+        h.type_keys("backtab");
+        h.settle();
+
+        let palette = h.stoat.command_palette.as_ref().expect("palette open");
+        assert_eq!(
+            (
+                root,
+                palette.scope,
+                arg_rows(&h),
+                arg_picker(&h).scopes.is_none()
+            ),
+            (PaletteScope::All, PaletteScope::All, dirs, true),
+        );
+    }
+
+    /// The file argument starts at All at each install, and a step of its
+    /// scope leaves the scope that the File Finder remembers alone.
+    #[test]
+    fn the_file_argument_starts_at_all_each_time_and_leaves_the_remembered_scope() {
+        let mut h = modified_harness();
+        h.type_text(":o ");
+        h.type_keys("backtab");
+        let stepped = file_scope(&h).0;
+        h.type_keys("escape");
+        h.type_text(":o ");
+        h.settle();
+
+        let remembered = h.stoat.active_workspace().last_finder_scope.clone();
+        assert_eq!(
+            (stepped, file_scope(&h).0, remembered),
+            (FinderScope::Modified, FinderScope::All, None),
+        );
+    }
+
+    /// Over the changes view the file argument holds Diff in the place of
+    /// Modified, with the files that the diff shows.
+    #[test]
+    fn the_file_argument_over_a_diff_holds_diff_in_place_of_modified() {
+        let mut h = TestHarness::with_size(100, 24);
+        let root = PathBuf::from("/repo");
+        h.fake_fs().insert_files(
+            [("a.txt", "A\n"), ("b.txt", "B\n"), ("c.txt", "c\n")]
+                .map(|(rel, text)| (root.join(rel), text.as_bytes())),
+        );
+        h.stoat.active_workspace_mut().git_root = root.clone();
+        h.fake_git()
+            .add_repo(&root)
+            .with_fs(h.fake_fs())
+            .modified("a.txt", "a\n", "A\n")
+            .modified("b.txt", "b\n", "B\n")
+            .head_file("c.txt", "c\n");
+        h.open_file(&root.join("a.txt"));
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::DiffChanges);
+        h.settle();
+
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::OpenCommandPalette);
+        h.type_text("o ");
+        h.settle();
+        h.type_keys("backtab");
+        h.settle();
+        let diff = file_scope(&h);
+        h.type_keys("backtab");
+        h.settle();
+
+        assert_eq!(
+            (diff, file_scope(&h).0),
+            (
+                (
+                    FinderScope::Diff,
+                    vec!["a.txt".to_owned(), "b.txt".to_owned()]
+                ),
+                FinderScope::AllWorkspaces,
+            ),
+        );
+    }
+
+    /// The row of a modified file ends in the `M` mark, and the row of an
+    /// unchanged file ends blank.
+    #[test]
+    fn a_modified_file_carries_its_mark_in_the_file_argument_list() {
+        let mut h = modified_harness();
+        h.type_text(":o ");
+        h.settle();
+        let _ = h.snapshot();
+
+        let list = crate::test_fixture::palette_arg_layout(&h).list;
+        let buf = h.rendered_buffer();
+        let rows: Vec<(String, String)> = (list.y..list.bottom())
+            .filter_map(|y| {
+                let label: String = (list.x..list.right() - 1)
+                    .map(|x| buf[(x, y)].symbol())
+                    .collect();
+                let mark = buf[(list.right() - 1, y)].symbol().to_owned();
+                let label = label.trim().to_owned();
+                (!label.is_empty()).then_some((label, mark))
+            })
+            .collect();
+        assert_eq!(
+            rows,
+            [
+                ("a.rs".to_owned(), " ".to_owned()),
+                ("b.rs".to_owned(), "M".to_owned())
+            ],
+        );
+    }
+
+    /// The Cmd Line names a file scope other than All after the count, and
+    /// names no scope under All.
+    #[test]
+    fn the_cmd_line_names_a_file_scope_other_than_all() {
+        let mut h = modified_harness();
+        h.type_text(":o ");
+        h.settle();
+        let all = arg_header(&mut h);
+        h.type_keys("backtab");
+        h.settle();
+        let modified = arg_header(&mut h);
+
+        assert_eq!(
+            (
+                all.ends_with("2 of 2"),
+                modified.ends_with("1 of 1 \u{b7} modified")
+            ),
+            (true, true),
+            "the header reads {all:?}, then {modified:?}",
+        );
+    }
+
+    /// A file scope other than All takes no fallback of ignored files. A
+    /// fallback built under All stays through the step, but stands in for no
+    /// other scope. The typing and the settles of that scope leave the query
+    /// of the fallback as it was.
+    #[test]
+    fn a_file_scope_other_than_all_takes_no_fallback() {
+        let mut h = modified_harness();
+        h.type_text(":o ");
+        let built = has_fallback_after(&mut h, "zzz");
+        let active = arg_picker(&h).fallback_active();
+        h.type_keys("backtab");
+        h.settle();
+        let after_step = arg_picker(&h).fallback_active();
+        h.type_text("q");
+        h.settle();
+        let typed = arg_fallback_query(&h);
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::PickerComplete);
+        let completed = arg_fallback_query(&h);
+
+        let mut stepped = modified_harness();
+        stepped.type_text(":o ");
+        stepped.type_keys("backtab");
+        let unbuilt = !has_fallback_after(&mut stepped, "zzz");
+        let wanted = arg_picker(&stepped).wants_ignored_fallback("zzz");
+
+        let kept = Some("zzz".to_owned());
+        assert_eq!(
+            (built, active, after_step, typed, completed, unbuilt, wanted),
+            (true, true, false, kept.clone(), kept, true, None),
+        );
+    }
+
+    /// An action that runs before a frame settles the list against the scope
+    /// on show. Under Modified, Tab over a tail that only an unmodified file
+    /// holds completes nothing.
+    #[test]
+    fn an_action_between_frames_settles_against_the_scope_on_show() {
+        let mut h = modified_harness();
+        h.type_text(":o ");
+        h.type_keys("backtab");
+        h.settle();
+        let ws = &mut h.stoat.workspaces[h.stoat.active_workspace];
+        let palette = h.stoat.command_palette.as_mut().expect("palette open");
+        palette.input.replace_text(ws, "o a");
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::PickerComplete);
+        assert_eq!(palette_text(&h), "o a");
+    }
+
+    /// Tab under Modified completes a modified file, and a run of presses
+    /// walks the Modified list alone.
+    #[test]
+    fn tab_under_the_modified_scope_completes_a_modified_file() {
+        let mut h = modified_harness();
+        h.type_text(":o ");
+        h.type_keys("backtab");
+        h.settle();
+        h.type_keys("tab");
+        let first = palette_text(&h);
+        h.type_keys("tab tab");
+
+        assert_eq!(
+            (first, palette_text(&h)),
+            ("o b.rs".to_owned(), "o b.rs".to_owned()),
+        );
+    }
+
+    /// The step onto Modified asks git again, so a file that turns modified
+    /// after the list opened lists.
+    #[test]
+    fn backtab_onto_modified_asks_git_again() {
+        let mut h = Stoat::test();
+        let root = seed_palette_workspace(&mut h, &[("a.rs", "v1\n"), ("b.rs", "v1\n")]);
+        h.fake_git()
+            .add_repo(&root)
+            .with_fs(h.fake_fs())
+            .head_file("a.rs", "v1\n")
+            .head_file("b.rs", "v1\n");
+        h.type_text(":o ");
+        h.settle();
+        h.fake_git()
+            .add_repo(&root)
+            .with_fs(h.fake_fs())
+            .modified("b.rs", "v1\n", "v2\n");
+        h.type_keys("backtab");
+        h.settle();
+
+        assert_eq!(
+            file_scope(&h),
+            (FinderScope::Modified, vec!["b.rs".to_owned()])
+        );
+    }
+
     /// Asserts against the painted frame rather than the filtered entries, so
     /// it covers the renderer reading the same string the matcher ranked on.
     /// The doc region under the list names the action the command runs, so the
@@ -6279,6 +6680,7 @@ mod tests {
             root.clone(),
             None,
             rows.map(PathBuf::from).to_vec(),
+            None,
         );
 
         picker.active_core().refilter("");

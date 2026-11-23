@@ -1267,7 +1267,7 @@ pub(crate) fn render_arg_page(
             };
             crate::render::picker::paint_path_rows(
                 &arg_rows(picker, home),
-                RowMarks::Modified(&[]),
+                RowMarks::Modified(picker.modified_paths()),
                 area,
                 start,
                 theme,

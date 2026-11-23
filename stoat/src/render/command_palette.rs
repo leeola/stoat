@@ -3,6 +3,7 @@ use crate::{
         is_action_row, split_head, typed_head, ArgPicker, Availability, CommandPalette, Namespace,
         PaletteScope, ResolvedCommand, ACTION_TOKEN,
     },
+    file_finder::FinderScope,
     input_history,
     input_view::InputView,
     keymap::ActionKeys,
@@ -447,7 +448,18 @@ fn render_palette_arg_picker(
                 false => "",
             };
             let rest = format!(" of {}{ignored}", grouped(list.base.len()));
-            count_status(list.filtered.len(), &rest, theme)
+            let mut spans = count_status(list.filtered.len(), &rest, theme);
+            let scope = picker
+                .scopes
+                .as_ref()
+                .map(|scopes| &scopes.scope)
+                .filter(|scope| **scope != FinderScope::All);
+            if let Some(scope) = scope {
+                let words = crate::render::file_finder::scope_words(scope);
+                let muted = theme.get(crate::theme::scope::UI_TEXT_MUTED);
+                spans.push((format!(" \u{b7} {words}"), muted));
+            }
+            spans
         })
         .unwrap_or_default();
     let Some(layout) = palette_arg_layout(area, palette, home, zoom, preview_min) else {
@@ -512,7 +524,7 @@ fn render_palette_arg_picker(
     };
     crate::render::picker::paint_path_rows(
         &arg_rows(picker, home),
-        RowMarks::Modified(&[]),
+        RowMarks::Modified(picker.modified_paths()),
         list,
         RowStart {
             result: window.first,

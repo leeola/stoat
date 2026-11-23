@@ -74,8 +74,9 @@ define_action!(
     "toggle command palette scope",
     "Flip the command palette between its default Active scope (actions \
      applicable to the current UI/user state) and All scope (every \
-     palette-visible action). Bound by default to Shift-Tab while the \
-     palette is open.",
+     palette-visible action). In the list of a file argument, step the file \
+     scope as the File Finder steps it. Bound by default to Shift-Tab while \
+     the palette is open.",
     ActionPriority::Normal,
     palette_visible = false
 );

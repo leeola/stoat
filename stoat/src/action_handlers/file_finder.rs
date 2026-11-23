@@ -293,7 +293,7 @@ pub(super) fn open_file_finder(
 ///
 /// These are the files the changes view lists, over the changes view and the
 /// per-file diff alike. A focus on a dock reads as no diff.
-fn diff_scope_paths(stoat: &mut Stoat) -> Option<Vec<PathBuf>> {
+pub(super) fn diff_scope_paths(stoat: &mut Stoat) -> Option<Vec<PathBuf>> {
     {
         let ws = stoat.active_workspace();
         let FocusTarget::SplitPane = ws.focus else {
@@ -440,7 +440,7 @@ pub(super) fn spawn_cached_paths(
 /// hundreds of milliseconds on a large or cold-cache repo, which is why it never
 /// runs where the finder's first paint waits on it. The result pings the redraw
 /// notifier so the rows fill in without needing another keystroke.
-fn spawn_modified_query(
+pub(super) fn spawn_modified_query(
     stoat: &Stoat,
     git_root: PathBuf,
 ) -> (UnboundedReceiver<Vec<PathBuf>>, Task<()>) {
@@ -462,7 +462,7 @@ fn spawn_modified_query(
 /// workspace's root from the on-disk registry, deduped by path. Empty roots (an
 /// unrooted scratch workspace) are skipped so the walk never falls back to the
 /// process working directory.
-fn collect_workspace_roots(stoat: &Stoat) -> Vec<PathBuf> {
+pub(super) fn collect_workspace_roots(stoat: &Stoat) -> Vec<PathBuf> {
     let mut roots: Vec<PathBuf> = Vec::new();
     let mut seen: HashSet<PathBuf> = HashSet::new();
     let mut push = |root: PathBuf, roots: &mut Vec<PathBuf>| {
@@ -487,7 +487,7 @@ fn collect_workspace_roots(stoat: &Stoat) -> Vec<PathBuf> {
 /// live picker repaints as paths arrive. Emitted paths stay absolute so the
 /// display resolver can attribute each to its owning root. The task must be held
 /// to keep the walk alive.
-fn spawn_multi_workspace_walk(
+pub(super) fn spawn_multi_workspace_walk(
     stoat: &Stoat,
     roots: Vec<PathBuf>,
 ) -> (UnboundedReceiver<Vec<PathBuf>>, Task<()>) {

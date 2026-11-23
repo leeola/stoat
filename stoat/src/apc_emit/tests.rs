@@ -7064,6 +7064,44 @@ fn palette_arg_list_is_pooled_and_retired() {
     );
 }
 
+/// A pooled page of the `:o` list ends the row of a modified file in the `M`
+/// mark, as the live list does. The row of an unchanged file ends blank.
+#[test]
+fn a_file_argument_page_marks_its_modified_rows() {
+    let mut h = Stoat::test();
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+    h.stoat.set_apc_tx(tx);
+    let root = PathBuf::from("/marked-arg");
+    for name in ["a.rs", "b.rs"] {
+        h.fake_fs().insert_file(root.join(name), b"v1\n");
+    }
+    h.stoat.active_workspace_mut().git_root = root.clone();
+    h.fake_git()
+        .add_repo(&root)
+        .with_fs(h.fake_fs())
+        .head_file("a.rs", "v1\n")
+        .modified("b.rs", "v1\n", "v2\n");
+    h.type_text(":o ");
+    h.settle();
+    h.snapshot();
+    let size = h.stoat.size();
+    h.stoat.active_workspace_mut().layout(size);
+
+    let list = palette_arg_layout(&h).list;
+    let bytes = emit_raw(&mut h, &mut rx);
+    let page = fill_payload(&bytes, crate::smooth_scroll::non_pane_pool::PALETTE, 0);
+    let rows: Vec<(String, char)> = page_cells(page, list.width, list.height)
+        .into_iter()
+        .filter_map(|row| {
+            let (&(mark, _, _), label) = row.split_last()?;
+            let label: String = label.iter().map(|&(ch, _, _)| ch).collect();
+            let label = label.trim().to_owned();
+            (!label.is_empty()).then_some((label, mark))
+        })
+        .collect();
+    assert_eq!(rows, [("a.rs".to_owned(), ' '), ("b.rs".to_owned(), 'M')]);
+}
+
 /// A Cmd Line that wraps onto a second row lowers the argument list's pool
 /// with the list. The region keeps its columns, starts one row lower, and is
 /// one row shorter.

@@ -1582,6 +1582,69 @@ fn keywords_narrow_history_under_a_wider_chip() {
     );
 }
 
+/// The rows of modified files in the `:o` list end in the `M` mark, and
+/// S-Tab steps the list to those files alone.
+///
+/// The smallest argument plate holds its list in cells 33 to 65, each label
+/// from cell 34, and the mark cell at cell 65. The selected row is the first
+/// cell row from 10 whose pixel (560, row * 18 + 9) reads the tab wash. Under
+/// All, a row under it holds the accent `M` of `src/main.rs`, and its second
+/// row under it holds a third result. Under Modified, the row under it holds
+/// the `M` of `src/util.rs`, and its second row under it is blank.
+#[test]
+fn the_file_argument_marks_modified_rows_and_cycles_to_them() {
+    let mut home = support::scratch_home();
+    let mut session = spawn_settled(home.path(), "rust-diff", "Cargo.toml");
+    play(&mut session, ":o<Space><Settle>");
+    let all = session.snapshot().expect("a snapshot");
+    play(&mut session, "<S-Tab><Settle>");
+    let modified = session.snapshot().expect("a snapshot");
+
+    let selected = |shot: &Snapshot| {
+        (10..40).find(|&row: &u16| pixel(shot, 560, u32::from(row) * 18 + 9) == TAB_WASH)
+    };
+    let marked = |shot: &Snapshot, row: u16| {
+        let accent = |[r, _, b]: [u8; 3]| i32::from(b) - i32::from(r) > 40;
+        pixels_where(shot, cell_rect(65, row, 1, 1), accent) > 0
+    };
+    let checks = match (selected(&all), selected(&modified)) {
+        (Some(all_row), Some(modified_row)) => [
+            (
+                "a row under the selected one holds the M of src/main.rs",
+                (all_row + 1..40).any(|row| marked(&all, row)),
+            ),
+            (
+                "a third result holds text",
+                distinct_colors(&all, cell_rect(34, all_row + 2, 1, 1)) > 1,
+            ),
+            (
+                "the row under the selected one holds the M of src/util.rs",
+                marked(&modified, modified_row + 1),
+            ),
+            (
+                "the Modified list holds two rows",
+                distinct_colors(&modified, cell_rect(34, modified_row + 2, 31, 1)) == 1,
+            ),
+        ],
+        _ => [("each frame holds a selected row", false); 4],
+    };
+
+    let failed: Vec<&str> = checks
+        .iter()
+        .filter(|(_, held)| !held)
+        .map(|(check, _)| *check)
+        .collect();
+    if !failed.is_empty() {
+        let all_frame = keep_frame(&all, &mut home, "file_argument_all");
+        let modified_frame = keep_frame(&modified, &mut home, "file_argument_modified");
+        panic!(
+            "the file argument list fails {failed:?}; the frames are {} and {}",
+            all_frame.display(),
+            modified_frame.display(),
+        );
+    }
+}
+
 /// The frame the basic-diff scene settles on after `keys` play, where the
 /// child's home is `home` and its temporary files go under `home/t`.
 ///
