@@ -1203,7 +1203,8 @@ mod tests {
             (
                 Some(Config {
                     blocks: Vec::new(),
-                    themes: Vec::new()
+                    themes: Vec::new(),
+                    commands: Vec::new(),
                 }),
                 0
             ),

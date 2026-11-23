@@ -18,6 +18,8 @@ impl<T> Spanned<T> {
 pub struct Config {
     pub blocks: Vec<Spanned<EventBlock>>,
     pub themes: Vec<Spanned<ThemeBlock>>,
+    /// The `command` items of the source, in source order.
+    pub commands: Vec<Spanned<CommandDecl>>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -288,6 +290,79 @@ pub enum Value {
     Array(Vec<Spanned<Value>>),
     Map(Vec<(Spanned<String>, Spanned<Value>)>),
     StateRef(String),
+}
+
+/// A user command that a `command NAME` item declares.
+///
+/// The parser checks the shape alone. The editor resolves the argument kinds,
+/// the steps, and the output by their names.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CommandDecl {
+    pub name: Spanned<String>,
+    pub body: CommandBody,
+}
+
+/// What a `command` item declares after its name.
+#[derive(Debug, Clone, PartialEq)]
+pub enum CommandBody {
+    /// The statements of a `{ ... }` block.
+    Block(Vec<Spanned<CommandStatement>>),
+    /// The call right of `=`, as `command rg = cli("rg");` writes it.
+    Wrap(Spanned<Call>),
+}
+
+/// One statement of a command block, written `key = value;` as a setting is.
+#[derive(Debug, Clone, PartialEq)]
+pub enum CommandStatement {
+    /// The description of the command, `doc = "...";`.
+    Doc(Spanned<String>),
+    /// An argument and its kind, `arg NAME = KIND;`.
+    Arg {
+        name: Spanned<String>,
+        kind: Spanned<Call>,
+    },
+    /// The steps that the command runs, `run = STEP;` or `run = [STEP, ...];`.
+    Run(RunExpr),
+    /// Where the output of the command goes, `output = NAME;`.
+    Output(Spanned<String>),
+}
+
+/// The steps of a `run` statement.
+#[derive(Debug, Clone, PartialEq)]
+pub enum RunExpr {
+    Single(Spanned<Call>),
+    Sequence(Vec<Spanned<Call>>),
+}
+
+/// A name with its arguments, as an argument kind, a step, or a wrapped tool
+/// writes it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Call {
+    pub name: Spanned<String>,
+    /// `None` for a bare name such as `file` or `pr`, and `Some` for a name
+    /// with parentheses, which hold zero or more arguments.
+    pub args: Option<Vec<Spanned<CallArg>>>,
+}
+
+/// One argument of a [`Call`].
+///
+/// A named argument takes a colon, as `show: "{title}"` writes it.
+#[derive(Debug, Clone, PartialEq)]
+pub enum CallArg {
+    Positional(Spanned<CallValue>),
+    Named {
+        name: Spanned<String>,
+        value: Spanned<CallValue>,
+    },
+}
+
+/// The value of a [`CallArg`].
+#[derive(Debug, Clone, PartialEq)]
+pub enum CallValue {
+    Value(Value),
+    /// A dotted reference of two or more segments, such as
+    /// `git.last_subject`. A one-word name stays [`Value::Ident`].
+    Context(Vec<Spanned<String>>),
 }
 
 #[cfg(test)]

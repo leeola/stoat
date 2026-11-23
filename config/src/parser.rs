@@ -1,8 +1,8 @@
 use crate::{
     ast::{
-        Action, ActionExpr, Arg, Binding, Config, EventBlock, EventType, Expr, FnDecl, Key,
-        KeyPart, LetBinding, Predicate, PredicateBlock, Setting, Spanned, Statement, ThemeBlock,
-        Value,
+        Action, ActionExpr, Arg, Binding, Call, CallArg, CallValue, CommandBody, CommandDecl,
+        CommandStatement, Config, EventBlock, EventType, Expr, FnDecl, Key, KeyPart, LetBinding,
+        Predicate, PredicateBlock, RunExpr, Setting, Spanned, Statement, ThemeBlock, Value,
     },
     error::ParseError,
 };
@@ -648,28 +648,192 @@ fn theme_block<'src, E: ConfigExtra<'src>>(
         .map_with(|node, e| Spanned::new(node, span_to_range(e.span())))
 }
 
+/// The value of a call argument.
+///
+/// Two or more identifiers joined by `.` read as a context reference, such
+/// as `git.last_subject`. Every other value reads as [`value`] reads it, so
+/// a one-word name stays an identifier.
+fn call_value<'src, E: ConfigExtra<'src>>() -> impl Parser<'src, &'src str, CallValue, E> + Clone {
+    let context = spanned_ident()
+        .then(
+            just('.')
+                .ignore_then(spanned_ident())
+                .repeated()
+                .at_least(1)
+                .collect::<Vec<_>>(),
+        )
+        .map(|(first, rest)| {
+            let mut segments = vec![first];
+            segments.extend(rest);
+            CallValue::Context(segments)
+        });
+
+    context.or(value().map(CallValue::Value))
+}
+
+/// One argument of a call, as [`arg`] reads one of an action.
+fn call_arg<'src, E: ConfigExtra<'src>>(
+) -> impl Parser<'src, &'src str, Spanned<CallArg>, E> + Clone {
+    let spanned_call_value =
+        call_value().map_with(|node, e| Spanned::new(node, span_to_range(e.span())));
+
+    let named = spanned_ident()
+        .then_ignore(ws())
+        .then_ignore(just(':'))
+        .then_ignore(ws())
+        .then(spanned_call_value.clone())
+        .map(|(name, value)| CallArg::Named { name, value });
+
+    let positional = spanned_call_value.map(CallArg::Positional);
+
+    named
+        .or(positional)
+        .map_with(|node, e| Spanned::new(node, span_to_range(e.span())))
+}
+
+/// A name with an optional list of arguments in parentheses.
+///
+/// A bare name keeps the span of its identifier, so a bare name and an empty
+/// call stay apart.
+fn call<'src, E: ConfigExtra<'src>>() -> impl Parser<'src, &'src str, Spanned<Call>, E> + Clone {
+    let args = ws()
+        .ignore_then(just('('))
+        .ignore_then(ws())
+        .ignore_then(
+            call_arg()
+                .separated_by(just(',').padded_by(ws()))
+                .allow_trailing()
+                .collect::<Vec<_>>(),
+        )
+        .then_ignore(ws())
+        .then_ignore(just(')'));
+
+    spanned_ident()
+        .then(args.or_not())
+        .map(|(name, args)| Call { name, args })
+        .map_with(|node, e| Spanned::new(node, span_to_range(e.span())))
+}
+
+/// The steps of a `run` statement, one call or a bracketed list of calls, as
+/// [`action_expr`] reads a binding's actions.
+fn run_expr<'src, E: ConfigExtra<'src>>() -> impl Parser<'src, &'src str, RunExpr, E> + Clone {
+    let sequence = just('[')
+        .ignore_then(ws())
+        .ignore_then(
+            call()
+                .separated_by(just(',').padded_by(ws()))
+                .allow_trailing()
+                .collect::<Vec<_>>(),
+        )
+        .then_ignore(ws())
+        .then_ignore(just(']'))
+        .map(RunExpr::Sequence);
+
+    sequence.or(call().map(RunExpr::Single))
+}
+
+/// One statement of a command block, with its semicolon.
+///
+/// `doc`, `arg`, `run`, and `output` open a statement only here, so each
+/// stays an identifier in every other place.
+fn command_statement<'src, E: ConfigExtra<'src>>(
+) -> impl Parser<'src, &'src str, Spanned<CommandStatement>, E> + Clone {
+    let doc = just("doc")
+        .ignore_then(ws())
+        .ignore_then(just('='))
+        .ignore_then(ws())
+        .ignore_then(spanned_string_literal())
+        .map(CommandStatement::Doc);
+
+    let arg = just("arg")
+        .ignore_then(required_ws())
+        .ignore_then(spanned_ident())
+        .then_ignore(ws())
+        .then_ignore(just('='))
+        .then_ignore(ws())
+        .then(call())
+        .map(|(name, kind)| CommandStatement::Arg { name, kind });
+
+    let run = just("run")
+        .ignore_then(ws())
+        .ignore_then(just('='))
+        .ignore_then(ws())
+        .ignore_then(run_expr())
+        .map(CommandStatement::Run);
+
+    let output = just("output")
+        .ignore_then(ws())
+        .ignore_then(just('='))
+        .ignore_then(ws())
+        .ignore_then(spanned_ident())
+        .map(CommandStatement::Output);
+
+    choice((doc, arg, run, output))
+        .then_ignore(semicolon())
+        .map_with(|node, e| Spanned::new(node, span_to_range(e.span())))
+        .then_ignore(ws())
+}
+
+/// A top-level `command NAME` item, a block of statements or a call after
+/// `=` and its semicolon.
+///
+/// `command` opens an item only at the top level, so it stays an identifier
+/// inside a block.
+fn command_item<'src, E: ConfigExtra<'src>>(
+) -> impl Parser<'src, &'src str, Spanned<CommandDecl>, E> + Clone {
+    let block = just('{')
+        .ignore_then(ws())
+        .ignore_then(command_statement().repeated().collect::<Vec<_>>())
+        .then_ignore(ws())
+        .then_ignore(just('}'))
+        .map(CommandBody::Block);
+
+    let wrap = just('=')
+        .ignore_then(ws())
+        .ignore_then(call())
+        .then_ignore(semicolon())
+        .map(CommandBody::Wrap);
+
+    just("command")
+        .ignore_then(required_ws())
+        .ignore_then(spanned_ident())
+        .then_ignore(ws())
+        .then(block.or(wrap))
+        .map(|(name, body)| CommandDecl { name, body })
+        .map_with(|node, e| Spanned::new(node, span_to_range(e.span())))
+}
+
 enum TopLevel {
     Event(Spanned<EventBlock>),
     Theme(Spanned<ThemeBlock>),
+    Command(Spanned<CommandDecl>),
 }
 
 fn config<'src, E: ConfigExtra<'src>>() -> impl Parser<'src, &'src str, Config, E> {
-    let item = theme_block()
-        .map(TopLevel::Theme)
-        .or(event_block().map(TopLevel::Event));
+    let item = choice((
+        theme_block().map(TopLevel::Theme),
+        event_block().map(TopLevel::Event),
+        command_item().map(TopLevel::Command),
+    ));
 
     ws().ignore_then(item.padded_by(ws()).repeated().collect::<Vec<_>>())
         .then_ignore(end())
         .map(|items| {
             let mut blocks = Vec::new();
             let mut themes = Vec::new();
+            let mut commands = Vec::new();
             for item in items {
                 match item {
                     TopLevel::Event(b) => blocks.push(b),
                     TopLevel::Theme(t) => themes.push(t),
+                    TopLevel::Command(c) => commands.push(c),
                 }
             }
-            Config { blocks, themes }
+            Config {
+                blocks,
+                themes,
+                commands,
+            }
         })
 }
 

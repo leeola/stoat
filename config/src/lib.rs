@@ -5,8 +5,9 @@ mod schema;
 mod settings;
 
 pub use ast::{
-    Action, ActionExpr, Arg, Binding, Config, EventBlock, EventType, Expr, FnDecl, Key, KeyPart,
-    LetBinding, Predicate, PredicateBlock, Setting, Span, Spanned, Statement, ThemeBlock, Value,
+    Action, ActionExpr, Arg, Binding, Call, CallArg, CallValue, CommandBody, CommandDecl,
+    CommandStatement, Config, EventBlock, EventType, Expr, FnDecl, Key, KeyPart, LetBinding,
+    Predicate, PredicateBlock, RunExpr, Setting, Span, Spanned, Statement, ThemeBlock, Value,
 };
 pub use error::{format_errors, ParseError};
 pub use schema::{settings_schema, PathSeg, SettingDef, ValueShape};
@@ -25,6 +26,29 @@ pub fn parse_action(source: &str) -> Result<Action, Vec<ParseError>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The five items of the CmdSpec board, one on each line, with each named
+    /// argument in the colon syntax.
+    const COMMAND_BOARD: &str = concat!(
+        r#"command pr { doc = "check out a pull request"; "#,
+        r#"arg pr = pick("gh pr list --json number,title,headRefName,state", "#,
+        r##"show: "#{number} {title}", value: "{number}", "##,
+        r#"preview: "gh pr view {number}"); "#,
+        r#"run = shell("gh pr checkout {pr}"); output = notify; }"#,
+        "\n",
+        r#"command review { doc = "open a PR as diff-changes against its base"; "#,
+        r#"arg pr = same_as(pr); "#,
+        r#"run = [shell("gh pr checkout {pr}"), DiffFiles(rev: "origin/main")]; }"#,
+        "\n",
+        r#"command rg = cli("rg", output: locations);"#,
+        "\n",
+        r#"command jj = cli("jj", completions: "jj util completion fish");"#,
+        "\n",
+        r#"command ship { arg message = text(default: git.last_subject); "#,
+        r#"run = [shell("cargo test"), shell("git push -u origin HEAD"), "#,
+        r#"shell("gh pr create --fill --title {message}"), Notify("shipped")]; "#,
+        r#"output = run_pane; }"#,
+    );
 
     fn parse_ok(source: &str) -> Config {
         let (result, errors) = parse(source);
@@ -1112,5 +1136,431 @@ mod tests {
         assert_setting(&theme.statements[1]);
         assert_setting(&theme.statements[2]);
         assert_setting(&theme.statements[3]);
+    }
+
+    /// The five items of the CmdSpec board parse to their declarations, with
+    /// each named argument in the colon syntax.
+    #[test]
+    fn the_command_spec_board_parses_in_the_colon_syntax() {
+        let src = COMMAND_BOARD;
+        let lines: Vec<&str> = src.lines().collect();
+        let pick = concat!(
+            r#"pick("gh pr list --json number,title,headRefName,state", "#,
+            r##"show: "#{number} {title}", value: "{number}", "##,
+            r#"preview: "gh pr view {number}")"#,
+        );
+        let checkout = r#"shell("gh pr checkout {pr}")"#;
+        let pr = decl_at(
+            src,
+            lines[0],
+            0,
+            CommandBody::Block(vec![
+                doc_at(src, "check out a pull request"),
+                arg_at(
+                    src,
+                    &format!("arg pr = {pick};"),
+                    0,
+                    call_at(
+                        src,
+                        pick,
+                        0,
+                        Some(vec![
+                            positional(string_at(
+                                src,
+                                "gh pr list --json number,title,headRefName,state",
+                                0,
+                            )),
+                            named("show", string_at(src, "#{number} {title}", 0)),
+                            named("value", string_at(src, "{number}", 0)),
+                            named("preview", string_at(src, "gh pr view {number}", 0)),
+                        ]),
+                    ),
+                ),
+                statement_at(
+                    src,
+                    &format!("run = {checkout};"),
+                    0,
+                    CommandStatement::Run(RunExpr::Single(shell_at(src, "gh pr checkout {pr}", 0))),
+                ),
+                statement_at(
+                    src,
+                    "output = notify;",
+                    0,
+                    CommandStatement::Output(word(src, "notify", 0)),
+                ),
+            ]),
+        );
+
+        let same_as = {
+            let span = at(src, "same_as(pr)", 0);
+            let value = span.start + "same_as(".len();
+            let pr = CallValue::Value(Value::Ident("pr".to_owned()));
+            let arg = positional(Spanned::new(pr, value..value + "pr".len()));
+            Spanned::new(
+                Call {
+                    name: head("same_as", span.start),
+                    args: Some(vec![arg]),
+                },
+                span,
+            )
+        };
+        let diff_files = r#"DiffFiles(rev: "origin/main")"#;
+        let review = decl_at(
+            src,
+            lines[1],
+            0,
+            CommandBody::Block(vec![
+                doc_at(src, "open a PR as diff-changes against its base"),
+                arg_at(src, "arg pr = same_as(pr);", 0, same_as),
+                statement_at(
+                    src,
+                    &format!("run = [{checkout}, {diff_files}];"),
+                    0,
+                    CommandStatement::Run(RunExpr::Sequence(vec![
+                        shell_at(src, "gh pr checkout {pr}", 1),
+                        call_at(
+                            src,
+                            diff_files,
+                            0,
+                            Some(vec![named("rev", string_at(src, "origin/main", 0))]),
+                        ),
+                    ])),
+                ),
+            ]),
+        );
+
+        let locations = Spanned::new(
+            CallValue::Value(Value::Ident("locations".to_owned())),
+            at(src, "locations", 0),
+        );
+        let rg = decl_at(
+            src,
+            lines[2],
+            0,
+            CommandBody::Wrap(call_at(
+                src,
+                r#"cli("rg", output: locations)"#,
+                0,
+                Some(vec![
+                    positional(string_at(src, "rg", 0)),
+                    named("output", locations),
+                ]),
+            )),
+        );
+        let jj = decl_at(
+            src,
+            lines[3],
+            0,
+            CommandBody::Wrap(call_at(
+                src,
+                r#"cli("jj", completions: "jj util completion fish")"#,
+                0,
+                Some(vec![
+                    positional(string_at(src, "jj", 0)),
+                    named("completions", string_at(src, "jj util completion fish", 0)),
+                ]),
+            )),
+        );
+
+        let last_subject = {
+            let span = at(src, "git.last_subject", 0);
+            let segments = vec![
+                head("git", span.start),
+                head("last_subject", span.start + "git.".len()),
+            ];
+            Spanned::new(CallValue::Context(segments), span)
+        };
+        let ship_steps = [
+            "cargo test",
+            "git push -u origin HEAD",
+            "gh pr create --fill --title {message}",
+        ];
+        let notify = r#"Notify("shipped")"#;
+        let mut steps: Vec<Spanned<Call>> = ship_steps
+            .iter()
+            .map(|command| shell_at(src, command, 0))
+            .collect();
+        steps.push(call_at(
+            src,
+            notify,
+            0,
+            Some(vec![positional(string_at(src, "shipped", 0))]),
+        ));
+        let run_text = format!(
+            "run = [{}, {notify}];",
+            ship_steps
+                .map(|command| format!("shell(\"{command}\")"))
+                .join(", "),
+        );
+        let ship = decl_at(
+            src,
+            lines[4],
+            0,
+            CommandBody::Block(vec![
+                arg_at(
+                    src,
+                    "arg message = text(default: git.last_subject);",
+                    0,
+                    call_at(
+                        src,
+                        "text(default: git.last_subject)",
+                        0,
+                        Some(vec![named("default", last_subject)]),
+                    ),
+                ),
+                statement_at(
+                    src,
+                    &run_text,
+                    0,
+                    CommandStatement::Run(RunExpr::Sequence(steps)),
+                ),
+                statement_at(
+                    src,
+                    "output = run_pane;",
+                    0,
+                    CommandStatement::Output(word(src, "run_pane", 0)),
+                ),
+            ]),
+        );
+
+        assert_eq!(parse_ok(src).commands, [pr, review, rg, jj, ship]);
+    }
+
+    /// A bare name holds no argument list, and a name with empty parentheses
+    /// holds an empty one.
+    #[test]
+    fn a_bare_name_and_an_empty_call_differ() {
+        let src = "command a { arg f = file; run = [b, OpenRun()]; }";
+        let run = CommandStatement::Run(RunExpr::Sequence(vec![
+            call_at(src, "b", 0, None),
+            call_at(src, "OpenRun()", 0, Some(Vec::new())),
+        ]));
+        assert_eq!(
+            parse_ok(src).commands,
+            [decl_at(
+                src,
+                src,
+                0,
+                CommandBody::Block(vec![
+                    arg_at(src, "arg f = file;", 0, call_at(src, "file", 0, None)),
+                    statement_at(src, "run = [b, OpenRun()];", 0, run),
+                ]),
+            )],
+        );
+    }
+
+    /// A one-word value of a call stays an identifier. Two words joined by
+    /// `.` read as a context reference with a span for each segment.
+    #[test]
+    fn a_one_word_value_is_an_identifier_and_a_dotted_value_is_a_context_reference() {
+        let src = concat!(
+            "command a { arg x = text(default: selection); ",
+            "arg y = text(default: git.last_subject); }",
+        );
+        let selection = Spanned::new(
+            CallValue::Value(Value::Ident("selection".to_owned())),
+            at(src, "selection", 0),
+        );
+        let context = Spanned::new(
+            CallValue::Context(vec![word(src, "git", 0), word(src, "last_subject", 0)]),
+            at(src, "git.last_subject", 0),
+        );
+        let text_of =
+            |text: &str, value| call_at(src, text, 0, Some(vec![named("default", value)]));
+        assert_eq!(
+            parse_ok(src).commands,
+            [decl_at(
+                src,
+                src,
+                0,
+                CommandBody::Block(vec![
+                    arg_at(
+                        src,
+                        "arg x = text(default: selection);",
+                        0,
+                        text_of("text(default: selection)", selection),
+                    ),
+                    arg_at(
+                        src,
+                        "arg y = text(default: git.last_subject);",
+                        0,
+                        text_of("text(default: git.last_subject)", context),
+                    ),
+                ]),
+            )],
+        );
+    }
+
+    /// `command` opens an item only at the top level. Inside a block it stays
+    /// an identifier, as a setting path segment and as an argument name.
+    #[test]
+    fn command_stays_an_identifier_inside_a_block() {
+        let config = parse_ok(concat!(
+            r#"on init { lsp.command.rust = "ra"; command = 1; } "#,
+            r#"on key { r -> Run(command: "make"); }"#,
+        ));
+        let paths: Vec<Vec<String>> = config.blocks[0]
+            .node
+            .statements
+            .iter()
+            .map(|statement| {
+                let path = &assert_setting(statement).path;
+                path.iter().map(|segment| segment.node.clone()).collect()
+            })
+            .collect();
+        let binding = assert_binding(&config.blocks[1].node.statements[0]);
+        let argument = match &binding.action.node {
+            ActionExpr::Single(action) => match &action.args[0].node {
+                Arg::Named { name, .. } => name.node.clone(),
+                other => panic!("expected a named argument, got {other:?}"),
+            },
+            other => panic!("expected one action, got {other:?}"),
+        };
+
+        let segments = |words: &[&str]| words.iter().map(|word| word.to_string()).collect();
+        assert_eq!(
+            (config.commands.is_empty(), paths, argument),
+            (
+                true,
+                vec![
+                    segments(&["lsp", "command", "rust"]),
+                    segments(&["command"])
+                ],
+                "command".to_owned(),
+            ),
+        );
+    }
+
+    /// A command item ends in `;` after its call, and a statement of its
+    /// block ends in `;`. A source without either reports errors and yields
+    /// no command.
+    #[test]
+    fn a_command_item_with_no_terminator_is_an_error() {
+        let outcome = |source: &str| {
+            let (config, errors) = parse(source);
+            let no_command = config.is_none_or(|config| config.commands.is_empty());
+            (!errors.is_empty(), no_command)
+        };
+        assert_eq!(
+            [
+                outcome(r#"command rg = cli("rg")"#),
+                outcome(r#"command a { run = shell("x") }"#),
+            ],
+            [(true, true); 2],
+        );
+    }
+
+    /// The span of the `nth` occurrence of `needle` in `source`, counting
+    /// from 0.
+    fn at(source: &str, needle: &str, nth: usize) -> Span {
+        let (start, _) = source
+            .match_indices(needle)
+            .nth(nth)
+            .expect("the needle occurs that often");
+        start..start + needle.len()
+    }
+
+    /// `needle` spanned at its `nth` occurrence in `source`.
+    fn word(source: &str, needle: &str, nth: usize) -> Spanned<String> {
+        Spanned::new(needle.to_owned(), at(source, needle, nth))
+    }
+
+    /// The identifier that `text` starts with, spanned from `start`.
+    fn head(text: &str, start: usize) -> Spanned<String> {
+        let end = text
+            .find(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+            .unwrap_or(text.len());
+        Spanned::new(text[..end].to_owned(), start..start + end)
+    }
+
+    /// The command item written as `text` at its `nth` occurrence in
+    /// `source`, with `body`.
+    fn decl_at(source: &str, text: &str, nth: usize, body: CommandBody) -> Spanned<CommandDecl> {
+        let span = at(source, text, nth);
+        let name_start = span.start + "command ".len();
+        let name = head(&text["command ".len()..], name_start);
+        Spanned::new(CommandDecl { name, body }, span)
+    }
+
+    /// The statement written as `text` at its `nth` occurrence in `source`.
+    fn statement_at(
+        source: &str,
+        text: &str,
+        nth: usize,
+        node: CommandStatement,
+    ) -> Spanned<CommandStatement> {
+        Spanned::new(node, at(source, text, nth))
+    }
+
+    /// The `doc` statement of the description `text`, which occurs once in
+    /// `source`.
+    fn doc_at(source: &str, text: &str) -> Spanned<CommandStatement> {
+        let quoted = format!("\"{text}\"");
+        let doc = Spanned::new(text.to_owned(), at(source, &quoted, 0));
+        statement_at(
+            source,
+            &format!("doc = {quoted};"),
+            0,
+            CommandStatement::Doc(doc),
+        )
+    }
+
+    /// The `arg` statement written as `text` at its `nth` occurrence in
+    /// `source`, with `kind`.
+    fn arg_at(
+        source: &str,
+        text: &str,
+        nth: usize,
+        kind: Spanned<Call>,
+    ) -> Spanned<CommandStatement> {
+        let span = at(source, text, nth);
+        let name = head(&text["arg ".len()..], span.start + "arg ".len());
+        Spanned::new(CommandStatement::Arg { name, kind }, span)
+    }
+
+    /// The call written as `text` at its `nth` occurrence in `source`.
+    fn call_at(
+        source: &str,
+        text: &str,
+        nth: usize,
+        args: Option<Vec<Spanned<CallArg>>>,
+    ) -> Spanned<Call> {
+        let span = at(source, text, nth);
+        Spanned::new(
+            Call {
+                name: head(text, span.start),
+                args,
+            },
+            span,
+        )
+    }
+
+    /// The step `shell("command")` at its `nth` occurrence in `source`.
+    fn shell_at(source: &str, command: &str, nth: usize) -> Spanned<Call> {
+        let text = format!("shell(\"{command}\")");
+        let arg = positional(string_at(source, command, nth));
+        call_at(source, &text, nth, Some(vec![arg]))
+    }
+
+    /// The string `text` as a call value, spanned at the `nth` occurrence of
+    /// its quoted form in `source`.
+    fn string_at(source: &str, text: &str, nth: usize) -> Spanned<CallValue> {
+        let span = at(source, &format!("\"{text}\""), nth);
+        Spanned::new(CallValue::Value(Value::String(text.to_owned())), span)
+    }
+
+    /// A positional argument of `value`, spanned as the value is.
+    fn positional(value: Spanned<CallValue>) -> Spanned<CallArg> {
+        let span = value.span.clone();
+        Spanned::new(CallArg::Positional(value), span)
+    }
+
+    /// The argument `name: value`, spanned from the name to the end of the
+    /// value. One blank stands between the colon and the value.
+    fn named(name: &str, value: Spanned<CallValue>) -> Spanned<CallArg> {
+        let start = value.span.start - name.len() - ": ".len();
+        let span = start..value.span.end;
+        let name = head(name, start);
+        Spanned::new(CallArg::Named { name, value }, span)
     }
 }
