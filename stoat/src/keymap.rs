@@ -9,6 +9,14 @@ use stoat_config::{
     ActionExpr, Binding, Config, EventType, Key, KeyPart, Predicate, Statement, Value,
 };
 
+/// The chord keys that [`Keymap::keys_by_action`] follows from its state, so
+/// a key such as `Spc a h` reads as one path to its action.
+const CHORD_DEPTH: usize = 2;
+
+/// The labels of the keys that run each action, by action name, as
+/// [`Keymap::keys_by_action`] builds them.
+pub(crate) type ActionKeys = HashMap<String, Vec<String>>;
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum StateValue {
     String(CompactString),
@@ -974,6 +982,72 @@ impl Keymap {
             })
     }
 
+    /// The labels of every key that runs each action from `state`, by action
+    /// name.
+    ///
+    /// A key a press reaches in `state` gives its label to each action it
+    /// runs. A chord key, whose only action enters a mode, opens that mode,
+    /// and each key inside gives the chord's label joined to its own, as `gd`
+    /// or `Spc a h` read. The search follows [`CHORD_DEPTH`] chord keys and
+    /// opens each mode one time. It runs breadth first, so an action lists its
+    /// direct keys before its chords, and each level keeps config order. A
+    /// label enters an action's list one time.
+    ///
+    /// `SetMode` and `SetVar` name no action, and a wheel notch or a side
+    /// button is not a key, so neither enters the index. A caller builds the
+    /// index one time and reads every action from it, where
+    /// [`Self::key_for_action`] answers one action with one key.
+    pub(crate) fn keys_by_action(&self, state: &dyn KeymapState) -> ActionKeys {
+        let mut keys = ActionKeys::new();
+        let mut opened: HashSet<CompactString> = match state.get("mode") {
+            Some(StateValue::String(mode)) => HashSet::from([mode.clone()]),
+            _ => HashSet::new(),
+        };
+
+        let mut level: Vec<(String, Option<CompactString>)> = vec![(String::new(), None)];
+        for depth in 0..=CHORD_DEPTH {
+            let mut next = Vec::new();
+            for (prefix, mode) in level {
+                let inside = mode.map(|mode| ChordState {
+                    under: state,
+                    mode: StateValue::String(mode),
+                });
+                let at: &dyn KeymapState = match &inside {
+                    Some(inside) => inside,
+                    None => state,
+                };
+
+                for binding in self.effective_bindings(at) {
+                    if binding.key.wheel.is_some() || binding.key.side_button.is_some() {
+                        continue;
+                    }
+                    let label = match prefix.is_empty() {
+                        true => binding.key.display_label(),
+                        false => chord_label(&prefix, &binding.key.display_label()),
+                    };
+
+                    if let Some(mode) = chord_mode(binding) {
+                        if depth < CHORD_DEPTH && opened.insert(mode.into()) {
+                            next.push((label, Some(mode.into())));
+                        }
+                        continue;
+                    }
+                    for action in binding.actions.iter() {
+                        if matches!(action.name.as_str(), "SetMode" | "SetVar") {
+                            continue;
+                        }
+                        let labels = keys.entry(action.name.clone()).or_default();
+                        if !labels.contains(&label) {
+                            labels.push(label.clone());
+                        }
+                    }
+                }
+            }
+            level = next;
+        }
+        keys
+    }
+
     /// Returns `(key_label, actions)` for every key a press reaches in
     /// `state`. Uses the same evaluator and ranking as [`Keymap::lookup`].
     pub fn active_bindings(&self, state: &dyn KeymapState) -> Vec<(String, &[ResolvedAction])> {
@@ -1105,8 +1179,8 @@ impl Keymap {
     }
 }
 
-/// A state inside a chord, which [`Keymap::key_for_action`] reads the chord's
-/// keys against.
+/// A state inside a chord, which [`Keymap::key_for_action`] and
+/// [`Keymap::keys_by_action`] read the chord's keys against.
 ///
 /// It answers `mode` with the chord's mode and every other field from the
 /// state under it. A chord key then reads as bound exactly when a press
@@ -5117,6 +5191,46 @@ mod tests {
         assert_eq!(
             [false, true].map(|lsp| keymap.key_for_action(&state(lsp), "GotoDefinition")),
             [None, Some("gd".to_string())],
+        );
+    }
+
+    /// The index lists every key of an action in config order, follows chords
+    /// two chord keys deep, and names no mode switch and no wheel notch. A
+    /// chord key back to a mode the search already opened opens nothing, so
+    /// `Escape` in the space mode gives `Undo` no `Spc Esc u`.
+    #[test]
+    fn keys_by_action_lists_every_key_and_follows_chords_two_deep() {
+        let config = parse_config(
+            r#"on key {
+                mode == normal {
+                    u -> Undo();
+                    ? -> OpenHelp();
+                    F1 -> OpenHelp();
+                    Space -> SetMode(space);
+                    WheelUp -> ScrollViewUp();
+                }
+                mode == space {
+                    a -> SetMode(pane);
+                    p -> OpenFileFinder();
+                    Escape -> SetMode(normal);
+                }
+                mode == pane {
+                    h -> [FocusLeft(), SetMode(normal)];
+                }
+            }"#,
+        );
+        let keymap = Keymap::compile(&config);
+        let normal = TestState::new().set("mode", StateValue::String("normal".into()));
+
+        let labels = |keys: &[&str]| keys.iter().map(|key| key.to_string()).collect::<Vec<_>>();
+        assert_eq!(
+            keymap.keys_by_action(&normal),
+            ActionKeys::from([
+                ("Undo".to_string(), labels(&["u"])),
+                ("OpenHelp".to_string(), labels(&["?", "F1"])),
+                ("OpenFileFinder".to_string(), labels(&["Spc p"])),
+                ("FocusLeft".to_string(), labels(&["Spc a h"])),
+            ]),
         );
     }
 }

@@ -1388,6 +1388,27 @@ fn a_root_row_ends_in_a_built_in_tag() {
     }
 }
 
+/// The doc island under the command list names the selected command and ends
+/// its first line in the command's Source Tag, one cell after the name.
+///
+/// The doc is the cell rows 29 to 34, and its text starts at cell 18. The
+/// name `files` takes 5 cells, so the tag's box starts at cell 24 and covers
+/// the pixels from (216, 523) to (285, 538).
+#[test]
+fn the_doc_island_tags_the_selected_command() {
+    let mut home = support::scratch_home();
+    let shot = palette_frame(home.path(), ":files<Settle>");
+
+    expect_color_box(
+        &shot,
+        &mut home,
+        OVERLAY,
+        522..540,
+        (216, 523, 285, 538),
+        "doc_tag",
+    );
+}
+
 /// The frame the basic-diff scene settles on after `keys` play, where the
 /// child's home is `home` and its temporary files go under `home/t`.
 ///

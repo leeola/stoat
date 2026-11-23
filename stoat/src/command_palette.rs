@@ -4,6 +4,7 @@ use crate::{
     fuzzy,
     host::FsHost,
     input_view::{InputView, SubmitTarget},
+    keymap::ActionKeys,
     pane::{FocusTarget, View},
     paths,
     picker::{self, PathPicker, PendingScan, PreviewPolicy, ScanTarget},
@@ -102,6 +103,13 @@ pub struct CommandPalette {
     ///
     /// Each change of the input sets it, so an idle frame walks no registry.
     pub(crate) resolved: Option<ResolvedCommand>,
+    /// The keys that run each action from the state the palette opened in,
+    /// which the doc region names under the selected command.
+    ///
+    /// Built one time at open, as
+    /// [`keys_by_action`](crate::keymap::Keymap::keys_by_action) builds it, so
+    /// a frame walks no keymap.
+    pub(crate) keys: ActionKeys,
 }
 
 /// A command token that the palette's input names, and the ghost that the Cmd
@@ -641,7 +649,12 @@ enum ArgsError {
 }
 
 impl CommandPalette {
-    pub fn new(ws: &mut Workspace, executor: Executor, availability: Availability) -> Self {
+    pub fn new(
+        ws: &mut Workspace,
+        executor: Executor,
+        availability: Availability,
+        keys: ActionKeys,
+    ) -> Self {
         let input = InputView::create(ws, executor, SubmitTarget::PaletteFilter, "", "insert");
         let scope = PaletteScope::Active;
         let mut filtered = Vec::new();
@@ -677,6 +690,7 @@ impl CommandPalette {
             arg_plate_width: 0,
             header_rows: 1,
             resolved: None,
+            keys,
         }
     }
 
@@ -4269,21 +4283,45 @@ mod tests {
 
     /// Asserts against the painted frame rather than the filtered entries, so
     /// it covers the renderer reading the same string the matcher ranked on.
+    /// The doc region under the list names the action the command runs, so the
+    /// test reads the row line, which holds the command's short description.
     #[test]
     fn the_list_shows_kebab_command_names() {
-        let mut h = Stoat::test();
+        let mut h = TestHarness::with_size(160, 50);
         h.type_text(":auto");
-        let frame = h.snapshot();
+        let _ = h.snapshot();
 
-        assert!(
-            frame.content.contains("auto-reload"),
-            "the row reads as a user command, got:\n{}",
-            frame.content
+        let desc = registry::lookup_alias("auto-reload")
+            .expect("auto-reload is a command")
+            .def
+            .short_desc();
+        let text = h.rendered_text();
+        let row = text
+            .lines()
+            .find(|line| line.contains(desc))
+            .unwrap_or_default();
+        assert_eq!(
+            (row.contains("auto-reload"), row.contains("AutoReload")),
+            (true, false),
+            "the row reads as a user command, got:\n{text}",
         );
+    }
+
+    /// The doc region ends in the action the selected command runs and the key
+    /// that reaches the action from the state the palette opened in. The
+    /// description of `files` wraps to three lines at this width, so the action
+    /// line is the region's last row.
+    #[test]
+    fn the_doc_island_names_the_action_and_its_keys() {
+        let mut h = TestHarness::with_size(160, 50);
+        h.type_text(":files");
+        let _ = h.snapshot();
+
+        let text = h.rendered_text();
         assert!(
-            !frame.content.contains("AutoReload"),
-            "no row still reads as a code identifier, got:\n{}",
-            frame.content
+            text.lines()
+                .any(|line| line.contains("runs action OpenFileFinder \u{b7} bound to Spc p")),
+            "the doc names the action and its key, got:\n{text}",
         );
     }
 

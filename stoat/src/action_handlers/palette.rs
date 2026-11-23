@@ -3,6 +3,7 @@ use crate::{
     command_palette::{self, Availability, CommandPalette, PaletteOutcome},
     file_finder::Browse,
     host::FsHost,
+    keymap_state::StoatKeymapState,
     picker::{PathPicker, PendingScan},
     walkthrough,
 };
@@ -172,9 +173,12 @@ fn revision_candidates(stoat: &Stoat, git_root: &Path) -> Vec<PathBuf> {
 pub(super) fn open_palette_seeded(stoat: &mut Stoat, seed: &str) -> UpdateEffect {
     let executor = stoat.executor.clone();
     let availability = Availability::from_stoat(stoat);
+    let keys = stoat
+        .keymap
+        .keys_by_action(&StoatKeymapState::from_stoat(stoat));
     {
         let ws = stoat.active_workspace_mut();
-        stoat.command_palette = Some(CommandPalette::new(ws, executor, availability));
+        stoat.command_palette = Some(CommandPalette::new(ws, executor, availability, keys));
     }
 
     let active_idx = stoat.active_workspace;

@@ -59,7 +59,7 @@ use crate::{
     editor_state::{EditorId, EditorState},
     host::FsHost,
     jumplist::JumpList,
-    keymap_state::{self, ActiveModal},
+    keymap_state::{self, ActiveModal, StoatKeymapState},
     merge_view::Side,
     pane::{Axis, Direction, DockSide, FocusTarget, View},
     workspace::diff::WorktreeBase,
@@ -465,8 +465,11 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
             }
             let executor = stoat.executor.clone();
             let availability = crate::command_palette::Availability::from_stoat(stoat);
+            let keys = stoat
+                .keymap
+                .keys_by_action(&StoatKeymapState::from_stoat(stoat));
             let ws = stoat.active_workspace_mut();
-            stoat.command_palette = Some(CommandPalette::new(ws, executor, availability));
+            stoat.command_palette = Some(CommandPalette::new(ws, executor, availability, keys));
             UpdateEffect::Redraw
         },
         ActionKind::OpenHelp => {

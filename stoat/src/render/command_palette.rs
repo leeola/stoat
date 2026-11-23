@@ -1,6 +1,7 @@
 use crate::{
     command_palette::{ArgPicker, CommandPalette, ResolvedCommand},
     input_view::InputView,
+    keymap::ActionKeys,
     render::{
         chrome::{ISLAND_BOTTOM, ISLAND_GAP, ISLAND_SIDE, ISLAND_TOP},
         cmd_line::{self, CmdLine, CmdStatus},
@@ -305,6 +306,7 @@ pub(crate) fn render_command_palette(
         zoom,
         &mut palette.header_rows,
         palette.resolved.as_ref(),
+        &palette.keys,
         ws,
         home,
         theme,
@@ -684,7 +686,8 @@ fn grouped(count: usize) -> String {
 /// Render the command list and the selected command's doc under the Cmd Line.
 ///
 /// `header_rows` holds the rows that the Cmd Line took in the last frame, and
-/// the paint stores there the rows that it draws.
+/// the paint stores there the rows that it draws. The doc names the keys of
+/// `keys` that run the selected command's action.
 #[allow(clippy::too_many_arguments)]
 fn render_palette_filter(
     input: &InputView,
@@ -696,6 +699,7 @@ fn render_palette_filter(
     zoom: i8,
     header_rows: &mut u16,
     resolved: Option<&ResolvedCommand>,
+    keys: &ActionKeys,
     ws: &mut Workspace,
     home: Option<&Path>,
     theme: &crate::theme::Theme,
@@ -767,12 +771,12 @@ fn render_palette_filter(
                 scene,
             );
         }
+        let width = usize::from(inner.width.saturating_sub(1));
         let lines = filtered
             .get(selected)
-            .map(|e| doc_lines(e, inner.width.saturating_sub(1) as usize))
+            .map(|entry| doc_lines(entry, keys, width, theme))
             .unwrap_or_default();
-        let doc_style = theme.get(crate::theme::scope::UI_TEXT_DIM);
-        paint_doc_lines(buf, doc, &lines, doc_style);
+        paint_doc_lines(buf, doc, &lines, theme, scene);
     }
 
     let parts = Footer {
@@ -783,42 +787,107 @@ fn render_palette_filter(
 }
 
 /// Paint `lines` into the doc region `doc`, one per row from its top, each
-/// clipped at the region's right edge.
-fn paint_doc_lines(buf: &mut Buffer, doc: Rect, lines: &[String], style: Style) {
-    for (i, line) in lines.iter().take(doc.height as usize).enumerate() {
-        write_str_clipped(
-            buf,
-            doc.x + 1,
-            doc.y + i as u16,
-            line,
-            style,
-            doc.x + doc.width,
-        );
+/// line's spans one after another from the region's second cell, clipped at
+/// its right edge.
+///
+/// The first line ends in the built-in Source Tag one cell after its text, as
+/// [`paint_doc_tag`] places it.
+fn paint_doc_lines(
+    buf: &mut Buffer,
+    doc: Rect,
+    lines: &[Vec<(String, Style)>],
+    theme: &crate::theme::Theme,
+    scene: &mut stoat_widgets::ApcScene,
+) {
+    let end = doc.x + doc.width;
+    for (row, line) in (doc.y..doc.bottom()).zip(lines) {
+        let mut x = doc.x + 1;
+        for (text, style) in line {
+            write_str_clipped(buf, x, row, text, *style, end);
+            x = x.saturating_add(text.chars().count() as u16);
+        }
+
+        if row == doc.y {
+            paint_doc_tag(buf, x.saturating_add(1), row, end, theme, scene);
+        }
     }
 }
 
-/// The help of `entry` as doc-region lines, the way a CLI's help reads.
+/// Paint the built-in Source Tag of a doc region's first line from cell `x`
+/// of `row`, as [`paint_source_tag`] draws it.
 ///
-/// The lines are its [`usage_line`], an `alias:` line when it has aliases, one
-/// line per parameter with its description, a blank line after any parameter,
-/// then its long description wrapped to `width`. Only the long description
-/// wraps, so the caller clips the rest at the region's edge.
-fn doc_lines(entry: &RegistryEntry, width: usize) -> Vec<String> {
-    let mut lines = vec![usage_line(entry)];
+/// A theme that leaves the tag's scope unset draws no tag, and neither does a
+/// tag that does not end one cell inside `end`, the region's right edge.
+fn paint_doc_tag(
+    buf: &mut Buffer,
+    x: u16,
+    row: u16,
+    end: u16,
+    theme: &crate::theme::Theme,
+    scene: &mut stoat_widgets::ApcScene,
+) {
+    let (label, scope) = BUILT_IN_TAG;
+    let Some(style) = theme.try_get(scope) else {
+        return;
+    };
+    let label_cells = label.chars().count() as u16;
+    let cells = source_tag_width(label, theme).div_ceil(16).max(label_cells);
+    if x.saturating_add(cells) >= end {
+        return;
+    }
+
+    // A dead scene ends the label one cell inside the rect it paints into, so
+    // a rect one cell wider than the label puts the label where the live box
+    // starts.
+    let rect = Rect::new(x, row, label_cells + 1, 1);
+    paint_source_tag(buf, rect, 0, label, style, theme, scene);
+}
+
+/// The help of `entry` as doc-region lines, each a run of styled spans.
+///
+/// The first line names the command in bold and its aliases after a blank
+/// cell, and [`paint_doc_lines`] ends it in the command's Source Tag. The
+/// [`usage_line`] follows, then the long description wrapped to `width`, and
+/// last the action the command runs with the keys of `keys` that reach it.
+/// The argument stage names the parameter that it collects, so no line names
+/// a parameter.
+fn doc_lines(
+    entry: &RegistryEntry,
+    keys: &ActionKeys,
+    width: usize,
+    theme: &crate::theme::Theme,
+) -> Vec<Vec<(String, Style)>> {
+    let text = theme.get(crate::theme::scope::UI_TEXT);
+    let muted = theme.get(crate::theme::scope::UI_TEXT_MUTED);
+    let dim = theme.get(crate::theme::scope::UI_TEXT_DIM);
+    let key_label = theme.get(crate::theme::scope::UI_KEY_LABEL);
+
+    let mut name = vec![(
+        entry.command_name.clone(),
+        text.add_modifier(Modifier::BOLD),
+    )];
     let aliases = entry.def.aliases();
     if !aliases.is_empty() {
-        lines.push(format!("alias: {}", aliases.join(", ")));
+        name.push((format!(" {}", aliases.join(", ")), muted));
     }
-    let params = entry.def.params();
+
+    let mut lines = vec![name, vec![(usage_line(entry), text)]];
     lines.extend(
-        params
-            .iter()
-            .map(|param| format!("  {}  {}", param.name, param.description)),
+        wrap_text(entry.def.long_desc(), width)
+            .into_iter()
+            .map(|line| vec![(line, dim)]),
     );
-    if !params.is_empty() {
-        lines.push(String::new());
+
+    let action = entry.def.name();
+    let mut runs = vec![
+        ("runs action ".to_owned(), muted),
+        (action.to_owned(), key_label),
+    ];
+    if let Some(bound) = keys.get(action).filter(|bound| !bound.is_empty()) {
+        runs.push((" \u{b7} bound to ".to_owned(), muted));
+        runs.push((bound.join(", "), key_label));
     }
-    lines.extend(wrap_text(entry.def.long_desc(), width));
+    lines.push(runs);
     lines
 }
 
@@ -1074,11 +1143,12 @@ fn paint_source_tag(
 mod tests {
     use super::{
         count_status, doc_lines, grouped, input_spans, paint_doc_lines, paint_palette_rows,
-        palette_filter_layout, render_command_palette, usage_line, DOC_ROWS, ISLAND_BOTTOM,
-        ISLAND_GAP, ISLAND_SIDE, ISLAND_TOP, LIST_ROWS,
+        palette_filter_layout, render_command_palette, usage_line, wrap_text, DOC_ROWS,
+        ISLAND_BOTTOM, ISLAND_GAP, ISLAND_SIDE, ISLAND_TOP, LIST_ROWS,
     };
     use crate::{
         command_palette::ResolvedCommand,
+        keymap::ActionKeys,
         render::editor::ResolvedChrome,
         test_fixture::{plate_islands, row_rules},
         theme::Theme,
@@ -1564,31 +1634,77 @@ mod tests {
         let area = Rect::new(0, 0, 40, 3);
         let doc = Rect::new(2, 1, 20, 1);
         let mut buf = Buffer::empty(area);
-        paint_doc_lines(&mut buf, doc, &["x".repeat(60)], Style::default());
+        let lines = [vec![("x".repeat(60), Style::default())]];
+        paint_doc_lines(
+            &mut buf,
+            doc,
+            &lines,
+            &Theme::empty(),
+            &mut stoat_widgets::ApcScene::new(),
+        );
         let painted: Vec<u16> = (0..area.width)
             .filter(|&x| buf[(x, 1)].symbol() == "x")
             .collect();
         assert_eq!(painted, (doc.x + 1..doc.x + doc.width).collect::<Vec<_>>());
     }
 
-    /// A command's doc opens with its usage, its aliases, one line per
-    /// parameter, and a blank line before its long description.
+    /// A command's doc names the command and its aliases, reads its usage line
+    /// and its long description, and ends in the action that it runs with the
+    /// keys bound to it, or with the action alone where no key reaches it.
     #[test]
-    fn a_doc_reads_usage_aliases_and_parameters_before_the_description() {
+    fn a_doc_reads_the_name_the_usage_the_description_and_the_action() {
         let entry = registry::lookup_alias("git log").expect("a command");
-        let param = &entry.def.params()[0];
-        let lines = doc_lines(entry, 60);
+        let texts = |keys: &ActionKeys| -> Vec<Vec<String>> {
+            doc_lines(entry, keys, 60, &Theme::empty())
+                .into_iter()
+                .map(|line| line.into_iter().map(|(text, _)| text).collect())
+                .collect()
+        };
+        let line =
+            |parts: &[&str]| -> Vec<String> { parts.iter().map(|part| part.to_string()).collect() };
+        let bound = ActionKeys::from([("GitLs".to_owned(), vec!["Spc g l".to_owned()])]);
+
+        let mut expected = vec![line(&["git log", " git ls"]), line(&["git log [rev]"])];
+        expected.extend(
+            wrap_text(entry.def.long_desc(), 60)
+                .into_iter()
+                .map(|text| vec![text]),
+        );
+        expected.push(line(&[
+            "runs action ",
+            "GitLs",
+            " \u{b7} bound to ",
+            "Spc g l",
+        ]));
         assert_eq!(
-            (&lines[..4], lines.len() > 4),
-            (
-                &[
-                    "git log [rev]".to_string(),
-                    "alias: git ls".to_string(),
-                    format!("  rev  {}", param.description),
-                    String::new(),
-                ][..],
-                true,
-            ),
+            (texts(&bound), texts(&ActionKeys::new()).last().cloned()),
+            (expected, Some(line(&["runs action ", "GitLs"]))),
+        );
+    }
+
+    /// The doc's first line ends in the Source Tag one cell after its text, in
+    /// cells under a dead scene. A doc where the tag does not end one cell
+    /// inside the right edge draws no tag.
+    #[test]
+    fn a_doc_ends_its_first_line_in_the_source_tag() {
+        let entry = registry::lookup_alias("open").expect("a command");
+        let first_row = |width: u16| {
+            let theme = tag_theme();
+            let lines = doc_lines(entry, &ActionKeys::new(), usize::from(width), &theme);
+            let mut buf = Buffer::empty(Rect::new(0, 0, 40, 6));
+            let mut scene = stoat_widgets::ApcScene::new();
+            scene.set_live(false);
+            let doc = Rect::new(0, 0, width, 6);
+            paint_doc_lines(&mut buf, doc, &lines, &theme, &mut scene);
+            row_text(&buf, 0)
+        };
+
+        assert_eq!(
+            [first_row(40), first_row(22)],
+            [
+                placed(40, &[(1, "open o, edit"), (14, "built-in")]),
+                placed(40, &[(1, "open o, edit")]),
+            ],
         );
     }
 
