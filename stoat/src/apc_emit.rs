@@ -2308,6 +2308,7 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
         let selected = &palette.selected;
         let name_offset = palette.name_offset();
         let (namespace, keys) = (palette.namespace, &palette.keys);
+        let specs = &stoat.cli_specs;
         let region = PoolRegionCommand {
             pool: crate::smooth_scroll::non_pane_pool::PALETTE,
             top: list.y,
@@ -2351,6 +2352,7 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
                     name_offset,
                     namespace,
                     keys,
+                    specs,
                     page,
                     theme,
                     region.width,

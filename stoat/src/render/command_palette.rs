@@ -8,6 +8,7 @@ use crate::{
     input_history,
     input_view::InputView,
     keymap::ActionKeys,
+    markdown::StyledLine,
     render::{
         chrome::{PlateColors, ISLAND_BOTTOM, ISLAND_GAP, ISLAND_SIDE, ISLAND_TOP},
         cmd_line::{self, CmdLine, CmdStatus},
@@ -16,7 +17,11 @@ use crate::{
         text::{pre_wrap_rows, wrap_text, write_str, write_str_clipped},
     },
     theme::TypeRole,
-    user_command::{pick, CommandSet, RunSpec},
+    user_command::{
+        pick,
+        run::{self, CliSpecState, LoadedCli},
+        CommandSet, RunSpec, UserCommand,
+    },
     workspace::Workspace,
 };
 use ratatui::{
@@ -25,7 +30,7 @@ use ratatui::{
     style::{Modifier, Style},
     widgets::{Block, Borders, StatefulWidget},
 };
-use std::{borrow::Cow, ops::Range, path::Path};
+use std::{borrow::Cow, collections::HashMap, ops::Range, path::Path};
 use stoat_action::{registry::RegistryEntry, ValueSource};
 use stoat_widgets::{
     bar::Bar,
@@ -386,7 +391,8 @@ fn arg_body_rows(inner: Rect, header_rows: u16) -> Option<(u16, u16)> {
 /// [`render_palette_history`] paints it. The ages of its lines count from
 /// `now`, the clock in unix seconds. Otherwise the palette shows the argument
 /// picker, the free-typed argument's hint, or the command list, by the stage
-/// that the input names.
+/// that the input names. The signature and the doc of a `cli` command read
+/// its loaded help in `specs`.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn render_command_palette(
     palette: &mut CommandPalette,
@@ -398,6 +404,7 @@ pub(crate) fn render_command_palette(
     zoom: i8,
     preview_min: u16,
     now: i64,
+    specs: &HashMap<String, CliSpecState>,
     buf: &mut Buffer,
     scene: &mut stoat_widgets::ApcScene,
 ) {
@@ -435,7 +442,9 @@ pub(crate) fn render_command_palette(
     if let Some(command) = palette.command.clone()
         && palette.arg_source().is_none()
     {
-        render_palette_free_arg(palette, &command, ws, home, theme, area, zoom, buf, scene);
+        render_palette_free_arg(
+            palette, &command, ws, home, theme, area, zoom, specs, buf, scene,
+        );
         return;
     }
 
@@ -458,6 +467,7 @@ pub(crate) fn render_command_palette(
         palette.resolved.as_ref(),
         &status,
         &palette.keys,
+        specs,
         ws,
         home,
         theme,
@@ -648,6 +658,7 @@ fn render_palette_free_arg(
     theme: &crate::theme::Theme,
     area: Rect,
     zoom: i8,
+    specs: &HashMap<String, CliSpecState>,
     buf: &mut Buffer,
     scene: &mut stoat_widgets::ApcScene,
 ) {
@@ -694,7 +705,7 @@ fn render_palette_free_arg(
         ),
         PaletteCommand::User(_) => (palette.user_arg().map(|arg| arg.name.clone()), None),
     };
-    let usage = usage_line(command);
+    let usage = usage_line(command, specs);
     write_str_clipped(buf, inner.x + 1, body_top, &usage, text_style, end_x);
     if let Some(hint) = hint
         && body_top + 1 < body_bottom
@@ -1486,7 +1497,8 @@ fn grouped(count: usize) -> String {
 /// region's last row, so the doc never scrolls past its end.
 ///
 /// The key line names the keys of the list that `namespace` names, as
-/// [`palette_footer_parts`] gives them under `scope`.
+/// [`palette_footer_parts`] gives them under `scope`. The rows and the doc of
+/// a `cli` command read its loaded help in `specs`.
 #[allow(clippy::too_many_arguments)]
 fn render_palette_filter(
     input: &InputView,
@@ -1504,6 +1516,7 @@ fn render_palette_filter(
     resolved: Option<&ResolvedCommand>,
     status: &[(String, Style)],
     keys: &ActionKeys,
+    specs: &HashMap<String, CliSpecState>,
     ws: &mut Workspace,
     home: Option<&Path>,
     theme: &crate::theme::Theme,
@@ -1558,6 +1571,7 @@ fn render_palette_filter(
         name_offset,
         namespace,
         keys,
+        specs,
         list,
         scroll,
         theme,
@@ -1580,16 +1594,17 @@ fn render_palette_filter(
         }
         let width = usize::from(inner.width.saturating_sub(1));
         let entry = filtered.get(selected);
-        let lines = entry
-            .map(|entry| doc_lines(entry, keys, width, theme))
+        let (lines, note) = entry
+            .map(|entry| doc_lines(entry, keys, width, theme, specs))
             .unwrap_or_default();
         let last_top = lines.len().saturating_sub(usize::from(doc.height));
         *doc_scroll = (*doc_scroll).min(last_top as u16);
 
-        // The Source Tag ends the name line, which a scroll moves off the doc.
+        // The Source Tag and its note end the name line, which a scroll moves
+        // off the doc.
         let tag = entry.map(doc_tag).filter(|_| *doc_scroll == 0);
         let shown = &lines[usize::from(*doc_scroll)..];
-        paint_doc_lines(buf, doc, shown, tag, theme, scene);
+        paint_doc_lines(buf, doc, shown, tag, &note, theme, scene);
     }
 
     let key_stage = match namespace {
@@ -1706,12 +1721,15 @@ fn palette_footer_parts(stage: KeyStage<'_>, theme: &crate::theme::Theme) -> Pal
 ///
 /// The first line ends in `tag` one cell after its text, as [`paint_doc_tag`]
 /// places it. The tag is a Source Tag's label and color scope, as
-/// [`doc_tag`] gives them.
+/// [`doc_tag`] gives them. The spans of `note` follow the tag one cell after
+/// its box, or one cell after the text when no tag draws, and only while
+/// `tag` is on show.
 fn paint_doc_lines(
     buf: &mut Buffer,
     doc: Rect,
-    lines: &[Vec<(String, Style)>],
+    lines: &[StyledLine],
     tag: Option<(&str, &str)>,
+    note: &[(String, Style)],
     theme: &crate::theme::Theme,
     scene: &mut stoat_widgets::ApcScene,
 ) {
@@ -1724,14 +1742,13 @@ fn paint_doc_lines(
         }
 
         if let Some((label, scope)) = tag.filter(|_| row == doc.y) {
-            paint_doc_tag(
-                buf,
-                (x.saturating_add(1), row, end),
-                label,
-                scope,
-                theme,
-                scene,
-            );
+            let tag_x = x.saturating_add(1);
+            let tag_end = paint_doc_tag(buf, (tag_x, row, end), label, scope, theme, scene);
+            let mut x = tag_end.map_or(tag_x, |tag_end| tag_end.saturating_add(1));
+            for (text, style) in note {
+                write_str_clipped(buf, x, row, text, *style, end);
+                x = x.saturating_add(text.chars().count() as u16);
+            }
         }
     }
 }
@@ -1739,7 +1756,9 @@ fn paint_doc_lines(
 /// Paint the Source Tag `label` in the colors of `scope` on a doc region's
 /// first line, from cell `x` of `row`, as [`paint_source_tag`] draws it.
 ///
-/// A theme that leaves `scope` unset draws no tag. A tag that does not end one
+/// Answers the first cell past the tag's box, whose width
+/// [`source_tag_width`] gives, or `None` for a tag that does not draw. A
+/// theme that leaves `scope` unset draws no tag. A tag that does not end one
 /// cell inside `end`, the region's right edge, does not draw.
 fn paint_doc_tag(
     buf: &mut Buffer,
@@ -1748,14 +1767,12 @@ fn paint_doc_tag(
     scope: &str,
     theme: &crate::theme::Theme,
     scene: &mut stoat_widgets::ApcScene,
-) {
-    let Some(style) = theme.try_get(scope) else {
-        return;
-    };
+) -> Option<u16> {
+    let style = theme.try_get(scope)?;
     let label_cells = label.chars().count() as u16;
     let cells = source_tag_width(label, theme).div_ceil(16).max(label_cells);
     if x.saturating_add(cells) >= end {
-        return;
+        return None;
     }
 
     // A dead scene ends the label one cell inside the rect it paints into, so
@@ -1763,6 +1780,7 @@ fn paint_doc_tag(
     // starts.
     let rect = Rect::new(x, row, label_cells + 1, 1);
     paint_source_tag(buf, rect, 0, label, style, theme, scene);
+    Some(x + cells)
 }
 
 /// The help of `command` as doc-region lines, each a run of styled spans.
@@ -1784,6 +1802,10 @@ fn paint_doc_tag(
 /// as the label of its Source Tag, ` command`, a space, U+00B7, a space, and
 /// `config.stcfg:<line>`.
 ///
+/// Beside the lines, the answer holds the note that stands after the Source
+/// Tag, which [`cli_note`] words for a `cli` command from its help in
+/// `specs`. Every other command has no note.
+///
 /// The argument stage names the parameter that it collects, so no line names
 /// a parameter.
 fn doc_lines(
@@ -1791,12 +1813,13 @@ fn doc_lines(
     keys: &ActionKeys,
     width: usize,
     theme: &crate::theme::Theme,
-) -> Vec<Vec<(String, Style)>> {
+    specs: &HashMap<String, CliSpecState>,
+) -> (Vec<StyledLine>, StyledLine) {
     let text = theme.get(crate::theme::scope::UI_TEXT);
     let muted = theme.get(crate::theme::scope::UI_TEXT_MUTED);
     let dim = theme.get(crate::theme::scope::UI_TEXT_DIM);
     let key_label = theme.get(crate::theme::scope::UI_KEY_LABEL);
-    let usage = vec![(usage_line(command), text)];
+    let usage = vec![(usage_line(command, specs), text)];
     let entry = match command {
         PaletteCommand::Action(entry) => *entry,
         PaletteCommand::User(user) => {
@@ -1812,7 +1835,7 @@ fn doc_lines(
             let (label, _) = doc_tag(command);
             let defined = format!("{label} command \u{b7} config.stcfg:{}", user.line);
             lines.push(vec![(defined, muted)]);
-            return lines;
+            return (lines, cli_note(user, specs, muted));
         },
     };
     let internal = !entry.is_command() && !is_action_row(entry);
@@ -1839,7 +1862,7 @@ fn doc_lines(
             .map(|line| vec![(line, dim)]),
     );
     if is_action_row(entry) {
-        return lines;
+        return (lines, Vec::new());
     }
 
     let action = entry.def.name();
@@ -1851,7 +1874,7 @@ fn doc_lines(
                 (bound.join(", "), key_label),
             ]);
         }
-        return lines;
+        return (lines, Vec::new());
     }
 
     let mut runs = vec![
@@ -1863,7 +1886,46 @@ fn doc_lines(
         runs.push((bound.join(", "), key_label));
     }
     lines.push(runs);
-    lines
+    (lines, Vec::new())
+}
+
+/// The note that stands after the Source Tag on the first line of `user`'s
+/// doc, in `muted`, or no span for a command that wraps no tool.
+///
+/// The note reads `wrapped from <source>`, where the source is the help run
+/// of the tool. Once the help in `specs` lands, a space, U+00B7, a space, and
+/// the tool's version follow, when the version run gave one. A tool that the
+/// load did not find reads `<tool>: not found`.
+fn cli_note(user: &UserCommand, specs: &HashMap<String, CliSpecState>, muted: Style) -> StyledLine {
+    let RunSpec::Cli { tool } = &user.run else {
+        return Vec::new();
+    };
+    let text = match loaded_cli(user, specs) {
+        Some(loaded) if loaded.missing => format!("{tool}: not found"),
+        Some(LoadedCli {
+            source,
+            version: Some(version),
+            ..
+        }) => format!("wrapped from {source} \u{b7} {version}"),
+        Some(loaded) => format!("wrapped from {}", loaded.source),
+        None => format!("wrapped from {}", run::help_source(tool)),
+    };
+    vec![(text, muted)]
+}
+
+/// The help of the tool that `user` wraps, as it landed in `specs`, or `None`
+/// for a command that wraps no tool and for a help that has not landed.
+fn loaded_cli<'a>(
+    user: &UserCommand,
+    specs: &'a HashMap<String, CliSpecState>,
+) -> Option<&'a LoadedCli> {
+    if !matches!(user.run, RunSpec::Cli { .. }) {
+        return None;
+    }
+    match specs.get(&user.name)? {
+        CliSpecState::Ready(loaded) => Some(loaded),
+        CliSpecState::Loading => None,
+    }
 }
 
 /// The text that names `command` in the palette's input, as [`typed_head`]
@@ -1871,9 +1933,9 @@ fn doc_lines(
 ///
 /// An internal action reads under the `action` token, as in `action undo`,
 /// because only that form runs it.
-fn usage_line(command: &PaletteCommand) -> String {
+fn usage_line(command: &PaletteCommand, specs: &HashMap<String, CliSpecState>) -> String {
     let head = typed_head(command);
-    let signature = signature(command);
+    let signature = signature(command, specs);
     match signature.is_empty() {
         true => head,
         false => format!("{head} {signature}"),
@@ -1882,12 +1944,16 @@ fn usage_line(command: &PaletteCommand) -> String {
 
 /// Each parameter of `command`, as `<name>` when the parameter is required and
 /// `[name]` when it is optional, one space apart. A user command reads as its
-/// [`UserCommand::signature`](crate::user_command::UserCommand::signature)
-/// writes it.
-fn signature(command: &PaletteCommand) -> String {
+/// [`UserCommand::signature`] writes it, and a `cli` command reads the usage
+/// of its help in `specs` once that help lands with one.
+fn signature(command: &PaletteCommand, specs: &HashMap<String, CliSpecState>) -> String {
     let entry = match command {
         PaletteCommand::Action(entry) => entry,
-        PaletteCommand::User(user) => return user.signature(),
+        PaletteCommand::User(user) => {
+            return loaded_cli(user, specs)
+                .and_then(|loaded| loaded.spec.usage.clone())
+                .unwrap_or_else(|| user.signature());
+        },
     };
     let params: Vec<String> = entry
         .def
@@ -1912,12 +1978,12 @@ fn signature(command: &PaletteCommand) -> String {
 /// `panels`, which a pool page passes false.
 ///
 /// A row reads the command's name in bold, its first alias, its
-/// [`signature`], and its short description, one cell apart, and ends in its
-/// Source Tag as [`paint_source_tag`] draws it. The name and alias columns
-/// take [`NAME_COLUMNS`] and [`ALIAS_COLUMNS`] cells and grow to the longest
-/// name and alias on show, because a cut name names nothing. The signature
-/// clips at [`SIGNATURE_COLUMNS`], because the doc region shows the whole
-/// usage line.
+/// [`signature`] with the loaded help of `specs`, and its short description,
+/// one cell apart, and ends in its Source Tag as [`paint_source_tag`] draws
+/// it. The name and alias columns take [`NAME_COLUMNS`] and [`ALIAS_COLUMNS`]
+/// cells and grow to the longest name and alias on show, because a cut name
+/// names nothing. The signature clips at [`SIGNATURE_COLUMNS`], because the
+/// doc region shows the whole usage line.
 ///
 /// The name of an entry that is no command, an internal action or the
 /// `action` row, draws in `ui.cmd.action`. Under a live scene a 1 px rule in
@@ -1941,6 +2007,7 @@ pub(crate) fn paint_palette_rows(
     name_offset: usize,
     namespace: Namespace,
     keys: &ActionKeys,
+    specs: &HashMap<String, CliSpecState>,
     area: Rect,
     start_row: usize,
     theme: &crate::theme::Theme,
@@ -2055,7 +2122,7 @@ pub(crate) fn paint_palette_rows(
 
         let signature_x = alias_x.saturating_add(alias_cols + 1);
         let signature_end = signature_x.saturating_add(SIGNATURE_COLUMNS).min(end_x);
-        let signature = signature(entry);
+        let signature = signature(entry, specs);
         write_str_clipped(
             buf,
             signature_x,
@@ -2362,6 +2429,7 @@ mod tests {
         ISLAND_TOP, LIST_ROWS,
     };
     use crate::{
+        cli_spec::{self, RG_HELP},
         command_palette::{
             action_row, ArgList, ArgRow, Availability, Namespace, PaletteCommand, PickLoad,
             PickState, ResolvedCommand,
@@ -2372,7 +2440,10 @@ mod tests {
         render::editor::ResolvedChrome,
         test_fixture::{plate_islands, row_rules},
         theme::Theme,
-        user_command::{CommandSet, PickSpec},
+        user_command::{
+            run::{CliSpecState, LoadedCli},
+            CommandSet, PickSpec,
+        },
     };
     use ratatui::{
         buffer::Buffer,
@@ -2495,6 +2566,7 @@ mod tests {
             0,
             Namespace::Commands,
             &ActionKeys::new(),
+            &HashMap::new(),
             list,
             0,
             &Theme::empty(),
@@ -2639,9 +2711,10 @@ mod tests {
     #[test]
     fn a_usage_line_brackets_each_parameter_by_whether_it_is_required() {
         let usage = |name| {
-            usage_line(&PaletteCommand::Action(
-                registry::lookup_alias(name).expect("a command"),
-            ))
+            usage_line(
+                &PaletteCommand::Action(registry::lookup_alias(name).expect("a command")),
+                &HashMap::new(),
+            )
         };
         assert_eq!(
             ["git log", "git review", "quit"].map(usage),
@@ -2673,6 +2746,7 @@ mod tests {
             name_offset,
             Namespace::Commands,
             &ActionKeys::new(),
+            &HashMap::new(),
             list,
             0,
             theme,
@@ -2854,6 +2928,7 @@ mod tests {
             0,
             Namespace::Commands,
             &ActionKeys::new(),
+            &HashMap::new(),
             list,
             0,
             &theme,
@@ -2893,6 +2968,7 @@ mod tests {
                 0,
                 Namespace::Commands,
                 &ActionKeys::new(),
+                &HashMap::new(),
                 list,
                 0,
                 &theme,
@@ -2934,11 +3010,12 @@ mod tests {
     /// description with no `runs action` line.
     #[test]
     fn the_action_row_doc_ends_in_its_description() {
-        let lines = doc_lines(
+        let (lines, _) = doc_lines(
             &PaletteCommand::Action(action_row()),
             &ActionKeys::new(),
             400,
             &Theme::empty(),
+            &HashMap::new(),
         );
         let texts: Vec<Vec<String>> = lines
             .into_iter()
@@ -3026,6 +3103,7 @@ mod tests {
             0,
             Namespace::Actions,
             keys,
+            &HashMap::new(),
             list,
             0,
             &Theme::empty(),
@@ -3086,17 +3164,19 @@ mod tests {
             ("u, C-z".to_owned(), fg(3)),
         ]);
 
+        let specs = HashMap::new();
         assert_eq!(
             (
-                doc_lines(&PaletteCommand::Action(entry), &bound, 60, &theme),
+                doc_lines(&PaletteCommand::Action(entry), &bound, 60, &theme, &specs),
                 doc_lines(
                     &PaletteCommand::Action(entry),
                     &ActionKeys::new(),
                     60,
-                    &theme
+                    &theme,
+                    &specs
                 ),
             ),
-            (keyed, described),
+            ((keyed, Vec::new()), (described, Vec::new())),
         );
     }
 
@@ -3346,6 +3426,7 @@ mod tests {
             doc,
             &lines,
             None,
+            &[],
             &Theme::empty(),
             &mut stoat_widgets::ApcScene::new(),
         );
@@ -3362,10 +3443,17 @@ mod tests {
     fn a_doc_reads_the_name_the_usage_the_description_and_the_action() {
         let entry = registry::lookup_alias("git log").expect("a command");
         let texts = |keys: &ActionKeys| -> Vec<Vec<String>> {
-            doc_lines(&PaletteCommand::Action(entry), keys, 60, &Theme::empty())
-                .into_iter()
-                .map(|line| line.into_iter().map(|(text, _)| text).collect())
-                .collect()
+            doc_lines(
+                &PaletteCommand::Action(entry),
+                keys,
+                60,
+                &Theme::empty(),
+                &HashMap::new(),
+            )
+            .0
+            .into_iter()
+            .map(|line| line.into_iter().map(|(text, _)| text).collect())
+            .collect()
         };
         let line =
             |parts: &[&str]| -> Vec<String> { parts.iter().map(|part| part.to_string()).collect() };
@@ -3397,11 +3485,12 @@ mod tests {
         let entry = registry::lookup_alias("open").expect("a command");
         let first_row = |width: u16| {
             let theme = tag_theme();
-            let lines = doc_lines(
+            let (lines, note) = doc_lines(
                 &PaletteCommand::Action(entry),
                 &ActionKeys::new(),
                 usize::from(width),
                 &theme,
+                &HashMap::new(),
             );
             let mut buf = Buffer::empty(Rect::new(0, 0, 40, 6));
             let mut scene = stoat_widgets::ApcScene::new();
@@ -3412,6 +3501,7 @@ mod tests {
                 doc,
                 &lines,
                 source_tag(&PaletteCommand::Action(entry)),
+                &note,
                 &theme,
                 &mut scene,
             );
@@ -3471,6 +3561,7 @@ mod tests {
             0,
             preview_min,
             0,
+            &HashMap::new(),
             &mut buf,
             &mut scene,
         );
@@ -3507,6 +3598,7 @@ mod tests {
             0,
             crate::render::picker::preview_min_columns(None),
             0,
+            &HashMap::new(),
             &mut buf,
             &mut scene,
         );
@@ -3563,6 +3655,7 @@ mod tests {
             0,
             Namespace::Commands,
             &ActionKeys::new(),
+            &HashMap::new(),
             list,
             0,
             theme,
@@ -3632,18 +3725,26 @@ mod tests {
         );
     }
 
+    /// The text of each line of `command`'s doc under `specs`, and the text of
+    /// the note after its Source Tag.
+    fn doc_texts(
+        command: &PaletteCommand,
+        specs: &HashMap<String, CliSpecState>,
+    ) -> (Vec<String>, String) {
+        let (lines, note) = doc_lines(command, &ActionKeys::new(), 60, &Theme::empty(), specs);
+        let text = |line: &[(String, Style)]| -> String {
+            line.iter().map(|(text, _)| text.as_str()).collect()
+        };
+        (lines.iter().map(|line| text(line)).collect(), text(&note))
+    }
+
     /// The last line names the Source Tag of the command, `config` for a block
     /// command and `cli` for a wrapped tool.
     #[test]
     fn the_doc_of_a_user_command_names_where_it_is_defined() {
-        let texts = |command: PaletteCommand| -> Vec<String> {
-            doc_lines(&command, &ActionKeys::new(), 60, &Theme::empty())
-                .iter()
-                .map(|line| line.iter().map(|(text, _)| text.as_str()).collect())
-                .collect()
-        };
+        let specs = HashMap::new();
         assert_eq!(
-            [texts(greet()), texts(rg())],
+            [doc_texts(&greet(), &specs).0, doc_texts(&rg(), &specs).0],
             [
                 [
                     "greet",
@@ -3657,6 +3758,39 @@ mod tests {
                     "search the tree",
                     "cli command \u{b7} config.stcfg:1"
                 ],
+            ],
+        );
+    }
+
+    /// The note after a `cli` command's Source Tag names where its help comes
+    /// from, and the tool's version once the help lands. The usage line then
+    /// reads the help's usage, and `[args...]` before the help lands.
+    #[test]
+    fn the_doc_of_a_wrap_command_names_the_help_source_and_version() {
+        let ready = HashMap::from([(
+            "rg".to_owned(),
+            CliSpecState::Ready(Arc::new(LoadedCli {
+                spec: cli_spec::parse_help(RG_HELP),
+                source: "rg --help".to_owned(),
+                version: Some("ripgrep 14.1.0".to_owned()),
+                missing: false,
+            })),
+        )]);
+        let usage_and_note = |specs| {
+            let (lines, note) = doc_texts(&rg(), specs);
+            (lines[1].clone(), note)
+        };
+        assert_eq!(
+            [usage_and_note(&ready), usage_and_note(&HashMap::new())],
+            [
+                (
+                    "rg [flags] <pattern> [path...]".to_owned(),
+                    "wrapped from rg --help \u{b7} ripgrep 14.1.0".to_owned()
+                ),
+                (
+                    "rg [args...]".to_owned(),
+                    "wrapped from rg --help".to_owned()
+                ),
             ],
         );
     }

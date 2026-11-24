@@ -15,6 +15,7 @@ mod buffer_registry;
 pub(crate) mod button_repeat;
 mod checkout_confirm;
 pub mod claude_plugin;
+mod cli_spec;
 mod code_index;
 pub mod command_palette;
 mod commit_graph;

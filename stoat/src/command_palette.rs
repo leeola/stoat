@@ -2549,6 +2549,7 @@ mod tests {
         input_history::InputHistory,
         picker::{PreviewSource, PREVIEW_BYTE_LIMIT, PREVIEW_DIR_LIMIT},
         test_harness::{editor, TestHarness},
+        user_command::run::CliSpecState,
     };
     use crossterm::event::Event;
     use ratatui::{
@@ -3468,6 +3469,69 @@ mod tests {
             _ => None,
         };
         assert_eq!(run, Some(("st".to_owned(), Vec::new(), "st".to_owned())));
+    }
+
+    /// The user command `rg`, which wraps ripgrep.
+    const RG: &str = r#"command rg = cli("rg");"#;
+
+    /// The root list loads no help. Argument entry loads it, and a later
+    /// palette loads it no more.
+    #[test]
+    fn the_spec_loads_when_argument_entry_opens_and_once() {
+        let mut h = Stoat::test();
+        h.stoat.reload_user_config(RG);
+        type_settled(&mut h, ":");
+        let at_root = shell_lines(&h);
+        type_settled(&mut h, "rg ");
+        let in_entry = shell_lines(&h);
+        h.type_keys("escape");
+        type_settled(&mut h, ":rg ");
+
+        let loads = vec!["rg --help".to_owned(), "rg --version".to_owned()];
+        assert_eq!(
+            (at_root, in_entry, shell_lines(&h)),
+            (Vec::new(), loads.clone(), loads),
+        );
+    }
+
+    #[test]
+    fn a_config_reload_drops_the_loaded_specs() {
+        let mut h = Stoat::test();
+        h.stoat.reload_user_config(RG);
+        type_settled(&mut h, ":rg ");
+        let loaded = matches!(h.stoat.cli_specs.get("rg"), Some(CliSpecState::Ready(_)));
+        h.stoat.reload_user_config(RG);
+        assert_eq!((loaded, h.stoat.cli_specs.len()), (true, 0));
+    }
+
+    /// The note after the Source Tag of a tool that the shell does not find
+    /// reads `<tool>: not found`, and the command still runs its line as
+    /// typed.
+    #[test]
+    fn a_missing_tool_reads_not_found_and_still_runs() {
+        let mut h = TestHarness::with_size(120, 30);
+        h.stoat
+            .reload_user_config(r#"command nope = cli("nope", output: notify);"#);
+        h.fake_shell.set_response(
+            "nope --help",
+            ShellOutput {
+                stdout: Vec::new(),
+                stderr: b"sh: nope: not found\n".to_vec(),
+                exit_code: 127,
+            },
+        );
+        type_settled(&mut h, ":nope ");
+        h.type_keys("backspace");
+        let _ = h.snapshot();
+        let doc = h.rendered_text();
+        type_settled(&mut h, " x");
+        enter_settled(&mut h);
+
+        assert_eq!(
+            (doc.contains("nope: not found"), shell_lines(&h)),
+            (true, vec!["nope --help".to_owned(), "nope x".to_owned()]),
+            "the palette reads {doc}",
+        );
     }
 
     #[test]

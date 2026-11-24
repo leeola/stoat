@@ -9,7 +9,7 @@ use crate::{
     host::FsHost,
     keymap_state::StoatKeymapState,
     picker::{PathPicker, PendingScan, PreviewSource},
-    user_command::{self, TextDefault},
+    user_command::{self, run::CliSpecState, RunSpec, TextDefault},
     walkthrough,
 };
 use std::{
@@ -219,7 +219,8 @@ pub(super) fn open_palette_seeded(stoat: &mut Stoat, seed: &str) -> UpdateEffect
 /// the box keeps the size of the command list for every recalled line.
 ///
 /// The sync also sets the ghost of a user command's empty argument, as
-/// [`sync_arg_ghost`] reads it.
+/// [`sync_arg_ghost`] reads it, and starts the load of a wrapped tool's
+/// help, as [`sync_cli_spec`] does.
 ///
 /// Lives here rather than on [`crate::command_palette::CommandPalette`] because
 /// spawning the walk needs [`Stoat`]-level resources (the executor, fs host, and
@@ -246,6 +247,7 @@ pub(crate) fn sync_palette_picker(stoat: &mut Stoat) {
     };
     sync_arg_ghost(stoat);
     sync_pick(stoat);
+    sync_cli_spec(stoat);
     let Some((source, tail)) = resolved else {
         return;
     };
@@ -344,6 +346,31 @@ pub(crate) fn sync_palette_picker(stoat: &mut Stoat) {
     }
 
     spawn_arg_picker_scans(stoat, pending);
+}
+
+/// Start the load of the help of the `cli` command whose argument entry the
+/// palette's input opens, the first time the input opens it.
+///
+/// The load runs once for each command while the config stays, as
+/// [`user_command::run::load_cli`] reads it, and [`Stoat::cli_specs`] marks
+/// it `Loading` until [`user_command::run::pump`] stores its help.
+fn sync_cli_spec(stoat: &mut Stoat) {
+    let wanted = match stoat
+        .command_palette
+        .as_ref()
+        .and_then(|palette| palette.command.as_ref())
+    {
+        Some(PaletteCommand::User(command)) => match &command.run {
+            RunSpec::Cli { tool } => Some((command.name.clone(), tool.clone())),
+            RunSpec::Step(_) => None,
+        },
+        _ => None,
+    };
+    let Some((name, tool)) = wanted.filter(|(name, _)| !stoat.cli_specs.contains_key(name)) else {
+        return;
+    };
+    stoat.cli_specs.insert(name.clone(), CliSpecState::Loading);
+    user_command::run::spawn_cli_load(stoat, name, tool);
 }
 
 /// Start, narrow, or drop the palette's pick list for the argument in entry.

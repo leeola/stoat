@@ -3,11 +3,12 @@ use crate::{
     action_handlers,
     app::{MessageKind, Stoat, UpdateEffect},
     buffer_lifecycle,
+    cli_spec::{self, CliSpec},
     command_palette::{ArgRow, PickLoad},
-    host::ShellOutput,
+    host::{ShellHost, ShellOutput},
     keymap::ResolvedAction,
     location_picker::{self, LocationEntry, ParsedLocation},
-    picker::PREVIEW_BYTE_LIMIT,
+    picker::{self, PREVIEW_BYTE_LIMIT},
 };
 use std::{
     collections::VecDeque,
@@ -19,6 +20,9 @@ use std::{
     },
 };
 use stoat_config::{Template, Value};
+
+/// The exit code that `sh` gives a command that it does not find on `PATH`.
+const NOT_FOUND_EXIT: i32 = 127;
 
 /// The id of the next [`CommandRun`], unique in the process, so a shell result
 /// finds the run that started it.
@@ -78,6 +82,34 @@ pub(crate) enum CommandEvent {
         line: String,
         result: io::Result<ShellOutput>,
     },
+    /// The help of the wrapped tool of the `cli` command `name`.
+    CliSpec { name: String, loaded: LoadedCli },
+}
+
+/// The help of a wrapped tool, as one load reads it.
+#[derive(Debug, PartialEq)]
+pub(crate) struct LoadedCli {
+    pub(crate) spec: CliSpec,
+    /// Where the help came from, as the doc island names it, the line of
+    /// [`help_source`].
+    pub(crate) source: String,
+    /// The first line of the tool's `--version` output, or `None` for a
+    /// version run that failed or printed nothing.
+    pub(crate) version: Option<String>,
+    /// Whether the shell found no tool. The spec of a missing tool is empty,
+    /// and its command still runs lines as typed.
+    pub(crate) missing: bool,
+}
+
+/// Where the load of the help of a `cli` command's tool stands.
+///
+/// The palette starts a load the first time it parses the command with its
+/// argument entry open. The state lasts for the session, and a config reload
+/// drops it.
+pub(crate) enum CliSpecState {
+    /// The load runs on a worker.
+    Loading,
+    Ready(Arc<LoadedCli>),
 }
 
 /// Run `command` with `values`, one value for each of its arguments.
@@ -115,7 +147,8 @@ pub(crate) fn start(stoat: &mut Stoat, command: &UserCommand, values: Vec<String
 /// Answers whether a result landed. A step that exits 0 hands its stdout to
 /// the rest of the run. Any other result ends the run with a message that
 /// names the failure. The result of a pick list's command goes to the
-/// palette's list, as [`land_pick`] reads it.
+/// palette's list, as [`land_pick`] reads it, and a tool's help goes to
+/// [`Stoat::cli_specs`], as [`land_cli`] stores it.
 pub(crate) fn pump(stoat: &mut Stoat) -> bool {
     let events = mem::take(&mut *stoat.command_events.lock().expect("command events mutex"));
     let landed = !events.is_empty();
@@ -142,6 +175,10 @@ pub(crate) fn pump(stoat: &mut Stoat) -> bool {
                 result,
             } => {
                 land_preview(stoat, generation, line, result);
+                continue;
+            },
+            CommandEvent::CliSpec { name, loaded } => {
+                land_cli(stoat, name, loaded);
                 continue;
             },
         };
@@ -284,17 +321,44 @@ fn advance(stoat: &mut Stoat, mut run: CommandRun) -> UpdateEffect {
     effect
 }
 
-/// Run `line` through the shell host on a worker.
+/// Run `line` through the shell host on a worker, as [`spawn_job`] runs a
+/// job.
 ///
-/// The line runs in the workspace root with the project environment and
-/// `TERM=dumb`. The event that `done` makes of the result goes onto
-/// [`Stoat::command_events`]. The step runs with no terminal, because an
-/// output that reads stdout reads it apart from stderr, and a terminal merges
-/// the two.
+/// The event that `done` makes of the result goes onto
+/// [`Stoat::command_events`].
 pub(crate) fn spawn_shell_job(
     stoat: &Stoat,
     line: String,
     done: impl FnOnce(io::Result<ShellOutput>) -> CommandEvent + Send + 'static,
+) {
+    spawn_job(stoat, move |shell, root, env| {
+        done(shell.run(&line, b"", Some(root), env))
+    });
+}
+
+/// Load the help of `tool`, the wrapped tool of the `cli` command `name`, on
+/// a worker, as [`load_cli`] reads it.
+///
+/// The help lands as a [`CommandEvent::CliSpec`], which [`pump`] stores.
+pub(crate) fn spawn_cli_load(stoat: &Stoat, name: String, tool: String) {
+    spawn_job(stoat, move |shell, root, env| CommandEvent::CliSpec {
+        name,
+        loaded: load_cli(shell, &tool, root, env),
+    });
+}
+
+/// Run `job` on a worker with the shell host, the workspace root, and the
+/// environment of a command's shell line, and push the event that it answers
+/// onto [`Stoat::command_events`].
+///
+/// The environment is the project environment with `TERM=dumb`. A job runs
+/// its lines with no terminal, because an output that reads stdout reads it
+/// apart from stderr, and a terminal merges the two.
+fn spawn_job(
+    stoat: &Stoat,
+    job: impl FnOnce(&dyn ShellHost, &Path, &[(String, Option<String>)]) -> CommandEvent
+        + Send
+        + 'static,
 ) {
     let ws = stoat.active_workspace();
     let root = ws.git_root.clone();
@@ -311,15 +375,82 @@ pub(crate) fn spawn_shell_job(
 
     stoat
         .spawn_woken(async move {
-            let result = executor
-                .spawn_blocking(move || shell_host.run(&line, b"", Some(&root), &env))
+            let event = executor
+                .spawn_blocking(move || job(&*shell_host, &root, &env))
                 .await;
-            events
-                .lock()
-                .expect("command events mutex")
-                .push(done(result));
+            events.lock().expect("command events mutex").push(event);
         })
         .detach();
+}
+
+/// Read the help of the wrapped `tool` through `shell`, in `root` with `env`.
+///
+/// The load runs `<tool> --help` and then `<tool> --version`, and blocks until
+/// both end. A help run that does not start, or that exits 127 as `sh` does
+/// for a command it does not find, marks the tool as missing and runs no
+/// version. A help on stderr with nothing on stdout reads as the help, as an
+/// older tool prints it. The version is the first line of the version run's
+/// stdout that holds text, when that run exits 0.
+pub(crate) fn load_cli(
+    shell: &dyn ShellHost,
+    tool: &str,
+    root: &Path,
+    env: &[(String, Option<String>)],
+) -> LoadedCli {
+    let source = help_source(tool);
+    let help = match shell.run(&source, b"", Some(root), env) {
+        Ok(output) if output.exit_code != NOT_FOUND_EXIT => output,
+        _ => {
+            return LoadedCli {
+                spec: CliSpec::default(),
+                source,
+                version: None,
+                missing: true,
+            };
+        },
+    };
+
+    let stdout = String::from_utf8_lossy(&help.stdout);
+    let text = match stdout.trim().is_empty() {
+        true => String::from_utf8_lossy(&help.stderr),
+        false => stdout,
+    };
+    let version = shell
+        .run(&format!("{tool} --version"), b"", Some(root), env)
+        .ok()
+        .filter(|output| output.exit_code == 0)
+        .and_then(|output| first_line(&String::from_utf8_lossy(&output.stdout)).map(str::to_owned));
+    LoadedCli {
+        spec: cli_spec::parse_help(&text),
+        source,
+        version,
+        missing: false,
+    }
+}
+
+/// The help run of the wrapped `tool`, which the doc island names as where
+/// the help comes from.
+pub(crate) fn help_source(tool: &str) -> String {
+    format!("{tool} --help")
+}
+
+/// Store `loaded`, the help of the `cli` command `name`, for the session.
+///
+/// The help lands only over the command's `Loading` mark, so a load that was
+/// out when the config reloaded drops. The open palette takes a new
+/// generation, because the pool pages of its list read the loaded signature.
+fn land_cli(stoat: &mut Stoat, name: String, loaded: LoadedCli) {
+    let Some(state) = stoat
+        .cli_specs
+        .get_mut(&name)
+        .filter(|state| matches!(state, CliSpecState::Loading))
+    else {
+        return;
+    };
+    *state = CliSpecState::Ready(Arc::new(loaded));
+    if let Some(palette) = stoat.command_palette.as_mut() {
+        palette.generation = picker::next_generation();
+    }
 }
 
 /// Give the open palette's pick list of `generation` the rows of `result`, or
@@ -492,10 +623,11 @@ fn failure(name: &str, result: &io::Result<ShellOutput>) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{pick_failure, plan, pump, CommandEvent, Plan};
+    use super::{load_cli, pick_failure, plan, pump, CommandEvent, LoadedCli, Plan};
     use crate::{
         action_handlers,
         app::{MessageKind, Stoat},
+        cli_spec::{self, CliSpec, RG_HELP},
         host::ShellOutput,
         location_picker::LocationEntry,
         pane::{DockPanel, DockSide, DockVisibility, FocusTarget, View},
@@ -504,7 +636,7 @@ mod tests {
     };
     use std::path::{Path, PathBuf};
     use stoat_config::Template;
-    use stoat_host::FakeShellInvocation;
+    use stoat_host::{FakeShell, FakeShellInvocation};
 
     /// The user command `greet`, which takes one argument and reports its
     /// output in a status message.
@@ -1010,7 +1142,11 @@ mod tests {
         assert_eq!(
             (shell_lines(&h), entries),
             (
-                vec!["rg -n three src".to_owned()],
+                vec![
+                    "rg --help".to_owned(),
+                    "rg --version".to_owned(),
+                    "rg -n three src".to_owned()
+                ],
                 Some(vec![LocationEntry {
                     path: PathBuf::from("/repo/src/a.rs"),
                     offset: 8,
@@ -1038,7 +1174,14 @@ mod tests {
         h.settle();
         assert_eq!(
             (entry.as_deref(), shell_lines(&h)),
-            (Some("st "), vec!["git status".to_owned()]),
+            (
+                Some("st "),
+                vec![
+                    "git status --help".to_owned(),
+                    "git status --version".to_owned(),
+                    "git status".to_owned()
+                ]
+            ),
         );
     }
 
@@ -1048,6 +1191,73 @@ mod tests {
     fn the_tail_keeps_its_quotes_and_globs() {
         let mut h = loaded(RG);
         submit(&mut h, r#"rg "a b" *.rs"#);
-        assert_eq!(shell_lines(&h), [r#"rg "a b" *.rs"#]);
+        assert_eq!(
+            shell_lines(&h),
+            ["rg --help", "rg --version", r#"rg "a b" *.rs"#]
+        );
+    }
+
+    /// The help of `tool` loaded through `shell` from `/repo`.
+    fn loaded_help(shell: &FakeShell, tool: &str) -> LoadedCli {
+        load_cli(shell, tool, Path::new("/repo"), &[])
+    }
+
+    /// The version is the first line of the version run's stdout.
+    #[test]
+    fn load_cli_reads_the_help_and_the_version() {
+        let shell = FakeShell::new();
+        shell.set_response("rg --help", output(RG_HELP.as_bytes(), b"", 0));
+        shell.set_response(
+            "rg --version",
+            output(b"ripgrep 14.1.0\n\nfeatures:+pcre2\n", b"", 0),
+        );
+        assert_eq!(
+            loaded_help(&shell, "rg"),
+            LoadedCli {
+                spec: cli_spec::parse_help(RG_HELP),
+                source: "rg --help".to_owned(),
+                version: Some("ripgrep 14.1.0".to_owned()),
+                missing: false,
+            },
+        );
+    }
+
+    /// A help run that exits 127 marks the tool as missing, and no version
+    /// run follows it.
+    #[test]
+    fn a_tool_that_is_not_installed_loads_as_missing() {
+        let shell = FakeShell::new();
+        shell.set_response("nope --help", output(b"", b"sh: nope: not found\n", 127));
+        let loaded = loaded_help(&shell, "nope");
+        let lines: Vec<String> = shell.invocations().into_iter().map(|run| run.cmd).collect();
+        assert_eq!(
+            (loaded, lines),
+            (
+                LoadedCli {
+                    spec: CliSpec::default(),
+                    source: "nope --help".to_owned(),
+                    version: None,
+                    missing: true,
+                },
+                vec!["nope --help".to_owned()],
+            ),
+        );
+    }
+
+    /// A help on stderr with an empty stdout reads as the help, whatever the
+    /// exit code. A version run that prints nothing gives no version.
+    #[test]
+    fn help_on_stderr_is_read() {
+        let shell = FakeShell::new();
+        shell.set_response("old --help", output(b"\n", RG_HELP.as_bytes(), 2));
+        assert_eq!(
+            loaded_help(&shell, "old"),
+            LoadedCli {
+                spec: cli_spec::parse_help(RG_HELP),
+                source: "old --help".to_owned(),
+                version: None,
+                missing: false,
+            },
+        );
     }
 }

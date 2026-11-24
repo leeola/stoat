@@ -2170,6 +2170,12 @@ pub struct Stoat {
     /// because a step runs detached on [`Self::executor`], as a load of
     /// [`Self::pending_env`] does.
     pub(crate) command_events: Arc<std::sync::Mutex<Vec<crate::user_command::run::CommandEvent>>>,
+    /// The help of each `cli` command's tool, by command name, loaded once for
+    /// the session when the palette first opens that command's argument entry.
+    ///
+    /// A config reload clears it, because the reloaded config may wrap other
+    /// tools under the same names.
+    pub(crate) cli_specs: std::collections::HashMap<String, crate::user_command::run::CliSpecState>,
     /// Landing slot for a finished `--continue` session restore, drained by
     /// [`Self::install_pending_workspace_restore`] in [`Self::drive_background`].
     /// Shared rather than returned because the restore runs detached on
@@ -3088,6 +3094,7 @@ impl Stoat {
             pending_env: Arc::new(std::sync::Mutex::new(Vec::new())),
             command_runs: Vec::new(),
             command_events: Arc::new(std::sync::Mutex::new(Vec::new())),
+            cli_specs: std::collections::HashMap::new(),
             pending_workspace_restore: Arc::new(std::sync::Mutex::new(None)),
             pending_workspace_saves: std::collections::HashMap::new(),
             pending_workspace_autosave: None,
@@ -3195,9 +3202,10 @@ impl Stoat {
     ///
     /// CLI overrides are re-applied on top, so a flag passed at launch keeps
     /// outranking the file. Runtime state (open buffers, the current mode, user
-    /// variables) is untouched. Settings read per use follow the new values
-    /// immediately, while those consumed once at launch (mouse capture, the
-    /// terminal shell, direnv) wait for the next start.
+    /// variables) is untouched, but the loaded help of each `cli` command drops,
+    /// because a reloaded command may wrap another tool. Settings read per use
+    /// follow the new values immediately, while those consumed once at launch
+    /// (mouse capture, the terminal shell, direnv) wait for the next start.
     pub(crate) fn reload_user_config(&mut self, source: &str) {
         let (config, errors) = stoat_config::parse(source);
         let Some(config) = config else {
@@ -3236,6 +3244,7 @@ impl Stoat {
 
         self.keymap = keymap;
         self.commands = Arc::new(commands);
+        self.cli_specs.clear();
         self.settings = settings;
         apply_log_level(&self.settings);
         self.theme = Arc::new(theme);

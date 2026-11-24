@@ -51,6 +51,7 @@ use crate::{
         walkthrough::Spotlight,
     },
     symbol_finder::SymbolFinder,
+    user_command::run::CliSpecState,
 };
 use ratatui::{
     buffer::Buffer,
@@ -58,7 +59,7 @@ use ratatui::{
     style::{Color, Style},
     widgets::StatefulWidget,
 };
-use std::{ops::Range, path::Path, sync::Arc};
+use std::{collections::HashMap, ops::Range, path::Path, sync::Arc};
 use stoat_widgets::{bar::Bar, ApcScene};
 use stoatty_protocol::command::{encode_fill_decorations_scope, encode_fill_scope};
 
@@ -1195,7 +1196,8 @@ pub(crate) fn render_symbol_finder_page(
 /// index alone selects the rows, and the list is read-only here. Each name
 /// leaves out its first `name_offset` bytes, as the live list does under a
 /// group. The rows of the `action` list that `namespace` names read their
-/// keys from `keys`, as the live list reads them.
+/// keys from `keys`, and a `cli` command's row reads its help in `specs`, as
+/// the live list reads them.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn render_palette_page(
     filtered: &[PaletteCommand],
@@ -1204,6 +1206,7 @@ pub(crate) fn render_palette_page(
     name_offset: usize,
     namespace: Namespace,
     keys: &ActionKeys,
+    specs: &HashMap<String, CliSpecState>,
     page: u64,
     theme: &crate::theme::Theme,
     region_width: u16,
@@ -1222,6 +1225,7 @@ pub(crate) fn render_palette_page(
                 name_offset,
                 namespace,
                 keys,
+                specs,
                 area,
                 start_row,
                 theme,
@@ -3571,6 +3575,7 @@ mod tests {
             keymap::ActionKeys,
             theme::Theme,
         };
+        use std::collections::HashMap;
         use stoat_action::registry;
 
         let entry = registry::lookup_alias("git log").expect("git log is a command");
@@ -3582,6 +3587,7 @@ mod tests {
                 name_offset,
                 Namespace::Commands,
                 &ActionKeys::new(),
+                &HashMap::new(),
                 0,
                 &Theme::empty(),
                 100,

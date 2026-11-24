@@ -2500,6 +2500,7 @@ pub(crate) fn frame(
                     zoom,
                     preview_min,
                     now,
+                    &stoat.cli_specs,
                     buf,
                     &mut *scene,
                 );
