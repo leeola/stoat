@@ -243,9 +243,14 @@ enum KeyStage<'a> {
     Actions,
     /// History, with the needle of the walk that shows it.
     History { needle: &'a str },
-    /// A pick list, with the shell line that Enter runs and the line of the
-    /// config that declares the command.
-    Pick { enter: String, line: u32 },
+    /// A pick list, with the shell line that Enter runs. `line` is the line of
+    /// the config that declares the command, and `tag` the label and the
+    /// color scope of the command's Source Tag.
+    Pick {
+        enter: String,
+        line: u32,
+        tag: (&'static str, &'static str),
+    },
     /// The list of a `cli` command's flags or subcommands, as `kind` names it.
     Cli { kind: CliListKind },
 }
@@ -856,12 +861,12 @@ fn render_palette_pick(
         }
     }
 
-    let line = match palette.command.as_ref() {
-        Some(PaletteCommand::User(command)) => command.line,
-        _ => 0,
+    let (line, tag) = match palette.command.as_ref() {
+        Some(command @ PaletteCommand::User(user)) => (user.line, doc_tag(command)),
+        _ => (0, ("config", crate::theme::scope::UI_CMD_SOURCE_CONFIG)),
     };
     let enter = palette.enter_line(ws).unwrap_or_else(|| "run".to_owned());
-    palette_footer_parts(KeyStage::Pick { enter, line }, theme).paint(
+    palette_footer_parts(KeyStage::Pick { enter, line, tag }, theme).paint(
         layout.footer,
         plate,
         theme,
@@ -1828,9 +1833,10 @@ fn render_palette_filter(
 /// has a note.
 ///
 /// A pick list names the shell line that Enter runs and its refresh key. Its
-/// note names where the command comes from, `config` in the foreground of
-/// `ui.cmd.source.config`, then ` command`, a space, U+00B7, a space, and
-/// `config.stcfg:<line>` in `ui.text.muted`.
+/// note names where the command comes from, the label of the command's Source
+/// Tag in the foreground of the tag's scope, `config` in `ui.cmd.source.config`
+/// or `script` in `ui.cmd.source.script`. Then ` command`, a space, U+00B7, a
+/// space, and `config.stcfg:<line>` follow in `ui.text.muted`.
 ///
 /// The list of a `cli` command names its run, completion, and history keys,
 /// with `complete flag` over the flags. Its note reads `cli` in the
@@ -1893,16 +1899,20 @@ fn palette_footer_parts(stage: KeyStage<'_>, theme: &crate::theme::Theme) -> Pal
                 note: Vec::new(),
             }
         },
-        KeyStage::Pick { enter, line } => {
+        KeyStage::Pick {
+            enter,
+            line,
+            tag: (label, scope),
+        } => {
             let muted = theme.get(crate::theme::scope::UI_TEXT_MUTED);
-            let config = theme
-                .try_get(crate::theme::scope::UI_CMD_SOURCE_CONFIG)
+            let source = theme
+                .try_get(scope)
                 .and_then(|style| style.fg)
                 .map_or(muted, |fg| muted.fg(fg));
             PaletteFooterParts {
                 hints: vec![("Enter", Cow::Owned(enter)), hint("C-r", "refresh list")],
                 note: vec![
-                    (Cow::Borrowed("config"), config),
+                    (Cow::Borrowed(label), source),
                     (
                         Cow::Owned(format!(" command \u{b7} config.stcfg:{line}")),
                         muted,
@@ -2545,15 +2555,21 @@ fn pascal_name(command: &PaletteCommand, _offset: usize) -> &str {
 /// `None` for an internal action, whose list names no source.
 ///
 /// The `action` row reads `internal`. A command reads `built-in`, because every
-/// command in the registry ships with stoat. A user command reads `config`, or
-/// `cli` for a command that wraps a tool.
+/// command in the registry ships with stoat. A user command reads `config`,
+/// `script` for a block command whose `run` lists its steps, or `cli` for a
+/// command that wraps a tool.
 fn source_tag(command: &PaletteCommand) -> Option<(&'static str, &'static str)> {
     let entry = match command {
         PaletteCommand::Action(entry) => entry,
         PaletteCommand::User(user) => {
             return Some(match user.run {
                 RunSpec::Cli { .. } => ("cli", crate::theme::scope::UI_CMD_SOURCE_CLI),
-                RunSpec::Step(_) => ("config", crate::theme::scope::UI_CMD_SOURCE_CONFIG),
+                RunSpec::Steps { script: true, .. } => {
+                    ("script", crate::theme::scope::UI_CMD_SOURCE_SCRIPT)
+                },
+                RunSpec::Steps { script: false, .. } => {
+                    ("config", crate::theme::scope::UI_CMD_SOURCE_CONFIG)
+                },
             });
         },
     };

@@ -3,7 +3,7 @@ use crate::{
     keymap::{ResolvedAction, ResolvedArg},
     keymap_state,
 };
-use std::{mem, sync::Arc};
+use std::{mem, slice, sync::Arc};
 use stoat_action::{registry, ParamDef};
 use stoat_config::{
     Call, CallArg, CallValue, CommandBody, CommandDecl, CommandStatement, Config, ParseError,
@@ -109,11 +109,16 @@ pub(crate) enum ContextValue {
     Line,
 }
 
-/// What a [`UserCommand`] runs, the step of a block or a wrapped tool.
+/// What a [`UserCommand`] runs, the steps of a block or a wrapped tool.
 #[derive(Debug, PartialEq)]
 pub(crate) enum RunSpec {
-    /// The `run` step of a `command NAME { ... }` block.
-    Step(Step),
+    /// The `run` steps of a `command NAME { ... }` block, in order.
+    Steps {
+        steps: Vec<Step>,
+        /// Whether the `run` statement writes its steps as a list, which
+        /// makes the command a script, whatever the list's length.
+        script: bool,
+    },
     /// The tool of a `command NAME = cli("tool", ...)` item, one or more shell
     /// words. The command has no argument. The palette takes the text after
     /// its name as one optional tail, which follows the tool on the shell line
@@ -127,13 +132,30 @@ pub(crate) enum RunSpec {
     },
 }
 
-/// The step that the `run` statement of a block command names.
-#[derive(Debug, PartialEq)]
+/// A step that the `run` statement of a block command names.
+#[derive(Debug, Clone, PartialEq)]
 pub(crate) enum Step {
     /// A shell line, with each value written as one shell word.
     Shell(Template),
     /// An action, with each placeholder of a string argument written as it is.
     Action(ResolvedAction),
+    /// A command of the set, a bare name in the `run` statement, whose steps
+    /// run in the place of this one. Each argument of that command takes the
+    /// value of the caller's argument of the same name, or its own default
+    /// when the caller declares none.
+    Command(String),
+}
+
+/// A step of a command's run, with each command step in that run replaced by
+/// the steps of the command it names, as [`UserCommand::flatten`] gives it.
+#[derive(Debug, PartialEq)]
+pub(crate) struct FlatStep<'a> {
+    /// The command that runs, then each command that a command step names on
+    /// the way to `step`. The last one's `run` holds `step`, so its arguments
+    /// are the ones that the step's placeholders name.
+    pub(crate) chain: Vec<&'a UserCommand>,
+    /// A shell or an action step, never a command step.
+    pub(crate) step: &'a Step,
 }
 
 /// Where the output of a [`UserCommand`] goes.
@@ -154,10 +176,12 @@ pub(crate) enum Output {
     Locations,
 }
 
-/// A command as its layer lowers it, with what the `same_as` check reads.
+/// A command as its layer lowers it, with what the `same_as` check and the
+/// command step check read.
 struct Lowered {
     command: UserCommand,
     same_as: Vec<SameAs>,
+    steps: Vec<CommandStep>,
     /// Whether the user config declares the command. The errors of the
     /// embedded config go to the log, not to the user.
     user: bool,
@@ -168,6 +192,22 @@ struct Lowered {
 struct SameAs {
     /// The place of the argument among the arguments of its command.
     index: usize,
+    target: String,
+    span: Span,
+}
+
+/// The steps that the `run` statement of a block names, before they lower.
+struct RunCalls<'a> {
+    calls: &'a [Spanned<Call>],
+    /// Whether the statement writes its steps as a list.
+    script: bool,
+}
+
+/// A command step of a lowered command, a bare name in its `run` statement.
+///
+/// The step can only be checked once every layer lowers, because it names a
+/// command of the whole set.
+struct CommandStep {
     target: String,
     span: Span,
 }
@@ -202,6 +242,7 @@ impl CommandSet {
         }
         check_same_as(&mut lowered, &mut embedded_errors, &mut user_errors);
         resolve_same_as(&mut lowered);
+        check_steps(&mut lowered, &mut embedded_errors, &mut user_errors);
 
         for error in &embedded_errors {
             tracing::error!(target: "stoat::config", "shipped config: {}", error.message);
@@ -244,6 +285,20 @@ impl UserCommand {
             .collect();
         args.join(" ")
     }
+
+    /// The steps of the run, with the steps of the command that each command
+    /// step names in its place, to any depth.
+    ///
+    /// Each step comes with the chain of commands that nests it, so a run
+    /// gives each step the values of its own command's arguments. A `cli`
+    /// command has no step, and a command step that names no command of
+    /// `set` adds none. The loader leaves no cycle of command steps in a set,
+    /// so the walk ends.
+    pub(crate) fn flatten<'a>(&'a self, set: &'a CommandSet) -> Vec<FlatStep<'a>> {
+        let mut flat = Vec::new();
+        flatten_into(&mut vec![self], set, &mut flat);
+        flat
+    }
 }
 
 impl CommandArg {
@@ -260,6 +315,35 @@ impl CommandArg {
     /// default allows.
     pub(crate) fn optional(&self) -> bool {
         self.default().is_some()
+    }
+}
+
+/// Push each step of the run of the last command of `chain` onto `flat`, with
+/// the steps of the command that each command step names in its place.
+fn flatten_into<'a>(
+    chain: &mut Vec<&'a UserCommand>,
+    set: &'a CommandSet,
+    flat: &mut Vec<FlatStep<'a>>,
+) {
+    let Some(&command) = chain.last() else {
+        return;
+    };
+    let RunSpec::Steps { steps, .. } = &command.run else {
+        return;
+    };
+    for step in steps {
+        let Step::Command(name) = step else {
+            flat.push(FlatStep {
+                chain: chain.clone(),
+                step,
+            });
+            continue;
+        };
+        if let Some(nested) = set.get(name) {
+            chain.push(nested.as_ref());
+            flatten_into(chain, set, flat);
+            chain.pop();
+        }
     }
 }
 
@@ -295,10 +379,11 @@ fn lower_layer(
 
         let before = source.get(..decl.span.start).unwrap_or(source);
         let line = before.bytes().filter(|&byte| byte == b'\n').count() as u32 + 1;
-        if let Some((command, same_as)) = lower(&decl.node, source, line, errors) {
+        if let Some((command, same_as, steps)) = lower(&decl.node, source, line, errors) {
             lowered.push(Lowered {
                 command,
                 same_as,
+                steps,
                 user,
             });
         }
@@ -328,8 +413,8 @@ fn taken(name: &str) -> Option<String> {
         .map(|group| format!("command `{name}` shadows the command group `{group}`"))
 }
 
-/// `decl` as a command and its `same_as` arguments, or `None` with an error
-/// in `errors` for each fault of the declaration.
+/// `decl` as a command with its `same_as` arguments and its command steps, or
+/// `None` with an error in `errors` for each fault of the declaration.
 ///
 /// `source` is the text that `decl` parses from, which keeps the literal text
 /// of a default.
@@ -338,12 +423,12 @@ fn lower(
     source: &str,
     line: u32,
     errors: &mut Vec<ParseError>,
-) -> Option<(UserCommand, Vec<SameAs>)> {
+) -> Option<(UserCommand, Vec<SameAs>, Vec<CommandStep>)> {
     let statements = match &decl.body {
         CommandBody::Block(statements) => statements,
         CommandBody::Wrap(call) if call.node.name.node == "cli" => {
             return match cli_command(&decl.name.node, line, call) {
-                Ok(command) => Some((command, Vec::new())),
+                Ok(command) => Some((command, Vec::new(), Vec::new())),
                 Err(fault) => {
                     errors.push(fault);
                     None
@@ -363,7 +448,7 @@ fn lower(
     let faults = errors.len();
     let mut args: Vec<CommandArg> = Vec::new();
     let mut same_as = Vec::new();
-    let mut run: Option<Option<&Spanned<Call>>> = None;
+    let mut run: Option<Option<RunCalls<'_>>> = None;
     let mut output: Option<Option<Output>> = None;
     let mut doc: Option<String> = None;
     for statement in statements {
@@ -402,10 +487,21 @@ fn lower(
                 });
             },
             CommandStatement::Run(_) if run.is_some() => errors.push(twice("run")),
-            CommandStatement::Run(RunExpr::Single(call)) => run = Some(Some(call)),
-            CommandStatement::Run(RunExpr::Sequence(_)) => {
-                errors.push(error(&statement.span, "`run` takes one step"));
+            CommandStatement::Run(RunExpr::Single(call)) => {
+                run = Some(Some(RunCalls {
+                    calls: slice::from_ref(call),
+                    script: false,
+                }));
+            },
+            CommandStatement::Run(RunExpr::Sequence(calls)) if calls.is_empty() => {
+                errors.push(error(&statement.span, "`run` holds no step"));
                 run = Some(None);
+            },
+            CommandStatement::Run(RunExpr::Sequence(calls)) => {
+                run = Some(Some(RunCalls {
+                    calls,
+                    script: true,
+                }));
             },
             CommandStatement::Output(_) if output.is_some() => errors.push(twice("output")),
             CommandStatement::Output(value) => {
@@ -422,7 +518,8 @@ fn lower(
     }
 
     let name = &decl.name.node;
-    let step = match run {
+    let mut links = Vec::new();
+    let spec = match run {
         None => {
             errors.push(error(
                 &decl.name.span,
@@ -430,7 +527,24 @@ fn lower(
             ));
             None
         },
-        Some(call) => call.and_then(|call| lower_step(call, name, &args, errors)),
+        Some(None) => None,
+        Some(Some(RunCalls { calls, script })) => {
+            let mut steps = Vec::with_capacity(calls.len());
+            for call in calls {
+                let step = lower_step(call, name, &args, errors);
+                if let Some(Step::Command(target)) = &step {
+                    links.push(CommandStep {
+                        target: target.clone(),
+                        span: call.span.clone(),
+                    });
+                }
+                steps.push(step);
+            }
+            steps
+                .into_iter()
+                .collect::<Option<Vec<Step>>>()
+                .map(|steps| RunSpec::Steps { steps, script })
+        },
     };
     if errors.len() > faults {
         return None;
@@ -441,10 +555,10 @@ fn lower(
         doc: doc.unwrap_or_default(),
         line,
         args,
-        run: RunSpec::Step(step?),
+        run: spec?,
         output: output.flatten().unwrap_or(Output::Block),
     };
-    Some((command, same_as))
+    Some((command, same_as, links))
 }
 
 /// The command `name` that the call `cli(...)` declares on line `line`, or
@@ -701,11 +815,12 @@ fn text_default(value: &Spanned<CallValue>, source: &str) -> Result<TextDefault,
 /// The step that `call` runs for the command `command`, or `None` with an
 /// error in `errors` for each fault of the step.
 ///
-/// A `shell` call takes one string. Any other call names an action, which
-/// must run as a key binding of it does. It takes only the arguments that the
-/// action declares, each at the place of its parameter. A placeholder in the
-/// shell line or in a string argument of the action names an argument of the
-/// command.
+/// A bare name is a command step, which [`check_steps`] checks once every
+/// layer lowers. A `shell` call takes one string. Any other call names an
+/// action, which must run as a key binding of it does. It takes only the
+/// arguments that the action declares, each at the place of its parameter. A
+/// placeholder in the shell line or in a string argument of the action names
+/// an argument of the command.
 fn lower_step(
     call: &Spanned<Call>,
     command: &str,
@@ -714,8 +829,7 @@ fn lower_step(
 ) -> Option<Step> {
     let name = &call.node.name.node;
     let Some(call_args) = call.node.args.as_deref() else {
-        errors.push(error(&call.span, format!("`{name}` is not a step")));
-        return None;
+        return Some(Step::Command(name.clone()));
     };
 
     if name == "shell" {
@@ -849,32 +963,44 @@ fn check_placeholders(
 /// Leave out each command of `lowered` with a `same_as` argument that fails.
 ///
 /// A failed argument names no command with an argument, or starts a chain of
-/// first arguments that loops. The checks repeat until no command fails,
-/// because a command that leaves the set takes the target of another
-/// `same_as` with it.
+/// first arguments that loops. A command reports its first failed argument.
 fn check_same_as(
     lowered: &mut Vec<Lowered>,
     embedded_errors: &mut Vec<ParseError>,
     user_errors: &mut Vec<ParseError>,
 ) {
-    loop {
-        let faults: Vec<Option<ParseError>> = lowered
+    leave_out_failing(lowered, embedded_errors, user_errors, |lowered, held| {
+        held.same_as
             .iter()
-            .map(|held| {
-                held.same_as
-                    .iter()
-                    .find_map(|link| same_as_fault(lowered, link))
-            })
-            .collect();
-        if faults.iter().all(Option::is_none) {
+            .find_map(|link| same_as_fault(lowered, link))
+            .into_iter()
+            .collect()
+    });
+}
+
+/// Leave out each command of `lowered` that `faults` finds a fault in, with
+/// its faults in the error list of its layer.
+///
+/// The checks repeat until no command fails, because a command that leaves
+/// the set takes the target of another command's link with it.
+fn leave_out_failing(
+    lowered: &mut Vec<Lowered>,
+    embedded_errors: &mut Vec<ParseError>,
+    user_errors: &mut Vec<ParseError>,
+    faults: impl Fn(&[Lowered], &Lowered) -> Vec<ParseError>,
+) {
+    loop {
+        let found: Vec<Vec<ParseError>> =
+            lowered.iter().map(|held| faults(lowered, held)).collect();
+        if found.iter().all(Vec::is_empty) {
             return;
         }
 
-        for (held, fault) in mem::take(lowered).into_iter().zip(faults) {
-            match (fault, held.user) {
-                (None, _) => lowered.push(held),
-                (Some(fault), true) => user_errors.push(fault),
-                (Some(fault), false) => embedded_errors.push(fault),
+        for (held, held_faults) in mem::take(lowered).into_iter().zip(found) {
+            match (held_faults.is_empty(), held.user) {
+                (true, _) => lowered.push(held),
+                (false, true) => user_errors.extend(held_faults),
+                (false, false) => embedded_errors.extend(held_faults),
             }
         }
     }
@@ -962,6 +1088,98 @@ fn chain_kind(lowered: &[Lowered], link: &SameAs) -> Option<ArgKind> {
     None
 }
 
+/// Leave out each command of `lowered` with a command step that fails.
+///
+/// A step names a block command of the set. Each argument of that command
+/// with no default is an argument of the caller, because the step's run takes
+/// the caller's value of the same name. And no step leads back to its own
+/// command. The check reads each argument's default, so it runs after
+/// [`resolve_same_as`] gives each `same_as` argument its kind.
+fn check_steps(
+    lowered: &mut Vec<Lowered>,
+    embedded_errors: &mut Vec<ParseError>,
+    user_errors: &mut Vec<ParseError>,
+) {
+    leave_out_failing(lowered, embedded_errors, user_errors, step_faults);
+}
+
+/// The faults of the command steps of `held` among the commands of
+/// `lowered`, each at the span of its step.
+fn step_faults(lowered: &[Lowered], held: &Lowered) -> Vec<ParseError> {
+    let caller = &held.command;
+    let mut faults = Vec::new();
+    for step in &held.steps {
+        let Some(target) = find_lowered(lowered, &step.target) else {
+            faults.push(error(
+                &step.span,
+                format!("unknown command `{}`", step.target),
+            ));
+            continue;
+        };
+        if let RunSpec::Cli { .. } = target.command.run {
+            faults.push(error(
+                &step.span,
+                format!("`{}` wraps a CLI and is no step", step.target),
+            ));
+            continue;
+        }
+
+        for arg in &target.command.args {
+            let passed = caller.args.iter().any(|own| own.name == arg.name);
+            if !passed && !arg.optional() {
+                faults.push(error(
+                    &step.span,
+                    format!("step `{}` needs the argument `{}`", step.target, arg.name),
+                ));
+            }
+        }
+        if runs_within(lowered, target, &caller.name) {
+            faults.push(error(
+                &step.span,
+                format!(
+                    "command `{}` runs itself through `{}`",
+                    caller.name, step.target
+                ),
+            ));
+        }
+    }
+    faults
+}
+
+/// Whether the command `name` runs within the run of `from`.
+///
+/// It does when it is `from`, or when a chain of command steps leads from
+/// `from` to it.
+fn runs_within(lowered: &[Lowered], from: &Lowered, name: &str) -> bool {
+    let mut visited: Vec<&str> = Vec::new();
+    let mut pending = vec![from];
+    while let Some(at) = pending.pop() {
+        if at.command.name.eq_ignore_ascii_case(name) {
+            return true;
+        }
+        if visited
+            .iter()
+            .any(|seen| seen.eq_ignore_ascii_case(&at.command.name))
+        {
+            continue;
+        }
+        visited.push(&at.command.name);
+        pending.extend(
+            at.steps
+                .iter()
+                .filter_map(|step| find_lowered(lowered, &step.target)),
+        );
+    }
+    false
+}
+
+/// The command of `lowered` named `name`, ASCII case ignored.
+fn find_lowered<'a>(lowered: &'a [Lowered], name: &str) -> Option<&'a Lowered> {
+    lowered
+        .iter()
+        .find(|held| held.command.name.eq_ignore_ascii_case(name))
+}
+
 fn error(span: &Span, message: impl Into<String>) -> ParseError {
     ParseError::new(span.clone(), message)
 }
@@ -972,9 +1190,12 @@ mod tests {
         ArgKind, CommandArg, CommandSet, ContextValue, Output, PickSpec, RunSpec, Step,
         TextDefault, UserCommand,
     };
-    use crate::app;
+    use crate::{
+        app,
+        keymap::{ResolvedAction, ResolvedArg},
+    };
     use std::sync::Arc;
-    use stoat_config::{Config, Span, Template};
+    use stoat_config::{Config, Span, Template, Value};
 
     /// The commands and the errors that `source` gives as the user layer over
     /// an embedded layer with no command.
@@ -1027,6 +1248,31 @@ mod tests {
             .map(|command| command.args.iter().map(|arg| arg.kind.clone()).collect())
     }
 
+    /// The run of one shell step `line`, written as `run = shell(...)`.
+    fn one_shell(line: &str) -> RunSpec {
+        RunSpec::Steps {
+            steps: vec![Step::Shell(Template::parse(line))],
+            script: false,
+        }
+    }
+
+    /// The step `Notify("text")`.
+    fn notify(text: &str) -> Step {
+        Step::Action(ResolvedAction {
+            name: "Notify".to_owned(),
+            args: vec![ResolvedArg {
+                name: None,
+                value: Value::String(text.to_owned()),
+            }],
+        })
+    }
+
+    /// The span of the bare step `name` in the list `[name` of `source`.
+    fn list_step(source: &str, list: &str, name: &str) -> Span {
+        let start = span(source, list).start + list.len() - name.len();
+        start..start + name.len()
+    }
+
     #[test]
     fn a_block_command_lowers_to_its_arguments_step_and_output() {
         let (set, errors) = load(
@@ -1044,7 +1290,7 @@ mod tests {
                         name: "who".to_owned(),
                         kind: ArgKind::Text { default: None },
                     }],
-                    run: RunSpec::Step(Step::Shell(Template::parse("echo hello {who}"))),
+                    run: one_shell("echo hello {who}"),
                     output: Output::Notify,
                 }],
                 Vec::new(),
@@ -1100,7 +1346,7 @@ mod tests {
                     name_span(source, "HELLO"),
                     "command `HELLO` is declared twice"
                 )],
-                Some(&RunSpec::Step(Step::Shell(Template::parse("first")))),
+                Some(&one_shell("first")),
             ),
         );
     }
@@ -1117,11 +1363,7 @@ mod tests {
                 set.get("hello").map(|command| &command.run),
                 errors
             ),
-            (
-                vec!["hello"],
-                Some(&RunSpec::Step(Step::Shell(Template::parse("mine")))),
-                Vec::new()
-            ),
+            (vec!["hello"], Some(&one_shell("mine")), Vec::new()),
         );
     }
 
@@ -1282,10 +1524,11 @@ mod tests {
         );
     }
 
+    /// A `shell` call takes one string. A bare name is a command step, so a
+    /// bare `shell` names a command, and the set holds none of that name.
     #[test]
-    fn a_run_takes_one_shell_or_action_step() {
+    fn a_shell_call_takes_one_string_and_a_bare_shell_names_no_command() {
         let source = concat!(
-            "command a { run = [shell(\"a\"), shell(\"b\")]; }\n",
             "command bee { run = shell; }\n",
             "command c { run = shell(); }",
         );
@@ -1296,13 +1539,167 @@ mod tests {
             (
                 Vec::new(),
                 vec![
-                    fault(
-                        span(source, "run = [shell(\"a\"), shell(\"b\")];"),
-                        "`run` takes one step"
-                    ),
-                    fault(bare..bare + "shell".len(), "`shell` is not a step"),
                     fault(span(source, "shell()"), "`shell` takes one string"),
+                    fault(bare..bare + "shell".len(), "unknown command `shell`"),
                 ],
+            ),
+        );
+    }
+
+    /// A `run` list lowers to its steps in order and makes the command a
+    /// script, whatever the list's length. A `run` that names one step with
+    /// no list makes none.
+    #[test]
+    fn a_run_list_lowers_to_its_steps_and_marks_a_script() {
+        let (set, errors) = load(concat!(
+            "command ship { run = [shell(\"cargo test\"), Notify(\"shipped\")]; }\n",
+            "command once { run = [shell(\"make\")]; }\n",
+            "command plain { run = shell(\"make\"); }",
+        ));
+        let run = |name: &str| set.get(name).map(|command| &command.run);
+        assert_eq!(
+            ([run("ship"), run("once"), run("plain")], errors),
+            (
+                [
+                    Some(&RunSpec::Steps {
+                        steps: vec![
+                            Step::Shell(Template::parse("cargo test")),
+                            notify("shipped")
+                        ],
+                        script: true,
+                    }),
+                    Some(&RunSpec::Steps {
+                        steps: vec![Step::Shell(Template::parse("make"))],
+                        script: true,
+                    }),
+                    Some(&one_shell("make")),
+                ],
+                Vec::new(),
+            ),
+        );
+    }
+
+    #[test]
+    fn an_empty_run_list_is_reported() {
+        let source = "command nothing { run = []; }";
+        let (set, errors) = load(source);
+        assert_eq!(
+            (names(&set), errors),
+            (
+                Vec::new(),
+                vec![fault(span(source, "run = [];"), "`run` holds no step")],
+            ),
+        );
+    }
+
+    /// The command `co`, which checks out a pull request, and `rv`, whose run
+    /// checks one out through `co` and then shows a message.
+    const CO_RV: &str = concat!(
+        "command co { arg pr = text; run = shell(\"gh pr checkout {pr}\"); output = notify; }\n",
+        "command rv { arg pr = same_as(co); run = [co, Notify(\"after\")]; }",
+    );
+
+    /// Each step comes with the chain of commands that nests it, so the
+    /// shell step of `co` reads the arguments of `co`.
+    #[test]
+    fn a_command_step_takes_the_place_of_that_command_s_steps() {
+        let (set, errors) = load(CO_RV);
+        let rv = set.get("rv").expect("rv loads");
+        let flat: Vec<(Vec<&str>, &Step)> = rv
+            .flatten(&set)
+            .into_iter()
+            .map(|flat| {
+                let chain = flat
+                    .chain
+                    .iter()
+                    .map(|command| command.name.as_str())
+                    .collect();
+                (chain, flat.step)
+            })
+            .collect();
+        assert_eq!(
+            (flat, errors),
+            (
+                vec![
+                    (
+                        vec!["rv", "co"],
+                        &Step::Shell(Template::parse("gh pr checkout {pr}"))
+                    ),
+                    (vec!["rv"], &notify("after")),
+                ],
+                Vec::new(),
+            ),
+        );
+    }
+
+    /// A step's command takes each argument of the caller of the same name.
+    /// An argument that the caller does not declare needs a default.
+    #[test]
+    fn a_command_step_that_needs_an_undeclared_argument_is_reported() {
+        let source = concat!(
+            "command co { arg pr = text; run = shell(\"gh pr checkout {pr}\"); }\n",
+            "command latest { arg pr = text(default: \"1\"); run = shell(\"echo {pr}\"); }\n",
+            "command broken { run = [co]; }\n",
+            "command newest { run = [latest]; }",
+        );
+        let (set, errors) = load(source);
+        assert_eq!(
+            (names(&set), errors),
+            (
+                vec!["co", "latest", "newest"],
+                vec![fault(
+                    list_step(source, "[co", "co"),
+                    "step `co` needs the argument `pr`"
+                )],
+            ),
+        );
+    }
+
+    #[test]
+    fn a_cycle_of_command_steps_is_reported_on_each_command() {
+        let source = concat!(
+            "command tick { run = [tock]; }\n",
+            "command tock { run = [tick]; }\n",
+            "command again { run = [again]; }",
+        );
+        let (set, errors) = load(source);
+        assert_eq!(
+            (names(&set), errors),
+            (
+                Vec::new(),
+                vec![
+                    fault(
+                        list_step(source, "[tock", "tock"),
+                        "command `tick` runs itself through `tock`"
+                    ),
+                    fault(
+                        list_step(source, "[tick", "tick"),
+                        "command `tock` runs itself through `tick`"
+                    ),
+                    fault(
+                        list_step(source, "[again", "again"),
+                        "command `again` runs itself through `again`"
+                    ),
+                ],
+            ),
+        );
+    }
+
+    #[test]
+    fn a_wrap_command_is_no_step() {
+        let source = concat!(
+            "command rg = cli(\"rg\");\n",
+            "command hunt { run = [rg]; }",
+        );
+        let (set, errors) = load(source);
+        assert_eq!(
+            (names(&set), errors),
+            (
+                vec!["rg"],
+                vec![fault(
+                    list_step(source, "[rg", "rg"),
+                    "`rg` wraps a CLI and is no step"
+                )],
             ),
         );
     }

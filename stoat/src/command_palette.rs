@@ -199,7 +199,7 @@ impl PaletteCommand {
             PaletteCommand::Action(entry) => entry.def.params().len(),
             PaletteCommand::User(command) => match command.run {
                 RunSpec::Cli { .. } => 1,
-                RunSpec::Step(_) => command.args.len(),
+                RunSpec::Steps { .. } => command.args.len(),
             },
         }
     }
@@ -1668,7 +1668,7 @@ impl CommandPalette {
             PaletteCommand::Action(entry) => dispatches_bare(entry),
             PaletteCommand::User(user) => match user.run {
                 RunSpec::Cli { .. } => ws.palette_history.is_walking(),
-                RunSpec::Step(_) => user.args.iter().all(CommandArg::optional),
+                RunSpec::Steps { .. } => user.args.iter().all(CommandArg::optional),
             },
         };
         if !runs {
@@ -1775,7 +1775,7 @@ impl CommandPalette {
         let text = self.input.text(ws);
         let (_, _, tail) = split_head(&text, &self.availability, &self.commands)?;
         let values = self.enter_values(ws, &command, tail)?;
-        run::run_line_preview(&command, &values)
+        run::run_line_preview(&command, &self.commands, &values)
     }
 
     /// The value that the argument list gives the argument of `command` that
@@ -4522,6 +4522,93 @@ mod tests {
                     .collect::<Vec<_>>(),
             ),
             (true, true, vec![config; 6]),
+            "the key line reads {text:?}",
+        );
+    }
+
+    /// A script, a block command whose `run` lists its steps, lists under the
+    /// Config scope. Its row ends in the `script` Source Tag, and its doc
+    /// names it a script command.
+    #[test]
+    fn a_script_reads_the_script_tag_and_lists_under_the_config_scope() {
+        let mut h = TestHarness::with_size(160, 50);
+        h.stoat.reload_user_config(
+            r#"command ship { doc = "test and push"; run = [shell("cargo test"), shell("git push")]; }"#,
+        );
+        h.type_text(":");
+        h.type_keys("backtab");
+        h.type_keys("backtab");
+        let _ = h.snapshot();
+        let text = h.rendered_text();
+        let (rows, zoom, header_rows) = crate::test_fixture::palette_sizing(&h);
+        let list = crate::render::command_palette::palette_filter_layout(
+            h.stoat.size(),
+            rows,
+            zoom,
+            header_rows,
+        )
+        .expect("the palette fits the test terminal")
+        .list;
+        let row: String = text
+            .lines()
+            .nth(usize::from(list.y))
+            .unwrap_or_default()
+            .chars()
+            .skip(usize::from(list.x))
+            .take(usize::from(list.width))
+            .collect();
+        assert_eq!(
+            (
+                h.stoat
+                    .command_palette
+                    .as_ref()
+                    .map(|palette| palette.scope),
+                row_names(&h),
+                row.contains("script"),
+                text.contains("script command \u{b7} config.stcfg:1"),
+            ),
+            (
+                Some(PaletteScope::Config),
+                vec!["ship".to_owned()],
+                true,
+                true
+            ),
+            "the palette reads {text:?}",
+        );
+    }
+
+    /// The key line of a script's pick list names the first shell line that
+    /// Enter runs. Its note names the config line, with `script` in the
+    /// foreground of `ui.cmd.source.script`.
+    #[test]
+    fn the_key_line_of_a_script_names_its_first_shell_line_and_its_tag() {
+        let mut h = TestHarness::with_size(160, 50);
+        h.stoat.reload_user_config(concat!(
+            "command prgo { arg pr = pick(\"gh pr list --json number,title,headRefName,state\", ",
+            "show: \"#{number} {title}\", value: \"{number}\"); ",
+            "run = [shell(\"gh pr checkout {pr}\"), Notify(\"checked out\")]; }",
+        ));
+        h.fake_shell.set_response(PR_LIST, three_prs());
+        type_settled(&mut h, ":prgo ");
+        let (text, colors) = key_line(&h);
+        let line = text.trim_end();
+        let note = "script command \u{b7} config.stcfg:1";
+        let at = line.chars().count() - note.chars().count();
+        let script = h
+            .stoat
+            .theme
+            .get(crate::theme::scope::UI_CMD_SOURCE_SCRIPT)
+            .fg;
+        assert_eq!(
+            (
+                line.contains("Enter gh pr checkout 412  C-r refresh list"),
+                line.ends_with(note),
+                colors[at..at + "script".len()]
+                    .iter()
+                    .map(|&color| Some(color))
+                    .collect::<Vec<_>>(),
+            ),
+            (true, true, vec![script; 6]),
             "the key line reads {text:?}",
         );
     }

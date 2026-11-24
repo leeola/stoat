@@ -1,4 +1,6 @@
-use super::{context, pick, ArgKind, Output, RunSpec, Step, UserCommand};
+use super::{
+    context, pick, ArgKind, CommandSet, FlatStep, Output, RunSpec, Step, TextDefault, UserCommand,
+};
 use crate::{
     action_handlers,
     app::{MessageKind, Stoat, UpdateEffect},
@@ -9,6 +11,7 @@ use crate::{
     keymap::ResolvedAction,
     location_picker::{self, LocationEntry, ParsedLocation},
     picker::{self, PREVIEW_BYTE_LIMIT},
+    workspace::WorkspaceId,
 };
 use std::{
     collections::VecDeque,
@@ -54,11 +57,17 @@ pub(crate) struct CommandRun {
     name: String,
     output: Output,
     steps: VecDeque<PlannedStep>,
+    /// The stdout of every shell step that ran, in order, which a `buffer`
+    /// and a `locations` run read.
+    stdout: String,
     /// The stdout of the last shell step, which the success message reads.
     last_stdout: String,
     /// Whether the last step was an action. A run that ends on an action
     /// shows no message of its own.
     last_was_action: bool,
+    /// The workspace that was active when the run started. An action acts on
+    /// the active workspace, so an action step runs only while this one is.
+    workspace: WorkspaceId,
 }
 
 /// What a shell step of a command run sends back to the UI thread.
@@ -114,18 +123,26 @@ pub(crate) enum CliSpecState {
 
 /// Run `command` with `values`, one value for each of its arguments.
 ///
-/// A shell step under the `block` output runs in the run modal. Any other
-/// step runs here, a shell step on a worker with no terminal, so its stdout
-/// and its stderr stay apart. A `cli` command runs as a shell step does, with
-/// its tail as its one value.
+/// A run of shell steps alone under the `block` output runs in the run modal,
+/// and under the `run_pane` output in a Run pane. Any other run goes step by
+/// step here, as [`plan`] lays it out. A shell step runs on a worker with no
+/// terminal, so its stdout and its stderr stay apart. An action step runs once
+/// the step before it exits 0, and the first failure ends the run. A `cli`
+/// command runs as a shell step does, with its tail as its one value.
 ///
 /// An empty value of an argument with a default runs with the default, as
-/// [`context::default_text`] reads it. A `file` or `dir` value that starts
-/// with `~/` runs with the `HOME` directory in place of the `~`.
+/// [`context::default_text`] reads it, and so does the default of a nested
+/// command's argument that its caller does not declare. A `file` or `dir`
+/// value that starts with `~/` runs with the `HOME` directory in place of the
+/// `~`.
 pub(crate) fn start(stoat: &mut Stoat, command: &UserCommand, values: Vec<String>) -> UpdateEffect {
     let values = fill_defaults(stoat, command, values);
     let values = expand_home(command, values, stoat.env_host.var("HOME").as_deref());
-    match plan(command, &values) {
+    let set = stoat.commands.clone();
+    let planned = plan(command, &set, &values, &mut |default| {
+        context::default_text(stoat, default)
+    });
+    match planned {
         Plan::Modal(line) => action_handlers::run::run_command(stoat, &line),
         Plan::Pane(line) => action_handlers::run::run_line_in_pane(stoat, &line),
         Plan::Steps(steps) => {
@@ -134,8 +151,10 @@ pub(crate) fn start(stoat: &mut Stoat, command: &UserCommand, values: Vec<String
                 name: command.name.clone(),
                 output: command.output,
                 steps,
+                stdout: String::new(),
                 last_stdout: String::new(),
                 last_was_action: false,
+                workspace: stoat.active_workspace,
             };
             advance(stoat, run)
         },
@@ -146,9 +165,10 @@ pub(crate) fn start(stoat: &mut Stoat, command: &UserCommand, values: Vec<String
 ///
 /// Answers whether a result landed. A step that exits 0 hands its stdout to
 /// the rest of the run. Any other result ends the run with a message that
-/// names the failure. The result of a pick list's command goes to the
-/// palette's list, as [`land_pick`] reads it, and a tool's help goes to
-/// [`Stoat::cli_specs`], as [`land_cli`] stores it.
+/// names the failure, except the step that ends a `locations` run, whose
+/// stdout lists the locations whatever its exit code. The result of a pick
+/// list's command goes to the palette's list, as [`land_pick`] reads it, and
+/// a tool's help goes to [`Stoat::cli_specs`], as [`land_cli`] stores it.
 pub(crate) fn pump(stoat: &mut Stoat) -> bool {
     let events = mem::take(&mut *stoat.command_events.lock().expect("command events mutex"));
     let landed = !events.is_empty();
@@ -187,9 +207,15 @@ pub(crate) fn pump(stoat: &mut Stoat) -> bool {
         };
         let mut run = stoat.command_runs.remove(index);
         match result {
-            Ok(output) if run.output == Output::Locations => end_locations(stoat, &run, output),
+            Ok(output) if run.output == Output::Locations && run.steps.is_empty() => {
+                run.stdout
+                    .push_str(&String::from_utf8_lossy(&output.stdout));
+                end_locations(stoat, &run, output);
+            },
             Ok(output) if output.exit_code == 0 => {
-                run.last_stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                run.stdout.push_str(&stdout);
+                run.last_stdout = stdout.into_owned();
                 advance(stoat, run);
             },
             failed => stoat.set_status(failure(&run.name, &failed)),
@@ -229,29 +255,110 @@ fn expand_home(command: &UserCommand, mut values: Vec<String>, home: Option<&str
     values
 }
 
-/// The steps of `command` with each placeholder written from `values`, which
-/// stand in the order of the command's arguments.
+/// The steps of `command` with each placeholder written, and how they run.
+///
+/// The steps are the command's run as [`UserCommand::flatten`] reads it from
+/// `set`. Each step's placeholders read the values of its own command, as
+/// [`chain_values`] gives them from `values`, which stand in the order of the
+/// arguments of `command`. A nested default reads as `default` writes it. A
+/// `cli` command runs the line that [`cli_line`] writes from its tool and its
+/// tail.
+///
+/// Under the `block` and the `run_pane` outputs, a run of shell steps alone
+/// joins its lines with ` && ` into the one line of the run modal or of the
+/// Run pane. A run with an action step goes step by step under them, as a
+/// `notify` run does, because neither the run modal nor the Run pane reports
+/// the exit status that an action step waits on.
+fn plan(
+    command: &UserCommand,
+    set: &CommandSet,
+    values: &[String],
+    default: &mut dyn FnMut(&TextDefault) -> String,
+) -> Plan {
+    if let RunSpec::Cli { tool, .. } = &command.run {
+        return shell_plan(cli_line(tool, values), command.output);
+    }
+    let steps: VecDeque<PlannedStep> = command
+        .flatten(set)
+        .iter()
+        .filter_map(|flat| planned_step(flat, values, default))
+        .collect();
+    let lines: Option<Vec<String>> = steps
+        .iter()
+        .map(|step| match step {
+            PlannedStep::Shell(line) => Some(line.clone()),
+            PlannedStep::Act(_) => None,
+        })
+        .collect();
+    match (command.output, lines) {
+        (Output::Block, Some(lines)) => Plan::Modal(lines.join(" && ")),
+        (Output::RunPane, Some(lines)) => Plan::Pane(lines.join(" && ")),
+        _ => Plan::Steps(steps),
+    }
+}
+
+/// The step of `flat` with each placeholder written from the values of the
+/// command whose `run` holds it, or `None` for a command step, which adds no
+/// step of its own.
 ///
 /// A shell line writes each value as one shell word. A string argument of an
-/// action writes each value as it is. A `cli` command runs the line that
-/// [`cli_line`] writes from its tool and its tail.
-fn plan(command: &UserCommand, values: &[String]) -> Plan {
-    let value = |name: &str| arg_value(command, values, name);
-    match &command.run {
-        RunSpec::Cli { tool, .. } => shell_plan(cli_line(tool, values), command.output),
-        RunSpec::Step(Step::Shell(template)) => {
-            shell_plan(template.render_shell(value), command.output)
-        },
-        RunSpec::Step(Step::Action(action)) => {
+/// action writes each value as it is.
+fn planned_step(
+    flat: &FlatStep<'_>,
+    values: &[String],
+    default: &mut dyn FnMut(&TextDefault) -> String,
+) -> Option<PlannedStep> {
+    let values = chain_values(&flat.chain, values, default);
+    let value = |name: &str| {
+        flat.chain
+            .last()
+            .and_then(|command| arg_value(command, &values, name))
+    };
+    match flat.step {
+        Step::Shell(template) => Some(PlannedStep::Shell(template.render_shell(value))),
+        Step::Action(action) => {
             let mut action = action.clone();
             for arg in &mut action.args {
                 if let Value::String(text) = &mut arg.value {
                     *text = Template::parse(text).render(value);
                 }
             }
-            Plan::Steps(VecDeque::from([PlannedStep::Act(action)]))
+            Some(PlannedStep::Act(action))
         },
+        Step::Command(_) => None,
     }
+}
+
+/// The values of the arguments of the last command of `chain`.
+///
+/// `values` stand in the order of the arguments of the first command, the
+/// command that runs. Each command after it runs as a command step of the one
+/// before it, so each of its arguments takes the value of its caller's
+/// argument of the same name. An argument that its caller does not declare
+/// takes its default, as `default` writes it.
+fn chain_values(
+    chain: &[&UserCommand],
+    values: &[String],
+    default: &mut dyn FnMut(&TextDefault) -> String,
+) -> Vec<String> {
+    let mut values = values.to_vec();
+    for pair in chain.windows(2) {
+        let [caller, nested] = pair else {
+            continue;
+        };
+        values = nested
+            .args
+            .iter()
+            .map(|arg| match arg_value(caller, &values, &arg.name) {
+                Some(value) => value,
+                None => match arg.default() {
+                    Some(text) => default(text),
+                    None => String::new(),
+                },
+            })
+            .collect();
+    }
+    values
 }
 
 /// How the shell line `line` runs under `output`.
@@ -280,14 +387,23 @@ fn cli_line(tool: &str, values: &[String]) -> String {
 /// Run the steps of `run` up to its next shell step, which parks the run
 /// until the step's result lands, or to its end.
 ///
-/// A run of the `notify` output that ends on a shell step shows a message.
-/// The message is the first line of that step's stdout, or `<name> done` for
-/// a step with none. A run of the `buffer` output that ends on a shell step
-/// opens that step's stdout in a scratch buffer.
+/// An action step runs only while the workspace that was active when the run
+/// started still is. Otherwise the run stops with a message that says so.
+///
+/// A run that ends on a shell step shows a message under the `notify`
+/// output, and under the `block` and `run_pane` outputs, which hand a run
+/// with an action step to this walk. The message is the first line of that
+/// step's stdout, or `<name> done` for a step with none. A run of the
+/// `buffer` output that ends on a shell step opens the stdout of every shell
+/// step in a scratch buffer.
 fn advance(stoat: &mut Stoat, mut run: CommandRun) -> UpdateEffect {
     let mut effect = UpdateEffect::Redraw;
     while let Some(step) = run.steps.pop_front() {
         match step {
+            PlannedStep::Act(_) if stoat.active_workspace != run.workspace => {
+                stoat.set_status(format!("{}: stopped, the workspace changed", run.name));
+                return effect;
+            },
             PlannedStep::Act(action) => {
                 effect =
                     effect.merge(stoat.run_bound_actions(&Arc::from(vec![action]), None, false));
@@ -308,15 +424,15 @@ fn advance(stoat: &mut Stoat, mut run: CommandRun) -> UpdateEffect {
 
     match run.output {
         _ if run.last_was_action => {},
-        Output::Notify => {
+        Output::Notify | Output::Block | Output::RunPane => {
             let text = first_line(&run.last_stdout)
                 .map_or_else(|| format!("{} done", run.name), str::to_owned);
             stoat.notify(MessageKind::Success, text);
         },
         Output::Buffer => {
-            buffer_lifecycle::show_scratch_with_text(stoat, &run.last_stdout);
+            buffer_lifecycle::show_scratch_with_text(stoat, &run.stdout);
         },
-        Output::Block | Output::RunPane | Output::Locations => {},
+        Output::Locations => {},
     }
     effect
 }
@@ -546,19 +662,43 @@ fn land_preview(stoat: &mut Stoat, generation: u64, line: String, result: io::Re
     pick.previews.insert(line, Some(text));
 }
 
-/// The shell line that `command` runs with `values`, one for each argument
-/// or the tail of a `cli` command, or `None` for an action step.
+/// The first shell line that `command` runs with `values`, one for each
+/// argument or the tail of a `cli` command, or `None` for a run with no shell
+/// step.
 ///
-/// The palette's key line names it. It writes each value as [`plan`] does.
-/// A `file` or `dir` value keeps its leading `~/`. Only the run expands it to
-/// the home directory, so the line on show reads that path as typed.
-pub(crate) fn run_line_preview(command: &UserCommand, values: &[String]) -> Option<String> {
-    match &command.run {
-        RunSpec::Cli { tool, .. } => Some(cli_line(tool, values)),
-        RunSpec::Step(Step::Shell(template)) => {
-            Some(template.render_shell(|name| arg_value(command, values, name)))
-        },
-        RunSpec::Step(Step::Action(_)) => None,
+/// The palette's key line names it. It reads the first shell step of the run
+/// as [`UserCommand::flatten`] reads it from `set`, and writes each value as
+/// [`plan`] does. A nested command's argument that its caller does not
+/// declare writes a literal default's text, and a context default reads as
+/// empty, because only the run reads the editor. A `file` or `dir` value
+/// keeps its leading `~/`. Only the run expands it to the home directory, so
+/// the line on show reads that path as typed.
+pub(crate) fn run_line_preview(
+    command: &UserCommand,
+    set: &CommandSet,
+    values: &[String],
+) -> Option<String> {
+    if let RunSpec::Cli { tool, .. } = &command.run {
+        return Some(cli_line(tool, values));
+    }
+    command
+        .flatten(set)
+        .iter()
+        .filter(|flat| matches!(flat.step, Step::Shell(_)))
+        .find_map(
+            |flat| match planned_step(flat, values, &mut literal_default)? {
+                PlannedStep::Shell(line) => Some(line),
+                PlannedStep::Act(_) => None,
+            },
+        )
+}
+
+/// The text of a literal default, or the empty string for a context value,
+/// which only a run reads.
+fn literal_default(default: &TextDefault) -> String {
+    match default {
+        TextDefault::Literal(text) => text.clone(),
+        TextDefault::Context(_) => String::new(),
     }
 }
 
@@ -589,14 +729,16 @@ fn first_line(text: &str) -> Option<&str> {
     text.lines().map(str::trim).find(|line| !line.is_empty())
 }
 
-/// End the `locations` run `run`, whose shell step gave `output`, whatever
-/// its exit code.
+/// End the `locations` run `run`, whose last shell step gave `output`,
+/// whatever its exit code.
 ///
-/// The lines of the stdout that name a location resolve on a worker, and the
-/// picker opens over them when they land. With no location, a run that failed
-/// with a stderr line shows its failure, and any other run says so.
+/// The lines of the stdout of every shell step that name a location resolve
+/// on a worker, and the picker opens over them when they land. With no
+/// location, a run whose last step failed with a stderr line shows its
+/// failure, and any other run says so.
 fn end_locations(stoat: &mut Stoat, run: &CommandRun, output: ShellOutput) {
-    let parsed: Vec<ParsedLocation> = String::from_utf8_lossy(&output.stdout)
+    let parsed: Vec<ParsedLocation> = run
+        .stdout
         .lines()
         .filter_map(location_picker::parse_location_line)
         .collect();
@@ -655,7 +797,7 @@ mod tests {
         location_picker::LocationEntry,
         pane::{DockPanel, DockSide, DockVisibility, FocusTarget, View},
         test_harness::TestHarness,
-        user_command::{ArgKind, CommandArg, Output, RunSpec, Step, UserCommand},
+        user_command::{ArgKind, CommandArg, CommandSet, Output, RunSpec, Step, UserCommand},
     };
     use std::path::{Path, PathBuf};
     use stoat_config::Template;
@@ -719,11 +861,19 @@ mod tests {
                 name: "pr".to_owned(),
                 kind: ArgKind::Text { default: None },
             }],
-            run: RunSpec::Step(Step::Shell(Template::parse("gh pr checkout {pr}"))),
+            run: RunSpec::Steps {
+                steps: vec![Step::Shell(Template::parse("gh pr checkout {pr}"))],
+                script: false,
+            },
             output: Output::Block,
         };
         assert_eq!(
-            plan(&command, &["412".to_owned()]),
+            plan(
+                &command,
+                &CommandSet::default(),
+                &["412".to_owned()],
+                &mut |_| String::new()
+            ),
             Plan::Modal("gh pr checkout 412".to_owned()),
         );
     }
@@ -1016,6 +1166,169 @@ mod tests {
                 matches!(ws.panes.pane(ws.panes.focus()).view, View::Run(_)),
             ),
             (FocusTarget::SplitPane, true),
+        );
+    }
+
+    /// The user command `ship`, which tests, pushes, and opens a pull request
+    /// titled after the newest commit, and then says so.
+    const SHIP: &str = concat!(
+        "command ship { arg message = text(default: git.last_subject); ",
+        "run = [shell(\"cargo test\"), shell(\"git push -u origin HEAD\"), ",
+        "shell(\"gh pr create --fill --title {message}\"), Notify(\"shipped\")]; ",
+        "output = run_pane; }",
+    );
+
+    /// A harness with [`SHIP`] loaded over a repository whose newest commit
+    /// reads `fix the parser`.
+    fn ship_harness() -> TestHarness {
+        let h = loaded(SHIP);
+        h.seed_linear_history(
+            "/repo",
+            &[("a1b2c3d4", "fix the parser", &[("a.rs", "1\n")])],
+        );
+        h
+    }
+
+    /// The steps after the failed one do not run, and the run names the
+    /// failure. A run with an action step goes step by step, so no Run pane
+    /// opens.
+    #[test]
+    fn a_failed_step_stops_the_steps_after_it() {
+        let mut h = ship_harness();
+        h.fake_shell
+            .set_response("git push -u origin HEAD", output(b"", b"rejected\n", 1));
+        submit(&mut h, "ship");
+        assert_eq!(
+            (
+                shell_lines(&h),
+                message(&h),
+                h.stoat.active_workspace().runs.len()
+            ),
+            (
+                vec![
+                    "cargo test".to_owned(),
+                    "git push -u origin HEAD".to_owned()
+                ],
+                (Some("ship: rejected (exit 1)"), MessageKind::Alert),
+                0,
+            ),
+        );
+    }
+
+    #[test]
+    fn a_script_runs_every_step_in_order_and_its_last_action_has_the_last_word() {
+        let mut h = ship_harness();
+        submit(&mut h, "ship");
+        assert_eq!(
+            (shell_lines(&h), message(&h)),
+            (
+                vec![
+                    "cargo test".to_owned(),
+                    "git push -u origin HEAD".to_owned(),
+                    "gh pr create --fill --title 'fix the parser'".to_owned(),
+                ],
+                (Some("shipped"), MessageKind::Info),
+            ),
+        );
+    }
+
+    #[test]
+    fn a_shell_only_script_hands_one_joined_line_to_the_run_pane() {
+        let mut h = loaded(
+            r#"command check { run = [shell("cargo fmt --check"), shell("cargo clippy")]; output = run_pane; }"#,
+        );
+        submit(&mut h, "check");
+        assert_eq!(
+            (
+                h.fake_terminal.sent_strings().last().cloned(),
+                h.fake_shell.invocations()
+            ),
+            (
+                Some("cargo fmt --check && cargo clippy\n".to_owned()),
+                Vec::new()
+            ),
+        );
+    }
+
+    /// The command `co`, which checks out a pull request, and `rv`, whose run
+    /// checks one out through `co` and then shows a message.
+    const CO_RV: &str = concat!(
+        "command co { arg pr = text; run = shell(\"gh pr checkout {pr}\"); output = notify; }\n",
+        "command rv { arg pr = same_as(co); run = [co, Notify(\"after\")]; }",
+    );
+
+    #[test]
+    fn a_command_step_runs_with_the_caller_s_values() {
+        let mut h = loaded(CO_RV);
+        submit(&mut h, "rv 412");
+        assert_eq!(
+            (shell_lines(&h), message(&h)),
+            (
+                vec!["gh pr checkout 412".to_owned()],
+                (Some("after"), MessageKind::Info)
+            ),
+        );
+    }
+
+    /// An argument of a step's command that the caller does not declare takes
+    /// that command's default.
+    #[test]
+    fn a_command_step_takes_its_own_default_for_an_argument_the_caller_lacks() {
+        let mut h = loaded(concat!(
+            "command hail { arg who = text(default: \"world\"); ",
+            "run = shell(\"echo hello {who}\"); }\n",
+            "command wave { run = [hail, Notify(\"waved\")]; }",
+        ));
+        submit(&mut h, "wave");
+        assert_eq!(
+            (shell_lines(&h), message(&h)),
+            (
+                vec!["echo hello world".to_owned()],
+                (Some("waved"), MessageKind::Info)
+            ),
+        );
+    }
+
+    #[test]
+    fn buffer_collects_the_stdout_of_every_shell_step() {
+        let mut h = loaded(
+            r#"command twologs { run = [shell("cat a.log"), shell("cat b.log")]; output = buffer; }"#,
+        );
+        h.fake_shell
+            .set_response("cat a.log", output(b"a\n", b"", 0));
+        h.fake_shell
+            .set_response("cat b.log", output(b"b\n", b"", 0));
+        submit(&mut h, "twologs");
+
+        let (buffer, _) = h.stoat.focused_cursor_pos().expect("an editor has focus");
+        assert_eq!(h.buffer_text(buffer), "a\nb\n");
+    }
+
+    /// The shell step finishes after another workspace became active, so the
+    /// action after it does not run, and the run says why.
+    #[test]
+    fn an_action_step_does_not_run_after_the_workspace_changed() {
+        let mut h = loaded(
+            r#"command nap { run = [shell("sleep 1"), Notify("after")]; output = notify; }"#,
+        );
+        action_handlers::dispatch(&mut h.stoat, &stoat_action::OpenCommandPalette);
+        h.type_text("nap");
+        h.hold_blocking();
+        h.type_keys("enter");
+        h.settle();
+        let other = h.create_workspace();
+        h.set_active_workspace(other);
+        h.run_held_blocking();
+        h.settle();
+        assert_eq!(
+            (shell_lines(&h), message(&h)),
+            (
+                vec!["sleep 1".to_owned()],
+                (
+                    Some("nap: stopped, the workspace changed"),
+                    MessageKind::Alert
+                ),
+            ),
         );
     }
 

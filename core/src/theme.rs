@@ -974,6 +974,10 @@ pub mod scope {
     /// `command NAME = cli(...)` item of the config declares it. A theme that
     /// leaves it unset draws no tag.
     pub const UI_CMD_SOURCE_CLI: &str = "ui.cmd.source.cli";
+    /// The Source Tag that ends a palette row whose command is a script, a
+    /// block command whose `run` writes its steps as a list. A theme that
+    /// leaves it unset draws no tag.
+    pub const UI_CMD_SOURCE_SCRIPT: &str = "ui.cmd.source.script";
     /// The Source Tag that ends the palette's `action` row, the row that opens
     /// the internal actions. A theme that leaves it unset draws no tag.
     pub const UI_CMD_SOURCE_INTERNAL: &str = "ui.cmd.source.internal";

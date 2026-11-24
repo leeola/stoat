@@ -369,7 +369,7 @@ fn sync_cli_spec(stoat: &mut Stoat) {
             RunSpec::Cli { tool, completions } => {
                 Some((command.name.clone(), tool.clone(), completions.clone()))
             },
-            RunSpec::Step(_) => None,
+            RunSpec::Steps { .. } => None,
         },
         _ => None,
     };
