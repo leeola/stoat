@@ -7,10 +7,18 @@
 //! finds and has no error case, because a help text in no shape it reads still
 //! belongs to a tool that the command runs.
 
-use std::iter;
+use std::{
+    iter::{self, Peekable},
+    mem,
+    str::Chars,
+};
 
 /// The text that opens a usage line, ASCII case ignored.
 const USAGE: &str = "usage:";
+
+/// The value name of a flag that a fish completion script marks as taking a
+/// value, because the script names no value.
+const FISH_VALUE: &str = "VALUE";
 
 /// What a tool's help text describes.
 #[derive(Debug, Clone, PartialEq, Default)]
@@ -42,6 +50,23 @@ pub(crate) struct CliSubcommand {
     pub(crate) description: String,
 }
 
+/// The options of one fish `complete` statement that the parser reads, each
+/// the first value that the statement gives it.
+#[derive(Default)]
+struct Complete<'a> {
+    /// The command that the statement completes, from `-c`.
+    command: Option<&'a str>,
+    /// The condition under which the statement applies, from `-n`.
+    condition: Option<&'a str>,
+    short: Option<&'a str>,
+    long: Option<&'a str>,
+    description: Option<&'a str>,
+    /// The candidates that the statement offers, from `-a`.
+    arguments: Option<&'a str>,
+    /// Whether `-r` or `-x` marks the option as taking a value.
+    takes_value: bool,
+}
+
 /// The usage, the flags, and the subcommands that `text`, a tool's help,
 /// describes.
 ///
@@ -52,6 +77,57 @@ pub(crate) fn parse_help(text: &str) -> CliSpec {
         usage: usage_text(&lines).map(usage_signature),
         flags: flags(&lines),
         subcommands: subcommands(&lines),
+    }
+}
+
+/// The flags and the subcommands that `script`, a fish completion script,
+/// declares for the tool `command`.
+///
+/// The script's `complete` statements whose `-c` names `command` declare
+/// them, in the shape that clap writes. A statement with `-s` or `-l`
+/// declares a flag, which takes a value when `-r` or `-x` marks it. A
+/// statement with neither declares a subcommand when its `-a` is one plain
+/// name. A statement whose condition names a subcommand completes that
+/// subcommand and is skipped.
+///
+/// The usage reads `[flags] <command>` for a tool with subcommands and
+/// `[flags] [args...]` for one with none. An unclosed quote ends the script,
+/// and the statements before it stand.
+pub(crate) fn parse_fish_completions(script: &str, command: &str) -> CliSpec {
+    let mut flags = Vec::new();
+    let mut subcommands = Vec::new();
+    for words in fish_statements(script) {
+        let Some(complete) = read_complete(&words) else {
+            continue;
+        };
+        if complete.command != Some(command) || complete.condition.is_some_and(names_subcommand) {
+            continue;
+        }
+
+        let description = complete.description.unwrap_or_default();
+        if complete.short.is_some() || complete.long.is_some() {
+            flags.push(CliFlag {
+                short: complete.short.and_then(|short| short.chars().next()),
+                long: complete.long.map(str::to_owned),
+                value: complete.takes_value.then(|| FISH_VALUE.to_owned()),
+                description: first_sentence(description),
+            });
+        } else if let Some(name) = complete.arguments.filter(|name| is_subcommand_name(name)) {
+            subcommands.push(CliSubcommand {
+                name: name.to_owned(),
+                description: description.to_owned(),
+            });
+        }
+    }
+
+    let usage = match subcommands.is_empty() {
+        true => "[flags] [args...]",
+        false => "[flags] <command>",
+    };
+    CliSpec {
+        usage: Some(usage.to_owned()),
+        flags,
+        subcommands,
     }
 }
 
@@ -258,16 +334,11 @@ fn flag(lines: &[&str], at: usize, flag_lines: &[usize]) -> CliFlag {
         .chain(below)
         .filter(|part| !part.is_empty())
         .collect();
-    let joined = parts.join(" ");
-    let sentence = joined
-        .split_once(". ")
-        .map_or(joined.as_str(), |(head, _)| head);
-
     CliFlag {
         short,
         long,
         value: long_value.or(short_value),
-        description: sentence.strip_suffix('.').unwrap_or(sentence).to_owned(),
+        description: first_sentence(&parts.join(" ")),
     }
 }
 
@@ -358,6 +429,126 @@ fn is_subcommand_name(name: &str) -> bool {
         .next()
         .is_some_and(|first| first.is_ascii_alphanumeric())
         && chars.all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | ':' | '.' | '+' | '-'))
+}
+
+/// The statements of `script`, each as its words, with fish's quoting read.
+///
+/// A statement ends at a newline or a `;` outside quotes, and a `#` that
+/// starts a word opens a comment to the end of its line. Outside quotes a
+/// backslash takes the next character. Adjacent pieces make one word, so
+/// `a'b'"c"` reads `abc`.
+///
+/// A quote that never closes ends the script, and drops the statement that it
+/// opens in, because a quoted value can hold newlines and the rest of the
+/// script reads as one value.
+fn fish_statements(script: &str) -> Vec<Vec<String>> {
+    let mut statements = Vec::new();
+    let mut words: Vec<String> = Vec::new();
+    let mut word: Option<String> = None;
+    let mut chars = script.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '\n' | ';' => {
+                words.extend(word.take());
+                if !words.is_empty() {
+                    statements.push(mem::take(&mut words));
+                }
+            },
+            ' ' | '\t' | '\r' => words.extend(word.take()),
+            '#' if word.is_none() => while chars.next_if(|&next| next != '\n').is_some() {},
+            '\\' => {
+                if let Some(next) = chars.next() {
+                    word.get_or_insert_with(String::new).push(next);
+                }
+            },
+            '\'' | '"' => {
+                if !read_quoted(&mut chars, c, word.get_or_insert_with(String::new)) {
+                    return statements;
+                }
+            },
+            c => word.get_or_insert_with(String::new).push(c),
+        }
+    }
+
+    words.extend(word);
+    if !words.is_empty() {
+        statements.push(words);
+    }
+    statements
+}
+
+/// Read the piece that the quote `quote` opened into `word`, up to its
+/// closing quote, and answer whether the quote closed.
+///
+/// In single quotes `\'` and `\\` are the escapes, and in double quotes
+/// `\"`, `\\`, and `\$`. Any other backslash stands as itself.
+fn read_quoted(chars: &mut Peekable<Chars<'_>>, quote: char, word: &mut String) -> bool {
+    let escapes: &[char] = match quote {
+        '\'' => &['\'', '\\'],
+        _ => &['"', '\\', '$'],
+    };
+    while let Some(c) = chars.next() {
+        if c == quote {
+            return true;
+        }
+        match chars.next_if(|next| c == '\\' && escapes.contains(next)) {
+            Some(escaped) => word.push(escaped),
+            None => word.push(c),
+        }
+    }
+    false
+}
+
+/// The options of `words`, one fish statement, when it is a `complete`
+/// statement.
+///
+/// `-c`, `-n`, `-s`, `-l`, `-d`, `-a`, `-o`, and `-w`, and their long
+/// spellings, each take the next word, and the first word of each counts.
+/// `-r` and `-x` mark a value, and every other option takes no word.
+fn read_complete(words: &[String]) -> Option<Complete<'_>> {
+    let (first, options) = words.split_first()?;
+    if first != "complete" {
+        return None;
+    }
+
+    let mut complete = Complete::default();
+    let mut unread = None;
+    let mut options = options.iter();
+    while let Some(option) = options.next() {
+        let slot = match option.as_str() {
+            "-r" | "--require-parameter" | "-x" | "--exclusive" => {
+                complete.takes_value = true;
+                continue;
+            },
+            "-c" | "--command" => &mut complete.command,
+            "-n" | "--condition" => &mut complete.condition,
+            "-s" | "--short-option" => &mut complete.short,
+            "-l" | "--long-option" => &mut complete.long,
+            "-d" | "--description" => &mut complete.description,
+            "-a" | "--arguments" => &mut complete.arguments,
+            "-o" | "--old-option" | "-w" | "--wraps" => &mut unread,
+            _ => continue,
+        };
+        let Some(value) = options.next() else {
+            break;
+        };
+        slot.get_or_insert(value.as_str());
+    }
+    Some(complete)
+}
+
+/// Whether the fish condition `condition` holds only inside a subcommand, as
+/// clap's `__fish_<tool>_using_subcommand` and fish's
+/// `__fish_seen_subcommand_from` test.
+fn names_subcommand(condition: &str) -> bool {
+    condition.contains("using_subcommand") || condition.contains("seen_subcommand_from")
+}
+
+/// The first sentence of `text`, cut at its first `. `, with no closing
+/// period.
+fn first_sentence(text: &str) -> String {
+    let sentence = text.split_once(". ").map_or(text, |(head, _)| head);
+    sentence.strip_suffix('.').unwrap_or(sentence).to_owned()
 }
 
 /// `text` split at its first run of two or more spaces, into the text before
@@ -466,10 +657,31 @@ const JJ_HELP: &str = concat!(
     "          Don't snapshot the working copy, and don't update it",
 );
 
+/// The fish completions of jj as clap writes them, with a value that spans
+/// lines in its quotes and two statements of a subcommand.
+#[cfg(test)]
+pub(crate) const JJ_FISH: &str = r#"function __fish_jj_needs_command
+    set -l cmd (commandline -opc)
+end
+
+complete -c jj -n "__fish_jj_needs_command" -s R -l repository -d 'Path to repository to operate on' -r -f -a "(__fish_complete_directories)"
+complete -c jj -n "__fish_jj_needs_command" -l at-operation -l at-op -d 'Operation to load the repo at' -r
+complete -c jj -n "__fish_jj_needs_command" -l color -d 'When to colorize output' -r -f -a "always\t''
+never\t''
+debug\t''
+auto\t''"
+complete -c jj -n "__fish_jj_needs_command" -l ignore-working-copy -d 'Don\'t snapshot the working copy, and don\'t update it'
+complete -c jj -n "__fish_jj_needs_command" -s h -l help -d 'Print help (see more with \'--help\')'
+complete -c jj -n "__fish_jj_needs_command" -f -a "git" -d 'Commands for working with Git remotes and the underlying Git repo'
+complete -c jj -n "__fish_jj_needs_command" -f -a "log" -d 'Show revision history'
+complete -c jj -n "__fish_jj_using_subcommand abandon" -s r -r
+complete -c jj -n "__fish_jj_using_subcommand abandon" -l at-operation -l at-op -d 'Operation to load the repo at' -r"#;
+
 #[cfg(test)]
 mod tests {
     use super::{
-        parse_help, usage_signature, CliFlag, CliSpec, CliSubcommand, CARGO_HELP, JJ_HELP, RG_HELP,
+        parse_fish_completions, parse_help, usage_signature, CliFlag, CliSpec, CliSubcommand,
+        CARGO_HELP, JJ_FISH, JJ_HELP, RG_HELP,
     };
 
     /// The flag with the short form `short`, the long form `long`, the value
@@ -664,6 +876,102 @@ mod tests {
         assert_eq!(
             parse_help("A tool that prints nothing useful.\n\n  It reads stdin.\n"),
             CliSpec::default(),
+        );
+    }
+
+    /// A spec with no flag and no subcommand, as a script that declares none
+    /// for its tool gives.
+    fn empty_fish_spec(flags: Vec<CliFlag>) -> CliSpec {
+        CliSpec {
+            usage: Some("[flags] [args...]".to_owned()),
+            flags,
+            subcommands: Vec::new(),
+        }
+    }
+
+    /// The first `-l` names the flag, `-r` gives it a value, and a quoted
+    /// value that spans lines ends where its quote closes.
+    #[test]
+    fn a_clap_fish_script_gives_the_tool_s_flags_and_subcommands() {
+        assert_eq!(
+            parse_fish_completions(JJ_FISH, "jj"),
+            CliSpec {
+                usage: Some("[flags] <command>".to_owned()),
+                flags: vec![
+                    flag(
+                        Some('R'),
+                        Some("repository"),
+                        Some("VALUE"),
+                        "Path to repository to operate on"
+                    ),
+                    flag(
+                        None,
+                        Some("at-operation"),
+                        Some("VALUE"),
+                        "Operation to load the repo at"
+                    ),
+                    flag(
+                        None,
+                        Some("color"),
+                        Some("VALUE"),
+                        "When to colorize output"
+                    ),
+                    flag(
+                        None,
+                        Some("ignore-working-copy"),
+                        None,
+                        "Don't snapshot the working copy, and don't update it"
+                    ),
+                    flag(
+                        Some('h'),
+                        Some("help"),
+                        None,
+                        "Print help (see more with '--help')"
+                    ),
+                ],
+                subcommands: vec![
+                    subcommand(
+                        "git",
+                        "Commands for working with Git remotes and the underlying Git repo"
+                    ),
+                    subcommand("log", "Show revision history"),
+                ],
+            },
+        );
+    }
+
+    #[test]
+    fn a_statement_for_another_command_is_skipped() {
+        assert_eq!(
+            parse_fish_completions(JJ_FISH, "git"),
+            empty_fish_spec(Vec::new())
+        );
+    }
+
+    /// A condition that holds inside a subcommand skips its statement, and
+    /// one that holds before any subcommand keeps it.
+    #[test]
+    fn a_condition_on_a_subcommand_is_skipped() {
+        let flags = |script| parse_fish_completions(script, "x").flags;
+        assert_eq!(
+            [
+                flags(r#"complete -c x -n "__fish_seen_subcommand_from log" -l graph"#),
+                flags(r#"complete -c x -n "__fish_use_subcommand" -l graph"#),
+            ],
+            [Vec::new(), vec![flag(None, Some("graph"), None, "")]],
+        );
+    }
+
+    #[test]
+    fn an_unclosed_quote_ends_the_script_and_gives_what_came_before() {
+        let script = concat!(
+            "complete -c x -l one\n",
+            "complete -c x -l two -d 'never closed\n",
+            "complete -c x -l three",
+        );
+        assert_eq!(
+            parse_fish_completions(script, "x"),
+            empty_fish_spec(vec![flag(None, Some("one"), None, "")]),
         );
     }
 }

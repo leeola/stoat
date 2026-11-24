@@ -1892,12 +1892,13 @@ fn doc_lines(
 /// The note that stands after the Source Tag on the first line of `user`'s
 /// doc, in `muted`, or no span for a command that wraps no tool.
 ///
-/// The note reads `wrapped from <source>`, where the source is the help run
-/// of the tool. Once the help in `specs` lands, a space, U+00B7, a space, and
-/// the tool's version follow, when the version run gave one. A tool that the
-/// load did not find reads `<tool>: not found`.
+/// The note reads `wrapped from <source>`, where the source is the line that
+/// the load of the tool's help reads, as [`run::help_source`] names it. Once
+/// the help in `specs` lands, a space, U+00B7, a space, and the tool's version
+/// follow, when the version run gave one. A tool that the load did not find
+/// reads `<tool>: not found`.
 fn cli_note(user: &UserCommand, specs: &HashMap<String, CliSpecState>, muted: Style) -> StyledLine {
-    let RunSpec::Cli { tool } = &user.run else {
+    let RunSpec::Cli { tool, completions } = &user.run else {
         return Vec::new();
     };
     let text = match loaded_cli(user, specs) {
@@ -1908,7 +1909,10 @@ fn cli_note(user: &UserCommand, specs: &HashMap<String, CliSpecState>, muted: St
             ..
         }) => format!("wrapped from {source} \u{b7} {version}"),
         Some(loaded) => format!("wrapped from {}", loaded.source),
-        None => format!("wrapped from {}", run::help_source(tool)),
+        None => format!(
+            "wrapped from {}",
+            run::help_source(tool, completions.as_deref())
+        ),
     };
     vec![(text, muted)]
 }
@@ -3792,6 +3796,20 @@ mod tests {
                     "wrapped from rg --help".to_owned()
                 ),
             ],
+        );
+    }
+
+    /// Before its help lands, a command that declares `completions` names that
+    /// command as where its help comes from.
+    #[test]
+    fn the_doc_of_a_completions_command_names_that_command() {
+        let jj = user_command(
+            r#"command jj = cli("jj", completions: "jj util completion fish");"#,
+            "jj",
+        );
+        assert_eq!(
+            doc_texts(&jj, &HashMap::new()).1,
+            "wrapped from jj util completion fish",
         );
     }
 

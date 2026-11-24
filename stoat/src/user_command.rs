@@ -118,7 +118,13 @@ pub(crate) enum RunSpec {
     /// words. The command has no argument. The palette takes the text after
     /// its name as one optional tail, which follows the tool on the shell line
     /// as typed.
-    Cli { tool: String },
+    Cli {
+        tool: String,
+        /// The command that prints the tool's fish completion script, which
+        /// the palette reads in place of the tool's `--help`, or `None` for
+        /// a tool whose help names its flags.
+        completions: Option<String>,
+    },
 }
 
 /// The step that the `run` statement of a block command names.
@@ -447,8 +453,8 @@ fn lower(
 /// The one positional string is the tool, which holds more than whitespace.
 /// The named `output` names an output, `block` when the call leaves it out.
 /// The named `doc` is the description of the palette's row, which the call's
-/// syntax gives no other place. The named `completions` is a string, which the
-/// call checks and does not keep.
+/// syntax gives no other place. The named `completions` is the command that
+/// prints the tool's fish completion script.
 fn cli_command(name: &str, line: u32, call: &Spanned<Call>) -> Result<UserCommand, ParseError> {
     let as_string = "`cli` takes the tool as a string";
     let mut tool: Option<&Spanned<CallValue>> = None;
@@ -497,14 +503,14 @@ fn cli_command(name: &str, line: u32, call: &Spanned<Call>) -> Result<UserComman
         },
     };
     let doc = named_string(doc, "doc")?.unwrap_or_default();
-    named_string(completions, "completions")?;
+    let completions = named_string(completions, "completions")?;
 
     Ok(UserCommand {
         name: name.to_owned(),
         doc,
         line,
         args: Vec::new(),
-        run: RunSpec::Cli { tool },
+        run: RunSpec::Cli { tool, completions },
         output,
     })
 }
@@ -1169,7 +1175,13 @@ mod tests {
     }
 
     /// The command that a `cli` item of [`load`] declares, with no argument.
-    fn wrap(name: &str, line: u32, tool: &str, output: Output, doc: &str) -> UserCommand {
+    fn wrap(
+        name: &str,
+        line: u32,
+        (tool, completions): (&str, Option<&str>),
+        output: Output,
+        doc: &str,
+    ) -> UserCommand {
         UserCommand {
             name: name.to_owned(),
             doc: doc.to_owned(),
@@ -1177,13 +1189,15 @@ mod tests {
             args: Vec::new(),
             run: RunSpec::Cli {
                 tool: tool.to_owned(),
+                completions: completions.map(str::to_owned),
             },
             output,
         }
     }
 
     /// A `cli` item lowers to its tool, its output, and its doc. The output
-    /// defaults to `block`, and `completions` loads as a string.
+    /// defaults to `block`, and `completions` names the command that prints
+    /// the tool's completions.
     #[test]
     fn a_wrap_command_lowers_to_its_tool_output_and_doc() {
         let (set, errors) = load(concat!(
@@ -1195,8 +1209,14 @@ mod tests {
             (commands, errors),
             (
                 vec![
-                    &wrap("rg", 1, "rg", Output::Locations, "search the tree"),
-                    &wrap("st", 2, "git status", Output::Block, ""),
+                    &wrap("rg", 1, ("rg", None), Output::Locations, "search the tree"),
+                    &wrap(
+                        "st",
+                        2,
+                        ("git status", Some("git completion fish")),
+                        Output::Block,
+                        ""
+                    ),
                 ],
                 Vec::new(),
             ),

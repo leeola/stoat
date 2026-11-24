@@ -238,7 +238,7 @@ fn expand_home(command: &UserCommand, mut values: Vec<String>, home: Option<&str
 fn plan(command: &UserCommand, values: &[String]) -> Plan {
     let value = |name: &str| arg_value(command, values, name);
     match &command.run {
-        RunSpec::Cli { tool } => shell_plan(cli_line(tool, values), command.output),
+        RunSpec::Cli { tool, .. } => shell_plan(cli_line(tool, values), command.output),
         RunSpec::Step(Step::Shell(template)) => {
             shell_plan(template.render_shell(value), command.output)
         },
@@ -337,13 +337,19 @@ pub(crate) fn spawn_shell_job(
 }
 
 /// Load the help of `tool`, the wrapped tool of the `cli` command `name`, on
-/// a worker, as [`load_cli`] reads it.
+/// a worker, from the command `completions` when the command declares one,
+/// as [`load_cli`] reads it.
 ///
 /// The help lands as a [`CommandEvent::CliSpec`], which [`pump`] stores.
-pub(crate) fn spawn_cli_load(stoat: &Stoat, name: String, tool: String) {
+pub(crate) fn spawn_cli_load(
+    stoat: &Stoat,
+    name: String,
+    tool: String,
+    completions: Option<String>,
+) {
     spawn_job(stoat, move |shell, root, env| CommandEvent::CliSpec {
         name,
-        loaded: load_cli(shell, &tool, root, env),
+        loaded: load_cli(shell, &tool, completions.as_deref(), root, env),
     });
 }
 
@@ -385,19 +391,24 @@ fn spawn_job(
 
 /// Read the help of the wrapped `tool` through `shell`, in `root` with `env`.
 ///
-/// The load runs `<tool> --help` and then `<tool> --version`, and blocks until
-/// both end. A help run that does not start, or that exits 127 as `sh` does
-/// for a command it does not find, marks the tool as missing and runs no
-/// version. A help on stderr with nothing on stdout reads as the help, as an
-/// older tool prints it. The version is the first line of the version run's
-/// stdout that holds text, when that run exits 0.
+/// The load runs the line that [`help_source`] names and then
+/// `<tool> --version`, and blocks until both end. That line is `<tool>
+/// --help`, or the command `completions` when the tool declares one, whose
+/// fish completion script reads as the help of the tool's first word.
+///
+/// A help run that does not start, or that exits 127 as `sh` does for a
+/// command it does not find, marks the tool as missing and runs no version. A
+/// help on stderr with nothing on stdout reads as the help, as an older tool
+/// prints it. The version is the first line of the version run's stdout that
+/// holds text, when that run exits 0.
 pub(crate) fn load_cli(
     shell: &dyn ShellHost,
     tool: &str,
+    completions: Option<&str>,
     root: &Path,
     env: &[(String, Option<String>)],
 ) -> LoadedCli {
-    let source = help_source(tool);
+    let source = help_source(tool, completions);
     let help = match shell.run(&source, b"", Some(root), env) {
         Ok(output) if output.exit_code != NOT_FOUND_EXIT => output,
         _ => {
@@ -420,18 +431,28 @@ pub(crate) fn load_cli(
         .ok()
         .filter(|output| output.exit_code == 0)
         .and_then(|output| first_line(&String::from_utf8_lossy(&output.stdout)).map(str::to_owned));
+    let spec = match completions {
+        Some(_) => {
+            let command = tool.split_whitespace().next().unwrap_or(tool);
+            cli_spec::parse_fish_completions(&text, command)
+        },
+        None => cli_spec::parse_help(&text),
+    };
     LoadedCli {
-        spec: cli_spec::parse_help(&text),
+        spec,
         source,
         version,
         missing: false,
     }
 }
 
-/// The help run of the wrapped `tool`, which the doc island names as where
-/// the help comes from.
-pub(crate) fn help_source(tool: &str) -> String {
-    format!("{tool} --help")
+/// The line whose output the load of the wrapped `tool`'s help reads, which
+/// the doc island names as where the help comes from.
+///
+/// It is the command `completions` when the tool declares one, and
+/// `<tool> --help` otherwise.
+pub(crate) fn help_source(tool: &str, completions: Option<&str>) -> String {
+    completions.map_or_else(|| format!("{tool} --help"), str::to_owned)
 }
 
 /// Store `loaded`, the help of the `cli` command `name`, for the session.
@@ -531,7 +552,7 @@ fn land_preview(stoat: &mut Stoat, generation: u64, line: String, result: io::Re
 /// the home directory, so the line on show reads that path as typed.
 pub(crate) fn run_line_preview(command: &UserCommand, values: &[String]) -> Option<String> {
     match &command.run {
-        RunSpec::Cli { tool } => Some(cli_line(tool, values)),
+        RunSpec::Cli { tool, .. } => Some(cli_line(tool, values)),
         RunSpec::Step(Step::Shell(template)) => {
             Some(template.render_shell(|name| arg_value(command, values, name)))
         },
@@ -627,7 +648,7 @@ mod tests {
     use crate::{
         action_handlers,
         app::{MessageKind, Stoat},
-        cli_spec::{self, CliSpec, RG_HELP},
+        cli_spec::{self, CliSpec, JJ_FISH, RG_HELP},
         host::ShellOutput,
         location_picker::LocationEntry,
         pane::{DockPanel, DockSide, DockVisibility, FocusTarget, View},
@@ -1197,9 +1218,15 @@ mod tests {
         );
     }
 
-    /// The help of `tool` loaded through `shell` from `/repo`.
+    /// The help of `tool`, which declares no completions, loaded through
+    /// `shell` from `/repo`.
     fn loaded_help(shell: &FakeShell, tool: &str) -> LoadedCli {
-        load_cli(shell, tool, Path::new("/repo"), &[])
+        load_cli(shell, tool, None, Path::new("/repo"), &[])
+    }
+
+    /// The lines that `shell` ran, in order.
+    fn ran(shell: &FakeShell) -> Vec<String> {
+        shell.invocations().into_iter().map(|run| run.cmd).collect()
     }
 
     /// The version is the first line of the version run's stdout.
@@ -1228,10 +1255,8 @@ mod tests {
     fn a_tool_that_is_not_installed_loads_as_missing() {
         let shell = FakeShell::new();
         shell.set_response("nope --help", output(b"", b"sh: nope: not found\n", 127));
-        let loaded = loaded_help(&shell, "nope");
-        let lines: Vec<String> = shell.invocations().into_iter().map(|run| run.cmd).collect();
         assert_eq!(
-            (loaded, lines),
+            (loaded_help(&shell, "nope"), ran(&shell)),
             (
                 LoadedCli {
                     spec: CliSpec::default(),
@@ -1258,6 +1283,40 @@ mod tests {
                 version: None,
                 missing: false,
             },
+        );
+    }
+
+    /// A tool that declares `completions` runs that command and no help run,
+    /// and the command's fish script gives the spec.
+    #[test]
+    fn completions_take_the_place_of_the_help_run() {
+        let shell = FakeShell::new();
+        shell.set_response(
+            "jj util completion fish",
+            output(JJ_FISH.as_bytes(), b"", 0),
+        );
+        shell.set_response("jj --version", output(b"jj 0.30.0\n", b"", 0));
+        let loaded = load_cli(
+            &shell,
+            "jj",
+            Some("jj util completion fish"),
+            Path::new("/repo"),
+            &[],
+        );
+        assert_eq!(
+            (loaded, ran(&shell)),
+            (
+                LoadedCli {
+                    spec: cli_spec::parse_fish_completions(JJ_FISH, "jj"),
+                    source: "jj util completion fish".to_owned(),
+                    version: Some("jj 0.30.0".to_owned()),
+                    missing: false,
+                },
+                vec![
+                    "jj util completion fish".to_owned(),
+                    "jj --version".to_owned()
+                ],
+            ),
         );
     }
 }

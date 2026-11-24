@@ -361,16 +361,20 @@ fn sync_cli_spec(stoat: &mut Stoat) {
         .and_then(|palette| palette.command.as_ref())
     {
         Some(PaletteCommand::User(command)) => match &command.run {
-            RunSpec::Cli { tool } => Some((command.name.clone(), tool.clone())),
+            RunSpec::Cli { tool, completions } => {
+                Some((command.name.clone(), tool.clone(), completions.clone()))
+            },
             RunSpec::Step(_) => None,
         },
         _ => None,
     };
-    let Some((name, tool)) = wanted.filter(|(name, _)| !stoat.cli_specs.contains_key(name)) else {
+    let Some((name, tool, completions)) =
+        wanted.filter(|(name, ..)| !stoat.cli_specs.contains_key(name))
+    else {
         return;
     };
     stoat.cli_specs.insert(name.clone(), CliSpecState::Loading);
-    user_command::run::spawn_cli_load(stoat, name, tool);
+    user_command::run::spawn_cli_load(stoat, name, tool, completions);
 }
 
 /// Start, narrow, or drop the palette's pick list for the argument in entry.
