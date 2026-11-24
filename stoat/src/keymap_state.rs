@@ -13,7 +13,6 @@ use crate::{
 };
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use std::collections::HashMap;
-use stoat_action::{registry::RegistryEntry, Action};
 
 /// The predicate field names [`StoatKeymapState`] derives itself, which a
 /// `SetVar` user variable may not shadow.
@@ -1185,22 +1184,6 @@ pub(crate) fn arg_to_state_value(arg: &ResolvedArg) -> Option<StateValue> {
     }
 }
 
-fn arg_to_param_value(
-    arg: &ResolvedArg,
-    captured: Option<f64>,
-) -> Option<stoat_action::ParamValue> {
-    match &arg.value {
-        stoat_config::Value::String(s) => Some(stoat_action::ParamValue::String(s.clone())),
-        stoat_config::Value::Ident(s) => Some(stoat_action::ParamValue::String(s.clone())),
-        stoat_config::Value::Number(n) => Some(stoat_action::ParamValue::Number(*n)),
-        stoat_config::Value::Bool(b) => Some(stoat_action::ParamValue::Bool(*b)),
-        stoat_config::Value::StateRef(name) if name == "num" => {
-            captured.map(stoat_action::ParamValue::Number)
-        },
-        _ => None,
-    }
-}
-
 pub(crate) fn action_display_desc(action: &ResolvedAction) -> String {
     if action.name == "SetMode" {
         let target = action.args.first().and_then(arg_as_str).unwrap_or_default();
@@ -1265,43 +1248,6 @@ fn entered_mode(actions: &[ResolvedAction]) -> Option<String> {
         .and_then(arg_as_str)
 }
 
-/// Build the action `name` with `args`, or `None` if unknown or an argument
-/// cannot be converted.
-///
-/// `captured` is the digit a `num` placeholder key matched this press, the value
-/// a `$num` argument resolves to. It is `None` for every non-placeholder
-/// binding, so a `$num` argument there has no value and drops the action.
-pub(crate) fn resolve_action(
-    name: &str,
-    args: &[ResolvedArg],
-    captured: Option<f64>,
-) -> Option<Box<dyn Action>> {
-    let entry = stoat_action::registry::lookup(name)?;
-    match build_action(entry, args, captured) {
-        Ok(action) => Some(action),
-        Err(reason) => {
-            tracing::warn!(target: "stoat::keymap", "action `{name}`: {reason}");
-            None
-        },
-    }
-}
-
-/// Build `entry`'s action from `args`, or say which argument does not fit.
-fn build_action(
-    entry: &RegistryEntry,
-    args: &[ResolvedArg],
-    captured: Option<f64>,
-) -> Result<Box<dyn Action>, String> {
-    let params = args
-        .iter()
-        .map(|arg| {
-            arg_to_param_value(arg, captured)
-                .ok_or_else(|| format!("cannot convert arg {:?}", arg.value))
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-    (entry.create)(&params).map_err(|error| error.to_string())
-}
-
 /// Parse `expr` as one action in the keymap grammar, and check that it runs.
 ///
 /// The text is what the right side of a binding holds, such as `MoveDown` or
@@ -1339,7 +1285,7 @@ pub(crate) fn check_bound_action(action: &ResolvedAction) -> Result<(), String> 
             let Some(entry) = stoat_action::registry::lookup(name) else {
                 return Err(format!("unknown action `{name}`"));
             };
-            build_action(entry, &action.args, None)
+            keymap::build_action(entry, &action.args, None)
                 .map_err(|reason| format!("action `{name}`: {reason}"))?;
         },
     }
@@ -1377,6 +1323,7 @@ mod tests {
     };
     use codegraph::SymbolKey;
     use std::{collections::HashSet, iter};
+    use stoat_action::Action;
     use stoat_config::Value;
 
     fn field(state: &StoatKeymapState<'_>, name: &str) -> Option<String> {

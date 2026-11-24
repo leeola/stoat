@@ -4,7 +4,10 @@ use std::{
     collections::{HashMap, HashSet},
     sync::Arc,
 };
-use stoat_action::registry;
+use stoat_action::{
+    registry::{self, RegistryEntry},
+    Action, ParamValue,
+};
 use stoat_config::{
     ActionExpr, Binding, Config, EventType, Key, KeyPart, Predicate, Statement, Value,
 };
@@ -1397,6 +1400,54 @@ pub(crate) fn resolve_config_action(action: &stoat_config::Action) -> ResolvedAc
     }
 }
 
+/// Build the action `name` with `args`, or `None` if unknown or an argument
+/// cannot be converted.
+///
+/// `captured` is the digit a `num` placeholder key matched this press, the value
+/// a `$num` argument resolves to. It is `None` for every non-placeholder
+/// binding, so a `$num` argument there has no value and drops the action.
+pub(crate) fn resolve_action(
+    name: &str,
+    args: &[ResolvedArg],
+    captured: Option<f64>,
+) -> Option<Box<dyn Action>> {
+    let entry = registry::lookup(name)?;
+    match build_action(entry, args, captured) {
+        Ok(action) => Some(action),
+        Err(reason) => {
+            tracing::warn!(target: "stoat::keymap", "action `{name}`: {reason}");
+            None
+        },
+    }
+}
+
+/// Build `entry`'s action from `args`, or say which argument does not fit.
+pub(crate) fn build_action(
+    entry: &RegistryEntry,
+    args: &[ResolvedArg],
+    captured: Option<f64>,
+) -> Result<Box<dyn Action>, String> {
+    let params = args
+        .iter()
+        .map(|arg| {
+            arg_to_param_value(arg, captured)
+                .ok_or_else(|| format!("cannot convert arg {:?}", arg.value))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    (entry.create)(&params).map_err(|error| error.to_string())
+}
+
+fn arg_to_param_value(arg: &ResolvedArg, captured: Option<f64>) -> Option<ParamValue> {
+    match &arg.value {
+        Value::String(s) => Some(ParamValue::String(s.clone())),
+        Value::Ident(s) => Some(ParamValue::String(s.clone())),
+        Value::Number(n) => Some(ParamValue::Number(*n)),
+        Value::Bool(b) => Some(ParamValue::Bool(*b)),
+        Value::StateRef(name) if name == "num" => captured.map(ParamValue::Number),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2033,8 +2084,7 @@ mod tests {
     fn resolved_focus_index(keymap: &Keymap, state: &TestState, digit: char) -> Option<usize> {
         let event = key_event(KeyCode::Char(digit), KeyModifiers::NONE);
         let (actions, captured) = keymap.lookup_with_capture(state, &event)?;
-        let action =
-            crate::keymap_state::resolve_action(&actions[0].name, &actions[0].args, captured)?;
+        let action = resolve_action(&actions[0].name, &actions[0].args, captured)?;
         action
             .as_any()
             .downcast_ref::<stoat_action::FocusPane>()
@@ -2111,8 +2161,7 @@ mod tests {
 
         assert_eq!(captured, None, "an exact key captures no digit");
         assert!(
-            crate::keymap_state::resolve_action(&actions[0].name, &actions[0].args, captured)
-                .is_none(),
+            resolve_action(&actions[0].name, &actions[0].args, captured).is_none(),
             "$num without a placeholder match drops the action"
         );
     }
@@ -3878,7 +3927,7 @@ mod tests {
             .lookup_with_capture(&prefix, &key_event(KeyCode::Char('3'), KeyModifiers::NONE))
             .expect("digits are bound in prefix mode");
         assert_eq!(three[1].name, "GotoTab");
-        let goto = crate::keymap_state::resolve_action(&three[1].name, &three[1].args, captured)
+        let goto = resolve_action(&three[1].name, &three[1].args, captured)
             .expect("GotoTab resolves with the captured digit");
         assert_eq!(
             goto.as_any()

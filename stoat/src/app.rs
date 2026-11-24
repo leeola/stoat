@@ -33,7 +33,7 @@ use crate::{
     keymap::{self, Keymap, ResolvedAction, SideButton, StateValue},
     keymap_state::{
         self, active_modal, debug_assert_modal_exclusivity, modal_predicate, normalize_shift_event,
-        resolve_action, ActiveModal, StoatKeymapState,
+        ActiveModal, StoatKeymapState,
     },
     lsp::{
         pending::{LabeledPending, Pending, StampedPending},
@@ -6974,7 +6974,7 @@ impl Stoat {
             if ra.name == "OpenSymbolPicker" {
                 dispatched_symbol_picker = true;
             }
-            if let Some(action) = resolve_action(&ra.name, &ra.args, captured_digit) {
+            if let Some(action) = keymap::resolve_action(&ra.name, &ra.args, captured_digit) {
                 dispatched_action = true;
                 let e = action_handlers::dispatch(self, &*action);
                 match e {
