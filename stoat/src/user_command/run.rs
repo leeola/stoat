@@ -1,8 +1,9 @@
-use super::{context, ArgKind, Output, Step, UserCommand};
+use super::{context, pick, ArgKind, Output, Step, UserCommand};
 use crate::{
     action_handlers,
     app::{MessageKind, Stoat, UpdateEffect},
     buffer_lifecycle,
+    command_palette::{ArgRow, PickLoad},
     host::ShellOutput,
     keymap::ResolvedAction,
     location_picker::{self, LocationEntry, ParsedLocation},
@@ -63,6 +64,12 @@ pub(crate) enum CommandEvent {
     },
     /// The entries that the stdout of a `locations` run resolved to.
     Locations { entries: Vec<LocationEntry> },
+    /// The result of the list command of a `pick` argument, with the
+    /// generation of the palette's list that started it.
+    PickList {
+        generation: u64,
+        result: io::Result<ShellOutput>,
+    },
 }
 
 /// Run `command` with `values`, one value for each of its arguments.
@@ -98,7 +105,8 @@ pub(crate) fn start(stoat: &mut Stoat, command: &UserCommand, values: Vec<String
 ///
 /// Answers whether a result landed. A step that exits 0 hands its stdout to
 /// the rest of the run. Any other result ends the run with a message that
-/// names the failure.
+/// names the failure. The result of a pick list's command goes to the
+/// palette's list, as [`land_pick`] reads it.
 pub(crate) fn pump(stoat: &mut Stoat) -> bool {
     let events = mem::take(&mut *stoat.command_events.lock().expect("command events mutex"));
     let landed = !events.is_empty();
@@ -113,6 +121,10 @@ pub(crate) fn pump(stoat: &mut Stoat) -> bool {
                             Some(action_handlers::lsp::open_location_picker(stoat, entries));
                     },
                 }
+                continue;
+            },
+            CommandEvent::PickList { generation, result } => {
+                land_pick(stoat, generation, result);
                 continue;
             },
         };
@@ -256,7 +268,7 @@ fn advance(stoat: &mut Stoat, mut run: CommandRun) -> UpdateEffect {
 /// [`Stoat::command_events`]. The step runs with no terminal, because an
 /// output that reads stdout reads it apart from stderr, and a terminal merges
 /// the two.
-fn spawn_shell_job(
+pub(crate) fn spawn_shell_job(
     stoat: &Stoat,
     line: String,
     done: impl FnOnce(io::Result<ShellOutput>) -> CommandEvent + Send + 'static,
@@ -285,6 +297,55 @@ fn spawn_shell_job(
                 .push(done(result));
         })
         .detach();
+}
+
+/// Give the open palette's pick list of `generation` the rows of `result`, or
+/// its failure.
+///
+/// A run that exits 0 gives a row for each row of its stdout, as
+/// [`pick::parse_rows`] reads them. The spec's templates write the label and
+/// the insert of each row. Any other result fails the list. A result for a
+/// list that the palette does not hold drops, because a newer run took its
+/// place.
+fn land_pick(stoat: &mut Stoat, generation: u64, result: io::Result<ShellOutput>) {
+    let Some(pick) = stoat
+        .command_palette
+        .as_mut()
+        .and_then(|palette| palette.pick.as_mut())
+        .filter(|pick| pick.generation == generation)
+    else {
+        return;
+    };
+    match result {
+        Ok(output) if output.exit_code == 0 => {
+            let spec = &pick.spec;
+            let rows = pick::parse_rows(&output.stdout)
+                .iter()
+                .map(|row| {
+                    let field = |name: &str| row.field(name).map(str::to_owned);
+                    ArgRow {
+                        label: spec.show.render(field),
+                        insert: spec.value.render(field),
+                    }
+                })
+                .collect();
+            pick.list.set_rows(rows);
+            pick.load = PickLoad::Ready;
+        },
+        failed => pick.load = PickLoad::Failed(pick_failure(&failed)),
+    }
+}
+
+/// The text that a failed pick list shows.
+///
+/// The text is the first line of the stderr that holds text, or `exit <code>`
+/// for a run with none. A run that did not start shows its error.
+fn pick_failure(result: &io::Result<ShellOutput>) -> String {
+    match result {
+        Ok(output) => first_line(&String::from_utf8_lossy(&output.stderr))
+            .map_or_else(|| format!("exit {}", output.exit_code), str::to_owned),
+        Err(error) => error.to_string(),
+    }
 }
 
 /// The first line of `text` that holds more than whitespace, trimmed.
@@ -349,7 +410,7 @@ fn failure(name: &str, result: &io::Result<ShellOutput>) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{plan, Plan};
+    use super::{pick_failure, plan, pump, CommandEvent, Plan};
     use crate::{
         action_handlers,
         app::{MessageKind, Stoat},
@@ -775,6 +836,59 @@ mod tests {
         assert_eq!(
             message(&h),
             (Some("find: rg: bad regex (exit 2)"), MessageKind::Alert),
+        );
+    }
+
+    /// A failed pick list names the first stderr line that holds text, or the
+    /// exit code of a run with none. A run that did not start names its error.
+    #[test]
+    fn a_pick_failure_names_its_stderr_or_its_exit_code() {
+        assert_eq!(
+            [
+                pick_failure(&Ok(output(b"", b"\n  gh: offline \nmore\n", 1))),
+                pick_failure(&Ok(output(b"rows\n", b" \n", 3))),
+                pick_failure(&Err(std::io::Error::other("no shell"))),
+            ],
+            ["gh: offline", "exit 3", "no shell"],
+        );
+    }
+
+    /// A pick result of another run drops, because the palette's list belongs
+    /// to the run of its own generation.
+    #[test]
+    fn a_pick_result_of_another_generation_drops() {
+        let mut h = loaded(
+            r#"command peek { arg f = pick("ls"); run = shell("cat {f}"); output = notify; }"#,
+        );
+        h.fake_shell.set_response("ls", output(b"x\n", b"", 0));
+        action_handlers::dispatch(&mut h.stoat, &stoat_action::OpenCommandPalette);
+        h.type_text("peek ");
+        let _ = h.snapshot();
+        h.settle();
+        let labels = |h: &TestHarness| {
+            let pick = h
+                .stoat
+                .command_palette
+                .as_ref()
+                .and_then(|palette| palette.pick.as_ref())
+                .expect("a pick list");
+            let labels: Vec<String> = pick.list.rows.iter().map(|row| row.label.clone()).collect();
+            (pick.generation, labels)
+        };
+        let (generation, landed) = labels(&h);
+
+        h.stoat
+            .command_events
+            .lock()
+            .expect("command events mutex")
+            .push(CommandEvent::PickList {
+                generation: generation + 1,
+                result: Ok(output(b"a\nb\n", b"", 0)),
+            });
+        pump(&mut h.stoat);
+        assert_eq!(
+            (landed, labels(&h).1),
+            (vec!["x".to_owned()], vec!["x".to_owned()])
         );
     }
 

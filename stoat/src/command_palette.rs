@@ -9,7 +9,7 @@ use crate::{
     paths,
     picker::{self, PathPicker, PendingScan, PreviewPolicy, ScanTarget},
     rebase::RebasePause,
-    user_command::{ArgKind, CommandArg, CommandSet, TextDefault, UserCommand},
+    user_command::{ArgKind, CommandArg, CommandSet, PickSpec, TextDefault, UserCommand},
     workspace::Workspace,
 };
 use ratatui::layout::Rect;
@@ -156,6 +156,12 @@ pub struct CommandPalette {
     /// A context value reads the editor and the repository, so it resolves
     /// once for each command and argument while the palette is open.
     pub(crate) resolved_defaults: Vec<(String, usize, String)>,
+    /// The list of the user command's `pick` argument in entry, or `None`
+    /// while no such argument is in entry.
+    ///
+    /// [`crate::action_handlers::sync_palette_picker`] starts it when the
+    /// argument's entry starts, and drops it for any other input.
+    pub(crate) pick: Option<PickState>,
 }
 
 /// A command that the palette's input names, a registered action or a user
@@ -199,6 +205,146 @@ pub(crate) struct ResolvedCommand {
     pub(crate) head_chars: usize,
     /// The text after the head, empty for a head that spells the whole name.
     pub(crate) ghost: String,
+}
+
+/// A row of an argument list that the palette builds, as the text it shows
+/// and the text it writes.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct ArgRow {
+    /// The text that the row shows, which the typed text matches.
+    pub(crate) label: String,
+    /// The text that Enter and Tab write for the row.
+    pub(crate) insert: String,
+}
+
+/// The [`ArgRow`]s of an argument list, which the typed text narrows by their
+/// labels, and the selection among the rows that match.
+#[derive(Default)]
+pub(crate) struct ArgList {
+    pub(crate) rows: Vec<ArgRow>,
+    /// The indices into [`Self::rows`] of the rows that match the query, best
+    /// first.
+    pub(crate) filtered: Vec<usize>,
+    /// The matched char offsets of the leading filtered rows, as
+    /// [`picker::rank_into`] stores them. Read them through
+    /// [`Self::row_indices`], which covers the rows past its end.
+    pub(crate) match_indices: Vec<Vec<u32>>,
+    /// The place of the selected row in [`Self::filtered`].
+    pub(crate) selected: usize,
+    /// The rows that the last paint showed, which a page key steps by. `None`
+    /// before the first paint.
+    pub(crate) viewport_rows: Option<usize>,
+    /// The parse of the query that [`Self::filtered`] answers, which derives
+    /// the offsets of a row past [`Self::match_indices`].
+    pattern: Option<fuzzy::Pattern>,
+    /// The query that [`Self::filtered`] answers, or `None` while the rows
+    /// have no match yet.
+    query: Option<String>,
+}
+
+impl ArgList {
+    /// Replace the rows, with no match and the selection on the first row
+    /// until the next [`Self::refilter`].
+    pub(crate) fn set_rows(&mut self, rows: Vec<ArgRow>) {
+        self.rows = rows;
+        self.filtered.clear();
+        self.match_indices.clear();
+        self.selected = 0;
+        self.pattern = None;
+        self.query = None;
+    }
+
+    /// Rank the rows by their labels against `query`, and select the best.
+    ///
+    /// A query with no atom lists every row in its own order. A query that
+    /// the list answers already keeps the matches and the selection, so a
+    /// frame that calls this with the same text moves nothing.
+    pub(crate) fn refilter(&mut self, query: &str) {
+        if self.query.as_deref() == Some(query) {
+            return;
+        }
+        let items = self
+            .rows
+            .iter()
+            .enumerate()
+            .map(|(index, row)| (index, row.label.as_str()));
+        self.pattern = picker::rank_into(
+            query,
+            items,
+            self.rows.len(),
+            &mut self.filtered,
+            &mut self.match_indices,
+        );
+        self.selected = 0;
+        self.query = Some(query.to_owned());
+    }
+
+    /// The selected row, or `None` while no row matches.
+    pub(crate) fn selected_row(&self) -> Option<&ArgRow> {
+        self.rows.get(*self.filtered.get(self.selected)?)
+    }
+
+    /// Step the selection by `delta` rows, saturating at both ends.
+    pub(crate) fn move_selection(&mut self, delta: i32) {
+        picker::nav_move(self.filtered.len(), &mut self.selected, delta);
+    }
+
+    /// Step the selection by half the rows on show, down for a positive `dir`
+    /// and up for a negative one.
+    pub(crate) fn page(&mut self, dir: i32) {
+        self.move_selection(dir * picker::nav_page_step(self.viewport_rows));
+    }
+
+    /// The matched char offsets of the label of filtered row `row`.
+    ///
+    /// See [`picker::row_indices`] for what `scratch` and `matching` are for.
+    pub(crate) fn row_indices<'a>(
+        &'a self,
+        row: usize,
+        scratch: &'a mut Vec<u32>,
+        matching: &mut fuzzy::Scratch,
+    ) -> &'a [u32] {
+        let label = self
+            .filtered
+            .get(row)
+            .and_then(|&index| self.rows.get(index))
+            .map_or("", |row| row.label.as_str());
+        picker::row_indices(
+            &self.match_indices,
+            self.pattern.as_ref(),
+            row,
+            label,
+            scratch,
+            matching,
+        )
+    }
+}
+
+/// The list of a user command's `pick` argument, with the run of its list
+/// command that gives the rows.
+pub(crate) struct PickState {
+    /// The name of the command and the index of the argument whose list this
+    /// is. A new key starts a new run.
+    pub(crate) key: (String, usize),
+    /// The spec of the argument, whose templates write the rows when the run's
+    /// result lands.
+    pub(crate) spec: Arc<PickSpec>,
+    /// The stamp of the run. A result lands only on the list of its own stamp.
+    pub(crate) generation: u64,
+    pub(crate) load: PickLoad,
+    pub(crate) list: ArgList,
+}
+
+/// Where the run of a pick list's command stands.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum PickLoad {
+    /// The command runs, and no row has landed.
+    Loading,
+    /// The rows have landed.
+    Ready,
+    /// The command failed. The text is the first line of its stderr that holds
+    /// text, or `exit <code>`.
+    Failed(String),
 }
 
 /// The list that the palette's input names, the commands at the root or the
@@ -967,6 +1113,7 @@ impl CommandPalette {
             commands,
             arg_ghost: None,
             resolved_defaults: Vec::new(),
+            pick: None,
         }
     }
 
@@ -981,7 +1128,11 @@ impl CommandPalette {
     /// Arg mode lists the argument picker's candidates, so `:o ` over a large
     /// workspace sizes to the file count rather than the command count. Both
     /// sources are unfiltered bases, so the answer holds while the user types.
+    /// A pick list counts its rows, none while its command runs.
     pub(crate) fn list_rows_hint(&self) -> u16 {
+        if let Some(pick) = &self.pick {
+            return rows_of(pick.list.rows.len());
+        }
         match self.arg_picker.as_ref().filter(|_| self.command.is_some()) {
             Some(picker) => rows_of(picker.active_core_ref().picklist.base.len()),
             None => rows_of(self.offering + usize::from(self.scope != PaletteScope::Config)),
@@ -1062,17 +1213,39 @@ impl CommandPalette {
     /// The default of the user command's argument in entry while that argument
     /// holds no text, with the command's name and the argument's index.
     pub(crate) fn empty_default(&self, ws: &Workspace) -> Option<(String, usize, TextDefault)> {
+        let (command, index, typed) = self.user_arg_in_entry(ws)?;
+        let default = command.args.get(index)?.default()?;
+        typed
+            .is_empty()
+            .then(|| (command.name.clone(), index, default.clone()))
+    }
+
+    /// The spec of the user command's `pick` argument in entry, with the
+    /// command's name, the argument's index, and the argument's text.
+    pub(crate) fn pick_in_entry(
+        &self,
+        ws: &Workspace,
+    ) -> Option<(String, usize, Arc<PickSpec>, String)> {
+        let (command, index, typed) = self.user_arg_in_entry(ws)?;
+        let ArgKind::Pick(spec) = &command.args.get(index)?.kind else {
+            return None;
+        };
+        Some((command.name.clone(), index, spec.clone(), typed))
+    }
+
+    /// The user command that the input names, the index of its argument in
+    /// entry, and that argument's text with no whitespace at its ends.
+    fn user_arg_in_entry(&self, ws: &Workspace) -> Option<(&Arc<UserCommand>, usize, String)> {
         let PaletteCommand::User(command) = self.command.as_ref()? else {
             return None;
         };
-        let default = command.args.get(self.typed_arg)?.default()?;
         let text = self.input.text(ws);
         let (_, _, tail) = split_head(&text, &self.availability, &self.commands)?;
-        let typed = current_user_arg(tail, command.args.len()).1;
-        typed
+        let typed = current_user_arg(tail, command.args.len())
+            .1
             .trim()
-            .is_empty()
-            .then(|| (command.name.clone(), self.typed_arg, default.clone()))
+            .to_owned();
+        Some((command, self.typed_arg, typed))
     }
 
     /// The value source of the argument being typed when it drives an inline
@@ -1447,13 +1620,15 @@ impl CommandPalette {
     /// The value that the argument list gives the argument of `command` that
     /// `tail` puts in entry, or `None` when the typed text stands.
     ///
-    /// Only the list of a `file` or `dir` argument gives a value, and only
-    /// while the history does not walk. A typed path that starts with `/` or
+    /// No list gives a value while the history walks. A `pick` argument takes
+    /// the insert of its list's selected row, ranked against the typed text,
+    /// and the typed text stands when no row matches. A `file` or `dir`
+    /// argument takes a row of its picker. A typed path that starts with `/` or
     /// `~` takes the selected row of its directory browse. Any other text takes
     /// the selected row of the list. The value is the row's path as
     /// [`shell_path`] writes it for the workspace root.
     fn picked_user_value(
-        &self,
+        &mut self,
         ws: &Workspace,
         command: &UserCommand,
         tail: &str,
@@ -1462,13 +1637,21 @@ impl CommandPalette {
             return None;
         }
         let count = command.args.len();
-        let source = kind_source(&command.args.get(user_arg_index(tail, count))?.kind);
+        let index = user_arg_index(tail, count);
+        let typed = current_user_arg(tail, count).1.trim();
+        let kind = &command.args.get(index)?.kind;
+        if let ArgKind::Pick(_) = kind {
+            let key = (command.name.clone(), index);
+            let pick = self.pick.as_mut().filter(|pick| pick.key == key)?;
+            pick.list.refilter(typed);
+            return pick.list.selected_row().map(|row| row.insert.clone());
+        }
+
+        let source = kind_source(kind);
         let picker = self
             .arg_picker
             .as_ref()
             .filter(|picker| picker.source() == source)?;
-
-        let typed = current_user_arg(tail, count).1.trim();
         let path = match typed.starts_with('/') || typed.starts_with('~') {
             true => picker.browse_selected_path()?,
             false => picker.selected_path()?,
@@ -1825,10 +2008,11 @@ pub(crate) fn shell_path(path: &Path, root: &Path) -> String {
 }
 
 /// The value source of the list that a user command's argument of kind `kind`
-/// picks from. A `text` argument picks from no list.
+/// picks from. A `text` argument picks from no list, and a `pick` argument
+/// from the palette's own [`PickState`] list.
 fn kind_source(kind: &ArgKind) -> ValueSource {
     match kind {
-        ArgKind::Text { .. } => ValueSource::None,
+        ArgKind::Text { .. } | ArgKind::Pick(_) => ValueSource::None,
         ArgKind::File => ValueSource::Files,
         ArgKind::Dir => ValueSource::Directories,
     }
@@ -2213,7 +2397,7 @@ mod tests {
     use crate::{
         badge::BadgeSource,
         buffer_registry::AutoReloadMode,
-        host::FakeFsOp,
+        host::{FakeFsOp, ShellOutput},
         input_history::InputHistory,
         picker::PREVIEW_DIR_LIMIT,
         test_harness::{editor, TestHarness},
@@ -3347,6 +3531,275 @@ mod tests {
         );
         h.type_text(":where ");
         assert_eq!(arg_ghost(&mut h).as_deref(), Some("src/a.rs"));
+    }
+
+    /// The user command `pr`, whose argument picks a pull request from the
+    /// rows of `gh pr list`.
+    const PR: &str = concat!(
+        "command pr { arg pr = pick(\"gh pr list --json number,title,headRefName,state\", ",
+        "show: \"#{number} {title}\", value: \"{number}\", preview: \"gh pr view {number}\"); ",
+        "run = shell(\"gh pr checkout {pr}\"); output = notify; }",
+    );
+
+    /// The list command of [`PR`].
+    const PR_LIST: &str = "gh pr list --json number,title,headRefName,state";
+
+    /// A harness with [`PR`] loaded, whose fake shell answers the list command
+    /// with `output`.
+    fn pr_harness(output: ShellOutput) -> TestHarness {
+        let mut h = TestHarness::with_size(120, 30);
+        h.stoat.reload_user_config(PR);
+        h.fake_shell.set_response(PR_LIST, output);
+        h
+    }
+
+    /// A list command's answer of three pull requests as a JSON array.
+    fn three_prs() -> ShellOutput {
+        let rows = concat!(
+            r#"[{"number":412,"title":"Ermine: diff status row and minimap islands","headRefName":"ermine","state":"OPEN"},"#,
+            r#"{"number":409,"title":"Fix the parser","headRefName":"parser","state":"OPEN"},"#,
+            r#"{"number":401,"title":"Docs for commands","headRefName":"docs","state":"OPEN"}]"#,
+        );
+        ShellOutput {
+            stdout: rows.as_bytes().to_vec(),
+            stderr: Vec::new(),
+            exit_code: 0,
+        }
+    }
+
+    /// The palette's pick list.
+    fn pick(h: &TestHarness) -> &PickState {
+        h.stoat
+            .command_palette
+            .as_ref()
+            .expect("palette open")
+            .pick
+            .as_ref()
+            .expect("a pick list")
+    }
+
+    /// The labels of the pick rows that match, in their order.
+    fn pick_labels(h: &TestHarness) -> Vec<String> {
+        let list = &pick(h).list;
+        list.filtered
+            .iter()
+            .map(|&index| list.rows[index].label.clone())
+            .collect()
+    }
+
+    /// The Cmd Line's row of the last frame.
+    fn header_line(h: &TestHarness) -> String {
+        h.rendered_text()
+            .lines()
+            .find(|line| line.contains('\u{276f}'))
+            .unwrap_or_default()
+            .to_owned()
+    }
+
+    /// The list command runs when the argument's entry starts. Its rows fill
+    /// the list, the box sizes to them, and the Cmd Line counts them and names
+    /// the command.
+    #[test]
+    fn a_pick_argument_runs_its_list_command_when_entry_starts() {
+        let mut h = pr_harness(three_prs());
+        type_settled(&mut h, ":pr ");
+        let header = header_line(&h);
+        assert_eq!(
+            (
+                shell_lines(&h),
+                pick_labels(&h).first().cloned(),
+                h.stoat
+                    .command_palette
+                    .as_ref()
+                    .map(CommandPalette::list_rows_hint),
+                header.contains("3 prs \u{b7} from gh pr list\u{2502}"),
+            ),
+            (
+                vec![PR_LIST.to_owned()],
+                Some("#412 Ermine: diff status row and minimap islands".to_owned()),
+                Some(3),
+                true,
+            ),
+            "the header reads {header:?}",
+        );
+    }
+
+    /// Text typed past the argument's start drops the list, and the command
+    /// list shows again.
+    #[test]
+    fn leaving_the_argument_drops_the_pick_list() {
+        let mut h = pr_harness(three_prs());
+        type_settled(&mut h, ":pr ");
+        h.type_keys("backspace");
+        type_settled(&mut h, "");
+        let palette = h.stoat.command_palette.as_ref().expect("palette open");
+        assert_eq!(
+            (palette.pick.is_none(), palette_text(&h)),
+            (true, "pr".to_owned())
+        );
+    }
+
+    #[test]
+    fn the_list_command_runs_once_while_the_argument_stays_in_entry() {
+        let mut h = pr_harness(three_prs());
+        type_settled(&mut h, ":pr ");
+        type_settled(&mut h, "4");
+        type_settled(&mut h, "1");
+        h.type_keys("backspace");
+        type_settled(&mut h, "");
+        assert_eq!(shell_lines(&h), [PR_LIST]);
+    }
+
+    /// Typed text narrows the rows and puts the selection back on the first
+    /// row, which Enter then runs. The Cmd Line counts the one row.
+    #[test]
+    fn typed_text_narrows_the_pick_rows() {
+        let mut h = pr_harness(three_prs());
+        type_settled(&mut h, ":pr ");
+        h.type_keys("down down");
+        type_settled(&mut h, "parser");
+        let narrowed = (pick_labels(&h), pick(&h).list.selected);
+        let header = header_line(&h);
+        enter_settled(&mut h);
+        assert_eq!(
+            (
+                narrowed,
+                header.contains("1 pr \u{b7} from gh pr list\u{2502}"),
+                shell_lines(&h),
+            ),
+            (
+                (vec!["#409 Fix the parser".to_owned()], 0),
+                true,
+                vec![PR_LIST.to_owned(), "gh pr checkout 409".to_owned()],
+            ),
+            "the header reads {header:?}",
+        );
+    }
+
+    #[test]
+    fn enter_runs_with_the_selected_row_s_value() {
+        let mut h = pr_harness(three_prs());
+        type_settled(&mut h, ":pr ");
+        enter_settled(&mut h);
+        assert_eq!(shell_lines(&h), [PR_LIST, "gh pr checkout 412"]);
+    }
+
+    #[test]
+    fn enter_with_no_matching_row_passes_the_typed_text() {
+        let mut h = pr_harness(three_prs());
+        type_settled(&mut h, ":pr 777");
+        enter_settled(&mut h);
+        assert_eq!(shell_lines(&h), [PR_LIST, "gh pr checkout 777"]);
+    }
+
+    #[test]
+    fn tab_writes_the_selected_value_into_the_argument() {
+        let mut h = pr_harness(three_prs());
+        type_settled(&mut h, ":pr ");
+        h.type_keys("tab");
+        assert_eq!(palette_text(&h), "pr 412");
+    }
+
+    /// A harness over the `pr` pick list, with the input changed to `pr docs`
+    /// and no frame since.
+    fn unseen_docs() -> TestHarness {
+        let mut h = pr_harness(three_prs());
+        type_settled(&mut h, ":pr ");
+        let active = h.stoat.active_workspace;
+        let palette = h.stoat.command_palette.as_ref().expect("palette open");
+        palette
+            .input
+            .replace_text(&mut h.stoat.workspaces[active], "pr docs");
+        h
+    }
+
+    /// Enter and Tab rank the rows against text that no frame has seen yet,
+    /// as a burst of keys or a macro gives it. So each takes the row that the
+    /// text names.
+    #[test]
+    fn enter_and_tab_rank_text_that_no_frame_has_seen() {
+        let mut tab = unseen_docs();
+        crate::action_handlers::dispatch(&mut tab.stoat, &stoat_action::PickerComplete);
+        let tabbed = palette_text(&tab);
+
+        let mut enter = unseen_docs();
+        let mut palette = enter.stoat.command_palette.take().expect("palette open");
+        let ws = enter.stoat.active_workspace_mut();
+        palette.refilter_from_input(ws);
+        let values = match palette.handle_submit(ws) {
+            PaletteOutcome::Run(_, values, _) => Some(values),
+            _ => None,
+        };
+        assert_eq!(
+            (tabbed, values),
+            ("pr 401".to_owned(), Some(vec!["401".to_owned()]))
+        );
+    }
+
+    /// PageDown, Up, and Down step the selection of a pick list, and Enter
+    /// runs the row that the selection stands on. A page steps by half the
+    /// rows on show, so it reaches the last of the three rows.
+    #[test]
+    fn the_keys_step_the_pick_selection() {
+        let mut h = pr_harness(three_prs());
+        type_settled(&mut h, ":pr ");
+        let steps = ["pagedown", "up", "down"].map(|key| {
+            h.type_keys(key);
+            pick(&h).list.selected
+        });
+        enter_settled(&mut h);
+        assert_eq!(
+            (steps, shell_lines(&h)),
+            (
+                [2, 1, 2],
+                vec![PR_LIST.to_owned(), "gh pr checkout 401".to_owned()]
+            ),
+        );
+    }
+
+    #[test]
+    fn a_failed_list_command_shows_its_stderr_in_the_list_s_place() {
+        let mut h = pr_harness(ShellOutput {
+            stdout: Vec::new(),
+            stderr: b"\ngh: not logged in\nmore\n".to_vec(),
+            exit_code: 1,
+        });
+        type_settled(&mut h, ":pr ");
+        let header = header_line(&h);
+        assert_eq!(
+            (
+                pick(&h).load.clone(),
+                header.contains("failed \u{b7} from gh pr list\u{2502}"),
+                h.rendered_text().contains("gh: not logged in"),
+            ),
+            (PickLoad::Failed("gh: not logged in".to_owned()), true, true),
+            "the header reads {header:?}",
+        );
+    }
+
+    /// The rows fill the whole body down to the key line, the doc rows among
+    /// them, as History's rows do. So the last of twenty rows shows in a box
+    /// whose list region holds fourteen.
+    #[test]
+    fn the_pick_rows_fill_the_body_down_to_the_key_line() {
+        let rows: String = (1..=20).map(|at| format!("row {at:02}\n")).collect();
+        let mut h = TestHarness::with_size(160, 50);
+        h.stoat
+            .reload_user_config(r#"command peek { arg f = pick("ls"); run = shell("cat {f}"); }"#);
+        h.fake_shell.set_response(
+            "ls",
+            ShellOutput {
+                stdout: rows.into_bytes(),
+                stderr: Vec::new(),
+                exit_code: 0,
+            },
+        );
+        type_settled(&mut h, ":peek ");
+        let text = h.rendered_text();
+        assert_eq!(
+            (text.contains("row 01"), text.contains("row 20")),
+            (true, true)
+        );
     }
 
     /// A submitted line records the time that the executor's clock reads, so

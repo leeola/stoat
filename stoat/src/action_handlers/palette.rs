@@ -1,7 +1,8 @@
 use crate::{
     app::{Stoat, UpdateEffect},
     command_palette::{
-        self, ArgPicker, Availability, CommandPalette, PaletteCommand, PaletteOutcome,
+        self, ArgList, ArgPicker, Availability, CommandPalette, PaletteCommand, PaletteOutcome,
+        PickLoad, PickState,
     },
     commit_picker,
     file_finder::{Browse, FileScopes, FinderScope},
@@ -244,6 +245,7 @@ pub(crate) fn sync_palette_picker(stoat: &mut Stoat) {
         palette.arg_source().zip(palette.arg_tail(ws))
     };
     sync_arg_ghost(stoat);
+    sync_pick(stoat);
     let Some((source, tail)) = resolved else {
         return;
     };
@@ -342,6 +344,57 @@ pub(crate) fn sync_palette_picker(stoat: &mut Stoat) {
     }
 
     spawn_arg_picker_scans(stoat, pending);
+}
+
+/// Start, narrow, or drop the palette's pick list for the argument in entry.
+///
+/// The list command of a user command's `pick` argument runs on a worker when
+/// that argument's entry starts. It runs once while the same argument stays in
+/// entry, and each frame narrows the list by the argument's text. Any other
+/// input drops the list.
+fn sync_pick(stoat: &mut Stoat) {
+    let wanted = {
+        let ws = &stoat.workspaces[stoat.active_workspace];
+        stoat
+            .command_palette
+            .as_ref()
+            .and_then(|palette| palette.pick_in_entry(ws))
+    };
+    let Some((name, index, spec, typed)) = wanted else {
+        if let Some(palette) = stoat.command_palette.as_mut() {
+            palette.pick = None;
+        }
+        return;
+    };
+
+    let key = (name, index);
+    let held = stoat
+        .command_palette
+        .as_ref()
+        .and_then(|palette| palette.pick.as_ref())
+        .is_some_and(|pick| pick.key == key);
+    if !held {
+        let generation = crate::picker::next_generation();
+        user_command::run::spawn_shell_job(stoat, spec.list.clone(), move |result| {
+            user_command::run::CommandEvent::PickList { generation, result }
+        });
+        if let Some(palette) = stoat.command_palette.as_mut() {
+            palette.pick = Some(PickState {
+                key,
+                spec,
+                generation,
+                load: PickLoad::Loading,
+                list: ArgList::default(),
+            });
+        }
+    }
+    if let Some(pick) = stoat
+        .command_palette
+        .as_mut()
+        .and_then(|palette| palette.pick.as_mut())
+    {
+        pick.list.refilter(&typed);
+    }
 }
 
 /// Set the palette's argument ghost to the default of the user command's
@@ -633,6 +686,10 @@ pub(crate) fn palette_move_selection(stoat: &mut Stoat, delta: i32) -> Option<Up
     }
 
     let palette = stoat.command_palette.as_mut()?;
+    if let Some(pick) = palette.pick.as_mut() {
+        pick.list.move_selection(delta);
+        return Some(UpdateEffect::Redraw);
+    }
     if palette.arg_source().is_some()
         && let Some(picker) = palette.arg_picker.as_mut()
     {
@@ -660,11 +717,14 @@ pub(super) fn palette_up(stoat: &mut Stoat) -> UpdateEffect {
     let Some(palette) = stoat.command_palette.as_ref() else {
         return UpdateEffect::None;
     };
-    let picker_row = palette
-        .arg_picker
-        .as_ref()
-        .filter(|_| palette.arg_source().is_some())
-        .map(|picker| picker.active_core_ref().picklist.selected);
+    let picker_row = match &palette.pick {
+        Some(pick) => Some(pick.list.selected),
+        None => palette
+            .arg_picker
+            .as_ref()
+            .filter(|_| palette.arg_source().is_some())
+            .map(|picker| picker.active_core_ref().picklist.selected),
+    };
     let first_row = match (palette.command.as_ref(), picker_row) {
         (_, Some(row)) => row == 0,
         (Some(_), None) => true,
@@ -749,6 +809,14 @@ pub(crate) fn palette_history_next(stoat: &mut Stoat) -> Option<UpdateEffect> {
 pub(super) fn palette_page(stoat: &mut Stoat, dir: i32) -> UpdateEffect {
     if stoat.active_workspace().palette_history.is_walking() {
         return UpdateEffect::None;
+    }
+    if let Some(pick) = stoat
+        .command_palette
+        .as_mut()
+        .and_then(|palette| palette.pick.as_mut())
+    {
+        pick.list.page(dir);
+        return UpdateEffect::Redraw;
     }
     if let Some(palette) = stoat.command_palette.as_mut()
         && palette.arg_source().is_some()
@@ -858,7 +926,8 @@ fn arg_picker_mut(stoat: &mut Stoat) -> Option<&mut ArgPicker> {
 /// presses walks the whole match list. A command with more than one parameter
 /// completes the token being typed and keeps the tokens before it as typed. A
 /// user command completes its argument in entry and keeps the text before it,
-/// as [`command_palette::current_user_arg`] splits them.
+/// as [`command_palette::current_user_arg`] splits them. A pick list writes
+/// the insert of its selected row in place of the argument's text.
 ///
 /// A browse-mode tail keeps the typed directory prefix and appends the
 /// highlighted child, and no completion appends a trailing `/`, so the browse
@@ -923,28 +992,41 @@ pub(super) fn palette_complete(stoat: &mut Stoat) -> UpdateEffect {
             PaletteCommand::Action(_) => ("", typed_tail),
         };
 
-        let git_root = &ws.git_root;
-        let Some(picker) = stoat
+        let pick = stoat
             .command_palette
             .as_mut()
-            .and_then(|palette| palette.arg_picker.as_mut())
-        else {
-            return UpdateEffect::None;
-        };
+            .and_then(|palette| palette.pick.as_mut());
+        let tail = if let Some(pick) = pick {
+            pick.list.refilter(typed_tail.trim());
+            let Some(row) = pick.list.selected_row() else {
+                return UpdateEffect::None;
+            };
+            row.insert.clone()
+        } else {
+            let git_root = &ws.git_root;
+            let Some(picker) = stoat
+                .command_palette
+                .as_mut()
+                .and_then(|palette| palette.arg_picker.as_mut())
+            else {
+                return UpdateEffect::None;
+            };
 
-        let tail = match picker.browse.as_ref() {
-            Some(browse) => {
-                let Some(name) = picker.browse_selected_path().and_then(|p| p.file_name()) else {
-                    return UpdateEffect::None;
-                };
-                format!("{}{}", browse.typed_dir, name.to_string_lossy())
-            },
-            None => {
-                let Some(cycled) = picker.advance_tab_cycle(typed_tail, git_root) else {
-                    return UpdateEffect::None;
-                };
-                cycled
-            },
+            match picker.browse.as_ref() {
+                Some(browse) => {
+                    let Some(name) = picker.browse_selected_path().and_then(|p| p.file_name())
+                    else {
+                        return UpdateEffect::None;
+                    };
+                    format!("{}{}", browse.typed_dir, name.to_string_lossy())
+                },
+                None => {
+                    let Some(cycled) = picker.advance_tab_cycle(typed_tail, git_root) else {
+                        return UpdateEffect::None;
+                    };
+                    cycled
+                },
+            }
         };
 
         format!("{head} {kept}{tail}")

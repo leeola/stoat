@@ -1,7 +1,8 @@
 use crate::{
     command_palette::{
-        is_action_row, split_head, typed_head, ArgPicker, Availability, CommandPalette, Namespace,
-        PaletteCommand, PaletteScope, ResolvedCommand, ACTION_TOKEN,
+        is_action_row, split_head, typed_head, ArgList, ArgPicker, Availability, CommandPalette,
+        Namespace, PaletteCommand, PaletteScope, PickLoad, PickState, ResolvedCommand,
+        ACTION_TOKEN,
     },
     file_finder::FinderScope,
     input_history,
@@ -15,7 +16,7 @@ use crate::{
         text::{pre_wrap_rows, wrap_text, write_str, write_str_clipped},
     },
     theme::TypeRole,
-    user_command::CommandSet,
+    user_command::{pick, CommandSet},
     workspace::Workspace,
 };
 use ratatui::{
@@ -124,6 +125,21 @@ pub(crate) struct PaletteFilterLayout {
     /// The key line under the doc, as
     /// [`footer_rect`](crate::render::picker::footer_rect) gives it.
     pub(crate) footer: Rect,
+}
+
+impl PaletteFilterLayout {
+    /// The list rows, the doc rows, and the row between them, as one rect.
+    ///
+    /// History and a pick list paint their rows on one Island over this rect,
+    /// and the hit test reads their rows in it.
+    pub(crate) fn body(&self) -> Rect {
+        Rect::new(
+            self.list.x,
+            self.list.y,
+            self.list.width,
+            self.footer.y.saturating_sub(self.list.y),
+        )
+    }
 }
 
 /// The on-screen rectangles of the palette's argument picker, derived from a
@@ -355,6 +371,11 @@ pub(crate) fn render_command_palette(
         return;
     }
     palette.history_rows.clear();
+
+    if palette.pick.is_some() {
+        render_palette_pick(palette, ws, home, theme, area, zoom, buf, scene);
+        return;
+    }
 
     if palette.arg_picker.is_some() && palette.arg_source().is_some() {
         render_palette_arg_picker(
@@ -671,6 +692,178 @@ fn render_palette_free_arg(
     crate::render::picker::modal_footer(buf, layout.footer, &parts, plate, theme, scene);
 }
 
+/// Render the list of a user command's `pick` argument, under a Cmd Line
+/// whose status counts the rows and names the list command.
+///
+/// The list draws in the box of [`palette_filter_layout`], as History does. One
+/// Island covers the list rows, the doc rows, and the row between them.
+/// [`paint_arg_rows`] paints the rows. A list command that failed shows its
+/// text on the first row in `ui.error`. The status reads as [`pick_status`]
+/// words it, in `ui.text.muted`.
+///
+/// The list draws on the live grid with no pool, and its rows step one at a
+/// time. The key line names the keys of every argument list.
+#[allow(clippy::too_many_arguments)]
+fn render_palette_pick(
+    palette: &mut CommandPalette,
+    ws: &mut Workspace,
+    home: Option<&Path>,
+    theme: &crate::theme::Theme,
+    area: Rect,
+    zoom: i8,
+    buf: &mut Buffer,
+    scene: &mut stoat_widgets::ApcScene,
+) {
+    let content_rows = palette.list_rows_hint();
+    let Some(layout) = palette_filter_layout(area, content_rows, zoom, palette.header_rows) else {
+        return;
+    };
+    let status = {
+        let name = palette.user_arg().map_or("", |arg| arg.name.as_str());
+        let text = palette
+            .pick
+            .as_ref()
+            .map_or_else(String::new, |pick| pick_status(pick, name));
+        vec![(text, theme.get(crate::theme::scope::UI_TEXT_MUTED))]
+    };
+    palette.header_rows = render_palette_prelude(
+        &palette.input,
+        palette.resolved.as_ref(),
+        None,
+        &[],
+        CmdStatus::Text(&status),
+        layout.modal,
+        layout.inner,
+        home,
+        ws,
+        theme,
+        buf,
+        scene,
+    );
+    let Some(layout) = palette_filter_layout(area, content_rows, zoom, palette.header_rows) else {
+        return;
+    };
+
+    let body = layout.body();
+    let plate = crate::render::chrome::plate_colors(theme, scene);
+    if let Some(plate) = plate {
+        let edges = [ISLAND_TOP, ISLAND_SIDE, ISLAND_BOTTOM, ISLAND_SIDE];
+        crate::render::chrome::modal_island(body, edges, plate, theme, buf, scene);
+    }
+    if let Some(pick) = palette.pick.as_mut() {
+        pick.list.viewport_rows = Some(usize::from(body.height));
+        match &pick.load {
+            PickLoad::Failed(text) => {
+                let error = theme.get(crate::theme::scope::UI_ERROR);
+                write_str_clipped(buf, body.x + 1, body.y, text, error, body.right());
+            },
+            PickLoad::Loading | PickLoad::Ready => {
+                paint_arg_rows(&pick.list, body, theme, true, buf, scene);
+            },
+        }
+    }
+
+    let parts = Footer {
+        hints: &PALETTE_HINTS,
+        ..Footer::default()
+    };
+    crate::render::picker::modal_footer(buf, layout.footer, &parts, plate, theme, scene);
+}
+
+/// The Cmd Line status of `pick`, the list of the argument named `name`.
+///
+/// A list with rows reads the count of the rows on show and the argument's
+/// name, as `3 prs`. The name takes an `s` for any count but 1. A list whose
+/// command runs reads `loading`, and one whose command failed reads `failed`.
+/// A space, U+00B7, a space, `from`, and the head of the list command follow,
+/// as [`pick::list_head`] gives it.
+fn pick_status(pick: &PickState, name: &str) -> String {
+    let count = match &pick.load {
+        PickLoad::Loading => "loading".to_owned(),
+        PickLoad::Failed(_) => "failed".to_owned(),
+        PickLoad::Ready => {
+            let shown = pick.list.filtered.len();
+            let plural = match shown {
+                1 => "",
+                _ => "s",
+            };
+            format!("{} {name}{plural}", grouped(shown))
+        },
+    };
+    format!("{count} \u{b7} from {}", pick::list_head(&pick.spec.list))
+}
+
+/// Paint the rows of `list` that match its query into `area`, one row for
+/// each, with the selected row and the matched chars marked.
+///
+/// A row paints as [`paint_palette_rows`] paints the name of a root row. Its
+/// label reads in `ui.text` from the row's second cell, and it clips at the
+/// area's edge with no ellipsis. Its matched chars take
+/// [`Theme::list_match`](crate::theme::Theme::list_match). The selected row
+/// draws through [`chrome::selected_row`](crate::render::chrome::selected_row)
+/// with `panels`. The window starts where
+/// [`window_start`](crate::render::picker::window_start) keeps the selection
+/// on show.
+fn paint_arg_rows(
+    list: &ArgList,
+    area: Rect,
+    theme: &crate::theme::Theme,
+    panels: bool,
+    buf: &mut Buffer,
+    scene: &mut stoat_widgets::ApcScene,
+) {
+    let rows = usize::from(area.height);
+    let row_style = theme.get(crate::theme::scope::UI_TEXT);
+    let match_style = theme.list_match();
+    let keeps_columns = theme
+        .try_get(crate::theme::scope::UI_LIST_SELECTED)
+        .is_some();
+    let start = crate::render::picker::window_start(list.selected, rows);
+    let end_x = area.right();
+    let mut derived = Vec::new();
+    let mut matching = crate::fuzzy::Scratch::default();
+
+    let on_show = list.filtered.iter().enumerate().skip(start).take(rows);
+    for (y, (place, &index)) in (area.y..).zip(on_show) {
+        let Some(item) = list.rows.get(index) else {
+            continue;
+        };
+        let row = Rect::new(area.x, y, area.width, 1);
+        let is_selected = place == list.selected;
+        let label_style = match is_selected {
+            true => {
+                let style =
+                    crate::render::chrome::selected_row(row, row_style, panels, theme, buf, scene);
+                match keeps_columns {
+                    true => Style {
+                        bg: style.bg,
+                        ..row_style
+                    },
+                    false => style,
+                }
+            },
+            false => {
+                for col in row.left()..row.right() {
+                    buf[(col, y)].set_char(' ').set_style(row_style);
+                }
+                row_style
+            },
+        };
+
+        let label_x = area.x + 1;
+        write_str_clipped(buf, label_x, y, &item.label, label_style, end_x);
+        let indices = list.row_indices(place, &mut derived, &mut matching);
+        paint_matches(
+            buf,
+            (label_x, y, end_x),
+            &item.label,
+            0,
+            indices,
+            match_style,
+        );
+    }
+}
+
 /// Render History, the lines of the palette history that the walk visits,
 /// under a Cmd Line that holds the recalled line and the walk's place.
 ///
@@ -738,12 +931,7 @@ fn render_palette_history(
         return;
     };
 
-    let body = Rect::new(
-        layout.list.x,
-        layout.list.y,
-        layout.list.width,
-        layout.footer.y.saturating_sub(layout.list.y),
-    );
+    let body = layout.body();
     let plate = crate::render::chrome::plate_colors(theme, scene);
     if let Some(plate) = plate {
         let edges = [ISLAND_TOP, ISLAND_SIDE, ISLAND_BOTTOM, ISLAND_SIDE];
@@ -2069,27 +2257,32 @@ fn paint_source_tag(
 #[cfg(test)]
 mod tests {
     use super::{
-        count_status, doc_lines, grouped, history_age, history_window, input_spans,
+        count_status, doc_lines, grouped, history_age, history_window, input_spans, paint_arg_rows,
         paint_doc_lines, paint_history_rows, paint_palette_rows, palette_arg_layout,
-        palette_filter_layout, pascal_matches, render_command_palette, source_tag, usage_line,
-        wrap_text, HistoryEntry, DOC_ROWS, ISLAND_BOTTOM, ISLAND_GAP, ISLAND_SIDE, ISLAND_TOP,
-        LIST_ROWS,
+        palette_filter_layout, pascal_matches, pick_status, render_command_palette, source_tag,
+        usage_line, wrap_text, HistoryEntry, DOC_ROWS, ISLAND_BOTTOM, ISLAND_GAP, ISLAND_SIDE,
+        ISLAND_TOP, LIST_ROWS,
     };
     use crate::{
-        command_palette::{action_row, Availability, Namespace, PaletteCommand, ResolvedCommand},
+        command_palette::{
+            action_row, ArgList, ArgRow, Availability, Namespace, PaletteCommand, PickLoad,
+            PickState, ResolvedCommand,
+        },
         input_history,
         keymap::ActionKeys,
         render::editor::ResolvedChrome,
         test_fixture::{plate_islands, row_rules},
         theme::Theme,
-        user_command::CommandSet,
+        user_command::{CommandSet, PickSpec},
     };
     use ratatui::{
         buffer::Buffer,
         layout::Rect,
         style::{Color, Modifier, Style},
     };
+    use std::sync::Arc;
     use stoat_action::registry;
+    use stoat_config::Template;
     use stoatty_protocol::command::{decode_stream, BarCommand, Command, TextRunCommand};
 
     /// Each of `entries` as a palette row.
@@ -3382,6 +3575,102 @@ mod tests {
                 ),
                 (vec![gray("title", 5), gray(" ", 4)], 6),
                 (vec![plain("title"), plain(" ")], 6),
+            ],
+        );
+    }
+
+    /// A pick row reads its label from the row's second cell. Off a live
+    /// scene, the cells of the selected row take the selected style, and a
+    /// matched char takes the match color over it. A row that does not match
+    /// the query is not on show. A list longer than its area shows the window
+    /// that holds the selection.
+    #[test]
+    fn a_pick_row_paints_its_label_and_marks_the_selected_row() {
+        let theme = {
+            let src = r##"theme t {
+                ui.selection = { fg: "#000000", bg: "#7fb0ff" };
+                ui.text.fg = "#040404";
+                ui.list.match.fg = "#070707";
+            }"##;
+            let (config, _) = stoat_config::parse(src);
+            Theme::from_config(&config.expect("theme parses"), "t").expect("theme loads")
+        };
+        let mut list = ArgList::default();
+        list.set_rows(
+            ["#412 Fix it", "#409 Docs"]
+                .map(|label| ArgRow {
+                    label: label.to_owned(),
+                    insert: String::new(),
+                })
+                .to_vec(),
+        );
+        list.refilter("Docs");
+        let area = Rect::new(0, 0, 20, 2);
+        let mut buf = Buffer::empty(area);
+        let mut scene = stoat_widgets::ApcScene::new();
+        scene.set_live(false);
+        paint_arg_rows(&list, area, &theme, true, &mut buf, &mut scene);
+
+        list.refilter("");
+        list.move_selection(1);
+        let one_row = Rect::new(0, 0, 20, 1);
+        let mut windowed = Buffer::empty(one_row);
+        paint_arg_rows(&list, one_row, &theme, true, &mut windowed, &mut scene);
+
+        let cell = |x: u16| (buf[(x, 0)].fg, buf[(x, 0)].bg);
+        let selected = Color::Rgb(0x7f, 0xb0, 0xff);
+        assert_eq!(
+            (
+                row_text(&buf, 0),
+                row_text(&buf, 1),
+                cell(1),
+                cell(6),
+                row_text(&windowed, 0),
+            ),
+            (
+                placed(20, &[(1, "#409 Docs")]),
+                placed(20, &[]),
+                (Color::Rgb(0, 0, 0), selected),
+                (Color::Rgb(7, 7, 7), selected),
+                placed(20, &[(1, "#409 Docs")]),
+            ),
+        );
+    }
+
+    /// The status names the load of a pick list and the head of its command.
+    /// A count of 1 reads the argument's name with no `s`, and any other count
+    /// with it.
+    #[test]
+    fn the_pick_status_names_its_load_and_its_command() {
+        let state = |load| PickState {
+            key: ("pr".to_owned(), 0),
+            spec: Arc::new(PickSpec {
+                list: "gh pr list --json number".to_owned(),
+                show: Template::parse("{line}"),
+                value: Template::parse("{line}"),
+            }),
+            generation: 0,
+            load,
+            list: ArgList::default(),
+        };
+        let mut one = state(PickLoad::Ready);
+        one.list.set_rows(vec![ArgRow {
+            label: "a".to_owned(),
+            insert: "a".to_owned(),
+        }]);
+        one.list.refilter("");
+        assert_eq!(
+            [
+                pick_status(&state(PickLoad::Loading), "pr"),
+                pick_status(&state(PickLoad::Failed("x".to_owned())), "pr"),
+                pick_status(&one, "pr"),
+                pick_status(&state(PickLoad::Ready), "pr"),
+            ],
+            [
+                "loading \u{b7} from gh pr list",
+                "failed \u{b7} from gh pr list",
+                "1 pr \u{b7} from gh pr list",
+                "0 prs \u{b7} from gh pr list",
             ],
         );
     }

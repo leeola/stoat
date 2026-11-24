@@ -516,6 +516,21 @@ pub(crate) fn boxed_modal_surfaces(stoat: &Stoat) -> Option<ModalSurfaces> {
             }
             let rows = palette.list_rows_hint();
             let zoom = zoom(ModalKind::Palette);
+            if let Some(pick) = palette.pick.as_ref() {
+                let layout = crate::render::command_palette::palette_filter_layout(
+                    size,
+                    rows,
+                    zoom,
+                    palette.header_rows,
+                )?;
+                return Some(ModalSurfaces {
+                    list: layout.body(),
+                    preview: None,
+                    len: pick.list.filtered.len(),
+                    selected: pick.list.selected,
+                    rows: ListRows::OnePerResult,
+                });
+            }
             if palette.command.is_none() {
                 let layout = crate::render::command_palette::palette_filter_layout(
                     size,
@@ -5557,5 +5572,39 @@ mod tests {
         left_press(&mut h, list.x + 1, list.y + 2);
 
         assert_eq!((before, selected(&h)), (0, 1));
+    }
+
+    /// A press on a row of a pick list selects that row, as a press on any
+    /// list does.
+    #[test]
+    fn a_press_on_a_pick_row_selects_it() {
+        let mut h = crate::test_harness::TestHarness::with_size(120, 30);
+        h.stoat.reload_user_config(
+            r#"command peek { arg f = pick("ls"); run = shell("cat {f}"); output = notify; }"#,
+        );
+        h.fake_shell.set_response(
+            "ls",
+            crate::host::ShellOutput {
+                stdout: b"a\nb\nc\n".to_vec(),
+                stderr: Vec::new(),
+                exit_code: 0,
+            },
+        );
+        h.type_text(":peek ");
+        let _ = h.snapshot();
+        h.settle();
+        let _ = h.snapshot();
+
+        let list = boxed_modal_surfaces(&h.stoat)
+            .expect("the palette is open")
+            .list;
+        left_press(&mut h, list.x + 1, list.y + 1);
+        let selected = h
+            .stoat
+            .command_palette
+            .as_ref()
+            .and_then(|palette| palette.pick.as_ref())
+            .map(|pick| pick.list.selected);
+        assert_eq!(selected, Some(1));
     }
 }

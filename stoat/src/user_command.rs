@@ -11,6 +11,7 @@ use stoat_config::{
 };
 
 pub(crate) mod context;
+pub(crate) mod pick;
 pub(crate) mod run;
 
 /// The user commands that the config's `command` items declare.
@@ -60,6 +61,26 @@ pub(crate) enum ArgKind {
     File,
     /// A directory, from the list of workspace directories that `:cd` shows.
     Dir,
+    /// A row of the list that a shell command prints, which the palette runs
+    /// when the argument's entry starts. A `same_as` argument shares the spec.
+    Pick(Arc<PickSpec>),
+}
+
+/// The list of a `pick` argument and the templates of its rows.
+///
+/// The shell command prints the rows, and the templates write the text and the
+/// value of a row from its fields.
+#[derive(Debug, PartialEq)]
+pub(crate) struct PickSpec {
+    /// The shell line that prints the rows. It runs in the workspace root and
+    /// holds no placeholder, because it runs before any argument has a value.
+    pub(crate) list: String,
+    /// The text of a row, which the typed text matches. `{line}` when the
+    /// declaration names none.
+    pub(crate) show: Template,
+    /// The text that Enter and Tab write for a row. The `show` template when
+    /// the declaration names none.
+    pub(crate) value: Template,
 }
 
 /// The value that an empty `text` argument takes.
@@ -206,7 +227,7 @@ impl CommandArg {
     pub(crate) fn default(&self) -> Option<&TextDefault> {
         match &self.kind {
             ArgKind::Text { default } => default.as_ref(),
-            ArgKind::File | ArgKind::Dir => None,
+            ArgKind::File | ArgKind::Dir | ArgKind::Pick(_) => None,
         }
     }
 
@@ -413,6 +434,7 @@ fn arg_kind(kind: &Spanned<Call>, source: &str) -> Result<(ArgKind, Option<Strin
         "text" => text_kind(kind, source).map(|kind| (kind, None)),
         "file" => bare(ArgKind::File),
         "dir" => bare(ArgKind::Dir),
+        "pick" => pick_kind(kind).map(|kind| (kind, None)),
         "same_as" => match kind.node.args.as_deref() {
             Some(
                 [Spanned {
@@ -455,6 +477,64 @@ fn text_kind(call: &Spanned<Call>, source: &str) -> Result<ArgKind, ParseError> 
         }
     }
     Ok(ArgKind::Text { default })
+}
+
+/// The kind that the call `pick(...)` names, or why the call names no `pick`
+/// kind.
+///
+/// The one positional string is the list command, which takes no
+/// placeholder. The named strings `show` and `value` are the templates of a
+/// row. A `preview` must be a string, and the palette does not read it here.
+fn pick_kind(call: &Spanned<Call>) -> Result<ArgKind, ParseError> {
+    let as_string = "`pick` takes the list command as a string";
+    let mut list: Option<&Spanned<CallValue>> = None;
+    let mut show = None;
+    let mut value = None;
+    for arg in call.node.args.iter().flatten() {
+        match &arg.node {
+            CallArg::Positional(_) if list.is_some() => {
+                return Err(error(&arg.span, "`pick` takes one list command"));
+            },
+            CallArg::Positional(command) => list = Some(command),
+            CallArg::Named { name, value: named } => {
+                let CallValue::Value(Value::String(text)) = &named.node else {
+                    return Err(error(
+                        &named.span,
+                        format!("`{}` takes a string", name.node),
+                    ));
+                };
+                match name.node.as_str() {
+                    "show" => show = Some(Template::parse(text)),
+                    "value" => value = Some(Template::parse(text)),
+                    "preview" => {},
+                    other => {
+                        return Err(error(
+                            &name.span,
+                            format!("`pick` takes no argument `{other}`"),
+                        ));
+                    },
+                }
+            },
+        }
+    }
+
+    let command = list.ok_or_else(|| error(&call.span, as_string))?;
+    let CallValue::Value(Value::String(list)) = &command.node else {
+        return Err(error(&command.span, as_string));
+    };
+    if Template::parse(list).placeholders().next().is_some() {
+        return Err(error(
+            &command.span,
+            "the list command of `pick` takes no placeholder",
+        ));
+    }
+    let show = show.unwrap_or_else(|| Template::parse("{line}"));
+    let value = value.unwrap_or_else(|| show.clone());
+    Ok(ArgKind::Pick(Arc::new(PickSpec {
+        list: list.clone(),
+        show,
+        value,
+    })))
 }
 
 /// The default that the value `value` of a `default:` argument names.
@@ -758,9 +838,11 @@ fn error(span: &Span, message: impl Into<String>) -> ParseError {
 #[cfg(test)]
 mod tests {
     use super::{
-        ArgKind, CommandArg, CommandSet, ContextValue, Output, Step, TextDefault, UserCommand,
+        ArgKind, CommandArg, CommandSet, ContextValue, Output, PickSpec, Step, TextDefault,
+        UserCommand,
     };
     use crate::app;
+    use std::sync::Arc;
     use stoat_config::{Config, Span, Template};
 
     /// The commands and the errors that `source` gives as the user layer over
@@ -1223,6 +1305,108 @@ mod tests {
             (set.get("ship").map(|command| command.signature()), errors),
             (Some("<to> [message]".to_owned()), Vec::new()),
         );
+    }
+
+    /// The spec of the first argument of the command `name` of `set`, while
+    /// that argument is a `pick`.
+    fn pick_spec(set: &CommandSet, name: &str) -> Option<Arc<PickSpec>> {
+        match &set.get(name)?.args.first()?.kind {
+            ArgKind::Pick(spec) => Some(spec.clone()),
+            _ => None,
+        }
+    }
+
+    /// The spec of a list command and its `show` and `value` templates.
+    fn spec(list: &str, show: &str, value: &str) -> Option<Arc<PickSpec>> {
+        Some(Arc::new(PickSpec {
+            list: list.to_owned(),
+            show: Template::parse(show),
+            value: Template::parse(value),
+        }))
+    }
+
+    /// `pick` takes the list command and the `show` and `value` templates. A
+    /// spec with no `show` shows `{line}`, and one with no `value` writes what
+    /// it shows.
+    #[test]
+    fn pick_takes_a_list_command_and_templates() {
+        let source = concat!(
+            "command pr { arg pr = pick(\"gh pr list --json number,title\", ",
+            "show: \"#{number} {title}\", value: \"{number}\", preview: \"gh pr view {number}\"); ",
+            "run = shell(\"gh pr checkout {pr}\"); }\n",
+            "command br { arg b = pick(\"git branch\"); run = shell(\"git switch {b}\"); }\n",
+            "command tags { arg t = pick(\"git tag\", show: \"v{line}\"); run = shell(\"x {t}\"); }",
+        );
+        let (set, errors) = load(source);
+        assert_eq!(
+            (
+                pick_spec(&set, "pr"),
+                pick_spec(&set, "br"),
+                pick_spec(&set, "tags"),
+                errors
+            ),
+            (
+                spec(
+                    "gh pr list --json number,title",
+                    "#{number} {title}",
+                    "{number}"
+                ),
+                spec("git branch", "{line}", "{line}"),
+                spec("git tag", "v{line}", "v{line}"),
+                Vec::new(),
+            ),
+        );
+    }
+
+    /// A placeholder in the list command is reported, and so is a list command
+    /// that is no string or no list command at all. A second list command,
+    /// another name, and a template that is no string are reported too.
+    #[test]
+    fn a_placeholder_in_the_list_command_is_reported() {
+        let source = concat!(
+            "command a { arg x = pick(\"gh pr view {x}\"); run = shell(\"a {x}\"); }\n",
+            "command bee { arg y = pick(1); run = shell(\"b {y}\"); }\n",
+            "command c { arg z = pick(); run = shell(\"c {z}\"); }\n",
+            "command d { arg w = pick(\"ls\", \"pwd\"); run = shell(\"d {w}\"); }\n",
+            "command e { arg v = pick(\"ls\", sort: \"x\"); run = shell(\"e {v}\"); }\n",
+            "command f { arg u = pick(\"ls\", show: 2); run = shell(\"f {u}\"); }",
+        );
+        let (set, errors) = load(source);
+        assert_eq!(
+            (names(&set), errors),
+            (
+                Vec::new(),
+                vec![
+                    fault(
+                        span(source, "\"gh pr view {x}\""),
+                        "the list command of `pick` takes no placeholder"
+                    ),
+                    fault(
+                        span(source, "1"),
+                        "`pick` takes the list command as a string"
+                    ),
+                    fault(
+                        span(source, "pick()"),
+                        "`pick` takes the list command as a string"
+                    ),
+                    fault(span(source, "\"pwd\""), "`pick` takes one list command"),
+                    fault(span(source, "sort"), "`pick` takes no argument `sort`"),
+                    fault(span(source, "2"), "`show` takes a string"),
+                ],
+            ),
+        );
+    }
+
+    #[test]
+    fn same_as_shares_the_pick_of_the_named_command() {
+        let (set, errors) = load(concat!(
+            "command pr { arg pr = pick(\"gh pr list\"); run = shell(\"gh pr checkout {pr}\"); }\n",
+            "command prview { arg p = same_as(pr); run = shell(\"gh pr view {p}\"); }",
+        ));
+        let shared = pick_spec(&set, "pr")
+            .zip(pick_spec(&set, "prview"))
+            .map(|(first, second)| Arc::ptr_eq(&first, &second));
+        assert_eq!((shared, errors), (Some(true), Vec::new()));
     }
 
     #[test]
