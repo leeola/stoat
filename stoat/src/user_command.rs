@@ -10,6 +10,7 @@ use stoat_config::{
     RunExpr, Span, Spanned, Template, Value,
 };
 
+pub(crate) mod context;
 pub(crate) mod run;
 
 /// The user commands that the config's `command` items declare.
@@ -33,8 +34,8 @@ pub(crate) struct UserCommand {
     /// command, counting from 1. The palette names it as where the command is
     /// defined.
     pub(crate) line: u32,
-    /// The arguments in the order that the palette takes them. Each one is
-    /// required.
+    /// The arguments in the order that the palette takes them. An argument
+    /// with a default is optional, and every other one is required.
     pub(crate) args: Vec<CommandArg>,
     pub(crate) step: Step,
     pub(crate) output: Output,
@@ -52,12 +53,36 @@ pub(crate) struct CommandArg {
 /// the palette shows while the argument is in entry.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum ArgKind {
-    /// Typed text, with no list.
-    Text,
+    /// Typed text, with no list. An argument with a default is optional, and
+    /// an empty value of it takes the default when the command runs.
+    Text { default: Option<TextDefault> },
     /// A file, from the list of workspace files that `:o` shows.
     File,
     /// A directory, from the list of workspace directories that `:cd` shows.
     Dir,
+}
+
+/// The value that an empty `text` argument takes.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum TextDefault {
+    /// The text of a string, a number, or a boolean literal.
+    Literal(String),
+    /// A value of the editor state, which a run reads when it starts.
+    Context(ContextValue),
+}
+
+/// A value of the editor state that a default names. It comes from the pane
+/// under the palette, or from the workspace's repository.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) enum ContextValue {
+    /// `git.last_subject`, the summary of the newest commit.
+    GitLastSubject,
+    /// `selection`, the text of the primary selection.
+    Selection,
+    /// `file`, the path of the pane's buffer.
+    File,
+    /// `line`, the 1-based line of the primary cursor.
+    Line,
 }
 
 /// What a [`UserCommand`] runs.
@@ -160,15 +185,35 @@ impl CommandSet {
 }
 
 impl UserCommand {
-    /// The arguments as the palette's usage line writes them, each as
-    /// `<name>`, one space apart.
+    /// The arguments as the palette's usage line writes them, one space apart.
+    /// A required argument reads `<name>`, and an optional one `[name]`.
     pub(crate) fn signature(&self) -> String {
         let args: Vec<String> = self
             .args
             .iter()
-            .map(|arg| format!("<{}>", arg.name))
+            .map(|arg| match arg.optional() {
+                true => format!("[{}]", arg.name),
+                false => format!("<{}>", arg.name),
+            })
             .collect();
         args.join(" ")
+    }
+}
+
+impl CommandArg {
+    /// The default that an empty value of the argument takes, or `None` for an
+    /// argument that the user must fill.
+    pub(crate) fn default(&self) -> Option<&TextDefault> {
+        match &self.kind {
+            ArgKind::Text { default } => default.as_ref(),
+            ArgKind::File | ArgKind::Dir => None,
+        }
+    }
+
+    /// Whether a run takes the argument empty, which an argument with a
+    /// default allows.
+    pub(crate) fn optional(&self) -> bool {
+        self.default().is_some()
     }
 }
 
@@ -204,7 +249,7 @@ fn lower_layer(
 
         let before = source.get(..decl.span.start).unwrap_or(source);
         let line = before.bytes().filter(|&byte| byte == b'\n').count() as u32 + 1;
-        if let Some((command, same_as)) = lower(&decl.node, line, errors) {
+        if let Some((command, same_as)) = lower(&decl.node, source, line, errors) {
             lowered.push(Lowered {
                 command,
                 same_as,
@@ -239,8 +284,12 @@ fn taken(name: &str) -> Option<String> {
 
 /// `decl` as a command and its `same_as` arguments, or `None` with an error
 /// in `errors` for each fault of the declaration.
+///
+/// `source` is the text that `decl` parses from, which keeps the literal text
+/// of a default.
 fn lower(
     decl: &CommandDecl,
+    source: &str,
     line: u32,
     errors: &mut Vec<ParseError>,
 ) -> Option<(UserCommand, Vec<SameAs>)> {
@@ -277,7 +326,7 @@ fn lower(
                         format!("argument `{}` is declared twice", name.node),
                     ));
                 }
-                let kind = match arg_kind(declared) {
+                let kind = match arg_kind(declared, source) {
                     Ok((kind, Some(target))) => {
                         same_as.push(SameAs {
                             index: args.len(),
@@ -289,7 +338,7 @@ fn lower(
                     Ok((kind, None)) => kind,
                     Err(fault) => {
                         errors.push(fault);
-                        ArgKind::Text
+                        ArgKind::Text { default: None }
                     },
                 };
                 args.push(CommandArg {
@@ -351,7 +400,7 @@ fn lower(
 ///
 /// A `same_as` argument takes [`ArgKind::Text`] until [`resolve_same_as`]
 /// gives it the kind of its target's first argument.
-fn arg_kind(kind: &Spanned<Call>) -> Result<(ArgKind, Option<String>), ParseError> {
+fn arg_kind(kind: &Spanned<Call>, source: &str) -> Result<(ArgKind, Option<String>), ParseError> {
     let name = &kind.node.name;
     let bare = |arg_kind: ArgKind| match kind.node.args.as_deref() {
         None | Some([]) => Ok((arg_kind, None)),
@@ -361,7 +410,7 @@ fn arg_kind(kind: &Spanned<Call>) -> Result<(ArgKind, Option<String>), ParseErro
         )),
     };
     match name.node.as_str() {
-        "text" => bare(ArgKind::Text),
+        "text" => text_kind(kind, source).map(|kind| (kind, None)),
         "file" => bare(ArgKind::File),
         "dir" => bare(ArgKind::Dir),
         "same_as" => match kind.node.args.as_deref() {
@@ -374,7 +423,7 @@ fn arg_kind(kind: &Spanned<Call>) -> Result<(ArgKind, Option<String>), ParseErro
                         }),
                     ..
                 }],
-            ) => Ok((ArgKind::Text, Some(target.clone()))),
+            ) => Ok((ArgKind::Text { default: None }, Some(target.clone()))),
             _ => Err(error(&kind.span, "`same_as` takes one command name")),
         },
         other => Err(error(
@@ -382,6 +431,60 @@ fn arg_kind(kind: &Spanned<Call>) -> Result<(ArgKind, Option<String>), ParseErro
             format!("unknown argument kind `{other}`"),
         )),
     }
+}
+
+/// The kind that the call `text(...)` names, with the default of its
+/// `default:` argument, or why the call names no `text` kind.
+fn text_kind(call: &Spanned<Call>, source: &str) -> Result<ArgKind, ParseError> {
+    let mut default = None;
+    for arg in call.node.args.iter().flatten() {
+        match &arg.node {
+            CallArg::Named { name, value } if name.node == "default" => {
+                if default.is_some() {
+                    return Err(error(&arg.span, "`default` is set twice"));
+                }
+                default = Some(text_default(value, source)?);
+            },
+            CallArg::Named { name, .. } => {
+                return Err(error(
+                    &name.span,
+                    format!("`text` takes no argument `{}`", name.node),
+                ));
+            },
+            CallArg::Positional(_) => return Err(error(&call.span, "`text` takes no argument")),
+        }
+    }
+    Ok(ArgKind::Text { default })
+}
+
+/// The default that the value `value` of a `default:` argument names.
+///
+/// A string, a number, or a boolean is a literal, which keeps the text of a
+/// number or a boolean as `source` writes it. The names `selection`, `file`,
+/// and `line` and the dotted name `git.last_subject` are context values. Any
+/// other value is an error.
+fn text_default(value: &Spanned<CallValue>, source: &str) -> Result<TextDefault, ParseError> {
+    let written = source.get(value.span.clone()).unwrap_or_default();
+    let context = match &value.node {
+        CallValue::Value(Value::String(text)) => return Ok(TextDefault::Literal(text.clone())),
+        CallValue::Value(Value::Number(_) | Value::Bool(_)) => {
+            return Ok(TextDefault::Literal(written.to_owned()));
+        },
+        CallValue::Value(Value::Ident(name)) => match name.as_str() {
+            "selection" => Some(ContextValue::Selection),
+            "file" => Some(ContextValue::File),
+            "line" => Some(ContextValue::Line),
+            _ => None,
+        },
+        CallValue::Context(path) => {
+            let names: Vec<&str> = path.iter().map(|segment| segment.node.as_str()).collect();
+            (names == ["git", "last_subject"]).then_some(ContextValue::GitLastSubject)
+        },
+        CallValue::Value(_) => None,
+    };
+    context
+        .map(TextDefault::Context)
+        .ok_or_else(|| error(&value.span, format!("unknown context value `{written}`")))
 }
 
 /// The step that `call` runs for the command `command`, or `None` with an
@@ -654,7 +757,9 @@ fn error(span: &Span, message: impl Into<String>) -> ParseError {
 
 #[cfg(test)]
 mod tests {
-    use super::{ArgKind, CommandArg, CommandSet, Output, Step, UserCommand};
+    use super::{
+        ArgKind, CommandArg, CommandSet, ContextValue, Output, Step, TextDefault, UserCommand,
+    };
     use crate::app;
     use stoat_config::{Config, Span, Template};
 
@@ -724,7 +829,7 @@ mod tests {
                     line: 1,
                     args: vec![CommandArg {
                         name: "who".to_owned(),
-                        kind: ArgKind::Text,
+                        kind: ArgKind::Text { default: None },
                     }],
                     step: Step::Shell(Template::parse("echo hello {who}")),
                     output: Output::Notify,
@@ -1044,6 +1149,79 @@ mod tests {
                 Some(vec![ArgKind::File]),
                 Vec::new(),
             ),
+        );
+    }
+
+    /// A string, a number, and a boolean default to their literal text. The
+    /// four context names default to their context values.
+    #[test]
+    fn a_text_default_is_a_literal_or_a_context_value() {
+        let source = concat!(
+            "command ctxs { arg a = text(default: \"hi\"); arg b = text(default: 2.50); ",
+            "arg c = text(default: true); arg d = text(default: git.last_subject); ",
+            "arg e = text(default: selection); arg f = text(default: file); ",
+            "arg g = text(default: line); arg h = text(); ",
+            "run = shell(\"x {a} {b} {c} {d} {e} {f} {g} {h}\"); }",
+        );
+        let (set, errors) = load(source);
+        let literal = |text: &str| ArgKind::Text {
+            default: Some(TextDefault::Literal(text.to_owned())),
+        };
+        let context = |value| ArgKind::Text {
+            default: Some(TextDefault::Context(value)),
+        };
+        assert_eq!(
+            (kinds(&set, "ctxs"), errors),
+            (
+                Some(vec![
+                    literal("hi"),
+                    literal("2.50"),
+                    literal("true"),
+                    context(ContextValue::GitLastSubject),
+                    context(ContextValue::Selection),
+                    context(ContextValue::File),
+                    context(ContextValue::Line),
+                    ArgKind::Text { default: None },
+                ]),
+                Vec::new(),
+            ),
+        );
+    }
+
+    /// An unknown context value is reported at the value. A name other than
+    /// `default`, and a second `default`, are reported as well.
+    #[test]
+    fn an_unknown_context_value_is_reported() {
+        let source = concat!(
+            "command a { arg x = text(default: git.head); run = shell(\"a {x}\"); }\n",
+            "command bee { arg y = text(default: nope); run = shell(\"b {y}\"); }\n",
+            "command c { arg z = text(other: 1); run = shell(\"c {z}\"); }\n",
+            "command d { arg w = text(default: \"1\", default: \"2\"); run = shell(\"d {w}\"); }",
+        );
+        let (set, errors) = load(source);
+        assert_eq!(
+            (names(&set), errors),
+            (
+                Vec::new(),
+                vec![
+                    fault(span(source, "git.head"), "unknown context value `git.head`"),
+                    fault(span(source, "nope"), "unknown context value `nope`"),
+                    fault(span(source, "other"), "`text` takes no argument `other`"),
+                    fault(span(source, "default: \"2\""), "`default` is set twice"),
+                ],
+            ),
+        );
+    }
+
+    #[test]
+    fn an_argument_with_a_default_reads_in_brackets() {
+        let (set, errors) = load(concat!(
+            "command ship { arg to = text; arg message = text(default: git.last_subject); ",
+            "run = shell(\"x {to} {message}\"); }",
+        ));
+        assert_eq!(
+            (set.get("ship").map(|command| command.signature()), errors),
+            (Some("<to> [message]".to_owned()), Vec::new()),
         );
     }
 

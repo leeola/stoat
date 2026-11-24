@@ -475,6 +475,7 @@ fn render_palette_arg_picker(
     palette.header_rows = render_palette_prelude(
         &palette.input,
         palette.resolved.as_ref(),
+        None,
         &[],
         CmdStatus::Text(&status),
         layout.modal,
@@ -601,6 +602,7 @@ fn render_palette_free_arg(
     palette.header_rows = render_palette_prelude(
         &palette.input,
         palette.resolved.as_ref(),
+        palette.arg_ghost.as_deref(),
         &[],
         CmdStatus::None,
         layout.modal,
@@ -721,6 +723,7 @@ fn render_palette_history(
     palette.header_rows = render_palette_prelude(
         &palette.input,
         palette.resolved.as_ref(),
+        None,
         &input_marks,
         CmdStatus::Chip(&chip),
         layout.modal,
@@ -980,8 +983,9 @@ fn history_window(heights: &[usize], selected: usize, rows: usize) -> usize {
 ///
 /// The Cmd Line names the workspace's root, abbreviated against `home`, and
 /// shows the live input with its caret and `status` at its right end. A
-/// `resolved` command token draws with its ghost, and the chars inside `marks`
-/// draw marked, as [`input_spans`] gives them.
+/// `resolved` command token draws with its ghost, and the `arg_ghost` of an
+/// empty argument follows the typed text. The chars inside `marks` draw
+/// marked. [`input_spans`] gives each of these spans.
 ///
 /// See also:
 /// - [`cmd_line::cmd_line`] for the row itself.
@@ -993,6 +997,7 @@ fn history_window(heights: &[usize], selected: usize, rows: usize) -> usize {
 fn render_palette_prelude(
     input: &InputView,
     resolved: Option<&ResolvedCommand>,
+    arg_ghost: Option<&str>,
     marks: &[Range<usize>],
     status: CmdStatus<'_>,
     modal: Rect,
@@ -1008,7 +1013,7 @@ fn render_palette_prelude(
 
     let cwd = crate::run::abbreviate_path(&ws.git_root, home);
     let (text, caret) = input.caret(ws);
-    let (input, caret) = input_spans(&text, caret, resolved, marks, theme);
+    let (input, caret) = input_spans(&text, caret, resolved, arg_ghost, marks, theme);
     let line = CmdLine {
         cwd: &cwd,
         input: &input,
@@ -1035,14 +1040,20 @@ fn render_palette_prelude(
 /// past the head moves right by the ghost's chars, and a caret at the head's
 /// end covers the ghost's first char, as a shell draws a suggestion.
 ///
+/// The `arg_ghost` of an empty argument follows the typed text in
+/// `ui.text.muted`, under the `ui.cmd.ghost` rule of the head's ghost. It
+/// moves no caret, because no typed char follows it. An input with no
+/// `resolved` head has no argument in entry, so it draws no such ghost.
+///
 /// The chars inside `marks`, char ranges of `text`, take
 /// [`Theme::list_match`](crate::theme::Theme::list_match) over the style they
-/// draw in. So a mark wins over the head's token color. The ghost takes no
+/// draw in. So a mark wins over the head's token color. A ghost takes no
 /// mark, because it is no part of the typed text.
 fn input_spans(
     text: &str,
     caret: usize,
     resolved: Option<&ResolvedCommand>,
+    arg_ghost: Option<&str>,
     marks: &[Range<usize>],
     theme: &crate::theme::Theme,
 ) -> (Vec<(String, Style)>, usize) {
@@ -1080,7 +1091,20 @@ fn input_spans(
     }
 
     spans.extend(marked_spans(rest, resolved.head_chars, plain, marks, mark));
+    spans.extend(arg_ghost_span(arg_ghost, theme));
     (spans, shown)
+}
+
+/// The span of `ghost`, the default of an empty argument, in `ui.text.muted`.
+/// `None` for no ghost, an empty one, or a theme that leaves `ui.cmd.ghost`
+/// unset.
+fn arg_ghost_span(ghost: Option<&str>, theme: &crate::theme::Theme) -> Option<(String, Style)> {
+    theme.try_get(crate::theme::scope::UI_CMD_GHOST)?;
+    let ghost = ghost.filter(|ghost| !ghost.is_empty())?;
+    Some((
+        ghost.to_owned(),
+        theme.get(crate::theme::scope::UI_TEXT_MUTED),
+    ))
 }
 
 /// `text` as spans in `base`, with `mark` patched over each char inside
@@ -1227,6 +1251,7 @@ fn render_palette_filter(
     *header_rows = render_palette_prelude(
         input,
         resolved,
+        None,
         &[],
         CmdStatus::Text(status),
         layout.modal,
@@ -2149,9 +2174,9 @@ mod tests {
 
         assert_eq!(
             [
-                input_spans("o src", 5, Some(&open), &[], &theme),
-                input_spans("o", 1, Some(&open), &[], &theme),
-                input_spans("o src", 5, Some(&open), &[], &Theme::empty()),
+                input_spans("o src", 5, Some(&open), None, &[], &theme),
+                input_spans("o", 1, Some(&open), None, &[], &theme),
+                input_spans("o src", 5, Some(&open), None, &[], &Theme::empty()),
             ],
             [
                 (spans(&[("o", 5), ("pen", 6), (" src", 4)]), 8),
@@ -2932,7 +2957,7 @@ mod tests {
         };
         let marked = |text: &str, needle: &str, resolved: Option<&ResolvedCommand>| {
             let marks = input_history::word_spans(text, needle);
-            input_spans(text, 0, resolved, &marks, &match_theme()).0
+            input_spans(text, 0, resolved, None, &marks, &match_theme()).0
         };
         let spans = |parts: &[(&str, u8)]| -> Vec<(String, Style)> {
             parts
@@ -3216,14 +3241,21 @@ mod tests {
         );
     }
 
-    /// The user command `greet` on line 1, with the argument `who` and the doc
-    /// `say hello`.
-    fn greet() -> PaletteCommand {
-        let source = r#"command greet { doc = "say hello"; arg who = text; run = shell("echo hello {who}"); output = notify; }"#;
+    /// The user command `name` that the user config `source` declares.
+    fn user_command(source: &str, name: &str) -> PaletteCommand {
         let config = stoat_config::parse(source).0.expect("the config parses");
         let empty = stoat_config::parse("").0.expect("an empty config parses");
         let (set, _) = CommandSet::build((&empty, ""), Some((&config, source)));
-        PaletteCommand::User(set.get("greet").expect("greet loads").clone())
+        PaletteCommand::User(set.get(name).expect("the command loads").clone())
+    }
+
+    /// The user command `greet` on line 1, with the argument `who` and the doc
+    /// `say hello`.
+    fn greet() -> PaletteCommand {
+        user_command(
+            r#"command greet { doc = "say hello"; arg who = text; run = shell("echo hello {who}"); output = notify; }"#,
+            "greet",
+        )
     }
 
     /// Paint the one row `command` into a list 100 cells wide under `theme`.
@@ -3295,6 +3327,61 @@ mod tests {
                 "greet <who>",
                 "say hello",
                 "config command \u{b7} config.stcfg:1"
+            ],
+        );
+    }
+
+    /// The ghost of an empty argument follows the typed text in
+    /// `ui.text.muted`, and the caret stays on the typed text. A theme without
+    /// the ghost scope draws no ghost.
+    #[test]
+    fn an_argument_ghost_follows_the_typed_text() {
+        let theme = {
+            let src = r##"theme t {
+                ui.text.fg = "#040404";
+                ui.text.muted.fg = "#070707";
+                ui.cmd.command.fg = "#050505";
+                ui.cmd.ghost.fg = "#060606";
+            }"##;
+            let (config, _) = stoat_config::parse(src);
+            Theme::from_config(&config.expect("theme parses"), "t").expect("theme loads")
+        };
+        let title = ResolvedCommand {
+            entry: user_command(
+                r#"command title { arg message = text(default: git.last_subject); run = shell("echo {message}"); }"#,
+                "title",
+            ),
+            head_chars: 5,
+            ghost: String::new(),
+        };
+        let gray = |text: &str, gray: u8| {
+            (
+                text.to_owned(),
+                Style::default().fg(Color::Rgb(gray, gray, gray)),
+            )
+        };
+        let plain = |text: &str| {
+            (
+                text.to_owned(),
+                Theme::empty().get(crate::theme::scope::UI_TEXT),
+            )
+        };
+
+        let typed = |ghost, theme| input_spans("title ", 6, Some(&title), ghost, &[], theme);
+
+        assert_eq!(
+            [
+                typed(Some("fix the parser"), &theme),
+                typed(Some(""), &theme),
+                typed(Some("fix the parser"), &Theme::empty()),
+            ],
+            [
+                (
+                    vec![gray("title", 5), gray(" ", 4), gray("fix the parser", 7)],
+                    6
+                ),
+                (vec![gray("title", 5), gray(" ", 4)], 6),
+                (vec![plain("title"), plain(" ")], 6),
             ],
         );
     }

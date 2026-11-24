@@ -9,7 +9,7 @@ use crate::{
     paths,
     picker::{self, PathPicker, PendingScan, PreviewPolicy, ScanTarget},
     rebase::RebasePause,
-    user_command::{ArgKind, CommandArg, CommandSet, UserCommand},
+    user_command::{ArgKind, CommandArg, CommandSet, TextDefault, UserCommand},
     workspace::Workspace,
 };
 use ratatui::layout::Rect;
@@ -145,6 +145,17 @@ pub struct CommandPalette {
     /// The user commands of the config when the palette opened, which a head
     /// names after the built-in commands.
     pub(crate) commands: Arc<CommandSet>,
+    /// The default that the user command's argument in entry shows after the
+    /// typed text while that argument holds no text, or `None`.
+    ///
+    /// [`crate::action_handlers::sync_palette_picker`] sets it each frame.
+    pub(crate) arg_ghost: Option<String>,
+    /// The text of each default that the ghost has shown, with the name of its
+    /// command and the index of its argument.
+    ///
+    /// A context value reads the editor and the repository, so it resolves
+    /// once for each command and argument while the palette is open.
+    pub(crate) resolved_defaults: Vec<(String, usize, String)>,
 }
 
 /// A command that the palette's input names, a registered action or a user
@@ -954,6 +965,8 @@ impl CommandPalette {
             doc_scroll: 0,
             history_rows: Vec::new(),
             commands,
+            arg_ghost: None,
+            resolved_defaults: Vec::new(),
         }
     }
 
@@ -1044,6 +1057,22 @@ impl CommandPalette {
             PaletteCommand::User(command) => command.args.get(self.typed_arg),
             PaletteCommand::Action(_) => None,
         }
+    }
+
+    /// The default of the user command's argument in entry while that argument
+    /// holds no text, with the command's name and the argument's index.
+    pub(crate) fn empty_default(&self, ws: &Workspace) -> Option<(String, usize, TextDefault)> {
+        let PaletteCommand::User(command) = self.command.as_ref()? else {
+            return None;
+        };
+        let default = command.args.get(self.typed_arg)?.default()?;
+        let text = self.input.text(ws);
+        let (_, _, tail) = split_head(&text, &self.availability, &self.commands)?;
+        let typed = current_user_arg(tail, command.args.len()).1;
+        typed
+            .trim()
+            .is_empty()
+            .then(|| (command.name.clone(), self.typed_arg, default.clone()))
     }
 
     /// The value source of the argument being typed when it drives an inline
@@ -1337,12 +1366,14 @@ impl CommandPalette {
 
     /// The outcome of Enter on `command` with no argument typed.
     ///
-    /// A command that runs with no argument runs. Any other opens the entry of
-    /// its argument, with its name and a space in the input.
+    /// A command that runs with no argument runs. A user command does when
+    /// each of its arguments has a default, and it runs with each argument
+    /// empty. Any other command opens the entry of its argument, with its name
+    /// and a space in the input.
     fn enter_bare(&mut self, ws: &mut Workspace, command: PaletteCommand) -> PaletteOutcome {
         let runs = match &command {
             PaletteCommand::Action(entry) => dispatches_bare(entry),
-            PaletteCommand::User(user) => user.args.is_empty(),
+            PaletteCommand::User(user) => user.args.iter().all(CommandArg::optional),
         };
         if !runs {
             self.input
@@ -1354,20 +1385,25 @@ impl CommandPalette {
         let line = history_head(&command);
         match command {
             PaletteCommand::Action(entry) => PaletteOutcome::Dispatch(entry, Vec::new(), line),
-            PaletteCommand::User(user) => PaletteOutcome::Run(user, Vec::new(), line),
+            PaletteCommand::User(user) => {
+                let values = vec![String::new(); user.args.len()];
+                PaletteOutcome::Run(user, values, line)
+            },
         }
     }
 
     /// The outcome of Enter on the user command `command` with the typed
     /// `tail`.
     ///
-    /// The command runs when the tail gives a value to each of its arguments.
-    /// Else the palette stays open, and the refusal goes to the log as the
-    /// refusal of a built-in command does.
+    /// The command runs when the tail gives a value to each argument that has
+    /// no default, and an argument with a default runs empty. Else the palette
+    /// stays open, and the refusal goes to the log as the refusal of a built-in
+    /// command does.
     ///
     /// The list of a `file` or `dir` argument in entry gives that argument its
     /// value, as [`Self::picked_user_value`] takes it. The history line holds
-    /// the values, so a recalled line runs on the picked path again.
+    /// the values that are not empty, so a recalled line runs on the picked
+    /// path again, and its empty arguments take their defaults again.
     fn submit_user_command(
         &mut self,
         ws: &mut Workspace,
@@ -1385,7 +1421,10 @@ impl CommandPalette {
                 None => values.push(picked),
             }
         }
-        if values.len() != count {
+        if command.args[values.len()..]
+            .iter()
+            .any(|arg| !arg.optional())
+        {
             tracing::warn!(
                 target: "stoat::command",
                 command = %command.name,
@@ -1394,9 +1433,14 @@ impl CommandPalette {
             );
             return PaletteOutcome::None;
         }
+        values.resize(count, String::new());
 
         self.input.dispose(ws);
-        let line = format!("{} {}", command.name, values.join(" "));
+        let line = iter::once(command.name.as_str())
+            .chain(values.iter().map(String::as_str))
+            .filter(|word| !word.is_empty())
+            .collect::<Vec<_>>()
+            .join(" ");
         PaletteOutcome::Run(command, values, line)
     }
 
@@ -1773,7 +1817,7 @@ pub(crate) fn current_user_arg(tail: &str, count: usize) -> (&str, &str) {
 /// `path` as a value of a user command's shell step, which runs in the
 /// workspace root `root`. A path under the root is relative to it, and any
 /// other path stays whole.
-fn shell_path(path: &Path, root: &Path) -> String {
+pub(crate) fn shell_path(path: &Path, root: &Path) -> String {
     path.strip_prefix(root)
         .unwrap_or(path)
         .to_string_lossy()
@@ -1784,7 +1828,7 @@ fn shell_path(path: &Path, root: &Path) -> String {
 /// picks from. A `text` argument picks from no list.
 fn kind_source(kind: &ArgKind) -> ValueSource {
     match kind {
-        ArgKind::Text => ValueSource::None,
+        ArgKind::Text { .. } => ValueSource::None,
         ArgKind::File => ValueSource::Files,
         ArgKind::Dir => ValueSource::Directories,
     }
@@ -3230,6 +3274,79 @@ mod tests {
         type_settled(&mut h, ":note urgent ");
         enter_settled(&mut h);
         assert_eq!(shell_lines(&h), ["note urgent src/main.rs"]);
+    }
+
+    /// The palette's argument ghost after a frame, `None` for no ghost.
+    fn arg_ghost(h: &mut TestHarness) -> Option<String> {
+        let _ = h.snapshot();
+        h.stoat
+            .command_palette
+            .as_ref()
+            .expect("palette open")
+            .arg_ghost
+            .clone()
+    }
+
+    /// The ghost shows the default of an empty argument and resolves it once.
+    /// A typed char hides the ghost, and an argument emptied again shows it
+    /// from the palette's cache.
+    #[test]
+    fn the_ghost_text_shows_the_default_of_an_empty_argument() {
+        let mut h = Stoat::test();
+        h.seed_linear_history(
+            "/repo",
+            &[("a1b2c3d4", "fix the parser", &[("a.rs", "1\n")])],
+        );
+        h.stoat.active_workspace_mut().git_root = "/repo".into();
+        h.stoat.reload_user_config(
+            r#"command title { arg message = text(default: git.last_subject); run = shell("echo {message}"); }"#,
+        );
+        h.type_text(":title ");
+        let shown = arg_ghost(&mut h);
+        h.type_text("x");
+        let typed = arg_ghost(&mut h);
+        h.type_keys("backspace");
+        let again = arg_ghost(&mut h);
+        let cmd_line = h
+            .rendered_text()
+            .lines()
+            .find(|line| line.contains('\u{276f}'))
+            .unwrap_or_default()
+            .to_owned();
+
+        let palette = h.stoat.command_palette.as_ref().expect("palette open");
+        assert_eq!(
+            (
+                shown,
+                typed,
+                again,
+                palette.resolved_defaults.clone(),
+                cmd_line.contains("\u{276f} title fix the parser"),
+            ),
+            (
+                Some("fix the parser".to_owned()),
+                None,
+                Some("fix the parser".to_owned()),
+                vec![("title".to_owned(), 0, "fix the parser".to_owned())],
+                true,
+            ),
+            "the Cmd Line reads {cmd_line:?}",
+        );
+    }
+
+    /// A `file` default reads the buffer of the pane under the palette, and
+    /// not the palette's own input, which takes the keys.
+    #[test]
+    fn a_file_ghost_reads_the_pane_under_the_palette() {
+        let mut h = Stoat::test();
+        h.stoat.active_workspace_mut().git_root = "/repo".into();
+        h.fake_fs().insert_file("/repo/src/a.rs", "one\n");
+        h.open_file(Path::new("/repo/src/a.rs"));
+        h.stoat.reload_user_config(
+            r#"command where { arg f = text(default: file); run = shell("echo {f}"); }"#,
+        );
+        h.type_text(":where ");
+        assert_eq!(arg_ghost(&mut h).as_deref(), Some("src/a.rs"));
     }
 
     /// A submitted line records the time that the executor's clock reads, so

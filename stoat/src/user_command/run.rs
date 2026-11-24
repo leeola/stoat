@@ -1,4 +1,4 @@
-use super::{ArgKind, Output, Step, UserCommand};
+use super::{context, ArgKind, Output, Step, UserCommand};
 use crate::{
     action_handlers,
     app::{MessageKind, Stoat, UpdateEffect},
@@ -71,9 +71,11 @@ pub(crate) enum CommandEvent {
 /// step runs here, a shell step on a worker with no terminal, so its stdout
 /// and its stderr stay apart.
 ///
-/// A `file` or `dir` value that starts with `~/` runs with the `HOME`
-/// directory in place of the `~`.
+/// An empty value of an argument with a default runs with the default, as
+/// [`context::default_text`] reads it. A `file` or `dir` value that starts
+/// with `~/` runs with the `HOME` directory in place of the `~`.
 pub(crate) fn start(stoat: &mut Stoat, command: &UserCommand, values: Vec<String>) -> UpdateEffect {
+    let values = fill_defaults(stoat, command, values);
     let values = expand_home(command, values, stoat.env_host.var("HOME").as_deref());
     match plan(command, &values) {
         Plan::Modal(line) => action_handlers::run::run_command(stoat, &line),
@@ -128,6 +130,17 @@ pub(crate) fn pump(stoat: &mut Stoat) -> bool {
         }
     }
     landed
+}
+
+/// `values` with each empty value of an argument with a default replaced by
+/// that default.
+fn fill_defaults(stoat: &mut Stoat, command: &UserCommand, mut values: Vec<String>) -> Vec<String> {
+    for (value, arg) in values.iter_mut().zip(&command.args) {
+        if let Some(default) = arg.default().filter(|_| value.is_empty()) {
+            *value = context::default_text(stoat, default);
+        }
+    }
+    values
 }
 
 /// `values` with the leading `~/` of each `file` or `dir` value written as
@@ -381,6 +394,15 @@ mod tests {
         )
     }
 
+    /// The lines that the fake shell ran, in order.
+    fn shell_lines(h: &TestHarness) -> Vec<String> {
+        h.fake_shell
+            .invocations()
+            .into_iter()
+            .map(|run| run.cmd)
+            .collect()
+    }
+
     fn output(stdout: &[u8], stderr: &[u8], exit_code: i32) -> ShellOutput {
         ShellOutput {
             stdout: stdout.to_vec(),
@@ -397,7 +419,7 @@ mod tests {
             line: 1,
             args: vec![CommandArg {
                 name: "pr".to_owned(),
-                kind: ArgKind::Text,
+                kind: ArgKind::Text { default: None },
             }],
             step: Step::Shell(Template::parse("gh pr checkout {pr}")),
             output: Output::Block,
@@ -502,13 +524,83 @@ mod tests {
         ));
         h.fake_env().set("HOME", "/home/tester");
         submit(&mut h, "catnote ~/a.txt ~/docs ~/x");
-        let lines: Vec<String> = h
-            .fake_shell
-            .invocations()
-            .into_iter()
-            .map(|run| run.cmd)
-            .collect();
-        assert_eq!(lines, ["cat /home/tester/a.txt /home/tester/docs '~/x'"]);
+        assert_eq!(
+            shell_lines(&h),
+            ["cat /home/tester/a.txt /home/tester/docs '~/x'"]
+        );
+    }
+
+    /// The user command `title`, whose message defaults to the summary of the
+    /// newest commit.
+    const TITLE: &str = r#"command title { arg message = text(default: git.last_subject); run = shell("echo {message}"); output = notify; }"#;
+
+    /// The default fills an argument left empty, from the bare name and from
+    /// a name with an empty tail. The history records no empty value.
+    #[test]
+    fn a_literal_default_fills_an_empty_argument() {
+        let mut h = loaded(
+            r#"command say { arg what = text(default: "hi"); run = shell("echo {what}"); output = notify; }"#,
+        );
+        submit(&mut h, "say");
+        submit(&mut h, "say ");
+        submit(&mut h, "say yo");
+        assert_eq!(
+            (
+                shell_lines(&h),
+                h.stoat.active_workspace().palette_history.entries(),
+            ),
+            (
+                vec![
+                    "echo hi".to_owned(),
+                    "echo hi".to_owned(),
+                    "echo yo".to_owned()
+                ],
+                &["say".to_owned(), "say yo".to_owned()][..],
+            ),
+        );
+    }
+
+    #[test]
+    fn git_last_subject_reads_the_newest_commit_summary() {
+        let mut h = loaded(TITLE);
+        h.seed_linear_history(
+            "/repo",
+            &[
+                ("a1b2c3d4", "add the lexer", &[("a.rs", "1\n")]),
+                ("b2c3d4e5", "fix the parser", &[("a.rs", "2\n")]),
+            ],
+        );
+        submit(&mut h, "title");
+        assert_eq!(shell_lines(&h), ["echo 'fix the parser'"]);
+    }
+
+    /// The selection, the file, and the line come from the editor of the
+    /// focused pane. The line is the cursor's, which a forward selection draws
+    /// on its last char. So the whole second line selected reads line 2,
+    /// although its head stands at the start of line 3.
+    #[test]
+    fn selection_file_and_line_read_the_pane_under_the_palette() {
+        let mut h = loaded(concat!(
+            "command ctx { arg s = text(default: selection); arg f = text(default: file); ",
+            "arg l = text(default: line); run = shell(\"echo {s} {f} {l}\"); output = notify; }\n",
+            "command atline { arg l = text(default: line); run = shell(\"echo {l}\"); output = notify; }",
+        ));
+        h.fake_fs()
+            .insert_file("/repo/src/a.rs", "one\ntwo\nthree\n");
+        h.open_file(Path::new("/repo/src/a.rs"));
+        h.type_keys("j m i w");
+        submit(&mut h, "ctx");
+        h.type_keys("x");
+        submit(&mut h, "atline");
+        assert_eq!(shell_lines(&h), ["echo two src/a.rs 2", "echo 2"]);
+    }
+
+    /// With no repository, `git.last_subject` reads as the empty string.
+    #[test]
+    fn a_context_value_with_nothing_to_read_is_empty() {
+        let mut h = loaded(TITLE);
+        submit(&mut h, "title");
+        assert_eq!(shell_lines(&h), ["echo ''"]);
     }
 
     #[test]

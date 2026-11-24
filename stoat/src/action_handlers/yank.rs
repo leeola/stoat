@@ -1,5 +1,6 @@
 use crate::{
     app::{Stoat, UpdateEffect},
+    editor_state::EditorId,
     host::ClipboardKind,
     paths,
     register::Register,
@@ -344,8 +345,14 @@ fn paste_clipboard(stoat: &mut Stoat, side: PasteSide) -> UpdateEffect {
 /// primary selection is collapsed.
 fn primary_selection_text(stoat: &mut Stoat) -> Option<String> {
     let (editor_id, _) = stoat.focused_editor_ids()?;
+    selection_text(stoat, editor_id)
+}
+
+/// The text of the primary selection of `editor`, or `None` for a collapsed
+/// selection or an editor that the workspace does not hold.
+pub(crate) fn selection_text(stoat: &mut Stoat, editor: EditorId) -> Option<String> {
     let ws = stoat.active_workspace_mut();
-    let editor = ws.editors.get_mut(editor_id).expect("editor");
+    let editor = ws.editors.get_mut(editor)?;
     let snapshot = editor.display_map.snapshot();
     let buf_snap = snapshot.buffer_snapshot();
     let primary = editor.selections.newest_anchor();

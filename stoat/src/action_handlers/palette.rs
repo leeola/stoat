@@ -8,7 +8,8 @@ use crate::{
     host::FsHost,
     keymap_state::StoatKeymapState,
     picker::{PathPicker, PendingScan},
-    user_command, walkthrough,
+    user_command::{self, TextDefault},
+    walkthrough,
 };
 use std::{
     path::{Path, PathBuf},
@@ -216,6 +217,9 @@ pub(super) fn open_palette_seeded(stoat: &mut Stoat, seed: &str) -> UpdateEffect
 /// The sync then drops an installed argument picker and starts no scan. Thus
 /// the box keeps the size of the command list for every recalled line.
 ///
+/// The sync also sets the ghost of a user command's empty argument, as
+/// [`sync_arg_ghost`] reads it.
+///
 /// Lives here rather than on [`crate::command_palette::CommandPalette`] because
 /// spawning the walk needs [`Stoat`]-level resources (the executor, fs host, and
 /// redraw notifier) that a palette method does not see.
@@ -239,6 +243,7 @@ pub(crate) fn sync_palette_picker(stoat: &mut Stoat) {
         }
         palette.arg_source().zip(palette.arg_tail(ws))
     };
+    sync_arg_ghost(stoat);
     let Some((source, tail)) = resolved else {
         return;
     };
@@ -337,6 +342,46 @@ pub(crate) fn sync_palette_picker(stoat: &mut Stoat) {
     }
 
     spawn_arg_picker_scans(stoat, pending);
+}
+
+/// Set the palette's argument ghost to the default of the user command's
+/// argument in entry while that argument holds no text.
+///
+/// A default resolves once for each command and argument while the palette
+/// is open, so an idle frame reads no repository.
+fn sync_arg_ghost(stoat: &mut Stoat) {
+    let wanted = {
+        let ws = &stoat.workspaces[stoat.active_workspace];
+        stoat
+            .command_palette
+            .as_ref()
+            .and_then(|palette| palette.empty_default(ws))
+    };
+    let ghost = wanted.map(|(name, index, default)| shown_default(stoat, name, index, &default));
+    if let Some(palette) = stoat.command_palette.as_mut() {
+        palette.arg_ghost = ghost;
+    }
+}
+
+/// The text of `default`, the default of argument `index` of the command
+/// `name`, from the palette's cache, or resolved and cached on a first read.
+fn shown_default(stoat: &mut Stoat, name: String, index: usize, default: &TextDefault) -> String {
+    let held = stoat.command_palette.as_ref().and_then(|palette| {
+        palette
+            .resolved_defaults
+            .iter()
+            .find(|(command, at, _)| *command == name && *at == index)
+            .map(|(_, _, text)| text.clone())
+    });
+    if let Some(text) = held {
+        return text;
+    }
+
+    let text = user_command::context::default_text(stoat, default);
+    if let Some(palette) = stoat.command_palette.as_mut() {
+        palette.resolved_defaults.push((name, index, text.clone()));
+    }
+    text
 }
 
 /// Bring the command list up to date with what is typed, before an action
