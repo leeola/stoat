@@ -538,6 +538,21 @@ pub(crate) fn boxed_modal_surfaces(stoat: &Stoat) -> Option<ModalSurfaces> {
                     rows: ListRows::OnePerResult,
                 });
             }
+            if let Some((_, _, list)) = palette.cli_list.as_ref() {
+                let layout = crate::render::command_palette::palette_filter_layout(
+                    size,
+                    rows,
+                    zoom,
+                    palette.header_rows,
+                )?;
+                return Some(ModalSurfaces {
+                    list: layout.list,
+                    preview: None,
+                    len: list.filtered.len(),
+                    selected: list.selected,
+                    rows: ListRows::OnePerResult,
+                });
+            }
             if palette.command.is_none() {
                 let layout = crate::render::command_palette::palette_filter_layout(
                     size,

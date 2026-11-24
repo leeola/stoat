@@ -1,5 +1,6 @@
 use crate::{
     app::Stoat,
+    cli_spec::CliSpec,
     file_finder::{self, Browse, FileScopes, FinderScope},
     fuzzy,
     host::FsHost,
@@ -164,6 +165,13 @@ pub struct CommandPalette {
     /// [`crate::action_handlers::sync_palette_picker`] starts it when the
     /// argument's entry starts, and drops it for any other input.
     pub(crate) pick: Option<PickState>,
+    /// The list of the flags or the subcommands of the `cli` command in
+    /// entry, with that command's name, or `None` while no such list shows.
+    ///
+    /// [`crate::action_handlers::sync_palette_picker`] builds it once the
+    /// command's help lands, builds it again when the command or the kind
+    /// changes, and drops it for a word that is free text.
+    pub(crate) cli_list: Option<(String, CliListKind, ArgList)>,
 }
 
 /// A command that the palette's input names, a registered action or a user
@@ -219,8 +227,24 @@ pub(crate) struct ResolvedCommand {
 pub(crate) struct ArgRow {
     /// The text that the row shows, which the typed text matches.
     pub(crate) label: String,
-    /// The text that Enter and Tab write for the row.
+    /// The text that Tab writes for the row, and Enter for a pick row.
     pub(crate) insert: String,
+    /// The name of the value that a flag row's flag takes, or `None` for a
+    /// row that names no value.
+    pub(crate) value_name: Option<String>,
+    /// The text that a flag or a subcommand row shows after its label, empty
+    /// for a pick row.
+    pub(crate) description: String,
+}
+
+/// Which list the argument entry of a `cli` command shows, as
+/// [`cli_list_kind`] picks it from the word in entry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CliListKind {
+    /// The tool's own flags, for a word that starts with `-`.
+    Flags,
+    /// The tool's subcommands, for its first word that is no flag.
+    Subcommands,
 }
 
 /// The [`ArgRow`]s of an argument list, which the typed text narrows by their
@@ -1198,6 +1222,7 @@ impl CommandPalette {
             arg_ghost: None,
             resolved_defaults: Vec::new(),
             pick: None,
+            cli_list: None,
         }
     }
 
@@ -1212,10 +1237,14 @@ impl CommandPalette {
     /// Arg mode lists the argument picker's candidates, so `:o ` over a large
     /// workspace sizes to the file count rather than the command count. Both
     /// sources are unfiltered bases, so the answer holds while the user types.
-    /// A pick list counts its rows, none while its command runs.
+    /// A pick list counts its rows, none while its command runs, and so does
+    /// the list of a `cli` command.
     pub(crate) fn list_rows_hint(&self) -> u16 {
         if let Some(pick) = &self.pick {
             return rows_of(pick.list.rows.len());
+        }
+        if let Some((_, _, list)) = &self.cli_list {
+            return rows_of(list.rows.len());
         }
         match self.arg_picker.as_ref().filter(|_| self.command.is_some()) {
             Some(picker) => rows_of(picker.active_core_ref().picklist.base.len()),
@@ -2171,6 +2200,23 @@ fn arg_index(tail: &str) -> usize {
     }
 }
 
+/// The list that the argument entry of a `cli` command whose help gives
+/// `spec` shows for the typed `tail`, or `None` while the word in entry is
+/// free text.
+///
+/// The word in entry is the tail's last word, as [`split_last_token`] splits
+/// it. A word that starts with `-` lists the flags, and the first word that is
+/// no flag lists the subcommands. Each list shows only while the spec holds
+/// rows for it, so a tool with an empty spec shows no list.
+pub(crate) fn cli_list_kind(spec: &CliSpec, tail: &str) -> Option<CliListKind> {
+    let (kept, word) = split_last_token(tail);
+    if word.starts_with('-') {
+        return (!spec.flags.is_empty()).then_some(CliListKind::Flags);
+    }
+    let first = kept.split_whitespace().all(|kept| kept.starts_with('-'));
+    (first && !spec.subcommands.is_empty()).then_some(CliListKind::Subcommands)
+}
+
 /// `tail` split before the token being typed, as the text kept ahead of it and
 /// the token itself.
 ///
@@ -2545,6 +2591,7 @@ mod tests {
         app::UpdateEffect,
         badge::BadgeSource,
         buffer_registry::AutoReloadMode,
+        cli_spec::{self, CARGO_HELP, RG_HELP},
         host::{FakeFsOp, ShellOutput},
         input_history::InputHistory,
         picker::{PreviewSource, PREVIEW_BYTE_LIMIT, PREVIEW_DIR_LIMIT},
@@ -3534,6 +3581,169 @@ mod tests {
         );
     }
 
+    /// A free word after a subcommand lists nothing, and a tool with no
+    /// subcommand lists none for its first word.
+    #[test]
+    fn cli_list_kind_follows_the_word_in_entry() {
+        let cargo = cli_spec::parse_help(CARGO_HELP);
+        let rg = cli_spec::parse_help(RG_HELP);
+        let subcommands = Some(CliListKind::Subcommands);
+        let flags = Some(CliListKind::Flags);
+        assert_eq!(
+            (
+                ["", "t", "test -", "-", "test foo"].map(|tail| cli_list_kind(&cargo, tail)),
+                cli_list_kind(&rg, ""),
+            ),
+            ([subcommands, subcommands, flags, flags, None], None),
+        );
+    }
+
+    /// A harness 160 by 50 with the `cli` command that `source` declares, whose
+    /// help run `help_line` prints `help`.
+    fn cli_harness(source: &str, help_line: &str, help: &str) -> TestHarness {
+        let mut h = TestHarness::with_size(160, 50);
+        h.fake_shell.set_response(
+            help_line,
+            ShellOutput {
+                stdout: help.as_bytes().to_vec(),
+                stderr: Vec::new(),
+                exit_code: 0,
+            },
+        );
+        h.stoat.reload_user_config(source);
+        h
+    }
+
+    /// The `cli` command `rg` over ripgrep's help.
+    fn rg_harness() -> TestHarness {
+        cli_harness(
+            r#"command rg = cli("rg", output: notify);"#,
+            "rg --help",
+            RG_HELP,
+        )
+    }
+
+    /// The `cli` command `cargo` over cargo's help.
+    fn cargo_harness() -> TestHarness {
+        cli_harness(
+            r#"command cargo = cli("cargo");"#,
+            "cargo --help",
+            CARGO_HELP,
+        )
+    }
+
+    /// The labels of the rows that the open palette's `cli` list shows, in
+    /// order, none while no such list shows.
+    fn cli_rows(h: &TestHarness) -> Vec<String> {
+        let palette = h.stoat.command_palette.as_ref().expect("palette open");
+        palette
+            .cli_list
+            .as_ref()
+            .map(|(_, _, list)| {
+                list.filtered
+                    .iter()
+                    .map(|&index| list.rows[index].label.clone())
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// The word `-` lists every flag, and the status counts the help's flags.
+    /// More of the word narrows the list by the flags' labels.
+    #[test]
+    fn a_dash_word_lists_the_flags() {
+        let mut h = rg_harness();
+        type_settled(&mut h, ":rg -t rust -");
+        let listed = cli_rows(&h).len();
+        let header = header_line(&h);
+        type_settled(&mut h, "-ig");
+
+        assert_eq!(
+            (
+                listed,
+                header.contains("flags \u{b7} 5 from --help\u{2502}"),
+                cli_rows(&h),
+            ),
+            (5, true, vec!["-i, --ignore-case".to_owned()]),
+            "the header reads {header:?}",
+        );
+    }
+
+    #[test]
+    fn the_first_word_lists_the_subcommands() {
+        let mut h = cargo_harness();
+        type_settled(&mut h, ":cargo t");
+        let header = header_line(&h);
+        assert_eq!(
+            (
+                cli_rows(&h),
+                header.contains("cli subcommands \u{b7} 5 from --help\u{2502}"),
+            ),
+            (vec!["t".to_owned(), "test".to_owned()], true),
+            "the header reads {header:?}",
+        );
+    }
+
+    /// Tab writes a flag's long form, the short form of a flag with no long
+    /// form, or a subcommand's name, and a space, in place of the word.
+    #[test]
+    fn tab_writes_the_long_form_and_a_space() {
+        let completed = |mut h: TestHarness, typed: &str| {
+            type_settled(&mut h, typed);
+            h.type_keys("tab");
+            palette_text(&h)
+        };
+        assert_eq!(
+            [
+                completed(rg_harness(), ":rg -i"),
+                completed(cargo_harness(), ":cargo -C"),
+                completed(cargo_harness(), ":cargo te"),
+            ],
+            ["rg --ignore-case ", "cargo -C ", "cargo test "],
+        );
+    }
+
+    #[test]
+    fn enter_runs_the_line_as_typed_whatever_row_is_selected() {
+        let mut h = rg_harness();
+        type_settled(&mut h, ":rg -");
+        h.type_keys("down");
+        let selected = h
+            .stoat
+            .command_palette
+            .as_ref()
+            .and_then(|palette| palette.cli_list.as_ref())
+            .map(|(_, _, list)| list.selected);
+        enter_settled(&mut h);
+        assert_eq!(
+            (selected, shell_lines(&h)),
+            (
+                Some(1),
+                vec![
+                    "rg --help".to_owned(),
+                    "rg --version".to_owned(),
+                    "rg -".to_owned()
+                ],
+            ),
+        );
+    }
+
+    #[test]
+    fn the_wrap_key_line_names_run_complete_flag_and_history() {
+        let mut h = rg_harness();
+        type_settled(&mut h, ":rg -");
+        let (text, _) = key_line(&h);
+        let line = text.trim_end();
+        assert_eq!(
+            (
+                line.contains("Enter run  Tab complete flag  \u{2191} history"),
+                line.ends_with("cli command \u{b7} auto-wrapped"),
+            ),
+            (true, true),
+            "the key line reads {text:?}",
+        );
+    }
+
     #[test]
     fn a_unique_prefix_of_a_user_command_shows_its_ghost() {
         let commands = user_commands(GREET);
@@ -4210,6 +4420,8 @@ mod tests {
         let row = |label: &str| ArgRow {
             label: label.to_owned(),
             insert: label.to_owned(),
+            value_name: None,
+            description: String::new(),
         };
         let mut list = ArgList::default();
         list.refilter("bet");

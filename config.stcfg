@@ -386,6 +386,7 @@ theme ermine_night inherits default_dark {
     ui.cmd.source.cli      = { fg: success, bg: tint_success };
     ui.cmd.source.script   = { fg: warning, bg: tint_warning };
     ui.cmd.source.internal = { fg: info, bg: tint_internal };
+    ui.cmd.flag.value.fg = warning;
     ui.hints.submenu.fg = accent;
     ui.badge.active.fg = warning;
 

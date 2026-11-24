@@ -995,6 +995,10 @@ pub mod scope {
     /// `action` token in a Cmd Line. A theme that leaves it unset draws the
     /// name and the token as a command's.
     pub const UI_CMD_ACTION: &str = "ui.cmd.action";
+    /// The value name of a flag row, such as `<GLOB>`, in the argument entry
+    /// of a command that wraps a tool. A theme that leaves it unset paints the
+    /// name in [`UI_TEXT_MUTED`].
+    pub const UI_CMD_FLAG_VALUE: &str = "ui.cmd.flag.value";
     /// The mark the key hints box draws beside a key whose toggle is on.
     /// [`UI_TOGGLE_INACTIVE`] is its sibling for a toggle that is off.
     pub const UI_TOGGLE_ACTIVE: &str = "ui.toggle.active";

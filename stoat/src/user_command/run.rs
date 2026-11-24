@@ -502,6 +502,8 @@ fn land_pick(stoat: &mut Stoat, generation: u64, result: io::Result<ShellOutput>
                     ArgRow {
                         label: spec.show.render(field),
                         insert: spec.value.render(field),
+                        value_name: None,
+                        description: String::new(),
                     }
                 })
                 .collect();

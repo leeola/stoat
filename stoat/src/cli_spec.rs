@@ -42,6 +42,29 @@ pub(crate) struct CliFlag {
     pub(crate) description: String,
 }
 
+impl CliFlag {
+    /// The name that the flag's row shows, as `-i, --ignore-case`, or the
+    /// one form of a flag that has one.
+    pub(crate) fn label(&self) -> String {
+        match (self.short, &self.long) {
+            (Some(short), Some(long)) => format!("-{short}, --{long}"),
+            (None, Some(long)) => format!("--{long}"),
+            (Some(short), None) => format!("-{short}"),
+            (None, None) => String::new(),
+        }
+    }
+
+    /// The text that Tab writes for the flag, its long form, or its short
+    /// form for a flag with no long form.
+    pub(crate) fn insert(&self) -> String {
+        match (&self.long, self.short) {
+            (Some(long), _) => format!("--{long}"),
+            (None, Some(short)) => format!("-{short}"),
+            (None, None) => String::new(),
+        }
+    }
+}
+
 /// A subcommand of a tool, or an alias of one.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct CliSubcommand {
@@ -972,6 +995,25 @@ mod tests {
         assert_eq!(
             parse_fish_completions(script, "x"),
             empty_fish_spec(vec![flag(None, Some("one"), None, "")]),
+        );
+    }
+
+    /// A flag with both forms reads both and writes its long form. A flag with
+    /// one form reads and writes that form.
+    #[test]
+    fn a_flag_label_and_insert_take_the_long_form_first() {
+        let flags = [
+            flag(Some('i'), Some("ignore-case"), None, ""),
+            flag(None, Some("mmap"), None, ""),
+            flag(Some('C'), None, Some("DIRECTORY"), ""),
+        ];
+        assert_eq!(
+            flags.map(|flag| (flag.label(), flag.insert())),
+            [
+                ("-i, --ignore-case".to_owned(), "--ignore-case".to_owned()),
+                ("--mmap".to_owned(), "--mmap".to_owned()),
+                ("-C".to_owned(), "-C".to_owned()),
+            ],
         );
     }
 }

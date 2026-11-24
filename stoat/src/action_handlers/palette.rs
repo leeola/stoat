@@ -1,8 +1,9 @@
 use crate::{
     app::{Stoat, UpdateEffect},
+    cli_spec::CliSpec,
     command_palette::{
-        self, ArgPicker, Availability, CommandPalette, PaletteCommand, PaletteOutcome, PickLoad,
-        PickState,
+        self, ArgList, ArgPicker, ArgRow, Availability, CliListKind, CommandPalette,
+        PaletteCommand, PaletteOutcome, PickLoad, PickState,
     },
     commit_picker,
     file_finder::{Browse, FileScopes, FinderScope},
@@ -215,12 +216,14 @@ pub(super) fn open_palette_seeded(stoat: &mut Stoat, seed: &str) -> UpdateEffect
 /// file-argument mode.
 ///
 /// While the history walks, the palette shows History and no argument list.
-/// The sync then drops an installed argument picker and starts no scan. Thus
-/// the box keeps the size of the command list for every recalled line.
+/// The sync then drops an installed argument picker and the list of a `cli`
+/// command, and starts no scan. Thus the box keeps the size of the command
+/// list for every recalled line.
 ///
 /// The sync also sets the ghost of a user command's empty argument, as
-/// [`sync_arg_ghost`] reads it, and starts the load of a wrapped tool's
-/// help, as [`sync_cli_spec`] does.
+/// [`sync_arg_ghost`] reads it, starts the load of a wrapped tool's help, as
+/// [`sync_cli_spec`] does, and lists that tool's flags or subcommands, as
+/// [`sync_cli_list`] does.
 ///
 /// Lives here rather than on [`crate::command_palette::CommandPalette`] because
 /// spawning the walk needs [`Stoat`]-level resources (the executor, fs host, and
@@ -241,6 +244,7 @@ pub(crate) fn sync_palette_picker(stoat: &mut Stoat) {
         palette.refilter_from_input(ws);
         if ws.palette_history.is_walking() {
             palette.dispose_arg_picker(ws);
+            palette.cli_list = None;
             return;
         }
         palette.arg_source().zip(palette.arg_tail(ws))
@@ -248,6 +252,7 @@ pub(crate) fn sync_palette_picker(stoat: &mut Stoat) {
     sync_arg_ghost(stoat);
     sync_pick(stoat);
     sync_cli_spec(stoat);
+    sync_cli_list(stoat);
     let Some((source, tail)) = resolved else {
         return;
     };
@@ -375,6 +380,80 @@ fn sync_cli_spec(stoat: &mut Stoat) {
     };
     stoat.cli_specs.insert(name.clone(), CliSpecState::Loading);
     user_command::run::spawn_cli_load(stoat, name, tool, completions);
+}
+
+/// Build, narrow, or drop the list of the flags or the subcommands of the
+/// `cli` command whose argument entry the palette's input opens.
+///
+/// The list shows once the command's help lands in [`Stoat::cli_specs`], for
+/// the kind that [`command_palette::cli_list_kind`] picks from the word in
+/// entry. Its rows build again when the command or the kind changes, and each
+/// frame narrows them by the word in entry. Any other input drops the list.
+fn sync_cli_list(stoat: &mut Stoat) {
+    let active = stoat.active_workspace;
+    let wanted = stoat.command_palette.as_ref().and_then(|palette| {
+        let PaletteCommand::User(command) = palette.command.as_ref()? else {
+            return None;
+        };
+        let Some(CliSpecState::Ready(loaded)) = stoat.cli_specs.get(&command.name) else {
+            return None;
+        };
+        let text = palette.input.text(&stoat.workspaces[active]);
+        let (_, _, tail) =
+            command_palette::split_head(&text, &palette.availability, &palette.commands)?;
+        let kind = command_palette::cli_list_kind(&loaded.spec, tail)?;
+        let word = command_palette::split_last_token(tail).1.to_owned();
+        Some((command.name.clone(), kind, loaded.clone(), word))
+    });
+    let Some(palette) = stoat.command_palette.as_mut() else {
+        return;
+    };
+    let Some((name, kind, loaded, word)) = wanted else {
+        palette.cli_list = None;
+        return;
+    };
+
+    let held = palette
+        .cli_list
+        .as_ref()
+        .is_some_and(|(held, held_kind, _)| *held == name && *held_kind == kind);
+    if !held {
+        let mut list = ArgList::default();
+        list.set_rows(cli_rows(&loaded.spec, kind));
+        palette.cli_list = Some((name, kind, list));
+    }
+    if let Some((_, _, list)) = palette.cli_list.as_mut() {
+        list.refilter(&word);
+    }
+}
+
+/// The rows of the `kind` list of `spec`.
+///
+/// A flag row shows the flag's label, its value name, and its description,
+/// and writes its insert. A subcommand row shows and writes its name.
+fn cli_rows(spec: &CliSpec, kind: CliListKind) -> Vec<ArgRow> {
+    match kind {
+        CliListKind::Flags => spec
+            .flags
+            .iter()
+            .map(|flag| ArgRow {
+                label: flag.label(),
+                insert: flag.insert(),
+                value_name: flag.value.clone(),
+                description: flag.description.clone(),
+            })
+            .collect(),
+        CliListKind::Subcommands => spec
+            .subcommands
+            .iter()
+            .map(|subcommand| ArgRow {
+                label: subcommand.name.clone(),
+                insert: subcommand.name.clone(),
+                value_name: None,
+                description: subcommand.description.clone(),
+            })
+            .collect(),
+    }
 }
 
 /// Start, narrow, or drop the palette's pick list for the argument in entry.
@@ -805,6 +884,10 @@ pub(crate) fn palette_move_selection(stoat: &mut Stoat, delta: i32) -> Option<Up
         pick.list.move_selection(delta);
         return Some(UpdateEffect::Redraw);
     }
+    if let Some((_, _, list)) = palette.cli_list.as_mut() {
+        list.move_selection(delta);
+        return Some(UpdateEffect::Redraw);
+    }
     if palette.arg_source().is_some()
         && let Some(picker) = palette.arg_picker.as_mut()
     {
@@ -832,9 +915,10 @@ pub(super) fn palette_up(stoat: &mut Stoat) -> UpdateEffect {
     let Some(palette) = stoat.command_palette.as_ref() else {
         return UpdateEffect::None;
     };
-    let picker_row = match &palette.pick {
-        Some(pick) => Some(pick.list.selected),
-        None => palette
+    let picker_row = match (&palette.pick, &palette.cli_list) {
+        (Some(pick), _) => Some(pick.list.selected),
+        (None, Some((_, _, list))) => Some(list.selected),
+        (None, None) => palette
             .arg_picker
             .as_ref()
             .filter(|_| palette.arg_source().is_some())
@@ -931,6 +1015,14 @@ pub(super) fn palette_page(stoat: &mut Stoat, dir: i32) -> UpdateEffect {
         .and_then(|palette| palette.pick.as_mut())
     {
         pick.list.page(dir);
+        return UpdateEffect::Redraw;
+    }
+    if let Some((_, _, list)) = stoat
+        .command_palette
+        .as_mut()
+        .and_then(|palette| palette.cli_list.as_mut())
+    {
+        list.page(dir);
         return UpdateEffect::Redraw;
     }
     if let Some(palette) = stoat.command_palette.as_mut()
@@ -1042,7 +1134,9 @@ fn arg_picker_mut(stoat: &mut Stoat) -> Option<&mut ArgPicker> {
 /// completes the token being typed and keeps the tokens before it as typed. A
 /// user command completes its argument in entry and keeps the text before it,
 /// as [`command_palette::current_user_arg`] splits them. A pick list writes
-/// the insert of its selected row in place of the argument's text.
+/// the insert of its selected row in place of the argument's text. The list
+/// of a `cli` command writes the insert of its selected row and a space in
+/// place of the word in entry.
 ///
 /// A browse-mode tail keeps the typed directory prefix and appends the
 /// highlighted child, and no completion appends a trailing `/`, so the browse
@@ -1101,17 +1195,33 @@ pub(super) fn palette_complete(stoat: &mut Stoat) -> UpdateEffect {
             PaletteCommand::Action(entry) if entry.def.params().len() > 1 => {
                 command_palette::split_last_token(typed_tail)
             },
+            PaletteCommand::User(user) if matches!(user.run, RunSpec::Cli { .. }) => {
+                command_palette::split_last_token(typed_tail)
+            },
             PaletteCommand::User(user) => {
                 command_palette::current_user_arg(typed_tail, user.args.len())
             },
             PaletteCommand::Action(_) => ("", typed_tail),
         };
 
+        let cli_row = stoat
+            .command_palette
+            .as_mut()
+            .and_then(|palette| palette.cli_list.as_mut())
+            .map(|(_, _, list)| {
+                list.refilter(typed_tail);
+                list.selected_row().map(|row| format!("{} ", row.insert))
+            });
         let pick = stoat
             .command_palette
             .as_mut()
             .and_then(|palette| palette.pick.as_mut());
-        let tail = if let Some(pick) = pick {
+        let tail = if let Some(row) = cli_row {
+            let Some(row) = row else {
+                return UpdateEffect::None;
+            };
+            row
+        } else if let Some(pick) = pick {
             pick.list.refilter(typed_tail.trim());
             let Some(row) = pick.list.selected_row() else {
                 return UpdateEffect::None;

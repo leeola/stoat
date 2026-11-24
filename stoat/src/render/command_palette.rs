@@ -1,8 +1,8 @@
 use crate::{
     command_palette::{
-        is_action_row, split_head, typed_head, ArgList, ArgPicker, Availability, CommandPalette,
-        Namespace, PaletteCommand, PaletteScope, PickLoad, PickState, ResolvedCommand,
-        ACTION_TOKEN,
+        is_action_row, split_head, typed_head, ArgList, ArgPicker, Availability, CliListKind,
+        CommandPalette, Namespace, PaletteCommand, PaletteScope, PickLoad, PickState,
+        ResolvedCommand, ACTION_TOKEN,
     },
     file_finder::FinderScope,
     input_history,
@@ -57,6 +57,20 @@ const ACTION_NAME_COLUMNS: u16 = 22;
 
 /// The cells of an `action` list row's key column, the board's `width: 18ch`.
 const ACTION_KEY_COLUMNS: u16 = 18;
+
+/// The cells of a flag row's label column, the CmdRg board's `width: 26ch`.
+/// A longer label moves its own row's value and description right, because
+/// no row truncates.
+const FLAG_LABEL_COLUMNS: u16 = 26;
+
+/// The cells of a flag row's value column, the CmdRg board's `width: 9ch`,
+/// which holds the value name in angle brackets.
+const FLAG_VALUE_COLUMNS: u16 = 9;
+
+/// The cells that a subcommand row's name column takes at least, the
+/// CmdRunStages board's `width: 8ch`. The column grows to the longest name on
+/// show.
+const SUBCOMMAND_COLUMNS: u16 = 8;
 
 /// The sixteenths between a Source Tag's box and its label on each side, the
 /// board's `padding: 0 5px`.
@@ -231,6 +245,8 @@ enum KeyStage<'a> {
     /// A pick list, with the shell line that Enter runs and the line of the
     /// config that declares the command.
     Pick { enter: String, line: u32 },
+    /// The list of a `cli` command's flags or subcommands, as `kind` names it.
+    Cli { kind: CliListKind },
 }
 
 /// One entry of History, a line of the palette history that the walk visits.
@@ -413,6 +429,11 @@ pub(crate) fn render_command_palette(
         return;
     }
     palette.history_rows.clear();
+
+    if palette.cli_list.is_some() {
+        render_palette_cli(palette, ws, home, theme, area, zoom, specs, buf, scene);
+        return;
+    }
 
     if palette.pick.is_some() {
         render_palette_pick(palette, ws, home, theme, chrome, area, zoom, buf, scene);
@@ -829,7 +850,7 @@ fn render_palette_pick(
                 write_str_clipped(buf, list.x + 1, list.y, text, error, list.right());
             },
             PickLoad::Loading | PickLoad::Ready => {
-                paint_arg_rows(&pick.list, list, theme, true, buf, scene);
+                paint_arg_rows(&pick.list, None, list, theme, true, buf, scene);
             },
         }
     }
@@ -846,6 +867,137 @@ fn render_palette_pick(
         buf,
         scene,
     );
+}
+
+/// Render the argument entry of a `cli` command over the list of its flags
+/// or its subcommands, as the palette's `cli_list` holds it.
+///
+/// The body takes the root list's layout, [`palette_filter_layout`], with the
+/// list's Island over the doc's Island. [`paint_arg_rows`] paints the rows in
+/// the columns of their kind, and the doc island shows the command's doc, as
+/// [`doc_lines`] words it. The Cmd Line's status counts the kind's rows in the
+/// help, as [`cli_status`] words it, and the key line names the keys of the
+/// `cli` stage of [`palette_footer_parts`].
+#[allow(clippy::too_many_arguments)]
+fn render_palette_cli(
+    palette: &mut CommandPalette,
+    ws: &mut Workspace,
+    home: Option<&Path>,
+    theme: &crate::theme::Theme,
+    area: Rect,
+    zoom: i8,
+    specs: &HashMap<String, CliSpecState>,
+    buf: &mut Buffer,
+    scene: &mut stoat_widgets::ApcScene,
+) {
+    let Some(PaletteCommand::User(user)) = palette.command.clone() else {
+        return;
+    };
+    let Some(kind) = palette.cli_list.as_ref().map(|(_, kind, _)| *kind) else {
+        return;
+    };
+    let content_rows = palette.list_rows_hint();
+    let Some(layout) = palette_filter_layout(area, content_rows, zoom, palette.header_rows) else {
+        return;
+    };
+    let status = cli_status(&user, kind, specs, theme);
+    palette.header_rows = render_palette_prelude(
+        &palette.input,
+        palette.resolved.as_ref(),
+        None,
+        &[],
+        CmdStatus::Text(&status),
+        layout.modal,
+        layout.inner,
+        home,
+        ws,
+        theme,
+        buf,
+        scene,
+    );
+    let Some(layout) = palette_filter_layout(area, content_rows, zoom, palette.header_rows) else {
+        return;
+    };
+
+    let plate = crate::render::chrome::plate_colors(theme, scene);
+    if let Some(plate) = plate {
+        let list_bottom = match layout.doc.is_empty() {
+            true => ISLAND_BOTTOM,
+            false => ISLAND_GAP,
+        };
+        let list_edges = [ISLAND_TOP, ISLAND_SIDE, list_bottom, ISLAND_SIDE];
+        crate::render::chrome::modal_island(layout.list, list_edges, plate, theme, buf, scene);
+        let doc_edges = [ISLAND_GAP, ISLAND_SIDE, ISLAND_BOTTOM, ISLAND_SIDE];
+        crate::render::chrome::modal_island(layout.doc, doc_edges, plate, theme, buf, scene);
+    }
+    if let Some((_, _, list)) = palette.cli_list.as_mut() {
+        list.viewport_rows = Some(usize::from(layout.list.height));
+        paint_arg_rows(list, Some(kind), layout.list, theme, true, buf, scene);
+    }
+
+    if layout.doc.height > 0 {
+        if plate.is_none() {
+            let separator = theme.get(crate::theme::scope::UI_BORDER_INACTIVE);
+            let inner = layout.inner;
+            let row = layout.doc.y - 1;
+            crate::render::chrome::hline(buf, inner.x, row, inner.width, separator, scene);
+        }
+        let command = PaletteCommand::User(user);
+        let width = usize::from(layout.inner.width.saturating_sub(1));
+        let (lines, note) = doc_lines(&command, &palette.keys, width, theme, specs);
+        let tag = Some(doc_tag(&command));
+        paint_doc_lines(buf, layout.doc, &lines, tag, &note, theme, scene);
+    }
+
+    palette_footer_parts(KeyStage::Cli { kind }, theme).paint(
+        layout.footer,
+        plate,
+        theme,
+        buf,
+        scene,
+    );
+}
+
+/// The status of the Cmd Line over the `kind` list of the `cli` command
+/// `user`, whose help lands in `specs`.
+///
+/// Over the flags it reads `flags`, U+00B7, the count of the help's flags, and
+/// the source, in `ui.text.muted`. Over the subcommands it reads `cli` in the
+/// foreground of `ui.cmd.source.cli`, then ` subcommands`, U+00B7, the count,
+/// and the source. The source reads `from completions` for a command that
+/// declares completions, and `from --help` otherwise.
+fn cli_status(
+    user: &UserCommand,
+    kind: CliListKind,
+    specs: &HashMap<String, CliSpecState>,
+    theme: &crate::theme::Theme,
+) -> StyledLine {
+    let muted = theme.get(crate::theme::scope::UI_TEXT_MUTED);
+    let source = match &user.run {
+        RunSpec::Cli {
+            completions: Some(_),
+            ..
+        } => "completions",
+        _ => "--help",
+    };
+    let spec = loaded_cli(user, specs).map(|loaded| &loaded.spec);
+    match kind {
+        CliListKind::Flags => {
+            let count = grouped(spec.map_or(0, |spec| spec.flags.len()));
+            vec![(format!("flags \u{b7} {count} from {source}"), muted)]
+        },
+        CliListKind::Subcommands => {
+            let count = grouped(spec.map_or(0, |spec| spec.subcommands.len()));
+            let cli = theme
+                .try_get(crate::theme::scope::UI_CMD_SOURCE_CLI)
+                .and_then(|style| style.fg)
+                .map_or(muted, |fg| muted.fg(fg));
+            vec![
+                ("cli".to_owned(), cli),
+                (format!(" subcommands \u{b7} {count} from {source}"), muted),
+            ]
+        },
+    }
 }
 
 /// The list rect and the preview rect of a pick list in `layout`.
@@ -904,8 +1056,18 @@ fn pick_status(pick: &PickState, name: &str) -> String {
 /// with `panels`. The window starts where
 /// [`window_start`](crate::render::picker::window_start) keeps the selection
 /// on show.
+///
+/// The rows of a `cli` command's list take the columns of their `shape`, with
+/// the label in bold and the description in `ui.text.dim`. A flag row sets its
+/// value name in angle brackets in `ui.cmd.flag.value` at
+/// [`FLAG_LABEL_COLUMNS`] past the label's start, and its description
+/// [`FLAG_VALUE_COLUMNS`] past that, one cell of gap after each. A subcommand
+/// row sets its description one cell past the widest name on show, at least
+/// [`SUBCOMMAND_COLUMNS`] wide. A pick row, with no shape, reads its label
+/// alone.
 fn paint_arg_rows(
     list: &ArgList,
+    shape: Option<CliListKind>,
     area: Rect,
     theme: &crate::theme::Theme,
     panels: bool,
@@ -914,6 +1076,14 @@ fn paint_arg_rows(
 ) {
     let rows = usize::from(area.height);
     let row_style = theme.get(crate::theme::scope::UI_TEXT);
+    let label_base = match shape {
+        Some(_) => row_style.add_modifier(Modifier::BOLD),
+        None => row_style,
+    };
+    let dim = theme.get(crate::theme::scope::UI_TEXT_DIM);
+    let value_base = theme
+        .try_get(crate::theme::scope::UI_CMD_FLAG_VALUE)
+        .unwrap_or_else(|| theme.get(crate::theme::scope::UI_TEXT_MUTED));
     let match_style = theme.list_match();
     let keeps_columns = theme
         .try_get(crate::theme::scope::UI_LIST_SELECTED)
@@ -923,25 +1093,22 @@ fn paint_arg_rows(
     let mut derived = Vec::new();
     let mut matching = crate::fuzzy::Scratch::default();
 
-    let on_show = list.filtered.iter().enumerate().skip(start).take(rows);
-    for (y, (place, &index)) in (area.y..).zip(on_show) {
+    let on_show = || list.filtered.iter().enumerate().skip(start).take(rows);
+    let name_cols = on_show()
+        .filter_map(|(_, &index)| list.rows.get(index))
+        .map(|row| row.label.chars().count())
+        .max()
+        .unwrap_or(0)
+        .max(usize::from(SUBCOMMAND_COLUMNS)) as u16;
+
+    for (y, (place, &index)) in (area.y..).zip(on_show()) {
         let Some(item) = list.rows.get(index) else {
             continue;
         };
         let row = Rect::new(area.x, y, area.width, 1);
         let is_selected = place == list.selected;
-        let label_style = match is_selected {
-            true => {
-                let style =
-                    crate::render::chrome::selected_row(row, row_style, panels, theme, buf, scene);
-                match keeps_columns {
-                    true => Style {
-                        bg: style.bg,
-                        ..row_style
-                    },
-                    false => style,
-                }
-            },
+        let style = match is_selected {
+            true => crate::render::chrome::selected_row(row, row_style, panels, theme, buf, scene),
             false => {
                 for col in row.left()..row.right() {
                     buf[(col, y)].set_char(' ').set_style(row_style);
@@ -949,9 +1116,17 @@ fn paint_arg_rows(
                 row_style
             },
         };
+        let column = |own: Style| match (is_selected, keeps_columns) {
+            (false, _) => own,
+            (true, true) => Style {
+                bg: style.bg,
+                ..own
+            },
+            (true, false) => style,
+        };
 
         let label_x = area.x + 1;
-        write_str_clipped(buf, label_x, y, &item.label, label_style, end_x);
+        write_str_clipped(buf, label_x, y, &item.label, column(label_base), end_x);
         let indices = list.row_indices(place, &mut derived, &mut matching);
         paint_matches(
             buf,
@@ -961,6 +1136,23 @@ fn paint_arg_rows(
             indices,
             match_style,
         );
+
+        let label_cols = item.label.chars().count() as u16;
+        let desc_x = match shape {
+            None => continue,
+            Some(CliListKind::Subcommands) => label_x.saturating_add(name_cols + 1),
+            Some(CliListKind::Flags) => {
+                let value_x = label_x.saturating_add(label_cols.max(FLAG_LABEL_COLUMNS) + 1);
+                let value = item
+                    .value_name
+                    .as_ref()
+                    .map_or_else(String::new, |name| format!("<{name}>"));
+                write_str_clipped(buf, value_x, y, &value, column(value_base), end_x);
+                let value_cols = (value.chars().count() as u16).max(FLAG_VALUE_COLUMNS);
+                value_x.saturating_add(value_cols + 1)
+            },
+        };
+        write_str_clipped(buf, desc_x, y, &item.description, column(dim), end_x);
     }
 }
 
@@ -1638,6 +1830,11 @@ fn render_palette_filter(
 /// note names where the command comes from, `config` in the foreground of
 /// `ui.cmd.source.config`, then ` command`, a space, U+00B7, a space, and
 /// `config.stcfg:<line>` in `ui.text.muted`.
+///
+/// The list of a `cli` command names its run, completion, and history keys,
+/// with `complete flag` over the flags. Its note reads `cli` in the
+/// foreground of `ui.cmd.source.cli`, then ` command`, a space, U+00B7, a
+/// space, and `auto-wrapped` in `ui.text.muted`.
 fn palette_footer_parts(stage: KeyStage<'_>, theme: &crate::theme::Theme) -> PaletteFooterParts {
     let hint = |key, word: &'static str| (key, Cow::Borrowed(word));
     match stage {
@@ -1709,6 +1906,28 @@ fn palette_footer_parts(stage: KeyStage<'_>, theme: &crate::theme::Theme) -> Pal
                         Cow::Owned(format!(" command \u{b7} config.stcfg:{line}")),
                         muted,
                     ),
+                ],
+            }
+        },
+        KeyStage::Cli { kind } => {
+            let muted = theme.get(crate::theme::scope::UI_TEXT_MUTED);
+            let cli = theme
+                .try_get(crate::theme::scope::UI_CMD_SOURCE_CLI)
+                .and_then(|style| style.fg)
+                .map_or(muted, |fg| muted.fg(fg));
+            let complete = match kind {
+                CliListKind::Flags => "complete flag",
+                CliListKind::Subcommands => "complete",
+            };
+            PaletteFooterParts {
+                hints: vec![
+                    hint("Enter", "run"),
+                    hint("Tab", complete),
+                    hint("\u{2191}", "history"),
+                ],
+                note: vec![
+                    (Cow::Borrowed("cli"), cli),
+                    (Cow::Borrowed(" command \u{b7} auto-wrapped"), muted),
                 ],
             }
         },
@@ -2435,8 +2654,8 @@ mod tests {
     use crate::{
         cli_spec::{self, RG_HELP},
         command_palette::{
-            action_row, ArgList, ArgRow, Availability, Namespace, PaletteCommand, PickLoad,
-            PickState, ResolvedCommand,
+            action_row, ArgList, ArgRow, Availability, CliListKind, Namespace, PaletteCommand,
+            PickLoad, PickState, ResolvedCommand,
         },
         input_history,
         keymap::ActionKeys,
@@ -3890,6 +4109,8 @@ mod tests {
                 .map(|label| ArgRow {
                     label: label.to_owned(),
                     insert: String::new(),
+                    value_name: None,
+                    description: String::new(),
                 })
                 .to_vec(),
         );
@@ -3898,13 +4119,21 @@ mod tests {
         let mut buf = Buffer::empty(area);
         let mut scene = stoat_widgets::ApcScene::new();
         scene.set_live(false);
-        paint_arg_rows(&list, area, &theme, true, &mut buf, &mut scene);
+        paint_arg_rows(&list, None, area, &theme, true, &mut buf, &mut scene);
 
         list.refilter("");
         list.move_selection(1);
         let one_row = Rect::new(0, 0, 20, 1);
         let mut windowed = Buffer::empty(one_row);
-        paint_arg_rows(&list, one_row, &theme, true, &mut windowed, &mut scene);
+        paint_arg_rows(
+            &list,
+            None,
+            one_row,
+            &theme,
+            true,
+            &mut windowed,
+            &mut scene,
+        );
 
         let cell = |x: u16| (buf[(x, 0)].fg, buf[(x, 0)].bg);
         let selected = Color::Rgb(0x7f, 0xb0, 0xff);
@@ -3950,6 +4179,8 @@ mod tests {
         one.list.set_rows(vec![ArgRow {
             label: "a".to_owned(),
             insert: "a".to_owned(),
+            value_name: None,
+            description: String::new(),
         }]);
         one.list.refilter("");
         assert_eq!(
@@ -3964,6 +4195,111 @@ mod tests {
                 "failed \u{b7} from gh pr list",
                 "1 pr \u{b7} from gh pr list",
                 "0 prs \u{b7} from gh pr list",
+            ],
+        );
+    }
+
+    /// A row of a `cli` command's list with the label `label`, the value name
+    /// `value`, and the description `description`.
+    fn cli_row(label: &str, value: Option<&str>, description: &str) -> ArgRow {
+        ArgRow {
+            label: label.to_owned(),
+            insert: label.to_owned(),
+            value_name: value.map(str::to_owned),
+            description: description.to_owned(),
+        }
+    }
+
+    /// `rows` painted as rows of `kind` into a list 80 cells wide and two rows
+    /// high, under a theme that sets `ui.cmd.flag.value` to `#0a0b0c`. The
+    /// first row holds the selection.
+    fn painted_cli_rows(rows: &[ArgRow], kind: CliListKind) -> Buffer {
+        let theme = {
+            let src = r##"theme t { ui.cmd.flag.value.fg = "#0a0b0c"; }"##;
+            let (config, _) = stoat_config::parse(src);
+            Theme::from_config(&config.expect("theme parses"), "t").expect("theme loads")
+        };
+        let mut list = ArgList::default();
+        list.set_rows(rows.to_vec());
+        list.refilter("");
+        let area = Rect::new(0, 0, 80, 2);
+        let mut buf = Buffer::empty(area);
+        let mut scene = stoat_widgets::ApcScene::new();
+        paint_arg_rows(&list, Some(kind), area, &theme, false, &mut buf, &mut scene);
+        buf
+    }
+
+    /// The label reads bold from the row's second cell, the value name in
+    /// `ui.cmd.flag.value` one cell past the label's column, and the
+    /// description one cell past the value's column.
+    #[test]
+    fn a_flag_row_paints_its_three_columns() {
+        let buf = painted_cli_rows(
+            &[
+                cli_row("-e, --regexp", Some("PATTERN"), "A pattern"),
+                cli_row("-g, --glob", Some("GLOB"), "Include or exclude files"),
+            ],
+            CliListKind::Flags,
+        );
+        assert_eq!(
+            (
+                row_text(&buf, 1),
+                buf[(1, 1)].modifier.contains(Modifier::BOLD),
+                buf[(28, 1)].fg,
+            ),
+            (
+                placed(
+                    80,
+                    &[
+                        (1, "-g, --glob"),
+                        (28, "<GLOB>"),
+                        (38, "Include or exclude files")
+                    ]
+                ),
+                true,
+                Color::Rgb(10, 11, 12),
+            ),
+        );
+    }
+
+    /// A label wider than its column moves the value and the description of
+    /// its own row right, and the other rows keep their columns.
+    #[test]
+    fn a_long_flag_label_moves_its_value_and_description_right() {
+        let long = "-x, --a-flag-with-a-long-name";
+        let buf = painted_cli_rows(
+            &[
+                cli_row("-g, --glob", Some("GLOB"), "short"),
+                cli_row(long, Some("V"), "long"),
+            ],
+            CliListKind::Flags,
+        );
+        let value_x = 1 + long.len() + 1;
+        assert_eq!(
+            [row_text(&buf, 0), row_text(&buf, 1)],
+            [
+                placed(80, &[(1, "-g, --glob"), (28, "<GLOB>"), (38, "short")]),
+                placed(80, &[(1, long), (value_x, "<V>"), (value_x + 10, "long")]),
+            ],
+        );
+    }
+
+    /// The description of a subcommand row starts one cell past a name column
+    /// of 8 cells, the column's least width.
+    #[test]
+    fn a_subcommand_row_paints_its_name_and_description() {
+        let buf = painted_cli_rows(
+            &[
+                cli_row("build", None, "Compile the current package"),
+                cli_row("t", None, "alias for test"),
+            ],
+            CliListKind::Subcommands,
+        );
+        assert_eq!(
+            [row_text(&buf, 0), row_text(&buf, 1)],
+            [
+                placed(80, &[(1, "build"), (10, "Compile the current package")]),
+                placed(80, &[(1, "t"), (10, "alias for test")]),
             ],
         );
     }
