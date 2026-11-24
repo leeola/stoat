@@ -1112,18 +1112,25 @@ pub(crate) fn modal_predicate(stoat: &Stoat) -> Option<&'static str> {
     active_modal(stoat).map(ActiveModal::context_str)
 }
 
-/// The open file finder's scope as a `scope` predicate value.
+/// The `scope` predicate value of the topmost modal.
 ///
-/// Absent unless the finder is the topmost modal, so a quit prompt over a
-/// finder carries no scope.
+/// The open file finder answers its scope, and the palette answers `pick`
+/// while a pick list shows. Any other modal answers none, so a quit prompt over
+/// a finder carries no scope.
 pub(crate) fn scope_predicate(stoat: &Stoat) -> Option<&str> {
-    if active_modal(stoat) != Some(ActiveModal::FileFinder) {
-        return None;
+    match active_modal(stoat)? {
+        ActiveModal::FileFinder => stoat
+            .file_finder
+            .as_ref()
+            .map(|finder| finder.scope().context_name()),
+        ActiveModal::Palette => stoat
+            .command_palette
+            .as_ref()?
+            .pick
+            .as_ref()
+            .map(|_| "pick"),
+        _ => None,
     }
-    stoat
-        .file_finder
-        .as_ref()
-        .map(|finder| finder.scope().context_name())
 }
 
 /// Strip the `SHIFT` modifier from events where it duplicates information
@@ -2018,6 +2025,25 @@ mod tests {
                 scope_after(&[&stoat_action::OpenFileFinder]),
             ),
             (None, named("buffers"), named("all")),
+        );
+    }
+
+    /// The palette's `scope` reads `pick` while a pick list shows, and is
+    /// absent over the command list. The refresh key holds only over a pick
+    /// list.
+    #[test]
+    fn the_scope_predicate_reads_pick_while_a_pick_list_shows() {
+        let mut h = Stoat::test();
+        h.stoat.reload_user_config(
+            "command pr { arg pr = pick(\"gh pr list\"); run = shell(\"gh pr checkout {pr}\"); }",
+        );
+        let scope = |stoat: &Stoat| StoatKeymapState::from_stoat(stoat).get("scope").cloned();
+        h.type_text(":pr");
+        let listed = scope(&h.stoat);
+        h.type_text(" ");
+        assert_eq!(
+            (listed, scope(&h.stoat)),
+            (None, Some(StateValue::String("pick".into()))),
         );
     }
 

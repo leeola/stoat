@@ -81,6 +81,9 @@ pub(crate) struct PickSpec {
     /// The text that Enter and Tab write for a row. The `show` template when
     /// the declaration names none.
     pub(crate) value: Template,
+    /// The shell line that prints the preview of a row, or `None` for a list
+    /// with no preview.
+    pub(crate) preview: Option<Template>,
 }
 
 /// The value that an empty `text` argument takes.
@@ -483,13 +486,14 @@ fn text_kind(call: &Spanned<Call>, source: &str) -> Result<ArgKind, ParseError> 
 /// kind.
 ///
 /// The one positional string is the list command, which takes no
-/// placeholder. The named strings `show` and `value` are the templates of a
-/// row. A `preview` must be a string, and the palette does not read it here.
+/// placeholder. The named strings `show`, `value`, and `preview` are the
+/// templates of a row.
 fn pick_kind(call: &Spanned<Call>) -> Result<ArgKind, ParseError> {
     let as_string = "`pick` takes the list command as a string";
     let mut list: Option<&Spanned<CallValue>> = None;
     let mut show = None;
     let mut value = None;
+    let mut preview = None;
     for arg in call.node.args.iter().flatten() {
         match &arg.node {
             CallArg::Positional(_) if list.is_some() => {
@@ -506,7 +510,7 @@ fn pick_kind(call: &Spanned<Call>) -> Result<ArgKind, ParseError> {
                 match name.node.as_str() {
                     "show" => show = Some(Template::parse(text)),
                     "value" => value = Some(Template::parse(text)),
-                    "preview" => {},
+                    "preview" => preview = Some(Template::parse(text)),
                     other => {
                         return Err(error(
                             &name.span,
@@ -534,6 +538,7 @@ fn pick_kind(call: &Spanned<Call>) -> Result<ArgKind, ParseError> {
         list: list.clone(),
         show,
         value,
+        preview,
     })))
 }
 
@@ -1316,18 +1321,20 @@ mod tests {
         }
     }
 
-    /// The spec of a list command and its `show` and `value` templates.
-    fn spec(list: &str, show: &str, value: &str) -> Option<Arc<PickSpec>> {
+    /// The spec of a list command and its `show`, `value`, and `preview`
+    /// templates.
+    fn spec(list: &str, show: &str, value: &str, preview: Option<&str>) -> Option<Arc<PickSpec>> {
         Some(Arc::new(PickSpec {
             list: list.to_owned(),
             show: Template::parse(show),
             value: Template::parse(value),
+            preview: preview.map(Template::parse),
         }))
     }
 
-    /// `pick` takes the list command and the `show` and `value` templates. A
-    /// spec with no `show` shows `{line}`, and one with no `value` writes what
-    /// it shows.
+    /// `pick` takes the list command and the `show`, `value`, and `preview`
+    /// templates. A spec with no `show` shows `{line}`, and one with no `value`
+    /// writes what it shows.
     #[test]
     fn pick_takes_a_list_command_and_templates() {
         let source = concat!(
@@ -1349,10 +1356,11 @@ mod tests {
                 spec(
                     "gh pr list --json number,title",
                     "#{number} {title}",
-                    "{number}"
+                    "{number}",
+                    Some("gh pr view {number}"),
                 ),
-                spec("git branch", "{line}", "{line}"),
-                spec("git tag", "v{line}", "v{line}"),
+                spec("git branch", "{line}", "{line}", None),
+                spec("git tag", "v{line}", "v{line}", None),
                 Vec::new(),
             ),
         );

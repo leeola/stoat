@@ -7,6 +7,7 @@ use crate::{
     host::ShellOutput,
     keymap::ResolvedAction,
     location_picker::{self, LocationEntry, ParsedLocation},
+    picker::PREVIEW_BYTE_LIMIT,
 };
 use std::{
     collections::VecDeque,
@@ -70,6 +71,13 @@ pub(crate) enum CommandEvent {
         generation: u64,
         result: io::Result<ShellOutput>,
     },
+    /// The result of the preview `line` of a pick row, with the generation of
+    /// the palette's list that started it.
+    PickPreview {
+        generation: u64,
+        line: String,
+        result: io::Result<ShellOutput>,
+    },
 }
 
 /// Run `command` with `values`, one value for each of its arguments.
@@ -125,6 +133,14 @@ pub(crate) fn pump(stoat: &mut Stoat) -> bool {
             },
             CommandEvent::PickList { generation, result } => {
                 land_pick(stoat, generation, result);
+                continue;
+            },
+            CommandEvent::PickPreview {
+                generation,
+                line,
+                result,
+            } => {
+                land_preview(stoat, generation, line, result);
                 continue;
             },
         };
@@ -187,13 +203,7 @@ fn expand_home(command: &UserCommand, values: Vec<String>, home: Option<&str>) -
 /// A shell line writes each value as one shell word. A string argument of an
 /// action writes each value as it is.
 fn plan(command: &UserCommand, values: &[String]) -> Plan {
-    let value = |name: &str| {
-        command
-            .args
-            .iter()
-            .position(|arg| arg.name == name)
-            .and_then(|index| values.get(index).cloned())
-    };
+    let value = |name: &str| arg_value(command, values, name);
     match &command.step {
         Step::Shell(template) => {
             let line = template.render_shell(value);
@@ -319,7 +329,8 @@ fn land_pick(stoat: &mut Stoat, generation: u64, result: io::Result<ShellOutput>
     match result {
         Ok(output) if output.exit_code == 0 => {
             let spec = &pick.spec;
-            let rows = pick::parse_rows(&output.stdout)
+            let parsed = pick::parse_rows(&output.stdout);
+            let rows = parsed
                 .iter()
                 .map(|row| {
                     let field = |name: &str| row.field(name).map(str::to_owned);
@@ -329,11 +340,66 @@ fn land_pick(stoat: &mut Stoat, generation: u64, result: io::Result<ShellOutput>
                     }
                 })
                 .collect();
+            pick.preview_lines = match &spec.preview {
+                Some(template) => parsed
+                    .iter()
+                    .map(|row| template.render_shell(|name| row.field(name).map(str::to_owned)))
+                    .collect(),
+                None => Vec::new(),
+            };
             pick.list.set_rows(rows);
             pick.load = PickLoad::Ready;
         },
         failed => pick.load = PickLoad::Failed(pick_failure(&failed)),
     }
+}
+
+/// Give the open palette's pick list of `generation` the preview text of
+/// `line`.
+///
+/// A run that exits 0 gives its stdout, cut at [`PREVIEW_BYTE_LIMIT`] bytes.
+/// Any other result gives its failure, as [`pick_failure`] words it. A result
+/// for a list that the palette does not hold drops.
+fn land_preview(stoat: &mut Stoat, generation: u64, line: String, result: io::Result<ShellOutput>) {
+    let Some(pick) = stoat
+        .command_palette
+        .as_mut()
+        .and_then(|palette| palette.pick.as_mut())
+        .filter(|pick| pick.generation == generation)
+    else {
+        return;
+    };
+    let text: Arc<str> = match &result {
+        Ok(output) if output.exit_code == 0 => {
+            let shown = &output.stdout[..output.stdout.len().min(PREVIEW_BYTE_LIMIT)];
+            Arc::from(String::from_utf8_lossy(shown).as_ref())
+        },
+        failed => Arc::from(pick_failure(failed)),
+    };
+    pick.previews.insert(line, Some(text));
+}
+
+/// The shell line that the shell step of `command` runs with `values`, one
+/// for each argument, or `None` for an action step.
+///
+/// The palette's key line names it. It writes each value as [`plan`] does.
+/// A `file` or `dir` value keeps its leading `~/`. Only the run expands it to
+/// the home directory, so the line on show reads that path as typed.
+pub(crate) fn run_line_preview(command: &UserCommand, values: &[String]) -> Option<String> {
+    let Step::Shell(template) = &command.step else {
+        return None;
+    };
+    Some(template.render_shell(|name| arg_value(command, values, name)))
+}
+
+/// The value in `values` of the argument of `command` named `name`, or `None`
+/// for a name that no argument has.
+fn arg_value(command: &UserCommand, values: &[String], name: &str) -> Option<String> {
+    command
+        .args
+        .iter()
+        .position(|arg| arg.name == name)
+        .and_then(|index| values.get(index).cloned())
 }
 
 /// The text that a failed pick list shows.

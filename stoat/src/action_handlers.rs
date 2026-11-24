@@ -68,7 +68,7 @@ pub(crate) use commits::{pump_commits, respawn_commits_panes};
 pub(crate) use file_finder::{
     close_file_finder, file_finder_move_selection, sync_file_finder_preview,
 };
-pub(crate) use palette::sync_palette_picker;
+pub(crate) use palette::{sync_palette_picker, sync_pick_preview};
 pub(crate) use pane::{
     close_pane_by_id, dispose_view, restore_covered_terminal, restore_pane_after_term_exit,
     retire_parked_pane, scratch_editor_view, EditorDisposal,
@@ -1441,6 +1441,7 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
         ActionKind::PromptHistoryNext => prompt::prompt_history_next(stoat),
         ActionKind::PaletteScopeToggle => palette::palette_scope_toggle(stoat),
         ActionKind::PaletteUp => palette::palette_up(stoat),
+        ActionKind::PaletteRefresh => palette::palette_refresh(stoat),
         ActionKind::OpenLastPicker => open_last_picker(stoat),
     };
     end_action_group(stoat, group_buffer);

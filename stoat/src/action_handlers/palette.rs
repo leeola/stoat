@@ -1,14 +1,14 @@
 use crate::{
     app::{Stoat, UpdateEffect},
     command_palette::{
-        self, ArgList, ArgPicker, Availability, CommandPalette, PaletteCommand, PaletteOutcome,
-        PickLoad, PickState,
+        self, ArgPicker, Availability, CommandPalette, PaletteCommand, PaletteOutcome, PickLoad,
+        PickState,
     },
     commit_picker,
     file_finder::{Browse, FileScopes, FinderScope},
     host::FsHost,
     keymap_state::StoatKeymapState,
-    picker::{PathPicker, PendingScan},
+    picker::{PathPicker, PendingScan, PreviewSource},
     user_command::{self, TextDefault},
     walkthrough,
 };
@@ -351,18 +351,22 @@ pub(crate) fn sync_palette_picker(stoat: &mut Stoat) {
 /// The list command of a user command's `pick` argument runs on a worker when
 /// that argument's entry starts. It runs once while the same argument stays in
 /// entry, and each frame narrows the list by the argument's text. Any other
-/// input drops the list.
+/// input drops the list and disposes its preview pane.
+///
+/// The preview of the selected row follows, as [`sync_pick_preview`] shows it.
 fn sync_pick(stoat: &mut Stoat) {
-    let wanted = {
-        let ws = &stoat.workspaces[stoat.active_workspace];
-        stoat
-            .command_palette
-            .as_ref()
-            .and_then(|palette| palette.pick_in_entry(ws))
-    };
+    let active = stoat.active_workspace;
+    let wanted = stoat
+        .command_palette
+        .as_ref()
+        .and_then(|palette| palette.pick_in_entry(&stoat.workspaces[active]));
     let Some((name, index, spec, typed)) = wanted else {
-        if let Some(palette) = stoat.command_palette.as_mut() {
-            palette.pick = None;
+        if let Some(dropped) = stoat
+            .command_palette
+            .as_mut()
+            .and_then(|palette| palette.pick.take())
+        {
+            dropped.preview.dispose(&mut stoat.workspaces[active]);
         }
         return;
     };
@@ -378,14 +382,13 @@ fn sync_pick(stoat: &mut Stoat) {
         user_command::run::spawn_shell_job(stoat, spec.list.clone(), move |result| {
             user_command::run::CommandEvent::PickList { generation, result }
         });
+        let executor = stoat.executor.clone();
+        let ws = &mut stoat.workspaces[active];
         if let Some(palette) = stoat.command_palette.as_mut() {
-            palette.pick = Some(PickState {
-                key,
-                spec,
-                generation,
-                load: PickLoad::Loading,
-                list: ArgList::default(),
-            });
+            let started = PickState::new(ws, executor, key, spec, generation);
+            if let Some(replaced) = palette.pick.replace(started) {
+                replaced.preview.dispose(ws);
+            }
         }
     }
     if let Some(pick) = stoat
@@ -395,6 +398,87 @@ fn sync_pick(stoat: &mut Stoat) {
     {
         pick.list.refilter(&typed);
     }
+    sync_pick_preview(stoat);
+}
+
+/// Show the preview of the pick list's selected row, or run it.
+///
+/// A list with rows and a preview template runs the preview line of its
+/// selected row on a worker. Each line runs once while the list lives, and a
+/// line whose text has landed shows it. The pane stays blank while the run is out,
+/// while the list loads or after it failed, and while no row is selected.
+///
+/// [`Stoat::drive_pumps`] calls this after the pumps too, because a frame's
+/// palette sync runs before them. A list that lands then starts its first
+/// preview, and a preview that lands shows, with no later frame.
+pub(crate) fn sync_pick_preview(stoat: &mut Stoat) {
+    let active = stoat.active_workspace;
+    let Some(pick) = stoat
+        .command_palette
+        .as_mut()
+        .and_then(|palette| palette.pick.as_mut())
+        .filter(|pick| pick.spec.preview.is_some())
+    else {
+        return;
+    };
+    let ws = &mut stoat.workspaces[active];
+    let selected = match pick.load {
+        PickLoad::Ready => pick.selected_preview_line().map(str::to_owned),
+        PickLoad::Loading | PickLoad::Failed(_) => None,
+    };
+    let Some(line) = selected else {
+        pick.preview.clear(ws);
+        return;
+    };
+
+    let text = match pick.previews.get(&line) {
+        Some(Some(text)) => text.clone(),
+        Some(None) => {
+            pick.preview.clear(ws);
+            return;
+        },
+        None => {
+            pick.previews.insert(line.clone(), None);
+            pick.preview.clear(ws);
+            let generation = pick.generation;
+            user_command::run::spawn_shell_job(stoat, line.clone(), move |result| {
+                user_command::run::CommandEvent::PickPreview {
+                    generation,
+                    line,
+                    result,
+                }
+            });
+            return;
+        },
+    };
+    let source = PreviewSource::Text(text);
+    pick.preview
+        .sync(ws, &*stoat.fs_host, &stoat.language_registry, source);
+}
+
+/// Run the list command of the palette's pick list again, as `Ctrl-r` asks.
+///
+/// The rows on show stay until the new ones land, and the Cmd Line reads
+/// `loading` meanwhile. The preview pane stays blank until then, and the
+/// preview texts clear, so each preview line runs again. With no pick list on
+/// show, nothing changes.
+pub(super) fn palette_refresh(stoat: &mut Stoat) -> UpdateEffect {
+    let Some(pick) = stoat
+        .command_palette
+        .as_mut()
+        .and_then(|palette| palette.pick.as_mut())
+    else {
+        return UpdateEffect::None;
+    };
+    let generation = crate::picker::next_generation();
+    pick.generation = generation;
+    pick.load = PickLoad::Loading;
+    pick.previews.clear();
+    let list = pick.spec.list.clone();
+    user_command::run::spawn_shell_job(stoat, list, move |result| {
+        user_command::run::CommandEvent::PickList { generation, result }
+    });
+    UpdateEffect::Redraw
 }
 
 /// Set the palette's argument ghost to the default of the user command's

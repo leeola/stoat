@@ -9,7 +9,7 @@ use crate::{
     input_view::InputView,
     keymap::ActionKeys,
     render::{
-        chrome::{ISLAND_BOTTOM, ISLAND_GAP, ISLAND_SIDE, ISLAND_TOP},
+        chrome::{PlateColors, ISLAND_BOTTOM, ISLAND_GAP, ISLAND_SIDE, ISLAND_TOP},
         cmd_line::{self, CmdLine, CmdStatus},
         paint::style_rgb,
         picker::{Footer, PathRows, RowMarks, RowStart, FOOTER_ROWS},
@@ -169,10 +169,42 @@ pub(crate) struct PaletteArgLayout {
 /// [`palette_footer_parts`] gives them.
 struct PaletteFooterParts {
     /// The key hints, each a bound key and the word for what it does. A word
-    /// that names the walk's needle is owned.
+    /// that names the walk's needle or a pick's line is owned.
     hints: Vec<(&'static str, Cow<'static, str>)>,
-    /// The note's spans, empty for a stage with no note.
-    note: Vec<(&'static str, Style)>,
+    /// The note's spans, empty for a stage with no note. A span that names a
+    /// pick's line is owned.
+    note: Vec<(Cow<'static, str>, Style)>,
+}
+
+impl PaletteFooterParts {
+    /// Paint the key line into `rect`, which
+    /// [`footer_rect`](crate::render::picker::footer_rect) gives, over the
+    /// plate of `plate`.
+    fn paint(
+        &self,
+        rect: Rect,
+        plate: Option<PlateColors>,
+        theme: &crate::theme::Theme,
+        buf: &mut Buffer,
+        scene: &mut stoat_widgets::ApcScene,
+    ) {
+        let hints: Vec<(&str, &str)> = self
+            .hints
+            .iter()
+            .map(|(key, word)| (*key, word.as_ref()))
+            .collect();
+        let note: Vec<(&str, Style)> = self
+            .note
+            .iter()
+            .map(|(text, style)| (text.as_ref(), *style))
+            .collect();
+        let parts = Footer {
+            hints: &hints,
+            note: &note,
+            ..Footer::default()
+        };
+        crate::render::picker::modal_footer(buf, rect, &parts, plate, theme, scene);
+    }
 }
 
 /// The stage of the palette whose keys its key line names.
@@ -191,6 +223,9 @@ enum KeyStage<'a> {
     Actions,
     /// History, with the needle of the walk that shows it.
     History { needle: &'a str },
+    /// A pick list, with the shell line that Enter runs and the line of the
+    /// config that declares the command.
+    Pick { enter: String, line: u32 },
 }
 
 /// One entry of History, a line of the palette history that the walk visits.
@@ -373,7 +408,7 @@ pub(crate) fn render_command_palette(
     palette.history_rows.clear();
 
     if palette.pick.is_some() {
-        render_palette_pick(palette, ws, home, theme, area, zoom, buf, scene);
+        render_palette_pick(palette, ws, home, theme, chrome, area, zoom, buf, scene);
         return;
     }
 
@@ -695,20 +730,26 @@ fn render_palette_free_arg(
 /// Render the list of a user command's `pick` argument, under a Cmd Line
 /// whose status counts the rows and names the list command.
 ///
-/// The list draws in the box of [`palette_filter_layout`], as History does. One
-/// Island covers the list rows, the doc rows, and the row between them.
+/// The list draws in the box of [`palette_filter_layout`], as History does,
+/// over the list rows, the doc rows, and the row between them. A list with a
+/// preview template splits that body as [`pick_body`] splits it. Its preview
+/// draws at Preview Scale beside the list, as the argument picker's preview
+/// draws.
+///
 /// [`paint_arg_rows`] paints the rows. A list command that failed shows its
 /// text on the first row in `ui.error`. The status reads as [`pick_status`]
-/// words it, in `ui.text.muted`.
+/// words it, in `ui.text.muted`. The list draws on the live grid with no pool,
+/// and its rows step one at a time.
 ///
-/// The list draws on the live grid with no pool, and its rows step one at a
-/// time. The key line names the keys of every argument list.
+/// The key line names the shell line that Enter runs and the refresh key, as
+/// [`palette_footer_parts`] words the pick stage.
 #[allow(clippy::too_many_arguments)]
 fn render_palette_pick(
     palette: &mut CommandPalette,
     ws: &mut Workspace,
     home: Option<&Path>,
     theme: &crate::theme::Theme,
+    chrome: &crate::render::editor::ResolvedChrome,
     area: Rect,
     zoom: i8,
     buf: &mut Buffer,
@@ -744,30 +785,78 @@ fn render_palette_pick(
         return;
     };
 
-    let body = layout.body();
+    let previews = palette
+        .pick
+        .as_ref()
+        .is_some_and(|pick| pick.spec.preview.is_some());
+    let (list, preview) = pick_body(&layout, previews);
     let plate = crate::render::chrome::plate_colors(theme, scene);
     if let Some(plate) = plate {
-        let edges = [ISLAND_TOP, ISLAND_SIDE, ISLAND_BOTTOM, ISLAND_SIDE];
-        crate::render::chrome::modal_island(body, edges, plate, theme, buf, scene);
+        crate::render::chrome::list_islands(list, preview, plate, theme, buf, scene);
     }
     if let Some(pick) = palette.pick.as_mut() {
-        pick.list.viewport_rows = Some(usize::from(body.height));
+        if let Some(preview_rect) = preview {
+            if plate.is_none() {
+                let separator = theme.get(crate::theme::scope::UI_BORDER_INACTIVE);
+                let x = list.x + list.width;
+                crate::render::chrome::vline(buf, x, list.y, list.height, separator, scene);
+            }
+            crate::render::picker::render_picker_preview(
+                &mut pick.preview,
+                preview_rect,
+                theme,
+                chrome,
+                ws,
+                buf,
+                scene,
+            );
+        }
+        pick.list.viewport_rows = Some(usize::from(list.height));
         match &pick.load {
             PickLoad::Failed(text) => {
                 let error = theme.get(crate::theme::scope::UI_ERROR);
-                write_str_clipped(buf, body.x + 1, body.y, text, error, body.right());
+                write_str_clipped(buf, list.x + 1, list.y, text, error, list.right());
             },
             PickLoad::Loading | PickLoad::Ready => {
-                paint_arg_rows(&pick.list, body, theme, true, buf, scene);
+                paint_arg_rows(&pick.list, list, theme, true, buf, scene);
             },
         }
     }
 
-    let parts = Footer {
-        hints: &PALETTE_HINTS,
-        ..Footer::default()
+    let line = match palette.command.as_ref() {
+        Some(PaletteCommand::User(command)) => command.line,
+        _ => 0,
     };
-    crate::render::picker::modal_footer(buf, layout.footer, &parts, plate, theme, scene);
+    let enter = palette.enter_line(ws).unwrap_or_else(|| "run".to_owned());
+    palette_footer_parts(KeyStage::Pick { enter, line }, theme).paint(
+        layout.footer,
+        plate,
+        theme,
+        buf,
+        scene,
+    );
+}
+
+/// The list rect and the preview rect of a pick list in `layout`.
+///
+/// A list with `previews` splits the body as the argument picker splits its
+/// body. The preview stands right of the list when the body is wide enough,
+/// and the list takes the whole body otherwise. The paint and the hit test
+/// both read the rects here.
+pub(crate) fn pick_body(layout: &PaletteFilterLayout, previews: bool) -> (Rect, Option<Rect>) {
+    let body = layout.body();
+    match previews {
+        true => crate::render::picker::split_list_preview(
+            body.x,
+            body.y,
+            body.width,
+            body.height,
+            50,
+            20,
+            crate::render::picker::DEFAULT_LIST_SHARE,
+        ),
+        false => (body, None),
+    }
 }
 
 /// The Cmd Line status of `pick`, the list of the argument named `name`.
@@ -965,17 +1054,7 @@ fn render_palette_history(
     );
 
     let stage = palette_footer_parts(KeyStage::History { needle }, theme);
-    let hints: Vec<(&str, &str)> = stage
-        .hints
-        .iter()
-        .map(|(key, word)| (*key, word.as_ref()))
-        .collect();
-    let parts = Footer {
-        hints: &hints,
-        note: &stage.note,
-        ..Footer::default()
-    };
-    crate::render::picker::modal_footer(buf, layout.footer, &parts, plate, theme, scene);
+    stage.paint(layout.footer, plate, theme, buf, scene);
 }
 
 /// Paint History's `entries`, newest first, into `area`, with the entry at
@@ -1523,17 +1602,7 @@ fn render_palette_filter(
         Namespace::Actions => KeyStage::Actions,
     };
     let stage = palette_footer_parts(key_stage, theme);
-    let hints: Vec<(&str, &str)> = stage
-        .hints
-        .iter()
-        .map(|(key, word)| (*key, word.as_ref()))
-        .collect();
-    let parts = Footer {
-        hints: &hints,
-        note: &stage.note,
-        ..Footer::default()
-    };
-    crate::render::picker::modal_footer(buf, layout.footer, &parts, plate, theme, scene);
+    stage.paint(layout.footer, plate, theme, buf, scene);
 }
 
 /// The key hints and the note of the palette's key line in `stage`.
@@ -1549,6 +1618,11 @@ fn render_palette_filter(
 /// History names its walk, run, edit, and back keys. With a needle that holds
 /// a word, it names the matches and the needle that `Esc` restores. Neither
 /// has a note.
+///
+/// A pick list names the shell line that Enter runs and its refresh key. Its
+/// note names where the command comes from, `config` in the foreground of
+/// `ui.cmd.source.config`, then ` command`, a space, U+00B7, a space, and
+/// `config.stcfg:<line>` in `ui.text.muted`.
 fn palette_footer_parts(stage: KeyStage<'_>, theme: &crate::theme::Theme) -> PaletteFooterParts {
     let hint = |key, word: &'static str| (key, Cow::Borrowed(word));
     match stage {
@@ -1572,9 +1646,9 @@ fn palette_footer_parts(stage: KeyStage<'_>, theme: &crate::theme::Theme) -> Pal
             PaletteFooterParts {
                 hints,
                 note: vec![
-                    ("root = commands \u{b7} ", muted),
-                    (":action", key),
-                    (" = internals", muted),
+                    (Cow::Borrowed("root = commands \u{b7} "), muted),
+                    (Cow::Borrowed(":action"), key),
+                    (Cow::Borrowed(" = internals"), muted),
                 ],
             }
         },
@@ -1604,6 +1678,23 @@ fn palette_footer_parts(stage: KeyStage<'_>, theme: &crate::theme::Theme) -> Pal
             PaletteFooterParts {
                 hints,
                 note: Vec::new(),
+            }
+        },
+        KeyStage::Pick { enter, line } => {
+            let muted = theme.get(crate::theme::scope::UI_TEXT_MUTED);
+            let config = theme
+                .try_get(crate::theme::scope::UI_CMD_SOURCE_CONFIG)
+                .and_then(|style| style.fg)
+                .map_or(muted, |fg| muted.fg(fg));
+            PaletteFooterParts {
+                hints: vec![("Enter", Cow::Owned(enter)), hint("C-r", "refresh list")],
+                note: vec![
+                    (Cow::Borrowed("config"), config),
+                    (
+                        Cow::Owned(format!(" command \u{b7} config.stcfg:{line}")),
+                        muted,
+                    ),
+                ],
             }
         },
     }
@@ -2270,6 +2361,7 @@ mod tests {
         },
         input_history,
         keymap::ActionKeys,
+        picker::Preview,
         render::editor::ResolvedChrome,
         test_fixture::{plate_islands, row_rules},
         theme::Theme,
@@ -2280,7 +2372,7 @@ mod tests {
         layout::Rect,
         style::{Color, Modifier, Style},
     };
-    use std::sync::Arc;
+    use std::{collections::HashMap, sync::Arc};
     use stoat_action::registry;
     use stoat_config::Template;
     use stoatty_protocol::command::{decode_stream, BarCommand, Command, TextRunCommand};
@@ -3648,10 +3740,14 @@ mod tests {
                 list: "gh pr list --json number".to_owned(),
                 show: Template::parse("{line}"),
                 value: Template::parse("{line}"),
+                preview: None,
             }),
             generation: 0,
             load,
             list: ArgList::default(),
+            preview: Preview::test_dummy(),
+            preview_lines: Vec::new(),
+            previews: HashMap::new(),
         };
         let mut one = state(PickLoad::Ready);
         one.list.set_rows(vec![ArgRow {

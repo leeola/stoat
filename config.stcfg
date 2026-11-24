@@ -1866,6 +1866,11 @@ on key {
         Tab -> PickerComplete();
         BackTab -> PaletteScopeToggle();
     }
+    # A pick list runs its list command again on Ctrl-r. Every other palette
+    # stage keeps Ctrl-r for the register insert of insert mode.
+    modal == palette && mode == insert && scope == pick {
+        Ctrl-r -> PaletteRefresh();
+    }
     modal == isearch && mode == insert {
         Alt-Up -> PromptHistoryPrev();
         Alt-Down -> PromptHistoryNext();

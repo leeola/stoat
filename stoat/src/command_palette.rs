@@ -7,14 +7,14 @@ use crate::{
     keymap::ActionKeys,
     pane::{FocusTarget, View},
     paths,
-    picker::{self, PathPicker, PendingScan, PreviewPolicy, ScanTarget},
+    picker::{self, PathPicker, PendingScan, Preview, PreviewPolicy, ScanTarget},
     rebase::RebasePause,
-    user_command::{ArgKind, CommandArg, CommandSet, PickSpec, TextDefault, UserCommand},
+    user_command::{run, ArgKind, CommandArg, CommandSet, PickSpec, TextDefault, UserCommand},
     workspace::Workspace,
 };
 use ratatui::layout::Rect;
 use std::{
-    collections::hash_map::DefaultHasher,
+    collections::{hash_map::DefaultHasher, HashMap},
     hash::{Hash, Hasher},
     iter,
     path::{Path, PathBuf},
@@ -243,15 +243,22 @@ pub(crate) struct ArgList {
 }
 
 impl ArgList {
-    /// Replace the rows, with no match and the selection on the first row
-    /// until the next [`Self::refilter`].
+    /// Replace the rows, ranked against the query of the last
+    /// [`Self::refilter`], with the selection on the best row.
+    ///
+    /// Rows that land from a worker rank at once. The frame that paints them
+    /// and the sync of the selected row's preview then see the matches. A list
+    /// with no refilter yet shows no match until its first.
     pub(crate) fn set_rows(&mut self, rows: Vec<ArgRow>) {
+        let query = self.query.take();
         self.rows = rows;
         self.filtered.clear();
         self.match_indices.clear();
         self.selected = 0;
         self.pattern = None;
-        self.query = None;
+        if let Some(query) = query {
+            self.refilter(&query);
+        }
     }
 
     /// Rank the rows by their labels against `query`, and select the best.
@@ -333,6 +340,47 @@ pub(crate) struct PickState {
     pub(crate) generation: u64,
     pub(crate) load: PickLoad,
     pub(crate) list: ArgList,
+    /// The pane that shows the preview of the selected row. Its scratch
+    /// editor lives as long as the state, which disposes it when it drops.
+    pub(crate) preview: Preview,
+    /// The shell line of each row's preview, in the order of
+    /// [`ArgList::rows`], or no line for a spec with no preview.
+    pub(crate) preview_lines: Vec<String>,
+    /// The text of each preview line that ran, `None` while its run is out.
+    ///
+    /// A line runs once while the list lives, and a refresh of the list
+    /// clears the texts.
+    pub(crate) previews: HashMap<String, Option<Arc<str>>>,
+}
+
+impl PickState {
+    /// A state for the list of `spec`, the argument at `key`, whose run of
+    /// `generation` is out.
+    pub(crate) fn new(
+        ws: &mut Workspace,
+        executor: Executor,
+        key: (String, usize),
+        spec: Arc<PickSpec>,
+        generation: u64,
+    ) -> Self {
+        Self {
+            key,
+            spec,
+            generation,
+            load: PickLoad::Loading,
+            list: ArgList::default(),
+            preview: Preview::new(ws, executor),
+            preview_lines: Vec::new(),
+            previews: HashMap::new(),
+        }
+    }
+
+    /// The preview line of the selected row, or `None` with no row selected or
+    /// no preview.
+    pub(crate) fn selected_preview_line(&self) -> Option<&str> {
+        let row = *self.list.filtered.get(self.list.selected)?;
+        self.preview_lines.get(row).map(String::as_str)
+    }
 }
 
 /// Where the run of a pick list's command stands.
@@ -1171,12 +1219,15 @@ impl CommandPalette {
 
     /// Tear down the editor slots owned by the palette. Called on any palette
     /// close path (`CancelPromptInput`, `Ctrl-C`, or post-`Dispatch` cleanup)
-    /// so neither the input scratch nor the inline picker's preview lingers in
-    /// the workspace's slotmaps.
+    /// so no input scratch and no preview of an inline picker or a pick list
+    /// lingers in the workspace's slotmaps.
     pub(crate) fn dispose(&self, ws: &mut Workspace) {
         self.input.dispose(ws);
         if let Some(picker) = &self.arg_picker {
             picker.dispose(ws);
+        }
+        if let Some(pick) = &self.pick {
+            pick.preview.dispose(ws);
         }
     }
 
@@ -1583,12 +1634,43 @@ impl CommandPalette {
         command: Arc<UserCommand>,
         tail: &str,
     ) -> PaletteOutcome {
+        let Some(values) = self.enter_values(ws, &command, tail) else {
+            tracing::warn!(
+                target: "stoat::command",
+                command = %command.name,
+                tail = %tail,
+                "command arguments rejected"
+            );
+            return PaletteOutcome::None;
+        };
+
+        self.input.dispose(ws);
+        let line = iter::once(command.name.as_str())
+            .chain(values.iter().map(String::as_str))
+            .filter(|word| !word.is_empty())
+            .collect::<Vec<_>>()
+            .join(" ");
+        PaletteOutcome::Run(command, values, line)
+    }
+
+    /// The values that Enter runs `command` with for the typed `tail`, one for
+    /// each argument, or `None` while an argument with no default has none.
+    ///
+    /// The tail gives the typed values, and the argument list gives the value
+    /// of the argument in entry, as [`Self::picked_user_value`] takes it. An
+    /// argument with a default stays empty.
+    fn enter_values(
+        &mut self,
+        ws: &Workspace,
+        command: &UserCommand,
+        tail: &str,
+    ) -> Option<Vec<String>> {
         let count = command.args.len();
         let mut values: Vec<String> = split_user_args(tail, count)
             .into_iter()
             .map(str::to_owned)
             .collect();
-        if let Some(picked) = self.picked_user_value(ws, &command, tail) {
+        if let Some(picked) = self.picked_user_value(ws, command, tail) {
             match values.get_mut(user_arg_index(tail, count)) {
                 Some(value) => *value = picked,
                 None => values.push(picked),
@@ -1598,23 +1680,26 @@ impl CommandPalette {
             .iter()
             .any(|arg| !arg.optional())
         {
-            tracing::warn!(
-                target: "stoat::command",
-                command = %command.name,
-                tail = %tail,
-                "command arguments rejected"
-            );
-            return PaletteOutcome::None;
+            return None;
         }
         values.resize(count, String::new());
+        Some(values)
+    }
 
-        self.input.dispose(ws);
-        let line = iter::once(command.name.as_str())
-            .chain(values.iter().map(String::as_str))
-            .filter(|word| !word.is_empty())
-            .collect::<Vec<_>>()
-            .join(" ");
-        PaletteOutcome::Run(command, values, line)
+    /// The shell line that Enter runs for the input, or `None` for an input
+    /// that runs no shell line.
+    ///
+    /// The key line of a pick list names it. The line reads the values of
+    /// [`Self::enter_values`], as the run reads them. A `file` or `dir` value
+    /// keeps its leading `~/`, which only the run expands.
+    pub(crate) fn enter_line(&mut self, ws: &Workspace) -> Option<String> {
+        let PaletteCommand::User(command) = self.command.clone()? else {
+            return None;
+        };
+        let text = self.input.text(ws);
+        let (_, _, tail) = split_head(&text, &self.availability, &self.commands)?;
+        let values = self.enter_values(ws, &command, tail)?;
+        run::run_line_preview(&command, &values)
     }
 
     /// The value that the argument list gives the argument of `command` that
@@ -2395,11 +2480,12 @@ fn rank_entries(
 mod tests {
     use super::*;
     use crate::{
+        app::UpdateEffect,
         badge::BadgeSource,
         buffer_registry::AutoReloadMode,
         host::{FakeFsOp, ShellOutput},
         input_history::InputHistory,
-        picker::PREVIEW_DIR_LIMIT,
+        picker::{PreviewSource, PREVIEW_BYTE_LIMIT, PREVIEW_DIR_LIMIT},
         test_harness::{editor, TestHarness},
     };
     use crossterm::event::Event;
@@ -3534,8 +3620,16 @@ mod tests {
     }
 
     /// The user command `pr`, whose argument picks a pull request from the
-    /// rows of `gh pr list`.
+    /// rows of `gh pr list`, with no preview, so the fake shell runs only the
+    /// list command and the checkout.
     const PR: &str = concat!(
+        "command pr { arg pr = pick(\"gh pr list --json number,title,headRefName,state\", ",
+        "show: \"#{number} {title}\", value: \"{number}\"); ",
+        "run = shell(\"gh pr checkout {pr}\"); output = notify; }",
+    );
+
+    /// [`PR`] as the board declares it, with the preview of each row.
+    const PR_PREVIEW: &str = concat!(
         "command pr { arg pr = pick(\"gh pr list --json number,title,headRefName,state\", ",
         "show: \"#{number} {title}\", value: \"{number}\", preview: \"gh pr view {number}\"); ",
         "run = shell(\"gh pr checkout {pr}\"); output = notify; }",
@@ -3547,8 +3641,14 @@ mod tests {
     /// A harness with [`PR`] loaded, whose fake shell answers the list command
     /// with `output`.
     fn pr_harness(output: ShellOutput) -> TestHarness {
+        pick_harness(PR, output)
+    }
+
+    /// A harness with the user config `source` loaded, whose fake shell
+    /// answers the list command of [`PR`] with `output`.
+    fn pick_harness(source: &str, output: ShellOutput) -> TestHarness {
         let mut h = TestHarness::with_size(120, 30);
-        h.stoat.reload_user_config(PR);
+        h.stoat.reload_user_config(source);
         h.fake_shell.set_response(PR_LIST, output);
         h
     }
@@ -3799,6 +3899,332 @@ mod tests {
         assert_eq!(
             (text.contains("row 01"), text.contains("row 20")),
             (true, true)
+        );
+    }
+
+    /// A fake shell answer of `stdout`, exit 0.
+    fn stdout(text: &str) -> ShellOutput {
+        ShellOutput {
+            stdout: text.as_bytes().to_vec(),
+            stderr: Vec::new(),
+            exit_code: 0,
+        }
+    }
+
+    /// A harness over the board's `pr` command with its preview, whose fake
+    /// shell answers the previews of the first two pull requests.
+    fn preview_harness() -> TestHarness {
+        let h = pick_harness(PR_PREVIEW, three_prs());
+        h.fake_shell
+            .set_response("gh pr view 412", stdout("the status row\n"));
+        h.fake_shell
+            .set_response("gh pr view 409", stdout("the parser fix\n"));
+        h
+    }
+
+    /// Whether the pick list's preview pane shows `text`.
+    fn previews(h: &TestHarness, text: &str) -> bool {
+        pick(h).preview.source() == Some(&PreviewSource::Text(Arc::from(text)))
+    }
+
+    /// The selected row's preview runs once, and its stdout shows in the pane.
+    /// A step down runs the second row's preview, and a step back up runs
+    /// nothing and shows the first text again.
+    ///
+    /// Each text shows once the pumps settle, with no frame after its land, as
+    /// the binary shows it with no key to start a frame.
+    #[test]
+    fn the_selected_row_s_preview_runs_once_and_shows_its_stdout() {
+        let mut h = preview_harness();
+        h.type_text(":pr ");
+        h.settle();
+        let first = previews(&h, "the status row\n");
+        h.type_keys("down");
+        let second = previews(&h, "the parser fix\n");
+        h.type_keys("up");
+        assert_eq!(
+            (
+                first,
+                second,
+                previews(&h, "the status row\n"),
+                shell_lines(&h)
+            ),
+            (
+                true,
+                true,
+                true,
+                vec![
+                    PR_LIST.to_owned(),
+                    "gh pr view 412".to_owned(),
+                    "gh pr view 409".to_owned()
+                ]
+            ),
+        );
+    }
+
+    #[test]
+    fn a_failed_preview_shows_its_stderr_line() {
+        let mut h = pick_harness(PR_PREVIEW, three_prs());
+        h.fake_shell.set_response(
+            "gh pr view 412",
+            ShellOutput {
+                stdout: Vec::new(),
+                stderr: b"\nno pull request\n".to_vec(),
+                exit_code: 1,
+            },
+        );
+        h.type_text(":pr ");
+        h.settle();
+        assert_eq!(
+            pick(&h).preview.source(),
+            Some(&PreviewSource::Text(Arc::from("no pull request")))
+        );
+    }
+
+    /// A refresh whose list command fails blanks the preview, so no row's text
+    /// stands beside the failure.
+    #[test]
+    fn a_failed_refresh_blanks_the_preview() {
+        let mut h = preview_harness();
+        h.type_text(":pr ");
+        h.settle();
+        let shown = previews(&h, "the status row\n");
+        h.fake_shell.set_response(
+            PR_LIST,
+            ShellOutput {
+                stdout: Vec::new(),
+                stderr: b"gh: offline\n".to_vec(),
+                exit_code: 1,
+            },
+        );
+        h.type_keys("ctrl-r");
+        h.settle();
+        assert_eq!(
+            (shown, pick(&h).load.clone(), pick(&h).preview.source()),
+            (true, PickLoad::Failed("gh: offline".to_owned()), None),
+        );
+    }
+
+    /// Rows that replace a ranked list rank against its query at once, with
+    /// the selection on the best row.
+    #[test]
+    fn set_rows_ranks_the_rows_against_the_last_query() {
+        let row = |label: &str| ArgRow {
+            label: label.to_owned(),
+            insert: label.to_owned(),
+        };
+        let mut list = ArgList::default();
+        list.refilter("bet");
+        list.set_rows(vec![row("alpha"), row("beta")]);
+        assert_eq!(
+            (list.filtered.clone(), list.selected_row()),
+            (vec![1], Some(&row("beta")))
+        );
+    }
+
+    /// A pick list with no preview template keeps the whole body for its rows,
+    /// so a long label shows whole. A list with a preview clips the label at
+    /// its edge, left of the preview.
+    #[test]
+    fn a_pick_with_no_preview_keeps_the_full_width_list() {
+        let shows_whole = |source| {
+            let mut h = pick_harness(source, three_prs());
+            type_settled(&mut h, ":pr ");
+            h.rendered_text()
+                .contains("#412 Ermine: diff status row and minimap islands")
+        };
+        assert_eq!([shows_whole(PR), shows_whole(PR_PREVIEW)], [true, false]);
+    }
+
+    /// `Ctrl-r` runs the list command again, and the list reads `loading`
+    /// until the rows land. The preview blanks meanwhile and runs no line. The
+    /// preview texts clear, so the selected row's preview runs again.
+    ///
+    /// The first refresh comes while the first preview runs. That text belongs
+    /// to the list before the refresh, so it lands nowhere, and the preview
+    /// runs again.
+    ///
+    /// The second refresh dispatches, and one frame follows with no scheduler
+    /// run. The harness's keys land the fake shell's rows before the load is
+    /// read. The key then runs the refresh a third time.
+    #[test]
+    fn ctrl_r_runs_the_list_command_again_and_clears_the_previews() {
+        let mut h = preview_harness();
+        h.type_text(":pr ");
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::PaletteRefresh);
+        h.settle();
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::PaletteRefresh);
+        h.stoat.drive_background();
+        let loading = (
+            pick(&h).load.clone(),
+            pick(&h).previews.is_empty(),
+            pick(&h).preview.source().is_none(),
+        );
+        h.settle();
+        h.type_keys("ctrl-r");
+        h.settle();
+        let run = [PR_LIST.to_owned(), "gh pr view 412".to_owned()];
+        assert_eq!(
+            (loading, shell_lines(&h), previews(&h, "the status row\n")),
+            ((PickLoad::Loading, true, true), vec![run; 4].concat(), true),
+        );
+    }
+
+    /// With no pick list on show, the refresh changes nothing and asks for no
+    /// frame.
+    #[test]
+    fn the_refresh_without_a_pick_list_does_nothing() {
+        let mut h = pick_harness(PR, three_prs());
+        type_settled(&mut h, ":pr");
+        let effect = crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::PaletteRefresh);
+        type_settled(&mut h, "");
+        assert_eq!(
+            (effect, shell_lines(&h)),
+            (UpdateEffect::None, Vec::<String>::new())
+        );
+    }
+
+    /// The key line names the shell line that Enter runs and the refresh key.
+    /// Its note names the config line that declares the command, with
+    /// `config` in the foreground of `ui.cmd.source.config`.
+    #[test]
+    fn the_key_line_names_the_line_enter_runs() {
+        let mut h = TestHarness::with_size(160, 50);
+        h.stoat.reload_user_config(PR);
+        h.fake_shell.set_response(PR_LIST, three_prs());
+        type_settled(&mut h, ":pr ");
+        let (text, colors) = key_line(&h);
+        let line = text.trim_end();
+        let note = "config command \u{b7} config.stcfg:1";
+        let at = line.chars().count() - note.chars().count();
+        let config = h
+            .stoat
+            .theme
+            .get(crate::theme::scope::UI_CMD_SOURCE_CONFIG)
+            .fg;
+        assert_eq!(
+            (
+                line.contains("Enter gh pr checkout 412  C-r refresh list"),
+                line.ends_with(note),
+                colors[at..at + "config".len()]
+                    .iter()
+                    .map(|&color| Some(color))
+                    .collect::<Vec<_>>(),
+            ),
+            (true, true, vec![config; 6]),
+            "the key line reads {text:?}",
+        );
+    }
+
+    /// The pick list's preview pane goes with its list. That holds when the
+    /// argument leaves entry, when another pick list takes its place, and when
+    /// the palette closes over the list.
+    #[test]
+    fn a_pick_preview_buffer_goes_with_its_list() {
+        let source =
+            format!("{PR}\ncommand peek {{ arg f = pick(\"ls\"); run = shell(\"cat {{f}}\"); }}");
+        let mut h = pick_harness(&source, three_prs());
+        type_settled(&mut h, ":pr ");
+        let left = pick(&h).preview.buffer;
+        h.type_keys("backspace");
+        let _ = h.snapshot();
+        type_settled(&mut h, " ");
+        let replaced = pick(&h).preview.buffer;
+        let active = h.stoat.active_workspace;
+        let palette = h.stoat.command_palette.as_ref().expect("palette open");
+        palette
+            .input
+            .replace_text(&mut h.stoat.workspaces[active], "peek ");
+        let _ = h.snapshot();
+        let closed = pick(&h).preview.buffer;
+        h.type_keys("escape");
+        let buffers = &h.stoat.active_workspace().buffers;
+        assert_eq!(
+            [left, replaced, closed].map(|id| buffers.get(id).is_none()),
+            [true; 3],
+        );
+    }
+
+    /// `C-d` scrolls the pick list's preview by half its rows, as it scrolls
+    /// every modal preview.
+    #[test]
+    fn ctrl_d_scrolls_the_pick_preview_by_half_its_rows() {
+        let mut h = pick_harness(PR_PREVIEW, three_prs());
+        let long: String = (0..80).map(|i| format!("line {i}\n")).collect();
+        h.fake_shell.set_response("gh pr view 412", stdout(&long));
+        h.type_text(":pr ");
+        h.settle();
+        let rows = crate::mouse::modal_preview_rows(&h.stoat).expect("the pick preview pane");
+        h.type_keys("ctrl-d");
+        let editors = &h.stoat.active_workspace().editors;
+        let scrolled = editors.get(pick(&h).preview.editor).map(|e| e.scroll_row);
+        assert_eq!(scrolled, Some((rows / 2).max(1) as u32));
+    }
+
+    /// A preview shows its stdout cut at the byte limit of every preview.
+    #[test]
+    fn a_long_preview_is_cut_at_the_byte_limit() {
+        let mut h = pick_harness(PR_PREVIEW, three_prs());
+        let long = "x".repeat(PREVIEW_BYTE_LIMIT + 1);
+        h.fake_shell.set_response("gh pr view 412", stdout(&long));
+        h.type_text(":pr ");
+        h.settle();
+        let shown = match pick(&h).preview.source() {
+            Some(PreviewSource::Text(text)) => Some(text.len()),
+            _ => None,
+        };
+        assert_eq!(shown, Some(PREVIEW_BYTE_LIMIT));
+    }
+
+    /// The preview paints the selected row's text in its rect, past a
+    /// separator column at the list's right edge.
+    #[test]
+    fn the_pick_preview_paints_past_a_separator() {
+        let mut h = preview_harness();
+        h.type_text(":pr ");
+        h.settle();
+        let _ = h.snapshot();
+        let (rows, zoom, header_rows) = crate::test_fixture::palette_sizing(&h);
+        let layout = crate::render::command_palette::palette_filter_layout(
+            h.stoat.size(),
+            rows,
+            zoom,
+            header_rows,
+        )
+        .expect("the palette fits the test terminal");
+        let (list, preview) = crate::render::command_palette::pick_body(&layout, true);
+        let preview = preview.expect("the body holds a preview");
+
+        let buf = h.rendered_buffer();
+        let separator: String = (list.y..list.bottom())
+            .map(|y| buf[(list.right(), y)].symbol())
+            .collect();
+        let first_row: String = (preview.x..preview.right())
+            .map(|x| buf[(x, preview.y)].symbol())
+            .collect();
+        assert_eq!(
+            (separator, first_row.trim_end()),
+            (
+                "\u{2502}".repeat(usize::from(list.height)),
+                "the status row"
+            ),
+        );
+    }
+
+    /// A pick list whose command runs an action names `run` for Enter,
+    /// because an action has no shell line to show.
+    #[test]
+    fn the_key_line_names_run_for_an_action_step() {
+        let source = concat!(
+            "command pr { arg pr = pick(\"gh pr list --json number,title,headRefName,state\"); ",
+            "run = Notify(\"{pr}\"); }",
+        );
+        let mut h = pick_harness(source, three_prs());
+        type_settled(&mut h, ":pr ");
+        let (text, _) = key_line(&h);
+        assert!(
+            text.contains("Enter run  C-r refresh list"),
+            "the key line reads {text:?}"
         );
     }
 

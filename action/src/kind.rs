@@ -531,6 +531,7 @@ action_kinds! {
     PromptHistoryNext,
     PaletteScopeToggle,
     PaletteUp,
+    PaletteRefresh,
     RunHistoryPrev,
     RunHistoryNext,
     HelpScopeToggle,

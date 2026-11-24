@@ -104,7 +104,7 @@ use crate::{
             OpenDiagnosticsPicker, OpenSymbolPicker, OpenWorkspaceDiagnosticsPicker,
             OpenWorkspaceSymbolPicker, ReflowComment, RenameSymbol,
         },
-        palette::OpenCommandPalette,
+        palette::{OpenCommandPalette, PaletteRefresh},
         pane::{
             CloseOtherPanes, ClosePane, DetachPane, FocusDown, FocusLeft, FocusNext, FocusPane,
             FocusPrev, FocusRight, FocusUp, MovePaneDown, MovePaneLeft, MovePaneNext, MovePanePrev,
@@ -352,6 +352,7 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
     add(OpenCommandPalette::DEF, |_| {
         Ok(Box::new(OpenCommandPalette))
     });
+    add(PaletteRefresh::DEF, |_| Ok(Box::new(PaletteRefresh)));
     add(OpenFileFinder::DEF, |_| Ok(Box::new(OpenFileFinder)));
     add(OpenFileFinderHSplit::DEF, |_| {
         Ok(Box::new(OpenFileFinderHSplit))
@@ -1434,6 +1435,7 @@ mod tests {
         "CloseOtherPanes",
         "TogglePaneWiden",
         "OpenCommandPalette",
+        "PaletteRefresh",
         "OpenFileFinder",
         "OpenFileFinderHSplit",
         "OpenFileFinderVSplit",
@@ -2385,7 +2387,8 @@ mod tests {
         // + 1 ForceCloseBuffer.
         // + 2 CloseOtherBuffers/ForceCloseOtherBuffers.
         // + 1 Notify.
-        assert_eq!(all().count(), 519);
+        // + 1 PaletteRefresh.
+        assert_eq!(all().count(), 520);
     }
 
     #[test]

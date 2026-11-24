@@ -10118,6 +10118,7 @@ impl Stoat {
         let completion_resolve = action_handlers::completion::pump_completion_resolve(self);
         let completion_accept = crate::completion::accept::pump_completion_accept(self);
         let user_commands = crate::user_command::run::pump(self);
+        action_handlers::sync_pick_preview(self);
 
         external
             || commits

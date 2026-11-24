@@ -1460,6 +1460,42 @@ fn the_root_list_ends_in_the_action_row_under_a_rule() {
     );
 }
 
+/// A pick list marks its selected row with the tab wash.
+///
+/// The `demo` list holds two rows, so the palette box is the 128 by 22 cells
+/// from cell (16, 14). The list starts on cell row 17, the pixel rows 306 to
+/// 323, where the selected first row reads the tab wash. The second row, on
+/// the pixel rows 324 to 341, reads the base.
+///
+/// The config file holds two backslashes before each `n`, and the config
+/// reader turns them into one, so `printf` prints the two rows.
+#[test]
+// The scratch config is this test's own disk state, set up before the child runs.
+#[allow(clippy::disallowed_methods)]
+fn the_pick_list_marks_its_selected_row() {
+    let mut home = support::scratch_home();
+    std::fs::write(
+        home.path().join("config/stoat/config.stcfg"),
+        concat!(
+            "on init {\n    direnv.load = false;\n}\n",
+            r#"command demo { arg item = pick("printf 'alpha\\nbeta\\n'"); "#,
+            r#"run = shell("true"); output = notify; }"#,
+            "\n",
+        ),
+    )
+    .expect("the scratch stoat config");
+    let shot = palette_frame(home.path(), ":demo<Space><Wait:500><Settle>");
+
+    expect_region(
+        &shot,
+        &mut home,
+        (500, 315, 1, 1),
+        TAB_WASH,
+        "pick_selected_row",
+    );
+    expect_region(&shot, &mut home, (500, 333, 1, 1), BASE, "pick_second_row");
+}
+
 /// The `action` list draws each PascalCase name bold in the info color, and
 /// no row ends in a Source Tag.
 ///

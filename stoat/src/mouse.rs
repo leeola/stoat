@@ -400,11 +400,16 @@ pub(crate) fn modal_preview_pane(stoat: &Stoat) -> Option<&Preview> {
             .map(|f| &f.active_core_ref().preview),
         ActiveModal::CodeSearch => stoat.code_search.as_ref().map(|f| &f.preview),
         ActiveModal::SymbolFinder => stoat.symbol_finder.as_ref().map(|f| &f.preview),
-        ActiveModal::Palette => stoat
-            .command_palette
-            .as_ref()
-            .and_then(|p| p.arg_picker.as_ref())
-            .map(|p| &p.active_core_ref().preview),
+        ActiveModal::Palette => {
+            let palette = stoat.command_palette.as_ref()?;
+            match palette.pick.as_ref() {
+                Some(pick) => Some(&pick.preview),
+                None => palette
+                    .arg_picker
+                    .as_ref()
+                    .map(|picker| &picker.active_core_ref().preview),
+            }
+        },
         ActiveModal::Location => stoat.location_picker.as_ref().map(|p| &p.preview),
         ActiveModal::Diagnostics => stoat.diagnostics_picker.as_ref().map(|p| &p.picker.preview),
         ActiveModal::Jumplist => stoat.jumplist_picker.as_ref().map(|p| &p.picker.preview),
@@ -523,9 +528,11 @@ pub(crate) fn boxed_modal_surfaces(stoat: &Stoat) -> Option<ModalSurfaces> {
                     zoom,
                     palette.header_rows,
                 )?;
+                let (list, preview) =
+                    crate::render::command_palette::pick_body(&layout, pick.spec.preview.is_some());
                 return Some(ModalSurfaces {
-                    list: layout.body(),
-                    preview: None,
+                    list,
+                    preview,
                     len: pick.list.filtered.len(),
                     selected: pick.list.selected,
                     rows: ListRows::OnePerResult,
