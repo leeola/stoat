@@ -2158,8 +2158,9 @@ fn name_segments(
 ///
 /// An alert takes `ui.message.error`. It falls back to red when the theme
 /// leaves that scope undefined, so the message never blends into the bar. An
-/// info message takes `ui.message.info`, and the alert style when the theme
-/// leaves that scope undefined.
+/// info message takes `ui.message.info`, and a success message takes
+/// `ui.message.success`. Each takes the alert style when the theme leaves its
+/// scope undefined.
 ///
 /// That fallback is an RGB red rather than a named one because
 /// [`render_status_segments`] drops the whole bar to the cell fallback on any
@@ -2170,10 +2171,13 @@ fn status_message_style(
     kind: MessageKind,
     theme: &crate::theme::Theme,
 ) -> Style {
-    if kind == MessageKind::Info
-        && let Some(info) = theme.try_get(crate::theme::scope::UI_MESSAGE_INFO)
-    {
-        return base_style.patch(info);
+    let scope = match kind {
+        MessageKind::Alert => None,
+        MessageKind::Info => Some(crate::theme::scope::UI_MESSAGE_INFO),
+        MessageKind::Success => Some(crate::theme::scope::UI_MESSAGE_SUCCESS),
+    };
+    if let Some(style) = scope.and_then(|scope| theme.try_get(scope)) {
+        return base_style.patch(style);
     }
     base_style.patch(
         theme
@@ -4447,19 +4451,27 @@ mod tests {
             let (config, _) = stoat_config::parse(source);
             let config = config.expect("the theme parses");
             let theme = crate::theme::Theme::from_config(&config, "t").expect("the theme loads");
-            [MessageKind::Alert, MessageKind::Info]
+            [MessageKind::Alert, MessageKind::Info, MessageKind::Success]
                 .map(|kind| status_message_style(Style::default(), kind, &theme).fg)
         };
         let red = Some(Color::Rgb(0xff, 0, 0));
 
         assert_eq!(
             [
-                foregrounds(
-                    r##"theme t { ui.message.error.fg = "#ff0000"; ui.message.info.fg = "#00ff00"; }"##
-                ),
+                foregrounds(concat!(
+                    r##"theme t { ui.message.error.fg = "#ff0000"; ui.message.info.fg = "#00ff00"; "##,
+                    r##"ui.message.success.fg = "#0000ff"; }"##,
+                )),
                 foregrounds(r##"theme t { ui.message.error.fg = "#ff0000"; }"##),
             ],
-            [[red, Some(Color::Rgb(0, 0xff, 0))], [red, red]],
+            [
+                [
+                    red,
+                    Some(Color::Rgb(0, 0xff, 0)),
+                    Some(Color::Rgb(0, 0, 0xff))
+                ],
+                [red, red, red],
+            ],
         );
     }
 

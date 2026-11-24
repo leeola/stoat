@@ -10465,6 +10465,68 @@ fn a_reload_with_a_broken_command_applies_the_rest() {
     );
 }
 
+/// A `command` item that fails a check of the loader leaves the set. The rest
+/// of the user config applies, and the status names the line of the error.
+#[test]
+fn an_invalid_command_is_reported_and_the_rest_of_the_config_loads() {
+    let scheduler = Arc::new(stoat_scheduler::TestScheduler::new());
+    let stoat = Stoat::new_with_user_config(
+        scheduler.executor(),
+        Settings::default(),
+        PathBuf::new(),
+        Some(
+            concat!(
+                "on init { editor.scrolloff = 7; }\n",
+                "command review { run = shell(\"x\"); }\n",
+                "command hello { run = shell(\"y\"); }",
+            )
+            .to_string(),
+        ),
+        Vec::new(),
+        None,
+    );
+
+    assert_eq!(
+        (
+            stoat.settings.scrolloff,
+            stoat.commands.get("review").is_some(),
+            stoat.commands.get("hello").is_some(),
+            stoat.pending_message.as_deref(),
+        ),
+        (
+            Some(7),
+            false,
+            true,
+            Some("config.stcfg:2: command `review` shadows the built-in command `review`"),
+        ),
+    );
+}
+
+/// A reload replaces the user commands with the ones that the new source
+/// declares.
+#[test]
+fn a_reload_swaps_the_command_set() {
+    let scheduler = Arc::new(stoat_scheduler::TestScheduler::new());
+    let mut stoat = Stoat::new(
+        scheduler.executor(),
+        Settings::default(),
+        PathBuf::from("/repo"),
+    );
+    stoat.reload_user_config("command hello { run = shell(\"x\"); }");
+    let loaded = stoat.commands.get("hello").is_some();
+    stoat.reload_user_config("command bye { run = shell(\"y\"); }");
+
+    assert_eq!(
+        (
+            loaded,
+            stoat.commands.get("hello").is_some(),
+            stoat.commands.get("bye").is_some(),
+            stoat.pending_message.as_deref(),
+        ),
+        (true, false, true, Some("config reloaded")),
+    );
+}
+
 /// The config error status names the error that starts first, by its line,
 /// and counts the rest.
 #[test]

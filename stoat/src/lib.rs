@@ -102,6 +102,7 @@ mod theme_vscode;
 pub(crate) mod toggle;
 pub mod tty;
 pub mod ui;
+mod user_command;
 mod vt_input;
 mod wake;
 pub mod walkthrough;

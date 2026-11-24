@@ -3215,9 +3215,17 @@ fn a_window_status_row_paints_a_message_in_the_color_of_its_kind() {
 
     let rgb = |[r, g, b]: [u8; 3]| Some(Color::Rgb(r, g, b));
     assert_eq!(
-        [ink(MessageKind::Alert), ink(MessageKind::Info)],
-        [rgb([0xf2, 0x77, 0x7f]), rgb([0xa3, 0xa9, 0xb5])],
-        "ermine_night's ui.message.error, then its ui.message.info",
+        [
+            ink(MessageKind::Alert),
+            ink(MessageKind::Info),
+            ink(MessageKind::Success)
+        ],
+        [
+            rgb([0xf2, 0x77, 0x7f]),
+            rgb([0xa3, 0xa9, 0xb5]),
+            rgb([0x8f, 0xd1, 0x8a])
+        ],
+        "ermine_night's ui.message.error, ui.message.info, and ui.message.success",
     );
 }
 

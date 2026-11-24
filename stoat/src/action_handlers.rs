@@ -31,7 +31,7 @@ pub(crate) mod rebase;
 pub(crate) mod review;
 pub(crate) mod review_walk;
 mod reword;
-mod run;
+pub(crate) mod run;
 pub(crate) mod search;
 pub(crate) mod shell;
 pub(crate) mod split_selection;
@@ -476,8 +476,15 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
             let keys = stoat
                 .keymap
                 .keys_by_action(&StoatKeymapState::from_stoat(stoat));
+            let commands = stoat.commands.clone();
             let ws = stoat.active_workspace_mut();
-            stoat.command_palette = Some(CommandPalette::new(ws, executor, availability, keys));
+            stoat.command_palette = Some(CommandPalette::new(
+                ws,
+                executor,
+                availability,
+                keys,
+                commands,
+            ));
             UpdateEffect::Redraw
         },
         ActionKind::OpenHelp => {

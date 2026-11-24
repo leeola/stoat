@@ -1,12 +1,14 @@
 use crate::{
     app::{Stoat, UpdateEffect},
-    command_palette::{self, ArgPicker, Availability, CommandPalette, PaletteOutcome},
+    command_palette::{
+        self, ArgPicker, Availability, CommandPalette, PaletteCommand, PaletteOutcome,
+    },
     commit_picker,
     file_finder::{Browse, FileScopes, FinderScope},
     host::FsHost,
     keymap_state::StoatKeymapState,
     picker::{PathPicker, PendingScan},
-    walkthrough,
+    user_command, walkthrough,
 };
 use std::{
     path::{Path, PathBuf},
@@ -174,12 +176,19 @@ fn revision_candidates(stoat: &Stoat, git_root: &Path) -> Vec<PathBuf> {
 pub(super) fn open_palette_seeded(stoat: &mut Stoat, seed: &str) -> UpdateEffect {
     let executor = stoat.executor.clone();
     let availability = Availability::from_stoat(stoat);
+    let commands = stoat.commands.clone();
     let keys = stoat
         .keymap
         .keys_by_action(&StoatKeymapState::from_stoat(stoat));
     {
         let ws = stoat.active_workspace_mut();
-        stoat.command_palette = Some(CommandPalette::new(ws, executor, availability, keys));
+        stoat.command_palette = Some(CommandPalette::new(
+            ws,
+            executor,
+            availability,
+            keys,
+            commands,
+        ));
     }
 
     let active_idx = stoat.active_workspace;
@@ -611,7 +620,7 @@ pub(super) fn palette_up(stoat: &mut Stoat) -> UpdateEffect {
         .as_ref()
         .filter(|_| palette.arg_source().is_some())
         .map(|picker| picker.active_core_ref().picklist.selected);
-    let first_row = match (palette.command, picker_row) {
+    let first_row = match (palette.command.as_ref(), picker_row) {
         (_, Some(row)) => row == 0,
         (Some(_), None) => true,
         (None, None) => palette.selected == 0,
@@ -852,15 +861,16 @@ pub(super) fn palette_complete(stoat: &mut Stoat) -> UpdateEffect {
         }
         let ws = &stoat.workspaces[active_idx];
         let text = palette.input.text(ws);
-        let Some((entry, head, typed_tail)) =
-            command_palette::split_head(&text, &palette.availability)
+        let Some((command, head, typed_tail)) =
+            command_palette::split_head(&text, &palette.availability, &palette.commands)
         else {
             return UpdateEffect::None;
         };
-        let (kept, typed_tail) = if entry.def.params().len() > 1 {
-            command_palette::split_last_token(typed_tail)
-        } else {
-            ("", typed_tail)
+        let (kept, typed_tail) = match command {
+            PaletteCommand::Action(entry) if entry.def.params().len() > 1 => {
+                command_palette::split_last_token(typed_tail)
+            },
+            _ => ("", typed_tail),
         };
 
         let git_root = &ws.git_root;
@@ -936,6 +946,21 @@ fn apply_outcome(stoat: &mut Stoat, outcome: PaletteOutcome) -> UpdateEffect {
                     UpdateEffect::Redraw
                 },
             }
+        },
+        PaletteOutcome::Run(command, values, line) => {
+            tracing::info!(
+                target: "stoat::command",
+                line = %line,
+                command = %command.name,
+                "user command"
+            );
+            let ran_at = commit_picker::now_epoch(&stoat.executor);
+            stoat
+                .active_workspace_mut()
+                .palette_history
+                .push_at(line, Some(ran_at));
+            close_palette(stoat);
+            user_command::run::start(stoat, &command, values)
         },
     }
 }

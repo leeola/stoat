@@ -1309,7 +1309,16 @@ pub(crate) fn parse_bound_action(expr: &str) -> Result<ResolvedAction, String> {
         format!("cannot parse `{expr}`: {}", messages.join("; "))
     })?;
     let action = keymap::resolve_config_action(&parsed);
+    check_bound_action(&action)?;
+    Ok(action)
+}
 
+/// Check that `action` runs, or say why it does not.
+///
+/// The reason is an unknown action, an argument that does not fit, a
+/// `SetMode` with no mode name, or a `SetVar` that [`user_var`] refuses. A
+/// `$num` argument has no key press to take a digit from, so it does not fit.
+pub(crate) fn check_bound_action(action: &ResolvedAction) -> Result<(), String> {
     match action.name.as_str() {
         "SetMode" => {
             if action.args.first().and_then(arg_as_str).is_none() {
@@ -1317,7 +1326,7 @@ pub(crate) fn parse_bound_action(expr: &str) -> Result<ResolvedAction, String> {
             }
         },
         "SetVar" => {
-            user_var(&action)?;
+            user_var(action)?;
         },
         name => {
             let Some(entry) = stoat_action::registry::lookup(name) else {
@@ -1327,7 +1336,7 @@ pub(crate) fn parse_bound_action(expr: &str) -> Result<ResolvedAction, String> {
                 .map_err(|reason| format!("action `{name}`: {reason}"))?;
         },
     }
-    Ok(action)
+    Ok(())
 }
 
 /// The variable a `SetVar(name, value)` action sets, or why it sets none.

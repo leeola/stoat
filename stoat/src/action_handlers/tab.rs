@@ -239,6 +239,7 @@ fn relayout(stoat: &mut Stoat) {
 mod tests {
     use crate::{
         app::{Stoat, UpdateEffect},
+        command_palette::PaletteCommand,
         pane::View,
         term_session::TermId,
         test_harness::TestHarness,
@@ -960,7 +961,10 @@ mod tests {
         let palette = h.stoat.command_palette.as_ref().expect("the palette opens");
         assert_eq!(palette.input.text(ws), "tab-rename ");
         assert_eq!(
-            palette.command.map(|entry| entry.def.name()),
+            palette.command.as_ref().map(|command| match command {
+                PaletteCommand::Action(entry) => entry.def.name(),
+                PaletteCommand::User(user) => user.name.as_str(),
+            }),
             Some("RenameTab"),
             "the seed parses into arg mode, not filter text"
         );

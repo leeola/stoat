@@ -1,7 +1,7 @@
 use crate::{
     command_palette::{
         is_action_row, split_head, typed_head, ArgPicker, Availability, CommandPalette, Namespace,
-        PaletteScope, ResolvedCommand, ACTION_TOKEN,
+        PaletteCommand, PaletteScope, ResolvedCommand, ACTION_TOKEN,
     },
     file_finder::FinderScope,
     input_history,
@@ -15,6 +15,7 @@ use crate::{
         text::{pre_wrap_rows, wrap_text, write_str, write_str_clipped},
     },
     theme::TypeRole,
+    user_command::CommandSet,
     workspace::Workspace,
 };
 use ratatui::{
@@ -372,10 +373,10 @@ pub(crate) fn render_command_palette(
     // shows a hint naming the argument instead of the emptied command list. Key
     // on the source, not picker presence -- a stale picker from an earlier
     // source may linger a frame and must not win.
-    if let Some(entry) = palette.command
+    if let Some(command) = palette.command.clone()
         && palette.arg_source().is_none()
     {
-        render_palette_free_arg(palette, entry, ws, home, theme, area, zoom, buf, scene);
+        render_palette_free_arg(palette, &command, ws, home, theme, area, zoom, buf, scene);
         return;
     }
 
@@ -573,12 +574,13 @@ pub(crate) fn arg_rows<'a>(picker: &'a ArgPicker, home: Option<&'a Path>) -> Pat
 ///
 /// Shows the command's usage line, the parameter being collected with its
 /// description, then the command's long description, so the modal describes
-/// what to type instead of showing the emptied command list. State is synced
-/// before the frame, so this only paints.
+/// what to type instead of showing the emptied command list. A user command
+/// shows its usage line and the name of the argument in entry. State is
+/// synced before the frame, so this only paints.
 #[allow(clippy::too_many_arguments)]
 fn render_palette_free_arg(
     palette: &mut CommandPalette,
-    entry: &'static RegistryEntry,
+    command: &PaletteCommand,
     ws: &mut Workspace,
     home: Option<&Path>,
     theme: &crate::theme::Theme,
@@ -620,23 +622,31 @@ fn render_palette_free_arg(
 
     let text_style = theme.get(crate::theme::scope::UI_TEXT);
     let end_x = inner.x + inner.width;
-    write_str_clipped(
-        buf,
-        inner.x + 1,
-        body_top,
-        &usage_line(entry),
-        text_style,
-        end_x,
-    );
-    if let Some(param) = palette.arg_param()
+    let (usage, hint, entry) = match command {
+        PaletteCommand::Action(entry) => (
+            usage_line(entry),
+            palette
+                .arg_param()
+                .map(|param| format!("{}  {}", param.name, param.description)),
+            Some(*entry),
+        ),
+        PaletteCommand::User(user) => (
+            format!("{} {}", user.name, user.signature()),
+            palette.user_arg().map(|arg| arg.name.clone()),
+            None,
+        ),
+    };
+    write_str_clipped(buf, inner.x + 1, body_top, &usage, text_style, end_x);
+    if let Some(hint) = hint
         && body_top + 1 < body_bottom
     {
-        let hint = format!("{}  {}", param.name, param.description);
         write_str_clipped(buf, inner.x + 1, body_top + 1, &hint, text_style, end_x);
     }
 
     let doc_top = body_top + 3;
-    if doc_top < body_bottom {
+    if let Some(entry) = entry
+        && doc_top < body_bottom
+    {
         let doc_style = theme.get(crate::theme::scope::UI_TEXT_DIM);
         let doc_lines = wrap_text(
             entry.def.long_desc(),
@@ -756,6 +766,7 @@ fn render_palette_history(
         now,
         body,
         &palette.availability,
+        &palette.commands,
         theme,
         buf,
         scene,
@@ -800,6 +811,7 @@ fn paint_history_rows(
     now: i64,
     area: Rect,
     availability: &Availability,
+    commands: &CommandSet,
     theme: &crate::theme::Theme,
     buf: &mut Buffer,
     scene: &mut stoat_widgets::ApcScene,
@@ -824,7 +836,7 @@ fn paint_history_rows(
                 .width
                 .saturating_sub(HISTORY_LINE_COLUMN + 1 + age_cells);
             let rows = pre_wrap_rows(&chars, usize::from(room), false);
-            let head = history_head_chars(entry.line, availability);
+            let head = history_head_chars(entry.line, availability, commands);
             (chars, age, rows, head)
         })
         .collect();
@@ -908,10 +920,10 @@ fn paint_history_marks(
 }
 
 /// The chars at the start of History line `line` that its head takes, the
-/// head that [`split_head`] finds against `availability`, else the line's
-/// first word.
-fn history_head_chars(line: &str, availability: &Availability) -> usize {
-    let head = match split_head(line, availability) {
+/// head that [`split_head`] finds against `availability` and `commands`, else
+/// the line's first word.
+fn history_head_chars(line: &str, availability: &Availability, commands: &CommandSet) -> usize {
+    let head = match split_head(line, availability, commands) {
         Some((_, head, _)) => head,
         None => line.split(' ').next().unwrap_or(""),
     };
@@ -1047,11 +1059,11 @@ fn input_spans(
     let command = theme
         .try_get(crate::theme::scope::UI_CMD_COMMAND)
         .unwrap_or(plain);
-    let head_style = match resolved.entry.is_command() {
-        true => command,
-        false => theme
+    let head_style = match &resolved.entry {
+        PaletteCommand::Action(entry) if !entry.is_command() => theme
             .try_get(crate::theme::scope::UI_CMD_ACTION)
             .unwrap_or(command),
+        _ => command,
     };
     let mut spans = marked_spans(head, 0, head_style, marks, mark);
 
@@ -1975,12 +1987,13 @@ mod tests {
         LIST_ROWS,
     };
     use crate::{
-        command_palette::{action_row, Availability, Namespace, ResolvedCommand},
+        command_palette::{action_row, Availability, Namespace, PaletteCommand, ResolvedCommand},
         input_history,
         keymap::ActionKeys,
         render::editor::ResolvedChrome,
         test_fixture::{plate_islands, row_rules},
         theme::Theme,
+        user_command::CommandSet,
     };
     use ratatui::{
         buffer::Buffer,
@@ -2040,7 +2053,7 @@ mod tests {
             Theme::from_config(&config.expect("theme parses"), "t").expect("theme loads")
         };
         let open = ResolvedCommand {
-            entry: registry::lookup_alias("open").expect("a command"),
+            entry: PaletteCommand::Action(registry::lookup_alias("open").expect("a command")),
             head_chars: 1,
             ghost: "pen".to_owned(),
         };
@@ -2827,7 +2840,7 @@ mod tests {
         let line = "git log --graph stoat/src";
         let typed = "o src/main";
         let open = ResolvedCommand {
-            entry: registry::lookup_alias("open").expect("a command"),
+            entry: PaletteCommand::Action(registry::lookup_alias("open").expect("a command")),
             head_chars: 1,
             ghost: "pen".to_owned(),
         };
@@ -2909,6 +2922,7 @@ mod tests {
             125,
             list,
             &Availability::default(),
+            &CommandSet::default(),
             theme,
             &mut buf,
             &mut stoat_widgets::ApcScene::new(),

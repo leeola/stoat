@@ -354,6 +354,7 @@ theme ermine_night inherits default_dark {
     ui.mode_label          = { fg: chrome, modifiers: [bold] };
     ui.statusbar.separator.fg = ground;
     ui.message.info.fg = dim;
+    ui.message.success.fg = success;
 
     ui.statusline.normal.fg  = accent;
     ui.statusline.submode.fg = muted;

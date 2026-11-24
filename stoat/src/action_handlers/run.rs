@@ -177,7 +177,7 @@ fn walk_focused_run(
     UpdateEffect::Redraw
 }
 
-pub(super) fn run_command(stoat: &mut Stoat, command: &str) -> UpdateEffect {
+pub(crate) fn run_command(stoat: &mut Stoat, command: &str) -> UpdateEffect {
     let pty_tx = stoat.pty_tx.clone();
     let executor = stoat.executor.clone();
     let ws = stoat.active_workspace();

@@ -9,6 +9,7 @@ use crate::{
     paths,
     picker::{self, PathPicker, PendingScan, PreviewPolicy, ScanTarget},
     rebase::RebasePause,
+    user_command::{CommandArg, CommandSet, UserCommand},
     workspace::Workspace,
 };
 use ratatui::layout::Rect;
@@ -18,7 +19,7 @@ use std::{
     iter,
     path::{Path, PathBuf},
     ptr,
-    sync::OnceLock,
+    sync::{Arc, OnceLock},
 };
 use stoat_action::{
     registry, ActionDef, ActionKind, ParamDef, ParamError, ParamKind, ParamValue, ValueSource,
@@ -43,9 +44,10 @@ pub struct CommandPalette {
     /// `Some` once the input parses as a known command followed by a space:
     /// the palette is collecting that command's trailing argument inline. The
     /// argument text is the input tail after the command token.
-    pub(crate) command: Option<&'static registry::RegistryEntry>,
+    pub(crate) command: Option<PaletteCommand>,
     /// Which parameter of [`Self::command`] the token being typed fills, as
-    /// [`arg_index`] counts it in the input tail.
+    /// [`arg_index`] counts it in the input tail, or [`user_arg_index`] for a
+    /// user command.
     ///
     /// Derived from the same parse as [`Self::command`], so the two change
     /// together, and only when the input does.
@@ -138,6 +140,27 @@ pub struct CommandPalette {
     /// cells before its age, and the age follows the clock. Empty after a
     /// frame that draws no History.
     pub(crate) history_rows: Vec<(Rect, usize)>,
+    /// The user commands of the config when the palette opened, which a head
+    /// names after the built-in commands.
+    pub(crate) commands: Arc<CommandSet>,
+}
+
+/// A command that the palette's input names, a registered action or a user
+/// command of the config.
+#[derive(Clone)]
+pub(crate) enum PaletteCommand {
+    Action(&'static registry::RegistryEntry),
+    User(Arc<UserCommand>),
+}
+
+impl PaletteCommand {
+    /// The parameters of the action, or the arguments of the user command.
+    fn arg_count(&self) -> usize {
+        match self {
+            PaletteCommand::Action(entry) => entry.def.params().len(),
+            PaletteCommand::User(command) => command.args.len(),
+        }
+    }
 }
 
 /// A command token that the palette's input names, and the ghost that the Cmd
@@ -147,9 +170,9 @@ pub struct CommandPalette {
 /// a typed `o` reads as `open`. It is display only: the input, its caret, Tab,
 /// and Enter never see it.
 pub(crate) struct ResolvedCommand {
-    /// The entry that the head names, which decides whether the head draws as
-    /// a command or as an internal action.
-    pub(crate) entry: &'static registry::RegistryEntry,
+    /// The command that the head names, which decides whether the head draws
+    /// as a command or as an internal action.
+    pub(crate) entry: PaletteCommand,
     /// The typed head's length in chars, from the input's start.
     pub(crate) head_chars: usize,
     /// The text after the head, empty for a head that spells the whole name.
@@ -827,6 +850,10 @@ pub(crate) enum PaletteOutcome {
     /// its parameter list. The third field is the canonical, re-executable
     /// command line to record in palette history.
     Dispatch(&'static registry::RegistryEntry, Vec<ParamValue>, String),
+    /// A user command is ready to run, with one value for each of its
+    /// arguments. The third field is the line `<name> <tail>` to record in
+    /// palette history.
+    Run(Arc<UserCommand>, Vec<String>, String),
 }
 
 /// Why [`parse_args`] refused the tokens typed for a command with more than one
@@ -842,11 +869,12 @@ enum ArgsError {
 }
 
 impl CommandPalette {
-    pub fn new(
+    pub(crate) fn new(
         ws: &mut Workspace,
         executor: Executor,
         availability: Availability,
         keys: ActionKeys,
+        commands: Arc<CommandSet>,
     ) -> Self {
         let input = InputView::create(ws, executor, SubmitTarget::PaletteFilter, "", "insert");
         let scope = PaletteScope::Active;
@@ -886,6 +914,7 @@ impl CommandPalette {
             keys,
             doc_scroll: 0,
             history_rows: Vec::new(),
+            commands,
         }
     }
 
@@ -958,7 +987,19 @@ impl CommandPalette {
     /// last parameter. A command with one parameter takes the whole tail as its
     /// value, so that parameter answers however many spaces the tail holds.
     pub(crate) fn arg_param(&self) -> Option<&'static ParamDef> {
-        param_at(self.command?.def.params(), self.typed_arg)
+        match self.command.as_ref()? {
+            PaletteCommand::Action(entry) => param_at(entry.def.params(), self.typed_arg),
+            PaletteCommand::User(_) => None,
+        }
+    }
+
+    /// The argument of the user command that the text being typed fills, or
+    /// `None` while no user command parses.
+    pub(crate) fn user_arg(&self) -> Option<&CommandArg> {
+        match self.command.as_ref()? {
+            PaletteCommand::User(command) => command.args.get(self.typed_arg),
+            PaletteCommand::Action(_) => None,
+        }
     }
 
     /// The value source of the argument being typed when it drives an inline
@@ -985,8 +1026,8 @@ impl CommandPalette {
     pub(crate) fn arg_tail(&self, ws: &Workspace) -> Option<String> {
         self.arg_source()?;
         let text = self.input.text(ws);
-        let (entry, _, tail) = split_head(&text, &self.availability)?;
-        let tail = if entry.def.params().len() > 1 {
+        let (command, _, tail) = split_head(&text, &self.availability, &self.commands)?;
+        let tail = if command.arg_count() > 1 {
             split_last_token(tail).1
         } else {
             tail
@@ -1084,11 +1125,14 @@ impl CommandPalette {
             Some(_) => Namespace::Actions,
             None => Namespace::Commands,
         };
-        self.resolved = resolve_typed(&text, self.scope, &self.availability);
-        let parsed = parse_command(&text, &self.availability);
-        self.command = parsed.map(|(entry, _)| entry);
-        self.typed_arg = parsed.map_or(0, |(_, arg)| arg_index(arg));
-        self.group = input_group(&text, &self.availability);
+        self.resolved = resolve_typed(&text, self.scope, &self.availability, &self.commands);
+        let parsed = parse_command(&text, &self.availability, &self.commands);
+        self.typed_arg = parsed.as_ref().map_or(0, |(command, arg)| match command {
+            PaletteCommand::Action(_) => arg_index(arg),
+            PaletteCommand::User(command) => user_arg_index(arg, command.args.len()),
+        });
+        self.command = parsed.map(|(command, _)| command);
+        self.group = input_group(&text, &self.availability, &self.commands);
         if self.command.is_some() {
             self.filtered.clear();
             self.match_indices.clear();
@@ -1125,7 +1169,11 @@ impl CommandPalette {
         let walking = ws.palette_history.is_walking();
         let arg_picker = self.arg_picker.as_ref().filter(|_| !walking);
         let text = self.input.text(ws);
-        if let Some((entry, arg)) = parse_command(&text, &self.availability) {
+        if let Some((command, arg)) = parse_command(&text, &self.availability, &self.commands) {
+            let entry = match command {
+                PaletteCommand::Action(entry) => entry,
+                PaletteCommand::User(command) => return self.submit_user_command(ws, command, arg),
+            };
             let params = entry.def.params();
             if params.len() > 1 {
                 let picked = param_at(params, arg_index(arg)).and_then(|param| {
@@ -1221,6 +1269,17 @@ impl CommandPalette {
                 .replace_text(ws, &format!("{} ", typed_head(entry)));
             return PaletteOutcome::None;
         }
+        if (self.selected == 0 || walking)
+            && let Some(command) = self.commands.get(bare).cloned()
+        {
+            if command.args.is_empty() {
+                self.input.dispose(ws);
+                let line = command.name.clone();
+                return PaletteOutcome::Run(command, Vec::new(), line);
+            }
+            self.input.replace_text(ws, &format!("{} ", command.name));
+            return PaletteOutcome::None;
+        }
         if walking {
             tracing::info!(target: "stoat::command", text = %text, "no command matched");
             return PaletteOutcome::None;
@@ -1241,6 +1300,35 @@ impl CommandPalette {
                 PaletteOutcome::None
             },
         }
+    }
+
+    /// The outcome of Enter on the user command `command` with the typed
+    /// `tail`.
+    ///
+    /// The command runs when the tail gives a value to each of its arguments.
+    /// Else the palette stays open, and the refusal goes to the log as the
+    /// refusal of a built-in command does.
+    fn submit_user_command(
+        &mut self,
+        ws: &mut Workspace,
+        command: Arc<UserCommand>,
+        tail: &str,
+    ) -> PaletteOutcome {
+        let values = split_user_args(tail, command.args.len());
+        if values.len() != command.args.len() {
+            tracing::warn!(
+                target: "stoat::command",
+                command = %command.name,
+                tail = %tail,
+                "command arguments rejected"
+            );
+            return PaletteOutcome::None;
+        }
+
+        self.input.dispose(ws);
+        let values = values.into_iter().map(str::to_owned).collect();
+        let line = format!("{} {}", command.name, tail.trim());
+        PaletteOutcome::Run(command, values, line)
     }
 }
 
@@ -1271,6 +1359,14 @@ const CONDITIONAL_COMMANDS: &[(&str, &[ActionKind])] = &[
     ),
 ];
 
+/// Whether `token` is one of the [`CONDITIONAL_COMMANDS`], ASCII case ignored,
+/// whatever context is active.
+pub(crate) fn is_conditional_token(token: &str) -> bool {
+    CONDITIONAL_COMMANDS
+        .iter()
+        .any(|(name, _)| name.eq_ignore_ascii_case(token))
+}
+
 /// Resolve `token` to the first [`CONDITIONAL_COMMANDS`] candidate whose
 /// context is active, or `None` when the token is not conditional or no
 /// candidate applies.
@@ -1298,16 +1394,17 @@ fn resolve_conditional(
 fn parse_command<'a>(
     text: &'a str,
     ctx: &Availability,
-) -> Option<(&'static registry::RegistryEntry, &'a str)> {
-    let (entry, _, arg) = split_head(text, ctx)?;
-    (!entry.def.params().is_empty()).then_some((entry, arg))
+    commands: &CommandSet,
+) -> Option<(PaletteCommand, &'a str)> {
+    let (command, _, arg) = split_head(text, ctx, commands)?;
+    (command.arg_count() > 0).then_some((command, arg))
 }
 
 /// Split palette input into the command its head names, the head, and the text
 /// after the space that ends the head.
 ///
 /// A command name such as `git log` holds spaces, so the head is the longest
-/// run of leading tokens that names a command, as [`resolve_head`] resolves
+/// run of leading tokens that names a command, as [`resolve_command`] resolves
 /// one. Returns `None` when neither the whole text nor a head that a space
 /// ends names a command.
 ///
@@ -1318,14 +1415,32 @@ fn parse_command<'a>(
 pub(crate) fn split_head<'a>(
     text: &'a str,
     ctx: &Availability,
-) -> Option<(&'static registry::RegistryEntry, &'a str, &'a str)> {
-    if let Some(entry) = resolve_head(text, ctx).filter(|entry| entry.def.params().is_empty()) {
-        return Some((entry, text, ""));
+    commands: &CommandSet,
+) -> Option<(PaletteCommand, &'a str, &'a str)> {
+    if let Some(command) =
+        resolve_command(text, ctx, commands).filter(|command| command.arg_count() == 0)
+    {
+        return Some((command, text, ""));
     }
     text.rmatch_indices(' ').find_map(|(i, _)| {
         let head = &text[..i];
-        resolve_head(head, ctx).map(|entry| (entry, head, &text[i + 1..]))
+        resolve_command(head, ctx, commands).map(|command| (command, head, &text[i + 1..]))
     })
+}
+
+/// The command that the palette head `head` names.
+///
+/// A built-in command comes first, as [`resolve_head`] resolves one, and then
+/// a user command of `commands`. A user command's name holds no space, so no
+/// head under the `action` token names one.
+fn resolve_command(
+    head: &str,
+    ctx: &Availability,
+    commands: &CommandSet,
+) -> Option<PaletteCommand> {
+    resolve_head(head, ctx)
+        .map(PaletteCommand::Action)
+        .or_else(|| commands.get(head).cloned().map(PaletteCommand::User))
 }
 
 /// The entry that the palette head `head` names.
@@ -1403,15 +1518,27 @@ pub(crate) fn typed_head(entry: &registry::RegistryEntry) -> String {
 /// it, or `None` when the text names no command.
 ///
 /// At the root the head follows [`named_command`], and the ghost follows
-/// [`ghost_of`]. Under the `action` token the head is the token and the
-/// action's name when the name resolves. Else the head is the token alone,
-/// which names the `action` row. Neither has a ghost.
-fn resolve_typed(text: &str, scope: PaletteScope, ctx: &Availability) -> Option<ResolvedCommand> {
+/// [`ghost_of`]. A user command has no ghost. Under the `action` token the
+/// head is the token and the action's name when the name resolves. Else the
+/// head is the token alone, which names the `action` row. Neither has a
+/// ghost.
+fn resolve_typed(
+    text: &str,
+    scope: PaletteScope,
+    ctx: &Availability,
+    commands: &CommandSet,
+) -> Option<ResolvedCommand> {
     if let Some(name) = action_query(text) {
-        let (entry, head) = split_head(text, ctx)
-            .map(|(entry, head, _)| (entry, head))
-            .or_else(|| lookup_action(name.trim_end()).map(|entry| (entry, text.trim_end())))
-            .unwrap_or((action_row(), &text[..ACTION_TOKEN.len()]));
+        let (entry, head) = split_head(text, ctx, commands)
+            .map(|(command, head, _)| (command, head))
+            .or_else(|| {
+                lookup_action(name.trim_end())
+                    .map(|entry| (PaletteCommand::Action(entry), text.trim_end()))
+            })
+            .unwrap_or((
+                PaletteCommand::Action(action_row()),
+                &text[..ACTION_TOKEN.len()],
+            ));
         return Some(ResolvedCommand {
             entry,
             head_chars: head.chars().count(),
@@ -1419,11 +1546,15 @@ fn resolve_typed(text: &str, scope: PaletteScope, ctx: &Availability) -> Option<
         });
     }
 
-    let (entry, head) = named_command(text, scope, ctx)?;
+    let (entry, head) = named_command(text, scope, ctx, commands)?;
+    let ghost = match &entry {
+        PaletteCommand::Action(action) => ghost_of(head, &action.command_name),
+        PaletteCommand::User(_) => String::new(),
+    };
     Some(ResolvedCommand {
         entry,
         head_chars: head.chars().count(),
-        ghost: ghost_of(head, &entry.command_name),
+        ghost,
     })
 }
 
@@ -1431,24 +1562,25 @@ fn resolve_typed(text: &str, scope: PaletteScope, ctx: &Availability) -> Option<
 /// and the head, or `None` when no head names a command.
 ///
 /// A head that [`split_head`] finds names its command first. Else the whole
-/// text less its trailing whitespace names a command, as [`resolve_head`]
-/// resolves one. Else a text with no whitespace names the one command that
-/// `scope` offers whose command name starts with it, ASCII case ignored. The
-/// `action` row takes part as one more command. So `quit-al` names
+/// text less its trailing whitespace names a command, as [`resolve_command`]
+/// resolves one. Else a text with no whitespace names the one built-in command
+/// that `scope` offers whose command name starts with it, ASCII case ignored.
+/// The `action` row takes part as one more command. So `quit-al` names
 /// `quit-all`, `act` names the `action` row, and `wri` names none of the
 /// commands that start with it.
 fn named_command<'a>(
     text: &'a str,
     scope: PaletteScope,
     ctx: &Availability,
-) -> Option<(&'static registry::RegistryEntry, &'a str)> {
-    if let Some((entry, head, _)) = split_head(text, ctx) {
-        return Some((entry, head));
+    commands: &CommandSet,
+) -> Option<(PaletteCommand, &'a str)> {
+    if let Some((command, head, _)) = split_head(text, ctx, commands) {
+        return Some((command, head));
     }
 
     let whole = text.trim_end();
-    if let Some(entry) = resolve_head(whole, ctx) {
-        return Some((entry, whole));
+    if let Some(command) = resolve_command(whole, ctx, commands) {
+        return Some((command, whole));
     }
 
     if text.is_empty() || text.contains(char::is_whitespace) {
@@ -1465,7 +1597,7 @@ fn named_command<'a>(
         .chain(iter::once(action_row()))
         .filter(starts);
     match (named.next(), named.next()) {
-        (Some(entry), None) => Some((entry, text)),
+        (Some(entry), None) => Some((PaletteCommand::Action(entry), text)),
         _ => None,
     }
 }
@@ -1482,6 +1614,35 @@ fn ghost_of(head: &str, name: &str) -> String {
         Some(prefix) if prefix.eq_ignore_ascii_case(head) => name[head.len()..].to_owned(),
         _ => format!(" \u{b7} {name}"),
     }
+}
+
+/// The values that a user command with `count` arguments takes from the typed
+/// `tail`, each trimmed.
+///
+/// One argument takes the whole tail. With two or more, each argument but the
+/// last takes one word, and the last takes the rest, so a message keeps its
+/// spaces. No value is empty, so a tail with too few words gives fewer than
+/// `count` values.
+pub(crate) fn split_user_args(tail: &str, count: usize) -> Vec<&str> {
+    let mut values = Vec::with_capacity(count);
+    let mut rest = tail.trim();
+    while values.len() + 1 < count && !rest.is_empty() {
+        let end = rest.find(char::is_whitespace).unwrap_or(rest.len());
+        values.push(&rest[..end]);
+        rest = rest[end..].trim_start();
+    }
+    if count > 0 && !rest.is_empty() {
+        values.push(rest);
+    }
+    values
+}
+
+/// Which argument of a user command with `count` arguments the text at the
+/// end of `tail` fills, counting from zero.
+///
+/// The last argument takes the rest of the tail, so the count stops there.
+fn user_arg_index(tail: &str, count: usize) -> usize {
+    arg_index(tail).min(count.saturating_sub(1))
 }
 
 /// Which parameter the token being typed at the end of `tail` fills, counting
@@ -1565,8 +1726,8 @@ fn parse_args(
 ///
 /// The list under the `action` token holds no group, so a text there answers
 /// `None`.
-fn input_group(text: &str, ctx: &Availability) -> Option<&'static str> {
-    if action_query(text).is_some() || parse_command(text, ctx).is_some() {
+fn input_group(text: &str, ctx: &Availability, commands: &CommandSet) -> Option<&'static str> {
+    if action_query(text).is_some() || parse_command(text, ctx, commands).is_some() {
         return None;
     }
     let (token, _) = text.split_once(' ')?;
@@ -1815,6 +1976,15 @@ mod tests {
         picker::PREVIEW_DIR_LIMIT,
         test_harness::{editor, TestHarness},
     };
+
+    /// The def name of the action that `command` names. These tests resolve
+    /// over no user command, so a user command fails the test.
+    fn action_name(command: PaletteCommand) -> &'static str {
+        match command {
+            PaletteCommand::Action(entry) => entry.def.name(),
+            PaletteCommand::User(command) => panic!("`{}` is a user command", command.name),
+        }
+    }
     use crossterm::event::Event;
     use ratatui::{
         buffer::Buffer,
@@ -1976,7 +2146,7 @@ mod tests {
         let mut selected = 0;
         refilter(
             text,
-            input_group(text, availability),
+            input_group(text, availability, &CommandSet::default()),
             scope,
             availability,
             &mut filtered,
@@ -2160,7 +2330,7 @@ mod tests {
         let positions = {
             let (mut filtered, mut match_indices, mut selected) = (Vec::new(), Vec::new(), 0);
             let ctx = Availability::default();
-            let group = input_group("git l", &ctx);
+            let group = input_group("git l", &ctx, &CommandSet::default());
             refilter(
                 "git l",
                 group,
@@ -2275,8 +2445,10 @@ mod tests {
     #[test]
     fn an_internal_action_resolves_only_under_the_action_token() {
         let ctx = Availability::default();
-        let split =
-            |text| split_head(text, &ctx).map(|(entry, head, tail)| (entry.def.name(), head, tail));
+        let split = |text| {
+            split_head(text, &ctx, &CommandSet::default())
+                .map(|(command, head, tail)| (action_name(command), head, tail))
+        };
         assert_eq!(
             [
                 "focus-left",
@@ -2353,6 +2525,103 @@ mod tests {
                 &["pwd".to_owned()][..],
                 ["cd", "pwd", "action focus-left"].map(String::from),
             ),
+        );
+    }
+
+    /// The user command `greet`, which takes one argument.
+    const GREET: &str =
+        r#"command greet { arg who = text; run = shell("echo hello {who}"); output = notify; }"#;
+
+    /// The user commands that `source` declares, over no embedded command.
+    fn user_commands(source: &str) -> CommandSet {
+        let config = |source| stoat_config::parse(source).0.expect("the config parses");
+        let (set, errors) = CommandSet::build(&config(""), Some(&config(source)));
+        assert_eq!(errors, Vec::new(), "the commands load");
+        set
+    }
+
+    #[test]
+    fn split_user_args_gives_the_last_argument_the_rest() {
+        assert_eq!(
+            [
+                split_user_args("a  b c", 2),
+                split_user_args("a", 2),
+                split_user_args(" x y ", 1),
+            ],
+            [vec!["a", "b c"], vec!["a"], vec!["x y"]],
+        );
+    }
+
+    /// Enter on the bare name of a user command that takes an argument opens
+    /// the entry of that argument.
+    #[test]
+    fn a_typed_user_command_name_enters_argument_entry() {
+        let mut h = Stoat::test();
+        h.stoat.reload_user_config(GREET);
+        h.type_text(":greet");
+        h.type_keys("enter");
+
+        let ws = h.stoat.active_workspace();
+        let input = h
+            .stoat
+            .command_palette
+            .as_ref()
+            .map(|palette| palette.input.text(ws));
+        assert_eq!(input.as_deref(), Some("greet "));
+    }
+
+    /// The body of a user command names its usage and the argument that the
+    /// typed text fills. The last argument takes the rest of the words.
+    #[test]
+    fn a_user_command_shows_its_usage_and_the_argument_in_entry() {
+        let mut h = TestHarness::with_size(120, 30);
+        h.stoat.reload_user_config(
+            r#"command pair { arg first = text; arg rest = text; run = shell("echo {first} {rest}"); output = notify; }"#,
+        );
+        let entry = |h: &mut TestHarness| {
+            let _ = h.snapshot();
+            let text = h.rendered_text();
+            let lines: Vec<&str> = text.lines().collect();
+            let usage = lines
+                .iter()
+                .position(|line| line.contains("pair <first> <rest>"));
+            let arg = usage
+                .and_then(|usage| lines.get(usage + 1))
+                .map(|line| line.trim_matches(|c: char| !c.is_alphanumeric()).to_owned());
+            (arg, text)
+        };
+
+        h.type_text(":pair ");
+        let (first, _) = entry(&mut h);
+        h.type_text("a b c");
+        let (rest, text) = entry(&mut h);
+        assert_eq!(
+            (first, rest),
+            (Some("first".to_owned()), Some("rest".to_owned())),
+            "{text}",
+        );
+    }
+
+    /// A user command's name resolves as a command token with no ghost, and no
+    /// head under the `action` token names one.
+    #[test]
+    fn a_user_command_head_resolves_as_a_command_token() {
+        let commands = user_commands(GREET);
+        let ctx = Availability::default();
+        let resolved =
+            resolve_typed("greet x", PaletteScope::All, &ctx, &commands).expect("a command token");
+        let user = match &resolved.entry {
+            PaletteCommand::User(command) => Some(command.name.as_str()),
+            PaletteCommand::Action(_) => None,
+        };
+        assert_eq!(
+            (
+                user,
+                resolved.head_chars,
+                resolved.ghost.as_str(),
+                resolve_command("action greet", &ctx, &commands).is_none(),
+            ),
+            (Some("greet"), 5, "", true),
         );
     }
 
@@ -2533,9 +2802,9 @@ mod tests {
     fn a_typed_head_resolves_by_name_alias_or_unique_prefix() {
         let ctx = Availability::default();
         let resolved = |text: &str| {
-            let name =
-                named_command(text, PaletteScope::All, &ctx).map(|(entry, _)| entry.def.name());
-            let shown = resolve_typed(text, PaletteScope::All, &ctx);
+            let name = named_command(text, PaletteScope::All, &ctx, &CommandSet::default())
+                .map(|(command, _)| action_name(command));
+            let shown = resolve_typed(text, PaletteScope::All, &ctx, &CommandSet::default());
             name.zip(shown)
                 .map(|(name, shown)| (name, shown.head_chars, shown.ghost))
         };
@@ -2760,8 +3029,8 @@ mod tests {
     #[test]
     fn a_two_token_head_parses_ahead_of_its_first_token() {
         let parsed = |text: &'static str| {
-            parse_command(text, &Availability::default())
-                .map(|(entry, tail)| (entry.def.name(), tail))
+            parse_command(text, &Availability::default(), &CommandSet::default())
+                .map(|(command, tail)| (action_name(command), tail))
         };
         assert_eq!(
             [
@@ -2792,8 +3061,8 @@ mod tests {
     #[test]
     fn a_whole_command_with_no_argument_wins_over_a_shorter_head() {
         let split = |text: &'static str| {
-            split_head(text, &Availability::default())
-                .map(|(entry, head, tail)| (entry.def.name(), head, tail))
+            split_head(text, &Availability::default(), &CommandSet::default())
+                .map(|(command, head, tail)| (action_name(command), head, tail))
         };
         assert_eq!(
             [
@@ -3449,7 +3718,12 @@ mod tests {
         assert_eq!(history.len(), 1, "the submitted entry is recorded");
         assert!(
             history[0].starts_with("action focus-")
-                && split_head(&history[0], &Availability::default()).is_some(),
+                && split_head(
+                    &history[0],
+                    &Availability::default(),
+                    &CommandSet::default()
+                )
+                .is_some(),
             "the recorded head names the action under its token and re-resolves, got {:?}",
             history[0]
         );

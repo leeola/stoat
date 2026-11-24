@@ -253,6 +253,10 @@ struct ConfigArtifacts {
     theme_pool: ThemePool,
     syntax_styles: SyntaxStyles,
     minimap_class_table: crate::minimap::ClassTable,
+    commands: crate::user_command::CommandSet,
+    /// The errors of the user config's `command` items, each at its span in
+    /// the user source. A command with an error is left out of `commands`.
+    command_errors: Vec<stoat_config::ParseError>,
 }
 
 /// Resolve `embedded` and the optional `user` config into the artifacts the
@@ -335,6 +339,9 @@ fn build_config_artifacts(
         }
     };
 
+    let (commands, command_errors) =
+        crate::user_command::CommandSet::build(embedded, user.as_ref());
+
     let (keymap, unknown_actions) = {
         let (default_keymap, warnings) = Keymap::compile_with_warnings(embedded);
         for warning in warnings {
@@ -378,6 +385,8 @@ fn build_config_artifacts(
         theme_pool,
         syntax_styles,
         minimap_class_table,
+        commands,
+        command_errors,
     }
 }
 
@@ -416,6 +425,27 @@ fn config_error_status(source: &str, errors: &[stoat_config::ParseError]) -> Str
         count => format!(" (+{} more)", count - 1),
     };
     format!("config.stcfg:{line}: {}{more}", first.message)
+}
+
+/// The status that names the first error of the user config `source`.
+///
+/// The first error is the earliest among the parse errors and the errors of
+/// the `command` items. A source with no error gives `None`. The command
+/// errors go to the log, as the parse logs its own.
+fn config_errors_status(
+    source: &str,
+    parse_errors: Vec<stoat_config::ParseError>,
+    command_errors: Vec<stoat_config::ParseError>,
+) -> Option<String> {
+    if !command_errors.is_empty() {
+        tracing::error!(
+            "user config has invalid commands; leaving them out: {}",
+            stoat_config::format_errors(source, &command_errors)
+        );
+    }
+    let errors: Vec<stoat_config::ParseError> =
+        parse_errors.into_iter().chain(command_errors).collect();
+    (!errors.is_empty()).then(|| config_error_status(source, &errors))
 }
 
 /// Point every registered language's highlight map at `styles`' theme keys.
@@ -552,13 +582,15 @@ const STATUS_MESSAGE_TTL: std::time::Duration = std::time::Duration::from_secs(4
 /// The kind of a status message, which picks its color in the status bar.
 ///
 /// [`Stoat::set_status`] gives every message the alert kind. The info kind
-/// marks plain news, such as the text of a `Notify` step. A theme that leaves
-/// `ui.message.info` unset draws it as an alert.
+/// marks plain news, such as the text of a `Notify` step. The success kind
+/// marks a command run that worked, such as a `notify` run that exits 0. A
+/// theme that leaves the scope of a kind unset draws it as an alert.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub(crate) enum MessageKind {
     #[default]
     Alert,
     Info,
+    Success,
 }
 
 /// Shortest gap between two `stoat::session` snapshot lines that saves log.
@@ -638,7 +670,7 @@ impl UpdateEffect {
     /// A coalesced batch applies several messages in one loop iteration and
     /// must act on the strongest result. Quit outranks Redraw, which outranks
     /// None. The result does not depend on argument order.
-    fn merge(self, other: UpdateEffect) -> UpdateEffect {
+    pub(crate) fn merge(self, other: UpdateEffect) -> UpdateEffect {
         match (self, other) {
             (UpdateEffect::Quit, _) | (_, UpdateEffect::Quit) => UpdateEffect::Quit,
             (UpdateEffect::Redraw, _) | (_, UpdateEffect::Redraw) => UpdateEffect::Redraw,
@@ -978,6 +1010,9 @@ pub struct Stoat {
     pub(crate) user_vars: std::collections::HashMap<String, StateValue>,
     pub executor: Executor,
     pub(crate) keymap: Keymap,
+    /// The user commands that the config declares, rebuilt with the keymap on
+    /// each load. The palette runs them as it runs a built-in command.
+    pub(crate) commands: Arc<crate::user_command::CommandSet>,
     pub settings: Settings,
     /// The CLI and environment overrides that layered over the config at
     /// startup, retained so a mid-session config reload can re-apply them. A
@@ -2121,6 +2156,14 @@ pub struct Stoat {
     /// because a load runs detached on [`Self::executor`], with no borrow of
     /// `self`.
     pub(crate) pending_env: Arc<std::sync::Mutex<Vec<crate::project_env::PendingEnvLoad>>>,
+    /// The command runs with a shell step out on a worker, which
+    /// [`crate::user_command::run::pump`] carries on as each result lands.
+    pub(crate) command_runs: Vec<crate::user_command::run::CommandRun>,
+    /// Landing slot for the shell steps of command runs, drained by
+    /// [`crate::user_command::run::pump`]. Shared rather than returned,
+    /// because a step runs detached on [`Self::executor`], as a load of
+    /// [`Self::pending_env`] does.
+    pub(crate) command_events: Arc<std::sync::Mutex<Vec<crate::user_command::run::CommandEvent>>>,
     /// Landing slot for a finished `--continue` session restore, drained by
     /// [`Self::install_pending_workspace_restore`] in [`Self::drive_background`].
     /// Shared rather than returned because the restore runs detached on
@@ -2694,28 +2737,31 @@ impl Stoat {
         user_themes: Vec<(String, String)>,
         env_theme: Option<String>,
     ) -> Self {
-        let (config, config_error) = match user_config {
-            Some(source) => match stoat_config::parse(&source) {
-                (parsed, errors) if errors.is_empty() => (parsed, None),
+        // The parse errors wait for the command errors of the same source. One
+        // status then names the first error of either kind.
+        let (config, parse_errors, config_error) = match user_config.as_deref() {
+            Some(source) => match stoat_config::parse(source) {
+                (parsed, errors) if errors.is_empty() => (parsed, errors, None),
                 (Some(parsed), errors) => {
                     tracing::error!(
                         "user config has errors; applying the items that parse: {}",
-                        stoat_config::format_errors(&source, &errors)
+                        stoat_config::format_errors(source, &errors)
                     );
-                    (Some(parsed), Some(config_error_status(&source, &errors)))
+                    (Some(parsed), errors, None)
                 },
                 (None, errors) => {
                     tracing::error!(
                         "user config parse failed; using built-in defaults: {}",
-                        stoat_config::format_errors(&source, &errors)
+                        stoat_config::format_errors(source, &errors)
                     );
                     (
                         None,
+                        Vec::new(),
                         Some("user config parse failed; using built-in defaults".to_string()),
                     )
                 },
             },
-            None => (None, None),
+            None => (None, Vec::new(), None),
         };
         let embedded = embedded_config();
 
@@ -2738,6 +2784,8 @@ impl Stoat {
             theme_pool,
             syntax_styles,
             minimap_class_table,
+            commands,
+            command_errors,
         } = build_config_artifacts(
             config,
             embedded,
@@ -2745,6 +2793,10 @@ impl Stoat {
             cli_settings.clone(),
             env_theme,
         );
+        let config_error = config_error.or_else(|| {
+            let source = user_config.as_deref()?;
+            config_errors_status(source, parse_errors, command_errors)
+        });
 
         let highlight_retention = settings
             .highlight_retention
@@ -2800,6 +2852,7 @@ impl Stoat {
             user_vars: std::collections::HashMap::new(),
             executor,
             keymap,
+            commands: Arc::new(commands),
             settings,
             cli_settings,
             theme: Arc::new(theme),
@@ -3026,6 +3079,8 @@ impl Stoat {
             agent_servers: std::collections::HashMap::new(),
             view_watchers: Vec::new(),
             pending_env: Arc::new(std::sync::Mutex::new(Vec::new())),
+            command_runs: Vec::new(),
+            command_events: Arc::new(std::sync::Mutex::new(Vec::new())),
             pending_workspace_restore: Arc::new(std::sync::Mutex::new(None)),
             pending_workspace_saves: std::collections::HashMap::new(),
             pending_workspace_autosave: None,
@@ -3161,6 +3216,8 @@ impl Stoat {
             theme_pool,
             syntax_styles,
             minimap_class_table,
+            commands,
+            command_errors,
         } = build_config_artifacts(
             Some(config),
             embedded_config(),
@@ -3170,6 +3227,7 @@ impl Stoat {
         );
 
         self.keymap = keymap;
+        self.commands = Arc::new(commands);
         self.settings = settings;
         apply_log_level(&self.settings);
         self.theme = Arc::new(theme);
@@ -3183,9 +3241,9 @@ impl Stoat {
         // touching any of them.
         self.paint_generation += 1;
         self.raise_config_actions_badge(&unknown_actions);
-        match errors.is_empty() {
-            true => self.set_status("config reloaded"),
-            false => self.set_status(config_error_status(source, &errors)),
+        match config_errors_status(source, errors, command_errors) {
+            None => self.set_status("config reloaded"),
+            Some(status) => self.set_status(status),
         }
     }
 
@@ -10051,6 +10109,7 @@ impl Stoat {
         let completion = crate::completion::request::pump(self);
         let completion_resolve = action_handlers::completion::pump_completion_resolve(self);
         let completion_accept = crate::completion::accept::pump_completion_accept(self);
+        let user_commands = crate::user_command::run::pump(self);
 
         external
             || commits
@@ -10077,6 +10136,7 @@ impl Stoat {
             || completion
             || completion_resolve
             || completion_accept
+            || user_commands
     }
 
     /// Resolve a `(line, column)` 0-based point to a byte
