@@ -939,7 +939,7 @@ fn span_rows(span: Range<usize>, rope: &Rope) -> Range<u32> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{app::install_highlight_maps, buffer::TextBuffer};
+    use crate::{buffer::TextBuffer, display_map::syntax_theme};
     use std::path::Path;
     use stoat_language::LanguageRegistry;
     use stoat_text::Anchor;
@@ -1085,7 +1085,7 @@ mod tests {
         let registry = LanguageRegistry::standard();
         // Without this every capture resolves to HighlightId::DEFAULT and both
         // token lists come back empty, comparing equal for the wrong reason.
-        install_highlight_maps(&registry, &styles);
+        syntax_theme::install_highlight_maps(&registry, &styles);
         let lang = registry.for_path(Path::new(path)).unwrap();
         let buffer_id = BufferId::new(1);
 
@@ -1303,7 +1303,7 @@ mod tests {
     fn carried_parse_fixture(path: &str) -> (SyntaxStyles, Arc<Language>) {
         let styles = SyntaxStyles::from_theme(&crate::theme::Theme::empty());
         let registry = LanguageRegistry::standard();
-        install_highlight_maps(&registry, &styles);
+        syntax_theme::install_highlight_maps(&registry, &styles);
         let lang = registry.for_path(Path::new(path)).unwrap();
         (styles, lang)
     }
@@ -1761,7 +1761,7 @@ mod tests {
     ) -> ParseJobOutput {
         let styles = SyntaxStyles::from_theme(&crate::theme::Theme::empty());
         let registry = LanguageRegistry::standard();
-        install_highlight_maps(&registry, &styles);
+        syntax_theme::install_highlight_maps(&registry, &styles);
         let lang = registry.for_path(Path::new(path)).unwrap();
         let buffer_id = BufferId::new(1);
 
@@ -1889,7 +1889,7 @@ mod tests {
     fn a_first_parse_reports_no_rows_at_all() {
         let styles = SyntaxStyles::from_theme(&crate::theme::Theme::empty());
         let registry = LanguageRegistry::standard();
-        install_highlight_maps(&registry, &styles);
+        syntax_theme::install_highlight_maps(&registry, &styles);
         let lang = registry.for_path(Path::new("a.rs")).unwrap();
         let buffer_id = BufferId::new(1);
 
@@ -1924,7 +1924,7 @@ mod tests {
     fn batched_parse_channel_matches_per_anchor_construction() {
         let styles = SyntaxStyles::from_theme(&crate::theme::Theme::empty());
         let registry = LanguageRegistry::standard();
-        install_highlight_maps(&registry, &styles);
+        syntax_theme::install_highlight_maps(&registry, &styles);
         let lang = registry.for_path(Path::new("a.rs")).unwrap();
         let buffer_id = BufferId::new(1);
 

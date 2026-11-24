@@ -18,7 +18,7 @@ use crate::{
     commit_preview::{self, CommitPreview},
     debounce,
     diff_changes::{REVEAL_FADE, REVEAL_HOLD},
-    display_map::syntax_theme::SyntaxStyles,
+    display_map::syntax_theme::{self, SyntaxStyles},
     editor_state::{EditorId, ScrollGlide},
     emoji_expand,
     file_finder::{FileFinder, FinderPathCache},
@@ -452,18 +452,6 @@ fn config_errors_status(
     let errors: Vec<stoat_config::ParseError> =
         parse_errors.into_iter().chain(command_errors).collect();
     (!errors.is_empty()).then(|| config_error_status(source, &errors))
-}
-
-/// Point every registered language's highlight map at `styles`' theme keys.
-///
-/// Must run again after a theme swap, since the keys a capture name maps onto
-/// are derived from the active theme.
-pub(crate) fn install_highlight_maps(registry: &LanguageRegistry, styles: &SyntaxStyles) {
-    let theme_keys = styles.theme_keys();
-    for lang in registry.languages() {
-        let map = stoat_language::HighlightMap::new(lang.highlight_capture_names(), theme_keys);
-        lang.set_highlight_map(map);
-    }
 }
 
 /// Register one non-recursive watch per directory of the workspace at `root`.
@@ -2823,7 +2811,7 @@ impl Stoat {
         apply_log_level(&settings);
 
         let language_registry = Arc::new(LanguageRegistry::standard());
-        install_highlight_maps(&language_registry, &syntax_styles);
+        syntax_theme::install_highlight_maps(&language_registry, &syntax_styles);
 
         // Built before the first workspace, since an editor needs it at
         // construction to wake the run loop when its background rewrap settles.
@@ -3252,7 +3240,7 @@ impl Stoat {
         self.syntax_styles = syntax_styles;
         self.minimap_class_table = minimap_class_table;
 
-        install_highlight_maps(&self.language_registry, &self.syntax_styles);
+        syntax_theme::install_highlight_maps(&self.language_registry, &self.syntax_styles);
         // The theme, the syntax styles, and the settings the renderer reads
         // directly all just moved, and a parse failure returned above without
         // touching any of them.

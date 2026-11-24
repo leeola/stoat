@@ -8,7 +8,7 @@ use std::sync::{
     atomic::{AtomicU64, Ordering},
     Arc,
 };
-use stoat_language::HighlightId;
+use stoat_language::{HighlightId, HighlightMap, LanguageRegistry};
 
 /// Canonical list of syntax scope stems this build recognizes. Each entry
 /// is the tree-sitter capture-name suffix; the full theme scope is
@@ -166,6 +166,18 @@ impl SyntaxStyles {
         } else {
             self.theme_table.get(id.0 as usize).copied()
         }
+    }
+}
+
+/// Point every registered language's highlight map at `styles`' theme keys.
+///
+/// Must run again after a theme swap, since the keys a capture name maps onto
+/// are derived from the active theme.
+pub(crate) fn install_highlight_maps(registry: &LanguageRegistry, styles: &SyntaxStyles) {
+    let theme_keys = styles.theme_keys();
+    for lang in registry.languages() {
+        let map = HighlightMap::new(lang.highlight_capture_names(), theme_keys);
+        lang.set_highlight_map(map);
     }
 }
 

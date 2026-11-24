@@ -2527,13 +2527,12 @@ mod tests {
     };
     use crate::{
         action_handlers::{self, movement},
-        app,
         buffer::BufferId,
         diff_map::{
             BaseHighlights, DiffHunk, DiffHunkStatus, DiffMap, GutterMark, MarkKind, MarkState,
             ProseChange, StagedMark,
         },
-        display_map::syntax_theme::SyntaxStyles,
+        display_map::syntax_theme::{self, SyntaxStyles},
         host::DiffStatus,
         pane::View,
         review::ReviewFileInput,
@@ -3508,7 +3507,7 @@ mod tests {
         let theme = Theme::from_config(&config.expect("a theme config"), "t").expect("a theme");
         let styles = SyntaxStyles::from_theme(&theme);
         let registry = LanguageRegistry::standard();
-        app::install_highlight_maps(&registry, &styles);
+        syntax_theme::install_highlight_maps(&registry, &styles);
         let language = registry
             .for_path(Path::new(path))
             .expect("a bundled language");
