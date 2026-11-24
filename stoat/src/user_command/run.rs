@@ -5,6 +5,7 @@ use crate::{
     buffer_lifecycle,
     host::ShellOutput,
     keymap::ResolvedAction,
+    location_picker::{self, LocationEntry, ParsedLocation},
 };
 use std::{
     collections::VecDeque,
@@ -59,6 +60,8 @@ pub(crate) enum CommandEvent {
         run: u64,
         result: io::Result<ShellOutput>,
     },
+    /// The entries that the stdout of a `locations` run resolved to.
+    Locations { entries: Vec<LocationEntry> },
 }
 
 /// Run `command` with `values`, one value for each of its arguments.
@@ -92,12 +95,26 @@ pub(crate) fn start(stoat: &mut Stoat, command: &UserCommand, values: Vec<String
 pub(crate) fn pump(stoat: &mut Stoat) -> bool {
     let events = mem::take(&mut *stoat.command_events.lock().expect("command events mutex"));
     let landed = !events.is_empty();
-    for CommandEvent::StepDone { run, result } in events {
+    for event in events {
+        let (run, result) = match event {
+            CommandEvent::StepDone { run, result } => (run, result),
+            CommandEvent::Locations { entries } => {
+                match entries.is_empty() {
+                    true => stoat.notify(MessageKind::Info, "no locations"),
+                    false => {
+                        stoat.location_picker =
+                            Some(action_handlers::lsp::open_location_picker(stoat, entries));
+                    },
+                }
+                continue;
+            },
+        };
         let Some(index) = stoat.command_runs.iter().position(|held| held.id == run) else {
             continue;
         };
         let mut run = stoat.command_runs.remove(index);
         match result {
+            Ok(output) if run.output == Output::Locations => end_locations(stoat, &run, output),
             Ok(output) if output.exit_code == 0 => {
                 run.last_stdout = String::from_utf8_lossy(&output.stdout).into_owned();
                 advance(stoat, run);
@@ -127,7 +144,7 @@ fn plan(command: &UserCommand, values: &[String]) -> Plan {
             match command.output {
                 Output::Block => Plan::Modal(line),
                 Output::RunPane => Plan::Pane(line),
-                Output::Notify | Output::Buffer => {
+                Output::Notify | Output::Buffer | Output::Locations => {
                     Plan::Steps(VecDeque::from([PlannedStep::Shell(line)]))
                 },
             }
@@ -183,7 +200,7 @@ fn advance(stoat: &mut Stoat, mut run: CommandRun) -> UpdateEffect {
         Output::Buffer => {
             buffer_lifecycle::show_scratch_with_text(stoat, &run.last_stdout);
         },
-        Output::Block | Output::RunPane => {},
+        Output::Block | Output::RunPane | Output::Locations => {},
     }
     effect
 }
@@ -231,6 +248,47 @@ fn first_line(text: &str) -> Option<&str> {
     text.lines().map(str::trim).find(|line| !line.is_empty())
 }
 
+/// End the `locations` run `run`, whose shell step gave `output`, whatever
+/// its exit code.
+///
+/// The lines of the stdout that name a location resolve on a worker, and the
+/// picker opens over them when they land. With no location, a run that failed
+/// with a stderr line shows its failure, and any other run says so.
+fn end_locations(stoat: &mut Stoat, run: &CommandRun, output: ShellOutput) {
+    let parsed: Vec<ParsedLocation> = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter_map(location_picker::parse_location_line)
+        .collect();
+    if parsed.is_empty() {
+        let failed =
+            output.exit_code != 0 && first_line(&String::from_utf8_lossy(&output.stderr)).is_some();
+        match failed {
+            true => stoat.set_status(failure(&run.name, &Ok(output))),
+            false => stoat.notify(MessageKind::Info, "no locations"),
+        }
+        return;
+    }
+
+    let root = stoat.active_workspace().git_root.clone();
+    let open = action_handlers::lsp::open_ropes(stoat);
+    let fs = stoat.fs_host.clone();
+    let executor = stoat.executor.clone();
+    let events = stoat.command_events.clone();
+    stoat
+        .spawn_woken(async move {
+            let entries = executor
+                .spawn_blocking(move || {
+                    location_picker::resolve_locations(parsed, &root, &open, &*fs)
+                })
+                .await;
+            events
+                .lock()
+                .expect("command events mutex")
+                .push(CommandEvent::Locations { entries });
+        })
+        .detach();
+}
+
 /// The message for the run of the command `name` that `result` ended.
 ///
 /// A step that ran names the first line of its stderr and its exit code. A
@@ -252,6 +310,7 @@ mod tests {
         action_handlers,
         app::{MessageKind, Stoat},
         host::ShellOutput,
+        location_picker::LocationEntry,
         pane::{DockPanel, DockSide, DockVisibility, FocusTarget, View},
         test_harness::TestHarness,
         user_command::{CommandArg, Output, Step, UserCommand},
@@ -514,6 +573,77 @@ mod tests {
                 matches!(ws.panes.pane(ws.panes.focus()).view, View::Run(_)),
             ),
             (FocusTarget::SplitPane, true),
+        );
+    }
+
+    /// The user command `find`, which opens the locations that `rg` prints.
+    const FIND: &str =
+        r#"command find { arg what = text; run = shell("rg -n {what}"); output = locations; }"#;
+
+    #[test]
+    fn a_locations_command_opens_the_location_picker() {
+        let mut h = loaded(FIND);
+        h.fake_fs()
+            .insert_file("/repo/src/a.rs", "one\ntwo three\n");
+        h.fake_shell.set_response(
+            "rg -n three",
+            output(b"src/a.rs:2:5:two three\nnoise\n", b"", 0),
+        );
+        submit(&mut h, "find three");
+
+        let entries = h
+            .stoat
+            .location_picker
+            .as_ref()
+            .map(|picker| picker.entries().to_vec());
+        assert_eq!(
+            entries,
+            Some(vec![LocationEntry {
+                path: PathBuf::from("/repo/src/a.rs"),
+                offset: 8,
+                line: 2,
+                column: 5,
+                text: "two three".to_owned(),
+                block: None,
+            }]),
+        );
+    }
+
+    #[test]
+    fn a_locations_command_with_no_location_says_so() {
+        let mut h = loaded(FIND);
+        h.fake_shell
+            .set_response("rg -n three", output(b"", b"", 1));
+        submit(&mut h, "find three");
+        assert_eq!(
+            (message(&h), h.stoat.location_picker.is_none()),
+            ((Some("no locations"), MessageKind::Info), true),
+        );
+    }
+
+    #[test]
+    fn a_failed_locations_command_reports_its_stderr() {
+        let mut h = loaded(FIND);
+        h.fake_shell
+            .set_response("rg -n three", output(b"", b"rg: bad regex\n", 2));
+        submit(&mut h, "find three");
+        assert_eq!(
+            message(&h),
+            (Some("find: rg: bad regex (exit 2)"), MessageKind::Alert),
+        );
+    }
+
+    /// A run whose locations name no file that reads says so, as a run with
+    /// no location does.
+    #[test]
+    fn a_locations_command_whose_files_do_not_read_says_so() {
+        let mut h = loaded(FIND);
+        h.fake_shell
+            .set_response("rg -n three", output(b"src/gone.rs:1:1:three\n", b"", 0));
+        submit(&mut h, "find three");
+        assert_eq!(
+            (message(&h), h.stoat.location_picker.is_none()),
+            ((Some("no locations"), MessageKind::Info), true),
         );
     }
 }

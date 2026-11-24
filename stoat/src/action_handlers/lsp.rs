@@ -353,7 +353,7 @@ fn lsp_request_site(stoat: &mut Stoat) -> Option<LspRequestSite> {
 /// A goto target in an open file resolves against this text, because it is
 /// what the server was sent. The file on disk does not hold the unsaved edits,
 /// and it keeps its own line endings.
-fn open_ropes(stoat: &Stoat) -> HashMap<PathBuf, Rope> {
+pub(crate) fn open_ropes(stoat: &Stoat) -> HashMap<PathBuf, Rope> {
     let buffers = &stoat.active_workspace().buffers;
     buffers
         .open_paths()
@@ -602,7 +602,7 @@ fn goto_candidates(response: GotoDefinitionResponse) -> Vec<(Uri, Position, Opti
 /// The trimmed text of `line` (0-based) in `rope`, for display in the
 /// location picker. Returns an empty string when the line is out of
 /// range so a stale position never panics.
-fn line_text(rope: &Rope, line: u32) -> String {
+pub(crate) fn line_text(rope: &Rope, line: u32) -> String {
     let start = rope.point_to_offset(Point::new(line, 0));
     let end = rope
         .point_to_offset(Point::new(line + 1, 0))

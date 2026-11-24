@@ -62,6 +62,10 @@ pub(crate) enum Output {
     Buffer,
     /// A Run pane, whose shell runs the line of a shell step.
     RunPane,
+    /// The location picker, over the `path:line:col: text` lines of the
+    /// stdout, whatever the exit code, because a search tool exits 1 when it
+    /// finds nothing.
+    Locations,
 }
 
 /// A command as its layer lowers it, with what the `same_as` check reads.
@@ -255,6 +259,7 @@ fn lower(decl: &CommandDecl, errors: &mut Vec<ParseError>) -> Option<(UserComman
                     "notify" => Some(Output::Notify),
                     "buffer" => Some(Output::Buffer),
                     "run_pane" => Some(Output::RunPane),
+                    "locations" => Some(Output::Locations),
                     other => {
                         errors.push(error(&value.span, format!("unknown output `{other}`")));
                         None
