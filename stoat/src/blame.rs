@@ -518,29 +518,6 @@ impl BlameCard {
     }
 }
 
-/// For each line of `new`, the line of `base` that it keeps, or `None` for a
-/// line in a region that the line diff from `base` changed.
-///
-/// A buffer line keeps the commit of the HEAD line it matches, so the blame of
-/// a buffer maps its lines with this. The fake host's blame follows a line back
-/// through history the same way. A line keeps an older commit for as long as
-/// each diff leaves it alone.
-pub(crate) fn line_origins(base: &str, new: &str) -> Vec<Option<u32>> {
-    let new_lines = new.split_inclusive('\n').count();
-    let mut origins: Vec<Option<u32>> = Vec::with_capacity(new_lines);
-    let mut base_line = 0;
-    for (base_bytes, new_bytes) in structural_diff::line_hunks(base, new) {
-        let kept = boundary_line(new, new_bytes.start) as usize - origins.len();
-        origins.extend((base_line..).take(kept).map(Some));
-        origins.resize(boundary_line(new, new_bytes.end) as usize, None);
-        base_line = boundary_line(base, base_bytes.end);
-    }
-
-    let kept = new_lines - origins.len();
-    origins.extend((base_line..).take(kept).map(Some));
-    origins
-}
-
 /// The line of `parent_text` that line `line` of `commit_text` matches, which a
 /// blame of the commit's parent puts the cursor on.
 ///
@@ -549,7 +526,7 @@ pub(crate) fn line_origins(base: &str, new: &str) -> Vec<Option<u32>> {
 /// the parent line of the nearest kept line above it, or the first line when no
 /// line above is kept. The answer stays on a line the parent holds.
 pub(crate) fn parent_line(parent_text: &str, commit_text: &str, line: u32) -> u32 {
-    let origins = line_origins(parent_text, commit_text);
+    let origins = structural_diff::line_origins(parent_text, commit_text);
     let line = line as usize;
     if let Some(Some(origin)) = origins.get(line) {
         return *origin;
@@ -715,7 +692,7 @@ fn resolve_base(
 fn map_spans(base: Option<&BlameBase>, snapshot: &TextBufferSnapshot) -> Vec<BlameSpan> {
     let text = snapshot.visible_text.to_string();
     let origins: Vec<Option<SpanOrigin>> = match base {
-        Some(base) => line_origins(&base.text, &text)
+        Some(base) => structural_diff::line_origins(&base.text, &text)
             .into_iter()
             .map(|origin| origin.and_then(|line| line_origin(&base.blame, line)))
             .collect(),
@@ -830,26 +807,11 @@ fn resolve_rows(spans: &[BlameSpan], snapshot: &TextBufferSnapshot) -> BlameRows
     }
 }
 
-/// The line that a region boundary at byte `offset` of `text` comes before.
-///
-/// A region covers whole lines, so a boundary is the start of a line or the
-/// end of the text. The end comes after the last line even when that line has
-/// no newline. A count of the newlines before the end misses that line.
-fn boundary_line(text: &str, offset: usize) -> u32 {
-    if offset == text.len() {
-        return text.split_inclusive('\n').count() as u32;
-    }
-    text.as_bytes()[..offset]
-        .iter()
-        .filter(|&&byte| byte == b'\n')
-        .count() as u32
-}
-
 #[cfg(test)]
 mod tests {
     use super::{
-        age_buckets, date_time, line_origins, message_body, parent_line, short_date, BlameState,
-        CommitDetails, LineBlame, DETAILS_CAPACITY,
+        age_buckets, date_time, message_body, parent_line, short_date, BlameState, CommitDetails,
+        LineBlame, DETAILS_CAPACITY,
     };
     use crate::{
         app::Stoat,
@@ -869,25 +831,6 @@ mod tests {
         ("c1", "one", &[("a.rs", "one\n")]),
         ("c2", "two", &[("a.rs", "one\ntwo\n")]),
     ];
-
-    #[test]
-    fn line_origins_map_each_kept_line_to_its_base_line() {
-        assert_eq!(
-            [
-                line_origins("a\nb\n", "a\nb\n"),
-                line_origins("a\nb\n", "a\nx\nb\n"),
-                line_origins("a\nb\nc\n", "a\nx\nc\n"),
-                line_origins("a\nb\nc\n", "a\nc\n"),
-            ],
-            [
-                vec![Some(0), Some(1)],
-                vec![Some(0), None, Some(1)],
-                vec![Some(0), None, Some(2)],
-                vec![Some(0), Some(2)],
-            ],
-            "equal texts, an inserted line, a replaced line, a deleted line",
-        );
-    }
 
     /// A date reads its month and day in the commit's own zone for a year,
     /// and its year after that.

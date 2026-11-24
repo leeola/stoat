@@ -1,15 +1,12 @@
 mod rebase;
 
-use crate::{
-    blame,
-    host::{
-        fake::FakeFs,
-        git::{
-            BackendSnafu, BlameCommit, BlameRun, ChangeLineStats, ChangedFile, CherryPickOutcome,
-            CommitFileChange, CommitFileChangeKind, CommitInfo, ConflictedFile, DeletedBy,
-            FileBlame, FileChange, FileKind, GitApplyError, GitHost, GitRepo, HunkTallies,
-            MergeOutcome, MergeState, RebaseError, RebaseTodo, RewriteResult, StagedKind,
-        },
+use crate::host::{
+    fake::FakeFs,
+    git::{
+        BackendSnafu, BlameCommit, BlameRun, ChangeLineStats, ChangedFile, CherryPickOutcome,
+        CommitFileChange, CommitFileChangeKind, CommitInfo, ConflictedFile, DeletedBy, FileBlame,
+        FileChange, FileKind, GitApplyError, GitHost, GitRepo, HunkTallies, MergeOutcome,
+        MergeState, RebaseError, RebaseTodo, RewriteResult, StagedKind,
     },
 };
 use std::{
@@ -22,6 +19,7 @@ use std::{
         Arc, Mutex,
     },
 };
+use stoat_language::structural_diff;
 use stoat_text::LineEnding;
 
 /// The reason libgit2 gives when a commit meets an index that still holds an
@@ -2482,7 +2480,7 @@ impl GitRepo for FakeGitRepo {
                 break;
             };
 
-            let origins = blame::line_origins(parent_text, &commit.tree[rel]);
+            let origins = structural_diff::line_origins(parent_text, &commit.tree[rel]);
             let mut kept = Vec::with_capacity(pending.len());
             for (blamed, line) in pending {
                 match origins[line as usize] {
