@@ -1,4 +1,4 @@
-use super::{context, pick, ArgKind, Output, Step, UserCommand};
+use super::{context, pick, ArgKind, Output, RunSpec, Step, UserCommand};
 use crate::{
     action_handlers,
     app::{MessageKind, Stoat, UpdateEffect},
@@ -84,7 +84,8 @@ pub(crate) enum CommandEvent {
 ///
 /// A shell step under the `block` output runs in the run modal. Any other
 /// step runs here, a shell step on a worker with no terminal, so its stdout
-/// and its stderr stay apart.
+/// and its stderr stay apart. A `cli` command runs as a shell step does, with
+/// its tail as its one value.
 ///
 /// An empty value of an argument with a default runs with the default, as
 /// [`context::default_text`] reads it. A `file` or `dir` value that starts
@@ -175,47 +176,36 @@ fn fill_defaults(stoat: &mut Stoat, command: &UserCommand, mut values: Vec<Strin
 /// the directory `home`. With no `home`, each value stays as typed.
 ///
 /// A shell step writes each value as a quoted word, and the shell expands no
-/// `~` in a quoted word.
-fn expand_home(command: &UserCommand, values: Vec<String>, home: Option<&str>) -> Vec<String> {
+/// `~` in a quoted word. The tail of a `cli` command stands past the
+/// arguments and stays as typed, because the shell reads it unquoted and
+/// expands its `~` itself.
+fn expand_home(command: &UserCommand, mut values: Vec<String>, home: Option<&str>) -> Vec<String> {
     let Some(home) = home else {
         return values;
     };
-    command
-        .args
-        .iter()
-        .zip(values)
-        .map(|(arg, value)| {
-            let path = matches!(arg.kind, ArgKind::File | ArgKind::Dir);
-            match path && value.starts_with("~/") {
-                true => Path::new(home)
-                    .join(&value["~/".len()..])
-                    .to_string_lossy()
-                    .into_owned(),
-                false => value,
-            }
-        })
-        .collect()
+    for (value, arg) in values.iter_mut().zip(&command.args) {
+        let path = matches!(arg.kind, ArgKind::File | ArgKind::Dir);
+        if let Some(rest) = value.strip_prefix("~/").filter(|_| path) {
+            *value = Path::new(home).join(rest).to_string_lossy().into_owned();
+        }
+    }
+    values
 }
 
 /// The steps of `command` with each placeholder written from `values`, which
 /// stand in the order of the command's arguments.
 ///
 /// A shell line writes each value as one shell word. A string argument of an
-/// action writes each value as it is.
+/// action writes each value as it is. A `cli` command runs the line that
+/// [`cli_line`] writes from its tool and its tail.
 fn plan(command: &UserCommand, values: &[String]) -> Plan {
     let value = |name: &str| arg_value(command, values, name);
-    match &command.step {
-        Step::Shell(template) => {
-            let line = template.render_shell(value);
-            match command.output {
-                Output::Block => Plan::Modal(line),
-                Output::RunPane => Plan::Pane(line),
-                Output::Notify | Output::Buffer | Output::Locations => {
-                    Plan::Steps(VecDeque::from([PlannedStep::Shell(line)]))
-                },
-            }
+    match &command.run {
+        RunSpec::Cli { tool } => shell_plan(cli_line(tool, values), command.output),
+        RunSpec::Step(Step::Shell(template)) => {
+            shell_plan(template.render_shell(value), command.output)
         },
-        Step::Action(action) => {
+        RunSpec::Step(Step::Action(action)) => {
             let mut action = action.clone();
             for arg in &mut action.args {
                 if let Value::String(text) = &mut arg.value {
@@ -224,6 +214,29 @@ fn plan(command: &UserCommand, values: &[String]) -> Plan {
             }
             Plan::Steps(VecDeque::from([PlannedStep::Act(action)]))
         },
+    }
+}
+
+/// How the shell line `line` runs under `output`.
+fn shell_plan(line: String, output: Output) -> Plan {
+    match output {
+        Output::Block => Plan::Modal(line),
+        Output::RunPane => Plan::Pane(line),
+        Output::Notify | Output::Buffer | Output::Locations => {
+            Plan::Steps(VecDeque::from([PlannedStep::Shell(line)]))
+        },
+    }
+}
+
+/// The shell line that runs the wrapped `tool` with the tail, the first of
+/// `values`, trimmed.
+///
+/// The tail joins the line as typed, with no quoting, so its flags, quotes,
+/// and globs keep their shell meaning. An empty tail runs the tool alone.
+fn cli_line(tool: &str, values: &[String]) -> String {
+    match values.first().map_or("", |tail| tail.trim()) {
+        "" => tool.to_owned(),
+        tail => format!("{tool} {tail}"),
     }
 }
 
@@ -379,17 +392,20 @@ fn land_preview(stoat: &mut Stoat, generation: u64, line: String, result: io::Re
     pick.previews.insert(line, Some(text));
 }
 
-/// The shell line that the shell step of `command` runs with `values`, one
-/// for each argument, or `None` for an action step.
+/// The shell line that `command` runs with `values`, one for each argument
+/// or the tail of a `cli` command, or `None` for an action step.
 ///
 /// The palette's key line names it. It writes each value as [`plan`] does.
 /// A `file` or `dir` value keeps its leading `~/`. Only the run expands it to
 /// the home directory, so the line on show reads that path as typed.
 pub(crate) fn run_line_preview(command: &UserCommand, values: &[String]) -> Option<String> {
-    let Step::Shell(template) = &command.step else {
-        return None;
-    };
-    Some(template.render_shell(|name| arg_value(command, values, name)))
+    match &command.run {
+        RunSpec::Cli { tool } => Some(cli_line(tool, values)),
+        RunSpec::Step(Step::Shell(template)) => {
+            Some(template.render_shell(|name| arg_value(command, values, name)))
+        },
+        RunSpec::Step(Step::Action(_)) => None,
+    }
 }
 
 /// The value in `values` of the argument of `command` named `name`, or `None`
@@ -484,7 +500,7 @@ mod tests {
         location_picker::LocationEntry,
         pane::{DockPanel, DockSide, DockVisibility, FocusTarget, View},
         test_harness::TestHarness,
-        user_command::{ArgKind, CommandArg, Output, Step, UserCommand},
+        user_command::{ArgKind, CommandArg, Output, RunSpec, Step, UserCommand},
     };
     use std::path::{Path, PathBuf};
     use stoat_config::Template;
@@ -548,7 +564,7 @@ mod tests {
                 name: "pr".to_owned(),
                 kind: ArgKind::Text { default: None },
             }],
-            step: Step::Shell(Template::parse("gh pr checkout {pr}")),
+            run: RunSpec::Step(Step::Shell(Template::parse("gh pr checkout {pr}"))),
             output: Output::Block,
         };
         assert_eq!(
@@ -970,5 +986,68 @@ mod tests {
             (message(&h), h.stoat.location_picker.is_none()),
             ((Some("no locations"), MessageKind::Info), true),
         );
+    }
+
+    /// The `cli` command `rg`, which opens the locations that `rg` prints.
+    const RG: &str = r#"command rg = cli("rg", output: locations);"#;
+
+    #[test]
+    fn a_wrap_command_runs_the_tool_with_the_typed_tail() {
+        let mut h = loaded(RG);
+        h.fake_fs()
+            .insert_file("/repo/src/a.rs", "one\ntwo three\n");
+        h.fake_shell.set_response(
+            "rg -n three src",
+            output(b"src/a.rs:2:5:two three\n", b"", 0),
+        );
+        submit(&mut h, "rg -n three src");
+
+        let entries = h
+            .stoat
+            .location_picker
+            .as_ref()
+            .map(|picker| picker.entries().to_vec());
+        assert_eq!(
+            (shell_lines(&h), entries),
+            (
+                vec!["rg -n three src".to_owned()],
+                Some(vec![LocationEntry {
+                    path: PathBuf::from("/repo/src/a.rs"),
+                    offset: 8,
+                    line: 2,
+                    column: 5,
+                    text: "two three".to_owned(),
+                    block: None,
+                }]),
+            ),
+        );
+    }
+
+    /// Enter on the bare name opens the entry of the tail, and Enter on an
+    /// empty tail runs the tool alone.
+    #[test]
+    fn a_wrap_command_with_no_tail_runs_the_tool_alone() {
+        let mut h = loaded(r#"command st = cli("git status", output: notify);"#);
+        submit(&mut h, "st");
+        let entry = h
+            .stoat
+            .command_palette
+            .as_ref()
+            .map(|palette| palette.input.text(h.stoat.active_workspace()));
+        h.type_keys("enter");
+        h.settle();
+        assert_eq!(
+            (entry.as_deref(), shell_lines(&h)),
+            (Some("st "), vec!["git status".to_owned()]),
+        );
+    }
+
+    /// The tail goes to the shell as typed, so a quote and a glob keep their
+    /// shell meaning.
+    #[test]
+    fn the_tail_keeps_its_quotes_and_globs() {
+        let mut h = loaded(RG);
+        submit(&mut h, r#"rg "a b" *.rs"#);
+        assert_eq!(shell_lines(&h), [r#"rg "a b" *.rs"#]);
     }
 }

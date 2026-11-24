@@ -9,7 +9,9 @@ use crate::{
     paths,
     picker::{self, PathPicker, PendingScan, Preview, PreviewPolicy, ScanTarget},
     rebase::RebasePause,
-    user_command::{run, ArgKind, CommandArg, CommandSet, PickSpec, TextDefault, UserCommand},
+    user_command::{
+        run, ArgKind, CommandArg, CommandSet, PickSpec, RunSpec, TextDefault, UserCommand,
+    },
     workspace::Workspace,
 };
 use ratatui::layout::Rect;
@@ -182,11 +184,15 @@ impl PaletteCommand {
         }
     }
 
-    /// The parameters of the action, or the arguments of the user command.
+    /// The parameters of the action, or the arguments of the user command. A
+    /// `cli` command takes one, its tail.
     pub(crate) fn arg_count(&self) -> usize {
         match self {
             PaletteCommand::Action(entry) => entry.def.params().len(),
-            PaletteCommand::User(command) => command.args.len(),
+            PaletteCommand::User(command) => match command.run {
+                RunSpec::Cli { .. } => 1,
+                RunSpec::Step(_) => command.args.len(),
+            },
         }
     }
 }
@@ -879,22 +885,51 @@ pub enum PaletteScope {
     Active,
     /// Every `palette_visible()` action, regardless of availability.
     All,
-    /// The user commands of the config alone, with no built-in command and no
-    /// `action` row.
+    /// The block commands of the config alone, with no built-in command and
+    /// no `action` row.
     Config,
+    /// The `cli` commands of the config alone, the tools that its
+    /// `command NAME = cli(...)` items wrap, with no built-in command and no
+    /// `action` row.
+    Cli,
 }
 
 impl PaletteScope {
     /// The scopes that `S-Tab` steps through, in order.
     ///
-    /// [`PaletteScope::Config`] joins the cycle while `commands` holds a user
-    /// command, because a scope stays out of the cycle until it lists a row.
+    /// [`PaletteScope::Config`] joins the cycle while `commands` holds a block
+    /// command, and [`PaletteScope::Cli`] while it holds a `cli` command,
+    /// because a scope stays out of the cycle until it lists a row.
     pub(crate) fn cycle(commands: &CommandSet) -> Vec<PaletteScope> {
         let mut scopes = vec![PaletteScope::Active, PaletteScope::All];
-        if commands.iter().next().is_some() {
-            scopes.push(PaletteScope::Config);
+        for scope in [PaletteScope::Config, PaletteScope::Cli] {
+            if commands.iter().any(|command| scope.lists(command)) {
+                scopes.push(scope);
+            }
         }
         scopes
+    }
+
+    /// Whether the scope lists the user command `command`.
+    ///
+    /// The Config scope lists the block commands and the Cli scope the `cli`
+    /// commands. Every other scope lists each user command.
+    fn lists(self, command: &UserCommand) -> bool {
+        let cli = matches!(command.run, RunSpec::Cli { .. });
+        match self {
+            PaletteScope::Active | PaletteScope::All => true,
+            PaletteScope::Config => !cli,
+            PaletteScope::Cli => cli,
+        }
+    }
+
+    /// Whether the scope lists the registered actions.
+    ///
+    /// They are the built-in commands, the `action` row, and the internal
+    /// actions under that row. The Config and Cli scopes list user commands
+    /// alone.
+    pub(crate) fn lists_registry(self) -> bool {
+        matches!(self, PaletteScope::Active | PaletteScope::All)
     }
 
     /// The names of the scopes that `S-Tab` reaches from this one, joined by
@@ -918,6 +953,7 @@ impl PaletteScope {
             PaletteScope::Active => "applicable",
             PaletteScope::All => "all",
             PaletteScope::Config => "config",
+            PaletteScope::Cli => "cli",
         }
     }
 }
@@ -1169,9 +1205,9 @@ impl CommandPalette {
     /// whichever list is showing.
     ///
     /// The command list counts its `action` row with the commands, except under
-    /// the Config scope, which lists no `action` row. The list of the internal
-    /// actions keeps the command list's box, so the box holds its place when
-    /// `action ` opens that list.
+    /// the Config and Cli scopes, which list no `action` row. The list of the
+    /// internal actions keeps the command list's box, so the box holds its
+    /// place when `action ` opens that list.
     ///
     /// Arg mode lists the argument picker's candidates, so `:o ` over a large
     /// workspace sizes to the file count rather than the command count. Both
@@ -1183,7 +1219,7 @@ impl CommandPalette {
         }
         match self.arg_picker.as_ref().filter(|_| self.command.is_some()) {
             Some(picker) => rows_of(picker.active_core_ref().picklist.base.len()),
-            None => rows_of(self.offering + usize::from(self.scope != PaletteScope::Config)),
+            None => rows_of(self.offering + usize::from(self.scope.lists_registry())),
         }
     }
 
@@ -1594,10 +1630,17 @@ impl CommandPalette {
     /// each of its arguments has a default, and it runs with each argument
     /// empty. Any other command opens the entry of its argument, with its name
     /// and a space in the input.
+    ///
+    /// A `cli` command opens the entry of its tail. While the history walks,
+    /// its recalled bare name runs the tool alone, as the run that recorded
+    /// the line did.
     fn enter_bare(&mut self, ws: &mut Workspace, command: PaletteCommand) -> PaletteOutcome {
         let runs = match &command {
             PaletteCommand::Action(entry) => dispatches_bare(entry),
-            PaletteCommand::User(user) => user.args.iter().all(CommandArg::optional),
+            PaletteCommand::User(user) => match user.run {
+                RunSpec::Cli { .. } => ws.palette_history.is_walking(),
+                RunSpec::Step(_) => user.args.iter().all(CommandArg::optional),
+            },
         };
         if !runs {
             self.input
@@ -1658,13 +1701,17 @@ impl CommandPalette {
     ///
     /// The tail gives the typed values, and the argument list gives the value
     /// of the argument in entry, as [`Self::picked_user_value`] takes it. An
-    /// argument with a default stays empty.
+    /// argument with a default stays empty. A `cli` command takes the whole
+    /// tail, trimmed, as its one value, which may be empty.
     fn enter_values(
         &mut self,
         ws: &Workspace,
         command: &UserCommand,
         tail: &str,
     ) -> Option<Vec<String>> {
+        if let RunSpec::Cli { .. } = command.run {
+            return Some(vec![tail.trim().to_owned()]);
+        }
         let count = command.args.len();
         let mut values: Vec<String> = split_user_args(tail, count)
             .into_iter()
@@ -1981,9 +2028,10 @@ fn resolve_typed(
 /// text less its trailing whitespace names a command, as [`resolve_command`]
 /// resolves one. Else a text with no whitespace names the one command that
 /// `scope` offers whose name starts with it, ASCII case ignored. The user
-/// commands take part, and outside the Config scope the `action` row takes
-/// part as one more command. So `quit-al` names `quit-all`, `act` names the
-/// `action` row, and `wri` names none of the commands that start with it.
+/// commands that `scope` lists take part, and in a scope that lists the
+/// registry the `action` row takes part as one more command. So `quit-al`
+/// names `quit-all`, `act` names the `action` row, and `wri` names none of the
+/// commands that start with it.
 fn named_command<'a>(
     text: &'a str,
     scope: PaletteScope,
@@ -2010,9 +2058,15 @@ fn named_command<'a>(
     };
     let mut named = registry::all()
         .filter(|entry| entry.is_command() && offers(entry, scope, ctx))
-        .chain(iter::once(action_row()).filter(|_| scope != PaletteScope::Config))
+        .chain(iter::once(action_row()).filter(|_| scope.lists_registry()))
         .map(PaletteCommand::Action)
-        .chain(commands.iter().cloned().map(PaletteCommand::User))
+        .chain(
+            commands
+                .iter()
+                .filter(|command| scope.lists(command))
+                .cloned()
+                .map(PaletteCommand::User),
+        )
         .filter(starts);
     match (named.next(), named.next()) {
         (Some(command), None) => Some((command, text)),
@@ -2257,34 +2311,38 @@ fn chosen_value(source: ValueSource, row: &str) -> &str {
 ///
 /// The Active scope hides the actions that do not apply to the current
 /// workspace state. So a scope flip changes how many commands the palette
-/// offers, not just their order. The Config scope offers no registered action.
-/// Every scope offers every user command.
+/// offers, not just their order. The Config and Cli scopes offer no registered
+/// action, as [`PaletteScope::lists_registry`] says.
 fn offers(
     entry: &registry::RegistryEntry,
     scope: PaletteScope,
     availability: &Availability,
 ) -> bool {
-    scope != PaletteScope::Config
+    scope.lists_registry()
         && entry.def.palette_visible()
         && (scope != PaletteScope::Active || action_is_available(entry.def.kind(), availability))
 }
 
 /// How many commands and how many internal actions `scope` offers before any
-/// query narrows them. The commands count the user commands of `commands`.
+/// query narrows them. The commands count the user commands of `commands`
+/// that `scope` lists.
 fn scope_offering(
     scope: PaletteScope,
     availability: &Availability,
     commands: &CommandSet,
 ) -> (usize, usize) {
+    let users = commands
+        .iter()
+        .filter(|command| scope.lists(command))
+        .count();
     registry::all()
         .filter(|entry| offers(entry, scope, availability))
-        .fold(
-            (commands.iter().count(), 0),
-            |(commands, actions), entry| match entry.is_command() {
+        .fold((users, 0), |(commands, actions), entry| {
+            match entry.is_command() {
                 true => (commands + 1, actions),
                 false => (commands, actions + 1),
-            },
-        )
+            }
+        })
 }
 
 /// A candidate count as list rows, saturating past what any screen could show.
@@ -2296,18 +2354,18 @@ fn rows_of(count: usize) -> u16 {
 /// `filtered` and `match_indices`, and clamp `selected` to the result.
 ///
 /// At the root the list holds the commands, the user commands of `commands`
-/// among them. With a query they rank with the built-in commands by name, and
-/// with none they follow the built-in commands in declaration order. Under
-/// `group` only the group's commands appear, and the text after the group
-/// token narrows them.
+/// that `scope` lists among them. With a query they rank with the built-in
+/// commands by name, and with none they follow the built-in commands in
+/// declaration order. Under `group` only the group's commands appear, and the
+/// text after the group token narrows them.
 ///
 /// With no group the `action` row ends the list when the query holds no atom
 /// or matches the row's name. The row leads the list when the query is the
-/// word `action`. The Config scope lists no `action` row. Under the `action`
-/// token the list holds the internal actions, which the text after the token
-/// narrows by their kebab names. Each match position indexes the whole command
-/// name either way. Neither a group nor the `action` list holds a user
-/// command.
+/// word `action`. The Config and Cli scopes list no `action` row. Under the
+/// `action` token the list holds the internal actions, which the text after
+/// the token narrows by their kebab names. Each match position indexes the
+/// whole command name either way. Neither a group nor the `action` list holds
+/// a user command.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn refilter(
     input: &str,
@@ -2321,7 +2379,11 @@ pub(crate) fn refilter(
 ) {
     let actions = action_query(input);
     let users: Vec<Arc<UserCommand>> = match (actions, group) {
-        (None, None) => commands.iter().cloned().collect(),
+        (None, None) => commands
+            .iter()
+            .filter(|command| scope.lists(command))
+            .cloned()
+            .collect(),
         _ => Vec::new(),
     };
     let visible: Vec<&'static registry::RegistryEntry> = registry::all()
@@ -2387,7 +2449,7 @@ pub(crate) fn refilter(
         match_indices.insert(0, indices);
     }
 
-    if actions.is_none() && group.is_none() && scope != PaletteScope::Config {
+    if actions.is_none() && group.is_none() && scope.lists_registry() {
         let row = PaletteCommand::Action(action_row());
         if needle.eq_ignore_ascii_case(ACTION_TOKEN) {
             filtered.insert(0, row);
@@ -3334,6 +3396,78 @@ mod tests {
             [hint(GREET_AND_PING), hint("")],
             [[true, true], [false, true]],
         );
+    }
+
+    /// With a block command and a `cli` command, the Cli scope follows the
+    /// Config scope in the cycle. Each lists and counts its own kind of user
+    /// command alone. With a `cli` command alone, the cycle holds no Config
+    /// scope.
+    #[test]
+    fn the_cli_scope_joins_the_cycle_and_lists_the_wrap_commands_alone() {
+        let both = user_commands(&format!("{GREET}\ncommand rg = cli(\"rg\");"));
+        let ctx = Availability::default();
+        let listed = |scope| {
+            let (mut filtered, mut indices, mut selected) = (Vec::new(), Vec::new(), 0);
+            refilter(
+                "",
+                None,
+                scope,
+                &ctx,
+                &both,
+                &mut filtered,
+                &mut indices,
+                &mut selected,
+            );
+            let names: Vec<String> = filtered
+                .iter()
+                .map(|command| command.name().to_owned())
+                .collect();
+            (names, scope_offering(scope, &ctx, &both))
+        };
+        let cycle = PaletteScope::cycle(&both);
+        assert_eq!(
+            (
+                PaletteScope::Active.next_names(&cycle),
+                cycle,
+                listed(PaletteScope::Config),
+                listed(PaletteScope::Cli),
+                PaletteScope::cycle(&user_commands("command rg = cli(\"rg\");")),
+            ),
+            (
+                "all / config / cli".to_owned(),
+                vec![
+                    PaletteScope::Active,
+                    PaletteScope::All,
+                    PaletteScope::Config,
+                    PaletteScope::Cli
+                ],
+                (vec!["greet".to_owned()], (1, 0)),
+                (vec!["rg".to_owned()], (1, 0)),
+                vec![PaletteScope::Active, PaletteScope::All, PaletteScope::Cli],
+            ),
+        );
+    }
+
+    /// Enter in History runs a recalled bare `cli` name with an empty tail,
+    /// where a typed bare name opens the entry of its tail.
+    #[test]
+    fn enter_in_history_runs_a_recalled_bare_wrap_command() {
+        let mut h = Stoat::test();
+        h.stoat
+            .reload_user_config(r#"command st = cli("git status");"#);
+        h.stoat.active_workspace_mut().palette_history =
+            InputHistory::from_entries(vec!["st".to_owned()]);
+        h.type_text(":");
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::PaletteUp);
+
+        let mut palette = h.stoat.command_palette.take().expect("palette open");
+        let run = match palette.handle_submit(h.stoat.active_workspace_mut()) {
+            PaletteOutcome::Run(command, values, line) => {
+                Some((command.name.clone(), values, line))
+            },
+            _ => None,
+        };
+        assert_eq!(run, Some(("st".to_owned(), Vec::new(), "st".to_owned())));
     }
 
     #[test]

@@ -38,7 +38,7 @@ pub(crate) struct UserCommand {
     /// The arguments in the order that the palette takes them. An argument
     /// with a default is optional, and every other one is required.
     pub(crate) args: Vec<CommandArg>,
-    pub(crate) step: Step,
+    pub(crate) run: RunSpec,
     pub(crate) output: Output,
 }
 
@@ -109,7 +109,19 @@ pub(crate) enum ContextValue {
     Line,
 }
 
-/// What a [`UserCommand`] runs.
+/// What a [`UserCommand`] runs, the step of a block or a wrapped tool.
+#[derive(Debug, PartialEq)]
+pub(crate) enum RunSpec {
+    /// The `run` step of a `command NAME { ... }` block.
+    Step(Step),
+    /// The tool of a `command NAME = cli("tool", ...)` item, one or more shell
+    /// words. The command has no argument. The palette takes the text after
+    /// its name as one optional tail, which follows the tool on the shell line
+    /// as typed.
+    Cli { tool: String },
+}
+
+/// The step that the `run` statement of a block command names.
 #[derive(Debug, PartialEq)]
 pub(crate) enum Step {
     /// A shell line, with each value written as one shell word.
@@ -210,8 +222,12 @@ impl CommandSet {
 
 impl UserCommand {
     /// The arguments as the palette's usage line writes them, one space apart.
-    /// A required argument reads `<name>`, and an optional one `[name]`.
+    /// A required argument reads `<name>`, and an optional one `[name]`. A
+    /// `cli` command reads `[args...]`, its one optional tail.
     pub(crate) fn signature(&self) -> String {
+        if let RunSpec::Cli { .. } = self.run {
+            return "[args...]".to_owned();
+        }
         let args: Vec<String> = self
             .args
             .iter()
@@ -319,6 +335,15 @@ fn lower(
 ) -> Option<(UserCommand, Vec<SameAs>)> {
     let statements = match &decl.body {
         CommandBody::Block(statements) => statements,
+        CommandBody::Wrap(call) if call.node.name.node == "cli" => {
+            return match cli_command(&decl.name.node, line, call) {
+                Ok(command) => Some((command, Vec::new())),
+                Err(fault) => {
+                    errors.push(fault);
+                    None
+                },
+            };
+        },
         CommandBody::Wrap(call) => {
             let form = &call.node.name;
             errors.push(error(
@@ -378,17 +403,14 @@ fn lower(
             },
             CommandStatement::Output(_) if output.is_some() => errors.push(twice("output")),
             CommandStatement::Output(value) => {
-                output = Some(match value.node.as_str() {
-                    "block" => Some(Output::Block),
-                    "notify" => Some(Output::Notify),
-                    "buffer" => Some(Output::Buffer),
-                    "run_pane" => Some(Output::RunPane),
-                    "locations" => Some(Output::Locations),
-                    other => {
-                        errors.push(error(&value.span, format!("unknown output `{other}`")));
-                        None
-                    },
-                });
+                let named = output_named(&value.node);
+                if named.is_none() {
+                    errors.push(error(
+                        &value.span,
+                        format!("unknown output `{}`", value.node),
+                    ));
+                }
+                output = Some(named);
             },
         }
     }
@@ -413,10 +435,108 @@ fn lower(
         doc: doc.unwrap_or_default(),
         line,
         args,
-        step: step?,
+        run: RunSpec::Step(step?),
         output: output.flatten().unwrap_or(Output::Block),
     };
     Some((command, same_as))
+}
+
+/// The command `name` that the call `cli(...)` declares on line `line`, or
+/// why the call declares none.
+///
+/// The one positional string is the tool, which holds more than whitespace.
+/// The named `output` names an output, `block` when the call leaves it out.
+/// The named `doc` is the description of the palette's row, which the call's
+/// syntax gives no other place. The named `completions` is a string, which the
+/// call checks and does not keep.
+fn cli_command(name: &str, line: u32, call: &Spanned<Call>) -> Result<UserCommand, ParseError> {
+    let as_string = "`cli` takes the tool as a string";
+    let mut tool: Option<&Spanned<CallValue>> = None;
+    let mut output = None;
+    let mut doc = None;
+    let mut completions = None;
+    for arg in call.node.args.iter().flatten() {
+        let (key, value) = match &arg.node {
+            CallArg::Positional(_) if tool.is_some() => {
+                return Err(error(&arg.span, "`cli` takes one tool"));
+            },
+            CallArg::Positional(value) => {
+                tool = Some(value);
+                continue;
+            },
+            CallArg::Named { name: key, value } => (key, value),
+        };
+        let slot = match key.node.as_str() {
+            "output" => &mut output,
+            "doc" => &mut doc,
+            "completions" => &mut completions,
+            other => {
+                return Err(error(
+                    &key.span,
+                    format!("`cli` takes no argument `{other}`"),
+                ));
+            },
+        };
+        if slot.replace(value).is_some() {
+            return Err(error(&arg.span, format!("`{}` is set twice", key.node)));
+        }
+    }
+
+    let tool = tool.ok_or_else(|| error(&call.span, as_string))?;
+    let tool = match &tool.node {
+        CallValue::Value(Value::String(text)) if !text.trim().is_empty() => text.clone(),
+        _ => return Err(error(&tool.span, as_string)),
+    };
+
+    let output = match output {
+        None => Output::Block,
+        Some(value) => match &value.node {
+            CallValue::Value(Value::Ident(named)) => output_named(named)
+                .ok_or_else(|| error(&value.span, format!("unknown output `{named}`")))?,
+            _ => return Err(error(&value.span, "`output` takes an output name")),
+        },
+    };
+    let doc = named_string(doc, "doc")?.unwrap_or_default();
+    named_string(completions, "completions")?;
+
+    Ok(UserCommand {
+        name: name.to_owned(),
+        doc,
+        line,
+        args: Vec::new(),
+        run: RunSpec::Cli { tool },
+        output,
+    })
+}
+
+/// The text of the named argument `key` of `cli`, whose value is `value`, or
+/// `None` for an argument that the call leaves out.
+///
+/// A value that is no string is an error.
+fn named_string(
+    value: Option<&Spanned<CallValue>>,
+    key: &str,
+) -> Result<Option<String>, ParseError> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    match &value.node {
+        CallValue::Value(Value::String(text)) => Ok(Some(text.clone())),
+        _ => Err(error(&value.span, format!("`{key}` takes a string"))),
+    }
+}
+
+/// The output that `name` names, as an `output` statement or an `output:`
+/// argument writes it, or `None` for a name that names no output.
+fn output_named(name: &str) -> Option<Output> {
+    match name {
+        "block" => Some(Output::Block),
+        "notify" => Some(Output::Notify),
+        "buffer" => Some(Output::Buffer),
+        "run_pane" => Some(Output::RunPane),
+        "locations" => Some(Output::Locations),
+        _ => None,
+    }
 }
 
 /// The kind that the argument kind `kind` names, with the target of a
@@ -843,8 +963,8 @@ fn error(span: &Span, message: impl Into<String>) -> ParseError {
 #[cfg(test)]
 mod tests {
     use super::{
-        ArgKind, CommandArg, CommandSet, ContextValue, Output, PickSpec, Step, TextDefault,
-        UserCommand,
+        ArgKind, CommandArg, CommandSet, ContextValue, Output, PickSpec, RunSpec, Step,
+        TextDefault, UserCommand,
     };
     use crate::app;
     use std::sync::Arc;
@@ -918,7 +1038,7 @@ mod tests {
                         name: "who".to_owned(),
                         kind: ArgKind::Text { default: None },
                     }],
-                    step: Step::Shell(Template::parse("echo hello {who}")),
+                    run: RunSpec::Step(Step::Shell(Template::parse("echo hello {who}"))),
                     output: Output::Notify,
                 }],
                 Vec::new(),
@@ -968,13 +1088,13 @@ mod tests {
         );
         let (set, errors) = load(source);
         assert_eq!(
-            (errors, set.get("hello").map(|command| &command.step)),
+            (errors, set.get("hello").map(|command| &command.run)),
             (
                 vec![fault(
                     name_span(source, "HELLO"),
                     "command `HELLO` is declared twice"
                 )],
-                Some(&Step::Shell(Template::parse("first"))),
+                Some(&RunSpec::Step(Step::Shell(Template::parse("first")))),
             ),
         );
     }
@@ -988,12 +1108,12 @@ mod tests {
         assert_eq!(
             (
                 names(&set),
-                set.get("hello").map(|command| &command.step),
+                set.get("hello").map(|command| &command.run),
                 errors
             ),
             (
                 vec!["hello"],
-                Some(&Step::Shell(Template::parse("mine"))),
+                Some(&RunSpec::Step(Step::Shell(Template::parse("mine")))),
                 Vec::new()
             ),
         );
@@ -1043,6 +1163,100 @@ mod tests {
                         "`same_as` takes one command name"
                     ),
                     fault(span(source, "other"), "`other` is not a command form"),
+                ],
+            ),
+        );
+    }
+
+    /// The command that a `cli` item of [`load`] declares, with no argument.
+    fn wrap(name: &str, line: u32, tool: &str, output: Output, doc: &str) -> UserCommand {
+        UserCommand {
+            name: name.to_owned(),
+            doc: doc.to_owned(),
+            line,
+            args: Vec::new(),
+            run: RunSpec::Cli {
+                tool: tool.to_owned(),
+            },
+            output,
+        }
+    }
+
+    /// A `cli` item lowers to its tool, its output, and its doc. The output
+    /// defaults to `block`, and `completions` loads as a string.
+    #[test]
+    fn a_wrap_command_lowers_to_its_tool_output_and_doc() {
+        let (set, errors) = load(concat!(
+            "command rg = cli(\"rg\", output: locations, doc: \"search the tree\");\n",
+            "command st = cli(\"git status\", completions: \"git completion fish\");",
+        ));
+        let commands: Vec<&UserCommand> = set.commands.iter().map(AsRef::as_ref).collect();
+        assert_eq!(
+            (commands, errors),
+            (
+                vec![
+                    &wrap("rg", 1, "rg", Output::Locations, "search the tree"),
+                    &wrap("st", 2, "git status", Output::Block, ""),
+                ],
+                Vec::new(),
+            ),
+        );
+    }
+
+    /// An argument that `cli` does not take is reported at its name. A value
+    /// of the wrong type, a second tool, and a second setting are reported
+    /// too.
+    #[test]
+    fn a_wrap_call_with_an_unknown_argument_is_reported() {
+        let source = concat!(
+            "command a = cli(\"a\", sort: \"x\");\n",
+            "command bee = cli(\"b\", doc: 1);\n",
+            "command c = cli(\"c\", output: loud);\n",
+            "command d = cli(\"d\", output: \"notify\");\n",
+            "command e = cli(\"e\", completions: true);\n",
+            "command f = cli(\"f\", \"g\");\n",
+            "command h = cli(\"h\", output: notify, output: block);",
+        );
+        let (set, errors) = load(source);
+        assert_eq!(
+            (names(&set), errors),
+            (
+                Vec::new(),
+                vec![
+                    fault(span(source, "sort"), "`cli` takes no argument `sort`"),
+                    fault(span(source, "1"), "`doc` takes a string"),
+                    fault(span(source, "loud"), "unknown output `loud`"),
+                    fault(span(source, "\"notify\""), "`output` takes an output name"),
+                    fault(span(source, "true"), "`completions` takes a string"),
+                    fault(span(source, "\"g\""), "`cli` takes one tool"),
+                    fault(span(source, "output: block"), "`output` is set twice"),
+                ],
+            ),
+        );
+    }
+
+    /// A `cli` call with no positional string, an empty one, or a positional
+    /// that is no string names no tool.
+    #[test]
+    fn a_wrap_call_with_no_tool_is_reported() {
+        let source = concat!(
+            "command a = cli(output: notify);\n",
+            "command bee = cli(\" \");\n",
+            "command c = cli(1);\n",
+            "command d = cli;",
+        );
+        let bare = span(source, "cli;").start;
+        let (set, errors) = load(source);
+        let no_tool = |at| fault(at, "`cli` takes the tool as a string");
+        assert_eq!(
+            (names(&set), errors),
+            (
+                Vec::new(),
+                vec![
+                    no_tool(span(source, "cli(output: notify)")),
+                    no_tool(span(source, "\" \"")),
+                    no_tool(span(source, "1")),
+                    no_tool(bare..bare + "cli".len()),
                 ],
             ),
         );

@@ -16,7 +16,7 @@ use crate::{
         text::{pre_wrap_rows, wrap_text, write_str, write_str_clipped},
     },
     theme::TypeRole,
-    user_command::{pick, CommandSet},
+    user_command::{pick, CommandSet, RunSpec},
     workspace::Workspace,
 };
 use ratatui::{
@@ -1404,10 +1404,10 @@ fn marked_spans(
 ///
 /// At the root it counts the commands on show, the user commands among them.
 /// Then it names the `action` row and the internal actions that the scope
-/// offers behind it, as `11 commands · action for 1,204 more`. The Config
-/// scope lists no `action` row, so its status ends after the count. Under the
-/// `action` token it counts the actions on show out of those that the scope
-/// offers, as `8 of 1,204 actions`. The `action` token reads in the
+/// offers behind it, as `11 commands · action for 1,204 more`. The Config and
+/// Cli scopes list no `action` row, so their status ends after the count.
+/// Under the `action` token it counts the actions on show out of those that
+/// the scope offers, as `8 of 1,204 actions`. The `action` token reads in the
 /// `ui.cmd.action` foreground.
 fn filter_status(palette: &CommandPalette, theme: &crate::theme::Theme) -> Vec<(String, Style)> {
     let more = grouped(palette.action_offering);
@@ -1422,7 +1422,7 @@ fn filter_status(palette: &CommandPalette, theme: &crate::theme::Theme) -> Vec<(
         .filter(|command| !names_action_row(command))
         .count();
     let mut spans = count_status(shown, " commands", theme);
-    if palette.scope == PaletteScope::Config {
+    if !palette.scope.lists_registry() {
         return spans;
     }
 
@@ -1781,7 +1781,8 @@ fn paint_doc_tag(
 ///
 /// A user command's doc reads its name in bold, its usage line, and its `doc`
 /// text wrapped to `width`. Its last line names where the config declares it,
-/// as `config command`, a space, U+00B7, a space, and `config.stcfg:<line>`.
+/// as the label of its Source Tag, ` command`, a space, U+00B7, a space, and
+/// `config.stcfg:<line>`.
 ///
 /// The argument stage names the parameter that it collects, so no line names
 /// a parameter.
@@ -1808,7 +1809,8 @@ fn doc_lines(
                     .into_iter()
                     .map(|line| vec![(line, dim)]),
             );
-            let defined = format!("config command \u{b7} config.stcfg:{}", user.line);
+            let (label, _) = doc_tag(command);
+            let defined = format!("{label} command \u{b7} config.stcfg:{}", user.line);
             lines.push(vec![(defined, muted)]);
             return lines;
         },
@@ -1879,8 +1881,9 @@ fn usage_line(command: &PaletteCommand) -> String {
 }
 
 /// Each parameter of `command`, as `<name>` when the parameter is required and
-/// `[name]` when it is optional, one space apart. A user command's arguments
-/// are all required.
+/// `[name]` when it is optional, one space apart. A user command reads as its
+/// [`UserCommand::signature`](crate::user_command::UserCommand::signature)
+/// writes it.
 fn signature(command: &PaletteCommand) -> String {
     let entry = match command {
         PaletteCommand::Action(entry) => entry,
@@ -2251,12 +2254,16 @@ fn pascal_name(command: &PaletteCommand, _offset: usize) -> &str {
 /// `None` for an internal action, whose list names no source.
 ///
 /// The `action` row reads `internal`. A command reads `built-in`, because every
-/// command in the registry ships with stoat, and a user command reads `config`.
+/// command in the registry ships with stoat. A user command reads `config`, or
+/// `cli` for a command that wraps a tool.
 fn source_tag(command: &PaletteCommand) -> Option<(&'static str, &'static str)> {
     let entry = match command {
         PaletteCommand::Action(entry) => entry,
-        PaletteCommand::User(_) => {
-            return Some(("config", crate::theme::scope::UI_CMD_SOURCE_CONFIG));
+        PaletteCommand::User(user) => {
+            return Some(match user.run {
+                RunSpec::Cli { .. } => ("cli", crate::theme::scope::UI_CMD_SOURCE_CLI),
+                RunSpec::Step(_) => ("config", crate::theme::scope::UI_CMD_SOURCE_CONFIG),
+            });
         },
     };
     if is_action_row(entry) {
@@ -3566,18 +3573,23 @@ mod tests {
         (buf, scene)
     }
 
-    /// A user row reads its name, no alias, its signature, and its doc as its
-    /// description. Its Source Tag reads `config` in `ui.cmd.source.config`.
-    #[test]
-    fn a_user_row_reads_its_name_signature_description_and_tag() {
-        let (buf, _) = painted_row(greet(), &Theme::empty());
+    /// The `cli` command `rg` on line 1, with the doc `search the tree`.
+    fn rg() -> PaletteCommand {
+        user_command(r#"command rg = cli("rg", doc: "search the tree");"#, "rg")
+    }
+
+    /// The text of `command`'s row, and the bars and the text runs of its row
+    /// under a theme that sets the Source Tag scope `scope` to `#010203` on
+    /// `#040506`, each with its color.
+    fn user_row(command: PaletteCommand, scope: &str) -> (String, Vec<(String, [u8; 3])>) {
+        let (buf, _) = painted_row(command.clone(), &Theme::empty());
         let theme = {
-            let src = r##"theme t { ui.cmd.source.config = { fg: "#010203", bg: "#040506" }; }"##;
-            let (config, _) = stoat_config::parse(src);
+            let src = format!(r##"theme t {{ {scope} = {{ fg: "#010203", bg: "#040506" }}; }}"##);
+            let (config, _) = stoat_config::parse(&src);
             Theme::from_config(&config.expect("theme parses"), "t").expect("theme loads")
         };
-        let (_, scene) = painted_row(greet(), &theme);
-        let tag: Vec<(String, [u8; 3])> = decode_stream(scene.bytes())
+        let (_, scene) = painted_row(command, &theme);
+        let tag = decode_stream(scene.bytes())
             .into_iter()
             .filter_map(|command| match command {
                 Command::Bar(bar) => Some(("bar".to_owned(), bar.color)),
@@ -3585,9 +3597,15 @@ mod tests {
                 _ => None,
             })
             .collect();
+        (row_text(&buf, 0), tag)
+    }
 
+    /// A user row reads its name, no alias, its signature, and its doc as its
+    /// description. Its Source Tag reads `config` in `ui.cmd.source.config`.
+    #[test]
+    fn a_user_row_reads_its_name_signature_description_and_tag() {
         assert_eq!(
-            (row_text(&buf, 0), tag),
+            user_row(greet(), "ui.cmd.source.config"),
             (
                 placed(100, &[(1, "greet"), (19, "<who>"), (48, "say hello")]),
                 vec![
@@ -3598,20 +3616,47 @@ mod tests {
         );
     }
 
+    /// A wrap row reads its name, the free signature `[args...]`, and its doc
+    /// as its description. Its Source Tag reads `cli` in `ui.cmd.source.cli`.
+    #[test]
+    fn a_wrap_row_reads_the_cli_tag_and_a_free_signature() {
+        assert_eq!(
+            user_row(rg(), "ui.cmd.source.cli"),
+            (
+                placed(
+                    100,
+                    &[(1, "rg"), (19, "[args...]"), (48, "search the tree")]
+                ),
+                vec![("bar".to_owned(), [4, 5, 6]), ("cli".to_owned(), [1, 2, 3])],
+            ),
+        );
+    }
+
+    /// The last line names the Source Tag of the command, `config` for a block
+    /// command and `cli` for a wrapped tool.
     #[test]
     fn the_doc_of_a_user_command_names_where_it_is_defined() {
-        let lines = doc_lines(&greet(), &ActionKeys::new(), 60, &Theme::empty());
-        let texts: Vec<String> = lines
-            .iter()
-            .map(|line| line.iter().map(|(text, _)| text.as_str()).collect())
-            .collect();
+        let texts = |command: PaletteCommand| -> Vec<String> {
+            doc_lines(&command, &ActionKeys::new(), 60, &Theme::empty())
+                .iter()
+                .map(|line| line.iter().map(|(text, _)| text.as_str()).collect())
+                .collect()
+        };
         assert_eq!(
-            texts,
+            [texts(greet()), texts(rg())],
             [
-                "greet",
-                "greet <who>",
-                "say hello",
-                "config command \u{b7} config.stcfg:1"
+                [
+                    "greet",
+                    "greet <who>",
+                    "say hello",
+                    "config command \u{b7} config.stcfg:1"
+                ],
+                [
+                    "rg",
+                    "rg [args...]",
+                    "search the tree",
+                    "cli command \u{b7} config.stcfg:1"
+                ],
             ],
         );
     }
