@@ -1,8 +1,4 @@
-use crate::{
-    host::terminal::{SpawnArgs, TerminalHost, TerminalSession},
-    run::{pty::PtyNotification, RunId},
-    workspace::WorkspaceId,
-};
+use crate::host::terminal::{SpawnArgs, TerminalHost, TerminalSession};
 use async_trait::async_trait;
 use std::{
     io,
@@ -208,34 +204,6 @@ impl TerminalSession for ArcTerminalSession {
     }
 }
 
-pub fn inject_output(
-    tx: &mpsc::Sender<PtyNotification>,
-    workspace: WorkspaceId,
-    run_id: RunId,
-    data: &[u8],
-) {
-    tx.try_send(PtyNotification::Output {
-        workspace,
-        run_id,
-        data: data.to_vec(),
-    })
-    .expect("pty_tx send failed");
-}
-
-pub fn inject_done(
-    tx: &mpsc::Sender<PtyNotification>,
-    workspace: WorkspaceId,
-    run_id: RunId,
-    exit_code: i32,
-) {
-    tx.try_send(PtyNotification::CommandDone {
-        workspace,
-        run_id,
-        exit_status: Some(exit_code),
-    })
-    .expect("pty_tx send failed");
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -313,25 +281,5 @@ mod tests {
             assert_eq!(spawned.try_wait().await.unwrap(), Some(7));
             assert_eq!(spawned.read_chunk().await.unwrap(), None);
         });
-    }
-
-    #[test]
-    fn inject_delivers_notification() {
-        let (tx, mut rx) = mpsc::channel(16);
-        let run_id = RunId::default();
-        let workspace = WorkspaceId::default();
-        inject_output(&tx, workspace, run_id, b"data");
-        inject_done(&tx, workspace, run_id, 0);
-
-        let notif = rx.try_recv().unwrap();
-        assert!(matches!(notif, PtyNotification::Output { data, .. } if data == b"data"));
-        let notif = rx.try_recv().unwrap();
-        assert!(matches!(
-            notif,
-            PtyNotification::CommandDone {
-                exit_status: Some(0),
-                ..
-            }
-        ));
     }
 }

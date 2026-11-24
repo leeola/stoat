@@ -26,7 +26,7 @@ pub use clipboard::{
 pub use fake::{
     change_params, completion_params, definition_params, document_highlight_params, hover_params,
     inlay_hint_params, open_params, reference_params,
-    terminal::{inject_done, inject_output, FakeTerminalHost, FakeTerminalSession},
+    terminal::{FakeTerminalHost, FakeTerminalSession},
     workspace_symbol_params, FakeClipboard, FakeEnv, FakeFs, FakeFsOp, FakeFsWatcher, FakeGit,
     FakeLsp, FakeRepoBuilder,
 };
