@@ -22,7 +22,8 @@ use std::{
     sync::{Arc, OnceLock},
 };
 use stoat_action::{
-    registry, ActionDef, ActionKind, ParamDef, ParamError, ParamKind, ParamValue, ValueSource,
+    registry, ActionDef, ActionKind, ActionPriority, ParamDef, ParamError, ParamKind, ParamValue,
+    ValueSource,
 };
 use stoat_language::LanguageRegistry;
 use stoat_scheduler::{Executor, Task};
@@ -33,10 +34,11 @@ pub struct CommandPalette {
     /// Parsed each frame into an optional command plus a trailing argument
     /// by [`CommandPalette::refilter_from_input`].
     pub(crate) input: InputView,
-    /// Action entries matching the current filter text, in display order.
-    /// Empty while [`Self::command`] is set, since arg mode replaces the
-    /// action list with the argument picker.
-    pub(crate) filtered: Vec<&'static registry::RegistryEntry>,
+    /// The commands matching the current filter text, in display order. The
+    /// built-in commands come first, then the user commands, then the `action`
+    /// row. Empty while [`Self::command`] is set, since arg mode replaces the
+    /// list with the argument picker.
+    pub(crate) filtered: Vec<PaletteCommand>,
     /// Per-row matched character offsets into each entry's name, parallel to
     /// [`Self::filtered`], used by the renderer to highlight matched cells.
     pub(crate) match_indices: Vec<Vec<u32>>,
@@ -154,8 +156,17 @@ pub(crate) enum PaletteCommand {
 }
 
 impl PaletteCommand {
+    /// The name that the palette's list and input spell, the action's command
+    /// name or the user command's name.
+    pub(crate) fn name(&self) -> &str {
+        match self {
+            PaletteCommand::Action(entry) => &entry.command_name,
+            PaletteCommand::User(command) => &command.name,
+        }
+    }
+
     /// The parameters of the action, or the arguments of the user command.
-    fn arg_count(&self) -> usize {
+    pub(crate) fn arg_count(&self) -> usize {
         match self {
             PaletteCommand::Action(entry) => entry.def.params().len(),
             PaletteCommand::User(command) => command.args.len(),
@@ -663,18 +674,45 @@ pub enum PaletteScope {
     Active,
     /// Every `palette_visible()` action, regardless of availability.
     All,
+    /// The user commands of the config alone, with no built-in command and no
+    /// `action` row.
+    Config,
 }
 
 impl PaletteScope {
+    /// The scopes that `S-Tab` steps through, in order.
+    ///
+    /// [`PaletteScope::Config`] joins the cycle while `commands` holds a user
+    /// command, because a scope stays out of the cycle until it lists a row.
+    pub(crate) fn cycle(commands: &CommandSet) -> Vec<PaletteScope> {
+        let mut scopes = vec![PaletteScope::Active, PaletteScope::All];
+        if commands.iter().next().is_some() {
+            scopes.push(PaletteScope::Config);
+        }
+        scopes
+    }
+
     /// The names of the scopes that `S-Tab` reaches from this one, joined by
     /// ` / `, as the palette's key line names them. The names stand in the
-    /// order that the key reaches the scopes.
-    ///
-    /// The cycle holds two scopes, so the answer names the other one.
-    pub(crate) fn next_names(self) -> &'static str {
+    /// order that the key reaches the scopes in `cycle`.
+    pub(crate) fn next_names(self, cycle: &[PaletteScope]) -> String {
+        let at = cycle.iter().position(|scope| *scope == self).unwrap_or(0);
+        let names: Vec<&str> = cycle
+            .iter()
+            .cycle()
+            .skip(at + 1)
+            .take(cycle.len().saturating_sub(1))
+            .map(|scope| scope.name())
+            .collect();
+        names.join(" / ")
+    }
+
+    /// The name that the key line gives the scope.
+    fn name(self) -> &'static str {
         match self {
-            PaletteScope::Active => "all",
-            PaletteScope::All => "applicable",
+            PaletteScope::Active => "applicable",
+            PaletteScope::All => "all",
+            PaletteScope::Config => "config",
         }
     }
 }
@@ -886,11 +924,12 @@ impl CommandPalette {
             None,
             scope,
             &availability,
+            &commands,
             &mut filtered,
             &mut match_indices,
             &mut selected,
         );
-        let (offering, action_offering) = scope_offering(scope, &availability);
+        let (offering, action_offering) = scope_offering(scope, &availability, &commands);
         Self {
             input,
             filtered,
@@ -921,9 +960,10 @@ impl CommandPalette {
     /// Rows the modal's list needs for the whole candidate set behind it,
     /// whichever list is showing.
     ///
-    /// The command list counts its `action` row with the commands. The list of
-    /// the internal actions keeps the command list's box, so the box holds its
-    /// place when `action ` opens that list.
+    /// The command list counts its `action` row with the commands, except under
+    /// the Config scope, which lists no `action` row. The list of the internal
+    /// actions keeps the command list's box, so the box holds its place when
+    /// `action ` opens that list.
     ///
     /// Arg mode lists the argument picker's candidates, so `:o ` over a large
     /// workspace sizes to the file count rather than the command count. Both
@@ -931,7 +971,7 @@ impl CommandPalette {
     pub(crate) fn list_rows_hint(&self) -> u16 {
         match self.arg_picker.as_ref().filter(|_| self.command.is_some()) {
             Some(picker) => rows_of(picker.active_core_ref().picklist.base.len()),
-            None => rows_of(self.offering + 1),
+            None => rows_of(self.offering + usize::from(self.scope != PaletteScope::Config)),
         }
     }
 
@@ -942,15 +982,19 @@ impl CommandPalette {
         self.group.map_or(0, |group| group.len() + 1)
     }
 
-    /// Flip the palette's [`PaletteScope`] and re-run the current-input
+    /// Step the palette's [`PaletteScope`] to the next one of its cycle, as
+    /// [`PaletteScope::cycle`] orders them, and re-run the current-input
     /// filter against the new scope. Called from the `PaletteScopeToggle`
     /// action handler (Shift-Tab).
     pub(crate) fn toggle_scope(&mut self, ws: &Workspace) {
-        self.scope = match self.scope {
-            PaletteScope::Active => PaletteScope::All,
-            PaletteScope::All => PaletteScope::Active,
-        };
-        (self.offering, self.action_offering) = scope_offering(self.scope, &self.availability);
+        let cycle = PaletteScope::cycle(&self.commands);
+        let at = cycle
+            .iter()
+            .position(|scope| *scope == self.scope)
+            .unwrap_or(0);
+        self.scope = cycle[(at + 1) % cycle.len()];
+        (self.offering, self.action_offering) =
+            scope_offering(self.scope, &self.availability, &self.commands);
         self.refilter_from_input(ws);
     }
 
@@ -1143,6 +1187,7 @@ impl CommandPalette {
                 self.group,
                 self.scope,
                 &self.availability,
+                &self.commands,
                 &mut self.filtered,
                 &mut self.match_indices,
                 &mut self.selected,
@@ -1185,7 +1230,8 @@ impl CommandPalette {
                 return match parse_args(params, arg, picked.as_deref()) {
                     Ok((values, tokens)) => {
                         self.input.dispose(ws);
-                        let line = format!("{} {tokens}", history_head(entry));
+                        let line =
+                            format!("{} {tokens}", history_head(&PaletteCommand::Action(entry)));
                         PaletteOutcome::Dispatch(entry, values, line)
                     },
                     Err(err) => {
@@ -1228,7 +1274,11 @@ impl CommandPalette {
             return match ParamValue::parse(param.kind, &chosen) {
                 Ok(value) => {
                     self.input.dispose(ws);
-                    let line = format!("{} {}", history_head(entry), chosen);
+                    let line = format!(
+                        "{} {}",
+                        history_head(&PaletteCommand::Action(entry)),
+                        chosen
+                    );
                     PaletteOutcome::Dispatch(entry, vec![value], line)
                 },
                 Err(err) => {
@@ -1259,46 +1309,44 @@ impl CommandPalette {
         // commands, so a bare internal action runs under the `action` token.
         let bare = text.trim();
         if (self.selected == 0 || walking)
-            && let Some(entry) = resolve_head(bare, &self.availability)
+            && let Some(command) = resolve_command(bare, &self.availability, &self.commands)
         {
-            if dispatches_bare(entry) {
-                self.input.dispose(ws);
-                return PaletteOutcome::Dispatch(entry, Vec::new(), history_head(entry));
-            }
-            self.input
-                .replace_text(ws, &format!("{} ", typed_head(entry)));
-            return PaletteOutcome::None;
-        }
-        if (self.selected == 0 || walking)
-            && let Some(command) = self.commands.get(bare).cloned()
-        {
-            if command.args.is_empty() {
-                self.input.dispose(ws);
-                let line = command.name.clone();
-                return PaletteOutcome::Run(command, Vec::new(), line);
-            }
-            self.input.replace_text(ws, &format!("{} ", command.name));
-            return PaletteOutcome::None;
+            return self.enter_bare(ws, command);
         }
         if walking {
             tracing::info!(target: "stoat::command", text = %text, "no command matched");
             return PaletteOutcome::None;
         }
 
-        match self.filtered.get(self.selected).copied() {
-            Some(entry) if dispatches_bare(entry) => {
-                self.input.dispose(ws);
-                PaletteOutcome::Dispatch(entry, Vec::new(), history_head(entry))
-            },
-            Some(entry) => {
-                self.input
-                    .replace_text(ws, &format!("{} ", typed_head(entry)));
-                PaletteOutcome::None
-            },
+        match self.filtered.get(self.selected).cloned() {
+            Some(command) => self.enter_bare(ws, command),
             None => {
                 tracing::info!(target: "stoat::command", text = %text, "no command matched");
                 PaletteOutcome::None
             },
+        }
+    }
+
+    /// The outcome of Enter on `command` with no argument typed.
+    ///
+    /// A command that runs with no argument runs. Any other opens the entry of
+    /// its argument, with its name and a space in the input.
+    fn enter_bare(&mut self, ws: &mut Workspace, command: PaletteCommand) -> PaletteOutcome {
+        let runs = match &command {
+            PaletteCommand::Action(entry) => dispatches_bare(entry),
+            PaletteCommand::User(user) => user.args.is_empty(),
+        };
+        if !runs {
+            self.input
+                .replace_text(ws, &format!("{} ", typed_head(&command)));
+            return PaletteOutcome::None;
+        }
+
+        self.input.dispose(ws);
+        let line = history_head(&command);
+        match command {
+            PaletteCommand::Action(entry) => PaletteOutcome::Dispatch(entry, Vec::new(), line),
+            PaletteCommand::User(user) => PaletteOutcome::Run(user, Vec::new(), line),
         }
     }
 
@@ -1501,13 +1549,17 @@ fn lookup_action(name: &str) -> Option<&'static registry::RegistryEntry> {
     })
 }
 
-/// The text that names `entry` in the palette's input, which Enter and Tab
+/// The text that names `command` in the palette's input, which Enter and Tab
 /// write.
 ///
-/// A command and the `action` row read by their command name. An internal
-/// action reads as the `action` token and its kebab name, because only that
-/// form resolves it.
-pub(crate) fn typed_head(entry: &registry::RegistryEntry) -> String {
+/// A command and the `action` row read by their command name, and a user
+/// command by its name. An internal action reads as the `action` token and its
+/// kebab name, because only that form resolves it.
+pub(crate) fn typed_head(command: &PaletteCommand) -> String {
+    let entry = match command {
+        PaletteCommand::Action(entry) => entry,
+        PaletteCommand::User(command) => return command.name.clone(),
+    };
     match entry.is_command() || is_action_row(entry) {
         true => entry.command_name.clone(),
         false => format!("{ACTION_TOKEN} {}", entry.command_name),
@@ -1518,10 +1570,9 @@ pub(crate) fn typed_head(entry: &registry::RegistryEntry) -> String {
 /// it, or `None` when the text names no command.
 ///
 /// At the root the head follows [`named_command`], and the ghost follows
-/// [`ghost_of`]. A user command has no ghost. Under the `action` token the
-/// head is the token and the action's name when the name resolves. Else the
-/// head is the token alone, which names the `action` row. Neither has a
-/// ghost.
+/// [`ghost_of`]. Under the `action` token the head is the token and the
+/// action's name when the name resolves. Else the head is the token alone,
+/// which names the `action` row. Neither has a ghost.
 fn resolve_typed(
     text: &str,
     scope: PaletteScope,
@@ -1549,7 +1600,7 @@ fn resolve_typed(
     let (entry, head) = named_command(text, scope, ctx, commands)?;
     let ghost = match &entry {
         PaletteCommand::Action(action) => ghost_of(head, &action.command_name),
-        PaletteCommand::User(_) => String::new(),
+        PaletteCommand::User(user) => ghost_of(head, &user.name),
     };
     Some(ResolvedCommand {
         entry,
@@ -1563,11 +1614,11 @@ fn resolve_typed(
 ///
 /// A head that [`split_head`] finds names its command first. Else the whole
 /// text less its trailing whitespace names a command, as [`resolve_command`]
-/// resolves one. Else a text with no whitespace names the one built-in command
-/// that `scope` offers whose command name starts with it, ASCII case ignored.
-/// The `action` row takes part as one more command. So `quit-al` names
-/// `quit-all`, `act` names the `action` row, and `wri` names none of the
-/// commands that start with it.
+/// resolves one. Else a text with no whitespace names the one command that
+/// `scope` offers whose name starts with it, ASCII case ignored. The user
+/// commands take part, and outside the Config scope the `action` row takes
+/// part as one more command. So `quit-al` names `quit-all`, `act` names the
+/// `action` row, and `wri` names none of the commands that start with it.
 fn named_command<'a>(
     text: &'a str,
     scope: PaletteScope,
@@ -1586,18 +1637,20 @@ fn named_command<'a>(
     if text.is_empty() || text.contains(char::is_whitespace) {
         return None;
     }
-    let starts = |entry: &&'static registry::RegistryEntry| {
-        entry
-            .command_name
+    let starts = |command: &PaletteCommand| {
+        command
+            .name()
             .get(..text.len())
             .is_some_and(|prefix| prefix.eq_ignore_ascii_case(text))
     };
     let mut named = registry::all()
         .filter(|entry| entry.is_command() && offers(entry, scope, ctx))
-        .chain(iter::once(action_row()))
+        .chain(iter::once(action_row()).filter(|_| scope != PaletteScope::Config))
+        .map(PaletteCommand::Action)
+        .chain(commands.iter().cloned().map(PaletteCommand::User))
         .filter(starts);
     match (named.next(), named.next()) {
-        (Some(entry), None) => Some((PaletteCommand::Action(entry), text)),
+        (Some(command), None) => Some((command, text)),
         _ => None,
     }
 }
@@ -1749,18 +1802,22 @@ fn dispatches_bare(entry: &registry::RegistryEntry) -> bool {
         .is_none_or(|param| !param.required)
 }
 
-/// The head to record for `entry` in palette history, its first alias when it
-/// has one, else its [`typed_head`].
+/// The head to record for `command` in palette history, its first alias when it
+/// has one, else its [`typed_head`]. A user command records its name.
 ///
 /// Each re-resolves through [`parse_command`], so a recalled `head [arg]` line
 /// runs again. A command without an alias records its command name. An
 /// internal action records the `action` token and its kebab name, because the
 /// root resolves no internal action. The alias is preferred because it reads
 /// like the short form a user types (`cd`, not `set-cwd`).
-fn history_head(entry: &registry::RegistryEntry) -> String {
-    match entry.def.aliases().first() {
+fn history_head(command: &PaletteCommand) -> String {
+    let alias = match command {
+        PaletteCommand::Action(entry) => entry.def.aliases().first(),
+        PaletteCommand::User(_) => None,
+    };
+    match alias {
         Some(alias) => (*alias).to_owned(),
-        None => typed_head(entry),
+        None => typed_head(command),
     }
 }
 
@@ -1793,29 +1850,36 @@ fn chosen_value(source: ValueSource, row: &str) -> &str {
 
 /// Whether `entry` belongs in the palette's list under `scope`.
 ///
-/// The Active scope hides actions the current workspace state cannot run, so a
-/// scope flip changes how many commands the palette offers, not just their
-/// order.
+/// The Active scope hides the actions that do not apply to the current
+/// workspace state. So a scope flip changes how many commands the palette
+/// offers, not just their order. The Config scope offers no registered action.
+/// Every scope offers every user command.
 fn offers(
     entry: &registry::RegistryEntry,
     scope: PaletteScope,
     availability: &Availability,
 ) -> bool {
-    entry.def.palette_visible()
+    scope != PaletteScope::Config
+        && entry.def.palette_visible()
         && (scope != PaletteScope::Active || action_is_available(entry.def.kind(), availability))
 }
 
 /// How many commands and how many internal actions `scope` offers before any
-/// query narrows them.
-fn scope_offering(scope: PaletteScope, availability: &Availability) -> (usize, usize) {
+/// query narrows them. The commands count the user commands of `commands`.
+fn scope_offering(
+    scope: PaletteScope,
+    availability: &Availability,
+    commands: &CommandSet,
+) -> (usize, usize) {
     registry::all()
         .filter(|entry| offers(entry, scope, availability))
-        .fold((0, 0), |(commands, actions), entry| {
-            match entry.is_command() {
+        .fold(
+            (commands.iter().count(), 0),
+            |(commands, actions), entry| match entry.is_command() {
                 true => (commands + 1, actions),
                 false => (commands, actions + 1),
-            }
-        })
+            },
+        )
 }
 
 /// A candidate count as list rows, saturating past what any screen could show.
@@ -1826,24 +1890,35 @@ fn rows_of(count: usize) -> u16 {
 /// Rank the entries that palette input `input` lists under `scope` into
 /// `filtered` and `match_indices`, and clamp `selected` to the result.
 ///
-/// At the root the list holds the commands. Under `group` only the group's
-/// commands appear, and the text after the group token narrows them. With no
-/// group the `action` row ends the list when the query holds no atom or
-/// matches the row's name. The row leads the list when the query is the word
-/// `action`. Under the `action` token the list holds the internal actions,
-/// which the text after the token narrows by their kebab names. Each match
-/// position indexes the whole command name either way.
+/// At the root the list holds the commands, the user commands of `commands`
+/// among them. With a query they rank with the built-in commands by name, and
+/// with none they follow the built-in commands in declaration order. Under
+/// `group` only the group's commands appear, and the text after the group
+/// token narrows them.
+///
+/// With no group the `action` row ends the list when the query holds no atom
+/// or matches the row's name. The row leads the list when the query is the
+/// word `action`. The Config scope lists no `action` row. Under the `action`
+/// token the list holds the internal actions, which the text after the token
+/// narrows by their kebab names. Each match position indexes the whole command
+/// name either way. Neither a group nor the `action` list holds a user
+/// command.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn refilter(
     input: &str,
     group: Option<&str>,
     scope: PaletteScope,
     availability: &Availability,
-    filtered: &mut Vec<&'static registry::RegistryEntry>,
+    commands: &CommandSet,
+    filtered: &mut Vec<PaletteCommand>,
     match_indices: &mut Vec<Vec<u32>>,
     selected: &mut usize,
 ) {
     let actions = action_query(input);
+    let users: Vec<Arc<UserCommand>> = match (actions, group) {
+        (None, None) => commands.iter().cloned().collect(),
+        _ => Vec::new(),
+    };
     let visible: Vec<&'static registry::RegistryEntry> = registry::all()
         .filter(|entry| offers(entry, scope, availability))
         .filter(|entry| entry.is_command() == actions.is_none())
@@ -1869,7 +1944,7 @@ pub(crate) fn refilter(
     };
     filtered.clear();
     match_indices.clear();
-    rank_entries(query, offset, visible, filtered, match_indices);
+    rank_entries(query, offset, visible, &users, filtered, match_indices);
 
     // Pin an exact name or alias match to the top so the displayed list agrees
     // with what Enter dispatches. `w` (SaveBuffer) and `o` (OpenFile) resolve by
@@ -1880,17 +1955,26 @@ pub(crate) fn refilter(
         Some(_) => lookup_action(needle),
         None => lookup_root(needle),
     };
-    if let Some(pinned) = pinned.filter(|pinned| offers(pinned, scope, availability)) {
+    let pinned = pinned
+        .filter(|pinned| offers(pinned, scope, availability))
+        .map(PaletteCommand::Action)
+        .or_else(|| {
+            let user = users
+                .iter()
+                .find(|command| command.name.eq_ignore_ascii_case(needle));
+            user.cloned().map(PaletteCommand::User)
+        });
+    if let Some(pinned) = pinned {
         let indices = match filtered
             .iter()
-            .position(|e| e.def.name() == pinned.def.name())
+            .position(|command| same_command(command, &pinned))
         {
             Some(pos) => {
                 filtered.remove(pos);
                 match_indices.remove(pos)
             },
-            None if pinned.command_name.eq_ignore_ascii_case(needle) => {
-                (0..pinned.command_name.chars().count() as u32).collect()
+            None if pinned.name().eq_ignore_ascii_case(needle) => {
+                (0..pinned.name().chars().count() as u32).collect()
             },
             None => Vec::new(),
         };
@@ -1898,13 +1982,13 @@ pub(crate) fn refilter(
         match_indices.insert(0, indices);
     }
 
-    if actions.is_none() && group.is_none() {
-        let row = action_row();
+    if actions.is_none() && group.is_none() && scope != PaletteScope::Config {
+        let row = PaletteCommand::Action(action_row());
         if needle.eq_ignore_ascii_case(ACTION_TOKEN) {
             filtered.insert(0, row);
             match_indices.insert(0, (0..ACTION_TOKEN.len() as u32).collect());
         } else {
-            let matched = match fuzzy::match_and_rank(query, iter::once((row, ACTION_TOKEN))) {
+            let matched = match fuzzy::match_and_rank(query, iter::once(((), ACTION_TOKEN))) {
                 None => Some(Vec::new()),
                 Some(matches) => matches.into_iter().next().map(|m| m.matched_indices),
             };
@@ -1918,40 +2002,62 @@ pub(crate) fn refilter(
     picker::nav_clamp(filtered.len(), selected);
 }
 
-/// Rank `visible` against `query` into `filtered` and `match_indices`, each
-/// name matched past its first `offset` bytes.
+/// Whether `a` and `b` name one command, the same registry entry or the same
+/// user command.
+fn same_command(a: &PaletteCommand, b: &PaletteCommand) -> bool {
+    match (a, b) {
+        (PaletteCommand::Action(a), PaletteCommand::Action(b)) => ptr::eq(*a, *b),
+        (PaletteCommand::User(a), PaletteCommand::User(b)) => Arc::ptr_eq(a, b),
+        _ => false,
+    }
+}
+
+/// Rank the registered `visible` and the user commands `users` against
+/// `query` into `filtered` and `match_indices`, each name matched past its
+/// first `offset` bytes.
 ///
-/// A query with no atom lists every entry by priority and then by name. A
-/// match ranks by its score, then by priority, then by name.
+/// A query with no atom lists every entry by priority and then by name, and
+/// then the user commands in their order. A match ranks by its score, then by
+/// priority, then by name. A user command ranks at the `Normal` priority,
+/// because it has no priority of its own.
 fn rank_entries(
     query: &str,
     offset: usize,
     visible: Vec<&'static registry::RegistryEntry>,
-    filtered: &mut Vec<&'static registry::RegistryEntry>,
+    users: &[Arc<UserCommand>],
+    filtered: &mut Vec<PaletteCommand>,
     match_indices: &mut Vec<Vec<u32>>,
 ) {
     let items = visible
         .iter()
-        .copied()
-        .map(|entry| (entry, &entry.command_name[offset..]));
+        .map(|&entry| (PaletteCommand::Action(entry), &entry.command_name[offset..]))
+        .chain(users.iter().map(|command| {
+            let name = command.name.get(offset..).unwrap_or("");
+            (PaletteCommand::User(command.clone()), name)
+        }));
     let Some(mut matches) = fuzzy::match_and_rank(query, items) else {
         let mut all = visible;
         all.sort_by_key(|e| (e.def.priority().ord(), e.command_name.as_str()));
         for entry in all {
-            filtered.push(entry);
+            filtered.push(PaletteCommand::Action(entry));
+            match_indices.push(Vec::new());
+        }
+        for command in users {
+            filtered.push(PaletteCommand::User(command.clone()));
             match_indices.push(Vec::new());
         }
         return;
     };
 
+    let priority = |command: &PaletteCommand| match command {
+        PaletteCommand::Action(entry) => entry.def.priority().ord(),
+        PaletteCommand::User(_) => ActionPriority::Normal.ord(),
+    };
     matches.sort_by(|a, b| {
         b.score.cmp(&a.score).then_with(|| {
-            a.item
-                .def
-                .priority()
-                .ord()
-                .cmp(&b.item.def.priority().ord())
-                .then_with(|| a.item.command_name.cmp(&b.item.command_name))
+            priority(&a.item)
+                .cmp(&priority(&b.item))
+                .then_with(|| a.item.name().cmp(b.item.name()))
         })
     });
     for m in matches {
@@ -1976,6 +2082,13 @@ mod tests {
         picker::PREVIEW_DIR_LIMIT,
         test_harness::{editor, TestHarness},
     };
+    use crossterm::event::Event;
+    use ratatui::{
+        buffer::Buffer,
+        style::{Color, Modifier},
+    };
+    use std::{collections::BTreeMap, time::Duration};
+    use stoat_action::{Action, ParamKind};
 
     /// The def name of the action that `command` names. These tests resolve
     /// over no user command, so a user command fails the test.
@@ -1985,13 +2098,15 @@ mod tests {
             PaletteCommand::User(command) => panic!("`{}` is a user command", command.name),
         }
     }
-    use crossterm::event::Event;
-    use ratatui::{
-        buffer::Buffer,
-        style::{Color, Modifier},
-    };
-    use std::{collections::BTreeMap, time::Duration};
-    use stoat_action::{Action, ParamKind};
+
+    /// The registry entry that `command` names. These tests list no user
+    /// command, so a user command fails the test.
+    fn entry_of(command: &PaletteCommand) -> &'static registry::RegistryEntry {
+        match command {
+            PaletteCommand::Action(entry) => entry,
+            PaletteCommand::User(command) => panic!("`{}` is a user command", command.name),
+        }
+    }
 
     /// Seed `files` into the harness' fake fs under a fixed virtual root and
     /// point the active workspace at it, so the palette's inline file picker
@@ -2149,11 +2264,12 @@ mod tests {
             input_group(text, availability, &CommandSet::default()),
             scope,
             availability,
+            &CommandSet::default(),
             &mut filtered,
             &mut match_indices,
             &mut selected,
         );
-        filtered
+        filtered.iter().map(entry_of).collect()
     }
 
     fn priority_ord_of(command_name: &str) -> u8 {
@@ -2336,13 +2452,14 @@ mod tests {
                 group,
                 PaletteScope::All,
                 &ctx,
+                &CommandSet::default(),
                 &mut filtered,
                 &mut match_indices,
                 &mut selected,
             );
             filtered
                 .iter()
-                .position(|entry| entry.command_name == "git log")
+                .position(|command| command.name() == "git log")
                 .map(|at| match_indices[at].clone())
         };
         assert_eq!(
@@ -2515,7 +2632,11 @@ mod tests {
         h.type_text(":pwd");
         h.type_keys("enter");
 
-        let head = |name| history_head(registry::lookup(name).expect("a registered action"));
+        let head = |name| {
+            history_head(&PaletteCommand::Action(
+                registry::lookup(name).expect("a registered action"),
+            ))
+        };
         assert_eq!(
             (
                 h.stoat.active_workspace().palette_history.entries(),
@@ -2535,7 +2656,7 @@ mod tests {
     /// The user commands that `source` declares, over no embedded command.
     fn user_commands(source: &str) -> CommandSet {
         let config = |source| stoat_config::parse(source).0.expect("the config parses");
-        let (set, errors) = CommandSet::build(&config(""), Some(&config(source)));
+        let (set, errors) = CommandSet::build((&config(""), ""), Some((&config(source), source)));
         assert_eq!(errors, Vec::new(), "the commands load");
         set
     }
@@ -2623,6 +2744,223 @@ mod tests {
             ),
             (Some("greet"), 5, "", true),
         );
+    }
+
+    /// The user commands `greet`, on line 1 with the argument `who` and the
+    /// doc `say hello`, and `ping`, on line 2 with no argument.
+    const GREET_AND_PING: &str = concat!(
+        "command greet { doc = \"say hello\"; arg who = text; ",
+        "run = shell(\"echo hello {who}\"); output = notify; }\n",
+        "command ping { run = Notify(\"pong\"); }",
+    );
+
+    /// A `width` by `height` harness with [`GREET_AND_PING`] loaded and the
+    /// palette open.
+    fn user_palette(width: u16, height: u16) -> TestHarness {
+        let mut h = TestHarness::with_size(width, height);
+        h.stoat.reload_user_config(GREET_AND_PING);
+        h.type_text(":");
+        h
+    }
+
+    /// The names of the rows that the open palette lists.
+    fn row_names(h: &TestHarness) -> Vec<String> {
+        h.stoat
+            .command_palette
+            .as_ref()
+            .expect("palette open")
+            .filtered
+            .iter()
+            .map(|command| command.name().to_owned())
+            .collect()
+    }
+
+    /// Select the row of the open palette named `name`.
+    fn select_row(h: &mut TestHarness, name: &str) {
+        let palette = h.stoat.command_palette.as_mut().expect("palette open");
+        palette.selected = palette
+            .filtered
+            .iter()
+            .position(|command| command.name() == name)
+            .expect("the row is listed");
+    }
+
+    #[test]
+    fn the_root_list_holds_user_commands_before_the_action_row() {
+        let names = row_names(&user_palette(80, 24));
+        assert_eq!(names[names.len() - 3..], ["greet", "ping", "action"]);
+    }
+
+    /// A user command ranks as a Normal action does. Each name below matches
+    /// `di` at its start, so the priority orders them, and then the name does.
+    #[test]
+    fn a_query_ranks_a_user_command_with_the_built_in_commands() {
+        let mut h = TestHarness::with_size(80, 24);
+        h.stoat
+            .reload_user_config("command dia { run = Notify(\"x\"); }");
+        h.type_text(":di");
+        assert_eq!(
+            row_names(&h)[..5],
+            [
+                "diagnostics",
+                "diff-changes",
+                "diff-files",
+                "dia",
+                "diff-against-head"
+            ]
+        );
+    }
+
+    /// The exact name of a user command pins its row first, and the list
+    /// holds the row once. The `terminal` command matches `ter` as well and
+    /// takes the tie on its Common priority.
+    #[test]
+    fn an_exact_user_command_name_pins_its_row_first() {
+        let mut h = TestHarness::with_size(80, 24);
+        h.stoat
+            .reload_user_config("command ter { run = Notify(\"x\"); }");
+        h.type_text(":ter");
+        let names = row_names(&h);
+        let rows = names.iter().filter(|name| *name == "ter").count();
+        assert_eq!(
+            (names[0].as_str(), names[1].as_str(), rows),
+            ("ter", "terminal", 1)
+        );
+    }
+
+    /// Two `S-Tab` presses reach the Config scope, which lists the user
+    /// commands alone and counts them in the header. A third returns to the
+    /// applicable scope.
+    #[test]
+    fn the_config_scope_joins_the_cycle_and_lists_the_user_commands_alone() {
+        let mut h = user_palette(120, 30);
+        h.type_keys("backtab");
+        h.type_keys("backtab");
+        let scope = |h: &TestHarness| {
+            h.stoat
+                .command_palette
+                .as_ref()
+                .expect("palette open")
+                .scope
+        };
+        let config = (scope(&h), row_names(&h));
+        let _ = h.snapshot();
+        let header = h
+            .rendered_text()
+            .lines()
+            .find(|line| line.contains('\u{276f}'))
+            .unwrap_or_default()
+            .to_owned();
+        h.type_keys("backtab");
+
+        assert_eq!(
+            (config, header.contains("2 commands\u{2502}"), scope(&h)),
+            (
+                (
+                    PaletteScope::Config,
+                    vec!["greet".to_owned(), "ping".to_owned()]
+                ),
+                true,
+                PaletteScope::Active,
+            ),
+            "the header reads {header:?}",
+        );
+    }
+
+    /// The list under the Config scope sizes to the user commands alone, with
+    /// no row for an `action` row that the scope does not list.
+    #[test]
+    fn the_config_scope_sizes_its_list_to_the_user_commands() {
+        let source: String = (0..12)
+            .map(|at| format!("command c{at} {{ run = Notify(\"x\"); }}\n"))
+            .collect();
+        let mut h = TestHarness::with_size(120, 60);
+        h.stoat.reload_user_config(&source);
+        h.type_text(":");
+        h.type_keys("backtab");
+        h.type_keys("backtab");
+        let palette = h.stoat.command_palette.as_ref().expect("palette open");
+        assert_eq!(
+            (
+                palette.scope,
+                palette.filtered.len(),
+                palette.list_rows_hint()
+            ),
+            (PaletteScope::Config, 12, 12),
+        );
+    }
+
+    /// The scope hint names the Config scope while the set holds a user
+    /// command, and names the All scope alone while it holds none.
+    #[test]
+    fn the_scope_hint_names_config_while_the_set_holds_a_command() {
+        let hint = |source: &str| {
+            let mut h = TestHarness::with_size(160, 50);
+            h.stoat.reload_user_config(source);
+            h.type_text(":");
+            let _ = h.snapshot();
+            let (text, _) = key_line(&h);
+            ["S-Tab all / config", "S-Tab all"].map(|hint| text.contains(hint))
+        };
+        assert_eq!(
+            [hint(GREET_AND_PING), hint("")],
+            [[true, true], [false, true]],
+        );
+    }
+
+    #[test]
+    fn a_unique_prefix_of_a_user_command_shows_its_ghost() {
+        let commands = user_commands(GREET);
+        let resolved = resolve_typed(
+            "gre",
+            PaletteScope::All,
+            &Availability::default(),
+            &commands,
+        )
+        .expect("a command token");
+        let user = match &resolved.entry {
+            PaletteCommand::User(command) => Some(command.name.as_str()),
+            PaletteCommand::Action(_) => None,
+        };
+        assert_eq!(
+            (user, resolved.head_chars, resolved.ghost.as_str()),
+            (Some("greet"), 3, "et"),
+        );
+    }
+
+    /// Tab on a user row writes its name and a space, because the command
+    /// takes an argument.
+    #[test]
+    fn tab_on_a_user_row_completes_its_name() {
+        let mut h = user_palette(80, 24);
+        select_row(&mut h, "greet");
+        h.type_keys("tab");
+        assert_eq!(palette_text(&h), "greet ");
+    }
+
+    /// The run also records the command's name in the palette history.
+    #[test]
+    fn enter_on_a_user_row_with_no_argument_runs_it() {
+        let mut h = user_palette(80, 24);
+        select_row(&mut h, "ping");
+        h.type_keys("enter");
+        h.settle();
+        assert_eq!(
+            (
+                h.stoat.command_palette.is_none(),
+                h.stoat.pending_message.as_deref(),
+                h.stoat.active_workspace().palette_history.entries(),
+            ),
+            (true, Some("pong"), &["ping".to_owned()][..]),
+        );
+    }
+
+    /// The root list with its selection on the user rows.
+    #[test]
+    fn snapshot_command_palette_user_commands() {
+        let mut h = user_palette(80, 24);
+        select_row(&mut h, "ping");
+        h.assert_snapshot("command_palette_user_commands");
     }
 
     /// A submitted line records the time that the executor's clock reads, so
@@ -2943,7 +3281,7 @@ mod tests {
             .expect("palette open")
             .filtered
             .first()
-            .copied()
+            .map(entry_of)
             .expect("the group lists a command");
         let row = text
             .lines()
@@ -2989,7 +3327,7 @@ mod tests {
             palette
                 .filtered
                 .iter()
-                .map(|entry| entry.command_name.as_str())
+                .map(|command| entry_of(command).command_name.as_str())
                 .collect::<Vec<_>>()
         };
         let without = |left_out: &[&str]| -> Vec<&str> {
@@ -3120,6 +3458,7 @@ mod tests {
             None,
             PaletteScope::All,
             &Availability::default(),
+            &CommandSet::default(),
             &mut filtered,
             &mut match_indices,
             &mut selected,
@@ -4996,7 +5335,7 @@ mod tests {
         let mut h = Stoat::test();
         h.type_text(":qui");
         let mut palette = h.stoat.command_palette.take().expect("palette open");
-        let expected = palette.filtered[palette.selected].def.name();
+        let expected = entry_of(&palette.filtered[palette.selected]).def.name();
         let ws = h.stoat.active_workspace_mut();
         match palette.handle_submit(ws) {
             PaletteOutcome::Dispatch(entry, _, _) => assert_eq!(entry.def.name(), expected),
@@ -5014,7 +5353,7 @@ mod tests {
             "expected >=2 fuzzy candidates for `w`"
         );
         palette.selected = 1;
-        let expected = palette.filtered[1].def.name();
+        let expected = entry_of(&palette.filtered[1]).def.name();
         assert_ne!(
             expected, "SaveBuffer",
             "SaveBuffer is not a fuzzy `w` match"
@@ -5786,7 +6125,7 @@ mod tests {
             let last = palette
                 .filtered
                 .last()
-                .map(|&entry| entry.command_name.as_str());
+                .map(|command| entry_of(command).command_name.as_str());
             (palette_text(&h), palette.namespace, last)
         };
 
@@ -5853,7 +6192,7 @@ mod tests {
             .expect("palette open")
             .filtered
             .last()
-            .map(|&entry| entry.command_name.as_str());
+            .map(|command| entry_of(command).command_name.as_str());
         assert_eq!(
             (oldest, newer, palette_text(&h), walking(&h), last),
             (
@@ -6278,13 +6617,21 @@ mod tests {
         h.type_text(":action abort");
         {
             let palette = h.stoat.command_palette.as_ref().unwrap();
-            let names: Vec<_> = palette.filtered.iter().map(|e| e.def.name()).collect();
+            let names: Vec<_> = palette
+                .filtered
+                .iter()
+                .map(|e| entry_of(e).def.name())
+                .collect();
             assert!(!names.contains(&"AbortRebase"), "got {names:?}");
         }
         h.type_keys("backtab");
         {
             let palette = h.stoat.command_palette.as_ref().unwrap();
-            let names: Vec<_> = palette.filtered.iter().map(|e| e.def.name()).collect();
+            let names: Vec<_> = palette
+                .filtered
+                .iter()
+                .map(|e| entry_of(e).def.name())
+                .collect();
             assert!(names.contains(&"AbortRebase"), "got {names:?}");
         }
     }

@@ -419,7 +419,12 @@ fn detail_lines(
     let mut title = vec![(entry.def.name().to_owned(), bold)];
     if let Some(command) = registry::lookup(entry.def.name()) {
         title.push((
-            format!(" :{}", crate::command_palette::typed_head(command)),
+            format!(
+                " :{}",
+                crate::command_palette::typed_head(
+                    &crate::command_palette::PaletteCommand::Action(command)
+                )
+            ),
             theme.get(crate::theme::scope::UI_TEXT_MUTED),
         ));
     }

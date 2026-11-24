@@ -17,7 +17,7 @@
 use crate::{
     blame::{BlameBase, BlameRows},
     code_search::CodeSearchFinder,
-    command_palette::{ArgPicker, Namespace},
+    command_palette::{ArgPicker, Namespace, PaletteCommand},
     commit_list::CommitListState,
     completion::CompletionPopup,
     conflict_session::ConflictViewState,
@@ -59,7 +59,6 @@ use ratatui::{
     widgets::StatefulWidget,
 };
 use std::{ops::Range, path::Path, sync::Arc};
-use stoat_action::registry::RegistryEntry;
 use stoat_widgets::{bar::Bar, ApcScene};
 use stoatty_protocol::command::{encode_fill_decorations_scope, encode_fill_scope};
 
@@ -1199,7 +1198,7 @@ pub(crate) fn render_symbol_finder_page(
 /// keys from `keys`, as the live list reads them.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn render_palette_page(
-    filtered: &[&'static RegistryEntry],
+    filtered: &[PaletteCommand],
     match_indices: &[Vec<u32>],
     selected: usize,
     name_offset: usize,
@@ -3567,13 +3566,17 @@ mod tests {
     #[test]
     fn a_palette_page_leaves_the_group_token_out() {
         use super::render_palette_page;
-        use crate::{command_palette::Namespace, keymap::ActionKeys, theme::Theme};
+        use crate::{
+            command_palette::{Namespace, PaletteCommand},
+            keymap::ActionKeys,
+            theme::Theme,
+        };
         use stoat_action::registry;
 
         let entry = registry::lookup_alias("git log").expect("git log is a command");
         let page = |name_offset| {
             let bytes = render_palette_page(
-                &[entry],
+                &[PaletteCommand::Action(entry)],
                 &[Vec::new()],
                 0,
                 name_offset,

@@ -981,6 +981,9 @@ pub mod scope {
     /// its label (foreground) on its box (background). A theme that leaves it
     /// unset draws no tag.
     pub const UI_CMD_SOURCE_BUILTIN: &str = "ui.cmd.source.builtin";
+    /// The Source Tag that ends a palette row whose command a `command` item of
+    /// the config declares. A theme that leaves it unset draws no tag.
+    pub const UI_CMD_SOURCE_CONFIG: &str = "ui.cmd.source.config";
     /// The Source Tag that ends the palette's `action` row, the row that opens
     /// the internal actions. A theme that leaves it unset draws no tag.
     pub const UI_CMD_SOURCE_INTERNAL: &str = "ui.cmd.source.internal";

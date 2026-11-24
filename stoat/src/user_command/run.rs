@@ -362,6 +362,8 @@ mod tests {
     fn the_default_output_plans_the_run_modal() {
         let command = UserCommand {
             name: "pr".to_owned(),
+            doc: String::new(),
+            line: 1,
             args: vec![CommandArg {
                 name: "pr".to_owned(),
             }],

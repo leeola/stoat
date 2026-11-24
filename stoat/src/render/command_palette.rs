@@ -165,6 +165,9 @@ enum KeyStage<'a> {
     /// holds text, and `recallable` while the history holds a line.
     Commands {
         scope: PaletteScope,
+        /// The scopes that `S-Tab` steps through, as [`PaletteScope::cycle`]
+        /// gives them.
+        cycle: &'a [PaletteScope],
         typed: bool,
         recallable: bool,
     },
@@ -382,6 +385,7 @@ pub(crate) fn render_command_palette(
 
     let content_rows = palette.list_rows_hint();
     let status = filter_status(palette, theme);
+    let cycle = PaletteScope::cycle(&palette.commands);
     render_palette_filter(
         &palette.input,
         &palette.filtered,
@@ -390,6 +394,7 @@ pub(crate) fn render_command_palette(
         palette.group,
         palette.namespace,
         palette.scope,
+        &cycle,
         content_rows,
         zoom,
         &mut palette.header_rows,
@@ -622,20 +627,16 @@ fn render_palette_free_arg(
 
     let text_style = theme.get(crate::theme::scope::UI_TEXT);
     let end_x = inner.x + inner.width;
-    let (usage, hint, entry) = match command {
+    let (hint, entry) = match command {
         PaletteCommand::Action(entry) => (
-            usage_line(entry),
             palette
                 .arg_param()
                 .map(|param| format!("{}  {}", param.name, param.description)),
             Some(*entry),
         ),
-        PaletteCommand::User(user) => (
-            format!("{} {}", user.name, user.signature()),
-            palette.user_arg().map(|arg| arg.name.clone()),
-            None,
-        ),
+        PaletteCommand::User(_) => (palette.user_arg().map(|arg| arg.name.clone()), None),
     };
+    let usage = usage_line(command);
     write_str_clipped(buf, inner.x + 1, body_top, &usage, text_style, end_x);
     if let Some(hint) = hint
         && body_top + 1 < body_bottom
@@ -1110,16 +1111,28 @@ fn marked_spans(
 
 /// The Cmd Line status over `palette`'s list.
 ///
-/// At the root it counts the commands on show. Then it names the `action` row
-/// and the internal actions that the scope offers behind it, as `11 commands ·
-/// action for 1,204 more`. Under the `action` token it counts the actions on
-/// show out of those that the scope offers, as `8 of 1,204 actions`. The
-/// `action` token reads in the `ui.cmd.action` foreground.
+/// At the root it counts the commands on show, the user commands among them.
+/// Then it names the `action` row and the internal actions that the scope
+/// offers behind it, as `11 commands · action for 1,204 more`. The Config
+/// scope lists no `action` row, so its status ends after the count. Under the
+/// `action` token it counts the actions on show out of those that the scope
+/// offers, as `8 of 1,204 actions`. The `action` token reads in the
+/// `ui.cmd.action` foreground.
 fn filter_status(palette: &CommandPalette, theme: &crate::theme::Theme) -> Vec<(String, Style)> {
     let more = grouped(palette.action_offering);
     if palette.namespace == Namespace::Actions {
         let rest = format!(" of {more} actions");
         return count_status(palette.filtered.len(), &rest, theme);
+    }
+
+    let shown = palette
+        .filtered
+        .iter()
+        .filter(|command| !names_action_row(command))
+        .count();
+    let mut spans = count_status(shown, " commands", theme);
+    if palette.scope == PaletteScope::Config {
+        return spans;
     }
 
     let muted = theme.get(crate::theme::scope::UI_TEXT_MUTED);
@@ -1130,12 +1143,6 @@ fn filter_status(palette: &CommandPalette, theme: &crate::theme::Theme) -> Vec<(
         Some(fg) => muted.fg(fg),
         None => muted,
     };
-    let shown = palette
-        .filtered
-        .iter()
-        .filter(|entry| !is_action_row(entry))
-        .count();
-    let mut spans = count_status(shown, " commands", theme);
     spans.extend([
         (" \u{b7} ".to_owned(), muted),
         (ACTION_TOKEN.to_owned(), token),
@@ -1192,12 +1199,13 @@ fn grouped(count: usize) -> String {
 #[allow(clippy::too_many_arguments)]
 fn render_palette_filter(
     input: &InputView,
-    filtered: &[&'static RegistryEntry],
+    filtered: &[PaletteCommand],
     match_indices: &[Vec<u32>],
     selected: usize,
     group: Option<&str>,
     namespace: Namespace,
     scope: PaletteScope,
+    cycle: &[PaletteScope],
     content_rows: u16,
     zoom: i8,
     header_rows: &mut u16,
@@ -1279,7 +1287,7 @@ fn render_palette_filter(
             );
         }
         let width = usize::from(inner.width.saturating_sub(1));
-        let entry = filtered.get(selected).copied();
+        let entry = filtered.get(selected);
         let lines = entry
             .map(|entry| doc_lines(entry, keys, width, theme))
             .unwrap_or_default();
@@ -1295,6 +1303,7 @@ fn render_palette_filter(
     let key_stage = match namespace {
         Namespace::Commands => KeyStage::Commands {
             scope,
+            cycle,
             typed: !input.text(ws).is_empty(),
             recallable: !ws.palette_history.entries().is_empty(),
         },
@@ -1332,6 +1341,7 @@ fn palette_footer_parts(stage: KeyStage<'_>, theme: &crate::theme::Theme) -> Pal
     match stage {
         KeyStage::Commands {
             scope,
+            cycle,
             typed,
             recallable,
         } => {
@@ -1345,7 +1355,7 @@ fn palette_footer_parts(stage: KeyStage<'_>, theme: &crate::theme::Theme) -> Pal
                 };
                 hints.push(hint("\u{2191}", word));
             }
-            hints.push(hint("S-Tab", scope.next_names()));
+            hints.push(("S-Tab", Cow::Owned(scope.next_names(cycle))));
             PaletteFooterParts {
                 hints,
                 note: vec![
@@ -1451,7 +1461,7 @@ fn paint_doc_tag(
     paint_source_tag(buf, rect, 0, label, style, theme, scene);
 }
 
-/// The help of `entry` as doc-region lines, each a run of styled spans.
+/// The help of `command` as doc-region lines, each a run of styled spans.
 ///
 /// The first line names a command in bold and its aliases after a blank
 /// cell, and [`paint_doc_lines`] ends it in the Source Tag of [`doc_tag`].
@@ -1465,10 +1475,14 @@ fn paint_doc_tag(
 /// last line reads `bound to` and its keys. The doc of an internal action
 /// that no key reaches ends in the description.
 ///
+/// A user command's doc reads its name in bold, its usage line, and its `doc`
+/// text wrapped to `width`. Its last line names where the config declares it,
+/// as `config command`, a space, U+00B7, a space, and `config.stcfg:<line>`.
+///
 /// The argument stage names the parameter that it collects, so no line names
 /// a parameter.
 fn doc_lines(
-    entry: &RegistryEntry,
+    command: &PaletteCommand,
     keys: &ActionKeys,
     width: usize,
     theme: &crate::theme::Theme,
@@ -1477,6 +1491,24 @@ fn doc_lines(
     let muted = theme.get(crate::theme::scope::UI_TEXT_MUTED);
     let dim = theme.get(crate::theme::scope::UI_TEXT_DIM);
     let key_label = theme.get(crate::theme::scope::UI_KEY_LABEL);
+    let usage = vec![(usage_line(command), text)];
+    let entry = match command {
+        PaletteCommand::Action(entry) => *entry,
+        PaletteCommand::User(user) => {
+            let mut lines = vec![
+                vec![(user.name.clone(), text.add_modifier(Modifier::BOLD))],
+                usage,
+            ];
+            lines.extend(
+                wrap_text(&user.doc, width)
+                    .into_iter()
+                    .map(|line| vec![(line, dim)]),
+            );
+            let defined = format!("config command \u{b7} config.stcfg:{}", user.line);
+            lines.push(vec![(defined, muted)]);
+            return lines;
+        },
+    };
     let internal = !entry.is_command() && !is_action_row(entry);
 
     let name = match internal {
@@ -1494,7 +1526,7 @@ fn doc_lines(
         },
     };
 
-    let mut lines = vec![name, vec![(usage_line(entry), text)]];
+    let mut lines = vec![name, usage];
     lines.extend(
         wrap_text(entry.def.long_desc(), width)
             .into_iter()
@@ -1528,23 +1560,28 @@ fn doc_lines(
     lines
 }
 
-/// The text that names `entry` in the palette's input, as [`typed_head`]
+/// The text that names `command` in the palette's input, as [`typed_head`]
 /// gives it, followed by its [`signature`].
 ///
 /// An internal action reads under the `action` token, as in `action undo`,
 /// because only that form runs it.
-fn usage_line(entry: &RegistryEntry) -> String {
-    let head = typed_head(entry);
-    let signature = signature(entry);
+fn usage_line(command: &PaletteCommand) -> String {
+    let head = typed_head(command);
+    let signature = signature(command);
     match signature.is_empty() {
         true => head,
         false => format!("{head} {signature}"),
     }
 }
 
-/// Each parameter of `entry`, as `<name>` when the parameter is required and
-/// `[name]` when it is optional, one space apart.
-fn signature(entry: &RegistryEntry) -> String {
+/// Each parameter of `command`, as `<name>` when the parameter is required and
+/// `[name]` when it is optional, one space apart. A user command's arguments
+/// are all required.
+fn signature(command: &PaletteCommand) -> String {
+    let entry = match command {
+        PaletteCommand::Action(entry) => entry,
+        PaletteCommand::User(user) => return user.signature(),
+    };
     let params: Vec<String> = entry
         .def
         .params()
@@ -1591,7 +1628,7 @@ fn signature(entry: &RegistryEntry) -> String {
 /// the left-out part paints nothing.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn paint_palette_rows(
-    filtered: &[&'static RegistryEntry],
+    filtered: &[PaletteCommand],
     match_indices: &[Vec<u32>],
     selected: usize,
     name_offset: usize,
@@ -1619,7 +1656,7 @@ pub(crate) fn paint_palette_rows(
         .is_some();
 
     let on_show = || filtered.iter().skip(start_row).take(rows);
-    let widest = |cells: fn(&RegistryEntry, usize) -> &str, least: u16| {
+    let widest = |cells: fn(&PaletteCommand, usize) -> &str, least: u16| {
         on_show()
             .map(|entry| cells(entry, name_offset).chars().count())
             .max()
@@ -1630,15 +1667,15 @@ pub(crate) fn paint_palette_rows(
     let alias_cols = widest(shown_alias, ALIAS_COLUMNS);
     let action_cols = (namespace == Namespace::Actions).then(|| {
         (
-            widest(|entry, _| entry.def.name(), ACTION_NAME_COLUMNS),
+            widest(pascal_name, ACTION_NAME_COLUMNS),
             widest(shown_name, ACTION_NAME_COLUMNS),
         )
     });
 
     let action_style = action_name_style(theme);
     let divider = style_rgb(theme.get(crate::theme::scope::UI_DIVIDER).fg).filter(|_| scene.live());
-    let tag_of = |entry: &RegistryEntry| {
-        let (label, scope) = source_tag(entry)?;
+    let tag_of = |command: &PaletteCommand| {
+        let (label, scope) = source_tag(command)?;
         let style = theme.try_get(scope)?;
         let start = area
             .width
@@ -1671,7 +1708,7 @@ pub(crate) fn paint_palette_rows(
             },
             (true, false) => style,
         };
-        if is_action_row(entry)
+        if names_action_row(entry)
             && abs > 0
             && let Some(color) = divider
         {
@@ -1689,15 +1726,17 @@ pub(crate) fn paint_palette_rows(
 
         let indices = match_indices.get(abs).unwrap_or(&empty_indices);
         if let Some(cols) = action_cols {
-            paint_action_columns(buf, row, entry, indices, cols, keys, theme, column);
+            if let PaletteCommand::Action(entry) = entry {
+                paint_action_columns(buf, row, entry, indices, cols, keys, theme, column);
+            }
             continue;
         }
 
         let name = shown_name(entry, name_offset);
         let name_x = area.x + 1;
-        let own_name = match entry.is_command() {
-            true => name_style,
-            false => action_style,
+        let own_name = match entry {
+            PaletteCommand::Action(action) if !action.is_command() => action_style,
+            _ => name_style,
         };
         write_str_clipped(buf, name_x, row.y, name, column(own_name), end_x);
         let at = (name_x, row.y, end_x);
@@ -1725,7 +1764,10 @@ pub(crate) fn paint_palette_rows(
             None => end_x.saturating_sub(1),
         };
         let desc_x = signature_x.saturating_add(SIGNATURE_COLUMNS + 1);
-        let desc = entry.def.short_desc();
+        let desc = match entry {
+            PaletteCommand::Action(action) => action.def.short_desc(),
+            PaletteCommand::User(user) => user.doc.as_str(),
+        };
         write_str_clipped(buf, desc_x, row.y, desc, column(dim), desc_end);
 
         if let Some((label, start, style)) = tag {
@@ -1870,18 +1912,20 @@ fn action_name_style(theme: &crate::theme::Theme) -> Style {
         })
 }
 
-/// The part of `entry`'s command name a row shows, past its first `offset`
-/// bytes.
-fn shown_name(entry: &RegistryEntry, offset: usize) -> &str {
-    entry.command_name.get(offset..).unwrap_or("")
+/// The part of `command`'s name a row shows, past its first `offset` bytes.
+fn shown_name(command: &PaletteCommand, offset: usize) -> &str {
+    command.name().get(offset..).unwrap_or("")
 }
 
-/// The first alias of `entry` as a row shows it, or `""` for a command with no
-/// alias.
+/// The first alias of `command` as a row shows it, or `""` for a command with
+/// no alias, a user command among them.
 ///
 /// An alias that starts with the first `offset` bytes of the command name, the
 /// group token and its space, leaves them out as [`shown_name`] does.
-fn shown_alias(entry: &RegistryEntry, offset: usize) -> &str {
+fn shown_alias(command: &PaletteCommand, offset: usize) -> &str {
+    let PaletteCommand::Action(entry) = command else {
+        return "";
+    };
     let alias = entry.def.aliases().first().copied().unwrap_or("");
     entry
         .command_name
@@ -1890,12 +1934,27 @@ fn shown_alias(entry: &RegistryEntry, offset: usize) -> &str {
         .unwrap_or(alias)
 }
 
-/// The label and the color scope of the Source Tag that ends `entry`'s row, or
+/// The PascalCase name of `command`, which the first column of the `action`
+/// list shows. A user command, which that list never holds, gives its name.
+fn pascal_name(command: &PaletteCommand, _offset: usize) -> &str {
+    match command {
+        PaletteCommand::Action(entry) => entry.def.name(),
+        PaletteCommand::User(user) => &user.name,
+    }
+}
+
+/// The label and the color scope of the Source Tag that ends `command`'s row, or
 /// `None` for an internal action, whose list names no source.
 ///
 /// The `action` row reads `internal`. A command reads `built-in`, because every
-/// command in the registry ships with stoat.
-fn source_tag(entry: &RegistryEntry) -> Option<(&'static str, &'static str)> {
+/// command in the registry ships with stoat, and a user command reads `config`.
+fn source_tag(command: &PaletteCommand) -> Option<(&'static str, &'static str)> {
+    let entry = match command {
+        PaletteCommand::Action(entry) => entry,
+        PaletteCommand::User(_) => {
+            return Some(("config", crate::theme::scope::UI_CMD_SOURCE_CONFIG));
+        },
+    };
     if is_action_row(entry) {
         return Some(INTERNAL_TAG);
     }
@@ -1905,13 +1964,18 @@ fn source_tag(entry: &RegistryEntry) -> Option<(&'static str, &'static str)> {
 }
 
 /// The label and the color scope of the Source Tag that ends the first line
-/// of `entry`'s doc.
+/// of `command`'s doc.
 ///
 /// The doc names the one action that the selected row names. So an internal
 /// action's doc reads `internal`, although its row in the `action` list
 /// draws no tag.
-fn doc_tag(entry: &RegistryEntry) -> (&'static str, &'static str) {
-    source_tag(entry).unwrap_or(INTERNAL_TAG)
+fn doc_tag(command: &PaletteCommand) -> (&'static str, &'static str) {
+    source_tag(command).unwrap_or(INTERNAL_TAG)
+}
+
+/// Whether `command` is the palette's `action` row.
+fn names_action_row(command: &PaletteCommand) -> bool {
+    matches!(command, PaletteCommand::Action(entry) if is_action_row(entry))
 }
 
 /// The width of a Source Tag's box for `label`, in sixteenths of a cell.
@@ -2002,6 +2066,14 @@ mod tests {
     };
     use stoat_action::registry;
     use stoatty_protocol::command::{decode_stream, BarCommand, Command, TextRunCommand};
+
+    /// Each of `entries` as a palette row.
+    fn rows(entries: &[&'static registry::RegistryEntry]) -> Vec<PaletteCommand> {
+        entries
+            .iter()
+            .map(|&entry| PaletteCommand::Action(entry))
+            .collect()
+    }
 
     fn layout(area: Rect, content_rows: u16, zoom: i8) -> super::PaletteFilterLayout {
         palette_filter_layout(area, content_rows, zoom, 1).expect("the area hosts the palette")
@@ -2100,7 +2172,7 @@ mod tests {
         let list = Rect::new(2, 1, list_width, 1);
         let mut buf = Buffer::empty(area);
         paint_palette_rows(
-            &[entry],
+            &[PaletteCommand::Action(entry)],
             &[Vec::new()],
             0,
             0,
@@ -2249,7 +2321,11 @@ mod tests {
     /// when required and in square brackets when optional.
     #[test]
     fn a_usage_line_brackets_each_parameter_by_whether_it_is_required() {
-        let usage = |name| usage_line(registry::lookup_alias(name).expect("a command"));
+        let usage = |name| {
+            usage_line(&PaletteCommand::Action(
+                registry::lookup_alias(name).expect("a command"),
+            ))
+        };
         assert_eq!(
             ["git log", "git review", "quit"].map(usage),
             ["git log [rev]", "git review <reference>", "quit"],
@@ -2274,7 +2350,7 @@ mod tests {
         let mut scene = stoat_widgets::ApcScene::new();
         scene.set_live(live);
         paint_palette_rows(
-            &entries,
+            &rows(&entries),
             &vec![Vec::new(); entries.len()],
             usize::MAX,
             name_offset,
@@ -2455,7 +2531,7 @@ mod tests {
         let list = Rect::new(0, 0, 100, 1);
         let mut buf = Buffer::empty(list);
         paint_palette_rows(
-            &entries,
+            &rows(&entries),
             &[Vec::new()],
             0,
             0,
@@ -2494,7 +2570,7 @@ mod tests {
             let mut scene = stoat_widgets::ApcScene::new();
             let indices = vec![Vec::new(); entries.len()];
             paint_palette_rows(
-                entries,
+                &rows(entries),
                 &indices,
                 usize::MAX,
                 0,
@@ -2541,7 +2617,12 @@ mod tests {
     /// description with no `runs action` line.
     #[test]
     fn the_action_row_doc_ends_in_its_description() {
-        let lines = doc_lines(action_row(), &ActionKeys::new(), 400, &Theme::empty());
+        let lines = doc_lines(
+            &PaletteCommand::Action(action_row()),
+            &ActionKeys::new(),
+            400,
+            &Theme::empty(),
+        );
         let texts: Vec<Vec<String>> = lines
             .into_iter()
             .map(|line| line.into_iter().map(|(text, _)| text).collect())
@@ -2622,7 +2703,7 @@ mod tests {
         let list = Rect::new(0, 0, 100, entries.len() as u16);
         let mut buf = Buffer::empty(list);
         paint_palette_rows(
-            &entries,
+            &rows(&entries),
             &vec![Vec::new(); entries.len()],
             usize::MAX,
             0,
@@ -2690,8 +2771,13 @@ mod tests {
 
         assert_eq!(
             (
-                doc_lines(entry, &bound, 60, &theme),
-                doc_lines(entry, &ActionKeys::new(), 60, &theme),
+                doc_lines(&PaletteCommand::Action(entry), &bound, 60, &theme),
+                doc_lines(
+                    &PaletteCommand::Action(entry),
+                    &ActionKeys::new(),
+                    60,
+                    &theme
+                ),
             ),
             (keyed, described),
         );
@@ -2959,7 +3045,7 @@ mod tests {
     fn a_doc_reads_the_name_the_usage_the_description_and_the_action() {
         let entry = registry::lookup_alias("git log").expect("a command");
         let texts = |keys: &ActionKeys| -> Vec<Vec<String>> {
-            doc_lines(entry, keys, 60, &Theme::empty())
+            doc_lines(&PaletteCommand::Action(entry), keys, 60, &Theme::empty())
                 .into_iter()
                 .map(|line| line.into_iter().map(|(text, _)| text).collect())
                 .collect()
@@ -2994,12 +3080,24 @@ mod tests {
         let entry = registry::lookup_alias("open").expect("a command");
         let first_row = |width: u16| {
             let theme = tag_theme();
-            let lines = doc_lines(entry, &ActionKeys::new(), usize::from(width), &theme);
+            let lines = doc_lines(
+                &PaletteCommand::Action(entry),
+                &ActionKeys::new(),
+                usize::from(width),
+                &theme,
+            );
             let mut buf = Buffer::empty(Rect::new(0, 0, 40, 6));
             let mut scene = stoat_widgets::ApcScene::new();
             scene.set_live(false);
             let doc = Rect::new(0, 0, width, 6);
-            paint_doc_lines(&mut buf, doc, &lines, source_tag(entry), &theme, &mut scene);
+            paint_doc_lines(
+                &mut buf,
+                doc,
+                &lines,
+                source_tag(&PaletteCommand::Action(entry)),
+                &theme,
+                &mut scene,
+            );
             row_text(&buf, 0)
         };
 
@@ -3115,6 +3213,89 @@ mod tests {
                 ],
                 0,
             ),
+        );
+    }
+
+    /// The user command `greet` on line 1, with the argument `who` and the doc
+    /// `say hello`.
+    fn greet() -> PaletteCommand {
+        let source = r#"command greet { doc = "say hello"; arg who = text; run = shell("echo hello {who}"); output = notify; }"#;
+        let config = stoat_config::parse(source).0.expect("the config parses");
+        let empty = stoat_config::parse("").0.expect("an empty config parses");
+        let (set, _) = CommandSet::build((&empty, ""), Some((&config, source)));
+        PaletteCommand::User(set.get("greet").expect("greet loads").clone())
+    }
+
+    /// Paint the one row `command` into a list 100 cells wide under `theme`.
+    fn painted_row(command: PaletteCommand, theme: &Theme) -> (Buffer, stoat_widgets::ApcScene) {
+        let list = Rect::new(0, 0, 100, 1);
+        let mut buf = Buffer::empty(list);
+        let mut scene = stoat_widgets::ApcScene::new();
+        scene.set_live(true);
+        paint_palette_rows(
+            &[command],
+            &[Vec::new()],
+            usize::MAX,
+            0,
+            Namespace::Commands,
+            &ActionKeys::new(),
+            list,
+            0,
+            theme,
+            false,
+            &mut buf,
+            &mut scene,
+        );
+        (buf, scene)
+    }
+
+    /// A user row reads its name, no alias, its signature, and its doc as its
+    /// description. Its Source Tag reads `config` in `ui.cmd.source.config`.
+    #[test]
+    fn a_user_row_reads_its_name_signature_description_and_tag() {
+        let (buf, _) = painted_row(greet(), &Theme::empty());
+        let theme = {
+            let src = r##"theme t { ui.cmd.source.config = { fg: "#010203", bg: "#040506" }; }"##;
+            let (config, _) = stoat_config::parse(src);
+            Theme::from_config(&config.expect("theme parses"), "t").expect("theme loads")
+        };
+        let (_, scene) = painted_row(greet(), &theme);
+        let tag: Vec<(String, [u8; 3])> = decode_stream(scene.bytes())
+            .into_iter()
+            .filter_map(|command| match command {
+                Command::Bar(bar) => Some(("bar".to_owned(), bar.color)),
+                Command::TextRun(run) => Some((run.text, run.color)),
+                _ => None,
+            })
+            .collect();
+
+        assert_eq!(
+            (row_text(&buf, 0), tag),
+            (
+                placed(100, &[(1, "greet"), (19, "<who>"), (48, "say hello")]),
+                vec![
+                    ("bar".to_owned(), [4, 5, 6]),
+                    ("config".to_owned(), [1, 2, 3])
+                ],
+            ),
+        );
+    }
+
+    #[test]
+    fn the_doc_of_a_user_command_names_where_it_is_defined() {
+        let lines = doc_lines(&greet(), &ActionKeys::new(), 60, &Theme::empty());
+        let texts: Vec<String> = lines
+            .iter()
+            .map(|line| line.iter().map(|(text, _)| text.as_str()).collect())
+            .collect();
+        assert_eq!(
+            texts,
+            [
+                "greet",
+                "greet <who>",
+                "say hello",
+                "config command \u{b7} config.stcfg:1"
+            ],
         );
     }
 }

@@ -267,6 +267,9 @@ struct ConfigArtifacts {
 /// mentions keeps working from the shipped config. That is what lets a config
 /// written against an older release stay usable.
 ///
+/// `user_source` is the text that `user` parses from. It gives each user command
+/// the line of its declaration.
+///
 /// `imported` are the VSCode themes, slotted between the embedded and user
 /// blocks so a user config's own `theme` block still wins. They are carried as
 /// unconverted sources, so only the theme resolved here is paid for.
@@ -279,6 +282,7 @@ struct ConfigArtifacts {
 /// startup.
 fn build_config_artifacts(
     user: Option<stoat_config::Config>,
+    user_source: Option<&str>,
     embedded: &stoat_config::Config,
     imported: &[Arc<VscodeSource>],
     cli_settings: Settings,
@@ -339,8 +343,10 @@ fn build_config_artifacts(
         }
     };
 
-    let (commands, command_errors) =
-        crate::user_command::CommandSet::build(embedded, user.as_ref());
+    let (commands, command_errors) = crate::user_command::CommandSet::build(
+        (embedded, DEFAULT_KEYMAP),
+        user.as_ref().zip(user_source),
+    );
 
     let (keymap, unknown_actions) = {
         let (default_keymap, warnings) = Keymap::compile_with_warnings(embedded);
@@ -2788,6 +2794,7 @@ impl Stoat {
             command_errors,
         } = build_config_artifacts(
             config,
+            user_config.as_deref(),
             embedded,
             &imported_themes,
             cli_settings.clone(),
@@ -3220,6 +3227,7 @@ impl Stoat {
             command_errors,
         } = build_config_artifacts(
             Some(config),
+            Some(source),
             embedded_config(),
             &self.imported_themes,
             self.cli_settings.clone(),

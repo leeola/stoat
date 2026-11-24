@@ -289,7 +289,10 @@ fn diagnose(text: &str) -> Vec<Diagnostic> {
         return diagnostics;
     };
 
-    let (_, command_errors) = CommandSet::build(crate::app::embedded_config(), Some(&config));
+    let (_, command_errors) = CommandSet::build(
+        (crate::app::embedded_config(), crate::app::DEFAULT_KEYMAP),
+        Some((&config, text)),
+    );
     for error in command_errors {
         diagnostics.push(diagnostic(
             lines.range(error.span),

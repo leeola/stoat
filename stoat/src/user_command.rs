@@ -27,6 +27,12 @@ pub(crate) struct CommandSet {
 #[derive(Debug, PartialEq)]
 pub(crate) struct UserCommand {
     pub(crate) name: String,
+    /// The text of the `doc` statement, empty for a command with none.
+    pub(crate) doc: String,
+    /// The line of the `command` keyword in the source that declares the
+    /// command, counting from 1. The palette names it as where the command is
+    /// defined.
+    pub(crate) line: u32,
     /// The arguments in the order that the palette takes them. Each one is
     /// required.
     pub(crate) args: Vec<CommandArg>,
@@ -89,11 +95,17 @@ struct SameAs {
 impl CommandSet {
     /// Lower the `command` items of `embedded` and of `user` into one set.
     ///
+    /// Each layer comes with the source that it parses from, which gives each
+    /// command the line of its declaration.
+    ///
     /// A user command takes the place of an embedded command of its name. A
     /// declaration that fails a check is left out, and the others load. The
     /// errors of `embedded` go to the log, and the answer holds the errors of
     /// `user`, each at the span of its fault.
-    pub(crate) fn build(embedded: &Config, user: Option<&Config>) -> (CommandSet, Vec<ParseError>) {
+    pub(crate) fn build(
+        embedded: (&Config, &str),
+        user: Option<(&Config, &str)>,
+    ) -> (CommandSet, Vec<ParseError>) {
         let mut embedded_errors = Vec::new();
         let mut user_errors = Vec::new();
         let mut lowered = lower_layer(embedded, false, &mut embedded_errors);
@@ -126,6 +138,11 @@ impl CommandSet {
             .iter()
             .find(|command| command.name.eq_ignore_ascii_case(name))
     }
+
+    /// The commands in declaration order, the embedded layer's first.
+    pub(crate) fn iter(&self) -> impl Iterator<Item = &Arc<UserCommand>> {
+        self.commands.iter()
+    }
 }
 
 impl UserCommand {
@@ -146,7 +163,11 @@ impl UserCommand {
 ///
 /// The later of two declarations of one name is an error, ASCII case ignored,
 /// even when the first one fails a check of its own.
-fn lower_layer(config: &Config, user: bool, errors: &mut Vec<ParseError>) -> Vec<Lowered> {
+fn lower_layer(
+    (config, source): (&Config, &str),
+    user: bool,
+    errors: &mut Vec<ParseError>,
+) -> Vec<Lowered> {
     let mut declared: Vec<&str> = Vec::new();
     let mut lowered = Vec::new();
     for decl in &config.commands {
@@ -167,7 +188,9 @@ fn lower_layer(config: &Config, user: bool, errors: &mut Vec<ParseError>) -> Vec
         }
         declared.push(&name.node);
 
-        if let Some((command, same_as)) = lower(&decl.node, errors) {
+        let before = source.get(..decl.span.start).unwrap_or(source);
+        let line = before.bytes().filter(|&byte| byte == b'\n').count() as u32 + 1;
+        if let Some((command, same_as)) = lower(&decl.node, line, errors) {
             lowered.push(Lowered {
                 command,
                 same_as,
@@ -202,7 +225,11 @@ fn taken(name: &str) -> Option<String> {
 
 /// `decl` as a command and its `same_as` arguments, or `None` with an error
 /// in `errors` for each fault of the declaration.
-fn lower(decl: &CommandDecl, errors: &mut Vec<ParseError>) -> Option<(UserCommand, Vec<SameAs>)> {
+fn lower(
+    decl: &CommandDecl,
+    line: u32,
+    errors: &mut Vec<ParseError>,
+) -> Option<(UserCommand, Vec<SameAs>)> {
     let statements = match &decl.body {
         CommandBody::Block(statements) => statements,
         CommandBody::Wrap(call) => {
@@ -220,12 +247,12 @@ fn lower(decl: &CommandDecl, errors: &mut Vec<ParseError>) -> Option<(UserComman
     let mut same_as = Vec::new();
     let mut run: Option<Option<&Spanned<Call>>> = None;
     let mut output: Option<Option<Output>> = None;
-    let mut doc = false;
+    let mut doc: Option<String> = None;
     for statement in statements {
         let twice = |key: &str| error(&statement.span, format!("`{key}` is set twice"));
         match &statement.node {
-            CommandStatement::Doc(_) if doc => errors.push(twice("doc")),
-            CommandStatement::Doc(_) => doc = true,
+            CommandStatement::Doc(_) if doc.is_some() => errors.push(twice("doc")),
+            CommandStatement::Doc(text) => doc = Some(text.node.clone()),
             CommandStatement::Arg { name, kind } => {
                 if args.iter().any(|arg| arg.name == name.node) {
                     errors.push(error(
@@ -286,6 +313,8 @@ fn lower(decl: &CommandDecl, errors: &mut Vec<ParseError>) -> Option<(UserComman
 
     let command = UserCommand {
         name: name.clone(),
+        doc: doc.unwrap_or_default(),
+        line,
         args,
         step: step?,
         output: output.flatten().unwrap_or(Output::Block),
@@ -557,7 +586,7 @@ mod tests {
     /// The commands and the errors that `source` gives as the user layer over
     /// an embedded layer with no command.
     fn load(source: &str) -> (CommandSet, Vec<(Span, String)>) {
-        let (set, errors) = CommandSet::build(&config(""), Some(&config(source)));
+        let (set, errors) = CommandSet::build((&config(""), ""), Some((&config(source), source)));
         let errors = errors
             .into_iter()
             .map(|error| (error.span, error.message))
@@ -610,6 +639,8 @@ mod tests {
             (
                 vec![&UserCommand {
                     name: "greet".to_owned(),
+                    doc: "say hello".to_owned(),
+                    line: 1,
                     args: vec![CommandArg {
                         name: "who".to_owned()
                     }],
@@ -676,10 +707,10 @@ mod tests {
 
     #[test]
     fn a_user_command_replaces_the_embedded_one_of_its_name() {
-        let (set, errors) = CommandSet::build(
-            &config("command hello { run = shell(\"shipped\"); }"),
-            Some(&config("command hello { run = shell(\"mine\"); }")),
-        );
+        let shipped = "command hello { run = shell(\"shipped\"); }";
+        let mine = "command hello { run = shell(\"mine\"); }";
+        let (set, errors) =
+            CommandSet::build((&config(shipped), shipped), Some((&config(mine), mine)));
         assert_eq!(
             (
                 names(&set),
@@ -888,7 +919,7 @@ mod tests {
 
     #[test]
     fn the_shipped_config_declares_no_command() {
-        let (set, errors) = CommandSet::build(app::embedded_config(), None);
+        let (set, errors) = CommandSet::build((app::embedded_config(), app::DEFAULT_KEYMAP), None);
         assert_eq!((names(&set), errors), (Vec::<&str>::new(), Vec::new()));
     }
 }

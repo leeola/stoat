@@ -844,11 +844,11 @@ pub(super) fn palette_complete(stoat: &mut Stoat) -> UpdateEffect {
             return UpdateEffect::None;
         };
         if palette.command.is_none() {
-            let Some(entry) = palette.filtered.get(palette.selected).copied() else {
+            let Some(command) = palette.filtered.get(palette.selected) else {
                 return UpdateEffect::None;
             };
-            let token = command_palette::typed_head(entry);
-            let completed = if entry.def.params().is_empty() {
+            let token = command_palette::typed_head(command);
+            let completed = if command.arg_count() == 0 {
                 token
             } else {
                 format!("{token} ")
