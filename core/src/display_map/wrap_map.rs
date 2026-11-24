@@ -244,7 +244,7 @@ const CONTINUATION_INDENT: u32 = 4;
 
 /// The Wrap Mark, U+21B3, which opens a continuation row two cells before its
 /// text so a reader tells the row from a new line.
-pub(crate) const WRAP_MARK: &str = "\u{21b3}";
+pub const WRAP_MARK: &str = "\u{21b3}";
 
 pub struct WrapMap {
     snapshot: WrapSnapshot,
@@ -1019,7 +1019,7 @@ fn continuation_indent(leading_ws: u32, width: u32) -> u32 {
 /// a block, breaks by this so it breaks where the same text breaks as a live
 /// line beside it.
 #[derive(Copy, Clone, PartialEq, Eq, Debug, Hash)]
-pub(crate) struct WrapGeometry {
+pub struct WrapGeometry {
     pub(crate) width: u32,
     pub(crate) tab_size: u32,
     pub(crate) max_expansion_column: u32,
@@ -1056,7 +1056,7 @@ impl WrapGeometry {
     ///
     /// See also:
     /// - [`compute_wrap_columns`] for the rule itself, in tab columns.
-    pub(crate) fn layout(&self, line: &str) -> BaseLineLayout {
+    pub fn layout(&self, line: &str) -> BaseLineLayout {
         let char_width = |ch: char, column: u32| match ch {
             '\t' if column >= self.max_expansion_column => 1,
             '\t' => self.tab_size - column % self.tab_size,
@@ -1103,11 +1103,11 @@ impl WrapGeometry {
 /// at a time expands the row's tabs from that column, so it gets the stops the
 /// whole line gives them without a walk over the bytes before the row.
 #[derive(Debug, PartialEq, Eq)]
-pub(crate) struct BaseLineLayout {
+pub struct BaseLineLayout {
     /// Each row's byte span of the line, with the tab column the span starts at.
-    pub(crate) rows: Vec<(Range<usize>, u32)>,
+    pub rows: Vec<(Range<usize>, u32)>,
     /// Columns a continuation row is indented by, zero for a line of one row.
-    pub(crate) indent: u32,
+    pub indent: u32,
 }
 
 impl WrapSnapshot {

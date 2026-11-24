@@ -16,6 +16,7 @@ use crate::{
             PlateTrailing, MIN_QUERY_COLUMNS, PLATE_HEADER_GAP, PLATE_HEADER_NUDGE,
         },
         text::{pre_wrap_rows, write_str, write_str_clipped},
+        TypeScale,
     },
     theme::{scope, Theme, TypeRole},
 };

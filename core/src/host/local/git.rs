@@ -1766,7 +1766,7 @@ fn restore_index_mode(repo: &Repository, rel: &Path, mode: u32) -> Result<(), gi
 /// and falling back to `--- a/<path>` when the new side is `/dev/null`.
 ///
 /// Only handles the headers stoat itself emits in
-/// [`rows_to_unified_diff`](crate::review_apply::patch), which is the sole
+/// `stoat::review_apply::patch`, which is the sole
 /// source of the patches reaching the index.
 fn patch_target_path(patch: &str) -> Option<&Path> {
     header_path(patch, "+++ ").or_else(|| header_path(patch, "--- "))

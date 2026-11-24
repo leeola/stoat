@@ -23,7 +23,7 @@ use crate::{
         review,
         text::{text_width, write_str, write_str_clipped},
         undercurl::UndercurlBatch,
-        FrameCtx,
+        FrameCtx, TypeScale,
     },
     theme::{scope, Theme, TypeRole},
 };
@@ -1397,7 +1397,7 @@ mod tests {
             review::{self, DiffColumns, DiffDials, DiffLayout},
             surface_blank,
             undercurl::UndercurlBatch,
-            FrameCtx, SINGLE_MINIMAP_STRIP_ID,
+            FrameCtx, TypeScale, SINGLE_MINIMAP_STRIP_ID,
         },
         test_fixture::drain_apc,
         test_harness::TestHarness,

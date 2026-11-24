@@ -16,6 +16,7 @@ use crate::{
         editor::{self, render_editor, ResolvedChrome},
         paint::style_rgb,
         text::{clip_to_width, write_str, write_str_clipped},
+        TypeScale,
     },
     theme::{scope, Theme, TypeRole},
     workspace::Workspace,

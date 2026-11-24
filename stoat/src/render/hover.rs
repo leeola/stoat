@@ -1,5 +1,5 @@
 use super::walkthrough::{card_style, sketch_corner_radius};
-use crate::{app::Stoat, editor_state::EditorId, pane::View, theme::TypeRole};
+use crate::{app::Stoat, editor_state::EditorId, pane::View, render::TypeScale, theme::TypeRole};
 use ratatui::{
     buffer::Buffer,
     layout::Rect,

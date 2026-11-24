@@ -22,6 +22,7 @@ use crate::{
             DIFF_TWO_COLUMN_MIN,
         },
         undercurl::{UndercurlBatch, UnderlineKind},
+        TypeScale,
     },
     theme::{Theme, TypeRole},
 };

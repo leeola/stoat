@@ -4,6 +4,7 @@ use crate::{
         paint::style_rgb,
         picker::{FilterHeader, Footer, FILTER_PROMPT, FOOTER_ROWS},
         text::{write_str, write_str_clipped},
+        TypeScale,
     },
     theme::TypeRole,
     workspace::Workspace,
@@ -503,6 +504,7 @@ mod tests {
             picker::test_support::{
                 match_theme, row_text, selection_theme, MATCH_FG, SELECTION_BG,
             },
+            TypeScale,
         },
         run::RunState,
         ssh::{RemoteTarget, Transport},

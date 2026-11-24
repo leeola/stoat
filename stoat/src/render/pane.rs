@@ -28,7 +28,7 @@ use crate::{
         term_pane::render_term_pane,
         text,
         undercurl::UndercurlBatch,
-        FrameCtx, MinimapChrome, PaneCtx,
+        FrameCtx, MinimapChrome, PaneCtx, TypeScale,
     },
     run::{RunId, RunState},
     term_session::{TermId, TermSession},
@@ -4077,7 +4077,7 @@ mod tests {
         lsp::drain,
         pane::{DockPanel, DockSide, DockVisibility, FocusTarget, View},
         rebase::RebaseState,
-        render::conflict_view::ConflictLayout,
+        render::{conflict_view::ConflictLayout, TypeScale},
         term_session::TermId,
         workspace::{
             diff::{DiffBase, HunkPosition, RepoStatus, WorktreeBase, DIFF_SETTLE},

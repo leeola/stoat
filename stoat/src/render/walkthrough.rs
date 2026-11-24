@@ -21,7 +21,7 @@ use crate::{
     buffer_lifecycle,
     editor_state::EditorId,
     pane::View,
-    render::screen,
+    render::{screen, TypeScale},
     theme::{scope, TypeRole},
     walkthrough::{
         run::{part, WalkthroughRun},

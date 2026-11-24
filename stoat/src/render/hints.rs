@@ -1,5 +1,6 @@
 use crate::{
     app::STATUS_ROW_PAD,
+    render::TypeScale,
     theme::TypeRole,
     toggle::{Toggle, ToggleStates},
 };

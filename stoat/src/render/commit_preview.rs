@@ -18,7 +18,7 @@ use crate::{
         commits::PreviewDials,
         paint,
         picker::{self, Footer, PlateHeader},
-        text,
+        text, TypeScale,
     },
     theme::{scope, Theme, TypeRole},
 };

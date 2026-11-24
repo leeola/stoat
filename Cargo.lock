@@ -4004,13 +4004,11 @@ name = "stoat"
 version = "0.1.0"
 dependencies = [
  "alacritty_terminal",
- "arboard",
  "ast-grep-core",
  "async-trait",
  "base64 0.23.1",
  "blake3",
  "codegraph",
- "compact_str 0.10.0",
  "crossterm",
  "emojis",
  "etcetera",
@@ -4039,6 +4037,7 @@ dependencies = [
  "snafu",
  "stoat_action",
  "stoat_config",
+ "stoat_core",
  "stoat_host",
  "stoat_language",
  "stoat_log",
@@ -4114,6 +4113,40 @@ version = "0.1.0"
 dependencies = [
  "ariadne",
  "chumsky",
+]
+
+[[package]]
+name = "stoat_core"
+version = "0.1.0"
+dependencies = [
+ "arboard",
+ "async-trait",
+ "base64 0.23.1",
+ "compact_str 0.10.0",
+ "crossterm",
+ "futures",
+ "git2",
+ "libc",
+ "lsp-types",
+ "portable-pty",
+ "ratatui",
+ "ron",
+ "serde",
+ "serde_json",
+ "smallvec",
+ "snafu",
+ "stoat_action",
+ "stoat_config",
+ "stoat_host",
+ "stoat_language",
+ "stoat_log",
+ "stoat_scheduler",
+ "stoat_text",
+ "stoatty_protocol",
+ "tempfile",
+ "tokio",
+ "tracing",
+ "vscode_theme",
 ]
 
 [[package]]

@@ -25,7 +25,7 @@ use stoat_config::{Spanned, ThemeBlock};
 /// therefore have to keep their relative positions rather than being grouped by
 /// kind, which is why converted and unconverted themes share one list.
 #[derive(Default)]
-pub(crate) struct ThemePool {
+pub struct ThemePool {
     entries: Vec<PoolEntry>,
 }
 
@@ -33,7 +33,7 @@ pub(crate) struct ThemePool {
 ///
 /// Shared behind an [`Arc`] so a config reload can rebuild the pool around the
 /// same sources, keeping whatever they have already converted.
-pub(crate) struct VscodeSource {
+pub struct VscodeSource {
     name: String,
     source: String,
     converted: OnceLock<Result<Spanned<ThemeBlock>, String>>,
@@ -46,16 +46,16 @@ enum PoolEntry {
 
 impl ThemePool {
     /// Add a theme block that is already parsed, at the end of the pool.
-    pub(crate) fn push_parsed(&mut self, block: Spanned<ThemeBlock>) {
+    pub fn push_parsed(&mut self, block: Spanned<ThemeBlock>) {
         self.entries.push(PoolEntry::Parsed(block));
     }
 
     /// Add a VSCode theme, at the end of the pool, without converting it.
-    pub(crate) fn push_vscode(&mut self, source: Arc<VscodeSource>) {
+    pub fn push_vscode(&mut self, source: Arc<VscodeSource>) {
         self.entries.push(PoolEntry::Vscode(source));
     }
 
-    pub(crate) fn is_empty(&self) -> bool {
+    pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
     }
 
@@ -66,11 +66,11 @@ impl ThemePool {
     /// converted block carries, so a name here resolves whether or not the
     /// theme has been converted yet. A theme whose JSON is broken is listed
     /// too, and fails when selected.
-    pub(crate) fn names(&self) -> impl Iterator<Item = &str> {
+    pub fn names(&self) -> impl Iterator<Item = &str> {
         self.entries.iter().map(PoolEntry::name)
     }
 
-    pub(crate) fn contains(&self, name: &str) -> bool {
+    pub fn contains(&self, name: &str) -> bool {
         self.names().any(|n| n == name)
     }
 
@@ -81,7 +81,7 @@ impl ThemePool {
     /// parents names no theme, [`ThemeError::InheritanceCycle`] when the
     /// `inherits` chain loops, or [`ThemeError::ImportFailed`] when a theme on
     /// the chain is VSCode JSON that does not parse.
-    pub(crate) fn resolve(&self, name: &str) -> Result<Theme, ThemeError> {
+    pub fn resolve(&self, name: &str) -> Result<Theme, ThemeError> {
         let wanted = self.inheritance_closure(name)?;
 
         let mut blocks: Vec<&Spanned<ThemeBlock>> = Vec::new();
@@ -138,7 +138,7 @@ impl PoolEntry {
 }
 
 impl VscodeSource {
-    pub(crate) fn new(name: String, source: String) -> Self {
+    pub fn new(name: String, source: String) -> Self {
         Self {
             name,
             source,
@@ -166,13 +166,13 @@ impl VscodeSource {
         }
     }
 
-    #[cfg(test)]
-    pub(crate) fn name(&self) -> &str {
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn name(&self) -> &str {
         &self.name
     }
 
-    #[cfg(test)]
-    pub(crate) fn is_converted(&self) -> bool {
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn is_converted(&self) -> bool {
         self.converted.get().is_some()
     }
 }

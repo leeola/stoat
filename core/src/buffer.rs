@@ -22,7 +22,7 @@ use stoat_text::{
 /// writes every keystroke it ever took into `state.ron` and replays them all on
 /// reopen. Compaction buys that bound by giving up undo past the threshold,
 /// which is the trade helix and zed already make by persisting no log at all.
-pub(crate) const OPS_COMPACT_THRESHOLD: usize = 4096;
+pub const OPS_COMPACT_THRESHOLD: usize = 4096;
 
 /// Timestamp a compacted history's seed edit takes when replayed. Replay starts
 /// from a fresh [`TextBuffer`] and assigns timestamps sequentially from one, so
@@ -260,7 +260,7 @@ pub struct BufferHistory {
     /// Whether a save writes this log as one [`BufferOp::DiskSeed`] that names
     /// the buffer's file, in place of the seed's text.
     ///
-    /// [`snapshot_retaining`](crate::buffer_registry::BufferRegistry::snapshot_retaining)
+    /// `BufferRegistry::snapshot_retaining`
     /// sets it on a clean buffer whose log is its seed alone and whose file has
     /// a known mtime, because that file then holds exactly the text. A save of
     /// an unedited file then costs a few bytes rather than the whole file.
@@ -268,7 +268,7 @@ pub struct BufferHistory {
     /// Like [`Self::compacted`], it describes how the value goes out rather
     /// than what it holds, so a history read back from disk reads `false`.
     #[serde(skip)]
-    pub(crate) seed_on_disk: bool,
+    pub seed_on_disk: bool,
 }
 
 impl BufferHistory {
@@ -279,7 +279,7 @@ impl BufferHistory {
     /// holds what its file held at the last open or save. A history of a
     /// loaded buffer carries the insert's text as [`Self::seed`], and one of a
     /// replayed buffer spells it out in the edit.
-    pub(crate) fn is_seed_alone(&self) -> bool {
+    pub fn is_seed_alone(&self) -> bool {
         matches!(self.ops.as_slice(), [BufferOp::Edit { old, .. }] if *old == (0..0))
     }
 }
@@ -348,7 +348,7 @@ pub struct Checkpoint {
 #[derive(Clone)]
 pub struct TextBufferSnapshot {
     pub visible_text: Rope,
-    pub(crate) deleted_text: Rope,
+    pub deleted_text: Rope,
     fragments: SumTree<Fragment>,
     insertions: SumTree<InsertionFragment>,
     undo_map: UndoMap,
@@ -1189,7 +1189,7 @@ impl TextBuffer {
     ///
     /// The group is not materialized until its first edit, so opening one around
     /// a non-editing action costs nothing and leaves the undo history unchanged.
-    pub(crate) fn begin_group(&mut self, selections_before: Arc<[Selection<Anchor>]>) {
+    pub fn begin_group(&mut self, selections_before: Arc<[Selection<Anchor>]>) {
         if self.open_group {
             self.seal_group(Arc::from([]));
         }
@@ -1210,7 +1210,7 @@ impl TextBuffer {
     /// is the common case during an insert session, where every typed character
     /// asks, so a caller that gathered the selections first would be building a
     /// list per keystroke for nobody.
-    pub(crate) fn try_begin_group(
+    pub fn try_begin_group(
         &mut self,
         selections_before: impl FnOnce() -> Arc<[Selection<Anchor>]>,
     ) -> bool {
@@ -1225,7 +1225,7 @@ impl TextBuffer {
 
     /// Whether an undo group is open, so a caller that seals one can tell
     /// whether there was anything to seal.
-    pub(crate) fn group_open(&self) -> bool {
+    pub fn group_open(&self) -> bool {
         self.open_group
     }
 
@@ -1235,14 +1235,14 @@ impl TextBuffer {
     /// would pass to [`Self::seal_group`] are never read. Gathering them costs a
     /// copy of the whole selection set, and most actions edit nothing, so a
     /// caller asks this first.
-    pub(crate) fn group_started(&self) -> bool {
+    pub fn group_started(&self) -> bool {
         self.open_group_started
     }
 
     /// Close the open undo group, recording `selections_after` to restore on
     /// redo. A group that took no edits was never materialized, so a non-editing
     /// action leaves no undo step behind.
-    pub(crate) fn seal_group(&mut self, selections_after: Arc<[Selection<Anchor>]>) {
+    pub fn seal_group(&mut self, selections_after: Arc<[Selection<Anchor>]>) {
         if !self.open_group {
             return;
         }
@@ -1266,7 +1266,7 @@ impl TextBuffer {
     /// marking the buffer unmodified. Call at every clean point (save, seeded
     /// content) so a later undo/redo back to this frontier -- or any edit that
     /// restores the saved bytes -- clears [`Self::dirty`] again.
-    pub(crate) fn mark_clean(&mut self) {
+    pub fn mark_clean(&mut self) {
         // A marker taken mid-group names a frontier undo can never land on,
         // since undo pops whole groups, so the nearest undo steps past the
         // saved state to before the group began. Sealing makes the save point a

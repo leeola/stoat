@@ -17,7 +17,7 @@ use crate::{
         text::{
             clip_to_width, truncate_to_cols, wrap_text, write_cell, write_str, write_str_clipped,
         },
-        FrameCtx,
+        FrameCtx, TypeScale,
     },
     review::{ReviewRow, ReviewSide},
     review_session::DiffDocument,

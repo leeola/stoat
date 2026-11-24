@@ -76,7 +76,7 @@ pub trait TerminalHost: Send + Sync {
 /// PTY-backed [`TerminalSession`]: owns the master (for resizing and
 /// process introspection), a queue into the shell's input, the child
 /// handle, and a reader thread that pumps output into a channel.
-pub(crate) struct PtyTerminalSession {
+pub struct PtyTerminalSession {
     master: Mutex<Box<dyn portable_pty::MasterPty + Send>>,
     writer: sync_mpsc::Sender<Vec<u8>>,
     /// Chunks sent but not yet written, shared with the writer thread.
@@ -180,9 +180,9 @@ impl TerminalSession for PtyTerminalSession {
 
 /// Synchronous PTY-open helper shared between [`TerminalHost::spawn`]
 /// (via [`crate::host::local::LocalTerminalHost`]) and the legacy
-/// [`crate::run::spawn_shell`] entry point, so both build the PTY through
+/// `stoat::run::spawn_shell` entry point, so both build the PTY through
 /// the same portable-pty boilerplate without an async detour.
-pub(crate) fn open_local_pty(args: SpawnArgs) -> io::Result<PtyTerminalSession> {
+pub fn open_local_pty(args: SpawnArgs) -> io::Result<PtyTerminalSession> {
     let pty_system = portable_pty::native_pty_system();
     let pair = pty_system
         // FIXME: The PTY carries no pixel size, so a remote stoat under :ssh reads
@@ -220,7 +220,7 @@ pub(crate) fn open_local_pty(args: SpawnArgs) -> io::Result<PtyTerminalSession> 
 /// appending their own built-in vars, so those built-ins land later in
 /// `env` and win any key conflict under the last-writer semantics of
 /// [`open_local_pty`].
-pub(crate) fn merge_env_diff(args: &mut SpawnArgs, diff: &[(String, Option<String>)]) {
+pub fn merge_env_diff(args: &mut SpawnArgs, diff: &[(String, Option<String>)]) {
     for (key, value) in diff {
         match value {
             Some(value) => args.env.push((key.clone(), value.clone())),

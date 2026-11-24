@@ -47,14 +47,13 @@ use stoat_scheduler::Executor;
 use stoat_text::{patch::Patch, Anchor, Bias, CharsAt, Point, ReversedCharsAt, Rope};
 pub use tab_map::{TabMap, TabPoint, TabRow, TabSnapshot};
 use tokio::sync::Notify;
-pub(crate) use wrap_map::{BaseLineLayout, WrapGeometry, WRAP_MARK};
-pub use wrap_map::{WrapMap, WrapPoint, WrapSnapshot};
+pub use wrap_map::{BaseLineLayout, WrapGeometry, WrapMap, WrapPoint, WrapSnapshot, WRAP_MARK};
 
 /// Columns a tab runs to in every editor's display map.
 ///
 /// A painter that expands tabs outside a display map, such as a commit
 /// preview's base text, reads this so its columns match an editor's.
-pub(crate) const DEFAULT_TAB_SIZE: u32 = 4;
+pub const DEFAULT_TAB_SIZE: u32 = 4;
 
 /// Shared empty text-highlight map, used as the `unwrap_or` fallback when an
 /// endpoint build carries no text highlights. Every live caller passes its own
@@ -62,7 +61,7 @@ pub(crate) const DEFAULT_TAB_SIZE: u32 = 4;
 /// `Arc<HashMap>` allocation on the rare `None` case.
 static EMPTY_TEXT_HIGHLIGHTS: LazyLock<TextHighlights> = LazyLock::new(|| Arc::new(HashMap::new()));
 
-pub(crate) use stoat_text::display_width;
+pub use stoat_text::display_width;
 
 /// Restate `edits` in buffer rows, reading each side against the text that side
 /// indexes into.
@@ -369,14 +368,14 @@ impl DisplayMap {
     ///
     /// Cheap (a buffer read, no snapshot), so the smooth-scroll page assembly can
     /// fold it into a diff-view page's content version to refill on hunk changes.
-    pub(crate) fn diff_version(&self) -> usize {
+    pub fn diff_version(&self) -> usize {
         self.multi_buffer.diff_version()
     }
 
     /// Enable or disable inline deleted-line block rows for this editor's diff
     /// map. Off by default. The side-by-side diff view turns it on. Nulls the
     /// snapshot cache so the next snapshot re-splices under the new setting.
-    pub(crate) fn set_show_deleted_blocks(&mut self, show: bool) {
+    pub fn set_show_deleted_blocks(&mut self, show: bool) {
         if self.show_deleted_blocks == show {
             return;
         }
@@ -388,7 +387,7 @@ impl DisplayMap {
     /// Choose whether a modified hunk's base rows pair with its live rows. See
     /// [`Self::pair_modified_hunks`]. Nulls the snapshot cache so the next
     /// snapshot re-splices the blocks under the new answer.
-    pub(crate) fn set_pair_modified_hunks(&mut self, pair: bool) {
+    pub fn set_pair_modified_hunks(&mut self, pair: bool) {
         if self.pair_modified_hunks == pair {
             return;
         }
@@ -535,7 +534,7 @@ impl DisplayMap {
 
     /// Whether the wrapping of the last snapshot is provisional, with a rewrap
     /// on the pool that moves its rows when it lands.
-    pub(crate) fn rewrap_pending(&self) -> bool {
+    pub fn rewrap_pending(&self) -> bool {
         self.wrap_map.background_pending()
     }
 
@@ -1472,7 +1471,7 @@ impl DisplaySnapshot {
     ///
     /// The end of a row that a fold closes resolves to the end of the fold, so
     /// the lines the fold hides count as lines above the next row.
-    pub(crate) fn wrap_to_buffer(&self, point: WrapPoint) -> Point {
+    pub fn wrap_to_buffer(&self, point: WrapPoint) -> Point {
         self.block_snapshot.wrap_to_buffer(point)
     }
 
@@ -1486,7 +1485,7 @@ impl DisplaySnapshot {
 
     /// The geometry this snapshot's rows wrap by, or `None` while wrapping is
     /// off.
-    pub(crate) fn wrap_geometry(&self) -> Option<WrapGeometry> {
+    pub fn wrap_geometry(&self) -> Option<WrapGeometry> {
         WrapGeometry::of(self.wrap_snapshot())
     }
 
@@ -1593,7 +1592,7 @@ impl DisplaySnapshot {
     /// Whether this snapshot's blocks were spliced with a modified hunk's base
     /// rows paired against its live rows. See
     /// [`DisplayMap::pair_modified_hunks`].
-    pub(crate) fn pairs_modified_hunks(&self) -> bool {
+    pub fn pairs_modified_hunks(&self) -> bool {
         self.pairs_modified_hunks
     }
 

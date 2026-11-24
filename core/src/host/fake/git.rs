@@ -70,7 +70,7 @@ impl FakeGit {
     pub fn add_repo(&self, workdir: impl Into<PathBuf>) -> FakeRepoBuilder<'_> {
         let workdir = workdir.into();
         {
-            let mut state = self.state.lock().unwrap();
+            let mut state = self.state.lock().expect("FakeGit lock poisoned");
             state.repos.entry(workdir.clone()).or_insert_with(|| {
                 Arc::new(FakeGitRepo {
                     workdir: workdir.clone(),
@@ -101,9 +101,9 @@ impl FakeGit {
     /// by tests that need to verify the complete body, not just the
     /// first-line summary returned by `log_commits`.
     pub fn commit_message(&self, workdir: &Path, sha: &str) -> Option<String> {
-        let state = self.state.lock().unwrap();
+        let state = self.state.lock().expect("FakeGit lock poisoned");
         let repo = state.repos.get(workdir)?;
-        let repo_state = repo.state.lock().unwrap();
+        let repo_state = repo.state.lock().expect("FakeGit lock poisoned");
         repo_state.commits.get(sha).map(|c| c.message.clone())
     }
 
@@ -111,21 +111,33 @@ impl FakeGit {
     /// order. Each entry captures the onto sha, the exact todo list,
     /// and the new HEAD sha minted by the fake.
     pub fn applied_rebases(&self, workdir: &Path) -> Vec<RecordedRebase> {
-        let state = self.state.lock().unwrap();
+        let state = self.state.lock().expect("FakeGit lock poisoned");
         state
             .repos
             .get(workdir)
-            .map(|repo| repo.state.lock().unwrap().applied_rebases.clone())
+            .map(|repo| {
+                repo.state
+                    .lock()
+                    .expect("FakeGit lock poisoned")
+                    .applied_rebases
+                    .clone()
+            })
             .unwrap_or_default()
     }
 
     /// Snapshot the amend-head calls against `workdir`, in call order.
     pub fn amend_history(&self, workdir: &Path) -> Vec<RecordedAmend> {
-        let state = self.state.lock().unwrap();
+        let state = self.state.lock().expect("FakeGit lock poisoned");
         state
             .repos
             .get(workdir)
-            .map(|repo| repo.state.lock().unwrap().amend_history.clone())
+            .map(|repo| {
+                repo.state
+                    .lock()
+                    .expect("FakeGit lock poisoned")
+                    .amend_history
+                    .clone()
+            })
             .unwrap_or_default()
     }
 
@@ -137,20 +149,26 @@ impl FakeGit {
     /// Each is a repo-mutex acquisition and a decompression against a real
     /// backend, so a caller that caches them shows up here as a flat count.
     pub fn blob_reads(&self, workdir: &Path) -> usize {
-        let state = self.state.lock().unwrap();
+        let state = self.state.lock().expect("FakeGit lock poisoned");
         state
             .repos
             .get(workdir)
-            .map(|repo| repo.state.lock().unwrap().blob_reads)
+            .map(|repo| repo.state.lock().expect("FakeGit lock poisoned").blob_reads)
             .unwrap_or_default()
     }
 
     pub fn applied_patches(&self, workdir: &Path) -> Vec<String> {
-        let state = self.state.lock().unwrap();
+        let state = self.state.lock().expect("FakeGit lock poisoned");
         state
             .repos
             .get(workdir)
-            .map(|repo| repo.state.lock().unwrap().applied_patches.clone())
+            .map(|repo| {
+                repo.state
+                    .lock()
+                    .expect("FakeGit lock poisoned")
+                    .applied_patches
+                    .clone()
+            })
             .unwrap_or_default()
     }
 
@@ -160,11 +178,17 @@ impl FakeGit {
     /// Only successful calls appear, so an empty list is proof the working tree
     /// never moved. Empty when the repo is unknown.
     pub fn checkouts(&self, workdir: &Path) -> Vec<String> {
-        let state = self.state.lock().unwrap();
+        let state = self.state.lock().expect("FakeGit lock poisoned");
         state
             .repos
             .get(workdir)
-            .map(|repo| repo.state.lock().unwrap().checkouts.clone())
+            .map(|repo| {
+                repo.state
+                    .lock()
+                    .expect("FakeGit lock poisoned")
+                    .checkouts
+                    .clone()
+            })
             .unwrap_or_default()
     }
 
@@ -172,11 +196,17 @@ impl FakeGit {
     /// [`GitRepo::merge_branch`], in call order. A refused merge and an
     /// up-to-date one do not appear. Empty when the repo is unknown.
     pub fn merges(&self, workdir: &Path) -> Vec<String> {
-        let state = self.state.lock().unwrap();
+        let state = self.state.lock().expect("FakeGit lock poisoned");
         state
             .repos
             .get(workdir)
-            .map(|repo| repo.state.lock().unwrap().merges.clone())
+            .map(|repo| {
+                repo.state
+                    .lock()
+                    .expect("FakeGit lock poisoned")
+                    .merges
+                    .clone()
+            })
             .unwrap_or_default()
     }
 
@@ -184,11 +214,17 @@ impl FakeGit {
     /// [`GitRepo::mark_resolved`] against `workdir`, in call order. Empty when
     /// none were marked or the repo is unknown.
     pub fn resolved_paths(&self, workdir: &Path) -> Vec<PathBuf> {
-        let state = self.state.lock().unwrap();
+        let state = self.state.lock().expect("FakeGit lock poisoned");
         state
             .repos
             .get(workdir)
-            .map(|repo| repo.state.lock().unwrap().resolved_paths.clone())
+            .map(|repo| {
+                repo.state
+                    .lock()
+                    .expect("FakeGit lock poisoned")
+                    .resolved_paths
+                    .clone()
+            })
             .unwrap_or_default()
     }
 
@@ -223,7 +259,7 @@ impl FakeGit {
     /// A tally is the most expensive read the trait offers, so a test that
     /// cares how often it runs counts it rather than timing it.
     pub fn tally_calls(&self, workdir: &Path) -> usize {
-        let state = self.state.lock().unwrap();
+        let state = self.state.lock().expect("FakeGit lock poisoned");
         state
             .repos
             .get(workdir)
@@ -232,7 +268,7 @@ impl FakeGit {
 
     /// How many rename lookups have run against the repo at `workdir`.
     pub fn rename_source_calls(&self, workdir: &Path) -> usize {
-        let state = self.state.lock().unwrap();
+        let state = self.state.lock().expect("FakeGit lock poisoned");
         state
             .repos
             .get(workdir)
@@ -263,7 +299,7 @@ fn parse_patch_target(patch: &str) -> Option<PathBuf> {
 impl GitHost for FakeGit {
     fn discover(&self, path: &Path) -> Option<Arc<dyn GitRepo>> {
         self.discover_calls.fetch_add(1, Ordering::Relaxed);
-        let state = self.state.lock().unwrap();
+        let state = self.state.lock().expect("FakeGit lock poisoned");
         let workdir = state
             .discover_index
             .iter()
@@ -877,12 +913,16 @@ impl<'a> FakeRepoBuilder<'a> {
     }
 
     fn mutate_repo<F: FnOnce(&mut FakeRepoState)>(&self, f: F) {
-        let state = self.host.state.lock().unwrap();
+        let state = self
+            .host
+            .state
+            .lock()
+            .expect("FakeRepoBuilder lock poisoned");
         let repo = state
             .repos
             .get(&self.workdir)
             .expect("FakeRepoBuilder: repo must be registered");
-        let mut inner = repo.state.lock().unwrap();
+        let mut inner = repo.state.lock().expect("FakeRepoBuilder lock poisoned");
         f(&mut inner);
     }
 }
@@ -1331,17 +1371,17 @@ impl GitRepo for FakeGitRepo {
     }
 
     fn is_path_ignored(&self, path: &Path) -> bool {
-        let state = self.state.lock().unwrap();
+        let state = self.state.lock().expect("FakeGitRepo lock poisoned");
         state.ignored.contains(path)
     }
 
     fn rebase_in_progress(&self) -> bool {
-        let state = self.state.lock().unwrap();
+        let state = self.state.lock().expect("FakeGitRepo lock poisoned");
         state.rebase_in_progress
     }
 
     fn merge_state(&self) -> Option<MergeState> {
-        let state = self.state.lock().unwrap();
+        let state = self.state.lock().expect("FakeGitRepo lock poisoned");
         let (head_sha, head_name, message) = state.merge_head.clone()?;
         Some(MergeState {
             head_sha,
@@ -1359,7 +1399,7 @@ impl GitRepo for FakeGitRepo {
     /// files. Any other branch merges into a commit whose tree lays the
     /// branch tip's files over HEAD's.
     fn merge_branch(&self, name: &str) -> Result<MergeOutcome, GitApplyError> {
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.state.lock().expect("FakeGitRepo lock poisoned");
         let refusal = if state.merge_head.is_some() {
             Some("a merge is in progress".to_string())
         } else if state.rebase_in_progress {
@@ -1423,7 +1463,7 @@ impl GitRepo for FakeGitRepo {
     }
 
     fn abort_merge(&self) -> Result<(), GitApplyError> {
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.state.lock().expect("FakeGitRepo lock poisoned");
         if state.merge_head.take().is_none() {
             return BackendSnafu {
                 reason: "no merge in progress",
@@ -1435,7 +1475,7 @@ impl GitRepo for FakeGitRepo {
     }
 
     fn changed_files(&self) -> Vec<ChangedFile> {
-        let state = self.state.lock().unwrap();
+        let state = self.state.lock().expect("FakeGitRepo lock poisoned");
         let mut staged: Vec<ChangedFile> = state
             .changed
             .iter()
@@ -1477,7 +1517,7 @@ impl GitRepo for FakeGitRepo {
     /// a registration rather than as text, so no comparison could find it, and
     /// it differs from the base whatever the commit held.
     fn changed_files_from(&self, base_sha: &str) -> Vec<ChangedFile> {
-        let state = self.state.lock().unwrap();
+        let state = self.state.lock().expect("FakeGitRepo lock poisoned");
         let Some(commit) = state.commits.get(base_sha) else {
             return Vec::new();
         };
@@ -1544,7 +1584,7 @@ impl GitRepo for FakeGitRepo {
     /// [`FakeRepoBuilder::empty_untracked`], which no other read sees.
     fn hunk_tallies(&self) -> HunkTallies {
         self.tally_calls.fetch_add(1, Ordering::Relaxed);
-        let state = self.state.lock().unwrap();
+        let state = self.state.lock().expect("FakeGitRepo lock poisoned");
         let side = |staged: bool| {
             state
                 .changed
@@ -1608,12 +1648,12 @@ impl GitRepo for FakeGitRepo {
     }
 
     fn has_tracked_changes(&self) -> bool {
-        let state = self.state.lock().unwrap();
+        let state = self.state.lock().expect("FakeGitRepo lock poisoned");
         !state.changed.is_empty()
     }
 
     fn head_contents(&self, paths: &[&Path]) -> Vec<Option<String>> {
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.state.lock().expect("FakeGitRepo lock poisoned");
         state.blob_reads += paths.len();
         paths
             .iter()
@@ -1626,7 +1666,7 @@ impl GitRepo for FakeGitRepo {
     }
 
     fn content_at(&self, sha: &str, path: &Path) -> Option<String> {
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.state.lock().expect("FakeGitRepo lock poisoned");
         state.blob_reads += 1;
         let rel = path.strip_prefix(&self.workdir).ok()?;
         let text = state.commits.get(sha)?.tree.get(rel)?;
@@ -1634,7 +1674,7 @@ impl GitRepo for FakeGitRepo {
     }
 
     fn index_content(&self, path: &Path) -> Option<String> {
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.state.lock().expect("FakeGitRepo lock poisoned");
         state.blob_reads += 1;
         let rel = path.strip_prefix(&self.workdir).ok()?;
         if state.removed_index_entries.contains(rel) {
@@ -1649,7 +1689,7 @@ impl GitRepo for FakeGitRepo {
 
     fn rename_source(&self, path: &Path) -> Option<PathBuf> {
         self.rename_source_calls.fetch_add(1, Ordering::Relaxed);
-        let state = self.state.lock().unwrap();
+        let state = self.state.lock().expect("FakeGitRepo lock poisoned");
         state
             .changed
             .iter()
@@ -1658,7 +1698,7 @@ impl GitRepo for FakeGitRepo {
     }
 
     fn conflicted_paths(&self) -> Vec<PathBuf> {
-        let state = self.state.lock().unwrap();
+        let state = self.state.lock().expect("FakeGitRepo lock poisoned");
         state.conflicts.iter().map(|f| f.path.clone()).collect()
     }
 
@@ -1668,7 +1708,7 @@ impl GitRepo for FakeGitRepo {
         } else {
             self.workdir.join(path)
         };
-        let state = self.state.lock().unwrap();
+        let state = self.state.lock().expect("FakeGitRepo lock poisoned");
         state.conflicts.iter().find(|f| f.path == target).cloned()
     }
 
@@ -1684,7 +1724,7 @@ impl GitRepo for FakeGitRepo {
         } else {
             self.workdir.join(path)
         };
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.state.lock().expect("FakeGitRepo lock poisoned");
         state.conflicts.retain(|f| f.path != target);
         if state.untracked.remove(&target) {
             let added = state.untracked_lines.remove(&target).unwrap_or(0);
@@ -1705,7 +1745,7 @@ impl GitRepo for FakeGitRepo {
     }
 
     fn apply_to_index(&self, patch: &str) -> Result<(), GitApplyError> {
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.state.lock().expect("FakeGitRepo lock poisoned");
         state.applied_patches.push(patch.to_string());
         match &state.apply_error {
             Some(msg) => BackendSnafu {
@@ -1723,7 +1763,7 @@ impl GitRepo for FakeGitRepo {
     /// were and only the staged flags move. Untracked paths stay untracked.
     /// The apply failure knob fails it as it fails [`GitRepo::commit_index`].
     fn stage_tracked(&self) -> Result<usize, GitApplyError> {
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.state.lock().expect("FakeGitRepo lock poisoned");
         if let Some(reason) = &state.apply_error {
             return BackendSnafu {
                 reason: reason.clone(),
@@ -1742,12 +1782,12 @@ impl GitRepo for FakeGitRepo {
     }
 
     fn commit_tree(&self, sha: &str) -> Option<BTreeMap<PathBuf, String>> {
-        let state = self.state.lock().unwrap();
+        let state = self.state.lock().expect("FakeGitRepo lock poisoned");
         state.commits.get(sha).map(|c| c.tree.clone())
     }
 
     fn tree_oid(&self, sha: &str) -> Option<String> {
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.state.lock().expect("FakeGitRepo lock poisoned");
         let tree = state.commits.get(sha)?.tree.clone();
         let oid = format!("tree-of-{sha}");
         state.trees.insert(oid.clone(), tree);
@@ -1759,7 +1799,7 @@ impl GitRepo for FakeGitRepo {
         base_sha: &str,
         updates: &[(PathBuf, Option<String>)],
     ) -> Result<String, GitApplyError> {
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.state.lock().expect("FakeGitRepo lock poisoned");
         let Some(commit) = state.commits.get(base_sha) else {
             return BackendSnafu {
                 reason: format!("unknown commit {base_sha}"),
@@ -1782,7 +1822,7 @@ impl GitRepo for FakeGitRepo {
     }
 
     fn parent_sha(&self, sha: &str) -> Option<String> {
-        let state = self.state.lock().unwrap();
+        let state = self.state.lock().expect("FakeGitRepo lock poisoned");
         state
             .commits
             .get(sha)
@@ -1790,7 +1830,7 @@ impl GitRepo for FakeGitRepo {
     }
 
     fn parent_shas(&self, sha: &str) -> Vec<String> {
-        let state = self.state.lock().unwrap();
+        let state = self.state.lock().expect("FakeGitRepo lock poisoned");
         state
             .commits
             .get(sha)
@@ -1802,7 +1842,7 @@ impl GitRepo for FakeGitRepo {
         if limit == 0 {
             return Vec::new();
         }
-        let state = self.state.lock().unwrap();
+        let state = self.state.lock().expect("FakeGitRepo lock poisoned");
         let start = match after {
             Some(sha) => state
                 .commits
@@ -1820,7 +1860,7 @@ impl GitRepo for FakeGitRepo {
         if limit == 0 {
             return Vec::new();
         }
-        let state = self.state.lock().unwrap();
+        let state = self.state.lock().expect("FakeGitRepo lock poisoned");
         state.walk_first_parent(start_sha.to_string(), &HashSet::new(), limit)
     }
 
@@ -1828,7 +1868,7 @@ impl GitRepo for FakeGitRepo {
         if limit == 0 {
             return Vec::new();
         }
-        let state = self.state.lock().unwrap();
+        let state = self.state.lock().expect("FakeGitRepo lock poisoned");
         if !state.commits.contains_key(tip_sha) || !state.commits.contains_key(exclude_sha) {
             return Vec::new();
         }
@@ -1841,13 +1881,13 @@ impl GitRepo for FakeGitRepo {
         if limit == 0 {
             return Vec::new();
         }
-        let state = self.state.lock().unwrap();
+        let state = self.state.lock().expect("FakeGitRepo lock poisoned");
 
         state.walk_graph(start_sha.to_string(), limit)
     }
 
     fn resolve_rev(&self, rev: &str) -> Option<String> {
-        let state = self.state.lock().unwrap();
+        let state = self.state.lock().expect("FakeGitRepo lock poisoned");
         if state.commits.contains_key(rev) {
             return Some(rev.to_string());
         }
@@ -1869,7 +1909,7 @@ impl GitRepo for FakeGitRepo {
     }
 
     fn merge_base(&self, a: &str, b: &str) -> Option<String> {
-        let state = self.state.lock().unwrap();
+        let state = self.state.lock().expect("FakeGitRepo lock poisoned");
         if !state.commits.contains_key(a) || !state.commits.contains_key(b) {
             return None;
         }
@@ -1885,7 +1925,7 @@ impl GitRepo for FakeGitRepo {
     }
 
     fn local_branches(&self) -> Vec<(String, String)> {
-        let state = self.state.lock().unwrap();
+        let state = self.state.lock().expect("FakeGitRepo lock poisoned");
         state
             .branches
             .iter()
@@ -1894,7 +1934,7 @@ impl GitRepo for FakeGitRepo {
     }
 
     fn remote_branches(&self) -> Vec<(String, String)> {
-        let state = self.state.lock().unwrap();
+        let state = self.state.lock().expect("FakeGitRepo lock poisoned");
         state
             .remotes
             .iter()
@@ -1903,7 +1943,7 @@ impl GitRepo for FakeGitRepo {
     }
 
     fn tags(&self) -> Vec<(String, String)> {
-        let state = self.state.lock().unwrap();
+        let state = self.state.lock().expect("FakeGitRepo lock poisoned");
         state
             .tags
             .iter()
@@ -1912,12 +1952,12 @@ impl GitRepo for FakeGitRepo {
     }
 
     fn head_branch(&self) -> Option<String> {
-        let state = self.state.lock().unwrap();
+        let state = self.state.lock().expect("FakeGitRepo lock poisoned");
         state.head_branch.clone()
     }
 
     fn upstream_divergence(&self) -> Option<(usize, usize)> {
-        let state = self.state.lock().unwrap();
+        let state = self.state.lock().expect("FakeGitRepo lock poisoned");
         state
             .upstream
             .as_ref()
@@ -1925,7 +1965,7 @@ impl GitRepo for FakeGitRepo {
     }
 
     fn upstream_name(&self) -> Option<String> {
-        let state = self.state.lock().unwrap();
+        let state = self.state.lock().expect("FakeGitRepo lock poisoned");
         state.upstream.as_ref().map(|(name, ..)| name.clone())
     }
 
@@ -1934,7 +1974,7 @@ impl GitRepo for FakeGitRepo {
     /// the seeded commits, and both sides must resolve to one.
     fn divergence(&self, from: &str, to: &str) -> Option<(usize, usize)> {
         {
-            let state = self.state.lock().unwrap();
+            let state = self.state.lock().expect("FakeGitRepo lock poisoned");
             if let Some((name, ahead, behind)) = &state.upstream {
                 if from == "HEAD" && to == name {
                     return Some((*ahead, *behind));
@@ -1947,7 +1987,7 @@ impl GitRepo for FakeGitRepo {
 
         let from = self.resolve_rev(from)?;
         let to = self.resolve_rev(to)?;
-        let state = self.state.lock().unwrap();
+        let state = self.state.lock().expect("FakeGitRepo lock poisoned");
         if !state.commits.contains_key(&from) || !state.commits.contains_key(&to) {
             return None;
         }
@@ -1963,7 +2003,7 @@ impl GitRepo for FakeGitRepo {
     /// Reports each registration's seeded lines on its own side, and each
     /// untracked path's lines as unstaged additions.
     fn change_line_stats(&self) -> ChangeLineStats {
-        let state = self.state.lock().unwrap();
+        let state = self.state.lock().expect("FakeGitRepo lock poisoned");
         let relative = |path: &Path| {
             path.strip_prefix(&self.workdir)
                 .unwrap_or(path)
@@ -2001,7 +2041,7 @@ impl GitRepo for FakeGitRepo {
         } else {
             self.workdir.join(path)
         };
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.state.lock().expect("FakeGitRepo lock poisoned");
         if let Some(reason) = &state.apply_error {
             return BackendSnafu {
                 reason: reason.clone(),
@@ -2049,7 +2089,7 @@ impl GitRepo for FakeGitRepo {
     }
 
     fn amend_head(&self, tree_oid: &str, message: Option<&str>) -> Result<String, GitApplyError> {
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.state.lock().expect("FakeGitRepo lock poisoned");
         let Some(tree) = state.trees.get(tree_oid).cloned() else {
             return BackendSnafu {
                 reason: format!("unknown tree oid: {tree_oid}"),
@@ -2107,12 +2147,12 @@ impl GitRepo for FakeGitRepo {
         message: Option<&str>,
         descendants: &[String],
     ) -> Result<RewriteResult, GitApplyError> {
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.state.lock().expect("FakeGitRepo lock poisoned");
         rebase::rewrite_commit(&mut state, sha, tree, message, descendants)
     }
 
     fn run_rebase(&self, onto: &str, todo: &[RebaseTodo]) -> Result<String, RebaseError> {
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.state.lock().expect("FakeGitRepo lock poisoned");
         rebase::run_rebase(&mut state, onto, todo)
     }
 
@@ -2121,7 +2161,7 @@ impl GitRepo for FakeGitRepo {
         source_sha: &str,
         onto_sha: &str,
     ) -> Result<CherryPickOutcome, GitApplyError> {
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.state.lock().expect("FakeGitRepo lock poisoned");
         rebase::cherry_pick_tree(&mut state, source_sha, onto_sha)
     }
 
@@ -2133,7 +2173,7 @@ impl GitRepo for FakeGitRepo {
         author_name: &str,
         author_email: &str,
     ) -> Result<String, GitApplyError> {
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.state.lock().expect("FakeGitRepo lock poisoned");
         if let Some(p) = parent_sha
             && !state.commits.contains_key(p)
         {
@@ -2179,7 +2219,7 @@ impl GitRepo for FakeGitRepo {
     /// still commits, and the commit ends the merge. A file still unmerged
     /// fails the commit with the reason a real index gives.
     fn commit_index(&self, message: &str) -> Result<String, GitApplyError> {
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.state.lock().expect("FakeGitRepo lock poisoned");
         if let Some(reason) = &state.apply_error {
             return BackendSnafu {
                 reason: reason.clone(),
@@ -2241,7 +2281,7 @@ impl GitRepo for FakeGitRepo {
     }
 
     fn commit_message(&self, sha: &str) -> Option<String> {
-        let state = self.state.lock().unwrap();
+        let state = self.state.lock().expect("FakeGitRepo lock poisoned");
         state.commits.get(sha).map(|commit| commit.message.clone())
     }
 
@@ -2252,7 +2292,7 @@ impl GitRepo for FakeGitRepo {
     /// and the amend lands in `amend_history`, as one through
     /// [`GitRepo::amend_head`] does.
     fn amend_index(&self, message: &str) -> Result<String, GitApplyError> {
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.state.lock().expect("FakeGitRepo lock poisoned");
         let head = state
             .head
             .clone()
@@ -2302,7 +2342,7 @@ impl GitRepo for FakeGitRepo {
     /// unless `untracked` is set. The apply failure knob fails it as it fails
     /// [`GitRepo::commit_index`].
     fn stash_save(&self, message: Option<&str>, untracked: bool) -> Result<String, GitApplyError> {
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.state.lock().expect("FakeGitRepo lock poisoned");
         if let Some(reason) = &state.apply_error {
             return BackendSnafu {
                 reason: reason.clone(),
@@ -2349,7 +2389,7 @@ impl GitRepo for FakeGitRepo {
     }
 
     fn stash_list(&self) -> Vec<CommitInfo> {
-        let state = self.state.lock().unwrap();
+        let state = self.state.lock().expect("FakeGitRepo lock poisoned");
         state
             .stashes
             .iter()
@@ -2373,7 +2413,7 @@ impl GitRepo for FakeGitRepo {
     /// staged under either `index` value. The apply failure knob fails it as it
     /// fails [`GitRepo::commit_index`].
     fn stash_pop(&self, sha: &str, _index: bool) -> Result<(), GitApplyError> {
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.state.lock().expect("FakeGitRepo lock poisoned");
         if let Some(reason) = &state.apply_error {
             return BackendSnafu {
                 reason: reason.clone(),
@@ -2401,7 +2441,7 @@ impl GitRepo for FakeGitRepo {
     /// [`GitRepo::has_tracked_changes`] before it ever calls this, and a fake
     /// that refused too would leave that guard untestable in isolation.
     fn checkout_detached(&self, sha: &str) -> Result<(), GitApplyError> {
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.state.lock().expect("FakeGitRepo lock poisoned");
         if !state.commits.contains_key(sha) {
             return BackendSnafu {
                 reason: format!("unknown sha: {sha}"),
@@ -2416,7 +2456,7 @@ impl GitRepo for FakeGitRepo {
     }
 
     fn checkout_ref(&self, name: &str) -> Result<(), GitApplyError> {
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.state.lock().expect("FakeGitRepo lock poisoned");
         let Some(tip) = state.branches.get(name).cloned() else {
             return BackendSnafu {
                 reason: format!("unknown branch: {name}"),
@@ -2431,7 +2471,7 @@ impl GitRepo for FakeGitRepo {
     }
 
     fn set_branch_target(&self, name: &str, sha: &str) -> Result<(), GitApplyError> {
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.state.lock().expect("FakeGitRepo lock poisoned");
         if !state.commits.contains_key(sha) {
             return BackendSnafu {
                 reason: format!("unknown sha: {sha}"),
@@ -2453,7 +2493,7 @@ impl GitRepo for FakeGitRepo {
     /// Follows first parents only. Seeded commits carry no zone, so every
     /// offset is 0.
     fn blame(&self, path: &Path, at: Option<&str>) -> Option<FileBlame> {
-        let state = self.state.lock().unwrap();
+        let state = self.state.lock().expect("FakeGitRepo lock poisoned");
         let rel = path.strip_prefix(&self.workdir).unwrap_or(path);
         let start = at.or(state.head.as_deref())?;
         let text = state.commits.get(start)?.tree.get(rel)?;
@@ -2524,7 +2564,7 @@ impl GitRepo for FakeGitRepo {
     }
 
     fn commit_file_changes(&self, sha: &str) -> Vec<CommitFileChange> {
-        let state = self.state.lock().unwrap();
+        let state = self.state.lock().expect("FakeGitRepo lock poisoned");
         let Some(commit) = state.commits.get(sha) else {
             return Vec::new();
         };

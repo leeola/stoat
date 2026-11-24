@@ -25,7 +25,7 @@ static NO_ENDPOINTS: LazyLock<Arc<HighlightEndpoints>> =
     LazyLock::new(|| HighlightEndpoints::shared(Vec::new()));
 
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct FoldId(pub(crate) usize);
+pub struct FoldId(pub usize);
 
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct FoldOffset(pub usize);
@@ -112,7 +112,7 @@ impl FoldScope {
     /// Whether the hunk lies outside every item, so the Scope names nothing.
     ///
     /// A Scope with a split names the split's item, so it is not top level.
-    pub(crate) fn is_top_level(&self) -> bool {
+    pub fn is_top_level(&self) -> bool {
         self.end == FoldEnd::None && self.segments.is_empty() && self.split.is_none()
     }
 }
@@ -2417,7 +2417,7 @@ mod tests {
         let multi_buffer = MultiBuffer::singleton(shared.clone());
         let snap0 = multi_buffer.snapshot();
 
-        let fold_range = |snap: &crate::MultiBufferSnapshot| {
+        let fold_range = |snap: &crate::multi_buffer::MultiBufferSnapshot| {
             let start = snap.rope().point_to_offset(stoat_text::Point::new(0, 3));
             let end = snap.rope().point_to_offset(stoat_text::Point::new(2, 0));
             snap.anchor_at(start, Bias::Right)..snap.anchor_at(end, Bias::Left)

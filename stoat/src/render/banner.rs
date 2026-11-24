@@ -6,7 +6,7 @@
 
 use crate::{
     app::BANNER_PAD,
-    render::{self, paint::style_rgb, text},
+    render::{self, paint::style_rgb, text, TypeScale},
     review_walk::{ReturnRef, ReviewWalk},
     theme::{scope, Theme, TypeRole},
 };

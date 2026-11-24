@@ -564,7 +564,7 @@ pub(super) fn spaces(width: u32) -> Option<&'static str> {
 /// which it counts as a single column. Any other char adds its display width.
 /// Shared with the render painter so its fast path and the display map's column
 /// math cannot drift.
-pub(crate) fn advance_column_for_char(
+pub fn advance_column_for_char(
     expanded: &mut u32,
     ch: char,
     tab_size: u32,

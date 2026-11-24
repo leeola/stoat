@@ -2,34 +2,37 @@ use crate::host::lsp::{
     IncomingRequest, LspHost, LspNotification, LspResponseError, OffsetEncoding,
 };
 use async_trait::async_trait;
+#[cfg(test)]
 use lsp_types::{
-    ApplyWorkspaceEditParams, CallHierarchyIncomingCall, CallHierarchyIncomingCallsParams,
-    CallHierarchyItem, CallHierarchyOutgoingCall, CallHierarchyOutgoingCallsParams,
-    CallHierarchyPrepareParams, CodeAction, CodeActionContext, CodeActionOrCommand,
-    CodeActionParams, Color, ColorInformation, ColorPresentation, ColorPresentationParams,
-    CompletionItem, CompletionList, CompletionParams, CompletionResponse, ConfigurationItem,
-    ConfigurationParams, Diagnostic, DiagnosticSeverity, DidChangeConfigurationParams,
-    DidChangeTextDocumentParams, DidChangeWatchedFilesParams, DidChangeWorkspaceFoldersParams,
-    DidCloseTextDocumentParams, DidOpenTextDocumentParams, DidSaveTextDocumentParams,
-    DocumentColorParams, DocumentDiagnosticParams, DocumentDiagnosticReportResult,
-    DocumentFormattingParams, DocumentHighlight, DocumentHighlightKind, DocumentHighlightParams,
-    DocumentLink, DocumentLinkParams, DocumentRangeFormattingParams, DocumentSymbolParams,
-    DocumentSymbolResponse, ExecuteCommandParams, FileChangeType, FileEvent, FileRename,
-    FoldingRange, FoldingRangeParams, FormattingOptions, GotoDefinitionParams,
-    GotoDefinitionResponse, Hover, HoverContents, HoverParams, InitializeResult, InlayHint,
-    InlayHintKind, InlayHintLabel, InlayHintParams, Location, LocationLink, MarkupContent,
-    MarkupKind, MessageType, NumberOrString, PartialResultParams, Position, PositionEncodingKind,
-    PrepareRenameResponse, Range, ReferenceContext, ReferenceParams, RenameFilesParams,
-    RenameParams, SelectionRange, SelectionRangeParams, SemanticTokensDeltaParams,
-    SemanticTokensFullDeltaResult, SemanticTokensParams, SemanticTokensRangeParams,
-    SemanticTokensRangeResult, SemanticTokensResult, ServerCapabilities, SignatureHelp,
-    SignatureHelpParams, SymbolInformation, SymbolKind, TextDocumentContentChangeEvent,
-    TextDocumentIdentifier, TextDocumentItem, TextDocumentPositionParams,
-    TextDocumentSyncCapability, TextDocumentSyncKind, TextEdit, TypeHierarchyItem,
-    TypeHierarchyPrepareParams, TypeHierarchySubtypesParams, TypeHierarchySupertypesParams, Uri,
-    VersionedTextDocumentIdentifier, WorkDoneProgress, WorkDoneProgressBegin,
-    WorkDoneProgressParams, WorkspaceEdit, WorkspaceFolder, WorkspaceFoldersChangeEvent,
-    WorkspaceSymbolParams, WorkspaceSymbolResponse,
+    ApplyWorkspaceEditParams, CodeActionContext, Color, ConfigurationItem, ConfigurationParams,
+    FileChangeType, FileEvent, FileRename, FormattingOptions, MessageType, WorkDoneProgress,
+    WorkDoneProgressBegin, WorkspaceFolder, WorkspaceFoldersChangeEvent,
+};
+use lsp_types::{
+    CallHierarchyIncomingCall, CallHierarchyIncomingCallsParams, CallHierarchyItem,
+    CallHierarchyOutgoingCall, CallHierarchyOutgoingCallsParams, CallHierarchyPrepareParams,
+    CodeAction, CodeActionOrCommand, CodeActionParams, ColorInformation, ColorPresentation,
+    ColorPresentationParams, CompletionItem, CompletionList, CompletionParams, CompletionResponse,
+    Diagnostic, DiagnosticSeverity, DidChangeConfigurationParams, DidChangeTextDocumentParams,
+    DidChangeWatchedFilesParams, DidChangeWorkspaceFoldersParams, DidCloseTextDocumentParams,
+    DidOpenTextDocumentParams, DidSaveTextDocumentParams, DocumentColorParams,
+    DocumentDiagnosticParams, DocumentDiagnosticReportResult, DocumentFormattingParams,
+    DocumentHighlight, DocumentHighlightKind, DocumentHighlightParams, DocumentLink,
+    DocumentLinkParams, DocumentRangeFormattingParams, DocumentSymbolParams,
+    DocumentSymbolResponse, ExecuteCommandParams, FoldingRange, FoldingRangeParams,
+    GotoDefinitionParams, GotoDefinitionResponse, Hover, HoverContents, HoverParams,
+    InitializeResult, InlayHint, InlayHintKind, InlayHintLabel, InlayHintParams, Location,
+    LocationLink, MarkupContent, MarkupKind, NumberOrString, PartialResultParams, Position,
+    PositionEncodingKind, PrepareRenameResponse, Range, ReferenceContext, ReferenceParams,
+    RenameFilesParams, RenameParams, SelectionRange, SelectionRangeParams,
+    SemanticTokensDeltaParams, SemanticTokensFullDeltaResult, SemanticTokensParams,
+    SemanticTokensRangeParams, SemanticTokensRangeResult, SemanticTokensResult, ServerCapabilities,
+    SignatureHelp, SignatureHelpParams, SymbolInformation, SymbolKind,
+    TextDocumentContentChangeEvent, TextDocumentIdentifier, TextDocumentItem,
+    TextDocumentPositionParams, TextDocumentSyncCapability, TextDocumentSyncKind, TextEdit,
+    TypeHierarchyItem, TypeHierarchyPrepareParams, TypeHierarchySubtypesParams,
+    TypeHierarchySupertypesParams, Uri, VersionedTextDocumentIdentifier, WorkDoneProgressParams,
+    WorkspaceEdit, WorkspaceSymbolParams, WorkspaceSymbolResponse,
 };
 use serde_json::Value;
 use std::{
@@ -82,6 +85,7 @@ pub fn hover_params(path: &str, line: u32, col: u32) -> HoverParams {
     }
 }
 
+#[cfg(test)]
 pub fn signature_help_params(path: &str, line: u32, col: u32) -> SignatureHelpParams {
     SignatureHelpParams {
         text_document_position_params: text_doc_pos(path, line, col),
@@ -134,6 +138,7 @@ pub fn inlay_hint_params(path: &str, start_line: u32, end_line: u32) -> InlayHin
     }
 }
 
+#[cfg(test)]
 pub fn range_inlay_hint_params(
     path: &str,
     start_line: u32,
@@ -151,6 +156,7 @@ pub fn range_inlay_hint_params(
     }
 }
 
+#[cfg(test)]
 pub fn folding_range_params(path: &str) -> FoldingRangeParams {
     FoldingRangeParams {
         text_document: text_doc_id(path),
@@ -159,6 +165,7 @@ pub fn folding_range_params(path: &str) -> FoldingRangeParams {
     }
 }
 
+#[cfg(test)]
 pub fn selection_range_params(path: &str, positions: &[(u32, u32)]) -> SelectionRangeParams {
     SelectionRangeParams {
         text_document: text_doc_id(path),
@@ -171,6 +178,7 @@ pub fn selection_range_params(path: &str, positions: &[(u32, u32)]) -> Selection
     }
 }
 
+#[cfg(test)]
 pub fn range_formatting_params(
     path: &str,
     start_line: u32,
@@ -189,6 +197,7 @@ pub fn range_formatting_params(
     }
 }
 
+#[cfg(test)]
 pub fn code_action_params(
     path: &str,
     start_line: u32,
@@ -212,6 +221,7 @@ pub fn code_action_params(
     }
 }
 
+#[cfg(test)]
 pub fn document_diagnostic_params(path: &str) -> DocumentDiagnosticParams {
     DocumentDiagnosticParams {
         text_document: text_doc_id(path),
@@ -222,6 +232,7 @@ pub fn document_diagnostic_params(path: &str) -> DocumentDiagnosticParams {
     }
 }
 
+#[cfg(test)]
 pub fn document_link_params(path: &str) -> DocumentLinkParams {
     DocumentLinkParams {
         text_document: text_doc_id(path),
@@ -230,6 +241,7 @@ pub fn document_link_params(path: &str) -> DocumentLinkParams {
     }
 }
 
+#[cfg(test)]
 pub fn document_symbol_params(path: &str) -> DocumentSymbolParams {
     DocumentSymbolParams {
         text_document: text_doc_id(path),
@@ -238,6 +250,7 @@ pub fn document_symbol_params(path: &str) -> DocumentSymbolParams {
     }
 }
 
+#[cfg(test)]
 pub fn document_color_params(path: &str) -> DocumentColorParams {
     DocumentColorParams {
         text_document: text_doc_id(path),
@@ -246,6 +259,7 @@ pub fn document_color_params(path: &str) -> DocumentColorParams {
     }
 }
 
+#[cfg(test)]
 pub fn color_presentation_params(
     path: &str,
     color: Color,
@@ -266,6 +280,7 @@ pub fn color_presentation_params(
     }
 }
 
+#[cfg(test)]
 pub fn semantic_tokens_params(path: &str) -> SemanticTokensParams {
     SemanticTokensParams {
         work_done_progress_params: wdp(),
@@ -274,6 +289,7 @@ pub fn semantic_tokens_params(path: &str) -> SemanticTokensParams {
     }
 }
 
+#[cfg(test)]
 pub fn semantic_tokens_range_params(
     path: &str,
     start_line: u32,
@@ -292,6 +308,7 @@ pub fn semantic_tokens_range_params(
     }
 }
 
+#[cfg(test)]
 pub fn call_hierarchy_prepare_params(
     path: &str,
     line: u32,
@@ -307,6 +324,7 @@ pub fn call_hierarchy_prepare_params(
 /// `(path, line, col)`. The item's `range` and `selection_range`
 /// both span a single position so the fake's lookup
 /// (`item.range.start`) matches `(line, col)`.
+#[cfg(test)]
 pub fn call_hierarchy_item(
     path: &str,
     name: &str,
@@ -328,6 +346,7 @@ pub fn call_hierarchy_item(
     }
 }
 
+#[cfg(test)]
 pub fn type_hierarchy_prepare_params(
     path: &str,
     line: u32,
@@ -343,6 +362,7 @@ pub fn type_hierarchy_prepare_params(
 /// `(path, line, col)`. The item's `range` and `selection_range`
 /// both span a single position so the fake's supertypes/subtypes
 /// lookup (`item.range.start`) matches `(line, col)`.
+#[cfg(test)]
 pub fn type_hierarchy_item(
     path: &str,
     name: &str,
@@ -398,6 +418,7 @@ pub fn change_params(path: &str, version: i32, new_text: &str) -> DidChangeTextD
 /// new_path)` pairs. Each path is converted to a `file://` URI
 /// via [`file_uri`] so test inputs match the URIs the fake's
 /// `will_rename` lookup uses.
+#[cfg(test)]
 pub fn rename_files_params(renames: &[(&str, &str)]) -> RenameFilesParams {
     RenameFilesParams {
         files: renames
@@ -410,6 +431,7 @@ pub fn rename_files_params(renames: &[(&str, &str)]) -> RenameFilesParams {
     }
 }
 
+#[cfg(test)]
 pub fn execute_command_params(command: &str, arguments: Vec<Value>) -> ExecuteCommandParams {
     ExecuteCommandParams {
         command: command.to_string(),
@@ -423,6 +445,7 @@ pub fn execute_command_params(command: &str, arguments: Vec<Value>) -> ExecuteCo
 /// (`IncomingRequest::WorkspaceApplyEdit`, etc.) construct the
 /// variant directly so the params type stays checked at compile
 /// time; this helper exists for the fallback path.
+#[cfg(test)]
 pub fn incoming_request(method: &str, id: i32, params: Value) -> IncomingRequest {
     IncomingRequest::Unknown {
         id: NumberOrString::Number(id),
@@ -538,7 +561,7 @@ impl Drop for CancellationGuard<'_> {
         }
         self.state
             .lock()
-            .unwrap()
+            .expect("FakeLsp lock poisoned")
             .cancelled_requests
             .push(std::mem::take(&mut self.method));
     }
@@ -714,7 +737,10 @@ impl FakeLsp {
     /// driving capability-dependent code paths so the host advertises
     /// the right feature set.
     pub fn set_capabilities(&self, capabilities: ServerCapabilities) {
-        self.state.lock().unwrap().capabilities = Arc::new(capabilities);
+        self.state
+            .lock()
+            .expect("FakeLsp lock poisoned")
+            .capabilities = Arc::new(capabilities);
     }
 
     /// Convenience setter that swaps just the
@@ -729,7 +755,7 @@ impl FakeLsp {
             OffsetEncoding::Utf16 => PositionEncodingKind::UTF16,
             OffsetEncoding::Utf32 => PositionEncodingKind::UTF32,
         };
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.state.lock().expect("FakeLsp lock poisoned");
         let mut caps = (*state.capabilities).clone();
         caps.position_encoding = Some(kind);
         state.capabilities = Arc::new(caps);
@@ -741,7 +767,7 @@ impl FakeLsp {
     /// configured `TextDocumentSyncKind`. Other capability fields
     /// are preserved.
     pub fn set_text_document_sync(&self, kind: TextDocumentSyncKind) {
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.state.lock().expect("FakeLsp lock poisoned");
         let mut caps = (*state.capabilities).clone();
         caps.text_document_sync = Some(TextDocumentSyncCapability::Kind(kind));
         state.capabilities = Arc::new(caps);
@@ -753,7 +779,7 @@ impl FakeLsp {
     pub fn set_folding_ranges(&self, path: &str, ranges: Vec<FoldingRange>) {
         self.state
             .lock()
-            .unwrap()
+            .expect("FakeLsp lock poisoned")
             .folding_ranges
             .insert(file_uri(path), ranges);
     }
@@ -768,7 +794,7 @@ impl FakeLsp {
     pub fn set_selection_range(&self, path: &str, line: u32, col: u32, range: SelectionRange) {
         self.state
             .lock()
-            .unwrap()
+            .expect("FakeLsp lock poisoned")
             .selection_ranges
             .insert(LspKey::new(path, line, col), range);
     }
@@ -782,7 +808,7 @@ impl FakeLsp {
     pub fn set_range_formatting(&self, path: &str, edits: Vec<TextEdit>) {
         self.state
             .lock()
-            .unwrap()
+            .expect("FakeLsp lock poisoned")
             .range_formatting
             .insert(file_uri(path), edits);
     }
@@ -793,7 +819,7 @@ impl FakeLsp {
     pub fn set_formatting(&self, path: &str, edits: Vec<TextEdit>) {
         self.state
             .lock()
-            .unwrap()
+            .expect("FakeLsp lock poisoned")
             .formatting
             .insert(file_uri(path), edits);
     }
@@ -807,7 +833,7 @@ impl FakeLsp {
     pub fn set_code_actions(&self, path: &str, actions: Vec<CodeActionOrCommand>) {
         self.state
             .lock()
-            .unwrap()
+            .expect("FakeLsp lock poisoned")
             .code_actions
             .insert(file_uri(path), actions);
     }
@@ -821,7 +847,7 @@ impl FakeLsp {
     pub fn set_document_diagnostic(&self, path: &str, report: DocumentDiagnosticReportResult) {
         self.state
             .lock()
-            .unwrap()
+            .expect("FakeLsp lock poisoned")
             .document_diagnostics
             .insert(file_uri(path), report);
     }
@@ -835,7 +861,7 @@ impl FakeLsp {
     pub fn set_document_links(&self, path: &str, links: Vec<DocumentLink>) {
         self.state
             .lock()
-            .unwrap()
+            .expect("FakeLsp lock poisoned")
             .document_links
             .insert(file_uri(path), links);
     }
@@ -846,7 +872,7 @@ impl FakeLsp {
     pub fn set_document_colors(&self, path: &str, colors: Vec<ColorInformation>) {
         self.state
             .lock()
-            .unwrap()
+            .expect("FakeLsp lock poisoned")
             .document_colors
             .insert(file_uri(path), colors);
     }
@@ -860,7 +886,7 @@ impl FakeLsp {
     pub fn set_color_presentations(&self, path: &str, presentations: Vec<ColorPresentation>) {
         self.state
             .lock()
-            .unwrap()
+            .expect("FakeLsp lock poisoned")
             .color_presentations
             .insert(file_uri(path), presentations);
     }
@@ -871,7 +897,7 @@ impl FakeLsp {
     pub fn set_semantic_tokens_full(&self, path: &str, result: SemanticTokensResult) {
         self.state
             .lock()
-            .unwrap()
+            .expect("FakeLsp lock poisoned")
             .semantic_tokens_full
             .insert(file_uri(path), result);
     }
@@ -888,7 +914,7 @@ impl FakeLsp {
     ) {
         self.state
             .lock()
-            .unwrap()
+            .expect("FakeLsp lock poisoned")
             .semantic_tokens_full_delta
             .insert(file_uri(path), result);
     }
@@ -899,7 +925,7 @@ impl FakeLsp {
     pub fn observed_semantic_token_deltas(&self) -> Vec<SemanticTokensDeltaParams> {
         self.state
             .lock()
-            .unwrap()
+            .expect("FakeLsp lock poisoned")
             .semantic_tokens_delta_requests
             .clone()
     }
@@ -913,7 +939,7 @@ impl FakeLsp {
     pub fn set_semantic_tokens_range(&self, path: &str, result: SemanticTokensRangeResult) {
         self.state
             .lock()
-            .unwrap()
+            .expect("FakeLsp lock poisoned")
             .semantic_tokens_range
             .insert(file_uri(path), result);
     }
@@ -929,7 +955,7 @@ impl FakeLsp {
     pub fn set_document_symbols(&self, path: &str, response: DocumentSymbolResponse) {
         self.state
             .lock()
-            .unwrap()
+            .expect("FakeLsp lock poisoned")
             .document_symbols
             .insert(file_uri(path), response);
     }
@@ -947,7 +973,7 @@ impl FakeLsp {
     ) {
         self.state
             .lock()
-            .unwrap()
+            .expect("FakeLsp lock poisoned")
             .call_hierarchy_prepare
             .insert(LspKey::new(path, line, col), items);
     }
@@ -956,7 +982,7 @@ impl FakeLsp {
     /// `callHierarchy/incomingCalls` is sent with an item anchored
     /// at `(path, line, col)`. The fake matches on the requested
     /// item's `range.start`, so tests should construct items via
-    /// [`call_hierarchy_item`] (or set `range.start` to match).
+    /// `call_hierarchy_item` (or set `range.start` to match).
     pub fn set_call_hierarchy_incoming_calls(
         &self,
         path: &str,
@@ -966,7 +992,7 @@ impl FakeLsp {
     ) {
         self.state
             .lock()
-            .unwrap()
+            .expect("FakeLsp lock poisoned")
             .call_hierarchy_incoming
             .insert(LspKey::new(path, line, col), calls);
     }
@@ -985,7 +1011,7 @@ impl FakeLsp {
     ) {
         self.state
             .lock()
-            .unwrap()
+            .expect("FakeLsp lock poisoned")
             .call_hierarchy_outgoing
             .insert(LspKey::new(path, line, col), calls);
     }
@@ -1003,7 +1029,7 @@ impl FakeLsp {
     ) {
         self.state
             .lock()
-            .unwrap()
+            .expect("FakeLsp lock poisoned")
             .type_hierarchy_prepare
             .insert(LspKey::new(path, line, col), items);
     }
@@ -1012,7 +1038,7 @@ impl FakeLsp {
     /// `typeHierarchy/supertypes` is sent with an item anchored at
     /// `(path, line, col)`. The fake matches on the requested
     /// item's `range.start`, so tests should construct items via
-    /// [`type_hierarchy_item`] (or set `range.start` to match).
+    /// `type_hierarchy_item` (or set `range.start` to match).
     pub fn set_type_hierarchy_supertypes(
         &self,
         path: &str,
@@ -1022,7 +1048,7 @@ impl FakeLsp {
     ) {
         self.state
             .lock()
-            .unwrap()
+            .expect("FakeLsp lock poisoned")
             .type_hierarchy_supertypes
             .insert(LspKey::new(path, line, col), items);
     }
@@ -1040,14 +1066,14 @@ impl FakeLsp {
     ) {
         self.state
             .lock()
-            .unwrap()
+            .expect("FakeLsp lock poisoned")
             .type_hierarchy_subtypes
             .insert(LspKey::new(path, line, col), items);
     }
 
     /// Programs the [`WorkspaceEdit`] returned for a
     /// `workspace/willRenameFiles` request whose first
-    /// [`FileRename`] entry matches `(old_path, new_path)`. The
+    /// [`lsp_types::FileRename`] entry matches `(old_path, new_path)`. The
     /// fake keys on the first entry only -- multi-file rename
     /// requests look up only the head pair, mirroring the typical
     /// editor flow of renaming one file at a time. Replaces any
@@ -1057,7 +1083,11 @@ impl FakeLsp {
             file_uri(old_path).as_str().to_string(),
             file_uri(new_path).as_str().to_string(),
         );
-        self.state.lock().unwrap().will_renames.insert(key, edit);
+        self.state
+            .lock()
+            .expect("FakeLsp lock poisoned")
+            .will_renames
+            .insert(key, edit);
     }
 
     /// Snapshot of every [`RenameFilesParams`] received via
@@ -1065,7 +1095,11 @@ impl FakeLsp {
     /// assert the editor notified the server about a completed
     /// rename.
     pub fn observed_renames(&self) -> Vec<RenameFilesParams> {
-        self.state.lock().unwrap().observed_renames.clone()
+        self.state
+            .lock()
+            .expect("FakeLsp lock poisoned")
+            .observed_renames
+            .clone()
     }
 
     /// Snapshot of every [`DidOpenTextDocumentParams`] received
@@ -1073,7 +1107,11 @@ impl FakeLsp {
     /// assert that the editor notified the server when a buffer
     /// was opened, and that re-opens dedupe at the call site.
     pub fn observed_opens(&self) -> Vec<DidOpenTextDocumentParams> {
-        self.state.lock().unwrap().observed_opens.clone()
+        self.state
+            .lock()
+            .expect("FakeLsp lock poisoned")
+            .observed_opens
+            .clone()
     }
 
     /// Snapshot of every [`DidChangeTextDocumentParams`] received
@@ -1081,14 +1119,22 @@ impl FakeLsp {
     /// assert that the editor's debouncer fired exactly once per
     /// quiet window with the latest text and a monotonic version.
     pub fn observed_changes(&self) -> Vec<DidChangeTextDocumentParams> {
-        self.state.lock().unwrap().observed_changes.clone()
+        self.state
+            .lock()
+            .expect("FakeLsp lock poisoned")
+            .observed_changes
+            .clone()
     }
 
     /// Snapshot of every [`DidSaveTextDocumentParams`] received via
     /// [`LspHost::did_save`] in call order. Tests assert the editor named the
     /// document a save fired for by the same URI it opened it under.
     pub fn observed_saves(&self) -> Vec<DidSaveTextDocumentParams> {
-        self.state.lock().unwrap().observed_saves.clone()
+        self.state
+            .lock()
+            .expect("FakeLsp lock poisoned")
+            .observed_saves
+            .clone()
     }
 
     /// Snapshot of every [`DidCloseTextDocumentParams`] received via
@@ -1096,34 +1142,54 @@ impl FakeLsp {
     /// released the document the server holds, which needs the URI to match
     /// the one the open registered.
     pub fn observed_closes(&self) -> Vec<DidCloseTextDocumentParams> {
-        self.state.lock().unwrap().observed_closes.clone()
+        self.state
+            .lock()
+            .expect("FakeLsp lock poisoned")
+            .observed_closes
+            .clone()
     }
 
     /// Snapshot of every [`CompletionParams`] received via
     /// [`LspHost::completion`] in call order. Tests assert the trigger
     /// context and that a request fired at the expected time.
     pub fn observed_completions(&self) -> Vec<CompletionParams> {
-        self.state.lock().unwrap().observed_completions.clone()
+        self.state
+            .lock()
+            .expect("FakeLsp lock poisoned")
+            .observed_completions
+            .clone()
     }
 
     /// Snapshot of every [`SignatureHelpParams`] received via
     /// [`LspHost::signature_help`] in call order. Tests assert that a burst of
     /// trigger characters asked once rather than once each.
     pub fn observed_signature_helps(&self) -> Vec<SignatureHelpParams> {
-        self.state.lock().unwrap().observed_signature_helps.clone()
+        self.state
+            .lock()
+            .expect("FakeLsp lock poisoned")
+            .observed_signature_helps
+            .clone()
     }
 
     /// Snapshot of every [`DocumentFormattingParams`] received via
     /// [`LspHost::formatting`] in call order. Tests assert the options the
     /// editor said it wanted, which a server is entitled to take literally.
     pub fn observed_formatting(&self) -> Vec<DocumentFormattingParams> {
-        self.state.lock().unwrap().observed_formatting.clone()
+        self.state
+            .lock()
+            .expect("FakeLsp lock poisoned")
+            .observed_formatting
+            .clone()
     }
 
     /// Snapshot of every [`DocumentRangeFormattingParams`] received via
     /// [`LspHost::range_formatting`] in call order.
     pub fn observed_range_formatting(&self) -> Vec<DocumentRangeFormattingParams> {
-        self.state.lock().unwrap().observed_range_formatting.clone()
+        self.state
+            .lock()
+            .expect("FakeLsp lock poisoned")
+            .observed_range_formatting
+            .clone()
     }
 
     /// Snapshot of every [`DidChangeWatchedFilesParams`] received
@@ -1131,7 +1197,7 @@ impl FakeLsp {
     pub fn observed_watched_file_changes(&self) -> Vec<DidChangeWatchedFilesParams> {
         self.state
             .lock()
-            .unwrap()
+            .expect("FakeLsp lock poisoned")
             .observed_watched_file_changes
             .clone()
     }
@@ -1141,7 +1207,7 @@ impl FakeLsp {
     pub fn observed_configuration_changes(&self) -> Vec<DidChangeConfigurationParams> {
         self.state
             .lock()
-            .unwrap()
+            .expect("FakeLsp lock poisoned")
             .observed_configuration_changes
             .clone()
     }
@@ -1151,7 +1217,7 @@ impl FakeLsp {
     pub fn observed_workspace_folder_changes(&self) -> Vec<DidChangeWorkspaceFoldersParams> {
         self.state
             .lock()
-            .unwrap()
+            .expect("FakeLsp lock poisoned")
             .observed_workspace_folder_changes
             .clone()
     }
@@ -1170,13 +1236,17 @@ impl FakeLsp {
     /// [`LspHost::reply`] in call order. Tests assert the editor
     /// answered an [`IncomingRequest`] with the right id and result.
     pub fn observed_replies(&self) -> Vec<(NumberOrString, Result<Value, LspResponseError>)> {
-        self.state.lock().unwrap().observed_replies.clone()
+        self.state
+            .lock()
+            .expect("FakeLsp lock poisoned")
+            .observed_replies
+            .clone()
     }
 
     /// Whether [`LspHost::shutdown`] has been called, so a quit-path test
     /// can assert the language server was reaped on exit.
     pub fn was_shut_down(&self) -> bool {
-        self.state.lock().unwrap().shut_down
+        self.state.lock().expect("FakeLsp lock poisoned").shut_down
     }
 
     /// Programs the response value returned for a
@@ -1188,7 +1258,7 @@ impl FakeLsp {
     pub fn set_execute_command(&self, command: &str, response: Value) {
         self.state
             .lock()
-            .unwrap()
+            .expect("FakeLsp lock poisoned")
             .executed_commands
             .insert(command.to_string(), response);
     }
@@ -1199,7 +1269,7 @@ impl FakeLsp {
     pub fn observed_executed_commands(&self) -> Vec<ExecuteCommandParams> {
         self.state
             .lock()
-            .unwrap()
+            .expect("FakeLsp lock poisoned")
             .observed_executed_commands
             .clone()
     }
@@ -1217,7 +1287,7 @@ impl FakeLsp {
     ) {
         self.state
             .lock()
-            .unwrap()
+            .expect("FakeLsp lock poisoned")
             .prepare_renames
             .insert(LspKey::new(path, line, col), response);
     }
@@ -1231,7 +1301,7 @@ impl FakeLsp {
     pub fn set_rename(&self, path: &str, line: u32, col: u32, edit: WorkspaceEdit) {
         self.state
             .lock()
-            .unwrap()
+            .expect("FakeLsp lock poisoned")
             .renames
             .insert(LspKey::new(path, line, col), edit);
     }
@@ -1248,7 +1318,7 @@ impl FakeLsp {
         };
         self.state
             .lock()
-            .unwrap()
+            .expect("FakeLsp lock poisoned")
             .hovers
             .insert(LspKey::new(path, line, col), hover);
     }
@@ -1262,7 +1332,7 @@ impl FakeLsp {
     pub fn set_signature_help(&self, path: &str, line: u32, col: u32, help: SignatureHelp) {
         self.state
             .lock()
-            .unwrap()
+            .expect("FakeLsp lock poisoned")
             .signature_helps
             .insert(LspKey::new(path, line, col), help);
     }
@@ -1311,7 +1381,7 @@ impl FakeLsp {
         );
         self.state
             .lock()
-            .unwrap()
+            .expect("FakeLsp lock poisoned")
             .diagnostics
             .entry(file_uri(path))
             .or_default()
@@ -1336,7 +1406,7 @@ impl FakeLsp {
     pub fn fail_next_request(&self, method: &str, kind: io::ErrorKind) {
         self.state
             .lock()
-            .unwrap()
+            .expect("FakeLsp lock poisoned")
             .request_failures_oneshot
             .insert(method.to_string(), kind);
     }
@@ -1348,7 +1418,7 @@ impl FakeLsp {
     pub fn set_method_error(&self, method: &str, kind: io::ErrorKind) {
         self.state
             .lock()
-            .unwrap()
+            .expect("FakeLsp lock poisoned")
             .request_failures_persistent
             .insert(method.to_string(), kind);
     }
@@ -1358,14 +1428,14 @@ impl FakeLsp {
     pub fn clear_method_error(&self, method: &str) {
         self.state
             .lock()
-            .unwrap()
+            .expect("FakeLsp lock poisoned")
             .request_failures_persistent
             .remove(method);
     }
 
     fn take_request_failure(&self, method: &str) -> Option<io::Error> {
         let kind = {
-            let mut state = self.state.lock().unwrap();
+            let mut state = self.state.lock().expect("FakeLsp lock poisoned");
             if let Some(kind) = state.request_failures_oneshot.remove(method) {
                 kind
             } else if let Some(&kind) = state.request_failures_persistent.get(method) {
@@ -1385,7 +1455,7 @@ impl FakeLsp {
     /// without an executor `set_request_delay` records the delay but
     /// requests resolve immediately.
     pub fn set_executor(&self, executor: Executor) {
-        *self.executor.lock().unwrap() = Some(executor);
+        *self.executor.lock().expect("FakeLsp lock poisoned") = Some(executor);
     }
 
     /// Arm a sticky delay for every request that targets `method`
@@ -1397,7 +1467,7 @@ impl FakeLsp {
     pub fn set_request_delay(&self, method: &str, duration: Duration) {
         self.state
             .lock()
-            .unwrap()
+            .expect("FakeLsp lock poisoned")
             .request_delays
             .insert(method.to_string(), duration);
     }
@@ -1405,19 +1475,23 @@ impl FakeLsp {
     /// Clear a delay previously armed via [`Self::set_request_delay`].
     /// No-op if none was armed.
     pub fn clear_request_delay(&self, method: &str) {
-        self.state.lock().unwrap().request_delays.remove(method);
+        self.state
+            .lock()
+            .expect("FakeLsp lock poisoned")
+            .request_delays
+            .remove(method);
     }
 
     async fn apply_delay(&self, method: &str) {
         let duration = self
             .state
             .lock()
-            .unwrap()
+            .expect("FakeLsp lock poisoned")
             .request_delays
             .get(method)
             .copied();
         let Some(duration) = duration else { return };
-        let executor = self.executor.lock().unwrap().clone();
+        let executor = self.executor.lock().expect("FakeLsp lock poisoned").clone();
         let Some(executor) = executor else { return };
         let guard = CancellationGuard::armed(&self.state, method.to_string());
         executor.timer(duration).await;
@@ -1432,14 +1506,22 @@ impl FakeLsp {
     /// observes the drop and pushes the method name here. Order
     /// preserves arrival.
     pub fn cancelled_requests(&self) -> Vec<String> {
-        self.state.lock().unwrap().cancelled_requests.clone()
+        self.state
+            .lock()
+            .expect("FakeLsp lock poisoned")
+            .cancelled_requests
+            .clone()
     }
 
     /// Clear the cancellation log. Tests use this between phases
     /// when they want the next assertion to start from an empty
     /// slate.
     pub fn clear_cancelled_requests(&self) {
-        self.state.lock().unwrap().cancelled_requests.clear();
+        self.state
+            .lock()
+            .expect("FakeLsp lock poisoned")
+            .cancelled_requests
+            .clear();
     }
 
     /// Toggle pending mode for the request method `R`. While
@@ -1457,7 +1539,7 @@ impl FakeLsp {
     {
         self.state
             .lock()
-            .unwrap()
+            .expect("FakeLsp lock poisoned")
             .pending_modes
             .insert(R::METHOD, enabled);
     }
@@ -1468,7 +1550,7 @@ impl FakeLsp {
     pub fn pending_count(&self, method: &str) -> usize {
         self.state
             .lock()
-            .unwrap()
+            .expect("FakeLsp lock poisoned")
             .pending_queue
             .get(method)
             .map(|q| q.len())
@@ -1492,7 +1574,7 @@ impl FakeLsp {
         let entry = self
             .state
             .lock()
-            .unwrap()
+            .expect("FakeLsp lock poisoned")
             .pending_queue
             .get_mut(R::METHOD)
             .and_then(|q| q.pop_front())?;
@@ -1506,7 +1588,7 @@ impl FakeLsp {
     fn is_pending_mode_for(&self, method: &str) -> bool {
         self.state
             .lock()
-            .unwrap()
+            .expect("FakeLsp lock poisoned")
             .pending_modes
             .get(method)
             .copied()
@@ -1527,7 +1609,7 @@ impl FakeLsp {
         };
         self.state
             .lock()
-            .unwrap()
+            .expect("FakeLsp lock poisoned")
             .pending_queue
             .entry(R::METHOD)
             .or_default()
@@ -1543,7 +1625,7 @@ impl FakeLsp {
     pub fn set_completions_incomplete(&self, path: &str, line: u32, col: u32) {
         self.state
             .lock()
-            .unwrap()
+            .expect("FakeLsp lock poisoned")
             .incomplete_completions
             .insert(LspKey::new(path, line, col));
     }
@@ -1558,7 +1640,7 @@ impl FakeLsp {
             .collect();
         self.state
             .lock()
-            .unwrap()
+            .expect("FakeLsp lock poisoned")
             .completions
             .insert(LspKey::new(path, line, col), items);
     }
@@ -1577,7 +1659,7 @@ impl FakeLsp {
     ) {
         self.state
             .lock()
-            .unwrap()
+            .expect("FakeLsp lock poisoned")
             .completions
             .insert(LspKey::new(path, line, col), items);
     }
@@ -1589,7 +1671,7 @@ impl FakeLsp {
     pub fn set_completion_resolve(&self, label: &str, item: CompletionItem) {
         self.state
             .lock()
-            .unwrap()
+            .expect("FakeLsp lock poisoned")
             .completion_resolve
             .insert(label.to_string(), item);
     }
@@ -1628,7 +1710,11 @@ impl FakeLsp {
         target_col: u32,
     ) {
         Self::set_goto(
-            &mut self.state.lock().unwrap().definitions,
+            &mut self
+                .state
+                .lock()
+                .expect("FakeLsp lock poisoned")
+                .definitions,
             path,
             line,
             col,
@@ -1654,10 +1740,14 @@ impl FakeLsp {
                 )
             })
             .collect();
-        self.state.lock().unwrap().definitions.insert(
-            LspKey::new(path, line, col),
-            GotoDefinitionResponse::Array(locations),
-        );
+        self.state
+            .lock()
+            .expect("FakeLsp lock poisoned")
+            .definitions
+            .insert(
+                LspKey::new(path, line, col),
+                GotoDefinitionResponse::Array(locations),
+            );
     }
 
     /// Seed a definition response with one location link, so a goto at
@@ -1679,10 +1769,14 @@ impl FakeLsp {
             target_range,
             target_selection_range: selection_range,
         };
-        self.state.lock().unwrap().definitions.insert(
-            LspKey::new(path, line, col),
-            GotoDefinitionResponse::Link(vec![link]),
-        );
+        self.state
+            .lock()
+            .expect("FakeLsp lock poisoned")
+            .definitions
+            .insert(
+                LspKey::new(path, line, col),
+                GotoDefinitionResponse::Link(vec![link]),
+            );
     }
 
     pub fn set_declaration(
@@ -1695,7 +1789,11 @@ impl FakeLsp {
         target_col: u32,
     ) {
         Self::set_goto(
-            &mut self.state.lock().unwrap().declarations,
+            &mut self
+                .state
+                .lock()
+                .expect("FakeLsp lock poisoned")
+                .declarations,
             path,
             line,
             col,
@@ -1715,7 +1813,11 @@ impl FakeLsp {
         target_col: u32,
     ) {
         Self::set_goto(
-            &mut self.state.lock().unwrap().type_definitions,
+            &mut self
+                .state
+                .lock()
+                .expect("FakeLsp lock poisoned")
+                .type_definitions,
             path,
             line,
             col,
@@ -1735,7 +1837,11 @@ impl FakeLsp {
         target_col: u32,
     ) {
         Self::set_goto(
-            &mut self.state.lock().unwrap().implementations,
+            &mut self
+                .state
+                .lock()
+                .expect("FakeLsp lock poisoned")
+                .implementations,
             path,
             line,
             col,
@@ -1759,7 +1865,7 @@ impl FakeLsp {
             .collect();
         self.state
             .lock()
-            .unwrap()
+            .expect("FakeLsp lock poisoned")
             .references
             .insert(LspKey::new(path, line, col), locations);
     }
@@ -1782,7 +1888,7 @@ impl FakeLsp {
             .collect();
         self.state
             .lock()
-            .unwrap()
+            .expect("FakeLsp lock poisoned")
             .highlights
             .insert(LspKey::new(path, line, col), highlights);
     }
@@ -1809,7 +1915,7 @@ impl FakeLsp {
         };
         self.state
             .lock()
-            .unwrap()
+            .expect("FakeLsp lock poisoned")
             .inlay_hints
             .entry(file_uri(path))
             .or_default()
@@ -1836,7 +1942,7 @@ impl FakeLsp {
     pub fn set_range_inlay_hints(&self, path: &str, hints: Vec<InlayHint>) {
         self.state
             .lock()
-            .unwrap()
+            .expect("FakeLsp lock poisoned")
             .range_inlay_hints
             .insert(file_uri(path), hints);
     }
@@ -1866,7 +1972,7 @@ impl FakeLsp {
         };
         self.state
             .lock()
-            .unwrap()
+            .expect("FakeLsp lock poisoned")
             .workspace_symbols
             .entry(query.to_string())
             .or_default()
@@ -1881,7 +1987,7 @@ impl FakeLsp {
     pub fn set_workspace_symbol_response(&self, query: &str, response: WorkspaceSymbolResponse) {
         self.state
             .lock()
-            .unwrap()
+            .expect("FakeLsp lock poisoned")
             .workspace_symbol_responses
             .insert(query.to_string(), response);
     }
@@ -1891,7 +1997,7 @@ impl FakeLsp {
     pub fn opened_documents(&self) -> Vec<Uri> {
         self.state
             .lock()
-            .unwrap()
+            .expect("FakeLsp lock poisoned")
             .open_documents
             .keys()
             .cloned()
@@ -1901,7 +2007,7 @@ impl FakeLsp {
     pub fn is_open(&self, path: &str) -> bool {
         self.state
             .lock()
-            .unwrap()
+            .expect("FakeLsp lock poisoned")
             .open_documents
             .contains_key(&file_uri(path))
     }
@@ -1918,7 +2024,11 @@ fn lookup_goto(
 #[async_trait]
 impl LspHost for FakeLsp {
     fn capabilities(&self) -> Arc<ServerCapabilities> {
-        self.state.lock().unwrap().capabilities.clone()
+        self.state
+            .lock()
+            .expect("FakeLsp lock poisoned")
+            .capabilities
+            .clone()
     }
 
     async fn initialize(&self, _root_uri: Option<Uri>) -> io::Result<InitializeResult> {
@@ -1926,7 +2036,7 @@ impl LspHost for FakeLsp {
         if let Some(err) = self.take_request_failure("initialize") {
             return Err(err);
         }
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.state.lock().expect("FakeLsp lock poisoned");
         state.initialized = true;
         Ok(InitializeResult {
             capabilities: (*state.capabilities).clone(),
@@ -1939,14 +2049,14 @@ impl LspHost for FakeLsp {
         if let Some(err) = self.take_request_failure("shutdown") {
             return Err(err);
         }
-        self.state.lock().unwrap().shut_down = true;
+        self.state.lock().expect("FakeLsp lock poisoned").shut_down = true;
         Ok(())
     }
 
     async fn did_open(&self, params: DidOpenTextDocumentParams) -> io::Result<()> {
         let pending =
             {
-                let mut state = self.state.lock().unwrap();
+                let mut state = self.state.lock().expect("FakeLsp lock poisoned");
                 let uri = params.text_document.uri.clone();
                 state
                     .open_documents
@@ -1969,7 +2079,7 @@ impl LspHost for FakeLsp {
     async fn did_change(&self, params: DidChangeTextDocumentParams) -> io::Result<()> {
         let pending =
             {
-                let mut state = self.state.lock().unwrap();
+                let mut state = self.state.lock().expect("FakeLsp lock poisoned");
                 let uri = params.text_document.uri.clone();
                 state.observed_changes.push(params.clone());
                 if let Some(change) = params.content_changes.into_iter().last() {
@@ -1990,19 +2100,27 @@ impl LspHost for FakeLsp {
     }
 
     async fn did_save(&self, params: DidSaveTextDocumentParams) -> io::Result<()> {
-        self.state.lock().unwrap().observed_saves.push(params);
+        self.state
+            .lock()
+            .expect("FakeLsp lock poisoned")
+            .observed_saves
+            .push(params);
         Ok(())
     }
 
     async fn did_close(&self, params: DidCloseTextDocumentParams) -> io::Result<()> {
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.state.lock().expect("FakeLsp lock poisoned");
         state.open_documents.remove(&params.text_document.uri);
         state.observed_closes.push(params);
         Ok(())
     }
 
     async fn did_rename(&self, params: RenameFilesParams) -> io::Result<()> {
-        self.state.lock().unwrap().observed_renames.push(params);
+        self.state
+            .lock()
+            .expect("FakeLsp lock poisoned")
+            .observed_renames
+            .push(params);
         Ok(())
     }
 
@@ -2012,7 +2130,7 @@ impl LspHost for FakeLsp {
     ) -> io::Result<()> {
         self.state
             .lock()
-            .unwrap()
+            .expect("FakeLsp lock poisoned")
             .observed_watched_file_changes
             .push(params);
         Ok(())
@@ -2024,7 +2142,7 @@ impl LspHost for FakeLsp {
     ) -> io::Result<()> {
         self.state
             .lock()
-            .unwrap()
+            .expect("FakeLsp lock poisoned")
             .observed_configuration_changes
             .push(params);
         Ok(())
@@ -2036,7 +2154,7 @@ impl LspHost for FakeLsp {
     ) -> io::Result<()> {
         self.state
             .lock()
-            .unwrap()
+            .expect("FakeLsp lock poisoned")
             .observed_workspace_folder_changes
             .push(params);
         Ok(())
@@ -2048,7 +2166,7 @@ impl LspHost for FakeLsp {
             return Err(err);
         }
         pending_check!(self, lsp_types::request::HoverRequest, params);
-        let state = self.state.lock().unwrap();
+        let state = self.state.lock().expect("FakeLsp lock poisoned");
         let key = LspKey::from_position(
             &params.text_document_position_params.text_document.uri,
             &params.text_document_position_params.position,
@@ -2065,7 +2183,7 @@ impl LspHost for FakeLsp {
             return Err(err);
         }
         pending_check!(self, lsp_types::request::GotoDefinition, params);
-        let state = self.state.lock().unwrap();
+        let state = self.state.lock().expect("FakeLsp lock poisoned");
         Ok(lookup_goto(
             &state.definitions,
             &params.text_document_position_params.text_document.uri,
@@ -2082,7 +2200,7 @@ impl LspHost for FakeLsp {
             return Err(err);
         }
         pending_check!(self, lsp_types::request::GotoDeclaration, params);
-        let state = self.state.lock().unwrap();
+        let state = self.state.lock().expect("FakeLsp lock poisoned");
         Ok(lookup_goto(
             &state.declarations,
             &params.text_document_position_params.text_document.uri,
@@ -2099,7 +2217,7 @@ impl LspHost for FakeLsp {
             return Err(err);
         }
         pending_check!(self, lsp_types::request::GotoTypeDefinition, params);
-        let state = self.state.lock().unwrap();
+        let state = self.state.lock().expect("FakeLsp lock poisoned");
         Ok(lookup_goto(
             &state.type_definitions,
             &params.text_document_position_params.text_document.uri,
@@ -2116,7 +2234,7 @@ impl LspHost for FakeLsp {
             return Err(err);
         }
         pending_check!(self, lsp_types::request::GotoImplementation, params);
-        let state = self.state.lock().unwrap();
+        let state = self.state.lock().expect("FakeLsp lock poisoned");
         Ok(lookup_goto(
             &state.implementations,
             &params.text_document_position_params.text_document.uri,
@@ -2130,7 +2248,7 @@ impl LspHost for FakeLsp {
             return Err(err);
         }
         pending_check!(self, lsp_types::request::References, params);
-        let state = self.state.lock().unwrap();
+        let state = self.state.lock().expect("FakeLsp lock poisoned");
         let key = LspKey::from_position(
             &params.text_document_position.text_document.uri,
             &params.text_document_position.position,
@@ -2147,7 +2265,7 @@ impl LspHost for FakeLsp {
             return Err(err);
         }
         pending_check!(self, lsp_types::request::DocumentHighlightRequest, params);
-        let state = self.state.lock().unwrap();
+        let state = self.state.lock().expect("FakeLsp lock poisoned");
         let key = LspKey::from_position(
             &params.text_document_position_params.text_document.uri,
             &params.text_document_position_params.position,
@@ -2165,7 +2283,7 @@ impl LspHost for FakeLsp {
             &params.text_document_position.text_document.uri,
             &params.text_document_position.position,
         );
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.state.lock().expect("FakeLsp lock poisoned");
         state.observed_completions.push(params);
         let is_incomplete = state.incomplete_completions.contains(&key);
         Ok(state.completions.get(&key).map(|items| {
@@ -2185,7 +2303,7 @@ impl LspHost for FakeLsp {
         let resolved = self
             .state
             .lock()
-            .unwrap()
+            .expect("FakeLsp lock poisoned")
             .completion_resolve
             .get(&item.label)
             .cloned();
@@ -2201,7 +2319,7 @@ impl LspHost for FakeLsp {
             return Err(err);
         }
         pending_check!(self, lsp_types::request::CodeActionRequest, params);
-        let state = self.state.lock().unwrap();
+        let state = self.state.lock().expect("FakeLsp lock poisoned");
         Ok(state.code_actions.get(&params.text_document.uri).cloned())
     }
 
@@ -2223,7 +2341,7 @@ impl LspHost for FakeLsp {
             return Err(err);
         }
         pending_check!(self, lsp_types::request::DocumentLinkRequest, params);
-        let state = self.state.lock().unwrap();
+        let state = self.state.lock().expect("FakeLsp lock poisoned");
         Ok(state.document_links.get(&params.text_document.uri).cloned())
     }
 
@@ -2245,7 +2363,7 @@ impl LspHost for FakeLsp {
             return Err(err);
         }
         pending_check_some!(self, lsp_types::request::DocumentColor, params);
-        let state = self.state.lock().unwrap();
+        let state = self.state.lock().expect("FakeLsp lock poisoned");
         Ok(state
             .document_colors
             .get(&params.text_document.uri)
@@ -2261,7 +2379,7 @@ impl LspHost for FakeLsp {
             return Err(err);
         }
         pending_check_some!(self, lsp_types::request::ColorPresentationRequest, params);
-        let state = self.state.lock().unwrap();
+        let state = self.state.lock().expect("FakeLsp lock poisoned");
         Ok(state
             .color_presentations
             .get(&params.text_document.uri)
@@ -2277,7 +2395,7 @@ impl LspHost for FakeLsp {
             return Err(err);
         }
         pending_check!(self, lsp_types::request::SemanticTokensFullRequest, params);
-        let state = self.state.lock().unwrap();
+        let state = self.state.lock().expect("FakeLsp lock poisoned");
         Ok(state
             .semantic_tokens_full
             .get(&params.text_document.uri)
@@ -2298,7 +2416,7 @@ impl LspHost for FakeLsp {
             lsp_types::request::SemanticTokensFullDeltaRequest,
             params
         );
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.state.lock().expect("FakeLsp lock poisoned");
         let result = state
             .semantic_tokens_full_delta
             .get(&params.text_document.uri)
@@ -2316,7 +2434,7 @@ impl LspHost for FakeLsp {
             return Err(err);
         }
         pending_check!(self, lsp_types::request::SemanticTokensRangeRequest, params);
-        let state = self.state.lock().unwrap();
+        let state = self.state.lock().expect("FakeLsp lock poisoned");
         Ok(state
             .semantic_tokens_range
             .get(&params.text_document.uri)
@@ -2332,7 +2450,7 @@ impl LspHost for FakeLsp {
             return Err(err);
         }
         pending_check!(self, lsp_types::request::CallHierarchyPrepare, params);
-        let state = self.state.lock().unwrap();
+        let state = self.state.lock().expect("FakeLsp lock poisoned");
         let key = LspKey::from_position(
             &params.text_document_position_params.text_document.uri,
             &params.text_document_position_params.position,
@@ -2349,7 +2467,7 @@ impl LspHost for FakeLsp {
             return Err(err);
         }
         pending_check!(self, lsp_types::request::CallHierarchyIncomingCalls, params);
-        let state = self.state.lock().unwrap();
+        let state = self.state.lock().expect("FakeLsp lock poisoned");
         let key = LspKey::from_position(&params.item.uri, &params.item.range.start);
         Ok(state.call_hierarchy_incoming.get(&key).cloned())
     }
@@ -2363,7 +2481,7 @@ impl LspHost for FakeLsp {
             return Err(err);
         }
         pending_check!(self, lsp_types::request::CallHierarchyOutgoingCalls, params);
-        let state = self.state.lock().unwrap();
+        let state = self.state.lock().expect("FakeLsp lock poisoned");
         let key = LspKey::from_position(&params.item.uri, &params.item.range.start);
         Ok(state.call_hierarchy_outgoing.get(&key).cloned())
     }
@@ -2377,7 +2495,7 @@ impl LspHost for FakeLsp {
             return Err(err);
         }
         pending_check!(self, lsp_types::request::TypeHierarchyPrepare, params);
-        let state = self.state.lock().unwrap();
+        let state = self.state.lock().expect("FakeLsp lock poisoned");
         let key = LspKey::from_position(
             &params.text_document_position_params.text_document.uri,
             &params.text_document_position_params.position,
@@ -2394,7 +2512,7 @@ impl LspHost for FakeLsp {
             return Err(err);
         }
         pending_check!(self, lsp_types::request::TypeHierarchySupertypes, params);
-        let state = self.state.lock().unwrap();
+        let state = self.state.lock().expect("FakeLsp lock poisoned");
         let key = LspKey::from_position(&params.item.uri, &params.item.range.start);
         Ok(state.type_hierarchy_supertypes.get(&key).cloned())
     }
@@ -2408,7 +2526,7 @@ impl LspHost for FakeLsp {
             return Err(err);
         }
         pending_check!(self, lsp_types::request::TypeHierarchySubtypes, params);
-        let state = self.state.lock().unwrap();
+        let state = self.state.lock().expect("FakeLsp lock poisoned");
         let key = LspKey::from_position(&params.item.uri, &params.item.range.start);
         Ok(state.type_hierarchy_subtypes.get(&key).cloned())
     }
@@ -2422,7 +2540,7 @@ impl LspHost for FakeLsp {
             return Err(err);
         }
         pending_check!(self, lsp_types::request::DocumentSymbolRequest, params);
-        let state = self.state.lock().unwrap();
+        let state = self.state.lock().expect("FakeLsp lock poisoned");
         Ok(state
             .document_symbols
             .get(&params.text_document.uri)
@@ -2438,7 +2556,7 @@ impl LspHost for FakeLsp {
             return Err(err);
         }
         pending_check_some!(self, lsp_types::request::DocumentDiagnosticRequest, params);
-        let state = self.state.lock().unwrap();
+        let state = self.state.lock().expect("FakeLsp lock poisoned");
         Ok(state
             .document_diagnostics
             .get(&params.text_document.uri)
@@ -2454,7 +2572,7 @@ impl LspHost for FakeLsp {
             return Err(err);
         }
         pending_check!(self, lsp_types::request::FoldingRangeRequest, params);
-        let state = self.state.lock().unwrap();
+        let state = self.state.lock().expect("FakeLsp lock poisoned");
         Ok(state.folding_ranges.get(&params.text_document.uri).cloned())
     }
 
@@ -2467,7 +2585,7 @@ impl LspHost for FakeLsp {
             return Err(err);
         }
         pending_check!(self, lsp_types::request::SelectionRangeRequest, params);
-        let state = self.state.lock().unwrap();
+        let state = self.state.lock().expect("FakeLsp lock poisoned");
         let uri = &params.text_document.uri;
         let mut chains = Vec::with_capacity(params.positions.len());
         for pos in &params.positions {
@@ -2492,7 +2610,7 @@ impl LspHost for FakeLsp {
             return Err(err);
         }
         pending_check!(self, lsp_types::request::WorkspaceSymbolRequest, params);
-        let state = self.state.lock().unwrap();
+        let state = self.state.lock().expect("FakeLsp lock poisoned");
         if let Some(response) = state.workspace_symbol_responses.get(&params.query) {
             return Ok(Some(response.clone()));
         }
@@ -2511,7 +2629,7 @@ impl LspHost for FakeLsp {
             return Err(err);
         }
         pending_check!(self, lsp_types::request::SignatureHelpRequest, params);
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.state.lock().expect("FakeLsp lock poisoned");
         state.observed_signature_helps.push(params.clone());
         let key = LspKey::from_position(
             &params.text_document_position_params.text_document.uri,
@@ -2526,7 +2644,7 @@ impl LspHost for FakeLsp {
             return Err(err);
         }
         pending_check!(self, lsp_types::request::InlayHintRequest, params);
-        let state = self.state.lock().unwrap();
+        let state = self.state.lock().expect("FakeLsp lock poisoned");
         Ok(state.inlay_hints.get(&params.text_document.uri).cloned())
     }
 
@@ -2548,7 +2666,7 @@ impl LspHost for FakeLsp {
             return Err(err);
         }
         pending_check!(self, lsp_types::request::InlayHintRequest, params);
-        let state = self.state.lock().unwrap();
+        let state = self.state.lock().expect("FakeLsp lock poisoned");
         Ok(state
             .range_inlay_hints
             .get(&params.text_document.uri)
@@ -2564,7 +2682,7 @@ impl LspHost for FakeLsp {
             return Err(err);
         }
         pending_check!(self, lsp_types::request::PrepareRenameRequest, params);
-        let state = self.state.lock().unwrap();
+        let state = self.state.lock().expect("FakeLsp lock poisoned");
         let key = LspKey::from_position(&params.text_document.uri, &params.position);
         Ok(state.prepare_renames.get(&key).cloned())
     }
@@ -2575,7 +2693,7 @@ impl LspHost for FakeLsp {
             return Err(err);
         }
         pending_check!(self, lsp_types::request::Rename, params);
-        let state = self.state.lock().unwrap();
+        let state = self.state.lock().expect("FakeLsp lock poisoned");
         let key = LspKey::from_position(
             &params.text_document_position.text_document.uri,
             &params.text_document_position.position,
@@ -2592,7 +2710,7 @@ impl LspHost for FakeLsp {
             return Err(err);
         }
         pending_check!(self, lsp_types::request::Formatting, params);
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.state.lock().expect("FakeLsp lock poisoned");
         state.observed_formatting.push(params.clone());
         Ok(state.formatting.get(&params.text_document.uri).cloned())
     }
@@ -2606,7 +2724,7 @@ impl LspHost for FakeLsp {
             return Err(err);
         }
         pending_check!(self, lsp_types::request::RangeFormatting, params);
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.state.lock().expect("FakeLsp lock poisoned");
         state.observed_range_formatting.push(params.clone());
         Ok(state
             .range_formatting
@@ -2624,7 +2742,7 @@ impl LspHost for FakeLsp {
             return Ok(None);
         };
         let key = (first.old_uri.clone(), first.new_uri.clone());
-        let state = self.state.lock().unwrap();
+        let state = self.state.lock().expect("FakeLsp lock poisoned");
         Ok(state.will_renames.get(&key).cloned())
     }
 
@@ -2634,7 +2752,7 @@ impl LspHost for FakeLsp {
             return Err(err);
         }
         pending_check!(self, lsp_types::request::ExecuteCommand, params);
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.state.lock().expect("FakeLsp lock poisoned");
         state.observed_executed_commands.push(params.clone());
         Ok(state.executed_commands.get(&params.command).cloned())
     }
@@ -2662,7 +2780,7 @@ impl LspHost for FakeLsp {
     ) -> io::Result<()> {
         self.state
             .lock()
-            .unwrap()
+            .expect("FakeLsp lock poisoned")
             .observed_replies
             .push((id, result));
         Ok(())

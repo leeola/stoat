@@ -17,6 +17,7 @@ use crate::{
     },
     editor_state::EditorState,
     host::DiffStatus,
+    render::TypeScale,
     theme::{scope as s, TypeRole, FULL_CELL_SCALE},
 };
 use ratatui::{

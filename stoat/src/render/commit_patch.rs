@@ -15,7 +15,7 @@ use crate::{
         commits::{self, LineKind, PreviewDials},
         diff_changes, paint,
         review::{self, DiffTints},
-        text,
+        text, TypeScale,
     },
     review::{ReviewRow, ReviewSide},
     review_session::{DiffDocument, ReviewChunkId},

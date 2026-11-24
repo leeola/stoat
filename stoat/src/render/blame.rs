@@ -1,6 +1,9 @@
 use crate::{
     blame::{self, BlameBase, BlameRows},
-    render::paint::{dim_rgb, style_rgb},
+    render::{
+        paint::{dim_rgb, style_rgb},
+        TypeScale,
+    },
     theme::{scope, Theme, TypeRole},
 };
 use ratatui::{

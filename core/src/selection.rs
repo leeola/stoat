@@ -16,7 +16,7 @@ static NEXT_GENERATION: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(from = "SelectionsCollectionWire")]
-pub(crate) struct SelectionsCollection {
+pub struct SelectionsCollection {
     next_selection_id: usize,
     /// The selections, shared rather than owned.
     ///
@@ -43,7 +43,7 @@ pub(crate) struct SelectionsCollection {
 }
 
 impl SelectionsCollection {
-    pub(crate) fn new() -> Self {
+    pub fn new() -> Self {
         let default = Selection {
             id: 0,
             start: Anchor::min(),
@@ -71,7 +71,7 @@ impl SelectionsCollection {
         self.generation = NEXT_GENERATION.fetch_add(1, Ordering::Relaxed);
     }
 
-    pub(crate) fn all_anchors(&self) -> &[Selection<Anchor>] {
+    pub fn all_anchors(&self) -> &[Selection<Anchor>] {
         &self.disjoint
     }
 
@@ -81,7 +81,7 @@ impl SelectionsCollection {
     /// because each install takes a fresh one and a clone keeps the set it was
     /// cloned with. A cache that keys a paint on the selections compares this
     /// instead of the list.
-    pub(crate) fn identity(&self) -> u64 {
+    pub fn identity(&self) -> u64 {
         self.generation
     }
 
@@ -95,7 +95,7 @@ impl SelectionsCollection {
     /// Ids are re-minted from a fresh block rather than shuffled, so no piece
     /// ends up sharing an id with another and being taken for the same
     /// selection.
-    pub(crate) fn make_first_primary(&mut self) {
+    pub fn make_first_primary(&mut self) {
         self.make_primary_at(0);
     }
 
@@ -106,7 +106,7 @@ impl SelectionsCollection {
     /// that selection now sits in the list.
     ///
     /// An `id` naming no selection leaves the primary where it is.
-    pub(crate) fn make_primary(&mut self, id: usize) {
+    pub fn make_primary(&mut self, id: usize) {
         if let Some(index) = self.disjoint.iter().position(|sel| sel.id == id) {
             self.make_primary_at(index);
         }
@@ -146,7 +146,7 @@ impl SelectionsCollection {
     /// For a caller that has to keep the set rather than read it, such as an
     /// undo group capturing what to restore. Costs a refcount bump, where
     /// copying out of [`Self::all_anchors`] would cost the whole list.
-    pub(crate) fn shared_anchors(&self) -> Arc<[Selection<Anchor>]> {
+    pub fn shared_anchors(&self) -> Arc<[Selection<Anchor>]> {
         Arc::clone(&self.disjoint)
     }
 
@@ -155,7 +155,7 @@ impl SelectionsCollection {
     ///
     /// For a producer that rebuilds every selection and wants the primary to
     /// stay on the same one, where its id does not survive the rebuild.
-    pub(crate) fn primary_index(&self) -> usize {
+    pub fn primary_index(&self) -> usize {
         debug_assert_eq!(
             self.newest,
             newest_index(&self.disjoint),
@@ -164,7 +164,7 @@ impl SelectionsCollection {
         self.newest
     }
 
-    pub(crate) fn newest_anchor(&self) -> &Selection<Anchor> {
+    pub fn newest_anchor(&self) -> &Selection<Anchor> {
         debug_assert_eq!(
             self.newest,
             newest_index(&self.disjoint),
@@ -182,7 +182,7 @@ impl SelectionsCollection {
     /// Paired with that order so a caller resolves the endpoints now and feeds
     /// the results back positionally later, which is what lets the two halves
     /// of a reanchor run on different threads.
-    pub(crate) fn anchors(&self) -> impl Iterator<Item = &Anchor> {
+    pub fn anchors(&self) -> impl Iterator<Item = &Anchor> {
         self.disjoint
             .iter()
             .flat_map(|selection| [&selection.start, &selection.end])
@@ -199,7 +199,7 @@ impl SelectionsCollection {
     /// The caller decides what an endpoint maps to, so nothing here checks that
     /// the result stays ordered or deduplicated. Feeding it a
     /// position-preserving map keeps both.
-    pub(crate) fn reanchor(&mut self, mut remap: impl FnMut(&Anchor) -> Anchor) {
+    pub fn reanchor(&mut self, mut remap: impl FnMut(&Anchor) -> Anchor) {
         let remapped = self
             .disjoint
             .iter()
@@ -218,8 +218,8 @@ impl SelectionsCollection {
     /// No action seeds a cursor at an arbitrary anchor. The tests do, to pin
     /// the multi-cursor merge and ordering invariants, so this builds only for
     /// them.
-    #[cfg(test)]
-    pub(crate) fn insert_cursor(
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn insert_cursor(
         &mut self,
         head: Anchor,
         goal: SelectionGoal,
@@ -270,7 +270,7 @@ impl SelectionsCollection {
     /// Seeds a freshly opened editor so its initial cursor covers a character
     /// like Helix, rather than the zero-width placeholder [`Self::new`] holds
     /// before a rope is available. An empty buffer leaves a zero-width cursor.
-    pub(crate) fn seed_cursor(&mut self, snapshot: &MultiBufferSnapshot) {
+    pub fn seed_cursor(&mut self, snapshot: &MultiBufferSnapshot) {
         self.install(Arc::from([land_block_cursor(
             0,
             0,
@@ -292,7 +292,7 @@ impl SelectionsCollection {
     /// `reversed` decides which end the cursor sits on. A caller carries it
     /// over from the selection it replaces, so the set keeps facing the way the
     /// user pointed it.
-    pub(crate) fn replace_primary(
+    pub fn replace_primary(
         &mut self,
         range: std::ops::Range<usize>,
         reversed: bool,
@@ -324,7 +324,7 @@ impl SelectionsCollection {
     ///
     /// `reversed` decides which end its cursor sits on, which a caller carries
     /// over from the selection it grew out of.
-    pub(crate) fn add_range(
+    pub fn add_range(
         &mut self,
         range: std::ops::Range<usize>,
         reversed: bool,
@@ -347,7 +347,7 @@ impl SelectionsCollection {
     /// `reversed` puts the cursor on the start rather than the end, which a
     /// motion that arrived from below sets so a repeat carries on the way it
     /// went.
-    pub(crate) fn set_single_range(
+    pub fn set_single_range(
         &mut self,
         start: Anchor,
         end: Anchor,
@@ -371,7 +371,7 @@ impl SelectionsCollection {
     /// Mouse clicks land here so the cursor covers a character like the keyboard
     /// landing paths, rather than the zero-width selection that would render on
     /// the trailing phantom row when a click clips to the rope end.
-    pub(crate) fn set_block_cursor(&mut self, offset: usize, snapshot: &MultiBufferSnapshot) {
+    pub fn set_block_cursor(&mut self, offset: usize, snapshot: &MultiBufferSnapshot) {
         let id = self.next_selection_id;
         self.next_selection_id += 1;
         self.install(Arc::from([land_block_cursor(
@@ -387,7 +387,7 @@ impl SelectionsCollection {
     /// undo group captured before its edits. Bumps the id allocator past the
     /// snapshot so later insertions never reuse a restored id. An empty snapshot
     /// is ignored, keeping the invariant of at least one selection.
-    pub(crate) fn restore(&mut self, snapshot: Arc<[Selection<Anchor>]>) {
+    pub fn restore(&mut self, snapshot: Arc<[Selection<Anchor>]>) {
         if snapshot.is_empty() {
             return;
         }
@@ -397,7 +397,7 @@ impl SelectionsCollection {
         self.install(snapshot);
     }
 
-    pub(crate) fn keep_primary(&mut self) {
+    pub fn keep_primary(&mut self) {
         let primary = self.newest_anchor().clone();
         self.install(Arc::from([primary]));
     }
@@ -412,7 +412,7 @@ impl SelectionsCollection {
     /// The collection always holds at least one selection, so a lone selection
     /// stays and the answer is `false`. The caller reports that refusal, which
     /// is otherwise indistinguishable from a keypress that never arrived.
-    pub(crate) fn remove_primary(&mut self) -> bool {
+    pub fn remove_primary(&mut self) -> bool {
         if self.disjoint.len() < 2 {
             return false;
         }
@@ -441,7 +441,7 @@ impl SelectionsCollection {
     ///
     /// The result reads backwards only when the first and last selection both
     /// did. A mixed set has no one direction to inherit, so it faces forward.
-    pub(crate) fn merge_all(&mut self) {
+    pub fn merge_all(&mut self) {
         let first = &self.disjoint[0];
         let last = &self.disjoint[self.disjoint.len() - 1];
 
@@ -463,7 +463,7 @@ impl SelectionsCollection {
     ///
     /// Each survivor takes its run's highest id, so the primary lands on
     /// whichever run absorbed it.
-    pub(crate) fn merge_consecutive(&mut self, snapshot: &MultiBufferSnapshot) {
+    pub fn merge_consecutive(&mut self, snapshot: &MultiBufferSnapshot) {
         let mut merged: Vec<Selection<Anchor>> = Vec::with_capacity(self.disjoint.len());
 
         for sel in self.disjoint.iter() {
@@ -485,7 +485,7 @@ impl SelectionsCollection {
         self.install(merged.into());
     }
 
-    pub(crate) fn rotate_primary_by(&mut self, forward: bool, count: u32) {
+    pub fn rotate_primary_by(&mut self, forward: bool, count: u32) {
         if self.disjoint.len() < 2 || count == 0 {
             return;
         }
@@ -525,7 +525,7 @@ impl SelectionsCollection {
         self.install(rotated);
     }
 
-    pub(crate) fn transform<F>(&mut self, snapshot: &MultiBufferSnapshot, mut f: F)
+    pub fn transform<F>(&mut self, snapshot: &MultiBufferSnapshot, mut f: F)
     where
         F: FnMut(&Selection<Anchor>) -> Selection<Anchor>,
     {
@@ -543,7 +543,7 @@ impl SelectionsCollection {
     ///
     /// Head and tail rather than start and end, that being what a motion asks
     /// for, and the two differing by whether the selection is reversed.
-    pub(crate) fn transform_resolved<F>(&mut self, snapshot: &MultiBufferSnapshot, mut f: F)
+    pub fn transform_resolved<F>(&mut self, snapshot: &MultiBufferSnapshot, mut f: F)
     where
         F: FnMut(&Selection<Anchor>, usize, usize) -> Selection<Anchor>,
     {
@@ -576,7 +576,7 @@ impl SelectionsCollection {
     /// split produces is minted in one walk, under `bias`. A splitter anchoring
     /// its own would pay a root descent each, and a regex over a large
     /// selection produces thousands.
-    pub(crate) fn split_each<F>(&mut self, snapshot: &MultiBufferSnapshot, bias: Bias, mut split: F)
+    pub fn split_each<F>(&mut self, snapshot: &MultiBufferSnapshot, bias: Bias, mut split: F)
     where
         F: FnMut(&Selection<Anchor>) -> Vec<(usize, usize)>,
     {
@@ -638,7 +638,7 @@ impl SelectionsCollection {
     ///
     /// An out-of-range `primary_index` names the last piece, matching what a
     /// producer minting in list order already gets.
-    pub(crate) fn replace_with_fresh_ids_primary(
+    pub fn replace_with_fresh_ids_primary(
         &mut self,
         mut new_disjoint: Vec<Selection<Anchor>>,
         primary_index: usize,
@@ -677,7 +677,7 @@ impl SelectionsCollection {
     /// anchor per probe and an O(N) shift, per addition, where this is one sort
     /// and one pass. Overlaps merge rather than surviving side by side, which
     /// is the disjointness the collection is named for.
-    pub(crate) fn extend_with_fresh_ids(
+    pub fn extend_with_fresh_ids(
         &mut self,
         added: Vec<Selection<Anchor>>,
         snapshot: &MultiBufferSnapshot,
@@ -696,7 +696,7 @@ impl SelectionsCollection {
     /// outranks the ones already held.
     ///
     /// An out-of-range `primary_index` names the last of `added`.
-    pub(crate) fn extend_with_fresh_ids_primary(
+    pub fn extend_with_fresh_ids_primary(
         &mut self,
         added: Vec<Selection<Anchor>>,
         primary_index: usize,
@@ -743,7 +743,7 @@ impl SelectionsCollection {
     /// of spans per keystroke.
     ///
     /// `spans` must be sorted by start. A debug build panics otherwise.
-    pub(crate) fn replace_sorted_from_offsets(
+    pub fn replace_sorted_from_offsets(
         &mut self,
         spans: &[(usize, usize)],
         bias: Bias,
@@ -834,7 +834,7 @@ impl SelectionsCollection {
     /// Replace selections with `new_disjoint`, sorting by offset and deduping
     /// empty collisions at the same offset (keeping the highest-id survivor).
     /// Asserts non-empty: callers must ensure at least one selection.
-    pub(crate) fn replace_with(
+    pub fn replace_with(
         &mut self,
         new_disjoint: Vec<Selection<Anchor>>,
         snapshot: &MultiBufferSnapshot,
@@ -977,7 +977,7 @@ impl SelectionsCollection {
     ///
     /// Head and tail rather than start and end, matching `transform_resolved`
     /// and what a motion asks for.
-    pub(crate) fn resolved_reads(&self, snapshot: &MultiBufferSnapshot) -> Vec<ResolvedRead> {
+    pub fn resolved_reads(&self, snapshot: &MultiBufferSnapshot) -> Vec<ResolvedRead> {
         let offsets = {
             let anchors: Vec<Anchor> = self
                 .disjoint
@@ -1013,7 +1013,7 @@ impl SelectionsCollection {
     /// knows where each cursor landed would otherwise mint two anchors per
     /// cursor, at a root descent each, only for `replace_with` to resolve them
     /// straight back to the offsets it was handed.
-    pub(crate) fn land_block_cursors(
+    pub fn land_block_cursors(
         &mut self,
         landings: &[(usize, usize, SelectionGoal)],
         snapshot: &MultiBufferSnapshot,
@@ -1054,7 +1054,7 @@ impl SelectionsCollection {
     /// span rather than a cursor. What it saves is the same round trip: every
     /// anchor is minted in one batched walk instead of two root descents per
     /// selection.
-    pub(crate) fn replace_from_offsets(
+    pub fn replace_from_offsets(
         &mut self,
         landings: &[SpanLanding],
         snapshot: &MultiBufferSnapshot,
@@ -1234,6 +1234,12 @@ impl SelectionsCollection {
     }
 }
 
+impl Default for SelectionsCollection {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// A [`SelectionsCollection`] as a session file holds it, read without the
 /// recorded primary.
 ///
@@ -1267,23 +1273,23 @@ impl From<SelectionsCollectionWire> for SelectionsCollection {
 /// [`SelectionsCollection::land_block_cursors`], which builds them for the
 /// narrower case of a 1-wide cursor.
 #[derive(Clone, Copy)]
-pub(crate) struct SpanLanding {
-    pub(crate) id: usize,
-    pub(crate) start: usize,
-    pub(crate) end: usize,
-    pub(crate) reversed: bool,
-    pub(crate) goal: SelectionGoal,
+pub struct SpanLanding {
+    pub id: usize,
+    pub start: usize,
+    pub end: usize,
+    pub reversed: bool,
+    pub goal: SelectionGoal,
 }
 
 /// One selection read out of its anchors, as a motion needs it.
 ///
 /// See [`SelectionsCollection::resolved_reads`], which produces these.
-pub(crate) struct ResolvedRead {
-    pub(crate) id: usize,
-    pub(crate) head: usize,
-    pub(crate) tail: usize,
-    pub(crate) goal: SelectionGoal,
-    pub(crate) reversed: bool,
+pub struct ResolvedRead {
+    pub id: usize,
+    pub head: usize,
+    pub tail: usize,
+    pub goal: SelectionGoal,
+    pub reversed: bool,
 }
 
 /// A selection on its way through [`SelectionsCollection::land_block_cursors`],
@@ -1308,7 +1314,7 @@ struct Landing {
 /// shared part is edited twice and the text after it is consumed a second
 /// time. Spans that merely touch stay separate, `(0, 3)` and `(3, 6)` covering
 /// disjoint text.
-pub(crate) fn merge_overlapping_spans(mut spans: Vec<(usize, usize)>) -> Vec<(usize, usize)> {
+pub fn merge_overlapping_spans(mut spans: Vec<(usize, usize)>) -> Vec<(usize, usize)> {
     spans.sort_unstable();
 
     let mut merged: Vec<(usize, usize)> = Vec::with_capacity(spans.len());
@@ -1342,7 +1348,7 @@ fn newest_index(selections: &[Selection<Anchor>]) -> usize {
 /// A shared list cannot be inserted into, so the whole list is rebuilt. The
 /// callers already walked it to find `at`, so this adds a pass rather than a
 /// complexity class.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 fn insert_at(
     selections: &[Selection<Anchor>],
     at: usize,
@@ -1366,7 +1372,7 @@ fn insert_at(
 ///
 /// `target` is a position rather than a boundary. An offset inside a grapheme
 /// cluster lands on the whole cluster.
-pub(crate) fn land_block_cursor(
+pub fn land_block_cursor(
     id: usize,
     target: usize,
     goal: SelectionGoal,
@@ -1398,7 +1404,7 @@ pub(crate) fn land_block_cursor(
 /// cursor sits at the insertion point, so it widens forward and never steps
 /// back at the buffer end. A backward step there moves the insertion point
 /// before the last inserted character and corrupts further typing.
-pub(crate) fn forward_block_cursor(
+pub fn forward_block_cursor(
     id: usize,
     target: usize,
     goal: SelectionGoal,
@@ -1416,7 +1422,7 @@ pub(crate) fn forward_block_cursor(
 }
 
 /// Re-anchor an offset-based selection produced by the block-cursor helpers.
-pub(crate) fn anchor_selection(
+pub fn anchor_selection(
     landed: Selection<usize>,
     buffer: &MultiBufferSnapshot,
 ) -> Selection<Anchor> {

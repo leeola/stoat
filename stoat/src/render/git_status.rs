@@ -13,7 +13,7 @@ use crate::{
     git_status::{
         BodyLine, Divergence, FileRow, GitStatusModel, GitStatusPanel, Note, OpBanner, Section,
     },
-    render::{chrome, clear_modal, paint::style_rgb, text::write_str},
+    render::{chrome, clear_modal, paint::style_rgb, text::write_str, TypeScale},
     theme::{scope, Theme, TypeRole},
 };
 use ratatui::{

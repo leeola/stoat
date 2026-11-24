@@ -11,7 +11,7 @@ use crate::{
     app::Stoat,
     blame::{self, BlameCard},
     commit_picker, keymap_state,
-    render::{paint::style_rgb, popout, screen},
+    render::{paint::style_rgb, popout, screen, TypeScale},
     theme::{scope, PanelRole, Theme, TypeRole},
 };
 use ratatui::{

@@ -6,7 +6,7 @@
 
 use crate::{
     checkout_confirm::CheckoutConfirm,
-    render::{self, chrome, paint::style_rgb, text},
+    render::{self, chrome, paint::style_rgb, text, TypeScale},
     theme::{scope, Theme, TypeRole},
 };
 use ratatui::{

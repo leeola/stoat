@@ -19,7 +19,7 @@ use tokio::sync::Notify;
 /// Poll a background task with the waker of the notify that the task wakes.
 /// A task that is still pending at the poll then asks for another pass when
 /// its result lands.
-pub(crate) fn notify_waker(notify: &Arc<Notify>) -> Waker {
+pub fn notify_waker(notify: &Arc<Notify>) -> Waker {
     Waker::from(Arc::new(NotifyWaker(notify.clone())))
 }
 

@@ -43,32 +43,50 @@ impl FakeTerminalSession {
     }
 
     pub fn push_output(&self, data: &[u8]) {
-        if let Some(tx) = self.read_tx.lock().unwrap().as_ref() {
+        if let Some(tx) = self
+            .read_tx
+            .lock()
+            .expect("FakeTerminalSession lock poisoned")
+            .as_ref()
+        {
             let _ = tx.try_send(data.to_vec());
         }
     }
 
     /// Set the name returned by [`TerminalSession::foreground_process_name`].
     pub fn set_foreground_name(&self, name: impl Into<String>) {
-        self.state.lock().unwrap().foreground_name = Some(name.into());
+        self.state
+            .lock()
+            .expect("FakeTerminalSession lock poisoned")
+            .foreground_name = Some(name.into());
     }
 
     /// Signal that the command finished with `exit_code`. Closes the read
     /// channel so a pending `read_chunk` returns `None`, and records the
     /// code for `try_wait`.
     pub fn finish(&self, exit_code: i32) {
-        self.read_tx.lock().unwrap().take();
-        self.state.lock().unwrap().exit_code = Some(exit_code);
+        self.read_tx
+            .lock()
+            .expect("FakeTerminalSession lock poisoned")
+            .take();
+        self.state
+            .lock()
+            .expect("FakeTerminalSession lock poisoned")
+            .exit_code = Some(exit_code);
     }
 
     pub fn sent_bytes(&self) -> Vec<Vec<u8>> {
-        self.state.lock().unwrap().sent.clone()
+        self.state
+            .lock()
+            .expect("FakeTerminalSession lock poisoned")
+            .sent
+            .clone()
     }
 
     pub fn sent_strings(&self) -> Vec<String> {
         self.state
             .lock()
-            .unwrap()
+            .expect("FakeTerminalSession lock poisoned")
             .sent
             .iter()
             .map(|b| String::from_utf8_lossy(b).into_owned())
@@ -76,7 +94,10 @@ impl FakeTerminalSession {
     }
 
     pub fn assert_sent(&self, index: usize, expected: &[u8]) {
-        let state = self.state.lock().unwrap();
+        let state = self
+            .state
+            .lock()
+            .expect("FakeTerminalSession lock poisoned");
         assert_eq!(
             state.sent.get(index).map(Vec::as_slice),
             Some(expected),
@@ -85,25 +106,38 @@ impl FakeTerminalSession {
     }
 
     pub fn assert_sent_count(&self, count: usize) {
-        let state = self.state.lock().unwrap();
+        let state = self
+            .state
+            .lock()
+            .expect("FakeTerminalSession lock poisoned");
         assert_eq!(state.sent.len(), count, "send count mismatch");
     }
 
     pub fn was_killed(&self) -> bool {
-        self.state.lock().unwrap().killed
+        self.state
+            .lock()
+            .expect("FakeTerminalSession lock poisoned")
+            .killed
     }
 
     /// The last `(rows, cols)` passed to [`TerminalSession::resize`], or
     /// `None` if it has not been resized.
     pub fn last_size(&self) -> Option<(u16, u16)> {
-        self.state.lock().unwrap().size
+        self.state
+            .lock()
+            .expect("FakeTerminalSession lock poisoned")
+            .size
     }
 }
 
 #[async_trait]
 impl TerminalSession for FakeTerminalSession {
     async fn write(&self, data: &[u8]) -> io::Result<()> {
-        self.state.lock().unwrap().sent.push(data.to_vec());
+        self.state
+            .lock()
+            .expect("FakeTerminalSession lock poisoned")
+            .sent
+            .push(data.to_vec());
         Ok(())
     }
 
@@ -112,21 +146,35 @@ impl TerminalSession for FakeTerminalSession {
     }
 
     async fn kill(&self) -> io::Result<()> {
-        self.state.lock().unwrap().killed = true;
+        self.state
+            .lock()
+            .expect("FakeTerminalSession lock poisoned")
+            .killed = true;
         Ok(())
     }
 
     async fn try_wait(&self) -> io::Result<Option<i32>> {
-        Ok(self.state.lock().unwrap().exit_code)
+        Ok(self
+            .state
+            .lock()
+            .expect("FakeTerminalSession lock poisoned")
+            .exit_code)
     }
 
     fn resize(&self, rows: u16, cols: u16) -> io::Result<()> {
-        self.state.lock().unwrap().size = Some((rows, cols));
+        self.state
+            .lock()
+            .expect("FakeTerminalSession lock poisoned")
+            .size = Some((rows, cols));
         Ok(())
     }
 
     fn foreground_process_name(&self) -> Option<String> {
-        self.state.lock().unwrap().foreground_name.clone()
+        self.state
+            .lock()
+            .expect("FakeTerminalSession lock poisoned")
+            .foreground_name
+            .clone()
     }
 }
 
@@ -151,21 +199,35 @@ impl FakeTerminalHost {
     /// The [`SpawnArgs`] of every [`TerminalHost::spawn`] call so far, in order,
     /// so a test can assert what program and arguments a spawn resolved to.
     pub fn spawns(&self) -> Vec<SpawnArgs> {
-        self.spawns.lock().unwrap().clone()
+        self.spawns
+            .lock()
+            .expect("FakeTerminalHost lock poisoned")
+            .clone()
     }
 
     /// Make the next [`TerminalHost::spawn`] fail with `kind`, as a missing
     /// program does. The failed spawn still shows in [`Self::spawns`].
     pub fn fail_next_spawn(&self, kind: io::ErrorKind) {
-        *self.spawn_error.lock().unwrap() = Some(kind);
+        *self
+            .spawn_error
+            .lock()
+            .expect("FakeTerminalHost lock poisoned") = Some(kind);
     }
 }
 
 #[async_trait]
 impl TerminalHost for FakeTerminalHost {
     async fn spawn(&self, args: SpawnArgs) -> io::Result<Box<dyn TerminalSession>> {
-        self.spawns.lock().unwrap().push(args);
-        if let Some(kind) = self.spawn_error.lock().unwrap().take() {
+        self.spawns
+            .lock()
+            .expect("FakeTerminalHost lock poisoned")
+            .push(args);
+        if let Some(kind) = self
+            .spawn_error
+            .lock()
+            .expect("FakeTerminalHost lock poisoned")
+            .take()
+        {
             return Err(io::Error::from(kind));
         }
         Ok(Box::new(ArcTerminalSession(self.session.clone())))

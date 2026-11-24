@@ -9,7 +9,7 @@
 //! - Small `Copy` return types for metadata
 
 pub mod clipboard;
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub mod fake;
 pub mod git;
 // The local host layer is the syscall boundary itself, so its direct std::env /
@@ -22,7 +22,7 @@ pub mod terminal;
 pub use clipboard::{
     clipboard_copy, osc52_should_emit, ClipboardHost, ClipboardKind, NoopClipboard,
 };
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub use fake::{
     change_params, completion_params, definition_params, document_highlight_params, hover_params,
     inlay_hint_params, open_params, reference_params,
@@ -37,7 +37,7 @@ pub use git::{
 };
 pub use local::{LocalClipboard, LocalGit, LocalLsp, LocalTerminalHost, LspTranscript};
 pub use lsp::{LanguageServerFeature, LspHost, LspNotification, NoopLsp, OffsetEncoding};
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub use stoat_host::FakeShell;
 pub use stoat_host::{
     EnvHost, FsDirEntry, FsEventKind, FsHost, FsMetadata, FsWatchEvent, FsWatchHost, LocalEnv,

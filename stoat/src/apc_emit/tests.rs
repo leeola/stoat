@@ -3,6 +3,7 @@ use crate::{
     action_handlers::movement,
     badge::{Anchor as BadgeAnchor, Badge, BadgeSource, BadgeState},
     debounce,
+    render::TypeScale,
     test_fixture::fake_term_session,
 };
 use stoat_text::Point;

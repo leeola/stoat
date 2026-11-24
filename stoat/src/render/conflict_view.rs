@@ -10,6 +10,7 @@ use crate::{
             dim_rgb, fill_line_tint, render_empty_num, render_side_num, render_side_text, style_rgb,
         },
         review::{paint_highlighted_row, DiffDials},
+        TypeScale,
     },
     review::ReviewSide,
     theme::TypeRole,

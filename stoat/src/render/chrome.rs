@@ -1,6 +1,6 @@
 use crate::{
     buffer_lifecycle,
-    render::{self, paint::style_rgb},
+    render::{self, paint::style_rgb, TypeScale},
     theme::{scope, PanelRole, Theme, TypeRole},
 };
 use ratatui::{

@@ -15,6 +15,7 @@ use crate::{
         paint::style_rgb,
         picker::{Footer, PathRows, RowMarks, RowStart, FOOTER_ROWS},
         text::{pre_wrap_rows, wrap_text, write_str, write_str_clipped},
+        TypeScale,
     },
     theme::TypeRole,
     user_command::{

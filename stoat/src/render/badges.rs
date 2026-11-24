@@ -6,6 +6,7 @@ use crate::{
     render::{
         paint::{blend, style_rgb},
         text::{write_cell, write_str},
+        TypeScale,
     },
     theme::TypeRole,
     walkthrough::run::WalkthroughRun,

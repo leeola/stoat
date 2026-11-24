@@ -282,8 +282,11 @@ mod tests {
     use ratatui::style::{Color, Modifier};
     use vscode_theme::parse;
 
+    /// The shipped config, read by path because `stoat` embeds it above this crate.
+    const DEFAULT_KEYMAP: &str = include_str!("../../config.stcfg");
+
     fn resolve(name: &str, theme: &VsCodeTheme) -> Theme {
-        let (config, _) = stoat_config::parse(crate::app::DEFAULT_KEYMAP);
+        let (config, _) = stoat_config::parse(DEFAULT_KEYMAP);
         let config = config.expect("default config parses");
         let block = theme_block(name, theme);
         let mut pool: Vec<&Spanned<ThemeBlock>> = config.themes.iter().collect();

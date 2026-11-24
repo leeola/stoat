@@ -177,6 +177,30 @@ const BADGE_CHROME: PopoverChrome = PopoverChrome {
     shadow_alpha: 140,
 };
 
+/// The text_run scale, in 256ths of a cell, of chrome text in a role.
+///
+/// The test build answers a full cell for every role. The test compositor
+/// draws one glyph per cell, so full-cell text keeps composited geometry
+/// exact against the fallback layout the harness scans and snapshots. Every
+/// other build answers the theme's scale.
+///
+/// It is a trait here rather than a method of the theme because `cfg(test)`
+/// holds only in the crate under test, and the tests that draw through the
+/// harness are this crate's.
+pub(crate) trait TypeScale {
+    fn type_scale(&self, role: crate::theme::TypeRole) -> u16;
+}
+
+impl TypeScale for crate::theme::Theme {
+    fn type_scale(&self, role: crate::theme::TypeRole) -> u16 {
+        if cfg!(test) {
+            return crate::theme::FULL_CELL_SCALE;
+        }
+
+        self.themed_type_scale(role)
+    }
+}
+
 pub(crate) struct PaneCtx<'a> {
     pub(crate) editors: &'a mut SlotMap<EditorId, EditorState>,
     pub(crate) buffers: &'a BufferRegistry,
@@ -3294,6 +3318,72 @@ pub(crate) fn pane_badge_colors(theme: &crate::theme::Theme) -> ([u8; 3], [u8; 3
     let ink =
         paint::style_rgb(theme.get(crate::theme::scope::UI_BACKGROUND).bg).unwrap_or([40, 44, 52]);
     (fill, ink)
+}
+
+#[cfg(test)]
+mod badge_color_tests {
+    use super::pane_badge_colors;
+    use crate::{app::DEFAULT_KEYMAP, theme::Theme};
+    use stoat_config::parse;
+
+    /// The theme `name` of the shipped config.
+    fn load(name: &str) -> Theme {
+        let (config, errors) = parse(DEFAULT_KEYMAP);
+        assert!(errors.is_empty(), "parse errors: {errors:?}");
+        let config = config.expect("expected successful parse");
+        Theme::from_config(&config, name).expect("theme load failed")
+    }
+
+    /// The ermine Pane Picker badge fills with the accent and inks its digit
+    /// and border in the chrome ground, as the PanePicker board draws it.
+    #[test]
+    fn the_ermine_badge_fills_with_the_accent() {
+        assert_eq!(
+            pane_badge_colors(&load("ermine_night")),
+            ([0x7f, 0xb0, 0xff], [0x12, 0x14, 0x18]),
+        );
+    }
+
+    /// A theme that sets no badge scope fills the badge with the focused
+    /// status bar's background and inks it with the editor background, which
+    /// default_dark sets to #636d83 and #282c34.
+    #[test]
+    fn a_theme_without_the_badge_scope_keeps_the_status_bar_fill() {
+        assert_eq!(
+            pane_badge_colors(&load("default_dark")),
+            ([0x63, 0x6d, 0x83], [0x28, 0x2c, 0x34]),
+        );
+    }
+}
+
+#[cfg(test)]
+mod type_scale_tests {
+    use super::TypeScale;
+    use crate::theme::{Theme, TypeRole};
+    use stoat_config::parse;
+
+    #[test]
+    fn the_test_build_draws_every_role_at_a_full_cell() {
+        let (config, errors) =
+            parse("theme t { ui.type.title = { scale: 300 }; ui.type.small.scale = 190; }");
+        assert!(errors.is_empty(), "parse errors: {errors:?}");
+        let theme = Theme::from_config(&config.expect("expected successful parse"), "t")
+            .expect("theme load failed");
+        let roles = [
+            TypeRole::Title,
+            TypeRole::Body,
+            TypeRole::Ui,
+            TypeRole::Caption,
+            TypeRole::Small,
+            TypeRole::Mode,
+        ];
+
+        assert_eq!(
+            roles.map(|role| theme.type_scale(role)),
+            [256; 6],
+            "the test build draws every role at a full cell"
+        );
+    }
 }
 
 #[cfg(all(test, feature = "perf"))]

@@ -34,18 +34,18 @@ use stoat_text::{patch::Patch, Anchor, Bias, Rope};
 
 /// Result of a successful background parse, ready to be installed on the
 /// foreground thread.
-pub(crate) struct ParseJobOutput {
-    pub(crate) buffer_id: BufferId,
-    pub(crate) syntax: SyntaxState,
+pub struct ParseJobOutput {
+    pub buffer_id: BufferId,
+    pub syntax: SyntaxState,
     /// Multi-layer parse state from [`stoat_language::SyntaxMap::reparse`].
     /// Populated alongside [`Self::syntax`] so the legacy single-tree
     /// highlight path and the capture-merging path can run side by side
     /// while consumers migrate.
-    pub(crate) syntax_map: stoat_language::SyntaxMap,
+    pub syntax_map: stoat_language::SyntaxMap,
     /// The highlight channel, built once here and installed into every editor
     /// viewing the buffer. It owns the token list, so the search index inside
     /// it cannot drift from the tokens it indexes.
-    pub(crate) token_channel: BufferSemanticTokens,
+    pub token_channel: BufferSemanticTokens,
     /// The byte range this parse's tokens cover, when it is not the whole
     /// file.
     ///
@@ -55,16 +55,16 @@ pub(crate) struct ParseJobOutput {
     /// A caller that retains these tokens as the base for a later incremental
     /// parse must not do so while this is [`Some`], or everything off screen
     /// would be carried forward as unchanged when it was never captured.
-    pub(crate) captured: Option<Range<usize>>,
+    pub captured: Option<Range<usize>>,
     /// This parse's tokens as raw byte spans, retained so the next parse can
     /// diff against them and report its own changed rows.
-    pub(crate) token_spans: SemanticTokenSpans,
+    pub token_spans: SemanticTokenSpans,
     /// Buffer rows whose tokens this parse changed, or `None` when that could
     /// not be determined and every row must be treated as changed.
     ///
     /// Lets a consumer holding per-row derived state, currently the minimap
     /// strip, recolor only what moved instead of the whole file per keystroke.
-    pub(crate) changed_token_rows: Option<Range<u32>>,
+    pub changed_token_rows: Option<Range<u32>>,
     /// Buffer rows whose painted styling this parse changes, against the
     /// tokens the display shows until it lands, or `None` when the parse has
     /// nothing to compare against and every row counts as changed.
@@ -74,7 +74,7 @@ pub(crate) struct ParseJobOutput {
     /// Unlike [`Self::changed_token_rows`], an edited row whose styling held
     /// is left out, because this compares against the installed tokens where
     /// the display draws them.
-    pub(crate) restyled_rows: Option<Range<u32>>,
+    pub restyled_rows: Option<Range<u32>>,
 }
 
 /// Whether a caller's cancel flag is set.
@@ -99,7 +99,7 @@ fn cancelled(cancel: Option<&AtomicBool>) -> bool {
 /// re-queries only the byte ranges the edit could have restyled. Spans alone
 /// still bound [`ParseJobOutput::changed_token_rows`].
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn parse_buffer_step(
+pub fn parse_buffer_step(
     buffer_id: BufferId,
     snapshot: TextBufferSnapshot,
     lang: &Arc<Language>,
@@ -537,7 +537,7 @@ fn styled_capture_spans(
 /// The diff view's base text memoizes these across theme changes and resolves
 /// them per theme, where the buffer resolves its captures at once through
 /// [`styled_capture_spans`]. The order is [`capture_ids`]'s.
-pub(crate) fn capture_highlight_ids(
+pub fn capture_highlight_ids(
     captures: Vec<SyntaxMapCapture<'_>>,
 ) -> Vec<(Range<usize>, HighlightId)> {
     capture_ids(captures).collect()
@@ -675,7 +675,7 @@ fn invalidated_ranges(
 /// Touching entries merge because the tokens crossing a shared boundary are the
 /// same set either way, and one wider query beats two adjacent ones. The code
 /// index merges its re-extraction window here for the same reason.
-pub(crate) fn merge_ranges(ranges: &mut Vec<Range<usize>>) {
+pub fn merge_ranges(ranges: &mut Vec<Range<usize>>) {
     let mut write = 0;
     for read in 0..ranges.len() {
         if write > 0 && ranges[read].start <= ranges[write - 1].end {

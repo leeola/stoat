@@ -26,7 +26,7 @@ use crate::{
         review::{DiffColumns, DiffDials, DiffLayout},
         undercurl::UnderlineKind,
         walkthrough::Spotlight,
-        STATUS_LANE,
+        TypeScale, STATUS_LANE,
     },
     review_walk::ReturnRef,
     run::GridSelection,

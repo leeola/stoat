@@ -20,6 +20,7 @@ use crate::{
         diff_changes, editor,
         paint::{dim_rgb, fill_line_tint, render_side_text, style_rgb},
         review::{self, paint_highlighted_row, DiffDials, DiffRowCache, DiffRowKind},
+        TypeScale,
     },
     review::ReviewSide,
     theme::{scope as s, Theme, TypeRole},

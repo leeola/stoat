@@ -16,7 +16,7 @@ use stoatty_protocol::command::PanelShadow;
 ///
 /// It is also the unit a scale counts in, so the cells a run of scaled text
 /// spans are its scaled width over this.
-pub(crate) const FULL_CELL_SCALE: u16 = 256;
+pub const FULL_CELL_SCALE: u16 = 256;
 
 #[derive(Debug, Clone)]
 pub struct Theme {
@@ -58,7 +58,7 @@ impl Theme {
     /// a theme expressing no cursor style falls back to reverse video rather
     /// than to no style at all. A theme that does style the scope, or any
     /// broader one [`Self::get`] falls back through, is returned untouched.
-    pub(crate) fn cursor_style(&self) -> Style {
+    pub fn cursor_style(&self) -> Style {
         let style = self.get(scope::UI_CURSOR);
         if style == Style::default() {
             return Style::default().add_modifier(Modifier::REVERSED);
@@ -72,7 +72,7 @@ impl Theme {
     /// Every list reads `ui.list.selected`, so a theme that sets it gives all
     /// lists one selected row. A theme that leaves it unset paints a list's row
     /// with `fallback`, the selection scope that list names for itself.
-    pub(crate) fn list_selected(&self, fallback: &str) -> Style {
+    pub fn list_selected(&self, fallback: &str) -> Style {
         self.try_get(scope::UI_LIST_SELECTED)
             .unwrap_or_else(|| self.get(fallback))
     }
@@ -81,7 +81,7 @@ impl Theme {
     ///
     /// A theme that leaves `ui.list.match` unset paints them with
     /// `ui.search.match`.
-    pub(crate) fn list_match(&self) -> Style {
+    pub fn list_match(&self) -> Style {
         // A theme inherits its parent's scopes field by field, and a list match
         // that a parent sets with a background keeps that background in every
         // child. The fallback lets a parent leave the list scopes unset.
@@ -96,7 +96,7 @@ impl Theme {
     /// box. The tag's text then takes the foreground of the kind's diff mark,
     /// which is `diff.modified`, `diff.moved`, `diff.added` for an untracked or
     /// a new file, or `diff.deleted`.
-    pub(crate) fn kind_tag_style(&self, kind: &FileKind) -> Style {
+    pub fn kind_tag_style(&self, kind: &FileKind) -> Style {
         let (tag, mark) = match kind {
             FileKind::Modified => (scope::DIFF_KIND_MODIFIED, scope::DIFF_MODIFIED),
             FileKind::Moved { .. } => (scope::DIFF_KIND_MOVED, scope::DIFF_MOVED),
@@ -113,7 +113,7 @@ impl Theme {
     /// A theme that leaves the scope unset gives the tag no box, and its text
     /// takes the foreground of `vcs.conflict.header`, as the conflict view's
     /// own tag falls back to the conflict header's color.
-    pub(crate) fn conflict_tag_style(&self) -> Style {
+    pub fn conflict_tag_style(&self) -> Style {
         self.tag_style(scope::VCS_CONFLICT_TAG, scope::VCS_CONFLICT_HEADER)
     }
 
@@ -123,7 +123,7 @@ impl Theme {
     /// A theme that leaves the scope unset gives the tag no box, and its text
     /// takes the foreground of `vcs.conflict.theirs`, the side a merge brings
     /// in.
-    pub(crate) fn merged_tag_style(&self) -> Style {
+    pub fn merged_tag_style(&self) -> Style {
         self.tag_style(scope::DIFF_KIND_MERGED, scope::VCS_CONFLICT_THEIRS)
     }
 
@@ -168,26 +168,12 @@ impl Theme {
         }
     }
 
-    /// The text_run scale, in 256ths of a cell, of chrome text in `role`.
+    /// The text_run scale, in 256ths of a cell, that the theme gives chrome
+    /// text in `role`.
     ///
     /// A theme sets it as the `scale` field of `ui.type.<role>`, and an unset
     /// field answers Ermine's scale.
-    ///
-    /// Under `cfg(test)` every role answers a full cell (256) instead. The test
-    /// compositor draws one glyph per cell, so full-cell text keeps composited
-    /// geometry exact against the fallback layout the harness scans and
-    /// snapshots.
-    pub fn type_scale(&self, role: TypeRole) -> u16 {
-        if cfg!(test) {
-            return FULL_CELL_SCALE;
-        }
-
-        self.themed_type_scale(role)
-    }
-
-    /// The scale the theme gives `role`, which [`Self::type_scale`] answers
-    /// outside the test build.
-    fn themed_type_scale(&self, role: TypeRole) -> u16 {
+    pub fn themed_type_scale(&self, role: TypeRole) -> u16 {
         match self.metric(role.scope(), "scale") {
             Some(Metric::Number(n)) => n as u16,
             _ => role.ermine_scale(),
@@ -876,13 +862,13 @@ pub mod scope {
     /// A theme that leaves it unset fills the column with the
     /// [`UI_SURFACE_RAISED`] background, and with the [`UI_BACKGROUND`]
     /// background when that is unset too.
-    pub(crate) const UI_BLAME_COLUMN: &str = "ui.blame.column";
+    pub const UI_BLAME_COLUMN: &str = "ui.blame.column";
     /// The four age colors of the Blame Column, oldest first, as foregrounds.
     ///
     /// A run's bar and short sha take the color of its commit's age bucket, a
     /// rank among the file's commit times. A theme that leaves one unset draws
     /// that bucket in the [`UI_TEXT_MUTED`] foreground.
-    pub(crate) const UI_BLAME_AGE: [&str; 4] = [
+    pub const UI_BLAME_AGE: [&str; 4] = [
         "ui.blame.age.1",
         "ui.blame.age.2",
         "ui.blame.age.3",
@@ -894,19 +880,19 @@ pub mod scope {
     ///
     /// A theme that leaves it unset selects with the [`UI_TEXT`] foreground
     /// and the [`UI_SELECTION`] background.
-    pub(crate) const UI_BLAME_SELECTED: &str = "ui.blame.selected";
+    pub const UI_BLAME_SELECTED: &str = "ui.blame.selected";
     /// The date of a selected run in the Blame Column, as its foreground.
     ///
     /// A theme that leaves it unset draws the date in the
     /// [`UI_BLAME_SELECTED`] foreground, as a lookup broadens a scope to its
     /// parent.
-    pub(crate) const UI_BLAME_SELECTED_DATE: &str = "ui.blame.selected.date";
+    pub const UI_BLAME_SELECTED_DATE: &str = "ui.blame.selected.date";
     /// The chip in the Commit Preview's header that marks the preview read-only,
     /// with the foreground for its text and the background for its box.
     ///
     /// A theme that leaves it unset draws the chip's text in the
     /// [`UI_TEXT_MUTED`] foreground with no box.
-    pub(crate) const UI_PREVIEW_CHIP: &str = "ui.preview.chip";
+    pub const UI_PREVIEW_CHIP: &str = "ui.preview.chip";
     /// The badge the Pane Picker draws on each pane its digits reach. The
     /// background is the badge's fill, and the foreground is its digit and
     /// its border.
@@ -1208,7 +1194,7 @@ pub mod scope {
     pub const VCS_REBASE_BANNER: &str = "vcs.rebase.banner";
     /// The banner row under the tab bar that names a blame checkout until its
     /// return, in its foreground on its background.
-    pub(crate) const VCS_CHECKOUT_BANNER: &str = "vcs.checkout.banner";
+    pub const VCS_CHECKOUT_BANNER: &str = "vcs.checkout.banner";
     /// The section heads of the git status panel, one per section.
     pub const VCS_STATUS_CONFLICTED: &str = "vcs.status.conflicted";
     pub const VCS_STATUS_STAGED: &str = "vcs.status.staged";
@@ -1291,9 +1277,11 @@ pub mod scope {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::render;
     use std::path::PathBuf;
     use stoat_config::parse;
+
+    /// The shipped config, read by path because `stoat` embeds it above this crate.
+    const DEFAULT_KEYMAP: &str = include_str!("../../config.stcfg");
 
     fn load(source: &str, name: &str) -> Theme {
         let (config, errors) = parse(source);
@@ -1447,11 +1435,6 @@ mod tests {
             roles.map(|role| theme.themed_type_scale(role)),
             [300, 256, 232, 216, 190, 208],
             "a set scale wins, and every unset role answers Ermine's"
-        );
-        assert_eq!(
-            roles.map(|role| theme.type_scale(role)),
-            [256; 6],
-            "the test build draws every role at a full cell"
         );
 
         let captioned = load("theme c { ui.type.caption.scale = 220; }", "c");
@@ -1739,7 +1722,7 @@ mod tests {
 
     /// The themes the shipped config defines, the default first.
     fn shipped_themes() -> [Theme; 2] {
-        ["ermine_night", "default_dark"].map(|name| load(crate::app::DEFAULT_KEYMAP, name))
+        ["ermine_night", "default_dark"].map(|name| load(DEFAULT_KEYMAP, name))
     }
 
     fn rgb(hex: u32) -> Color {
@@ -1749,7 +1732,7 @@ mod tests {
 
     #[test]
     fn the_ermine_theme_resolves_from_the_shipped_config() {
-        let theme = load(crate::app::DEFAULT_KEYMAP, "ermine_night");
+        let theme = load(DEFAULT_KEYMAP, "ermine_night");
         assert_eq!(
             (
                 theme.get(scope::UI_BACKGROUND).bg,
@@ -1778,36 +1761,13 @@ mod tests {
         );
     }
 
-    /// The ermine Pane Picker badge fills with the accent and inks its digit
-    /// and border in the chrome ground, as the PanePicker board draws it.
-    #[test]
-    fn the_ermine_badge_fills_with_the_accent() {
-        let theme = load(crate::app::DEFAULT_KEYMAP, "ermine_night");
-        assert_eq!(
-            render::pane_badge_colors(&theme),
-            ([0x7f, 0xb0, 0xff], [0x12, 0x14, 0x18]),
-        );
-    }
-
-    /// A theme that sets no badge scope fills the badge with the focused
-    /// status bar's background and inks it with the editor background, which
-    /// default_dark sets to #636d83 and #282c34.
-    #[test]
-    fn a_theme_without_the_badge_scope_keeps_the_status_bar_fill() {
-        let theme = load(crate::app::DEFAULT_KEYMAP, "default_dark");
-        assert_eq!(
-            render::pane_badge_colors(&theme),
-            ([0x63, 0x6d, 0x83], [0x28, 0x2c, 0x34]),
-        );
-    }
-
     /// The ermine File Kind Tags take the DiffKindsSpec board's colors. A
     /// theme that sets no `diff.kind` scope, as default_dark does, tags each
     /// kind with its text alone, in the foreground of the kind's diff mark.
     #[test]
     fn a_kind_tag_without_its_scope_takes_its_diff_mark_s_text_color() {
         let [ermine, dark] =
-            ["ermine_night", "default_dark"].map(|name| load(crate::app::DEFAULT_KEYMAP, name));
+            ["ermine_night", "default_dark"].map(|name| load(DEFAULT_KEYMAP, name));
         let kinds = [
             FileKind::Modified,
             FileKind::Moved {
@@ -1856,7 +1816,7 @@ mod tests {
     #[test]
     fn a_merge_tag_without_its_scope_takes_its_fallback_text_color() {
         let [ermine, dark] =
-            ["ermine_night", "default_dark"].map(|name| load(crate::app::DEFAULT_KEYMAP, name));
+            ["ermine_night", "default_dark"].map(|name| load(DEFAULT_KEYMAP, name));
         let tag = |fg: u32, bg: u32| Style::new().fg(rgb(fg)).bg(rgb(bg));
         let text = |fg: u32| Style::new().fg(rgb(fg));
 
@@ -1880,7 +1840,7 @@ mod tests {
     /// not restate keeps default_dark's color in every scope inherited from it.
     #[test]
     fn the_ermine_semantic_colors_reach_the_inherited_scopes() {
-        let theme = load(crate::app::DEFAULT_KEYMAP, "ermine_night");
+        let theme = load(DEFAULT_KEYMAP, "ermine_night");
         assert_eq!(
             [
                 scope::UI_TEXT,
@@ -1902,7 +1862,7 @@ mod tests {
     /// drops one of default_dark's modifiers states the empty set.
     #[test]
     fn the_ermine_overrides_drop_the_parent_modifiers() {
-        let theme = load(crate::app::DEFAULT_KEYMAP, "ermine_night");
+        let theme = load(DEFAULT_KEYMAP, "ermine_night");
         assert_eq!(
             [
                 scope::UI_CURSOR,
@@ -2064,7 +2024,7 @@ mod tests {
     /// the boards' tab pill takes.
     #[test]
     fn the_ermine_theme_fills_the_active_tab_with_the_accent_wash() {
-        let theme = load(crate::app::DEFAULT_KEYMAP, "ermine_night");
+        let theme = load(DEFAULT_KEYMAP, "ermine_night");
         assert_eq!(
             theme.get(scope::UI_TABBAR_ACTIVE).bg,
             Some(rgb(0x243552)),

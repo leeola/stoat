@@ -18,7 +18,7 @@ const CHORD_DEPTH: usize = 2;
 
 /// The labels of the keys that run each action, by action name, as
 /// [`Keymap::keys_by_action`] builds them.
-pub(crate) type ActionKeys = HashMap<String, Vec<String>>;
+pub type ActionKeys = HashMap<String, Vec<String>>;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum StateValue {
@@ -952,7 +952,7 @@ impl Keymap {
     /// Among the keys a press reaches, as [`Self::active_keys`] lists them,
     /// the first in config order wins. A wheel notch or a side button is not a
     /// key, so neither answers. `None` when no key reaches the action.
-    pub(crate) fn key_for_action(&self, state: &dyn KeymapState, name: &str) -> Option<String> {
+    pub fn key_for_action(&self, state: &dyn KeymapState, name: &str) -> Option<String> {
         let is_key = |binding: &CompiledBinding| {
             binding.key.wheel.is_none() && binding.key.side_button.is_none()
         };
@@ -1000,7 +1000,7 @@ impl Keymap {
     /// button is not a key, so neither enters the index. A caller builds the
     /// index one time and reads every action from it, where
     /// [`Self::key_for_action`] answers one action with one key.
-    pub(crate) fn keys_by_action(&self, state: &dyn KeymapState) -> ActionKeys {
+    pub fn keys_by_action(&self, state: &dyn KeymapState) -> ActionKeys {
         let mut keys = ActionKeys::new();
         let mut opened: HashSet<CompactString> = match state.get("mode") {
             Some(StateValue::String(mode)) => HashSet::from([mode.clone()]),
@@ -1113,7 +1113,7 @@ impl Keymap {
     ///
     /// A wheel binding is left out, because the card affords a key press, which
     /// a notch is not.
-    pub(crate) fn flag_bindings(
+    pub fn flag_bindings(
         &self,
         state: &dyn KeymapState,
         field: &str,
@@ -1210,7 +1210,7 @@ impl KeymapState for ChordState<'_> {
 ///
 /// Free rather than a method, because a caller that already holds one action
 /// name needs the same answer with no [`Keymap`] in hand.
-pub(crate) fn is_unknown_action(name: &str) -> bool {
+pub fn is_unknown_action(name: &str) -> bool {
     !matches!(name, "SetMode" | "SetVar") && registry::lookup(name).is_none()
 }
 
@@ -1378,7 +1378,7 @@ fn compile_binding(binding: &Binding, predicates: &[Predicate], out: &mut Vec<Co
     });
 }
 
-pub(crate) fn resolve_config_action(action: &stoat_config::Action) -> ResolvedAction {
+pub fn resolve_config_action(action: &stoat_config::Action) -> ResolvedAction {
     let args = action
         .args
         .iter()
@@ -1406,7 +1406,7 @@ pub(crate) fn resolve_config_action(action: &stoat_config::Action) -> ResolvedAc
 /// `captured` is the digit a `num` placeholder key matched this press, the value
 /// a `$num` argument resolves to. It is `None` for every non-placeholder
 /// binding, so a `$num` argument there has no value and drops the action.
-pub(crate) fn resolve_action(
+pub fn resolve_action(
     name: &str,
     args: &[ResolvedArg],
     captured: Option<f64>,
@@ -1422,7 +1422,7 @@ pub(crate) fn resolve_action(
 }
 
 /// Build `entry`'s action from `args`, or say which argument does not fit.
-pub(crate) fn build_action(
+pub fn build_action(
     entry: &RegistryEntry,
     args: &[ResolvedArg],
     captured: Option<f64>,
@@ -1455,6 +1455,9 @@ mod tests {
     use stoat_config::{
         LineNumbers, MouseCapturePolicy, RepeatButton, Settings, TabBarMode, WrapMode,
     };
+
+    /// The shipped config, read by path because `stoat` embeds it above this crate.
+    const DEFAULT_KEYMAP: &str = include_str!("../../config.stcfg");
 
     struct TestState {
         values: HashMap<String, StateValue>,
@@ -1768,7 +1771,7 @@ mod tests {
     /// Select mode hops by function on the Alt wheel, as normal mode does.
     #[test]
     fn the_select_block_binds_the_wheel_to_the_object_hops() {
-        let keymap = Keymap::compile(&parse_config(crate::app::DEFAULT_KEYMAP));
+        let keymap = Keymap::compile(&parse_config(DEFAULT_KEYMAP));
         let select = TestState::new()
             .set("mode", StateValue::String("select".into()))
             .set("pane", StateValue::String("editor".into()));
@@ -2263,7 +2266,7 @@ mod tests {
             }"#,
         );
         let guarded = Keymap::compile(&config);
-        let shipped = Keymap::compile(&parse_config(crate::app::DEFAULT_KEYMAP));
+        let shipped = Keymap::compile(&parse_config(DEFAULT_KEYMAP));
         let pressed = |keymap: &Keymap, comment: bool, key: char| {
             let state = TestState::new()
                 .set("mode", StateValue::String("space_lsp".into()))
@@ -2550,14 +2553,14 @@ mod tests {
 
     #[test]
     fn default_config_compiles_without_warnings() {
-        let config = parse_config(crate::app::DEFAULT_KEYMAP);
+        let config = parse_config(DEFAULT_KEYMAP);
         let (_, warnings) = Keymap::compile_with_warnings(&config);
         assert!(warnings.is_empty(), "shipped config warnings: {warnings:?}");
     }
 
     #[test]
     fn default_keymap_names_only_registered_actions() {
-        let keymap = Keymap::compile(&parse_config(crate::app::DEFAULT_KEYMAP));
+        let keymap = Keymap::compile(&parse_config(DEFAULT_KEYMAP));
         assert_eq!(
             keymap.unknown_actions(),
             Vec::<String>::new(),
@@ -2599,7 +2602,7 @@ mod tests {
 
     #[test]
     fn question_mark_rebinds_across_modes() {
-        let config = parse_config(crate::app::DEFAULT_KEYMAP);
+        let config = parse_config(DEFAULT_KEYMAP);
         let keymap = Keymap::compile(&config);
         let question = key_event(KeyCode::Char('?'), KeyModifiers::NONE);
         let names_in = |mode: &str| {
@@ -2642,7 +2645,7 @@ mod tests {
 
     #[test]
     fn the_default_alt_wheel_walks_changes_in_a_diff_and_functions_elsewhere() {
-        let config = parse_config(crate::app::DEFAULT_KEYMAP);
+        let config = parse_config(DEFAULT_KEYMAP);
         let keymap = Keymap::compile(&config);
 
         let plain = TestState::new().set("mode", StateValue::String("normal".into()));
@@ -2676,7 +2679,7 @@ mod tests {
 
     #[test]
     fn the_diff_view_binds_the_side_buttons_to_the_bridging_hops() {
-        let config = parse_config(crate::app::DEFAULT_KEYMAP);
+        let config = parse_config(DEFAULT_KEYMAP);
         let keymap = Keymap::compile(&config);
 
         let plain = TestState::new().set("mode", StateValue::String("normal".into()));
@@ -2721,7 +2724,7 @@ mod tests {
 
     #[test]
     fn the_default_side_buttons_walk_changes_in_the_pinned_goto_and_git_chords() {
-        let config = parse_config(crate::app::DEFAULT_KEYMAP);
+        let config = parse_config(DEFAULT_KEYMAP);
         let keymap = Keymap::compile(&config);
 
         let goto = TestState::in_repo("space_goto");
@@ -2778,7 +2781,7 @@ mod tests {
     /// p. A chord arm releases its chord, and a review arm holds the mode.
     #[test]
     fn the_git_walk_keys_sit_beside_the_structured_ones() {
-        let config = parse_config(crate::app::DEFAULT_KEYMAP);
+        let config = parse_config(DEFAULT_KEYMAP);
         let keymap = Keymap::compile(&config);
         let pressed = |mode: &str, key| {
             keymap
@@ -2828,7 +2831,7 @@ mod tests {
 
     #[test]
     fn the_list_views_walk_on_the_arrows_as_well_as_j_and_k() {
-        let config = parse_config(crate::app::DEFAULT_KEYMAP);
+        let config = parse_config(DEFAULT_KEYMAP);
         let keymap = Keymap::compile(&config);
 
         let bound = |view: &str, code, mods| {
@@ -2937,7 +2940,7 @@ mod tests {
     /// the other layout's action, and no other view binds it.
     #[test]
     fn ctrl_t_flips_the_diff_layout_from_either_screen() {
-        let config = parse_config(crate::app::DEFAULT_KEYMAP);
+        let config = parse_config(DEFAULT_KEYMAP);
         let keymap = Keymap::compile(&config);
         let ctrl_t = |view: &str| {
             let state = TestState::new()
@@ -2966,7 +2969,7 @@ mod tests {
     /// every list view's own arrows on top.
     #[test]
     fn the_base_modes_move_on_the_arrows_and_extend_on_them_in_select() {
-        let config = parse_config(crate::app::DEFAULT_KEYMAP);
+        let config = parse_config(DEFAULT_KEYMAP);
         let keymap = Keymap::compile(&config);
 
         let bound = |mode: &str, code, mods| {
@@ -3023,7 +3026,7 @@ mod tests {
     /// in Helix, and splits an insert run into two undo steps in insert mode.
     #[test]
     fn ctrl_s_saves_a_selection_outside_insert_mode() {
-        let config = parse_config(crate::app::DEFAULT_KEYMAP);
+        let config = parse_config(DEFAULT_KEYMAP);
         let keymap = Keymap::compile(&config);
         let ctrl_s = |mode: &str| {
             let state = TestState::new().set("mode", StateValue::String(mode.into()));
@@ -3052,7 +3055,7 @@ mod tests {
     /// references arm needs no server, since the code index answers it too.
     #[test]
     fn the_goto_chords_carry_the_lsp_gotos() {
-        let keymap = Keymap::compile(&parse_config(crate::app::DEFAULT_KEYMAP));
+        let keymap = Keymap::compile(&parse_config(DEFAULT_KEYMAP));
         let state = |mode: &str, lsp: bool| {
             TestState::new()
                 .set("mode", StateValue::String(mode.into()))
@@ -3102,7 +3105,7 @@ mod tests {
     /// insert mode, so a tab chord needs no Escape first.
     #[test]
     fn ctrl_a_opens_the_tab_prefix_from_select_mode() {
-        let keymap = Keymap::compile(&parse_config(crate::app::DEFAULT_KEYMAP));
+        let keymap = Keymap::compile(&parse_config(DEFAULT_KEYMAP));
         let ctrl_a = |mode: &str| {
             let state = TestState::new().set("mode", StateValue::String(mode.into()));
             keymap
@@ -3127,7 +3130,7 @@ mod tests {
     /// outlast the key that runs a step.
     #[test]
     fn space_w_holds_the_walkthrough_mode_across_a_step() {
-        let config = parse_config(crate::app::DEFAULT_KEYMAP);
+        let config = parse_config(DEFAULT_KEYMAP);
         let keymap = Keymap::compile(&config);
 
         let space = TestState::on_tour("space");
@@ -3172,7 +3175,7 @@ mod tests {
     /// the file and Alt-notches back onto the path.
     #[test]
     fn alt_wheel_walks_the_tour_and_a_bare_notch_does_not() {
-        let config = parse_config(crate::app::DEFAULT_KEYMAP);
+        let config = parse_config(DEFAULT_KEYMAP);
         let keymap = Keymap::compile(&config);
         let walkthrough = TestState::on_tour("walkthrough");
 
@@ -3210,7 +3213,7 @@ mod tests {
 
     #[test]
     fn space_r_holds_the_review_mode_across_a_hop() {
-        let config = parse_config(crate::app::DEFAULT_KEYMAP);
+        let config = parse_config(DEFAULT_KEYMAP);
         let keymap = Keymap::compile(&config);
 
         let space = TestState::in_repo("space");
@@ -3255,7 +3258,7 @@ mod tests {
 
     #[test]
     fn the_review_mode_walks_from_the_side_buttons_and_alt_wheel() {
-        let config = parse_config(crate::app::DEFAULT_KEYMAP);
+        let config = parse_config(DEFAULT_KEYMAP);
         let keymap = Keymap::compile(&config);
         let review = TestState::in_repo("review");
         let button =
@@ -3292,7 +3295,7 @@ mod tests {
     /// hunks.
     #[test]
     fn the_changes_view_walks_changes_and_leaves_n_p_and_g_to_the_editor() {
-        let config = parse_config(crate::app::DEFAULT_KEYMAP);
+        let config = parse_config(DEFAULT_KEYMAP);
         let keymap = Keymap::compile(&config);
         let changes = TestState::new()
             .set("mode", StateValue::String("normal".into()))
@@ -3336,7 +3339,7 @@ mod tests {
     /// `z j` still scrolls.
     #[test]
     fn the_changes_view_z_menu_opens_folds() {
-        let config = parse_config(crate::app::DEFAULT_KEYMAP);
+        let config = parse_config(DEFAULT_KEYMAP);
         let keymap = Keymap::compile(&config);
         let press = |view: &str, mode: &str, c| {
             let state = TestState::new()
@@ -3378,7 +3381,7 @@ mod tests {
     /// as well.
     #[test]
     fn the_changes_view_arrows_cross_excerpts_in_insert_mode() {
-        let config = parse_config(crate::app::DEFAULT_KEYMAP);
+        let config = parse_config(DEFAULT_KEYMAP);
         let keymap = Keymap::compile(&config);
         let arrows = |modal: Option<&str>| {
             let mut state = TestState::new()
@@ -3411,7 +3414,7 @@ mod tests {
     /// the key never closes the view, and q alone closes it.
     #[test]
     fn escape_in_the_changes_view_matches_the_per_file_diff() {
-        let config = parse_config(crate::app::DEFAULT_KEYMAP);
+        let config = parse_config(DEFAULT_KEYMAP);
         let keymap = Keymap::compile(&config);
         let state = |view: &str| {
             TestState::new()
@@ -3440,7 +3443,7 @@ mod tests {
     /// that binds its own verbs, or an old one that loses a key, fails here.
     #[test]
     fn every_picker_modal_answers_the_same_keys() {
-        let config = parse_config(crate::app::DEFAULT_KEYMAP);
+        let config = parse_config(DEFAULT_KEYMAP);
         let keymap = Keymap::compile(&config);
 
         // Every list modal prompts, so every one of them takes these in insert
@@ -3551,7 +3554,7 @@ mod tests {
 
     #[test]
     fn space_pane_display_binds_digits_to_focus_pane() {
-        let config = parse_config(crate::app::DEFAULT_KEYMAP);
+        let config = parse_config(DEFAULT_KEYMAP);
         let keymap = Keymap::compile(&config);
 
         let nav = TestState::new().set("mode", StateValue::String("space_pane_nav".into()));
@@ -3584,7 +3587,7 @@ mod tests {
 
     #[test]
     fn prefix_ctrl_e_opens_the_pane_picker() {
-        let keymap = Keymap::compile(&parse_config(crate::app::DEFAULT_KEYMAP));
+        let keymap = Keymap::compile(&parse_config(DEFAULT_KEYMAP));
         let prefix = TestState::new().set("mode", StateValue::String("prefix".into()));
 
         let actions = keymap
@@ -3605,7 +3608,7 @@ mod tests {
 
     #[test]
     fn plus_and_minus_take_over_increment_and_decrement_from_ctrl_a() {
-        let config = parse_config(crate::app::DEFAULT_KEYMAP);
+        let config = parse_config(DEFAULT_KEYMAP);
         let keymap = Keymap::compile(&config);
         let normal = TestState::new().set("mode", StateValue::String("normal".into()));
 
@@ -3644,7 +3647,7 @@ mod tests {
     /// the box, and this is how the reader asks for it back.
     #[test]
     fn ctrl_question_toggles_the_key_hints_from_every_mode() {
-        let config = parse_config(crate::app::DEFAULT_KEYMAP);
+        let config = parse_config(DEFAULT_KEYMAP);
         let keymap = Keymap::compile(&config);
         let ctrl_question = key_event(KeyCode::Char('?'), KeyModifiers::CONTROL);
 
@@ -3665,7 +3668,7 @@ mod tests {
     /// answers them, and so does a prompt that a modal owns.
     #[test]
     fn ctrl_colon_and_ctrl_semicolon_open_the_palette_from_every_mode() {
-        let config = parse_config(crate::app::DEFAULT_KEYMAP);
+        let config = parse_config(DEFAULT_KEYMAP);
         let keymap = Keymap::compile(&config);
         for c in [':', ';'] {
             assert_ctrl_chord_from_every_mode(&keymap, c, "OpenCommandPalette");
@@ -3676,7 +3679,7 @@ mod tests {
     /// answers them, and so does a prompt that a modal owns.
     #[test]
     fn ctrl_plus_and_ctrl_underscore_step_the_font_from_every_mode() {
-        let keymap = Keymap::compile(&parse_config(crate::app::DEFAULT_KEYMAP));
+        let keymap = Keymap::compile(&parse_config(DEFAULT_KEYMAP));
         assert_ctrl_chord_from_every_mode(&keymap, '+', "FontSizeInc");
         assert_ctrl_chord_from_every_mode(&keymap, '_', "FontSizeDec");
     }
@@ -3706,7 +3709,7 @@ mod tests {
 
     #[test]
     fn ctrl_a_enters_the_prefix_from_insert_but_not_from_a_prompt() {
-        let config = parse_config(crate::app::DEFAULT_KEYMAP);
+        let config = parse_config(DEFAULT_KEYMAP);
         let keymap = Keymap::compile(&config);
         let ctrl_a = key_event(KeyCode::Char('a'), KeyModifiers::CONTROL);
 
@@ -3762,7 +3765,7 @@ mod tests {
 
     #[test]
     fn a_pane_at_rest_answers_the_root_control_keys() {
-        let keymap = Keymap::compile(&parse_config(crate::app::DEFAULT_KEYMAP));
+        let keymap = Keymap::compile(&parse_config(DEFAULT_KEYMAP));
         let ctrl = |c| key_event(KeyCode::Char(c), KeyModifiers::CONTROL);
         let bare = |code| key_event(code, KeyModifiers::NONE);
 
@@ -3840,7 +3843,7 @@ mod tests {
 
     #[test]
     fn ca_ctrl_v_and_ctrl_s_split_the_pane() {
-        let keymap = Keymap::compile(&parse_config(crate::app::DEFAULT_KEYMAP));
+        let keymap = Keymap::compile(&parse_config(DEFAULT_KEYMAP));
         let ctrl = |c| mode_calls(&keymap, "prefix", KeyCode::Char(c), KeyModifiers::CONTROL);
 
         assert_eq!(
@@ -3852,7 +3855,7 @@ mod tests {
 
     #[test]
     fn ca_focus_keys_move_focus_and_end_the_chord() {
-        let keymap = Keymap::compile(&parse_config(crate::app::DEFAULT_KEYMAP));
+        let keymap = Keymap::compile(&parse_config(DEFAULT_KEYMAP));
         let plain = |code| mode_calls(&keymap, "prefix", code, KeyModifiers::NONE);
 
         assert_eq!(
@@ -3884,7 +3887,7 @@ mod tests {
 
     #[test]
     fn ca_prefix_chords_resolve_tab_actions() {
-        let config = parse_config(crate::app::DEFAULT_KEYMAP);
+        let config = parse_config(DEFAULT_KEYMAP);
         let keymap = Keymap::compile(&config);
         let prefix = TestState::with_tabs("prefix", 10.0);
 
@@ -3965,7 +3968,7 @@ mod tests {
     /// where it enters the selected row rather than paging.
     #[test]
     fn ctrl_f_in_the_workspace_picker_submits_the_selection() {
-        let config = parse_config(crate::app::DEFAULT_KEYMAP);
+        let config = parse_config(DEFAULT_KEYMAP);
         let keymap = Keymap::compile(&config);
         let picker = TestState::new()
             .set("modal", StateValue::String("workspace_picker".into()))
@@ -3985,7 +3988,7 @@ mod tests {
 
     #[test]
     fn ctrl_x_in_the_workspace_picker_closes_the_rows_session() {
-        let keymap = Keymap::compile(&parse_config(crate::app::DEFAULT_KEYMAP));
+        let keymap = Keymap::compile(&parse_config(DEFAULT_KEYMAP));
         let picker = TestState::new()
             .set("modal", StateValue::String("workspace_picker".into()))
             .set("mode", StateValue::String("insert".into()));
@@ -3999,7 +4002,7 @@ mod tests {
 
     #[test]
     fn ca_t_tab_mode_chords_cycle_and_rename() {
-        let config = parse_config(crate::app::DEFAULT_KEYMAP);
+        let config = parse_config(DEFAULT_KEYMAP);
         let keymap = Keymap::compile(&config);
         let tab = TestState::with_tabs("prefix_tab", 2.0);
 
@@ -4069,7 +4072,7 @@ mod tests {
     /// the moved tab keeps the focus. A lone tab has no place to move to.
     #[test]
     fn ca_t_moves_the_tab_on_the_ctrl_steps_only_with_a_second_tab() {
-        let config = parse_config(crate::app::DEFAULT_KEYMAP);
+        let config = parse_config(DEFAULT_KEYMAP);
         let keymap = Keymap::compile(&config);
         let bound = |tabs: f64, code: KeyCode| -> Option<Vec<String>> {
             let state = TestState::with_tabs("prefix_tab", tabs);
@@ -4098,7 +4101,7 @@ mod tests {
 
     #[test]
     fn ca_m_move_mode_chords_move_the_pane_and_hold() {
-        let config = parse_config(crate::app::DEFAULT_KEYMAP);
+        let config = parse_config(DEFAULT_KEYMAP);
         let keymap = Keymap::compile(&config);
 
         let prefix = TestState::split("prefix");
@@ -4145,7 +4148,7 @@ mod tests {
 
     #[test]
     fn ca_e_pane_mode_chords_end_the_chord() {
-        let keymap = Keymap::compile(&parse_config(crate::app::DEFAULT_KEYMAP));
+        let keymap = Keymap::compile(&parse_config(DEFAULT_KEYMAP));
         let pane = |code, modifiers| mode_calls(&keymap, "prefix_pane", code, modifiers);
         let plain = |code| pane(code, KeyModifiers::NONE);
         let set_mode = |mode: &str| {
@@ -4203,7 +4206,7 @@ mod tests {
     /// a commit, and turns the change walk's wrap off and on otherwise.
     #[test]
     fn git_chord_c_returns_from_a_walk_and_turns_the_wrap_otherwise() {
-        let keymap = Keymap::compile(&parse_config(crate::app::DEFAULT_KEYMAP));
+        let keymap = Keymap::compile(&parse_config(DEFAULT_KEYMAP));
         let names = |state: &TestState| {
             keymap
                 .lookup(state, &key_event(KeyCode::Char('c'), KeyModifiers::NONE))
@@ -4233,7 +4236,7 @@ mod tests {
     /// either way.
     #[test]
     fn space_h_then_tilde_pins_the_git_mode_and_holds_it() {
-        let config = parse_config(crate::app::DEFAULT_KEYMAP);
+        let config = parse_config(DEFAULT_KEYMAP);
         let keymap = Keymap::compile(&config);
 
         let space = TestState::new().set("mode", StateValue::String("space".into()));
@@ -4288,7 +4291,7 @@ mod tests {
 
     #[test]
     fn the_git_chord_binds_the_pair_diff_only_with_a_pair() {
-        let config = parse_config(crate::app::DEFAULT_KEYMAP);
+        let config = parse_config(DEFAULT_KEYMAP);
         let keymap = Keymap::compile(&config);
         let pressed = |pair| {
             let state = TestState::new()
@@ -4310,7 +4313,7 @@ mod tests {
     /// lists no `d`.
     #[test]
     fn space_d_opens_the_diff_chord_only_with_a_diff_to_show() {
-        let config = parse_config(crate::app::DEFAULT_KEYMAP);
+        let config = parse_config(DEFAULT_KEYMAP);
         let keymap = Keymap::compile(&config);
         let pressed = |field: Option<&str>| {
             let state = TestState::new().set("mode", StateValue::String("space".into()));
@@ -4340,7 +4343,7 @@ mod tests {
     /// them.
     #[test]
     fn space_d_f_c_and_x_pick_a_diff_layout() {
-        let config = parse_config(crate::app::DEFAULT_KEYMAP);
+        let config = parse_config(DEFAULT_KEYMAP);
         let keymap = Keymap::compile(&config);
         let pressed = |key| {
             action_names(keymap.lookup(
@@ -4363,7 +4366,7 @@ mod tests {
     /// binds only where the workspace root is inside one.
     #[test]
     fn space_d_x_binds_only_in_a_repository() {
-        let config = parse_config(crate::app::DEFAULT_KEYMAP);
+        let config = parse_config(DEFAULT_KEYMAP);
         let keymap = Keymap::compile(&config);
         let pressed = |git| {
             let state = TestState::new()
@@ -4385,7 +4388,7 @@ mod tests {
     /// focused file.
     #[test]
     fn the_diff_chord_binds_the_git_bases_only_without_a_pair_diff() {
-        let config = parse_config(crate::app::DEFAULT_KEYMAP);
+        let config = parse_config(DEFAULT_KEYMAP);
         let keymap = Keymap::compile(&config);
         let pressed = |key, pair_diff| {
             let state =
@@ -4408,7 +4411,7 @@ mod tests {
 
     #[test]
     fn the_diff_chord_binds_the_pair_diff_only_with_a_pair() {
-        let config = parse_config(crate::app::DEFAULT_KEYMAP);
+        let config = parse_config(DEFAULT_KEYMAP);
         let keymap = Keymap::compile(&config);
         let pressed = |key, pair| {
             let state = TestState::new()
@@ -4432,7 +4435,7 @@ mod tests {
     /// doubled `g`, because no goto arm takes `g`.
     #[test]
     fn space_g_twice_pins_the_goto_mode_and_holds_it() {
-        let config = parse_config(crate::app::DEFAULT_KEYMAP);
+        let config = parse_config(DEFAULT_KEYMAP);
         let keymap = Keymap::compile(&config);
 
         let space = TestState::new().set("mode", StateValue::String("space".into()));
@@ -4487,7 +4490,7 @@ mod tests {
 
     #[test]
     fn space_g_opens_the_goto_submode_and_a_reaches_the_last_buffer() {
-        let config = parse_config(crate::app::DEFAULT_KEYMAP);
+        let config = parse_config(DEFAULT_KEYMAP);
         let keymap = Keymap::compile(&config);
 
         let space = TestState::new().set("mode", StateValue::String("space".into()));
@@ -4522,7 +4525,7 @@ mod tests {
 
     #[test]
     fn diff_view_does_not_shadow_normal_mode_keys() {
-        let config = parse_config(crate::app::DEFAULT_KEYMAP);
+        let config = parse_config(DEFAULT_KEYMAP);
         let keymap = Keymap::compile(&config);
 
         let diff = TestState::new()
@@ -4544,7 +4547,7 @@ mod tests {
 
     #[test]
     fn space_buffer_binds_d_to_close_buffer() {
-        let config = parse_config(crate::app::DEFAULT_KEYMAP);
+        let config = parse_config(DEFAULT_KEYMAP);
         let keymap = Keymap::compile(&config);
 
         let space_buffer = TestState::new()
@@ -4562,7 +4565,7 @@ mod tests {
 
     #[test]
     fn the_git_chord_binds_its_mode_toggles() {
-        let config = parse_config(crate::app::DEFAULT_KEYMAP);
+        let config = parse_config(DEFAULT_KEYMAP);
         let keymap = Keymap::compile(&config);
 
         let space_git = TestState::in_repo("space_git");
@@ -4585,7 +4588,7 @@ mod tests {
     /// only inside a repository, as the git chord's follow keys do.
     #[test]
     fn the_diff_chord_binds_follow_reload_in_a_repo() {
-        let config = parse_config(crate::app::DEFAULT_KEYMAP);
+        let config = parse_config(DEFAULT_KEYMAP);
         let keymap = Keymap::compile(&config);
         let r = key_event(KeyCode::Char('r'), KeyModifiers::NONE);
         let outside = TestState::new().set("mode", StateValue::String("space_diff".into()));
@@ -4604,7 +4607,7 @@ mod tests {
 
     #[test]
     fn default_config_pins_every_setting_default() {
-        let config = parse_config(crate::app::DEFAULT_KEYMAP);
+        let config = parse_config(DEFAULT_KEYMAP);
         // The embedded config must actively set every fixed-default scalar, so
         // this asserts the full resolved state. Adding a Settings field breaks
         // the literal, forcing a matching default entry in config.stcfg.

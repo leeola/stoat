@@ -75,7 +75,7 @@ pub(crate) fn theme_scope_for_key(key: &str) -> String {
 /// Translate a theme-driven [`HighlightId`] into its hierarchical theme scope,
 /// returning `None` for [`HighlightId::DEFAULT`]. The id indexes [`THEME_KEYS`],
 /// whose stem feeds [`theme_scope_for_key`].
-pub(crate) fn theme_scope_for_id(id: HighlightId) -> Option<String> {
+pub fn theme_scope_for_id(id: HighlightId) -> Option<String> {
     if id.is_default() {
         return None;
     }
@@ -92,7 +92,7 @@ pub(crate) fn theme_scope_for_id(id: HighlightId) -> Option<String> {
 /// lets such a producer reach [`SyntaxStyles`] rather than resolving colors
 /// against the theme itself, which would bake the current theme into whatever
 /// it stores.
-pub(crate) fn highlight_id_for_key(key: &str) -> Option<HighlightId> {
+pub fn highlight_id_for_key(key: &str) -> Option<HighlightId> {
     THEME_KEYS
         .iter()
         .position(|stem| *stem == key)
@@ -173,7 +173,7 @@ impl SyntaxStyles {
 ///
 /// Must run again after a theme swap, since the keys a capture name maps onto
 /// are derived from the active theme.
-pub(crate) fn install_highlight_maps(registry: &LanguageRegistry, styles: &SyntaxStyles) {
+pub fn install_highlight_maps(registry: &LanguageRegistry, styles: &SyntaxStyles) {
     let theme_keys = styles.theme_keys();
     for lang in registry.languages() {
         let map = HighlightMap::new(lang.highlight_capture_names(), theme_keys);
@@ -181,7 +181,7 @@ pub(crate) fn install_highlight_maps(registry: &LanguageRegistry, styles: &Synta
     }
 }
 
-pub(crate) fn style_to_highlight_style(s: &Style) -> HighlightStyle {
+pub fn style_to_highlight_style(s: &Style) -> HighlightStyle {
     let mods = s.add_modifier;
     HighlightStyle {
         foreground: s.fg,

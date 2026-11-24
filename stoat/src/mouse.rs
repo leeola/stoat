@@ -34,6 +34,7 @@ use crate::{
     render::{
         commit_picker::MIN_LIST_ROWS,
         conflict_view::{ConflictHover, ConflictTarget},
+        TypeScale,
     },
     run::GridSelection,
     term_session::TermId,
