@@ -45,6 +45,19 @@ pub(crate) struct UserCommand {
 #[derive(Debug, PartialEq)]
 pub(crate) struct CommandArg {
     pub(crate) name: String,
+    pub(crate) kind: ArgKind,
+}
+
+/// What an argument of a [`UserCommand`] takes. The kind sets the list that
+/// the palette shows while the argument is in entry.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum ArgKind {
+    /// Typed text, with no list.
+    Text,
+    /// A file, from the list of workspace files that `:o` shows.
+    File,
+    /// A directory, from the list of workspace directories that `:cd` shows.
+    Dir,
 }
 
 /// What a [`UserCommand`] runs.
@@ -121,6 +134,7 @@ impl CommandSet {
             }
         }
         check_same_as(&mut lowered, &mut embedded_errors, &mut user_errors);
+        resolve_same_as(&mut lowered);
 
         for error in &embedded_errors {
             tracing::error!(target: "stoat::config", "shipped config: {}", error.message);
@@ -253,24 +267,34 @@ fn lower(
         match &statement.node {
             CommandStatement::Doc(_) if doc.is_some() => errors.push(twice("doc")),
             CommandStatement::Doc(text) => doc = Some(text.node.clone()),
-            CommandStatement::Arg { name, kind } => {
+            CommandStatement::Arg {
+                name,
+                kind: declared,
+            } => {
                 if args.iter().any(|arg| arg.name == name.node) {
                     errors.push(error(
                         &name.span,
                         format!("argument `{}` is declared twice", name.node),
                     ));
                 }
-                match arg_kind(kind) {
-                    Ok(Some(target)) => same_as.push(SameAs {
-                        index: args.len(),
-                        target,
-                        span: kind.span.clone(),
-                    }),
-                    Ok(None) => {},
-                    Err(fault) => errors.push(fault),
-                }
+                let kind = match arg_kind(declared) {
+                    Ok((kind, Some(target))) => {
+                        same_as.push(SameAs {
+                            index: args.len(),
+                            target,
+                            span: declared.span.clone(),
+                        });
+                        kind
+                    },
+                    Ok((kind, None)) => kind,
+                    Err(fault) => {
+                        errors.push(fault);
+                        ArgKind::Text
+                    },
+                };
                 args.push(CommandArg {
                     name: name.node.clone(),
+                    kind,
                 });
             },
             CommandStatement::Run(_) if run.is_some() => errors.push(twice("run")),
@@ -322,15 +346,24 @@ fn lower(
     Some((command, same_as))
 }
 
-/// The `same_as` target of argument kind `kind`, `None` for the kind `text`,
-/// or why `kind` is no argument kind.
-fn arg_kind(kind: &Spanned<Call>) -> Result<Option<String>, ParseError> {
+/// The kind that the argument kind `kind` names, with the target of a
+/// `same_as(target)` kind, or why `kind` is no argument kind.
+///
+/// A `same_as` argument takes [`ArgKind::Text`] until [`resolve_same_as`]
+/// gives it the kind of its target's first argument.
+fn arg_kind(kind: &Spanned<Call>) -> Result<(ArgKind, Option<String>), ParseError> {
     let name = &kind.node.name;
+    let bare = |arg_kind: ArgKind| match kind.node.args.as_deref() {
+        None | Some([]) => Ok((arg_kind, None)),
+        Some(_) => Err(error(
+            &kind.span,
+            format!("`{}` takes no argument", name.node),
+        )),
+    };
     match name.node.as_str() {
-        "text" => match kind.node.args.as_deref() {
-            None | Some([]) => Ok(None),
-            Some(_) => Err(error(&kind.span, "`text` takes no argument")),
-        },
+        "text" => bare(ArgKind::Text),
+        "file" => bare(ArgKind::File),
+        "dir" => bare(ArgKind::Dir),
         "same_as" => match kind.node.args.as_deref() {
             Some(
                 [Spanned {
@@ -341,7 +374,7 @@ fn arg_kind(kind: &Spanned<Call>) -> Result<Option<String>, ParseError> {
                         }),
                     ..
                 }],
-            ) => Ok(Some(target.clone())),
+            ) => Ok((ArgKind::Text, Some(target.clone()))),
             _ => Err(error(&kind.span, "`same_as` takes one command name")),
         },
         other => Err(error(
@@ -573,13 +606,55 @@ fn same_as_fault(lowered: &[Lowered], link: &SameAs) -> Option<ParseError> {
     }
 }
 
+/// Give each `same_as` argument of `lowered` the kind of the first argument at
+/// the end of its chain.
+///
+/// [`check_same_as`] runs first, so each chain that is left ends on a kind.
+fn resolve_same_as(lowered: &mut [Lowered]) {
+    let kinds: Vec<(usize, usize, ArgKind)> = {
+        let view: &[Lowered] = lowered;
+        view.iter()
+            .enumerate()
+            .flat_map(|(at, held)| {
+                held.same_as
+                    .iter()
+                    .filter_map(move |link| Some((at, link.index, chain_kind(view, link)?)))
+            })
+            .collect()
+    };
+    for (at, index, kind) in kinds {
+        lowered[at].command.args[index].kind = kind;
+    }
+}
+
+/// The kind of the first argument at the end of `link`'s chain of first
+/// arguments, or `None` for a chain that ends on no kind.
+///
+/// A chain that ends visits each command once at most. So a walk longer than
+/// the set loops, and gives `None` as a chain that names no command does.
+fn chain_kind(lowered: &[Lowered], link: &SameAs) -> Option<ArgKind> {
+    let find = |name: &str| {
+        lowered
+            .iter()
+            .find(|held| held.command.name.eq_ignore_ascii_case(name))
+    };
+    let mut at = find(&link.target)?;
+    for _ in 0..lowered.len() {
+        match at.same_as.iter().find(|first| first.index == 0) {
+            Some(next) => at = find(&next.target)?,
+            None => return at.command.args.first().map(|arg| arg.kind.clone()),
+        }
+    }
+    None
+}
+
 fn error(span: &Span, message: impl Into<String>) -> ParseError {
     ParseError::new(span.clone(), message)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{CommandArg, CommandSet, Output, Step, UserCommand};
+    use super::{ArgKind, CommandArg, CommandSet, Output, Step, UserCommand};
     use crate::app;
     use stoat_config::{Config, Span, Template};
 
@@ -628,6 +703,12 @@ mod tests {
         (span, message.to_owned())
     }
 
+    /// The kinds of the arguments of the command `name` of `set`.
+    fn kinds(set: &CommandSet, name: &str) -> Option<Vec<ArgKind>> {
+        set.get(name)
+            .map(|command| command.args.iter().map(|arg| arg.kind.clone()).collect())
+    }
+
     #[test]
     fn a_block_command_lowers_to_its_arguments_step_and_output() {
         let (set, errors) = load(
@@ -642,7 +723,8 @@ mod tests {
                     doc: "say hello".to_owned(),
                     line: 1,
                     args: vec![CommandArg {
-                        name: "who".to_owned()
+                        name: "who".to_owned(),
+                        kind: ArgKind::Text,
                     }],
                     step: Step::Shell(Template::parse("echo hello {who}")),
                     output: Output::Notify,
@@ -913,6 +995,54 @@ mod tests {
                         "`same_as(lost)` names no command"
                     ),
                 ],
+            ),
+        );
+    }
+
+    /// `file` and `dir` load bare or with empty parentheses. Each takes no
+    /// argument.
+    #[test]
+    fn file_and_dir_are_argument_kinds() {
+        let source = concat!(
+            "command show { arg a = file; arg b = dir; arg c = file(); arg d = dir(); ",
+            "run = shell(\"x {a} {b} {c} {d}\"); }\n",
+            "command bad { arg e = file(1); arg f = dir(x); run = shell(\"x {e} {f}\"); }",
+        );
+        let (set, errors) = load(source);
+        assert_eq!(
+            (names(&set), kinds(&set, "show"), errors),
+            (
+                vec!["show"],
+                Some(vec![
+                    ArgKind::File,
+                    ArgKind::Dir,
+                    ArgKind::File,
+                    ArgKind::Dir
+                ]),
+                vec![
+                    fault(span(source, "file(1)"), "`file` takes no argument"),
+                    fault(span(source, "dir(x)"), "`dir` takes no argument"),
+                ],
+            ),
+        );
+    }
+
+    /// A `same_as` argument takes the kind of its target's first argument, at
+    /// the end of a chain of two as well.
+    #[test]
+    fn same_as_takes_the_kind_of_the_named_command_s_first_argument() {
+        let source = concat!(
+            "command show { arg path = file; run = shell(\"cat {path}\"); }\n",
+            "command mirror { arg a = same_as(show); arg b = dir; run = shell(\"x {a} {b}\"); }\n",
+            "command echoes { arg c = same_as(mirror); run = shell(\"x {c}\"); }",
+        );
+        let (set, errors) = load(source);
+        assert_eq!(
+            (kinds(&set, "mirror"), kinds(&set, "echoes"), errors),
+            (
+                Some(vec![ArgKind::File, ArgKind::Dir]),
+                Some(vec![ArgKind::File]),
+                Vec::new(),
             ),
         );
     }

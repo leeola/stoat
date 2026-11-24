@@ -811,7 +811,9 @@ fn arg_picker_mut(stoat: &mut Stoat) -> Option<&mut ArgPicker> {
 /// argument. Pressing it again without editing the tail in between steps to the
 /// next candidate the typed text matched, wrapping at the end, so a run of
 /// presses walks the whole match list. A command with more than one parameter
-/// completes the token being typed and keeps the tokens before it as typed.
+/// completes the token being typed and keeps the tokens before it as typed. A
+/// user command completes its argument in entry and keeps the text before it,
+/// as [`command_palette::current_user_arg`] splits them.
 ///
 /// A browse-mode tail keeps the typed directory prefix and appends the
 /// highlighted child, and no completion appends a trailing `/`, so the browse
@@ -870,7 +872,10 @@ pub(super) fn palette_complete(stoat: &mut Stoat) -> UpdateEffect {
             PaletteCommand::Action(entry) if entry.def.params().len() > 1 => {
                 command_palette::split_last_token(typed_tail)
             },
-            _ => ("", typed_tail),
+            PaletteCommand::User(user) => {
+                command_palette::current_user_arg(typed_tail, user.args.len())
+            },
+            PaletteCommand::Action(_) => ("", typed_tail),
         };
 
         let git_root = &ws.git_root;

@@ -9,7 +9,7 @@ use crate::{
     paths,
     picker::{self, PathPicker, PendingScan, PreviewPolicy, ScanTarget},
     rebase::RebasePause,
-    user_command::{CommandArg, CommandSet, UserCommand},
+    user_command::{ArgKind, CommandArg, CommandSet, UserCommand},
     workspace::Workspace,
 };
 use ratatui::layout::Rect;
@@ -1053,8 +1053,15 @@ impl CommandPalette {
     /// [`ValueSource::Values`], e.g. `:o `,
     /// `:cd `, `:b `, `:SetTheme `, `:git log `, or `:auto-reload `), or `None`
     /// otherwise. Gates rendering the picker and routing selection keys to it.
+    ///
+    /// The argument of a user command picks from the list of its kind, as
+    /// [`kind_source`] maps it.
     pub(crate) fn arg_source(&self) -> Option<ValueSource> {
-        match self.arg_param()?.value_source {
+        let source = match self.command.as_ref()? {
+            PaletteCommand::Action(_) => self.arg_param()?.value_source,
+            PaletteCommand::User(_) => kind_source(&self.user_arg()?.kind),
+        };
+        match source {
             ValueSource::None => None,
             source => Some(source),
         }
@@ -1066,15 +1073,16 @@ impl CommandPalette {
     /// its spaces.
     ///
     /// A command with more than one parameter filters on the token being typed
-    /// alone, which is empty right after a space.
+    /// alone, which is empty right after a space. A user command filters on the
+    /// text of its argument in entry, as [`current_user_arg`] splits it.
     pub(crate) fn arg_tail(&self, ws: &Workspace) -> Option<String> {
         self.arg_source()?;
         let text = self.input.text(ws);
         let (command, _, tail) = split_head(&text, &self.availability, &self.commands)?;
-        let tail = if command.arg_count() > 1 {
-            split_last_token(tail).1
-        } else {
-            tail
+        let tail = match &command {
+            PaletteCommand::User(user) => current_user_arg(tail, user.args.len()).1,
+            PaletteCommand::Action(_) if command.arg_count() > 1 => split_last_token(tail).1,
+            PaletteCommand::Action(_) => tail,
         };
         Some(tail.to_string())
     }
@@ -1356,14 +1364,28 @@ impl CommandPalette {
     /// The command runs when the tail gives a value to each of its arguments.
     /// Else the palette stays open, and the refusal goes to the log as the
     /// refusal of a built-in command does.
+    ///
+    /// The list of a `file` or `dir` argument in entry gives that argument its
+    /// value, as [`Self::picked_user_value`] takes it. The history line holds
+    /// the values, so a recalled line runs on the picked path again.
     fn submit_user_command(
         &mut self,
         ws: &mut Workspace,
         command: Arc<UserCommand>,
         tail: &str,
     ) -> PaletteOutcome {
-        let values = split_user_args(tail, command.args.len());
-        if values.len() != command.args.len() {
+        let count = command.args.len();
+        let mut values: Vec<String> = split_user_args(tail, count)
+            .into_iter()
+            .map(str::to_owned)
+            .collect();
+        if let Some(picked) = self.picked_user_value(ws, &command, tail) {
+            match values.get_mut(user_arg_index(tail, count)) {
+                Some(value) => *value = picked,
+                None => values.push(picked),
+            }
+        }
+        if values.len() != count {
             tracing::warn!(
                 target: "stoat::command",
                 command = %command.name,
@@ -1374,9 +1396,40 @@ impl CommandPalette {
         }
 
         self.input.dispose(ws);
-        let values = values.into_iter().map(str::to_owned).collect();
-        let line = format!("{} {}", command.name, tail.trim());
+        let line = format!("{} {}", command.name, values.join(" "));
         PaletteOutcome::Run(command, values, line)
+    }
+
+    /// The value that the argument list gives the argument of `command` that
+    /// `tail` puts in entry, or `None` when the typed text stands.
+    ///
+    /// Only the list of a `file` or `dir` argument gives a value, and only
+    /// while the history does not walk. A typed path that starts with `/` or
+    /// `~` takes the selected row of its directory browse. Any other text takes
+    /// the selected row of the list. The value is the row's path as
+    /// [`shell_path`] writes it for the workspace root.
+    fn picked_user_value(
+        &self,
+        ws: &Workspace,
+        command: &UserCommand,
+        tail: &str,
+    ) -> Option<String> {
+        if ws.palette_history.is_walking() {
+            return None;
+        }
+        let count = command.args.len();
+        let source = kind_source(&command.args.get(user_arg_index(tail, count))?.kind);
+        let picker = self
+            .arg_picker
+            .as_ref()
+            .filter(|picker| picker.source() == source)?;
+
+        let typed = current_user_arg(tail, count).1.trim();
+        let path = match typed.starts_with('/') || typed.starts_with('~') {
+            true => picker.browse_selected_path()?,
+            false => picker.selected_path()?,
+        };
+        Some(shell_path(path, &ws.git_root))
     }
 }
 
@@ -1696,6 +1749,45 @@ pub(crate) fn split_user_args(tail: &str, count: usize) -> Vec<&str> {
 /// The last argument takes the rest of the tail, so the count stops there.
 fn user_arg_index(tail: &str, count: usize) -> usize {
     arg_index(tail).min(count.saturating_sub(1))
+}
+
+/// `tail` split before the argument that it puts in entry, for a user command
+/// with `count` arguments. The parts are the text kept ahead of that argument
+/// and the argument's own text.
+///
+/// An argument before the last is one word, and the last takes the rest of
+/// the tail, as [`split_user_args`] reads them. The kept text holds its
+/// whitespace byte for byte, so a completion written after it keeps the
+/// spacing that the user typed.
+pub(crate) fn current_user_arg(tail: &str, count: usize) -> (&str, &str) {
+    let mut start = tail.len() - tail.trim_start().len();
+    for _ in 0..user_arg_index(tail, count) {
+        let word = tail[start..]
+            .find(char::is_whitespace)
+            .map_or(tail.len(), |end| start + end);
+        start = tail.len() - tail[word..].trim_start().len();
+    }
+    tail.split_at(start)
+}
+
+/// `path` as a value of a user command's shell step, which runs in the
+/// workspace root `root`. A path under the root is relative to it, and any
+/// other path stays whole.
+fn shell_path(path: &Path, root: &Path) -> String {
+    path.strip_prefix(root)
+        .unwrap_or(path)
+        .to_string_lossy()
+        .into_owned()
+}
+
+/// The value source of the list that a user command's argument of kind `kind`
+/// picks from. A `text` argument picks from no list.
+fn kind_source(kind: &ArgKind) -> ValueSource {
+    match kind {
+        ArgKind::Text => ValueSource::None,
+        ArgKind::File => ValueSource::Files,
+        ArgKind::Dir => ValueSource::Directories,
+    }
 }
 
 /// Which parameter the token being typed at the end of `tail` fills, counting
@@ -2673,6 +2765,28 @@ mod tests {
         );
     }
 
+    #[test]
+    fn current_user_arg_splits_before_the_argument_in_entry() {
+        assert_eq!(
+            [
+                current_user_arg("src/ma", 1),
+                current_user_arg("my file", 1),
+                current_user_arg("a", 2),
+                current_user_arg("a  b c", 2),
+                current_user_arg("a b ", 3),
+                current_user_arg(" x", 1),
+            ],
+            [
+                ("", "src/ma"),
+                ("", "my file"),
+                ("", "a"),
+                ("a  ", "b c"),
+                ("a b ", ""),
+                (" ", "x"),
+            ],
+        );
+    }
+
     /// Enter on the bare name of a user command that takes an argument opens
     /// the entry of that argument.
     #[test]
@@ -2961,6 +3075,161 @@ mod tests {
         let mut h = user_palette(80, 24);
         select_row(&mut h, "ping");
         h.assert_snapshot("command_palette_user_commands");
+    }
+
+    /// The user command `show`, which passes a file to `cat`.
+    const SHOW: &str =
+        r#"command show { arg path = file; run = shell("cat {path}"); output = notify; }"#;
+
+    /// A harness over `src/main.rs` and `README.md` in the palette workspace,
+    /// with the user config `source` loaded.
+    fn file_harness(source: &str) -> TestHarness {
+        let mut h = Stoat::test();
+        seed_palette_workspace(&mut h, &[("src/main.rs", ""), ("README.md", "")]);
+        h.stoat.reload_user_config(source);
+        h
+    }
+
+    /// Type `text` and let the argument list settle on it.
+    fn type_settled(h: &mut TestHarness, text: &str) {
+        h.type_text(text);
+        let _ = h.snapshot();
+        h.settle();
+        let _ = h.snapshot();
+    }
+
+    /// Press Enter and let the run settle.
+    fn enter_settled(h: &mut TestHarness) {
+        h.type_keys("enter");
+        h.settle();
+    }
+
+    /// The lines that the fake shell ran, in order.
+    fn shell_lines(h: &TestHarness) -> Vec<String> {
+        h.fake_shell
+            .invocations()
+            .into_iter()
+            .map(|run| run.cmd)
+            .collect()
+    }
+
+    #[test]
+    fn a_file_argument_lists_the_workspace_files() {
+        let mut h = file_harness(SHOW);
+        type_settled(&mut h, ":show ma");
+        assert_eq!(arg_rows(&h), ["/stoat-palette-test/src/main.rs"]);
+    }
+
+    /// The history line holds the picked path, so a recalled line runs on the
+    /// same file.
+    #[test]
+    fn enter_passes_the_selected_file_relative_to_the_root() {
+        let mut h = file_harness(SHOW);
+        type_settled(&mut h, ":show ma");
+        enter_settled(&mut h);
+        assert_eq!(
+            (
+                shell_lines(&h),
+                h.stoat.active_workspace().palette_history.entries(),
+            ),
+            (
+                vec!["cat src/main.rs".to_owned()],
+                &["show src/main.rs".to_owned()][..],
+            ),
+        );
+    }
+
+    /// A typed path that starts with `/` passes as typed, although the row
+    /// `src/main.rs` matches `/main.rs` too. A text that no row matches passes
+    /// as typed as well.
+    #[test]
+    fn a_typed_path_outside_the_list_passes_as_typed() {
+        let mut h = file_harness(SHOW);
+        type_settled(&mut h, ":show /main.rs");
+        let matched = arg_rows(&h);
+        enter_settled(&mut h);
+        type_settled(&mut h, ":show zzz");
+        enter_settled(&mut h);
+        assert_eq!(
+            (matched, shell_lines(&h)),
+            (
+                vec!["/stoat-palette-test/src/main.rs".to_owned()],
+                vec!["cat /main.rs".to_owned(), "cat zzz".to_owned()],
+            ),
+        );
+    }
+
+    /// Enter in History runs a recalled user command line as typed. Up
+    /// dispatches with no frame after it, so the argument list is still
+    /// installed, and its selected row stands in for no argument.
+    #[test]
+    fn enter_in_history_runs_a_recalled_user_command_as_typed() {
+        let mut h = file_harness(SHOW);
+        h.stoat.active_workspace_mut().palette_history =
+            InputHistory::from_entries(vec!["show ma".to_string()]);
+        type_settled(&mut h, ":show ma");
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::PaletteUp);
+
+        let mut palette = h.stoat.command_palette.take().expect("palette open");
+        let installed = palette.arg_picker.is_some();
+        let run = match palette.handle_submit(h.stoat.active_workspace_mut()) {
+            PaletteOutcome::Run(command, values, _) => Some((command.name.clone(), values)),
+            _ => None,
+        };
+        assert_eq!(
+            (installed, run),
+            (true, Some(("show".to_owned(), vec!["ma".to_owned()]))),
+        );
+    }
+
+    /// A `dir` argument lists the workspace directories. A typed `/` path
+    /// browses that directory, and Enter passes the selected child whole,
+    /// because it lies outside the workspace root.
+    #[test]
+    fn a_dir_argument_lists_directories_and_browses_a_typed_path() {
+        let mut h = file_harness(
+            r#"command lsd { arg where = dir; run = shell("ls {where}"); output = notify; }"#,
+        );
+        h.fake_fs().insert_dir("/elsewhere/a");
+        h.fake_fs().insert_dir("/elsewhere/b");
+        type_settled(&mut h, ":lsd ");
+        let listed = arg_rows(&h);
+        type_settled(&mut h, "/elsewhere/");
+        let browsed = browse_dir_rows(&h);
+        enter_settled(&mut h);
+        assert_eq!(
+            (listed, browsed, shell_lines(&h)),
+            (
+                vec!["/stoat-palette-test/src".to_owned()],
+                vec!["a".to_owned(), "b".to_owned()],
+                vec!["ls /elsewhere/a".to_owned()],
+            ),
+        );
+    }
+
+    /// The user command `note`, whose second argument is a file.
+    const NOTE: &str = r#"command note { arg tag = text; arg path = file; run = shell("note {tag} {path}"); output = notify; }"#;
+
+    /// Tab completes the selected file into the second argument of a command
+    /// and keeps the first argument as typed.
+    #[test]
+    fn tab_completes_the_selected_file_into_the_argument() {
+        let mut h = file_harness(NOTE);
+        type_settled(&mut h, ":note urgent ma");
+        h.type_keys("tab");
+        assert_eq!(palette_text(&h), "note urgent src/main.rs");
+    }
+
+    /// The selected row gives the value of a second argument that has no
+    /// text yet, after the argument typed before it.
+    #[test]
+    fn enter_on_an_empty_file_argument_takes_the_selected_row() {
+        let mut h = Stoat::test();
+        seed_palette_workspace(&mut h, &[("src/main.rs", "")]);
+        h.stoat.reload_user_config(NOTE);
+        type_settled(&mut h, ":note urgent ");
+        enter_settled(&mut h);
+        assert_eq!(shell_lines(&h), ["note urgent src/main.rs"]);
     }
 
     /// A submitted line records the time that the executor's clock reads, so

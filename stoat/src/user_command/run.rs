@@ -1,4 +1,4 @@
-use super::{Output, Step, UserCommand};
+use super::{ArgKind, Output, Step, UserCommand};
 use crate::{
     action_handlers,
     app::{MessageKind, Stoat, UpdateEffect},
@@ -10,6 +10,7 @@ use crate::{
 use std::{
     collections::VecDeque,
     io, mem,
+    path::Path,
     sync::{
         atomic::{AtomicU64, Ordering},
         Arc,
@@ -69,7 +70,11 @@ pub(crate) enum CommandEvent {
 /// A shell step under the `block` output runs in the run modal. Any other
 /// step runs here, a shell step on a worker with no terminal, so its stdout
 /// and its stderr stay apart.
+///
+/// A `file` or `dir` value that starts with `~/` runs with the `HOME`
+/// directory in place of the `~`.
 pub(crate) fn start(stoat: &mut Stoat, command: &UserCommand, values: Vec<String>) -> UpdateEffect {
+    let values = expand_home(command, values, stoat.env_host.var("HOME").as_deref());
     match plan(command, &values) {
         Plan::Modal(line) => action_handlers::run::run_command(stoat, &line),
         Plan::Pane(line) => action_handlers::run::run_line_in_pane(stoat, &line),
@@ -123,6 +128,32 @@ pub(crate) fn pump(stoat: &mut Stoat) -> bool {
         }
     }
     landed
+}
+
+/// `values` with the leading `~/` of each `file` or `dir` value written as
+/// the directory `home`. With no `home`, each value stays as typed.
+///
+/// A shell step writes each value as a quoted word, and the shell expands no
+/// `~` in a quoted word.
+fn expand_home(command: &UserCommand, values: Vec<String>, home: Option<&str>) -> Vec<String> {
+    let Some(home) = home else {
+        return values;
+    };
+    command
+        .args
+        .iter()
+        .zip(values)
+        .map(|(arg, value)| {
+            let path = matches!(arg.kind, ArgKind::File | ArgKind::Dir);
+            match path && value.starts_with("~/") {
+                true => Path::new(home)
+                    .join(&value["~/".len()..])
+                    .to_string_lossy()
+                    .into_owned(),
+                false => value,
+            }
+        })
+        .collect()
 }
 
 /// The steps of `command` with each placeholder written from `values`, which
@@ -313,7 +344,7 @@ mod tests {
         location_picker::LocationEntry,
         pane::{DockPanel, DockSide, DockVisibility, FocusTarget, View},
         test_harness::TestHarness,
-        user_command::{CommandArg, Output, Step, UserCommand},
+        user_command::{ArgKind, CommandArg, Output, Step, UserCommand},
     };
     use std::path::{Path, PathBuf};
     use stoat_config::Template;
@@ -366,6 +397,7 @@ mod tests {
             line: 1,
             args: vec![CommandArg {
                 name: "pr".to_owned(),
+                kind: ArgKind::Text,
             }],
             step: Step::Shell(Template::parse("gh pr checkout {pr}")),
             output: Output::Block,
@@ -458,6 +490,25 @@ mod tests {
             (message(&h), h.fake_shell.invocations()),
             ((Some("hi there done"), MessageKind::Info), Vec::new()),
         );
+    }
+
+    /// A `file` or `dir` value that starts with `~/` runs with the home
+    /// directory in place of the `~`. A `text` value stays as typed.
+    #[test]
+    fn a_home_relative_file_value_takes_the_home_directory() {
+        let mut h = loaded(concat!(
+            "command catnote { arg path = file; arg place = dir; arg note = text; ",
+            "run = shell(\"cat {path} {place} {note}\"); output = notify; }",
+        ));
+        h.fake_env().set("HOME", "/home/tester");
+        submit(&mut h, "catnote ~/a.txt ~/docs ~/x");
+        let lines: Vec<String> = h
+            .fake_shell
+            .invocations()
+            .into_iter()
+            .map(|run| run.cmd)
+            .collect();
+        assert_eq!(lines, ["cat /home/tester/a.txt /home/tester/docs '~/x'"]);
     }
 
     #[test]
