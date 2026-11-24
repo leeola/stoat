@@ -12,7 +12,7 @@
 //! resolves a binding against. The server advertises UTF-8 position encoding
 //! so line/column offsets are plain byte counts.
 
-use crate::{host::lsp::LspHost, keymap};
+use crate::{host::lsp::LspHost, keymap, user_command::CommandSet};
 use async_trait::async_trait;
 use lsp_types::{
     CompletionItem, CompletionItemKind, CompletionOptions, CompletionParams, CompletionResponse,
@@ -29,12 +29,13 @@ use lsp_types::{
 };
 use std::{
     collections::{HashMap, HashSet},
-    io, iter,
+    io, iter, slice,
     sync::{Arc, LazyLock, Mutex},
 };
 use stoat_config::{
-    ActionExpr, Arg, Binding, EventBlock, EventType, Expr, PathSeg, Predicate, Setting, SettingDef,
-    Span, Spanned, Statement, ThemeBlock, Value, ValueShape,
+    ActionExpr, Arg, Binding, Call, CallArg, CallValue, CommandBody, CommandDecl, CommandStatement,
+    EventBlock, EventType, Expr, PathSeg, Predicate, RunExpr, Setting, SettingDef, Span, Spanned,
+    Statement, ThemeBlock, Value, ValueShape,
 };
 
 /// In-process settings language server backing `.stcfg` buffers.
@@ -266,7 +267,9 @@ fn complete(text: &str, offset: usize) -> Vec<CompletionItem> {
 /// spanning its call, since the keymap drops that binding.
 ///
 /// A `command` item that does not parse reports its error, and the checks go
-/// on over the items that parse.
+/// on over the items that parse. Each fault that the command loader finds in
+/// an item that parses becomes an error diagnostic at its span, because the
+/// command does not load.
 fn diagnose(text: &str) -> Vec<Diagnostic> {
     let (config, errors) = stoat_config::parse(text);
     let lines = LineIndex::new(text);
@@ -285,6 +288,15 @@ fn diagnose(text: &str) -> Vec<Diagnostic> {
     let Some(config) = config else {
         return diagnostics;
     };
+
+    let (_, command_errors) = CommandSet::build(crate::app::embedded_config(), Some(&config));
+    for error in command_errors {
+        diagnostics.push(diagnostic(
+            lines.range(error.span),
+            DiagnosticSeverity::ERROR,
+            error.message,
+        ));
+    }
 
     for block in &config.blocks {
         if block.node.event != EventType::Init {
@@ -587,7 +599,8 @@ const TK_COMMENT: u32 = 9;
 /// [`STCFG_CAPABILITIES`].
 ///
 /// A text whose only errors sit in `command` items parses to a config, so its
-/// tokens color the items that parse.
+/// tokens color the items that parse. A `command` item colors its keys, its
+/// name, and the calls of its argument kinds and its steps.
 fn semantic_tokens(text: &str) -> Option<Vec<SemanticToken>> {
     let (config, _errors) = stoat_config::parse(text);
     let config = config?;
@@ -598,6 +611,9 @@ fn semantic_tokens(text: &str) -> Option<Vec<SemanticToken>> {
     }
     for theme in &config.themes {
         walk_theme_block(text, theme, &mut spans);
+    }
+    for command in &config.commands {
+        walk_command(command, &mut spans);
     }
     collect_comment_spans(text, &mut spans);
 
@@ -645,6 +661,84 @@ fn walk_theme_block(text: &str, theme: &Spanned<ThemeBlock>, out: &mut Vec<(Span
 
     for statement in &theme.node.statements {
         walk_statement(text, statement, out);
+    }
+}
+
+/// Push the tokens of a `command` item.
+///
+/// The `command` keyword and `arg` read as keywords, the command's name as a
+/// function, and `doc`, `run`, and `output` as properties. An argument's name
+/// reads as a parameter, its kind as a type, a step as a function, and an
+/// output's name as an enum member.
+fn walk_command(command: &Spanned<CommandDecl>, out: &mut Vec<(Span, u32)>) {
+    let start = command.span.start;
+    out.push((start..start + "command".len(), TK_KEYWORD));
+    out.push((command.node.name.span.clone(), TK_FUNCTION));
+
+    let statements = match &command.node.body {
+        CommandBody::Block(statements) => statements,
+        CommandBody::Wrap(call) => {
+            walk_call(call, TK_FUNCTION, out);
+            return;
+        },
+    };
+    for statement in statements {
+        let key = |key: &str, kind| {
+            let start = statement.span.start;
+            (start..start + key.len(), kind)
+        };
+        match &statement.node {
+            CommandStatement::Doc(doc) => {
+                out.push(key("doc", TK_PROPERTY));
+                out.push((doc.span.clone(), TK_STRING));
+            },
+            CommandStatement::Arg { name, kind } => {
+                out.push(key("arg", TK_KEYWORD));
+                out.push((name.span.clone(), TK_PARAMETER));
+                walk_call(kind, TK_TYPE, out);
+            },
+            CommandStatement::Run(run) => {
+                out.push(key("run", TK_PROPERTY));
+                let steps = match run {
+                    RunExpr::Single(step) => slice::from_ref(step),
+                    RunExpr::Sequence(steps) => steps.as_slice(),
+                };
+                for step in steps {
+                    walk_call(step, TK_FUNCTION, out);
+                }
+            },
+            CommandStatement::Output(name) => {
+                out.push(key("output", TK_PROPERTY));
+                out.push((name.span.clone(), TK_ENUM_MEMBER));
+            },
+        }
+    }
+}
+
+/// Push the tokens of `call`, with its name as `kind`.
+///
+/// A named argument's name reads as a parameter, a value as [`walk_value`]
+/// reads it, and each segment of a context reference as a variable.
+fn walk_call(call: &Spanned<Call>, kind: u32, out: &mut Vec<(Span, u32)>) {
+    out.push((call.node.name.span.clone(), kind));
+    for arg in call.node.args.iter().flatten() {
+        let value = match &arg.node {
+            CallArg::Positional(value) => value,
+            CallArg::Named { name, value } => {
+                out.push((name.span.clone(), TK_PARAMETER));
+                value
+            },
+        };
+        match &value.node {
+            CallValue::Value(scalar) => {
+                walk_value(&Spanned::new(scalar.clone(), value.span.clone()), out);
+            },
+            CallValue::Context(segments) => {
+                for segment in segments {
+                    out.push((segment.span.clone(), TK_VARIABLE));
+                }
+            },
+        }
     }
 }
 
@@ -1053,6 +1147,55 @@ mod tests {
         assert_eq!(error.range.start.line, 1);
     }
 
+    /// A command that the loader leaves out diagnoses as an error at its
+    /// fault, with the loader's message.
+    #[test]
+    fn a_command_error_diagnoses_at_its_span() {
+        let text = "command review { run = shell(\"x\"); }";
+        let name = text.find("review").expect("the name");
+        assert_eq!(
+            diagnose(text),
+            vec![diagnostic(
+                LineIndex::new(text).range(name..name + "review".len()),
+                DiagnosticSeverity::ERROR,
+                "command `review` shadows the built-in command `review`".to_owned(),
+            )],
+        );
+    }
+
+    /// A command item that does not parse diagnoses its parse error, and the
+    /// rest of the file still diagnoses.
+    #[test]
+    fn a_broken_command_still_diagnoses_the_rest_of_the_file() {
+        let text = "command broken { doc = ; }\non init { editor.scrollofff = 3; }";
+        let found: Vec<(Option<DiagnosticSeverity>, u32, String)> = diagnose(text)
+            .into_iter()
+            .map(|diagnostic| {
+                (
+                    diagnostic.severity,
+                    diagnostic.range.start.line,
+                    diagnostic.message,
+                )
+            })
+            .collect();
+        assert_eq!(
+            (
+                found
+                    .iter()
+                    .map(|(severity, line, _)| (*severity, *line))
+                    .collect::<Vec<_>>(),
+                found.get(1).map(|(_, _, message)| message.as_str()),
+            ),
+            (
+                vec![
+                    (Some(DiagnosticSeverity::ERROR), 0),
+                    (Some(DiagnosticSeverity::WARNING), 1),
+                ],
+                Some("unknown setting `editor.scrollofff`"),
+            ),
+        );
+    }
+
     #[test]
     fn hover_reports_doc_and_default() {
         let (text, offset) = at_cursor("on init { editor.line_num|bers = relative; }");
@@ -1235,6 +1378,78 @@ mod tests {
                 tok(&text, "count", TK_PARAMETER),
                 tok(&text, "7", TK_NUMBER),
                 tok(&text, "\"jump\"", TK_STRING),
+            ],
+        );
+    }
+
+    #[test]
+    fn semantic_tokens_cover_a_command_block() {
+        let text = [
+            "command greet {",
+            "  doc = \"say hello\";",
+            "  arg who = text;",
+            "  run = shell(\"echo {who}\");",
+            "  output = notify;",
+            "}",
+        ]
+        .join("\n");
+
+        let tokens = semantic_tokens(&text).expect("a parseable config yields tokens");
+        assert_eq!(
+            decode(&tokens),
+            vec![
+                tok(&text, "command", TK_KEYWORD),
+                tok(&text, "greet", TK_FUNCTION),
+                tok(&text, "doc", TK_PROPERTY),
+                tok(&text, "\"say hello\"", TK_STRING),
+                tok(&text, "arg", TK_KEYWORD),
+                tok(&text, "who", TK_PARAMETER),
+                tok(&text, "text", TK_TYPE),
+                tok(&text, "run", TK_PROPERTY),
+                tok(&text, "shell", TK_FUNCTION),
+                tok(&text, "\"echo {who}\"", TK_STRING),
+                tok(&text, "output", TK_PROPERTY),
+                tok(&text, "notify", TK_ENUM_MEMBER),
+            ],
+        );
+    }
+
+    #[test]
+    fn semantic_tokens_cover_a_wrap_command() {
+        let text = "command rg = cli(\"rg\", output: locations);";
+
+        let tokens = semantic_tokens(text).expect("a parseable config yields tokens");
+        assert_eq!(
+            decode(&tokens),
+            vec![
+                tok(text, "command", TK_KEYWORD),
+                tok(text, "rg", TK_FUNCTION),
+                tok(text, "cli", TK_FUNCTION),
+                tok(text, "\"rg\"", TK_STRING),
+                tok(text, "output", TK_PARAMETER),
+                tok(text, "locations", TK_VARIABLE),
+            ],
+        );
+    }
+
+    /// Each step of a `run` list colors, and each segment of a context
+    /// reference reads as a variable.
+    #[test]
+    fn semantic_tokens_cover_each_step_of_a_run_list() {
+        let text = "command say { run = [shell(\"a\"), Notify(git.last_subject)]; }";
+
+        let tokens = semantic_tokens(text).expect("a parseable config yields tokens");
+        assert_eq!(
+            decode(&tokens),
+            vec![
+                tok(text, "command", TK_KEYWORD),
+                tok(text, "say", TK_FUNCTION),
+                tok(text, "run", TK_PROPERTY),
+                tok(text, "shell", TK_FUNCTION),
+                tok(text, "\"a\"", TK_STRING),
+                tok(text, "Notify", TK_FUNCTION),
+                tok(text, "git", TK_VARIABLE),
+                tok(text, "last_subject", TK_VARIABLE),
             ],
         );
     }
