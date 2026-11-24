@@ -1,7 +1,7 @@
 use crate::{
     app::{Stoat, UpdateEffect},
     buffer_lifecycle,
-    pane::View,
+    pane::{FocusTarget, View},
     run::{OutputBlock, RunSink, RunState},
 };
 
@@ -33,6 +33,37 @@ pub(super) fn open_run(stoat: &mut Stoat) -> UpdateEffect {
     buffer_lifecycle::replace_pane_view(ws, &executor, focused, View::Run(run_id));
     stoat.transition_mode("insert".into());
     UpdateEffect::Redraw
+}
+
+/// Run `line` in a Run pane, as a submit of the pane's input runs a typed
+/// line.
+///
+/// The first split pane that shows a Run pane takes the line and the focus.
+/// With no Run pane on show, a Run pane opens in the focused pane, as
+/// `OpenRun` opens one.
+pub(crate) fn run_line_in_pane(stoat: &mut Stoat, line: &str) -> UpdateEffect {
+    let ws = stoat.active_workspace_mut();
+    ws.focus = FocusTarget::SplitPane;
+    let shown = ws
+        .panes
+        .split_panes()
+        .find_map(|(id, pane)| matches!(pane.view, View::Run(_)).then_some(id));
+    match shown {
+        Some(pane) => ws.panes.set_focus(pane),
+        None => {
+            open_run(stoat);
+        },
+    }
+
+    let ws = stoat.active_workspace_mut();
+    let View::Run(id) = ws.panes.pane(ws.panes.focus()).view else {
+        return UpdateEffect::None;
+    };
+    let Some(input) = ws.runs.get(id).map(|run| run.input.clone()) else {
+        return UpdateEffect::None;
+    };
+    input.replace_text(ws, line);
+    run_submit(stoat)
 }
 
 pub(super) fn run_submit(stoat: &mut Stoat) -> UpdateEffect {

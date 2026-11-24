@@ -806,6 +806,25 @@ pub(crate) fn show_new_scratch(stoat: &mut Stoat) -> BufferId {
     buffer_id
 }
 
+/// Show a new scratch buffer that holds `text` in the focused pane, such as
+/// the output of a command run.
+///
+/// The buffer holds the text with no edit, so it reads clean and the quit
+/// guard does not hold it. Its cursor starts at the first line. The pane
+/// records a jump first, as [`show_new_scratch`] does.
+pub(crate) fn show_scratch_with_text(stoat: &mut Stoat, text: &str) -> BufferId {
+    let workspace = stoat.active_workspace;
+    let ws = &mut stoat.workspaces[workspace];
+    let (buffer_id, buffer) = ws.buffers.new_scratch();
+    buffer.write().expect("scratch buffer poisoned").reset(text);
+    let target = ws.panes.focus();
+    let executor = stoat.executor.clone();
+
+    jump::record_pane_switch(stoat, workspace, target, buffer_id);
+    show_buffer_in_pane(stoat, workspace, target, buffer_id, buffer, executor);
+    buffer_id
+}
+
 /// Show `buffer_id` in `target` by swapping the pane's editor to a fresh
 /// [`EditorState`] over the buffer, garbage-collecting the outgoing one.
 ///

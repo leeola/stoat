@@ -2,6 +2,7 @@ use super::{Output, Step, UserCommand};
 use crate::{
     action_handlers,
     app::{MessageKind, Stoat, UpdateEffect},
+    buffer_lifecycle,
     host::ShellOutput,
     keymap::ResolvedAction,
 };
@@ -35,6 +36,8 @@ enum Plan {
     Steps(VecDeque<PlannedStep>),
     /// The shell line that the run modal runs and shows.
     Modal(String),
+    /// The shell line that a Run pane's shell runs.
+    Pane(String),
 }
 
 /// A command run with steps left, or with a shell step out on a worker.
@@ -66,6 +69,7 @@ pub(crate) enum CommandEvent {
 pub(crate) fn start(stoat: &mut Stoat, command: &UserCommand, values: Vec<String>) -> UpdateEffect {
     match plan(command, &values) {
         Plan::Modal(line) => action_handlers::run::run_command(stoat, &line),
+        Plan::Pane(line) => action_handlers::run::run_line_in_pane(stoat, &line),
         Plan::Steps(steps) => {
             let run = CommandRun {
                 id: NEXT_RUN.fetch_add(1, Ordering::Relaxed),
@@ -122,7 +126,10 @@ fn plan(command: &UserCommand, values: &[String]) -> Plan {
             let line = template.render_shell(value);
             match command.output {
                 Output::Block => Plan::Modal(line),
-                Output::Notify => Plan::Steps(VecDeque::from([PlannedStep::Shell(line)])),
+                Output::RunPane => Plan::Pane(line),
+                Output::Notify | Output::Buffer => {
+                    Plan::Steps(VecDeque::from([PlannedStep::Shell(line)]))
+                },
             }
         },
         Step::Action(action) => {
@@ -142,7 +149,8 @@ fn plan(command: &UserCommand, values: &[String]) -> Plan {
 ///
 /// A run of the `notify` output that ends on a shell step shows a message.
 /// The message is the first line of that step's stdout, or `<name> done` for
-/// a step with none.
+/// a step with none. A run of the `buffer` output that ends on a shell step
+/// opens that step's stdout in a scratch buffer.
 fn advance(stoat: &mut Stoat, mut run: CommandRun) -> UpdateEffect {
     let mut effect = UpdateEffect::Redraw;
     while let Some(step) = run.steps.pop_front() {
@@ -165,10 +173,17 @@ fn advance(stoat: &mut Stoat, mut run: CommandRun) -> UpdateEffect {
         }
     }
 
-    if run.output == Output::Notify && !run.last_was_action {
-        let text = first_line(&run.last_stdout)
-            .map_or_else(|| format!("{} done", run.name), str::to_owned);
-        stoat.notify(MessageKind::Success, text);
+    match run.output {
+        _ if run.last_was_action => {},
+        Output::Notify => {
+            let text = first_line(&run.last_stdout)
+                .map_or_else(|| format!("{} done", run.name), str::to_owned);
+            stoat.notify(MessageKind::Success, text);
+        },
+        Output::Buffer => {
+            buffer_lifecycle::show_scratch_with_text(stoat, &run.last_stdout);
+        },
+        Output::Block | Output::RunPane => {},
     }
     effect
 }
@@ -234,12 +249,14 @@ fn failure(name: &str, result: &io::Result<ShellOutput>) -> String {
 mod tests {
     use super::{plan, Plan};
     use crate::{
+        action_handlers,
         app::{MessageKind, Stoat},
         host::ShellOutput,
+        pane::{DockPanel, DockSide, DockVisibility, FocusTarget, View},
         test_harness::TestHarness,
         user_command::{CommandArg, Output, Step, UserCommand},
     };
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
     use stoat_config::Template;
     use stoat_host::FakeShellInvocation;
 
@@ -255,9 +272,13 @@ mod tests {
         h
     }
 
-    /// Type `line` into the palette, press Enter, and settle the run.
+    /// Open the palette, type `line`, press Enter, and settle the run.
+    ///
+    /// The palette opens through its action, so a mode with no `:` binding
+    /// opens it too.
     fn submit(h: &mut TestHarness, line: &str) {
-        h.type_text(&format!(":{line}"));
+        action_handlers::dispatch(&mut h.stoat, &stoat_action::OpenCommandPalette);
+        h.type_text(line);
         h.type_keys("enter");
         h.settle();
     }
@@ -383,5 +404,116 @@ mod tests {
         let mut h = loaded(r#"command hi { run = Notify("hello"); }"#);
         submit(&mut h, "hi");
         assert_eq!(message(&h), (Some("hello"), MessageKind::Info));
+    }
+
+    /// The user command `catlog`, which opens its output in a scratch buffer.
+    const DUMP: &str = r#"command catlog { run = shell("cat log"); output = buffer; }"#;
+
+    /// The user command `check`, which runs its line in a Run pane.
+    const CHECK: &str = r#"command check { run = shell("make test"); output = run_pane; }"#;
+
+    #[test]
+    fn a_buffer_command_opens_its_output_in_a_clean_scratch_buffer() {
+        let mut h = loaded(DUMP);
+        h.fake_shell
+            .set_response("cat log", output(b"a\nb\n", b"", 0));
+        submit(&mut h, "catlog");
+
+        let (buffer, cursor) = h.stoat.focused_cursor_pos().expect("an editor has focus");
+        let ws = h.stoat.active_workspace();
+        assert_eq!(
+            (
+                h.buffer_text(buffer),
+                ws.buffers.path_for(buffer).map(Path::to_path_buf),
+                ws.buffers
+                    .dirty_buffers()
+                    .iter()
+                    .map(|dirty| dirty.id)
+                    .collect::<Vec<_>>(),
+                cursor,
+            ),
+            ("a\nb\n".to_owned(), None, Vec::new(), 0),
+        );
+    }
+
+    #[test]
+    fn a_failed_buffer_command_opens_no_buffer() {
+        let mut h = loaded(DUMP);
+        h.fake_shell
+            .set_response("cat log", output(b"", b"no log\n", 1));
+        let before = h.stoat.focused_cursor_pos().map(|(buffer, _)| buffer);
+        submit(&mut h, "catlog");
+
+        let after = h.stoat.focused_cursor_pos().map(|(buffer, _)| buffer);
+        assert_eq!(
+            (after, message(&h)),
+            (
+                before,
+                (Some("catlog: no log (exit 1)"), MessageKind::Alert)
+            ),
+        );
+    }
+
+    #[test]
+    fn a_run_pane_command_opens_a_run_pane_and_sends_its_line() {
+        let mut h = loaded(CHECK);
+        submit(&mut h, "check");
+
+        let ws = h.stoat.active_workspace();
+        assert_eq!(
+            (
+                matches!(ws.panes.pane(ws.panes.focus()).view, View::Run(_)),
+                h.fake_terminal.sent_strings().last().cloned(),
+                h.fake_shell.invocations(),
+            ),
+            (true, Some("make test\n".to_owned()), Vec::new()),
+        );
+    }
+
+    /// A Run pane on show takes the line and the focus, and no second run
+    /// opens.
+    #[test]
+    fn a_run_pane_command_uses_the_run_pane_on_show() {
+        let mut h = loaded(CHECK);
+        action_handlers::dispatch(&mut h.stoat, &stoat_action::SplitRight);
+        action_handlers::dispatch(&mut h.stoat, &stoat_action::OpenRun);
+        let run_pane = h.stoat.active_workspace().panes.focus();
+        action_handlers::dispatch(&mut h.stoat, &stoat_action::FocusLeft);
+        submit(&mut h, "check");
+
+        let ws = h.stoat.active_workspace();
+        assert_eq!(
+            (
+                ws.runs.len(),
+                ws.panes.focus() == run_pane,
+                h.fake_terminal.sent_strings().last().cloned(),
+            ),
+            (1, true, Some("make test\n".to_owned())),
+        );
+    }
+
+    /// A Run pane takes the focus from a dock that held it.
+    #[test]
+    fn a_run_pane_command_takes_the_focus_from_a_dock() {
+        let mut h = loaded(CHECK);
+        let ws = h.stoat.active_workspace_mut();
+        let dock = ws.docks.insert(DockPanel {
+            view: View::Label("dock".into()),
+            side: DockSide::Right,
+            visibility: DockVisibility::Open { width: 10 },
+            default_width: 10,
+            area: Default::default(),
+        });
+        ws.focus = FocusTarget::Dock(dock);
+        submit(&mut h, "check");
+
+        let ws = h.stoat.active_workspace();
+        assert_eq!(
+            (
+                ws.focus,
+                matches!(ws.panes.pane(ws.panes.focus()).view, View::Run(_)),
+            ),
+            (FocusTarget::SplitPane, true),
+        );
     }
 }

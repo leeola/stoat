@@ -57,6 +57,11 @@ pub(crate) enum Output {
     Block,
     /// A status message, with the first line of the output or the failure.
     Notify,
+    /// A scratch buffer that holds the whole stdout of a run that worked. A
+    /// failure shows its message and opens no buffer.
+    Buffer,
+    /// A Run pane, whose shell runs the line of a shell step.
+    RunPane,
 }
 
 /// A command as its layer lowers it, with what the `same_as` check reads.
@@ -248,6 +253,8 @@ fn lower(decl: &CommandDecl, errors: &mut Vec<ParseError>) -> Option<(UserComman
                 output = Some(match value.node.as_str() {
                     "block" => Some(Output::Block),
                     "notify" => Some(Output::Notify),
+                    "buffer" => Some(Output::Buffer),
+                    "run_pane" => Some(Output::RunPane),
                     other => {
                         errors.push(error(&value.span, format!("unknown output `{other}`")));
                         None
