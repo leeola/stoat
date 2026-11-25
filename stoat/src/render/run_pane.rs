@@ -6,7 +6,7 @@ use crate::{
         picker::{Footer, PlateHeader},
         text::write_str,
     },
-    run::{Cmd, CmdId, GridSelection, RunState, StyledCell, VtermGrid},
+    run::{cargo::CmdReport, Cmd, CmdId, GridSelection, RunState, StyledCell, VtermGrid},
 };
 use ratatui::{
     buffer::Buffer,
@@ -118,6 +118,14 @@ pub(crate) fn render_run_pane(
             }
         }
 
+        if !block.finished
+            && let Some(CmdReport::Test(report)) = &block.report
+            && report.total > 0
+            && offsets.contains(&1)
+        {
+            let row = Rect::new(inner.x + 1, row_of(1), inner.width.saturating_sub(1), 1);
+            paint_progress(row, report.done(), report.total, theme, buf, scene);
+        }
         if offsets.contains(&(span - 1)) {
             rule_rows.push(row_of(span - 1));
         }
@@ -222,6 +230,46 @@ fn paint_stack_rules(
     }
 }
 
+/// Draw a running `cargo test` Cmd's progress bar on the top two pixel rows
+/// of `row`, the first row of its body, where no glyph reaches.
+///
+/// The track spans `row` in the `ui.divider` foreground, the color of a
+/// meter's track, and the fill covers `done` of `total` of it in the
+/// `ui.statusline.run` foreground. A plain terminal draws neither.
+fn paint_progress(
+    row: Rect,
+    done: u32,
+    total: u32,
+    theme: &crate::theme::Theme,
+    buf: &mut Buffer,
+    scene: &mut stoat_widgets::ApcScene,
+) {
+    if !scene.live() || total == 0 {
+        return;
+    }
+    let width = row.width.saturating_mul(16);
+    let fill = u16::try_from(u32::from(width) * done.min(total) / total).unwrap_or(width);
+    let bars = [
+        (width, crate::theme::scope::UI_DIVIDER),
+        (fill, crate::theme::scope::UI_STATUSLINE_RUN),
+    ];
+    for (width, scope) in bars {
+        let Some(color) = style_rgb(theme.get(scope).fg).filter(|_| width > 0) else {
+            continue;
+        };
+        Bar {
+            x: 0,
+            y: 0,
+            width,
+            height: 2,
+            color,
+            radius: 0,
+            corners: 0,
+        }
+        .render(row, buf, scene);
+    }
+}
+
 /// The status that ends `cmd`'s header, as the parts it reads in order.
 ///
 /// A Parsed Cmd's status leads with its Kind Chip in `ui.run.kind`, or in
@@ -232,12 +280,15 @@ fn paint_stack_rules(
 /// 0, and otherwise U+2717 in `ui.error`, with `exit N` after it when the
 /// process gave a code. Its runtime follows in `ui.text.muted`, with the run
 /// count after it from the second run on. A Cmd without both a start and an
-/// end reads its mark alone.
+/// end reads its mark alone. A `cargo test` Cmd whose report counts a failed
+/// test reads U+2717, that count, and `failed` as its mark.
 ///
 /// A running Cmd reads U+25CF and the whole seconds it has run, as
 /// [`Cmd::elapsed_secs`] holds them, in the foreground of
-/// `ui.statusline.run`. The status-line scope can carry a background, which a
-/// header leaves to the pane.
+/// `ui.statusline.run`. A running `cargo test` Cmd that knows its total reads
+/// its done count over that total between the two, such as `2 / 4`. The
+/// status-line scope can carry a background, which a header leaves to the
+/// pane.
 pub(crate) fn status_parts(cmd: &Cmd, theme: &crate::theme::Theme) -> Vec<StatusPart> {
     let mut parts: Vec<StatusPart> = cmd
         .kind
@@ -254,8 +305,17 @@ pub(crate) fn status_parts(cmd: &Cmd, theme: &crate::theme::Theme) -> Vec<Status
 
     if !cmd.finished {
         let fg = theme.get(crate::theme::scope::UI_STATUSLINE_RUN).fg;
+        let elapsed = crate::run::format_elapsed(cmd.elapsed_secs);
+        let text = match &cmd.report {
+            Some(CmdReport::Test(report)) if report.total > 0 => format!(
+                "\u{25cf} {} / {} \u{b7} {elapsed}",
+                report.done(),
+                report.total
+            ),
+            _ => format!("\u{25cf} {elapsed}"),
+        };
         parts.push(StatusPart {
-            text: format!("\u{25cf} {}", crate::run::format_elapsed(cmd.elapsed_secs)),
+            text,
             style: Style {
                 fg,
                 ..Style::default()
@@ -265,7 +325,15 @@ pub(crate) fn status_parts(cmd: &Cmd, theme: &crate::theme::Theme) -> Vec<Status
         return parts;
     }
 
+    let failed = match &cmd.report {
+        Some(CmdReport::Test(report)) => report.totals().1,
+        None => 0,
+    };
     let (mark, mark_scope) = match cmd.exit_status {
+        _ if failed > 0 => (
+            format!("\u{2717} {failed} failed"),
+            crate::theme::scope::UI_ERROR,
+        ),
         Some(0) => (
             "\u{2713}".to_owned(),
             crate::theme::scope::UI_BADGE_COMPLETE,

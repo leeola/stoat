@@ -113,12 +113,20 @@ pub(crate) struct CmdSink {
     pub(crate) run: u32,
 }
 
+/// The environment that a Cmd's process sees over stoat's own.
+pub(crate) struct CmdEnv<'a> {
+    /// The workspace's environment diff, which sets and unsets variables.
+    pub(crate) diff: &'a [(String, Option<String>)],
+    /// Variables set after `TERM`, such as cargo's request for color.
+    pub(crate) vars: &'a [(String, String)],
+}
+
 /// Start `line` as its own `bash -c` process on a PTY through `host`, in
 /// `cwd`, and spawn its reader on `executor`.
 ///
-/// The process sees the environment with `diff` over it and `TERM=dumb`. The
-/// reader sends each chunk of output to `sink`, and the exit status at the
-/// PTY's end.
+/// The process sees the environment with `env`'s diff over it, then
+/// `TERM=dumb`, then `env`'s variables. The reader sends each chunk of output
+/// to `sink`, and the exit status at the PTY's end.
 pub(crate) fn spawn_cmd(
     host: &dyn TerminalHost,
     executor: &Executor,
@@ -126,7 +134,7 @@ pub(crate) fn spawn_cmd(
     cwd: &Path,
     width: u16,
     sink: CmdSink,
-    diff: &[(String, Option<String>)],
+    env: &CmdEnv<'_>,
 ) -> std::io::Result<CmdProcess> {
     let mut args = SpawnArgs {
         program: "bash".into(),
@@ -137,8 +145,9 @@ pub(crate) fn spawn_cmd(
         width,
         rows: 24,
     };
-    merge_env_diff(&mut args, diff);
+    merge_env_diff(&mut args, env.diff);
     args.env.push(("TERM".into(), "dumb".into()));
+    args.env.extend(env.vars.iter().cloned());
     let session = match host.spawn(args).now_or_never() {
         Some(result) => result?,
         None => {

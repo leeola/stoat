@@ -1,4 +1,5 @@
 use super::{
+    cargo::{CmdReport, LineFeed},
     kind::{self, RunKind},
     pty::CmdProcess,
 };
@@ -710,6 +711,12 @@ pub struct Cmd {
     /// The header paints this count rather than the clock, so a frame moves
     /// only when a tick writes a new one.
     pub(crate) elapsed_secs: u64,
+    /// The counts that the current run's output reports, for a kind whose
+    /// output the block reads, as its lines arrive.
+    pub(crate) report: Option<CmdReport>,
+    /// The bytes of the output line that has not ended, which `report` reads
+    /// once the line ends.
+    lines: LineFeed,
 }
 
 impl Cmd {
@@ -729,6 +736,8 @@ impl Cmd {
             ended: None,
             run_count: 0,
             elapsed_secs: 0,
+            report: CmdReport::for_kind(kind),
+            lines: LineFeed::default(),
         }
     }
 
@@ -736,12 +745,23 @@ impl Cmd {
     /// the rows that scrolled off the front.
     ///
     /// A selection whose rows all fell off is dropped, since it no longer marks
-    /// anything the grid still holds.
+    /// anything the grid still holds. A Cmd that keeps a report reads each
+    /// line that `bytes` end into it.
     pub fn feed(&mut self, bytes: &[u8]) {
         let trimmed = self.grid.feed(bytes);
         if trimmed > 0 {
             self.selection = self.selection.and_then(|sel| sel.shifted_up(trimmed));
         }
+        if let Some(report) = &mut self.report {
+            self.lines.push(bytes, &mut |line| report.push_line(line));
+        }
+    }
+
+    /// Start the report of a new run over from no output, so the counts of the
+    /// run before it never reach it.
+    pub(crate) fn reset_report(&mut self) {
+        self.report = CmdReport::for_kind(self.kind);
+        self.lines = LineFeed::default();
     }
 
     /// Rows this block occupies in the run pane, counting its prompt line, its

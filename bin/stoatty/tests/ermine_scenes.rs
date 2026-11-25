@@ -64,6 +64,7 @@ const TINT_INTERNAL: [u8; 3] = [0x1b, 0x2a, 0x2d];
 /// the internal Source Tag.
 const KIND_TINT: [u8; 3] = TINT_INTERNAL;
 const TINT_SPECIAL: [u8; 3] = [0x2a, 0x22, 0x36];
+const SPECIAL: [u8; 3] = [0xc5, 0x9a, 0xf0];
 const DANGER: [u8; 3] = [0xf2, 0x77, 0x7f];
 const SUCCESS: [u8; 3] = [0x8f, 0xd1, 0x8a];
 const WARNING: [u8; 3] = [0xe8, 0xbd, 0x6a];
@@ -2469,6 +2470,50 @@ fn the_kind_chip_stands_on_its_tint() {
             frame.display(),
         );
     }
+}
+
+/// A running `cargo test` Cmd draws its progress bar over its first body row,
+/// filled to the share of its tests that finished.
+///
+/// A fake `cargo` prints `running 4 tests` and two `ok` lines and then
+/// sleeps, so the block is rows 43 to 46 and its first body row is row 44. The
+/// bar is that row's top two pixel rows, 792 and 793, from x 27 to x 1422, and
+/// half of it is filled. The pixel rows under the bar keep the base.
+#[test]
+fn a_running_cargo_test_draws_its_progress_bar() {
+    let mut home = support::scratch_home();
+    fake_program(
+        home.path(),
+        "cargo",
+        "#!/bin/sh\nprintf 'running 4 tests\\ntest a ... ok\\ntest b ... ok\\n'\nexec sleep 30\n",
+    );
+    let mut session = spawn_scene(ermine_scene_with_bin(
+        "basic-diff",
+        "unstaged.txt",
+        home.path(),
+    ));
+    wait_for_diff(&mut session);
+    play(
+        &mut session,
+        "<Space>t<Settle>cargo test<Enter><Settle:400>",
+    );
+    let shot = session.snapshot().expect("a snapshot");
+
+    expect_region(
+        &shot,
+        &mut home,
+        (40, 792, 600, 2),
+        SPECIAL,
+        "progress_fill",
+    );
+    expect_region(
+        &shot,
+        &mut home,
+        (800, 792, 600, 2),
+        DIVIDER,
+        "progress_track",
+    );
+    expect_region(&shot, &mut home, (300, 795, 300, 2), BASE, "progress_under");
 }
 
 /// The which-key box docks on the status bar as a card on the raised surface.

@@ -3,7 +3,8 @@ use crate::{
     buffer_lifecycle,
     pane::{FocusTarget, View},
     run::{
-        pty::{self, CmdSink},
+        kind::RunKind,
+        pty::{self, CmdEnv, CmdSink},
         Cmd, CmdId, RunState,
     },
     workspace::Workspace,
@@ -234,6 +235,7 @@ fn start_process(stoat: &mut Stoat, id: CmdId) {
     cmd.finished = false;
     cmd.exit_status = None;
     cmd.error = None;
+    cmd.reset_report();
     let sink = CmdSink {
         tx,
         workspace,
@@ -241,15 +243,17 @@ fn start_process(stoat: &mut Stoat, id: CmdId) {
         run: cmd.run_count,
     };
     let width = cmd.grid.width();
-    match pty::spawn_cmd(
-        &*host,
-        &executor,
-        &cmd.command,
-        &cmd.cwd,
-        width,
-        sink,
-        &diff,
-    ) {
+    // TERM=dumb turns cargo's color off, and the block of a Parsed Cmd shows
+    // cargo's colors and lets cargo erase its own status lines.
+    let vars = match cmd.kind {
+        RunKind::Parsed(_) => vec![("CARGO_TERM_COLOR".to_owned(), "always".to_owned())],
+        RunKind::Line | RunKind::Agent => Vec::new(),
+    };
+    let env = CmdEnv {
+        diff: &diff,
+        vars: &vars,
+    };
+    match pty::spawn_cmd(&*host, &executor, &cmd.command, &cmd.cwd, width, sink, &env) {
         Ok(process) => cmd.process = Some(process),
         Err(error) => {
             cmd.error = Some(format!("spawn failed: {error}"));
@@ -277,11 +281,17 @@ mod tests {
     use crate::{
         app::Stoat,
         pane::View,
-        run::{CmdId, PtyNotification},
+        render::paint::style_rgb,
+        run::{
+            cargo::{ONE_FAILURE, THREE_BINARIES},
+            CmdId, PtyNotification,
+        },
         test_harness::{CmdHandle, TestHarness},
+        theme::scope,
     };
     use futures::FutureExt;
     use std::{path::PathBuf, time::Duration};
+    use stoatty_protocol::command::{self, Command};
 
     /// The program, the arguments, the cwd, and the last variable of a spawn of
     /// the fake terminal host.
@@ -682,5 +692,92 @@ mod tests {
         let handle = h.submit_run("cargo test");
 
         assert_eq!(h.cmd_status(handle.cmd), "cargo test \u{25cf} 0:00");
+    }
+
+    /// A running `cargo test` Cmd counts its result lines against its total,
+    /// and a progress bar on its first body row fills the same share of the
+    /// body's width.
+    #[test]
+    fn a_running_cargo_test_counts_its_results() {
+        let mut h = Stoat::test();
+        h.open_run();
+        let handle = h.submit_run("cargo test");
+        h.inject_cmd_output(
+            handle.cmd,
+            b"running 4 tests\r\ntest a ... ok\r\ntest b ... ok\r\n",
+        );
+        let status = h.cmd_status(handle.cmd);
+        h.render_composited();
+
+        let area = {
+            let ws = h.stoat.active_workspace();
+            ws.panes.pane(ws.panes.focus()).area
+        };
+        let inner = crate::run::stack_rect(area);
+        let (x, y) = (
+            ((inner.x + 1) * 16) as i16,
+            ((area.bottom() - 4) * 16) as i16,
+        );
+        let bars: Vec<_> = command::decode_stream(&h.stoat.apc_scene.all_bytes())
+            .into_iter()
+            .filter_map(|cmd| match cmd {
+                Command::Bar(bar) if bar.height == 2 && bar.y == y => {
+                    Some((bar.x, bar.width, bar.color))
+                },
+                _ => None,
+            })
+            .collect();
+        let color = |name| style_rgb(h.stoat.theme.get(name).fg).expect("an RGB color");
+        let width = (inner.width - 1) * 16;
+        assert_eq!(
+            (status, bars),
+            (
+                "cargo test \u{25cf} 2 / 4 \u{b7} 0:00".to_owned(),
+                vec![
+                    (x, width, color(scope::UI_DIVIDER)),
+                    (x, width / 2, color(scope::UI_STATUSLINE_RUN)),
+                ],
+            ),
+        );
+    }
+
+    /// A finished `cargo test` Cmd whose report counts a failed test names the
+    /// count as its mark, and a run with none reads the plain mark.
+    #[test]
+    fn a_finished_cargo_test_reads_its_failed_count() {
+        let mut h = Stoat::test();
+        h.open_run();
+        let reads = [(ONE_FAILURE, 101), (THREE_BINARIES, 0)].map(|(output, code)| {
+            let handle = h.submit_run("cargo test");
+            h.inject_cmd_output(handle.cmd, output.as_bytes());
+            h.inject_cmd_done(handle.cmd, code);
+            h.cmd_status(handle.cmd)
+        });
+
+        assert_eq!(
+            reads,
+            [
+                "cargo test \u{2717} 1 failed 0ms",
+                "cargo test \u{2713} 0ms"
+            ],
+        );
+    }
+
+    /// A Parsed Cmd asks cargo for color after `TERM`, which turns it off.
+    #[test]
+    fn a_parsed_cmd_asks_cargo_for_color() {
+        let mut h = Stoat::test();
+        h.open_run();
+        h.submit_run("cargo test");
+
+        let spawns = h.fake_terminal_host().spawns();
+        let env = &spawns.last().expect("a spawn").env;
+        assert_eq!(
+            env[env.len().saturating_sub(2)..],
+            [
+                ("TERM".to_owned(), "dumb".to_owned()),
+                ("CARGO_TERM_COLOR".to_owned(), "always".to_owned()),
+            ],
+        );
     }
 }

@@ -3776,6 +3776,7 @@ pub(crate) fn window_content_version(
                 block.run_count.hash(&mut hasher);
                 block.elapsed_secs.hash(&mut hasher);
                 block.kind.hash(&mut hasher);
+                block.report.hash(&mut hasher);
                 block.error.hash(&mut hasher);
                 block.selection.hash(&mut hasher);
             }
