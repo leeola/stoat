@@ -32,7 +32,7 @@ const NOT_FOUND_EXIT: i32 = 127;
 static NEXT_RUN: AtomicU64 = AtomicU64::new(0);
 
 /// A step of a command run, with each placeholder written.
-#[derive(Debug, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub(crate) enum PlannedStep {
     /// A shell line, which runs in the workspace root.
     Shell(String),
@@ -45,10 +45,10 @@ pub(crate) enum PlannedStep {
 enum Plan {
     /// The steps that run in order, each shell step on a worker.
     Steps(VecDeque<PlannedStep>),
-    /// The shell line of a Cmd that the palette's Run Block shows.
-    Modal(String),
-    /// The shell line of a Cmd that joins a Run pane's stack.
-    Pane(String),
+    /// The steps of a Cmd that the palette's Run Block shows.
+    Modal(Vec<PlannedStep>),
+    /// The steps of a Cmd that joins a Run pane's stack.
+    Pane(Vec<PlannedStep>),
 }
 
 /// A command run with steps left, or with a shell step out on a worker.
@@ -124,12 +124,13 @@ pub(crate) enum CliSpecState {
 /// Run `command` with `values`, one value for each of its arguments, for the
 /// typed `line`.
 ///
-/// A run of shell steps alone runs as one Cmd, whose line is `line` and whose
-/// shell text is the run's shell line. Under the `block` output, the palette
-/// that started it turns into the Cmd's Run Block, and with no palette the Cmd
-/// joins a Run pane's stack. Under the `run_pane` output, the Cmd joins a Run
-/// pane's stack and the focus stays where it is. Any other run goes step by
-/// step here, as [`plan`] lays it out. A shell step runs on a worker with no
+/// A run with a shell step under the `block` or the `run_pane` output runs as
+/// one Cmd whose line is `line`, and the Cmd runs the steps in order, as
+/// [`action_handlers::run::run_steps`] runs them. Under the `block` output,
+/// the palette that started it turns into the Cmd's Run Block, and with no
+/// palette the Cmd joins a Run pane's stack. Under the `run_pane` output, the
+/// Cmd joins a Run pane's stack and the focus stays where it is. Any other run
+/// goes step by step here, as [`plan`] lays it out. A shell step runs on a worker with no
 /// terminal, so its stdout and its stderr stay apart. An action step runs once
 /// the step before it exits 0, and the first failure ends the run. A `cli`
 /// command runs as a shell step does, with its tail as its one value.
@@ -152,19 +153,21 @@ pub(crate) fn start(
         context::default_text(stoat, default)
     });
     match planned {
-        Plan::Modal(shell) => {
+        Plan::Modal(steps) => {
             let width = action_handlers::run_block_width(stoat);
             let source = Some(command.source_tag());
-            let id = action_handlers::run::start_cmd_as(stoat, line, Some(&shell), source, width);
+            let (id, effect) =
+                action_handlers::run::start_cmd_steps(stoat, line, steps, source, width);
             action_handlers::open_run_block(stoat, id);
-            UpdateEffect::Redraw
+            effect.merge(UpdateEffect::Redraw)
         },
-        Plan::Pane(shell) => {
+        Plan::Pane(steps) => {
             let width = action_handlers::run::run_pane_width(stoat);
             let source = Some(command.source_tag());
-            let id = action_handlers::run::start_cmd_as(stoat, line, Some(&shell), source, width);
+            let (id, effect) =
+                action_handlers::run::start_cmd_steps(stoat, line, steps, source, width);
             action_handlers::run::append_to_run_pane(stoat, id, false);
-            UpdateEffect::Redraw
+            effect.merge(UpdateEffect::Redraw)
         },
         Plan::Steps(steps) => {
             let run = CommandRun {
@@ -285,11 +288,10 @@ fn expand_home(command: &UserCommand, mut values: Vec<String>, home: Option<&str
 /// `cli` command runs the line that [`cli_line`] writes from its tool and its
 /// tail.
 ///
-/// Under the `block` and the `run_pane` outputs, a run of shell steps alone
-/// joins its lines with ` && ` into the one shell line of a Cmd. A run with an
-/// action step goes step by step under them, as a `notify` run does, because
-/// an action step waits on the exit status of the step before it, and a Cmd's
-/// exit never reaches the run.
+/// Under the `block` and the `run_pane` outputs, a run that holds a shell step
+/// is the steps of one Cmd, in order. A run of action steps alone goes step by
+/// step under them, as a `notify` run does, because it starts no process for
+/// a Cmd to show.
 fn plan(
     command: &UserCommand,
     set: &CommandSet,
@@ -304,16 +306,12 @@ fn plan(
         .iter()
         .filter_map(|flat| planned_step(flat, values, default))
         .collect();
-    let lines: Option<Vec<String>> = steps
+    let has_shell = steps
         .iter()
-        .map(|step| match step {
-            PlannedStep::Shell(line) => Some(line.clone()),
-            PlannedStep::Act(_) => None,
-        })
-        .collect();
-    match (command.output, lines) {
-        (Output::Block, Some(lines)) => Plan::Modal(lines.join(" && ")),
-        (Output::RunPane, Some(lines)) => Plan::Pane(lines.join(" && ")),
+        .any(|step| matches!(step, PlannedStep::Shell(_)));
+    match (command.output, has_shell) {
+        (Output::Block, true) => Plan::Modal(steps.into()),
+        (Output::RunPane, true) => Plan::Pane(steps.into()),
         _ => Plan::Steps(steps),
     }
 }
@@ -385,8 +383,8 @@ fn chain_values(
 /// How the shell line `line` runs under `output`.
 fn shell_plan(line: String, output: Output) -> Plan {
     match output {
-        Output::Block => Plan::Modal(line),
-        Output::RunPane => Plan::Pane(line),
+        Output::Block => Plan::Modal(vec![PlannedStep::Shell(line)]),
+        Output::RunPane => Plan::Pane(vec![PlannedStep::Shell(line)]),
         Output::Notify | Output::Buffer | Output::Locations => {
             Plan::Steps(VecDeque::from([PlannedStep::Shell(line)]))
         },
@@ -412,11 +410,11 @@ fn cli_line(tool: &str, values: &[String]) -> String {
 /// started still is. Otherwise the run stops with a message that says so.
 ///
 /// A run that ends on a shell step shows a message under the `notify`
-/// output, and under the `block` and `run_pane` outputs, which hand a run
-/// with an action step to this walk. The message is the first line of that
-/// step's stdout, or `<name> done` for a step with none. A run of the
-/// `buffer` output that ends on a shell step opens the stdout of every shell
-/// step in a scratch buffer.
+/// output. The message is the first line of that step's stdout, or `<name>
+/// done` for a step with none. A run of the `buffer` output that ends on a
+/// shell step opens the stdout of every shell step in a scratch buffer. The
+/// `block` and `run_pane` outputs hand this walk a run of action steps alone,
+/// which shows no message of its own.
 fn advance(stoat: &mut Stoat, mut run: CommandRun) -> UpdateEffect {
     let mut effect = UpdateEffect::Redraw;
     while let Some(step) = run.steps.pop_front() {
@@ -445,7 +443,7 @@ fn advance(stoat: &mut Stoat, mut run: CommandRun) -> UpdateEffect {
 
     match run.output {
         _ if run.last_was_action => {},
-        Output::Notify | Output::Block | Output::RunPane => {
+        Output::Notify => {
             let text = first_line(&run.last_stdout)
                 .map_or_else(|| format!("{} done", run.name), str::to_owned);
             stoat.notify(MessageKind::Success, text);
@@ -453,7 +451,7 @@ fn advance(stoat: &mut Stoat, mut run: CommandRun) -> UpdateEffect {
         Output::Buffer => {
             buffer_lifecycle::show_scratch_with_text(stoat, &run.stdout);
         },
-        Output::Locations => {},
+        Output::Block | Output::RunPane | Output::Locations => {},
     }
     effect
 }
@@ -809,19 +807,27 @@ fn failure(name: &str, result: &io::Result<ShellOutput>) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{load_cli, pick_failure, plan, pump, CommandEvent, LoadedCli, Plan};
+    use super::{load_cli, pick_failure, plan, pump, CommandEvent, LoadedCli, Plan, PlannedStep};
     use crate::{
         action_handlers,
-        app::{MessageKind, Stoat},
+        app::{MessageKind, Stoat, UpdateEffect},
         cli_spec::{self, CliSpec, JJ_FISH, RG_HELP},
-        host::ShellOutput,
+        host::{FakeTerminalSession, ShellOutput},
         location_picker::LocationEntry,
         pane::{DockPanel, DockSide, DockVisibility, FocusTarget, PaneId, View},
-        run::RunId,
+        run::{
+            kind::{CargoKind, RunKind},
+            CmdId, PtyNotification, RunId,
+        },
         test_harness::TestHarness,
+        theme::scope,
         user_command::{ArgKind, CommandArg, CommandSet, Output, RunSpec, Step, UserCommand},
     };
-    use std::path::{Path, PathBuf};
+    use ratatui::style::Color;
+    use std::{
+        path::{Path, PathBuf},
+        sync::Arc,
+    };
     use stoat_config::Template;
     use stoat_host::{FakeShell, FakeShellInvocation};
 
@@ -910,7 +916,7 @@ mod tests {
                 &["412".to_owned()],
                 &mut |_| String::new()
             ),
-            Plan::Modal("gh pr checkout 412".to_owned()),
+            Plan::Modal(vec![PlannedStep::Shell("gh pr checkout 412".to_owned())]),
         );
     }
 
@@ -1245,19 +1251,29 @@ mod tests {
         assert_eq!((ws.focus, stacked), (FocusTarget::Dock(dock), 1));
     }
 
-    /// The user command `ship`, which tests, pushes, and opens a pull request
-    /// titled after the newest commit, and then says so.
-    const SHIP: &str = concat!(
-        "command ship { arg message = text(default: git.last_subject); ",
-        "run = [shell(\"cargo test\"), shell(\"git push -u origin HEAD\"), ",
-        "shell(\"gh pr create --fill --title {message}\"), Notify(\"shipped\")]; ",
-        "output = run_pane; }",
-    );
+    /// The user command `ship` under the output `output`, which tests, pushes,
+    /// and opens a pull request titled after the newest commit, and then says
+    /// so.
+    fn ship(output: &str) -> String {
+        format!(
+            "command ship {{ arg message = text(default: git.last_subject); \
+             run = [shell(\"cargo test\"), shell(\"git push -u origin HEAD\"), \
+             shell(\"gh pr create --fill --title {{message}}\"), Notify(\"shipped\")]; \
+             output = {output}; }}"
+        )
+    }
 
-    /// A harness with [`SHIP`] loaded over a repository whose newest commit
-    /// reads `fix the parser`.
-    fn ship_harness() -> TestHarness {
-        let h = loaded(SHIP);
+    /// The step texts of [`ship`] for the newest commit `fix the parser`.
+    const SHIP_STEPS: [&str; 3] = [
+        "cargo test",
+        "git push -u origin HEAD",
+        "gh pr create --fill --title 'fix the parser'",
+    ];
+
+    /// A harness with [`ship`] under `output` loaded over a repository whose
+    /// newest commit reads `fix the parser`.
+    fn ship_harness(output: &str) -> TestHarness {
+        let h = loaded(&ship(output));
         h.seed_linear_history(
             "/repo",
             &[("a1b2c3d4", "fix the parser", &[("a.rs", "1\n")])],
@@ -1265,12 +1281,325 @@ mod tests {
         h
     }
 
+    /// The user command `mid` under the output `output`, whose action step
+    /// stands between two shell steps.
+    fn mid(output: &str) -> String {
+        format!(
+            "command mid {{ run = [shell(\"true\"), Notify(\"half\"), shell(\"echo end\")]; \
+             output = {output}; }}"
+        )
+    }
+
+    /// Queue a session of the fake terminal host of `h` for each of the next
+    /// `count` spawns, in order.
+    fn queue_sessions(h: &TestHarness, count: usize) -> Vec<Arc<FakeTerminalSession>> {
+        (0..count)
+            .map(|_| {
+                let session = Arc::new(FakeTerminalSession::new());
+                h.fake_terminal_host().push_session(session.clone());
+                session
+            })
+            .collect()
+    }
+
+    /// The program and the arguments of each spawn of the fake terminal host,
+    /// in order.
+    fn spawns(h: &TestHarness) -> Vec<(String, Vec<String>)> {
+        h.fake_terminal_host()
+            .spawns()
+            .into_iter()
+            .map(|spawn| (spawn.program, spawn.args))
+            .collect()
+    }
+
+    /// The one Cmd of the store of the active workspace.
+    fn only_cmd(h: &TestHarness) -> CmdId {
+        let ids: Vec<CmdId> = h.stoat.active_workspace().cmds.keys().collect();
+        let [id] = ids[..] else {
+            panic!("one Cmd, not {}", ids.len());
+        };
+        id
+    }
+
+    /// A script under `run_pane` is one Cmd on a Run pane's stack. Each shell
+    /// step spawns once the step before it exits 0, under a row of its text in
+    /// the muted color, and the last action shows its message once the last
+    /// shell step ends.
+    #[test]
+    fn a_script_runs_its_steps_as_one_cmd() {
+        let mut h = ship_harness("run_pane");
+        let sessions = queue_sessions(&h, 3);
+        submit(&mut h, "ship");
+        let mut spawned = vec![spawns(&h).len()];
+        for session in &sessions {
+            session.finish(0);
+            h.settle();
+            spawned.push(spawns(&h).len());
+        }
+
+        let cmd = only_cmd(&h);
+        let ws = h.stoat.active_workspace();
+        let block = &ws.cmds[cmd];
+        let stacked: Vec<CmdId> = ws
+            .runs
+            .values()
+            .flat_map(|run| run.blocks.clone())
+            .collect();
+        let rows: Vec<Vec<(char, Option<Color>)>> = (0..SHIP_STEPS.len())
+            .map(|row| {
+                block
+                    .grid
+                    .row(row)
+                    .iter()
+                    .map(|cell| (cell.ch, cell.fg))
+                    .collect()
+            })
+            .collect();
+        let muted = h.stoat.theme.get(scope::UI_TEXT_MUTED).fg;
+        assert_eq!(
+            (
+                (
+                    stacked,
+                    block.command.as_str(),
+                    block.source.map(|(label, _)| label)
+                ),
+                (spawned, spawns(&h)),
+                message(&h),
+                (block.finished, block.exit_status, block.run_count),
+                rows,
+                h.fake_shell.invocations(),
+            ),
+            (
+                (vec![cmd], "ship", Some("script")),
+                (vec![1, 2, 3, 3], SHIP_STEPS.map(bash).to_vec()),
+                (Some("shipped"), MessageKind::Info),
+                (true, Some(0), 1),
+                SHIP_STEPS
+                    .map(|text| text.chars().map(|ch| (ch, muted)).collect())
+                    .to_vec(),
+                Vec::new(),
+            ),
+        );
+    }
+
+    /// A step that exits 1 ends the Cmd with that status, and no later step
+    /// runs, so the closing action shows no message.
+    #[test]
+    fn a_failed_step_ends_the_cmd_and_no_later_step_runs() {
+        let mut h = ship_harness("run_pane");
+        let sessions = queue_sessions(&h, 2);
+        h.stoat.pending_message = None;
+        submit(&mut h, "ship");
+        sessions[0].finish(0);
+        h.settle();
+        sessions[1].finish(1);
+        h.settle();
+
+        let cmd = only_cmd(&h);
+        assert_eq!(
+            (
+                spawns(&h).len(),
+                h.cmd_status(cmd),
+                h.stoat.pending_message.as_deref()
+            ),
+            (2, "script \u{2717} exit 1 0ms".to_owned(), None),
+        );
+    }
+
+    /// An action step between two shell steps dispatches once the first one
+    /// exits 0, and the second one spawns after it. The palette's Run Block
+    /// holds the Cmd.
+    #[test]
+    fn an_action_step_dispatches_between_two_shell_steps() {
+        let mut h = loaded(&mid("block"));
+        let sessions = queue_sessions(&h, 2);
+        submit(&mut h, "mid");
+        let shown = h.stoat.run_block_cmd();
+        sessions[0].finish(0);
+        h.settle();
+
+        assert_eq!(
+            (shown, h.stoat.pending_message.as_deref(), last_spawn(&h)),
+            (Some(only_cmd(&h)), Some("half"), Some(bash("echo end"))),
+        );
+    }
+
+    /// A leading action step dispatches as the run starts, and the shell step
+    /// after it spawns.
+    #[test]
+    fn a_leading_action_step_runs_before_the_first_process() {
+        let mut h = loaded(
+            r#"command lead { run = [Notify("first"), shell("make")]; output = run_pane; }"#,
+        );
+        submit(&mut h, "lead");
+
+        let cmd = only_cmd(&h);
+        assert_eq!(
+            (
+                h.stoat.pending_message.as_deref(),
+                spawns(&h),
+                h.stoat.active_workspace().cmds[cmd].step,
+            ),
+            (Some("first"), vec![bash("make")], 1),
+        );
+    }
+
+    /// `Ctrl-r` on a finished script's block starts a second run from the
+    /// first step.
+    #[test]
+    fn ctrl_r_runs_every_step_again() {
+        let mut h = ship_harness("run_pane");
+        let sessions = queue_sessions(&h, 4);
+        submit(&mut h, "ship");
+        for session in &sessions[..3] {
+            session.finish(0);
+            h.settle();
+        }
+        action_handlers::dispatch(&mut h.stoat, &stoat_action::FocusDown);
+        h.type_keys("ctrl-r");
+
+        let block = &h.stoat.active_workspace().cmds[only_cmd(&h)];
+        assert_eq!(
+            (
+                spawns(&h).len(),
+                last_spawn(&h),
+                (block.run_count, block.step, block.finished),
+            ),
+            (4, Some(bash("cargo test")), (2, 0, false)),
+        );
+    }
+
+    /// The first step exits 0 after another workspace became active, so the
+    /// action step after it does not run, and the Cmd ends with the line that
+    /// says why.
+    #[test]
+    fn an_action_step_stops_when_its_workspace_is_not_on_screen() {
+        let mut h = loaded(&mid("run_pane"));
+        let sessions = queue_sessions(&h, 1);
+        h.stoat.pending_message = None;
+        submit(&mut h, "mid");
+        let (home, cmd) = (h.stoat.active_workspace, only_cmd(&h));
+        let other = h.create_workspace();
+        h.set_active_workspace(other);
+        sessions[0].finish(0);
+        h.settle();
+
+        let block = &h.stoat.workspaces[home].cmds[cmd];
+        assert_eq!(
+            (
+                (block.error.as_deref(), block.exit_status, block.finished),
+                h.stoat.pending_message.as_deref(),
+                spawns(&h).len(),
+            ),
+            (
+                (Some("stopped, the workspace changed"), None, true),
+                None,
+                1
+            ),
+        );
+    }
+
+    /// A step whose output asks for the alternate screen hands off and ends
+    /// the plan, so the step after it does not run when its process exits 0.
+    #[test]
+    fn a_step_that_hands_off_ends_the_plan() {
+        let mut h = loaded(
+            r#"command tui { run = [shell("mytui"), shell("echo after")]; output = run_pane; }"#,
+        );
+        submit(&mut h, "tui");
+        let cmd = only_cmd(&h);
+        h.inject_cmd_output(cmd, b"\x1b[?1049h");
+        h.inject_cmd_done(cmd, 0);
+
+        let block = &h.stoat.active_workspace().cmds[cmd];
+        assert_eq!(
+            (spawns(&h), block.finished, block.step),
+            (vec![bash("mytui"), bash("mytui")], true, 0),
+        );
+    }
+
+    /// A script keeps the kind of a plain line when it runs again, though its
+    /// last step reads as a test run.
+    #[test]
+    fn a_script_keeps_its_line_kind_when_it_runs_again() {
+        let mut h = loaded(
+            r#"command chk { run = [shell("cargo fmt"), shell("cargo test")]; output = run_pane; }"#,
+        );
+        submit(&mut h, "chk");
+        let cmd = only_cmd(&h);
+        h.inject_cmd_done(cmd, 0);
+        h.inject_cmd_done(cmd, 0);
+        action_handlers::dispatch(&mut h.stoat, &stoat_action::FocusDown);
+        action_handlers::dispatch(&mut h.stoat, &stoat_action::RunAgain);
+
+        let block = &h.stoat.active_workspace().cmds[cmd];
+        assert_eq!((block.run_count, block.kind), (2, RunKind::Line));
+    }
+
+    /// A plan of one `cargo test` step keeps the report kind of its text, and
+    /// a plan of several steps reads as a plain line.
+    #[test]
+    fn a_plan_of_one_cargo_step_keeps_its_report_kind() {
+        let kind = |source: &str, line: &str| {
+            let mut h = loaded(source);
+            submit(&mut h, line);
+            h.stoat.active_workspace().cmds[only_cmd(&h)].kind
+        };
+        assert_eq!(
+            [
+                kind(r#"command t { run = shell("cargo test"); }"#, "t"),
+                kind(&ship("run_pane"), "ship"),
+            ],
+            [RunKind::Parsed(CargoKind::Test), RunKind::Line],
+        );
+    }
+
+    /// A script of action steps alone dispatches them and starts no Cmd.
+    #[test]
+    fn a_run_of_action_steps_alone_starts_no_cmd() {
+        let mut h = loaded(r#"command hi { run = [Notify("hi")]; output = run_pane; }"#);
+        submit(&mut h, "hi");
+
+        let ws = h.stoat.active_workspace();
+        assert_eq!(
+            (
+                h.stoat.pending_message.as_deref(),
+                ws.cmds.len(),
+                ws.runs.len()
+            ),
+            (Some("hi"), 0, 0),
+        );
+    }
+
+    /// An action step whose effect is Quit quits wherever the run reaches it.
+    /// That holds as the run starts, after a shell step exits 0, and as a run
+    /// again starts.
+    #[test]
+    fn an_action_step_that_quits_quits() {
+        let mut h = loaded(concat!(
+            "command bye { run = [ForceQuitAll(), shell(\"true\"), ForceQuitAll()]; ",
+            "output = run_pane; }",
+        ));
+        let command = h.stoat.commands.get("bye").cloned().expect("bye loads");
+        let started = super::start(&mut h.stoat, &command, Vec::new(), "bye");
+        let cmd = only_cmd(&h);
+        let exited = h.stoat.handle_pty_notification(PtyNotification::CmdExited {
+            workspace: h.stoat.active_workspace,
+            cmd,
+            run: 1,
+            exit_status: Some(0),
+        });
+        action_handlers::dispatch(&mut h.stoat, &stoat_action::FocusDown);
+        let again = action_handlers::dispatch(&mut h.stoat, &stoat_action::RunAgain);
+
+        assert_eq!([started, exited, again], [UpdateEffect::Quit; 3]);
+    }
+
     /// The steps after the failed one do not run, and the run names the
-    /// failure. A run with an action step goes step by step, so no Run pane
-    /// opens.
+    /// failure.
     #[test]
     fn a_failed_step_stops_the_steps_after_it() {
-        let mut h = ship_harness();
+        let mut h = ship_harness("notify");
         h.fake_shell
             .set_response("git push -u origin HEAD", output(b"", b"rejected\n", 1));
         submit(&mut h, "ship");
@@ -1293,7 +1622,7 @@ mod tests {
 
     #[test]
     fn a_script_runs_every_step_in_order_and_its_last_action_has_the_last_word() {
-        let mut h = ship_harness();
+        let mut h = ship_harness("notify");
         submit(&mut h, "ship");
         assert_eq!(
             (shell_lines(&h), message(&h)),
@@ -1308,37 +1637,11 @@ mod tests {
         );
     }
 
-    #[test]
-    fn a_shell_only_script_hands_one_joined_line_to_the_run_pane() {
-        let mut h = loaded(
-            r#"command check { run = [shell("cargo fmt --check"), shell("cargo clippy")]; output = run_pane; }"#,
-        );
-        submit(&mut h, "check");
-
-        let cmd = h
-            .stoat
-            .active_workspace()
-            .cmds
-            .values()
-            .next()
-            .expect("the command's Cmd");
-        let joined = "cargo fmt --check && cargo clippy";
-        assert_eq!(
-            (
-                cmd.shell.as_deref(),
-                cmd.source.map(|(label, _)| label),
-                last_spawn(&h),
-                h.fake_shell.invocations(),
-            ),
-            (Some(joined), Some("script"), Some(bash(joined)), Vec::new()),
-        );
-    }
-
     /// The command `co`, which checks out a pull request, and `rv`, whose run
     /// checks one out through `co` and then shows a message.
     const CO_RV: &str = concat!(
         "command co { arg pr = text; run = shell(\"gh pr checkout {pr}\"); output = notify; }\n",
-        "command rv { arg pr = same_as(co); run = [co, Notify(\"after\")]; }",
+        "command rv { arg pr = same_as(co); run = [co, Notify(\"after\")]; output = notify; }",
     );
 
     #[test]
@@ -1361,7 +1664,7 @@ mod tests {
         let mut h = loaded(concat!(
             "command hail { arg who = text(default: \"world\"); ",
             "run = shell(\"echo hello {who}\"); }\n",
-            "command wave { run = [hail, Notify(\"waved\")]; }",
+            "command wave { run = [hail, Notify(\"waved\")]; output = notify; }",
         ));
         submit(&mut h, "wave");
         assert_eq!(

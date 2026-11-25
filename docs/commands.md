@@ -228,7 +228,7 @@ a row: `line`, and each key of a JSON object.
 `output = NAME;` names one of five outputs:
 
 - `block` turns the palette into the Run Block of the run. The block shows
-  the command's line, its status, and the output of the shell line. `Esc`
+  the command's line, its status, and the output of its shell steps. `Esc`
   moves a running block to a Run pane, and closes a finished one. This is
   the default.
 - `notify` shows a status message. When the run succeeds, the message is
@@ -255,13 +255,17 @@ without a terminal, so its output and its error output stay apart. `buffer` and
 `notify` reads the output of the last shell step. A run that ends with an
 action step shows no message of its own.
 
-Under `block` or `run_pane`, a list of shell steps alone runs as one shell
-line, with `&&` between the steps. A list with an action step runs step by
-step under these outputs, and it shows its result as a `notify` run does.
+Under `block` or `run_pane`, a script is one Cmd. Each shell step runs as a
+process of its own in the Cmd's block, so no shell state passes from one
+step to the next, and the block shows the step's text before its output. An
+action step runs between them. A step that fails ends the Cmd with its exit
+code, and `Ctrl-r` runs every step again. A script of action steps alone
+runs as a `notify` run does.
 
 An action step runs only while the workspace that was active at the start
 of the run stays active. When you change the workspace, the run stops with
-`NAME: stopped, the workspace changed`.
+`NAME: stopped, the workspace changed`. Under `block` or `run_pane`, the
+block shows `stopped, the workspace changed`.
 
 ## Wrapped tools
 

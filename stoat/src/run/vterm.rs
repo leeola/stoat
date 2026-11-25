@@ -8,6 +8,7 @@ use crate::{
     osc_cap::{OscCap, MAX_OSC_CLIPBOARD_BYTES, MAX_OSC_PLAIN_BYTES},
     term_session::TermId,
     theme::scope,
+    user_command::run::PlannedStep,
 };
 use base64::{engine::general_purpose::STANDARD, Engine};
 use ratatui::style::{Color, Modifier};
@@ -735,6 +736,11 @@ pub struct Cmd {
     /// The text that `bash -c` runs when it is not [`Self::command`], such as
     /// the shell line of a config command whose typed line is its name.
     pub(crate) shell: Option<String>,
+    /// The planned steps of a config command, in order, or none for a typed
+    /// line, which runs as itself.
+    pub(crate) steps: Vec<PlannedStep>,
+    /// The index in [`Self::steps`] of the step that runs, or that runs next.
+    pub(crate) step: usize,
     /// The tab that the Cmd's text went on in after its output asked for the
     /// alternate screen, which makes the block a Stub, or `None` for a Cmd
     /// that runs in its block.
@@ -779,6 +785,8 @@ impl Cmd {
             raw_view: false,
             source: None,
             shell: None,
+            steps: Vec::new(),
+            step: 0,
             handoff: None,
         }
     }

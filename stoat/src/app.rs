@@ -9617,6 +9617,10 @@ impl Stoat {
     /// Only an owner on screen marks the frame dirty, asks for a redraw, or
     /// leaves insert mode after its terminal pane closes. An owner in the
     /// background keeps its state current, and a switch to it repaints.
+    ///
+    /// A step of a config command's Cmd that exits 0 with a step after it
+    /// starts the steps after it, as [`action_handlers::run::run_steps`] runs
+    /// them. Any other exit ends the Cmd.
     fn handle_session_notification(
         &mut self,
         notif: PtyNotification,
@@ -9684,6 +9688,16 @@ impl Stoat {
                 let Some(cmd) = ws.cmds.get_mut(id).filter(|cmd| cmd.run_count == run) else {
                     return UpdateEffect::None;
                 };
+                if !cmd.finished && exit_status == Some(0) && cmd.step + 1 < cmd.steps.len() {
+                    cmd.exit_status = exit_status;
+                    cmd.process = None;
+                    cmd.step += 1;
+                    let effect = action_handlers::run::run_steps(self, id, on_screen);
+                    return match on_screen {
+                        true => effect.merge(UpdateEffect::Redraw),
+                        false => effect,
+                    };
+                }
                 if !cmd.finished {
                     cmd.finished = true;
                     cmd.exit_status = exit_status;

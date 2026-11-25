@@ -20,10 +20,13 @@ use crate::{
     },
     term_session::{TermId, ViewLocation},
     theme::scope,
-    user_command::{self, CommandSet},
+    user_command::{self, run::PlannedStep, CommandSet},
     workspace::Workspace,
 };
-use std::path::{Path, PathBuf};
+use std::{
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 use stoat_action::{registry, ActionKind};
 
 pub(super) fn open_run(stoat: &mut Stoat) -> UpdateEffect {
@@ -420,17 +423,18 @@ pub(super) fn run_again(stoat: &mut Stoat) -> UpdateEffect {
     let Some(id) = id else {
         return UpdateEffect::None;
     };
-    restart_cmd(stoat, id);
-    UpdateEffect::Redraw
+    restart_cmd(stoat, id).merge(UpdateEffect::Redraw)
 }
 
 /// Start the next run of the Cmd `id` with an empty output, in the directory
-/// and in the place where it ran before.
+/// and in the place where it ran before, and answer the effect of the action
+/// steps that ran before its first process.
 ///
-/// A Stub runs in its block again, with the kind that its text reads as. An
-/// agent's Stub starts no process. It starts the agent again in a new tab, as
-/// [`open_agent_tab`] opens it, and stays a Stub of that tab.
-fn restart_cmd(stoat: &mut Stoat, id: CmdId) {
+/// A Stub runs in its block again, with the kind that [`steps_kind`] reads
+/// from its line and its steps. An agent's Stub starts no process. It starts
+/// the agent again in a new tab, as [`open_agent_tab`] opens it, and stays a
+/// Stub of that tab.
+fn restart_cmd(stoat: &mut Stoat, id: CmdId) -> UpdateEffect {
     let agent_line = stoat
         .active_workspace()
         .cmds
@@ -443,17 +447,17 @@ fn restart_cmd(stoat: &mut Stoat, id: CmdId) {
         {
             cmd.handoff = Some(handoff);
         }
-        return;
+        return UpdateEffect::None;
     }
 
     let Some(cmd) = stoat.active_workspace_mut().cmds.get_mut(id) else {
-        return;
+        return UpdateEffect::None;
     };
     cmd.grid = VtermGrid::new(cmd.grid.width());
     cmd.selection = None;
     cmd.handoff = None;
-    cmd.kind = kind::run_kind(cmd.run_text());
-    start_process(stoat, id);
+    cmd.kind = steps_kind(&cmd.command, &cmd.steps);
+    start_process(stoat, id)
 }
 
 /// Hand the Cmd `id`, whose output asked for the alternate screen, to a new
@@ -782,32 +786,48 @@ pub(super) fn run_line(stoat: &mut Stoat, line: &str) -> UpdateEffect {
 /// Insert a Cmd of `line` in the active workspace's store, with the workspace
 /// root as its cwd, and start its process.
 fn start_cmd(stoat: &mut Stoat, line: &str, width: u16) -> CmdId {
-    start_cmd_as(stoat, line, None, None, width)
+    // A line with no step dispatches no action, so its start has no effect
+    // to pass on.
+    let (id, _) = start_cmd_steps(stoat, line, Vec::new(), None, width);
+    id
 }
 
 /// Insert a Cmd of `line` in the active workspace's store, with the workspace
-/// root as its cwd and a grid `width` cells wide, and start its process.
+/// root as its cwd and a grid `width` cells wide, start its run of `steps`,
+/// and answer the effect of the action steps that ran before its first
+/// process.
 ///
-/// A `shell` text runs in place of the line, and the Cmd's Run Kind comes from
-/// it, so a config command's line names the command and its run reads the
-/// shell line. `source` is the Source Tag that the Cmd's header shows.
-pub(crate) fn start_cmd_as(
+/// A config command's line names the command, and its planned steps are its
+/// run, as [`run_steps`] runs them. A Cmd with no step runs its line. The
+/// Run Kind is the one that [`steps_kind`] reads, and `source` is the Source
+/// Tag that the Cmd's header shows.
+pub(crate) fn start_cmd_steps(
     stoat: &mut Stoat,
     line: &str,
-    shell: Option<&str>,
+    steps: Vec<PlannedStep>,
     source: Option<(&'static str, &'static str)>,
     width: u16,
-) -> CmdId {
+) -> (CmdId, UpdateEffect) {
     let ws = stoat.active_workspace_mut();
     let mut cmd = Cmd::new(line.to_owned(), ws.git_root.clone(), width);
-    if let Some(shell) = shell {
-        cmd.kind = kind::run_kind(shell);
-        cmd.shell = Some(shell.to_owned());
-    }
+    cmd.kind = steps_kind(line, &steps);
+    cmd.steps = steps;
     cmd.source = source;
     let id = ws.cmds.insert(cmd);
-    start_process(stoat, id);
-    id
+    (id, start_process(stoat, id))
+}
+
+/// The Run Kind of a Cmd of `line` that runs `steps`.
+///
+/// A plan of one shell step reads as its shell text, and a longer plan as a
+/// plain line, because a report reads the output of one program. A Cmd with
+/// no step reads as its line.
+fn steps_kind(line: &str, steps: &[PlannedStep]) -> RunKind {
+    match steps {
+        [] => kind::run_kind(line),
+        [PlannedStep::Shell(shell)] => kind::run_kind(shell),
+        _ => RunKind::Line,
+    }
 }
 
 /// The grid width of a Cmd that [`append_to_run_pane`] places, in cells.
@@ -874,24 +894,16 @@ fn run_pane_on_show(ws: &Workspace) -> Option<(PaneId, RunId)> {
         })
 }
 
-/// Start the next run of the Cmd `id` of the active workspace, a `bash -c` of
-/// its line in its cwd.
+/// Start the next run of the Cmd `id` of the active workspace from its first
+/// step, as [`run_steps`] runs it, and answer the effect of the action steps
+/// that ran before its first process.
 ///
-/// The run counts one more, starts now, and clears the end and the elapsed
-/// seconds of the run before it. A spawn that fails ends the run at once with
-/// the error line `spawn failed: <error>`.
-fn start_process(stoat: &mut Stoat, id: CmdId) {
+/// The run counts one more, starts now, and clears the end, the elapsed
+/// seconds, the status, and the report of the run before it.
+fn start_process(stoat: &mut Stoat, id: CmdId) -> UpdateEffect {
     let now = stoat.executor.now();
-    let executor = stoat.executor.clone();
-    let host = stoat.terminal_host.clone();
-    let tx = stoat.pty_tx.clone();
-    let workspace = stoat.active_workspace;
-    let muted = style_rgb(stoat.theme.get(scope::UI_TEXT_MUTED).fg);
-
-    let ws = stoat.active_workspace_mut();
-    let diff = ws.env.diff.clone();
-    let Some(cmd) = ws.cmds.get_mut(id) else {
-        return;
+    let Some(cmd) = stoat.active_workspace_mut().cmds.get_mut(id) else {
+        return UpdateEffect::None;
     };
 
     cmd.run_count += 1;
@@ -903,6 +915,92 @@ fn start_process(stoat: &mut Stoat, id: CmdId) {
     cmd.error = None;
     cmd.reset_report();
     cmd.raw_view = false;
+    cmd.step = 0;
+    run_steps(stoat, id, true)
+}
+
+/// Run the Cmd `id` of the active workspace from its current step, up to the
+/// shell step whose process it waits on or to its end, and answer the effect
+/// of the action steps that ran.
+///
+/// A Cmd with no step runs its line. A shell step runs as a `bash -c` of its
+/// text, after a row of the text in `ui.text.muted` when the text is not the
+/// Cmd's line, so each step's output reads under its text. An action step
+/// dispatches as a key binding of it does, and the run goes on to the next
+/// step. Past the last step, the Cmd ends with the status of the step before
+/// it.
+///
+/// An action acts on the workspace on screen, so an action step that comes
+/// due while the Cmd's workspace is not `on_screen` ends the Cmd with the line
+/// `stopped, the workspace changed`.
+pub(crate) fn run_steps(stoat: &mut Stoat, id: CmdId, on_screen: bool) -> UpdateEffect {
+    let muted = style_rgb(stoat.theme.get(scope::UI_TEXT_MUTED).fg);
+    let mut effect = UpdateEffect::None;
+    loop {
+        let now = stoat.executor.now();
+        let Some(cmd) = stoat.active_workspace_mut().cmds.get_mut(id) else {
+            return effect;
+        };
+        if cmd.steps.is_empty() {
+            spawn_run_text(stoat, id);
+            return effect;
+        }
+        let Some(step) = cmd.steps.get(cmd.step).cloned() else {
+            cmd.finished = true;
+            cmd.ended = Some(now);
+            return effect;
+        };
+
+        match step {
+            PlannedStep::Act(_) if !on_screen => {
+                cmd.error = Some("stopped, the workspace changed".to_owned());
+                cmd.exit_status = None;
+                cmd.finished = true;
+                cmd.ended = Some(now);
+                return effect;
+            },
+            PlannedStep::Act(action) => {
+                let ran = stoat.run_bound_actions(&Arc::from(vec![action]), None, false);
+                effect = effect.merge(ran);
+                let Some(cmd) = stoat.active_workspace_mut().cmds.get_mut(id) else {
+                    return effect;
+                };
+                cmd.step += 1;
+            },
+            PlannedStep::Shell(text) => {
+                if text != cmd.command {
+                    let row = match muted {
+                        Some([r, g, b]) => format!("\x1b[38;2;{r};{g};{b}m{text}\x1b[0m\r\n"),
+                        None => format!("{text}\r\n"),
+                    };
+                    cmd.grid.feed(row.as_bytes());
+                }
+                cmd.shell = Some(text);
+                spawn_run_text(stoat, id);
+                return effect;
+            },
+        }
+    }
+}
+
+/// Spawn a `bash -c` of the run text of the Cmd `id` of the active workspace
+/// in its cwd, as the process of its current run.
+///
+/// The process runs with the variables of the Cmd's Run Kind. A spawn that
+/// fails ends the run at once with the error line `spawn failed: <error>`.
+fn spawn_run_text(stoat: &mut Stoat, id: CmdId) {
+    let now = stoat.executor.now();
+    let executor = stoat.executor.clone();
+    let host = stoat.terminal_host.clone();
+    let tx = stoat.pty_tx.clone();
+    let workspace = stoat.active_workspace;
+
+    let ws = stoat.active_workspace_mut();
+    let diff = ws.env.diff.clone();
+    let Some(cmd) = ws.cmds.get_mut(id) else {
+        return;
+    };
+
     let sink = CmdSink {
         tx,
         workspace,
@@ -930,13 +1028,6 @@ fn start_process(stoat: &mut Stoat, id: CmdId) {
         diff: &diff,
         vars: &vars,
     };
-    if let Some(shell) = cmd.shell.as_ref().filter(|shell| **shell != cmd.command) {
-        let row = match muted {
-            Some([r, g, b]) => format!("\x1b[38;2;{r};{g};{b}m{shell}\x1b[0m\r\n"),
-            None => format!("{shell}\r\n"),
-        };
-        cmd.grid.feed(row.as_bytes());
-    }
     match pty::spawn_cmd(
         &*host,
         &executor,
