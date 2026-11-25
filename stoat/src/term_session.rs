@@ -66,6 +66,12 @@ pub struct TermSession {
     /// tab and its pane until the child sets a title, or `None` for a session
     /// that no handoff started.
     pub(crate) label: Option<String>,
+    /// Whether the session's tab closes when its program ends, because a
+    /// handoff opened the tab for that program alone.
+    ///
+    /// An agent's handoff leaves it unset, since an agent's tab keeps the
+    /// agent's last frame after its session ends.
+    pub(crate) closes_tab_on_exit: bool,
 }
 
 impl TermSession {
@@ -87,6 +93,7 @@ impl TermSession {
             mode: "normal".into(),
             token,
             label: None,
+            closes_tab_on_exit: false,
         }
     }
 

@@ -334,9 +334,10 @@ fn restart_cmd(stoat: &mut Stoat, id: CmdId) {
 /// The Cmd's process is killed and the Cmd ends. The tab runs `bash -c` of
 /// the Cmd's text in the Cmd's cwd and takes the focus, because the program
 /// needs the keys. It goes by the text's program word until the program sets
-/// a title. The Cmd of the palette's Run Block closes the palette and leaves
-/// the store, because a Stub is a row of a Run pane. A spawn that fails ends
-/// the Cmd with the error line `handoff failed`.
+/// a title, and it closes when the program ends, as [`retire_handoff`] closes
+/// it. The Cmd of the palette's Run Block closes the palette and leaves the
+/// store, because a Stub is a row of a Run pane. A spawn that fails ends the
+/// Cmd with the error line `handoff failed`.
 pub(crate) fn hand_off(stoat: &mut Stoat, id: CmdId) {
     let now = stoat.executor.now();
     let Some(cmd) = stoat.active_workspace_mut().cmds.get_mut(id) else {
@@ -362,6 +363,9 @@ pub(crate) fn hand_off(stoat: &mut Stoat, id: CmdId) {
         }
         return;
     };
+    if let Some(session) = stoat.active_workspace_mut().terms.get_mut(term) {
+        session.closes_tab_on_exit = true;
+    }
     open_tab_on(stoat, view);
 
     if stoat.run_block_cmd() == Some(id) {
@@ -453,21 +457,21 @@ fn open_tab_on(stoat: &mut Stoat, view: View) {
     super::tab::relayout(stoat);
 }
 
-/// Close the tab that the ended session `term` of a Stub ran in, and answer
-/// whether it closed.
+/// Close the tab that a handoff opened for the ended session `term`, and
+/// answer whether it closed.
 ///
-/// The tab closes when a Stub's handoff names `term` and runs no agent, the
-/// session's pane is the tab's only split pane, and the workspace has another
-/// tab. The tab exists for that program, and its last pane turns into a
-/// scratch buffer otherwise. The workspace goes back to the tab it left, as
-/// [`super::tab::close_tab_at`] moves it.
+/// The tab closes when the session's
+/// [`TermSession::closes_tab_on_exit`](crate::term_session::TermSession::closes_tab_on_exit)
+/// is set, its pane is the tab's only split pane, and the workspace has
+/// another tab. The tab exists for that program, and its last pane turns
+/// into a scratch buffer otherwise. The workspace goes back to the tab it
+/// left, as [`super::tab::close_tab_at`] moves it.
 pub(crate) fn retire_handoff(stoat: &mut Stoat, term: TermId) -> bool {
     let ws = stoat.active_workspace();
-    let handed_off = ws.cmds.values().any(|cmd| {
-        cmd.handoff
-            .as_ref()
-            .is_some_and(|handoff| handoff.term == term && !handoff.agent)
-    });
+    let handed_off = ws
+        .terms
+        .get(term)
+        .is_some_and(|session| session.closes_tab_on_exit);
     let Some(ViewLocation::Pane { tab, pane }) = ws.term_location(term) else {
         return false;
     };
@@ -816,6 +820,10 @@ mod tests {
 
     /// A line that runs the agent with a quoted prompt.
     const CLAUDE_LINE: &str = r#"claude -p "hi""#;
+
+    /// The user command `tui`, which runs a full-screen program under the
+    /// default `block` output.
+    const TUI: &str = r#"command tui { run = shell("mytui"); }"#;
 
     /// The program, the arguments, the cwd, and the last variable of a spawn of
     /// the fake terminal host.
@@ -1398,8 +1406,7 @@ mod tests {
     #[test]
     fn a_palette_block_that_goes_full_screen_closes_the_palette_and_leaves_no_cmd() {
         let mut h = Stoat::test();
-        h.stoat
-            .reload_user_config(r#"command tui { run = shell("mytui"); }"#);
+        h.stoat.reload_user_config(TUI);
         let (cmd, session) = enter_command(&mut h, "tui");
         let input = h
             .stoat
@@ -1422,6 +1429,28 @@ mod tests {
             ),
             (true, false, 0, true, (1, true)),
         );
+    }
+
+    /// The tab that a palette Cmd handed off to closes when its program ends,
+    /// though no Stub names it, and the workspace goes back to the tab it
+    /// left.
+    #[test]
+    fn a_palette_handoff_tab_closes_when_its_program_ends() {
+        let mut h = Stoat::test();
+        h.stoat.reload_user_config(TUI);
+        let (cmd, _) = enter_command(&mut h, "tui");
+        h.inject_cmd_output(cmd, FULL_SCREEN);
+        let term = {
+            let ws = h.stoat.active_workspace();
+            let View::Terminal(term) = ws.panes.pane(ws.panes.focus()).view else {
+                panic!("the handoff tab shows a terminal");
+            };
+            term
+        };
+        end_term(&mut h, term);
+
+        let ws = h.stoat.active_workspace();
+        assert_eq!((ws.tabs.len(), ws.active_tab, ws.terms.len()), (1, 0, 0));
     }
 
     /// A `claude` line at the Run pane prompt starts no Cmd process. The line
