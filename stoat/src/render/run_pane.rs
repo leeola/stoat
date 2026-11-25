@@ -7,8 +7,9 @@ use crate::{
         text::{write_str, write_str_clipped},
     },
     run::{
-        cargo::CmdReport, vterm::BodyRow, Cmd, CmdId, GridSelection, RunState, StyledCell,
-        VtermGrid,
+        cargo::CmdReport,
+        vterm::{self, BodyRow},
+        Cmd, CmdId, GridSelection, RunState, StyledCell, VtermGrid,
     },
 };
 use ratatui::{
@@ -139,12 +140,11 @@ pub(crate) fn render_run_pane(
         }
 
         if !block.finished
-            && let Some(CmdReport::Test(report)) = &block.report
-            && report.total > 0
+            && let Some((done, total)) = block.report.as_ref().and_then(CmdReport::progress)
             && offsets.contains(&1)
         {
             let row = Rect::new(inner.x + 1, row_of(1), inner.width.saturating_sub(1), 1);
-            paint_progress(row, report.done(), report.total, theme, buf, scene);
+            paint_progress(row, done, total, theme, buf, scene);
         }
         if offsets.contains(&(span - 1)) {
             rule_rows.push(row_of(span - 1));
@@ -250,8 +250,8 @@ fn paint_stack_rules(
     }
 }
 
-/// Draw a running `cargo test` Cmd's progress bar on the top two pixel rows
-/// of `row`, the first row of its body, where no glyph reaches.
+/// Draw a running Cmd's progress bar on the top two pixel rows of `row`, the
+/// first row of its body, where no glyph reaches.
 ///
 /// The track spans `row` in the `ui.divider` foreground, the color of a
 /// meter's track, and the fill covers `done` of `total` of it in the
@@ -301,14 +301,16 @@ fn paint_progress(
 /// process gave a code. Its runtime follows in `ui.text.muted`, with the run
 /// count after it from the second run on. A Cmd without both a start and an
 /// end reads its mark alone. A `cargo test` Cmd whose report counts a failed
-/// test reads U+2717, that count, and `failed` as its mark.
+/// test reads U+2717, that count, and `failed` as its mark, and a build whose
+/// report counts an error reads U+2717 and its count of errors, such as
+/// `1 error`.
 ///
 /// A running Cmd reads U+25CF and the whole seconds it has run, as
 /// [`Cmd::elapsed_secs`] holds them, in the foreground of
-/// `ui.statusline.run`. A running `cargo test` Cmd that knows its total reads
-/// its done count over that total between the two, such as `2 / 4`. The
-/// status-line scope can carry a background, which a header leaves to the
-/// pane.
+/// `ui.statusline.run`. A running Cmd whose report counts its progress reads
+/// the done count over the total between the two, such as `2 / 4`, as
+/// [`CmdReport::progress`] gives them. The status-line scope can carry a
+/// background, which a header leaves to the pane.
 pub(crate) fn status_parts(cmd: &Cmd, theme: &crate::theme::Theme) -> Vec<StatusPart> {
     let mut parts: Vec<StatusPart> = cmd
         .kind
@@ -326,13 +328,9 @@ pub(crate) fn status_parts(cmd: &Cmd, theme: &crate::theme::Theme) -> Vec<Status
     if !cmd.finished {
         let fg = theme.get(crate::theme::scope::UI_STATUSLINE_RUN).fg;
         let elapsed = crate::run::format_elapsed(cmd.elapsed_secs);
-        let text = match &cmd.report {
-            Some(CmdReport::Test(report)) if report.total > 0 => format!(
-                "\u{25cf} {} / {} \u{b7} {elapsed}",
-                report.done(),
-                report.total
-            ),
-            _ => format!("\u{25cf} {elapsed}"),
+        let text = match cmd.report.as_ref().and_then(CmdReport::progress) {
+            Some((done, total)) => format!("\u{25cf} {done} / {total} \u{b7} {elapsed}"),
+            None => format!("\u{25cf} {elapsed}"),
         };
         parts.push(StatusPart {
             text,
@@ -346,23 +344,25 @@ pub(crate) fn status_parts(cmd: &Cmd, theme: &crate::theme::Theme) -> Vec<Status
     }
 
     let failed = match &cmd.report {
-        Some(CmdReport::Test(report)) => report.totals().1,
-        None => 0,
+        Some(CmdReport::Test(report)) => {
+            let failed = report.totals().1;
+            (failed > 0).then(|| format!("{failed} failed"))
+        },
+        Some(CmdReport::Build(report)) => (!report.errors.is_empty())
+            .then(|| vterm::counted(report.errors.len(), "error", "errors")),
+        None => None,
     };
-    let (mark, mark_scope) = match cmd.exit_status {
-        _ if failed > 0 => (
-            format!("\u{2717} {failed} failed"),
-            crate::theme::scope::UI_ERROR,
-        ),
-        Some(0) => (
+    let (mark, mark_scope) = match (failed, cmd.exit_status) {
+        (Some(failed), _) => (format!("\u{2717} {failed}"), crate::theme::scope::UI_ERROR),
+        (None, Some(0)) => (
             "\u{2713}".to_owned(),
             crate::theme::scope::UI_BADGE_COMPLETE,
         ),
-        Some(code) => (
+        (None, Some(code)) => (
             format!("\u{2717} exit {code}"),
             crate::theme::scope::UI_ERROR,
         ),
-        None => ("\u{2717}".to_owned(), crate::theme::scope::UI_ERROR),
+        (None, None) => ("\u{2717}".to_owned(), crate::theme::scope::UI_ERROR),
     };
     parts.push(StatusPart {
         text: mark,

@@ -7,8 +7,8 @@ use crate::{
     host::{FsHost, OffsetEncoding},
     pane::{FocusTarget, View},
     run::{
-        cargo::TestReport,
-        kind::RunKind,
+        cargo::CmdReport,
+        kind::{CargoKind, RunKind},
         pty::{self, CmdEnv, CmdSink},
         Cmd, CmdId, RunState,
     },
@@ -125,12 +125,13 @@ pub(super) fn run_submit(stoat: &mut Stoat) -> UpdateEffect {
 /// Take an Enter at an empty prompt to the Cmd `id`, the newest block of the
 /// stack.
 ///
-/// A finished Cmd whose report located a failure goes to the first located
-/// failure, as [`go_to_location`] opens it. rustc counts a column in chars,
-/// so the column lands as UTF-32. Every other Cmd takes the Enter as nothing.
+/// A finished Cmd whose report located a test failure or a build error goes
+/// to the first of them, as [`CmdReport::first_location`] picks it and
+/// [`go_to_location`] opens it. rustc counts a column in chars, so the column
+/// lands as UTF-32. Every other Cmd takes the Enter as nothing.
 fn block_enter(stoat: &mut Stoat, id: CmdId) -> UpdateEffect {
     let found = stoat.active_workspace().cmds.get(id).and_then(|cmd| {
-        let location = cmd.finished_report().and_then(TestReport::first_location)?;
+        let location = cmd.finished_report().and_then(CmdReport::first_location)?;
         Some((cmd.cwd.clone(), location.clone()))
     });
     let Some((cwd, location)) = found else {
@@ -368,9 +369,19 @@ fn start_process(stoat: &mut Stoat, id: CmdId) {
     };
     let width = cmd.grid.width();
     // TERM=dumb turns cargo's color off, and the block of a Parsed Cmd shows
-    // cargo's colors and lets cargo erase its own status lines.
+    // cargo's colors and lets cargo erase its own status lines. Cargo draws
+    // its progress bar to a dumb terminal only when asked, and only with a
+    // width. Each redraw fills the grid's width and ends in a carriage return,
+    // so the bar keeps to one row. A test run's progress counts its tests, so
+    // it asks for no bar.
+    let color = ("CARGO_TERM_COLOR".to_owned(), "always".to_owned());
     let vars = match cmd.kind {
-        RunKind::Parsed(_) => vec![("CARGO_TERM_COLOR".to_owned(), "always".to_owned())],
+        RunKind::Parsed(CargoKind::Test) => vec![color],
+        RunKind::Parsed(CargoKind::Build | CargoKind::Check | CargoKind::Clippy) => vec![
+            color,
+            ("CARGO_TERM_PROGRESS_WHEN".to_owned(), "always".to_owned()),
+            ("CARGO_TERM_PROGRESS_WIDTH".to_owned(), width.to_string()),
+        ],
         RunKind::Line | RunKind::Agent => Vec::new(),
     };
     let env = CmdEnv {
@@ -407,7 +418,7 @@ mod tests {
         pane::View,
         render::paint::style_rgb,
         run::{
-            cargo::{ONE_FAILURE, THREE_BINARIES},
+            cargo::{ERROR_AND_WARNING, ONE_FAILURE, THREE_BINARIES},
             vterm::BodyRow,
             CmdId, PtyNotification,
         },
@@ -418,9 +429,17 @@ mod tests {
     use std::{path::PathBuf, time::Duration};
     use stoatty_protocol::command::{self, Command};
 
+    /// The file that the failure and the error of the samples name, under the
+    /// root `/work`.
+    const CHROME: &str = "/work/stoat/src/render/chrome.rs";
+
     /// The program, the arguments, the cwd, and the last variable of a spawn of
     /// the fake terminal host.
     type Spawn = (String, Vec<String>, PathBuf, Option<(String, String)>);
+
+    /// A progress bar that the run pane draws, as its left edge, its width,
+    /// and its color.
+    type ProgressBar = (i16, u16, [u8; 3]);
 
     #[test]
     fn a_run_drops_the_editor_it_replaces() {
@@ -832,28 +851,9 @@ mod tests {
             b"running 4 tests\r\ntest a ... ok\r\ntest b ... ok\r\n",
         );
         let status = h.cmd_status(handle.cmd);
-        h.render_composited();
 
-        let area = {
-            let ws = h.stoat.active_workspace();
-            ws.panes.pane(ws.panes.focus()).area
-        };
-        let inner = crate::run::stack_rect(area);
-        let (x, y) = (
-            ((inner.x + 1) * 16) as i16,
-            ((area.bottom() - 4) * 16) as i16,
-        );
-        let bars: Vec<_> = command::decode_stream(&h.stoat.apc_scene.all_bytes())
-            .into_iter()
-            .filter_map(|cmd| match cmd {
-                Command::Bar(bar) if bar.height == 2 && bar.y == y => {
-                    Some((bar.x, bar.width, bar.color))
-                },
-                _ => None,
-            })
-            .collect();
+        let (x, width, bars) = progress_bars(&mut h, 4);
         let color = |name| style_rgb(h.stoat.theme.get(name).fg).expect("an RGB color");
-        let width = (inner.width - 1) * 16;
         assert_eq!(
             (status, bars),
             (
@@ -864,6 +864,58 @@ mod tests {
                 ],
             ),
         );
+    }
+
+    /// A running build reads the counts of cargo's progress bar, and a
+    /// progress bar on its first body row fills the same share of the body's
+    /// width.
+    #[test]
+    fn a_running_build_reads_its_progress() {
+        let mut h = Stoat::test();
+        h.open_run();
+        let handle = h.submit_run("cargo build");
+        h.inject_cmd_output(
+            handle.cmd,
+            b"\x1b[1m\x1b[96m    Building\x1b[0m [=====>      ] 212/240: stoat(build)\r",
+        );
+        let status = h.cmd_status(handle.cmd);
+
+        let (x, width, bars) = progress_bars(&mut h, 2);
+        let color = |name| style_rgb(h.stoat.theme.get(name).fg).expect("an RGB color");
+        let fill = u16::try_from(u32::from(width) * 212 / 240).expect("a fill inside the track");
+        assert_eq!(
+            (status, bars),
+            (
+                "cargo build \u{25cf} 212 / 240 \u{b7} 0:00".to_owned(),
+                vec![
+                    (x, width, color(scope::UI_DIVIDER)),
+                    (x, fill, color(scope::UI_STATUSLINE_RUN)),
+                ],
+            ),
+        );
+    }
+
+    /// The bars two pixels high that the focused Run pane draws on the row
+    /// `rows_up` rows above its bottom edge, each as its left edge, its width,
+    /// and its color, after the left edge and the width of a full track.
+    fn progress_bars(h: &mut TestHarness, rows_up: u16) -> (i16, u16, Vec<ProgressBar>) {
+        h.render_composited();
+        let area = {
+            let ws = h.stoat.active_workspace();
+            ws.panes.pane(ws.panes.focus()).area
+        };
+        let inner = crate::run::stack_rect(area);
+        let y = ((area.bottom() - rows_up) * 16) as i16;
+        let bars = command::decode_stream(&h.stoat.apc_scene.all_bytes())
+            .into_iter()
+            .filter_map(|cmd| match cmd {
+                Command::Bar(bar) if bar.height == 2 && bar.y == y => {
+                    Some((bar.x, bar.width, bar.color))
+                },
+                _ => None,
+            })
+            .collect();
+        (((inner.x + 1) * 16) as i16, (inner.width - 1) * 16, bars)
     }
 
     /// A finished `cargo test` Cmd whose report counts a failed test names the
@@ -906,10 +958,10 @@ mod tests {
         );
     }
 
-    /// Run `cargo test` at the focused Run pane's prompt to its end, with
-    /// `output` and the exit `code`, and answer its Cmd.
-    fn finished_cargo_test(h: &mut TestHarness, output: &str, code: i32) -> CmdId {
-        let handle = h.submit_run("cargo test");
+    /// Run `line` at the focused Run pane's prompt to its end, with `output`
+    /// and the exit `code`, and answer its Cmd.
+    fn finished_run(h: &mut TestHarness, line: &str, output: &str, code: i32) -> CmdId {
+        let handle = h.submit_run(line);
         h.inject_cmd_output(handle.cmd, output.as_bytes());
         h.inject_cmd_done(handle.cmd, code);
         handle.cmd
@@ -934,7 +986,7 @@ mod tests {
     fn a_finished_cargo_test_shows_its_report() {
         let mut h = Stoat::test();
         h.open_run();
-        let cmd = finished_cargo_test(&mut h, ONE_FAILURE, 101);
+        let cmd = finished_run(&mut h, "cargo test", ONE_FAILURE, 101);
 
         let lines = h.stoat.active_workspace().cmds[cmd]
             .grid
@@ -961,7 +1013,7 @@ mod tests {
     fn a_passing_run_shows_no_failed_count_and_no_hint() {
         let mut h = Stoat::test();
         h.open_run();
-        let cmd = finished_cargo_test(&mut h, THREE_BINARIES, 0);
+        let cmd = finished_run(&mut h, "cargo test", THREE_BINARIES, 0);
 
         let lines = h.stoat.active_workspace().cmds[cmd]
             .grid
@@ -986,7 +1038,12 @@ mod tests {
         h.open_run();
         let running = h.submit_run("cargo test");
         h.inject_cmd_output(running.cmd, ONE_FAILURE.as_bytes());
-        let unbuilt = finished_cargo_test(&mut h, "error: could not compile `stoat`\n", 101);
+        let unbuilt = finished_run(
+            &mut h,
+            "cargo test",
+            "error: could not compile `stoat`\n",
+            101,
+        );
 
         let shows_report = |cmd| h.stoat.active_workspace().cmds[cmd].report_rows().is_some();
         assert_eq!(
@@ -1001,7 +1058,7 @@ mod tests {
     fn t_shows_the_raw_output_and_t_again_the_report() {
         let mut h = Stoat::test();
         h.open_run();
-        let cmd = finished_cargo_test(&mut h, ONE_FAILURE, 101);
+        let cmd = finished_run(&mut h, "cargo test", ONE_FAILURE, 101);
         let read = |h: &TestHarness| {
             let block = &h.stoat.active_workspace().cmds[cmd];
             (block.report_rows().is_some(), block.rendered_line_span())
@@ -1035,29 +1092,192 @@ mod tests {
         assert_eq!((cmd.raw_view, cmd.report_rows().is_some()), (false, true));
     }
 
+    /// Run `line` to its end with `output` and the exit `code` in a Run pane
+    /// beside an editor pane, with the root `/work` over a 500-line
+    /// [`CHROME`], and press Enter at the empty prompt.
+    ///
+    /// Answers whether the editor pane took the focus, the file it shows, and
+    /// its cursor's row and column, from 0.
+    fn enter_after(line: &str, output: &str, code: i32) -> (bool, PathBuf, (u32, u32)) {
+        let mut h = Stoat::test();
+        h.stoat.active_workspace_mut().git_root = PathBuf::from("/work");
+        h.seed_fixture(CHROME, format!("{}\n", "x".repeat(20)).repeat(500));
+        let editor_pane = h.stoat.active_workspace().panes.focus();
+        h.type_action("SplitRight()");
+        h.open_run();
+        finished_run(&mut h, line, output, code);
+
+        h.type_keys("enter");
+        let point = editor::focused_cursor_point(&mut h.stoat);
+        (
+            h.stoat.active_workspace().panes.focus() == editor_pane,
+            editor::focused_buffer_path(&h.stoat),
+            (point.row, point.column),
+        )
+    }
+
     /// An Enter at an empty prompt opens the first failure's file in the
     /// editor pane beside the Run pane, which takes the focus, with the cursor
     /// on the failure's line and column. Cargo names the file from the root.
     #[test]
     fn enter_at_an_empty_prompt_goes_to_the_first_failure() {
-        let mut h = Stoat::test();
-        h.stoat.active_workspace_mut().git_root = PathBuf::from("/work");
-        let file = PathBuf::from("/work/stoat/src/render/chrome.rs");
-        h.seed_fixture(&file, format!("{}\n", "x".repeat(20)).repeat(500));
-        let editor_pane = h.stoat.active_workspace().panes.focus();
-        h.type_action("SplitRight()");
-        h.open_run();
-        finished_cargo_test(&mut h, ONE_FAILURE, 101);
+        assert_eq!(
+            enter_after("cargo test", ONE_FAILURE, 101),
+            (true, PathBuf::from(CHROME), (411, 8)),
+        );
+    }
 
-        h.type_keys("enter");
-        let point = editor::focused_cursor_point(&mut h.stoat);
+    /// The Enter after a failed build goes to its first error, past the
+    /// warning that came before it.
+    #[test]
+    fn enter_goes_to_the_first_error() {
+        assert_eq!(
+            enter_after("cargo build", ERROR_AND_WARNING, 101),
+            (true, PathBuf::from(CHROME), (411, 19)),
+        );
+    }
+
+    /// A build asks cargo for its progress bar as wide as the block's grid,
+    /// after the color, and a test run asks for no bar.
+    #[test]
+    fn a_build_cmd_asks_cargo_for_its_progress_bar() {
+        let mut h = Stoat::test();
+        h.open_run();
+        let build = h.submit_run("cargo build");
+        h.submit_run("cargo test");
+
+        let width = h.stoat.active_workspace().cmds[build.cmd]
+            .grid
+            .width()
+            .to_string();
+        let spawns = h.fake_terminal_host().spawns();
+        let (build_env, test_env) = (&spawns[0].env, &spawns[1].env);
+        let var = |name: &str, value: &str| (name.to_owned(), value.to_owned());
         assert_eq!(
             (
-                h.stoat.active_workspace().panes.focus(),
-                editor::focused_buffer_path(&h.stoat),
-                (point.row, point.column),
+                build_env[build_env.len().saturating_sub(4)..].to_vec(),
+                test_env
+                    .iter()
+                    .any(|(name, _)| name.starts_with("CARGO_TERM_PROGRESS")),
             ),
-            (editor_pane, file, (411, 8)),
+            (
+                vec![
+                    var("TERM", "dumb"),
+                    var("CARGO_TERM_COLOR", "always"),
+                    var("CARGO_TERM_PROGRESS_WHEN", "always"),
+                    var("CARGO_TERM_PROGRESS_WIDTH", &width),
+                ],
+                false,
+            ),
+        );
+    }
+
+    /// A finished build with an error names its count as its mark, and its
+    /// report counts both kinds and lists the errors before the warnings.
+    #[test]
+    fn a_finished_build_counts_its_errors_and_warnings() {
+        let mut h = Stoat::test();
+        h.open_run();
+        let cmd = finished_run(&mut h, "cargo build", ERROR_AND_WARNING, 101);
+
+        let lines = h.stoat.active_workspace().cmds[cmd]
+            .grid
+            .rendered_line_count();
+        assert_eq!(
+            (h.cmd_status(cmd), report_and_hint(&h, cmd)),
+            (
+                "cargo build \u{2717} 1 error 0ms".to_owned(),
+                (
+                    Some(vec![
+                        "1 error  1 warning".to_owned(),
+                        "\u{2717} mismatched types   chrome.rs:412".to_owned(),
+                        "\u{25b2} unused variable: `width`   chrome.rs:210".to_owned(),
+                        format!("\u{22ef} {lines} lines of output \u{b7} t terminal view"),
+                    ]),
+                    Some("Enter go to failure".to_owned()),
+                ),
+            ),
+        );
+    }
+
+    /// Each row of a build's report draws its errors in the error color and
+    /// its warnings in the warning color, and its locations muted.
+    #[test]
+    fn a_build_report_colors_errors_and_warnings_apart() {
+        let mut h = Stoat::test();
+        h.open_run();
+        let cmd = finished_run(&mut h, "cargo build", ERROR_AND_WARNING, 101);
+
+        let scopes: Vec<Vec<&str>> = h.stoat.active_workspace().cmds[cmd]
+            .report_rows()
+            .expect("a report")
+            .iter()
+            .map(|row| row.spans.iter().map(|(_, tone)| tone.scope()).collect())
+            .collect();
+        assert_eq!(
+            scopes,
+            [
+                vec![scope::UI_ERROR, scope::UI_DIAGNOSTIC_WARNING],
+                vec![scope::UI_ERROR, scope::UI_TEXT_MUTED],
+                vec![scope::UI_DIAGNOSTIC_WARNING, scope::UI_TEXT_MUTED],
+                vec![scope::UI_TEXT_MUTED],
+            ],
+        );
+    }
+
+    /// A build with warnings alone shows its report, with its mark of a
+    /// passing run, and offers no Enter, which never goes to a warning.
+    #[test]
+    fn a_build_with_warnings_alone_shows_its_report() {
+        let mut h = Stoat::test();
+        h.open_run();
+        let cmd = finished_run(
+            &mut h,
+            "cargo build",
+            concat!(
+                "warning: unused variable: `width`\n",
+                "  --> stoat/src/render/chrome.rs:210:9\n",
+            ),
+            0,
+        );
+
+        let lines = h.stoat.active_workspace().cmds[cmd]
+            .grid
+            .rendered_line_count();
+        assert_eq!(
+            (h.cmd_status(cmd), report_and_hint(&h, cmd)),
+            (
+                "cargo build \u{2713} 0ms".to_owned(),
+                (
+                    Some(vec![
+                        "1 warning".to_owned(),
+                        "\u{25b2} unused variable: `width`   chrome.rs:210".to_owned(),
+                        format!("\u{22ef} {lines} lines of output \u{b7} t terminal view"),
+                    ]),
+                    None,
+                ),
+            ),
+        );
+    }
+
+    /// A build that ends with no error and no warning keeps cargo's own lines.
+    #[test]
+    fn a_clean_build_keeps_its_raw_output() {
+        let mut h = Stoat::test();
+        h.open_run();
+        let cmd = finished_run(
+            &mut h,
+            "cargo build",
+            concat!(
+                "   Compiling stoat v0.4.0\n",
+                "    Finished `dev` profile [unoptimized + debuginfo] target(s) in 2.44s\n",
+            ),
+            0,
+        );
+
+        assert_eq!(
+            (h.cmd_status(cmd), report_and_hint(&h, cmd)),
+            ("cargo build \u{2713} 0ms".to_owned(), (None, None)),
         );
     }
 
@@ -1071,7 +1291,7 @@ mod tests {
         h.seed_fixture(&file, "x\n".repeat(500));
         h.type_action("SplitRight()");
         h.open_run();
-        finished_cargo_test(&mut h, ONE_FAILURE, 101);
+        finished_run(&mut h, "cargo test", ONE_FAILURE, 101);
 
         h.type_keys("enter");
         assert_eq!(editor::focused_buffer_path(&h.stoat), file);
@@ -1081,7 +1301,7 @@ mod tests {
     fn enter_on_a_failure_in_no_file_names_the_path() {
         let mut h = Stoat::test();
         h.open_run();
-        finished_cargo_test(&mut h, ONE_FAILURE, 101);
+        finished_run(&mut h, "cargo test", ONE_FAILURE, 101);
 
         h.type_keys("enter");
         assert_eq!(

@@ -90,11 +90,34 @@ const NO_THREAD_ID: &str = concat!(
     "finished in 0.02s\n",
 );
 
+/// The output of a `cargo build` that ends in one error and one warning, and
+/// in the two summary lines that count them.
+#[cfg(test)]
+pub(crate) const ERROR_AND_WARNING: &str = concat!(
+    "   Compiling stoat v0.4.0 (/home/lee/code/stoat/stoat)\n",
+    "warning: unused variable: `width`\n",
+    "  --> stoat/src/render/chrome.rs:210:9\n",
+    "   |\n",
+    "210 |     let width = 3;\n",
+    "   |         ^^^^^\n",
+    "\n",
+    "error[E0308]: mismatched types\n",
+    "  --> stoat/src/render/chrome.rs:412:20\n",
+    "    |\n",
+    "412 |     let rows: u16 = \"x\";\n",
+    "    |                     ^^^ expected `u16`, found `&str`\n",
+    "\n",
+    "warning: `stoat` (lib) generated 1 warning\n",
+    "error: could not compile `stoat` (lib) due to 1 previous error; 1 warning emitted\n",
+);
+
 /// What a Cmd's output reports, for a kind whose output the block reads.
 #[derive(Debug, Hash)]
 pub(crate) enum CmdReport {
     /// The report of a `cargo test` run.
     Test(TestReport),
+    /// The report of a `cargo build`, `cargo check`, or `cargo clippy` run.
+    Build(BuildReport),
 }
 
 /// The counts and the failures of a `cargo test` run, as its lines arrive.
@@ -147,6 +170,37 @@ enum FailureBlock {
     Message(usize),
 }
 
+/// The progress and the diagnostics of a `cargo build`, `cargo check`, or
+/// `cargo clippy` run, as its lines arrive.
+#[derive(Debug, Default, Hash)]
+pub(crate) struct BuildReport {
+    /// The finished and the total units that the last redraw of cargo's
+    /// progress bar names.
+    pub(crate) progress: Option<(u32, u32)>,
+    /// The errors that named a location, in the order they arrived.
+    pub(crate) errors: Vec<Diagnostic>,
+    /// The warnings that named a location, in the order they arrived.
+    pub(crate) warnings: Vec<Diagnostic>,
+    /// The header of the diagnostic whose location line has not arrived.
+    pending: Option<(Severity, String)>,
+}
+
+/// One error or warning of a build, as its header and its location line name
+/// it.
+#[derive(Debug, PartialEq, Eq, Hash)]
+pub(crate) struct Diagnostic {
+    /// The header's text after its colon, such as `mismatched types`.
+    pub(crate) message: String,
+    pub(crate) location: ParsedLocation,
+}
+
+/// Whether a diagnostic's header names an error or a warning.
+#[derive(Clone, Copy, Debug, Hash)]
+enum Severity {
+    Error,
+    Warning,
+}
+
 /// The bytes of a Cmd's output, cut into whole lines.
 #[derive(Debug, Default)]
 pub(crate) struct LineFeed {
@@ -163,7 +217,10 @@ impl CmdReport {
     pub(crate) fn for_kind(kind: RunKind) -> Option<Self> {
         match kind {
             RunKind::Parsed(CargoKind::Test) => Some(CmdReport::Test(TestReport::default())),
-            _ => None,
+            RunKind::Parsed(CargoKind::Build | CargoKind::Check | CargoKind::Clippy) => {
+                Some(CmdReport::Build(BuildReport::default()))
+            },
+            RunKind::Line | RunKind::Agent => None,
         }
     }
 
@@ -171,6 +228,31 @@ impl CmdReport {
     pub(crate) fn push_line(&mut self, line: &str) {
         match self {
             CmdReport::Test(report) => report.push_line(line),
+            CmdReport::Build(report) => report.push_line(line),
+        }
+    }
+
+    /// The done and the total count of the run's progress, `None` while its
+    /// output names no total.
+    ///
+    /// A test run counts the tests that finished against the tests that its
+    /// binaries said they would run. A build counts the units of cargo's
+    /// progress bar.
+    pub(crate) fn progress(&self) -> Option<(u32, u32)> {
+        match self {
+            CmdReport::Test(report) => (report.total > 0).then(|| (report.done(), report.total)),
+            CmdReport::Build(report) => report.progress,
+        }
+    }
+
+    /// The location that an Enter at an empty prompt goes to, a test run's
+    /// first failure that names one or a build's first error.
+    ///
+    /// A build's warnings never take the Enter.
+    pub(crate) fn first_location(&self) -> Option<&ParsedLocation> {
+        match self {
+            CmdReport::Test(report) => report.first_location(),
+            CmdReport::Build(report) => report.errors.first().map(|error| &error.location),
         }
     }
 }
@@ -195,7 +277,7 @@ impl TestReport {
     }
 
     /// The location of the first failure whose panic line named one.
-    pub(crate) fn first_location(&self) -> Option<&ParsedLocation> {
+    fn first_location(&self) -> Option<&ParsedLocation> {
         self.failures
             .iter()
             .find_map(|failure| failure.location.as_ref())
@@ -310,6 +392,52 @@ impl TestReport {
     }
 }
 
+impl BuildReport {
+    /// Read one line of the build's output into the report.
+    ///
+    /// A line whose trimmed start is `Building [` is a redraw of cargo's
+    /// progress bar, and the `N/M` after the bar's `]` sets the progress. A
+    /// line that starts with `error` or `warning`, a code in brackets or
+    /// none, and a colon is a diagnostic's header, which waits for its
+    /// location. The next line whose trimmed start is `--> ` names it, and a
+    /// location that does not parse drops it.
+    ///
+    /// A blank line or another header before the location drops the waiting
+    /// header, so the summary lines that end a build count for nothing.
+    fn push_line(&mut self, line: &str) {
+        let trimmed = line.trim_start();
+        if let Some(bar) = trimmed.strip_prefix("Building [") {
+            if let Some(progress) = bar_counts(bar) {
+                self.progress = Some(progress);
+            }
+            return;
+        }
+        if let Some((severity, message)) = diagnostic_header(line) {
+            self.pending = Some((severity, message.to_owned()));
+            return;
+        }
+        if trimmed.is_empty() {
+            self.pending = None;
+            return;
+        }
+
+        let Some(at) = trimmed.strip_prefix("--> ") else {
+            return;
+        };
+        let Some((severity, message)) = self.pending.take() else {
+            return;
+        };
+        let Some(location) = location_picker::parse_location_line(at) else {
+            return;
+        };
+        let diagnostic = Diagnostic { message, location };
+        match severity {
+            Severity::Error => self.errors.push(diagnostic),
+            Severity::Warning => self.warnings.push(diagnostic),
+        }
+    }
+}
+
 impl LineFeed {
     /// Cut `bytes` into lines and hand each line that they end to `sink`, its
     /// escape sequences dropped, holding back the bytes of a line that has
@@ -368,6 +496,32 @@ fn result_counts(rest: &str) -> (u32, u32, u32) {
     counts
 }
 
+/// The finished and the total units that a redraw of cargo's progress bar
+/// names, read from the text after its `Building [`.
+///
+/// The counts follow the bar's `]` as `N/M`, and a colon and the names of the
+/// units that build follow them.
+fn bar_counts(bar: &str) -> Option<(u32, u32)> {
+    let (_, rest) = bar.split_once(']')?;
+    let counts = rest.trim_start().split([':', ' ']).next()?;
+    let (done, total) = counts.split_once('/')?;
+    Some((done.parse().ok()?, total.parse().ok()?))
+}
+
+/// The severity and the message of a diagnostic's header, such as
+/// `error[E0308]: mismatched types`, or `None` for another line.
+fn diagnostic_header(line: &str) -> Option<(Severity, &str)> {
+    let (severity, rest) = match line.strip_prefix("error") {
+        Some(rest) => (Severity::Error, rest),
+        None => (Severity::Warning, line.strip_prefix("warning")?),
+    };
+    let rest = match rest.strip_prefix('[') {
+        Some(coded) => coded.split_once(']')?.1,
+        None => rest,
+    };
+    Some((severity, rest.strip_prefix(':')?.trim()))
+}
+
 /// `text` without its CSI and OSC escape sequences.
 ///
 /// A CSI sequence runs from ESC `[` to its final byte, in 0x40 to 0x7E, and an
@@ -408,14 +562,22 @@ fn strip_ansi(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        strip_ansi, LineFeed, ParsedLocation, TestFailure, TestReport, NO_THREAD_ID, ONE_FAILURE,
-        THREE_BINARIES,
+        strip_ansi, BuildReport, Diagnostic, LineFeed, ParsedLocation, TestFailure, TestReport,
+        ERROR_AND_WARNING, NO_THREAD_ID, ONE_FAILURE, THREE_BINARIES,
     };
 
     /// The report of `text`, folded over the lines that a [`LineFeed`] cuts
     /// from it.
     fn parse_test_output(text: &str) -> TestReport {
         let mut report = TestReport::default();
+        LineFeed::default().push(text.as_bytes(), &mut |line| report.push_line(line));
+        report
+    }
+
+    /// The build report of `text`, folded over the lines that a [`LineFeed`]
+    /// cuts from it.
+    fn parse_build_output(text: &str) -> BuildReport {
+        let mut report = BuildReport::default();
         LineFeed::default().push(text.as_bytes(), &mut |line| report.push_line(line));
         report
     }
@@ -585,6 +747,82 @@ mod tests {
         assert_eq!(
             lines(&["test a ..", ". ok\r", "\ntest b ... ok\n"]),
             ["test a ... ok", "test b ... ok"],
+        );
+    }
+
+    #[test]
+    fn a_progress_line_gives_its_counts() {
+        assert_eq!(
+            [
+                "    Building [=======================>   ] 212/240: stoat(build), syn\n",
+                "    Finished `dev` profile [unoptimized + debuginfo] target(s) in 2.44s\n",
+            ]
+            .map(|text| parse_build_output(text).progress),
+            [Some((212, 240)), None],
+        );
+    }
+
+    /// A redraw of the bar that cargo draws when asked ends in a carriage
+    /// return, and the line after it starts with an erase.
+    #[test]
+    fn a_bar_segment_of_cargo_gives_its_counts() {
+        let text = format!(
+            "\x1b[1m\x1b[96m    Building\x1b[0m [========>      ] 1/3: probe(build){}\r{}",
+            " ".repeat(20),
+            "\x1b[K\x1b[1m\x1b[92m   Compiling\x1b[0m probe v0.1.0\n",
+        );
+        assert_eq!(parse_build_output(&text).progress, Some((1, 3)));
+    }
+
+    /// A diagnostic counts once its location line names where it is, so the
+    /// summary lines that end a build count for nothing.
+    #[test]
+    fn a_diagnostic_counts_only_with_its_location() {
+        let at = |line, column| ParsedLocation {
+            path: "stoat/src/render/chrome.rs".to_owned(),
+            line,
+            column,
+            text: String::new(),
+        };
+        let report = parse_build_output(ERROR_AND_WARNING);
+        assert_eq!(
+            (report.errors, report.warnings),
+            (
+                vec![Diagnostic {
+                    message: "mismatched types".to_owned(),
+                    location: at(412, 20),
+                }],
+                vec![Diagnostic {
+                    message: "unused variable: `width`".to_owned(),
+                    location: at(210, 9),
+                }],
+            ),
+        );
+    }
+
+    /// A blank line drops a header that waits for its location, so a later
+    /// location line, such as a note's, completes no diagnostic.
+    #[test]
+    fn a_blank_line_drops_a_waiting_header() {
+        let report = parse_build_output(concat!(
+            "error: could not compile `stoat` (lib) due to 1 previous error\n",
+            "\n",
+            "note: a later message\n",
+            "  --> stoat/src/render/chrome.rs:1:1\n",
+        ));
+        assert_eq!((report.errors, report.warnings), (Vec::new(), Vec::new()));
+    }
+
+    #[test]
+    fn the_last_lines_of_a_run_count_for_nothing() {
+        let report = parse_build_output(concat!(
+            "warning: `probe` (lib) generated 1 warning (run `cargo fix --lib -p probe` to apply 1 ",
+            "suggestion)\n",
+            "    Finished `dev` profile [unoptimized + debuginfo] target(s) in 2.44s\n",
+        ));
+        assert_eq!(
+            (report.errors, report.warnings, report.progress),
+            (Vec::new(), Vec::new(), None),
         );
     }
 

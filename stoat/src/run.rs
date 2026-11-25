@@ -8,7 +8,7 @@ use crate::{
     input_view::{InputView, SubmitTarget},
     workspace::Workspace,
 };
-use cargo::TestReport;
+use cargo::CmdReport;
 pub use pty::{
     agent_socket_bind_dir, agent_socket_dir, agent_socket_path, agent_socket_path_in, spawn_claude,
     spawn_ssh_reader, spawn_term_reader, spawn_terminal, PtyNotification, TermSpawnEnv,
@@ -206,9 +206,10 @@ impl RunState {
     }
 
     /// The hint row after the newest block's last row, which names the key
-    /// that goes to the block's first failure.
+    /// that goes to the block's first failure or error.
     ///
-    /// `Some` when the newest Cmd finished and its report located a failure.
+    /// `Some` when the newest Cmd finished and its report located a test
+    /// failure or a build error, as [`CmdReport::first_location`] reads it.
     /// The row counts as the block's last row, so the block's rule runs under
     /// it and a failed block's bar runs beside it.
     pub(crate) fn hint(&self, cmds: &SlotMap<CmdId, Cmd>) -> Option<BodyRow> {
@@ -224,7 +225,7 @@ impl RunState {
     fn has_hint(&self, cmds: &SlotMap<CmdId, Cmd>) -> bool {
         self.active_block(cmds)
             .and_then(Cmd::finished_report)
-            .and_then(TestReport::first_location)
+            .and_then(CmdReport::first_location)
             .is_some()
     }
 

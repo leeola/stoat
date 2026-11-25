@@ -1,9 +1,10 @@
 use super::{
-    cargo::{CmdReport, LineFeed, TestReport},
+    cargo::{BuildReport, CmdReport, LineFeed, TestReport},
     kind::{self, RunKind},
     pty::CmdProcess,
 };
 use crate::{
+    location_picker::ParsedLocation,
     osc_cap::{OscCap, MAX_OSC_CLIPBOARD_BYTES, MAX_OSC_PLAIN_BYTES},
     theme::scope,
 };
@@ -775,63 +776,34 @@ impl Cmd {
         self.lines = LineFeed::default();
     }
 
-    /// The report of a finished `cargo test` run that read a test binary's
-    /// output, which the block can show in place of that output.
-    pub(crate) fn finished_report(&self) -> Option<&TestReport> {
-        match &self.report {
-            Some(CmdReport::Test(report)) if self.finished && report.binaries > 0 => Some(report),
-            _ => None,
-        }
+    /// The report of a finished run that the block can show in place of its
+    /// output.
+    ///
+    /// A test run's report shows once a test binary's output arrived. A
+    /// build's shows when it holds an error or a warning, so a clean build
+    /// keeps cargo's own lines.
+    pub(crate) fn finished_report(&self) -> Option<&CmdReport> {
+        let report = self.report.as_ref().filter(|_| self.finished)?;
+        let shows = match report {
+            CmdReport::Test(report) => report.binaries > 0,
+            CmdReport::Build(report) => !report.errors.is_empty() || !report.warnings.is_empty(),
+        };
+        shows.then_some(report)
     }
 
     /// The rows that the block shows in place of its output, `None` for a
     /// block that shows its output.
     ///
     /// A block with a [`Self::finished_report`] shows its report unless
-    /// [`Self::raw_view`] is on. The first row reads the passed count, the
-    /// failed count when it is over 0, and the test and binary counts. Each
-    /// failure takes a row with its name and, when its panic named one, the
-    /// file name and line, and a row under it with its message when it has
-    /// one. The last row counts the output's rows and names `t`, the key that
+    /// [`Self::raw_view`] is on, as [`test_rows`] and [`build_rows`] lay it
+    /// out. The last row counts the output's rows and names `t`, the key that
     /// shows them.
     pub(crate) fn report_rows(&self) -> Option<Vec<BodyRow>> {
-        let report = self.finished_report().filter(|_| !self.raw_view)?;
-        let (passed, failed, _) = report.totals();
-
-        let mut summary = vec![(format!("{passed} passed"), Tone::Success)];
-        if failed > 0 {
-            summary.push((format!("  {failed} failed"), Tone::Danger));
-        }
-        summary.push((
-            format!(
-                "  {} \u{b7} {}",
-                counted(report.total, "test", "tests"),
-                counted(report.binaries, "binary", "binaries")
-            ),
-            Tone::Dim,
-        ));
-        let mut rows = vec![BodyRow { spans: summary }];
-
-        for failure in &report.failures {
-            let mut spans = vec![(format!("\u{2717} {}", failure.name), Tone::Danger)];
-            if let Some(location) = &failure.location {
-                let path = Path::new(&location.path);
-                let file = path.file_name().unwrap_or(path.as_os_str());
-                spans.push((
-                    format!("   {}:{}", file.to_string_lossy(), location.line),
-                    Tone::Muted,
-                ));
-            }
-            rows.push(BodyRow { spans });
-            if let Some(message) = &failure.message {
-                rows.push(BodyRow {
-                    spans: vec![(format!("  {message}"), Tone::Dim)],
-                });
-            }
-        }
-
-        let lines = self.grid.rendered_line_count();
-        let lines = counted(u32::try_from(lines).unwrap_or(u32::MAX), "line", "lines");
+        let mut rows = match self.finished_report().filter(|_| !self.raw_view)? {
+            CmdReport::Test(report) => test_rows(report),
+            CmdReport::Build(report) => build_rows(report),
+        };
+        let lines = counted(self.grid.rendered_line_count(), "line", "lines");
         rows.push(BodyRow {
             spans: vec![(
                 format!("\u{22ef} {lines} of output \u{b7} t terminal view"),
@@ -881,6 +853,8 @@ pub(crate) enum Tone {
     Success,
     /// `ui.error`, for a failure.
     Danger,
+    /// `ui.diagnostic.warning`, for a warning.
+    Warning,
     /// `ui.key_label`, for a key that a hint names.
     Key,
 }
@@ -893,13 +867,100 @@ impl Tone {
             Tone::Muted => scope::UI_TEXT_MUTED,
             Tone::Success => scope::UI_BADGE_COMPLETE,
             Tone::Danger => scope::UI_ERROR,
+            Tone::Warning => scope::UI_DIAGNOSTIC_WARNING,
             Tone::Key => scope::UI_KEY_LABEL,
         }
     }
 }
 
+/// The rows of a test run's report, before the row that counts its output.
+///
+/// The first row reads the passed count, the failed count when it is over 0,
+/// and the test and binary counts. Each failure takes a row with its name
+/// and, when its panic named one, the file name and line, and a row under it
+/// with its message when it has one.
+fn test_rows(report: &TestReport) -> Vec<BodyRow> {
+    let (passed, failed, _) = report.totals();
+    let mut summary = vec![(format!("{passed} passed"), Tone::Success)];
+    if failed > 0 {
+        summary.push((format!("  {failed} failed"), Tone::Danger));
+    }
+    summary.push((
+        format!(
+            "  {} \u{b7} {}",
+            counted(report.total as usize, "test", "tests"),
+            counted(report.binaries as usize, "binary", "binaries")
+        ),
+        Tone::Dim,
+    ));
+    let mut rows = vec![BodyRow { spans: summary }];
+
+    for failure in &report.failures {
+        let mut spans = vec![(format!("\u{2717} {}", failure.name), Tone::Danger)];
+        spans.extend(failure.location.as_ref().map(location_span));
+        rows.push(BodyRow { spans });
+        if let Some(message) = &failure.message {
+            rows.push(BodyRow {
+                spans: vec![(format!("  {message}"), Tone::Dim)],
+            });
+        }
+    }
+    rows
+}
+
+/// The rows of a build's report, before the row that counts its output.
+///
+/// The first row reads the error count and the warning count, each left out
+/// at 0. Each error takes a row with U+2717, its message, and its file name
+/// and line, and each warning after them a row with U+25B2 in place of
+/// U+2717.
+fn build_rows(report: &BuildReport) -> Vec<BodyRow> {
+    let mut summary = Vec::new();
+    if !report.errors.is_empty() {
+        summary.push((
+            counted(report.errors.len(), "error", "errors"),
+            Tone::Danger,
+        ));
+    }
+    if !report.warnings.is_empty() {
+        let gap = if summary.is_empty() { "" } else { "  " };
+        let warnings = counted(report.warnings.len(), "warning", "warnings");
+        summary.push((format!("{gap}{warnings}"), Tone::Warning));
+    }
+    let mut rows = vec![BodyRow { spans: summary }];
+
+    let errors = report
+        .errors
+        .iter()
+        .map(|diagnostic| (diagnostic, "\u{2717}", Tone::Danger));
+    let warnings = report
+        .warnings
+        .iter()
+        .map(|diagnostic| (diagnostic, "\u{25b2}", Tone::Warning));
+    for (diagnostic, mark, tone) in errors.chain(warnings) {
+        rows.push(BodyRow {
+            spans: vec![
+                (format!("{mark} {}", diagnostic.message), tone),
+                location_span(&diagnostic.location),
+            ],
+        });
+    }
+    rows
+}
+
+/// The span that names `location`'s file name and line, three spaces after
+/// the text before it.
+fn location_span(location: &ParsedLocation) -> (String, Tone) {
+    let path = Path::new(&location.path);
+    let file = path.file_name().unwrap_or(path.as_os_str());
+    (
+        format!("   {}:{}", file.to_string_lossy(), location.line),
+        Tone::Muted,
+    )
+}
+
 /// `count` and its noun, `one` for a count of 1 and `many` for any other.
-fn counted(count: u32, one: &str, many: &str) -> String {
+pub(crate) fn counted(count: usize, one: &str, many: &str) -> String {
     match count {
         1 => format!("1 {one}"),
         _ => format!("{count} {many}"),
