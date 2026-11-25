@@ -2427,6 +2427,46 @@ fn a_failed_body_carries_the_danger_bar_in_pixels() {
     );
 }
 
+/// A Cmd whose output asks for the alternate screen hands off to a terminal
+/// tab and leaves a Stub, which carries the run color's bar beside its rows.
+///
+/// `printf '\033\133?1049h'` prints the request, so its line runs again in a
+/// new tab, where it ends at once and the tab closes. The line names `[` by
+/// its octal code, because the prompt pairs a typed bracket with its closer.
+///
+/// The block is then the header on row 44, the Stub row 45, and the hint row
+/// 46. The bar covers the two pixels from x 18 beside the Stub row and the
+/// hint row, and the two pixels right of it keep the base. The header's
+/// status reads `tab closed` in the muted color, with no pixel of the run
+/// color.
+#[test]
+fn a_handed_off_cmd_leaves_a_stub_with_its_bar() {
+    let mut home = support::scratch_home();
+    let shot = settled_frame(
+        home.path(),
+        "basic-diff",
+        "unstaged.txt",
+        "<Space>t<Settle>printf '\\033\\133?1049h'<Enter><Settle:800>",
+    );
+
+    expect_region(&shot, &mut home, (18, 812, 2, 30), SPECIAL, "stub_bar");
+    expect_region(&shot, &mut home, (20, 812, 2, 30), BASE, "stub_bar_edge");
+
+    let status = cell_rect(128, 44, 30, 1);
+    let (muted, run) = (
+        pixels_of(&shot, status, MUTED),
+        pixels_of(&shot, status, SPECIAL),
+    );
+    if muted == 0 || run > 0 {
+        let frame = keep_frame(&shot, &mut home, "stub_status");
+        panic!(
+            "the header's right end reads {muted} muted pixels and {run} run color pixels; \
+             want the muted status and no run color; the frame is {}",
+            frame.display(),
+        );
+    }
+}
+
 /// A Parsed Cmd's header ends in its Kind Chip, its label in the info color
 /// on the chip's tint.
 ///

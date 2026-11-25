@@ -95,17 +95,21 @@ pub(super) fn toggle_tab(stoat: &mut Stoat) -> UpdateEffect {
     UpdateEffect::Redraw
 }
 
-/// Close the active tab and release every view its layout held.
+/// Close tab `index` and release every view its layout held.
+///
+/// Closing the active tab moves to the tab that
+/// [`Workspace::close_tab`](crate::workspace::Workspace::close_tab) picks, and
+/// closing another tab leaves the active one in place. The last tab stays, and
+/// the status line says so.
 ///
 /// Editors go through the referenced check rather than being dropped outright,
 /// since tabs share a workspace's editors and another tab may still show one.
 /// A shell that a pane of the tab covered ends with the tab, unless another
 /// view shows it, and so does a commits list a pane covered.
-pub(super) fn close_tab(stoat: &mut Stoat) -> UpdateEffect {
+pub(super) fn close_tab_at(stoat: &mut Stoat, index: usize) -> UpdateEffect {
     let executor = stoat.executor.clone();
     let ws = stoat.active_workspace_mut();
-    let active = ws.active_tab;
-    let Some(closed) = ws.close_tab(active) else {
+    let Some(closed) = ws.close_tab(index) else {
         stoat.set_status("cannot close the last tab");
         return UpdateEffect::Redraw;
     };
@@ -230,7 +234,7 @@ pub(super) fn rename_tab(stoat: &mut Stoat, name: Option<&str>) -> UpdateEffect 
 /// Re-layout the newly active tab's tree to the pane layout area, so the first
 /// render after a switch shows correctly-sized panes rather than the
 /// zero-sized rects a parked tree was stored with.
-fn relayout(stoat: &mut Stoat) {
+pub(super) fn relayout(stoat: &mut Stoat) {
     let size = stoat.layout_size();
     stoat.active_workspace_mut().layout(size);
 }

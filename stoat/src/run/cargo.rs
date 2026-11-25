@@ -220,7 +220,7 @@ impl CmdReport {
             RunKind::Parsed(CargoKind::Build | CargoKind::Check | CargoKind::Clippy) => {
                 Some(CmdReport::Build(BuildReport::default()))
             },
-            RunKind::Line | RunKind::Agent => None,
+            RunKind::Line | RunKind::Agent | RunKind::FullTerminal => None,
         }
     }
 

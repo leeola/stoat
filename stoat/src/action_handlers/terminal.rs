@@ -9,7 +9,7 @@ use crate::{
     workspace::Workspace,
 };
 use futures::FutureExt;
-use std::sync::Arc;
+use std::{path::Path, sync::Arc};
 use stoat_action::{SplitNewDown, SplitNewRight};
 
 /// Dimensions the terminal PTY opens at before the render/resize pass fits it
@@ -176,15 +176,33 @@ pub(crate) fn respawn_terminal_panes(stoat: &mut Stoat) {
 ///
 /// Shared by the terminal action and the restore-time respawn. Resolves the
 /// program and arguments from the `terminal.shell` / `terminal.args` settings
-/// (falling back to `$SHELL`, then `/bin/sh`), stores the session alongside a
-/// fresh screen emulator, and starts its reader.
+/// (falling back to `$SHELL`, then `/bin/sh`), and runs the shell in the
+/// workspace root, as [`spawn_terminal_view_with`] spawns it.
 pub(super) fn spawn_terminal_view(stoat: &mut Stoat) -> View {
     let (program, args) = resolve_shell(
         stoat.settings.terminal_shell.as_deref(),
         stoat.settings.terminal_args.as_deref(),
         stoat.env_host().var("SHELL"),
     );
+    let cwd = stoat.active_workspace().git_root.clone();
+    spawn_terminal_view_with(stoat, &program, &args, &cwd, None)
+}
 
+/// Spawn `program` with `args` in `cwd` as a fresh terminal session, and
+/// return a [`View::Terminal`] naming it, or [`View::Label`] when the spawn
+/// fails.
+///
+/// The session's environment names the workspace's hook socket, as a shell
+/// of the Terminal action's has it. The session goes into the workspace's
+/// terms with a fresh screen emulator and `label`, which names it until its
+/// child sets a title, and its reader starts.
+pub(super) fn spawn_terminal_view_with(
+    stoat: &mut Stoat,
+    program: &str,
+    args: &[String],
+    cwd: &Path,
+    label: Option<String>,
+) -> View {
     // The shell's environment names this workspace's socket, so bind it before
     // handing over the path. Repeat calls for a workspace already served cost
     // nothing.
@@ -199,7 +217,6 @@ pub(super) fn spawn_terminal_view(stoat: &mut Stoat) -> View {
     let socket_dir = stoat.agent_socket_dir.clone();
     let workspace = stoat.active_workspace;
     let ws = stoat.active_workspace_mut();
-    let cwd = ws.git_root.clone();
     let diff = ws.env.diff.clone();
 
     // Minted before the spawn because the child's environment names it, and the
@@ -213,7 +230,7 @@ pub(super) fn spawn_terminal_view(stoat: &mut Stoat) -> View {
 
     // The local terminal host opens the PTY synchronously, so the spawn future
     // is ready on first poll, matching the claude pane's spawn path.
-    let spawned = spawn_terminal(&*host, &cwd, &program, &args, &diff, session_env).now_or_never();
+    let spawned = spawn_terminal(&*host, cwd, program, args, &diff, session_env).now_or_never();
     let session = match spawned {
         Some(Ok(session)) => session,
         Some(Err(err)) => {
@@ -224,11 +241,14 @@ pub(super) fn spawn_terminal_view(stoat: &mut Stoat) -> View {
     };
 
     let session: Arc<dyn TerminalSession> = Arc::from(session);
-    let term_id = ws.terms.insert(TermSession::new(
-        TermScreen::new(TERM_ROWS, TERM_COLS),
-        session.clone(),
-        token,
-    ));
+    let term_id = ws.terms.insert(TermSession {
+        label,
+        ..TermSession::new(
+            TermScreen::new(TERM_ROWS, TERM_COLS),
+            session.clone(),
+            token,
+        )
+    });
     spawn_term_reader(&executor, session, workspace, term_id, pty_tx);
     tracing::info!(
         target: "stoat::terminal",

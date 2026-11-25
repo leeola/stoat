@@ -11,6 +11,7 @@ use crate::{
         vterm::{self, BodyRow},
         Cmd, CmdId, GridSelection, RunState, StyledCell, VtermGrid,
     },
+    term_session::{TermId, TermSession},
 };
 use ratatui::{
     buffer::Buffer,
@@ -47,12 +48,16 @@ pub(crate) struct StatusPart {
 /// [`RunState::hint`] row follows its last row.
 ///
 /// Inside stoatty a rule ends each block, a bar runs beside the body of a
-/// failed block, and a rule tops the prompt row, as [`paint_stack_rules`]
-/// draws them. A plain terminal draws none of them.
+/// failed block and of a Stub, and a rule tops the prompt row, as
+/// [`paint_stack_rules`] draws them. A plain terminal draws none of them.
+///
+/// `terms` holds the sessions of the workspace, which tell whether a Stub's
+/// tab still runs.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn render_run_pane(
     run_state: &RunState,
     cmds: &slotmap::SlotMap<CmdId, Cmd>,
+    terms: &slotmap::SlotMap<TermId, TermSession>,
     editors: &mut slotmap::SlotMap<crate::editor_state::EditorId, crate::editor_state::EditorState>,
     theme: &crate::theme::Theme,
     chrome: &crate::render::editor::ResolvedChrome,
@@ -81,9 +86,9 @@ pub(crate) fn render_run_pane(
     // its whole scrollback, so materializing the rows would cost the history
     // on every paint to draw a pane's worth of it.
     let mut rule_rows = Vec::new();
-    let mut failed_bodies = Vec::new();
+    let mut body_bars = Vec::new();
     let mut base = 0;
-    let hint = run_state.hint(cmds);
+    let hint = run_state.hint(cmds, terms);
     let newest = run_state.blocks.len().saturating_sub(1);
     let blocks = run_state
         .blocks
@@ -112,7 +117,7 @@ pub(crate) fn render_run_pane(
                     let cwd = crate::run::abbreviate_path(cwd, home);
                     let token = command.chars().take_while(|ch| !ch.is_whitespace()).count();
                     let input = cmd_line::token_spans(command, token, theme);
-                    let parts = status_parts(block, theme);
+                    let parts = status_parts(block, terms, theme);
                     let header = CmdLine {
                         cwd: &cwd,
                         input: &input,
@@ -150,8 +155,15 @@ pub(crate) fn render_run_pane(
             rule_rows.push(row_of(span - 1));
         }
         let body = offsets.start.max(1)..offsets.end;
-        if block.finished && block.exit_status != Some(0) && !body.is_empty() {
-            failed_bodies.push((row_of(body.start), body.len() as u16));
+        let bar = match block.handoff {
+            Some(_) => Some(crate::theme::scope::UI_STATUSLINE_RUN),
+            None => (block.finished && block.exit_status != Some(0))
+                .then_some(crate::theme::scope::UI_ERROR),
+        };
+        if let Some(scope) = bar
+            && !body.is_empty()
+        {
+            body_bars.push((row_of(body.start), body.len() as u16, scope));
         }
         base += span;
     }
@@ -179,35 +191,28 @@ pub(crate) fn render_run_pane(
     // The plain terminal has no room for a rule between the rows, so the
     // stack and the prompt stay flush there.
     if scene.live() {
-        paint_stack_rules(
-            buf,
-            inner,
-            &rule_rows,
-            &failed_bodies,
-            input_row,
-            theme,
-            scene,
-        );
+        paint_stack_rules(buf, inner, &rule_rows, &body_bars, input_row, theme, scene);
     }
 }
 
-/// Draw the bar beside each failed body, the rule under each block, and the
-/// rule over the prompt, across `inner`.
+/// Draw the bar beside each body that carries one, the rule under each block,
+/// and the rule over the prompt, across `inner`.
 ///
-/// `rule_rows` holds the last row of each block on show, `failed_bodies` the
-/// first row and the row count of each failed block's body on show, and
+/// `rule_rows` holds the last row of each block on show, `body_bars` the
+/// first row, the row count, and the scope of each body bar on show, and
 /// `prompt_row` the prompt's row.
 ///
 /// A block's rule runs along its last row's bottom edge in `ui.run.rule`, and
-/// a theme that leaves that unset draws none. A failure bar is 4 sixteenths
-/// wide at `inner`'s left edge in `ui.error`. The prompt's rule runs along the
-/// prompt row's top edge in `ui.run.prompt.rule`, or in `ui.divider` for a
-/// theme that leaves that unset.
+/// a theme that leaves that unset draws none. A body bar is 4 sixteenths wide
+/// at `inner`'s left edge in the foreground of its scope, `ui.error` beside a
+/// failed block's body and `ui.statusline.run` beside a Stub's. The prompt's
+/// rule runs along the prompt row's top edge in `ui.run.prompt.rule`, or in
+/// `ui.divider` for a theme that leaves that unset.
 fn paint_stack_rules(
     buf: &mut Buffer,
     inner: Rect,
     rule_rows: &[u16],
-    failed_bodies: &[(u16, u16)],
+    body_bars: &[(u16, u16, &'static str)],
     prompt_row: u16,
     theme: &crate::theme::Theme,
     scene: &mut stoat_widgets::ApcScene,
@@ -223,11 +228,12 @@ fn paint_stack_rules(
         corners: 0,
     };
 
-    if let Some(color) = style_rgb(theme.get(crate::theme::scope::UI_ERROR).fg) {
-        for &(row, count) in failed_bodies {
-            let body = Rect::new(inner.x, row, inner.width, count);
-            bar(0, 4, count.saturating_mul(16), color).render(body, buf, scene);
-        }
+    for &(row, count, scope) in body_bars {
+        let Some(color) = style_rgb(theme.get(scope).fg) else {
+            continue;
+        };
+        let body = Rect::new(inner.x, row, inner.width, count);
+        bar(0, 4, count.saturating_mul(16), color).render(body, buf, scene);
     }
 
     // The rules go after the bars, so a block's rule runs unbroken under the
@@ -313,7 +319,33 @@ pub(super) fn paint_progress(
 /// the done count over the total between the two, such as `2 / 4`, as
 /// [`CmdReport::progress`] gives them. The status-line scope can carry a
 /// background, which a header leaves to the pane.
-pub(crate) fn status_parts(cmd: &Cmd, theme: &crate::theme::Theme) -> Vec<StatusPart> {
+///
+/// A Stub reads one part. It is U+25CF and `Terminal tab` in the foreground of
+/// `ui.statusline.run` while `terms` holds the session of its tab, and `tab
+/// closed` in `ui.text.muted` once the session ended.
+pub(crate) fn status_parts(
+    cmd: &Cmd,
+    terms: &slotmap::SlotMap<TermId, TermSession>,
+    theme: &crate::theme::Theme,
+) -> Vec<StatusPart> {
+    if let Some(handoff) = &cmd.handoff {
+        let (text, style) = match terms.contains_key(handoff.term) {
+            true => (
+                "\u{25cf} Terminal tab",
+                Style {
+                    fg: theme.get(crate::theme::scope::UI_STATUSLINE_RUN).fg,
+                    ..Style::default()
+                },
+            ),
+            false => ("tab closed", theme.get(crate::theme::scope::UI_TEXT_MUTED)),
+        };
+        return vec![StatusPart {
+            text: text.to_owned(),
+            style,
+            chip: false,
+        }];
+    }
+
     let kind_chip = cmd.kind.chip().map(|label| StatusPart {
         text: label.to_owned(),
         style: theme
@@ -976,7 +1008,7 @@ mod tests {
 
     /// The text and the foreground of each part of `cmd`'s status.
     fn status(cmd: &Cmd, theme: &Theme) -> Vec<(String, Option<Color>)> {
-        status_parts(cmd, theme)
+        status_parts(cmd, &slotmap::SlotMap::with_key(), theme)
             .into_iter()
             .map(|part| (part.text, part.style.fg))
             .collect()
@@ -1167,6 +1199,7 @@ mod tests {
         let Workspace {
             runs,
             cmds,
+            terms,
             editors,
             git_root,
             ..
@@ -1175,7 +1208,8 @@ mod tests {
         let mut buf = Buffer::empty(Rect::new(0, 0, area.right(), area.bottom()));
         let mut scene = ApcScene::new();
         render_run_pane(
-            run, cmds, editors, theme, &chrome, git_root, None, area, false, &mut buf, &mut scene,
+            run, cmds, terms, editors, theme, &chrome, git_root, None, area, false, &mut buf,
+            &mut scene,
         );
         (buf, scene)
     }
@@ -1349,8 +1383,9 @@ mod tests {
         let mut cmd = finished(Some(0), Duration::ZERO, 1);
         cmd.kind = kind::run_kind("cargo test");
 
-        let ermine_parts = status_parts(&cmd, &ermine);
-        let dark_parts = status_parts(&cmd, &dark);
+        let terms = slotmap::SlotMap::with_key();
+        let ermine_parts = status_parts(&cmd, &terms, &ermine);
+        let dark_parts = status_parts(&cmd, &terms, &dark);
         let texts: Vec<_> = ermine_parts
             .iter()
             .map(|part| (part.text.as_str(), part.chip))

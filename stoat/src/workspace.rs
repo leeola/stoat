@@ -1078,12 +1078,12 @@ impl Workspace {
         }
     }
 
-    /// The tab name of session `id`, which is the title its child set, or
-    /// `kind` while it has set none.
+    /// The tab name of session `id`, which is its
+    /// [`TermSession::display_title`], or `kind` while it has none.
     fn session_tab_title(&self, id: TermId, kind: &str) -> String {
         self.terms
             .get(id)
-            .and_then(|session| session.term.title())
+            .and_then(TermSession::display_title)
             .map(|title| text::truncate_to_cols(title, TAB_TITLE_MAX_COLS))
             .unwrap_or_else(|| kind.to_string())
     }

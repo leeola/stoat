@@ -849,10 +849,9 @@ impl TestHarness {
     /// The status of the Cmd `cmd` of the active workspace as its Run Block's
     /// header reads it, the texts of its parts one space apart.
     pub(crate) fn cmd_status(&self, cmd: crate::run::CmdId) -> String {
-        let parts = crate::render::run_pane::status_parts(
-            &self.stoat.active_workspace().cmds[cmd],
-            &self.stoat.theme,
-        );
+        let ws = self.stoat.active_workspace();
+        let parts =
+            crate::render::run_pane::status_parts(&ws.cmds[cmd], &ws.terms, &self.stoat.theme);
         parts
             .iter()
             .map(|part| part.text.as_str())

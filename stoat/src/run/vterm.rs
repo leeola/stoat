@@ -6,6 +6,7 @@ use super::{
 use crate::{
     location_picker::ParsedLocation,
     osc_cap::{OscCap, MAX_OSC_CLIPBOARD_BYTES, MAX_OSC_PLAIN_BYTES},
+    term_session::TermId,
     theme::scope,
 };
 use base64::{engine::general_purpose::STANDARD, Engine};
@@ -734,6 +735,26 @@ pub struct Cmd {
     /// The text that `bash -c` runs when it is not [`Self::command`], such as
     /// the shell line of a config command whose typed line is its name.
     pub(crate) shell: Option<String>,
+    /// The tab that the Cmd's text went on in after its output asked for the
+    /// alternate screen, which makes the block a Stub, or `None` for a Cmd
+    /// that runs in its block.
+    pub(crate) handoff: Option<Handoff>,
+}
+
+/// Where a Stub's text went on running, a terminal tab of its own.
+///
+/// A Run Block draws a program's output into its grid, which has no room for
+/// a full-screen program. Such a Cmd leaves its row as a Stub, and the Stub
+/// reads the state of the tab off this.
+pub(crate) struct Handoff {
+    /// The session of the tab, which leaves the workspace's terms when its
+    /// program ends.
+    pub(crate) term: TermId,
+    /// The name of the tab until its program sets a title, the program word
+    /// of the text.
+    pub(crate) label: String,
+    /// Whether the tab runs an agent, whose tab stays after its session ends.
+    pub(crate) agent: bool,
 }
 
 impl Cmd {
@@ -758,6 +779,7 @@ impl Cmd {
             raw_view: false,
             source: None,
             shell: None,
+            handoff: None,
         }
     }
 
@@ -812,7 +834,22 @@ impl Cmd {
     /// [`Self::raw_view`] is on, as [`test_rows`] and [`build_rows`] lay it
     /// out. The last row counts the output's rows and names `t`, the key that
     /// shows them.
+    ///
+    /// A Stub, a Cmd with a [`Self::handoff`], shows one row whatever
+    /// [`Self::raw_view`] holds. It reads that the Cmd needs a full terminal
+    /// and went to its own tab, then the tab's label.
     pub(crate) fn report_rows(&self) -> Option<Vec<BodyRow>> {
+        if let Some(handoff) = &self.handoff {
+            return Some(vec![BodyRow {
+                spans: vec![
+                    (
+                        "needs a full terminal \u{b7} handed off to its own tab ".to_owned(),
+                        Tone::Dim,
+                    ),
+                    (handoff.label.clone(), Tone::Text),
+                ],
+            }]);
+        }
         let mut rows = match self.finished_report().filter(|_| !self.raw_view)? {
             CmdReport::Test(report) => test_rows(report),
             CmdReport::Build(report) => build_rows(report),
@@ -859,6 +896,8 @@ impl BodyRow {
 /// The color of a span of a [`BodyRow`], as the theme scope it reads.
 #[derive(Clone, Copy, Debug)]
 pub(crate) enum Tone {
+    /// `ui.text`, for a name, such as the label of a Stub's tab.
+    Text,
     /// `ui.text.dim`, the color of output the program left uncolored.
     Dim,
     /// `ui.text.muted`, for a location and a note.
@@ -877,6 +916,7 @@ impl Tone {
     /// The scope of the theme whose foreground the span draws in.
     pub(crate) fn scope(self) -> &'static str {
         match self {
+            Tone::Text => scope::UI_TEXT,
             Tone::Dim => scope::UI_TEXT_DIM,
             Tone::Muted => scope::UI_TEXT_MUTED,
             Tone::Success => scope::UI_BADGE_COMPLETE,

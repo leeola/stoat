@@ -3783,6 +3783,13 @@ pub(crate) fn window_content_version(
                 block.raw_view.hash(&mut hasher);
                 block.error.hash(&mut hasher);
                 block.selection.hash(&mut hasher);
+                // A Stub's status and hint turn on whether its tab's session
+                // lives, which no field of the Cmd records.
+                let handoff = block
+                    .handoff
+                    .as_ref()
+                    .map(|handoff| (handoff.term, ws.terms.contains_key(handoff.term)));
+                handoff.hash(&mut hasher);
             }
             input_view_version(&run.input, ws, &mut hasher)?;
         },

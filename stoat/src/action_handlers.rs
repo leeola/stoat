@@ -346,7 +346,10 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
         ActionKind::PrevTab => tab::prev_tab(stoat),
         ActionKind::MoveTabLeft => tab::move_tab_left(stoat),
         ActionKind::MoveTabRight => tab::move_tab_right(stoat),
-        ActionKind::CloseTab => tab::close_tab(stoat),
+        ActionKind::CloseTab => {
+            let active = stoat.active_workspace().active_tab;
+            tab::close_tab_at(stoat, active)
+        },
         ActionKind::ToggleTab => tab::toggle_tab(stoat),
         ActionKind::ToggleTabBar => tab::toggle_tab_bar(stoat),
         ActionKind::TogglePaneFade => tab::toggle_pane_fade(stoat),

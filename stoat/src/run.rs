@@ -6,6 +6,7 @@ pub mod vterm;
 use crate::{
     input_history::InputHistory,
     input_view::{InputView, SubmitTarget},
+    term_session::{TermId, TermSession},
     workspace::Workspace,
 };
 use cargo::CmdReport;
@@ -206,13 +207,34 @@ impl RunState {
     }
 
     /// The hint row after the newest block's last row, which names the keys
-    /// that run the block again and that go to its first failure or error.
+    /// that act on the block.
     ///
     /// `Some` when the newest Cmd finished and its report located a test
     /// failure or a build error, as [`CmdReport::first_location`] reads it.
-    /// The row counts as the block's last row, so the block's rule runs under
-    /// it and a failed block's bar runs beside it.
-    pub(crate) fn hint(&self, cmds: &SlotMap<CmdId, Cmd>) -> Option<BodyRow> {
+    /// That row names the keys that run the block again and that go to the
+    /// first of them.
+    ///
+    /// A newest Stub's row names `Enter`, which goes to its tab, while `terms`
+    /// holds the tab's session, and `C-r`, which runs it again, once the
+    /// session ended. The row counts as the block's last row, so the block's
+    /// rule runs under it and a block's bar runs beside it.
+    pub(crate) fn hint(
+        &self,
+        cmds: &SlotMap<CmdId, Cmd>,
+        terms: &SlotMap<TermId, TermSession>,
+    ) -> Option<BodyRow> {
+        if let Some(handoff) = self.active_block(cmds).and_then(|cmd| cmd.handoff.as_ref()) {
+            let (key, action) = match terms.contains_key(handoff.term) {
+                true => ("Enter", " go to tab"),
+                false => ("C-r", " run again"),
+            };
+            return Some(BodyRow {
+                spans: vec![
+                    (key.to_owned(), Tone::Key),
+                    (action.to_owned(), Tone::Muted),
+                ],
+            });
+        }
         self.has_hint(cmds).then(|| BodyRow {
             spans: vec![
                 ("C-r".to_owned(), Tone::Key),
@@ -223,12 +245,16 @@ impl RunState {
         })
     }
 
-    /// Whether the newest block carries the [`Self::hint`] row.
+    /// Whether the newest block carries the [`Self::hint`] row, which a Stub
+    /// always does.
     fn has_hint(&self, cmds: &SlotMap<CmdId, Cmd>) -> bool {
-        self.active_block(cmds)
-            .and_then(Cmd::finished_report)
-            .and_then(CmdReport::first_location)
-            .is_some()
+        self.active_block(cmds).is_some_and(|cmd| {
+            cmd.handoff.is_some()
+                || cmd
+                    .finished_report()
+                    .and_then(CmdReport::first_location)
+                    .is_some()
+        })
     }
 
     /// Translates a focused-pane-relative `(col, row)` cell into the active

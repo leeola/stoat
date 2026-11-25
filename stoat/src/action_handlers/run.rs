@@ -4,6 +4,7 @@ use crate::{
     app::{Stoat, UpdateEffect},
     buffer_lifecycle,
     buffer_registry::OpenOrigin,
+    file_finder::OpenIntent,
     host::{FsHost, OffsetEncoding},
     pane::{Axis, FocusTarget, PaneId, View},
     render::paint::style_rgb,
@@ -11,8 +12,10 @@ use crate::{
         cargo::CmdReport,
         kind::{self, CargoKind, RunKind},
         pty::{self, CmdEnv, CmdSink},
+        vterm::Handoff,
         Cmd, CmdId, RunId, RunState, VtermGrid,
     },
+    term_session::{TermId, ViewLocation},
     theme::scope,
     workspace::Workspace,
 };
@@ -101,9 +104,21 @@ pub(super) fn run_submit(stoat: &mut Stoat) -> UpdateEffect {
 /// to the first of them, as [`CmdReport::first_location`] picks it and
 /// [`go_to_location`] opens it. rustc counts a column in chars, so the column
 /// lands as UTF-32. A finished Cmd that the palette shows with no located
-/// failure opens its output, as [`open_cmd_output`] does. Every other Cmd
-/// takes the Enter as nothing.
+/// failure opens its output, as [`open_cmd_output`] does. A Stub goes to its
+/// tab, as [`super::terminal::show_terminal`] reveals it, which reports that
+/// the terminal exited once the tab's session ended. Every other Cmd takes
+/// the Enter as nothing.
 pub(super) fn block_enter(stoat: &mut Stoat, id: CmdId) -> UpdateEffect {
+    let stub = stoat
+        .active_workspace()
+        .cmds
+        .get(id)
+        .and_then(|cmd| cmd.handoff.as_ref())
+        .map(|handoff| handoff.term);
+    if let Some(term) = stub {
+        return super::terminal::show_terminal(stoat, term, OpenIntent::Replace);
+    }
+
     let found = stoat.active_workspace().cmds.get(id).and_then(|cmd| {
         let location = cmd.finished_report().and_then(CmdReport::first_location)?;
         Some((cmd.cwd.clone(), location.clone()))
@@ -245,10 +260,20 @@ pub(super) fn run_toggle_view(stoat: &mut Stoat) -> UpdateEffect {
 /// stack.
 ///
 /// A running Cmd of the Run Block stays as it is, and so does a Run pane with
-/// no finished Cmd. The Cmd keeps its place, as [`restart_cmd`] starts it.
+/// no finished Cmd. A Stub whose tab's session lives counts as running,
+/// because its program runs on in that tab. The Cmd keeps its place, as
+/// [`restart_cmd`] starts it.
 pub(super) fn run_again(stoat: &mut Stoat) -> UpdateEffect {
     let ws = stoat.active_workspace();
-    let finished = |id: &CmdId| ws.cmds.get(*id).is_some_and(|cmd| cmd.finished);
+    let finished = |id: &CmdId| {
+        ws.cmds.get(*id).is_some_and(|cmd| {
+            let tab_lives = cmd
+                .handoff
+                .as_ref()
+                .is_some_and(|handoff| ws.terms.contains_key(handoff.term));
+            cmd.finished && !tab_lives
+        })
+    };
     let id = match stoat.run_block_cmd() {
         Some(shown) => Some(shown).filter(finished),
         None => {
@@ -269,13 +294,106 @@ pub(super) fn run_again(stoat: &mut Stoat) -> UpdateEffect {
 
 /// Start the next run of the Cmd `id` with an empty output, in the directory
 /// and in the place where it ran before.
+///
+/// A Stub runs in its block again, with the kind that its text reads as.
 fn restart_cmd(stoat: &mut Stoat, id: CmdId) {
     let Some(cmd) = stoat.active_workspace_mut().cmds.get_mut(id) else {
         return;
     };
     cmd.grid = VtermGrid::new(cmd.grid.width());
     cmd.selection = None;
+    cmd.handoff = None;
+    cmd.kind = kind::run_kind(cmd.run_text());
     start_process(stoat, id);
+}
+
+/// Hand the Cmd `id`, whose output asked for the alternate screen, to a new
+/// terminal tab that runs its text again, and leave the Cmd as a Stub.
+///
+/// The Cmd's process is killed and the Cmd ends. The tab runs `bash -c` of
+/// the Cmd's text in the Cmd's cwd and takes the focus, because the program
+/// needs the keys. It goes by the text's program word until the program sets
+/// a title. The Cmd of the palette's Run Block closes the palette and leaves
+/// the store, because a Stub is a row of a Run pane. A spawn that fails ends
+/// the Cmd with the error line `handoff failed`.
+pub(crate) fn hand_off(stoat: &mut Stoat, id: CmdId) {
+    let now = stoat.executor.now();
+    let Some(cmd) = stoat.active_workspace_mut().cmds.get_mut(id) else {
+        return;
+    };
+    if let Some(process) = cmd.process.take() {
+        process.kill();
+    }
+    cmd.finished = true;
+    cmd.ended = Some(now);
+    cmd.kind = RunKind::FullTerminal;
+    let (text, cwd) = (cmd.run_text().to_owned(), cmd.cwd.clone());
+
+    // A line of assignments alone names no program, so the tab goes by the
+    // whole line.
+    let label = kind::program_word(&text).unwrap_or(&text).to_owned();
+    let args = ["-c".to_owned(), text];
+    let view =
+        super::terminal::spawn_terminal_view_with(stoat, "bash", &args, &cwd, Some(label.clone()));
+    let View::Terminal(term) = view else {
+        if let Some(cmd) = stoat.active_workspace_mut().cmds.get_mut(id) {
+            cmd.error = Some("handoff failed".into());
+        }
+        return;
+    };
+
+    let executor = stoat.executor.clone();
+    let ws = stoat.active_workspace_mut();
+    ws.new_tab(&executor);
+    let pane = ws.panes.focus();
+    buffer_lifecycle::replace_pane_view(ws, &executor, pane, view);
+    ws.focus = FocusTarget::SplitPane;
+    super::tab::relayout(stoat);
+
+    if stoat.run_block_cmd() == Some(id) {
+        if let Some(palette) = stoat.command_palette.take() {
+            super::palette::dispose_palette(stoat, palette);
+        }
+        stoat.active_workspace_mut().cmds.remove(id);
+        return;
+    }
+    if let Some(cmd) = stoat.active_workspace_mut().cmds.get_mut(id) {
+        cmd.handoff = Some(Handoff {
+            term,
+            label,
+            agent: false,
+        });
+    }
+}
+
+/// Close the tab that the ended session `term` of a Stub ran in, and answer
+/// whether it closed.
+///
+/// The tab closes when a Stub's handoff names `term` and runs no agent, the
+/// session's pane is the tab's only split pane, and the workspace has another
+/// tab. The tab exists for that program, and its last pane turns into a
+/// scratch buffer otherwise. The workspace goes back to the tab it left, as
+/// [`super::tab::close_tab_at`] moves it.
+pub(crate) fn retire_handoff(stoat: &mut Stoat, term: TermId) -> bool {
+    let ws = stoat.active_workspace();
+    let handed_off = ws.cmds.values().any(|cmd| {
+        cmd.handoff
+            .as_ref()
+            .is_some_and(|handoff| handoff.term == term && !handoff.agent)
+    });
+    let Some(ViewLocation::Pane { tab, pane }) = ws.term_location(term) else {
+        return false;
+    };
+    let tree = match tab == ws.active_tab {
+        true => Some(&ws.panes),
+        false => ws.tabs.get(tab).and_then(|slot| slot.parked.as_ref()),
+    };
+    let alone = tree.is_some_and(|tree| tree.split_pane_ids() == [pane]);
+    if !(handed_off && alone && ws.tabs.len() > 1) {
+        return false;
+    }
+    super::tab::close_tab_at(stoat, tab);
+    true
 }
 
 /// Move the Cmd of the palette's Run Block, running or finished, onto a Run
@@ -532,7 +650,7 @@ fn start_process(stoat: &mut Stoat, id: CmdId) {
             ("CARGO_TERM_PROGRESS_WHEN".to_owned(), "always".to_owned()),
             ("CARGO_TERM_PROGRESS_WIDTH".to_owned(), width.to_string()),
         ],
-        RunKind::Line | RunKind::Agent => Vec::new(),
+        RunKind::Line | RunKind::Agent | RunKind::FullTerminal => Vec::new(),
     };
     let env = CmdEnv {
         diff: &diff,
@@ -579,20 +697,22 @@ fn cd_path(line: &str) -> Option<&str> {
 #[cfg(test)]
 mod tests {
     use crate::{
-        app::Stoat,
+        app::{Stoat, UpdateEffect},
         host::FakeTerminalSession,
-        pane::View,
+        pane::{DockPanel, DockSide, DockVisibility, FocusTarget, View},
         render::paint::style_rgb,
         run::{
             cargo::{ERROR_AND_WARNING, ONE_FAILURE, THREE_BINARIES},
+            kind::RunKind,
             vterm::BodyRow,
             CmdId, GridSelection, PtyNotification,
         },
+        term_session::TermId,
         test_harness::{editor, CmdHandle, TestHarness},
         theme::scope,
     };
     use futures::FutureExt;
-    use std::{path::PathBuf, sync::Arc, time::Duration};
+    use std::{io, path::PathBuf, sync::Arc, time::Duration};
     use stoatty_protocol::command::{self, Command};
 
     /// The file that the failure and the error of the samples name, under the
@@ -603,6 +723,10 @@ mod tests {
     /// `block` output.
     const HELLO: &str = r#"command hello { run = shell("echo hi"); }"#;
 
+    /// The request for the alternate screen that a full-screen program writes
+    /// first.
+    const FULL_SCREEN: &[u8] = b"\x1b[?1049h";
+
     /// The program, the arguments, the cwd, and the last variable of a spawn of
     /// the fake terminal host.
     type Spawn = (String, Vec<String>, PathBuf, Option<(String, String)>);
@@ -610,6 +734,9 @@ mod tests {
     /// A progress bar that the run pane draws, as its left edge, its width,
     /// and its color.
     type ProgressBar = (i16, u16, [u8; 3]);
+
+    /// A bar beside a block's body, as its top edge, its height, and its color.
+    type BodyBar = (i16, u16, [u8; 3]);
 
     #[test]
     fn a_run_drops_the_editor_it_replaces() {
@@ -848,31 +975,419 @@ mod tests {
         );
     }
 
-    /// A full-screen request ends its own Cmd with the error line and kills
-    /// its process, and the other Cmd runs on.
+    /// A full-screen request kills its own Cmd's process and runs the Cmd's
+    /// text again in a new terminal tab, which takes the focus and goes by the
+    /// program's name. The other Cmd runs on.
     #[test]
-    fn a_full_screen_request_ends_its_own_cmd_alone() {
+    fn a_full_screen_request_hands_the_cmd_to_a_terminal_tab() {
         let mut h = Stoat::test();
+        h.stoat.active_workspace_mut().git_root = PathBuf::from("/work");
         h.open_run();
-        let [first, second] = ["vim", "sleep 9"].map(|line| h.submit_run(line));
-        h.inject_cmd_output(first.cmd, b"\x1b[?1049h");
+        let [first, second] = ["mytui -d 5", "sleep 9"].map(|line| h.submit_run(line));
+        h.inject_cmd_output(first.cmd, FULL_SCREEN);
 
         let ws = h.stoat.active_workspace();
-        let state = |handle: &CmdHandle| {
-            let cmd = &ws.cmds[handle.cmd];
-            (cmd.finished, cmd.error.clone(), handle.session.was_killed())
-        };
+        let stub = &ws.cmds[first.cmd];
+        let term = stub.handoff.as_ref().map(|handoff| handoff.term);
         assert_eq!(
-            [state(&first), state(&second)],
-            [
-                (
-                    true,
-                    Some("this command requires a full terminal".to_owned()),
-                    true
-                ),
-                (false, None, false),
-            ],
+            (
+                first.session.was_killed(),
+                spawns(&h).pop(),
+                (ws.tabs.len(), ws.active_tab, ws.tab_title(1)),
+                Some(ws.panes.pane(ws.panes.focus()).view.clone()),
+                (stub.finished, stub.kind),
+                (ws.cmds[second.cmd].finished, second.session.was_killed()),
+            ),
+            (
+                true,
+                Some((
+                    "bash".to_owned(),
+                    vec!["-c".to_owned(), "mytui -d 5".to_owned()],
+                    PathBuf::from("/work"),
+                    Some(("TERM".to_owned(), "xterm-256color".to_owned())),
+                )),
+                (2, 1, "mytui".to_owned()),
+                term.map(View::Terminal),
+                (true, RunKind::FullTerminal),
+                (false, false),
+            ),
         );
+    }
+
+    /// Back on the Run pane's tab, a Stub's header names its tab in the run
+    /// color, its row names the tab, and its hint names the key that goes
+    /// there. One bar in the run color runs beside the two rows.
+    #[test]
+    fn the_stub_names_its_tab() {
+        let mut h = Stoat::test();
+        let (cmd, _) = handed_off(&mut h);
+        super::super::dispatch(&mut h.stoat, &stoat_action::ToggleTab);
+
+        let (prompt, bars) = body_bars(&mut h);
+        let run = style_rgb(h.stoat.theme.get(scope::UI_STATUSLINE_RUN).fg).expect("an RGB color");
+        assert_eq!(
+            (h.cmd_status(cmd), report_and_hint(&h, cmd), bars),
+            (
+                "\u{25cf} Terminal tab".to_owned(),
+                (
+                    Some(vec![
+                        "needs a full terminal \u{b7} handed off to its own tab mytui".to_owned()
+                    ]),
+                    Some("Enter go to tab".to_owned()),
+                ),
+                vec![(prompt - 32, 32, run)],
+            ),
+        );
+    }
+
+    #[test]
+    fn enter_on_a_stub_goes_to_its_tab() {
+        let mut h = Stoat::test();
+        let (_, term) = handed_off(&mut h);
+        super::super::dispatch(&mut h.stoat, &stoat_action::ToggleTab);
+        h.type_keys("enter");
+
+        let ws = h.stoat.active_workspace();
+        assert_eq!(
+            (ws.active_tab, ws.panes.pane(ws.panes.focus()).view.clone()),
+            (1, View::Terminal(term)),
+        );
+    }
+
+    /// `Ctrl-r` leaves a Stub whose tab lives alone, because its program runs
+    /// on in that tab.
+    #[test]
+    fn ctrl_r_leaves_a_stub_with_a_live_tab_alone() {
+        let mut h = Stoat::test();
+        let (cmd, term) = handed_off(&mut h);
+        super::super::dispatch(&mut h.stoat, &stoat_action::ToggleTab);
+        let before = spawns(&h).len();
+        h.type_keys("ctrl-r");
+
+        let stub = &h.stoat.active_workspace().cmds[cmd];
+        assert_eq!(
+            (
+                spawns(&h).len(),
+                stub.handoff.as_ref().map(|handoff| handoff.term)
+            ),
+            (before, Some(term)),
+        );
+    }
+
+    /// The end of the program of a tab that its terminal fills alone closes
+    /// the tab and goes back to the Run pane's tab. The Stub reads that the
+    /// tab closed, and its hint names the key that runs it again.
+    #[test]
+    fn a_handoff_tab_closes_when_its_program_ends() {
+        let mut h = Stoat::test();
+        let (cmd, term) = handed_off(&mut h);
+        end_term(&mut h, term);
+
+        let ws = h.stoat.active_workspace();
+        assert_eq!(
+            (
+                (ws.tabs.len(), ws.active_tab, ws.terms.len()),
+                h.cmd_status(cmd),
+                report_and_hint(&h, cmd).1,
+            ),
+            (
+                (1, 0, 0),
+                "tab closed".to_owned(),
+                Some("C-r run again".to_owned())
+            ),
+        );
+    }
+
+    /// The end of the program of a handoff tab that the workspace left closes
+    /// that tab, and the Run pane's tab stays on show.
+    #[test]
+    fn a_parked_handoff_tab_closes_when_its_program_ends() {
+        let mut h = Stoat::test();
+        let (cmd, term) = handed_off(&mut h);
+        super::super::dispatch(&mut h.stoat, &stoat_action::ToggleTab);
+        end_term(&mut h, term);
+
+        let ws = h.stoat.active_workspace();
+        let run_shown = matches!(ws.panes.pane(ws.panes.focus()).view, View::Run(_));
+        assert_eq!(
+            (
+                (ws.tabs.len(), ws.active_tab, ws.terms.len(), run_shown),
+                h.cmd_status(cmd),
+            ),
+            ((1, 0, 0, true), "tab closed".to_owned()),
+        );
+    }
+
+    /// A handoff tab that is the workspace's last tab stays when its program
+    /// ends, and its pane turns into a scratch buffer, as a terminal's last
+    /// pane does.
+    ///
+    /// The Stub sits in a Run pane of a dock, which outlives the tab that the
+    /// Cmd ran in.
+    #[test]
+    fn a_handoff_tab_that_is_the_last_tab_stays() {
+        let mut h = Stoat::test();
+        let run = h.open_run();
+        let cmd = h.submit_run("mytui -d 5").cmd;
+        {
+            let ws = h.stoat.active_workspace_mut();
+            ws.docks.insert(dock(View::Run(run)));
+            let focus = ws.panes.focus();
+            ws.panes.pane_mut(focus).view = View::Label("left".into());
+        }
+        h.inject_cmd_output(cmd, FULL_SCREEN);
+        let term = h.stoat.active_workspace().cmds[cmd]
+            .handoff
+            .as_ref()
+            .expect("a handoff")
+            .term;
+        super::super::dispatch(&mut h.stoat, &stoat_action::ToggleTab);
+        super::super::dispatch(&mut h.stoat, &stoat_action::CloseTab);
+        end_term(&mut h, term);
+
+        let ws = h.stoat.active_workspace();
+        let scratch = matches!(ws.panes.pane(ws.panes.focus()).view, View::Editor(_));
+        assert_eq!(
+            ((ws.tabs.len(), ws.terms.len(), scratch), h.cmd_status(cmd)),
+            ((1, 0, true), "tab closed".to_owned()),
+        );
+    }
+
+    /// A handoff takes the focus from a dock, because the program needs the
+    /// keys.
+    #[test]
+    fn a_handoff_takes_the_focus_from_a_dock() {
+        let mut h = Stoat::test();
+        h.open_run();
+        let cmd = h.submit_run("mytui -d 5").cmd;
+        {
+            let ws = h.stoat.active_workspace_mut();
+            let label = ws.docks.insert(dock(View::Label("dock".into())));
+            ws.focus = FocusTarget::Dock(label);
+        }
+        h.inject_cmd_output(cmd, FULL_SCREEN);
+
+        let ws = h.stoat.active_workspace();
+        assert_eq!((ws.focus, ws.active_tab), (FocusTarget::SplitPane, 1));
+    }
+
+    /// A handoff lays its tab out before the next frame and asks for a
+    /// redraw, and so does the end of its tab's program, since each moves the
+    /// workspace to another tab.
+    #[test]
+    fn a_handoff_and_the_end_of_its_tab_ask_for_a_redraw() {
+        let mut h = Stoat::test();
+        h.open_run();
+        let cmd = h.submit_run("mytui -d 5").cmd;
+        let workspace = h.stoat.active_workspace;
+        let handed = h.stoat.handle_pty_notification(PtyNotification::CmdOutput {
+            workspace,
+            cmd,
+            run: 1,
+            data: FULL_SCREEN.to_vec(),
+        });
+        let (term, area) = {
+            let ws = h.stoat.active_workspace();
+            let handoff = ws.cmds[cmd].handoff.as_ref().expect("a handoff");
+            (handoff.term, ws.panes.pane(ws.panes.focus()).area)
+        };
+        let ended = h
+            .stoat
+            .handle_pty_notification(PtyNotification::TermExited {
+                workspace,
+                term_id: term,
+            });
+
+        assert_eq!(
+            (handed, ended, area.is_empty()),
+            (UpdateEffect::Redraw, UpdateEffect::Redraw, false),
+        );
+    }
+
+    /// A handoff whose spawn fails ends the Cmd with its error line, and no
+    /// tab opens.
+    #[test]
+    fn a_failed_handoff_ends_the_cmd_with_its_error() {
+        let mut h = Stoat::test();
+        h.open_run();
+        let cmd = h.submit_run("mytui -d 5").cmd;
+        h.fake_terminal_host()
+            .fail_next_spawn(io::ErrorKind::NotFound);
+        h.inject_cmd_output(cmd, FULL_SCREEN);
+
+        let ws = h.stoat.active_workspace();
+        let failed = &ws.cmds[cmd];
+        assert_eq!(
+            (
+                failed.finished,
+                failed.error.as_deref(),
+                failed.handoff.is_none(),
+                ws.tabs.len(),
+            ),
+            (true, Some("handoff failed"), true, 1),
+        );
+    }
+
+    /// A handoff tab with a second pane stays when its program ends, and
+    /// keeps that pane.
+    #[test]
+    fn a_handoff_tab_with_a_second_pane_stays() {
+        let mut h = Stoat::test();
+        let (_, term) = handed_off(&mut h);
+        super::super::dispatch(&mut h.stoat, &stoat_action::SplitNewRight);
+        end_term(&mut h, term);
+
+        let ws = h.stoat.active_workspace();
+        let editors: Vec<bool> = ws
+            .panes
+            .split_panes()
+            .map(|(_, pane)| matches!(pane.view, View::Editor(_)))
+            .collect();
+        assert_eq!((ws.tabs.len(), ws.active_tab, editors), (2, 1, vec![true]));
+    }
+
+    /// `Ctrl-r` on a Stub whose tab closed runs its line in its block again,
+    /// as a Line Cmd with no handoff.
+    #[test]
+    fn ctrl_r_on_a_closed_stub_runs_the_line_again() {
+        let mut h = Stoat::test();
+        let (cmd, term) = handed_off(&mut h);
+        end_term(&mut h, term);
+        h.fake_terminal_host()
+            .push_session(Arc::new(FakeTerminalSession::new()));
+        h.type_keys("ctrl-r");
+
+        let rerun = &h.stoat.active_workspace().cmds[cmd];
+        let last = spawns(&h).pop().map(|(_, args, _, var)| (args, var));
+        assert_eq!(
+            (
+                last,
+                rerun.run_count,
+                rerun.kind,
+                rerun.handoff.is_none(),
+                rerun.finished,
+            ),
+            (
+                Some((
+                    vec!["-c".to_owned(), "mytui -d 5".to_owned()],
+                    Some(("TERM".to_owned(), "dumb".to_owned())),
+                )),
+                2,
+                RunKind::Line,
+                true,
+                false,
+            ),
+        );
+    }
+
+    /// The exit of the killed process, which arrives after the handoff,
+    /// leaves the Stub as it is.
+    #[test]
+    fn a_late_exit_leaves_a_stub_as_it_is() {
+        let mut h = Stoat::test();
+        let (cmd, term) = handed_off(&mut h);
+        let ended = h.stoat.active_workspace().cmds[cmd].ended;
+        h.advance_clock(Duration::from_secs(3));
+        h.inject_cmd_done(cmd, 0);
+
+        let stub = &h.stoat.active_workspace().cmds[cmd];
+        assert_eq!(
+            (
+                stub.exit_status,
+                stub.ended,
+                stub.handoff.as_ref().map(|handoff| handoff.term),
+                h.cmd_status(cmd),
+            ),
+            (None, ended, Some(term), "\u{25cf} Terminal tab".to_owned()),
+        );
+    }
+
+    /// A Cmd of the palette's Run Block that asks for the alternate screen
+    /// hands off too. The palette closes with its input, and the Cmd leaves
+    /// the store.
+    #[test]
+    fn a_palette_block_that_goes_full_screen_closes_the_palette_and_leaves_no_cmd() {
+        let mut h = Stoat::test();
+        h.stoat
+            .reload_user_config(r#"command tui { run = shell("mytui"); }"#);
+        let (cmd, session) = enter_command(&mut h, "tui");
+        let input = h
+            .stoat
+            .command_palette
+            .as_ref()
+            .expect("the palette is open")
+            .input
+            .editor_id;
+        h.inject_cmd_output(cmd, FULL_SCREEN);
+
+        let ws = h.stoat.active_workspace();
+        let shown = matches!(ws.panes.pane(ws.panes.focus()).view, View::Terminal(_));
+        assert_eq!(
+            (
+                h.stoat.command_palette.is_none(),
+                ws.editors.contains_key(input),
+                ws.cmds.len(),
+                session.was_killed(),
+                (ws.active_tab, shown),
+            ),
+            (true, false, 0, true, (1, true)),
+        );
+    }
+
+    /// Run `mytui -d 5` in a new Run pane and have its output ask for the
+    /// alternate screen, and answer the Cmd and the session of its tab.
+    fn handed_off(h: &mut TestHarness) -> (CmdId, TermId) {
+        h.open_run();
+        let cmd = h.submit_run("mytui -d 5").cmd;
+        h.inject_cmd_output(cmd, FULL_SCREEN);
+        let term = h.stoat.active_workspace().cmds[cmd]
+            .handoff
+            .as_ref()
+            .expect("a handoff")
+            .term;
+        (cmd, term)
+    }
+
+    /// An open dock on the right that shows `view`.
+    fn dock(view: View) -> DockPanel {
+        DockPanel {
+            view,
+            side: DockSide::Right,
+            visibility: DockVisibility::Open { width: 10 },
+            default_width: 10,
+            area: Default::default(),
+        }
+    }
+
+    /// End the session `term` of the active workspace, as its reader does at
+    /// the PTY's end.
+    fn end_term(h: &mut TestHarness, term: TermId) {
+        h.stoat
+            .handle_pty_notification(PtyNotification::TermExited {
+                workspace: h.stoat.active_workspace,
+                term_id: term,
+            });
+    }
+
+    /// The bars 4 sixteenths wide at the left edge of the focused Run pane's
+    /// stack, after the top edge of the pane's prompt row.
+    fn body_bars(h: &mut TestHarness) -> (i16, Vec<BodyBar>) {
+        h.render_composited();
+        let area = {
+            let ws = h.stoat.active_workspace();
+            ws.panes.pane(ws.panes.focus()).area
+        };
+        let x = (crate::run::stack_rect(area).x * 16) as i16;
+        let bars = command::decode_stream(&h.stoat.apc_scene.all_bytes())
+            .into_iter()
+            .filter_map(|cmd| match cmd {
+                Command::Bar(bar) if bar.width == 4 && bar.x == x => {
+                    Some((bar.y, bar.height, bar.color))
+                },
+                _ => None,
+            })
+            .collect();
+        (((area.bottom() - 1) * 16) as i16, bars)
     }
 
     #[test]
@@ -1147,7 +1662,10 @@ mod tests {
         let rows = ws.cmds[cmd]
             .report_rows()
             .map(|rows| rows.iter().map(BodyRow::text).collect());
-        (rows, ws.runs[run].hint(&ws.cmds).map(|row| row.text()))
+        (
+            rows,
+            ws.runs[run].hint(&ws.cmds, &ws.terms).map(|row| row.text()),
+        )
     }
 
     /// A finished `cargo test` Cmd shows its report in place of its output,
@@ -1487,13 +2005,14 @@ mod tests {
         h
     }
 
-    /// Run `hello` from the palette with Enter, with a fresh fake session queued
-    /// for its process, and answer the Run Block's Cmd and the session.
-    fn enter_hello(h: &mut TestHarness) -> (CmdId, Arc<FakeTerminalSession>) {
+    /// Run the user command `name` from the palette with Enter, with a fresh
+    /// fake session queued for its process, and answer the Run Block's Cmd and
+    /// the session.
+    fn enter_command(h: &mut TestHarness, name: &str) -> (CmdId, Arc<FakeTerminalSession>) {
         let session = Arc::new(FakeTerminalSession::new());
         h.fake_terminal_host().push_session(session.clone());
         super::super::dispatch(&mut h.stoat, &stoat_action::OpenCommandPalette);
-        h.type_text("hello");
+        h.type_text(name);
         h.type_keys("enter");
         let cmd = h.stoat.run_block_cmd().expect("a Run Block");
         (cmd, session)
@@ -1563,7 +2082,7 @@ mod tests {
         pane.type_keys("ctrl-r");
 
         let mut block = with_hello();
-        let (cmd, _) = enter_hello(&mut block);
+        let (cmd, _) = enter_command(&mut block, "hello");
         block.type_keys("ctrl-r");
 
         let runs = |h: &TestHarness, cmd: CmdId| {
@@ -1617,7 +2136,7 @@ mod tests {
     #[test]
     fn ctrl_r_on_the_palette_block_runs_it_again_in_place() {
         let mut h = with_hello();
-        let (cmd, _) = enter_hello(&mut h);
+        let (cmd, _) = enter_command(&mut h, "hello");
         h.inject_cmd_done(cmd, 0);
         h.type_keys("ctrl-r");
 
@@ -1653,7 +2172,7 @@ mod tests {
     #[test]
     fn ctrl_o_moves_a_running_block_into_a_new_run_pane() {
         let mut h = with_hello();
-        let (cmd, session) = enter_hello(&mut h);
+        let (cmd, session) = enter_command(&mut h, "hello");
         let input = h
             .stoat
             .command_palette
@@ -1712,7 +2231,7 @@ mod tests {
         let run = h.open_run();
         h.submit_run("ls");
         super::super::dispatch(&mut h.stoat, &stoat_action::FocusLeft);
-        let (cmd, _) = enter_hello(&mut h);
+        let (cmd, _) = enter_command(&mut h, "hello");
         h.type_keys("ctrl-o");
 
         let ws = h.stoat.active_workspace();
@@ -1730,7 +2249,7 @@ mod tests {
     #[test]
     fn ctrl_o_moves_a_finished_block_too() {
         let mut h = with_hello();
-        let (cmd, _) = enter_hello(&mut h);
+        let (cmd, _) = enter_command(&mut h, "hello");
         h.inject_cmd_done(cmd, 0);
         h.type_keys("ctrl-o");
 

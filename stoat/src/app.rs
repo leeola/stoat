@@ -9650,7 +9650,6 @@ impl Stoat {
             PtyNotification::CmdOutput {
                 cmd: id, run, data, ..
             } => {
-                let now = executor.now();
                 let Workspace { runs, cmds, .. } = ws;
                 // Output of an earlier run of the Cmd never lands in a later
                 // run's grid.
@@ -9667,13 +9666,13 @@ impl Stoat {
                     );
                 }
                 if cmd.grid.alt_screen_detected {
-                    cmd.error = Some("this command requires a full terminal".into());
-                    cmd.finished = true;
-                    cmd.ended = Some(now);
                     cmd.grid.alt_screen_detected = false;
-                    if let Some(process) = cmd.process.take() {
-                        process.kill();
-                    }
+                    action_handlers::run::hand_off(self, id);
+                    return if on_screen {
+                        UpdateEffect::Redraw
+                    } else {
+                        UpdateEffect::None
+                    };
                 }
                 if palette_cmd == Some(id) {
                     if on_screen {
@@ -9755,6 +9754,14 @@ impl Stoat {
             },
             PtyNotification::TermExited { term_id, .. } => {
                 tracing::info!(target: "stoat::terminal", ?term_id, "terminal exited");
+                if action_handlers::run::retire_handoff(self, term_id) {
+                    return if on_screen {
+                        UpdateEffect::Redraw
+                    } else {
+                        UpdateEffect::None
+                    };
+                }
+                let ws = self.active_workspace_mut();
                 let pane_ids = ws
                     .panes
                     .split_pane_ids()

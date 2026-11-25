@@ -250,6 +250,7 @@ pub(crate) fn render_pane(
                 render_run_pane(
                     run_state,
                     cmds,
+                    terms,
                     editors,
                     theme,
                     frame.chrome,
@@ -3909,13 +3910,13 @@ fn pane_status_info(
         View::Agent(id) => owned(
             terms
                 .get(*id)
-                .and_then(|session| session.term.title())
+                .and_then(TermSession::display_title)
                 .unwrap_or("[agent]"),
         ),
         View::Terminal(id) => owned(
             terms
                 .get(*id)
-                .and_then(|session| session.term.title())
+                .and_then(TermSession::display_title)
                 .unwrap_or("[term]"),
         ),
         View::Image { path, .. } => owned(&crate::action_handlers::file::display_name(path)),
@@ -4688,7 +4689,7 @@ mod tests {
         let bars: Vec<(bool, bool, bool)> = kinds
             .iter()
             .map(|&(view, label)| {
-                let (before, after) = bar_before_and_after_a_title(view);
+                let (before, after) = bar_before_and_after_a_title(view, None);
                 (
                     before.contains(label),
                     after.contains("build"),
@@ -4699,9 +4700,26 @@ mod tests {
         assert_eq!(bars, [(true, true, false); 2]);
     }
 
-    /// Show a fresh terminal session in the focused pane as `view`, and paint
-    /// its bar before and after the child titles it `build`.
-    fn bar_before_and_after_a_title(view: SessionView) -> (String, String) {
+    /// A session that a handoff started names itself by its label until the
+    /// child sets a title, in a terminal pane and in an agent pane alike.
+    #[test]
+    fn a_handoff_session_s_pane_status_names_its_label() {
+        let views: [SessionView; 2] = [View::Terminal, View::Agent];
+        let bars = views.map(|view| {
+            let (before, after) = bar_before_and_after_a_title(view, Some("mytui"));
+            (
+                before.contains("mytui"),
+                after.contains("build"),
+                after.contains("mytui"),
+            )
+        });
+        assert_eq!(bars, [(true, true, false); 2]);
+    }
+
+    /// Show a fresh terminal session in the focused pane as `view`, with the
+    /// handoff label `label`, and paint its bar before and after the child
+    /// titles it `build`.
+    fn bar_before_and_after_a_title(view: SessionView, label: Option<&str>) -> (String, String) {
         let mut h = crate::test_harness::TestHarness::with_size(60, 8);
         dispatch(&mut h.stoat, &stoat_action::Terminal);
         let term_id = {
@@ -4711,6 +4729,7 @@ mod tests {
                 panic!("the terminal action shows a terminal");
             };
             ws.panes.pane_mut(focus).view = view(term_id);
+            ws.terms[term_id].label = label.map(str::to_owned);
             term_id
         };
         let before = bar_row(&h.render_composited());

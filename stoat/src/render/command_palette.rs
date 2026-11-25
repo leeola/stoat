@@ -570,7 +570,7 @@ fn render_palette_run_block(
         .take_while(|ch| !ch.is_whitespace())
         .count();
     let input = cmd_line::token_spans(&cmd.command, token, theme);
-    let parts = run_pane::status_parts(cmd, theme);
+    let parts = run_pane::status_parts(cmd, &ws.terms, theme);
     let line = CmdLine {
         cwd: &cwd,
         input: &input,

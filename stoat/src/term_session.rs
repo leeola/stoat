@@ -62,6 +62,10 @@ pub struct TermSession {
     /// Moving a pane swaps which view sits where and strands the name, while
     /// the session itself stays put.
     pub token: u64,
+    /// The program that a handoff started the session for, which names its
+    /// tab and its pane until the child sets a title, or `None` for a session
+    /// that no handoff started.
+    pub(crate) label: Option<String>,
 }
 
 impl TermSession {
@@ -82,7 +86,14 @@ impl TermSession {
             session,
             mode: "normal".into(),
             token,
+            label: None,
         }
+    }
+
+    /// The name that the session's tab and pane show, the title the child set
+    /// or else the [`Self::label`] of its handoff.
+    pub(crate) fn display_title(&self) -> Option<&str> {
+        self.term.title().or(self.label.as_deref())
     }
 
     /// The mouse selection the pane paints and copies, in grid points, or

@@ -3,7 +3,8 @@
 //! The kind decides how a Run Block reads its Cmd. A Parsed Cmd runs a cargo
 //! subcommand whose output the block can count, and its header shows a Kind
 //! Chip that names the subcommand. An Agent Cmd runs `claude`. Every other
-//! line is a plain Line Cmd.
+//! line is a plain Line Cmd. A Full Terminal Cmd is one whose output asked for
+//! the alternate screen, which its handoff marks after the line ran.
 
 /// The cargo global flags that cargo documents with a separate value word, so
 /// the word after one is its value rather than the subcommand.
@@ -27,6 +28,9 @@ pub(crate) enum RunKind {
     Parsed(CargoKind),
     /// A run of `claude`.
     Agent,
+    /// A program that asked for the alternate screen, which went on in a
+    /// terminal tab of its own.
+    FullTerminal,
 }
 
 impl RunKind {
@@ -40,7 +44,7 @@ impl RunKind {
             RunKind::Parsed(CargoKind::Build) => Some("cargo build"),
             RunKind::Parsed(CargoKind::Clippy) => Some("cargo clippy"),
             RunKind::Parsed(CargoKind::Check) => Some("cargo check"),
-            RunKind::Line | RunKind::Agent => None,
+            RunKind::Line | RunKind::Agent | RunKind::FullTerminal => None,
         }
     }
 }
@@ -69,7 +73,7 @@ pub(crate) fn run_kind(line: &str) -> RunKind {
 
 /// The program that `line` runs, its first word that is not a `NAME=value`
 /// assignment, or `None` for a line of assignments alone.
-fn program_word(line: &str) -> Option<&str> {
+pub(crate) fn program_word(line: &str) -> Option<&str> {
     line.split_whitespace().find(|word| !is_assignment(word))
 }
 

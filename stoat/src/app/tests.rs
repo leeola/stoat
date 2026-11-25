@@ -29,7 +29,7 @@ use crate::{
         TypeScale, STATUS_LANE,
     },
     review_walk::ReturnRef,
-    run::GridSelection,
+    run::{vterm::Handoff, GridSelection},
     test_fixture::{
         fake_term_session, finder_layout, focused_editor_pane_area, mouse_event,
         open_indent_buffer, open_scratch_file, open_with_minimap_strip, palette_arg_layout,
@@ -9909,10 +9909,30 @@ fn a_run_pane_versions_on_everything_its_render_reads() {
 
     let input_editor = h.stoat.active_workspace().runs[run_id].input.editor_id;
     h.stoat.active_workspace_mut().editors[input_editor].scroll_row = 1;
+    let input_scrolled = version(h.stoat.active_workspace());
     assert_ne!(
-        scrolled,
-        version(h.stoat.active_workspace()),
+        scrolled, input_scrolled,
         "the input line scrolls under a long command"
+    );
+
+    let ws = h.stoat.active_workspace_mut();
+    let term = ws.terms.insert(fake_term_session(4, 20).0);
+    ws.cmds[cmd].handoff = Some(Handoff {
+        term,
+        label: "ls".into(),
+        agent: false,
+    });
+    let stub = version(h.stoat.active_workspace());
+    assert_ne!(
+        input_scrolled, stub,
+        "a handoff turns the block into a Stub"
+    );
+
+    h.stoat.active_workspace_mut().terms.remove(term);
+    assert_ne!(
+        stub,
+        version(h.stoat.active_workspace()),
+        "the end of the Stub's tab session moves its status"
     );
 }
 
