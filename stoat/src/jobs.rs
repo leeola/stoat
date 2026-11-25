@@ -209,7 +209,7 @@ mod tests {
         path::PathBuf,
         time::{Duration, Instant},
     };
-    use stoat_action::{ClosePane, CloseWorkspace, SplitRight, Terminal};
+    use stoat_action::{ClosePane, CloseWorkspace, NewTab, SplitRight, Terminal};
 
     /// The request for the alternate screen that a full-screen program writes
     /// first.
@@ -571,6 +571,66 @@ mod tests {
         assert_eq!(
             [name("cargo test -p stoat"), name("htop"), name("sleep  30")],
             ["cargo test", "htop", "sleep 30"],
+        );
+    }
+
+    /// A running Job ticks once a second with its Run pane parked in another
+    /// tab, because the Job Tray shows its time.
+    #[test]
+    fn a_running_job_ticks_once_a_second_with_no_stub_on_show() {
+        let mut h = Stoat::test();
+        let job = h.push_job("sleep 30");
+        action_handlers::dispatch(&mut h.stoat, &NewTab);
+        let read = |h: &mut TestHarness| {
+            h.snapshot();
+            let time = super::time_text(&h.stoat.active_workspace().cmds[job.cmd]);
+            (h.stoat.cmd_tick.is_some(), time)
+        };
+
+        let mut reads = vec![read(&mut h)];
+        for _ in 0..3 {
+            h.advance_clock(Duration::from_secs(1));
+            reads.push(read(&mut h));
+        }
+        assert_eq!(
+            reads,
+            ["0:00", "0:01", "0:02", "0:03"].map(|time| (true, time.to_owned())),
+        );
+    }
+
+    /// The tick that a Job with no Stub on show keeps stops once the Job ends.
+    #[test]
+    fn no_tick_is_armed_after_the_last_job_ends() {
+        let mut h = Stoat::test();
+        let job = h.push_job("sleep 30");
+        action_handlers::dispatch(&mut h.stoat, &NewTab);
+        h.snapshot();
+        let running = h.stoat.cmd_tick.is_some();
+        h.inject_cmd_done(job.cmd, 0);
+        h.snapshot();
+
+        assert_eq!([running, h.stoat.cmd_tick.is_some()], [true, false]);
+    }
+
+    /// A Job of a workspace that is not on screen arms no tick, and its time
+    /// catches up on the first frame that its workspace shows.
+    #[test]
+    fn a_job_of_a_workspace_that_is_not_active_arms_no_tick() {
+        let mut h = Stoat::test();
+        let job = h.push_job("sleep 30");
+        let first = h.stoat.active_workspace;
+        let second = h.create_workspace();
+        h.set_active_workspace(second);
+        h.snapshot();
+        let background = h.stoat.cmd_tick.is_some();
+
+        h.advance_clock(Duration::from_secs(5));
+        h.set_active_workspace(first);
+        h.snapshot();
+        let time = super::time_text(&h.stoat.active_workspace().cmds[job.cmd]);
+        assert_eq!(
+            (background, h.stoat.cmd_tick.is_some(), time),
+            (false, true, "0:05".to_owned()),
         );
     }
 

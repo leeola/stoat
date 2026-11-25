@@ -1605,7 +1605,9 @@ pub struct Stoat {
     /// Cmd on show, so its elapsed time ticks while it prints nothing.
     ///
     /// It is armed only while a running Cmd is on show, so an idle app or a
-    /// parked Run pane wakes nothing. Replacing it cancels the prior timer.
+    /// parked Run pane wakes nothing. A running Job of the active workspace is
+    /// on show, because the Job Tray shows its time. Replacing it cancels the
+    /// prior timer.
     pub(crate) cmd_tick: Option<stoat_scheduler::Task<()>>,
     /// When [`Self::cmd_tick`] fires, on the scheduler clock.
     cmd_tick_due: Option<std::time::Instant>,
@@ -10126,9 +10128,11 @@ impl Stoat {
     ///
     /// A Cmd in a hidden pane, a parked tab, or a background workspace keeps
     /// its count current on any pass but arms no timer. The Cmd of the
-    /// palette's Run Block is on show. The timer fires at the soonest next
-    /// whole second among the shown Cmds, so each second's count lands on the
-    /// frame the wake starts.
+    /// palette's Run Block is on show, and so is each Job of the active
+    /// workspace, whose time the Job Tray shows whether or not a Run pane
+    /// shows its Stub. The timer fires at the soonest next whole second among
+    /// the shown Cmds, so each second's count lands on the frame the wake
+    /// starts.
     fn tick_cmds(&mut self) {
         let now = self.executor.now();
         for ws in self.workspaces.values_mut() {
@@ -10147,6 +10151,7 @@ impl Stoat {
             .filter(|&(run_id, _)| Self::run_visible(ws, run_id))
             .flat_map(|(_, run)| run.blocks.iter().filter_map(|id| ws.cmds.get(*id)))
             .chain(palette_cmd.and_then(|id| ws.cmds.get(id)))
+            .chain(ws.jobs.iter().filter_map(|id| ws.cmds.get(*id)))
             .filter(|cmd| !cmd.finished)
             .filter_map(|cmd| cmd.started)
             .map(|started| {
