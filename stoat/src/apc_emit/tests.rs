@@ -3327,8 +3327,8 @@ fn detached_diff_row(
     (runs, [words(&row[..59]), words(&row[60..])])
 }
 
-/// A detached run pane that holds focus reads the run chip and names its
-/// directory whole, as a run pane's row in the main window does. The prompt
+/// A detached run pane that holds focus reads the run chip, counts its Cmds,
+/// and names its directory whole, as a run pane's row in the main window does. The prompt
 /// shortens the same directory to `/d/r/dir`.
 #[test]
 fn a_focused_detached_run_pane_s_row_reads_run_and_its_directory() {
@@ -3350,9 +3350,13 @@ fn a_focused_detached_run_pane_s_row_reads_run_and_its_directory() {
     }
     let text = String::from_utf8_lossy(&raw);
     assert_eq!(
-        (text.contains(" RUN "), text.contains("/detach/run/dir")),
-        (true, true),
-        "the row leads with the run chip and names the directory whole",
+        (
+            text.contains(" RUN "),
+            text.contains(" 0 Cmds "),
+            text.contains("/detach/run/dir")
+        ),
+        (true, true, true),
+        "the row leads with the run chip, counts its Cmds, and names the directory whole",
     );
 }
 

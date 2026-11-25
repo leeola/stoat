@@ -437,6 +437,7 @@ fn emit_window_content(stoat: &mut Stoat, out: &mut Vec<u8>) -> Vec<Vec<u8>> {
     let repo_status = ws.repo_status();
     let tallies = ws.repo_tallies();
     let run_cwd = crate::render::pane::focused_run_cwd(focus_target, &ws.panes, &ws.git_root);
+    let run_cmds = crate::render::pane::focused_run_cmds(focus_target, &ws.panes, &ws.runs);
 
     let frame = crate::render::FrameCtx {
         workspace_name: &workspace_name,
@@ -512,6 +513,7 @@ fn emit_window_content(stoat: &mut Stoat, out: &mut Vec<u8>) -> Vec<Vec<u8>> {
         hover_cell: None,
         home: stoat.home.as_deref(),
         run_cwd,
+        run_cmds,
         blame: &ws.blame,
         now_epoch: crate::commit_picker::now_epoch(&stoat.executor),
         #[cfg(feature = "perf")]
@@ -1734,6 +1736,7 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
             hover_cell: None,
             home: None,
             run_cwd: None,
+            run_cmds: None,
             blame: &ws.blame,
             now_epoch: crate::commit_picker::now_epoch(&stoat.executor),
             #[cfg(feature = "perf")]

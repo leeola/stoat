@@ -627,6 +627,10 @@ pub(crate) struct FrameCtx<'a> {
     /// directory at its right end, and its mode chip reads `RUN` whatever mode
     /// its input is in. See [`pane::focused_run_cwd`].
     pub(crate) run_cwd: Option<&'a Path>,
+    /// The Cmds in the stack of the Run pane that holds the focus, which its
+    /// status row counts after its name, or `None` when no Run pane holds
+    /// focus. See [`pane::focused_run_cmds`].
+    pub(crate) run_cmds: Option<usize>,
     /// The commit of each line of every blamed buffer, which a blamed pane's
     /// status row names for the cursor line.
     pub(crate) blame: &'a BlameState,
@@ -1536,6 +1540,7 @@ pub(crate) fn frame(
         editor.conflict_frame.hover = stoat.conflict_hover;
     }
     let run_cwd = pane::focused_run_cwd(ws.focus, &ws.panes, &ws.git_root);
+    let run_cmds = pane::focused_run_cmds(ws.focus, &ws.panes, &ws.runs);
     // The islands read where the gaps run, and the hairlines paint in them when
     // islands are off, so the frame lays them out once for both.
     let dividers = ws.panes.dividers();
@@ -1619,6 +1624,7 @@ pub(crate) fn frame(
         hover_cell: stoat.hover_cell,
         home: stoat.home.as_deref(),
         run_cwd,
+        run_cmds,
         blame: &ws.blame,
         now_epoch: crate::commit_picker::now_epoch(&stoat.executor),
         #[cfg(feature = "perf")]

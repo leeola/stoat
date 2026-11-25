@@ -30,6 +30,7 @@ use crate::{
         undercurl::UndercurlBatch,
         FrameCtx, MinimapChrome, PaneCtx, TypeScale,
     },
+    run::{RunId, RunState},
     term_session::{TermId, TermSession},
     theme::{PanelRole, TypeRole, FULL_CELL_SCALE},
     workspace::{
@@ -1313,6 +1314,26 @@ pub(crate) fn focused_run_cwd<'a>(
     }
 }
 
+/// The Cmds in the stack of the run that the focused split pane shows, or
+/// `None` when focus is off the split panes or the focused pane shows no run.
+///
+/// Like [`focused_run_cwd`] it takes the workspace's fields rather than the
+/// workspace, so a frame holds a borrow of the runs alone while the pane loop
+/// borrows the editors mutably.
+pub(crate) fn focused_run_cmds(
+    focus: FocusTarget,
+    panes: &PaneTree,
+    runs: &SlotMap<RunId, RunState>,
+) -> Option<usize> {
+    let FocusTarget::SplitPane = focus else {
+        return None;
+    };
+    match panes.pane(panes.focus()).view {
+        View::Run(id) => runs.get(id).map(|run| run.blocks.len()),
+        _ => None,
+    }
+}
+
 /// The part of status row `row` that holds its segments, left of any badge
 /// box that paints over the row.
 ///
@@ -2407,6 +2428,22 @@ fn status_segments(
                 muted,
             );
         }
+    }
+    if let Some(count) = frame
+        .run_cmds
+        .filter(|_| is_focused && prompt.is_none() && modal.is_none())
+    {
+        let noun = match count {
+            1 => "Cmd",
+            _ => "Cmds",
+        };
+        push_left(
+            &mut left,
+            &mut cursor,
+            pane_end,
+            format!(" {count} {noun} "),
+            muted_tint(bar_style, theme),
+        );
     }
     // An inline row has no base half, so its metrics follow the file name. The
     // tag's segment comes second among them. Only a per-file diff carries a
@@ -8347,8 +8384,9 @@ mod tests {
     }
 
     /// A focused run pane's row leads with the run chip in either mode of its
-    /// input and names the directory its commands run in at its right end,
-    /// where an editor's row shows the cursor. The repo segment stays off the
+    /// input, counts the Cmds of its stack after its name, and names the
+    /// directory its commands run in at its right end, where an editor's row
+    /// shows the cursor. The repo segment stays off the
     /// row, as the StartRun board draws the directory alone.
     #[test]
     fn a_focused_run_pane_s_row_reads_run_and_its_directory() {
@@ -8378,7 +8416,55 @@ mod tests {
 
         assert_eq!(
             [insert, normal],
-            ["RUN stoat run ~/code/stoat"; 2].map(String::from),
+            ["RUN stoat run 0 Cmds ~/code/stoat"; 2].map(String::from),
+        );
+    }
+
+    /// A focused Run pane's row counts the Cmds of its stack after its name,
+    /// in the singular for one. An unfocused Run pane's row names `run` alone,
+    /// even beside a focused Run pane, whose count is its own.
+    #[test]
+    fn a_run_pane_s_row_counts_its_cmds() {
+        let mut h = crate::test_harness::TestHarness::with_size(120, 12);
+        h.stoat.home = Some(PathBuf::from("/home/u"));
+        h.stoat.active_workspace_mut().git_root = PathBuf::from("/home/u/code/stoat");
+        h.type_action("SplitRight()");
+        h.open_run();
+        let run_row = |h: &mut crate::test_harness::TestHarness| {
+            let buf = h.render_composited();
+            let ws = h.stoat.active_workspace();
+            let area = ws
+                .panes
+                .split_panes()
+                .filter(|(_, pane)| matches!(pane.view, View::Run(_)))
+                .map(|(_, pane)| pane.area)
+                .max_by_key(|area| area.x)
+                .expect("a Run pane");
+            // The rightmost pane's row runs on past its area to the window's edge.
+            let row: String = (area.x..buf.area.right())
+                .map(|x| buf[(x, area.bottom())].symbol())
+                .collect();
+            let row = row.replace('\u{2500}', " ");
+            row.split_whitespace().collect::<Vec<_>>().join(" ")
+        };
+
+        let mut reads = vec![run_row(&mut h)];
+        for line in ["a", "b"] {
+            h.submit_run(line);
+            reads.push(run_row(&mut h));
+        }
+        h.stoat.active_workspace_mut().panes.focus_next();
+        h.open_run();
+        reads.push(run_row(&mut h));
+
+        assert_eq!(
+            reads,
+            [
+                "RUN stoat run 0 Cmds ~/code/stoat",
+                "RUN stoat run 1 Cmd ~/code/stoat",
+                "RUN stoat run 2 Cmds ~/code/stoat",
+                "run",
+            ],
         );
     }
 }
