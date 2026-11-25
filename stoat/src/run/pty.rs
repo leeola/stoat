@@ -173,12 +173,16 @@ pub(crate) fn spawn_cmd(
 /// session and socket to reach. Carried in rather than resolved here, because
 /// the socket directory is a per-instance knob
 /// ([`crate::Stoat::set_agent_socket_dir`]).
+///
+/// With `line`, the subshell is `bash -c` of the line, which runs `claude` as
+/// the line asks.
 pub async fn spawn_claude(
     host: &dyn TerminalHost,
     uid: WorkspaceUid,
     cwd: &Path,
     diff: &[(String, Option<String>)],
     socket_path: Option<&Path>,
+    line: Option<&str>,
 ) -> std::io::Result<Box<dyn TerminalSession>> {
     let editor_command = editor_bridge_command();
     host.spawn(claude_spawn_args(
@@ -187,6 +191,7 @@ pub async fn spawn_claude(
         socket_path,
         &editor_command,
         diff,
+        line,
     ))
     .await
 }
@@ -405,16 +410,26 @@ fn agent_socket_name(uid: WorkspaceUid) -> String {
 /// agent's blocking-editor contract is how it composes a prompt, and does not
 /// depend on this instance having a socket directory. The session pair does
 /// depend on one, so it pushes only alongside a path.
+///
+/// With `line`, the program is `bash` with `-c` and the line, so the line's
+/// quoting and its arguments reach `claude` as a shell reads them. Without
+/// one, the program is `claude` with no argument. The environment is the
+/// same either way.
 fn claude_spawn_args(
     uid: WorkspaceUid,
     cwd: &Path,
     socket_path: Option<&Path>,
     editor_command: &str,
     diff: &[(String, Option<String>)],
+    line: Option<&str>,
 ) -> SpawnArgs {
+    let (program, args) = match line {
+        Some(line) => ("bash".into(), vec!["-c".into(), line.to_owned()]),
+        None => ("claude".into(), Vec::new()),
+    };
     let mut args = SpawnArgs {
-        program: "claude".into(),
-        args: Vec::new(),
+        program,
+        args,
         env: Vec::new(),
         env_remove: Vec::new(),
         cwd: cwd.to_path_buf(),
@@ -523,6 +538,7 @@ mod tests {
             None,
             "/usr/bin/stoat api open --wait --split",
             &[],
+            None,
         );
         assert_eq!(
             args.env,
@@ -552,6 +568,7 @@ mod tests {
             Some(Path::new("/run/agent.sock")),
             "/usr/bin/stoat api open --wait --split",
             &diff,
+            None,
         );
         assert_eq!(args.program, "claude");
         assert_eq!(args.cwd, Path::new("/work"));
@@ -576,6 +593,31 @@ mod tests {
                     "/usr/bin/stoat api open --wait --split".to_string()
                 ),
             ],
+        );
+    }
+
+    /// A line runs through `bash -c`, so its quoting reaches `claude` as a
+    /// shell reads it, with the variables of the bare form.
+    #[test]
+    fn claude_args_run_a_line_through_bash() {
+        let args = |line| {
+            claude_spawn_args(
+                WorkspaceUid(0xABCD),
+                Path::new("/work"),
+                Some(Path::new("/run/agent.sock")),
+                "/usr/bin/stoat api open --wait --split",
+                &[],
+                line,
+            )
+        };
+        let (line, bare) = (args(Some("claude -p \"hi\"")), args(None));
+        assert_eq!(
+            (line.program, line.args, line.env),
+            (
+                "bash".to_string(),
+                vec!["-c".to_string(), "claude -p \"hi\"".to_string()],
+                bare.env,
+            ),
         );
     }
 

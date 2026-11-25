@@ -37,7 +37,8 @@ pub(super) fn open_run(stoat: &mut Stoat) -> UpdateEffect {
 /// Run the line at the focused Run pane's prompt as a new Cmd.
 ///
 /// An Enter at an empty prompt goes to the newest block instead, as
-/// [`block_enter`] takes it.
+/// [`block_enter`] takes it. A line whose program is `claude` starts an agent
+/// in a tab of its own and leaves a Stub, as [`hand_off_agent`] starts it.
 pub(super) fn run_submit(stoat: &mut Stoat) -> UpdateEffect {
     let ws = stoat.active_workspace_mut();
     let focused = ws.panes.focus();
@@ -79,6 +80,9 @@ pub(super) fn run_submit(stoat: &mut Stoat) -> UpdateEffect {
     if let Some(path) = cd_path(&text) {
         super::workspace::set_cwd(stoat, path);
         return UpdateEffect::Redraw;
+    }
+    if kind::run_kind(&text) == RunKind::Agent {
+        return hand_off_agent(stoat, &text, true);
     }
 
     // The body draws one column inside the stack, which stands one column
@@ -295,8 +299,25 @@ pub(super) fn run_again(stoat: &mut Stoat) -> UpdateEffect {
 /// Start the next run of the Cmd `id` with an empty output, in the directory
 /// and in the place where it ran before.
 ///
-/// A Stub runs in its block again, with the kind that its text reads as.
+/// A Stub runs in its block again, with the kind that its text reads as. An
+/// agent's Stub starts no process. It starts the agent again in a new tab, as
+/// [`open_agent_tab`] opens it, and stays a Stub of that tab.
 fn restart_cmd(stoat: &mut Stoat, id: CmdId) {
+    let agent_line = stoat
+        .active_workspace()
+        .cmds
+        .get(id)
+        .filter(|cmd| cmd.handoff.as_ref().is_some_and(|handoff| handoff.agent))
+        .map(|cmd| cmd.run_text().to_owned());
+    if let Some(line) = agent_line {
+        if let Some(handoff) = open_agent_tab(stoat, &line)
+            && let Some(cmd) = stoat.active_workspace_mut().cmds.get_mut(id)
+        {
+            cmd.handoff = Some(handoff);
+        }
+        return;
+    }
+
     let Some(cmd) = stoat.active_workspace_mut().cmds.get_mut(id) else {
         return;
     };
@@ -341,14 +362,7 @@ pub(crate) fn hand_off(stoat: &mut Stoat, id: CmdId) {
         }
         return;
     };
-
-    let executor = stoat.executor.clone();
-    let ws = stoat.active_workspace_mut();
-    ws.new_tab(&executor);
-    let pane = ws.panes.focus();
-    buffer_lifecycle::replace_pane_view(ws, &executor, pane, view);
-    ws.focus = FocusTarget::SplitPane;
-    super::tab::relayout(stoat);
+    open_tab_on(stoat, view);
 
     if stoat.run_block_cmd() == Some(id) {
         if let Some(palette) = stoat.command_palette.take() {
@@ -364,6 +378,79 @@ pub(crate) fn hand_off(stoat: &mut Stoat, id: CmdId) {
             agent: false,
         });
     }
+}
+
+/// Start the agent that `line` runs in a new tab, and with `stub`, leave a
+/// Stub of the line on the stack of the focused Run pane.
+///
+/// The line starts no Cmd process, because a Cmd runs under `TERM=dumb`,
+/// where the agent's terminal UI does not draw, and without the agent's
+/// environment. The Run pane is read before the tab opens, because the new
+/// tab takes the focus. A spawn that fails leaves no Stub, as
+/// [`open_agent_tab`] reports it.
+fn hand_off_agent(stoat: &mut Stoat, line: &str, stub: bool) -> UpdateEffect {
+    let stack = {
+        let ws = stoat.active_workspace();
+        match ws.panes.pane(ws.panes.focus()).view {
+            View::Run(run) if stub => Some((run, run_pane_width(stoat))),
+            _ => None,
+        }
+    };
+    let Some(handoff) = open_agent_tab(stoat, line) else {
+        return UpdateEffect::Redraw;
+    };
+    let Some((run, width)) = stack else {
+        return UpdateEffect::Redraw;
+    };
+
+    let ws = stoat.active_workspace_mut();
+    let mut cmd = Cmd::new(line.to_owned(), ws.git_root.clone(), width);
+    cmd.finished = true;
+    cmd.handoff = Some(handoff);
+    let id = ws.cmds.insert(cmd);
+    let Workspace { runs, cmds, .. } = ws;
+    if let Some(run_state) = runs.get_mut(run) {
+        run_state.blocks.push(id);
+        run_state.scroll_offset = 0;
+        run_state.trim_blocks(cmds);
+    }
+    UpdateEffect::Redraw
+}
+
+/// Start the agent that `line` runs in a new tab, and answer the handoff
+/// that a Stub of the line keeps, or `None` when the agent did not start.
+///
+/// The session runs `bash -c` of the line with the agent's environment, as
+/// [`super::agent::spawn_claude_term`] spawns it, and the tab goes by
+/// `claude` until the agent sets a title. A spawn that fails reports `claude
+/// did not start` in the status line.
+fn open_agent_tab(stoat: &mut Stoat, line: &str) -> Option<Handoff> {
+    let Some(term) = super::agent::spawn_claude_term(stoat, Some(line)) else {
+        stoat.set_status("claude did not start");
+        return None;
+    };
+    let label = "claude".to_owned();
+    if let Some(session) = stoat.active_workspace_mut().terms.get_mut(term) {
+        session.label = Some(label.clone());
+    }
+    open_tab_on(stoat, View::Agent(term));
+    Some(Handoff {
+        term,
+        label,
+        agent: true,
+    })
+}
+
+/// Open a new tab whose one pane shows `view`, and give that pane the focus,
+/// because the program it runs needs the keys.
+fn open_tab_on(stoat: &mut Stoat, view: View) {
+    let executor = stoat.executor.clone();
+    let ws = stoat.active_workspace_mut();
+    ws.new_tab(&executor);
+    let pane = ws.panes.focus();
+    buffer_lifecycle::replace_pane_view(ws, &executor, pane, view);
+    ws.focus = FocusTarget::SplitPane;
+    super::tab::relayout(stoat);
 }
 
 /// Close the tab that the ended session `term` of a Stub ran in, and answer
@@ -705,7 +792,7 @@ mod tests {
             cargo::{ERROR_AND_WARNING, ONE_FAILURE, THREE_BINARIES},
             kind::RunKind,
             vterm::BodyRow,
-            CmdId, GridSelection, PtyNotification,
+            CmdId, GridSelection, PtyNotification, RunId,
         },
         term_session::TermId,
         test_harness::{editor, CmdHandle, TestHarness},
@@ -726,6 +813,9 @@ mod tests {
     /// The request for the alternate screen that a full-screen program writes
     /// first.
     const FULL_SCREEN: &[u8] = b"\x1b[?1049h";
+
+    /// A line that runs the agent with a quoted prompt.
+    const CLAUDE_LINE: &str = r#"claude -p "hi""#;
 
     /// The program, the arguments, the cwd, and the last variable of a spawn of
     /// the fake terminal host.
@@ -1332,6 +1422,217 @@ mod tests {
             ),
             (true, false, 0, true, (1, true)),
         );
+    }
+
+    /// A `claude` line at the Run pane prompt starts no Cmd process. The line
+    /// runs through `bash -c` with the agent's environment in a new tab, which
+    /// shows the agent and takes the focus, and the Run pane's stack holds a
+    /// Stub of the kind `Agent`.
+    #[test]
+    fn a_claude_line_starts_in_an_agent_tab_with_its_arguments() {
+        let mut h = Stoat::test();
+        let (run, cmd) = agent_stub(&mut h);
+
+        let spawns = h
+            .fake_terminal_host()
+            .spawns()
+            .into_iter()
+            .map(|spawn| {
+                let keys: Vec<String> = spawn.env.into_iter().map(|(key, _)| key).collect();
+                (spawn.program, spawn.args, keys)
+            })
+            .collect::<Vec<_>>();
+        let ws = h.stoat.active_workspace();
+        let stub = &ws.cmds[cmd];
+        assert_eq!(
+            (
+                spawns,
+                (ws.tabs.len(), ws.active_tab),
+                Some(ws.panes.pane(ws.panes.focus()).view.clone()),
+                ws.runs[run].blocks.clone(),
+                stub.kind,
+            ),
+            (
+                vec![(
+                    "bash".to_owned(),
+                    vec!["-c".to_owned(), CLAUDE_LINE.to_owned()],
+                    vec!["EDITOR".to_owned(), "VISUAL".to_owned()],
+                )],
+                (2, 1),
+                stub.handoff
+                    .as_ref()
+                    .map(|handoff| View::Agent(handoff.term)),
+                vec![cmd],
+                RunKind::Agent,
+            ),
+        );
+    }
+
+    /// An agent's Stub names its tab as an agent's, and the tab goes by
+    /// `claude` until the agent sets a title.
+    #[test]
+    fn an_agent_stub_names_its_tab() {
+        let mut h = Stoat::test();
+        let (_, cmd) = agent_stub(&mut h);
+
+        let ws = h.stoat.active_workspace();
+        let rows = ws.cmds[cmd]
+            .report_rows()
+            .map(|rows| rows.iter().map(BodyRow::text).collect::<Vec<_>>());
+        assert_eq!(
+            (h.cmd_status(cmd), rows, ws.tab_title(1)),
+            (
+                "\u{25cf} Agent tab".to_owned(),
+                Some(vec![
+                    "runs as an agent \u{b7} handed off to its own tab claude".to_owned()
+                ]),
+                "claude".to_owned(),
+            ),
+        );
+    }
+
+    /// The end of an agent's session leaves its tab on the agent's last
+    /// frame, so the Stub still names the tab.
+    #[test]
+    fn an_agent_stub_outlives_its_session() {
+        let mut h = Stoat::test();
+        let (_, cmd) = agent_stub(&mut h);
+        let term = h.stoat.active_workspace().cmds[cmd]
+            .handoff
+            .as_ref()
+            .expect("a handoff")
+            .term;
+        end_term(&mut h, term);
+
+        let ws = h.stoat.active_workspace();
+        assert_eq!(
+            (
+                (ws.tabs.len(), ws.active_tab),
+                ws.panes.pane(ws.panes.focus()).view.clone(),
+                h.cmd_status(cmd),
+            ),
+            ((2, 1), View::Agent(term), "\u{25cf} Agent tab".to_owned()),
+        );
+    }
+
+    /// `Ctrl-r` on an agent's Stub whose tab closed starts the agent again in
+    /// a new tab, from the line and with no `TERM=dumb`. The Stub keeps its
+    /// place and names the new tab.
+    #[test]
+    fn ctrl_r_on_a_closed_agent_stub_starts_the_agent_again() {
+        let mut h = Stoat::test();
+        let (run, cmd) = agent_stub(&mut h);
+        super::super::dispatch(&mut h.stoat, &stoat_action::CloseTab);
+        let closed = h.cmd_status(cmd);
+        h.type_keys("ctrl-r");
+
+        let spawns = h.fake_terminal_host().spawns();
+        let dumb = ("TERM".to_owned(), "dumb".to_owned());
+        let line = (
+            "bash".to_owned(),
+            vec!["-c".to_owned(), CLAUDE_LINE.to_owned()],
+        );
+        let ws = h.stoat.active_workspace();
+        let stub = &ws.cmds[cmd];
+        assert_eq!(
+            (
+                closed,
+                spawns
+                    .iter()
+                    .map(|spawn| (spawn.program.clone(), spawn.args.clone()))
+                    .collect::<Vec<_>>(),
+                spawns.iter().any(|spawn| spawn.env.contains(&dumb)),
+                (ws.tabs.len(), ws.active_tab),
+                Some(ws.panes.pane(ws.panes.focus()).view.clone()),
+                ws.runs[run].blocks.clone(),
+                h.cmd_status(cmd),
+            ),
+            (
+                "tab closed".to_owned(),
+                vec![line.clone(), line],
+                false,
+                (2, 1),
+                stub.handoff
+                    .as_ref()
+                    .map(|handoff| View::Agent(handoff.term)),
+                vec![cmd],
+                "\u{25cf} Agent tab".to_owned(),
+            ),
+        );
+    }
+
+    /// An agent's Stub joins its stack as a submitted line's Cmd does. The
+    /// stack snaps back to its prompt, and its trim drops the full finished
+    /// block that the Stub moves out of the newest place.
+    ///
+    /// The running Cmd's rows hold the stack over its cap, so the trim that
+    /// the full block's own output ran had nothing it could drop.
+    #[test]
+    fn a_claude_line_joins_its_stack_as_a_submitted_line_does() {
+        let mut h = Stoat::test();
+        let run = h.open_run();
+        let running = h.submit_run("sleep 9").cmd;
+        h.inject_cmd_output(running, "x\r\n".repeat(600).as_bytes());
+        let full = h.submit_run("seq 10000").cmd;
+        h.inject_cmd_output(full, "x\r\n".repeat(10_000).as_bytes());
+        h.inject_cmd_done(full, 0);
+        h.stoat.active_workspace_mut().runs[run].scroll_offset = 3;
+        let stub = h.submit_run(CLAUDE_LINE).cmd;
+
+        let run_state = &h.stoat.active_workspace().runs[run];
+        assert_eq!(
+            (run_state.blocks.clone(), run_state.scroll_offset),
+            (vec![running, stub], 0),
+        );
+    }
+
+    /// An agent handoff without a Stub opens the agent's tab and leaves the
+    /// Run pane's stack as it was.
+    #[test]
+    fn an_agent_handoff_without_a_stub_opens_its_tab_alone() {
+        let mut h = Stoat::test();
+        let run = h.open_run();
+        super::hand_off_agent(&mut h.stoat, CLAUDE_LINE, false);
+
+        let ws = h.stoat.active_workspace();
+        let shown = matches!(ws.panes.pane(ws.panes.focus()).view, View::Agent(_));
+        assert_eq!(
+            (
+                ws.cmds.len(),
+                ws.runs[run].blocks.len(),
+                (ws.tabs.len(), shown)
+            ),
+            (0, 0, (2, true)),
+        );
+    }
+
+    /// A `claude` line whose agent fails to start reports it, and leaves no
+    /// Stub and no tab.
+    #[test]
+    fn a_claude_line_that_fails_to_start_reports_it() {
+        let mut h = Stoat::test();
+        let run = h.open_run();
+        h.fake_terminal_host()
+            .fail_next_spawn(io::ErrorKind::NotFound);
+        h.submit_run(CLAUDE_LINE);
+
+        let ws = h.stoat.active_workspace();
+        assert_eq!(
+            (
+                h.stoat.pending_message.as_deref(),
+                ws.runs[run].blocks.len(),
+                ws.tabs.len(),
+            ),
+            (Some("claude did not start"), 0, 1),
+        );
+    }
+
+    /// Submit [`CLAUDE_LINE`] at a new Run pane's prompt, and answer the run
+    /// and the Stub that the line leaves.
+    fn agent_stub(h: &mut TestHarness) -> (RunId, CmdId) {
+        let run = h.open_run();
+        let cmd = h.submit_run(CLAUDE_LINE).cmd;
+        (run, cmd)
     }
 
     /// Run `mytui -d 5` in a new Run pane and have its output ask for the

@@ -5,7 +5,7 @@ use crate::{
     pane::View,
     run::{agent_socket_path_in, spawn_claude, spawn_term_reader},
     term_screen::TermScreen,
-    term_session::TermSession,
+    term_session::{TermId, TermSession},
 };
 use futures::FutureExt;
 use std::sync::Arc;
@@ -17,13 +17,31 @@ const AGENT_COLS: u16 = 80;
 
 /// Launch a Claude agent session into the focused pane.
 ///
-/// Spawns the subshell through the terminal host, stores it alongside a fresh
-/// screen emulator in the workspace's agent collection, and points the focused
+/// Spawns the subshell as [`spawn_claude_term`] does and points the focused
 /// pane at the new [`View::Agent`]. A spawn failure leaves the pane unchanged.
 ///
 /// The view the pane showed is released as
 /// [`buffer_lifecycle::replace_pane_view`] describes.
 pub(super) fn spawn_claude_pane(stoat: &mut Stoat) -> UpdateEffect {
+    let Some(agent_id) = spawn_claude_term(stoat, None) else {
+        return UpdateEffect::None;
+    };
+    let executor = stoat.executor.clone();
+    let ws = stoat.active_workspace_mut();
+    let focused = ws.panes.focus();
+    buffer_lifecycle::replace_pane_view(ws, &executor, focused, View::Agent(agent_id));
+    UpdateEffect::Redraw
+}
+
+/// Spawn a Claude agent session in the workspace root, and answer its key in
+/// the workspace's terms, or `None` when the spawn fails.
+///
+/// With `line`, the session runs `bash -c` of the line, so the line's quoting
+/// and its arguments reach `claude` as a shell reads them. Without one, it
+/// runs `claude` alone. The session's environment names the workspace's hook
+/// socket, which this binds first. The session goes into the terms with a
+/// fresh screen emulator, and its reader starts.
+pub(super) fn spawn_claude_term(stoat: &mut Stoat, line: Option<&str>) -> Option<TermId> {
     // The agent's hooks call back over this workspace's socket, so bind it
     // before the spawn hands over the path. Repeat calls for a workspace
     // already served cost nothing.
@@ -49,14 +67,15 @@ pub(super) fn spawn_claude_pane(stoat: &mut Stoat) -> UpdateEffect {
     // The local terminal host opens the PTY synchronously, so the spawn future
     // is ready on first poll. The run pane drives its session writes through
     // the same `now_or_never` path.
-    let spawned = spawn_claude(&*host, uid, &cwd, &diff, socket_path.as_deref()).now_or_never();
+    let spawned =
+        spawn_claude(&*host, uid, &cwd, &diff, socket_path.as_deref(), line).now_or_never();
     let session = match spawned {
         Some(Ok(session)) => session,
         Some(Err(err)) => {
             tracing::warn!(target: "stoat::agent", %err, "failed to spawn claude session");
-            return UpdateEffect::None;
+            return None;
         },
-        None => return UpdateEffect::None,
+        None => return None,
     };
 
     let session: Arc<dyn TerminalSession> = Arc::from(session);
@@ -65,11 +84,8 @@ pub(super) fn spawn_claude_pane(stoat: &mut Stoat) -> UpdateEffect {
         session.clone(),
         TermSession::next_token(),
     ));
-    let focused = ws.panes.focus();
-    buffer_lifecycle::replace_pane_view(ws, &executor, focused, View::Agent(agent_id));
-
     spawn_term_reader(&executor, session, workspace, agent_id, pty_tx);
-    UpdateEffect::Redraw
+    Some(agent_id)
 }
 
 #[cfg(test)]
@@ -185,5 +201,21 @@ mod tests {
             ],
             "no socket dir means no session to name, but the editor bridge stands",
         );
+    }
+
+    /// The agent action runs `claude` itself, with no argument.
+    #[test]
+    fn the_agent_action_runs_claude_with_no_argument() {
+        let mut h = Stoat::test();
+
+        super::super::dispatch(&mut h.stoat, &stoat_action::SpawnClaude);
+
+        let spawns: Vec<(String, Vec<String>)> = h
+            .fake_terminal_host()
+            .spawns()
+            .into_iter()
+            .map(|spawn| (spawn.program, spawn.args))
+            .collect();
+        assert_eq!(spawns, vec![("claude".to_string(), Vec::new())]);
     }
 }

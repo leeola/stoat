@@ -836,16 +836,17 @@ impl Cmd {
     /// shows them.
     ///
     /// A Stub, a Cmd with a [`Self::handoff`], shows one row whatever
-    /// [`Self::raw_view`] holds. It reads that the Cmd needs a full terminal
-    /// and went to its own tab, then the tab's label.
+    /// [`Self::raw_view`] holds. It reads that the Cmd needs a full terminal,
+    /// or runs as an agent, and went to its own tab, then the tab's label.
     pub(crate) fn report_rows(&self) -> Option<Vec<BodyRow>> {
         if let Some(handoff) = &self.handoff {
+            let note = match handoff.agent {
+                true => "runs as an agent \u{b7} handed off to its own tab ",
+                false => "needs a full terminal \u{b7} handed off to its own tab ",
+            };
             return Some(vec![BodyRow {
                 spans: vec![
-                    (
-                        "needs a full terminal \u{b7} handed off to its own tab ".to_owned(),
-                        Tone::Dim,
-                    ),
+                    (note.to_owned(), Tone::Dim),
                     (handoff.label.clone(), Tone::Text),
                 ],
             }]);

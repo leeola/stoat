@@ -320,9 +320,11 @@ pub(super) fn paint_progress(
 /// [`CmdReport::progress`] gives them. The status-line scope can carry a
 /// background, which a header leaves to the pane.
 ///
-/// A Stub reads one part. It is U+25CF and `Terminal tab` in the foreground of
-/// `ui.statusline.run` while `terms` holds the session of its tab, and `tab
-/// closed` in `ui.text.muted` once the session ended.
+/// A Stub reads one part. It is U+25CF and `Terminal tab`, or `Agent tab` for
+/// an agent's, in the foreground of `ui.statusline.run` while `terms` holds
+/// the session of its tab, and `tab closed` in `ui.text.muted` once the
+/// workspace dropped the session. An agent's session stays until its tab
+/// closes.
 pub(crate) fn status_parts(
     cmd: &Cmd,
     terms: &slotmap::SlotMap<TermId, TermSession>,
@@ -331,7 +333,10 @@ pub(crate) fn status_parts(
     if let Some(handoff) = &cmd.handoff {
         let (text, style) = match terms.contains_key(handoff.term) {
             true => (
-                "\u{25cf} Terminal tab",
+                match handoff.agent {
+                    true => "\u{25cf} Agent tab",
+                    false => "\u{25cf} Terminal tab",
+                },
                 Style {
                     fg: theme.get(crate::theme::scope::UI_STATUSLINE_RUN).fg,
                     ..Style::default()
