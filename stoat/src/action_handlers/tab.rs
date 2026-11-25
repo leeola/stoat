@@ -104,8 +104,8 @@ pub(super) fn toggle_tab(stoat: &mut Stoat) -> UpdateEffect {
 ///
 /// Editors go through the referenced check rather than being dropped outright,
 /// since tabs share a workspace's editors and another tab may still show one.
-/// A shell that a pane of the tab covered ends with the tab, unless another
-/// view shows it, and so does a commits list a pane covered.
+/// A shell or a Run pane that a pane of the tab covered ends with the tab,
+/// unless another view shows it, and so does a commits list a pane covered.
 pub(super) fn close_tab_at(stoat: &mut Stoat, index: usize) -> UpdateEffect {
     let executor = stoat.executor.clone();
     let ws = stoat.active_workspace_mut();
@@ -131,6 +131,12 @@ pub(super) fn close_tab_at(stoat: &mut Stoat, index: usize) -> UpdateEffect {
                 ws,
                 &executor,
                 View::Terminal(term_id),
+                EditorDisposal::GcIfUnreferenced,
+            ),
+            View::Run(run) if ws.view_location(&View::Run(run)).is_none() => dispose_view(
+                ws,
+                &executor,
+                View::Run(run),
                 EditorDisposal::GcIfUnreferenced,
             ),
             View::Commits(list) => dispose_view(

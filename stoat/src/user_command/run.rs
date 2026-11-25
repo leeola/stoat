@@ -2,7 +2,7 @@ use super::{
     context, pick, ArgKind, CommandSet, FlatStep, Output, RunSpec, Step, TextDefault, UserCommand,
 };
 use crate::{
-    action_handlers,
+    action_handlers, agent_goto,
     app::{MessageKind, Stoat, UpdateEffect},
     buffer_lifecycle,
     cli_spec::{self, CliSpec},
@@ -224,6 +224,20 @@ fn at_run_prompt(stoat: &Stoat) -> bool {
     stoat.palette_held.is_none()
         && ws.focus == FocusTarget::SplitPane
         && matches!(ws.panes.pane(ws.panes.focus()).view, View::Run(_))
+}
+
+/// Give the split focus to the pane that [`agent_goto::target_pane`] picks
+/// when the focused pane shows a Run pane, so what opens in the focused pane
+/// opens beside the stack and the stack stays.
+fn focus_beside_a_run_pane(stoat: &mut Stoat) {
+    let executor = stoat.executor.clone();
+    let ws = stoat.active_workspace_mut();
+    if !matches!(ws.panes.pane(ws.panes.focus()).view, View::Run(_)) {
+        return;
+    }
+    let pane = agent_goto::target_pane(ws, executor);
+    ws.focus = FocusTarget::SplitPane;
+    ws.panes.set_focus(pane);
 }
 
 /// Take the results of the shell steps that finished, and carry each run on.
@@ -453,9 +467,10 @@ fn cli_line(tool: &str, values: &[String]) -> String {
 /// A run that ends on a shell step shows a message under the `notify`
 /// output. The message is the first line of that step's stdout, or `<name>
 /// done` for a step with none. A run of the `buffer` output that ends on a
-/// shell step opens the stdout of every shell step in a scratch buffer. The
-/// `block` and `run_pane` outputs hand this walk a run of action steps alone,
-/// which shows no message of its own.
+/// shell step opens the stdout of every shell step in a scratch buffer,
+/// beside a focused Run pane, as [`focus_beside_a_run_pane`] moves the focus.
+/// The `block` and `run_pane` outputs hand this walk a run of action steps
+/// alone, which shows no message of its own.
 fn advance(stoat: &mut Stoat, mut run: CommandRun) -> UpdateEffect {
     let mut effect = UpdateEffect::Redraw;
     while let Some(step) = run.steps.pop_front() {
@@ -490,6 +505,7 @@ fn advance(stoat: &mut Stoat, mut run: CommandRun) -> UpdateEffect {
             stoat.notify(MessageKind::Success, text);
         },
         Output::Buffer => {
+            focus_beside_a_run_pane(stoat);
             buffer_lifecycle::show_scratch_with_text(stoat, &run.stdout);
         },
         Output::Block | Output::RunPane | Output::Locations => {},
@@ -1759,6 +1775,56 @@ mod tests {
 
         let (buffer, _) = h.stoat.focused_cursor_pos().expect("an editor has focus");
         assert_eq!(h.buffer_text(buffer), "a\nb\n");
+    }
+
+    /// A `buffer` command at the Run pane prompt opens its output in the
+    /// editor pane beside the Run pane, which takes the focus, and the Run
+    /// pane keeps its stack.
+    #[test]
+    fn a_buffer_command_at_the_run_prompt_opens_beside_the_run_pane() {
+        let mut h = loaded(r#"command alog { run = shell("cat a.log"); output = buffer; }"#);
+        h.fake_shell
+            .set_response("cat a.log", output(b"a\n", b"", 0));
+        let editor_pane = h.stoat.active_workspace().panes.focus();
+        action_handlers::dispatch(&mut h.stoat, &stoat_action::SplitRight);
+        let run = h.open_run();
+        let cmd = h.submit_run("true").cmd;
+        h.submit_run("alog");
+        h.settle();
+
+        let (buffer, _) = h.stoat.focused_cursor_pos().expect("an editor has focus");
+        let ws = h.stoat.active_workspace();
+        assert_eq!(
+            (
+                ws.panes.focus() == editor_pane,
+                h.buffer_text(buffer),
+                ws.runs[run].blocks.clone(),
+            ),
+            (true, "a\n".to_owned(), vec![cmd]),
+        );
+    }
+
+    /// A `buffer` command opens its output in a focused pane that shows no Run
+    /// pane, a terminal's included, and the focus stays on that pane.
+    #[test]
+    fn a_buffer_command_over_a_terminal_opens_in_its_pane() {
+        let mut h = loaded(r#"command alog { run = shell("cat a.log"); output = buffer; }"#);
+        h.fake_shell
+            .set_response("cat a.log", output(b"a\n", b"", 0));
+        action_handlers::dispatch(&mut h.stoat, &stoat_action::Terminal);
+        let terminal_pane = h.stoat.active_workspace().panes.focus();
+        submit(&mut h, "alog");
+
+        let (buffer, _) = h.stoat.focused_cursor_pos().expect("an editor has focus");
+        let ws = h.stoat.active_workspace();
+        assert_eq!(
+            (
+                ws.panes.focus() == terminal_pane,
+                ws.panes.split_panes().count(),
+                h.buffer_text(buffer),
+            ),
+            (true, 1, "a\n".to_owned()),
+        );
     }
 
     /// The shell step finishes after another workspace became active, so the

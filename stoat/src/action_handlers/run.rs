@@ -2000,6 +2000,141 @@ mod tests {
         assert_eq!(terms, [xterm.clone(), xterm]);
     }
 
+    /// A file opened at the Run prompt takes the pane, and the Run pane ends as
+    /// a pane close ends it. The running Cmd's process is killed, and the run
+    /// and its Cmds leave the workspace.
+    #[test]
+    fn opening_a_file_at_the_run_prompt_ends_the_run_pane() {
+        let mut h = Stoat::test();
+        h.stoat.active_workspace_mut().git_root = PathBuf::from("/work");
+        h.fake_fs().insert_file("/work/a.rs", b"fn a() {}\n");
+        let run = h.open_run();
+        let finished = h.submit_run("true").cmd;
+        h.inject_cmd_done(finished, 0);
+        let running = h.submit_run("sleep 9");
+        submit_ending(&mut h, run, "o a.rs");
+
+        let ws = h.stoat.active_workspace();
+        assert_eq!(
+            (
+                editor::focused_buffer_path(&h.stoat),
+                (ws.runs.len(), ws.cmds.len()),
+                running.session.was_killed(),
+            ),
+            (PathBuf::from("/work/a.rs"), (0, 0), true),
+        );
+    }
+
+    /// A Run pane that a second pane shows stays when a file takes one of the
+    /// two panes, and the other pane shows its stack.
+    #[test]
+    fn a_run_that_a_second_pane_shows_stays() {
+        let mut h = Stoat::test();
+        h.stoat.active_workspace_mut().git_root = PathBuf::from("/work");
+        h.fake_fs().insert_file("/work/a.rs", b"fn a() {}\n");
+        let run = h.open_run();
+        let cmd = h.submit_run("true").cmd;
+        super::super::dispatch(&mut h.stoat, &stoat_action::SplitRight);
+        submit_ending(&mut h, run, "o a.rs");
+
+        let ws = h.stoat.active_workspace();
+        let shown: Vec<RunId> = ws
+            .panes
+            .split_panes()
+            .filter_map(|(_, pane)| match pane.view {
+                View::Run(id) => Some(id),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            (shown, ws.runs[run].blocks.clone(), ws.cmds.len()),
+            (vec![run], vec![cmd], 1),
+        );
+    }
+
+    /// A pane whose terminal covers a Run pane closes with the run, since no
+    /// other pane shows it.
+    #[test]
+    fn closing_a_pane_whose_terminal_covers_a_run_pane_ends_that_run() {
+        let mut h = Stoat::test();
+        super::super::dispatch(&mut h.stoat, &stoat_action::SplitRight);
+        h.open_run();
+        h.submit_run("true");
+        super::super::dispatch(&mut h.stoat, &stoat_action::Terminal);
+        super::super::dispatch(&mut h.stoat, &stoat_action::ClosePane);
+
+        let ws = h.stoat.active_workspace();
+        assert_eq!(
+            (ws.panes.split_panes().count(), ws.runs.len(), ws.cmds.len()),
+            (1, 0, 0),
+        );
+    }
+
+    /// A pane whose terminal covers a Run pane that a second pane shows closes
+    /// without the run, which the second pane keeps.
+    #[test]
+    fn closing_a_pane_whose_terminal_covers_a_shown_run_keeps_the_run() {
+        let mut h = Stoat::test();
+        let run = h.open_run();
+        let cmd = h.submit_run("true").cmd;
+        super::super::dispatch(&mut h.stoat, &stoat_action::SplitRight);
+        super::super::dispatch(&mut h.stoat, &stoat_action::Terminal);
+        super::super::dispatch(&mut h.stoat, &stoat_action::ClosePane);
+
+        let ws = h.stoat.active_workspace();
+        let shown: Vec<RunId> = ws
+            .panes
+            .split_panes()
+            .filter_map(|(_, pane)| match pane.view {
+                View::Run(id) => Some(id),
+                _ => None,
+            })
+            .collect();
+        assert_eq!((shown, ws.runs[run].blocks.clone()), (vec![run], vec![cmd]));
+    }
+
+    /// A tab whose terminal covers a Run pane that another tab shows closes
+    /// without the run.
+    #[test]
+    fn closing_a_tab_keeps_a_covered_run_that_another_tab_shows() {
+        let mut h = Stoat::test();
+        let run = h.open_run();
+        let cmd = h.submit_run("true").cmd;
+        super::super::dispatch(&mut h.stoat, &stoat_action::NewTab);
+        let ws = h.stoat.active_workspace_mut();
+        let focused = ws.panes.focus();
+        ws.panes.pane_mut(focused).view = View::Run(run);
+        super::super::dispatch(&mut h.stoat, &stoat_action::Terminal);
+        super::super::dispatch(&mut h.stoat, &stoat_action::CloseTab);
+
+        let ws = h.stoat.active_workspace();
+        assert_eq!((ws.tabs.len(), ws.runs[run].blocks.clone()), (1, vec![cmd]));
+    }
+
+    /// A tab whose terminal covers a Run pane closes with the run.
+    #[test]
+    fn closing_a_tab_ends_the_run_that_its_terminal_covers() {
+        let mut h = Stoat::test();
+        super::super::dispatch(&mut h.stoat, &stoat_action::NewTab);
+        h.open_run();
+        h.submit_run("true");
+        super::super::dispatch(&mut h.stoat, &stoat_action::Terminal);
+        super::super::dispatch(&mut h.stoat, &stoat_action::CloseTab);
+
+        let ws = h.stoat.active_workspace();
+        assert_eq!((ws.tabs.len(), ws.runs.len(), ws.cmds.len()), (1, 0, 0));
+    }
+
+    /// Submit `text` at the prompt of the run `run` of `h`, as Enter does, for
+    /// a line whose run can end the run, which the harness's submit reads
+    /// after it.
+    fn submit_ending(h: &mut TestHarness, run: RunId, text: &str) {
+        let ws = h.stoat.active_workspace_mut();
+        let input = ws.runs[run].input.clone();
+        input.replace_text(ws, text);
+        super::super::dispatch(&mut h.stoat, &stoat_action::RunSubmit);
+    }
+
     /// The exit of the killed process, which arrives after the handoff,
     /// leaves the Stub as it is.
     #[test]

@@ -215,9 +215,9 @@ fn close_diff_screen(stoat: &mut Stoat) {
 /// `false` when the pane tree refused to close (only one split pane
 /// remains); in that case no state is touched.
 ///
-/// A shell the pane covered ends with it, unless another view shows it. A
-/// commits list or a changes view the pane covered ends with it too, since no
-/// other pane holds one.
+/// A shell or a Run pane that the pane covered ends with it, unless another
+/// view shows it. A commits list or a changes view the pane covered ends with
+/// it too, since no other pane holds one.
 pub(crate) fn close_pane_by_id(stoat: &mut Stoat, id: PaneId) -> bool {
     let executor = stoat.executor.clone();
     let ws = stoat.active_workspace_mut();
@@ -237,6 +237,9 @@ pub(crate) fn close_pane_by_id(stoat: &mut Stoat, id: PaneId) -> bool {
             View::Terminal(term_id),
             EditorDisposal::Remove,
         ),
+        Some(View::Run(run)) if ws.view_location(&View::Run(run)).is_none() => {
+            dispose_view(ws, &executor, View::Run(run), EditorDisposal::Remove)
+        },
         Some(View::Commits(list)) => {
             dispose_view(ws, &executor, View::Commits(list), EditorDisposal::Remove)
         },

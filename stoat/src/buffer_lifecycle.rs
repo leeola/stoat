@@ -839,6 +839,10 @@ pub(crate) fn show_scratch_with_text(stoat: &mut Stoat, text: &str) -> BufferId 
 /// A changes view in the pane comes down first, and the buffer opens over the
 /// view the changes view covered, so that view is the one displaced.
 ///
+/// A displaced Run pane ends as a pane close ends it, its running processes
+/// killed and its Cmds gone, unless another pane or a dock shows the same
+/// run.
+///
 /// A pinned mode on the displaced editor carries onto the new one, and the pin
 /// travels with it, so a chord the user still holds survives the swap. Every
 /// other mode is dropped, since the new editor starts on a different buffer.
@@ -873,6 +877,10 @@ pub(crate) fn show_buffer_in_pane(
         View::Editor(eid) => Some(eid),
         _ => None,
     };
+    let outgoing_run = match ws.panes.pane(target).view {
+        View::Run(run) => Some(run),
+        _ => None,
+    };
     let outgoing_diff_view = old
         .and_then(|eid| ws.editors.get(eid))
         .is_some_and(|editor| editor.diff_view);
@@ -882,6 +890,7 @@ pub(crate) fn show_buffer_in_pane(
         .map(|editor| (editor.mode.clone(), editor.pinned, editor.chord_origin));
 
     stash_commits_list(ws, target, &executor);
+    let disposer = executor.clone();
     let mut editor = ws.seeded_editor(buffer_id, buffer, executor);
     if let Some((mode, pinned, chord_origin)) = carried_mode {
         editor.mode = mode;
@@ -899,6 +908,14 @@ pub(crate) fn show_buffer_in_pane(
     ws.panes.pane_mut(target).view = View::Editor(new_editor_id);
     if let Some(outgoing) = outgoing {
         ws.panes.pane_mut(target).record_shown(outgoing);
+    }
+    if let Some(run) = outgoing_run.filter(|run| ws.view_location(&View::Run(*run)).is_none()) {
+        dispose_view(
+            ws,
+            &disposer,
+            View::Run(run),
+            EditorDisposal::GcIfUnreferenced,
+        );
     }
 
     if let Some(old_id) = old {
