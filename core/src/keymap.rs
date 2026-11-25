@@ -4694,6 +4694,7 @@ mod tests {
                 session_retention_days: Some(14),
                 terminal_shell: None,
                 terminal_args: None,
+                run_full_terminal: None,
                 ssh_program: None,
                 mosh_server: None,
                 direnv_load: Some(true),

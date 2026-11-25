@@ -273,6 +273,14 @@ pub fn settings_schema() -> &'static [SettingDef] {
             default: "none",
         },
         SettingDef {
+            path: &[Lit("run"), Lit("full_terminal")],
+            shape: ValueShape::StringArray,
+            doc: "Programs that need a full terminal. A line that starts with one of them \
+                  runs in a terminal tab of its own.",
+            default: "[vi, vim, nvim, nano, emacs, top, htop, btop, less, more, man, watch, \
+                      tig, lazygit, tmux, screen, ssh]",
+        },
+        SettingDef {
             path: &[Lit("ssh"), Lit("program")],
             shape: ValueShape::String,
             doc: "Path to the stoat binary that :ssh and :mosh run on the remote host.",

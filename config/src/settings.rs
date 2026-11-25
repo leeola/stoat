@@ -234,6 +234,11 @@ pub struct Settings {
     /// Arguments passed to the terminal pane's subshell. `None` spawns with no
     /// arguments. Set via `terminal.args = ["-l"];` in stcfg.
     pub terminal_args: Option<Vec<String>>,
+    /// Program names that need a full terminal, whose lines run in a terminal
+    /// tab of their own rather than as a Cmd. `None` falls back to the
+    /// built-in list, and an empty list turns the rule off. Set via
+    /// `run.full_terminal = ["vim", "htop"];` in stcfg.
+    pub run_full_terminal: Option<Vec<String>>,
     /// Editor binary that `:ssh` and `:mosh` run on the remote host. `None`
     /// falls back to a bare `stoat`. Set via
     /// `ssh.program = "/path/to/stoat";` in stcfg.
@@ -389,6 +394,7 @@ impl Settings {
             session_retention_days: other.session_retention_days.or(self.session_retention_days),
             terminal_shell: other.terminal_shell.or(self.terminal_shell),
             terminal_args: other.terminal_args.or(self.terminal_args),
+            run_full_terminal: other.run_full_terminal.or(self.run_full_terminal),
             ssh_program: other.ssh_program.or(self.ssh_program),
             mosh_server: other.mosh_server.or(self.mosh_server),
             direnv_load: other.direnv_load.or(self.direnv_load),
@@ -641,6 +647,11 @@ impl Settings {
                     );
                 }
             },
+            ["run", "full_terminal"] => {
+                if let Value::Array(items) = &setting.value.node {
+                    self.run_full_terminal = Some(string_array(items));
+                }
+            },
             ["ssh", "program"] => {
                 if let Value::Ident(s) | Value::String(s) = &setting.value.node {
                     self.ssh_program = Some(s.clone());
@@ -782,6 +793,7 @@ mod tests {
                 session_retention_days: None,
                 terminal_shell: None,
                 terminal_args: None,
+                run_full_terminal: None,
                 ssh_program: None,
                 mosh_server: None,
                 direnv_load: None,
@@ -1210,6 +1222,7 @@ mod tests {
                 session_retention_days: None,
                 terminal_shell: None,
                 terminal_args: None,
+                run_full_terminal: None,
                 ssh_program: None,
                 mosh_server: None,
                 direnv_load: None,
@@ -1264,6 +1277,7 @@ mod tests {
                 session_retention_days: None,
                 terminal_shell: None,
                 terminal_args: None,
+                run_full_terminal: None,
                 ssh_program: None,
                 mosh_server: None,
                 direnv_load: None,
@@ -1327,6 +1341,7 @@ mod tests {
             session_retention_days: None,
             terminal_shell: None,
             terminal_args: None,
+            run_full_terminal: None,
             ssh_program: None,
             mosh_server: None,
             direnv_load: None,
@@ -1373,6 +1388,7 @@ mod tests {
             session_retention_days: None,
             terminal_shell: None,
             terminal_args: None,
+            run_full_terminal: None,
             ssh_program: None,
             mosh_server: None,
             direnv_load: None,
@@ -1421,6 +1437,7 @@ mod tests {
                 session_retention_days: None,
                 terminal_shell: None,
                 terminal_args: None,
+                run_full_terminal: None,
                 ssh_program: None,
                 mosh_server: None,
                 direnv_load: None,
@@ -1472,6 +1489,7 @@ mod tests {
             session_retention_days: None,
             terminal_shell: None,
             terminal_args: None,
+            run_full_terminal: None,
             ssh_program: None,
             mosh_server: None,
             direnv_load: None,
@@ -1521,6 +1539,7 @@ mod tests {
                 session_retention_days: None,
                 terminal_shell: None,
                 terminal_args: None,
+                run_full_terminal: None,
                 ssh_program: None,
                 mosh_server: None,
                 direnv_load: None,
@@ -1583,6 +1602,7 @@ mod tests {
                 session_retention_days: None,
                 terminal_shell: None,
                 terminal_args: None,
+                run_full_terminal: None,
                 ssh_program: None,
                 mosh_server: None,
                 direnv_load: None,
@@ -1637,6 +1657,7 @@ mod tests {
                 session_retention_days: None,
                 terminal_shell: None,
                 terminal_args: None,
+                run_full_terminal: None,
                 ssh_program: None,
                 mosh_server: None,
                 direnv_load: None,
@@ -1688,6 +1709,7 @@ mod tests {
             session_retention_days: None,
             terminal_shell: None,
             terminal_args: None,
+            run_full_terminal: None,
             ssh_program: None,
             mosh_server: None,
             direnv_load: None,
@@ -1734,6 +1756,7 @@ mod tests {
             session_retention_days: None,
             terminal_shell: None,
             terminal_args: None,
+            run_full_terminal: None,
             ssh_program: None,
             mosh_server: None,
             direnv_load: None,
@@ -1964,6 +1987,15 @@ mod tests {
     }
 
     #[test]
+    fn from_config_extracts_run_full_terminal() {
+        let config = parse_ok(r#"on init { run.full_terminal = ["vim", "mytui"]; }"#);
+        assert_eq!(
+            Settings::from_config(&config).run_full_terminal,
+            Some(vec!["vim".to_string(), "mytui".to_string()])
+        );
+    }
+
+    #[test]
     fn from_config_terminal_args_skips_non_string_elements() {
         let config = parse_ok(r#"on init { terminal.args = ["-l", 3, "-c"]; }"#);
         assert_eq!(
@@ -1987,6 +2019,21 @@ mod tests {
         let merged = left.merge(right);
         assert_eq!(merged.terminal_shell, Some("/bin/zsh".to_string()));
         assert_eq!(merged.terminal_args, Some(vec!["-l".to_string()]));
+    }
+
+    /// A later list of full-terminal programs replaces an earlier one, and an
+    /// empty list replaces it too.
+    #[test]
+    fn merge_right_replaces_run_full_terminal() {
+        let left = Settings {
+            run_full_terminal: Some(vec!["vim".to_string()]),
+            ..Settings::default()
+        };
+        let right = Settings {
+            run_full_terminal: Some(Vec::new()),
+            ..Settings::default()
+        };
+        assert_eq!(left.merge(right).run_full_terminal, Some(Vec::new()));
     }
 
     /// A user's level overrides the shipped one, the merge order the config

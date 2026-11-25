@@ -10101,6 +10101,7 @@ impl Stoat {
         self.drive_parse_jobs();
         self.drive_diff_jobs();
 
+        action_handlers::run::pump_handoffs(self);
         self.tick_cmds();
         self.drive_pumps();
         // Not gated on the pumps' progress. The `.git` refresh drain stales

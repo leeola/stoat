@@ -632,6 +632,10 @@ on init {
     # Arguments passed to the terminal pane's subshell.
     # terminal.args = ["-l"];
 
+    # Programs that need a full terminal. A line that starts with one of them
+    # runs in a terminal tab of its own.
+    # run.full_terminal = ["vim", "htop"];
+
     # Editor binary `:ssh` and `:mosh` run on the remote host. Defaults to a
     # bare `stoat`.
     # sshd runs it through a non-interactive login shell, whose PATH misses most

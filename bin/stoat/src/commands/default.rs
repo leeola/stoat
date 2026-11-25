@@ -449,6 +449,7 @@ fn run_tui(
         session_retention_days: None,
         terminal_shell: None,
         terminal_args: None,
+        run_full_terminal: None,
         ssh_program: None,
         mosh_server: None,
         direnv_load: None,

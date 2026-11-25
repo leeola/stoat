@@ -2499,6 +2499,57 @@ fn a_handed_off_cmd_leaves_a_stub_with_its_bar() {
     }
 }
 
+/// A line whose program is in the full-terminal list hands off at submit, and
+/// its Stub stays with no first run of the program under `TERM=dumb`.
+///
+/// A fake `htop` exits at once, so its tab closes. The block is then the header
+/// on row 44, the Stub row 45, and the hint row 46, with the run color's bar
+/// beside the Stub row and the hint row. The header's status reads in the
+/// muted color. A first run of this program in the block would end in the
+/// success mark, so the header's right end holds no pixel of that color.
+#[test]
+fn a_listed_program_leaves_a_stub_at_submit() {
+    let mut home = support::scratch_home();
+    fake_program(home.path(), "htop", "#!/bin/sh\nexit 0\n");
+    let mut session = spawn_scene(ermine_scene_with_bin(
+        "basic-diff",
+        "unstaged.txt",
+        home.path(),
+    ));
+    wait_for_diff(&mut session);
+    play(&mut session, "<Space>t<Settle>htop<Enter><Settle:800>");
+    let shot = session.snapshot().expect("a snapshot");
+
+    expect_region(
+        &shot,
+        &mut home,
+        (18, 812, 2, 30),
+        SPECIAL,
+        "listed_stub_bar",
+    );
+    expect_region(
+        &shot,
+        &mut home,
+        (20, 812, 2, 30),
+        BASE,
+        "listed_stub_bar_edge",
+    );
+
+    let status = cell_rect(128, 44, 30, 1);
+    let (muted, success) = (
+        pixels_of(&shot, status, MUTED),
+        pixels_of(&shot, status, SUCCESS),
+    );
+    if muted == 0 || success > 0 {
+        let frame = keep_frame(&shot, &mut home, "listed_stub_status");
+        panic!(
+            "the header's right end reads {muted} muted pixels and {success} success pixels; \
+             want the muted status and no success mark; the frame is {}",
+            frame.display(),
+        );
+    }
+}
+
 /// A Parsed Cmd's header ends in its Kind Chip, its label in the info color
 /// on the chip's tint.
 ///

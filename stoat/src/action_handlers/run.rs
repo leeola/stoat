@@ -21,7 +21,7 @@ use crate::{
     term_session::{TermId, ViewLocation},
     theme::scope,
     user_command::{self, run::PlannedStep, CommandSet},
-    workspace::Workspace,
+    workspace::{Workspace, WorkspaceId},
 };
 use std::{
     path::{Path, PathBuf},
@@ -516,6 +516,42 @@ pub(crate) fn hand_off(stoat: &mut Stoat, id: CmdId) {
     }
 }
 
+/// Hand each Cmd that waits on a hand-off to a terminal tab, as [`hand_off`]
+/// hands it, in the workspace that holds the Cmd.
+///
+/// A Cmd waits on a hand-off when its start found that its program needs a
+/// full terminal. Its kind is then `FullTerminal`, and it has not finished
+/// and holds no process and no handoff. The frame's background pass runs
+/// this, because a Cmd takes its place in a stack or in the palette's Run
+/// Block after its start, and the hand-off reads that place.
+pub(crate) fn pump_handoffs(stoat: &mut Stoat) {
+    let waiting: Vec<(WorkspaceId, Vec<CmdId>)> = stoat
+        .workspaces
+        .iter()
+        .map(|(workspace, ws)| {
+            let ids = ws
+                .cmds
+                .iter()
+                .filter(|(_, cmd)| {
+                    cmd.kind == RunKind::FullTerminal
+                        && !cmd.finished
+                        && cmd.process.is_none()
+                        && cmd.handoff.is_none()
+                })
+                .map(|(id, _)| id)
+                .collect();
+            (workspace, ids)
+        })
+        .collect();
+    for (workspace, ids) in waiting {
+        stoat.in_workspace(workspace, |stoat| {
+            for id in ids {
+                hand_off(stoat, id);
+            }
+        });
+    }
+}
+
 /// Start the agent that `line` runs in a new tab, and with `stub`, leave a
 /// Stub of the line on the stack of the focused Run pane.
 ///
@@ -942,7 +978,7 @@ pub(crate) fn run_steps(stoat: &mut Stoat, id: CmdId, on_screen: bool) -> Update
             return effect;
         };
         if cmd.steps.is_empty() {
-            spawn_run_text(stoat, id);
+            start_run_text(stoat, id);
             return effect;
         }
         let Some(step) = cmd.steps.get(cmd.step).cloned() else {
@@ -976,10 +1012,43 @@ pub(crate) fn run_steps(stoat: &mut Stoat, id: CmdId, on_screen: bool) -> Update
                     cmd.grid.feed(row.as_bytes());
                 }
                 cmd.shell = Some(text);
-                spawn_run_text(stoat, id);
+                start_run_text(stoat, id);
                 return effect;
             },
         }
+    }
+}
+
+/// Start the run text of the Cmd `id` of the active workspace as the process
+/// of its current run, or leave the Cmd to a hand-off when its program needs
+/// a full terminal.
+///
+/// A program that needs a full terminal, as [`needs_full_terminal`] reads the
+/// setting `run.full_terminal`, starts no run under `TERM=dumb`, where it
+/// draws no screen. The Cmd takes the kind `FullTerminal` instead, and
+/// [`pump_handoffs`] hands it to a terminal tab once it holds its place.
+fn start_run_text(stoat: &mut Stoat, id: CmdId) {
+    let full_terminal = stoat
+        .active_workspace()
+        .cmds
+        .get(id)
+        .is_some_and(|cmd| needs_full_terminal(stoat, cmd.run_text()));
+    if !full_terminal {
+        spawn_run_text(stoat, id);
+        return;
+    }
+    if let Some(cmd) = stoat.active_workspace_mut().cmds.get_mut(id) {
+        cmd.kind = RunKind::FullTerminal;
+    }
+}
+
+/// Whether `text` runs a program that needs a full terminal, one that the
+/// setting `run.full_terminal` names, or with no setting one of
+/// [`kind::FULL_TERMINAL_PROGRAMS`].
+fn needs_full_terminal(stoat: &Stoat, text: &str) -> bool {
+    match stoat.settings.run_full_terminal.as_deref() {
+        Some(programs) => kind::needs_full_terminal(text, programs),
+        None => kind::needs_full_terminal(text, &kind::FULL_TERMINAL_PROGRAMS),
     }
 }
 
@@ -1060,7 +1129,7 @@ mod tests {
             cargo::{ERROR_AND_WARNING, ONE_FAILURE, THREE_BINARIES},
             kind::RunKind,
             vterm::BodyRow,
-            CmdId, GridSelection, PtyNotification, RunId,
+            Cmd, CmdId, GridSelection, PtyNotification, RunId,
         },
         term_session::TermId,
         test_harness::{editor, CmdHandle, TestHarness},
@@ -1652,6 +1721,195 @@ mod tests {
                 false,
             ),
         );
+    }
+
+    /// A line whose program is in the full-terminal list hands off at submit,
+    /// so its one run is the one in the new terminal tab, and no run goes under
+    /// `TERM=dumb`. Back on the Run pane's tab, its Stub names the tab.
+    #[test]
+    fn a_listed_program_hands_off_at_submit_with_no_first_run() {
+        let mut h = Stoat::test();
+        h.stoat.active_workspace_mut().git_root = PathBuf::from("/work");
+        let run = h.open_run();
+        let cmd = h.submit_run("htop -d 5").cmd;
+
+        let ws = h.stoat.active_workspace();
+        let stub = &ws.cmds[cmd];
+        let term = stub.handoff.as_ref().map(|handoff| handoff.term);
+        let tab = (
+            (ws.tabs.len(), ws.active_tab, ws.tab_title(1)),
+            ws.panes.pane(ws.panes.focus()).view.clone(),
+        );
+        let stack = (ws.runs[run].blocks.clone(), stub.finished, stub.kind);
+        let spawned = spawns(&h);
+        super::super::dispatch(&mut h.stoat, &stoat_action::ToggleTab);
+
+        assert_eq!(
+            (
+                spawned,
+                tab,
+                stack,
+                h.cmd_status(cmd),
+                report_and_hint(&h, cmd)
+            ),
+            (
+                vec![(
+                    "bash".to_owned(),
+                    vec!["-c".to_owned(), "htop -d 5".to_owned()],
+                    PathBuf::from("/work"),
+                    Some(("TERM".to_owned(), "xterm-256color".to_owned())),
+                )],
+                (
+                    (2, 1, "htop".to_owned()),
+                    View::Terminal(term.expect("a handoff"))
+                ),
+                (vec![cmd], true, RunKind::FullTerminal),
+                "\u{25cf} Terminal tab".to_owned(),
+                (
+                    Some(vec![
+                        "needs a full terminal \u{b7} handed off to its own tab htop".to_owned()
+                    ]),
+                    Some("Enter go to tab".to_owned()),
+                ),
+            ),
+        );
+    }
+
+    /// A line whose program is outside the list runs as a Cmd under
+    /// `TERM=dumb`.
+    #[test]
+    fn a_program_outside_the_list_runs_as_a_cmd() {
+        let mut h = Stoat::test();
+        h.stoat.active_workspace_mut().git_root = PathBuf::from("/work");
+        h.open_run();
+        h.submit_run("ls");
+
+        assert_eq!(spawns(&h), vec![bash_in("ls", "/work")]);
+    }
+
+    /// A list of the setting takes the place of the default list, so its
+    /// program hands off and a program of the default list runs as a Cmd.
+    #[test]
+    fn the_setting_replaces_the_default_list() {
+        let mut h = Stoat::test();
+        h.stoat.settings.run_full_terminal = Some(vec!["mytui".to_owned()]);
+        h.open_run();
+        let listed = h.submit_run("mytui").cmd;
+        super::super::dispatch(&mut h.stoat, &stoat_action::ToggleTab);
+        let unlisted = h.submit_run("htop").cmd;
+
+        let ws = h.stoat.active_workspace();
+        let read = |cmd: CmdId| (ws.cmds[cmd].kind, ws.cmds[cmd].handoff.is_some());
+        assert_eq!(
+            [read(listed), read(unlisted)],
+            [(RunKind::FullTerminal, true), (RunKind::Line, false)],
+        );
+    }
+
+    /// An empty list of the setting turns the rule off, so a program of the
+    /// default list runs as a Cmd.
+    #[test]
+    fn an_empty_list_turns_the_rule_off() {
+        let mut h = Stoat::test();
+        h.stoat.settings.run_full_terminal = Some(Vec::new());
+        h.stoat.active_workspace_mut().git_root = PathBuf::from("/work");
+        h.open_run();
+        h.submit_run("htop");
+
+        assert_eq!(spawns(&h), vec![bash_in("htop", "/work")]);
+    }
+
+    /// The `run` command with a listed program leaves its Stub on a new Run
+    /// pane under the editor pane, and the terminal tab is active.
+    #[test]
+    fn the_run_command_hands_a_listed_program_off() {
+        let mut h = Stoat::test();
+        dispatch_run(&mut h, "htop");
+        h.stoat.drive_background();
+
+        let ws = h.stoat.active_workspace();
+        let tab = (
+            ws.tabs.len(),
+            ws.active_tab,
+            matches!(ws.panes.pane(ws.panes.focus()).view, View::Terminal(_)),
+        );
+        super::super::dispatch(&mut h.stoat, &stoat_action::ToggleTab);
+        let ws = h.stoat.active_workspace();
+        let lower = ws
+            .panes
+            .split_panes()
+            .max_by_key(|(_, pane)| pane.area.y)
+            .map(|(_, pane)| match pane.view {
+                View::Run(run) => ws.runs[run]
+                    .blocks
+                    .iter()
+                    .map(|cmd| ws.cmds[*cmd].handoff.is_some())
+                    .collect(),
+                _ => Vec::new(),
+            });
+        assert_eq!((tab, lower), ((2, 1, true), Some(vec![true])));
+    }
+
+    /// A config command whose run is a listed program hands it off from the
+    /// palette, which closes, and leaves no Cmd, since a Stub is a row of a
+    /// Run pane.
+    #[test]
+    fn a_config_command_hands_its_listed_program_off() {
+        let mut h = Stoat::test();
+        h.stoat.reload_user_config(r#"command top = cli("htop");"#);
+        h.type_text(":top");
+        h.type_keys("enter enter");
+
+        let ws = h.stoat.active_workspace();
+        assert_eq!(
+            (
+                h.stoat.command_palette.is_none(),
+                ws.cmds.len(),
+                (ws.tabs.len(), ws.active_tab)
+            ),
+            (true, 0, (2, 1)),
+        );
+    }
+
+    /// A Cmd that has not finished and holds no process waits on no hand-off
+    /// unless its start found a program that needs a full terminal.
+    #[test]
+    fn only_a_cmd_marked_at_its_start_hands_off() {
+        let mut h = Stoat::test();
+        let run = h.open_run();
+        let cmd = {
+            let ws = h.stoat.active_workspace_mut();
+            let id = ws
+                .cmds
+                .insert(Cmd::new("htop".to_owned(), PathBuf::from("/work"), 80));
+            ws.runs[run].blocks.push(id);
+            id
+        };
+        h.stoat.drive_background();
+
+        let ws = h.stoat.active_workspace();
+        assert_eq!((ws.tabs.len(), ws.cmds[cmd].handoff.is_none()), (1, true));
+    }
+
+    /// `Ctrl-r` on the Stub of a listed program whose tab closed hands the
+    /// line off again, with no run under `TERM=dumb`.
+    #[test]
+    fn ctrl_r_on_a_closed_stub_hands_off_again() {
+        let mut h = Stoat::test();
+        h.open_run();
+        let cmd = h.submit_run("htop").cmd;
+        let term = h.stoat.active_workspace().cmds[cmd]
+            .handoff
+            .as_ref()
+            .expect("a handoff")
+            .term;
+        end_term(&mut h, term);
+        h.type_keys("ctrl-r");
+
+        let terms: Vec<Option<(String, String)>> =
+            spawns(&h).into_iter().map(|(_, _, _, var)| var).collect();
+        let xterm = Some(("TERM".to_owned(), "xterm-256color".to_owned()));
+        assert_eq!(terms, [xterm.clone(), xterm]);
     }
 
     /// The exit of the killed process, which arrives after the handoff,
