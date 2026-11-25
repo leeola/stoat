@@ -1934,6 +1934,13 @@ on key {
     pane == run {
         Ctrl-c -> RunInterrupt();
     }
+    # Ctrl-j moves the newest running block to the Job Tray, and with none it
+    # brings the Job of the newest Stub back. Shift-Enter and Alt-Enter insert
+    # the newline at the prompt. The guard leaves the key to a modal over the
+    # pane.
+    !modal && pane == run {
+        Ctrl-j -> RunJobToggle();
+    }
     # A string after an action is the short name the hint box shows for the
     # key. A key that enters a submenu reads the submenu's name, such as
     # `+buffer`, and needs none.

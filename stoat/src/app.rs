@@ -9659,6 +9659,7 @@ impl Stoat {
                         UpdateEffect::None
                     };
                 }
+                let in_jobs = cmd.in_jobs;
                 if palette_cmd == Some(id) {
                     if on_screen {
                         self.pty_dirty = true;
@@ -9668,12 +9669,17 @@ impl Stoat {
                 let Some((run_id, run_state)) =
                     runs.iter_mut().find(|(_, run)| run.blocks.contains(&id))
                 else {
+                    if on_screen && in_jobs {
+                        self.pty_dirty = true;
+                    }
                     return UpdateEffect::None;
                 };
                 run_state.trim_blocks(cmds);
                 // The Cmd still feeds while hidden, but a hidden one drives no
                 // repaint. Revealing it repaints on the toggle's own dispatch.
-                if on_screen && Self::run_visible(ws, run_id) {
+                // A Job repaints even when no visible pane shows its stack,
+                // because the Job Tray carries it.
+                if on_screen && (in_jobs || Self::run_visible(ws, run_id)) {
                     self.pty_dirty = true;
                 }
                 UpdateEffect::None

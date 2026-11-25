@@ -9,6 +9,7 @@ use crate::{
     file_finder::OpenIntent,
     host::{FsHost, OffsetEncoding},
     input_history::InputHistory,
+    jobs,
     pane::{Axis, FocusTarget, PaneId, View},
     render::{self, paint::style_rgb},
     run::{
@@ -508,8 +509,9 @@ fn restart_cmd(stoat: &mut Stoat, id: CmdId) -> UpdateEffect {
 /// needs the keys. It goes by the text's program word until the program sets
 /// a title, and it closes when the program ends, as [`retire_handoff`] closes
 /// it. The Cmd of the palette's Run Block closes the palette and leaves the
-/// store, because a Stub is a row of a Run pane. A spawn that fails ends the
-/// Cmd with the error line `handoff failed`.
+/// store, because a Stub is a row of a Run pane. A Job leaves the Job Tray,
+/// and a Job that no stack holds leaves the store too. A spawn that fails
+/// ends the Cmd with the error line `handoff failed`.
 pub(crate) fn hand_off(stoat: &mut Stoat, id: CmdId) {
     let now = stoat.executor.now();
     let Some(cmd) = stoat.active_workspace_mut().cmds.get_mut(id) else {
@@ -547,12 +549,16 @@ pub(crate) fn hand_off(stoat: &mut Stoat, id: CmdId) {
         stoat.active_workspace_mut().cmds.remove(id);
         return;
     }
-    if let Some(cmd) = stoat.active_workspace_mut().cmds.get_mut(id) {
+    let ws = stoat.active_workspace_mut();
+    if let Some(cmd) = ws.cmds.get_mut(id) {
         cmd.handoff = Some(Handoff {
             term,
             label,
             agent: false,
         });
+    }
+    if jobs::take(ws, id) && !ws.runs.values().any(|run| run.blocks.contains(&id)) {
+        ws.cmds.remove(id);
     }
 }
 

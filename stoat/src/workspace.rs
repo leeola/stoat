@@ -276,6 +276,12 @@ pub struct Workspace {
     pub(crate) runs: SlotMap<RunId, RunState>,
     /// Every Cmd of the workspace, whichever stack shows it.
     pub(crate) cmds: SlotMap<CmdId, Cmd>,
+    /// The Job Tray, the ids of the Cmds whose placement is the tray, oldest
+    /// first.
+    ///
+    /// A stack keeps the id of each Cmd it moved here, and [`Cmd::in_jobs`]
+    /// marks that block as a Stub of the stack.
+    pub(crate) jobs: Vec<CmdId>,
     pub(crate) terms: SlotMap<TermId, TermSession>,
     /// The grid stoatty reported for each terminal pane it draws as a pool at
     /// the terminal font size, as `(rows, cols)` of that font.
@@ -602,6 +608,7 @@ impl Workspace {
             reload_flashes: Vec::new(),
             runs: SlotMap::with_key(),
             cmds: SlotMap::with_key(),
+            jobs: Vec::new(),
             terms: SlotMap::with_key(),
             term_pool_grids: HashMap::new(),
             band_pane: None,
@@ -653,12 +660,16 @@ impl Workspace {
     /// input of its prompt.
     ///
     /// Each Cmd that still runs has its process killed, since no pane can show
-    /// it once the run is gone.
+    /// it once the run is gone. A Cmd in the Job Tray stays in the store with
+    /// its process, because the tray carries it.
     pub(crate) fn remove_run(&mut self, id: RunId) {
         let Some(state) = self.runs.remove(id) else {
             return;
         };
         for id in &state.blocks {
+            if self.cmds.get(*id).is_some_and(|cmd| cmd.in_jobs) {
+                continue;
+            }
             if let Some(cmd) = self.cmds.remove(*id)
                 && let Some(process) = &cmd.process
             {

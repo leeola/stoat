@@ -142,7 +142,8 @@ impl RunState {
     /// The threshold is [`MAX_RUN_ROWS`] plus [`vterm::SCROLLBACK_SLACK`], the
     /// most rows one block holds. The newest block always stays, and so does
     /// each Cmd that still runs, so a flood in one Cmd kills no other
-    /// process. An id with no Cmd counts for no rows.
+    /// process. A Cmd in the Job Tray stays too, because the tray carries it.
+    /// An id with no Cmd counts for no rows.
     pub(crate) fn trim_blocks(&mut self, cmds: &mut SlotMap<CmdId, Cmd>) {
         let mut rows: usize = self
             .blocks
@@ -154,7 +155,7 @@ impl RunState {
             let newest = self.blocks.len().saturating_sub(1);
             let Some(oldest) = self.blocks[..newest]
                 .iter()
-                .position(|id| cmds.get(*id).is_none_or(|cmd| cmd.finished))
+                .position(|id| cmds.get(*id).is_none_or(|cmd| cmd.finished && !cmd.in_jobs))
             else {
                 return;
             };
@@ -1096,6 +1097,24 @@ mod tests {
             commands(&run, &cmds),
             ["cmd0", "cmd2"],
             "the running oldest Cmd stays, and the second drops"
+        );
+    }
+
+    /// A trim never drops a Cmd in the Job Tray, because the tray carries it.
+    #[test]
+    fn a_trim_keeps_a_cmd_in_jobs() {
+        let (mut run, mut cmds) = scrollable(3, 0);
+        for block in cmds.values_mut() {
+            block.feed("x\r\n".repeat(4_000).as_bytes());
+            block.finished = true;
+        }
+        cmds[run.blocks[0]].in_jobs = true;
+
+        run.trim_blocks(&mut cmds);
+        assert_eq!(
+            commands(&run, &cmds),
+            ["cmd0", "cmd2"],
+            "the oldest Cmd in Jobs stays, and the second drops"
         );
     }
 

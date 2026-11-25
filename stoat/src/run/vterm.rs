@@ -755,6 +755,9 @@ pub struct Cmd {
     /// alternate screen, which makes the block a Stub, or `None` for a Cmd
     /// that runs in its block.
     pub(crate) handoff: Option<Handoff>,
+    /// Whether the Job Tray holds the Cmd, true while `Workspace::jobs` holds
+    /// its id.
+    pub(crate) in_jobs: bool,
 }
 
 /// Where a Stub's text went on running, a terminal tab of its own.
@@ -799,6 +802,7 @@ impl Cmd {
             steps: Vec::new(),
             step: 0,
             handoff: None,
+            in_jobs: false,
         }
     }
 

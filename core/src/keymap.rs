@@ -3868,6 +3868,35 @@ mod tests {
         );
     }
 
+    /// `Ctrl-j` in a Run pane moves a block to or from the Job Tray in either
+    /// mode, and a modal over the pane keeps the key.
+    #[test]
+    fn ctrl_j_in_a_run_pane_binds_the_job_toggle() {
+        let keymap = Keymap::compile(&parse_config(DEFAULT_KEYMAP));
+        let ctrl_j = key_event(KeyCode::Char('j'), KeyModifiers::CONTROL);
+        let run_pane = |mode: &str| {
+            TestState::new()
+                .set("mode", StateValue::String(mode.into()))
+                .set("pane", StateValue::String("run".into()))
+        };
+        let calls = |state: &TestState| {
+            keymap
+                .lookup(state, &ctrl_j)
+                .map(|actions| action_calls(&actions))
+        };
+        let toggle = Some(vec![("RunJobToggle".to_owned(), Vec::new())]);
+        let under_palette = run_pane("insert").set("modal", StateValue::String("palette".into()));
+
+        assert_eq!(
+            [
+                calls(&run_pane("insert")),
+                calls(&run_pane("normal")),
+                calls(&under_palette),
+            ],
+            [toggle.clone(), toggle, None],
+        );
+    }
+
     /// The actions `code` with `modifiers` resolves to in `mode`, over the two
     /// split panes the pane chords act on.
     fn mode_calls(

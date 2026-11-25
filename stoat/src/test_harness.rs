@@ -809,6 +809,21 @@ impl TestHarness {
         CmdHandle { cmd, session }
     }
 
+    /// Submit `line` at the prompt of a Run pane and press `ctrl-j`, which
+    /// moves the Cmd that the submit started to the Job Tray.
+    ///
+    /// Opens a Run pane first when the focused pane shows none.
+    pub(crate) fn push_job(&mut self, line: &str) -> CmdHandle {
+        use crate::pane::View;
+        let ws = self.stoat.active_workspace();
+        if !matches!(ws.panes.pane(ws.panes.focus()).view, View::Run(_)) {
+            self.open_run();
+        }
+        let job = self.submit_run(line);
+        self.type_keys("ctrl-j");
+        job
+    }
+
     /// Send output for the newest Cmd of the run `run_id`, as its reader does.
     pub fn inject_run_output(&mut self, run_id: crate::run::RunId, data: &[u8]) {
         let cmd = self.newest_cmd(run_id);

@@ -36,6 +36,19 @@ define_action!(
 );
 
 define_action!(
+    RunJobToggleDef,
+    RunJobToggle,
+    "RunJobToggle",
+    ActionKind::RunJobToggle,
+    "move a command to or from Jobs",
+    "Move the newest running block of the focused Run pane to the Job Tray, \
+     where it runs on as a Job. With no running block, bring the newest Job of \
+     the pane back to its block.",
+    ActionPriority::Normal,
+    palette_visible = false
+);
+
+define_action!(
     RunToggleViewDef,
     RunToggleView,
     "RunToggleView",

@@ -17,6 +17,7 @@ mod git_merge;
 mod git_stash;
 mod git_status;
 pub(crate) mod help;
+mod jobs;
 pub(crate) mod jump;
 pub(crate) mod lsp;
 pub(crate) mod macro_recording;
@@ -1110,6 +1111,7 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
         ActionKind::Terminal => terminal::open_terminal_pane(stoat),
         ActionKind::RunSubmit => run::run_submit(stoat),
         ActionKind::RunInterrupt => run::run_interrupt(stoat),
+        ActionKind::RunJobToggle => jobs::run_job_toggle(stoat),
         ActionKind::RunToggleView => run::run_toggle_view(stoat),
         ActionKind::RunAgain => run::run_again(stoat),
         ActionKind::RunBlockToPane => run::run_block_to_pane(stoat),

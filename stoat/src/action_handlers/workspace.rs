@@ -3,6 +3,7 @@ use crate::{
     app::{Stoat, UpdateEffect},
     host::FsHost,
     input_view::{InputView, SubmitTarget},
+    jobs,
     pane::View,
     workspace::{
         persist,
@@ -466,16 +467,31 @@ fn remove_session_files(fs: &dyn FsHost, state_path: &Path) {
     }
 }
 
-/// End every shell, run, and agent session of the open workspace `id`, and
-/// stop its hook server.
+/// End every shell, run, Job, and agent session of the open workspace `id`,
+/// and stop its hook server.
 ///
 /// A reader task holds its session, so a workspace removed without this
 /// leaves its shells running and its socket bound until exit. Each session
 /// ends the way a tab close ends it. The exit of a killed shell then lands
-/// for a workspace that no longer exists, and drops.
+/// for a workspace that no longer exists, and drops. A Job leaves the tray
+/// first, so it ends with the run whose stack holds it, or alone when no
+/// stack does.
 fn release_workspace(stoat: &mut Stoat, id: WorkspaceId) {
     let executor = stoat.executor.clone();
     let ws = &mut stoat.workspaces[id];
+
+    let held = ws.jobs.clone();
+    for job in held {
+        jobs::take(ws, job);
+        if ws.runs.values().any(|run| run.blocks.contains(&job)) {
+            continue;
+        }
+        if let Some(cmd) = ws.cmds.remove(job)
+            && let Some(process) = &cmd.process
+        {
+            process.kill();
+        }
+    }
 
     let terms: Vec<_> = ws.terms.keys().collect();
     for term_id in terms {
