@@ -270,6 +270,10 @@ The typed UI scopes, by group (syntax scopes are open-ended):
   prompt. A theme that leaves `ui.run.rule` unset draws no rule under a
   block, and one that leaves `ui.run.prompt.rule` unset draws the prompt's
   rule in the `ui.divider` foreground, as default_dark does.
+- `ui.run.kind` -- the Kind Chip at the right of a Parsed Cmd's header in a Run
+  pane, such as `cargo test`. The background fills the chip's box and the
+  foreground draws its label. A theme that leaves it unset draws the label in
+  the `ui.key_label` foreground with no box, as default_dark does.
 - `ui.readonly.label`, `ui.readonly.frame` -- the label and the dashed ring
   a read-only editor pane draws inside stoatty. default_dark leaves both
   unset, so its read-only panes draw neither.

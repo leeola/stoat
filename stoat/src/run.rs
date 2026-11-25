@@ -1,3 +1,4 @@
+pub(crate) mod kind;
 pub mod pty;
 pub mod vterm;
 

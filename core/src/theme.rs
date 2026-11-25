@@ -910,6 +910,11 @@ pub mod scope {
     /// The rule over a Run pane's prompt. A theme that leaves it unset draws
     /// the rule in [`UI_DIVIDER`].
     pub const UI_RUN_PROMPT_RULE: &str = "ui.run.prompt.rule";
+    /// The Kind Chip at the right of a Parsed Cmd's header, such as `cargo test`.
+    /// Its background fills the chip's box and its foreground draws the label.
+    /// A theme that leaves it unset draws the label in [`UI_KEY_LABEL`] with no
+    /// box.
+    pub const UI_RUN_KIND: &str = "ui.run.kind";
 
     pub const UI_PANEL_ISLAND: &str = "ui.panel.island";
     pub const UI_PANEL_POPOUT: &str = "ui.panel.popout";

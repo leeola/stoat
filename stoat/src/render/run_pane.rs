@@ -224,6 +224,10 @@ fn paint_stack_rules(
 
 /// The status that ends `cmd`'s header, as the parts it reads in order.
 ///
+/// A Parsed Cmd's status leads with its Kind Chip in `ui.run.kind`, or in
+/// `ui.key_label` for a theme that leaves that unset, which draws the label
+/// with no box. The other parts follow it.
+///
 /// A finished Cmd reads its mark, U+2713 in `ui.badge.complete` for an exit of
 /// 0, and otherwise U+2717 in `ui.error`, with `exit N` after it when the
 /// process gave a code. Its runtime follows in `ui.text.muted`, with the run
@@ -235,16 +239,30 @@ fn paint_stack_rules(
 /// `ui.statusline.run`. The status-line scope can carry a background, which a
 /// header leaves to the pane.
 pub(crate) fn status_parts(cmd: &Cmd, theme: &crate::theme::Theme) -> Vec<StatusPart> {
+    let mut parts: Vec<StatusPart> = cmd
+        .kind
+        .chip()
+        .map(|label| StatusPart {
+            text: label.to_owned(),
+            style: theme
+                .try_get(crate::theme::scope::UI_RUN_KIND)
+                .unwrap_or_else(|| theme.get(crate::theme::scope::UI_KEY_LABEL)),
+            chip: true,
+        })
+        .into_iter()
+        .collect();
+
     if !cmd.finished {
         let fg = theme.get(crate::theme::scope::UI_STATUSLINE_RUN).fg;
-        return vec![StatusPart {
+        parts.push(StatusPart {
             text: format!("\u{25cf} {}", crate::run::format_elapsed(cmd.elapsed_secs)),
             style: Style {
                 fg,
                 ..Style::default()
             },
             chip: false,
-        }];
+        });
+        return parts;
     }
 
     let (mark, mark_scope) = match cmd.exit_status {
@@ -258,11 +276,11 @@ pub(crate) fn status_parts(cmd: &Cmd, theme: &crate::theme::Theme) -> Vec<Status
         ),
         None => ("\u{2717}".to_owned(), crate::theme::scope::UI_ERROR),
     };
-    let mut parts = vec![StatusPart {
+    parts.push(StatusPart {
         text: mark,
         style: theme.get(mark_scope),
         chip: false,
-    }];
+    });
 
     if let Some((started, ended)) = cmd.started.zip(cmd.ended) {
         let runtime = crate::run::format_runtime(ended.saturating_duration_since(started));
@@ -515,11 +533,12 @@ pub(crate) fn render_modal_run(
 mod tests {
     use super::{
         block_line, paint_grid_row, render_modal_run, render_run_pane, status_parts,
-        window_offsets, Buffer, Cmd, GridSelection, Modifier, OutputLine, Rect, RunState, Style,
-        ISLAND_BOTTOM, ISLAND_SIDE, ISLAND_TOP,
+        window_offsets, Buffer, Cmd, GridSelection, Modifier, OutputLine, Rect, RunState,
+        StatusPart, Style, ISLAND_BOTTOM, ISLAND_SIDE, ISLAND_TOP,
     };
     use crate::{
         render::{editor::ResolvedChrome, paint::style_rgb},
+        run::kind,
         test_harness::TestHarness,
         theme::{scope, Theme},
         workspace::Workspace,
@@ -1116,5 +1135,39 @@ mod tests {
 
         let divider = style_rgb(theme.get(scope::UI_DIVIDER).fg).expect("an RGB divider color");
         assert_eq!(bars(&scene), [(16, 11 * 16, 38 * 16, 1, divider)]);
+    }
+
+    /// A Parsed Cmd's status leads with its Kind Chip in the `ui.run.kind`
+    /// colors, before its mark and its runtime. A theme that leaves the scope
+    /// unset gives the chip the `ui.key_label` foreground and no background, so
+    /// the chip draws as a label with no box.
+    #[test]
+    fn a_parsed_header_leads_its_status_with_the_kind_chip() {
+        let (config, _) = stoat_config::parse(crate::app::DEFAULT_KEYMAP);
+        let config = config.expect("the shipped config parses");
+        let shipped =
+            |name: &str| Theme::from_config(&config, name).expect("the shipped theme builds");
+        let (ermine, dark) = (shipped("ermine_night"), shipped("default_dark"));
+        let mut cmd = finished(Some(0), Duration::ZERO, 1);
+        cmd.kind = kind::run_kind("cargo test");
+
+        let ermine_parts = status_parts(&cmd, &ermine);
+        let dark_parts = status_parts(&cmd, &dark);
+        let texts: Vec<_> = ermine_parts
+            .iter()
+            .map(|part| (part.text.as_str(), part.chip))
+            .collect();
+        let chip_colors = |parts: &[StatusPart]| (parts[0].style.fg, parts[0].style.bg);
+        assert_eq!(
+            (texts, chip_colors(&ermine_parts), chip_colors(&dark_parts)),
+            (
+                vec![("cargo test", true), ("\u{2713}", false), ("0ms", false)],
+                (
+                    Some(Color::Rgb(0x6c, 0xc7, 0xd6)),
+                    Some(Color::Rgb(0x1b, 0x2a, 0x2d))
+                ),
+                (dark.get(scope::UI_KEY_LABEL).fg, None),
+            ),
+        );
     }
 }

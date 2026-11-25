@@ -11,6 +11,7 @@
 use std::{
     collections::{HashMap, HashSet},
     ops::Range,
+    os::unix::fs::PermissionsExt,
     path::{Path, PathBuf},
     time::{Duration, Instant},
 };
@@ -59,6 +60,9 @@ const STRONG: [u8; 3] = [0x3e, 0x43, 0x4e];
 const DISABLED: [u8; 3] = [0x5b, 0x61, 0x6d];
 const TINT_ACCENT: [u8; 3] = [0x22, 0x30, 0x49];
 const TINT_INTERNAL: [u8; 3] = [0x1b, 0x2a, 0x2d];
+/// The box of a Parsed Cmd's Kind Chip, which `ui.run.kind` gives the tint of
+/// the internal Source Tag.
+const KIND_TINT: [u8; 3] = TINT_INTERNAL;
 const TINT_SPECIAL: [u8; 3] = [0x2a, 0x22, 0x36];
 const DANGER: [u8; 3] = [0xf2, 0x77, 0x7f];
 const SUCCESS: [u8; 3] = [0x8f, 0xd1, 0x8a];
@@ -2422,6 +2426,51 @@ fn a_failed_body_carries_the_danger_bar_in_pixels() {
     );
 }
 
+/// A Parsed Cmd's header ends in its Kind Chip, its label in the info color
+/// on the chip's tint.
+///
+/// A fake `cargo` that exits at once runs `cargo test` in the lone Run pane,
+/// so the block is its header alone, on row 46 over the prompt. The chip's box
+/// covers at least 14 pixel rows of 40 pixels in the tint, and its label draws
+/// in the info color over it.
+///
+/// The label draws at the small size, where few pixels take the info color
+/// whole, so the check reads the label's hue rather than its exact color.
+#[test]
+fn the_kind_chip_stands_on_its_tint() {
+    let mut home = support::scratch_home();
+    fake_program(home.path(), "cargo", "#!/bin/sh\nexit 0\n");
+    let mut session = spawn_scene(ermine_scene_with_bin(
+        "basic-diff",
+        "unstaged.txt",
+        home.path(),
+    ));
+    wait_for_diff(&mut session);
+    play(
+        &mut session,
+        "<Space>t<Settle>cargo test<Enter><Settle:500>",
+    );
+    let shot = session.snapshot().expect("a snapshot");
+
+    fn gap(a: u8, b: u8) -> i32 {
+        i32::from(a) - i32::from(b)
+    }
+    let info = |[r, g, b]: [u8; 3]| gap(g, r) > 40 && gap(b, r) > 40;
+    let cells = cell_rect(108, 46, 50, 1);
+    let (tint, ink) = (
+        pixels_of(&shot, cells, KIND_TINT),
+        pixels_where(&shot, cells, info),
+    );
+    if tint < 14 * 40 || ink == 0 {
+        let frame = keep_frame(&shot, &mut home, "kind_chip");
+        panic!(
+            "the header's right end reads {tint} tint pixels and {ink} info pixels; want a chip \
+             box of at least 560 tint pixels under an info label; the frame is {}",
+            frame.display(),
+        );
+    }
+}
+
 /// The which-key box docks on the status bar as a card on the raised surface.
 ///
 /// The card's cells end above the two rows of the status band, so its footer
@@ -3536,6 +3585,28 @@ fn ermine_scene(fixture: &str, file: &str, home: &Path) -> Scene {
         software: true,
         extra_env: support::scratch_env(home),
     }
+}
+
+/// The [`ermine_scene`] of `fixture` and `file`, with `<home>/bin` first on its
+/// child's `PATH`, so a program that [`fake_program`] writes there stands in
+/// for the real one in the Cmds the scene runs.
+fn ermine_scene_with_bin(fixture: &str, file: &str, home: &Path) -> Scene {
+    Scene {
+        stoat_dir: Some(home.join("bin")),
+        ..ermine_scene(fixture, file, home)
+    }
+}
+
+/// Write the shell script `script` to `<home>/bin/<name>` as an executable.
+// The fake program is this test's own disk state, set up before the child runs.
+#[allow(clippy::disallowed_methods)]
+fn fake_program(home: &Path, name: &str, script: &str) {
+    let bin = home.join("bin");
+    std::fs::create_dir_all(&bin).expect("the scene's bin directory");
+    let path = bin.join(name);
+    std::fs::write(&path, script).expect("the fake program");
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))
+        .expect("an executable fake program");
 }
 
 /// The pixels that `cols` by `rows` cells cover, from the cell at `col` and

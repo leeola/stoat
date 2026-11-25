@@ -672,4 +672,15 @@ mod tests {
             (false, "\u{25cf} 0:05".to_owned())
         );
     }
+
+    /// A submitted `cargo test` line reads its Kind Chip before its elapsed
+    /// time, since a Cmd reads its kind from its line when it is made.
+    #[test]
+    fn a_submitted_cargo_line_leads_its_status_with_its_chip() {
+        let mut h = Stoat::test();
+        h.open_run();
+        let handle = h.submit_run("cargo test");
+
+        assert_eq!(h.cmd_status(handle.cmd), "cargo test \u{25cf} 0:00");
+    }
 }

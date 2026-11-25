@@ -331,6 +331,7 @@ theme ermine_night inherits default_dark {
     ui.divider.fg         = divider;
     ui.run.rule.fg        = raised;
     ui.run.prompt.rule.fg = hairline;
+    ui.run.kind           = { fg: info, bg: tint_internal };
 
     ui.selection           = { fg: text, bg: select };
     ui.selection.reversed  = { fg: text, bg: select, modifiers: [] };

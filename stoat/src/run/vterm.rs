@@ -1,4 +1,7 @@
-use super::pty::CmdProcess;
+use super::{
+    kind::{self, RunKind},
+    pty::CmdProcess,
+};
 use crate::osc_cap::{OscCap, MAX_OSC_CLIPBOARD_BYTES, MAX_OSC_PLAIN_BYTES};
 use base64::{engine::general_purpose::STANDARD, Engine};
 use ratatui::style::{Color, Modifier};
@@ -673,6 +676,9 @@ impl GridSelection {
 /// A Run Block is a Cmd after Enter.
 pub struct Cmd {
     pub command: String,
+    /// The kind of run that the line asks for, read from the line when the Cmd
+    /// is made.
+    pub(crate) kind: RunKind,
     /// The directory the command runs in, the workspace root when it was
     /// submitted, which the block's prompt line names.
     pub cwd: PathBuf,
@@ -708,8 +714,10 @@ pub struct Cmd {
 
 impl Cmd {
     pub fn new(command: String, cwd: PathBuf, width: u16) -> Self {
+        let kind = kind::run_kind(&command);
         Self {
             command,
+            kind,
             cwd,
             grid: VtermGrid::new(width),
             finished: false,
