@@ -2096,10 +2096,11 @@ fn scroll_modal_preview(stoat: &mut Stoat, down: bool) -> UpdateEffect {
                 return UpdateEffect::None;
             };
             let rows = stoat.size().height.saturating_sub(1) as usize;
-            let Some(run_state) = stoat.active_workspace_mut().runs.get_mut(run_id) else {
+            let Workspace { runs, cmds, .. } = stoat.active_workspace_mut();
+            let Some(run_state) = runs.get_mut(run_id) else {
                 return UpdateEffect::None;
             };
-            run_state.wheel_scroll(down, rows);
+            run_state.wheel_scroll(down, rows, cmds);
             return UpdateEffect::Redraw;
         },
         _ => modal_preview_editor(stoat),
@@ -2306,11 +2307,12 @@ pub(crate) fn scroll_view_at(
             if steps == 0 {
                 return UpdateEffect::None;
             }
-            let Some(run_state) = stoat.active_workspace_mut().runs.get_mut(id) else {
+            let Workspace { runs, cmds, .. } = stoat.active_workspace_mut();
+            let Some(run_state) = runs.get_mut(id) else {
                 return UpdateEffect::None;
             };
             for _ in 0..steps.unsigned_abs() {
-                run_state.wheel_scroll(steps > 0, (area.height as usize).saturating_sub(1));
+                run_state.wheel_scroll(steps > 0, (area.height as usize).saturating_sub(1), cmds);
             }
             UpdateEffect::Redraw
         },
@@ -2387,12 +2389,12 @@ fn handle_run_pane_mouse(stoat: &mut Stoat, kind: MouseEventKind, col: u16, row:
     };
     let clipboard_host = stoat.clipboard_host.clone();
     let env_host = stoat.env_host.clone();
-    let ws = stoat.active_workspace_mut();
-    let Some(run_state) = ws.runs.get_mut(run_id) else {
+    let Workspace { runs, cmds, .. } = stoat.active_workspace_mut();
+    let Some(run_state) = runs.get(run_id) else {
         return false;
     };
-    let pos = run_state.active_block_grid_pos(area, col, row);
-    let Some(block) = run_state.active_block_mut() else {
+    let pos = run_state.active_block_grid_pos(cmds, area, col, row);
+    let Some(block) = run_state.active_block_mut(cmds) else {
         return false;
     };
     match kind {

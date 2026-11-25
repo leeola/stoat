@@ -122,6 +122,7 @@ pub(crate) fn render_pane(
         editors,
         buffers,
         runs,
+        cmds,
         terms,
         term_pool_grids,
         commit_lists,
@@ -248,6 +249,7 @@ pub(crate) fn render_pane(
             if let Some(run_state) = runs.get(*run_id) {
                 render_run_pane(
                     run_state,
+                    cmds,
                     editors,
                     theme,
                     frame.chrome,

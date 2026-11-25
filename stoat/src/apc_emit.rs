@@ -583,6 +583,7 @@ fn emit_window_content(stoat: &mut Stoat, out: &mut Vec<u8>) -> Vec<Vec<u8>> {
                         editors: &mut ws.editors,
                         buffers: &ws.buffers,
                         runs: &ws.runs,
+                        cmds: &ws.cmds,
                         terms: &ws.terms,
                         term_pool_grids: &ws.term_pool_grids,
                         commit_lists: &mut ws.commit_lists,
@@ -3759,7 +3760,7 @@ pub(crate) fn window_content_version(
             run.scroll_offset.hash(&mut hasher);
             run.cwd.hash(&mut hasher);
             run.blocks.len().hash(&mut hasher);
-            for block in &run.blocks {
+            for block in run.blocks.iter().filter_map(|id| ws.cmds.get(*id)) {
                 // Only the grid needs a counter. Every other field the block
                 // renders is a scalar or a short string, cheap enough to hash
                 // outright and safer than tracking who writes it.

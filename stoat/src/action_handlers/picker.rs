@@ -911,7 +911,7 @@ mod tests {
     use crate::{
         diagnostics_picker::PickerScope,
         diff_changes::DiffChangesState,
-        run::OutputBlock,
+        run::Cmd,
         test_fixture::{diag, drain_apc, open_scratch_file, store_two_tours},
         test_harness::{editor, keys, stoat, TestHarness},
     };
@@ -1373,11 +1373,12 @@ mod tests {
     fn a_run_row_previews_its_blocks() {
         let mut h = Stoat::test();
         let run_id = h.open_run();
-        let run = &mut h.stoat.active_workspace_mut().runs[run_id];
+        let ws = h.stoat.active_workspace_mut();
+        let run = &mut ws.runs[run_id];
         for (command, output) in [("echo hi", "hi\r\n"), ("pwd", "/ws"), ("sleep 9", "")] {
-            let mut block = OutputBlock::new(command.into(), run.cwd.clone(), 80);
+            let mut block = Cmd::new(command.into(), run.cwd.clone(), 80);
             block.feed(output.as_bytes());
-            run.blocks.push(block);
+            run.blocks.push(ws.cmds.insert(block));
         }
         dispatch(&mut h.stoat, &stoat_action::OpenPaneFinder);
 

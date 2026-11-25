@@ -37,7 +37,7 @@ use crate::{
     rebase::{ActiveRebase, RebaseState},
     render::{chrome, text, walkthrough::SlideParts},
     review_approval::ApprovedRows,
-    run::{RunId, RunState},
+    run::{Cmd, CmdId, RunId, RunState},
     ssh::RemoteTarget,
     syntax_parse::{parse_buffer_step, ParseJobOutput},
     term_session::{TermId, TermSession, ViewLocation},
@@ -270,6 +270,8 @@ pub struct Workspace {
     /// every editor of a buffer listed here paints the wash.
     pub(crate) reload_flashes: Vec<ReloadFlash>,
     pub(crate) runs: SlotMap<RunId, RunState>,
+    /// Every Cmd of the workspace, whichever stack shows it.
+    pub(crate) cmds: SlotMap<CmdId, Cmd>,
     pub(crate) terms: SlotMap<TermId, TermSession>,
     /// The grid stoatty reported for each terminal pane it draws as a pool at
     /// the terminal font size, as `(rows, cols)` of that font.
@@ -595,6 +597,7 @@ impl Workspace {
             editors,
             reload_flashes: Vec::new(),
             runs: SlotMap::with_key(),
+            cmds: SlotMap::with_key(),
             terms: SlotMap::with_key(),
             term_pool_grids: HashMap::new(),
             band_pane: None,
@@ -640,6 +643,20 @@ impl Workspace {
             agent: None,
             editor_bridge_waiters: HashMap::new(),
         }
+    }
+
+    /// Remove the run `id`, with every Cmd of its stack, and dispose the
+    /// input of its prompt.
+    ///
+    /// Answers the removed state, so a caller that ends the run can kill its
+    /// shell.
+    pub(crate) fn remove_run(&mut self, id: RunId) -> Option<RunState> {
+        let state = self.runs.remove(id)?;
+        for cmd in &state.blocks {
+            self.cmds.remove(*cmd);
+        }
+        state.dispose(self);
+        Some(state)
     }
 
     /// Make tab `idx` active, parking the outgoing tree and taking the

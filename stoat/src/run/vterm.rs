@@ -723,7 +723,10 @@ impl GridSelection {
     }
 }
 
-pub struct OutputBlock {
+/// One command line and its run.
+///
+/// A Run Block is a Cmd after Enter.
+pub struct Cmd {
     pub command: String,
     /// The shell's working directory when this command was submitted,
     /// rendered as the block's prompt-line cwd.
@@ -741,7 +744,7 @@ pub struct OutputBlock {
     pub selection: Option<GridSelection>,
 }
 
-impl OutputBlock {
+impl Cmd {
     pub fn new(command: String, cwd: PathBuf, width: u16) -> Self {
         Self {
             command,

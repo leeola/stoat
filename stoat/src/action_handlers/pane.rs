@@ -420,11 +420,10 @@ pub(crate) fn dispose_view(
             ws.release_bridge_waiters(buffer_id, outcome);
         },
         View::Run(id) => {
-            if let Some(mut state) = ws.runs.remove(id) {
-                if let Some(handle) = &mut state.shell_handle {
-                    handle.kill();
-                }
-                state.dispose(ws);
+            if let Some(mut state) = ws.remove_run(id)
+                && let Some(handle) = &mut state.shell_handle
+            {
+                handle.kill();
             }
         },
         View::Agent(id) | View::Terminal(id) => {

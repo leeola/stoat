@@ -12,13 +12,18 @@ pub use pty::{
     PtyNotification, RunSink, ShellHandle, TermSpawnEnv,
 };
 use ratatui::layout::Rect;
-use slotmap::new_key_type;
+use slotmap::{new_key_type, SlotMap};
 use std::path::{Component, Path, PathBuf};
 use stoat_scheduler::Executor;
-pub use vterm::{CommandMark, GridSelection, OutputBlock, StyledCell, VtermGrid};
+pub use vterm::{Cmd, CommandMark, GridSelection, StyledCell, VtermGrid};
 
 new_key_type! {
     pub struct RunId;
+    /// The key of a [`Cmd`] in [`Workspace::cmds`].
+    ///
+    /// A place that shows a Cmd names it by this key, so several places can
+    /// show one Cmd.
+    pub struct CmdId;
 }
 
 /// Output rows one wheel notch moves the run pane's scrollback.
@@ -33,7 +38,8 @@ const MAX_RUN_ROWS: usize = vterm::MAX_SCROLLBACK_ROWS;
 
 pub struct RunState {
     pub(crate) input: InputView,
-    pub blocks: Vec<OutputBlock>,
+    /// The stack, oldest first. Each id names a Cmd in `Workspace::cmds`.
+    pub blocks: Vec<CmdId>,
     pub scroll_offset: usize,
     pub cwd: PathBuf,
     pub shell_handle: Option<ShellHandle>,
@@ -68,9 +74,9 @@ impl RunState {
     ///
     /// Each block reads as its `$ <command>` line, then the output rows the
     /// run pane shows for it. A blank line separates the blocks.
-    pub(crate) fn preview_text(&self) -> String {
+    pub(crate) fn preview_text(&self, cmds: &SlotMap<CmdId, Cmd>) -> String {
         let mut text = String::new();
-        for block in &self.blocks {
+        for block in self.blocks.iter().filter_map(|id| cmds.get(*id)) {
             if !text.is_empty() {
                 text.push_str("\n\n");
             }
@@ -87,20 +93,25 @@ impl RunState {
         text
     }
 
-    pub fn active_block(&self) -> Option<&OutputBlock> {
-        self.blocks.last()
+    /// The newest Cmd of the stack, the one that output arrives into.
+    pub fn active_block<'a>(&self, cmds: &'a SlotMap<CmdId, Cmd>) -> Option<&'a Cmd> {
+        self.blocks.last().and_then(|id| cmds.get(*id))
     }
 
-    pub fn active_block_mut(&mut self) -> Option<&mut OutputBlock> {
-        self.blocks.last_mut()
+    /// The newest Cmd of the stack, for a write.
+    ///
+    /// It borrows the store alone, so the caller can write the run state while
+    /// it holds the Cmd.
+    pub fn active_block_mut<'a>(&self, cmds: &'a mut SlotMap<CmdId, Cmd>) -> Option<&'a mut Cmd> {
+        self.blocks.last().and_then(|id| cmds.get_mut(*id))
     }
 
-    pub fn is_running(&self) -> bool {
-        self.blocks.last().is_some_and(|b| !b.finished)
+    pub fn is_running(&self, cmds: &SlotMap<CmdId, Cmd>) -> bool {
+        self.active_block(cmds).is_some_and(|b| !b.finished)
     }
 
     /// Drop the oldest blocks while the pane holds more than one scrollback
-    /// of rows.
+    /// of rows, and remove each dropped Cmd from `cmds`.
     ///
     /// Each block caps its own scrollback. The block count has no cap, so a
     /// pane that runs a flooding command many times keeps every row of every
@@ -108,15 +119,19 @@ impl RunState {
     ///
     /// The threshold is [`MAX_RUN_ROWS`] plus [`vterm::SCROLLBACK_SLACK`], the
     /// most rows one block holds. The active block always stays, because
-    /// output arrives into it.
-    pub(crate) fn trim_blocks(&mut self) {
+    /// output arrives into it. An id with no Cmd counts for no rows.
+    pub(crate) fn trim_blocks(&mut self, cmds: &mut SlotMap<CmdId, Cmd>) {
         let mut rows: usize = self
             .blocks
             .iter()
+            .filter_map(|id| cmds.get(*id))
             .map(|block| block.grid.line_count())
             .sum();
         while self.blocks.len() > 1 && rows > MAX_RUN_ROWS + vterm::SCROLLBACK_SLACK {
-            rows -= self.blocks.remove(0).grid.line_count();
+            let dropped = self.blocks.remove(0);
+            rows -= cmds
+                .remove(dropped)
+                .map_or(0, |block| block.grid.line_count());
         }
     }
 
@@ -150,8 +165,8 @@ impl RunState {
     /// shrinks the range under an offset already held, and without the clamp a
     /// scroll down would spend its steps walking a stale offset back into range
     /// rather than moving the view.
-    pub fn wheel_scroll(&mut self, down: bool, page: usize) {
-        let max = self.output_line_total().saturating_sub(page);
+    pub fn wheel_scroll(&mut self, down: bool, page: usize, cmds: &SlotMap<CmdId, Cmd>) {
+        let max = self.output_line_total(cmds).saturating_sub(page);
         self.scroll_offset = if down {
             self.scroll_offset.min(max).saturating_sub(WHEEL_STEP_ROWS)
         } else {
@@ -164,11 +179,12 @@ impl RunState {
     ///
     /// The wheel-scroll clamp and [`Self::active_block_grid_pos`] both size the
     /// output by this, so the drawn rows, the scrollable range, and the
-    /// mouse-hit rows stay in lockstep.
-    pub fn output_line_total(&self) -> usize {
+    /// mouse-hit rows stay in lockstep. An id with no Cmd counts for no rows.
+    pub fn output_line_total(&self, cmds: &SlotMap<CmdId, Cmd>) -> usize {
         self.blocks
             .iter()
-            .map(OutputBlock::rendered_line_span)
+            .filter_map(|id| cmds.get(*id))
+            .map(Cmd::rendered_line_span)
             .sum()
     }
 
@@ -178,7 +194,13 @@ impl RunState {
     /// / blank line, on a row scrolled off-screen, or past the active grid's
     /// width. Mirrors the layout that
     /// [`crate::render::run_pane::render_run_pane`] builds.
-    pub fn active_block_grid_pos(&self, area: Rect, col: u16, row: u16) -> Option<(u16, u16)> {
+    pub fn active_block_grid_pos(
+        &self,
+        cmds: &SlotMap<CmdId, Cmd>,
+        area: Rect,
+        col: u16,
+        row: u16,
+    ) -> Option<(u16, u16)> {
         if area.height < 2 || area.width < 4 {
             return None;
         }
@@ -191,16 +213,17 @@ impl RunState {
         }
 
         let active_idx = self.blocks.len().checked_sub(1)?;
-        let active = &self.blocks[active_idx];
+        let active = cmds.get(self.blocks[active_idx])?;
 
         let idx: usize = self.blocks[..active_idx]
             .iter()
-            .map(OutputBlock::rendered_line_span)
+            .filter_map(|id| cmds.get(*id))
+            .map(Cmd::rendered_line_span)
             .sum();
         let active_grid_start = idx + 1;
         let active_grid_end = active_grid_start + active.grid.rendered_line_count();
 
-        let total = self.output_line_total();
+        let total = self.output_line_total(cmds);
 
         let start = total.saturating_sub(output_height + self.scroll_offset);
         let line_idx = start + row as usize;
@@ -276,6 +299,7 @@ mod tests {
     use super::*;
     use crate::{buffer::BufferId, editor_state::EditorId};
     use ratatui::style::Color;
+    use std::collections::BTreeSet;
 
     #[test]
     fn abbreviate_path_shortens_ancestors_under_home() {
@@ -814,9 +838,10 @@ mod tests {
         );
     }
 
-    /// A run state holding `blocks` one-line blocks, without a workspace behind
-    /// it. Only the scroll arithmetic reads these.
-    fn scrollable(blocks: usize, scroll_offset: usize) -> RunState {
+    /// A run state holding `blocks` one-line blocks, with the store of their
+    /// Cmds and without a workspace behind it. Only the scroll arithmetic
+    /// reads these.
+    fn scrollable(blocks: usize, scroll_offset: usize) -> (RunState, SlotMap<CmdId, Cmd>) {
         let mut run = RunState {
             input: InputView {
                 editor_id: EditorId::default(),
@@ -830,40 +855,41 @@ mod tests {
             history: InputHistory::default(),
             title: None,
         };
+        let mut cmds = SlotMap::with_key();
         for n in 0..blocks {
-            let mut block = OutputBlock::new(format!("cmd{n}"), PathBuf::from("/repo"), 10);
+            let mut block = Cmd::new(format!("cmd{n}"), PathBuf::from("/repo"), 10);
             block.feed(b"out");
-            run.blocks.push(block);
+            run.blocks.push(cmds.insert(block));
         }
-        run
+        (run, cmds)
     }
 
     #[test]
     fn a_wheel_walks_the_scrollback_and_stops_at_its_ends() {
-        let mut run = scrollable(20, 0);
+        let (mut run, cmds) = scrollable(20, 0);
         let page = 5;
 
-        run.wheel_scroll(false, page);
-        run.wheel_scroll(false, page);
+        run.wheel_scroll(false, page, &cmds);
+        run.wheel_scroll(false, page, &cmds);
         assert_eq!(run.scroll_offset, 6, "two notches walk back six rows");
 
         for _ in 0..20 {
-            run.wheel_scroll(false, page);
+            run.wheel_scroll(false, page, &cmds);
         }
         assert_eq!(
             run.scroll_offset,
-            run.output_line_total() - page,
+            run.output_line_total(&cmds) - page,
             "scrolling back stops with a page still shown"
         );
     }
 
     #[test]
     fn a_wheel_down_over_a_shrunken_scrollback_moves_the_view_at_once() {
-        let mut run = scrollable(4, 5_000);
+        let (mut run, cmds) = scrollable(4, 5_000);
         let page = 5;
-        let max = run.output_line_total() - page;
+        let max = run.output_line_total(&cmds) - page;
 
-        run.wheel_scroll(true, page);
+        run.wheel_scroll(true, page, &cmds);
 
         assert_eq!(
             run.scroll_offset,
@@ -874,7 +900,7 @@ mod tests {
 
     #[test]
     fn a_blocks_selection_follows_its_grid_through_a_trim() {
-        let mut block = OutputBlock::new("cmd".to_owned(), PathBuf::from("/repo"), 10);
+        let mut block = Cmd::new("cmd".to_owned(), PathBuf::from("/repo"), 10);
         block.selection = Some(GridSelection {
             anchor: (0, 0),
             head: (0, 1),
@@ -888,25 +914,43 @@ mod tests {
     }
 
     /// The command of each block `run` holds, oldest first.
-    fn commands(run: &RunState) -> Vec<&str> {
+    fn commands<'a>(run: &RunState, cmds: &'a SlotMap<CmdId, Cmd>) -> Vec<&'a str> {
         run.blocks
             .iter()
+            .filter_map(|id| cmds.get(*id))
             .map(|block| block.command.as_str())
             .collect()
     }
 
     #[test]
     fn a_flood_across_blocks_drops_the_oldest_block() {
-        let mut run = scrollable(3, 0);
-        for block in &mut run.blocks {
+        let (mut run, mut cmds) = scrollable(3, 0);
+        for block in cmds.values_mut() {
             block.feed("x\r\n".repeat(4_000).as_bytes());
         }
 
-        run.trim_blocks();
+        run.trim_blocks(&mut cmds);
         assert_eq!(
-            commands(&run),
+            commands(&run, &cmds),
             ["cmd1", "cmd2"],
             "one drop brings three 4,001-row blocks back under the cap"
+        );
+    }
+
+    #[test]
+    fn a_trimmed_block_leaves_the_cmd_store() {
+        let (mut run, mut cmds) = scrollable(3, 0);
+        for block in cmds.values_mut() {
+            block.feed("x\r\n".repeat(4_000).as_bytes());
+        }
+
+        run.trim_blocks(&mut cmds);
+        let stored: BTreeSet<CmdId> = cmds.keys().collect();
+        let stacked: BTreeSet<CmdId> = run.blocks.iter().copied().collect();
+        assert_eq!(
+            (stored, run.blocks.len()),
+            (stacked, 2),
+            "the store holds the two ids that the stack holds"
         );
     }
 
@@ -914,15 +958,15 @@ mod tests {
     /// the cap at any row count the flooded active block settles at.
     #[test]
     fn the_active_block_survives_any_flood() {
-        let mut run = scrollable(3, 0);
+        let (mut run, mut cmds) = scrollable(3, 0);
         let slack = "x\r\n".repeat(vterm::SCROLLBACK_SLACK);
-        run.blocks[0].feed(slack.as_bytes());
-        run.blocks[1].feed(slack.as_bytes());
-        run.blocks[2].feed(flood().as_bytes());
+        cmds[run.blocks[0]].feed(slack.as_bytes());
+        cmds[run.blocks[1]].feed(slack.as_bytes());
+        cmds[run.blocks[2]].feed(flood().as_bytes());
 
-        run.trim_blocks();
+        run.trim_blocks(&mut cmds);
         assert_eq!(
-            commands(&run),
+            commands(&run, &cmds),
             ["cmd2"],
             "both older blocks drop and the flooded active block stays"
         );

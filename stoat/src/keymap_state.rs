@@ -933,7 +933,7 @@ pub(crate) fn close_topmost_modal(stoat: &mut Stoat) -> bool {
                 if let Some(handle) = &mut run_state.shell_handle {
                     handle.kill();
                 }
-                if let Some(block) = run_state.active_block_mut() {
+                if let Some(block) = run_state.active_block_mut(&mut ws.cmds) {
                     block.finished = true;
                 }
             }

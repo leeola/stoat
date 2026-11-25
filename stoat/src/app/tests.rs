@@ -4675,8 +4675,10 @@ fn a_background_run_lands_in_its_own_workspace() {
             }),
     ];
     let blocks = [launch, second].map(|id| {
-        let run = &h.stoat.workspaces[id].runs[run_id];
-        let block = run.active_block().expect("the submit opened a block");
+        let ws = &h.stoat.workspaces[id];
+        let block = ws.runs[run_id]
+            .active_block(&ws.cmds)
+            .expect("the submit opened a block");
         (block.finished, block.exit_status)
     });
     assert_eq!(
@@ -9879,21 +9881,21 @@ fn a_run_pane_versions_on_everything_its_render_reads() {
         "an idle run pane holds still"
     );
 
-    h.stoat.active_workspace_mut().runs[run_id]
-        .blocks
-        .push(crate::run::OutputBlock::new(
-            "ls".into(),
-            PathBuf::from("/work"),
-            80,
-        ));
+    let ws = h.stoat.active_workspace_mut();
+    let cmd = ws.cmds.insert(crate::run::Cmd::new(
+        "ls".into(),
+        PathBuf::from("/work"),
+        80,
+    ));
+    ws.runs[run_id].blocks.push(cmd);
     let submitted = version(h.stoat.active_workspace());
     assert_ne!(base, submitted, "a submitted command adds a prompt line");
 
-    h.stoat.active_workspace_mut().runs[run_id].blocks[0].feed(b"a.txt\n");
+    h.stoat.active_workspace_mut().cmds[cmd].feed(b"a.txt\n");
     let fed = version(h.stoat.active_workspace());
     assert_ne!(submitted, fed, "output fills the block's grid");
 
-    h.stoat.active_workspace_mut().runs[run_id].blocks[0].exit_status = Some(1);
+    h.stoat.active_workspace_mut().cmds[cmd].exit_status = Some(1);
     let exited = version(h.stoat.active_workspace());
     assert_ne!(fed, exited, "the exit code flags the next prompt");
 
@@ -11789,10 +11791,11 @@ fn a_run_pane_keeps_one_scrollback_across_its_blocks() {
     let run_id = h.open_run();
     let lines = |count: usize| "x\r\n".repeat(count).into_bytes();
     let commands = |stoat: &Stoat| -> Vec<String> {
-        stoat.active_workspace().runs[run_id]
+        let ws = stoat.active_workspace();
+        ws.runs[run_id]
             .blocks
             .iter()
-            .map(|block| block.command.clone())
+            .map(|id| ws.cmds[*id].command.clone())
             .collect()
     };
 
@@ -13067,13 +13070,12 @@ fn mouse_down_anchors_run_pane_selection() {
     let run_id = open_run_with_output(&mut h, b"hello\n");
     h.stoat
         .update(mouse_event(MouseEventKind::Down(MouseButton::Left), 2, 1));
-    let block = h
-        .stoat
-        .active_workspace()
+    let ws = h.stoat.active_workspace();
+    let block = ws
         .runs
         .get(run_id)
         .expect("run state exists")
-        .active_block()
+        .active_block(&ws.cmds)
         .expect("active block exists");
     assert_eq!(
         block.selection,
@@ -13094,13 +13096,12 @@ fn mouse_drag_updates_run_pane_selection_head() {
         .update(mouse_event(MouseEventKind::Down(MouseButton::Left), 1, 1));
     h.stoat
         .update(mouse_event(MouseEventKind::Drag(MouseButton::Left), 4, 2));
-    let block = h
-        .stoat
-        .active_workspace()
+    let ws = h.stoat.active_workspace();
+    let block = ws
         .runs
         .get(run_id)
         .expect("run state exists")
-        .active_block()
+        .active_block(&ws.cmds)
         .expect("active block exists");
     assert_eq!(
         block.selection,
@@ -13120,13 +13121,12 @@ fn a_plain_click_release_clears_the_run_pane_selection() {
     let release = h
         .stoat
         .update(mouse_event(MouseEventKind::Up(MouseButton::Left), 3, 1));
-    let block = h
-        .stoat
-        .active_workspace()
+    let ws = h.stoat.active_workspace();
+    let block = ws
         .runs
         .get(run_id)
         .expect("run state exists")
-        .active_block()
+        .active_block(&ws.cmds)
         .expect("active block exists");
     assert_eq!(
         (block.selection, release),
@@ -13146,13 +13146,12 @@ fn a_run_pane_drag_copies_and_drops_its_selection() {
     let release = h
         .stoat
         .update(mouse_event(MouseEventKind::Up(MouseButton::Left), 4, 1));
-    let selection = h
-        .stoat
-        .active_workspace()
+    let ws = h.stoat.active_workspace();
+    let selection = ws
         .runs
         .get(run_id)
         .expect("run state exists")
-        .active_block()
+        .active_block(&ws.cmds)
         .expect("active block exists")
         .selection;
 
@@ -13183,13 +13182,12 @@ fn mouse_down_outside_active_block_does_not_select() {
             col,
             row,
         ));
-        let block = h
-            .stoat
-            .active_workspace()
+        let ws = h.stoat.active_workspace();
+        let block = ws
             .runs
             .get(run_id)
             .expect("run state exists")
-            .active_block()
+            .active_block(&ws.cmds)
             .expect("active block exists");
         assert_eq!(
             block.selection, None,
@@ -13204,13 +13202,12 @@ fn mouse_drag_without_prior_down_is_noop() {
     let run_id = open_run_with_output(&mut h, b"hello\n");
     h.stoat
         .update(mouse_event(MouseEventKind::Drag(MouseButton::Left), 2, 1));
-    let block = h
-        .stoat
-        .active_workspace()
+    let ws = h.stoat.active_workspace();
+    let block = ws
         .runs
         .get(run_id)
         .expect("run state exists")
-        .active_block()
+        .active_block(&ws.cmds)
         .expect("active block exists");
     assert_eq!(block.selection, None);
 }

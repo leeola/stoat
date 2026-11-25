@@ -6402,11 +6402,8 @@ impl Stoat {
         }
 
         if let Some(run_id) = self.modal_run {
-            let running = self
-                .active_workspace()
-                .runs
-                .get(run_id)
-                .is_some_and(|r| r.is_running());
+            let ws = self.active_workspace();
+            let running = ws.runs.get(run_id).is_some_and(|r| r.is_running(&ws.cmds));
             if running {
                 // Swallow input while the command is still running.
                 return UpdateEffect::None;
@@ -9457,14 +9454,11 @@ impl Stoat {
             return;
         }
 
-        if let Some(run_id) = self.modal_run.take() {
-            let ws = self.active_workspace_mut();
-            if let Some(mut state) = ws.runs.remove(run_id) {
-                if let Some(handle) = &mut state.shell_handle {
-                    handle.kill();
-                }
-                state.dispose(ws);
-            }
+        if let Some(run_id) = self.modal_run.take()
+            && let Some(mut state) = self.active_workspace_mut().remove_run(run_id)
+            && let Some(handle) = &mut state.shell_handle
+        {
+            handle.kill();
         }
         while active_modal(self).is_some() {
             keymap_state::close_topmost_modal(self);
@@ -9596,10 +9590,11 @@ impl Stoat {
                 // The block still feeds while hidden, but a hidden run drives no
                 // repaint. Revealing it repaints on the toggle's own dispatch.
                 let visible = Self::run_visible(ws, run_id, modal_run);
-                let Some(run_state) = ws.runs.get_mut(run_id) else {
+                let Workspace { runs, cmds, .. } = ws;
+                let Some(run_state) = runs.get_mut(run_id) else {
                     return UpdateEffect::None;
                 };
-                let Some(block) = run_state.active_block_mut() else {
+                let Some(block) = run_state.active_block_mut(cmds) else {
                     return UpdateEffect::None;
                 };
                 block.feed(&data);
@@ -9643,7 +9638,7 @@ impl Stoat {
                 if let Some(cwd) = reported_cwd {
                     run_state.cwd = cwd;
                 }
-                run_state.trim_blocks();
+                run_state.trim_blocks(cmds);
                 if visible && on_screen {
                     self.pty_dirty = true;
                 }
@@ -9654,10 +9649,10 @@ impl Stoat {
                 exit_status,
                 ..
             } => {
-                let Some(run_state) = ws.runs.get_mut(run_id) else {
+                let Some(run_state) = ws.runs.get(run_id) else {
                     return UpdateEffect::None;
                 };
-                let Some(block) = run_state.active_block_mut() else {
+                let Some(block) = run_state.active_block_mut(&mut ws.cmds) else {
                     return UpdateEffect::None;
                 };
                 if !block.finished {

@@ -83,7 +83,7 @@ use crate::{
     minimap::{diff_view::DiffViewStrip, emit, EdgeClass, MinimapContent},
     pane::{Divider, DockVisibility, FocusTarget, Pane, PaneId, View},
     rebase::RebasePause,
-    run::{RunId, RunState},
+    run::{Cmd, CmdId, RunId, RunState},
     term_session::{TermId, TermSession},
     toggle::{self, Toggle, ToggleStates},
     workspace::{
@@ -205,6 +205,7 @@ pub(crate) struct PaneCtx<'a> {
     pub(crate) editors: &'a mut SlotMap<EditorId, EditorState>,
     pub(crate) buffers: &'a BufferRegistry,
     pub(crate) runs: &'a SlotMap<RunId, RunState>,
+    pub(crate) cmds: &'a SlotMap<CmdId, Cmd>,
     pub(crate) terms: &'a SlotMap<TermId, TermSession>,
     /// The terms stoatty draws as pools at the terminal font size, see
     /// [`crate::workspace::Workspace::term_pool_grids`].
@@ -1767,6 +1768,7 @@ pub(crate) fn frame(
                 editors: &mut ws.editors,
                 buffers: &ws.buffers,
                 runs: &ws.runs,
+                cmds: &ws.cmds,
                 terms: &ws.terms,
                 term_pool_grids: &ws.term_pool_grids,
                 commit_lists: &mut ws.commit_lists,
@@ -1929,6 +1931,7 @@ pub(crate) fn frame(
                 editors: &mut ws.editors,
                 buffers: &ws.buffers,
                 runs: &ws.runs,
+                cmds: &ws.cmds,
                 terms: &ws.terms,
                 term_pool_grids: &ws.term_pool_grids,
                 commit_lists: &mut ws.commit_lists,
@@ -1965,6 +1968,7 @@ pub(crate) fn frame(
                     editors: &mut ws.editors,
                     buffers: &ws.buffers,
                     runs: &ws.runs,
+                    cmds: &ws.cmds,
                     terms: &ws.terms,
                     term_pool_grids: &ws.term_pool_grids,
                     commit_lists: &mut ws.commit_lists,
@@ -2023,7 +2027,14 @@ pub(crate) fn frame(
             if let Some(run_id) = stoat.modal_run
                 && let Some(run_state) = ws.runs.get(run_id)
             {
-                run_pane::render_modal_run(run_state, &stoat.theme, full, buf, &mut *scene);
+                run_pane::render_modal_run(
+                    run_state,
+                    &ws.cmds,
+                    &stoat.theme,
+                    full,
+                    buf,
+                    &mut *scene,
+                );
             }
         },
         Some(ActiveModal::QuitConfirm) => {

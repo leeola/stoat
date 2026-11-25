@@ -198,7 +198,7 @@ pub(crate) fn pane_target(ws: &Workspace, row: &PaneRow) -> Option<(PreviewSourc
             Some((PreviewSource::Terminal(*id), 0))
         },
         PaneTarget::View(View::Run(id)) => {
-            let text = ws.runs.get(*id)?.preview_text();
+            let text = ws.runs.get(*id)?.preview_text(&ws.cmds);
             Some((PreviewSource::Text(text.into()), 0))
         },
         PaneTarget::View(_) => None,

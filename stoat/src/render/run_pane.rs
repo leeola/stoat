@@ -5,7 +5,7 @@ use crate::{
         picker::{Footer, PlateHeader},
         text::write_str,
     },
-    run::{GridSelection, OutputBlock, RunState, StyledCell, VtermGrid},
+    run::{Cmd, CmdId, GridSelection, RunState, StyledCell, VtermGrid},
 };
 use ratatui::{
     buffer::Buffer,
@@ -26,6 +26,7 @@ const RUN_LABEL: &str = "Run";
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn render_run_pane(
     run_state: &RunState,
+    cmds: &slotmap::SlotMap<CmdId, Cmd>,
     editors: &mut slotmap::SlotMap<crate::editor_state::EditorId, crate::editor_state::EditorState>,
     theme: &crate::theme::Theme,
     chrome: &crate::render::editor::ResolvedChrome,
@@ -42,7 +43,7 @@ pub(crate) fn render_run_pane(
     let input_row = area.y + area.height - 1;
     let output_height = area.height.saturating_sub(1);
 
-    let total = run_state.output_line_total();
+    let total = run_state.output_line_total(cmds);
     let visible = output_height as usize;
     let start = total.saturating_sub(visible + run_state.scroll_offset);
     let window = start..start + visible;
@@ -51,10 +52,8 @@ pub(crate) fn render_run_pane(
     // its whole scrollback, so materializing the rows would cost the history
     // on every paint to draw a pane's worth of it.
     let mut base = 0;
-    for (i, block) in run_state.blocks.iter().enumerate() {
-        let prev_exit = i
-            .checked_sub(1)
-            .and_then(|prev| run_state.blocks[prev].exit_status);
+    let mut prev_exit = None;
+    for block in run_state.blocks.iter().filter_map(|id| cmds.get(*id)) {
         let grid_rows = block.grid.rendered_line_count();
         let span = block.rendered_line_span();
 
@@ -93,12 +92,14 @@ pub(crate) fn render_run_pane(
         }
 
         base += span;
+        prev_exit = block.exit_status;
     }
 
     let last_exit = run_state
         .blocks
         .iter()
         .rev()
+        .filter_map(|id| cmds.get(*id))
         .find(|block| block.finished)
         .and_then(|block| block.exit_status);
     let abbrev = crate::run::abbreviate_path(&run_state.cwd, home);
@@ -204,11 +205,11 @@ fn window_offsets(base: usize, span: usize, window: &Range<usize>) -> Range<usiz
 /// block's rendered grid height.
 ///
 /// The span is the prompt, then the grid, then an error line if the block has
-/// one, so this and [`crate::run::OutputBlock::rendered_line_span`] describe the
+/// one, so this and [`crate::run::Cmd::rendered_line_span`] describe the
 /// same rows and have to agree. `None` for an offset past them, which the
 /// caller's window bounds already exclude.
 fn block_line(
-    block: &OutputBlock,
+    block: &Cmd,
     grid_rows: usize,
     offset: usize,
     prev_exit: Option<i32>,
@@ -285,6 +286,7 @@ fn write_prompt(
 /// holds its header alone. An area under 20 by 8 cells paints nothing.
 pub(crate) fn render_modal_run(
     run_state: &RunState,
+    cmds: &slotmap::SlotMap<CmdId, Cmd>,
     theme: &crate::theme::Theme,
     area: Rect,
     buf: &mut Buffer,
@@ -307,14 +309,14 @@ pub(crate) fn render_modal_run(
         title: run_state
             .title
             .as_deref()
-            .or_else(|| run_state.active_block().map(|b| b.command.as_str()))
+            .or_else(|| run_state.active_block(cmds).map(|b| b.command.as_str()))
             .unwrap_or_default(),
         meta: &[],
         chip: None,
     };
     crate::render::picker::plate_header(buf, inner, &header, theme, scene);
 
-    let Some(active) = run_state.active_block() else {
+    let Some(active) = run_state.active_block(cmds) else {
         return;
     };
 
@@ -392,8 +394,8 @@ pub(crate) fn render_modal_run(
 #[cfg(test)]
 mod tests {
     use super::{
-        block_line, paint_grid_row, render_modal_run, window_offsets, Buffer, GridSelection,
-        Modifier, OutputBlock, OutputLine, Rect, RunState, ISLAND_BOTTOM, ISLAND_SIDE, ISLAND_TOP,
+        block_line, paint_grid_row, render_modal_run, window_offsets, Buffer, Cmd, GridSelection,
+        Modifier, OutputLine, Rect, RunState, ISLAND_BOTTOM, ISLAND_SIDE, ISLAND_TOP,
     };
     use crate::{
         render::paint::style_rgb,
@@ -454,8 +456,8 @@ mod tests {
         }
     }
 
-    fn block_with(rows: &str, error: Option<&str>) -> OutputBlock {
-        let mut block = OutputBlock::new("cmd".to_owned(), PathBuf::from("/repo"), 20);
+    fn block_with(rows: &str, error: Option<&str>) -> Cmd {
+        let mut block = Cmd::new("cmd".to_owned(), PathBuf::from("/repo"), 20);
         block.grid.feed(rows.as_bytes());
         block.error = error.map(str::to_owned);
         block
@@ -591,13 +593,14 @@ mod tests {
         let mut block = block_with("a\r\nb", None);
         block.finished = true;
         block.exit_status = Some(0);
-        run.blocks.push(block);
+        let mut cmds = slotmap::SlotMap::with_key();
+        run.blocks.push(cmds.insert(block));
 
         let area = Rect::new(0, 0, 100, 40);
         let mut buf = Buffer::empty(area);
         let mut scene = ApcScene::new();
         scene.set_nudge_protocol(true);
-        render_modal_run(&run, &theme, area, &mut buf, &mut scene);
+        render_modal_run(&run, &cmds, &theme, area, &mut buf, &mut scene);
 
         let commands = command::decode_stream(scene.bytes());
         let panels: Vec<_> = commands

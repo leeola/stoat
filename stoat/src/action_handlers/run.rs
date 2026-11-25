@@ -2,7 +2,8 @@ use crate::{
     app::{Stoat, UpdateEffect},
     buffer_lifecycle,
     pane::{FocusTarget, View},
-    run::{OutputBlock, RunSink, RunState},
+    run::{Cmd, RunSink, RunState},
+    workspace::Workspace,
 };
 
 pub(super) fn open_run(stoat: &mut Stoat) -> UpdateEffect {
@@ -107,16 +108,16 @@ pub(super) fn run_submit(stoat: &mut Stoat) -> UpdateEffect {
     // Output no longer sits under a "$ " indent, so the grid fills the pane.
     let width = pane_area.width.max(20);
 
-    let run_state = match ws.runs.get_mut(id) {
+    let Workspace { runs, cmds, .. } = ws;
+    let run_state = match runs.get_mut(id) {
         Some(s) => s,
         None => return UpdateEffect::None,
     };
     // Submitting snaps the output back to the prompt, like a terminal.
     run_state.scroll_offset = 0;
-    run_state
-        .blocks
-        .push(OutputBlock::new(text.clone(), run_state.cwd.clone(), width));
-    run_state.trim_blocks();
+    let cmd = cmds.insert(Cmd::new(text.clone(), run_state.cwd.clone(), width));
+    run_state.blocks.push(cmd);
+    run_state.trim_blocks(cmds);
 
     let sink = RunSink {
         tx: pty_tx,
@@ -164,7 +165,7 @@ pub(super) fn run_modal_dismiss(stoat: &mut Stoat) -> UpdateEffect {
     let Some(run_id) = stoat.modal_run.take() else {
         return UpdateEffect::None;
     };
-    stoat.active_workspace_mut().runs.remove(run_id);
+    stoat.active_workspace_mut().remove_run(run_id);
     UpdateEffect::Redraw
 }
 
@@ -221,9 +222,10 @@ pub(crate) fn run_command(stoat: &mut Stoat, command: &str) -> UpdateEffect {
     let ws = &mut stoat.workspaces[active_idx];
     let mut state = RunState::new(cwd.clone(), ws, executor);
     state.title = Some(command.to_owned());
-    state
-        .blocks
-        .push(OutputBlock::new(command.to_owned(), cwd.clone(), width));
+    let cmd = ws
+        .cmds
+        .insert(Cmd::new(command.to_owned(), cwd.clone(), width));
+    state.blocks.push(cmd);
     let id = ws.runs.insert(state);
 
     let sink = RunSink {
@@ -249,10 +251,7 @@ pub(crate) fn run_command(stoat: &mut Stoat, command: &str) -> UpdateEffect {
         },
         Err(e) => {
             tracing::warn!(target: "stoat::run", "failed to spawn command: {e}");
-            let ws = stoat.active_workspace_mut();
-            if let Some(state) = ws.runs.remove(id) {
-                state.dispose(ws);
-            }
+            stoat.active_workspace_mut().remove_run(id);
             UpdateEffect::None
         },
     }
@@ -283,6 +282,34 @@ mod tests {
             ),
             (true, false),
             "the run takes the pane, and the editor it replaced goes"
+        );
+    }
+
+    /// Closing a Run pane drops its run and every Cmd of its stack.
+    #[test]
+    fn closing_a_run_pane_empties_the_cmd_store() {
+        let mut h = Stoat::test();
+        let run_id = h.open_run();
+        for line in ["ls", "pwd"] {
+            let input = h.stoat.active_workspace().runs[run_id].input.clone();
+            input.replace_text(h.stoat.active_workspace_mut(), line);
+            super::super::dispatch(&mut h.stoat, &stoat_action::RunSubmit);
+        }
+        let submitted = h.stoat.active_workspace().cmds.len();
+
+        let executor = h.stoat.executor.clone();
+        super::super::pane::dispose_view(
+            h.stoat.active_workspace_mut(),
+            &executor,
+            View::Run(run_id),
+            super::super::pane::EditorDisposal::Remove,
+        );
+
+        let ws = h.stoat.active_workspace();
+        assert_eq!(
+            (submitted, ws.cmds.len(), ws.runs.len()),
+            (2, 0, 0),
+            "the two submitted Cmds leave the store with their run"
         );
     }
 
