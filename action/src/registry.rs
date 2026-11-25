@@ -140,7 +140,7 @@ use crate::{
         },
         run::{
             OpenRun, Run, RunAgain, RunBlockToPane, RunHistoryNext, RunHistoryPrev, RunInterrupt,
-            RunSubmit, RunToggleView,
+            RunLocationList, RunSubmit, RunToggleView,
         },
         set_theme::SetTheme,
         tab::{
@@ -1051,6 +1051,7 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
     add(RunToggleView::DEF, |_| Ok(Box::new(RunToggleView)));
     add(RunAgain::DEF, |_| Ok(Box::new(RunAgain)));
     add(RunBlockToPane::DEF, |_| Ok(Box::new(RunBlockToPane)));
+    add(RunLocationList::DEF, |_| Ok(Box::new(RunLocationList)));
     add(RunHistoryPrev::DEF, |_| Ok(Box::new(RunHistoryPrev)));
     add(RunHistoryNext::DEF, |_| Ok(Box::new(RunHistoryNext)));
     add(HelpScopeToggle::DEF, |_| Ok(Box::new(HelpScopeToggle)));
@@ -1637,6 +1638,7 @@ mod tests {
         "RunToggleView",
         "RunAgain",
         "RunBlockToPane",
+        "RunLocationList",
         "RunHistoryPrev",
         "RunHistoryNext",
         "ToggleDockRight",
@@ -2395,7 +2397,7 @@ mod tests {
         // + 1 PaletteRefresh.
         // + 1 RunToggleView.
         // + 2 RunAgain/RunBlockToPane.
-        assert_eq!(all().count(), 522);
+        assert_eq!(all().count(), 523);
     }
 
     #[test]

@@ -22,7 +22,7 @@ use stoat_text::{LineEnding, Rope};
 
 /// The most entries that one run of tool output opens, so a search that
 /// matches every line of a large tree keeps the picker responsive.
-const MAX_LOCATIONS: usize = 5_000;
+pub(crate) const MAX_LOCATIONS: usize = 5_000;
 
 /// One resolved goto candidate. Carries the byte offset to jump to plus
 /// the 1-based line/column and the target line's text for display.

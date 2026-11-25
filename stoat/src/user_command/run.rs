@@ -10,17 +10,19 @@ use crate::{
     host::{ShellHost, ShellOutput},
     keymap::ResolvedAction,
     location_picker::{self, LocationEntry, ParsedLocation},
+    pane::{FocusTarget, View},
     picker::{self, PREVIEW_BYTE_LIMIT},
     workspace::WorkspaceId,
 };
 use std::{
     collections::VecDeque,
     io, mem,
-    path::Path,
+    path::{Path, PathBuf},
     sync::{
         atomic::{AtomicU64, Ordering},
         Arc,
     },
+    time::Instant,
 };
 use stoat_config::{Template, Value};
 
@@ -68,6 +70,16 @@ pub(crate) struct CommandRun {
     /// The workspace that was active when the run started. An action acts on
     /// the active workspace, so an action step runs only while this one is.
     workspace: WorkspaceId,
+    /// The typed line that started the run, the line of a Cmd that the run
+    /// ends in.
+    line: String,
+    /// The Source Tag of the run's command.
+    tag: (&'static str, &'static str),
+    /// Every step of the run in order, which a Cmd that the run ends in runs
+    /// again on its own PTY.
+    plan: Vec<PlannedStep>,
+    /// When the run started, the start of a Cmd that the run ends in.
+    started: Instant,
 }
 
 /// What a shell step of a command run sends back to the UI thread.
@@ -129,11 +141,16 @@ pub(crate) enum CliSpecState {
 /// [`action_handlers::run::run_steps`] runs them. Under the `block` output,
 /// the palette that started it turns into the Cmd's Run Block, and with no
 /// palette the Cmd joins a Run pane's stack. Under the `run_pane` output, the
-/// Cmd joins a Run pane's stack and the focus stays where it is. Any other run
-/// goes step by step here, as [`plan`] lays it out. A shell step runs on a worker with no
-/// terminal, so its stdout and its stderr stay apart. An action step runs once
-/// the step before it exits 0, and the first failure ends the run. A `cli`
-/// command runs as a shell step does, with its tail as its one value.
+/// Cmd joins a Run pane's stack and the focus stays where it is. A
+/// `locations` run that starts at a Run pane prompt, as [`at_run_prompt`]
+/// reads it, runs as a Cmd on that pane's stack too, whose block shows its
+/// matches.
+///
+/// Any other run goes step by step here, as [`plan`] lays it out. A shell
+/// step runs on a worker with no terminal, so its stdout and its stderr stay
+/// apart. An action step runs once the step before it exits 0, and the first
+/// failure ends the run. A `cli` command runs as a shell step does, with its
+/// tail as its one value.
 ///
 /// An empty value of an argument with a default runs with the default, as
 /// [`context::default_text`] reads it, and so does the default of a nested
@@ -169,20 +186,44 @@ pub(crate) fn start(
             action_handlers::run::append_to_run_pane(stoat, id, false);
             effect.merge(UpdateEffect::Redraw)
         },
+        Plan::Steps(steps) if command.output == Output::Locations && at_run_prompt(stoat) => {
+            let width = action_handlers::run::run_pane_width(stoat);
+            let source = Some(command.source_tag());
+            let (id, effect) =
+                action_handlers::run::start_cmd_steps(stoat, line, steps.into(), source, width);
+            if let Some(cmd) = stoat.active_workspace_mut().cmds.get_mut(id) {
+                cmd.locations = Some(Vec::new());
+            }
+            action_handlers::run::append_to_run_pane(stoat, id, false);
+            effect.merge(UpdateEffect::Redraw)
+        },
         Plan::Steps(steps) => {
             let run = CommandRun {
                 id: NEXT_RUN.fetch_add(1, Ordering::Relaxed),
                 name: command.name.clone(),
                 output: command.output,
+                plan: steps.iter().cloned().collect(),
                 steps,
                 stdout: String::new(),
                 last_stdout: String::new(),
                 last_was_action: false,
                 workspace: stoat.active_workspace,
+                line: line.to_owned(),
+                tag: command.source_tag(),
+                started: stoat.executor.now(),
             };
             advance(stoat, run)
         },
     }
+}
+
+/// Whether a run starts at a Run pane prompt, where no palette holds it and
+/// the focused split pane shows a Run pane.
+fn at_run_prompt(stoat: &Stoat) -> bool {
+    let ws = stoat.active_workspace();
+    stoat.palette_held.is_none()
+        && ws.focus == FocusTarget::SplitPane
+        && matches!(ws.panes.pane(ws.panes.focus()).view, View::Run(_))
 }
 
 /// Take the results of the shell steps that finished, and carry each run on.
@@ -234,7 +275,7 @@ pub(crate) fn pump(stoat: &mut Stoat) -> bool {
             Ok(output) if run.output == Output::Locations && run.steps.is_empty() => {
                 run.stdout
                     .push_str(&String::from_utf8_lossy(&output.stdout));
-                end_locations(stoat, &run, output);
+                end_locations(stoat, run, output);
             },
             Ok(output) if output.exit_code == 0 => {
                 let stdout = String::from_utf8_lossy(&output.stdout);
@@ -751,27 +792,56 @@ fn first_line(text: &str) -> Option<&str> {
 /// End the `locations` run `run`, whose last shell step gave `output`,
 /// whatever its exit code.
 ///
-/// The lines of the stdout of every shell step that name a location resolve
-/// on a worker, and the picker opens over them when they land. With no
-/// location, a run whose last step failed with a stderr line shows its
-/// failure, and any other run says so.
-fn end_locations(stoat: &mut Stoat, run: &CommandRun, output: ShellOutput) {
+/// The lines of the stdout of every shell step that name a location open as
+/// a location list, as [`spawn_resolve_locations`] resolves them. A run with
+/// no location becomes a finished Cmd on a Run pane's stack, its output the
+/// stdout of every shell step and then the last step's stderr, so its output
+/// shows and it can run again on its own PTY. The focus stays where it is.
+///
+/// A run whose workspace left the screen opens no Run pane there. With no
+/// location, its last step's failure with a stderr line shows as a message,
+/// and any other run says that it found none.
+fn end_locations(stoat: &mut Stoat, run: CommandRun, output: ShellOutput) {
     let parsed: Vec<ParsedLocation> = run
         .stdout
         .lines()
         .filter_map(location_picker::parse_location_line)
         .collect();
-    if parsed.is_empty() {
-        let failed =
-            output.exit_code != 0 && first_line(&String::from_utf8_lossy(&output.stderr)).is_some();
-        match failed {
-            true => stoat.set_status(failure(&run.name, &Ok(output))),
-            false => stoat.notify(MessageKind::Info, "no locations"),
-        }
+    if !parsed.is_empty() {
+        let root = stoat.active_workspace().git_root.clone();
+        spawn_resolve_locations(stoat, parsed, root);
         return;
     }
 
-    let root = stoat.active_workspace().git_root.clone();
+    if stoat.active_workspace == run.workspace {
+        let mut text = run.stdout.into_bytes();
+        text.extend_from_slice(&output.stderr);
+        let id = action_handlers::run::finished_cmd(
+            stoat,
+            &run.line,
+            run.plan,
+            Some(run.tag),
+            &text,
+            Some(output.exit_code),
+            run.started,
+        );
+        action_handlers::run::append_to_run_pane(stoat, id, false);
+        return;
+    }
+    let failed =
+        output.exit_code != 0 && first_line(&String::from_utf8_lossy(&output.stderr)).is_some();
+    match failed {
+        true => stoat.set_status(failure(&run.name, &Ok(output))),
+        false => stoat.notify(MessageKind::Info, "no locations"),
+    }
+}
+
+/// Resolve the locations `parsed` against `root` on a worker, and open the
+/// location picker over them once they land, as [`pump`] lands them.
+///
+/// A file that does not read drops its locations, and with none left the
+/// message says that the run found no locations.
+pub(crate) fn spawn_resolve_locations(stoat: &Stoat, parsed: Vec<ParsedLocation>, root: PathBuf) {
     let open = action_handlers::lsp::open_ropes(stoat);
     let fs = stoat.fs_host.clone();
     let executor = stoat.executor.clone();
@@ -1752,28 +1822,191 @@ mod tests {
         );
     }
 
+    /// A run from the palette that names no location becomes a finished Cmd on
+    /// a new Run pane under the editor pane, with no message and no picker.
+    /// The editor pane keeps the focus.
     #[test]
-    fn a_locations_command_with_no_location_says_so() {
+    fn a_locations_command_with_no_location_goes_to_a_run_pane() {
         let mut h = loaded(FIND);
-        h.fake_shell
-            .set_response("rg -n three", output(b"", b"", 1));
-        submit(&mut h, "find three");
+        h.fake_shell.set_response("rg -n x", output(b"", b"", 1));
+        let editor_pane = h.stoat.active_workspace().panes.focus();
+        h.stoat.pending_message = None;
+        submit(&mut h, "find x");
+
+        let panes = run_panes(&h);
+        let [(run_pane, run)] = panes[..] else {
+            panic!("one Run pane, not {}", panes.len());
+        };
+        let ws = h.stoat.active_workspace();
+        let stack: Vec<_> = ws.runs[run]
+            .blocks
+            .iter()
+            .map(|id| {
+                let cmd = &ws.cmds[*id];
+                (
+                    cmd.command.as_str(),
+                    cmd.source.map(|(label, _)| label),
+                    (cmd.finished, cmd.exit_status),
+                    cmd.grid.rendered_line_count(),
+                )
+            })
+            .collect();
         assert_eq!(
-            (message(&h), h.stoat.location_picker.is_none()),
-            ((Some("no locations"), MessageKind::Info), true),
+            (
+                (
+                    h.stoat.pending_message.as_deref(),
+                    h.stoat.location_picker.is_none()
+                ),
+                (
+                    ws.panes.focus() == editor_pane,
+                    ws.panes.pane(run_pane).area.y > ws.panes.pane(editor_pane).area.y,
+                ),
+                stack,
+            ),
+            (
+                (None, true),
+                (true, true),
+                vec![("find x", Some("config"), (true, Some(1)), 0)]
+            ),
         );
     }
 
+    /// A failed run from the palette that names no location shows its stdout
+    /// and then its stderr in its block on a Run pane, each line from the
+    /// left edge, and its status names its exit code.
     #[test]
-    fn a_failed_locations_command_reports_its_stderr() {
+    fn a_failed_locations_command_shows_its_stderr_in_a_run_pane() {
         let mut h = loaded(FIND);
-        h.fake_shell
-            .set_response("rg -n three", output(b"", b"rg: bad regex\n", 2));
-        submit(&mut h, "find three");
-        assert_eq!(
-            message(&h),
-            (Some("find: rg: bad regex (exit 2)"), MessageKind::Alert),
+        h.fake_shell.set_response(
+            "rg -n three",
+            output(b"no match here\n", b"rg: bad regex\n", 2),
         );
+        submit(&mut h, "find three");
+
+        let cmd = only_cmd(&h);
+        let grid = &h.stoat.active_workspace().cmds[cmd].grid;
+        let rows: Vec<String> = (0..grid.rendered_line_count())
+            .map(|row| grid.text_in(0..usize::from(grid.width()), row..row + 1))
+            .collect();
+        assert_eq!(
+            (rows, h.cmd_status(cmd)),
+            (
+                vec!["no match here".to_owned(), "rg: bad regex".to_owned()],
+                "config \u{2717} exit 2 0ms".to_owned()
+            ),
+        );
+    }
+
+    /// `C-r` on the block of a worker run starts the command again on its own
+    /// PTY, as a `bash -c` of its shell line, and the second run's block shows
+    /// its matches.
+    #[test]
+    fn a_cmd_from_a_worker_run_runs_again_on_its_own_pty() {
+        let mut h = loaded(FIND);
+        h.fake_shell.set_response("rg -n x", output(b"", b"", 1));
+        submit(&mut h, "find x");
+        action_handlers::dispatch(&mut h.stoat, &stoat_action::FocusDown);
+        h.type_keys("ctrl-r");
+        let spawned = last_spawn(&h);
+        let cmd = only_cmd(&h);
+        h.inject_cmd_output(cmd, b"src/a.rs:2:5:two three\r\n");
+        h.inject_cmd_done(cmd, 0);
+
+        assert_eq!(
+            (spawned, h.cmd_status(cmd)),
+            (
+                Some(bash("rg -n x")),
+                "config \u{2713} 1 match \u{b7} 0ms \u{b7} run 2".to_owned()
+            ),
+        );
+    }
+
+    /// From the palette a `locations` run goes on a worker and opens the
+    /// location picker, also over a focused Run pane.
+    #[test]
+    fn a_locations_command_from_the_palette_over_a_run_pane_opens_the_picker() {
+        let mut h = loaded(FIND);
+        h.fake_fs()
+            .insert_file("/repo/src/a.rs", "one\ntwo three\n");
+        h.fake_shell
+            .set_response("rg -n three", output(b"src/a.rs:2:5:two three\n", b"", 0));
+        action_handlers::dispatch(&mut h.stoat, &stoat_action::OpenRun);
+        submit(&mut h, "find three");
+
+        assert_eq!(
+            (
+                shell_lines(&h),
+                h.stoat
+                    .location_picker
+                    .as_ref()
+                    .map(|picker| picker.entries().len()),
+                h.stoat.active_workspace().cmds.len(),
+            ),
+            (vec!["rg -n three".to_owned()], Some(1), 0),
+        );
+    }
+
+    /// A run that starts with a dock in focus is not at a Run pane prompt, so
+    /// it goes on a worker, though the split focus shows a Run pane.
+    #[test]
+    fn a_locations_run_with_a_dock_in_focus_goes_on_a_worker() {
+        let mut h = loaded(FIND);
+        h.fake_shell.set_response("rg -n x", output(b"", b"", 1));
+        action_handlers::dispatch(&mut h.stoat, &stoat_action::OpenRun);
+        let ws = h.stoat.active_workspace_mut();
+        let dock = ws.docks.insert(DockPanel {
+            view: View::Label("dock".into()),
+            side: DockSide::Right,
+            visibility: DockVisibility::Open { width: 10 },
+            default_width: 10,
+            area: Default::default(),
+        });
+        ws.focus = FocusTarget::Dock(dock);
+        let command = h.stoat.commands.get("find").cloned().expect("find loads");
+        super::start(&mut h.stoat, &command, vec!["x".to_owned()], "find x");
+        h.settle();
+
+        assert_eq!(shell_lines(&h), vec!["rg -n x".to_owned()]);
+    }
+
+    /// A run that names no location after its workspace left the screen opens
+    /// no Run pane, and it says that it found none.
+    #[test]
+    fn a_run_whose_workspace_left_says_it_found_no_location() {
+        let mut h = loaded(FIND);
+        h.fake_shell.set_response("rg -n x", output(b"", b"", 1));
+        action_handlers::dispatch(&mut h.stoat, &stoat_action::OpenCommandPalette);
+        h.type_text("find x");
+        h.hold_blocking();
+        h.type_keys("enter");
+        h.settle();
+        let home = h.stoat.active_workspace;
+        let other = h.create_workspace();
+        h.set_active_workspace(other);
+        h.run_held_blocking();
+        h.settle();
+
+        assert_eq!(
+            (
+                message(&h),
+                h.stoat.workspaces[home].cmds.len(),
+                h.stoat.active_workspace().cmds.len(),
+            ),
+            ((Some("no locations"), MessageKind::Info), 0, 0),
+        );
+    }
+
+    /// The split panes of `h` that show a Run pane, each with its run.
+    fn run_panes(h: &TestHarness) -> Vec<(PaneId, RunId)> {
+        h.stoat
+            .active_workspace()
+            .panes
+            .split_panes()
+            .filter_map(|(pane, shown)| match shown.view {
+                View::Run(run) => Some((pane, run)),
+                _ => None,
+            })
+            .collect()
     }
 
     /// A failed pick list names the first stderr line that holds text, or the

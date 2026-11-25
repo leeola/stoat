@@ -4,7 +4,7 @@ use super::{
     pty::CmdProcess,
 };
 use crate::{
-    location_picker::ParsedLocation,
+    location_picker::{self, ParsedLocation, MAX_LOCATIONS},
     osc_cap::{OscCap, MAX_OSC_CLIPBOARD_BYTES, MAX_OSC_PLAIN_BYTES},
     term_session::TermId,
     theme::scope,
@@ -57,6 +57,10 @@ pub(crate) const MAX_SCROLLBACK_ROWS: usize = 10_000;
 /// to the cap, so the cost of dropping rows is paid once per this many lines
 /// rather than once per line.
 pub(crate) const SCROLLBACK_SLACK: usize = 512;
+
+/// The most matches that a locations block lists, since its rows build at
+/// each paint and the location list filters a longer list.
+const SHOWN_MATCHES: usize = 100;
 
 pub struct VtermGrid {
     cells: Vec<Vec<StyledCell>>,
@@ -724,11 +728,17 @@ pub struct Cmd {
     /// The counts that the current run's output reports, for a kind whose
     /// output the block reads, as its lines arrive.
     pub(crate) report: Option<CmdReport>,
-    /// The bytes of the output line that has not ended, which `report` reads
-    /// once the line ends.
+    /// The lines of the current run's output that name a location, in order,
+    /// for a Cmd of a `locations` command, or `None` for any other Cmd.
+    ///
+    /// The list holds [`MAX_LOCATIONS`] entries at most, as the location list
+    /// of a run does.
+    pub(crate) locations: Option<Vec<ParsedLocation>>,
+    /// The bytes of the output line that has not ended, which `report` and
+    /// `locations` read once the line ends.
     lines: LineFeed,
-    /// Whether a block that can show its report shows its output instead, as
-    /// the `t` key flips it.
+    /// Whether a block that can show its report or its matches shows its
+    /// output instead, as the `t` key flips it.
     pub(crate) raw_view: bool,
     /// The Source Tag of a config command's Cmd, as its label and its scope,
     /// or `None` for a typed line.
@@ -781,6 +791,7 @@ impl Cmd {
             run_count: 0,
             elapsed_secs: 0,
             report: CmdReport::for_kind(kind),
+            locations: None,
             lines: LineFeed::default(),
             raw_view: false,
             source: None,
@@ -802,15 +813,32 @@ impl Cmd {
     ///
     /// A selection whose rows all fell off is dropped, since it no longer marks
     /// anything the grid still holds. A Cmd that keeps a report reads each
-    /// line that `bytes` end into it.
+    /// line that `bytes` end into it. A Cmd that keeps a list of locations adds
+    /// each line that names one, as
+    /// [`location_picker::parse_location_line`] reads it, while the list holds
+    /// fewer than [`MAX_LOCATIONS`].
     pub fn feed(&mut self, bytes: &[u8]) {
         let trimmed = self.grid.feed(bytes);
         if trimmed > 0 {
             self.selection = self.selection.and_then(|sel| sel.shifted_up(trimmed));
         }
-        if let Some(report) = &mut self.report {
-            self.lines.push(bytes, &mut |line| report.push_line(line));
+        if self.report.is_none() && self.locations.is_none() {
+            return;
         }
+        let Self {
+            report,
+            locations,
+            lines,
+            ..
+        } = self;
+        lines.push(bytes, &mut |line| {
+            if let Some(report) = report.as_mut() {
+                report.push_line(line);
+            }
+            if let Some(list) = locations.as_mut().filter(|list| list.len() < MAX_LOCATIONS) {
+                list.extend(location_picker::parse_location_line(line));
+            }
+        });
     }
 
     /// Start the report of a new run over from no output, so the counts of the
@@ -835,6 +863,14 @@ impl Cmd {
         shows.then_some(report)
     }
 
+    /// The locations of a finished Cmd of a `locations` command whose output
+    /// named one or more, which the block can show in place of its output.
+    pub(crate) fn finished_locations(&self) -> Option<&[ParsedLocation]> {
+        self.locations
+            .as_deref()
+            .filter(|list| self.finished && !list.is_empty())
+    }
+
     /// The rows that the block shows in place of its output, `None` for a
     /// block that shows its output.
     ///
@@ -846,6 +882,9 @@ impl Cmd {
     /// A Stub, a Cmd with a [`Self::handoff`], shows one row whatever
     /// [`Self::raw_view`] holds. It reads that the Cmd needs a full terminal,
     /// or runs as an agent, and went to its own tab, then the tab's label.
+    ///
+    /// A Cmd with [`Self::finished_locations`] shows its matches unless
+    /// [`Self::raw_view`] is on, as [`location_rows`] lays them out.
     pub(crate) fn report_rows(&self) -> Option<Vec<BodyRow>> {
         if let Some(handoff) = &self.handoff {
             let note = match handoff.agent {
@@ -858,6 +897,9 @@ impl Cmd {
                     (handoff.label.clone(), Tone::Text),
                 ],
             }]);
+        }
+        if let Some(locations) = self.finished_locations().filter(|_| !self.raw_view) {
+            return Some(location_rows(locations));
         }
         let mut rows = match self.finished_report().filter(|_| !self.raw_view)? {
             CmdReport::Test(report) => test_rows(report),
@@ -1020,6 +1062,53 @@ fn location_span(location: &ParsedLocation) -> (String, Tone) {
         format!("   {}:{}", file.to_string_lossy(), location.line),
         Tone::Muted,
     )
+}
+
+/// The rows of a locations block, each path once in the order it first
+/// appears, with a row under it for each of its matches.
+///
+/// A match row reads its line and column in `ui.text.muted` and its text in
+/// `ui.text.dim`. The text keeps one color through the matched word, because
+/// a location names where a match starts and not where it ends. Past
+/// [`SHOWN_MATCHES`], a last row counts the matches that only the location
+/// list shows.
+fn location_rows(locations: &[ParsedLocation]) -> Vec<BodyRow> {
+    let shown = &locations[..locations.len().min(SHOWN_MATCHES)];
+    let mut paths: Vec<&str> = Vec::new();
+    for location in shown {
+        if !paths.contains(&location.path.as_str()) {
+            paths.push(&location.path);
+        }
+    }
+
+    let mut rows = Vec::new();
+    for path in paths {
+        rows.push(BodyRow {
+            spans: vec![(path.to_owned(), Tone::Text)],
+        });
+        for location in shown.iter().filter(|location| location.path == path) {
+            rows.push(BodyRow {
+                spans: vec![
+                    (
+                        format!("  {}:{}", location.line, location.column),
+                        Tone::Muted,
+                    ),
+                    (format!("  {}", location.text), Tone::Dim),
+                ],
+            });
+        }
+    }
+
+    let more = locations.len() - shown.len();
+    if more > 0 {
+        rows.push(BodyRow {
+            spans: vec![(
+                format!("\u{22ef} {more} more in the location list"),
+                Tone::Muted,
+            )],
+        });
+    }
+    rows
 }
 
 /// `count` and its noun, `one` for a count of 1 and `many` for any other.

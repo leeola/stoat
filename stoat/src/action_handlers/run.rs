@@ -26,6 +26,7 @@ use crate::{
 use std::{
     path::{Path, PathBuf},
     sync::Arc,
+    time::Instant,
 };
 use stoat_action::{registry, ActionKind};
 
@@ -238,11 +239,13 @@ fn prompt_info(text: String, ctx: &Availability, commands: &CommandSet) -> Promp
 /// A finished Cmd whose report located a test failure or a build error goes
 /// to the first of them, as [`CmdReport::first_location`] picks it and
 /// [`go_to_location`] opens it. rustc counts a column in chars, so the column
-/// lands as UTF-32. A finished Cmd that the palette shows with no located
-/// failure opens its output, as [`open_cmd_output`] does. A Stub goes to its
-/// tab, as [`super::terminal::show_terminal`] reveals it, which reports that
-/// the terminal exited once the tab's session ended. Every other Cmd takes
-/// the Enter as nothing.
+/// lands as UTF-32. A finished block of matches goes to its first match,
+/// whose column a search tool counts in bytes. A finished Cmd that the
+/// palette shows with no located failure opens its output, as
+/// [`open_cmd_output`] does. A Stub goes to its tab, as
+/// [`super::terminal::show_terminal`] reveals it, which reports that the
+/// terminal exited once the tab's session ended. Every other Cmd takes the
+/// Enter as nothing.
 pub(super) fn block_enter(stoat: &mut Stoat, id: CmdId) -> UpdateEffect {
     let stub = stoat
         .active_workspace()
@@ -255,17 +258,20 @@ pub(super) fn block_enter(stoat: &mut Stoat, id: CmdId) -> UpdateEffect {
     }
 
     let found = stoat.active_workspace().cmds.get(id).and_then(|cmd| {
+        if let Some(first) = cmd.finished_locations().and_then(<[_]>::first) {
+            return Some((cmd.cwd.clone(), first.clone(), OffsetEncoding::Utf8));
+        }
         let location = cmd.finished_report().and_then(CmdReport::first_location)?;
-        Some((cmd.cwd.clone(), location.clone()))
+        Some((cmd.cwd.clone(), location.clone(), OffsetEncoding::Utf32))
     });
-    if let Some((cwd, location)) = found {
+    if let Some((cwd, location, encoding)) = found {
         go_to_location(
             stoat,
             &cwd,
             &location.path,
             location.line,
             location.column,
-            OffsetEncoding::Utf32,
+            encoding,
         );
         return UpdateEffect::Redraw;
     }
@@ -362,11 +368,13 @@ fn located_file(fs: &dyn FsHost, base: &Path, path: &str) -> Option<PathBuf> {
         .find(|file| is_file(file))
 }
 
-/// Flip a block between its report and its raw output, the Cmd that the
-/// palette's Run Block shows or else the newest block of the focused Run pane.
+/// Flip a block between its report or its matches and its raw output, the Cmd
+/// that the palette's Run Block shows or else the newest block of the focused
+/// Run pane.
 ///
-/// Only a block with a [`Cmd::finished_report`] flips, so the key does
-/// nothing while the Cmd runs and for a Cmd that keeps no report.
+/// Only a block with a [`Cmd::finished_report`] or
+/// [`Cmd::finished_locations`] flips, so the key does nothing while the Cmd
+/// runs and for a Cmd that keeps neither.
 pub(super) fn run_toggle_view(stoat: &mut Stoat) -> UpdateEffect {
     let shown = stoat.run_block_cmd();
     let ws = stoat.active_workspace_mut();
@@ -382,11 +390,43 @@ pub(super) fn run_toggle_view(stoat: &mut Stoat) -> UpdateEffect {
     let Some(cmd) = ws
         .cmds
         .get_mut(id)
-        .filter(|cmd| cmd.finished_report().is_some())
+        .filter(|cmd| cmd.finished_report().is_some() || cmd.finished_locations().is_some())
     else {
         return UpdateEffect::None;
     };
     cmd.raw_view = !cmd.raw_view;
+    UpdateEffect::Redraw
+}
+
+/// Open the matches of the newest finished block of matches on the focused
+/// Run pane's stack as a location list.
+///
+/// The matches resolve on a worker against the Cmd's cwd, as the matches of
+/// a `locations` run from the palette resolve, and the list opens once they
+/// land. A location picked from the list opens beside the Run pane, so the
+/// stack stays.
+pub(super) fn run_location_list(stoat: &mut Stoat) -> UpdateEffect {
+    let found = {
+        let ws = stoat.active_workspace();
+        let View::Run(run) = ws.panes.pane(ws.panes.focus()).view else {
+            return UpdateEffect::None;
+        };
+        ws.runs.get(run).and_then(|run_state| {
+            run_state
+                .blocks
+                .iter()
+                .rev()
+                .filter_map(|id| ws.cmds.get(*id))
+                .find_map(|cmd| {
+                    let locations = cmd.finished_locations()?;
+                    Some((locations.to_vec(), cmd.cwd.clone()))
+                })
+        })
+    };
+    let Some((locations, cwd)) = found else {
+        return UpdateEffect::None;
+    };
+    user_command::run::spawn_resolve_locations(stoat, locations, cwd);
     UpdateEffect::Redraw
 }
 
@@ -866,6 +906,50 @@ fn steps_kind(line: &str, steps: &[PlannedStep]) -> RunKind {
     }
 }
 
+/// Insert a finished Cmd of `line` whose run of `steps` went on a worker and
+/// printed `output`, in the active workspace's store, and answer its id.
+///
+/// The Cmd is built as [`start_cmd_steps`] builds one, at the width that
+/// [`run_pane_width`] gives, and keeps a list of locations, so a run again on
+/// its own PTY reads its matches. Its output reaches its grid as a PTY writes
+/// it, a carriage return before each line feed. It ends with `exit_status`,
+/// ran from `started` to now, and counts one run.
+pub(crate) fn finished_cmd(
+    stoat: &mut Stoat,
+    line: &str,
+    steps: Vec<PlannedStep>,
+    source: Option<(&'static str, &'static str)>,
+    output: &[u8],
+    exit_status: Option<i32>,
+    started: Instant,
+) -> CmdId {
+    let width = run_pane_width(stoat);
+    let now = stoat.executor.now();
+    let ws = stoat.active_workspace_mut();
+    let mut cmd = Cmd::new(line.to_owned(), ws.git_root.clone(), width);
+    cmd.kind = steps_kind(line, &steps);
+    cmd.reset_report();
+    cmd.steps = steps;
+    cmd.source = source;
+    cmd.locations = Some(Vec::new());
+
+    let mut written = Vec::with_capacity(output.len());
+    for &byte in output {
+        if byte == b'\n' {
+            written.push(b'\r');
+        }
+        written.push(byte);
+    }
+    cmd.feed(&written);
+
+    cmd.finished = true;
+    cmd.exit_status = exit_status;
+    cmd.started = Some(started);
+    cmd.ended = Some(now);
+    cmd.run_count = 1;
+    ws.cmds.insert(cmd)
+}
+
 /// The grid width of a Cmd that [`append_to_run_pane`] places, in cells.
 ///
 /// It is the width of the pane that takes the Cmd, or of the focused pane
@@ -935,7 +1019,7 @@ fn run_pane_on_show(ws: &Workspace) -> Option<(PaneId, RunId)> {
 /// that ran before its first process.
 ///
 /// The run counts one more, starts now, and clears the end, the elapsed
-/// seconds, the status, and the report of the run before it.
+/// seconds, the status, the report, and the matches of the run before it.
 fn start_process(stoat: &mut Stoat, id: CmdId) -> UpdateEffect {
     let now = stoat.executor.now();
     let Some(cmd) = stoat.active_workspace_mut().cmds.get_mut(id) else {
@@ -950,6 +1034,9 @@ fn start_process(stoat: &mut Stoat, id: CmdId) -> UpdateEffect {
     cmd.exit_status = None;
     cmd.error = None;
     cmd.reset_report();
+    if let Some(locations) = cmd.locations.as_mut() {
+        locations.clear();
+    }
     cmd.raw_view = false;
     cmd.step = 0;
     run_steps(stoat, id, true)
@@ -1123,6 +1210,7 @@ mod tests {
         host::FakeTerminalSession,
         input_history::InputHistory,
         keymap_state,
+        location_picker::MAX_LOCATIONS,
         pane::{DockPanel, DockSide, DockVisibility, FocusTarget, PaneId, View},
         render::{paint::style_rgb, run_pane::RECALL_NOTE},
         run::{
@@ -3209,6 +3297,306 @@ mod tests {
         assert_eq!(
             enter_after("cargo build", ERROR_AND_WARNING, 101),
             (true, PathBuf::from(CHROME), (411, 19)),
+        );
+    }
+
+    /// The user command `rg`, which wraps `rg --vimgrep` and opens its
+    /// matches.
+    const RG: &str = r#"command rg = cli("rg --vimgrep", output: locations);"#;
+
+    /// The second file that [`ZOOMED`] names, under the root `/work`.
+    const THEME: &str = "/work/stoat/src/theme.rs";
+
+    /// Three matches of `zoomed` in two files, as `rg --vimgrep` prints them.
+    const ZOOMED: [&str; 3] = [
+        "stoat/src/render/chrome.rs:412:4:fn zoomed(area: u16) -> u16 {",
+        "stoat/src/render/chrome.rs:431:8:fn zoomed_clamps() {",
+        "stoat/src/theme.rs:75:12:pub fn zoomed() {",
+    ];
+
+    /// A harness rooted at `/work` with [`RG`] loaded, the two files of
+    /// [`ZOOMED`] in its file system, and a Run pane beside an editor pane,
+    /// and answer the editor pane.
+    ///
+    /// Each line of the files starts with a two-byte char, so a byte column
+    /// and a char column name different places.
+    fn rg_harness() -> (TestHarness, PaneId) {
+        let mut h = Stoat::test();
+        h.stoat.active_workspace_mut().git_root = PathBuf::from("/work");
+        h.stoat.reload_user_config(RG);
+        let text = format!("\u{e9}{}\n", "x".repeat(19)).repeat(500);
+        h.seed_fixture(CHROME, &text);
+        h.seed_fixture(THEME, &text);
+        let editor_pane = h.stoat.active_workspace().panes.focus();
+        h.type_action("SplitRight()");
+        h.open_run();
+        (h, editor_pane)
+    }
+
+    /// Run `rg zoomed` at the Run prompt of `h` to its end, with the output
+    /// `lines` and the exit `code`, and answer its Cmd.
+    fn rg_run(h: &mut TestHarness, lines: &[&str], code: i32) -> CmdId {
+        let cmd = h.submit_run("rg zoomed").cmd;
+        let output: String = lines.iter().map(|line| format!("{line}\r\n")).collect();
+        h.inject_cmd_output(cmd, output.as_bytes());
+        h.inject_cmd_done(cmd, code);
+        cmd
+    }
+
+    /// A `locations` command at the Run prompt joins the stack as a Cmd on its
+    /// own PTY, and the shell host runs nothing.
+    #[test]
+    fn a_locations_command_at_the_run_prompt_joins_the_stack() {
+        let (mut h, _) = rg_harness();
+        let cmd = h.submit_run("rg zoomed").cmd;
+
+        let block = &h.stoat.active_workspace().cmds[cmd];
+        assert_eq!(
+            (
+                spawns(&h)
+                    .pop()
+                    .map(|(program, args, _, _)| (program, args)),
+                h.fake_shell.invocations().len(),
+                (block.command.as_str(), block.source.map(|(label, _)| label)),
+            ),
+            (
+                Some((
+                    "bash".to_owned(),
+                    vec!["-c".to_owned(), "rg --vimgrep zoomed".to_owned()]
+                )),
+                0,
+                ("rg zoomed", Some("cli")),
+            ),
+        );
+    }
+
+    /// A finished block of matches shows each path once, with a row under it
+    /// for each of its matches, counts its matches in its status, and names
+    /// the keys that open them. The stack spans the header, the five rows,
+    /// and the hint row.
+    #[test]
+    fn a_finished_locations_block_groups_its_matches_by_file() {
+        let (mut h, _) = rg_harness();
+        let cmd = rg_run(&mut h, &ZOOMED, 0);
+
+        let ws = h.stoat.active_workspace();
+        let View::Run(run) = ws.panes.pane(ws.panes.focus()).view else {
+            panic!("the focused pane shows a Run pane");
+        };
+        assert_eq!(
+            (
+                ws.runs[run].output_line_total(&ws.cmds),
+                h.cmd_status(cmd),
+                report_and_hint(&h, cmd)
+            ),
+            (
+                7,
+                "cli \u{2713} 3 matches \u{b7} 0ms".to_owned(),
+                (
+                    Some(
+                        [
+                            "stoat/src/render/chrome.rs",
+                            "  412:4  fn zoomed(area: u16) -> u16 {",
+                            "  431:8  fn zoomed_clamps() {",
+                            "stoat/src/theme.rs",
+                            "  75:12  pub fn zoomed() {",
+                        ]
+                        .map(str::to_owned)
+                        .to_vec()
+                    ),
+                    Some("Enter open location \u{b7} C-q to location list".to_owned()),
+                ),
+            ),
+        );
+    }
+
+    /// A block of matches shows its raw output while it runs, and its matches
+    /// once it ends.
+    #[test]
+    fn a_running_block_of_matches_shows_its_output() {
+        let (mut h, _) = rg_harness();
+        let cmd = h.submit_run("rg zoomed").cmd;
+        h.inject_cmd_output(cmd, format!("{}\r\n", ZOOMED[0]).as_bytes());
+        let running = report_and_hint(&h, cmd);
+        h.inject_cmd_done(cmd, 0);
+
+        assert_eq!(
+            (running, report_and_hint(&h, cmd).0.map(|rows| rows.len())),
+            ((None, None), Some(2)),
+        );
+    }
+
+    /// A block keeps at most as many locations as a location list opens, so a
+    /// search that matches every line of a large tree keeps the stack light.
+    #[test]
+    fn a_block_keeps_at_most_the_location_list_bound() {
+        let mut cmd = Cmd::new("rg x".to_owned(), PathBuf::from("/work"), 80);
+        cmd.locations = Some(Vec::new());
+        let output: String = (1..=MAX_LOCATIONS + 1)
+            .map(|line| format!("a.rs:{line}:1:x\r\n"))
+            .collect();
+        cmd.feed(output.as_bytes());
+
+        assert_eq!(cmd.locations.map(|list| list.len()), Some(MAX_LOCATIONS));
+    }
+
+    #[test]
+    fn one_match_reads_as_one_match() {
+        let (mut h, _) = rg_harness();
+        let cmd = rg_run(&mut h, &ZOOMED[..1], 0);
+
+        assert_eq!(h.cmd_status(cmd), "cli \u{2713} 1 match \u{b7} 0ms");
+    }
+
+    /// A block of a `locations` command whose output names no location shows
+    /// its raw output, and its status reads as any block's does.
+    #[test]
+    fn a_locations_block_with_no_location_keeps_its_raw_output() {
+        let (mut h, _) = rg_harness();
+        let cmd = rg_run(&mut h, &[], 1);
+
+        assert_eq!(
+            (h.cmd_status(cmd), report_and_hint(&h, cmd)),
+            ("cli \u{2717} exit 1 0ms".to_owned(), (None, None)),
+        );
+    }
+
+    /// A block lists its first 100 matches, and a last row counts the rest.
+    #[test]
+    fn a_long_match_list_ends_in_a_count_row() {
+        let (mut h, _) = rg_harness();
+        let lines: Vec<String> = (1..=130).map(|line| format!("a.rs:{line}:1:x")).collect();
+        let lines: Vec<&str> = lines.iter().map(String::as_str).collect();
+        let cmd = rg_run(&mut h, &lines, 0);
+
+        let rows = report_and_hint(&h, cmd).0.expect("the rows of the matches");
+        assert_eq!(
+            (
+                rows.len(),
+                rows.iter().filter(|row| row.starts_with("  ")).count(),
+                rows.last().map(String::as_str),
+            ),
+            (102, 100, Some("\u{22ef} 30 more in the location list")),
+        );
+    }
+
+    /// An Enter at an empty prompt opens the first match of the newest block
+    /// in the editor pane beside the Run pane, which takes the focus, with the
+    /// column read as a byte column.
+    #[test]
+    fn enter_opens_the_first_match_beside_the_run_pane() {
+        let (mut h, editor_pane) = rg_harness();
+        rg_run(&mut h, &ZOOMED, 0);
+        h.type_keys("enter");
+
+        let point = editor::focused_cursor_point(&mut h.stoat);
+        assert_eq!(
+            (
+                h.stoat.active_workspace().panes.focus() == editor_pane,
+                editor::focused_buffer_path(&h.stoat),
+                (point.row, point.column),
+            ),
+            (true, PathBuf::from(CHROME), (411, 3)),
+        );
+    }
+
+    /// `C-q` opens the matches of the newest block as a location list, each
+    /// in output order at its place in its file. The block before it keeps
+    /// its own match out of the list.
+    #[test]
+    fn ctrl_q_opens_the_matches_as_a_location_list() {
+        let (mut h, _) = rg_harness();
+        rg_run(&mut h, &ZOOMED[2..], 0);
+        rg_run(&mut h, &ZOOMED, 0);
+        h.type_keys("ctrl-q");
+        h.settle();
+
+        let entries: Option<Vec<(PathBuf, u32, u32)>> =
+            h.stoat.location_picker.as_ref().map(|picker| {
+                picker
+                    .entries()
+                    .iter()
+                    .map(|entry| (entry.path.clone(), entry.line, entry.column))
+                    .collect()
+            });
+        assert_eq!(
+            entries,
+            Some(vec![
+                (PathBuf::from(CHROME), 412, 4),
+                (PathBuf::from(CHROME), 431, 8),
+                (PathBuf::from(THEME), 75, 12),
+            ]),
+        );
+    }
+
+    /// A location picked from the list over a Run pane opens in the editor
+    /// pane beside it, and the Run pane keeps its stack.
+    #[test]
+    fn a_location_picked_over_a_run_pane_opens_beside_it() {
+        let (mut h, editor_pane) = rg_harness();
+        let run_pane = h.stoat.active_workspace().panes.focus();
+        let cmd = rg_run(&mut h, &ZOOMED, 0);
+        h.type_keys("ctrl-q");
+        h.settle();
+        h.type_keys("enter");
+
+        let ws = h.stoat.active_workspace();
+        let stack = match ws.panes.pane(run_pane).view {
+            View::Run(run) => ws.runs[run].blocks.clone(),
+            _ => Vec::new(),
+        };
+        assert_eq!(
+            (
+                ws.panes.focus() == editor_pane,
+                editor::focused_buffer_path(&h.stoat),
+                stack,
+            ),
+            (true, PathBuf::from(CHROME), vec![cmd]),
+        );
+    }
+
+    /// `t` shows the raw output of a block of matches, the row of the step's
+    /// text and then the lines as the tool printed them.
+    #[test]
+    fn t_shows_the_raw_lines_of_a_locations_block() {
+        let mut h = Stoat::test();
+        h.stoat.reload_user_config(RG);
+        h.open_run();
+        let cmd = rg_run(&mut h, &ZOOMED, 0);
+        h.type_keys("escape t");
+
+        let block = &h.stoat.active_workspace().cmds[cmd];
+        let rows: Vec<String> = (0..block.grid.rendered_line_count())
+            .map(|row| {
+                block
+                    .grid
+                    .text_in(0..usize::from(block.grid.width()), row..row + 1)
+            })
+            .collect();
+        let mut printed = vec!["rg --vimgrep zoomed".to_owned()];
+        printed.extend(ZOOMED.map(str::to_owned));
+        assert_eq!(
+            (block.raw_view, block.report_rows().is_none(), rows),
+            (true, true, printed),
+        );
+    }
+
+    /// `C-r` runs a block of matches again, with no match until the second
+    /// run's output names one.
+    #[test]
+    fn ctrl_r_runs_a_locations_block_again() {
+        let (mut h, _) = rg_harness();
+        let cmd = rg_run(&mut h, &ZOOMED, 0);
+        h.type_keys("ctrl-r");
+
+        let block = &h.stoat.active_workspace().cmds[cmd];
+        assert_eq!(
+            (
+                block.run_count,
+                block.finished,
+                block.locations.as_ref().map(Vec::len)
+            ),
+            (2, false, Some(0)),
         );
     }
 

@@ -241,13 +241,17 @@ a row: `line`, and each key of a JSON object.
 - `locations` opens a location list over the lines of the output that name
   a location, as `path:line:col: text` does. The column and the text are
   optional. The list opens whatever the exit code, because a search tool
-  exits with 1 when it finds nothing. With no location, the message is
-  `no locations`.
+  exits with 1 when it finds nothing. A run with no location goes to a Run
+  pane's stack as a finished block that shows its output and its error
+  output, and the focus stays where it is. At a Run pane prompt, the run
+  joins that pane's stack as a block that groups its matches by file.
+  `Enter` at the empty prompt opens the first match, and `C-q` opens the
+  matches as a location list.
 
 When a step of a `notify`, `buffer`, or `locations` run fails, a status
 message shows the name of the command, the first line of the error output,
 and the exit code, for example `ship: rejected (exit 1)`. The last step of a
-`locations` run shows this failure only when it found no location.
+`locations` run shows its failure in its block instead.
 
 A shell step that does not run in the Run Block or in a Run pane runs
 without a terminal, so its output and its error output stay apart. `buffer` and
@@ -290,8 +294,12 @@ version of the tool. When the shell does not find the tool, the doc island
 shows `TOOL: not found`, and the command still runs your text as you typed
 it.
 
+`rg` prints its matches under a heading for each file when it writes to a
+terminal, as at a Run pane prompt, so a `locations` command passes
+`--vimgrep`, which prints one location on each line.
+
 ```stcfg
-command rg = cli("rg", output: locations);
+command rg = cli("rg --vimgrep", output: locations);
 command jj = cli("jj", completions: "jj util completion fish");
 ```
 

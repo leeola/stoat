@@ -1,5 +1,6 @@
 use super::{focused_pane_jumplist, pane_editor_ids};
 use crate::{
+    agent_goto,
     app::{Stoat, UpdateEffect},
     buffer_registry::OpenOrigin,
     commit_preview,
@@ -440,6 +441,10 @@ pub(super) fn location_picker_close(stoat: &mut Stoat) -> UpdateEffect {
 /// Jump the focused editor to the goto candidate under the picker's
 /// selection, reusing the same apply path a single-location goto takes.
 /// An empty picker just closes.
+///
+/// A picker over a Run pane jumps in the pane that
+/// [`agent_goto::target_pane`] picks, which takes the focus, so the Run
+/// pane's stack stays.
 pub(crate) fn location_picker_select(stoat: &mut Stoat) -> UpdateEffect {
     let Some(mut picker) = stoat.location_picker.take() else {
         return UpdateEffect::None;
@@ -451,6 +456,14 @@ pub(crate) fn location_picker_select(stoat: &mut Stoat) -> UpdateEffect {
     let Some(entry) = entry else {
         return UpdateEffect::Redraw;
     };
+
+    let executor = stoat.executor.clone();
+    let ws = stoat.active_workspace_mut();
+    if matches!(ws.panes.pane(ws.panes.focus()).view, View::Run(_)) {
+        let pane = agent_goto::target_pane(ws, executor);
+        ws.focus = FocusTarget::SplitPane;
+        ws.panes.set_focus(pane);
+    }
     super::lsp::apply_jump(stoat, &entry.path, entry.offset, entry.block);
     UpdateEffect::Redraw
 }

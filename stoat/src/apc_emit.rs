@@ -3782,6 +3782,7 @@ pub(crate) fn window_content_version(
                 block.elapsed_secs.hash(&mut hasher);
                 block.kind.hash(&mut hasher);
                 block.report.hash(&mut hasher);
+                block.locations.as_ref().map(Vec::len).hash(&mut hasher);
                 block.raw_view.hash(&mut hasher);
                 block.error.hash(&mut hasher);
                 block.selection.hash(&mut hasher);

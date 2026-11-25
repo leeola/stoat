@@ -64,6 +64,7 @@ const TINT_INTERNAL: [u8; 3] = [0x1b, 0x2a, 0x2d];
 /// the internal Source Tag.
 const KIND_TINT: [u8; 3] = TINT_INTERNAL;
 const TINT_SPECIAL: [u8; 3] = [0x2a, 0x22, 0x36];
+const TINT_SUCCESS: [u8; 3] = [0x1d, 0x2a, 0x1f];
 const SPECIAL: [u8; 3] = [0xc5, 0x9a, 0xf0];
 const DANGER: [u8; 3] = [0xf2, 0x77, 0x7f];
 const SUCCESS: [u8; 3] = [0x8f, 0xd1, 0x8a];
@@ -2548,6 +2549,77 @@ fn a_listed_program_leaves_a_stub_at_submit() {
             frame.display(),
         );
     }
+}
+
+/// A `locations` command at a Run pane prompt joins the stack as a block that
+/// groups its matches by file.
+///
+/// A fake `rg` prints three matches in two files and exits 0. The header is
+/// row 40, the body rows 41 to 45 hold a path, its two matches, a path, and
+/// its match, and the hint row is 46. A path draws in the text color from
+/// cell 3, a match's place in the muted color from cell 5 and its text in the
+/// dim color from cell 12, and the hint's first key in the info color. The
+/// header's right end holds the success mark, the muted count of matches, and
+/// the `cli` tag on its tint. A block that exits 0 draws no bar.
+#[test]
+// The scratch config and the fake program are this test's own disk state, set
+// up before the child runs.
+#[allow(clippy::disallowed_methods)]
+fn a_locations_block_groups_its_matches() {
+    let mut home = support::scratch_home();
+    std::fs::write(
+        home.path().join("config/stoat/config.stcfg"),
+        concat!(
+            "on init {\n    direnv.load = false;\n}\n",
+            r#"command rg = cli("rg --vimgrep", output: locations);"#,
+            "\n",
+        ),
+    )
+    .expect("the scratch stoat config");
+    fake_program(
+        home.path(),
+        "rg",
+        concat!(
+            "#!/bin/sh\n",
+            "printf '%s\\n' 'stoat/src/render/chrome.rs:412:4:fn zoomed(area: u16) -> u16 {' ",
+            "'stoat/src/render/chrome.rs:431:8:fn zoomed_clamps() {' ",
+            "'stoat/src/theme.rs:75:12:pub fn zoomed() {'\n",
+        ),
+    );
+    let mut session = spawn_scene(ermine_scene_with_bin(
+        "basic-diff",
+        "unstaged.txt",
+        home.path(),
+    ));
+    wait_for_diff(&mut session);
+    play(&mut session, "<Space>t<Settle>rg zoomed<Enter><Settle:500>");
+    let shot = session.snapshot().expect("a snapshot");
+
+    let status = cell_rect(128, 40, 30, 1);
+    let counts = [
+        ("path", pixels_of(&shot, cell_rect(3, 41, 26, 1), TEXT)),
+        ("place", pixels_of(&shot, cell_rect(5, 42, 5, 1), MUTED)),
+        ("text", pixels_of(&shot, cell_rect(12, 42, 30, 1), TEXT_DIM)),
+        ("key", pixels_of(&shot, cell_rect(3, 46, 5, 1), INFO)),
+        ("mark", pixels_of(&shot, status, SUCCESS)),
+        ("count", pixels_of(&shot, status, MUTED)),
+    ];
+    let tint = pixels_of(&shot, cell_rect(108, 40, 50, 1), TINT_SUCCESS);
+    if counts.iter().any(|(_, count)| *count == 0) || tint <= 200 {
+        let frame = keep_frame(&shot, &mut home, "locations_block");
+        panic!(
+            "the block reads {counts:?} pixels of its colors and {tint} pixels of the tag's \
+             tint; want each color above 0 and the tint above 200; the frame is {}",
+            frame.display(),
+        );
+    }
+    expect_region(
+        &shot,
+        &mut home,
+        (18, 742, 2, 100),
+        BASE,
+        "locations_no_bar",
+    );
 }
 
 /// A Parsed Cmd's header ends in its Kind Chip, its label in the info color

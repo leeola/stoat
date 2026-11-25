@@ -317,11 +317,12 @@ pub(super) fn paint_progress(
 /// A finished Cmd reads its mark, U+2713 in `ui.badge.complete` for an exit of
 /// 0, and otherwise U+2717 in `ui.error`, with `exit N` after it when the
 /// process gave a code. Its runtime follows in `ui.text.muted`, with the run
-/// count after it from the second run on. A Cmd without both a start and an
-/// end reads its mark alone. A `cargo test` Cmd whose report counts a failed
-/// test reads U+2717, that count, and `failed` as its mark, and a build whose
-/// report counts an error reads U+2717 and its count of errors, such as
-/// `1 error`.
+/// count after it from the second run on. A Cmd with matches reads their
+/// count and U+00B7 before its runtime, such as `3 matches`. A Cmd without
+/// both a start and an end reads its mark alone. A `cargo test` Cmd whose
+/// report counts a failed test reads U+2717, that count, and `failed` as its
+/// mark, and a build whose report counts an error reads U+2717 and its count
+/// of errors, such as `1 error`.
 ///
 /// A running Cmd reads U+25CF and the whole seconds it has run, as
 /// [`Cmd::elapsed_secs`] holds them, in the foreground of
@@ -412,6 +413,13 @@ pub(crate) fn status_parts(
 
     if let Some((started, ended)) = cmd.started.zip(cmd.ended) {
         let runtime = crate::run::format_runtime(ended.saturating_duration_since(started));
+        let runtime = match cmd.finished_locations() {
+            Some(locations) => {
+                let matches = vterm::counted(locations.len(), "match", "matches");
+                format!("{matches} \u{b7} {runtime}")
+            },
+            None => runtime,
+        };
         let text = match cmd.run_count {
             0 | 1 => runtime,
             count => format!("{runtime} \u{b7} run {count}"),

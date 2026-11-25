@@ -216,6 +216,10 @@ impl RunState {
     /// holds the tab's session, and `C-r`, which runs it again, once the
     /// session ended. The row counts as the block's last row, so the block's
     /// rule runs under it and a block's bar runs beside it.
+    ///
+    /// A newest block of matches, a Cmd with [`Cmd::finished_locations`],
+    /// names `Enter`, which opens the first match, and `C-q`, which opens the
+    /// matches as a location list.
     pub(crate) fn hint(
         &self,
         cmds: &SlotMap<CmdId, Cmd>,
@@ -230,6 +234,19 @@ impl RunState {
                 spans: vec![
                     (key.to_owned(), Tone::Key),
                     (action.to_owned(), Tone::Muted),
+                ],
+            });
+        }
+        if self
+            .active_block(cmds)
+            .is_some_and(|cmd| cmd.finished_locations().is_some())
+        {
+            return Some(BodyRow {
+                spans: vec![
+                    ("Enter".to_owned(), Tone::Key),
+                    (" open location \u{b7} ".to_owned(), Tone::Muted),
+                    ("C-q".to_owned(), Tone::Key),
+                    (" to location list".to_owned(), Tone::Muted),
                 ],
             });
         }
@@ -248,6 +265,7 @@ impl RunState {
     fn has_hint(&self, cmds: &SlotMap<CmdId, Cmd>) -> bool {
         self.active_block(cmds).is_some_and(|cmd| {
             cmd.handoff.is_some()
+                || cmd.finished_locations().is_some()
                 || cmd
                     .finished_report()
                     .and_then(CmdReport::first_location)

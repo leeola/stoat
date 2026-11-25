@@ -1923,11 +1923,13 @@ on key {
     !modal && pane == run && mode == normal {
         t -> RunToggleView();
         Ctrl-r -> RunAgain();
+        Ctrl-q -> RunLocationList();
     }
     # The guard leaves Ctrl-r to the palette's register insert and to its pick
     # list while the palette stands over the Run pane.
     !modal && pane == run && mode == insert {
         Ctrl-r -> RunAgain();
+        Ctrl-q -> RunLocationList();
     }
     pane == run {
         Ctrl-c -> RunInterrupt();

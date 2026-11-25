@@ -75,6 +75,19 @@ define_action!(
 );
 
 define_action!(
+    RunLocationListDef,
+    RunLocationList,
+    "RunLocationList",
+    ActionKind::RunLocationList,
+    "open the matches as a location list",
+    "Open the matches of the newest finished block of matches on the focused \
+     Run pane as a location list. A location picked there opens beside the \
+     Run pane, so its stack stays.",
+    ActionPriority::Normal,
+    palette_visible = false
+);
+
+define_action!(
     RunHistoryPrevDef,
     RunHistoryPrev,
     "RunHistoryPrev",

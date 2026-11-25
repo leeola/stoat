@@ -1113,6 +1113,7 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
         ActionKind::RunToggleView => run::run_toggle_view(stoat),
         ActionKind::RunAgain => run::run_again(stoat),
         ActionKind::RunBlockToPane => run::run_block_to_pane(stoat),
+        ActionKind::RunLocationList => run::run_location_list(stoat),
         ActionKind::RunHistoryPrev => run::run_history_prev(stoat),
         ActionKind::RunHistoryNext => run::run_history_next(stoat),
         ActionKind::HelpScopeToggle => help::help_scope_toggle(stoat),
