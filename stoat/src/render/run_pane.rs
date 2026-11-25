@@ -151,11 +151,24 @@ pub(crate) fn render_run_pane(
 /// A finished Cmd reads its mark, U+2713 in `ui.badge.complete` for an exit of
 /// 0, and otherwise U+2717 in `ui.error`, with `exit N` after it when the
 /// process gave a code. Its runtime follows in `ui.text.muted`, with the run
-/// count after it from the second run on. A running Cmd reads nothing, and a
-/// Cmd without both a start and an end reads its mark alone.
+/// count after it from the second run on. A Cmd without both a start and an
+/// end reads its mark alone.
+///
+/// A running Cmd reads U+25CF and the whole seconds it has run, as
+/// [`Cmd::elapsed_secs`] holds them, in the foreground of
+/// `ui.statusline.run`. The status-line scope can carry a background, which a
+/// header leaves to the pane.
 pub(crate) fn status_parts(cmd: &Cmd, theme: &crate::theme::Theme) -> Vec<StatusPart> {
     if !cmd.finished {
-        return Vec::new();
+        let fg = theme.get(crate::theme::scope::UI_STATUSLINE_RUN).fg;
+        return vec![StatusPart {
+            text: format!("\u{25cf} {}", crate::run::format_elapsed(cmd.elapsed_secs)),
+            style: Style {
+                fg,
+                ..Style::default()
+            },
+            chip: false,
+        }];
     }
 
     let (mark, mark_scope) = match cmd.exit_status {
@@ -675,13 +688,14 @@ mod tests {
         );
     }
 
-    /// A theme with the three colors of a Run Block's status.
+    /// A theme with the colors of a Run Block's status, finished or running.
     fn status_theme() -> Theme {
         let (config, _) = stoat_config::parse(
             r##"theme t {
                 ui.badge.complete.fg = "#8fd18a";
                 ui.error.fg = "#f2777f";
                 ui.text.muted.fg = "#838a98";
+                ui.statusline.run.fg = "#c59af0";
             }"##,
         );
         Theme::from_config(&config.expect("theme parses"), "t").expect("theme loads")
@@ -786,13 +800,23 @@ mod tests {
         assert_eq!(texts, ["\u{2713}", "2:31 \u{b7} run 3"]);
     }
 
+    /// A running Cmd reads U+25CF and the whole seconds that the last tick
+    /// wrote, in the run color.
     #[test]
-    fn a_running_header_carries_no_status() {
+    fn a_running_header_reads_its_elapsed_time() {
         let mut cmd = finished(None, Duration::from_secs(1), 1);
         cmd.finished = false;
         cmd.ended = None;
+        cmd.elapsed_secs = 21;
+        let theme = status_theme();
 
-        assert_eq!(status(&cmd, &status_theme()), Vec::new());
+        assert_eq!(
+            status(&cmd, &theme),
+            [(
+                "\u{25cf} 0:21".to_owned(),
+                theme.get(scope::UI_STATUSLINE_RUN).fg
+            )],
+        );
     }
 
     /// The header of `echo ok` draws `echo` as the command token and ` ok` as

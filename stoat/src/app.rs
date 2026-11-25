@@ -581,6 +581,13 @@ pub(crate) const AUTO_RELOAD_POLL: std::time::Duration = std::time::Duration::fr
 /// wakes the run loop so [`crate::render::frame`] can clear the expired message.
 const STATUS_MESSAGE_TTL: std::time::Duration = std::time::Duration::from_secs(4);
 
+/// The least wait of the tick that advances a running Cmd's elapsed seconds.
+///
+/// A timer can fire a hair before the second it was set for turns, and the
+/// turn is then microseconds out. The floor wakes the run loop just past that
+/// turn rather than again at once.
+const CMD_TICK_FLOOR: std::time::Duration = std::time::Duration::from_millis(20);
+
 /// The kind of a status message, which picks its color in the status bar.
 ///
 /// [`Stoat::set_status`] gives every message the alert kind. The info kind
@@ -1589,6 +1596,14 @@ pub struct Stoat {
     /// finished un-drawing itself, so an idle screen drops it without a key
     /// press. Replacing it cancels the prior timer.
     pub(crate) walkthrough_exit_timer: Option<stoat_scheduler::Task<()>>,
+    /// The timer that wakes the run loop at the next whole second of a running
+    /// Cmd on show, so its elapsed time ticks while it prints nothing.
+    ///
+    /// It is armed only while a running Cmd is on show, so an idle app or a
+    /// parked Run pane wakes nothing. Replacing it cancels the prior timer.
+    pub(crate) cmd_tick: Option<stoat_scheduler::Task<()>>,
+    /// When [`Self::cmd_tick`] fires, on the scheduler clock.
+    cmd_tick_due: Option<std::time::Instant>,
     /// When a modified wheel notch last ran a keymap binding, on the
     /// scheduler clock.
     ///
@@ -2987,6 +3002,8 @@ impl Stoat {
             pending_message_deadline: None,
             pending_message_expiry: None,
             walkthrough_exit_timer: None,
+            cmd_tick: None,
+            cmd_tick_due: None,
             wheel_binding_last: None,
             button_repeat: None,
             wheel_line_remainder: 0.0,
@@ -10045,11 +10062,60 @@ impl Stoat {
         self.drive_parse_jobs();
         self.drive_diff_jobs();
 
+        self.tick_cmds();
         self.drive_pumps();
         // Not gated on the pumps' progress. The `.git` refresh drain stales
         // every map and still reports none.
         self.drive_diff_jobs();
         button_repeat::drain(self);
+    }
+
+    /// Write the elapsed seconds of every running Cmd, and keep
+    /// [`Self::cmd_tick`] armed while a running Cmd is on show.
+    ///
+    /// A Cmd in a hidden pane, a parked tab, or a background workspace keeps
+    /// its count current on any pass but arms no timer. The timer fires at the
+    /// soonest next whole second among the shown Cmds, so each second's count
+    /// lands on the frame the wake starts.
+    fn tick_cmds(&mut self) {
+        let now = self.executor.now();
+        for ws in self.workspaces.values_mut() {
+            for cmd in ws.cmds.values_mut() {
+                if let Some(started) = cmd.started.filter(|_| !cmd.finished) {
+                    cmd.elapsed_secs = now.saturating_duration_since(started).as_secs();
+                }
+            }
+        }
+
+        let modal_run = self.modal_run;
+        let ws = self.active_workspace();
+        let next_second = ws
+            .runs
+            .iter()
+            .filter(|&(run_id, _)| Self::run_visible(ws, run_id, modal_run))
+            .flat_map(|(_, run)| run.blocks.iter().filter_map(|id| ws.cmds.get(*id)))
+            .filter(|cmd| !cmd.finished)
+            .filter_map(|cmd| cmd.started)
+            .map(|started| {
+                let into = now.saturating_duration_since(started).subsec_nanos();
+                std::time::Duration::from_nanos(u64::from(1_000_000_000 - into))
+            })
+            .min();
+        let Some(delay) = next_second else {
+            self.cmd_tick = None;
+            self.cmd_tick_due = None;
+            return;
+        };
+        if self.cmd_tick.is_some() && self.cmd_tick_due.is_some_and(|due| now < due) {
+            return;
+        }
+
+        let delay = delay.max(CMD_TICK_FLOOR);
+        self.cmd_tick_due = Some(now + delay);
+        let timer = self.executor.timer(delay);
+        self.cmd_tick = Some(self.spawn_woken(async move {
+            timer.await;
+        }));
     }
 
     /// Advance every asynchronous request the editor has out, and report

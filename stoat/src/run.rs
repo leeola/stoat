@@ -320,7 +320,19 @@ pub(crate) fn format_runtime(elapsed: Duration) -> String {
             let tenths = elapsed.as_millis() / 100;
             format!("{}.{}s", tenths / 10, tenths % 10)
         },
-        60..3600 => format!("{}:{:02}", secs / 60, secs % 60),
+        _ => format_elapsed(secs),
+    }
+}
+
+/// The time a running Cmd has run, `secs` whole seconds, as its status reads
+/// it.
+///
+/// It reads `m:ss` from zero (`0:00`, `2:31`) and `h:mm:ss` from an hour
+/// (`1:02:05`). A running Cmd's status counts whole seconds, so it has no
+/// millisecond form.
+pub(crate) fn format_elapsed(secs: u64) -> String {
+    match secs {
+        0..3600 => format!("{}:{:02}", secs / 60, secs % 60),
         _ => format!("{}:{:02}:{:02}", secs / 3600, secs / 60 % 60, secs % 60),
     }
 }
@@ -343,6 +355,14 @@ mod tests {
                 "0ms", "18ms", "999ms", "1.0s", "1.2s", "59.9s", "1:00", "2:31", "1:00:00",
                 "1:02:05"
             ],
+        );
+    }
+
+    #[test]
+    fn elapsed_reads_minutes_and_seconds() {
+        assert_eq!(
+            [0, 21, 151, 3_725].map(format_elapsed),
+            ["0:00", "0:21", "2:31", "1:02:05"],
         );
     }
 

@@ -209,9 +209,9 @@ fn start_cmd(stoat: &mut Stoat, line: &str, width: u16) -> CmdId {
 /// Start the next run of the Cmd `id` of the active workspace, a `bash -c` of
 /// its line in its cwd.
 ///
-/// The run counts one more, starts now, and clears the end of the run before
-/// it. A spawn that fails ends the run at once with the error line
-/// `spawn failed: <error>`.
+/// The run counts one more, starts now, and clears the end and the elapsed
+/// seconds of the run before it. A spawn that fails ends the run at once with
+/// the error line `spawn failed: <error>`.
 fn start_process(stoat: &mut Stoat, id: CmdId) {
     let now = stoat.executor.now();
     let executor = stoat.executor.clone();
@@ -228,6 +228,7 @@ fn start_process(stoat: &mut Stoat, id: CmdId) {
     cmd.run_count += 1;
     cmd.started = Some(now);
     cmd.ended = None;
+    cmd.elapsed_secs = 0;
     cmd.finished = false;
     cmd.exit_status = None;
     cmd.error = None;
@@ -277,6 +278,7 @@ mod tests {
         run::{CmdId, PtyNotification},
         test_harness::{CmdHandle, TestHarness},
     };
+    use futures::FutureExt;
     use std::{path::PathBuf, time::Duration};
 
     /// The program, the arguments, the cwd, and the last variable of a spawn of
@@ -581,6 +583,91 @@ mod tests {
         assert_eq!(
             [first, h.cmd_status(failed.cmd)],
             ["\u{2713} 18ms", "\u{2717} exit 5 0ms"],
+        );
+    }
+
+    #[test]
+    fn a_running_cmd_ticks_once_a_second() {
+        let mut h = Stoat::test();
+        h.open_run();
+        let handle = h.submit_run("sleep 9");
+        let mut reads = vec![h.cmd_status(handle.cmd)];
+        for _ in 0..3 {
+            h.advance_clock(Duration::from_secs(1));
+            h.snapshot();
+            reads.push(h.cmd_status(handle.cmd));
+        }
+
+        assert_eq!(
+            reads,
+            [
+                "\u{25cf} 0:00",
+                "\u{25cf} 0:01",
+                "\u{25cf} 0:02",
+                "\u{25cf} 0:03"
+            ],
+        );
+    }
+
+    /// With no output and no input, the tick wakes the run loop at each second
+    /// of a running Cmd, so each second's count reaches the screen.
+    #[test]
+    fn a_running_cmd_wakes_the_run_loop_each_second() {
+        let mut h = Stoat::test();
+        h.open_run();
+        h.submit_run("sleep 9");
+        let notify = h.stoat.redraw_notify.clone();
+
+        let wakes: Vec<bool> = (0..3)
+            .map(|_| {
+                let _ = notify.notified().now_or_never();
+                h.advance_clock(Duration::from_secs(1));
+                let woke = notify.notified().now_or_never().is_some();
+                h.snapshot();
+                woke
+            })
+            .collect();
+        assert_eq!(wakes, [true; 3]);
+    }
+
+    /// The tick is armed while a Run pane on show holds a running Cmd, and
+    /// dropped before the first Cmd and after the last one ends.
+    #[test]
+    fn no_tick_is_armed_while_no_cmd_runs() {
+        let mut h = Stoat::test();
+        h.open_run();
+        h.snapshot();
+        let idle = h.stoat.cmd_tick.is_some();
+
+        let handle = h.submit_run("sleep 9");
+        h.snapshot();
+        let running = h.stoat.cmd_tick.is_some();
+
+        h.inject_cmd_done(handle.cmd, 0);
+        h.snapshot();
+        assert_eq!(
+            [idle, running, h.stoat.cmd_tick.is_some()],
+            [false, true, false]
+        );
+    }
+
+    /// A running Cmd in a parked tab arms no tick, and the first frame after
+    /// its tab returns reads the seconds that passed while it was parked.
+    #[test]
+    fn a_cmd_in_a_parked_tab_arms_no_tick() {
+        let mut h = Stoat::test();
+        h.open_run();
+        let handle = h.submit_run("sleep 9");
+        super::super::dispatch(&mut h.stoat, &stoat_action::NewTab);
+        h.snapshot();
+        let parked = h.stoat.cmd_tick.is_some();
+
+        h.advance_clock(Duration::from_secs(5));
+        super::super::dispatch(&mut h.stoat, &stoat_action::PrevTab);
+        h.snapshot();
+        assert_eq!(
+            (parked, h.cmd_status(handle.cmd)),
+            (false, "\u{25cf} 0:05".to_owned())
         );
     }
 }

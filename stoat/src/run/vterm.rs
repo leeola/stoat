@@ -698,6 +698,12 @@ pub struct Cmd {
     /// How many runs started, so a notification of an earlier run reads
     /// apart from the current one.
     pub(crate) run_count: u32,
+    /// The whole seconds the running process has run, as the last tick wrote
+    /// them.
+    ///
+    /// The header paints this count rather than the clock, so a frame moves
+    /// only when a tick writes a new one.
+    pub(crate) elapsed_secs: u64,
 }
 
 impl Cmd {
@@ -714,6 +720,7 @@ impl Cmd {
             started: None,
             ended: None,
             run_count: 0,
+            elapsed_secs: 0,
         }
     }
 
