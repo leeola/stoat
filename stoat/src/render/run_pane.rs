@@ -1,6 +1,7 @@
 use crate::{
     render::{
         chrome::{ISLAND_BOTTOM, ISLAND_SIDE, ISLAND_TOP},
+        cmd_line::{self, CmdLine, CmdStatus},
         paint::style_rgb,
         picker::{Footer, PlateHeader},
         text::write_str,
@@ -18,6 +19,16 @@ use stoat_widgets::bar::Bar;
 
 /// The run modal's name, which leads its header.
 const RUN_LABEL: &str = "Run";
+
+/// One part of the status that ends a Run Block's header, such as its mark or
+/// its runtime.
+pub(crate) struct StatusPart {
+    pub(crate) text: String,
+    pub(crate) style: Style,
+    /// Whether the part draws as a tag, its text in a box, rather than as
+    /// words.
+    pub(crate) chip: bool,
+}
 
 /// Paint a run pane's output blocks and its prompt row into `area`.
 ///
@@ -53,27 +64,29 @@ pub(crate) fn render_run_pane(
     // its whole scrollback, so materializing the rows would cost the history
     // on every paint to draw a pane's worth of it.
     let mut base = 0;
-    let mut prev_exit = None;
     for block in run_state.blocks.iter().filter_map(|id| cmds.get(*id)) {
         let grid_rows = block.grid.rendered_line_count();
         let span = block.rendered_line_span();
 
         for offset in window_offsets(base, span, &window) {
             let y = area.y + (base + offset - start) as u16;
-            let Some(line) = block_line(block, grid_rows, offset, prev_exit) else {
+            let Some(line) = block_line(block, grid_rows, offset) else {
                 continue;
             };
             match &line {
-                OutputLine::Prompt {
-                    cwd,
-                    prev_exit,
-                    command,
-                } => {
-                    let abbrev = crate::run::abbreviate_path(cwd, home);
-                    let pw = write_prompt(buf, area.x, y, &abbrev, *prev_exit, theme);
-                    let max_w = (area.width as usize).saturating_sub(pw as usize);
-                    let display: String = command.chars().take(max_w).collect();
-                    write_str(buf, area.x + pw, y, &display, Style::default());
+                OutputLine::Prompt { cwd, command } => {
+                    let cwd = crate::run::abbreviate_path(cwd, home);
+                    let token = command.chars().take_while(|ch| !ch.is_whitespace()).count();
+                    let input = cmd_line::token_spans(command, token, theme);
+                    let parts = status_parts(block, theme);
+                    let header = CmdLine {
+                        cwd: &cwd,
+                        input: &input,
+                        caret: None,
+                        status: CmdStatus::Parts(&parts),
+                    };
+                    let row = Rect::new(area.x, y, area.width, 1);
+                    cmd_line::cmd_line_row(buf, row, &header, theme, scene);
                 },
                 OutputLine::GridRow(grid, row_idx, selection) => {
                     paint_grid_row(buf, area, y, grid, *row_idx, *selection);
@@ -93,18 +106,10 @@ pub(crate) fn render_run_pane(
         }
 
         base += span;
-        prev_exit = block.exit_status;
     }
 
-    let last_exit = run_state
-        .blocks
-        .iter()
-        .rev()
-        .filter_map(|id| cmds.get(*id))
-        .find(|block| block.finished)
-        .and_then(|block| block.exit_status);
     let abbrev = crate::run::abbreviate_path(root, home);
-    let prompt_w = write_prompt(buf, area.x, input_row, &abbrev, last_exit, theme);
+    let prompt_w = write_prompt(buf, area.x, input_row, &abbrev, theme);
 
     let input_area = Rect::new(
         area.x + prompt_w,
@@ -139,6 +144,50 @@ pub(crate) fn render_run_pane(
         }
         .render(Rect::new(area.x, input_row, area.width, 1), buf, scene);
     }
+}
+
+/// The status that ends `cmd`'s header, as the parts it reads in order.
+///
+/// A finished Cmd reads its mark, U+2713 in `ui.badge.complete` for an exit of
+/// 0, and otherwise U+2717 in `ui.error`, with `exit N` after it when the
+/// process gave a code. Its runtime follows in `ui.text.muted`, with the run
+/// count after it from the second run on. A running Cmd reads nothing, and a
+/// Cmd without both a start and an end reads its mark alone.
+pub(crate) fn status_parts(cmd: &Cmd, theme: &crate::theme::Theme) -> Vec<StatusPart> {
+    if !cmd.finished {
+        return Vec::new();
+    }
+
+    let (mark, mark_scope) = match cmd.exit_status {
+        Some(0) => (
+            "\u{2713}".to_owned(),
+            crate::theme::scope::UI_BADGE_COMPLETE,
+        ),
+        Some(code) => (
+            format!("\u{2717} exit {code}"),
+            crate::theme::scope::UI_ERROR,
+        ),
+        None => ("\u{2717}".to_owned(), crate::theme::scope::UI_ERROR),
+    };
+    let mut parts = vec![StatusPart {
+        text: mark,
+        style: theme.get(mark_scope),
+        chip: false,
+    }];
+
+    if let Some((started, ended)) = cmd.started.zip(cmd.ended) {
+        let runtime = crate::run::format_runtime(ended.saturating_duration_since(started));
+        let text = match cmd.run_count {
+            0 | 1 => runtime,
+            count => format!("{runtime} \u{b7} run {count}"),
+        };
+        parts.push(StatusPart {
+            text,
+            style: theme.get(crate::theme::scope::UI_TEXT_MUTED),
+            chip: false,
+        });
+    }
+    parts
 }
 
 /// Paint row `row_idx` of `grid` at `y`, from `area.x` across as much of the
@@ -209,16 +258,10 @@ fn window_offsets(base: usize, span: usize, window: &Range<usize>) -> Range<usiz
 /// one, so this and [`crate::run::Cmd::rendered_line_span`] describe the
 /// same rows and have to agree. `None` for an offset past them, which the
 /// caller's window bounds already exclude.
-fn block_line(
-    block: &Cmd,
-    grid_rows: usize,
-    offset: usize,
-    prev_exit: Option<i32>,
-) -> Option<OutputLine<'_>> {
+fn block_line(block: &Cmd, grid_rows: usize, offset: usize) -> Option<OutputLine<'_>> {
     match offset.checked_sub(1) {
         None => Some(OutputLine::Prompt {
             cwd: &block.cwd,
-            prev_exit,
             command: block.command.as_str(),
         }),
         Some(row) if row < grid_rows => Some(OutputLine::GridRow(
@@ -231,29 +274,17 @@ fn block_line(
 }
 
 enum OutputLine<'a> {
-    Prompt {
-        cwd: &'a Path,
-        prev_exit: Option<i32>,
-        command: &'a str,
-    },
+    Prompt { cwd: &'a Path, command: &'a str },
     GridRow(&'a VtermGrid, usize, Option<&'a GridSelection>),
     Error(&'a str),
 }
 
-/// Write the run prompt prefix (abbreviated cwd, optional exit flag, and the
-/// U+276F prompt glyph) at `(x, y)` and return its column width.
+/// Write the run prompt prefix (abbreviated cwd and the U+276F prompt glyph)
+/// at `(x, y)` and return its column width.
 ///
-/// The cwd is styled `UI_KEY_LABEL`. The `[N]` exit flag appears only when
-/// `exit_flag` is a nonzero code, styled `UI_ERROR`. The glyph and whatever
-/// the caller writes after it are plain.
-fn write_prompt(
-    buf: &mut Buffer,
-    x: u16,
-    y: u16,
-    cwd: &str,
-    exit_flag: Option<i32>,
-    theme: &crate::theme::Theme,
-) -> u16 {
+/// The cwd is styled `UI_KEY_LABEL`. The glyph and whatever the caller writes
+/// after it are plain.
+fn write_prompt(buf: &mut Buffer, x: u16, y: u16, cwd: &str, theme: &crate::theme::Theme) -> u16 {
     let plain = Style::default();
     let mut col = x;
 
@@ -267,11 +298,6 @@ fn write_prompt(
     col += cwd.chars().count() as u16;
     write_str(buf, col, y, " ", plain);
     col += 1;
-    if let Some(code) = exit_flag.filter(|&c| c != 0) {
-        let flag = format!("[{code}]");
-        write_str(buf, col, y, &flag, theme.get(crate::theme::scope::UI_ERROR));
-        col += flag.chars().count() as u16;
-    }
     // U+276F (heavy right-pointing angle quotation mark) as the prompt glyph.
     write_str(buf, col, y, "\u{276F} ", plain);
     col += 2;
@@ -395,15 +421,21 @@ pub(crate) fn render_modal_run(
 #[cfg(test)]
 mod tests {
     use super::{
-        block_line, paint_grid_row, render_modal_run, window_offsets, Buffer, Cmd, GridSelection,
-        Modifier, OutputLine, Rect, RunState, ISLAND_BOTTOM, ISLAND_SIDE, ISLAND_TOP,
+        block_line, paint_grid_row, render_modal_run, status_parts, window_offsets, Buffer, Cmd,
+        GridSelection, Modifier, OutputLine, Rect, RunState, Style, ISLAND_BOTTOM, ISLAND_SIDE,
+        ISLAND_TOP,
     };
     use crate::{
         render::paint::style_rgb,
         test_harness::TestHarness,
         theme::{scope, Theme},
     };
-    use std::path::PathBuf;
+    use ratatui::style::Color;
+    use std::{
+        ops::Range,
+        path::PathBuf,
+        time::{Duration, Instant},
+    };
     use stoat_widgets::ApcScene;
     use stoatty_protocol::command::{self, Command, Edge};
 
@@ -471,7 +503,7 @@ mod tests {
         let span = block.rendered_line_span();
 
         let lines: Vec<String> = (0..span)
-            .map(|offset| tag(block_line(&block, grid_rows, offset, None)))
+            .map(|offset| tag(block_line(&block, grid_rows, offset)))
             .collect();
 
         assert_eq!(
@@ -488,7 +520,7 @@ mod tests {
         let span = block.rendered_line_span();
 
         let lines: Vec<String> = (0..span)
-            .map(|offset| tag(block_line(&block, grid_rows, offset, None)))
+            .map(|offset| tag(block_line(&block, grid_rows, offset)))
             .collect();
 
         assert_eq!(
@@ -641,5 +673,179 @@ mod tests {
                 [" ", "a"],
             ),
         );
+    }
+
+    /// A theme with the three colors of a Run Block's status.
+    fn status_theme() -> Theme {
+        let (config, _) = stoat_config::parse(
+            r##"theme t {
+                ui.badge.complete.fg = "#8fd18a";
+                ui.error.fg = "#f2777f";
+                ui.text.muted.fg = "#838a98";
+            }"##,
+        );
+        Theme::from_config(&config.expect("theme parses"), "t").expect("theme loads")
+    }
+
+    /// A Cmd that finished with `exit_status` after running for `ran`, on its
+    /// `run_count`th run.
+    fn finished(exit_status: Option<i32>, ran: Duration, run_count: u32) -> Cmd {
+        let mut cmd = block_with("", None);
+        let started = Instant::now();
+        cmd.started = Some(started);
+        cmd.ended = Some(started + ran);
+        cmd.finished = true;
+        cmd.exit_status = exit_status;
+        cmd.run_count = run_count;
+        cmd
+    }
+
+    /// The text and the foreground of each part of `cmd`'s status.
+    fn status(cmd: &Cmd, theme: &Theme) -> Vec<(String, Option<Color>)> {
+        status_parts(cmd, theme)
+            .into_iter()
+            .map(|part| (part.text, part.style.fg))
+            .collect()
+    }
+
+    /// The area of the focused pane of `h`'s active workspace.
+    fn pane_area(h: &TestHarness) -> Rect {
+        let ws = h.stoat.active_workspace();
+        ws.panes.pane(ws.panes.focus()).area
+    }
+
+    /// A Cmd that ran 18 ms to an exit of 0 reads a mark and a runtime, and the
+    /// pane draws both as runs on the header's row, the runtime ending at the
+    /// pane's right edge.
+    #[test]
+    fn a_finished_header_ends_in_its_mark_and_runtime() {
+        let theme = status_theme();
+        let parts = status(&finished(Some(0), Duration::from_millis(18), 1), &theme);
+
+        let mut h = TestHarness::with_size(60, 12);
+        h.open_run();
+        let handle = h.submit_run("true");
+        h.advance_clock(Duration::from_millis(18));
+        h.inject_cmd_done(handle.cmd, 0);
+        h.render_composited();
+        let area = pane_area(&h);
+        let runs: Vec<_> = command::decode_stream(&h.stoat.apc_scene.all_bytes())
+            .into_iter()
+            .filter_map(|cmd| match cmd {
+                Command::TextRun(run) if ["\u{2713}", "18ms"].contains(&run.text.as_str()) => {
+                    let end = run.col + 16 * run.text.chars().count() as i16;
+                    Some((run.text, run.row, end))
+                },
+                _ => None,
+            })
+            .collect();
+
+        let (row, right) = ((area.y * 16) as i16, (area.right() * 16) as i16);
+        assert_eq!(
+            (parts, runs),
+            (
+                vec![
+                    (
+                        "\u{2713}".to_owned(),
+                        theme.get(scope::UI_BADGE_COMPLETE).fg
+                    ),
+                    ("18ms".to_owned(), theme.get(scope::UI_TEXT_MUTED).fg),
+                ],
+                vec![
+                    ("\u{2713}".to_owned(), row, right - 64 - 14),
+                    ("18ms".to_owned(), row, right),
+                ],
+            ),
+        );
+    }
+
+    #[test]
+    fn a_failed_header_reads_its_exit_code() {
+        let theme = status_theme();
+        let error = theme.get(scope::UI_ERROR).fg;
+        let marks = [Some(5), None]
+            .map(|exit| status(&finished(exit, Duration::ZERO, 1), &theme).remove(0));
+
+        assert_eq!(
+            marks,
+            [
+                ("\u{2717} exit 5".to_owned(), error),
+                ("\u{2717}".to_owned(), error)
+            ],
+        );
+    }
+
+    #[test]
+    fn a_later_run_names_its_count() {
+        let cmd = finished(Some(0), Duration::from_secs(151), 3);
+        let texts: Vec<String> = status(&cmd, &status_theme())
+            .into_iter()
+            .map(|(text, _)| text)
+            .collect();
+
+        assert_eq!(texts, ["\u{2713}", "2:31 \u{b7} run 3"]);
+    }
+
+    #[test]
+    fn a_running_header_carries_no_status() {
+        let mut cmd = finished(None, Duration::from_secs(1), 1);
+        cmd.finished = false;
+        cmd.ended = None;
+
+        assert_eq!(status(&cmd, &status_theme()), Vec::new());
+    }
+
+    /// The header of `echo ok` draws `echo` as the command token and ` ok` as
+    /// plain text, after the cwd `/w` and the glyph.
+    #[test]
+    fn a_header_colors_its_first_word() {
+        let mut h = TestHarness::with_size(60, 12);
+        h.stoat.active_workspace_mut().git_root = PathBuf::from("/w");
+        h.open_run();
+        h.submit_run("echo ok");
+        let buf = h.render_composited();
+
+        let area = pane_area(&h);
+        let theme = &h.stoat.theme;
+        let looks = |cols: Range<u16>| {
+            cols.map(|col| {
+                let cell = &buf[(area.x + col, area.y)];
+                (cell.fg, cell.modifier)
+            })
+            .collect::<Vec<_>>()
+        };
+        let look = |style: Style, cells: usize| {
+            vec![(style.fg.unwrap_or(Color::Reset), style.add_modifier); cells]
+        };
+        assert_eq!(
+            (looks(5..9), looks(9..12)),
+            (
+                look(theme.get(scope::UI_CMD_COMMAND), 4),
+                look(theme.get(scope::UI_TEXT), 3)
+            ),
+        );
+    }
+
+    /// A failed block names its exit in its status alone, so neither its own
+    /// header, the header after it, nor the prompt row holds a `[N]` flag.
+    #[test]
+    fn no_row_carries_an_exit_flag() {
+        let mut h = TestHarness::with_size(60, 12);
+        h.open_run();
+        let failed = h.submit_run("false");
+        h.inject_cmd_done(failed.cmd, 5);
+        h.submit_run("retry");
+        let buf = h.render_composited();
+
+        let area = pane_area(&h);
+        let flagged: Vec<String> = (area.y..area.bottom())
+            .map(|y| {
+                (area.x..area.right())
+                    .map(|x| buf[(x, y)].symbol())
+                    .collect()
+            })
+            .filter(|row: &String| row.contains('['))
+            .collect();
+        assert_eq!(flagged, Vec::<String>::new());
     }
 }

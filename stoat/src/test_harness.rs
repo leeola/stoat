@@ -846,6 +846,20 @@ impl TestHarness {
         self.capture("inject_done");
     }
 
+    /// The status of the Cmd `cmd` of the active workspace as its Run Block's
+    /// header reads it, the texts of its parts one space apart.
+    pub(crate) fn cmd_status(&self, cmd: crate::run::CmdId) -> String {
+        let parts = crate::render::run_pane::status_parts(
+            &self.stoat.active_workspace().cmds[cmd],
+            &self.stoat.theme,
+        );
+        parts
+            .iter()
+            .map(|part| part.text.as_str())
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+
     /// The newest Cmd of the run `run_id`, or the default id for a run with
     /// none.
     fn newest_cmd(&self, run_id: crate::run::RunId) -> crate::run::CmdId {

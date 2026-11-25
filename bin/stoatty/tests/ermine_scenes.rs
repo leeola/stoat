@@ -2280,6 +2280,58 @@ fn a_run_pane_line_runs_in_its_own_bash() {
     }
 }
 
+/// A Run Block's header ends in its status at the pane's right end, and the
+/// prompt carries no exit flag.
+///
+/// `echo ok` and `false` run in the lone Run pane, so the headers take rows 2
+/// and 4. The right end of the first holds the green success mark and the
+/// second the red failure mark, each beside its runtime in gray ink. The
+/// prompt row, the pane's last, holds no red pixel, because the status carries
+/// the exit.
+///
+/// The marks draw at the caption size, where a pixel that a stroke covers in
+/// part blends with the pane, so each check reads a pixel's hue rather than
+/// its exact color.
+#[test]
+fn the_run_block_header_ends_in_its_status() {
+    let mut home = support::scratch_home();
+    let shot = settled_frame(
+        home.path(),
+        "basic-diff",
+        "unstaged.txt",
+        "<Space>t<Settle>echo ok<Enter><Settle:500>false<Enter><Settle:500>",
+    );
+
+    fn gap(a: u8, b: u8) -> i32 {
+        i32::from(a) - i32::from(b)
+    }
+    let green = |[r, g, b]: [u8; 3]| gap(g, r) > 30 && gap(g, b) > 30;
+    let red = |[r, g, b]: [u8; 3]| gap(r, g) > 60 && gap(r, b) > 60;
+    let gray = |[r, g, b]: [u8; 3]| {
+        let (low, high) = (r.min(g).min(b), r.max(g).max(b));
+        high > 70 && high - low < 24
+    };
+    let [ok, failed] = [2, 4].map(|row| cell_rect(129, row, 30, 1));
+    let marks = [
+        pixels_where(&shot, ok, green),
+        pixels_where(&shot, failed, red),
+    ];
+    let runtimes = [
+        pixels_where(&shot, ok, gray),
+        pixels_where(&shot, failed, gray),
+    ];
+    let flag = pixels_where(&shot, cell_rect(1, 47, 40, 1), red);
+    if marks.contains(&0) || runtimes.contains(&0) || flag > 0 {
+        let frame = keep_frame(&shot, &mut home, "run_block_status");
+        panic!(
+            "the headers' right ends read {marks:?} mark pixels and {runtimes:?} gray pixels, \
+             and the prompt row {flag} red pixels; want marks and runtimes on both headers \
+             and no flag; the frame is {}",
+            frame.display(),
+        );
+    }
+}
+
 /// The which-key box docks on the status bar as a card on the raised surface.
 ///
 /// The card's cells end above the two rows of the status band, so its footer

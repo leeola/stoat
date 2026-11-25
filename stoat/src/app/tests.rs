@@ -11211,8 +11211,6 @@ fn snapshot_run_pane_prompt_blocks() {
     h.inject_run_output(run_id, b"boom\n");
     h.inject_run_done(run_id, 5);
 
-    // The unfinished follow-up leaves both its prompt and the input row
-    // showing the previous nonzero exit as a red [5].
     h.submit_run("retry");
 
     h.assert_snapshot("run_pane_prompt_blocks");

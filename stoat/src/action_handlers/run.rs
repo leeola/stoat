@@ -566,4 +566,21 @@ mod tests {
             (vec![bash_in("ls", "/work")], Some(2)),
         );
     }
+
+    #[test]
+    fn a_finished_block_reads_its_mark_and_runtime() {
+        let mut h = Stoat::test();
+        h.open_run();
+        let ok = h.submit_run("true");
+        h.advance_clock(Duration::from_millis(18));
+        h.inject_cmd_done(ok.cmd, 0);
+        let first = h.cmd_status(ok.cmd);
+
+        let failed = h.submit_run("false");
+        h.inject_cmd_done(failed.cmd, 5);
+        assert_eq!(
+            [first, h.cmd_status(failed.cmd)],
+            ["\u{2713} 18ms", "\u{2717} exit 5 0ms"],
+        );
+    }
 }

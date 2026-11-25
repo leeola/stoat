@@ -12,7 +12,10 @@ pub use pty::{
 };
 use ratatui::layout::Rect;
 use slotmap::{new_key_type, SlotMap};
-use std::path::{Component, Path};
+use std::{
+    path::{Component, Path},
+    time::Duration,
+};
 use stoat_scheduler::Executor;
 pub use vterm::{Cmd, GridSelection, StyledCell, VtermGrid};
 
@@ -301,12 +304,47 @@ fn abbreviate_component(name: &str) -> String {
     }
 }
 
+/// The runtime `elapsed` as a Run Block's status reads it, in the unit that
+/// its size takes.
+///
+/// Under a second it reads whole milliseconds (`18ms`), under a minute
+/// seconds with one decimal digit (`1.2s`), under an hour `m:ss` (`2:31`), and
+/// from an hour `h:mm:ss` (`1:02:05`). The decimal digit is cut rather than
+/// rounded, so a runtime never reads as the next unit's first value, as
+/// 59.99 s would read `60.0s`.
+pub(crate) fn format_runtime(elapsed: Duration) -> String {
+    let secs = elapsed.as_secs();
+    match secs {
+        0 => format!("{}ms", elapsed.as_millis()),
+        1..60 => {
+            let tenths = elapsed.as_millis() / 100;
+            format!("{}.{}s", tenths / 10, tenths % 10)
+        },
+        60..3600 => format!("{}:{:02}", secs / 60, secs % 60),
+        _ => format!("{}:{:02}:{:02}", secs / 3600, secs / 60 % 60, secs % 60),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::{buffer::BufferId, editor_state::EditorId};
     use ratatui::style::Color;
     use std::{collections::BTreeSet, path::PathBuf};
+
+    #[test]
+    fn runtime_reads_in_the_unit_its_size_takes() {
+        let millis = [
+            0, 18, 999, 1_000, 1_249, 59_999, 60_000, 151_000, 3_600_000, 3_725_000,
+        ];
+        assert_eq!(
+            millis.map(|ms| format_runtime(Duration::from_millis(ms))),
+            [
+                "0ms", "18ms", "999ms", "1.0s", "1.2s", "59.9s", "1:00", "2:31", "1:00:00",
+                "1:02:05"
+            ],
+        );
+    }
 
     #[test]
     fn abbreviate_path_shortens_ancestors_under_home() {

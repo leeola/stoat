@@ -1497,9 +1497,7 @@ fn render_palette_prelude(
         status,
     };
     cmd_line::cmd_line(buf, inner, &line, theme, scene);
-
-    let plate = crate::render::chrome::plate_colors(theme, scene).is_some();
-    cmd_line::cmd_line_rows(&line, inner.width, plate, theme)
+    cmd_line::cmd_line_rows(&line, inner.width, theme, scene)
 }
 
 /// The palette input `text` as Cmd Line spans, and the display caret for the
@@ -2600,7 +2598,7 @@ fn names_action_row(command: &PaletteCommand) -> bool {
 ///
 /// The box holds the label at the [`TypeRole::Small`] size with
 /// [`SOURCE_TAG_INSET`] on each side.
-fn source_tag_width(label: &str, theme: &crate::theme::Theme) -> u16 {
+pub(super) fn source_tag_width(label: &str, theme: &crate::theme::Theme) -> u16 {
     let small = theme.type_scale(TypeRole::Small);
     text_run::advance_sixteenths(label.chars().count(), small) + 2 * SOURCE_TAG_INSET
 }
@@ -2614,7 +2612,7 @@ fn source_tag_width(label: &str, theme: &crate::theme::Theme) -> u16 {
 /// runs but no panel. A dead scene, or a label color outside RGB, writes the
 /// label in cells in `style`, in the cells that end one cell inside the row's
 /// right edge.
-fn paint_source_tag(
+pub(super) fn paint_source_tag(
     buf: &mut Buffer,
     row: Rect,
     start: u16,

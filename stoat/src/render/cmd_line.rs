@@ -9,12 +9,13 @@
 
 use crate::{
     render::{
-        chrome,
+        chrome, command_palette,
         paint::style_rgb,
         picker::{
             blank_plate_row, plate_chip_boxes, plate_run, plate_trailing, window_start,
             PlateTrailing, MIN_QUERY_COLUMNS, PLATE_HEADER_GAP, PLATE_HEADER_NUDGE,
         },
+        run_pane::StatusPart,
         text::{pre_wrap_rows, write_str, write_str_clipped},
         TypeScale,
     },
@@ -27,7 +28,10 @@ use ratatui::{
     widgets::StatefulWidget,
 };
 use std::ops::Range;
-use stoat_widgets::{text_run, ApcScene};
+use stoat_widgets::{
+    text_run::{self, TextRun},
+    ApcScene,
+};
 use unicode_width::UnicodeWidthStr;
 
 /// The glyph between a Cmd Line's cwd and its input.
@@ -48,6 +52,13 @@ pub(crate) enum CmdStatus<'a> {
     ///
     /// It draws in `ui.preview.chip`, as a filter header draws its chip.
     Chip(&'a str),
+    /// Parts that end at the row's right end in order, such as a Run Block's
+    /// mark and runtime.
+    ///
+    /// Each part draws as words or as a Source Tag in its own style, so the
+    /// status holds a tag beside colored words, which neither `Text` nor
+    /// `Chip` holds together.
+    Parts(&'a [StatusPart]),
 }
 
 /// The parts of one Cmd Line, for [`cmd_line`].
@@ -87,6 +98,13 @@ struct Piece<'a> {
 /// Under the plate it is a box of whole cells with its run centered in it. In
 /// cells its text stands between two blank cells. A theme without the scope
 /// draws the chip's text in `ui.text.muted`.
+///
+/// A parts status ends at the first row's right in order. In a live scene the
+/// parts stand [`PLATE_HEADER_GAP`] apart and the input ends that gap before
+/// the first one. A part with `chip` set draws as a Source Tag, and any other
+/// part as a [`TypeRole::Caption`] run in its foreground over no background.
+/// In cells each part writes its text in its style, one blank cell apart. A
+/// row too narrow for the parts drops them together.
 ///
 /// The input wraps as [`pre_wrap_rows`] breaks it, and each of its rows spans
 /// from the input's column to the status's slot. The cwd, the glyph, and the
@@ -131,35 +149,94 @@ pub(crate) fn cmd_line(
 }
 
 /// The rows that the Cmd Line of `line` takes in a rect `width` cells wide,
-/// under the plate look where `plate` holds, from 1 to [`MAX_CMD_ROWS`].
+/// as [`cmd_line`] paints it into `scene`, from 1 to [`MAX_CMD_ROWS`].
 ///
 /// The painter breaks the input by this same measure, so a caller that lays a
 /// body out under the line reads the rows that the paint takes.
-pub(crate) fn cmd_line_rows(line: &CmdLine<'_>, width: u16, plate: bool, theme: &Theme) -> u16 {
-    let room = match plate {
-        true => plate_measure(line, width, theme).room,
-        false => cell_measure(line, width).room,
+pub(crate) fn cmd_line_rows(
+    line: &CmdLine<'_>,
+    width: u16,
+    theme: &Theme,
+    scene: &ApcScene,
+) -> u16 {
+    let room = match chrome::plate_colors(theme, scene) {
+        Some(_) => plate_measure(line, width, theme).room,
+        None => cell_measure(line, width, theme, scene.live()).room,
     };
     shown_rows(line, room).len() as u16
+}
+
+/// Paint `line` on the one row `row` of a pane, such as a Run Block's header.
+///
+/// The row reads as the first row of [`cmd_line`] under a theme with no plate
+/// colors. The cwd, the glyph, and the input stand one blank cell apart in
+/// cells, and the status ends at the row's right end. A pane's row stands on
+/// the pane's surface, and the row under it is the pane's output, so the row
+/// blanks no cell to a ground and rules no row.
+///
+/// The input shows the row that holds its caret, or its first row with no
+/// caret, so a line wider than the row is cut before the status. A parts
+/// status draws as [`cmd_line`] draws it, and a text or chip status draws in
+/// cells.
+pub(crate) fn cmd_line_row(
+    buf: &mut Buffer,
+    row: Rect,
+    line: &CmdLine<'_>,
+    theme: &Theme,
+    scene: &mut ApcScene,
+) {
+    if row.is_empty() {
+        return;
+    }
+    let row = Rect { height: 1, ..row };
+    let measure = cell_measure(line, row.width, theme, scene.live());
+    paint_cell_lead(buf, row, line, &measure, theme, scene);
+
+    let input_x = row.x + measure.input_col;
+    let input_end = input_x.saturating_add(u16::try_from(measure.room).unwrap_or(u16::MAX));
+    let chars = caret_row(line, measure.room);
+    write_input_row(buf, (input_x, row.y), input_end, line, chars, theme);
+}
+
+/// The input of `line` as Cmd Line spans, its first `token_chars` chars as
+/// the command token.
+///
+/// The token takes `ui.cmd.command`, or `ui.text` where the theme leaves that
+/// unset, and the rest takes `ui.text`. An empty side gives no span.
+pub(crate) fn token_spans(text: &str, token_chars: usize, theme: &Theme) -> Vec<(String, Style)> {
+    let split = text
+        .char_indices()
+        .nth(token_chars)
+        .map_or(text.len(), |(at, _)| at);
+    let (token, rest) = text.split_at(split);
+    let text_style = theme.get(scope::UI_TEXT);
+    let token_style = theme.try_get(scope::UI_CMD_COMMAND).unwrap_or(text_style);
+    [(token, token_style), (rest, text_style)]
+        .into_iter()
+        .filter(|(part, _)| !part.is_empty())
+        .map(|(part, style)| (part.to_owned(), style))
+        .collect()
 }
 
 /// Where the parts of a cell row stand, in cells from the row's left.
 struct CellMeasure {
     show_cwd: bool,
-    /// The status's first cell, when the row keeps the status.
-    status_col: Option<u16>,
+    /// Whether the row keeps the status, which ends at the row's right end.
+    show_status: bool,
     /// The input's first cell.
     input_col: u16,
     /// The chars of input that one row holds.
     room: usize,
 }
 
-/// Where the parts of a row `width` cells wide stand in the cell look.
+/// Where the parts of a row `width` cells wide stand in the cell look, in a
+/// scene that is `live` or not.
 ///
 /// The cwd, the glyph, and the input stand one blank cell apart. The status
-/// ends flush with the row's right end, one blank cell clear of the input.
-fn cell_measure(line: &CmdLine<'_>, width: u16) -> CellMeasure {
-    let status_width = status_cells(&line.status);
+/// ends flush with the row's right end, as far clear of the input as
+/// [`status_trail`] counts.
+fn cell_measure(line: &CmdLine<'_>, width: u16, theme: &Theme, live: bool) -> CellMeasure {
+    let trail = status_trail(&line.status, theme, live);
     let cwd_width = line.cwd.width() as u16;
     let glyph_width = PROMPT_GLYPH.width() as u16;
 
@@ -168,20 +245,23 @@ fn cell_measure(line: &CmdLine<'_>, width: u16) -> CellMeasure {
         false => glyph_width + 1,
     };
     let fits = |cwd: bool, status: bool| {
-        let trail = match status && status_width > 0 {
-            true => status_width + 1,
+        let trail = match status {
+            true => trail,
             false => 0,
         };
         u32::from(lead(cwd)) + u32::from(MIN_QUERY_COLUMNS) + u32::from(trail) <= u32::from(width)
     };
     let (show_cwd, show_status) = parts_kept(fits);
 
+    let show_status = show_status && trail > 0;
     let input_col = lead(show_cwd).min(width);
-    let status_col = (show_status && status_width > 0).then(|| width - status_width);
-    let input_end = status_col.map_or(width, |col| col.saturating_sub(1));
+    let input_end = match show_status {
+        true => width.saturating_sub(trail),
+        false => width,
+    };
     CellMeasure {
         show_cwd,
-        status_col,
+        show_status,
         input_col,
         room: usize::from(input_end.saturating_sub(input_col)),
     }
@@ -190,6 +270,8 @@ fn cell_measure(line: &CmdLine<'_>, width: u16) -> CellMeasure {
 /// Where the parts of a plate row stand, in sixteenths from the row's left.
 struct PlateMeasure {
     show_cwd: bool,
+    /// Whether the row keeps the status.
+    show_status: bool,
     glyph_x: u16,
     input_x: u16,
     /// The status's place, which [`plate_trailing`] gives as a count's.
@@ -217,18 +299,23 @@ fn plate_measure(line: &CmdLine<'_>, width: u16, theme: &Theme) -> PlateMeasure 
         CmdStatus::Chip(chip) => Some(chip),
         _ => None,
     };
+    let parts = match line.status {
+        CmdStatus::Parts(parts) if !parts.is_empty() => Some(parts),
+        _ => None,
+    };
     let boxed = theme
         .try_get(scope::UI_PREVIEW_CHIP)
         .and_then(|style| style_rgb(style.bg))
         .is_some();
     let end = width.saturating_mul(16);
-    let status_trail = match chip {
-        Some(chip) => {
+    let status_trail = match (chip, parts) {
+        (Some(chip), _) => {
             let alone = plate_trailing(None, &[(chip, true)], boxed, end, 0, caption);
             end.saturating_sub(alone.query_end)
         },
-        None if status.is_empty() => 0,
-        None => advance(&status, caption).saturating_add(PLATE_HEADER_GAP),
+        (None, Some(parts)) => parts_span(parts, theme).saturating_add(PLATE_HEADER_GAP),
+        (None, None) if status.is_empty() => 0,
+        (None, None) => advance(&status, caption).saturating_add(PLATE_HEADER_GAP),
     };
 
     let glyph_at = |cwd: bool| match cwd && !line.cwd.is_empty() {
@@ -249,8 +336,8 @@ fn plate_measure(line: &CmdLine<'_>, width: u16, theme: &Theme) -> PlateMeasure 
         u32::from(query_min(cwd)) + u32::from(trail) <= u32::from(end)
     };
     let (show_cwd, show_status) = parts_kept(fits);
-    let trailing = match chip.filter(|_| show_status) {
-        Some(chip) => plate_trailing(
+    let trailing = match (chip.filter(|_| show_status), parts) {
+        (Some(chip), _) => plate_trailing(
             None,
             &[(chip, true)],
             boxed,
@@ -258,7 +345,15 @@ fn plate_measure(line: &CmdLine<'_>, width: u16, theme: &Theme) -> PlateMeasure 
             query_min(show_cwd),
             caption,
         ),
-        None => {
+        (None, Some(_)) => PlateTrailing {
+            count: None,
+            chips: Vec::new(),
+            query_end: match show_status {
+                true => end.saturating_sub(status_trail),
+                false => end,
+            },
+        },
+        (None, None) => {
             let shown = Some(status.as_str()).filter(|status| show_status && !status.is_empty());
             plate_trailing(shown, &[], false, end, query_min(show_cwd), caption)
         },
@@ -269,6 +364,7 @@ fn plate_measure(line: &CmdLine<'_>, width: u16, theme: &Theme) -> PlateMeasure 
         usize::from(trailing.query_end.saturating_sub(input_x)) * 16 / usize::from(ui.max(1));
     PlateMeasure {
         show_cwd,
+        show_status,
         glyph_x: glyph_at(show_cwd),
         input_x,
         trailing,
@@ -285,47 +381,135 @@ fn paint_cell_rows(
     theme: &Theme,
     scene: &mut ApcScene,
 ) -> u16 {
-    let (y, end) = (inner.y, inner.right());
-    let measure = cell_measure(line, inner.width);
-
-    let mut x = inner.x;
-    if measure.show_cwd && !line.cwd.is_empty() {
-        write_str_clipped(buf, x, y, line.cwd, cwd_style(theme), end);
-        x = x.saturating_add(line.cwd.width() as u16 + 1);
-    }
-    write_str_clipped(buf, x, y, PROMPT_GLYPH, prompt_style(theme), end);
-    if let Some(col) = measure.status_col {
-        let mut at = inner.x + col;
-        if let CmdStatus::Chip(chip) = line.status {
-            let text = format!(" {chip} ");
-            let cells = Rect::new(at, y, text.width() as u16, 1);
-            let style = match theme.try_get(scope::UI_PREVIEW_CHIP) {
-                Some(style) => chrome::chip_cells(cells, style, scene),
-                None => theme.get(scope::UI_TEXT_MUTED),
-            };
-            write_str(buf, at, y, &text, style);
-        }
-        for (text, style) in status_spans(&line.status) {
-            write_str(buf, at, y, text, *style);
-            at += text.width() as u16;
-        }
-    }
+    let measure = cell_measure(line, inner.width, theme, scene.live());
+    paint_cell_lead(
+        buf,
+        Rect { height: 1, ..inner },
+        line,
+        &measure,
+        theme,
+        scene,
+    );
 
     let input_x = inner.x + measure.input_col;
     let input_end = input_x.saturating_add(u16::try_from(measure.room).unwrap_or(u16::MAX));
     let rows = shown_rows(line, measure.room);
     for (row_y, row) in (inner.y..inner.bottom()).zip(&rows) {
-        let mut at = input_x;
-        for piece in row_pieces(line, row.clone()) {
-            let style = match piece.caret {
-                true => theme.cursor_style(),
-                false => piece.style,
-            };
-            write_str_clipped(buf, at, row_y, piece.text, style, input_end);
-            at = at.saturating_add(piece.text.width() as u16);
-        }
+        write_input_row(buf, (input_x, row_y), input_end, line, row.clone(), theme);
     }
     (rows.len() as u16).min(inner.height)
+}
+
+/// Write the cwd, the glyph, and the status of `line` on the cell row `row`,
+/// where `measure` places them.
+fn paint_cell_lead(
+    buf: &mut Buffer,
+    row: Rect,
+    line: &CmdLine<'_>,
+    measure: &CellMeasure,
+    theme: &Theme,
+    scene: &mut ApcScene,
+) {
+    let (y, end) = (row.y, row.right());
+    let mut x = row.x;
+    if measure.show_cwd && !line.cwd.is_empty() {
+        write_str_clipped(buf, x, y, line.cwd, cwd_style(theme), end);
+        x = x.saturating_add(line.cwd.width() as u16 + 1);
+    }
+    write_str_clipped(buf, x, y, PROMPT_GLYPH, prompt_style(theme), end);
+    if !measure.show_status {
+        return;
+    }
+
+    if let CmdStatus::Parts(parts) = line.status {
+        paint_parts(buf, row, parts, theme, scene);
+        return;
+    }
+    let mut at = end.saturating_sub(status_cells(&line.status));
+    if let CmdStatus::Chip(chip) = line.status {
+        let text = format!(" {chip} ");
+        let cells = Rect::new(at, y, text.width() as u16, 1);
+        let style = match theme.try_get(scope::UI_PREVIEW_CHIP) {
+            Some(style) => chrome::chip_cells(cells, style, scene),
+            None => theme.get(scope::UI_TEXT_MUTED),
+        };
+        write_str(buf, at, y, &text, style);
+    }
+    for (text, style) in status_spans(&line.status) {
+        write_str(buf, at, y, text, *style);
+        at += text.width() as u16;
+    }
+}
+
+/// Write the chars `chars` of `line`'s input from `(x, y)`, cut at the cell
+/// `end`, with the caret's char in [`Theme::cursor_style`].
+fn write_input_row(
+    buf: &mut Buffer,
+    (x, y): (u16, u16),
+    end: u16,
+    line: &CmdLine<'_>,
+    chars: Range<usize>,
+    theme: &Theme,
+) {
+    let mut at = x;
+    for piece in row_pieces(line, chars) {
+        let style = match piece.caret {
+            true => theme.cursor_style(),
+            false => piece.style,
+        };
+        write_str_clipped(buf, at, y, piece.text, style, end);
+        at = at.saturating_add(piece.text.width() as u16);
+    }
+}
+
+/// Paint `parts` so they end at `row`'s right end, in order.
+///
+/// A live scene draws them [`PLATE_HEADER_GAP`] apart. A part with `chip` set
+/// draws as a Source Tag, and any other part as a [`TypeRole::Caption`] run in
+/// its foreground over no background, or as no run where that color has no
+/// RGB value. Otherwise each part writes its text in cells in its style, one
+/// blank cell apart.
+fn paint_parts(
+    buf: &mut Buffer,
+    row: Rect,
+    parts: &[StatusPart],
+    theme: &Theme,
+    scene: &mut ApcScene,
+) {
+    if !scene.live() {
+        let mut x = row.right().saturating_sub(parts_cells(parts));
+        for part in parts {
+            write_str_clipped(buf, x, row.y, &part.text, part.style, row.right());
+            x = x.saturating_add(part.text.width() as u16 + 1);
+        }
+        return;
+    }
+
+    let caption = theme.type_scale(TypeRole::Caption);
+    let mut col = row
+        .width
+        .saturating_mul(16)
+        .saturating_sub(parts_span(parts, theme));
+    for part in parts {
+        if part.chip {
+            command_palette::paint_source_tag(buf, row, col, &part.text, part.style, theme, scene);
+        } else if let Some(color) = style_rgb(part.style.fg) {
+            let run = TextRun {
+                col: col as i16,
+                row: 0,
+                scale: caption,
+                color,
+                bg: None,
+                text: &part.text,
+                bold: part.style.add_modifier.contains(Modifier::BOLD),
+                italic: false,
+                follow: 0,
+                anchor: None,
+            };
+            run.render(row, buf, scene);
+        }
+        col = col.saturating_add(part_width(part, theme).saturating_add(PLATE_HEADER_GAP));
+    }
 }
 
 /// Paint `line` into `inner`'s first rows as a plate's header, runs on the
@@ -437,6 +621,12 @@ fn paint_plate_rows(
         };
         run(inner.y, *col, chip, caption, colors, false);
     }
+    if let CmdStatus::Parts(parts) = line.status
+        && measure.show_status
+    {
+        let row = Rect::new(inner.x, inner.y, inner.width, 1);
+        paint_parts(buf, row, parts, theme, scene);
+    }
     scene.nudge([0, 0]);
 }
 
@@ -453,24 +643,69 @@ fn parts_kept(fits: impl Fn(bool, bool) -> bool) -> (bool, bool) {
     }
 }
 
-/// The spans of `status`, empty for a row with none and for a chip, which
-/// draws apart from the spans.
+/// The spans of `status`, empty for a row with none and for a chip or parts,
+/// which draw apart from the spans.
 fn status_spans<'a>(status: &CmdStatus<'a>) -> &'a [(String, Style)] {
     match status {
-        CmdStatus::None | CmdStatus::Chip(_) => &[],
+        CmdStatus::None | CmdStatus::Chip(_) | CmdStatus::Parts(_) => &[],
         CmdStatus::Text(spans) => spans,
     }
 }
 
 /// The cells that `status` takes in the cell look. A chip takes a blank cell
-/// on each side of its text, as a filter header's chip does.
+/// on each side of its text, as a filter header's chip does, and parts stand
+/// one blank cell apart.
 fn status_cells(status: &CmdStatus<'_>) -> u16 {
     match status {
         CmdStatus::Chip(chip) => chip.width() as u16 + 2,
+        CmdStatus::Parts(parts) => parts_cells(parts),
         _ => status_spans(status)
             .iter()
             .map(|(text, _)| text.width() as u16)
             .sum(),
+    }
+}
+
+/// The cells that `status` takes at a cell row's right end with the gap
+/// before it, in a scene that is `live` or not, or 0 for a row with none.
+///
+/// The gap is one blank cell, except before the parts of a live scene. Those
+/// draw as runs [`PLATE_HEADER_GAP`] clear of the input, so they take each
+/// cell that they and the gap reach into.
+fn status_trail(status: &CmdStatus<'_>, theme: &Theme, live: bool) -> u16 {
+    match status {
+        CmdStatus::Parts(parts) if live && !parts.is_empty() => parts_span(parts, theme)
+            .saturating_add(PLATE_HEADER_GAP)
+            .div_ceil(16),
+        _ => match status_cells(status) {
+            0 => 0,
+            cells => cells + 1,
+        },
+    }
+}
+
+/// The cells that `parts` take in cells, one blank cell apart.
+fn parts_cells(parts: &[StatusPart]) -> u16 {
+    let text: u16 = parts.iter().map(|part| part.text.width() as u16).sum();
+    text.saturating_add((parts.len() as u16).saturating_sub(1))
+}
+
+/// The sixteenths that `parts` span as runs, [`PLATE_HEADER_GAP`] apart.
+fn parts_span(parts: &[StatusPart], theme: &Theme) -> u16 {
+    let widths: u16 = parts.iter().map(|part| part_width(part, theme)).sum();
+    let gaps = (parts.len() as u16).saturating_sub(1);
+    widths.saturating_add(gaps.saturating_mul(PLATE_HEADER_GAP))
+}
+
+/// The sixteenths that `part` takes as a run, or as a Source Tag's box for a
+/// part with `chip` set.
+fn part_width(part: &StatusPart, theme: &Theme) -> u16 {
+    match part.chip {
+        true => command_palette::source_tag_width(&part.text, theme),
+        false => text_run::advance_sixteenths(
+            part.text.chars().count(),
+            theme.type_scale(TypeRole::Caption),
+        ),
     }
 }
 
@@ -497,6 +732,24 @@ fn shown_rows(line: &CmdLine<'_>, room: usize) -> Vec<Range<usize>> {
         .skip(first)
         .take(usize::from(MAX_CMD_ROWS))
         .collect()
+}
+
+/// The chars of `line`'s input on the row that holds its caret, or on its
+/// first row for a line with no caret, as [`pre_wrap_rows`] breaks the input
+/// into rows of `room` chars.
+fn caret_row(line: &CmdLine<'_>, room: usize) -> Range<usize> {
+    let cells: Vec<char> = line
+        .input
+        .iter()
+        .flat_map(|(text, _)| text.chars())
+        .collect();
+    let caret = line.caret.map(|caret| caret.min(cells.len()));
+    let rows = pre_wrap_rows(&cells, room, caret == Some(cells.len()));
+
+    let at = caret
+        .and_then(|caret| rows.iter().position(|row| row.contains(&caret)))
+        .unwrap_or(0);
+    rows.into_iter().nth(at).unwrap_or_default()
 }
 
 /// The pieces of `line`'s input in the cells of `row`, as [`spans_between`]
@@ -571,8 +824,11 @@ fn prompt_style(theme: &Theme) -> Style {
 
 #[cfg(test)]
 mod tests {
-    use super::{cmd_line, cmd_line_rows, CmdLine, CmdStatus, PROMPT_GLYPH};
+    use super::{
+        cmd_line, cmd_line_row, cmd_line_rows, token_spans, CmdLine, CmdStatus, PROMPT_GLYPH,
+    };
     use crate::{
+        render::run_pane::StatusPart,
         test_fixture,
         theme::{scope, Theme},
     };
@@ -665,7 +921,9 @@ mod tests {
         let parts = ("~/p/stoat", input, Some(caret), "14 of 890");
         let theme = plate_theme();
         let (_, scene) = painted(parts, Rect::new(2, 1, 60, 4), &theme, true);
-        let rows = with_line(parts, &theme, |line| cmd_line_rows(line, 60, true, &theme));
+        let rows = with_line(parts, &theme, |line| {
+            cmd_line_rows(line, 60, &theme, &scene)
+        });
         (commands(&scene), rows)
     }
 
@@ -1080,5 +1338,218 @@ mod tests {
             Command::TextRun(run) => Command::TextRun(TextRunCommand { bold: true, ..run }),
             command => command,
         }
+    }
+
+    /// A status part of `text` in the foreground `fg` over `bg`, drawn as a
+    /// tag where `chip` holds.
+    fn part(text: &str, fg: [u8; 3], bg: Option<[u8; 3]>, chip: bool) -> StatusPart {
+        let rgb = |[r, g, b]: [u8; 3]| Color::Rgb(r, g, b);
+        let style = Style::default().fg(rgb(fg));
+        StatusPart {
+            text: text.to_owned(),
+            style: bg.map_or(style, |bg| style.bg(rgb(bg))),
+            chip,
+        }
+    }
+
+    /// Paint the line of the cwd `~/p/stoat` and the input `ab` with no caret,
+    /// ended by `parts`, through [`cmd_line_row`] on the row (0, 3, 60, 1) of a
+    /// 64 by 6 buffer under `theme`, by a scene that reads nudges and is
+    /// `live` or not.
+    fn row_painted(parts: &[StatusPart], theme: &Theme, live: bool) -> (Buffer, ApcScene) {
+        let input = [("ab".to_owned(), theme.get(scope::UI_TEXT))];
+        let line = CmdLine {
+            cwd: "~/p/stoat",
+            input: &input,
+            caret: None,
+            status: CmdStatus::Parts(parts),
+        };
+        let mut buf = Buffer::empty(Rect::new(0, 0, 64, 6));
+        let mut scene = ApcScene::new();
+        scene.set_live(live);
+        scene.set_nudge_protocol(true);
+        cmd_line_row(&mut buf, Rect::new(0, 3, 60, 1), &line, theme, &mut scene);
+        (buf, scene)
+    }
+
+    /// A run of `text` at `col` and `row` sixteenths, in `color` over no
+    /// background.
+    fn bare_run(row: i16, col: i16, text: &str, color: [u8; 3]) -> Command {
+        match run_on(row, col, text, color, [0; 3]) {
+            Command::TextRun(run) => Command::TextRun(TextRunCommand { bg: None, ..run }),
+            command => command,
+        }
+    }
+
+    /// The parts end at the row's right edge 14 sixteenths apart, as runs over
+    /// no background, and the cwd, the glyph, and the input stand in cells from
+    /// the row's left.
+    #[test]
+    fn a_parts_status_ends_at_the_right_edge_with_its_gaps() {
+        let parts = [
+            part("\u{2713}", TEXT, None, false),
+            part("18ms", MUTED, None, false),
+        ];
+        let (buf, scene) = row_painted(&parts, &Theme::empty(), true);
+
+        assert_eq!(
+            (commands(&scene), row(&buf, 3).trim_end().to_owned()),
+            (
+                vec![
+                    bare_run(48, 866, "\u{2713}", TEXT),
+                    bare_run(48, 896, "18ms", MUTED)
+                ],
+                format!("~/p/stoat {PROMPT_GLYPH} ab"),
+            ),
+        );
+    }
+
+    /// A part with `chip` set draws through the Source Tag painter, its box a
+    /// rounded bar in the part's background under its label, and the part
+    /// after it keeps the gap.
+    #[test]
+    fn a_tag_part_draws_through_the_source_tag_painter() {
+        let parts = [
+            part("cargo test", TEXT, Some(GROUND), true),
+            part("\u{2713}", MUTED, None, false),
+        ];
+        let (_, scene) = row_painted(&parts, &Theme::empty(), true);
+
+        let drawn = commands(&scene);
+        let bars: Vec<_> = drawn
+            .iter()
+            .filter_map(|command| match command {
+                Command::Bar(bar) => {
+                    Some((bar.x, bar.y, bar.width, bar.height, bar.radius, bar.color))
+                },
+                _ => None,
+            })
+            .collect();
+        let runs: Vec<_> = drawn
+            .iter()
+            .filter_map(|command| match command {
+                Command::TextRun(run) => Some((run.col, run.text.as_str(), run.color)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            (bars, runs),
+            (
+                vec![(750, 49, 180, 14, 4, GROUND)],
+                vec![(760, "cargo test", TEXT), (944, "\u{2713}", MUTED)],
+            ),
+        );
+    }
+
+    /// A scene that is not live writes each part's text in cells in its style,
+    /// one blank cell apart, the last ending at the row's right edge.
+    #[test]
+    fn a_dead_scene_writes_the_parts_in_cells() {
+        let parts = [
+            part("cargo test", TEXT, Some(GROUND), true),
+            part("\u{2713}", MUTED, None, false),
+        ];
+        let (buf, scene) = row_painted(&parts, &Theme::empty(), false);
+
+        let cells: Vec<_> = (48..60)
+            .map(|x| {
+                let cell = &buf[(x, 3)];
+                (cell.symbol().to_owned(), cell.fg, cell.bg)
+            })
+            .collect();
+        let styled = |text: &str, style: Style| {
+            let colors = (
+                style.fg.unwrap_or(Color::Reset),
+                style.bg.unwrap_or(Color::Reset),
+            );
+            text.chars()
+                .map(move |ch| (ch.to_string(), colors.0, colors.1))
+                .collect::<Vec<_>>()
+        };
+        let mut want = styled("cargo test", parts[0].style);
+        want.extend(styled(" ", Style::default()));
+        want.extend(styled("\u{2713}", parts[1].style));
+        assert_eq!((cells, commands(&scene)), (want, Vec::new()));
+    }
+
+    /// A pane's row under the plate's theme stays in cells. It draws no nudge
+    /// and no bar, rules no row under it, and leaves each cell's background
+    /// unset.
+    #[test]
+    fn a_pane_row_carries_no_rule_and_no_plate_ground() {
+        let parts = [part("\u{2713}", MUTED, None, false)];
+        let (buf, scene) = row_painted(&parts, &plate_theme(), true);
+
+        let chrome: Vec<_> = commands(&scene)
+            .into_iter()
+            .filter(|command| matches!(command, Command::Nudge(_) | Command::Bar(_)))
+            .collect();
+        let grounds: Vec<_> = (0..64)
+            .map(|x| buf[(x, 3)].bg)
+            .filter(|bg| *bg != Color::Reset)
+            .collect();
+        assert_eq!(
+            (chrome, grounds, row(&buf, 4).trim().to_owned()),
+            (Vec::new(), Vec::new(), String::new()),
+        );
+    }
+
+    /// Under the plate a parts status ends at the row's right as runs over no
+    /// background, inside the header's nudge.
+    #[test]
+    fn a_plate_header_ends_in_its_parts() {
+        let theme = plate_theme();
+        let input = [("ab".to_owned(), theme.get(scope::UI_TEXT))];
+        let parts = [
+            part("\u{2713}", TEXT, None, false),
+            part("18ms", MUTED, None, false),
+        ];
+        let line = CmdLine {
+            cwd: "~/p/stoat",
+            input: &input,
+            caret: Some(2),
+            status: CmdStatus::Parts(&parts),
+        };
+        let (_, scene) = paint_line(&line, Rect::new(2, 1, 60, 4), &theme, true);
+
+        assert_eq!(
+            commands(&scene),
+            [
+                Command::Nudge([1, 7]),
+                run(32, "~/p/stoat", CWD, GROUND),
+                run(190, PROMPT_GLYPH, PROMPT, GROUND),
+                run(220, "ab", TEXT, GROUND),
+                run(252, " ", GROUND, TEXT),
+                bare_run(16, 898, "\u{2713}", TEXT),
+                bare_run(16, 928, "18ms", MUTED),
+                Command::Nudge([0, 0]),
+            ],
+        );
+    }
+
+    #[test]
+    fn token_spans_color_the_token_alone() {
+        let (config, _) = stoat_config::parse(
+            r##"theme t {
+                ui.text.fg = "#040404";
+                ui.cmd.command = { fg: "#0e0e0e", modifiers: [bold] };
+            }"##,
+        );
+        let theme = Theme::from_config(&config.expect("theme parses"), "t").expect("theme loads");
+        let empty = Theme::empty();
+        let spans = |token: Style, text: Style| {
+            vec![("cargo".to_owned(), token), (" test".to_owned(), text)]
+        };
+
+        assert_eq!(
+            [
+                token_spans("cargo test", 5, &theme),
+                token_spans("cargo test", 5, &empty)
+            ],
+            [
+                spans(theme.get(scope::UI_CMD_COMMAND), theme.get(scope::UI_TEXT)),
+                spans(empty.get(scope::UI_TEXT), empty.get(scope::UI_TEXT)),
+            ],
+        );
     }
 }
