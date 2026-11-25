@@ -631,6 +631,10 @@ pub(crate) struct FrameCtx<'a> {
     /// status row counts after its name, or `None` when no Run pane holds
     /// focus. See [`pane::focused_run_cmds`].
     pub(crate) run_cmds: Option<usize>,
+    /// The Stubs of Jobs in the stack of the Run pane that holds the focus,
+    /// which its status row counts after its Cmds, or 0 when no Run pane
+    /// holds focus. See [`pane::focused_run_stubs`].
+    pub(crate) run_stubs: usize,
     /// The commit of each line of every blamed buffer, which a blamed pane's
     /// status row names for the cursor line.
     pub(crate) blame: &'a BlameState,
@@ -1541,6 +1545,7 @@ pub(crate) fn frame(
     }
     let run_cwd = pane::focused_run_cwd(ws.focus, &ws.panes, &ws.git_root);
     let run_cmds = pane::focused_run_cmds(ws.focus, &ws.panes, &ws.runs);
+    let run_stubs = pane::focused_run_stubs(ws.focus, &ws.panes, &ws.runs, &ws.cmds);
     // The islands read where the gaps run, and the hairlines paint in them when
     // islands are off, so the frame lays them out once for both.
     let dividers = ws.panes.dividers();
@@ -1625,6 +1630,7 @@ pub(crate) fn frame(
         home: stoat.home.as_deref(),
         run_cwd,
         run_cmds,
+        run_stubs,
         blame: &ws.blame,
         now_epoch: crate::commit_picker::now_epoch(&stoat.executor),
         #[cfg(feature = "perf")]

@@ -438,6 +438,8 @@ fn emit_window_content(stoat: &mut Stoat, out: &mut Vec<u8>) -> Vec<Vec<u8>> {
     let tallies = ws.repo_tallies();
     let run_cwd = crate::render::pane::focused_run_cwd(focus_target, &ws.panes, &ws.git_root);
     let run_cmds = crate::render::pane::focused_run_cmds(focus_target, &ws.panes, &ws.runs);
+    let run_stubs =
+        crate::render::pane::focused_run_stubs(focus_target, &ws.panes, &ws.runs, &ws.cmds);
 
     let frame = crate::render::FrameCtx {
         workspace_name: &workspace_name,
@@ -514,6 +516,7 @@ fn emit_window_content(stoat: &mut Stoat, out: &mut Vec<u8>) -> Vec<Vec<u8>> {
         home: stoat.home.as_deref(),
         run_cwd,
         run_cmds,
+        run_stubs,
         blame: &ws.blame,
         now_epoch: crate::commit_picker::now_epoch(&stoat.executor),
         #[cfg(feature = "perf")]
@@ -1740,6 +1743,7 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
             home: None,
             run_cwd: None,
             run_cmds: None,
+            run_stubs: 0,
             blame: &ws.blame,
             now_epoch: crate::commit_picker::now_epoch(&stoat.executor),
             #[cfg(feature = "perf")]
@@ -3784,6 +3788,8 @@ pub(crate) fn window_content_version(
                 block.report.hash(&mut hasher);
                 block.locations.as_ref().map(Vec::len).hash(&mut hasher);
                 block.raw_view.hash(&mut hasher);
+                block.in_jobs.hash(&mut hasher);
+                block.stopped.hash(&mut hasher);
                 block.error.hash(&mut hasher);
                 block.selection.hash(&mut hasher);
                 // A Stub's status and hint turn on whether its tab's session

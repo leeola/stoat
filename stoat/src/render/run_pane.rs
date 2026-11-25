@@ -1,4 +1,5 @@
 use crate::{
+    jobs,
     render::{
         cmd_line::{self, CmdLine, CmdStatus},
         paint::style_rgb,
@@ -148,8 +149,8 @@ pub(crate) fn render_run_pane(
             }
         }
 
-        if !block.finished
-            && let Some((done, total)) = block.report.as_ref().and_then(CmdReport::progress)
+        if !block.in_jobs
+            && let Some((done, total)) = block.progress()
             && offsets.contains(&1)
         {
             let row = Rect::new(inner.x + 1, row_of(1), inner.width.saturating_sub(1), 1);
@@ -159,15 +160,18 @@ pub(crate) fn render_run_pane(
             rule_rows.push(row_of(span - 1));
         }
         let body = offsets.start.max(1)..offsets.end;
-        let bar = match block.handoff {
-            Some(_) => Some(crate::theme::scope::UI_STATUSLINE_RUN),
-            None => (block.finished && block.exit_status != Some(0))
-                .then_some(crate::theme::scope::UI_ERROR),
+        let bar = if block.in_jobs {
+            Some(jobs::state_style(theme, jobs::state_of(block)))
+        } else if block.handoff.is_some() {
+            Some(theme.get(crate::theme::scope::UI_STATUSLINE_RUN))
+        } else {
+            (block.finished && block.exit_status != Some(0))
+                .then(|| theme.get(crate::theme::scope::UI_ERROR))
         };
-        if let Some(scope) = bar
+        if let Some(style) = bar
             && !body.is_empty()
         {
-            body_bars.push((row_of(body.start), body.len() as u16, scope));
+            body_bars.push((row_of(body.start), body.len() as u16, style));
         }
         base += span;
     }
@@ -209,20 +213,21 @@ pub(crate) fn render_run_pane(
 /// and the rule over the prompt, across `inner`.
 ///
 /// `rule_rows` holds the last row of each block on show, `body_bars` the
-/// first row, the row count, and the scope of each body bar on show, and
+/// first row, the row count, and the style of each body bar on show, and
 /// `prompt_row` the prompt's row.
 ///
 /// A block's rule runs along its last row's bottom edge in `ui.run.rule`, and
 /// a theme that leaves that unset draws none. A body bar is 4 sixteenths wide
-/// at `inner`'s left edge in the foreground of its scope, `ui.error` beside a
-/// failed block's body and `ui.statusline.run` beside a Stub's. The prompt's
-/// rule runs along the prompt row's top edge in `ui.run.prompt.rule`, or in
-/// `ui.divider` for a theme that leaves that unset.
+/// at `inner`'s left edge in the foreground of its style: `ui.error` beside a
+/// failed block's body, `ui.statusline.run` beside a Stub's, and the state
+/// color of a Job beside the Stub of a Job. The prompt's rule runs along the
+/// prompt row's top edge in `ui.run.prompt.rule`, or in `ui.divider` for a
+/// theme that leaves that unset.
 fn paint_stack_rules(
     buf: &mut Buffer,
     inner: Rect,
     rule_rows: &[u16],
-    body_bars: &[(u16, u16, &'static str)],
+    body_bars: &[(u16, u16, Style)],
     prompt_row: u16,
     theme: &crate::theme::Theme,
     scene: &mut stoat_widgets::ApcScene,
@@ -238,8 +243,8 @@ fn paint_stack_rules(
         corners: 0,
     };
 
-    for &(row, count, scope) in body_bars {
-        let Some(color) = style_rgb(theme.get(scope).fg) else {
+    for &(row, count, style) in body_bars {
+        let Some(color) = style_rgb(style.fg) else {
             continue;
         };
         let body = Rect::new(inner.x, row, inner.width, count);
@@ -328,7 +333,7 @@ pub(super) fn paint_progress(
 /// [`Cmd::elapsed_secs`] holds them, in the foreground of
 /// `ui.statusline.run`. A running Cmd whose report counts its progress reads
 /// the done count over the total between the two, such as `2 / 4`, as
-/// [`CmdReport::progress`] gives them. The status-line scope can carry a
+/// [`Cmd::progress`] gives them. The status-line scope can carry a
 /// background, which a header leaves to the pane.
 ///
 /// A Stub reads one part. It is U+25CF and `Terminal tab`, or `Agent tab` for
@@ -336,11 +341,32 @@ pub(super) fn paint_progress(
 /// the session of its tab, and `tab closed` in `ui.text.muted` once the
 /// workspace dropped the session. An agent's session stays until its tab
 /// closes.
+///
+/// The Stub of a Job, a Cmd [`Cmd::in_jobs`], reads its lead and one part in
+/// the color of its state, as [`jobs::state_style`] gives it. The part is the
+/// state's mark and `in Jobs`, then U+00B7 and the progress counts of a
+/// running Cmd, or else the time that [`jobs::time_text`] reads.
 pub(crate) fn status_parts(
     cmd: &Cmd,
     terms: &slotmap::SlotMap<TermId, TermSession>,
     theme: &crate::theme::Theme,
 ) -> Vec<StatusPart> {
+    if cmd.in_jobs {
+        let state = jobs::state_of(cmd);
+        let rest = match cmd.progress() {
+            Some((done, total)) => format!("{done} / {total}"),
+            None => jobs::time_text(cmd),
+        };
+        let mut parts: Vec<StatusPart> = lead_part(cmd.kind.chip(), cmd.source, theme)
+            .into_iter()
+            .collect();
+        parts.push(StatusPart {
+            text: format!("{} in Jobs \u{b7} {rest}", state.mark()),
+            style: jobs::state_style(theme, state),
+            chip: false,
+        });
+        return parts;
+    }
     if let Some(handoff) = &cmd.handoff {
         let (text, style) = match terms.contains_key(handoff.term) {
             true => (
@@ -369,7 +395,7 @@ pub(crate) fn status_parts(
     if !cmd.finished {
         let fg = theme.get(crate::theme::scope::UI_STATUSLINE_RUN).fg;
         let elapsed = crate::run::format_elapsed(cmd.elapsed_secs);
-        let text = match cmd.report.as_ref().and_then(CmdReport::progress) {
+        let text = match cmd.progress() {
             Some((done, total)) => format!("\u{25cf} {done} / {total} \u{b7} {elapsed}"),
             None => format!("\u{25cf} {elapsed}"),
         };
@@ -617,10 +643,12 @@ impl Body<'_> {
 #[cfg(test)]
 mod tests {
     use super::{
-        block_line, paint_grid_row, render_run_pane, status_parts, window_offsets, Body, Buffer,
-        Cmd, GridSelection, Modifier, OutputLine, Rect, StatusPart, Style,
+        block_line, paint_grid_row, render_run_pane, status_parts, window_offsets, Body, BodyRow,
+        Buffer, Cmd, CmdId, GridSelection, Modifier, OutputLine, Rect, StatusPart, Style,
     };
     use crate::{
+        app::Stoat,
+        pane::{PaneId, View},
         render::paint::style_rgb,
         run::{cargo::ONE_FAILURE, kind},
         test_harness::TestHarness,
@@ -999,6 +1027,8 @@ mod tests {
 
     const RAISED: [u8; 3] = [0x1e, 0x21, 0x27];
     const HAIRLINE: [u8; 3] = [0x2e, 0x32, 0x3b];
+    const SPECIAL: [u8; 3] = [0xc5, 0x9a, 0xf0];
+    const DANGER: [u8; 3] = [0xf2, 0x77, 0x7f];
 
     /// A harness at `/w` whose Run pane holds a block for each of `runs`: its
     /// line, its output, and its exit code, or `None` for a Cmd that runs on.
@@ -1224,5 +1254,196 @@ mod tests {
                 (dark.get(scope::UI_KEY_LABEL).fg, None),
             ),
         );
+    }
+
+    /// A block in Jobs reads as a Stub. Its status names the Job in the run
+    /// color, one row stands in place of its output, and its hint row names
+    /// the key that brings it back.
+    #[test]
+    fn a_block_in_jobs_reads_as_a_stub() {
+        let mut h = Stoat::test();
+        let job = h.push_job("sleep 30");
+        h.inject_cmd_output(job.cmd, b"hello\n");
+        h.advance_clock(Duration::from_secs(41));
+        h.snapshot();
+
+        let ws = h.stoat.active_workspace();
+        let run = ws.runs.values().next().expect("an open run");
+        let body = ws.cmds[job.cmd]
+            .report_rows()
+            .map(|rows| rows.iter().map(toned).collect::<Vec<_>>());
+        assert_eq!(
+            (
+                h.cmd_status(job.cmd),
+                last_part_rgb(&h, job.cmd),
+                body,
+                run.hint(&ws.cmds, &ws.terms).as_ref().map(toned),
+                h.rendered_text().contains("hello"),
+            ),
+            (
+                "\u{25cf} in Jobs \u{b7} 0:41".to_owned(),
+                Some(SPECIAL),
+                Some(vec![vec![(
+                    "pushed to Jobs with C-j \u{b7} the Tray Chip carries it".to_owned(),
+                    "Muted".to_owned(),
+                )]]),
+                Some(vec![
+                    ("C-j".to_owned(), "Key".to_owned()),
+                    (" bring it back here".to_owned(), "Muted".to_owned()),
+                ]),
+                false,
+            ),
+        );
+    }
+
+    /// The Stub of a Job carries a bar in the color of its state beside its
+    /// row and its hint row.
+    #[test]
+    fn the_rows_of_a_stub_carry_a_two_pixel_bar() {
+        let mut h = Stoat::test();
+        h.push_job("sleep 30");
+
+        assert_eq!(stub_bars(&mut h), [(16, 9 * 16, 4, 32, SPECIAL)]);
+    }
+
+    /// A Job that fails in the tray shows its result on its Stub, its status
+    /// and its bar in the failed color.
+    #[test]
+    fn the_stub_of_a_failed_job_shows_the_result() {
+        let mut h = Stoat::test();
+        let job = h.push_job("sleep 30");
+        h.inject_cmd_done(job.cmd, 101);
+
+        assert_eq!(
+            (
+                h.cmd_status(job.cmd),
+                last_part_rgb(&h, job.cmd),
+                stub_bars(&mut h)
+            ),
+            (
+                "\u{2717} in Jobs \u{b7} exit 101".to_owned(),
+                Some(DANGER),
+                vec![(16, 9 * 16, 4, 32, DANGER)],
+            ),
+        );
+    }
+
+    /// The hint row belongs to the newest block alone, so a Stub under a
+    /// newer block has none, and its bar runs beside its one row.
+    #[test]
+    fn a_stub_under_a_newer_block_has_no_hint_row() {
+        let mut h = Stoat::test();
+        h.push_job("sleep 30");
+        h.submit_run("echo a");
+
+        let hint = {
+            let ws = h.stoat.active_workspace();
+            let run = ws.runs.values().next().expect("an open run");
+            run.hint(&ws.cmds, &ws.terms).as_ref().map(toned)
+        };
+        let bars: Vec<(u16, [u8; 3])> = stub_bars(&mut h)
+            .into_iter()
+            .map(|(.., height, color)| (height, color))
+            .collect();
+        assert_eq!((hint, bars), (None, vec![(16, SPECIAL)]));
+    }
+
+    /// A running Job whose report counts its progress reads the counts on its
+    /// Stub in place of its time, and its Stub draws no progress bar.
+    #[test]
+    fn a_stub_with_a_progress_reads_its_counts() {
+        let mut h = Stoat::test();
+        let job = h.push_job("cargo test");
+        h.inject_cmd_output(
+            job.cmd,
+            b"running 4 tests\r\ntest a ... ok\r\ntest b ... ok\r\n",
+        );
+        let theme = h.stoat.theme.clone();
+        let (_, scene) = painted(&mut h, &theme, Rect::new(0, 0, 40, 12));
+        let progress: Vec<BarSpec> = bars(&scene)
+            .into_iter()
+            .filter(|&(.., height, _)| height == 2)
+            .collect();
+
+        assert_eq!(
+            (h.cmd_status(job.cmd), progress),
+            (
+                "cargo test \u{25cf} in Jobs \u{b7} 2 / 4".to_owned(),
+                Vec::new()
+            ),
+        );
+    }
+
+    /// The keys of the pane that act on its newest block pass a block in Jobs.
+    /// `ctrl-c` interrupts the older running Cmd, and `ctrl-r` finds no ended
+    /// Cmd to run again. `enter` and `t` leave the ended Job as it was, though
+    /// its report would take both.
+    #[test]
+    fn the_keys_of_the_pane_pass_a_block_in_jobs() {
+        let mut h = Stoat::test();
+        h.open_run();
+        let other = h.submit_run("sleep 31");
+        let job = h.push_job("cargo test");
+        h.type_keys("ctrl-c");
+        let interrupts = [&other, &job].map(|handle| handle.session.sent_bytes());
+
+        h.inject_cmd_output(job.cmd, ONE_FAILURE.as_bytes());
+        h.inject_cmd_done(job.cmd, 101);
+        let spawns = h.fake_terminal_host().spawns().len();
+        h.type_keys("ctrl-r");
+        let respawns = h.fake_terminal_host().spawns().len() - spawns;
+
+        h.stoat.pending_message = None;
+        let views = pane_views(&h);
+        h.type_keys("enter");
+        let entered = (pane_views(&h) == views, h.stoat.pending_message.clone());
+        h.type_keys("escape t");
+
+        assert_eq!(
+            (
+                interrupts,
+                respawns,
+                entered,
+                h.stoat.active_workspace().cmds[job.cmd].raw_view,
+            ),
+            ([vec![vec![0x03]], Vec::new()], 0, (true, None), false),
+        );
+    }
+
+    /// The text and the tone of each span of `row`, the tone by its name.
+    fn toned(row: &BodyRow) -> Vec<(String, String)> {
+        row.spans
+            .iter()
+            .map(|(text, tone)| (text.clone(), format!("{tone:?}")))
+            .collect()
+    }
+
+    /// The RGB foreground of the last part of the status of the Cmd `cmd`.
+    fn last_part_rgb(h: &TestHarness, cmd: CmdId) -> Option<[u8; 3]> {
+        let ws = h.stoat.active_workspace();
+        status_parts(&ws.cmds[cmd], &ws.terms, &h.stoat.theme)
+            .last()
+            .and_then(|part| style_rgb(part.style.fg))
+    }
+
+    /// The bars 4 sixteenths wide of the Run pane of `h`, painted into an area
+    /// of 40 by 12 cells.
+    fn stub_bars(h: &mut TestHarness) -> Vec<BarSpec> {
+        let theme = h.stoat.theme.clone();
+        let (_, scene) = painted(h, &theme, Rect::new(0, 0, 40, 12));
+        bars(&scene)
+            .into_iter()
+            .filter(|&(.., width, _, _)| width == 4)
+            .collect()
+    }
+
+    /// The view of each split pane of `h` and the focused pane.
+    fn pane_views(h: &TestHarness) -> (Vec<View>, PaneId) {
+        let panes = &h.stoat.active_workspace().panes;
+        let views = panes
+            .split_panes()
+            .map(|(_, pane)| pane.view.clone())
+            .collect();
+        (views, panes.focus())
     }
 }

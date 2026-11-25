@@ -221,11 +221,22 @@ impl RunState {
     /// A newest block of matches, a Cmd with [`Cmd::finished_locations`],
     /// names `Enter`, which opens the first match, and `C-q`, which opens the
     /// matches as a location list.
+    ///
+    /// The row of a newest Stub of a Job, a Cmd [`Cmd::in_jobs`], comes before
+    /// each other rule. It names `C-j`, which brings the Job back to its block.
     pub(crate) fn hint(
         &self,
         cmds: &SlotMap<CmdId, Cmd>,
         terms: &SlotMap<TermId, TermSession>,
     ) -> Option<BodyRow> {
+        if self.active_block(cmds).is_some_and(|cmd| cmd.in_jobs) {
+            return Some(BodyRow {
+                spans: vec![
+                    ("C-j".to_owned(), Tone::Key),
+                    (" bring it back here".to_owned(), Tone::Muted),
+                ],
+            });
+        }
         if let Some(handoff) = self.active_block(cmds).and_then(|cmd| cmd.handoff.as_ref()) {
             let (key, action) = match terms.contains_key(handoff.term) {
                 true => ("Enter", " go to tab"),
@@ -265,7 +276,8 @@ impl RunState {
     /// always does.
     fn has_hint(&self, cmds: &SlotMap<CmdId, Cmd>) -> bool {
         self.active_block(cmds).is_some_and(|cmd| {
-            cmd.handoff.is_some()
+            cmd.in_jobs
+                || cmd.handoff.is_some()
                 || cmd.finished_locations().is_some()
                 || cmd
                     .finished_report()
@@ -280,8 +292,9 @@ impl RunState {
     /// block's region, on a header / status / blank line, on a row scrolled
     /// off-screen, left of the body's column, or past the active grid's width.
     /// An active block that shows its report draws no grid row, so every
-    /// position over it answers `None`. Mirrors the layout that
-    /// [`crate::render::run_pane::render_run_pane`] builds.
+    /// position over it answers `None`, and so does every position over a
+    /// Stub, which draws its one row in place of its grid. Mirrors the layout
+    /// that [`crate::render::run_pane::render_run_pane`] builds.
     pub fn active_block_grid_pos(
         &self,
         cmds: &SlotMap<CmdId, Cmd>,

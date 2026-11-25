@@ -245,9 +245,18 @@ fn prompt_info(text: String, ctx: &Availability, commands: &CommandSet) -> Promp
 /// palette shows with no located failure opens its output, as
 /// [`open_cmd_output`] does. A Stub goes to its tab, as
 /// [`super::terminal::show_terminal`] reveals it, which reports that the
-/// terminal exited once the tab's session ended. Every other Cmd takes the
-/// Enter as nothing.
+/// terminal exited once the tab's session ended. A Cmd in Jobs takes the
+/// Enter as nothing, because the pane shows a Stub of it and the tray carries
+/// it. Every other Cmd takes the Enter as nothing too.
 pub(super) fn block_enter(stoat: &mut Stoat, id: CmdId) -> UpdateEffect {
+    if stoat
+        .active_workspace()
+        .cmds
+        .get(id)
+        .is_some_and(|cmd| cmd.in_jobs)
+    {
+        return UpdateEffect::None;
+    }
     let stub = stoat
         .active_workspace()
         .cmds
@@ -371,11 +380,12 @@ fn located_file(fs: &dyn FsHost, base: &Path, path: &str) -> Option<PathBuf> {
 
 /// Flip a block between its report or its matches and its raw output, the Cmd
 /// that the palette's Run Block shows or else the newest block of the focused
-/// Run pane.
+/// Run pane that is not in Jobs.
 ///
 /// Only a block with a [`Cmd::finished_report`] or
 /// [`Cmd::finished_locations`] flips, so the key does nothing while the Cmd
-/// runs and for a Cmd that keeps neither.
+/// runs and for a Cmd that keeps neither. A Cmd in Jobs is passed, because
+/// the pane shows a Stub of it.
 pub(super) fn run_toggle_view(stoat: &mut Stoat) -> UpdateEffect {
     let shown = stoat.run_block_cmd();
     let ws = stoat.active_workspace_mut();
@@ -383,7 +393,13 @@ pub(super) fn run_toggle_view(stoat: &mut Stoat) -> UpdateEffect {
         let View::Run(run) = ws.panes.pane(ws.panes.focus()).view else {
             return None;
         };
-        ws.runs.get(run)?.blocks.last().copied()
+        ws.runs
+            .get(run)?
+            .blocks
+            .iter()
+            .rev()
+            .copied()
+            .find(|id| ws.cmds.get(*id).is_some_and(|cmd| !cmd.in_jobs))
     };
     let Some(id) = shown.or_else(newest) else {
         return UpdateEffect::None;
@@ -405,7 +421,8 @@ pub(super) fn run_toggle_view(stoat: &mut Stoat) -> UpdateEffect {
 /// The matches resolve on a worker against the Cmd's cwd, as the matches of
 /// a `locations` run from the palette resolve, and the list opens once they
 /// land. A location picked from the list opens beside the Run pane, so the
-/// stack stays.
+/// stack stays. A block in Jobs is passed, because the pane shows a Stub of
+/// it.
 pub(super) fn run_location_list(stoat: &mut Stoat) -> UpdateEffect {
     let found = {
         let ws = stoat.active_workspace();
@@ -418,6 +435,7 @@ pub(super) fn run_location_list(stoat: &mut Stoat) -> UpdateEffect {
                 .iter()
                 .rev()
                 .filter_map(|id| ws.cmds.get(*id))
+                .filter(|cmd| !cmd.in_jobs)
                 .find_map(|cmd| {
                     let locations = cmd.finished_locations()?;
                     Some((locations.to_vec(), cmd.cwd.clone()))
@@ -433,11 +451,12 @@ pub(super) fn run_location_list(stoat: &mut Stoat) -> UpdateEffect {
 
 /// Run a finished Cmd again in place, the Cmd of the palette's Run Block when
 /// the stage shows, else the newest finished Cmd of the focused Run pane's
-/// stack.
+/// stack that is not in Jobs.
 ///
 /// A running Cmd of the Run Block stays as it is, and so does a Run pane with
-/// no finished Cmd. A Stub whose tab's session lives counts as running,
-/// because its program runs on in that tab. The Cmd keeps its place, as
+/// no such Cmd. A Stub whose tab's session lives counts as running, because
+/// its program runs on in that tab. A Cmd in Jobs is passed, because the pane
+/// shows a Stub of it and the tray carries it. The Cmd keeps its place, as
 /// [`restart_cmd`] starts it.
 pub(super) fn run_again(stoat: &mut Stoat) -> UpdateEffect {
     let ws = stoat.active_workspace();
@@ -456,9 +475,15 @@ pub(super) fn run_again(stoat: &mut Stoat) -> UpdateEffect {
             let View::Run(run) = ws.panes.pane(ws.panes.focus()).view else {
                 return UpdateEffect::None;
             };
-            ws.runs
-                .get(run)
-                .and_then(|run_state| run_state.blocks.iter().rev().copied().find(finished))
+            ws.runs.get(run).and_then(|run_state| {
+                run_state
+                    .blocks
+                    .iter()
+                    .rev()
+                    .copied()
+                    .filter(|id| ws.cmds.get(*id).is_some_and(|cmd| !cmd.in_jobs))
+                    .find(finished)
+            })
         },
     };
     let Some(id) = id else {
@@ -719,6 +744,11 @@ pub(super) fn run_block_to_pane(stoat: &mut Stoat) -> UpdateEffect {
     UpdateEffect::Redraw
 }
 
+/// Interrupt the newest running Cmd of the focused Run pane, and mark the run
+/// as one that the user stopped.
+///
+/// A Cmd in Jobs is passed, because the pane shows a Stub of it and the tray
+/// carries it.
 pub(super) fn run_interrupt(stoat: &mut Stoat) -> UpdateEffect {
     let ws = stoat.active_workspace_mut();
     let focused = ws.panes.focus();
@@ -728,14 +758,16 @@ pub(super) fn run_interrupt(stoat: &mut Stoat) -> UpdateEffect {
     let Some(run_state) = ws.runs.get(id) else {
         return UpdateEffect::None;
     };
-    let newest_running = run_state
-        .blocks
-        .iter()
-        .rev()
-        .filter_map(|id| ws.cmds.get(*id))
-        .find(|cmd| !cmd.finished);
-    if let Some(process) = newest_running.and_then(|cmd| cmd.process.as_ref()) {
+    let newest_running = run_state.blocks.iter().rev().copied().find(|id| {
+        ws.cmds
+            .get(*id)
+            .is_some_and(|cmd| !cmd.finished && !cmd.in_jobs)
+    });
+    if let Some(cmd) = newest_running.and_then(|id| ws.cmds.get_mut(id))
+        && let Some(process) = &cmd.process
+    {
         process.send_interrupt();
+        cmd.stopped = true;
     }
     UpdateEffect::Redraw
 }
@@ -1025,7 +1057,8 @@ fn run_pane_on_show(ws: &Workspace) -> Option<(PaneId, RunId)> {
 /// that ran before its first process.
 ///
 /// The run counts one more, starts now, and clears the end, the elapsed
-/// seconds, the status, the report, and the matches of the run before it.
+/// seconds, the status, the stop, the report, and the matches of the run
+/// before it.
 fn start_process(stoat: &mut Stoat, id: CmdId) -> UpdateEffect {
     let now = stoat.executor.now();
     let Some(cmd) = stoat.active_workspace_mut().cmds.get_mut(id) else {
@@ -1038,6 +1071,7 @@ fn start_process(stoat: &mut Stoat, id: CmdId) -> UpdateEffect {
     cmd.elapsed_secs = 0;
     cmd.finished = false;
     cmd.exit_status = None;
+    cmd.stopped = false;
     cmd.error = None;
     cmd.reset_report();
     if let Some(locations) = cmd.locations.as_mut() {
@@ -3667,6 +3701,28 @@ mod tests {
                 (PathBuf::from(CHROME), 431, 8),
                 (PathBuf::from(THEME), 75, 12),
             ]),
+        );
+    }
+
+    /// `C-q` passes a block of matches in Jobs, since the pane shows a Stub of
+    /// it, and so opens no list.
+    #[test]
+    fn ctrl_q_passes_a_block_of_matches_in_jobs() {
+        let (mut h, _) = rg_harness();
+        let cmd = h.submit_run("rg zoomed").cmd;
+        h.type_keys("ctrl-j");
+        let output: String = ZOOMED.iter().map(|line| format!("{line}\r\n")).collect();
+        h.inject_cmd_output(cmd, output.as_bytes());
+        h.inject_cmd_done(cmd, 0);
+        let matches = h.stoat.active_workspace().cmds[cmd]
+            .finished_locations()
+            .map(<[_]>::len);
+        h.type_keys("ctrl-q");
+        h.settle();
+
+        assert_eq!(
+            (matches, h.stoat.location_picker.is_none()),
+            (Some(3), true)
         );
     }
 

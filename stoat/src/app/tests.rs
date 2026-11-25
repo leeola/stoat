@@ -9910,10 +9910,18 @@ fn a_run_pane_versions_on_everything_its_render_reads() {
     );
 
     h.stoat.active_workspace_mut().runs[run_id].prompt.chip = Some("cargo test");
+    let chipped = version(h.stoat.active_workspace());
+    assert_ne!(closed, chipped, "the prompt's resolve moves its chip");
+
+    h.stoat.active_workspace_mut().cmds[cmd].in_jobs = true;
+    let pushed = version(h.stoat.active_workspace());
+    assert_ne!(chipped, pushed, "a block in Jobs draws as a Stub");
+
+    h.stoat.active_workspace_mut().cmds[cmd].stopped = true;
     assert_ne!(
-        closed,
+        pushed,
         version(h.stoat.active_workspace()),
-        "the prompt's resolve moves its chip"
+        "a stop moves the state of a Job"
     );
 }
 

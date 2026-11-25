@@ -758,6 +758,11 @@ pub struct Cmd {
     /// Whether the Job Tray holds the Cmd, true while `Workspace::jobs` holds
     /// its id.
     pub(crate) in_jobs: bool,
+    /// Whether the user interrupted this run.
+    ///
+    /// The exit code of an interrupted process differs from program to
+    /// program, so the code alone cannot tell a stopped run from a failed one.
+    pub(crate) stopped: bool,
 }
 
 /// Where a Stub's text went on running, a terminal tab of its own.
@@ -803,6 +808,7 @@ impl Cmd {
             step: 0,
             handoff: None,
             in_jobs: false,
+            stopped: false,
         }
     }
 
@@ -867,6 +873,16 @@ impl Cmd {
         shows.then_some(report)
     }
 
+    /// The done and the total count of a running Cmd's progress, as
+    /// [`CmdReport::progress`] reads them, or `None` for a Cmd that finished
+    /// or whose output names no total.
+    pub(crate) fn progress(&self) -> Option<(u32, u32)> {
+        self.report
+            .as_ref()
+            .filter(|_| !self.finished)
+            .and_then(CmdReport::progress)
+    }
+
     /// The locations of a finished Cmd of a `locations` command whose output
     /// named one or more, which the block can show in place of its output.
     pub(crate) fn finished_locations(&self) -> Option<&[ParsedLocation]> {
@@ -887,9 +903,21 @@ impl Cmd {
     /// [`Self::raw_view`] holds. It reads that the Cmd needs a full terminal,
     /// or runs as an agent, and went to its own tab, then the tab's label.
     ///
+    /// The Stub of a Job, a Cmd [`Self::in_jobs`], shows one row before any
+    /// other rule and whatever [`Self::raw_view`] holds. It reads that the Cmd
+    /// went to Jobs and that the Tray Chip carries it.
+    ///
     /// A Cmd with [`Self::finished_locations`] shows its matches unless
     /// [`Self::raw_view`] is on, as [`location_rows`] lays them out.
     pub(crate) fn report_rows(&self) -> Option<Vec<BodyRow>> {
+        if self.in_jobs {
+            return Some(vec![BodyRow {
+                spans: vec![(
+                    "pushed to Jobs with C-j \u{b7} the Tray Chip carries it".to_owned(),
+                    Tone::Muted,
+                )],
+            }]);
+        }
         if let Some(handoff) = &self.handoff {
             let note = match handoff.agent {
                 true => "runs as an agent \u{b7} handed off to its own tab ",
@@ -1120,5 +1148,39 @@ pub(crate) fn counted(count: usize, one: &str, many: &str) -> String {
     match count {
         1 => format!("1 {one}"),
         _ => format!("{count} {many}"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Cmd;
+    use std::path::PathBuf;
+
+    /// A running `cargo test` or `cargo build` reads the counts of its
+    /// progress, and a finished Cmd or a Cmd with no report reads none.
+    #[test]
+    fn a_running_parsed_cmd_reads_its_progress() {
+        let fed = |line: &str, output: &[u8]| {
+            let mut cmd = Cmd::new(line.to_owned(), PathBuf::from("/w"), 80);
+            cmd.feed(output);
+            let running = cmd.progress();
+            cmd.finished = true;
+            (running, cmd.progress())
+        };
+
+        assert_eq!(
+            [
+                fed(
+                    "cargo test",
+                    b"running 4 tests\r\ntest a ... ok\r\ntest b ... ok\r\n"
+                ),
+                fed(
+                    "cargo build",
+                    b"    Building [=====>      ] 212/240: stoat(build)\r"
+                ),
+                fed("sleep 30", b"zzz\r\n"),
+            ],
+            [(Some((2, 4)), None), (Some((212, 240)), None), (None, None)],
+        );
     }
 }

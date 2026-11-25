@@ -6352,13 +6352,14 @@ impl Stoat {
             // A Run Block takes Ctrl-C as its running Cmd's interrupt and stays
             // open, so no key kills the Cmd it shows.
             if active_modal(self) == Some(ActiveModal::RunBlock)
-                && let Some(process) = self
+                && let Some(cmd) = self
                     .run_block_cmd()
-                    .and_then(|id| self.active_workspace().cmds.get(id))
+                    .and_then(|id| self.active_workspace_mut().cmds.get_mut(id))
                     .filter(|cmd| !cmd.finished)
-                    .and_then(|cmd| cmd.process.as_ref())
+                && let Some(process) = &cmd.process
             {
                 process.send_interrupt();
+                cmd.stopped = true;
                 return UpdateEffect::Redraw;
             }
             if keymap_state::close_topmost_modal(self) {

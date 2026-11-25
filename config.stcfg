@@ -390,6 +390,10 @@ theme ermine_night inherits default_dark {
     ui.cmd.flag.value.fg = warning;
     ui.hints.submenu.fg = accent;
     ui.badge.active.fg = warning;
+    ui.job.running.fg = special;
+    ui.job.ok.fg      = success;
+    ui.job.failed.fg  = danger;
+    ui.job.stopped.fg = muted;
 
     ui.tag.rust.fg     = warning;
     ui.tag.markdown.fg = info;

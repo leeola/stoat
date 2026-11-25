@@ -1022,6 +1022,17 @@ pub mod scope {
     pub const UI_BADGE_COMPLETE: &str = "ui.badge.complete";
     pub const UI_BADGE_ERROR: &str = "ui.badge.error";
 
+    /// The state color of a Job, a Cmd in the Job Tray, while it runs. A
+    /// theme that leaves it unset draws the state in [`UI_STATUSLINE_RUN`].
+    ///
+    /// [`UI_JOB_OK`], [`UI_JOB_FAILED`], and [`UI_JOB_STOPPED`] are its
+    /// siblings for the three states that end a run. Unset, they draw in
+    /// [`UI_BADGE_COMPLETE`], [`UI_BADGE_ERROR`], and [`UI_TEXT_MUTED`].
+    pub const UI_JOB_RUNNING: &str = "ui.job.running";
+    pub const UI_JOB_OK: &str = "ui.job.ok";
+    pub const UI_JOB_FAILED: &str = "ui.job.failed";
+    pub const UI_JOB_STOPPED: &str = "ui.job.stopped";
+
     /// The mark and connector that point at a walkthrough stop's subject.
     ///
     /// One stop has exactly one focus, so it gets a scope of its own rather

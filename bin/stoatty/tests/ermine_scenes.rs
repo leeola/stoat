@@ -2551,6 +2551,47 @@ fn a_listed_program_leaves_a_stub_at_submit() {
     }
 }
 
+/// A running block that `<C-j>` moves to Jobs draws as a Stub, with the bar
+/// of the Job's state beside its rows.
+///
+/// `sleep 30` runs on in the tray, so the block is the header on row 44, the
+/// Stub row 45, and the hint row 46. The bar covers the two pixels from x 18
+/// beside the Stub row and the hint row, and the two pixels right of it keep
+/// the base. The header's status reads in the run color, and the key that
+/// leads the hint row in the info color.
+#[test]
+fn a_block_pushed_to_jobs_draws_as_a_stub() {
+    let mut home = support::scratch_home();
+    let shot = settled_frame(
+        home.path(),
+        "basic-diff",
+        "unstaged.txt",
+        "<Space>t<Settle>sleep 30<Enter><Settle><C-j><Settle>",
+    );
+
+    expect_region(&shot, &mut home, (18, 812, 2, 30), SPECIAL, "job_stub_bar");
+    expect_region(
+        &shot,
+        &mut home,
+        (20, 812, 2, 30),
+        BASE,
+        "job_stub_bar_edge",
+    );
+
+    let (status, key) = (
+        pixels_of(&shot, cell_rect(128, 44, 30, 1), SPECIAL),
+        pixels_of(&shot, cell_rect(3, 46, 3, 1), INFO),
+    );
+    if status == 0 || key == 0 {
+        let frame = keep_frame(&shot, &mut home, "job_stub_status");
+        panic!(
+            "the header's right end reads {status} run color pixels and the hint row's key \
+             {key} info pixels; want both; the frame is {}",
+            frame.display(),
+        );
+    }
+}
+
 /// A `locations` command at a Run pane prompt joins the stack as a block that
 /// groups its matches by file.
 ///

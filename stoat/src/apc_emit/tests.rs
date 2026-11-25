@@ -3176,6 +3176,33 @@ fn detached_pane_status_row_names_its_file_and_no_sides() {
     );
 }
 
+/// A detached Run pane's status row counts its Cmds in Jobs after its Cmds,
+/// as the row of a Run pane in the main window counts them.
+#[test]
+fn a_detached_run_pane_s_row_counts_its_cmds_in_jobs() {
+    let mut h = Stoat::test();
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+    h.stoat.set_apc_tx(tx);
+    h.stoat.window_ipc_connected = true;
+    let size = h.stoat.size();
+    h.stoat.active_workspace_mut().layout(size);
+    h.type_action("SplitRight()");
+    h.push_job("sleep 30");
+    h.type_action("DetachPane()");
+    while rx.try_recv().is_ok() {}
+
+    emit_smooth_scroll(&mut h.stoat);
+    let mut raw = Vec::new();
+    while let Ok(batch) = rx.try_recv() {
+        raw.extend(batch);
+    }
+    let text = String::from_utf8_lossy(&raw);
+    assert!(
+        text.contains(" 1 Cmd \u{b7} 1 in Jobs "),
+        "the row counts the Cmd in Jobs",
+    );
+}
+
 /// A detached pane's status row paints a message in the color of its kind.
 #[test]
 fn a_window_status_row_paints_a_message_in_the_color_of_its_kind() {

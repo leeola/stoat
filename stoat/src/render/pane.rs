@@ -30,7 +30,7 @@ use crate::{
         undercurl::UndercurlBatch,
         FrameCtx, MinimapChrome, PaneCtx, TypeScale,
     },
-    run::{RunId, RunState},
+    run::{Cmd, CmdId, RunId, RunState},
     term_session::{TermId, TermSession},
     theme::{PanelRole, TypeRole, FULL_CELL_SCALE},
     workspace::{
@@ -1334,6 +1334,32 @@ pub(crate) fn focused_run_cmds(
     }
 }
 
+/// The Stubs of Jobs in the stack of the run that the focused split pane
+/// shows, the ids whose Cmd is in Jobs, or 0 when focus is off the split
+/// panes or the focused pane shows no run.
+///
+/// It takes the workspace's fields for the reason that
+/// [`focused_run_cmds`] does.
+pub(crate) fn focused_run_stubs(
+    focus: FocusTarget,
+    panes: &PaneTree,
+    runs: &SlotMap<RunId, RunState>,
+    cmds: &SlotMap<CmdId, Cmd>,
+) -> usize {
+    let FocusTarget::SplitPane = focus else {
+        return 0;
+    };
+    let View::Run(id) = panes.pane(panes.focus()).view else {
+        return 0;
+    };
+    runs.get(id).map_or(0, |run| {
+        run.blocks
+            .iter()
+            .filter(|id| cmds.get(**id).is_some_and(|cmd| cmd.in_jobs))
+            .count()
+    })
+}
+
 /// The part of status row `row` that holds its segments, left of any badge
 /// box that paints over the row.
 ///
@@ -2437,11 +2463,15 @@ fn status_segments(
             1 => "Cmd",
             _ => "Cmds",
         };
+        let text = match frame.run_stubs {
+            0 => format!(" {count} {noun} "),
+            stubs => format!(" {count} {noun} \u{b7} {stubs} in Jobs "),
+        };
         push_left(
             &mut left,
             &mut cursor,
             pane_end,
-            format!(" {count} {noun} "),
+            text,
             muted_tint(bar_style, theme),
         );
     }
@@ -8482,6 +8512,35 @@ mod tests {
                 "RUN stoat run 1 Cmd ~/code/stoat",
                 "RUN stoat run 2 Cmds ~/code/stoat",
                 "run",
+            ],
+        );
+    }
+
+    /// A focused Run pane's row counts the Cmds of its stack in Jobs after its
+    /// count of Cmds, while any is in Jobs.
+    #[test]
+    fn the_row_of_a_run_pane_counts_its_cmds_in_jobs() {
+        let mut h = crate::test_harness::TestHarness::with_size(120, 12);
+        h.stoat.home = Some(PathBuf::from("/home/u"));
+        h.stoat.active_workspace_mut().git_root = PathBuf::from("/home/u/code/stoat");
+        h.open_run();
+        h.submit_run("sleep 30");
+        let row = |h: &mut crate::test_harness::TestHarness| {
+            let row = bar_row(&h.render_composited()).replace('\u{2500}', " ");
+            row.split_whitespace().collect::<Vec<_>>().join(" ")
+        };
+
+        let mut reads = vec![row(&mut h)];
+        for _ in 0..2 {
+            h.type_keys("ctrl-j");
+            reads.push(row(&mut h));
+        }
+        assert_eq!(
+            reads,
+            [
+                "RUN stoat run 1 Cmd ~/code/stoat",
+                "RUN stoat run 1 Cmd \u{b7} 1 in Jobs ~/code/stoat",
+                "RUN stoat run 1 Cmd ~/code/stoat",
             ],
         );
     }

@@ -1713,14 +1713,20 @@ mod tests {
         );
     }
 
+    /// `ctrl-c` interrupts the running Cmd of the Run Block, marks the run as
+    /// one that the user stopped, and leaves the block open.
     #[test]
     fn ctrl_c_interrupts_a_running_block_and_leaves_it_open() {
         let mut h = loaded(HELLO);
         let session = entered(&mut h, "hello");
         h.type_keys("ctrl-c");
         assert_eq!(
-            (session.sent_bytes(), active_modal(&h.stoat)),
-            (vec![vec![0x03]], Some(ActiveModal::RunBlock)),
+            (
+                session.sent_bytes(),
+                active_modal(&h.stoat),
+                h.stoat.active_workspace().cmds[block_cmd(&h)].stopped,
+            ),
+            (vec![vec![0x03]], Some(ActiveModal::RunBlock), true),
         );
     }
 

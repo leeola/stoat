@@ -3343,6 +3343,7 @@ mod tests {
             home: None,
             run_cwd: None,
             run_cmds: None,
+            run_stubs: 0,
             blame: &stoat.active_workspace().blame,
             now_epoch: 0,
             #[cfg(feature = "perf")]

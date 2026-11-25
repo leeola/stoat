@@ -4,14 +4,40 @@
 //! A Job is a placement of one Cmd, which stays in [`Workspace::cmds`] with its
 //! process, its grid, and its report, so its output and its exit reach it as
 //! they reach any Cmd. [`Workspace::jobs`] lists the ids, and
-//! [`Cmd::in_jobs`](crate::run::Cmd::in_jobs) marks the block of each one as a
-//! Stub of the stack that holds its id. [`push`] and [`take`] are the only
-//! writers of the two.
+//! [`Cmd::in_jobs`] marks the block of each one as a Stub of the stack that
+//! holds its id. [`push`] and [`take`] are the only writers of the two.
 
 use crate::{
-    run::{CmdId, RunId},
+    run::{self, Cmd, CmdId, RunId},
+    theme::{scope, Theme},
     workspace::Workspace,
 };
+use ratatui::style::Style;
+
+/// The state of a Job, one of the four that a Cmd reaches, which colors the
+/// Job wherever it shows.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum JobState {
+    Running,
+    Ok,
+    Failed,
+    Stopped,
+}
+
+impl JobState {
+    /// The mark that leads the text of the state.
+    ///
+    /// It is U+25CF while the Cmd runs, and U+2713, U+2717, or U+25A0 for a
+    /// Cmd that ended ok, failed, or stopped.
+    pub(crate) fn mark(self) -> char {
+        match self {
+            JobState::Running => '\u{25cf}',
+            JobState::Ok => '\u{2713}',
+            JobState::Failed => '\u{2717}',
+            JobState::Stopped => '\u{25a0}',
+        }
+    }
+}
 
 /// Put the Cmd `id` in the tray, and answer whether it went in.
 ///
@@ -70,8 +96,65 @@ pub(crate) fn return_to_run(ws: &mut Workspace, run: RunId) -> bool {
     newest.is_some_and(|id| take(ws, id))
 }
 
+/// The state of `cmd`.
+///
+/// A run that exits 0 is ok even when the user interrupted it, since its
+/// program finished. A run that the user interrupted and that exits with
+/// another code is stopped, because the exit code of an interrupted process
+/// differs from program to program. A run that ended with no exit status
+/// is stopped too, and every other ended run failed.
+pub(crate) fn state_of(cmd: &Cmd) -> JobState {
+    if !cmd.finished {
+        return JobState::Running;
+    }
+    match cmd.exit_status {
+        Some(0) => JobState::Ok,
+        Some(_) if !cmd.stopped => JobState::Failed,
+        _ => JobState::Stopped,
+    }
+}
+
+/// The style that draws `state`, the foreground of its `ui.job` scope alone.
+///
+/// A theme that leaves that scope unset draws the state in the foreground of
+/// `ui.statusline.run`, `ui.badge.complete`, `ui.badge.error`, or
+/// `ui.text.muted`. A Job's text stands on the surface under it, so the style
+/// carries no background.
+pub(crate) fn state_style(theme: &Theme, state: JobState) -> Style {
+    let (job, fallback) = match state {
+        JobState::Running => (scope::UI_JOB_RUNNING, scope::UI_STATUSLINE_RUN),
+        JobState::Ok => (scope::UI_JOB_OK, scope::UI_BADGE_COMPLETE),
+        JobState::Failed => (scope::UI_JOB_FAILED, scope::UI_BADGE_ERROR),
+        JobState::Stopped => (scope::UI_JOB_STOPPED, scope::UI_TEXT_MUTED),
+    };
+    let fg = theme.try_get(job).unwrap_or_else(|| theme.get(fallback)).fg;
+    Style {
+        fg,
+        ..Style::default()
+    }
+}
+
+/// The time that the text of a Job reads for `cmd`.
+///
+/// A running Cmd reads the whole seconds it has run, as
+/// [`run::format_elapsed`] gives them, and a failed Cmd reads `exit N`. Any
+/// other ended Cmd reads its runtime, as [`run::format_runtime`] gives it, or
+/// the empty text when it lacks a start or an end.
+pub(crate) fn time_text(cmd: &Cmd) -> String {
+    match (state_of(cmd), cmd.exit_status) {
+        (JobState::Running, _) => run::format_elapsed(cmd.elapsed_secs),
+        (JobState::Failed, Some(code)) => format!("exit {code}"),
+        _ => cmd
+            .started
+            .zip(cmd.ended)
+            .map(|(started, ended)| run::format_runtime(ended.saturating_duration_since(started)))
+            .unwrap_or_default(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use super::JobState;
     use crate::{
         action_handlers::{
             self,
@@ -79,8 +162,14 @@ mod tests {
         },
         app::Stoat,
         pane::View,
-        run::{CmdId, RunId},
+        run::{Cmd, CmdId, RunId},
         test_harness::{CmdHandle, TestHarness},
+        theme::Theme,
+    };
+    use ratatui::style::{Color, Style};
+    use std::{
+        path::PathBuf,
+        time::{Duration, Instant},
     };
     use stoat_action::{ClosePane, CloseWorkspace, SplitRight, Terminal};
 
@@ -306,6 +395,133 @@ mod tests {
             super::push(ws, CmdId::default()),
         ];
         assert_eq!((pushes, ws.jobs.clone()), ([true, false, false], vec![id]));
+    }
+
+    /// A Cmd runs, or ended ok, failed, or stopped, and each state leads with
+    /// its mark. An exit of 0 is ok even after an interrupt, and an end with
+    /// no exit status is a stop.
+    #[test]
+    fn a_cmd_takes_one_of_four_states() {
+        let state = |finished: bool, exit_status: Option<i32>, stopped: bool| {
+            let mut cmd = Cmd::new("sleep 30".to_owned(), PathBuf::from("/w"), 40);
+            cmd.finished = finished;
+            cmd.exit_status = exit_status;
+            cmd.stopped = stopped;
+            let state = super::state_of(&cmd);
+            (state, state.mark())
+        };
+
+        assert_eq!(
+            [
+                state(false, None, false),
+                state(true, Some(0), false),
+                state(true, Some(101), false),
+                state(true, Some(130), true),
+                state(true, None, false),
+                state(true, Some(0), true),
+            ],
+            [
+                (JobState::Running, '\u{25cf}'),
+                (JobState::Ok, '\u{2713}'),
+                (JobState::Failed, '\u{2717}'),
+                (JobState::Stopped, '\u{25a0}'),
+                (JobState::Stopped, '\u{25a0}'),
+                (JobState::Ok, '\u{2713}'),
+            ],
+        );
+    }
+
+    /// A state draws in the foreground of its `ui.job` scope alone, and a
+    /// theme that leaves that scope unset draws it in the scope that the state
+    /// falls back to.
+    #[test]
+    fn a_state_draws_in_its_job_scope_or_its_fallback() {
+        let theme = |job_scopes: &str| {
+            let text = format!(
+                r##"theme t {{
+                    ui.statusline.run.fg = "#000001";
+                    ui.badge.complete.fg = "#000002";
+                    ui.badge.error.fg = "#000003";
+                    ui.text.muted.fg = "#000004";
+                    {job_scopes}
+                }}"##
+            );
+            let (config, _) = stoat_config::parse(&text);
+            Theme::from_config(&config.expect("theme parses"), "t").expect("theme loads")
+        };
+        let styles = |theme: &Theme| {
+            [
+                JobState::Running,
+                JobState::Ok,
+                JobState::Failed,
+                JobState::Stopped,
+            ]
+            .map(|state| super::state_style(theme, state))
+        };
+        let fg = |blue: u8| Style::default().fg(Color::Rgb(0, 0, blue));
+
+        let fallback = styles(&theme(""));
+        let set = styles(&theme(
+            r##"ui.job.running = { fg: "#000011", bg: "#0000ff" };
+                ui.job.ok.fg = "#000012";
+                ui.job.failed.fg = "#000013";
+                ui.job.stopped.fg = "#000014";"##,
+        ));
+        assert_eq!(
+            (fallback, set),
+            (
+                [fg(1), fg(2), fg(3), fg(4)],
+                [fg(0x11), fg(0x12), fg(0x13), fg(0x14)],
+            ),
+        );
+    }
+
+    /// `ctrl-c` writes the interrupt to the newest running Cmd and marks it
+    /// stopped, so its exit reads as a stop, and a run again clears the mark.
+    #[test]
+    fn ctrl_c_marks_the_cmd_it_interrupts_as_stopped() {
+        let mut h = Stoat::test();
+        h.open_run();
+        let handle = h.submit_run("sleep 30");
+        h.type_keys("ctrl-c");
+        let interrupted = (
+            handle.session.sent_bytes(),
+            h.stoat.active_workspace().cmds[handle.cmd].stopped,
+        );
+
+        h.inject_cmd_done(handle.cmd, 130);
+        let ended = super::state_of(&h.stoat.active_workspace().cmds[handle.cmd]);
+        h.type_keys("ctrl-r");
+        let cmd = &h.stoat.active_workspace().cmds[handle.cmd];
+        assert_eq!(
+            (interrupted, ended, (cmd.finished, cmd.stopped)),
+            ((vec![vec![0x03]], true), JobState::Stopped, (false, false)),
+        );
+    }
+
+    /// A running Job reads the seconds it has run, a failed one its exit
+    /// code, and one that ended ok its runtime.
+    #[test]
+    fn the_time_text_follows_the_state() {
+        let mut h = Stoat::test();
+        let job = h.push_job("sleep 30");
+        h.advance_clock(Duration::from_secs(41));
+        h.snapshot();
+        let time = |h: &TestHarness| super::time_text(&h.stoat.active_workspace().cmds[job.cmd]);
+        let running = time(&h);
+        h.inject_cmd_done(job.cmd, 101);
+        let failed = time(&h);
+
+        let mut ok = Cmd::new("true".to_owned(), PathBuf::from("/w"), 40);
+        let started = Instant::now();
+        ok.started = Some(started);
+        ok.ended = Some(started + Duration::from_millis(1500));
+        ok.finished = true;
+        ok.exit_status = Some(0);
+        assert_eq!(
+            [running, failed, super::time_text(&ok)],
+            ["0:41", "exit 101", "1.5s"],
+        );
     }
 
     /// The run that the focused pane shows.
