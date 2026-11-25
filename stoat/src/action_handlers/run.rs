@@ -5,13 +5,15 @@ use crate::{
     buffer_lifecycle,
     buffer_registry::OpenOrigin,
     host::{FsHost, OffsetEncoding},
-    pane::{FocusTarget, View},
+    pane::{Axis, FocusTarget, PaneId, View},
+    render::paint::style_rgb,
     run::{
         cargo::CmdReport,
-        kind::{CargoKind, RunKind},
+        kind::{self, CargoKind, RunKind},
         pty::{self, CmdEnv, CmdSink},
-        Cmd, CmdId, RunState,
+        Cmd, CmdId, RunId, RunState,
     },
+    theme::scope,
     workspace::Workspace,
 };
 use std::path::{Path, PathBuf};
@@ -27,37 +29,6 @@ pub(super) fn open_run(stoat: &mut Stoat) -> UpdateEffect {
     buffer_lifecycle::replace_pane_view(ws, &executor, focused, View::Run(run_id));
     stoat.transition_mode("insert".into());
     UpdateEffect::Redraw
-}
-
-/// Run `line` in a Run pane, as a submit of the pane's input runs a typed
-/// line.
-///
-/// The first split pane that shows a Run pane takes the line and the focus.
-/// With no Run pane on show, a Run pane opens in the focused pane, as
-/// `OpenRun` opens one.
-pub(crate) fn run_line_in_pane(stoat: &mut Stoat, line: &str) -> UpdateEffect {
-    let ws = stoat.active_workspace_mut();
-    ws.focus = FocusTarget::SplitPane;
-    let shown = ws
-        .panes
-        .split_panes()
-        .find_map(|(id, pane)| matches!(pane.view, View::Run(_)).then_some(id));
-    match shown {
-        Some(pane) => ws.panes.set_focus(pane),
-        None => {
-            open_run(stoat);
-        },
-    }
-
-    let ws = stoat.active_workspace_mut();
-    let View::Run(id) = ws.panes.pane(ws.panes.focus()).view else {
-        return UpdateEffect::None;
-    };
-    let Some(input) = ws.runs.get(id).map(|run| run.input.clone()) else {
-        return UpdateEffect::None;
-    };
-    input.replace_text(ws, line);
-    run_submit(stoat)
 }
 
 /// Run the line at the focused Run pane's prompt as a new Cmd.
@@ -122,30 +93,61 @@ pub(super) fn run_submit(stoat: &mut Stoat) -> UpdateEffect {
     UpdateEffect::Redraw
 }
 
-/// Take an Enter at an empty prompt to the Cmd `id`, the newest block of the
-/// stack.
+/// Take an Enter to the Cmd `id`, the newest block of a Run pane's stack or the
+/// Cmd that the palette's Run Block shows, and answer a redraw when the Enter
+/// acted.
 ///
 /// A finished Cmd whose report located a test failure or a build error goes
 /// to the first of them, as [`CmdReport::first_location`] picks it and
 /// [`go_to_location`] opens it. rustc counts a column in chars, so the column
-/// lands as UTF-32. Every other Cmd takes the Enter as nothing.
-fn block_enter(stoat: &mut Stoat, id: CmdId) -> UpdateEffect {
+/// lands as UTF-32. A finished Cmd that the palette shows with no located
+/// failure opens its output, as [`open_cmd_output`] does. Every other Cmd
+/// takes the Enter as nothing.
+pub(super) fn block_enter(stoat: &mut Stoat, id: CmdId) -> UpdateEffect {
     let found = stoat.active_workspace().cmds.get(id).and_then(|cmd| {
         let location = cmd.finished_report().and_then(CmdReport::first_location)?;
         Some((cmd.cwd.clone(), location.clone()))
     });
-    let Some((cwd, location)) = found else {
+    if let Some((cwd, location)) = found {
+        go_to_location(
+            stoat,
+            &cwd,
+            &location.path,
+            location.line,
+            location.column,
+            OffsetEncoding::Utf32,
+        );
+        return UpdateEffect::Redraw;
+    }
+
+    let shown = stoat.run_block_cmd() == Some(id);
+    let finished = stoat
+        .active_workspace()
+        .cmds
+        .get(id)
+        .is_some_and(|cmd| cmd.finished);
+    if !(shown && finished) {
         return UpdateEffect::None;
-    };
-    go_to_location(
-        stoat,
-        &cwd,
-        &location.path,
-        location.line,
-        location.column,
-        OffsetEncoding::Utf32,
-    );
+    }
+    open_cmd_output(stoat, id);
     UpdateEffect::Redraw
+}
+
+/// Show the output of the Cmd `id` in a new scratch buffer, in the pane that
+/// [`agent_goto::target_pane`] picks, which takes the focus.
+fn open_cmd_output(stoat: &mut Stoat, id: CmdId) {
+    let Some(text) = stoat.active_workspace().cmds.get(id).map(|cmd| {
+        let grid = &cmd.grid;
+        grid.text_in(0..usize::from(grid.width()), 0..grid.rendered_line_count())
+    }) else {
+        return;
+    };
+    let executor = stoat.executor.clone();
+    let ws = stoat.active_workspace_mut();
+    let pane = agent_goto::target_pane(ws, executor);
+    ws.focus = FocusTarget::SplitPane;
+    ws.panes.set_focus(pane);
+    buffer_lifecycle::show_scratch_with_text(stoat, &text);
 }
 
 /// Open the file at `path` with the cursor on `line` and `column`, both
@@ -210,20 +212,26 @@ fn located_file(fs: &dyn FsHost, base: &Path, path: &str) -> Option<PathBuf> {
         .find(|file| is_file(file))
 }
 
-/// Flip the newest block of the focused Run pane between its report and its
-/// raw output.
+/// Flip a block between its report and its raw output, the Cmd that the
+/// palette's Run Block shows or else the newest block of the focused Run pane.
 ///
 /// Only a block with a [`Cmd::finished_report`] flips, so the key does
 /// nothing while the Cmd runs and for a Cmd that keeps no report.
 pub(super) fn run_toggle_view(stoat: &mut Stoat) -> UpdateEffect {
+    let shown = stoat.run_block_cmd();
     let ws = stoat.active_workspace_mut();
-    let View::Run(id) = ws.panes.pane(ws.panes.focus()).view else {
+    let newest = || {
+        let View::Run(run) = ws.panes.pane(ws.panes.focus()).view else {
+            return None;
+        };
+        ws.runs.get(run)?.blocks.last().copied()
+    };
+    let Some(id) = shown.or_else(newest) else {
         return UpdateEffect::None;
     };
-    let Workspace { runs, cmds, .. } = ws;
-    let Some(cmd) = runs
-        .get(id)
-        .and_then(|run_state| run_state.active_block_mut(cmds))
+    let Some(cmd) = ws
+        .cmds
+        .get_mut(id)
         .filter(|cmd| cmd.finished_report().is_some())
     else {
         return UpdateEffect::None;
@@ -305,7 +313,7 @@ fn walk_focused_run(
     UpdateEffect::Redraw
 }
 
-pub(crate) fn run_command(stoat: &mut Stoat, command: &str) -> UpdateEffect {
+pub(super) fn run_command(stoat: &mut Stoat, command: &str) -> UpdateEffect {
     let executor = stoat.executor.clone();
     let ws = stoat.active_workspace_mut();
     let focused_area = ws.panes.pane(ws.panes.focus()).area;
@@ -326,11 +334,96 @@ pub(crate) fn run_command(stoat: &mut Stoat, command: &str) -> UpdateEffect {
 /// Insert a Cmd of `line` in the active workspace's store, with the workspace
 /// root as its cwd, and start its process.
 fn start_cmd(stoat: &mut Stoat, line: &str, width: u16) -> CmdId {
+    start_cmd_as(stoat, line, None, None, width)
+}
+
+/// Insert a Cmd of `line` in the active workspace's store, with the workspace
+/// root as its cwd and a grid `width` cells wide, and start its process.
+///
+/// A `shell` text runs in place of the line, and the Cmd's Run Kind comes from
+/// it, so a config command's line names the command and its run reads the
+/// shell line. `source` is the Source Tag that the Cmd's header shows.
+pub(crate) fn start_cmd_as(
+    stoat: &mut Stoat,
+    line: &str,
+    shell: Option<&str>,
+    source: Option<(&'static str, &'static str)>,
+    width: u16,
+) -> CmdId {
     let ws = stoat.active_workspace_mut();
-    let cmd = Cmd::new(line.to_owned(), ws.git_root.clone(), width);
+    let mut cmd = Cmd::new(line.to_owned(), ws.git_root.clone(), width);
+    if let Some(shell) = shell {
+        cmd.kind = kind::run_kind(shell);
+        cmd.shell = Some(shell.to_owned());
+    }
+    cmd.source = source;
     let id = ws.cmds.insert(cmd);
     start_process(stoat, id);
     id
+}
+
+/// The grid width of a Cmd that [`append_to_run_pane`] places, in cells.
+///
+/// It is the width of the pane that takes the Cmd, or of the focused pane
+/// when a new pane splits it, less the stack's inset and the body's column,
+/// and at least 20.
+pub(crate) fn run_pane_width(stoat: &Stoat) -> u16 {
+    let ws = stoat.active_workspace();
+    let pane = run_pane_on_show(ws).map_or_else(|| ws.panes.focus(), |(pane, _)| pane);
+    ws.panes.pane(pane).area.width.saturating_sub(3).max(20)
+}
+
+/// Push the Cmd `cmd` onto a Run pane's stack, and answer that pane's run.
+///
+/// The focused split pane takes the Cmd when it shows a Run pane, else the
+/// first split pane that shows one, else a new Run pane that splits the
+/// focused pane downward, as `SplitDown` does. The stack snaps back to its
+/// prompt. With `focus`, the pane takes the focus and its prompt takes
+/// typing. Without it, the focus stays where it is.
+pub(crate) fn append_to_run_pane(stoat: &mut Stoat, cmd: CmdId, focus: bool) -> RunId {
+    let executor = stoat.executor.clone();
+    let ws = stoat.active_workspace_mut();
+    let (pane, run) = match run_pane_on_show(ws) {
+        Some(shown) => shown,
+        None => {
+            let focused = ws.panes.focus();
+            let state = RunState::new(ws, executor);
+            let run = ws.runs.insert(state);
+            let pane = ws.panes.split(Axis::Horizontal);
+            ws.panes.pane_mut(pane).view = View::Run(run);
+            ws.panes.set_focus(focused);
+            (pane, run)
+        },
+    };
+
+    let Workspace { runs, cmds, .. } = &mut *ws;
+    if let Some(run_state) = runs.get_mut(run) {
+        run_state.blocks.push(cmd);
+        run_state.scroll_offset = 0;
+        run_state.trim_blocks(cmds);
+    }
+    if focus {
+        ws.focus = FocusTarget::SplitPane;
+        ws.panes.set_focus(pane);
+        stoat.transition_mode("insert".into());
+    }
+    run
+}
+
+/// The split pane that shows a Run pane and its run, the focused pane when it
+/// shows one and else the first such pane, or `None` with no Run pane on
+/// show.
+fn run_pane_on_show(ws: &Workspace) -> Option<(PaneId, RunId)> {
+    let focused = ws.panes.focus();
+    if let View::Run(run) = ws.panes.pane(focused).view {
+        return Some((focused, run));
+    }
+    ws.panes
+        .split_panes()
+        .find_map(|(pane, shown)| match shown.view {
+            View::Run(run) => Some((pane, run)),
+            _ => None,
+        })
 }
 
 /// Start the next run of the Cmd `id` of the active workspace, a `bash -c` of
@@ -345,6 +438,7 @@ fn start_process(stoat: &mut Stoat, id: CmdId) {
     let host = stoat.terminal_host.clone();
     let tx = stoat.pty_tx.clone();
     let workspace = stoat.active_workspace;
+    let muted = style_rgb(stoat.theme.get(scope::UI_TEXT_MUTED).fg);
 
     let ws = stoat.active_workspace_mut();
     let diff = ws.env.diff.clone();
@@ -388,7 +482,22 @@ fn start_process(stoat: &mut Stoat, id: CmdId) {
         diff: &diff,
         vars: &vars,
     };
-    match pty::spawn_cmd(&*host, &executor, &cmd.command, &cmd.cwd, width, sink, &env) {
+    if let Some(shell) = cmd.shell.as_ref().filter(|shell| **shell != cmd.command) {
+        let row = match muted {
+            Some([r, g, b]) => format!("\x1b[38;2;{r};{g};{b}m{shell}\x1b[0m\r\n"),
+            None => format!("{shell}\r\n"),
+        };
+        cmd.grid.feed(row.as_bytes());
+    }
+    match pty::spawn_cmd(
+        &*host,
+        &executor,
+        cmd.run_text(),
+        &cmd.cwd,
+        width,
+        sink,
+        &env,
+    ) {
         Ok(process) => cmd.process = Some(process),
         Err(error) => {
             cmd.error = Some(format!("spawn failed: {error}"));

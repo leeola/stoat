@@ -256,7 +256,7 @@ fn paint_stack_rules(
 /// The track spans `row` in the `ui.divider` foreground, the color of a
 /// meter's track, and the fill covers `done` of `total` of it in the
 /// `ui.statusline.run` foreground. A plain terminal draws neither.
-fn paint_progress(
+pub(super) fn paint_progress(
     row: Rect,
     done: u32,
     total: u32,
@@ -294,7 +294,9 @@ fn paint_progress(
 ///
 /// A Parsed Cmd's status leads with its Kind Chip in `ui.run.kind`, or in
 /// `ui.key_label` for a theme that leaves that unset, which draws the label
-/// with no box. The other parts follow it.
+/// with no box. A Cmd with no Kind Chip that a config command started leads
+/// with that command's Source Tag in the tag's scope, when the theme sets the
+/// scope. The other parts follow the lead.
 ///
 /// A finished Cmd reads its mark, U+2713 in `ui.badge.complete` for an exit of
 /// 0, and otherwise U+2717 in `ui.error`, with `exit N` after it when the
@@ -312,18 +314,22 @@ fn paint_progress(
 /// [`CmdReport::progress`] gives them. The status-line scope can carry a
 /// background, which a header leaves to the pane.
 pub(crate) fn status_parts(cmd: &Cmd, theme: &crate::theme::Theme) -> Vec<StatusPart> {
-    let mut parts: Vec<StatusPart> = cmd
-        .kind
-        .chip()
-        .map(|label| StatusPart {
+    let kind_chip = cmd.kind.chip().map(|label| StatusPart {
+        text: label.to_owned(),
+        style: theme
+            .try_get(crate::theme::scope::UI_RUN_KIND)
+            .unwrap_or_else(|| theme.get(crate::theme::scope::UI_KEY_LABEL)),
+        chip: true,
+    });
+    let source_tag = || {
+        let (label, scope) = cmd.source?;
+        theme.try_get(scope).map(|style| StatusPart {
             text: label.to_owned(),
-            style: theme
-                .try_get(crate::theme::scope::UI_RUN_KIND)
-                .unwrap_or_else(|| theme.get(crate::theme::scope::UI_KEY_LABEL)),
+            style,
             chip: true,
         })
-        .into_iter()
-        .collect();
+    };
+    let mut parts: Vec<StatusPart> = kind_chip.or_else(source_tag).into_iter().collect();
 
     if !cmd.finished {
         let fg = theme.get(crate::theme::scope::UI_STATUSLINE_RUN).fg;
@@ -394,7 +400,7 @@ pub(crate) fn status_parts(cmd: &Cmd, theme: &crate::theme::Theme) -> Vec<Status
 ///
 /// A cell that the program left without a foreground takes the foreground of
 /// `dim`, and a cell that the program colored keeps its color.
-fn paint_grid_row(
+pub(super) fn paint_grid_row(
     buf: &mut Buffer,
     area: Rect,
     y: u16,
@@ -443,7 +449,12 @@ fn paint_grid_row(
 ///
 /// Each span draws in the foreground of its tone's scope alone, so a scope
 /// that carries a background leaves the pane's showing.
-fn paint_body_row(buf: &mut Buffer, area: Rect, row: &BodyRow, theme: &crate::theme::Theme) {
+pub(super) fn paint_body_row(
+    buf: &mut Buffer,
+    area: Rect,
+    row: &BodyRow,
+    theme: &crate::theme::Theme,
+) {
     let end = area.x.saturating_add(area.width);
     let mut x = area.x;
     for (text, tone) in &row.spans {

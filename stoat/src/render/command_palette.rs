@@ -14,9 +14,11 @@ use crate::{
         cmd_line::{self, CmdLine, CmdStatus},
         paint::style_rgb,
         picker::{Footer, PathRows, RowMarks, RowStart, FOOTER_ROWS},
+        run_pane,
         text::{pre_wrap_rows, wrap_text, write_str, write_str_clipped},
         TypeScale,
     },
+    run::cargo::CmdReport,
     theme::TypeRole,
     user_command::{
         pick,
@@ -37,6 +39,14 @@ use stoat_widgets::{
     bar::Bar,
     text_run::{self, TextRun},
 };
+
+/// The fewest columns of a Run Block's plate, the boards' small plate, whose
+/// 71 inner cells draw the board's 664 px.
+const RUN_BLOCK_COLS: u16 = 73;
+
+/// The most body rows that a Run Block shows, the newest rows of its Cmd's
+/// output.
+const RUN_BLOCK_ROWS: u16 = 16;
 
 const LIST_ROWS: u16 = 10;
 const DOC_ROWS: u16 = 6;
@@ -409,7 +419,10 @@ fn arg_body_rows(inner: Rect, header_rows: u16) -> Option<(u16, u16)> {
 
 /// Render the open command palette into `area`.
 ///
-/// While the palette history walks, the palette shows History, as
+/// A palette with a Run Block shows it, as [`render_palette_run_block`]
+/// paints it. Every other stage stamps the plate it draws in
+/// [`CommandPalette::plate`]. While the palette history walks, the palette
+/// shows History, as
 /// [`render_palette_history`] paints it. The ages of its lines count from
 /// `now`, the clock in unix seconds. Otherwise the palette shows the argument
 /// picker, the free-typed argument's hint, or the command list, by the stage
@@ -430,6 +443,10 @@ pub(crate) fn render_command_palette(
     buf: &mut Buffer,
     scene: &mut stoat_widgets::ApcScene,
 ) {
+    if palette.block.is_some() {
+        render_palette_run_block(palette, ws, home, theme, area, buf, scene);
+        return;
+    }
     if ws.palette_history.is_walking() {
         render_palette_history(palette, ws, home, theme, area, zoom, now, buf, scene);
         return;
@@ -503,11 +520,142 @@ pub(crate) fn render_command_palette(
         scene,
     );
 
-    if palette.command.is_none()
-        && let Some(layout) = palette_filter_layout(area, content_rows, zoom, palette.header_rows)
-    {
-        palette.viewport_rows = Some(layout.list.height as usize);
+    if let Some(layout) = palette_filter_layout(area, content_rows, zoom, palette.header_rows) {
+        palette.plate = Some(layout.modal);
+        if palette.command.is_none() {
+            palette.viewport_rows = Some(layout.list.height as usize);
+        }
     }
+}
+
+/// Render the palette's Run Block, the stage that shows the Cmd of a `block`
+/// command's Enter.
+///
+/// The plate keeps the top row and the width of the typing stage, as
+/// [`run_block_plate_width`] widens it, and its height follows its rows. The
+/// Cmd Line draws the Cmd's line with its first word as the token and no
+/// caret, and the status of the Run pane's header. One Island holds the body,
+/// the newest rows of the Cmd's report or of its grid, in the Run pane's row
+/// styles, with a running Parsed Cmd's progress bar on the first row.
+///
+/// The body takes 1 to [`RUN_BLOCK_ROWS`] rows above the area's last row. It
+/// grows with the output and holds its rows while the Cmd runs, and it takes
+/// the rows of the finished body at the end. The key line names the keys that
+/// act on the Cmd, which differ once it finishes.
+fn render_palette_run_block(
+    palette: &mut CommandPalette,
+    ws: &Workspace,
+    home: Option<&Path>,
+    theme: &crate::theme::Theme,
+    area: Rect,
+    buf: &mut Buffer,
+    scene: &mut stoat_widgets::ApcScene,
+) {
+    let Some(block) = palette.block.as_mut() else {
+        return;
+    };
+    let Some(cmd) = ws.cmds.get(block.cmd) else {
+        return;
+    };
+
+    let width = run_block_plate_width(block.origin, area);
+    let x = match width == block.origin.width {
+        true => block.origin.x,
+        false => area.x + area.width.saturating_sub(width) / 2,
+    };
+    let cwd = crate::run::abbreviate_path(&cmd.cwd, home);
+    let token = cmd
+        .command
+        .chars()
+        .take_while(|ch| !ch.is_whitespace())
+        .count();
+    let input = cmd_line::token_spans(&cmd.command, token, theme);
+    let parts = run_pane::status_parts(cmd, theme);
+    let line = CmdLine {
+        cwd: &cwd,
+        input: &input,
+        caret: None,
+        status: CmdStatus::Parts(&parts),
+    };
+    let header_rows = cmd_line::cmd_line_rows(&line, width.saturating_sub(2), theme, scene);
+    palette.header_rows = header_rows;
+
+    let report = cmd.report_rows();
+    let content = report
+        .as_ref()
+        .map_or_else(|| cmd.grid.rendered_line_count(), Vec::len);
+    let content_rows = u16::try_from(content).unwrap_or(u16::MAX);
+    block.rows = match cmd.finished {
+        true => content_rows,
+        false => block.rows.max(content_rows),
+    };
+    let room = area
+        .bottom()
+        .saturating_sub(1)
+        .saturating_sub(block.origin.y + header_rows + 4);
+    let rows = block.rows.clamp(1, RUN_BLOCK_ROWS).min(room.max(1));
+    let modal = Rect::new(x, block.origin.y, width, header_rows + rows + 4);
+
+    let modal_style = theme.get(crate::theme::scope::UI_MODAL_PALETTE);
+    let inner = crate::render::chrome::list_plate(buf, modal, modal_style, theme, &mut *scene);
+    cmd_line::cmd_line(buf, inner, &line, theme, scene);
+
+    let body = Rect::new(inner.x, inner.y + 1 + header_rows, inner.width, rows);
+    let plate = crate::render::chrome::plate_colors(theme, scene);
+    if let Some(plate) = plate {
+        let edges = [ISLAND_TOP, ISLAND_SIDE, ISLAND_BOTTOM, ISLAND_SIDE];
+        crate::render::chrome::modal_island(body, edges, plate, theme, buf, scene);
+    }
+
+    let row_rect = |y| Rect::new(body.x + 1, y, body.width.saturating_sub(2), 1);
+    let first = content.saturating_sub(usize::from(rows));
+    let dim = theme.get(crate::theme::scope::UI_TEXT_DIM);
+    for (y, index) in (body.y..body.bottom()).zip(first..content) {
+        match &report {
+            Some(report) => run_pane::paint_body_row(buf, row_rect(y), &report[index], theme),
+            None => run_pane::paint_grid_row(buf, row_rect(y), y, &cmd.grid, index, None, dim),
+        }
+    }
+    if !cmd.finished
+        && let Some((done, total)) = cmd.report.as_ref().and_then(CmdReport::progress)
+    {
+        run_pane::paint_progress(row_rect(body.y), done, total, theme, buf, scene);
+    }
+
+    let located = cmd
+        .finished_report()
+        .and_then(CmdReport::first_location)
+        .is_some();
+    let hints: &[(&str, &str)] = match (cmd.finished, located) {
+        (false, _) => &[("C-c", "interrupt"), ("Esc", "hide (keeps running)")],
+        (true, true) => &[("Enter", "go to failure"), ("Esc", "close")],
+        (true, false) => &[("Enter", "open output"), ("Esc", "close")],
+    };
+    let footer = Footer {
+        hints,
+        ..Footer::default()
+    };
+    let rect = crate::render::picker::footer_rect(modal);
+    crate::render::picker::modal_footer(buf, rect, &footer, plate, theme, scene);
+}
+
+/// The plate that a Run Block opens over when the palette painted no typing
+/// stage, a box of [`RUN_BLOCK_COLS`] by 6 cells centered in `area`.
+pub(crate) fn run_block_origin(area: Rect) -> Rect {
+    let size = (RUN_BLOCK_COLS, 6);
+    crate::render::chrome::modal_box(area, size, size, (20, 6), 0).unwrap_or(area)
+}
+
+/// The width of a Run Block's plate over `area`, for a stage that opened over
+/// the plate `origin`.
+///
+/// It is the width of `origin`, at least [`RUN_BLOCK_COLS`] and at most the
+/// area's width less 2. The plate never narrows while the palette is open.
+pub(crate) fn run_block_plate_width(origin: Rect, area: Rect) -> u16 {
+    origin
+        .width
+        .max(RUN_BLOCK_COLS)
+        .min(area.width.saturating_sub(2))
 }
 
 /// Render the inline file picker shown while collecting a `Files` argument
@@ -564,6 +712,7 @@ fn render_palette_arg_picker(
     let Some(layout) = palette_arg_layout(area, palette, home, zoom, preview_min) else {
         return;
     };
+    palette.plate = Some(layout.modal);
     palette.arg_plate_width = layout.plate_base;
     palette.header_rows = render_palette_prelude(
         &palette.input,
@@ -693,6 +842,7 @@ fn render_palette_free_arg(
     let Some(layout) = palette_filter_layout(area, rows_hint, zoom, palette.header_rows) else {
         return;
     };
+    palette.plate = Some(layout.modal);
     palette.header_rows = render_palette_prelude(
         &palette.input,
         palette.resolved.as_ref(),
@@ -797,6 +947,7 @@ fn render_palette_pick(
     let Some(layout) = palette_filter_layout(area, content_rows, zoom, palette.header_rows) else {
         return;
     };
+    palette.plate = Some(layout.modal);
     let status = {
         let name = palette.user_arg().map_or("", |arg| arg.name.as_str());
         let text = palette
@@ -906,6 +1057,7 @@ fn render_palette_cli(
     let Some(layout) = palette_filter_layout(area, content_rows, zoom, palette.header_rows) else {
         return;
     };
+    palette.plate = Some(layout.modal);
     let status = cli_status(&user, kind, specs, theme);
     palette.header_rows = render_palette_prelude(
         &palette.input,
@@ -1194,6 +1346,7 @@ fn render_palette_history(
     let Some(layout) = palette_filter_layout(area, content_rows, zoom, palette.header_rows) else {
         return;
     };
+    palette.plate = Some(layout.modal);
 
     let matches = ws.palette_history.matches();
     let place = ws

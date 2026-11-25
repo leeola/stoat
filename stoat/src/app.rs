@@ -55,7 +55,7 @@ use crate::{
         BlankedBuffer, Hold, PRIMARY_MODES,
     },
     review_walk::{ReviewWalk, WalkOrigin},
-    run::{PtyNotification, RunId},
+    run::{CmdId, PtyNotification, RunId},
     selection::{merge_overlapping_spans, SpanLanding},
     session_log::SessionLog,
     ssh,
@@ -1150,6 +1150,12 @@ pub struct Stoat {
     /// never persisted, because the choice answers what is on screen now.
     pub(crate) commits_split: Option<u16>,
     pub(crate) command_palette: Option<CommandPalette>,
+    /// The palette while a config command of its own submit starts, taken out
+    /// of [`Self::command_palette`] for the start.
+    ///
+    /// A start that shows its Cmd as the Run Block puts the palette back, and
+    /// the submit closes a palette that is still held when the start ends.
+    pub(crate) palette_held: Option<CommandPalette>,
     pub(crate) help: Option<Help>,
     pub(crate) file_finder: Option<FileFinder>,
     /// The workspace file list the last finder close left behind, so reopening
@@ -2891,6 +2897,7 @@ impl Stoat {
             modal_split: std::collections::BTreeMap::new(),
             commits_split: None,
             command_palette: None,
+            palette_held: None,
             help: None,
             file_finder: None,
             finder_path_cache: None,
@@ -6344,6 +6351,18 @@ impl Stoat {
             if active_modal(self).is_some() {
                 action_handlers::macro_recording::capture(self, &key);
             }
+            // A Run Block takes Ctrl-C as its running Cmd's interrupt and stays
+            // open, so no key kills the Cmd it shows.
+            if active_modal(self) == Some(ActiveModal::RunBlock)
+                && let Some(process) = self
+                    .run_block_cmd()
+                    .and_then(|id| self.active_workspace().cmds.get(id))
+                    .filter(|cmd| !cmd.finished)
+                    .and_then(|cmd| cmd.process.as_ref())
+            {
+                process.send_interrupt();
+                return UpdateEffect::Redraw;
+            }
             if keymap_state::close_topmost_modal(self) {
                 return UpdateEffect::Redraw;
             }
@@ -7236,6 +7255,16 @@ impl Stoat {
         Some((editor.buffer_id, offset))
     }
 
+    /// The Cmd that the palette's Run Block shows, or `None` while no Run Block
+    /// shows.
+    pub(crate) fn run_block_cmd(&self) -> Option<CmdId> {
+        self.command_palette
+            .as_ref()?
+            .block
+            .as_ref()
+            .map(|block| block.cmd)
+    }
+
     /// The scratch editor the open modal types into, or `None` when no modal is
     /// open or the open one has no input of its own.
     ///
@@ -7250,7 +7279,9 @@ impl Stoat {
             ActiveModal::FileFinder => &self.file_finder.as_ref()?.input,
             ActiveModal::SymbolFinder => &self.symbol_finder.as_ref()?.input,
             ActiveModal::CodeSearch => &self.code_search.as_ref()?.input,
-            ActiveModal::Palette => self.command_palette.as_ref()?.focused_input()?,
+            ActiveModal::Palette | ActiveModal::RunBlock => {
+                self.command_palette.as_ref()?.focused_input()?
+            },
             ActiveModal::Help => &self.help.as_ref()?.input,
             ActiveModal::Rename => &self.rename_input.as_ref()?.input,
             ActiveModal::Search => &self.search_input.as_ref()?.input,
@@ -9613,6 +9644,7 @@ impl Stoat {
         let env_host = self.env_host.clone();
         let executor = self.executor.clone();
         let modal_run = self.modal_run;
+        let palette_cmd = self.run_block_cmd();
         let ws = self.active_workspace_mut();
         match notif {
             PtyNotification::CmdOutput {
@@ -9642,6 +9674,12 @@ impl Stoat {
                     if let Some(process) = cmd.process.take() {
                         process.kill();
                     }
+                }
+                if palette_cmd == Some(id) {
+                    if on_screen {
+                        self.pty_dirty = true;
+                    }
+                    return UpdateEffect::None;
                 }
                 let Some((run_id, run_state)) =
                     runs.iter_mut().find(|(_, run)| run.blocks.contains(&id))
@@ -10074,9 +10112,10 @@ impl Stoat {
     /// [`Self::cmd_tick`] armed while a running Cmd is on show.
     ///
     /// A Cmd in a hidden pane, a parked tab, or a background workspace keeps
-    /// its count current on any pass but arms no timer. The timer fires at the
-    /// soonest next whole second among the shown Cmds, so each second's count
-    /// lands on the frame the wake starts.
+    /// its count current on any pass but arms no timer. The Cmd of the
+    /// palette's Run Block is on show. The timer fires at the soonest next
+    /// whole second among the shown Cmds, so each second's count lands on the
+    /// frame the wake starts.
     fn tick_cmds(&mut self) {
         let now = self.executor.now();
         for ws in self.workspaces.values_mut() {
@@ -10088,12 +10127,14 @@ impl Stoat {
         }
 
         let modal_run = self.modal_run;
+        let palette_cmd = self.run_block_cmd();
         let ws = self.active_workspace();
         let next_second = ws
             .runs
             .iter()
             .filter(|&(run_id, _)| Self::run_visible(ws, run_id, modal_run))
             .flat_map(|(_, run)| run.blocks.iter().filter_map(|id| ws.cmds.get(*id)))
+            .chain(palette_cmd.and_then(|id| ws.cmds.get(id)))
             .filter(|cmd| !cmd.finished)
             .filter_map(|cmd| cmd.started)
             .map(|started| {

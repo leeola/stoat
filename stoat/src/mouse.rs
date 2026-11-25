@@ -721,13 +721,15 @@ pub(crate) fn boxed_modal_surfaces(stoat: &Stoat) -> Option<ModalSurfaces> {
         }),
         // Nothing to point at. It owns the pointer all the same, so a press
         // never reaches the panes it covers, and keys alone answer it.
-        ActiveModal::QuitConfirm | ActiveModal::CheckoutConfirm => Some(ModalSurfaces {
-            list: Rect::new(0, 0, 0, 0),
-            preview: None,
-            len: 0,
-            selected: 0,
-            rows: ListRows::OnePerResult,
-        }),
+        ActiveModal::QuitConfirm | ActiveModal::CheckoutConfirm | ActiveModal::RunBlock => {
+            Some(ModalSurfaces {
+                list: Rect::new(0, 0, 0, 0),
+                preview: None,
+                len: 0,
+                selected: 0,
+                rows: ListRows::OnePerResult,
+            })
+        },
         // The bottom-line prompts leave the editor visible, so the pointer
         // stays the editor's.
         ActiveModal::Rename

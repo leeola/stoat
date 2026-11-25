@@ -68,7 +68,9 @@ pub(crate) use commits::{pump_commits, respawn_commits_panes};
 pub(crate) use file_finder::{
     close_file_finder, file_finder_move_selection, sync_file_finder_preview,
 };
-pub(crate) use palette::{sync_palette_picker, sync_pick_preview};
+pub(crate) use palette::{
+    close_palette, open_run_block, run_block_width, sync_palette_picker, sync_pick_preview,
+};
 pub(crate) use pane::{
     close_pane_by_id, dispose_view, restore_covered_terminal, restore_pane_after_term_exit,
     retire_parked_pane, scratch_editor_view, EditorDisposal,

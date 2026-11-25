@@ -3550,7 +3550,7 @@ fn drain_pending_leaves_pty_output_past_its_turn_budget_queued() {
             .pty_tx
             .try_send(PtyNotification::CmdOutput {
                 workspace: h.stoat.active_workspace,
-                cmd: crate::run::CmdId::default(),
+                cmd: CmdId::default(),
                 run: 0,
                 data: vec![b'x'; chunk],
             })
@@ -18261,6 +18261,40 @@ fn an_agent_switch_closes_the_palette_and_saves_the_workspace_left() {
             h.stoat.pending_workspace_saves.contains_key(&launch),
         ),
         (second, true, (None, None), true, false, true),
+    );
+}
+
+/// An agent switch closes the Run Block of the workspace it leaves. The
+/// block's running Cmd moves onto a Run pane's stack there and runs on.
+#[test]
+fn an_agent_switch_moves_a_running_block_into_a_run_pane() {
+    let mut h = Stoat::test();
+    h.stoat
+        .reload_user_config(r#"command hello { run = shell("echo hi"); }"#);
+    let launch = h.stoat.active_workspace;
+    let session = Arc::new(crate::host::FakeTerminalSession::new());
+    h.fake_terminal_host().push_session(session.clone());
+    action_handlers::dispatch(&mut h.stoat, &stoat_action::OpenCommandPalette);
+    h.type_text("hello");
+    h.type_keys("enter");
+    let cmd = h.stoat.run_block_cmd().expect("a Run Block");
+    let second = h.create_workspace();
+
+    open_agent_editor_in(&mut h, second);
+
+    let stacked: Vec<CmdId> = h.stoat.workspaces[launch]
+        .runs
+        .values()
+        .flat_map(|run| run.blocks.clone())
+        .collect();
+    assert_eq!(
+        (
+            h.stoat.active_workspace,
+            h.stoat.command_palette.is_none(),
+            stacked,
+            session.was_killed(),
+        ),
+        (second, true, vec![cmd], false),
     );
 }
 

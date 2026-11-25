@@ -2,6 +2,7 @@ use crate::{
     command_palette,
     keymap::{ResolvedAction, ResolvedArg},
     keymap_state,
+    theme::scope,
 };
 use std::{mem, slice, sync::Arc};
 use stoat_action::{registry, ParamDef};
@@ -161,7 +162,8 @@ pub(crate) struct FlatStep<'a> {
 /// Where the output of a [`UserCommand`] goes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Output {
-    /// The run modal, which shows the output of a shell step.
+    /// The Run Block, which the palette turns into to show the output of a
+    /// shell step.
     Block,
     /// A status message, with the first line of the output or the failure.
     Notify,
@@ -298,6 +300,19 @@ impl UserCommand {
         let mut flat = Vec::new();
         flatten_into(&mut vec![self], set, &mut flat);
         flat
+    }
+
+    /// The label and the scope of the Source Tag that names where the command
+    /// comes from, as the palette's rows of user commands draw it.
+    ///
+    /// A `cli` command reads `cli`, a command whose `run` lists its steps
+    /// reads `script`, and any other command reads `config`.
+    fn source_tag(&self) -> (&'static str, &'static str) {
+        match self.run {
+            RunSpec::Cli { .. } => ("cli", scope::UI_CMD_SOURCE_CLI),
+            RunSpec::Steps { script: true, .. } => ("script", scope::UI_CMD_SOURCE_SCRIPT),
+            RunSpec::Steps { script: false, .. } => ("config", scope::UI_CMD_SOURCE_CONFIG),
+        }
     }
 }
 

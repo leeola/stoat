@@ -45,9 +45,9 @@ pub(crate) enum PlannedStep {
 enum Plan {
     /// The steps that run in order, each shell step on a worker.
     Steps(VecDeque<PlannedStep>),
-    /// The shell line that the run modal runs and shows.
+    /// The shell line of a Cmd that the palette's Run Block shows.
     Modal(String),
-    /// The shell line that a Run pane's shell runs.
+    /// The shell line of a Cmd that joins a Run pane's stack.
     Pane(String),
 }
 
@@ -121,10 +121,14 @@ pub(crate) enum CliSpecState {
     Ready(Arc<LoadedCli>),
 }
 
-/// Run `command` with `values`, one value for each of its arguments.
+/// Run `command` with `values`, one value for each of its arguments, for the
+/// typed `line`.
 ///
-/// A run of shell steps alone under the `block` output runs in the run modal,
-/// and under the `run_pane` output in a Run pane. Any other run goes step by
+/// A run of shell steps alone runs as one Cmd, whose line is `line` and whose
+/// shell text is the run's shell line. Under the `block` output, the palette
+/// that started it turns into the Cmd's Run Block, and with no palette the Cmd
+/// joins a Run pane's stack. Under the `run_pane` output, the Cmd joins a Run
+/// pane's stack and the focus stays where it is. Any other run goes step by
 /// step here, as [`plan`] lays it out. A shell step runs on a worker with no
 /// terminal, so its stdout and its stderr stay apart. An action step runs once
 /// the step before it exits 0, and the first failure ends the run. A `cli`
@@ -135,7 +139,12 @@ pub(crate) enum CliSpecState {
 /// command's argument that its caller does not declare. A `file` or `dir`
 /// value that starts with `~/` runs with the `HOME` directory in place of the
 /// `~`.
-pub(crate) fn start(stoat: &mut Stoat, command: &UserCommand, values: Vec<String>) -> UpdateEffect {
+pub(crate) fn start(
+    stoat: &mut Stoat,
+    command: &UserCommand,
+    values: Vec<String>,
+    line: &str,
+) -> UpdateEffect {
     let values = fill_defaults(stoat, command, values);
     let values = expand_home(command, values, stoat.env_host.var("HOME").as_deref());
     let set = stoat.commands.clone();
@@ -143,8 +152,20 @@ pub(crate) fn start(stoat: &mut Stoat, command: &UserCommand, values: Vec<String
         context::default_text(stoat, default)
     });
     match planned {
-        Plan::Modal(line) => action_handlers::run::run_command(stoat, &line),
-        Plan::Pane(line) => action_handlers::run::run_line_in_pane(stoat, &line),
+        Plan::Modal(shell) => {
+            let width = action_handlers::run_block_width(stoat);
+            let source = Some(command.source_tag());
+            let id = action_handlers::run::start_cmd_as(stoat, line, Some(&shell), source, width);
+            action_handlers::open_run_block(stoat, id);
+            UpdateEffect::Redraw
+        },
+        Plan::Pane(shell) => {
+            let width = action_handlers::run::run_pane_width(stoat);
+            let source = Some(command.source_tag());
+            let id = action_handlers::run::start_cmd_as(stoat, line, Some(&shell), source, width);
+            action_handlers::run::append_to_run_pane(stoat, id, false);
+            UpdateEffect::Redraw
+        },
         Plan::Steps(steps) => {
             let run = CommandRun {
                 id: NEXT_RUN.fetch_add(1, Ordering::Relaxed),
@@ -265,10 +286,10 @@ fn expand_home(command: &UserCommand, mut values: Vec<String>, home: Option<&str
 /// tail.
 ///
 /// Under the `block` and the `run_pane` outputs, a run of shell steps alone
-/// joins its lines with ` && ` into the one line of the run modal or of the
-/// Run pane. A run with an action step goes step by step under them, as a
-/// `notify` run does, because neither the run modal nor the Run pane reports
-/// the exit status that an action step waits on.
+/// joins its lines with ` && ` into the one shell line of a Cmd. A run with an
+/// action step goes step by step under them, as a `notify` run does, because
+/// an action step waits on the exit status of the step before it, and a Cmd's
+/// exit never reaches the run.
 fn plan(
     command: &UserCommand,
     set: &CommandSet,
@@ -795,7 +816,8 @@ mod tests {
         cli_spec::{self, CliSpec, JJ_FISH, RG_HELP},
         host::ShellOutput,
         location_picker::LocationEntry,
-        pane::{DockPanel, DockSide, DockVisibility, FocusTarget, View},
+        pane::{DockPanel, DockSide, DockVisibility, FocusTarget, PaneId, View},
+        run::RunId,
         test_harness::TestHarness,
         user_command::{ArgKind, CommandArg, CommandSet, Output, RunSpec, Step, UserCommand},
     };
@@ -866,7 +888,7 @@ mod tests {
     }
 
     #[test]
-    fn the_default_output_plans_the_run_modal() {
+    fn the_default_output_plans_the_run_block() {
         let command = UserCommand {
             name: "pr".to_owned(),
             doc: String::new(),
@@ -889,30 +911,6 @@ mod tests {
                 &mut |_| String::new()
             ),
             Plan::Modal("gh pr checkout 412".to_owned()),
-        );
-    }
-
-    /// A command of the default output runs its line in the run modal through
-    /// the terminal host, and the modal's Cmd takes the exit status.
-    #[test]
-    fn a_block_command_runs_its_line_through_the_terminal_host() {
-        let mut h = loaded(r#"command hello { run = shell("echo hi"); }"#);
-        submit(&mut h, "hello");
-        let spawns = h.fake_terminal_host().spawns().len();
-        let cmd = {
-            let run_id = h.stoat.modal_run.expect("the run modal is open");
-            h.stoat.active_workspace().runs[run_id].blocks[0]
-        };
-
-        h.inject_cmd_done(cmd, 2);
-        assert_eq!(
-            (
-                spawns,
-                last_spawn(&h),
-                h.fake_shell.invocations(),
-                h.stoat.active_workspace().cmds[cmd].exit_status,
-            ),
-            (1, Some(bash("echo hi")), Vec::new(), Some(2)),
         );
     }
 
@@ -1144,43 +1142,92 @@ mod tests {
         );
     }
 
+    /// The command's Cmd joins the stack of a Run pane that splits the editor
+    /// pane downward, with its line, its shell text, and its Source Tag, and
+    /// the editor pane keeps the focus.
     #[test]
-    fn a_run_pane_command_opens_a_run_pane_and_sends_its_line() {
+    fn a_run_pane_command_opens_a_run_pane_and_keeps_the_focus() {
         let mut h = loaded(CHECK);
+        let editor_pane = h.stoat.active_workspace().panes.focus();
         submit(&mut h, "check");
 
         let ws = h.stoat.active_workspace();
+        let shown: Vec<(PaneId, RunId)> = ws
+            .panes
+            .split_panes()
+            .filter_map(|(pane, shown)| match shown.view {
+                View::Run(run) => Some((pane, run)),
+                _ => None,
+            })
+            .collect();
+        let [(run_pane, run)] = shown[..] else {
+            panic!("one Run pane, not {}", shown.len());
+        };
+        let (above, below) = (
+            ws.panes.pane(editor_pane).area,
+            ws.panes.pane(run_pane).area,
+        );
+        let stack: Vec<_> = ws.runs[run]
+            .blocks
+            .iter()
+            .map(|id| {
+                let cmd = &ws.cmds[*id];
+                (
+                    cmd.command.as_str(),
+                    cmd.shell.as_deref(),
+                    cmd.source.map(|(label, _)| label),
+                )
+            })
+            .collect();
         assert_eq!(
             (
-                matches!(ws.panes.pane(ws.panes.focus()).view, View::Run(_)),
+                ws.panes.focus() == editor_pane,
+                (below.x, below.y > above.y),
+                stack,
                 last_spawn(&h),
                 h.fake_shell.invocations(),
             ),
-            (true, Some(bash("make test")), Vec::new()),
+            (
+                true,
+                (above.x, true),
+                vec![("check", Some("make test"), Some("config"))],
+                Some(bash("make test")),
+                Vec::new()
+            ),
         );
     }
 
-    /// A Run pane on show takes the line and the focus, and no second run
-    /// opens.
+    /// A Run pane on show takes the Cmd onto its stack, no second run opens,
+    /// and the focus stays on the editor pane.
     #[test]
     fn a_run_pane_command_uses_the_run_pane_on_show() {
         let mut h = loaded(CHECK);
         action_handlers::dispatch(&mut h.stoat, &stoat_action::SplitRight);
         action_handlers::dispatch(&mut h.stoat, &stoat_action::OpenRun);
-        let run_pane = h.stoat.active_workspace().panes.focus();
         action_handlers::dispatch(&mut h.stoat, &stoat_action::FocusLeft);
+        let editor_pane = h.stoat.active_workspace().panes.focus();
         submit(&mut h, "check");
 
         let ws = h.stoat.active_workspace();
+        let stacks: Vec<Vec<&str>> = ws
+            .runs
+            .values()
+            .map(|run| {
+                run.blocks
+                    .iter()
+                    .map(|id| ws.cmds[*id].command.as_str())
+                    .collect()
+            })
+            .collect();
         assert_eq!(
-            (ws.runs.len(), ws.panes.focus() == run_pane, last_spawn(&h),),
-            (1, true, Some(bash("make test"))),
+            (stacks, ws.panes.focus() == editor_pane, last_spawn(&h)),
+            (vec![vec!["check"]], true, Some(bash("make test"))),
         );
     }
 
-    /// A Run pane takes the focus from a dock that held it.
+    /// A Run pane command leaves the focus in the dock that held it.
     #[test]
-    fn a_run_pane_command_takes_the_focus_from_a_dock() {
+    fn a_run_pane_command_leaves_the_focus_in_a_dock() {
         let mut h = loaded(CHECK);
         let ws = h.stoat.active_workspace_mut();
         let dock = ws.docks.insert(DockPanel {
@@ -1194,13 +1241,8 @@ mod tests {
         submit(&mut h, "check");
 
         let ws = h.stoat.active_workspace();
-        assert_eq!(
-            (
-                ws.focus,
-                matches!(ws.panes.pane(ws.panes.focus()).view, View::Run(_)),
-            ),
-            (FocusTarget::SplitPane, true),
-        );
+        let stacked: usize = ws.runs.values().map(|run| run.blocks.len()).sum();
+        assert_eq!((ws.focus, stacked), (FocusTarget::Dock(dock), 1));
     }
 
     /// The user command `ship`, which tests, pushes, and opens a pull request
@@ -1272,9 +1314,23 @@ mod tests {
             r#"command check { run = [shell("cargo fmt --check"), shell("cargo clippy")]; output = run_pane; }"#,
         );
         submit(&mut h, "check");
+
+        let cmd = h
+            .stoat
+            .active_workspace()
+            .cmds
+            .values()
+            .next()
+            .expect("the command's Cmd");
+        let joined = "cargo fmt --check && cargo clippy";
         assert_eq!(
-            (last_spawn(&h), h.fake_shell.invocations()),
-            (Some(bash("cargo fmt --check && cargo clippy")), Vec::new()),
+            (
+                cmd.shell.as_deref(),
+                cmd.source.map(|(label, _)| label),
+                last_spawn(&h),
+                h.fake_shell.invocations(),
+            ),
+            (Some(joined), Some("script"), Some(bash(joined)), Vec::new()),
         );
     }
 

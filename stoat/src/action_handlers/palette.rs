@@ -1,8 +1,9 @@
+use super::run;
 use crate::{
     app::{Stoat, UpdateEffect},
     cli_spec::CliSpec,
     command_palette::{
-        self, ArgList, ArgPicker, ArgRow, Availability, CliListKind, CommandPalette,
+        self, ArgList, ArgPicker, ArgRow, Availability, CliListKind, CommandPalette, PaletteBlock,
         PaletteCommand, PaletteOutcome, PickLoad, PickState,
     },
     commit_picker,
@@ -10,6 +11,8 @@ use crate::{
     host::FsHost,
     keymap_state::StoatKeymapState,
     picker::{PathPicker, PendingScan, PreviewSource},
+    render,
+    run::CmdId,
     user_command::{self, run::CliSpecState, RunSpec, TextDefault},
     walkthrough,
 };
@@ -229,7 +232,11 @@ pub(super) fn open_palette_seeded(stoat: &mut Stoat, seed: &str) -> UpdateEffect
 /// spawning the walk needs [`Stoat`]-level resources (the executor, fs host, and
 /// redraw notifier) that a palette method does not see.
 pub(crate) fn sync_palette_picker(stoat: &mut Stoat) {
-    if stoat.command_palette.is_none() {
+    if stoat
+        .command_palette
+        .as_ref()
+        .is_none_or(|palette| palette.block.is_some())
+    {
         return;
     }
     let active_idx = stoat.active_workspace;
@@ -812,8 +819,19 @@ fn sync_arg_picker_browse(stoat: &mut Stoat, tail: &str) {
 /// when the palette consumed the submission (even if the outcome is a redraw
 /// without a dispatch), or `None` if no palette is open so the caller can
 /// fall through to other prompt consumers.
+///
+/// Over a Run Block, Enter acts on its Cmd as [`run::block_enter`] takes it,
+/// and an Enter that acts closes the palette, since the stage would stand over
+/// what the Enter opened.
 pub(super) fn palette_submit(stoat: &mut Stoat) -> Option<UpdateEffect> {
     stoat.command_palette.as_ref()?;
+    if let Some(cmd) = stoat.run_block_cmd() {
+        let effect = run::block_enter(stoat, cmd);
+        if effect == UpdateEffect::Redraw {
+            close_palette(stoat);
+        }
+        return Some(effect);
+    }
     settle_command_list(stoat);
     settle_arg_picker_scan(stoat);
     let outcome = {
@@ -834,7 +852,13 @@ pub(super) fn palette_submit(stoat: &mut Stoat) -> Option<UpdateEffect> {
 ///
 /// While the history walks, `Esc` ends the walk and writes the typed text
 /// back, and the palette stays open on the list for that text.
+///
+/// Over a Run Block, `Esc` closes the palette at once, as [`close_palette`]
+/// closes it.
 pub(super) fn palette_cancel(stoat: &mut Stoat) -> Option<UpdateEffect> {
+    if stoat.command_palette.as_ref()?.block.is_some() {
+        return close_palette(stoat).then_some(UpdateEffect::Redraw);
+    }
     let active_idx = stoat.active_workspace;
     let palette = stoat.command_palette.as_mut()?;
     let ws = &mut stoat.workspaces[active_idx];
@@ -1315,33 +1339,580 @@ fn apply_outcome(stoat: &mut Stoat, outcome: PaletteOutcome) -> UpdateEffect {
             stoat
                 .active_workspace_mut()
                 .palette_history
-                .push_at(line, Some(ran_at));
-            close_palette(stoat);
-            user_command::run::start(stoat, &command, values)
+                .push_at(line.clone(), Some(ran_at));
+            stoat.palette_held = stoat.command_palette.take();
+            let effect = user_command::run::start(stoat, &command, values, &line);
+            if let Some(palette) = stoat.palette_held.take() {
+                dispose_palette(stoat, palette);
+            }
+            effect
         },
     }
 }
 
-/// Close the palette, disposing its [`InputView`] and restoring the saved
-/// pre-palette mode. Returns `true` if a palette was open, `false` otherwise.
-fn close_palette(stoat: &mut Stoat) -> bool {
+/// Close the palette, disposing its [`InputView`] and ending the history walk.
+/// Returns `true` if a palette was open, `false` otherwise.
+///
+/// A Run Block's Cmd outlives the stage only while it runs. A running Cmd
+/// moves onto a Run pane's stack, as [`run::append_to_run_pane`] places it,
+/// and a finished one leaves the store.
+pub(crate) fn close_palette(stoat: &mut Stoat) -> bool {
     let Some(palette) = stoat.command_palette.take() else {
         return false;
     };
-    {
-        let active_idx = stoat.active_workspace;
-        let workspaces = &mut stoat.workspaces;
-        palette.dispose(&mut workspaces[active_idx]);
-        workspaces[active_idx].palette_history.reset();
+    if let Some(block) = &palette.block {
+        let running = stoat
+            .active_workspace()
+            .cmds
+            .get(block.cmd)
+            .is_some_and(|cmd| !cmd.finished);
+        match running {
+            true => {
+                run::append_to_run_pane(stoat, block.cmd, false);
+            },
+            false => {
+                stoat.active_workspace_mut().cmds.remove(block.cmd);
+            },
+        }
     }
+    dispose_palette(stoat, palette);
     true
+}
+
+/// Dispose the editors of `palette`, a palette out of
+/// [`Stoat::command_palette`], and end the history walk.
+fn dispose_palette(stoat: &mut Stoat, palette: CommandPalette) {
+    let ws = stoat.active_workspace_mut();
+    palette.dispose(ws);
+    ws.palette_history.reset();
+}
+
+/// The grid width, in cells, of the Cmd that a config command's start shows.
+///
+/// With a held palette, the Cmd shows in the Run Block, whose plate takes the
+/// width that [`render::command_palette::run_block_plate_width`] gives over the
+/// plate of the palette's typing stage, and the body's rows stand one cell
+/// inside the plate's inner rect. With no held palette, the Cmd joins a Run
+/// pane, as [`run::run_pane_width`] sizes it.
+pub(crate) fn run_block_width(stoat: &Stoat) -> u16 {
+    let Some(palette) = stoat.palette_held.as_ref() else {
+        return run::run_pane_width(stoat);
+    };
+    let area = stoat.size();
+    let origin = palette
+        .plate
+        .unwrap_or_else(|| render::command_palette::run_block_origin(area));
+    render::command_palette::run_block_plate_width(origin, area).saturating_sub(4)
+}
+
+/// Show the Cmd `id` that a config command's start ran.
+///
+/// With a held palette, the palette turns into the Cmd's Run Block over the
+/// plate of its typing stage. Its argument picker and its pick list go, the
+/// history walk ends, and its input stays the modal's input in `normal` mode,
+/// so no key types into it. With no held palette, the Cmd joins a Run pane, as
+/// [`run::append_to_run_pane`] places it, and the focus stays where it is.
+pub(crate) fn open_run_block(stoat: &mut Stoat, id: CmdId) {
+    let Some(mut palette) = stoat.palette_held.take() else {
+        run::append_to_run_pane(stoat, id, false);
+        return;
+    };
+    let origin = palette
+        .plate
+        .unwrap_or_else(|| render::command_palette::run_block_origin(stoat.size()));
+    let ws = stoat.active_workspace_mut();
+    palette.dispose_arg_picker(ws);
+    if let Some(pick) = palette.pick.take() {
+        pick.preview.dispose(ws);
+    }
+    ws.palette_history.reset();
+    if let Some(editor) = ws.editors.get_mut(palette.input.editor_id) {
+        editor.mode = "normal".into();
+    }
+    palette.block = Some(PaletteBlock {
+        cmd: id,
+        origin,
+        rows: 0,
+    });
+    stoat.command_palette = Some(palette);
 }
 
 #[cfg(test)]
 mod tests {
     use super::{list_child_dirs, revision_candidates};
-    use crate::{app::Stoat, host::FakeFs};
-    use std::path::{Path, PathBuf};
+    use crate::{
+        action_handlers,
+        app::Stoat,
+        host::{FakeFs, FakeTerminalSession},
+        keymap_state::{self, active_modal, ActiveModal},
+        pane::{PaneId, View},
+        run::{cargo::ONE_FAILURE, CmdId, PtyNotification},
+        test_harness::{editor, TestHarness},
+        theme::scope,
+        user_command,
+    };
+    use ratatui::{buffer::Buffer, layout::Rect, style::Modifier};
+    use std::{
+        path::{Path, PathBuf},
+        sync::Arc,
+    };
+
+    /// The user command `hello`, which runs under the default `block` output.
+    const HELLO: &str = r#"command hello { run = shell("echo hi"); }"#;
+
+    /// The file that the failure of [`ONE_FAILURE`] names, under the root
+    /// `/work`.
+    const CHROME: &str = "/work/stoat/src/render/chrome.rs";
+
+    /// A harness with the user config `source` loaded.
+    fn loaded(source: &str) -> TestHarness {
+        let mut h = Stoat::test();
+        h.stoat.reload_user_config(source);
+        h
+    }
+
+    /// Open the palette and type `line`, with a fresh fake session queued for
+    /// the process that a run of it starts, and answer the session.
+    fn typed(h: &mut TestHarness, line: &str) -> Arc<FakeTerminalSession> {
+        let session = Arc::new(FakeTerminalSession::new());
+        h.fake_terminal_host().push_session(session.clone());
+        action_handlers::dispatch(&mut h.stoat, &stoat_action::OpenCommandPalette);
+        h.type_text(line);
+        session
+    }
+
+    /// Run `line` from the palette with Enter, as [`typed`] types it, and
+    /// answer the session of its process.
+    fn entered(h: &mut TestHarness, line: &str) -> Arc<FakeTerminalSession> {
+        let session = typed(h, line);
+        h.type_keys("enter");
+        session
+    }
+
+    /// The Cmd that the palette's Run Block shows.
+    fn block_cmd(h: &TestHarness) -> CmdId {
+        h.stoat.run_block_cmd().expect("a Run Block")
+    }
+
+    /// The plate that the palette's typing stage drew last.
+    fn plate(h: &TestHarness) -> Rect {
+        h.stoat
+            .command_palette
+            .as_ref()
+            .and_then(|palette| palette.plate)
+            .expect("a plate")
+    }
+
+    /// Row `y` of `buf` across `plate`, each U+2500 and U+2502 read as a
+    /// space, trimmed.
+    fn plate_row(buf: &Buffer, plate: Rect, y: u16) -> String {
+        let text: String = (plate.x..plate.right())
+            .map(|x| buf[(x, y)].symbol())
+            .collect();
+        text.replace(['\u{2500}', '\u{2502}'], " ")
+            .trim()
+            .to_owned()
+    }
+
+    /// The split panes that show a Run pane, each with its stack.
+    fn run_stacks(h: &TestHarness) -> Vec<(PaneId, Vec<CmdId>)> {
+        let ws = h.stoat.active_workspace();
+        ws.panes
+            .split_panes()
+            .filter_map(|(pane, shown)| match shown.view {
+                View::Run(run) => Some((pane, ws.runs[run].blocks.clone())),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn enter_on_a_block_command_turns_the_palette_into_its_run_block() {
+        let mut h = loaded(HELLO);
+        entered(&mut h, "hello");
+
+        let cmd = &h.stoat.active_workspace().cmds[block_cmd(&h)];
+        let spawn = h
+            .fake_terminal_host()
+            .spawns()
+            .last()
+            .map(|spawn| (spawn.program.clone(), spawn.args.clone()));
+        assert_eq!(
+            (
+                (
+                    cmd.command.as_str(),
+                    cmd.shell.as_deref(),
+                    cmd.source.map(|(label, _)| label)
+                ),
+                active_modal(&h.stoat),
+                keymap_state::modal_predicate(&h.stoat),
+                h.stoat.focused_mode(),
+                spawn,
+                h.fake_shell.invocations().len(),
+                h.stoat
+                    .active_workspace()
+                    .palette_history
+                    .entries()
+                    .last()
+                    .map(String::as_str),
+            ),
+            (
+                ("hello", Some("echo hi"), Some("config")),
+                Some(ActiveModal::RunBlock),
+                Some("run_block"),
+                "normal",
+                Some((
+                    "bash".to_owned(),
+                    vec!["-c".to_owned(), "echo hi".to_owned()]
+                )),
+                0,
+                Some("hello"),
+            ),
+        );
+    }
+
+    /// The Run Block's Cmd Line keeps the typed line on the typing stage's
+    /// row, and the caret that the typing stage drew goes.
+    #[test]
+    fn the_run_block_keeps_its_line_and_draws_no_caret() {
+        let mut h = loaded(HELLO);
+        typed(&mut h, "hello");
+        let typing = header(&mut h);
+        h.type_keys("enter");
+        assert_eq!([typing, header(&mut h)], [(true, true), (true, false)]);
+    }
+
+    /// Whether the palette's Cmd Line row reads `hello`, and whether a cell of
+    /// it draws a caret.
+    ///
+    /// A caret draws in the cursor's style in cells, reversed under a theme
+    /// with no cursor scope, and on the text color in the plate.
+    fn header(h: &mut TestHarness) -> (bool, bool) {
+        let buf = h.render_composited();
+        let plate = plate(h);
+        let y = plate.y + 1;
+        let cursor = h.stoat.theme.cursor_style().bg;
+        let text = h.stoat.theme.get(scope::UI_TEXT).fg;
+        let caret = (plate.x..plate.right()).any(|x| {
+            let cell = &buf[(x, y)];
+            cell.modifier.contains(Modifier::REVERSED)
+                || cursor.is_some_and(|bg| cell.bg == bg)
+                || text.is_some_and(|fg| cell.bg == fg)
+        });
+        (plate_row(&buf, plate, y).contains("hello"), caret)
+    }
+
+    /// A body of 40 lines shows its newest 16, under the shell row that opens
+    /// the grid. The window leaves room for more rows, so the 16 are the
+    /// body's own bound.
+    #[test]
+    fn the_run_block_body_follows_the_tail() {
+        let mut h = TestHarness::with_size(160, 50);
+        h.stoat.reload_user_config(HELLO);
+        entered(&mut h, "hello");
+        let output: String = (1..=40).map(|n| format!("line {n}\r\n")).collect();
+        h.inject_cmd_output(block_cmd(&h), output.as_bytes());
+
+        let buf = h.render_composited();
+        let plate = plate(&h);
+        let rows: Vec<String> = (plate.y + 3..plate.y + 19)
+            .map(|y| plate_row(&buf, plate, y))
+            .collect();
+        let tail: Vec<String> = (25..=40).map(|n| format!("line {n}")).collect();
+        assert_eq!(rows, tail);
+    }
+
+    #[test]
+    fn the_plate_keeps_its_top_and_its_width_at_enter() {
+        let mut h = loaded(HELLO);
+        typed(&mut h, "hello");
+        let typing = plate_sides(&mut h);
+        h.type_keys("enter");
+        assert_eq!(plate_sides(&mut h), typing);
+    }
+
+    /// The glyph of the plate's top left corner and the columns of its two
+    /// sides on the Cmd Line row, under the typing stage's plate.
+    fn plate_sides(h: &mut TestHarness) -> (String, u16, u16) {
+        let buf = h.render_composited();
+        let plate = plate(h);
+        let y = plate.y + 1;
+        let middle = plate.x + plate.width / 2;
+        let side = |x: &u16| buf[(*x, y)].symbol() == "\u{2502}";
+        let left = (0..middle).rev().find(side).expect("a left side");
+        let right = (middle..buf.area.width).find(side).expect("a right side");
+        (buf[(left, plate.y)].symbol().to_owned(), left, right)
+    }
+
+    /// The key line names `C-c` and `Esc` while the Cmd runs, and `Enter` and
+    /// `Esc` once it finishes, and never the Jobs keys of a later leaf.
+    #[test]
+    fn the_key_line_names_the_keys_of_a_running_block_and_of_a_finished_one() {
+        let mut h = TestHarness::with_size(160, 50);
+        h.stoat.reload_user_config(HELLO);
+        entered(&mut h, "hello");
+        let running = key_line(&mut h);
+        h.inject_cmd_done(block_cmd(&h), 0);
+        let finished = key_line(&mut h);
+
+        let names = |line: &str, keys: &str| (line.contains(keys), line.contains("Jobs"));
+        assert_eq!(
+            [
+                names(&running, "C-c interrupt  Esc hide (keeps running)"),
+                names(&finished, "Enter open output  Esc close"),
+            ],
+            [(true, false); 2],
+        );
+    }
+
+    /// The row of the plate that names `Esc`, the key line.
+    fn key_line(h: &mut TestHarness) -> String {
+        let buf = h.render_composited();
+        let plate = plate(h);
+        (plate.y..buf.area.height)
+            .map(|y| plate_row(&buf, plate, y))
+            .find(|row| row.contains("Esc"))
+            .expect("a key line")
+    }
+
+    /// `Esc` on a running block closes the palette and moves the Cmd onto the
+    /// stack of a Run pane that splits the editor pane downward. The Cmd runs
+    /// on, and the editor pane keeps the focus.
+    #[test]
+    fn escape_on_a_running_block_moves_the_cmd_into_a_run_pane() {
+        let mut h = loaded(HELLO);
+        let editor_pane = h.stoat.active_workspace().panes.focus();
+        let session = entered(&mut h, "hello");
+        let cmd = block_cmd(&h);
+        h.type_keys("escape");
+
+        let stacks = run_stacks(&h);
+        let [(run_pane, ref stack)] = stacks[..] else {
+            panic!("one Run pane, not {}", stacks.len());
+        };
+        let ws = h.stoat.active_workspace();
+        let (above, below) = (
+            ws.panes.pane(editor_pane).area,
+            ws.panes.pane(run_pane).area,
+        );
+        assert_eq!(
+            (
+                h.stoat.command_palette.is_none(),
+                stack.clone(),
+                (below.x, below.y > above.y),
+                session.was_killed(),
+                ws.panes.focus() == editor_pane,
+            ),
+            (true, vec![cmd], (above.x, true), false, true),
+        );
+    }
+
+    #[test]
+    fn ctrl_c_interrupts_a_running_block_and_leaves_it_open() {
+        let mut h = loaded(HELLO);
+        let session = entered(&mut h, "hello");
+        h.type_keys("ctrl-c");
+        assert_eq!(
+            (session.sent_bytes(), active_modal(&h.stoat)),
+            (vec![vec![0x03]], Some(ActiveModal::RunBlock)),
+        );
+    }
+
+    #[test]
+    fn ctrl_c_closes_a_finished_block() {
+        let mut h = loaded(HELLO);
+        entered(&mut h, "hello");
+        let cmd = block_cmd(&h);
+        h.inject_cmd_done(cmd, 0);
+        h.type_keys("ctrl-c");
+        assert_eq!(
+            (
+                h.stoat.command_palette.is_none(),
+                h.stoat.active_workspace().cmds.contains_key(cmd)
+            ),
+            (true, false),
+        );
+    }
+
+    #[test]
+    fn escape_on_a_finished_block_drops_the_cmd() {
+        let mut h = loaded(HELLO);
+        entered(&mut h, "hello");
+        h.inject_cmd_done(block_cmd(&h), 0);
+        h.type_keys("escape");
+
+        let ws = h.stoat.active_workspace();
+        assert_eq!(
+            (
+                h.stoat.command_palette.is_none(),
+                ws.cmds.len(),
+                ws.runs.len()
+            ),
+            (true, 0, 0),
+        );
+    }
+
+    /// The palette's input stays in normal mode under the Run Block, so typed
+    /// keys change neither its text nor the buffer behind the palette.
+    #[test]
+    fn typing_changes_nothing_while_the_block_shows() {
+        let mut h = loaded(HELLO);
+        editor::seed_focused_buffer(&mut h.stoat, "behind\n");
+        let behind = {
+            let ws = h.stoat.active_workspace();
+            let View::Editor(editor_id) = ws.panes.pane(ws.panes.focus()).view else {
+                panic!("the focused pane shows an editor");
+            };
+            ws.editors[editor_id].buffer_id
+        };
+        entered(&mut h, "hello");
+        h.type_keys("i a b x d d");
+
+        let input = h
+            .stoat
+            .command_palette
+            .as_ref()
+            .expect("the palette is open")
+            .input
+            .text(h.stoat.active_workspace());
+        assert_eq!(
+            (input, editor::buffer_text(&h.stoat, behind)),
+            ("hello".to_owned(), "behind\n".to_owned()),
+        );
+    }
+
+    /// Enter on a finished Line Cmd closes the palette and shows its output,
+    /// the shell row and the program's rows, in a scratch buffer in the pane
+    /// behind.
+    #[test]
+    fn enter_opens_a_finished_line_cmd_s_output_in_a_buffer() {
+        let mut h = loaded(HELLO);
+        entered(&mut h, "hello");
+        let cmd = block_cmd(&h);
+        h.inject_cmd_output(cmd, b"hi\r\n");
+        h.inject_cmd_done(cmd, 0);
+        h.type_keys("enter");
+
+        let shown = {
+            let ws = h.stoat.active_workspace();
+            let View::Editor(editor_id) = ws.panes.pane(ws.panes.focus()).view else {
+                panic!("the focused pane shows an editor");
+            };
+            ws.editors[editor_id].buffer_id
+        };
+        assert_eq!(
+            (
+                h.stoat.command_palette.is_none(),
+                editor::buffer_text(&h.stoat, shown)
+            ),
+            (true, "echo hi\nhi".to_owned()),
+        );
+    }
+
+    /// Enter on a finished `cargo test` Cmd with a located failure closes the
+    /// palette and opens the failure's file at its line and column.
+    #[test]
+    fn enter_goes_to_the_failure_of_a_finished_cargo_test() {
+        let mut h = loaded(r#"command t { run = shell("cargo test"); }"#);
+        h.stoat.active_workspace_mut().git_root = PathBuf::from("/work");
+        h.seed_fixture(CHROME, format!("{}\n", "x".repeat(20)).repeat(500));
+        entered(&mut h, "t");
+        let cmd = block_cmd(&h);
+        h.inject_cmd_output(cmd, ONE_FAILURE.as_bytes());
+        h.inject_cmd_done(cmd, 101);
+        h.type_keys("enter");
+
+        let point = editor::focused_cursor_point(&mut h.stoat);
+        assert_eq!(
+            (
+                h.stoat.command_palette.is_none(),
+                editor::focused_buffer_path(&h.stoat),
+                (point.row, point.column),
+            ),
+            (true, PathBuf::from(CHROME), (411, 8)),
+        );
+    }
+
+    /// A `block` command that runs with no palette open puts its Cmd on a Run
+    /// pane's stack.
+    #[test]
+    fn a_block_command_with_no_palette_joins_the_run_pane() {
+        let mut h = loaded(HELLO);
+        let command = h.stoat.commands.get("hello").expect("hello loads").clone();
+        user_command::run::start(&mut h.stoat, &command, Vec::new(), "hello");
+
+        let ws = h.stoat.active_workspace();
+        let stacked: Vec<&str> = run_stacks(&h)
+            .iter()
+            .flat_map(|(_, stack)| stack.iter().map(|id| ws.cmds[*id].command.as_str()))
+            .collect();
+        assert_eq!(
+            (h.stoat.command_palette.is_none(), stacked),
+            (true, vec!["hello"])
+        );
+    }
+
+    /// `t` flips the Run Block's finished `cargo test` Cmd between its report
+    /// and its raw output.
+    #[test]
+    fn t_flips_the_run_block_between_its_report_and_its_output() {
+        let mut h = loaded(r#"command t { run = shell("cargo test"); }"#);
+        entered(&mut h, "t");
+        let cmd = block_cmd(&h);
+        h.inject_cmd_output(cmd, ONE_FAILURE.as_bytes());
+        h.inject_cmd_done(cmd, 101);
+        let shows_report =
+            |h: &TestHarness| h.stoat.active_workspace().cmds[cmd].report_rows().is_some();
+
+        let report = shows_report(&h);
+        h.type_keys("t");
+        let raw = shows_report(&h);
+        h.type_keys("t");
+        assert_eq!([report, raw, shows_report(&h)], [true, false, true]);
+    }
+
+    /// Output of the Run Block's Cmd marks the frame dirty, and the running
+    /// Cmd keeps the tick armed, as a Cmd of a Run pane on show does.
+    #[test]
+    fn the_run_block_s_output_repaints_and_its_cmd_ticks() {
+        let mut h = loaded(HELLO);
+        entered(&mut h, "hello");
+        h.snapshot();
+        let ticking = h.stoat.cmd_tick.is_some();
+
+        let cmd = block_cmd(&h);
+        h.stoat.pty_dirty = false;
+        h.stoat.handle_pty_notification(PtyNotification::CmdOutput {
+            workspace: h.stoat.active_workspace,
+            cmd,
+            run: h.stoat.active_workspace().cmds[cmd].run_count,
+            data: b"one\r\n".to_vec(),
+        });
+        assert_eq!((ticking, h.stoat.pty_dirty), (true, true));
+    }
+
+    /// A line that Up recalls and Enter runs shows its Run Block, and the
+    /// history walk ends.
+    #[test]
+    fn a_recalled_line_that_runs_ends_the_history_walk() {
+        let mut h = loaded(HELLO);
+        entered(&mut h, "hello");
+        h.inject_cmd_done(block_cmd(&h), 0);
+        h.type_keys("escape");
+
+        typed(&mut h, "");
+        h.type_keys("up");
+        let recalled = h.stoat.active_workspace().palette_history.is_walking();
+        h.type_keys("enter");
+        assert_eq!(
+            (
+                recalled,
+                h.stoat.run_block_cmd().is_some(),
+                h.stoat.active_workspace().palette_history.is_walking(),
+            ),
+            (true, true, false),
+        );
+    }
 
     #[test]
     fn revision_candidates_list_branches_then_head_history() {

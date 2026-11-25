@@ -227,15 +227,17 @@ a row: `line`, and each key of a JSON object.
 
 `output = NAME;` names one of five outputs:
 
-- `block` shows the run in a modal. The modal shows the output of the shell
-  line. At the end it shows `done`, or `exited` and the exit code. This is
+- `block` turns the palette into the Run Block of the run. The block shows
+  the command's line, its status, and the output of the shell line. `Esc`
+  moves a running block to a Run pane, and closes a finished one. This is
   the default.
 - `notify` shows a status message. When the run succeeds, the message is
   the first line of the output that holds text, or `NAME done`.
 - `buffer` opens the output in a new scratch buffer. A run that fails opens
   no buffer.
-- `run_pane` runs the shell line in a Run pane. The command uses the Run
-  pane on show, or it opens a new one. The Run pane shows the output.
+- `run_pane` adds the run to a Run pane's stack, and the focus stays where
+  it is. The command uses the Run pane on show, or a new one that splits the
+  focused pane downward.
 - `locations` opens a location list over the lines of the output that name
   a location, as `path:line:col: text` does. The column and the text are
   optional. The list opens whatever the exit code, because a search tool
@@ -247,8 +249,8 @@ message shows the name of the command, the first line of the error output,
 and the exit code, for example `ship: rejected (exit 1)`. The last step of a
 `locations` run shows this failure only when it found no location.
 
-A shell step that does not run in the modal or in a Run pane runs without a
-terminal, so its output and its error output stay apart. `buffer` and
+A shell step that does not run in the Run Block or in a Run pane runs
+without a terminal, so its output and its error output stay apart. `buffer` and
 `locations` read the output of each shell step of the run, in order.
 `notify` reads the output of the last shell step. A run that ends with an
 action step shows no message of its own.

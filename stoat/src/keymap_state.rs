@@ -730,6 +730,7 @@ pub(crate) enum ActiveModal {
     SymbolFinder,
     CodeSearch,
     Palette,
+    RunBlock,
     Help,
     Rename,
     Search,
@@ -761,6 +762,7 @@ impl ActiveModal {
             Self::SymbolFinder => "symbols",
             Self::CodeSearch => "code_search",
             Self::Palette => "palette",
+            Self::RunBlock => "run_block",
             Self::Help => "help",
             Self::Rename => "rename",
             Self::Search => "isearch",
@@ -782,6 +784,7 @@ impl ActiveModal {
             Self::Help => Some("help"),
             Self::WorkspacePicker => Some("session finder"),
             Self::Palette => Some("palette"),
+            Self::RunBlock => Some("palette"),
             Self::SymbolFinder => Some("symbols"),
             Self::CodeSearch => Some("search"),
             Self::PaneFinder => Some("panes"),
@@ -871,6 +874,7 @@ impl ActiveModal {
                 | Self::PaneFinder
                 | Self::WalkthroughPicker
                 | Self::Palette
+                | Self::RunBlock
                 | Self::Help
                 | Self::WorkspacePicker
                 | Self::GitStatus
@@ -980,11 +984,8 @@ pub(crate) fn close_topmost_modal(stoat: &mut Stoat) -> bool {
         ActiveModal::CodeSearch => {
             action_handlers::code_search::close_code_search(stoat);
         },
-        ActiveModal::Palette => {
-            if let Some(palette) = stoat.command_palette.take() {
-                let active_idx = stoat.active_workspace;
-                palette.dispose(&mut stoat.workspaces[active_idx]);
-            }
+        ActiveModal::Palette | ActiveModal::RunBlock => {
+            action_handlers::close_palette(stoat);
         },
         ActiveModal::Help => action_handlers::help::close_help(stoat),
         ActiveModal::Rename => {
@@ -1038,8 +1039,11 @@ pub(crate) fn active_modal(stoat: &Stoat) -> Option<ActiveModal> {
         Some(ActiveModal::SymbolFinder)
     } else if stoat.code_search.is_some() {
         Some(ActiveModal::CodeSearch)
-    } else if stoat.command_palette.is_some() {
-        Some(ActiveModal::Palette)
+    } else if let Some(palette) = stoat.command_palette.as_ref() {
+        match palette.block {
+            Some(_) => Some(ActiveModal::RunBlock),
+            None => Some(ActiveModal::Palette),
+        }
     } else if stoat.help.is_some() {
         Some(ActiveModal::Help)
     } else if stoat.rename_input.is_some() {
@@ -2035,6 +2039,24 @@ mod tests {
         );
     }
 
+    /// A `block` command's Enter turns the palette into its Run Block, whose
+    /// keys bind under `run_block` in the input's normal mode.
+    #[test]
+    fn from_stoat_modal_names_the_run_block() {
+        let mut h = Stoat::test();
+        h.stoat
+            .reload_user_config(r#"command hello { run = shell("echo hi"); }"#);
+        action_handlers::dispatch(&mut h.stoat, &stoat_action::OpenCommandPalette);
+        h.type_text("hello");
+        h.type_keys("enter");
+
+        let state = StoatKeymapState::from_stoat(&h.stoat);
+        assert_eq!(
+            (field(&state, "modal"), field(&state, "mode")),
+            (Some("run_block".to_string()), Some("normal".to_string())),
+        );
+    }
+
     #[test]
     fn from_stoat_modal_covers_text_inputs() {
         let mut h = Stoat::test();
@@ -2044,7 +2066,7 @@ mod tests {
     }
 
     /// Every variant, in the canonical order [`active_modal`] resolves them.
-    const ALL_MODALS: [ActiveModal; 22] = [
+    const ALL_MODALS: [ActiveModal; 23] = [
         ActiveModal::Run,
         ActiveModal::QuitConfirm,
         ActiveModal::CheckoutConfirm,
@@ -2061,6 +2083,7 @@ mod tests {
         ActiveModal::SymbolFinder,
         ActiveModal::CodeSearch,
         ActiveModal::Palette,
+        ActiveModal::RunBlock,
         ActiveModal::Help,
         ActiveModal::Rename,
         ActiveModal::Search,
@@ -2096,6 +2119,7 @@ mod tests {
                 "symbols",
                 "code_search",
                 "palette",
+                "run_block",
                 "help",
                 "rename",
                 "isearch",
@@ -2125,6 +2149,7 @@ mod tests {
             "symbols",
             "code_search",
             "palette",
+            "run_block",
             "help",
         ];
         assert_eq!(

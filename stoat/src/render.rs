@@ -2527,8 +2527,9 @@ pub(crate) fn frame(
                 }
             }
         },
-        Some(ActiveModal::Palette) => {
+        Some(modal @ (ActiveModal::Palette | ActiveModal::RunBlock)) => {
             if let Some(palette) = &mut stoat.command_palette {
+                let hints_name = modal.context_str();
                 let zoom = modal_zoom_steps(&stoat.modal_zoom, ModalKind::Palette);
                 let now = crate::commit_picker::now_epoch(&stoat.executor);
                 command_palette::render_command_palette(
@@ -2550,7 +2551,7 @@ pub(crate) fn frame(
                         &mut stoat.hints_cache,
                         &stoat.keymap,
                         mode,
-                        "palette",
+                        hints_name,
                         None,
                         None,
                         on_request,

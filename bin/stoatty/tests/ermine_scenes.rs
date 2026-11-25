@@ -2604,6 +2604,72 @@ fn a_finished_cargo_test_draws_its_report() {
     );
 }
 
+/// The Run Block's plate holds one Island between its Cmd Line and its key
+/// line.
+///
+/// The `block` command `hello` runs `true`, which prints nothing, so the body
+/// holds one row, the shell text that opens it. `top` is the first pixel row
+/// from y 40 where x 720 reads the ground, the plate's top. The Island starts
+/// 32 px under it, as the board's 32 px Cmd Line sets it, and holds one 18 px
+/// row with 4 px above and under it. The plate ends 10 px into the row under
+/// the key line.
+#[test]
+// The scratch config is this test's own disk state, set up before the child runs.
+#[allow(clippy::disallowed_methods)]
+fn the_run_block_plate_holds_one_island_between_its_cmd_line_and_its_key_line() {
+    let mut home = support::scratch_home();
+    std::fs::write(
+        home.path().join("config/stoat/config.stcfg"),
+        concat!(
+            "on init {\n    direnv.load = false;\n}\n",
+            r#"command hello { run = shell("true"); }"#,
+            "\n",
+        ),
+    )
+    .expect("the scratch stoat config");
+    let shot = settled_frame(
+        home.path(),
+        "basic-diff",
+        "unstaged.txt",
+        ":hello<Enter><Settle:500>",
+    );
+
+    let top = (40..shot.height)
+        .find(|&y| pixel(&shot, 720, y) == GROUND)
+        .expect("the plate's top");
+    expect_region(
+        &shot,
+        &mut home,
+        (700, top + 4, 40, 24),
+        GROUND,
+        "run_block_cmd_line",
+    );
+    expect_region(
+        &shot,
+        &mut home,
+        (700, top + 34, 40, 22),
+        BASE,
+        "run_block_island",
+    );
+    expect_region(
+        &shot,
+        &mut home,
+        (700, top + 60, 40, 20),
+        GROUND,
+        "run_block_key_line",
+    );
+    let under = pixels_of(&shot, (700, top + 86, 40, 8), GROUND);
+    if under > 0 {
+        let frame = keep_frame(&shot, &mut home, "run_block_plate_end");
+        panic!(
+            "the 8 pixel rows from {} read {under} ground pixels, where the plate has ended; \
+             the frame is {}",
+            top + 86,
+            frame.display(),
+        );
+    }
+}
+
 /// The which-key box docks on the status bar as a card on the raised surface.
 ///
 /// The card's cells end above the two rows of the status band, so its footer

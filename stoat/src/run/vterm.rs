@@ -728,6 +728,12 @@ pub struct Cmd {
     /// Whether a block that can show its report shows its output instead, as
     /// the `t` key flips it.
     pub(crate) raw_view: bool,
+    /// The Source Tag of a config command's Cmd, as its label and its scope,
+    /// or `None` for a typed line.
+    pub(crate) source: Option<(&'static str, &'static str)>,
+    /// The text that `bash -c` runs when it is not [`Self::command`], such as
+    /// the shell line of a config command whose typed line is its name.
+    pub(crate) shell: Option<String>,
 }
 
 impl Cmd {
@@ -750,7 +756,15 @@ impl Cmd {
             report: CmdReport::for_kind(kind),
             lines: LineFeed::default(),
             raw_view: false,
+            source: None,
+            shell: None,
         }
+    }
+
+    /// The text that the Cmd's shell runs, its shell text when it has one and
+    /// its line otherwise.
+    pub(crate) fn run_text(&self) -> &str {
+        self.shell.as_deref().unwrap_or(&self.command)
     }
 
     /// Advance the block's terminal by `bytes`, moving any selection down with

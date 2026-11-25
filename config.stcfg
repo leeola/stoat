@@ -928,6 +928,14 @@ on key {
         Ctrl-d -> PickerDetailDown();
         Ctrl-u -> PickerDetailUp();
     }
+    # The Run Block's keys stand ahead of each `view == ... && mode == normal`
+    # block. Two blocks of two predicates tie, the earlier one wins, and the
+    # commits view binds Escape and Enter behind the palette.
+    modal == run_block && mode == normal {
+        Escape -> CancelPromptInput();
+        Enter -> SubmitPromptInput();
+        t -> RunToggleView();
+    }
     # Every normal-mode modal block above is self-contained, binding only the
     # keys it handles. Without the modal guard this block's bindings stay live
     # underneath them, so Space or `:` opens a second modal over an open picker

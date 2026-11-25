@@ -10,6 +10,7 @@ use crate::{
     paths,
     picker::{self, PathPicker, PendingScan, Preview, PreviewPolicy, ScanTarget},
     rebase::RebasePause,
+    run::CmdId,
     user_command::{
         run, ArgKind, CommandArg, CommandSet, PickSpec, RunSpec, TextDefault, UserCommand,
     },
@@ -172,6 +173,27 @@ pub struct CommandPalette {
     /// command's help lands, builds it again when the command or the kind
     /// changes, and drops it for a word that is free text.
     pub(crate) cli_list: Option<(String, CliListKind, ArgList)>,
+    /// The modal rect that the last paint of a typing stage drew, or `None`
+    /// before the first paint.
+    ///
+    /// The Run Block opens over it, so the plate keeps its top and its width
+    /// when Enter runs a Cmd.
+    pub(crate) plate: Option<Rect>,
+    /// The Cmd that the palette shows as its Run Block, or `None` while the
+    /// palette takes typing.
+    pub(crate) block: Option<PaletteBlock>,
+}
+
+/// The Cmd that the palette shows as its Run Block, which a `block` command's
+/// Enter turns the palette into.
+pub(crate) struct PaletteBlock {
+    pub(crate) cmd: CmdId,
+    /// The plate of the typing stage when the Run Block opened, whose top row
+    /// and width the Run Block keeps.
+    pub(crate) origin: Rect,
+    /// The body rows that the Run Block holds, which grow with the output
+    /// while the Cmd runs and take the rows of the finished body at its end.
+    pub(crate) rows: u16,
 }
 
 /// A command that the palette's input names, a registered action or a user
@@ -1223,6 +1245,8 @@ impl CommandPalette {
             resolved_defaults: Vec::new(),
             pick: None,
             cli_list: None,
+            plate: None,
+            block: None,
         }
     }
 
@@ -1555,7 +1579,6 @@ impl CommandPalette {
                 });
                 return match parse_args(params, arg, picked.as_deref()) {
                     Ok((values, tokens)) => {
-                        self.input.dispose(ws);
                         let line =
                             format!("{} {tokens}", history_head(&PaletteCommand::Action(entry)));
                         PaletteOutcome::Dispatch(entry, values, line)
@@ -1599,7 +1622,6 @@ impl CommandPalette {
             };
             return match ParamValue::parse(param.kind, &chosen) {
                 Ok(value) => {
-                    self.input.dispose(ws);
                     let line = format!(
                         "{} {}",
                         history_head(&PaletteCommand::Action(entry)),
@@ -1677,7 +1699,6 @@ impl CommandPalette {
             return PaletteOutcome::None;
         }
 
-        self.input.dispose(ws);
         let line = history_head(&command);
         match command {
             PaletteCommand::Action(entry) => PaletteOutcome::Dispatch(entry, Vec::new(), line),
@@ -1716,7 +1737,6 @@ impl CommandPalette {
             return PaletteOutcome::None;
         };
 
-        self.input.dispose(ws);
         let line = iter::once(command.name.as_str())
             .chain(values.iter().map(String::as_str))
             .filter(|word| !word.is_empty())

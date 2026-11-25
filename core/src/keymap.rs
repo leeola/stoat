@@ -3818,6 +3818,30 @@ mod tests {
         }
     }
 
+    /// The Run Block's Escape and Enter win over the commits view's under the
+    /// palette, since its block stands first among blocks of two predicates.
+    #[test]
+    fn the_run_block_keys_win_over_a_view_behind_the_palette() {
+        let keymap = Keymap::compile(&parse_config(DEFAULT_KEYMAP));
+        let state = TestState::new()
+            .set("modal", StateValue::String("run_block".into()))
+            .set("mode", StateValue::String("normal".into()))
+            .set("view", StateValue::String("commits".into()));
+        let bound = |code| {
+            keymap
+                .lookup(&state, &key_event(code, KeyModifiers::NONE))
+                .map(|actions| action_calls(&actions))
+        };
+
+        assert_eq!(
+            (bound(KeyCode::Esc), bound(KeyCode::Enter)),
+            (
+                Some(vec![("CancelPromptInput".to_owned(), Vec::new())]),
+                Some(vec![("SubmitPromptInput".to_owned(), Vec::new())]),
+            ),
+        );
+    }
+
     /// `t` in a Run pane's normal mode flips the newest block's view over the
     /// normal-mode motion, and a modal over the pane keeps the key.
     #[test]
