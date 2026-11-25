@@ -10,6 +10,7 @@ use crate::{
     display_map::FoldScope,
     editor_state::{EditorId, EditorState},
     host::git::FileKind,
+    jobs,
     minimap::RAIL_MAX_COLUMNS,
     pane::{Divider, DividerOrientation, FocusTarget, Pane, PaneTree, Placement, View},
     render::{
@@ -18,6 +19,7 @@ use crate::{
         conflict_view::ConflictLayout,
         diff_changes::{self, MergeNote},
         editor::{editor_cursor_position, render_editor_with_overlay, split_minimap_strip},
+        job_tray,
         paint::{dim_rgb, floor_rgb, luma, style_rgb, FAINT_CONTRAST_FLOOR},
         popout::{
             paint_popout_card, popout_area, popout_card_bg, popout_inset, scaled_char_capacity,
@@ -76,7 +78,7 @@ pub(super) const MINIMAP_MAX_COLUMNS: u8 = 120;
 pub(super) const MINIMAP_THUMB_RADIUS: u8 = 4;
 
 /// The tab bar's conflict chip's `padding: 0 8px`, two sixteenths to the px.
-const CHIP_PAD: u16 = 16;
+pub(super) const CHIP_PAD: u16 = 16;
 
 /// The top of the hairline that parts the tab bar's workspace name from its
 /// tabs, in sixteenths down the row.
@@ -1238,7 +1240,7 @@ fn kind_tag_panel(fill: [u8; 3]) -> Panel {
 /// row's top and bottom, the boards' 22 px on the 18 px row. The band's ground
 /// holds it, because the bar's row draws [`TAB_BAR_PAD`] px down from the
 /// band's top. Without a band, the pill keeps the chip's box inside its row.
-fn tab_pill_panel(fill: [u8; 3], band: bool) -> Panel {
+pub(super) fn tab_pill_panel(fill: [u8; 3], band: bool) -> Panel {
     let chip = Panel::chip(fill);
     match band {
         true => Panel {
@@ -1644,6 +1646,12 @@ fn status_scene_key(runs: &[StatusRun], separator: [u8; 3]) -> u64 {
 /// background differs from the bar's draws as a [`Panel::chip`], one logical
 /// pixel inside the row. A chip on the bar's background reads as plain text.
 ///
+/// The bar ends in the Job Tray, a Tray Chip for each Job of `ws`, as
+/// [`job_tray::draw_tray`] draws them. The tray ends one pad cell before the
+/// bar's right edge, or one blank cell left of `cover`, the cells of the
+/// top-right badges on the bar's row. It takes the right half of the bar at
+/// most, and the tabs and the chips above lay out left of it.
+///
 /// Leaves in `spans` the extent of each painted tab, in sixteenths of a cell
 /// from the left edge of `area`, so a pointer press resolves against the
 /// segments as painted.
@@ -1651,6 +1659,7 @@ pub(crate) fn render_tab_bar(
     ws: &Workspace,
     area: Rect,
     frame: FrameCtx<'_>,
+    cover: Option<Rect>,
     buf: &mut Buffer,
     scene: &mut ApcScene,
     spans: &mut Vec<Range<u16>>,
@@ -1683,6 +1692,24 @@ pub(crate) fn render_tab_bar(
         segments.iter().map(|(text, _)| text.chars().count()).sum()
     };
 
+    let views = jobs::views(ws);
+    let tray_right = match cover {
+        Some(cover) if cover.y == area.y => cover.x.saturating_sub(1),
+        _ => area.right() - 1,
+    };
+    let tray_colors = scene.live().then(|| job_tray::tray_colors(theme)).flatten();
+    let tray_scale = tray_colors
+        .as_ref()
+        .map(|_| theme.type_scale(TypeRole::Caption));
+    let placed = job_tray::tray_layout(&views, tray_right, area.x + area.width / 2, tray_scale);
+    let lead = match placed.first() {
+        Some((_, cells)) => Rect {
+            width: cells.start - area.x,
+            ..area
+        },
+        None => area,
+    };
+
     // The chip takes its cells out of the run. It stands one blank cell before
     // the layout chips, which keep the bar's end, or with no layout chips one
     // blank cell ends the bar after it. It drops first where the tabs leave it
@@ -1692,24 +1719,24 @@ pub(crate) fn render_tab_bar(
             true => usize::from(chip.cells),
             false => chars(&right) + usize::from(chip.cells) + 2,
         };
-        chars(&left) + taken < usize::from(area.width)
+        chars(&left) + taken < usize::from(lead.width)
     });
     let chip_rect = chip.as_ref().map(|chip| {
-        let end = area.right() - chars(&right) as u16 - 1;
-        Rect::new(end - chip.cells, area.y, chip.cells, 1)
+        let end = lead.right() - chars(&right) as u16 - 1;
+        Rect::new(end - chip.cells, lead.y, chip.cells, 1)
     });
     let segments = match chip_rect {
         Some(rect) if !right.is_empty() => Rect {
-            width: rect.x - 1 - area.x,
-            ..area
+            width: rect.x - 1 - lead.x,
+            ..lead
         },
         Some(rect) => Rect {
-            width: rect.x - area.x,
-            ..area
+            width: rect.x - lead.x,
+            ..lead
         },
-        None => area,
+        None => lead,
     };
-    if chars(&left) + chars(&right) > usize::from(area.width) {
+    if chars(&left) + chars(&right) > usize::from(lead.width) {
         right.clear();
     }
 
@@ -1733,7 +1760,7 @@ pub(crate) fn render_tab_bar(
     }
     draw_layout_chips(
         &right,
-        area,
+        lead,
         inactive,
         rich.then(|| theme.type_scale(TypeRole::Caption)),
         buf,
@@ -1742,6 +1769,15 @@ pub(crate) fn render_tab_bar(
     if let (Some(chip), Some(rect)) = (chip, chip_rect) {
         draw_conflict_chip(&chip, rect, theme, buf, scene);
     }
+    job_tray::draw_tray(
+        &views,
+        &placed,
+        tray_colors.as_ref(),
+        area,
+        frame,
+        buf,
+        scene,
+    );
 
     let texts: Vec<&str> = runs[0].left.iter().map(|(text, _)| text.as_str()).collect();
     let tabs: Vec<Range<usize>> = runs[0]
@@ -7924,6 +7960,57 @@ mod tests {
         );
     }
 
+    /// With a Job the layout chips pack from the start of the tray rather than
+    /// from the bar's end. They drop where the tabs leave them no room before
+    /// the tray, though the bar past the tray would hold them.
+    #[test]
+    fn the_layout_chips_end_left_of_the_tray() {
+        use stoatty_protocol::command::Command;
+
+        let mut h = toggles_harness();
+        dispatch(&mut h.stoat, &stoat_action::NewTab);
+        h.push_job("sleep 30");
+        dispatch(&mut h.stoat, &stoat_action::PrevTab);
+        h.stoat.active_workspace_mut().name = "ws".to_string();
+        focused_editor_mut(&mut h.stoat)
+            .expect("editor")
+            .set_diff_view(true);
+        let fills = [
+            super::style_rgb(
+                h.stoat
+                    .theme
+                    .get(crate::theme::scope::UI_TABBAR_TOGGLE_ACTIVE)
+                    .bg,
+            ),
+            Some([0x1e, 0x21, 0x27]),
+        ];
+        let boxes = |h: &mut crate::test_harness::TestHarness| -> Vec<(u16, u16)> {
+            h.render_composited();
+            stoatty_protocol::command::decode_stream(&h.stoat.apc_scene.all_bytes())
+                .into_iter()
+                .filter_map(|command| match command {
+                    Command::Panel(panel) if panel.top == 0 && fills.contains(&panel.fill) => {
+                        Some((panel.left, panel.width))
+                    },
+                    _ => None,
+                })
+                .collect()
+        };
+
+        let roomy = boxes(&mut h);
+        let tabs_end = h.stoat.tab_bar_spans.last().map_or(0, |span| span.end / 16);
+        h.stoat.active_workspace_mut().name =
+            format!("ws{}", "x".repeat(usize::from(95 - tabs_end)));
+        let crowded = boxes(&mut h);
+
+        assert_eq!(
+            (roomy, crowded),
+            (vec![(85, 7), (102, 17)], vec![(102, 17)]),
+            "the files chip packs from the tray's start, and drops once the tabs reach 95 \
+             columns",
+        );
+    }
+
     /// One changed `a.rs` open in an editor, 120 by 8, with the tab bar on and
     /// no minimap.
     fn toggles_harness() -> crate::test_harness::TestHarness {
@@ -8173,6 +8260,53 @@ mod tests {
             ),
             "the active tab's chip in the accent wash, then the conflict chip one cell before \
              the bar's edge, its text a whole cell in",
+        );
+    }
+
+    /// With a Job the conflict chip ends one blank cell before the tray. It
+    /// drops where the tabs leave it no room before the tray, though the bar
+    /// past the tray would hold it.
+    #[test]
+    fn the_conflict_chip_ends_left_of_the_tray() {
+        let mut h = conflict_tabs_harness(&["f.txt"]);
+        dispatch(&mut h.stoat, &stoat_action::NewTab);
+        h.push_job("sleep 30");
+        dispatch(&mut h.stoat, &stoat_action::PrevTab);
+        dispatch(
+            &mut h.stoat,
+            &OpenFile {
+                path: PathBuf::from("/repo/f.txt"),
+            },
+        );
+        h.settle_diff_jobs();
+        dispatch(&mut h.stoat, &Conflict);
+        h.settle();
+        let fills = [Some([0x33, 0x20, 0x1f]), Some([0x1e, 0x21, 0x27])];
+        let boxes = |h: &mut crate::test_harness::TestHarness| -> Vec<(u16, u16)> {
+            h.render_composited();
+            stoatty_protocol::command::decode_stream(&h.stoat.apc_scene.all_bytes())
+                .into_iter()
+                .filter_map(|command| match command {
+                    stoatty_protocol::command::Command::Panel(panel)
+                        if panel.top == 0 && fills.contains(&panel.fill) =>
+                    {
+                        Some((panel.left, panel.width))
+                    },
+                    _ => None,
+                })
+                .collect()
+        };
+
+        let roomy = boxes(&mut h);
+        let tabs_end = h.stoat.tab_bar_spans.last().map_or(0, |span| span.end / 16);
+        h.stoat.active_workspace_mut().name =
+            format!("ws{}", "x".repeat(usize::from(41 - tabs_end)));
+        let crowded = boxes(&mut h);
+
+        assert_eq!(
+            (roomy, crowded),
+            (vec![(38, 43), (82, 17)], vec![(82, 17)]),
+            "the chip ends a cell before the tray, and drops once the tabs reach 41 columns",
         );
     }
 
@@ -8516,8 +8650,29 @@ mod tests {
         );
     }
 
+    /// Under `ui.tab_bar = auto` the bar shows while the workspace holds a Job,
+    /// whose Tray Chip it carries, and hides once the Job comes back.
+    #[test]
+    fn the_auto_tab_bar_shows_while_a_job_exists() {
+        let mut h = crate::test_harness::TestHarness::default();
+        h.open_run();
+        h.submit_run("sleep 30");
+        let before = h.stoat.tab_bar_visible();
+        h.type_keys("ctrl-j");
+        let pushed = h.stoat.tab_bar_visible();
+        h.type_keys("ctrl-j");
+
+        assert_eq!(
+            [before, pushed, h.stoat.tab_bar_visible()],
+            [false, true, false]
+        );
+    }
+
     /// A focused Run pane's row counts the Cmds of its stack in Jobs after its
     /// count of Cmds, while any is in Jobs.
+    ///
+    /// The tab bar shows while the workspace holds a Job, so the row leaves out
+    /// the workspace name that the bar carries then.
     #[test]
     fn the_row_of_a_run_pane_counts_its_cmds_in_jobs() {
         let mut h = crate::test_harness::TestHarness::with_size(120, 12);
@@ -8539,7 +8694,7 @@ mod tests {
             reads,
             [
                 "RUN stoat run 1 Cmd ~/code/stoat",
-                "RUN stoat run 1 Cmd \u{b7} 1 in Jobs ~/code/stoat",
+                "RUN run 1 Cmd \u{b7} 1 in Jobs ~/code/stoat",
                 "RUN stoat run 1 Cmd ~/code/stoat",
             ],
         );

@@ -394,6 +394,7 @@ theme ermine_night inherits default_dark {
     ui.job.ok.fg      = success;
     ui.job.failed.fg  = danger;
     ui.job.stopped.fg = muted;
+    ui.job.chip.bg    = raised;
 
     ui.tag.rust.fg     = warning;
     ui.tag.markdown.fg = info;
@@ -498,8 +499,8 @@ on init {
     theme = ermine_night;
 
     # The tab bar holds the top row with one tab or many, and carries the
-    # session name. auto shows it only once a workspace holds a second tab,
-    # and never hides it.
+    # session name. auto shows it only while a workspace holds a second tab
+    # or a Job, and never hides it.
     ui.tab_bar = always;
 
     # How far an unfocused pane's colors blend toward the theme background,

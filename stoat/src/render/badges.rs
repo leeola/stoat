@@ -123,10 +123,39 @@ pub(crate) fn bottom_right_cover(
         })
 }
 
+/// The columns the top-right badges cover on `area`'s first row, as a one-row
+/// rect.
+///
+/// A top-right badge draws its chip on the window's first row, which is where
+/// the tab bar draws. The bar's Job Tray ends left of this span, since the
+/// chip paints over whatever the bar put there. `None` when no badge reaches
+/// the row.
+pub(crate) fn top_right_cover(
+    workspace: &BadgeTray,
+    global: &BadgeTray,
+    area: Rect,
+) -> Option<Rect> {
+    let row = area.y;
+    if area.height == 0 {
+        return None;
+    }
+    placements(workspace, global, Anchor::TopRight, area)
+        .into_iter()
+        .map(|(_, rect)| rect)
+        .filter(|rect| rect.y <= row && row < rect.y + rect.height)
+        .reduce(Rect::union)
+        .map(|rect| Rect {
+            y: row,
+            height: 1,
+            ..rect
+        })
+}
+
 /// Where each visible badge at `anchor` draws inside `area`, in paint order.
 ///
-/// [`render_badges`] paints from this and [`bottom_right_cover`] measures from
-/// it, so the columns a status bar keeps clear are the ones the badges fill.
+/// [`render_badges`] paints from this, and [`bottom_right_cover`] and
+/// [`top_right_cover`] measure from it, so the columns a bar keeps clear are
+/// the ones the badges fill.
 fn placements<'t>(
     workspace: &'t BadgeTray,
     global: &'t BadgeTray,
@@ -893,6 +922,47 @@ mod tests {
             bottom_right_cover(&tray, &BadgeTray::new(), area),
             None,
             "a badge at another anchor"
+        );
+    }
+
+    /// The tab bar's tray keeps clear of the cells that a top-right chip
+    /// tints on the first row, and a badge at another anchor covers none of
+    /// that row.
+    #[test]
+    fn top_right_cover_spans_the_badges_on_the_first_row() {
+        let mut tray = BadgeTray::new();
+        tray.insert(Badge {
+            anchor: Anchor::TopRight,
+            ..corner_badge("tour 1/6")
+        });
+        let area = Rect::new(0, 0, 80, 24);
+        let mut buf = Buffer::empty(area);
+        let mut scene = ApcScene::new();
+        scene.set_live(false);
+        render_badges(
+            &tray,
+            &BadgeTray::new(),
+            area,
+            false,
+            false,
+            &rgb_badge_theme(),
+            &mut buf,
+            &mut scene,
+        );
+
+        let [r, g, b] = TINT;
+        let tinted: Vec<u16> = (0..80)
+            .filter(|&x| buf[(x, 0)].bg == Color::Rgb(r, g, b))
+            .collect();
+        let mut corner = BadgeTray::new();
+        corner.insert(corner_badge("ab"));
+        assert_eq!(
+            (
+                top_right_cover(&tray, &BadgeTray::new(), area),
+                tinted,
+                top_right_cover(&corner, &BadgeTray::new(), area),
+            ),
+            (Some(Rect::new(69, 0, 10, 1)), (69..79).collect(), None),
         );
     }
 }

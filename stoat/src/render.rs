@@ -25,6 +25,7 @@ pub(crate) mod git_status;
 pub(crate) mod help;
 pub(crate) mod hints;
 pub(crate) mod hover;
+pub(crate) mod job_tray;
 pub(crate) mod jumplist_picker;
 pub(crate) mod location_picker;
 pub(crate) mod paint;
@@ -1489,6 +1490,7 @@ pub(crate) fn frame(
         ..size
     };
     let badge_cover = badges::bottom_right_cover(&ws.badges, &stoat.badges, badge_area);
+    let tray_cover = badges::top_right_cover(&ws.badges, &stoat.badges, badge_area);
 
     let screen = crate::keymap_state::view_predicate(ws);
 
@@ -1677,7 +1679,15 @@ pub(crate) fn frame(
         if chrome_bands {
             scene.nudge([0, i16::from(TAB_BAR_PAD)]);
         }
-        pane::render_tab_bar(ws, bar, frame, buf, scene, &mut stoat.tab_bar_spans);
+        pane::render_tab_bar(
+            ws,
+            bar,
+            frame,
+            tray_cover,
+            buf,
+            scene,
+            &mut stoat.tab_bar_spans,
+        );
         if chrome_bands {
             scene.nudge([0, 0]);
         }

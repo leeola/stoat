@@ -1032,6 +1032,10 @@ pub mod scope {
     pub const UI_JOB_OK: &str = "ui.job.ok";
     pub const UI_JOB_FAILED: &str = "ui.job.failed";
     pub const UI_JOB_STOPPED: &str = "ui.job.stopped";
+    /// The box of a Tray Chip, the mark of a Job in the tab bar, in its
+    /// background. A theme that leaves it unset fills the box with the
+    /// background of [`UI_SURFACE_RAISED`], and then of [`UI_CHIP`].
+    pub const UI_JOB_CHIP: &str = "ui.job.chip";
 
     /// The mark and connector that point at a walkthrough stop's subject.
     ///

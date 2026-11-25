@@ -356,9 +356,12 @@ The typed UI scopes, by group (syntax scopes are open-ended):
   badges.
 - `ui.job.running`, `ui.job.ok`, `ui.job.failed`, `ui.job.stopped` -- the
   state of a Job, a Cmd moved to the Job Tray: the mark and the status of its
-  Stub in the Run pane and the bar beside the Stub's rows. Unset, the four
-  take `ui.statusline.run`, `ui.badge.complete`, `ui.badge.error`, and
-  `ui.text.muted`.
+  Stub in the Run pane, the bar beside the Stub's rows, and the mark of its
+  Tray Chip in the tab bar. Unset, the four take `ui.statusline.run`,
+  `ui.badge.complete`, `ui.badge.error`, and `ui.text.muted`.
+- `ui.job.chip` -- the box of a Tray Chip, which marks a Job at the right end
+  of the tab bar, in its background. Unset, the box takes the background of
+  `ui.surface.raised`, and then of `ui.chip`.
 - `ui.tag.rust`, `ui.tag.markdown`, `ui.tag.config` -- the color of the
   extension of a Rust, Markdown, or config file in a tab, a status row, a file
   header of the changes view, and a finder row.

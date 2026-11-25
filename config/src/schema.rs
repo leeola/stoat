@@ -225,7 +225,7 @@ pub fn settings_schema() -> &'static [SettingDef] {
             path: &[Lit("ui"), Lit("tab_bar")],
             shape: ValueShape::Enum(&["auto", "always", "never"]),
             doc: "When the tab bar occupies the top row. `auto` shows it only \
-                  once a workspace holds a second tab.",
+                  while a workspace holds a second tab or a Job.",
             default: "auto",
         },
         SettingDef {

@@ -4412,8 +4412,9 @@ impl Stoat {
 
     /// Whether the tab bar occupies the window's top row this frame.
     ///
-    /// [`TabBarMode::Auto`] reveals it only once the active workspace holds a
-    /// second tab, so a single-tab session keeps the whole window. `:tabs`
+    /// [`TabBarMode::Auto`] reveals it only while the active workspace holds a
+    /// second tab or a Job, so a single-tab session keeps the whole window
+    /// until it has a tab to switch to or a Tray Chip to show. `:tabs`
     /// overrides the configured mode for the session.
     pub(crate) fn tab_bar_visible(&self) -> bool {
         let mode = self
@@ -4423,7 +4424,10 @@ impl Stoat {
         match mode {
             TabBarMode::Always => true,
             TabBarMode::Never => false,
-            TabBarMode::Auto => self.active_workspace().tabs.len() > 1,
+            TabBarMode::Auto => {
+                let ws = self.active_workspace();
+                ws.tabs.len() > 1 || !ws.jobs.is_empty()
+            },
         }
     }
 

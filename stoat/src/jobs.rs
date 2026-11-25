@@ -39,6 +39,19 @@ impl JobState {
     }
 }
 
+/// What a Job shows of its Cmd wherever the Job draws, such as its Tray Chip.
+pub(crate) struct JobView {
+    pub(crate) state: JobState,
+    /// The first two words of the Cmd's line, one space apart, which name
+    /// the program and its first argument, such as `cargo test`.
+    pub(crate) name: String,
+    /// The done and the total count of a running Cmd's progress, as
+    /// [`Cmd::progress`] reads them.
+    pub(crate) progress: Option<(u32, u32)>,
+    /// The time of the Cmd, as [`time_text`] reads it.
+    pub(crate) time: String,
+}
+
 /// Put the Cmd `id` in the tray, and answer whether it went in.
 ///
 /// A Cmd that the store does not hold, or that the tray holds, stays as it is.
@@ -149,6 +162,31 @@ pub(crate) fn time_text(cmd: &Cmd) -> String {
             .zip(cmd.ended)
             .map(|(started, ended)| run::format_runtime(ended.saturating_duration_since(started)))
             .unwrap_or_default(),
+    }
+}
+
+/// The view of each Job of `ws`, oldest first, one for each id of the tray
+/// that the store holds.
+pub(crate) fn views(ws: &Workspace) -> Vec<JobView> {
+    ws.jobs
+        .iter()
+        .filter_map(|id| ws.cmds.get(*id))
+        .map(view_of)
+        .collect()
+}
+
+/// The view of the Job of `cmd`.
+fn view_of(cmd: &Cmd) -> JobView {
+    JobView {
+        state: state_of(cmd),
+        name: cmd
+            .command
+            .split_whitespace()
+            .take(2)
+            .collect::<Vec<_>>()
+            .join(" "),
+        progress: cmd.progress(),
+        time: time_text(cmd),
     }
 }
 
@@ -521,6 +559,18 @@ mod tests {
         assert_eq!(
             [running, failed, super::time_text(&ok)],
             ["0:41", "exit 101", "1.5s"],
+        );
+    }
+
+    /// A Job names its Cmd by the first two words of the line, one space apart.
+    #[test]
+    fn a_job_view_names_the_first_two_words_of_its_line() {
+        let name =
+            |line: &str| super::view_of(&Cmd::new(line.to_owned(), PathBuf::from("/w"), 40)).name;
+
+        assert_eq!(
+            [name("cargo test -p stoat"), name("htop"), name("sleep  30")],
+            ["cargo test", "htop", "sleep 30"],
         );
     }
 

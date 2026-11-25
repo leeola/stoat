@@ -56,8 +56,8 @@ pub enum MinimapMode {
 }
 
 /// When the tab bar occupies a row at the top of the window. `Auto` shows it
-/// only once a workspace holds more than one tab, so a single-tab session keeps
-/// the whole window for panes.
+/// only while a workspace holds more than one tab or a Job, so a single-tab
+/// session keeps the whole window for panes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TabBarMode {
     Auto,
