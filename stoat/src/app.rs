@@ -10101,6 +10101,7 @@ impl Stoat {
         crate::diff_warm::install_finished(self);
         crate::buffer_lifecycle::install_pending_opens(self);
         action_handlers::sync_palette_picker(self);
+        action_handlers::run::sync_run_prompts(self);
         action_handlers::sync_file_finder_preview(self);
         action_handlers::search::sync_search_preview(self);
         action_handlers::split_selection::sync_regex_preview(self);

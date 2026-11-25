@@ -2396,6 +2396,38 @@ fn the_run_stack_sits_on_the_prompt_between_two_rules() {
     }
 }
 
+/// The Run pane prompt colors a cargo line's first word and shows its Kind
+/// Chip at its right, as the line is typed.
+///
+/// `cargo test` sits at the prompt of the lone Run pane, row 47, with no Enter.
+/// `cargo` draws in the command color, so the row's left end holds pixels of
+/// the special color, and the chip's box at the row's right end covers at
+/// least 14 pixel rows of 40 pixels in its tint.
+#[test]
+fn the_run_prompt_shows_its_kind_chip() {
+    let mut home = support::scratch_home();
+    let shot = settled_frame(
+        home.path(),
+        "basic-diff",
+        "unstaged.txt",
+        "<Space>t<Settle>cargo test<Settle>",
+    );
+
+    let (token, tint) = (
+        pixels_of(&shot, cell_rect(2, 47, 30, 1), SPECIAL),
+        pixels_of(&shot, cell_rect(108, 47, 50, 1), KIND_TINT),
+    );
+    if token == 0 || tint < 14 * 40 {
+        let frame = keep_frame(&shot, &mut home, "run_prompt_chip");
+        panic!(
+            "the prompt row reads {token} special pixels at its left and {tint} tint pixels \
+             at its right; want the command color on `cargo` and a chip box of at least 560 \
+             tint pixels; the frame is {}",
+            frame.display(),
+        );
+    }
+}
+
 /// A failed block's body carries the danger bar at the inset's left edge.
 ///
 /// `echo boom; false` prints `boom` on row 46 and exits 1. The bar covers the

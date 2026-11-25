@@ -1942,7 +1942,7 @@ pub(crate) fn split_head<'a>(
 /// A built-in command comes first, as [`resolve_head`] resolves one, and then
 /// a user command of `commands`. A user command's name holds no space, so no
 /// head under the `action` token names one.
-fn resolve_command(
+pub(crate) fn resolve_command(
     head: &str,
     ctx: &Availability,
     commands: &CommandSet,
@@ -1962,6 +1962,31 @@ fn resolve_head(head: &str, ctx: &Availability) -> Option<&'static registry::Reg
     match action_query(head) {
         Some(name) => lookup_action(name),
         None => resolve_conditional(head, ctx).or_else(|| lookup_root(head)),
+    }
+}
+
+/// The head of a Run pane line, which the prompt resolves by the palette's
+/// rule for a head.
+///
+/// It is the line's first word, or its first two words when the first is the
+/// `action` token, because an internal action runs as `action <name>`. The
+/// leading whitespace of the line is no part of it. A command name that holds
+/// a space, such as `git log`, is no head here, so a line of git runs git.
+pub(crate) fn line_head(text: &str) -> &str {
+    let text = text.trim_start();
+    let word_end = |from: usize| {
+        text[from..]
+            .find(char::is_whitespace)
+            .map_or(text.len(), |at| from + at)
+    };
+    let first = word_end(0);
+    if !text[..first].eq_ignore_ascii_case(ACTION_TOKEN) {
+        return &text[..first];
+    }
+    let name = first + (text[first..].len() - text[first..].trim_start().len());
+    match name < text.len() {
+        true => &text[..word_end(name)],
+        false => &text[..first],
     }
 }
 
@@ -2625,6 +2650,16 @@ mod tests {
     };
     use std::{collections::BTreeMap, time::Duration};
     use stoat_action::{Action, ParamKind};
+
+    /// A line's head is its first word, past leading whitespace, or the
+    /// `action` token with the name after it.
+    #[test]
+    fn line_head_takes_the_action_token_with_its_name() {
+        assert_eq!(
+            ["cd sub", "action focus-left x", "", "  git log", "action",].map(line_head),
+            ["cd", "action focus-left", "", "git", "action"],
+        );
+    }
 
     /// The def name of the action that `command` names. These tests resolve
     /// over no user command, so a user command fails the test.

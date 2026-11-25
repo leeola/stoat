@@ -47,6 +47,11 @@ pub(crate) struct StatusPart {
 /// [`Cmd::report_rows`] gives them, and the newest block's
 /// [`RunState::hint`] row follows its last row.
 ///
+/// The prompt row paints as a Cmd Line, as [`cmd_line::cmd_line_row`] paints
+/// one, with the workspace root as its cwd. Its command token and the tag at
+/// its right are the ones that [`RunState::prompt`] holds, and its caret shows
+/// while the pane holds the focus.
+///
 /// Inside stoatty a rule ends each block, a bar runs beside the body of a
 /// failed block and of a Stub, and a rule tops the prompt row, as
 /// [`paint_stack_rules`] draws them. A plain terminal draws none of them.
@@ -58,9 +63,8 @@ pub(crate) fn render_run_pane(
     run_state: &RunState,
     cmds: &slotmap::SlotMap<CmdId, Cmd>,
     terms: &slotmap::SlotMap<TermId, TermSession>,
-    editors: &mut slotmap::SlotMap<crate::editor_state::EditorId, crate::editor_state::EditorState>,
+    editors: &slotmap::SlotMap<crate::editor_state::EditorId, crate::editor_state::EditorState>,
     theme: &crate::theme::Theme,
-    chrome: &crate::render::editor::ResolvedChrome,
     root: &Path,
     home: Option<&Path>,
     area: Rect,
@@ -168,25 +172,23 @@ pub(crate) fn render_run_pane(
         base += span;
     }
 
-    let abbrev = crate::run::abbreviate_path(root, home);
-    let prompt_w = write_prompt(buf, inner.x, input_row, &abbrev, theme);
-
-    let input_area = Rect::new(
-        inner.x + prompt_w,
-        input_row,
-        inner.width.saturating_sub(prompt_w),
-        1,
-    );
-    run_state.input.render(
-        editors,
-        input_area,
-        is_focused,
-        "prompt",
-        theme,
-        chrome,
-        &std::collections::BTreeMap::new(),
-        buf,
-    );
+    let cwd = crate::run::abbreviate_path(root, home);
+    let (text, caret) = run_state.input.caret_in(editors);
+    let input = cmd_line::token_spans(&text, run_state.prompt.token_len, theme);
+    let tag: Vec<StatusPart> = lead_part(run_state.prompt.chip, run_state.prompt.source, theme)
+        .into_iter()
+        .collect();
+    let prompt = CmdLine {
+        cwd: &cwd,
+        input: &input,
+        caret: is_focused.then_some(caret),
+        status: match tag.is_empty() {
+            true => CmdStatus::None,
+            false => CmdStatus::Parts(&tag),
+        },
+    };
+    let row = Rect::new(inner.x, input_row, inner.width, 1);
+    cmd_line::cmd_line_row(buf, row, &prompt, theme, scene);
 
     // The plain terminal has no room for a rule between the rows, so the
     // stack and the prompt stay flush there.
@@ -351,22 +353,9 @@ pub(crate) fn status_parts(
         }];
     }
 
-    let kind_chip = cmd.kind.chip().map(|label| StatusPart {
-        text: label.to_owned(),
-        style: theme
-            .try_get(crate::theme::scope::UI_RUN_KIND)
-            .unwrap_or_else(|| theme.get(crate::theme::scope::UI_KEY_LABEL)),
-        chip: true,
-    });
-    let source_tag = || {
-        let (label, scope) = cmd.source?;
-        theme.try_get(scope).map(|style| StatusPart {
-            text: label.to_owned(),
-            style,
-            chip: true,
-        })
-    };
-    let mut parts: Vec<StatusPart> = kind_chip.or_else(source_tag).into_iter().collect();
+    let mut parts: Vec<StatusPart> = lead_part(cmd.kind.chip(), cmd.source, theme)
+        .into_iter()
+        .collect();
 
     if !cmd.finished {
         let fg = theme.get(crate::theme::scope::UI_STATUSLINE_RUN).fg;
@@ -426,6 +415,35 @@ pub(crate) fn status_parts(
         });
     }
     parts
+}
+
+/// The tag that leads a status, the Kind Chip `chip`, else the Source Tag
+/// `source`, or `None` for neither.
+///
+/// The chip draws in `ui.run.kind`, or in `ui.key_label` for a theme that
+/// leaves that unset, which draws the label with no box. The Source Tag draws
+/// in its scope, and only where the theme sets the scope. A Run Block's
+/// header and the Run pane prompt lead with the same tag for the same line.
+fn lead_part(
+    chip: Option<&'static str>,
+    source: Option<(&'static str, &'static str)>,
+    theme: &crate::theme::Theme,
+) -> Option<StatusPart> {
+    let kind_chip = chip.map(|label| StatusPart {
+        text: label.to_owned(),
+        style: theme
+            .try_get(crate::theme::scope::UI_RUN_KIND)
+            .unwrap_or_else(|| theme.get(crate::theme::scope::UI_KEY_LABEL)),
+        chip: true,
+    });
+    kind_chip.or_else(|| {
+        let (label, scope) = source?;
+        theme.try_get(scope).map(|style| StatusPart {
+            text: label.to_owned(),
+            style,
+            chip: true,
+        })
+    })
 }
 
 /// Paint row `row_idx` of `grid` at `y`, from `area.x` across as much of the
@@ -580,31 +598,6 @@ impl Body<'_> {
     }
 }
 
-/// Write the run prompt prefix (abbreviated cwd and the U+276F prompt glyph)
-/// at `(x, y)` and return its column width.
-///
-/// The cwd is styled `UI_KEY_LABEL`. The glyph and whatever the caller writes
-/// after it are plain.
-fn write_prompt(buf: &mut Buffer, x: u16, y: u16, cwd: &str, theme: &crate::theme::Theme) -> u16 {
-    let plain = Style::default();
-    let mut col = x;
-
-    write_str(
-        buf,
-        col,
-        y,
-        cwd,
-        theme.get(crate::theme::scope::UI_KEY_LABEL),
-    );
-    col += cwd.chars().count() as u16;
-    write_str(buf, col, y, " ", plain);
-    col += 1;
-    // U+276F (heavy right-pointing angle quotation mark) as the prompt glyph.
-    write_str(buf, col, y, "\u{276F} ", plain);
-    col += 2;
-    col - x
-}
-
 /// Paint the run modal, the output of `run_state`'s last block, in a box
 /// centered over `area`.
 ///
@@ -727,7 +720,7 @@ mod tests {
         StatusPart, Style, ISLAND_BOTTOM, ISLAND_SIDE, ISLAND_TOP,
     };
     use crate::{
-        render::{editor::ResolvedChrome, paint::style_rgb},
+        render::paint::style_rgb,
         run::{cargo::ONE_FAILURE, kind},
         test_harness::TestHarness,
         theme::{scope, Theme},
@@ -1200,7 +1193,6 @@ mod tests {
     /// Paint the Run pane of `h` into `area` under `theme`, through a live
     /// scene, on a buffer that ends where `area` does.
     fn painted(h: &mut TestHarness, theme: &Theme, area: Rect) -> (Buffer, ApcScene) {
-        let chrome = ResolvedChrome::resolve(theme);
         let Workspace {
             runs,
             cmds,
@@ -1213,8 +1205,7 @@ mod tests {
         let mut buf = Buffer::empty(Rect::new(0, 0, area.right(), area.bottom()));
         let mut scene = ApcScene::new();
         render_run_pane(
-            run, cmds, terms, editors, theme, &chrome, git_root, None, area, false, &mut buf,
-            &mut scene,
+            run, cmds, terms, editors, theme, git_root, None, area, false, &mut buf, &mut scene,
         );
         (buf, scene)
     }

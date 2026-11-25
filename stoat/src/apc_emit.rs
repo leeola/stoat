@@ -3764,6 +3764,7 @@ pub(crate) fn window_content_version(
             1u8.hash(&mut hasher);
             run_id.hash(&mut hasher);
             run.scroll_offset.hash(&mut hasher);
+            run.prompt.hash(&mut hasher);
             run.blocks.len().hash(&mut hasher);
             for block in run.blocks.iter().filter_map(|id| ws.cmds.get(*id)) {
                 // Only the grid needs a counter. Every other field the block

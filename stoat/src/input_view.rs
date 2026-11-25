@@ -125,13 +125,21 @@ impl InputView {
         guard.snapshot.visible_text.to_string()
     }
 
-    /// The input's text, and the char index of the cell its cursor covers.
+    /// The input's text, and the char index of the cell its cursor covers, as
+    /// [`Self::caret_in`] reads them from the workspace's editors.
+    pub(crate) fn caret(&self, ws: &Workspace) -> (String, usize) {
+        self.caret_in(&ws.editors)
+    }
+
+    /// The input's text, and the char index of the cell its cursor covers,
+    /// read from `editors`, which hold the input's editor.
     ///
     /// The cell is the one the input's editor draws its block cursor on. A
     /// cursor past the text's end covers the cell after its last char, so the
-    /// index is then the text's char count.
-    pub(crate) fn caret(&self, ws: &Workspace) -> (String, usize) {
-        let Some(editor) = ws.editors.get(self.editor_id) else {
+    /// index is then the text's char count. A painter that holds the editors
+    /// apart from their workspace reads the caret through this.
+    pub(crate) fn caret_in(&self, editors: &SlotMap<EditorId, EditorState>) -> (String, usize) {
+        let Some(editor) = editors.get(self.editor_id) else {
             return (String::new(), 0);
         };
         let buffer = editor.display_map.buffer_snapshot();

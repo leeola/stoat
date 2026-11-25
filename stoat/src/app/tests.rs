@@ -9929,10 +9929,17 @@ fn a_run_pane_versions_on_everything_its_render_reads() {
     );
 
     h.stoat.active_workspace_mut().terms.remove(term);
+    let closed = version(h.stoat.active_workspace());
     assert_ne!(
-        stub,
-        version(h.stoat.active_workspace()),
+        stub, closed,
         "the end of the Stub's tab session moves its status"
+    );
+
+    h.stoat.active_workspace_mut().runs[run_id].prompt.chip = Some("cargo test");
+    assert_ne!(
+        closed,
+        version(h.stoat.active_workspace()),
+        "the prompt's resolve moves its chip"
     );
 }
 

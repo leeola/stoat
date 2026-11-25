@@ -307,7 +307,7 @@ impl UserCommand {
     ///
     /// A `cli` command reads `cli`, a command whose `run` lists its steps
     /// reads `script`, and any other command reads `config`.
-    fn source_tag(&self) -> (&'static str, &'static str) {
+    pub(crate) fn source_tag(&self) -> (&'static str, &'static str) {
         match self.run {
             RunSpec::Cli { .. } => ("cli", scope::UI_CMD_SOURCE_CLI),
             RunSpec::Steps { script: true, .. } => ("script", scope::UI_CMD_SOURCE_SCRIPT),

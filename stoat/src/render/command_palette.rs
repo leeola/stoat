@@ -2723,7 +2723,7 @@ fn pascal_name(command: &PaletteCommand, _offset: usize) -> &str {
 /// command in the registry ships with stoat. A user command reads `config`,
 /// `script` for a block command whose `run` lists its steps, or `cli` for a
 /// command that wraps a tool.
-fn source_tag(command: &PaletteCommand) -> Option<(&'static str, &'static str)> {
+pub(crate) fn source_tag(command: &PaletteCommand) -> Option<(&'static str, &'static str)> {
     let entry = match command {
         PaletteCommand::Action(entry) => entry,
         PaletteCommand::User(user) => {

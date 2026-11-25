@@ -4,19 +4,21 @@ use crate::{
     app::{Stoat, UpdateEffect},
     buffer_lifecycle,
     buffer_registry::OpenOrigin,
+    command_palette::{self, Availability, PaletteCommand},
     file_finder::OpenIntent,
     host::{FsHost, OffsetEncoding},
     pane::{Axis, FocusTarget, PaneId, View},
-    render::paint::style_rgb,
+    render::{self, paint::style_rgb},
     run::{
         cargo::CmdReport,
         kind::{self, CargoKind, RunKind},
         pty::{self, CmdEnv, CmdSink},
         vterm::Handoff,
-        Cmd, CmdId, RunId, RunState, VtermGrid,
+        Cmd, CmdId, PromptInfo, RunId, RunState, VtermGrid,
     },
     term_session::{TermId, ViewLocation},
     theme::scope,
+    user_command::CommandSet,
     workspace::Workspace,
 };
 use std::path::{Path, PathBuf};
@@ -98,6 +100,72 @@ pub(super) fn run_submit(stoat: &mut Stoat) -> UpdateEffect {
     }
     tracing::info!(target: "stoat::run", command = %text, "run pane command started");
     UpdateEffect::Redraw
+}
+
+/// Resolve the prompt of each Run pane of the active workspace whose text
+/// changed since its last resolve, so the painter reads the command token
+/// and the tag at its right without a lookup of its own.
+///
+/// One [`Availability`] snapshot and the configured commands serve every
+/// prompt, as [`prompt_info`] reads a text.
+pub(crate) fn sync_run_prompts(stoat: &mut Stoat) {
+    let changed: Vec<(RunId, String)> = {
+        let ws = stoat.active_workspace();
+        ws.runs
+            .iter()
+            .filter_map(|(id, run)| {
+                let text = run.input.text(ws);
+                (text != run.prompt.text).then_some((id, text))
+            })
+            .collect()
+    };
+    if changed.is_empty() {
+        return;
+    }
+
+    let ctx = Availability::from_stoat(stoat);
+    let commands = stoat.commands.clone();
+    let runs = &mut stoat.active_workspace_mut().runs;
+    for (id, text) in changed {
+        if let Some(run) = runs.get_mut(id) {
+            run.prompt = prompt_info(text, &ctx, &commands);
+        }
+    }
+}
+
+/// What the prompt shows for `text`, its head resolved against `ctx` and
+/// `commands` by the palette's rule for a head.
+///
+/// The command token runs from the text's start to the end of a head that
+/// names a command, or to the end of the first word of a Parsed or Agent
+/// line, so `cargo` takes the command color beside the `cargo test` chip.
+/// Any other line has no token. The chip is the line's Kind Chip, and the
+/// source is the Source Tag of the command that the head names.
+fn prompt_info(text: String, ctx: &Availability, commands: &CommandSet) -> PromptInfo {
+    let trimmed = text.trim_start();
+    let lead = text.len() - trimmed.len();
+    let first_word = trimmed.find(char::is_whitespace).unwrap_or(trimmed.len());
+    let head = command_palette::line_head(&text);
+    let command = Some(head)
+        .filter(|head| !head.is_empty())
+        .and_then(|head| command_palette::resolve_command(head, ctx, commands));
+
+    let kind = kind::run_kind(&text);
+    let token_end = match (&command, kind) {
+        (Some(_), _) => lead + head.len(),
+        (None, RunKind::Parsed(_) | RunKind::Agent) => lead + first_word,
+        (None, _) => 0,
+    };
+    let source = command.as_ref().and_then(|command| match command {
+        PaletteCommand::User(user) => Some(user.source_tag()),
+        PaletteCommand::Action(_) => render::command_palette::source_tag(command),
+    });
+    PromptInfo {
+        token_len: text[..token_end].chars().count(),
+        chip: kind.chip(),
+        source,
+        text,
+    }
 }
 
 /// Take an Enter to the Cmd `id`, the newest block of a Run pane's stack or the
@@ -790,7 +858,7 @@ mod tests {
     use crate::{
         app::{Stoat, UpdateEffect},
         host::FakeTerminalSession,
-        pane::{DockPanel, DockSide, DockVisibility, FocusTarget, View},
+        pane::{DockPanel, DockSide, DockVisibility, FocusTarget, PaneId, View},
         render::paint::style_rgb,
         run::{
             cargo::{ERROR_AND_WARNING, ONE_FAILURE, THREE_BINARIES},
@@ -803,6 +871,11 @@ mod tests {
         theme::scope,
     };
     use futures::FutureExt;
+    use ratatui::{
+        buffer::Buffer,
+        layout::Rect,
+        style::{Color, Modifier},
+    };
     use std::{io, path::PathBuf, sync::Arc, time::Duration};
     use stoatty_protocol::command::{self, Command};
 
@@ -835,6 +908,12 @@ mod tests {
 
     /// A bar beside a block's body, as its top edge, its height, and its color.
     type BodyBar = (i16, u16, [u8; 3]);
+
+    /// A text run of a frame's scene, as its text and its color.
+    type SceneRun = (String, [u8; 3]);
+
+    /// A box of a frame's scene, as its color and its right edge in sixteenths.
+    type SceneBox = ([u8; 3], i32);
 
     #[test]
     fn a_run_drops_the_editor_it_replaces() {
@@ -2597,5 +2676,228 @@ mod tests {
             ),
             (true, vec![cmd], true),
         );
+    }
+
+    /// A first word that names a command takes the command color at the Run
+    /// pane prompt, and the rest of the line the text color.
+    #[test]
+    fn the_prompt_colors_a_resolved_first_word() {
+        let mut h = Stoat::test();
+        h.open_run();
+        h.type_text("cd sub");
+
+        let (command, text) = (look(&h, scope::UI_CMD_COMMAND), look(&h, scope::UI_TEXT));
+        assert_eq!(
+            prompt_cells(&mut h, "cd sub"),
+            [vec![command; 2], vec![text; 4]].concat(),
+        );
+    }
+
+    /// A cargo line's first word takes the command color, and its Kind Chip
+    /// stands at the right end of the prompt row in the `ui.run.kind` colors.
+    #[test]
+    fn the_prompt_colors_a_cargo_line_and_shows_its_chip() {
+        let mut h = Stoat::test();
+        h.open_run();
+        h.type_text("cargo test -p stoat");
+
+        let cells = prompt_cells(&mut h, "cargo test");
+        let row = focused_prompt_row(&h);
+        let (runs, boxes) = row_scene(&h, row);
+        let kind = h.stoat.theme.get(scope::UI_RUN_KIND);
+        let (fg, bg) = (rgb(kind.fg), rgb(kind.bg));
+        let (command, text) = (look(&h, scope::UI_CMD_COMMAND), look(&h, scope::UI_TEXT));
+        assert_eq!(
+            (
+                cells,
+                runs,
+                boxes
+                    .into_iter()
+                    .filter(|(color, _)| *color == bg)
+                    .collect::<Vec<_>>(),
+            ),
+            (
+                [vec![command; 5], vec![text; 5]].concat(),
+                vec![("cargo test".to_owned(), fg)],
+                vec![(bg, i32::from(row.right()) * 16)],
+            ),
+        );
+    }
+
+    /// A first word that names a command shows that command's Source Tag at
+    /// the right end of the prompt row.
+    #[test]
+    fn the_prompt_shows_the_source_tag_of_a_resolved_command() {
+        let mut h = Stoat::test();
+        h.open_run();
+        h.type_text("cd sub");
+
+        let (runs, _) = row_scene(&h, focused_prompt_row(&h));
+        let builtin = h.stoat.theme.get(scope::UI_CMD_SOURCE_BUILTIN);
+        assert_eq!(runs, vec![("built-in".to_owned(), rgb(builtin.fg))]);
+    }
+
+    /// A first word that names a user command shows that command's Source Tag
+    /// at the right end of the prompt row.
+    #[test]
+    fn the_prompt_shows_the_source_tag_of_a_user_command() {
+        let mut h = with_hello();
+        h.open_run();
+        h.type_text("hello");
+
+        let (runs, _) = row_scene(&h, focused_prompt_row(&h));
+        let config = h.stoat.theme.get(scope::UI_CMD_SOURCE_CONFIG);
+        assert_eq!(runs, vec![("config".to_owned(), rgb(config.fg))]);
+    }
+
+    /// A line whose first word names no command draws in the text color, with
+    /// no tag at its right.
+    #[test]
+    fn a_plain_shell_word_stays_plain() {
+        let mut h = Stoat::test();
+        h.open_run();
+        h.type_text("ls -la");
+
+        let cells = prompt_cells(&mut h, "ls -la");
+        let (runs, _) = row_scene(&h, focused_prompt_row(&h));
+        assert_eq!((cells, runs), (vec![look(&h, scope::UI_TEXT); 6], vec![]));
+    }
+
+    /// A command name that holds a space names nothing at the prompt, so
+    /// `git log` runs git and draws in the text color.
+    #[test]
+    fn a_command_name_with_a_space_does_not_resolve_at_the_prompt() {
+        let mut h = Stoat::test();
+        h.open_run();
+        h.type_text("git log");
+
+        let cells = prompt_cells(&mut h, "git log");
+        let (runs, _) = row_scene(&h, focused_prompt_row(&h));
+        assert_eq!((cells, runs), (vec![look(&h, scope::UI_TEXT); 7], vec![]));
+    }
+
+    /// The `action` token and the internal action's name after it take the
+    /// command color together.
+    #[test]
+    fn an_internal_action_resolves_under_the_action_token() {
+        let mut h = Stoat::test();
+        h.open_run();
+        h.type_text("action focus-left");
+
+        assert_eq!(
+            prompt_cells(&mut h, "action focus-left"),
+            vec![look(&h, scope::UI_CMD_COMMAND); 17],
+        );
+    }
+
+    /// The prompt draws its caret in the theme's cursor style after the typed
+    /// text, and a Run pane without the focus draws none.
+    ///
+    /// The fade of unfocused panes is off, so the cells of the pane without
+    /// the focus keep the colors that the prompt paints them in.
+    #[test]
+    fn the_prompt_keeps_its_caret() {
+        let mut h = Stoat::test();
+        h.stoat.pane_fade_override = Some(false);
+        h.open_run();
+        h.type_text("ls");
+        let pane = h.stoat.active_workspace().panes.focus();
+        let focused = caret_offsets(&mut h, pane, "ls");
+        super::super::dispatch(&mut h.stoat, &stoat_action::SplitNewRight);
+
+        assert_eq!(
+            (focused, caret_offsets(&mut h, pane, "ls")),
+            (vec![2], vec![])
+        );
+    }
+
+    /// The foreground and the modifiers of the theme scope `name`.
+    fn look(h: &TestHarness, name: &str) -> (Color, Modifier) {
+        let style = h.stoat.theme.get(name);
+        (style.fg.expect("a foreground"), style.add_modifier)
+    }
+
+    /// The RGB value of `color`.
+    fn rgb(color: Option<Color>) -> [u8; 3] {
+        style_rgb(color).expect("an RGB color")
+    }
+
+    /// The prompt row of the Run pane `pane`, as the last frame laid it out.
+    fn prompt_row(h: &TestHarness, pane: PaneId) -> Rect {
+        let area = h.stoat.active_workspace().panes.pane(pane).area;
+        let inner = crate::run::stack_rect(area);
+        Rect::new(inner.x, area.bottom() - 1, inner.width, 1)
+    }
+
+    /// The prompt row of the focused Run pane, as the last frame laid it out.
+    fn focused_prompt_row(h: &TestHarness) -> Rect {
+        prompt_row(h, h.stoat.active_workspace().panes.focus())
+    }
+
+    /// The column of the first cell of `text` on `row` of `buf`.
+    fn text_col(buf: &Buffer, row: Rect, text: &str) -> u16 {
+        let chars: Vec<String> = text.chars().map(String::from).collect();
+        let symbols: Vec<String> = (row.x..row.right())
+            .map(|x| buf[(x, row.y)].symbol().to_owned())
+            .collect();
+        let at = symbols
+            .windows(chars.len())
+            .position(|cells| cells == chars.as_slice())
+            .expect("the row shows the text");
+        row.x + at as u16
+    }
+
+    /// The foreground and the modifiers of the cells of `text` on the focused
+    /// Run pane's prompt row, as a frame paints them.
+    fn prompt_cells(h: &mut TestHarness, text: &str) -> Vec<(Color, Modifier)> {
+        let buf = h.stoat.render();
+        let row = focused_prompt_row(h);
+        let start = text_col(&buf, row, text);
+        (start..start + text.chars().count() as u16)
+            .map(|x| (buf[(x, row.y)].fg, buf[(x, row.y)].modifier))
+            .collect()
+    }
+
+    /// The text runs and the boxes that the last frame's scene draws on `row`.
+    fn row_scene(h: &TestHarness, row: Rect) -> (Vec<SceneRun>, Vec<SceneBox>) {
+        let top = i32::from(row.y) * 16;
+        let on_row = |y: i16| (top..top + 16).contains(&i32::from(y));
+        let (mut runs, mut boxes) = (Vec::new(), Vec::new());
+        for cmd in command::decode_stream(&h.stoat.apc_scene.all_bytes()) {
+            match cmd {
+                Command::TextRun(run) if on_row(run.row) => runs.push((run.text, run.color)),
+                Command::TextRuns(group) => runs.extend(
+                    group
+                        .runs
+                        .into_iter()
+                        .filter(|(_, run_row, _)| on_row(*run_row))
+                        .map(|(.., text)| (text, group.color)),
+                ),
+                Command::Bar(bar) if on_row(bar.y) => {
+                    boxes.push((bar.color, i32::from(bar.x) + i32::from(bar.width)))
+                },
+                _ => {},
+            }
+        }
+        (runs, boxes)
+    }
+
+    /// The offsets from the first cell of `text`, on the prompt row of the Run
+    /// pane `pane`, of the cells that carry the theme's cursor style.
+    fn caret_offsets(h: &mut TestHarness, pane: PaneId, text: &str) -> Vec<i32> {
+        let buf = h.stoat.render();
+        let row = prompt_row(h, pane);
+        let start = i32::from(text_col(&buf, row, text));
+        let cursor = h.stoat.theme.cursor_style();
+        (row.x..row.right())
+            .filter(|&x| {
+                let cell = &buf[(x, row.y)];
+                match cursor.bg {
+                    Some(bg) => cell.bg == bg,
+                    None => cell.modifier.contains(Modifier::REVERSED),
+                }
+            })
+            .map(|x| i32::from(x) - start)
+            .collect()
     }
 }

@@ -56,6 +56,28 @@ pub struct RunState {
     /// session and misleading across a restart.
     pub(crate) history: InputHistory,
     pub title: Option<String>,
+    /// What the prompt shows for the text it holds, which the frame resolves
+    /// once for each change of the text.
+    pub(crate) prompt: PromptInfo,
+}
+
+/// The command token and the tag at its right that the Run pane prompt shows
+/// for its text.
+///
+/// The palette's rule for a head reads the command set and the context of
+/// the workspace, which the painter does not hold. So the frame resolves the
+/// prompt once for each change of its text, and the painter reads this.
+#[derive(Default, Hash)]
+pub(crate) struct PromptInfo {
+    /// The text that the other fields were resolved for.
+    pub(crate) text: String,
+    /// The chars of the text, from its start, that the command token takes.
+    pub(crate) token_len: usize,
+    /// The Kind Chip that the text's Run Kind gives.
+    pub(crate) chip: Option<&'static str>,
+    /// The label and the scope of the Source Tag of the command that the
+    /// text's head names.
+    pub(crate) source: Option<(&'static str, &'static str)>,
 }
 
 impl RunState {
@@ -70,6 +92,7 @@ impl RunState {
             scroll_offset: 0,
             history: InputHistory::default(),
             title: None,
+            prompt: PromptInfo::default(),
         }
     }
 
@@ -946,6 +969,7 @@ mod tests {
             scroll_offset,
             history: InputHistory::default(),
             title: None,
+            prompt: PromptInfo::default(),
         };
         let mut cmds = SlotMap::with_key();
         for n in 0..blocks {

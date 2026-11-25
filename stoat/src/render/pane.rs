@@ -253,7 +253,6 @@ pub(crate) fn render_pane(
                     terms,
                     editors,
                     theme,
-                    frame.chrome,
                     frame.workspace_root,
                     frame.home,
                     content_area,
