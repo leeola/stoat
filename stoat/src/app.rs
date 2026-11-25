@@ -55,7 +55,7 @@ use crate::{
         BlankedBuffer, Hold, PRIMARY_MODES,
     },
     review_walk::{ReviewWalk, WalkOrigin},
-    run::{CommandMark, PtyNotification, RunId},
+    run::{PtyNotification, RunId},
     selection::{merge_overlapping_spans, SpanLanding},
     session_log::SessionLog,
     ssh,
@@ -9454,11 +9454,8 @@ impl Stoat {
             return;
         }
 
-        if let Some(run_id) = self.modal_run.take()
-            && let Some(mut state) = self.active_workspace_mut().remove_run(run_id)
-            && let Some(handle) = &mut state.shell_handle
-        {
-            handle.kill();
+        if let Some(run_id) = self.modal_run.take() {
+            self.active_workspace_mut().remove_run(run_id);
         }
         while active_modal(self).is_some() {
             keymap_state::close_topmost_modal(self);
@@ -9550,12 +9547,27 @@ impl Stoat {
         Ok(())
     }
 
+    /// Handle each notification that a PTY reader queued, as the run loop
+    /// does, and answer whether there was one.
+    ///
+    /// A test drives the readers through its scheduler rather than through
+    /// the run loop, so it collects their notifications here.
+    #[cfg(test)]
+    pub(crate) fn handle_queued_pty(&mut self) -> bool {
+        let mut handled = false;
+        while let Ok(notif) = self.pty_rx.try_recv() {
+            self.handle_pty_notification(notif);
+            handled = true;
+        }
+        handled
+    }
+
     pub(crate) fn handle_pty_notification(&mut self, notif: PtyNotification) -> UpdateEffect {
         match notif {
             PtyNotification::SshOutput { data } => ssh::forward_output(self, data),
             PtyNotification::SshExited { exit_status } => ssh::finish(self, exit_status),
-            PtyNotification::Output { workspace, .. }
-            | PtyNotification::CommandDone { workspace, .. }
+            PtyNotification::CmdOutput { workspace, .. }
+            | PtyNotification::CmdExited { workspace, .. }
             | PtyNotification::TermOutput { workspace, .. }
             | PtyNotification::TermExited { workspace, .. } => {
                 let on_screen = workspace == self.active_workspace;
@@ -9586,36 +9598,18 @@ impl Stoat {
         let modal_run = self.modal_run;
         let ws = self.active_workspace_mut();
         match notif {
-            PtyNotification::Output { run_id, data, .. } => {
-                // The block still feeds while hidden, but a hidden run drives no
-                // repaint. Revealing it repaints on the toggle's own dispatch.
-                let visible = Self::run_visible(ws, run_id, modal_run);
+            PtyNotification::CmdOutput {
+                cmd: id, run, data, ..
+            } => {
+                let now = executor.now();
                 let Workspace { runs, cmds, .. } = ws;
-                let Some(run_state) = runs.get_mut(run_id) else {
+                // Output of an earlier run of the Cmd never lands in a later
+                // run's grid.
+                let Some(cmd) = cmds.get_mut(id).filter(|cmd| cmd.run_count == run) else {
                     return UpdateEffect::None;
                 };
-                let Some(block) = run_state.active_block_mut(cmds) else {
-                    return UpdateEffect::None;
-                };
-                block.feed(&data);
-                // An OSC 133 done mark finalizes the block with its exit code.
-                // Start marks are drained but unused. Blocks are created at
-                // submit time.
-                for mark in std::mem::take(&mut block.grid.command_marks) {
-                    if let CommandMark::Done { exit } = mark
-                        && !block.finished
-                    {
-                        block.finished = true;
-                        block.exit_status = exit;
-                        tracing::info!(
-                            target: "stoat::run",
-                            command = %block.command,
-                            ?exit,
-                            "run finished"
-                        );
-                    }
-                }
-                for text in block.grid.clipboard_writes.drain(..) {
+                cmd.feed(&data);
+                for text in cmd.grid.clipboard_writes.drain(..) {
                     crate::host::clipboard_copy(
                         clipboard_host.as_ref(),
                         env_host.as_ref(),
@@ -9623,45 +9617,51 @@ impl Stoat {
                         &text,
                     );
                 }
-                // Adopt the latest OSC 7 cwd report. Captured before the
-                // alt-screen branch reborrows run_state below.
-                let reported_cwd = std::mem::take(&mut block.grid.cwd_reports).pop();
-                if block.grid.alt_screen_detected {
-                    block.error = Some("this command requires a full terminal".into());
-                    block.finished = true;
-                    block.grid.alt_screen_detected = false;
-                    if let Some(handle) = &mut run_state.shell_handle {
-                        handle.kill();
+                if cmd.grid.alt_screen_detected {
+                    cmd.error = Some("this command requires a full terminal".into());
+                    cmd.finished = true;
+                    cmd.ended = Some(now);
+                    cmd.grid.alt_screen_detected = false;
+                    if let Some(process) = cmd.process.take() {
+                        process.kill();
                     }
-                    run_state.shell_handle = None;
                 }
-                if let Some(cwd) = reported_cwd {
-                    run_state.cwd = cwd;
-                }
+                let Some((run_id, run_state)) =
+                    runs.iter_mut().find(|(_, run)| run.blocks.contains(&id))
+                else {
+                    return UpdateEffect::None;
+                };
                 run_state.trim_blocks(cmds);
-                if visible && on_screen {
+                // The Cmd still feeds while hidden, but a hidden one drives no
+                // repaint. Revealing it repaints on the toggle's own dispatch.
+                if on_screen && Self::run_visible(ws, run_id, modal_run) {
                     self.pty_dirty = true;
                 }
                 UpdateEffect::None
             },
-            PtyNotification::CommandDone {
-                run_id,
+            PtyNotification::CmdExited {
+                cmd: id,
+                run,
                 exit_status,
                 ..
             } => {
-                let Some(run_state) = ws.runs.get(run_id) else {
+                let now = executor.now();
+                let Some(cmd) = ws.cmds.get_mut(id).filter(|cmd| cmd.run_count == run) else {
                     return UpdateEffect::None;
                 };
-                let Some(block) = run_state.active_block_mut(&mut ws.cmds) else {
-                    return UpdateEffect::None;
-                };
-                if !block.finished {
-                    block.finished = true;
-                    block.exit_status = exit_status;
+                if !cmd.finished {
+                    cmd.finished = true;
+                    cmd.exit_status = exit_status;
+                    cmd.ended = Some(now);
+                    cmd.process = None;
+                    let runtime_ms = cmd
+                        .started
+                        .map(|started| now.saturating_duration_since(started).as_millis());
                     tracing::info!(
                         target: "stoat::run",
-                        command = %block.command,
+                        command = %cmd.command,
                         exit = ?exit_status,
+                        ?runtime_ms,
                         "run finished"
                     );
                 }

@@ -436,7 +436,7 @@ fn emit_window_content(stoat: &mut Stoat, out: &mut Vec<u8>) -> Vec<Vec<u8>> {
     let held_buffers = ws.held_buffer_labels();
     let repo_status = ws.repo_status();
     let tallies = ws.repo_tallies();
-    let run_cwd = crate::render::pane::focused_run_cwd(focus_target, &ws.panes, &ws.runs);
+    let run_cwd = crate::render::pane::focused_run_cwd(focus_target, &ws.panes, &ws.git_root);
 
     let frame = crate::render::FrameCtx {
         workspace_name: &workspace_name,
@@ -3758,7 +3758,6 @@ pub(crate) fn window_content_version(
             1u8.hash(&mut hasher);
             run_id.hash(&mut hasher);
             run.scroll_offset.hash(&mut hasher);
-            run.cwd.hash(&mut hasher);
             run.blocks.len().hash(&mut hasher);
             for block in run.blocks.iter().filter_map(|id| ws.cmds.get(*id)) {
                 // Only the grid needs a counter. Every other field the block

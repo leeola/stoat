@@ -10,9 +10,9 @@ define_action!(
     "OpenRun",
     ActionKind::OpenRun,
     "open the run-command prompt",
-    "Turn the focused pane into a run prompt backed by a shell. Commands typed \
-     at the prompt run in the workspace root and their output stays in the \
-     pane. See also Terminal, which opens a bare subshell pane instead.",
+    "Turn the focused pane into a run prompt. Each command typed at the prompt \
+     runs in a shell of its own in the workspace root, and its output stays in \
+     the pane. See also Terminal, which opens a bare subshell pane instead.",
     ActionPriority::Common
 );
 
@@ -22,7 +22,8 @@ define_action!(
     "RunSubmit",
     ActionKind::RunSubmit,
     "submit command",
-    "Submit the current command line to the shell."
+    "Run the current command line in a shell of its own. A cd line changes the \
+     workspace root instead, since no shell state carries to the next line."
 );
 
 define_action!(
@@ -31,7 +32,7 @@ define_action!(
     "RunInterrupt",
     ActionKind::RunInterrupt,
     "interrupt command",
-    "Send SIGINT to the running shell command."
+    "Send SIGINT to the newest running command."
 );
 
 define_action!(

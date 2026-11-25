@@ -929,13 +929,13 @@ pub(crate) fn close_topmost_modal(stoat: &mut Stoat) -> bool {
         ActiveModal::Run => {
             let run_id = stoat.modal_run.expect("the run modal is open");
             let ws = stoat.active_workspace_mut();
-            if let Some(run_state) = ws.runs.get_mut(run_id) {
-                if let Some(handle) = &mut run_state.shell_handle {
-                    handle.kill();
+            if let Some(run_state) = ws.runs.get(run_id)
+                && let Some(block) = run_state.active_block_mut(&mut ws.cmds)
+            {
+                if let Some(process) = block.process.take() {
+                    process.kill();
                 }
-                if let Some(block) = run_state.active_block_mut(&mut ws.cmds) {
-                    block.finished = true;
-                }
+                block.finished = true;
             }
         },
         ActiveModal::QuitConfirm => stoat.quit_all_confirm = None,

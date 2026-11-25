@@ -168,7 +168,7 @@ pub(crate) enum Output {
     /// A scratch buffer that holds the whole stdout of a run that worked. A
     /// failure shows its message and opens no buffer.
     Buffer,
-    /// A Run pane, whose shell runs the line of a shell step.
+    /// A Run pane, which runs the line of a shell step in a shell of its own.
     RunPane,
     /// The location picker, over the `path:line:col: text` lines of the
     /// stdout, whatever the exit code, because a search tool exits 1 when it

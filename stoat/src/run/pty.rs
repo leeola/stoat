@@ -1,32 +1,46 @@
-use super::RunId;
+use super::CmdId;
 use crate::{
-    host::terminal::{merge_env_diff, open_local_pty, SpawnArgs, TerminalHost, TerminalSession},
+    host::terminal::{merge_env_diff, SpawnArgs, TerminalHost, TerminalSession},
     term_session::TermId,
     workspace::{WorkspaceId, WorkspaceUid},
 };
+use futures::FutureExt;
 use std::{
     io::Error,
     path::{Path, PathBuf},
     sync::Arc,
+    time::Duration,
 };
 use stoat_scheduler::Executor;
 use tokio::sync::mpsc;
 
+/// How many times the reader of a Cmd asks for the exit status after the PTY's
+/// end, [`EXIT_STATUS_POLL`] apart.
+const EXIT_STATUS_TRIES: u32 = 50;
+
+/// The wait between two asks for the exit status of a Cmd's process.
+const EXIT_STATUS_POLL: Duration = Duration::from_millis(10);
+
 /// What a PTY reader tells the run loop.
 ///
-/// A [`RunId`] or [`TermId`] is a key local to the workspace that owns the
+/// A [`CmdId`] or [`TermId`] is a key local to the workspace that owns the
 /// session, so the first sessions of two workspaces share a key. Each session
 /// notification therefore carries the [`WorkspaceId`] of its owner. The run
 /// loop applies it to that workspace, on screen or not.
 pub enum PtyNotification {
-    Output {
+    /// A chunk of the output of the run `run` of the Cmd `cmd`.
+    CmdOutput {
         workspace: WorkspaceId,
-        run_id: RunId,
+        cmd: CmdId,
+        run: u32,
         data: Vec<u8>,
     },
-    CommandDone {
+    /// The end of the run `run` of the Cmd `cmd`, with the exit status of its
+    /// process, or `None` when no status came.
+    CmdExited {
         workspace: WorkspaceId,
-        run_id: RunId,
+        cmd: CmdId,
+        run: u32,
         exit_status: Option<i32>,
     },
     TermOutput {
@@ -56,125 +70,67 @@ impl PtyNotification {
     /// it is what a per-turn parse budget counts against.
     pub(crate) fn payload_len(&self) -> usize {
         match self {
-            PtyNotification::Output { data, .. }
+            PtyNotification::CmdOutput { data, .. }
             | PtyNotification::TermOutput { data, .. }
             | PtyNotification::SshOutput { data } => data.len(),
-            PtyNotification::CommandDone { .. }
+            PtyNotification::CmdExited { .. }
             | PtyNotification::TermExited { .. }
             | PtyNotification::SshExited { .. } => 0,
         }
     }
 }
 
-pub struct ShellHandle {
+/// The process of one run of a Cmd, a `bash -c` of its line on a PTY.
+pub(crate) struct CmdProcess {
     session: Arc<dyn TerminalSession>,
 }
 
-impl ShellHandle {
+impl CmdProcess {
     pub(crate) fn new(session: Arc<dyn TerminalSession>) -> Self {
         Self { session }
     }
 
-    pub fn send_command(&self, command: &str) {
-        use futures::FutureExt;
-        let payload = format!("{command}\n");
-        let _ = self.session.write(payload.as_bytes()).now_or_never();
-    }
-
-    pub fn send_interrupt(&self) {
-        use futures::FutureExt;
+    /// Write Ctrl-C into the process, as a terminal does for the key.
+    pub(crate) fn send_interrupt(&self) {
         let _ = self.session.write(b"\x03").now_or_never();
     }
 
-    pub fn kill(&self) {
-        use futures::FutureExt;
+    pub(crate) fn kill(&self) {
         let _ = self.session.kill().now_or_never();
     }
-
-    /// Whether the shell process has exited.
-    ///
-    /// An exited shell reads no more input, so a command sent to it is lost.
-    /// The check never blocks. A session that gives no answer at once counts
-    /// as still running.
-    pub(crate) fn exited(&self) -> bool {
-        use futures::FutureExt;
-        matches!(self.session.try_wait().now_or_never(), Some(Ok(Some(_))))
-    }
 }
 
-/// Where a run's PTY reader sends the output it reads.
+/// Where the reader of one run of a Cmd sends what it reads.
 ///
-/// A [`RunId`] names a run only within its own workspace, so the reader tags
-/// each notification with the owning [`WorkspaceId`] as well as the run.
-pub struct RunSink {
-    pub tx: mpsc::Sender<PtyNotification>,
-    pub workspace: WorkspaceId,
-    pub run_id: RunId,
+/// A [`CmdId`] names a Cmd only within its own workspace, so each
+/// notification carries the owning [`WorkspaceId`] too. The run number lets
+/// the run loop drop what an earlier run of the Cmd sends after a later run
+/// started.
+pub(crate) struct CmdSink {
+    pub(crate) tx: mpsc::Sender<PtyNotification>,
+    pub(crate) workspace: WorkspaceId,
+    pub(crate) cmd: CmdId,
+    pub(crate) run: u32,
 }
 
-pub fn spawn_shell(
+/// Start `line` as its own `bash -c` process on a PTY through `host`, in
+/// `cwd`, and spawn its reader on `executor`.
+///
+/// The process sees the environment with `diff` over it and `TERM=dumb`. The
+/// reader sends each chunk of output to `sink`, and the exit status at the
+/// PTY's end.
+pub(crate) fn spawn_cmd(
     host: &dyn TerminalHost,
     executor: &Executor,
+    line: &str,
     cwd: &Path,
     width: u16,
-    sink: RunSink,
+    sink: CmdSink,
     diff: &[(String, Option<String>)],
-) -> std::io::Result<ShellHandle> {
-    use futures::FutureExt;
-
+) -> std::io::Result<CmdProcess> {
     let mut args = SpawnArgs {
         program: "bash".into(),
-        args: vec!["--noediting".into(), "--noprofile".into(), "--norc".into()],
-        env: Vec::new(),
-        env_remove: Vec::new(),
-        cwd: cwd.to_path_buf(),
-        width,
-        rows: 24,
-    };
-    merge_env_diff(&mut args, diff);
-    args.env.extend([
-        ("PS1".into(), String::new()),
-        ("PS2".into(), String::new()),
-        // PS0 emits the OSC 133 command-start mark before each command
-        // runs. PROMPT_COMMAND emits the done mark with the exit code and
-        // an OSC 7 cwd report after it. The run pane reads these to bound
-        // output blocks and track the shell's working directory.
-        ("PS0".into(), "\x1b]133;C\x07".into()),
-        (
-            "PROMPT_COMMAND".into(),
-            "printf '\x1b]133;D;%s\x07\x1b]7;file://%s\x07' \"$?\" \"$PWD\"".into(),
-        ),
-        ("TERM".into(), "dumb".into()),
-    ]);
-    let session = match host.spawn(args).now_or_never() {
-        Some(result) => result?,
-        None => {
-            return Err(Error::other(
-                "terminal host did not spawn the run shell synchronously",
-            ))
-        },
-    };
-    let session: Arc<dyn TerminalSession> = Arc::from(session);
-    executor.spawn(reader_task(session.clone(), sink)).detach();
-
-    // bash --noediting echoes injected lines back into the grid. Turn the
-    // tty's echo off so only real command output is rendered.
-    let _ = session.write(b"stty -echo\n").now_or_never();
-
-    Ok(ShellHandle::new(session))
-}
-
-pub fn spawn_oneshot(
-    executor: &Executor,
-    command: &str,
-    cwd: &Path,
-    width: u16,
-    sink: RunSink,
-    diff: &[(String, Option<String>)],
-) -> std::io::Result<ShellHandle> {
-    let mut args = SpawnArgs {
-        program: "bash".into(),
-        args: vec!["-c".into(), command.to_string()],
+        args: vec!["-c".into(), line.to_owned()],
         env: Vec::new(),
         env_remove: Vec::new(),
         cwd: cwd.to_path_buf(),
@@ -183,10 +139,19 @@ pub fn spawn_oneshot(
     };
     merge_env_diff(&mut args, diff);
     args.env.push(("TERM".into(), "dumb".into()));
-    let session: Arc<dyn TerminalSession> = Arc::new(open_local_pty(args)?);
-    executor.spawn(reader_task(session.clone(), sink)).detach();
-
-    Ok(ShellHandle::new(session))
+    let session = match host.spawn(args).now_or_never() {
+        Some(result) => result?,
+        None => {
+            return Err(Error::other(
+                "terminal host did not spawn the command synchronously",
+            ))
+        },
+    };
+    let session: Arc<dyn TerminalSession> = Arc::from(session);
+    executor
+        .spawn(cmd_reader_task(session.clone(), sink, executor.clone()))
+        .detach();
+    Ok(CmdProcess::new(session))
 }
 
 /// Spawn `claude` as an owned subshell keyed to the workspace `uid`,
@@ -486,38 +451,49 @@ fn editor_command_for(exe: Option<&Path>) -> String {
     }
 }
 
-async fn reader_task(session: Arc<dyn TerminalSession>, sink: RunSink) {
-    let RunSink {
+/// Forward each chunk that `session` reads to `sink`, then the exit status at
+/// the PTY's end.
+///
+/// The PTY closes before the kernel lets the child be reaped, so the status
+/// comes from `try_wait`, asked up to [`EXIT_STATUS_TRIES`] times,
+/// [`EXIT_STATUS_POLL`] apart. A status that never comes reads `None`.
+async fn cmd_reader_task(session: Arc<dyn TerminalSession>, sink: CmdSink, executor: Executor) {
+    let CmdSink {
         tx,
         workspace,
-        run_id,
+        cmd,
+        run,
     } = sink;
     loop {
-        let chunk = match session.read_chunk().await {
+        let data = match session.read_chunk().await {
             Ok(Some(chunk)) => chunk,
             Ok(None) | Err(_) => break,
         };
-        if tx
-            .send(PtyNotification::Output {
-                workspace,
-                run_id,
-                data: chunk,
-            })
-            .await
-            .is_err()
-        {
-            break;
+        let output = PtyNotification::CmdOutput {
+            workspace,
+            cmd,
+            run,
+            data,
+        };
+        if tx.send(output).await.is_err() {
+            return;
         }
     }
 
-    // The read loop ends when the shell closes its PTY end (exit) or on a read
-    // error. Signal completion at EOF so a still-running block finalizes even
-    // without an OSC 133 done mark, which the oneshot modal path relies on.
+    let mut exit_status = None;
+    for _ in 0..EXIT_STATUS_TRIES {
+        if let Ok(Some(code)) = session.try_wait().await {
+            exit_status = Some(code);
+            break;
+        }
+        executor.timer(EXIT_STATUS_POLL).await;
+    }
     let _ = tx
-        .send(PtyNotification::CommandDone {
+        .send(PtyNotification::CmdExited {
             workspace,
-            run_id,
-            exit_status: None,
+            cmd,
+            run,
+            exit_status,
         })
         .await;
 }
@@ -525,6 +501,8 @@ async fn reader_task(session: Arc<dyn TerminalSession>, sink: RunSink) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::host::FakeTerminalSession;
+    use stoat_scheduler::TestScheduler;
 
     /// Without a socket directory there is no instance to name, but the agent
     /// still composes prompts through the editor bridge.
@@ -657,5 +635,45 @@ mod tests {
             "/usr/bin/stoat api open --wait --split"
         );
         assert_eq!(editor_command_for(None), "stoat api open --wait --split");
+    }
+
+    /// The reader forwards the chunk and then, at the PTY's end, the exit
+    /// status, both named by the sink's Cmd and run.
+    #[test]
+    fn the_reader_reports_the_exit_status_after_the_last_chunk() {
+        let scheduler = Arc::new(TestScheduler::new());
+        let session = Arc::new(FakeTerminalSession::new());
+        session.push_output(b"hello");
+        session.finish(7);
+        let (tx, mut rx) = mpsc::channel(8);
+        let sink = CmdSink {
+            tx,
+            workspace: WorkspaceId::default(),
+            cmd: CmdId::default(),
+            run: 3,
+        };
+
+        scheduler.block_on(cmd_reader_task(session, sink, scheduler.executor()));
+
+        let mut events = Vec::new();
+        while let Ok(event) = rx.try_recv() {
+            events.push(match event {
+                PtyNotification::CmdOutput { cmd, run, data, .. } => {
+                    format!(
+                        "output {} {run} {}",
+                        cmd == CmdId::default(),
+                        String::from_utf8_lossy(&data)
+                    )
+                },
+                PtyNotification::CmdExited {
+                    cmd,
+                    run,
+                    exit_status,
+                    ..
+                } => format!("exited {} {run} {exit_status:?}", cmd == CmdId::default()),
+                _ => "other".to_owned(),
+            });
+        }
+        assert_eq!(events, ["output true 3 hello", "exited true 3 Some(7)"]);
     }
 }

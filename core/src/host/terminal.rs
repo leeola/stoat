@@ -76,7 +76,7 @@ pub trait TerminalHost: Send + Sync {
 /// PTY-backed [`TerminalSession`]: owns the master (for resizing and
 /// process introspection), a queue into the shell's input, the child
 /// handle, and a reader thread that pumps output into a channel.
-pub struct PtyTerminalSession {
+pub(crate) struct PtyTerminalSession {
     master: Mutex<Box<dyn portable_pty::MasterPty + Send>>,
     writer: sync_mpsc::Sender<Vec<u8>>,
     /// Chunks sent but not yet written, shared with the writer thread.
@@ -178,11 +178,10 @@ impl TerminalSession for PtyTerminalSession {
     }
 }
 
-/// Synchronous PTY-open helper shared between [`TerminalHost::spawn`]
-/// (via [`crate::host::local::LocalTerminalHost`]) and the legacy
-/// `stoat::run::spawn_shell` entry point, so both build the PTY through
-/// the same portable-pty boilerplate without an async detour.
-pub fn open_local_pty(args: SpawnArgs) -> io::Result<PtyTerminalSession> {
+/// Synchronous PTY-open helper behind the [`TerminalHost::spawn`] of
+/// [`crate::host::local::LocalTerminalHost`], which builds the PTY through
+/// the portable-pty boilerplate without an async detour.
+pub(crate) fn open_local_pty(args: SpawnArgs) -> io::Result<PtyTerminalSession> {
     let pty_system = portable_pty::native_pty_system();
     let pair = pty_system
         // FIXME: The PTY carries no pixel size, so a remote stoat under :ssh reads

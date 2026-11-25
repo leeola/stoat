@@ -1,8 +1,9 @@
+use super::pty::CmdProcess;
 use crate::osc_cap::{OscCap, MAX_OSC_CLIPBOARD_BYTES, MAX_OSC_PLAIN_BYTES};
 use base64::{engine::general_purpose::STANDARD, Engine};
 use ratatui::style::{Color, Modifier};
 use smallvec::SmallVec;
-use std::{ops::Range, path::PathBuf};
+use std::{ops::Range, path::PathBuf, time::Instant};
 use unicode_width::UnicodeWidthChar;
 
 #[derive(Clone)]
@@ -43,19 +44,6 @@ pub(crate) const MAX_SCROLLBACK_ROWS: usize = 10_000;
 /// rather than once per line.
 pub(crate) const SCROLLBACK_SLACK: usize = 512;
 
-/// Shell-integration command boundary decoded from OSC 133 in the input
-/// stream.
-///
-/// `Start` (OSC 133;C) precedes a command's output. `Done` carries the
-/// command's exit code (OSC 133;D;&lt;exit&gt;), `None` when the shell omits
-/// it. Callers drain [`VtermGrid::command_marks`] after [`VtermGrid::feed`]
-/// to finalize the active output block. The grid does not own that state.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum CommandMark {
-    Start,
-    Done { exit: Option<i32> },
-}
-
 pub struct VtermGrid {
     cells: Vec<Vec<StyledCell>>,
     cursor_row: usize,
@@ -78,14 +66,6 @@ pub struct VtermGrid {
     /// Callers drain after [`Self::feed`] and forward to a clipboard
     /// host; the grid does not own clipboard side effects.
     pub clipboard_writes: Vec<String>,
-    /// OSC 133 shell-integration command marks decoded from the input
-    /// stream, in arrival order. Callers drain after [`Self::feed`] to
-    /// finalize the active output block on a `Done` mark.
-    pub command_marks: Vec<CommandMark>,
-    /// OSC 7 working-directory reports decoded from the input stream, in
-    /// arrival order. Callers drain after [`Self::feed`] and adopt the last
-    /// as the run pane's current directory.
-    pub cwd_reports: Vec<PathBuf>,
     generation: u64,
     /// Rows dropped off the front during the running [`VtermGrid::feed`], which
     /// reports it so a caller can move what it anchored to a row index. Reset
@@ -107,8 +87,6 @@ impl VtermGrid {
             parser: vte::Parser::new(),
             osc: OscCap::new(MAX_OSC_PLAIN_BYTES, MAX_OSC_CLIPBOARD_BYTES),
             clipboard_writes: Vec::new(),
-            command_marks: Vec::new(),
-            cwd_reports: Vec::new(),
             generation: 0,
             trimmed_rows: 0,
         }
@@ -392,39 +370,6 @@ impl vte::Perform for VtermGrid {
     fn put(&mut self, _byte: u8) {}
     fn unhook(&mut self) {}
     fn osc_dispatch(&mut self, params: &[&[u8]], _bell_terminated: bool) {
-        // OSC 133 shell-integration marks bound command output. "C" marks a
-        // command's start and "D" its completion with an optional exit code
-        // (OSC 133;D;<exit>). The app drains these to finalize the active
-        // output block. They are invisible, unlike the old __STOAT_N__ echo.
-        if !params.is_empty() && params[0] == b"133" {
-            match params.get(1) {
-                Some(p) if *p == b"C" => self.command_marks.push(CommandMark::Start),
-                Some(p) if *p == b"D" => {
-                    let exit = params
-                        .get(2)
-                        .and_then(|p| std::str::from_utf8(p).ok())
-                        .and_then(|s| s.trim().parse().ok());
-                    self.command_marks.push(CommandMark::Done { exit });
-                },
-                _ => {},
-            }
-            return;
-        }
-
-        // OSC 7 reports the shell's working directory as a file:// URI. The
-        // host is empty (file:///path) or named (file://host/path), so the
-        // path starts at the first slash after the scheme. The app adopts the
-        // last report as the run pane's cwd. A non-file URI is ignored.
-        if !params.is_empty() && params[0] == b"7" {
-            if let Some(uri) = params.get(1).and_then(|p| std::str::from_utf8(p).ok())
-                && let Some(rest) = uri.strip_prefix("file://")
-                && let Some(slash) = rest.find('/')
-            {
-                self.cwd_reports.push(PathBuf::from(&rest[slash..]));
-            }
-            return;
-        }
-
         // OSC 52 -- "set clipboard". Format: ESC ] 52 ; <Pc> ; <Pd> ST,
         // where <Pc> is the selection ("c" / "p" / "s" / mixed / empty)
         // and <Pd> is base64-encoded text. We honour writes targeted at
@@ -728,8 +673,8 @@ impl GridSelection {
 /// A Run Block is a Cmd after Enter.
 pub struct Cmd {
     pub command: String,
-    /// The shell's working directory when this command was submitted,
-    /// rendered as the block's prompt-line cwd.
+    /// The directory the command runs in, the workspace root when it was
+    /// submitted, which the block's prompt line names.
     pub cwd: PathBuf,
     pub grid: VtermGrid,
     pub finished: bool,
@@ -742,6 +687,17 @@ pub struct Cmd {
     /// click's release clears it too, so only a drag over blank cells, which
     /// copies nothing, stays highlighted after release.
     pub selection: Option<GridSelection>,
+    /// The process of the current run, `None` before the first run and after
+    /// the run ends.
+    pub(crate) process: Option<CmdProcess>,
+    /// When the current run started, `None` before the first run.
+    pub(crate) started: Option<Instant>,
+    /// When the current run ended, `None` while it runs and before the first
+    /// run.
+    pub(crate) ended: Option<Instant>,
+    /// How many runs started, so a notification of an earlier run reads
+    /// apart from the current one.
+    pub(crate) run_count: u32,
 }
 
 impl Cmd {
@@ -754,6 +710,10 @@ impl Cmd {
             exit_status: None,
             error: None,
             selection: None,
+            process: None,
+            started: None,
+            ended: None,
+            run_count: 0,
         }
     }
 

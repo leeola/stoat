@@ -8,14 +8,13 @@ use crate::{
 };
 pub use pty::{
     agent_socket_bind_dir, agent_socket_dir, agent_socket_path, agent_socket_path_in, spawn_claude,
-    spawn_oneshot, spawn_shell, spawn_ssh_reader, spawn_term_reader, spawn_terminal,
-    PtyNotification, RunSink, ShellHandle, TermSpawnEnv,
+    spawn_ssh_reader, spawn_term_reader, spawn_terminal, PtyNotification, TermSpawnEnv,
 };
 use ratatui::layout::Rect;
 use slotmap::{new_key_type, SlotMap};
-use std::path::{Component, Path, PathBuf};
+use std::path::{Component, Path};
 use stoat_scheduler::Executor;
-pub use vterm::{Cmd, CommandMark, GridSelection, StyledCell, VtermGrid};
+pub use vterm::{Cmd, GridSelection, StyledCell, VtermGrid};
 
 new_key_type! {
     pub struct RunId;
@@ -41,8 +40,6 @@ pub struct RunState {
     /// The stack, oldest first. Each id names a Cmd in `Workspace::cmds`.
     pub blocks: Vec<CmdId>,
     pub scroll_offset: usize,
-    pub cwd: PathBuf,
-    pub shell_handle: Option<ShellHandle>,
     /// Fish-style recall history of commands run in this pane, walked by
     /// Up/Down in the prompt.
     ///
@@ -57,14 +54,12 @@ impl RunState {
     /// Construct a new run state with an empty [`InputView`] for the command
     /// prompt. The actual [`RunId`] is resolved from pane focus at submit
     /// time, so construction does not need the key yet.
-    pub fn new(cwd: PathBuf, ws: &mut Workspace, executor: Executor) -> Self {
+    pub fn new(ws: &mut Workspace, executor: Executor) -> Self {
         let input = InputView::create(ws, executor, SubmitTarget::Run, "", "insert");
         Self {
             input,
             blocks: Vec::new(),
             scroll_offset: 0,
-            cwd,
-            shell_handle: None,
             history: InputHistory::default(),
             title: None,
         }
@@ -106,20 +101,25 @@ impl RunState {
         self.blocks.last().and_then(|id| cmds.get_mut(*id))
     }
 
+    /// Whether a Cmd of the stack has not finished.
     pub fn is_running(&self, cmds: &SlotMap<CmdId, Cmd>) -> bool {
-        self.active_block(cmds).is_some_and(|b| !b.finished)
+        self.blocks
+            .iter()
+            .filter_map(|id| cmds.get(*id))
+            .any(|cmd| !cmd.finished)
     }
 
-    /// Drop the oldest blocks while the pane holds more than one scrollback
-    /// of rows, and remove each dropped Cmd from `cmds`.
+    /// Drop the oldest finished blocks while the pane holds more than one
+    /// scrollback of rows, and remove each dropped Cmd from `cmds`.
     ///
     /// Each block caps its own scrollback. The block count has no cap, so a
     /// pane that runs a flooding command many times keeps every row of every
     /// run until this drops them.
     ///
     /// The threshold is [`MAX_RUN_ROWS`] plus [`vterm::SCROLLBACK_SLACK`], the
-    /// most rows one block holds. The active block always stays, because
-    /// output arrives into it. An id with no Cmd counts for no rows.
+    /// most rows one block holds. The newest block always stays, and so does
+    /// each Cmd that still runs, so a flood in one Cmd kills no other
+    /// process. An id with no Cmd counts for no rows.
     pub(crate) fn trim_blocks(&mut self, cmds: &mut SlotMap<CmdId, Cmd>) {
         let mut rows: usize = self
             .blocks
@@ -127,8 +127,15 @@ impl RunState {
             .filter_map(|id| cmds.get(*id))
             .map(|block| block.grid.line_count())
             .sum();
-        while self.blocks.len() > 1 && rows > MAX_RUN_ROWS + vterm::SCROLLBACK_SLACK {
-            let dropped = self.blocks.remove(0);
+        while rows > MAX_RUN_ROWS + vterm::SCROLLBACK_SLACK {
+            let newest = self.blocks.len().saturating_sub(1);
+            let Some(oldest) = self.blocks[..newest]
+                .iter()
+                .position(|id| cmds.get(*id).is_none_or(|cmd| cmd.finished))
+            else {
+                return;
+            };
+            let dropped = self.blocks.remove(oldest);
             rows -= cmds
                 .remove(dropped)
                 .map_or(0, |block| block.grid.line_count());
@@ -299,7 +306,7 @@ mod tests {
     use super::*;
     use crate::{buffer::BufferId, editor_state::EditorId};
     use ratatui::style::Color;
-    use std::collections::BTreeSet;
+    use std::{collections::BTreeSet, path::PathBuf};
 
     #[test]
     fn abbreviate_path_shortens_ancestors_under_home() {
@@ -533,43 +540,6 @@ mod tests {
     }
 
     #[test]
-    fn osc133_records_start_and_done_with_exit() {
-        let mut grid = VtermGrid::new(20);
-        grid.feed(b"\x1b]133;C\x07");
-        grid.feed(b"\x1b]133;D;0\x07");
-        assert_eq!(
-            grid.command_marks,
-            vec![CommandMark::Start, CommandMark::Done { exit: Some(0) }],
-        );
-    }
-
-    #[test]
-    fn osc133_done_without_exit_is_none() {
-        let mut grid = VtermGrid::new(20);
-        // ST-terminated (ESC \) with no exit field.
-        grid.feed(b"\x1b]133;D\x1b\\");
-        assert_eq!(grid.command_marks, vec![CommandMark::Done { exit: None }]);
-    }
-
-    #[test]
-    fn osc7_records_cwd_bare_and_with_host() {
-        let mut grid = VtermGrid::new(20);
-        grid.feed(b"\x1b]7;file:///Users/lee\x07");
-        grid.feed(b"\x1b]7;file://myhost/tmp\x07");
-        assert_eq!(
-            grid.cwd_reports,
-            vec![PathBuf::from("/Users/lee"), PathBuf::from("/tmp")],
-        );
-    }
-
-    #[test]
-    fn osc7_ignores_non_file_uri() {
-        let mut grid = VtermGrid::new(20);
-        grid.feed(b"\x1b]7;http://example.com/x\x07");
-        assert!(grid.cwd_reports.is_empty());
-    }
-
-    #[test]
     fn osc52_accepts_clipboard_in_mixed_selection() {
         let mut grid = VtermGrid::new(20);
         // selection "cs" = clipboard + screen, both target system clipboard
@@ -579,22 +549,21 @@ mod tests {
 
     /// The block's parser buffers an OSC payload without bound and keeps the
     /// capacity for the block's life, so an oversized one is cut before it
-    /// arrives. The cut ends where the escape does, or the marks and the output
-    /// behind it would go with it.
+    /// arrives. The cut ends where the escape does, or the escapes and the
+    /// output behind it would go with it.
     #[test]
-    fn an_oversize_osc_leaves_the_mark_behind_it_alone() {
+    fn an_oversize_osc_leaves_the_escape_behind_it_alone() {
         let mut grid = VtermGrid::new(20);
 
         let mut seq = b"\x1b]0;".to_vec();
         seq.resize(seq.len() + 1024 * 1024, b'a');
-        seq.extend_from_slice(b"\x07\x1b]133;D;0\x07done");
+        seq.extend_from_slice(b"\x07\x1b]52;c;aGVsbG8=\x07done");
         grid.feed(&seq);
 
         assert_eq!(
-            grid.command_marks,
-            vec![CommandMark::Done { exit: Some(0) }],
+            (grid.clipboard_writes.clone(), grid.text_in(0..4, 0..1)),
+            (vec!["hello".to_owned()], "done".to_owned()),
         );
-        assert_eq!(grid.text_in(0..4, 0..1), "done");
     }
 
     /// A clipboard write is the one code with a reason to carry a large
@@ -791,19 +760,6 @@ mod tests {
     }
 
     #[test]
-    fn command_marks_survive_a_trim() {
-        let mut grid = VtermGrid::new(10);
-        grid.feed(flood().as_bytes());
-        grid.feed(b"\x1b]133;D;7\x07");
-
-        assert_eq!(
-            grid.command_marks,
-            vec![CommandMark::Done { exit: Some(7) }],
-            "marks carry no row index, so trimming rows cannot lose them"
-        );
-    }
-
-    #[test]
     fn a_selection_moves_down_with_the_rows_that_scrolled_off() {
         let sel = GridSelection {
             anchor: (2, 30),
@@ -839,8 +795,8 @@ mod tests {
     }
 
     /// A run state holding `blocks` one-line blocks, with the store of their
-    /// Cmds and without a workspace behind it. Only the scroll arithmetic
-    /// reads these.
+    /// Cmds and without a workspace behind it. Each Cmd but the newest has
+    /// finished. Only the scroll and trim arithmetic reads these.
     fn scrollable(blocks: usize, scroll_offset: usize) -> (RunState, SlotMap<CmdId, Cmd>) {
         let mut run = RunState {
             input: InputView {
@@ -850,8 +806,6 @@ mod tests {
             },
             blocks: Vec::new(),
             scroll_offset,
-            cwd: PathBuf::from("/repo"),
-            shell_handle: None,
             history: InputHistory::default(),
             title: None,
         };
@@ -859,6 +813,7 @@ mod tests {
         for n in 0..blocks {
             let mut block = Cmd::new(format!("cmd{n}"), PathBuf::from("/repo"), 10);
             block.feed(b"out");
+            block.finished = n + 1 < blocks;
             run.blocks.push(cmds.insert(block));
         }
         (run, cmds)
@@ -969,6 +924,24 @@ mod tests {
             commands(&run, &cmds),
             ["cmd2"],
             "both older blocks drop and the flooded active block stays"
+        );
+    }
+
+    /// A trim drops the oldest finished Cmd and never one that still runs, so
+    /// a flood in one Cmd kills no other process.
+    #[test]
+    fn a_trim_keeps_a_running_cmd() {
+        let (mut run, mut cmds) = scrollable(3, 0);
+        for block in cmds.values_mut() {
+            block.feed("x\r\n".repeat(4_000).as_bytes());
+        }
+        cmds[run.blocks[0]].finished = false;
+
+        run.trim_blocks(&mut cmds);
+        assert_eq!(
+            commands(&run, &cmds),
+            ["cmd0", "cmd2"],
+            "the running oldest Cmd stays, and the second drops"
         );
     }
 }

@@ -2252,6 +2252,34 @@ fn the_pane_picker_badge_draws_the_accent_box() {
     }
 }
 
+/// A line typed at a Run pane runs in a bash of its own, and the pane shows
+/// the line's output under its header and nothing past it.
+///
+/// `<Space>t` turns the lone pane into a Run pane, which starts at column 1
+/// and row 2. The line's header takes row 2, its output `ok` takes row 3, and
+/// the row under the output stays blank.
+#[test]
+fn a_run_pane_line_runs_in_its_own_bash() {
+    let mut home = support::scratch_home();
+    let shot = settled_frame(
+        home.path(),
+        "basic-diff",
+        "unstaged.txt",
+        "<Space>t<Settle>echo ok<Enter><Settle:500>",
+    );
+
+    let output = pixels_of(&shot, cell_rect(1, 3, 2, 1), TEXT);
+    let under = pixels_of(&shot, cell_rect(1, 4, 2, 1), TEXT);
+    if output == 0 || under > 0 {
+        let frame = keep_frame(&shot, &mut home, "run_pane_own_bash");
+        panic!(
+            "the output row reads {output} text pixels in cells 1 and 2, and the row under it \
+             {under}; want text on the output row alone; the frame is {}",
+            frame.display(),
+        );
+    }
+}
+
 /// The which-key box docks on the status bar as a card on the raised surface.
 ///
 /// The card's cells end above the two rows of the status band, so its footer

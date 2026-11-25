@@ -30,7 +30,6 @@ use crate::{
         undercurl::UndercurlBatch,
         FrameCtx, MinimapChrome, PaneCtx, TypeScale,
     },
-    run::{RunId, RunState},
     term_session::{TermId, TermSession},
     theme::{PanelRole, TypeRole, FULL_CELL_SCALE},
     workspace::{
@@ -253,6 +252,7 @@ pub(crate) fn render_pane(
                     editors,
                     theme,
                     frame.chrome,
+                    frame.workspace_root,
                     frame.home,
                     content_area,
                     is_focused,
@@ -1293,21 +1293,22 @@ pub(crate) fn status_row(
     StatusRow { runs, badge }
 }
 
-/// The working directory of the run the focused split pane shows, or `None`
-/// when focus is off the split panes or the focused pane shows no run.
+/// The directory a run's next Cmd starts in, the workspace root `root`, while
+/// the focused split pane shows a run, or `None` when focus is off the split
+/// panes or the focused pane shows no run.
 ///
 /// Takes the workspace's fields rather than the workspace, so a frame holds a
-/// borrow of the runs alone while the pane loop borrows the editors mutably.
+/// borrow of the root alone while the pane loop borrows the editors mutably.
 pub(crate) fn focused_run_cwd<'a>(
     focus: FocusTarget,
     panes: &PaneTree,
-    runs: &'a SlotMap<RunId, RunState>,
+    root: &'a Path,
 ) -> Option<&'a Path> {
     let FocusTarget::SplitPane = focus else {
         return None;
     };
     match panes.pane(panes.focus()).view {
-        View::Run(id) => runs.get(id).map(|run| run.cwd.as_path()),
+        View::Run(_) => Some(root),
         _ => None,
     }
 }
@@ -8363,9 +8364,9 @@ mod tests {
         h.stoat.set_diff_warm_auto(true);
         h.open_file(Path::new("/repo/f.txt"));
         h.settle_diff_jobs();
-        let run = h.open_run();
+        h.open_run();
         h.stoat.home = Some(PathBuf::from("/home/u"));
-        h.stoat.active_workspace_mut().runs[run].cwd = PathBuf::from("/home/u/code/stoat");
+        h.stoat.active_workspace_mut().git_root = PathBuf::from("/home/u/code/stoat");
         let row = |h: &mut crate::test_harness::TestHarness| {
             let row = bar_row(&h.render_composited()).replace('\u{2500}', " ");
             row.split_whitespace().collect::<Vec<_>>().join(" ")
@@ -8377,7 +8378,7 @@ mod tests {
 
         assert_eq!(
             [insert, normal],
-            ["RUN repo run ~/code/stoat"; 2].map(String::from),
+            ["RUN stoat run ~/code/stoat"; 2].map(String::from),
         );
     }
 }

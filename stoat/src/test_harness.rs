@@ -64,6 +64,13 @@ const SETTLE_MAX_PASSES: usize = 1000;
 /// the wall clock the test clock starts at.
 pub(crate) const COMMITS_NOW_EPOCH: i64 = 1_700_000_000 + 3 * 86_400 + 3_600;
 
+/// A Cmd that [`TestHarness::submit_run`] started, and the fake session its
+/// process runs on.
+pub(crate) struct CmdHandle {
+    pub(crate) cmd: crate::run::CmdId,
+    pub(crate) session: Arc<crate::host::FakeTerminalSession>,
+}
+
 pub struct TestHarness {
     pub(crate) stoat: Stoat,
     scheduler: Arc<TestScheduler>,
@@ -612,12 +619,15 @@ impl TestHarness {
     }
 
     /// Drive the scheduler and async pump pipeline to a fixed point. After
-    /// returning, every spawned task has been polled to suspension and every
-    /// queued pump result has been routed through the main dispatch path.
+    /// returning, every spawned task has been polled to suspension, every
+    /// notification that a PTY reader queued has been handled as the run loop
+    /// handles it, and every queued pump result has been routed through the
+    /// main dispatch path.
     pub fn settle(&mut self) {
         for _ in 0..SETTLE_MAX_PASSES {
             self.scheduler.run_until_parked();
-            if !self.stoat.drive_pumps() {
+            let handled = self.stoat.handle_queued_pty();
+            if !self.stoat.drive_pumps() && !handled {
                 return;
             }
         }
@@ -763,42 +773,97 @@ impl TestHarness {
         }
     }
 
-    pub fn submit_run(&mut self, text: &str) {
-        use crate::{pane::View, run::Cmd};
-        let ws = self.stoat.active_workspace_mut();
-        let focused = ws.panes.focus();
-        let View::Run(id) = ws.panes.pane(focused).view else {
+    /// Submit `text` at the prompt of the focused Run pane, with a fresh fake
+    /// session queued for the process that the submit starts.
+    ///
+    /// Answers the Cmd that the submit pushed and its session. A submit that
+    /// starts no process, such as a `cd`, takes the session back from the
+    /// queue and answers the default id.
+    pub(crate) fn submit_run(&mut self, text: &str) -> CmdHandle {
+        use crate::pane::View;
+        let ws = self.stoat.active_workspace();
+        let View::Run(id) = ws.panes.pane(ws.panes.focus()).view else {
             panic!("submit_run: focused pane is not a Run");
         };
-        let run_state = ws.runs.get_mut(id).expect("run state exists");
-        run_state.history.push(text.to_owned());
-        let width = ws.panes.pane(focused).area.width.max(20);
-        let cmd = ws
-            .cmds
-            .insert(Cmd::new(text.to_owned(), run_state.cwd.clone(), width));
-        run_state.blocks.push(cmd);
+        let newest_before = ws.runs[id].blocks.last().copied();
+        let input = ws.runs[id].input.clone();
+        let session = Arc::new(crate::host::FakeTerminalSession::new());
+        self.fake_terminal_host().push_session(session.clone());
+        let spawns = self.fake_terminal_host().spawns().len();
+
+        input.replace_text(self.stoat.active_workspace_mut(), text);
+        crate::action_handlers::dispatch(&mut self.stoat, &stoat_action::RunSubmit);
+        if self.fake_terminal_host().spawns().len() == spawns {
+            self.fake_terminal_host().unqueue();
+        }
         self.capture("submit_run");
+
+        // The submit's trim can drop an older Cmd and keep the stack's length,
+        // so a new newest id is what tells a pushed Cmd apart.
+        let cmd = self.stoat.active_workspace().runs[id]
+            .blocks
+            .last()
+            .copied()
+            .filter(|&newest| Some(newest) != newest_before)
+            .unwrap_or_default();
+        CmdHandle { cmd, session }
     }
 
+    /// Send output for the newest Cmd of the run `run_id`, as its reader does.
     pub fn inject_run_output(&mut self, run_id: crate::run::RunId, data: &[u8]) {
-        let notif = crate::run::PtyNotification::Output {
+        let cmd = self.newest_cmd(run_id);
+        self.inject_cmd_output(cmd, data);
+    }
+
+    /// End the newest Cmd of the run `run_id` with `exit_code`, as its reader
+    /// does at the PTY's end.
+    pub fn inject_run_done(&mut self, run_id: crate::run::RunId, exit_code: i32) {
+        let cmd = self.newest_cmd(run_id);
+        self.inject_cmd_done(cmd, exit_code);
+    }
+
+    /// Send output for the current run of the Cmd `cmd`.
+    pub(crate) fn inject_cmd_output(&mut self, cmd: crate::run::CmdId, data: &[u8]) {
+        let notif = crate::run::PtyNotification::CmdOutput {
             workspace: self.stoat.active_workspace,
-            run_id,
+            cmd,
+            run: self.run_count(cmd),
             data: data.to_vec(),
         };
         self.stoat.handle_pty_notification(notif);
         self.capture("inject_output");
     }
 
-    pub fn inject_run_done(&mut self, run_id: crate::run::RunId, exit_code: i32) {
-        let mark = format!("\x1b]133;D;{exit_code}\x07");
-        let notif = crate::run::PtyNotification::Output {
+    /// End the current run of the Cmd `cmd` with `exit_code`.
+    pub(crate) fn inject_cmd_done(&mut self, cmd: crate::run::CmdId, exit_code: i32) {
+        let notif = crate::run::PtyNotification::CmdExited {
             workspace: self.stoat.active_workspace,
-            run_id,
-            data: mark.into_bytes(),
+            cmd,
+            run: self.run_count(cmd),
+            exit_status: Some(exit_code),
         };
         self.stoat.handle_pty_notification(notif);
         self.capture("inject_done");
+    }
+
+    /// The newest Cmd of the run `run_id`, or the default id for a run with
+    /// none.
+    fn newest_cmd(&self, run_id: crate::run::RunId) -> crate::run::CmdId {
+        self.stoat
+            .active_workspace()
+            .runs
+            .get(run_id)
+            .and_then(|run| run.blocks.last().copied())
+            .unwrap_or_default()
+    }
+
+    /// The run count of the Cmd `cmd`, or 0 for a Cmd the store lacks.
+    fn run_count(&self, cmd: crate::run::CmdId) -> u32 {
+        self.stoat
+            .active_workspace()
+            .cmds
+            .get(cmd)
+            .map_or(0, |cmd| cmd.run_count)
     }
 
     pub fn type_action(&mut self, action_expr: &str) {

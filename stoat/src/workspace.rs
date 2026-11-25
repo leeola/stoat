@@ -648,15 +648,20 @@ impl Workspace {
     /// Remove the run `id`, with every Cmd of its stack, and dispose the
     /// input of its prompt.
     ///
-    /// Answers the removed state, so a caller that ends the run can kill its
-    /// shell.
-    pub(crate) fn remove_run(&mut self, id: RunId) -> Option<RunState> {
-        let state = self.runs.remove(id)?;
-        for cmd in &state.blocks {
-            self.cmds.remove(*cmd);
+    /// Each Cmd that still runs has its process killed, since no pane can show
+    /// it once the run is gone.
+    pub(crate) fn remove_run(&mut self, id: RunId) {
+        let Some(state) = self.runs.remove(id) else {
+            return;
+        };
+        for id in &state.blocks {
+            if let Some(cmd) = self.cmds.remove(*id)
+                && let Some(process) = &cmd.process
+            {
+                process.kill();
+            }
         }
         state.dispose(self);
-        Some(state)
     }
 
     /// Make tab `idx` active, parking the outgoing tree and taking the

@@ -843,6 +843,20 @@ mod tests {
             .collect()
     }
 
+    /// The program and the arguments of the last spawn of the fake terminal
+    /// host.
+    fn last_spawn(h: &TestHarness) -> Option<(String, Vec<String>)> {
+        h.fake_terminal_host()
+            .spawns()
+            .last()
+            .map(|spawn| (spawn.program.clone(), spawn.args.clone()))
+    }
+
+    /// The program and the arguments of a `bash -c` of `line`.
+    fn bash(line: &str) -> (String, Vec<String>) {
+        ("bash".to_owned(), vec!["-c".to_owned(), line.to_owned()])
+    }
+
     fn output(stdout: &[u8], stderr: &[u8], exit_code: i32) -> ShellOutput {
         ShellOutput {
             stdout: stdout.to_vec(),
@@ -875,6 +889,30 @@ mod tests {
                 &mut |_| String::new()
             ),
             Plan::Modal("gh pr checkout 412".to_owned()),
+        );
+    }
+
+    /// A command of the default output runs its line in the run modal through
+    /// the terminal host, and the modal's Cmd takes the exit status.
+    #[test]
+    fn a_block_command_runs_its_line_through_the_terminal_host() {
+        let mut h = loaded(r#"command hello { run = shell("echo hi"); }"#);
+        submit(&mut h, "hello");
+        let spawns = h.fake_terminal_host().spawns().len();
+        let cmd = {
+            let run_id = h.stoat.modal_run.expect("the run modal is open");
+            h.stoat.active_workspace().runs[run_id].blocks[0]
+        };
+
+        h.inject_cmd_done(cmd, 2);
+        assert_eq!(
+            (
+                spawns,
+                last_spawn(&h),
+                h.fake_shell.invocations(),
+                h.stoat.active_workspace().cmds[cmd].exit_status,
+            ),
+            (1, Some(bash("echo hi")), Vec::new(), Some(2)),
         );
     }
 
@@ -1115,10 +1153,10 @@ mod tests {
         assert_eq!(
             (
                 matches!(ws.panes.pane(ws.panes.focus()).view, View::Run(_)),
-                h.fake_terminal.sent_strings().last().cloned(),
+                last_spawn(&h),
                 h.fake_shell.invocations(),
             ),
-            (true, Some("make test\n".to_owned()), Vec::new()),
+            (true, Some(bash("make test")), Vec::new()),
         );
     }
 
@@ -1135,12 +1173,8 @@ mod tests {
 
         let ws = h.stoat.active_workspace();
         assert_eq!(
-            (
-                ws.runs.len(),
-                ws.panes.focus() == run_pane,
-                h.fake_terminal.sent_strings().last().cloned(),
-            ),
-            (1, true, Some("make test\n".to_owned())),
+            (ws.runs.len(), ws.panes.focus() == run_pane, last_spawn(&h),),
+            (1, true, Some(bash("make test"))),
         );
     }
 
@@ -1239,14 +1273,8 @@ mod tests {
         );
         submit(&mut h, "check");
         assert_eq!(
-            (
-                h.fake_terminal.sent_strings().last().cloned(),
-                h.fake_shell.invocations()
-            ),
-            (
-                Some("cargo fmt --check && cargo clippy\n".to_owned()),
-                Vec::new()
-            ),
+            (last_spawn(&h), h.fake_shell.invocations()),
+            (Some(bash("cargo fmt --check && cargo clippy")), Vec::new()),
         );
     }
 

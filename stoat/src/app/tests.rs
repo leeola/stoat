@@ -167,7 +167,7 @@ fn ctrl_colon_over_a_finished_run_dismisses_it_for_the_palette() {
     let executor = h.stoat.executor.clone();
     let run_id = {
         let ws = h.stoat.active_workspace_mut();
-        let run = crate::run::RunState::new(PathBuf::from("/tmp"), ws, executor);
+        let run = crate::run::RunState::new(ws, executor);
         ws.runs.insert(run)
     };
     h.stoat.modal_run = Some(run_id);
@@ -3536,7 +3536,7 @@ async fn a_pty_flood_still_paints() {
 /// floods. The parse runs on the app thread, so bytes drained in one turn
 /// are milliseconds the frame timer and the key reader do not get.
 ///
-/// The notifications name no run, so the handler returns at once and what
+/// The notifications name no Cmd, so the handler returns at once and what
 /// is measured is the budget rather than the parse behind it.
 #[test]
 fn drain_pending_leaves_pty_output_past_its_turn_budget_queued() {
@@ -3548,9 +3548,10 @@ fn drain_pending_leaves_pty_output_past_its_turn_budget_queued() {
     for _ in 0..chunks {
         h.stoat
             .pty_tx
-            .try_send(PtyNotification::Output {
+            .try_send(PtyNotification::CmdOutput {
                 workspace: h.stoat.active_workspace,
-                run_id: RunId::default(),
+                cmd: crate::run::CmdId::default(),
+                run: 0,
                 data: vec![b'x'; chunk],
             })
             .expect("the channel holds 256 chunks");
@@ -4645,8 +4646,8 @@ fn a_background_shell_lands_in_its_own_workspace() {
     );
 }
 
-/// Run ids repeat across workspaces too, so a run in a background workspace
-/// finishes its own block and repaints nothing.
+/// Run and Cmd ids repeat across workspaces too, so the exit of a Cmd in a
+/// background workspace finishes its own block and repaints nothing.
 #[test]
 fn a_background_run_lands_in_its_own_workspace() {
     let mut h = Stoat::test();
@@ -4655,24 +4656,23 @@ fn a_background_run_lands_in_its_own_workspace() {
     let ids = [launch, second].map(|id| {
         h.set_active_workspace(id);
         let run_id = h.open_run();
-        h.submit_run("true");
-        run_id
+        (run_id, h.submit_run("true").cmd)
     });
-    assert_eq!(ids[0], ids[1], "each workspace keys its first run alike");
-    let run_id = ids[0];
+    assert_eq!(
+        ids[0], ids[1],
+        "each workspace keys its first run and its first Cmd alike"
+    );
+    let (run_id, cmd) = ids[0];
 
+    let exited = |exit_status| PtyNotification::CmdExited {
+        workspace: launch,
+        cmd,
+        run: 1,
+        exit_status,
+    };
     let effects = [
-        h.stoat.handle_pty_notification(PtyNotification::Output {
-            workspace: launch,
-            run_id,
-            data: b"\x1b]133;D;3\x07".to_vec(),
-        }),
-        h.stoat
-            .handle_pty_notification(PtyNotification::CommandDone {
-                workspace: launch,
-                run_id,
-                exit_status: Some(0),
-            }),
+        h.stoat.handle_pty_notification(exited(Some(3))),
+        h.stoat.handle_pty_notification(exited(Some(0))),
     ];
     let blocks = [launch, second].map(|id| {
         let ws = &h.stoat.workspaces[id];
@@ -5721,7 +5721,7 @@ fn a_click_away_rests_a_run_commits_diff_changes_or_docked_view() {
     let run_editor = {
         let exec = run.stoat.executor.clone();
         let ws = run.stoat.active_workspace_mut();
-        let state = crate::run::RunState::new(PathBuf::from("/work"), ws, exec);
+        let state = crate::run::RunState::new(ws, exec);
         let editor = state.input.editor_id;
         let id = ws.runs.insert(state);
         ws.panes.pane_mut(left).view = View::Run(id);
@@ -9864,7 +9864,7 @@ fn a_run_pane_versions_on_everything_its_render_reads() {
     let exec = h.stoat.executor.clone();
     let run_id = {
         let ws = h.stoat.active_workspace_mut();
-        let state = crate::run::RunState::new(PathBuf::from("/work"), ws, exec);
+        let state = crate::run::RunState::new(ws, exec);
         ws.runs.insert(state)
     };
 
@@ -11198,63 +11198,10 @@ fn a_backlog_past_any_bound_queues_without_waiting() {
 }
 
 #[test]
-fn open_run_spawns_shell_with_echo_disabled() {
-    let mut h = Stoat::test();
-    let run_id = h.open_run();
-
-    assert_eq!(
-        h.fake_terminal().sent_bytes().first().map(Vec::as_slice),
-        Some(b"stty -echo\n".as_slice()),
-        "eager spawn disables tty echo before anything else",
-    );
-
-    let input = h
-        .stoat
-        .active_workspace()
-        .runs
-        .get(run_id)
-        .expect("run state exists")
-        .input
-        .clone();
-    input.replace_text(h.stoat.active_workspace_mut(), "ls");
-    action_handlers::dispatch(&mut h.stoat, &stoat_action::RunSubmit);
-
-    let sent = h.fake_terminal().sent_strings();
-    assert!(
-        sent.get(1).is_some_and(|s| s.starts_with("ls\n")),
-        "submit reuses the eager shell to send the command, got {sent:?}",
-    );
-}
-
-#[test]
-fn osc7_updates_run_cwd() {
-    let mut h = Stoat::test();
-    let run_id = h.open_run();
-    h.submit_run("cd /tmp");
-    h.inject_run_output(run_id, b"\x1b]7;file:///tmp\x07");
-
-    assert_eq!(
-        h.stoat
-            .active_workspace()
-            .runs
-            .get(run_id)
-            .expect("run state")
-            .cwd,
-        std::path::PathBuf::from("/tmp"),
-        "an OSC 7 report updates the run pane's cwd",
-    );
-}
-
-#[test]
 fn snapshot_run_pane_prompt_blocks() {
     let mut h = crate::test_harness::TestHarness::with_size(40, 12);
     let run_id = h.open_run();
-    h.stoat
-        .active_workspace_mut()
-        .runs
-        .get_mut(run_id)
-        .expect("run state")
-        .cwd = std::path::PathBuf::from("/work/proj");
+    h.stoat.active_workspace_mut().git_root = std::path::PathBuf::from("/work/proj");
 
     h.submit_run("true");
     h.inject_run_output(run_id, b"ok\n");
@@ -11281,13 +11228,8 @@ fn run_pane_abbreviates_cwd_under_home() {
             // re-inject it now that HOME is populated.
             h.stoat.set_env_host(h.fake_env().clone());
         }
-        let run_id = h.open_run();
-        h.stoat
-            .active_workspace_mut()
-            .runs
-            .get_mut(run_id)
-            .expect("run state")
-            .cwd = std::path::PathBuf::from("/home/tester/proj");
+        h.open_run();
+        h.stoat.active_workspace_mut().git_root = std::path::PathBuf::from("/home/tester/proj");
         h.submit_run("ls");
         h.rendered_text()
     };
@@ -11633,7 +11575,7 @@ fn finished_modal_run_escape_dismisses_via_keymap() {
     let executor = h.stoat.executor.clone();
     let run_id = {
         let ws = h.stoat.active_workspace_mut();
-        let run = crate::run::RunState::new(std::path::PathBuf::from("/tmp"), ws, executor);
+        let run = crate::run::RunState::new(ws, executor);
         ws.runs.insert(run)
     };
     h.stoat.modal_run = Some(run_id);
@@ -11655,29 +11597,25 @@ fn finished_modal_run_escape_dismisses_via_keymap() {
 #[test]
 fn run_enter_submits_from_insert_and_normal() {
     let mut h = Stoat::test();
-    let fake = h.fake_terminal().clone();
     h.open_run();
 
     h.type_text("ls");
     h.type_keys("enter");
-    assert!(
-        fake.sent_strings().iter().any(|s| s.starts_with("ls\n")),
-        "insert-mode Enter submits, sent {:?}",
-        fake.sent_strings(),
-    );
-
     h.type_text("pwd");
     h.type_keys("esc");
-    assert_eq!(
-        h.stoat.focused_mode(),
-        "normal",
-        "Escape leaves insert mode"
-    );
+    let mode = h.stoat.focused_mode().to_owned();
     h.type_keys("enter");
-    assert!(
-        fake.sent_strings().iter().any(|s| s.starts_with("pwd\n")),
-        "normal-mode Enter submits, sent {:?}",
-        fake.sent_strings(),
+
+    let last_args: Vec<String> = h
+        .fake_terminal_host()
+        .spawns()
+        .iter()
+        .filter_map(|spawn| spawn.args.last().cloned())
+        .collect();
+    assert_eq!(
+        (mode, last_args),
+        ("normal".to_owned(), vec!["ls".to_owned(), "pwd".to_owned()]),
+        "Enter submits from insert mode, and from normal mode after Escape",
     );
 }
 
@@ -11803,6 +11741,7 @@ fn a_run_pane_keeps_one_scrollback_across_its_blocks() {
         h.type_text(command);
         h.type_keys("enter");
         h.inject_run_output(run_id, &lines(4_000));
+        h.inject_run_done(run_id, 0);
     }
     assert_eq!(
         commands(&h.stoat),
@@ -18333,8 +18272,10 @@ fn an_agent_switch_ends_the_modal_run_of_the_workspace_left() {
     let (run_id, input) = {
         let executor = h.stoat.executor.clone();
         let ws = h.stoat.active_workspace_mut();
-        let mut run = crate::run::RunState::new(PathBuf::from("/"), ws, executor);
-        run.shell_handle = Some(crate::run::ShellHandle::new(session.clone()));
+        let mut run = crate::run::RunState::new(ws, executor);
+        let mut cmd = crate::run::Cmd::new("sleep 9".into(), PathBuf::from("/"), 80);
+        cmd.process = Some(crate::run::pty::CmdProcess::new(session.clone()));
+        run.blocks.push(ws.cmds.insert(cmd));
         let input = run.input.editor_id;
         (ws.runs.insert(run), input)
     };

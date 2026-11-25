@@ -30,6 +30,7 @@ pub(crate) fn render_run_pane(
     editors: &mut slotmap::SlotMap<crate::editor_state::EditorId, crate::editor_state::EditorState>,
     theme: &crate::theme::Theme,
     chrome: &crate::render::editor::ResolvedChrome,
+    root: &Path,
     home: Option<&Path>,
     area: Rect,
     is_focused: bool,
@@ -102,7 +103,7 @@ pub(crate) fn render_run_pane(
         .filter_map(|id| cmds.get(*id))
         .find(|block| block.finished)
         .and_then(|block| block.exit_status);
-    let abbrev = crate::run::abbreviate_path(&run_state.cwd, home);
+    let abbrev = crate::run::abbreviate_path(root, home);
     let prompt_w = write_prompt(buf, area.x, input_row, &abbrev, last_exit, theme);
 
     let input_area = Rect::new(
@@ -585,11 +586,7 @@ mod tests {
         let theme = Theme::from_config(&config.expect("theme parses"), "t").expect("theme loads");
         let mut h = TestHarness::with_size(100, 40);
         let executor = h.stoat.executor.clone();
-        let mut run = RunState::new(
-            PathBuf::from("/repo"),
-            h.stoat.active_workspace_mut(),
-            executor,
-        );
+        let mut run = RunState::new(h.stoat.active_workspace_mut(), executor);
         let mut block = block_with("a\r\nb", None);
         block.finished = true;
         block.exit_status = Some(0);

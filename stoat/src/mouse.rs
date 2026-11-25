@@ -5504,7 +5504,7 @@ mod tests {
         let executor = h.stoat.executor.clone();
         let run_id = {
             let ws = h.stoat.active_workspace_mut();
-            let run = crate::run::RunState::new(PathBuf::from("/tmp"), ws, executor);
+            let run = crate::run::RunState::new(ws, executor);
             ws.runs.insert(run)
         };
         h.stoat.modal_run = Some(run_id);

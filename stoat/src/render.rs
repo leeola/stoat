@@ -1535,7 +1535,7 @@ pub(crate) fn frame(
         editor.conflict_frame.position = conflict_position;
         editor.conflict_frame.hover = stoat.conflict_hover;
     }
-    let run_cwd = pane::focused_run_cwd(ws.focus, &ws.panes, &ws.runs);
+    let run_cwd = pane::focused_run_cwd(ws.focus, &ws.panes, &ws.git_root);
     // The islands read where the gaps run, and the hairlines paint in them when
     // islands are off, so the frame lays them out once for both.
     let dividers = ws.panes.dividers();

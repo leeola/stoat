@@ -2,34 +2,20 @@ use crate::{
     app::{Stoat, UpdateEffect},
     buffer_lifecycle,
     pane::{FocusTarget, View},
-    run::{Cmd, RunSink, RunState},
+    run::{
+        pty::{self, CmdSink},
+        Cmd, CmdId, RunState,
+    },
     workspace::Workspace,
 };
 
 pub(super) fn open_run(stoat: &mut Stoat) -> UpdateEffect {
     let executor = stoat.executor.clone();
-    let pty_tx = stoat.pty_tx.clone();
-    let host = stoat.terminal_host.clone();
-    let workspace = stoat.active_workspace;
     let ws = stoat.active_workspace_mut();
-    let cwd = ws.git_root.clone();
-    let diff = ws.env.diff.clone();
     let focused = ws.panes.focus();
-    let width = ws.panes.pane(focused).area.width.saturating_sub(2).max(20);
 
-    let state = RunState::new(cwd.clone(), ws, executor.clone());
+    let state = RunState::new(ws, executor.clone());
     let run_id = ws.runs.insert(state);
-
-    let sink = RunSink {
-        tx: pty_tx,
-        workspace,
-        run_id,
-    };
-    if let Ok(handle) = crate::run::spawn_shell(&*host, &executor, &cwd, width, sink, &diff)
-        && let Some(run_state) = ws.runs.get_mut(run_id)
-    {
-        run_state.shell_handle = Some(handle);
-    }
 
     buffer_lifecycle::replace_pane_view(ws, &executor, focused, View::Run(run_id));
     stoat.transition_mode("insert".into());
@@ -68,12 +54,7 @@ pub(crate) fn run_line_in_pane(stoat: &mut Stoat, line: &str) -> UpdateEffect {
 }
 
 pub(super) fn run_submit(stoat: &mut Stoat) -> UpdateEffect {
-    let pty_tx = stoat.pty_tx.clone();
-    let executor = stoat.executor.clone();
-    let host = stoat.terminal_host.clone();
-    let active_idx = stoat.active_workspace;
-    let ws = &mut stoat.workspaces[active_idx];
-    let diff = ws.env.diff.clone();
+    let ws = stoat.active_workspace_mut();
     let focused = ws.panes.focus();
     let View::Run(id) = ws.panes.pane(focused).view else {
         return UpdateEffect::None;
@@ -104,41 +85,23 @@ pub(super) fn run_submit(stoat: &mut Stoat) -> UpdateEffect {
     };
     input_ref.replace_text(ws, "");
 
-    let pane_area = ws.panes.pane(focused).area;
-    // Output no longer sits under a "$ " indent, so the grid fills the pane.
-    let width = pane_area.width.max(20);
-
-    let Workspace { runs, cmds, .. } = ws;
-    let run_state = match runs.get_mut(id) {
-        Some(s) => s,
-        None => return UpdateEffect::None,
-    };
-    // Submitting snaps the output back to the prompt, like a terminal.
-    run_state.scroll_offset = 0;
-    let cmd = cmds.insert(Cmd::new(text.clone(), run_state.cwd.clone(), width));
-    run_state.blocks.push(cmd);
-    run_state.trim_blocks(cmds);
-
-    let sink = RunSink {
-        tx: pty_tx,
-        workspace: active_idx,
-        run_id: id,
-    };
-    run_state.shell_handle.take_if(|handle| handle.exited());
-    if let Some(handle) = &mut run_state.shell_handle {
-        handle.send_command(&text);
-    } else if let Ok(handle) =
-        crate::run::spawn_shell(&*host, &executor, &run_state.cwd, width, sink, &diff)
-    {
-        run_state.shell_handle = Some(handle);
-        if let Some(h) = &mut run_state.shell_handle {
-            h.send_command(&text);
-        }
-    }
-    if run_state.shell_handle.is_some() {
-        tracing::info!(target: "stoat::run", command = %text, "run pane command sent");
+    // Shell state does not carry from one Cmd's process to the next, so a
+    // `cd` moves the workspace root that later Cmds start in.
+    if let Some(path) = cd_path(&text) {
+        super::workspace::set_cwd(stoat, path);
+        return UpdateEffect::Redraw;
     }
 
+    let width = ws.panes.pane(focused).area.width.max(20);
+    let cmd = start_cmd(stoat, &text, width);
+    let Workspace { runs, cmds, .. } = stoat.active_workspace_mut();
+    if let Some(run_state) = runs.get_mut(id) {
+        run_state.blocks.push(cmd);
+        // Submitting snaps the output back to the prompt, like a terminal.
+        run_state.scroll_offset = 0;
+        run_state.trim_blocks(cmds);
+    }
+    tracing::info!(target: "stoat::run", command = %text, "run pane command started");
     UpdateEffect::Redraw
 }
 
@@ -148,11 +111,17 @@ pub(super) fn run_interrupt(stoat: &mut Stoat) -> UpdateEffect {
     let View::Run(id) = ws.panes.pane(focused).view else {
         return UpdateEffect::None;
     };
-    let Some(run_state) = ws.runs.get_mut(id) else {
+    let Some(run_state) = ws.runs.get(id) else {
         return UpdateEffect::None;
     };
-    if let Some(handle) = &mut run_state.shell_handle {
-        handle.send_interrupt();
+    let newest_running = run_state
+        .blocks
+        .iter()
+        .rev()
+        .filter_map(|id| ws.cmds.get(*id))
+        .find(|cmd| !cmd.finished);
+    if let Some(process) = newest_running.and_then(|cmd| cmd.process.as_ref()) {
+        process.send_interrupt();
     }
     UpdateEffect::Redraw
 }
@@ -210,56 +179,109 @@ fn walk_focused_run(
 }
 
 pub(crate) fn run_command(stoat: &mut Stoat, command: &str) -> UpdateEffect {
-    let pty_tx = stoat.pty_tx.clone();
     let executor = stoat.executor.clone();
-    let ws = stoat.active_workspace();
-    let cwd = ws.git_root.clone();
-    let diff = ws.env.diff.clone();
+    let ws = stoat.active_workspace_mut();
     let focused_area = ws.panes.pane(ws.panes.focus()).area;
     let width = focused_area.width.saturating_sub(8).max(20);
 
-    let active_idx = stoat.active_workspace;
-    let ws = &mut stoat.workspaces[active_idx];
-    let mut state = RunState::new(cwd.clone(), ws, executor);
+    let mut state = RunState::new(ws, executor);
     state.title = Some(command.to_owned());
-    let cmd = ws
-        .cmds
-        .insert(Cmd::new(command.to_owned(), cwd.clone(), width));
-    state.blocks.push(cmd);
     let id = ws.runs.insert(state);
+    let cmd = start_cmd(stoat, command, width);
+    if let Some(run_state) = stoat.active_workspace_mut().runs.get_mut(id) {
+        run_state.blocks.push(cmd);
+    }
+    stoat.modal_run = Some(id);
+    tracing::info!(target: "stoat::run", command = %command, ?id, "run started");
+    UpdateEffect::Redraw
+}
 
-    let sink = RunSink {
-        tx: pty_tx,
-        workspace: active_idx,
-        run_id: id,
+/// Insert a Cmd of `line` in the active workspace's store, with the workspace
+/// root as its cwd, and start its process.
+fn start_cmd(stoat: &mut Stoat, line: &str, width: u16) -> CmdId {
+    let ws = stoat.active_workspace_mut();
+    let cmd = Cmd::new(line.to_owned(), ws.git_root.clone(), width);
+    let id = ws.cmds.insert(cmd);
+    start_process(stoat, id);
+    id
+}
+
+/// Start the next run of the Cmd `id` of the active workspace, a `bash -c` of
+/// its line in its cwd.
+///
+/// The run counts one more, starts now, and clears the end of the run before
+/// it. A spawn that fails ends the run at once with the error line
+/// `spawn failed: <error>`.
+fn start_process(stoat: &mut Stoat, id: CmdId) {
+    let now = stoat.executor.now();
+    let executor = stoat.executor.clone();
+    let host = stoat.terminal_host.clone();
+    let tx = stoat.pty_tx.clone();
+    let workspace = stoat.active_workspace;
+
+    let ws = stoat.active_workspace_mut();
+    let diff = ws.env.diff.clone();
+    let Some(cmd) = ws.cmds.get_mut(id) else {
+        return;
     };
-    match crate::run::spawn_oneshot(&stoat.executor, command, &cwd, width, sink, &diff) {
-        Ok(handle) => {
-            let ws = stoat.active_workspace_mut();
-            if let Some(run_state) = ws.runs.get_mut(id) {
-                run_state.shell_handle = Some(handle);
-            }
-            stoat.modal_run = Some(id);
-            tracing::info!(
-                target: "stoat::run",
-                command = %command,
-                cwd = %cwd.display(),
-                ?id,
-                "run started"
-            );
-            UpdateEffect::Redraw
+
+    cmd.run_count += 1;
+    cmd.started = Some(now);
+    cmd.ended = None;
+    cmd.finished = false;
+    cmd.exit_status = None;
+    cmd.error = None;
+    let sink = CmdSink {
+        tx,
+        workspace,
+        cmd: id,
+        run: cmd.run_count,
+    };
+    let width = cmd.grid.width();
+    match pty::spawn_cmd(
+        &*host,
+        &executor,
+        &cmd.command,
+        &cmd.cwd,
+        width,
+        sink,
+        &diff,
+    ) {
+        Ok(process) => cmd.process = Some(process),
+        Err(error) => {
+            cmd.error = Some(format!("spawn failed: {error}"));
+            cmd.finished = true;
+            cmd.ended = Some(now);
         },
-        Err(e) => {
-            tracing::warn!(target: "stoat::run", "failed to spawn command: {e}");
-            stoat.active_workspace_mut().remove_run(id);
-            UpdateEffect::None
-        },
+    }
+}
+
+/// The path of a line whose first word is `cd`, `~` for a bare `cd`, or
+/// `None` for any other line.
+fn cd_path(line: &str) -> Option<&str> {
+    let rest = line.trim_start().strip_prefix("cd")?;
+    if !(rest.is_empty() || rest.starts_with(char::is_whitespace)) {
+        return None;
+    }
+    match rest.trim() {
+        "" => Some("~"),
+        path => Some(path),
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use crate::{app::Stoat, pane::View};
+    use crate::{
+        app::Stoat,
+        pane::View,
+        run::{CmdId, PtyNotification},
+        test_harness::{CmdHandle, TestHarness},
+    };
+    use std::{path::PathBuf, time::Duration};
+
+    /// The program, the arguments, the cwd, and the last variable of a spawn of
+    /// the fake terminal host.
+    type Spawn = (String, Vec<String>, PathBuf, Option<(String, String)>);
 
     #[test]
     fn a_run_drops_the_editor_it_replaces() {
@@ -313,30 +335,235 @@ mod tests {
         );
     }
 
+    /// Each spawn of the fake terminal host of `h`, in order.
+    fn spawns(h: &TestHarness) -> Vec<Spawn> {
+        h.fake_terminal_host()
+            .spawns()
+            .into_iter()
+            .map(|spawn| {
+                (
+                    spawn.program,
+                    spawn.args,
+                    spawn.cwd,
+                    spawn.env.last().cloned(),
+                )
+            })
+            .collect()
+    }
+
+    /// A spawn of `bash -c line` in `cwd` with `TERM=dumb` last.
+    fn bash_in(line: &str, cwd: &str) -> Spawn {
+        (
+            "bash".to_owned(),
+            vec!["-c".to_owned(), line.to_owned()],
+            PathBuf::from(cwd),
+            Some(("TERM".to_owned(), "dumb".to_owned())),
+        )
+    }
+
+    /// A new Run pane starts no process, and each submitted line starts a
+    /// `bash -c` of its own in the workspace root and writes into no session.
     #[test]
-    fn a_command_after_the_shell_exits_starts_a_fresh_shell() {
+    fn each_submitted_line_starts_its_own_bash() {
+        let mut h = Stoat::test();
+        h.stoat.active_workspace_mut().git_root = PathBuf::from("/work");
+        h.open_run();
+        let opened = h.fake_terminal_host().spawns().len();
+        let handles = ["ls", "pwd"].map(|line| h.submit_run(line));
+
+        let writes = [&handles[0].session, &handles[1].session, h.fake_terminal()]
+            .map(|session| session.sent_bytes().len());
+        assert_eq!(
+            (opened, spawns(&h), writes),
+            (
+                0,
+                vec![bash_in("ls", "/work"), bash_in("pwd", "/work")],
+                [0, 0, 0]
+            ),
+        );
+    }
+
+    /// Output and the end of each process land on the Cmd that owns it alone.
+    #[test]
+    fn output_reaches_the_cmd_that_owns_the_process() {
+        let mut h = Stoat::test();
+        h.open_run();
+        let [first, second] = ["one", "two"].map(|line| h.submit_run(line));
+        first.session.push_output(b"hello");
+        h.settle();
+        let text = |h: &TestHarness, handle: &CmdHandle| {
+            h.stoat.active_workspace().cmds[handle.cmd]
+                .grid
+                .text_in(0..5, 0..1)
+        };
+        let read = [text(&h, &first), text(&h, &second)];
+
+        first.session.finish(3);
+        second.session.finish(0);
+        h.settle();
+        let ws = h.stoat.active_workspace();
+        let ends = [&first, &second].map(|handle| {
+            let cmd = &ws.cmds[handle.cmd];
+            (cmd.exit_status, cmd.ended.is_some(), cmd.process.is_none())
+        });
+        assert_eq!(
+            (read, ends),
+            (
+                ["hello".to_owned(), String::new()],
+                [(Some(3), true, true), (Some(0), true, true)]
+            ),
+        );
+    }
+
+    #[test]
+    fn a_cmd_records_when_it_ran() {
+        let mut h = Stoat::test();
+        h.open_run();
+        let handle = h.submit_run("sleep 1");
+        h.advance_clock(Duration::from_millis(1500));
+        handle.session.finish(0);
+        h.settle();
+
+        let cmd = &h.stoat.active_workspace().cmds[handle.cmd];
+        let ran = cmd
+            .ended
+            .zip(cmd.started)
+            .map(|(ended, started)| ended - started);
+        assert_eq!((ran, cmd.run_count), (Some(Duration::from_millis(1500)), 1));
+    }
+
+    #[test]
+    fn output_of_an_earlier_run_is_dropped() {
+        let mut h = Stoat::test();
+        h.open_run();
+        let handle = h.submit_run("ls");
+        h.stoat.handle_pty_notification(PtyNotification::CmdOutput {
+            workspace: h.stoat.active_workspace,
+            cmd: handle.cmd,
+            run: 0,
+            data: b"stale".to_vec(),
+        });
+
+        let cmd = &h.stoat.active_workspace().cmds[handle.cmd];
+        assert_eq!(
+            (cmd.run_count, cmd.grid.text_in(0..5, 0..1)),
+            (1, String::new())
+        );
+    }
+
+    /// A `cd` line starts no process, since shell state does not carry from
+    /// one Cmd to the next. It moves the workspace root that the next line
+    /// starts in.
+    #[test]
+    fn a_cd_line_moves_the_workspace_root_and_starts_no_process() {
+        let mut h = Stoat::test();
+        h.stoat.active_workspace_mut().git_root = PathBuf::from("/work");
+        h.fake_fs().insert_file("/work/sub/a.txt", b"");
+        let run_id = h.open_run();
+        let cd = h.submit_run("cd sub");
+        let ws = h.stoat.active_workspace();
+        let after_cd = (
+            ws.git_root.clone(),
+            h.fake_terminal_host().spawns().len(),
+            ws.runs[run_id].blocks.len(),
+            cd.cmd == CmdId::default(),
+        );
+
+        h.submit_run("ls");
+        assert_eq!(
+            (after_cd, spawns(&h)),
+            (
+                (PathBuf::from("/work/sub"), 0, 0, true),
+                vec![bash_in("ls", "/work/sub")]
+            ),
+        );
+    }
+
+    /// Ctrl-C goes to the newest Cmd that still runs.
+    #[test]
+    fn ctrl_c_reaches_the_newest_running_cmd() {
+        let mut h = Stoat::test();
+        h.open_run();
+        let [first, second] = ["sleep 9", "sleep 8"].map(|line| h.submit_run(line));
+        super::super::dispatch(&mut h.stoat, &stoat_action::RunInterrupt);
+        let after_one = [first.session.sent_bytes(), second.session.sent_bytes()];
+
+        second.session.finish(0);
+        h.settle();
+        super::super::dispatch(&mut h.stoat, &stoat_action::RunInterrupt);
+        let after_two = [first.session.sent_bytes(), second.session.sent_bytes()];
+        assert_eq!(
+            (after_one, after_two),
+            (
+                [Vec::new(), vec![vec![0x03]]],
+                [vec![vec![0x03]], vec![vec![0x03]]]
+            ),
+        );
+    }
+
+    #[test]
+    fn closing_a_run_pane_kills_its_running_cmds() {
         let mut h = Stoat::test();
         let run_id = h.open_run();
-        h.fake_terminal().finish(0);
+        let handles = ["sleep 9", "sleep 8"].map(|line| h.submit_run(line));
 
-        let input = h.stoat.active_workspace().runs[run_id].input.clone();
-        input.replace_text(h.stoat.active_workspace_mut(), "ls");
-        super::super::dispatch(&mut h.stoat, &stoat_action::RunSubmit);
+        let executor = h.stoat.executor.clone();
+        super::super::pane::dispose_view(
+            h.stoat.active_workspace_mut(),
+            &executor,
+            View::Run(run_id),
+            super::super::pane::EditorDisposal::Remove,
+        );
+        assert_eq!(
+            handles.map(|handle| handle.session.was_killed()),
+            [true, true]
+        );
+    }
+
+    /// A full-screen request ends its own Cmd with the error line and kills
+    /// its process, and the other Cmd runs on.
+    #[test]
+    fn a_full_screen_request_ends_its_own_cmd_alone() {
+        let mut h = Stoat::test();
+        h.open_run();
+        let [first, second] = ["vim", "sleep 9"].map(|line| h.submit_run(line));
+        h.inject_cmd_output(first.cmd, b"\x1b[?1049h");
+
+        let ws = h.stoat.active_workspace();
+        let state = |handle: &CmdHandle| {
+            let cmd = &ws.cmds[handle.cmd];
+            (cmd.finished, cmd.error.clone(), handle.session.was_killed())
+        };
+        assert_eq!(
+            [state(&first), state(&second)],
+            [
+                (
+                    true,
+                    Some("this command requires a full terminal".to_owned()),
+                    true
+                ),
+                (false, None, false),
+            ],
+        );
+    }
+
+    #[test]
+    fn the_run_modal_spawns_through_the_terminal_host() {
+        let mut h = Stoat::test();
+        h.stoat.active_workspace_mut().git_root = PathBuf::from("/work");
+        super::super::dispatch(
+            &mut h.stoat,
+            &stoat_action::Run {
+                command: "ls".to_owned(),
+            },
+        );
+        let run_id = h.stoat.modal_run.expect("the run modal is open");
+        let cmd = h.stoat.active_workspace().runs[run_id].blocks[0];
+        h.inject_cmd_done(cmd, 2);
 
         assert_eq!(
-            (
-                h.fake_terminal_host().spawns().len(),
-                h.fake_terminal().sent_strings()
-            ),
-            (
-                2,
-                vec![
-                    "stty -echo\n".to_owned(),
-                    "stty -echo\n".to_owned(),
-                    "ls\n".to_owned()
-                ]
-            ),
-            "the exited shell gives way to a fresh one, which gets the command"
+            (spawns(&h), h.stoat.active_workspace().cmds[cmd].exit_status),
+            (vec![bash_in("ls", "/work")], Some(2)),
         );
     }
 }

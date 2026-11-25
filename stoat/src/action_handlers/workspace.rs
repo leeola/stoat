@@ -1872,7 +1872,8 @@ mod tests {
     }
 
     /// Closing a workspace, deleting its open row, or closing its row's session
-    /// ends the run and the shell of that workspace, and stops its hook server.
+    /// ends the running Cmd of the run and the shell of that workspace, and
+    /// stops its hook server.
     #[test]
     fn closing_or_deleting_an_open_workspace_ends_its_sessions() {
         /// Put the launch workspace under a picker whose selection sits on the
@@ -1900,9 +1901,13 @@ mod tests {
             harness.type_action("NewWorkspace()");
 
             // The terminal covers the run and keeps it alive. A run opened
-            // over a terminal pane ends that shell, so the run goes first.
+            // over a terminal pane ends that shell, so the run goes first, and
+            // its submitted line runs on the session installed for it.
             let run = install_fake_session(&mut harness);
-            harness.open_run();
+            let run_id = harness.open_run();
+            let input = harness.stoat.active_workspace().runs[run_id].input.clone();
+            input.replace_text(harness.stoat.active_workspace_mut(), "sleep 9");
+            super::super::dispatch(&mut harness.stoat, &stoat_action::RunSubmit);
             let shell = install_fake_session(&mut harness);
             super::super::dispatch(&mut harness.stoat, &stoat_action::Terminal);
             let killed = || [run.was_killed(), shell.was_killed()];

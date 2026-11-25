@@ -1375,7 +1375,7 @@ mod tests {
             args: Vec::new(),
         });
         let executor: Executor = Arc::new(TestScheduler::new()).executor();
-        let run = RunState::new(PathBuf::from("/tmp/ws01"), &mut workspaces[sub], executor);
+        let run = RunState::new(&mut workspaces[sub], executor);
         workspaces[sub].runs.insert(run);
 
         let mut picker = picker_for(&workspaces, sub);

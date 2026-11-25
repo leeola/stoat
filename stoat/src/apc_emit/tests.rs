@@ -3338,8 +3338,8 @@ fn a_focused_detached_run_pane_s_row_reads_run_and_its_directory() {
     h.stoat.window_ipc_connected = true;
     h.type_action("SplitRight()");
     h.settle();
-    let run = h.open_run();
-    h.stoat.active_workspace_mut().runs[run].cwd = PathBuf::from("/detach/run/dir");
+    h.open_run();
+    h.stoat.active_workspace_mut().git_root = PathBuf::from("/detach/run/dir");
     action_handlers::dispatch(&mut h.stoat, &DetachPane);
     while rx.try_recv().is_ok() {}
 

@@ -1376,7 +1376,7 @@ mod tests {
         let ws = h.stoat.active_workspace_mut();
         let run = &mut ws.runs[run_id];
         for (command, output) in [("echo hi", "hi\r\n"), ("pwd", "/ws"), ("sleep 9", "")] {
-            let mut block = Cmd::new(command.into(), run.cwd.clone(), 80);
+            let mut block = Cmd::new(command.into(), ws.git_root.clone(), 80);
             block.feed(output.as_bytes());
             run.blocks.push(ws.cmds.insert(block));
         }
