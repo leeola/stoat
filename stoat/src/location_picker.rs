@@ -45,7 +45,7 @@ pub(crate) struct LocationEntry {
 ///
 /// A search tool and a compiler print a location as `path:line:col: text`.
 /// The line and the column count from 1.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) struct ParsedLocation {
     pub(crate) path: String,
     pub(crate) line: u32,

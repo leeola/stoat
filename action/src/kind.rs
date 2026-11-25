@@ -382,6 +382,7 @@ action_kinds! {
     OpenRun,
     RunSubmit,
     RunInterrupt,
+    RunToggleView,
     RunModalDismiss,
     Run,
     SpawnClaude,

@@ -1,13 +1,20 @@
 use super::{
-    cargo::{CmdReport, LineFeed},
+    cargo::{CmdReport, LineFeed, TestReport},
     kind::{self, RunKind},
     pty::CmdProcess,
 };
-use crate::osc_cap::{OscCap, MAX_OSC_CLIPBOARD_BYTES, MAX_OSC_PLAIN_BYTES};
+use crate::{
+    osc_cap::{OscCap, MAX_OSC_CLIPBOARD_BYTES, MAX_OSC_PLAIN_BYTES},
+    theme::scope,
+};
 use base64::{engine::general_purpose::STANDARD, Engine};
 use ratatui::style::{Color, Modifier};
 use smallvec::SmallVec;
-use std::{ops::Range, path::PathBuf, time::Instant};
+use std::{
+    ops::Range,
+    path::{Path, PathBuf},
+    time::Instant,
+};
 use unicode_width::UnicodeWidthChar;
 
 #[derive(Clone)]
@@ -717,6 +724,9 @@ pub struct Cmd {
     /// The bytes of the output line that has not ended, which `report` reads
     /// once the line ends.
     lines: LineFeed,
+    /// Whether a block that can show its report shows its output instead, as
+    /// the `t` key flips it.
+    pub(crate) raw_view: bool,
 }
 
 impl Cmd {
@@ -738,6 +748,7 @@ impl Cmd {
             elapsed_secs: 0,
             report: CmdReport::for_kind(kind),
             lines: LineFeed::default(),
+            raw_view: false,
         }
     }
 
@@ -764,9 +775,133 @@ impl Cmd {
         self.lines = LineFeed::default();
     }
 
+    /// The report of a finished `cargo test` run that read a test binary's
+    /// output, which the block can show in place of that output.
+    pub(crate) fn finished_report(&self) -> Option<&TestReport> {
+        match &self.report {
+            Some(CmdReport::Test(report)) if self.finished && report.binaries > 0 => Some(report),
+            _ => None,
+        }
+    }
+
+    /// The rows that the block shows in place of its output, `None` for a
+    /// block that shows its output.
+    ///
+    /// A block with a [`Self::finished_report`] shows its report unless
+    /// [`Self::raw_view`] is on. The first row reads the passed count, the
+    /// failed count when it is over 0, and the test and binary counts. Each
+    /// failure takes a row with its name and, when its panic named one, the
+    /// file name and line, and a row under it with its message when it has
+    /// one. The last row counts the output's rows and names `t`, the key that
+    /// shows them.
+    pub(crate) fn report_rows(&self) -> Option<Vec<BodyRow>> {
+        let report = self.finished_report().filter(|_| !self.raw_view)?;
+        let (passed, failed, _) = report.totals();
+
+        let mut summary = vec![(format!("{passed} passed"), Tone::Success)];
+        if failed > 0 {
+            summary.push((format!("  {failed} failed"), Tone::Danger));
+        }
+        summary.push((
+            format!(
+                "  {} \u{b7} {}",
+                counted(report.total, "test", "tests"),
+                counted(report.binaries, "binary", "binaries")
+            ),
+            Tone::Dim,
+        ));
+        let mut rows = vec![BodyRow { spans: summary }];
+
+        for failure in &report.failures {
+            let mut spans = vec![(format!("\u{2717} {}", failure.name), Tone::Danger)];
+            if let Some(location) = &failure.location {
+                let path = Path::new(&location.path);
+                let file = path.file_name().unwrap_or(path.as_os_str());
+                spans.push((
+                    format!("   {}:{}", file.to_string_lossy(), location.line),
+                    Tone::Muted,
+                ));
+            }
+            rows.push(BodyRow { spans });
+            if let Some(message) = &failure.message {
+                rows.push(BodyRow {
+                    spans: vec![(format!("  {message}"), Tone::Dim)],
+                });
+            }
+        }
+
+        let lines = self.grid.rendered_line_count();
+        let lines = counted(u32::try_from(lines).unwrap_or(u32::MAX), "line", "lines");
+        rows.push(BodyRow {
+            spans: vec![(
+                format!("\u{22ef} {lines} of output \u{b7} t terminal view"),
+                Tone::Muted,
+            )],
+        });
+        Some(rows)
+    }
+
     /// Rows this block occupies in the run pane, counting its prompt line, its
-    /// grid rows (trailing all-default row dropped), and an optional error line.
+    /// body rows, and an optional error line.
+    ///
+    /// The body is the rows of its report when it shows one, as
+    /// [`Self::report_rows`] gives them, and otherwise its grid rows with a
+    /// trailing all-default row dropped.
     pub fn rendered_line_span(&self) -> usize {
-        1 + self.grid.rendered_line_count() + usize::from(self.error.is_some())
+        let body = self
+            .report_rows()
+            .map_or_else(|| self.grid.rendered_line_count(), |rows| rows.len());
+        1 + body + usize::from(self.error.is_some())
+    }
+}
+
+/// One row that a Run Block draws as spans of text, such as a row of its
+/// report or the hint under the newest block.
+pub(crate) struct BodyRow {
+    /// The row's text in order, each span in the color of its tone.
+    pub(crate) spans: Vec<(String, Tone)>,
+}
+
+impl BodyRow {
+    /// The row's text, its spans joined.
+    #[cfg(test)]
+    pub(crate) fn text(&self) -> String {
+        self.spans.iter().map(|(text, _)| text.as_str()).collect()
+    }
+}
+
+/// The color of a span of a [`BodyRow`], as the theme scope it reads.
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum Tone {
+    /// `ui.text.dim`, the color of output the program left uncolored.
+    Dim,
+    /// `ui.text.muted`, for a location and a note.
+    Muted,
+    /// `ui.badge.complete`, for a count of passes.
+    Success,
+    /// `ui.error`, for a failure.
+    Danger,
+    /// `ui.key_label`, for a key that a hint names.
+    Key,
+}
+
+impl Tone {
+    /// The scope of the theme whose foreground the span draws in.
+    pub(crate) fn scope(self) -> &'static str {
+        match self {
+            Tone::Dim => scope::UI_TEXT_DIM,
+            Tone::Muted => scope::UI_TEXT_MUTED,
+            Tone::Success => scope::UI_BADGE_COMPLETE,
+            Tone::Danger => scope::UI_ERROR,
+            Tone::Key => scope::UI_KEY_LABEL,
+        }
+    }
+}
+
+/// `count` and its noun, `one` for a count of 1 and `many` for any other.
+fn counted(count: u32, one: &str, many: &str) -> String {
+    match count {
+        1 => format!("1 {one}"),
+        _ => format!("{count} {many}"),
     }
 }

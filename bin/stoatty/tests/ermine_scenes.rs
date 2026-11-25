@@ -2516,6 +2516,94 @@ fn a_running_cargo_test_draws_its_progress_bar() {
     expect_region(&shot, &mut home, (300, 795, 300, 2), BASE, "progress_under");
 }
 
+/// A finished `cargo test` Cmd draws its report in place of its output, and
+/// the hint row follows it as the newest block's last row.
+///
+/// A fake `cargo` prints the output of a run with one failure and exits 101,
+/// so the header is row 41, the report rows 42 to 45, and the hint row 46. The
+/// summary row reads its passed count in the success color and its failed
+/// count in the danger color, the failure bar runs beside the body through
+/// the hint row, and the header's status reads the failed count in the danger
+/// color.
+///
+/// The header's status draws at the caption size, where a pixel that a stroke
+/// covers in part blends with the pane, so the text checks read a pixel's hue
+/// rather than its exact color.
+#[test]
+fn a_finished_cargo_test_draws_its_report() {
+    const OUTPUT: &str = concat!(
+        "running 3 tests\n",
+        "test render::chrome::tests::zoomed_clamps ... ok\n",
+        "test render::chrome::tests::zoomed_negative_steps ... FAILED\n",
+        "test render::chrome::tests::slow_case ... ignored\n",
+        "\n",
+        "failures:\n",
+        "\n",
+        "---- render::chrome::tests::zoomed_negative_steps stdout ----\n",
+        "\n",
+        "thread 'render::chrome::tests::zoomed_negative_steps' (48213) panicked at ",
+        "stoat/src/render/chrome.rs:412:9:\n",
+        "assertion `left == right` failed\n",
+        "  left: 18\n",
+        " right: 16\n",
+        "note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace\n",
+        "\n",
+        "\n",
+        "failures:\n",
+        "    render::chrome::tests::zoomed_negative_steps\n",
+        "\n",
+        "test result: FAILED. 1 passed; 1 failed; 1 ignored; 0 measured; 0 filtered out; ",
+        "finished in 0.02s\n",
+    );
+    let mut home = support::scratch_home();
+    fake_program(
+        home.path(),
+        "cargo",
+        &format!("#!/bin/sh\ncat <<'EOF'\n{OUTPUT}EOF\nexit 101\n"),
+    );
+    let mut session = spawn_scene(ermine_scene_with_bin(
+        "basic-diff",
+        "unstaged.txt",
+        home.path(),
+    ));
+    wait_for_diff(&mut session);
+    play(
+        &mut session,
+        "<Space>t<Settle>cargo test<Enter><Settle:500>",
+    );
+    let shot = session.snapshot().expect("a snapshot");
+
+    fn gap(a: u8, b: u8) -> i32 {
+        i32::from(a) - i32::from(b)
+    }
+    let green = |[r, g, b]: [u8; 3]| gap(g, r) > 30 && gap(g, b) > 30;
+    let red = |[r, g, b]: [u8; 3]| gap(r, g) > 60 && gap(r, b) > 60;
+    let summary = cell_rect(3, 42, 40, 1);
+    let inks = [
+        pixels_where(&shot, summary, green),
+        pixels_where(&shot, summary, red),
+        pixels_where(&shot, cell_rect(128, 41, 30, 1), red),
+    ];
+    if inks.contains(&0) {
+        let frame = keep_frame(&shot, &mut home, "cargo_report");
+        panic!(
+            "the summary row reads {} green and {} red pixels and the header's right end {} \
+             red pixels; want each over 0; the frame is {}",
+            inks[0],
+            inks[1],
+            inks[2],
+            frame.display(),
+        );
+    }
+    expect_region(
+        &shot,
+        &mut home,
+        (18, 760, 2, 80),
+        DANGER,
+        "cargo_report_bar",
+    );
+}
+
 /// The which-key box docks on the status bar as a card on the raised surface.
 ///
 /// The card's cells end above the two rows of the status band, so its footer

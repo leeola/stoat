@@ -1909,6 +1909,11 @@ on key {
         Up -> RunHistoryPrev();
         Down -> RunHistoryNext();
     }
+    # The `pane` predicate still holds while a modal stands over the pane, so
+    # the `!modal` guard leaves `t` to the modal.
+    !modal && pane == run && mode == normal {
+        t -> RunToggleView();
+    }
     pane == run {
         Ctrl-c -> RunInterrupt();
     }

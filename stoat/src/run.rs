@@ -8,6 +8,7 @@ use crate::{
     input_view::{InputView, SubmitTarget},
     workspace::Workspace,
 };
+use cargo::TestReport;
 pub use pty::{
     agent_socket_bind_dir, agent_socket_dir, agent_socket_path, agent_socket_path_in, spawn_claude,
     spawn_ssh_reader, spawn_term_reader, spawn_terminal, PtyNotification, TermSpawnEnv,
@@ -19,6 +20,7 @@ use std::{
     time::Duration,
 };
 use stoat_scheduler::Executor;
+use vterm::{BodyRow, Tone};
 pub use vterm::{Cmd, GridSelection, StyledCell, VtermGrid};
 
 new_key_type! {
@@ -191,13 +193,39 @@ impl RunState {
     ///
     /// The wheel-scroll clamp and [`Self::active_block_grid_pos`] both size the
     /// output by this, so the drawn rows, the scrollable range, and the
-    /// mouse-hit rows stay in lockstep. An id with no Cmd counts for no rows.
+    /// mouse-hit rows stay in lockstep. An id with no Cmd counts for no rows,
+    /// and the [`Self::hint`] row counts for one.
     pub fn output_line_total(&self, cmds: &SlotMap<CmdId, Cmd>) -> usize {
-        self.blocks
+        let spans: usize = self
+            .blocks
             .iter()
             .filter_map(|id| cmds.get(*id))
             .map(Cmd::rendered_line_span)
-            .sum()
+            .sum();
+        spans + usize::from(self.has_hint(cmds))
+    }
+
+    /// The hint row after the newest block's last row, which names the key
+    /// that goes to the block's first failure.
+    ///
+    /// `Some` when the newest Cmd finished and its report located a failure.
+    /// The row counts as the block's last row, so the block's rule runs under
+    /// it and a failed block's bar runs beside it.
+    pub(crate) fn hint(&self, cmds: &SlotMap<CmdId, Cmd>) -> Option<BodyRow> {
+        self.has_hint(cmds).then(|| BodyRow {
+            spans: vec![
+                ("Enter".to_owned(), Tone::Key),
+                (" go to failure".to_owned(), Tone::Muted),
+            ],
+        })
+    }
+
+    /// Whether the newest block carries the [`Self::hint`] row.
+    fn has_hint(&self, cmds: &SlotMap<CmdId, Cmd>) -> bool {
+        self.active_block(cmds)
+            .and_then(Cmd::finished_report)
+            .and_then(TestReport::first_location)
+            .is_some()
     }
 
     /// Translates a focused-pane-relative `(col, row)` cell into the active
@@ -205,8 +233,9 @@ impl RunState {
     /// on the input row, on the blank rows over a short stack, on a non-active
     /// block's region, on a header / status / blank line, on a row scrolled
     /// off-screen, left of the body's column, or past the active grid's width.
-    /// Mirrors the layout that [`crate::render::run_pane::render_run_pane`]
-    /// builds.
+    /// An active block that shows its report draws no grid row, so every
+    /// position over it answers `None`. Mirrors the layout that
+    /// [`crate::render::run_pane::render_run_pane`] builds.
     pub fn active_block_grid_pos(
         &self,
         cmds: &SlotMap<CmdId, Cmd>,
@@ -227,6 +256,9 @@ impl RunState {
 
         let active_idx = self.blocks.len().checked_sub(1)?;
         let active = cmds.get(self.blocks[active_idx])?;
+        if active.report_rows().is_some() {
+            return None;
+        }
 
         let idx: usize = self.blocks[..active_idx]
             .iter()
@@ -359,7 +391,7 @@ pub(crate) fn stack_rect(area: Rect) -> Rect {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{buffer::BufferId, editor_state::EditorId};
+    use crate::{buffer::BufferId, editor_state::EditorId, run::cargo::ONE_FAILURE};
     use ratatui::style::Color;
     use std::{collections::BTreeSet, path::PathBuf};
 
@@ -1020,6 +1052,29 @@ mod tests {
             ["cmd0", "cmd2"],
             "the running oldest Cmd stays, and the second drops"
         );
+    }
+
+    /// A block that shows its report draws no grid row, so no cell over it
+    /// maps into the grid, and the raw view maps its rows again.
+    #[test]
+    fn a_block_showing_its_report_maps_no_cell_into_its_grid() {
+        let (mut run, mut cmds) = scrollable(0, 0);
+        let mut block = Cmd::new("cargo test".to_owned(), PathBuf::from("/repo"), 40);
+        block.feed(ONE_FAILURE.as_bytes());
+        block.finished = true;
+        let id = cmds.insert(block);
+        run.blocks.push(id);
+
+        let area = Rect::new(0, 0, 44, 30);
+        let mapped = |cmds: &SlotMap<CmdId, Cmd>| {
+            (0..area.height)
+                .flat_map(|row| (0..area.width).map(move |col| (col, row)))
+                .filter(|&(col, row)| run.active_block_grid_pos(cmds, area, col, row).is_some())
+                .count()
+        };
+        let report = mapped(&cmds);
+        cmds[id].raw_view = true;
+        assert_eq!((report, mapped(&cmds) > 0), (0, true));
     }
 }
 

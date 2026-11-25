@@ -140,6 +140,7 @@ use crate::{
         },
         run::{
             OpenRun, Run, RunHistoryNext, RunHistoryPrev, RunInterrupt, RunModalDismiss, RunSubmit,
+            RunToggleView,
         },
         set_theme::SetTheme,
         tab::{
@@ -1047,6 +1048,7 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
     add(Terminal::DEF, |_| Ok(Box::new(Terminal)));
     add(RunSubmit::DEF, |_| Ok(Box::new(RunSubmit)));
     add(RunInterrupt::DEF, |_| Ok(Box::new(RunInterrupt)));
+    add(RunToggleView::DEF, |_| Ok(Box::new(RunToggleView)));
     add(RunModalDismiss::DEF, |_| Ok(Box::new(RunModalDismiss)));
     add(RunHistoryPrev::DEF, |_| Ok(Box::new(RunHistoryPrev)));
     add(RunHistoryNext::DEF, |_| Ok(Box::new(RunHistoryNext)));
@@ -1631,6 +1633,7 @@ mod tests {
         "terminal",
         "RunSubmit",
         "RunInterrupt",
+        "RunToggleView",
         "RunModalDismiss",
         "RunHistoryPrev",
         "RunHistoryNext",
@@ -2388,7 +2391,8 @@ mod tests {
         // + 2 CloseOtherBuffers/ForceCloseOtherBuffers.
         // + 1 Notify.
         // + 1 PaletteRefresh.
-        assert_eq!(all().count(), 520);
+        // + 1 RunToggleView.
+        assert_eq!(all().count(), 521);
     }
 
     #[test]

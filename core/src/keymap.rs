@@ -3818,6 +3818,32 @@ mod tests {
         }
     }
 
+    /// `t` in a Run pane's normal mode flips the newest block's view over the
+    /// normal-mode motion, and a modal over the pane keeps the key.
+    #[test]
+    fn t_in_a_run_pane_binds_the_view_toggle() {
+        let keymap = Keymap::compile(&parse_config(DEFAULT_KEYMAP));
+        let t = key_event(KeyCode::Char('t'), KeyModifiers::NONE);
+        let run_pane = || {
+            TestState::new()
+                .set("mode", StateValue::String("normal".into()))
+                .set("pane", StateValue::String("run".into()))
+        };
+        let under_finder = run_pane().set("modal", StateValue::String("finder".into()));
+
+        assert_eq!(
+            (
+                keymap
+                    .lookup(&run_pane(), &t)
+                    .map(|actions| action_calls(&actions)),
+                keymap
+                    .lookup_scoped(&under_finder, &t, "pane", "run")
+                    .map(|(actions, _)| action_calls(&actions)),
+            ),
+            (Some(vec![("RunToggleView".to_owned(), Vec::new())]), None),
+        );
+    }
+
     /// The actions `code` with `modifiers` resolves to in `mode`, over the two
     /// split panes the pane chords act on.
     fn mode_calls(

@@ -4,9 +4,12 @@ use crate::{
         cmd_line::{self, CmdLine, CmdStatus},
         paint::style_rgb,
         picker::{Footer, PlateHeader},
-        text::write_str,
+        text::{write_str, write_str_clipped},
     },
-    run::{cargo::CmdReport, Cmd, CmdId, GridSelection, RunState, StyledCell, VtermGrid},
+    run::{
+        cargo::CmdReport, vterm::BodyRow, Cmd, CmdId, GridSelection, RunState, StyledCell,
+        VtermGrid,
+    },
 };
 use ratatui::{
     buffer::Buffer,
@@ -37,6 +40,10 @@ pub(crate) struct StatusPart {
 /// each side of the pane, as [`crate::run::stack_rect`] gives them, and a
 /// block's body rows start one column inside its header. Output that the
 /// program left uncolored draws in `ui.text.dim`.
+///
+/// A block that shows its report draws the report's rows as its body, as
+/// [`Cmd::report_rows`] gives them, and the newest block's
+/// [`RunState::hint`] row follows its last row.
 ///
 /// Inside stoatty a rule ends each block, a bar runs beside the body of a
 /// failed block, and a rule tops the prompt row, as [`paint_stack_rules`]
@@ -75,15 +82,27 @@ pub(crate) fn render_run_pane(
     let mut rule_rows = Vec::new();
     let mut failed_bodies = Vec::new();
     let mut base = 0;
-    for block in run_state.blocks.iter().filter_map(|id| cmds.get(*id)) {
-        let grid_rows = block.grid.rendered_line_count();
-        let span = block.rendered_line_span();
+    let hint = run_state.hint(cmds);
+    let newest = run_state.blocks.len().saturating_sub(1);
+    let blocks = run_state
+        .blocks
+        .iter()
+        .enumerate()
+        .filter_map(|(index, id)| cmds.get(*id).map(|block| (index, block)));
+    for (index, block) in blocks {
+        let report = block.report_rows();
+        let content = match &report {
+            Some(rows) => Body::Report(rows),
+            None => Body::Grid(block.grid.rendered_line_count()),
+        };
+        let hint = hint.as_ref().filter(|_| index == newest);
+        let span = block.rendered_line_span() + usize::from(hint.is_some());
         let offsets = window_offsets(base, span, &window);
         let row_of = |offset: usize| area.y + (pad + base + offset - start) as u16;
 
         for offset in offsets.clone() {
             let y = row_of(offset);
-            let Some(line) = block_line(block, grid_rows, offset) else {
+            let Some(line) = block_line(block, content, hint, offset) else {
                 continue;
             };
             let body = Rect::new(inner.x + 1, y, inner.width.saturating_sub(1), 1);
@@ -105,6 +124,7 @@ pub(crate) fn render_run_pane(
                 OutputLine::GridRow(grid, row_idx, selection) => {
                     paint_grid_row(buf, body, y, grid, *row_idx, *selection, dim);
                 },
+                OutputLine::Row(row) => paint_body_row(buf, body, row, theme),
                 OutputLine::Error(msg) => {
                     let display: String = msg.chars().take(usize::from(body.width)).collect();
                     write_str(
@@ -419,6 +439,23 @@ fn paint_grid_row(
     }
 }
 
+/// Paint `row` into `area` span by span, cut at `area`'s right edge.
+///
+/// Each span draws in the foreground of its tone's scope alone, so a scope
+/// that carries a background leaves the pane's showing.
+fn paint_body_row(buf: &mut Buffer, area: Rect, row: &BodyRow, theme: &crate::theme::Theme) {
+    let end = area.x.saturating_add(area.width);
+    let mut x = area.x;
+    for (text, tone) in &row.spans {
+        let style = Style {
+            fg: theme.get(tone.scope()).fg,
+            ..Style::default()
+        };
+        write_str_clipped(buf, x, area.y, text, style, end);
+        x = x.saturating_add(u16::try_from(text.chars().count()).unwrap_or(u16::MAX));
+    }
+}
+
 /// The block-local row offsets that fall inside `window`, for a block occupying
 /// `base..base + span` of the pane's output rows.
 ///
@@ -430,32 +467,69 @@ fn window_offsets(base: usize, span: usize, window: &Range<usize>) -> Range<usiz
     first..last.max(first)
 }
 
-/// The line drawn at `offset` within a block's span, where `grid_rows` is the
-/// block's rendered grid height.
+/// The line drawn at `offset` within a block's span, where `content` is what
+/// the block's body shows and `hint` the row the newest block carries.
 ///
-/// The span is the prompt, then the grid, then an error line if the block has
-/// one, so this and [`crate::run::Cmd::rendered_line_span`] describe the
-/// same rows and have to agree. `None` for an offset past them, which the
-/// caller's window bounds already exclude.
-fn block_line(block: &Cmd, grid_rows: usize, offset: usize) -> Option<OutputLine<'_>> {
-    match offset.checked_sub(1) {
-        None => Some(OutputLine::Prompt {
+/// The span is the prompt, then the body, then an error line if the block has
+/// one, then the hint, so this and [`crate::run::Cmd::rendered_line_span`],
+/// with one row for a hint, describe the same rows and have to agree. `None`
+/// for an offset past them, which the caller's window bounds already exclude.
+fn block_line<'a>(
+    block: &'a Cmd,
+    content: Body<'a>,
+    hint: Option<&'a BodyRow>,
+    offset: usize,
+) -> Option<OutputLine<'a>> {
+    let Some(row) = offset.checked_sub(1) else {
+        return Some(OutputLine::Prompt {
             cwd: &block.cwd,
             command: block.command.as_str(),
-        }),
-        Some(row) if row < grid_rows => Some(OutputLine::GridRow(
-            &block.grid,
-            row,
-            block.selection.as_ref(),
-        )),
-        Some(_) => block.error.as_deref().map(OutputLine::Error),
+        });
+    };
+    if row < content.rows() {
+        return Some(match content {
+            Body::Grid(_) => OutputLine::GridRow(&block.grid, row, block.selection.as_ref()),
+            Body::Report(rows) => OutputLine::Row(&rows[row]),
+        });
     }
+
+    block
+        .error
+        .as_deref()
+        .map(OutputLine::Error)
+        .into_iter()
+        .chain(hint.map(OutputLine::Row))
+        .nth(row - content.rows())
 }
 
 enum OutputLine<'a> {
-    Prompt { cwd: &'a Path, command: &'a str },
+    Prompt {
+        cwd: &'a Path,
+        command: &'a str,
+    },
     GridRow(&'a VtermGrid, usize, Option<&'a GridSelection>),
     Error(&'a str),
+    /// A row of the block's report, or the hint row after the newest block.
+    Row(&'a BodyRow),
+}
+
+/// What a block's body shows, between its header and its error line.
+#[derive(Clone, Copy)]
+enum Body<'a> {
+    /// This many rows of the block's grid.
+    Grid(usize),
+    /// The rows of the block's report.
+    Report(&'a [BodyRow]),
+}
+
+impl Body<'_> {
+    /// The rows that the body takes.
+    fn rows(self) -> usize {
+        match self {
+            Body::Grid(rows) => rows,
+            Body::Report(rows) => rows.len(),
+        }
+    }
 }
 
 /// Write the run prompt prefix (abbreviated cwd and the U+276F prompt glyph)
@@ -601,12 +675,12 @@ pub(crate) fn render_modal_run(
 mod tests {
     use super::{
         block_line, paint_grid_row, render_modal_run, render_run_pane, status_parts,
-        window_offsets, Buffer, Cmd, GridSelection, Modifier, OutputLine, Rect, RunState,
+        window_offsets, Body, Buffer, Cmd, GridSelection, Modifier, OutputLine, Rect, RunState,
         StatusPart, Style, ISLAND_BOTTOM, ISLAND_SIDE, ISLAND_TOP,
     };
     use crate::{
         render::{editor::ResolvedChrome, paint::style_rgb},
-        run::kind,
+        run::{cargo::ONE_FAILURE, kind},
         test_harness::TestHarness,
         theme::{scope, Theme},
         workspace::Workspace,
@@ -667,6 +741,7 @@ mod tests {
             Some(OutputLine::Prompt { .. }) => "prompt".to_owned(),
             Some(OutputLine::GridRow(_, row, _)) => format!("grid{row}"),
             Some(OutputLine::Error(_)) => "error".to_owned(),
+            Some(OutputLine::Row(row)) => row.text(),
         }
     }
 
@@ -684,7 +759,7 @@ mod tests {
         let span = block.rendered_line_span();
 
         let lines: Vec<String> = (0..span)
-            .map(|offset| tag(block_line(&block, grid_rows, offset)))
+            .map(|offset| tag(block_line(&block, Body::Grid(grid_rows), None, offset)))
             .collect();
 
         assert_eq!(
@@ -701,7 +776,7 @@ mod tests {
         let span = block.rendered_line_span();
 
         let lines: Vec<String> = (0..span)
-            .map(|offset| tag(block_line(&block, grid_rows, offset)))
+            .map(|offset| tag(block_line(&block, Body::Grid(grid_rows), None, offset)))
             .collect();
 
         assert_eq!(
@@ -1189,6 +1264,50 @@ mod tests {
             .filter(|&(.., width, _, _)| width == 4)
             .collect();
         assert_eq!(marks, [(16, 8 * 16, 4, 32, danger)]);
+    }
+
+    /// A finished `cargo test` block draws its report's rows as its body, and
+    /// the hint row after them is its last row, on the prompt, with the
+    /// danger bar beside it and the block's rule under it.
+    #[test]
+    fn a_report_block_ends_in_the_hint_row() {
+        let mut h = stacked(&[("cargo test", ONE_FAILURE.as_bytes(), Some(101))]);
+        let theme = h.stoat.theme.clone();
+        let (buf, scene) = painted(&mut h, &theme, Rect::new(0, 0, 80, 12));
+
+        let lines = h
+            .stoat
+            .active_workspace()
+            .cmds
+            .values()
+            .next()
+            .expect("a Cmd")
+            .grid
+            .rendered_line_count();
+        let rows: Vec<String> = (6..12).map(|y| row_text(&buf, y)).collect();
+        let danger = style_rgb(theme.get(scope::UI_ERROR).fg).expect("an RGB error color");
+        let edges: Vec<BarSpec> = bars(&scene)
+            .into_iter()
+            .filter(|&(.., width, _, color)| width == 4 || color == RAISED)
+            .collect();
+        assert_eq!(
+            (rows, edges),
+            (
+                vec![
+                    "  1 passed  1 failed  3 tests \u{b7} 1 binary".to_owned(),
+                    "  \u{2717} render::chrome::tests::zoomed_negative_steps   chrome.rs:412"
+                        .to_owned(),
+                    "    assertion `left == right` failed  left: 18  right: 16".to_owned(),
+                    format!("  \u{22ef} {lines} lines of output \u{b7} t terminal view"),
+                    "  Enter go to failure".to_owned(),
+                    " /w \u{276f}".to_owned(),
+                ],
+                vec![
+                    (16, 6 * 16, 4, 5 * 16, danger),
+                    (16, 10 * 16 + 15, 78 * 16, 1, RAISED),
+                ],
+            ),
+        );
     }
 
     /// A theme that leaves the run scopes unset draws no rule under a block and

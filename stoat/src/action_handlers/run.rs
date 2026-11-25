@@ -1,14 +1,20 @@
+use super::jump;
 use crate::{
+    agent_goto,
     app::{Stoat, UpdateEffect},
     buffer_lifecycle,
+    buffer_registry::OpenOrigin,
+    host::{FsHost, OffsetEncoding},
     pane::{FocusTarget, View},
     run::{
+        cargo::TestReport,
         kind::RunKind,
         pty::{self, CmdEnv, CmdSink},
         Cmd, CmdId, RunState,
     },
     workspace::Workspace,
 };
+use std::path::{Path, PathBuf};
 
 pub(super) fn open_run(stoat: &mut Stoat) -> UpdateEffect {
     let executor = stoat.executor.clone();
@@ -54,6 +60,10 @@ pub(crate) fn run_line_in_pane(stoat: &mut Stoat, line: &str) -> UpdateEffect {
     run_submit(stoat)
 }
 
+/// Run the line at the focused Run pane's prompt as a new Cmd.
+///
+/// An Enter at an empty prompt goes to the newest block instead, as
+/// [`block_enter`] takes it.
 pub(super) fn run_submit(stoat: &mut Stoat) -> UpdateEffect {
     let ws = stoat.active_workspace_mut();
     let focused = ws.panes.focus();
@@ -67,7 +77,11 @@ pub(super) fn run_submit(stoat: &mut Stoat) -> UpdateEffect {
         run_state.input.text(ws)
     };
     if text.is_empty() {
-        return UpdateEffect::None;
+        let newest = ws.runs.get(id).and_then(|run| run.blocks.last().copied());
+        return match newest {
+            Some(cmd) => block_enter(stoat, cmd),
+            None => UpdateEffect::None,
+        };
     }
 
     {
@@ -105,6 +119,115 @@ pub(super) fn run_submit(stoat: &mut Stoat) -> UpdateEffect {
         run_state.trim_blocks(cmds);
     }
     tracing::info!(target: "stoat::run", command = %text, "run pane command started");
+    UpdateEffect::Redraw
+}
+
+/// Take an Enter at an empty prompt to the Cmd `id`, the newest block of the
+/// stack.
+///
+/// A finished Cmd whose report located a failure goes to the first located
+/// failure, as [`go_to_location`] opens it. rustc counts a column in chars,
+/// so the column lands as UTF-32. Every other Cmd takes the Enter as nothing.
+fn block_enter(stoat: &mut Stoat, id: CmdId) -> UpdateEffect {
+    let found = stoat.active_workspace().cmds.get(id).and_then(|cmd| {
+        let location = cmd.finished_report().and_then(TestReport::first_location)?;
+        Some((cmd.cwd.clone(), location.clone()))
+    });
+    let Some((cwd, location)) = found else {
+        return UpdateEffect::None;
+    };
+    go_to_location(
+        stoat,
+        &cwd,
+        &location.path,
+        location.line,
+        location.column,
+        OffsetEncoding::Utf32,
+    );
+    UpdateEffect::Redraw
+}
+
+/// Open the file at `path` with the cursor on `line` and `column`, both
+/// counted from 1, and answer whether it opened.
+///
+/// The file opens in the pane that [`agent_goto::target_pane`] picks, since
+/// the focused pane shows the Run pane, and that pane takes the focus. Its
+/// jumplist records where it was. `column` counts in the units of `encoding`.
+///
+/// A path that names no file, as [`located_file`] reads it from `base`, sets
+/// the status `no file <path>` and opens nothing.
+fn go_to_location(
+    stoat: &mut Stoat,
+    base: &Path,
+    path: &str,
+    line: u32,
+    column: u32,
+    encoding: OffsetEncoding,
+) -> bool {
+    let Some(file) = located_file(&*stoat.fs_host, base, path) else {
+        stoat.set_status(format!("no file {path}"));
+        return false;
+    };
+
+    let target = {
+        let executor = stoat.executor.clone();
+        let ws = stoat.active_workspace_mut();
+        let pane = agent_goto::target_pane(ws, executor);
+        ws.focus = FocusTarget::SplitPane;
+        ws.panes.set_focus(pane);
+        pane
+    };
+    jump::push_jump(stoat);
+    if buffer_lifecycle::open_file_in_pane_now(stoat, target, &file, OpenOrigin::Visited).is_none()
+    {
+        return false;
+    }
+
+    let Some(offset) =
+        stoat.offset_for_focused_point(line.saturating_sub(1), column.saturating_sub(1), encoding)
+    else {
+        return false;
+    };
+    stoat.collapse_focused_cursor_to(offset);
+    true
+}
+
+/// The file that a location's `path` names, read from `base`.
+///
+/// An absolute path names itself. A relative one names the first file it
+/// joins to from `base` or from an ancestor of `base`, since cargo names a
+/// path from the workspace root and a Cmd can run in a member's directory.
+/// `None` when no path it names is a file.
+fn located_file(fs: &dyn FsHost, base: &Path, path: &str) -> Option<PathBuf> {
+    let is_file =
+        |candidate: &Path| matches!(fs.metadata(candidate), Ok(Some(meta)) if !meta.is_dir);
+    if Path::new(path).is_absolute() {
+        return Some(PathBuf::from(path)).filter(|file| is_file(file));
+    }
+    base.ancestors()
+        .map(|dir| dir.join(path))
+        .find(|file| is_file(file))
+}
+
+/// Flip the newest block of the focused Run pane between its report and its
+/// raw output.
+///
+/// Only a block with a [`Cmd::finished_report`] flips, so the key does
+/// nothing while the Cmd runs and for a Cmd that keeps no report.
+pub(super) fn run_toggle_view(stoat: &mut Stoat) -> UpdateEffect {
+    let ws = stoat.active_workspace_mut();
+    let View::Run(id) = ws.panes.pane(ws.panes.focus()).view else {
+        return UpdateEffect::None;
+    };
+    let Workspace { runs, cmds, .. } = ws;
+    let Some(cmd) = runs
+        .get(id)
+        .and_then(|run_state| run_state.active_block_mut(cmds))
+        .filter(|cmd| cmd.finished_report().is_some())
+    else {
+        return UpdateEffect::None;
+    };
+    cmd.raw_view = !cmd.raw_view;
     UpdateEffect::Redraw
 }
 
@@ -236,6 +359,7 @@ fn start_process(stoat: &mut Stoat, id: CmdId) {
     cmd.exit_status = None;
     cmd.error = None;
     cmd.reset_report();
+    cmd.raw_view = false;
     let sink = CmdSink {
         tx,
         workspace,
@@ -284,9 +408,10 @@ mod tests {
         render::paint::style_rgb,
         run::{
             cargo::{ONE_FAILURE, THREE_BINARIES},
+            vterm::BodyRow,
             CmdId, PtyNotification,
         },
-        test_harness::{CmdHandle, TestHarness},
+        test_harness::{editor, CmdHandle, TestHarness},
         theme::scope,
     };
     use futures::FutureExt;
@@ -778,6 +903,190 @@ mod tests {
                 ("TERM".to_owned(), "dumb".to_owned()),
                 ("CARGO_TERM_COLOR".to_owned(), "always".to_owned()),
             ],
+        );
+    }
+
+    /// Run `cargo test` at the focused Run pane's prompt to its end, with
+    /// `output` and the exit `code`, and answer its Cmd.
+    fn finished_cargo_test(h: &mut TestHarness, output: &str, code: i32) -> CmdId {
+        let handle = h.submit_run("cargo test");
+        h.inject_cmd_output(handle.cmd, output.as_bytes());
+        h.inject_cmd_done(handle.cmd, code);
+        handle.cmd
+    }
+
+    /// The texts of the rows that the Cmd `cmd` shows in place of its output,
+    /// and the text of the hint row of the focused Run pane.
+    fn report_and_hint(h: &TestHarness, cmd: CmdId) -> (Option<Vec<String>>, Option<String>) {
+        let ws = h.stoat.active_workspace();
+        let View::Run(run) = ws.panes.pane(ws.panes.focus()).view else {
+            panic!("the focused pane shows a Run pane");
+        };
+        let rows = ws.cmds[cmd]
+            .report_rows()
+            .map(|rows| rows.iter().map(BodyRow::text).collect());
+        (rows, ws.runs[run].hint(&ws.cmds).map(|row| row.text()))
+    }
+
+    /// A finished `cargo test` Cmd shows its report in place of its output,
+    /// and the newest block's hint names the key that goes to its failure.
+    #[test]
+    fn a_finished_cargo_test_shows_its_report() {
+        let mut h = Stoat::test();
+        h.open_run();
+        let cmd = finished_cargo_test(&mut h, ONE_FAILURE, 101);
+
+        let lines = h.stoat.active_workspace().cmds[cmd]
+            .grid
+            .rendered_line_count();
+        assert_eq!(
+            (h.cmd_status(cmd), report_and_hint(&h, cmd)),
+            (
+                "cargo test \u{2717} 1 failed 0ms".to_owned(),
+                (
+                    Some(vec![
+                        "1 passed  1 failed  3 tests \u{b7} 1 binary".to_owned(),
+                        "\u{2717} render::chrome::tests::zoomed_negative_steps   chrome.rs:412"
+                            .to_owned(),
+                        "  assertion `left == right` failed  left: 18  right: 16".to_owned(),
+                        format!("\u{22ef} {lines} lines of output \u{b7} t terminal view"),
+                    ]),
+                    Some("Enter go to failure".to_owned()),
+                ),
+            ),
+        );
+    }
+
+    #[test]
+    fn a_passing_run_shows_no_failed_count_and_no_hint() {
+        let mut h = Stoat::test();
+        h.open_run();
+        let cmd = finished_cargo_test(&mut h, THREE_BINARIES, 0);
+
+        let lines = h.stoat.active_workspace().cmds[cmd]
+            .grid
+            .rendered_line_count();
+        assert_eq!(
+            report_and_hint(&h, cmd),
+            (
+                Some(vec![
+                    "3 passed  3 tests \u{b7} 3 binaries".to_owned(),
+                    format!("\u{22ef} {lines} lines of output \u{b7} t terminal view"),
+                ]),
+                None,
+            ),
+        );
+    }
+
+    /// A `cargo test` Cmd shows its raw output while it runs, and after a run
+    /// that started no test binary, such as one that failed to build.
+    #[test]
+    fn a_running_or_unbuilt_test_run_shows_its_raw_output() {
+        let mut h = Stoat::test();
+        h.open_run();
+        let running = h.submit_run("cargo test");
+        h.inject_cmd_output(running.cmd, ONE_FAILURE.as_bytes());
+        let unbuilt = finished_cargo_test(&mut h, "error: could not compile `stoat`\n", 101);
+
+        let shows_report = |cmd| h.stoat.active_workspace().cmds[cmd].report_rows().is_some();
+        assert_eq!(
+            [shows_report(running.cmd), shows_report(unbuilt)],
+            [false; 2]
+        );
+    }
+
+    /// `t` in normal mode turns the newest block's report into its raw output,
+    /// which the block lays out as its grid rows, and `t` again turns it back.
+    #[test]
+    fn t_shows_the_raw_output_and_t_again_the_report() {
+        let mut h = Stoat::test();
+        h.open_run();
+        let cmd = finished_cargo_test(&mut h, ONE_FAILURE, 101);
+        let read = |h: &TestHarness| {
+            let block = &h.stoat.active_workspace().cmds[cmd];
+            (block.report_rows().is_some(), block.rendered_line_span())
+        };
+        let grid_rows = h.stoat.active_workspace().cmds[cmd]
+            .grid
+            .rendered_line_count();
+
+        let report = read(&h);
+        h.type_keys("escape t");
+        let raw = read(&h);
+        h.type_keys("t");
+        assert_eq!(
+            [report, raw, read(&h)],
+            [(true, 5), (false, 1 + grid_rows), (true, 5)]
+        );
+    }
+
+    /// `t` flips only a block that has a report to show, so a press while the
+    /// run goes on leaves the report to show once it ends.
+    #[test]
+    fn t_before_the_run_ends_flips_nothing() {
+        let mut h = Stoat::test();
+        h.open_run();
+        let handle = h.submit_run("cargo test");
+        h.inject_cmd_output(handle.cmd, ONE_FAILURE.as_bytes());
+        h.type_keys("escape t");
+        h.inject_cmd_done(handle.cmd, 101);
+
+        let cmd = &h.stoat.active_workspace().cmds[handle.cmd];
+        assert_eq!((cmd.raw_view, cmd.report_rows().is_some()), (false, true));
+    }
+
+    /// An Enter at an empty prompt opens the first failure's file in the
+    /// editor pane beside the Run pane, which takes the focus, with the cursor
+    /// on the failure's line and column. Cargo names the file from the root.
+    #[test]
+    fn enter_at_an_empty_prompt_goes_to_the_first_failure() {
+        let mut h = Stoat::test();
+        h.stoat.active_workspace_mut().git_root = PathBuf::from("/work");
+        let file = PathBuf::from("/work/stoat/src/render/chrome.rs");
+        h.seed_fixture(&file, format!("{}\n", "x".repeat(20)).repeat(500));
+        let editor_pane = h.stoat.active_workspace().panes.focus();
+        h.type_action("SplitRight()");
+        h.open_run();
+        finished_cargo_test(&mut h, ONE_FAILURE, 101);
+
+        h.type_keys("enter");
+        let point = editor::focused_cursor_point(&mut h.stoat);
+        assert_eq!(
+            (
+                h.stoat.active_workspace().panes.focus(),
+                editor::focused_buffer_path(&h.stoat),
+                (point.row, point.column),
+            ),
+            (editor_pane, file, (411, 8)),
+        );
+    }
+
+    /// Cargo names a failure's file from the workspace root, so a Cmd that
+    /// ran in a member's directory finds the file under an ancestor of it.
+    #[test]
+    fn enter_reads_a_failure_path_from_an_ancestor_of_the_cwd() {
+        let mut h = Stoat::test();
+        h.stoat.active_workspace_mut().git_root = PathBuf::from("/work/stoat");
+        let file = PathBuf::from("/work/stoat/src/render/chrome.rs");
+        h.seed_fixture(&file, "x\n".repeat(500));
+        h.type_action("SplitRight()");
+        h.open_run();
+        finished_cargo_test(&mut h, ONE_FAILURE, 101);
+
+        h.type_keys("enter");
+        assert_eq!(editor::focused_buffer_path(&h.stoat), file);
+    }
+
+    #[test]
+    fn enter_on_a_failure_in_no_file_names_the_path() {
+        let mut h = Stoat::test();
+        h.open_run();
+        finished_cargo_test(&mut h, ONE_FAILURE, 101);
+
+        h.type_keys("enter");
+        assert_eq!(
+            h.stoat.pending_message.as_deref(),
+            Some("no file stoat/src/render/chrome.rs"),
         );
     }
 }

@@ -36,6 +36,18 @@ define_action!(
 );
 
 define_action!(
+    RunToggleViewDef,
+    RunToggleView,
+    "RunToggleView",
+    ActionKind::RunToggleView,
+    "show the raw output or the report",
+    "Flip the newest block of the focused Run pane between the report of its \
+     finished test run and the raw output that the report was read from.",
+    ActionPriority::Normal,
+    palette_visible = false
+);
+
+define_action!(
     RunModalDismissDef,
     RunModalDismiss,
     "RunModalDismiss",

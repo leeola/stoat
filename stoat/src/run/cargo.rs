@@ -6,6 +6,7 @@
 //! output.
 
 use super::kind::{CargoKind, RunKind};
+use crate::location_picker::{self, ParsedLocation};
 
 /// The output of a `cargo test` run of one binary with three tests, one of
 /// which passes, one fails, and one is ignored.
@@ -62,18 +63,45 @@ pub(crate) const THREE_BINARIES: &str = concat!(
     "finished in 0.00s\n",
 );
 
+/// [`ONE_FAILURE`] with its failure's block printed tight, with no blank line
+/// after its `----` line and no thread id on its panic line.
+#[cfg(test)]
+const NO_THREAD_ID: &str = concat!(
+    "running 3 tests\n",
+    "test render::chrome::tests::zoomed_clamps ... ok\n",
+    "test render::chrome::tests::zoomed_negative_steps ... FAILED\n",
+    "test render::chrome::tests::slow_case ... ignored\n",
+    "\n",
+    "failures:\n",
+    "\n",
+    "---- render::chrome::tests::zoomed_negative_steps stdout ----\n",
+    "thread 'render::chrome::tests::zoomed_negative_steps' panicked at ",
+    "stoat/src/render/chrome.rs:412:9:\n",
+    "assertion `left == right` failed\n",
+    "  left: 18\n",
+    " right: 16\n",
+    "note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace\n",
+    "\n",
+    "\n",
+    "failures:\n",
+    "    render::chrome::tests::zoomed_negative_steps\n",
+    "\n",
+    "test result: FAILED. 1 passed; 1 failed; 1 ignored; 0 measured; 0 filtered out; ",
+    "finished in 0.02s\n",
+);
+
 /// What a Cmd's output reports, for a kind whose output the block reads.
 #[derive(Debug, Hash)]
 pub(crate) enum CmdReport {
-    /// The counts of a `cargo test` run.
+    /// The report of a `cargo test` run.
     Test(TestReport),
 }
 
-/// The counts of a `cargo test` run, as its lines arrive.
+/// The counts and the failures of a `cargo test` run, as its lines arrive.
 #[derive(Debug, Default, Hash)]
 pub(crate) struct TestReport {
     /// The test binaries that started, each with its `running N tests` line.
-    binaries: u32,
+    pub(crate) binaries: u32,
     /// The tests that the binaries that started said they would run.
     pub(crate) total: u32,
     passed: u32,
@@ -83,6 +111,40 @@ pub(crate) struct TestReport {
     summaries: u32,
     /// The passed, failed, and ignored sums of the `test result:` lines.
     summed: (u32, u32, u32),
+    /// The failed tests, in the order their result lines arrived.
+    pub(crate) failures: Vec<TestFailure>,
+    /// The failure block that the arriving lines belong to.
+    block: FailureBlock,
+}
+
+/// One failed test of a `cargo test` run, as its result line and its block of
+/// output name it.
+#[derive(Debug, PartialEq, Eq, Hash)]
+pub(crate) struct TestFailure {
+    /// The test's path, as its result line names it.
+    pub(crate) name: String,
+    /// Where the test panicked, as its block's first panic line names it.
+    pub(crate) location: Option<ParsedLocation>,
+    /// The panic message, its lines trimmed and joined by two spaces.
+    pub(crate) message: Option<String>,
+}
+
+/// Where the reading of a failure's block of output stands.
+///
+/// Cargo prints the output of each failed test after the results, in a block
+/// that a `---- <name> stdout ----` line opens and a `failures:` line ends. The
+/// block's first panic line names where the test panicked, and the lines after
+/// it hold the panic message.
+#[derive(Debug, Default, Hash)]
+enum FailureBlock {
+    /// The lines belong to no block, or to one whose message has ended.
+    #[default]
+    Closed,
+    /// The block of the failure at this index is open, and its panic line has
+    /// not arrived.
+    Opened(usize),
+    /// The lines are the panic message of the failure at this index.
+    Message(usize),
 }
 
 /// The bytes of a Cmd's output, cut into whole lines.
@@ -132,13 +194,29 @@ impl TestReport {
         }
     }
 
-    /// Read one line of the run's output into the counts.
+    /// The location of the first failure whose panic line named one.
+    pub(crate) fn first_location(&self) -> Option<&ParsedLocation> {
+        self.failures
+            .iter()
+            .find_map(|failure| failure.location.as_ref())
+    }
+
+    /// Read one line of the run's output into the report.
     ///
     /// A `running N tests` line starts a binary of N tests. A `test result:`
     /// line ends one with its sums. Any other line that starts with `test `
     /// and holds ` ... ` is the result of one test. The outcome after its
     /// last ` ... ` reads `ok` or `bench` for a pass, `FAILED` for a failure,
-    /// and `ignored` for an ignored test. Every other line counts for nothing.
+    /// and `ignored` for an ignored test. A failure adds a [`TestFailure`] of
+    /// its name when none has it.
+    ///
+    /// A `---- <name> stdout ----` line opens the block of the failure it
+    /// names, and a line that starts with `failures:` closes it. The block's
+    /// first line that starts with `thread '` and holds `panicked at ` gives
+    /// the failure's location, read from the text after `panicked at `. The
+    /// lines after it are the message, up to a blank line or a line that
+    /// starts with `note:` or `stack backtrace:`. Every other line counts for
+    /// nothing.
     fn push_line(&mut self, line: &str) {
         if let Some(count) = running_count(line) {
             self.total += count;
@@ -153,8 +231,32 @@ impl TestReport {
             self.summed.2 += ignored;
             return;
         }
+        if line.starts_with("failures:") {
+            self.block = FailureBlock::Closed;
+            return;
+        }
+        if let Some(name) = line
+            .strip_prefix("---- ")
+            .and_then(|rest| rest.strip_suffix(" stdout ----"))
+        {
+            self.block = self
+                .failures
+                .iter()
+                .position(|failure| failure.name == name)
+                .map_or(FailureBlock::Closed, FailureBlock::Opened);
+            return;
+        }
+        match self.block {
+            FailureBlock::Closed => self.push_result_line(line),
+            FailureBlock::Opened(index) => self.push_block_line(index, line),
+            FailureBlock::Message(index) => self.push_message_line(index, line),
+        }
+    }
 
-        let Some((_, outcome)) = line
+    /// Read a line outside every failure block, which counts when it is the
+    /// result of one test.
+    fn push_result_line(&mut self, line: &str) {
+        let Some((name, outcome)) = line
             .strip_prefix("test ")
             .and_then(|rest| rest.rsplit_once(" ... "))
         else {
@@ -164,8 +266,46 @@ impl TestReport {
             self.passed += 1;
         } else if outcome.starts_with("FAILED") {
             self.failed += 1;
+            if !self.failures.iter().any(|failure| failure.name == name) {
+                self.failures.push(TestFailure {
+                    name: name.to_owned(),
+                    location: None,
+                    message: None,
+                });
+            }
         } else if outcome.starts_with("ignored") {
             self.ignored += 1;
+        }
+    }
+
+    /// Read a line of the open block of failure `index` before its panic
+    /// line, where the test's captured output counts for nothing.
+    fn push_block_line(&mut self, index: usize, line: &str) {
+        let Some((_, at)) = line
+            .strip_prefix("thread '")
+            .and_then(|rest| rest.split_once("panicked at "))
+        else {
+            return;
+        };
+        self.failures[index].location = location_picker::parse_location_line(at);
+        self.block = FailureBlock::Message(index);
+    }
+
+    /// Read a line of the panic message of failure `index`, or end the message
+    /// at a line that ends it.
+    fn push_message_line(&mut self, index: usize, line: &str) {
+        let text = line.trim();
+        if text.is_empty() || line.starts_with("note:") || line.starts_with("stack backtrace:") {
+            self.block = FailureBlock::Closed;
+            return;
+        }
+        let failure = &mut self.failures[index];
+        match &mut failure.message {
+            Some(message) => {
+                message.push_str("  ");
+                message.push_str(text);
+            },
+            None => failure.message = Some(text.to_owned()),
         }
     }
 }
@@ -267,7 +407,10 @@ fn strip_ansi(text: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{strip_ansi, LineFeed, TestReport, ONE_FAILURE, THREE_BINARIES};
+    use super::{
+        strip_ansi, LineFeed, ParsedLocation, TestFailure, TestReport, NO_THREAD_ID, ONE_FAILURE,
+        THREE_BINARIES,
+    };
 
     /// The report of `text`, folded over the lines that a [`LineFeed`] cuts
     /// from it.
@@ -333,6 +476,89 @@ mod tests {
             "test result: ok. 2 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out\n",
         );
         assert_eq!((report.done(), report.summed), (0, (2, 0, 1)));
+    }
+
+    /// The failure that [`ONE_FAILURE`] reports, as its block names it.
+    fn chrome_failure() -> TestFailure {
+        TestFailure {
+            name: "render::chrome::tests::zoomed_negative_steps".to_owned(),
+            location: Some(ParsedLocation {
+                path: "stoat/src/render/chrome.rs".to_owned(),
+                line: 412,
+                column: 9,
+                text: String::new(),
+            }),
+            message: Some("assertion `left == right` failed  left: 18  right: 16".to_owned()),
+        }
+    }
+
+    #[test]
+    fn a_failure_carries_its_panic_location_and_message() {
+        assert_eq!(parse_test_output(ONE_FAILURE).failures, [chrome_failure()]);
+    }
+
+    #[test]
+    fn a_panic_line_reads_with_or_without_a_thread_id() {
+        assert_eq!(parse_test_output(NO_THREAD_ID).failures, [chrome_failure()]);
+    }
+
+    /// A message ends at a blank line or at a backtrace, so the output after
+    /// it and a backtrace's frames join no message.
+    #[test]
+    fn a_message_ends_at_a_blank_line_or_a_backtrace() {
+        let report = parse_test_output(concat!(
+            "test a ... FAILED\n",
+            "test b ... FAILED\n",
+            "---- a stdout ----\n",
+            "thread 'a' panicked at src/a.rs:3:5:\n",
+            "first\n",
+            "stack backtrace:\n",
+            "   0: rust_begin_unwind\n",
+            "---- b stdout ----\n",
+            "thread 'b' panicked at src/b.rs:7:5:\n",
+            "second\n",
+            "\n",
+            "later output\n",
+        ));
+        let messages: Vec<_> = report
+            .failures
+            .iter()
+            .map(|failure| failure.message.as_deref())
+            .collect();
+        assert_eq!(messages, [Some("first"), Some("second")]);
+    }
+
+    /// A `failures:` line closes a block that no panic line read, such as a
+    /// `should_panic` test's, so the results of a later binary still count.
+    #[test]
+    fn a_failures_line_closes_a_block_with_no_panic() {
+        let report = parse_test_output(concat!(
+            "running 1 test\n",
+            "test a ... FAILED\n",
+            "---- a stdout ----\n",
+            "note: test did not panic as expected\n",
+            "failures:\n",
+            "running 1 test\n",
+            "test b ... FAILED\n",
+        ));
+        let names: Vec<_> = report
+            .failures
+            .iter()
+            .map(|failure| failure.name.as_str())
+            .collect();
+        assert_eq!((report.totals(), names), ((0, 2, 0), vec!["a", "b"]));
+    }
+
+    #[test]
+    fn a_failed_result_with_no_panic_block_keeps_its_name_alone() {
+        assert_eq!(
+            parse_test_output("test a ... FAILED\n").failures,
+            [TestFailure {
+                name: "a".to_owned(),
+                location: None,
+                message: None,
+            }],
+        );
     }
 
     #[test]

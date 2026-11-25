@@ -9899,9 +9899,13 @@ fn a_run_pane_versions_on_everything_its_render_reads() {
     let exited = version(h.stoat.active_workspace());
     assert_ne!(fed, exited, "the exit code flags the next prompt");
 
+    h.stoat.active_workspace_mut().cmds[cmd].raw_view = true;
+    let raw = version(h.stoat.active_workspace());
+    assert_ne!(exited, raw, "the raw view swaps a report for its output");
+
     h.stoat.active_workspace_mut().runs[run_id].scroll_offset = 3;
     let scrolled = version(h.stoat.active_workspace());
-    assert_ne!(exited, scrolled, "scrolling picks different output lines");
+    assert_ne!(raw, scrolled, "scrolling picks different output lines");
 
     let input_editor = h.stoat.active_workspace().runs[run_id].input.editor_id;
     h.stoat.active_workspace_mut().editors[input_editor].scroll_row = 1;
