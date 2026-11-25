@@ -263,8 +263,9 @@ fn view_title(ws: &Workspace, view: &View) -> String {
         View::Run(id) => ws
             .runs
             .get(*id)
-            .and_then(|run| run.title.clone())
-            .unwrap_or_else(|| "run".to_string()),
+            .and_then(|run| run.blocks.last())
+            .and_then(|cmd| ws.cmds.get(*cmd))
+            .map_or_else(|| "run".to_string(), |cmd| cmd.command.clone()),
         _ => ws.view_title(view),
     }
 }
@@ -301,6 +302,22 @@ mod tests {
         assert_eq!(
             listed(h.stoat.active_workspace()),
             ["buffer a.rs tab 1", "run run tab 1", "term term tab 2"],
+        );
+    }
+
+    /// A Run pane lists by the line of its newest Cmd.
+    #[test]
+    fn a_run_pane_lists_by_its_newest_cmd() {
+        let mut h = TestHarness::with_size(80, 24);
+        open_scratch_at(&mut h, "/ws/a.rs", "fn a() {}");
+        dispatch(&mut h.stoat, &SplitNewRight);
+        h.open_run();
+        h.submit_run("make");
+        h.submit_run("ls -la");
+
+        assert_eq!(
+            listed(h.stoat.active_workspace()),
+            ["buffer a.rs tab 1", "run ls -la tab 1"],
         );
     }
 

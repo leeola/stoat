@@ -1,9 +1,7 @@
 use crate::{
     render::{
-        chrome::{ISLAND_BOTTOM, ISLAND_SIDE, ISLAND_TOP},
         cmd_line::{self, CmdLine, CmdStatus},
         paint::style_rgb,
-        picker::{Footer, PlateHeader},
         text::{write_str, write_str_clipped},
     },
     run::{
@@ -21,9 +19,6 @@ use ratatui::{
 };
 use std::{ops::Range, path::Path};
 use stoat_widgets::bar::Bar;
-
-/// The run modal's name, which leads its header.
-const RUN_LABEL: &str = "Run";
 
 /// The note at the right of a Run pane prompt that shows a line a walk of the
 /// command history recalled, which names the keys and the rule of the walk.
@@ -611,126 +606,11 @@ impl Body<'_> {
     }
 }
 
-/// Paint the run modal, the output of `run_state`'s last block, in a box
-/// centered over `area`.
-///
-/// The box is a [`list_plate`](crate::render::chrome::list_plate): its header
-/// names the run, one Island holds the output's rows, and the key line notes
-/// whether the command still runs or how it ended. With no block, the box
-/// holds its header alone. An area under 20 by 8 cells paints nothing.
-pub(crate) fn render_modal_run(
-    run_state: &RunState,
-    cmds: &slotmap::SlotMap<CmdId, Cmd>,
-    theme: &crate::theme::Theme,
-    area: Rect,
-    buf: &mut Buffer,
-    scene: &mut stoat_widgets::ApcScene,
-) {
-    if area.width < 20 || area.height < 8 {
-        return;
-    }
-
-    let box_width = (area.width * 7 / 10).min(area.width.saturating_sub(4));
-    let box_height = (area.height * 8 / 10).min(area.height.saturating_sub(2));
-    let x = area.x + (area.width.saturating_sub(box_width)) / 2;
-    let y = area.y + (area.height.saturating_sub(box_height)) / 2;
-    let modal_area = Rect::new(x, y, box_width, box_height);
-
-    let modal_style = theme.get(crate::theme::scope::UI_MODAL_RUN);
-    let inner = crate::render::chrome::list_plate(buf, modal_area, modal_style, theme, scene);
-    let header = PlateHeader {
-        label: RUN_LABEL,
-        title: run_state
-            .title
-            .as_deref()
-            .or_else(|| run_state.active_block(cmds).map(|b| b.command.as_str()))
-            .unwrap_or_default(),
-        meta: &[],
-        chip: None,
-    };
-    crate::render::picker::plate_header(buf, inner, &header, theme, scene);
-
-    let Some(active) = run_state.active_block(cmds) else {
-        return;
-    };
-
-    let output = Rect::new(
-        inner.x,
-        inner.y + 2,
-        inner.width,
-        inner.height.saturating_sub(3),
-    );
-    let plate = crate::render::chrome::plate_colors(theme, scene);
-    if let Some(plate) = plate {
-        let edges = [ISLAND_TOP, ISLAND_SIDE, ISLAND_BOTTOM, ISLAND_SIDE];
-        crate::render::chrome::modal_island(output, edges, plate, theme, buf, scene);
-    }
-
-    // The rows stand a cell inside the Island, 12 px from its edge, as the
-    // boards inset a plate's row text.
-    let text = Rect::new(
-        output.x + 1,
-        output.y,
-        output.width.saturating_sub(2),
-        output.height,
-    );
-    let grid = &active.grid;
-    let visible_rows = text.height as usize;
-    let total = grid.line_count();
-    let start = total.saturating_sub(visible_rows + run_state.scroll_offset);
-    let w = (text.width as usize).min(grid.width() as usize);
-
-    for (i, row_idx) in (start..total).take(visible_rows).enumerate() {
-        let y = text.y + i as u16;
-        let row = grid.row(row_idx);
-        for (col, cell) in row.iter().enumerate().take(w) {
-            if cell.ch == ' ' && cell.fg.is_none() && cell.bg.is_none() && cell.modifiers.is_empty()
-            {
-                continue;
-            }
-            let mut style = Style::default();
-            if let Some(fg) = cell.fg {
-                style = style.fg(fg);
-            }
-            if let Some(bg) = cell.bg {
-                style = style.bg(bg);
-            }
-            style = style.add_modifier(cell.modifiers);
-            let cx = text.x + col as u16;
-            if cx < text.x + text.width {
-                buf[(cx, y)].set_char(cell.ch).set_style(style);
-            }
-        }
-    }
-
-    let status = if active.finished {
-        let code = active.exit_status.unwrap_or(-1);
-        if code == 0 {
-            "done -- press Escape to dismiss".to_owned()
-        } else {
-            format!("exited {} -- press Escape to dismiss", code)
-        }
-    } else {
-        "running...".to_owned()
-    };
-    let note = [(
-        status.as_str(),
-        theme.get(crate::theme::scope::UI_TEXT_MUTED),
-    )];
-    let footer = Footer {
-        note: &note,
-        ..Footer::default()
-    };
-    let footer_rows = crate::render::picker::footer_rect(modal_area);
-    crate::render::picker::modal_footer(buf, footer_rows, &footer, plate, theme, scene);
-}
-
 #[cfg(test)]
 mod tests {
     use super::{
-        block_line, paint_grid_row, render_modal_run, render_run_pane, status_parts,
-        window_offsets, Body, Buffer, Cmd, GridSelection, Modifier, OutputLine, Rect, RunState,
-        StatusPart, Style, ISLAND_BOTTOM, ISLAND_SIDE, ISLAND_TOP,
+        block_line, paint_grid_row, render_run_pane, status_parts, window_offsets, Body, Buffer,
+        Cmd, GridSelection, Modifier, OutputLine, Rect, StatusPart, Style,
     };
     use crate::{
         render::paint::style_rgb,
@@ -746,7 +626,7 @@ mod tests {
         time::{Duration, Instant},
     };
     use stoat_widgets::ApcScene;
-    use stoatty_protocol::command::{self, Command, Edge};
+    use stoatty_protocol::command::{self, Command};
 
     /// The `(block, offset)` pairs the pane draws, built the obvious way: lay
     /// every block's rows out flat, then take the window out of the middle.
@@ -913,81 +793,6 @@ mod tests {
         assert_eq!(
             hairlines,
             [(((content.x + 1) * 16) as i16, (content.width - 2) * 16)],
-        );
-    }
-
-    /// Under the plate look the run modal is the list plate's two panels over
-    /// its inner cells, then one Island over its output rows, whose text starts
-    /// a cell inside it. The header names the run and its command, and the key
-    /// line notes how the command ended.
-    #[test]
-    fn the_run_modal_draws_as_a_list_plate_with_one_island() {
-        let (config, _) = stoat_config::parse(
-            r##"theme t {
-                ui.surface.ground.bg = "#0c0e11";
-                ui.background.bg = "#17191e";
-                ui.modal.label = { fg: "#c59af0", modifiers: [bold] };
-                ui.text.fg = "#dfe2e8";
-                ui.text.muted.fg = "#838a98";
-            }"##,
-        );
-        let theme = Theme::from_config(&config.expect("theme parses"), "t").expect("theme loads");
-        let mut h = TestHarness::with_size(100, 40);
-        let executor = h.stoat.executor.clone();
-        let mut run = RunState::new(h.stoat.active_workspace_mut(), executor);
-        let mut block = block_with("a\r\nb", None);
-        block.finished = true;
-        block.exit_status = Some(0);
-        let mut cmds = slotmap::SlotMap::with_key();
-        run.blocks.push(cmds.insert(block));
-
-        let area = Rect::new(0, 0, 100, 40);
-        let mut buf = Buffer::empty(area);
-        let mut scene = ApcScene::new();
-        scene.set_nudge_protocol(true);
-        render_modal_run(&run, &cmds, &theme, area, &mut buf, &mut scene);
-
-        let commands = command::decode_stream(scene.bytes());
-        let panels: Vec<_> = commands
-            .iter()
-            .filter_map(|cmd| match cmd {
-                Command::Panel(panel) => Some((
-                    Rect::new(panel.left, panel.top, panel.width, panel.height),
-                    panel.edges,
-                    panel.backdrop,
-                )),
-                _ => None,
-            })
-            .collect();
-        let runs: Vec<&str> = commands
-            .iter()
-            .filter_map(|cmd| match cmd {
-                Command::TextRun(run) => Some(run.text.as_str()),
-                _ => None,
-            })
-            .collect();
-        let inner = Rect::new(16, 5, 68, 30);
-        let plate_edges = [
-            Edge::Inset(0),
-            Edge::Outset(11),
-            Edge::Outset(10),
-            Edge::Outset(11),
-        ];
-        assert_eq!(
-            (panels, runs, [buf[(16, 7)].symbol(), buf[(17, 7)].symbol()]),
-            (
-                vec![
-                    (inner, plate_edges, false),
-                    (inner, plate_edges, true),
-                    (
-                        Rect::new(16, 7, 68, 27),
-                        [ISLAND_TOP, ISLAND_SIDE, ISLAND_BOTTOM, ISLAND_SIDE],
-                        true,
-                    ),
-                ],
-                vec!["Run", "cmd", "done -- press Escape to dismiss"],
-                [" ", "a"],
-            ),
         );
     }
 

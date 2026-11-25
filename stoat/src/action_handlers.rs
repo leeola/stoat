@@ -469,13 +469,8 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
         ActionKind::OpenCommandPalette => {
             // `Ctrl-:` and `Ctrl-;` bind at the keymap's root, past every
             // `!modal` guard, so the modal they fire over closes and the
-            // palette owns the keys alone. A finished run is the one modal
-            // that close leaves open.
-            if stoat.modal_run.is_some() {
-                run::run_modal_dismiss(stoat);
-            } else {
-                keymap_state::close_topmost_modal(stoat);
-            }
+            // palette owns the keys alone.
+            keymap_state::close_topmost_modal(stoat);
             let executor = stoat.executor.clone();
             let availability = crate::command_palette::Availability::from_stoat(stoat);
             let keys = stoat
@@ -1118,7 +1113,6 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
         ActionKind::RunToggleView => run::run_toggle_view(stoat),
         ActionKind::RunAgain => run::run_again(stoat),
         ActionKind::RunBlockToPane => run::run_block_to_pane(stoat),
-        ActionKind::RunModalDismiss => run::run_modal_dismiss(stoat),
         ActionKind::RunHistoryPrev => run::run_history_prev(stoat),
         ActionKind::RunHistoryNext => run::run_history_next(stoat),
         ActionKind::HelpScopeToggle => help::help_scope_toggle(stoat),
@@ -1131,7 +1125,7 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
                 .as_any()
                 .downcast_ref::<Run>()
                 .expect("Run action downcast");
-            run::run_command(stoat, &cmd.command)
+            run::run_line(stoat, &cmd.command)
         },
         ActionKind::ToggleDockRight => pane::toggle_dock(stoat, DockSide::Right),
         ActionKind::ToggleDockLeft => pane::toggle_dock(stoat, DockSide::Left),

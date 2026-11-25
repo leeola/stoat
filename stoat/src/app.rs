@@ -1452,7 +1452,6 @@ pub struct Stoat {
     /// An in-flight background diff-cache warm pass, drained by
     /// [`crate::diff_warm::install_finished`] in [`Self::drive_background`].
     pub(crate) pending_diff_warm: Option<crate::diff_warm::PendingDiffWarm>,
-    pub(crate) modal_run: Option<RunId>,
     /// Session-wide toggle for tree-sitter syntax coloring, applied to every
     /// editor at paint time. Not a [`crate::config::Settings`] field:
     /// persistence can come later. Defaults to on.
@@ -2972,7 +2971,6 @@ impl Stoat {
             code_search_query_tx,
             code_search_query_rx,
             pending_diff_warm: None,
-            modal_run: None,
             syntax_highlight: true,
             minimap_override: None,
             tab_bar_override: None,
@@ -6437,17 +6435,6 @@ impl Stoat {
             action_handlers::macro_recording::capture(self, &key);
         }
 
-        if let Some(run_id) = self.modal_run {
-            let ws = self.active_workspace();
-            let running = ws.runs.get(run_id).is_some_and(|r| r.is_running(&ws.cmds));
-            if running {
-                // Swallow input while the command is still running.
-                return UpdateEffect::None;
-            }
-            // Once finished, keys fall through so the `modal == run` bindings
-            // (Escape -> RunModalDismiss) resolve through the keymap.
-        }
-
         if let Some(term_id) = self.term_input_target() {
             if let Some((actions, captured_digit)) = self.passthrough_binding(&key) {
                 return self.run_bound_actions(
@@ -7269,7 +7256,7 @@ impl Stoat {
     /// open or the open one has no input of its own.
     ///
     /// A picker without an input (the jumplist, diagnostics, and location pickers,
-    /// the quit prompt, a modal run, the git status panel, the Commit Preview)
+    /// the quit prompt, the git status panel, the Commit Preview)
     /// answers `None` so the caller keeps resolving through the panes behind it,
     /// which is where the keys it does handle land.
     pub(crate) fn active_modal_input(&self) -> Option<(EditorId, BufferId)> {
@@ -7293,8 +7280,7 @@ impl Stoat {
             ActiveModal::Jumplist => &self.jumplist_picker.as_ref()?.picker.input,
             ActiveModal::WalkthroughPicker => &self.walkthrough_picker.as_ref()?.picker.input,
             ActiveModal::PaneFinder => &self.pane_finder.as_ref()?.picker.input,
-            ActiveModal::Run
-            | ActiveModal::QuitConfirm
+            ActiveModal::QuitConfirm
             | ActiveModal::CheckoutConfirm
             | ActiveModal::CommitPreview
             | ActiveModal::GitStatus => return None,
@@ -9492,9 +9478,8 @@ impl Stoat {
     /// A modal input owns an editor and a buffer under keys of the workspace it
     /// opened in, and those keys repeat across workspaces. Left open over
     /// another workspace, the modal types into the editor there under the same
-    /// key, and its close disposes that editor. A modal run ends outright,
-    /// because the close loop interrupts a run and leaves it open. Hover state
-    /// and a drag in progress belong to the workspace left, so they go too.
+    /// key, and its close disposes that editor. Hover state and a drag in
+    /// progress belong to the workspace left, so they go too.
     ///
     /// A request for the active workspace changes nothing.
     fn enter_agent_workspace(&mut self, ws_id: WorkspaceId) {
@@ -9502,9 +9487,6 @@ impl Stoat {
             return;
         }
 
-        if let Some(run_id) = self.modal_run.take() {
-            self.active_workspace_mut().remove_run(run_id);
-        }
         while active_modal(self).is_some() {
             keymap_state::close_topmost_modal(self);
         }
@@ -9643,7 +9625,6 @@ impl Stoat {
         let clipboard_host = self.clipboard_host.clone();
         let env_host = self.env_host.clone();
         let executor = self.executor.clone();
-        let modal_run = self.modal_run;
         let palette_cmd = self.run_block_cmd();
         let ws = self.active_workspace_mut();
         match notif {
@@ -9688,7 +9669,7 @@ impl Stoat {
                 run_state.trim_blocks(cmds);
                 // The Cmd still feeds while hidden, but a hidden one drives no
                 // repaint. Revealing it repaints on the toggle's own dispatch.
-                if on_screen && Self::run_visible(ws, run_id, modal_run) {
+                if on_screen && Self::run_visible(ws, run_id) {
                     self.pty_dirty = true;
                 }
                 UpdateEffect::None
@@ -9875,14 +9856,12 @@ impl Stoat {
 
     /// Whether any visible surface shows run `run_id`.
     ///
-    /// A split pane always counts as visible. A dock counts only when not hidden. A run
-    /// shown modally counts too. Gates a run block's output-driven repaint.
-    fn run_visible(ws: &Workspace, run_id: RunId, modal_run: Option<RunId>) -> bool {
-        modal_run == Some(run_id)
-            || ws
-                .panes
-                .split_panes()
-                .any(|(_, pane)| matches!(pane.view, View::Run(id) if id == run_id))
+    /// A split pane always counts as visible. A dock counts only when not hidden.
+    /// Gates a run block's output-driven repaint.
+    fn run_visible(ws: &Workspace, run_id: RunId) -> bool {
+        ws.panes
+            .split_panes()
+            .any(|(_, pane)| matches!(pane.view, View::Run(id) if id == run_id))
             || ws.docks.values().any(|dock| {
                 dock.visibility != DockVisibility::Hidden
                     && matches!(dock.view, View::Run(id) if id == run_id)
@@ -10134,13 +10113,12 @@ impl Stoat {
             }
         }
 
-        let modal_run = self.modal_run;
         let palette_cmd = self.run_block_cmd();
         let ws = self.active_workspace();
         let next_second = ws
             .runs
             .iter()
-            .filter(|&(run_id, _)| Self::run_visible(ws, run_id, modal_run))
+            .filter(|&(run_id, _)| Self::run_visible(ws, run_id))
             .flat_map(|(_, run)| run.blocks.iter().filter_map(|id| ws.cmds.get(*id)))
             .chain(palette_cmd.and_then(|id| ws.cmds.get(id)))
             .filter(|cmd| !cmd.finished)

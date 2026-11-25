@@ -159,32 +159,6 @@ fn ctrl_colon_over_a_finder_swaps_it_for_the_palette() {
     );
 }
 
-/// A finished run is the one modal the topmost close leaves open, so the
-/// palette dismisses it the way Escape does before it opens.
-#[test]
-fn ctrl_colon_over_a_finished_run_dismisses_it_for_the_palette() {
-    let mut h = Stoat::test();
-    let executor = h.stoat.executor.clone();
-    let run_id = {
-        let ws = h.stoat.active_workspace_mut();
-        let run = crate::run::RunState::new(ws, executor);
-        ws.runs.insert(run)
-    };
-    h.stoat.modal_run = Some(run_id);
-
-    h.stoat.handle_key(ctrl(':'));
-
-    assert_eq!(
-        (
-            h.stoat.modal_run.is_none(),
-            h.stoat.active_workspace().runs.get(run_id).is_none(),
-            h.stoat.command_palette.is_some(),
-        ),
-        (true, true, true),
-        "the run closes and the palette opens",
-    );
-}
-
 /// A second `Ctrl-:` over the open palette leaves it as it stands, so the
 /// query typed into it stays.
 #[test]
@@ -11599,31 +11573,6 @@ fn ctrl_c_in_an_editor_does_not_quit() {
 }
 
 #[test]
-fn finished_modal_run_escape_dismisses_via_keymap() {
-    let mut h = Stoat::test();
-    let executor = h.stoat.executor.clone();
-    let run_id = {
-        let ws = h.stoat.active_workspace_mut();
-        let run = crate::run::RunState::new(ws, executor);
-        ws.runs.insert(run)
-    };
-    h.stoat.modal_run = Some(run_id);
-
-    // A fresh run has no in-flight block, so it reads as finished.
-    h.stoat
-        .handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::empty()));
-
-    assert!(
-        h.stoat.modal_run.is_none(),
-        "Escape on a finished modal run dismisses it"
-    );
-    assert!(
-        h.stoat.active_workspace().runs.get(run_id).is_none(),
-        "the dismissed run is removed from the registry"
-    );
-}
-
-#[test]
 fn run_enter_submits_from_insert_and_normal() {
     let mut h = Stoat::test();
     h.open_run();
@@ -18325,41 +18274,6 @@ fn an_agent_switch_moves_a_running_block_into_a_run_pane() {
             session.was_killed(),
         ),
         (second, true, vec![cmd], false),
-    );
-}
-
-/// A modal run in the workspace an agent request leaves ends with the switch.
-/// No key reaches the run after it, so a run left running stays modal forever.
-#[test]
-fn an_agent_switch_ends_the_modal_run_of_the_workspace_left() {
-    let mut h = Stoat::test();
-    let launch = h.stoat.active_workspace;
-    let session = Arc::new(crate::host::FakeTerminalSession::new());
-    let (run_id, input) = {
-        let executor = h.stoat.executor.clone();
-        let ws = h.stoat.active_workspace_mut();
-        let mut run = crate::run::RunState::new(ws, executor);
-        let mut cmd = crate::run::Cmd::new("sleep 9".into(), PathBuf::from("/"), 80);
-        cmd.process = Some(crate::run::pty::CmdProcess::new(session.clone()));
-        run.blocks.push(ws.cmds.insert(cmd));
-        let input = run.input.editor_id;
-        (ws.runs.insert(run), input)
-    };
-    h.stoat.modal_run = Some(run_id);
-    let second = h.create_workspace();
-
-    open_agent_editor_in(&mut h, second);
-
-    let ws = &h.stoat.workspaces[launch];
-    assert_eq!(
-        (
-            h.stoat.active_workspace,
-            h.stoat.modal_run,
-            session.was_killed(),
-            ws.runs.contains_key(run_id),
-            ws.editors.contains_key(input),
-        ),
-        (second, None, true, false, false),
     );
 }
 

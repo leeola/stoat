@@ -385,7 +385,6 @@ action_kinds! {
     RunToggleView,
     RunAgain,
     RunBlockToPane,
-    RunModalDismiss,
     Run,
     SpawnClaude,
     Terminal,

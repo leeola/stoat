@@ -300,10 +300,10 @@ The typed UI scopes, by group (syntax scopes are open-ended):
   background.
 - `ui.divider` -- the faint track a meter fills over, such as the stat bar of
   a file row in the commits view.
-- `ui.modal.help`, `ui.modal.hints`, `ui.modal.palette`, `ui.modal.picker`,
-  `ui.modal.run` -- per floating modal, the border hue (foreground) and the box
-  surface (background). A modal style with no background keeps the window
-  ground. The cursor popups and the small pickers share `ui.modal.hints`.
+- `ui.modal.help`, `ui.modal.hints`, `ui.modal.palette`, `ui.modal.picker`
+  -- per floating modal, the border hue (foreground) and the box surface
+  (background). A modal style with no background keeps the window ground. The
+  cursor popups and the small pickers share `ui.modal.hints`.
 - `ui.modal.hints.card` -- the which-key hints box. Under stoatty it draws as
   a borderless card docked on the status bar, so only its background shows,
   as the card's fill. In cells its foreground is the border hue. A theme that

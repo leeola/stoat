@@ -71,7 +71,6 @@ theme default_dark {
     ui.modal.hints.card = { fg: muted, bg: subtle };
     ui.modal.palette.fg = muted;
     ui.modal.picker.fg = muted;
-    ui.modal.run.fg = muted;
     ui.modal.footer.bg = subtle;
 
     ui.prompt.fg = warning;
@@ -368,7 +367,6 @@ theme ermine_night inherits default_dark {
     ui.modal.hints.card = { fg: strong, bg: raised };
     ui.modal.palette = { fg: strong, bg: overlay };
     ui.modal.picker  = { fg: strong, bg: overlay };
-    ui.modal.run     = { fg: strong, bg: overlay };
     ui.modal.footer  = { bg: raised };
     ui.modal.label   = { fg: special, modifiers: [bold] };
     ui.chip          = { fg: text, bg: tab_wash };
@@ -1910,9 +1908,6 @@ on key {
         Alt-Enter -> PromptInsertNewline();
         Up -> MoveUp();
         Down -> MoveDown();
-    }
-    modal == run && mode == normal {
-        Escape -> RunModalDismiss();
     }
     pane == run && mode == insert {
         Enter -> RunSubmit();

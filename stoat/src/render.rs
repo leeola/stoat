@@ -2029,20 +2029,6 @@ pub(crate) fn frame(
     let on_request = painted_modal.is_some_and(ActiveModal::hints_on_request);
     let modal_hints = stoat.key_hints_visible || !on_request;
     match painted_modal {
-        Some(ActiveModal::Run) => {
-            if let Some(run_id) = stoat.modal_run
-                && let Some(run_state) = ws.runs.get(run_id)
-            {
-                run_pane::render_modal_run(
-                    run_state,
-                    &ws.cmds,
-                    &stoat.theme,
-                    full,
-                    buf,
-                    &mut *scene,
-                );
-            }
-        },
         Some(ActiveModal::QuitConfirm) => {
             if let Some(modal) = &stoat.quit_all_confirm {
                 quit_all_confirm::render_quit_all_confirm(

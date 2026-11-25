@@ -390,8 +390,8 @@ pub(crate) fn modal_preview_rows(stoat: &Stoat) -> Option<usize> {
 /// preview is not an editor.
 ///
 /// Every target list previews through a scratch editor, so a wheel, a keyboard
-/// half-page, and a pooled page all want the same one. The commit picker, help,
-/// and the run modal keep their own row offset instead and are absent here.
+/// half-page, and a pooled page all want the same one. The commit picker and
+/// help keep their own row offset instead and are absent here.
 /// Each caller handles those where it handles this.
 pub(crate) fn modal_preview_pane(stoat: &Stoat) -> Option<&Preview> {
     match active_modal(stoat)? {
@@ -434,9 +434,8 @@ pub(crate) fn modal_preview_editor(stoat: &Stoat) -> Option<EditorId> {
 /// bottom-line prompts are deliberately absent. The editor stays fully visible
 /// under those, so a click there still belongs to the editor.
 ///
-/// `quit_confirm` and the run modal report no list. They own the pointer all
-/// the same, since the gate reads "some modal is open" from this returning
-/// `Some`.
+/// `quit_confirm` reports no list. It owns the pointer all the same, since
+/// the gate reads "some modal is open" from this returning `Some`.
 pub(crate) fn boxed_modal_surfaces(stoat: &Stoat) -> Option<ModalSurfaces> {
     let size = stoat.size();
     let zoom = |kind| modal_zoom_steps(&stoat.modal_zoom, kind);
@@ -687,15 +686,6 @@ pub(crate) fn boxed_modal_surfaces(stoat: &Stoat) -> Option<ModalSurfaces> {
                 rows: ListRows::OnePerResult,
             })
         },
-        // The run modal is all output, so the whole screen reads as its
-        // preview and the wheel scrolls that output.
-        ActiveModal::Run => Some(ModalSurfaces {
-            list: Rect::new(0, 0, 0, 0),
-            preview: Some(size),
-            len: 0,
-            selected: 0,
-            rows: ListRows::OnePerResult,
-        }),
         // The panel's rows interleave its section heads, so no list of one
         // row per line maps a press to its file, and `press_git_status_row`
         // maps it instead. It owns the pointer all the same, so a press never
@@ -2091,19 +2081,6 @@ fn scroll_modal_preview(stoat: &mut Stoat, down: bool) -> UpdateEffect {
                 true => action_handlers::help::help_scroll_detail_down(stoat),
                 false => action_handlers::help::help_scroll_detail_up(stoat),
             };
-        },
-        // The run modal is all output, so the whole box is its preview.
-        Some(ActiveModal::Run) => {
-            let Some(run_id) = stoat.modal_run else {
-                return UpdateEffect::None;
-            };
-            let rows = stoat.size().height.saturating_sub(1) as usize;
-            let Workspace { runs, cmds, .. } = stoat.active_workspace_mut();
-            let Some(run_state) = runs.get_mut(run_id) else {
-                return UpdateEffect::None;
-            };
-            run_state.wheel_scroll(down, rows, cmds);
-            return UpdateEffect::Redraw;
         },
         _ => modal_preview_editor(stoat),
     };
@@ -5494,44 +5471,6 @@ mod tests {
             (selected, h.stoat.diagnostics_picker.is_some()),
             (2, false),
             "the first press selects the clicked row and the second acts on it"
-        );
-    }
-
-    /// The run modal is all output, so its wheel scrolls that output rather
-    /// than the editor it hides.
-    #[test]
-    fn a_wheel_over_the_run_modal_scrolls_its_output() {
-        let mut h = crate::test_harness::TestHarness::with_size(120, 40);
-        h.seed_focused_buffer(&"line\n".repeat(200));
-        let executor = h.stoat.executor.clone();
-        let run_id = {
-            let ws = h.stoat.active_workspace_mut();
-            let run = crate::run::RunState::new(ws, executor);
-            ws.runs.insert(run)
-        };
-        h.stoat.modal_run = Some(run_id);
-        {
-            let run = h
-                .stoat
-                .active_workspace_mut()
-                .runs
-                .get_mut(run_id)
-                .expect("run state");
-            run.scroll_offset = 8;
-        }
-
-        h.stoat
-            .update(mouse_event(MouseEventKind::ScrollDown, 60, 20));
-
-        assert_eq!(
-            h.stoat
-                .active_workspace()
-                .runs
-                .get(run_id)
-                .expect("run state")
-                .scroll_offset,
-            0,
-            "the wheel walks the run output's own offset"
         );
     }
 

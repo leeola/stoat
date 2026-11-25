@@ -75,15 +75,6 @@ define_action!(
 );
 
 define_action!(
-    RunModalDismissDef,
-    RunModalDismiss,
-    "RunModalDismiss",
-    ActionKind::RunModalDismiss,
-    "dismiss finished run",
-    "Remove a finished modal run and close its overlay."
-);
-
-define_action!(
     RunHistoryPrevDef,
     RunHistoryPrev,
     "RunHistoryPrev",
@@ -106,7 +97,7 @@ const RUN_PARAMS: &[ParamDef] = &[ParamDef {
     kind: ParamKind::String,
     value_source: ValueSource::None,
     required: true,
-    description: "Shell command to execute in a modal overlay.",
+    description: "Shell command to run in the Run pane.",
 }];
 
 define_action_def!(
@@ -114,7 +105,10 @@ define_action_def!(
     "Run",
     ActionKind::Run,
     "run command",
-    "Run a shell command in a temporary modal overlay. The modal shows output while running and can be dismissed when done.",
+    "Run a shell command in the Run pane. Its Cmd joins the stack of the Run \
+     pane on show, or of a new Run pane that splits the focused pane downward, \
+     and the focus stays where it is. A claude line starts in an agent tab \
+     instead.",
     ActionPriority::Common,
     aliases = &["r"],
     command_name = "run",

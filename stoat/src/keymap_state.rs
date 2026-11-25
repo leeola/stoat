@@ -714,7 +714,6 @@ pub(crate) fn view_predicate(ws: &Workspace) -> Option<&'static str> {
 /// resolving keybindings.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ActiveModal {
-    Run,
     QuitConfirm,
     CheckoutConfirm,
     CommitPreview,
@@ -746,7 +745,6 @@ impl ActiveModal {
     /// binding under it is scoped to the incremental walk, not to searching.
     pub(crate) fn context_str(self) -> &'static str {
         match self {
-            Self::Run => "run",
             Self::QuitConfirm => "quit_confirm",
             Self::CheckoutConfirm => "checkout_confirm",
             Self::CommitPreview => "commit_preview",
@@ -775,9 +773,8 @@ impl ActiveModal {
     /// The name the focused status row gives this modal while it is open.
     ///
     /// Only the pickers have a name. A text input paints its query in the
-    /// status row or in a popup of its own. The run and quit boxes take no
-    /// query. Under these modals the row keeps its mode chip and its screen
-    /// label.
+    /// status row or in a popup of its own. The quit box takes no query.
+    /// Under these modals the row keeps its mode chip and its screen label.
     pub(crate) fn label(self) -> Option<&'static str> {
         match self {
             Self::FileFinder => Some("find file"),
@@ -793,8 +790,7 @@ impl ActiveModal {
             Self::Location => Some("locations"),
             Self::Jumplist => Some("jumps"),
             Self::WalkthroughPicker => Some("walkthroughs"),
-            Self::Run
-            | Self::QuitConfirm
+            Self::QuitConfirm
             | Self::CheckoutConfirm
             | Self::CommitPreview
             | Self::GitStatus
@@ -921,27 +917,12 @@ impl ActiveModal {
 /// user is typing into. A modal owning a scratch editor is disposed rather
 /// than dropped, or its input stays in the workspace for the rest of the
 /// session.
-///
-/// A run pane is the one arm that does not close. It owns the whole pane
-/// rather than floating over it, so it interrupts its shell and stays open.
 pub(crate) fn close_topmost_modal(stoat: &mut Stoat) -> bool {
     let Some(modal) = active_modal(stoat) else {
         return false;
     };
 
     match modal {
-        ActiveModal::Run => {
-            let run_id = stoat.modal_run.expect("the run modal is open");
-            let ws = stoat.active_workspace_mut();
-            if let Some(run_state) = ws.runs.get(run_id)
-                && let Some(block) = run_state.active_block_mut(&mut ws.cmds)
-            {
-                if let Some(process) = block.process.take() {
-                    process.kill();
-                }
-                block.finished = true;
-            }
-        },
         ActiveModal::QuitConfirm => stoat.quit_all_confirm = None,
         // The preview behind the confirm closes with it. A caller that opens
         // another modal next closes one modal and expects none to stay.
@@ -1009,9 +990,7 @@ pub(crate) fn close_topmost_modal(stoat: &mut Stoat) -> bool {
 }
 
 pub(crate) fn active_modal(stoat: &Stoat) -> Option<ActiveModal> {
-    if stoat.modal_run.is_some() {
-        Some(ActiveModal::Run)
-    } else if stoat.quit_all_confirm.is_some() {
+    if stoat.quit_all_confirm.is_some() {
         Some(ActiveModal::QuitConfirm)
     } else if stoat.checkout_confirm.is_some() {
         Some(ActiveModal::CheckoutConfirm)
@@ -1081,7 +1060,6 @@ pub(crate) fn debug_assert_modal_exclusivity(stoat: &Stoat) {
 
 fn open_modal_count(stoat: &Stoat) -> usize {
     [
-        stoat.modal_run.is_some(),
         stoat.quit_all_confirm.is_some(),
         stoat.checkout_confirm.is_some(),
         stoat.commit_preview.is_some(),
@@ -1952,9 +1930,9 @@ mod tests {
         let mut h = Stoat::test();
         assert_eq!(StoatKeymapState::from_stoat(&h.stoat).get("modal"), None);
 
-        h.stoat.modal_run = Some(RunId::default());
+        action_handlers::dispatch(&mut h.stoat, &stoat_action::OpenCommandPalette);
         let state = StoatKeymapState::from_stoat(&h.stoat);
-        assert_eq!(field(&state, "modal"), Some("run".to_string()));
+        assert_eq!(field(&state, "modal"), Some("palette".to_string()));
     }
 
     /// The `scope` field names the open finder's scope and is absent without a
@@ -2066,8 +2044,7 @@ mod tests {
     }
 
     /// Every variant, in the canonical order [`active_modal`] resolves them.
-    const ALL_MODALS: [ActiveModal; 23] = [
-        ActiveModal::Run,
+    const ALL_MODALS: [ActiveModal; 22] = [
         ActiveModal::QuitConfirm,
         ActiveModal::CheckoutConfirm,
         ActiveModal::CommitPreview,
@@ -2103,7 +2080,6 @@ mod tests {
         assert_eq!(
             context_strs(ALL_MODALS),
             [
-                "run",
                 "quit_confirm",
                 "checkout_confirm",
                 "commit_preview",
@@ -2133,7 +2109,6 @@ mod tests {
     #[test]
     fn every_boxed_modal_hides_the_minimap_and_owns_zoom() {
         let boxed = [
-            "run",
             "quit_confirm",
             "checkout_confirm",
             "commit_preview",

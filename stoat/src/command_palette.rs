@@ -1032,7 +1032,7 @@ pub struct Availability {
     /// `workspace.walkthrough.is_some()`: a walkthrough plays, so its stepping
     /// actions have a tour to step.
     pub walkthrough_open: bool,
-    /// Focused pane hosts a [`View::Run`], or a modal run is active.
+    /// Focused pane hosts a [`View::Run`].
     pub run_focused: bool,
     /// `workspace.pair_panes().is_some()`: two split panes show two different
     /// files, so the pair diff has its two sides.
@@ -1066,7 +1066,7 @@ impl Availability {
             FocusTarget::SplitPane => Some(ws.panes.pane(ws.panes.focus()).view.clone()),
             FocusTarget::Dock(dock_id) => ws.docks.get(dock_id).map(|d| d.view.clone()),
         };
-        let run_focused = matches!(focused_view, Some(View::Run(_))) || stoat.modal_run.is_some();
+        let run_focused = matches!(focused_view, Some(View::Run(_)));
         let diff_view_open = match &focused_view {
             Some(View::Editor(id)) => ws.editors.get(*id).is_some_and(|e| e.diff_view),
             _ => false,

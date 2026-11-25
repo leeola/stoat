@@ -822,9 +822,9 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
 
     // Every boxed modal previews through a scratch editor pane, and only one
     // modal is ever open, so one pool serves whichever is up. The pairing
-    // excludes the modals whose preview is not an editor: the commit picker
-    // pools its diff separately, and help and the run modal keep row offsets
-    // rather than a buffer.
+    // excludes the modals whose preview is not an editor. The commit picker
+    // pools its diff separately, and help keeps row offsets rather than a
+    // buffer.
     let modal_preview = (!overlay)
         .then(|| {
             let rect = crate::mouse::boxed_modal_surfaces(stoat)?.preview?;

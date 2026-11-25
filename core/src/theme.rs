@@ -938,7 +938,6 @@ pub mod scope {
     pub const UI_MODAL_HINTS_CARD: &str = "ui.modal.hints.card";
     pub const UI_MODAL_PALETTE: &str = "ui.modal.palette";
     pub const UI_MODAL_PICKER: &str = "ui.modal.picker";
-    pub const UI_MODAL_RUN: &str = "ui.modal.run";
     /// The key line a modal ends in, with its key hints.
     ///
     /// A plate's key line draws on the plate's ground and does not read it.

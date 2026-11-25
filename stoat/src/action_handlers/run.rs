@@ -654,18 +654,6 @@ pub(super) fn run_interrupt(stoat: &mut Stoat) -> UpdateEffect {
     UpdateEffect::Redraw
 }
 
-/// Dismiss the finished modal run, dropping its overlay and removing the run.
-///
-/// Bound under `modal == run`, reachable only once the run has finished
-/// because the in-flight run swallows keys before the keymap sees them.
-pub(super) fn run_modal_dismiss(stoat: &mut Stoat) -> UpdateEffect {
-    let Some(run_id) = stoat.modal_run.take() else {
-        return UpdateEffect::None;
-    };
-    stoat.active_workspace_mut().remove_run(run_id);
-    UpdateEffect::Redraw
-}
-
 /// Recall the previous command in the focused run pane's prompt.
 pub(super) fn run_history_prev(stoat: &mut Stoat) -> UpdateEffect {
     walk_focused_run(stoat, InputHistory::prev)
@@ -773,21 +761,21 @@ fn prompt_form(entry: &str, ctx: &Availability, commands: &CommandSet) -> String
     }
 }
 
-pub(super) fn run_command(stoat: &mut Stoat, command: &str) -> UpdateEffect {
-    let executor = stoat.executor.clone();
-    let ws = stoat.active_workspace_mut();
-    let focused_area = ws.panes.pane(ws.panes.focus()).area;
-    let width = focused_area.width.saturating_sub(8).max(20);
-
-    let mut state = RunState::new(ws, executor);
-    state.title = Some(command.to_owned());
-    let id = ws.runs.insert(state);
-    let cmd = start_cmd(stoat, command, width);
-    if let Some(run_state) = stoat.active_workspace_mut().runs.get_mut(id) {
-        run_state.blocks.push(cmd);
+/// Run `line` as the `run` command runs it, as a Cmd on a Run pane's stack.
+///
+/// The Cmd joins the Run pane that [`append_to_run_pane`] picks, and the
+/// focus stays where it is, so a user who ran the line from the palette works
+/// on in the pane behind. A line of the Agent kind starts its agent tab and
+/// leaves no Stub, because no stack holds it.
+pub(super) fn run_line(stoat: &mut Stoat, line: &str) -> UpdateEffect {
+    if kind::run_kind(line) == RunKind::Agent {
+        return hand_off_agent(stoat, line, false);
     }
-    stoat.modal_run = Some(id);
-    tracing::info!(target: "stoat::run", command = %command, ?id, "run started");
+
+    let width = run_pane_width(stoat);
+    let id = start_cmd(stoat, line, width);
+    append_to_run_pane(stoat, id, false);
+    tracing::info!(target: "stoat::run", command = %line, ?id, "run started");
     UpdateEffect::Redraw
 }
 
@@ -974,6 +962,7 @@ mod tests {
         commit_picker,
         host::FakeTerminalSession,
         input_history::InputHistory,
+        keymap_state,
         pane::{DockPanel, DockSide, DockVisibility, FocusTarget, PaneId, View},
         render::{paint::style_rgb, run_pane::RECALL_NOTE},
         run::{
@@ -2313,24 +2302,150 @@ mod tests {
         (((area.bottom() - 1) * 16) as i16, bars)
     }
 
+    /// The `run` command over one editor pane starts its line as a Cmd on a
+    /// new Run pane that splits the editor pane downward, its grid as wide as
+    /// the pane less the stack's inset. The editor pane keeps the focus, and
+    /// no modal opens.
     #[test]
-    fn the_run_modal_spawns_through_the_terminal_host() {
+    fn the_run_command_appends_its_cmd_to_the_run_pane() {
         let mut h = Stoat::test();
         h.stoat.active_workspace_mut().git_root = PathBuf::from("/work");
+        let editor = h.stoat.active_workspace().panes.focus();
+        dispatch_run(&mut h, "ls");
+
+        let ws = h.stoat.active_workspace();
+        let (lower, shown) = ws
+            .panes
+            .split_panes()
+            .max_by_key(|(_, pane)| pane.area.y)
+            .expect("a split pane");
+        let View::Run(run) = shown.view else {
+            panic!("the lower pane shows a Run pane");
+        };
+        assert_eq!(
+            (
+                spawns(&h),
+                run_stacks(&h),
+                ws.cmds[ws.runs[run].blocks[0]].grid.width() + 3,
+                (lower != editor, ws.panes.focus()),
+                keymap_state::active_modal(&h.stoat),
+            ),
+            (
+                vec![bash_in("ls", "/work")],
+                vec![vec!["ls".to_owned()]],
+                shown.area.width,
+                (true, editor),
+                None,
+            ),
+        );
+    }
+
+    /// The `run` command puts its Cmd on the stack of the Run pane on show,
+    /// no pane opens, and the focus stays on the editor pane.
+    #[test]
+    fn the_run_command_uses_the_run_pane_that_shows() {
+        let mut h = Stoat::test();
+        super::super::dispatch(&mut h.stoat, &stoat_action::SplitRight);
+        h.open_run();
+        h.submit_run("make");
+        super::super::dispatch(&mut h.stoat, &stoat_action::FocusLeft);
+        let editor = h.stoat.active_workspace().panes.focus();
+        dispatch_run(&mut h, "ls");
+
+        assert_eq!(
+            (run_stacks(&h), h.stoat.active_workspace().panes.focus()),
+            (vec![vec!["make".to_owned(), "ls".to_owned()]], editor),
+        );
+    }
+
+    /// `:run ls` and Enter closes the palette and runs the line on a Run
+    /// pane's stack.
+    #[test]
+    fn the_run_command_from_the_palette_closes_the_palette() {
+        let mut h = Stoat::test();
+        h.type_text(":run ls");
+        h.type_keys("enter");
+
+        assert_eq!(
+            (h.stoat.command_palette.is_none(), run_stacks(&h)),
+            (true, vec![vec!["ls".to_owned()]]),
+        );
+    }
+
+    /// `run ls` at a Run pane prompt puts the Cmd on that pane's stack.
+    #[test]
+    fn run_at_the_run_prompt_appends_to_that_pane() {
+        let mut h = Stoat::test();
+        h.open_run();
+        let ran = h.submit_run("run ls").cmd;
+
+        assert_eq!(
+            (
+                run_stacks(&h),
+                h.stoat.active_workspace().cmds[ran].command.as_str()
+            ),
+            (vec![vec!["ls".to_owned()]], "ls"),
+        );
+    }
+
+    /// The `run` command with a `claude` line starts the agent in a new tab
+    /// that takes the focus. No Run pane opens and no Stub stays.
+    #[test]
+    fn the_run_command_starts_an_agent_tab_for_a_claude_line() {
+        let mut h = Stoat::test();
+        dispatch_run(&mut h, CLAUDE_LINE);
+
+        let ws = h.stoat.active_workspace();
+        let shown = matches!(ws.panes.pane(ws.panes.focus()).view, View::Agent(_));
+        assert_eq!(
+            (ws.runs.len(), ws.cmds.len(), (ws.tabs.len(), shown)),
+            (0, 0, (2, true)),
+        );
+    }
+
+    /// `run` with a `claude` line at a Run pane prompt starts the agent's tab
+    /// and leaves no Stub on the pane's stack, as the `run` command leaves
+    /// none on any stack.
+    #[test]
+    fn run_at_the_run_prompt_leaves_no_stub_for_a_claude_line() {
+        let mut h = Stoat::test();
+        let run = h.open_run();
+        h.submit_run(&format!("run {CLAUDE_LINE}"));
+
+        let ws = h.stoat.active_workspace();
+        assert_eq!(
+            (ws.runs[run].blocks.len(), ws.cmds.len(), ws.tabs.len()),
+            (0, 0, 2),
+        );
+    }
+
+    /// Dispatch the `run` command with the line `line`.
+    fn dispatch_run(h: &mut TestHarness, line: &str) {
         super::super::dispatch(
             &mut h.stoat,
             &stoat_action::Run {
-                command: "ls".to_owned(),
+                command: line.to_owned(),
             },
         );
-        let run_id = h.stoat.modal_run.expect("the run modal is open");
-        let cmd = h.stoat.active_workspace().runs[run_id].blocks[0];
-        h.inject_cmd_done(cmd, 2);
+    }
 
-        assert_eq!(
-            (spawns(&h), h.stoat.active_workspace().cmds[cmd].exit_status),
-            (vec![bash_in("ls", "/work")], Some(2)),
-        );
+    /// The stack of each split pane of `h` that shows a Run pane, as the
+    /// lines of its Cmds.
+    fn run_stacks(h: &TestHarness) -> Vec<Vec<String>> {
+        let ws = h.stoat.active_workspace();
+        ws.panes
+            .split_panes()
+            .filter_map(|(_, shown)| match shown.view {
+                View::Run(run) => Some(
+                    ws.runs[run]
+                        .blocks
+                        .iter()
+                        .map(|cmd| ws.cmds[*cmd].command.clone())
+                        .collect(),
+                ),
+                _ => None,
+            })
+            .collect()
     }
 
     #[test]

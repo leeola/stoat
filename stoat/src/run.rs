@@ -47,7 +47,6 @@ pub struct RunState {
     /// The stack, oldest first. Each id names a Cmd in `Workspace::cmds`.
     pub blocks: Vec<CmdId>,
     pub scroll_offset: usize,
-    pub title: Option<String>,
     /// What the prompt shows for the text it holds, which the frame resolves
     /// once for each change of the text.
     pub(crate) prompt: PromptInfo,
@@ -92,7 +91,6 @@ impl RunState {
             input,
             blocks: Vec::new(),
             scroll_offset: 0,
-            title: None,
             prompt: PromptInfo::default(),
             recalled: None,
         }
@@ -132,14 +130,6 @@ impl RunState {
     /// it holds the Cmd.
     pub fn active_block_mut<'a>(&self, cmds: &'a mut SlotMap<CmdId, Cmd>) -> Option<&'a mut Cmd> {
         self.blocks.last().and_then(|id| cmds.get_mut(*id))
-    }
-
-    /// Whether a Cmd of the stack has not finished.
-    pub fn is_running(&self, cmds: &SlotMap<CmdId, Cmd>) -> bool {
-        self.blocks
-            .iter()
-            .filter_map(|id| cmds.get(*id))
-            .any(|cmd| !cmd.finished)
     }
 
     /// Drop the oldest finished blocks while the pane holds more than one
@@ -952,7 +942,6 @@ mod tests {
             },
             blocks: Vec::new(),
             scroll_offset,
-            title: None,
             prompt: PromptInfo::default(),
             recalled: None,
         };
