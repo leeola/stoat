@@ -2453,7 +2453,7 @@ fn dispatches_bare(entry: &registry::RegistryEntry) -> bool {
 /// internal action records the `action` token and its kebab name, because the
 /// root resolves no internal action. The alias is preferred because it reads
 /// like the short form a user types (`cd`, not `set-cwd`).
-fn history_head(command: &PaletteCommand) -> String {
+pub(crate) fn history_head(command: &PaletteCommand) -> String {
     let alias = match command {
         PaletteCommand::Action(entry) => entry.def.aliases().first(),
         PaletteCommand::User(_) => None,

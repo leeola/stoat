@@ -5,8 +5,10 @@ use crate::{
     buffer_lifecycle,
     buffer_registry::OpenOrigin,
     command_palette::{self, Availability, PaletteCommand, RunLine},
+    commit_picker,
     file_finder::OpenIntent,
     host::{FsHost, OffsetEncoding},
+    input_history::InputHistory,
     pane::{Axis, FocusTarget, PaneId, View},
     render::{self, paint::style_rgb},
     run::{
@@ -22,6 +24,7 @@ use crate::{
     workspace::Workspace,
 };
 use std::path::{Path, PathBuf};
+use stoat_action::{registry, ActionKind};
 
 pub(super) fn open_run(stoat: &mut Stoat) -> UpdateEffect {
     let executor = stoat.executor.clone();
@@ -74,11 +77,10 @@ pub(super) fn run_submit(stoat: &mut Stoat) -> UpdateEffect {
         _ => text.as_str(),
     };
     let agent = kind::run_kind(line) == RunKind::Agent;
+    let ctx = Availability::from_stoat(stoat);
     let resolved = match agent {
         true => None,
-        false => {
-            command_palette::resolve_line(line, &Availability::from_stoat(stoat), &stoat.commands)
-        },
+        false => command_palette::resolve_line(line, &ctx, &stoat.commands),
     };
     let command = match resolved.transpose() {
         Ok(command) => command,
@@ -88,13 +90,14 @@ pub(super) fn run_submit(stoat: &mut Stoat) -> UpdateEffect {
         },
     };
 
+    let entry = history_entry(&text, &ctx, &stoat.commands);
+    let ran_at = commit_picker::now_epoch(&stoat.executor);
     let ws = stoat.active_workspace_mut();
-    let Some(run_state) = ws.runs.get_mut(id) else {
+    ws.palette_history.push_at(entry, Some(ran_at));
+    ws.palette_history.reset();
+    let Some(input) = ws.runs.get(id).map(|run_state| run_state.input.clone()) else {
         return UpdateEffect::None;
     };
-    run_state.history.push(text.clone());
-    run_state.history.reset();
-    let input = run_state.input.clone();
     input.replace_text(ws, "");
 
     if agent {
@@ -151,28 +154,41 @@ fn run_shell_line(stoat: &mut Stoat, id: RunId, pane: PaneId, text: &str) -> Upd
 ///
 /// One [`Availability`] snapshot and the configured commands serve every
 /// prompt, as [`prompt_info`] reads a text.
+///
+/// Each prompt also learns on every pass whether it shows the line that the
+/// active walk of the command history recalled, because a walk ends with no
+/// prompt's text changing. A Run pane drops its record of a recalled line
+/// once no walk is active.
 pub(crate) fn sync_run_prompts(stoat: &mut Stoat) {
-    let changed: Vec<(RunId, String)> = {
+    let (texts, walking, changed) = {
         let ws = stoat.active_workspace();
-        ws.runs
+        let texts: Vec<(RunId, String)> = ws
+            .runs
             .iter()
-            .filter_map(|(id, run)| {
-                let text = run.input.text(ws);
-                (text != run.prompt.text).then_some((id, text))
-            })
-            .collect()
+            .map(|(id, run)| (id, run.input.text(ws)))
+            .collect();
+        let changed = texts
+            .iter()
+            .any(|(id, text)| ws.runs.get(*id).is_some_and(|run| run.prompt.text != *text));
+        (texts, ws.palette_history.is_walking(), changed)
     };
-    if changed.is_empty() {
-        return;
-    }
 
-    let ctx = Availability::from_stoat(stoat);
-    let commands = stoat.commands.clone();
+    let resolve = changed.then(|| (Availability::from_stoat(stoat), stoat.commands.clone()));
     let runs = &mut stoat.active_workspace_mut().runs;
-    for (id, text) in changed {
-        if let Some(run) = runs.get_mut(id) {
-            run.prompt = prompt_info(text, &ctx, &commands);
+    for (id, text) in texts {
+        let Some(run) = runs.get_mut(id) else {
+            continue;
+        };
+        if !walking {
+            run.recalled = None;
         }
+        let recalled = run.recalled.as_deref() == Some(text.as_str());
+        if let Some((ctx, commands)) = resolve.as_ref()
+            && run.prompt.text != text
+        {
+            run.prompt = prompt_info(text, ctx, commands);
+        }
+        run.prompt.recalled = recalled;
     }
 }
 
@@ -207,6 +223,7 @@ fn prompt_info(text: String, ctx: &Availability, commands: &CommandSet) -> Promp
         token_len: text[..token_end].chars().count(),
         chip: kind.chip(),
         source,
+        recalled: false,
         text,
     }
 }
@@ -651,26 +668,36 @@ pub(super) fn run_modal_dismiss(stoat: &mut Stoat) -> UpdateEffect {
 
 /// Recall the previous command in the focused run pane's prompt.
 pub(super) fn run_history_prev(stoat: &mut Stoat) -> UpdateEffect {
-    walk_focused_run(stoat, RunState::history_prev)
+    walk_focused_run(stoat, InputHistory::prev)
 }
 
 /// Recall the next command toward the newest in the focused run pane's prompt.
 pub(super) fn run_history_next(stoat: &mut Stoat) -> UpdateEffect {
-    walk_focused_run(stoat, RunState::history_next)
+    walk_focused_run(stoat, InputHistory::next)
 }
 
-/// Walk the focused run pane's history with `step` and write the result into
-/// its prompt. No-op when focus is not on a run pane.
+/// Walk the workspace's command history with `step` from the focused Run
+/// pane's prompt, and write the recalled line into the prompt. No-op when
+/// focus is not on a Run pane.
 ///
-/// The prompt's [`crate::input_view::InputView`] is a pair of ids, so it comes
-/// out by clone. That ends the borrow of the run state before the write, which
-/// needs the workspace the state lives in.
+/// The history holds palette lines, and a recalled entry comes back as
+/// [`prompt_form`] reads it. A step past the newest match ends the walk and
+/// writes back the typed text as it was typed, since that text is no entry.
+///
+/// The prompt records the line it shows, so its status names the recall. The
+/// walk goes on while the prompt still shows that line, and any other text
+/// starts a fresh walk with that text as its needle. The check reads the
+/// record, not the entry of the prompt's text, because a prompt form need not
+/// map back to its entry. The entry `run make` shows as `make`, which
+/// [`history_entry`] stores as `r make`. A walk runs at a time, so every
+/// other Run pane drops its record.
 fn walk_focused_run(
     stoat: &mut Stoat,
-    step: impl FnOnce(&mut RunState, &str) -> Option<String>,
+    step: fn(&mut InputHistory, &str) -> Option<String>,
 ) -> UpdateEffect {
-    let active_idx = stoat.active_workspace;
-    let ws = &mut stoat.workspaces[active_idx];
+    let ctx = Availability::from_stoat(stoat);
+    let commands = stoat.commands.clone();
+    let ws = stoat.active_workspace_mut();
     let focused = ws.panes.focus();
     let View::Run(id) = ws.panes.pane(focused).view else {
         return UpdateEffect::None;
@@ -680,13 +707,70 @@ fn walk_focused_run(
     };
 
     let current = input.text(ws);
-    let Some(run_state) = ws.runs.get_mut(id) else {
-        return UpdateEffect::None;
+    let walks_on = ws
+        .runs
+        .get(id)
+        .and_then(|run_state| run_state.recalled.as_deref())
+        == Some(current.as_str());
+    if !walks_on {
+        ws.palette_history.reset();
+    }
+    let Some(recalled) = step(&mut ws.palette_history, &current) else {
+        return UpdateEffect::Redraw;
     };
-    if let Some(recalled) = step(run_state, &current) {
-        input.replace_text(ws, &recalled);
+    let shown = match ws.palette_history.is_walking() {
+        true => prompt_form(&recalled, &ctx, &commands),
+        false => recalled,
+    };
+    input.replace_text(ws, &shown);
+    for (run_id, run_state) in ws.runs.iter_mut() {
+        run_state.recalled = (run_id == id).then(|| shown.clone());
     }
     UpdateEffect::Redraw
+}
+
+/// The palette line that stores the Run pane line `line` in the workspace's
+/// command history.
+///
+/// A line whose head names a command is stored as typed, because the palette
+/// runs it the same. Any other line is stored behind the head of the `run`
+/// command, so the palette lists it as that command with the line as its
+/// argument.
+fn history_entry(line: &str, ctx: &Availability, commands: &CommandSet) -> String {
+    let head = command_palette::line_head(line);
+    if !head.is_empty() && command_palette::resolve_command(head, ctx, commands).is_some() {
+        return line.to_owned();
+    }
+    registry::lookup("Run").map_or_else(
+        || line.to_owned(),
+        |run| {
+            let head = command_palette::history_head(&PaletteCommand::Action(run));
+            format!("{head} {line}")
+        },
+    )
+}
+
+/// The Run pane prompt's form of the command history's entry `entry`.
+///
+/// An entry that stores a shell line behind the head of the `run` command
+/// shows as the bare line, because the bare line runs the same at the prompt.
+/// The head stays when the line's own head names a command, since the bare
+/// line would run that command. Any other entry shows as stored.
+fn prompt_form(entry: &str, ctx: &Availability, commands: &CommandSet) -> String {
+    let Some((first, rest)) = entry.split_once(' ') else {
+        return entry.to_owned();
+    };
+    let names_run = matches!(
+        command_palette::resolve_command(first, ctx, commands),
+        Some(PaletteCommand::Action(found)) if found.def.kind() == ActionKind::Run
+    );
+    let rest_head = command_palette::line_head(rest);
+    let rest_names_command = !rest_head.is_empty()
+        && command_palette::resolve_command(rest_head, ctx, commands).is_some();
+    match names_run && !rest_names_command {
+        true => rest.to_owned(),
+        false => entry.to_owned(),
+    }
 }
 
 pub(super) fn run_command(stoat: &mut Stoat, command: &str) -> UpdateEffect {
@@ -887,9 +971,11 @@ fn start_process(stoat: &mut Stoat, id: CmdId) {
 mod tests {
     use crate::{
         app::{Stoat, UpdateEffect},
+        commit_picker,
         host::FakeTerminalSession,
+        input_history::InputHistory,
         pane::{DockPanel, DockSide, DockVisibility, FocusTarget, PaneId, View},
-        render::paint::style_rgb,
+        render::{paint::style_rgb, run_pane::RECALL_NOTE},
         run::{
             cargo::{ERROR_AND_WARNING, ONE_FAILURE, THREE_BINARIES},
             kind::RunKind,
@@ -899,6 +985,7 @@ mod tests {
         term_session::TermId,
         test_harness::{editor, CmdHandle, TestHarness},
         theme::scope,
+        workspace::Workspace,
     };
     use futures::FutureExt;
     use ratatui::{
@@ -1809,7 +1896,7 @@ mod tests {
             (
                 h.stoat.pending_message.as_deref(),
                 ws.runs[run].input.text(ws),
-                ws.runs[run].history.entries().len(),
+                ws.palette_history.entries().len(),
                 (spawns(&h).len(), ws.tabs.len()),
             ),
             (
@@ -1930,6 +2017,236 @@ mod tests {
             ),
             ((2, 1, true), View::Run(run), vec![(RunKind::Agent, true)]),
         );
+    }
+
+    /// A shell line from a Run pane joins the palette's history behind the
+    /// head of the `run` command, with the time it ran.
+    #[test]
+    fn a_shell_line_joins_the_palette_history_as_a_run_command() {
+        let mut h = Stoat::test();
+        h.open_run();
+        h.submit_run("ls -la");
+
+        let history = &h.stoat.active_workspace().palette_history;
+        assert_eq!(
+            (history.entries().to_vec(), history.times().to_vec(),),
+            (
+                vec!["r ls -la".to_owned()],
+                vec![Some(commit_picker::now_epoch(&h.stoat.executor))],
+            ),
+        );
+    }
+
+    /// The palette's line for a shell line recalls bare at the Run prompt,
+    /// and so does a line behind the `run` command's name, which the walk goes
+    /// on past. A `run` line whose own head names a command keeps the `run`
+    /// head, since the bare line would run that command.
+    #[test]
+    fn a_palette_run_line_recalls_bare_at_the_run_prompt() {
+        let mut h = Stoat::test();
+        h.stoat.active_workspace_mut().palette_history = InputHistory::from_entries(
+            ["r ls -la", "r pwd", "run make"]
+                .map(str::to_owned)
+                .to_vec(),
+        );
+        h.open_run();
+        let walk = [(); 3].map(|()| {
+            h.type_keys("up");
+            focused_prompt_text(&h)
+        });
+
+        assert_eq!(walk, ["make", "r pwd", "ls -la"]);
+    }
+
+    /// A submit ends the walk, so the next Up starts a fresh walk from the
+    /// newest line, even over the recalled line typed again.
+    #[test]
+    fn a_submit_ends_the_walk() {
+        let mut h = Stoat::test();
+        h.open_run();
+        h.submit_run("make");
+        h.submit_run("ls -la");
+        h.type_keys("up enter");
+        h.type_text("ls -la");
+        h.type_keys("up");
+
+        assert_eq!(focused_prompt_text(&h), "ls -la");
+    }
+
+    /// A walk that steps past the newest line ends and writes back the typed
+    /// text as typed, even text that reads as a stored `run` line, and the
+    /// prompt names no recall.
+    #[test]
+    fn a_walk_that_ends_restores_the_typed_text_and_names_no_recall() {
+        let mut h = Stoat::test();
+        let run = h.open_run();
+        h.submit_run("ls -la");
+        h.type_text("r ls");
+        h.type_keys("up");
+        let recalled = focused_prompt_text(&h);
+        h.type_keys("down");
+
+        let ws = h.stoat.active_workspace();
+        assert_eq!(
+            (
+                recalled,
+                focused_prompt_text(&h),
+                ws.runs[run].prompt.recalled
+            ),
+            ("ls -la".to_owned(), "r ls".to_owned(), false),
+        );
+    }
+
+    /// A line whose head names a command is stored and recalled as typed.
+    #[test]
+    fn a_resolved_command_is_stored_and_recalled_as_typed() {
+        let mut h = Stoat::test();
+        h.stoat.active_workspace_mut().git_root = PathBuf::from("/work");
+        h.fake_fs().insert_file("/work/sub/a.txt", b"");
+        h.open_run();
+        h.submit_run("cd sub");
+        h.type_keys("up");
+
+        assert_eq!(
+            (
+                h.stoat
+                    .active_workspace()
+                    .palette_history
+                    .entries()
+                    .to_vec(),
+                focused_prompt_text(&h),
+            ),
+            (vec!["cd sub".to_owned()], "cd sub".to_owned()),
+        );
+    }
+
+    /// Two Run panes walk one history. A walk from the second pane recalls
+    /// the first pane's line, and the first pane, whose walk ended, names no
+    /// recall.
+    #[test]
+    fn two_run_panes_walk_one_history() {
+        let mut h = Stoat::test();
+        let first = h.open_run();
+        h.submit_run("ls -la");
+        h.type_keys("up");
+        super::super::dispatch(&mut h.stoat, &stoat_action::SplitNewRight);
+        let second = h.open_run();
+        h.type_keys("up");
+
+        let ws = h.stoat.active_workspace();
+        assert_eq!(
+            (
+                focused_prompt_text(&h),
+                [first, second].map(|run| ws.runs[run].prompt.recalled),
+            ),
+            ("ls -la".to_owned(), [false, true]),
+        );
+    }
+
+    /// A recalled line left as it was walks on, so a second Up reaches the
+    /// older line.
+    #[test]
+    fn a_walk_goes_on_through_the_prompt_form() {
+        let mut h = Stoat::test();
+        h.open_run();
+        h.submit_run("ls -la");
+        h.submit_run("make test");
+        h.type_keys("up");
+        let newest = focused_prompt_text(&h);
+        h.type_keys("up");
+
+        assert_eq!(
+            (newest, focused_prompt_text(&h)),
+            ("make test".to_owned(), "ls -la".to_owned()),
+        );
+    }
+
+    /// A recalled line names the walk at the right end of the prompt row in
+    /// the muted color, and an edit of the line drops the name.
+    #[test]
+    fn the_prompt_names_a_recalled_line() {
+        let mut h = Stoat::test();
+        let run = h.open_run();
+        h.submit_run("ls -la");
+        let read = |h: &TestHarness| {
+            let (runs, _) = row_scene(h, focused_prompt_row(h));
+            (h.stoat.active_workspace().runs[run].prompt.recalled, runs)
+        };
+        h.type_keys("up");
+        let recalled = read(&h);
+        h.type_text("x");
+
+        let muted = rgb(h.stoat.theme.get(scope::UI_TEXT_MUTED).fg);
+        assert_eq!(
+            (recalled, read(&h)),
+            (
+                (true, vec![(RECALL_NOTE.to_owned(), muted)]),
+                (false, vec![])
+            ),
+        );
+    }
+
+    /// A palette that opens over a Run pane's walk ends that walk on its first
+    /// frame and lists its commands.
+    #[test]
+    fn a_palette_that_opens_over_a_run_pane_walk_shows_its_command_list() {
+        let mut h = Stoat::test();
+        h.open_run();
+        h.submit_run("ls -la");
+        h.type_keys("up");
+        let walking = h.stoat.active_workspace().palette_history.is_walking();
+        h.type_keys("escape :");
+
+        let palette = h
+            .stoat
+            .command_palette
+            .as_ref()
+            .expect("the palette is open");
+        assert_eq!(
+            (
+                walking,
+                palette.filtered.is_empty(),
+                h.stoat.active_workspace().palette_history.is_walking(),
+            ),
+            (true, false, false),
+        );
+    }
+
+    /// A Run pane's line saves with the workspace and restores with its time.
+    #[test]
+    fn a_run_pane_line_survives_a_restart() {
+        let mut h = Stoat::test();
+        h.open_run();
+        h.submit_run("ls -la");
+        let exec = h.stoat.executor.clone();
+        let path = PathBuf::from("/state/workspace.ron");
+        let fs = h.fake_fs().clone();
+        h.stoat
+            .active_workspace()
+            .save_state(&path, &*fs)
+            .expect("the state saves");
+
+        let mut fresh = Workspace::new(PathBuf::from("/work"), &exec, crate::test_notify());
+        fresh
+            .restore_state(&path, &*fs, &exec)
+            .expect("the state restores");
+        let history = &h.stoat.active_workspace().palette_history;
+        assert_eq!(
+            (
+                fresh.palette_history.entries(),
+                fresh.palette_history.times()
+            ),
+            (history.entries(), history.times()),
+        );
+    }
+
+    /// The text at the focused Run pane's prompt.
+    fn focused_prompt_text(h: &TestHarness) -> String {
+        let ws = h.stoat.active_workspace();
+        let View::Run(run) = ws.panes.pane(ws.panes.focus()).view else {
+            panic!("the focused pane shows a Run pane");
+        };
+        ws.runs[run].input.text(ws)
     }
 
     /// Submit [`CLAUDE_LINE`] at a new Run pane's prompt, and answer the run

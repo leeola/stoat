@@ -225,9 +225,13 @@ pub struct Workspace {
     /// purpose. Every other ending keeps it, since a dropped link is exactly
     /// what a reconnect is for.
     pub(crate) remote: Option<RemoteTarget>,
-    /// Fish-style recall history of executed command-palette lines, walked by
-    /// Ctrl-Up/Ctrl-Down and Alt-Up/Alt-Down in the palette. Persisted per
-    /// workspace.
+    /// Fish-style recall history of the command lines that the palette and
+    /// each Run pane prompt ran, as palette lines. Persisted per workspace.
+    ///
+    /// The palette walks it by Ctrl-Up/Ctrl-Down and Alt-Up/Alt-Down, and a
+    /// Run pane prompt by Up/Down. A shell line from a Run pane is stored
+    /// behind the head of the `run` command, so the palette runs it the same,
+    /// and a Run pane prompt recalls it as the bare line.
     pub(crate) palette_history: InputHistory,
     /// Fish-style recall history of submitted search patterns, walked by
     /// Alt-Up/Alt-Down in the `/` and `?` prompts. Persisted per workspace.

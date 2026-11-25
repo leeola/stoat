@@ -25,6 +25,10 @@ use stoat_widgets::bar::Bar;
 /// The run modal's name, which leads its header.
 const RUN_LABEL: &str = "Run";
 
+/// The note at the right of a Run pane prompt that shows a line a walk of the
+/// command history recalled, which names the keys and the rule of the walk.
+pub(crate) const RECALL_NOTE: &str = "\u{2191} history \u{b7} keyword match";
+
 /// One part of the status that ends a Run Block's header, such as its mark or
 /// its runtime.
 pub(crate) struct StatusPart {
@@ -50,7 +54,8 @@ pub(crate) struct StatusPart {
 /// The prompt row paints as a Cmd Line, as [`cmd_line::cmd_line_row`] paints
 /// one, with the workspace root as its cwd. Its command token and the tag at
 /// its right are the ones that [`RunState::prompt`] holds, and its caret shows
-/// while the pane holds the focus.
+/// while the pane holds the focus. A line that a walk of the command history
+/// recalled ends the row with [`RECALL_NOTE`] in `ui.text.muted`.
 ///
 /// Inside stoatty a rule ends each block, a bar runs beside the body of a
 /// failed block and of a Stub, and a rule tops the prompt row, as
@@ -175,16 +180,24 @@ pub(crate) fn render_run_pane(
     let cwd = crate::run::abbreviate_path(root, home);
     let (text, caret) = run_state.input.caret_in(editors);
     let input = cmd_line::token_spans(&text, run_state.prompt.token_len, theme);
-    let tag: Vec<StatusPart> = lead_part(run_state.prompt.chip, run_state.prompt.source, theme)
-        .into_iter()
-        .collect();
+    let mut parts: Vec<StatusPart> =
+        lead_part(run_state.prompt.chip, run_state.prompt.source, theme)
+            .into_iter()
+            .collect();
+    if run_state.prompt.recalled {
+        parts.push(StatusPart {
+            text: RECALL_NOTE.to_owned(),
+            style: theme.get(crate::theme::scope::UI_TEXT_MUTED),
+            chip: false,
+        });
+    }
     let prompt = CmdLine {
         cwd: &cwd,
         input: &input,
         caret: is_focused.then_some(caret),
-        status: match tag.is_empty() {
+        status: match parts.is_empty() {
             true => CmdStatus::None,
-            false => CmdStatus::Parts(&tag),
+            false => CmdStatus::Parts(&parts),
         },
     };
     let row = Rect::new(inner.x, input_row, inner.width, 1);

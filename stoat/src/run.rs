@@ -4,7 +4,6 @@ pub mod pty;
 pub mod vterm;
 
 use crate::{
-    input_history::InputHistory,
     input_view::{InputView, SubmitTarget},
     term_session::{TermId, TermSession},
     workspace::Workspace,
@@ -48,17 +47,17 @@ pub struct RunState {
     /// The stack, oldest first. Each id names a Cmd in `Workspace::cmds`.
     pub blocks: Vec<CmdId>,
     pub scroll_offset: usize,
-    /// Fish-style recall history of commands run in this pane, walked by
-    /// Up/Down in the prompt.
-    ///
-    /// Session-scoped rather than persisted. A shell line is bound to the
-    /// state the pane was in when it ran, so it is worth recalling within a
-    /// session and misleading across a restart.
-    pub(crate) history: InputHistory,
     pub title: Option<String>,
     /// What the prompt shows for the text it holds, which the frame resolves
     /// once for each change of the text.
     pub(crate) prompt: PromptInfo,
+    /// The line that a walk of the workspace's command history wrote into the
+    /// prompt, while that walk lasts.
+    ///
+    /// The prompt names a recall, and Up and Down walk on, while its text is
+    /// this line, so an edit drops the name and starts a fresh walk. A walk
+    /// from another prompt clears it, because one walk runs at a time.
+    pub(crate) recalled: Option<String>,
 }
 
 /// The command token and the tag at its right that the Run pane prompt shows
@@ -78,6 +77,9 @@ pub(crate) struct PromptInfo {
     /// The label and the scope of the Source Tag of the command that the
     /// text's head names.
     pub(crate) source: Option<(&'static str, &'static str)>,
+    /// Whether the text is a line that the active walk of the command history
+    /// recalled, which the prompt names at its right.
+    pub(crate) recalled: bool,
 }
 
 impl RunState {
@@ -90,9 +92,9 @@ impl RunState {
             input,
             blocks: Vec::new(),
             scroll_offset: 0,
-            history: InputHistory::default(),
             title: None,
             prompt: PromptInfo::default(),
+            recalled: None,
         }
     }
 
@@ -171,23 +173,6 @@ impl RunState {
                 .remove(dropped)
                 .map_or(0, |block| block.grid.line_count());
         }
-    }
-
-    /// Recall the previous command against the needle `current`, or [`None`] to
-    /// leave the prompt unchanged.
-    ///
-    /// Returns the line rather than writing it, because the prompt's
-    /// [`InputView`] writes through the workspace this state lives in.
-    pub(crate) fn history_prev(&mut self, current: &str) -> Option<String> {
-        self.history.reset_if_edited(current);
-        self.history.prev(current)
-    }
-
-    /// Recall the next command toward the newest, restoring the
-    /// originally-typed text past the newest match.
-    pub(crate) fn history_next(&mut self, current: &str) -> Option<String> {
-        self.history.reset_if_edited(current);
-        self.history.next(current)
     }
 
     /// Remove the run's [`InputView`] scratch editor. Called on pane close to
@@ -967,9 +952,9 @@ mod tests {
             },
             blocks: Vec::new(),
             scroll_offset,
-            history: InputHistory::default(),
             title: None,
             prompt: PromptInfo::default(),
+            recalled: None,
         };
         let mut cmds = SlotMap::with_key();
         for n in 0..blocks {
