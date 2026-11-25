@@ -4,7 +4,7 @@ use crate::{
     app::{Stoat, UpdateEffect},
     buffer_lifecycle,
     buffer_registry::OpenOrigin,
-    command_palette::{self, Availability, PaletteCommand},
+    command_palette::{self, Availability, PaletteCommand, RunLine},
     file_finder::OpenIntent,
     host::{FsHost, OffsetEncoding},
     pane::{Axis, FocusTarget, PaneId, View},
@@ -18,7 +18,7 @@ use crate::{
     },
     term_session::{TermId, ViewLocation},
     theme::scope,
-    user_command::CommandSet,
+    user_command::{self, CommandSet},
     workspace::Workspace,
 };
 use std::path::{Path, PathBuf};
@@ -36,11 +36,18 @@ pub(super) fn open_run(stoat: &mut Stoat) -> UpdateEffect {
     UpdateEffect::Redraw
 }
 
-/// Run the line at the focused Run pane's prompt as a new Cmd.
+/// Run the line at the focused Run pane's prompt.
 ///
 /// An Enter at an empty prompt goes to the newest block instead, as
 /// [`block_enter`] takes it. A line whose program is `claude` starts an agent
 /// in a tab of its own and leaves a Stub, as [`hand_off_agent`] starts it.
+///
+/// A line whose head names a command runs that command, as
+/// [`command_palette::resolve_line`] reads it. An action dispatches and
+/// leaves no block, and a config command starts with the typed line, as the
+/// palette starts one. A bare `cd` goes to `~`. An argument that does not
+/// parse sets the status line and leaves the line at the prompt. Any other
+/// line runs as a shell line in a new Cmd.
 pub(super) fn run_submit(stoat: &mut Stoat) -> UpdateEffect {
     let ws = stoat.active_workspace_mut();
     let focused = ws.panes.focus();
@@ -61,36 +68,72 @@ pub(super) fn run_submit(stoat: &mut Stoat) -> UpdateEffect {
         };
     }
 
-    {
-        let Some(run_state) = ws.runs.get_mut(id) else {
-            return UpdateEffect::None;
-        };
-        run_state.history.push(text.clone());
-        run_state.history.reset();
-    }
-
-    let input_ref = {
-        let Some(run_state) = ws.runs.get(id) else {
-            return UpdateEffect::None;
-        };
-        run_state.input.clone()
+    // A shell's bare `cd` goes home, and `SetCwd` takes a path.
+    let line = match text.trim() {
+        "cd" => "cd ~",
+        _ => text.as_str(),
     };
-    input_ref.replace_text(ws, "");
+    let agent = kind::run_kind(line) == RunKind::Agent;
+    let resolved = match agent {
+        true => None,
+        false => {
+            command_palette::resolve_line(line, &Availability::from_stoat(stoat), &stoat.commands)
+        },
+    };
+    let command = match resolved.transpose() {
+        Ok(command) => command,
+        Err(message) => {
+            stoat.set_status(message);
+            return UpdateEffect::Redraw;
+        },
+    };
 
-    // Shell state does not carry from one Cmd's process to the next, so a
-    // `cd` moves the workspace root that later Cmds start in.
-    if let Some(path) = cd_path(&text) {
-        super::workspace::set_cwd(stoat, path);
-        return UpdateEffect::Redraw;
-    }
-    if kind::run_kind(&text) == RunKind::Agent {
+    let ws = stoat.active_workspace_mut();
+    let Some(run_state) = ws.runs.get_mut(id) else {
+        return UpdateEffect::None;
+    };
+    run_state.history.push(text.clone());
+    run_state.history.reset();
+    let input = run_state.input.clone();
+    input.replace_text(ws, "");
+
+    if agent {
         return hand_off_agent(stoat, &text, true);
     }
+    match command {
+        Some(RunLine::Action(entry, params)) => match (entry.create)(&params) {
+            Ok(action) => super::dispatch(stoat, &*action),
+            Err(err) => {
+                tracing::warn!(
+                    target: "stoat::command",
+                    command = entry.def.name(),
+                    %err,
+                    "run prompt action rejected"
+                );
+                UpdateEffect::Redraw
+            },
+        },
+        Some(RunLine::User(command, values)) => {
+            user_command::run::start(stoat, &command, values, &text)
+        },
+        None => run_shell_line(stoat, id, focused, &text),
+    }
+}
 
+/// Run `text` as a shell line in a new Cmd on the stack of the run `id`, which
+/// the split pane `pane` shows.
+fn run_shell_line(stoat: &mut Stoat, id: RunId, pane: PaneId, text: &str) -> UpdateEffect {
     // The body draws one column inside the stack, which stands one column
     // inside each side of the pane.
-    let width = ws.panes.pane(focused).area.width.saturating_sub(3).max(20);
-    let cmd = start_cmd(stoat, &text, width);
+    let width = stoat
+        .active_workspace()
+        .panes
+        .pane(pane)
+        .area
+        .width
+        .saturating_sub(3)
+        .max(20);
+    let cmd = start_cmd(stoat, text, width);
     let Workspace { runs, cmds, .. } = stoat.active_workspace_mut();
     if let Some(run_state) = runs.get_mut(id) {
         run_state.blocks.push(cmd);
@@ -840,19 +883,6 @@ fn start_process(stoat: &mut Stoat, id: CmdId) {
     }
 }
 
-/// The path of a line whose first word is `cd`, `~` for a bare `cd`, or
-/// `None` for any other line.
-fn cd_path(line: &str) -> Option<&str> {
-    let rest = line.trim_start().strip_prefix("cd")?;
-    if !(rest.is_empty() || rest.starts_with(char::is_whitespace)) {
-        return None;
-    }
-    match rest.trim() {
-        "" => Some("~"),
-        path => Some(path),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use crate::{
@@ -944,7 +974,7 @@ mod tests {
     fn closing_a_run_pane_empties_the_cmd_store() {
         let mut h = Stoat::test();
         let run_id = h.open_run();
-        for line in ["ls", "pwd"] {
+        for line in ["ls", "date"] {
             let input = h.stoat.active_workspace().runs[run_id].input.clone();
             input.replace_text(h.stoat.active_workspace_mut(), line);
             super::super::dispatch(&mut h.stoat, &stoat_action::RunSubmit);
@@ -1001,7 +1031,7 @@ mod tests {
         h.stoat.active_workspace_mut().git_root = PathBuf::from("/work");
         h.open_run();
         let opened = h.fake_terminal_host().spawns().len();
-        let handles = ["ls", "pwd"].map(|line| h.submit_run(line));
+        let handles = ["ls", "date"].map(|line| h.submit_run(line));
 
         let writes = [&handles[0].session, &handles[1].session, h.fake_terminal()]
             .map(|session| session.sent_bytes().len());
@@ -1009,7 +1039,7 @@ mod tests {
             (opened, spawns(&h), writes),
             (
                 0,
-                vec![bash_in("ls", "/work"), bash_in("pwd", "/work")],
+                vec![bash_in("ls", "/work"), bash_in("date", "/work")],
                 [0, 0, 0]
             ),
         );
@@ -1732,6 +1762,173 @@ mod tests {
                 ws.tabs.len(),
             ),
             (Some("claude did not start"), 0, 1),
+        );
+    }
+
+    /// A line whose head names a command runs that command at the prompt and
+    /// leaves no block.
+    #[test]
+    fn a_resolved_command_runs_at_the_run_prompt() {
+        let mut h = Stoat::test();
+        h.stoat.active_workspace_mut().git_root = PathBuf::from("/work");
+        let run = h.open_run();
+        h.submit_run("pwd");
+
+        assert_eq!(
+            (
+                h.stoat.pending_message.as_deref(),
+                spawns(&h).len(),
+                h.stoat.active_workspace().runs[run].blocks.len(),
+            ),
+            (Some("Current working directory is /work"), 0, 0),
+        );
+    }
+
+    /// A command that takes no argument runs as a shell line when text follows
+    /// its name, so the shell's own program runs.
+    #[test]
+    fn a_zero_argument_command_with_arguments_runs_as_a_shell_line() {
+        let mut h = Stoat::test();
+        h.stoat.active_workspace_mut().git_root = PathBuf::from("/work");
+        h.open_run();
+        h.submit_run("pwd -P");
+
+        assert_eq!(spawns(&h), vec![bash_in("pwd -P", "/work")]);
+    }
+
+    /// An argument that does not parse reports in the status line, runs
+    /// nothing, and leaves the line at the prompt and out of the history.
+    #[test]
+    fn a_bad_argument_reports_and_keeps_the_prompt() {
+        let mut h = Stoat::test();
+        let run = h.open_run();
+        h.submit_run("tab x");
+
+        let ws = h.stoat.active_workspace();
+        assert_eq!(
+            (
+                h.stoat.pending_message.as_deref(),
+                ws.runs[run].input.text(ws),
+                ws.runs[run].history.entries().len(),
+                (spawns(&h).len(), ws.tabs.len()),
+            ),
+            (
+                Some("tab: cannot parse `x` as number"),
+                "tab x".to_owned(),
+                0,
+                (0, 1)
+            ),
+        );
+    }
+
+    /// A bare `cd` goes to the home directory, as a shell's does.
+    #[test]
+    fn a_bare_cd_goes_home() {
+        let mut h = Stoat::test();
+        h.fake_env().set("HOME", "/home/u");
+        h.fake_fs().insert_file("/home/u/a.txt", b"");
+        h.open_run();
+        h.submit_run("cd");
+
+        assert_eq!(
+            h.stoat.active_workspace().git_root,
+            PathBuf::from("/home/u")
+        );
+    }
+
+    /// A config command at the prompt joins the Run pane's stack with its
+    /// Source Tag. Its typed line is the Cmd's line, and its shell line is the
+    /// run's first row, in the muted color.
+    #[test]
+    fn a_config_command_joins_the_stack_with_its_tag() {
+        let mut h = with_hello();
+        let run = h.open_run();
+        let cmd = h.submit_run("hello").cmd;
+
+        let ws = h.stoat.active_workspace();
+        let block = &ws.cmds[cmd];
+        let row: Vec<(char, Option<Color>)> = block
+            .grid
+            .row(0)
+            .iter()
+            .map(|cell| (cell.ch, cell.fg))
+            .collect();
+        let muted = h.stoat.theme.get(scope::UI_TEXT_MUTED).fg;
+        assert_eq!(
+            (
+                ws.runs[run].blocks.clone(),
+                (block.command.as_str(), block.shell.as_deref()),
+                block.source.map(|(label, _)| label),
+                h.cmd_status(cmd),
+                row,
+            ),
+            (
+                vec![cmd],
+                ("hello", Some("echo hi")),
+                Some("config"),
+                "config \u{25cf} 0:00".to_owned(),
+                "echo hi".chars().map(|ch| (ch, muted)).collect(),
+            ),
+        );
+    }
+
+    /// A `cli` command at the prompt takes the rest of the line as its tool's
+    /// tail.
+    #[test]
+    fn a_cli_command_takes_the_rest_of_the_line() {
+        let mut h = Stoat::test();
+        h.stoat.reload_user_config(r#"command gh = cli("gh");"#);
+        h.stoat.active_workspace_mut().git_root = PathBuf::from("/work");
+        h.open_run();
+        h.submit_run("gh pr list");
+
+        assert_eq!(spawns(&h), vec![bash_in("gh pr list", "/work")]);
+    }
+
+    /// A config command whose argument with no default gets no value reports
+    /// it, and the line stays at the prompt.
+    #[test]
+    fn a_config_command_with_a_missing_argument_reports_it() {
+        let mut h = Stoat::test();
+        h.stoat
+            .reload_user_config(r#"command say { arg what = text; run = shell("echo {what}"); }"#);
+        let run = h.open_run();
+        h.submit_run("say");
+
+        let ws = h.stoat.active_workspace();
+        assert_eq!(
+            (
+                h.stoat.pending_message.as_deref(),
+                ws.runs[run].input.text(ws),
+                spawns(&h).len(),
+            ),
+            (Some("say: what is missing"), "say".to_owned(), 0),
+        );
+    }
+
+    /// A bare `claude` line stays an Agent line, though `claude` names a
+    /// built-in command, so the Run pane keeps its place and gains a Stub.
+    #[test]
+    fn a_bare_claude_line_stays_an_agent_line() {
+        let mut h = Stoat::test();
+        let run = h.open_run();
+        h.submit_run("claude");
+
+        let ws = h.stoat.active_workspace();
+        let first = ws.tabs[0].parked.as_ref().expect("the first tab is parked");
+        let shown = matches!(ws.panes.pane(ws.panes.focus()).view, View::Agent(_));
+        let stack: Vec<(RunKind, bool)> = ws.runs[run]
+            .blocks
+            .iter()
+            .map(|id| (ws.cmds[*id].kind, ws.cmds[*id].handoff.is_some()))
+            .collect();
+        assert_eq!(
+            (
+                (ws.tabs.len(), ws.active_tab, shown),
+                first.pane(first.focus()).view.clone(),
+                stack,
+            ),
+            ((2, 1, true), View::Run(run), vec![(RunKind::Agent, true)]),
         );
     }
 

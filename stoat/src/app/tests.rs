@@ -11630,7 +11630,7 @@ fn run_enter_submits_from_insert_and_normal() {
 
     h.type_text("ls");
     h.type_keys("enter");
-    h.type_text("pwd");
+    h.type_text("date");
     h.type_keys("esc");
     let mode = h.stoat.focused_mode().to_owned();
     h.type_keys("enter");
@@ -11643,7 +11643,10 @@ fn run_enter_submits_from_insert_and_normal() {
         .collect();
     assert_eq!(
         (mode, last_args),
-        ("normal".to_owned(), vec!["ls".to_owned(), "pwd".to_owned()]),
+        (
+            "normal".to_owned(),
+            vec!["ls".to_owned(), "date".to_owned()]
+        ),
         "Enter submits from insert mode, and from normal mode after Escape",
     );
 }
@@ -11728,7 +11731,7 @@ fn run_submit_resets_scroll_offset() {
         .unwrap()
         .input
         .clone();
-    input.replace_text(h.stoat.active_workspace_mut(), "pwd");
+    input.replace_text(h.stoat.active_workspace_mut(), "date");
     action_handlers::dispatch(&mut h.stoat, &stoat_action::RunSubmit);
 
     assert_eq!(
@@ -11760,7 +11763,7 @@ fn a_run_pane_keeps_one_scrollback_across_its_blocks() {
             .collect()
     };
 
-    for command in ["a", "b", "c"] {
+    for command in ["l1", "l2", "l3"] {
         h.type_text(command);
         h.type_keys("enter");
         h.inject_run_output(run_id, &lines(4_000));
@@ -11768,22 +11771,22 @@ fn a_run_pane_keeps_one_scrollback_across_its_blocks() {
     }
     assert_eq!(
         commands(&h.stoat),
-        ["b", "c"],
+        ["l2", "l3"],
         "the third output passes the cap"
     );
 
     h.inject_run_output(run_id, &lines(2_510));
     assert_eq!(
         commands(&h.stoat),
-        ["b", "c"],
+        ["l2", "l3"],
         "output up to the cap exactly drops nothing"
     );
 
-    h.type_text("d");
+    h.type_text("l4");
     h.type_keys("enter");
     assert_eq!(
         commands(&h.stoat),
-        ["c", "d"],
+        ["l3", "l4"],
         "the new block's row passes the cap"
     );
 }

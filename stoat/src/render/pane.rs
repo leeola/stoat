@@ -8467,7 +8467,7 @@ mod tests {
         };
 
         let mut reads = vec![run_row(&mut h)];
-        for line in ["a", "b"] {
+        for line in ["l1", "l2"] {
             h.submit_run(line);
             reads.push(run_row(&mut h));
         }

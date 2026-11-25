@@ -1273,7 +1273,7 @@ mod tests {
     /// stack's inset.
     #[test]
     fn each_block_ends_in_a_rule_and_the_prompt_starts_with_one() {
-        let mut h = stacked(&[("a", b"one\r\n", Some(0)), ("b", b"", Some(0))]);
+        let mut h = stacked(&[("l1", b"one\r\n", Some(0)), ("l2", b"", Some(0))]);
         let theme = h.stoat.theme.clone();
         let (_, scene) = painted(&mut h, &theme, Rect::new(0, 0, 40, 12));
 

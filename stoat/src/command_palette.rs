@@ -19,6 +19,7 @@ use crate::{
 use ratatui::layout::Rect;
 use std::{
     collections::{hash_map::DefaultHasher, HashMap},
+    fmt,
     hash::{Hash, Hasher},
     iter,
     path::{Path, PathBuf},
@@ -1181,6 +1182,17 @@ pub(crate) enum PaletteOutcome {
     Run(Arc<UserCommand>, Vec<String>, String),
 }
 
+/// A line of the Run pane prompt whose head names a command, with the values
+/// that its arguments parse to, as [`resolve_line`] reads it.
+pub(crate) enum RunLine {
+    /// A registered action, with one value for each parameter that the line
+    /// gives.
+    Action(&'static registry::RegistryEntry, Vec<ParamValue>),
+    /// A user command of the config, with one value for each of its
+    /// arguments.
+    User(Arc<UserCommand>, Vec<String>),
+}
+
 /// Why [`parse_args`] refused the tokens typed for a command with more than one
 /// parameter.
 #[derive(Debug, PartialEq)]
@@ -1191,6 +1203,16 @@ enum ArgsError {
     Missing { param: &'static str },
     /// A token falls past the last parameter, so no parameter takes it.
     Extra { arg: String },
+}
+
+impl fmt::Display for ArgsError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ArgsError::Invalid { param, arg } => write!(f, "cannot parse `{arg}` as {param}"),
+            ArgsError::Missing { param } => write!(f, "{param} is missing"),
+            ArgsError::Extra { arg } => write!(f, "no parameter takes `{arg}`"),
+        }
+    }
 }
 
 impl CommandPalette {
@@ -1990,6 +2012,77 @@ pub(crate) fn line_head(text: &str) -> &str {
     }
 }
 
+/// The command that a Run pane line names, with the values that its arguments
+/// parse to, or the line of text that says why they do not parse.
+///
+/// `None` when the line's head, as [`line_head`] takes it, names no command,
+/// or names a built-in command that takes no parameter while text follows the
+/// head. Such a line runs as a shell line, so `pwd -P` runs the shell's `pwd`.
+///
+/// A built-in command parses one parameter from the whole rest of the line,
+/// as the palette's argument entry does, and more parameters one token each,
+/// as [`parse_args`] reads them. A user command takes one value for each
+/// argument, as [`split_user_args`] splits the rest, and an empty one for an
+/// absent argument. A `cli` command takes the rest as its tail. A required
+/// parameter or an argument with no default that gets no value is an error,
+/// and so is a value that does not parse. Each error names the head as typed,
+/// as a shell names its program.
+pub(crate) fn resolve_line(
+    text: &str,
+    ctx: &Availability,
+    commands: &CommandSet,
+) -> Option<Result<RunLine, String>> {
+    let head = line_head(text);
+    let command = Some(head)
+        .filter(|head| !head.is_empty())
+        .and_then(|head| resolve_command(head, ctx, commands))?;
+    let rest = text.trim_start()[head.len()..].trim();
+    let missing = |name: &str| format!("{head}: {name} is missing");
+
+    let user = match command {
+        PaletteCommand::Action(entry) => {
+            let values = match entry.def.params() {
+                [] if !rest.is_empty() => return None,
+                [] => Ok(Vec::new()),
+                [param] if rest.is_empty() => match param.required {
+                    true => Err(missing(param.name)),
+                    false => Ok(Vec::new()),
+                },
+                [param] => ParamValue::parse(param.kind, rest)
+                    .map(|value| vec![value])
+                    .map_err(|err| format!("{head}: {err}")),
+                params => parse_args(params, rest, None)
+                    .map(|(values, _)| values)
+                    .map_err(|err| format!("{head}: {err}")),
+            };
+            return Some(values.map(|values| RunLine::Action(entry, values)));
+        },
+        PaletteCommand::User(user) => user,
+    };
+
+    let values = match user.run {
+        RunSpec::Cli { .. } => vec![rest.to_owned()],
+        RunSpec::Steps { .. } => {
+            let count = user.args.len();
+            let mut values: Vec<String> = split_user_args(rest, count)
+                .into_iter()
+                .map(str::to_owned)
+                .collect();
+            values.resize(count, String::new());
+            let absent = user
+                .args
+                .iter()
+                .zip(&values)
+                .find(|(arg, value)| value.is_empty() && !arg.optional());
+            if let Some((arg, _)) = absent {
+                return Some(Err(missing(&arg.name)));
+            }
+            values
+        },
+    };
+    Some(Ok(RunLine::User(user, values)))
+}
+
 /// The text after a leading `action` token and its space, ASCII case ignored,
 /// or `None` for a text that lists the commands.
 pub(crate) fn action_query(text: &str) -> Option<&str> {
@@ -2650,6 +2743,66 @@ mod tests {
     };
     use std::{collections::BTreeMap, time::Duration};
     use stoat_action::{Action, ParamKind};
+
+    /// A Run pane line resolves by its head. A command that takes no parameter
+    /// resolves only with nothing after it, and a required parameter with no
+    /// value is an error that names the head.
+    #[test]
+    fn resolve_line_reads_a_command_and_its_arguments() {
+        let (ctx, commands) = (Availability::default(), CommandSet::default());
+        let read = |text: &str| {
+            resolve_line(text, &ctx, &commands).map(|line| {
+                line.map(|line| match line {
+                    RunLine::Action(entry, values) => (entry.def.name(), values),
+                    RunLine::User(command, _) => panic!("`{}` is a user command", command.name),
+                })
+            })
+        };
+        assert_eq!(
+            [
+                "cd sub",
+                "pwd",
+                "pwd -P",
+                "nosuchword x",
+                "cd",
+                "review a b c",
+            ]
+            .map(read),
+            [
+                Some(Ok(("SetCwd", vec![ParamValue::String("sub".to_owned())]))),
+                Some(Ok(("ShowCwd", Vec::new()))),
+                None,
+                None,
+                Some(Err("cd: path is missing".to_owned())),
+                Some(Err("review: no parameter takes `c`".to_owned())),
+            ],
+        );
+    }
+
+    /// Each refusal of the tokens of a command with more than one parameter
+    /// reads as one line, which the Run pane prompt's status names its head
+    /// before.
+    #[test]
+    fn args_errors_read_as_one_line_each() {
+        let errors = [
+            ArgsError::Invalid {
+                param: "count",
+                arg: "x".to_owned(),
+            },
+            ArgsError::Missing { param: "rev" },
+            ArgsError::Extra {
+                arg: "y".to_owned(),
+            },
+        ];
+        assert_eq!(
+            errors.map(|err| err.to_string()),
+            [
+                "cannot parse `x` as count",
+                "rev is missing",
+                "no parameter takes `y`"
+            ],
+        );
+    }
 
     /// A line's head is its first word, past leading whitespace, or the
     /// `action` token with the name after it.
