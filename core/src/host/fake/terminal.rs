@@ -1,6 +1,7 @@
 use crate::host::terminal::{SpawnArgs, TerminalHost, TerminalSession};
 use async_trait::async_trait;
 use std::{
+    collections::VecDeque,
     io,
     sync::{Arc, Mutex},
 };
@@ -178,13 +179,23 @@ impl TerminalSession for FakeTerminalSession {
     }
 }
 
-/// Factory fake that hands out boxes wrapping a shared
-/// `Arc<FakeTerminalSession>`, so a test holding the `Arc` and the box
-/// returned by [`Self::spawn`] observe the same underlying state.
+/// Factory fake that hands out boxes wrapping an `Arc<FakeTerminalSession>`,
+/// so a test holding the `Arc` and the box that [`TerminalHost::spawn`]
+/// returns observe the same underlying state.
+///
+/// A spawn takes its session from one of two sources. A session that
+/// [`Self::push_session`] queued serves the next successful spawn, one spawn
+/// each, in the order queued. With the queue empty, every spawn shares the
+/// session of [`Self::new`]. A test that drives two processes apart queues a
+/// session for each.
 pub struct FakeTerminalHost {
     session: Arc<FakeTerminalSession>,
     spawns: Mutex<Vec<SpawnArgs>>,
     spawn_error: Mutex<Option<io::ErrorKind>>,
+    /// The sessions that the next successful spawns return, front first.
+    queued: Mutex<VecDeque<Arc<FakeTerminalSession>>>,
+    /// The session of each successful spawn, in spawn order.
+    handed: Mutex<Vec<Arc<FakeTerminalSession>>>,
 }
 
 impl FakeTerminalHost {
@@ -193,6 +204,8 @@ impl FakeTerminalHost {
             session,
             spawns: Mutex::new(Vec::new()),
             spawn_error: Mutex::new(None),
+            queued: Mutex::new(VecDeque::new()),
+            handed: Mutex::new(Vec::new()),
         }
     }
 
@@ -213,6 +226,35 @@ impl FakeTerminalHost {
             .lock()
             .expect("FakeTerminalHost lock poisoned") = Some(kind);
     }
+
+    /// Queue `session` for a later [`TerminalHost::spawn`] to return.
+    ///
+    /// The queue serves spawns in the order queued, one spawn each. A spawn
+    /// that fails takes no session from it.
+    pub fn push_session(&self, session: Arc<FakeTerminalSession>) {
+        self.queued
+            .lock()
+            .expect("FakeTerminalHost lock poisoned")
+            .push_back(session);
+    }
+
+    /// Take back the newest queued session, or `None` when the queue is
+    /// empty.
+    pub fn unqueue(&self) -> Option<Arc<FakeTerminalSession>> {
+        self.queued
+            .lock()
+            .expect("FakeTerminalHost lock poisoned")
+            .pop_back()
+    }
+
+    /// The session of each successful [`TerminalHost::spawn`] so far, in
+    /// spawn order.
+    pub fn sessions(&self) -> Vec<Arc<FakeTerminalSession>> {
+        self.handed
+            .lock()
+            .expect("FakeTerminalHost lock poisoned")
+            .clone()
+    }
 }
 
 #[async_trait]
@@ -230,7 +272,18 @@ impl TerminalHost for FakeTerminalHost {
         {
             return Err(io::Error::from(kind));
         }
-        Ok(Box::new(ArcTerminalSession(self.session.clone())))
+
+        let session = self
+            .queued
+            .lock()
+            .expect("FakeTerminalHost lock poisoned")
+            .pop_front()
+            .unwrap_or_else(|| self.session.clone());
+        self.handed
+            .lock()
+            .expect("FakeTerminalHost lock poisoned")
+            .push(session.clone());
+        Ok(Box::new(ArcTerminalSession(session)))
     }
 }
 
@@ -342,6 +395,115 @@ mod tests {
             session.finish(7);
             assert_eq!(spawned.try_wait().await.unwrap(), Some(7));
             assert_eq!(spawned.read_chunk().await.unwrap(), None);
+        });
+    }
+
+    /// The arguments of a spawn of `sh`, which no test here reads.
+    fn args() -> SpawnArgs {
+        SpawnArgs {
+            program: "sh".into(),
+            args: vec![],
+            env: vec![],
+            env_remove: vec![],
+            cwd: "/tmp".into(),
+            width: 80,
+            rows: 24,
+        }
+    }
+
+    /// The session of each spawn of `host`, named `queued` or `shared` by the
+    /// session it is.
+    fn handed(
+        host: &FakeTerminalHost,
+        queued: &Arc<FakeTerminalSession>,
+        shared: &Arc<FakeTerminalSession>,
+    ) -> Vec<&'static str> {
+        host.sessions()
+            .iter()
+            .map(
+                |session| match (Arc::ptr_eq(session, queued), Arc::ptr_eq(session, shared)) {
+                    (true, _) => "queued",
+                    (_, true) => "shared",
+                    _ => "other",
+                },
+            )
+            .collect()
+    }
+
+    /// Output pushed on each session reaches the spawns of that session alone,
+    /// so the first spawn and the two after it drive apart.
+    #[test]
+    fn a_queued_session_serves_one_spawn_and_the_shared_session_serves_the_rest() {
+        rt().block_on(async {
+            let shared = Arc::new(FakeTerminalSession::new());
+            let queued = Arc::new(FakeTerminalSession::new());
+            let host = FakeTerminalHost::new(shared.clone());
+            host.push_session(queued.clone());
+            let first = host.spawn(args()).await.unwrap();
+            let second = host.spawn(args()).await.unwrap();
+            let third = host.spawn(args()).await.unwrap();
+
+            queued.push_output(b"queued");
+            shared.push_output(b"shared");
+            second.write(b"two").await.unwrap();
+            third.write(b"three").await.unwrap();
+
+            assert_eq!(
+                (
+                    first.read_chunk().await.unwrap(),
+                    second.read_chunk().await.unwrap(),
+                    queued.sent_strings(),
+                    shared.sent_strings(),
+                    handed(&host, &queued, &shared),
+                ),
+                (
+                    Some(b"queued".to_vec()),
+                    Some(b"shared".to_vec()),
+                    Vec::<String>::new(),
+                    vec!["two".to_owned(), "three".to_owned()],
+                    vec!["queued", "shared", "shared"],
+                ),
+            );
+        });
+    }
+
+    #[test]
+    fn a_failed_spawn_keeps_the_queued_session() {
+        rt().block_on(async {
+            let shared = Arc::new(FakeTerminalSession::new());
+            let queued = Arc::new(FakeTerminalSession::new());
+            let host = FakeTerminalHost::new(shared.clone());
+            host.push_session(queued.clone());
+            host.fail_next_spawn(io::ErrorKind::NotFound);
+
+            let failed = host
+                .spawn(args())
+                .await
+                .map(|_| ())
+                .map_err(|error| error.kind());
+            host.spawn(args()).await.unwrap();
+
+            assert_eq!(
+                (failed, handed(&host, &queued, &shared)),
+                (Err(io::ErrorKind::NotFound), vec!["queued"]),
+            );
+        });
+    }
+
+    #[test]
+    fn an_unqueued_session_serves_no_spawn() {
+        rt().block_on(async {
+            let shared = Arc::new(FakeTerminalSession::new());
+            let queued = Arc::new(FakeTerminalSession::new());
+            let host = FakeTerminalHost::new(shared.clone());
+            host.push_session(queued.clone());
+            let taken = host.unqueue().map(|taken| Arc::ptr_eq(&taken, &queued));
+            host.spawn(args()).await.unwrap();
+
+            assert_eq!(
+                (taken, handed(&host, &queued, &shared)),
+                (Some(true), vec!["shared"]),
+            );
         });
     }
 }
