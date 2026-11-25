@@ -2053,4 +2053,44 @@ mod tests {
         let (set, errors) = CommandSet::build((app::embedded_config(), app::DEFAULT_KEYMAP), None);
         assert_eq!((names(&set), errors), (Vec::<&str>::new(), Vec::new()));
     }
+
+    /// The `stcfg` examples of docs/commands.md load with no error, a command
+    /// for each item, so the document cannot drift from the loader.
+    #[test]
+    fn the_examples_of_the_commands_document_load_clean() {
+        let source = stcfg_examples(include_str!("../../docs/commands.md"));
+        let (examples, parse_errors) = stoat_config::parse(&source);
+        let examples = examples.expect("the examples parse");
+        let (set, errors) = CommandSet::build(
+            (app::embedded_config(), app::DEFAULT_KEYMAP),
+            Some((&examples, &source)),
+        );
+        assert_eq!(
+            (parse_errors, errors, names(&set)),
+            (
+                Vec::new(),
+                Vec::new(),
+                vec!["pr", "prdiff", "ship", "rg", "jj"]
+            ),
+        );
+    }
+
+    /// The lines between each `stcfg` fence of the Markdown `doc` and its
+    /// closing fence, joined.
+    fn stcfg_examples(doc: &str) -> String {
+        let mut source = String::new();
+        let mut inside = false;
+        for line in doc.lines() {
+            match (inside, line.trim_end()) {
+                (false, "```stcfg") => inside = true,
+                (true, "```") => inside = false,
+                (true, _) => {
+                    source.push_str(line);
+                    source.push('\n');
+                },
+                (false, _) => {},
+            }
+        }
+        source
+    }
 }

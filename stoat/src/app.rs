@@ -116,7 +116,7 @@ pub(crate) const DEFAULT_KEYMAP: &str = include_str!("../../config.stcfg");
 /// user config layers over [`DEFAULT_KEYMAP`], and a copy of that pins every
 /// binding of the release that wrote it. A later release that drops a verb
 /// then leaves the user's file binding it.
-pub(crate) const USER_CONFIG_SEED: &str = r"# This is your stoat config. It layers over the config stoat ships and does
+pub(crate) const USER_CONFIG_SEED: &str = r#"# This is your stoat config. It layers over the config stoat ships and does
 # not replace it.
 #
 # Only what this file states changes. Every key it never binds, every setting
@@ -136,9 +136,17 @@ pub(crate) const USER_CONFIG_SEED: &str = r"# This is your stoat config. It laye
 #     }
 # }
 #
+# command hello {
+#     doc = "say hello";
+#     run = shell("echo hello");
+#     output = notify;
+# }
+#
+# docs/commands.md in the stoat repository documents commands.
+#
 # The command palette lists every action name. This editor completes setting
 # names.
-";
+"#;
 
 /// The text `:config stoatty` writes to a missing stoatty config.
 ///

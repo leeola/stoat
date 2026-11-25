@@ -16,6 +16,9 @@ They never overlap. Recoloring the editor does nothing to a shell you run in a
 stoatty split, and vice versa. This document covers the editor theme first,
 then the terminal palette.
 
+The editor's `config.stcfg` also declares commands. See
+[commands.md](commands.md).
+
 ## The editor theme
 
 ### Where it lives
