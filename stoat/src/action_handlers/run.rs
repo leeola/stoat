@@ -92,7 +92,9 @@ pub(super) fn run_submit(stoat: &mut Stoat) -> UpdateEffect {
         return UpdateEffect::Redraw;
     }
 
-    let width = ws.panes.pane(focused).area.width.max(20);
+    // The body draws one column inside the stack, which stands one column
+    // inside each side of the pane.
+    let width = ws.panes.pane(focused).area.width.saturating_sub(3).max(20);
     let cmd = start_cmd(stoat, &text, width);
     let Workspace { runs, cmds, .. } = stoat.active_workspace_mut();
     if let Some(run_state) = runs.get_mut(id) {

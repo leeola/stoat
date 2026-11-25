@@ -30,10 +30,17 @@ pub(crate) struct StatusPart {
     pub(crate) chip: bool,
 }
 
-/// Paint a run pane's output blocks and its prompt row into `area`.
+/// Paint a Run pane's stack and its prompt row into `area`.
 ///
-/// The prompt row takes the pane's last row. Inside stoatty a hairline in
-/// `ui.divider` runs along the row's top edge and rules it off the output.
+/// The prompt row takes the pane's last row, and the stack sits on it, so a
+/// short stack leaves its blank rows at the top. Both stand one column inside
+/// each side of the pane, as [`crate::run::stack_rect`] gives them, and a
+/// block's body rows start one column inside its header. Output that the
+/// program left uncolored draws in `ui.text.dim`.
+///
+/// Inside stoatty a rule ends each block, a bar runs beside the body of a
+/// failed block, and a rule tops the prompt row, as [`paint_stack_rules`]
+/// draws them. A plain terminal draws none of them.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn render_run_pane(
     run_state: &RunState,
@@ -52,27 +59,34 @@ pub(crate) fn render_run_pane(
         return;
     }
 
+    let inner = crate::run::stack_rect(area);
     let input_row = area.y + area.height - 1;
-    let output_height = area.height.saturating_sub(1);
+    let visible = usize::from(area.height - 1);
 
     let total = run_state.output_line_total(cmds);
-    let visible = output_height as usize;
     let start = total.saturating_sub(visible + run_state.scroll_offset);
     let window = start..start + visible;
+    let pad = visible.saturating_sub(total);
+    let dim = theme.get(crate::theme::scope::UI_TEXT_DIM);
 
     // Walked block by block rather than flattened first. A block's grid holds
     // its whole scrollback, so materializing the rows would cost the history
     // on every paint to draw a pane's worth of it.
+    let mut rule_rows = Vec::new();
+    let mut failed_bodies = Vec::new();
     let mut base = 0;
     for block in run_state.blocks.iter().filter_map(|id| cmds.get(*id)) {
         let grid_rows = block.grid.rendered_line_count();
         let span = block.rendered_line_span();
+        let offsets = window_offsets(base, span, &window);
+        let row_of = |offset: usize| area.y + (pad + base + offset - start) as u16;
 
-        for offset in window_offsets(base, span, &window) {
-            let y = area.y + (base + offset - start) as u16;
+        for offset in offsets.clone() {
+            let y = row_of(offset);
             let Some(line) = block_line(block, grid_rows, offset) else {
                 continue;
             };
+            let body = Rect::new(inner.x + 1, y, inner.width.saturating_sub(1), 1);
             match &line {
                 OutputLine::Prompt { cwd, command } => {
                     let cwd = crate::run::abbreviate_path(cwd, home);
@@ -85,18 +99,17 @@ pub(crate) fn render_run_pane(
                         caret: None,
                         status: CmdStatus::Parts(&parts),
                     };
-                    let row = Rect::new(area.x, y, area.width, 1);
+                    let row = Rect::new(inner.x, y, inner.width, 1);
                     cmd_line::cmd_line_row(buf, row, &header, theme, scene);
                 },
                 OutputLine::GridRow(grid, row_idx, selection) => {
-                    paint_grid_row(buf, area, y, grid, *row_idx, *selection);
+                    paint_grid_row(buf, body, y, grid, *row_idx, *selection, dim);
                 },
                 OutputLine::Error(msg) => {
-                    let max_w = area.width as usize;
-                    let display: String = msg.chars().take(max_w).collect();
+                    let display: String = msg.chars().take(usize::from(body.width)).collect();
                     write_str(
                         buf,
-                        area.x,
+                        body.x,
                         y,
                         &display,
                         theme.get(crate::theme::scope::UI_ERROR),
@@ -105,16 +118,23 @@ pub(crate) fn render_run_pane(
             }
         }
 
+        if offsets.contains(&(span - 1)) {
+            rule_rows.push(row_of(span - 1));
+        }
+        let body = offsets.start.max(1)..offsets.end;
+        if block.finished && block.exit_status != Some(0) && !body.is_empty() {
+            failed_bodies.push((row_of(body.start), body.len() as u16));
+        }
         base += span;
     }
 
     let abbrev = crate::run::abbreviate_path(root, home);
-    let prompt_w = write_prompt(buf, area.x, input_row, &abbrev, theme);
+    let prompt_w = write_prompt(buf, inner.x, input_row, &abbrev, theme);
 
     let input_area = Rect::new(
-        area.x + prompt_w,
+        inner.x + prompt_w,
         input_row,
-        area.width.saturating_sub(prompt_w),
+        inner.width.saturating_sub(prompt_w),
         1,
     );
     run_state.input.render(
@@ -128,21 +148,77 @@ pub(crate) fn render_run_pane(
         buf,
     );
 
-    // The plain terminal has no room for a rule between the output and the
-    // prompt, so the row stays flush there.
-    if let Some(color) =
-        style_rgb(theme.get(crate::theme::scope::UI_DIVIDER).fg).filter(|_| scene.live())
-    {
-        Bar {
-            x: 0,
-            y: 0,
-            width: area.width.saturating_mul(16),
-            height: 1,
-            color,
-            radius: 0,
-            corners: 0,
+    // The plain terminal has no room for a rule between the rows, so the
+    // stack and the prompt stay flush there.
+    if scene.live() {
+        paint_stack_rules(
+            buf,
+            inner,
+            &rule_rows,
+            &failed_bodies,
+            input_row,
+            theme,
+            scene,
+        );
+    }
+}
+
+/// Draw the bar beside each failed body, the rule under each block, and the
+/// rule over the prompt, across `inner`.
+///
+/// `rule_rows` holds the last row of each block on show, `failed_bodies` the
+/// first row and the row count of each failed block's body on show, and
+/// `prompt_row` the prompt's row.
+///
+/// A block's rule runs along its last row's bottom edge in `ui.run.rule`, and
+/// a theme that leaves that unset draws none. A failure bar is 4 sixteenths
+/// wide at `inner`'s left edge in `ui.error`. The prompt's rule runs along the
+/// prompt row's top edge in `ui.run.prompt.rule`, or in `ui.divider` for a
+/// theme that leaves that unset.
+fn paint_stack_rules(
+    buf: &mut Buffer,
+    inner: Rect,
+    rule_rows: &[u16],
+    failed_bodies: &[(u16, u16)],
+    prompt_row: u16,
+    theme: &crate::theme::Theme,
+    scene: &mut stoat_widgets::ApcScene,
+) {
+    let width = inner.width.saturating_mul(16);
+    let bar = |y: i16, width: u16, height: u16, color: [u8; 3]| Bar {
+        x: 0,
+        y,
+        width,
+        height,
+        color,
+        radius: 0,
+        corners: 0,
+    };
+
+    if let Some(color) = style_rgb(theme.get(crate::theme::scope::UI_ERROR).fg) {
+        for &(row, count) in failed_bodies {
+            let body = Rect::new(inner.x, row, inner.width, count);
+            bar(0, 4, count.saturating_mul(16), color).render(body, buf, scene);
         }
-        .render(Rect::new(area.x, input_row, area.width, 1), buf, scene);
+    }
+
+    // The rules go after the bars, so a block's rule runs unbroken under the
+    // bar beside its body, as the board's border does.
+    let rule = theme
+        .try_get(crate::theme::scope::UI_RUN_RULE)
+        .and_then(|style| style_rgb(style.fg));
+    if let Some(color) = rule {
+        for &row in rule_rows {
+            bar(15, width, 1, color).render(Rect::new(inner.x, row, inner.width, 1), buf, scene);
+        }
+    }
+
+    let prompt = theme
+        .try_get(crate::theme::scope::UI_RUN_PROMPT_RULE)
+        .unwrap_or_else(|| theme.get(crate::theme::scope::UI_DIVIDER));
+    if let Some(color) = style_rgb(prompt.fg) {
+        let row = Rect::new(inner.x, prompt_row, inner.width, 1);
+        bar(0, width, 1, color).render(row, buf, scene);
     }
 }
 
@@ -209,6 +285,9 @@ pub(crate) fn status_parts(cmd: &Cmd, theme: &crate::theme::Theme) -> Vec<Status
 /// A row holds only the cells written to it. A selection also covers the
 /// columns past them, so a row of a selected block paints full width. Those
 /// columns show as reversed blanks.
+///
+/// A cell that the program left without a foreground takes the foreground of
+/// `dim`, and a cell that the program colored keeps its color.
 fn paint_grid_row(
     buf: &mut Buffer,
     area: Rect,
@@ -216,6 +295,7 @@ fn paint_grid_row(
     grid: &VtermGrid,
     row_idx: usize,
     selection: Option<&GridSelection>,
+    dim: Style,
 ) {
     let row = grid.row(row_idx);
     let w = (area.width as usize).min(grid.width() as usize);
@@ -236,7 +316,7 @@ fn paint_grid_row(
             continue;
         }
         let mut style = Style::default();
-        if let Some(fg) = cell.fg {
+        if let Some(fg) = cell.fg.or(dim.fg) {
             style = style.fg(fg);
         }
         if let Some(bg) = cell.bg {
@@ -434,14 +514,15 @@ pub(crate) fn render_modal_run(
 #[cfg(test)]
 mod tests {
     use super::{
-        block_line, paint_grid_row, render_modal_run, status_parts, window_offsets, Buffer, Cmd,
-        GridSelection, Modifier, OutputLine, Rect, RunState, Style, ISLAND_BOTTOM, ISLAND_SIDE,
-        ISLAND_TOP,
+        block_line, paint_grid_row, render_modal_run, render_run_pane, status_parts,
+        window_offsets, Buffer, Cmd, GridSelection, Modifier, OutputLine, Rect, RunState, Style,
+        ISLAND_BOTTOM, ISLAND_SIDE, ISLAND_TOP,
     };
     use crate::{
-        render::paint::style_rgb,
+        render::{editor::ResolvedChrome, paint::style_rgb},
         test_harness::TestHarness,
         theme::{scope, Theme},
+        workspace::Workspace,
     };
     use ratatui::style::Color;
     use std::{
@@ -552,7 +633,15 @@ mod tests {
         };
         let area = Rect::new(0, 0, 20, 1);
         let mut buf = Buffer::empty(area);
-        paint_grid_row(&mut buf, area, 0, &block.grid, 0, Some(&selection));
+        paint_grid_row(
+            &mut buf,
+            area,
+            0,
+            &block.grid,
+            0,
+            Some(&selection),
+            Style::default(),
+        );
 
         let reversed: Vec<u16> = (0..20)
             .filter(|&x| buf[(x, 0)].modifier.contains(Modifier::REVERSED))
@@ -578,38 +667,36 @@ mod tests {
         );
     }
 
-    /// Inside stoatty a hairline in the divider color rules the prompt row off
-    /// the output above it, along the row's top edge and across the pane.
+    /// Inside stoatty a hairline in the prompt rule's color rules the prompt
+    /// row off the stack, along the row's top edge and across the inset that
+    /// the stack stands in.
     #[test]
-    fn a_divider_hairline_tops_the_prompt_row() {
+    fn the_prompt_rule_spans_the_inset_width() {
         let mut h = TestHarness::with_size(60, 12);
         h.open_run();
         h.render_composited();
 
-        let content = {
-            let ws = h.stoat.active_workspace();
-            ws.panes.pane(ws.panes.focus()).area
-        };
-        let divider =
-            style_rgb(h.stoat.theme.get(scope::UI_DIVIDER).fg).expect("an RGB divider color");
+        let content = pane_area(&h);
+        let rule = style_rgb(h.stoat.theme.get(scope::UI_RUN_PROMPT_RULE).fg)
+            .expect("an RGB prompt rule color");
+        let prompt_row = content.y + content.height - 1;
         let hairlines: Vec<_> = command::decode_stream(&h.stoat.apc_scene.all_bytes())
             .into_iter()
             .filter_map(|cmd| match cmd {
-                Command::Bar(bar) if bar.height == 1 && bar.color == divider => {
-                    Some((bar.x, bar.y, bar.width))
+                Command::Bar(bar)
+                    if bar.height == 1
+                        && bar.color == rule
+                        && bar.y == (prompt_row * 16) as i16 =>
+                {
+                    Some((bar.x, bar.width))
                 },
                 _ => None,
             })
             .collect();
 
-        let prompt_row = content.y + content.height - 1;
         assert_eq!(
             hairlines,
-            [(
-                (content.x * 16) as i16,
-                (prompt_row * 16) as i16,
-                content.width * 16
-            )],
+            [(((content.x + 1) * 16) as i16, (content.width - 2) * 16)],
         );
     }
 
@@ -730,7 +817,7 @@ mod tests {
 
     /// A Cmd that ran 18 ms to an exit of 0 reads a mark and a runtime, and the
     /// pane draws both as runs on the header's row, the runtime ending at the
-    /// pane's right edge.
+    /// right edge of the stack. A lone header with no output sits on the prompt.
     #[test]
     fn a_finished_header_ends_in_its_mark_and_runtime() {
         let theme = status_theme();
@@ -754,7 +841,9 @@ mod tests {
             })
             .collect();
 
-        let (row, right) = ((area.y * 16) as i16, (area.right() * 16) as i16);
+        let header = area.bottom() - 2;
+        let right = crate::run::stack_rect(area).right();
+        let (row, right) = ((header * 16) as i16, (right * 16) as i16);
         assert_eq!(
             (parts, runs),
             (
@@ -819,8 +908,10 @@ mod tests {
         );
     }
 
-    /// The header of `echo ok` draws `echo` as the command token and ` ok` as
-    /// plain text, after the cwd `/w` and the glyph.
+    /// The header of `echo ok` draws `echo` as the command token and `ok` as
+    /// plain text, after the cwd `/w` and the glyph. The blank between them is
+    /// not read, since the block's rule composites its line glyph into the
+    /// blank cells of the header row.
     #[test]
     fn a_header_colors_its_first_word() {
         let mut h = TestHarness::with_size(60, 12);
@@ -829,11 +920,12 @@ mod tests {
         h.submit_run("echo ok");
         let buf = h.render_composited();
 
-        let area = pane_area(&h);
+        let stack = crate::run::stack_rect(pane_area(&h));
+        let header = stack.bottom() - 2;
         let theme = &h.stoat.theme;
         let looks = |cols: Range<u16>| {
             cols.map(|col| {
-                let cell = &buf[(area.x + col, area.y)];
+                let cell = &buf[(stack.x + col, header)];
                 (cell.fg, cell.modifier)
             })
             .collect::<Vec<_>>()
@@ -842,10 +934,10 @@ mod tests {
             vec![(style.fg.unwrap_or(Color::Reset), style.add_modifier); cells]
         };
         assert_eq!(
-            (looks(5..9), looks(9..12)),
+            (looks(5..9), looks(10..12)),
             (
                 look(theme.get(scope::UI_CMD_COMMAND), 4),
-                look(theme.get(scope::UI_TEXT), 3)
+                look(theme.get(scope::UI_TEXT), 2)
             ),
         );
     }
@@ -871,5 +963,158 @@ mod tests {
             .filter(|row: &String| row.contains('['))
             .collect();
         assert_eq!(flagged, Vec::<String>::new());
+    }
+
+    /// A bar of a scene as its x, y, width, height, and color.
+    type BarSpec = (i16, i16, u16, u16, [u8; 3]);
+
+    const RAISED: [u8; 3] = [0x1e, 0x21, 0x27];
+    const HAIRLINE: [u8; 3] = [0x2e, 0x32, 0x3b];
+
+    /// A harness at `/w` whose Run pane holds a block for each of `runs`: its
+    /// line, its output, and its exit code, or `None` for a Cmd that runs on.
+    fn stacked(runs: &[(&str, &[u8], Option<i32>)]) -> TestHarness {
+        let mut h = TestHarness::with_size(60, 20);
+        h.stoat.active_workspace_mut().git_root = PathBuf::from("/w");
+        h.open_run();
+        for &(line, output, exit) in runs {
+            let handle = h.submit_run(line);
+            h.inject_cmd_output(handle.cmd, output);
+            if let Some(code) = exit {
+                h.inject_cmd_done(handle.cmd, code);
+            }
+        }
+        h
+    }
+
+    /// Paint the Run pane of `h` into `area` under `theme`, through a live
+    /// scene, on a buffer that ends where `area` does.
+    fn painted(h: &mut TestHarness, theme: &Theme, area: Rect) -> (Buffer, ApcScene) {
+        let chrome = ResolvedChrome::resolve(theme);
+        let Workspace {
+            runs,
+            cmds,
+            editors,
+            git_root,
+            ..
+        } = h.stoat.active_workspace_mut();
+        let run = runs.values().next().expect("an open run");
+        let mut buf = Buffer::empty(Rect::new(0, 0, area.right(), area.bottom()));
+        let mut scene = ApcScene::new();
+        render_run_pane(
+            run, cmds, editors, theme, &chrome, git_root, None, area, false, &mut buf, &mut scene,
+        );
+        (buf, scene)
+    }
+
+    /// The text of row `y` of `buf`, its trailing blanks dropped.
+    fn row_text(buf: &Buffer, y: u16) -> String {
+        let row: String = (0..buf.area.width).map(|x| buf[(x, y)].symbol()).collect();
+        row.trim_end().to_owned()
+    }
+
+    /// Each bar of `scene`.
+    fn bars(scene: &ApcScene) -> Vec<BarSpec> {
+        command::decode_stream(scene.bytes())
+            .into_iter()
+            .filter_map(|cmd| match cmd {
+                Command::Bar(bar) => Some((bar.x, bar.y, bar.width, bar.height, bar.color)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// A stack shorter than the pane sits on the prompt and leaves its blank
+    /// rows at the top.
+    #[test]
+    fn a_short_stack_sits_on_the_prompt() {
+        let mut h = stacked(&[("ls", b"one\r\ntwo\r\n", None)]);
+        let theme = h.stoat.theme.clone();
+        let (buf, _) = painted(&mut h, &theme, Rect::new(0, 0, 40, 12));
+
+        let rows: Vec<String> = (0..12).map(|y| row_text(&buf, y)).collect();
+        let mut want = vec![String::new(); 8];
+        want.extend([" /w \u{276f} ls", "  one", "  two", " /w \u{276f}"].map(String::from));
+        assert_eq!(rows, want);
+    }
+
+    #[test]
+    fn output_starts_one_cell_inside_its_header() {
+        let mut h = stacked(&[("ls", b"one\r\n", None)]);
+        let theme = h.stoat.theme.clone();
+        let (buf, _) = painted(&mut h, &theme, Rect::new(0, 0, 40, 12));
+
+        let first_glyph = |y: u16| (0..40).find(|&x| buf[(x, y)].symbol() != " ");
+        assert_eq!([first_glyph(9), first_glyph(10)], [Some(1), Some(2)]);
+    }
+
+    #[test]
+    fn uncolored_output_draws_dim_and_colored_output_keeps_its_color() {
+        let mut h = stacked(&[("ls", b"plain\r\n\x1b[31mred", None)]);
+        let theme = h.stoat.theme.clone();
+        let (buf, _) = painted(&mut h, &theme, Rect::new(0, 0, 40, 12));
+
+        let colors = |y: u16, cols: Range<u16>| cols.map(|x| buf[(x, y)].fg).collect::<Vec<_>>();
+        let dim = theme
+            .get(scope::UI_TEXT_DIM)
+            .fg
+            .expect("the theme sets a dim color");
+        assert_eq!(
+            (colors(9, 2..7), colors(10, 2..5)),
+            (vec![dim; 5], vec![Color::Red; 3]),
+        );
+    }
+
+    /// Each block ends in a rule along its last row's bottom edge, and a rule
+    /// along the prompt row's top edge rules the prompt off, each across the
+    /// stack's inset.
+    #[test]
+    fn each_block_ends_in_a_rule_and_the_prompt_starts_with_one() {
+        let mut h = stacked(&[("a", b"one\r\n", Some(0)), ("b", b"", Some(0))]);
+        let theme = h.stoat.theme.clone();
+        let (_, scene) = painted(&mut h, &theme, Rect::new(0, 0, 40, 12));
+
+        assert_eq!(
+            bars(&scene),
+            [
+                (16, 9 * 16 + 15, 38 * 16, 1, RAISED),
+                (16, 10 * 16 + 15, 38 * 16, 1, RAISED),
+                (16, 11 * 16, 38 * 16, 1, HAIRLINE),
+            ],
+        );
+    }
+
+    /// A failed block draws a danger bar beside its body rows. A block that
+    /// exits 0 and a failed block with no output draw none.
+    #[test]
+    fn a_failed_body_carries_the_danger_bar() {
+        let mut h = stacked(&[
+            ("ok", b"x\r\n", Some(0)),
+            ("bad", b"one\r\ntwo\r\n", Some(1)),
+            ("quiet", b"", Some(1)),
+        ]);
+        let theme = h.stoat.theme.clone();
+        let (_, scene) = painted(&mut h, &theme, Rect::new(0, 0, 40, 12));
+
+        let danger = style_rgb(theme.get(scope::UI_ERROR).fg).expect("an RGB error color");
+        let marks: Vec<BarSpec> = bars(&scene)
+            .into_iter()
+            .filter(|&(.., width, _, _)| width == 4)
+            .collect();
+        assert_eq!(marks, [(16, 8 * 16, 4, 32, danger)]);
+    }
+
+    /// A theme that leaves the run scopes unset draws no rule under a block and
+    /// the prompt's rule in its divider color.
+    #[test]
+    fn a_theme_without_the_run_scopes_draws_the_divider_hairline_alone() {
+        let (config, _) = stoat_config::parse(crate::app::DEFAULT_KEYMAP);
+        let theme = Theme::from_config(&config.expect("the shipped config parses"), "default_dark")
+            .expect("the shipped theme builds");
+        let mut h = stacked(&[("a", b"one\r\n", Some(0))]);
+        let (_, scene) = painted(&mut h, &theme, Rect::new(0, 0, 40, 12));
+
+        let divider = style_rgb(theme.get(scope::UI_DIVIDER).fg).expect("an RGB divider color");
+        assert_eq!(bars(&scene), [(16, 11 * 16, 38 * 16, 1, divider)]);
     }
 }

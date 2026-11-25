@@ -200,10 +200,11 @@ impl RunState {
 
     /// Translates a focused-pane-relative `(col, row)` cell into the active
     /// block's `(grid_col, grid_row)`. Returns `None` when the position falls
-    /// on the input row, on a non-active block's region, on a header / status
-    /// / blank line, on a row scrolled off-screen, or past the active grid's
-    /// width. Mirrors the layout that
-    /// [`crate::render::run_pane::render_run_pane`] builds.
+    /// on the input row, on the blank rows over a short stack, on a non-active
+    /// block's region, on a header / status / blank line, on a row scrolled
+    /// off-screen, left of the body's column, or past the active grid's width.
+    /// Mirrors the layout that [`crate::render::run_pane::render_run_pane`]
+    /// builds.
     pub fn active_block_grid_pos(
         &self,
         cmds: &SlotMap<CmdId, Cmd>,
@@ -236,15 +237,18 @@ impl RunState {
         let total = self.output_line_total(cmds);
 
         let start = total.saturating_sub(output_height + self.scroll_offset);
-        let line_idx = start + row as usize;
+        let pad = output_height.saturating_sub(total);
+        let line_idx = start + (row as usize).checked_sub(pad)?;
 
         if line_idx < active_grid_start || line_idx >= active_grid_end {
             return None;
         }
-        if col >= active.grid.width() {
+        let body_col = stack_rect(area).x - area.x + 1;
+        let grid_col = col.checked_sub(body_col)?;
+        if grid_col >= active.grid.width() {
             return None;
         }
-        Some((col, (line_idx - active_grid_start) as u16))
+        Some((grid_col, (line_idx - active_grid_start) as u16))
     }
 }
 
@@ -335,6 +339,19 @@ pub(crate) fn format_elapsed(secs: u64) -> String {
         0..3600 => format!("{}:{:02}", secs / 60, secs % 60),
         _ => format!("{}:{:02}:{:02}", secs / 3600, secs / 60 % 60, secs % 60),
     }
+}
+
+/// The rect that a Run pane's stack and prompt draw in, one column inside
+/// each side of the pane's `area`, or `area` whole under 6 columns.
+///
+/// The board pads its island 12 px, and one 9 px cell puts the text 10 px
+/// from the island's edge. A pane too narrow to spare the two columns keeps
+/// them for its text.
+pub(crate) fn stack_rect(area: Rect) -> Rect {
+    if area.width < 6 {
+        return area;
+    }
+    Rect::new(area.x + 1, area.y, area.width - 2, area.height)
 }
 
 #[cfg(test)]

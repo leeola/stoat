@@ -11644,10 +11644,6 @@ fn run_wheel_scrolls_output_and_clamps() {
         .flat_map(|i| format!("line{i}\n").into_bytes())
         .collect();
     let run_id = open_run_with_output(&mut h, &output);
-    // Pin a short pane (the captures inside the helper re-layout it to the
-    // full terminal) so the 16 output rows overflow the 9 visible rows.
-    let pane_id = h.stoat.active_workspace().panes.focus();
-    h.stoat.active_workspace_mut().panes.pane_mut(pane_id).area = Rect::new(0, 0, 40, 10);
     let offset = |h: &crate::test_harness::TestHarness| {
         h.stoat
             .active_workspace()
@@ -11680,8 +11676,6 @@ fn run_submit_resets_scroll_offset() {
         .flat_map(|i| format!("line{i}\n").into_bytes())
         .collect();
     let run_id = open_run_with_output(&mut h, &output);
-    let pane_id = h.stoat.active_workspace().panes.focus();
-    h.stoat.active_workspace_mut().panes.pane_mut(pane_id).area = Rect::new(0, 0, 40, 10);
 
     h.stoat.update(mouse_event(MouseEventKind::ScrollUp, 1, 1));
     assert!(
@@ -11763,12 +11757,18 @@ fn a_run_pane_keeps_one_scrollback_across_its_blocks() {
     );
 }
 
+/// Open a Run pane, run `ls`, and give its block `output`, in a pane pinned to
+/// 40 by 10 cells.
+///
+/// Each capture lays the panes out again over the whole terminal, so the pin
+/// comes after the last one, and a press or a wheel notch reads the pinned
+/// pane.
 fn open_run_with_output(h: &mut crate::test_harness::TestHarness, output: &[u8]) -> RunId {
     let run_id = h.open_run();
-    let pane_id = h.stoat.active_workspace().panes.focus();
-    h.stoat.active_workspace_mut().panes.pane_mut(pane_id).area = Rect::new(0, 0, 40, 10);
     h.submit_run("ls");
     h.inject_run_output(run_id, output);
+    let pane_id = h.stoat.active_workspace().panes.focus();
+    h.stoat.active_workspace_mut().panes.pane_mut(pane_id).area = Rect::new(0, 0, 40, 10);
     run_id
 }
 
@@ -13006,7 +13006,7 @@ fn mouse_down_anchors_run_pane_selection() {
     let mut h = Stoat::test();
     let run_id = open_run_with_output(&mut h, b"hello\n");
     h.stoat
-        .update(mouse_event(MouseEventKind::Down(MouseButton::Left), 2, 1));
+        .update(mouse_event(MouseEventKind::Down(MouseButton::Left), 4, 8));
     let ws = h.stoat.active_workspace();
     let block = ws
         .runs
@@ -13030,9 +13030,9 @@ fn mouse_drag_updates_run_pane_selection_head() {
     // (the trailing blank row after the final newline is not rendered).
     let run_id = open_run_with_output(&mut h, b"hello\nworld\n");
     h.stoat
-        .update(mouse_event(MouseEventKind::Down(MouseButton::Left), 1, 1));
+        .update(mouse_event(MouseEventKind::Down(MouseButton::Left), 3, 7));
     h.stoat
-        .update(mouse_event(MouseEventKind::Drag(MouseButton::Left), 4, 2));
+        .update(mouse_event(MouseEventKind::Drag(MouseButton::Left), 6, 8));
     let ws = h.stoat.active_workspace();
     let block = ws
         .runs
@@ -13054,10 +13054,10 @@ fn a_plain_click_release_clears_the_run_pane_selection() {
     let mut h = Stoat::test();
     let run_id = open_run_with_output(&mut h, b"hello\n");
     h.stoat
-        .update(mouse_event(MouseEventKind::Down(MouseButton::Left), 3, 1));
+        .update(mouse_event(MouseEventKind::Down(MouseButton::Left), 5, 8));
     let release = h
         .stoat
-        .update(mouse_event(MouseEventKind::Up(MouseButton::Left), 3, 1));
+        .update(mouse_event(MouseEventKind::Up(MouseButton::Left), 5, 8));
     let ws = h.stoat.active_workspace();
     let block = ws
         .runs
@@ -13077,12 +13077,12 @@ fn a_run_pane_drag_copies_and_drops_its_selection() {
     let mut h = Stoat::test();
     let run_id = open_run_with_output(&mut h, b"hello\n");
     h.stoat
-        .update(mouse_event(MouseEventKind::Down(MouseButton::Left), 0, 1));
+        .update(mouse_event(MouseEventKind::Down(MouseButton::Left), 2, 8));
     h.stoat
-        .update(mouse_event(MouseEventKind::Drag(MouseButton::Left), 4, 1));
+        .update(mouse_event(MouseEventKind::Drag(MouseButton::Left), 6, 8));
     let release = h
         .stoat
-        .update(mouse_event(MouseEventKind::Up(MouseButton::Left), 4, 1));
+        .update(mouse_event(MouseEventKind::Up(MouseButton::Left), 6, 8));
     let ws = h.stoat.active_workspace();
     let selection = ws
         .runs
@@ -13113,7 +13113,7 @@ fn a_run_pane_drag_copies_and_drops_its_selection() {
 fn mouse_down_outside_active_block_does_not_select() {
     let mut h = Stoat::test();
     let run_id = open_run_with_output(&mut h, b"hello\n");
-    for (col, row) in [(2u16, 0u16), (2, 3), (2, 9), (50, 1)] {
+    for (col, row) in [(4u16, 0u16), (4, 7), (4, 9), (1, 8), (52, 8)] {
         h.stoat.update(mouse_event(
             MouseEventKind::Down(MouseButton::Left),
             col,
@@ -13138,7 +13138,7 @@ fn mouse_drag_without_prior_down_is_noop() {
     let mut h = Stoat::test();
     let run_id = open_run_with_output(&mut h, b"hello\n");
     h.stoat
-        .update(mouse_event(MouseEventKind::Drag(MouseButton::Left), 2, 1));
+        .update(mouse_event(MouseEventKind::Drag(MouseButton::Left), 4, 8));
     let ws = h.stoat.active_workspace();
     let block = ws
         .runs
@@ -13167,11 +13167,11 @@ fn mouse_up_after_drag_writes_selection_to_clipboard() {
     let mut h = Stoat::test();
     let _ = open_run_with_output(&mut h, b"hello\n");
     h.stoat
-        .update(mouse_event(MouseEventKind::Down(MouseButton::Left), 1, 1));
+        .update(mouse_event(MouseEventKind::Down(MouseButton::Left), 3, 8));
     h.stoat
-        .update(mouse_event(MouseEventKind::Drag(MouseButton::Left), 3, 1));
+        .update(mouse_event(MouseEventKind::Drag(MouseButton::Left), 5, 8));
     h.stoat
-        .update(mouse_event(MouseEventKind::Up(MouseButton::Left), 3, 1));
+        .update(mouse_event(MouseEventKind::Up(MouseButton::Left), 5, 8));
     assert_eq!(h.fake_clipboard().writes(), vec!["ell"]);
 }
 
@@ -13180,9 +13180,9 @@ fn mouse_up_without_drag_skips_clipboard() {
     let mut h = Stoat::test();
     let _ = open_run_with_output(&mut h, b"hello\n");
     h.stoat
-        .update(mouse_event(MouseEventKind::Down(MouseButton::Left), 2, 1));
+        .update(mouse_event(MouseEventKind::Down(MouseButton::Left), 4, 8));
     h.stoat
-        .update(mouse_event(MouseEventKind::Up(MouseButton::Left), 2, 1));
+        .update(mouse_event(MouseEventKind::Up(MouseButton::Left), 4, 8));
     assert!(h.fake_clipboard().writes().is_empty());
 }
 
@@ -13191,7 +13191,7 @@ fn mouse_up_with_no_selection_skips_clipboard() {
     let mut h = Stoat::test();
     let _ = open_run_with_output(&mut h, b"hello\n");
     h.stoat
-        .update(mouse_event(MouseEventKind::Up(MouseButton::Left), 2, 1));
+        .update(mouse_event(MouseEventKind::Up(MouseButton::Left), 4, 8));
     assert!(h.fake_clipboard().writes().is_empty());
 }
 
@@ -13200,21 +13200,21 @@ fn mouse_up_multi_row_drag_writes_joined_lines() {
     let mut h = Stoat::test();
     let _ = open_run_with_output(&mut h, b"foo\nbar\n");
     h.stoat
-        .update(mouse_event(MouseEventKind::Down(MouseButton::Left), 1, 1));
+        .update(mouse_event(MouseEventKind::Down(MouseButton::Left), 3, 7));
     h.stoat
-        .update(mouse_event(MouseEventKind::Drag(MouseButton::Left), 1, 2));
+        .update(mouse_event(MouseEventKind::Drag(MouseButton::Left), 3, 8));
     h.stoat
-        .update(mouse_event(MouseEventKind::Up(MouseButton::Left), 1, 2));
+        .update(mouse_event(MouseEventKind::Up(MouseButton::Left), 3, 8));
     assert_eq!(h.fake_clipboard().writes(), vec!["oo\nba"]);
 }
 
 fn drag_select_ell_in_hello(h: &mut crate::test_harness::TestHarness) {
     h.stoat
-        .update(mouse_event(MouseEventKind::Down(MouseButton::Left), 1, 1));
+        .update(mouse_event(MouseEventKind::Down(MouseButton::Left), 3, 8));
     h.stoat
-        .update(mouse_event(MouseEventKind::Drag(MouseButton::Left), 3, 1));
+        .update(mouse_event(MouseEventKind::Drag(MouseButton::Left), 5, 8));
     h.stoat
-        .update(mouse_event(MouseEventKind::Up(MouseButton::Left), 3, 1));
+        .update(mouse_event(MouseEventKind::Up(MouseButton::Left), 5, 8));
 }
 
 #[test]

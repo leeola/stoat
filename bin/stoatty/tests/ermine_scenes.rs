@@ -2255,9 +2255,10 @@ fn the_pane_picker_badge_draws_the_accent_box() {
 /// A line typed at a Run pane runs in a bash of its own, and the pane shows
 /// the line's output under its header and nothing past it.
 ///
-/// `<Space>t` turns the lone pane into a Run pane, which starts at column 1
-/// and row 2. The line's header takes row 2, its output `ok` takes row 3, and
-/// the row under the output stays blank.
+/// `<Space>t` turns the lone pane into a Run pane, whose prompt takes row 47.
+/// The stack sits on the prompt, so the line's header takes row 45 and its
+/// output `ok` row 46 from column 3, in the dim text color. The row over the
+/// header stays blank.
 #[test]
 fn a_run_pane_line_runs_in_its_own_bash() {
     let mut home = support::scratch_home();
@@ -2268,13 +2269,15 @@ fn a_run_pane_line_runs_in_its_own_bash() {
         "<Space>t<Settle>echo ok<Enter><Settle:500>",
     );
 
-    let output = pixels_of(&shot, cell_rect(1, 3, 2, 1), TEXT);
-    let under = pixels_of(&shot, cell_rect(1, 4, 2, 1), TEXT);
-    if output == 0 || under > 0 {
+    let output = pixels_of(&shot, cell_rect(3, 46, 2, 1), TEXT_DIM);
+    let above = brightest(&shot, cell_rect(1, 44, 100, 1));
+    let base = BASE.into_iter().max().unwrap_or_default();
+    if output == 0 || above > base {
         let frame = keep_frame(&shot, &mut home, "run_pane_own_bash");
         panic!(
-            "the output row reads {output} text pixels in cells 1 and 2, and the row under it \
-             {under}; want text on the output row alone; the frame is {}",
+            "the output row reads {output} dim text pixels in cells 3 and 4, and the row over \
+             the header peaks at {above}; want dim text on the output row and a blank row over \
+             the header; the frame is {}",
             frame.display(),
         );
     }
@@ -2283,9 +2286,9 @@ fn a_run_pane_line_runs_in_its_own_bash() {
 /// A Run Block's header ends in its status at the pane's right end, and the
 /// prompt carries no exit flag.
 ///
-/// `echo ok` and `false` run in the lone Run pane, so the headers take rows 2
-/// and 4. The right end of the first holds the green success mark and the
-/// second the red failure mark, each beside its runtime in gray ink. The
+/// `echo ok` and `false` run in the lone Run pane, and the stack sits on the
+/// prompt, so the headers take rows 44 and 46. The right end of the first holds the green success
+/// mark and the second the red failure mark, each beside its runtime in gray ink. The
 /// prompt row, the pane's last, holds no red pixel, because the status carries
 /// the exit.
 ///
@@ -2311,7 +2314,7 @@ fn the_run_block_header_ends_in_its_status() {
         let (low, high) = (r.min(g).min(b), r.max(g).max(b));
         high > 70 && high - low < 24
     };
-    let [ok, failed] = [2, 4].map(|row| cell_rect(129, row, 30, 1));
+    let [ok, failed] = [44, 46].map(|row| cell_rect(128, row, 30, 1));
     let marks = [
         pixels_where(&shot, ok, green),
         pixels_where(&shot, failed, red),
@@ -2320,7 +2323,7 @@ fn the_run_block_header_ends_in_its_status() {
         pixels_where(&shot, ok, gray),
         pixels_where(&shot, failed, gray),
     ];
-    let flag = pixels_where(&shot, cell_rect(1, 47, 40, 1), red);
+    let flag = pixels_where(&shot, cell_rect(2, 47, 40, 1), red);
     if marks.contains(&0) || runtimes.contains(&0) || flag > 0 {
         let frame = keep_frame(&shot, &mut home, "run_block_status");
         panic!(
@@ -2330,6 +2333,93 @@ fn the_run_block_header_ends_in_its_status() {
             frame.display(),
         );
     }
+}
+
+/// A Run pane's stack sits on its prompt one column inside the pane, between
+/// the rule that ends its block and the rule over the prompt.
+///
+/// `echo ok` runs in the lone Run pane, columns 1 to 158 and rows 2 to 47, so
+/// the header takes row 45, the output row 46, and the prompt row 47. The
+/// block's rule is the last pixel row of row 46 and the prompt's rule the
+/// first pixel row of row 47, both across the inset from x 18. The column left
+/// of the inset keeps the base there, as do the empty pane over the stack and
+/// the left edge of a passed block's body. The output starts at column 3 in
+/// the dim text color.
+#[test]
+fn the_run_stack_sits_on_the_prompt_between_two_rules() {
+    let mut home = support::scratch_home();
+    let shot = settled_frame(
+        home.path(),
+        "basic-diff",
+        "unstaged.txt",
+        "<Space>t<Settle>echo ok<Enter><Settle:500>",
+    );
+
+    expect_region(
+        &shot,
+        &mut home,
+        (18, 846, 1404, 1),
+        HAIRLINE,
+        "run_prompt_rule",
+    );
+    expect_region(
+        &shot,
+        &mut home,
+        (18, 845, 1404, 1),
+        RAISED,
+        "run_block_rule",
+    );
+    expect_region(&shot, &mut home, (9, 845, 9, 2), BASE, "run_rule_inset");
+    expect_region(
+        &shot,
+        &mut home,
+        cell_rect(2, 20, 100, 20),
+        BASE,
+        "run_empty_pane",
+    );
+    expect_region(&shot, &mut home, (18, 829, 2, 15), BASE, "run_passed_body");
+
+    let output = pixels_of(&shot, cell_rect(3, 46, 2, 1), TEXT_DIM);
+    let gutter = pixels_of(&shot, cell_rect(2, 46, 1, 1), TEXT_DIM);
+    if output == 0 || gutter > 0 {
+        let frame = keep_frame(&shot, &mut home, "run_stack_output");
+        panic!(
+            "the output reads {output} dim text pixels in cells 3 and 4 and {gutter} in cell 2; \
+             want the output to start at cell 3; the frame is {}",
+            frame.display(),
+        );
+    }
+}
+
+/// A failed block's body carries the danger bar at the inset's left edge.
+///
+/// `echo boom; false` prints `boom` on row 46 and exits 1. The bar covers the
+/// two pixels from x 18 on that row, and the two pixels right of it keep the
+/// base.
+#[test]
+fn a_failed_body_carries_the_danger_bar_in_pixels() {
+    let mut home = support::scratch_home();
+    let shot = settled_frame(
+        home.path(),
+        "basic-diff",
+        "unstaged.txt",
+        "<Space>t<Settle>echo boom; false<Enter><Settle:500>",
+    );
+
+    expect_region(
+        &shot,
+        &mut home,
+        (18, 829, 2, 15),
+        DANGER,
+        "run_failure_bar",
+    );
+    expect_region(
+        &shot,
+        &mut home,
+        (20, 829, 2, 15),
+        BASE,
+        "run_failure_bar_edge",
+    );
 }
 
 /// The which-key box docks on the status bar as a card on the raised surface.

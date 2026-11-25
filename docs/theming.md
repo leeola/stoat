@@ -264,6 +264,12 @@ The typed UI scopes, by group (syntax scopes are open-ended):
   names the active scope, such as the file finder's pill of the list on show.
 - `ui.highlight.read`, `ui.highlight.write` -- symbol-occurrence highlights.
 - `ui.border.focused`, `ui.border.inactive` -- pane and modal borders.
+- `ui.run.rule`, `ui.run.prompt.rule` -- the hairlines of a Run pane inside
+  stoatty. The foreground of `ui.run.rule` draws the rule under each block of
+  the stack, and the foreground of `ui.run.prompt.rule` the rule over the
+  prompt. A theme that leaves `ui.run.rule` unset draws no rule under a
+  block, and one that leaves `ui.run.prompt.rule` unset draws the prompt's
+  rule in the `ui.divider` foreground, as default_dark does.
 - `ui.readonly.label`, `ui.readonly.frame` -- the label and the dashed ring
   a read-only editor pane draws inside stoatty. default_dark leaves both
   unset, so its read-only panes draw neither.

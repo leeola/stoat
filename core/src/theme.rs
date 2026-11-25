@@ -904,6 +904,12 @@ pub mod scope {
     /// The faint track a meter fills over, such as the stat bar of a file row
     /// in the commits view.
     pub const UI_DIVIDER: &str = "ui.divider";
+    /// The rule under each block of a Run pane's stack. A theme that leaves it
+    /// unset draws no rule under a block.
+    pub const UI_RUN_RULE: &str = "ui.run.rule";
+    /// The rule over a Run pane's prompt. A theme that leaves it unset draws
+    /// the rule in [`UI_DIVIDER`].
+    pub const UI_RUN_PROMPT_RULE: &str = "ui.run.prompt.rule";
 
     pub const UI_PANEL_ISLAND: &str = "ui.panel.island";
     pub const UI_PANEL_POPOUT: &str = "ui.panel.popout";
