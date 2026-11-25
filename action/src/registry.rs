@@ -139,8 +139,8 @@ use crate::{
             ToggleStageLine,
         },
         run::{
-            OpenRun, Run, RunHistoryNext, RunHistoryPrev, RunInterrupt, RunModalDismiss, RunSubmit,
-            RunToggleView,
+            OpenRun, Run, RunAgain, RunBlockToPane, RunHistoryNext, RunHistoryPrev, RunInterrupt,
+            RunModalDismiss, RunSubmit, RunToggleView,
         },
         set_theme::SetTheme,
         tab::{
@@ -1049,6 +1049,8 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
     add(RunSubmit::DEF, |_| Ok(Box::new(RunSubmit)));
     add(RunInterrupt::DEF, |_| Ok(Box::new(RunInterrupt)));
     add(RunToggleView::DEF, |_| Ok(Box::new(RunToggleView)));
+    add(RunAgain::DEF, |_| Ok(Box::new(RunAgain)));
+    add(RunBlockToPane::DEF, |_| Ok(Box::new(RunBlockToPane)));
     add(RunModalDismiss::DEF, |_| Ok(Box::new(RunModalDismiss)));
     add(RunHistoryPrev::DEF, |_| Ok(Box::new(RunHistoryPrev)));
     add(RunHistoryNext::DEF, |_| Ok(Box::new(RunHistoryNext)));
@@ -1634,6 +1636,8 @@ mod tests {
         "RunSubmit",
         "RunInterrupt",
         "RunToggleView",
+        "RunAgain",
+        "RunBlockToPane",
         "RunModalDismiss",
         "RunHistoryPrev",
         "RunHistoryNext",
@@ -2392,7 +2396,8 @@ mod tests {
         // + 1 Notify.
         // + 1 PaletteRefresh.
         // + 1 RunToggleView.
-        assert_eq!(all().count(), 521);
+        // + 2 RunAgain/RunBlockToPane.
+        assert_eq!(all().count(), 523);
     }
 
     #[test]

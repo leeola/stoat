@@ -383,6 +383,8 @@ action_kinds! {
     RunSubmit,
     RunInterrupt,
     RunToggleView,
+    RunAgain,
+    RunBlockToPane,
     RunModalDismiss,
     Run,
     SpawnClaude,

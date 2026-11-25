@@ -627,9 +627,23 @@ fn render_palette_run_block(
         .and_then(CmdReport::first_location)
         .is_some();
     let hints: &[(&str, &str)] = match (cmd.finished, located) {
-        (false, _) => &[("C-c", "interrupt"), ("Esc", "hide (keeps running)")],
-        (true, true) => &[("Enter", "go to failure"), ("Esc", "close")],
-        (true, false) => &[("Enter", "open output"), ("Esc", "close")],
+        (false, _) => &[
+            ("C-o", "to Run pane"),
+            ("C-c", "interrupt"),
+            ("Esc", "hide (keeps running)"),
+        ],
+        (true, true) => &[
+            ("Enter", "go to failure"),
+            ("C-r", "run again"),
+            ("C-o", "to Run pane"),
+            ("Esc", "close"),
+        ],
+        (true, false) => &[
+            ("Enter", "open output"),
+            ("C-r", "run again"),
+            ("C-o", "to Run pane"),
+            ("Esc", "close"),
+        ],
     };
     let footer = Footer {
         hints,

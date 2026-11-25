@@ -205,8 +205,8 @@ impl RunState {
         spans + usize::from(self.has_hint(cmds))
     }
 
-    /// The hint row after the newest block's last row, which names the key
-    /// that goes to the block's first failure or error.
+    /// The hint row after the newest block's last row, which names the keys
+    /// that run the block again and that go to its first failure or error.
     ///
     /// `Some` when the newest Cmd finished and its report located a test
     /// failure or a build error, as [`CmdReport::first_location`] reads it.
@@ -215,6 +215,8 @@ impl RunState {
     pub(crate) fn hint(&self, cmds: &SlotMap<CmdId, Cmd>) -> Option<BodyRow> {
         self.has_hint(cmds).then(|| BodyRow {
             spans: vec![
+                ("C-r".to_owned(), Tone::Key),
+                (" run again \u{b7} ".to_owned(), Tone::Muted),
                 ("Enter".to_owned(), Tone::Key),
                 (" go to failure".to_owned(), Tone::Muted),
             ],

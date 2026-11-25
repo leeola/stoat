@@ -48,6 +48,33 @@ define_action!(
 );
 
 define_action!(
+    RunAgainDef,
+    RunAgain,
+    "RunAgain",
+    ActionKind::RunAgain,
+    "run the Cmd again",
+    "Run a finished Cmd again in place: the Cmd of the palette's Run Block, \
+     or the newest finished Cmd of the focused Run pane. The run starts with \
+     an empty output in the directory the Cmd first ran in, and its status \
+     names the run's count. A running Cmd stays as it is.",
+    ActionPriority::Normal,
+    palette_visible = false
+);
+
+define_action!(
+    RunBlockToPaneDef,
+    RunBlockToPane,
+    "RunBlockToPane",
+    ActionKind::RunBlockToPane,
+    "move the Cmd to the Run pane",
+    "Move the Cmd of the palette's Run Block, running or finished, onto a Run \
+     pane's stack and close the palette. The Run pane takes the focus, and \
+     its prompt takes typing.",
+    ActionPriority::Normal,
+    palette_visible = false
+);
+
+define_action!(
     RunModalDismissDef,
     RunModalDismiss,
     "RunModalDismiss",

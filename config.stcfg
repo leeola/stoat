@@ -935,6 +935,8 @@ on key {
         Escape -> CancelPromptInput();
         Enter -> SubmitPromptInput();
         t -> RunToggleView();
+        Ctrl-r -> RunAgain();
+        Ctrl-o -> RunBlockToPane();
     }
     # Every normal-mode modal block above is self-contained, binding only the
     # keys it handles. Without the modal guard this block's bindings stay live
@@ -1921,6 +1923,12 @@ on key {
     # the `!modal` guard leaves `t` to the modal.
     !modal && pane == run && mode == normal {
         t -> RunToggleView();
+        Ctrl-r -> RunAgain();
+    }
+    # The guard leaves Ctrl-r to the palette's register insert and to its pick
+    # list while the palette stands over the Run pane.
+    !modal && pane == run && mode == insert {
+        Ctrl-r -> RunAgain();
     }
     pane == run {
         Ctrl-c -> RunInterrupt();

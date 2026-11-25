@@ -1381,7 +1381,7 @@ pub(crate) fn close_palette(stoat: &mut Stoat) -> bool {
 
 /// Dispose the editors of `palette`, a palette out of
 /// [`Stoat::command_palette`], and end the history walk.
-fn dispose_palette(stoat: &mut Stoat, palette: CommandPalette) {
+pub(super) fn dispose_palette(stoat: &mut Stoat, palette: CommandPalette) {
     let ws = stoat.active_workspace_mut();
     palette.dispose(ws);
     ws.palette_history.reset();
@@ -1658,8 +1658,14 @@ mod tests {
         let names = |line: &str, keys: &str| (line.contains(keys), line.contains("Jobs"));
         assert_eq!(
             [
-                names(&running, "C-c interrupt  Esc hide (keeps running)"),
-                names(&finished, "Enter open output  Esc close"),
+                names(
+                    &running,
+                    "C-o to Run pane  C-c interrupt  Esc hide (keeps running)"
+                ),
+                names(
+                    &finished,
+                    "Enter open output  C-r run again  C-o to Run pane  Esc close"
+                ),
             ],
             [(true, false); 2],
         );

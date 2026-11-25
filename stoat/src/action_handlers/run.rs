@@ -11,7 +11,7 @@ use crate::{
         cargo::CmdReport,
         kind::{self, CargoKind, RunKind},
         pty::{self, CmdEnv, CmdSink},
-        Cmd, CmdId, RunId, RunState,
+        Cmd, CmdId, RunId, RunState, VtermGrid,
     },
     theme::scope,
     workspace::Workspace,
@@ -237,6 +237,62 @@ pub(super) fn run_toggle_view(stoat: &mut Stoat) -> UpdateEffect {
         return UpdateEffect::None;
     };
     cmd.raw_view = !cmd.raw_view;
+    UpdateEffect::Redraw
+}
+
+/// Run a finished Cmd again in place, the Cmd of the palette's Run Block when
+/// the stage shows, else the newest finished Cmd of the focused Run pane's
+/// stack.
+///
+/// A running Cmd of the Run Block stays as it is, and so does a Run pane with
+/// no finished Cmd. The Cmd keeps its place, as [`restart_cmd`] starts it.
+pub(super) fn run_again(stoat: &mut Stoat) -> UpdateEffect {
+    let ws = stoat.active_workspace();
+    let finished = |id: &CmdId| ws.cmds.get(*id).is_some_and(|cmd| cmd.finished);
+    let id = match stoat.run_block_cmd() {
+        Some(shown) => Some(shown).filter(finished),
+        None => {
+            let View::Run(run) = ws.panes.pane(ws.panes.focus()).view else {
+                return UpdateEffect::None;
+            };
+            ws.runs
+                .get(run)
+                .and_then(|run_state| run_state.blocks.iter().rev().copied().find(finished))
+        },
+    };
+    let Some(id) = id else {
+        return UpdateEffect::None;
+    };
+    restart_cmd(stoat, id);
+    UpdateEffect::Redraw
+}
+
+/// Start the next run of the Cmd `id` with an empty output, in the directory
+/// and in the place where it ran before.
+fn restart_cmd(stoat: &mut Stoat, id: CmdId) {
+    let Some(cmd) = stoat.active_workspace_mut().cmds.get_mut(id) else {
+        return;
+    };
+    cmd.grid = VtermGrid::new(cmd.grid.width());
+    cmd.selection = None;
+    start_process(stoat, id);
+}
+
+/// Move the Cmd of the palette's Run Block, running or finished, onto a Run
+/// pane's stack, and close the palette.
+///
+/// The Cmd stays in the store and its process runs on. The Run pane, as
+/// [`append_to_run_pane`] picks it, takes the focus and its prompt takes
+/// typing.
+pub(super) fn run_block_to_pane(stoat: &mut Stoat) -> UpdateEffect {
+    let Some(cmd) = stoat.run_block_cmd() else {
+        return UpdateEffect::None;
+    };
+    let Some(palette) = stoat.command_palette.take() else {
+        return UpdateEffect::None;
+    };
+    super::palette::dispose_palette(stoat, palette);
+    append_to_run_pane(stoat, cmd, true);
     UpdateEffect::Redraw
 }
 
@@ -524,23 +580,28 @@ fn cd_path(line: &str) -> Option<&str> {
 mod tests {
     use crate::{
         app::Stoat,
+        host::FakeTerminalSession,
         pane::View,
         render::paint::style_rgb,
         run::{
             cargo::{ERROR_AND_WARNING, ONE_FAILURE, THREE_BINARIES},
             vterm::BodyRow,
-            CmdId, PtyNotification,
+            CmdId, GridSelection, PtyNotification,
         },
         test_harness::{editor, CmdHandle, TestHarness},
         theme::scope,
     };
     use futures::FutureExt;
-    use std::{path::PathBuf, time::Duration};
+    use std::{path::PathBuf, sync::Arc, time::Duration};
     use stoatty_protocol::command::{self, Command};
 
     /// The file that the failure and the error of the samples name, under the
     /// root `/work`.
     const CHROME: &str = "/work/stoat/src/render/chrome.rs";
+
+    /// The user command `hello`, which runs `echo hi` under the default
+    /// `block` output.
+    const HELLO: &str = r#"command hello { run = shell("echo hi"); }"#;
 
     /// The program, the arguments, the cwd, and the last variable of a spawn of
     /// the fake terminal host.
@@ -1112,7 +1173,7 @@ mod tests {
                         "  assertion `left == right` failed  left: 18  right: 16".to_owned(),
                         format!("\u{22ef} {lines} lines of output \u{b7} t terminal view"),
                     ]),
-                    Some("Enter go to failure".to_owned()),
+                    Some("C-r run again \u{b7} Enter go to failure".to_owned()),
                 ),
             ),
         );
@@ -1303,7 +1364,7 @@ mod tests {
                         "\u{25b2} unused variable: `width`   chrome.rs:210".to_owned(),
                         format!("\u{22ef} {lines} lines of output \u{b7} t terminal view"),
                     ]),
-                    Some("Enter go to failure".to_owned()),
+                    Some("C-r run again \u{b7} Enter go to failure".to_owned()),
                 ),
             ),
         );
@@ -1416,6 +1477,276 @@ mod tests {
         assert_eq!(
             h.stoat.pending_message.as_deref(),
             Some("no file stoat/src/render/chrome.rs"),
+        );
+    }
+
+    /// A harness with the user command [`HELLO`] loaded.
+    fn with_hello() -> TestHarness {
+        let mut h = Stoat::test();
+        h.stoat.reload_user_config(HELLO);
+        h
+    }
+
+    /// Run `hello` from the palette with Enter, with a fresh fake session queued
+    /// for its process, and answer the Run Block's Cmd and the session.
+    fn enter_hello(h: &mut TestHarness) -> (CmdId, Arc<FakeTerminalSession>) {
+        let session = Arc::new(FakeTerminalSession::new());
+        h.fake_terminal_host().push_session(session.clone());
+        super::super::dispatch(&mut h.stoat, &stoat_action::OpenCommandPalette);
+        h.type_text("hello");
+        h.type_keys("enter");
+        let cmd = h.stoat.run_block_cmd().expect("a Run Block");
+        (cmd, session)
+    }
+
+    /// The program and the arguments of each spawn of the fake terminal host.
+    fn programs(h: &TestHarness) -> Vec<(String, Vec<String>)> {
+        spawns(h)
+            .into_iter()
+            .map(|(program, args, ..)| (program, args))
+            .collect()
+    }
+
+    /// `Ctrl-r` at a Run pane's prompt runs its finished Cmd again in the same
+    /// block with an empty grid, and the block's status names the second run
+    /// once it ends.
+    #[test]
+    fn ctrl_r_runs_a_finished_cmd_again_in_its_block() {
+        let mut h = Stoat::test();
+        let run = h.open_run();
+        let handle = h.submit_run("make");
+        h.inject_cmd_output(handle.cmd, b"one\r\n");
+        h.inject_cmd_done(handle.cmd, 1);
+        h.stoat.active_workspace_mut().cmds[handle.cmd].selection = Some(GridSelection {
+            anchor: (0, 0),
+            head: (2, 0),
+        });
+        h.fake_terminal_host()
+            .push_session(Arc::new(FakeTerminalSession::new()));
+        h.type_keys("ctrl-r");
+
+        let restarted = {
+            let cmd = &h.stoat.active_workspace().cmds[handle.cmd];
+            (
+                cmd.finished,
+                cmd.run_count,
+                cmd.grid.rendered_line_count(),
+                cmd.selection.is_none(),
+            )
+        };
+        h.advance_clock(Duration::from_secs(151));
+        h.inject_cmd_done(handle.cmd, 0);
+        let make = ("bash".to_owned(), vec!["-c".to_owned(), "make".to_owned()]);
+        assert_eq!(
+            (
+                programs(&h),
+                h.stoat.active_workspace().runs[run].blocks.clone(),
+                restarted,
+                h.cmd_status(handle.cmd),
+            ),
+            (
+                vec![make.clone(), make],
+                vec![handle.cmd],
+                (false, 2, 0, true),
+                "\u{2713} 2:31 \u{b7} run 2".to_owned(),
+            ),
+        );
+    }
+
+    /// `Ctrl-r` leaves a running Cmd alone, at a Run pane's prompt and on the
+    /// palette's Run Block.
+    #[test]
+    fn ctrl_r_leaves_a_running_cmd_alone() {
+        let mut pane = Stoat::test();
+        pane.open_run();
+        let handle = pane.submit_run("sleep 9");
+        pane.type_keys("ctrl-r");
+
+        let mut block = with_hello();
+        let (cmd, _) = enter_hello(&mut block);
+        block.type_keys("ctrl-r");
+
+        let runs = |h: &TestHarness, cmd: CmdId| {
+            (
+                spawns(h).len(),
+                h.stoat.active_workspace().cmds[cmd].run_count,
+            )
+        };
+        assert_eq!([runs(&pane, handle.cmd), runs(&block, cmd)], [(1, 1); 2]);
+    }
+
+    /// `Ctrl-r` in a Run pane's normal mode runs the newest finished Cmd of the
+    /// stack again, and the older one keeps its run.
+    #[test]
+    fn ctrl_r_in_normal_mode_runs_the_newest_finished_cmd() {
+        let mut h = Stoat::test();
+        h.open_run();
+        let [older, newer] = ["make", "ls"].map(|line| {
+            let handle = h.submit_run(line);
+            h.inject_cmd_done(handle.cmd, 0);
+            handle.cmd
+        });
+        h.type_keys("escape ctrl-r");
+
+        let ws = h.stoat.active_workspace();
+        assert_eq!([ws.cmds[older].run_count, ws.cmds[newer].run_count], [1, 2]);
+    }
+
+    /// Output that the first run's reader sends after the restart never lands
+    /// in the second run's grid.
+    #[test]
+    fn output_of_the_first_run_does_not_reach_the_second() {
+        let mut h = Stoat::test();
+        h.open_run();
+        let handle = h.submit_run("make");
+        h.inject_cmd_done(handle.cmd, 1);
+        h.type_keys("ctrl-r");
+        h.stoat.handle_pty_notification(PtyNotification::CmdOutput {
+            workspace: h.stoat.active_workspace,
+            cmd: handle.cmd,
+            run: 1,
+            data: b"stale\r\n".to_vec(),
+        });
+
+        let cmd = &h.stoat.active_workspace().cmds[handle.cmd];
+        assert_eq!((cmd.run_count, cmd.grid.rendered_line_count()), (2, 0));
+    }
+
+    /// `Ctrl-r` on the palette's finished Run Block runs its Cmd again, and the
+    /// palette stays open on it.
+    #[test]
+    fn ctrl_r_on_the_palette_block_runs_it_again_in_place() {
+        let mut h = with_hello();
+        let (cmd, _) = enter_hello(&mut h);
+        h.inject_cmd_done(cmd, 0);
+        h.type_keys("ctrl-r");
+
+        let shown = &h.stoat.active_workspace().cmds[cmd];
+        assert_eq!(
+            (h.stoat.run_block_cmd(), shown.finished, shown.run_count),
+            (Some(cmd), false, 2),
+        );
+    }
+
+    /// `Ctrl-r` in the palette's typing stage over a Run pane with a finished
+    /// Cmd stays the palette's, so no Cmd runs again.
+    #[test]
+    fn ctrl_r_in_the_typing_stage_over_a_run_pane_runs_no_cmd() {
+        let mut h = Stoat::test();
+        h.open_run();
+        let handle = h.submit_run("make");
+        h.inject_cmd_done(handle.cmd, 0);
+        super::super::dispatch(&mut h.stoat, &stoat_action::OpenCommandPalette);
+        h.type_keys("ctrl-r");
+        assert_eq!(
+            (
+                spawns(&h).len(),
+                h.stoat.active_workspace().cmds[handle.cmd].run_count
+            ),
+            (1, 1),
+        );
+    }
+
+    /// `Ctrl-o` moves the running Run Block's Cmd onto the stack of a new Run
+    /// pane under the editor pane, which takes the focus in insert mode. The
+    /// Cmd runs on, its later output reaches it, and the palette's input goes.
+    #[test]
+    fn ctrl_o_moves_a_running_block_into_a_new_run_pane() {
+        let mut h = with_hello();
+        let (cmd, session) = enter_hello(&mut h);
+        let input = h
+            .stoat
+            .command_palette
+            .as_ref()
+            .expect("the palette is open")
+            .input
+            .editor_id;
+        h.type_keys("ctrl-o");
+        h.inject_cmd_output(cmd, b"later\r\n");
+
+        let ws = h.stoat.active_workspace();
+        let lower = ws
+            .panes
+            .split_panes()
+            .max_by_key(|(_, pane)| pane.area.y)
+            .map(|(id, _)| id)
+            .expect("a split pane");
+        let View::Run(run) = ws.panes.pane(lower).view else {
+            panic!("the lower pane shows a Run pane");
+        };
+        let last_row = {
+            let grid = &ws.cmds[cmd].grid;
+            let rows = grid.rendered_line_count();
+            grid.text_in(0..usize::from(grid.width()), rows - 1..rows)
+        };
+        assert_eq!(
+            (
+                h.stoat.command_palette.is_none(),
+                ws.editors.contains_key(input),
+                ws.panes.split_panes().count(),
+                ws.runs[run].blocks.clone(),
+                ws.panes.focus() == lower,
+                h.stoat.focused_mode(),
+                session.was_killed(),
+                last_row,
+            ),
+            (
+                true,
+                false,
+                2,
+                vec![cmd],
+                true,
+                "insert",
+                false,
+                "later".to_owned()
+            ),
+        );
+    }
+
+    /// `Ctrl-o` puts the Run Block's Cmd on the stack of the Run pane on show,
+    /// and no pane opens.
+    #[test]
+    fn ctrl_o_appends_to_the_run_pane_that_shows() {
+        let mut h = with_hello();
+        super::super::dispatch(&mut h.stoat, &stoat_action::SplitRight);
+        let run = h.open_run();
+        h.submit_run("ls");
+        super::super::dispatch(&mut h.stoat, &stoat_action::FocusLeft);
+        let (cmd, _) = enter_hello(&mut h);
+        h.type_keys("ctrl-o");
+
+        let ws = h.stoat.active_workspace();
+        let stack = &ws.runs[run].blocks;
+        assert_eq!(
+            (
+                ws.panes.split_panes().count(),
+                stack.len(),
+                stack.last().copied()
+            ),
+            (2, 2, Some(cmd)),
+        );
+    }
+
+    #[test]
+    fn ctrl_o_moves_a_finished_block_too() {
+        let mut h = with_hello();
+        let (cmd, _) = enter_hello(&mut h);
+        h.inject_cmd_done(cmd, 0);
+        h.type_keys("ctrl-o");
+
+        let ws = h.stoat.active_workspace();
+        let stacked: Vec<CmdId> = ws
+            .runs
+            .values()
+            .flat_map(|run| run.blocks.clone())
+            .collect();
+        assert_eq!(
+            (
+                h.stoat.command_palette.is_none(),
+                stacked,
+                ws.cmds[cmd].finished
+            ),
+            (true, vec![cmd], true),
         );
     }
 }

@@ -1310,7 +1310,7 @@ mod tests {
                         .to_owned(),
                     "    assertion `left == right` failed  left: 18  right: 16".to_owned(),
                     format!("  \u{22ef} {lines} lines of output \u{b7} t terminal view"),
-                    "  Enter go to failure".to_owned(),
+                    "  C-r run again \u{b7} Enter go to failure".to_owned(),
                     " /w \u{276f}".to_owned(),
                 ],
                 vec![
