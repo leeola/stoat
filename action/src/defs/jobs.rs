@@ -129,3 +129,16 @@ define_action!(
     ActionPriority::Normal,
     palette_visible = false
 );
+
+define_action!(
+    JobRerunLastDef,
+    JobRerunLast,
+    "JobRerunLast",
+    ActionKind::JobRerunLast,
+    "run the last command again",
+    "Run the last Cmd of the workspace again in its place, a Job in the Job \
+     Tray or a block in its Run pane. The last Cmd is the one that started \
+     last among the Jobs and the blocks of the Run panes. A Cmd that still \
+     runs stays as it is, and the status says so.",
+    ActionPriority::Normal
+);

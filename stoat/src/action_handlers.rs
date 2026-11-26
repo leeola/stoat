@@ -1123,6 +1123,7 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
         ActionKind::JobDismiss => jobs::job_dismiss(stoat),
         ActionKind::Jobs => jobs::open_job_list(stoat),
         ActionKind::JobListScopeToggle => jobs::job_list_scope_toggle(stoat),
+        ActionKind::JobRerunLast => jobs::job_rerun_last(stoat),
         ActionKind::RunToggleView => run::run_toggle_view(stoat),
         ActionKind::RunAgain => run::run_again(stoat),
         ActionKind::RunBlockToPane => run::run_block_to_pane(stoat),

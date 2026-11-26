@@ -371,7 +371,9 @@ mod tests {
         sync::Arc,
         time::{Duration, Instant},
     };
-    use stoat_action::{ClosePane, CloseWorkspace, NewTab, RunSubmitJob, SplitRight, Terminal};
+    use stoat_action::{
+        ClosePane, CloseWorkspace, JobRerunLast, NewTab, RunSubmitJob, SplitRight, Terminal,
+    };
 
     /// The request for the alternate screen that a full-screen program writes
     /// first.
@@ -1220,5 +1222,109 @@ mod tests {
             (at_submit, ws.jobs.clone(), stubs),
             (Vec::new(), Vec::new(), vec![true])
         );
+    }
+
+    /// An ended block `echo a` of a Run pane and an ended Job `sleep 30` on
+    /// its stack, the Job started a second after the block when `job_newer`
+    /// and else the block a second after the Job, with the ids of the Job and
+    /// the block.
+    fn ended_pair(h: &mut TestHarness, job_newer: bool) -> (CmdId, CmdId) {
+        h.open_run();
+        let first = match job_newer {
+            true => h.submit_run("echo a").cmd,
+            false => h.push_job("sleep 30").cmd,
+        };
+        h.inject_cmd_done(first, 0);
+        h.advance_clock(Duration::from_secs(1));
+        let second = match job_newer {
+            true => h.push_job("sleep 30").cmd,
+            false => h.submit_run("echo a").cmd,
+        };
+        h.inject_cmd_done(second, 0);
+        match job_newer {
+            true => (second, first),
+            false => (first, second),
+        }
+    }
+
+    /// `Space J r` runs the Cmd that started last again in its place, a Job in
+    /// the tray or a block in its Run pane, and leaves the other as it was.
+    #[test]
+    fn space_j_r_runs_the_newest_cmd_again_in_its_place() {
+        let rerun = |job_newer: bool| {
+            let mut h = Stoat::test();
+            let (job, block) = ended_pair(&mut h, job_newer);
+            h.type_keys("escape space J r");
+
+            let ws = h.stoat.active_workspace();
+            let state = |id: CmdId| (ws.cmds[id].run_count, ws.cmds[id].finished);
+            let placed = ws.jobs == [job] && ws.runs[focused_run(&h)].blocks.contains(&block);
+            (state(job), state(block), placed)
+        };
+
+        assert_eq!(
+            [rerun(true), rerun(false)],
+            [((2, false), (1, true), true), ((1, true), (2, false), true)],
+        );
+    }
+
+    #[test]
+    fn space_j_r_on_a_running_cmd_says_still_running() {
+        let mut h = Stoat::test();
+        h.open_run();
+        h.submit_run("sleep 30");
+        let spawned = h.fake_terminal_host().spawns().len();
+        h.type_keys("escape space J r");
+
+        assert_eq!(
+            (
+                h.stoat.pending_message.as_deref(),
+                h.fake_terminal_host().spawns().len()
+            ),
+            (Some("still running"), spawned),
+        );
+    }
+
+    /// With no Cmd the status says so, and the key leaves no submenu open.
+    #[test]
+    fn space_j_r_with_no_cmd_says_so() {
+        let mut h = Stoat::test();
+        h.type_keys("space J r");
+
+        assert_eq!(
+            (h.stoat.pending_message.as_deref(), h.stoat.focused_mode()),
+            (Some("no command to run again"), "normal"),
+        );
+    }
+
+    /// A Job whose Run pane closed is in the tray alone, and it is the last
+    /// Cmd all the same, so it runs again there.
+    #[test]
+    fn space_j_r_runs_a_job_whose_run_pane_closed() {
+        let mut h = Stoat::test();
+        action_handlers::dispatch(&mut h.stoat, &SplitRight);
+        let job = h.push_job("sleep 30");
+        h.inject_cmd_done(job.cmd, 0);
+        action_handlers::dispatch(&mut h.stoat, &ClosePane);
+        h.type_keys("space J r");
+
+        let ws = h.stoat.active_workspace();
+        assert_eq!(
+            (ws.cmds[job.cmd].run_count, ws.jobs.clone()),
+            (2, vec![job.cmd]),
+        );
+    }
+
+    /// A Stub whose terminal tab the workspace still holds counts as running,
+    /// because its program runs on in that tab. The hand-off leaves the tab
+    /// focused, so the action goes by dispatch rather than by its keys.
+    #[test]
+    fn rerun_last_on_a_stub_with_a_live_tab_says_still_running() {
+        let mut h = Stoat::test();
+        h.open_run();
+        h.submit_run("htop");
+        action_handlers::dispatch(&mut h.stoat, &JobRerunLast);
+
+        assert_eq!(h.stoat.pending_message.as_deref(), Some("still running"));
     }
 }

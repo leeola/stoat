@@ -394,6 +394,7 @@ action_kinds! {
     JobDismiss,
     Jobs,
     JobListScopeToggle,
+    JobRerunLast,
     RunToggleView,
     RunAgain,
     RunBlockToPane,

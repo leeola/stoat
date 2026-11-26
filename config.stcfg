@@ -2057,6 +2057,7 @@ on key {
         Escape -> SetMode(normal);
         j -> Jobs() "jobs";
         k -> JobGlance() "glance";
+        r -> [JobRerunLast(), SetMode(normal)] "run again";
     }
     mode == space_clipboard {
         Escape -> SetMode(normal);

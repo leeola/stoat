@@ -135,6 +135,37 @@ pub(super) fn job_rerun(stoat: &mut Stoat) -> UpdateEffect {
     super::run::restart_cmd(stoat, id).merge(UpdateEffect::Redraw)
 }
 
+/// Run the last Cmd of the workspace again in its place, a Job in the tray
+/// and a block in its Run pane, as [`super::run::restart_cmd`] starts it.
+///
+/// The last Cmd is the one with the latest start among the Cmds that the
+/// tray or a stack of a Run pane names. A Cmd that runs, or a Stub whose
+/// terminal tab the workspace still holds, starts nothing, and the status
+/// says `still running`. With no such Cmd the status says
+/// `no command to run again`.
+pub(super) fn job_rerun_last(stoat: &mut Stoat) -> UpdateEffect {
+    let ws = stoat.active_workspace();
+    let last = ws
+        .jobs
+        .iter()
+        .chain(ws.runs.values().flat_map(|run| run.blocks.iter()))
+        .filter_map(|&id| Some((id, ws.cmds.get(id)?)))
+        .max_by_key(|(_, cmd)| cmd.started)
+        .map(|(id, cmd)| {
+            let tab_lives = cmd
+                .handoff
+                .as_ref()
+                .is_some_and(|handoff| ws.terms.contains_key(handoff.term));
+            (id, !cmd.finished || tab_lives)
+        });
+    match last {
+        None => stoat.set_status("no command to run again"),
+        Some((_, true)) => stoat.set_status("still running"),
+        Some((id, false)) => return super::run::restart_cmd(stoat, id).merge(UpdateEffect::Redraw),
+    }
+    UpdateEffect::Redraw
+}
+
 /// Interrupt the running Cmd that a Job key acts on and mark the run as one
 /// that the user stopped, keeping the Glance or the Job List open. On an
 /// ended Cmd the key closes the modal, as `Ctrl-c` closes each modal.

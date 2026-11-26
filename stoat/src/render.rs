@@ -5428,6 +5428,16 @@ mod lsp_filter_tests {
         );
     }
 
+    /// The `Space J` box names its keys with the config's short labels.
+    #[test]
+    fn the_job_box_names_its_keys() {
+        let mut h = TestHarness::with_size(150, 50);
+        assert_eq!(
+            chord_rows(&mut h, "space J"),
+            ["jobs", "glance", "run again"]
+        );
+    }
+
     /// Closing the only workspace is refused, so its row lists only once a
     /// second workspace gives the close somewhere to land.
     #[test]

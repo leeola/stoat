@@ -100,7 +100,7 @@ use crate::{
         help::{CloseHelp, DismissKeyHints, HelpScopeToggle, OpenHelp, ToggleKeyHints},
         jobs::{
             JobDismiss, JobGlance, JobGlanceClose, JobGlanceNext, JobGlancePrev, JobInterrupt,
-            JobListScopeToggle, JobOpen, JobRerun, Jobs,
+            JobListScopeToggle, JobOpen, JobRerun, JobRerunLast, Jobs,
         },
         lsp::{
             CodeAction, Format, FormatSelections, GotoDeclaration, GotoDefinition,
@@ -1066,6 +1066,7 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
     add(JobListScopeToggle::DEF, |_| {
         Ok(Box::new(JobListScopeToggle))
     });
+    add(JobRerunLast::DEF, |_| Ok(Box::new(JobRerunLast)));
     add(RunToggleView::DEF, |_| Ok(Box::new(RunToggleView)));
     add(RunAgain::DEF, |_| Ok(Box::new(RunAgain)));
     add(RunBlockToPane::DEF, |_| Ok(Box::new(RunBlockToPane)));
@@ -1667,6 +1668,7 @@ mod tests {
         "JobDismiss",
         "Jobs",
         "JobListScopeToggle",
+        "JobRerunLast",
         "RunToggleView",
         "RunAgain",
         "RunBlockToPane",
@@ -2436,7 +2438,7 @@ mod tests {
         // + 1 PaletteRefresh.
         // + 1 RunToggleView.
         // + 2 RunAgain/RunBlockToPane.
-        assert_eq!(all().count(), 537);
+        assert_eq!(all().count(), 538);
     }
 
     #[test]
