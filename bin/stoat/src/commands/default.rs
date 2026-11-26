@@ -375,10 +375,11 @@ fn run_tui(
     // from the render watch because `fill` page content must not coalesce or
     // drop; written to stdout by the UI thread right after each grid frame.
     let (apc_tx, apc_rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
-    // The UI thread's one report of whether a stoatty answered the startup ident
-    // handshake, which only it can run: the reply arrives on raw stdin, which
-    // that thread owns.
-    let (stoatty_tx, stoatty_rx) = tokio::sync::mpsc::unbounded_channel::<Option<u32>>();
+    // The UI thread's reports of whether a stoatty answered the ident handshake,
+    // which only it can run: the reply arrives on raw stdin, which that thread
+    // owns.
+    let (stoatty_tx, stoatty_rx) =
+        tokio::sync::mpsc::unbounded_channel::<Option<stoat::ui::StoattyPeer>>();
     // The tty's cell size, for the same reason: only that thread can ask it.
     let (cell_pixels_tx, cell_pixels_rx) =
         tokio::sync::mpsc::unbounded_channel::<Option<(u16, u16)>>();

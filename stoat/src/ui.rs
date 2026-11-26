@@ -220,11 +220,15 @@ pub struct UiChannels {
     pub render_rx: watch::Receiver<Option<RenderFrame>>,
     /// Ordered stoatty APC byte batches, written after each grid frame.
     pub apc_rx: UnboundedReceiver<Vec<u8>>,
-    /// The ident handshake's one-shot answer to the app: the peer's protocol
-    /// version when a stoatty replied, `None` when none did. The app learns it
-    /// no other way, since the handshake needs raw mode and sole ownership of
-    /// fd 0, both of which live on this thread.
-    pub stoatty_tx: UnboundedSender<Option<u32>>,
+    /// The ident handshake's answer to the app, the peer when a stoatty replied
+    /// and `None` when none did. The app learns it no other way, since the
+    /// handshake needs raw mode and sole ownership of fd 0, both of which live
+    /// on this thread.
+    ///
+    /// It goes once at startup, again for a terminal that attaches, and again
+    /// when a change of the cell size asks for the ident, as a move to a display
+    /// of another scale does.
+    pub stoatty_tx: UnboundedSender<Option<StoattyPeer>>,
     /// The tty's cell size, for the same reason, and unlike the handshake it
     /// goes again on every resize, since a window that changed size or font has
     /// changed the answer.
@@ -237,6 +241,20 @@ pub struct UiChannels {
     /// input-to-flush span ends on the clock it starts on.
     #[cfg(feature = "perf")]
     pub clock: Executor,
+}
+
+/// What a stoatty states about itself in its ident reply, the part the app
+/// keeps.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct StoattyPeer {
+    /// The peer's protocol version, which gates what the app may emit.
+    pub protocol: u32,
+    /// The peer's display scale in thousandths, or zero from a stoatty that
+    /// states none.
+    ///
+    /// A nudge is in logical px and the winsize gives a cell in physical px, so
+    /// a layout by pixels needs this ratio of the two.
+    pub scale: u32,
 }
 
 pub fn spawn(mut channels: UiChannels, mouse_captured: bool) -> thread::JoinHandle<io::Result<()>> {
@@ -426,7 +444,10 @@ async fn run(
                 crossterm::event::read,
                 tty::read_stdin,
                 tty::winsize,
-                identify_terminal,
+                Probes {
+                    handshake: identify_terminal,
+                    identify: stoatty_handshake,
+                },
                 || wait_idle(slot.wake_reader(), &winch),
             )
         }
@@ -607,7 +628,7 @@ async fn run(
 /// Returns [`stoatty_handshake`]'s two answers, then whether the terminal speaks
 /// the kitty keyboard protocol. Both probes read fd 0, so they run back to back
 /// on the thread that owns stdin at the time.
-fn identify_terminal() -> (Option<u32>, Vec<u8>, bool) {
+fn identify_terminal() -> (Option<StoattyPeer>, Vec<u8>, bool) {
     let (stoatty, typed) = stoatty_handshake();
     (stoatty, typed, query_keyboard())
 }
@@ -616,13 +637,13 @@ fn identify_terminal() -> (Option<u32>, Vec<u8>, bool) {
 ///
 /// Thin wrapper over [`detect::handshake`], which does the probing. This
 /// supplies stoat's own identity, logs the result, and narrows the reply to the
-/// peer's protocol version, which is all the app keeps.
+/// peer's protocol version and display scale, which is all the app keeps.
 ///
-/// Returns that version when a stoatty answered and `None` when none did, plus
+/// Returns that peer when a stoatty answered and `None` when none did, plus
 /// every byte read that was neither answer. Those are what someone typed while
 /// the probe owned fd 0, and the caller replays them rather than losing what was
 /// typed at launch.
-fn stoatty_handshake() -> (Option<u32>, Vec<u8>) {
+fn stoatty_handshake() -> (Option<StoattyPeer>, Vec<u8>) {
     let hello = HelloCommand {
         pid: std::process::id(),
         log_id: stoat_log::ident::get()
@@ -641,11 +662,16 @@ fn stoatty_handshake() -> (Option<u32>, Vec<u8>) {
             stoatty_hostname = %reply.hostname,
             stoatty_version = %reply.version,
             stoatty_protocol = reply.protocol,
+            stoatty_scale = reply.scale,
             "stoatty ident"
         ),
         None => tracing::info!("no stoatty ident reply (headless or foreign terminal)"),
     }
-    (reply.map(|reply| reply.protocol), leftover)
+    let peer = reply.map(|reply| StoattyPeer {
+        protocol: reply.protocol,
+        scale: reply.scale,
+    });
+    (peer, leftover)
 }
 
 /// Whether the terminal speaks the kitty keyboard protocol.
@@ -739,8 +765,9 @@ struct InputChannels<'a> {
     /// The tty's cell size, re-read on every resize and after an attach.
     cell_pixels_tx: &'a UnboundedSender<Option<(u16, u16)>>,
     /// The ident handshake's answer. Sent once at startup by the UI thread, and
-    /// again from here for each terminal that attaches later.
-    stoatty_tx: &'a UnboundedSender<Option<u32>>,
+    /// again from here for each terminal that attaches later and for each
+    /// repeat ident that a change of the cell size asks for.
+    stoatty_tx: &'a UnboundedSender<Option<StoattyPeer>>,
     /// Whether the terminal answered the kitty keyboard protocol query, sent
     /// as the handshake's answer is. The query reads fd 0 too, so it runs where
     /// the handshake does.
@@ -750,10 +777,19 @@ struct InputChannels<'a> {
     slot: &'a PassthroughSlot,
 }
 
+/// The probes that read a terminal's answers off fd 0, which a test replaces
+/// with canned answers.
+struct Probes<H, I> {
+    /// The probe of an attach, the ident handshake and the keyboard query.
+    handshake: H,
+    /// The probe of a repeat ident, the ident handshake alone.
+    identify: I,
+}
+
 /// Forward what fd 0 produces, to the app or to the remote session the slot
 /// names.
 ///
-/// Four modes, re-read every pass, so a `:ssh` or an attach takes effect on the
+/// Five modes, re-read every pass, so a `:ssh` or an attach takes effect on the
 /// turn after the slot moves:
 ///
 /// - Idle: `poll` then `read` an event and send it, as a normal session does. An idle wait blocks
@@ -768,12 +804,16 @@ struct InputChannels<'a> {
 /// - Handshake: identify the terminal that just attached, ask whether it speaks the kitty keyboard
 ///   protocol, report both, then go idle. The probe and the query read fd 0, so they belong on this
 ///   thread and nowhere else.
+/// - Reidentify: ask the terminal on fd 0 for its ident again, report a peer that answers, then go
+///   idle. Its keyboard flags are already pushed, so the keyboard query stays out, and a probe that
+///   gets no answer reports nothing, so the app keeps what it has.
 ///
 /// Sound because crossterm 0.29 reads fd 0 on the calling thread, so nothing
 /// else reads stdin while this one does.
 ///
 /// `poll`, `read`, `read_raw`, and `winsize` are the crossterm and libc calls in
-/// production, and parameters so the loop runs without a terminal.
+/// production, and parameters so the loop runs without a terminal, as are
+/// the `probes` of an attach and of a repeat ident.
 ///
 /// Returns when a send fails, meaning the main loop is gone, or when a read
 /// errors. Neither is recoverable from here, and the caller's thread has
@@ -784,7 +824,10 @@ fn forward_input(
     mut read: impl FnMut() -> io::Result<Event>,
     mut read_raw: impl FnMut(&mut [u8], Duration) -> io::Result<usize>,
     mut winsize: impl FnMut() -> Option<libc::winsize>,
-    mut handshake: impl FnMut() -> (Option<u32>, Vec<u8>, bool),
+    probes: Probes<
+        impl FnMut() -> (Option<StoattyPeer>, Vec<u8>, bool),
+        impl FnMut() -> (Option<StoattyPeer>, Vec<u8>),
+    >,
     mut wait_idle: impl FnMut() -> io::Result<IdleWake>,
 ) {
     let InputChannels {
@@ -794,6 +837,10 @@ fn forward_input(
         keyboard_tx,
         slot,
     } = channels;
+    let Probes {
+        mut handshake,
+        mut identify,
+    } = probes;
 
     let mut raw = [0u8; RAW_CHUNK];
     let mut buffered: Vec<u8> = Vec::new();
@@ -908,6 +955,22 @@ fn forward_input(
                 // re-entry owes it this one's size and cell metrics.
                 ran_session = true;
                 slot.release();
+            },
+            SlotState::Reidentify => {
+                let (peer, typed) = identify();
+                if let Some(peer) = peer
+                    && stoatty_tx.send(Some(peer)).is_err()
+                {
+                    return;
+                }
+                // Typed while the probe owned fd 0, so it goes ahead of anything
+                // typed after, as at an attach.
+                for event in vt_input::decode(&typed) {
+                    if event_tx.send(event).is_err() {
+                        return;
+                    }
+                }
+                slot.finish_reidentify();
             },
         }
     }
@@ -1338,7 +1401,10 @@ mod tests {
             read,
             |_, _| Ok(0),
             || None,
-            || (None, Vec::new(), false),
+            Probes {
+                handshake: || (None, Vec::new(), false),
+                identify: || (None, Vec::new()),
+            },
             || Ok(IdleWake::Input),
         );
     }
@@ -1450,7 +1516,10 @@ mod tests {
                     ws_ypixel: 0,
                 })
             },
-            || (None, Vec::new(), false),
+            Probes {
+                handshake: || (None, Vec::new(), false),
+                identify: || (None, Vec::new()),
+            },
             || Ok(IdleWake::Input),
         );
 
@@ -1484,6 +1553,10 @@ mod tests {
         let attached = PassthroughSlot::new().0;
         attached.rehandshake();
         assert_wakes(&attached, "an attach");
+
+        let rescaled = PassthroughSlot::new().0;
+        rescaled.reidentify();
+        assert_wakes(&rescaled, "a repeat ident");
     }
 
     /// Assert `slot` woke an idle wait, without risking one that never ends.
@@ -1552,7 +1625,10 @@ mod tests {
                     ws_ypixel: 0,
                 })
             },
-            || (None, Vec::new(), false),
+            Probes {
+                handshake: || (None, Vec::new(), false),
+                identify: || (None, Vec::new()),
+            },
             || {
                 let events = arriving.take().ok_or_else(eof)?;
                 held.borrow_mut().extend(events);
@@ -1599,6 +1675,99 @@ mod tests {
         unsafe { libc::poll(&raw mut poll_fd, 1, 0) > 0 }
     }
 
+    /// The peer that a probe in these tests answers, a stoatty at a display
+    /// scale of 2.
+    const PEER: StoattyPeer = StoattyPeer {
+        protocol: 3,
+        scale: 2000,
+    };
+
+    /// What a repeat ident sent on each channel, and whether the slot went back
+    /// to idle.
+    #[derive(Debug, PartialEq)]
+    struct Reidentified {
+        events: Vec<Event>,
+        peers: Vec<Option<StoattyPeer>>,
+        keyboards: Vec<bool>,
+        idle: bool,
+    }
+
+    /// Run the input thread over a slot that asks for a repeat ident, whose
+    /// probe answers `answer` with the typed byte `x`, until the idle pass after
+    /// it ends the loop.
+    fn reidentified(answer: Option<StoattyPeer>) -> Reidentified {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let (px_tx, _px_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (stoatty_tx, mut stoatty_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (keyboard_tx, mut keyboard_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (slot, _ack_rx) = PassthroughSlot::new();
+        slot.reidentify();
+
+        forward_input(
+            InputChannels {
+                event_tx: &tx,
+                cell_pixels_tx: &px_tx,
+                stoatty_tx: &stoatty_tx,
+                keyboard_tx: &keyboard_tx,
+                slot: &slot,
+            },
+            |_| Ok(true),
+            || Err(io::Error::from(io::ErrorKind::UnexpectedEof)),
+            |_, _| Ok(0),
+            || None,
+            Probes {
+                handshake: || (None, Vec::new(), false),
+                identify: || (answer, b"x".to_vec()),
+            },
+            || Ok(IdleWake::Input),
+        );
+
+        Reidentified {
+            events: std::iter::from_fn(|| rx.try_recv().ok()).collect(),
+            peers: std::iter::from_fn(|| stoatty_rx.try_recv().ok()).collect(),
+            keyboards: std::iter::from_fn(|| keyboard_rx.try_recv().ok()).collect(),
+            idle: matches!(slot.state(), SlotState::Idle),
+        }
+    }
+
+    /// A repeat ident reads the ident alone and replays what was typed while
+    /// the probe owned fd 0. It asks no keyboard query, since the flags of this
+    /// terminal are already pushed, and sends no size, since the terminal is
+    /// the one the app laid out against.
+    #[test]
+    fn a_reidentify_reads_the_ident_alone_and_replays_what_was_typed() {
+        assert_eq!(
+            reidentified(Some(PEER)),
+            Reidentified {
+                events: vec![Event::Key(KeyEvent::new(
+                    KeyCode::Char('x'),
+                    KeyModifiers::NONE
+                ))],
+                peers: vec![Some(PEER)],
+                keyboards: Vec::new(),
+                idle: true,
+            },
+        );
+    }
+
+    /// A probe that gets no answer reports nothing, so the app keeps the scale
+    /// it has.
+    #[test]
+    fn a_reidentify_with_no_answer_sends_no_report() {
+        assert_eq!(
+            reidentified(None),
+            Reidentified {
+                events: vec![Event::Key(KeyEvent::new(
+                    KeyCode::Char('x'),
+                    KeyModifiers::NONE
+                ))],
+                peers: Vec::new(),
+                keyboards: Vec::new(),
+                idle: true,
+            },
+        );
+    }
+
     /// The probe and the keyboard query read raw fd 0, so they belong on this
     /// thread. What was typed while the probe owned the terminal is the user's,
     /// and the app laid out against the terminal that left, so the new one's
@@ -1633,13 +1802,16 @@ mod tests {
                     ws_ypixel: 0,
                 })
             },
-            || (Some(3), b"x".to_vec(), true),
+            Probes {
+                handshake: || (Some(PEER), b"x".to_vec(), true),
+                identify: || (None, Vec::new()),
+            },
             || Ok(IdleWake::Input),
         );
 
         assert_eq!(
             (stoatty_rx.try_recv(), keyboard_rx.try_recv()),
-            (Ok(Some(3)), Ok(true)),
+            (Ok(Some(PEER)), Ok(true)),
             "the new terminal's protocol and its keyboard answer reach the UI",
         );
         assert!(

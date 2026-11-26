@@ -167,7 +167,7 @@ session control. "Head" is the fixed prefix of the first argument.
 | `config_reload` | C | -- | The terminal re-reads its own config file |
 | `zoom_capture` | C | 1 B | Claim or release the platform zoom combo |
 | `font_step` | C | 4 B | Step the terminal's font size |
-| `hello` | C | 5 args | Identifies the program; the terminal replies `ident` |
+| `hello` | C | 5 args | Identifies the program; the terminal replies `ident`, which ends in its display scale |
 
 From protocol version 9, a `pool_region` for a terminal pane appends a kind
 byte of 1. The terminal composites that pool every frame at the terminal font

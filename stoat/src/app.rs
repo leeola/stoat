@@ -63,7 +63,7 @@ use crate::{
     term_keys,
     term_session::{TermId, ViewLocation},
     theme_pool::{ThemePool, VscodeSource},
-    ui::{FrameBatches, FrameBatchesHold, RenderFrame},
+    ui::{FrameBatches, FrameBatchesHold, RenderFrame, StoattyPeer},
     workspace::{BridgeWaiter, ParseRestyle, Workspace, WorkspaceId, WorkspaceUid},
     workspace_picker::WorkspacePicker,
 };
@@ -1304,15 +1304,15 @@ pub struct Stoat {
     /// [`Self::handle_window_ipc`].
     window_ipc_tx: UnboundedSender<WindowIpc>,
     window_ipc_rx: UnboundedReceiver<WindowIpc>,
-    /// The UI thread's one report of whether a stoatty answered the ident
-    /// handshake, drained into [`Self::handle_stoatty_present`].
+    /// The UI thread's reports of whether a stoatty answered the ident handshake,
+    /// drained into [`Self::handle_stoatty_present`].
     ///
     /// Unlike the side channels above, whose senders this struct holds, the
     /// sender lives on the UI thread and so goes away when that thread exits.
     /// [`Self::run`] matches `Some` on this arm rather than testing for a closed
     /// channel, which parks the arm once it closes instead of waking the loop on
     /// every poll. Born closed, since a process with no UI thread never reports.
-    stoatty_rx: UnboundedReceiver<Option<u32>>,
+    stoatty_rx: UnboundedReceiver<Option<StoattyPeer>>,
     /// A client attached to this session, so the terminal on fd 0 is a new one
     /// that holds nothing this process sent. Born closed like [`Self::stoatty_rx`],
     /// since a run with no attach server never reports.
@@ -2882,7 +2882,7 @@ impl Stoat {
         // Dropped at once, leaving the channel closed until `set_stoatty_rx`
         // installs the UI thread's end. Closed is the truthful state for a
         // process that has no UI thread to hear from.
-        let (_, stoatty_rx) = tokio::sync::mpsc::unbounded_channel::<Option<u32>>();
+        let (_, stoatty_rx) = tokio::sync::mpsc::unbounded_channel::<Option<StoattyPeer>>();
         let (_, attached_rx) = tokio::sync::mpsc::unbounded_channel::<()>();
         let (_, cell_pixels_rx) = tokio::sync::mpsc::unbounded_channel::<Option<(u16, u16)>>();
 
@@ -3383,7 +3383,7 @@ impl Stoat {
     /// this end over once the app exists. Left uncalled, [`Self::stoatty`] stays
     /// false for the process's life, which is what a headless or embedded run
     /// wants.
-    pub fn set_stoatty_rx(&mut self, stoatty_rx: UnboundedReceiver<Option<u32>>) {
+    pub fn set_stoatty_rx(&mut self, stoatty_rx: UnboundedReceiver<Option<StoattyPeer>>) {
         self.stoatty_rx = stoatty_rx;
     }
 
@@ -3418,20 +3418,25 @@ impl Stoat {
     /// make them itself, because it wires the app up before the run loop starts
     /// and the flag is necessarily still false there, which would gate them away.
     ///
-    /// Only the confirming report does anything. A `false` report is the state
-    /// the app already starts in, and a repeat cannot arrive since the handshake
-    /// runs once.
-    fn handle_stoatty_present(&mut self, protocol: Option<u32>) -> UpdateEffect {
-        // Set before the filter below, because a plain terminal reports `None`
+    /// Only a report that names a peer does anything. A `None` report is the
+    /// state the app already starts in. A repeat for a stoatty already confirmed
+    /// follows a change of the cell size, as a move to a display of another
+    /// scale gives, and it repaints against that size while the protocol of the
+    /// first report stays.
+    fn handle_stoatty_present(&mut self, peer: Option<StoattyPeer>) -> UpdateEffect {
+        // Set before the check below, because a plain terminal reports `None`
         // and that answer still ends the wait a reconnect is gated on.
         self.terminal_reported = true;
 
-        let Some(protocol) = protocol.filter(|_| !self.stoatty) else {
+        let Some(peer) = peer else {
             return UpdateEffect::None;
         };
+        if self.stoatty {
+            return UpdateEffect::Redraw;
+        }
 
         self.stoatty = true;
-        self.stoatty_protocol = protocol;
+        self.stoatty_protocol = peer.protocol;
         apc_emit::emit_theme_default_colors(self);
         self.sync_zoom_claim();
 
@@ -5217,9 +5222,18 @@ impl Stoat {
         effect = effect.merge(ssh::reconnect_when_ready(self));
         // The last report wins: an intermediate size from a drag that is already
         // over describes a window that no longer exists.
+        let before = self.cell_pixels;
         while let Ok(cell_pixels) = self.cell_pixels_rx.try_recv() {
             self.cell_pixels = cell_pixels;
             coalesced += 1;
+        }
+        // A window that moves to a display of another scale changes the cell
+        // size, and only a fresh ident states the scale of the new display.
+        if let (Some(before), Some(after)) = (before, self.cell_pixels)
+            && before != after
+            && self.stoatty
+        {
+            ssh::reidentify_terminal(self);
         }
         self.drain_index_updates();
 

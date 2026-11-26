@@ -39,6 +39,12 @@ pub struct IdentReply {
     /// predates the field. This is what an emitter gates a feature on, unlike
     /// `version`, which only names the terminal's own release.
     pub protocol: u32,
+    /// The terminal's display scale in thousandths, 1000 for one physical px a
+    /// logical px, or zero from a terminal that states none.
+    ///
+    /// A nudge is in logical px and a winsize gives a cell in physical px, so a
+    /// program that lays rows out by pixels needs this ratio of the two.
+    pub scale: u32,
 }
 
 /// Encode a [`Command::Reset`] as a full `Gstoatty;reset` frame for an emitter.
@@ -173,7 +179,7 @@ pub(super) fn decode_hello(args: &[Vec<u8>]) -> Option<HelloCommand> {
         log_id: String::from_utf8(log_id.clone()).ok()?,
         hostname: String::from_utf8(hostname.clone()).ok()?,
         version: String::from_utf8(version.clone()).ok()?,
-        protocol: decode_protocol(args.get(4)),
+        protocol: decode_appended(args.get(4)),
     })
 }
 
@@ -195,6 +201,7 @@ pub fn encode_ident_reply_into(out: &mut Vec<u8>, reply: &IdentReply) {
     frame::push_arg(out, |w| w.write_all(reply.hostname.as_bytes()));
     frame::push_arg(out, |w| w.write_all(reply.version.as_bytes()));
     frame::push_arg(out, |w| write!(w, "{}", reply.protocol));
+    frame::push_arg(out, |w| write!(w, "{}", reply.scale));
     frame::end(out);
 }
 
@@ -215,16 +222,18 @@ pub fn decode_ident_reply(frame: &Frame) -> Option<IdentReply> {
         log_id: String::from_utf8(log_id.clone()).ok()?,
         hostname: String::from_utf8(hostname.clone()).ok()?,
         version: String::from_utf8(version.clone()).ok()?,
-        protocol: decode_protocol(frame.args.get(4)),
+        protocol: decode_appended(frame.args.get(4)),
+        scale: decode_appended(frame.args.get(5)),
     })
 }
 
-/// The protocol version an appended handshake argument carries, or zero when it
-/// is absent or unreadable.
+/// The number that an appended handshake argument carries, or zero when it is
+/// absent or unreadable.
 ///
-/// A terminal built before the field existed sends no fifth argument at all, and
-/// reports as version zero rather than failing the handshake over it.
-fn decode_protocol(arg: Option<&Vec<u8>>) -> u32 {
+/// A peer built before such a field existed sends no argument for it, and reads
+/// as zero for it rather than failing the handshake, as a terminal before the
+/// protocol version reads as version zero.
+fn decode_appended(arg: Option<&Vec<u8>>) -> u32 {
     arg.and_then(|arg| std::str::from_utf8(arg).ok()?.parse().ok())
         .unwrap_or(0)
 }
@@ -257,6 +266,7 @@ mod tests {
             hostname: "workstation".to_string(),
             version: "0.2.0".to_string(),
             protocol: crate::PROTOCOL_VERSION,
+            scale: 1500,
         };
         let frame = frame::decode(&encode_ident_reply(&reply)).expect("ident frame decodes");
         assert_eq!(decode_ident_reply(&frame), Some(reply));
@@ -294,9 +304,12 @@ mod tests {
             hostname: "h".to_owned(),
             version: "v".to_owned(),
             protocol: crate::PROTOCOL_VERSION,
+            scale: 1000,
         }))
         .expect("a valid frame");
-        reply.args.pop();
+        // A terminal predating the version field sends neither the version nor
+        // the scale after it.
+        reply.args.truncate(4);
 
         assert_eq!(
             decode_ident_reply(&reply).map(|reply| reply.protocol),
@@ -315,12 +328,35 @@ mod tests {
             hostname: "h".to_owned(),
             version: "v".to_owned(),
             protocol: crate::PROTOCOL_VERSION,
+            scale: 1000,
         };
         let encoded = encode_ident_reply(&reply);
         let mut frame = frame::decode(&encoded).expect("the encoder emits a valid frame");
         frame.args.push(b"later".to_vec());
 
         assert_eq!(decode_ident_reply(&frame), Some(reply));
+    }
+
+    /// A terminal before the display scale sends five arguments, and its ident
+    /// reads as scale zero, so a program keeps the scale it has.
+    #[test]
+    fn an_ident_reply_of_five_arguments_reads_as_scale_zero() {
+        let reply = IdentReply {
+            pid: 7,
+            log_id: "l".to_owned(),
+            hostname: "h".to_owned(),
+            version: "v".to_owned(),
+            protocol: 39,
+            scale: 1500,
+        };
+        let mut frame = frame::decode(&encode_ident_reply(&reply)).expect("a valid frame");
+        assert_eq!(frame.args.len(), 6, "the encoder appends the scale");
+        frame.args.pop();
+
+        assert_eq!(
+            decode_ident_reply(&frame),
+            Some(IdentReply { scale: 0, ..reply })
+        );
     }
 
     #[test]

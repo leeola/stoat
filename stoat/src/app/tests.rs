@@ -288,7 +288,7 @@ fn a_confirmed_stoatty_sets_the_flag_and_repaints() {
 
     assert_eq!(
         h.stoat
-            .handle_stoatty_present(Some(stoatty_protocol::PROTOCOL_VERSION)),
+            .handle_stoatty_present(Some(peer(stoatty_protocol::PROTOCOL_VERSION))),
         UpdateEffect::Redraw
     );
     assert!(h.stoat.stoatty, "and the flag stays set");
@@ -308,7 +308,7 @@ fn a_stoatty_predating_the_version_field_still_confirms_at_version_zero() {
     h.stoat.stoatty = false;
 
     assert_eq!(
-        h.stoat.handle_stoatty_present(Some(0)),
+        h.stoat.handle_stoatty_present(Some(peer(0))),
         UpdateEffect::Redraw
     );
     assert!(h.stoat.stoatty, "a version-less reply is still a stoatty");
@@ -330,7 +330,7 @@ fn confirming_a_stoatty_sends_the_theme_defaults_and_claims_the_zoom() {
     h.stoat.set_apc_tx(tx);
 
     h.stoat
-        .handle_stoatty_present(Some(stoatty_protocol::PROTOCOL_VERSION));
+        .handle_stoatty_present(Some(peer(stoatty_protocol::PROTOCOL_VERSION)));
 
     let sent: Vec<u8> = std::iter::from_fn(|| rx.try_recv().ok())
         .flatten()
@@ -380,7 +380,7 @@ fn the_zoom_claim_rides_the_handshake_alone() {
     };
 
     h.stoat
-        .handle_stoatty_present(Some(stoatty_protocol::PROTOCOL_VERSION));
+        .handle_stoatty_present(Some(peer(stoatty_protocol::PROTOCOL_VERSION)));
     assert_eq!(
         zoom_frames(&mut rx),
         vec![claim(true)],
@@ -403,6 +403,89 @@ fn an_unanswered_handshake_leaves_the_session_foreign() {
 
     assert_eq!(h.stoat.handle_stoatty_present(None), UpdateEffect::None);
     assert!(!h.stoat.stoatty, "a silent terminal is a foreign one");
+}
+
+/// A stoatty at `protocol` and a display scale of 1, as its ident reply
+/// states them.
+fn peer(protocol: u32) -> StoattyPeer {
+    StoattyPeer {
+        protocol,
+        scale: 1000,
+    }
+}
+
+/// A repeat report follows a change of the cell size and repaints against the
+/// new size, while the protocol of the first report stays.
+#[test]
+fn a_repeat_ident_report_repaints() {
+    let mut h = crate::test_harness::TestHarness::with_size(80, 24);
+    h.stoat.stoatty = false;
+    h.stoat
+        .handle_stoatty_present(Some(peer(stoatty_protocol::PROTOCOL_VERSION)));
+
+    assert_eq!(
+        (
+            h.stoat.handle_stoatty_present(Some(peer(1))),
+            h.stoat.stoatty_protocol
+        ),
+        (UpdateEffect::Redraw, stoatty_protocol::PROTOCOL_VERSION),
+    );
+}
+
+/// Report each of `sizes` as the tty's cell size and drain it, and name the
+/// state of `slot` after each. A repeat ident goes back to idle after each, as
+/// the input thread returns it once the answer is out.
+fn slot_after_cell_sizes(
+    h: &mut crate::test_harness::TestHarness,
+    slot: &ssh::PassthroughSlot,
+    sizes: &[(u16, u16)],
+) -> Vec<&'static str> {
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    h.stoat.set_cell_pixels_rx(rx);
+    let (_events_tx, mut events) = tokio::sync::mpsc::unbounded_channel();
+    sizes
+        .iter()
+        .map(|&size| {
+            tx.send(Some(size)).expect("the app holds the receiver");
+            h.stoat.drain_pending(&mut events);
+            let state = match slot.state() {
+                ssh::SlotState::Idle => "idle",
+                ssh::SlotState::Reidentify => "reidentify",
+                _ => "other",
+            };
+            slot.finish_reidentify();
+            state
+        })
+        .collect()
+}
+
+/// A window that moves to a display of another scale changes the cell size,
+/// so the app asks the input thread for the ident again. The first size and a
+/// size that did not change ask nothing.
+#[test]
+fn a_change_of_the_cell_pixel_size_asks_for_the_ident_again() {
+    let mut h = Stoat::test();
+    let (slot, _ui_rx) = install_passthrough(&mut h.stoat);
+    h.stoat.stoatty = true;
+
+    assert_eq!(
+        slot_after_cell_sizes(&mut h, &slot, &[(9, 18), (18, 36), (18, 36)]),
+        ["idle", "reidentify", "idle"],
+    );
+}
+
+/// A plain terminal answers no ident, so a change of its cell size asks for
+/// none.
+#[test]
+fn a_plain_terminal_is_not_asked_again() {
+    let mut h = Stoat::test();
+    let (slot, _ui_rx) = install_passthrough(&mut h.stoat);
+    h.stoat.stoatty = false;
+
+    assert_eq!(
+        slot_after_cell_sizes(&mut h, &slot, &[(9, 18), (18, 36)]),
+        ["idle", "idle"],
+    );
 }
 
 fn zoom(delta: i32) -> WindowIpc {
@@ -19107,7 +19190,7 @@ fn an_attach_retires_the_terminal_and_asks_who_it_is() {
         "the UI thread re-enters the alternate screen",
     );
 
-    h.stoat.handle_stoatty_present(Some(1));
+    h.stoat.handle_stoatty_present(Some(peer(1)));
     assert!(h.stoat.stoatty, "and the new terminal's answer upgrades it");
     assert_eq!(h.stoat.stoatty_protocol, 1);
 }

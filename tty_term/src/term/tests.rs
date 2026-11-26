@@ -627,8 +627,10 @@ fn hello_yields_event_and_replies_when_ident_set() {
         hostname: "host".to_string(),
         version: "v".to_string(),
         protocol: stoatty_protocol::PROTOCOL_VERSION,
+        scale: 0,
     };
     terminal.set_ident(ident.clone());
+    terminal.set_display_scale(2000);
 
     let hello = HelloCommand {
         pid: 99,
@@ -640,7 +642,14 @@ fn hello_yields_event_and_replies_when_ident_set() {
     terminal.advance(&encode_hello(&hello));
 
     assert_eq!(terminal.take_events(), vec![TermEvent::Hello(hello)]);
-    assert_eq!(terminal.take_responses(), encode_ident_reply(&ident));
+    assert_eq!(
+        terminal.take_responses(),
+        encode_ident_reply(&IdentReply {
+            scale: 2000,
+            ..ident
+        }),
+        "the reply states the recorded display scale",
+    );
 }
 
 #[test]

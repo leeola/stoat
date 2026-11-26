@@ -1176,6 +1176,7 @@ impl ApplicationHandler<PtyEvent> for App {
                     hostname: stoat_log::ident::hostname(),
                     version: crate::cli::VERSION_INFO.to_string(),
                     protocol: stoatty_protocol::PROTOCOL_VERSION,
+                    scale: 0,
                 });
         }
         let dirty = Arc::new(AtomicBool::new(false));
@@ -2250,6 +2251,9 @@ pub(crate) fn flush_due_sync_update(state: &mut State) -> (Option<Instant>, Vec<
 ///
 /// Re-run whenever either font size or the display scale factor changes, since
 /// the cell metrics move with all three.
+///
+/// The display scale goes in too, in thousandths, so each ident reply states
+/// the ratio of a logical px to a physical one that these cells are drawn at.
 pub(crate) fn update_cell_pixels(
     terminal: &FairMutex<Terminal>,
     font_size: u32,
@@ -2263,6 +2267,7 @@ pub(crate) fn update_cell_pixels(
     let mut terminal = terminal.lock();
     terminal.set_cell_pixels(width, height);
     terminal.set_terminal_cell_pixels(terminal_width, terminal_height);
+    terminal.set_display_scale((scale_factor * 1000.0).round() as u32);
 }
 
 /// Record where `layout` hangs the primary window's last row in the terminal.
@@ -4587,9 +4592,9 @@ mod tests {
         time::{Duration, Instant},
     };
     use stoatty_protocol::command::{
-        encode_fill, encode_fill_end, encode_pool_anchor, encode_pool_drop, encode_pool_region,
-        encode_scroll, FillCommand, PoolAnchorCommand, PoolDropCommand, PoolKind,
-        PoolRegionCommand, ScrollCommand,
+        encode_fill, encode_fill_end, encode_hello, encode_ident_reply, encode_pool_anchor,
+        encode_pool_drop, encode_pool_region, encode_scroll, FillCommand, HelloCommand, IdentReply,
+        PoolAnchorCommand, PoolDropCommand, PoolKind, PoolRegionCommand, ScrollCommand,
     };
     use stoatty_render::{gpu::PoolCell, render::GridLayout};
     use stoatty_term::{
@@ -5474,6 +5479,38 @@ mod tests {
             (held, left),
             (vec![(1, true)], vec![]),
             "the pool composites while the program holds the screen",
+        );
+    }
+
+    /// The scale factor goes into each ident reply in thousandths, so a program
+    /// learns the ratio of its logical px to a physical px of a cell.
+    #[test]
+    fn update_cell_pixels_records_the_display_scale() {
+        let terminal = FairMutex::new(Terminal::new(4, 8, Theme::default()));
+        let ident = IdentReply {
+            pid: 1,
+            log_id: String::new(),
+            hostname: String::new(),
+            version: String::new(),
+            protocol: stoatty_protocol::PROTOCOL_VERSION,
+            scale: 0,
+        };
+        terminal.lock().set_ident(ident.clone());
+        update_cell_pixels(&terminal, 20, 20, 1.25);
+        terminal.lock().advance(&encode_hello(&HelloCommand {
+            pid: 2,
+            log_id: String::new(),
+            hostname: String::new(),
+            version: String::new(),
+            protocol: stoatty_protocol::PROTOCOL_VERSION,
+        }));
+
+        assert_eq!(
+            terminal.lock().take_responses(),
+            encode_ident_reply(&IdentReply {
+                scale: 1250,
+                ..ident
+            }),
         );
     }
 

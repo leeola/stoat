@@ -220,6 +220,7 @@ impl HeadlessSession {
             hostname: ident::hostname(),
             version: VERSION_INFO.to_string(),
             protocol: PROTOCOL_VERSION,
+            scale: 0,
         });
 
         let dirty = Arc::new(AtomicBool::new(false));

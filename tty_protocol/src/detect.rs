@@ -251,6 +251,7 @@ mod tests {
             hostname: "host".into(),
             version: "1.2.3".into(),
             protocol: crate::PROTOCOL_VERSION,
+            scale: 1000,
         }
     }
 

@@ -204,6 +204,9 @@ pub struct Terminal {
     /// `None` until the host installs it via [`Self::set_ident`]. While `None` a
     /// hello is still logged but not answered.
     ident: Option<IdentReply>,
+    /// The display scale in thousandths, which the ident reply states, or zero
+    /// until the host records one through [`Self::set_display_scale`].
+    display_scale: u32,
     parser: Processor,
     /// Color set the projection resolves named and default colors against.
     theme: Theme,
@@ -1266,6 +1269,7 @@ impl Terminal {
             term,
             responses,
             ident: None,
+            display_scale: 0,
             parser: Processor::new(),
             theme,
             palette,
@@ -1677,8 +1681,21 @@ impl Terminal {
     /// Install this terminal's identity, so an arriving [`Command::Hello`] is
     /// answered with an ident reply. Without it a hello is still logged (as a
     /// [`TermEvent::Hello`]) but not answered.
+    ///
+    /// The reply states the scale of [`Self::set_display_scale`] in place of the
+    /// installed identity's own.
     pub fn set_ident(&mut self, ident: IdentReply) {
         self.ident = Some(ident);
+    }
+
+    /// Record the display scale in thousandths, which each later ident reply
+    /// states, so a program can relate its logical px to the physical px of a
+    /// cell.
+    ///
+    /// The host records it wherever it records the cell size, since a cell moves
+    /// with the scale.
+    pub fn set_display_scale(&mut self, scale: u32) {
+        self.display_scale = scale;
     }
 
     /// Record the physical pixel size of one cell so a CSI 14 t query can report
@@ -2146,10 +2163,15 @@ impl Terminal {
             },
             // Hello identifies the program behind the terminal and touches no
             // grid state. The host logs the event, and the terminal answers with
-            // its own ident when one is installed.
+            // its own ident when one is installed, at the display scale it last
+            // recorded.
             Command::Hello(hello) => {
                 if let Some(ident) = &self.ident {
-                    self.responses.push(&command::encode_ident_reply(ident));
+                    let reply = IdentReply {
+                        scale: self.display_scale,
+                        ..ident.clone()
+                    };
+                    self.responses.push(&command::encode_ident_reply(&reply));
                 }
                 self.pending_events.push(TermEvent::Hello(hello));
             },

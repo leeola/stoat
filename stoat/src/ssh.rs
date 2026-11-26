@@ -111,6 +111,10 @@ pub enum SlotState {
     /// owns fd 0 runs the probe. It reverts to [`Self::Idle`] once the answer
     /// is on its way to the app.
     Handshake,
+    /// The terminal on fd 0 reports another cell size, and the input thread asks
+    /// for its ident again. It reverts to [`Self::Idle`] once the answer, if one
+    /// came, is on its way to the app.
+    Reidentify,
 }
 
 /// The app's ends of the passthrough plumbing, installed by the bin layer.
@@ -195,6 +199,32 @@ impl PassthroughSlot {
         self.wake();
     }
 
+    /// Ask an idle input thread to read the ident of the terminal on fd 0 again,
+    /// with no keyboard query.
+    ///
+    /// A passthrough session and the handshake of an attach own fd 0 while they
+    /// run, so a slot in another state stays as it is and the ask goes away.
+    pub(crate) fn reidentify(&self) {
+        let mut state = self.state.lock().expect("passthrough slot lock");
+        if !matches!(*state, SlotState::Idle) {
+            return;
+        }
+        *state = SlotState::Reidentify;
+        drop(state);
+        self.wake();
+    }
+
+    /// Return the slot to idle once a repeat ident is on its way to the app.
+    ///
+    /// A state the app moved the slot to meanwhile stays, since it is the
+    /// newer ask.
+    pub(crate) fn finish_reidentify(&self) {
+        let mut state = self.state.lock().expect("passthrough slot lock");
+        if matches!(*state, SlotState::Reidentify) {
+            *state = SlotState::Idle;
+        }
+    }
+
     /// The wake pipe's read end, for the input thread to park on.
     pub(crate) fn wake_reader(&self) -> &PipeReader {
         &self.wake_rx
@@ -202,8 +232,8 @@ impl PassthroughSlot {
 
     /// Tell an idle input thread the state moved under it.
     ///
-    /// Only the two transitions out of idle need this. `engage` and `release`
-    /// fire while that thread is already inside a polling arm.
+    /// Only the transitions out of idle need this. `engage` and `release` fire
+    /// while that thread is already inside a polling arm.
     ///
     /// A full pipe means unread wakes are already queued, which says what this
     /// one would, so a failed write is nothing to handle.
@@ -417,6 +447,18 @@ pub(crate) fn terminal_replaced(stoat: &mut Stoat) -> UpdateEffect {
         link.slot.rehandshake();
     }
     UpdateEffect::None
+}
+
+/// Ask the input thread to read the ident of the terminal on fd 0 again.
+///
+/// A window that moves to a display of another scale changes the cell size of
+/// the winsize, and only a fresh ident states the new scale. The ask waits on
+/// an idle slot, as [`PassthroughSlot::reidentify`] holds it, and a run with no
+/// link asks nothing.
+pub(crate) fn reidentify_terminal(stoat: &Stoat) {
+    if let Some(link) = &stoat.passthrough_link {
+        link.slot.reidentify();
+    }
 }
 
 /// Hand the window back to the active workspace's stored target, once both the
@@ -688,7 +730,10 @@ fn last_line_of(bytes: &[u8]) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{keep_tail, last_line_of, mosh_argv, shell_quote, ssh_argv, TAIL_BYTES};
+    use super::{
+        keep_tail, last_line_of, mosh_argv, shell_quote, ssh_argv, PassthroughSlot, SlotState,
+        TAIL_BYTES,
+    };
     use std::collections::VecDeque;
 
     #[test]
@@ -763,5 +808,40 @@ mod tests {
             Some("ssh: connect refused".to_owned()),
         );
         assert_eq!(last_line_of(b"\r\n \r\n"), None);
+    }
+
+    /// A repeat ident takes fd 0 only from the idle state, so a passthrough
+    /// session or the handshake of an attach goes first, and its finish returns
+    /// only its own state to idle.
+    #[test]
+    fn a_reidentify_starts_only_from_idle() {
+        let name = |state: SlotState| match state {
+            SlotState::Idle => "idle",
+            SlotState::Pending => "pending",
+            SlotState::Active(_) => "active",
+            SlotState::Handshake => "handshake",
+            SlotState::Reidentify => "reidentify",
+        };
+        let run = |set: fn(&PassthroughSlot)| {
+            let (slot, _ack_rx) = PassthroughSlot::new();
+            set(&slot);
+            slot.reidentify();
+            let asked = name(slot.state());
+            slot.finish_reidentify();
+            (asked, name(slot.state()))
+        };
+
+        assert_eq!(
+            [
+                run(|_| {}),
+                run(PassthroughSlot::arm),
+                run(PassthroughSlot::rehandshake)
+            ],
+            [
+                ("reidentify", "idle"),
+                ("pending", "pending"),
+                ("handshake", "handshake")
+            ],
+        );
     }
 }

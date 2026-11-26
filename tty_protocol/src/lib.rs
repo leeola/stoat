@@ -249,9 +249,14 @@
 /// emitter sends one inside a fill only to a terminal at
 /// [`PAGE_NUDGE_PROTOCOL`] or later.
 ///
+/// Version 40 ends the `ident` reply in the terminal's display scale in
+/// thousandths, a sixth argument. A terminal that predates it sends five
+/// arguments, which read as scale zero, so a program gates a layout by pixels
+/// on [`DISPLAY_SCALE_PROTOCOL`].
+///
 /// Zero is reserved for a peer whose handshake carries no version at all, which
 /// is every build from before the field existed.
-pub const PROTOCOL_VERSION: u32 = 39;
+pub const PROTOCOL_VERSION: u32 = 40;
 
 /// The first [`PROTOCOL_VERSION`] whose terminal reads the `text_runs` and
 /// `bars` batches.
@@ -346,6 +351,14 @@ pub const POOL_SCALE_PROTOCOL: u32 = 38;
 /// the live decorations after it, so an emitter sends a nudge inside a fill only
 /// to a terminal at this version or later.
 pub const PAGE_NUDGE_PROTOCOL: u32 = 39;
+
+/// The first [`PROTOCOL_VERSION`] whose terminal states its display scale in
+/// the `ident` reply.
+///
+/// An earlier terminal states none, and its reply reads as scale zero, so a
+/// program that lays rows out by pixels keeps the scale it has from such a
+/// terminal.
+pub const DISPLAY_SCALE_PROTOCOL: u32 = 40;
 
 pub mod command;
 pub mod detect;
