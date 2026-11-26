@@ -1183,6 +1183,10 @@ pub struct Stoat {
     pub(crate) git_status: Option<GitStatusPanel>,
     /// The Glance of a Job, or `None` while it is closed.
     pub(crate) job_glance: Option<crate::jobs::Glance>,
+    /// Whether a `Ctrl-Enter` submit of the palette is in dispatch, so the Cmd
+    /// that it starts goes to the Job Tray, as [`crate::jobs::claim_for_jobs`]
+    /// claims it.
+    pub(crate) job_submit: bool,
     /// The Commit Preview, or `None` while it is closed.
     pub(crate) commit_preview: Option<CommitPreview>,
     /// The confirm that asks before a blame checkout stashes the working
@@ -2914,6 +2918,7 @@ impl Stoat {
             workspace_picker: None,
             git_status: None,
             job_glance: None,
+            job_submit: false,
             commit_preview: None,
             checkout_confirm: None,
             quit_all_confirm: None,

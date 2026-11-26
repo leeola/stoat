@@ -8,6 +8,7 @@ use crate::{
     cli_spec::{self, CliSpec},
     command_palette::{ArgRow, PickLoad},
     host::{ShellHost, ShellOutput},
+    jobs,
     keymap::ResolvedAction,
     location_picker::{self, LocationEntry, ParsedLocation},
     pane::{FocusTarget, View},
@@ -142,6 +143,8 @@ pub(crate) enum CliSpecState {
 /// the palette that started it turns into the Cmd's Run Block, and with no
 /// palette the Cmd joins a Run pane's stack. Under the `run_pane` output, the
 /// Cmd joins a Run pane's stack and the focus stays where it is. A
+/// `Ctrl-Enter` submit sends the Cmd of either output to the Job Tray
+/// instead, as [`jobs::claim_for_jobs`] claims it. A
 /// `locations` run that starts at a Run pane prompt, as [`at_run_prompt`]
 /// reads it, runs as a Cmd on that pane's stack too, whose block shows its
 /// matches.
@@ -183,7 +186,9 @@ pub(crate) fn start(
             let source = Some(command.source_tag());
             let (id, effect) =
                 action_handlers::run::start_cmd_steps(stoat, line, steps, source, width);
-            action_handlers::run::append_to_run_pane(stoat, id, false);
+            if !jobs::claim_for_jobs(stoat, id) {
+                action_handlers::run::append_to_run_pane(stoat, id, false);
+            }
             effect.merge(UpdateEffect::Redraw)
         },
         Plan::Steps(steps) if command.output == Output::Locations && at_run_prompt(stoat) => {

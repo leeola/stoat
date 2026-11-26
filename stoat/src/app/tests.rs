@@ -18252,9 +18252,10 @@ fn an_agent_switch_closes_the_palette_and_saves_the_workspace_left() {
 }
 
 /// An agent switch closes the Run Block of the workspace it leaves. The
-/// block's running Cmd moves onto a Run pane's stack there and runs on.
+/// block's running Cmd goes to the Job Tray there and runs on, and no Run
+/// pane opens.
 #[test]
-fn an_agent_switch_moves_a_running_block_into_a_run_pane() {
+fn an_agent_switch_moves_a_running_block_to_the_tray() {
     let mut h = Stoat::test();
     h.stoat
         .reload_user_config(r#"command hello { run = shell("echo hi"); }"#);
@@ -18269,7 +18270,8 @@ fn an_agent_switch_moves_a_running_block_into_a_run_pane() {
 
     open_agent_editor_in(&mut h, second);
 
-    let stacked: Vec<CmdId> = h.stoat.workspaces[launch]
+    let left = &h.stoat.workspaces[launch];
+    let stacked: Vec<CmdId> = left
         .runs
         .values()
         .flat_map(|run| run.blocks.clone())
@@ -18278,10 +18280,11 @@ fn an_agent_switch_moves_a_running_block_into_a_run_pane() {
         (
             h.stoat.active_workspace,
             h.stoat.command_palette.is_none(),
+            left.jobs.clone(),
             stacked,
             session.was_killed(),
         ),
-        (second, true, vec![cmd], false),
+        (second, true, vec![cmd], Vec::new(), false),
     );
 }
 

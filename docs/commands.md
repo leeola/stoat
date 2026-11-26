@@ -229,8 +229,8 @@ a row: `line`, and each key of a JSON object.
 
 - `block` turns the palette into the Run Block of the run. The block shows
   the command's line, its status, and the output of its shell steps. `Esc`
-  moves a running block to a Run pane, and closes a finished one. This is
-  the default.
+  on a running Run Block sends its Cmd to the Job Tray, where it runs on as
+  a Job, and `Esc` closes a finished block. This is the default.
 - `notify` shows a status message. When the run succeeds, the message is
   the first line of the output that holds text, or `NAME done`.
 - `buffer` opens the output in a new scratch buffer. A run that fails opens
@@ -247,6 +247,9 @@ a row: `line`, and each key of a JSON object.
   joins that pane's stack as a block that groups its matches by file.
   `Enter` at the empty prompt opens the first match, and `C-q` opens the
   matches as a location list.
+
+`Ctrl-Enter` in the palette starts a `block` or a `run_pane` command as a
+Job in the Job Tray, so no Run Block shows and no Run pane opens.
 
 When a step of a `notify`, `buffer`, or `locations` run fails, a status
 message shows the name of the command, the first line of the error output,

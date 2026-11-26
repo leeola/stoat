@@ -885,8 +885,10 @@ fn prompt_form(entry: &str, ctx: &Availability, commands: &CommandSet) -> String
 ///
 /// The Cmd joins the Run pane that [`append_to_run_pane`] picks, and the
 /// focus stays where it is, so a user who ran the line from the palette works
-/// on in the pane behind. A line of the Agent kind starts its agent tab and
-/// leaves no Stub, because no stack holds it.
+/// on in the pane behind. A Cmd that a `Ctrl-Enter` submit starts goes to the
+/// Job Tray instead, as [`jobs::claim_for_jobs`] claims it. A line of the
+/// Agent kind starts its agent tab and leaves no Stub, because no stack holds
+/// it.
 pub(super) fn run_line(stoat: &mut Stoat, line: &str) -> UpdateEffect {
     if kind::run_kind(line) == RunKind::Agent {
         return hand_off_agent(stoat, line, false);
@@ -894,7 +896,9 @@ pub(super) fn run_line(stoat: &mut Stoat, line: &str) -> UpdateEffect {
 
     let width = run_pane_width(stoat);
     let id = start_cmd(stoat, line, width);
-    append_to_run_pane(stoat, id, false);
+    if !jobs::claim_for_jobs(stoat, id) {
+        append_to_run_pane(stoat, id, false);
+    }
     tracing::info!(target: "stoat::run", command = %line, ?id, "run started");
     UpdateEffect::Redraw
 }

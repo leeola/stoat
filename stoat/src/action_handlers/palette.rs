@@ -9,6 +9,7 @@ use crate::{
     commit_picker,
     file_finder::{Browse, FileScopes, FinderScope},
     host::FsHost,
+    jobs,
     keymap_state::StoatKeymapState,
     picker::{PathPicker, PendingScan, PreviewSource},
     render,
@@ -843,6 +844,21 @@ pub(super) fn palette_submit(stoat: &mut Stoat) -> Option<UpdateEffect> {
     Some(apply_outcome(stoat, outcome))
 }
 
+/// Submit the palette as [`palette_submit`] does, and send the Cmd that the
+/// submit starts for a `block` or a `run_pane` output to the Job Tray, as
+/// [`jobs::claim_for_jobs`] claims it.
+///
+/// No Run Block shows and no Run pane opens for such a Cmd, and the palette
+/// closes. A line that starts no Cmd acts as on `Enter`. The answer is `None`
+/// with no palette open.
+pub(super) fn palette_submit_job(stoat: &mut Stoat) -> Option<UpdateEffect> {
+    stoat.command_palette.as_ref()?;
+    stoat.job_submit = true;
+    let effect = palette_submit(stoat);
+    stoat.job_submit = false;
+    effect
+}
+
 /// Cancel the currently open palette, closing it and restoring the previous
 /// mode.
 ///
@@ -1354,29 +1370,45 @@ fn apply_outcome(stoat: &mut Stoat, outcome: PaletteOutcome) -> UpdateEffect {
 /// Returns `true` if a palette was open, `false` otherwise.
 ///
 /// A Run Block's Cmd outlives the stage only while it runs. A running Cmd
-/// moves onto a Run pane's stack, as [`run::append_to_run_pane`] places it,
-/// and a finished one leaves the store.
+/// goes to the Job Tray, as [`jobs::push`] puts it, so no close kills it and
+/// none opens a Run pane. A finished one leaves the store.
 pub(crate) fn close_palette(stoat: &mut Stoat) -> bool {
     let Some(palette) = stoat.command_palette.take() else {
         return false;
     };
     if let Some(block) = &palette.block {
-        let running = stoat
-            .active_workspace()
-            .cmds
-            .get(block.cmd)
-            .is_some_and(|cmd| !cmd.finished);
+        let ws = stoat.active_workspace_mut();
+        let running = ws.cmds.get(block.cmd).is_some_and(|cmd| !cmd.finished);
         match running {
             true => {
-                run::append_to_run_pane(stoat, block.cmd, false);
+                jobs::push(ws, block.cmd);
             },
             false => {
-                stoat.active_workspace_mut().cmds.remove(block.cmd);
+                ws.cmds.remove(block.cmd);
             },
         }
     }
     dispose_palette(stoat, palette);
     true
+}
+
+/// Send the running Cmd of the palette's Run Block to the Job Tray and close
+/// the palette, as [`close_palette`] sends it.
+///
+/// A palette with no Run Block, or one whose Cmd ended, stays as it is, and
+/// the answer is `None`.
+pub(super) fn palette_cmd_to_jobs(stoat: &mut Stoat) -> Option<UpdateEffect> {
+    let cmd = stoat.run_block_cmd()?;
+    let running = stoat
+        .active_workspace()
+        .cmds
+        .get(cmd)
+        .is_some_and(|cmd| !cmd.finished);
+    if !running {
+        return None;
+    }
+    close_palette(stoat);
+    Some(UpdateEffect::Redraw)
 }
 
 /// Dispose the editors of `palette`, a palette out of
@@ -1412,7 +1444,14 @@ pub(crate) fn run_block_width(stoat: &Stoat) -> u16 {
 /// history walk ends, and its input stays the modal's input in `normal` mode,
 /// so no key types into it. With no held palette, the Cmd joins a Run pane, as
 /// [`run::append_to_run_pane`] places it, and the focus stays where it is.
+///
+/// A Cmd that a `Ctrl-Enter` submit starts goes to the Job Tray instead, as
+/// [`jobs::claim_for_jobs`] claims it. The held palette then stays held, and
+/// its caller disposes it.
 pub(crate) fn open_run_block(stoat: &mut Stoat, id: CmdId) {
+    if jobs::claim_for_jobs(stoat, id) {
+        return;
+    }
     let Some(mut palette) = stoat.palette_held.take() else {
         run::append_to_run_pane(stoat, id, false);
         return;
@@ -1644,8 +1683,8 @@ mod tests {
         (buf[(left, plate.y)].symbol().to_owned(), left, right)
     }
 
-    /// The key line names `C-c` and `Esc` while the Cmd runs, and `Enter` and
-    /// `Esc` once it finishes, and never the Jobs keys of a later leaf.
+    /// The key line names `C-j`, `C-o`, `C-c`, and `Esc` while the Cmd runs,
+    /// and `Enter`, `C-r`, `C-o`, and `Esc` once it finishes.
     #[test]
     fn the_key_line_names_the_keys_of_a_running_block_and_of_a_finished_one() {
         let mut h = TestHarness::with_size(160, 50);
@@ -1655,19 +1694,16 @@ mod tests {
         h.inject_cmd_done(block_cmd(&h), 0);
         let finished = key_line(&mut h);
 
-        let names = |line: &str, keys: &str| (line.contains(keys), line.contains("Jobs"));
         assert_eq!(
             [
-                names(
-                    &running,
-                    "C-o to Run pane  C-c interrupt  Esc hide (keeps running)"
+                running.contains(
+                    "C-j to Jobs  C-o to Run pane  C-c interrupt  Esc hide (keeps running \u{2192} \
+                     Jobs)"
                 ),
-                names(
-                    &finished,
-                    "Enter open output  C-r run again  C-o to Run pane  Esc close"
-                ),
+                finished.contains("Enter open output  C-r run again  C-o to Run pane  Esc close"),
             ],
-            [(true, false); 2],
+            [true; 2],
+            "{running:?} {finished:?}",
         );
     }
 
@@ -1681,35 +1717,282 @@ mod tests {
             .expect("a key line")
     }
 
-    /// `Esc` on a running block closes the palette and moves the Cmd onto the
-    /// stack of a Run pane that splits the editor pane downward. The Cmd runs
-    /// on, and the editor pane keeps the focus.
+    /// `Esc` on a running block closes the palette and sends the Cmd to the
+    /// Job Tray. The Cmd runs on, no Run pane opens, and the editor pane keeps
+    /// the focus.
     #[test]
-    fn escape_on_a_running_block_moves_the_cmd_into_a_run_pane() {
+    fn escape_on_a_running_block_moves_the_cmd_to_the_tray() {
         let mut h = loaded(HELLO);
         let editor_pane = h.stoat.active_workspace().panes.focus();
         let session = entered(&mut h, "hello");
         let cmd = block_cmd(&h);
         h.type_keys("escape");
 
-        let stacks = run_stacks(&h);
-        let [(run_pane, ref stack)] = stacks[..] else {
-            panic!("one Run pane, not {}", stacks.len());
-        };
         let ws = h.stoat.active_workspace();
-        let (above, below) = (
-            ws.panes.pane(editor_pane).area,
-            ws.panes.pane(run_pane).area,
-        );
         assert_eq!(
             (
                 h.stoat.command_palette.is_none(),
-                stack.clone(),
-                (below.x, below.y > above.y),
+                ws.jobs.clone(),
+                run_stacks(&h),
                 session.was_killed(),
                 ws.panes.focus() == editor_pane,
             ),
-            (true, vec![cmd], (above.x, true), false, true),
+            (true, vec![cmd], Vec::new(), false, true),
+        );
+    }
+
+    /// `ctrl-j` on a running block closes the palette and sends the Cmd to
+    /// the Job Tray, where it runs on, and no Run pane opens.
+    #[test]
+    fn ctrl_j_moves_a_running_palette_cmd_to_the_tray() {
+        let mut h = loaded(HELLO);
+        let session = entered(&mut h, "hello");
+        let cmd = block_cmd(&h);
+        h.type_keys("ctrl-j");
+
+        let ws = h.stoat.active_workspace();
+        assert_eq!(
+            (
+                h.stoat.command_palette.is_none(),
+                ws.jobs.clone(),
+                (ws.cmds[cmd].in_jobs, ws.cmds[cmd].finished),
+                run_stacks(&h),
+                session.was_killed(),
+            ),
+            (true, vec![cmd], (true, false), Vec::new(), false),
+        );
+    }
+
+    #[test]
+    fn ctrl_j_on_an_ended_palette_cmd_changes_nothing() {
+        let mut h = loaded(HELLO);
+        entered(&mut h, "hello");
+        let cmd = block_cmd(&h);
+        h.inject_cmd_done(cmd, 0);
+        h.type_keys("ctrl-j");
+
+        assert_eq!(
+            (
+                h.stoat.run_block_cmd(),
+                h.stoat.active_workspace().jobs.clone()
+            ),
+            (Some(cmd), Vec::new()),
+        );
+    }
+
+    /// A close from outside the palette, as a workspace switch closes the
+    /// topmost modal, sends the running Cmd to the Job Tray too.
+    #[test]
+    fn a_palette_closed_from_outside_keeps_its_running_cmd_as_a_job() {
+        let mut h = loaded(HELLO);
+        let session = entered(&mut h, "hello");
+        let cmd = block_cmd(&h);
+        keymap_state::close_topmost_modal(&mut h.stoat);
+
+        assert_eq!(
+            (
+                h.stoat.command_palette.is_none(),
+                h.stoat.active_workspace().jobs.clone(),
+                session.was_killed(),
+            ),
+            (true, vec![cmd], false),
+        );
+    }
+
+    /// Run `line` from the palette with `ctrl-enter`, as [`typed`] types it,
+    /// and answer the session of its process.
+    fn job_entered(h: &mut TestHarness, line: &str) -> Arc<FakeTerminalSession> {
+        let session = typed(h, line);
+        h.type_keys("ctrl-enter");
+        session
+    }
+
+    /// The one Job of the active workspace.
+    fn only_job(h: &TestHarness) -> CmdId {
+        let jobs = &h.stoat.active_workspace().jobs;
+        let [id] = jobs[..] else {
+            panic!("one Job, not {}", jobs.len());
+        };
+        id
+    }
+
+    /// The line of the Cmd `id` and whether it ended.
+    fn line_and_end(h: &TestHarness, id: CmdId) -> (String, bool) {
+        let cmd = &h.stoat.active_workspace().cmds[id];
+        (cmd.command.clone(), cmd.finished)
+    }
+
+    /// `ctrl-enter` on a `block` command starts its Cmd straight in the Job
+    /// Tray. The palette closes, no Run Block shows, no Run pane opens, and the
+    /// history keeps the line.
+    #[test]
+    fn ctrl_enter_starts_a_block_command_as_a_job() {
+        let mut h = loaded(HELLO);
+        job_entered(&mut h, "hello");
+
+        let ws = h.stoat.active_workspace();
+        let cmd = &ws.cmds[only_job(&h)];
+        let spawn = h
+            .fake_terminal_host()
+            .spawns()
+            .last()
+            .map(|spawn| (spawn.program.clone(), spawn.args.clone()));
+        assert_eq!(
+            (
+                (
+                    h.stoat.command_palette.is_none(),
+                    h.stoat.palette_held.is_none()
+                ),
+                (
+                    cmd.command.as_str(),
+                    cmd.shell.as_deref(),
+                    cmd.source.map(|(label, _)| label),
+                    cmd.finished
+                ),
+                spawn,
+                run_stacks(&h),
+                ws.palette_history.entries().last().map(String::as_str),
+            ),
+            (
+                (true, true),
+                ("hello", Some("echo hi"), Some("config"), false),
+                Some((
+                    "bash".to_owned(),
+                    vec!["-c".to_owned(), "echo hi".to_owned()]
+                )),
+                Vec::new(),
+                Some("hello"),
+            ),
+        );
+    }
+
+    #[test]
+    fn ctrl_enter_starts_a_run_pane_command_as_a_job() {
+        let mut h = loaded(r#"command check { run = shell("make test"); output = run_pane; }"#);
+        job_entered(&mut h, "check");
+
+        assert_eq!(
+            (line_and_end(&h, only_job(&h)), run_stacks(&h)),
+            (("check".to_owned(), false), Vec::new()),
+        );
+    }
+
+    #[test]
+    fn ctrl_enter_starts_a_run_line_as_a_job() {
+        let mut h = Stoat::test();
+        job_entered(&mut h, "run sleep 30");
+
+        assert_eq!(
+            (line_and_end(&h, only_job(&h)), run_stacks(&h)),
+            (("sleep 30".to_owned(), false), Vec::new()),
+        );
+    }
+
+    /// A script is one Cmd, so `ctrl-enter` makes it one Job, and its next
+    /// step starts in the tray once the step before it exits 0.
+    #[test]
+    fn ctrl_enter_starts_a_script_as_one_job() {
+        let mut h = loaded(r#"command two { run = [shell("true"), shell("echo end")]; }"#);
+        let first = typed(&mut h, "two");
+        h.fake_terminal_host()
+            .push_session(Arc::new(FakeTerminalSession::new()));
+        h.type_keys("ctrl-enter");
+        let id = only_job(&h);
+        first.finish(0);
+        h.settle();
+
+        let spawn = h
+            .fake_terminal_host()
+            .spawns()
+            .last()
+            .map(|spawn| (spawn.program.clone(), spawn.args.clone()));
+        assert_eq!(
+            (spawn, h.stoat.active_workspace().jobs.clone()),
+            (
+                Some((
+                    "bash".to_owned(),
+                    vec!["-c".to_owned(), "echo end".to_owned()]
+                )),
+                vec![id],
+            ),
+        );
+    }
+
+    #[test]
+    fn ctrl_enter_on_an_action_command_runs_it_as_enter_does() {
+        let mut h = Stoat::test();
+        h.stoat.active_workspace_mut().git_root = PathBuf::from("/work");
+        job_entered(&mut h, "pwd");
+
+        assert_eq!(
+            (
+                h.stoat.pending_message.as_deref(),
+                h.stoat.active_workspace().jobs.clone()
+            ),
+            (Some("Current working directory is /work"), Vec::new()),
+        );
+    }
+
+    /// A `notify` command runs on a worker with no terminal, so it starts no
+    /// Cmd and no Job.
+    #[test]
+    fn ctrl_enter_on_a_notify_command_starts_no_job() {
+        let mut h = loaded(r#"command note { run = shell("echo hi"); output = notify; }"#);
+        job_entered(&mut h, "note");
+        h.settle();
+
+        let ws = h.stoat.active_workspace();
+        let shell: Vec<String> = h
+            .fake_shell
+            .invocations()
+            .into_iter()
+            .map(|run| run.cmd)
+            .collect();
+        assert_eq!(
+            (shell, ws.jobs.clone(), ws.cmds.len()),
+            (vec!["echo hi".to_owned()], Vec::new(), 0),
+        );
+    }
+
+    /// A program that needs a full terminal hands off to its terminal tab as
+    /// it does on `Enter`, and its Stub stays on a Run pane's stack.
+    #[test]
+    fn ctrl_enter_on_a_listed_program_hands_off_as_enter_does() {
+        let mut h = Stoat::test();
+        job_entered(&mut h, "run htop");
+
+        let ws = h.stoat.active_workspace();
+        let stubs: Vec<bool> = ws
+            .runs
+            .values()
+            .flat_map(|run| run.blocks.iter())
+            .map(|id| ws.cmds[*id].handoff.is_some())
+            .collect();
+        let terminal = matches!(ws.panes.pane(ws.panes.focus()).view, View::Terminal(_));
+        assert_eq!(
+            (
+                ws.jobs.clone(),
+                stubs,
+                (ws.tabs.len(), ws.active_tab, terminal)
+            ),
+            (Vec::new(), vec![true], (2, 1, true)),
+        );
+    }
+
+    #[test]
+    fn the_job_submit_flag_is_clear_after_each_submit() {
+        let mut h = loaded(HELLO);
+        job_entered(&mut h, "hello");
+        let flag = h.stoat.job_submit;
+        entered(&mut h, "hello");
+
+        assert_eq!(
+            (
+                flag,
+                active_modal(&h.stoat),
+                h.stoat.active_workspace().jobs.len()
+            ),
+            (false, Some(ActiveModal::RunBlock), 1),
         );
     }
 

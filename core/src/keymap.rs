@@ -2558,6 +2558,51 @@ mod tests {
         assert!(warnings.is_empty(), "shipped config warnings: {warnings:?}");
     }
 
+    /// `Ctrl-Enter` submits as a Job at the palette and at the Run pane
+    /// prompt, and the guard leaves the Run pane's key to the palette over it.
+    #[test]
+    fn ctrl_enter_binds_the_job_submits() {
+        let keymap = Keymap::compile(&parse_config(DEFAULT_KEYMAP));
+        let event = key_event(KeyCode::Enter, KeyModifiers::CONTROL);
+        let insert = || TestState::new().set("mode", StateValue::String("insert".into()));
+        let palette = || insert().set("modal", StateValue::String("palette".into()));
+        let run = |state: TestState| state.set("pane", StateValue::String("run".into()));
+        let bound = |state: TestState| {
+            keymap
+                .lookup(&state, &event)
+                .map(|actions| actions[0].name.clone())
+        };
+
+        assert_eq!(
+            [
+                bound(palette()),
+                bound(run(insert())),
+                bound(run(palette()))
+            ],
+            [
+                Some("PaletteSubmitJob".to_owned()),
+                Some("RunSubmitJob".to_owned()),
+                Some("PaletteSubmitJob".to_owned()),
+            ],
+        );
+    }
+
+    #[test]
+    fn ctrl_j_in_the_run_block_binds_the_move_to_jobs() {
+        let keymap = Keymap::compile(&parse_config(DEFAULT_KEYMAP));
+        let state = TestState::new()
+            .set("mode", StateValue::String("normal".into()))
+            .set("modal", StateValue::String("run_block".into()));
+        let event = key_event(KeyCode::Char('j'), KeyModifiers::CONTROL);
+
+        assert_eq!(
+            keymap
+                .lookup(&state, &event)
+                .map(|actions| actions[0].name.clone()),
+            Some("PaletteCmdToJobs".to_owned()),
+        );
+    }
+
     #[test]
     fn default_keymap_names_only_registered_actions() {
         let keymap = Keymap::compile(&parse_config(DEFAULT_KEYMAP));

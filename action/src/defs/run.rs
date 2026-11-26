@@ -27,6 +27,19 @@ define_action!(
 );
 
 define_action!(
+    RunSubmitJobDef,
+    RunSubmitJob,
+    "RunSubmitJob",
+    ActionKind::RunSubmitJob,
+    "submit as a Job",
+    "Run the line at the Run pane prompt as Enter does, and send the block that \
+     it starts to the Job Tray, so the pane keeps a Stub of it. A line that \
+     starts no process runs as on Enter.",
+    ActionPriority::Normal,
+    palette_visible = false
+);
+
+define_action!(
     RunInterruptDef,
     RunInterrupt,
     "RunInterrupt",

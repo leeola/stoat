@@ -123,8 +123,8 @@ use crate::{
             PickerRename,
         },
         prompt::{
-            CancelPromptInput, PaletteScopeToggle, PaletteUp, PromptHistoryNext, PromptHistoryPrev,
-            PromptInsertNewline, SubmitPromptInput,
+            CancelPromptInput, PaletteCmdToJobs, PaletteScopeToggle, PaletteSubmitJob, PaletteUp,
+            PromptHistoryNext, PromptHistoryPrev, PromptInsertNewline, SubmitPromptInput,
         },
         rebase::{
             AbortRebase, EnterRebase, ExecuteRebase, GitRebase, GitRebaseAbort, GitRebaseContinue,
@@ -144,7 +144,7 @@ use crate::{
         },
         run::{
             OpenRun, Run, RunAgain, RunBlockToPane, RunHistoryNext, RunHistoryPrev, RunInterrupt,
-            RunJobToggle, RunLocationList, RunSubmit, RunToggleView,
+            RunJobToggle, RunLocationList, RunSubmit, RunSubmitJob, RunToggleView,
         },
         set_theme::SetTheme,
         tab::{
@@ -1051,6 +1051,7 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
     add(SpawnClaude::DEF, |_| Ok(Box::new(SpawnClaude)));
     add(Terminal::DEF, |_| Ok(Box::new(Terminal)));
     add(RunSubmit::DEF, |_| Ok(Box::new(RunSubmit)));
+    add(RunSubmitJob::DEF, |_| Ok(Box::new(RunSubmitJob)));
     add(RunInterrupt::DEF, |_| Ok(Box::new(RunInterrupt)));
     add(RunJobToggle::DEF, |_| Ok(Box::new(RunJobToggle)));
     add(JobGlance::DEF, |_| Ok(Box::new(JobGlance)));
@@ -1346,6 +1347,8 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
     add(PaletteScopeToggle::DEF, |_| {
         Ok(Box::new(PaletteScopeToggle))
     });
+    add(PaletteCmdToJobs::DEF, |_| Ok(Box::new(PaletteCmdToJobs)));
+    add(PaletteSubmitJob::DEF, |_| Ok(Box::new(PaletteSubmitJob)));
     add(PaletteUp::DEF, |_| Ok(Box::new(PaletteUp)));
 
     map
@@ -1647,6 +1650,7 @@ mod tests {
         "SpawnClaude",
         "terminal",
         "RunSubmit",
+        "RunSubmitJob",
         "RunInterrupt",
         "RunJobToggle",
         "JobGlance",
@@ -1699,6 +1703,8 @@ mod tests {
         "CancelPromptInput",
         "PromptInsertNewline",
         "PaletteScopeToggle",
+        "PaletteCmdToJobs",
+        "PaletteSubmitJob",
         "PaletteUp",
         "ReloadBuffer",
         "ForceReloadBuffer",
@@ -2419,7 +2425,7 @@ mod tests {
         // + 1 PaletteRefresh.
         // + 1 RunToggleView.
         // + 2 RunAgain/RunBlockToPane.
-        assert_eq!(all().count(), 532);
+        assert_eq!(all().count(), 535);
     }
 
     #[test]

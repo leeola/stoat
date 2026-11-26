@@ -1110,6 +1110,7 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
         ActionKind::SpawnClaude => agent::spawn_claude_pane(stoat),
         ActionKind::Terminal => terminal::open_terminal_pane(stoat),
         ActionKind::RunSubmit => run::run_submit(stoat),
+        ActionKind::RunSubmitJob => jobs::run_submit_job(stoat),
         ActionKind::RunInterrupt => run::run_interrupt(stoat),
         ActionKind::RunJobToggle => jobs::run_job_toggle(stoat),
         ActionKind::JobGlance => jobs::job_glance_open(stoat),
@@ -1453,6 +1454,12 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
         ActionKind::PromptHistoryPrev => prompt::prompt_history_prev(stoat),
         ActionKind::PromptHistoryNext => prompt::prompt_history_next(stoat),
         ActionKind::PaletteScopeToggle => palette::palette_scope_toggle(stoat),
+        ActionKind::PaletteCmdToJobs => {
+            palette::palette_cmd_to_jobs(stoat).unwrap_or(UpdateEffect::None)
+        },
+        ActionKind::PaletteSubmitJob => {
+            palette::palette_submit_job(stoat).unwrap_or(UpdateEffect::None)
+        },
         ActionKind::PaletteUp => palette::palette_up(stoat),
         ActionKind::PaletteRefresh => palette::palette_refresh(stoat),
         ActionKind::OpenLastPicker => open_last_picker(stoat),

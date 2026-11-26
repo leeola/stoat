@@ -2,7 +2,8 @@ use crate::{
     app::{Stoat, UpdateEffect},
     jobs,
     pane::View,
-    run::CmdId,
+    run::{kind::RunKind, CmdId},
+    workspace::Workspace,
 };
 
 /// Move the newest running block of the focused Run pane to the Job Tray, or
@@ -21,6 +22,40 @@ pub(super) fn run_job_toggle(stoat: &mut Stoat) -> UpdateEffect {
     }
     stoat.set_status("no running command");
     UpdateEffect::Redraw
+}
+
+/// Submit the line at the focused Run pane's prompt as
+/// [`super::run::run_submit`] does, and send the block that the submit adds
+/// to the Job Tray while it runs, so the pane keeps a Stub of it and the
+/// history keeps the line.
+///
+/// A line that adds no block, a block that ended at once, and a block whose
+/// program needs a full terminal act as on `Enter`.
+pub(super) fn run_submit_job(stoat: &mut Stoat) -> UpdateEffect {
+    let ws = stoat.active_workspace();
+    let View::Run(run) = ws.panes.pane(ws.panes.focus()).view else {
+        return UpdateEffect::None;
+    };
+    let newest = |ws: &Workspace| {
+        ws.runs
+            .get(run)
+            .and_then(|state| state.blocks.last().copied())
+    };
+    let before = newest(ws);
+    let effect = super::run::run_submit(stoat);
+
+    // A stack past its row budget drops an old block as a new one joins, so
+    // the newest id tells a new block apart where the length would not.
+    let ws = stoat.active_workspace_mut();
+    if let Some(id) = newest(ws).filter(|id| Some(*id) != before)
+        && ws
+            .cmds
+            .get(id)
+            .is_some_and(|cmd| !cmd.finished && cmd.kind != RunKind::FullTerminal)
+    {
+        jobs::push(ws, id);
+    }
+    effect
 }
 
 /// Open the Glance of a Job, the newest one, or the Job before the one of the

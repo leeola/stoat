@@ -11,7 +11,7 @@ use crate::{
     action_handlers,
     app::{Stoat, UpdateEffect},
     pane::View,
-    run::{self, Cmd, CmdId, RunId},
+    run::{self, kind::RunKind, Cmd, CmdId, RunId},
     theme::{scope, Theme},
     workspace::Workspace,
 };
@@ -138,6 +138,26 @@ pub(crate) fn return_to_run(ws: &mut Workspace, run: RunId) -> bool {
             .find(|id| ws.cmds.get(*id).is_some_and(|cmd| cmd.in_jobs))
     });
     newest.is_some_and(|id| take(ws, id))
+}
+
+/// Put the Cmd `id` that a start just made in the tray of the active
+/// workspace while a `Ctrl-Enter` submit runs, as [`Stoat::job_submit`] marks
+/// it, and answer whether it went in.
+///
+/// A start that answers true gives the Cmd no other place, so no Run Block
+/// shows it and no Run pane opens for it. A Cmd whose program needs a full
+/// terminal stays out, so it takes the place that `Enter` gives it, and its
+/// hand-off to a terminal tab reads that place.
+pub(crate) fn claim_for_jobs(stoat: &mut Stoat, id: CmdId) -> bool {
+    if !stoat.job_submit {
+        return false;
+    }
+    let ws = stoat.active_workspace_mut();
+    let full_terminal = ws
+        .cmds
+        .get(id)
+        .is_some_and(|cmd| cmd.kind == RunKind::FullTerminal);
+    !full_terminal && push(ws, id)
 }
 
 /// The state of `cmd`.
@@ -332,6 +352,7 @@ mod tests {
             pane::{dispose_view, EditorDisposal},
         },
         app::{Stoat, UpdateEffect},
+        host::FakeTerminalSession,
         keymap_state,
         pane::View,
         run::{Cmd, CmdId, RunId},
@@ -342,9 +363,10 @@ mod tests {
     use ratatui::style::{Color, Style};
     use std::{
         path::PathBuf,
+        sync::Arc,
         time::{Duration, Instant},
     };
-    use stoat_action::{ClosePane, CloseWorkspace, NewTab, SplitRight, Terminal};
+    use stoat_action::{ClosePane, CloseWorkspace, NewTab, RunSubmitJob, SplitRight, Terminal};
 
     /// The request for the alternate screen that a full-screen program writes
     /// first.
@@ -1119,5 +1141,79 @@ mod tests {
         handle.session.push_output(b"x");
         h.settle();
         h.stoat.pty_dirty
+    }
+
+    /// Open a Run pane and type `line` at its prompt, with a fresh fake session
+    /// queued for the process that a submit starts, and answer the pane's run.
+    fn typed_at_prompt(h: &mut TestHarness, line: &str) -> RunId {
+        let run = h.open_run();
+        h.fake_terminal_host()
+            .push_session(Arc::new(FakeTerminalSession::new()));
+        h.type_text(line);
+        run
+    }
+
+    /// `Ctrl-Enter` at the Run pane prompt runs the line as `Enter` does and
+    /// sends its block to the Job Tray, so the stack keeps a Stub of it and the
+    /// history keeps the line.
+    #[test]
+    fn ctrl_enter_at_the_run_prompt_starts_the_cmd_as_a_job_and_keeps_a_stub() {
+        let mut h = Stoat::test();
+        let run = typed_at_prompt(&mut h, "sleep 30");
+        h.type_keys("ctrl-enter");
+
+        let ws = h.stoat.active_workspace();
+        let jobs: Vec<(&str, bool)> = ws
+            .jobs
+            .iter()
+            .map(|id| (ws.cmds[*id].command.as_str(), ws.cmds[*id].finished))
+            .collect();
+        assert_eq!(
+            (
+                jobs,
+                ws.runs[run].blocks == ws.jobs,
+                ws.palette_history.entries().last().map(String::as_str),
+            ),
+            (vec![("sleep 30", false)], true, Some("r sleep 30")),
+        );
+    }
+
+    /// A line that starts no Cmd pushes nothing, not even the running block
+    /// that the stack held before it.
+    #[test]
+    fn ctrl_enter_on_a_line_that_starts_no_cmd_pushes_nothing() {
+        let mut h = Stoat::test();
+        let run = h.open_run();
+        let running = h.submit_run("sleep 30").cmd;
+        h.type_text("pwd");
+        h.type_keys("ctrl-enter");
+
+        let ws = h.stoat.active_workspace();
+        assert_eq!(
+            (ws.jobs.clone(), ws.runs[run].blocks.clone()),
+            (Vec::new(), vec![running])
+        );
+    }
+
+    /// A program that needs a full terminal never enters the tray, and it
+    /// hands off as on `Enter`, its Stub on the stack.
+    #[test]
+    fn ctrl_enter_on_a_listed_program_at_the_run_prompt_hands_off() {
+        let mut h = Stoat::test();
+        let run = typed_at_prompt(&mut h, "htop");
+        action_handlers::dispatch(&mut h.stoat, &RunSubmitJob);
+        let at_submit = h.stoat.active_workspace().jobs.clone();
+        h.stoat.drive_background();
+
+        let ws = h.stoat.active_workspace();
+        let stubs: Vec<bool> = ws.runs[run]
+            .blocks
+            .iter()
+            .map(|id| ws.cmds[*id].handoff.is_some())
+            .collect();
+        assert_eq!(
+            (at_submit, ws.jobs.clone(), stubs),
+            (Vec::new(), Vec::new(), vec![true])
+        );
     }
 }

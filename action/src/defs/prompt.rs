@@ -82,6 +82,31 @@ define_action!(
 );
 
 define_action!(
+    PaletteCmdToJobsDef,
+    PaletteCmdToJobs,
+    "PaletteCmdToJobs",
+    ActionKind::PaletteCmdToJobs,
+    "send the running Cmd to Jobs",
+    "Close the palette's Run Block and send its running Cmd to the Job Tray, \
+     where it runs on as a Job. A Cmd that ended stays in the block.",
+    ActionPriority::Normal,
+    palette_visible = false
+);
+
+define_action!(
+    PaletteSubmitJobDef,
+    PaletteSubmitJob,
+    "PaletteSubmitJob",
+    ActionKind::PaletteSubmitJob,
+    "run as a Job",
+    "Submit the palette's line as Enter does, and send the Cmd that it starts \
+     to the Job Tray, so no Run Block shows and no Run pane opens. A line that \
+     starts no Cmd runs as on Enter.",
+    ActionPriority::Normal,
+    palette_visible = false
+);
+
+define_action!(
     PaletteUpDef,
     PaletteUp,
     "PaletteUp",

@@ -12,7 +12,7 @@ use crate::{
     rebase::RebasePause,
     run::CmdId,
     user_command::{
-        run, ArgKind, CommandArg, CommandSet, PickSpec, RunSpec, TextDefault, UserCommand,
+        run, ArgKind, CommandArg, CommandSet, Output, PickSpec, RunSpec, TextDefault, UserCommand,
     },
     workspace::Workspace,
 };
@@ -1802,6 +1802,23 @@ impl CommandPalette {
         }
         values.resize(count, String::new());
         Some(values)
+    }
+
+    /// Whether a submit of the parsed command starts a Cmd that a Run Block
+    /// or a Run pane shows, which is true for the built-in `run` and for a
+    /// user command under the `block` or the `run_pane` output.
+    ///
+    /// The key line of an argument stage names `C-Enter` while this holds,
+    /// because that key runs such a Cmd as a Job. It reads the output alone,
+    /// so a command of action steps under `block` holds it too.
+    pub(crate) fn starts_cmd(&self) -> bool {
+        match &self.command {
+            Some(PaletteCommand::Action(entry)) => entry.def.kind() == ActionKind::Run,
+            Some(PaletteCommand::User(user)) => {
+                matches!(user.output, Output::Block | Output::RunPane)
+            },
+            None => false,
+        }
     }
 
     /// The shell line that Enter runs for the input, or `None` for an input
@@ -3952,6 +3969,19 @@ mod tests {
         );
     }
 
+    /// A `cli` command under the default `block` output names `C-Enter` after
+    /// its `Enter` pair, because its run starts a Cmd.
+    #[test]
+    fn a_block_cli_key_line_names_run_as_job() {
+        let mut h = cargo_harness();
+        type_settled(&mut h, ":cargo ");
+        let (text, _) = key_line(&h);
+        assert!(
+            text.contains("Enter run  C-Enter run as Job  Tab complete  \u{2191} history"),
+            "the key line reads {text:?}"
+        );
+    }
+
     #[test]
     fn a_unique_prefix_of_a_user_command_shows_its_ghost() {
         let commands = user_commands(GREET);
@@ -4786,8 +4816,8 @@ mod tests {
     }
 
     /// The key line of a script's pick list names the first shell line that
-    /// Enter runs. Its note names the config line, with `script` in the
-    /// foreground of `ui.cmd.source.script`.
+    /// Enter runs, and `C-Enter` after it. Its note names the config line, with
+    /// `script` in the foreground of `ui.cmd.source.script`.
     #[test]
     fn the_key_line_of_a_script_names_its_first_shell_line_and_its_tag() {
         let mut h = TestHarness::with_size(160, 50);
@@ -4809,7 +4839,7 @@ mod tests {
             .fg;
         assert_eq!(
             (
-                line.contains("Enter gh pr checkout 412  C-r refresh list"),
+                line.contains("Enter gh pr checkout 412  C-Enter run as Job  C-r refresh list"),
                 line.ends_with(note),
                 colors[at..at + "script".len()]
                     .iter()
@@ -4917,7 +4947,8 @@ mod tests {
     }
 
     /// A pick list whose command runs an action names `run` for Enter,
-    /// because an action has no shell line to show.
+    /// because an action has no shell line to show. The `block` output names
+    /// `C-Enter` after it, because the key line reads the output alone.
     #[test]
     fn the_key_line_names_run_for_an_action_step() {
         let source = concat!(
@@ -4928,7 +4959,7 @@ mod tests {
         type_settled(&mut h, ":pr ");
         let (text, _) = key_line(&h);
         assert!(
-            text.contains("Enter run  C-r refresh list"),
+            text.contains("Enter run  C-Enter run as Job  C-r refresh list"),
             "the key line reads {text:?}"
         );
     }

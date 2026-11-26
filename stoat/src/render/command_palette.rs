@@ -628,9 +628,10 @@ fn render_palette_run_block(
         .is_some();
     let hints: &[(&str, &str)] = match (cmd.finished, located) {
         (false, _) => &[
+            ("C-j", "to Jobs"),
             ("C-o", "to Run pane"),
             ("C-c", "interrupt"),
-            ("Esc", "hide (keeps running)"),
+            ("Esc", "hide (keeps running \u{2192} Jobs)"),
         ],
         (true, true) => &[
             ("Enter", "go to failure"),
@@ -800,12 +801,12 @@ fn render_palette_arg_picker(
         scene,
     );
 
-    let hints: &[(&str, &str)] = match picker.source() {
-        ValueSource::Files => &ARG_FILE_HINTS,
-        _ => &PALETTE_HINTS,
+    let hints = match picker.source() {
+        ValueSource::Files => ARG_FILE_HINTS.to_vec(),
+        _ => job_hints(palette, &PALETTE_HINTS),
     };
     let parts = Footer {
-        hints,
+        hints: &hints,
         ..Footer::default()
     };
     crate::render::picker::modal_footer(buf, layout.footer, &parts, plate, theme, scene);
@@ -922,8 +923,9 @@ fn render_palette_free_arg(
         }
     }
 
+    let hints = job_hints(palette, &PALETTE_HINTS);
     let parts = Footer {
-        hints: &PALETTE_HINTS,
+        hints: &hints,
         ..Footer::default()
     };
     crate::render::picker::modal_footer(buf, layout.footer, &parts, plate, theme, scene);
@@ -1031,13 +1033,9 @@ fn render_palette_pick(
         _ => (0, ("config", crate::theme::scope::UI_CMD_SOURCE_CONFIG)),
     };
     let enter = palette.enter_line(ws).unwrap_or_else(|| "run".to_owned());
-    palette_footer_parts(KeyStage::Pick { enter, line, tag }, theme).paint(
-        layout.footer,
-        plate,
-        theme,
-        buf,
-        scene,
-    );
+    let mut parts = palette_footer_parts(KeyStage::Pick { enter, line, tag }, theme);
+    parts.hints = job_hints(palette, &parts.hints);
+    parts.paint(layout.footer, plate, theme, buf, scene);
 }
 
 /// Render the argument entry of a `cli` command over the list of its flags
@@ -1121,13 +1119,9 @@ fn render_palette_cli(
         paint_doc_lines(buf, layout.doc, &lines, tag, &note, theme, scene);
     }
 
-    palette_footer_parts(KeyStage::Cli { kind }, theme).paint(
-        layout.footer,
-        plate,
-        theme,
-        buf,
-        scene,
-    );
+    let mut parts = palette_footer_parts(KeyStage::Cli { kind }, theme);
+    parts.hints = job_hints(palette, &parts.hints);
+    parts.paint(layout.footer, plate, theme, buf, scene);
 }
 
 /// The status of the Cmd Line over the `kind` list of the `cli` command
@@ -2110,6 +2104,25 @@ fn palette_footer_parts(stage: KeyStage<'_>, theme: &crate::theme::Theme) -> Pal
     }
 }
 
+/// The key hints `hints` of an argument stage of `palette`, with the pair
+/// `C-Enter run as Job` straight after the first `Enter` pair while the
+/// parsed command starts a Cmd, as [`CommandPalette::starts_cmd`] reads it.
+///
+/// The pair names the key that runs such a Cmd as a Job. The other pairs
+/// keep their order.
+fn job_hints<W: Clone + From<&'static str>>(
+    palette: &CommandPalette,
+    hints: &[(&'static str, W)],
+) -> Vec<(&'static str, W)> {
+    let mut hints = hints.to_vec();
+    if palette.starts_cmd()
+        && let Some(at) = hints.iter().position(|(key, _)| *key == "Enter")
+    {
+        hints.insert(at + 1, ("C-Enter", W::from("run as Job")));
+    }
+    hints
+}
+
 /// Paint `lines` into the doc region `doc`, one per row from its top, each
 /// line's spans one after another from the region's second cell, clipped at
 /// its right edge.
@@ -2844,6 +2857,7 @@ mod tests {
         picker::Preview,
         render::editor::ResolvedChrome,
         test_fixture::{plate_islands, row_rules},
+        test_harness::TestHarness,
         theme::Theme,
         user_command::{
             run::{CliSpecState, LoadedCli},
@@ -3929,6 +3943,43 @@ mod tests {
         assert_eq!(
             arg_key_line(":o "),
             " Enter open  Tab complete  S-Tab scope  \u{2191} history",
+        );
+    }
+
+    /// The key line of an argument stage names `C-Enter` after its `Enter`
+    /// pair while the parsed command starts a Cmd, as the built-in `run` and a
+    /// `block` command do and `cd` does not. The list of a `dir` argument
+    /// names it too.
+    #[test]
+    fn the_typing_key_line_offers_run_as_job_for_a_cmd() {
+        let key_line = |input: &str| {
+            let mut h = TestHarness::with_size(160, 50);
+            h.stoat.reload_user_config(concat!(
+                "command greet { arg who = text; run = shell(\"echo {who}\"); }\n",
+                "command look { arg at = dir; run = shell(\"ls {at}\"); }",
+            ));
+            crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::OpenCommandPalette);
+            h.type_text(input);
+            h.settle();
+            h.snapshot();
+            h.rendered_text()
+                .replace('\u{2500}', " ")
+                .lines()
+                .find(|row| row.contains("Tab complete"))
+                .expect("a key line")
+                .to_owned()
+        };
+        let [greet, run, cd, look] = ["greet x", "run ls", "cd x", "look x"].map(key_line);
+
+        assert_eq!(
+            [
+                greet.contains("Enter run  C-Enter run as Job  Tab complete"),
+                run.contains("C-Enter run as Job"),
+                cd.contains("C-Enter"),
+                look.contains("Enter run  C-Enter run as Job  Tab complete"),
+            ],
+            [true, true, false, true],
+            "{greet:?} {run:?} {cd:?} {look:?}",
         );
     }
 

@@ -959,6 +959,7 @@ on key {
         t -> RunToggleView();
         Ctrl-r -> RunAgain();
         Ctrl-o -> RunBlockToPane();
+        Ctrl-j -> PaletteCmdToJobs();
     }
     # Every normal-mode modal block above is self-contained, binding only the
     # keys it handles. Without the modal guard this block's bindings stay live
@@ -1901,6 +1902,9 @@ on key {
         PageUp -> PickerPageUp();
         Tab -> PickerComplete();
         BackTab -> PaletteScopeToggle();
+        # Ctrl-Enter runs the line as a Job. A terminal with no kitty keyboard
+        # protocol sends Enter for the key, so the line runs as on Enter.
+        Ctrl-Enter -> PaletteSubmitJob();
     }
     # A pick list runs its list command again on Ctrl-r. Every other palette
     # stage keeps Ctrl-r for the register insert of insert mode.
@@ -1960,6 +1964,12 @@ on key {
     # pane.
     !modal && pane == run {
         Ctrl-j -> RunJobToggle();
+    }
+    # Ctrl-Enter runs the line at the prompt as Enter does and sends its block
+    # to the Job Tray. A terminal with no kitty keyboard protocol sends Enter
+    # for the key, so the block runs in the pane, and Ctrl-j moves it.
+    !modal && pane == run && mode == insert {
+        Ctrl-Enter -> RunSubmitJob();
     }
     # A string after an action is the short name the hint box shows for the
     # key. A key that enters a submenu reads the submenu's name, such as
