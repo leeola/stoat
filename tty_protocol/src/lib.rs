@@ -261,9 +261,16 @@
 /// asks reads the pixel only from a terminal at [`POOL_POINTER_PROTOCOL`] or
 /// later.
 ///
+/// Version 42 reads a fixed 27-byte `pool_region` head, which ends in the
+/// pool's pixel inset, a left and a top byte in logical px. The terminal
+/// starts a page's first cell and the composite's scissor that far into the
+/// region. A terminal that predates it reads the first 25 bytes and draws no
+/// inset, so an emitter states one only to a terminal at
+/// [`POOL_INSET_PROTOCOL`] or later. This version drops a shorter head.
+///
 /// Zero is reserved for a peer whose handshake carries no version at all, which
 /// is every build from before the field existed.
-pub const PROTOCOL_VERSION: u32 = 41;
+pub const PROTOCOL_VERSION: u32 = 42;
 
 /// The first [`PROTOCOL_VERSION`] whose terminal reads the `text_runs` and
 /// `bars` batches.
@@ -374,6 +381,14 @@ pub const DISPLAY_SCALE_PROTOCOL: u32 = 40;
 /// pointer, so a program sends the frame only to a terminal at this version or
 /// later and reads a press in the grid cell otherwise.
 pub const POOL_POINTER_PROTOCOL: u32 = 41;
+
+/// The first [`PROTOCOL_VERSION`] whose terminal places a pool's pages at the
+/// pixel inset that its `pool_region` states.
+///
+/// An earlier terminal reads the head it knows and places the pages on the
+/// region's first cell, so a program states an inset only to a terminal at
+/// this version or later.
+pub const POOL_INSET_PROTOCOL: u32 = 42;
 
 pub mod command;
 pub mod detect;

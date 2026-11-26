@@ -1724,6 +1724,7 @@ mod tests {
             kind: PoolKind::Grid,
             dim: 0,
             resident,
+            inset: [0, 0],
         }));
         let view = PoolView {
             id: 1,
@@ -1737,6 +1738,7 @@ mod tests {
                 kind: PoolKind::Grid,
                 dim: 0,
                 resident,
+                inset: [0, 0],
             },
             scroll_target: DocumentOffset::default(),
             cursor_anchor: None,
@@ -2131,6 +2133,7 @@ mod tests {
             },
             dim: 0,
             resident: false,
+            inset: [0, 0],
         }));
         for page in 0..3 {
             fill_page(&mut terminal, 1, page, format!("page {page}").as_bytes());
@@ -2176,6 +2179,7 @@ mod tests {
             kind: PoolKind::Grid,
             dim: 0,
             resident: false,
+            inset: [0, 0],
         };
         let at = |col, row| {
             cursor_in_region(
@@ -2246,6 +2250,7 @@ mod tests {
                 kind: PoolKind::Grid,
                 dim: 0,
                 resident: false,
+                inset: [0, 0],
             },
             scroll_target: DocumentOffset::default(),
             cursor_anchor: None,
@@ -2458,6 +2463,7 @@ mod tests {
                 kind: PoolKind::Grid,
                 dim: 0,
                 resident: false,
+                inset: [0, 0],
             },
             cell: (20, 5),
         }

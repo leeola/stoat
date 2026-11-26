@@ -3500,6 +3500,7 @@ pub(crate) fn redraw(state: &mut State) {
                     rides.iter().find(|ride| ride.pool == pool.id),
                     [cw, ch],
                     layout,
+                    state.scale_factor as f32,
                     state.terminal_font_size,
                 )
             })
@@ -3642,9 +3643,15 @@ pub(crate) fn redraw(state: &mut State) {
 /// The composite fades toward the clear color by the region's dim, which is
 /// how the program fades an unfocused terminal pane without a new page.
 ///
+/// The region's inset moves the composite's origin and the left and the top of
+/// its scissor in by that many logical px at `scale_factor`, each rounded to a
+/// whole physical px, so a page starts between two cell edges. The scissor's
+/// right and bottom stay on the region's cells.
+///
 /// `changed_rows` names the rows of `grid` that its last compose rewrote, for
 /// a pool that tracks them. A terminal pool does, and a gliding pool passes
 /// `None`.
+#[allow(clippy::too_many_arguments)]
 fn pool_composite<'a>(
     pool: &ActivePool,
     grid: &'a Grid,
@@ -3652,15 +3659,31 @@ fn pool_composite<'a>(
     ride: Option<&AnchorRide>,
     [cw, ch]: [f32; 2],
     layout: GridLayout,
+    scale_factor: f32,
     terminal_font_size: u32,
 ) -> PoolComposite<'a> {
+    let region = pool.region;
+    // A whole-pixel inset keeps the origin on the screen pixel grid that the
+    // text pass snaps each position against, so the page lays out as it does
+    // at a cell edge.
+    let [ix, iy] = region
+        .inset
+        .map(|inset| (f32::from(inset) * scale_factor).round());
     // region_scissor floors each edge to the grid-row boundary the renderer lays
     // cells on, then takes the span, so each scissor covers exactly its region's
     // rows. Flooring width and height on their own rounds the far edge to a
     // different pixel than the adjacent row, which leaks a sliver of one surface
     // into the next.
-    let region = pool.region;
-    let region_rect = region_scissor(region, layout, cw, ch);
+    let region_rect = {
+        let [x, y, width, height] = region_scissor(region, layout, cw, ch);
+        let [ix, iy] = [ix as u32, iy as u32];
+        [
+            x + ix,
+            y + iy,
+            width.saturating_sub(ix),
+            height.saturating_sub(iy),
+        ]
+    };
     let cell_h = pool_cell_height(region.kind, ch);
 
     let (ride_rows, scissor) = match ride {
@@ -3695,7 +3718,7 @@ fn pool_composite<'a>(
         // the two land in the same pixel, while an origin left on the whole-cell
         // grid is one the renderer's instance cache still recognizes a frame
         // later.
-        origin_cells: [region.left as f32, region.top as f32],
+        origin_cells: [region.left as f32 + ix / cw, region.top as f32 + iy / ch],
         scissor,
         // Snapped once over the sum. Two roundings of two fractions land a pixel
         // from where their sum does.
@@ -3887,9 +3910,9 @@ fn redraw_aux(
 /// The composite that draws aux window pool `pool` from `grid`, the rows its
 /// glide composed, on a grid of `cell`-sized cells whose rows `layout` places.
 ///
-/// Every pool but a scaled one draws at the live cell, and no pool fades or
-/// leaves a cell to the clear. A scaled pool draws at its scale, and its shift
-/// counts rows of its own cell.
+/// Every pool but a scaled one draws at the live cell, and no pool fades,
+/// insets its page, or leaves a cell to the clear. A scaled pool draws at its
+/// scale, and its shift counts rows of its own cell.
 fn aux_pool_composite<'a>(
     pool: &ActivePool,
     grid: &'a Grid,
@@ -5116,6 +5139,7 @@ mod tests {
             },
             dim: 0,
             resident: true,
+            inset: [0, 0],
         }));
         fill_page(&mut terminal, 1, 0, b"abcd");
         fill_page(&mut terminal, 1, 1, b"....");
@@ -5156,6 +5180,7 @@ mod tests {
             kind: PoolKind::Grid,
             dim: 0,
             resident: false,
+            inset: [0, 0],
         }));
         // A two-row page, and the one below it, since the compose spans a row
         // more than the region is tall.
@@ -5174,6 +5199,7 @@ mod tests {
                 kind: PoolKind::Grid,
                 dim: 0,
                 resident: false,
+                inset: [0, 0],
             },
             scroll_target: DocumentOffset::default(),
             cursor_anchor: None,
@@ -5218,6 +5244,7 @@ mod tests {
             kind: PoolKind::Grid,
             dim: 0,
             resident: false,
+            inset: [0, 0],
         };
         let pool = PoolView {
             id: 1,
@@ -5283,6 +5310,7 @@ mod tests {
             kind: PoolKind::Grid,
             dim: 0,
             resident: false,
+            inset: [0, 0],
         };
         let rides: Vec<_> = projection
             .rides
@@ -5350,6 +5378,7 @@ mod tests {
             kind: PoolKind::Grid,
             dim: 0,
             resident: false,
+            inset: [0, 0],
         }));
         batch.extend(encode_scroll(&ScrollCommand {
             pool: 1,
@@ -5458,7 +5487,7 @@ mod tests {
         let dims: Vec<f32> = projection
             .active
             .iter()
-            .map(|pool| pool_composite(pool, grid, None, None, [12.0, 24.0], FLOORED, 10).dim)
+            .map(|pool| pool_composite(pool, grid, None, None, [12.0, 24.0], FLOORED, 1.0, 10).dim)
             .collect();
 
         assert_eq!(
@@ -5654,12 +5683,14 @@ mod tests {
                     kind,
                     dim,
                     resident: kind == PoolKind::Terminal,
+                    inset: [0, 0],
                 },
                 frac: 0.0,
                 content_changed: true,
                 scrolled_rows: None,
             };
-            let composite = pool_composite(&tile, &grid, None, None, [12.0, 24.0], FLOORED, 10);
+            let composite =
+                pool_composite(&tile, &grid, None, None, [12.0, 24.0], FLOORED, 1.0, 10);
             (
                 composite.cell,
                 composite.origin_cells,
@@ -5703,12 +5734,13 @@ mod tests {
                 },
                 dim: 0,
                 resident: true,
+                inset: [0, 0],
             },
             frac: 0.3,
             content_changed: true,
             scrolled_rows: None,
         };
-        let composite = pool_composite(&tile, &grid, None, None, [12.0, 24.0], FLOORED, 10);
+        let composite = pool_composite(&tile, &grid, None, None, [12.0, 24.0], FLOORED, 1.0, 10);
 
         assert_eq!(
             (
@@ -5725,6 +5757,66 @@ mod tests {
                 false,
                 -4.0 / 12.0
             ),
+        );
+    }
+
+    /// A pool's inset moves the composite's origin and the left and the top of
+    /// its scissor in by whole pixels at the display scale, and the scissor's
+    /// right and bottom stay on the region's cells. A region at cell 10, 4 that
+    /// is 20 by 6 cells with the inset 12, 5 starts at pixel 102, 77 on a 9 by
+    /// 18 px cell at scale 1, and at pixel 204, 154 on an 18 by 36 px cell at
+    /// scale 2. At scale 1.25 the inset 5, 6 comes to 6.25 and 7.5 px, which
+    /// round to the nearest pixels, 6 and 8. No inset leaves the composite on
+    /// the region's first cell.
+    #[test]
+    fn a_pool_inset_moves_the_origin_and_the_scissor_by_whole_pixels() {
+        let grid = Grid::new(1, 1);
+        let placed = |inset, [cw, ch]: [f32; 2], scale| {
+            let tile = ActivePool {
+                id: 1,
+                region: PoolRegion {
+                    pool: 1,
+                    window: 0,
+                    top: 4,
+                    left: 10,
+                    width: 20,
+                    height: 6,
+                    kind: PoolKind::Grid,
+                    dim: 0,
+                    resident: false,
+                    inset,
+                },
+                frac: 0.0,
+                content_changed: true,
+                scrolled_rows: None,
+            };
+            // The last row stands on the uniform pitch, so each row of the
+            // region lies a whole cell under the one above it.
+            let layout = GridLayout {
+                rows: 12,
+                cols: 40,
+                bottom_row_y: 11.0 * ch,
+            };
+            let composite = pool_composite(&tile, &grid, None, None, [cw, ch], layout, scale, 10);
+            (composite.origin_cells, composite.scissor)
+        };
+
+        assert_eq!(
+            [
+                placed([12, 5], [9.0, 18.0], 1.0),
+                placed([12, 5], [18.0, 36.0], 2.0),
+                placed([5, 6], [10.0, 20.0], 1.25),
+                placed([0, 0], [9.0, 18.0], 1.0),
+            ],
+            [
+                ([10.0 + 12.0 / 9.0, 4.0 + 5.0 / 18.0], [102, 77, 168, 103]),
+                (
+                    [10.0 + 24.0 / 18.0, 4.0 + 10.0 / 36.0],
+                    [204, 154, 336, 206]
+                ),
+                ([10.0 + 6.0 / 10.0, 4.0 + 8.0 / 20.0], [106, 88, 194, 112]),
+                ([10.0, 4.0], [90, 72, 180, 108]),
+            ],
         );
     }
 
@@ -5747,6 +5839,7 @@ mod tests {
                     kind,
                     dim: 0,
                     resident: true,
+                    inset: [0, 0],
                 },
                 frac: 0.3,
                 content_changed: true,
@@ -5805,6 +5898,7 @@ mod tests {
             kind: PoolKind::Terminal,
             dim: 0,
             resident: true,
+            inset: [0, 0],
         }));
         let declared = tiles(&project(&mut terminal, &mut frame));
 
@@ -5839,6 +5933,7 @@ mod tests {
             kind: PoolKind::Terminal,
             dim,
             resident: true,
+            inset: [0, 0],
         }));
     }
 
@@ -5874,6 +5969,7 @@ mod tests {
                 kind: PoolKind::Grid,
                 dim: 0,
                 resident: false,
+                inset: [0, 0],
             }));
             for page in 0..3 {
                 fill_page(&mut terminal, pool, page, b"....");
@@ -6361,6 +6457,7 @@ mod tests {
                 kind,
                 dim: 0,
                 resident: true,
+                inset: [0, 0],
             },
             scroll_target: DocumentOffset::default(),
             cursor_anchor: None,
@@ -6412,6 +6509,7 @@ mod tests {
                 kind,
                 dim: 0,
                 resident: true,
+                inset: [0, 0],
             },
             scroll_target: DocumentOffset::default(),
             cursor_anchor: None,

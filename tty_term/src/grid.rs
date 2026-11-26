@@ -2047,6 +2047,13 @@ pub struct PoolRegion {
     /// Whether the pool's pages are the region's content at rest, so the
     /// renderer keeps the pool composited when a glide settles.
     pub resident: bool,
+    /// The logical px from the region's left and from its top to the first
+    /// cell of a page, where the renderer starts the composite and its
+    /// scissor.
+    ///
+    /// The region's cells stay its bounds, so the pages are built at the
+    /// region's grid whatever the inset.
+    pub inset: [u8; 2],
 }
 
 /// A fixed renderer-drawn status icon composited above the cells.

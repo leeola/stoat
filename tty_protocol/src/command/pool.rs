@@ -46,8 +46,8 @@ pub struct PoolRegionCommand {
     /// How the terminal draws the pool, which rides the frame as the byte
     /// after the placement.
     ///
-    /// The last six bytes of the head carry a scaled pool's scale and grid,
-    /// and zeros for the other kinds.
+    /// The six bytes after the resident byte carry a scaled pool's scale and
+    /// grid, and zeros for the other kinds.
     pub kind: PoolKind,
     /// How far the terminal fades the pool's composite toward its clear color,
     /// from 0 (no fade) to 255 (the clear color alone).
@@ -63,6 +63,15 @@ pub struct PoolRegionCommand {
     /// a scaled pool are resident by kind. The byte rides the frame after the
     /// dim.
     pub resident: bool,
+    /// The logical px from the region's left and from its top to the first
+    /// cell of a page, which the last two bytes of the head carry.
+    ///
+    /// A nudge moves runs and bars but no cell, so a page that starts
+    /// between two cell edges moves by its region instead. The composite's
+    /// scissor starts at the inset, so the live grid shows in the strip at
+    /// the region's left and top. The region's right and bottom stay on
+    /// their cells, and the program sizes the page to what is left.
+    pub inset: [u8; 2],
 }
 
 impl PoolRegionCommand {
@@ -319,7 +328,8 @@ pub fn encode_pool_region_into(out: &mut Vec<u8>, command: &PoolRegionCommand) {
         w.write_all(&[kind, command.dim, u8::from(command.resident)])?;
         w.write_all(&scale.to_be_bytes())?;
         w.write_all(&rows.to_be_bytes())?;
-        w.write_all(&cols.to_be_bytes())
+        w.write_all(&cols.to_be_bytes())?;
+        w.write_all(&command.inset)
     });
     frame::end(out);
 }
@@ -624,7 +634,7 @@ pub fn encode_pool_drop_into(out: &mut Vec<u8>, pool: u32) {
 }
 
 pub(super) fn decode_pool_region(args: &[Vec<u8>]) -> Option<PoolRegionCommand> {
-    let arg: &[u8; 25] = args.first()?.get(..25)?.try_into().ok()?;
+    let arg: &[u8; 27] = args.first()?.get(..27)?.try_into().ok()?;
     let (scale, rows, cols) = (
         u16::from_be_bytes([arg[19], arg[20]]),
         u16::from_be_bytes([arg[21], arg[22]]),
@@ -651,6 +661,7 @@ pub(super) fn decode_pool_region(args: &[Vec<u8>]) -> Option<PoolRegionCommand> 
         kind,
         dim: arg[17],
         resident: arg[18] != 0,
+        inset: [arg[25], arg[26]],
     })
 }
 
@@ -766,6 +777,7 @@ mod tests {
         kind: PoolKind::Grid,
         dim: 0,
         resident: true,
+        inset: [0, 0],
     };
 
     /// The scaled kind the tests declare, a 16 by 36 grid at Preview Scale.
@@ -786,11 +798,11 @@ mod tests {
         );
     }
 
-    /// Every pool's frame is the 25-byte head whose last nine bytes are its
-    /// kind, dim, resident byte, and a scaled pool's scale and grid, and
-    /// decodes to what was declared.
+    /// Every pool's frame is the 27-byte head whose last eleven bytes are its
+    /// kind, dim, resident byte, a scaled pool's scale and grid, and its left
+    /// and top inset, and decodes to what was declared.
     #[test]
-    fn every_pool_region_carries_kind_dim_and_resident() {
+    fn every_pool_region_carries_kind_dim_resident_and_inset() {
         let grid = PoolRegionCommand {
             pool: 4,
             top: 1,
@@ -801,6 +813,7 @@ mod tests {
             kind: PoolKind::Grid,
             dim: 0,
             resident: false,
+            inset: [0, 0],
         };
         let terminal = PoolRegionCommand {
             kind: PoolKind::Terminal,
@@ -812,6 +825,10 @@ mod tests {
             kind: SCALED,
             ..grid
         };
+        let inset = PoolRegionCommand {
+            inset: [3, 5],
+            ..grid
+        };
         let read = |command: &PoolRegionCommand| {
             let encoded = encode_pool_region(command);
             let tail = frame::decode(&encoded).map(|frame| frame.args[0][16..].to_vec());
@@ -819,34 +836,38 @@ mod tests {
         };
 
         assert_eq!(
-            [read(&grid), read(&terminal), read(&scaled)],
+            [read(&grid), read(&terminal), read(&scaled), read(&inset)],
             [
                 (
                     Some(Command::PoolRegion(grid)),
-                    Some(vec![0, 0, 0, 0, 0, 0, 0, 0, 0])
+                    Some(vec![0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0])
                 ),
                 (
                     Some(Command::PoolRegion(terminal)),
-                    Some(vec![1, 64, 1, 0, 0, 0, 0, 0, 0])
+                    Some(vec![1, 64, 1, 0, 0, 0, 0, 0, 0, 0, 0])
                 ),
                 (
                     Some(Command::PoolRegion(scaled)),
-                    Some(vec![2, 0, 0, 0, 154, 0, 16, 0, 36])
+                    Some(vec![2, 0, 0, 0, 154, 0, 16, 0, 36, 0, 0])
+                ),
+                (
+                    Some(Command::PoolRegion(inset)),
+                    Some(vec![0, 0, 0, 0, 0, 0, 0, 0, 0, 3, 5])
                 ),
             ],
         );
     }
 
-    /// A head short of 25 bytes is ignored, which is what becomes of a 19-byte
-    /// head from an emitter before version 38. A whole head reads its kind,
-    /// dim, and resident bytes, and a kind from a later version reads as a grid
-    /// pool.
+    /// A head short of 27 bytes is ignored, which is what becomes of the
+    /// 25-byte head from an emitter before version 42. A whole head reads its
+    /// kind, dim, resident, and inset bytes, and a kind from a later version
+    /// reads as a grid pool.
     #[test]
-    fn a_pool_region_with_a_short_head_is_ignored() {
+    fn a_pool_region_with_the_shorter_head_is_ignored() {
         let head = vec![0, 0, 0, 4, 0, 1, 0, 2, 0, 76, 0, 22, 0, 0, 0, 2];
         let read = |tail: &[u8]| {
             decode_pool_region(&[[head.as_slice(), tail].concat()])
-                .map(|region| (region.kind, region.dim, region.resident))
+                .map(|region| (region.kind, region.dim, region.resident, region.inset))
         };
 
         assert_eq!(
@@ -857,7 +878,9 @@ mod tests {
                 read(&[1, 64, 1]),
                 read(&[1, 64, 1, 0, 0, 0, 0, 0]),
                 read(&[1, 64, 1, 0, 0, 0, 0, 0, 0]),
-                read(&[3, 64, 0, 0, 0, 0, 0, 0, 0])
+                read(&[1, 64, 1, 0, 0, 0, 0, 0, 0, 3]),
+                read(&[1, 64, 1, 0, 0, 0, 0, 0, 0, 3, 5]),
+                read(&[3, 64, 0, 0, 0, 0, 0, 0, 0, 0, 0])
             ],
             [
                 None,
@@ -865,8 +888,10 @@ mod tests {
                 None,
                 None,
                 None,
-                Some((PoolKind::Terminal, 64, true)),
-                Some((PoolKind::Grid, 64, false)),
+                None,
+                None,
+                Some((PoolKind::Terminal, 64, true, [3, 5])),
+                Some((PoolKind::Grid, 64, false, [0, 0])),
             ],
         );
     }
@@ -947,6 +972,7 @@ mod tests {
             kind: PoolKind::Terminal,
             dim: 0,
             resident: true,
+            inset: [0, 0],
         };
 
         assert_eq!(
@@ -966,9 +992,30 @@ mod tests {
         );
     }
 
+    /// A re-declare that changes only the inset places the pool elsewhere, so
+    /// a program refills the pages that the new inset moves.
+    #[test]
+    fn a_region_that_differs_in_inset_alone_is_another_placement() {
+        let inset = PoolRegionCommand {
+            inset: [3, 5],
+            ..REGION
+        };
+        assert_eq!(
+            [
+                REGION.same_placement(&inset),
+                inset.same_placement(&PoolRegionCommand {
+                    inset: [3, 0],
+                    ..inset
+                }),
+                inset.same_placement(&inset),
+            ],
+            [false, false, true],
+        );
+    }
+
     #[test]
     fn rejects_wrong_length_pool_region_payload() {
-        // The single arg here decodes to 3 bytes, not the 25 a pool region needs.
+        // The single arg here decodes to 3 bytes, not the 27 a pool region needs.
         assert!(decode(b"Gstoatty;pool_region;YWJj").is_none());
     }
 

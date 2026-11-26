@@ -140,6 +140,7 @@ impl Pool {
                 kind: PoolKind::Grid,
                 dim: 0,
                 resident: false,
+                inset: [0, 0],
             },
             bg,
             label,

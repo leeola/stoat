@@ -161,6 +161,7 @@ pub(crate) fn pool_region_from_command(command: PoolRegionCommand) -> PoolRegion
         // The live grid holds no cells of a scaled pool's size, so its region
         // never goes back to the live grid at rest.
         resident: command.resident || matches!(command.kind, PoolKind::Scaled { .. }),
+        inset: command.inset,
     }
 }
 

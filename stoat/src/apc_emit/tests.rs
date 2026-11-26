@@ -3687,6 +3687,7 @@ fn a_terminal_pane_pools_as_a_terminal_kind_under_protocol_nine() {
                 kind: PoolKind::Terminal,
                 dim: 0,
                 resident: true,
+                inset: [0, 0],
             })]
         ),
         "only a terminal that composites terminal pools gets one, with no page yet",
@@ -4573,6 +4574,7 @@ fn a_changes_view_declares_a_resident_pool_over_its_stack() {
             kind: PoolKind::Grid,
             dim: 0,
             resident: true,
+            inset: [0, 0],
         }]
     );
 }
@@ -6086,6 +6088,7 @@ fn the_modal_preview_is_pooled_and_retired() {
         kind: PoolKind::Grid,
         dim: 0,
         resident: false,
+        inset: [0, 0],
     };
     assert!(
         drain_apc(&mut rx).contains(&Command::PoolRegion(expected)),
@@ -6259,6 +6262,7 @@ fn file_finder_list_is_pooled_and_retired() {
         kind: PoolKind::Grid,
         dim: 0,
         resident: false,
+        inset: [0, 0],
     };
     assert!(
         drain_apc(&mut rx).contains(&Command::PoolRegion(expected)),
@@ -6438,6 +6442,7 @@ fn a_pixel_finder_list_fills_a_resident_pool_with_nudged_runs() {
                 kind: PoolKind::Grid,
                 dim: 0,
                 resident: true,
+                inset: [0, 0],
             }),
             vec![[0, 1], [0, 4], [0, 7], [0, 10]],
             true,
@@ -6525,6 +6530,7 @@ fn a_pixel_palette_list_fills_a_resident_pool() {
                 kind: PoolKind::Grid,
                 dim: 0,
                 resident: true,
+                inset: [0, 0],
             }),
             vec![[0, 2], [0, 1], [0, 5], [0, 4], [0, 8], [0, 7]],
             true,
@@ -6845,6 +6851,7 @@ fn a_modal_preview_declares_a_scaled_resident_pool() {
         },
         dim: 0,
         resident: true,
+        inset: [0, 0],
     };
     let fill = |index| Command::Fill(FillCommand { pool, index });
     assert_eq!(
@@ -6881,6 +6888,7 @@ fn an_older_terminal_keeps_the_grid_preview_pool() {
             kind: PoolKind::Grid,
             dim: 0,
             resident: false,
+            inset: [0, 0],
         })],
     );
 }
@@ -7058,6 +7066,7 @@ fn code_search_list_is_pooled_and_retired() {
         kind: PoolKind::Grid,
         dim: 0,
         resident: false,
+        inset: [0, 0],
     };
     assert!(
         drain_apc(&mut rx).contains(&Command::PoolRegion(expected)),
@@ -7190,6 +7199,7 @@ fn symbol_finder_list_is_pooled_and_retired() {
         kind: PoolKind::Grid,
         dim: 0,
         resident: false,
+        inset: [0, 0],
     };
     assert!(
         drain_apc(&mut rx).contains(&Command::PoolRegion(expected)),
@@ -7395,6 +7405,7 @@ fn finder_pool_region_spans_the_full_window_over_the_band() {
         kind: PoolKind::Grid,
         dim: 0,
         resident: false,
+        inset: [0, 0],
     };
     assert!(
             drain_apc(&mut rx).contains(&Command::PoolRegion(expected)),
@@ -7437,6 +7448,7 @@ fn palette_list_is_pooled_and_retired() {
         kind: PoolKind::Grid,
         dim: 0,
         resident: false,
+        inset: [0, 0],
     };
     assert!(
         drain_apc(&mut rx).contains(&Command::PoolRegion(expected)),
@@ -7486,6 +7498,7 @@ fn palette_arg_list_is_pooled_and_retired() {
         kind: PoolKind::Grid,
         dim: 0,
         resident: false,
+        inset: [0, 0],
     };
     assert!(
         drain_apc(&mut rx).contains(&Command::PoolRegion(expected)),
@@ -7666,6 +7679,7 @@ fn palette_filter_to_arg_flip_repools() {
         kind: PoolKind::Grid,
         dim: 0,
         resident: false,
+        inset: [0, 0],
     };
     assert!(
         drain_apc(&mut rx).contains(&Command::PoolRegion(expected)),
@@ -7831,6 +7845,7 @@ fn a_pixel_history_declares_a_pointer_region_with_no_page() {
         kind: PoolKind::Grid,
         dim: 0,
         resident: false,
+        inset: [0, 0],
     };
     let drop = Command::PoolDrop(PoolDropCommand { pool });
     assert_eq!(
@@ -7898,6 +7913,7 @@ fn completion_popup_is_pooled_and_retired() {
         kind: PoolKind::Grid,
         dim: 0,
         resident: false,
+        inset: [0, 0],
     };
     assert!(
         drain_apc(&mut rx).contains(&Command::PoolRegion(expected)),
@@ -7940,6 +7956,7 @@ fn help_list_and_detail_are_pooled_and_retired() {
         kind: PoolKind::Grid,
         dim: 0,
         resident: false,
+        inset: [0, 0],
     };
     let detail = PoolRegionCommand {
         pool: crate::smooth_scroll::non_pane_pool::HELP_DETAIL,
@@ -7951,6 +7968,7 @@ fn help_list_and_detail_are_pooled_and_retired() {
         kind: PoolKind::Grid,
         dim: 0,
         resident: false,
+        inset: [0, 0],
     };
     let cmds = drain_apc(&mut rx);
     assert!(
@@ -8049,6 +8067,7 @@ fn commits_list_is_pooled_and_retired() {
         kind: PoolKind::Grid,
         dim: 0,
         resident: false,
+        inset: [0, 0],
     };
     let bytes = rx
         .try_recv()

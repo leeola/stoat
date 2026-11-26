@@ -613,6 +613,7 @@ fn emit_window_content(stoat: &mut Stoat, out: &mut Vec<u8>) -> Vec<Vec<u8>> {
             kind: PoolKind::Grid,
             dim: 0,
             resident: false,
+            inset: [0, 0],
         };
         // A view whose render reads from a source that counts its own
         // changes answers "nothing moved" from the counter, and skipping on
@@ -734,6 +735,7 @@ fn emit_window_content(stoat: &mut Stoat, out: &mut Vec<u8>) -> Vec<Vec<u8>> {
             kind: PoolKind::Grid,
             dim: 0,
             resident: false,
+            inset: [0, 0],
         };
 
         // The segments are the row's content, so hashing them answers
@@ -2049,6 +2051,7 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
             kind: PoolKind::Grid,
             dim: 0,
             resident: pixels.is_some(),
+            inset: [0, 0],
         };
         // A wrapped label takes more than one row, so the pool pages by the
         // document rows that the table sums. The prefix is copied out first,
@@ -2168,6 +2171,7 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
             kind,
             dim: 0,
             resident: scaled.is_some(),
+            inset: [0, 0],
         };
         let (page_rows, page_cols) = (region.page_rows(), region.page_cols());
         let active_idx = stoat.active_workspace;
@@ -2299,6 +2303,7 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
             kind: PoolKind::Grid,
             dim: 0,
             resident: false,
+            inset: [0, 0],
         };
         let scroll_row =
             crate::render::picker::window_start(finder.selected, list.height.max(1) as usize)
@@ -2352,6 +2357,7 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
             kind: PoolKind::Grid,
             dim: 0,
             resident: false,
+            inset: [0, 0],
         };
         let scroll_row =
             crate::render::picker::window_start(finder.selected, list.height.max(1) as usize)
@@ -2409,6 +2415,7 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
             kind: PoolKind::Grid,
             dim: 0,
             resident: pixels.is_some(),
+            inset: [0, 0],
         };
         let scroll_row = selected.saturating_sub(list.height.saturating_sub(1) as usize) as u32;
         let pixel_scroll = pixels.map(|metrics| {
@@ -2490,6 +2497,7 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
             kind: PoolKind::Grid,
             dim: 0,
             resident: false,
+            inset: [0, 0],
         };
         stoat.smooth_scroll.declare_pointer_region(&mut out, region);
     }
@@ -2512,6 +2520,7 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
             kind: PoolKind::Grid,
             dim: 0,
             resident: pixels.is_some(),
+            inset: [0, 0],
         };
         // The pool pages by document rows, as the finder's does. The prefix is
         // copied out first, since the active picker borrows the whole picker.
@@ -2619,6 +2628,7 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
             kind: PoolKind::Grid,
             dim: 0,
             resident: false,
+            inset: [0, 0],
         };
         let scroll_row = state.scroll_top as u32;
         // Commits stream in lazily, so the length and the load and end flags
@@ -2673,6 +2683,7 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
             kind: PoolKind::Grid,
             dim: 0,
             resident: false,
+            inset: [0, 0],
         };
         let lanes = picker.graph_lanes;
         let scroll_row =
@@ -2744,6 +2755,7 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
             kind,
             dim: 0,
             resident: grid.is_some(),
+            inset: [0, 0],
         };
         let (page_rows, page_cols) = (region.page_rows(), region.page_cols());
         // Clamped through the same helper the renderer uses, so the pool
@@ -2800,6 +2812,7 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
             kind: PoolKind::Grid,
             dim: 0,
             resident: false,
+            inset: [0, 0],
         };
         let scroll_row = layout.viewport_top as u32;
         // The item list is replaced wholesale on a re-query, which bumps
@@ -2854,6 +2867,7 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
             kind: PoolKind::Grid,
             dim: 0,
             resident: false,
+            inset: [0, 0],
         };
         let list_scroll =
             help.selected()
@@ -2900,6 +2914,7 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
             kind: PoolKind::Grid,
             dim: 0,
             resident: false,
+            inset: [0, 0],
         };
         let detail_scroll = help.detail_scroll() as u32;
         let surface = crate::render::chrome::plate_colors(theme, &stoat.apc_scene).is_some();
@@ -2947,6 +2962,7 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
             kind: PoolKind::Grid,
             dim: 0,
             resident: false,
+            inset: [0, 0],
         };
         let interior = inner.height.max(1) as usize;
         let half_page = (interior / 2).max(1);
@@ -3290,6 +3306,7 @@ pub(crate) fn editor_pool_panes(stoat: &Stoat) -> Vec<(u32, EditorId, PoolRegion
                     kind: PoolKind::Grid,
                     dim: 0,
                     resident: false,
+                    inset: [0, 0],
                 },
             ))
         })
@@ -3343,6 +3360,7 @@ pub(crate) fn diff_changes_pool_panes(
                     kind: PoolKind::Grid,
                     dim: 0,
                     resident: true,
+                    inset: [0, 0],
                 },
             ))
         })
@@ -3494,6 +3512,7 @@ fn terminal_pool_panes(
                         false => 0,
                     },
                     resident: true,
+                    inset: [0, 0],
                 },
                 is_focused,
                 dim: match region_fades {
@@ -3825,6 +3844,7 @@ fn windowed_editor_pool_panes(stoat: &Stoat) -> Vec<(u32, EditorId, PoolRegionCo
                     kind: PoolKind::Grid,
                     dim: 0,
                     resident: false,
+                    inset: [0, 0],
                 },
             ))
         })

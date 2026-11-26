@@ -147,7 +147,7 @@ session control. "Head" is the fixed prefix of the first argument.
 | `fill` | P | 12 B | + streamed page, closed by `fill_end` |
 | `fill_rows` | P | 20 B | + streamed rows, closed by `fill_end` |
 | `fill_end` | P | -- | Commits the page onto its pool slot |
-| `pool_region` | P | 25 B | Declares a smooth-scroll pool, ending in a scaled pool's scale and grid |
+| `pool_region` | P | 27 B | Declares a smooth-scroll pool, ending in a scaled pool's scale and grid, then its pixel inset |
 | `scroll` | P | 14 B | Pool scroll target, page plus fraction |
 | `pool_cursor` | P | 14 B | Anchors the cursor to a gliding pool |
 | `pool_cursor_release` | P | 4 B | Takes the cursor anchor off a pool |
@@ -270,6 +270,18 @@ the region. A drag reports only when the pointer enters another grid cell.
 The setting lives on the pool, so a `pool_drop` ends it and a re-declare
 keeps it. A terminal below version 41 ignores the frame and reports the grid
 cell.
+
+From protocol version 42, every `pool_region` carries a fixed 27-byte head: the
+25 bytes of version 38, then the pool's inset, a left and a top byte in logical
+px. The terminal starts a page's first cell that far right of and down from the
+region's top-left, each rounded to the nearest whole physical px at its display
+scale, and starts the composite's scissor there. The region's right and bottom
+edges stay on their cells, so the live grid shows in the strip at the left and
+the top, and the program sizes the page to the rest. A `pool_mouse` pixel offset
+still counts from the region's top-left. A terminal below version 42 reads the
+first 25 bytes and places the page on the region's first cell, so state an
+inset only to a terminal at version 42 or later. A terminal at version 42 or
+later drops a shorter head.
 
 `ident` travels the other way, terminal to program, and arrives as input bytes
 on stdin. `decode` never yields it; use `decode_ident_reply`.
