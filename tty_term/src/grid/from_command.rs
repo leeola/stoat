@@ -69,7 +69,8 @@ impl From<TextRunCommand> for StoredTextRun {
 /// `nudge` the offset in force at its declaration. All three come from the
 /// caller because a pool page has none of them. A page carries no line layout,
 /// so its row resolution is the identity. Its runs are the base layer of the
-/// composite, so they take `seq` 0, and a page takes no nudge.
+/// composite, so they take `seq` 0, and each takes the nudge that its page set
+/// at its declaration.
 pub(crate) fn text_run_from_command(
     run: &StoredTextRun,
     row: i16,

@@ -163,7 +163,7 @@ session control. "Head" is the fixed prefix of the first argument.
 | `reset` | C | -- | Clears every decoration |
 | `lane_begin` | C | 4 B | Opens a numbered lane and clears its decorations |
 | `lane_end` | C | -- | Closes the open lane |
-| `nudge` | C | 4 B | Offsets the text runs, bars, and panels after it by logical px |
+| `nudge` | C | 4 B | Offsets the text runs, bars, and panels after it by logical px, or inside a fill those of its page |
 | `config_reload` | C | -- | The terminal re-reads its own config file |
 | `zoom_capture` | C | 1 B | Claim or release the platform zoom combo |
 | `font_step` | C | 4 B | Step the terminal's font size |
@@ -236,7 +236,11 @@ its declared place, until the next `nudge`, `lane_begin`, `lane_end`, or
 `reset`. An icon takes no nudge, since it carries its own offset. A panel's
 inset and outset edges move with the nudge, and its margin and gap edges keep
 their place. A terminal below version 35 ignores the frame. Send a nudge only
-to a terminal at version 35 or later.
+to a terminal at version 35 or later. From version 39, a `nudge` inside a
+`fill` or a `fill_decorations` scope offsets the text runs and the bars of that
+page alone, and it ends with the scope, so the live lane keeps its own offset.
+A terminal below version 39 applies such a nudge to the open lane, so send one
+inside a fill only to a terminal at version 39 or later.
 
 From protocol version 36, bit 1 of the flags byte that ends a `text_run` head,
 and of the one in a `text_runs` batch's shared fields, draws the run in the

@@ -11,9 +11,16 @@
 //! entry, and `panel`, until the next `nudge`, `lane_begin`, `lane_end`, or
 //! `reset`. An icon takes none, since it carries its own offset.
 //!
+//! Inside a `fill` or a `fill_decorations` scope, the offset holds for the text
+//! runs and the bars of that page alone, and it ends with the scope. The live
+//! lane keeps its own offset, so a page can set each of its lines on its own
+//! pixel row.
+//!
 //! A terminal before protocol version 35 ignores the frame, so it draws each
 //! component at its declared place. Send a nudge only to a terminal at version
-//! 35 or later.
+//! 35 or later. A terminal before version 39 applies a nudge inside a fill to
+//! the open lane, so send one there only to a terminal at
+//! [`crate::PAGE_NUDGE_PROTOCOL`] or later.
 
 use crate::frame;
 

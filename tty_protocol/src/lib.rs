@@ -243,9 +243,15 @@
 /// a scaled pool only to a terminal at [`POOL_SCALE_PROTOCOL`] or later. This
 /// version drops a shorter head.
 ///
+/// Version 39 offsets the text runs and the bars of a page by a `nudge` inside
+/// its `fill` or `fill_decorations` scope, and the nudge ends with the scope. A
+/// terminal that predates it applies such a nudge to the open lane, so an
+/// emitter sends one inside a fill only to a terminal at
+/// [`PAGE_NUDGE_PROTOCOL`] or later.
+///
 /// Zero is reserved for a peer whose handshake carries no version at all, which
 /// is every build from before the field existed.
-pub const PROTOCOL_VERSION: u32 = 38;
+pub const PROTOCOL_VERSION: u32 = 39;
 
 /// The first [`PROTOCOL_VERSION`] whose terminal reads the `text_runs` and
 /// `bars` batches.
@@ -332,6 +338,14 @@ pub const MINIMAP_MARK_PROTOCOL: u32 = 37;
 /// region, so an emitter declares a scaled pool only to a terminal at this
 /// version or later.
 pub const POOL_SCALE_PROTOCOL: u32 = 38;
+
+/// The first [`PROTOCOL_VERSION`] whose terminal offsets the text runs and the
+/// bars of a page by a `nudge` inside its fill.
+///
+/// An earlier terminal applies such a nudge to the open lane, where it moves
+/// the live decorations after it, so an emitter sends a nudge inside a fill only
+/// to a terminal at this version or later.
+pub const PAGE_NUDGE_PROTOCOL: u32 = 39;
 
 pub mod command;
 pub mod detect;

@@ -2689,6 +2689,146 @@ fn page_decorations_past_the_cap_are_dropped() {
     );
 }
 
+/// A fill of page 0 of pool 0 whose decorations sit under two nudges, the run
+/// `a` and a bar under `[0, 5]` and then the run `b` under `[2, 0]`.
+fn nudged_page_stream() -> Vec<u8> {
+    let mut stream = encode_fill(&FillCommand { pool: 0, index: 0 });
+    stream.extend_from_slice(&encode_nudge([0, 5]));
+    stream.extend_from_slice(&text_run_frame("a"));
+    stream.extend_from_slice(&bar_frames(1));
+    stream.extend_from_slice(&encode_nudge([2, 0]));
+    stream.extend_from_slice(&text_run_frame("b"));
+    stream.extend_from_slice(&encode_fill_end());
+    stream
+}
+
+/// The text and the nudge of each run on a page, and the nudge of each of its
+/// bars.
+type PageNudges = (Vec<(String, [i16; 2])>, Vec<[i16; 2]>);
+
+/// The nudges on page `index` of pool 0, as [`PageNudges`] lists them.
+fn page_nudges(terminal: &Terminal, index: u64) -> PageNudges {
+    let (runs, bars, _, _) = terminal.pools[&0]
+        .page_pool
+        .page_decorations(index)
+        .expect("page buffered");
+    (
+        runs.iter()
+            .map(|run| (run.text.to_string(), run.nudge))
+            .collect(),
+        bars.iter().map(|bar| bar.nudge).collect(),
+    )
+}
+
+#[test]
+fn a_nudge_inside_a_fill_offsets_the_runs_and_the_bars_of_its_page() {
+    let mut terminal = Terminal::new(2, 4, Theme::default());
+    declare_pool(&mut terminal, 0, 2, 4);
+    terminal.advance(&nudged_page_stream());
+
+    assert_eq!(
+        page_nudges(&terminal, 0),
+        (
+            vec![("a".to_owned(), [0, 5]), ("b".to_owned(), [2, 0])],
+            vec![[0, 5]]
+        ),
+    );
+}
+
+/// A nudge inside a page leaves the live lane at its own offset, so a live run
+/// after the page draws at its declared place.
+#[test]
+fn a_nudge_inside_a_fill_leaves_the_live_lane_at_its_own_offset() {
+    let mut terminal = Terminal::new(2, 4, Theme::default());
+    let mut grid = Grid::new(2, 4);
+    declare_pool(&mut terminal, 0, 2, 4);
+    terminal.advance(&nudged_page_stream());
+    terminal.advance(&text_run_frame("live"));
+    terminal.project(&mut grid);
+
+    let runs: Vec<(&str, [i16; 2])> = grid
+        .text_runs()
+        .iter()
+        .map(|run| (&*run.text, run.nudge))
+        .collect();
+    assert_eq!(runs, [("live", [0, 0])]);
+}
+
+/// Each fill starts with no nudge, so the offset that one page set does not
+/// carry into the next page through the recycled context.
+#[test]
+fn a_fill_starts_with_no_nudge() {
+    let mut terminal = Terminal::new(2, 4, Theme::default());
+    declare_pool(&mut terminal, 0, 2, 4);
+    let mut stream = nudged_page_stream();
+    stream.extend_from_slice(&encode_fill(&FillCommand { pool: 0, index: 1 }));
+    stream.extend_from_slice(&text_run_frame("c"));
+    stream.extend_from_slice(&encode_fill_end());
+    terminal.advance(&stream);
+
+    assert_eq!(
+        page_nudges(&terminal, 1),
+        (vec![("c".to_owned(), [0, 0])], Vec::new())
+    );
+}
+
+/// A run and a bar nudged down hang below their declared row, so the page
+/// above the window contributes them while their row sits just above it. An
+/// un-nudged run on that row stays culled.
+#[test]
+fn a_nudged_run_hangs_into_the_composite_from_the_page_above() {
+    let mut terminal = Terminal::new(2, 4, Theme::default());
+    let mut out = Grid::new(3, 4);
+    declare_pool(&mut terminal, 0, 2, 4);
+
+    let run_on_row_one = |text: &str| {
+        encode_text_run(&TextRunCommand {
+            col: 0,
+            row: 16,
+            scale: 160,
+            color: [1, 2, 3],
+            bg: None,
+            bold: false,
+            italic: false,
+            follow: 0,
+            anchor: None,
+            text: text.to_owned(),
+        })
+    };
+    let mut stream = encode_fill(&FillCommand { pool: 0, index: 0 });
+    stream.extend_from_slice(&run_on_row_one("plain"));
+    stream.extend_from_slice(&encode_nudge([0, 5]));
+    stream.extend_from_slice(&run_on_row_one("low"));
+    stream.extend_from_slice(&encode_bar(&BarCommand {
+        x: 0,
+        y: 16,
+        width: 16,
+        height: 16,
+        color: [1, 2, 3],
+        occludes: false,
+        hatch: None,
+        radius: 0,
+        corners: 0,
+    }));
+    for index in 1..3 {
+        stream.extend_from_slice(&encode_fill(&FillCommand { pool: 0, index }));
+    }
+    stream.extend_from_slice(&encode_fill_end());
+    terminal.advance(&stream);
+    terminal.project_pool(0, &mut out, 1.0);
+
+    let runs: Vec<(&str, i16, [i16; 2])> = out
+        .text_runs()
+        .iter()
+        .map(|run| (&*run.text, run.row, run.nudge))
+        .collect();
+    let bars: Vec<(i16, [i16; 2])> = out.bars().iter().map(|bar| (bar.y, bar.nudge)).collect();
+    assert_eq!(
+        (runs, bars),
+        (vec![("low", -16, [0, 5])], vec![(-16, [0, 5])])
+    );
+}
+
 /// A window drag during an editor refill resizes mid-fill. Closing the fill
 /// there would route the rest of the page to the live parser, painting page
 /// content across the screen.

@@ -1144,18 +1144,25 @@ struct FillTarget {
     /// outlives its page has to be emptied or the sink grows for the life of the
     /// terminal.
     responses: ResponseSink,
-    /// Page-targeted text runs captured while this page paints, moved onto the
-    /// pool slot when the fill commits.
-    text_runs: Vec<TextRunCommand>,
+    /// Page-targeted text runs captured while this page paints, each with the
+    /// nudge in force at its declaration, moved onto the pool slot when the fill
+    /// commits.
+    text_runs: Vec<(TextRunCommand, [i16; 2])>,
     /// Page-targeted bars captured while this page paints. See
     /// [`Self::text_runs`].
-    bars: Vec<BarCommand>,
+    bars: Vec<(BarCommand, [i16; 2])>,
     /// Page-targeted stroked paths captured while this page paints. See
     /// [`Self::text_runs`].
     polylines: Vec<PolylineCommand>,
     /// Page-targeted status icons captured while this page paints. See
     /// [`Self::text_runs`].
     icons: Vec<IconCommand>,
+    /// The offset that the `nudge` frames of this page set for the runs and the
+    /// bars after them, in logical px.
+    ///
+    /// It starts at `[0, 0]` with each page and ends with it, so a nudge inside
+    /// a fill never reaches the live lane.
+    nudge: [i16; 2],
 }
 
 impl FillTarget {
@@ -1186,6 +1193,7 @@ impl FillTarget {
             bars: Vec::new(),
             polylines: Vec::new(),
             icons: Vec::new(),
+            nudge: [0, 0],
         }
     }
 
@@ -1943,7 +1951,8 @@ impl Terminal {
             // bar accumulates onto the grid and stages like the other decorations.
             Command::Bar(bar) => match &mut self.fill {
                 Some(fill) => {
-                    push_capped(&mut fill.bars, bar, &mut self.warned_decoration_cap);
+                    let nudged = (bar, fill.nudge);
+                    push_capped(&mut fill.bars, nudged, &mut self.warned_decoration_cap);
                 },
                 None => self.stage_or_apply(Command::Bar(bar)),
             },
@@ -2121,9 +2130,19 @@ impl Terminal {
             // whose text streamed in before it lands in the lane and at the
             // offset it opened in. The marker itself stages like a reset, in
             // order with the decorations around it.
-            Command::LaneBegin(_) | Command::LaneEnd | Command::Nudge(_) => {
+            Command::LaneBegin(_) | Command::LaneEnd => {
                 self.commit_capture();
                 self.stage_or_apply(command);
+            },
+            // A nudge inside a page sets the offset of that page's runs and
+            // bars and leaves the live lane's alone, since the page's
+            // decorations ride its slot rather than the lane.
+            Command::Nudge(offset) => {
+                self.commit_capture();
+                match &mut self.fill {
+                    Some(fill) => fill.nudge = offset,
+                    None => self.stage_or_apply(Command::Nudge(offset)),
+                }
             },
             // Hello identifies the program behind the terminal and touches no
             // grid state. The host logs the event, and the terminal answers with
@@ -3104,6 +3123,7 @@ impl Terminal {
         };
         fill.cells = cells;
         fill.rows = None;
+        fill.nudge = [0, 0];
         self.fill = Some(fill);
     }
 
@@ -3276,7 +3296,7 @@ impl Terminal {
             Some(fill) => {
                 push_capped(
                     &mut fill.text_runs,
-                    command,
+                    (command, fill.nudge),
                     &mut self.warned_decoration_cap,
                 );
             },

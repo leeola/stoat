@@ -315,6 +315,67 @@ fn a_scaled_pool_draws_its_cells_at_the_scaled_size() {
     );
 }
 
+/// A page bar nudged 3 px down draws 3 px below its declared place. The pool's
+/// 12 by 24 pixel cells start at pixel (24, 24), so the bar over cell (0, 0)
+/// spans y 27 to 50 rather than 24 to 47.
+#[test]
+fn a_page_bar_draws_at_its_nudge() {
+    let (device, queue) = require_headless_device();
+    let (target, view) = offscreen_target(&device, WIDTH, HEIGHT);
+    let mut renderer = renderer(&device);
+    let [live_w, live_h] = cells(LIVE_FONT);
+
+    let (left, top) = (2, 1);
+    let red = Rgb::new(255, 0, 0);
+    let mut pool = Grid::new(2, 4);
+    pool.set_bars(vec![Bar {
+        x: 0,
+        y: 0,
+        width: 16,
+        height: 16,
+        color: red,
+        seq: 1,
+        occludes: false,
+        hatch: None,
+        radius: 0,
+        corners: 0,
+        nudge: [0, 3],
+    }]);
+
+    let live = Grid::new((HEIGHT / live_h) as usize, (WIDTH / live_w) as usize);
+    let (full, none) = (Damage::Full, Damage::Partial(Vec::new()));
+    renderer.render_pools_into(
+        &device,
+        &queue,
+        &view,
+        &live,
+        still_frame(&full, &none),
+        &[PoolComposite {
+            id: 0,
+            grid: &pool,
+            cell: PoolCell::Live,
+            origin_cells: [left as f32, top as f32],
+            scissor: [left * live_w, top * live_h, 4 * live_w, 2 * live_h],
+            shift_rows: 0.0,
+            content_changed: true,
+            scrolled_rows: None,
+            occludable: true,
+            skip_clear: false,
+            changed_rows: None,
+            dim: 0.0,
+        }],
+        &[],
+    );
+    let pixels = read_back(&device, &queue, &target, WIDTH, HEIGHT);
+
+    let red_at = |y: u32| pixel(&pixels, WIDTH, 30, y) == rgb(red);
+    assert_eq!(
+        [26, 27, 50, 51].map(red_at),
+        [false, true, true, false],
+        "the bar spans y 27 to 50 down column 30",
+    );
+}
+
 /// A renderer over the whole surface at the live font size, clearing to black.
 fn renderer(device: &Device) -> Renderer {
     Renderer::new(

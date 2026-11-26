@@ -225,6 +225,13 @@ pub(super) fn apply_line_layout(grid: &mut Grid, command: Option<&LineLayoutComm
 /// fraction stays with the renderer, so these shift by the same pixel offset as
 /// the cells [`PagePool::compose`] copied.
 ///
+/// A run or a bar nudged down reaches one row further than its declared rows,
+/// because a nudge under one cell height moves it at most one row down. So it
+/// stays while that row shows, and the walk starts at the page above the
+/// window, since one of its runs or bars can hang into the first composed row.
+/// The other decorations of that page lie above the window and drop by their
+/// own culls.
+///
 /// The page decorations are already in grid form (see
 /// [`PagePool::set_decorations`]), so re-stamping is Copy-field arithmetic plus
 /// an `Arc` bump per run, with no per-frame decode. They carry `seq` 0 as the
@@ -250,7 +257,7 @@ pub(super) fn stamp_pool_decorations(pool: &PagePool, out: &mut Grid, top: i64, 
     // the pages are walked.
     let mut kept = 0;
 
-    for page in first_page..=last_page {
+    for page in (first_page - 1).max(0)..=last_page {
         let Some((page_runs, page_bars, page_polylines, page_icons)) =
             pool.page_decorations(page as u64)
         else {
@@ -270,7 +277,8 @@ pub(super) fn stamp_pool_decorations(pool: &PagePool, out: &mut Grid, top: i64, 
 
         for run in page_runs {
             let row = run.row as i64 + shift;
-            if row + 16 <= 0 || row >= out_rows_16 {
+            let reach = 16 + nudged_reach(run.nudge);
+            if row + reach <= 0 || row >= out_rows_16 {
                 continue;
             }
             if let Ok(row) = i16::try_from(row) {
@@ -280,7 +288,8 @@ pub(super) fn stamp_pool_decorations(pool: &PagePool, out: &mut Grid, top: i64, 
 
         for bar in page_bars {
             let y = bar.y as i64 + shift;
-            if y + bar.height as i64 <= 0 || y >= out_rows_16 {
+            let reach = bar.height as i64 + nudged_reach(bar.nudge);
+            if y + reach <= 0 || y >= out_rows_16 {
                 continue;
             }
             if let Ok(y) = i16::try_from(y) {
@@ -332,6 +341,15 @@ pub(super) fn stamp_pool_decorations(pool: &PagePool, out: &mut Grid, top: i64, 
     out.set_bars(bars);
     out.set_polylines(polylines);
     out.set_icons(icons);
+}
+
+/// The sixteenths that a decoration nudged by `nudge` reaches below its
+/// declared rows, one row for a nudge down and none for any other.
+fn nudged_reach(nudge: [i16; 2]) -> i64 {
+    match nudge[1] > 0 {
+        true => 16,
+        false => 0,
+    }
 }
 
 /// Replace the grid's text-run list with each stored text-run command's run.

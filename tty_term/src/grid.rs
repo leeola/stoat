@@ -1229,6 +1229,9 @@ impl PagePool {
     /// Store the page-targeted decorations captured for document page `index`,
     /// replacing any already on its slot.
     ///
+    /// Each text run and bar comes with the nudge in force at its declaration,
+    /// and it keeps that nudge, so it draws that far from its declared place.
+    ///
     /// Written by the terminal when a fill commits, after [`Self::fill`] has
     /// recycled the slot and its cells are painted. The commands are page-local.
     /// The terminal translates them to the window when it projects the pool.
@@ -1239,8 +1242,8 @@ impl PagePool {
     pub fn set_decorations(
         &mut self,
         index: u64,
-        text_runs: Vec<TextRunCommand>,
-        bars: Vec<BarCommand>,
+        text_runs: Vec<(TextRunCommand, [i16; 2])>,
+        bars: Vec<(BarCommand, [i16; 2])>,
         polylines: Vec<PolylineCommand>,
         icons: Vec<IconCommand>,
     ) {
@@ -1252,14 +1255,14 @@ impl PagePool {
         // against once it is.
         let text_runs: Vec<TextRun> = text_runs
             .into_iter()
-            .map(|command| {
+            .map(|(command, nudge)| {
                 let run = StoredTextRun::from(command);
-                text_run_from_command(&run, run.row, 0, [0, 0])
+                text_run_from_command(&run, run.row, 0, nudge)
             })
             .collect();
         let bars: Vec<Bar> = bars
             .iter()
-            .map(|command| bar_from_command(command, command.y, 0, [0, 0]))
+            .map(|(command, nudge)| bar_from_command(command, command.y, 0, *nudge))
             .collect();
 
         let icons: Vec<Icon> = icons
@@ -1295,8 +1298,8 @@ impl PagePool {
     pub fn redecorate(
         &mut self,
         index: u64,
-        text_runs: Vec<TextRunCommand>,
-        bars: Vec<BarCommand>,
+        text_runs: Vec<(TextRunCommand, [i16; 2])>,
+        bars: Vec<(BarCommand, [i16; 2])>,
         polylines: Vec<PolylineCommand>,
         icons: Vec<IconCommand>,
     ) -> bool {
@@ -2626,18 +2629,36 @@ mod tests {
         let mut pool = PagePool::new(3, 4, 2);
 
         pool.fill(0, 3, 4).get_mut(0, 0).ch = 'a';
-        pool.set_decorations(0, Vec::new(), vec![bar_at(0)], Vec::new(), Vec::new());
+        pool.set_decorations(
+            0,
+            Vec::new(),
+            vec![(bar_at(0), [0, 0])],
+            Vec::new(),
+            Vec::new(),
+        );
         pool.content_changed(0, true);
 
         pool.fill(0, 3, 4).get_mut(0, 0).ch = 'a';
-        pool.set_decorations(0, Vec::new(), vec![bar_at(0)], Vec::new(), Vec::new());
+        pool.set_decorations(
+            0,
+            Vec::new(),
+            vec![(bar_at(0), [0, 0])],
+            Vec::new(),
+            Vec::new(),
+        );
         assert!(
             !pool.content_changed(0, false),
             "the same cells under the same bar is not a change",
         );
 
         pool.fill(0, 3, 4).get_mut(0, 0).ch = 'a';
-        pool.set_decorations(0, Vec::new(), vec![bar_at(1)], Vec::new(), Vec::new());
+        pool.set_decorations(
+            0,
+            Vec::new(),
+            vec![(bar_at(1), [0, 0])],
+            Vec::new(),
+            Vec::new(),
+        );
         assert!(
             pool.content_changed(0, false),
             "the bar moved, so the page renders differently",
@@ -3357,7 +3378,13 @@ mod tests {
             let page = pool.fill(0, 2, 3);
             page.row_mut(0)[0].ch = 'x';
         }
-        pool.set_decorations(0, Vec::new(), vec![bar_at(0)], Vec::new(), Vec::new());
+        pool.set_decorations(
+            0,
+            Vec::new(),
+            vec![(bar_at(0), [0, 0])],
+            Vec::new(),
+            Vec::new(),
+        );
 
         pool.invalidate();
 
