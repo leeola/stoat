@@ -1372,6 +1372,10 @@ impl ListWindow {
 /// which stands [`DIRTY_DOT_DROP`] under the top of its box. A page of a
 /// resident pool is what draws this, since no row stands on the cell grid.
 ///
+/// A pixel list's marks end [`MARK_INSET`] inside its right edge. The `M`
+/// draws at the Caption size on the result's first line, and the dot is
+/// [`DIRTY_DOT_SIZE`] across.
+///
 /// [`chrome::selected_row`]: crate::render::chrome::selected_row
 /// [`chrome::tagged_name`]: crate::render::chrome::tagged_name
 #[allow(clippy::too_many_arguments)]
@@ -1404,7 +1408,7 @@ pub(crate) fn paint_path_rows(
         );
         return;
     }
-    let mark_style = theme.get(scope::DIFF_MODIFIED);
+    let mark_style = modified_mark_style(theme);
     let area_end = area.x + area.width;
 
     let mut top = i32::from(area.y) - i32::from(start.skip);
@@ -1462,9 +1466,16 @@ pub(crate) fn paint_path_rows(
 }
 
 /// The logical px from the top of a pixel list's result box to the top of its
-/// dot, which sets the dot of [`dirty_dot`] where the cell form sets it, about
-/// 6 px under the top of a row.
+/// dot, as FinderShared sets the dot's `margin-top`.
 const DIRTY_DOT_DROP: u16 = 6;
+
+/// The logical px across the dot of an unsaved buffer in a pixel list.
+const DIRTY_DOT_SIZE: u16 = 6;
+
+/// The logical px from a pixel list's right edge to the right end of a row's
+/// mark, which is the 3 px that the selected box stands inside the list and
+/// the 8 px of the row's padding.
+const MARK_INSET: u16 = 11;
 
 /// What every result of one paint of a path list shares, with the scratch that
 /// its results reuse.
@@ -1493,6 +1504,18 @@ struct Measured<'r> {
     is_path: bool,
     path: &'r PathBuf,
     lines: u32,
+}
+
+/// The mark that ends a result's first line in a pixel list, which stands
+/// [`MARK_INSET`] inside the list's right edge.
+#[derive(Clone, Copy)]
+enum PixelMark {
+    /// A glyph drawn at the Caption size in a color, which is the `M` of a
+    /// modified file or the `●` of an unsaved buffer whose dot has no RGB
+    /// color.
+    Glyph(char, [u8; 3]),
+    /// The round dot of an unsaved buffer in a color.
+    Dot([u8; 3]),
 }
 
 impl<'r, 'a> RowPainter<'r, 'a> {
@@ -1672,7 +1695,14 @@ fn paint_pixel_rows(
         scratch.resize(cells);
         scratch.reset();
         painter.paint_result(measured, cells, 0, style, &mut scratch);
-        let dot = pixel_mark(marks, measured, theme, &mut scratch);
+        let mark = match area.width > LABEL_PAD + MARK_COLUMNS {
+            true => pixel_mark(marks, measured, theme, fallback),
+            false => None,
+        };
+        let mark_end = area
+            .width
+            .saturating_mul(16)
+            .saturating_sub(metrics.cols(MARK_INSET));
 
         for line in 0..lines {
             let top = y + i64::from(metrics.px(ROW_PAD)) + i64::from(line) * line_height;
@@ -1686,19 +1716,37 @@ fn paint_pixel_rows(
                 fallback,
             };
             pixel_rows::emit_cells(&scratch, line as u16, 0..area.width, &at, buf, scene);
+            if let (0, Some(PixelMark::Glyph(glyph, color))) = (line, mark) {
+                let scale = theme.type_scale(TypeRole::Caption);
+                let mut utf8 = [0; 4];
+                TextRun {
+                    col: mark_end.saturating_sub(text_run::advance_sixteenths(1, scale)) as i16,
+                    row: 0,
+                    scale,
+                    color,
+                    bg: None,
+                    bold: false,
+                    italic: false,
+                    follow: 0,
+                    anchor: None,
+                    text: glyph.encode_utf8(&mut utf8),
+                }
+                .render(at.anchor, buf, scene);
+            }
         }
 
         let dot_top = y + i64::from(metrics.px(DIRTY_DOT_DROP));
-        if let Some(dot) = dot
+        if let Some(PixelMark::Dot(color)) = mark
             && inside(dot_top)
         {
+            let size = metrics.cols(DIRTY_DOT_SIZE);
             let bar = PixelBar {
-                x: (area.width - 1) as i16 * 16 + dot.x,
+                x: mark_end.saturating_sub(size) as i16,
                 y: dot_top as u32,
-                width: dot.width,
-                height: dot.height,
-                color: dot.color,
-                radius: dot.radius,
+                width: size,
+                height: metrics.rows16(DIRTY_DOT_SIZE),
+                color,
+                radius: (DIRTY_DOT_SIZE / 2) as u8,
             };
             pixel_rows::bar(&mut placer, &metrics, area, &bar, buf, scene);
         }
@@ -1709,41 +1757,44 @@ fn paint_pixel_rows(
     placer.end(scene);
 }
 
-/// Write the mark that `marks` gives `measured` into the last cell of the first
-/// row of `scratch`, a pixel list's paint of that result, and answer the dot's
-/// bar where the dot is one.
+/// The mark that `marks` gives `measured` in a pixel list, or `None` for a
+/// result that takes none.
 ///
-/// The pixel list draws the cells of `scratch` as text runs, so an `M`, and a
-/// dot whose foreground has no RGB value, draw with the result's first line.
+/// A mark with no RGB value of its own takes `fallback`, the color a run of
+/// the list falls back to, and a dot with none draws as the `●` glyph.
 fn pixel_mark(
     marks: RowMarks<'_>,
     measured: Measured<'_>,
     theme: &Theme,
-    scratch: &mut Buffer,
-) -> Option<Bar> {
-    let width = scratch.area.width;
-    if !measured.is_path || width <= LABEL_PAD + MARK_COLUMNS {
+    fallback: [u8; 3],
+) -> Option<PixelMark> {
+    if !measured.is_path {
         return None;
     }
-    let cell = &mut scratch[(width - 1, 0)];
     match marks {
         RowMarks::Modified(paths) if paths.binary_search(measured.path).is_ok() => {
-            cell.set_char('M')
-                .set_style(theme.get(scope::DIFF_MODIFIED));
-            None
+            let color = style_rgb(modified_mark_style(theme).fg).unwrap_or(fallback);
+            Some(PixelMark::Glyph('M', color))
         },
         RowMarks::Dirty(paths) if paths.binary_search(measured.path).is_ok() => {
             let style = theme.try_get(scope::UI_LIST_DIRTY)?;
-            match style_rgb(style.fg) {
-                Some(color) => Some(dirty_dot(color)),
-                None => {
-                    cell.set_char('\u{25cf}').set_style(style);
-                    None
-                },
-            }
+            Some(match style_rgb(style.fg) {
+                Some(color) => PixelMark::Dot(color),
+                None => PixelMark::Glyph('\u{25cf}', fallback),
+            })
         },
         RowMarks::Modified(_) | RowMarks::Dirty(_) => None,
     }
+}
+
+/// The style of the `M` that ends a modified file's row.
+///
+/// `ui.list.modified` names it, and a theme that leaves that scope unset
+/// keeps `diff.modified`.
+fn modified_mark_style(theme: &Theme) -> Style {
+    theme
+        .try_get(scope::UI_LIST_MODIFIED)
+        .unwrap_or_else(|| theme.get(scope::DIFF_MODIFIED))
 }
 
 /// Draw the dot of an unsaved buffer's result in the cell at column `x` and
@@ -4667,16 +4718,52 @@ mod tests {
         );
     }
 
-    /// The commands of a pixel paint of `a.rs` and `b.rs` under `theme`, where
-    /// `b.rs` takes the mark of `marks`, without the ends of the text runs.
+    /// A modified file's `M` takes `ui.list.modified` over `diff.modified`, and
+    /// a theme that leaves the list scope unset paints it in `diff.modified`.
+    #[test]
+    fn a_modified_mark_takes_the_list_scope_and_falls_back_to_the_diff_color() {
+        let list = list_of(vec![PathBuf::from("/r/a.rs")], vec![vec![]]);
+        let area = Rect::new(0, 0, 20, 1);
+        let mark = |body: &str| {
+            let mut buf = Buffer::empty(area);
+            paint_path_rows(
+                &rows_of(&list, None),
+                RowMarks::Modified(&list.base),
+                area,
+                RowStart { result: 0, skip: 0 },
+                &theme_of(body),
+                Style::default(),
+                false,
+                None,
+                &mut buf,
+                &mut stoat_widgets::ApcScene::new(),
+            );
+            (buf[(19, 0)].symbol().to_owned(), buf[(19, 0)].fg)
+        };
+
+        assert_eq!(
+            [
+                mark(r##"ui.list.modified.fg = "#010203"; diff.modified.fg = "#040506";"##),
+                mark(r##"diff.modified.fg = "#040506";"##),
+            ],
+            [
+                ("M".to_owned(), Color::Rgb(1, 2, 3)),
+                ("M".to_owned(), Color::Rgb(4, 5, 6)),
+            ]
+        );
+    }
+
+    /// The commands of a pixel paint of `a.rs` and `b.rs` under `theme` in a
+    /// list 20 cells wide and 2 rows high, where `a.rs` takes the mark of
+    /// `marks`, without the ends of the text runs.
     fn marked_pixel_paint(marks: fn(&[PathBuf]) -> RowMarks<'_>, theme: &Theme) -> Vec<Command> {
         let paths = ["/r/a.rs", "/r/b.rs"].map(PathBuf::from);
         let list = list_of(paths.to_vec(), vec![vec![]; 2]);
-        let area = Rect::new(0, 0, 20, 4);
+        let area = Rect::new(0, 0, 20, 2);
         let mut scene = stoat_widgets::ApcScene::new();
         paint_path_rows(
             &rows_of(&list, None),
-            marks(&paths[1..]),
+            marks(&paths[..1]),
             area,
             RowStart { result: 0, skip: 0 },
             theme,
@@ -4692,10 +4779,11 @@ mod tests {
             .collect()
     }
 
-    /// A modified path ends its first line in the `M` of the cell form, a run
-    /// in the list's last cell under that line's nudge.
+    /// A modified path ends its first line in an `M` at the Caption size, a run
+    /// of its own that ends 11 px, 20 sixteenths, inside the list's right edge
+    /// at col 320. The cells of the label hold no `M`.
     #[test]
-    fn a_pixel_list_ends_a_modified_path_in_its_mark() {
+    fn a_pixel_row_draws_its_mark_at_the_caption_size() {
         let theme = theme_of(r##"diff.modified.fg = "#0a0b0c";"##);
 
         assert_eq!(
@@ -4703,25 +4791,73 @@ mod tests {
             [
                 Command::Nudge([0, 1]),
                 pixel_run(16, 0, "a.rs", UNTHEMED, true),
+                pixel_run(284, 0, "M", [10, 11, 12], false),
                 Command::Nudge([0, 4]),
                 pixel_run(16, 16, "b.rs", UNTHEMED, true),
-                pixel_run(304, 16, "M", [10, 11, 12], false),
                 Command::Nudge([0, 0]),
             ]
         );
     }
 
-    /// An unsaved buffer ends its first line in the dot of the cell form, the
-    /// bar that straddles the left edge of the last cell. It stands 6 px under
-    /// the top of its result's box at pixel row 21, so 9 px into cell row 1.
+    /// A modified path that wraps draws its `M` on its first line alone.
     #[test]
-    fn a_pixel_list_ends_an_unsaved_buffer_in_its_dot() {
+    fn a_wrapped_pixel_row_draws_its_mark_on_its_first_line_alone() {
+        let list = list_of(vec![PathBuf::from(LONG_PATH)], vec![vec![]]);
+        let area = Rect::new(0, 0, 20, 4);
+        let mut scene = stoat_widgets::ApcScene::new();
+        paint_path_rows(
+            &rows_of(&list, None),
+            RowMarks::Modified(&list.base),
+            area,
+            RowStart { result: 0, skip: 0 },
+            &theme_of(r##"diff.modified.fg = "#0a0b0c";"##),
+            Style::default(),
+            false,
+            Some(PIXELS),
+            &mut Buffer::empty(area),
+            &mut scene,
+        );
+        let marks: Vec<(i16, i16)> = decode_stream(scene.bytes())
+            .into_iter()
+            .filter_map(|command| match command {
+                Command::TextRun(run) if run.text == "M" => Some((run.col, run.row)),
+                _ => None,
+            })
+            .collect();
+
+        assert_eq!(marks, [(284, 0)]);
+    }
+
+    /// The dot of an unsaved buffer whose color is no RGB value draws as the
+    /// `●` glyph where the `M` would stand, in the color a run falls back to.
+    #[test]
+    fn a_pixel_dot_with_no_rgb_color_draws_its_glyph() {
+        let theme = theme_of("ui.list.dirty.fg = red;");
+
+        assert_eq!(
+            marked_pixel_paint(|paths| RowMarks::Dirty(paths), &theme),
+            [
+                Command::Nudge([0, 1]),
+                pixel_run(16, 0, "a.rs", UNTHEMED, true),
+                pixel_run(284, 0, "\u{25cf}", UNTHEMED, false),
+                Command::Nudge([0, 4]),
+                pixel_run(16, 16, "b.rs", UNTHEMED, true),
+                Command::Nudge([0, 0]),
+            ]
+        );
+    }
+
+    /// An unsaved buffer ends its first line in a dot 6 px across that ends
+    /// 11 px inside the list's right edge, 8 px inside the box of its row, and
+    /// stands 6 px under the top of that box.
+    #[test]
+    fn a_pixel_row_draws_its_dot_eight_pixels_inside_its_box() {
         let theme = theme_of(r##"ui.list.dirty.fg = "#0d0e0f";"##);
         let dot = Command::Bar(BarCommand {
-            x: 299,
-            y: 16,
+            x: 289,
+            y: 0,
             width: 11,
-            height: 6,
+            height: 5,
             color: [13, 14, 15],
             occludes: false,
             hatch: None,
@@ -4734,10 +4870,10 @@ mod tests {
             [
                 Command::Nudge([0, 1]),
                 pixel_run(16, 0, "a.rs", UNTHEMED, true),
+                Command::Nudge([0, 6]),
+                dot,
                 Command::Nudge([0, 4]),
                 pixel_run(16, 16, "b.rs", UNTHEMED, true),
-                Command::Nudge([0, 9]),
-                dot,
                 Command::Nudge([0, 0]),
             ]
         );

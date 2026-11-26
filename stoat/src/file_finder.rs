@@ -3638,8 +3638,9 @@ mod tests {
 
     /// A row shows its directory muted, its name bold in the text color, and
     /// its extension bold in the tag color, and a modified file's row ends in
-    /// an `M`. A file with no tag keeps its extension in the style of its
-    /// name, and both rows start their labels in the same column.
+    /// an `M` in the danger color that ermine_night gives `ui.list.modified`.
+    /// A file with no tag keeps its extension in the style of its name, and
+    /// both rows start their labels in the same column.
     #[test]
     fn a_row_shows_its_directory_name_extension_and_modified_mark() {
         let mut h = crate::Stoat::test();
@@ -3672,7 +3673,7 @@ mod tests {
         };
 
         let warning = Color::Rgb(0xe8, 0xbd, 0x6a);
-        let accent = Color::Rgb(0x7f, 0xb0, 0xff);
+        let danger = Color::Rgb(0xf2, 0x77, 0x7f);
         let muted = Color::Rgb(0x83, 0x8a, 0x98);
         let body = Color::Rgb(0xdf, 0xe2, 0xe8);
         let last = list.width - 1;
@@ -3690,7 +3691,7 @@ mod tests {
                 ("s".to_owned(), muted, false),
                 ("a".to_owned(), body, true),
                 ("r".to_owned(), warning, true),
-                ("M".to_owned(), accent, false),
+                ("M".to_owned(), danger, false),
                 ("b".to_owned(), body, true),
                 (".".to_owned(), body, true),
                 (" ".to_owned(), body, false),

@@ -256,6 +256,11 @@ The typed UI scopes, by group (syntax scopes are open-ended):
   carries an accent bar at its left edge, in the `ui.border.focused` color.
 - `ui.list.current` -- the row of a list that another pane shows, such as the
   file the commits view's diff preview stands on in its files table.
+- `ui.list.modified` -- the `M` at the right end of a list row that names a
+  file with changes in the work tree, such as a row of the File Finder. Inside
+  stoatty, where a filter modal draws as a plate, the mark draws at the
+  Caption size. A theme that leaves it unset paints the mark in
+  `diff.modified`, which is the look of default_dark.
 - `ui.list.dirty` -- the dot at the right end of a list row that names an
   open buffer with unsaved edits, such as a row of the Buffer Finder. Inside
   stoatty the dot is round. A plain terminal shows `●` in this foreground. A

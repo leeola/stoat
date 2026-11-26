@@ -346,6 +346,7 @@ theme ermine_night inherits default_dark {
     ui.list.match    = { fg: warning, modifiers: [bold] };
 
     ui.list.current.bg = raised;
+    ui.list.modified.fg = danger;
     ui.list.dirty.fg   = warning;
 
     ui.tabbar.active       = { fg: text, bg: tab_wash };

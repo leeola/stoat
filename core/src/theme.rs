@@ -830,6 +830,11 @@ pub mod scope {
     /// It marks where the reader is without taking the selection's look, since
     /// the keys move the preview rather than this row.
     pub const UI_LIST_CURRENT: &str = "ui.list.current";
+    /// The `M` at the right end of a list row that names a file with changes in
+    /// the work tree, such as a row of the File Finder.
+    ///
+    /// A theme that leaves it unset paints the mark in [`DIFF_MODIFIED`].
+    pub const UI_LIST_MODIFIED: &str = "ui.list.modified";
     /// The dot at the right end of a list row that names an open buffer with
     /// unsaved edits, such as a row of the Buffer Finder.
     ///

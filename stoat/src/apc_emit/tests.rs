@@ -6478,7 +6478,10 @@ fn a_pixel_finder_list_refills_when_its_marks_land() {
             _ => None,
         })
         .collect();
-    assert_eq!(marks, [((list.width as i16 - 1) * 16, 0)]);
+    // The mark ends 11 px, 20 sixteenths of the 9 px cell, inside the list's
+    // right edge, and one char at the test build's full-cell Caption scale
+    // advances 16.
+    assert_eq!(marks, [(list.width as i16 * 16 - 36, 0)]);
 }
 
 /// A pixel finder list asks one time for each declaration of its pool to have

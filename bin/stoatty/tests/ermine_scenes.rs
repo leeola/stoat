@@ -1628,14 +1628,16 @@ fn keywords_narrow_history_under_a_wider_chip() {
 /// S-Tab steps the list to those files alone.
 ///
 /// The smallest argument plate holds its list in cells 33 to 65, each label
-/// from cell 34, pixel column 306, and the mark cell at cell 65, pixel column
-/// 585. The selected result is the first, whose box starts on the top pixel row
-/// of the first cell row from 10 whose pixel (560, row * 18 + 9) reads the tab
-/// wash, and the results after it stand 21 px apart from that pixel row y.
+/// from cell 34, pixel column 306, and a mark in the pixel columns 575 to 583,
+/// 11 px inside the list's right edge. The selected result is the first, whose
+/// box starts on the top pixel row of the first cell row from 10 whose pixel
+/// (560, row * 18 + 9) reads the tab wash, and the results after it stand
+/// 21 px apart from that pixel row y.
 /// Under All the list reads `.gitignore`, `Cargo.toml`, `src/main.rs`, and
-/// `src/util.rs`, so the third result, from y + 42, holds text and the accent
-/// `M` of `src/main.rs`. Under Modified, the second result, from y + 21, holds
-/// the `M` of `src/util.rs`, and the 20 pixel rows from y + 42 are blank.
+/// `src/util.rs`, so the third result, from y + 42, holds text and the `M` of
+/// `src/main.rs` in the danger color, whose red stands more than 60 over its
+/// blue. Under Modified, the second result, from y + 21, holds the `M` of
+/// `src/util.rs`, and the 20 pixel rows from y + 42 are blank.
 #[test]
 fn the_file_argument_marks_modified_rows_and_cycles_to_them() {
     let mut home = support::scratch_home();
@@ -1651,8 +1653,8 @@ fn the_file_argument_marks_modified_rows_and_cycles_to_them() {
             .map(|row| row * 18)
     };
     let marked = |shot: &Snapshot, y: u32| {
-        let accent = |[r, _, b]: [u8; 3]| i32::from(b) - i32::from(r) > 40;
-        pixels_where(shot, (585, y, 9, 20), accent) > 0
+        let danger = |[r, _, b]: [u8; 3]| i32::from(r) - i32::from(b) > 60;
+        pixels_where(shot, (575, y, 9, 20), danger) > 0
     };
     let checks = match (selected_top(&all), selected_top(&modified)) {
         (Some(all_y), Some(modified_y)) => [
@@ -1962,10 +1964,11 @@ fn the_finder_preview_rules_off_its_numbers() {
 /// a row.
 ///
 /// The list is cells 33 to 65 from pixel row 216, a label starts at cell 34,
-/// pixel column 306, and the `M` of a modified file stands in cell 65, pixel
-/// column 585, in the accent. Result k takes the pixel rows from 216 + 21k,
-/// 20 of them. The first result from result 1 with an accent pixel in its mark
-/// cell is `src/main.rs`. Its pixel columns 306 to 341, `src/`, hold muted ink
+/// pixel column 306, and the `M` of a modified file stands in the pixel
+/// columns 575 to 583, 11 px inside the list's right edge, in the danger color.
+/// Result k takes the pixel rows from 216 + 21k, 20 of them. The first result
+/// from result 1 with a pixel there whose red stands more than 60 over its blue
+/// is `src/main.rs`. Its pixel columns 306 to 341, `src/`, hold muted ink
 /// and no pixel of the text or warm colors. The columns 342 to 377, `main`,
 /// hold a pixel of the near-white text. The columns 378 to 404, `.rs`, hold a
 /// pixel of the warm Rust tag color. In the result above it, `Cargo.toml`, the
@@ -1979,11 +1982,12 @@ fn the_finder_row_colors_its_directory_name_and_extension() {
     fn gap(a: u8, b: u8) -> i32 {
         i32::from(a) - i32::from(b)
     }
-    let marked = |y| count((585, y, 9, 20), |[r, _, b]| gap(b, r) > 40) > 0;
+    let marked = |y| count((575, y, 9, 20), |[r, _, b]| gap(r, b) > 60) > 0;
     let Some(y) = (1..23).map(|k| 216 + 21 * k).find(|&y| marked(y)) else {
         let frame = keep_frame(&shot, &mut home, "finder_row_colors");
         panic!(
-            "no result from result 1 holds an accent mark in cell 65; the frame is {}",
+            "no result from result 1 holds a danger mark in the pixel columns 575 to 583; the \
+             frame is {}",
             frame.display(),
         );
     };
@@ -3280,13 +3284,14 @@ fn the_finder_header_boxes_its_active_scope_pill() {
 /// The Buffer Finder ends the row of an unsaved buffer in a round dot in the
 /// warning color, and its header boxes the `buffers` pill.
 ///
-/// The one row is the selected row on cell row 12, and its mark cell is cell
-/// 65. The dot covers the pixels 582 to 587 by 222 to 227, 3 px inside the box
-/// of the row. Its pixels (584, 224) and (585, 225) read the warning color, and
-/// the pixels (581, 224) and (588, 224) at its sides read the tab wash. Its
-/// round corner leaves the pixel (582, 222) clear of the warning color. The
-/// `buffers` pill is the 8 cells from cell 110 on cell row 10, so its box fills
-/// the pixels from (991, 187) to (1062, 204).
+/// The one row is the selected row from pixel row 216, and the list's right
+/// edge is pixel column 594. The dot is 6 px across and ends 11 px inside that
+/// edge, 8 px inside the box of the row, and stands 6 px under the box's top,
+/// so it covers the pixels 577 to 582 by 222 to 227. Its pixels (579, 224) and
+/// (580, 225) read the warning color, and the pixels (576, 224) and (583, 224)
+/// at its sides read the tab wash. Its round corner leaves the pixel (577, 222)
+/// clear of the warning color. The `buffers` pill is the 8 cells from cell 110
+/// on cell row 10, so its box fills the pixels from (991, 187) to (1062, 204).
 #[test]
 fn the_buffer_finder_marks_an_unsaved_buffer_with_a_dot() {
     let mut home = support::scratch_home();
@@ -3297,14 +3302,14 @@ fn the_buffer_finder_marks_an_unsaved_buffer_with_a_dot() {
         "ix<Esc><Space>bb<Settle>",
     );
 
-    let dot = [(584, 224), (585, 225), (581, 224), (588, 224)].map(|(x, y)| pixel(&shot, x, y));
-    let corner = pixel(&shot, 582, 222);
+    let dot = [(579, 224), (580, 225), (576, 224), (583, 224)].map(|(x, y)| pixel(&shot, x, y));
+    let corner = pixel(&shot, 577, 222);
     if dot != [WARNING, WARNING, TAB_WASH, TAB_WASH] || corner == WARNING {
         let frame = keep_frame(&shot, &mut home, "buffer_dot");
         panic!(
-            "the pixels (584, 224), (585, 225), (581, 224), and (588, 224) read {}, where the \
+            "the pixels (579, 224), (580, 225), (576, 224), and (583, 224) read {}, where the \
              dot is two pixels of the warning {} between two of the tab wash {}; the corner \
-             pixel (582, 222) reads {}, which the round dot leaves clear of the warning; the \
+             pixel (577, 222) reads {}, which the round dot leaves clear of the warning; the \
              frame is {}",
             dot.map(hex).join(", "),
             hex(WARNING),
