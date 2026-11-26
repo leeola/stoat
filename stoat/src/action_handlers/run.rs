@@ -245,9 +245,10 @@ fn prompt_info(text: String, ctx: &Availability, commands: &CommandSet) -> Promp
 /// palette shows with no located failure opens its output, as
 /// [`open_cmd_output`] does. A Stub goes to its tab, as
 /// [`super::terminal::show_terminal`] reveals it, which reports that the
-/// terminal exited once the tab's session ended. A Cmd in Jobs takes the
-/// Enter as nothing, because the pane shows a Stub of it and the tray carries
-/// it. Every other Cmd takes the Enter as nothing too.
+/// terminal exited once the tab's session ended. A Cmd in Jobs opens the
+/// Glance of its Job, as [`jobs::show_glance`] opens it, because the pane
+/// shows a Stub of it and the Glance is the view of a Job. Every other Cmd
+/// takes the Enter as nothing.
 pub(super) fn block_enter(stoat: &mut Stoat, id: CmdId) -> UpdateEffect {
     if stoat
         .active_workspace()
@@ -255,7 +256,8 @@ pub(super) fn block_enter(stoat: &mut Stoat, id: CmdId) -> UpdateEffect {
         .get(id)
         .is_some_and(|cmd| cmd.in_jobs)
     {
-        return UpdateEffect::None;
+        jobs::show_glance(stoat, id);
+        return UpdateEffect::Redraw;
     }
     let stub = stoat
         .active_workspace()
@@ -500,7 +502,7 @@ pub(super) fn run_again(stoat: &mut Stoat) -> UpdateEffect {
 /// from its line and its steps. An agent's Stub starts no process. It starts
 /// the agent again in a new tab, as [`open_agent_tab`] opens it, and stays a
 /// Stub of that tab.
-fn restart_cmd(stoat: &mut Stoat, id: CmdId) -> UpdateEffect {
+pub(crate) fn restart_cmd(stoat: &mut Stoat, id: CmdId) -> UpdateEffect {
     let agent_line = stoat
         .active_workspace()
         .cmds

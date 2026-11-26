@@ -25,6 +25,7 @@ pub(crate) mod git_status;
 pub(crate) mod help;
 pub(crate) mod hints;
 pub(crate) mod hover;
+pub(crate) mod job_glance;
 pub(crate) mod job_tray;
 pub(crate) mod jumplist_picker;
 pub(crate) mod location_picker;
@@ -1679,7 +1680,7 @@ pub(crate) fn frame(
         if chrome_bands {
             scene.nudge([0, i16::from(TAB_BAR_PAD)]);
         }
-        pane::render_tab_bar(
+        stoat.tray_spans = pane::render_tab_bar(
             ws,
             bar,
             frame,
@@ -1693,6 +1694,7 @@ pub(crate) fn frame(
         }
     } else {
         stoat.tab_bar_spans.clear();
+        stoat.tray_spans.clear();
     }
 
     // The banner paints after the stale holds clear too, since a pane it pushes
@@ -2195,6 +2197,45 @@ pub(crate) fn frame(
                         "git_status",
                         None,
                         Some("status"),
+                        on_request,
+                        toggles,
+                        &stoat.theme,
+                        full,
+                        status_rows,
+                        chrome_bands,
+                        buf,
+                        &mut *scene,
+                    );
+                }
+            }
+        },
+        Some(ActiveModal::JobGlance) => {
+            if let Some(glance) = &stoat.job_glance
+                && let Some(cmd) = ws.cmds.get(glance.cmd)
+            {
+                let right = stoat
+                    .tray_spans
+                    .iter()
+                    .find(|span| span.cmd == glance.cmd)
+                    .map_or(full.right() - 1, |span| span.cells.end);
+                if let Some(rect) = job_glance::glance_rect(full, tab_bar_rows, right) {
+                    job_glance::render_job_glance(
+                        cmd,
+                        rect,
+                        chrome_bands,
+                        &stoat.theme,
+                        buf,
+                        &mut *scene,
+                    );
+                }
+                if modal_hints {
+                    cached_modal_hints(
+                        &mut stoat.hints_cache,
+                        &stoat.keymap,
+                        mode,
+                        "job_glance",
+                        None,
+                        Some("glance"),
                         on_request,
                         toggles,
                         &stoat.theme,
@@ -5340,6 +5381,7 @@ mod lsp_filter_tests {
             ("q", "quit"),
             ("a", "+pane nav"),
             ("t", "run"),
+            ("J", "+job"),
             ("c", "claude"),
             ("w", "+workspace"),
             ("b", "+buffer"),

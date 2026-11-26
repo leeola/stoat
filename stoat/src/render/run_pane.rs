@@ -1288,6 +1288,8 @@ mod tests {
                     "Muted".to_owned(),
                 )]]),
                 Some(vec![
+                    ("Enter".to_owned(), "Key".to_owned()),
+                    (" go to the Job \u{b7} ".to_owned(), "Muted".to_owned()),
                     ("C-j".to_owned(), "Key".to_owned()),
                     (" bring it back here".to_owned(), "Muted".to_owned()),
                 ]),

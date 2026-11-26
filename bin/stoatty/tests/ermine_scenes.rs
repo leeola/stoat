@@ -2650,6 +2650,52 @@ fn a_pushed_job_draws_its_tray_chip() {
     }
 }
 
+/// The Glance of a pushed Job hangs under its Tray Chip, 6 px under the tab
+/// bar's band, with its right edge on the chip's.
+///
+/// The chip ends at column 159, so the box covers the 38 columns 121 to 158.
+/// It stands 2 px inside its first row 2 and 8 px past its last row 4, so it
+/// covers pixel rows 38 to 97. On a pixel column past the arc of its corners, its
+/// first and last pixel rows read the raised fill and the pixel rows beyond
+/// them do not. On its middle pixel row, its first and last pixel columns
+/// read the fill and the columns beyond them do not.
+#[test]
+fn the_glance_hangs_six_pixels_under_the_tab_bar() {
+    let mut home = support::scratch_home();
+    let shot = settled_frame(
+        home.path(),
+        "many-files",
+        "src/alpha.txt",
+        "<Space>t<Settle>sleep 30<Enter><Settle><C-j><Settle><Esc><Space>Jk<Settle>",
+    );
+
+    let (left, top, width, height) = cell_rect(121, 2, 38, 3);
+    let right = left + width - 1;
+    let box_top = top + 2;
+    let box_bottom = top + height - 1 + 8;
+    let column = right - 15;
+    let middle = (box_top + box_bottom) / 2;
+    let down = [box_top - 1, box_top, box_bottom, box_bottom + 1].map(|y| pixel(&shot, column, y));
+    let across = [left - 1, left, right, right + 1].map(|x| pixel(&shot, x, middle));
+    let raised = |colors: [[u8; 3]; 4]| colors.map(|color| color == RAISED);
+    let edges = [false, true, true, false];
+    if raised(down) != edges || raised(across) != edges {
+        let frame = keep_frame(&shot, &mut home, "job_glance");
+        panic!(
+            "down pixel column {column} the box reads {:?} on pixel rows {} to {}, and across \
+             pixel row {middle} it reads {:?} on pixel columns {} to {}; want the raised fill \
+             on its first and last pixels and not past them; the frame is {}",
+            down.map(hex),
+            box_top - 1,
+            box_bottom + 1,
+            across.map(hex),
+            left - 1,
+            right + 1,
+            frame.display(),
+        );
+    }
+}
+
 /// A `locations` command at a Run pane prompt joins the stack as a block that
 /// groups its matches by file.
 ///

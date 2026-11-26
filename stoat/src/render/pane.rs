@@ -10,7 +10,7 @@ use crate::{
     display_map::FoldScope,
     editor_state::{EditorId, EditorState},
     host::git::FileKind,
-    jobs,
+    jobs::{self, TraySpan},
     minimap::RAIL_MAX_COLUMNS,
     pane::{Divider, DividerOrientation, FocusTarget, Pane, PaneTree, Placement, View},
     render::{
@@ -1654,7 +1654,8 @@ fn status_scene_key(runs: &[StatusRun], separator: [u8; 3]) -> u64 {
 ///
 /// Leaves in `spans` the extent of each painted tab, in sixteenths of a cell
 /// from the left edge of `area`, so a pointer press resolves against the
-/// segments as painted.
+/// segments as painted. Answers the columns of each Tray Chip that it drew,
+/// with the Cmd of its Job, which a press on a chip and the Glance read.
 pub(crate) fn render_tab_bar(
     ws: &Workspace,
     area: Rect,
@@ -1663,10 +1664,10 @@ pub(crate) fn render_tab_bar(
     buf: &mut Buffer,
     scene: &mut ApcScene,
     spans: &mut Vec<Range<u16>>,
-) {
+) -> Vec<TraySpan> {
     spans.clear();
     if area.width == 0 || area.height == 0 {
-        return;
+        return Vec::new();
     }
 
     let theme = frame.theme;
@@ -1786,6 +1787,14 @@ pub(crate) fn render_tab_bar(
         .map(|run_box| run_box.segments.clone())
         .collect();
     spans.extend(status_bar::box_spans(&texts, &tabs, scale, segments.width));
+
+    placed
+        .into_iter()
+        .map(|(index, cells)| TraySpan {
+            cmd: views[index].id,
+            cells,
+        })
+        .collect()
 }
 
 /// The tab bar's left segments, the workspace name and then each tab, with

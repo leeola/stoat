@@ -19,6 +19,7 @@ use crate::{
     display_map::DisplaySnapshot,
     editor_state::{EditorId, EditorState, ScrollGlide},
     host::ClipboardKind,
+    jobs::{self, TraySpan},
     keymap::WheelDirection,
     keymap_state::{active_modal, ActiveModal, StoatKeymapState},
     merge_view::{ChunkState, Side},
@@ -36,7 +37,7 @@ use crate::{
         conflict_view::{ConflictHover, ConflictTarget},
         TypeScale,
     },
-    run::GridSelection,
+    run::{CmdId, GridSelection},
     term_session::TermId,
     theme::TypeRole,
     workspace::Workspace,
@@ -709,6 +710,16 @@ pub(crate) fn boxed_modal_surfaces(stoat: &Stoat) -> Option<ModalSurfaces> {
             selected: 0,
             rows: ListRows::OnePerResult,
         }),
+        // The Glance holds no list. It owns the pointer, so a press never
+        // reaches the panes it covers, and `press_over_glance` reads a press on
+        // a Tray Chip.
+        ActiveModal::JobGlance => Some(ModalSurfaces {
+            list: Rect::new(0, 0, 0, 0),
+            preview: None,
+            len: 0,
+            selected: 0,
+            rows: ListRows::OnePerResult,
+        }),
         // Nothing to point at. It owns the pointer all the same, so a press
         // never reaches the panes it covers, and keys alone answer it.
         ActiveModal::QuitConfirm | ActiveModal::CheckoutConfirm | ActiveModal::RunBlock => {
@@ -757,6 +768,9 @@ fn handle_modal_mouse(stoat: &mut Stoat, mouse: MouseEvent) -> UpdateEffect {
     }
     if active_modal(stoat) == Some(ActiveModal::GitStatus) {
         return press_git_status_row(stoat, mouse);
+    }
+    if active_modal(stoat) == Some(ActiveModal::JobGlance) {
+        return press_over_glance(stoat, mouse);
     }
     if let Some(effect) = press_history_row(stoat, mouse) {
         return effect;
@@ -808,6 +822,18 @@ fn press_git_status_row(stoat: &mut Stoat, mouse: MouseEvent) -> UpdateEffect {
         return action_handlers::dispatch(stoat, &GitStatusOpen);
     }
     panel.selected = index;
+    UpdateEffect::Redraw
+}
+
+/// Move the Glance to the Tray Chip under a left press on the tab bar, or
+/// close it for a left press anywhere else.
+fn press_over_glance(stoat: &mut Stoat, mouse: MouseEvent) -> UpdateEffect {
+    let bar = stoat.size();
+    let on_bar = (bar.y..bar.y + stoat.tab_bar_rows()).contains(&mouse.row);
+    match chip_at(&stoat.tray_spans, mouse.column).filter(|_| on_bar) {
+        Some(cmd) => jobs::show_glance(stoat, cmd),
+        None => stoat.job_glance = None,
+    }
     UpdateEffect::Redraw
 }
 
@@ -1856,7 +1882,7 @@ fn land_on_stack_row(
 }
 
 /// Claims a button press on the tab bar's rows, switching to the tab under a
-/// left press.
+/// left press, or opening the Glance of the Job whose Tray Chip it lands on.
 ///
 /// Returns `None` for an event that is not a press on the visible bar. A band
 /// takes two rows, and each tab draws over part of both, so a press on either
@@ -1872,6 +1898,12 @@ fn handle_tab_bar_mouse(stoat: &mut Stoat, mouse: MouseEvent) -> Option<UpdateEf
         return None;
     }
 
+    if button == MouseButton::Left
+        && let Some(cmd) = chip_at(&stoat.tray_spans, mouse.column)
+    {
+        jobs::show_glance(stoat, cmd);
+        return Some(UpdateEffect::Redraw);
+    }
     let hit = tab_at(&stoat.tab_bar_spans, mouse.column.saturating_sub(bar.x));
     match (button, hit) {
         (MouseButton::Left, Some(idx)) => Some(action_handlers::tab::goto_tab(stoat, idx + 1)),
@@ -1886,6 +1918,14 @@ fn tab_at(spans: &[Range<u16>], column: u16) -> Option<usize> {
     spans
         .iter()
         .position(|span| (u32::from(span.start)..u32::from(span.end)).contains(&center))
+}
+
+/// The Cmd of the Job whose Tray Chip covers the window column `column`.
+fn chip_at(spans: &[TraySpan], column: u16) -> Option<CmdId> {
+    spans
+        .iter()
+        .find(|span| span.cells.contains(&column))
+        .map(|span| span.cmd)
 }
 
 /// Claims a button press on the checkout banner's rows, which does nothing.
@@ -5250,6 +5290,42 @@ mod tests {
             column,
             row,
         ));
+    }
+
+    /// A left press on a Tray Chip opens the Glance of its Job, and while the
+    /// Glance shows, a press on another chip moves the Glance to that Job.
+    #[test]
+    fn a_press_on_a_tray_chip_opens_its_glance() {
+        let mut h = crate::test_harness::TestHarness::default();
+        let older = h.push_job("sleep 30");
+        let newer = h.push_job("sleep 31");
+        h.snapshot();
+        let chips: Vec<u16> = h
+            .stoat
+            .tray_spans
+            .iter()
+            .map(|span| span.cells.start)
+            .collect();
+
+        let mut named = Vec::new();
+        for column in chips {
+            left_press(&mut h, column, 0);
+            named.push(h.stoat.job_glance.as_ref().map(|glance| glance.cmd));
+        }
+        assert_eq!(named, [Some(older.cmd), Some(newer.cmd)]);
+    }
+
+    /// While the Glance shows, a left press off the chips closes it.
+    #[test]
+    fn a_press_off_the_chips_closes_the_glance() {
+        let mut h = crate::test_harness::TestHarness::default();
+        h.push_job("sleep 30");
+        h.type_keys("escape space J k");
+        h.snapshot();
+        let open = h.stoat.job_glance.is_some();
+        left_press(&mut h, 5, 10);
+
+        assert_eq!((open, h.stoat.job_glance.is_none()), (true, true));
     }
 
     fn git_status_selected(h: &crate::test_harness::TestHarness) -> Option<usize> {

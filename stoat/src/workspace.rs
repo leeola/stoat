@@ -282,6 +282,9 @@ pub struct Workspace {
     /// A stack keeps the id of each Cmd it moved here, and [`Cmd::in_jobs`]
     /// marks that block as a Stub of the stack.
     pub(crate) jobs: Vec<CmdId>,
+    /// The Job of the last Glance that the workspace opened, from which a
+    /// later `Space J k` steps to the Job before it.
+    pub(crate) glanced: Option<CmdId>,
     pub(crate) terms: SlotMap<TermId, TermSession>,
     /// The grid stoatty reported for each terminal pane it draws as a pool at
     /// the terminal font size, as `(rows, cols)` of that font.
@@ -609,6 +612,7 @@ impl Workspace {
             runs: SlotMap::with_key(),
             cmds: SlotMap::with_key(),
             jobs: Vec::new(),
+            glanced: None,
             terms: SlotMap::with_key(),
             term_pool_grids: HashMap::new(),
             band_pane: None,

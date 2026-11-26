@@ -1181,6 +1181,8 @@ pub struct Stoat {
     pub(crate) workspace_picker: Option<WorkspacePicker>,
     /// The git status panel, or `None` while it is closed.
     pub(crate) git_status: Option<GitStatusPanel>,
+    /// The Glance of a Job, or `None` while it is closed.
+    pub(crate) job_glance: Option<crate::jobs::Glance>,
     /// The Commit Preview, or `None` while it is closed.
     pub(crate) commit_preview: Option<CommitPreview>,
     /// The confirm that asks before a blame checkout stashes the working
@@ -1482,6 +1484,11 @@ pub struct Stoat {
     /// left edge, and the list is empty while the bar is hidden. The tab bar's
     /// press hit test reads it.
     pub(crate) tab_bar_spans: Vec<Range<u16>>,
+    /// Where the last paint drew each Tray Chip of the tab bar, empty while
+    /// the bar is hidden.
+    ///
+    /// A press on a chip and the Glance under a chip read it.
+    pub(crate) tray_spans: Vec<crate::jobs::TraySpan>,
     /// The window-right strip band single-minimap mode reserves, stamped every
     /// paint. `Some` only under stoatty in [`stoat_config::MinimapMode::Single`]
     /// on a wide-enough window while a split pane shows an editor or a changes
@@ -2906,6 +2913,7 @@ impl Stoat {
             symbol_finder: None,
             workspace_picker: None,
             git_status: None,
+            job_glance: None,
             commit_preview: None,
             checkout_confirm: None,
             quit_all_confirm: None,
@@ -2980,6 +2988,7 @@ impl Stoat {
             line_numbers_override: None,
             window_focused: true,
             tab_bar_spans: Vec::new(),
+            tray_spans: Vec::new(),
             single_minimap_rect: None,
             lsp_badge_rect: None,
             lsp_status_pinned: false,
@@ -6368,7 +6377,11 @@ impl Stoat {
                 cmd.stopped = true;
                 return UpdateEffect::Redraw;
             }
-            if keymap_state::close_topmost_modal(self) {
+            // The Glance of a Job takes Ctrl-C through its own binding, which
+            // interrupts its running Job, so the press closes no modal here.
+            if active_modal(self) != Some(ActiveModal::JobGlance)
+                && keymap_state::close_topmost_modal(self)
+            {
                 return UpdateEffect::Redraw;
             }
             if self.pending_completion.is_some() {
@@ -7290,7 +7303,8 @@ impl Stoat {
             ActiveModal::QuitConfirm
             | ActiveModal::CheckoutConfirm
             | ActiveModal::CommitPreview
-            | ActiveModal::GitStatus => return None,
+            | ActiveModal::GitStatus
+            | ActiveModal::JobGlance => return None,
         };
 
         Some((input.editor_id, input.buffer_id))
@@ -10226,6 +10240,7 @@ impl Stoat {
         let diff_nav_jump = crate::code_index::nav::pump_diff_nav_jump(self);
         let lsp = crate::lsp::pump_all(self);
         action_handlers::workspace::sync_workspace_picker(self);
+        crate::jobs::sync_glance(self);
         action_handlers::picker::sync_location_picker(self);
         action_handlers::picker::sync_diagnostics_picker(self);
         action_handlers::picker::sync_jumplist_picker(self);

@@ -294,7 +294,7 @@ pub(super) fn draw_tray(
 
 /// The background that fills the box of a chip, from `ui.job.chip`, else from
 /// `ui.surface.raised`, else from `ui.chip`.
-fn fill_bg(theme: &Theme) -> Option<Color> {
+pub(super) fn fill_bg(theme: &Theme) -> Option<Color> {
     [scope::UI_JOB_CHIP, scope::UI_SURFACE_RAISED]
         .into_iter()
         .find_map(|scope| theme.try_get(scope).and_then(|style| style.bg))
@@ -376,6 +376,7 @@ mod tests {
         badge::{Anchor, Badge, BadgeSource, BadgeState},
         jobs::{JobState, JobView},
         render::badges,
+        run::CmdId,
         test_harness::TestHarness,
         theme::Theme,
     };
@@ -701,6 +702,7 @@ mod tests {
     #[test]
     fn a_chip_counts_its_cells_at_the_caption_scale_and_in_cells() {
         let view = || JobView {
+            id: CmdId::default(),
             state: JobState::Running,
             name: "cargo test".to_owned(),
             progress: None,

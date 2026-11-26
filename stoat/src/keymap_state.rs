@@ -719,6 +719,7 @@ pub(crate) enum ActiveModal {
     CommitPreview,
     WorkspacePicker,
     GitStatus,
+    JobGlance,
     Jumplist,
     WalkthroughPicker,
     PaneFinder,
@@ -750,6 +751,7 @@ impl ActiveModal {
             Self::CommitPreview => "commit_preview",
             Self::WorkspacePicker => "workspace_picker",
             Self::GitStatus => "git_status",
+            Self::JobGlance => "job_glance",
             Self::Jumplist => "jumplist",
             Self::WalkthroughPicker => "walkthrough_picker",
             Self::PaneFinder => "pane_finder",
@@ -794,6 +796,7 @@ impl ActiveModal {
             | Self::CheckoutConfirm
             | Self::CommitPreview
             | Self::GitStatus
+            | Self::JobGlance
             | Self::Rename
             | Self::Search
             | Self::SplitSelection
@@ -874,6 +877,7 @@ impl ActiveModal {
                 | Self::Help
                 | Self::WorkspacePicker
                 | Self::GitStatus
+                | Self::JobGlance
                 | Self::CheckoutConfirm
                 | Self::CommitPreview
         )
@@ -929,6 +933,7 @@ pub(crate) fn close_topmost_modal(stoat: &mut Stoat) -> bool {
         ActiveModal::CheckoutConfirm => stoat.checkout_confirm = None,
         ActiveModal::CommitPreview => stoat.commit_preview = None,
         ActiveModal::GitStatus => stoat.git_status = None,
+        ActiveModal::JobGlance => stoat.job_glance = None,
         ActiveModal::WorkspacePicker => {
             if let Some(picker) = stoat.workspace_picker.take() {
                 picker.dispose(stoat.active_workspace_mut());
@@ -1000,6 +1005,8 @@ pub(crate) fn active_modal(stoat: &Stoat) -> Option<ActiveModal> {
         Some(ActiveModal::WorkspacePicker)
     } else if stoat.git_status.is_some() {
         Some(ActiveModal::GitStatus)
+    } else if stoat.job_glance.is_some() {
+        Some(ActiveModal::JobGlance)
     } else if stoat.jumplist_picker.is_some() {
         Some(ActiveModal::Jumplist)
     } else if stoat.walkthrough_picker.is_some() {
@@ -1065,6 +1072,7 @@ fn open_modal_count(stoat: &Stoat) -> usize {
         stoat.commit_preview.is_some(),
         stoat.workspace_picker.is_some(),
         stoat.git_status.is_some(),
+        stoat.job_glance.is_some(),
         stoat.jumplist_picker.is_some(),
         stoat.walkthrough_picker.is_some(),
         stoat.pane_finder.is_some(),
@@ -2044,12 +2052,13 @@ mod tests {
     }
 
     /// Every variant, in the canonical order [`active_modal`] resolves them.
-    const ALL_MODALS: [ActiveModal; 22] = [
+    const ALL_MODALS: [ActiveModal; 23] = [
         ActiveModal::QuitConfirm,
         ActiveModal::CheckoutConfirm,
         ActiveModal::CommitPreview,
         ActiveModal::WorkspacePicker,
         ActiveModal::GitStatus,
+        ActiveModal::JobGlance,
         ActiveModal::Jumplist,
         ActiveModal::WalkthroughPicker,
         ActiveModal::PaneFinder,
@@ -2085,6 +2094,7 @@ mod tests {
                 "commit_preview",
                 "workspace_picker",
                 "git_status",
+                "job_glance",
                 "jumplist",
                 "walkthrough_picker",
                 "pane_finder",
@@ -2114,6 +2124,7 @@ mod tests {
             "commit_preview",
             "workspace_picker",
             "git_status",
+            "job_glance",
             "jumplist",
             "walkthrough_picker",
             "pane_finder",

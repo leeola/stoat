@@ -223,7 +223,8 @@ impl RunState {
     /// matches as a location list.
     ///
     /// The row of a newest Stub of a Job, a Cmd [`Cmd::in_jobs`], comes before
-    /// each other rule. It names `C-j`, which brings the Job back to its block.
+    /// each other rule. It names `Enter`, which opens the Glance of the Job, and
+    /// `C-j`, which brings the Job back to its block.
     pub(crate) fn hint(
         &self,
         cmds: &SlotMap<CmdId, Cmd>,
@@ -232,6 +233,8 @@ impl RunState {
         if self.active_block(cmds).is_some_and(|cmd| cmd.in_jobs) {
             return Some(BodyRow {
                 spans: vec![
+                    ("Enter".to_owned(), Tone::Key),
+                    (" go to the Job \u{b7} ".to_owned(), Tone::Muted),
                     ("C-j".to_owned(), Tone::Key),
                     (" bring it back here".to_owned(), Tone::Muted),
                 ],

@@ -8,11 +8,15 @@
 //! holds its id. [`push`] and [`take`] are the only writers of the two.
 
 use crate::{
+    action_handlers,
+    app::{Stoat, UpdateEffect},
+    pane::View,
     run::{self, Cmd, CmdId, RunId},
     theme::{scope, Theme},
     workspace::Workspace,
 };
 use ratatui::style::Style;
+use std::ops::Range;
 
 /// The state of a Job, one of the four that a Cmd reaches, which colors the
 /// Job wherever it shows.
@@ -37,10 +41,37 @@ impl JobState {
             JobState::Stopped => '\u{25a0}',
         }
     }
+
+    /// The word that names the state, such as `running`.
+    pub(crate) fn word(self) -> &'static str {
+        match self {
+            JobState::Running => "running",
+            JobState::Ok => "ok",
+            JobState::Failed => "failed",
+            JobState::Stopped => "stopped",
+        }
+    }
+}
+
+/// The Glance of a Job, a modal under the Job's Tray Chip that reads the Job
+/// at a glance and takes the keys that act on it.
+pub(crate) struct Glance {
+    /// The Cmd of the Job that the Glance shows.
+    pub(crate) cmd: CmdId,
+}
+
+/// Where the tab bar drew the Tray Chip of a Job, which a press on the bar and
+/// the Glance under the chip read.
+pub(crate) struct TraySpan {
+    pub(crate) cmd: CmdId,
+    /// The columns of the chip on the bar's row.
+    pub(crate) cells: Range<u16>,
 }
 
 /// What a Job shows of its Cmd wherever the Job draws, such as its Tray Chip.
 pub(crate) struct JobView {
+    /// The Cmd of the Job.
+    pub(crate) id: CmdId,
     pub(crate) state: JobState,
     /// The first two words of the Cmd's line, one space apart, which name
     /// the program and its first argument, such as `cargo test`.
@@ -170,14 +201,14 @@ pub(crate) fn time_text(cmd: &Cmd) -> String {
 pub(crate) fn views(ws: &Workspace) -> Vec<JobView> {
     ws.jobs
         .iter()
-        .filter_map(|id| ws.cmds.get(*id))
-        .map(view_of)
+        .filter_map(|id| ws.cmds.get(*id).map(|cmd| view_of(*id, cmd)))
         .collect()
 }
 
-/// The view of the Job of `cmd`.
-fn view_of(cmd: &Cmd) -> JobView {
+/// The view of the Job of `cmd`, whose id is `id`.
+fn view_of(id: CmdId, cmd: &Cmd) -> JobView {
     JobView {
+        id,
         state: state_of(cmd),
         name: cmd
             .command
@@ -190,6 +221,108 @@ fn view_of(cmd: &Cmd) -> JobView {
     }
 }
 
+/// Open the Glance of the Job `id`, and remember the Job as the workspace's
+/// last Glance.
+///
+/// The Glance takes no input, so the focused mode goes to normal, where its
+/// keys bind, as the git status panel's do.
+pub(crate) fn show_glance(stoat: &mut Stoat, id: CmdId) {
+    stoat.set_focused_mode("normal".into());
+    stoat.job_glance = Some(Glance { cmd: id });
+    stoat.active_workspace_mut().glanced = Some(id);
+}
+
+/// Take the Job `id` out of the tray, show it as a block of a Run pane that
+/// takes the focus, and close the Glance.
+///
+/// A Run pane on show whose stack holds the id shows the block in place,
+/// scrolled so that the block's last row is the pane's last output row. A
+/// stack that no pane shows, as one under a terminal that covers its pane,
+/// drops the id, and the Cmd goes to the end of a Run pane's stack as a Cmd
+/// with no stack does.
+pub(crate) fn open(stoat: &mut Stoat, id: CmdId) -> UpdateEffect {
+    stoat.job_glance = None;
+    let ws = stoat.active_workspace_mut();
+    take(ws, id);
+    let holder = ws
+        .runs
+        .iter()
+        .find(|(_, run)| run.blocks.contains(&id))
+        .map(|(run, _)| run);
+    let shown = holder.and_then(|run| Some((run, ws.view_location(&View::Run(run))?)));
+    match shown {
+        Some((run, at)) => {
+            scroll_to_block(ws, run, id);
+            stoat.reveal_location(at);
+        },
+        None => {
+            if let Some(run) = holder {
+                ws.runs[run].blocks.retain(|block| *block != id);
+            }
+            action_handlers::run::append_to_run_pane(stoat, id, true);
+        },
+    }
+    UpdateEffect::Redraw
+}
+
+/// Take the ended Job `id` out of the tray and close the Glance.
+///
+/// A stack that holds the id keeps the Cmd as an ended block, because the
+/// stack of a Run pane is the record of that pane. With no such stack the
+/// Cmd leaves the store. A Job that still runs stays, and the status says so.
+pub(crate) fn dismiss(stoat: &mut Stoat, id: CmdId) -> UpdateEffect {
+    let ws = stoat.active_workspace_mut();
+    if ws.cmds.get(id).is_some_and(|cmd| !cmd.finished) {
+        stoat.set_status("still running");
+        return UpdateEffect::Redraw;
+    }
+    take(ws, id);
+    if !ws.runs.values().any(|run| run.blocks.contains(&id)) {
+        ws.cmds.remove(id);
+    }
+    stoat.job_glance = None;
+    UpdateEffect::Redraw
+}
+
+/// Close the Glance when the tray of the active workspace does not hold its
+/// Job, as after the Job comes back to its block or its workspace leaves the
+/// screen.
+pub(crate) fn sync_glance(stoat: &mut Stoat) {
+    let Some(glance) = &stoat.job_glance else {
+        return;
+    };
+    if !stoat.active_workspace().jobs.contains(&glance.cmd) {
+        stoat.job_glance = None;
+    }
+}
+
+/// Scroll the stack of the run `run` so that the last row of the block `id` is
+/// its last output row, which is no scroll for the newest block.
+fn scroll_to_block(ws: &mut Workspace, run: RunId, id: CmdId) {
+    let Some(run_state) = ws.runs.get(run) else {
+        return;
+    };
+    let offset = match run_state.blocks.last() == Some(&id) {
+        true => 0,
+        false => {
+            let through: usize = run_state
+                .blocks
+                .iter()
+                .take_while(|block| **block != id)
+                .chain(std::iter::once(&id))
+                .filter_map(|block| ws.cmds.get(*block))
+                .map(Cmd::rendered_line_span)
+                .sum();
+            run_state
+                .output_line_total(&ws.cmds)
+                .saturating_sub(through)
+        },
+    };
+    if let Some(run_state) = ws.runs.get_mut(run) {
+        run_state.scroll_offset = offset;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::JobState;
@@ -198,12 +331,14 @@ mod tests {
             self,
             pane::{dispose_view, EditorDisposal},
         },
-        app::Stoat,
+        app::{Stoat, UpdateEffect},
+        keymap_state,
         pane::View,
         run::{Cmd, CmdId, RunId},
         test_harness::{CmdHandle, TestHarness},
         theme::Theme,
     };
+    use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
     use ratatui::style::{Color, Style};
     use std::{
         path::PathBuf,
@@ -565,8 +700,13 @@ mod tests {
     /// A Job names its Cmd by the first two words of the line, one space apart.
     #[test]
     fn a_job_view_names_the_first_two_words_of_its_line() {
-        let name =
-            |line: &str| super::view_of(&Cmd::new(line.to_owned(), PathBuf::from("/w"), 40)).name;
+        let name = |line: &str| {
+            super::view_of(
+                CmdId::default(),
+                &Cmd::new(line.to_owned(), PathBuf::from("/w"), 40),
+            )
+            .name
+        };
 
         assert_eq!(
             [name("cargo test -p stoat"), name("htop"), name("sleep  30")],
@@ -632,6 +772,323 @@ mod tests {
             (background, h.stoat.cmd_tick.is_some(), time),
             (false, true, "0:05".to_owned()),
         );
+    }
+
+    /// `Space J k` opens the Glance on the newest Job, a modal with no input
+    /// whose keys bind in normal mode.
+    #[test]
+    fn space_j_k_opens_the_glance_on_the_newest_job() {
+        let mut h = Stoat::test();
+        h.push_job("sleep 30");
+        let newest = h.push_job("sleep 31");
+        h.type_keys("escape space J k");
+
+        assert_eq!(
+            (
+                glanced(&h),
+                keymap_state::modal_predicate(&h.stoat),
+                h.stoat.focused_mode().to_string(),
+            ),
+            (Some(newest.cmd), Some("job_glance"), "normal".to_owned()),
+        );
+    }
+
+    /// After a Glance, `Space J k` opens the Job before the last one glanced
+    /// at, and after the oldest Job the newest.
+    #[test]
+    fn space_j_k_steps_to_the_older_job_after_a_glance() {
+        let mut h = Stoat::test();
+        let first = h.push_job("sleep 30");
+        let second = h.push_job("sleep 31");
+        h.type_keys("escape");
+
+        let mut named = Vec::new();
+        for _ in 0..3 {
+            h.type_keys("space J k");
+            named.push(glanced(&h));
+            h.type_keys("escape");
+        }
+        assert_eq!(named, [second.cmd, first.cmd, second.cmd].map(Some));
+    }
+
+    /// `h` steps the Glance to the older Job and `l` to the newer, and both
+    /// wrap at the ends of the tray.
+    #[test]
+    fn h_and_l_walk_the_jobs_and_wrap() {
+        let mut h = Stoat::test();
+        let ids = ["sleep 30", "sleep 31", "sleep 32"].map(|line| h.push_job(line).cmd);
+        h.type_keys("escape space J k");
+
+        let mut walk = vec![glanced(&h)];
+        for key in ["h", "h", "h", "l"] {
+            h.type_keys(key);
+            walk.push(glanced(&h));
+        }
+        assert_eq!(walk, [ids[2], ids[1], ids[0], ids[2], ids[0]].map(Some));
+    }
+
+    /// `Enter` takes the Job out of the tray, back to its block in the Run pane
+    /// that shows its Stub, and that pane takes the focus from the file beside
+    /// it.
+    #[test]
+    fn enter_returns_a_job_to_its_stub_and_focuses_the_run_pane() {
+        let mut h = Stoat::test();
+        let editor = h.stoat.active_workspace().panes.focus();
+        action_handlers::dispatch(&mut h.stoat, &SplitRight);
+        let job = h.push_job("sleep 30");
+        let (run_pane, run) = (h.stoat.active_workspace().panes.focus(), focused_run(&h));
+        h.stoat.active_workspace_mut().panes.set_focus(editor);
+        h.type_keys("space J k");
+        h.type_keys("enter");
+
+        let ws = h.stoat.active_workspace();
+        let cmd = &ws.cmds[job.cmd];
+        assert_eq!(
+            (
+                ws.jobs.clone(),
+                (cmd.in_jobs, cmd.finished),
+                ws.runs[run].blocks.clone(),
+                ws.panes.focus() == run_pane,
+                h.stoat.job_glance.is_none(),
+            ),
+            (Vec::new(), (false, false), vec![job.cmd], true, true),
+        );
+    }
+
+    /// `Enter` on a Job whose Run pane closed puts the Cmd at the end of the
+    /// stack of a Run pane that opens for it.
+    #[test]
+    fn enter_appends_a_job_with_no_stub_to_a_run_pane() {
+        let mut h = Stoat::test();
+        action_handlers::dispatch(&mut h.stoat, &SplitRight);
+        let job = h.push_job("sleep 30");
+        action_handlers::dispatch(&mut h.stoat, &ClosePane);
+        h.type_keys("space J k");
+        h.type_keys("enter");
+
+        let ws = h.stoat.active_workspace();
+        assert_eq!(
+            (
+                ws.jobs.clone(),
+                ws.runs[focused_run(&h)].blocks.last().copied(),
+            ),
+            (Vec::new(), Some(job.cmd)),
+        );
+    }
+
+    /// `Ctrl-r` runs an ended Job again in the tray, and leaves a running one
+    /// as it is.
+    #[test]
+    fn ctrl_r_runs_the_glanced_job_again_in_the_tray() {
+        let mut h = Stoat::test();
+        let job = h.push_job("sleep 30");
+        h.type_keys("escape space J k");
+        let spawned = |h: &TestHarness| {
+            h.fake_terminal_host()
+                .spawns()
+                .iter()
+                .filter(|spawn| spawn.args.last().is_some_and(|line| line == "sleep 30"))
+                .count()
+        };
+        h.type_keys("ctrl-r");
+        let running = (spawned(&h), h.stoat.pending_message.clone());
+
+        h.inject_cmd_done(job.cmd, 0);
+        h.type_keys("ctrl-r");
+        let ws = h.stoat.active_workspace();
+        let cmd = &ws.cmds[job.cmd];
+        assert_eq!(
+            (
+                running,
+                (cmd.finished, cmd.run_count),
+                spawned(&h),
+                ws.jobs.clone()
+            ),
+            (
+                (1, Some("still running".to_owned())),
+                (false, 2),
+                2,
+                vec![job.cmd]
+            ),
+        );
+    }
+
+    /// `Ctrl-c` interrupts a running Job and keeps the Glance, and on an ended
+    /// Job it closes the Glance with no quit.
+    #[test]
+    fn ctrl_c_interrupts_a_running_job_and_closes_the_glance_of_an_ended_one() {
+        let mut h = Stoat::test();
+        let job = h.push_job("sleep 30");
+        h.type_keys("escape space J k");
+        h.type_keys("ctrl-c");
+        let interrupted = (
+            job.session.sent_bytes(),
+            h.stoat.active_workspace().cmds[job.cmd].stopped,
+            h.stoat.job_glance.is_some(),
+        );
+
+        h.inject_cmd_done(job.cmd, 130);
+        let ctrl_c = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
+        let quit = matches!(h.stoat.update(Event::Key(ctrl_c)), UpdateEffect::Quit);
+        assert_eq!(
+            (interrupted, quit, h.stoat.job_glance.is_none()),
+            ((vec![vec![0x03]], true, true), false, true),
+        );
+    }
+
+    /// `x` leaves a running Job in the tray, and dismisses an ended Job, which
+    /// leaves the store too when no stack holds it.
+    #[test]
+    fn x_dismisses_an_ended_job_and_keeps_a_running_one() {
+        let mut h = Stoat::test();
+        action_handlers::dispatch(&mut h.stoat, &SplitRight);
+        let job = h.push_job("sleep 30");
+        action_handlers::dispatch(&mut h.stoat, &ClosePane);
+        h.type_keys("space J k");
+        h.type_keys("x");
+        let running = (
+            h.stoat.pending_message.clone(),
+            h.stoat.active_workspace().jobs.clone(),
+        );
+
+        h.inject_cmd_done(job.cmd, 0);
+        h.type_keys("x");
+        let ws = h.stoat.active_workspace();
+        assert_eq!(
+            (running, ws.jobs.len(), ws.cmds.len()),
+            ((Some("still running".to_owned()), vec![job.cmd]), 0, 0),
+        );
+    }
+
+    /// A dismissed Job whose Run pane shows its Stub stays in that stack as an
+    /// ended block with its output, because the stack is the pane's record.
+    #[test]
+    fn a_dismissed_job_with_a_stub_stays_in_its_run_pane() {
+        let mut h = Stoat::test();
+        let job = h.push_job("sleep 30");
+        let run = focused_run(&h);
+        h.inject_cmd_output(job.cmd, b"hello\n");
+        h.inject_cmd_done(job.cmd, 0);
+        h.type_keys("escape space J k");
+        h.type_keys("x");
+
+        let ws = h.stoat.active_workspace();
+        let cmd = &ws.cmds[job.cmd];
+        assert_eq!(
+            (
+                ws.runs[run].blocks.clone(),
+                cmd.in_jobs,
+                cmd.grid.text_in(0..5, 0..1),
+                ws.jobs.clone(),
+            ),
+            (vec![job.cmd], false, "hello".to_owned(), Vec::new()),
+        );
+    }
+
+    /// The Glance closes once its Job leaves the tray.
+    #[test]
+    fn the_glance_closes_when_its_job_leaves_the_tray() {
+        let mut h = Stoat::test();
+        let job = h.push_job("sleep 30");
+        h.type_keys("escape space J k");
+        let open = h.stoat.job_glance.is_some();
+        super::take(h.stoat.active_workspace_mut(), job.cmd);
+        h.settle();
+
+        assert_eq!((open, h.stoat.job_glance.is_none()), (true, true));
+    }
+
+    /// `Enter` at the empty prompt of a Run pane opens the Glance of a newest
+    /// block in Jobs, which its hint row names.
+    #[test]
+    fn enter_at_an_empty_prompt_opens_the_glance_of_a_stub() {
+        let mut h = Stoat::test();
+        let job = h.push_job("sleep 30");
+        let run = focused_run(&h);
+        h.type_keys("enter");
+
+        let ws = h.stoat.active_workspace();
+        let hint = ws.runs[run].hint(&ws.cmds, &ws.terms).map(|row| row.text());
+        assert_eq!(
+            (glanced(&h), hint),
+            (
+                Some(job.cmd),
+                Some("Enter go to the Job \u{b7} C-j bring it back here".to_owned()),
+            ),
+        );
+    }
+
+    /// `Space J k` with no Job says so and leaves the submenu for normal mode.
+    #[test]
+    fn space_j_k_with_no_job_says_so() {
+        let mut h = Stoat::test();
+        h.type_keys("space J k");
+
+        assert_eq!(
+            (
+                h.stoat.job_glance.is_none(),
+                h.stoat.pending_message.clone(),
+                h.stoat.focused_mode().to_string(),
+            ),
+            (true, Some("no jobs".to_owned()), "normal".to_owned()),
+        );
+    }
+
+    /// Opening a Job whose Run pane a terminal covers drops its id from that
+    /// stack and puts the Cmd at the end of a Run pane on show.
+    #[test]
+    fn open_moves_a_job_out_of_a_covered_stack() {
+        let mut h = Stoat::test();
+        let job = h.push_job("sleep 30");
+        let covered = focused_run(&h);
+        action_handlers::dispatch(&mut h.stoat, &Terminal);
+        super::open(&mut h.stoat, job.cmd);
+
+        let ws = h.stoat.active_workspace();
+        assert_eq!(
+            (
+                ws.runs[covered].blocks.clone(),
+                ws.runs[focused_run(&h)].blocks.last().copied(),
+                ws.jobs.len(),
+            ),
+            (Vec::new(), Some(job.cmd), 0),
+        );
+    }
+
+    /// Opening a Job under a newer block scrolls its stack so that the Job's
+    /// block ends on the pane's last output row.
+    #[test]
+    fn open_scrolls_an_older_block_to_the_bottom_of_its_pane() {
+        let mut h = Stoat::test();
+        let job = h.push_job("sleep 30");
+        h.submit_run("echo a");
+        let run = focused_run(&h);
+        super::open(&mut h.stoat, job.cmd);
+
+        assert_eq!(h.stoat.active_workspace().runs[run].scroll_offset, 1);
+    }
+
+    /// `Ctrl-:` over the Glance swaps it for the palette, so one modal owns the
+    /// keys.
+    #[test]
+    fn the_palette_key_swaps_the_glance_for_the_palette() {
+        let mut h = Stoat::test();
+        h.push_job("sleep 30");
+        h.type_keys("escape space J k");
+        h.type_keys("ctrl-:");
+
+        assert_eq!(
+            (
+                h.stoat.job_glance.is_none(),
+                h.stoat.command_palette.is_some()
+            ),
+            (true, true),
+        );
+    }
+
+    /// The Job of the open Glance.
+    fn glanced(h: &TestHarness) -> Option<CmdId> {
+        h.stoat.job_glance.as_ref().map(|glance| glance.cmd)
     }
 
     /// The run that the focused pane shows.

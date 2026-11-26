@@ -845,6 +845,21 @@ on key {
         a -> GitStatusAbort();
         S -> GitStatusSkip();
     }
+    # The Glance of a Job opens over a view whose keys rank by two
+    # predicates, as the git status panel does, so the mode predicate ranks
+    # its keys level with them and the earlier block wins the tie.
+    modal == job_glance && mode == normal {
+        Enter -> JobOpen() "open";
+        Ctrl-r -> JobRerun() "run again";
+        Ctrl-c -> JobInterrupt() "stop";
+        h -> JobGlancePrev() "job";
+        l -> JobGlanceNext() "job";
+        Left -> JobGlancePrev();
+        Right -> JobGlanceNext();
+        x -> JobDismiss() "dismiss";
+        Escape -> JobGlanceClose() "close";
+        q -> JobGlanceClose() "close";
+    }
     # The Commit Preview's footer lists the labeled bindings of this block in
     # this order, with the keys of one label joined, so Escape comes last.
     modal == commit_preview && mode == normal {
@@ -1954,6 +1969,7 @@ on key {
         q -> [Quit(), SetMode(normal)] "quit";
         a -> SetMode(space_pane_nav);
         t -> [OpenRun()] "run";
+        J -> SetMode(space_job);
         c -> [SpawnClaude(), SetMode(normal)] "claude";
         w -> SetMode(space_workspace);
         b -> SetMode(space_buffer);
@@ -2008,6 +2024,10 @@ on key {
         }
 
         ? -> [ToggleKeyHints(), SetMode(normal)] "toggle hints";
+    }
+    mode == space_job {
+        Escape -> SetMode(normal);
+        k -> JobGlance() "glance";
     }
     mode == space_clipboard {
         Escape -> SetMode(normal);

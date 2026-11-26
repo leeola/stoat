@@ -98,6 +98,10 @@ use crate::{
             GitStatusTakeTheirs, GitStatusUnstage,
         },
         help::{CloseHelp, DismissKeyHints, HelpScopeToggle, OpenHelp, ToggleKeyHints},
+        jobs::{
+            JobDismiss, JobGlance, JobGlanceClose, JobGlanceNext, JobGlancePrev, JobInterrupt,
+            JobOpen, JobRerun,
+        },
         lsp::{
             CodeAction, Format, FormatSelections, GotoDeclaration, GotoDefinition,
             GotoImplementation, GotoNextDiagnostic, GotoPrevDiagnostic, GotoTypeDefinition, Hover,
@@ -1049,6 +1053,14 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
     add(RunSubmit::DEF, |_| Ok(Box::new(RunSubmit)));
     add(RunInterrupt::DEF, |_| Ok(Box::new(RunInterrupt)));
     add(RunJobToggle::DEF, |_| Ok(Box::new(RunJobToggle)));
+    add(JobGlance::DEF, |_| Ok(Box::new(JobGlance)));
+    add(JobGlanceNext::DEF, |_| Ok(Box::new(JobGlanceNext)));
+    add(JobGlancePrev::DEF, |_| Ok(Box::new(JobGlancePrev)));
+    add(JobGlanceClose::DEF, |_| Ok(Box::new(JobGlanceClose)));
+    add(JobOpen::DEF, |_| Ok(Box::new(JobOpen)));
+    add(JobRerun::DEF, |_| Ok(Box::new(JobRerun)));
+    add(JobInterrupt::DEF, |_| Ok(Box::new(JobInterrupt)));
+    add(JobDismiss::DEF, |_| Ok(Box::new(JobDismiss)));
     add(RunToggleView::DEF, |_| Ok(Box::new(RunToggleView)));
     add(RunAgain::DEF, |_| Ok(Box::new(RunAgain)));
     add(RunBlockToPane::DEF, |_| Ok(Box::new(RunBlockToPane)));
@@ -1637,6 +1649,14 @@ mod tests {
         "RunSubmit",
         "RunInterrupt",
         "RunJobToggle",
+        "JobGlance",
+        "JobGlanceNext",
+        "JobGlancePrev",
+        "JobGlanceClose",
+        "JobOpen",
+        "JobRerun",
+        "JobInterrupt",
+        "JobDismiss",
         "RunToggleView",
         "RunAgain",
         "RunBlockToPane",
@@ -2399,7 +2419,7 @@ mod tests {
         // + 1 PaletteRefresh.
         // + 1 RunToggleView.
         // + 2 RunAgain/RunBlockToPane.
-        assert_eq!(all().count(), 524);
+        assert_eq!(all().count(), 532);
     }
 
     #[test]

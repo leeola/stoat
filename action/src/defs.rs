@@ -10,6 +10,7 @@ pub mod file;
 pub mod file_finder;
 pub mod git_status;
 pub mod help;
+pub mod jobs;
 pub mod lsp;
 pub mod palette;
 pub mod pane;
