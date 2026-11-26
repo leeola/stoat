@@ -718,6 +718,7 @@ pub(crate) fn type_tag(path: &Path) -> Option<TypeTag> {
         "rs" => scope::UI_TAG_RUST,
         "md" => scope::UI_TAG_MARKDOWN,
         "toml" | "stcfg" | "cfg" => scope::UI_TAG_CONFIG,
+        "c" | "h" => scope::UI_TAG_C,
         _ => return None,
     };
     Some(TypeTag {
@@ -1067,10 +1068,11 @@ mod tests {
         Style::default().fg(Color::Rgb(1, 2, 3))
     }
 
-    /// A gzip name takes its inner extension's tag, and one whose inner
+    /// A Rust, Markdown, config, C source, or C header name takes its type's
+    /// tag. A gzip name takes its inner extension's tag, and one whose inner
     /// extension takes no tag answers `None`.
     #[test]
-    fn type_tag_names_the_rust_markdown_and_config_files() {
+    fn type_tag_names_the_rust_markdown_config_and_c_files() {
         let tagged = |tag_scope, gzip| {
             Some(TypeTag {
                 scope: tag_scope,
@@ -1081,6 +1083,8 @@ mod tests {
             "a.rs",
             "README.md",
             "config.stcfg",
+            "x.c",
+            "x.h",
             "Makefile",
             "CHANGELOG.md.gz",
             "hosts.gz",
@@ -1092,11 +1096,22 @@ mod tests {
                 tagged(scope::UI_TAG_RUST, false),
                 tagged(scope::UI_TAG_MARKDOWN, false),
                 tagged(scope::UI_TAG_CONFIG, false),
+                tagged(scope::UI_TAG_C, false),
+                tagged(scope::UI_TAG_C, false),
                 None,
                 tagged(scope::UI_TAG_MARKDOWN, true),
                 None,
             ],
         );
+    }
+
+    /// A C file's name splits before its `.c`, as the tag that names the
+    /// extension takes it.
+    #[test]
+    fn a_c_name_splits_before_its_extension() {
+        let split = tagged_name(Path::new("/r/scan.c")).map(|tagged| (tagged.stem, tagged.suffix));
+
+        assert_eq!(split, Some(("scan".to_string(), ".c".to_string())));
     }
 
     /// A tagged name splits before the extension its tag names, and a gzip name

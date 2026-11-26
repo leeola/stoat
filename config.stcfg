@@ -400,6 +400,7 @@ theme ermine_night inherits default_dark {
     ui.tag.rust.fg     = warning;
     ui.tag.markdown.fg = info;
     ui.tag.config.fg   = special;
+    ui.tag.c.fg        = accent;
 
     ui.readonly.label.fg = readonly;
     ui.readonly.frame.fg = readonly_line;

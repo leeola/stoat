@@ -1081,11 +1081,18 @@ pub mod scope {
     pub const UI_TABBAR_TOGGLE_INACTIVE: &str = "ui.tabbar.toggle.inactive";
 
     /// The color of a Rust file's extension in a tab, a status row, a file
-    /// header of the changes view, and a finder row. [`UI_TAG_MARKDOWN`] and
-    /// [`UI_TAG_CONFIG`] are its siblings for the other tagged file types.
+    /// header of the changes view, and a finder row. [`UI_TAG_MARKDOWN`],
+    /// [`UI_TAG_CONFIG`], and [`UI_TAG_C`] are its siblings for the other
+    /// tagged file types.
     pub const UI_TAG_RUST: &str = "ui.tag.rust";
     pub const UI_TAG_MARKDOWN: &str = "ui.tag.markdown";
     pub const UI_TAG_CONFIG: &str = "ui.tag.config";
+    /// The color of a C source or header file's extension, as
+    /// [`UI_TAG_RUST`] colors a Rust file's.
+    ///
+    /// A theme that leaves it unset keeps the extension in the style of the
+    /// file's name.
+    pub const UI_TAG_C: &str = "ui.tag.c";
 
     pub const UI_STATUSBAR_FOCUSED: &str = "ui.statusbar.focused";
     pub const UI_STATUSBAR_UNFOCUSED: &str = "ui.statusbar.unfocused";
@@ -2018,7 +2025,8 @@ mod tests {
     }
 
     /// A tag tells file types apart by its color alone, so each type needs a
-    /// color of its own.
+    /// color of its own. Every shipped theme colors the Rust, Markdown, and
+    /// config tags, and the C tag where it sets one.
     #[test]
     fn every_type_tag_has_a_color_of_its_own() {
         for theme in shipped_themes() {
@@ -2029,11 +2037,18 @@ mod tests {
             ]
             .iter()
             .map(|name| theme.try_get(name).and_then(|style| style.fg).expect(name))
+            .chain(theme.try_get(scope::UI_TAG_C).and_then(|style| style.fg))
             .collect();
+            let tags = colors.len();
 
             colors.sort_by_key(|color| format!("{color:?}"));
             colors.dedup();
-            assert_eq!(colors.len(), 3, "{}: no two tags share a color", theme.name);
+            assert_eq!(
+                colors.len(),
+                tags,
+                "{}: no two tags share a color",
+                theme.name
+            );
         }
     }
 

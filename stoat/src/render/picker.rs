@@ -4124,6 +4124,19 @@ mod tests {
         );
     }
 
+    /// A C file's extension takes the C tag's color, bold as the name is.
+    #[test]
+    fn a_c_row_colors_its_extension() {
+        let theme = theme_of(r##"ui.tag.c.fg = "#010203";"##);
+        let buf = painted_row("/r/a.c", vec![], 10, &theme);
+        let tag = Color::Rgb(1, 2, 3);
+
+        assert_eq!(
+            (1..4).map(|col| fg_and_bold(&buf, col)).collect::<Vec<_>>(),
+            [(Color::Reset, true), (tag, true), (tag, true)]
+        );
+    }
+
     /// A gzip name takes the tag color on both of its extensions, the ones that
     /// `chrome::tagged_name` splits off, and its stem keeps the name's style.
     #[test]

@@ -367,9 +367,11 @@ The typed UI scopes, by group (syntax scopes are open-ended):
 - `ui.job.chip` -- the box of a Tray Chip, which marks a Job at the right end
   of the tab bar, in its background. Unset, the box takes the background of
   `ui.surface.raised`, and then of `ui.chip`.
-- `ui.tag.rust`, `ui.tag.markdown`, `ui.tag.config` -- the color of the
-  extension of a Rust, Markdown, or config file in a tab, a status row, a file
-  header of the changes view, and a finder row.
+- `ui.tag.rust`, `ui.tag.markdown`, `ui.tag.config`, `ui.tag.c` -- the color
+  of the extension of a Rust, Markdown, config, or C file in a tab, a status
+  row, a file header of the changes view, and a finder row. A theme that leaves
+  `ui.tag.c` unset keeps a C file's extension in the style of its name, which
+  is the look of default_dark.
 - `ui.panel.*`, `ui.type.*` -- panel frames and text sizes, set by the fields in
   [Panel and type metrics](#panel-and-type-metrics).
 - `ui.walkthrough.focus`, `ui.walkthrough.card`, `ui.walkthrough.marker1`

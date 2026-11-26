@@ -2089,6 +2089,34 @@ fn the_finder_boxes_every_row_of_a_wrapped_selection() {
     }
 }
 
+/// The finder colors a C file's extension with the C tag, the accent in
+/// ermine_night.
+///
+/// The query `z` keeps only the 161-char path, which ends in `.c`. Its second
+/// line, from pixel row 235, holds 69 chars from cell 7, so `.c` stands in
+/// cells 74 and 75, from pixel column 666. Those 18 by 18 px hold a pixel whose
+/// blue stands more than 60 over its red, as the accent's does and the tab wash
+/// under it does not.
+#[test]
+fn the_finder_colors_a_c_extension() {
+    let mut home = support::scratch_home();
+    let shot = settled_frame(
+        home.path(),
+        "deep-paths",
+        "src/main.rs",
+        "<Space>pz<Settle>",
+    );
+
+    let accent = |[r, _, b]: [u8; 3]| i32::from(b) - i32::from(r) > 60;
+    if pixels_where(&shot, (666, 235, 18, 18), accent) == 0 {
+        let frame = keep_frame(&shot, &mut home, "c_extension");
+        panic!(
+            "the cells of .c hold no pixel of the accent; the frame is {}",
+            frame.display(),
+        );
+    }
+}
+
 /// A finder result that wraps grows by one 18 px line, and each neighbour keeps
 /// a 20 px row of its own.
 ///
