@@ -43,7 +43,10 @@ use crate::{
         file_finder::paint_finder_rows,
         help::{paint_help_detail_rows, paint_help_list_rows},
         paint::dim_rgb,
-        picker::{page_start, paint_preview_numbers, paint_target_row, NumberColumn, RowMarks},
+        picker::{
+            page_start, paint_preview_numbers, paint_target_row, NumberColumn, RowMarks, RowStart,
+        },
+        pixel_rows::RowMetrics,
         review::{diff_gutter_digits, paint_diff_rows, BufferNumbering, DiffDials},
         serialize_buffer,
         symbol_finder::paint_symbol_rows,
@@ -1114,7 +1117,11 @@ fn render_rows_page(
 /// [`row_tops`], places the page's first row, and a page past them paints no
 /// row. The finder is read-only here.
 ///
+/// With `pixels` the page is a page of a pixel list, which starts at the
+/// page's first physical px row and draws its rows as nudged runs and bars.
+///
 /// [`row_tops`]: crate::render::picker::row_tops
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn render_finder_page(
     finder: &FileFinder,
     home: Option<&Path>,
@@ -1123,6 +1130,7 @@ pub(crate) fn render_finder_page(
     theme: &crate::theme::Theme,
     region_width: u16,
     region_height: u16,
+    pixels: Option<RowMetrics>,
 ) -> Vec<u8> {
     render_rows_page(
         region_width,
@@ -1130,12 +1138,30 @@ pub(crate) fn render_finder_page(
         page,
         theme,
         |buf, area, _, scene| {
-            let Some(start) = page_start(tops, page_top_row(page, region_height)) else {
+            let Some(start) = list_page_start(tops, page, region_height, pixels) else {
                 return;
             };
-            paint_finder_rows(finder, home, area, start, theme, false, buf, scene)
+            paint_finder_rows(finder, home, area, start, theme, false, pixels, buf, scene)
         },
     )
+}
+
+/// Where page `index` of a path list's pool starts, from the document rows
+/// `tops` of each measured result, or `None` past the last of them.
+///
+/// The page of a pixel list starts at its first physical px row, as `pixels`
+/// measures one.
+fn list_page_start(
+    tops: &[u32],
+    index: u64,
+    region_height: u16,
+    pixels: Option<RowMetrics>,
+) -> Option<RowStart> {
+    let row = page_top_row(index, region_height);
+    match pixels {
+        Some(metrics) => metrics.start(tops, row.saturating_mul(u32::from(metrics.cell[1]))),
+        None => page_start(tops, row),
+    }
 }
 
 /// Render `region_height` rows of the code-search match list starting at row
@@ -1243,8 +1269,10 @@ pub(crate) fn render_palette_page(
 ///
 /// Mirrors [`render_finder_page`] but paints the picker's path rows through the
 /// shared [`crate::render::picker::paint_path_rows`], so a pooled page matches
-/// the live inline picker. `tops` places the page's first row as it does for
-/// the finder. The picker is read-only here.
+/// the live inline picker. `tops` places the page's first row, and `pixels`
+/// makes it a page of a pixel list, as they do for the finder. The picker is
+/// read-only here.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn render_arg_page(
     picker: &ArgPicker,
     home: Option<&Path>,
@@ -1253,6 +1281,7 @@ pub(crate) fn render_arg_page(
     theme: &crate::theme::Theme,
     region_width: u16,
     region_height: u16,
+    pixels: Option<RowMetrics>,
 ) -> Vec<u8> {
     render_rows_page(
         region_width,
@@ -1260,7 +1289,7 @@ pub(crate) fn render_arg_page(
         page,
         theme,
         |buf, area, _, scene| {
-            let Some(start) = page_start(tops, page_top_row(page, region_height)) else {
+            let Some(start) = list_page_start(tops, page, region_height, pixels) else {
                 return;
             };
             let row_style = if picker.fallback_active() {
@@ -1276,6 +1305,7 @@ pub(crate) fn render_arg_page(
                 theme,
                 row_style,
                 false,
+                pixels,
                 buf,
                 scene,
             )

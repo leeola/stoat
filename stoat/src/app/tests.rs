@@ -432,6 +432,59 @@ fn a_repeat_ident_report_repaints() {
     );
 }
 
+/// Each ident report states the display scale in thousandths, and the app
+/// keeps the latest. A repeat after the first report moves it, a scale of
+/// zero states none, and so does a report of no stoatty.
+#[test]
+fn an_ident_report_keeps_its_display_scale() {
+    let mut h = crate::test_harness::TestHarness::with_size(80, 24);
+    h.stoat.stoatty = false;
+    let mut report = |scale, protocol: Option<u32>| {
+        let peer = protocol.map(|protocol| StoattyPeer { protocol, scale });
+        h.stoat.handle_stoatty_present(peer);
+        h.stoat.display_scale
+    };
+    let current = Some(stoatty_protocol::PROTOCOL_VERSION);
+
+    assert_eq!(
+        [
+            report(1500, current),
+            report(2000, current),
+            report(0, current),
+            report(1000, None),
+        ],
+        [Some(1.5), Some(2.0), None, None]
+    );
+}
+
+/// A result list lays its rows out by pixels under a stoatty at
+/// `PAGE_NUDGE_PROTOCOL` that has stated its cell size and display scale, and
+/// under none short of any of the three.
+#[test]
+fn a_list_lays_out_by_pixels_from_the_page_nudge_protocol() {
+    let mut h = crate::test_harness::TestHarness::with_size(80, 24);
+    h.stoat.cell_pixels = Some((9, 18));
+    let mut rows = |protocol, scale| {
+        h.stoat.stoatty_protocol = protocol;
+        h.stoat.display_scale = scale;
+        h.stoat.pixel_rows()
+    };
+    let page = PAGE_NUDGE_PROTOCOL;
+    let pixels = RowMetrics {
+        cell: [9, 18],
+        scale: 1.0,
+    };
+
+    assert_eq!(
+        [
+            rows(page - 1, Some(1.0)),
+            rows(page, Some(1.0)),
+            rows(page, None),
+        ],
+        [None, Some(pixels), None]
+    );
+}
+
 /// Report each of `sizes` as the tty's cell size and drain it, and name the
 /// state of `slot` after each. A repeat ident goes back to idle after each, as
 /// the input thread returns it once the answer is out.

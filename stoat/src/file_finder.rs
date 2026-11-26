@@ -3,6 +3,7 @@ use crate::{
     input_view::{InputView, SubmitTarget},
     paths,
     picker::{BaseId, DisplayCache, PathPicker, PendingScan, PreviewPolicy, Scan, ScanTarget},
+    render::pixel_rows::RowMetrics,
     workspace::Workspace,
 };
 use globset::{Glob, GlobSet, GlobSetBuilder};
@@ -240,6 +241,13 @@ pub struct FileFinder {
     /// list does not pull the plate in under the user typing it. Each open
     /// starts over at 0, so the plate fits the next list afresh.
     pub(crate) plate_width: u16,
+    /// The cell and scale that the last frame laid the list out by, or `None`
+    /// for a list on whole cell rows.
+    ///
+    /// The pool that pages a pixel list and the hit test read the layout after
+    /// the paint, so the paint keeps its measure here, as it keeps
+    /// `viewport_rows`.
+    pub(crate) row_metrics: Option<RowMetrics>,
 }
 
 /// Source tags for [`base_id`], so two scopes carrying the same generation
@@ -331,6 +339,7 @@ impl FileFinder {
             browse: None,
             content_rows: 0,
             plate_width: 0,
+            row_metrics: None,
         };
         // Uniformly seed the initial (empty-query) list for whatever scope
         // opened, including a named scope's glob filter.
@@ -663,7 +672,11 @@ pub(crate) struct FileScopes {
     /// The lists are fixed between the moments they are replaced, so the
     /// picker only has to be told when one is, and otherwise keeps the rows it
     /// derived from them. Restamped wherever one is rebuilt.
-    base_generation: u64,
+    ///
+    /// A row's mark reads these lists too, so the pool that pages the list
+    /// feeds this into its content version, and a list that lands after a
+    /// page filled refills that page.
+    pub(crate) base_generation: u64,
     /// Absolute paths of currently-open buffers. Captured once at open time;
     /// not re-queried on scope toggle.
     pub(crate) buffer_paths: Vec<PathBuf>,
@@ -4318,5 +4331,17 @@ mod tests {
             Arc::ptr_eq(&finder_display_rows(&h), &seeded),
             "the open lists the rows the build derived"
         );
+    }
+
+    /// A pixel list counts as its viewport the results whose 21 px rows fit
+    /// the list's px and the one gap that stands past its last row.
+    #[test]
+    fn a_pixel_list_counts_the_rows_that_fit_as_its_viewport() {
+        let h = test_fixture::pixel_finder(40);
+
+        let list = test_fixture::finder_layout(&h).list;
+        let fit = (usize::from(list.height) * 18 + 1) / 21;
+        let finder = h.stoat.file_finder.as_ref().expect("the finder is open");
+        assert_eq!(finder.active_core_ref().picklist.viewport_rows, Some(fit));
     }
 }

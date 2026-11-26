@@ -103,6 +103,9 @@ pub struct ApcScene {
     /// The grid cell's pixel size `[width, height]` while the host draws scaled
     /// pools, as [`Self::set_scaled_cell`] set.
     scaled_cell: Option<[u16; 2]>,
+    /// The grid cell in physical px and the display scale while the host draws
+    /// nudged page runs, as [`Self::set_pixel_rows`] set.
+    pixel_rows: Option<([u16; 2], f32)>,
     /// Whether the next flush resets the terminal and sends the whole scene.
     ///
     /// Set by a switch of the lane protocol, since a flush in the other mode
@@ -129,6 +132,7 @@ impl ApcScene {
             batches: false,
             nudges: false,
             scaled_cell: None,
+            pixel_rows: None,
             resync: false,
             dynamic_current: Vec::new(),
             dynamic_previous: Vec::new(),
@@ -209,6 +213,24 @@ impl ApcScene {
     /// [`Self::set_scaled_cell`] declared.
     pub fn scaled_cell(&self) -> Option<[u16; 2]> {
         self.scaled_cell
+    }
+
+    /// Declare the grid cell in physical px and the display scale while the host
+    /// draws nudged page runs, which a stoatty at
+    /// [`PAGE_NUDGE_PROTOCOL`](stoatty_protocol::PAGE_NUDGE_PROTOCOL) or later
+    /// does once it has stated both, or `None` otherwise.
+    ///
+    /// Expected once per frame like [`Self::set_live`]. A list that lays its
+    /// rows out by pixels reads it through [`Self::pixel_rows`] before it
+    /// paints, since a board px is a physical px times the scale.
+    pub fn set_pixel_rows(&mut self, pixel_rows: Option<([u16; 2], f32)>) {
+        self.pixel_rows = pixel_rows;
+    }
+
+    /// The grid cell in physical px and the display scale while the host draws
+    /// nudged page runs, as [`Self::set_pixel_rows`] declared.
+    pub fn pixel_rows(&self) -> Option<([u16; 2], f32)> {
+        self.pixel_rows
     }
 
     /// Empty every lane so widgets build the next frame from scratch, and send

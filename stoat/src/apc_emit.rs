@@ -27,6 +27,7 @@ use crate::{
         diff_changes::{merge_note, PagePaint},
         editor::EolCursor,
         hover::HoverFrame,
+        pixel_rows::RowMetrics,
         rail_strip_id,
         review::DiffDials,
         undercurl::UndercurlBatch,
@@ -185,6 +186,53 @@ struct PaintedSelection {
     /// excerpt's relative numbers count from, where the gutter lays its
     /// numbers as runs.
     cursor_row: Option<(usize, u32)>,
+}
+
+/// How the pool of a path list, the File Finder's or the argument list's,
+/// scrolls and stamps its pages.
+///
+/// A list on whole cell rows counts all three in document rows. A pixel list
+/// counts the selected result's span and a page's height in physical px, and
+/// its target in cell rows that rest between two rows, where the resident pool
+/// keeps compositing.
+struct PathListScroll {
+    /// The scroll target, the row of the window's first result.
+    offset: f32,
+    /// The rows that the selected result takes, as [`rows_page_stamp`] reads
+    /// them.
+    selected: Range<u32>,
+    /// The rows of one page in the units of `selected`.
+    page_height: u16,
+}
+
+impl PathListScroll {
+    /// The scroll of a list whose window starts at result `first`, with result
+    /// `selected` selected, from the document rows `tops` of each measured
+    /// result, in a pool whose regions are `region_height` rows tall.
+    fn of(
+        tops: &[u32],
+        first: usize,
+        selected: usize,
+        pixels: Option<RowMetrics>,
+        region_height: u16,
+    ) -> Self {
+        let Some(metrics) = pixels else {
+            return Self {
+                offset: tops.get(first).copied().unwrap_or(0) as f32,
+                selected: selected_result_rows(tops, selected),
+                page_height: region_height,
+            };
+        };
+        let top = match first < tops.len() {
+            true => metrics.top(tops, first),
+            false => 0,
+        };
+        Self {
+            offset: top as f32 / f32::from(metrics.cell[1]),
+            selected: selected_result_span(tops, selected, metrics),
+            page_height: region_height.saturating_mul(metrics.cell[1]),
+        }
+    }
 }
 
 /// The surface whose pages a pane pool holds.
@@ -1973,6 +2021,10 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
     }
 
     if let (Some(list), Some(finder)) = (finder_list, stoat.file_finder.as_mut()) {
+        // A pixel list's rows stand off the cell grid, so its pool is resident:
+        // the live cells under it stay blank, and its pages are the list even
+        // at rest.
+        let pixels = finder.row_metrics;
         let region = PoolRegionCommand {
             pool: crate::smooth_scroll::non_pane_pool::FINDER,
             top: list.y,
@@ -1982,7 +2034,7 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
             window: 0,
             kind: PoolKind::Grid,
             dim: 0,
-            resident: false,
+            resident: pixels.is_some(),
         };
         // A wrapped label takes more than one row, so the pool pages by the
         // document rows that the table sums. The prefix is copied out first,
@@ -2014,13 +2066,15 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
             &crate::render::file_finder::finder_rows(finder, home),
             list.width,
             list.height,
+            pixels,
         );
         let tops =
             crate::render::picker::row_tops(&core.picklist, list.width, &prefix).unwrap_or(&[0]);
-        let scroll_row = tops.get(window.first).copied().unwrap_or(0);
         // The visible rows are the active picker's filtered indices, and in
         // browse mode the typed directory re-roots them, so both feed the
-        // pool's content version: a re-filter or a re-root refills it.
+        // pool's content version: a re-filter or a re-root refills it. The
+        // rows' marks read the scopes' lists, and a pixel list's measure
+        // places every row, so both feed the version too.
         let content_version = {
             let mut hasher = DefaultHasher::new();
             stoat.theme_epoch.hash(&mut hasher);
@@ -2031,22 +2085,24 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
                 .unwrap_or_default()
                 .hash(&mut hasher);
             core.picklist.filter_generation.hash(&mut hasher);
+            finder.scopes.base_generation.hash(&mut hasher);
+            hash_row_metrics(pixels, &mut hasher);
             hasher.finish()
         };
         let selected = core.picklist.selected;
-        let selected_rows = selected_result_rows(tops, selected);
+        let scroll = PathListScroll::of(tops, window.first, selected, pixels, region.height);
         pool::emit_pages_into(
             &mut out,
             &mut stoat.smooth_scroll,
             region,
-            scroll_row as f32,
+            scroll.offset,
             u64::MAX,
             PageVersions {
                 cells: content_version,
                 decorations: 0,
             },
-            |page| rows_page_stamp(selected, selected_rows.clone(), page, region.height),
-            true,
+            |page| rows_page_stamp(selected, scroll.selected.clone(), page, scroll.page_height),
+            pixels.is_none(),
             |page| {
                 crate::smooth_scroll::render_finder_page(
                     finder,
@@ -2056,6 +2112,7 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
                     theme,
                     region.width,
                     region.height,
+                    pixels,
                 )
             },
         );
@@ -2373,12 +2430,13 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
         );
     }
 
-    if let (Some(list), Some(picker)) = (
+    // A pixel list pools resident, as the finder's does.
+    if let (Some(list), Some((picker, pixels))) = (
         palette_arg_list,
-        stoat
-            .command_palette
-            .as_mut()
-            .and_then(|palette| palette.arg_picker.as_mut()),
+        stoat.command_palette.as_mut().and_then(|palette| {
+            let pixels = palette.row_metrics;
+            Some((palette.arg_picker.as_mut()?, pixels))
+        }),
     ) {
         let region = PoolRegionCommand {
             pool: crate::smooth_scroll::non_pane_pool::PALETTE,
@@ -2389,7 +2447,7 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
             window: 0,
             kind: PoolKind::Grid,
             dim: 0,
-            resident: false,
+            resident: pixels.is_some(),
         };
         // The pool pages by document rows, as the finder's does. The prefix is
         // copied out first, since the active picker borrows the whole picker.
@@ -2420,16 +2478,17 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
             &crate::render::command_palette::arg_rows(picker, home),
             list.width,
             list.height,
+            pixels,
         );
         let tops =
             crate::render::picker::row_tops(&core.picklist, list.width, &prefix).unwrap_or(&[0]);
-        let scroll_row = tops.get(window.first).copied().unwrap_or(0);
         // The visible rows are the active picker's filtered paths, so their
         // hash is the pool's content version and a re-filter refills it. The
         // leading discriminant keeps this arg-mode list from aliasing a
         // filter-mode list that shares this pool id, and the browse typed
         // directory folds re-roots in so two same-shaped filtered sets from
-        // different roots cannot alias.
+        // different roots cannot alias. The marks and a pixel list's measure
+        // feed it as they do the finder's.
         let content_version = {
             let mut hasher = DefaultHasher::new();
             stoat.theme_epoch.hash(&mut hasher);
@@ -2441,22 +2500,28 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
                 .unwrap_or_default()
                 .hash(&mut hasher);
             core.picklist.filter_generation.hash(&mut hasher);
+            picker
+                .scopes
+                .as_ref()
+                .map(|scopes| scopes.base_generation)
+                .hash(&mut hasher);
+            hash_row_metrics(pixels, &mut hasher);
             hasher.finish()
         };
         let selected = core.picklist.selected;
-        let selected_rows = selected_result_rows(tops, selected);
+        let scroll = PathListScroll::of(tops, window.first, selected, pixels, region.height);
         pool::emit_pages_into(
             &mut out,
             &mut stoat.smooth_scroll,
             region,
-            scroll_row as f32,
+            scroll.offset,
             u64::MAX,
             PageVersions {
                 cells: content_version,
                 decorations: 0,
             },
-            |page| rows_page_stamp(selected, selected_rows.clone(), page, region.height),
-            true,
+            |page| rows_page_stamp(selected, scroll.selected.clone(), page, scroll.page_height),
+            pixels.is_none(),
             |page| {
                 crate::smooth_scroll::render_arg_page(
                     picker,
@@ -2466,6 +2531,7 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
                     theme,
                     region.width,
                     region.height,
+                    pixels,
                 )
             },
         );
@@ -4190,6 +4256,9 @@ fn selection_page_stamp(selected: usize, index: u64, height: u16) -> u64 {
 /// than one row. A page answers `selected + 1` while its rows meet the selected
 /// result's rows, and 0 while they meet none of them. A selection step
 /// therefore refills each page that the selection leaves or enters.
+///
+/// A pixel list passes the physical px of the selected result's box and of a
+/// page as `rows` and `height`, which the stamp reads alike.
 fn rows_page_stamp(selected: usize, rows: Range<u32>, index: u64, height: u16) -> u64 {
     let top_row = crate::smooth_scroll::page_top_row(index, height);
     let page = top_row..top_row.saturating_add(u32::from(height));
@@ -4209,6 +4278,30 @@ fn selected_result_rows(tops: &[u32], selected: usize) -> Range<u32> {
     let top = tops.get(selected).copied().unwrap_or(last);
     let end = tops.get(selected + 1).copied().unwrap_or(top + 1);
     top..end
+}
+
+/// The physical px that the box of result `selected` takes in a pixel list
+/// laid out by `metrics`, from the document rows `tops` of each measured
+/// result.
+///
+/// The sibling of [`selected_result_rows`] for a pixel list. A result past the
+/// measured ones takes a one-line box after the last entry, as it takes one
+/// row there.
+fn selected_result_span(tops: &[u32], selected: usize, metrics: RowMetrics) -> Range<u32> {
+    let Some(last) = tops.len().checked_sub(1) else {
+        return 0..0;
+    };
+    let rows = selected_result_rows(tops, selected);
+    let top = metrics.top(tops, selected.min(last));
+    top..top + metrics.box_height(rows.end - rows.start)
+}
+
+/// Feed the measure of a pixel list into a pool's content version, so a list
+/// laid out at another cell or scale refills its pages.
+fn hash_row_metrics(pixels: Option<RowMetrics>, hasher: &mut DefaultHasher) {
+    pixels
+        .map(|metrics| (metrics.cell, metrics.scale.to_bits()))
+        .hash(hasher);
 }
 
 #[cfg(test)]

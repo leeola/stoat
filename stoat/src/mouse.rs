@@ -122,13 +122,16 @@ impl ModalSurfaces {
     /// The window comes from the same function the paint uses, so the resolved
     /// result is the one drawn under the pointer. A press on any row of a
     /// wrapped result names that result.
+    ///
+    /// A pixel list's rows stand off the cell grid, so a press there names the
+    /// result under the middle pixel row of the cell it lands on.
     fn row_at(&self, stoat: &Stoat, mouse: MouseEvent) -> Option<usize> {
         if !self.list.contains(Position::new(mouse.column, mouse.row)) {
             return None;
         }
         let row = mouse.row - self.list.y;
         let home = stoat.home.as_deref();
-        let rows = match self.rows {
+        let (rows, pixels) = match self.rows {
             ListRows::OnePerResult => {
                 let start =
                     crate::render::picker::window_start(self.selected, self.list.height as usize);
@@ -136,14 +139,27 @@ impl ModalSurfaces {
                 return (index < self.len).then_some(index);
             },
             ListRows::Finder => {
-                crate::render::file_finder::finder_rows(stoat.file_finder.as_ref()?, home)
+                let finder = stoat.file_finder.as_ref()?;
+                let rows = crate::render::file_finder::finder_rows(finder, home);
+                (rows, finder.row_metrics)
             },
             ListRows::PaletteArg => {
-                let picker = stoat.command_palette.as_ref()?.arg_picker.as_ref()?;
-                crate::render::command_palette::arg_rows(picker, home)
+                let palette = stoat.command_palette.as_ref()?;
+                let picker = palette.arg_picker.as_ref()?;
+                let rows = crate::render::command_palette::arg_rows(picker, home);
+                (rows, palette.row_metrics)
             },
         };
-        crate::render::picker::list_window(&rows, self.list.width, self.list.height).result_at(row)
+        let window =
+            crate::render::picker::list_window(&rows, self.list.width, self.list.height, pixels);
+        let offset = match pixels {
+            Some(metrics) => {
+                let height = u32::from(metrics.cell[1]);
+                u32::from(row) * height + height / 2
+            },
+            None => u32::from(row),
+        };
+        window.result_at(offset)
     }
 }
 
@@ -5682,5 +5698,23 @@ mod tests {
             .and_then(|palette| palette.pick.as_ref())
             .map(|pick| pick.list.selected);
         assert_eq!(selected, Some(1));
+    }
+
+    /// A press on a pixel list names the result under the middle pixel row of
+    /// the cell it lands on. The middles of cell rows 2, 3, and 4 are pixels
+    /// 45, 63, and 81, which the 21 px rows of results 2, 3, and 3 hold.
+    #[test]
+    fn a_press_on_a_pixel_list_selects_the_row_under_the_middle_of_its_cell() {
+        let mut h = crate::test_fixture::pixel_finder(5);
+        let list = crate::test_fixture::finder_layout(&h).list;
+        let mut press = |row: u16| {
+            let finder = h.stoat.file_finder.as_mut().expect("the finder is open");
+            finder.active_core().picklist.selected = 0;
+            left_press(&mut h, list.x + 1, list.y + row);
+            let finder = h.stoat.file_finder.as_ref().expect("the finder is open");
+            finder.active_core_ref().picklist.selected
+        };
+
+        assert_eq!([press(2), press(3), press(4)], [2, 3, 3]);
     }
 }

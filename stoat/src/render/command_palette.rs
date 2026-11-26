@@ -14,6 +14,7 @@ use crate::{
         cmd_line::{self, CmdLine, CmdStatus},
         paint::style_rgb,
         picker::{Footer, PathRows, RowMarks, RowStart, FOOTER_ROWS},
+        pixel_rows::RowMetrics,
         run_pane,
         text::{pre_wrap_rows, wrap_text, write_str, write_str_clipped},
         TypeScale,
@@ -778,28 +779,43 @@ fn render_palette_arg_picker(
         );
     }
 
-    let window =
-        crate::render::picker::list_window(&arg_rows(picker, home), list.width, list.height);
-    picker.active_core().picklist.viewport_rows = Some(window.whole(list.height).max(1));
+    // A pixel list's rows stand off the cell grid, so the palette's resident
+    // pool draws them over the blank list and the live list paints none.
+    let pixels = RowMetrics::of(theme, scene);
+    palette.row_metrics = pixels;
+    let window = crate::render::picker::list_window(
+        &arg_rows(picker, home),
+        list.width,
+        list.height,
+        pixels,
+    );
+    let budget = match pixels {
+        Some(metrics) => metrics.extent(list.height),
+        None => u32::from(list.height),
+    };
+    picker.active_core().picklist.viewport_rows = Some(window.whole(budget).max(1));
     let row_style = if fallback_active {
         theme.get(crate::theme::scope::UI_TEXT_MUTED)
     } else {
         theme.get(crate::theme::scope::UI_TEXT)
     };
-    crate::render::picker::paint_path_rows(
-        &arg_rows(picker, home),
-        RowMarks::Modified(picker.modified_paths()),
-        list,
-        RowStart {
-            result: window.first,
-            skip: 0,
-        },
-        theme,
-        row_style,
-        true,
-        buf,
-        scene,
-    );
+    if pixels.is_none() {
+        crate::render::picker::paint_path_rows(
+            &arg_rows(picker, home),
+            RowMarks::Modified(picker.modified_paths()),
+            list,
+            RowStart {
+                result: window.first,
+                skip: 0,
+            },
+            theme,
+            row_style,
+            true,
+            None,
+            buf,
+            scene,
+        );
+    }
 
     let hints = match picker.source() {
         ValueSource::Files => ARG_FILE_HINTS.to_vec(),

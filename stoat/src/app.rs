@@ -50,6 +50,7 @@ use crate::{
         conflict_view::ConflictHover,
         paint,
         pane_cache::PaneCacheEntry,
+        pixel_rows::RowMetrics,
         sanitize,
         undercurl::{self, UndercurlBatch},
         BlankedBuffer, Hold, PRIMARY_MODES,
@@ -97,7 +98,8 @@ use stoat_widgets::{pool::SmoothScrollState, ApcScene};
 use stoatty_protocol::{
     command,
     window_ipc::{MouseButton as IpcMouseButton, MouseKind, WindowIpcEvent},
-    BACKDROP_PANEL_PROTOCOL, BATCHED_DECORATIONS_PROTOCOL, NUDGE_PROTOCOL, POOL_SCALE_PROTOCOL,
+    BACKDROP_PANEL_PROTOCOL, BATCHED_DECORATIONS_PROTOCOL, NUDGE_PROTOCOL, PAGE_NUDGE_PROTOCOL,
+    POOL_SCALE_PROTOCOL,
 };
 use tokio::{
     io::AsyncBufReadExt,
@@ -2548,6 +2550,12 @@ pub struct Stoat {
     /// unless [`Self::stoatty`] is set, since a foreign terminal answers no
     /// handshake at all.
     pub(crate) stoatty_protocol: u32,
+    /// The display scale that the stoatty on the other end stated, the physical
+    /// px of one logical px, or `None` while none has.
+    ///
+    /// A nudge is in logical px and the winsize gives a cell in physical px, so
+    /// a list laid out by pixels reads both through [`Self::pixel_rows`].
+    pub(crate) display_scale: Option<f32>,
     /// Walkthroughs opened this session, which distinguishes one run's mark ids
     /// from the last one's.
     ///
@@ -3189,6 +3197,7 @@ impl Stoat {
             passthrough_link: None,
             stoatty: false,
             stoatty_protocol: 0,
+            display_scale: None,
             walkthrough_runs_opened: 0,
             apc_scene: ApcScene::new(),
             pending_undercurls: UndercurlBatch::default(),
@@ -3418,15 +3427,19 @@ impl Stoat {
     /// make them itself, because it wires the app up before the run loop starts
     /// and the flag is necessarily still false there, which would gate them away.
     ///
-    /// Only a report that names a peer does anything. A `None` report is the
-    /// state the app already starts in. A repeat for a stoatty already confirmed
-    /// follows a change of the cell size, as a move to a display of another
-    /// scale gives, and it repaints against that size while the protocol of the
-    /// first report stays.
+    /// Only a report that names a peer does anything more than keep its display
+    /// scale. A `None` report is the state the app already starts in. A repeat
+    /// for a stoatty already confirmed follows a change of the cell size, as a
+    /// move to a display of another scale gives, and it repaints against that
+    /// size and scale while the protocol of the first report stays.
     fn handle_stoatty_present(&mut self, peer: Option<StoattyPeer>) -> UpdateEffect {
         // Set before the check below, because a plain terminal reports `None`
         // and that answer still ends the wait a reconnect is gated on.
         self.terminal_reported = true;
+        self.display_scale = peer
+            .map(|peer| peer.scale)
+            .filter(|&scale| scale > 0)
+            .map(|scale| scale as f32 / 1000.0);
 
         let Some(peer) = peer else {
             return UpdateEffect::None;
@@ -4266,6 +4279,21 @@ impl Stoat {
         self.cell_pixels
             .filter(|_| capable)
             .map(|(width, height)| [width, height])
+    }
+
+    /// The cell and display scale that a result list lays its rows out by
+    /// pixels with, or `None` while the terminal cannot draw such a list.
+    ///
+    /// A stoatty at [`PAGE_NUDGE_PROTOCOL`] or later nudges the runs of a page,
+    /// which a row set off the cell grid needs. The layout also needs the cell
+    /// that [`Self::scaled_cell`] gives and the scale of the ident reply, since
+    /// a nudge is in logical px.
+    pub(crate) fn pixel_rows(&self) -> Option<RowMetrics> {
+        let cell = self
+            .scaled_cell()
+            .filter(|_| self.stoatty_protocol >= PAGE_NUDGE_PROTOCOL)?;
+        let scale = self.display_scale?;
+        Some(RowMetrics { cell, scale })
     }
 
     /// The fewest columns the finder's preview takes, which hold 100 columns
@@ -10115,6 +10143,7 @@ impl Stoat {
         scene.set_batch_protocol(self.stoatty_protocol >= BATCHED_DECORATIONS_PROTOCOL);
         scene.set_nudge_protocol(self.stoatty_protocol >= NUDGE_PROTOCOL);
         scene.set_scaled_cell(self.scaled_cell());
+        scene.set_pixel_rows(self.pixel_rows().map(|rows| (rows.cell, rows.scale)));
         let mut undercurls = std::mem::take(&mut self.pending_undercurls);
         undercurls.begin();
         let painted = crate::render::frame(self, buf, &mut scene, &mut undercurls, holds);

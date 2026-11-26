@@ -35,6 +35,7 @@ pub(crate) mod pane;
 pub(crate) mod pane_cache;
 pub(crate) mod pane_finder;
 pub(crate) mod picker;
+pub(crate) mod pixel_rows;
 pub(crate) mod popout;
 pub(crate) mod quit_all_confirm;
 pub(crate) mod rebase;

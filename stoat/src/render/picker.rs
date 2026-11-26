@@ -12,13 +12,14 @@ use crate::{
     input_view::InputView,
     picker::{write_row_display, PickList, Preview, RowTops, ScaledPreview},
     render::{
-        chrome::PlateColors,
+        chrome::{PlateColors, SELECTED_ROW_RADIUS},
         editor::{self, render_editor, ResolvedChrome},
         paint::style_rgb,
+        pixel_rows::{self, PixelBar, Placer, RowMetrics, RunsAt, ROW_PAD},
         text::{clip_to_width, write_str, write_str_clipped},
         TypeScale,
     },
-    theme::{scope, Theme, TypeRole},
+    theme::{scope, Theme, TypeRole, FULL_CELL_SCALE},
     workspace::Workspace,
 };
 use ratatui::{
@@ -1260,7 +1261,8 @@ impl PathRows<'_> {
 }
 
 /// The first result that a paint of a path list shows, with the count of that
-/// result's cell rows above the paint's area.
+/// result's cell rows above the paint's area, or of its physical px in a pixel
+/// list.
 ///
 /// The live list starts on a whole result. A pooled page starts wherever its
 /// first document row falls, and that row is partway through a label when the
@@ -1287,21 +1289,24 @@ pub(crate) enum RowMarks<'a> {
 }
 
 /// The results that the window of a path list shows, from `first`, with the
-/// cell rows that each takes.
+/// rows that each takes.
+///
+/// A row is a cell row, or a physical px in a pixel list, where a result takes
+/// its box and the gap after it.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub(crate) struct ListWindow {
     pub(crate) first: usize,
-    heights: Vec<u16>,
+    heights: Vec<u32>,
 }
 
 impl ListWindow {
     /// The result that window row `row` shows, or `None` past the window's
     /// results.
-    pub(crate) fn result_at(&self, row: u16) -> Option<usize> {
+    pub(crate) fn result_at(&self, row: u32) -> Option<usize> {
         let mut bottom = 0u32;
         for (offset, &height) in self.heights.iter().enumerate() {
-            bottom += u32::from(height);
-            if u32::from(row) < bottom {
+            bottom += height;
+            if row < bottom {
                 return Some(self.first + offset);
             }
         }
@@ -1309,13 +1314,13 @@ impl ListWindow {
     }
 
     /// The count of results that the window shows whole within `rows` rows.
-    pub(crate) fn whole(&self, rows: u16) -> usize {
+    pub(crate) fn whole(&self, rows: u32) -> usize {
         let mut bottom = 0u32;
         self.heights
             .iter()
             .take_while(|&&height| {
-                bottom += u32::from(height);
-                bottom <= u32::from(rows)
+                bottom += height;
+                bottom <= rows
             })
             .count()
     }
@@ -1356,6 +1361,17 @@ impl ListWindow {
 /// last cell holds `●` in that scope's style. A theme that leaves the scope
 /// unset draws no dot.
 ///
+/// With `pixels` the list is a pixel list, which sets its results at the
+/// boards' pixel sizes and writes no cell of `buf`, and `start` counts physical
+/// px. A result is a box of its lines with [`pixel_rows::ROW_PAD`] over and
+/// under them, and [`pixel_rows::ROW_GAP`] stands between two boxes. Each line
+/// draws as text runs on the cell row that holds its top pixel row, under the
+/// nudge that sets it there, and only where that top lies in `area`. The same
+/// rule places the selected result's box, a rounded bar in the background of
+/// [`Theme::list_selected`] with the sides of the cell form's box, and the dot,
+/// which stands [`DIRTY_DOT_DROP`] under the top of its box. A page of a
+/// resident pool is what draws this, since no row stands on the cell grid.
+///
 /// [`chrome::selected_row`]: crate::render::chrome::selected_row
 /// [`chrome::tagged_name`]: crate::render::chrome::tagged_name
 #[allow(clippy::too_many_arguments)]
@@ -1367,39 +1383,38 @@ pub(crate) fn paint_path_rows(
     theme: &Theme,
     row_style: Style,
     panels: bool,
+    pixels: Option<RowMetrics>,
     buf: &mut Buffer,
     scene: &mut stoat_widgets::ApcScene,
 ) {
     if area.height == 0 || area.width == 0 {
         return;
     }
-    let match_style = theme.list_match();
-    let dir_style = theme.get(scope::UI_TEXT_MUTED);
+    let mut painter = RowPainter::new(rows, theme, area.width);
+    if let Some(metrics) = pixels {
+        paint_pixel_rows(
+            &mut painter,
+            marks,
+            area,
+            start,
+            metrics,
+            row_style,
+            buf,
+            scene,
+        );
+        return;
+    }
     let mark_style = theme.get(scope::DIFF_MODIFIED);
-    let wrap_fg = editor::wrap_mark_style(theme).fg;
-
     let area_end = area.x + area.width;
-    let text_end = area_end.saturating_sub(MARK_COLUMNS);
-    let width = label_columns(area.width);
-    let prefix_len = rows.prefix.chars().count() as u32;
-    let (mut label, mut starts) = (String::new(), Vec::new());
-
-    // Rows past the eagerly indexed block derive their offsets here, one row at
-    // a time into buffers the whole window shares.
-    let mut derived = Vec::new();
-    let mut matching = fuzzy::Scratch::default();
 
     let mut top = i32::from(area.y) - i32::from(start.skip);
     let mut result = start.result;
     while top < i32::from(area.bottom()) {
-        let Some(is_path) = rows.label(result, &mut label) else {
+        let Some(measured) = painter.measure(result) else {
             break;
         };
-        let Some(path) = rows.path(result) else {
-            break;
-        };
-        label_lines(&label, is_path, width, &mut starts);
-        let bottom = top + starts.len() as i32;
+        let path = measured.path;
+        let bottom = top + measured.lines as i32;
         let shown = top.max(i32::from(area.y))..bottom.min(i32::from(area.bottom()));
         if shown.is_empty() {
             top = bottom;
@@ -1426,74 +1441,9 @@ pub(crate) fn paint_path_rows(
                 row_style
             },
         };
-        let wrap_style = match wrap_fg {
-            Some(fg) => style.fg(fg),
-            None => style,
-        };
+        painter.paint_result(measured, area, top, style, buf);
 
-        let name_col = if is_path { name_start(&label) } else { 0 };
-        let label_len = label.chars().count();
-        let ext = match is_path {
-            true => crate::render::chrome::tagged_name(path),
-            false => None,
-        }
-        .map(|tagged| {
-            let ext_col = label_len.saturating_sub(tagged.suffix.chars().count());
-            (ext_col, theme.get(tagged.tag.scope))
-        });
-        let indices = rows
-            .picklist
-            .row_indices(result, &mut derived, &mut matching);
-
-        for (line, &line_start) in starts.iter().enumerate() {
-            let y = top + line as i32;
-            if !shown.contains(&y) {
-                continue;
-            }
-            let y = y as u16;
-            let line_end = starts.get(line + 1).copied().unwrap_or(label_len);
-            let text_x = match line {
-                0 => area.x + LABEL_PAD,
-                _ => {
-                    let mark_x = area.x + LABEL_PAD + 2;
-                    if mark_x < text_end {
-                        buf[(mark_x, y)].set_char('\u{21b3}').set_style(wrap_style);
-                    }
-                    area.x + LABEL_PAD + WRAP_INDENT
-                },
-            };
-            let text = &label[char_byte(&label, line_start)..char_byte(&label, line_end)];
-            write_str_clipped(buf, text_x, y, text, style, text_end);
-
-            for (offset, label_col) in (line_start..line_end).enumerate() {
-                let col = text_x + offset as u16;
-                if col >= text_end {
-                    break;
-                }
-                let cell = &mut buf[(col, y)];
-                if label_col < name_col {
-                    cell.set_style(dir_style);
-                } else if is_path {
-                    cell.set_style(Style::default().add_modifier(Modifier::BOLD));
-                }
-                if let Some((ext_col, ext_style)) = ext
-                    && label_col >= ext_col
-                {
-                    cell.set_style(ext_style);
-                }
-                let label_col = label_col as u32;
-                // The literal `prefix` is never matched. The picklist's indices
-                // are offsets into the part after it, so shift them past the
-                // prefix.
-                if label_col >= prefix_len
-                    && indices.binary_search(&(label_col - prefix_len)).is_ok()
-                {
-                    cell.set_style(match_style);
-                }
-            }
-        }
-
-        if is_path && area.width > LABEL_PAD + MARK_COLUMNS && shown.contains(&top) {
+        if measured.is_path && area.width > LABEL_PAD + MARK_COLUMNS && shown.contains(&top) {
             let (x, y) = (area_end - 1, top as u16);
             match marks {
                 RowMarks::Modified(paths) if paths.binary_search(path).is_ok() => {
@@ -1511,6 +1461,291 @@ pub(crate) fn paint_path_rows(
     }
 }
 
+/// The logical px from the top of a pixel list's result box to the top of its
+/// dot, which sets the dot of [`dirty_dot`] where the cell form sets it, about
+/// 6 px under the top of a row.
+const DIRTY_DOT_DROP: u16 = 6;
+
+/// What every result of one paint of a path list shares, with the scratch that
+/// its results reuse.
+struct RowPainter<'r, 'a> {
+    rows: &'r PathRows<'a>,
+    theme: &'r Theme,
+    match_style: Style,
+    dir_style: Style,
+    wrap_fg: Option<Color>,
+    /// The chars that a label's first line holds.
+    width: usize,
+    prefix_len: u32,
+    label: String,
+    starts: Vec<usize>,
+    /// Rows past the eagerly indexed block derive their offsets into this, one
+    /// row at a time.
+    derived: Vec<u32>,
+    matching: fuzzy::Scratch,
+}
+
+/// A result whose label [`RowPainter::measure`] broke into lines, which the
+/// painter holds until it measures another.
+#[derive(Clone, Copy)]
+struct Measured<'r> {
+    result: usize,
+    is_path: bool,
+    path: &'r PathBuf,
+    lines: u32,
+}
+
+impl<'r, 'a> RowPainter<'r, 'a> {
+    fn new(rows: &'r PathRows<'a>, theme: &'r Theme, list_width: u16) -> Self {
+        Self {
+            rows,
+            theme,
+            match_style: theme.list_match(),
+            dir_style: theme.get(scope::UI_TEXT_MUTED),
+            wrap_fg: editor::wrap_mark_style(theme).fg,
+            width: label_columns(list_width),
+            prefix_len: rows.prefix.chars().count() as u32,
+            label: String::new(),
+            starts: Vec::new(),
+            derived: Vec::new(),
+            matching: fuzzy::Scratch::default(),
+        }
+    }
+
+    /// Break the label of result `result` into lines, or `None` past the last
+    /// result.
+    fn measure(&mut self, result: usize) -> Option<Measured<'r>> {
+        let rows = self.rows;
+        let is_path = rows.label(result, &mut self.label)?;
+        let path = rows.path(result)?;
+        label_lines(&self.label, is_path, self.width, &mut self.starts);
+        Some(Measured {
+            result,
+            is_path,
+            path,
+            lines: self.starts.len() as u32,
+        })
+    }
+
+    /// Paint the lines of `measured` that fall on the rows of `area`, where its
+    /// first line is row `top`, in `style`.
+    ///
+    /// `measured` is the result this painter measured last. The cells under the
+    /// lines keep whatever fill the caller gave them.
+    fn paint_result(
+        &mut self,
+        measured: Measured<'_>,
+        area: Rect,
+        top: i32,
+        style: Style,
+        buf: &mut Buffer,
+    ) {
+        let text_end = (area.x + area.width).saturating_sub(MARK_COLUMNS);
+        let wrap_style = match self.wrap_fg {
+            Some(fg) => style.fg(fg),
+            None => style,
+        };
+
+        let label = self.label.as_str();
+        let name_col = if measured.is_path {
+            name_start(label)
+        } else {
+            0
+        };
+        let label_len = label.chars().count();
+        let ext = match measured.is_path {
+            true => crate::render::chrome::tagged_name(measured.path),
+            false => None,
+        }
+        .map(|tagged| {
+            let ext_col = label_len.saturating_sub(tagged.suffix.chars().count());
+            (ext_col, self.theme.get(tagged.tag.scope))
+        });
+        let indices =
+            self.rows
+                .picklist
+                .row_indices(measured.result, &mut self.derived, &mut self.matching);
+
+        let rows = i32::from(area.y)..i32::from(area.bottom());
+        for (line, &line_start) in self.starts.iter().enumerate() {
+            let y = top + line as i32;
+            if !rows.contains(&y) {
+                continue;
+            }
+            let y = y as u16;
+            let line_end = self.starts.get(line + 1).copied().unwrap_or(label_len);
+            let text_x = match line {
+                0 => area.x + LABEL_PAD,
+                _ => {
+                    let mark_x = area.x + LABEL_PAD + 2;
+                    if mark_x < text_end {
+                        buf[(mark_x, y)].set_char('\u{21b3}').set_style(wrap_style);
+                    }
+                    area.x + LABEL_PAD + WRAP_INDENT
+                },
+            };
+            let text = &label[char_byte(label, line_start)..char_byte(label, line_end)];
+            write_str_clipped(buf, text_x, y, text, style, text_end);
+
+            for (offset, label_col) in (line_start..line_end).enumerate() {
+                let col = text_x + offset as u16;
+                if col >= text_end {
+                    break;
+                }
+                let cell = &mut buf[(col, y)];
+                if label_col < name_col {
+                    cell.set_style(self.dir_style);
+                } else if measured.is_path {
+                    cell.set_style(Style::default().add_modifier(Modifier::BOLD));
+                }
+                if let Some((ext_col, ext_style)) = ext
+                    && label_col >= ext_col
+                {
+                    cell.set_style(ext_style);
+                }
+                let label_col = label_col as u32;
+                // The literal `prefix` is never matched. The picklist's indices
+                // are offsets into the part after it, so shift them past the
+                // prefix.
+                if label_col >= self.prefix_len
+                    && indices
+                        .binary_search(&(label_col - self.prefix_len))
+                        .is_ok()
+                {
+                    cell.set_style(self.match_style);
+                }
+            }
+        }
+    }
+}
+
+/// Paint the results of a path list into `area` from `start` as the pixel
+/// list that [`paint_path_rows`] describes.
+#[allow(clippy::too_many_arguments)]
+fn paint_pixel_rows(
+    painter: &mut RowPainter<'_, '_>,
+    marks: RowMarks<'_>,
+    area: Rect,
+    start: RowStart,
+    metrics: RowMetrics,
+    row_style: Style,
+    buf: &mut Buffer,
+    scene: &mut stoat_widgets::ApcScene,
+) {
+    let theme = painter.theme;
+    let selected = theme.list_selected(scope::UI_SELECTION);
+    let fallback = style_rgb(Some(crate::render::themed_fg(theme))).unwrap_or([0xff; 3]);
+    let line_height = i64::from(metrics.cell[1]);
+    let height = i64::from(area.height) * line_height;
+    let inside = |y: i64| (0..height).contains(&y);
+    let mut placer = Placer::default();
+    let mut scratch = Buffer::empty(Rect::default());
+
+    let mut y = -i64::from(start.skip);
+    let mut result = start.result;
+    while y < height {
+        let Some(measured) = painter.measure(result) else {
+            break;
+        };
+        let lines = measured.lines;
+        let style = match result == painter.rows.picklist.selected {
+            true => {
+                if let Some(color) = style_rgb(selected.bg).filter(|_| inside(y)) {
+                    let left = metrics.cols(1);
+                    let bar = PixelBar {
+                        x: left as i16,
+                        y: y as u32,
+                        width: (area.width.saturating_mul(16))
+                            .saturating_sub(left + metrics.cols(3)),
+                        height: metrics.box16(lines as u16),
+                        color,
+                        radius: SELECTED_ROW_RADIUS,
+                    };
+                    pixel_rows::bar(&mut placer, &metrics, area, &bar, buf, scene);
+                }
+                selected
+            },
+            false => row_style,
+        };
+
+        let cells = Rect::new(0, 0, area.width, lines as u16);
+        scratch.resize(cells);
+        scratch.reset();
+        painter.paint_result(measured, cells, 0, style, &mut scratch);
+        let dot = pixel_mark(marks, measured, theme, &mut scratch);
+
+        for line in 0..lines {
+            let top = y + i64::from(metrics.px(ROW_PAD)) + i64::from(line) * line_height;
+            if !inside(top) {
+                continue;
+            }
+            let at = RunsAt {
+                col: 0,
+                scale: FULL_CELL_SCALE,
+                anchor: placer.line(&metrics, area, top as u32, scene),
+                fallback,
+            };
+            pixel_rows::emit_cells(&scratch, line as u16, 0..area.width, &at, buf, scene);
+        }
+
+        let dot_top = y + i64::from(metrics.px(DIRTY_DOT_DROP));
+        if let Some(dot) = dot
+            && inside(dot_top)
+        {
+            let bar = PixelBar {
+                x: (area.width - 1) as i16 * 16 + dot.x,
+                y: dot_top as u32,
+                width: dot.width,
+                height: dot.height,
+                color: dot.color,
+                radius: dot.radius,
+            };
+            pixel_rows::bar(&mut placer, &metrics, area, &bar, buf, scene);
+        }
+
+        y += i64::from(metrics.pitch(lines));
+        result += 1;
+    }
+    placer.end(scene);
+}
+
+/// Write the mark that `marks` gives `measured` into the last cell of the first
+/// row of `scratch`, a pixel list's paint of that result, and answer the dot's
+/// bar where the dot is one.
+///
+/// The pixel list draws the cells of `scratch` as text runs, so an `M`, and a
+/// dot whose foreground has no RGB value, draw with the result's first line.
+fn pixel_mark(
+    marks: RowMarks<'_>,
+    measured: Measured<'_>,
+    theme: &Theme,
+    scratch: &mut Buffer,
+) -> Option<Bar> {
+    let width = scratch.area.width;
+    if !measured.is_path || width <= LABEL_PAD + MARK_COLUMNS {
+        return None;
+    }
+    let cell = &mut scratch[(width - 1, 0)];
+    match marks {
+        RowMarks::Modified(paths) if paths.binary_search(measured.path).is_ok() => {
+            cell.set_char('M')
+                .set_style(theme.get(scope::DIFF_MODIFIED));
+            None
+        },
+        RowMarks::Dirty(paths) if paths.binary_search(measured.path).is_ok() => {
+            let style = theme.try_get(scope::UI_LIST_DIRTY)?;
+            match style_rgb(style.fg) {
+                Some(color) => Some(dirty_dot(color)),
+                None => {
+                    cell.set_char('\u{25cf}').set_style(style);
+                    None
+                },
+            }
+        },
+        RowMarks::Modified(_) | RowMarks::Dirty(_) => None,
+    }
+}
+
 /// Draw the dot of an unsaved buffer's result in the cell at column `x` and
 /// row `y`, as [`paint_path_rows`] describes it.
 fn dirty_mark(
@@ -1524,22 +1759,27 @@ fn dirty_mark(
         return;
     };
     match style_rgb(style.fg).filter(|_| scene.live()) {
-        // Sixteenths run along each axis of the 9 by 18 px cell, so 11 across
-        // and 6 down are close to 6 px each way, and a 3 px radius rounds the
-        // bar to a dot. The bar starts 5 sixteenths left of the cell.
-        Some(color) => Bar {
-            x: -5,
-            y: 5,
-            width: 11,
-            height: 6,
-            color,
-            radius: 3,
-            corners: 0,
-        }
-        .render(Rect::new(x, y, 1, 1), buf, scene),
+        Some(color) => dirty_dot(color).render(Rect::new(x, y, 1, 1), buf, scene),
         None => {
             buf[(x, y)].set_char('\u{25cf}').set_style(style);
         },
+    }
+}
+
+/// The bar of an unsaved buffer's dot in `color`, placed on the cell that ends
+/// the result's first row.
+fn dirty_dot(color: [u8; 3]) -> Bar {
+    // Sixteenths run along each axis of the 9 by 18 px cell, so 11 across and 6
+    // down are close to 6 px each way, and a 3 px radius rounds the bar to a
+    // dot. The bar starts 5 sixteenths left of the cell.
+    Bar {
+        x: -5,
+        y: 5,
+        width: 11,
+        height: 6,
+        color,
+        radius: 3,
+        corners: 0,
     }
 }
 
@@ -1605,17 +1845,29 @@ fn char_byte(text: &str, index: usize) -> usize {
 /// scrolls to its first result, so the three agree on what each row shows. It
 /// measures only the results it shows.
 ///
+/// With `pixels` the window is a pixel list's, whose rows are physical px. A
+/// result takes the px of its box and the gap after it, and the list's rows
+/// give their px and one gap more, since the gap after the last result stands
+/// past the list.
+///
 /// See also:
 /// - [`window_from`] for the rule that picks the results.
-pub(crate) fn list_window(rows: &PathRows<'_>, list_width: u16, list_rows: u16) -> ListWindow {
+pub(crate) fn list_window(
+    rows: &PathRows<'_>,
+    list_width: u16,
+    list_rows: u16,
+    pixels: Option<RowMetrics>,
+) -> ListWindow {
     let width = label_columns(list_width);
     let (mut label, mut starts) = (String::new(), Vec::new());
-    window_from(
-        rows.picklist.filtered.len(),
-        rows.picklist.selected,
-        list_rows,
-        |result| rows.height(result, width, &mut label, &mut starts),
-    )
+    let mut lines = |result| u32::from(rows.height(result, width, &mut label, &mut starts));
+    let (len, selected) = (rows.picklist.filtered.len(), rows.picklist.selected);
+    match pixels {
+        Some(metrics) => window_from(len, selected, metrics.extent(list_rows), |result| {
+            metrics.pitch(lines(result))
+        }),
+        None => window_from(len, selected, u32::from(list_rows), lines),
+    }
 }
 
 /// The window of `len` results in `rows` rows around result `selected`, where
@@ -1630,8 +1882,8 @@ pub(crate) fn list_window(rows: &PathRows<'_>, list_width: u16, list_rows: u16) 
 fn window_from(
     len: usize,
     selected: usize,
-    rows: u16,
-    mut height: impl FnMut(usize) -> u16,
+    rows: u32,
+    mut height: impl FnMut(usize) -> u32,
 ) -> ListWindow {
     let Some(last) = len.checked_sub(1) else {
         return ListWindow {
@@ -1640,18 +1892,17 @@ fn window_from(
         };
     };
     let selected = selected.min(last);
-    let rows = u32::from(rows);
 
     let selected_height = height(selected);
-    let mut used = u32::from(selected_height);
+    let mut used = selected_height;
     let mut heights = Vec::new();
     let mut first = selected;
     while first > 0 {
         let above = height(first - 1);
-        if used + u32::from(above) > rows {
+        if used + above > rows {
             break;
         }
-        used += u32::from(above);
+        used += above;
         heights.push(above);
         first -= 1;
     }
@@ -1661,7 +1912,7 @@ fn window_from(
     let mut next = selected + 1;
     while next <= last && used < rows {
         let below = height(next);
-        used += u32::from(below);
+        used += below;
         heights.push(below);
         next += 1;
     }
@@ -3449,6 +3700,7 @@ mod tests {
             theme,
             Style::default(),
             false,
+            None,
             &mut buf,
             &mut stoat_widgets::ApcScene::new(),
         );
@@ -3523,6 +3775,7 @@ mod tests {
                 &Theme::empty(),
                 Style::default(),
                 false,
+                None,
                 &mut buf,
                 &mut stoat_widgets::ApcScene::new(),
             );
@@ -3642,6 +3895,7 @@ mod tests {
             &Theme::empty(),
             Style::default().fg(muted),
             false,
+            None,
             &mut buf,
             &mut stoat_widgets::ApcScene::new(),
         );
@@ -3782,6 +4036,7 @@ mod tests {
             theme,
             Style::default(),
             false,
+            None,
             &mut buf,
             &mut scene,
         );
@@ -4213,6 +4468,7 @@ mod tests {
             &rounded_row_theme(),
             Style::default(),
             true,
+            None,
             &mut buf,
             &mut scene,
         );
@@ -4267,6 +4523,252 @@ mod tests {
         assert_eq!(
             (taller.first, taller.result_at(3), taller.whole(4)),
             (1, Some(1), 0)
+        );
+    }
+
+    /// The pixel list of the scale-1 cell of 9 by 18 px.
+    const PIXELS: RowMetrics = RowMetrics {
+        cell: [9, 18],
+        scale: 1.0,
+    };
+
+    /// The white that a run takes from a theme that colors no text.
+    const UNTHEMED: [u8; 3] = [0xff; 3];
+
+    /// The Wrap Mark's color under [`pixel_theme`].
+    const WRAP: [u8; 3] = [1, 2, 3];
+
+    /// A theme whose selection and Wrap Mark are RGB and whose text takes no
+    /// color, so a pixel list's runs read apart by weight and the mark.
+    fn pixel_theme() -> Theme {
+        theme_of(r##"ui.selection.bg = "#040506"; ui.virtual.wrap.fg = "#010203";"##)
+    }
+
+    /// `a.rs`, [`LONG_PATH`], and `b.rs`, with the long path selected.
+    fn wrapped_selection() -> PickList {
+        let paths = ["/r/a.rs", LONG_PATH, "/r/b.rs"];
+        let mut list = list_of(paths.map(PathBuf::from).to_vec(), vec![vec![]; 3]);
+        list.selected = 1;
+        list
+    }
+
+    /// The commands that a pixel paint of `list` from `start` into `area` sends,
+    /// without the ends of its text runs, and whether every cell of the area
+    /// stays blank.
+    fn pixel_paint(list: &PickList, area: Rect, start: RowStart) -> (Vec<Command>, bool) {
+        let mut buf = Buffer::empty(area);
+        let mut scene = stoat_widgets::ApcScene::new();
+        paint_path_rows(
+            &rows_of(list, None),
+            RowMarks::Modified(&[]),
+            area,
+            start,
+            &pixel_theme(),
+            Style::default(),
+            false,
+            Some(PIXELS),
+            &mut buf,
+            &mut scene,
+        );
+        let commands = decode_stream(scene.bytes())
+            .into_iter()
+            .filter(|command| *command != Command::TextRunEnd)
+            .collect();
+        (commands, buf == Buffer::empty(area))
+    }
+
+    fn pixel_run(col: i16, row: i16, text: &str, color: [u8; 3], bold: bool) -> Command {
+        Command::TextRun(TextRunCommand {
+            col,
+            row,
+            scale: FULL_CELL_SCALE,
+            color,
+            bg: None,
+            bold,
+            italic: false,
+            follow: 0,
+            anchor: None,
+            text: text.to_owned(),
+        })
+    }
+
+    /// Each result is a 20 px box 1 px from the next. `a.rs` draws 1 px down
+    /// from the list's top, the selected long path's box stands at pixel row
+    /// 21, 3 px into cell row 1, and its four lines stand 1 px inside it, from
+    /// 4 px into cell row 1. `b.rs` follows the 75 px of that box and gap, 7 px
+    /// into cell row 5.
+    #[test]
+    fn a_pixel_list_draws_each_line_as_runs_under_its_nudge() {
+        let area = Rect::new(0, 0, 20, 10);
+        let box_bar = Command::Bar(BarCommand {
+            x: 2,
+            y: 16,
+            width: 313,
+            height: 66,
+            color: ROW_SELECT,
+            occludes: false,
+            hatch: None,
+            radius: 4,
+            corners: 0,
+        });
+
+        assert_eq!(
+            pixel_paint(&wrapped_selection(), area, RowStart { result: 0, skip: 0 }),
+            (
+                vec![
+                    Command::Nudge([0, 1]),
+                    pixel_run(16, 0, "a.rs", UNTHEMED, true),
+                    Command::Nudge([0, 3]),
+                    box_bar,
+                    Command::Nudge([0, 4]),
+                    pixel_run(16, 16, "very/deeply/", UNTHEMED, false),
+                    pixel_run(48, 32, "\u{21b3}", WRAP, false),
+                    pixel_run(80, 32, "nested/dir/", UNTHEMED, false),
+                    pixel_run(48, 48, "\u{21b3}", WRAP, false),
+                    pixel_run(80, 48, "module/", UNTHEMED, false),
+                    pixel_run(48, 64, "\u{21b3}", WRAP, false),
+                    pixel_run(80, 64, "file_name.rs", UNTHEMED, true),
+                    Command::Nudge([0, 7]),
+                    pixel_run(16, 80, "b.rs", UNTHEMED, true),
+                    Command::Nudge([0, 0]),
+                ],
+                true,
+            )
+        );
+    }
+
+    /// A page that starts 30 px into the long path's box shows its last two
+    /// lines from pixel row 7, and `b.rs` from pixel row 46. The box's top lies
+    /// on the page above, so this page draws no box.
+    #[test]
+    fn a_pixel_page_draws_only_the_lines_that_start_in_it() {
+        let area = Rect::new(0, 0, 20, 3);
+
+        assert_eq!(
+            pixel_paint(
+                &wrapped_selection(),
+                area,
+                RowStart {
+                    result: 1,
+                    skip: 30
+                }
+            )
+            .0,
+            [
+                Command::Nudge([0, 7]),
+                pixel_run(48, 0, "\u{21b3}", WRAP, false),
+                pixel_run(80, 0, "module/", UNTHEMED, false),
+                pixel_run(48, 16, "\u{21b3}", WRAP, false),
+                pixel_run(80, 16, "file_name.rs", UNTHEMED, true),
+                Command::Nudge([0, 10]),
+                pixel_run(16, 32, "b.rs", UNTHEMED, true),
+                Command::Nudge([0, 0]),
+            ]
+        );
+    }
+
+    /// The commands of a pixel paint of `a.rs` and `b.rs` under `theme`, where
+    /// `b.rs` takes the mark of `marks`, without the ends of the text runs.
+    fn marked_pixel_paint(marks: fn(&[PathBuf]) -> RowMarks<'_>, theme: &Theme) -> Vec<Command> {
+        let paths = ["/r/a.rs", "/r/b.rs"].map(PathBuf::from);
+        let list = list_of(paths.to_vec(), vec![vec![]; 2]);
+        let area = Rect::new(0, 0, 20, 4);
+        let mut scene = stoat_widgets::ApcScene::new();
+        paint_path_rows(
+            &rows_of(&list, None),
+            marks(&paths[1..]),
+            area,
+            RowStart { result: 0, skip: 0 },
+            theme,
+            Style::default(),
+            false,
+            Some(PIXELS),
+            &mut Buffer::empty(area),
+            &mut scene,
+        );
+        decode_stream(scene.bytes())
+            .into_iter()
+            .filter(|command| *command != Command::TextRunEnd)
+            .collect()
+    }
+
+    /// A modified path ends its first line in the `M` of the cell form, a run
+    /// in the list's last cell under that line's nudge.
+    #[test]
+    fn a_pixel_list_ends_a_modified_path_in_its_mark() {
+        let theme = theme_of(r##"diff.modified.fg = "#0a0b0c";"##);
+
+        assert_eq!(
+            marked_pixel_paint(|paths| RowMarks::Modified(paths), &theme),
+            [
+                Command::Nudge([0, 1]),
+                pixel_run(16, 0, "a.rs", UNTHEMED, true),
+                Command::Nudge([0, 4]),
+                pixel_run(16, 16, "b.rs", UNTHEMED, true),
+                pixel_run(304, 16, "M", [10, 11, 12], false),
+                Command::Nudge([0, 0]),
+            ]
+        );
+    }
+
+    /// An unsaved buffer ends its first line in the dot of the cell form, the
+    /// bar that straddles the left edge of the last cell. It stands 6 px under
+    /// the top of its result's box at pixel row 21, so 9 px into cell row 1.
+    #[test]
+    fn a_pixel_list_ends_an_unsaved_buffer_in_its_dot() {
+        let theme = theme_of(r##"ui.list.dirty.fg = "#0d0e0f";"##);
+        let dot = Command::Bar(BarCommand {
+            x: 299,
+            y: 16,
+            width: 11,
+            height: 6,
+            color: [13, 14, 15],
+            occludes: false,
+            hatch: None,
+            radius: 3,
+            corners: 0,
+        });
+
+        assert_eq!(
+            marked_pixel_paint(|paths| RowMarks::Dirty(paths), &theme),
+            [
+                Command::Nudge([0, 1]),
+                pixel_run(16, 0, "a.rs", UNTHEMED, true),
+                Command::Nudge([0, 4]),
+                pixel_run(16, 16, "b.rs", UNTHEMED, true),
+                Command::Nudge([0, 9]),
+                dot,
+                Command::Nudge([0, 0]),
+            ]
+        );
+    }
+
+    /// In a page 36 px high, `c.rs` 8 px into the list draws from pixel row 35
+    /// on the page's last cell row, and 7 px into the list its pixel row 36
+    /// belongs to the next page.
+    #[test]
+    fn a_line_on_the_last_pixel_row_of_a_page_stays_on_that_page() {
+        let paths = ["/r/a.rs", "/r/b.rs", "/r/c.rs"];
+        let list = list_of(paths.map(PathBuf::from).to_vec(), vec![vec![]; 3]);
+        let area = Rect::new(0, 0, 20, 2);
+        let paint = |skip| pixel_paint(&list, area, RowStart { result: 0, skip }).0;
+
+        assert_eq!(
+            [paint(8), paint(7)],
+            [
+                vec![
+                    Command::Nudge([0, 14]),
+                    pixel_run(16, 0, "b.rs", UNTHEMED, true),
+                    Command::Nudge([0, 17]),
+                    pixel_run(16, 16, "c.rs", UNTHEMED, true),
+                    Command::Nudge([0, 0]),
+                ],
+                vec![
+                    Command::Nudge([0, 15]),
+                    pixel_run(16, 0, "b.rs", UNTHEMED, true),
+                    Command::Nudge([0, 0]),
+                ],
+            ]
         );
     }
 

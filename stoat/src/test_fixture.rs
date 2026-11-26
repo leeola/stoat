@@ -32,7 +32,7 @@ use lsp_types::{
 };
 use ratatui::layout::Rect;
 use std::{path::PathBuf, sync::Arc};
-use stoat_action::OpenFile;
+use stoat_action::{OpenFile, OpenFileFinder};
 use stoat_config::MinimapMode;
 use stoat_widgets::ApcScene;
 use stoatty_protocol::command::{self, LineSummary, MinimapRun};
@@ -86,6 +86,29 @@ pub(crate) fn finder_layout(h: &TestHarness) -> crate::render::file_finder::Find
         modal_zoom_steps(&h.stoat.modal_zoom, ModalKind::FileFinder),
     )
     .expect("the open finder fits the test terminal")
+}
+
+/// A harness with its file finder open and painted over `files` one-line
+/// files, under a stoatty whose finder list lays its rows out by pixels.
+///
+/// The stoatty speaks the current protocol, with a 9 by 18 px cell and a
+/// display scale of 1, so a result row is 20 px high and 21 px from the next.
+pub(crate) fn pixel_finder(files: usize) -> TestHarness {
+    let mut h = TestHarness::default();
+    h.stoat.stoatty_protocol = stoatty_protocol::PROTOCOL_VERSION;
+    h.stoat.cell_pixels = Some((9, 18));
+    h.stoat.display_scale = Some(1.0);
+
+    let root = PathBuf::from("/pixel-finder");
+    for n in 0..files {
+        h.fake_fs()
+            .insert_file(root.join(format!("f{n:02}.rs")), b"x\n");
+    }
+    h.stoat.active_workspace_mut().git_root = root;
+    action_handlers::dispatch(&mut h.stoat, &OpenFileFinder);
+    h.settle();
+    h.stoat.render();
+    h
 }
 
 /// The layout of the open target picker of `kind`, sized from the same zoom

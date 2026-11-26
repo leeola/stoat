@@ -10,6 +10,7 @@ use crate::{
     paths,
     picker::{self, PathPicker, PendingScan, Preview, PreviewPolicy, ScanTarget},
     rebase::RebasePause,
+    render::pixel_rows::RowMetrics,
     run::CmdId,
     user_command::{
         run, ArgKind, CommandArg, CommandSet, Output, PickSpec, RunSpec, TextDefault, UserCommand,
@@ -112,6 +113,13 @@ pub struct CommandPalette {
     /// outlasts a change of the argument's source, and each open starts over
     /// at 0.
     pub(crate) arg_plate_width: u16,
+    /// The cell and scale that the last frame laid the argument list out by,
+    /// or `None` for a list on whole cell rows.
+    ///
+    /// The pool that pages a pixel list and the hit test read the layout after
+    /// the paint, so the paint keeps its measure here, as it keeps the
+    /// picker's `viewport_rows`.
+    pub(crate) row_metrics: Option<RowMetrics>,
     /// The rows that the Cmd Line took at the box's top in the last frame, 1
     /// before the first.
     ///
@@ -1257,6 +1265,7 @@ impl CommandPalette {
             action_offering,
             namespace: Namespace::Commands,
             arg_plate_width: 0,
+            row_metrics: None,
             header_rows: 1,
             resolved: None,
             keys,

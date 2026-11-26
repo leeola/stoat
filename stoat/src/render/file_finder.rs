@@ -5,6 +5,7 @@ use crate::{
     picker::{write_row_display, PreviewSource},
     render::{
         picker::{FilterHeader, Footer, PathRows, RowMarks, RowStart, FILTER_PROMPT},
+        pixel_rows::RowMetrics,
         text::write_str_clipped,
     },
     workspace::Workspace,
@@ -347,6 +348,7 @@ pub(crate) fn render_file_finder(
         }
     }
 
+    finder.row_metrics = RowMetrics::of(theme, scene);
     let whole = match no_match {
         true => {
             paint_no_match(&finder.input.text(ws), layout.list, theme, buf);
@@ -457,6 +459,10 @@ pub(crate) fn scope_words(scope: &FinderScope) -> &str {
 /// [`list_window`] derives shows them, and return the count of results that
 /// the window shows whole.
 ///
+/// A pixel list, as [`FileFinder::row_metrics`] records one, paints no row
+/// here. Its rows stand off the cell grid, so the finder's resident pool draws
+/// them over the blank list.
+///
 /// [`list_window`]: crate::render::picker::list_window
 fn render_list(
     finder: &FileFinder,
@@ -466,14 +472,22 @@ fn render_list(
     buf: &mut Buffer,
     scene: &mut stoat_widgets::ApcScene,
 ) -> usize {
-    let window =
-        crate::render::picker::list_window(&finder_rows(finder, home), area.width, area.height);
+    let pixels = finder.row_metrics;
+    let window = crate::render::picker::list_window(
+        &finder_rows(finder, home),
+        area.width,
+        area.height,
+        pixels,
+    );
+    if let Some(metrics) = pixels {
+        return window.whole(metrics.extent(area.height));
+    }
     let start = RowStart {
         result: window.first,
         skip: 0,
     };
-    paint_finder_rows(finder, home, area, start, theme, true, buf, scene);
-    window.whole(area.height)
+    paint_finder_rows(finder, home, area, start, theme, true, None, buf, scene);
+    window.whole(u32::from(area.height))
 }
 
 /// The finder's results as its list paints them, the active picker's rows
@@ -495,7 +509,8 @@ pub(crate) fn finder_rows<'a>(finder: &'a FileFinder, home: Option<&'a Path>) ->
 ///
 /// A thin adapter over [`crate::render::picker::paint_path_rows`], kept because
 /// the smooth-scroll pool paints pages through a `&FileFinder`. A page passes
-/// `panels` false, as that function describes.
+/// `panels` false, and the metrics of a pixel list as `pixels`, as that
+/// function describes.
 ///
 /// The rows paint muted while a fallback of ignored files stands in for the
 /// list, so they read apart from the files the list holds.
@@ -510,6 +525,7 @@ pub(crate) fn paint_finder_rows(
     start: RowStart,
     theme: &crate::theme::Theme,
     panels: bool,
+    pixels: Option<RowMetrics>,
     buf: &mut Buffer,
     scene: &mut stoat_widgets::ApcScene,
 ) {
@@ -530,6 +546,7 @@ pub(crate) fn paint_finder_rows(
         theme,
         row_style,
         panels,
+        pixels,
         buf,
         scene,
     );

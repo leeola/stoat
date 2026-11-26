@@ -6380,6 +6380,180 @@ fn a_wrapped_argument_list_scrolls_its_pool_by_document_rows() {
     assert_eq!(row, (first * rows) as u64);
 }
 
+/// A finder list laid out by pixels is a resident pool, whose first page
+/// draws each 21 px row's text under a nudge 3 px deeper than the last, and
+/// the live scene draws no text over the list.
+#[test]
+fn a_pixel_finder_list_fills_a_resident_pool_with_nudged_runs() {
+    use stoatty_protocol::command::{Command, PoolKind, PoolRegionCommand};
+
+    let mut h = crate::test_fixture::pixel_finder(40);
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+    h.stoat.set_apc_tx(tx);
+    h.stoat.render();
+    let pooled = emit_raw(&mut h, &mut rx);
+
+    let list = finder_layout(&h).list;
+    let pool = crate::smooth_scroll::non_pane_pool::FINDER;
+    let region = command::decode_stream(&pooled)
+        .into_iter()
+        .find_map(|command| match command {
+            Command::PoolRegion(region) if region.pool == pool => Some(region),
+            _ => None,
+        });
+    let page = command::decode_stream(fill_payload(&pooled, pool, 0));
+    let nudges: Vec<[i16; 2]> = page
+        .iter()
+        .filter_map(|command| match command {
+            Command::Nudge(offset) => Some(*offset),
+            _ => None,
+        })
+        .take(4)
+        .collect();
+    let runs = page
+        .iter()
+        .filter(|command| matches!(command, Command::TextRun(_)))
+        .count();
+    let live_runs = command::decode_stream(&h.stoat.apc_scene.all_bytes())
+        .into_iter()
+        .filter(|command| match command {
+            Command::TextRun(run) => {
+                (list.y * 16..list.bottom() * 16).contains(&(run.row as u16))
+                    && (list.x * 16..list.right() * 16).contains(&(run.col as u16))
+            },
+            _ => false,
+        })
+        .count();
+
+    assert_eq!(
+        (region, nudges, runs > 0, live_runs),
+        (
+            Some(PoolRegionCommand {
+                pool,
+                top: list.y,
+                left: list.x,
+                width: list.width,
+                height: list.height,
+                window: 0,
+                kind: PoolKind::Grid,
+                dim: 0,
+                resident: true,
+            }),
+            vec![[0, 1], [0, 4], [0, 7], [0, 10]],
+            true,
+            0,
+        )
+    );
+}
+
+/// The marks of a finder list read the scopes' lists, which land after the
+/// first fill, so a list that lands refills the resident pool's pages and the
+/// first result ends in its `M`.
+#[test]
+fn a_pixel_finder_list_refills_when_its_marks_land() {
+    use stoatty_protocol::command::Command;
+
+    let mut h = crate::test_fixture::pixel_finder(3);
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+    h.stoat.set_apc_tx(tx);
+    h.stoat.render();
+    let _ = emit_raw(&mut h, &mut rx);
+
+    let finder = h.stoat.file_finder.as_mut().expect("the finder is open");
+    let first = {
+        let picklist = &finder.active_core_ref().picklist;
+        picklist.base[picklist.filtered[0]].clone()
+    };
+    finder.scopes.modified_paths = vec![first];
+    finder.scopes.base_generation = crate::picker::next_generation();
+    h.stoat.render();
+    let pooled = emit_raw(&mut h, &mut rx);
+
+    let list = finder_layout(&h).list;
+    let pool = crate::smooth_scroll::non_pane_pool::FINDER;
+    let marks: Vec<(i16, i16)> = command::decode_stream(fill_payload(&pooled, pool, 0))
+        .into_iter()
+        .filter_map(|command| match command {
+            Command::TextRun(run) if run.text == "M" => Some((run.col, run.row)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(marks, [((list.width as i16 - 1) * 16, 0)]);
+}
+
+/// A pixel finder list whose display scale changes refills its first page at
+/// the new measure. At scale 2 on the 18 px cell a row stands 24 px from the
+/// next, so the lines of the fourth and fifth results stand 1 and 4 logical px
+/// into their cell rows, where at scale 1 they stand 10 and 13.
+#[test]
+fn a_pixel_finder_list_refills_at_another_scale() {
+    use stoatty_protocol::command::Command;
+
+    let mut h = crate::test_fixture::pixel_finder(5);
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+    h.stoat.set_apc_tx(tx);
+    h.stoat.render();
+    let _ = emit_raw(&mut h, &mut rx);
+
+    h.stoat.display_scale = Some(2.0);
+    h.stoat.render();
+    let pooled = emit_raw(&mut h, &mut rx);
+
+    let pool = crate::smooth_scroll::non_pane_pool::FINDER;
+    let nudges: Vec<[i16; 2]> = command::decode_stream(fill_payload(&pooled, pool, 0))
+        .into_iter()
+        .filter_map(|command| match command {
+            Command::Nudge(offset) => Some(offset),
+            _ => None,
+        })
+        .take(5)
+        .collect();
+    assert_eq!(nudges, [[0, 1], [0, 4], [0, 7], [0, 1], [0, 4]]);
+}
+
+/// A pixel list's pool scrolls to its first result's pixel top in cell rows,
+/// and stamps its pages by the px of the selected result's box and of a page.
+/// A selection past the measured results takes a one-line box after them.
+#[test]
+fn a_pixel_list_scroll_counts_the_selected_box_and_a_page_in_pixels() {
+    let pixels = RowMetrics {
+        cell: [9, 18],
+        scale: 1.0,
+    };
+    let tops = [0, 1, 3, 4];
+    let of = |first, selected| {
+        let scroll = PathListScroll::of(&tops, first, selected, Some(pixels), 5);
+        (scroll.offset, scroll.selected, scroll.page_height)
+    };
+
+    assert_eq!(
+        [of(1, 1), of(1, 7)],
+        [(21.0 / 18.0, 21..59, 90), (21.0 / 18.0, 81..101, 90)]
+    );
+}
+
+/// A pixel finder list scrolls its pool to the pixel top of its window's
+/// first result, in cell rows. With result 30 selected, the window ends on it
+/// and holds the `fit` results whose 21 px rows fit the list's px and one gap.
+#[test]
+fn a_pixel_finder_list_scrolls_by_pixels() {
+    let mut h = crate::test_fixture::pixel_finder(40);
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+    h.stoat.set_apc_tx(tx);
+    let finder = h.stoat.file_finder.as_mut().expect("the finder is open");
+    finder.active_core().picklist.selected = 30;
+    h.stoat.render();
+    let _ = emit_raw(&mut h, &mut rx);
+
+    let list = finder_layout(&h).list;
+    let fit = (u32::from(list.height) * 18 + 1) / 21;
+    let pool = crate::smooth_scroll::non_pane_pool::FINDER;
+    assert_eq!(
+        h.stoat.smooth_scroll.last_target(pool),
+        Some(((31 - fit) * 21) as f32 / 18.0)
+    );
+}
+
 /// A finder whose query matches nothing paints a message in place of its
 /// rows. The emit then declares no list pool and retires the one the matches
 /// had.

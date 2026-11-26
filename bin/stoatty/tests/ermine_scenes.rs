@@ -1628,11 +1628,14 @@ fn keywords_narrow_history_under_a_wider_chip() {
 /// S-Tab steps the list to those files alone.
 ///
 /// The smallest argument plate holds its list in cells 33 to 65, each label
-/// from cell 34, and the mark cell at cell 65. The selected row is the first
-/// cell row from 10 whose pixel (560, row * 18 + 9) reads the tab wash. Under
-/// All, a row under it holds the accent `M` of `src/main.rs`, and its second
-/// row under it holds a third result. Under Modified, the row under it holds
-/// the `M` of `src/util.rs`, and its second row under it is blank.
+/// from cell 34, pixel column 306, and the mark cell at cell 65, pixel column
+/// 585. The selected result is the first, whose box starts on the top pixel row
+/// of the first cell row from 10 whose pixel (560, row * 18 + 9) reads the tab
+/// wash, and the results after it stand 21 px apart from that pixel row y.
+/// Under All the list reads `.gitignore`, `Cargo.toml`, `src/main.rs`, and
+/// `src/util.rs`, so the third result, from y + 42, holds text and the accent
+/// `M` of `src/main.rs`. Under Modified, the second result, from y + 21, holds
+/// the `M` of `src/util.rs`, and the 20 pixel rows from y + 42 are blank.
 #[test]
 fn the_file_argument_marks_modified_rows_and_cycles_to_them() {
     let mut home = support::scratch_home();
@@ -1642,30 +1645,32 @@ fn the_file_argument_marks_modified_rows_and_cycles_to_them() {
     play(&mut session, "<S-Tab><Settle>");
     let modified = session.snapshot().expect("a snapshot");
 
-    let selected = |shot: &Snapshot| {
-        (10..40).find(|&row: &u16| pixel(shot, 560, u32::from(row) * 18 + 9) == TAB_WASH)
+    let selected_top = |shot: &Snapshot| {
+        (10..40u32)
+            .find(|&row| pixel(shot, 560, row * 18 + 9) == TAB_WASH)
+            .map(|row| row * 18)
     };
-    let marked = |shot: &Snapshot, row: u16| {
+    let marked = |shot: &Snapshot, y: u32| {
         let accent = |[r, _, b]: [u8; 3]| i32::from(b) - i32::from(r) > 40;
-        pixels_where(shot, cell_rect(65, row, 1, 1), accent) > 0
+        pixels_where(shot, (585, y, 9, 20), accent) > 0
     };
-    let checks = match (selected(&all), selected(&modified)) {
-        (Some(all_row), Some(modified_row)) => [
+    let checks = match (selected_top(&all), selected_top(&modified)) {
+        (Some(all_y), Some(modified_y)) => [
             (
-                "a row under the selected one holds the M of src/main.rs",
-                (all_row + 1..40).any(|row| marked(&all, row)),
+                "the third result holds the M of src/main.rs",
+                marked(&all, all_y + 42),
             ),
             (
-                "a third result holds text",
-                distinct_colors(&all, cell_rect(34, all_row + 2, 1, 1)) > 1,
+                "the third result holds text",
+                distinct_colors(&all, (306, all_y + 42, 9, 20)) > 1,
             ),
             (
-                "the row under the selected one holds the M of src/util.rs",
-                marked(&modified, modified_row + 1),
+                "the second result holds the M of src/util.rs",
+                marked(&modified, modified_y + 21),
             ),
             (
-                "the Modified list holds two rows",
-                distinct_colors(&modified, cell_rect(34, modified_row + 2, 31, 1)) == 1,
+                "the Modified list holds two results",
+                distinct_colors(&modified, (306, modified_y + 42, 279, 20)) == 1,
             ),
         ],
         _ => [("each frame holds a selected row", false); 4],
@@ -1956,57 +1961,58 @@ fn the_finder_preview_rules_off_its_numbers() {
 /// its extension bold in the tag color of the file type, as FinderShared draws
 /// a row.
 ///
-/// The list is cells 33 to 65 from cell row 12, a label starts at cell 34,
-/// and the `M` of a modified file stands in cell 65 in the accent. The first
-/// row from 13 with an accent pixel in cell 65 is `src/main.rs`. Its cells 34
-/// to 37, `src/`, hold muted ink and no pixel of the text or warm colors.
-/// Cells 38 to 41, `main`, hold a pixel of the near-white text. Cells 42 to 44,
-/// `.rs`, hold a pixel of the warm Rust tag color. On the row above it,
-/// `Cargo.toml`, cells 39 to 43, `.toml`, hold a pixel of the violet config tag
-/// color.
+/// The list is cells 33 to 65 from pixel row 216, a label starts at cell 34,
+/// pixel column 306, and the `M` of a modified file stands in cell 65, pixel
+/// column 585, in the accent. Result k takes the pixel rows from 216 + 21k,
+/// 20 of them. The first result from result 1 with an accent pixel in its mark
+/// cell is `src/main.rs`. Its pixel columns 306 to 341, `src/`, hold muted ink
+/// and no pixel of the text or warm colors. The columns 342 to 377, `main`,
+/// hold a pixel of the near-white text. The columns 378 to 404, `.rs`, hold a
+/// pixel of the warm Rust tag color. In the result above it, `Cargo.toml`, the
+/// columns 351 to 395, `.toml`, hold a pixel of the violet config tag color.
 #[test]
 fn the_finder_row_colors_its_directory_name_and_extension() {
     let mut home = support::scratch_home();
     let shot = settled_frame(home.path(), "rust-diff", "Cargo.toml", "<Space>p<Settle>");
 
-    let count = |col, row, cols, pred: fn([u8; 3]) -> bool| {
-        pixels_where(&shot, cell_rect(col, row, cols, 1), pred)
-    };
+    let count = |rect: PixelRect, pred: fn([u8; 3]) -> bool| pixels_where(&shot, rect, pred);
     fn gap(a: u8, b: u8) -> i32 {
         i32::from(a) - i32::from(b)
     }
-    let Some(row) = (13..39).find(|&row| count(65, row, 1, |[r, _, b]| gap(b, r) > 40) > 0) else {
+    let marked = |y| count((585, y, 9, 20), |[r, _, b]| gap(b, r) > 40) > 0;
+    let Some(y) = (1..23).map(|k| 216 + 21 * k).find(|&y| marked(y)) else {
         let frame = keep_frame(&shot, &mut home, "finder_row_colors");
         panic!(
-            "no list row from cell row 13 holds an accent mark in cell 65; the frame is {}",
+            "no result from result 1 holds an accent mark in cell 65; the frame is {}",
             frame.display(),
         );
     };
 
     let checks = [
-        (
-            "src/ holds ink",
-            brightest(&shot, cell_rect(34, row, 4, 1)) > 0x40,
-        ),
+        ("src/ holds ink", brightest(&shot, (306, y, 36, 20)) > 0x40),
         (
             "src/ holds no text-bright pixel",
-            count(34, row, 4, |[r, _, _]| r > 0xa0) == 0,
+            count((306, y, 36, 20), |[r, _, _]| r > 0xa0) == 0,
         ),
         (
             "src/ holds no warm pixel",
-            count(34, row, 4, |[r, _, b]| gap(r, b) > 40) == 0,
+            count((306, y, 36, 20), |[r, _, b]| gap(r, b) > 40) == 0,
         ),
         (
             "main holds the near-white text",
-            count(38, row, 4, |[r, _, b]| r > 0xa0 && gap(r, b).abs() <= 24) > 0,
+            count((342, y, 36, 20), |[r, _, b]| {
+                r > 0xa0 && gap(r, b).abs() <= 24
+            }) > 0,
         ),
         (
             ".rs holds the warm Rust tag color",
-            count(42, row, 3, |[r, _, b]| gap(r, b) > 40) > 0,
+            count((378, y, 27, 20), |[r, _, b]| gap(r, b) > 40) > 0,
         ),
         (
             ".toml holds the violet config tag color",
-            count(39, row - 1, 5, |[r, g, b]| gap(b, g) > 30 && gap(r, g) > 20) > 0,
+            count((351, y - 21, 45, 20), |[r, g, b]| {
+                gap(b, g) > 30 && gap(r, g) > 20
+            }) > 0,
         ),
     ];
     let failed: Vec<&str> = checks
@@ -2017,26 +2023,26 @@ fn the_finder_row_colors_its_directory_name_and_extension() {
     if !failed.is_empty() {
         let frame = keep_frame(&shot, &mut home, "finder_row_colors");
         panic!(
-            "on cell row {row}, src/main.rs, and the row above it, these checks fail: \
-             {failed:?}; the frame is {}",
+            "on the result from pixel row {y}, src/main.rs, and the result above it, these \
+             checks fail: {failed:?}; the frame is {}",
             frame.display(),
         );
     }
 }
 
-/// A selected finder result that wraps draws one box over all of its cell rows,
-/// and each continuation line starts with the Wrap Mark two cells in.
+/// A selected finder result that wraps draws one box over both of its lines,
+/// and its continuation line starts with the Wrap Mark two cells in.
 ///
 /// The plate reaches the cap, so the list is cells 2 to 97 and its labels take
-/// 93 cells from cell 3. The query `z` keeps only the 161-char path, which takes
-/// the two cell rows 12 and 13 with lines of 92 and 69 chars. Cell 95 stays
-/// blank, so its middle pixel on each of those rows reads the tab wash. The
-/// box's corners round off, so the pixels at x 19 and 878 on pixel rows 216 and
-/// 251 read the base. The pixels at (19, 233) and (19, 234), on each side of the
-/// row edge, read the wash, so one box fills the rows with no gap between them.
-/// On the continuation row, cell 3 holds one color, and cell 5 holds the mark,
-/// brighter than the wash's 0x52 and at most 2 above the 0x6d of the mark's
-/// color. The row under the result holds the base alone.
+/// 93 cells from cell 3. The query `z` keeps only the 161-char path, whose lines
+/// of 92 and 69 chars stand 1 px and 19 px under the list's top at pixel row
+/// 216. Its box is those 36 px and 1 px over and under them, so the tab wash
+/// fills the pixels from (19, 216) to (878, 253) and no other pixel of the
+/// pixel rows 212 to 257, and the pixel (860, 254) under the box reads the
+/// base. On the continuation line, from pixel row 235, cell 3 holds one color,
+/// and cell 5 holds the mark, brighter than the wash's 0x52 and at most 2 above
+/// the 0x6d of the mark's color. The 18 pixel rows under the box hold the base
+/// alone over the list.
 #[test]
 fn the_finder_boxes_every_row_of_a_wrapped_selection() {
     let mut home = support::scratch_home();
@@ -2047,31 +2053,28 @@ fn the_finder_boxes_every_row_of_a_wrapped_selection() {
         "<Space>pz<Settle>",
     );
 
+    expect_color_box(
+        &shot,
+        &mut home,
+        TAB_WASH,
+        212..258,
+        (19, 216, 878, 253),
+        "wrapped_selection_box",
+    );
+
     let mut failed = Vec::new();
-    for k in 0..2 {
-        if pixel(&shot, 860, 225 + 18 * k) != TAB_WASH {
-            failed.push(format!("the wash in cell 95 of row {}", 12 + k));
-        }
+    if pixel(&shot, 860, 254) != BASE {
+        failed.push("the base at the pixel (860, 254) under the box".to_owned());
     }
-    for (x, y) in [(19, 216), (878, 216), (19, 251), (878, 251)] {
-        if pixel(&shot, x, y) != BASE {
-            failed.push(format!("the base at the corner pixel ({x}, {y})"));
-        }
+    if distinct_colors(&shot, (27, 235, 9, 18)) != 1 {
+        failed.push("one color in cell 3 of the continuation line".to_owned());
     }
-    for (x, y) in [(19, 233), (19, 234)] {
-        if pixel(&shot, x, y) != TAB_WASH {
-            failed.push(format!("the wash at the row-edge pixel ({x}, {y})"));
-        }
+    if !(0x53..=0x6f).contains(&brightest(&shot, (45, 235, 9, 18))) {
+        failed.push("the Wrap Mark in cell 5 of the continuation line".to_owned());
     }
-    if distinct_colors(&shot, cell_rect(3, 13, 1, 1)) != 1 {
-        failed.push("one color in cell 3 of row 13".to_owned());
-    }
-    if !(0x53..=0x6f).contains(&brightest(&shot, cell_rect(5, 13, 1, 1))) {
-        failed.push("the Wrap Mark in cell 5 of row 13".to_owned());
-    }
-    let under = cell_rect(2, 14, 96, 1);
+    let under = (18, 254, 864, 18);
     if distinct_colors(&shot, under) != 1 || pixel(&shot, under.0, under.1) != BASE {
-        failed.push("the base alone over row 14".to_owned());
+        failed.push("the base alone under the box".to_owned());
     }
     if !failed.is_empty() {
         let frame = keep_frame(&shot, &mut home, "wrapped_selection");
@@ -2082,17 +2085,18 @@ fn the_finder_boxes_every_row_of_a_wrapped_selection() {
     }
 }
 
-/// A finder result that wraps leaves each neighbour one row of its own.
+/// A finder result that wraps grows by one 18 px line, and each neighbour keeps
+/// a 20 px row of its own.
 ///
-/// The plate reaches the cap, so the labels take 93 cells from cell 3. The
-/// query `v` keeps the three long paths, which take 1, 1, and 2 rows. Each of
-/// cell rows 12 to 38 is one kind of row. A first line holds more than one
-/// color in cell 3, where its label starts. A continuation line holds one color
-/// in cell 3 and more than one in cell 5, its Wrap Mark. An empty row holds one
-/// color over the label cells 3 to 95. The list holds 3 first lines, 1
-/// continuation line, and 23 empty rows.
+/// The plate reaches the cap, so the labels take 93 cells from cell 3, pixel
+/// column 27. The query `v` keeps the three long paths, which take 1, 1, and 2
+/// lines. Each line's text is one band of the pixel rows that hold a pixel
+/// above 0x70 in some channel, in the pixel columns 27 to 205, and the pixel
+/// rows 216 to 330 hold four bands. Two results stand 21 px apart and the two
+/// lines of the wrapped one 18 px apart, so the gaps between the tops of the
+/// bands are 21, 21, and 18 px in some order.
 #[test]
-fn a_wrapped_finder_row_leaves_its_neighbours_one_row() {
+fn a_wrapped_finder_row_grows_by_one_line_and_its_neighbours_keep_one_row() {
     let mut home = support::scratch_home();
     let shot = settled_frame(
         home.path(),
@@ -2101,25 +2105,15 @@ fn a_wrapped_finder_row_leaves_its_neighbours_one_row() {
         "<Space>pv<Settle>",
     );
 
-    let mut counts = [0; 3];
-    for row in 12..39 {
-        let colors = |col, cols| distinct_colors(&shot, cell_rect(col, row, cols, 1));
-        if colors(3, 1) > 1 {
-            counts[0] += 1;
-        } else if colors(5, 1) > 1 {
-            counts[1] += 1;
-        } else if colors(3, 93) == 1 {
-            counts[2] += 1;
-        }
-    }
-    if counts != [3, 1, 23] {
+    let inked = |y: u32| (27..206).any(|x| pixel(&shot, x, y).iter().any(|&c| c > 0x70));
+    let tops: Vec<u32> = (216..331).filter(|&y| inked(y) && !inked(y - 1)).collect();
+    let mut gaps: Vec<u32> = tops.windows(2).map(|pair| pair[1] - pair[0]).collect();
+    gaps.sort_unstable();
+    if gaps != [18, 21, 21] {
         let frame = keep_frame(&shot, &mut home, "wrapped_neighbours");
         panic!(
-            "rows 12 to 38 hold {} first lines, {} continuation lines, and {} empty rows, \
-             where the list holds 3, 1, and 23; the frame is {}",
-            counts[0],
-            counts[1],
-            counts[2],
+            "the bands of label text start on the pixel rows {tops:?}, where four bands stand \
+             21, 21, and 18 px apart in some order; the frame is {}",
             frame.display(),
         );
     }
@@ -3133,13 +3127,13 @@ fn the_diff_view_keeps_its_box_docked_on_the_raised_surface() {
 /// The finder's selected row is one box in the tab wash with 4 px corners, and
 /// no accent edge runs inside it.
 ///
-/// The selected row is the list's first, cell row 12, and its first cell is
-/// cell 33, from pixel column 297. The box stands 1 px inside that cell, so
-/// the row's first pixel column keeps the list's Island, on the base surface.
-/// The box spans pixel columns 298 to 590, 3 px inside the row's last cell,
-/// and its 4 px arcs leave the base at the four corner pixels. A blank pixel
-/// in the row's middle reads the tab wash, and no pixel of the row's first
-/// cell takes the accent.
+/// The selected row is the list's first, from pixel row 216, the top of cell
+/// row 12, and its first cell is cell 33, from pixel column 297. The box stands
+/// 1 px inside that cell, so the row's first pixel column keeps the list's
+/// Island, on the base surface. The box spans pixel columns 298 to 590, 3 px
+/// inside the row's last cell, and pixel rows 216 to 235, and its 4 px arcs
+/// leave the base at the four corner pixels. A blank pixel in the row's middle
+/// reads the tab wash, and no pixel of the row's first cell takes the accent.
 #[test]
 fn the_finder_marks_its_selected_row_with_a_rounded_wash() {
     let mut home = support::scratch_home();
@@ -3160,23 +3154,87 @@ fn the_finder_marks_its_selected_row_with_a_rounded_wash() {
     expect_region(
         &shot,
         &mut home,
-        (297, 216, 1, 18),
+        (297, 216, 1, 20),
         BASE,
         "selected_row_first_column",
     );
-    for (x, y) in [(298, 216), (590, 216), (298, 233), (590, 233)] {
+    for (x, y) in [(298, 216), (590, 216), (298, 235), (590, 235)] {
         let what = format!("selected_row_corner_{x}_{y}");
         expect_region(&shot, &mut home, (x, y, 1, 1), BASE, &what);
     }
 
     let accent = (297..306)
-        .flat_map(|x| (216..234).map(move |y| (x, y)))
+        .flat_map(|x| (216..236).map(move |y| (x, y)))
         .filter(|&(x, y)| pixel(&shot, x, y) == ACCENT)
         .count();
     if accent > 0 {
         let frame = keep_frame(&shot, &mut home, "selected_row_accent");
         panic!(
             "{accent} pixels of the selected row's first cell take the accent; the frame is {}",
+            frame.display(),
+        );
+    }
+}
+
+/// The finder's selected row is a box 20 px high, its 18 px line with 1 px
+/// over and under it, as FinderShared sets a row's height.
+///
+/// The box fills the pixels from (298, 216) to (590, 235), so no other pixel of
+/// the pixel rows 212 to 239 takes the tab wash, and the pixel row 236 under
+/// the box reads the base.
+#[test]
+fn the_finder_selected_row_is_twenty_pixels_high() {
+    let mut home = support::scratch_home();
+    let shot = settled_frame(
+        home.path(),
+        "many-files",
+        "src/alpha.txt",
+        "<Space>p<Settle>",
+    );
+
+    expect_color_box(
+        &shot,
+        &mut home,
+        TAB_WASH,
+        212..240,
+        (298, 216, 590, 235),
+        "selected_row_box",
+    );
+    expect_region(
+        &shot,
+        &mut home,
+        (500, 236, 1, 1),
+        BASE,
+        "selected_row_under",
+    );
+}
+
+/// The finder's rows stand 21 px apart, each 20 px row with 1 px under it.
+///
+/// A result's text is one band of the pixel rows that hold a pixel above 0x70
+/// in some channel, in the pixel columns 306 to 439 of the labels. The tops of
+/// the first five bands from pixel row 216 stand 21 px apart.
+#[test]
+fn the_finder_rows_stand_twenty_one_pixels_apart() {
+    let mut home = support::scratch_home();
+    let shot = settled_frame(
+        home.path(),
+        "many-files",
+        "src/alpha.txt",
+        "<Space>p<Settle>",
+    );
+
+    let inked = |y: u32| (306..440).any(|x| pixel(&shot, x, y).iter().any(|&c| c > 0x70));
+    let tops: Vec<u32> = (216..331)
+        .filter(|&y| inked(y) && !inked(y - 1))
+        .take(5)
+        .collect();
+    let gaps: Vec<u32> = tops.windows(2).map(|pair| pair[1] - pair[0]).collect();
+    if gaps != [21; 4] {
+        let frame = keep_frame(&shot, &mut home, "finder_row_pitch");
+        panic!(
+            "the bands of label text start on the pixel rows {tops:?}, where five bands stand \
+             21 px apart; the frame is {}",
             frame.display(),
         );
     }

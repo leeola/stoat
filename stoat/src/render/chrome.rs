@@ -43,7 +43,7 @@ const ZOOM_STEP_DIVISOR: u16 = 10;
 const SELECTION_BAR_WIDTH: u16 = 3;
 
 /// The corner radius of a list's rounded selected row, in logical pixels.
-const SELECTED_ROW_RADIUS: u8 = 4;
+pub(crate) const SELECTED_ROW_RADIUS: u8 = 4;
 
 /// Where a rounded selected row's sides stand inside the row's cells, top,
 /// right, bottom, and left, in logical pixels.
