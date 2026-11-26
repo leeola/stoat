@@ -189,7 +189,8 @@ struct PaintedSelection {
 }
 
 /// How the pool of a path list, the File Finder's or the argument list's,
-/// scrolls and stamps its pages.
+/// scrolls and stamps its pages, as the palette's command list does too when
+/// its rows lay out by pixels.
 ///
 /// A list on whole cell rows counts all three in document rows. A pixel list
 /// counts the selected result's span and a page's height in physical px, and
@@ -2383,6 +2384,8 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
         let name_offset = palette.name_offset();
         let (namespace, keys) = (palette.namespace, &palette.keys);
         let specs = &stoat.cli_specs;
+        // A pixel list pools resident, as the finder's does.
+        let pixels = palette.row_metrics;
         let region = PoolRegionCommand {
             pool: crate::smooth_scroll::non_pane_pool::PALETTE,
             top: list.y,
@@ -2392,32 +2395,56 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
             window: 0,
             kind: PoolKind::Grid,
             dim: 0,
-            resident: false,
+            resident: pixels.is_some(),
         };
         let scroll_row = selected.saturating_sub(list.height.saturating_sub(1) as usize) as u32;
+        let pixel_scroll = pixels.map(|metrics| {
+            let window = crate::render::command_palette::command_window(
+                filtered,
+                *selected,
+                list.height,
+                metrics,
+            );
+            let top = crate::render::command_palette::command_top(window.first, metrics);
+            PathListScroll {
+                offset: top as f32 / f32::from(metrics.cell[1]),
+                selected: crate::render::command_palette::command_box(filtered, *selected, metrics),
+                page_height: region.height.saturating_mul(metrics.cell[1]),
+            }
+        });
         // The visible row set is the filtered entries, so a hash of their
         // names is the pool's content version and a re-filter refills it. The
         // leading discriminant keeps a filter-mode list from aliasing an
         // arg-mode list that shares this pool id and matches region and scroll.
+        // A pixel list's measure places every row, so it feeds the version too.
         let content_version = {
             let mut hasher = DefaultHasher::new();
             stoat.theme_epoch.hash(&mut hasher);
             0u8.hash(&mut hasher);
             palette.generation.hash(&mut hasher);
+            hash_row_metrics(pixels, &mut hasher);
             hasher.finish()
         };
+        let held = stoat.smooth_scroll.holds_region(region.pool, &region);
         pool::emit_pages_into(
             &mut out,
             &mut stoat.smooth_scroll,
             region,
-            scroll_row as f32,
+            pixel_scroll
+                .as_ref()
+                .map_or(scroll_row as f32, |scroll| scroll.offset),
             u64::MAX,
             PageVersions {
                 cells: content_version,
                 decorations: 0,
             },
-            |page| selection_page_stamp(*selected, page, region.height),
-            true,
+            |page| match &pixel_scroll {
+                Some(scroll) => {
+                    rows_page_stamp(*selected, scroll.selected.clone(), page, scroll.page_height)
+                },
+                None => selection_page_stamp(*selected, page, region.height),
+            },
+            pixels.is_none(),
             |page| {
                 crate::smooth_scroll::render_palette_page(
                     filtered,
@@ -2431,9 +2458,13 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
                     theme,
                     region.width,
                     region.height,
+                    pixels,
                 )
             },
         );
+        if pixels.is_some() && stoat.window_ipc_connected {
+            ask_pixel_pointer(&mut out, held, region.pool, stoat.stoatty_protocol);
+        }
     }
 
     // A pixel list pools resident, as the finder's does.

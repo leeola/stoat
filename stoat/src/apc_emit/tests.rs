@@ -6446,6 +6446,92 @@ fn a_pixel_finder_list_fills_a_resident_pool_with_nudged_runs() {
     );
 }
 
+/// The palette's command list laid out by pixels is a resident pool. Its first
+/// page draws each 21 px row's tag 2 px and its text 1 px under the row's top,
+/// so the nudges step 3 px deeper a row, and the live scene draws no text over
+/// the list. The selected first row's box stands on the page's top, where no
+/// nudge is needed.
+#[test]
+fn a_pixel_palette_list_fills_a_resident_pool() {
+    use stoatty_protocol::command::{Command, PoolKind, PoolRegionCommand};
+
+    let mut h = Stoat::test();
+    h.stoat.stoatty_protocol = stoatty_protocol::PROTOCOL_VERSION;
+    h.stoat.cell_pixels = Some((9, 18));
+    h.stoat.display_scale = Some(1.0);
+    h.type_text(":");
+    h.snapshot();
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+    h.stoat.set_apc_tx(tx);
+    let pooled = emit_raw(&mut h, &mut rx);
+
+    let list = {
+        let palette = h
+            .stoat
+            .command_palette
+            .as_ref()
+            .expect("the palette is open");
+        crate::render::command_palette::palette_filter_layout(
+            h.stoat.size(),
+            palette.list_rows_hint(),
+            modal_zoom_steps(&h.stoat.modal_zoom, ModalKind::Palette),
+            palette.header_rows,
+        )
+        .expect("the palette lays out")
+        .list
+    };
+    let pool = crate::smooth_scroll::non_pane_pool::PALETTE;
+    let region = command::decode_stream(&pooled)
+        .into_iter()
+        .find_map(|command| match command {
+            Command::PoolRegion(region) if region.pool == pool => Some(region),
+            _ => None,
+        });
+    let page = command::decode_stream(fill_payload(&pooled, pool, 0));
+    let nudges: Vec<[i16; 2]> = page
+        .iter()
+        .filter_map(|command| match command {
+            Command::Nudge(offset) => Some(*offset),
+            _ => None,
+        })
+        .take(6)
+        .collect();
+    let runs = page
+        .iter()
+        .filter(|command| matches!(command, Command::TextRun(_)))
+        .count();
+    let live_runs = command::decode_stream(&h.stoat.apc_scene.all_bytes())
+        .into_iter()
+        .filter(|command| match command {
+            Command::TextRun(run) => {
+                (list.y * 16..list.bottom() * 16).contains(&(run.row as u16))
+                    && (list.x * 16..list.right() * 16).contains(&(run.col as u16))
+            },
+            _ => false,
+        })
+        .count();
+
+    assert_eq!(
+        (region, nudges, runs > 0, live_runs),
+        (
+            Some(PoolRegionCommand {
+                pool,
+                top: list.y,
+                left: list.x,
+                width: list.width,
+                height: list.height,
+                window: 0,
+                kind: PoolKind::Grid,
+                dim: 0,
+                resident: true,
+            }),
+            vec![[0, 2], [0, 1], [0, 5], [0, 4], [0, 8], [0, 7]],
+            true,
+            0,
+        )
+    );
+}
+
 /// The marks of a finder list read the scopes' lists, which land after the
 /// first fill, so a list that lands refills the resident pool's pages and the
 /// first result ends in its `M`.

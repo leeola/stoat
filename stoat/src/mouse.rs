@@ -35,6 +35,7 @@ use crate::{
     render::{
         commit_picker::MIN_LIST_ROWS,
         conflict_view::{ConflictHover, ConflictTarget},
+        pixel_rows::RowMetrics,
         TypeScale,
     },
     run::{CmdId, GridSelection},
@@ -113,6 +114,9 @@ pub(crate) struct ModalSurfaces {
 enum ListRows {
     /// One row per result, in the window that `window_start` derives.
     OnePerResult,
+    /// The palette's command list, one row per command, which a pixel list
+    /// lays out in the window that `command_window` derives.
+    Commands,
     /// The file finder's results, whose long labels wrap onto more rows.
     Finder,
     /// The palette argument picker's results, which wrap as the finder's do.
@@ -139,11 +143,19 @@ impl ModalSurfaces {
         let row = mouse.row - self.list.y;
         let home = stoat.home.as_deref();
         let (rows, pixels) = match self.rows {
-            ListRows::OnePerResult => {
-                let start =
-                    crate::render::picker::window_start(self.selected, self.list.height as usize);
-                let index = start + row as usize;
-                return (index < self.len).then_some(index);
+            ListRows::OnePerResult => return self.one_per_result(row),
+            ListRows::Commands => {
+                let palette = stoat.command_palette.as_ref()?;
+                let Some(metrics) = palette.row_metrics else {
+                    return self.one_per_result(row);
+                };
+                let window = crate::render::command_palette::command_window(
+                    &palette.filtered,
+                    palette.selected,
+                    self.list.height,
+                    metrics,
+                );
+                return window.result_at(self.pixel_row(stoat, row, metrics));
             },
             ListRows::Finder => {
                 let finder = stoat.file_finder.as_ref()?;
@@ -159,19 +171,35 @@ impl ModalSurfaces {
         };
         let window =
             crate::render::picker::list_window(&rows, self.list.width, self.list.height, pixels);
+        let offset = match pixels {
+            Some(metrics) => self.pixel_row(stoat, row, metrics),
+            None => u32::from(row),
+        };
+        window.result_at(offset)
+    }
+
+    /// The result in list row `row` of a list of one row per result, in the
+    /// window that `window_start` derives.
+    fn one_per_result(&self, row: u16) -> Option<usize> {
+        let start = crate::render::picker::window_start(self.selected, self.list.height as usize);
+        let index = start + row as usize;
+        (index < self.len).then_some(index)
+    }
+
+    /// The physical px row of a pixel list laid out by `metrics` that a press
+    /// in list row `row` names.
+    ///
+    /// That is the pixel row that the list's pool reports with the press, or
+    /// the middle pixel row of the cell row where no report names it.
+    fn pixel_row(&self, stoat: &Stoat, row: u16, metrics: RowMetrics) -> u32 {
         let reported = stoat
             .pool_pointer
             .filter(|&(pool, ..)| Some(pool) == self.pool)
             .map(|(_, _, pixel_row)| u32::from(pixel_row));
-        let offset = match (pixels, reported) {
-            (Some(_), Some(pixel_row)) => pixel_row,
-            (Some(metrics), None) => {
-                let height = u32::from(metrics.cell[1]);
-                u32::from(row) * height + height / 2
-            },
-            (None, _) => u32::from(row),
-        };
-        window.result_at(offset)
+        reported.unwrap_or_else(|| {
+            let height = u32::from(metrics.cell[1]);
+            u32::from(row) * height + height / 2
+        })
     }
 }
 
@@ -601,7 +629,7 @@ pub(crate) fn boxed_modal_surfaces(stoat: &Stoat) -> Option<ModalSurfaces> {
                     preview: None,
                     len: palette.filtered.len(),
                     selected: palette.selected,
-                    rows: ListRows::OnePerResult,
+                    rows: ListRows::Commands,
                     pool: Some(crate::smooth_scroll::non_pane_pool::PALETTE),
                 });
             }
@@ -5835,6 +5863,42 @@ mod tests {
                 .expect("the palette is open");
             let picker = palette.arg_picker.as_ref().expect("the argument picker");
             picker.active_core_ref().picklist.selected
+        };
+
+        assert_eq!([press(22), press(20)], [1, 0]);
+    }
+
+    /// A press on the palette's command list lands on the pixel row its pool
+    /// reports, as a press on the argument list does. In list row 1, pixel
+    /// row 22 is row 1, and pixel row 20, the gap under row 0, is row 0.
+    #[test]
+    fn a_press_on_the_command_list_lands_on_the_pixel_row_under_the_pointer() {
+        let mut h = crate::test_harness::TestHarness::default();
+        h.stoat.stoatty_protocol = stoatty_protocol::PROTOCOL_VERSION;
+        h.stoat.cell_pixels = Some((9, 18));
+        h.stoat.display_scale = Some(1.0);
+        h.type_text(":");
+        h.snapshot();
+        let list = boxed_modal_surfaces(&h.stoat)
+            .expect("the palette is open")
+            .list;
+
+        let mut press = |pixel_row| {
+            let press = WindowIpcEvent::PoolMouse {
+                pool: crate::smooth_scroll::non_pane_pool::PALETTE,
+                kind: MouseKind::Press(IpcMouseButton::Left),
+                col: list.x + 1,
+                row: list.y + 1,
+                cell_col: 9,
+                cell_row: pixel_row,
+                mods: 0,
+            };
+            crate::app::deliver_window_event(&mut h.stoat, press);
+            h.stoat
+                .command_palette
+                .as_ref()
+                .expect("the palette is open")
+                .selected
         };
 
         assert_eq!([press(22), press(20)], [1, 0]);

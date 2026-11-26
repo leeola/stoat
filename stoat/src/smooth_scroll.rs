@@ -29,7 +29,7 @@ use crate::{
     render::{
         blame::{self, BlameColors, BlameLines, BLAME_COLUMN_CELLS},
         code_search::paint_match_rows,
-        command_palette::{arg_rows, paint_palette_rows},
+        command_palette::{arg_rows, command_page_start, paint_palette_rows},
         commits::paint_commit_rows,
         completion::paint_completion_rows,
         conflict_view::{render_conflict_rows, GridPaint},
@@ -1224,6 +1224,10 @@ pub(crate) fn render_symbol_finder_page(
 /// group. The rows of the `action` list that `namespace` names read their
 /// keys from `keys`, and a `cli` command's row reads its help in `specs`, as
 /// the live list reads them.
+///
+/// With `pixels` the page is a page of a pixel list, which starts at the
+/// page's first physical px row as [`command_page_start`] places it. A page
+/// past the list's end paints no row.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn render_palette_page(
     filtered: &[PaletteCommand],
@@ -1237,6 +1241,7 @@ pub(crate) fn render_palette_page(
     theme: &crate::theme::Theme,
     region_width: u16,
     region_height: u16,
+    pixels: Option<RowMetrics>,
 ) -> Vec<u8> {
     render_rows_page(
         region_width,
@@ -1244,6 +1249,20 @@ pub(crate) fn render_palette_page(
         page,
         theme,
         |buf, area, start_row, scene| {
+            let start = match pixels {
+                Some(metrics) => {
+                    let row = page_top_row(page, region_height);
+                    let at = row.saturating_mul(u32::from(metrics.cell[1]));
+                    let Some(start) = command_page_start(filtered, at, metrics) else {
+                        return;
+                    };
+                    start
+                },
+                None => RowStart {
+                    result: start_row,
+                    skip: 0,
+                },
+            };
             paint_palette_rows(
                 filtered,
                 match_indices,
@@ -1253,9 +1272,10 @@ pub(crate) fn render_palette_page(
                 keys,
                 specs,
                 area,
-                start_row,
+                start,
                 theme,
                 false,
+                pixels,
                 buf,
                 scene,
             )
@@ -3622,6 +3642,7 @@ mod tests {
                 &Theme::empty(),
                 100,
                 1,
+                None,
             );
             String::from_utf8_lossy(&bytes).into_owned()
         };

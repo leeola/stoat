@@ -113,8 +113,8 @@ pub struct CommandPalette {
     /// outlasts a change of the argument's source, and each open starts over
     /// at 0.
     pub(crate) arg_plate_width: u16,
-    /// The cell and scale that the last frame laid the argument list out by,
-    /// or `None` for a list on whole cell rows.
+    /// The cell and scale that the last frame laid the command list or the
+    /// argument list out by, or `None` for a list on whole cell rows.
     ///
     /// The pool that pages a pixel list and the hit test read the layout after
     /// the paint, so the paint keeps its measure here, as it keeps the

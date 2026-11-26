@@ -1357,15 +1357,57 @@ fn the_cmd_line_draws_an_alias_with_its_ghost() {
     );
 }
 
-/// A root row ends in its Source Tag, a rounded box in the overlay color with
-/// the `built-in` label over it, one cell inside the list's right edge.
+/// A root row's box is 20 px high and 1 px from the next, and its columns
+/// stand 8 px apart.
 ///
-/// The list is the 126 cells from cell 17 on the cell rows 15 to 27. At the
-/// Small scale of 208 the label `built-in` advances 104 sixteenths, so its box
-/// is 124 sixteenths wide and ends at cell 142. On cell row 16 the box covers
-/// the pixels from (1208, 289) to (1277, 304). On the selected row 15 the box
-/// stands over the row's wash, and the label's left pad reads the box's color.
-/// The bold name of row 16 draws in the text color.
+/// The list is the 126 cells from cell 17 on the cell rows 15 to 27, so row k
+/// covers the pixel rows 270 + 21k to 289 + 21k. The selected first row's box
+/// stands 1 px inside each end of the list, so the tab wash fills the pixels
+/// from (154, 270) to (1285, 289) and no other pixel of the rows 268 to 290.
+/// The name and alias columns take the longest name and first alias of the
+/// whole list, 25 and 18 cells, so the signature starts 732 sixteenths into
+/// the list. Its 28 chars at the Ui scale of 232 end at pixel column 793, and
+/// each description starts 8 px later, at 801. So on the 180 pixel rows from
+/// 291 the columns 795 to 800 read the base, and row 1's description
+/// brightens the pixels from 801.
+#[test]
+fn a_root_row_is_twenty_pixels_high() {
+    let mut home = support::scratch_home();
+    let shot = palette_frame(home.path(), ":<Settle>");
+
+    expect_color_box(
+        &shot,
+        &mut home,
+        TAB_WASH,
+        268..291,
+        (154, 270, 1285, 289),
+        "root_row_box",
+    );
+    let gap = brightest(&shot, (795, 291, 6, 180));
+    let desc = brightest(&shot, (801, 292, 9, 18));
+    if gap != 0x1e || desc <= 0x60 {
+        let frame = keep_frame(&shot, &mut home, "root_row_columns");
+        panic!(
+            "the gap before the descriptions peaks at {gap:#04x}, where it reads the base's \
+             0x1e, and row 1's description peaks at {desc:#04x}, where it draws above 0x60; \
+             the frame is {}",
+            frame.display(),
+        );
+    }
+}
+
+/// A root row ends in its Source Tag, a rounded box in the overlay color with
+/// the `built-in` label over it, 8 px inside the row's box.
+///
+/// The list is the 126 cells from cell 17 on the cell rows 15 to 27, and row
+/// 1's box covers the pixel rows 291 to 310. At the Small scale of 208 the
+/// label `built-in` advances 104 sixteenths, so its box is 122 sixteenths wide
+/// and ends at pixel column 1278, 9 px inside the list's right edge. The box
+/// stands 2 px under the row's top and is 16 px high, so it covers the pixels
+/// from (1209, 293) to (1277, 308). On the selected row 0 the box stands over
+/// the row's wash, and the label's left pad reads the box's color. The bold
+/// name of row 1 draws in the text color from pixel column 162, 1 px under the
+/// row's top.
 #[test]
 fn a_root_row_ends_in_a_built_in_tag() {
     let mut home = support::scratch_home();
@@ -1375,23 +1417,23 @@ fn a_root_row_ends_in_a_built_in_tag() {
         &shot,
         &mut home,
         OVERLAY,
-        288..306,
-        (1208, 289, 1277, 304),
+        291..311,
+        (1209, 293, 1277, 308),
         "built_in_tag",
     );
     expect_region(
         &shot,
         &mut home,
-        (1209, 278, 4, 2),
+        (1210, 278, 3, 2),
         OVERLAY,
         "built_in_tag_over_the_wash",
     );
 
-    let name = pixels_of(&shot, cell_rect(18, 16, 13, 1), TEXT);
+    let name = pixels_of(&shot, (162, 292, 117, 18), TEXT);
     if name == 0 {
         let frame = keep_frame(&shot, &mut home, "root_row_name");
         panic!(
-            "the name column of cell row 16 holds no pixel in the text color {}; the frame is {}",
+            "the name column of row 1 holds no pixel in the text color {}; the frame is {}",
             hex(TEXT),
             frame.display(),
         );
@@ -1402,8 +1444,9 @@ fn a_root_row_ends_in_a_built_in_tag() {
 /// its first line in the command's Source Tag, one cell after the name.
 ///
 /// The doc is the cell rows 29 to 34, and its text starts at cell 18. The
-/// name `files` takes 5 cells, so the tag's box starts at cell 24 and covers
-/// the pixels from (216, 523) to (285, 538).
+/// name `files` takes 5 cells, so the tag's box starts at cell 24. Its 122
+/// sixteenths, the label's 104 at the Small scale of 208 and 9 at each side,
+/// cover the pixels from (216, 523) to (284, 538).
 #[test]
 fn the_doc_island_tags_the_selected_command() {
     let mut home = support::scratch_home();
@@ -1414,7 +1457,7 @@ fn the_doc_island_tags_the_selected_command() {
         &mut home,
         OVERLAY,
         522..540,
-        (216, 523, 285, 538),
+        (216, 523, 284, 538),
         "doc_tag",
     );
 }
@@ -1422,23 +1465,25 @@ fn the_doc_island_tags_the_selected_command() {
 /// The root list ends in the `action` row under a 1 px rule, and the row's
 /// Source Tag reads `internal` on the internal tint.
 ///
-/// Twenty pages down select the last row, so the `action` row stands on the
-/// list's last cell row, 27, the pixel rows 486 to 503. The rule runs along
-/// the row's top pixel row, and its tag's box covers the pixels from (1208,
-/// 487) to (1277, 502). The row above keeps its `built-in` tag. The selected
-/// row reads the tab wash in the gap from its signature's end at x 512 to its
-/// description's start at x 639.
+/// Twenty pages down select the last row. The list's 13 cell rows hold 235
+/// px, and the `action` row takes 28 px with the 7 px of space over its box,
+/// so 9 rows of 21 px stand over it, where 10 would need 238. The 7 px start
+/// at pixel row 459, and the rule runs along pixel row 463, 4 px down. The
+/// selected row's box covers the pixel rows 466 to 485 in the tab wash, 1 px
+/// inside each end of the list, and its tag's box covers the pixels from
+/// (1209, 468) to (1277, 483). The row above keeps its `built-in` tag, and the
+/// space over the rule reads the base.
 #[test]
 fn the_root_list_ends_in_the_action_row_under_a_rule() {
     let mut home = support::scratch_home();
     let keys = format!(":{}<Settle>", "<PageDown>".repeat(20));
     let shot = palette_frame(home.path(), &keys);
 
-    let rule = longest_run(&shot, (170, 486, 1000), DIVIDER);
+    let rule = longest_run(&shot, (170, 463, 1000), DIVIDER);
     if rule != 1000 {
         let frame = keep_frame(&shot, &mut home, "action_rule");
         panic!(
-            "the longest run of the divider color {} on the pixel row 486 is {rule} px, where \
+            "the longest run of the divider color {} on the pixel row 463 is {rule} px, where \
              the rule runs 1000 px from x 170; the frame is {}",
             hex(DIVIDER),
             frame.display(),
@@ -1447,25 +1492,27 @@ fn the_root_list_ends_in_the_action_row_under_a_rule() {
     expect_color_box(
         &shot,
         &mut home,
+        TAB_WASH,
+        461..489,
+        (154, 466, 1285, 485),
+        "action_row_wash",
+    );
+    expect_color_box(
+        &shot,
+        &mut home,
         TINT_INTERNAL,
-        486..504,
-        (1208, 487, 1277, 502),
+        461..489,
+        (1209, 468, 1277, 483),
         "internal_tag",
     );
     expect_region(
         &shot,
         &mut home,
-        (1209, 476, 4, 2),
+        (1210, 446, 3, 2),
         OVERLAY,
         "built_in_tag_above",
     );
-    expect_region(
-        &shot,
-        &mut home,
-        (560, 495, 1, 1),
-        TAB_WASH,
-        "action_row_wash",
-    );
+    expect_region(&shot, &mut home, (500, 460, 1, 1), BASE, "action_row_space");
 }
 
 /// A pick list marks its selected row with the tab wash.
@@ -1507,17 +1554,18 @@ fn the_pick_list_marks_its_selected_row() {
 /// The `action` list draws each PascalCase name bold in the info color, and
 /// no row ends in a Source Tag.
 ///
-/// The bare token lists the internal actions from the list's first cell row,
-/// 15. The second row's name then stands in the cells from 18 on row 16. A
-/// root row's tag stands in the pixels from x 1200 to 1287 over the rows 15
-/// to 27. Those pixels hold no tag box of either tint.
+/// The bare token lists the internal actions from the list's top, pixel row
+/// 270. The second row's name then stands from pixel column 162 on the pixel
+/// rows 292 to 309, in its 22 cells. A root row's tag stands in the pixels
+/// from x 1200 to 1286, and those pixels hold no tag box of either tint over
+/// the 198 pixel rows from 270.
 #[test]
 fn the_action_list_draws_names_in_the_info_color_and_no_tag() {
     let mut home = support::scratch_home();
     let shot = palette_frame(home.path(), ":action <Settle>");
 
-    let name = pixels_of(&shot, cell_rect(18, 16, 22, 1), INFO);
-    let tags = [OVERLAY, TINT_INTERNAL].map(|tint| pixels_of(&shot, (1200, 270, 87, 234), tint));
+    let name = pixels_of(&shot, (162, 292, 198, 18), INFO);
+    let tags = [OVERLAY, TINT_INTERNAL].map(|tint| pixels_of(&shot, (1200, 270, 87, 198), tint));
     if name == 0 || tags != [0, 0] {
         let frame = keep_frame(&shot, &mut home, "action_list");
         panic!(

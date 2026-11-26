@@ -10,17 +10,19 @@ use crate::{
     keymap::ActionKeys,
     markdown::StyledLine,
     render::{
-        chrome::{PlateColors, ISLAND_BOTTOM, ISLAND_GAP, ISLAND_SIDE, ISLAND_TOP},
+        chrome::{
+            PlateColors, ISLAND_BOTTOM, ISLAND_GAP, ISLAND_SIDE, ISLAND_TOP, SELECTED_ROW_RADIUS,
+        },
         cmd_line::{self, CmdLine, CmdStatus},
         paint::style_rgb,
-        picker::{Footer, PathRows, RowMarks, RowStart, FOOTER_ROWS},
-        pixel_rows::RowMetrics,
+        picker::{Footer, ListWindow, PathRows, RowMarks, RowStart, FOOTER_ROWS},
+        pixel_rows::{self, PixelBar, Placer, RowMetrics, ROW_PAD},
         run_pane,
-        text::{pre_wrap_rows, wrap_text, write_str, write_str_clipped},
+        text::{clip_to_width, pre_wrap_rows, wrap_text, write_str, write_str_clipped},
         TypeScale,
     },
     run::cargo::CmdReport,
-    theme::TypeRole,
+    theme::{TypeRole, FULL_CELL_SCALE},
     user_command::{
         pick,
         run::{self, CliSpecState, LoadedCli},
@@ -35,7 +37,7 @@ use ratatui::{
     widgets::{Block, Borders, StatefulWidget},
 };
 use std::{borrow::Cow, collections::HashMap, ops::Range, path::Path};
-use stoat_action::{registry::RegistryEntry, ValueSource};
+use stoat_action::ValueSource;
 use stoat_widgets::{
     bar::Bar,
     text_run::{self, TextRun},
@@ -85,8 +87,8 @@ const FLAG_VALUE_COLUMNS: u16 = 9;
 const SUBCOMMAND_COLUMNS: u16 = 8;
 
 /// The sixteenths between a Source Tag's box and its label on each side, the
-/// board's `padding: 0 5px`.
-const SOURCE_TAG_INSET: u16 = 10;
+/// board's `padding: 0 5px` at a 9 px cell.
+const SOURCE_TAG_INSET: u16 = 9;
 
 /// The height of a Source Tag's box, in sixteenths of a row, one in from the
 /// row's top. It is the whole sixteenth nearest the board's
@@ -96,6 +98,41 @@ const SOURCE_TAG_HEIGHT: u16 = 14;
 /// The radius a Source Tag's box rounds its corners at, in logical pixels,
 /// the board's `border-radius: 4px`.
 const SOURCE_TAG_RADIUS: u8 = 4;
+
+/// The logical px of space over the `action` row's rule, the CmdRoot board's
+/// `margin-top: 4px`.
+const ACTION_ROW_MARGIN: u16 = 4;
+
+/// The logical px of the rule over the `action` row, the board's
+/// `border-top: 1px`.
+const ACTION_ROW_RULE: u16 = 1;
+
+/// The logical px between the `action` row's rule and its box, the board's
+/// `padding-top: 2px`.
+const ACTION_ROW_PAD: u16 = 2;
+
+/// The logical px that the box of a pixel row stands inside each end of the
+/// list. The command list has no preview beside it, so both ends match.
+const PIXEL_BOX_INSET: u16 = 1;
+
+/// The logical px that a pixel row's last part ends inside its box, the
+/// CmdRoot board's `padding: 0 8px`.
+const PIXEL_ROW_PAD: u16 = 8;
+
+/// Sixteenths from the list's left edge to a pixel row's first column, the
+/// [`PIXEL_BOX_INSET`] and the [`PIXEL_ROW_PAD`] at a 9 px cell.
+const PIXEL_FIRST_COLUMN: u16 = 16;
+
+/// Sixteenths between two columns of a pixel row, the boards' 8 px gap at a
+/// 9 px cell.
+const PIXEL_COLUMN_GAP: u16 = 14;
+
+/// The logical px that a pixel row's Source Tag stands under the top of the
+/// row's box, which centers the board's 16 px chip in the 20 px box.
+const PIXEL_TAG_DROP: u16 = 2;
+
+/// The logical px of a pixel row's Source Tag, the board's `line-height: 16px`.
+const PIXEL_TAG_HEIGHT: u16 = 16;
 
 /// The label and the color scope of the Source Tag that names the internal
 /// actions, on the `action` row and in an internal action's doc.
@@ -496,6 +533,8 @@ pub(crate) fn render_command_palette(
     let content_rows = palette.list_rows_hint();
     let status = filter_status(palette, theme);
     let cycle = PaletteScope::cycle(&palette.commands);
+    let pixels = RowMetrics::of(theme, scene);
+    palette.row_metrics = pixels;
     render_palette_filter(
         &palette.input,
         &palette.filtered,
@@ -513,6 +552,7 @@ pub(crate) fn render_command_palette(
         &status,
         &palette.keys,
         specs,
+        pixels,
         ws,
         home,
         theme,
@@ -524,7 +564,13 @@ pub(crate) fn render_command_palette(
     if let Some(layout) = palette_filter_layout(area, content_rows, zoom, palette.header_rows) {
         palette.plate = Some(layout.modal);
         if palette.command.is_none() {
-            palette.viewport_rows = Some(layout.list.height as usize);
+            let rows = layout.list.height;
+            palette.viewport_rows = Some(match pixels {
+                Some(m) => command_window(&palette.filtered, palette.selected, rows, m)
+                    .whole(m.extent(rows))
+                    .max(1),
+                None => usize::from(rows),
+            });
         }
     }
 }
@@ -1872,6 +1918,9 @@ fn grouped(count: usize) -> String {
 /// The key line names the keys of the list that `namespace` names, as
 /// [`palette_footer_parts`] gives them under `scope`. The rows and the doc of
 /// a `cli` command read its loaded help in `specs`.
+///
+/// With `pixels` the list's rows are a pixel list's, which the palette's
+/// resident pool draws, so the list paints no row of its own.
 #[allow(clippy::too_many_arguments)]
 fn render_palette_filter(
     input: &InputView,
@@ -1890,6 +1939,7 @@ fn render_palette_filter(
     status: &[(String, Style)],
     keys: &ActionKeys,
     specs: &HashMap<String, CliSpecState>,
+    pixels: Option<RowMetrics>,
     ws: &mut Workspace,
     home: Option<&Path>,
     theme: &crate::theme::Theme,
@@ -1936,22 +1986,28 @@ fn render_palette_filter(
         crate::render::chrome::modal_island(doc, doc_edges, plate, theme, buf, scene);
     }
 
-    let scroll = selected.saturating_sub(list.height.saturating_sub(1) as usize);
-    paint_palette_rows(
-        filtered,
-        match_indices,
-        selected,
-        name_offset,
-        namespace,
-        keys,
-        specs,
-        list,
-        scroll,
-        theme,
-        true,
-        buf,
-        &mut *scene,
-    );
+    if pixels.is_none() {
+        let scroll = selected.saturating_sub(list.height.saturating_sub(1) as usize);
+        paint_palette_rows(
+            filtered,
+            match_indices,
+            selected,
+            name_offset,
+            namespace,
+            keys,
+            specs,
+            list,
+            RowStart {
+                result: scroll,
+                skip: 0,
+            },
+            theme,
+            true,
+            None,
+            buf,
+            &mut *scene,
+        );
+    }
 
     if doc.height > 0 {
         if plate.is_none() {
@@ -2395,11 +2451,10 @@ fn signature(command: &PaletteCommand, specs: &HashMap<String, CliSpecState>) ->
     params.join(" ")
 }
 
-/// Paint command-palette result rows into `area` starting at `start_row`, one
-/// row per entry, with the selected row and the fuzzy-match characters
-/// highlighted.
+/// Paint command-palette result rows into `area` from `start`, one row per
+/// entry, with the selected row and the fuzzy-match characters highlighted.
 ///
-/// Shared by the live list, which derives `start_row` from the selection, and
+/// Shared by the live list, which derives `start` from the selection, and
 /// the smooth-scroll pool, which paints absolute pages, so both render
 /// identical rows. The selected row draws through
 /// [`chrome::selected_row`](crate::render::chrome::selected_row) with
@@ -2420,13 +2475,26 @@ fn signature(command: &PaletteCommand, specs: &HashMap<String, CliSpecState>) ->
 ///
 /// Under [`Namespace::Actions`] in `namespace`, a row reads the action's
 /// PascalCase name, its kebab name, its keys in `keys`, and its short
-/// description instead. [`paint_action_columns`] paints those columns, and
-/// the row draws no Source Tag.
+/// description instead, as [`row_parts`] words them, and the row draws no
+/// Source Tag. Its two name columns take [`ACTION_NAME_COLUMNS`] cells and
+/// grow as the root's name column grows, and the keys clip at
+/// [`ACTION_KEY_COLUMNS`].
 ///
 /// Each name leaves out its first `name_offset` bytes, the group token and
 /// space a grouped list's title already shows, and so does an alias that
 /// starts with them. A match position indexes the whole name, so one inside
 /// the left-out part paints nothing.
+///
+/// With `pixels` the rows are a pixel list's, laid out by those metrics from
+/// `start`'s row with its first `skip` px above `area`, and they write no
+/// cell. A row's box is 20 px high, 1 px from the next and 1 px inside each
+/// end of the list. Each column starts [`PIXEL_COLUMN_GAP`] after the width of
+/// the column before it, where a width counts chars at the column's own size:
+/// the name and the alias at the cell size, and the signature, the kebab name,
+/// the keys, and the description at [`TypeRole::Ui`]. The name columns take
+/// the longest of the whole list, because two pages must agree. The tag is a
+/// 16 px chip 2 px under the box's top that ends 8 px inside the box, and the
+/// `action` row stands [`action_lead`] lower, its rule in that space.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn paint_palette_rows(
     filtered: &[PaletteCommand],
@@ -2437,27 +2505,38 @@ pub(crate) fn paint_palette_rows(
     keys: &ActionKeys,
     specs: &HashMap<String, CliSpecState>,
     area: Rect,
-    start_row: usize,
+    start: RowStart,
     theme: &crate::theme::Theme,
     panels: bool,
+    pixels: Option<RowMetrics>,
     buf: &mut Buffer,
     scene: &mut stoat_widgets::ApcScene,
 ) {
+    let list = PaletteList {
+        filtered,
+        match_indices,
+        selected,
+        name_offset,
+        namespace,
+        keys,
+        specs,
+        theme,
+    };
+    if let Some(metrics) = pixels {
+        paint_pixel_palette_rows(&list, area, start, metrics, buf, scene);
+        return;
+    }
     let rows = area.height as usize;
     if rows == 0 {
         return;
     }
 
     let row_style = theme.get(crate::theme::scope::UI_TEXT);
-    let name_style = row_style.add_modifier(Modifier::BOLD);
-    let muted = theme.get(crate::theme::scope::UI_TEXT_MUTED);
-    let dim = theme.get(crate::theme::scope::UI_TEXT_DIM);
-    let match_style = theme.list_match();
     let keeps_columns = theme
         .try_get(crate::theme::scope::UI_LIST_SELECTED)
         .is_some();
 
-    let on_show = || filtered.iter().skip(start_row).take(rows);
+    let on_show = || filtered.iter().skip(start.result).take(rows);
     let widest = |cells: fn(&PaletteCommand, usize) -> &str, least: u16| {
         on_show()
             .map(|entry| cells(entry, name_offset).chars().count())
@@ -2474,23 +2553,11 @@ pub(crate) fn paint_palette_rows(
         )
     });
 
-    let action_style = action_name_style(theme);
     let divider = style_rgb(theme.get(crate::theme::scope::UI_DIVIDER).fg).filter(|_| scene.live());
-    let tag_of = |command: &PaletteCommand| {
-        let (label, scope) = source_tag(command)?;
-        let style = theme.try_get(scope)?;
-        let start = area
-            .width
-            .saturating_sub(1)
-            .saturating_mul(16)
-            .saturating_sub(source_tag_width(label, theme));
-        Some((label, start, style))
-    };
     let end_x = area.x + area.width;
-    let empty_indices: Vec<u32> = Vec::new();
 
     for (row_idx, entry) in on_show().enumerate() {
-        let abs = start_row + row_idx;
+        let abs = start.result + row_idx;
         let row = Rect::new(area.x, area.y + row_idx as u16, area.width, 1);
         let is_selected = abs == selected;
         let style = match is_selected {
@@ -2526,131 +2593,467 @@ pub(crate) fn paint_palette_rows(
             StatefulWidget::render(rule, row, buf, scene);
         }
 
-        let indices = match_indices.get(abs).unwrap_or(&empty_indices);
-        if let Some(cols) = action_cols {
-            if let PaletteCommand::Action(entry) = entry {
-                paint_action_columns(buf, row, entry, indices, cols, keys, theme, column);
-            }
-            continue;
-        }
-
-        let name = shown_name(entry, name_offset);
+        let parts = row_parts(&list, abs, column);
         let name_x = area.x + 1;
-        let own_name = match entry {
-            PaletteCommand::Action(action) if !action.is_command() => action_style,
-            _ => name_style,
+        let (starts, ends) = match action_cols {
+            Some((pascal_cols, kebab_cols)) => {
+                let kebab_x = name_x.saturating_add(pascal_cols + 1);
+                let keys_x = kebab_x.saturating_add(kebab_cols + 1);
+                let keys_end = keys_x.saturating_add(ACTION_KEY_COLUMNS).min(end_x);
+                let desc_x = keys_x.saturating_add(ACTION_KEY_COLUMNS + 1);
+                (
+                    [name_x, kebab_x, keys_x, desc_x],
+                    [end_x, end_x, keys_end, end_x.saturating_sub(1)],
+                )
+            },
+            None => {
+                let alias_x = name_x.saturating_add(name_cols + 1);
+                let signature_x = alias_x.saturating_add(alias_cols + 1);
+                let signature_end = signature_x.saturating_add(SIGNATURE_COLUMNS).min(end_x);
+                let desc_x = signature_x.saturating_add(SIGNATURE_COLUMNS + 1);
+                let desc_end = match parts.tag {
+                    Some((label, _)) => {
+                        area.x + (cell_tag_start(label, area, theme) / 16).saturating_sub(1)
+                    },
+                    None => end_x.saturating_sub(1),
+                };
+                (
+                    [name_x, alias_x, signature_x, desc_x],
+                    [end_x, end_x, signature_end, desc_end],
+                )
+            },
         };
-        write_str_clipped(buf, name_x, row.y, name, column(own_name), end_x);
-        let at = (name_x, row.y, end_x);
-        paint_matches(buf, at, name, name_offset, indices, match_style);
+        write_columns(buf, row.y, &parts, starts, ends);
 
-        let alias_x = name_x.saturating_add(name_cols + 1);
-        let alias = shown_alias(entry, name_offset);
-        write_str_clipped(buf, alias_x, row.y, alias, column(muted), end_x);
-
-        let signature_x = alias_x.saturating_add(alias_cols + 1);
-        let signature_end = signature_x.saturating_add(SIGNATURE_COLUMNS).min(end_x);
-        let signature = signature(entry, specs);
-        write_str_clipped(
-            buf,
-            signature_x,
-            row.y,
-            &signature,
-            column(muted),
-            signature_end,
-        );
-
-        let tag = tag_of(entry);
-        let desc_end = match tag {
-            Some((_, start, _)) => area.x + (start / 16).saturating_sub(1),
-            None => end_x.saturating_sub(1),
-        };
-        let desc_x = signature_x.saturating_add(SIGNATURE_COLUMNS + 1);
-        let desc = match entry {
-            PaletteCommand::Action(action) => action.def.short_desc(),
-            PaletteCommand::User(user) => user.doc.as_str(),
-        };
-        write_str_clipped(buf, desc_x, row.y, desc, column(dim), desc_end);
-
-        if let Some((label, start, style)) = tag {
+        if let Some((label, style)) = parts.tag {
+            let start = cell_tag_start(label, area, theme);
             paint_source_tag(buf, row, start, label, style, theme, scene);
         }
     }
 }
 
-/// Paint the columns of internal action `entry`'s row in the `action` list.
+/// What one paint of the palette's list reads its rows from.
+struct PaletteList<'a> {
+    filtered: &'a [PaletteCommand],
+    match_indices: &'a [Vec<u32>],
+    selected: usize,
+    name_offset: usize,
+    namespace: Namespace,
+    keys: &'a ActionKeys,
+    specs: &'a HashMap<String, CliSpecState>,
+    theme: &'a crate::theme::Theme,
+}
+
+/// The text of one row of the palette's list, which both of the list's forms
+/// draw.
+struct RowParts<'a> {
+    /// The row's four columns from its left, each as spans of one style. A
+    /// command reads its name, its first alias, its [`signature`], and its
+    /// short description. A row of the `action` list reads its PascalCase
+    /// name, its kebab name, its keys, and its short description.
+    columns: [Vec<(Cow<'a, str>, Style)>; 4],
+    /// The label and the style of the Source Tag that ends the row.
+    tag: Option<(&'static str, Style)>,
+}
+
+/// The text of row `index` of `list`, each column in the style that `column`
+/// gives the column's own style.
 ///
-/// The row reads the PascalCase name in `ui.cmd.action` and the kebab name in
-/// `ui.text.muted`. The labels of the keys that `keys` binds to the action
-/// follow in `ui.key_label`, and the short description ends the row in
-/// `ui.text.dim`. The columns stand one cell apart.
+/// A command's name is bold, or in `ui.cmd.action` for an entry that is no
+/// command, an internal action or the `action` row. Its alias and signature
+/// read `ui.text.muted`, and its description `ui.text.dim`. A row of the
+/// `action` list reads its PascalCase name in `ui.cmd.action`, its kebab name
+/// in `ui.text.muted`, the labels of the keys that bind the action in
+/// `ui.key_label`, and its description in `ui.text.dim`. The `action` list
+/// draws no Source Tag.
 ///
-/// `cols` holds the cells of the two name columns, which grow to the longest
-/// name on show, as the root's name column grows. The keys clip at
-/// [`ACTION_KEY_COLUMNS`], because the doc region lists them whole.
-///
-/// A position in `indices` indexes the kebab name, which the query ranks.
-/// [`pascal_matches`] marks the same letters of the PascalCase name.
-#[allow(clippy::too_many_arguments)]
-fn paint_action_columns(
-    buf: &mut Buffer,
-    row: Rect,
-    entry: &RegistryEntry,
-    indices: &[u32],
-    (pascal_cols, kebab_cols): (u16, u16),
-    keys: &ActionKeys,
-    theme: &crate::theme::Theme,
+/// Each char at a position in the row's match indices stands in a span of its
+/// own, in the column's style patched by the list's match style. A position
+/// indexes the kebab name in the `action` list, and [`pascal_matches`] marks
+/// the same letters of the PascalCase name. The signature clips at
+/// [`SIGNATURE_COLUMNS`] chars and the keys at [`ACTION_KEY_COLUMNS`],
+/// because the doc region shows them whole.
+fn row_parts<'a>(
+    list: &PaletteList<'a>,
+    index: usize,
     column: impl Fn(Style) -> Style,
-) {
-    let end_x = row.right();
+) -> RowParts<'a> {
+    let theme = list.theme;
+    let entry = &list.filtered[index];
+    let indices = list.match_indices.get(index).map_or(&[][..], Vec::as_slice);
     let matched = theme.list_match();
+    let muted = column(theme.get(crate::theme::scope::UI_TEXT_MUTED));
+    let dim = column(theme.get(crate::theme::scope::UI_TEXT_DIM));
+    let desc = match entry {
+        PaletteCommand::Action(action) => action.def.short_desc(),
+        PaletteCommand::User(user) => user.doc.as_str(),
+    };
 
-    let pascal = entry.def.name();
-    let pascal_x = row.x + 1;
-    write_str_clipped(
-        buf,
-        pascal_x,
-        row.y,
-        pascal,
-        column(action_name_style(theme)),
-        end_x,
-    );
-    let pascal_indices = pascal_matches(&entry.command_name, indices);
-    paint_matches(
-        buf,
-        (pascal_x, row.y, end_x),
-        pascal,
-        0,
-        &pascal_indices,
-        matched,
-    );
+    if list.namespace == Namespace::Actions {
+        let PaletteCommand::Action(action) = entry else {
+            return RowParts {
+                columns: Default::default(),
+                tag: None,
+            };
+        };
+        let (pascal, kebab) = (action.def.name(), action.command_name.as_str());
+        let labels = list
+            .keys
+            .get(pascal)
+            .map(|labels| labels.join(" \u{b7} "))
+            .unwrap_or_default();
+        let key_label = column(theme.get(crate::theme::scope::UI_KEY_LABEL));
+        let pascal_indices = pascal_matches(kebab, indices);
+        return RowParts {
+            columns: [
+                match_spans(
+                    pascal,
+                    0,
+                    &pascal_indices,
+                    column(action_name_style(theme)),
+                    matched,
+                ),
+                match_spans(kebab, 0, indices, muted, matched),
+                vec![(Cow::Owned(clipped(labels, ACTION_KEY_COLUMNS)), key_label)],
+                vec![(Cow::Borrowed(desc), dim)],
+            ],
+            tag: None,
+        };
+    }
 
-    let kebab = entry.command_name.as_str();
-    let kebab_x = pascal_x.saturating_add(pascal_cols + 1);
-    let muted = theme.get(crate::theme::scope::UI_TEXT_MUTED);
-    write_str_clipped(buf, kebab_x, row.y, kebab, column(muted), end_x);
-    paint_matches(buf, (kebab_x, row.y, end_x), kebab, 0, indices, matched);
+    let own_name = match entry {
+        PaletteCommand::Action(action) if !action.is_command() => action_name_style(theme),
+        _ => theme
+            .get(crate::theme::scope::UI_TEXT)
+            .add_modifier(Modifier::BOLD),
+    };
+    let name = shown_name(entry, list.name_offset);
+    let alias = shown_alias(entry, list.name_offset);
+    let signature = clipped(signature(entry, list.specs), SIGNATURE_COLUMNS);
+    RowParts {
+        columns: [
+            match_spans(name, list.name_offset, indices, column(own_name), matched),
+            vec![(Cow::Borrowed(alias), muted)],
+            vec![(Cow::Owned(signature), muted)],
+            vec![(Cow::Borrowed(desc), dim)],
+        ],
+        tag: source_tag(entry).and_then(|(label, scope)| Some((label, theme.try_get(scope)?))),
+    }
+}
 
-    let keys_x = kebab_x.saturating_add(kebab_cols + 1);
-    let keys_end = keys_x.saturating_add(ACTION_KEY_COLUMNS).min(end_x);
-    let labels = keys
-        .get(pascal)
-        .map(|labels| labels.join(" \u{b7} "))
-        .unwrap_or_default();
-    let key_label = theme.get(crate::theme::scope::UI_KEY_LABEL);
-    write_str_clipped(buf, keys_x, row.y, &labels, column(key_label), keys_end);
+/// The spans of `text` in `own`, where each stretch of chars at positions in
+/// `indices` stands in a span of its own in `own` patched by `matched`.
+///
+/// A row leaves out a name's first `offset` chars, and `indices` index the
+/// whole name, so the text's char `i` sits at position `offset + i`.
+fn match_spans<'a>(
+    text: &'a str,
+    offset: usize,
+    indices: &[u32],
+    own: Style,
+    matched: Style,
+) -> Vec<(Cow<'a, str>, Style)> {
+    let style = |hit: bool| match hit {
+        true => own.patch(matched),
+        false => own,
+    };
+    let mut spans = Vec::new();
+    let (mut start, mut run) = (0, None);
+    for (index, (byte, _)) in text.char_indices().enumerate() {
+        let hit = indices.binary_search(&((offset + index) as u32)).is_ok();
+        if let Some(was) = run.filter(|&was| was != hit) {
+            spans.push((Cow::Borrowed(&text[start..byte]), style(was)));
+            start = byte;
+        }
+        run = Some(hit);
+    }
+    if let Some(was) = run {
+        spans.push((Cow::Borrowed(&text[start..]), style(was)));
+    }
+    spans
+}
 
-    let desc_x = keys_x.saturating_add(ACTION_KEY_COLUMNS + 1);
-    let dim = theme.get(crate::theme::scope::UI_TEXT_DIM);
-    let desc = entry.def.short_desc();
-    write_str_clipped(
-        buf,
-        desc_x,
-        row.y,
-        desc,
-        column(dim),
-        end_x.saturating_sub(1),
-    );
+/// `text` cut to its first `chars` chars.
+fn clipped(mut text: String, chars: u16) -> String {
+    if let Some((end, _)) = text.char_indices().nth(usize::from(chars)) {
+        text.truncate(end);
+    }
+    text
+}
+
+/// The sixteenth of a cell row of the list `area` that a Source Tag `label`
+/// starts at, so its box ends one cell inside the list's right edge.
+fn cell_tag_start(label: &str, area: Rect, theme: &crate::theme::Theme) -> u16 {
+    area.width
+        .saturating_sub(1)
+        .saturating_mul(16)
+        .saturating_sub(source_tag_width(label, theme))
+}
+
+/// Write the columns of `parts` into the cells of row `y`, each column from
+/// its cell in `starts` and cut at its cell in `ends`.
+fn write_columns(buf: &mut Buffer, y: u16, parts: &RowParts<'_>, starts: [u16; 4], ends: [u16; 4]) {
+    for ((spans, mut x), end) in parts.columns.iter().zip(starts).zip(ends) {
+        for (text, style) in spans {
+            write_str_clipped(buf, x, y, text, *style, end);
+            x = x.saturating_add(text.chars().count() as u16);
+        }
+    }
+}
+
+/// Paint the rows of `list` into `area` from `start` as the pixel rows that
+/// [`paint_palette_rows`] describes, laid out by `m`.
+fn paint_pixel_palette_rows(
+    list: &PaletteList<'_>,
+    area: Rect,
+    start: RowStart,
+    m: RowMetrics,
+    buf: &mut Buffer,
+    scene: &mut stoat_widgets::ApcScene,
+) {
+    let theme = list.theme;
+    let selected_style = theme.list_selected(crate::theme::scope::UI_SELECTION);
+    let keeps_columns = theme
+        .try_get(crate::theme::scope::UI_LIST_SELECTED)
+        .is_some();
+    let fallback = style_rgb(Some(crate::render::themed_fg(theme))).unwrap_or([0xff; 3]);
+    let divider = style_rgb(theme.get(crate::theme::scope::UI_DIVIDER).fg);
+    let small = theme.type_scale(TypeRole::Small);
+    let columns = pixel_columns(list, theme.type_scale(TypeRole::Ui));
+
+    let left = m.cols(PIXEL_BOX_INSET);
+    let box_width = area.width.saturating_mul(16).saturating_sub(2 * left);
+    let tag_end = area
+        .width
+        .saturating_mul(16)
+        .saturating_sub(left + m.cols(PIXEL_ROW_PAD));
+    let height = i64::from(area.height) * i64::from(m.cell[1]);
+    let inside = |y: i64| (0..height).contains(&y);
+    let mut placer = Placer::default();
+
+    let mut y = -i64::from(start.skip);
+    for index in start.result..list.filtered.len() {
+        if y >= height {
+            break;
+        }
+        let lead = action_lead(list.filtered, index, m);
+        let rule = y + i64::from(m.px(ACTION_ROW_MARGIN));
+        if let Some(color) = divider.filter(|_| lead > 0 && inside(rule)) {
+            let bar = PixelBar {
+                x: left as i16,
+                y: rule as u32,
+                width: box_width,
+                height: 1,
+                color,
+                radius: 0,
+            };
+            pixel_rows::bar(&mut placer, &m, area, &bar, buf, scene);
+        }
+        let top = y + i64::from(lead);
+
+        let is_selected = index == list.selected;
+        if let Some(color) = style_rgb(selected_style.bg).filter(|_| is_selected && inside(top)) {
+            let bar = PixelBar {
+                x: left as i16,
+                y: top as u32,
+                width: box_width,
+                height: m.box16(1),
+                color,
+                radius: SELECTED_ROW_RADIUS,
+            };
+            pixel_rows::bar(&mut placer, &m, area, &bar, buf, scene);
+        }
+
+        let column = |own: Style| match is_selected && !keeps_columns {
+            true => selected_style,
+            false => own,
+        };
+        let parts = row_parts(list, index, column);
+        let tag = parts.tag.map(|(label, style)| {
+            let width = source_tag_width(label, theme);
+            (label, style, tag_end.saturating_sub(width), width)
+        });
+        let tag_top = top + i64::from(m.px(PIXEL_TAG_DROP));
+        if let Some((_, style, x, width)) = tag
+            && let Some(color) = style_rgb(style.bg).filter(|_| inside(tag_top))
+        {
+            let bar = PixelBar {
+                x: x as i16,
+                y: tag_top as u32,
+                width,
+                height: m.rows16(PIXEL_TAG_HEIGHT),
+                color,
+                radius: SOURCE_TAG_RADIUS,
+            };
+            pixel_rows::bar(&mut placer, &m, area, &bar, buf, scene);
+        }
+
+        let line = top + i64::from(m.px(ROW_PAD));
+        if inside(line) {
+            let anchor = placer.line(&m, area, line as u32, scene);
+            let desc_end = match tag {
+                Some((_, _, x, _)) => x.saturating_sub(PIXEL_COLUMN_GAP),
+                None => tag_end,
+            };
+            let mut col = PIXEL_FIRST_COLUMN;
+            for (spans, (scale, width)) in parts.columns.iter().zip(columns) {
+                match width {
+                    Some(width) => {
+                        pixel_rows::emit_spans(spans, col, scale, anchor, fallback, buf, scene);
+                        col = col.saturating_add(width + PIXEL_COLUMN_GAP);
+                    },
+                    None => {
+                        let room = chars_within(desc_end.saturating_sub(col), scale);
+                        let shown = clip_spans(spans, room);
+                        pixel_rows::emit_spans(&shown, col, scale, anchor, fallback, buf, scene);
+                    },
+                }
+            }
+            if let Some((label, style, x, _)) = tag {
+                TextRun {
+                    col: (x + SOURCE_TAG_INSET) as i16,
+                    row: 0,
+                    scale: small,
+                    color: style_rgb(style.fg).unwrap_or(fallback),
+                    bg: None,
+                    bold: false,
+                    italic: false,
+                    follow: 0,
+                    anchor: None,
+                    text: label,
+                }
+                .render(anchor, buf, scene);
+            }
+        }
+        y += i64::from(row_pitch(list.filtered, index, m));
+    }
+    placer.end(scene);
+}
+
+/// The text scale of each column of a pixel row of `list`, and the width in
+/// sixteenths of each but the description, which takes the rest of the row.
+///
+/// A width counts chars at the column's own scale: the name and the alias at
+/// the cell size, and the rest at `ui`. The name and alias columns, and both
+/// name columns of the `action` list, take the longest of the whole list.
+fn pixel_columns(list: &PaletteList<'_>, ui: u16) -> [(u16, Option<u16>); 4] {
+    let widest = |cells: fn(&PaletteCommand, usize) -> &str, least: u16| {
+        list.filtered
+            .iter()
+            .map(|entry| cells(entry, list.name_offset).chars().count())
+            .max()
+            .unwrap_or(0)
+            .max(usize::from(least))
+    };
+    let column =
+        |scale: u16, chars: usize| (scale, Some(text_run::advance_sixteenths(chars, scale)));
+    match list.namespace {
+        Namespace::Commands => [
+            column(FULL_CELL_SCALE, widest(shown_name, NAME_COLUMNS)),
+            column(FULL_CELL_SCALE, widest(shown_alias, ALIAS_COLUMNS)),
+            column(ui, usize::from(SIGNATURE_COLUMNS)),
+            (ui, None),
+        ],
+        Namespace::Actions => [
+            column(FULL_CELL_SCALE, widest(pascal_name, ACTION_NAME_COLUMNS)),
+            column(ui, widest(shown_name, ACTION_NAME_COLUMNS)),
+            column(ui, usize::from(ACTION_KEY_COLUMNS)),
+            (ui, None),
+        ],
+    }
+}
+
+/// The spans of `spans` cut to their first `chars` chars.
+fn clip_spans<'s>(spans: &'s [(Cow<'_, str>, Style)], chars: usize) -> Vec<(&'s str, Style)> {
+    let mut left = chars;
+    spans
+        .iter()
+        .map_while(|(text, style)| {
+            (left > 0).then(|| {
+                let shown = clip_to_width(text, left);
+                left -= shown.chars().count();
+                (shown, *style)
+            })
+        })
+        .collect()
+}
+
+/// The most chars whose advance at `scale` fits in `room` sixteenths, as
+/// [`text_run::advance_sixteenths`] rounds an advance.
+fn chars_within(room: u16, scale: u16) -> usize {
+    (usize::from(room) * 16 + 7) / usize::from(scale.max(1))
+}
+
+/// The physical px over row `index`'s box of `filtered` that the `action`
+/// row takes for its margin, its rule, and the pad under the rule, or 0 for
+/// any other row and for an `action` row that leads the list.
+fn action_lead(filtered: &[PaletteCommand], index: usize, m: RowMetrics) -> u32 {
+    match index > 0 && filtered.get(index).is_some_and(names_action_row) {
+        true => m.px(ACTION_ROW_MARGIN) + m.px(ACTION_ROW_RULE) + m.px(ACTION_ROW_PAD),
+        false => 0,
+    }
+}
+
+/// The physical px from the top of row `index` of `filtered` to the top of
+/// the row after it, in a pixel list laid out by `m`.
+fn row_pitch(filtered: &[PaletteCommand], index: usize, m: RowMetrics) -> u32 {
+    m.pitch(1) + action_lead(filtered, index, m)
+}
+
+/// The physical px from the top of the palette's pixel list to the top of the
+/// space that row `index` takes, laid out by `m`.
+///
+/// The filter puts the `action` row, the one row with a lead, at the list's
+/// end, or at its start where the row takes no lead. So every row's space
+/// starts a whole [`RowMetrics::pitch`] of one line after the row above it.
+pub(crate) fn command_top(index: usize, m: RowMetrics) -> u32 {
+    (index as u32).saturating_mul(m.pitch(1))
+}
+
+/// The physical px that the box of row `index` of `filtered` covers in the
+/// palette's pixel list, laid out by `m`, from the list's top.
+///
+/// The `action` row's box stands its [`action_lead`] under the top of its
+/// space.
+pub(crate) fn command_box(filtered: &[PaletteCommand], index: usize, m: RowMetrics) -> Range<u32> {
+    let top = command_top(index, m) + action_lead(filtered, index, m);
+    top..top + m.box_height(1)
+}
+
+/// The window of the palette's pixel list `list_rows` cells tall around row
+/// `selected` of `filtered`, laid out by `m`.
+///
+/// The pool scrolls to the window's first row, the hit test reads the row
+/// under a press from it, and a page step moves by the rows it holds whole,
+/// so the three agree. A row takes its [`row_pitch`].
+pub(crate) fn command_window(
+    filtered: &[PaletteCommand],
+    selected: usize,
+    list_rows: u16,
+    m: RowMetrics,
+) -> ListWindow {
+    crate::render::picker::window_from(filtered.len(), selected, m.extent(list_rows), |index| {
+        row_pitch(filtered, index, m)
+    })
+}
+
+/// Where a page of the palette's pixel list whose first physical px row is
+/// `at` starts, laid out by `m`, or `None` at or past the list's end.
+///
+/// The page starts on the row whose space holds `at`, as [`command_top`]
+/// places each space, with the px of that space above `at` skipped.
+pub(crate) fn command_page_start(
+    filtered: &[PaletteCommand],
+    at: u32,
+    m: RowMetrics,
+) -> Option<RowStart> {
+    let last = filtered.len().checked_sub(1)?;
+    let result = ((at / m.pitch(1).max(1)) as usize).min(last);
+    let skip = at - command_top(result, m);
+    (skip < row_pitch(filtered, result, m)).then_some(RowStart {
+        result,
+        skip: skip as u16,
+    })
 }
 
 /// Paint `style` over each cell of `text` whose char sits at a position in
@@ -2856,11 +3259,11 @@ pub(super) fn paint_source_tag(
 #[cfg(test)]
 mod tests {
     use super::{
-        count_status, doc_lines, grouped, history_age, history_window, input_spans, paint_arg_rows,
-        paint_doc_lines, paint_history_rows, paint_palette_rows, palette_arg_layout,
-        palette_filter_layout, pascal_matches, pick_status, render_command_palette, source_tag,
-        usage_line, wrap_text, HistoryEntry, DOC_ROWS, ISLAND_BOTTOM, ISLAND_GAP, ISLAND_SIDE,
-        ISLAND_TOP, LIST_ROWS,
+        command_box, command_page_start, command_window, count_status, doc_lines, grouped,
+        history_age, history_window, input_spans, paint_arg_rows, paint_doc_lines,
+        paint_history_rows, paint_palette_rows, palette_arg_layout, palette_filter_layout,
+        pascal_matches, pick_status, render_command_palette, source_tag, usage_line, wrap_text,
+        HistoryEntry, DOC_ROWS, ISLAND_BOTTOM, ISLAND_GAP, ISLAND_SIDE, ISLAND_TOP, LIST_ROWS,
     };
     use crate::{
         cli_spec::{self, RG_HELP},
@@ -2871,7 +3274,7 @@ mod tests {
         input_history,
         keymap::ActionKeys,
         picker::Preview,
-        render::editor::ResolvedChrome,
+        render::{editor::ResolvedChrome, picker::RowStart, pixel_rows::RowMetrics},
         test_fixture::{plate_islands, row_rules},
         test_harness::TestHarness,
         theme::Theme,
@@ -3003,9 +3406,10 @@ mod tests {
             &ActionKeys::new(),
             &HashMap::new(),
             list,
-            0,
+            RowStart { result: 0, skip: 0 },
             &Theme::empty(),
             false,
+            None,
             &mut buf,
             &mut stoat_widgets::ApcScene::new(),
         );
@@ -3183,9 +3587,10 @@ mod tests {
             &ActionKeys::new(),
             &HashMap::new(),
             list,
-            0,
+            RowStart { result: 0, skip: 0 },
             theme,
             false,
+            None,
             &mut buf,
             &mut scene,
         );
@@ -3272,9 +3677,9 @@ mod tests {
             commands,
             [
                 Command::Bar(BarCommand {
-                    x: 1436,
+                    x: 1438,
                     y: 1,
-                    width: 148,
+                    width: 146,
                     height: 14,
                     color: [4, 5, 6],
                     occludes: false,
@@ -3283,7 +3688,7 @@ mod tests {
                     corners: 0,
                 }),
                 Command::TextRun(TextRunCommand {
-                    col: 1446,
+                    col: 1447,
                     row: 0,
                     scale: 256,
                     color: [1, 2, 3],
@@ -3365,9 +3770,10 @@ mod tests {
             &ActionKeys::new(),
             &HashMap::new(),
             list,
-            0,
+            RowStart { result: 0, skip: 0 },
             &theme,
             false,
+            None,
             &mut buf,
             &mut stoat_widgets::ApcScene::new(),
         );
@@ -3405,9 +3811,10 @@ mod tests {
                 &ActionKeys::new(),
                 &HashMap::new(),
                 list,
-                0,
+                RowStart { result: 0, skip: 0 },
                 &theme,
                 false,
+                None,
                 &mut buf,
                 &mut scene,
             );
@@ -3438,6 +3845,330 @@ mod tests {
                 }],
                 Vec::new(),
             ),
+        );
+    }
+
+    /// The metrics of a 9 by 18 px cell at a display scale of 1.
+    const M1: RowMetrics = RowMetrics {
+        cell: [9, 18],
+        scale: 1.0,
+    };
+
+    /// The commands, less the ends of their runs, of the rows of `entries`
+    /// painted from `start` as pixel rows by [`M1`] into the list (0, 0,
+    /// `width`, 3) under `theme`, with row `selected` selected.
+    fn pixel_commands(
+        entries: &[&'static registry::RegistryEntry],
+        selected: usize,
+        theme: &Theme,
+        start: RowStart,
+        width: u16,
+    ) -> Vec<Command> {
+        let list = Rect::new(0, 0, width, 3);
+        let mut scene = stoat_widgets::ApcScene::new();
+        paint_palette_rows(
+            &rows(entries),
+            &vec![Vec::new(); entries.len()],
+            selected,
+            0,
+            Namespace::Commands,
+            &ActionKeys::new(),
+            &HashMap::new(),
+            list,
+            start,
+            theme,
+            false,
+            Some(M1),
+            &mut Buffer::empty(list),
+            &mut scene,
+        );
+        decode_stream(scene.bytes())
+            .into_iter()
+            .filter(|command| *command != Command::TextRunEnd)
+            .collect()
+    }
+
+    /// A pixel row's run of `text` at `col` sixteenths on the cell row at
+    /// `row` sixteenths, at the test build's full-cell scale.
+    fn pixel_run(row: i16, col: i16, text: &str, color: [u8; 3], bold: bool) -> Command {
+        Command::TextRun(TextRunCommand {
+            col,
+            row,
+            scale: 256,
+            color,
+            bg: None,
+            bold,
+            italic: false,
+            follow: 0,
+            anchor: None,
+            text: text.to_owned(),
+        })
+    }
+
+    /// A pixel root row draws its tag as a chip 2 px under the row's top that
+    /// ends 8 px inside the box, and its text 1 px under the top. The columns
+    /// start 14 sixteenths after the width of the column before them, the
+    /// name and the alias columns 13 and 3 cells wide and the signature 28
+    /// chars. A run whose foreground has no RGB value draws in white.
+    #[test]
+    fn a_pixel_root_row_sets_its_columns_eight_pixels_apart() {
+        let entries = [registry::lookup_alias("open").expect("a command")];
+        let white = [0xff; 3];
+        let top = RowStart { result: 0, skip: 0 };
+        assert_eq!(
+            pixel_commands(&entries, usize::MAX, &tag_theme(), top, 100),
+            [
+                Command::Nudge([0, 2]),
+                Command::Bar(BarCommand {
+                    x: 1438,
+                    y: 0,
+                    width: 146,
+                    height: 14,
+                    color: [4, 5, 6],
+                    occludes: false,
+                    hatch: None,
+                    radius: 4,
+                    corners: 0,
+                }),
+                Command::Nudge([0, 1]),
+                pixel_run(0, 16, "open", white, true),
+                pixel_run(0, 238, "o", white, false),
+                pixel_run(0, 300, "<path>", white, false),
+                pixel_run(0, 762, "open a file", white, false),
+                pixel_run(0, 1447, "built-in", [1, 2, 3], false),
+                Command::Nudge([0, 0]),
+            ],
+        );
+    }
+
+    /// The `action` row stands 7 px under the row above it. The 4 px of its
+    /// margin come first, then its 1 px rule in `ui.divider` 1 px inside each
+    /// end of the list, then 2 px under the rule. Its rule draws on pixel row
+    /// 25 and its text on pixel row 29, both on cell row 1.
+    #[test]
+    fn a_pixel_action_row_stands_seven_pixels_under_the_row_above_it() {
+        let theme = {
+            let src = r##"theme t { ui.divider.fg = "#070707"; }"##;
+            let (config, _) = stoat_config::parse(src);
+            Theme::from_config(&config.expect("theme parses"), "t").expect("theme loads")
+        };
+        let open = registry::lookup_alias("open").expect("a command");
+        let white = [0xff; 3];
+        let top = RowStart { result: 0, skip: 0 };
+        assert_eq!(
+            pixel_commands(&[open, action_row()], usize::MAX, &theme, top, 100),
+            [
+                Command::Nudge([0, 1]),
+                pixel_run(0, 16, "open", white, true),
+                pixel_run(0, 238, "o", white, false),
+                pixel_run(0, 300, "<path>", white, false),
+                pixel_run(0, 762, "open a file", white, false),
+                Command::Nudge([0, 7]),
+                Command::Bar(BarCommand {
+                    x: 2,
+                    y: 16,
+                    width: 1596,
+                    height: 1,
+                    color: [7, 7, 7],
+                    occludes: false,
+                    hatch: None,
+                    radius: 0,
+                    corners: 0,
+                }),
+                Command::Nudge([0, 11]),
+                pixel_run(16, 16, "action", white, true),
+                pixel_run(16, 300, "<action> [args]", white, false),
+                pixel_run(
+                    16,
+                    762,
+                    "Stoat's internal actions, the lower-level API",
+                    white,
+                    false
+                ),
+                Command::Nudge([0, 0]),
+            ],
+        );
+    }
+
+    /// Under a theme that sets `ui.list.selected`, a selected pixel row's box
+    /// is a rounded bar in its background 1 px inside each end of the list,
+    /// and each column keeps its own color over the box.
+    #[test]
+    fn a_selected_pixel_row_keeps_its_column_colors_over_its_box() {
+        let theme = {
+            let src = r##"theme t {
+                ui.list.selected = { fg: "#000000", bg: "#7f7f7f" };
+                ui.text.muted.fg = "#050505";
+            }"##;
+            let (config, _) = stoat_config::parse(src);
+            Theme::from_config(&config.expect("theme parses"), "t").expect("theme loads")
+        };
+        let entries = [registry::lookup_alias("open").expect("a command")];
+        let (white, muted) = ([0xff; 3], [5, 5, 5]);
+        let top = RowStart { result: 0, skip: 0 };
+        assert_eq!(
+            pixel_commands(&entries, 0, &theme, top, 100),
+            [
+                Command::Bar(BarCommand {
+                    x: 2,
+                    y: 0,
+                    width: 1596,
+                    height: 18,
+                    color: [0x7f; 3],
+                    occludes: false,
+                    hatch: None,
+                    radius: 4,
+                    corners: 0,
+                }),
+                Command::Nudge([0, 1]),
+                pixel_run(0, 16, "open", white, true),
+                pixel_run(0, 238, "o", muted, false),
+                pixel_run(0, 300, "<path>", muted, false),
+                pixel_run(0, 762, "open a file", white, false),
+                Command::Nudge([0, 0]),
+            ],
+        );
+    }
+
+    /// A pixel row's description stops 14 sixteenths before its tag. In a
+    /// list 60 cells wide the tag of `open` starts at 798, so the description
+    /// from 762 has room for the one char that ends by 784.
+    #[test]
+    fn a_pixel_description_stops_fourteen_sixteenths_before_the_tag() {
+        let entries = [registry::lookup_alias("open").expect("a command")];
+        let top = RowStart { result: 0, skip: 0 };
+        let runs: Vec<(i16, String)> = pixel_commands(&entries, usize::MAX, &tag_theme(), top, 60)
+            .into_iter()
+            .filter_map(|command| match command {
+                Command::TextRun(run) => Some((run.col, run.text)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            runs,
+            [
+                (16, "open".to_owned()),
+                (238, "o".to_owned()),
+                (300, "<path>".to_owned()),
+                (762, "o".to_owned()),
+                (807, "built-in".to_owned()),
+            ],
+        );
+    }
+
+    /// A page that starts partway into a row draws no part of the row above
+    /// its top. From 3 px into the first of two rows, the first row's box, tag,
+    /// and text all stand above the page, and the second row's tag and text
+    /// draw 2 and 1 px into cell row 1. From 5 px into the `action` row's space
+    /// the rule above the page draws nothing, and the text draws 3 px down.
+    #[test]
+    fn a_pixel_page_draws_no_part_above_its_top() {
+        let theme = {
+            let src = r##"theme t {
+                ui.list.selected = { fg: "#000000", bg: "#7f7f7f" };
+                ui.cmd.source.builtin = { fg: "#010203", bg: "#040506" };
+                ui.divider.fg = "#070707";
+            }"##;
+            let (config, _) = stoat_config::parse(src);
+            Theme::from_config(&config.expect("theme parses"), "t").expect("theme loads")
+        };
+        let open = registry::lookup_alias("open").expect("a command");
+        let commands_of = |entries: &[&'static registry::RegistryEntry], result, skip| {
+            pixel_commands(entries, 0, &theme, RowStart { result, skip }, 100)
+        };
+        let tag = Command::Bar(BarCommand {
+            x: 1438,
+            y: 16,
+            width: 146,
+            height: 14,
+            color: [4, 5, 6],
+            occludes: false,
+            hatch: None,
+            radius: 4,
+            corners: 0,
+        });
+        let white = [0xff; 3];
+
+        assert_eq!(
+            (
+                commands_of(&[open, open], 0, 3),
+                commands_of(&[open, action_row()], 1, 5),
+            ),
+            (
+                vec![
+                    Command::Nudge([0, 2]),
+                    tag,
+                    Command::Nudge([0, 1]),
+                    pixel_run(16, 16, "open", white, true),
+                    pixel_run(16, 238, "o", white, false),
+                    pixel_run(16, 300, "<path>", white, false),
+                    pixel_run(16, 762, "open a file", white, false),
+                    pixel_run(16, 1447, "built-in", [1, 2, 3], false),
+                    Command::Nudge([0, 0]),
+                ],
+                vec![
+                    Command::Nudge([0, 3]),
+                    pixel_run(0, 16, "action", white, true),
+                    pixel_run(0, 300, "<action> [args]", white, false),
+                    pixel_run(
+                        0,
+                        762,
+                        "Stoat's internal actions, the lower-level API",
+                        white,
+                        false
+                    ),
+                    Command::Nudge([0, 0]),
+                ],
+            ),
+        );
+    }
+
+    /// The `action` row's box stands its 7 px lead under the top of its space
+    /// where a row stands above it, and on the top of its space where it leads
+    /// the list.
+    #[test]
+    fn the_action_row_box_stands_its_lead_under_its_space() {
+        let open = registry::lookup_alias("open").expect("a command");
+        let (under, leading) = (rows(&[open, action_row()]), rows(&[action_row(), open]));
+        assert_eq!(
+            [
+                command_box(&under, 1, M1),
+                command_box(&leading, 0, M1),
+                command_box(&leading, 1, M1),
+            ],
+            [28..48, 0..20, 21..41],
+        );
+    }
+
+    /// The `action` row takes the 28 px of its lead and its row. So with the
+    /// `action` row selected, 9 commands and the `action` row in a list 11
+    /// cells tall, 199 px, show the `action` row and 8 rows above it, and the 9
+    /// of them stand whole.
+    #[test]
+    fn the_command_window_counts_the_lead_of_the_action_row() {
+        let mut filtered: Vec<PaletteCommand> = registry::all()
+            .filter(|entry| entry.is_command())
+            .take(9)
+            .map(PaletteCommand::Action)
+            .collect();
+        filtered.push(PaletteCommand::Action(action_row()));
+
+        let window = command_window(&filtered, 9, 11, M1);
+        assert_eq!((window.first, window.whole(M1.extent(11))), (1, 9));
+    }
+
+    /// A page starts on the row whose space holds its first pixel row, with
+    /// the px of that space above the page skipped. The `action` row's space
+    /// takes 28 px from pixel row 42, and a page past it starts on no row.
+    #[test]
+    fn a_pixel_page_starts_on_the_row_whose_space_holds_its_first_pixel() {
+        let open = registry::lookup_alias("open").expect("a command");
+        let filtered = rows(&[open, open, action_row()]);
+        let start = |result, skip| Some(RowStart { result, skip });
+
+        assert_eq!(
+            [0, 30, 42, 69, 70].map(|at| command_page_start(&filtered, at, M1)),
+            [start(0, 0), start(1, 9), start(2, 0), start(2, 27), None],
         );
     }
 
@@ -3540,9 +4271,10 @@ mod tests {
             keys,
             &HashMap::new(),
             list,
-            0,
+            RowStart { result: 0, skip: 0 },
             &Theme::empty(),
             false,
+            None,
             &mut buf,
             &mut stoat_widgets::ApcScene::new(),
         );
@@ -4129,9 +4861,10 @@ mod tests {
             &ActionKeys::new(),
             &HashMap::new(),
             list,
-            0,
+            RowStart { result: 0, skip: 0 },
             theme,
             false,
+            None,
             &mut buf,
             &mut scene,
         );

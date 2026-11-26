@@ -1996,7 +1996,7 @@ pub(crate) fn list_window(
 /// takes each result above while the rows stay at most `rows`, then the results
 /// after the selected one until the rows reach `rows`. A selection past the
 /// last result counts as the last result.
-fn window_from(
+pub(crate) fn window_from(
     len: usize,
     selected: usize,
     rows: u32,

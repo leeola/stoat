@@ -17,7 +17,12 @@ use crate::{
     render::{chrome, paint::style_rgb, picker::RowStart},
     theme::Theme,
 };
-use ratatui::{buffer::Buffer, layout::Rect, style::Modifier, widgets::StatefulWidget};
+use ratatui::{
+    buffer::Buffer,
+    layout::Rect,
+    style::{Modifier, Style},
+    widgets::StatefulWidget,
+};
 use std::ops::Range;
 use stoat_widgets::{
     bar::Bar,
@@ -273,6 +278,46 @@ pub(crate) fn emit_cells(
     }
 }
 
+/// Draw `spans` as text runs on the line `anchor` from `col` sixteenths at
+/// `scale`, and answer the sixteenth that the last span's advance ends at.
+///
+/// Each span is one run with no background, which starts at `col` plus the
+/// advance of the chars before it, in its style's foreground, weight, and
+/// slant. A foreground with no RGB value takes `fallback`, and a blank span
+/// draws no run.
+pub(crate) fn emit_spans<S: AsRef<str>>(
+    spans: &[(S, Style)],
+    col: u16,
+    scale: u16,
+    anchor: Rect,
+    fallback: [u8; 3],
+    buf: &mut Buffer,
+    scene: &mut ApcScene,
+) -> u16 {
+    let mut chars = 0;
+    for (text, style) in spans {
+        let text = text.as_ref();
+        if !text.trim().is_empty() {
+            let start = col.saturating_add(text_run::advance_sixteenths(chars, scale));
+            TextRun {
+                col: i16::try_from(start).unwrap_or(i16::MAX),
+                row: 0,
+                scale,
+                color: style_rgb(style.fg).unwrap_or(fallback),
+                bg: None,
+                bold: style.add_modifier.contains(Modifier::BOLD),
+                italic: style.add_modifier.contains(Modifier::ITALIC),
+                follow: 0,
+                anchor: None,
+                text,
+            }
+            .render(anchor, buf, scene);
+        }
+        chars += text.chars().count();
+    }
+    col.saturating_add(text_run::advance_sixteenths(chars, scale))
+}
+
 /// Draw `bar` on the line of `area` that holds its top pixel row, under the
 /// nudge that sets its top there.
 pub(crate) fn bar(
@@ -298,7 +343,7 @@ pub(crate) fn bar(
 
 #[cfg(test)]
 mod tests {
-    use super::{bar, emit_cells, PixelBar, Placer, RowMetrics, RunsAt};
+    use super::{bar, emit_cells, emit_spans, PixelBar, Placer, RowMetrics, RunsAt};
     use crate::{
         render::picker::RowStart,
         theme::{Theme, FULL_CELL_SCALE},
@@ -471,6 +516,51 @@ mod tests {
                 run(96, "x", [1, 2, 3], false),
                 run(128, "y", [9, 9, 9], false),
             ]
+        );
+    }
+
+    /// Each span draws one run from the advance of the chars before it, in its
+    /// own colors, and a blank span draws none. At the scale of 232 a char
+    /// advances 14.5 sixteenths, so the runs after `ab` start where the
+    /// rounded advance of 3 and 5 chars ends. A foreground with no RGB value
+    /// takes the fallback, and the answer is where the advance of all 6 chars
+    /// ends.
+    #[test]
+    fn spans_draw_one_run_each_after_the_chars_before_them() {
+        let bold = Style::default()
+            .fg(Color::Rgb(1, 2, 3))
+            .add_modifier(Modifier::BOLD);
+        let spans = [
+            ("ab", bold),
+            (" ", Style::default()),
+            ("cd", Style::default().fg(Color::Rgb(4, 5, 6))),
+            ("e", Style::default()),
+        ];
+        let mut scene = ApcScene::new();
+        let end = emit_spans(
+            &spans,
+            8,
+            232,
+            Rect::new(0, 5, 8, 1),
+            [9, 9, 9],
+            &mut Buffer::empty(Rect::default()),
+            &mut scene,
+        );
+        let at_232 = |col, text, color, bold| match run(col, text, color, bold) {
+            Command::TextRun(run) => Command::TextRun(TextRunCommand { scale: 232, ..run }),
+            command => command,
+        };
+
+        assert_eq!(
+            (commands(&scene), end),
+            (
+                vec![
+                    at_232(8, "ab", [1, 2, 3], true),
+                    at_232(52, "cd", [4, 5, 6], false),
+                    at_232(81, "e", [9, 9, 9], false),
+                ],
+                95,
+            )
         );
     }
 

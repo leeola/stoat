@@ -1474,8 +1474,8 @@ mod tests {
         assert_eq!(
             (bars, runs),
             (
-                vec![(750, 49, 180, 14, 4, GROUND)],
-                vec![(760, "cargo test", TEXT), (944, "\u{2713}", MUTED)],
+                vec![(752, 49, 178, 14, 4, GROUND)],
+                vec![(761, "cargo test", TEXT), (944, "\u{2713}", MUTED)],
             ),
         );
     }
