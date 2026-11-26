@@ -544,6 +544,9 @@ impl Renderer {
     /// Split out of [`Self::render_into`] because a caller waiting on a surface
     /// drawable prepares before it holds a view, and still has to record
     /// through the same path afterward.
+    ///
+    /// A frame with a scrim records the strokes and the cursor after the scrim,
+    /// in the order a frame that composites pools records them.
     pub(crate) fn record_into(&mut self, device: &Device, queue: &Queue, view: &TextureView) {
         // Time this frame's GPU work when the timer's current slot is free.
         #[cfg(feature = "perf")]
@@ -554,7 +557,14 @@ impl Renderer {
         let mut encoder = device.create_command_encoder(&CommandEncoderDescriptor::default());
         {
             let mut render_pass = self.begin_frame_pass(&mut encoder, view, timing);
-            self.record_frame(&mut render_pass, CursorLayer::Inline);
+            if self.panel.scrim {
+                self.record_frame(&mut render_pass, CursorLayer::Deferred);
+                self.record_scrim(&mut render_pass);
+                self.record_panel_strokes(&mut render_pass);
+                self.record_cursor_over(&mut render_pass, None);
+            } else {
+                self.record_frame(&mut render_pass, CursorLayer::Inline);
+            }
         }
         self.finish_frame(device, queue, encoder, timing);
     }
@@ -633,6 +643,7 @@ impl Renderer {
                 }
             }
             self.record_pool_shadows(&mut render_pass, pools);
+            self.record_scrim(&mut render_pass);
             self.record_riding_panels(&mut render_pass);
             for (slot, pool) in pools.iter().enumerate() {
                 if !pool.occludable
@@ -853,6 +864,19 @@ impl Renderer {
                 self.panel.draw_shadows_over(render_pass, scissor);
             }
         }
+        render_pass.set_scissor_rect(0, 0, self.width, self.height);
+    }
+
+    /// Record the scrim over everything the frame has drawn, and the exterior
+    /// shadows of the floating boxes over it.
+    ///
+    /// Run after the pane composites and the shadows drawn again over them.
+    /// The riding panels, the composites of the boxes, the strokes, and the
+    /// cursor record after it. A no-op on a frame with no scrim. Leaves the
+    /// full-surface scissor set.
+    pub(crate) fn record_scrim(&self, render_pass: &mut RenderPass<'_>) {
+        render_pass.set_scissor_rect(0, 0, self.width, self.height);
+        self.panel.draw_scrim(render_pass);
         render_pass.set_scissor_rect(0, 0, self.width, self.height);
     }
 
@@ -2659,6 +2683,7 @@ impl GpuContext {
                 }
             }
             self.renderer.record_pool_shadows(&mut render_pass, pools);
+            self.renderer.record_scrim(&mut render_pass);
             self.renderer.record_riding_panels(&mut render_pass);
             for (slot, pool) in pools.iter().enumerate() {
                 if !pool.occludable
@@ -3191,14 +3216,15 @@ mod tests {
     use stoatty_protocol::command::Edge;
     use stoatty_term::{
         grid::{
-            BorderStyle, Grid, Icon, IconKind, Panel, PanelShadow, Rgb, ScrollRegion,
+            BorderStyle, Grid, Icon, IconKind, Panel, PanelShadow, Rgb, Scrim, ScrollRegion,
             UnderlineStyle,
         },
         term::Damage,
     };
     use wgpu::{
-        Device, Extent3d, Queue, Texture, TextureDescriptor, TextureDimension, TextureUsages,
-        TextureViewDescriptor,
+        Device, Extent3d, LoadOp, Operations, Queue, RenderPassColorAttachment,
+        RenderPassDescriptor, StoreOp, Texture, TextureDescriptor, TextureDimension, TextureUsages,
+        TextureView, TextureViewDescriptor,
     };
 
     /// A second window builds its font system from what the first found rather
@@ -3650,6 +3676,390 @@ mod tests {
             (center(1, 2), center(0, 5)),
             ([0, 160, 0], [80, 80, 80]),
             "the live cell shows inside the panel, and the pool paints outside it",
+        );
+    }
+
+    /// The ground of a scrim test's grid, the boards' window color.
+    const GROUND: Rgb = Rgb::new(23, 25, 30);
+
+    /// [`GROUND`] under [`board_scrim`].
+    const DIMMED: [u8; 3] = [16, 18, 21];
+
+    /// The fill of a scrim test's box.
+    const BOX_FILL: Rgb = Rgb::new(200, 100, 50);
+
+    /// The boards' overlay color at its 0.45 alpha, from `top_px` logical px
+    /// under the top of `top_row` down.
+    fn board_scrim(top_row: u16, top_px: i16) -> Scrim {
+        Scrim {
+            color: Rgb::new(8, 9, 11),
+            alpha: 115,
+            top_row,
+            top_px,
+        }
+    }
+
+    /// A box over the two cells at the top-left corner, filled with
+    /// [`BOX_FILL`] and casting `shadow`, with square corners and no frame.
+    fn corner_box(shadow: PanelShadow) -> Panel {
+        Panel {
+            top: 0,
+            left: 0,
+            width: 2,
+            height: 1,
+            style: BorderStyle::None_,
+            border: Rgb::new(0, 0, 0),
+            corner_radius: 0,
+            fill: Some(BOX_FILL),
+            shadow,
+            edges: Edge::symmetric(0, 0),
+            corners: 0,
+            fillets: 0,
+            fillet_radius: 2,
+            hatch: None,
+            above_pools: false,
+            backdrop: false,
+            anchor: None,
+            seq: 0,
+        }
+    }
+
+    /// A frame of `live` drawn alone, and one drawn under an occludable pool of
+    /// `ground` cells over the whole target.
+    ///
+    /// The second frame records the strokes after the composites, as
+    /// [`GpuContext::render_with_pools`] does. Both record the scrim before the
+    /// strokes, after the whole frame in the first and after the pane composite
+    /// in the second.
+    fn scrim_frames(
+        device: &Device,
+        queue: &Queue,
+        renderer: &mut Renderer,
+        target: &Texture,
+        live: &Grid,
+        ground: Rgb,
+    ) -> [Vec<u8>; 2] {
+        let (rows, cols) = renderer.grid_size();
+        let pool = filled_grid(rows, cols, ground);
+        let alone = draw_covered(device, queue, renderer, target, live, &[]);
+
+        let view = target.create_view(&TextureViewDescriptor::default());
+        let (full, none) = (Damage::Full, Damage::Partial(Vec::new()));
+        let frame = still_frame(&full, &none);
+        renderer.render_pools_into(device, queue, &view, live, frame, &[whole_pool(&pool)], &[]);
+        record_strokes_over(device, queue, renderer, &view);
+
+        [
+            alone,
+            read_back(device, queue, target, TARGET_WIDTH, TARGET_HEIGHT),
+        ]
+    }
+
+    /// Record the panel strokes over what `view` holds, in a pass of their own.
+    ///
+    /// [`Renderer::render_pools_into`] stops before the strokes that
+    /// [`GpuContext::render_with_pools`] records after the composites, so this
+    /// finishes that frame.
+    fn record_strokes_over(
+        device: &Device,
+        queue: &Queue,
+        renderer: &Renderer,
+        view: &TextureView,
+    ) {
+        let mut encoder = device.create_command_encoder(&CommandEncoderDescriptor::default());
+        {
+            let mut render_pass = encoder.begin_render_pass(&RenderPassDescriptor {
+                label: Some("strokes over"),
+                color_attachments: &[Some(RenderPassColorAttachment {
+                    view,
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: Operations {
+                        load: LoadOp::Load,
+                        store: StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            renderer.record_panel_strokes(&mut render_pass);
+        }
+        queue.submit([encoder.finish()]);
+    }
+
+    /// The pixels at `points` of each frame [`scrim_frames`] draws of `live`
+    /// over [`GROUND`].
+    fn scrim_pixels(
+        device: &Device,
+        queue: &Queue,
+        renderer: &mut Renderer,
+        target: &Texture,
+        live: &Grid,
+        points: &[[u32; 2]],
+    ) -> [Vec<[u8; 3]>; 2] {
+        scrim_frames(device, queue, renderer, target, live, GROUND).map(|shot| {
+            points
+                .iter()
+                .map(|&[x, y]| pixel(&shot, TARGET_WIDTH, x, y))
+                .collect()
+        })
+    }
+
+    /// Whether each frame's pixels read `want`, each channel within one level.
+    ///
+    /// The adapter rounds a blend its own way, and lavapipe lands some
+    /// channels a level above the exact value.
+    fn reads_near(frames: &[Vec<[u8; 3]>; 2], want: &[[u8; 3]]) -> bool {
+        frames.iter().all(|pixels| {
+            pixels.len() == want.len()
+                && pixels.iter().zip(want).all(|(got, want)| {
+                    got.iter()
+                        .zip(want)
+                        .all(|(got, want)| got.abs_diff(*want) <= 1)
+                })
+        })
+    }
+
+    /// A scrim lays its color over the grid outside a floating box, which is a
+    /// box with a drop or a halo shadow, and the box keeps its fill.
+    #[test]
+    fn a_scrim_blends_its_color_over_the_grid_outside_a_floating_box() {
+        let (device, queue) = require_headless_device();
+        let (target, mut renderer) = readback_renderer(&device, GROUND);
+        let (rows, cols) = renderer.grid_size();
+        let fill = [BOX_FILL.r, BOX_FILL.g, BOX_FILL.b];
+
+        for shadow in [PanelShadow::Drop, PanelShadow::Halo] {
+            let mut live = filled_grid(rows, cols, GROUND);
+            live.set_panels(vec![corner_box(shadow)]);
+            live.set_scrim(Some(board_scrim(0, 0)));
+            let pixels = scrim_pixels(
+                &device,
+                &queue,
+                &mut renderer,
+                &target,
+                &live,
+                &[[120, 100], [4, 18]],
+            );
+            assert!(
+                reads_near(&pixels, &[DIMMED, fill]),
+                "{shadow:?}: 84 px right of the box the ground takes the scrim, and 4 px \
+                 inside it the box keeps its fill, got {pixels:?}",
+            );
+        }
+    }
+
+    /// The rows over a scrim's top keep their color, and the top stands its px
+    /// under the top of its row.
+    #[test]
+    fn a_scrim_leaves_the_rows_over_its_top() {
+        let (device, queue) = require_headless_device();
+        let (target, mut renderer) = readback_renderer(&device, GROUND);
+        let (rows, cols) = renderer.grid_size();
+        let mut live = filled_grid(rows, cols, GROUND);
+        live.set_scrim(Some(board_scrim(1, 4)));
+
+        let ground = [GROUND.r, GROUND.g, GROUND.b];
+        let pixels = scrim_pixels(
+            &device,
+            &queue,
+            &mut renderer,
+            &target,
+            &live,
+            &[[120, 18], [120, 39], [120, 40]],
+        );
+        assert_eq!(
+            pixels.each_ref().map(|pixels| pixels[..2].to_vec()),
+            [vec![ground, ground], vec![ground, ground]],
+            "row 0 and the 4 px under its bottom stay bright",
+        );
+        assert!(
+            reads_near(
+                &pixels.each_ref().map(|pixels| pixels[2..].to_vec()),
+                &[DIMMED]
+            ),
+            "the scrim starts 4 px under row 1's top, got {pixels:?}",
+        );
+    }
+
+    /// A floating box's drop shadow lies over the scrim, so 10 px under the
+    /// box the scrim reads darker than it does unshaded.
+    ///
+    /// The boards' scrim is too dark to tell a shadow over it from one under
+    /// it, so a white scrim over a gray ground tells them apart. The shadow
+    /// darkens that scrim's own color by the share the frame without a scrim
+    /// shows. A shadow drawn under the scrim, or drawn under the text as well,
+    /// reads more than ten levels off.
+    #[test]
+    fn the_drop_shadow_of_a_floating_box_falls_on_the_scrim() {
+        let (device, queue) = require_headless_device();
+        let (target, mut renderer) = readback_renderer(&device, GROUND);
+        let (rows, cols) = renderer.grid_size();
+        let mut live = filled_grid(rows, cols, GROUND);
+        live.set_panels(vec![corner_box(PanelShadow::Drop)]);
+        live.set_scrim(Some(board_scrim(0, 0)));
+        let dark = scrim_pixels(
+            &device,
+            &queue,
+            &mut renderer,
+            &target,
+            &live,
+            &[[18, 46], [120, 100]],
+        );
+        assert!(
+            dark.iter().all(|pixels| pixels[0]
+                .iter()
+                .zip(pixels[1])
+                .all(|(&shaded, unshaded)| shaded < unshaded)),
+            "10 px under the box the scrim reads darker than 84 px right of it, got {dark:?}",
+        );
+
+        let gray = Rgb::new(200, 200, 200);
+        let mut live = filled_grid(rows, cols, gray);
+        live.set_panels(vec![corner_box(PanelShadow::Drop)]);
+        let red = |live: &Grid, renderer: &mut Renderer| {
+            scrim_frames(&device, &queue, renderer, &target, live, gray)
+                .map(|shot| f32::from(pixel(&shot, TARGET_WIDTH, 18, 46)[0]))
+        };
+        let bare = red(&live, &mut renderer);
+        live.set_scrim(Some(Scrim {
+            color: Rgb::new(255, 255, 255),
+            ..board_scrim(0, 0)
+        }));
+        let lit = red(&live, &mut renderer);
+
+        let scrimmed = 200.0 + 55.0 * 115.0 / 255.0;
+        let expected = bare.map(|bare| scrimmed * bare / 200.0);
+        assert!(
+            lit.iter()
+                .zip(&expected)
+                .all(|(got, want)| (got - want).abs() <= 2.0),
+            "the shadow takes {bare:?} of 200 off the white scrim, so {expected:?}, got {lit:?}",
+        );
+    }
+
+    /// A box with no exterior shadow, or one whose shadow is a band inside it
+    /// or a cast under it, does not float, so the scrim covers its fill.
+    #[test]
+    fn a_panel_with_no_exterior_shadow_takes_the_scrim() {
+        let (device, queue) = require_headless_device();
+        let (target, mut renderer) = readback_renderer(&device, GROUND);
+        let (rows, cols) = renderer.grid_size();
+
+        let fill_under_scrim = [113, 59, 32];
+        for shadow in [
+            PanelShadow::None_,
+            PanelShadow::Tucked,
+            PanelShadow::Overhang,
+            PanelShadow::Cast,
+        ] {
+            let mut live = filled_grid(rows, cols, GROUND);
+            live.set_panels(vec![corner_box(shadow)]);
+            live.set_scrim(Some(board_scrim(0, 0)));
+            let pixels = scrim_pixels(&device, &queue, &mut renderer, &target, &live, &[[4, 18]]);
+            assert!(
+                reads_near(&pixels, &[fill_under_scrim]),
+                "{shadow:?}: the fill 4 px inside the box takes the scrim, got {pixels:?}",
+            );
+        }
+    }
+
+    /// A backdrop paints its ground over the corners inside its cells with
+    /// the strokes, after the scrim. Under the scrim that ground reads dimmed
+    /// as the cells around it do, and over the scrim's top it keeps its color.
+    #[test]
+    fn a_backdrop_ground_corner_takes_the_scrim() {
+        let (device, queue) = require_headless_device();
+        let (target, mut renderer) = readback_renderer(&device, GROUND);
+        let (rows, cols) = renderer.grid_size();
+        let backdrop = |top| Panel {
+            top,
+            left: 1,
+            width: 3,
+            height: 1,
+            border: Rgb::new(200, 200, 200),
+            corner_radius: 8,
+            backdrop: true,
+            ..corner_box(PanelShadow::None_)
+        };
+        let mut live = filled_grid(rows, cols, GROUND);
+        live.set_panels(vec![backdrop(0), backdrop(2)]);
+        live.set_scrim(Some(board_scrim(1, 0)));
+
+        let ground_under_scrim = [113, 114, 115];
+        let pixels = scrim_pixels(
+            &device,
+            &queue,
+            &mut renderer,
+            &target,
+            &live,
+            &[[18, 0], [18, 72]],
+        );
+        assert!(
+            reads_near(&pixels, &[[200, 200, 200], ground_under_scrim]),
+            "the top-left pixel of each backdrop's cells lies outside its rounded box, \
+             in row 0 over the scrim and in row 2 under it, got {pixels:?}",
+        );
+    }
+
+    /// A floating box's shadow over the scrim keeps off every floating box, as
+    /// the scrim does, so a box under another's shadow keeps its fill and so
+    /// does the box that casts it.
+    #[test]
+    fn a_floating_box_keeps_off_the_shadow_of_another() {
+        let (device, queue) = require_headless_device();
+        let (target, mut renderer) = readback_renderer(&device, GROUND);
+        let (rows, cols) = renderer.grid_size();
+        let mut live = filled_grid(rows, cols, GROUND);
+        live.set_panels(vec![
+            corner_box(PanelShadow::Drop),
+            Panel {
+                top: 1,
+                ..corner_box(PanelShadow::Drop)
+            },
+        ]);
+        live.set_scrim(Some(board_scrim(0, 0)));
+
+        let fill = [BOX_FILL.r, BOX_FILL.g, BOX_FILL.b];
+        let pixels = scrim_pixels(
+            &device,
+            &queue,
+            &mut renderer,
+            &target,
+            &live,
+            &[[4, 18], [4, 40]],
+        );
+        assert!(
+            reads_near(&pixels, &[fill, fill]),
+            "the upper box, and the lower box 4 px under its top in the upper one's \
+             shadow, keep their fills, got {pixels:?}",
+        );
+    }
+
+    /// A grid whose scrim clears draws each frame as it drew before the scrim
+    /// was set, the floating box's shadow under the text included.
+    #[test]
+    fn a_frame_with_no_scrim_draws_as_before() {
+        let (device, queue) = require_headless_device();
+        let (target, mut renderer) = readback_renderer(&device, GROUND);
+        let (rows, cols) = renderer.grid_size();
+        let mut live = filled_grid(rows, cols, GROUND);
+        live.set_panels(vec![corner_box(PanelShadow::Drop)]);
+
+        let mut frames =
+            |live: &Grid| scrim_frames(&device, &queue, &mut renderer, &target, live, GROUND);
+        let before = frames(&live);
+        live.set_scrim(Some(board_scrim(0, 0)));
+        let dimmed = frames(&live);
+        live.set_scrim(None);
+        let after = frames(&live);
+
+        assert_eq!(
+            [dimmed != before, after == before],
+            [true, true],
+            "the scrim draws while it is set and leaves nothing once cleared",
         );
     }
 

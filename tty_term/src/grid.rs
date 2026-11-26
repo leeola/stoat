@@ -88,6 +88,7 @@ pub struct Grid {
     overlays: Vec<Overlay>,
     panels: Vec<Panel>,
     scroll_region: Option<ScrollRegion>,
+    scrim: Option<Scrim>,
     icons: Vec<Icon>,
     text_runs: Vec<TextRun>,
     bars: Vec<Bar>,
@@ -146,6 +147,7 @@ impl Grid {
             overlays: Vec::new(),
             panels: Vec::new(),
             scroll_region: None,
+            scrim: None,
             icons: Vec::new(),
             text_runs: Vec::new(),
             bars: Vec::new(),
@@ -338,6 +340,7 @@ impl Grid {
         self.border_table.clear();
         self.overlays.clear();
         self.scroll_region = None;
+        self.scrim = None;
         self.icons.clear();
         self.text_runs.clear();
         self.bars.clear();
@@ -414,6 +417,7 @@ impl Grid {
         self.border_table.clear();
         self.overlays.clear();
         self.scroll_region = None;
+        self.scrim = None;
         self.icons.clear();
         self.text_runs.clear();
         self.bars.clear();
@@ -554,6 +558,23 @@ impl Grid {
     /// rather than accumulating.
     pub fn set_scroll_region(&mut self, region: Option<ScrollRegion>) {
         self.scroll_region = region;
+    }
+
+    /// The scrim that dims the window behind the floating boxes, or `None`
+    /// when the scene declares none.
+    ///
+    /// Only the live grid holds one. A pool page takes none, since the scrim
+    /// lies over the whole window rather than over one surface in it.
+    pub fn scrim(&self) -> Option<Scrim> {
+        self.scrim
+    }
+
+    /// Replace the scrim.
+    ///
+    /// Grid-level like the scroll region, so the per-cell projection leaves it
+    /// untouched. The caller sets it each frame it changes.
+    pub fn set_scrim(&mut self, scrim: Option<Scrim>) {
+        self.scrim = scrim;
     }
 
     /// The status icons drawn above the cells, in draw order.
@@ -2016,6 +2037,21 @@ impl ScrollRegion {
             && col >= left
             && col < left + self.width as usize
     }
+}
+
+/// A translucent color the renderer lays over the window behind the floating
+/// boxes, the way a page dims what a modal dialog covers.
+///
+/// It covers the surface from [`Self::top_px`] logical px under the top of the
+/// row [`Self::top_row`] down to the bottom, at [`Self::alpha`] out of 255. The
+/// box of each floating panel stays clear, which is a panel whose shadow is
+/// [`PanelShadow::Drop`] or [`PanelShadow::Halo`].
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Scrim {
+    pub color: Rgb,
+    pub alpha: u8,
+    pub top_row: u16,
+    pub top_px: i16,
 }
 
 /// One smooth-scroll surface's declared rectangle, and which pool and window

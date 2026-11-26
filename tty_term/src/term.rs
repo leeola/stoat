@@ -27,8 +27,8 @@ use alacritty_terminal::{
 };
 use decorate::{
     apply_bars, apply_borders, apply_icons, apply_line_layout, apply_minimaps, apply_panels,
-    apply_polylines, apply_popovers, apply_scales, apply_scroll_region, apply_sketches,
-    apply_text_runs, decoration_footprint, stamp_pool_decorations,
+    apply_polylines, apply_popovers, apply_scales, apply_scrim, apply_scroll_region,
+    apply_sketches, apply_text_runs, decoration_footprint, stamp_pool_decorations,
 };
 use parking_lot::Mutex;
 use project::{
@@ -48,8 +48,8 @@ use stoatty_protocol::{
         self, BarCommand, BorderCommand, Command, FillRowsCommand, HelloCommand, IconCommand,
         IdentReply, LineLayoutCommand, LineSummary, MinimapCommand, MinimapLenCommand,
         MinimapLinesCommand, PanelCommand, PolylineCommand, PoolKind, PoolRegionCommand,
-        PopoverCommand, ScaleCommand, ScrollRegionCommand, SketchCommand, TextRunCommand,
-        WindowOpenCommand,
+        PopoverCommand, ScaleCommand, ScrimCommand, ScrollRegionCommand, SketchCommand,
+        TextRunCommand, WindowOpenCommand,
     },
     frame::FrameScratch,
     iterm, kitty,
@@ -286,6 +286,10 @@ pub struct Terminal {
     /// accumulate: a region's scroll offset updates over time, so the latest
     /// frame replaces the prior one.
     scroll_region: Option<ScrollRegionCommand>,
+    /// The scrim of the highest lane that holds one, applied to the grid by
+    /// [`Self::project`]. A lane holds at most one, since a later scrim frame
+    /// in the same lane replaces the earlier.
+    scrim: Option<ScrimCommand>,
     /// Status icons set by `Gstoatty;icon` frames, applied to the grid's icon
     /// list by [`Self::project`]. Like popovers they accumulate and are
     /// grid-level rather than cell attributes.
@@ -575,6 +579,7 @@ struct DecorationDirty {
     scales: bool,
     popovers: bool,
     scroll_region: bool,
+    scrim: bool,
     icons: bool,
     line_layout: bool,
     text_runs: bool,
@@ -593,6 +598,7 @@ impl DecorationDirty {
             scales: true,
             popovers: true,
             scroll_region: true,
+            scrim: true,
             icons: true,
             line_layout: true,
             text_runs: true,
@@ -612,6 +618,7 @@ impl DecorationDirty {
         self.panels = true;
         self.scales = true;
         self.popovers = true;
+        self.scrim = true;
         self.icons = true;
         self.text_runs = true;
         self.bars = true;
@@ -658,6 +665,7 @@ struct ProjectedDecorations {
     /// a view-only advance moves the thumb while leaving the strip list equal.
     minimap_views: HashMap<u32, MinimapView>,
     scroll_region: Option<ScrollRegionCommand>,
+    scrim: Option<ScrimCommand>,
     line_layout: Option<LineLayoutCommand>,
 }
 
@@ -687,6 +695,9 @@ struct LaneDecorations {
     minimap_seq: Vec<u32>,
     text_run_nudge: Vec<[i16; 2]>,
     bar_nudge: Vec<[i16; 2]>,
+    /// The lane's scrim. A later scrim frame in the lane replaces it, since the
+    /// window takes one.
+    scrim: Option<ScrimCommand>,
     /// The lane-local seq the next sequenced decoration takes.
     decoration_seq: u32,
 }
@@ -703,6 +714,7 @@ impl LaneDecorations {
             && self.polylines.is_empty()
             && self.sketches.is_empty()
             && self.minimaps.is_empty()
+            && self.scrim.is_none()
     }
 
     /// Empty every list and restart the seq counter.
@@ -729,6 +741,7 @@ impl LaneDecorations {
         self.minimap_seq.clear();
         self.text_run_nudge.clear();
         self.bar_nudge.clear();
+        self.scrim = None;
         self.decoration_seq = 0;
     }
 }
@@ -1299,6 +1312,7 @@ impl Terminal {
             scales: Vec::new(),
             popovers: Vec::new(),
             scroll_region: None,
+            scrim: None,
             icons: Vec::new(),
             text_runs: Vec::new(),
             bars: Vec::new(),
@@ -1593,10 +1607,13 @@ impl Terminal {
                         | Command::Reset
                         // A dropped lane marker files every decoration after it
                         // under the wrong lane, and a dropped nudge draws every
-                        // one after it at the wrong offset.
+                        // one after it at the wrong offset. A scrim belongs to
+                        // the window rather than to a page, so it lands in the
+                        // open lane even while a page paints.
                         | Command::LaneBegin(_)
                         | Command::LaneEnd
                         | Command::Nudge(_)
+                        | Command::Scrim(_)
                         | Command::Popover(_)
                         | Command::PopoverEnd
                         | Command::TextRun(_)
@@ -1944,6 +1961,7 @@ impl Terminal {
             Command::Border(_)
             | Command::Panel(_)
             | Command::Scale(_)
+            | Command::Scrim(_)
             | Command::ScrollRegion(_)
             | Command::LineLayout(_)
             | Command::Sketch(_) => self.stage_or_apply(command),
@@ -2494,6 +2512,10 @@ impl Terminal {
                     self.lanes_changed = true;
                 }
             },
+            Command::Scrim(scrim) => {
+                self.lanes.entry(self.lane).or_default().scrim = Some(scrim);
+                self.lanes_changed = true;
+            },
             Command::ScrollRegion(region) => {
                 self.scroll_region = Some(region);
                 self.decorations_dirty.scroll_region = true;
@@ -2685,6 +2707,7 @@ impl Terminal {
     /// A no-op unless a lane changed since the last rebuild. The lanes
     /// concatenate in ascending id order, and each decoration's seq moves past
     /// every seq the lower lanes hold, so a higher lane draws over a lower one.
+    /// The window takes one scrim, so the highest lane that holds one wins.
     /// Numbering restarts at 1 on every rebuild, so a scene declared again
     /// unchanged reproduces its numbers and the projection skips it.
     fn flatten_lanes(&mut self) {
@@ -2738,6 +2761,7 @@ impl Terminal {
             extend_renumbered(&mut self.minimap_seq, &lane.minimap_seq, base);
             base += lane.decoration_seq;
         }
+        self.scrim = self.lanes.values().rev().find_map(|lane| lane.scrim);
 
         self.decorations_dirty.mark_lane_categories();
     }
@@ -3438,6 +3462,7 @@ impl Terminal {
             &self.scroll_region,
             &mut last.scroll_region,
         );
+        reconcile(&mut dirty.scrim, &self.scrim, &mut last.scrim);
         reconcile(
             &mut dirty.line_layout,
             &self.line_layout,
@@ -4007,6 +4032,9 @@ impl Terminal {
         }
         if self.decorations_dirty.panels || resized {
             apply_panels(grid, &self.panels, &self.panel_seq);
+        }
+        if self.decorations_dirty.scrim || resized {
+            apply_scrim(grid, self.scrim);
         }
         if self.decorations_dirty.scroll_region || resized {
             apply_scroll_region(grid, self.scroll_region);

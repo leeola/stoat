@@ -40,6 +40,7 @@ use pool::{
 };
 use popover::decode_popover;
 use scale::decode_scale;
+use scrim::decode_scrim;
 use scroll_region::decode_scroll_region;
 use sketch::decode_sketch;
 use terminal_control::{decode_font_step, decode_hello, decode_zoom_capture};
@@ -58,6 +59,7 @@ pub mod polyline;
 pub mod pool;
 pub mod popover;
 pub mod scale;
+pub mod scrim;
 pub mod scroll_region;
 pub mod sketch;
 pub mod terminal_control;
@@ -101,6 +103,7 @@ pub use popover::{
     encode_popover_scope, PopoverChrome, PopoverCommand, PopoverSpan, MAX_POPOVER_SPANS,
 };
 pub use scale::{encode_scale, encode_scale_into, ScaleCommand};
+pub use scrim::{encode_scrim, encode_scrim_into, ScrimCommand};
 pub use scroll_region::{encode_scroll_region, encode_scroll_region_into, ScrollRegionCommand};
 pub use sketch::{
     encode_sketch, encode_sketch_into, SketchBounds, SketchCommand, SketchEasing, SketchEnd,
@@ -294,6 +297,12 @@ pub enum Command {
     ///
     /// [`nudge`] has the full rules.
     Nudge([i16; 2]),
+    /// Dim the surface from a row down, leaving the box of each floating panel
+    /// clear.
+    ///
+    /// A decoration of its lane, so a lane declared again without one holds
+    /// none. [`scrim`] has the full rules.
+    Scrim(ScrimCommand),
     /// The terminal's own config file changed on disk, so it should re-read and
     /// re-apply it. Carries no payload: the terminal reads the file itself, and
     /// the program that sends this is only reporting that it wrote it.
@@ -483,6 +492,7 @@ pub fn encode_into(out: &mut Vec<u8>, command: &Command) {
         Command::LaneBegin(id) => encode_lane_begin_into(out, *id),
         Command::LaneEnd => encode_lane_end_into(out),
         Command::Nudge(offset) => encode_nudge_into(out, *offset),
+        Command::Scrim(c) => encode_scrim_into(out, c),
         Command::ConfigReload => encode_config_reload_into(out),
         Command::ZoomCapture { on, inband } => encode_zoom_capture_into(out, *on, *inband),
         Command::FontStep { delta } => encode_font_step_into(out, *delta),
@@ -545,6 +555,7 @@ fn dispatch(sub: &str, args: &[Vec<u8>]) -> Option<Command> {
         "lane_begin" => decode_lane_begin(args).map(Command::LaneBegin),
         "lane_end" => Some(Command::LaneEnd),
         "nudge" => decode_nudge(args).map(Command::Nudge),
+        "scrim" => decode_scrim(args).map(Command::Scrim),
         "config_reload" => Some(Command::ConfigReload),
         "zoom_capture" => decode_zoom_capture(args),
         "font_step" => decode_font_step(args),
@@ -711,6 +722,15 @@ mod tests {
                 encode_reposition(&RepositionCommand { pool: 1, page: 2 }),
             ),
             ("pool_drop", encode_pool_drop(&PoolDropCommand { pool: 1 })),
+            (
+                "scrim",
+                encode_scrim(&ScrimCommand {
+                    color: [1, 2, 3],
+                    alpha: 4,
+                    top_row: 5,
+                    top_px: -6,
+                }),
+            ),
             (
                 "minimap_view",
                 encode_minimap_view(&MinimapViewCommand {
@@ -1307,6 +1327,12 @@ mod tests {
             Command::LaneBegin(7),
             Command::LaneEnd,
             Command::Nudge([3, -7]),
+            Command::Scrim(ScrimCommand {
+                color: [8, 9, 11],
+                alpha: 115,
+                top_row: 2,
+                top_px: -4,
+            }),
         ];
 
         for command in commands {

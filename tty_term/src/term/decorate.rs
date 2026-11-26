@@ -13,13 +13,14 @@ use crate::grid::{
         minimap_strip_from_command, panel_grid, popover_overlay, text_run_from_command,
         StoredTextRun,
     },
-    Bar, Border, BorderEdge, Grid, Icon, Minimap, MinimapView, PagePool, Polyline, Rgb,
+    Bar, Border, BorderEdge, Grid, Icon, Minimap, MinimapView, PagePool, Polyline, Rgb, Scrim,
     ScrollRegion, Sketch, TextRun,
 };
 use std::{collections::HashMap, mem};
 use stoatty_protocol::command::{
     BarCommand, BorderCommand, IconCommand, LineLayoutCommand, MinimapCommand, PanelCommand,
-    PolylineCommand, PopoverCommand, ScaleCommand, ScrollRegionCommand, SketchCommand,
+    PolylineCommand, PopoverCommand, ScaleCommand, ScrimCommand, ScrollRegionCommand,
+    SketchCommand,
 };
 
 /// Mark the grid rows the damage-tracked decorations occupy, clamped to `rows`.
@@ -190,6 +191,22 @@ pub(super) fn apply_scroll_region(grid: &mut Grid, command: Option<ScrollRegionC
         width: command.width,
         height: command.height,
         offset: command.offset,
+    }));
+}
+
+/// Set the grid's scrim from the stored command, or clear it.
+///
+/// Grid-level like the scroll region, so the projection sets it whole whenever
+/// it changes.
+pub(super) fn apply_scrim(grid: &mut Grid, command: Option<ScrimCommand>) {
+    grid.set_scrim(command.map(|command| {
+        let [r, g, b] = command.color;
+        Scrim {
+            color: Rgb::new(r, g, b),
+            alpha: command.alpha,
+            top_row: command.top_row,
+            top_px: command.top_px,
+        }
     }));
 }
 

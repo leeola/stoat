@@ -125,9 +125,9 @@ struct PanelInstance {
 }
 
 /// The uniform shared by every instance. Carries the surface resolution, the
-/// cell size the vertex shader maps cell coordinates through, and the panel
-/// count the fragment shader loops over for self-occlusion. Padded to 32 bytes
-/// so the layout matches the WGSL uniform.
+/// cell size the vertex shader maps cell coordinates through, the panel count
+/// the fragment shader loops over for self-occlusion, and the scrim. WGSL
+/// aligns the scrim's `vec4` at byte 32, so one pad word follows its top.
 #[repr(C)]
 #[derive(Clone, Copy, PartialEq, Pod, Zeroable)]
 struct Globals {
@@ -136,7 +136,11 @@ struct Globals {
     count: u32,
     /// Physical pixels per logical pixel, which the stroke weights scale by.
     scale_factor: f32,
-    _pad: [u32; 2],
+    /// The scrim's top in physical pixels down from the surface's top.
+    scrim_top: f32,
+    _pad: u32,
+    /// The scrim's color and alpha, all zero on a frame with no scrim.
+    scrim: [f32; 4],
 }
 
 /// The instanced panel pipeline and its per-frame buffers.
@@ -148,9 +152,20 @@ pub struct PanelPass {
     /// The exterior shadow alone, recorded again over a pane pool's composite,
     /// which paints over the shadow the under pass drew.
     pipeline_shadow: RenderPipeline,
+    /// The scrim's quad, from its top down.
+    pipeline_scrim: RenderPipeline,
+    /// A floating box's exterior shadow, recorded over the scrim.
+    pipeline_float_shadow: RenderPipeline,
     /// Whether a panel that rides no pool casts an exterior shadow this frame,
     /// so the shadow draw over a composite has anything to draw.
     casts: bool,
+    /// Whether this frame's grid holds a scrim that dims anything, which is
+    /// when [`Self::draw_scrim`] draws.
+    ///
+    /// A frame with one records the strokes and the cursor after the scrim,
+    /// and the strokes compose under it as the shader's `under_scrim` mixes
+    /// them.
+    pub(crate) scrim: bool,
     bind_group_layout: BindGroupLayout,
     globals: Buffer,
     bind_group: BindGroup,
@@ -220,11 +235,36 @@ impl PanelPass {
             immediate_size: 0,
         });
 
-        // One module, two pairs of stages. The stroke draws separately from the
-        // rest, so the frame records above the text it surrounds. Each vertex
-        // stage leaves out the part of the box its fragment stage paints nothing
-        // over.
-        let build = |label: &str, vertex: &str, fragment: &str| {
+        let attributes = vertex_attr_array![
+            0 => Float32x2,
+            1 => Float32x2,
+            2 => Float32x3,
+            3 => Float32x3,
+            4 => Float32x2,
+            5 => Float32,
+            6 => Float32,
+            7 => Float32,
+            8 => Uint32,
+            9 => Float32,
+            10 => Uint32,
+            11 => Float32x3,
+            12 => Float32,
+            13 => Float32x4,
+            14 => Uint32,
+            15 => Float32,
+        ];
+        let instance = [Some(VertexBufferLayout {
+            array_stride: size_of::<PanelInstance>() as u64,
+            step_mode: VertexStepMode::Instance,
+            attributes: &attributes,
+        })];
+
+        // One module, and a pair of stages for each part of a panel. The stroke
+        // draws separately from the rest, so the frame records above the text
+        // it surrounds. Each vertex stage leaves out the part of the box its
+        // fragment stage paints nothing over. The scrim's quad reads no
+        // instance, so its stage takes no buffer.
+        let build = |label: &str, vertex: &str, fragment: &str, buffers| {
             device.create_render_pipeline(&RenderPipelineDescriptor {
                 label: Some(label),
                 layout: Some(&layout),
@@ -232,28 +272,7 @@ impl PanelPass {
                     module: &shader,
                     entry_point: Some(vertex),
                     compilation_options: Default::default(),
-                    buffers: &[Some(VertexBufferLayout {
-                        array_stride: size_of::<PanelInstance>() as u64,
-                        step_mode: VertexStepMode::Instance,
-                        attributes: &vertex_attr_array![
-                            0 => Float32x2,
-                            1 => Float32x2,
-                            2 => Float32x3,
-                            3 => Float32x3,
-                            4 => Float32x2,
-                            5 => Float32,
-                            6 => Float32,
-                            7 => Float32,
-                            8 => Uint32,
-                            9 => Float32,
-                            10 => Uint32,
-                            11 => Float32x3,
-                            12 => Float32,
-                            13 => Float32x4,
-                            14 => Uint32,
-                            15 => Float32,
-                        ],
-                    })],
+                    buffers,
                 },
                 fragment: Some(FragmentState {
                     module: &shader,
@@ -272,11 +291,18 @@ impl PanelPass {
                 cache: None,
             })
         };
-        let pipeline_under = build("panel under", "vs_under", "fs_under");
-        let pipeline_stroke = build("panel stroke", "vs_stroke", "fs_stroke");
+        let pipeline_under = build("panel under", "vs_under", "fs_under", &instance);
+        let pipeline_stroke = build("panel stroke", "vs_stroke", "fs_stroke", &instance);
         // The stroke's vertex stage draws the four bands around the box, which
         // hold every pixel an exterior shadow reaches.
-        let pipeline_shadow = build("panel shadow", "vs_stroke", "fs_shadow");
+        let pipeline_shadow = build("panel shadow", "vs_stroke", "fs_shadow", &instance);
+        let pipeline_float_shadow = build(
+            "panel float shadow",
+            "vs_stroke",
+            "fs_float_shadow",
+            &instance,
+        );
+        let pipeline_scrim = build("panel scrim", "vs_scrim", "fs_scrim", &[]);
 
         let globals = device.create_buffer(&BufferDescriptor {
             label: Some("panel globals"),
@@ -292,7 +318,10 @@ impl PanelPass {
             pipeline_under,
             pipeline_stroke,
             pipeline_shadow,
+            pipeline_scrim,
+            pipeline_float_shadow,
             casts: false,
+            scrim: false,
             bind_group_layout,
             globals,
             bind_group,
@@ -327,11 +356,14 @@ impl PanelPass {
         resolution: [f32; 2],
         anchor: RowAnchor,
     ) {
-        // With no panel to draw now and none drawn last frame, nothing reads this
-        // pass's buffers, so the frame skips it without touching the GPU. The frame
-        // that empties the list still runs, which is what drops the count to zero
-        // and stops the draw.
-        if grid.panels().is_empty() && self.count == 0 {
+        let scrim = grid.scrim().filter(|scrim| scrim.alpha > 0);
+        self.scrim = scrim.is_some();
+
+        // With no panel or scrim to draw now and no panel drawn last frame,
+        // nothing reads this pass's buffers, so the frame skips it without
+        // touching the GPU. The frame that empties the list still runs, which is
+        // what drops the count to zero and stops the draw.
+        if grid.panels().is_empty() && self.count == 0 && !self.scrim {
             return;
         }
 
@@ -379,7 +411,15 @@ impl PanelPass {
             cell_size: [self.metrics.width, self.metrics.height],
             count: self.count,
             scale_factor: self.metrics.scale_factor,
-            _pad: [0; 2],
+            scrim_top: scrim.map_or(0.0, |scrim| {
+                anchor.row_y(f32::from(scrim.top_row), self.metrics.height)
+                    + f32::from(scrim.top_px) * self.metrics.scale_factor
+            }),
+            _pad: 0,
+            scrim: scrim.map_or([0.0; 4], |scrim| {
+                let [r, g, b] = rgb_f32(scrim.color);
+                [r, g, b, f32::from(scrim.alpha) / 255.0]
+            }),
         };
         crate::render::upload_globals(queue, &self.globals, 0, globals, &mut self.last_globals);
 
@@ -438,6 +478,24 @@ impl PanelPass {
         }
         render_pass.set_scissor_rect(x, y, width, height);
         self.draw_slots(render_pass, &self.pipeline_shadow);
+    }
+
+    /// Record the scrim, and over it the exterior shadow of every floating box.
+    ///
+    /// A no-op on a frame whose grid holds no scrim. The scrim dims what the
+    /// frame drew before it and leaves each floating box clear. A riding box's
+    /// shadow draws under its host's scissor, which stays set.
+    pub(crate) fn draw_scrim(&self, render_pass: &mut RenderPass<'_>) {
+        if !self.scrim {
+            return;
+        }
+
+        render_pass.set_pipeline(&self.pipeline_scrim);
+        render_pass.set_bind_group(0, &self.bind_group, &[]);
+        render_pass.draw(0..6, 0..1);
+
+        self.draw_slots(render_pass, &self.pipeline_float_shadow);
+        self.draw_riding_slots(render_pass, &self.pipeline_float_shadow);
     }
 
     fn draw_slots(&self, render_pass: &mut RenderPass<'_>, pipeline: &RenderPipeline) {

@@ -268,9 +268,15 @@
 /// inset, so an emitter states one only to a terminal at
 /// [`POOL_INSET_PROTOCOL`] or later. This version drops a shorter head.
 ///
+/// Version 43 reads `scrim`, which lays a translucent color over the surface
+/// from a row down and leaves the box of each floating panel clear. A
+/// floating panel's exterior shadow then falls on the scrim. A terminal that
+/// predates it ignores the frame and draws the window undimmed, so a program
+/// sends a scrim only to a terminal at [`SCRIM_PROTOCOL`] or later.
+///
 /// Zero is reserved for a peer whose handshake carries no version at all, which
 /// is every build from before the field existed.
-pub const PROTOCOL_VERSION: u32 = 42;
+pub const PROTOCOL_VERSION: u32 = 43;
 
 /// The first [`PROTOCOL_VERSION`] whose terminal reads the `text_runs` and
 /// `bars` batches.
@@ -389,6 +395,13 @@ pub const POOL_POINTER_PROTOCOL: u32 = 41;
 /// region's first cell, so a program states an inset only to a terminal at
 /// this version or later.
 pub const POOL_INSET_PROTOCOL: u32 = 42;
+
+/// The first [`PROTOCOL_VERSION`] whose terminal dims the window behind the
+/// floating boxes by a `scrim`.
+///
+/// An earlier terminal ignores the frame, so a program that dims the window
+/// for a modal on such a terminal shows the window undimmed.
+pub const SCRIM_PROTOCOL: u32 = 43;
 
 pub mod command;
 pub mod detect;

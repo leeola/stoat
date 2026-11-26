@@ -14,8 +14,11 @@ struct Globals {
     // logical pixels, so a 2x display draws them twice as wide and the frame
     // keeps its weight against the box it frames.
     scale_factor: f32,
+    // The scrim's top in physical pixels down from the surface's top.
+    scrim_top: f32,
     pad0: u32,
-    pad1: u32,
+    // The scrim's color and alpha. A zero alpha is a frame with no scrim.
+    scrim: vec4<f32>,
 }
 
 @group(0) @binding(0)
@@ -431,6 +434,74 @@ fn boxed(frag: vec2<f32>) -> bool {
     return false;
 }
 
+/// Whether a panel whose shadow takes `mode` and blurs over `margin` floats
+/// over the window, as a box with a drop (0) or a halo (3) shadow does.
+fn floats(mode: f32, margin: f32) -> bool {
+    let drop_or_halo = mode < 0.5 || (mode > 2.5 && mode < 3.5);
+    return margin > 0.0 && drop_or_halo;
+}
+
+/// Whether the panel's exterior shadow draws over the scrim, in
+/// fs_float_shadow, rather than under the text.
+fn shadow_over_scrim(in: VsOut) -> bool {
+    return globals.scrim.a > 0.0 && floats(in.shadow_mode, in.shadow.z);
+}
+
+/// How much of the pixel at `frag` the boxes of the floating panels cover, by
+/// the ramp across half a pixel each side of the edge that a fill draws with.
+///
+/// The walk covers every instance, as boxed does, since the scrim holds off
+/// each floating box whichever panel declared it.
+fn float_cover(frag: vec2<f32>) -> f32 {
+    var cover = 0.0;
+    for (var j = 0u; j < globals.count; j = j + 1u) {
+        let base = j * INSTANCE_STRIDE;
+        if !floats(instances[base + 16u], instances[base + 12u]) {
+            continue;
+        }
+        let cell_j = vec2<f32>(instances[base], instances[base + 1u]);
+        let size_j = vec2<f32>(instances[base + 2u], instances[base + 3u]);
+        let edge_px_j = vec4<f32>(
+            instances[base + 22u],
+            instances[base + 23u],
+            instances[base + 24u],
+            instances[base + 25u]
+        );
+        let sdf = occluder_sdf(
+            frag,
+            cell_j,
+            size_j,
+            globals.cell_size,
+            instances[base + 13u],
+            edge_px_j,
+            bitcast<u32>(instances[base + 26u]),
+            bitcast<u32>(instances[base + 17u]) & 15u
+        );
+        cover = max(cover, clamp(0.5 - sdf, 0.0, 1.0));
+    }
+    return cover;
+}
+
+/// The scrim's opacity at `frag`, which is zero above the scrim's top and
+/// falls off across the floating boxes.
+fn scrim_alpha(frag: vec2<f32>) -> f32 {
+    if globals.scrim.a <= 0.0 || frag.y < globals.scrim_top {
+        return 0.0;
+    }
+    return globals.scrim.a * (1.0 - float_cover(frag));
+}
+
+/// The premultiplied `acc` as it reads under the scrim at `frag`.
+///
+/// A draw that records after the scrim and paints the window behind the
+/// floating boxes mixes toward the scrim's color by the scrim's opacity there.
+/// Blending the result over the dimmed surface then gives the pixel that
+/// drawing first and dimming after gives.
+fn under_scrim(acc: vec4<f32>, frag: vec2<f32>) -> vec4<f32> {
+    let dim = scrim_alpha(frag);
+    return vec4<f32>(mix(acc.rgb, globals.scrim.rgb * acc.a, dim), acc.a);
+}
+
 /// The panel's signed distance field and the coverages derived from it, shared
 /// by both fragment stages so each measures the same box.
 struct Coverage {
@@ -620,8 +691,11 @@ fn unpremultiply(acc: vec4<f32>) -> vec4<f32> {
     return vec4<f32>(acc.rgb / max(acc.a, 1.0e-5), acc.a);
 }
 
-/// Everything of the panel that sits beneath the text it frames: the exterior
-/// shadow, the optional fill, and the bottom band cast onto that fill.
+/// Everything of the panel that sits beneath the text it frames, which is the
+/// exterior shadow, the optional fill, and the bottom band cast onto that fill.
+///
+/// While a scrim is set, a floating box's exterior shadow draws over the scrim
+/// in fs_float_shadow instead, so this stage leaves it out.
 @fragment
 fn fs_under(in: VsOut) -> @location(0) vec4<f32> {
     if occluded(in.clip.xy, in.instance) {
@@ -643,9 +717,10 @@ fn fs_under(in: VsOut) -> @location(0) vec4<f32> {
     }
 
     let c = coverage_of(in);
+    let shadow = select(c.shadow, 0.0, shadow_over_scrim(in));
 
     var acc = vec4<f32>(0.0, 0.0, 0.0, 0.0);
-    acc = over(acc, SHADOW_COLOR, c.shadow);
+    acc = over(acc, SHADOW_COLOR, shadow);
     acc = over(acc, fill_color(in), c.fill);
     acc = over(acc, SHADOW_COLOR, c.band);
     return unpremultiply(acc);
@@ -657,10 +732,11 @@ fn fs_under(in: VsOut) -> @location(0) vec4<f32> {
 /// live grid. Inside such a box the live grid still holds the shadow the under
 /// pass drew, so this draw passes it and nothing darkens twice. A later box
 /// hides the shadow here as it hides it in the under pass, which keeps the
-/// shadow off a later box that a pool paints over.
+/// shadow off a later box that a pool paints over. A floating box's shadow
+/// that draws over the scrim takes no draw here.
 @fragment
 fn fs_shadow(in: VsOut) -> @location(0) vec4<f32> {
-    if occluded(in.clip.xy, in.instance) || boxed(in.clip.xy) {
+    if shadow_over_scrim(in) || occluded(in.clip.xy, in.instance) || boxed(in.clip.xy) {
         discard;
     }
     let shadow = coverage_of(in).shadow;
@@ -668,6 +744,45 @@ fn fs_shadow(in: VsOut) -> @location(0) vec4<f32> {
         discard;
     }
     return vec4<f32>(SHADOW_COLOR, shadow);
+}
+
+/// A floating box's exterior shadow, drawn over the scrim.
+///
+/// CSS paints a `box-shadow` over all that lies beneath its box, text
+/// included, and the boards lay a dialog's shadow over the overlay. The
+/// shadow keeps off every floating box, as the scrim does.
+@fragment
+fn fs_float_shadow(in: VsOut) -> @location(0) vec4<f32> {
+    if !floats(in.shadow_mode, in.shadow.z) {
+        discard;
+    }
+    let shadow = coverage_of(in).shadow * (1.0 - float_cover(in.clip.xy));
+    if shadow <= 0.0 {
+        discard;
+    }
+    return vec4<f32>(SHADOW_COLOR, shadow);
+}
+
+/// One quad over the whole width of the surface from the scrim's top down.
+@vertex
+fn vs_scrim(@builtin(vertex_index) vertex_index: u32) -> @builtin(position) vec4<f32> {
+    var corners = array<vec2<f32>, 6>(
+        vec2<f32>(0.0, 0.0),
+        vec2<f32>(1.0, 0.0),
+        vec2<f32>(0.0, 1.0),
+        vec2<f32>(0.0, 1.0),
+        vec2<f32>(1.0, 0.0),
+        vec2<f32>(1.0, 1.0)
+    );
+    let corner = corners[vertex_index % 6u];
+    let top = 1.0 - globals.scrim_top / globals.resolution.y * 2.0;
+    return vec4<f32>(corner.x * 2.0 - 1.0, mix(top, -1.0, corner.y), 0.0, 1.0);
+}
+
+/// The scrim's color at the opacity that scrim_alpha gives the pixel.
+@fragment
+fn fs_scrim(@builtin(position) frag: vec4<f32>) -> @location(0) vec4<f32> {
+    return vec4<f32>(globals.scrim.rgb, scrim_alpha(frag.xy));
 }
 
 /// The panel's frame stroke alone, so it can be recorded above the text the
@@ -680,6 +795,10 @@ fn fs_shadow(in: VsOut) -> @location(0) vec4<f32> {
 /// A backdrop with a fill paints its ground here too, under the stroke, as
 /// ground_weight reads it. Above the text and the pool composites, the ground
 /// covers whatever its cells draw outside the rounded box.
+///
+/// A frame with a scrim records the strokes after it. What a stroke paints
+/// outside the floating boxes reads as it would under the scrim, as
+/// under_scrim mixes it.
 @fragment
 fn fs_stroke(in: VsOut) -> @location(0) vec4<f32> {
     if occluded(in.clip.xy, in.instance) {
@@ -690,5 +809,5 @@ fn fs_stroke(in: VsOut) -> @location(0) vec4<f32> {
     var acc = vec4<f32>(0.0, 0.0, 0.0, 0.0);
     acc = over(acc, in.border, ground_weight(in));
     acc = over(acc, in.border, c.stroke);
-    return unpremultiply(acc);
+    return unpremultiply(under_scrim(acc, in.clip.xy));
 }

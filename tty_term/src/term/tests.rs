@@ -9,7 +9,7 @@ use crate::{
     grid::{
         Bar, Border, BorderStyle, Cell, DocumentOffset, Flags, Grid, Icon, IconKind, MarkId,
         Minimap, MinimapView, Overlay, OverlaySpan, Panel, PanelShadow, Polyline, Rgb, Scale,
-        ScrollRegion, Sketch, TextRun, UnderlineStyle,
+        Scrim, ScrollRegion, Sketch, TextRun, UnderlineStyle,
     },
     theme::Theme,
 };
@@ -26,17 +26,17 @@ use stoatty_protocol::command::{
     encode_minimap_lines, encode_minimap_view, encode_nudge, encode_panel, encode_polyline,
     encode_pool_anchor, encode_pool_cursor, encode_pool_cursor_release, encode_pool_drop,
     encode_pool_pointer, encode_pool_region, encode_popover, encode_reposition, encode_reset,
-    encode_scale, encode_scroll, encode_scroll_region, encode_sketch, encode_text_run,
-    encode_text_run_end, encode_text_runs, encode_window_open, encode_zoom_capture, BarCommand,
-    BarsCommand, BorderCommand, BorderStyle as ProtoBorderStyle, Edge, FillCommand,
-    FillRowsCommand, HelloCommand, IconCommand, IconKind as ProtoIconKind, IdentReply,
-    LineLayoutCommand, LineSummary, MinimapCommand, MinimapDropCommand, MinimapLenCommand,
-    MinimapLinesCommand, MinimapRun, MinimapViewCommand, PanelCommand,
+    encode_scale, encode_scrim, encode_scroll, encode_scroll_region, encode_sketch,
+    encode_text_run, encode_text_run_end, encode_text_runs, encode_window_open,
+    encode_zoom_capture, BarCommand, BarsCommand, BorderCommand, BorderStyle as ProtoBorderStyle,
+    Edge, FillCommand, FillRowsCommand, HelloCommand, IconCommand, IconKind as ProtoIconKind,
+    IdentReply, LineLayoutCommand, LineSummary, MinimapCommand, MinimapDropCommand,
+    MinimapLenCommand, MinimapLinesCommand, MinimapRun, MinimapViewCommand, PanelCommand,
     PanelShadow as ProtoPanelShadow, PolylineCommand, PoolAnchorCommand, PoolCursorCommand,
     PoolCursorReleaseCommand, PoolDropCommand, PoolKind, PoolPointerCommand, PoolRegionCommand,
-    PopoverChrome, PopoverCommand, PopoverSpan, RepositionCommand, ScaleCommand, ScrollCommand,
-    ScrollRegionCommand, SketchBounds, SketchCommand, SketchEasing, SketchPhase, SketchShape,
-    SketchStyle, SketchTiming, TextRunCommand, TextRunsCommand, WindowOpenCommand,
+    PopoverChrome, PopoverCommand, PopoverSpan, RepositionCommand, ScaleCommand, ScrimCommand,
+    ScrollCommand, ScrollRegionCommand, SketchBounds, SketchCommand, SketchEasing, SketchPhase,
+    SketchShape, SketchStyle, SketchTiming, TextRunCommand, TextRunsCommand, WindowOpenCommand,
 };
 
 /// Base64, for a test feeding a graphics payload.
@@ -3588,6 +3588,87 @@ fn a_lane_marker_commits_an_open_run_into_its_lane() {
         run_labels(&grid),
         Vec::<&str>::new(),
         "the run landed in lane 1, which the re-declaration emptied"
+    );
+}
+
+/// A scrim frame of `alpha` with fixed color and tops.
+fn scrim_frame(alpha: u8) -> Vec<u8> {
+    encode_scrim(&ScrimCommand {
+        color: [8, 9, 11],
+        alpha,
+        top_row: 1,
+        top_px: -4,
+    })
+}
+
+/// The highest lane that holds a scrim sets the grid's, and a scrim outside
+/// any lane lands in lane 0. A scrim inside a synchronized update lands when
+/// the update ends, and one inside a fill lands in the open lane, since no page
+/// holds a scrim.
+#[test]
+fn a_scrim_frame_sets_the_scrim_of_the_grid() {
+    let mut terminal = Terminal::new(4, 8, Theme::default());
+    let mut grid = Grid::new(4, 8);
+    declare_pool(&mut terminal, 0, 2, 8);
+    let scrim = |alpha| {
+        Some(Scrim {
+            color: Rgb::new(8, 9, 11),
+            alpha,
+            top_row: 1,
+            top_px: -4,
+        })
+    };
+
+    terminal.project(&mut grid);
+    terminal.advance(&scrim_frame(5));
+    terminal.project(&mut grid);
+    assert_eq!(grid.scrim(), scrim(5), "a bare scrim lands in lane 0");
+
+    terminal.advance(&[in_lane(2, &scrim_frame(20)), in_lane(1, &scrim_frame(10))].concat());
+    terminal.project(&mut grid);
+    assert_eq!(grid.scrim(), scrim(20), "the higher lane's scrim draws");
+
+    terminal.advance(b"\x1b[?2026h");
+    terminal.advance(&in_lane(2, &scrim_frame(30)));
+    terminal.project(&mut grid);
+    assert_eq!(grid.scrim(), scrim(20), "the prior scrim holds mid-update");
+    terminal.advance(b"\x1b[?2026l");
+    terminal.project(&mut grid);
+    assert_eq!(grid.scrim(), scrim(30), "the update's end lands it");
+
+    terminal.advance(
+        &[
+            encode_fill(&FillCommand { pool: 0, index: 0 }),
+            in_lane(3, &scrim_frame(40)),
+            encode_fill_end(),
+        ]
+        .concat(),
+    );
+    terminal.project(&mut grid);
+    assert_eq!(grid.scrim(), scrim(40), "a scrim inside a fill lands");
+}
+
+/// A lane declared again without its scrim holds none, while another lane's
+/// declaration leaves it, and a reset clears it.
+#[test]
+fn a_lane_flushed_without_a_scrim_clears_it() {
+    let mut terminal = Terminal::new(4, 8, Theme::default());
+    let mut grid = Grid::new(4, 8);
+    let mut alpha_after = |stream: &[u8]| {
+        terminal.advance(stream);
+        terminal.project(&mut grid);
+        grid.scrim().map(|scrim| scrim.alpha)
+    };
+
+    assert_eq!(
+        [
+            alpha_after(&in_lane(1, &scrim_frame(115))),
+            alpha_after(&in_lane(2, &text_run_frame("a"))),
+            alpha_after(&in_lane(1, &text_run_frame("b"))),
+            alpha_after(&in_lane(1, &scrim_frame(115))),
+            alpha_after(&encode_reset()),
+        ],
+        [Some(115), Some(115), None, Some(115), None],
     );
 }
 

@@ -144,6 +144,7 @@ session control. "Head" is the fixed prefix of the first argument.
 | `line_layout` | D | 2 B per line | Max 24567 lines, replaced whole |
 | `minimap` | D | 34 B + palette arg | Strip declaration, ending in the mark class; its content store is persistent |
 | `scroll_region` | D | 10 B | Eased by the change between declarations |
+| `scrim` | D | 8 B | Dims the surface from a row down, leaving each floating box clear |
 | `fill` | P | 12 B | + streamed page, closed by `fill_end` |
 | `fill_rows` | P | 20 B | + streamed rows, closed by `fill_end` |
 | `fill_end` | P | -- | Commits the page onto its pool slot |
@@ -282,6 +283,23 @@ still counts from the region's top-left. A terminal below version 42 reads the
 first 25 bytes and places the page on the region's first cell, so state an
 inset only to a terminal at version 42 or later. A terminal at version 42 or
 later drops a shorter head.
+
+From protocol version 43, a `scrim` frame carries an 8-byte argument: an rgb
+color, an alpha out of 255, a u16 top row, and an i16 top px, each big-endian.
+The terminal lays the color at that alpha over the surface from `top_px`
+logical px under the top of the row `top_row` down to the bottom. The scrim is
+a decoration of its lane. A lane declared again without the frame holds none,
+and where two lanes hold one, the higher lane's draws. A floating box is a
+`panel` whose shadow is a drop or a halo. The scrim leaves the box of each one
+clear, by the half pixel coverage its fill draws with, so a dialog and what it
+holds stay bright. The scrim draws after the frame's cells, decorations,
+images, and pane pools, and before the riding panels, the pools of the boxes,
+the frame strokes, and the cursor. A stroke drawn outside the floating boxes
+reads as it would under the scrim. While a scrim is set, the exterior shadow
+of a floating box draws after the scrim and over the text beneath it, as a
+CSS `box-shadow` lies over all that a box stands on. The tucked, overhang,
+and cast shadows keep their places. A terminal below version 43 ignores the
+frame, so send a scrim only to a terminal at version 43 or later.
 
 `ident` travels the other way, terminal to program, and arrives as input bytes
 on stdin. `decode` never yields it; use `decode_ident_reply`.
