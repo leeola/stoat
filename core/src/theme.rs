@@ -951,6 +951,13 @@ pub mod scope {
     ///
     /// A theme that leaves it unset draws the name in the bold `ui.text.dim`.
     pub const UI_MODAL_LABEL: &str = "ui.modal.label";
+    /// The overlay a boxed modal lays over the window behind it, as its
+    /// background.
+    ///
+    /// A stoatty that draws a scrim lays it at the `ui.modal_scrim` alpha. A
+    /// theme that leaves it unset fades each pane toward `ui.background` by
+    /// `ui.modal_dim` instead.
+    pub const UI_MODAL_SCRIM: &str = "ui.modal.scrim";
 
     /// The badge that leads a completion row, a glyph on a tinted cell.
     ///

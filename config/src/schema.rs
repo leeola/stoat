@@ -243,6 +243,14 @@ pub fn settings_schema() -> &'static [SettingDef] {
             default: "0",
         },
         SettingDef {
+            path: &[Lit("ui"), Lit("modal_scrim")],
+            shape: ValueShape::Number,
+            doc: "Alpha of the overlay a boxed modal lays over the window behind \
+                  it in the theme's ui.modal.scrim color, in place of \
+                  ui.modal_dim under a stoatty that draws it (0 keeps the fade).",
+            default: "0",
+        },
+        SettingDef {
             path: &[Lit("ui"), Lit("inactive_dim_follows_focus")],
             shape: ValueShape::Bool,
             doc: "Whether the unfocused-pane fade paints only while the terminal \

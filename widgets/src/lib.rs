@@ -28,7 +28,7 @@ use std::{
     sync::Once,
 };
 use stoatty_protocol::{
-    command::{self, HelloCommand, PanelCommand},
+    command::{self, HelloCommand, PanelCommand, ScrimCommand},
     detect,
 };
 
@@ -272,6 +272,16 @@ impl ApcScene {
     /// and a dead scene drops it as it drops every append.
     pub fn nudge(&mut self, offset: [i16; 2]) {
         command::encode_nudge_into(self.buffer(), offset);
+    }
+
+    /// Dim the window behind the floating boxes by `scrim`, as a decoration of
+    /// the open lane.
+    ///
+    /// A lane holds one scrim, and the next flush of the lane without one
+    /// clears it. A host before [`SCRIM_PROTOCOL`](stoatty_protocol::SCRIM_PROTOCOL)
+    /// ignores it, and a dead scene drops it as it drops every append.
+    pub fn scrim(&mut self, scrim: ScrimCommand) {
+        command::encode_scrim_into(self.buffer(), &scrim);
     }
 
     /// Forget what the last flush wrote, so the next [`Self::flush_to`] sends

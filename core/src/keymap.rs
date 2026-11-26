@@ -4762,6 +4762,7 @@ mod tests {
                 ui_inactive_dim: Some(0.14),
                 ui_inactive_dim_follows_focus: Some(true),
                 ui_modal_dim: Some(0.65),
+                ui_modal_scrim: Some(0.45),
                 ui_relative_numbers_follow_focus: Some(true),
                 ui_pin_hides_hints: None,
                 highlight_retention: Some(64),

@@ -855,6 +855,16 @@ impl ActiveModal {
         )
     }
 
+    /// Whether this modal dims the window behind its box.
+    ///
+    /// Each modal that paints its own box does, but the Glance of the Jobs
+    /// parent. The boards draw the bar and the panes at full strength around a
+    /// Glance. Its box casts the Popout role's shadow, so a terminal's scrim
+    /// would dim the box with the window.
+    pub(crate) fn dims_window(self) -> bool {
+        self.paints_own_box() && self != Self::JobGlance
+    }
+
     /// Whether this modal's docked key hints box waits for the hints toggle,
     /// rather than showing whenever the modal opens.
     ///

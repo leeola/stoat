@@ -370,6 +370,7 @@ theme ermine_night inherits default_dark {
     ui.modal.picker  = { fg: strong, bg: overlay };
     ui.modal.footer  = { bg: raised };
     ui.modal.label   = { fg: special, modifiers: [bold] };
+    ui.modal.scrim.bg = "#08090b";
     ui.chip          = { fg: text, bg: tab_wash };
 
     ui.completion.kind.function.bg = tint_accent;
@@ -512,6 +513,11 @@ on init {
     # How far every pane's colors blend toward the theme background while a
     # modal paints its own box over them, from 0 (no fade) to 1.
     ui.modal_dim = 0.65;
+
+    # The alpha, from 0 to 1, of the overlay that a boxed modal lays over the
+    # window behind it, in the theme's ui.modal.scrim color. Under a stoatty
+    # that draws it, it takes the place of ui.modal_dim. 0 keeps the fade.
+    ui.modal_scrim = 0.45;
 
     # Fade the unfocused panes only while the stoatty window has focus. The
     # fade marks the pane a keystroke reaches, and with the window in the

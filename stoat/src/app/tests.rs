@@ -51,7 +51,7 @@ use std::{
 };
 use stoat_config::LineNumbers;
 use stoat_text::Point;
-use stoatty_protocol::command::{self, PoolKind, PoolRegionCommand};
+use stoatty_protocol::command::{self, PoolKind, PoolRegionCommand, ScrimCommand};
 use tokio::sync::mpsc::{error::TryRecvError, UnboundedReceiver};
 
 fn stoat_with_detached_pane(window: u32) -> (Stoat, PaneId) {
@@ -7384,6 +7384,204 @@ fn close_finder_over_split(modal_dim: f64) -> (u64, Buffer, Buffer) {
     let restored = paint_restored(&mut h, buf, holds);
     let held_replays = h.stoat.pane_replays_held - held_before;
     (held_replays, restored, h.stoat.render())
+}
+
+/// A harness on a stoatty at `protocol`, with the shipped modal fade and
+/// overlay alpha.
+fn dimming_harness(protocol: u32) -> crate::test_harness::TestHarness {
+    let mut h = Stoat::test();
+    h.stoat.stoatty_protocol = protocol;
+    h.stoat.settings.ui_modal_dim = Some(0.65);
+    h.stoat.settings.ui_modal_scrim = Some(0.45);
+    h
+}
+
+/// The scrim frames of a fresh frame's scene, in lane 0 and then in every
+/// lane.
+fn frame_scrims(h: &mut crate::test_harness::TestHarness) -> [Vec<ScrimCommand>; 2] {
+    let _ = h.stoat.render();
+    let scrims = |bytes: &[u8]| -> Vec<ScrimCommand> {
+        command::decode_stream(bytes)
+            .into_iter()
+            .filter_map(|cmd| match cmd {
+                command::Command::Scrim(scrim) => Some(scrim),
+                _ => None,
+            })
+            .collect()
+    };
+    [
+        scrims(h.stoat.apc_scene.lane_bytes(0)),
+        scrims(&h.stoat.apc_scene.all_bytes()),
+    ]
+}
+
+/// The finder open over the window of `h`, settled.
+fn open_finder(h: &mut crate::test_harness::TestHarness) {
+    action_handlers::dispatch(&mut h.stoat, &stoat_action::OpenFileFinder);
+    h.settle();
+}
+
+/// A boxed modal under the ermine theme, on a stoatty that draws a scrim, lays
+/// the theme's overlay over the window in lane 0 and fades no pane. The
+/// overlay starts at the window's top with no tab bar. Under a tab bar band
+/// it starts 32 px down, 14 px into the band's second row.
+#[test]
+fn a_boxed_modal_under_the_ermine_theme_sends_the_scrim_and_fades_no_pane() {
+    let mut h = dimming_harness(stoatty_protocol::PROTOCOL_VERSION);
+    let scrim = |top_row, top_px| ScrimCommand {
+        color: [8, 9, 11],
+        alpha: 115,
+        top_row,
+        top_px,
+    };
+
+    open_finder(&mut h);
+    let one_tab = (
+        h.stoat.modal_scrim(),
+        h.stoat.modal_dim(),
+        frame_scrims(&mut h),
+    );
+    h.type_keys("escape");
+    action_handlers::dispatch(&mut h.stoat, &stoat_action::NewTab);
+    open_finder(&mut h);
+    let two_tabs = frame_scrims(&mut h);
+
+    assert_eq!(
+        (one_tab, two_tabs),
+        (
+            (
+                Some(([8, 9, 11], 115)),
+                0.0,
+                [vec![scrim(0, 0)], vec![scrim(0, 0)]]
+            ),
+            [vec![scrim(1, 14)], vec![scrim(1, 14)]],
+        ),
+    );
+}
+
+/// A stoatty before the scrim, and a terminal that is no stoatty at all, fade
+/// every pane by `ui.modal_dim` under a boxed modal, and the scene holds no
+/// scrim.
+#[test]
+fn a_terminal_before_the_scrim_keeps_the_fade() {
+    let terminals = [
+        (true, POOL_INSET_PROTOCOL),
+        (false, stoatty_protocol::PROTOCOL_VERSION),
+    ];
+    let looks = terminals.map(|(stoatty, protocol)| {
+        let mut h = dimming_harness(protocol);
+        h.stoat.stoatty = stoatty;
+        open_finder(&mut h);
+        (
+            h.stoat.modal_scrim(),
+            h.stoat.modal_dim(),
+            frame_scrims(&mut h),
+        )
+    });
+    let kept = (None, 0.65, [Vec::new(), Vec::new()]);
+    assert_eq!(looks, [kept.clone(), kept]);
+}
+
+/// A `ui.modal_scrim` of 0 lays no overlay, so every pane fades by
+/// `ui.modal_dim` under a boxed modal.
+#[test]
+fn a_scrim_alpha_of_zero_keeps_the_fade() {
+    let mut h = dimming_harness(stoatty_protocol::PROTOCOL_VERSION);
+    h.stoat.settings.ui_modal_scrim = Some(0.0);
+    open_finder(&mut h);
+    assert_eq!(
+        (
+            h.stoat.modal_scrim(),
+            h.stoat.modal_dim(),
+            frame_scrims(&mut h)
+        ),
+        (None, 0.65, [Vec::new(), Vec::new()]),
+    );
+}
+
+/// A theme with a scrim and no window ground draws the tab bar as one plain
+/// row with no band, and the overlay starts under that row.
+#[test]
+fn a_tab_bar_with_no_band_starts_the_scrim_under_its_row() {
+    let mut h = dimming_harness(stoatty_protocol::PROTOCOL_VERSION);
+    let (config, _) = stoat_config::parse(r##"theme t { ui.modal.scrim.bg = "#08090b"; }"##);
+    let theme = crate::theme::Theme::from_config(&config.expect("the theme parses"), "t")
+        .expect("the theme builds");
+    h.stoat.theme = Arc::new(theme);
+    action_handlers::dispatch(&mut h.stoat, &stoat_action::NewTab);
+    open_finder(&mut h);
+
+    let scrim = ScrimCommand {
+        color: [8, 9, 11],
+        alpha: 115,
+        top_row: 1,
+        top_px: 0,
+    };
+    assert_eq!(
+        (
+            h.stoat.tab_bar_rows(),
+            h.stoat.chrome_bands_on(),
+            frame_scrims(&mut h)
+        ),
+        (1, false, [vec![scrim], vec![scrim]]),
+    );
+}
+
+/// A theme that names no `ui.modal.scrim` fades every pane by `ui.modal_dim`
+/// under a boxed modal, on a stoatty that draws a scrim.
+#[test]
+fn a_theme_with_no_scrim_scope_keeps_the_fade() {
+    let mut h = dimming_harness(stoatty_protocol::PROTOCOL_VERSION);
+    let (config, _) = stoat_config::parse(DEFAULT_KEYMAP);
+    let dark = crate::theme::Theme::from_config(
+        &config.expect("the shipped config parses"),
+        "default_dark",
+    )
+    .expect("the shipped theme builds");
+    h.stoat.theme = Arc::new(dark);
+
+    open_finder(&mut h);
+    assert_eq!(
+        (
+            h.stoat.modal_scrim(),
+            h.stoat.modal_dim(),
+            frame_scrims(&mut h)
+        ),
+        (None, 0.65, [Vec::new(), Vec::new()]),
+    );
+}
+
+/// The search prompt paints no box, so it neither lays the overlay nor fades
+/// a pane.
+#[test]
+fn a_prompt_with_no_box_sends_no_scrim() {
+    let mut h = dimming_harness(stoatty_protocol::PROTOCOL_VERSION);
+    h.type_keys("/");
+    assert_eq!(
+        (
+            h.stoat.modal_scrim(),
+            h.stoat.modal_dim(),
+            frame_scrims(&mut h)
+        ),
+        (None, 0.0, [Vec::new(), Vec::new()]),
+    );
+}
+
+/// A Glance lays no overlay and fades no pane, on a stoatty that draws a scrim
+/// and on one before it.
+#[test]
+fn a_glance_dims_nothing() {
+    let dims = [stoatty_protocol::PROTOCOL_VERSION, POOL_INSET_PROTOCOL].map(|protocol| {
+        let mut h = dimming_harness(protocol);
+        h.push_job("sleep 30");
+        h.type_keys("escape space J k");
+        (
+            active_modal(&h.stoat),
+            h.stoat.modal_scrim(),
+            h.stoat.modal_dim(),
+        )
+    });
+    assert_eq!(dims, [(Some(ActiveModal::JobGlance), None, 0.0); 2]);
 }
 
 /// A frame lists each pane capture it shows whole for the UI thread, by its

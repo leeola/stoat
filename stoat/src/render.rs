@@ -120,7 +120,8 @@ use std::{
 use stoat_config::{LineNumbers, MinimapMode, WrapMode};
 use stoat_widgets::{minimap::Minimap, popover::Popover, ApcScene};
 use stoatty_protocol::{
-    command::PopoverChrome, BACKDROP_PANEL_PROTOCOL, BATCHED_DECORATIONS_PROTOCOL,
+    command::{PopoverChrome, ScrimCommand},
+    BACKDROP_PANEL_PROTOCOL, BATCHED_DECORATIONS_PROTOCOL,
 };
 use unicode_width::UnicodeWidthStr;
 
@@ -565,8 +566,9 @@ pub(crate) struct FrameCtx<'a> {
     /// to unfocused panes only.
     pub(crate) inactive_dim: f32,
     /// Fraction every pane's colors blend toward the theme background while a
-    /// modal paints its own box over them, resolved by [`Stoat::modal_dim`].
-    /// `0.0` while no such modal is open.
+    /// modal dims the window behind its box, resolved by [`Stoat::modal_dim`].
+    /// `0.0` while no such modal is open, and while the frame lays the modal's
+    /// scrim over the window instead.
     ///
     /// See also:
     /// - [`Self::pane_dim`] for the fade one pane takes from this and [`Self::inactive_dim`].
@@ -1390,6 +1392,7 @@ pub(crate) fn frame(
     let size = stoat.layout_size();
     let inactive_dim = stoat.painted_inactive_dim();
     let modal_dim = stoat.modal_dim();
+    let modal_scrim = stoat.modal_scrim();
 
     // A per-pane strip takes its dimmed palette whenever its pane dims, so the
     // palette builds at the deeper of the two fades.
@@ -1697,6 +1700,24 @@ pub(crate) fn frame(
     } else {
         stoat.tab_bar_spans.clear();
         stoat.tray_spans.clear();
+    }
+
+    // The boards lay the overlay from the bottom of the tab bar down, which
+    // a band draws 32 px under the window's top, 14 px into its second row.
+    // The scrim rides lane 0, so the first frame after the modal closes
+    // flushes it away.
+    if let Some((color, alpha)) = modal_scrim {
+        let (top_row, top_px) = match (tab_bar_rows > 0, chrome_bands) {
+            (false, _) => (full.y, 0),
+            (true, false) => (full.y + 1, 0),
+            (true, true) => (full.y + 1, 2 * i16::from(TAB_BAR_PAD)),
+        };
+        scene.scrim(ScrimCommand {
+            color,
+            alpha,
+            top_row,
+            top_px,
+        });
     }
 
     // The banner paints after the stale holds clear too, since a pane it pushes

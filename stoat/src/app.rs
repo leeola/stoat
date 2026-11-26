@@ -63,6 +63,7 @@ use crate::{
     symbol_finder::SymbolFinder,
     term_keys,
     term_session::{TermId, ViewLocation},
+    theme::PanelRole,
     theme_pool::{ThemePool, VscodeSource},
     ui::{FrameBatches, FrameBatchesHold, RenderFrame, StoattyPeer},
     workspace::{BridgeWaiter, ParseRestyle, Workspace, WorkspaceId, WorkspaceUid},
@@ -96,10 +97,10 @@ use stoat_text::{
 };
 use stoat_widgets::{pool::SmoothScrollState, ApcScene};
 use stoatty_protocol::{
-    command,
+    command::{self, PanelShadow},
     window_ipc::{MouseButton as IpcMouseButton, MouseKind, WindowIpcEvent},
     BACKDROP_PANEL_PROTOCOL, BATCHED_DECORATIONS_PROTOCOL, NUDGE_PROTOCOL, PAGE_NUDGE_PROTOCOL,
-    POOL_INSET_PROTOCOL, POOL_SCALE_PROTOCOL,
+    POOL_INSET_PROTOCOL, POOL_SCALE_PROTOCOL, SCRIM_PROTOCOL,
 };
 use tokio::{
     io::AsyncBufReadExt,
@@ -4539,16 +4540,50 @@ impl Stoat {
     }
 
     /// The fade a frame paints every pane with, focused or not, while a modal
-    /// paints its own box over them.
+    /// dims the window behind its box.
     ///
     /// The `ui.modal_dim` setting answers, clamped to `0.0..=1.0` and `0.0`
     /// when unset. A transient input such as the search prompt paints no box,
-    /// so it leaves the panes at `0.0` and the editor it works on in full.
+    /// so it leaves the panes at `0.0` and the editor it works on in full, and
+    /// a Glance leaves them too, as [`ActiveModal::dims_window`] rules.
+    ///
+    /// The window dims in one of two looks. Where [`Self::modal_scrim`] lays
+    /// the theme's overlay over the window, this answers `0.0`, since the
+    /// overlay dims the panes already. Elsewhere each pane fades by this.
     pub(crate) fn modal_dim(&self) -> f32 {
-        if !active_modal(self).is_some_and(ActiveModal::paints_own_box) {
+        if !active_modal(self).is_some_and(ActiveModal::dims_window) || self.modal_scrim().is_some()
+        {
             return 0.0;
         }
         self.settings.ui_modal_dim.unwrap_or(0.0).clamp(0.0, 1.0) as f32
+    }
+
+    /// The overlay a boxed modal lays over the window behind it, as its color
+    /// and its alpha out of 255, or `None` where the panes fade by
+    /// [`Self::modal_dim`] instead.
+    ///
+    /// The overlay needs a modal that dims the window, a stoatty at
+    /// [`SCRIM_PROTOCOL`] or later, a `ui.modal_scrim` above 0, a theme that
+    /// gives `ui.modal.scrim` an RGB background, and an Overlay role whose
+    /// shadow is a drop or a halo. The terminal keeps the box of such a panel
+    /// clear of the overlay, and every boxed modal frames with that role's
+    /// shadow.
+    pub(crate) fn modal_scrim(&self) -> Option<([u8; 3], u8)> {
+        let floats = matches!(
+            self.theme.panel(PanelRole::Overlay).shadow,
+            PanelShadow::Drop | PanelShadow::Halo
+        );
+        let shown = active_modal(self).is_some_and(ActiveModal::dims_window)
+            && self.stoatty
+            && self.stoatty_protocol >= SCRIM_PROTOCOL
+            && floats;
+        if !shown {
+            return None;
+        }
+
+        let alpha = self.settings.ui_modal_scrim.filter(|alpha| *alpha > 0.0)?;
+        let color = paint::style_rgb(self.theme.try_get(crate::theme::scope::UI_MODAL_SCRIM)?.bg)?;
+        Some((color, (alpha.clamp(0.0, 1.0) * 255.0).round() as u8))
     }
 
     /// The line numbering the gutter takes, resolving `:relative-numbers`

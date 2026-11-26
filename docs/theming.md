@@ -319,6 +319,12 @@ The typed UI scopes, by group (syntax scopes are open-ended):
 - `ui.modal.label` -- the name a filter modal's header row starts with, such
   as `Files`. A theme that leaves it unset draws the name in the bold
   `ui.text.dim`. default_dark leaves it unset.
+- `ui.modal.scrim` -- the overlay a boxed modal lays over the window behind
+  it, as its background. A stoatty that draws a scrim lays it from the bottom
+  of the tab bar down at the `ui.modal_scrim` alpha, and the modal's box stays
+  clear. A theme that leaves it unset, a terminal that draws no scrim, and a
+  `ui.modal_scrim` of 0 fade each pane toward `ui.background` by
+  `ui.modal_dim` instead. default_dark leaves it unset.
 - `ui.completion.kind.function`, `ui.completion.kind.constant`,
   `ui.completion.kind.module`, `ui.completion.kind.variable`,
   `ui.completion.kind.keyword` -- the badge that leads a completion row, a

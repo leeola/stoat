@@ -91,6 +91,16 @@ const BLAME_AGE_4: [u8; 3] = [0xa9, 0xc8, 0xff];
 const TINT_WARNING: [u8; 3] = [0x2e, 0x2a, 0x1e];
 const STRIP_TEXT: [u8; 3] = [0x3a, 0x3f, 0x49];
 
+/// [`BASE`] under the boards' modal overlay, `rgba(8,9,11,0.45)`, as the
+/// renderer blends it. The exact blend is #101215, and the headless adapter
+/// rounds the red channel a level up.
+const SCRIM_BASE: [u8; 3] = [0x11, 0x12, 0x15];
+
+/// [`GROUND`] under the boards' modal overlay, as the renderer blends it. The
+/// exact blend is #0a0c0e, and the headless adapter rounds the red channel a
+/// level up.
+const SCRIM_GROUND: [u8; 3] = [0x0b, 0x0c, 0x0e];
+
 /// The primary cursor's opaque block, the terminal palette's cursor color. The
 /// color comes from stoatty's own palette rather than a theme scope.
 const CURSOR_PRIMARY: [u8; 3] = [0xdf, 0xe2, 0xe8];
@@ -1846,7 +1856,8 @@ fn expect_plate_sides(shot: &Snapshot, home: &mut TempDir, (left, right): (u32, 
 /// plate's bottom edge stands 10 px into its last row, cell row 40. The pixel
 /// 30 px under that edge at the plate's middle column lies 12 px past the
 /// shadow rect's bottom, where the blur still lays about a sixth of black over
-/// the editor surface.
+/// the editor surface under the overlay, [`SCRIM_BASE`]. The shadow lies over
+/// the overlay, as the boards lay it.
 #[test]
 fn the_file_finder_box_casts_the_modal_shadow() {
     let mut home = support::scratch_home();
@@ -1861,13 +1872,17 @@ fn the_file_finder_box_casts_the_modal_shadow() {
     let (_, last_row, _, _) = cell_rect(32, 40, 1, 1);
     let plate_bottom = last_row + 10;
     let under = dominant_color(&shot, (x + width / 2, plate_bottom + 30, 1, 1));
-    if under.iter().zip(BASE).any(|(&found, base)| found >= base) {
+    if under
+        .iter()
+        .zip(SCRIM_BASE)
+        .any(|(&found, overlaid)| found >= overlaid)
+    {
         let frame = keep_frame(&shot, &mut home, "finder_shadow");
         panic!(
             "the pixel 30 px under the finder plate reads {}, not darker than {} in every \
              channel; the frame is {}",
             hex(under),
-            hex(BASE),
+            hex(SCRIM_BASE),
             frame.display(),
         );
     }
@@ -3524,29 +3539,46 @@ fn the_buffer_finder_marks_an_unsaved_buffer_with_a_dot() {
     );
 }
 
-/// The editor behind the finder fades toward its own ground.
+/// The window behind the finder takes the boards' overlay,
+/// `rgba(8,9,11,0.45)`, outside the plate and its shadow.
 ///
-/// The fade blends a glyph toward its cell's background, so the backdrop keeps
-/// its surface and its text dims. The brightest pixel of the first line's text
-/// falls below half of what it was before the finder opened.
+/// The overlay lies over the editor's text, its surface, and the window's
+/// ground alike. The first line's text peaks at the 0xe8 of [`TEXT`] before the
+/// finder opens, and at 0x84 or 0x85 under the overlay. The window's left
+/// margin reads [`SCRIM_GROUND`]. Down the editor's left columns, under its two
+/// lines, most of the surface reads [`SCRIM_BASE`], and none of it the bare
+/// [`BASE`].
 #[test]
-fn the_editor_behind_the_finder_fades() {
+fn the_window_behind_the_finder_takes_the_overlay() {
     let mut home = support::scratch_home();
     let mut session = spawn_settled(home.path(), "many-files", "src/alpha.txt");
-    let text = cell_rect(6, 2, 17, 1);
-    let before = session.snapshot().expect("a snapshot");
     play(&mut session, "<Space>p<Settle>");
     let after = session.snapshot().expect("a snapshot");
 
-    let (lit, faded) = (brightest(&before, text), brightest(&after, text));
-    if u16::from(faded) * 2 >= u16::from(lit) {
-        let frame = keep_frame(&after, &mut home, "modal_backdrop");
+    let text = brightest(&after, cell_rect(6, 2, 17, 1));
+    let surface = (20, 300, 60, 400);
+    let (overlaid, bare) = (
+        pixels_of(&after, surface, SCRIM_BASE),
+        pixels_of(&after, surface, BASE),
+    );
+    if !(0x84..=0x85).contains(&text) || overlaid <= 12_000 || bare != 0 {
+        let frame = keep_frame(&after, &mut home, "modal_overlay");
         panic!(
-            "the backdrop text peaks at {faded} under the finder and at {lit} before it; the \
-             frame is {}",
+            "the text under the overlay peaks at {text:#x}, and of the surface's 24000 pixels \
+             {overlaid} read {} and {bare} read {}, most of them {}; the frame is {}",
+            hex(SCRIM_BASE),
+            hex(BASE),
+            hex(dominant_color(&after, surface)),
             frame.display(),
         );
     }
+    expect_region(
+        &after,
+        &mut home,
+        (0, 100, 8, 700),
+        SCRIM_GROUND,
+        "overlay_ground",
+    );
 }
 
 /// The finder ends in its key line on the plate's ground, in the inner rect's
