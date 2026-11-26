@@ -1558,10 +1558,11 @@ fn the_palette_key_line_ends_in_the_namespace_note() {
 ///
 /// Two commands run first, so History holds two lines. The chip
 /// `history 1 / 2` advances 176 sixteenths at the Caption scale of 216, so its
-/// box is the 13 cells that end at cell 143. The selected first row reads the
-/// tab wash, and one Island covers the gap that the root list leaves between
-/// its list and its doc. The second row's U+21BA mark draws in the disabled
-/// color from cell 18, and its age `now` draws muted from cell 139.
+/// box is 198 sixteenths wide, and it ends 4 sixteenths inside the row's end at
+/// cell 143. The selected first row reads the tab wash, and one Island covers
+/// the gap that the root list leaves between its list and its doc. The second
+/// row's U+21BA mark draws in the disabled color from cell 18, and its age
+/// `now` draws muted from cell 139.
 #[test]
 fn up_lists_history_under_a_chip() {
     let mut home = support::scratch_home();
@@ -1575,7 +1576,7 @@ fn up_lists_history_under_a_chip() {
         &mut home,
         TINT_SPECIAL,
         234..266,
-        (1171, 241, 1287, 258),
+        (1174, 241, 1285, 258),
         "history_chip",
     );
     expect_region(
@@ -1605,7 +1606,8 @@ fn up_lists_history_under_a_chip() {
 /// The command `:o unstaged.txt` runs first. The needle `txt o` holds the two
 /// words of that line in the other order, so only the word rule finds the
 /// line. The chip `history · txt o · 1 / 1` is 23 chars, which advance 311
-/// sixteenths, so its box is the 21 cells that end at cell 143.
+/// sixteenths, so its box is 333 sixteenths wide, and it ends 4 sixteenths
+/// inside the row's end at cell 143.
 #[test]
 fn keywords_narrow_history_under_a_wider_chip() {
     let mut home = support::scratch_home();
@@ -1619,7 +1621,7 @@ fn keywords_narrow_history_under_a_wider_chip() {
         &mut home,
         TINT_SPECIAL,
         234..266,
-        (1099, 241, 1287, 258),
+        (1098, 241, 1285, 258),
         "keyword_chip",
     );
 }
@@ -3316,12 +3318,15 @@ fn the_finder_rows_stand_twenty_one_pixels_apart() {
 /// The finder's header names its scopes as pills, and the active scope's pill
 /// is the one box on the tab wash.
 ///
-/// The header row is cell row 10, and a box draws 1 px right and 7 px down of
-/// its cells. With `all` active, its box is the 4 cells from cell 105, so the
-/// tab wash fills the pixels from (946, 187) to (981, 204) and no other pixel of
-/// the header's 32 px band, pixel rows 180 to 211. After Shift-Tab the box
-/// moves to `modified`, the 9 cells from cell 107, from (964, 187) to (1044,
-/// 204).
+/// The header row is cell row 10, and its pills `all`, `modified`, and
+/// `workspaces` end 4 sixteenths inside the row's end at cell 126. Each pill is
+/// its text with 11 sixteenths at each side, 4 sixteenths from the next. A box
+/// draws 1 px right and 7 px down of its sixteenths, each edge on the nearest
+/// pixel. With `all` active, its box runs from 1654 to 1717 sixteenths across
+/// the screen, so the tab wash fills the pixels from (931, 187) to (966, 204)
+/// and no other pixel of the header's 32 px band, pixel rows 180 to 211. After
+/// Shift-Tab the box moves to `modified`, from 1721 to 1851 sixteenths, which
+/// fills the pixels from (969, 187) to (1041, 204).
 #[test]
 fn the_finder_header_boxes_its_active_scope_pill() {
     let mut home = support::scratch_home();
@@ -3334,7 +3339,7 @@ fn the_finder_header_boxes_its_active_scope_pill() {
         &mut home,
         TAB_WASH,
         180..212,
-        (946, 187, 981, 204),
+        (931, 187, 966, 204),
         "header_pill_all",
     );
 
@@ -3345,7 +3350,7 @@ fn the_finder_header_boxes_its_active_scope_pill() {
         &mut home,
         TAB_WASH,
         180..212,
-        (964, 187, 1044, 204),
+        (969, 187, 1041, 204),
         "header_pill_modified",
     );
 }
@@ -3359,8 +3364,10 @@ fn the_finder_header_boxes_its_active_scope_pill() {
 /// so it covers the pixels 577 to 582 by 222 to 227. Its pixels (579, 224) and
 /// (580, 225) read the warning color, and the pixels (576, 224) and (583, 224)
 /// at its sides read the tab wash. Its round corner leaves the pixel (577, 222)
-/// clear of the warning color. The `buffers` pill is the 8 cells from cell 110
-/// on cell row 10, so its box fills the pixels from (991, 187) to (1062, 204).
+/// clear of the warning color. The `buffers` pill stands 4 sixteenths before
+/// `modified`, which ends 4 sixteenths inside the header's end at cell 126. So
+/// its box runs from 1761 to 1878 sixteenths across cell row 10 and fills the
+/// pixels from (992, 187) to (1056, 204).
 #[test]
 fn the_buffer_finder_marks_an_unsaved_buffer_with_a_dot() {
     let mut home = support::scratch_home();
@@ -3393,7 +3400,7 @@ fn the_buffer_finder_marks_an_unsaved_buffer_with_a_dot() {
         &mut home,
         TAB_WASH,
         180..212,
-        (991, 187, 1062, 204),
+        (992, 187, 1056, 204),
         "buffers_pill",
     );
 }
@@ -3493,13 +3500,14 @@ fn the_session_picker_plate_ends_in_its_key_line() {
 /// The help header names both scopes. The active `applicable` sits in a chip
 /// box on the tab wash, and `all` follows as text on the plate's ground.
 ///
-/// The box takes the fewest whole cells that hold `applicable` with 6 px of
-/// padding at each end, which are the 10 cells from cell 129. They end on the
-/// last cell edge left of `all` and its gap. The header row is cell row 3, and
-/// the box draws 1 px right and 7 px down of its cells. So the tab wash fills
-/// the pixels from (1162, 61) to (1251, 78), and no other pixel of the header's
-/// 32 px band, pixel rows 54 to 85, takes it. In that band, the 30 px from x 1258 hold `all` with
-/// no box, so most of them keep the ground.
+/// The box is `applicable` with 11 sixteenths at each side, and it ends 4
+/// sixteenths before the pill of `all`, which ends 4 sixteenths inside the
+/// header's end at cell 143. So it runs from 2060 to 2217 sixteenths across the
+/// screen. The header row is cell row 3, and the box draws 1 px right and 7 px
+/// down of its sixteenths, each edge on the nearest pixel. So the tab wash
+/// fills the pixels from (1160, 61) to (1247, 78), and no other pixel of the
+/// header's 32 px band, pixel rows 54 to 85, takes it. In that band, the 32 px
+/// from x 1252 hold `all` with no box, so most of them keep the ground.
 #[test]
 fn the_help_header_names_both_scopes() {
     let mut home = support::scratch_home();
@@ -3510,13 +3518,13 @@ fn the_help_header_names_both_scopes() {
         &mut home,
         TAB_WASH,
         54..86,
-        (1162, 61, 1251, 78),
+        (1160, 61, 1247, 78),
         "help_active_scope",
     );
     expect_region(
         &shot,
         &mut home,
-        (1258, 61, 30, 18),
+        (1252, 61, 32, 18),
         GROUND,
         "help_inactive_scope",
     );

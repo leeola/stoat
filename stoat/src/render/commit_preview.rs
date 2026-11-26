@@ -315,7 +315,6 @@ mod tests {
     use std::path::{Path, PathBuf};
     use stoat_action::BlamePreview;
     use stoat_config::TabBarMode;
-    use stoat_widgets::panel::Panel;
     use stoatty_protocol::{
         command::{decode_stream, BorderStyle, Command, Edge, PanelShadow},
         PROTOCOL_VERSION,
@@ -416,10 +415,11 @@ mod tests {
     /// Under a live scene the box is the plate's two panels over the inner
     /// cells, a plain one and then a backdrop in the ground. One Island in the
     /// editor surface follows over the patch's rows. The read-only chip draws
-    /// in its own box at the header row's right end, and a light square ring
-    /// marks the origin row, the added line the preview opened from. The key
-    /// line's row, the inner rect's last, blanks to the ground. The tab bar
-    /// shows in two rows here, so the box starts on row 2.
+    /// in its own rounded bar, 326 sixteenths wide, which ends 4 sixteenths
+    /// inside the header row's right end, and a light square ring marks the
+    /// origin row, the added line the preview opened from. The key line's row,
+    /// the inner rect's last, blanks to the ground. The tab bar shows in two
+    /// rows here, so the box starts on row 2.
     #[test]
     fn the_live_box_draws_a_plate_with_one_island() {
         let mut h = preview_open();
@@ -432,9 +432,18 @@ mod tests {
 
         let theme = &h.stoat.theme;
         let plate = chrome::plate_colors(theme, &h.stoat.apc_scene).expect("the plate look");
-        let chip = Panel::chip(
-            paint::style_rgb(theme.get(scope::UI_PREVIEW_CHIP).bg).expect("an RGB chip"),
-        );
+        let chip_fill =
+            paint::style_rgb(theme.get(scope::UI_PREVIEW_CHIP).bg).expect("an RGB chip");
+        let chip_bars: Vec<(i16, i16, u16, u16, u8)> =
+            decode_stream(h.stoat.apc_scene.lane_bytes(OVERLAY_LANE))
+                .into_iter()
+                .filter_map(|command| match command {
+                    Command::Bar(bar) if bar.color == chip_fill => {
+                        Some((bar.x, bar.y, bar.width, bar.height, bar.radius))
+                    },
+                    _ => None,
+                })
+                .collect();
         let inner = Rect::new(2, 3, 116, 20);
         let [r, g, b] = plate.ground;
         let plate_edges = [
@@ -444,7 +453,7 @@ mod tests {
             Edge::Outset(11),
         ];
         assert_eq!(
-            (box_panels(&h), key_line),
+            (box_panels(&h), key_line, chip_bars),
             (
                 vec![
                     (
@@ -478,16 +487,6 @@ mod tests {
                         true,
                     ),
                     (
-                        Rect::new(97, 3, 21, 1),
-                        chip.style,
-                        chip.fill,
-                        chip.shadow,
-                        chip.corner_radius,
-                        Edge::symmetric(0, 0),
-                        chip.above_pools,
-                        chip.backdrop,
-                    ),
-                    (
                         Rect::new(2, 7, 116, 1),
                         BorderStyle::Light,
                         None,
@@ -499,6 +498,7 @@ mod tests {
                     ),
                 ],
                 vec![Color::Rgb(r, g, b); 116],
+                vec![(1558, 48, 326, 16, 4)],
             ),
         );
     }

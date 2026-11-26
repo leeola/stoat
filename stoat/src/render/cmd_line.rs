@@ -95,8 +95,9 @@ struct Piece<'a> {
 /// the cwd second, because the input is the part the user types in.
 ///
 /// A chip status draws in `ui.preview.chip`, as a filter header draws its chip.
-/// Under the plate it is a box of whole cells with its run centered in it. In
-/// cells its text stands between two blank cells. A theme without the scope
+/// Under the plate it is a rounded box 6 px wider than its run at each side,
+/// which ends 2 px inside the row's right, as [`plate_trailing`] places a chip.
+/// In cells its text stands between two blank cells. A theme without the scope
 /// draws the chip's text in `ui.text.muted`.
 ///
 /// A parts status ends at the first row's right in order. In a live scene the
@@ -545,7 +546,7 @@ fn paint_plate_rows(
 
     scene.nudge(PLATE_HEADER_NUDGE);
     if let Some(fill) = fill {
-        plate_chip_boxes(&measure.trailing, fill, inner, scene);
+        plate_chip_boxes(&measure.trailing, fill, inner, buf, scene);
     }
     let mut run =
         |y: u16, col: u16, part: &str, scale: u16, colors: (Option<[u8; 3]>, [u8; 3]), bold| {
@@ -936,7 +937,7 @@ mod tests {
             run(190, PROMPT_GLYPH, PROMPT, GROUND),
         ];
         commands.extend(input);
-        commands.extend([run(848, "14 of 890", MUTED, GROUND), Command::Nudge([0, 0])]);
+        commands.extend([run(844, "14 of 890", MUTED, GROUND), Command::Nudge([0, 0])]);
         commands
     }
 
@@ -997,15 +998,16 @@ mod tests {
                 run(190, PROMPT_GLYPH, PROMPT, GROUND),
                 run(220, "ab", TEXT, GROUND),
                 run(252, " ", GROUND, TEXT),
-                run(848, "14 of 890", MUTED, GROUND),
+                run(844, "14 of 890", MUTED, GROUND),
                 Command::Nudge([0, 0]),
             ],
         );
     }
 
-    /// A chip status draws its box as a panel of whole cells and centers its
-    /// run in the box, in the chip's colors. The chip `history 1 / 24` takes
-    /// the 16 cells that end at the row's right, from cell 46.
+    /// A chip status draws its box as a rounded bar and its run 11 sixteenths
+    /// inside it, in the chip's colors. The chip `history 1 / 24` advances 224
+    /// sixteenths, so its bar is 246 wide. It ends at 988, 4 sixteenths inside
+    /// the right of the 60-cell row that starts at 32.
     #[test]
     fn a_chip_status_draws_its_box_and_its_run() {
         let theme = plate_theme();
@@ -1019,10 +1021,13 @@ mod tests {
         let (_, scene) = paint_line(&line, Rect::new(2, 1, 60, 4), &theme, true);
 
         let decoded = commands(&scene);
-        let panel = decoded.iter().find_map(|command| match command {
-            Command::Panel(panel) => Some((panel.left, panel.width)),
-            _ => None,
-        });
+        let bars: Vec<(i16, u16, u8)> = decoded
+            .iter()
+            .filter_map(|command| match command {
+                Command::Bar(bar) => Some((bar.x, bar.width, bar.radius)),
+                _ => None,
+            })
+            .collect();
         let chip = decoded.iter().find_map(|command| match command {
             Command::TextRun(run) if run.text == "history 1 / 24" => {
                 Some((run.col, run.color, run.bg))
@@ -1030,10 +1035,10 @@ mod tests {
             _ => None,
         });
         assert_eq!(
-            (panel, chip),
+            (bars, chip),
             (
-                Some((46, 16)),
-                Some((752, [12, 12, 12], Some([13, 13, 13])))
+                vec![(742, 246, 4)],
+                Some((753, [12, 12, 12], Some([13, 13, 13])))
             ),
         );
     }

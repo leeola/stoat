@@ -31,17 +31,14 @@ use ratatui::{
 use std::{
     collections::BTreeMap,
     fmt::Write,
-    ops::Range,
     path::{Path, PathBuf},
 };
 use stoat_text::Point;
 use stoat_widgets::{
     bar::Bar,
-    panel::Panel,
     pool,
     text_run::{self, TextRun, TextRunBatch},
 };
-use stoatty_protocol::command::Edge;
 use unicode_width::UnicodeWidthStr;
 
 /// The glyph before a filter modal's query.
@@ -63,9 +60,20 @@ pub(super) const PLATE_HEADER_NUDGE: [i16; 2] = [1, 7];
 /// at a 9 px cell.
 pub(super) const PLATE_HEADER_GAP: u16 = 14;
 
-/// Sixteenths of fill on each side of an active chip's text, the boards' 6 px
-/// padding at a 9 px cell.
+/// Sixteenths on each side of a chip's text, the boards' 6 px padding at a 9 px
+/// cell.
+///
+/// Every chip takes it, boxed or not, so a pill keeps its place when the scope
+/// changes.
 const CHIP_PAD: u16 = 11;
+
+/// Sixteenths between two chips of a plate's header row, the boards' 2 px gap
+/// at a 9 px cell.
+const PILL_GAP: u16 = 4;
+
+/// Sixteenths that a plate header's row ends inside its inner rect, 2 px, so
+/// under the 1 px of [`PLATE_HEADER_NUDGE`] it ends 12 px inside the plate.
+const PLATE_END_INSET: u16 = 4;
 
 /// Rows a modal's key line takes, the inner rect's last row and the bottom
 /// border's row under it.
@@ -335,7 +343,7 @@ fn paint_plate_header(
 
     scene.nudge(PLATE_HEADER_NUDGE);
     if let Some(fill) = fill {
-        plate_chip_boxes(&trailing, fill, inner, scene);
+        plate_chip_boxes(&trailing, fill, inner, buf, scene);
     }
 
     let origin = Rect::new(inner.x, inner.y, 1, 1);
@@ -403,27 +411,32 @@ pub(super) fn blank_plate_row(buf: &mut Buffer, row: Rect, ground: [u8; 3]) {
     }
 }
 
-/// Draw a chip panel in `fill` over the cells of each boxed chip that
+/// Draw a rounded chip box in `fill` under each boxed chip that
 /// [`plate_trailing`] placed on `inner`'s first row.
 ///
-/// The panels must follow the row's [`PLATE_HEADER_NUDGE`], so they stand off
-/// the cells as the chips' runs do.
+/// A box is a bar the height of the row in sixteenths, so it stands at the
+/// boards' pixels rather than on cells. The boxes must follow the row's
+/// [`PLATE_HEADER_NUDGE`], so they stand off the cells as the chips' runs do.
 pub(super) fn plate_chip_boxes(
     trailing: &PlateTrailing,
     fill: [u8; 3],
     inner: Rect,
+    buf: &mut Buffer,
     scene: &mut stoat_widgets::ApcScene,
 ) {
-    for (_, cells) in &trailing.chips {
-        if let Some(cells) = cells {
-            Panel {
-                edges: Edge::symmetric(0, 0),
-                ..Panel::chip(fill)
+    let row = Rect::new(inner.x, inner.y, inner.width, 1);
+    for (_, chip_box) in &trailing.chips {
+        if let Some((left, width)) = *chip_box {
+            Bar {
+                x: left as i16,
+                y: 0,
+                width,
+                height: 16,
+                color: fill,
+                radius: 4,
+                corners: 0,
             }
-            .draw_components(
-                Rect::new(inner.x + cells.start, inner.y, cells.len() as u16, 1),
-                scene,
-            );
+            .render(row, buf, scene);
         }
     }
 }
@@ -433,20 +446,21 @@ pub(super) fn plate_chip_boxes(
 pub(super) struct PlateTrailing {
     /// The count's run start, in sixteenths from the row's left.
     pub(super) count: Option<u16>,
-    /// Each kept chip's run start, and the cells its box covers.
-    pub(super) chips: Vec<(u16, Option<Range<u16>>)>,
+    /// Each kept chip's run start, and for a boxed chip the left and the width
+    /// of its box, all in sixteenths from the row's left.
+    pub(super) chips: Vec<(u16, Option<(u16, u16)>)>,
     /// The sixteenth the query ends by.
     pub(super) query_end: u16,
 }
 
-/// Place a plate header's `count` and `chips` right to left from `end`
-/// sixteenths, [`PLATE_HEADER_GAP`] apart, at `scale`.
+/// Place a plate header's `count` and `chips` right to left from
+/// [`PLATE_END_INSET`] inside `end` sixteenths, at `scale`.
 ///
-/// With `boxed`, an active chip takes whole cells, because its box is a panel.
-/// The box is the fewest cells that hold the chip's text with [`CHIP_PAD`] on
-/// each side, and it ends at the last cell edge at or left of the parts after
-/// it. The chip's run centers in the box. Every other part ends flush where the
-/// parts after it leave off.
+/// Each chip takes its text with [`CHIP_PAD`] on each side, and the chips
+/// stand [`PILL_GAP`] apart. With `boxed`, an active chip's box is that span.
+/// The count ends [`PLATE_HEADER_GAP`] left of the first chip, or where the
+/// chips would end when there is none. The query ends [`PLATE_HEADER_GAP`]
+/// left of what stands right of it.
 ///
 /// If the query then ends left of `query_min`, the chips drop together. If it
 /// still does, the count drops too, as [`paint_header_row`] drops them.
@@ -462,24 +476,22 @@ pub(super) fn plate_trailing(
 ) -> PlateTrailing {
     let advance = |text: &str| text_run::advance_sixteenths(text.chars().count(), scale);
     let place = |count: Option<&str>, chips: &[(&str, bool)]| {
-        let mut right = end;
+        let mut right = end.saturating_sub(PLATE_END_INSET);
+        let mut first_left = None;
         let mut placed = Vec::with_capacity(chips.len());
         for &(chip, active) in chips.iter().rev() {
-            let width = advance(chip);
-            if active && boxed {
-                let last = right / 16;
-                let first = last.saturating_sub((width + 2 * CHIP_PAD).div_ceil(16));
-                let col = first * 16 + ((last - first) * 16).saturating_sub(width) / 2;
-                placed.push((col, Some(first..last)));
-                right = first * 16;
-            } else {
-                right = right.saturating_sub(width);
-                placed.push((right, None));
-            }
-            right = right.saturating_sub(PLATE_HEADER_GAP);
+            let width = advance(chip) + 2 * CHIP_PAD;
+            let left = right.saturating_sub(width);
+            let chip_box = (active && boxed).then_some((left, width));
+            placed.push((left + CHIP_PAD, chip_box));
+            first_left = Some(left);
+            right = left.saturating_sub(PILL_GAP);
         }
         placed.reverse();
 
+        if let Some(left) = first_left {
+            right = left.saturating_sub(PLATE_HEADER_GAP);
+        }
         let count = count.map(|count| {
             let col = right.saturating_sub(advance(count));
             right = col.saturating_sub(PLATE_HEADER_GAP);
@@ -710,7 +722,7 @@ fn paint_plate_title_row(
 
     scene.nudge(PLATE_HEADER_NUDGE);
     if let Some(fill) = fill {
-        plate_chip_boxes(&trailing, fill, inner, scene);
+        plate_chip_boxes(&trailing, fill, inner, buf, scene);
     }
 
     let origin = Rect::new(inner.x, inner.y, 1, 1);
@@ -2926,6 +2938,22 @@ mod tests {
         })
     }
 
+    /// The rounded bar of an active chip, `width` sixteenths from `x` on the
+    /// header row at `y`.
+    fn plate_chip_bar(x: i16, y: i16, width: u16) -> Command {
+        Command::Bar(BarCommand {
+            x,
+            y,
+            width,
+            height: 16,
+            color: PLATE_CHIP_FILL,
+            occludes: false,
+            hatch: None,
+            radius: 4,
+            corners: 0,
+        })
+    }
+
     /// The commands of a scene, less the ends that close its runs.
     fn plate_commands(scene: &stoat_widgets::ApcScene) -> Vec<Command> {
         decode_stream(scene.bytes())
@@ -2939,10 +2967,11 @@ mod tests {
     ///
     /// The label leads in its bold color, and the prompt and the query follow
     /// 14 sixteenths apart. The caret is a space after `ab`, in the ground over
-    /// the text color. From the right, `all` ends the row flush, and the active
-    /// `applicable` centers in a 12-cell chip panel that ends on the cell edge
-    /// 14 sixteenths left of `all`. The count ends 14 sixteenths left of that
-    /// box.
+    /// the text color. From the right, the row ends 4 sixteenths inside its
+    /// end, and each chip takes its text with 11 sixteenths at each side, 4
+    /// sixteenths from the next, so `all` stands last and the active
+    /// `applicable` before it over a rounded bar of that span. The count ends
+    /// 14 sixteenths left of that bar.
     #[test]
     fn a_plate_header_draws_its_parts_as_nudged_runs() {
         let header = FilterHeader {
@@ -2955,32 +2984,14 @@ mod tests {
             plate_commands(&painted_header(&header, true).1),
             vec![
                 Command::Nudge([1, 7]),
-                Command::Panel(PanelCommand {
-                    top: 1,
-                    left: 46,
-                    width: 12,
-                    height: 1,
-                    style: BorderStyle::None_,
-                    border: PLATE_CHIP_FILL,
-                    corner_radius: 4,
-                    fill: Some(PLATE_CHIP_FILL),
-                    shadow: PanelShadow::None_,
-                    edges: Edge::symmetric(0, 0),
-                    corners: 0,
-                    fillets: 0,
-                    fillet_radius: 2,
-                    hatch: None,
-                    above_pools: false,
-                    backdrop: false,
-                    anchor: None,
-                }),
+                plate_chip_bar(732, 16, 182),
                 plate_run(32, "Help", PLATE_LABEL, PLATE_GROUND, true),
                 plate_run(110, FILTER_PROMPT, PLATE_MUTED, PLATE_GROUND, false),
                 plate_run(140, "ab", PLATE_TEXT, PLATE_GROUND, false),
                 plate_run(172, " ", PLATE_GROUND, PLATE_TEXT, false),
-                plate_run(578, "14 of 890", PLATE_MUTED, PLATE_GROUND, false),
-                plate_run(752, "applicable", PLATE_CHIP_TEXT, PLATE_CHIP_FILL, false),
-                plate_run(944, "all", PLATE_MUTED, PLATE_GROUND, false),
+                plate_run(574, "14 of 890", PLATE_MUTED, PLATE_GROUND, false),
+                plate_run(743, "applicable", PLATE_CHIP_TEXT, PLATE_CHIP_FILL, false),
+                plate_run(929, "all", PLATE_MUTED, PLATE_GROUND, false),
                 Command::Nudge([0, 0]),
             ],
         );
@@ -3003,8 +3014,8 @@ mod tests {
                 plate_run(32, FILTER_PROMPT, PLATE_MUTED, PLATE_GROUND, false),
                 plate_run(62, "ab", PLATE_TEXT, PLATE_GROUND, false),
                 plate_run(94, " ", PLATE_GROUND, PLATE_TEXT, false),
-                plate_run(864, "0", PLATE_DELETED, PLATE_GROUND, false),
-                plate_run(880, " of 214", PLATE_MUTED, PLATE_GROUND, false),
+                plate_run(860, "0", PLATE_DELETED, PLATE_GROUND, false),
+                plate_run(876, " of 214", PLATE_MUTED, PLATE_GROUND, false),
                 Command::Nudge([0, 0]),
             ],
         );
@@ -3075,7 +3086,7 @@ mod tests {
             [47, 46, 30, 29].map(|width: u16| {
                 plate_trailing(Some("14 of 890"), &chips, true, width * 16, 316, 256).query_end
             }),
-            [324, 578, 322, 464],
+            [320, 574, 318, 460],
         );
     }
 
@@ -3160,9 +3171,10 @@ mod tests {
     /// cells, which blank to the ground, with no rule under it.
     ///
     /// The label leads in its bold color, and the bold title follows 14
-    /// sixteenths after it. From the right, the chip centers in a 21-cell chip
-    /// panel that ends on the row's last cell edge. The meta's spans end 14
-    /// sixteenths left of that box, each in its own color.
+    /// sixteenths after it. From the right, the chip's run stands 11
+    /// sixteenths inside a rounded bar that ends 4 sixteenths inside the row.
+    /// The meta's spans end 14 sixteenths left of that bar, each in its own
+    /// color.
     #[test]
     fn a_plate_title_header_draws_its_parts_as_nudged_runs() {
         let (buf, scene) = painted_title_header(&title_meta(), 60, true);
@@ -3178,31 +3190,13 @@ mod tests {
                 .concat(),
                 vec![
                     Command::Nudge([1, 7]),
-                    Command::Panel(PanelCommand {
-                        top: 1,
-                        left: 41,
-                        width: 21,
-                        height: 1,
-                        style: BorderStyle::None_,
-                        border: PLATE_CHIP_FILL,
-                        corner_radius: 4,
-                        fill: Some(PLATE_CHIP_FILL),
-                        shadow: PanelShadow::None_,
-                        edges: Edge::symmetric(0, 0),
-                        corners: 0,
-                        fillets: 0,
-                        fillet_radius: 2,
-                        hatch: None,
-                        above_pools: false,
-                        backdrop: false,
-                        anchor: None,
-                    }),
+                    plate_chip_bar(662, 16, 326),
                     plate_run(32, "Commit", PLATE_LABEL, PLATE_GROUND, true),
                     plate_run(142, "two", PLATE_TEXT, PLATE_GROUND, true),
-                    plate_run(498, "fake \u{b7} ", PLATE_MUTED, PLATE_GROUND, false),
-                    plate_run(610, "c1", PLATE_SHA, PLATE_GROUND, false),
+                    plate_run(504, "fake \u{b7} ", PLATE_MUTED, PLATE_GROUND, false),
+                    plate_run(616, "c1", PLATE_SHA, PLATE_GROUND, false),
                     plate_run(
-                        672,
+                        673,
                         "preview \u{b7} read-only",
                         PLATE_CHIP_TEXT,
                         PLATE_CHIP_FILL,
