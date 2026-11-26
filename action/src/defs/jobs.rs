@@ -69,7 +69,8 @@ define_action!(
     "JobRerun",
     ActionKind::JobRerun,
     "run the job again",
-    "Run the ended Job of the open Glance again in the Job Tray. A Job that \
+    "Run the ended Job of the open Glance again in the Job Tray, or the ended \
+     Cmd of the selected row of the Job List again in its place. A Cmd that \
      still runs stays as it is, and the status says so.",
     ActionPriority::Normal,
     palette_visible = false
@@ -81,8 +82,9 @@ define_action!(
     "JobInterrupt",
     ActionKind::JobInterrupt,
     "stop the job",
-    "Send SIGINT to the running Job of the open Glance and keep the Glance. \
-     On an ended Job the key closes the Glance.",
+    "Send SIGINT to the running Job of the open Glance, or to the running Cmd \
+     of the selected row of the Job List, and keep it open. On an ended Cmd \
+     the key closes the Glance or the list.",
     ActionPriority::Normal,
     palette_visible = false
 );
@@ -93,9 +95,37 @@ define_action!(
     "JobDismiss",
     ActionKind::JobDismiss,
     "dismiss the job",
-    "Take the ended Job of the open Glance out of the Job Tray. A Run pane \
-     that shows its Stub keeps it as an ended block, and else the Job goes. \
-     A Job that still runs stays, and the status says so.",
+    "Take the ended Job of the open Glance, or of the selected row of the Job \
+     List, out of the Job Tray. A Run pane that shows its Stub keeps it as an \
+     ended block, and else the Job goes. A Job that still runs stays, and the \
+     status says so. A row of a Run pane stays too, and the status says it is \
+     not in the tray.",
+    ActionPriority::Normal,
+    palette_visible = false
+);
+
+define_action!(
+    JobsDef,
+    Jobs,
+    "Jobs",
+    ActionKind::Jobs,
+    "list the jobs",
+    "Open the Job List, one row for each Job of the Job Tray and for each Cmd \
+     of the workspace's Run panes, newest first. A row reads its state, its \
+     time, and where it stands, and the filter narrows the rows by their \
+     line. Enter opens the selected row, and the keys of the list run it \
+     again, stop it, or dismiss it.",
+    ActionPriority::Common,
+    command_name = "jobs"
+);
+
+define_action!(
+    JobListScopeToggleDef,
+    JobListScopeToggle,
+    "JobListScopeToggle",
+    ActionKind::JobListScopeToggle,
+    "toggle the job list scope",
+    "Flip the Job List between every row and the rows whose Cmd still runs.",
     ActionPriority::Normal,
     palette_visible = false
 );

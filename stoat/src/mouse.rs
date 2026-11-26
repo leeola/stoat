@@ -687,6 +687,17 @@ pub(crate) fn boxed_modal_surfaces(stoat: &Stoat) -> Option<ModalSurfaces> {
                 rows: ListRows::OnePerResult,
             })
         },
+        ActiveModal::JobList => {
+            let list = stoat.job_list.as_ref()?;
+            let (_, inner) = crate::render::job_list::job_list_layout(size, list.entries().len())?;
+            Some(ModalSurfaces {
+                list: crate::render::job_list::job_list_rows(inner),
+                preview: None,
+                len: list.filtered().len(),
+                selected: list.selected(),
+                rows: ListRows::OnePerResult,
+            })
+        },
         // The panel's rows interleave its section heads, so no list of one
         // row per line maps a press to its file, and `press_git_status_row`
         // maps it instead. It owns the pointer all the same, so a press never
@@ -3040,6 +3051,7 @@ mod tests {
     use std::{
         path::{Path, PathBuf},
         sync::Arc,
+        time::Duration,
     };
     use stoat_action::{
         Action, Conflict, ConflictNextFile, ConflictPickOurs, ConflictPickTheirs, MoveDown, NewTab,
@@ -5313,6 +5325,28 @@ mod tests {
             named.push(h.stoat.job_glance.as_ref().map(|glance| glance.cmd));
         }
         assert_eq!(named, [Some(older.cmd), Some(newer.cmd)]);
+    }
+
+    /// A press on a row of the Job List selects it, and a second press on the
+    /// selected row opens it, which closes the list.
+    #[test]
+    fn a_press_on_a_job_list_row_selects_it_and_a_second_opens_it() {
+        let mut h = crate::test_harness::TestHarness::default();
+        h.open_run();
+        let echo = h.submit_run("echo a");
+        h.inject_cmd_done(echo.cmd, 0);
+        h.advance_clock(Duration::from_secs(1));
+        h.push_job("sleep 30");
+        h.type_keys("escape space J j");
+        h.snapshot();
+        let (_, inner) =
+            crate::render::job_list::job_list_layout(h.stoat.size(), 2).expect("the list fits");
+        let row = crate::render::job_list::job_list_rows(inner).y + 1;
+
+        left_press(&mut h, inner.x + 5, row);
+        let selected = h.stoat.job_list.as_ref().map(|list| list.selected());
+        left_press(&mut h, inner.x + 5, row);
+        assert_eq!((selected, h.stoat.job_list.is_none()), (Some(1), true));
     }
 
     /// While the Glance shows, a left press off the chips closes it.

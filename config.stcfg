@@ -860,6 +860,24 @@ on key {
         Escape -> JobGlanceClose() "close";
         q -> JobGlanceClose() "close";
     }
+    # The Job List's filter takes typing, so its keys bind in insert mode and
+    # Ctrl-x dismisses, because x types into the filter. Enter and Escape come
+    # from the `modal && mode == insert` block. The block stands ahead of the
+    # `pane == run && mode == insert` block, which binds Up and Down under a
+    # list open over a Run pane, because two blocks of two predicates tie and
+    # the earlier one wins.
+    modal == job_list && mode == insert {
+        Up -> PickerPrev();
+        Down -> PickerNext();
+        Ctrl-p -> PickerPrev();
+        Ctrl-n -> PickerNext();
+        PageDown -> PickerPageDown();
+        PageUp -> PickerPageUp();
+        BackTab -> JobListScopeToggle();
+        Ctrl-r -> JobRerun();
+        Ctrl-c -> JobInterrupt();
+        Ctrl-x -> JobDismiss();
+    }
     # The Commit Preview's footer lists the labeled bindings of this block in
     # this order, with the keys of one label joined, so Escape comes last.
     modal == commit_preview && mode == normal {
@@ -2037,6 +2055,7 @@ on key {
     }
     mode == space_job {
         Escape -> SetMode(normal);
+        j -> Jobs() "jobs";
         k -> JobGlance() "glance";
     }
     mode == space_clipboard {

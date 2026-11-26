@@ -26,6 +26,7 @@ pub(crate) mod help;
 pub(crate) mod hints;
 pub(crate) mod hover;
 pub(crate) mod job_glance;
+pub(crate) mod job_list;
 pub(crate) mod job_tray;
 pub(crate) mod jumplist_picker;
 pub(crate) mod location_picker;
@@ -2236,6 +2237,29 @@ pub(crate) fn frame(
                         "job_glance",
                         None,
                         Some("glance"),
+                        on_request,
+                        toggles,
+                        &stoat.theme,
+                        full,
+                        status_rows,
+                        chrome_bands,
+                        buf,
+                        &mut *scene,
+                    );
+                }
+            }
+        },
+        Some(ActiveModal::JobList) => {
+            if let Some(list) = &mut stoat.job_list {
+                job_list::render_job_list(list, ws, &stoat.theme, chrome, full, buf, &mut *scene);
+                if modal_hints {
+                    cached_modal_hints(
+                        &mut stoat.hints_cache,
+                        &stoat.keymap,
+                        mode,
+                        "job_list",
+                        None,
+                        Some("jobs"),
                         on_request,
                         toggles,
                         &stoat.theme,

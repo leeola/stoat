@@ -1,5 +1,7 @@
 use crate::{
     app::{Stoat, UpdateEffect},
+    input_view::{InputView, SubmitTarget},
+    job_list::{JobList, JobPlace},
     jobs,
     pane::View,
     run::{kind::RunKind, CmdId},
@@ -111,10 +113,14 @@ pub(super) fn job_open(stoat: &mut Stoat) -> UpdateEffect {
     }
 }
 
-/// Run the ended Job of the open Glance again in the tray. A Job that still
-/// runs stays as it is, and the status says so.
+/// Run the ended Cmd that a Job key acts on again in its place, a Job in the
+/// tray and a block in its Run pane. A Cmd that still runs stays as it is,
+/// and the status says so.
+///
+/// The Cmd is the selected row's while the Job List is open, and else the
+/// Glance's, as [`acted_cmd`] picks it.
 pub(super) fn job_rerun(stoat: &mut Stoat) -> UpdateEffect {
-    let Some(id) = glanced_cmd(stoat) else {
+    let Some(id) = acted_cmd(stoat) else {
         return UpdateEffect::None;
     };
     let finished = stoat
@@ -129,30 +135,136 @@ pub(super) fn job_rerun(stoat: &mut Stoat) -> UpdateEffect {
     super::run::restart_cmd(stoat, id).merge(UpdateEffect::Redraw)
 }
 
-/// Interrupt the running Job of the open Glance and mark the run as one that
-/// the user stopped, keeping the Glance. On an ended Job the key closes the
-/// Glance, as `Ctrl-c` closes each modal.
+/// Interrupt the running Cmd that a Job key acts on and mark the run as one
+/// that the user stopped, keeping the Glance or the Job List open. On an
+/// ended Cmd the key closes the modal, as `Ctrl-c` closes each modal.
 pub(super) fn job_interrupt(stoat: &mut Stoat) -> UpdateEffect {
-    let Some(id) = glanced_cmd(stoat) else {
+    let Some(id) = acted_cmd(stoat) else {
         return UpdateEffect::None;
     };
-    match stoat.active_workspace_mut().cmds.get_mut(id) {
-        Some(cmd) if !cmd.finished => {
-            if let Some(process) = &cmd.process {
-                process.send_interrupt();
-                cmd.stopped = true;
-            }
+    let running = stoat
+        .active_workspace_mut()
+        .cmds
+        .get_mut(id)
+        .filter(|cmd| !cmd.finished);
+    if let Some(cmd) = running {
+        if let Some(process) = &cmd.process {
+            process.send_interrupt();
+            cmd.stopped = true;
+        }
+        return UpdateEffect::Redraw;
+    }
+    match stoat.job_list.is_some() {
+        true => job_list_close(stoat),
+        false => job_glance_close(stoat),
+    }
+}
+
+/// Dismiss the ended Job that a Job key acts on, as [`jobs::dismiss`] does.
+///
+/// A row of the Job List in a Run pane stays, and the status says
+/// `not in the tray`, because the stack of a Run pane is the record of that
+/// pane. The list stays open after a dismiss.
+pub(super) fn job_dismiss(stoat: &mut Stoat) -> UpdateEffect {
+    let row = stoat
+        .job_list
+        .as_ref()
+        .map(|list| list.selected_entry().map(|entry| (entry.cmd, entry.place)));
+    match row {
+        Some(Some((_, JobPlace::RunPane(_)))) => {
+            stoat.set_status("not in the tray");
+            UpdateEffect::Redraw
         },
-        _ => stoat.job_glance = None,
+        Some(Some((id, JobPlace::Tray))) => jobs::dismiss(stoat, id),
+        Some(None) => UpdateEffect::None,
+        None => match glanced_cmd(stoat) {
+            Some(id) => jobs::dismiss(stoat, id),
+            None => UpdateEffect::None,
+        },
+    }
+}
+
+/// Open the Job List over the rows of the active workspace, as
+/// [`JobList::sync`] lists them.
+///
+/// The focused mode drops to normal first, because the list's input takes
+/// insert, and a submenu such as `Space J` that opened the list must not stay
+/// on the view underneath once the list closes. With the list open the key
+/// does nothing.
+pub(super) fn open_job_list(stoat: &mut Stoat) -> UpdateEffect {
+    if stoat.job_list.is_some() {
+        return UpdateEffect::None;
+    }
+    stoat.set_focused_mode("normal".into());
+    let input = {
+        let executor = stoat.executor.clone();
+        InputView::create(
+            stoat.active_workspace_mut(),
+            executor,
+            SubmitTarget::JobList,
+            "",
+            "insert",
+        )
+    };
+    let mut list = JobList::new(input);
+    list.sync(stoat.active_workspace(), "");
+    stoat.job_list = Some(list);
+    UpdateEffect::Redraw
+}
+
+/// Close the Job List and show the Cmd of its selected row.
+///
+/// A row of the tray opens its Job as [`jobs::open`] does. A row of a Run pane
+/// shows its block in its pane as [`jobs::show_block`] shows it. An empty list
+/// only closes.
+pub(super) fn job_list_select(stoat: &mut Stoat) -> UpdateEffect {
+    let Some(list) = stoat.job_list.take() else {
+        return UpdateEffect::None;
+    };
+    let row = list.selected_entry().map(|entry| (entry.cmd, entry.place));
+    list.dispose(stoat.active_workspace_mut());
+    match row {
+        Some((id, JobPlace::Tray)) => jobs::open(stoat, id),
+        Some((id, JobPlace::RunPane(_))) => {
+            jobs::show_block(stoat, id);
+            UpdateEffect::Redraw
+        },
+        None => UpdateEffect::Redraw,
+    }
+}
+
+pub(super) fn job_list_close(stoat: &mut Stoat) -> UpdateEffect {
+    if let Some(list) = stoat.job_list.take() {
+        list.dispose(stoat.active_workspace_mut());
     }
     UpdateEffect::Redraw
 }
 
-/// Dismiss the ended Job of the open Glance, as [`jobs::dismiss`] does.
-pub(super) fn job_dismiss(stoat: &mut Stoat) -> UpdateEffect {
-    match glanced_cmd(stoat) {
-        Some(id) => jobs::dismiss(stoat, id),
-        None => UpdateEffect::None,
+pub(super) fn job_list_scope_toggle(stoat: &mut Stoat) -> UpdateEffect {
+    if let Some(list) = stoat.job_list.as_mut() {
+        list.toggle_scope();
+    }
+    UpdateEffect::Redraw
+}
+
+/// Rank the open Job List against its input text and the store on the idle
+/// path, so typing narrows the rows and a Cmd that starts, ends, or leaves
+/// its place shows in them.
+pub(crate) fn sync_job_list(stoat: &mut Stoat) {
+    let Some(list) = stoat.job_list.as_mut() else {
+        return;
+    };
+    let ws = &stoat.workspaces[stoat.active_workspace];
+    let query = list.input.text(ws);
+    list.sync(ws, &query);
+}
+
+/// The Cmd that a Job key acts on, the selected row's while the Job List is
+/// open, and else the Glance's.
+fn acted_cmd(stoat: &Stoat) -> Option<CmdId> {
+    match &stoat.job_list {
+        Some(list) => list.selected_entry().map(|entry| entry.cmd),
+        None => glanced_cmd(stoat),
     }
 }
 

@@ -55,6 +55,7 @@ pub(crate) enum SubmitTarget {
     SymbolFinder,
     CommitPicker,
     WorkspacePicker,
+    JobList,
     LocationPicker,
     JumplistPicker,
     WalkthroughPicker,

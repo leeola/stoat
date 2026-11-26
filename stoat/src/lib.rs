@@ -54,6 +54,7 @@ pub mod help;
 mod input_history;
 pub mod input_parse;
 mod input_view;
+mod job_list;
 mod jobs;
 mod jumplist;
 pub(crate) mod jumplist_picker;

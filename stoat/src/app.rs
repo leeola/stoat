@@ -1183,6 +1183,8 @@ pub struct Stoat {
     pub(crate) git_status: Option<GitStatusPanel>,
     /// The Glance of a Job, or `None` while it is closed.
     pub(crate) job_glance: Option<crate::jobs::Glance>,
+    /// The Job List, or `None` while it is closed.
+    pub(crate) job_list: Option<crate::job_list::JobList>,
     /// Whether a `Ctrl-Enter` submit of the palette is in dispatch, so the Cmd
     /// that it starts goes to the Job Tray, as [`crate::jobs::claim_for_jobs`]
     /// claims it.
@@ -2918,6 +2920,7 @@ impl Stoat {
             workspace_picker: None,
             git_status: None,
             job_glance: None,
+            job_list: None,
             job_submit: false,
             commit_preview: None,
             checkout_confirm: None,
@@ -6382,10 +6385,13 @@ impl Stoat {
                 cmd.stopped = true;
                 return UpdateEffect::Redraw;
             }
-            // The Glance of a Job takes Ctrl-C through its own binding, which
-            // interrupts its running Job, so the press closes no modal here.
-            if active_modal(self) != Some(ActiveModal::JobGlance)
-                && keymap_state::close_topmost_modal(self)
+            // The Glance of a Job and the Job List take Ctrl-C through their own
+            // binding, which interrupts the running Cmd they act on, so the
+            // press closes no modal here.
+            if !matches!(
+                active_modal(self),
+                Some(ActiveModal::JobGlance | ActiveModal::JobList)
+            ) && keymap_state::close_topmost_modal(self)
             {
                 return UpdateEffect::Redraw;
             }
@@ -7287,6 +7293,7 @@ impl Stoat {
     pub(crate) fn active_modal_input(&self) -> Option<(EditorId, BufferId)> {
         let input = match active_modal(self)? {
             ActiveModal::WorkspacePicker => &self.workspace_picker.as_ref()?.input,
+            ActiveModal::JobList => &self.job_list.as_ref()?.input,
             ActiveModal::CommitPicker => &self.commit_picker.as_ref()?.input,
             ActiveModal::FileFinder => &self.file_finder.as_ref()?.input,
             ActiveModal::SymbolFinder => &self.symbol_finder.as_ref()?.input,
@@ -10149,9 +10156,11 @@ impl Stoat {
     /// its count current on any pass but arms no timer. The Cmd of the
     /// palette's Run Block is on show, and so is each Job of the active
     /// workspace, whose time the Job Tray shows whether or not a Run pane
-    /// shows its Stub. The timer fires at the soonest next whole second among
-    /// the shown Cmds, so each second's count lands on the frame the wake
-    /// starts.
+    /// shows its Stub. While the Job List is open, each Cmd of the active
+    /// workspace is on show, because a row of a parked tab's Run pane shows
+    /// its time there alone. The timer fires at the soonest next whole second
+    /// among the shown Cmds, so each second's count lands on the frame the
+    /// wake starts.
     fn tick_cmds(&mut self) {
         let now = self.executor.now();
         for ws in self.workspaces.values_mut() {
@@ -10164,6 +10173,12 @@ impl Stoat {
 
         let palette_cmd = self.run_block_cmd();
         let ws = self.active_workspace();
+        let listed = self
+            .job_list
+            .is_some()
+            .then(|| ws.cmds.values())
+            .into_iter()
+            .flatten();
         let next_second = ws
             .runs
             .iter()
@@ -10171,6 +10186,7 @@ impl Stoat {
             .flat_map(|(_, run)| run.blocks.iter().filter_map(|id| ws.cmds.get(*id)))
             .chain(palette_cmd.and_then(|id| ws.cmds.get(id)))
             .chain(ws.jobs.iter().filter_map(|id| ws.cmds.get(*id)))
+            .chain(listed)
             .filter(|cmd| !cmd.finished)
             .filter_map(|cmd| cmd.started)
             .map(|started| {
@@ -10246,6 +10262,7 @@ impl Stoat {
         let lsp = crate::lsp::pump_all(self);
         action_handlers::workspace::sync_workspace_picker(self);
         crate::jobs::sync_glance(self);
+        action_handlers::jobs::sync_job_list(self);
         action_handlers::picker::sync_location_picker(self);
         action_handlers::picker::sync_diagnostics_picker(self);
         action_handlers::picker::sync_jumplist_picker(self);

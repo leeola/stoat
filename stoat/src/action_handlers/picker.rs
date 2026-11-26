@@ -43,6 +43,7 @@ pub(crate) fn picker_step(stoat: &mut Stoat, delta: i32) -> UpdateEffect {
         },
         Some(ActiveModal::Location) => shift!(stoat.location_picker.as_mut()),
         Some(ActiveModal::WorkspacePicker) => shift!(stoat.workspace_picker.as_mut()),
+        Some(ActiveModal::JobList) => shift!(stoat.job_list.as_mut()),
         Some(ActiveModal::CodeSearch) => shift!(stoat.code_search.as_mut()),
         Some(ActiveModal::FileFinder) => super::file_finder_move_selection(stoat, delta),
         Some(ActiveModal::SymbolFinder) => {
@@ -67,6 +68,13 @@ pub(super) fn picker_page(stoat: &mut Stoat, dir: i32) -> UpdateEffect {
         Some(ActiveModal::Diagnostics) => diagnostics_picker_page(stoat, dir),
         Some(ActiveModal::Location) => location_picker_page(stoat, dir),
         Some(ActiveModal::WorkspacePicker) => super::workspace::workspace_picker_page(stoat, dir),
+        Some(ActiveModal::JobList) => match stoat.job_list.as_mut() {
+            Some(list) => {
+                list.page(dir);
+                UpdateEffect::Redraw
+            },
+            None => UpdateEffect::None,
+        },
         Some(ActiveModal::FileFinder) => super::file_finder::file_finder_page(stoat, dir),
         Some(ActiveModal::SymbolFinder) => crate::symbol_finder::symbol_finder_page(stoat, dir),
         Some(ActiveModal::CommitPicker) => super::review_walk::commit_picker_page(stoat, dir),

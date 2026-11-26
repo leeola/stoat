@@ -253,17 +253,23 @@ pub(crate) fn show_glance(stoat: &mut Stoat, id: CmdId) {
 }
 
 /// Take the Job `id` out of the tray, show it as a block of a Run pane that
-/// takes the focus, and close the Glance.
+/// takes the focus, as [`show_block`] shows it, and close the Glance.
+pub(crate) fn open(stoat: &mut Stoat, id: CmdId) -> UpdateEffect {
+    stoat.job_glance = None;
+    take(stoat.active_workspace_mut(), id);
+    show_block(stoat, id);
+    UpdateEffect::Redraw
+}
+
+/// Show the Cmd `id` as a block of a Run pane that takes the focus.
 ///
 /// A Run pane on show whose stack holds the id shows the block in place,
 /// scrolled so that the block's last row is the pane's last output row. A
 /// stack that no pane shows, as one under a terminal that covers its pane,
 /// drops the id, and the Cmd goes to the end of a Run pane's stack as a Cmd
 /// with no stack does.
-pub(crate) fn open(stoat: &mut Stoat, id: CmdId) -> UpdateEffect {
-    stoat.job_glance = None;
+pub(crate) fn show_block(stoat: &mut Stoat, id: CmdId) {
     let ws = stoat.active_workspace_mut();
-    take(ws, id);
     let holder = ws
         .runs
         .iter()
@@ -282,7 +288,6 @@ pub(crate) fn open(stoat: &mut Stoat, id: CmdId) -> UpdateEffect {
             action_handlers::run::append_to_run_pane(stoat, id, true);
         },
     }
-    UpdateEffect::Redraw
 }
 
 /// Take the ended Job `id` out of the tray and close the Glance.

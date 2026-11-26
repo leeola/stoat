@@ -100,7 +100,7 @@ use crate::{
         help::{CloseHelp, DismissKeyHints, HelpScopeToggle, OpenHelp, ToggleKeyHints},
         jobs::{
             JobDismiss, JobGlance, JobGlanceClose, JobGlanceNext, JobGlancePrev, JobInterrupt,
-            JobOpen, JobRerun,
+            JobListScopeToggle, JobOpen, JobRerun, Jobs,
         },
         lsp::{
             CodeAction, Format, FormatSelections, GotoDeclaration, GotoDefinition,
@@ -1062,6 +1062,10 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
     add(JobRerun::DEF, |_| Ok(Box::new(JobRerun)));
     add(JobInterrupt::DEF, |_| Ok(Box::new(JobInterrupt)));
     add(JobDismiss::DEF, |_| Ok(Box::new(JobDismiss)));
+    add(Jobs::DEF, |_| Ok(Box::new(Jobs)));
+    add(JobListScopeToggle::DEF, |_| {
+        Ok(Box::new(JobListScopeToggle))
+    });
     add(RunToggleView::DEF, |_| Ok(Box::new(RunToggleView)));
     add(RunAgain::DEF, |_| Ok(Box::new(RunAgain)));
     add(RunBlockToPane::DEF, |_| Ok(Box::new(RunBlockToPane)));
@@ -1661,6 +1665,8 @@ mod tests {
         "JobRerun",
         "JobInterrupt",
         "JobDismiss",
+        "Jobs",
+        "JobListScopeToggle",
         "RunToggleView",
         "RunAgain",
         "RunBlockToPane",
@@ -1768,6 +1774,11 @@ mod tests {
             Some("SetCwd"),
             "command names resolve case-insensitively"
         );
+    }
+
+    #[test]
+    fn jobs_is_a_command_name() {
+        assert_eq!(lookup_alias("jobs").map(|e| e.def.name()), Some("Jobs"));
     }
 
     /// Curating a command name lets the identical alias be deleted, so this
@@ -2425,7 +2436,7 @@ mod tests {
         // + 1 PaletteRefresh.
         // + 1 RunToggleView.
         // + 2 RunAgain/RunBlockToPane.
-        assert_eq!(all().count(), 535);
+        assert_eq!(all().count(), 537);
     }
 
     #[test]
