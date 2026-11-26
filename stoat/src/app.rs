@@ -1834,8 +1834,12 @@ pub struct Stoat {
     /// moved since the press, so `Up(Left)` copies the selection only for a real
     /// drag and a plain click leaves no selection behind.
     pub(crate) terminal_drag: Option<(TermId, bool)>,
-    /// The pool id and terminal-font cell of the `pool_mouse` event being
+    /// The pool id and the pool's own cell of the `pool_mouse` event being
     /// routed, or `None` outside one.
+    ///
+    /// A terminal pool's cell is at the terminal font size. A pixel list's pool
+    /// reports the pointer's pixel offset from its region's top-left, since the
+    /// grid cell under the pointer names two of its rows.
     pub(crate) pool_pointer: Option<(u32, u16, u16)>,
     /// Terminal cell the mouse last rested over a focused editor pane, or
     /// `None` before any motion. The render resolves the diagnostic under it
@@ -3671,14 +3675,15 @@ impl Stoat {
         }
     }
 
-    /// Route a gesture that stoatty reported in terminal pool `pool`, at grid
-    /// cell `col`, `row` and at the pool's own `cell`, with `mods` as the
-    /// modifier bitmask.
+    /// Route a gesture that stoatty reported in pool `pool`, a terminal pool or
+    /// a pixel list's, at grid cell `col`, `row` and at the pool's own `cell`,
+    /// with `mods` as the modifier bitmask.
     ///
     /// The grid cell runs the modal gates, the divider arming, and the focus
-    /// that a terminal report runs. The pane that takes the gesture reads
+    /// that a terminal report runs. The surface that takes the gesture reads
     /// `cell` through [`Self::pool_pointer`], since only the terminal knows
-    /// which of its cells is under the pointer. A side button does nothing.
+    /// which cell of a terminal pool, or which pixel of a pixel list, is under
+    /// the pointer. A side button does nothing.
     fn handle_pool_mouse(
         &mut self,
         pool: u32,

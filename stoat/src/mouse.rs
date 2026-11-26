@@ -101,6 +101,10 @@ pub(crate) struct ModalSurfaces {
     selected: usize,
     /// How the list lays its results out in rows.
     rows: ListRows,
+    /// The pool that pages the list, whose `pool_mouse` report names the pixel
+    /// under the pointer in a pixel list, or `None` for a list that no such
+    /// pool pages.
+    pool: Option<u32>,
 }
 
 /// How a modal's list lays its results out in rows, which is what a press
@@ -124,7 +128,10 @@ impl ModalSurfaces {
     /// wrapped result names that result.
     ///
     /// A pixel list's rows stand off the cell grid, so a press there names the
-    /// result under the middle pixel row of the cell it lands on.
+    /// result under the pointer's pixel row, which its pool's `pool_mouse`
+    /// report carries. A press with no such report, as from a terminal that
+    /// reports grid cells, names the result under the middle pixel row of the
+    /// cell it lands on.
     fn row_at(&self, stoat: &Stoat, mouse: MouseEvent) -> Option<usize> {
         if !self.list.contains(Position::new(mouse.column, mouse.row)) {
             return None;
@@ -152,12 +159,17 @@ impl ModalSurfaces {
         };
         let window =
             crate::render::picker::list_window(&rows, self.list.width, self.list.height, pixels);
-        let offset = match pixels {
-            Some(metrics) => {
+        let reported = stoat
+            .pool_pointer
+            .filter(|&(pool, ..)| Some(pool) == self.pool)
+            .map(|(_, _, pixel_row)| u32::from(pixel_row));
+        let offset = match (pixels, reported) {
+            (Some(_), Some(pixel_row)) => pixel_row,
+            (Some(metrics), None) => {
                 let height = u32::from(metrics.cell[1]);
                 u32::from(row) * height + height / 2
             },
-            None => u32::from(row),
+            (None, _) => u32::from(row),
         };
         window.result_at(offset)
     }
@@ -471,6 +483,7 @@ pub(crate) fn boxed_modal_surfaces(stoat: &Stoat) -> Option<ModalSurfaces> {
                 len: core.picklist.filtered.len(),
                 selected: core.picklist.selected,
                 rows: ListRows::Finder,
+                pool: Some(crate::smooth_scroll::non_pane_pool::FINDER),
             })
         },
         ActiveModal::CodeSearch => {
@@ -489,6 +502,7 @@ pub(crate) fn boxed_modal_surfaces(stoat: &Stoat) -> Option<ModalSurfaces> {
                 len: finder.matches.len(),
                 selected: finder.selected,
                 rows: ListRows::OnePerResult,
+                pool: None,
             })
         },
         ActiveModal::SymbolFinder => {
@@ -505,6 +519,7 @@ pub(crate) fn boxed_modal_surfaces(stoat: &Stoat) -> Option<ModalSurfaces> {
                 len: finder.filtered.len(),
                 selected: finder.selected,
                 rows: ListRows::OnePerResult,
+                pool: None,
             })
         },
         ActiveModal::CommitPicker => {
@@ -521,6 +536,7 @@ pub(crate) fn boxed_modal_surfaces(stoat: &Stoat) -> Option<ModalSurfaces> {
                 len: picker.filtered.len(),
                 selected: picker.selected,
                 rows: ListRows::OnePerResult,
+                pool: None,
             })
         },
         ActiveModal::Palette => {
@@ -534,6 +550,7 @@ pub(crate) fn boxed_modal_surfaces(stoat: &Stoat) -> Option<ModalSurfaces> {
                     len: 0,
                     selected: 0,
                     rows: ListRows::OnePerResult,
+                    pool: None,
                 });
             }
             let rows = palette.list_rows_hint();
@@ -553,6 +570,7 @@ pub(crate) fn boxed_modal_surfaces(stoat: &Stoat) -> Option<ModalSurfaces> {
                     len: pick.list.filtered.len(),
                     selected: pick.list.selected,
                     rows: ListRows::OnePerResult,
+                    pool: None,
                 });
             }
             if let Some((_, _, list)) = palette.cli_list.as_ref() {
@@ -568,6 +586,7 @@ pub(crate) fn boxed_modal_surfaces(stoat: &Stoat) -> Option<ModalSurfaces> {
                     len: list.filtered.len(),
                     selected: list.selected,
                     rows: ListRows::OnePerResult,
+                    pool: None,
                 });
             }
             if palette.command.is_none() {
@@ -583,6 +602,7 @@ pub(crate) fn boxed_modal_surfaces(stoat: &Stoat) -> Option<ModalSurfaces> {
                     len: palette.filtered.len(),
                     selected: palette.selected,
                     rows: ListRows::OnePerResult,
+                    pool: Some(crate::smooth_scroll::non_pane_pool::PALETTE),
                 });
             }
             let picker = palette
@@ -597,6 +617,7 @@ pub(crate) fn boxed_modal_surfaces(stoat: &Stoat) -> Option<ModalSurfaces> {
                 len: core.picklist.filtered.len(),
                 selected: core.picklist.selected,
                 rows: ListRows::PaletteArg,
+                pool: Some(crate::smooth_scroll::non_pane_pool::PALETTE),
             })
         },
         ActiveModal::Help => {
@@ -612,6 +633,7 @@ pub(crate) fn boxed_modal_surfaces(stoat: &Stoat) -> Option<ModalSurfaces> {
                 len: help.filtered().len(),
                 selected: help.selected(),
                 rows: ListRows::OnePerResult,
+                pool: None,
             })
         },
         ActiveModal::Jumplist => {
@@ -627,6 +649,7 @@ pub(crate) fn boxed_modal_surfaces(stoat: &Stoat) -> Option<ModalSurfaces> {
                 len: picker.filtered().len(),
                 selected: picker.selected(),
                 rows: ListRows::OnePerResult,
+                pool: None,
             })
         },
         ActiveModal::WalkthroughPicker => {
@@ -642,6 +665,7 @@ pub(crate) fn boxed_modal_surfaces(stoat: &Stoat) -> Option<ModalSurfaces> {
                 len: picker.filtered().len(),
                 selected: picker.selected(),
                 rows: ListRows::OnePerResult,
+                pool: None,
             })
         },
         ActiveModal::PaneFinder => {
@@ -657,6 +681,7 @@ pub(crate) fn boxed_modal_surfaces(stoat: &Stoat) -> Option<ModalSurfaces> {
                 len: finder.filtered().len(),
                 selected: finder.selected(),
                 rows: ListRows::OnePerResult,
+                pool: None,
             })
         },
         ActiveModal::Diagnostics => {
@@ -672,6 +697,7 @@ pub(crate) fn boxed_modal_surfaces(stoat: &Stoat) -> Option<ModalSurfaces> {
                 len: picker.filtered().len(),
                 selected: picker.selected(),
                 rows: ListRows::OnePerResult,
+                pool: None,
             })
         },
         ActiveModal::Location => {
@@ -687,6 +713,7 @@ pub(crate) fn boxed_modal_surfaces(stoat: &Stoat) -> Option<ModalSurfaces> {
                 len: picker.filtered().len(),
                 selected: picker.selected(),
                 rows: ListRows::OnePerResult,
+                pool: None,
             })
         },
         ActiveModal::WorkspacePicker => {
@@ -701,6 +728,7 @@ pub(crate) fn boxed_modal_surfaces(stoat: &Stoat) -> Option<ModalSurfaces> {
                 len: picker.filtered().len(),
                 selected: picker.selected(),
                 rows: ListRows::OnePerResult,
+                pool: None,
             })
         },
         ActiveModal::JobList => {
@@ -712,6 +740,7 @@ pub(crate) fn boxed_modal_surfaces(stoat: &Stoat) -> Option<ModalSurfaces> {
                 len: list.filtered().len(),
                 selected: list.selected(),
                 rows: ListRows::OnePerResult,
+                pool: None,
             })
         },
         // The panel's rows interleave its section heads, so no list of one
@@ -724,6 +753,7 @@ pub(crate) fn boxed_modal_surfaces(stoat: &Stoat) -> Option<ModalSurfaces> {
             len: 0,
             selected: 0,
             rows: ListRows::OnePerResult,
+            pool: None,
         }),
         // The patch is the one surface the preview scrolls. The box has no list,
         // so a press or a wheel off the patch does nothing.
@@ -736,6 +766,7 @@ pub(crate) fn boxed_modal_surfaces(stoat: &Stoat) -> Option<ModalSurfaces> {
             len: 0,
             selected: 0,
             rows: ListRows::OnePerResult,
+            pool: None,
         }),
         // The Glance holds no list. It owns the pointer, so a press never
         // reaches the panes it covers, and `press_over_glance` reads a press on
@@ -746,6 +777,7 @@ pub(crate) fn boxed_modal_surfaces(stoat: &Stoat) -> Option<ModalSurfaces> {
             len: 0,
             selected: 0,
             rows: ListRows::OnePerResult,
+            pool: None,
         }),
         // Nothing to point at. It owns the pointer all the same, so a press
         // never reaches the panes it covers, and keys alone answer it.
@@ -756,6 +788,7 @@ pub(crate) fn boxed_modal_surfaces(stoat: &Stoat) -> Option<ModalSurfaces> {
                 len: 0,
                 selected: 0,
                 rows: ListRows::OnePerResult,
+                pool: None,
             })
         },
         // The bottom-line prompts leave the editor visible, so the pointer
@@ -3076,6 +3109,7 @@ mod tests {
     use stoat_text::Point;
     use stoatty_protocol::{
         command::{self, Command},
+        window_ipc::WindowIpcEvent,
         NUDGE_PROTOCOL,
     };
     /// A buffer with `count` single-line diagnostics on consecutive rows,
@@ -5716,5 +5750,93 @@ mod tests {
         };
 
         assert_eq!([press(2), press(3), press(4)], [2, 3, 3]);
+    }
+
+    /// Press the left button in list row `row` of a pixel finder over 5 files,
+    /// as a `pool_mouse` report of pool `pool` at pixel row `pixel_row`, and
+    /// answer the selection after each press of `presses` in turn.
+    fn reported_presses(presses: &[(u32, u16, u16)]) -> Vec<usize> {
+        let mut h = crate::test_fixture::pixel_finder(5);
+        let list = crate::test_fixture::finder_layout(&h).list;
+        presses
+            .iter()
+            .map(|&(pool, row, pixel_row)| {
+                let press = WindowIpcEvent::PoolMouse {
+                    pool,
+                    kind: MouseKind::Press(IpcMouseButton::Left),
+                    col: list.x + 1,
+                    row: list.y + row,
+                    cell_col: 9,
+                    cell_row: pixel_row,
+                    mods: 0,
+                };
+                crate::app::deliver_window_event(&mut h.stoat, press);
+                let finder = h.stoat.file_finder.as_ref().expect("the finder is open");
+                finder.active_core_ref().picklist.selected
+            })
+            .collect()
+    }
+
+    /// A press in list row 1 lands on the pixel row its pool reports, where the
+    /// row's middle, pixel 27, is result 1. Pixel row 22 is result 1, and pixel
+    /// row 20, the gap under result 0, is result 0.
+    #[test]
+    fn a_press_lands_on_the_pixel_row_under_the_pointer() {
+        let finder = crate::smooth_scroll::non_pane_pool::FINDER;
+
+        assert_eq!(
+            reported_presses(&[(finder, 1, 22), (finder, 1, 20)]),
+            [1, 0]
+        );
+    }
+
+    /// A report of another pool carries no pixel of the list, so a press in
+    /// list row 4 takes the row's middle, pixel 81, which is result 3, where
+    /// the reported pixel row 20 would be result 0.
+    #[test]
+    fn a_press_with_no_pixel_report_takes_the_middle_of_its_cell() {
+        assert_eq!(reported_presses(&[(9, 4, 20)]), [3]);
+    }
+
+    /// A press on the palette's argument list lands on the pixel row its pool
+    /// reports, as a press on the finder's list does. In list row 1, pixel row
+    /// 22 is result 1 and pixel row 20 is result 0.
+    #[test]
+    fn a_press_on_an_argument_list_lands_on_the_pixel_row_under_the_pointer() {
+        let mut h = crate::test_harness::TestHarness::default();
+        h.stoat.stoatty_protocol = stoatty_protocol::PROTOCOL_VERSION;
+        h.stoat.cell_pixels = Some((9, 18));
+        h.stoat.display_scale = Some(1.0);
+        let root = PathBuf::from("/pixel-argument-press");
+        for n in 0..5 {
+            h.fake_fs()
+                .insert_file(root.join(format!("f{n:02}.rs")), b"x\n");
+        }
+        h.stoat.active_workspace_mut().git_root = root;
+        h.type_text(":o ");
+        h.snapshot();
+        let list = crate::test_fixture::palette_arg_layout(&h).list;
+
+        let mut press = |pixel_row| {
+            let press = WindowIpcEvent::PoolMouse {
+                pool: crate::smooth_scroll::non_pane_pool::PALETTE,
+                kind: MouseKind::Press(IpcMouseButton::Left),
+                col: list.x + 1,
+                row: list.y + 1,
+                cell_col: 9,
+                cell_row: pixel_row,
+                mods: 0,
+            };
+            crate::app::deliver_window_event(&mut h.stoat, press);
+            let palette = h
+                .stoat
+                .command_palette
+                .as_ref()
+                .expect("the palette is open");
+            let picker = palette.arg_picker.as_ref().expect("the argument picker");
+            picker.active_core_ref().picklist.selected
+        };
+
+        assert_eq!([press(22), press(20)], [1, 0]);
     }
 }

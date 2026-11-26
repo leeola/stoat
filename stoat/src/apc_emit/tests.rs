@@ -6481,6 +6481,87 @@ fn a_pixel_finder_list_refills_when_its_marks_land() {
     assert_eq!(marks, [((list.width as i16 - 1) * 16, 0)]);
 }
 
+/// A pixel finder list asks one time for each declaration of its pool to have
+/// a press reported with the pointer's pixel, after the region that declares
+/// the pool. A terminal before protocol 41, and a session with no window
+/// socket to carry the report, are not asked.
+#[test]
+fn a_pixel_list_asks_for_the_pixel_pointer_one_time() {
+    use stoatty_protocol::command::Command;
+
+    let pool = crate::smooth_scroll::non_pane_pool::FINDER;
+    let emits = |protocol: u32, socket: bool| {
+        let mut h = crate::test_fixture::pixel_finder(3);
+        h.stoat.stoatty_protocol = protocol;
+        h.stoat.window_ipc_connected = socket;
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+        h.stoat.set_apc_tx(tx);
+        h.stoat.render();
+        [emit_raw(&mut h, &mut rx), emit_raw(&mut h, &mut rx)].map(|bytes| {
+            command::decode_stream(&bytes)
+                .into_iter()
+                .filter_map(|command| match command {
+                    Command::PoolRegion(region) if region.pool == pool => Some("region"),
+                    Command::PoolPointer(pointer) if pointer.pool == pool => match pointer.pixels {
+                        true => Some("pixels"),
+                        false => Some("cells"),
+                    },
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+        })
+    };
+
+    assert_eq!(
+        [
+            emits(stoatty_protocol::PROTOCOL_VERSION, true),
+            emits(stoatty_protocol::DISPLAY_SCALE_PROTOCOL, true),
+            emits(stoatty_protocol::PROTOCOL_VERSION, false),
+        ],
+        [
+            [vec!["region", "pixels"], vec![]],
+            [vec!["region"], vec![]],
+            [vec!["region"], vec![]],
+        ]
+    );
+}
+
+/// The palette's argument list asks for the pixel pointer of its pool as the
+/// finder's list does, when its rows lay out by pixels.
+#[test]
+fn a_pixel_argument_list_asks_for_the_pixel_pointer() {
+    use stoatty_protocol::command::{Command, PoolPointerCommand};
+
+    let mut h = Stoat::test();
+    h.stoat.stoatty_protocol = stoatty_protocol::PROTOCOL_VERSION;
+    h.stoat.cell_pixels = Some((9, 18));
+    h.stoat.display_scale = Some(1.0);
+    h.stoat.window_ipc_connected = true;
+    let root = PathBuf::from("/pixel-argument");
+    h.fake_fs().insert_file(root.join("a.rs"), b"x\n");
+    h.stoat.active_workspace_mut().git_root = root;
+    h.type_text(":o ");
+    h.snapshot();
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+    h.stoat.set_apc_tx(tx);
+    let pooled = emit_raw(&mut h, &mut rx);
+
+    let asks: Vec<PoolPointerCommand> = command::decode_stream(&pooled)
+        .into_iter()
+        .filter_map(|command| match command {
+            Command::PoolPointer(pointer) => Some(pointer),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        asks,
+        [PoolPointerCommand {
+            pool: crate::smooth_scroll::non_pane_pool::PALETTE,
+            pixels: true,
+        }]
+    );
+}
+
 /// A pixel finder list whose display scale changes refills its first page at
 /// the new measure. At scale 2 on the 18 px cell a row stands 24 px from the
 /// next, so the lines of the fourth and fifth results stand 1 and 4 logical px

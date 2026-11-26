@@ -55,7 +55,7 @@ use stoat_widgets::{
 };
 use stoatty_protocol::{
     command::{FillRowsCommand, PoolAnchorCommand, PoolKind, PoolRegionCommand},
-    BATCHED_DECORATIONS_PROTOCOL, PAGE_ICONS_PROTOCOL,
+    BATCHED_DECORATIONS_PROTOCOL, PAGE_ICONS_PROTOCOL, POOL_POINTER_PROTOCOL,
 };
 
 /// The protocol version that reads a decorations-only page fill. An older
@@ -2091,6 +2091,7 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
         };
         let selected = core.picklist.selected;
         let scroll = PathListScroll::of(tops, window.first, selected, pixels, region.height);
+        let held = stoat.smooth_scroll.holds_region(region.pool, &region);
         pool::emit_pages_into(
             &mut out,
             &mut stoat.smooth_scroll,
@@ -2116,6 +2117,11 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
                 )
             },
         );
+        // A press in a pool that asked for pixels rides the window socket, so a
+        // session with no socket, as over ssh, keeps the grid cell's report.
+        if pixels.is_some() && stoat.window_ipc_connected {
+            ask_pixel_pointer(&mut out, held, region.pool, stoat.stoatty_protocol);
+        }
     }
 
     // The preview pane is an editor, so it pools exactly as a split pane does:
@@ -2510,6 +2516,7 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
         };
         let selected = core.picklist.selected;
         let scroll = PathListScroll::of(tops, window.first, selected, pixels, region.height);
+        let held = stoat.smooth_scroll.holds_region(region.pool, &region);
         pool::emit_pages_into(
             &mut out,
             &mut stoat.smooth_scroll,
@@ -2535,6 +2542,9 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
                 )
             },
         );
+        if pixels.is_some() && stoat.window_ipc_connected {
+            ask_pixel_pointer(&mut out, held, region.pool, stoat.stoatty_protocol);
+        }
     }
 
     if let (Some(list), Some(state)) = (
@@ -4302,6 +4312,20 @@ fn hash_row_metrics(pixels: Option<RowMetrics>, hasher: &mut DefaultHasher) {
     pixels
         .map(|metrics| (metrics.cell, metrics.scale.to_bits()))
         .hash(hasher);
+}
+
+/// Ask the terminal to report a press in pixel list pool `pool` with the
+/// pointer's pixel, which names one row where the grid cell names two.
+///
+/// The request lives on the terminal's pool and goes with its drop, so it goes
+/// out once for each declaration of the pool, while `held` is false. A
+/// terminal before [`POOL_POINTER_PROTOCOL`] takes none and reports the grid
+/// cell.
+fn ask_pixel_pointer(out: &mut Vec<u8>, held: bool, pool: u32, protocol: u32) {
+    if held || protocol < POOL_POINTER_PROTOCOL {
+        return;
+    }
+    stoatty_protocol::command::encode_pool_pointer_into(out, pool, true);
 }
 
 #[cfg(test)]
