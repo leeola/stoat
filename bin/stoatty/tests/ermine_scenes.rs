@@ -1220,9 +1220,10 @@ fn the_argument_picker_plate_stops_one_cell_inside_each_side_of_the_window() {
 /// inner rect starts at cell (17, 13), the header band is the pixel rows 234
 /// to 265, and the header text draws 1 px right and 7 px down of its cells.
 /// The 24-char cwd advances 348 sixteenths at the Ui scale of 232, the glyph
-/// starts at 362, and the empty input starts at 391. So the caret block, the
-/// one box of the text color in the band, covers the pixels from (374, 241) to
-/// (381, 258).
+/// starts at 362, and the empty input starts at 391. The caret block there is
+/// a bar one char's 15 sixteenths wide, 1 sixteenth under the row's top and 13
+/// high. So the one box of the text color in the band covers the pixels from
+/// (374, 242) to (381, 256), the 15 px of the boards' caret.
 ///
 /// The cwd in the info color and the dim glyph peak above the ground and at
 /// most at 0xd6, where a bold title in `#c59af0` peaks at 0xf0. The row's
@@ -1238,7 +1239,7 @@ fn the_palette_header_is_the_cmd_line_on_the_ground() {
         &mut home,
         TEXT,
         234..266,
-        (374, 241, 381, 258),
+        (374, 242, 381, 256),
         "cmd_line_caret",
     );
     expect_region(
@@ -1327,10 +1328,11 @@ fn a_long_palette_line_adds_a_header_row() {
 /// (33, 15), 16 cells right of and 2 rows under the inner rect of the root box,
 /// so the header text stands 144 px right of and 36 px under its place there.
 ///
-/// The token `o` stands in the pixel columns 518 to 525, the ghost `pen` in 526
-/// to 550, and the caret block in 567 to 574, on the pixel rows 277 to 294. The
-/// token peaks at the 0xf0 of `#c59af0`, and the ghost peaks at the 0x81 of
-/// `#695481`.
+/// The token `o` stands in the pixel columns 518 to 525 and the ghost `pen` in
+/// 526 to 550, on the pixel rows 277 to 294. The caret block stands in 567 to
+/// 574 on 15 of those rows, 278 to 292, so the text color holds most of the
+/// rect read there. The token peaks at the 0xf0 of `#c59af0`, and the ghost
+/// peaks at the 0x81 of `#695481`.
 #[test]
 fn the_cmd_line_draws_an_alias_with_its_ghost() {
     let mut home = support::scratch_home();

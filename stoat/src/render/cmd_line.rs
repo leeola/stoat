@@ -12,8 +12,8 @@ use crate::{
         chrome, command_palette,
         paint::style_rgb,
         picker::{
-            blank_plate_row, plate_chip_boxes, plate_run, plate_trailing, window_start,
-            PlateTrailing, MIN_QUERY_COLUMNS, PLATE_HEADER_GAP, PLATE_HEADER_NUDGE,
+            blank_plate_row, plate_caret, plate_chip_boxes, plate_run, plate_trailing,
+            window_start, PlateTrailing, MIN_QUERY_COLUMNS, PLATE_HEADER_GAP, PLATE_HEADER_NUDGE,
         },
         run_pane::StatusPart,
         text::{pre_wrap_rows, write_str, write_str_clipped},
@@ -116,7 +116,7 @@ struct Piece<'a> {
 /// draw as runs on the plate's ground, [`PLATE_HEADER_NUDGE`] px off their
 /// cells, and no rule draws under them. The parts stand [`PLATE_HEADER_GAP`]
 /// apart at the [`TypeRole::Ui`] size, the status at the [`TypeRole::Caption`]
-/// size, and the caret's char draws in the ground over the `ui.text` color.
+/// size, and [`plate_caret`] draws the block caret in the `ui.text` color.
 /// Otherwise the parts draw in cells one blank cell apart, the caret's cell
 /// takes [`Theme::cursor_style`], and a rule in `ui.border.inactive` fills the
 /// row under the input. A part whose color has no RGB value draws no run.
@@ -577,16 +577,16 @@ fn paint_plate_rows(
         bold(prompt),
     );
 
+    let mut caret = None;
     for (y, row) in (inner.y..inner.y + height).zip(&rows) {
         let mut index = 0;
         for piece in row_pieces(line, row.clone()) {
             let col = measure
                 .input_x
                 .saturating_add(text_run::advance_sixteenths(index, ui));
-            match (piece.caret, text) {
-                (true, Some(text)) => run(y, col, piece.text, ui, (Some(ground), text), false),
-                (true, None) => {},
-                (false, _) => run(
+            match piece.caret {
+                true => caret = Some((y, col, piece.text)),
+                false => run(
                     y,
                     col,
                     piece.text,
@@ -627,6 +627,10 @@ fn paint_plate_rows(
     {
         let row = Rect::new(inner.x, inner.y, inner.width, 1);
         paint_parts(buf, row, parts, theme, scene);
+    }
+    if let (Some((y, col, at_caret)), Some(text)) = (caret, text) {
+        let origin = Rect::new(inner.x, y, 1, 1);
+        plate_caret(col, at_caret, ui, (text, ground), origin, buf, scene);
     }
     scene.nudge([0, 0]);
 }
@@ -839,7 +843,7 @@ mod tests {
         style::{Color, Modifier, Style},
     };
     use stoat_widgets::ApcScene;
-    use stoatty_protocol::command::{decode_stream, Command, TextRunCommand};
+    use stoatty_protocol::command::{decode_stream, BarCommand, Command, TextRunCommand};
 
     const GROUND: [u8; 3] = [1, 1, 1];
     const TEXT: [u8; 3] = [4, 4, 4];
@@ -929,16 +933,35 @@ mod tests {
     }
 
     /// The commands of a line that [`wrapped`] paints, with `input` as its
-    /// input runs, between the cwd and glyph runs and the status run.
-    fn framed(input: Vec<Command>) -> Vec<Command> {
+    /// input runs between the cwd and glyph runs and the status run, and
+    /// `caret` as its caret's commands after the status run.
+    fn framed(input: Vec<Command>, caret: impl IntoIterator<Item = Command>) -> Vec<Command> {
         let mut commands = vec![
             Command::Nudge([1, 7]),
             run(32, "~/p/stoat", CWD, GROUND),
             run(190, PROMPT_GLYPH, PROMPT, GROUND),
         ];
         commands.extend(input);
-        commands.extend([run(844, "14 of 890", MUTED, GROUND), Command::Nudge([0, 0])]);
+        commands.push(run(844, "14 of 890", MUTED, GROUND));
+        commands.extend(caret);
+        commands.push(Command::Nudge([0, 0]));
         commands
+    }
+
+    /// The block caret's bar at `col` sixteenths on the row at `row`, 1
+    /// sixteenth under the row's top and 13 high in the text color.
+    fn caret_bar(row: i16, col: i16) -> Command {
+        Command::Bar(BarCommand {
+            x: col,
+            y: row + 1,
+            width: 16,
+            height: 13,
+            color: TEXT,
+            occludes: false,
+            hatch: None,
+            radius: 0,
+            corners: 0,
+        })
     }
 
     /// A run of `text` at `col` sixteenths on row 1, in `color` over `bg`.
@@ -979,8 +1002,8 @@ mod tests {
 
     /// Under the plate the row is runs 1 px right and 7 px down of its cells.
     /// The cwd leads in its color, the glyph and the input follow 14
-    /// sixteenths apart, the caret is a space after `ab` in the ground over the
-    /// text color, and the muted status ends at the row's right.
+    /// sixteenths apart, and the muted status ends at the row's right. The
+    /// caret after `ab` covers a blank, so it draws last as its bar alone.
     #[test]
     fn a_plate_cmd_line_draws_its_parts_as_nudged_runs() {
         let (_, scene) = painted(
@@ -997,8 +1020,8 @@ mod tests {
                 run(32, "~/p/stoat", CWD, GROUND),
                 run(190, PROMPT_GLYPH, PROMPT, GROUND),
                 run(220, "ab", TEXT, GROUND),
-                run(252, " ", GROUND, TEXT),
                 run(844, "14 of 890", MUTED, GROUND),
+                caret_bar(16, 252),
                 Command::Nudge([0, 0]),
             ],
         );
@@ -1007,7 +1030,8 @@ mod tests {
     /// A chip status draws its box as a rounded bar and its run 11 sixteenths
     /// inside it, in the chip's colors. The chip `history 1 / 24` advances 224
     /// sixteenths, so its bar is 246 wide. It ends at 988, 4 sixteenths inside
-    /// the right of the 60-cell row that starts at 32.
+    /// the right of the 60-cell row that starts at 32. The square bar of the
+    /// caret after `ab` follows it.
     #[test]
     fn a_chip_status_draws_its_box_and_its_run() {
         let theme = plate_theme();
@@ -1037,7 +1061,7 @@ mod tests {
         assert_eq!(
             (bars, chip),
             (
-                vec![(742, 246, 4)],
+                vec![(742, 246, 4), (252, 16, 0)],
                 Some((753, [12, 12, 12], Some([13, 13, 13])))
             ),
         );
@@ -1158,11 +1182,13 @@ mod tests {
         assert_eq!(
             wrapped(&input, 51),
             (
-                framed(vec![
-                    run_on(16, 220, &format!("{} ", "a".repeat(30)), TEXT, GROUND),
-                    run_on(32, 220, &"b".repeat(20), TEXT, GROUND),
-                    run_on(32, 540, " ", GROUND, TEXT),
-                ]),
+                framed(
+                    vec![
+                        run_on(16, 220, &format!("{} ", "a".repeat(30)), TEXT, GROUND),
+                        run_on(32, 220, &"b".repeat(20), TEXT, GROUND),
+                    ],
+                    [caret_bar(32, 540)],
+                ),
                 2,
             ),
         );
@@ -1174,11 +1200,13 @@ mod tests {
         assert_eq!(
             wrapped(&"x".repeat(50), 50),
             (
-                framed(vec![
-                    run_on(16, 220, &"x".repeat(38), TEXT, GROUND),
-                    run_on(32, 220, &"x".repeat(12), TEXT, GROUND),
-                    run_on(32, 412, " ", GROUND, TEXT),
-                ]),
+                framed(
+                    vec![
+                        run_on(16, 220, &"x".repeat(38), TEXT, GROUND),
+                        run_on(32, 220, &"x".repeat(12), TEXT, GROUND),
+                    ],
+                    [caret_bar(32, 412)],
+                ),
                 2,
             ),
         );
@@ -1189,11 +1217,8 @@ mod tests {
     #[test]
     fn a_caret_past_a_full_row_takes_the_next_row() {
         let caret_alone = |input: &str| {
-            let input = vec![
-                run_on(16, 220, input, TEXT, GROUND),
-                run_on(32, 220, " ", GROUND, TEXT),
-            ];
-            (framed(input), 2)
+            let input = vec![run_on(16, 220, input, TEXT, GROUND)];
+            (framed(input, [caret_bar(32, 220)]), 2)
         };
         let (full, spaced) = (
             "x".repeat(38),
@@ -1245,23 +1270,27 @@ mod tests {
             [wrapped(&input, 200), wrapped(&input, 0)],
             [
                 (
-                    framed(vec![
-                        run_on(16, 220, &full, TEXT, GROUND),
-                        run_on(32, 220, &full, TEXT, GROUND),
-                        run_on(48, 220, &full, TEXT, GROUND),
-                        run_on(64, 220, &"x".repeat(10), TEXT, GROUND),
-                        run_on(64, 380, " ", GROUND, TEXT),
-                    ]),
+                    framed(
+                        vec![
+                            run_on(16, 220, &full, TEXT, GROUND),
+                            run_on(32, 220, &full, TEXT, GROUND),
+                            run_on(48, 220, &full, TEXT, GROUND),
+                            run_on(64, 220, &"x".repeat(10), TEXT, GROUND),
+                        ],
+                        [caret_bar(64, 380)],
+                    ),
                     4,
                 ),
                 (
-                    framed(vec![
-                        run_on(16, 220, "x", GROUND, TEXT),
-                        run_on(16, 236, &"x".repeat(37), TEXT, GROUND),
-                        run_on(32, 220, &full, TEXT, GROUND),
-                        run_on(48, 220, &full, TEXT, GROUND),
-                        run_on(64, 220, &full, TEXT, GROUND),
-                    ]),
+                    framed(
+                        vec![
+                            run_on(16, 236, &"x".repeat(37), TEXT, GROUND),
+                            run_on(32, 220, &full, TEXT, GROUND),
+                            run_on(48, 220, &full, TEXT, GROUND),
+                            run_on(64, 220, &full, TEXT, GROUND),
+                        ],
+                        [caret_bar(16, 220), bare_run(16, 220, "x", GROUND)],
+                    ),
                     4,
                 ),
             ],
@@ -1289,7 +1318,8 @@ mod tests {
 
     /// Under the plate each span of the input draws as its own run in its own
     /// style, as a command token, its ghost, and the argument after them do. A
-    /// caret inside a span splits it around the caret's char.
+    /// caret inside a span splits it around the caret's char, which draws over
+    /// the caret's bar in the ground after the status.
     #[test]
     fn a_plate_cmd_line_draws_each_span_as_its_own_run() {
         let theme = plate_theme();
@@ -1321,18 +1351,22 @@ mod tests {
         assert_eq!(
             [runs(6), runs(1)],
             [
-                framed(vec![
-                    bold(run(220, "o", token, GROUND)),
-                    run(236, "pen", ghost, GROUND),
-                    run(284, " x", TEXT, GROUND),
-                    run(316, " ", GROUND, TEXT),
-                ]),
-                framed(vec![
-                    bold(run(220, "o", token, GROUND)),
-                    run(236, "p", GROUND, TEXT),
-                    run(252, "en", ghost, GROUND),
-                    run(284, " x", TEXT, GROUND),
-                ]),
+                framed(
+                    vec![
+                        bold(run(220, "o", token, GROUND)),
+                        run(236, "pen", ghost, GROUND),
+                        run(284, " x", TEXT, GROUND),
+                    ],
+                    [caret_bar(16, 316)],
+                ),
+                framed(
+                    vec![
+                        bold(run(220, "o", token, GROUND)),
+                        run(252, "en", ghost, GROUND),
+                        run(284, " x", TEXT, GROUND),
+                    ],
+                    [caret_bar(16, 236), bare_run(16, 236, "p", GROUND)],
+                ),
             ],
         );
     }
@@ -1524,9 +1558,9 @@ mod tests {
                 run(32, "~/p/stoat", CWD, GROUND),
                 run(190, PROMPT_GLYPH, PROMPT, GROUND),
                 run(220, "ab", TEXT, GROUND),
-                run(252, " ", GROUND, TEXT),
                 bare_run(16, 898, "\u{2713}", TEXT),
                 bare_run(16, 928, "18ms", MUTED),
+                caret_bar(16, 252),
                 Command::Nudge([0, 0]),
             ],
         );

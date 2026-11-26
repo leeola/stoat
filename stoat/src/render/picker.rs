@@ -75,6 +75,15 @@ const PILL_GAP: u16 = 4;
 /// under the 1 px of [`PLATE_HEADER_NUDGE`] it ends 12 px inside the plate.
 const PLATE_END_INSET: u16 = 4;
 
+/// Sixteenths that a plate's block caret stands under its row's top, the
+/// boards' 1 px of an 18 px row.
+const CARET_TOP: i16 = 1;
+
+/// Sixteenths a plate's block caret is high. Under [`CARET_TOP`] it covers the
+/// pixel rows 1 to 15 of an 18 px row, the boards' 15 px caret, which leaves
+/// 2 px of the row under it.
+const CARET_HEIGHT: u16 = 13;
+
 /// Rows a modal's key line takes, the inner rect's last row and the bottom
 /// border's row under it.
 ///
@@ -284,11 +293,11 @@ fn label_style(theme: &Theme) -> Style {
 /// the [`TypeRole::Caption`] size, as [`plate_trailing`] places them.
 ///
 /// The query is the input's text `query`, as [`query_window`] fits it around
-/// `caret`, the char its cursor covers. The caret's char draws in the ground
-/// over the text color, which is the block caret. A label or a prompt that
-/// runs past the row's end clips there. A count of no shown entries paints its
-/// zero in `diff.deleted`'s foreground, as [`paint_header_row`] does. A part
-/// whose color has no RGB value draws nothing.
+/// `caret`, the char its cursor covers, and [`plate_caret`] draws the block
+/// caret over that char in the text color. A label or a prompt that runs past
+/// the row's end clips there. A count of no shown entries paints its zero in
+/// `diff.deleted`'s foreground, as [`paint_header_row`] does. A part whose
+/// color has no RGB value draws nothing.
 fn paint_plate_header(
     buf: &mut Buffer,
     inner: Rect,
@@ -369,12 +378,9 @@ fn paint_plate_header(
         bold(muted),
     );
     run(query_x, before, ui, (text, ground), false);
-    if let (Some(at_caret), Some(caret_color)) = (at_caret, text) {
-        let caret_x = query_x + text_run::advance_sixteenths(before.chars().count(), ui);
-        run(caret_x, at_caret, ui, (Some(ground), caret_color), false);
-        let after_x = query_x + text_run::advance_sixteenths(before.chars().count() + 1, ui);
-        run(after_x, after, ui, (text, ground), false);
-    }
+    let caret_x = query_x + text_run::advance_sixteenths(before.chars().count(), ui);
+    let after_x = query_x + text_run::advance_sixteenths(before.chars().count() + 1, ui);
+    run(after_x, after, ui, (text, ground), false);
 
     if let (Some(col), Some(count), Some((shown, _))) = (trailing.count, &count, header.count) {
         let (zero, rest) = count.split_at(usize::from(shown == 0));
@@ -395,6 +401,9 @@ fn paint_plate_header(
             (false, _) => (style_rgb(muted.fg), ground),
         };
         run(*col, name, caption, colors, false);
+    }
+    if let (Some(at_caret), Some(text)) = (at_caret, text) {
+        plate_caret(caret_x, at_caret, ui, (text, ground), origin, buf, scene);
     }
 
     scene.nudge([0, 0]);
@@ -953,6 +962,51 @@ pub(super) fn plate_run(
         follow: 0,
         anchor: None,
     }
+}
+
+/// Draw a plate row's block caret `col` sixteenths into the row of `origin`,
+/// over `at_caret`, the char it covers, at `scale`.
+///
+/// The caret is a bar in `text`, one char's advance wide, [`CARET_TOP`] under
+/// the row's top and [`CARET_HEIGHT`] high. The char draws over it in `ground`
+/// with no background of its own, and a caret over a blank draws the bar alone.
+pub(super) fn plate_caret(
+    col: u16,
+    at_caret: &str,
+    scale: u16,
+    (text, ground): ([u8; 3], [u8; 3]),
+    origin: Rect,
+    buf: &mut Buffer,
+    scene: &mut stoat_widgets::ApcScene,
+) {
+    let x = i16::try_from(col).unwrap_or(i16::MAX);
+    Bar {
+        x,
+        y: CARET_TOP,
+        width: text_run::advance_sixteenths(1, scale),
+        height: CARET_HEIGHT,
+        color: text,
+        radius: 0,
+        corners: 0,
+    }
+    .render(origin, buf, scene);
+
+    if at_caret.trim().is_empty() {
+        return;
+    }
+    TextRun {
+        col: x,
+        row: 0,
+        scale,
+        color: ground,
+        bg: None,
+        bold: false,
+        italic: false,
+        text: at_caret,
+        follow: 0,
+        anchor: None,
+    }
+    .render(origin, buf, scene);
 }
 
 /// Where the parts of a key line start, in the units of the measure that
@@ -2878,29 +2932,34 @@ mod tests {
     const PLATE_CHIP_FILL: [u8; 3] = [7, 7, 7];
     const PLATE_DELETED: [u8; 3] = [8, 8, 8];
 
+    /// A theme of the `PLATE_` colors, whose plate needs a scene that reads
+    /// nudges.
+    fn plate_header_theme() -> Theme {
+        let src = r##"theme t {
+            ui.surface.ground.bg = "#010101";
+            ui.background.bg = "#020202";
+            ui.modal.label = { fg: "#030303", modifiers: [bold] };
+            ui.text.fg = "#040404";
+            ui.text.muted.fg = "#050505";
+            ui.chip = { fg: "#060606", bg: "#070707" };
+            diff.deleted.fg = "#080808";
+            ui.border.inactive.fg = "#090909";
+        }"##;
+        let (config, _) = stoat_config::parse(src);
+        Theme::from_config(&config.expect("theme parses"), "t").expect("theme loads")
+    }
+
     /// The buffer and the scene of `header` painted into the inner rect
-    /// (2, 1, 60, 4) over an input that holds `ab`, under a theme of the
-    /// `PLATE_` colors, by a scene that reads nudges where `nudges` holds.
+    /// (2, 1, 60, 4) over an input that holds `ab`, under
+    /// [`plate_header_theme`], by a scene that reads nudges where `nudges`
+    /// holds.
     ///
     /// Every cell of the 64 by 6 buffer holds `x` before the paint.
     fn painted_header(
         header: &FilterHeader<'_>,
         nudges: bool,
     ) -> (Buffer, stoat_widgets::ApcScene) {
-        let theme = {
-            let src = r##"theme t {
-                ui.surface.ground.bg = "#010101";
-                ui.background.bg = "#020202";
-                ui.modal.label = { fg: "#030303", modifiers: [bold] };
-                ui.text.fg = "#040404";
-                ui.text.muted.fg = "#050505";
-                ui.chip = { fg: "#060606", bg: "#070707" };
-                diff.deleted.fg = "#080808";
-                ui.border.inactive.fg = "#090909";
-            }"##;
-            let (config, _) = stoat_config::parse(src);
-            Theme::from_config(&config.expect("theme parses"), "t").expect("theme loads")
-        };
+        let theme = plate_header_theme();
         let mut h = crate::Stoat::test();
         let executor = h.stoat.executor.clone();
         let ws = h.stoat.active_workspace_mut();
@@ -2938,6 +2997,22 @@ mod tests {
         })
     }
 
+    /// The block caret's bar at `col` sixteenths on the header row, 1
+    /// sixteenth under the row's top and 13 high in the text color.
+    fn plate_caret_bar(col: i16) -> Command {
+        Command::Bar(BarCommand {
+            x: col,
+            y: 17,
+            width: 16,
+            height: 13,
+            color: PLATE_TEXT,
+            occludes: false,
+            hatch: None,
+            radius: 0,
+            corners: 0,
+        })
+    }
+
     /// The rounded bar of an active chip, `width` sixteenths from `x` on the
     /// header row at `y`.
     fn plate_chip_bar(x: i16, y: i16, width: u16) -> Command {
@@ -2966,12 +3041,13 @@ mod tests {
     /// cells, with no rule under it.
     ///
     /// The label leads in its bold color, and the prompt and the query follow
-    /// 14 sixteenths apart. The caret is a space after `ab`, in the ground over
-    /// the text color. From the right, the row ends 4 sixteenths inside its
-    /// end, and each chip takes its text with 11 sixteenths at each side, 4
+    /// 14 sixteenths apart. From the right, the row ends 4 sixteenths inside
+    /// its end, and each chip takes its text with 11 sixteenths at each side, 4
     /// sixteenths from the next, so `all` stands last and the active
     /// `applicable` before it over a rounded bar of that span. The count ends
-    /// 14 sixteenths left of that bar.
+    /// 14 sixteenths left of that bar. The caret after `ab` covers a blank, so
+    /// it draws last as its bar alone, 1 sixteenth under the row's top and 13
+    /// high in the text color.
     #[test]
     fn a_plate_header_draws_its_parts_as_nudged_runs() {
         let header = FilterHeader {
@@ -2988,10 +3064,10 @@ mod tests {
                 plate_run(32, "Help", PLATE_LABEL, PLATE_GROUND, true),
                 plate_run(110, FILTER_PROMPT, PLATE_MUTED, PLATE_GROUND, false),
                 plate_run(140, "ab", PLATE_TEXT, PLATE_GROUND, false),
-                plate_run(172, " ", PLATE_GROUND, PLATE_TEXT, false),
                 plate_run(574, "14 of 890", PLATE_MUTED, PLATE_GROUND, false),
                 plate_run(743, "applicable", PLATE_CHIP_TEXT, PLATE_CHIP_FILL, false),
                 plate_run(929, "all", PLATE_MUTED, PLATE_GROUND, false),
+                plate_caret_bar(172),
                 Command::Nudge([0, 0]),
             ],
         );
@@ -3013,9 +3089,56 @@ mod tests {
                 Command::Nudge([1, 7]),
                 plate_run(32, FILTER_PROMPT, PLATE_MUTED, PLATE_GROUND, false),
                 plate_run(62, "ab", PLATE_TEXT, PLATE_GROUND, false),
-                plate_run(94, " ", PLATE_GROUND, PLATE_TEXT, false),
                 plate_run(860, "0", PLATE_DELETED, PLATE_GROUND, false),
                 plate_run(876, " of 214", PLATE_MUTED, PLATE_GROUND, false),
+                plate_caret_bar(94),
+                Command::Nudge([0, 0]),
+            ],
+        );
+    }
+
+    /// A caret over a char draws its bar at the char's col, and the char over
+    /// the bar in the ground with no background of its own. The chars after
+    /// the caret draw as their own run one char further right.
+    #[test]
+    fn a_caret_over_a_char_draws_that_char_in_the_ground() {
+        let header = FilterHeader {
+            label: "",
+            prompt: FILTER_PROMPT,
+            count: None,
+            chips: &[],
+        };
+        let mut scene = stoat_widgets::ApcScene::new();
+        scene.set_nudge_protocol(true);
+        paint_plate_header(
+            &mut Buffer::empty(Rect::new(0, 0, 64, 6)),
+            Rect::new(2, 1, 60, 4),
+            &header,
+            ("ab".to_owned(), 0),
+            PLATE_GROUND,
+            &plate_header_theme(),
+            &mut scene,
+        );
+
+        assert_eq!(
+            plate_commands(&scene),
+            vec![
+                Command::Nudge([1, 7]),
+                plate_run(32, FILTER_PROMPT, PLATE_MUTED, PLATE_GROUND, false),
+                plate_run(78, "b", PLATE_TEXT, PLATE_GROUND, false),
+                plate_caret_bar(62),
+                Command::TextRun(TextRunCommand {
+                    col: 62,
+                    row: 16,
+                    scale: 256,
+                    color: PLATE_GROUND,
+                    bg: None,
+                    bold: false,
+                    italic: false,
+                    follow: 0,
+                    anchor: None,
+                    text: "a".to_owned(),
+                }),
                 Command::Nudge([0, 0]),
             ],
         );
