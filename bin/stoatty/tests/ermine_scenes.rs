@@ -1883,16 +1883,17 @@ fn the_file_finder_box_casts_the_modal_shadow() {
 /// The base cell sits in the preview, under the six lines of the file it shows.
 ///
 /// The rule under the preview's path header runs 2 px into cell row 13, the
-/// header's second row, on pixel row 236, 24 px under the preview Island's top,
-/// in the divider color, as a rule on the editor surface draws. The pixel row
-/// above it reads the base surface.
+/// preview's first row, on pixel row 236, 24 px under the preview Island's
+/// top, in the divider color, as a rule on the editor surface draws. The pixel
+/// row above it reads the base surface.
 ///
-/// The preview draws at Preview Scale from pixel (603, 252), cell (67, 14), and
-/// numbers its lines in four 5 px digit cells, pixels 603 to 622, before its
-/// rule. Their first 11 px row, pixel rows 252 to 262, holds the number in the
-/// muted color and no text, so it peaks above the base surface and at most at
-/// the muted color. Their eighth row, pixel rows 329 to 339, is the first past
-/// the file's seven lines, and holds no number.
+/// The preview draws at Preview Scale from pixel (603, 239), 5 px into cell
+/// (67, 13), and numbers its lines in four 5 px digit cells, pixels 603 to
+/// 622, before its rule. Source row r takes the 11 pixel rows from 239 + 11r,
+/// so the pixel rows 252 to 262 hold the numbers of rows 1 and 2 in the muted
+/// color and no text, and peak above the base surface and at most at the
+/// muted color. The pixel rows 329 to 339 lie past the file's seven lines,
+/// which end at pixel row 316, and hold no number.
 #[test]
 fn the_file_finder_box_draws_as_the_ground_plate() {
     let mut home = support::scratch_home();
@@ -1992,14 +1993,19 @@ fn the_file_finder_box_draws_as_the_ground_plate() {
 
 /// The finder preview's path header is the boards' 24 px band over a 1 px rule.
 ///
-/// On the smallest plate the preview is cells 67 to 125, its header is the
-/// cell rows 12 and 13, and its Island's top is pixel row 212. The rule fills
-/// the 534 px of pixel row 236 from pixel column 603, 24 px under that top,
-/// and pixel row 233, where the rule stood on whole cells, reads the base. The
-/// shown lines of a one-line file draw at the Caption size in the muted color,
-/// 1 px over the header's first row, and end 10 px inside the Island, so the
-/// pixels from (1058, 215) peak above the base and at most at the muted color,
-/// and the 6 px right of them read the base.
+/// On the smallest plate the preview is cells 67 to 125, its header is cell
+/// row 12, and its Island's top is pixel row 212. The rule fills the 534 px of
+/// pixel row 236 from pixel column 603, 24 px under that top, and pixel row
+/// 233, where the rule stood on whole cells, reads the base. The shown lines
+/// of a one-line file draw at the Caption size in the muted color, 1 px over
+/// the header's first row, and end 10 px inside the Island, so the pixels from
+/// (1058, 215) peak above the base and at most at the muted color, and the 6 px
+/// right of them read the base.
+///
+/// The preview's pool starts on cell row 13, the rule's row, 5 px into it.
+/// The 2 px under the rule, pixel rows 237 and 238, show the live Island in
+/// the base, and the number of the first source line lights the pixels from
+/// (603, 239).
 #[test]
 fn the_preview_header_is_a_twenty_four_pixel_band() {
     let mut home = support::scratch_home();
@@ -2021,6 +2027,18 @@ fn the_preview_header_is_a_twenty_four_pixel_band() {
             frame.display(),
         );
     }
+    let base = BASE.into_iter().max().expect("a color has channels");
+    let under_rule = brightest(&shot, (603, 237, 534, 2));
+    let number = brightest(&shot, (603, 239, 60, 11));
+    if under_rule != base || number <= 0x40 {
+        let frame = keep_frame(&shot, &mut home, "preview_first_line");
+        panic!(
+            "the 2 px under the rule peak at {under_rule:#04x} where they read the base's \
+             {base:#04x}, and the first line's number peaks at {number:#04x}, at most 0x40; \
+             the frame is {}",
+            frame.display(),
+        );
+    }
     expect_region(
         &shot,
         &mut home,
@@ -2034,10 +2052,11 @@ fn the_preview_header_is_a_twenty_four_pixel_band() {
 /// 11 px pitch of a 5 by 11 px cell, where the grid's 9 by 18 px cell stands
 /// them 18 px apart.
 ///
-/// The preview starts at cell (67, 14), pixel (603, 252), and its digits take
-/// its first four scaled cells, pixels 603 to 622, which hold no rule and no
-/// text. The pixel rows there that hold a digit form one band per line, and the
-/// first five bands start at pixel rows 254, 265, 276, 287, and 298.
+/// The preview starts at pixel (603, 239), 5 px into cell (67, 13), and its
+/// digits take its first four scaled cells, pixels 603 to 622, which hold no
+/// rule and no text. The pixel rows there that hold a digit form one band per
+/// line, and the first five bands start at pixel rows 241, 252, 263, 274, and
+/// 285.
 #[test]
 fn the_finder_preview_draws_at_preview_scale() {
     let mut home = support::scratch_home();
@@ -2050,15 +2069,15 @@ fn the_finder_preview_draws_at_preview_scale() {
 
     let base = BASE.into_iter().max().expect("a color has channels");
     let lit = |y: u32| brightest(&shot, (603, y, 20, 1)) > base;
-    let tops: Vec<u32> = (252..400)
+    let tops: Vec<u32> = (239..400)
         .filter(|&y| lit(y) && !lit(y - 1))
         .take(5)
         .collect();
-    if tops != [254, 265, 276, 287, 298] {
+    if tops != [241, 252, 263, 274, 285] {
         let frame = keep_frame(&shot, &mut home, "preview_scale");
         panic!(
             "the preview's number bands start at pixel rows {tops:?}, not 11 px apart from row \
-             254; the frame is {}",
+             241; the frame is {}",
             frame.display(),
         );
     }
@@ -2068,8 +2087,8 @@ fn the_finder_preview_draws_at_preview_scale() {
 /// PreviewZoom board does, with a 1 px rule in the divider color 24 px right of
 /// the preview's left edge.
 ///
-/// The preview starts at pixel (603, 252), so the rule stands in pixel column
-/// 627. On the first line's row, pixel row 257, that pixel reads the divider,
+/// The preview starts at pixel (603, 239), so the rule stands in pixel column
+/// 627. On the first line's row, pixel row 244, that pixel reads the divider,
 /// and the pixel on each side of it reads the base surface.
 #[test]
 fn the_finder_preview_rules_off_its_numbers() {
@@ -2081,11 +2100,11 @@ fn the_finder_preview_rules_off_its_numbers() {
         "<Space>p<Settle>",
     );
 
-    let row = [626, 627, 628].map(|x| pixel(&shot, x, 257));
+    let row = [626, 627, 628].map(|x| pixel(&shot, x, 244));
     if row != [BASE, DIVIDER, BASE] {
         let frame = keep_frame(&shot, &mut home, "preview_rule");
         panic!(
-            "pixels 626 to 628 of pixel row 257 read {}, {}, and {}, where the divider {} \
+            "pixels 626 to 628 of pixel row 244 read {}, {}, and {}, where the divider {} \
              stands between two pixels of the base {}; the frame is {}",
             hex(row[0]),
             hex(row[1]),

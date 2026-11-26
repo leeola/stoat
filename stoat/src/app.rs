@@ -99,7 +99,7 @@ use stoatty_protocol::{
     command,
     window_ipc::{MouseButton as IpcMouseButton, MouseKind, WindowIpcEvent},
     BACKDROP_PANEL_PROTOCOL, BATCHED_DECORATIONS_PROTOCOL, NUDGE_PROTOCOL, PAGE_NUDGE_PROTOCOL,
-    POOL_SCALE_PROTOCOL,
+    POOL_INSET_PROTOCOL, POOL_SCALE_PROTOCOL,
 };
 use tokio::{
     io::AsyncBufReadExt,
@@ -4299,6 +4299,16 @@ impl Stoat {
             .filter(|_| self.stoatty_protocol >= PAGE_NUDGE_PROTOCOL)?;
         let scale = self.display_scale?;
         Some(RowMetrics { cell, scale })
+    }
+
+    /// Whether the terminal starts a pool's pages at the pixel inset that its
+    /// region states.
+    ///
+    /// A stoatty at [`POOL_INSET_PROTOCOL`] or later does. An earlier one
+    /// places the pages on the region's first cell, so a surface that needs a
+    /// page between two cell edges keeps its cell layout there.
+    pub(crate) fn pool_insets(&self) -> bool {
+        self.stoatty && self.stoatty_protocol >= POOL_INSET_PROTOCOL
     }
 
     /// The fewest columns the finder's preview takes, which hold 100 columns

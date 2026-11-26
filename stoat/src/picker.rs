@@ -1841,6 +1841,14 @@ pub(crate) struct Preview {
     /// [`Preview::clear`] drop it, so a pane never marks a line that the
     /// selection after it does not name.
     pub(crate) target_line: Option<u32>,
+    /// The logical px that a page of the preview leaves free inside its rect
+    /// at the left, the top, the right, and the bottom.
+    ///
+    /// The first two ride the `inset` of the preview's pool region, so the
+    /// page starts between two cell edges. The paint, the pool, and the keys
+    /// that page the preview all size the page from it, so they agree on its
+    /// rows.
+    pub(crate) pad: [u8; 4],
 }
 
 /// Where a preview lays its editor out at Preview Scale.
@@ -1868,6 +1876,7 @@ impl Preview {
             scratch: Buffer::empty(Rect::ZERO),
             scaled: None,
             target_line: None,
+            pad: [0; 4],
         }
     }
 
@@ -2042,6 +2051,7 @@ impl Preview {
             scratch: Buffer::empty(Rect::ZERO),
             scaled: None,
             target_line: None,
+            pad: [0; 4],
         }
     }
 }

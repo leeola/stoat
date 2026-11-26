@@ -7002,6 +7002,53 @@ fn the_preview_keys_page_by_the_scaled_rows() {
     );
 }
 
+/// A pixel finder at the inset protocol starts its preview's pool on the row
+/// under its one-row path header, the row of the header's rule, with a top
+/// inset of 5 px, and its pages hold the scaled rows under that inset. At
+/// protocol 41 the header keeps two rows, and the pool starts under them with
+/// no inset. So does a finder at the inset protocol whose lists keep their
+/// cell rows, under a terminal that states no display scale.
+#[test]
+fn the_finder_preview_region_states_its_top_inset() {
+    use crate::render::picker::preview_grid;
+    use stoatty_protocol::command::{Command, PoolKind};
+
+    let pool = crate::smooth_scroll::non_pane_pool::MODAL_PREVIEW;
+    let declared = |protocol: u32, scale: Option<f32>| {
+        let (mut h, mut rx) = scaled_preview_harness(protocol);
+        h.stoat.display_scale = scale;
+        h.stoat.render();
+        let layout = finder_layout(&h);
+        let header = layout.preview_header.expect("a preview header");
+        let preview = layout.preview.expect("a preview beside the list");
+        let region = pool_commands(&emit_raw(&mut h, &mut rx), pool)
+            .into_iter()
+            .find_map(|command| match command {
+                Command::PoolRegion(region) => Some(region),
+                _ => None,
+            })
+            .expect("the preview declares its pool");
+        let rows = match region.kind {
+            PoolKind::Scaled { rows, .. } => Some(rows),
+            PoolKind::Grid | PoolKind::Terminal => None,
+        };
+        ((region.inset, region.top - header.y, rows), preview)
+    };
+
+    let (inset, inset_preview) = declared(stoatty_protocol::PROTOCOL_VERSION, Some(1.0));
+    let (plain, plain_preview) = declared(POOL_POINTER_PROTOCOL, Some(1.0));
+    let (cells, cells_preview) = declared(stoatty_protocol::PROTOCOL_VERSION, None);
+    let rows = |preview, pad| preview_grid(preview, Some([9, 18]), pad).map(|(rows, _)| rows);
+    assert_eq!(
+        [inset, plain, cells],
+        [
+            ([0, 5], 1, rows(inset_preview, [0, 5, 0, 0])),
+            ([0, 0], 2, rows(plain_preview, [0; 4])),
+            ([0, 0], 2, rows(cells_preview, [0; 4])),
+        ],
+    );
+}
+
 /// A 160 by 40 harness under a stoatty at `protocol` with 9 by 18 pixel cells,
 /// its file finder open over two 120-line files and painted, and the channel
 /// its emits go to.

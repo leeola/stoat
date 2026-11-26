@@ -2147,9 +2147,10 @@ pub(crate) fn name_start(label: &str) -> usize {
 /// [`paint_target_row`] draws it.
 ///
 /// A live scene with a scaled cell lays the editor out at Preview Scale, in
-/// the grid [`preview_grid`] gives, and records it in [`Preview::scaled`]. The
-/// paint goes into [`Preview::scratch`] for the layout alone, and `area` blanks
-/// to the editor surface, since the preview's resident pool draws the text.
+/// the grid [`preview_grid`] gives less the [`Preview::pad`] at the scene's
+/// display scale, and records it in [`Preview::scaled`]. The paint goes into
+/// [`Preview::scratch`] for the layout alone, and `area` blanks to the editor
+/// surface, since the preview's resident pool draws the text.
 pub(crate) fn render_picker_preview(
     preview: &mut Preview,
     area: Rect,
@@ -2169,7 +2170,12 @@ pub(crate) fn render_picker_preview(
         return area.height;
     };
 
-    let grid = preview_grid(area, scene.scaled_cell()).filter(|_| scene.live());
+    // The pad is in logical px, and the grid counts physical ones. A scene
+    // with no pixel rows states no scale, and its preview takes no pad.
+    let pad_px = scene.pixel_rows().map_or([0; 4], |(_, scale)| {
+        preview.pad.map(|px| (f32::from(px) * scale).round() as u16)
+    });
+    let grid = preview_grid(area, scene.scaled_cell(), pad_px).filter(|_| scene.live());
     let column = NumberColumn::new(numbers, grid.is_some());
     let Some((rows, cols)) = grid else {
         paint_preview_editor(editor, column, target_line, area, theme, chrome, buf, scene);
@@ -2205,8 +2211,19 @@ pub(crate) const PREVIEW_SCALE: u16 = 154;
 
 /// The `(rows, cols)` of Preview Scale cells that a preview over `area` lays
 /// its source out in, or `None` without a scaled cell, where it keeps the grid.
-pub(crate) fn preview_grid(area: Rect, cell: Option<[u16; 2]>) -> Option<(u16, u16)> {
-    cell.map(|cell| pool::scaled_grid(area.width, area.height, cell, PREVIEW_SCALE))
+///
+/// `pad_px` holds the physical px that the page leaves free at the left, the
+/// top, the right, and the bottom of `area`, as [`Preview::pad`] states them
+/// at the display scale. They come off the rect's pixels before the pixels
+/// divide into scaled cells.
+pub(crate) fn preview_grid(
+    area: Rect,
+    cell: Option<[u16; 2]>,
+    pad_px: [u16; 4],
+) -> Option<(u16, u16)> {
+    let [left, top, right, bottom] = pad_px.map(u32::from);
+    let pad = [left + right, top + bottom];
+    cell.map(|cell| pool::padded_scaled_grid(area.width, area.height, cell, PREVIEW_SCALE, pad))
 }
 
 /// Paint `editor` into `area` of `buf` as a preview, and record in its
@@ -4352,7 +4369,7 @@ mod tests {
         let area = Rect::new(4, 2, 60, 30);
 
         assert_eq!(
-            painted_preview(area, Some([9, 18])),
+            painted_preview(area, Some([9, 18]), None),
             (
                 49,
                 Some(49),
@@ -4371,18 +4388,66 @@ mod tests {
     #[test]
     fn a_preview_with_no_scaled_cell_paints_its_cells() {
         assert_eq!(
-            painted_preview(Rect::new(4, 2, 60, 30), None),
+            painted_preview(Rect::new(4, 2, 60, 30), None, None),
             (30, Some(30), None, false),
         );
     }
 
+    /// A scaled preview's grid leaves out its pad at the scene's display scale,
+    /// rounded to the nearest px. The 60 by 30 area's 540 px hold 49 rows of
+    /// 11 px. A top pad of 7 logical px at scale 1.75 is 12.25 px, which leaves
+    /// 528 px, 48 rows. A top pad of 5 at scale 2.5 is 12.5 px, which rounds to
+    /// 13 and leaves 527 px, 47 rows.
+    #[test]
+    fn a_scaled_preview_leaves_out_its_pad() {
+        let area = Rect::new(4, 2, 60, 30);
+        let rows = |pad| painted_preview(area, Some([9, 18]), pad).0;
+        assert_eq!(
+            [
+                rows(None),
+                rows(Some(([0, 7, 0, 0], 1.75))),
+                rows(Some(([0, 5, 0, 0], 2.5)))
+            ],
+            [49, 48, 47],
+        );
+    }
+
+    /// A preview's grid counts the 5 by 11 px cells of its rect's pixels less
+    /// its pad. A 20 by 11 cell rect of 9 by 18 px cells holds 36 cols and 18
+    /// rows, and 33 cols and 17 rows once 12 px across and 5 px down come off,
+    /// whichever sides hold them. The top's 12 px and the left's 5 px leave 35
+    /// cols and 16 rows.
+    #[test]
+    fn a_preview_grid_takes_its_pad_from_the_rect() {
+        let rect = Rect::new(4, 2, 20, 11);
+        let grid = |pad| preview_grid(rect, Some([9, 18]), pad);
+        assert_eq!(
+            [
+                grid([0; 4]),
+                grid([12, 5, 0, 0]),
+                grid([0, 0, 12, 5]),
+                grid([5, 12, 0, 0]),
+                preview_grid(rect, None, [12, 5, 0, 0]),
+            ],
+            [
+                Some((18, 36)),
+                Some((17, 33)),
+                Some((17, 33)),
+                Some((16, 35)),
+                None
+            ],
+        );
+    }
+
     /// Paint a file finder's preview into `area` under a live scene whose scaled
-    /// cell is `cell`. Answers the rows the call returns, the editor's viewport
-    /// rows, what the preview records, and whether every cell of `area` is a
-    /// blank on the editor surface.
+    /// cell is `cell`, with `pad` the preview's pad and the scene's display
+    /// scale. Answers the rows the call returns, the editor's viewport rows,
+    /// what the preview records, and whether every cell of `area` is a blank
+    /// on the editor surface.
     fn painted_preview(
         area: Rect,
         cell: Option<[u16; 2]>,
+        pad: Option<([u8; 4], f32)>,
     ) -> (u16, Option<u32>, Option<ScaledPreview>, bool) {
         let mut h = crate::test_harness::TestHarness::with_size(120, 40);
         let root = PathBuf::from("/scaled-preview");
@@ -4399,6 +4464,10 @@ mod tests {
         scene.set_scaled_cell(cell);
         let mut finder = h.stoat.file_finder.take().expect("the finder is open");
         let preview = &mut finder.active_core().preview;
+        if let Some((pad, scale)) = pad {
+            preview.pad = pad;
+            scene.set_pixel_rows(cell.map(|cell| (cell, scale)));
+        }
         let ws = h.stoat.active_workspace_mut();
         let rows = render_picker_preview(preview, area, &theme, &chrome, ws, &mut buf, &mut scene);
 

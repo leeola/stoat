@@ -855,7 +855,7 @@ fn render_preview(
     };
     match preview {
         Some(Some(document)) => {
-            let grid = crate::render::picker::preview_grid(area, scene.scaled_cell())
+            let grid = crate::render::picker::preview_grid(area, scene.scaled_cell(), [0; 4])
                 .filter(|_| scene.live());
             if let Some((rows, _)) = grid {
                 picker.preview_scroll =

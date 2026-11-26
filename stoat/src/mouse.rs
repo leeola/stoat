@@ -418,7 +418,8 @@ pub(crate) fn modal_preview_rows(stoat: &Stoat) -> Option<usize> {
     let rect = boxed_modal_surfaces(stoat).and_then(|surfaces| surfaces.preview)?;
     let scaled_rows = match active_modal(stoat) {
         Some(ActiveModal::CommitPicker) => {
-            crate::render::picker::preview_grid(rect, stoat.scaled_cell()).map(|(rows, _)| rows)
+            crate::render::picker::preview_grid(rect, stoat.scaled_cell(), [0; 4])
+                .map(|(rows, _)| rows)
         },
         _ => modal_preview_pane(stoat)
             .and_then(|preview| preview.scaled)

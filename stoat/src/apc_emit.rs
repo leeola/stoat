@@ -888,6 +888,7 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
                 preview.editor,
                 preview.scaled,
                 preview.target_line,
+                preview.pad,
             ))
         })
         .flatten();
@@ -2148,8 +2149,10 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
     // A preview at Preview Scale is a resident scaled pool over the area its
     // render laid out, which leaves out a doc pane above the source. The pool
     // is the pane at rest and the live cells under it are blank, so it holds
-    // nothing, and the pages a composite reads render in this emit.
-    if let Some((rect, editor_id, scaled, target_line)) = modal_preview {
+    // nothing, and the pages a composite reads render in this emit. The
+    // region's inset is the preview's left and top pad, which the render's
+    // grid left free, so the page starts where the render laid it out.
+    if let Some((rect, editor_id, scaled, target_line, pad)) = modal_preview {
         let (area, kind) = match scaled {
             Some(scaled) => (
                 scaled.area,
@@ -2171,7 +2174,7 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
             kind,
             dim: 0,
             resident: scaled.is_some(),
-            inset: [0, 0],
+            inset: [pad[0], pad[1]],
         };
         let (page_rows, page_cols) = (region.page_rows(), region.page_cols());
         let active_idx = stoat.active_workspace;
@@ -2736,7 +2739,7 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
         // A diff at Preview Scale is a resident scaled pool, as a modal's source
         // preview is. The live cells under it are blank, so the pool draws the
         // pane at rest as well as in a glide.
-        let grid = crate::render::picker::preview_grid(rect, stoat.scaled_cell());
+        let grid = crate::render::picker::preview_grid(rect, stoat.scaled_cell(), [0; 4]);
         let kind = match grid {
             Some((rows, cols)) => PoolKind::Scaled {
                 scale: crate::render::picker::PREVIEW_SCALE,

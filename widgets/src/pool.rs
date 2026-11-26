@@ -707,12 +707,27 @@ pub fn emit_pages_into(
 /// terminal composites them over. Each side counts the whole scaled cells that
 /// the rect's pixels hold, at least one, up to the `u16` maximum.
 pub fn scaled_grid(width: u16, height: u16, cell: [u16; 2], scale: u16) -> (u16, u16) {
-    let fit = |cells: u16, side: u16| {
-        let pixels = u32::from(cells) * u32::from(side);
+    padded_scaled_grid(width, height, cell, scale, [0, 0])
+}
+
+/// The `(rows, cols)` of scaled cells that [`scaled_grid`] counts once `pad`
+/// physical px, across and down, come off the rect's pixels.
+///
+/// A program sizes the pages of a pool whose region states an inset by this,
+/// since the inset and any pad at the far edges hold no cell of the page.
+pub fn padded_scaled_grid(
+    width: u16,
+    height: u16,
+    cell: [u16; 2],
+    scale: u16,
+    pad: [u32; 2],
+) -> (u16, u16) {
+    let fit = |cells: u16, side: u16, pad: u32| {
+        let pixels = (u32::from(cells) * u32::from(side)).saturating_sub(pad);
         let scaled = u32::from(scaled_cell_side(side, scale));
         (pixels / scaled).clamp(1, u32::from(u16::MAX)) as u16
     };
-    (fit(height, cell[1]), fit(width, cell[0]))
+    (fit(height, cell[1], pad[1]), fit(width, cell[0], pad[0]))
 }
 
 /// Request a fill for every page in `window` not already requested, record `window`

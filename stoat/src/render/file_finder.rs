@@ -68,6 +68,14 @@ struct BodyRows {
 /// rule under it.
 const PREVIEW_HEADER_ROWS: u16 = 2;
 
+/// The logical px at the top of the preview's first row that its page leaves
+/// over its first line when the path header takes one row.
+///
+/// That row holds the header's rule 2 px under its top, then the rule's 1 px
+/// and 2 px of padding, the board's 2.4 px as a whole px. The rule stands in
+/// px, so the sum holds at each cell size.
+const PREVIEW_HEAD_INSET: u8 = 5;
+
 /// The sixteenths of a cell that the shown lines of the preview's path header end
 /// inside the header under the plate look, and that the path stops short of them.
 const PREVIEW_HEADER_INSET: u16 = 14;
@@ -158,6 +166,12 @@ pub(crate) fn file_finder_layout(
 /// rect the pooled preview page fills and a wheel scrolls. A preview too short
 /// to keep an editor row under the header gets no header.
 ///
+/// A preview whose [`Preview::pad`] leaves px at its top gives the header one
+/// row. The header's rule then stands on the preview's first row, over the
+/// page that the pad starts under it.
+///
+/// [`Preview::pad`]: crate::picker::Preview::pad
+///
 /// [`list_columns`]: crate::render::picker::list_columns
 /// [`fitted_split`]: crate::render::picker::fitted_split
 pub(crate) fn finder_layout(
@@ -196,15 +210,19 @@ pub(crate) fn finder_layout(
         preview_min,
         split,
     );
-    let (preview_header, preview) = match preview.filter(|p| p.height > PREVIEW_HEADER_ROWS) {
+    let header_rows = match finder.active_core_ref().preview.pad[1] {
+        0 => PREVIEW_HEADER_ROWS,
+        _ => 1,
+    };
+    let (preview_header, preview) = match preview.filter(|p| p.height > header_rows) {
         Some(preview) => (
             Some(Rect {
-                height: PREVIEW_HEADER_ROWS,
+                height: header_rows,
                 ..preview
             }),
             Some(Rect {
-                y: preview.y + PREVIEW_HEADER_ROWS,
-                height: preview.height - PREVIEW_HEADER_ROWS,
+                y: preview.y + header_rows,
+                height: preview.height - header_rows,
                 ..preview
             }),
         ),
@@ -253,6 +271,12 @@ fn body_rows(modal: Rect) -> Option<BodyRows> {
 /// The paint keeps the plate's width before zoom steps in
 /// [`FileFinder::plate_width`], so the next frame draws a plate at least as
 /// wide while the finder stays open.
+///
+/// Under a scene whose lists lay their rows out by pixels, `insets` says the
+/// terminal starts a pool's page at its region's inset. The paint then sets
+/// the preview's pad to [`PREVIEW_HEAD_INSET`] at the top, so the header takes
+/// one row and the page's first line stands 2 px under the header's rule. Any
+/// other paint sets no pad.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn render_file_finder(
     finder: &mut FileFinder,
@@ -264,9 +288,15 @@ pub(crate) fn render_file_finder(
     zoom: i8,
     split: Option<u16>,
     preview_min: u16,
+    insets: bool,
     buf: &mut Buffer,
     scene: &mut stoat_widgets::ApcScene,
 ) {
+    let metrics = RowMetrics::of(theme, scene);
+    finder.active_core().preview.pad = match insets && metrics.is_some() {
+        true => [0, PREVIEW_HEAD_INSET, 0, 0],
+        false => [0; 4],
+    };
     let Some(layout) = finder_layout(area, finder, home, zoom, split, preview_min) else {
         return;
     };
@@ -360,7 +390,7 @@ pub(crate) fn render_file_finder(
         }
     }
 
-    finder.row_metrics = RowMetrics::of(theme, scene);
+    finder.row_metrics = metrics;
     let whole = match no_match {
         true => {
             paint_no_match(&finder.input.text(ws), layout.list, theme, buf);
@@ -918,6 +948,7 @@ mod tests {
             0,
             None,
             preview_min_columns(None),
+            false,
             &mut buf,
             &mut ApcScene::new(),
         );
@@ -952,6 +983,32 @@ mod tests {
                 fg(scope::UI_TEXT_DISABLED).unwrap(),
             ),
         );
+    }
+
+    /// A finder whose preview pads its top gives the path header one row, and
+    /// the preview starts on the row under it. With no pad the header keeps
+    /// its two rows.
+    #[test]
+    fn a_pixel_preview_header_takes_one_row() {
+        let mut h = crate::Stoat::test();
+        let root = PathBuf::from("/header-rows");
+        h.fake_fs()
+            .insert_files([(root.join("a.rs"), "fn a() {}".as_bytes())]);
+        h.stoat.active_workspace_mut().git_root = root;
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::OpenFileFinder);
+        h.settle();
+        let mut finder = h.stoat.file_finder.take().expect("the finder is open");
+        let area = Rect::new(0, 0, 200, 40);
+        let mut rows = |pad: [u8; 4]| {
+            finder.active_core().preview.pad = pad;
+            let layout = finder_layout(area, &finder, None, 0, None, preview_min_columns(None))
+                .expect("the finder fits");
+            let header = layout.preview_header.expect("a preview header");
+            let preview = layout.preview.expect("a preview beside the list");
+            (header.height, preview.y - header.y)
+        };
+
+        assert_eq!([rows([0, 5, 0, 0]), rows([0; 4])], [(1, 1), (2, 2)]);
     }
 
     /// The header ends in one pill per scope, `all`, `modified`, and
@@ -1103,6 +1160,7 @@ mod tests {
             0,
             None,
             preview_min_columns(None),
+            false,
             &mut buf,
             &mut scene,
         );
@@ -1165,6 +1223,7 @@ mod tests {
             0,
             None,
             preview_min_columns(None),
+            false,
             &mut buf,
             &mut scene,
         );
