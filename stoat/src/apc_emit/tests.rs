@@ -7049,6 +7049,55 @@ fn the_finder_preview_region_states_its_top_inset() {
     );
 }
 
+/// A pixel pick list's preview at the inset protocol states the board's pad
+/// inside its Island as its pool's inset, 12 px at the left and 4 px at the
+/// top on the 9 by 18 px cell. At protocol 41 it states none.
+#[test]
+fn the_pick_preview_region_states_its_pad() {
+    use stoatty_protocol::command::Command;
+
+    let pool = crate::smooth_scroll::non_pane_pool::MODAL_PREVIEW;
+    let inset = |protocol: u32| {
+        let mut h = crate::test_harness::TestHarness::with_size(120, 30);
+        h.stoat.stoatty = true;
+        h.stoat.stoatty_protocol = protocol;
+        h.stoat.cell_pixels = Some((9, 18));
+        h.stoat.display_scale = Some(1.0);
+        h.stoat.reload_user_config(concat!(
+            r#"command peek { arg f = pick("ls", preview: "cat {line}"); "#,
+            r#"run = shell("cat {f}"); }"#,
+        ));
+        h.fake_shell.set_response(
+            "ls",
+            crate::host::ShellOutput {
+                stdout: b"a\nb\n".to_vec(),
+                stderr: Vec::new(),
+                exit_code: 0,
+            },
+        );
+        h.type_text(":peek ");
+        let _ = h.snapshot();
+        h.settle();
+        let _ = h.snapshot();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+        h.stoat.set_apc_tx(tx);
+        command::decode_stream(&emit_raw(&mut h, &mut rx))
+            .into_iter()
+            .find_map(|command| match command {
+                Command::PoolRegion(region) if region.pool == pool => Some(region.inset),
+                _ => None,
+            })
+    };
+
+    assert_eq!(
+        [
+            inset(stoatty_protocol::PROTOCOL_VERSION),
+            inset(POOL_POINTER_PROTOCOL)
+        ],
+        [Some([12, 4]), Some([0, 0])],
+    );
+}
+
 /// A 160 by 40 harness under a stoatty at `protocol` with 9 by 18 pixel cells,
 /// its file finder open over two 120-line files and painted, and the channel
 /// its emits go to.

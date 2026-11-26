@@ -162,6 +162,10 @@ const PIXEL_BOX_INSET: u16 = 1;
 /// preview's Island.
 const PIXEL_PREVIEW_BOX_INSET: u16 = 3;
 
+/// The logical px, across and down, that a pick list's preview stands inside
+/// its Island, the CmdPr board's `padding: 8px 12px`.
+const PICK_PREVIEW_PAD: [u8; 2] = [12, 8];
+
 /// The logical px that a pixel row's last part ends inside its box, the
 /// CmdRoot board's `padding: 0 8px`.
 const PIXEL_ROW_PAD: u16 = 8;
@@ -544,7 +548,9 @@ fn arg_body_rows(inner: Rect, header_rows: u16) -> Option<(u16, u16)> {
 /// `now`, the clock in unix seconds. Otherwise the palette shows the argument
 /// picker, the free-typed argument's hint, or the command list, by the stage
 /// that the input names. The signature and the doc of a `cli` command read
-/// its loaded help in `specs`.
+/// its loaded help in `specs`. A pick list's preview takes the board's pad
+/// inside its Island where `insets` says the terminal starts a page at its
+/// pool's inset.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn render_command_palette(
     palette: &mut CommandPalette,
@@ -557,6 +563,7 @@ pub(crate) fn render_command_palette(
     preview_min: u16,
     now: i64,
     specs: &HashMap<String, CliSpecState>,
+    insets: bool,
     buf: &mut Buffer,
     scene: &mut stoat_widgets::ApcScene,
 ) {
@@ -578,7 +585,9 @@ pub(crate) fn render_command_palette(
     }
 
     if palette.pick.is_some() {
-        render_palette_pick(palette, ws, home, theme, chrome, area, zoom, buf, scene);
+        render_palette_pick(
+            palette, ws, home, theme, chrome, area, zoom, insets, buf, scene,
+        );
         return;
     }
 
@@ -1104,6 +1113,9 @@ fn render_palette_free_arg(
 /// rows, and the list's page steps by the rows whose boxes fit. The selected
 /// row's box stands [`PIXEL_PREVIEW_BOX_INSET`] px inside a list beside a
 /// preview. A failed list's text draws as one run where a row's label starts.
+/// Where `insets` says the terminal starts a page at its pool's inset, the
+/// preview's page stands [`PICK_PREVIEW_PAD`] inside its Island, as
+/// [`island_pad`](crate::render::chrome::island_pad) sets its pad.
 ///
 /// The key line names the shell line that Enter runs and the refresh key, as
 /// [`palette_footer_parts`] words the pick stage.
@@ -1116,6 +1128,7 @@ fn render_palette_pick(
     chrome: &crate::render::editor::ResolvedChrome,
     area: Rect,
     zoom: i8,
+    insets: bool,
     buf: &mut Buffer,
     scene: &mut stoat_widgets::ApcScene,
 ) {
@@ -1180,6 +1193,10 @@ fn render_palette_pick(
                 let x = list.x + list.width;
                 crate::render::chrome::vline(buf, x, list.y, list.height, separator, scene);
             }
+            pick.preview.pad = match pixels.filter(|_| insets) {
+                Some(m) => crate::render::chrome::island_pad(m, PICK_PREVIEW_PAD),
+                None => [0; 4],
+            };
             crate::render::picker::render_picker_preview(
                 &mut pick.preview,
                 preview_rect,
@@ -6193,6 +6210,7 @@ mod tests {
             preview_min,
             0,
             &HashMap::new(),
+            false,
             &mut buf,
             &mut scene,
         );
@@ -6230,6 +6248,7 @@ mod tests {
             crate::render::picker::preview_min_columns(None),
             0,
             &HashMap::new(),
+            false,
             &mut buf,
             &mut scene,
         );
@@ -7065,7 +7084,8 @@ mod tests {
 
     /// The commands, less the ends of their runs, that the open palette of `h`
     /// paints into the harness's area under a live scene whose lists lay their
-    /// rows out by [`M1`], and the Islands among them.
+    /// rows out by [`M1`], for a terminal that starts a page at its pool's
+    /// inset, and the Islands among them.
     fn pixel_palette(h: &mut TestHarness) -> (Vec<Command>, Vec<(Rect, [Edge; 4])>) {
         let mut palette = h.stoat.command_palette.take().expect("the palette is open");
         let specs = std::mem::take(&mut h.stoat.cli_specs);
@@ -7088,6 +7108,7 @@ mod tests {
             0,
             0,
             &specs,
+            true,
             &mut buf,
             &mut scene,
         );

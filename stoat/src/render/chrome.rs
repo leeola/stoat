@@ -1,6 +1,6 @@
 use crate::{
     buffer_lifecycle,
-    render::{self, paint::style_rgb, TypeScale},
+    render::{self, paint::style_rgb, pixel_rows::RowMetrics, TypeScale},
     theme::{scope, PanelRole, Theme, TypeRole},
 };
 use ratatui::{
@@ -115,6 +115,13 @@ pub(crate) const ISLAND_GAP: Edge = Edge::Gap(8);
 
 /// The bottom edge of a plate's Island, 4 px under its last row.
 pub(crate) const ISLAND_BOTTOM: Edge = Edge::Outset(4);
+
+/// The edges of the Island of a preview beside a plate's list, in panel edge
+/// order.
+///
+/// Its right side stands at the plate's side, and its left side faces the
+/// list's Island across the separator column.
+const PREVIEW_ISLAND_EDGES: [Edge; 4] = [ISLAND_TOP, ISLAND_SIDE, ISLAND_BOTTOM, ISLAND_GAP];
 
 /// The colors of a modal plate, as [`plate_colors`] resolves them for the
 /// theme.
@@ -567,8 +574,52 @@ pub(crate) fn list_islands(
     let list_edges = [ISLAND_TOP, list_right, ISLAND_BOTTOM, ISLAND_SIDE];
     modal_island(list, list_edges, plate, theme, buf, scene);
     if let Some(preview) = preview {
-        let preview_edges = [ISLAND_TOP, ISLAND_SIDE, ISLAND_BOTTOM, ISLAND_GAP];
-        modal_island(preview, preview_edges, plate, theme, buf, scene);
+        modal_island(preview, PREVIEW_ISLAND_EDGES, plate, theme, buf, scene);
+    }
+}
+
+/// The logical px that a page of a preview beside a plate's list leaves free
+/// at the left, the top, the right, and the bottom of the preview's cells, so
+/// that it stands `pad` logical px, across and down, inside the preview's
+/// Island, on the cell of `m`.
+///
+/// The Island's edges reach past the preview's cells, or stop inside them, by
+/// px that the cell's size in logical px sets, so the pad of each side is the
+/// board's pad less that reach, held at 0. A preview whose page states this
+/// pad as [`Preview::pad`] keeps the board's padding at any cell size.
+///
+/// [`Preview::pad`]: crate::picker::Preview::pad
+pub(crate) fn island_pad(m: RowMetrics, [x, y]: [u8; 2]) -> [u8; 4] {
+    let logical = |px: u16| (f32::from(px) / m.scale).round() as i32;
+    let (width, height) = (logical(m.cell[0]), logical(m.cell[1]));
+    let [top, right, bottom, left] = PREVIEW_ISLAND_EDGES;
+    let inside = |pad: u8, reach: i32| (i32::from(pad) - reach).clamp(0, 255) as u8;
+    [
+        inside(x, edge_reach(left, width, true)),
+        inside(y, edge_reach(top, height, true)),
+        inside(x, edge_reach(right, width, false)),
+        inside(y, edge_reach(bottom, height, false)),
+    ]
+}
+
+/// The logical px that `edge` reaches past its cells, negative for an edge
+/// that stops inside them, where the cell beside it spans `cell` logical px.
+///
+/// A margin crosses the cell and stops its px short of the far side. A gap
+/// crosses half of what that margin would, rounded down on a `near` side, the
+/// top or the left, and up on the far side, as the renderer splits it.
+fn edge_reach(edge: Edge, cell: i32, near: bool) -> i32 {
+    match edge {
+        Edge::Inset(px) => -i32::from(px),
+        Edge::Margin(px) => cell - i32::from(px),
+        Edge::Gap(px) => {
+            let reach = cell - i32::from(px);
+            match near {
+                true => reach.div_euclid(2),
+                false => (reach + 1).div_euclid(2),
+            }
+        },
+        Edge::Outset(px) => i32::from(px),
     }
 }
 
@@ -1042,13 +1093,14 @@ pub(crate) fn text(
 #[cfg(test)]
 mod tests {
     use super::{
-        fitted_width, hline, hline_edge, list_modal_width, list_plate, modal_box, modal_frame,
-        modal_frame_above_pools, modal_frame_anchored, modal_island, modal_plate, plate_colors,
-        popout_frame, selected_row, tagged_name, text, toggle_mark, type_tag, vline, TypeTag,
-        CONFIRM_EDGES, ISLAND_BOTTOM, ISLAND_GAP, ISLAND_SIDE, ISLAND_TOP,
+        edge_reach, fitted_width, hline, hline_edge, island_pad, list_modal_width, list_plate,
+        modal_box, modal_frame, modal_frame_above_pools, modal_frame_anchored, modal_island,
+        modal_plate, plate_colors, popout_frame, selected_row, tagged_name, text, toggle_mark,
+        type_tag, vline, TypeTag, CONFIRM_EDGES, ISLAND_BOTTOM, ISLAND_GAP, ISLAND_SIDE,
+        ISLAND_TOP,
     };
     use crate::{
-        render,
+        render::{self, pixel_rows::RowMetrics},
         theme::{scope, PanelRole, Theme},
     };
     use ratatui::{
@@ -1530,6 +1582,43 @@ mod tests {
                 .to_vec(),
                 panel,
             ),
+        );
+    }
+
+    /// A pick preview's pad is the board's 12 and 8 px less the reach of each
+    /// edge of its Island past the preview's cells. On a 9 by 18 px cell the
+    /// gap reaches none, the top 4, the side 3, and the bottom 4, so the pad
+    /// is 12, 4, 9, and 4. A 10 by 20 px cell reaches 1, 6, 4, and 4. An 18 by
+    /// 36 px cell at scale 2 is the 9 by 18 logical px cell. On a 30 by 60 px
+    /// cell the top and the side reach past the board's pad, which holds at 0.
+    #[test]
+    fn the_pick_preview_pad_counts_from_the_edges_of_its_island() {
+        let pad = |cell, scale| island_pad(RowMetrics { cell, scale }, [12, 8]);
+        assert_eq!(
+            [
+                pad([9, 18], 1.0),
+                pad([10, 20], 1.0),
+                pad([18, 36], 2.0),
+                pad([30, 60], 1.0)
+            ],
+            [[12, 4, 9, 4], [11, 2, 8, 4], [12, 4, 9, 4], [1, 0, 0, 4]],
+        );
+    }
+
+    /// An inset stops its px inside the cells, a margin crosses the cell
+    /// beside them less its px, a gap half that, rounded down on a near side
+    /// and up on a far one, and an outset reaches its px.
+    #[test]
+    fn an_island_edge_reaches_past_its_cells_by_its_mode() {
+        assert_eq!(
+            [
+                edge_reach(Edge::Inset(3), 9, true),
+                edge_reach(ISLAND_TOP, 18, true),
+                edge_reach(ISLAND_GAP, 9, true),
+                edge_reach(ISLAND_GAP, 9, false),
+                edge_reach(ISLAND_BOTTOM, 18, false),
+            ],
+            [-3, 4, 0, 1, 4],
         );
     }
 

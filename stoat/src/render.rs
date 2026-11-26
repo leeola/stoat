@@ -2613,6 +2613,7 @@ pub(crate) fn frame(
                     preview_min,
                     now,
                     &stoat.cli_specs,
+                    pool_insets,
                     buf,
                     &mut *scene,
                 );

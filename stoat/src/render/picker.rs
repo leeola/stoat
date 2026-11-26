@@ -4416,7 +4416,8 @@ mod tests {
     /// its pad. A 20 by 11 cell rect of 9 by 18 px cells holds 36 cols and 18
     /// rows, and 33 cols and 17 rows once 12 px across and 5 px down come off,
     /// whichever sides hold them. The top's 12 px and the left's 5 px leave 35
-    /// cols and 16 rows.
+    /// cols and 16 rows. A pick preview's pad on that cell, 12, 4, 9, and 4 px,
+    /// leaves 31 cols and 17 rows.
     #[test]
     fn a_preview_grid_takes_its_pad_from_the_rect() {
         let rect = Rect::new(4, 2, 20, 11);
@@ -4427,6 +4428,7 @@ mod tests {
                 grid([12, 5, 0, 0]),
                 grid([0, 0, 12, 5]),
                 grid([5, 12, 0, 0]),
+                grid([12, 4, 9, 4]),
                 preview_grid(rect, None, [12, 5, 0, 0]),
             ],
             [
@@ -4434,6 +4436,7 @@ mod tests {
                 Some((17, 33)),
                 Some((17, 33)),
                 Some((16, 35)),
+                Some((17, 31)),
                 None
             ],
         );
