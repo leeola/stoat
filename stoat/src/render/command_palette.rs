@@ -2041,8 +2041,13 @@ fn history_pixel_end(area: Rect, m: RowMetrics) -> u16 {
 /// [`history_pixel_end`] puts it.
 ///
 /// An entry's span runs from its box's top to the next box's top, so the 1 px
-/// under it is its own. The walk ends at the first entry whose top stands
-/// under `area`.
+/// under it is its own.
+///
+/// A line draws only when its whole 18 px stand inside `area`, because History
+/// draws on the live scene, which no pool's scissor clips. The walk ends at
+/// the first line that would pass `area`'s bottom, and an entry that draws no
+/// line pushes no span. A selected entry taller than `area` draws its box down
+/// to `area`'s bottom.
 fn paint_pixel_history_rows(
     laid: &[LaidEntry<'_>],
     (start, selected): (usize, usize),
@@ -2066,23 +2071,35 @@ fn paint_pixel_history_rows(
     let caption = theme.type_scale(TypeRole::Caption);
     let end = history_pixel_end(area, m);
     let left = m.cols(PIXEL_BOX_INSET);
-    let height = u32::from(area.height) * u32::from(m.cell[1]);
+    let line_height = u32::from(m.cell[1]);
+    let height = u32::from(area.height) * line_height;
 
     let mut placer = Placer::default();
     let mut spans = Vec::new();
     let mut y = 0u32;
     for (place, laid) in laid.iter().enumerate().skip(start) {
-        if y >= height {
+        let line_top = |line: usize| y + m.px(ROW_PAD) + line as u32 * line_height;
+        let fits = (0..laid.rows.len())
+            .take_while(|&line| line_top(line) + line_height <= height)
+            .count();
+        if fits == 0 {
             break;
         }
         let lines = laid.rows.len() as u32;
         let is_selected = place == selected;
         if let Some(color) = style_rgb(selected_style.bg).filter(|_| is_selected) {
+            // The window keeps a selected box whole unless the entry is
+            // taller than the list, and that box stops in the whole
+            // sixteenths over the list's bottom.
+            let box_height = match fits == laid.rows.len() {
+                true => m.box16(lines as u16),
+                false => ((height - y) * 16 / line_height) as u16,
+            };
             let bar = PixelBar {
                 x: left as i16,
                 y,
                 width: area.width.saturating_mul(16).saturating_sub(2 * left),
-                height: m.box16(lines as u16),
+                height: box_height,
                 color,
                 radius: SELECTED_ROW_RADIUS,
             };
@@ -2094,12 +2111,8 @@ fn paint_pixel_history_rows(
         };
         let styles = (column(head_style), column(dim), matched);
 
-        for (line, row) in laid.rows.iter().enumerate() {
-            let top = y + m.px(ROW_PAD) + line as u32 * u32::from(m.cell[1]);
-            if top >= height {
-                break;
-            }
-            let anchor = placer.line(&m, area, top, scene);
+        for (line, row) in laid.rows.iter().enumerate().take(fits) {
+            let anchor = placer.line(&m, area, line_top(line), scene);
             if line == 0 {
                 let mark_span = [("\u{21ba}", column(mark))];
                 let (col, scale) = (HISTORY_PIXEL_MARK, FULL_CELL_SCALE);
@@ -5687,8 +5700,8 @@ mod tests {
     /// against the list's px. In a list 10 rows tall the boxes of nine
     /// one-line entries end at pixel row 188, past the 180 that the list
     /// holds, so with the ninth selected the window starts at the second. The
-    /// tenth shows its top, and the eleventh starts under the list and draws
-    /// nothing.
+    /// tenth's line would end at pixel row 187, past the list, so it and the
+    /// eleventh draw nothing.
     #[test]
     fn the_pixel_history_window_keeps_the_selected_entry_whole() {
         let lines: Vec<String> = (0..11).map(|index| format!("cd /{index}")).collect();
@@ -5704,17 +5717,18 @@ mod tests {
             .collect();
         let (_, spans, _) = pixel_history(&entries, 8, &Theme::empty(), 10);
 
-        let shown: Vec<(Range<u32>, usize)> = (1..10u32)
+        let shown: Vec<(Range<u32>, usize)> = (1..9u32)
             .map(|index| ((index - 1) * 21..index * 21, index as usize))
             .collect();
         assert_eq!(spans, shown);
     }
 
-    /// A line of a pixel History entry whose top stands under the list draws
-    /// nothing. A list 1 row tall shows the first 35 chars of a 40-char word,
-    /// and its last 5 would start on pixel row 19.
+    /// A line of a pixel History entry whose 18 px would pass the list draws
+    /// nothing, and the walk ends there. A list 2 rows tall, 36 px, shows the
+    /// first 35 chars of a 40-char word on pixel rows 1 to 19, and its last 5
+    /// would end on pixel row 37. The entry keeps its whole span.
     #[test]
-    fn a_pixel_history_line_under_the_list_draws_nothing() {
+    fn a_pixel_history_line_past_the_list_draws_nothing() {
         let word = "x".repeat(40);
         let entries = [HistoryEntry {
             index: 0,
@@ -5722,7 +5736,7 @@ mod tests {
             at: None,
             marks: Vec::new(),
         }];
-        let (commands, spans, _) = pixel_history(&entries, usize::MAX, &Theme::empty(), 1);
+        let (commands, spans, _) = pixel_history(&entries, usize::MAX, &Theme::empty(), 2);
         let white = [0xff; 3];
         assert_eq!(
             (commands, spans),
@@ -5734,6 +5748,128 @@ mod tests {
                     Command::Nudge([0, 0]),
                 ],
                 vec![(0..39, 0)],
+            ),
+        );
+    }
+
+    /// A pixel History entry whose first line would pass the list draws
+    /// nothing and pushes no span, so a press there names no entry. In a list
+    /// 2 rows tall, 36 px, the selected 1-line entry draws its line from pixel
+    /// row 1 in the selected style, one run, and the first line of a 2-line
+    /// entry under it would span the pixel rows 22 to 40.
+    #[test]
+    fn a_pixel_history_entry_whose_first_line_passes_the_list_draws_nothing() {
+        let word = "x".repeat(40);
+        let entries = [
+            HistoryEntry {
+                index: 4,
+                line: "cd /alpha",
+                at: None,
+                marks: Vec::new(),
+            },
+            HistoryEntry {
+                index: 2,
+                line: &word,
+                at: None,
+                marks: Vec::new(),
+            },
+        ];
+        let (commands, spans, _) = pixel_history(&entries, 0, &Theme::empty(), 2);
+        let white = [0xff; 3];
+        assert_eq!(
+            (commands, spans),
+            (
+                vec![
+                    Command::Nudge([0, 1]),
+                    pixel_run(0, 16, "\u{21ba}", white, false),
+                    pixel_run(0, 62, "cd /alpha", white, false),
+                    Command::Nudge([0, 0]),
+                ],
+                vec![(0..21, 4)],
+            ),
+        );
+    }
+
+    /// A pixel History line that ends exactly at the list's bottom draws. On a
+    /// 10 by 20 px cell, rows stand 23 px apart, so in a list 16 rows tall,
+    /// 320 px, the fourteenth one-line entry's line spans the pixel rows 300
+    /// to 320, and the fifteenth's would pass the list.
+    #[test]
+    fn a_pixel_history_line_that_ends_on_the_list_s_bottom_draws() {
+        let lines: Vec<String> = (0..15).map(|index| format!("cd /{index}")).collect();
+        let entries: Vec<HistoryEntry<'_>> = lines
+            .iter()
+            .enumerate()
+            .map(|(index, line)| HistoryEntry {
+                index,
+                line,
+                at: None,
+                marks: Vec::new(),
+            })
+            .collect();
+        let list = Rect::new(0, 0, 40, 16);
+        let metrics = RowMetrics {
+            cell: [10, 20],
+            scale: 1.0,
+        };
+        let (_, spans) = paint_history_rows(
+            &entries,
+            0,
+            125,
+            list,
+            &Availability::default(),
+            &CommandSet::default(),
+            &Theme::empty(),
+            Some(metrics),
+            &mut Buffer::empty(list),
+            &mut stoat_widgets::ApcScene::new(),
+        );
+
+        let last = spans.last().cloned();
+        assert_eq!((spans.len(), last), (14, Some((299..322, 13))));
+    }
+
+    /// A selected pixel History entry taller than its list draws its box down
+    /// to the list's bottom and no further. A 3-line entry in a list 2 rows
+    /// tall, 36 px, boxes the list's 32 sixteenths and draws its first line,
+    /// whose 18 px end at pixel row 19, where its second would end at 37.
+    #[test]
+    fn a_selected_pixel_history_entry_taller_than_its_list_boxes_down_to_its_bottom() {
+        let word = "x".repeat(100);
+        let entries = [HistoryEntry {
+            index: 0,
+            line: &word,
+            at: None,
+            marks: Vec::new(),
+        }];
+        let theme = {
+            let src = r##"theme t { ui.list.selected = { fg: "#000000", bg: "#7f7f7f" }; }"##;
+            let (config, _) = stoat_config::parse(src);
+            Theme::from_config(&config.expect("theme parses"), "t").expect("theme loads")
+        };
+        let (commands, spans, _) = pixel_history(&entries, 0, &theme, 2);
+        let white = [0xff; 3];
+        assert_eq!(
+            (commands, spans),
+            (
+                vec![
+                    Command::Bar(BarCommand {
+                        x: 2,
+                        y: 0,
+                        width: 636,
+                        height: 32,
+                        color: [0x7f; 3],
+                        occludes: false,
+                        hatch: None,
+                        radius: 4,
+                        corners: 0,
+                    }),
+                    Command::Nudge([0, 1]),
+                    pixel_run(0, 16, "\u{21ba}", white, false),
+                    pixel_run(0, 62, &"x".repeat(35), white, true),
+                    Command::Nudge([0, 0]),
+                ],
+                vec![(0..57, 0)],
             ),
         );
     }
