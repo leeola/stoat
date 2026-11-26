@@ -7917,6 +7917,96 @@ fn a_pixel_history_declares_a_pointer_region_with_no_page() {
     );
 }
 
+/// A pixel pick list draws on the live grid with no page, so the palette's
+/// pool declares a region with no page over the list and asks for the pixel
+/// pointer, which a press on the list reads.
+#[test]
+fn a_pixel_pick_list_declares_its_pointer_region() {
+    let (commands, expected) = arg_list_pointer(
+        r#"command peek { arg f = pick("ls"); run = shell("cat {f}"); }"#,
+        ("ls", b"a\nb\nc\n"),
+        ":peek ",
+    );
+    assert_eq!(commands, expected);
+}
+
+/// A pixel `cli` list declares the palette's pointer region over its list, as
+/// a pick list does.
+#[test]
+fn a_pixel_cli_list_declares_its_pointer_region() {
+    let (commands, expected) = arg_list_pointer(
+        r#"command rg = cli("rg", output: notify);"#,
+        ("rg --help", crate::cli_spec::RG_HELP.as_bytes()),
+        ":rg -",
+    );
+    assert_eq!(commands, expected);
+}
+
+/// The commands of the palette's pool that one emit sends once a pixel palette
+/// with the config `source` shows the argument list that `typed` opens, where
+/// the fake shell answers `line` with `stdout`, and the commands that declare
+/// a pointer region over that list.
+fn arg_list_pointer(
+    source: &str,
+    (line, stdout): (&str, &[u8]),
+    typed: &str,
+) -> (Vec<command::Command>, [command::Command; 2]) {
+    use stoatty_protocol::command::{Command, PoolKind, PoolPointerCommand, PoolRegionCommand};
+
+    let mut h = crate::test_harness::TestHarness::with_size(120, 30);
+    h.stoat.stoatty_protocol = stoatty_protocol::PROTOCOL_VERSION;
+    h.stoat.cell_pixels = Some((9, 18));
+    h.stoat.display_scale = Some(1.0);
+    h.stoat.window_ipc_connected = true;
+    h.stoat.reload_user_config(source);
+    h.fake_shell.set_response(
+        line,
+        crate::host::ShellOutput {
+            stdout: stdout.to_vec(),
+            stderr: Vec::new(),
+            exit_code: 0,
+        },
+    );
+    h.type_text(typed);
+    let _ = h.snapshot();
+    h.settle();
+    let _ = h.snapshot();
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+    h.stoat.set_apc_tx(tx);
+
+    let pool = crate::smooth_scroll::non_pane_pool::PALETTE;
+    let list = crate::mouse::boxed_modal_surfaces(&h.stoat)
+        .expect("the palette is open")
+        .list;
+    let commands: Vec<Command> = command::decode_stream(&emit_raw(&mut h, &mut rx))
+        .into_iter()
+        .filter(|command| match command {
+            Command::PoolRegion(region) => region.pool == pool,
+            Command::PoolPointer(pointer) => pointer.pool == pool,
+            Command::PoolDrop(drop) => drop.pool == pool,
+            Command::Fill(fill) | Command::FillDecorations(fill) => fill.pool == pool,
+            _ => false,
+        })
+        .collect();
+    let region = PoolRegionCommand {
+        pool,
+        top: list.y,
+        left: list.x,
+        width: list.width,
+        height: list.height,
+        window: 0,
+        kind: PoolKind::Grid,
+        dim: 0,
+        resident: false,
+        inset: [0, 0],
+    };
+    let expected = [
+        Command::PoolRegion(region),
+        Command::PoolPointer(PoolPointerCommand { pool, pixels: true }),
+    ];
+    (commands, expected)
+}
+
 #[test]
 fn completion_popup_is_pooled_and_retired() {
     use crate::completion::{CompletionItem, CompletionPopup, CompletionSource};

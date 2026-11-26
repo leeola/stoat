@@ -931,17 +931,23 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
     // The Run Block holds no list, so it retires the pool too.
     let walking = stoat.active_workspace().palette_history.is_walking();
     let pools_palette = !overlay && !walking;
-    // Pixel History rows stand off the cell grid, so the pool passes to a
-    // region with no page over History's list, where a press reports the
-    // pointer's pixel. That report rides the window socket.
-    let history_pointer = (!overlay
-        && walking
-        && stoat.window_ipc_connected
-        && stoat.stoatty_protocol >= POOL_POINTER_PROTOCOL)
-        .then_some(stoat.command_palette.as_ref())
-        .flatten()
-        .filter(|p| p.block.is_none())
-        .and_then(|p| p.history_body);
+    // Pixel rows stand off the cell grid. History's rows and a config
+    // command's pick and cli rows draw on the live grid with no page, so the
+    // pool passes to a region with no page over their list, where a press
+    // reports the pointer's pixel. That report rides the window socket.
+    let palette_pointer =
+        (!overlay && stoat.window_ipc_connected && stoat.stoatty_protocol >= POOL_POINTER_PROTOCOL)
+            .then_some(stoat.command_palette.as_ref())
+            .flatten()
+            .filter(|p| p.block.is_none())
+            .and_then(|p| match walking {
+                true => p.history_body,
+                false => p
+                    .row_metrics
+                    .filter(|_| p.pick.is_some() || p.cli_list.is_some())
+                    .and_then(|_| crate::mouse::boxed_modal_surfaces(stoat))
+                    .map(|surfaces| surfaces.list),
+            });
     let palette_list = pools_palette
         .then_some(stoat.command_palette.as_ref())
         .flatten()
@@ -1139,7 +1145,7 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
     if finder_list.is_some() {
         active.push(crate::smooth_scroll::non_pane_pool::FINDER);
     }
-    if palette_list.is_some() || palette_arg_list.is_some() || history_pointer.is_some() {
+    if palette_list.is_some() || palette_arg_list.is_some() || palette_pointer.is_some() {
         active.push(crate::smooth_scroll::non_pane_pool::PALETTE);
     }
     if code_search_list.is_some() {
@@ -2489,13 +2495,13 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
             ask_pixel_pointer(&mut out, held, region.pool, stoat.stoatty_protocol);
         }
     }
-    if let Some(body) = history_pointer {
+    if let Some(rect) = palette_pointer {
         let region = PoolRegionCommand {
             pool: crate::smooth_scroll::non_pane_pool::PALETTE,
-            top: body.y,
-            left: body.x,
-            width: body.width,
-            height: body.height,
+            top: rect.y,
+            left: rect.x,
+            width: rect.width,
+            height: rect.height,
             window: 0,
             kind: PoolKind::Grid,
             dim: 0,

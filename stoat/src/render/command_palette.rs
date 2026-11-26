@@ -114,8 +114,9 @@ const ACTION_NAME_COLUMNS: u16 = 22;
 const ACTION_KEY_COLUMNS: u16 = 18;
 
 /// The cells of a flag row's label column, the CmdRg board's `width: 26ch`.
-/// A longer label moves its own row's value and description right, because
-/// no row truncates.
+/// On cell rows a longer label moves its own row's value and description
+/// right, because no cell row truncates. A pixel row cuts the label at this
+/// width, so its value and description keep their columns.
 const FLAG_LABEL_COLUMNS: u16 = 26;
 
 /// The cells of a flag row's value column, the CmdRg board's `width: 9ch`,
@@ -155,6 +156,11 @@ const ACTION_ROW_PAD: u16 = 2;
 /// The logical px that the box of a pixel row stands inside each end of the
 /// list. The command list has no preview beside it, so both ends match.
 const PIXEL_BOX_INSET: u16 = 1;
+
+/// The logical px that the box of a pixel row stands inside the right end of
+/// a list beside a preview, as the finder's list sets its box by the
+/// preview's Island.
+const PIXEL_PREVIEW_BOX_INSET: u16 = 3;
 
 /// The logical px that a pixel row's last part ends inside its box, the
 /// CmdRoot board's `padding: 0 8px`.
@@ -1094,6 +1100,11 @@ fn render_palette_free_arg(
 /// words it, in `ui.text.muted`. The list draws on the live grid with no pool,
 /// and its rows step one at a time.
 ///
+/// Under a scene whose lists lay their rows out by pixels, the rows are pixel
+/// rows, and the list's page steps by the rows whose boxes fit. The selected
+/// row's box stands [`PIXEL_PREVIEW_BOX_INSET`] px inside a list beside a
+/// preview. A failed list's text draws as one run where a row's label starts.
+///
 /// The key line names the shell line that Enter runs and the refresh key, as
 /// [`palette_footer_parts`] words the pick stage.
 #[allow(clippy::too_many_arguments)]
@@ -1108,6 +1119,8 @@ fn render_palette_pick(
     buf: &mut Buffer,
     scene: &mut stoat_widgets::ApcScene,
 ) {
+    let pixels = RowMetrics::of(theme, scene);
+    palette.row_metrics = pixels;
     let content_rows = palette.list_rows_hint();
     let Some(layout) = palette_filter_layout(
         area,
@@ -1177,14 +1190,27 @@ fn render_palette_pick(
                 scene,
             );
         }
-        pick.list.viewport_rows = Some(usize::from(list.height));
+        let end = match preview {
+            Some(_) => PIXEL_PREVIEW_BOX_INSET,
+            None => PIXEL_BOX_INSET,
+        };
+        let pixels = pixels.map(|m| (m, end));
+        pick.list.viewport_rows = Some(match pixels {
+            Some((m, _)) => m.fit(list.height),
+            None => usize::from(list.height),
+        });
         match &pick.load {
             PickLoad::Failed(text) => {
                 let error = theme.get(crate::theme::scope::UI_ERROR);
-                write_str_clipped(buf, list.x + 1, list.y, text, error, list.right());
+                match pixels {
+                    Some(pixels) => {
+                        paint_pixel_arg_note(text, error, list, theme, pixels, buf, scene)
+                    },
+                    None => write_str_clipped(buf, list.x + 1, list.y, text, error, list.right()),
+                }
             },
             PickLoad::Loading | PickLoad::Ready => {
-                paint_arg_rows(&pick.list, None, list, theme, true, buf, scene);
+                paint_arg_rows(&pick.list, None, list, theme, true, pixels, buf, scene);
             },
         }
     }
@@ -1208,6 +1234,10 @@ fn render_palette_pick(
 /// [`doc_lines`] words it. The Cmd Line's status counts the kind's rows in the
 /// help, as [`cli_status`] words it, and the key line names the keys of the
 /// `cli` stage of [`palette_footer_parts`].
+///
+/// Under a scene whose lists lay their rows out by pixels, the rows are pixel
+/// rows, and the doc island takes the pixel doc's edges and lines, as the
+/// command list's doc does, from the doc's top.
 #[allow(clippy::too_many_arguments)]
 fn render_palette_cli(
     palette: &mut CommandPalette,
@@ -1226,6 +1256,8 @@ fn render_palette_cli(
     let Some(kind) = palette.cli_list.as_ref().map(|(_, kind, _)| *kind) else {
         return;
     };
+    let pixels = RowMetrics::of(theme, scene);
+    palette.row_metrics = pixels;
     let content_rows = palette.list_rows_hint();
     let Some(layout) = palette_filter_layout(
         area,
@@ -1264,18 +1296,32 @@ fn render_palette_cli(
 
     let plate = crate::render::chrome::plate_colors(theme, scene);
     if let Some(plate) = plate {
-        let list_bottom = match layout.doc.is_empty() {
-            true => ISLAND_BOTTOM,
-            false => ISLAND_GAP,
+        let (list_bottom, doc_top) = match (layout.doc.is_empty(), pixels) {
+            (true, _) => (ISLAND_BOTTOM, ISLAND_GAP),
+            (false, Some(_)) => (PIXEL_LIST_EDGE, PIXEL_DOC_EDGE),
+            (false, None) => (ISLAND_GAP, ISLAND_GAP),
         };
         let list_edges = [ISLAND_TOP, ISLAND_SIDE, list_bottom, ISLAND_SIDE];
         crate::render::chrome::modal_island(layout.list, list_edges, plate, theme, buf, scene);
-        let doc_edges = [ISLAND_GAP, ISLAND_SIDE, ISLAND_BOTTOM, ISLAND_SIDE];
+        let doc_edges = [doc_top, ISLAND_SIDE, ISLAND_BOTTOM, ISLAND_SIDE];
         crate::render::chrome::modal_island(layout.doc, doc_edges, plate, theme, buf, scene);
     }
     if let Some((_, _, list)) = palette.cli_list.as_mut() {
-        list.viewport_rows = Some(usize::from(layout.list.height));
-        paint_arg_rows(list, Some(kind), layout.list, theme, true, buf, scene);
+        let pixels = pixels.map(|m| (m, PIXEL_BOX_INSET));
+        list.viewport_rows = Some(match pixels {
+            Some((m, _)) => m.fit(layout.list.height),
+            None => usize::from(layout.list.height),
+        });
+        paint_arg_rows(
+            list,
+            Some(kind),
+            layout.list,
+            theme,
+            true,
+            pixels,
+            buf,
+            scene,
+        );
     }
 
     if layout.doc.height > 0 {
@@ -1286,10 +1332,13 @@ fn render_palette_cli(
             crate::render::chrome::hline(buf, inner.x, row, inner.width, separator, scene);
         }
         let command = PaletteCommand::User(user);
-        let width = usize::from(layout.inner.width.saturating_sub(1));
-        let DocLines { lines, note, .. } = doc_lines(&command, &palette.keys, width, theme, specs);
+        let width = doc_chars(&layout, pixels.is_some(), theme);
+        let text = doc_lines(&command, &palette.keys, width, theme, specs);
         let tag = Some(doc_tag(&command));
-        paint_doc_lines(buf, layout.doc, &lines, tag, &note, theme, scene);
+        match pixels {
+            Some(m) => paint_doc_pixels(layout.doc, &text, (0, tag), theme, m, buf, scene),
+            None => paint_doc_lines(buf, layout.doc, &text.lines, tag, &text.note, theme, scene),
+        }
     }
 
     let mut parts = palette_footer_parts(KeyStage::Cli { kind }, theme);
@@ -1404,15 +1453,25 @@ fn pick_status(pick: &PickState, name: &str) -> String {
 /// row sets its description one cell past the widest name on show, at least
 /// [`SUBCOMMAND_COLUMNS`] wide. A pick row, with no shape, reads its label
 /// alone.
+///
+/// With `pixels`, the metrics and the px that the selected row's box stands
+/// inside the list's right end, the rows are pixel rows as
+/// [`paint_pixel_arg_rows`] draws them, and they write no cell.
+#[allow(clippy::too_many_arguments)]
 fn paint_arg_rows(
     list: &ArgList,
     shape: Option<CliListKind>,
     area: Rect,
     theme: &crate::theme::Theme,
     panels: bool,
+    pixels: Option<(RowMetrics, u16)>,
     buf: &mut Buffer,
     scene: &mut stoat_widgets::ApcScene,
 ) {
+    if let Some(pixels) = pixels {
+        paint_pixel_arg_rows(list, shape, area, theme, pixels, buf, scene);
+        return;
+    }
     let rows = usize::from(area.height);
     let row_style = theme.get(crate::theme::scope::UI_TEXT);
     let label_base = match shape {
@@ -1493,6 +1552,166 @@ fn paint_arg_rows(
         };
         write_str_clipped(buf, desc_x, y, &item.description, column(dim), end_x);
     }
+}
+
+/// Paint the rows of `list` into `area` as pixel rows laid out by `m`, in the
+/// columns that [`paint_arg_rows`] gives them, with the selected row's box
+/// `end` px inside the list's right end.
+///
+/// The walk writes no cell. It draws the rows that [`RowMetrics::fit`] counts,
+/// from where [`window_start`](crate::render::picker::window_start) keeps the
+/// selection among them, row k of the window k pitches under the list's top.
+/// So no row's line draws past the list, which no pool clips. The selected
+/// row's box draws as a bar in the selected background 1 px inside the list's
+/// left end, and each row's line stands 1 px under its top.
+///
+/// A row's label draws at the cell size from [`PIXEL_FIRST_COLUMN`], with its
+/// matched chars in the match style. A flag row cuts its label at
+/// [`FLAG_LABEL_COLUMNS`] chars and sets its value name [`PIXEL_COLUMN_GAP`]
+/// after that many cells, cut at [`FLAG_VALUE_COLUMNS`] chars. Its
+/// description follows the gap after that many value chars. A subcommand
+/// row's description follows the gap after the widest name on show, at least
+/// [`SUBCOMMAND_COLUMNS`] cells. The value name and the description draw at
+/// the [`TypeRole::Ui`] size, and a row's last column stops 8 px inside its
+/// box.
+fn paint_pixel_arg_rows(
+    list: &ArgList,
+    shape: Option<CliListKind>,
+    area: Rect,
+    theme: &crate::theme::Theme,
+    (m, end): (RowMetrics, u16),
+    buf: &mut Buffer,
+    scene: &mut stoat_widgets::ApcScene,
+) {
+    let row_style = theme.get(crate::theme::scope::UI_TEXT);
+    let label_base = match shape {
+        Some(_) => row_style.add_modifier(Modifier::BOLD),
+        None => row_style,
+    };
+    let dim = theme.get(crate::theme::scope::UI_TEXT_DIM);
+    let value_base = theme
+        .try_get(crate::theme::scope::UI_CMD_FLAG_VALUE)
+        .unwrap_or_else(|| theme.get(crate::theme::scope::UI_TEXT_MUTED));
+    let match_style = theme.list_match();
+    let selected_style = theme.list_selected(crate::theme::scope::UI_SELECTION);
+    let keeps_columns = theme
+        .try_get(crate::theme::scope::UI_LIST_SELECTED)
+        .is_some();
+    let fallback = style_rgb(Some(crate::render::themed_fg(theme))).unwrap_or([0xff; 3]);
+    let ui = theme.type_scale(TypeRole::Ui);
+
+    let left = m.cols(PIXEL_BOX_INSET);
+    let box_end = area.width.saturating_mul(16).saturating_sub(m.cols(end));
+    let row_end = arg_row_end(area, m, end);
+    let fit = m.fit(area.height);
+    let start = crate::render::picker::window_start(list.selected, fit);
+    let on_show = || list.filtered.iter().enumerate().skip(start).take(fit);
+    let name_cols = on_show()
+        .filter_map(|(_, &index)| list.rows.get(index))
+        .map(|row| row.label.chars().count())
+        .max()
+        .unwrap_or(0)
+        .max(usize::from(SUBCOMMAND_COLUMNS)) as u16;
+    let mut derived = Vec::new();
+    let mut matching = crate::fuzzy::Scratch::default();
+
+    let mut placer = Placer::default();
+    for (place, &index) in on_show() {
+        let Some(item) = list.rows.get(index) else {
+            continue;
+        };
+        let top = (place - start) as u32 * m.pitch(1);
+        let is_selected = place == list.selected;
+        if let Some(color) = style_rgb(selected_style.bg).filter(|_| is_selected) {
+            let bar = PixelBar {
+                x: left as i16,
+                y: top,
+                width: box_end.saturating_sub(left),
+                height: m.box16(1),
+                color,
+                radius: SELECTED_ROW_RADIUS,
+            };
+            pixel_rows::bar(&mut placer, &m, area, &bar, buf, scene);
+        }
+        let column = |own: Style| match is_selected && !keeps_columns {
+            true => selected_style,
+            false => own,
+        };
+
+        let anchor = placer.line(&m, area, top + m.px(ROW_PAD), scene);
+        let label_chars = match shape {
+            Some(CliListKind::Flags) => usize::from(FLAG_LABEL_COLUMNS),
+            Some(CliListKind::Subcommands) => usize::from(name_cols),
+            None => chars_within(row_end.saturating_sub(PIXEL_FIRST_COLUMN), FULL_CELL_SCALE),
+        };
+        let label = clip_to_width(&item.label, label_chars);
+        let indices = list.row_indices(place, &mut derived, &mut matching);
+        let spans = match_spans(label, 0, indices, column(label_base), match_style);
+        let (col, scale) = (PIXEL_FIRST_COLUMN, FULL_CELL_SCALE);
+        pixel_rows::emit_spans(&spans, col, scale, anchor, fallback, buf, scene);
+
+        let desc_col = match shape {
+            None => continue,
+            Some(CliListKind::Subcommands) => {
+                PIXEL_FIRST_COLUMN + name_cols.saturating_mul(16) + PIXEL_COLUMN_GAP
+            },
+            Some(CliListKind::Flags) => {
+                let value_col = PIXEL_FIRST_COLUMN + FLAG_LABEL_COLUMNS * 16 + PIXEL_COLUMN_GAP;
+                let value = item
+                    .value_name
+                    .as_ref()
+                    .map_or_else(String::new, |name| format!("<{name}>"));
+                let value = [(
+                    clip_to_width(&value, usize::from(FLAG_VALUE_COLUMNS)),
+                    column(value_base),
+                )];
+                pixel_rows::emit_spans(&value, value_col, ui, anchor, fallback, buf, scene);
+                let value_width = text_run::advance_sixteenths(usize::from(FLAG_VALUE_COLUMNS), ui);
+                value_col + value_width + PIXEL_COLUMN_GAP
+            },
+        };
+        let room = chars_within(row_end.saturating_sub(desc_col), ui);
+        let description = [(clip_to_width(&item.description, room), column(dim))];
+        pixel_rows::emit_spans(&description, desc_col, ui, anchor, fallback, buf, scene);
+    }
+    placer.end(scene);
+}
+
+/// The sixteenth of a pixel arg row of `area` that the row's last column stops
+/// at, 8 px inside the row's box, whose right edge stands `end` px inside the
+/// list's right end.
+fn arg_row_end(area: Rect, m: RowMetrics, end: u16) -> u16 {
+    area.width
+        .saturating_mul(16)
+        .saturating_sub(m.cols(end) + m.cols(PIXEL_ROW_PAD))
+}
+
+/// Draw `text` in `style` as one run on the first line of the pixel arg list
+/// `area` laid out by `m`, where a row's label starts, cut where a row whose
+/// box stands `end` px inside the list's right end stops its last column.
+///
+/// A pick list whose command failed shows its text this way in place of its
+/// rows.
+fn paint_pixel_arg_note(
+    text: &str,
+    style: Style,
+    area: Rect,
+    theme: &crate::theme::Theme,
+    (m, end): (RowMetrics, u16),
+    buf: &mut Buffer,
+    scene: &mut stoat_widgets::ApcScene,
+) {
+    let fallback = style_rgb(Some(crate::render::themed_fg(theme))).unwrap_or([0xff; 3]);
+    let room = arg_row_end(area, m, end).saturating_sub(PIXEL_FIRST_COLUMN);
+    let note = [(
+        clip_to_width(text, chars_within(room, FULL_CELL_SCALE)),
+        style,
+    )];
+    let mut placer = Placer::default();
+    let anchor = placer.line(&m, area, m.px(ROW_PAD), scene);
+    let (col, scale) = (PIXEL_FIRST_COLUMN, FULL_CELL_SCALE);
+    pixel_rows::emit_spans(&note, col, scale, anchor, fallback, buf, scene);
+    placer.end(scene);
 }
 
 /// Render History, the lines of the palette history that the walk visits,
@@ -2357,16 +2576,7 @@ fn render_palette_filter(
             );
         }
         let entry = filtered.get(selected);
-        let width = match pixels {
-            Some(_) => {
-                let room = doc
-                    .width
-                    .saturating_mul(16)
-                    .saturating_sub(2 * PIXEL_DOC_COLUMN);
-                chars_within(room, theme.type_scale(TypeRole::Ui))
-            },
-            None => usize::from(inner.width.saturating_sub(1)),
-        };
+        let width = doc_chars(&layout, pixels.is_some(), theme);
         let text = entry
             .map(|entry| doc_lines(entry, keys, width, theme, specs))
             .unwrap_or_default();
@@ -3554,6 +3764,25 @@ fn clip_spans<S: AsRef<str>>(spans: &[(S, Style)], chars: usize) -> Vec<(&str, S
         .collect()
 }
 
+/// The chars that a line of the palette's doc holds in `layout`.
+///
+/// A pixel doc holds the [`TypeRole::Ui`] chars between its two
+/// [`PIXEL_DOC_COLUMN`] pads. A doc on cell rows holds the box's inner cells
+/// less one.
+fn doc_chars(layout: &PaletteFilterLayout, pixels: bool, theme: &crate::theme::Theme) -> usize {
+    match pixels {
+        true => {
+            let room = layout
+                .doc
+                .width
+                .saturating_mul(16)
+                .saturating_sub(2 * PIXEL_DOC_COLUMN);
+            chars_within(room, theme.type_scale(TypeRole::Ui))
+        },
+        false => usize::from(layout.inner.width.saturating_sub(1)),
+    }
+}
+
 /// The most chars whose advance at `scale` fits in `room` sixteenths, as
 /// [`text_run::advance_sixteenths`] rounds an advance.
 fn chars_within(room: u16, scale: u16) -> usize {
@@ -3840,7 +4069,8 @@ mod tests {
         paint_doc_pixels, paint_history_rows, paint_palette_rows, palette_arg_layout,
         palette_filter_layout, pascal_matches, pick_status, pixel_doc_last_top,
         render_command_palette, source_tag, usage_line, wrap_text, DocLines, HistoryEntry,
-        DOC_ROWS, ISLAND_BOTTOM, ISLAND_GAP, ISLAND_SIDE, ISLAND_TOP, LIST_ROWS, PIXEL_DOC_ROWS,
+        DOC_ROWS, ISLAND_BOTTOM, ISLAND_GAP, ISLAND_SIDE, ISLAND_TOP, LIST_ROWS, PIXEL_DOC_EDGE,
+        PIXEL_DOC_ROWS, PIXEL_LIST_EDGE,
     };
     use crate::{
         cli_spec::{self, RG_HELP},
@@ -3848,10 +4078,13 @@ mod tests {
             action_row, ArgList, ArgRow, Availability, CliListKind, HistorySpans, Namespace,
             PaletteCommand, PickLoad, PickState, ResolvedCommand,
         },
+        host::ShellOutput,
         input_history,
         keymap::ActionKeys,
         picker::Preview,
-        render::{editor::ResolvedChrome, picker::RowStart, pixel_rows::RowMetrics},
+        render::{
+            editor::ResolvedChrome, paint::style_rgb, picker::RowStart, pixel_rows::RowMetrics,
+        },
         test_fixture::{plate_islands, row_rules},
         test_harness::TestHarness,
         theme::Theme,
@@ -3868,7 +4101,7 @@ mod tests {
     use std::{collections::HashMap, ops::Range, sync::Arc};
     use stoat_action::registry;
     use stoat_config::Template;
-    use stoatty_protocol::command::{decode_stream, BarCommand, Command, TextRunCommand};
+    use stoatty_protocol::command::{decode_stream, BarCommand, Command, Edge, TextRunCommand};
 
     /// Each of `entries` as a palette row.
     fn rows(entries: &[&'static registry::RegistryEntry]) -> Vec<PaletteCommand> {
@@ -6160,7 +6393,7 @@ mod tests {
         let mut buf = Buffer::empty(area);
         let mut scene = stoat_widgets::ApcScene::new();
         scene.set_live(false);
-        paint_arg_rows(&list, None, area, &theme, true, &mut buf, &mut scene);
+        paint_arg_rows(&list, None, area, &theme, true, None, &mut buf, &mut scene);
 
         list.refilter("");
         list.move_selection(1);
@@ -6172,6 +6405,7 @@ mod tests {
             one_row,
             &theme,
             true,
+            None,
             &mut windowed,
             &mut scene,
         );
@@ -6266,7 +6500,16 @@ mod tests {
         let area = Rect::new(0, 0, 80, 2);
         let mut buf = Buffer::empty(area);
         let mut scene = stoat_widgets::ApcScene::new();
-        paint_arg_rows(&list, Some(kind), area, &theme, false, &mut buf, &mut scene);
+        paint_arg_rows(
+            &list,
+            Some(kind),
+            area,
+            &theme,
+            false,
+            None,
+            &mut buf,
+            &mut scene,
+        );
         buf
     }
 
@@ -6343,5 +6586,381 @@ mod tests {
                 placed(80, &[(1, "t"), (10, "alias for test")]),
             ],
         );
+    }
+
+    /// A pixel pick row's box is 20 px high and 1 px from the next. Its line
+    /// stands 1 px under its top, the label from col 16. The selected second
+    /// row's box is a rounded bar 1 px inside the list's left end and 1 px
+    /// inside its right end, or 3 px inside it beside a preview.
+    #[test]
+    fn a_pixel_pick_row_is_twenty_pixels_high_and_one_pixel_from_the_next() {
+        let list = arg_list(
+            ["alpha", "beta"]
+                .map(|label| cli_row(label, None, ""))
+                .to_vec(),
+            1,
+        );
+        let white = [0xff; 3];
+        let bar = |width| {
+            Command::Bar(BarCommand {
+                x: 2,
+                y: 16,
+                width,
+                height: 18,
+                color: [0x7f; 3],
+                occludes: false,
+                hatch: None,
+                radius: 4,
+                corners: 0,
+            })
+        };
+        let painted = |end| pixel_arg_commands(&list, None, 4, end);
+        let rows = |bar| {
+            vec![
+                Command::Nudge([0, 1]),
+                pixel_run(0, 16, "alpha", white, false),
+                Command::Nudge([0, 3]),
+                bar,
+                Command::Nudge([0, 4]),
+                pixel_run(16, 16, "beta", white, false),
+                Command::Nudge([0, 0]),
+            ]
+        };
+
+        assert_eq!([painted(1), painted(3)], [rows(bar(956)), rows(bar(953))]);
+    }
+
+    /// A pixel flag row draws its flag bold from col 16, its value name in
+    /// `ui.cmd.flag.value` 14 sixteenths past the label's 26 cells, at col
+    /// 446, and its description 14 sixteenths past the value's 9 chars, at col
+    /// 604. The description stops 8 px inside the row's box, at sixteenth 944
+    /// of a list 60 cells wide, so 21 of its chars show. A 30-char flag shows
+    /// its first 26 chars, and the 10-char value `<PATTERNS>` its first 9, so
+    /// both keep their columns.
+    #[test]
+    fn a_pixel_flag_row_sets_its_columns_eight_pixels_apart() {
+        let long = "--a-flag-with-a-long-long-name";
+        let list = arg_list(
+            vec![
+                cli_row("-g, --glob", Some("GLOB"), "Include or exclude files"),
+                cli_row(long, Some("PATTERNS"), "Search"),
+            ],
+            0,
+        );
+        let (white, value) = ([0xff; 3], [0x0a, 0x0b, 0x0c]);
+
+        assert_eq!(
+            arg_runs(&pixel_arg_commands(&list, Some(CliListKind::Flags), 4, 1)),
+            [
+                (0, 16, "-g, --glob".to_owned(), white, true),
+                (0, 446, "<GLOB>".to_owned(), value, false),
+                (0, 604, "Include or exclude fi".to_owned(), white, false),
+                (16, 16, long[..26].to_owned(), white, true),
+                (16, 446, "<PATTERNS".to_owned(), value, false),
+                (16, 604, "Search".to_owned(), white, false),
+            ],
+        );
+    }
+
+    /// A pixel pick row's label stops 8 px inside its box, at sixteenth 944 of
+    /// a list 60 cells wide, so 58 chars of a 70-char label show from col 16.
+    #[test]
+    fn a_pixel_pick_label_stops_eight_pixels_inside_its_box() {
+        let list = arg_list(vec![cli_row(&"x".repeat(70), None, "")], 0);
+        assert_eq!(
+            arg_runs(&pixel_arg_commands(&list, None, 4, 1)),
+            [(0, 16, "x".repeat(58), [0xff; 3], false)],
+        );
+    }
+
+    /// A pixel pick row draws the chars that its query matches in
+    /// `ui.list.match`, each stretch of them as a run of its own.
+    #[test]
+    fn a_pixel_pick_row_marks_its_matched_chars() {
+        let mut list = ArgList::default();
+        list.set_rows(vec![cli_row("alpha", None, "")]);
+        list.refilter("lph");
+        let white = [0xff; 3];
+
+        assert_eq!(
+            arg_runs(&pixel_arg_commands(&list, None, 4, 1)),
+            [
+                (0, 16, "a".to_owned(), white, false),
+                (0, 32, "lph".to_owned(), [7, 7, 7], false),
+                (0, 80, "a".to_owned(), white, false),
+            ],
+        );
+    }
+
+    /// A pixel subcommand row draws its name bold from col 16, and its
+    /// description 14 sixteenths past the name column, whose 8 cells end at
+    /// sixteenth 144, at col 158.
+    #[test]
+    fn a_pixel_subcommand_row_sets_its_description_after_the_name_column() {
+        let list = arg_list(
+            vec![
+                cli_row("test", None, "Run the tests"),
+                cli_row("tree", None, "Show the tree"),
+            ],
+            0,
+        );
+        let runs = arg_runs(&pixel_arg_commands(
+            &list,
+            Some(CliListKind::Subcommands),
+            4,
+            1,
+        ));
+        let white = [0xff; 3];
+
+        assert_eq!(
+            runs[..2],
+            [
+                (0, 16, "test".to_owned(), white, true),
+                (0, 158, "Run the tests".to_owned(), white, false),
+            ],
+        );
+    }
+
+    /// A pixel arg list shows the rows whose boxes fit whole, 9 of 21 px in
+    /// 11 cell rows of 18 px, 17 in 20 cell rows, and 1 in a list of one row.
+    /// Thirty rows with row 20 selected in 11 cell rows show rows 12 to 20, so
+    /// the selection stands on the last row that fits.
+    #[test]
+    fn a_pixel_arg_list_counts_the_rows_that_fit() {
+        let rows = (0..30)
+            .map(|at| cli_row(&format!("row {at:02}"), None, ""))
+            .collect();
+        let list = arg_list(rows, 20);
+        let labels: Vec<String> = arg_runs(&pixel_arg_commands(&list, None, 11, 1))
+            .into_iter()
+            .map(|(_, _, text, _, _)| text)
+            .collect();
+
+        let shown: Vec<String> = (12..=20).map(|at| format!("row {at:02}")).collect();
+        assert_eq!(
+            (M1.fit(11), M1.fit(20), M1.fit(1), labels),
+            (9, 17, 1, shown)
+        );
+    }
+
+    /// An [`ArgList`] of `rows`, matched against no query, with row `selected`
+    /// selected.
+    fn arg_list(rows: Vec<ArgRow>, selected: i32) -> ArgList {
+        let mut list = ArgList::default();
+        list.set_rows(rows);
+        list.refilter("");
+        list.move_selection(selected);
+        list
+    }
+
+    /// The commands, less the ends of their runs, of the rows of `list` in the
+    /// columns of `shape`, painted as pixel rows by [`M1`] into the list (0, 0,
+    /// 60, `rows`) with the selected row's box `end` px inside the list's right
+    /// end. The theme boxes the selected row in `#7f7f7f` and keeps each
+    /// column's color, and it gives `ui.cmd.flag.value` `#0a0b0c` and
+    /// `ui.list.match` `#070707`.
+    fn pixel_arg_commands(
+        list: &ArgList,
+        shape: Option<CliListKind>,
+        rows: u16,
+        end: u16,
+    ) -> Vec<Command> {
+        let theme = {
+            let src = r##"theme t {
+                ui.list.selected = { fg: "#000000", bg: "#7f7f7f" };
+                ui.cmd.flag.value.fg = "#0a0b0c";
+                ui.list.match.fg = "#070707";
+            }"##;
+            let (config, _) = stoat_config::parse(src);
+            Theme::from_config(&config.expect("theme parses"), "t").expect("theme loads")
+        };
+        let area = Rect::new(0, 0, 60, rows);
+        let mut buf = Buffer::empty(area);
+        let mut scene = stoat_widgets::ApcScene::new();
+        let pixels = Some((M1, end));
+        paint_arg_rows(
+            list, shape, area, &theme, true, pixels, &mut buf, &mut scene,
+        );
+        decode_stream(scene.bytes())
+            .into_iter()
+            .filter(|command| *command != Command::TextRunEnd)
+            .collect()
+    }
+
+    /// The text runs of `commands` as their row, col, text, color, and weight.
+    fn arg_runs(commands: &[Command]) -> Vec<(i16, i16, String, [u8; 3], bool)> {
+        commands
+            .iter()
+            .filter_map(|command| match command {
+                Command::TextRun(run) => {
+                    Some((run.row, run.col, run.text.clone(), run.color, run.bold))
+                },
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// A pixel pick list whose command failed draws the command's text as one
+    /// run in `ui.error` where a row's label starts, 1 px into the list's first
+    /// row.
+    #[test]
+    fn a_failed_pixel_pick_list_draws_its_text_where_a_label_starts() {
+        let failed = ShellOutput {
+            stdout: Vec::new(),
+            stderr: b"ls: no such dir\n".to_vec(),
+            exit_code: 1,
+        };
+        let mut h = pick_palette(r#"pick("ls")"#, failed);
+        let (commands, _) = pixel_palette(&mut h);
+        let list = crate::mouse::boxed_modal_surfaces(&h.stoat)
+            .expect("the palette is open")
+            .list;
+        let error = style_rgb(h.stoat.theme.get(crate::theme::scope::UI_ERROR).fg);
+
+        let at = commands.iter().position(
+            |command| matches!(command, Command::TextRun(run) if run.text == "ls: no such dir"),
+        );
+        let note = at.and_then(|at| match (&commands[at - 1], &commands[at]) {
+            (Command::Nudge(nudge), Command::TextRun(run)) => {
+                Some((*nudge, run.row, run.col, Some(run.color)))
+            },
+            _ => None,
+        });
+        assert_eq!(
+            note,
+            Some(([0, 1], list.y as i16 * 16, list.x as i16 * 16 + 16, error))
+        );
+    }
+
+    /// A pixel pick list beside a preview boxes its selected row 1 px inside
+    /// the list's left end and 3 px inside its right end, by the preview's
+    /// Island.
+    #[test]
+    fn a_pixel_pick_list_beside_a_preview_boxes_its_row_three_pixels_in() {
+        let rows = ShellOutput {
+            stdout: b"a\nb\n".to_vec(),
+            stderr: Vec::new(),
+            exit_code: 0,
+        };
+        let mut h = pick_palette(r#"pick("ls", preview: "cat {line}")"#, rows);
+        let (commands, _) = pixel_palette(&mut h);
+        let list = crate::mouse::boxed_modal_surfaces(&h.stoat)
+            .expect("the palette is open")
+            .list;
+
+        let boxes: Vec<(i16, u16)> = commands
+            .iter()
+            .filter_map(|command| match command {
+                Command::Bar(bar) if bar.y == list.y as i16 * 16 && bar.radius == 4 => {
+                    Some((bar.x, bar.width))
+                },
+                _ => None,
+            })
+            .collect();
+        assert_eq!(boxes, [(list.x as i16 * 16 + 2, list.width * 16 - 7)]);
+    }
+
+    /// A pixel `cli` list draws its flags as pixel rows, the first flag's label
+    /// bold where a row's label starts, and pages by the rows that fit. Its doc
+    /// island takes the pixel doc's edges, 8 px under the list's Island and
+    /// 2 px over the doc's first row, and its name line draws as a run.
+    #[test]
+    fn a_pixel_cli_list_draws_pixel_rows_over_a_pixel_doc() {
+        let mut h = TestHarness::with_size(120, 30);
+        let help = ShellOutput {
+            stdout: RG_HELP.as_bytes().to_vec(),
+            stderr: Vec::new(),
+            exit_code: 0,
+        };
+        h.fake_shell.set_response("rg --help", help);
+        h.stoat
+            .reload_user_config(r#"command rg = cli("rg", output: notify);"#);
+        h.type_text(":rg -");
+        let _ = h.snapshot();
+        h.settle();
+        let _ = h.snapshot();
+        let (commands, islands) = pixel_palette(&mut h);
+        let list = crate::mouse::boxed_modal_surfaces(&h.stoat)
+            .expect("the palette is open")
+            .list;
+        let palette = h.stoat.command_palette.as_ref().expect("palette open");
+        let (_, _, cli) = palette.cli_list.as_ref().expect("a cli list");
+
+        let at = |row: u16, col: u16| {
+            commands.iter().any(|command| {
+                matches!(command, Command::TextRun(run)
+                    if run.row == row as i16 * 16 && run.col == col as i16 * 16 + 16 && run.bold)
+            })
+        };
+        let doc_name = commands.iter().any(|command| {
+            matches!(command, Command::TextRun(run)
+                if run.text == "rg" && run.row >= list.bottom() as i16 * 16)
+        });
+        let edges: Vec<[Edge; 4]> = islands.into_iter().map(|(_, edges)| edges).collect();
+        assert_eq!(
+            (at(list.y, list.x), cli.viewport_rows, doc_name, edges),
+            (
+                true,
+                Some(M1.fit(list.height)),
+                true,
+                vec![
+                    [ISLAND_TOP, ISLAND_SIDE, PIXEL_LIST_EDGE, ISLAND_SIDE],
+                    [PIXEL_DOC_EDGE, ISLAND_SIDE, ISLAND_BOTTOM, ISLAND_SIDE],
+                ],
+            ),
+        );
+    }
+
+    /// A 120 by 30 harness with the command `peek`, whose argument is the pick
+    /// `pick`, open in the palette over the list of `ls`, which the fake shell
+    /// answers with `output`.
+    fn pick_palette(pick: &str, output: ShellOutput) -> TestHarness {
+        let mut h = TestHarness::with_size(120, 30);
+        h.stoat.reload_user_config(&format!(
+            r#"command peek {{ arg f = {pick}; run = shell("cat {{f}}"); }}"#
+        ));
+        h.fake_shell.set_response("ls", output);
+        h.type_text(":peek ");
+        let _ = h.snapshot();
+        h.settle();
+        let _ = h.snapshot();
+        h
+    }
+
+    /// The commands, less the ends of their runs, that the open palette of `h`
+    /// paints into the harness's area under a live scene whose lists lay their
+    /// rows out by [`M1`], and the Islands among them.
+    fn pixel_palette(h: &mut TestHarness) -> (Vec<Command>, Vec<(Rect, [Edge; 4])>) {
+        let mut palette = h.stoat.command_palette.take().expect("the palette is open");
+        let specs = std::mem::take(&mut h.stoat.cli_specs);
+        let theme = h.stoat.theme.clone();
+        let chrome = ResolvedChrome::resolve(&theme);
+        let area = h.stoat.size();
+        let mut buf = Buffer::empty(area);
+        let mut scene = stoat_widgets::ApcScene::new();
+        scene.set_nudge_protocol(true);
+        scene.set_scaled_cell(Some(M1.cell));
+        scene.set_pixel_rows(Some((M1.cell, M1.scale)));
+        render_command_palette(
+            &mut palette,
+            h.stoat.active_workspace_mut(),
+            None,
+            &theme,
+            &chrome,
+            area,
+            0,
+            0,
+            0,
+            &specs,
+            &mut buf,
+            &mut scene,
+        );
+        h.stoat.command_palette = Some(palette);
+        h.stoat.cli_specs = specs;
+        let commands = decode_stream(scene.bytes())
+            .into_iter()
+            .filter(|command| *command != Command::TextRunEnd)
+            .collect();
+        (commands, plate_islands(&theme, &scene))
     }
 }

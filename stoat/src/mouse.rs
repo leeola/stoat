@@ -91,7 +91,7 @@ pub(crate) fn mouse_button(button: IpcMouseButton) -> Option<MouseButton> {
 /// drawn there.
 pub(crate) struct ModalSurfaces {
     /// Rows the list occupies. A press here resolves to a row index.
-    list: Rect,
+    pub(crate) list: Rect,
     /// The preview or detail pane, when the modal shows one. A wheel here
     /// scrolls that pane instead of stepping the list, and the pooled page
     /// covers exactly this rect.
@@ -121,6 +121,10 @@ enum ListRows {
     Finder,
     /// The palette argument picker's results, which wrap as the finder's do.
     PaletteArg,
+    /// A config command's pick list or `cli` list, one row per result, which
+    /// a pixel list lays out one row pitch apart in the window that
+    /// `window_start` derives from the rows that fit.
+    ArgRows,
 }
 
 impl ModalSurfaces {
@@ -156,6 +160,18 @@ impl ModalSurfaces {
                     metrics,
                 );
                 return window.result_at(pointer_pixel_row(stoat, self.pool, row, metrics));
+            },
+            ListRows::ArgRows => {
+                let palette = stoat.command_palette.as_ref()?;
+                let Some(metrics) = palette.row_metrics else {
+                    return self.one_per_result(row);
+                };
+                let fit = metrics.fit(self.list.height);
+                let start = crate::render::picker::window_start(self.selected, fit);
+                let pixel = pointer_pixel_row(stoat, self.pool, row, metrics);
+                let shown = (pixel / metrics.pitch(1)) as usize;
+                let index = start + shown;
+                return (shown < fit && index < self.len).then_some(index);
             },
             ListRows::Finder => {
                 let finder = stoat.file_finder.as_ref()?;
@@ -583,8 +599,8 @@ pub(crate) fn boxed_modal_surfaces(stoat: &Stoat) -> Option<ModalSurfaces> {
                     preview,
                     len: pick.list.filtered.len(),
                     selected: pick.list.selected,
-                    rows: ListRows::OnePerResult,
-                    pool: None,
+                    rows: ListRows::ArgRows,
+                    pool: Some(crate::smooth_scroll::non_pane_pool::PALETTE),
                 });
             }
             if let Some((_, _, list)) = palette.cli_list.as_ref() {
@@ -600,8 +616,8 @@ pub(crate) fn boxed_modal_surfaces(stoat: &Stoat) -> Option<ModalSurfaces> {
                     preview: None,
                     len: list.filtered.len(),
                     selected: list.selected,
-                    rows: ListRows::OnePerResult,
-                    pool: None,
+                    rows: ListRows::ArgRows,
+                    pool: Some(crate::smooth_scroll::non_pane_pool::PALETTE),
                 });
             }
             if palette.command.is_none() {
@@ -5785,6 +5801,130 @@ mod tests {
             .and_then(|palette| palette.pick.as_ref())
             .map(|pick| pick.list.selected);
         assert_eq!(selected, Some(1));
+    }
+
+    /// A press on a pixel pick list names the row under the pointer's pixel,
+    /// which the palette's pool reports. In list row 1, pixel row 22 is row 1,
+    /// and pixel row 20, the gap under row 0, is row 0. A plain press on that
+    /// cell takes its middle, pixel row 27, which is row 1.
+    #[test]
+    fn a_press_on_a_pixel_pick_row_selects_the_row_under_the_pointer() {
+        let mut h = crate::test_harness::TestHarness::with_size(120, 30);
+        h.stoat.stoatty_protocol = stoatty_protocol::PROTOCOL_VERSION;
+        h.stoat.cell_pixels = Some((9, 18));
+        h.stoat.display_scale = Some(1.0);
+        h.stoat.reload_user_config(
+            r#"command peek { arg f = pick("ls"); run = shell("cat {f}"); output = notify; }"#,
+        );
+        h.fake_shell.set_response(
+            "ls",
+            crate::host::ShellOutput {
+                stdout: b"a\nb\nc\nd\ne\n".to_vec(),
+                stderr: Vec::new(),
+                exit_code: 0,
+            },
+        );
+        h.type_text(":peek ");
+        let _ = h.snapshot();
+        h.settle();
+        let _ = h.snapshot();
+        let list = boxed_modal_surfaces(&h.stoat)
+            .expect("the palette is open")
+            .list;
+
+        let mut pressed = |report: Option<u16>| {
+            let pick = h
+                .stoat
+                .command_palette
+                .as_mut()
+                .and_then(|palette| palette.pick.as_mut())
+                .expect("a pick list");
+            pick.list.selected = 4;
+            match report {
+                Some(pixel_row) => {
+                    let press = WindowIpcEvent::PoolMouse {
+                        pool: crate::smooth_scroll::non_pane_pool::PALETTE,
+                        kind: MouseKind::Press(IpcMouseButton::Left),
+                        col: list.x + 1,
+                        row: list.y + 1,
+                        cell_col: 9,
+                        cell_row: pixel_row,
+                        mods: 0,
+                    };
+                    crate::app::deliver_window_event(&mut h.stoat, press);
+                },
+                None => left_press(&mut h, list.x + 1, list.y + 1),
+            }
+            h.stoat
+                .command_palette
+                .as_ref()
+                .and_then(|palette| palette.pick.as_ref())
+                .map(|pick| pick.list.selected)
+        };
+
+        assert_eq!(
+            [pressed(Some(22)), pressed(Some(20)), pressed(None)],
+            [Some(1), Some(0), Some(1)]
+        );
+    }
+
+    /// A press on a pixel pick list in the strip under the last row whose box
+    /// fits names no row, since the list draws none there, and the selection
+    /// stays.
+    #[test]
+    fn a_press_under_the_last_pixel_pick_row_names_no_row() {
+        let rows: String = (0..40).map(|at| format!("r{at}\n")).collect();
+        let mut h = crate::test_harness::TestHarness::with_size(120, 30);
+        h.stoat.stoatty_protocol = stoatty_protocol::PROTOCOL_VERSION;
+        h.stoat.cell_pixels = Some((9, 18));
+        h.stoat.display_scale = Some(1.0);
+        h.stoat.reload_user_config(
+            r#"command peek { arg f = pick("ls"); run = shell("cat {f}"); output = notify; }"#,
+        );
+        h.fake_shell.set_response(
+            "ls",
+            crate::host::ShellOutput {
+                stdout: rows.into_bytes(),
+                stderr: Vec::new(),
+                exit_code: 0,
+            },
+        );
+        h.type_text(":peek ");
+        let _ = h.snapshot();
+        h.settle();
+        let _ = h.snapshot();
+        let list = boxed_modal_surfaces(&h.stoat)
+            .expect("the palette is open")
+            .list;
+        let metrics = h
+            .stoat
+            .command_palette
+            .as_ref()
+            .and_then(|palette| palette.row_metrics)
+            .expect("the list lays its rows out by pixels");
+        let under = metrics.fit(list.height) as u32 * metrics.pitch(1);
+        assert!(
+            under < u32::from(list.height) * 18,
+            "the list holds a strip under its rows"
+        );
+
+        let press = WindowIpcEvent::PoolMouse {
+            pool: crate::smooth_scroll::non_pane_pool::PALETTE,
+            kind: MouseKind::Press(IpcMouseButton::Left),
+            col: list.x + 1,
+            row: list.y + (under / 18) as u16,
+            cell_col: 9,
+            cell_row: under as u16,
+            mods: 0,
+        };
+        crate::app::deliver_window_event(&mut h.stoat, press);
+        let selected = h
+            .stoat
+            .command_palette
+            .as_ref()
+            .and_then(|palette| palette.pick.as_ref())
+            .map(|pick| pick.list.selected);
+        assert_eq!(selected, Some(0));
     }
 
     /// A press on a pixel list names the result under the middle pixel row of

@@ -4586,6 +4586,36 @@ mod tests {
         );
     }
 
+    /// A pixel pick list pages by the rows whose boxes fit whole in its list,
+    /// which are fewer than its cell rows.
+    #[test]
+    fn a_pixel_pick_list_pages_by_the_rows_that_fit() {
+        let rows: String = (1..=40).map(|at| format!("row {at:02}\n")).collect();
+        let mut h = TestHarness::with_size(120, 30);
+        h.stoat.stoatty_protocol = stoatty_protocol::PROTOCOL_VERSION;
+        h.stoat.cell_pixels = Some((9, 18));
+        h.stoat.display_scale = Some(1.0);
+        h.stoat
+            .reload_user_config(r#"command peek { arg f = pick("ls"); run = shell("cat {f}"); }"#);
+        h.fake_shell.set_response("ls", stdout(&rows));
+        type_settled(&mut h, ":peek ");
+
+        let list = crate::mouse::boxed_modal_surfaces(&h.stoat)
+            .expect("the palette is open")
+            .list;
+        let metrics = h
+            .stoat
+            .command_palette
+            .as_ref()
+            .and_then(|palette| palette.row_metrics)
+            .expect("the list lays its rows out by pixels");
+        let fit = metrics.fit(list.height);
+        assert_eq!(
+            (pick(&h).list.viewport_rows, fit < usize::from(list.height)),
+            (Some(fit), true),
+        );
+    }
+
     /// A fake shell answer of `stdout`, exit 0.
     fn stdout(text: &str) -> ShellOutput {
         ShellOutput {

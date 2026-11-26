@@ -1558,9 +1558,11 @@ fn the_root_list_ends_in_the_action_row_under_a_rule() {
 /// A pick list marks its selected row with the tab wash.
 ///
 /// The `demo` list holds two rows, so the palette box is the 128 by 22 cells
-/// from cell (16, 14). The list starts on cell row 17, the pixel rows 306 to
-/// 323, where the selected first row reads the tab wash. The second row, on
-/// the pixel rows 324 to 341, reads the base.
+/// from cell (16, 14). The list starts on cell row 17, pixel row 306, and its
+/// rows are pixel rows. The selected first row's box reads the tab wash 20 px
+/// high from pixel (154, 306) to (1285, 325), 1 px inside each end of the
+/// list. Pixel row 326, the 1 px between the two rows, reads the base, and so
+/// does the second row at pixel (500, 333).
 ///
 /// The config file holds two backslashes before each `n`, and the config
 /// reader turns them into one, so `printf` prints the two rows.
@@ -1581,13 +1583,15 @@ fn the_pick_list_marks_its_selected_row() {
     .expect("the scratch stoat config");
     let shot = palette_frame(home.path(), ":demo<Space><Wait:500><Settle>");
 
-    expect_region(
+    expect_color_box(
         &shot,
         &mut home,
-        (500, 315, 1, 1),
         TAB_WASH,
-        "pick_selected_row",
+        304..327,
+        (154, 306, 1285, 325),
+        "pick_row",
     );
+    expect_region(&shot, &mut home, (500, 326, 1, 1), BASE, "pick_row_gap");
     expect_region(&shot, &mut home, (500, 333, 1, 1), BASE, "pick_second_row");
 }
 

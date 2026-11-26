@@ -118,6 +118,15 @@ impl RowMetrics {
         u32::from(rows) * self.line_height() + self.px(ROW_GAP)
     }
 
+    /// The one-line rows whose boxes fit whole in a list `rows` cells tall, at
+    /// least one.
+    ///
+    /// A list of one-line rows steps its window and its page keys by this, so
+    /// the selection never stands in a box that the list cuts.
+    pub(crate) fn fit(&self, rows: u16) -> usize {
+        (self.extent(rows) / self.pitch(1)).max(1) as usize
+    }
+
     /// The physical px from the list's top to the top of result `result`, from
     /// `tops`, the line that each result starts on as [`RowTops`] sums them.
     ///
