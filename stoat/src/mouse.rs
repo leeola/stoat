@@ -589,6 +589,7 @@ pub(crate) fn boxed_modal_surfaces(stoat: &Stoat) -> Option<ModalSurfaces> {
                     rows,
                     zoom,
                     palette.header_rows,
+                    palette.doc_rows(),
                 )?;
                 let (list, preview) =
                     crate::render::command_palette::pick_body(&layout, pick.spec.preview.is_some());
@@ -607,6 +608,7 @@ pub(crate) fn boxed_modal_surfaces(stoat: &Stoat) -> Option<ModalSurfaces> {
                     rows,
                     zoom,
                     palette.header_rows,
+                    palette.doc_rows(),
                 )?;
                 return Some(ModalSurfaces {
                     list: layout.list,
@@ -623,6 +625,7 @@ pub(crate) fn boxed_modal_surfaces(stoat: &Stoat) -> Option<ModalSurfaces> {
                     rows,
                     zoom,
                     palette.header_rows,
+                    palette.doc_rows(),
                 )?;
                 return Some(ModalSurfaces {
                     list: layout.list,
@@ -1092,6 +1095,7 @@ pub(crate) fn open_modal_box(stoat: &Stoat, kind: ModalKind, zoom: i8) -> Option
                         palette.list_rows_hint(),
                         zoom,
                         palette.header_rows,
+                        palette.doc_rows(),
                     )?
                     .modal
                 },

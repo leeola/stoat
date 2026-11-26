@@ -42,6 +42,7 @@ use stoat_widgets::{
     bar::Bar,
     text_run::{self, TextRun},
 };
+use stoatty_protocol::command::Edge;
 
 /// The fewest columns of a Run Block's plate, the boards' small plate, whose
 /// 71 inner cells draw the board's 664 px.
@@ -53,6 +54,46 @@ const RUN_BLOCK_ROWS: u16 = 16;
 
 const LIST_ROWS: u16 = 10;
 const DOC_ROWS: u16 = 6;
+
+/// The cell rows of the palette's doc when it lays its lines out by pixels.
+///
+/// The doc's Island stands 2 px over its first row, as [`PIXEL_DOC_EDGE`]
+/// sets it, and 4 px under its last, so 8 rows of 18 px make the board's
+/// 150 px island. The box keeps the height of [`DOC_ROWS`], so the list gives
+/// the doc its 2 rows.
+const PIXEL_DOC_ROWS: u16 = 8;
+
+/// The bottom edge of the list's Island when the doc lays its lines out by
+/// pixels, 8 px under the list's last row.
+///
+/// With the doc's [`PIXEL_DOC_EDGE`] it leaves the board's 8 px between the
+/// two Islands across the 18 px row between their cells.
+const PIXEL_LIST_EDGE: Edge = Edge::Outset(8);
+
+/// The top edge of a pixel doc's Island, 2 px over the doc's first row.
+const PIXEL_DOC_EDGE: Edge = Edge::Outset(2);
+
+/// The logical px from the top of a pixel doc's first row to its first line,
+/// the board's 8 px of padding less the 2 px that [`PIXEL_DOC_EDGE`] stands
+/// over the row.
+const PIXEL_DOC_TOP: u16 = 6;
+
+/// The logical px over the bottom of a pixel doc's last row that its lines
+/// end by, the board's 8 px of padding less the 4 px that its Island stands
+/// under that row.
+const PIXEL_DOC_BOTTOM: u16 = 4;
+
+/// The logical px between two items of a pixel doc, the board's `gap: 4px`.
+const PIXEL_DOC_GAP: u16 = 4;
+
+/// The logical px between the parts of a pixel doc's first line, the board's
+/// `gap: 10px`.
+const PIXEL_DOC_PART_GAP: u16 = 10;
+
+/// Sixteenths from a pixel doc's left edge to its text, and from its text's
+/// room to its right edge. That is the board's 12 px of padding less the 3 px
+/// that the Island reaches past the doc's cells, one cell at a 9 px cell.
+const PIXEL_DOC_COLUMN: u16 = 16;
 
 /// The cells a root row's name column takes at least, the CmdRoot board's
 /// `width: 13ch`.
@@ -336,11 +377,16 @@ struct HistoryEntry<'a> {
 /// [`CommandPalette::header_rows`] holds them, and the row under them. The box
 /// does not follow `header_rows`, so a wrapped header takes its rows from the
 /// body, and the doc region gives up its rows first.
+///
+/// The doc takes `doc_rows` rows, as [`doc_rows`] answers them, and the list
+/// the rest of the body. The box's height counts [`DOC_ROWS`] whatever the doc
+/// takes, so a doc of more rows takes them from the list.
 pub(crate) fn palette_filter_layout(
     area: Rect,
     content_rows: u16,
     zoom: i8,
     header_rows: u16,
+    doc_rows: u16,
 ) -> Option<PaletteFilterLayout> {
     if area.width < 30 || area.height < 10 {
         return None;
@@ -363,8 +409,8 @@ pub(crate) fn palette_filter_layout(
     let body = inner
         .height
         .saturating_sub(2 + header_rows + FOOTER_ROWS - 1);
-    let list_height = body.saturating_sub(DOC_ROWS).max(LIST_ROWS).min(body);
-    let doc_height = DOC_ROWS.min(body.saturating_sub(list_height));
+    let list_height = body.saturating_sub(doc_rows).max(LIST_ROWS).min(body);
+    let doc_height = doc_rows.min(body.saturating_sub(list_height));
 
     let list = Rect::new(inner.x, inner.y + 1 + header_rows, inner.width, list_height);
     let doc = Rect::new(inner.x, list.y + list_height + 1, inner.width, doc_height);
@@ -376,6 +422,15 @@ pub(crate) fn palette_filter_layout(
         doc,
         footer: crate::render::picker::footer_rect(modal),
     })
+}
+
+/// The rows of the palette's doc, [`PIXEL_DOC_ROWS`] for a doc that lays its
+/// lines out by `pixels` and [`DOC_ROWS`] for one on whole cells.
+pub(crate) fn doc_rows(pixels: Option<RowMetrics>) -> u16 {
+    match pixels {
+        Some(_) => PIXEL_DOC_ROWS,
+        None => DOC_ROWS,
+    }
 }
 
 /// Lay out the palette's argument picker (`:o `, `:cd `, `:b `) within `area`,
@@ -404,8 +459,14 @@ pub(crate) fn palette_arg_layout(
     preview_min: u16,
 ) -> Option<PaletteArgLayout> {
     let picker = palette.arg_picker.as_ref()?;
-    let rows =
-        palette_filter_layout(area, palette.list_rows_hint(), zoom, palette.header_rows)?.modal;
+    let rows = palette_filter_layout(
+        area,
+        palette.list_rows_hint(),
+        zoom,
+        palette.header_rows,
+        palette.doc_rows(),
+    )?
+    .modal;
     let list = {
         let inner = Block::default().borders(Borders::ALL).inner(rows);
         let (_, list_rows) = arg_body_rows(inner, 1)?;
@@ -561,7 +622,13 @@ pub(crate) fn render_command_palette(
         scene,
     );
 
-    if let Some(layout) = palette_filter_layout(area, content_rows, zoom, palette.header_rows) {
+    if let Some(layout) = palette_filter_layout(
+        area,
+        content_rows,
+        zoom,
+        palette.header_rows,
+        palette.doc_rows(),
+    ) {
         palette.plate = Some(layout.modal);
         if palette.command.is_none() {
             let rows = layout.list.height;
@@ -916,7 +983,13 @@ fn render_palette_free_arg(
     scene: &mut stoat_widgets::ApcScene,
 ) {
     let rows_hint = palette.list_rows_hint();
-    let Some(layout) = palette_filter_layout(area, rows_hint, zoom, palette.header_rows) else {
+    let Some(layout) = palette_filter_layout(
+        area,
+        rows_hint,
+        zoom,
+        palette.header_rows,
+        palette.doc_rows(),
+    ) else {
         return;
     };
     palette.plate = Some(layout.modal);
@@ -1022,7 +1095,13 @@ fn render_palette_pick(
     scene: &mut stoat_widgets::ApcScene,
 ) {
     let content_rows = palette.list_rows_hint();
-    let Some(layout) = palette_filter_layout(area, content_rows, zoom, palette.header_rows) else {
+    let Some(layout) = palette_filter_layout(
+        area,
+        content_rows,
+        zoom,
+        palette.header_rows,
+        palette.doc_rows(),
+    ) else {
         return;
     };
     palette.plate = Some(layout.modal);
@@ -1048,7 +1127,13 @@ fn render_palette_pick(
         buf,
         scene,
     );
-    let Some(layout) = palette_filter_layout(area, content_rows, zoom, palette.header_rows) else {
+    let Some(layout) = palette_filter_layout(
+        area,
+        content_rows,
+        zoom,
+        palette.header_rows,
+        palette.doc_rows(),
+    ) else {
         return;
     };
 
@@ -1128,7 +1213,13 @@ fn render_palette_cli(
         return;
     };
     let content_rows = palette.list_rows_hint();
-    let Some(layout) = palette_filter_layout(area, content_rows, zoom, palette.header_rows) else {
+    let Some(layout) = palette_filter_layout(
+        area,
+        content_rows,
+        zoom,
+        palette.header_rows,
+        palette.doc_rows(),
+    ) else {
         return;
     };
     palette.plate = Some(layout.modal);
@@ -1147,7 +1238,13 @@ fn render_palette_cli(
         buf,
         scene,
     );
-    let Some(layout) = palette_filter_layout(area, content_rows, zoom, palette.header_rows) else {
+    let Some(layout) = palette_filter_layout(
+        area,
+        content_rows,
+        zoom,
+        palette.header_rows,
+        palette.doc_rows(),
+    ) else {
         return;
     };
 
@@ -1176,7 +1273,7 @@ fn render_palette_cli(
         }
         let command = PaletteCommand::User(user);
         let width = usize::from(layout.inner.width.saturating_sub(1));
-        let (lines, note) = doc_lines(&command, &palette.keys, width, theme, specs);
+        let DocLines { lines, note, .. } = doc_lines(&command, &palette.keys, width, theme, specs);
         let tag = Some(doc_tag(&command));
         paint_doc_lines(buf, layout.doc, &lines, tag, &note, theme, scene);
     }
@@ -1413,7 +1510,13 @@ fn render_palette_history(
     scene: &mut stoat_widgets::ApcScene,
 ) {
     let content_rows = palette.list_rows_hint();
-    let Some(layout) = palette_filter_layout(area, content_rows, zoom, palette.header_rows) else {
+    let Some(layout) = palette_filter_layout(
+        area,
+        content_rows,
+        zoom,
+        palette.header_rows,
+        palette.doc_rows(),
+    ) else {
         return;
     };
     palette.plate = Some(layout.modal);
@@ -1448,7 +1551,13 @@ fn render_palette_history(
         buf,
         scene,
     );
-    let Some(layout) = palette_filter_layout(area, content_rows, zoom, palette.header_rows) else {
+    let Some(layout) = palette_filter_layout(
+        area,
+        content_rows,
+        zoom,
+        palette.header_rows,
+        palette.doc_rows(),
+    ) else {
         return;
     };
 
@@ -1948,7 +2057,9 @@ fn render_palette_filter(
     scene: &mut stoat_widgets::ApcScene,
 ) {
     let name_offset = group.map_or(0, |group| group.len() + 1);
-    let Some(layout) = palette_filter_layout(area, content_rows, zoom, *header_rows) else {
+    let Some(layout) =
+        palette_filter_layout(area, content_rows, zoom, *header_rows, doc_rows(pixels))
+    else {
         return;
     };
     *header_rows = render_palette_prelude(
@@ -1965,7 +2076,9 @@ fn render_palette_filter(
         buf,
         &mut *scene,
     );
-    let Some(layout) = palette_filter_layout(area, content_rows, zoom, *header_rows) else {
+    let Some(layout) =
+        palette_filter_layout(area, content_rows, zoom, *header_rows, doc_rows(pixels))
+    else {
         return;
     };
 
@@ -1976,13 +2089,14 @@ fn render_palette_filter(
     let doc = layout.doc;
     let plate = crate::render::chrome::plate_colors(theme, scene);
     if let Some(plate) = plate {
-        let list_bottom = match doc.is_empty() {
-            true => ISLAND_BOTTOM,
-            false => ISLAND_GAP,
+        let (list_bottom, doc_top) = match (doc.is_empty(), pixels) {
+            (true, _) => (ISLAND_BOTTOM, ISLAND_GAP),
+            (false, Some(_)) => (PIXEL_LIST_EDGE, PIXEL_DOC_EDGE),
+            (false, None) => (ISLAND_GAP, ISLAND_GAP),
         };
         let list_edges = [ISLAND_TOP, ISLAND_SIDE, list_bottom, ISLAND_SIDE];
         crate::render::chrome::modal_island(list, list_edges, plate, theme, buf, scene);
-        let doc_edges = [ISLAND_GAP, ISLAND_SIDE, ISLAND_BOTTOM, ISLAND_SIDE];
+        let doc_edges = [doc_top, ISLAND_SIDE, ISLAND_BOTTOM, ISLAND_SIDE];
         crate::render::chrome::modal_island(doc, doc_edges, plate, theme, buf, scene);
     }
 
@@ -2021,19 +2135,37 @@ fn render_palette_filter(
                 scene,
             );
         }
-        let width = usize::from(inner.width.saturating_sub(1));
         let entry = filtered.get(selected);
-        let (lines, note) = entry
+        let width = match pixels {
+            Some(_) => {
+                let room = doc
+                    .width
+                    .saturating_mul(16)
+                    .saturating_sub(2 * PIXEL_DOC_COLUMN);
+                chars_within(room, theme.type_scale(TypeRole::Ui))
+            },
+            None => usize::from(inner.width.saturating_sub(1)),
+        };
+        let text = entry
             .map(|entry| doc_lines(entry, keys, width, theme, specs))
             .unwrap_or_default();
-        let last_top = lines.len().saturating_sub(usize::from(doc.height));
+        let last_top = match pixels {
+            Some(m) => pixel_doc_last_top(&text, doc.height, m),
+            None => text.lines.len().saturating_sub(usize::from(doc.height)),
+        };
         *doc_scroll = (*doc_scroll).min(last_top as u16);
 
         // The Source Tag and its note end the name line, which a scroll moves
         // off the doc.
         let tag = entry.map(doc_tag).filter(|_| *doc_scroll == 0);
-        let shown = &lines[usize::from(*doc_scroll)..];
-        paint_doc_lines(buf, doc, shown, tag, &note, theme, scene);
+        let scroll = usize::from(*doc_scroll);
+        match pixels {
+            Some(m) => paint_doc_pixels(doc, &text, (scroll, tag), theme, m, buf, scene),
+            None => {
+                let shown = &text.lines[scroll..];
+                paint_doc_lines(buf, doc, shown, tag, &text.note, theme, scene);
+            },
+        }
     }
 
     let key_stage = match namespace {
@@ -2263,6 +2395,197 @@ fn paint_doc_tag(
     Some(x + cells)
 }
 
+/// Paint `text` into `doc` from its line `scroll` as a pixel doc laid out by
+/// `m`, with `tag`, a Source Tag's label and scope, on the name line.
+///
+/// The doc writes no cell. Each line stands where [`pixel_doc_tops`] puts it
+/// and draws from [`PIXEL_DOC_COLUMN`], cut where the room between the doc's
+/// side pads ends. The name line draws as [`paint_doc_name_line`] does, and
+/// every other line at [`TypeRole::Ui`].
+fn paint_doc_pixels(
+    doc: Rect,
+    text: &DocLines,
+    (scroll, tag): (usize, Option<(&str, &str)>),
+    theme: &crate::theme::Theme,
+    m: RowMetrics,
+    buf: &mut Buffer,
+    scene: &mut stoat_widgets::ApcScene,
+) {
+    let ui = theme.type_scale(TypeRole::Ui);
+    let fallback = style_rgb(Some(crate::render::themed_fg(theme))).unwrap_or([0xff; 3]);
+    let room = doc
+        .width
+        .saturating_mul(16)
+        .saturating_sub(2 * PIXEL_DOC_COLUMN);
+    let mut placer = Placer::default();
+    for (index, top) in pixel_doc_tops(text, scroll, doc.height, m) {
+        if index == 0 {
+            let line = DocLine { doc, top, m };
+            paint_doc_name_line(&line, text, tag, theme, &mut placer, buf, scene);
+            continue;
+        }
+        let anchor = placer.line(&m, doc, top, scene);
+        let shown = clip_spans(&text.lines[index], chars_within(room, ui));
+        pixel_rows::emit_spans(&shown, PIXEL_DOC_COLUMN, ui, anchor, fallback, buf, scene);
+    }
+    placer.end(scene);
+}
+
+/// Where a line of a pixel doc stands, in `doc` at `top` physical px from
+/// its top, laid out by `m`.
+struct DocLine {
+    doc: Rect,
+    top: u32,
+    m: RowMetrics,
+}
+
+/// Paint the name line of `text` at `line`, its name at the cell size, then
+/// its aliases at [`TypeRole::Ui`], `tag`, and `text`'s note, each
+/// [`PIXEL_DOC_PART_GAP`] after the part before it.
+///
+/// The tag is the chip of a pixel row, 1 px under the line's top, in the
+/// colors of its scope. A theme that leaves the scope unset draws no tag, and
+/// neither does a doc whose room ends before the tag does. The note then
+/// follows the part before the tag. The aliases' span leads with the blank
+/// that the cell doc writes before them, which the gap stands in for.
+fn paint_doc_name_line(
+    line: &DocLine,
+    text: &DocLines,
+    tag: Option<(&str, &str)>,
+    theme: &crate::theme::Theme,
+    placer: &mut Placer,
+    buf: &mut Buffer,
+    scene: &mut stoat_widgets::ApcScene,
+) {
+    let DocLine { doc, top, m } = *line;
+    let ui = theme.type_scale(TypeRole::Ui);
+    let fallback = style_rgb(Some(crate::render::themed_fg(theme))).unwrap_or([0xff; 3]);
+    let room_end = doc
+        .width
+        .saturating_mul(16)
+        .saturating_sub(PIXEL_DOC_COLUMN);
+    let gap = m.cols(PIXEL_DOC_PART_GAP);
+    let advance = |spans: &[(&str, Style)], scale| {
+        let chars = spans.iter().map(|(text, _)| text.chars().count()).sum();
+        text_run::advance_sixteenths(chars, scale)
+    };
+    let room_from = |x: u16, scale| chars_within(room_end.saturating_sub(x), scale);
+
+    let spans = text.lines.first().map_or(&[][..], Vec::as_slice);
+    let (name, aliases) = spans.split_at(spans.len().min(1));
+    let name = clip_spans(name, room_from(PIXEL_DOC_COLUMN, FULL_CELL_SCALE));
+    let name_end = PIXEL_DOC_COLUMN + advance(&name, FULL_CELL_SCALE);
+    let alias_x = name_end + gap;
+    let aliases: Vec<(&str, Style)> = aliases
+        .iter()
+        .map(|(alias, style)| (alias.trim_start(), *style))
+        .collect();
+    let aliases = clip_spans(&aliases, room_from(alias_x, ui));
+    let mut end = match aliases.is_empty() {
+        true => name_end,
+        false => alias_x + advance(&aliases, ui),
+    };
+
+    let chip = tag.and_then(|(label, scope)| {
+        let style = theme.try_get(scope)?;
+        let (x, width) = (end + gap, source_tag_width(label, theme));
+        (x + width <= room_end).then_some((label, style, x, width))
+    });
+    if let Some((_, style, x, width)) = chip
+        && let Some(color) = style_rgb(style.bg)
+    {
+        let bar = PixelBar {
+            x: x as i16,
+            y: top + m.px(1),
+            width,
+            height: m.rows16(PIXEL_TAG_HEIGHT),
+            color,
+            radius: SOURCE_TAG_RADIUS,
+        };
+        pixel_rows::bar(placer, &m, doc, &bar, buf, scene);
+    }
+
+    let anchor = placer.line(&m, doc, top, scene);
+    pixel_rows::emit_spans(
+        &name,
+        PIXEL_DOC_COLUMN,
+        FULL_CELL_SCALE,
+        anchor,
+        fallback,
+        buf,
+        scene,
+    );
+    pixel_rows::emit_spans(&aliases, alias_x, ui, anchor, fallback, buf, scene);
+    if let Some((label, style, x, width)) = chip {
+        TextRun {
+            col: (x + SOURCE_TAG_INSET) as i16,
+            row: 0,
+            scale: theme.type_scale(TypeRole::Small),
+            color: style_rgb(style.fg).unwrap_or(fallback),
+            bg: None,
+            bold: false,
+            italic: false,
+            follow: 0,
+            anchor: None,
+            text: label,
+        }
+        .render(anchor, buf, scene);
+        end = x + width;
+    }
+    let note_x = end + gap;
+    let note = clip_spans(&text.note, room_from(note_x, ui));
+    pixel_rows::emit_spans(&note, note_x, ui, anchor, fallback, buf, scene);
+}
+
+/// The index of each line of `text` that a pixel doc `doc_height` cell rows
+/// tall shows from its line `scroll`, laid out by `m`, with the physical px
+/// from the doc's top to the line's top.
+///
+/// The first line shown stands [`PIXEL_DOC_TOP`] under the doc's top, and
+/// each next line 18 px under the line before it. A line that starts an item
+/// stands [`PIXEL_DOC_GAP`] lower. The items start at the usage line, at the
+/// description, and at a last line that [`DocLines::tail`] sets apart. The
+/// lines stop before the first whose bottom passes [`PIXEL_DOC_BOTTOM`] over
+/// the bottom of the doc's last row.
+fn pixel_doc_tops(
+    text: &DocLines,
+    scroll: usize,
+    doc_height: u16,
+    m: RowMetrics,
+) -> Vec<(usize, u32)> {
+    let line_height = u32::from(m.cell[1]);
+    let limit = (u32::from(doc_height) * line_height).saturating_sub(m.px(PIXEL_DOC_BOTTOM));
+    let last = text.lines.len().saturating_sub(1);
+    let starts_item = |index: usize| index == 1 || index == 2 || (text.tail && index == last);
+
+    let mut tops = Vec::new();
+    let mut y = m.px(PIXEL_DOC_TOP);
+    for index in scroll..text.lines.len() {
+        if index > scroll && starts_item(index) {
+            y += m.px(PIXEL_DOC_GAP);
+        }
+        if y + line_height > limit {
+            break;
+        }
+        tops.push((index, y));
+        y += line_height;
+    }
+    tops
+}
+
+/// The first line of `text` from which a pixel doc `doc_height` cell rows
+/// tall, laid out by `m`, shows every later line, where the doc's scroll
+/// stops.
+///
+/// A doc too short for its last line stops its scroll at the first line.
+fn pixel_doc_last_top(text: &DocLines, doc_height: u16, m: RowMetrics) -> usize {
+    (0..text.lines.len())
+        .find(|&scroll| {
+            pixel_doc_tops(text, scroll, doc_height, m).len() == text.lines.len() - scroll
+        })
+        .unwrap_or(0)
+}
+
 /// The help of `command` as doc-region lines, each a run of styled spans.
 ///
 /// The first line names a command in bold and its aliases after a blank
@@ -2294,7 +2617,7 @@ fn doc_lines(
     width: usize,
     theme: &crate::theme::Theme,
     specs: &HashMap<String, CliSpecState>,
-) -> (Vec<StyledLine>, StyledLine) {
+) -> DocLines {
     let text = theme.get(crate::theme::scope::UI_TEXT);
     let muted = theme.get(crate::theme::scope::UI_TEXT_MUTED);
     let dim = theme.get(crate::theme::scope::UI_TEXT_DIM);
@@ -2315,7 +2638,11 @@ fn doc_lines(
             let (label, _) = doc_tag(command);
             let defined = format!("{label} command \u{b7} config.stcfg:{}", user.line);
             lines.push(vec![(defined, muted)]);
-            return (lines, cli_note(user, specs, muted));
+            return DocLines {
+                lines,
+                tail: true,
+                note: cli_note(user, specs, muted),
+            };
         },
     };
     let internal = !entry.is_command() && !is_action_row(entry);
@@ -2342,7 +2669,10 @@ fn doc_lines(
             .map(|line| vec![(line, dim)]),
     );
     if is_action_row(entry) {
-        return (lines, Vec::new());
+        return DocLines {
+            lines,
+            ..DocLines::default()
+        };
     }
 
     let action = entry.def.name();
@@ -2354,7 +2684,11 @@ fn doc_lines(
                 (bound.join(", "), key_label),
             ]);
         }
-        return (lines, Vec::new());
+        return DocLines {
+            lines,
+            tail: bound.is_some(),
+            note: Vec::new(),
+        };
     }
 
     let mut runs = vec![
@@ -2366,7 +2700,28 @@ fn doc_lines(
         runs.push((bound.join(", "), key_label));
     }
     lines.push(runs);
-    (lines, Vec::new())
+    DocLines {
+        lines,
+        tail: true,
+        note: Vec::new(),
+    }
+}
+
+/// The help of a command as a doc's lines, as [`doc_lines`] words it.
+#[derive(Debug, Default, PartialEq)]
+struct DocLines {
+    /// The doc's lines, each a run of styled spans. They are the name line,
+    /// the usage line, the description's wrapped lines, and a last line apart
+    /// from them.
+    lines: Vec<StyledLine>,
+    /// Whether the doc ends in a line apart from the description.
+    ///
+    /// That line names the action that a command runs, the keys that reach an
+    /// internal action, or where a user command is defined. A pixel doc stands
+    /// it apart from the description, as it stands each item apart.
+    tail: bool,
+    /// The spans that stand after the Source Tag on the name line.
+    note: StyledLine,
 }
 
 /// The note that stands after the Source Tag on the first line of `user`'s
@@ -2964,13 +3319,13 @@ fn pixel_columns(list: &PaletteList<'_>, ui: u16) -> [(u16, Option<u16>); 4] {
 }
 
 /// The spans of `spans` cut to their first `chars` chars.
-fn clip_spans<'s>(spans: &'s [(Cow<'_, str>, Style)], chars: usize) -> Vec<(&'s str, Style)> {
+fn clip_spans<S: AsRef<str>>(spans: &[(S, Style)], chars: usize) -> Vec<(&str, Style)> {
     let mut left = chars;
     spans
         .iter()
         .map_while(|(text, style)| {
             (left > 0).then(|| {
-                let shown = clip_to_width(text, left);
+                let shown = clip_to_width(text.as_ref(), left);
                 left -= shown.chars().count();
                 (shown, *style)
             })
@@ -3261,9 +3616,10 @@ mod tests {
     use super::{
         command_box, command_page_start, command_window, count_status, doc_lines, grouped,
         history_age, history_window, input_spans, paint_arg_rows, paint_doc_lines,
-        paint_history_rows, paint_palette_rows, palette_arg_layout, palette_filter_layout,
-        pascal_matches, pick_status, render_command_palette, source_tag, usage_line, wrap_text,
-        HistoryEntry, DOC_ROWS, ISLAND_BOTTOM, ISLAND_GAP, ISLAND_SIDE, ISLAND_TOP, LIST_ROWS,
+        paint_doc_pixels, paint_history_rows, paint_palette_rows, palette_arg_layout,
+        palette_filter_layout, pascal_matches, pick_status, pixel_doc_last_top,
+        render_command_palette, source_tag, usage_line, wrap_text, DocLines, HistoryEntry,
+        DOC_ROWS, ISLAND_BOTTOM, ISLAND_GAP, ISLAND_SIDE, ISLAND_TOP, LIST_ROWS, PIXEL_DOC_ROWS,
     };
     use crate::{
         cli_spec::{self, RG_HELP},
@@ -3302,7 +3658,8 @@ mod tests {
     }
 
     fn layout(area: Rect, content_rows: u16, zoom: i8) -> super::PaletteFilterLayout {
-        palette_filter_layout(area, content_rows, zoom, 1).expect("the area hosts the palette")
+        palette_filter_layout(area, content_rows, zoom, 1, DOC_ROWS)
+            .expect("the area hosts the palette")
     }
 
     /// A Cmd Line count groups its thousands with `,`, as the boards write
@@ -3528,7 +3885,8 @@ mod tests {
     fn a_wrapped_header_lowers_the_list_and_takes_the_doc_rows_first() {
         let area = Rect::new(0, 0, 200, 60);
         let one = layout(area, 4, 0);
-        let two = palette_filter_layout(area, 4, 0, 2).expect("the area hosts the palette");
+        let two =
+            palette_filter_layout(area, 4, 0, 2, DOC_ROWS).expect("the area hosts the palette");
 
         let inner = one.inner;
         let list_y = inner.y + 3;
@@ -4172,17 +4530,245 @@ mod tests {
         );
     }
 
+    /// A doc that lays its lines out by pixels takes 8 rows, and the box keeps
+    /// its height. So the body of 19 rows gives the list 11 rows and the doc 8,
+    /// under the row between them.
+    #[test]
+    fn a_pixel_palette_gives_its_doc_eight_rows() {
+        let area = Rect::new(0, 0, 160, 50);
+        let cell = palette_filter_layout(area, 200, 0, 1, DOC_ROWS).expect("the area hosts it");
+        let laid =
+            palette_filter_layout(area, 200, 0, 1, PIXEL_DOC_ROWS).expect("the area hosts it");
+        assert_eq!(
+            (laid.modal, laid.list.height, laid.doc.height, laid.doc.y),
+            (cell.modal, 11, 8, laid.list.bottom() + 1),
+        );
+    }
+
+    /// The nudge, the row, and the text of each run of `text` painted from its
+    /// line `scroll` as a pixel doc into `doc` by [`M1`] under `theme`, with
+    /// `tag` on the name line.
+    fn pixel_doc_runs(
+        text: &DocLines,
+        (scroll, tag): (usize, Option<(&str, &str)>),
+        doc: Rect,
+        theme: &Theme,
+    ) -> Vec<(i16, i16, String)> {
+        let mut scene = stoat_widgets::ApcScene::new();
+        let mut buf = Buffer::empty(doc);
+        paint_doc_pixels(doc, text, (scroll, tag), theme, M1, &mut buf, &mut scene);
+        let mut dy = 0;
+        decode_stream(scene.bytes())
+            .into_iter()
+            .filter_map(|command| match command {
+                Command::Nudge([_, y]) => {
+                    dy = y;
+                    None
+                },
+                Command::TextRun(run) => Some((dy, run.row, run.text)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// A pixel doc stands its items 4 px apart from 6 px under its top, and a
+    /// wrapped line of the description 18 px under the line before it. So the
+    /// doc of `git log`, whose description wraps to two lines, draws its name
+    /// line 6 px into its first row and its usage 10 px into its second. The
+    /// description draws 14 px into the third and fourth rows, and the line
+    /// naming the action and the key `Spc g l` on the sixth row, pixel row 90.
+    #[test]
+    fn a_pixel_doc_sets_its_items_four_pixels_apart() {
+        let entry = registry::lookup_alias("git log").expect("a command");
+        let keys = ActionKeys::from([("GitLs".to_owned(), vec!["Spc g l".to_owned()])]);
+        let command = PaletteCommand::Action(entry);
+        let text = doc_lines(&command, &keys, 140, &Theme::empty(), &HashMap::new());
+        let mut lines: Vec<(i16, i16)> =
+            pixel_doc_runs(&text, (0, None), Rect::new(0, 0, 150, 8), &Theme::empty())
+                .into_iter()
+                .map(|(dy, row, _)| (dy, row))
+                .collect();
+        lines.dedup();
+
+        assert_eq!(
+            (text.lines.len(), lines),
+            (5, vec![(6, 0), (10, 16), (14, 32), (14, 48), (0, 80)]),
+        );
+    }
+
+    /// The parts of a pixel doc's name line stand 10 px, 18 sixteenths, apart.
+    /// The name `open` draws at the cell size from sixteenth 16 and ends at 80,
+    /// and its alias draws from 98 without the blank that leads it in cells.
+    /// The tag's chip stands from 132, 1 px under the line's top, with its
+    /// label 9 sixteenths in, and the note follows the chip's end at 278.
+    #[test]
+    fn a_pixel_doc_name_line_sets_its_parts_ten_pixels_apart() {
+        let white = [0xff; 3];
+        assert_eq!(
+            name_line_commands(" o", 100),
+            [
+                Command::Nudge([0, 7]),
+                Command::Bar(BarCommand {
+                    x: 132,
+                    y: 0,
+                    width: 146,
+                    height: 14,
+                    color: [4, 5, 6],
+                    occludes: false,
+                    hatch: None,
+                    radius: 4,
+                    corners: 0,
+                }),
+                Command::Nudge([0, 6]),
+                pixel_run(0, 16, "open", white, false),
+                pixel_run(0, 98, "o", white, false),
+                pixel_run(0, 141, "built-in", [1, 2, 3], false),
+                pixel_run(0, 296, "note", white, false),
+                Command::Nudge([0, 0]),
+            ],
+        );
+    }
+
+    /// The commands, less the ends of their runs, of a pixel doc `width` cells
+    /// wide whose one line names `open` with `aliases`, under [`tag_theme`],
+    /// with the built-in tag and the note `note` after it.
+    fn name_line_commands(aliases: &str, width: u16) -> Vec<Command> {
+        let plain = |text: &str| (text.to_owned(), Style::default());
+        let text = DocLines {
+            lines: vec![vec![plain("open"), plain(aliases)]],
+            tail: false,
+            note: vec![plain("note")],
+        };
+        let tag = ("built-in", crate::theme::scope::UI_CMD_SOURCE_BUILTIN);
+        let doc = Rect::new(0, 0, width, 8);
+        let mut scene = stoat_widgets::ApcScene::new();
+        let mut buf = Buffer::empty(doc);
+        paint_doc_pixels(
+            doc,
+            &text,
+            (0, Some(tag)),
+            &tag_theme(),
+            M1,
+            &mut buf,
+            &mut scene,
+        );
+        decode_stream(scene.bytes())
+            .into_iter()
+            .filter(|command| *command != Command::TextRunEnd)
+            .collect()
+    }
+
+    /// A pixel doc cuts its name line where its room ends. In a doc 10 cells
+    /// wide the room ends at sixteenth 144, so the alias `opener` from 98 keeps
+    /// the 2 chars that fit there. The tag would end at 294, so it draws
+    /// nothing, and the note finds no room after the alias. In a doc 4 cells
+    /// wide the room ends at 48, so the name keeps its first 2 chars and no
+    /// part after it fits.
+    #[test]
+    fn a_narrow_pixel_doc_cuts_its_name_line_at_its_room() {
+        let white = [0xff; 3];
+        assert_eq!(
+            [
+                name_line_commands(" opener", 10),
+                name_line_commands(" opener", 4),
+            ],
+            [
+                vec![
+                    Command::Nudge([0, 6]),
+                    pixel_run(0, 16, "open", white, false),
+                    pixel_run(0, 98, "op", white, false),
+                    Command::Nudge([0, 0]),
+                ],
+                vec![
+                    Command::Nudge([0, 6]),
+                    pixel_run(0, 16, "op", white, false),
+                    Command::Nudge([0, 0]),
+                ],
+            ],
+        );
+    }
+
+    /// A scrolled pixel doc starts its first line at the top pad, with no gap
+    /// over it, although the line starts the description. The lines from
+    /// `one` stand 18 px apart from 6 px under the doc's top.
+    #[test]
+    fn a_scrolled_pixel_doc_starts_at_its_top_pad() {
+        let runs = pixel_doc_runs(
+            &five_line_doc(),
+            (2, None),
+            Rect::new(0, 0, 60, 6),
+            &Theme::empty(),
+        );
+        let lines: Vec<(i16, i16, &str)> = runs
+            .iter()
+            .map(|(dy, row, text)| (*dy, *row, text.as_str()))
+            .collect();
+        assert_eq!(
+            lines,
+            [
+                (6, 0, "one"),
+                (6, 16, "two"),
+                (6, 32, "three"),
+                (6, 48, "four"),
+                (6, 64, "five"),
+            ],
+        );
+    }
+
+    /// A doc of the name, the usage, a description of five lines, and a last
+    /// line apart from them, as `text` words it.
+    fn five_line_doc() -> DocLines {
+        let line = |text: &str| vec![(text.to_owned(), Style::default())];
+        DocLines {
+            lines: [
+                "name", "usage", "one", "two", "three", "four", "five", "last",
+            ]
+            .map(line)
+            .to_vec(),
+            tail: true,
+            note: Vec::new(),
+        }
+    }
+
+    /// A pixel doc draws a line only while its 18 px end at or over the 8 px
+    /// pad at its Island's bottom. In a doc of 6 rows that is pixel row 104, so
+    /// the doc draws its name, its usage, and three of the description's five
+    /// lines, and not its last line.
+    #[test]
+    fn a_pixel_doc_stops_at_its_bottom_pad() {
+        let texts: Vec<String> = pixel_doc_runs(
+            &five_line_doc(),
+            (0, None),
+            Rect::new(0, 0, 60, 6),
+            &Theme::empty(),
+        )
+        .into_iter()
+        .map(|(_, _, text)| text)
+        .collect();
+        assert_eq!(texts, ["name", "usage", "one", "two", "three"]);
+    }
+
+    /// A pixel doc's scroll stops at the first line from which every later
+    /// line shows. In a doc of 6 rows the lines from `two` show with the last
+    /// line 4 px apart, ending at pixel row 100, where from `one` the last line
+    /// would end at 118, past the pad at 104.
+    #[test]
+    fn a_pixel_doc_scroll_stops_where_its_last_line_shows() {
+        assert_eq!(pixel_doc_last_top(&five_line_doc(), 6, M1), 3);
+    }
+
     /// The `action` row runs no action of its own, so its doc ends in its
     /// description with no `runs action` line.
     #[test]
     fn the_action_row_doc_ends_in_its_description() {
-        let (lines, _) = doc_lines(
+        let lines = doc_lines(
             &PaletteCommand::Action(action_row()),
             &ActionKeys::new(),
             400,
             &Theme::empty(),
             &HashMap::new(),
-        );
+        )
+        .lines;
         let texts: Vec<Vec<String>> = lines
             .into_iter()
             .map(|line| line.into_iter().map(|(text, _)| text).collect())
@@ -4343,7 +4929,18 @@ mod tests {
                     &specs
                 ),
             ),
-            ((keyed, Vec::new()), (described, Vec::new())),
+            (
+                DocLines {
+                    lines: keyed,
+                    tail: true,
+                    note: Vec::new(),
+                },
+                DocLines {
+                    lines: described,
+                    tail: false,
+                    note: Vec::new(),
+                },
+            ),
         );
     }
 
@@ -4617,7 +5214,7 @@ mod tests {
                 &Theme::empty(),
                 &HashMap::new(),
             )
-            .0
+            .lines
             .into_iter()
             .map(|line| line.into_iter().map(|(text, _)| text).collect())
             .collect()
@@ -4652,7 +5249,7 @@ mod tests {
         let entry = registry::lookup_alias("open").expect("a command");
         let first_row = |width: u16| {
             let theme = tag_theme();
-            let (lines, note) = doc_lines(
+            let DocLines { lines, note, .. } = doc_lines(
                 &PaletteCommand::Action(entry),
                 &ActionKeys::new(),
                 usize::from(width),
@@ -4936,7 +5533,8 @@ mod tests {
         command: &PaletteCommand,
         specs: &HashMap<String, CliSpecState>,
     ) -> (Vec<String>, String) {
-        let (lines, note) = doc_lines(command, &ActionKeys::new(), 60, &Theme::empty(), specs);
+        let DocLines { lines, note, .. } =
+            doc_lines(command, &ActionKeys::new(), 60, &Theme::empty(), specs);
         let text = |line: &[(String, Style)]| -> String {
             line.iter().map(|(text, _)| text.as_str()).collect()
         };

@@ -2043,12 +2043,13 @@ fn a_press_under_a_wrapped_query_selects_the_command_under_the_pointer() {
     h.settle();
     h.snapshot();
 
-    let (rows, zoom, header_rows) = palette_sizing(&h);
+    let (rows, zoom, header_rows, doc_rows) = palette_sizing(&h);
     let inner = crate::render::command_palette::palette_filter_layout(
         h.stoat.size(),
         rows,
         zoom,
         header_rows,
+        doc_rows,
     )
     .expect("the palette fits the test terminal")
     .inner;

@@ -1307,6 +1307,15 @@ impl CommandPalette {
         }
     }
 
+    /// Rows the modal's doc takes, for the measure that the last frame laid
+    /// the list out by.
+    ///
+    /// The paint, the pool, and the hit test each lay the box out, so each
+    /// reads the doc's rows here and all three split the body alike.
+    pub(crate) fn doc_rows(&self) -> u16 {
+        crate::render::command_palette::doc_rows(self.row_metrics)
+    }
+
     /// The bytes at the start of each listed command name that the group's
     /// title already shows, the group token and its space, which the rows
     /// leave out. Zero outside a group.
@@ -4787,12 +4796,13 @@ mod tests {
         h.type_keys("backtab");
         let _ = h.snapshot();
         let text = h.rendered_text();
-        let (rows, zoom, header_rows) = crate::test_fixture::palette_sizing(&h);
+        let (rows, zoom, header_rows, doc_rows) = crate::test_fixture::palette_sizing(&h);
         let list = crate::render::command_palette::palette_filter_layout(
             h.stoat.size(),
             rows,
             zoom,
             header_rows,
+            doc_rows,
         )
         .expect("the palette fits the test terminal")
         .list;
@@ -4928,12 +4938,13 @@ mod tests {
         h.type_text(":pr ");
         h.settle();
         let _ = h.snapshot();
-        let (rows, zoom, header_rows) = crate::test_fixture::palette_sizing(&h);
+        let (rows, zoom, header_rows, doc_rows) = crate::test_fixture::palette_sizing(&h);
         let layout = crate::render::command_palette::palette_filter_layout(
             h.stoat.size(),
             rows,
             zoom,
             header_rows,
+            doc_rows,
         )
         .expect("the palette fits the test terminal");
         let (list, preview) = crate::render::command_palette::pick_body(&layout, true);
@@ -5247,12 +5258,13 @@ mod tests {
         h.type_text(":");
         let _ = h.snapshot();
 
-        let (rows, zoom, header_rows) = crate::test_fixture::palette_sizing(&h);
+        let (rows, zoom, header_rows, doc_rows) = crate::test_fixture::palette_sizing(&h);
         let list = crate::render::command_palette::palette_filter_layout(
             h.stoat.size(),
             rows,
             zoom,
             header_rows,
+            doc_rows,
         )
         .expect("the palette fits the test terminal")
         .list;
@@ -7982,12 +7994,13 @@ mod tests {
             let _ = h.snapshot();
         }
 
-        let (rows, zoom, header_rows) = crate::test_fixture::palette_sizing(&h);
+        let (rows, zoom, header_rows, doc_rows) = crate::test_fixture::palette_sizing(&h);
         let doc = crate::render::command_palette::palette_filter_layout(
             h.stoat.size(),
             rows,
             zoom,
             header_rows,
+            doc_rows,
         )
         .expect("the palette fits the test terminal")
         .doc;
@@ -8515,12 +8528,13 @@ mod tests {
     /// The chars that draw in the foreground of `ui.list.match` on the Cmd
     /// Line's first row and on the first row of the palette list.
     fn palette_marks(h: &TestHarness) -> [String; 2] {
-        let (rows, zoom, header_rows) = crate::test_fixture::palette_sizing(h);
+        let (rows, zoom, header_rows, doc_rows) = crate::test_fixture::palette_sizing(h);
         let layout = crate::render::command_palette::palette_filter_layout(
             h.stoat.size(),
             rows,
             zoom,
             header_rows,
+            doc_rows,
         )
         .expect("the palette fits the test terminal");
         let fg = h.stoat.theme.list_match().fg;
@@ -8574,12 +8588,13 @@ mod tests {
     /// The text of the palette list's row `row`, from its second cell, with
     /// its trailing blanks cut. The first cell holds the selected row's bar.
     fn history_list_row(h: &TestHarness, row: u16) -> String {
-        let (rows, zoom, header_rows) = crate::test_fixture::palette_sizing(h);
+        let (rows, zoom, header_rows, doc_rows) = crate::test_fixture::palette_sizing(h);
         let list = crate::render::command_palette::palette_filter_layout(
             h.stoat.size(),
             rows,
             zoom,
             header_rows,
+            doc_rows,
         )
         .expect("the palette fits the test terminal")
         .list;
@@ -8594,12 +8609,13 @@ mod tests {
     /// cells. The text reads U+2500 as a space, because the cell look's rule
     /// fills the line's blank cells with it.
     fn key_line(h: &TestHarness) -> (String, Vec<Color>) {
-        let (rows, zoom, header_rows) = crate::test_fixture::palette_sizing(h);
+        let (rows, zoom, header_rows, doc_rows) = crate::test_fixture::palette_sizing(h);
         let footer = crate::render::command_palette::palette_filter_layout(
             h.stoat.size(),
             rows,
             zoom,
             header_rows,
+            doc_rows,
         )
         .expect("the palette fits the test terminal")
         .footer;

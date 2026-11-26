@@ -1360,7 +1360,7 @@ fn the_cmd_line_draws_an_alias_with_its_ghost() {
 /// A root row's box is 20 px high and 1 px from the next, and its columns
 /// stand 8 px apart.
 ///
-/// The list is the 126 cells from cell 17 on the cell rows 15 to 27, so row k
+/// The list is the 126 cells from cell 17 on the cell rows 15 to 25, so row k
 /// covers the pixel rows 270 + 21k to 289 + 21k. The selected first row's box
 /// stands 1 px inside each end of the list, so the tab wash fills the pixels
 /// from (154, 270) to (1285, 289) and no other pixel of the rows 268 to 290.
@@ -1399,7 +1399,7 @@ fn a_root_row_is_twenty_pixels_high() {
 /// A root row ends in its Source Tag, a rounded box in the overlay color with
 /// the `built-in` label over it, 8 px inside the row's box.
 ///
-/// The list is the 126 cells from cell 17 on the cell rows 15 to 27, and row
+/// The list is the 126 cells from cell 17 on the cell rows 15 to 25, and row
 /// 1's box covers the pixel rows 291 to 310. At the Small scale of 208 the
 /// label `built-in` advances 104 sixteenths, so its box is 122 sixteenths wide
 /// and ends at pixel column 1278, 9 px inside the list's right edge. The box
@@ -1440,13 +1440,43 @@ fn a_root_row_ends_in_a_built_in_tag() {
     }
 }
 
-/// The doc island under the command list names the selected command and ends
-/// its first line in the command's Source Tag, one cell after the name.
+/// The doc island is 150 px high, 8 px under the list's Island.
 ///
-/// The doc is the cell rows 29 to 34, and its text starts at cell 18. The
-/// name `files` takes 5 cells, so the tag's box starts at cell 24. Its 122
+/// The list is the cell rows 15 to 25, and its Island ends 8 px under them,
+/// at pixel row 475. The doc is the cell rows 27 to 34, and its Island stands
+/// 2 px over them and 4 px under them, so it covers the pixel rows 484 to 633.
+/// At pixel column 700 the rows 475, 484, and 633 read the base, and the rows
+/// 476, 483, and 634 read the plate's ground.
+#[test]
+fn the_doc_island_is_one_hundred_and_fifty_pixels_high() {
+    let mut home = support::scratch_home();
+    let shot = palette_frame(home.path(), ":<Settle>");
+
+    let rows = [475, 484, 633, 476, 483, 634].map(|y| pixel(&shot, 700, y));
+    if rows != [BASE, BASE, BASE, GROUND, GROUND, GROUND] {
+        let frame = keep_frame(&shot, &mut home, "doc_island");
+        panic!(
+            "at pixel column 700 the rows 475, 484, 633, 476, 483, and 634 read {}, where \
+             the first three read the base {} and the rest the ground {}; the frame is {}",
+            rows.map(hex).join(", "),
+            hex(BASE),
+            hex(GROUND),
+            frame.display(),
+        );
+    }
+}
+
+/// The doc island under the command list names the selected command and ends
+/// its first line in the command's Source Tag, 10 px after the name.
+///
+/// The doc is the cell rows 27 to 34, and its first line stands 6 px into its
+/// first row, on the pixel rows 492 to 509 from pixel column 162. The name
+/// `files` advances 5 cells, so the tag's box starts 10 px after it, 114
+/// sixteenths into the doc, and stands 1 px under the line's top. Its 122
 /// sixteenths, the label's 104 at the Small scale of 208 and 9 at each side,
-/// cover the pixels from (216, 523) to (284, 538).
+/// cover the pixels from (217, 493) to (285, 508). The 4 px under the first
+/// line read the base, and the usage line draws in the text color from pixel
+/// row 514.
 #[test]
 fn the_doc_island_tags_the_selected_command() {
     let mut home = support::scratch_home();
@@ -1456,34 +1486,44 @@ fn the_doc_island_tags_the_selected_command() {
         &shot,
         &mut home,
         OVERLAY,
-        522..540,
-        (216, 523, 284, 538),
+        484..512,
+        (217, 493, 285, 508),
         "doc_tag",
     );
+    expect_region(&shot, &mut home, (162, 510, 200, 4), BASE, "doc_item_gap");
+    let usage = brightest(&shot, (162, 514, 90, 18));
+    if usage <= 0xa0 {
+        let frame = keep_frame(&shot, &mut home, "doc_usage");
+        panic!(
+            "the usage line peaks at {usage:#04x}, where it draws above 0xa0; the frame is {}",
+            frame.display(),
+        );
+    }
 }
 
 /// The root list ends in the `action` row under a 1 px rule, and the row's
 /// Source Tag reads `internal` on the internal tint.
 ///
-/// Twenty pages down select the last row. The list's 13 cell rows hold 235
-/// px, and the `action` row takes 28 px with the 7 px of space over its box,
-/// so 9 rows of 21 px stand over it, where 10 would need 238. The 7 px start
-/// at pixel row 459, and the rule runs along pixel row 463, 4 px down. The
-/// selected row's box covers the pixel rows 466 to 485 in the tab wash, 1 px
-/// inside each end of the list, and its tag's box covers the pixels from
-/// (1209, 468) to (1277, 483). The row above keeps its `built-in` tag, and the
-/// space over the rule reads the base.
+/// Thirty pages down select the last row, since a page steps half of the 9
+/// rows that the list shows whole. The list's 11 cell rows hold 199 px, and
+/// the `action` row takes 28 px with the 7 px of space over its box, so 8 rows
+/// of 21 px stand over it, where 9 would need 217. The 7 px start at pixel row
+/// 438, and the rule runs along pixel row 442, 4 px down. The selected row's
+/// box covers the pixel rows 445 to 464 in the tab wash, 1 px inside each end
+/// of the list, and its tag's box covers the pixels from (1209, 447) to (1277,
+/// 462). The row above keeps its `built-in` tag, and the space over the rule
+/// reads the base.
 #[test]
 fn the_root_list_ends_in_the_action_row_under_a_rule() {
     let mut home = support::scratch_home();
-    let keys = format!(":{}<Settle>", "<PageDown>".repeat(20));
+    let keys = format!(":{}<Settle>", "<PageDown>".repeat(30));
     let shot = palette_frame(home.path(), &keys);
 
-    let rule = longest_run(&shot, (170, 463, 1000), DIVIDER);
+    let rule = longest_run(&shot, (170, 442, 1000), DIVIDER);
     if rule != 1000 {
         let frame = keep_frame(&shot, &mut home, "action_rule");
         panic!(
-            "the longest run of the divider color {} on the pixel row 463 is {rule} px, where \
+            "the longest run of the divider color {} on the pixel row 442 is {rule} px, where \
              the rule runs 1000 px from x 170; the frame is {}",
             hex(DIVIDER),
             frame.display(),
@@ -1493,26 +1533,26 @@ fn the_root_list_ends_in_the_action_row_under_a_rule() {
         &shot,
         &mut home,
         TAB_WASH,
-        461..489,
-        (154, 466, 1285, 485),
+        440..468,
+        (154, 445, 1285, 464),
         "action_row_wash",
     );
     expect_color_box(
         &shot,
         &mut home,
         TINT_INTERNAL,
-        461..489,
-        (1209, 468, 1277, 483),
+        440..468,
+        (1209, 447, 1277, 462),
         "internal_tag",
     );
     expect_region(
         &shot,
         &mut home,
-        (1210, 446, 3, 2),
+        (1210, 425, 3, 2),
         OVERLAY,
         "built_in_tag_above",
     );
-    expect_region(&shot, &mut home, (500, 460, 1, 1), BASE, "action_row_space");
+    expect_region(&shot, &mut home, (500, 439, 1, 1), BASE, "action_row_space");
 }
 
 /// A pick list marks its selected row with the tab wash.

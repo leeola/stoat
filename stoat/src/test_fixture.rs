@@ -51,9 +51,9 @@ pub(crate) fn help_layout(h: &TestHarness) -> crate::render::help::HelpLayout {
 }
 
 /// The open palette's sizing inputs, so a test lays its box out exactly as
-/// the renderer would, as the content rows, the zoom steps, and the header
-/// rows that the last frame drew.
-pub(crate) fn palette_sizing(h: &TestHarness) -> (u16, i8, u16) {
+/// the renderer would, as the content rows, the zoom steps, the header rows
+/// that the last frame drew, and the doc's rows.
+pub(crate) fn palette_sizing(h: &TestHarness) -> (u16, i8, u16, u16) {
     let palette = h
         .stoat
         .command_palette
@@ -63,6 +63,7 @@ pub(crate) fn palette_sizing(h: &TestHarness) -> (u16, i8, u16) {
         palette.list_rows_hint(),
         modal_zoom_steps(&h.stoat.modal_zoom, ModalKind::Palette),
         palette.header_rows,
+        palette.doc_rows(),
     )
 }
 

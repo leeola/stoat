@@ -6476,6 +6476,7 @@ fn a_pixel_palette_list_fills_a_resident_pool() {
             palette.list_rows_hint(),
             modal_zoom_steps(&h.stoat.modal_zoom, ModalKind::Palette),
             palette.header_rows,
+            palette.doc_rows(),
         )
         .expect("the palette lays out")
         .list
@@ -7416,12 +7417,13 @@ fn palette_list_is_pooled_and_retired() {
     h.stoat.active_workspace_mut().layout(size);
 
     emit_smooth_scroll(&mut h.stoat);
-    let (rows, zoom, header_rows) = palette_sizing(&h);
+    let (rows, zoom, header_rows, doc_rows) = palette_sizing(&h);
     let list = crate::render::command_palette::palette_filter_layout(
         h.stoat.size(),
         rows,
         zoom,
         header_rows,
+        doc_rows,
     )
     .expect("the palette fits the test terminal")
     .list;
