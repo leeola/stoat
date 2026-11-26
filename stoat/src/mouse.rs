@@ -155,7 +155,7 @@ impl ModalSurfaces {
                     self.list.height,
                     metrics,
                 );
-                return window.result_at(self.pixel_row(stoat, row, metrics));
+                return window.result_at(pointer_pixel_row(stoat, self.pool, row, metrics));
             },
             ListRows::Finder => {
                 let finder = stoat.file_finder.as_ref()?;
@@ -172,7 +172,7 @@ impl ModalSurfaces {
         let window =
             crate::render::picker::list_window(&rows, self.list.width, self.list.height, pixels);
         let offset = match pixels {
-            Some(metrics) => self.pixel_row(stoat, row, metrics),
+            Some(metrics) => pointer_pixel_row(stoat, self.pool, row, metrics),
             None => u32::from(row),
         };
         window.result_at(offset)
@@ -184,22 +184,6 @@ impl ModalSurfaces {
         let start = crate::render::picker::window_start(self.selected, self.list.height as usize);
         let index = start + row as usize;
         (index < self.len).then_some(index)
-    }
-
-    /// The physical px row of a pixel list laid out by `metrics` that a press
-    /// in list row `row` names.
-    ///
-    /// That is the pixel row that the list's pool reports with the press, or
-    /// the middle pixel row of the cell row where no report names it.
-    fn pixel_row(&self, stoat: &Stoat, row: u16, metrics: RowMetrics) -> u32 {
-        let reported = stoat
-            .pool_pointer
-            .filter(|&(pool, ..)| Some(pool) == self.pool)
-            .map(|(_, _, pixel_row)| u32::from(pixel_row));
-        reported.unwrap_or_else(|| {
-            let height = u32::from(metrics.cell[1]);
-            u32::from(row) * height + height / 2
-        })
     }
 }
 
@@ -938,6 +922,11 @@ fn press_over_glance(stoat: &mut Stoat, mouse: MouseEvent) -> UpdateEffect {
 /// [`CommandPalette::history_rows`](crate::command_palette::CommandPalette::history_rows).
 /// A row's height comes from the wrap before its age. The age follows the
 /// clock, which moves between the paint and the press.
+///
+/// Pixel rows stand off the cell grid, so a press on pixel History reads the
+/// spans that the paint keeps in
+/// [`CommandPalette::history_spans`](crate::command_palette::CommandPalette::history_spans)
+/// at the pointer's pixel row, as [`pointer_pixel_row`] finds it.
 fn press_history_row(stoat: &mut Stoat, mouse: MouseEvent) -> Option<UpdateEffect> {
     let palette = stoat.command_palette.as_ref()?;
     let history = &stoat.active_workspace().palette_history;
@@ -945,11 +934,26 @@ fn press_history_row(stoat: &mut Stoat, mouse: MouseEvent) -> Option<UpdateEffec
         return None;
     }
     let at = Position::new(mouse.column, mouse.row);
-    let Some(&(_, index)) = palette
-        .history_rows
-        .iter()
-        .find(|(rect, _)| rect.contains(at))
-    else {
+    let pressed = match (palette.history_body, palette.row_metrics) {
+        (Some(body), Some(metrics)) => {
+            let pool = Some(crate::smooth_scroll::non_pane_pool::PALETTE);
+            body.contains(at)
+                .then(|| pointer_pixel_row(stoat, pool, mouse.row - body.y, metrics))
+                .and_then(|pixel| {
+                    palette
+                        .history_spans
+                        .iter()
+                        .find(|(span, _)| span.contains(&pixel))
+                })
+                .map(|&(_, index)| index)
+        },
+        _ => palette
+            .history_rows
+            .iter()
+            .find(|(rect, _)| rect.contains(at))
+            .map(|&(_, index)| index),
+    };
+    let Some(index) = pressed else {
         return Some(UpdateEffect::None);
     };
 
@@ -957,6 +961,22 @@ fn press_history_row(stoat: &mut Stoat, mouse: MouseEvent) -> Option<UpdateEffec
         return Some(action_handlers::prompt::submit_prompt_input(stoat));
     }
     Some(recall_history_line(stoat, index))
+}
+
+/// The physical px row of a pixel list laid out by `metrics` that a press in
+/// list row `row` names.
+///
+/// That is the pixel row that the list's pool `pool` reports with the press,
+/// or the middle pixel row of the cell row where no report names it.
+fn pointer_pixel_row(stoat: &Stoat, pool: Option<u32>, row: u16, metrics: RowMetrics) -> u32 {
+    let reported = stoat
+        .pool_pointer
+        .filter(|&(named, ..)| Some(named) == pool)
+        .map(|(_, _, pixel_row)| u32::from(pixel_row));
+    reported.unwrap_or_else(|| {
+        let height = u32::from(metrics.cell[1]);
+        u32::from(row) * height + height / 2
+    })
 }
 
 /// Step the palette's History by `steps` wheel notches in list order.

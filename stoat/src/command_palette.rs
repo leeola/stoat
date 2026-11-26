@@ -23,6 +23,7 @@ use std::{
     fmt,
     hash::{Hash, Hasher},
     iter,
+    ops::Range,
     path::{Path, PathBuf},
     ptr,
     sync::{Arc, OnceLock},
@@ -34,6 +35,14 @@ use stoat_action::{
 use stoat_language::LanguageRegistry;
 use stoat_scheduler::{Executor, Task};
 use tokio::sync::mpsc::UnboundedReceiver;
+
+/// The physical px rows that each pixel History entry on show takes from the
+/// top of History's list, with the index of the entry's line in the palette
+/// history.
+///
+/// A press reads it, because pixel rows stand off the cell grid and two
+/// entries can share a cell row.
+pub(crate) type HistorySpans = Vec<(Range<u32>, usize)>;
 
 pub struct CommandPalette {
     /// The single command-line input, holding the raw text typed after `:`.
@@ -153,8 +162,17 @@ pub struct CommandPalette {
     ///
     /// The paint stores it, because a row's height comes from the wrap in the
     /// cells before its age, and the age follows the clock. Empty after a
-    /// frame that draws no History.
+    /// frame that draws no History or draws it on pixel rows.
     pub(crate) history_rows: Vec<(Rect, usize)>,
+    /// The spans of the History entries that the last frame drew as pixel
+    /// rows, from the top of [`Self::history_body`], for the pointer.
+    ///
+    /// Empty after a frame that draws History on cell rows or draws none, when
+    /// [`Self::history_rows`] maps a press instead.
+    pub(crate) history_spans: HistorySpans,
+    /// The list rect of the last frame's pixel History, which a press reads its
+    /// pixel row against, or `None` after a frame with no pixel History.
+    pub(crate) history_body: Option<Rect>,
     /// The user commands of the config when the palette opened, which a head
     /// names after the built-in commands.
     pub(crate) commands: Arc<CommandSet>,
@@ -1271,6 +1289,8 @@ impl CommandPalette {
             keys,
             doc_scroll: 0,
             history_rows: Vec::new(),
+            history_spans: Vec::new(),
+            history_body: None,
             commands,
             arg_ghost: None,
             resolved_defaults: Vec::new(),

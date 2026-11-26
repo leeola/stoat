@@ -7769,6 +7769,92 @@ fn history_retires_the_palette_pool() {
     );
 }
 
+/// Pixel History passes the palette's pool to a region with no page over
+/// History's list. The region drops the list's pages, then asks for the pixel
+/// pointer, and the next frame sends nothing for it. A terminal before
+/// protocol 41 and a session with no window socket to carry the report get no
+/// region, so the walk retires the pool.
+#[test]
+fn a_pixel_history_declares_a_pointer_region_with_no_page() {
+    use stoatty_protocol::command::{
+        Command, PoolDropCommand, PoolKind, PoolPointerCommand, PoolRegionCommand,
+    };
+
+    let pool = crate::smooth_scroll::non_pane_pool::PALETTE;
+    let walked = |protocol: u32, socket: bool| {
+        let mut h = Stoat::test();
+        h.stoat.stoatty_protocol = protocol;
+        h.stoat.cell_pixels = Some((9, 18));
+        h.stoat.display_scale = Some(1.0);
+        h.stoat.window_ipc_connected = socket;
+        h.stoat.active_workspace_mut().palette_history =
+            crate::input_history::InputHistory::from_entries(vec!["pwd".to_string()]);
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+        h.stoat.set_apc_tx(tx);
+        h.type_text(":");
+        h.snapshot();
+        emit_raw(&mut h, &mut rx);
+        h.type_keys("up");
+        h.snapshot();
+
+        let palette_commands = |bytes: &[u8]| {
+            command::decode_stream(bytes)
+                .into_iter()
+                .filter(|command| match command {
+                    Command::PoolRegion(region) => region.pool == pool,
+                    Command::PoolDrop(drop) => drop.pool == pool,
+                    Command::PoolPointer(pointer) => pointer.pool == pool,
+                    Command::Fill(fill) | Command::FillDecorations(fill) => fill.pool == pool,
+                    _ => false,
+                })
+                .collect::<Vec<_>>()
+        };
+        let body = h
+            .stoat
+            .command_palette
+            .as_ref()
+            .and_then(|p| p.history_body);
+        let first = palette_commands(&emit_raw(&mut h, &mut rx));
+        let second = palette_commands(&emit_raw(&mut h, &mut rx));
+        (body, first, second)
+    };
+
+    let pointer = walked(stoatty_protocol::PROTOCOL_VERSION, true);
+    let body = pointer.0.expect("History lays its rows out by pixels");
+    let region = PoolRegionCommand {
+        pool,
+        top: body.y,
+        left: body.x,
+        width: body.width,
+        height: body.height,
+        window: 0,
+        kind: PoolKind::Grid,
+        dim: 0,
+        resident: false,
+    };
+    let drop = Command::PoolDrop(PoolDropCommand { pool });
+    assert_eq!(
+        [
+            pointer,
+            walked(stoatty_protocol::DISPLAY_SCALE_PROTOCOL, true),
+            walked(stoatty_protocol::PROTOCOL_VERSION, false),
+        ],
+        [
+            (
+                Some(body),
+                vec![
+                    drop.clone(),
+                    Command::PoolRegion(region),
+                    Command::PoolPointer(PoolPointerCommand { pool, pixels: true }),
+                ],
+                Vec::new(),
+            ),
+            (Some(body), vec![drop.clone()], Vec::new()),
+            (Some(body), vec![drop], Vec::new()),
+        ],
+    );
+}
+
 #[test]
 fn completion_popup_is_pooled_and_retired() {
     use crate::completion::{CompletionItem, CompletionPopup, CompletionSource};

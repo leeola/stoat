@@ -1649,10 +1649,15 @@ fn the_palette_key_line_ends_in_the_namespace_note() {
 /// Two commands run first, so History holds two lines. The chip
 /// `history 1 / 2` advances 176 sixteenths at the Caption scale of 216, so its
 /// box is 198 sixteenths wide, and it ends 4 sixteenths inside the row's end at
-/// cell 143. The selected first row reads the tab wash, and one Island covers
-/// the gap that the root list leaves between its list and its doc. The second
-/// row's U+21BA mark draws in the disabled color from cell 18, and its age
-/// `now` draws muted from cell 139.
+/// cell 143.
+///
+/// History draws pixel rows on a list from cell 17 to cell 143. The selected
+/// first row's box reads the tab wash from pixel row 270, 20 px high and 1 px
+/// inside each end of the list. One Island covers the row between the list
+/// and the doc, cell row 26. The second row starts 1 px under that box, so its
+/// line stands on pixel row 292. Its U+21BA mark draws in the disabled color
+/// from pixel 162, 8 px into its box, and its age `now` draws muted at the
+/// Caption size from pixel 1254 to the 1278 that ends 8 px inside the box.
 #[test]
 fn up_lists_history_under_a_chip() {
     let mut home = support::scratch_home();
@@ -1669,16 +1674,17 @@ fn up_lists_history_under_a_chip() {
         (1174, 241, 1285, 258),
         "history_chip",
     );
-    expect_region(
+    expect_color_box(
         &shot,
         &mut home,
-        (500, 279, 1, 1),
         TAB_WASH,
+        268..291,
+        (154, 270, 1285, 289),
         "history_selected_row",
     );
-    expect_region(&shot, &mut home, (700, 513, 1, 1), BASE, "history_island");
-    let mark = brightest(&shot, cell_rect(18, 16, 1, 1));
-    let age = brightest(&shot, cell_rect(139, 16, 3, 1));
+    expect_region(&shot, &mut home, (700, 480, 1, 1), BASE, "history_island");
+    let mark = brightest(&shot, (162, 292, 9, 18));
+    let age = brightest(&shot, (1254, 292, 24, 18));
     if !(0x1e < mark && mark <= 0x6d && 0x1e < age && age <= 0x98) {
         let frame = keep_frame(&shot, &mut home, "history_rows");
         panic!(

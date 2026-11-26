@@ -1,7 +1,7 @@
 use crate::{
     command_palette::{
         is_action_row, split_head, typed_head, ArgList, ArgPicker, Availability, CliListKind,
-        CommandPalette, Namespace, PaletteCommand, PaletteScope, PickLoad, PickState,
+        CommandPalette, HistorySpans, Namespace, PaletteCommand, PaletteScope, PickLoad, PickState,
         ResolvedCommand, ACTION_TOKEN,
     },
     file_finder::FinderScope,
@@ -214,6 +214,18 @@ const HISTORY_MARK_COLUMN: u16 = 1;
 ///
 /// Each next cell row of a wrapped line starts in this cell too.
 const HISTORY_LINE_COLUMN: u16 = 4;
+
+/// Sixteenths from the list's left edge to the U+21BA mark of a pixel History
+/// row, the 1 px that the row's box stands inside the list and the board's
+/// 8 px of padding at a 9 px cell.
+const HISTORY_PIXEL_MARK: u16 = 16;
+
+/// Sixteenths from the list's left edge to the line of a pixel History row.
+///
+/// The mark takes the board's `width: 2ch` of two cells, and the line follows
+/// it [`PIXEL_COLUMN_GAP`] later, the board's `gap: 8px`. Each line of a
+/// wrapped entry starts here too.
+const HISTORY_PIXEL_LINE: u16 = HISTORY_PIXEL_MARK + 2 * 16 + PIXEL_COLUMN_GAP;
 
 /// The on-screen rectangles of the command-palette filter modal, derived from a
 /// terminal `area` by [`palette_filter_layout`].
@@ -551,6 +563,8 @@ pub(crate) fn render_command_palette(
         return;
     }
     palette.history_rows.clear();
+    palette.history_spans.clear();
+    palette.history_body = None;
 
     if palette.cli_list.is_some() {
         render_palette_cli(palette, ws, home, theme, area, zoom, specs, buf, scene);
@@ -1492,11 +1506,14 @@ fn paint_arg_rows(
 /// needle stand in the chip one space apart, between the word `history` and
 /// the count. Each word marks its chars in the rows and in the input, as
 /// [`input_history::word_spans`] finds them. The rows that the paint draws go
-/// to [`CommandPalette::history_rows`] for the pointer.
+/// to [`CommandPalette::history_rows`] for the pointer, or in the pixel form
+/// their spans to [`CommandPalette::history_spans`] and the list's rect to
+/// [`CommandPalette::history_body`].
 ///
-/// History draws on the live grid with no pool, because its rows differ in
-/// height. Each step of the walk also changes the input and the chip with the
-/// rows.
+/// History draws on the live grid, because its rows differ in height and each
+/// step of the walk also changes the input and the chip with the rows. No pool
+/// pages it. In the pixel form a pool with no page covers the list only so
+/// that a press there reports the pointer's pixel.
 #[allow(clippy::too_many_arguments)]
 fn render_palette_history(
     palette: &mut CommandPalette,
@@ -1509,6 +1526,8 @@ fn render_palette_history(
     buf: &mut Buffer,
     scene: &mut stoat_widgets::ApcScene,
 ) {
+    let pixels = RowMetrics::of(theme, scene);
+    palette.row_metrics = pixels;
     let content_rows = palette.list_rows_hint();
     let Some(layout) = palette_filter_layout(
         area,
@@ -1582,7 +1601,7 @@ fn render_palette_history(
             }
         })
         .collect();
-    palette.history_rows = paint_history_rows(
+    (palette.history_rows, palette.history_spans) = paint_history_rows(
         &entries,
         place,
         now,
@@ -1590,9 +1609,11 @@ fn render_palette_history(
         &palette.availability,
         &palette.commands,
         theme,
+        pixels,
         buf,
         scene,
     );
+    palette.history_body = pixels.map(|_| body);
 
     let stage = palette_footer_parts(KeyStage::History { needle }, theme);
     stage.paint(layout.footer, plate, theme, buf, scene);
@@ -1615,7 +1636,15 @@ fn render_palette_history(
 /// A line with no time wraps one cell inside the right edge. The window starts
 /// where [`history_window`] keeps the selected entry whole.
 ///
-/// Answers the cells of each entry on show with the index of its line.
+/// Answers the cells of each entry on show with the index of its line, and no
+/// pixel span.
+///
+/// With `pixels` the rows are pixel rows laid out by those metrics, as
+/// [`paint_pixel_history_rows`] draws them, and they write no cell. The line
+/// wraps in the whole cells from [`HISTORY_PIXEL_LINE`] to
+/// [`PIXEL_COLUMN_GAP`] before the age, which ends 8 px inside the row's box,
+/// or to that end for a line with no time. The answer is then no cell and the
+/// physical px span of each entry on show.
 #[allow(clippy::too_many_arguments)]
 fn paint_history_rows(
     entries: &[HistoryEntry<'_>],
@@ -1625,9 +1654,10 @@ fn paint_history_rows(
     availability: &Availability,
     commands: &CommandSet,
     theme: &crate::theme::Theme,
+    pixels: Option<RowMetrics>,
     buf: &mut Buffer,
     scene: &mut stoat_widgets::ApcScene,
-) -> Vec<(Rect, usize)> {
+) -> (Vec<(Rect, usize)>, HistorySpans) {
     let row_style = theme.get(crate::theme::scope::UI_TEXT);
     let head_style = row_style.add_modifier(Modifier::BOLD);
     let dim = theme.get(crate::theme::scope::UI_TEXT_DIM);
@@ -1637,28 +1667,71 @@ fn paint_history_rows(
     let keeps_columns = theme
         .try_get(crate::theme::scope::UI_LIST_SELECTED)
         .is_some();
+    let caption = theme.type_scale(TypeRole::Caption);
 
-    let laid: Vec<_> = entries
+    let laid: Vec<LaidEntry<'_>> = entries
         .iter()
         .map(|entry| {
             let chars: Vec<char> = entry.line.chars().collect();
             let age = entry.at.map(|at| history_age(now, at));
-            let age_cells = age.as_ref().map_or(0, |age| age.chars().count() as u16 + 1);
-            let room = area
-                .width
-                .saturating_sub(HISTORY_LINE_COLUMN + 1 + age_cells);
-            let rows = pre_wrap_rows(&chars, usize::from(room), false);
-            let head = history_head_chars(entry.line, availability, commands);
-            (chars, age, rows, head)
+            let room = match pixels {
+                Some(m) => {
+                    let end = history_pixel_end(area, m);
+                    let line_end = match &age {
+                        Some(age) => end
+                            .saturating_sub(text_run::advance_sixteenths(
+                                age.chars().count(),
+                                caption,
+                            ))
+                            .saturating_sub(PIXEL_COLUMN_GAP),
+                        None => end,
+                    };
+                    line_end.saturating_sub(HISTORY_PIXEL_LINE) / 16
+                },
+                None => {
+                    let age_cells = age.as_ref().map_or(0, |age| age.chars().count() as u16 + 1);
+                    area.width
+                        .saturating_sub(HISTORY_LINE_COLUMN + 1 + age_cells)
+                },
+            };
+            LaidEntry {
+                entry,
+                rows: pre_wrap_rows(&chars, usize::from(room), false),
+                chars,
+                age,
+                head: history_head_chars(entry.line, availability, commands),
+            }
         })
         .collect();
-    let heights: Vec<usize> = laid.iter().map(|(_, _, rows, _)| rows.len()).collect();
-    let start = history_window(&heights, selected, usize::from(area.height));
+    let heights: Vec<usize> = laid
+        .iter()
+        .map(|laid| match pixels {
+            Some(m) => m.pitch(laid.rows.len() as u32) as usize,
+            None => laid.rows.len(),
+        })
+        .collect();
+    let budget = match pixels {
+        Some(m) => m.extent(area.height) as usize,
+        None => usize::from(area.height),
+    };
+    let start = history_window(&heights, selected, budget);
+    if let Some(m) = pixels {
+        let spans = paint_pixel_history_rows(&laid, (start, selected), area, theme, m, buf, scene);
+        return (Vec::new(), spans);
+    }
 
     let mut drawn = Vec::new();
     let mut y = area.y;
-    for (place, (entry, (chars, age, rows, head))) in
-        entries.iter().zip(&laid).enumerate().skip(start)
+    for (
+        place,
+        LaidEntry {
+            entry,
+            chars,
+            age,
+            rows,
+            head,
+        },
+    ) in laid.iter().enumerate().skip(start)
     {
         if y >= area.bottom() {
             break;
@@ -1711,7 +1784,154 @@ fn paint_history_rows(
         drawn.push((rect, entry.index));
         y += height;
     }
-    drawn
+    (drawn, Vec::new())
+}
+
+/// A History entry as its row lays it out.
+struct LaidEntry<'a> {
+    entry: &'a HistoryEntry<'a>,
+    chars: Vec<char>,
+    /// The age that the row shows, or `None` for a line with no known time.
+    age: Option<String>,
+    /// The char range of each line that the entry wraps onto.
+    rows: Vec<Range<usize>>,
+    /// The chars of the line's head, as [`history_head_chars`] counts them.
+    head: usize,
+}
+
+/// The sixteenth of a pixel History row that its age ends at, 8 px inside
+/// the row's box, which stands 1 px inside each end of `area`.
+fn history_pixel_end(area: Rect, m: RowMetrics) -> u16 {
+    area.width
+        .saturating_mul(16)
+        .saturating_sub(m.cols(PIXEL_BOX_INSET) + m.cols(PIXEL_ROW_PAD))
+}
+
+/// Paint the History entries `laid` from `start` into `area` as pixel rows
+/// laid out by `m`, with the entry at `selected` as the selected row, and
+/// answer the physical px span of each entry on show with its line's index.
+///
+/// The walk writes no cell. Each entry's box is its lines' 18 px each and a
+/// pad of 1 px over and under them, 1 px from the next and 1 px inside each
+/// end of `area`, and the selected entry's box draws as a bar in the selected
+/// background. The mark draws on the first line at [`HISTORY_PIXEL_MARK`], and
+/// each line of the wrap at [`HISTORY_PIXEL_LINE`], both at the cell size,
+/// with the head and the rest of the line and the needle's marks as
+/// [`history_row_spans`] splits them. The age draws as one
+/// [`TypeRole::Caption`] run on the first line, ending where
+/// [`history_pixel_end`] puts it.
+///
+/// An entry's span runs from its box's top to the next box's top, so the 1 px
+/// under it is its own. The walk ends at the first entry whose top stands
+/// under `area`.
+fn paint_pixel_history_rows(
+    laid: &[LaidEntry<'_>],
+    (start, selected): (usize, usize),
+    area: Rect,
+    theme: &crate::theme::Theme,
+    m: RowMetrics,
+    buf: &mut Buffer,
+    scene: &mut stoat_widgets::ApcScene,
+) -> HistorySpans {
+    let row_style = theme.get(crate::theme::scope::UI_TEXT);
+    let head_style = row_style.add_modifier(Modifier::BOLD);
+    let dim = theme.get(crate::theme::scope::UI_TEXT_DIM);
+    let muted = theme.get(crate::theme::scope::UI_TEXT_MUTED);
+    let mark = theme.get(crate::theme::scope::UI_TEXT_DISABLED);
+    let matched = theme.list_match();
+    let selected_style = theme.list_selected(crate::theme::scope::UI_SELECTION);
+    let keeps_columns = theme
+        .try_get(crate::theme::scope::UI_LIST_SELECTED)
+        .is_some();
+    let fallback = style_rgb(Some(crate::render::themed_fg(theme))).unwrap_or([0xff; 3]);
+    let caption = theme.type_scale(TypeRole::Caption);
+    let end = history_pixel_end(area, m);
+    let left = m.cols(PIXEL_BOX_INSET);
+    let height = u32::from(area.height) * u32::from(m.cell[1]);
+
+    let mut placer = Placer::default();
+    let mut spans = Vec::new();
+    let mut y = 0u32;
+    for (place, laid) in laid.iter().enumerate().skip(start) {
+        if y >= height {
+            break;
+        }
+        let lines = laid.rows.len() as u32;
+        let is_selected = place == selected;
+        if let Some(color) = style_rgb(selected_style.bg).filter(|_| is_selected) {
+            let bar = PixelBar {
+                x: left as i16,
+                y,
+                width: area.width.saturating_mul(16).saturating_sub(2 * left),
+                height: m.box16(lines as u16),
+                color,
+                radius: SELECTED_ROW_RADIUS,
+            };
+            pixel_rows::bar(&mut placer, &m, area, &bar, buf, scene);
+        }
+        let column = |own: Style| match is_selected && !keeps_columns {
+            true => selected_style,
+            false => own,
+        };
+        let styles = (column(head_style), column(dim), matched);
+
+        for (line, row) in laid.rows.iter().enumerate() {
+            let top = y + m.px(ROW_PAD) + line as u32 * u32::from(m.cell[1]);
+            if top >= height {
+                break;
+            }
+            let anchor = placer.line(&m, area, top, scene);
+            if line == 0 {
+                let mark_span = [("\u{21ba}", column(mark))];
+                let (col, scale) = (HISTORY_PIXEL_MARK, FULL_CELL_SCALE);
+                pixel_rows::emit_spans(&mark_span, col, scale, anchor, fallback, buf, scene);
+            }
+            let row_spans = history_row_spans(laid, row, styles);
+            let (col, scale) = (HISTORY_PIXEL_LINE, FULL_CELL_SCALE);
+            pixel_rows::emit_spans(&row_spans, col, scale, anchor, fallback, buf, scene);
+            if let (0, Some(age)) = (line, &laid.age) {
+                let age_x =
+                    end.saturating_sub(text_run::advance_sixteenths(age.chars().count(), caption));
+                let age_span = [(age.as_str(), column(muted))];
+                pixel_rows::emit_spans(&age_span, age_x, caption, anchor, fallback, buf, scene);
+            }
+        }
+
+        let pitch = m.pitch(lines);
+        spans.push((y..y + pitch, laid.entry.index));
+        y += pitch;
+    }
+    placer.end(scene);
+    spans
+}
+
+/// The spans of the chars `row` of `laid`'s line, the head's chars in
+/// `head`, the rest in `rest`, and each char inside one of the entry's marks
+/// patched by `matched`.
+fn history_row_spans(
+    laid: &LaidEntry<'_>,
+    row: &Range<usize>,
+    (head, rest, matched): (Style, Style, Style),
+) -> Vec<(String, Style)> {
+    let style_at = |index: usize| {
+        let own = match index < laid.head {
+            true => head,
+            false => rest,
+        };
+        match laid.entry.marks.iter().any(|mark| mark.contains(&index)) {
+            true => own.patch(matched),
+            false => own,
+        }
+    };
+    let mut spans: Vec<(String, Style)> = Vec::new();
+    for index in row.clone() {
+        let style = style_at(index);
+        match spans.last_mut() {
+            Some((text, last)) if *last == style => text.push(laid.chars[index]),
+            _ => spans.push((laid.chars[index].to_string(), style)),
+        }
+    }
+    spans
 }
 
 /// Patch `style` over each cell of a History row whose char is inside `marks`.
@@ -1767,8 +1987,9 @@ fn history_age(now: i64, at: i64) -> String {
 /// above the list's last row.
 ///
 /// The window starts at the newest entry from which the entries through
-/// `selected` fit in `rows` rows. `heights` holds the rows of each entry,
-/// newest first. A selected entry taller than the list starts the window
+/// `selected` fit in `rows`. `heights` holds the height of each entry, newest
+/// first, in the unit of `rows`: cell rows for cell rows, or physical px for
+/// pixel rows. A selected entry taller than the list starts the window
 /// itself, and a selection past the last entry counts as the last.
 fn history_window(heights: &[usize], selected: usize, rows: usize) -> usize {
     let Some(last) = heights.len().checked_sub(1) else {
@@ -3624,8 +3845,8 @@ mod tests {
     use crate::{
         cli_spec::{self, RG_HELP},
         command_palette::{
-            action_row, ArgList, ArgRow, Availability, CliListKind, Namespace, PaletteCommand,
-            PickLoad, PickState, ResolvedCommand,
+            action_row, ArgList, ArgRow, Availability, CliListKind, HistorySpans, Namespace,
+            PaletteCommand, PickLoad, PickState, ResolvedCommand,
         },
         input_history,
         keymap::ActionKeys,
@@ -3644,7 +3865,7 @@ mod tests {
         layout::Rect,
         style::{Color, Modifier, Style},
     };
-    use std::{collections::HashMap, sync::Arc};
+    use std::{collections::HashMap, ops::Range, sync::Arc};
     use stoat_action::registry;
     use stoat_config::Template;
     use stoatty_protocol::command::{decode_stream, BarCommand, Command, TextRunCommand};
@@ -5079,6 +5300,245 @@ mod tests {
         assert_eq!(marked_cells(&buf, 0), [4, 5, 6, 20, 21, 22, 23, 24]);
     }
 
+    /// A pixel History row draws no cell. Its line stands 1 px under the
+    /// row's top, the U+21BA mark at 16 sixteenths and the line at 62 with
+    /// the head bold. The age ends 8 px inside the row's box, at 624 in a list
+    /// 40 cells wide. The row's span is its 20 px box and the 1 px under it.
+    #[test]
+    fn a_pixel_history_row_draws_its_mark_its_line_and_its_age() {
+        let entries = [HistoryEntry {
+            index: 0,
+            line: "cd /alpha",
+            at: Some(0),
+            marks: Vec::new(),
+        }];
+        let white = [0xff; 3];
+        assert_eq!(
+            pixel_history(&entries, usize::MAX, &Theme::empty(), 6),
+            (
+                vec![
+                    Command::Nudge([0, 1]),
+                    pixel_run(0, 16, "\u{21ba}", white, false),
+                    pixel_run(0, 62, "cd", white, true),
+                    pixel_run(0, 94, " /alpha", white, false),
+                    pixel_run(0, 592, "2m", white, false),
+                    Command::Nudge([0, 0]),
+                ],
+                vec![(0..21, 0)],
+                false,
+            ),
+        );
+    }
+
+    /// A pixel History line wraps after the last space that fits before the
+    /// age, and its next line stands 18 px under it. The selected entry's box
+    /// is a rounded bar 1 px inside each end of the list over both lines and
+    /// their pads. The next entry starts 1 px under that box, so its line
+    /// stands on pixel row 40, 4 px into cell row 2.
+    #[test]
+    fn a_pixel_history_line_wraps_after_the_last_space_that_fits() {
+        let long = format!("run {} {}", "a".repeat(20), "b".repeat(20));
+        let entries = [
+            HistoryEntry {
+                index: 7,
+                line: &long,
+                at: Some(0),
+                marks: Vec::new(),
+            },
+            HistoryEntry {
+                index: 3,
+                line: "cd /alpha",
+                at: Some(0),
+                marks: Vec::new(),
+            },
+        ];
+        let theme = {
+            let src = r##"theme t {
+                ui.list.selected = { fg: "#000000", bg: "#7f7f7f" };
+                ui.text.muted.fg = "#050505";
+            }"##;
+            let (config, _) = stoat_config::parse(src);
+            Theme::from_config(&config.expect("theme parses"), "t").expect("theme loads")
+        };
+        let (white, muted) = ([0xff; 3], [5, 5, 5]);
+        let (commands, spans, _) = pixel_history(&entries, 0, &theme, 6);
+
+        assert_eq!(
+            (commands, spans),
+            (
+                vec![
+                    Command::Bar(BarCommand {
+                        x: 2,
+                        y: 0,
+                        width: 636,
+                        height: 34,
+                        color: [0x7f; 3],
+                        occludes: false,
+                        hatch: None,
+                        radius: 4,
+                        corners: 0,
+                    }),
+                    Command::Nudge([0, 1]),
+                    pixel_run(0, 16, "\u{21ba}", white, false),
+                    pixel_run(0, 62, "run", white, true),
+                    pixel_run(0, 110, &format!(" {} ", "a".repeat(20)), white, false),
+                    pixel_run(0, 592, "2m", muted, false),
+                    pixel_run(16, 62, &"b".repeat(20), white, false),
+                    Command::Nudge([0, 4]),
+                    pixel_run(32, 16, "\u{21ba}", white, false),
+                    pixel_run(32, 62, "cd", white, true),
+                    pixel_run(32, 94, " /alpha", white, false),
+                    pixel_run(32, 592, "2m", muted, false),
+                    Command::Nudge([0, 0]),
+                ],
+                vec![(0..39, 7), (39..60, 3)],
+            ),
+        );
+    }
+
+    /// A pixel History word longer than its room breaks at the room's last
+    /// cell, 32 cells from the line's start before an age and 35 for a line
+    /// with no time.
+    #[test]
+    fn a_pixel_history_word_longer_than_a_row_breaks_at_the_last_cell() {
+        let word = "x".repeat(40);
+        let line_chars = |at| {
+            let entries = [HistoryEntry {
+                index: 0,
+                line: &word,
+                at,
+                marks: Vec::new(),
+            }];
+            let (commands, _, _) = pixel_history(&entries, usize::MAX, &Theme::empty(), 6);
+            commands
+                .into_iter()
+                .filter_map(|command| match command {
+                    Command::TextRun(run) if run.col == 62 => Some(run.text.len()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+        };
+        assert_eq!([line_chars(Some(0)), line_chars(None)], [[32, 8], [35, 5]]);
+    }
+
+    /// A pixel History row gives `ui.list.match` to the chars of each word of
+    /// the needle at the word's first place in the line, over the weight of
+    /// the head `git log`, and splits its runs where a mark starts and ends.
+    #[test]
+    fn a_pixel_history_row_marks_the_matched_words() {
+        let line = "git log --graph stoat/src";
+        let entries = [HistoryEntry {
+            index: 0,
+            line,
+            at: None,
+            marks: input_history::word_spans(line, "stoat git"),
+        }];
+        let (commands, _, _) = pixel_history(&entries, usize::MAX, &match_theme(), 6);
+        let (text, matched) = ([4; 3], [7; 3]);
+        assert_eq!(
+            commands,
+            [
+                Command::Nudge([0, 1]),
+                pixel_run(0, 16, "\u{21ba}", text, false),
+                pixel_run(0, 62, "git", matched, true),
+                pixel_run(0, 110, " log", text, true),
+                pixel_run(0, 174, " --graph ", text, false),
+                pixel_run(0, 318, "stoat", matched, false),
+                pixel_run(0, 398, "/src", text, false),
+                Command::Nudge([0, 0]),
+            ],
+        );
+    }
+
+    /// The pixel History window counts each entry's box and the 1 px under it
+    /// against the list's px. In a list 10 rows tall the boxes of nine
+    /// one-line entries end at pixel row 188, past the 180 that the list
+    /// holds, so with the ninth selected the window starts at the second. The
+    /// tenth shows its top, and the eleventh starts under the list and draws
+    /// nothing.
+    #[test]
+    fn the_pixel_history_window_keeps_the_selected_entry_whole() {
+        let lines: Vec<String> = (0..11).map(|index| format!("cd /{index}")).collect();
+        let entries: Vec<HistoryEntry<'_>> = lines
+            .iter()
+            .enumerate()
+            .map(|(index, line)| HistoryEntry {
+                index,
+                line,
+                at: None,
+                marks: Vec::new(),
+            })
+            .collect();
+        let (_, spans, _) = pixel_history(&entries, 8, &Theme::empty(), 10);
+
+        let shown: Vec<(Range<u32>, usize)> = (1..10u32)
+            .map(|index| ((index - 1) * 21..index * 21, index as usize))
+            .collect();
+        assert_eq!(spans, shown);
+    }
+
+    /// A line of a pixel History entry whose top stands under the list draws
+    /// nothing. A list 1 row tall shows the first 35 chars of a 40-char word,
+    /// and its last 5 would start on pixel row 19.
+    #[test]
+    fn a_pixel_history_line_under_the_list_draws_nothing() {
+        let word = "x".repeat(40);
+        let entries = [HistoryEntry {
+            index: 0,
+            line: &word,
+            at: None,
+            marks: Vec::new(),
+        }];
+        let (commands, spans, _) = pixel_history(&entries, usize::MAX, &Theme::empty(), 1);
+        let white = [0xff; 3];
+        assert_eq!(
+            (commands, spans),
+            (
+                vec![
+                    Command::Nudge([0, 1]),
+                    pixel_run(0, 16, "\u{21ba}", white, false),
+                    pixel_run(0, 62, &"x".repeat(35), white, true),
+                    Command::Nudge([0, 0]),
+                ],
+                vec![(0..39, 0)],
+            ),
+        );
+    }
+
+    /// The commands, less the ends of their runs, and the spans of History
+    /// `entries` painted as pixel rows by [`M1`] into the list (0, 0, 40,
+    /// `rows`) under `theme`, two minutes after the time 0, with entry
+    /// `selected` selected, and whether the paint wrote a cell or answered
+    /// one.
+    fn pixel_history(
+        entries: &[HistoryEntry<'_>],
+        selected: usize,
+        theme: &Theme,
+        rows: u16,
+    ) -> (Vec<Command>, HistorySpans, bool) {
+        let list = Rect::new(0, 0, 40, rows);
+        let mut buf = Buffer::empty(list);
+        let mut scene = stoat_widgets::ApcScene::new();
+        let (cells, spans) = paint_history_rows(
+            entries,
+            selected,
+            125,
+            list,
+            &Availability::default(),
+            &CommandSet::default(),
+            theme,
+            Some(M1),
+            &mut buf,
+            &mut scene,
+        );
+        let commands = decode_stream(scene.bytes())
+            .into_iter()
+            .filter(|command| *command != Command::TextRunEnd)
+            .collect();
+        let drew_cells = !cells.is_empty() || buf != Buffer::empty(list);
+        (commands, spans, drew_cells)
+    }
+
     /// The recalled input gives `ui.list.match` to the chars that the needle's
     /// words mark, and plain text to the runs between them. A mark wins over
     /// the head's command color, and the ghost takes no mark.
@@ -5163,7 +5623,7 @@ mod tests {
     ) -> (Buffer, Vec<(Rect, usize)>) {
         let list = Rect::new(0, 0, 40, 4);
         let mut buf = Buffer::empty(list);
-        let rows = paint_history_rows(
+        let (rows, _) = paint_history_rows(
             entries,
             usize::MAX,
             125,
@@ -5171,6 +5631,7 @@ mod tests {
             &Availability::default(),
             &CommandSet::default(),
             theme,
+            None,
             &mut buf,
             &mut stoat_widgets::ApcScene::new(),
         );

@@ -2397,6 +2397,53 @@ fn a_press_on_a_later_cell_row_of_a_wrapped_history_line_recalls_that_line() {
     assert_eq!(palette_input(&h), long_history_line());
 }
 
+/// A press on pixel History recalls the entry under the pixel row that the
+/// palette's pool reports. In cell row 3 of the list, pixel row 62 is in the
+/// span of `pwd`, and pixel row 58 in the span of the long line.
+#[test]
+fn a_history_press_lands_on_the_entry_under_the_pointer_s_pixel() {
+    let pressed = |pixel_row: u16| {
+        let (mut h, body) = pixel_history_harness();
+        let pool = crate::smooth_scroll::non_pane_pool::PALETTE;
+        let kind = MouseKind::Press(IpcMouseButton::Left);
+        let grid = (body.x + 10, body.y + 3);
+        h.stoat
+            .handle_window_ipc(pool_gesture(pool, kind, grid, (90, pixel_row)));
+        palette_input(&h)
+    };
+    assert_eq!(
+        [pressed(62), pressed(58)],
+        ["pwd".to_owned(), long_history_line()]
+    );
+}
+
+/// A press on the row above pixel History's list recalls nothing and leaves
+/// History open.
+#[test]
+fn a_press_above_pixel_history_recalls_nothing() {
+    let (mut h, body) = pixel_history_harness();
+    let press = MouseEventKind::Down(MouseButton::Left);
+    h.stoat.update(mouse_event(press, body.x + 10, body.y - 1));
+    assert_eq!(
+        (
+            palette_input(&h),
+            h.stoat.active_workspace().palette_history.is_walking()
+        ),
+        ("cd /beta".to_owned(), true)
+    );
+}
+
+/// A press on pixel History with no pixel report takes the middle pixel row
+/// of its cell. In cell row 3 of the list that is pixel row 63, in the span
+/// of `pwd`, where the cell's top pixel row 54 is in the long line's.
+#[test]
+fn a_history_press_with_no_pixel_report_takes_the_middle_of_its_cell() {
+    let (mut h, body) = pixel_history_harness();
+    let press = MouseEventKind::Down(MouseButton::Left);
+    h.stoat.update(mouse_event(press, body.x + 10, body.y + 3));
+    assert_eq!(palette_input(&h), "pwd");
+}
+
 /// A wheel notch over History steps it in list order. A notch down goes to the
 /// next older line, a notch up goes to the next newer, and no notch leaves
 /// History.
@@ -2433,7 +2480,30 @@ fn a_wheel_notch_over_history_steps_it_in_list_order() {
 /// The header takes one row, so History starts on row 5. `cd /beta` stands on
 /// row 5, the long line on rows 6 and 7, and `pwd` on row 8.
 fn history_rows_harness() -> crate::test_harness::TestHarness {
+    walked_history(Stoat::test())
+}
+
+/// The harness of [`history_rows_harness`] with History laid out by pixels,
+/// on a 9 by 18 px cell at a display scale of 1, and the rect of its list.
+///
+/// `cd /beta` takes the pixel rows 0 to 21 of the list, the long line 21 to
+/// 60 on two lines, and `pwd` 60 to 81.
+fn pixel_history_harness() -> (crate::test_harness::TestHarness, Rect) {
     let mut h = Stoat::test();
+    h.stoat.stoatty_protocol = stoatty_protocol::PROTOCOL_VERSION;
+    h.stoat.cell_pixels = Some((9, 18));
+    h.stoat.display_scale = Some(1.0);
+    let h = walked_history(h);
+    let palette = h.stoat.command_palette.as_ref().expect("palette open");
+    let body = palette
+        .history_body
+        .expect("History lays its rows out by pixels");
+    (h, body)
+}
+
+/// `h` with its palette showing History after `:` and Up, over the history
+/// `pwd`, then [`long_history_line`], then `cd /beta`.
+fn walked_history(mut h: crate::test_harness::TestHarness) -> crate::test_harness::TestHarness {
     h.stoat.active_workspace_mut().palette_history =
         crate::input_history::InputHistory::from_entries(vec![
             "pwd".to_string(),

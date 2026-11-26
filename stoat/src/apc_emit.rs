@@ -923,10 +923,22 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
 
     // The command palette is a modal over normal mode like the finder. Its
     // fixed list region pools as a non-pane surface. Command-filter mode
-    // pools the command list. History draws on the live grid with no pool,
-    // because its rows differ in height, so a walk retires the pool. The Run
-    // Block holds no list, so it retires the pool too.
-    let pools_palette = !overlay && !stoat.active_workspace().palette_history.is_walking();
+    // pools the command list. History draws on the live grid with no page,
+    // because its rows differ in height, so a walk retires the list's pool.
+    // The Run Block holds no list, so it retires the pool too.
+    let walking = stoat.active_workspace().palette_history.is_walking();
+    let pools_palette = !overlay && !walking;
+    // Pixel History rows stand off the cell grid, so the pool passes to a
+    // region with no page over History's list, where a press reports the
+    // pointer's pixel. That report rides the window socket.
+    let history_pointer = (!overlay
+        && walking
+        && stoat.window_ipc_connected
+        && stoat.stoatty_protocol >= POOL_POINTER_PROTOCOL)
+        .then_some(stoat.command_palette.as_ref())
+        .flatten()
+        .filter(|p| p.block.is_none())
+        .and_then(|p| p.history_body);
     let palette_list = pools_palette
         .then_some(stoat.command_palette.as_ref())
         .flatten()
@@ -1124,7 +1136,7 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
     if finder_list.is_some() {
         active.push(crate::smooth_scroll::non_pane_pool::FINDER);
     }
-    if palette_list.is_some() || palette_arg_list.is_some() {
+    if palette_list.is_some() || palette_arg_list.is_some() || history_pointer.is_some() {
         active.push(crate::smooth_scroll::non_pane_pool::PALETTE);
     }
     if code_search_list.is_some() {
@@ -2466,6 +2478,20 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
         if pixels.is_some() && stoat.window_ipc_connected {
             ask_pixel_pointer(&mut out, held, region.pool, stoat.stoatty_protocol);
         }
+    }
+    if let Some(body) = history_pointer {
+        let region = PoolRegionCommand {
+            pool: crate::smooth_scroll::non_pane_pool::PALETTE,
+            top: body.y,
+            left: body.x,
+            width: body.width,
+            height: body.height,
+            window: 0,
+            kind: PoolKind::Grid,
+            dim: 0,
+            resident: false,
+        };
+        stoat.smooth_scroll.declare_pointer_region(&mut out, region);
     }
 
     // A pixel list pools resident, as the finder's does.

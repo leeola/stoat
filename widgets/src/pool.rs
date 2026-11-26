@@ -23,9 +23,9 @@ use std::{
     ops::Range,
 };
 use stoatty_protocol::command::{
-    encode_fill_scope, encode_minimap_view_into, encode_pool_drop_into, encode_pool_region_into,
-    encode_reposition_into, encode_scroll_into, scaled_cell_side, MinimapViewCommand, PoolKind,
-    PoolRegionCommand, ScrollCommand,
+    encode_fill_scope, encode_minimap_view_into, encode_pool_drop_into, encode_pool_pointer_into,
+    encode_pool_region_into, encode_reposition_into, encode_scroll_into, scaled_cell_side,
+    MinimapViewCommand, PoolKind, PoolRegionCommand, ScrollCommand,
 };
 
 /// Pages kept buffered around each pool's visible page, the pool's working
@@ -252,6 +252,42 @@ impl SmoothScrollState {
         }
         encode_pool_region_into(out, &region);
         entry.region = Some(region);
+    }
+
+    /// Declare `region` as a pool that holds no page and reports a press with
+    /// the pointer's pixel.
+    ///
+    /// For a surface that draws on the live grid and reads the pixel under a
+    /// press. The terminal composes nothing for a pool with no page, so the
+    /// live grid shows through, and the region gives a `pool_mouse` report its
+    /// origin.
+    ///
+    /// A pool that holds `region` with no page sends nothing. Any other pool
+    /// under the id drops first, as [`Self::drop_pool`] drops it, because a
+    /// terminal that takes a pool's region again keeps its scroll target, and
+    /// its pages at an unchanged grid. The region then goes out with the ask
+    /// for the pixel pointer, which the terminal keeps until the pool drops.
+    /// [`Self::drop_absent`] retires the pool as it retires any other.
+    pub fn declare_pointer_region(&mut self, out: &mut Vec<u8>, region: PoolRegionCommand) {
+        let held = self.pools.get(&region.pool).is_some_and(|entry| {
+            entry.requested.is_none()
+                && entry
+                    .region
+                    .is_some_and(|held| held.same_placement(&region))
+        });
+        if held {
+            return;
+        }
+        self.drop_pool(out, region.pool);
+        encode_pool_region_into(out, &region);
+        encode_pool_pointer_into(out, region.pool, true);
+        self.pools.insert(
+            region.pool,
+            PoolEmitState {
+                region: Some(region),
+                ..PoolEmitState::default()
+            },
+        );
     }
 
     /// Record `version` as the content of `pool`'s buffered pages, and send
@@ -818,8 +854,8 @@ mod tests {
         PageVersions, Refill, SmoothScrollState, WINDOW_PAGES,
     };
     use stoatty_protocol::command::{
-        decode, Command, MinimapViewCommand, PoolDropCommand, PoolKind, PoolRegionCommand,
-        RepositionCommand, ScrollCommand,
+        decode, Command, MinimapViewCommand, PoolDropCommand, PoolKind, PoolPointerCommand,
+        PoolRegionCommand, RepositionCommand, ScrollCommand,
     };
 
     fn region(pool: u32, height: u16) -> PoolRegionCommand {
@@ -2098,6 +2134,77 @@ mod tests {
             page: 2,
             fraction: 0
         })));
+    }
+
+    /// A pointer region declares its pool and asks for the pixel pointer, and
+    /// fills no page. A second call with the region the pool holds sends
+    /// nothing.
+    #[test]
+    fn a_pointer_region_declares_one_time_and_fills_no_page() {
+        let mut state = SmoothScrollState::default();
+        let (mut first, mut second) = (Vec::new(), Vec::new());
+        state.declare_pointer_region(&mut first, region(4, 20));
+        state.declare_pointer_region(&mut second, region(4, 20));
+
+        assert_eq!(
+            (commands(&first), commands(&second)),
+            (pointer_redeclare(4, 20)[1..].to_vec(), Vec::new())
+        );
+    }
+
+    /// A pointer region at another placement drops its pool, then declares it
+    /// and asks for the pixel pointer again.
+    #[test]
+    fn a_moved_pointer_region_drops_and_declares_again() {
+        let mut state = SmoothScrollState::default();
+        let mut out = Vec::new();
+        state.declare_pointer_region(&mut out, region(4, 20));
+        out.clear();
+        state.declare_pointer_region(&mut out, region(4, 12));
+
+        assert_eq!(commands(&out), pointer_redeclare(4, 12));
+    }
+
+    /// A pool that filled pages drops them before it declares a pointer
+    /// region, even at the placement that it filled them at.
+    #[test]
+    fn a_filled_pool_drops_its_pages_before_a_pointer_region() {
+        let mut state = SmoothScrollState::default();
+        let mut out = Vec::new();
+        emit_into(&mut out, &mut state, region(4, 20), 0.0, 0, false, |_| {
+            Vec::new()
+        });
+        out.clear();
+        state.declare_pointer_region(&mut out, region(4, 20));
+
+        assert_eq!(commands(&out), pointer_redeclare(4, 20));
+    }
+
+    /// The commands that declare a pointer region over a held pool `pool`:
+    /// the drop, the region `height` rows tall, and the ask for the pixel
+    /// pointer.
+    fn pointer_redeclare(pool: u32, height: u16) -> Vec<Command> {
+        vec![
+            Command::PoolDrop(PoolDropCommand { pool }),
+            Command::PoolRegion(region(pool, height)),
+            Command::PoolPointer(PoolPointerCommand { pool, pixels: true }),
+        ]
+    }
+
+    /// A pointer region's pool retires as any pool does, so a frame that
+    /// draws no surface over it drops it.
+    #[test]
+    fn drop_absent_retires_a_pointer_region() {
+        let mut state = SmoothScrollState::default();
+        let mut out = Vec::new();
+        state.declare_pointer_region(&mut out, region(4, 20));
+        out.clear();
+        state.drop_absent(&mut out, &[]);
+
+        assert_eq!(
+            commands(&out),
+            vec![Command::PoolDrop(PoolDropCommand { pool: 4 })]
+        );
     }
 
     #[test]
