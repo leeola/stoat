@@ -1784,9 +1784,10 @@ fn the_file_finder_box_casts_the_modal_shadow() {
 ///
 /// The base cell sits in the preview, under the six lines of the file it shows.
 ///
-/// The rule under the preview's path header runs along the last pixel row of
-/// cell row 12, the header's first row, in the divider color, as a rule on the
-/// editor surface draws. The pixel row above it reads the base surface.
+/// The rule under the preview's path header runs 2 px into cell row 13, the
+/// header's second row, on pixel row 236, 24 px under the preview Island's top,
+/// in the divider color, as a rule on the editor surface draws. The pixel row
+/// above it reads the base surface.
 ///
 /// The preview draws at Preview Scale from pixel (603, 252), cell (67, 14), and
 /// numbers its lines in four 5 px digit cells, pixels 603 to 622, before its
@@ -1862,18 +1863,18 @@ fn the_file_finder_box_draws_as_the_ground_plate() {
         "finder_preview",
     );
 
-    let (x, y, width, height) = cell_rect(110, 12, 1, 1);
+    let (x, _, width, _) = cell_rect(110, 12, 1, 1);
     expect_region(
         &shot,
         &mut home,
-        (x, y + height - 2, width, 1),
+        (x, 235, width, 1),
         BASE,
         "preview_header_over_rule",
     );
     expect_region(
         &shot,
         &mut home,
-        (x, y + height - 1, width, 1),
+        (x, 236, width, 1),
         DIVIDER,
         "preview_header_rule",
     );
@@ -1889,6 +1890,46 @@ fn the_file_finder_box_draws_as_the_ground_plate() {
             frame.display(),
         );
     }
+}
+
+/// The finder preview's path header is the boards' 24 px band over a 1 px rule.
+///
+/// On the smallest plate the preview is cells 67 to 125, its header is the
+/// cell rows 12 and 13, and its Island's top is pixel row 212. The rule fills
+/// the 534 px of pixel row 236 from pixel column 603, 24 px under that top,
+/// and pixel row 233, where the rule stood on whole cells, reads the base. The
+/// shown lines of a one-line file draw at the Caption size in the muted color,
+/// 1 px over the header's first row, and end 10 px inside the Island, so the
+/// pixels from (1058, 215) peak above the base and at most at the muted color,
+/// and the 6 px right of them read the base.
+#[test]
+fn the_preview_header_is_a_twenty_four_pixel_band() {
+    let mut home = support::scratch_home();
+    let shot = settled_frame(
+        home.path(),
+        "many-files",
+        "src/alpha.txt",
+        "<Space>p<Settle>",
+    );
+
+    let rule = longest_run(&shot, (603, 236, 534), DIVIDER);
+    let label = brightest(&shot, (1058, 215, 69, 18));
+    if rule != 534 || pixel(&shot, 900, 233) != BASE || !(0x1f..=0x98).contains(&label) {
+        let frame = keep_frame(&shot, &mut home, "preview_header_band");
+        panic!(
+            "the rule's longest run on pixel row 236 is {rule} px where it is 534, pixel \
+             (900, 233) reads {}, and the label peaks at {label:#04x}; the frame is {}",
+            hex(pixel(&shot, 900, 233)),
+            frame.display(),
+        );
+    }
+    expect_region(
+        &shot,
+        &mut home,
+        (1128, 215, 6, 18),
+        BASE,
+        "preview_header_label_end",
+    );
 }
 
 /// The file finder's preview draws at Preview Scale, so its lines stand on the

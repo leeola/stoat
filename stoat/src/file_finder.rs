@@ -3734,8 +3734,9 @@ mod tests {
         );
     }
 
-    /// The preview opens with the shown file's directory and name, and the
-    /// lines the pane shows one column from its right edge.
+    /// The preview opens with the shown file's directory and name, which stand
+    /// with no cell between them, and the lines the pane shows one column from
+    /// its right edge.
     #[test]
     fn the_preview_header_names_the_file_and_its_shown_lines() {
         let mut h = TestHarness::with_size(120, 30);
@@ -3755,7 +3756,7 @@ mod tests {
                 text.split_whitespace().collect::<Vec<_>>(),
                 text.ends_with("1\u{2013}3 ")
             ),
-            (vec!["src/", "a.rs", "lines", "1\u{2013}3"], true),
+            (vec!["src/a.rs", "lines", "1\u{2013}3"], true),
             "the header row reads {text:?}",
         );
     }

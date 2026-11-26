@@ -4,18 +4,26 @@ use crate::{
     file_finder::{FileFinder, FinderScope},
     picker::{write_row_display, PreviewSource},
     render::{
+        paint::style_rgb,
         picker::{FilterHeader, Footer, PathRows, RowMarks, RowStart, FILTER_PROMPT},
         pixel_rows::RowMetrics,
-        text::write_str_clipped,
+        text::{clip_to_width, write_str_clipped},
+        TypeScale,
     },
+    theme::TypeRole,
     workspace::Workspace,
 };
 use ratatui::{
     buffer::Buffer,
     layout::Rect,
-    widgets::{Block, Borders},
+    style::Style,
+    widgets::{Block, Borders, StatefulWidget},
 };
 use std::path::Path;
+use stoat_widgets::{
+    bar::Bar,
+    text_run::{self, TextRun},
+};
 use unicode_width::UnicodeWidthStr;
 
 /// The on-screen rectangles of the file finder modal, derived from a terminal
@@ -59,6 +67,10 @@ struct BodyRows {
 /// Rows the finder's preview gives its path header, the header row and the
 /// rule under it.
 const PREVIEW_HEADER_ROWS: u16 = 2;
+
+/// The sixteenths of a cell that the shown lines of the preview's path header end
+/// inside the header under the plate look, and that the path stops short of them.
+const PREVIEW_HEADER_INSET: u16 = 14;
 
 /// The finder's footer hints, each a bound key and the word for what it does.
 ///
@@ -565,15 +577,27 @@ fn row_prefix(finder: &FileFinder) -> &str {
 /// shown source's directory and name, the lines the pane shows at the right,
 /// and the rule under them.
 ///
+/// The directory reads in `ui.text.muted` and the name in `ui.text` with no
+/// cell between them, and the extension that [`chrome::tagged_name`] splits off
+/// takes its tag's color, as a finder row draws it. The lines read in
+/// `ui.text.muted`. A row too narrow for the whole path keeps the name.
+///
 /// The rule draws in `ui.divider`, the color of a rule on the editor surface,
-/// and in `ui.border.inactive` when the theme gives the divider no color. It
-/// runs through the header's second row, or along the bottom of its first row
-/// under the plate look, which keeps the second row blank above the source.
+/// and in `ui.border.inactive` when the theme gives the divider no color. In
+/// cells it runs through the header's second row.
+///
+/// Under the plate look the header is the boards' 24 px band, which starts at
+/// the Island's top 4 px over its first row, and it writes no cell. Its text
+/// draws as runs 1 px over that row, the path at the [`TypeRole::Ui`] size and
+/// the lines at the [`TypeRole::Caption`] size, and the rule draws 2 px into
+/// the second row. A part whose color has no RGB value draws nothing.
 ///
 /// Under a live scene the header sits on the editor surface, which the
 /// preview below it shares, and a plain terminal keeps the modal's fill under
 /// both. A blank pane leaves the header row empty, and a source with no path
 /// shows only its lines.
+///
+/// [`chrome::tagged_name`]: crate::render::chrome::tagged_name
 fn paint_preview_header(
     finder: &FileFinder,
     header: Rect,
@@ -583,29 +607,20 @@ fn paint_preview_header(
     buf: &mut Buffer,
     scene: &mut stoat_widgets::ApcScene,
 ) {
-    let (y, end) = (header.y, header.x + header.width);
     let core = finder.active_core_ref();
-    let muted = theme.get(crate::theme::scope::UI_TEXT_MUTED);
-
-    let mut path_end = end.saturating_sub(1);
     let lines = core
         .preview
         .source()
         .and_then(|_| ws.editors.get_mut(core.preview.editor))
-        .and_then(shown_lines);
-    if let Some((top, bottom)) = lines {
-        let text = format!("lines {top}\u{2013}{bottom}");
-        let x = path_end.saturating_sub(text.width() as u16);
-        write_str_clipped(buf, x, y, &text, muted, end);
-        path_end = x.saturating_sub(2);
-    }
+        .and_then(shown_lines)
+        .map(|(top, bottom)| format!("lines {top}\u{2013}{bottom}"));
 
     let path = core.preview.source().and_then(|source| match source {
         PreviewSource::File(path) | PreviewSource::Directory(path) => Some(path.as_path()),
         PreviewSource::Buffer(id) => ws.buffers.path_for(*id),
         PreviewSource::Terminal(_) | PreviewSource::Markdown(_) | PreviewSource::Text(_) => None,
     });
-    if let Some(path) = path {
+    let label = path.map(|path| {
         let mut label = row_prefix(finder).to_owned();
         write_row_display(
             &mut label,
@@ -614,35 +629,197 @@ fn paint_preview_header(
             core.picklist.display_roots.as_deref(),
             home,
         );
-        let split = label
-            .char_indices()
-            .nth(crate::render::picker::name_start(&label))
-            .map_or(label.len(), |(byte, _)| byte);
-        let (dir, name) = label.split_at(split);
-
-        let text = theme.get(crate::theme::scope::UI_TEXT);
-        let x = header.x + 1;
-        // The name is what the header is for, so a row too narrow for both
-        // keeps it and drops the directory.
-        let fits = x as usize + dir.width() + 1 + name.width() <= path_end as usize;
-        match dir.is_empty() || !fits {
-            true => write_str_clipped(buf, x, y, name, text, path_end),
-            false => {
-                write_str_clipped(buf, x, y, dir, muted, path_end);
-                let name_x = x + dir.width() as u16 + 1;
-                write_str_clipped(buf, name_x, y, name, text, path_end);
-            },
-        }
-    }
+        label
+    });
+    let parts = label
+        .as_deref()
+        .zip(path)
+        .map(|(label, path)| HeaderPath::of(label, path, theme));
 
     let rule = theme
         .try_get(crate::theme::scope::UI_DIVIDER)
         .filter(|style| style.fg.is_some())
         .unwrap_or_else(|| theme.get(crate::theme::scope::UI_BORDER_INACTIVE));
     match crate::render::chrome::plate_colors(theme, scene) {
-        Some(_) => crate::render::chrome::hline_edge(buf, header.x, y, header.width, rule, scene),
-        None => crate::render::chrome::hline(buf, header.x, y + 1, header.width, rule, scene),
+        Some(_) => {
+            paint_plate_preview_header(header, parts, lines.as_deref(), rule, theme, buf, scene)
+        },
+        None => {
+            paint_cell_preview_header(header, parts, lines.as_deref(), theme, buf);
+            crate::render::chrome::hline(buf, header.x, header.y + 1, header.width, rule, scene);
+        },
     }
+}
+
+/// The path that the preview's header names, split into the parts that take
+/// their own colors.
+struct HeaderPath<'a> {
+    /// The directory, in `ui.text.muted`.
+    dir: (&'a str, Style),
+    /// The name before the extension that its type tag colors, in `ui.text`.
+    stem: (&'a str, Style),
+    /// The extension in its tag's color, empty for a file with no tag.
+    suffix: (&'a str, Style),
+}
+
+impl<'a> HeaderPath<'a> {
+    /// Split `label`, the header's text for the source at `path`.
+    fn of(label: &'a str, path: &Path, theme: &crate::theme::Theme) -> Self {
+        let split = label
+            .char_indices()
+            .nth(crate::render::picker::name_start(label))
+            .map_or(label.len(), |(byte, _)| byte);
+        let (dir, name) = label.split_at(split);
+        let text = theme.get(crate::theme::scope::UI_TEXT);
+        let tagged = crate::render::chrome::tagged_name(path)
+            .filter(|tagged| name.ends_with(tagged.suffix.as_str()));
+        let (stem, suffix) = match &tagged {
+            Some(tagged) => name.split_at(name.len() - tagged.suffix.len()),
+            None => (name, ""),
+        };
+        let tag = tagged.map_or(text, |tagged| theme.get(tagged.tag.scope));
+        HeaderPath {
+            dir: (dir, theme.get(crate::theme::scope::UI_TEXT_MUTED)),
+            stem: (stem, text),
+            suffix: (suffix, tag),
+        }
+    }
+
+    /// The parts to draw, with the directory where `with_dir` keeps it.
+    fn parts(&self, with_dir: bool) -> [(&'a str, Style); 3] {
+        let dir = match with_dir {
+            true => self.dir,
+            false => ("", self.dir.1),
+        };
+        [dir, self.stem, self.suffix]
+    }
+
+    /// The chars of the whole path.
+    fn chars(&self) -> usize {
+        self.parts(true)
+            .iter()
+            .map(|(text, _)| text.chars().count())
+            .sum()
+    }
+}
+
+/// Write the path header's text into the cells of `header`'s first row, the
+/// lines one cell from its right edge and the path from its second cell.
+fn paint_cell_preview_header(
+    header: Rect,
+    path: Option<HeaderPath<'_>>,
+    lines: Option<&str>,
+    theme: &crate::theme::Theme,
+    buf: &mut Buffer,
+) {
+    let (y, end) = (header.y, header.x + header.width);
+    let mut path_end = end.saturating_sub(1);
+    if let Some(text) = lines {
+        let muted = theme.get(crate::theme::scope::UI_TEXT_MUTED);
+        let x = path_end.saturating_sub(text.width() as u16);
+        write_str_clipped(buf, x, y, text, muted, end);
+        path_end = x.saturating_sub(2);
+    }
+
+    let Some(path) = path else {
+        return;
+    };
+    let mut x = header.x + 1;
+    let fits = usize::from(x)
+        + path
+            .parts(true)
+            .iter()
+            .map(|(text, _)| text.width())
+            .sum::<usize>()
+        <= usize::from(path_end);
+    for (text, style) in path.parts(fits) {
+        write_str_clipped(buf, x, y, text, style, path_end);
+        x = x.saturating_add(text.width() as u16);
+    }
+}
+
+/// Draw the path header over `header` as the plate's runs and rule, as
+/// [`paint_preview_header`] describes them.
+///
+/// The text starts a cell in and stands [`PREVIEW_HEADER_INSET`] sixteenths
+/// from the lines, which end that far inside the header's right edge.
+#[allow(clippy::too_many_arguments)]
+fn paint_plate_preview_header(
+    header: Rect,
+    path: Option<HeaderPath<'_>>,
+    lines: Option<&str>,
+    rule: Style,
+    theme: &crate::theme::Theme,
+    buf: &mut Buffer,
+    scene: &mut stoat_widgets::ApcScene,
+) {
+    let (ui, caption) = (
+        theme.type_scale(TypeRole::Ui),
+        theme.type_scale(TypeRole::Caption),
+    );
+    let width = header.width.saturating_mul(16);
+    let label_col = lines.map(|text| {
+        let advance = text_run::advance_sixteenths(text.chars().count(), caption);
+        width.saturating_sub(PREVIEW_HEADER_INSET + advance)
+    });
+    let path_end = label_col
+        .unwrap_or(width)
+        .saturating_sub(PREVIEW_HEADER_INSET);
+    let muted = theme.get(crate::theme::scope::UI_TEXT_MUTED);
+    let origin = Rect::new(header.x, header.y, 1, 1);
+
+    scene.nudge([1, -1]);
+    {
+        let mut run = |col: u16, text: &str, scale: u16, style: Style| {
+            if let (Some(color), false) = (style_rgb(style.fg), text.is_empty()) {
+                TextRun {
+                    col: col as i16,
+                    row: 0,
+                    scale,
+                    color,
+                    bg: None,
+                    bold: false,
+                    italic: false,
+                    follow: 0,
+                    anchor: None,
+                    text,
+                }
+                .render(origin, buf, scene);
+            }
+        };
+        if let Some(path) = path {
+            let mut col: u16 = 16;
+            let fits = col + text_run::advance_sixteenths(path.chars(), ui) <= path_end;
+            for (text, style) in path.parts(fits) {
+                let room = usize::from(path_end.saturating_sub(col)) * 16 / usize::from(ui.max(1));
+                let shown = clip_to_width(text, room);
+                run(col, shown, ui, style);
+                col = col.saturating_add(text_run::advance_sixteenths(shown.chars().count(), ui));
+            }
+        }
+        if let (Some(text), Some(col)) = (lines, label_col) {
+            run(col, text, caption, muted);
+        }
+    }
+
+    scene.nudge([0, 2]);
+    if let Some(color) = style_rgb(rule.fg) {
+        Bar {
+            x: 0,
+            y: 0,
+            width: width.saturating_add(5),
+            height: 1,
+            color,
+            radius: 0,
+            corners: 0,
+        }
+        .render(
+            Rect::new(header.x, header.y + 1, header.width, 1),
+            buf,
+            scene,
+        );
+    }
+    scene.nudge([0, 0]);
 }
 
 /// The first and last buffer lines, counted from 1, that `editor` showed in
@@ -661,7 +838,9 @@ fn shown_lines(editor: &mut EditorState) -> Option<(u32, u32)> {
 
 #[cfg(test)]
 mod tests {
-    use super::{file_finder_layout, finder_layout, render_file_finder, FinderLayout};
+    use super::{
+        file_finder_layout, finder_layout, paint_preview_header, render_file_finder, FinderLayout,
+    };
     use crate::{
         file_finder::FileFinder,
         render::{
@@ -679,6 +858,7 @@ mod tests {
     };
     use std::{ops::Range, path::PathBuf};
     use stoat_widgets::ApcScene;
+    use stoatty_protocol::command::{decode_stream, BarCommand, Command, TextRunCommand};
 
     /// Every caller of this layout must fit inside the same area, so the box a
     /// short list gets and the box a data-heavy modal gets are checked together.
@@ -1010,6 +1190,120 @@ mod tests {
                 ],
                 0,
             ),
+        );
+    }
+
+    /// The commands that the preview header of a finder over `src/a.rs` of 3
+    /// lines draws into `header` under the plate look, without the ends of the
+    /// text runs, and whether every cell stays blank.
+    fn plate_header_commands(header: Rect) -> (Vec<Command>, bool) {
+        let mut h = crate::test_harness::TestHarness::with_size(200, 40);
+        let root = PathBuf::from("/header");
+        h.fake_fs()
+            .insert_files([(root.join("src/a.rs"), "one\ntwo\nthree".as_bytes())]);
+        h.stoat.active_workspace_mut().git_root = root;
+        h.type_keys("space p");
+        h.settle();
+        h.stoat.render();
+        let finder = h.stoat.file_finder.take().expect("the finder is open");
+        let src = r##"theme t {
+            ui.surface.ground.bg = "#0c0e11";
+            ui.background.bg = "#17191e";
+            ui.text.fg = "#010101";
+            ui.text.muted.fg = "#020202";
+            ui.tag.rust.fg = "#030303";
+            ui.divider.fg = "#040404";
+        }"##;
+        let (config, _) = stoat_config::parse(src);
+        let theme = Theme::from_config(&config.expect("theme parses"), "t").expect("theme loads");
+        let area = Rect::new(0, 0, 80, 10);
+        let mut buf = Buffer::empty(area);
+        let mut scene = ApcScene::new();
+        scene.set_nudge_protocol(true);
+        paint_preview_header(
+            &finder,
+            header,
+            None,
+            &theme,
+            h.stoat.active_workspace_mut(),
+            &mut buf,
+            &mut scene,
+        );
+        let commands = decode_stream(scene.bytes())
+            .into_iter()
+            .filter(|command| *command != Command::TextRunEnd)
+            .collect();
+        (commands, buf == Buffer::empty(area))
+    }
+
+    fn header_run(col: i16, text: &str, color: [u8; 3]) -> Command {
+        Command::TextRun(TextRunCommand {
+            col,
+            row: 80,
+            scale: 256,
+            color,
+            bg: None,
+            bold: false,
+            italic: false,
+            follow: 0,
+            anchor: None,
+            text: text.to_owned(),
+        })
+    }
+
+    fn header_rule(width: u16) -> Command {
+        Command::Bar(BarCommand {
+            x: 640,
+            y: 96,
+            width,
+            height: 1,
+            color: [4, 4, 4],
+            occludes: false,
+            hatch: None,
+            radius: 0,
+            corners: 0,
+        })
+    }
+
+    /// Under the plate look the preview header draws its path from col 16 of
+    /// its first row and its shown lines ending 14 sixteenths inside it, both
+    /// 1 px right and 1 px over the row, and its rule 2 px into its second row
+    /// and 5 sixteenths past its right edge. Its rows hold no glyph.
+    #[test]
+    fn a_plate_preview_header_draws_its_path_and_lines_as_nudged_runs() {
+        assert_eq!(
+            plate_header_commands(Rect::new(40, 5, 30, 2)),
+            (
+                vec![
+                    Command::Nudge([1, -1]),
+                    header_run(656, "src/", [2, 2, 2]),
+                    header_run(720, "a", [1, 1, 1]),
+                    header_run(736, ".rs", [3, 3, 3]),
+                    header_run(962, "lines 1\u{2013}3", [2, 2, 2]),
+                    Command::Nudge([0, 2]),
+                    header_rule(485),
+                    Command::Nudge([0, 0]),
+                ],
+                true,
+            )
+        );
+    }
+
+    /// A plate header 13 cells wide puts the lines at col 50 and stops the path
+    /// at col 36, where `src/a.rs` does not fit, so it keeps the name and clips
+    /// it there, after `a`.
+    #[test]
+    fn a_narrow_plate_preview_header_keeps_the_name() {
+        assert_eq!(
+            plate_header_commands(Rect::new(40, 5, 13, 2)).0,
+            [
+                Command::Nudge([1, -1]),
+                header_run(656, "a", [1, 1, 1]),
+                header_run(690, "lines 1\u{2013}3", [2, 2, 2]),
+                Command::Nudge([0, 2]),
+                header_rule(213),
+                Command::Nudge([0, 0]),
+            ]
         );
     }
 }
