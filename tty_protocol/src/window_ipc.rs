@@ -67,13 +67,17 @@ pub enum WindowIpcEvent {
     /// size, so only the terminal knows how many terminal cells fit in it. A
     /// program sizes the pane's emulator and PTY to this answer.
     PoolSized { pool: u32, cols: u16, rows: u16 },
-    /// A pointer gesture pressed in terminal-kind `pool`, with modifiers `mods`
-    /// as a bitmask.
+    /// A pointer gesture pressed in `pool`, a terminal-kind pool or one a
+    /// `pool_pointer` frame asked for pixels, with modifiers `mods` as a
+    /// bitmask.
     ///
-    /// `col` and `row` are the primary-grid cell under the pointer.
-    /// `cell_col` and `cell_row` are the pool's cell at the terminal font size,
-    /// which only the terminal knows. A gesture pressed in a terminal pool
-    /// rides this event in place of an SGR report.
+    /// `col` and `row` are the primary-grid cell under the pointer. In a
+    /// terminal pool, `cell_col` and `cell_row` are the pool's cell at the
+    /// terminal font size, which only the terminal knows. In a pool that asked
+    /// for pixels, they are the pointer's offset from the region's top-left in
+    /// physical px, and a drag reports only when the pointer enters another
+    /// grid cell. A gesture pressed in either pool rides this event in place of
+    /// an SGR report.
     PoolMouse {
         pool: u32,
         kind: MouseKind,

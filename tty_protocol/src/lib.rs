@@ -254,9 +254,16 @@
 /// arguments, which read as scale zero, so a program gates a layout by pixels
 /// on [`DISPLAY_SCALE_PROTOCOL`].
 ///
+/// Version 41 reads `pool_pointer`, which makes the terminal report a gesture
+/// pressed in that pool as a `pool_mouse` line whose pool cell is the
+/// pointer's offset from the region's top-left in physical px. A terminal that
+/// predates it ignores the frame and reports the grid cell, so a program that
+/// asks reads the pixel only from a terminal at [`POOL_POINTER_PROTOCOL`] or
+/// later.
+///
 /// Zero is reserved for a peer whose handshake carries no version at all, which
 /// is every build from before the field existed.
-pub const PROTOCOL_VERSION: u32 = 40;
+pub const PROTOCOL_VERSION: u32 = 41;
 
 /// The first [`PROTOCOL_VERSION`] whose terminal reads the `text_runs` and
 /// `bars` batches.
@@ -359,6 +366,14 @@ pub const PAGE_NUDGE_PROTOCOL: u32 = 39;
 /// program that lays rows out by pixels keeps the scale it has from such a
 /// terminal.
 pub const DISPLAY_SCALE_PROTOCOL: u32 = 40;
+
+/// The first [`PROTOCOL_VERSION`] whose terminal reports a gesture in a pool
+/// with the pointer's pixel offset when a `pool_pointer` frame asks.
+///
+/// An earlier terminal ignores the frame and reports the grid cell under the
+/// pointer, so a program sends the frame only to a terminal at this version or
+/// later and reads a press in the grid cell otherwise.
+pub const POOL_POINTER_PROTOCOL: u32 = 41;
 
 pub mod command;
 pub mod detect;

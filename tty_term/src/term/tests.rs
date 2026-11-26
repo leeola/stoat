@@ -25,17 +25,18 @@ use stoatty_protocol::command::{
     encode_line_layout, encode_minimap, encode_minimap_drop, encode_minimap_len,
     encode_minimap_lines, encode_minimap_view, encode_nudge, encode_panel, encode_polyline,
     encode_pool_anchor, encode_pool_cursor, encode_pool_cursor_release, encode_pool_drop,
-    encode_pool_region, encode_popover, encode_reposition, encode_reset, encode_scale,
-    encode_scroll, encode_scroll_region, encode_sketch, encode_text_run, encode_text_run_end,
-    encode_text_runs, encode_window_open, encode_zoom_capture, BarCommand, BarsCommand,
-    BorderCommand, BorderStyle as ProtoBorderStyle, Edge, FillCommand, FillRowsCommand,
-    HelloCommand, IconCommand, IconKind as ProtoIconKind, IdentReply, LineLayoutCommand,
-    LineSummary, MinimapCommand, MinimapDropCommand, MinimapLenCommand, MinimapLinesCommand,
-    MinimapRun, MinimapViewCommand, PanelCommand, PanelShadow as ProtoPanelShadow, PolylineCommand,
-    PoolAnchorCommand, PoolCursorCommand, PoolCursorReleaseCommand, PoolDropCommand, PoolKind,
-    PoolRegionCommand, PopoverChrome, PopoverCommand, PopoverSpan, RepositionCommand, ScaleCommand,
-    ScrollCommand, ScrollRegionCommand, SketchBounds, SketchCommand, SketchEasing, SketchPhase,
-    SketchShape, SketchStyle, SketchTiming, TextRunCommand, TextRunsCommand, WindowOpenCommand,
+    encode_pool_pointer, encode_pool_region, encode_popover, encode_reposition, encode_reset,
+    encode_scale, encode_scroll, encode_scroll_region, encode_sketch, encode_text_run,
+    encode_text_run_end, encode_text_runs, encode_window_open, encode_zoom_capture, BarCommand,
+    BarsCommand, BorderCommand, BorderStyle as ProtoBorderStyle, Edge, FillCommand,
+    FillRowsCommand, HelloCommand, IconCommand, IconKind as ProtoIconKind, IdentReply,
+    LineLayoutCommand, LineSummary, MinimapCommand, MinimapDropCommand, MinimapLenCommand,
+    MinimapLinesCommand, MinimapRun, MinimapViewCommand, PanelCommand,
+    PanelShadow as ProtoPanelShadow, PolylineCommand, PoolAnchorCommand, PoolCursorCommand,
+    PoolCursorReleaseCommand, PoolDropCommand, PoolKind, PoolPointerCommand, PoolRegionCommand,
+    PopoverChrome, PopoverCommand, PopoverSpan, RepositionCommand, ScaleCommand, ScrollCommand,
+    ScrollRegionCommand, SketchBounds, SketchCommand, SketchEasing, SketchPhase, SketchShape,
+    SketchStyle, SketchTiming, TextRunCommand, TextRunsCommand, WindowOpenCommand,
 };
 
 /// Base64, for a test feeding a graphics payload.
@@ -4566,6 +4567,26 @@ fn a_scroll_during_a_fill_still_lands_on_the_pool() {
     );
 }
 
+/// The report of a pool is persistent state, so a `pool_pointer` that arrives
+/// while a page paints acts rather than being dropped with the decorations.
+#[test]
+fn a_pool_pointer_during_a_fill_still_lands_on_the_pool() {
+    let mut terminal = Terminal::new(4, 8, Theme::default());
+    declare_pool(&mut terminal, 1, 2, 4);
+
+    terminal.advance(&encode_fill(&FillCommand { pool: 1, index: 0 }));
+    terminal.advance(&encode_pool_pointer(&PoolPointerCommand {
+        pool: 1,
+        pixels: true,
+    }));
+    terminal.advance(&encode_fill_end());
+
+    assert!(
+        terminal.pools[&1].pointer_pixels,
+        "the request applies rather than being dropped"
+    );
+}
+
 #[test]
 fn a_scroll_on_a_primary_pool_marks_nothing_dirty() {
     let mut terminal = Terminal::new(4, 8, Theme::default());
@@ -5878,6 +5899,40 @@ fn a_cursor_release_takes_the_anchor_off_its_pool_alone() {
             .collect::<Vec<_>>(),
         [None, Some((9, 3))],
         "the release clears pool 0's anchor and leaves pool 1's",
+    );
+}
+
+/// A `pool_pointer` frame sets the report of its pool, which a re-declare
+/// keeps and a drop ends, and a frame for a pool not declared does nothing.
+#[test]
+fn a_pool_pointer_frame_sets_the_report_of_its_pool() {
+    let mut terminal = Terminal::new(4, 8, Theme::default());
+    let reports = |terminal: &Terminal| {
+        terminal
+            .pools()
+            .iter()
+            .map(|pool| (pool.id, pool.pointer_pixels))
+            .collect::<Vec<_>>()
+    };
+    let ask = |pool, pixels| encode_pool_pointer(&PoolPointerCommand { pool, pixels });
+    declare_pool(&mut terminal, 0, 4, 8);
+    let declared = reports(&terminal);
+
+    terminal.advance(&ask(0, true));
+    terminal.advance(&ask(9, true));
+    let asked = reports(&terminal);
+    declare_pool(&mut terminal, 0, 2, 8);
+    let redeclared = reports(&terminal);
+    terminal.advance(&ask(0, false));
+    let returned = reports(&terminal);
+
+    terminal.advance(&ask(0, true));
+    terminal.advance(&encode_pool_drop(&PoolDropCommand { pool: 0 }));
+    declare_pool(&mut terminal, 0, 4, 8);
+
+    assert_eq!(
+        [declared, asked, redeclared, returned, reports(&terminal)],
+        [false, true, true, false, false].map(|pixels| vec![(0, pixels)])
     );
 }
 

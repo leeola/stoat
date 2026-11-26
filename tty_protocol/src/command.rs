@@ -35,8 +35,8 @@ use panel::decode_panel;
 use polyline::decode_polyline;
 use pool::{
     decode_fill, decode_fill_rows, decode_pool_anchor, decode_pool_cursor,
-    decode_pool_cursor_release, decode_pool_drop, decode_pool_region, decode_reposition,
-    decode_scroll,
+    decode_pool_cursor_release, decode_pool_drop, decode_pool_pointer, decode_pool_region,
+    decode_reposition, decode_scroll,
 };
 use popover::decode_popover;
 use scale::decode_scale;
@@ -89,11 +89,12 @@ pub use pool::{
     encode_fill_end_into, encode_fill_into, encode_fill_rows_into, encode_fill_rows_scope,
     encode_fill_scope, encode_pool_anchor, encode_pool_anchor_into, encode_pool_cursor,
     encode_pool_cursor_into, encode_pool_cursor_release, encode_pool_cursor_release_into,
-    encode_pool_drop, encode_pool_drop_into, encode_pool_region, encode_pool_region_into,
-    encode_reposition, encode_reposition_into, encode_scroll, encode_scroll_into, fill_batch_key,
-    scaled_cell_side, FillBatchKey, FillCommand, FillRowsCommand, PoolAnchorCommand,
-    PoolCursorCommand, PoolCursorReleaseCommand, PoolDropCommand, PoolKind, PoolRegionCommand,
-    RepositionCommand, ScrollCommand, NON_PANE_POOL_BASE,
+    encode_pool_drop, encode_pool_drop_into, encode_pool_pointer, encode_pool_pointer_into,
+    encode_pool_region, encode_pool_region_into, encode_reposition, encode_reposition_into,
+    encode_scroll, encode_scroll_into, fill_batch_key, scaled_cell_side, FillBatchKey, FillCommand,
+    FillRowsCommand, PoolAnchorCommand, PoolCursorCommand, PoolCursorReleaseCommand,
+    PoolDropCommand, PoolKind, PoolPointerCommand, PoolRegionCommand, RepositionCommand,
+    ScrollCommand, NON_PANE_POOL_BASE,
 };
 pub use popover::{
     encode_popover, encode_popover_end, encode_popover_end_into, encode_popover_into,
@@ -211,6 +212,12 @@ pub enum Command {
     /// stops being the focused one, so a later glide of that pool leaves the
     /// cursor on its terminal cell.
     PoolCursorRelease(PoolCursorReleaseCommand),
+    /// Set how the terminal reports a gesture pressed in a pool.
+    ///
+    /// With [`PoolPointerCommand::pixels`] the pool reports the pointer's pixel
+    /// offset from its region's top-left, for a pool whose rows are no multiple
+    /// of the cell. Sent once for each declaration of such a pool.
+    PoolPointer(PoolPointerCommand),
     /// Anchor a floating pool to the host pool it must ride while that host
     /// glides.
     ///
@@ -460,6 +467,7 @@ pub fn encode_into(out: &mut Vec<u8>, command: &Command) {
         Command::Scroll(c) => encode_scroll_into(out, c),
         Command::PoolCursor(c) => encode_pool_cursor_into(out, c),
         Command::PoolCursorRelease(c) => encode_pool_cursor_release_into(out, c.pool),
+        Command::PoolPointer(c) => encode_pool_pointer_into(out, c.pool, c.pixels),
         Command::PoolAnchor(c) => encode_pool_anchor_into(out, c),
         Command::Reposition(c) => encode_reposition_into(out, c.pool, c.page),
         Command::PoolDrop(c) => encode_pool_drop_into(out, c.pool),
@@ -520,6 +528,7 @@ fn dispatch(sub: &str, args: &[Vec<u8>]) -> Option<Command> {
         "scroll" => decode_scroll(args).map(Command::Scroll),
         "pool_cursor" => decode_pool_cursor(args).map(Command::PoolCursor),
         "pool_cursor_release" => decode_pool_cursor_release(args).map(Command::PoolCursorRelease),
+        "pool_pointer" => decode_pool_pointer(args).map(Command::PoolPointer),
         "pool_anchor" => decode_pool_anchor(args).map(Command::PoolAnchor),
         "reposition" => decode_reposition(args).map(Command::Reposition),
         "pool_drop" => decode_pool_drop(args).map(Command::PoolDrop),
@@ -680,6 +689,13 @@ mod tests {
             (
                 "pool_cursor_release",
                 encode_pool_cursor_release(&PoolCursorReleaseCommand { pool: 1 }),
+            ),
+            (
+                "pool_pointer",
+                encode_pool_pointer(&PoolPointerCommand {
+                    pool: 1,
+                    pixels: true,
+                }),
             ),
             (
                 "pool_anchor",
@@ -1235,6 +1251,10 @@ mod tests {
                 col: 30_000,
             }),
             Command::PoolCursorRelease(PoolCursorReleaseCommand { pool: 2 }),
+            Command::PoolPointer(PoolPointerCommand {
+                pool: 2,
+                pixels: true,
+            }),
             Command::Reposition(RepositionCommand {
                 pool: 3,
                 page: 1_000,

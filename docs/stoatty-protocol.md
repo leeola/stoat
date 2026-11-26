@@ -151,6 +151,7 @@ session control. "Head" is the fixed prefix of the first argument.
 | `scroll` | P | 14 B | Pool scroll target, page plus fraction |
 | `pool_cursor` | P | 14 B | Anchors the cursor to a gliding pool |
 | `pool_cursor_release` | P | 4 B | Takes the cursor anchor off a pool |
+| `pool_pointer` | P | 5 B | Reports a gesture in a pool with the pointer's pixel offset |
 | `reposition` | P | 12 B | Re-anchors across an unbuffered gap |
 | `pool_drop` | P | 4 B | Retires a pool |
 | `minimap_lines` | P | 16 B header + lines | Paginates past the payload cap; runs of 3 B |
@@ -259,6 +260,16 @@ head with a zero scale, row count, or column count reads as a grid pool. A
 terminal below version 38 reads kind 2 as a grid pool, so declare a scaled
 pool only to a terminal at version 38 or later. A terminal at version 38 or
 later drops a shorter head.
+
+From protocol version 41, a `pool_pointer` frame carries a pool and a byte, 1
+to report a gesture pressed in that pool with the pointer's pixel offset and 0
+to return the pool to the report of its kind. Such a gesture rides the window
+socket as a `pool_mouse` line in place of an SGR report, and its pool cell is
+the pointer's offset from the region's top-left in physical px, held inside
+the region. A drag reports only when the pointer enters another grid cell.
+The setting lives on the pool, so a `pool_drop` ends it and a re-declare
+keeps it. A terminal below version 41 ignores the frame and reports the grid
+cell.
 
 `ident` travels the other way, terminal to program, and arrives as input bytes
 on stdin. `decode` never yields it; use `decode_ident_reply`.

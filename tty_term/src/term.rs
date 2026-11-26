@@ -976,6 +976,13 @@ pub struct PoolView {
     /// the gap between `top_rows` and the host's eased top, so a popup laid out
     /// over a scrolling pane travels with the text beneath it.
     pub anchor: Option<(u32, f32)>,
+    /// Whether a gesture pressed in this pool reports the pointer's pixel offset
+    /// from the region's top-left, as a `Gstoatty;pool_pointer` frame asked.
+    ///
+    /// A program whose rows are no multiple of the cell asks, since the grid
+    /// cell under the pointer names two of its rows. A gesture in a pool that
+    /// did not ask reports the report of the pool's kind.
+    pub pointer_pixels: bool,
     /// Bumped whenever the pooled page bytes change, so a renderer can tell a
     /// pure sub-cell glide from a frame whose composed content actually changed.
     pub content_version: u64,
@@ -1031,6 +1038,10 @@ struct Pool {
     /// `None` when the pool floats free, which is every pool that is not a
     /// popup riding a pane. Cleared when the pool is dropped.
     anchor: Option<(u32, f32)>,
+    /// Whether a gesture pressed in this pool reports the pointer's pixel
+    /// offset, set by `Gstoatty;pool_pointer`. False until a frame asks, kept
+    /// through a re-declare, and gone with the pool when it is dropped.
+    pointer_pixels: bool,
     /// Which declaration of its id this pool is, as [`PoolView::serial`]
     /// reports it.
     serial: u64,
@@ -1049,6 +1060,7 @@ impl Pool {
             content_version: 0,
             cursor_anchor: None,
             anchor: None,
+            pointer_pixels: false,
             serial,
         }
     }
@@ -1598,6 +1610,7 @@ impl Terminal {
                         | Command::Scroll(_)
                         | Command::PoolCursor(_)
                         | Command::PoolCursorRelease(_)
+                        | Command::PoolPointer(_)
                         | Command::Reposition(_)
                         | Command::PoolDrop(_)
                         | Command::MinimapLines(_)
@@ -2081,6 +2094,15 @@ impl Terminal {
             Command::PoolCursorRelease(release) => {
                 let window = self.pools.get_mut(&release.pool).map(|pool| {
                     pool.cursor_anchor = None;
+                    pool.region.window
+                });
+                if let Some(window) = window {
+                    self.mark_window_dirty(window);
+                }
+            },
+            Command::PoolPointer(pointer) => {
+                let window = self.pools.get_mut(&pointer.pool).map(|pool| {
+                    pool.pointer_pixels = pointer.pixels;
                     pool.region.window
                 });
                 if let Some(window) = window {
@@ -2589,6 +2611,7 @@ impl Terminal {
             | Command::Scroll(_)
             | Command::PoolCursor(_)
             | Command::PoolCursorRelease(_)
+            | Command::PoolPointer(_)
             | Command::PoolAnchor(_)
             | Command::Reposition(_)
             | Command::PoolDrop(_)
@@ -2774,6 +2797,7 @@ impl Terminal {
             scroll_target: pool.scroll_target,
             cursor_anchor: pool.cursor_anchor,
             anchor: pool.anchor,
+            pointer_pixels: pool.pointer_pixels,
             content_version: pool.content_version,
             grid: pool.grid,
             serial: pool.serial,

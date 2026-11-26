@@ -223,6 +223,21 @@ pub struct PoolCursorReleaseCommand {
     pub pool: u32,
 }
 
+/// Ask the terminal to report a gesture pressed in pool [`Self::pool`] with
+/// the pointer's pixel offset.
+///
+/// A program that draws rows at no multiple of the cell needs the pixel, since
+/// the grid cell under the pointer names two rows. With [`Self::pixels`] the
+/// gesture rides the window socket as a `pool_mouse` line whose pool cell is
+/// the pointer's offset from the region's top-left in physical px, the unit of
+/// the winsize. `false` returns the pool to the report of its kind. The setting
+/// lives on the pool, so a `pool_drop` ends it.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct PoolPointerCommand {
+    pub pool: u32,
+    pub pixels: bool,
+}
+
 /// A floating surface's tie to the pool it must ride.
 ///
 /// A popup laid out over a scrolling pane is drawn from a live frame, but no
@@ -528,6 +543,27 @@ pub fn encode_pool_cursor_release_into(out: &mut Vec<u8>, pool: u32) {
     frame::end(out);
 }
 
+/// Encode a [`PoolPointerCommand`] as a full `Gstoatty;pool_pointer` frame.
+///
+/// The request rides one fixed 5-byte argument, the pool big-endian and then 0
+/// or 1.
+pub fn encode_pool_pointer(command: &PoolPointerCommand) -> Vec<u8> {
+    let mut out = Vec::new();
+    encode_pool_pointer_into(&mut out, command.pool, command.pixels);
+    out
+}
+
+/// Append a `Gstoatty;pool_pointer` frame that sets the report of pool `pool`
+/// to `out`.
+pub fn encode_pool_pointer_into(out: &mut Vec<u8>, pool: u32, pixels: bool) {
+    frame::begin(out, "pool_pointer");
+    frame::push_arg(out, |w| {
+        w.write_all(&pool.to_be_bytes())?;
+        w.write_all(&[u8::from(pixels)])
+    });
+    frame::end(out);
+}
+
 /// Encode a [`PoolAnchorCommand`] as a full `Gstoatty;pool_anchor` frame.
 ///
 /// The anchor rides one fixed 12-byte big-endian argument holding the anchored
@@ -673,6 +709,15 @@ pub(super) fn decode_pool_cursor_release(args: &[Vec<u8>]) -> Option<PoolCursorR
 
     Some(PoolCursorReleaseCommand {
         pool: u32::from_be_bytes(*arg),
+    })
+}
+
+pub(super) fn decode_pool_pointer(args: &[Vec<u8>]) -> Option<PoolPointerCommand> {
+    let arg: &[u8; 5] = args.first()?.get(..5)?.try_into().ok()?;
+
+    Some(PoolPointerCommand {
+        pool: u32::from_be_bytes([arg[0], arg[1], arg[2], arg[3]]),
+        pixels: arg[4] != 0,
     })
 }
 
@@ -1126,6 +1171,26 @@ mod tests {
     fn rejects_wrong_length_pool_cursor_release_payload() {
         // The single arg here decodes to 3 bytes, not the 4 a pool id needs.
         assert!(decode(b"Gstoatty;pool_cursor_release;YWJj").is_none());
+    }
+
+    #[test]
+    fn pool_pointer_round_trips() {
+        let command = |pixels| PoolPointerCommand {
+            pool: 70_000,
+            pixels,
+        };
+        let decoded = |pixels| decode(&encode_pool_pointer(&command(pixels)));
+
+        assert_eq!(
+            [decoded(true), decoded(false)],
+            [true, false].map(|pixels| Some(Command::PoolPointer(command(pixels))))
+        );
+    }
+
+    #[test]
+    fn rejects_wrong_length_pool_pointer_payload() {
+        // The single arg here decodes to 3 bytes, not the 5 a pool and its flag need.
+        assert!(decode(b"Gstoatty;pool_pointer;YWJj").is_none());
     }
 
     #[test]
