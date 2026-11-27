@@ -3,7 +3,6 @@ use crate::{
     display_map::{
         highlights::HighlightStyle, BlockPlacement, BlockProperties, BlockStyle, WrapGeometry,
     },
-    host::DiffStatus,
     multi_buffer::MultiBufferSnapshot,
 };
 use std::{
@@ -48,6 +47,22 @@ pub enum DiffHunkStatus {
     /// Byte-for-byte equal content that relocated to or from another
     /// position. Paired with provenance in [`TokenDetail`] and
     /// [`ChangeSpan::move_metadata`].
+    Moved,
+}
+
+/// Status of a diff region at the line level.
+///
+/// The diff map derives a line's status from the hunk that covers it, and
+/// the display layer paints it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum DiffStatus {
+    #[default]
+    Unchanged,
+    Added,
+    Modified,
+    /// Line participates in a [`DiffHunkStatus::Moved`] hunk. Its content is
+    /// byte-for-byte equal to content that relocated to or from another
+    /// position, possibly in another file of the same changeset.
     Moved,
 }
 
@@ -3367,13 +3382,12 @@ fn line_of(line_starts: &[usize], byte: usize) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::{
-        ChangeKind, ChangeSpan, DiffHunk, DiffHunkStatus, DiffMap, GutterMark, MarkKind, MarkState,
-        ProseChange, StagedMark, TokenDetail,
+        ChangeKind, ChangeSpan, DiffHunk, DiffHunkStatus, DiffMap, DiffStatus, GutterMark,
+        MarkKind, MarkState, ProseChange, StagedMark, TokenDetail,
     };
     use crate::{
         buffer::{BufferId, TextBuffer},
         display_map::{BlockPlacement, BlockProperties, WrapGeometry},
-        host::DiffStatus,
         multi_buffer::MultiBuffer,
     };
     use std::sync::Arc;

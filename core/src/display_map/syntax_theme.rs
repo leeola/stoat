@@ -1,6 +1,6 @@
 use crate::{
+    diff_map::DiffStatus,
     display_map::highlights::{HighlightStyle, HighlightStyleId, HighlightStyleInterner},
-    host::DiffStatus,
     theme::Theme,
 };
 use ratatui::style::{Color, Modifier, Style};
@@ -407,7 +407,7 @@ mod tests {
 
     #[test]
     fn diff_theme_covers_every_status() {
-        use crate::host::DiffStatus;
+        use crate::diff_map::DiffStatus;
         let theme = DiffTheme::default();
         assert!(theme.color_for(DiffStatus::Unchanged).is_none());
         let colors = [

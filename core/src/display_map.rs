@@ -12,8 +12,7 @@ mod wrap_map;
 
 use crate::{
     buffer::BufferId,
-    diff_map::{DeletedBlockKey, DiffMap, TokenDetail},
-    host::DiffStatus,
+    diff_map::{DeletedBlockKey, DiffMap, DiffStatus, TokenDetail},
     multi_buffer::{MultiBuffer, MultiBufferSnapshot},
 };
 pub use block_map::{

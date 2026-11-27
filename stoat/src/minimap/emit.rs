@@ -897,7 +897,7 @@ fn minimap_row_mark(
     class_table: &crate::minimap::ClassTable,
     row: u32,
 ) -> RowMark {
-    use crate::{host::DiffStatus, minimap::EdgeClass};
+    use crate::{diff_map::DiffStatus, minimap::EdgeClass};
     use lsp_types::DiagnosticSeverity;
 
     let status = diff.map_or(DiffStatus::Unchanged, |diff| diff.status_for_line(row));

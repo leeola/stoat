@@ -15,8 +15,8 @@ pub use clipboard::{
 };
 pub use git::{
     BlameCommit, BlameRun, ChangedFile, CherryPickOutcome, CommitFileChange, CommitFileChangeKind,
-    CommitInfo, ConflictedFile, DiffStatus, FileBlame, GitApplyError, GitHost, GitRepo, LocalGit,
-    RebaseError, RebaseTodo, RebaseTodoOp, RewriteResult, StagedKind,
+    CommitInfo, ConflictedFile, FileBlame, GitApplyError, GitHost, GitRepo, LocalGit, RebaseError,
+    RebaseTodo, RebaseTodoOp, RewriteResult, StagedKind,
 };
 #[cfg(any(test, feature = "test-support"))]
 pub use git::{FakeGit, FakeGitRepo, FakeRepoBuilder};

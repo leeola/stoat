@@ -124,7 +124,9 @@ pub(crate) fn test_notify() -> std::sync::Arc<tokio::sync::Notify> {
 }
 pub use badge::{Anchor, BadgeId, BadgeSource, BadgeState};
 pub use buffer::{BufferId, SharedBuffer, TextBuffer, TextBufferSnapshot};
-pub use diff_map::{ChangeKind, ChangeSpan, DiffHunk, DiffHunkStatus, DiffMap, TokenDetail};
+pub use diff_map::{
+    ChangeKind, ChangeSpan, DiffHunk, DiffHunkStatus, DiffMap, DiffStatus, TokenDetail,
+};
 pub use display_map::{
     BlockMap, BlockPoint, BlockRow, BlockRowKind, BlockSnapshot, Chunk, ChunkRenderer,
     ChunkRendererId, ChunkReplacement, Crease, CreaseId, CreaseMap, CreaseSnapshot, DisplayMap,
@@ -134,7 +136,6 @@ pub use display_map::{
     InlayOffset, InlayPoint, InlaySnapshot, SemanticTokenHighlight, SemanticTokensHighlights,
     TabMap, TabPoint, TabRow, TabSnapshot, TextHighlights, WrapMap, WrapPoint, WrapSnapshot,
 };
-pub use host::DiffStatus;
 pub use multi_buffer::{MultiBuffer, MultiBufferSnapshot};
 pub use pane::{
     Axis, Direction, DockId, DockPanel, DockSide, DockVisibility, FocusTarget, Pane, PaneId,

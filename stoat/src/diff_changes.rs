@@ -3632,10 +3632,10 @@ mod tests {
         auto_reload,
         buffer::{BufferId, TextBuffer},
         buffer_registry::AutoReloadMode,
-        diff_map::{DiffHunk, DiffHunkStatus, DiffMap, TokenDetail},
+        diff_map::{DiffHunk, DiffHunkStatus, DiffMap, DiffStatus, TokenDetail},
         display_map::{DisplayPoint, FoldEnd, FoldScope, InlayPoint, ScopeMark},
         editor_state::{EditorId, EditorState},
-        host::{git::FileKind, DiffStatus, FakeRepoBuilder},
+        host::{git::FileKind, FakeRepoBuilder},
         test_harness::TestHarness,
         theme::FULL_CELL_SCALE,
         workspace::{

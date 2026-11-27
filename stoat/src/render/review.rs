@@ -9,14 +9,16 @@ use crate::{
     diff_changes::{
         self, RevealFlash, ScopeRole, FOLD_BUTTON_GAP, FOLD_BUTTON_MARGIN, FOLD_BUTTON_WIDTH,
     },
-    diff_map::{ChangeKind, DiffHunk, DiffHunkStatus, DiffMap, GutterMark, MarkState, ProseChange},
+    diff_map::{
+        ChangeKind, DiffHunk, DiffHunkStatus, DiffMap, DiffStatus, GutterMark, MarkState,
+        ProseChange,
+    },
     display_map::{
         highlights::HighlightStyle, syntax_theme::DiffTheme, tab_map, BaseLineLayout, Block,
         BlockPlacement, BlockRowKind, CachedHighlightEndpoints, DisplayPoint, DisplaySnapshot,
         FoldPlaceholder, FoldScope, RowHighlightCursor, WrapPoint,
     },
     editor_state::EditorState,
-    host::DiffStatus,
     render::TypeScale,
     theme::{scope as s, TypeRole, FULL_CELL_SCALE},
 };

@@ -20,7 +20,7 @@ use super::{focused_editor_mut, movement};
 use crate::{
     app::{Stoat, UpdateEffect},
     buffer_registry::OpenOrigin,
-    diff_map::{DiffHunkStatus, TokenDetail},
+    diff_map::{DiffHunkStatus, DiffStatus, TokenDetail},
     editor_state::EditorState,
 };
 use stoat_language::structural_diff::BufferRef;
@@ -66,7 +66,7 @@ pub(super) fn current_move_summary(editor: &mut EditorState) -> Option<MoveSumma
     let cursor_line = buffer_snapshot.rope().offset_to_point(offset).row;
 
     // A cursor on a moved line (the moved-to side) summarizes its own detail.
-    if snapshot.line_diff_status(cursor_line) == crate::host::DiffStatus::Moved {
+    if snapshot.line_diff_status(cursor_line) == DiffStatus::Moved {
         return move_summary_from_detail(snapshot.token_detail_for_line(cursor_line)?, cursor_line);
     }
 

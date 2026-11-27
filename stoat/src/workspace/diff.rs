@@ -2529,11 +2529,10 @@ mod tests {
         action_handlers::{self, movement},
         buffer::BufferId,
         diff_map::{
-            BaseHighlights, DiffHunk, DiffHunkStatus, DiffMap, GutterMark, MarkKind, MarkState,
-            ProseChange, StagedMark,
+            BaseHighlights, DiffHunk, DiffHunkStatus, DiffMap, DiffStatus, GutterMark, MarkKind,
+            MarkState, ProseChange, StagedMark,
         },
         display_map::syntax_theme::{self, SyntaxStyles},
-        host::DiffStatus,
         pane::View,
         review::ReviewFileInput,
         review_approval::ApprovedRows,

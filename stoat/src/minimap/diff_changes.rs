@@ -36,10 +36,9 @@ use crate::{
     buffer::BufferId,
     buffer_registry::BufferRegistry,
     diff_changes::{self, DiffChangesId, DiffChangesState},
-    diff_map::{DiffHunkStatus, DiffMap},
+    diff_map::{DiffHunkStatus, DiffMap, DiffStatus},
     display_map::{DisplayPoint, DisplaySnapshot},
     editor_state::{EditorId, EditorState},
-    host::DiffStatus,
     pane::View,
     render::{
         rail_strip_id,

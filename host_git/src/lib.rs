@@ -23,22 +23,6 @@ pub mod fake;
 #[allow(clippy::disallowed_methods)]
 pub mod local;
 
-/// Status of a diff region at the line level. Rendered by the display
-/// layer; included here because both the working-tree git path and the
-/// in-memory diff map produce values of this type.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum DiffStatus {
-    #[default]
-    Unchanged,
-    Added,
-    Modified,
-    /// Line participates in a `DiffHunkStatus::Moved` hunk of the diff map.
-    /// Its content is byte-for-byte equal to content that relocated to or
-    /// from another position, possibly in another file of the same
-    /// changeset.
-    Moved,
-}
-
 /// Hunk counts across a repository, as [`GitRepo::hunk_tallies`] reports them.
 ///
 /// The two sides are counted independently: `staged` diffs the index against
