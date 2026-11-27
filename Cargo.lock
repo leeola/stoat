@@ -4040,6 +4040,7 @@ dependencies = [
  "stoat_config",
  "stoat_core",
  "stoat_host",
+ "stoat_keymap",
  "stoat_language",
  "stoat_log",
  "stoat_scheduler",
@@ -4139,13 +4140,9 @@ dependencies = [
 name = "stoat_core"
 version = "0.1.0"
 dependencies = [
- "compact_str 0.10.0",
- "crossterm",
  "ron",
  "serde",
- "stoat_action",
  "stoat_buffer",
- "stoat_config",
  "stoat_host",
  "stoat_host_clipboard",
  "stoat_host_git",
@@ -4155,7 +4152,6 @@ dependencies = [
  "stoat_text",
  "stoat_theme",
  "tempfile",
- "tracing",
 ]
 
 [[package]]
@@ -4219,6 +4215,17 @@ dependencies = [
  "libc",
  "portable-pty",
  "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "stoat_keymap"
+version = "0.1.0"
+dependencies = [
+ "compact_str 0.10.0",
+ "crossterm",
+ "stoat_action",
+ "stoat_config",
  "tracing",
 ]
 

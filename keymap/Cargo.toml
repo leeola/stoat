@@ -1,0 +1,15 @@
+[package]
+name = "stoat_keymap"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+stoat_action = { path = "../action" }
+stoat_config = { path = "../config" }
+crossterm.workspace = true
+tracing.workspace = true
+compact_str.workspace = true

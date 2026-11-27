@@ -22,6 +22,7 @@ stoat_buffer = { path = "../buffer" }
 stoat_config = { path = "../config" }
 stoat_core = { path = "../core" }
 stoat_host = { path = "../host" }
+stoat_keymap = { path = "../keymap" }
 stoat_language = { path = "../language" }
 stoat_log = { path = "../log" }
 stoat_scheduler = { path = "../scheduler" }

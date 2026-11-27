@@ -1,3 +1,10 @@
+//! The keymap, which turns a key press into the actions a config binds to it.
+//!
+//! [`Keymap::compile`] builds the bindings of a config, and [`Keymap::lookup`]
+//! resolves a key event against a [`KeymapState`], whose fields the bindings'
+//! predicates read, to the winning binding's actions. [`resolve_action`] builds
+//! an action from a resolved binding's name and arguments.
+
 use compact_str::CompactString;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use std::{

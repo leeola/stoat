@@ -14,6 +14,7 @@ members = [
   "host_git",
   "host_lsp",
   "host_terminal",
+  "keymap",
   "language",
   "scheduler",
   "stoat",

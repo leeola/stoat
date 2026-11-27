@@ -20,9 +20,7 @@ test-support = [
 ]
 
 [dependencies]
-stoat_action = { path = "../action" }
 stoat_buffer = { path = "../buffer" }
-stoat_config = { path = "../config" }
 stoat_host = { path = "../host" }
 stoat_host_clipboard = { path = "../host_clipboard" }
 stoat_host_git = { path = "../host_git" }
@@ -30,10 +28,7 @@ stoat_host_lsp = { path = "../host_lsp" }
 stoat_host_terminal = { path = "../host_terminal" }
 stoat_language = { path = "../language" }
 stoat_text = { path = "../text" }
-crossterm.workspace = true
 serde = { workspace = true, features = ["derive", "rc"] }
-tracing.workspace = true
-compact_str.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
