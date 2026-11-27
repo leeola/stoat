@@ -447,8 +447,7 @@ impl RunState {
         })?;
 
         let start = b.left + b.metrics.px(10);
-        let advance = u32::from(b.metrics.cell[0]) * u32::from(b.scale);
-        let col = x.checked_sub(start)? * 256 / advance.max(1);
+        let col = b.chars_in(x.checked_sub(start)?);
         let col = u16::try_from(col)
             .ok()
             .filter(|&col| col < active.grid.width())?;
@@ -491,6 +490,14 @@ impl RunBox {
             width: px(i64::from(area.width) * cell_width + right + left - 2 * pad),
             bottom: px(i64::from(area.height) * cell_height + under - i64::from(metrics.px(6))),
         }
+    }
+
+    /// The chars that a body line holds, from its start 10 px into the content
+    /// to the content's right, which is the grid width of a Cmd that starts on
+    /// this stack.
+    pub(crate) fn columns(&self) -> u16 {
+        let chars = self.chars_in(self.width.saturating_sub(self.metrics.px(10)));
+        u16::try_from(chars).unwrap_or(u16::MAX)
     }
 
     /// The height of an output row, a report row, a location row, and the
@@ -537,6 +544,13 @@ impl RunBox {
 
     fn hint_height(&self) -> u32 {
         u32::from(self.metrics.cell[1]) + 2 * self.metrics.px(2)
+    }
+
+    /// The whole chars of a body line that `px` physical px hold, each char
+    /// advancing its share of a cell at [`Self::scale`].
+    fn chars_in(&self, px: u32) -> u32 {
+        let advance = u32::from(self.metrics.cell[0]) * u32::from(self.scale);
+        px * 256 / advance.max(1)
     }
 }
 
@@ -1553,6 +1567,15 @@ mod tests {
             [start + 49, start + 48].map(|x| run.active_block_grid_px(&cmds, &b, x, 150)),
             [Some((6, 0)), Some((5, 0))],
         );
+    }
+
+    /// The scene pane's content, 1400 px past the body's 10 px start, holds 170
+    /// chars at the Ui scale 232 and 154 chars a full cell wide.
+    #[test]
+    fn a_pixel_body_line_holds_more_chars_than_cells() {
+        let area = Rect::new(0, 0, 158, 46);
+        let columns = |scale| RunBox::of(M1, scale, area, [4, 1, 12, 1]).columns();
+        assert_eq!([columns(232), columns(FULL_CELL_SCALE)], [170, 154]);
     }
 }
 

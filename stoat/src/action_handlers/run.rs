@@ -131,16 +131,7 @@ pub(super) fn run_submit(stoat: &mut Stoat) -> UpdateEffect {
 /// Run `text` as a shell line in a new Cmd on the stack of the run `id`, which
 /// the split pane `pane` shows.
 fn run_shell_line(stoat: &mut Stoat, id: RunId, pane: PaneId, text: &str) -> UpdateEffect {
-    // The body draws one column inside the stack, which stands one column
-    // inside each side of the pane.
-    let width = stoat
-        .active_workspace()
-        .panes
-        .pane(pane)
-        .area
-        .width
-        .saturating_sub(3)
-        .max(20);
+    let width = cmd_width(stoat.active_workspace(), pane, Some(id));
     let cmd = start_cmd(stoat, text, width);
     let Workspace { runs, cmds, .. } = stoat.active_workspace_mut();
     if let Some(run_state) = runs.get_mut(id) {
@@ -994,15 +985,34 @@ pub(crate) fn finished_cmd(
     ws.cmds.insert(cmd)
 }
 
-/// The grid width of a Cmd that [`append_to_run_pane`] places, in cells.
+/// The grid width of a Cmd that [`append_to_run_pane`] places, in chars.
 ///
-/// It is the width of the pane that takes the Cmd, or of the focused pane
-/// when a new pane splits it, less the stack's inset and the body's column,
-/// and at least 20.
+/// It is the width that [`cmd_width`] gives the Run pane that takes the Cmd,
+/// or the focused pane when a new pane splits it.
 pub(crate) fn run_pane_width(stoat: &Stoat) -> u16 {
     let ws = stoat.active_workspace();
-    let pane = run_pane_on_show(ws).map_or_else(|| ws.panes.focus(), |(pane, _)| pane);
-    ws.panes.pane(pane).area.width.saturating_sub(3).max(20)
+    let (pane, run) = run_pane_on_show(ws)
+        .map_or_else(|| (ws.panes.focus(), None), |(pane, run)| (pane, Some(run)));
+    cmd_width(ws, pane, run)
+}
+
+/// The grid width of a new Cmd on the stack of the run `run` that the split
+/// pane `pane` shows, in chars, at least 20.
+///
+/// A run that last drew at the board's pixels holds the chars that its body
+/// line holds at the Ui size, as [`RunBox::columns`] counts them. Any other
+/// pane, and a pane with no run yet, holds its cells less three: the body
+/// draws one column inside the stack, which stands one column inside each
+/// side of the pane.
+///
+/// [`RunBox::columns`]: crate::run::RunBox::columns
+fn cmd_width(ws: &Workspace, pane: PaneId, run: Option<RunId>) -> u16 {
+    let pixel_box = run.and_then(|run| ws.runs.get(run)?.pixel_box);
+    let columns = match pixel_box {
+        Some(b) => b.columns(),
+        None => ws.panes.pane(pane).area.width.saturating_sub(3),
+    };
+    columns.max(20)
 }
 
 /// Push the Cmd `cmd` onto a Run pane's stack, and answer that pane's run.
@@ -2918,6 +2928,57 @@ mod tests {
             })
             .collect();
         (((area.bottom() - 1) * 16) as i16, bars)
+    }
+
+    /// A line submitted at a Run pane that drew at the board's pixels starts a
+    /// Cmd as wide as the chars of its body line, and so does a Cmd that the
+    /// pane takes from elsewhere. A pane with no stored box gives both its
+    /// cells less three.
+    #[test]
+    fn a_cmd_of_a_pixel_pane_takes_the_columns_of_its_body() {
+        let started = |painted: bool| {
+            let mut h = Stoat::test();
+            h.stoat.stoatty_protocol = stoatty_protocol::PROTOCOL_VERSION;
+            h.stoat.cell_pixels = Some((9, 18));
+            h.stoat.display_scale = Some(1.0);
+            let run = h.open_run();
+            let _ = h.stoat.render();
+            let pixel_box = h.stoat.active_workspace().runs[run].pixel_box;
+            if !painted {
+                h.stoat.active_workspace_mut().runs[run].pixel_box = None;
+            }
+            let appended = super::run_pane_width(&h.stoat);
+            let handle = h.submit_run("ls");
+            let ws = h.stoat.active_workspace();
+            let cells = ws.panes.pane(ws.panes.focus()).area.width - 3;
+            let columns = pixel_box.map(|b| b.columns());
+            ([ws.cmds[handle.cmd].grid.width(), appended], columns, cells)
+        };
+        let (pixel, columns, _) = started(true);
+        let (cell, _, cells) = started(false);
+        let columns = columns.expect("a pixel paint stores its box");
+        assert_eq!(
+            [pixel, cell],
+            [[columns; 2], [cells; 2]],
+            "the body line's chars, then the cells less three",
+        );
+        assert_ne!(columns, cells, "the two widths differ on this pane");
+    }
+
+    /// A Cmd starts at least 20 chars wide, however narrow its pane.
+    #[test]
+    fn a_narrow_pane_starts_a_cmd_twenty_chars_wide() {
+        let mut h = TestHarness::with_size(16, 12);
+        h.open_run();
+        let handle = h.submit_run("ls");
+        let ws = h.stoat.active_workspace();
+        assert_eq!(
+            (
+                ws.panes.pane(ws.panes.focus()).area.width < 23,
+                ws.cmds[handle.cmd].grid.width()
+            ),
+            (true, 20),
+        );
     }
 
     /// The `run` command over one editor pane starts its line as a Cmd on a
