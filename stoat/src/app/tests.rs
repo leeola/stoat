@@ -6464,6 +6464,94 @@ fn pool_gesture(pool: u32, kind: MouseKind, grid: (u16, u16), cell: (u16, u16)) 
     })
 }
 
+/// A harness whose lone pane is a Run pane at the board's pixels, on a 9 by 18
+/// px cell at a display scale of 1, over a block that printed `hello`, painted
+/// once so the pane holds its box.
+fn pixel_run_pane() -> crate::test_harness::TestHarness {
+    let mut h = Stoat::test();
+    h.stoat.stoatty_protocol = stoatty_protocol::PROTOCOL_VERSION;
+    h.stoat.cell_pixels = Some((9, 18));
+    h.stoat.display_scale = Some(1.0);
+    h.open_run();
+    let handle = h.submit_run("echo hello");
+    h.inject_cmd_output(handle.cmd, b"hello\r\n");
+    h.inject_cmd_done(handle.cmd, 0);
+    let _ = h.stoat.render();
+    h
+}
+
+/// The pool and the area of the focused Run pane of `h`, and the pixel from
+/// the area's corner where the text of its output row starts, as the box
+/// that its paint stored places it.
+fn run_output_origin(h: &crate::test_harness::TestHarness) -> (u32, Rect, (u32, u32)) {
+    let ws = h.stoat.active_workspace();
+    let pane = ws.panes.pane(ws.panes.focus());
+    let View::Run(id) = pane.view else {
+        panic!("the focused pane shows a Run");
+    };
+    let run = &ws.runs[id];
+    let b = run.pixel_box.expect("the pane draws at the board's pixels");
+    let output = run
+        .window_px(&ws.cmds, &b)
+        .into_iter()
+        .find(|line| line.line == 1)
+        .expect("the output row is on show");
+    (
+        pane.index,
+        pane.area,
+        (b.left + b.metrics.px(10), output.top),
+    )
+}
+
+/// The selection of the newest block of the focused Run pane of `h`.
+fn run_selection(h: &crate::test_harness::TestHarness) -> Option<GridSelection> {
+    let ws = h.stoat.active_workspace();
+    let View::Run(id) = ws.panes.pane(ws.panes.focus()).view else {
+        return None;
+    };
+    ws.runs[id].active_block(&ws.cmds)?.selection
+}
+
+/// A press on the first pixel of the second char of `hello`, a drag, and a
+/// release on the last pixel of its fourth char, each at the pixel that the
+/// pane's pool reports, copy `ell`. A char advances one 9 px cell at the test
+/// build's full-cell Ui scale.
+#[test]
+fn a_pixel_drag_selects_the_chars_under_the_pointer() {
+    let mut h = pixel_run_pane();
+    let (pool, area, (start, top)) = run_output_origin(&h);
+    let y = top + 8;
+    for (kind, x) in [
+        (MouseKind::Press(IpcMouseButton::Left), start + 9),
+        (MouseKind::Drag(IpcMouseButton::Left), start + 22),
+        (MouseKind::Release(IpcMouseButton::Left), start + 35),
+    ] {
+        let grid = (area.x + (x / 9) as u16, area.y + (y / 18) as u16);
+        h.stoat
+            .handle_window_ipc(pool_gesture(pool, kind, grid, (x as u16, y as u16)));
+    }
+    assert_eq!(h.fake_clipboard().writes(), vec!["ell".to_owned()]);
+}
+
+/// A press that no pool reports on, as a terminal's own mouse report gives
+/// it, maps the middle pixel of its cell through the pane's box.
+#[test]
+fn a_run_pane_press_with_no_pixel_report_takes_the_middle_of_its_cell() {
+    let mut h = pixel_run_pane();
+    let (_, area, (start, top)) = run_output_origin(&h);
+    let row = (0..u32::from(area.height))
+        .find(|row| (top..top + 17).contains(&(row * 18 + 9)))
+        .expect("a cell row whose middle lies on the output row");
+    let col = 4;
+    let char = (col * 9 + 4 - start) / 9;
+
+    let press = MouseEventKind::Down(MouseButton::Left);
+    h.stoat
+        .update(mouse_event(press, area.x + col as u16, area.y + row as u16));
+    let anchor = run_selection(&h).map(|selection| selection.anchor);
+    assert_eq!(anchor, Some((char as u16, 0)));
+}
+
 /// The drag stays live, since the release that copies clears the selection on
 /// its own.
 #[test]

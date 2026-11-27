@@ -1513,6 +1513,47 @@ mod tests {
             [Some((1, 0)), Some((0, 0)), None, None],
         );
     }
+
+    /// A running block whose two output rows stand on the pixel rows 142 and
+    /// 159 of the first box.
+    fn two_row_block() -> (RunState, SlotMap<CmdId, Cmd>) {
+        let (mut run, mut cmds) = scrollable(0, 0);
+        let mut block = Cmd::new("ls".to_owned(), PathBuf::from("/repo"), 10);
+        block.feed(b"one\r\ntwo");
+        run.blocks.push(cmds.insert(block));
+        (run, cmds)
+    }
+
+    /// A pixel maps to the grid cell of the row whose box holds it and of the
+    /// char 10 px past the content's left that holds it. The inset left of the
+    /// chars and the pad under the last row map to none.
+    #[test]
+    fn a_pixel_names_the_grid_cell_under_it() {
+        let (run, cmds) = two_row_block();
+        let b = first_box();
+        let at = |(x, y)| run.active_block_grid_px(&cmds, &b, x, y);
+        assert_eq!(
+            [(40, 150), (40, 160), (21, 150), (40, 177)].map(at),
+            [Some((2, 0)), Some((2, 1)), None, None],
+        );
+    }
+
+    /// At the Ui scale 232 a char advances 8.16 px of a 9 px cell, so the
+    /// pixel 49 px into the body stands on char 6 and the pixel before it on
+    /// char 5.
+    #[test]
+    fn a_char_at_the_ui_size_is_narrower_than_a_cell() {
+        let (run, cmds) = two_row_block();
+        let b = RunBox {
+            scale: 232,
+            ..first_box()
+        };
+        let start = b.left + M1.px(10);
+        assert_eq!(
+            [start + 49, start + 48].map(|x| run.active_block_grid_px(&cmds, &b, x, 150)),
+            [Some((6, 0)), Some((5, 0))],
+        );
+    }
 }
 
 #[cfg(test)]

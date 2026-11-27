@@ -1840,7 +1840,10 @@ pub struct Stoat {
     ///
     /// A terminal pool's cell is at the terminal font size. A pixel list's pool
     /// reports the pointer's pixel offset from its region's top-left, since the
-    /// grid cell under the pointer names two of its rows.
+    /// grid cell under the pointer names two of its rows. The pool of a Run
+    /// pane at the board's pixels reports the pixel too, since a char of its
+    /// body is narrower than a cell, and the press maps through the box its
+    /// paint stored.
     pub(crate) pool_pointer: Option<(u32, u16, u16)>,
     /// Terminal cell the mouse last rested over a focused editor pane, or
     /// `None` before any motion. The render resolves the diagnostic under it

@@ -2518,30 +2518,40 @@ fn handle_run_pane_mouse(stoat: &mut Stoat, kind: MouseEventKind, col: u16, row:
             FocusTarget::SplitPane => {
                 let pane = ws.panes.pane(ws.panes.focus());
                 if let View::Run(id) = pane.view {
-                    Some((id, pane.area))
+                    Some((id, pane.area, Some(pane.index)))
                 } else {
                     None
                 }
             },
             FocusTarget::Dock(dock_id) => ws.docks.get(dock_id).and_then(|dock| {
                 if let View::Run(id) = dock.view {
-                    Some((id, dock.area))
+                    Some((id, dock.area, None))
                 } else {
                     None
                 }
             }),
         }
     };
-    let Some((run_id, area)) = target else {
+    let Some((run_id, area, pool)) = target else {
         return false;
     };
+    // A pane at the board's pixels declares its own pool over its paint, so a
+    // report there carries the pointer's pixel from the corner of its box. A
+    // gesture with no report keeps the middle of its cell.
+    let pixel = stoat
+        .pool_pointer
+        .filter(|&(at, ..)| Some(at) == pool)
+        .map(|(_, x, y)| (u32::from(x), u32::from(y)));
     let clipboard_host = stoat.clipboard_host.clone();
     let env_host = stoat.env_host.clone();
     let Workspace { runs, cmds, .. } = stoat.active_workspace_mut();
     let Some(run_state) = runs.get(run_id) else {
         return false;
     };
-    let pos = run_state.active_block_grid_pos(cmds, area, col, row);
+    let pos = match run_state.pixel_box.zip(pixel) {
+        Some((b, (x, y))) => run_state.active_block_grid_px(cmds, &b, x, y),
+        None => run_state.active_block_grid_pos(cmds, area, col, row),
+    };
     let Some(block) = run_state.active_block_mut(cmds) else {
         return false;
     };
@@ -2570,9 +2580,15 @@ fn handle_run_pane_mouse(stoat: &mut Stoat, kind: MouseEventKind, col: u16, row:
             true
         },
         MouseEventKind::Up(MouseButton::Left) => {
-            let Some(sel) = block.selection.as_ref() else {
+            let Some(sel) = block.selection.as_mut() else {
                 return false;
             };
+            // A pixel drag reports only on entering another grid cell, so the
+            // release, which reports its pixel, can stand on a char past the
+            // last drag's.
+            if let Some(pos) = pos {
+                sel.head = pos;
+            }
             if sel.is_empty() {
                 block.selection = None;
                 return true;

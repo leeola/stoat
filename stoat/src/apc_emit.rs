@@ -948,6 +948,16 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
                     .and_then(|_| crate::mouse::boxed_modal_surfaces(stoat))
                     .map(|surfaces| surfaces.list),
             });
+    // A Run pane at the board's pixels draws on the live grid too, so the
+    // pane's own pool takes a region with no page over the rect of its paint,
+    // where a press reports its pixel over the same socket.
+    let run_pointers = match !overlay
+        && stoat.window_ipc_connected
+        && stoat.stoatty_protocol >= POOL_POINTER_PROTOCOL
+    {
+        true => run_pointer_regions(stoat),
+        false => Vec::new(),
+    };
     let palette_list = pools_palette
         .then_some(stoat.command_palette.as_ref())
         .flatten()
@@ -1116,6 +1126,7 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
     let mut active: Vec<u32> = panes.iter().map(|(pool, _, _)| *pool).collect();
     active.extend(terminal_panes.iter().map(|pane| pane.region.pool));
     active.extend(stack_panes.iter().map(|(pool, _, _)| *pool));
+    active.extend(run_pointers.iter().map(|region| region.pool));
     // Each detached pane also keeps a one-row status pool alive.
     for (pool, _, region) in &panes {
         if region.window != 0 {
@@ -1182,6 +1193,9 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
     stoat
         .terminal_pages
         .retain(|pool, _| terminal_panes.iter().any(|pane| pane.region.pool == *pool));
+    for region in run_pointers {
+        stoat.smooth_scroll.declare_pointer_region(&mut out, region);
+    }
 
     // Editor and review pages render off the run loop. The loop collects a
     // snapshot -- plus the cloned view state and theme for review -- and the
@@ -3174,6 +3188,36 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
             },
         }
     }
+}
+
+/// The pointer region of each pane of the split tree whose Run pane last drew
+/// at the board's pixels, in the pane's own pool over the rect of that paint.
+///
+/// The pane fills no page in the primary window, so its pool holds none and
+/// gives a press the pixel from the corner of the measure the paint stored.
+fn run_pointer_regions(stoat: &Stoat) -> Vec<PoolRegionCommand> {
+    let ws = stoat.active_workspace();
+    ws.panes
+        .split_panes()
+        .filter_map(|(_, pane)| {
+            let View::Run(id) = pane.view else {
+                return None;
+            };
+            let area = ws.runs.get(id)?.pixel_box?.area;
+            Some(PoolRegionCommand {
+                pool: pane.index,
+                top: area.y,
+                left: area.x,
+                width: area.width,
+                height: area.height,
+                window: 0,
+                kind: PoolKind::Grid,
+                dim: 0,
+                resident: false,
+                inset: [0, 0],
+            })
+        })
+        .collect()
 }
 
 /// Retire every pane pool whose owner changed since the last pass, and record
