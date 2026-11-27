@@ -820,11 +820,29 @@ pub(crate) fn modal_footer(
     theme: &Theme,
     scene: &mut stoat_widgets::ApcScene,
 ) {
+    let down = PLATE_FOOTER_NUDGE[1];
+    modal_footer_at(buf, rect, footer, plate, down, theme, scene);
+}
+
+/// Paint a modal's key line into `rect` as [`modal_footer`] does, with the
+/// plate's line `down` logical px down of its row.
+///
+/// For a plate whose last Island ends off the cell grid, so the 24 px of the
+/// line under it start between two cell edges. The cell form ignores `down`.
+pub(crate) fn modal_footer_at(
+    buf: &mut Buffer,
+    rect: Rect,
+    footer: &Footer<'_>,
+    plate: Option<PlateColors>,
+    down: i16,
+    theme: &Theme,
+    scene: &mut stoat_widgets::ApcScene,
+) {
     if rect.is_empty() {
         return;
     }
     match plate {
-        Some(plate) => paint_plate_footer(buf, rect, footer, plate.ground, theme, scene),
+        Some(plate) => paint_plate_footer(buf, rect, footer, plate.ground, down, theme, scene),
         None => paint_cell_footer(buf, rect, footer, theme, scene),
     }
 }
@@ -888,16 +906,19 @@ fn paint_cell_footer(
 }
 
 /// Paint `footer` into `rect`'s first row as the plate's key line, runs on the
-/// plate's `ground`, for [`modal_footer`].
+/// plate's `ground` `down` logical px down of the row, for
+/// [`modal_footer_at`].
 ///
 /// The hints stand [`PLATE_HINT_GAP`] apart, and the hints, the legend, and the
 /// note stand [`PLATE_FOOTER_GAP`] apart. A part whose color has no RGB value
 /// draws nothing.
+#[allow(clippy::too_many_arguments)]
 fn paint_plate_footer(
     buf: &mut Buffer,
     rect: Rect,
     footer: &Footer<'_>,
     ground: [u8; 3],
+    down: i16,
     theme: &Theme,
     scene: &mut stoat_widgets::ApcScene,
 ) {
@@ -915,7 +936,7 @@ fn paint_plate_footer(
     let muted = style_rgb(theme.get(scope::UI_TEXT_MUTED).fg);
 
     let origin = Rect::new(rect.x, rect.y, 1, 1);
-    scene.nudge(PLATE_FOOTER_NUDGE);
+    scene.nudge([PLATE_FOOTER_NUDGE[0], down]);
     let mut run = |col: u16, text: &str, color: Option<[u8; 3]>| {
         if let (Some(color), false) = (color, text.is_empty()) {
             plate_run(col, text, caption, color, ground, false).render(origin, buf, scene);

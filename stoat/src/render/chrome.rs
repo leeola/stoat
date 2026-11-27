@@ -78,7 +78,7 @@ const PLATE_RADIUS: u8 = 8;
 /// into the modal rect's last row. Its sides reach 11 px out, because the
 /// boards pad the plate 8 px to an Island and inset an Island's row text 12 px,
 /// which puts that text one cell inside the inner rect.
-const PLATE_EDGES: [Edge; 4] = [
+pub(crate) const PLATE_EDGES: [Edge; 4] = [
     Edge::Inset(0),
     Edge::Outset(11),
     Edge::Outset(10),
@@ -131,6 +131,28 @@ pub(crate) struct PlateColors {
     pub(crate) ground: [u8; 3],
     /// The editor surface, which fills the plate's Islands.
     pub(crate) surface: [u8; 3],
+}
+
+/// Where a plate's last Island and the key line and the bottom of the plate
+/// under it stand, for an Island whose height the boards set in pixels.
+///
+/// An Island's cells clear to the surface, so an Island grows down from its
+/// cells and never ends inside them. The 24 px key line follows the Island's
+/// bottom edge, and the plate ends where the key line does.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct IslandFit {
+    /// The cell rows of the Island.
+    pub(crate) rows: u16,
+    /// The Island's bottom edge under its last row.
+    pub(crate) bottom: Edge,
+    /// The logical px that the key line draws down of the row under the
+    /// Island's rows.
+    pub(crate) footer_down: i16,
+    /// The plate's bottom edge under its inner rect.
+    pub(crate) plate_bottom: Edge,
+    /// Whether the inner rect takes one more blank row under the key line,
+    /// for a plate that ends past the cell under it.
+    pub(crate) extra_row: bool,
 }
 
 /// The theme scope that colors the extension of a file whose type takes a
@@ -600,6 +622,51 @@ pub(crate) fn island_pad(m: RowMetrics, [x, y]: [u8; 2]) -> [u8; 4] {
         inside(x, edge_reach(right, width, false)),
         inside(y, edge_reach(bottom, height, false)),
     ]
+}
+
+/// The logical px from the left of an Island's cells to `pad` logical px inside
+/// its [`ISLAND_SIDE`] edge, on the cell of `m`, held at 0.
+///
+/// The edge reaches into the column beside the cells by what the cell's width
+/// sets, so a row that starts this far in stands `pad` px inside the Island at
+/// any cell size.
+pub(crate) fn island_side_pad(m: RowMetrics, pad: u8) -> u16 {
+    let width = (f32::from(m.cell[0]) / m.scale).round() as i32;
+    (i32::from(pad) - edge_reach(ISLAND_SIDE, width, true)).clamp(0, 255) as u16
+}
+
+/// The rows and the edges of a plate's last Island, whose bottom stands
+/// `below` logical px under the top of its first row, over a key line and the
+/// plate's bottom, on cells `h` logical px high.
+///
+/// The Island takes the whole rows that `below` covers, at least one, and
+/// reaches the rest under them, so `below` must be at least `h`. The key line
+/// centers in the 24 px under the Island, and the plate ends at the key line's
+/// bottom. A plate that would end past the cell under the key line ends a row
+/// lower, since the ring that a plate clears under its cells is one row.
+///
+/// The boards' cell form is the case of `below` at `h + 4`: one row, a 4 px
+/// outset, a key line 7 px down, and a plate 10 px into the row under it.
+pub(crate) fn island_fit(h: u16, below: u16) -> IslandFit {
+    let rows = (below / h.max(1)).max(1);
+    let k = below.saturating_sub(h * rows);
+    let plate = i32::from(k) + 24 - i32::from(h);
+    let extra_row = plate > i32::from(h);
+    let plate = match extra_row {
+        true => plate - i32::from(h),
+        false => plate,
+    };
+    let edge = |px: i32| match px >= 0 {
+        true => Edge::Outset(px.min(255) as u8),
+        false => Edge::Inset((-px).min(255) as u8),
+    };
+    IslandFit {
+        rows,
+        bottom: edge(i32::from(k)),
+        footer_down: (i32::from(k) + 12 - i32::from(h / 2)) as i16,
+        plate_bottom: edge(plate),
+        extra_row,
+    }
 }
 
 /// The logical px that `edge` reaches past its cells, negative for an edge
@@ -1093,11 +1160,11 @@ pub(crate) fn text(
 #[cfg(test)]
 mod tests {
     use super::{
-        edge_reach, fitted_width, hline, hline_edge, island_pad, list_modal_width, list_plate,
-        modal_box, modal_frame, modal_frame_above_pools, modal_frame_anchored, modal_island,
-        modal_plate, plate_colors, popout_frame, selected_row, tagged_name, text, toggle_mark,
-        type_tag, vline, TypeTag, CONFIRM_EDGES, ISLAND_BOTTOM, ISLAND_GAP, ISLAND_SIDE,
-        ISLAND_TOP,
+        edge_reach, fitted_width, hline, hline_edge, island_fit, island_pad, island_side_pad,
+        list_modal_width, list_plate, modal_box, modal_frame, modal_frame_above_pools,
+        modal_frame_anchored, modal_island, modal_plate, plate_colors, popout_frame, selected_row,
+        tagged_name, text, toggle_mark, type_tag, vline, IslandFit, TypeTag, CONFIRM_EDGES,
+        ISLAND_BOTTOM, ISLAND_GAP, ISLAND_SIDE, ISLAND_TOP,
     };
     use crate::{
         render::{self, pixel_rows::RowMetrics},
@@ -1603,6 +1670,40 @@ mod tests {
             ],
             [[12, 4, 9, 4], [11, 2, 8, 4], [12, 4, 9, 4], [1, 0, 0, 4]],
         );
+    }
+
+    /// An Island takes the whole 18 px rows that its bottom covers and reaches
+    /// the rest under them. The key line centers in the 24 px under it, and
+    /// the plate ends at the key line's bottom, a row lower where that is past
+    /// the row under the key line. A bottom of 22 px is the cell form.
+    #[test]
+    fn an_island_ends_its_plate_by_its_pixel_height() {
+        let fit = |rows, bottom, footer_down, plate_bottom, extra_row| IslandFit {
+            rows,
+            bottom: Edge::Outset(bottom),
+            footer_down,
+            plate_bottom: Edge::Outset(plate_bottom),
+            extra_row,
+        };
+        assert_eq!(
+            [22, 25, 42, 280, 33].map(|below| island_fit(18, below)),
+            [
+                fit(1, 4, 7, 10, false),
+                fit(1, 7, 10, 13, false),
+                fit(2, 6, 9, 12, false),
+                fit(15, 10, 13, 16, false),
+                fit(1, 15, 18, 3, true),
+            ],
+        );
+    }
+
+    /// A row 10 px inside an Island's side starts 7 px into its cells on a
+    /// 9 px cell, whose column the side reaches 3 px into, and 4 px into them
+    /// on a 12 px cell.
+    #[test]
+    fn a_row_inside_an_island_side_counts_from_its_reach() {
+        let pad = |cell| island_side_pad(RowMetrics { cell, scale: 1.0 }, 10);
+        assert_eq!([pad([9, 18]), pad([12, 24])], [7, 4]);
     }
 
     /// An inset stops its px inside the cells, a margin crosses the cell

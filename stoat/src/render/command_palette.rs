@@ -11,7 +11,8 @@ use crate::{
     markdown::StyledLine,
     render::{
         chrome::{
-            PlateColors, ISLAND_BOTTOM, ISLAND_GAP, ISLAND_SIDE, ISLAND_TOP, SELECTED_ROW_RADIUS,
+            IslandFit, PlateColors, ISLAND_BOTTOM, ISLAND_GAP, ISLAND_SIDE, ISLAND_TOP,
+            PLATE_EDGES, SELECTED_ROW_RADIUS,
         },
         cmd_line::{self, CmdLine, CmdStatus},
         paint::style_rgb,
@@ -21,7 +22,7 @@ use crate::{
         text::{clip_to_width, pre_wrap_rows, wrap_text, write_str, write_str_clipped},
         TypeScale,
     },
-    run::cargo::CmdReport,
+    run::{cargo::CmdReport, vterm::BodyRow, Cmd},
     theme::{TypeRole, FULL_CELL_SCALE},
     user_command::{
         pick,
@@ -735,36 +736,81 @@ fn render_palette_run_block(
     let room = area
         .bottom()
         .saturating_sub(1)
-        .saturating_sub(block.origin.y + header_rows + 4);
-    let rows = block.rows.clamp(1, RUN_BLOCK_ROWS).min(room.max(1));
-    let modal = Rect::new(x, block.origin.y, width, header_rows + rows + 4);
+        .saturating_sub(block.origin.y + header_rows + 4)
+        .max(1);
+    let wanted = block.rows.clamp(1, RUN_BLOCK_ROWS);
+    let progress = cmd
+        .report
+        .as_ref()
+        .and_then(CmdReport::progress)
+        .filter(|_| !cmd.finished);
+    let pixels = block_pixels(theme, scene, wanted, room, progress.is_some());
+    let (lines, rows) = match &pixels {
+        Some(pixels) => (pixels.lines, pixels.fit.rows),
+        None => (wanted.min(room), wanted.min(room)),
+    };
+    let extra = pixels
+        .as_ref()
+        .map_or(0, |pixels| u16::from(pixels.fit.extra_row));
+    let modal = Rect::new(x, block.origin.y, width, header_rows + rows + 4 + extra);
 
     let modal_style = theme.get(crate::theme::scope::UI_MODAL_PALETTE);
-    let inner = crate::render::chrome::list_plate(buf, modal, modal_style, theme, &mut *scene);
+    let inner = match &pixels {
+        Some(pixels) => {
+            let inner = Block::default().borders(Borders::ALL).inner(modal);
+            let [top, right, _, left] = PLATE_EDGES;
+            let edges = [top, right, pixels.fit.plate_bottom, left];
+            crate::render::chrome::modal_plate(buf, inner, edges, pixels.plate, theme, scene);
+            inner
+        },
+        None => crate::render::chrome::list_plate(buf, modal, modal_style, theme, &mut *scene),
+    };
     cmd_line::cmd_line(buf, inner, &line, theme, scene);
 
     let body = Rect::new(inner.x, inner.y + 1 + header_rows, inner.width, rows);
     let plate = crate::render::chrome::plate_colors(theme, scene);
     if let Some(plate) = plate {
-        let edges = [ISLAND_TOP, ISLAND_SIDE, ISLAND_BOTTOM, ISLAND_SIDE];
+        let bottom = pixels
+            .as_ref()
+            .map_or(ISLAND_BOTTOM, |pixels| pixels.fit.bottom);
+        let edges = [ISLAND_TOP, ISLAND_SIDE, bottom, ISLAND_SIDE];
         crate::render::chrome::modal_island(body, edges, plate, theme, buf, scene);
     }
 
-    let row_rect = |y| Rect::new(body.x + 1, y, body.width.saturating_sub(2), 1);
-    let first = content.saturating_sub(usize::from(rows));
-    let dim = theme.get(crate::theme::scope::UI_TEXT_DIM);
-    for (y, index) in (body.y..body.bottom()).zip(first..content) {
-        match &report {
-            Some(report) => run_pane::paint_body_row(buf, row_rect(y), &report[index], theme),
-            None => run_pane::paint_grid_row(buf, row_rect(y), y, &cmd.grid, index, None, dim),
-        }
-    }
-    if !cmd.finished
-        && let Some((done, total)) = cmd.report.as_ref().and_then(CmdReport::progress)
-    {
-        let row = row_rect(body.y);
-        let width = row.width.saturating_mul(16);
-        run_pane::paint_progress(row, 0, width, done, total, theme, buf, scene);
+    let first = content.saturating_sub(usize::from(lines));
+    match &pixels {
+        Some(pixels) => {
+            let body_rows = report.as_deref();
+            paint_block_pixel_lines(
+                cmd,
+                body_rows,
+                (first, body),
+                pixels,
+                progress,
+                theme,
+                buf,
+                scene,
+            );
+        },
+        None => {
+            let row_rect = |y| Rect::new(body.x + 1, y, body.width.saturating_sub(2), 1);
+            let dim = theme.get(crate::theme::scope::UI_TEXT_DIM);
+            for (y, index) in (body.y..body.bottom()).zip(first..content) {
+                match &report {
+                    Some(report) => {
+                        run_pane::paint_body_row(buf, row_rect(y), &report[index], theme)
+                    },
+                    None => {
+                        run_pane::paint_grid_row(buf, row_rect(y), y, &cmd.grid, index, None, dim)
+                    },
+                }
+            }
+            if let Some((done, total)) = progress {
+                let row = row_rect(body.y);
+                let width = row.width.saturating_mul(16);
+                run_pane::paint_progress(row, 0, width, done, total, theme, buf, scene);
+            }
+        },
     }
 
     let located = cmd
@@ -795,8 +841,134 @@ fn render_palette_run_block(
         hints,
         ..Footer::default()
     };
-    let rect = crate::render::picker::footer_rect(modal);
-    crate::render::picker::modal_footer(buf, rect, &footer, plate, theme, scene);
+    match &pixels {
+        Some(pixels) => {
+            let rect = Rect::new(modal.x + 1, body.bottom(), modal.width.saturating_sub(2), 1);
+            let down = pixels.fit.footer_down;
+            crate::render::picker::modal_footer_at(buf, rect, &footer, plate, down, theme, scene);
+        },
+        None => {
+            let rect = crate::render::picker::footer_rect(modal);
+            crate::render::picker::modal_footer(buf, rect, &footer, plate, theme, scene);
+        },
+    }
+}
+
+/// How a Run Block's Island lays its lines out at the board's pixels.
+struct BlockPixels {
+    metrics: RowMetrics,
+    /// The cell height in logical px.
+    height: u16,
+    /// The lines on show, the newest of the body.
+    lines: u16,
+    fit: IslandFit,
+    plate: PlateColors,
+}
+
+/// The pixel layout of a Run Block's Island under `scene`, for a body that
+/// wants `wanted` lines, with `room` cell rows for the Island and its extra
+/// row, or `None` where the Island keeps its cells.
+///
+/// The pixel form is the Run pane's, a host that states its cell and its scale
+/// and reads `ink` frames, under the plate look, on a cell at most 25 logical
+/// px high. A taller cell puts the Island's bottom inside its one row. The
+/// Island is 12 px and 17 px for each line high at the 18 px cell, as the
+/// cell height less 1 px, and 8 px more over a progress bar. Its top stands
+/// `h - 14` px over its first row, so its bottom stands `26 - h + (h - 1) * n
+/// + p` px under the top of that row. The lines on show are the most up to
+/// `wanted` whose rows fit `room`.
+fn block_pixels(
+    theme: &crate::theme::Theme,
+    scene: &stoat_widgets::ApcScene,
+    wanted: u16,
+    room: u16,
+    progress: bool,
+) -> Option<BlockPixels> {
+    let metrics = RowMetrics::of(theme, scene).filter(|_| scene.inks())?;
+    let plate = crate::render::chrome::plate_colors(theme, scene)?;
+    let height = (f32::from(metrics.cell[1]) / metrics.scale).round() as u16;
+    if !(1..=25).contains(&height) {
+        return None;
+    }
+
+    let bar = u16::from(progress) * 8;
+    let fit = |lines: u16| {
+        let below = 26 - height + (height - 1) * lines + bar;
+        crate::render::chrome::island_fit(height, below)
+    };
+    let fits = |lines: &u16| {
+        let fit = fit(*lines);
+        fit.rows + u16::from(fit.extra_row) <= room
+    };
+    let lines = (1..=wanted).rev().find(fits).unwrap_or(1);
+    Some(BlockPixels {
+        metrics,
+        height,
+        lines,
+        fit: fit(lines),
+        plate,
+    })
+}
+
+/// Draw the newest lines of `cmd`'s body from line `first`, the rows of its
+/// report or of its grid, and a running Cmd's `progress` bar, in the Island
+/// over `body`, at the board's pixels.
+///
+/// The Island's top stands `h - 14` px over `body`'s first row, `h` its cell's
+/// height in logical px, and pads 6 px. Line i draws `2 + p + (h - 1) * i` px
+/// under the top of that row, `p` the 8 px of a progress bar's 2 px and its
+/// 3 px over and under, through the Run pane's row painters and in its colors.
+/// Each line starts 10 px inside the Island's side, and the bar draws 5 px
+/// under the row's top from 10 px inside each side. The paint ends with no ink
+/// and no nudge in force.
+#[allow(clippy::too_many_arguments)]
+fn paint_block_pixel_lines(
+    cmd: &Cmd,
+    report: Option<&[BodyRow]>,
+    (first, body): (usize, Rect),
+    pixels: &BlockPixels,
+    progress: Option<(u32, u32)>,
+    theme: &crate::theme::Theme,
+    buf: &mut Buffer,
+    scene: &mut stoat_widgets::ApcScene,
+) {
+    let (m, h) = (pixels.metrics, pixels.height);
+    let col = m.cols(crate::render::chrome::island_side_pad(m, 10));
+    let ui = theme.type_scale(TypeRole::Ui);
+    let dim = style_rgb(theme.get(crate::theme::scope::UI_TEXT_DIM).fg).unwrap_or_default();
+    let colors = run_pane::CellColors {
+        dim,
+        surface: pixels.plate.surface,
+    };
+    let row_at = |px: u16| Rect::new(body.x, body.y + px / h, body.width, 1);
+    let mut pen = run_pane::Pen::at(0);
+
+    let bar = match progress {
+        Some((done, total)) => {
+            pen.nudge((5 % h) as i16, scene);
+            pen.ink(None, scene);
+            let width = body.width.saturating_mul(16).saturating_sub(2 * col);
+            run_pane::paint_progress(row_at(5), col, width, done, total, theme, buf, scene);
+            8
+        },
+        None => 0,
+    };
+    let content = report.map_or_else(|| cmd.grid.rendered_line_count(), <[BodyRow]>::len);
+    for (line, index) in (first..content).enumerate() {
+        let px = 2 + bar + (h - 1) * line as u16;
+        pen.nudge((px % h) as i16, scene);
+        let at = run_pane::RowAt::body(row_at(px), col, ui, &m);
+        match report {
+            Some(rows) => {
+                run_pane::paint_pixel_body_row(&rows[index], &at, theme, dim, &mut pen, buf, scene)
+            },
+            None => run_pane::paint_pixel_grid_row(
+                &cmd.grid, index, None, &at, colors, &mut pen, buf, scene,
+            ),
+        }
+    }
+    pen.ink(None, scene);
+    scene.nudge([0, 0]);
 }
 
 /// The plate that a Run Block opens over when the palette painted no typing
@@ -4096,19 +4268,19 @@ pub(super) fn paint_source_tag(
 #[cfg(test)]
 mod tests {
     use super::{
-        command_box, command_page_start, command_window, count_status, doc_lines, grouped,
-        history_age, history_window, input_spans, paint_arg_rows, paint_doc_lines,
+        block_pixels, command_box, command_page_start, command_window, count_status, doc_lines,
+        grouped, history_age, history_window, input_spans, paint_arg_rows, paint_doc_lines,
         paint_doc_pixels, paint_history_rows, paint_palette_rows, palette_arg_layout,
         palette_filter_layout, pascal_matches, pick_status, pixel_doc_last_top,
-        render_command_palette, source_tag, usage_line, wrap_text, DocLines, HistoryEntry,
-        DOC_ROWS, ISLAND_BOTTOM, ISLAND_GAP, ISLAND_SIDE, ISLAND_TOP, LIST_ROWS, PIXEL_DOC_EDGE,
-        PIXEL_DOC_ROWS, PIXEL_LIST_EDGE,
+        render_command_palette, run_block_origin, source_tag, usage_line, wrap_text, DocLines,
+        HistoryEntry, DOC_ROWS, ISLAND_BOTTOM, ISLAND_GAP, ISLAND_SIDE, ISLAND_TOP, LIST_ROWS,
+        PIXEL_DOC_EDGE, PIXEL_DOC_ROWS, PIXEL_LIST_EDGE,
     };
     use crate::{
         cli_spec::{self, RG_HELP},
         command_palette::{
             action_row, ArgList, ArgRow, Availability, CliListKind, HistorySpans, Namespace,
-            PaletteCommand, PickLoad, PickState, ResolvedCommand,
+            PaletteBlock, PaletteCommand, PickLoad, PickState, ResolvedCommand,
         },
         host::ShellOutput,
         input_history,
@@ -4117,6 +4289,7 @@ mod tests {
         render::{
             editor::ResolvedChrome, paint::style_rgb, picker::RowStart, pixel_rows::RowMetrics,
         },
+        run::Cmd,
         test_fixture::{plate_islands, row_rules},
         test_harness::TestHarness,
         theme::Theme,
@@ -4130,7 +4303,7 @@ mod tests {
         layout::Rect,
         style::{Color, Modifier, Style},
     };
-    use std::{collections::HashMap, ops::Range, sync::Arc};
+    use std::{collections::HashMap, ops::Range, path::PathBuf, sync::Arc};
     use stoat_action::registry;
     use stoat_config::Template;
     use stoatty_protocol::command::{decode_stream, BarCommand, Command, Edge, TextRunCommand};
@@ -7087,7 +7260,7 @@ mod tests {
     /// The commands, less the ends of their runs, that the open palette of `h`
     /// paints into the harness's area under a live scene whose lists lay their
     /// rows out by [`M1`], for a terminal that starts a page at its pool's
-    /// inset, and the Islands among them.
+    /// inset and reads `ink` frames, and the Islands among them.
     fn pixel_palette(h: &mut TestHarness) -> (Vec<Command>, Vec<(Rect, [Edge; 4])>) {
         let mut palette = h.stoat.command_palette.take().expect("the palette is open");
         let specs = std::mem::take(&mut h.stoat.cli_specs);
@@ -7099,6 +7272,7 @@ mod tests {
         scene.set_nudge_protocol(true);
         scene.set_scaled_cell(Some(M1.cell));
         scene.set_pixel_rows(Some((M1.cell, M1.scale)));
+        scene.set_ink_protocol(true);
         render_command_palette(
             &mut palette,
             h.stoat.active_workspace_mut(),
@@ -7121,5 +7295,189 @@ mod tests {
             .filter(|command| *command != Command::TextRunEnd)
             .collect();
         (commands, plate_islands(&theme, &scene))
+    }
+
+    /// A harness whose palette shows a Run Block over a Cmd of `line` that
+    /// printed `output`, which exited 0 where `finished` holds and else runs.
+    fn run_block_over(line: &str, output: &[u8], finished: bool) -> TestHarness {
+        let mut h = TestHarness::with_size(120, 40);
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::OpenCommandPalette);
+        let mut cmd = Cmd::new(line.to_owned(), PathBuf::from("/w"), 60);
+        cmd.feed(output);
+        cmd.finished = finished;
+        cmd.exit_status = finished.then_some(0);
+        let id = h.stoat.active_workspace_mut().cmds.insert(cmd);
+        let origin = run_block_origin(h.stoat.size());
+        let palette = h
+            .stoat
+            .command_palette
+            .as_mut()
+            .expect("the palette is open");
+        palette.block = Some(PaletteBlock {
+            cmd: id,
+            origin,
+            rows: 0,
+        });
+        h
+    }
+
+    /// The cells and the edges of the plate that `commands` declare, the
+    /// backdrop panel in the ground of `theme`.
+    fn plate_panel(commands: &[Command], theme: &Theme) -> Option<(Rect, [Edge; 4])> {
+        let ground = style_rgb(crate::render::ground_surface(theme))?;
+        commands.iter().find_map(|command| match command {
+            Command::Panel(panel) if panel.backdrop && panel.fill == Some(ground) => {
+                let cells = Rect::new(panel.left, panel.top, panel.width, panel.height);
+                Some((cells, panel.edges))
+            },
+            _ => None,
+        })
+    }
+
+    /// Each command of `commands` but the nudges, with the nudge in force where
+    /// it stands.
+    fn under_nudges(commands: &[Command]) -> Vec<([i16; 2], &Command)> {
+        let mut nudge = [0, 0];
+        commands
+            .iter()
+            .filter_map(|command| match command {
+                Command::Nudge(offset) => {
+                    nudge = *offset;
+                    None
+                },
+                command => Some((nudge, command)),
+            })
+            .collect()
+    }
+
+    /// The pixel layout of a Run Block whose body wants `wanted` lines, with
+    /// `room` rows, under the theme of a fresh harness and a scene that reads
+    /// nudges and inks on a 9 px cell `height` px high at scale 1.
+    fn laid_out(height: u16, wanted: u16, room: u16) -> Option<(u16, u16)> {
+        let theme = TestHarness::with_size(80, 24).stoat.theme.clone();
+        let mut scene = stoat_widgets::ApcScene::new();
+        scene.set_nudge_protocol(true);
+        scene.set_ink_protocol(true);
+        scene.set_pixel_rows(Some(([9, height], 1.0)));
+        block_pixels(&theme, &scene, wanted, room, false)
+            .map(|pixels| (pixels.lines, pixels.fit.rows))
+    }
+
+    /// A Run Block shows the most lines whose Island keeps the plate over the
+    /// area's last row. Seven 17 px lines fill seven 18 px rows, and the
+    /// sixteenth line of a roomy plate ends in the fifteenth row.
+    #[test]
+    fn a_pixel_run_block_holds_the_lines_that_fit_its_room() {
+        assert_eq!(
+            [laid_out(18, 16, 7), laid_out(18, 16, 16)],
+            [Some((7, 7)), Some((16, 15))],
+        );
+    }
+
+    /// A cell over 25 logical px high puts the Island's bottom inside its one
+    /// row, so a Run Block keeps its cells there.
+    #[test]
+    fn a_run_block_keeps_its_cells_on_a_cell_over_25_px_high() {
+        assert_eq!(
+            [laid_out(25, 1, 8), laid_out(26, 1, 8)],
+            [Some((1, 1)), None],
+        );
+    }
+
+    /// A finished Cmd's one line `one` stands in an Island 12 px and 17 px
+    /// high, 10 px inside it, so the Island ends 7 px under its one row. The
+    /// key line centers in the 24 px under the Island, and the plate ends where
+    /// the key line does.
+    #[test]
+    fn a_pixel_run_block_island_is_twelve_pixels_and_seventeen_a_line_high() {
+        let mut h = run_block_over("echo one", b"one", true);
+        let (commands, islands) = pixel_palette(&mut h);
+        let header_rows = h
+            .stoat
+            .command_palette
+            .as_ref()
+            .expect("the palette")
+            .header_rows;
+        let [(island, edges)] = islands[..] else {
+            panic!("one Island, got {islands:?}");
+        };
+
+        let placed = under_nudges(&commands);
+        let run = |text: &str| {
+            placed.iter().find_map(|(at, command)| match command {
+                Command::TextRun(run) if run.text == text => Some((*at, run.col, run.row)),
+                _ => None,
+            })
+        };
+        let body = (island.x as i16 * 16, island.y as i16 * 16);
+        let plate = plate_panel(&commands, &h.stoat.theme);
+        assert_eq!(
+            (
+                (island.height, edges[2]),
+                run("one"),
+                run("Enter").map(|(at, ..)| at),
+                plate.map(|(cells, edges)| (cells.height, edges[2])),
+            ),
+            (
+                (1, Edge::Outset(7)),
+                Some(([0, 2], body.0 + 12, body.1)),
+                Some([1, 10]),
+                Some((header_rows + 3, Edge::Outset(13))),
+            ),
+        );
+    }
+
+    /// A running build's progress bar draws 5 px under the top of the Island's
+    /// first row, from 10 px inside each side, and pushes the line under it
+    /// 8 px down. The Island then ends 15 px under its row, past the room of
+    /// one cell under the key line, so the plate takes one more row and ends
+    /// 3 px into it.
+    #[test]
+    fn a_running_parsed_block_draws_its_bar_over_its_lines() {
+        let output = b"    Building [=========>            ] 212/480: stoat\r";
+        let mut h = run_block_over("cargo build", output, false);
+        let (commands, islands) = pixel_palette(&mut h);
+        let header_rows = h
+            .stoat
+            .command_palette
+            .as_ref()
+            .expect("the palette")
+            .header_rows;
+        let [(island, edges)] = islands[..] else {
+            panic!("one Island, got {islands:?}");
+        };
+
+        let placed = under_nudges(&commands);
+        let bars: Vec<(i16, i16, u16)> = placed
+            .iter()
+            .filter_map(|(at, command)| match command {
+                Command::Bar(bar) if *at == [0, 5] && bar.height == 2 => {
+                    Some((bar.x, bar.y, bar.width))
+                },
+                _ => None,
+            })
+            .collect();
+        let line = placed.iter().find_map(|(at, command)| match command {
+            Command::TextRun(run) if run.text.starts_with("Building") => Some(*at),
+            _ => None,
+        });
+        let plate = plate_panel(&commands, &h.stoat.theme);
+        let (x, y) = (island.x as i16 * 16 + 12, island.y as i16 * 16);
+        let width = island.width * 16 - 24;
+        let fill = (u32::from(width) * 212 / 480) as u16;
+        assert_eq!(
+            (
+                bars,
+                line,
+                edges[2],
+                plate.map(|(cells, edges)| (cells.height, edges[2]))
+            ),
+            (
+                vec![(x, y, width), (x, y, fill)],
+                Some([0, 10]),
+                Edge::Outset(15),
+                Some((header_rows + 4, Edge::Outset(3))),
+            ),
+        );
     }
 }

@@ -3173,11 +3173,13 @@ fn a_finished_cargo_test_draws_its_report() {
 /// line.
 ///
 /// The `block` command `hello` runs `true`, which prints nothing, so the body
-/// holds one row, the shell text that opens it. `top` is the first pixel row
+/// holds one line, the shell text that opens it. `top` is the first pixel row
 /// from y 40 where x 720 reads the ground, the plate's top. The Island starts
-/// 32 px under it, as the board's 32 px Cmd Line sets it, and holds one 18 px
-/// row with 4 px above and under it. The plate ends 10 px into the row under
-/// the key line.
+/// 32 px under it, as the board's 32 px Cmd Line sets it, and is the pixel
+/// rows `top + 32` to `top + 60`, 6 px of pad over and under its 17 px line,
+/// which starts 10 px inside it in the muted color that a step writes its
+/// shell text in. The 24 px key line follows the Island, and the plate ends on
+/// its last pixel row, `top + 84`.
 #[test]
 // The scratch config is this test's own disk state, set up before the child runs.
 #[allow(clippy::disallowed_methods)]
@@ -3212,24 +3214,44 @@ fn the_run_block_plate_holds_one_island_between_its_cmd_line_and_its_key_line() 
     expect_region(
         &shot,
         &mut home,
-        (700, top + 34, 40, 22),
+        (700, top + 33, 40, 4),
         BASE,
-        "run_block_island",
+        "run_block_island_pad_over",
     );
     expect_region(
         &shot,
         &mut home,
-        (700, top + 60, 40, 20),
+        (700, top + 56, 40, 4),
+        BASE,
+        "run_block_island_pad_under",
+    );
+    expect_region(
+        &shot,
+        &mut home,
+        (152, top + 38, 7, 17),
+        BASE,
+        "run_block_line_inset",
+    );
+    expect_region(
+        &shot,
+        &mut home,
+        (700, top + 62, 40, 22),
         GROUND,
         "run_block_key_line",
     );
-    let under = pixels_of(&shot, (700, top + 86, 40, 8), GROUND);
-    if under > 0 {
+    let line = pixels_of(&shot, (160, top + 38, 27, 17), MUTED);
+    let (last, past) = (pixel(&shot, 700, top + 84), pixel(&shot, 700, top + 85));
+    if line == 0 || last != GROUND || past == GROUND {
         let frame = keep_frame(&shot, &mut home, "run_block_plate_end");
         panic!(
-            "the 8 pixel rows from {} read {under} ground pixels, where the plate has ended; \
-             the frame is {}",
-            top + 86,
+            "the line reads {line} muted pixels from x 160, and the pixel rows {} and {} \
+             read {} and {}; want the line's text 10 px inside the Island and the plate ending \
+             on {}; the frame is {}",
+            top + 84,
+            top + 85,
+            hex(last),
+            hex(past),
+            top + 84,
             frame.display(),
         );
     }

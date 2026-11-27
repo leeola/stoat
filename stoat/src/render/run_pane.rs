@@ -131,7 +131,7 @@ impl LineParts {
 
 /// The nudge and the ink that a pixel stack last sent, so a line sends each
 /// only where it differs from the one in force.
-struct Pen {
+pub(super) struct Pen {
     /// The content's left in logical px, which every line is nudged right by.
     dx: i16,
     nudge: Option<[i16; 2]>,
@@ -140,10 +140,25 @@ struct Pen {
 
 impl Pen {
     fn new(b: &RunBox) -> Pen {
+        Pen::at((b.left as f32 / b.metrics.scale).round() as i16)
+    }
+
+    /// A pen whose every line is nudged `dx` logical px right, with no nudge
+    /// and no ink sent yet.
+    pub(super) fn at(dx: i16) -> Pen {
         Pen {
-            dx: (b.left as f32 / b.metrics.scale).round() as i16,
+            dx,
             nudge: None,
             ink: None,
+        }
+    }
+
+    /// Put in force the nudge that sets a line `dy` logical px down of its row.
+    pub(super) fn nudge(&mut self, dy: i16, scene: &mut stoat_widgets::ApcScene) {
+        let nudge = [self.dx, dy];
+        if self.nudge != Some(nudge) {
+            scene.nudge(nudge);
+            self.nudge = Some(nudge);
         }
     }
 
@@ -151,16 +166,12 @@ impl Pen {
     /// nudge that sets a line's top on `y` and its left on the content's.
     fn line(&mut self, b: &RunBox, y: u32, scene: &mut stoat_widgets::ApcScene) -> Rect {
         let (row, dy) = b.metrics.place(y);
-        let nudge = [self.dx, dy];
-        if self.nudge != Some(nudge) {
-            scene.nudge(nudge);
-            self.nudge = Some(nudge);
-        }
+        self.nudge(dy, scene);
         Rect::new(b.area.x, b.area.y.saturating_add(row), b.area.width, 1)
     }
 
     /// Put `ink` in force for the runs and the bars after it.
-    fn ink(&mut self, ink: Option<u8>, scene: &mut stoat_widgets::ApcScene) {
+    pub(super) fn ink(&mut self, ink: Option<u8>, scene: &mut stoat_widgets::ApcScene) {
         if self.ink != ink {
             scene.ink(ink);
             self.ink = ink;
@@ -244,24 +255,37 @@ impl CellInk {
 
 /// The colors that a grid row draws in where its cells name none.
 #[derive(Clone, Copy)]
-struct CellColors {
+pub(super) struct CellColors {
     /// The color of output that the program left uncolored, `ui.text.dim`.
-    dim: [u8; 3],
+    pub(super) dim: [u8; 3],
     /// The Island's surface, which the text of a selected cell draws in.
-    surface: [u8; 3],
+    pub(super) surface: [u8; 3],
 }
 
-/// Where the runs and the bars of a grid row draw.
-struct RowAt {
+/// Where the runs and the bars of a row of output draw.
+pub(super) struct RowAt {
     /// The one-row rect the runs anchor on.
-    anchor: Rect,
-    /// The sixteenths from the anchor's left to where the row's first cell
+    pub(super) anchor: Rect,
+    /// The sixteenths from the anchor's left to where the row's first char
     /// draws.
-    col: u16,
-    /// The text scale, which sets how far each cell advances.
-    scale: u16,
+    pub(super) col: u16,
+    /// The text scale, which sets how far each char advances.
+    pub(super) scale: u16,
     /// The height of a bar under a run, in sixteenths of a cell.
-    height: u16,
+    pub(super) height: u16,
+}
+
+impl RowAt {
+    /// A row of output on `anchor` from `col` sixteenths at `scale`, whose bar
+    /// under a run is one body line high, the cell height of `m` less 1 px.
+    pub(super) fn body(anchor: Rect, col: u16, scale: u16, m: &RowMetrics) -> RowAt {
+        RowAt {
+            anchor,
+            col,
+            scale,
+            height: high16(m, u32::from(m.cell[1]).saturating_sub(m.px(1))),
+        }
+    }
 }
 
 /// Paint a Run pane's stack and its prompt row into `area`.
@@ -502,12 +526,7 @@ fn paint_pixel_stack(
                     cmd_line::cmd_line_runs(buf, row, width16, gap16, &header.line(), theme, scene);
                 },
                 OutputLine::GridRow(grid, row_idx, selection) => {
-                    let at = RowAt {
-                        anchor: row,
-                        col: body16,
-                        scale: b.scale,
-                        height: high16(&m, b.body_line()),
-                    };
+                    let at = RowAt::body(row, body16, b.scale, &m);
                     paint_pixel_grid_row(
                         grid, row_idx, selection, &at, colors, &mut pen, buf, scene,
                     );
@@ -517,16 +536,8 @@ fn paint_pixel_stack(
                         true => caption,
                         false => b.scale,
                     };
-                    let spans: Vec<(&str, Style)> = body_row
-                        .spans
-                        .iter()
-                        .map(|(text, tone)| {
-                            let fg = theme.get(tone.scope()).fg;
-                            (text.as_str(), Style::default().fg(fg.unwrap_or_default()))
-                        })
-                        .collect();
-                    pen.ink(None, scene);
-                    pixel_rows::emit_spans(&spans, body16, scale, row, dim, buf, scene);
+                    let at = RowAt::body(row, body16, scale, &m);
+                    paint_pixel_body_row(body_row, &at, theme, dim, &mut pen, buf, scene);
                 },
                 OutputLine::Error(msg) => {
                     pen.ink(None, scene);
@@ -599,7 +610,7 @@ fn paint_pixel_stack(
 /// runs stand on its grid columns. A wide char ends its run, so the blank cell
 /// after it, its covered half, starts no run of its own.
 #[allow(clippy::too_many_arguments)]
-fn paint_pixel_grid_row(
+pub(super) fn paint_pixel_grid_row(
     grid: &VtermGrid,
     row_idx: usize,
     selection: Option<&GridSelection>,
@@ -708,6 +719,33 @@ fn paint_pixel_grid_row(
         }
         .render(at.anchor, buf, scene);
     }
+}
+
+/// Draw `row`, a row of a report, a Stub's row, or a hint, as spans where `at`
+/// places them, with no ink in force.
+///
+/// Each span draws in the foreground of its tone's scope, as
+/// [`paint_body_row`] draws it in cells, and a scope with no RGB foreground
+/// draws in `fallback`.
+pub(super) fn paint_pixel_body_row(
+    row: &BodyRow,
+    at: &RowAt,
+    theme: &crate::theme::Theme,
+    fallback: [u8; 3],
+    pen: &mut Pen,
+    buf: &mut Buffer,
+    scene: &mut stoat_widgets::ApcScene,
+) {
+    let spans: Vec<(&str, Style)> = row
+        .spans
+        .iter()
+        .map(|(text, tone)| {
+            let fg = theme.get(tone.scope()).fg;
+            (text.as_str(), Style::default().fg(fg.unwrap_or_default()))
+        })
+        .collect();
+    pen.ink(None, scene);
+    pixel_rows::emit_spans(&spans, at.col, at.scale, at.anchor, fallback, buf, scene);
 }
 
 /// The style of the bar beside `block`'s body, or `None` for a block that
