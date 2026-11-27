@@ -1,0 +1,25 @@
+[package]
+name = "stoat_host_clipboard"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+# Compile the in-memory clipboard fake. Off by default so a release build
+# carries none of it, and enabled from a consumer's [dev-dependencies] so its
+# tests do. It also compiles the environment fake, since a test that drives
+# clipboard_copy passes a FakeEnv beside the FakeClipboard.
+[features]
+test-support = ["stoat_host/test-support"]
+
+[dependencies]
+stoat_host = { path = "../host" }
+arboard.workspace = true
+base64.workspace = true
+tokio = { workspace = true, features = ["fs", "io-util", "net", "time"] }
+tracing.workspace = true
+
+[dev-dependencies]
+stoat_host = { path = "../host", features = ["test-support"] }

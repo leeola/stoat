@@ -1,4 +1,4 @@
-use crate::host::{ClipboardHost, ClipboardKind};
+use crate::{ClipboardHost, ClipboardKind};
 use std::{io, sync::Mutex};
 
 /// In-memory [`ClipboardHost`] for tests. Records every

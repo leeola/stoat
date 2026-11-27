@@ -1,5 +1,24 @@
-use crate::host::EnvHost;
+//! The clipboard host, the interface that every copy and paste reaches a
+//! clipboard through.
+//!
+//! [`ClipboardHost`] reads and writes the clipboard of a [`ClipboardKind`],
+//! and [`clipboard_copy`] pairs each write with its OSC 52 forwarding.
+//! [`LocalClipboard`] serves the OS clipboard through arboard and forwards
+//! to the host terminal. The `fake` module records every write and every
+//! forward for tests, under the `test-support` feature.
+
+#[cfg(any(test, feature = "test-support"))]
+pub use fake::FakeClipboard;
+pub use local::LocalClipboard;
 use std::io;
+use stoat_host::EnvHost;
+
+#[cfg(any(test, feature = "test-support"))]
+pub mod fake;
+// The local host layer is the syscall boundary itself, so its direct std::env /
+// std::fs calls are the intended implementation, not a bypass.
+#[allow(clippy::disallowed_methods)]
+pub mod local;
 
 /// Which of the two selections a clipboard operation addresses.
 ///
@@ -21,7 +40,7 @@ pub enum ClipboardKind {
 /// System clipboard write surface.
 ///
 /// Production code routes clipboard writes through this trait so tests
-/// can install [`crate::host::FakeClipboard`] without leaking into the
+/// can install [`crate::FakeClipboard`] without leaking into the
 /// real OS clipboard. UTF-8-only by design: callers serialize into a
 /// `&str` before invoking [`Self::set`].
 pub trait ClipboardHost: Send + Sync {
@@ -41,7 +60,7 @@ pub trait ClipboardHost: Send + Sync {
     /// Forwards `text` to the host terminal as an OSC 52 set-clipboard
     /// escape so SSH sessions reach the user's local clipboard. The
     /// default impl is a no-op for hosts without a stdout-bound
-    /// terminal (the test [`crate::host::FakeClipboard`] overrides
+    /// terminal (the test [`crate::FakeClipboard`] overrides
     /// this to record the emit).
     fn osc52_emit(&self, kind: ClipboardKind, text: &str) -> io::Result<()> {
         let _ = (kind, text);
@@ -115,7 +134,7 @@ impl ClipboardHost for NoopClipboard {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::host::FakeEnv;
+    use stoat_host::FakeEnv;
 
     #[test]
     fn should_emit_in_ssh_without_mux() {

@@ -1,4 +1,4 @@
-use crate::host::{ClipboardHost, ClipboardKind};
+use crate::{ClipboardHost, ClipboardKind};
 use base64::{engine::general_purpose::STANDARD, Engine};
 use std::{
     io::{self, Write},
@@ -289,7 +289,7 @@ impl ClipboardHost for LocalClipboard {
 #[cfg(test)]
 mod tests {
     use super::{osc52_sequence, serve, ClipboardBackend, Command, LocalClipboard};
-    use crate::host::{ClipboardHost, ClipboardKind};
+    use crate::{ClipboardHost, ClipboardKind};
     use std::{
         io,
         sync::{mpsc, Arc, Mutex, MutexGuard},

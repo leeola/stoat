@@ -4119,8 +4119,6 @@ dependencies = [
 name = "stoat_core"
 version = "0.1.0"
 dependencies = [
- "arboard",
- "base64 0.23.1",
  "compact_str 0.10.0",
  "crossterm",
  "futures",
@@ -4132,6 +4130,7 @@ dependencies = [
  "stoat_action",
  "stoat_config",
  "stoat_host",
+ "stoat_host_clipboard",
  "stoat_host_git",
  "stoat_host_lsp",
  "stoat_host_terminal",
@@ -4154,6 +4153,17 @@ dependencies = [
  "libc",
  "notify",
  "tempfile",
+]
+
+[[package]]
+name = "stoat_host_clipboard"
+version = "0.1.0"
+dependencies = [
+ "arboard",
+ "base64 0.23.1",
+ "stoat_host",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]

@@ -102,7 +102,7 @@ pub(crate) fn read_utf8(fs: &dyn FsHost, path: &Path) -> std::io::Result<String>
 #[cfg(test)]
 mod tests {
     use super::{extract_review_hunks_changeset, scan_working_tree};
-    use crate::host::fake::{FakeFs, FakeGit};
+    use crate::host::{FakeFs, FakeGit};
     use std::path::Path;
     use stoat_language::LanguageRegistry;
 

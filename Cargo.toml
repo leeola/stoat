@@ -9,6 +9,7 @@ members = [
   "config",
   "core",
   "host",
+  "host_clipboard",
   "host_git",
   "host_lsp",
   "host_terminal",

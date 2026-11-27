@@ -13,6 +13,7 @@ workspace = true
 [features]
 test-support = [
   "stoat_host/test-support",
+  "stoat_host_clipboard/test-support",
   "stoat_host_git/test-support",
   "stoat_host_lsp/test-support",
   "stoat_host_terminal/test-support",
@@ -22,6 +23,7 @@ test-support = [
 stoat_action = { path = "../action" }
 stoat_config = { path = "../config" }
 stoat_host = { path = "../host" }
+stoat_host_clipboard = { path = "../host_clipboard" }
 stoat_host_git = { path = "../host_git" }
 stoat_host_lsp = { path = "../host_lsp" }
 stoat_host_terminal = { path = "../host_terminal" }
@@ -39,13 +41,12 @@ tracing.workspace = true
 compact_str.workspace = true
 snafu = { workspace = true }
 smallvec.workspace = true
-arboard.workspace = true
-base64.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
 ron.workspace = true
 stoat_host = { path = "../host", features = ["test-support"] }
+stoat_host_clipboard = { path = "../host_clipboard", features = ["test-support"] }
 stoat_host_git = { path = "../host_git", features = ["test-support"] }
 stoat_host_lsp = { path = "../host_lsp", features = ["test-support"] }
 stoat_host_terminal = { path = "../host_terminal", features = ["test-support"] }
