@@ -545,7 +545,9 @@ pub(super) fn diff_changes_edge(stoat: &mut Stoat, last: bool) -> UpdateEffect {
 /// file moves the focus to the nearest file that shows rows.
 ///
 /// A press on a fold row's Fold Button opens the fold from the button's edge,
-/// on any excerpt of the stack. The cursor and the focus stay where they were.
+/// on any excerpt of the stack. The cursor, the focus, and the stack's scroll
+/// stay where they were, so the rows above the pressed row keep their screen
+/// rows and the opened rows push the rest down.
 ///
 /// Any other press puts the cursor on the pressed cell, and the row's excerpt
 /// takes the focus, as a press in an editor does.
@@ -1270,7 +1272,10 @@ fn lands(snapshot: &DisplaySnapshot, row: u32) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{diff_changes_jump, diff_changes_step, respawn_diff_changes_panes, viewport_rows};
+    use super::{
+        diff_changes_jump, diff_changes_scroll, diff_changes_step, respawn_diff_changes_panes,
+        viewport_rows,
+    };
     use crate::{
         action_handlers::{commits, dispatch, focused_editor_mut, jump, pane, view},
         apc_emit,
@@ -2302,6 +2307,45 @@ mod tests {
         );
     }
 
+    /// A press on a Fold Button opens the fold and leaves the stack's scroll
+    /// where a wheel left it, with the cursor above the view. The last fold,
+    /// which a wheel scroll to the stack's last page shows, opens ten rows from
+    /// its top. The second button of the fold between the hunks grows the hunk
+    /// below up by ten rows.
+    #[test]
+    fn a_press_on_a_fold_button_keeps_the_scroll_off_the_cursor() {
+        let press_after_scroll = |fold_row: u32, column: u16, delta: i32| {
+            let mut h = two_hunk_file_rows(10);
+            diff_changes_scroll(&mut h.stoat, delta);
+            h.render_composited();
+            let (scroll, cursor, _) = stack_view(&mut h);
+            let row = stack_row_of(&mut h, fold_row);
+            let viewport = viewport_rows(&h.stoat);
+            assert!(
+                cursor < scroll && (scroll + 2..scroll + viewport).contains(&row),
+                "cursor row {cursor} above the view of {viewport} rows from {scroll}, \
+                 fold row {row} in it under the pinned rows",
+            );
+
+            press_stack(&mut h, MouseButton::Left, row, column);
+            h.render_composited();
+            ((shown_rows(&mut h), stack_view(&mut h).0), scroll)
+        };
+        let (last, last_scroll) = press_after_scroll(44, 1, i32::MAX);
+        let (middle, middle_scroll) = press_after_scroll(24, 3, 6);
+
+        assert_eq!(
+            [last, middle],
+            [
+                (rows_of(&[0..=0, 17..=23, 24..=24, 37..=54]), last_scroll),
+                (
+                    rows_of(&[0..=0, 17..=23, 24..=24, 27..=43, 44..=44]),
+                    middle_scroll
+                ),
+            ],
+        );
+    }
+
     /// A middle press on a Fold Button opens the fold and asks the server
     /// nothing, since the press places no cursor to ask from.
     #[test]
@@ -2336,10 +2380,10 @@ mod tests {
     }
 
     /// One changed file of sixty lines with hunks on rows 20 and 40, in a
-    /// settled and painted changes view, so its excerpt folds rows 0 to 16, 24
-    /// to 36, and 44 on.
-    fn two_hunk_file() -> TestHarness {
-        let mut h = TestHarness::with_size(100, 24);
+    /// settled and painted changes view of a window `height` rows tall, so its
+    /// excerpt folds rows 0 to 16, 24 to 36, and 44 on.
+    fn two_hunk_file_rows(height: u16) -> TestHarness {
+        let mut h = TestHarness::with_size(100, height);
         let base: String = (1..=60).map(|n| format!("{n}\n")).collect();
         let working = base
             .replace("\n21\n", "\nTWENTY-ONE\n")
@@ -2349,6 +2393,11 @@ mod tests {
         h.settle();
         h.render_composited();
         h
+    }
+
+    /// The two-hunk file of [`two_hunk_file_rows`] in a window 24 rows tall.
+    fn two_hunk_file() -> TestHarness {
+        two_hunk_file_rows(24)
     }
 
     /// Dispatch `action`, then press Escape, so the key epilogue runs after the

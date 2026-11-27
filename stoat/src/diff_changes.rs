@@ -1812,8 +1812,8 @@ pub(crate) fn expand_from_cursor(stoat: &mut Stoat, dir: ExpandDir) -> Result<()
         return Err("no fold to open");
     };
 
+    let cursor = cursor_point(editor).row;
     let targets: Vec<(Range<u32>, FoldEdge)> = {
-        let cursor = cursor_point(editor).row;
         let snapshot = editor.display_map.snapshot();
         let rope = snapshot.buffer_snapshot().rope();
         let line_count = rope.max_point().row + 1;
@@ -1845,9 +1845,48 @@ pub(crate) fn expand_from_cursor(stoat: &mut Stoat, dir: ExpandDir) -> Result<()
     let index = state.focused;
     let parse = ScopeParse::of(buffers, state.excerpts[index].buffer_id, &cache);
     for (gap, edge) in targets {
-        expand(state, editors, parse.as_ref(), index, gap, edge);
+        let below = gap.start >= cursor;
+        if let Some(rows) = expand(state, editors, parse.as_ref(), index, gap, edge) {
+            let far = match below {
+                true => rows.end - 1,
+                false => rows.start,
+            };
+            show_opened(state, editors, index, far);
+        }
     }
     Ok(())
+}
+
+/// Scroll the rows that an expand opened in excerpt `index` of `state` into
+/// view, `far` being the buffer row at their far edge from the cursor.
+///
+/// The scroll first shows the far edge of the opened rows, the first row of a
+/// fold above the cursor or the last row of a fold below it. Then it shows the
+/// cursor, so a short view keeps the cursor in sight.
+fn show_opened(
+    state: &mut DiffChangesState,
+    editors: &mut SlotMap<EditorId, EditorState>,
+    index: usize,
+    far: u32,
+) {
+    let Some(editor) = state
+        .excerpts
+        .get(index)
+        .and_then(|excerpt| editors.get_mut(excerpt.editor_id))
+    else {
+        return;
+    };
+    let far_row = editor
+        .display_map
+        .snapshot()
+        .buffer_to_display(Point::new(far, 0))
+        .row as usize;
+    layout_stack(state, editors);
+    let first = state.excerpts[index].top + header_rows(&state.excerpts[index]);
+    state.ensure_row_visible(editors, first + far_row, state.viewport_rows);
+    if let Some(row) = cursor_stack_row(state, editors) {
+        state.ensure_row_visible(editors, row, state.viewport_rows);
+    }
 }
 
 /// Fold again the rows that expands opened around the focused changes view's
@@ -3441,11 +3480,11 @@ pub(crate) fn fold_lines(rope: &Rope, gap: &Range<u32>) -> u32 {
 }
 
 /// Open the rows of `gap` that an expand from `edge` reveals in excerpt `index`
-/// of `state`, and scroll the opened rows into view.
+/// of `state`, and answer the buffer rows it opened.
 ///
-/// The scroll first shows the far edge of the opened rows, the first row of a
-/// fold above the cursor or the last row of a fold below it. Then it shows the
-/// cursor, so a short view keeps the cursor in sight.
+/// The answer is `None` when the excerpt or its editor is gone. The scroll is
+/// the caller's. A press on a Fold Button leaves the stack where it was, and
+/// [`expand_from_cursor`] scrolls the opened rows into view.
 ///
 /// The opened rows carry a [`RevealFlash`] on the excerpt's editor until its
 /// fade ends.
@@ -3456,14 +3495,9 @@ pub(crate) fn expand(
     index: usize,
     gap: Range<u32>,
     edge: FoldEdge,
-) {
-    let Some(excerpt) = state.excerpts.get_mut(index) else {
-        return;
-    };
-    let Some(editor) = editors.get_mut(excerpt.editor_id) else {
-        return;
-    };
-    let cursor = cursor_point(editor).row;
+) -> Option<Range<u32>> {
+    let excerpt = state.excerpts.get_mut(index)?;
+    let editor = editors.get_mut(excerpt.editor_id)?;
     let rows = {
         let snapshot = editor.display_map.snapshot();
         let buffer = snapshot.buffer_snapshot();
@@ -3492,22 +3526,7 @@ pub(crate) fn expand(
         rows: rows.clone(),
         age: 0.0,
     });
-
-    let far = match gap.start >= cursor {
-        true => rows.end - 1,
-        false => rows.start,
-    };
-    let far_row = editor
-        .display_map
-        .snapshot()
-        .buffer_to_display(Point::new(far, 0))
-        .row as usize;
-    layout_stack(state, editors);
-    let first = state.excerpts[index].top + header_rows(&state.excerpts[index]);
-    state.ensure_row_visible(editors, first + far_row, state.viewport_rows);
-    if let Some(row) = cursor_stack_row(state, editors) {
-        state.ensure_row_visible(editors, row, state.viewport_rows);
-    }
+    Some(rows)
 }
 
 /// The edge an expand toward `dir` opens `gap` from, a fold of `lines` lines in
