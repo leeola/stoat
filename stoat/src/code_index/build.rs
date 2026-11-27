@@ -11,7 +11,6 @@
 
 use crate::{
     buffer::{BufferId, TextBufferSnapshot},
-    buffer_registry::fingerprint_bytes,
     code_index::store,
     host::FsHost,
     paths,
@@ -34,7 +33,7 @@ use std::{
 };
 use stoat_language::{
     edit_tree, enclosing_symbol_item, extract_references, extract_symbols, grammar_yields_symbols,
-    parse_rope, Language, LanguageRegistry, Node, RefSite, SymbolDef, Tree,
+    parse_rope, structural_diff, Language, LanguageRegistry, Node, RefSite, SymbolDef, Tree,
 };
 use stoat_scheduler::{Executor, Task};
 use stoat_text::{patch::Patch, LineEnding, Rope};
@@ -453,7 +452,7 @@ pub(crate) fn reindex_path(
             redraw.notify_one();
             return;
         };
-        if expected == Some(fingerprint_bytes(&text)) {
+        if expected == Some(structural_diff::fingerprint_bytes(&text)) {
             return;
         }
 
@@ -543,7 +542,7 @@ pub(crate) fn file_id(rel_path: &str) -> FileId {
 
 /// The content fingerprint of a readable UTF-8 file, or `None` otherwise.
 pub(crate) fn current_fingerprint(fs: &dyn FsHost, path: &Path) -> Option<[u8; 32]> {
-    Some(fingerprint_bytes(&read_utf8(fs, path)?))
+    Some(structural_diff::fingerprint_bytes(&read_utf8(fs, path)?))
 }
 
 /// A file's contents with line terminators normalized to bare `\n`, or `None`
@@ -779,7 +778,7 @@ fn shard_of(rel_path: &str, rope: &Rope, defs: Vec<SymbolDef>, refs: Vec<RefSite
     build_shard(
         file_id(rel_path),
         rel_path,
-        fingerprint_bytes(&text),
+        structural_diff::fingerprint_bytes(&text),
         &text,
         defs,
         refs,
@@ -946,7 +945,6 @@ mod tests {
     };
     use crate::{
         buffer::{BufferId, TextBuffer},
-        buffer_registry::fingerprint_bytes,
         code_index::store,
         host::{FakeFs, FakeFsOp, FsHost},
         workspace::WorkspaceId,
@@ -959,7 +957,7 @@ mod tests {
         path::{Path, PathBuf},
         sync::Arc,
     };
-    use stoat_language::{edit_tree, parse_rope, Language, LanguageRegistry};
+    use stoat_language::{edit_tree, parse_rope, structural_diff, Language, LanguageRegistry};
     use stoat_scheduler::TestScheduler;
     use stoat_text::{
         patch::{Edit, Patch},
@@ -1060,7 +1058,7 @@ mod tests {
             .expect("the build wrote the shard itself");
         assert_eq!(
             codegraph::decode_shard(&stored).unwrap().content_hash,
-            fingerprint_bytes("fn helper() {}\n"),
+            structural_diff::fingerprint_bytes("fn helper() {}\n"),
             "and wrote the bytes for the text it indexed",
         );
     }
@@ -1133,7 +1131,7 @@ mod tests {
 
         let dir = Path::new("/idx");
         let stored = codegraph::FileShard {
-            content_hash: fingerprint_bytes(source),
+            content_hash: structural_diff::fingerprint_bytes(source),
             symbols: Vec::new(),
             edges: Vec::new(),
         };
@@ -1144,7 +1142,7 @@ mod tests {
                 schema_version: SCHEMA_VERSION,
                 files: vec![FileEntry {
                     rel_path: "a.rs".to_string(),
-                    content_hash: fingerprint_bytes(source),
+                    content_hash: structural_diff::fingerprint_bytes(source),
                 }],
             },
             fs.as_ref(),
@@ -1185,7 +1183,10 @@ mod tests {
         .unwrap();
 
         assert_eq!(rel_path, "src/a.rs");
-        assert_eq!(shard.content_hash, fingerprint_bytes(source));
+        assert_eq!(
+            shard.content_hash,
+            structural_diff::fingerprint_bytes(source)
+        );
 
         let mut names: Vec<&str> = shard.symbols.iter().map(|s| s.name.as_str()).collect();
         names.sort_unstable();
@@ -1232,7 +1233,7 @@ mod tests {
         );
         assert_eq!(
             shard.content_hash,
-            fingerprint_bytes(normalized),
+            structural_diff::fingerprint_bytes(normalized),
             "and the staleness fingerprint covers the text a buffer would hold",
         );
     }
@@ -1618,7 +1619,10 @@ mod b {
         fs.write(path, text.as_bytes()).unwrap();
 
         let mut known = HashMap::new();
-        known.insert(String::from("Cargo.toml"), fingerprint_bytes(text));
+        known.insert(
+            String::from("Cargo.toml"),
+            structural_diff::fingerprint_bytes(text),
+        );
 
         let registry = LanguageRegistry::standard();
         let loaded = load_or_extract(&fs, &registry, git_root, Some(index_dir), &known, path);
@@ -1649,7 +1653,10 @@ mod b {
         )
         .unwrap();
         let mut known = HashMap::new();
-        known.insert(rel_path.clone(), fingerprint_bytes(original));
+        known.insert(
+            rel_path.clone(),
+            structural_diff::fingerprint_bytes(original),
+        );
 
         let (_, loaded, source) =
             load_or_extract(&fs, &registry, git_root, Some(index_dir), &known, path).unwrap();

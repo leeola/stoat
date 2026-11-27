@@ -1134,16 +1134,6 @@ pub(crate) struct BufferEntrySnap {
     pub revision: Option<RevisionSource>,
 }
 
-/// 32-byte blake3 hash of `text`.
-///
-/// A caller keeps the hash in place of the text when it only compares texts,
-/// for example in a memo key or a stored content hash. The hash also fills
-/// [`BufferRef::fingerprint`](stoat_language::structural_diff::BufferRef::fingerprint),
-/// which identifies the source file of a cross-file move.
-pub(crate) fn fingerprint_bytes(text: &str) -> [u8; 32] {
-    blake3::hash(text.as_bytes()).into()
-}
-
 /// The listing order of two buffers given as `(path, id)`, path-bound ones
 /// first by path and scratch buffers after by id.
 fn by_path_then_id(a: (&Option<PathBuf>, BufferId), b: (&Option<PathBuf>, BufferId)) -> Ordering {
@@ -1594,11 +1584,5 @@ mod tests {
         let mut reg = BufferRegistry::new();
         let (id, _) = reg.open(Path::new("/foo/bar.rs"), "");
         assert_eq!(reg.path_for(id), Some(Path::new("/foo/bar.rs")));
-    }
-
-    #[test]
-    fn fingerprint_differs_per_text() {
-        assert_ne!(fingerprint_bytes("a"), fingerprint_bytes("b"));
-        assert_eq!(fingerprint_bytes("abc"), fingerprint_bytes("abc"));
     }
 }

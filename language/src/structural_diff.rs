@@ -194,9 +194,9 @@ pub struct MoveSource {
 }
 
 /// Identifier for the file a cross-file [`MoveSource`] points at.
-/// `fingerprint` is expected to be a blake3 hash of the file's source
-/// text; this crate treats it as an opaque 32-byte key and the stoat
-/// workspace layer computes and owns the actual hashes.
+///
+/// `fingerprint` is the [`fingerprint_bytes`] of the file's source text, which
+/// the diff treats as an opaque 32-byte key.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct BufferRef {
     pub path: PathBuf,
@@ -264,6 +264,16 @@ pub struct DiffResult {
     pub unsearched: Vec<(Range<usize>, Range<usize>)>,
 }
 
+/// 32-byte blake3 hash of `text`.
+///
+/// A caller keeps the hash in place of the text when it only compares texts,
+/// for example in a memo key or a stored content hash. The hash also fills
+/// [`BufferRef::fingerprint`], which identifies the source file of a
+/// cross-file move.
+pub fn fingerprint_bytes(text: &str) -> [u8; 32] {
+    blake3::hash(text.as_bytes()).into()
+}
+
 /// Public entry point for callers without a language. Routes to the
 /// line-diff fallback. Use [`diff_with_language_or_lines`] when a
 /// language is available to get structural-quality output.
@@ -296,4 +306,15 @@ fn lower_rust(source: &str) -> (SyntaxArena, SyntaxId) {
     let lang = rust_lang();
     let tree = parse(&lang, source, None).unwrap();
     lower_tree(&tree, Arc::from(source))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::fingerprint_bytes;
+
+    #[test]
+    fn fingerprint_differs_per_text() {
+        assert_ne!(fingerprint_bytes("a"), fingerprint_bytes("b"));
+        assert_eq!(fingerprint_bytes("abc"), fingerprint_bytes("abc"));
+    }
 }

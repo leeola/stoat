@@ -304,16 +304,17 @@ mod tests {
         prune_shards, read_manifest, read_shard, remove_manifest_entry, update_manifest_entries,
         update_manifest_entry, write_manifest, write_shard, ManifestEdit,
     };
-    use crate::{buffer_registry::fingerprint_bytes, host::FakeFs};
+    use crate::host::FakeFs;
     use codegraph::{FileEntry, Manifest, SCHEMA_VERSION};
     use std::{io, path::Path};
+    use stoat_language::structural_diff;
 
     fn manifest_for(content: &str) -> Manifest {
         Manifest {
             schema_version: SCHEMA_VERSION,
             files: vec![FileEntry {
                 rel_path: "src/a.rs".to_string(),
-                content_hash: fingerprint_bytes(content),
+                content_hash: structural_diff::fingerprint_bytes(content),
             }],
         }
     }
@@ -344,8 +345,8 @@ mod tests {
 
         let stored = read_manifest(dir, &fs).unwrap();
         let entry = &stored.files[0];
-        assert_eq!(entry.content_hash, fingerprint_bytes("v1"));
-        assert_ne!(entry.content_hash, fingerprint_bytes("v2"));
+        assert_eq!(entry.content_hash, structural_diff::fingerprint_bytes("v1"));
+        assert_ne!(entry.content_hash, structural_diff::fingerprint_bytes("v2"));
     }
 
     #[test]

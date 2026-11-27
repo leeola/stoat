@@ -1,4 +1,3 @@
-use crate::buffer_registry::fingerprint_bytes;
 use serde::{Deserialize, Serialize};
 use std::{
     ops::Range,
@@ -132,7 +131,7 @@ pub fn extract_review_hunks_changeset(
         .map(|f| FileDiffInput {
             buffer: BufferRef {
                 path: f.path.clone(),
-                fingerprint: fingerprint_bytes(&f.buffer_text),
+                fingerprint: structural_diff::fingerprint_bytes(&f.buffer_text),
             },
             language: f.language.clone(),
             lhs_text: f.base_text.as_str(),

@@ -15,7 +15,7 @@ use super::Workspace;
 use crate::{
     action_handlers::movement::{ChangeDir, ChangeUnit},
     buffer::{BufferId, TextBufferSnapshot},
-    buffer_registry::{self, BufferRegistry},
+    buffer_registry::BufferRegistry,
     code_index::build::file_id,
     diff::{self, ReviewFileInput},
     diff_cache::ContentHash,
@@ -1764,8 +1764,8 @@ pub(crate) struct DiffBaseText {
 
 impl DiffBaseText {
     fn new(base: Arc<String>, staged_text: Arc<String>, staged_from: Option<Arc<String>>) -> Self {
-        let base_hash = buffer_registry::fingerprint_bytes(&base);
-        let staged_hash = buffer_registry::fingerprint_bytes(&staged_text);
+        let base_hash = structural_diff::fingerprint_bytes(&base);
+        let staged_hash = structural_diff::fingerprint_bytes(&staged_text);
         Self {
             base,
             staged_text,
@@ -2473,8 +2473,8 @@ pub(crate) fn scan_changed_ranges(
 
     for input in &inputs {
         let fid = file_id(&input.rel_path);
-        let base_hash = buffer_registry::fingerprint_bytes(input.base_text.as_str());
-        let buffer_hash = buffer_registry::fingerprint_bytes(input.buffer_text.as_str());
+        let base_hash = structural_diff::fingerprint_bytes(input.base_text.as_str());
+        let buffer_hash = structural_diff::fingerprint_bytes(input.buffer_text.as_str());
 
         let ranges = match memo.get(&fid) {
             Some((cached_base, cached_buffer, cached))
