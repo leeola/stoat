@@ -9,6 +9,7 @@ members = [
   "config",
   "core",
   "host",
+  "host_git",
   "language",
   "scheduler",
   "stoat",

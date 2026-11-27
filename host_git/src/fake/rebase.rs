@@ -4,7 +4,7 @@
 //! overlay trees directly and mint synthetic shas.
 
 use super::{FakeCommit, FakeRepoState, RecordedRebase};
-use crate::host::git::{
+use crate::{
     BackendSnafu, CherryPickOutcome, ConflictSnafu, ConflictedFile, GitApplyError,
     RebaseBackendSnafu, RebaseError, RebaseTodo, RebaseTodoOp, RewriteResult,
 };

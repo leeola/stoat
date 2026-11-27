@@ -11,7 +11,7 @@
 pub mod clipboard;
 #[cfg(any(test, feature = "test-support"))]
 pub mod fake;
-pub mod git;
+pub use stoat_host_git as git;
 // The local host layer is the syscall boundary itself, so its direct std::env /
 // std::fs calls are the intended implementation, not a bypass.
 #[allow(clippy::disallowed_methods)]
@@ -32,10 +32,10 @@ pub use fake::{
 };
 pub use git::{
     BlameCommit, BlameRun, ChangedFile, CherryPickOutcome, CommitFileChange, CommitFileChangeKind,
-    CommitInfo, ConflictedFile, DiffStatus, FileBlame, GitApplyError, GitHost, GitRepo,
+    CommitInfo, ConflictedFile, DiffStatus, FileBlame, GitApplyError, GitHost, GitRepo, LocalGit,
     RebaseError, RebaseTodo, RebaseTodoOp, RewriteResult, StagedKind,
 };
-pub use local::{LocalClipboard, LocalGit, LocalLsp, LocalTerminalHost, LspTranscript};
+pub use local::{LocalClipboard, LocalLsp, LocalTerminalHost, LspTranscript};
 pub use lsp::{LanguageServerFeature, LspHost, LspNotification, NoopLsp, OffsetEncoding};
 #[cfg(any(test, feature = "test-support"))]
 pub use stoat_host::FakeShell;

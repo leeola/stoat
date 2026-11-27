@@ -1,13 +1,10 @@
 mod rebase;
 
-use crate::host::{
-    fake::FakeFs,
-    git::{
-        BackendSnafu, BlameCommit, BlameRun, ChangeLineStats, ChangedFile, CherryPickOutcome,
-        CommitFileChange, CommitFileChangeKind, CommitInfo, ConflictedFile, DeletedBy, FileBlame,
-        FileChange, FileKind, GitApplyError, GitHost, GitRepo, HunkTallies, MergeOutcome,
-        MergeState, RebaseError, RebaseTodo, RewriteResult, StagedKind,
-    },
+use crate::{
+    BackendSnafu, BlameCommit, BlameRun, ChangeLineStats, ChangedFile, CherryPickOutcome,
+    CommitFileChange, CommitFileChangeKind, CommitInfo, ConflictedFile, DeletedBy, FileBlame,
+    FileChange, FileKind, GitApplyError, GitHost, GitRepo, HunkTallies, MergeOutcome, MergeState,
+    RebaseError, RebaseTodo, RewriteResult, StagedKind,
 };
 use std::{
     cmp::Reverse,
@@ -19,6 +16,7 @@ use std::{
         Arc, Mutex,
     },
 };
+use stoat_host::FakeFs;
 use stoat_language::structural_diff;
 use stoat_text::LineEnding;
 
@@ -2949,7 +2947,7 @@ mod tests {
 
     #[test]
     fn with_fs_populates_working_tree() {
-        use crate::host::FsHost;
+        use stoat_host::FsHost;
 
         let fs = FakeFs::new();
         let host = FakeGit::new();

@@ -1,7 +1,7 @@
 mod rebase;
 mod tree;
 
-use crate::host::git::{
+use crate::{
     BackendSnafu, BlameCommit, BlameRun, ChangeLineStats, ChangedFile, CherryPickOutcome,
     CommitChanges, CommitFileChange, CommitFileChangeKind, CommitInfo, ConflictedFile, DeletedBy,
     FileBlame, FileChange, FileKind, GitApplyError, GitHost, GitRepo, HunkTallies, MergeOutcome,
@@ -2264,7 +2264,7 @@ fn delta_path(delta: &DiffDelta<'_>) -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::{apply_mismatch_detail, patch_target_path, LocalGit, QUOTED_LINE_MAX};
-    use crate::host::git::{
+    use crate::{
         CherryPickOutcome, CommitFileChangeKind, FileBlame, GitApplyError, GitHost, GitRepo,
         MergeOutcome, MergeState, RebaseTodo, RebaseTodoOp, StagedKind,
     };

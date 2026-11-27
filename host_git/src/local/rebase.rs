@@ -2,12 +2,9 @@
 //! [`super::LocalGitRepo`] trait impl so the mutation-heavy logic lives
 //! apart from the flat trait-method surface.
 
-use crate::host::{
-    git::{
-        CherryPickOutcome, ConflictSnafu, ConflictedFile, GitApplyError, RebaseBackendSnafu,
-        RebaseError, RebaseTodo, RebaseTodoOp,
-    },
-    local::git::tree::read_blob,
+use crate::{
+    local::tree::read_blob, CherryPickOutcome, ConflictSnafu, ConflictedFile, GitApplyError,
+    RebaseBackendSnafu, RebaseError, RebaseTodo, RebaseTodoOp,
 };
 use git2::{
     build::TreeUpdateBuilder, Commit, FileMode, ObjectType, Oid, Repository, Tree, TreeEntry,

@@ -1,3 +1,13 @@
+//! The git host, the interface that every git feature reads and writes a
+//! repository through.
+//!
+//! [`GitHost`] finds the repository that holds a path, and [`GitRepo`] reads
+//! and writes it. [`LocalGit`] serves both over libgit2. The `fake` module
+//! serves them from memory for tests, under the `test-support` feature.
+
+#[cfg(any(test, feature = "test-support"))]
+pub use fake::{FakeGit, FakeGitRepo, FakeRepoBuilder};
+pub use local::LocalGit;
 use serde::{Deserialize, Serialize};
 use snafu::Snafu;
 use std::{
@@ -5,6 +15,13 @@ use std::{
     path::{Path, PathBuf},
     sync::Arc,
 };
+
+#[cfg(any(test, feature = "test-support"))]
+pub mod fake;
+// The local host layer is the syscall boundary itself, so its direct std::env /
+// std::fs calls are the intended implementation, not a bypass.
+#[allow(clippy::disallowed_methods)]
+pub mod local;
 
 /// Status of a diff region at the line level. Rendered by the display
 /// layer; included here because both the working-tree git path and the
@@ -15,9 +32,10 @@ pub enum DiffStatus {
     Unchanged,
     Added,
     Modified,
-    /// Line participates in a [`crate::diff_map::DiffHunkStatus::Moved`]
-    /// hunk: byte-for-byte equal content that relocated to or from
-    /// another position (possibly across files in the same changeset).
+    /// Line participates in a `DiffHunkStatus::Moved` hunk of the diff map.
+    /// Its content is byte-for-byte equal to content that relocated to or
+    /// from another position, possibly in another file of the same
+    /// changeset.
     Moved,
 }
 

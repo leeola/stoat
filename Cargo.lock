@@ -4125,7 +4125,6 @@ dependencies = [
  "compact_str 0.10.0",
  "crossterm",
  "futures",
- "git2",
  "libc",
  "lsp-types",
  "portable-pty",
@@ -4138,6 +4137,7 @@ dependencies = [
  "stoat_action",
  "stoat_config",
  "stoat_host",
+ "stoat_host_git",
  "stoat_language",
  "stoat_log",
  "stoat_scheduler",
@@ -4158,6 +4158,20 @@ dependencies = [
  "libc",
  "notify",
  "tempfile",
+]
+
+[[package]]
+name = "stoat_host_git"
+version = "0.1.0"
+dependencies = [
+ "git2",
+ "serde",
+ "snafu",
+ "stoat_host",
+ "stoat_language",
+ "stoat_text",
+ "tempfile",
+ "tracing",
 ]
 
 [[package]]

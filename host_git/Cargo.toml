@@ -1,0 +1,29 @@
+[package]
+name = "stoat_host_git"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+# Compile the in-memory git fake. Off by default so a release build carries
+# none of it, and enabled from a consumer's [dev-dependencies] so its tests
+# do. Only the fake's blame reads the structural diff, so a release build
+# compiles this crate beside stoat_language rather than after it.
+[features]
+test-support = ["stoat_host/test-support", "dep:stoat_language"]
+
+[dependencies]
+stoat_host = { path = "../host" }
+stoat_language = { path = "../language", optional = true }
+stoat_text = { path = "../text" }
+git2 = { version = "0.21", default-features = false }
+serde = { workspace = true, features = ["derive", "rc"] }
+snafu = { workspace = true }
+tracing.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+stoat_host = { path = "../host", features = ["test-support"] }
+stoat_language = { path = "../language" }

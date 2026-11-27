@@ -11,12 +11,13 @@ workspace = true
 # so a release build carries none of them, and enabled from a consumer's
 # [dev-dependencies] so its tests do.
 [features]
-test-support = ["stoat_host/test-support"]
+test-support = ["stoat_host/test-support", "stoat_host_git/test-support"]
 
 [dependencies]
 stoat_action = { path = "../action" }
 stoat_config = { path = "../config" }
 stoat_host = { path = "../host" }
+stoat_host_git = { path = "../host_git" }
 stoat_language = { path = "../language" }
 stoat_log = { path = "../log" }
 stoat_scheduler = { path = "../scheduler" }
@@ -31,7 +32,6 @@ tokio = { workspace = true, features = ["fs", "io-util", "net", "time"] }
 futures = { workspace = true, features = ["alloc"] }
 tracing.workspace = true
 compact_str.workspace = true
-git2 = { version = "0.21", default-features = false }
 lsp-types.workspace = true
 async-trait.workspace = true
 snafu = { workspace = true }
@@ -45,4 +45,5 @@ base64.workspace = true
 tempfile.workspace = true
 ron.workspace = true
 stoat_host = { path = "../host", features = ["test-support"] }
+stoat_host_git = { path = "../host_git", features = ["test-support"] }
 stoat_scheduler = { path = "../scheduler", features = ["test-support"] }
