@@ -215,7 +215,7 @@ pub struct Pane {
     /// `serde(skip)`: session intent rather than persisted layout, so a
     /// restored session starts unlatched.
     #[serde(skip)]
-    pub(crate) diff_mode: bool,
+    pub diff_mode: bool,
     /// Whether the pane shows the Blame Column while it shows a plain editor.
     ///
     /// Per pane rather than per editor, because each cross-file open replaces
@@ -226,7 +226,7 @@ pub struct Pane {
     /// `serde(skip)`: session intent rather than persisted layout, so a
     /// restored session starts with the column off.
     #[serde(skip)]
-    pub(crate) blame: bool,
+    pub blame: bool,
     /// The buffers this pane has shown, oldest first and each once.
     ///
     /// A buffer enters when the pane moves off it, and
@@ -1976,69 +1976,6 @@ mod tests {
         let pane = tree.pane(tree.focus());
         assert_eq!(pane.placement, Placement::Split);
         assert!(matches!(&pane.view, View::Label(s) if s == "Pane 0"));
-    }
-
-    #[test]
-    fn snapshot_split_right() {
-        let mut h = crate::Stoat::test();
-        h.type_action("SplitRight()");
-        h.assert_snapshot("split_right");
-    }
-
-    #[test]
-    fn snapshot_split_down() {
-        let mut h = crate::Stoat::test();
-        h.type_action("SplitDown()");
-        h.assert_snapshot("split_down");
-    }
-
-    #[test]
-    fn snapshot_nested_splits() {
-        let mut h = crate::Stoat::test();
-        h.type_action("SplitRight()");
-        h.type_action("SplitDown()");
-        h.assert_snapshot("nested_splits");
-    }
-
-    #[test]
-    fn snapshot_three_columns() {
-        let mut h = crate::Stoat::test();
-        h.type_action("SplitRight()");
-        h.type_action("SplitRight()");
-        h.assert_snapshot("three_columns");
-    }
-
-    #[test]
-    fn snapshot_close_returns_to_single() {
-        let mut h = crate::Stoat::test();
-        h.type_action("SplitRight()");
-        h.type_action("ClosePane()");
-        h.assert_snapshot("close_returns_to_single");
-    }
-
-    #[test]
-    fn snapshot_close_other_panes_from_three() {
-        let mut h = crate::Stoat::test();
-        h.type_action("SplitRight()");
-        h.type_action("SplitRight()");
-        h.type_action("CloseOtherPanes()");
-        h.assert_snapshot("close_other_panes_from_three");
-    }
-
-    #[test]
-    fn snapshot_quit_closes_one_split() {
-        let mut h = crate::Stoat::test();
-        h.type_action("SplitRight()");
-        h.type_action("Quit()");
-        h.assert_snapshot("quit_closes_one_split");
-    }
-
-    #[test]
-    fn snapshot_split_right_focus_left() {
-        let mut h = crate::Stoat::test();
-        h.type_action("SplitRight()");
-        h.type_action("FocusLeft()");
-        h.assert_snapshot("split_right_focus_left");
     }
 
     #[test]

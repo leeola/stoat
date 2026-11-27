@@ -1,4 +1,4 @@
-pub(crate) mod apc;
+pub mod apc;
 pub mod editor;
 pub mod keys;
 
@@ -76,7 +76,7 @@ pub struct CmdHandle {
 pub struct TestHarness {
     pub stoat: Stoat,
     scheduler: Arc<TestScheduler>,
-    pub(crate) fake_fs: Arc<crate::host::FakeFs>,
+    pub fake_fs: Arc<crate::host::FakeFs>,
     pub(crate) fake_fs_watcher: Arc<crate::host::FakeFsWatcher>,
     pub fake_git: Arc<crate::host::FakeGit>,
     pub(crate) fake_env: Arc<crate::host::FakeEnv>,
@@ -145,7 +145,7 @@ impl TestHarness {
         Self::new_with_settings(width, height, Settings::default())
     }
 
-    pub(crate) fn new_with_settings(width: u16, height: u16, mut settings: Settings) -> Self {
+    pub fn new_with_settings(width: u16, height: u16, mut settings: Settings) -> Self {
         #[cfg(feature = "test-support")]
         draw_type_at_full_cell();
         // The harness frames keep the top row for the panes until a second tab

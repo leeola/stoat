@@ -488,7 +488,7 @@ pub(super) fn latch_diff_view(stoat: &mut Stoat) {
 /// - [`exit_diff_view`], the exit half, which undoes every piece of this.
 /// - [`close_full_window_screen`](super::pane::close_full_window_screen), which closes the view on
 ///   a layout action.
-pub(crate) fn enter_diff_view(stoat: &mut Stoat) {
+pub fn enter_diff_view(stoat: &mut Stoat) {
     let focus = stoat.active_workspace().panes.focus();
     drop_other_diff_views(stoat.active_workspace_mut(), focus);
 

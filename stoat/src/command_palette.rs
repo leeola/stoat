@@ -131,7 +131,7 @@ pub struct CommandPalette {
     /// The pool that pages a pixel list and the hit test read the layout after
     /// the paint, so the paint keeps its measure here, as it keeps the
     /// picker's `viewport_rows`.
-    pub(crate) row_metrics: Option<RowMetrics>,
+    pub row_metrics: Option<RowMetrics>,
     /// The rows that the Cmd Line took at the box's top in the last frame, 1
     /// before the first.
     ///
@@ -195,7 +195,7 @@ pub struct CommandPalette {
     ///
     /// [`crate::action_handlers::sync_palette_picker`] starts it when the
     /// argument's entry starts, and drops it for any other input.
-    pub(crate) pick: Option<PickState>,
+    pub pick: Option<PickState>,
     /// The list of the flags or the subcommands of the `cli` command in
     /// entry, with that command's name, or `None` while no such list shows.
     ///
@@ -302,7 +302,7 @@ pub(crate) enum CliListKind {
 /// The [`ArgRow`]s of an argument list, which the typed text narrows by their
 /// labels, and the selection among the rows that match.
 #[derive(Default)]
-pub(crate) struct ArgList {
+pub struct ArgList {
     pub(crate) rows: Vec<ArgRow>,
     /// The indices into [`Self::rows`] of the rows that match the query, best
     /// first.
@@ -312,7 +312,7 @@ pub(crate) struct ArgList {
     /// [`Self::row_indices`], which covers the rows past its end.
     pub(crate) match_indices: Vec<Vec<u32>>,
     /// The place of the selected row in [`Self::filtered`].
-    pub(crate) selected: usize,
+    pub selected: usize,
     /// The rows that the last paint showed, which a page key steps by. `None`
     /// before the first paint.
     pub(crate) viewport_rows: Option<usize>,
@@ -411,7 +411,7 @@ impl ArgList {
 
 /// The list of a user command's `pick` argument, with the run of its list
 /// command that gives the rows.
-pub(crate) struct PickState {
+pub struct PickState {
     /// The name of the command and the index of the argument whose list this
     /// is. A new key starts a new run.
     pub(crate) key: (String, usize),
@@ -421,7 +421,7 @@ pub(crate) struct PickState {
     /// The stamp of the run. A result lands only on the list of its own stamp.
     pub(crate) generation: u64,
     pub(crate) load: PickLoad,
-    pub(crate) list: ArgList,
+    pub list: ArgList,
     /// The pane that shows the preview of the selected row. Its scratch
     /// editor lives as long as the state, which disposes it when it drops.
     pub(crate) preview: Preview,

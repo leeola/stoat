@@ -1381,7 +1381,7 @@ pub(crate) fn render_completion_page(
 ///
 /// Mirrors [`render_finder_page`] but paints help list rows; the page index
 /// alone selects the rows, and the list is read-only here.
-pub(crate) fn render_help_list_page(
+pub fn render_help_list_page(
     help: &Help,
     page: u64,
     theme: &crate::theme::Theme,

@@ -32,7 +32,7 @@ const MAX_DIFF_HOPS: usize = 64;
 /// start symbol) and, once the end is marked, the cached path between the
 /// enclosing symbols as a [`NavList`] whose cursor tracks the current position
 /// along it. While only the start is marked, `path` is empty.
-pub(crate) struct TrailState {
+pub struct TrailState {
     /// Where the reader marked the start, or `None` for a path installed
     /// without marks at all. A trail computed for them rather than by them has
     /// no anchor to resolve, and never needs one, since its path is already
@@ -47,7 +47,7 @@ impl TrailState {
     ///
     /// One-based because a person reads it. The first stop of five reads
     /// "1/5", not "0/5".
-    pub(crate) fn progress(&self) -> Option<(usize, usize)> {
+    pub fn progress(&self) -> Option<(usize, usize)> {
         (!self.is_armed()).then(|| (self.path.cursor() + 1, self.path.len()))
     }
 
@@ -275,7 +275,7 @@ fn goto_along(stoat: &mut Stoat, kind: EdgeKind, dir: Dir) -> UpdateEffect {
 /// Mark the start of a call-graph trail at the cursor.
 ///
 /// A no-op when no editor is focused. Replaces any prior trail.
-pub(crate) fn mark_trail_start(stoat: &mut Stoat) -> UpdateEffect {
+pub fn mark_trail_start(stoat: &mut Stoat) -> UpdateEffect {
     let Some(start) = focused_anchor(stoat) else {
         return UpdateEffect::None;
     };
@@ -352,7 +352,7 @@ pub(crate) fn mark_trail_end(stoat: &mut Stoat) -> UpdateEffect {
 /// the one a walkthrough lays between consecutive stops. It carries no start
 /// anchor, since the path is already built and there is nothing left to
 /// resolve one against.
-pub(crate) fn install_trail(stoat: &mut Stoat, path: &[SymbolKey]) {
+pub fn install_trail(stoat: &mut Stoat, path: &[SymbolKey]) {
     stoat.active_workspace_mut().trail = Some(TrailState {
         start: None,
         path: nav_list_of(path),
@@ -374,7 +374,7 @@ fn nav_list_of(path: &[SymbolKey]) -> NavList<SymbolKey> {
 /// Marking a new start replaces a trail as well, so this is the way to put one
 /// down without picking another up. A no-op when none is set, since there is
 /// nothing to report having cleared.
-pub(crate) fn trail_clear(stoat: &mut Stoat) -> UpdateEffect {
+pub fn trail_clear(stoat: &mut Stoat) -> UpdateEffect {
     if stoat.active_workspace().trail.is_none() {
         return UpdateEffect::None;
     }

@@ -111,7 +111,7 @@ pub(crate) fn age_label(now_epoch: i64, commit_time: i64) -> String {
 ///
 /// The units are [`age_label`]'s. Anything under a minute, and anything dated
 /// in the future, reads as `just now`.
-pub(crate) fn age_words(now_epoch: i64, commit_time: i64) -> String {
+pub fn age_words(now_epoch: i64, commit_time: i64) -> String {
     let age = now_epoch.saturating_sub(commit_time);
     for (seconds, _, word) in AGE_UNITS {
         if age >= seconds {
@@ -127,7 +127,7 @@ pub(crate) fn age_words(now_epoch: i64, commit_time: i64) -> String {
 ///
 /// [`age_label`] measures a commit's age against it. A clock set before the
 /// epoch reads 0.
-pub(crate) fn now_epoch(executor: &Executor) -> i64 {
+pub fn now_epoch(executor: &Executor) -> i64 {
     executor
         .system_now()
         .duration_since(UNIX_EPOCH)

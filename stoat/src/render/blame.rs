@@ -101,7 +101,7 @@ struct LinePalette {
 }
 
 /// What a blamed pane's Blame Column paints.
-pub(crate) struct BlamePaint<'a> {
+pub struct BlamePaint<'a> {
     pub(crate) colors: &'a BlameColors,
     /// `None` before a blame of the buffer lands, and the column then paints
     /// its surface alone.

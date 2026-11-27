@@ -41,7 +41,7 @@ pub enum Toggle {
 
 impl Toggle {
     /// Every toggle, in declaration order.
-    pub(crate) const ALL: [Toggle; 22] = [
+    pub const ALL: [Toggle; 22] = [
         Toggle::FollowChanges,
         Toggle::LiveReload,
         Toggle::FollowReload,
@@ -100,7 +100,7 @@ impl Toggle {
     ///
     /// A focused pane with no editor reads [`Toggle::DiffView`] and
     /// [`Toggle::Wrap`] as off.
-    fn is_on(self, stoat: &Stoat) -> bool {
+    pub fn is_on(self, stoat: &Stoat) -> bool {
         let ws = stoat.active_workspace();
         match self {
             Toggle::FollowChanges => stoat.follow_changes,
@@ -143,18 +143,18 @@ impl Toggle {
 ///
 /// One bit per [`Toggle`], at the toggle's declaration index.
 #[derive(Clone, Copy, Default)]
-pub(crate) struct ToggleStates(u32);
+pub struct ToggleStates(u32);
 
 impl ToggleStates {
     /// The state of every [`Toggle`] in `stoat` now.
-    pub(crate) fn read(stoat: &Stoat) -> Self {
+    pub fn read(stoat: &Stoat) -> Self {
         Toggle::ALL
             .into_iter()
             .filter(|toggle| toggle.is_on(stoat))
             .collect()
     }
 
-    pub(crate) fn is_on(self, toggle: Toggle) -> bool {
+    pub fn is_on(self, toggle: Toggle) -> bool {
         self.0 & (1 << toggle as u32) != 0
     }
 }
@@ -176,7 +176,7 @@ impl FromIterator<Toggle> for ToggleStates {
 /// in [`crate::keymap_state::binding_display_desc`]. An action called with an
 /// argument answers `None`, because an argument names a target instead of
 /// flipping a state.
-pub(crate) fn binding_toggle(actions: &[ResolvedAction]) -> Option<Toggle> {
+pub fn binding_toggle(actions: &[ResolvedAction]) -> Option<Toggle> {
     let action = actions.iter().find(|action| action.name != "SetMode")?;
     if !action.args.is_empty() {
         return None;
@@ -186,30 +186,12 @@ pub(crate) fn binding_toggle(actions: &[ResolvedAction]) -> Option<Toggle> {
 
 #[cfg(test)]
 mod tests {
-    use super::{binding_toggle, Toggle, ToggleStates};
+    use super::{binding_toggle, Toggle};
     use crate::{
-        action_handlers::{dispatch, focused_editor_mut},
         keymap::{ResolvedAction, ResolvedArg},
-        Stoat,
+        test_fixture::action,
     };
-    use stoat_action::{Conflict, ToggleMinimap, TogglePaneWiden, ToggleTabBar, ToggleWrap};
     use stoat_config::Value;
-
-    fn action(name: &str) -> ResolvedAction {
-        ResolvedAction {
-            name: name.to_string(),
-            args: Vec::new(),
-        }
-    }
-
-    /// Every toggle that is on in `stoat`, in [`Toggle::ALL`] order.
-    fn on(stoat: &Stoat) -> Vec<Toggle> {
-        let states = ToggleStates::read(stoat);
-        Toggle::ALL
-            .into_iter()
-            .filter(|toggle| states.is_on(*toggle))
-            .collect()
-    }
 
     #[test]
     fn binding_toggle_reads_the_action_that_names_the_row() {
@@ -282,139 +264,6 @@ mod tests {
         assert_eq!(
             binding_toggle(&[action("ToggleRelativeNumbers")]),
             Some(Toggle::RelativeNumbers)
-        );
-    }
-
-    #[test]
-    fn toggle_states_read_the_session_flags() {
-        let mut h = Stoat::test();
-        assert_eq!(
-            on(&h.stoat),
-            [
-                Toggle::ChangeWalkWrap,
-                Toggle::DiffSyntax,
-                Toggle::SyntaxHighlight,
-                Toggle::Wrap,
-                Toggle::Minimap,
-                Toggle::PaneFade,
-                Toggle::RelativeNumbers,
-            ],
-            "the flags a lone scratch pane starts with",
-        );
-
-        h.stoat.follow_changes = true;
-        h.stoat.live_reload = true;
-        h.stoat.diff_underline = true;
-        h.stoat.diff_bold = true;
-        h.stoat.diff_syntax = false;
-        h.stoat.inlay_hints_enabled = true;
-        assert_eq!(
-            on(&h.stoat),
-            [
-                Toggle::FollowChanges,
-                Toggle::LiveReload,
-                Toggle::FollowReload,
-                Toggle::ChangeWalkWrap,
-                Toggle::DiffUnderline,
-                Toggle::DiffBold,
-                Toggle::SyntaxHighlight,
-                Toggle::InlayHints,
-                Toggle::Wrap,
-                Toggle::Minimap,
-                Toggle::PaneFade,
-                Toggle::RelativeNumbers,
-            ],
-        );
-    }
-
-    /// The pair toggle reads on only while both of the modes it flips are on.
-    #[test]
-    fn follow_reload_reads_on_only_while_both_modes_are() {
-        let mut h = Stoat::test();
-        let reads = [(true, false), (false, true), (true, true)].map(|(follow, reload)| {
-            h.stoat.follow_changes = follow;
-            h.stoat.live_reload = reload;
-            Toggle::FollowReload.is_on(&h.stoat)
-        });
-        assert_eq!(reads, [false, false, true]);
-    }
-
-    #[test]
-    fn toggle_states_read_the_view_flags() {
-        let mut h = Stoat::test();
-        dispatch(&mut h.stoat, &TogglePaneWiden);
-        focused_editor_mut(&mut h.stoat)
-            .expect("editor")
-            .set_diff_view(true);
-        dispatch(&mut h.stoat, &ToggleWrap);
-        dispatch(&mut h.stoat, &ToggleMinimap);
-        dispatch(&mut h.stoat, &ToggleTabBar);
-        {
-            let ws = h.stoat.active_workspace_mut();
-            let focus = ws.panes.focus();
-            ws.panes.pane_mut(focus).blame = true;
-        }
-
-        assert_eq!(
-            on(&h.stoat),
-            [
-                Toggle::ChangeWalkWrap,
-                Toggle::DiffSyntax,
-                Toggle::SyntaxHighlight,
-                Toggle::DiffView,
-                Toggle::PaneWiden,
-                Toggle::TabBar,
-                Toggle::PaneFade,
-                Toggle::RelativeNumbers,
-                Toggle::Blame,
-            ],
-            "each view toggle reads the state its action flipped",
-        );
-    }
-
-    /// The `space d c` row reads as the changes view toggle, which is on while
-    /// a changes view has the focus.
-    #[test]
-    fn the_changes_view_toggle_reads_the_focused_pane() {
-        let mut h = Stoat::test();
-        let reads = |stoat: &Stoat| ToggleStates::read(stoat).is_on(Toggle::ChangesView);
-
-        let before = reads(&h.stoat);
-        h.cover_with_diff_changes(false);
-        assert_eq!(
-            (
-                binding_toggle(&[action("DiffChanges"), action("SetMode")]),
-                before,
-                reads(&h.stoat)
-            ),
-            (Some(Toggle::ChangesView), false, true),
-        );
-    }
-
-    /// The `space d x` row reads as the conflict view toggle, which is on while
-    /// the workspace holds a conflict session.
-    #[test]
-    fn the_conflict_view_toggle_reads_the_session() {
-        let mut h = Stoat::test();
-        let git_root = h.stoat.active_workspace().git_root.clone();
-        h.fake_git().add_repo(git_root).conflicted_file(
-            "f.txt",
-            Some("base\n"),
-            Some("ours\n"),
-            Some("theirs\n"),
-        );
-        let reads = |stoat: &Stoat| ToggleStates::read(stoat).is_on(Toggle::ConflictView);
-
-        let before = reads(&h.stoat);
-        dispatch(&mut h.stoat, &Conflict);
-        h.settle();
-        assert_eq!(
-            (
-                binding_toggle(&[action("Conflict"), action("SetMode")]),
-                before,
-                reads(&h.stoat)
-            ),
-            (Some(Toggle::ConflictView), false, true),
         );
     }
 }

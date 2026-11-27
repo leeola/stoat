@@ -13,8 +13,8 @@ use std::{collections::HashMap, time::Instant};
 /// The whole walkthrough is held rather than read back per step, so a tour
 /// plays the same from start to finish even while the file behind it is edited.
 /// Drift against the *source* files is a separate question, reported per jump.
-pub(crate) struct WalkthroughRun {
-    pub(crate) walkthrough: Walkthrough,
+pub struct WalkthroughRun {
+    pub walkthrough: Walkthrough,
     stop_idx: usize,
     /// Which of the current stop's annotations the reader is on, or `None` for
     /// the stop's own focus.
@@ -48,30 +48,30 @@ pub(crate) struct WalkthroughRun {
     ///
     /// A reuse and a layout give the same slide, so only a count tells them
     /// apart.
-    #[cfg(test)]
-    pub(crate) layouts: usize,
+    #[cfg(any(test, feature = "test-support"))]
+    pub layouts: usize,
 }
 
 /// Where walkthrough mark ids start.
 ///
 /// High enough that nothing else an emitter declares lands in the same range by
 /// accident, since a collision would have two things sharing one clock.
-pub(crate) const ID_SPACE: u32 = 0x5700_0000;
+pub const ID_SPACE: u32 = 0x5700_0000;
 
 /// Ids one stop reserves, which caps its drawn annotations at 126.
 ///
 /// A slide with more annotations than that is unreadable long before it runs
 /// out of room, so the cap costs nothing and keeps a stop's ids contiguous.
-pub(crate) const STOP_ID_STRIDE: u32 = 0x100;
+pub const STOP_ID_STRIDE: u32 = 0x100;
 
 /// The parts of a slide, in the order their ids run.
 ///
 /// Derived from the stop and the part rather than allocated, so a re-emitted
 /// scene comes out with the same ids and no state has to remember them.
-pub(crate) mod part {
-    pub(crate) const FOCUS_MARK: u32 = 0;
-    pub(crate) const CARD: u32 = 1;
-    pub(crate) const FOCUS_LINK: u32 = 2;
+pub mod part {
+    pub const FOCUS_MARK: u32 = 0;
+    pub const CARD: u32 = 1;
+    pub const FOCUS_LINK: u32 = 2;
     /// The first annotation's two ids, its connector and its label, which then
     /// repeat every two. An annotation draws no mark of its own.
     pub(crate) const ANNOTATION_BASE: u32 = 3;
@@ -96,7 +96,7 @@ impl WalkthroughRun {
             last_declared: HashMap::new(),
             id_base: ID_SPACE + (run << 16),
             last_layout: None,
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-support"))]
             layouts: 0,
         })
     }
@@ -117,7 +117,7 @@ impl WalkthroughRun {
 
         let slide = slide::layout(input);
         self.last_layout = Some((input.clone(), slide.clone()));
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         {
             self.layouts += 1;
         }
@@ -127,12 +127,12 @@ impl WalkthroughRun {
     /// The id of `part` for the stop the reader is on.
     ///
     /// See [`part`] for what the offsets name.
-    pub(crate) fn part_id(&self, part: u32) -> u32 {
+    pub fn part_id(&self, part: u32) -> u32 {
         self.id_base + self.stop_idx as u32 * STOP_ID_STRIDE + part
     }
 
     /// The connector and label ids of annotation `index`.
-    pub(crate) fn annotation_ids(&self, index: usize) -> (u32, u32) {
+    pub fn annotation_ids(&self, index: usize) -> (u32, u32) {
         let base = part::ANNOTATION_BASE + part::ANNOTATION_STRIDE * index as u32;
         (self.part_id(base), self.part_id(base + 1))
     }
@@ -169,7 +169,7 @@ impl WalkthroughRun {
     }
 
     /// Which stop of how many, counted the way a reader says it.
-    pub(crate) fn progress(&self) -> (usize, usize) {
+    pub fn progress(&self) -> (usize, usize) {
         (self.stop_idx + 1, self.walkthrough.stops.len())
     }
 

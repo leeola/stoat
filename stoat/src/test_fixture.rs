@@ -13,8 +13,12 @@
 use crate::{
     action_handlers,
     app::{modal_split_share, modal_zoom_steps, ModalKind},
+    badge::{Anchor, Badge, BadgeSource, BadgeState},
+    diff_map::{DiffHunkStatus, GutterMark, MarkState},
     editor_state::EditorId,
     host::{lsp::IncomingRequest, FakeTerminalSession},
+    keymap::{KeymapState, ResolvedAction, ResolvedArg, StateValue},
+    keymap_state::StoatKeymapState,
     lsp::drain,
     pane::FocusTarget,
     term_screen::TermScreen,
@@ -33,7 +37,7 @@ use lsp_types::{
 use ratatui::layout::Rect;
 use std::{path::PathBuf, sync::Arc};
 use stoat_action::{OpenFile, OpenFileFinder};
-use stoat_config::MinimapMode;
+use stoat_config::{MinimapMode, Value};
 use stoat_widgets::ApcScene;
 use stoatty_protocol::command::{self, LineSummary, MinimapRun};
 use tokio::sync::mpsc::UnboundedReceiver;
@@ -531,4 +535,45 @@ pub fn row_rules(scene: &ApcScene, y: u16) -> usize {
             |cmd| matches!(cmd, command::Command::Bar(bar) if bar.y == middle && bar.height == 1),
         )
         .count()
+}
+
+/// The gutter mark of an unstaged row of kind `status`.
+pub fn mark(status: DiffHunkStatus) -> GutterMark {
+    GutterMark {
+        status,
+        state: MarkState::Unstaged,
+    }
+}
+
+pub fn field(state: &StoatKeymapState<'_>, name: &str) -> Option<String> {
+    match state.get(name) {
+        Some(StateValue::String(s)) => Some(s.to_string()),
+        _ => None,
+    }
+}
+pub fn resolved(name: &str, args: Vec<Value>) -> ResolvedAction {
+    ResolvedAction {
+        name: name.to_string(),
+        args: args
+            .into_iter()
+            .map(|value| ResolvedArg { name: None, value })
+            .collect(),
+    }
+}
+
+pub fn corner_badge(label: &str) -> Badge {
+    Badge {
+        source: BadgeSource::Walkthrough,
+        anchor: Anchor::BottomRight,
+        state: BadgeState::Complete,
+        label: label.to_owned(),
+        detail: None,
+    }
+}
+
+pub fn action(name: &str) -> ResolvedAction {
+    ResolvedAction {
+        name: name.to_string(),
+        args: Vec::new(),
+    }
 }

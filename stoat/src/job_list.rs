@@ -48,7 +48,7 @@ pub(crate) enum JobScope {
 }
 
 /// The open Job List, its filter input, and the ranking of its rows.
-pub(crate) struct JobList {
+pub struct JobList {
     pub(crate) input: InputView,
     entries: Vec<JobEntry>,
     /// Indices into `entries` in display order after the filter and the
@@ -64,13 +64,13 @@ pub(crate) struct JobList {
     selected: usize,
     /// Rows the last render painted, stamped by the renderer and read by
     /// [`Self::page`].
-    pub(crate) viewport_rows: Option<usize>,
+    pub viewport_rows: Option<usize>,
     /// The cell and the scale that the last render laid the rows out by at
     /// the board's pixels, or `None` for rows on whole cells.
     ///
     /// A press and the pointer region read it, because the rows stand off the
     /// cell grid and the paint's layout follows the metrics.
-    pub(crate) row_metrics: Option<RowMetrics>,
+    pub row_metrics: Option<RowMetrics>,
     scope: JobScope,
     /// The query that the ranking came from, `None` until the first ranking.
     /// With unchanged rows, a pass of the same query ranks nothing, and
@@ -125,7 +125,7 @@ impl JobList {
         &self.filtered
     }
 
-    pub(crate) fn selected(&self) -> usize {
+    pub fn selected(&self) -> usize {
         self.selected
     }
 

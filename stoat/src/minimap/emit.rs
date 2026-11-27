@@ -174,7 +174,7 @@ impl MinimapPalettes {
 /// the diffed scene from the paint. This sends only the persistent content
 /// stores. A no-op until [`Stoat::stoatty`] confirms a listener and the APC
 /// channel is installed, or with the minimap off.
-pub(crate) fn emit_minimap(stoat: &mut Stoat) {
+pub fn emit_minimap(stoat: &mut Stoat) {
     // Recomputed below from each synced strip. Cleared first so the early
     // exits (no listener, no channel, minimap off) leave no build pending.
     stoat.minimap_build_pending = false;

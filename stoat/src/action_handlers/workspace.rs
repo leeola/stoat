@@ -547,7 +547,7 @@ pub(super) fn workspace_picker_close(stoat: &mut Stoat) -> UpdateEffect {
 ///
 /// The mode drops to normal first, because the picker's own input takes insert
 /// and the editor underneath must not keep a mode it no longer owns.
-pub(crate) fn open_workspace_picker(stoat: &mut Stoat) -> UpdateEffect {
+pub fn open_workspace_picker(stoat: &mut Stoat) -> UpdateEffect {
     let inactive = registry::list_all(&*stoat.fs_host).unwrap_or_default();
     open_workspace_picker_over(stoat, inactive)
 }

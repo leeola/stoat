@@ -242,7 +242,7 @@ impl PreviewCache {
     /// This is the call a preview sync makes to decide whether to build, so
     /// asking and recording are the same act and no caller can do one without
     /// the other.
-    pub(crate) fn mark_used(&mut self, sha: &str) -> bool {
+    pub fn mark_used(&mut self, sha: &str) -> bool {
         if !self.sessions.contains_key(sha) {
             return false;
         }
@@ -267,7 +267,7 @@ impl PreviewCache {
 
     /// Cache a built `document` for `sha` as the most recently used, dropping
     /// the least recently used when that puts the cache over the cap.
-    pub(crate) fn insert(&mut self, sha: String, document: Arc<DiffDocument>) {
+    pub fn insert(&mut self, sha: String, document: Arc<DiffDocument>) {
         self.record(sha, Some(document));
     }
 

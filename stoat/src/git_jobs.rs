@@ -28,7 +28,7 @@ pub(crate) type GitWork = Box<dyn FnOnce() -> GitLanding + Send>;
 type GitStart = Box<dyn FnOnce(&mut Stoat) -> Option<GitWork>>;
 
 /// One git write the loop started.
-pub(crate) struct GitJob {
+pub struct GitJob {
     label: &'static str,
     key: Option<GitJobKey>,
     start: GitStart,
@@ -59,7 +59,7 @@ impl GitJob {
 
 /// The kinds of job a later press makes stale while it waits.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum GitJobKey {
+pub enum GitJobKey {
     /// A review-walk step or a rebase edit-pause checkout. The later one names
     /// where the reader stands now.
     WalkLanding,
@@ -117,7 +117,7 @@ struct RunningGitJob {
 /// the reader goes to another workspace. If that workspace closes before the
 /// job starts, the job does nothing. If it closes while the work runs, the git
 /// write completes and the landing does nothing.
-pub(crate) fn enqueue(stoat: &mut Stoat, job: GitJob) {
+pub fn enqueue(stoat: &mut Stoat, job: GitJob) {
     let workspace = stoat.active_workspace;
     let GitJob { label, key, start } = job;
     let job = GitJob::new(label, key, move |stoat: &mut Stoat| {
@@ -223,8 +223,8 @@ fn start_next(stoat: &mut Stoat) {
 
 /// A job whose work and landing do nothing, for a test that holds later jobs
 /// behind a running one.
-#[cfg(test)]
-pub(crate) fn idle_job(key: Option<GitJobKey>) -> GitJob {
+#[cfg(any(test, feature = "test-support"))]
+pub fn idle_job(key: Option<GitJobKey>) -> GitJob {
     GitJob::new("test", key, |_| {
         Some(Box::new(|| Box::new(|_: &mut Stoat| {}) as GitLanding) as GitWork)
     })

@@ -103,18 +103,18 @@ const BOARD_CELL_PX: (u8, u8) = (9, 18);
 
 /// The top edge of a plate's Island, which reaches 4 px into the row above the
 /// Island's cells.
-pub(crate) const ISLAND_TOP: Edge = Edge::Margin(14);
+pub const ISLAND_TOP: Edge = Edge::Margin(14);
 
 /// The side of a plate's Island at the plate's edge, which reaches 3 px into
 /// the column beside its cells and so stands 8 px in from the plate.
-pub(crate) const ISLAND_SIDE: Edge = Edge::Margin(6);
+pub const ISLAND_SIDE: Edge = Edge::Margin(6);
 
 /// The side of an Island that faces another across the separator column or row
 /// between their cells, which leaves 8 px between the two.
-pub(crate) const ISLAND_GAP: Edge = Edge::Gap(8);
+pub const ISLAND_GAP: Edge = Edge::Gap(8);
 
 /// The bottom edge of a plate's Island, 4 px under its last row.
-pub(crate) const ISLAND_BOTTOM: Edge = Edge::Outset(4);
+pub const ISLAND_BOTTOM: Edge = Edge::Outset(4);
 
 /// The edges of the Island of a preview beside a plate's list, in panel edge
 /// order.

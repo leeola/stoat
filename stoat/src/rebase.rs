@@ -113,7 +113,7 @@ impl RebaseState {
 /// when `ExecuteRebase` kicks off the plan and consumed when the plan
 /// completes or aborts. Lives on [`crate::workspace::Workspace`] as
 /// `rebase_active`.
-pub(crate) struct ActiveRebase {
+pub struct ActiveRebase {
     pub workdir: PathBuf,
     /// Original base the plan stacks onto; retained for diagnostics
     /// and potential recovery even though the stepper reads from
@@ -138,7 +138,7 @@ pub(crate) struct ActiveRebase {
     pub branch: Option<String>,
 }
 
-pub(crate) enum RebasePause {
+pub enum RebasePause {
     /// Waiting for the user to edit a commit message. The user's
     /// in-progress message lives in a real [`crate::editor_state::EditorState`]
     /// backed by a scratch [`crate::buffer::TextBuffer`], so reword gets
@@ -181,7 +181,7 @@ pub(crate) enum RebasePause {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) enum ConflictResolution {
+pub enum ConflictResolution {
     TakeOurs,
     TakeTheirs,
     /// Skip this entry entirely (treat as Drop for rebase purposes).

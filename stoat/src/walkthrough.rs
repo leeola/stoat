@@ -28,8 +28,8 @@ use std::{
     path::{Path, PathBuf},
 };
 
-pub(crate) mod run;
-pub(crate) mod slide;
+pub mod run;
+pub mod slide;
 pub mod store;
 
 /// One authored walkthrough, the whole contents of its JSON file.

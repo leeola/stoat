@@ -626,7 +626,7 @@ pub const REPO_RETRY: std::time::Duration = std::time::Duration::from_secs(1);
 /// A trackpad flick emits a stream of per-line reports far faster than this,
 /// so one flick walks a handful of jumps rather than a hundred. A deliberate
 /// notch cadence runs near 150ms, so every intended gesture still lands.
-pub(crate) const WHEEL_BINDING_COOLDOWN: std::time::Duration = std::time::Duration::from_millis(80);
+pub const WHEEL_BINDING_COOLDOWN: std::time::Duration = std::time::Duration::from_millis(80);
 
 /// Maximum index updates [`Stoat::drain_index_updates`] processes in one call.
 /// Bounds the graph work per event-loop turn so a large reindex burst cannot
@@ -775,7 +775,7 @@ pub enum ModalKind {
 ///
 /// More than the single row a notch moves the list, because a diff is read by
 /// the screenful while a commit list is walked one commit at a time.
-pub(crate) const PREVIEW_WHEEL_ROWS: usize = 3;
+pub const PREVIEW_WHEEL_ROWS: usize = 3;
 
 /// Rows a dragged separator leaves the pane below it.
 ///
@@ -1180,11 +1180,11 @@ pub struct Stoat {
     pub symbol_finder: Option<SymbolFinder>,
     pub workspace_picker: Option<WorkspacePicker>,
     /// The git status panel, or `None` while it is closed.
-    pub(crate) git_status: Option<GitStatusPanel>,
+    pub git_status: Option<GitStatusPanel>,
     /// The Glance of a Job, or `None` while it is closed.
-    pub(crate) job_glance: Option<crate::jobs::Glance>,
+    pub job_glance: Option<crate::jobs::Glance>,
     /// The Job List, or `None` while it is closed.
-    pub(crate) job_list: Option<crate::job_list::JobList>,
+    pub job_list: Option<crate::job_list::JobList>,
     /// Whether a `Ctrl-Enter` submit of the palette is in dispatch, so the Cmd
     /// that it starts goes to the Job Tray, as [`crate::jobs::claim_for_jobs`]
     /// claims it.
@@ -1206,7 +1206,7 @@ pub struct Stoat {
     /// Modal listing the workspace's stored walkthroughs, opened by
     /// [`stoat_action::OpenWalkthroughPicker`] and dismissed when a tour plays or
     /// on cancel.
-    pub(crate) walkthrough_picker: Option<crate::walkthrough_picker::WalkthroughPicker>,
+    pub walkthrough_picker: Option<crate::walkthrough_picker::WalkthroughPicker>,
     /// The modal that lists every view the workspace holds.
     /// [`stoat_action::OpenPaneFinder`] opens it, and a pick or a cancel
     /// closes it.
@@ -1229,7 +1229,7 @@ pub struct Stoat {
     /// re-fire the same action and rebuild the picker fresh.
     /// Only set when an opening dispatch returned `Redraw`;
     /// no-op opens do not overwrite the prior recall target.
-    pub(crate) last_picker_action: Option<&'static str>,
+    pub last_picker_action: Option<&'static str>,
     pub code_search: Option<crate::code_search::CodeSearchFinder>,
     /// Active input modal for typing the regex passed to
     /// [`stoat_action::SplitSelection`]. `Some` while the user
@@ -1272,7 +1272,7 @@ pub struct Stoat {
     /// real `$XDG_STATE_HOME/stoat/workspaces/` directory.
     pub persistence_disabled: bool,
     pub(crate) language_registry: Arc<LanguageRegistry>,
-    pub(crate) syntax_styles: SyntaxStyles,
+    pub syntax_styles: SyntaxStyles,
     pub workspaces: SlotMap<WorkspaceId, Workspace>,
     pub active_workspace: WorkspaceId,
     /// App-level badge tray for cross-workspace notifications. Badges here
@@ -1489,12 +1489,12 @@ pub struct Stoat {
     /// The extents run in tab order, in sixteenths of a cell from the window's
     /// left edge, and the list is empty while the bar is hidden. The tab bar's
     /// press hit test reads it.
-    pub(crate) tab_bar_spans: Vec<Range<u16>>,
+    pub tab_bar_spans: Vec<Range<u16>>,
     /// Where the last paint drew each Tray Chip of the tab bar, empty while
     /// the bar is hidden.
     ///
     /// A press on a chip and the Glance under a chip read it.
-    pub(crate) tray_spans: Vec<crate::jobs::TraySpan>,
+    pub tray_spans: Vec<crate::jobs::TraySpan>,
     /// The window-right strip band single-minimap mode reserves, stamped every
     /// paint. `Some` only under stoatty in [`stoat_config::MinimapMode::Single`]
     /// on a wide-enough window while a split pane shows an editor or a changes
@@ -1503,14 +1503,14 @@ pub struct Stoat {
     /// The focused pane's status-bar LSP badge group, in cells, stamped every
     /// paint. `Some` only when a badge painted, `None` when the focused bar shows
     /// no server badge. The badge-hover hit test consumes it.
-    pub(crate) lsp_badge_rect: Option<Rect>,
+    pub lsp_badge_rect: Option<Rect>,
     /// Whether the detailed LSP status popout is pinned open, toggled by
     /// `ToggleLspStatus`. Off by default. A runtime session flag, not persisted.
     pub lsp_status_pinned: bool,
     /// Whether the pointer currently rests on the LSP badge, which opens the
     /// status popout for as long as it does. Set from [`Self::lsp_badge_rect`] by
     /// the hover handler and cleared when no badge paints.
-    pub(crate) lsp_badge_hovered: bool,
+    pub lsp_badge_hovered: bool,
     /// Whether the keybinding hints overlay is force-shown in a primary mode,
     /// toggled by `ToggleKeyHints`, off by default. A runtime session flag like
     /// [`Self::syntax_highlight`], not persisted. Contexts that already
@@ -1529,7 +1529,7 @@ pub struct Stoat {
     pub hints_cache: Option<crate::render::hints::HintsCache>,
     /// Whether LSP inlay hints are requested and rendered for the focused
     /// editor. Toggled by `ToggleInlayHints`, off by default. Not persisted.
-    pub(crate) inlay_hints_enabled: bool,
+    pub inlay_hints_enabled: bool,
     /// In-flight viewport inlay-hint request, armed by
     /// [`action_handlers::lsp::inlay_hints_trigger`] behind a debounce and
     /// applied by [`action_handlers::lsp::pump_lsp_inlay_hints`].
@@ -1630,7 +1630,7 @@ pub struct Stoat {
     /// A trackpad flick arrives as a burst of per-line reports, and an ungated
     /// burst walks a hundred jumps. A notch inside [`WHEEL_BINDING_COOLDOWN`]
     /// of this scrolls instead of dispatching.
-    pub(crate) wheel_binding_last: Option<std::time::Instant>,
+    pub wheel_binding_last: Option<std::time::Instant>,
     /// The repeat a held listed pointer button armed, or `None` when no such
     /// button is held.
     ///
@@ -1639,7 +1639,7 @@ pub struct Stoat {
     /// [`button_repeat::drain`] reads the due time on the scheduler clock, and
     /// dropping the repeat cancels the wake, as replacing
     /// [`Self::pending_message_expiry`] does.
-    pub(crate) button_repeat: Option<ButtonRepeat>,
+    pub button_repeat: Option<ButtonRepeat>,
     /// Sub-notch wheel travel held for the consumers that step by whole
     /// notches: a keymap wheel binding, the boxed modals, the hover popup, and
     /// a run pane.
@@ -1742,8 +1742,7 @@ pub struct Stoat {
     ///
     /// The count rides along because dispatching the arming action consumes
     /// the pending count, leaving the type char's keypress nothing to read.
-    pub(crate) pending_textobject_select:
-        Option<(action_handlers::textobject::TextobjectMode, usize)>,
+    pub pending_textobject_select: Option<(action_handlers::textobject::TextobjectMode, usize)>,
     /// Active search input modal. Some while the user is typing a
     /// `/` (forward) or `?` (reverse) search query; cleared by
     /// [`action_handlers::search::search_submit`] or
@@ -1853,7 +1852,7 @@ pub struct Stoat {
     pub(crate) hover_diag: Option<usize>,
     /// The open conflict chunk's side the pointer last rested over, which the
     /// conflict view rings, or `None` off every open side.
-    pub(crate) conflict_hover: Option<ConflictHover>,
+    pub conflict_hover: Option<ConflictHover>,
     /// Set on `MouseEventKind::Down(Left)` over a split divider. While `Some`,
     /// `Drag(Left)` moves that boundary via `set_divider` and `Up(Left)` clears
     /// it. Takes over the pointer so pane handlers never see the drag.
@@ -2095,7 +2094,7 @@ pub struct Stoat {
     /// construction and refreshed by [`Self::set_env_host`]. Lets the per-frame
     /// paint paths abbreviate `~` without an env lookup and allocation each
     /// frame.
-    pub(crate) home: Option<PathBuf>,
+    pub home: Option<PathBuf>,
     /// Language-server requests route through this trait. Defaults to
     /// Language servers keyed by name. Reached through
     /// [`crate::lsp::hosts::lsp_host`] and [`crate::lsp::hosts::lsp_for`],
@@ -2155,7 +2154,7 @@ pub struct Stoat {
     ///
     /// The `LiveReload` and `FollowReload` actions are its only writers.
     /// Session-scoped, off at start, and never persisted.
-    pub(crate) live_reload: bool,
+    pub live_reload: bool,
     /// Directory holding the per-workspace agent sockets, the single source of
     /// the path both [`Self::serve_term_session`] binds and an owned child's
     /// `STOAT_AGENT_SOCK` names.
@@ -2307,7 +2306,7 @@ pub struct Stoat {
     /// [`action_handlers::blame::sync_card`] closes it after an event when the
     /// cursor leaves its line, the pane stops blaming, the focus moves, or a
     /// modal opens. The card and the hover popup never show together.
-    pub(crate) blame_card: Option<crate::blame::BlameCard>,
+    pub blame_card: Option<crate::blame::BlameCard>,
 
     /// In-flight `textDocument/signatureHelp` request, armed by
     /// [`crate::lsp::signature_help::signature_help_trigger`] on a trigger
@@ -2584,7 +2583,7 @@ pub struct Stoat {
     /// terminal goes stale the moment the theme does. The pool content versions
     /// hash this in, which is what makes a `:theme` switch refill them instead of
     /// gliding old-theme pixels back onto the screen.
-    pub(crate) theme_epoch: u64,
+    pub theme_epoch: u64,
     /// Counts the changes to what a pane paints from outside its display map.
     ///
     /// A pane's own content is answered by
@@ -2661,7 +2660,7 @@ pub struct Stoat {
     /// Keyed on the theme's identity rather than [`Self::theme_epoch`], because
     /// the epoch tracks pooled-surface staleness rather than the theme itself
     /// and a config reload replaces the theme without bumping it.
-    pub(crate) chrome: Option<(
+    pub chrome: Option<(
         Arc<crate::theme::Theme>,
         crate::render::editor::ResolvedChrome,
     )>,
@@ -2685,7 +2684,7 @@ pub struct Stoat {
     ///
     /// [`Self::emit_minimap`] syncs each entry from its buffer's edits at the
     /// frame seam and drains the resulting splices into `minimap_lines`.
-    pub(crate) minimap_content:
+    pub minimap_content:
         std::collections::HashMap<(WorkspaceId, BufferId), crate::minimap::MinimapContent>,
     /// Monotonic source of the `content_id`s naming minimap content stores on the
     /// terminal, global so ids stay unique across workspaces.
@@ -2722,7 +2721,7 @@ pub struct Stoat {
     pub spinner_clock: f32,
     /// Syntax-scope palette the minimap strips declare and their run summaries
     /// index, resolved from [`Self::theme`].
-    pub(crate) minimap_class_table: crate::minimap::ClassTable,
+    pub minimap_class_table: crate::minimap::ClassTable,
 }
 
 impl Stoat {
@@ -4022,7 +4021,7 @@ impl Stoat {
     ///
     /// Single mode reserves no band while no split pane shows an editor or a
     /// changes view, so a window of terminals gives every column to the panes.
-    pub(crate) fn minimap_mode(&self) -> MinimapMode {
+    pub fn minimap_mode(&self) -> MinimapMode {
         let setting = self.settings.editor_minimap.unwrap_or(MinimapMode::Single);
         match self.minimap_override {
             Some(false) => MinimapMode::Off,
@@ -4229,7 +4228,7 @@ impl Stoat {
     ///
     /// Separate from reading it, so a caller that goes on to borrow the rest of
     /// the state it paints from can settle the rebuild first.
-    pub(crate) fn refresh_chrome(&mut self) {
+    pub fn refresh_chrome(&mut self) {
         // Keyed on the theme handle rather than its contents, and the handle is
         // retained so its allocation cannot be freed and reused by a later
         // theme that would then read as unchanged.
@@ -4388,7 +4387,7 @@ impl Stoat {
     /// between them for its status, so no pane gives up a row of its own.
     /// `None` for a window too short to hold the status rows and one row of
     /// panes, which keeps its rows for the panes.
-    pub(crate) fn status_bar_rect(&self) -> Option<Rect> {
+    pub fn status_bar_rect(&self) -> Option<Rect> {
         if self.size.height < self.status_rows() + 1 {
             return None;
         }
@@ -4485,7 +4484,7 @@ impl Stoat {
     /// second tab or a Job, so a single-tab session keeps the whole window
     /// until it has a tab to switch to or a Tray Chip to show. `:tabs`
     /// overrides the configured mode for the session.
-    pub(crate) fn tab_bar_visible(&self) -> bool {
+    pub fn tab_bar_visible(&self) -> bool {
         let mode = self
             .tab_bar_override
             .or(self.settings.ui_tab_bar)

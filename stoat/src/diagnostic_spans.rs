@@ -40,7 +40,7 @@ pub(crate) struct ResolvedDiag {
 /// follow their text, so the same pair answers for every buffer version, and a
 /// query resolves the few it actually returns.
 #[derive(Clone, Copy, Debug)]
-pub(crate) struct AnchoredDiag {
+pub struct AnchoredDiag {
     pub(crate) start: Anchor,
     pub(crate) end: Anchor,
     pub(crate) severity: DiagnosticSeverity,
@@ -56,14 +56,14 @@ pub(crate) struct AnchoredDiag {
 /// standing, because anchors already describe where the text went, so typing in
 /// a file full of diagnostics costs nothing here. Transient render state, not
 /// persisted.
-pub(crate) struct DiagnosticSpanCache {
+pub struct DiagnosticSpanCache {
     set_version: u64,
     /// Sorted by start offset as resolved when the cache was built.
     ///
     /// One consistent resolve settles the order, and anchors move monotonically
     /// from there, so no later edit reorders them. That is what lets every
     /// query binary-search without resolving the whole list again.
-    pub(crate) spans: Vec<AnchoredDiag>,
+    pub spans: Vec<AnchoredDiag>,
     /// Running argmax of [`Self::spans`]' ends, one entry per span.
     ///
     /// The spans are sorted by start, so their ends are not, and a viewport's

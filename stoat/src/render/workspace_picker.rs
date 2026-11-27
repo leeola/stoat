@@ -56,7 +56,7 @@ const SAVED_MARK: &str = "\u{25cb}";
 /// list shows every session up to half `area`'s height less the box's other
 /// rows, past which the list scrolls. The box's top sits a third of the way
 /// down the room `area` leaves around it.
-pub(crate) fn workspace_picker_layout(area: Rect, entries_len: usize) -> Option<(Rect, Rect)> {
+pub fn workspace_picker_layout(area: Rect, entries_len: usize) -> Option<(Rect, Rect)> {
     if entries_len == 0 {
         return None;
     }

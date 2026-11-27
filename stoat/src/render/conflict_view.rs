@@ -61,16 +61,16 @@ pub struct GridPaint<'a> {
 /// and a press finds the chip or the pick button under it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ConflictLayout {
-    pub(crate) ours: Range<u16>,
-    pub(crate) merged: Range<u16>,
-    pub(crate) theirs: Range<u16>,
+    pub ours: Range<u16>,
+    pub merged: Range<u16>,
+    pub theirs: Range<u16>,
     /// The rows under the header, across all three columns.
-    pub(crate) body: Rect,
+    pub body: Rect,
     /// The cells of each chunk's chip on screen, with the chunk it names.
-    pub(crate) chips: Vec<(Rect, usize)>,
+    pub chips: Vec<(Rect, usize)>,
     /// The cells of each pick button of the open chip menu, with the pick it
     /// takes.
-    pub(crate) buttons: Vec<(Rect, ActionKind)>,
+    pub buttons: Vec<(Rect, ActionKind)>,
 }
 
 /// What a press on the conflict view's MergeGrid lands on, as
@@ -95,11 +95,11 @@ pub(crate) enum ConflictTarget {
 /// names the pick of.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ConflictHover {
-    pub(crate) chunk: usize,
-    pub(crate) side: Side,
+    pub chunk: usize,
+    pub side: Side,
     /// The merge row of the one line an Alt press takes, set while Alt is
     /// held. `None` rings the whole side, which a plain press takes.
-    pub(crate) merge_row: Option<usize>,
+    pub merge_row: Option<usize>,
 }
 
 /// Column geometry for the conflict view's cell layout, the one a terminal with

@@ -1,7 +1,7 @@
 use crate::{action_handlers, app::Stoat, editor_state::EditorState};
 
 pub(crate) mod document_highlight;
-pub(crate) mod drain;
+pub mod drain;
 pub mod edit_apply;
 pub(crate) mod emoji;
 pub(crate) mod folding;
@@ -29,7 +29,7 @@ pub(crate) mod watched_files;
 /// callers such as the `space l` which-key filter need. This preserves it in a
 /// coarser bucketing than the raw legend but finer than the highlight scope.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
-pub(crate) enum LspSymbolKind {
+pub enum LspSymbolKind {
     Trait,
     Type,
     Function,

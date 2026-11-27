@@ -20,7 +20,7 @@ use stoatty_protocol::command::{Command, IconKind, PopoverCommand};
 /// scene replays over the *finished* main pass, so without that rule an earlier
 /// frame's border lands on cells a later widget already cleared and wrote,
 /// inverting the paint order the real renderer has.
-pub(crate) fn composite_scene(buf: &mut Buffer, cmds: &[Command]) {
+pub fn composite_scene(buf: &mut Buffer, cmds: &[Command]) {
     let boxes = box_interiors(cmds);
     for (idx, cmd) in cmds.iter().enumerate() {
         let above = &boxes[boxes.partition_point(|(i, _)| *i <= idx)..];

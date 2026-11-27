@@ -158,37 +158,3 @@ pub(crate) fn close_help(stoat: &mut Stoat) {
     let active_idx = stoat.active_workspace;
     help.dispose(&mut stoat.workspaces[active_idx]);
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn question_mark_opens_help_in_normal_mode() {
-        let mut h = Stoat::test();
-        assert!(h.stoat.help.is_none(), "no help open by default");
-
-        h.type_text("?");
-        let all = h
-            .stoat
-            .help
-            .as_ref()
-            .expect("? opens help directly in normal mode")
-            .filtered()
-            .len();
-        assert!(all > 0, "help lists the active bindings");
-
-        h.type_text("quit");
-        let filtered = h
-            .stoat
-            .help
-            .as_ref()
-            .expect("help stays open while typing")
-            .filtered()
-            .len();
-        assert!(
-            filtered < all,
-            "typing into the help search filters the list ({all} -> {filtered})",
-        );
-    }
-}

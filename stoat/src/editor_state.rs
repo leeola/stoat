@@ -154,7 +154,7 @@ pub struct EditorState {
     /// Per-editor soft-wrap override, toggled by `ToggleWrap`. `Some` forces this
     /// editor's wrap mode regardless of the global `editor.wrap` setting; `None`
     /// follows the setting. Transient, not persisted.
-    pub(crate) wrap_override: Option<WrapMode>,
+    pub wrap_override: Option<WrapMode>,
     /// When set, `render_editor` paints this editor as a side-by-side diff: the
     /// right column is the normal syntax-highlighted buffer and the left column
     /// shows the base text (the index, or the installed base) via the buffer's
@@ -226,7 +226,7 @@ pub struct EditorState {
     pub(crate) hint_inlay_ids: Vec<crate::display_map::InlayId>,
     /// Cached diagnostic gutter severity map, keyed by the diagnostic-set
     /// version. Transient render state, not persisted.
-    pub(crate) gutter_severity_cache: Option<crate::render::editor::GutterSeverityCache>,
+    pub gutter_severity_cache: Option<crate::render::editor::GutterSeverityCache>,
     /// Cached gutter geometry (folded lines, digit width, and diff marks) and
     /// the rich component lines built from it, each keyed by the inputs it
     /// reads. Lets an unchanged repaint reuse the collections instead of
@@ -241,7 +241,7 @@ pub struct EditorState {
     /// Diagnostic spans resolved to byte offsets, keyed by the diagnostic-set
     /// and buffer versions, so the per-frame render paths reuse one resolution.
     /// Transient render state, not persisted.
-    pub(crate) diagnostic_span_cache: Option<crate::diagnostic_spans::DiagnosticSpanCache>,
+    pub diagnostic_span_cache: Option<crate::diagnostic_spans::DiagnosticSpanCache>,
     /// Collections the diagnostic paint refills every frame, retained so it
     /// reuses their capacity instead of allocating a pair per pane per frame.
     /// Holds nothing between frames. Transient render state, not persisted.

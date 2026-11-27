@@ -16,14 +16,14 @@ use std::{
 /// See also:
 /// - [`Self::below`] for that range, which the fs-watch drain reads.
 #[derive(Default)]
-pub(crate) struct IndexedFiles {
+pub struct IndexedFiles {
     by_id: HashMap<FileId, PathBuf>,
     /// The paths of `by_id`, in order.
     ordered: BTreeSet<PathBuf>,
 }
 
 impl IndexedFiles {
-    pub(crate) fn insert(&mut self, file: FileId, path: PathBuf) {
+    pub fn insert(&mut self, file: FileId, path: PathBuf) {
         if self.by_id.get(&file) == Some(&path) {
             return;
         }

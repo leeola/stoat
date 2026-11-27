@@ -139,11 +139,11 @@ pub(crate) struct CommitDetails {
 ///
 /// The card holds its commit, so a blame that lands under it does not change
 /// what it shows. The card closes when the cursor leaves its row.
-pub(crate) struct BlameCard {
+pub struct BlameCard {
     pub(crate) editor: EditorId,
     /// The buffer row the card opened on.
     pub(crate) row: u32,
-    pub(crate) commit: BlameCommit,
+    pub commit: BlameCommit,
     /// The body and the change size, `None` until they load.
     pub(crate) details: Option<Arc<CommitDetails>>,
     /// The key and the label of each blame binding the card lists, in keymap
@@ -585,7 +585,7 @@ pub(crate) fn author_word(name: &str) -> &str {
 /// A commit of the 365 days before `now_epoch` shows its `MM/DD`, and an older
 /// one shows its four-digit year. A time or an offset that no date holds shows
 /// `--/--`.
-pub(crate) fn short_date(time: i64, utc_offset_minutes: i32, now_epoch: i64) -> String {
+pub fn short_date(time: i64, utc_offset_minutes: i32, now_epoch: i64) -> String {
     let Some(date) = zoned(time, utc_offset_minutes) else {
         return "--/--".to_owned();
     };

@@ -53,7 +53,7 @@ pub enum HoverFrame {
 #[derive(Debug, Clone, PartialEq)]
 pub struct HoverPopup {
     /// Rendered content, one line per entry, each a list of styled spans.
-    pub(crate) lines: Vec<Vec<(String, Style)>>,
+    pub lines: Vec<Vec<(String, Style)>>,
     /// The goto keys the popup's last row names, as `(key, word)` pairs such
     /// as `("gd", "definition")`.
     ///
@@ -108,13 +108,13 @@ pub struct HoverPopup {
     /// The deliberate dismissals -- Esc, Ctrl-c, a click outside, a focus
     /// change -- go on working. A card that cannot be dismissed is worse than
     /// one that vanishes.
-    pub(crate) pinned: bool,
+    pub pinned: bool,
     /// Where the popup goes, overriding the cursor-anchored placement.
     ///
     /// A hover belongs beside the cursor. A card belongs where the slide layout
     /// put it, which is a different question, so the layout takes this when set
     /// and clamps it the same way.
-    pub(crate) placement: Option<Rect>,
+    pub placement: Option<Rect>,
     pub frame: HoverFrame,
 }
 

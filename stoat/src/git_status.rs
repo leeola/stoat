@@ -189,12 +189,12 @@ pub(crate) struct RebaseProgress {
 
 /// The git status panel while it is open.
 #[derive(Debug, Default)]
-pub(crate) struct GitStatusPanel {
+pub struct GitStatusPanel {
     /// The model the last read produced, or `None` until the first read
     /// lands.
     pub(crate) model: Option<GitStatusModel>,
     /// The selected row, as an index into [`Self::rows`].
-    pub(crate) selected: usize,
+    pub selected: usize,
     /// The first row the body shows, as an index into [`Self::rows`], which
     /// [`Self::scroll_into_view`] moves to keep the selected row in view.
     pub(crate) top: usize,

@@ -17,7 +17,7 @@ use tokio::sync::Notify;
 ///
 /// The picker owns its rows rather than reading the store while it is open, so
 /// a frame never touches the filesystem.
-pub(crate) struct WalkthroughPicker {
+pub struct WalkthroughPicker {
     /// The filter, selection, and preview every target list shares.
     pub(crate) picker: TargetPicker<WalkthroughRow>,
     /// The row of the tour that was open when the picker opened, which the list
@@ -82,7 +82,7 @@ impl WalkthroughPicker {
 
     /// Index into [`Self::entries`] of the tour that was open when the picker
     /// opened.
-    pub(crate) fn playing_idx(&self) -> Option<usize> {
+    pub fn playing_idx(&self) -> Option<usize> {
         self.playing
     }
 

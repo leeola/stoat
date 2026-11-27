@@ -315,7 +315,7 @@ pub struct Workspace {
     /// Workspace-relative path for each indexed [`FileId`], so navigation can
     /// recover a symbol's file from its graph id. The graph keys files by a
     /// one-way hash, so this is the only way back to a path.
-    pub(crate) file_paths: IndexedFiles,
+    pub file_paths: IndexedFiles,
     /// Byte ranges changed against HEAD for each file with a working-tree
     /// diff, in the working-tree text's byte space. Rebuilt by
     /// [`scan_changed_ranges`] so diff-filtered navigation asks whether a
@@ -333,7 +333,7 @@ pub struct Workspace {
     /// The active call-graph trail, if the user has marked a start. Holds
     /// the marked anchors and, once both ends are set, the cached path that
     /// [`crate::code_index::nav`]'s trail actions step along.
-    pub(crate) trail: Option<TrailState>,
+    pub trail: Option<TrailState>,
     /// The parts of the stop the reader just left, and when they started to go.
     ///
     /// A slide that simply stopped being re-declared would vanish between two
@@ -343,11 +343,11 @@ pub struct Workspace {
     /// The emitted form rather than the geometry, because a retiring mark
     /// cannot be recomputed: it was measured against the old scroll position,
     /// and after a jump to another file against another buffer.
-    pub(crate) walkthrough_exit: Option<(SlideParts, Instant)>,
+    pub walkthrough_exit: Option<(SlideParts, Instant)>,
     /// Active three-way conflict resolve session (if any). Owned at the
     /// workspace level so a resolve outlives the pane showing it. Dropped on
     /// `CloseConflict`.
-    pub(crate) conflict: Option<ConflictSession>,
+    pub conflict: Option<ConflictSession>,
     /// The note the git status panel gives each file that the conflict view
     /// resolved during the merge in progress, keyed by absolute path.
     ///
@@ -405,7 +405,7 @@ pub struct Workspace {
     /// Walkthrough being played (if any). Opened by `WalkthroughOpen` and
     /// dropped only by `WalkthroughDone`, so moving away from a stop's file
     /// leaves the tour where it was.
-    pub(crate) walkthrough: Option<crate::walkthrough::run::WalkthroughRun>,
+    pub walkthrough: Option<crate::walkthrough::run::WalkthroughRun>,
     /// Active rebase plan (if any). Populated when the user enters
     /// `"rebase"` mode from the commit list; dropped on abort or after
     /// successful execution.
@@ -414,7 +414,7 @@ pub struct Workspace {
     /// paused on reword/edit/conflict and during final execution;
     /// dropped when the plan completes, aborts, or fails a step, and when a
     /// restore finds it with no pause.
-    pub(crate) rebase_active: Option<ActiveRebase>,
+    pub rebase_active: Option<ActiveRebase>,
     /// The commit that the held COMMIT_EDITMSG buffer lands when it leaves the
     /// editor. Taken when the buffer leaves, and never saved with the session,
     /// because its channel does not outlive the process.
@@ -1634,7 +1634,7 @@ impl Workspace {
     ///
     /// See also:
     /// - [`Self::pair_for`] for a file measured against another file.
-    pub(crate) fn diff_base(&self) -> Option<&DiffBase> {
+    pub fn diff_base(&self) -> Option<&DiffBase> {
         self.diff.effective_base()
     }
 
@@ -2291,7 +2291,7 @@ impl Workspace {
     /// the left pane of a side-by-side split and the top pane of a stacked one.
     /// A covered pane under a widen still counts, because the widen hides a
     /// pane and does not close it.
-    pub(crate) fn pair_panes(&self) -> Option<[(PaneId, BufferId); 2]> {
+    pub fn pair_panes(&self) -> Option<[(PaneId, BufferId); 2]> {
         let mut files = self.panes.split_panes().filter_map(|(pane_id, pane)| {
             let View::Editor(editor_id) = pane.view else {
                 return None;

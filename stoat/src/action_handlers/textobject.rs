@@ -52,7 +52,7 @@ pub(crate) const TEXTOBJECT_HINTS: &[(&str, &str)] = &[
 
 /// Around / inside selection mode for the active textobject chord.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum TextobjectMode {
+pub enum TextobjectMode {
     Around,
     Inner,
 }

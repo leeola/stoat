@@ -106,7 +106,7 @@ impl RowMetrics {
 
     /// The physical px from the top of a row of `lines` lines to the top of the
     /// row after it.
-    pub(crate) fn pitch(&self, lines: u32) -> u32 {
+    pub fn pitch(&self, lines: u32) -> u32 {
         self.box_height(lines) + self.px(ROW_GAP)
     }
 
@@ -123,7 +123,7 @@ impl RowMetrics {
     ///
     /// A list of one-line rows steps its window and its page keys by this, so
     /// the selection never stands in a box that the list cuts.
-    pub(crate) fn fit(&self, rows: u16) -> usize {
+    pub fn fit(&self, rows: u16) -> usize {
         (self.extent(rows) / self.pitch(1)).max(1) as usize
     }
 

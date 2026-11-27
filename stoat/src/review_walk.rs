@@ -51,9 +51,9 @@ pub enum WalkOrigin {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WalkStash {
     /// The stash commit's sha.
-    pub(crate) sha: String,
+    pub sha: String,
     /// How many files the stash took, untracked files among them.
-    pub(crate) changes: usize,
+    pub changes: usize,
 }
 
 /// A walk through a run of commits, showing each one's diff in turn.

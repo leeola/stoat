@@ -40,7 +40,7 @@ const KEY_COLUMNS: usize = 10;
 /// Reads the unfiltered entries rather than the search result, so narrowing the
 /// search never resizes the box. A scope flip rebuilds the entries and is
 /// meant to resize it.
-pub(crate) fn help_content_rows(help: &Help) -> u16 {
+pub fn help_content_rows(help: &Help) -> u16 {
     u16::try_from(help.entries().len()).unwrap_or(u16::MAX)
 }
 
@@ -61,7 +61,7 @@ pub struct HelpLayout {
     pub detail: Rect,
     /// The key line under the list and the detail, as
     /// [`footer_rect`](crate::render::picker::footer_rect) gives it.
-    pub(crate) footer: Rect,
+    pub footer: Rect,
 }
 
 /// Lay out the help modal within `area`, or `None` when `area` is too small to
@@ -72,7 +72,7 @@ pub struct HelpLayout {
 /// pane's wrapped lines, since detail length tracks the selection and would
 /// move the box as the user walks the list. `zoom` is the user's step count
 /// from [`modal_zoom`](crate::app::Stoat::modal_zoom).
-pub(crate) fn help_layout(area: Rect, content_rows: u16, zoom: i8) -> Option<HelpLayout> {
+pub fn help_layout(area: Rect, content_rows: u16, zoom: i8) -> Option<HelpLayout> {
     let modal = crate::render::chrome::modal_box(
         area,
         (120, content_rows.saturating_add(CHROME_ROWS)),
@@ -110,7 +110,7 @@ pub(crate) fn help_layout(area: Rect, content_rows: u16, zoom: i8) -> Option<Hel
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn render_help(
+pub fn render_help(
     help: &Help,
     stoat_mode: &str,
     ws: &mut crate::workspace::Workspace,
@@ -219,7 +219,7 @@ fn footer_note(help: &Help) -> String {
 /// [`selected_row`](crate::render::chrome::selected_row), as a rounded box with
 /// `panels`. A pool page passes `panels` false, because a page captures no
 /// panel, and keeps the row's cells in the selected style with the accent bar.
-pub(crate) fn paint_help_list_rows(
+pub fn paint_help_list_rows(
     help: &Help,
     area: Rect,
     start_row: usize,
@@ -579,13 +579,8 @@ fn context_summary(context: &SnapshotState) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{
-        keymap::ResolvedArg,
-        render::chrome::{ISLAND_BOTTOM, ISLAND_GAP, ISLAND_SIDE, ISLAND_TOP},
-        test_fixture::{column_rules, plate_islands},
-    };
+    use crate::keymap::ResolvedArg;
     use stoat_config::Value;
-    use stoatty_protocol::command::{decode_stream, Command};
 
     #[test]
     fn format_action_renders_args_then_bare() {
@@ -645,122 +640,6 @@ mod tests {
         assert!(
             help_layout(Rect::new(0, 0, 200, 13), 5, 0).is_none(),
             "so does a height under the 12-row minimum plus its thinnest margin"
-        );
-    }
-
-    /// The footer row ends in its note, which names the mode help opened from and
-    /// then the context it captured there.
-    #[test]
-    fn the_footer_ends_in_the_mode_and_context_note() {
-        let mut h = crate::test_harness::TestHarness::with_size(200, 40);
-        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::OpenHelp);
-        let help = h.stoat.help.take().expect("help is open");
-        let theme = h.stoat.theme.clone();
-        let chrome = crate::render::editor::ResolvedChrome::resolve(&theme);
-        let area = Rect::new(0, 0, 200, 40);
-        let mut buf = Buffer::empty(area);
-        render_help(
-            &help,
-            "insert",
-            h.stoat.active_workspace_mut(),
-            &theme,
-            &chrome,
-            area,
-            0,
-            &mut buf,
-            &mut stoat_widgets::ApcScene::new(),
-        );
-
-        let footer = help_layout(area, help_content_rows(&help), 0)
-            .expect("help fits")
-            .footer;
-        h.stoat.help = Some(help);
-        let text: String = (footer.x..footer.x + footer.width)
-            .map(|x| buf[(x, footer.y)].symbol())
-            .collect();
-        assert!(
-            text.ends_with("normal \u{00B7} view file \u{00B7} pane editor "),
-            "the footer reads {text:?}"
-        );
-    }
-
-    /// The live list draws its selected first row as the rounded box with no
-    /// bar. A pooled page captures no panel, so the page of the same rows keeps
-    /// the accent bar at the row's first cell and draws no panel.
-    #[test]
-    fn the_help_list_rounds_its_live_row_and_keeps_the_bar_on_its_page() {
-        let mut h = crate::test_harness::TestHarness::with_size(200, 40);
-        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::OpenHelp);
-        let help = h.stoat.help.take().expect("help is open");
-        let theme = h.stoat.theme.clone();
-        let rows = Rect::new(0, 0, 40, 4);
-        let mut live = stoat_widgets::ApcScene::new();
-        paint_help_list_rows(
-            &help,
-            rows,
-            0,
-            &theme,
-            true,
-            &mut Buffer::empty(rows),
-            &mut live,
-        );
-        let page = crate::smooth_scroll::render_help_list_page(&help, 0, &theme, 40, 4);
-
-        let marks = |bytes: &[u8]| -> Vec<(char, i32, i32)> {
-            decode_stream(bytes)
-                .into_iter()
-                .filter_map(|command| match command {
-                    Command::Panel(panel) => Some(('p', panel.left.into(), panel.top.into())),
-                    Command::Bar(bar) => Some(('b', bar.x.into(), bar.y.into())),
-                    _ => None,
-                })
-                .collect()
-        };
-        assert_eq!(
-            (marks(live.bytes()), marks(&page)),
-            (vec![('p', 0, 0)], vec![('b', 0, 0)]),
-        );
-    }
-
-    /// Under the plate look the list and the detail draw as Islands that face
-    /// each other across the separator column, which draws no rule.
-    #[test]
-    fn under_the_plate_the_list_and_the_detail_draw_as_islands() {
-        let mut h = crate::test_harness::TestHarness::with_size(200, 40);
-        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::OpenHelp);
-        let help = h.stoat.help.take().expect("help is open");
-        let theme = h.stoat.theme.clone();
-        let chrome = crate::render::editor::ResolvedChrome::resolve(&theme);
-        let area = Rect::new(0, 0, 200, 40);
-        let mut buf = Buffer::empty(area);
-        let mut scene = stoat_widgets::ApcScene::new();
-        scene.set_nudge_protocol(true);
-        render_help(
-            &help,
-            "insert",
-            h.stoat.active_workspace_mut(),
-            &theme,
-            &chrome,
-            area,
-            0,
-            &mut buf,
-            &mut scene,
-        );
-
-        let layout = help_layout(area, help_content_rows(&help), 0).expect("help fits");
-        let (list, detail) = (layout.list, layout.detail);
-        assert_eq!(
-            (
-                plate_islands(&theme, &scene),
-                column_rules(&scene, list.right())
-            ),
-            (
-                vec![
-                    (list, [ISLAND_TOP, ISLAND_GAP, ISLAND_BOTTOM, ISLAND_SIDE]),
-                    (detail, [ISLAND_TOP, ISLAND_SIDE, ISLAND_BOTTOM, ISLAND_GAP]),
-                ],
-                0,
-            ),
         );
     }
 }

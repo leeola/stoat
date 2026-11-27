@@ -52,9 +52,9 @@ pub(crate) struct HintsFooter {
 /// Either is `None` when no key reaches its action, and the footer then
 /// leaves that part out.
 #[derive(Clone, Default, PartialEq, Eq, Debug)]
-pub(crate) struct FooterKeys {
-    pub(crate) hide: Option<String>,
-    pub(crate) help: Option<String>,
+pub struct FooterKeys {
+    pub hide: Option<String>,
+    pub help: Option<String>,
 }
 
 /// The box an armed one-char chord shows while it waits on its char.
@@ -92,7 +92,7 @@ pub struct HintsCache {
     pub rows: Vec<HintRow>,
     /// The keys the footer names, which the same keymap state decides as
     /// [`Self::rows`].
-    pub(crate) footer_keys: FooterKeys,
+    pub footer_keys: FooterKeys,
     /// The most recent layout of [`Self::rows`], or `None` before one is built.
     layout: Option<HintsLayout>,
 }
@@ -724,13 +724,9 @@ mod tests {
         HintsCache, HintsFooter, LaidCell, LayoutKey,
     };
     use crate::{
-        action_handlers,
-        keymap::CompiledKey,
-        test_harness::TestHarness,
         theme::Theme,
         toggle::{Toggle, ToggleStates},
     };
-    use crossterm::event::{KeyCode, KeyModifiers};
     use ratatui::{
         buffer::Buffer,
         layout::Rect,
@@ -1316,58 +1312,5 @@ mod tests {
 
         let painted = (0..buf.area.height).any(|y| !row_text(&buf, y).trim().is_empty());
         assert!(!painted, "a box too wide for the area paints nothing");
-    }
-
-    /// A dial binding names a view, so the box lists the five chords beside
-    /// the other context keys of a diff surface, and none of them on a plain
-    /// pane, where no dial answers.
-    #[test]
-    fn the_hints_box_lists_the_diff_chords_on_a_diff_surface() {
-        const DIALS: [(char, &str); 5] = [
-            ('6', "underline changes"),
-            ('7', "bold changes"),
-            ('8', "syntax colors"),
-            ('9', "tint down"),
-            ('0', "tint up"),
-        ];
-        let mut h = TestHarness::default();
-        h.stoat.key_hints_visible = true;
-        let mut dial_rows = |diff_view: bool| {
-            action_handlers::focused_editor_mut(&mut h.stoat)
-                .expect("editor")
-                .set_diff_view(diff_view);
-            h.snapshot();
-            h.stoat
-                .hints_cache
-                .as_ref()
-                .expect("the hints box laid out its rows")
-                .rows
-                .iter()
-                .filter(|row| DIALS.iter().any(|(_, action)| row.action == *action))
-                .map(|row| (row.keys.clone(), row.action.clone()))
-                .collect::<Vec<_>>()
-        };
-        let chord_label = |digit| {
-            CompiledKey {
-                code: KeyCode::Char(digit),
-                modifiers: KeyModifiers::SUPER,
-                any_digit: false,
-                wheel: None,
-                side_button: None,
-            }
-            .display_label()
-        };
-
-        assert_eq!(
-            (dial_rows(true), dial_rows(false)),
-            (
-                DIALS
-                    .iter()
-                    .map(|&(digit, action)| (chord_label(digit), action.to_string()))
-                    .collect::<Vec<_>>(),
-                Vec::new(),
-            ),
-            "the diff view lists each dial under its chord, and a plain pane lists none"
-        );
     }
 }

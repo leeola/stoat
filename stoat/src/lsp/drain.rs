@@ -36,7 +36,7 @@ use stoat_text::Rope;
 /// per-feature consumer hooks. Cap is per-tick to avoid starving
 /// the event loop on a pathological notification burst; the
 /// remainder drains on the next update.
-pub(crate) fn drain_lsp_notifications(stoat: &mut Stoat) {
+pub fn drain_lsp_notifications(stoat: &mut Stoat) {
     // Borrowed rather than collected, since this runs on every event and
     // the owned form clones a name string per server each time. The fields
     // the drain writes are disjoint from the registry it walks.

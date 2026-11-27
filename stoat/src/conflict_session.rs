@@ -23,7 +23,7 @@ use stoat_text::{Anchor, BufferId, Point};
 /// Owns the swapped-in center editor and the original editor displaced from the
 /// pane, so closing the view restores the plain file. Held as
 /// [`crate::workspace::Workspace::conflict`] while the `:conflict` view is open.
-pub(crate) struct ConflictSession {
+pub struct ConflictSession {
     /// The repository the open discovered, held so an apply marks a file
     /// resolved without rediscovering it per press.
     pub(crate) repo: Arc<dyn GitRepo>,
@@ -39,7 +39,7 @@ pub(crate) struct ConflictSession {
     /// Index into [`Self::files`] of the file currently shown.
     pub(crate) current: usize,
     /// Resolve state of the file currently shown.
-    pub(crate) file: FileResolveState,
+    pub file: FileResolveState,
     /// The editor displaced from the focused pane when the view opened,
     /// restored there on close.
     pub(crate) saved_editor: EditorId,
@@ -57,7 +57,7 @@ pub(crate) struct ConflictSession {
     ///
     /// The shown file's [`ConflictViewState::chip_menu`] mirrors it, so the
     /// painter and a pool page draw the buttons.
-    pub(crate) chip_menu: Option<usize>,
+    pub chip_menu: Option<usize>,
     /// In-progress resolve state of files visited and stepped away from, keyed
     /// by their index in [`Self::files`].
     ///
@@ -75,7 +75,7 @@ pub(crate) struct ConflictSession {
 }
 
 /// The in-progress resolution of one conflicted file.
-pub(crate) struct FileResolveState {
+pub struct FileResolveState {
     /// Absolute path of the conflicted file.
     pub(crate) path: PathBuf,
     /// The three-way merge of the file's index stages.
@@ -85,7 +85,7 @@ pub(crate) struct FileResolveState {
     /// Start and end anchors of each chunk's region in the center buffer.
     pub(crate) chunk_anchors: Vec<(Anchor, Anchor)>,
     /// The center (result) buffer holding the editable merged text.
-    pub(crate) buffer_id: BufferId,
+    pub buffer_id: BufferId,
     /// The center editor swapped into the pane.
     pub(crate) editor_id: EditorId,
     /// The chunks still on their markers, with the buffer version they were
@@ -123,7 +123,7 @@ pub struct ConflictViewState {
     pub(crate) labels: ConflictLabels,
     /// The chunk whose chip shows its pick buttons, as
     /// [`ConflictSession::chip_menu`] holds it while this file is shown.
-    pub(crate) chip_menu: Option<usize>,
+    pub chip_menu: Option<usize>,
     /// Layout and chunk classification derived from the center buffer, rebuilt
     /// only when that buffer or [`Self::picks`] changes. See [`Self::derived`].
     derived: Option<ConflictDerived>,

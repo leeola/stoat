@@ -773,7 +773,7 @@ fn paired_with_base<'a>(
 /// The plain gutter's rule over the larger of the buffer's line count and the
 /// base text's, since the left column numbers base lines, the right column
 /// numbers buffer lines, and one field width serves both.
-pub(crate) fn diff_gutter_digits(snapshot: &DisplaySnapshot) -> u16 {
+pub fn diff_gutter_digits(snapshot: &DisplaySnapshot) -> u16 {
     editor::gutter_digits(
         snapshot
             .buffer_line_count()
@@ -933,7 +933,7 @@ pub struct DiffColumns {
     pub left_content_w: usize,
     /// The right side's first cell, the left side's in the unified layout.
     pub(crate) right_x: u16,
-    pub(crate) right_num_x: u16,
+    pub right_num_x: u16,
     pub(crate) status_right_x: u16,
     pub(crate) right_sep_x: Option<u16>,
     pub right_text_x: u16,
@@ -1002,7 +1002,7 @@ impl DiffColumns {
 
 /// The diff view's mid-divider column in `inner`, absent below
 /// [`DIFF_TWO_COLUMN_MIN`], where both sides share one column.
-pub(crate) fn diff_divider_x(inner: Rect) -> Option<u16> {
+pub fn diff_divider_x(inner: Rect) -> Option<u16> {
     (inner.width >= DIFF_TWO_COLUMN_MIN).then(|| divider_x(inner))
 }
 

@@ -14,7 +14,7 @@ use ratatui::{buffer::Buffer, layout::Rect};
 ///
 /// The two help rows at the bottom sit outside it. Shared by the renderer and
 /// the pointer, so a clicked row is the row drawn under the pointer.
-pub(crate) fn rebase_list_rect(pane_area: Rect) -> Option<Rect> {
+pub fn rebase_list_rect(pane_area: Rect) -> Option<Rect> {
     let inner = pane_area;
     if inner.width < 10 || inner.height == 0 {
         return None;

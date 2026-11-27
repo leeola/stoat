@@ -565,7 +565,7 @@ impl BufferRegistry {
     /// Returns paths of currently-open path-bound buffers in lexicographic
     /// order. Scratch buffers (with no path) are skipped. The deterministic
     /// ordering matches what the file finder shows for the All scope.
-    pub(crate) fn open_paths(&self) -> Vec<PathBuf> {
+    pub fn open_paths(&self) -> Vec<PathBuf> {
         let mut paths: Vec<PathBuf> = self.path_to_id.keys().cloned().collect();
         paths.sort();
         paths
@@ -839,7 +839,7 @@ impl BufferRegistry {
     /// Stored even when empty, so a buffer whose response carried no symbol
     /// tokens reads as an existing index with no match rather than as having no
     /// index at all.
-    pub(crate) fn store_lsp_symbol_kinds(&mut self, id: BufferId, kinds: LspSymbolKindIndex) {
+    pub fn store_lsp_symbol_kinds(&mut self, id: BufferId, kinds: LspSymbolKindIndex) {
         if let Some(entry) = self.buffers.get_mut(&id) {
             entry.lsp_symbol_kinds = Some(kinds);
         }

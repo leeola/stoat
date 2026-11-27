@@ -100,7 +100,7 @@ pub(crate) fn blend(color: [u8; 3], toward: [u8; 3], percent: u16) -> [u8; 3] {
 ///
 /// Dims an unfocused pane's colors toward the theme background by a configurable
 /// fraction. `amount` is clamped to `0.0..=1.0`.
-pub(crate) fn dim_rgb(fg: [u8; 3], bg: [u8; 3], amount: f32) -> [u8; 3] {
+pub fn dim_rgb(fg: [u8; 3], bg: [u8; 3], amount: f32) -> [u8; 3] {
     let amount = amount.clamp(0.0, 1.0);
     let blend = |f: u8, b: u8| (f as f32 * (1.0 - amount) + b as f32 * amount).round() as u8;
     [

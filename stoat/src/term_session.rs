@@ -65,7 +65,7 @@ pub struct TermSession {
     /// The program that a handoff started the session for, which names its
     /// tab and its pane until the child sets a title, or `None` for a session
     /// that no handoff started.
-    pub(crate) label: Option<String>,
+    pub label: Option<String>,
     /// Whether the session's tab closes when its program ends, because a
     /// handoff opened the tab for that program alone.
     ///

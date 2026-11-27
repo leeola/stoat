@@ -40,14 +40,14 @@ type LinkEnds = ((i16, i16), (i16, i16));
 /// than by an absent range, so the caller does not have to decide what "off
 /// screen" means.
 #[derive(Clone, PartialEq, Eq, Debug)]
-pub(crate) struct CellRange {
+pub struct CellRange {
     /// First and last row the range covers, inclusive, clamped to what is
     /// visible. Empty when none of it is on screen.
-    pub(crate) rows: Vec<u16>,
+    pub rows: Vec<u16>,
     /// Column the range starts at on its first row.
-    pub(crate) start_x: u16,
+    pub start_x: u16,
     /// Column the range ends at on its last row, inclusive.
-    pub(crate) end_x: u16,
+    pub end_x: u16,
 }
 
 /// A rectangle in sixteenths of a cell, which is what a sketch widget takes.
@@ -74,10 +74,10 @@ pub(crate) enum Mark {
 
 /// One annotation's label box, and where a line joins it to the code.
 #[derive(Clone, PartialEq, Eq, Debug)]
-pub(crate) struct Callout {
+pub struct Callout {
     /// The annotation's index in the stop, which is what matches a callout to
     /// the text it came from and to a marker color.
-    pub(crate) key: usize,
+    pub key: usize,
     /// The label box, in whole cells.
     pub(crate) label: Rect,
     /// The connector from the code to the label, or `None` for a range that
@@ -89,7 +89,7 @@ pub(crate) struct Callout {
     /// The layout plans the whole line because only it knows what lies between
     /// the code and the box. The text on each row, the card, and the other
     /// labels all lie there.
-    pub(crate) link: Option<Link>,
+    pub link: Option<Link>,
 }
 
 /// How a connector runs between its code and its label, in sixteenths of a
@@ -107,7 +107,7 @@ pub(crate) enum Route {
 
 /// The line a connector draws from an annotation's code to its label.
 #[derive(Clone, PartialEq, Eq, Debug)]
-pub(crate) struct Link {
+pub struct Link {
     /// Where the line leaves the code, in sixteenths of a cell.
     ///
     /// A line that leaves beside text on the annotation's row runs through
@@ -122,7 +122,7 @@ pub(crate) struct Link {
 
 /// A part of a slide, for the timing table.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub(crate) enum Part {
+pub enum Part {
     Focus,
     FocusLink,
     Card,
@@ -144,17 +144,17 @@ pub(crate) enum Emphasis {
 
 /// Everything a stop draws, and when.
 #[derive(Clone, PartialEq, Eq, Debug)]
-pub(crate) struct Slide {
+pub struct Slide {
     pub(crate) focus: Option<Mark>,
     /// The narration card, in whole cells.
     pub(crate) card: Option<Rect>,
     /// Whether a connector joins the focus mark to the card.
     pub(crate) focus_link: bool,
     /// One callout per annotation the reader has reached.
-    pub(crate) callouts: Vec<Callout>,
+    pub callouts: Vec<Callout>,
     /// When each part starts and how long it draws, in milliseconds from the
     /// stop's own zero.
-    pub(crate) timing: Vec<(Part, u16, u16)>,
+    pub timing: Vec<(Part, u16, u16)>,
     /// Which annotation the reader is on, carried so [`Self::emphasis`]
     /// answers without the caller passing it back.
     current: Option<usize>,
@@ -177,9 +177,9 @@ impl Slide {
 
 /// One annotation as the caller measured it.
 #[derive(Clone, PartialEq, Eq, Debug)]
-pub(crate) struct AnnotationCells {
+pub struct AnnotationCells {
     pub(crate) key: usize,
-    pub(crate) range: CellRange,
+    pub range: CellRange,
     /// The label's lines, already wrapped by the caller.
     ///
     /// A wrap needs the font and the text. Placement needs only the extent, so
@@ -189,16 +189,16 @@ pub(crate) struct AnnotationCells {
 
 /// The screen geometry one stop is laid out against.
 #[derive(Clone, PartialEq, Eq, Debug)]
-pub(crate) struct SlideInput {
+pub struct SlideInput {
     /// The cells the pane paints buffer text into, which is its content area
     /// minus the gutter and the minimap strip. Marks and boxes are clamped into
     /// it, so nothing draws over either.
-    pub(crate) pane: Rect,
-    pub(crate) focus: Option<CellRange>,
-    pub(crate) annotations: Vec<AnnotationCells>,
+    pub pane: Rect,
+    pub focus: Option<CellRange>,
+    pub annotations: Vec<AnnotationCells>,
     /// Where the text ends on each visible row, so a box lands past the text
     /// rather than over it.
-    pub(crate) line_ends: Vec<(u16, u16)>,
+    pub line_ends: Vec<(u16, u16)>,
     /// The size of one cell in pixels, width then height, or `None` when the
     /// terminal reports none.
     ///
@@ -226,7 +226,7 @@ pub(crate) struct SlideInput {
 }
 
 /// Lay out one stop.
-pub(crate) fn layout(input: &SlideInput) -> Slide {
+pub fn layout(input: &SlideInput) -> Slide {
     let focus = input
         .focus
         .as_ref()

@@ -808,7 +808,7 @@ impl DiffChangesState {
     }
 
     /// The excerpt whose editor has focus, or `None` on an empty stack.
-    pub(crate) fn focused_excerpt(&self) -> Option<&Excerpt> {
+    pub fn focused_excerpt(&self) -> Option<&Excerpt> {
         self.excerpts.get(self.focused)
     }
 
@@ -1041,7 +1041,7 @@ pub fn toggle_file(
 /// [`Excerpt::top`] records its header's row. An excerpt that waits on its
 /// diff map takes its header row alone, so the stack never shows a whole
 /// unfolded file.
-pub(crate) fn layout_stack(
+pub fn layout_stack(
     state: &mut DiffChangesState,
     editors: &mut SlotMap<EditorId, EditorState>,
 ) -> usize {
@@ -1226,10 +1226,7 @@ pub(crate) fn pinned_row(
 /// The count is current with every edit, fold, and wrap, and reads with no
 /// snapshot clone while none moved, so a layout per frame pays the version
 /// checks alone.
-pub(crate) fn excerpt_rows(
-    excerpt: &Excerpt,
-    editors: &mut SlotMap<EditorId, EditorState>,
-) -> usize {
+pub fn excerpt_rows(excerpt: &Excerpt, editors: &mut SlotMap<EditorId, EditorState>) -> usize {
     if !excerpt.shows_rows() {
         return 0;
     }
@@ -1301,7 +1298,7 @@ fn no_base(map: &DiffMap) -> bool {
 /// [`layout_stack`].
 ///
 /// `None` on an empty stack, and while the focused excerpt shows no rows.
-pub(crate) fn cursor_stack_row(
+pub fn cursor_stack_row(
     state: &DiffChangesState,
     editors: &mut SlotMap<EditorId, EditorState>,
 ) -> Option<usize> {
@@ -2070,7 +2067,7 @@ pub fn place_cursor(editor: &mut EditorState, point: Point) {
 }
 
 /// The buffer position of `editor`'s cursor.
-pub(crate) fn cursor_point(editor: &mut EditorState) -> Point {
+pub fn cursor_point(editor: &mut EditorState) -> Point {
     let snapshot = editor.display_map.snapshot();
     let buffer = snapshot.buffer_snapshot();
     let selection = editor.selections.newest_anchor();

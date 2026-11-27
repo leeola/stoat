@@ -4305,6 +4305,7 @@ dependencies = [
  "lsp-types",
  "ratatui",
  "serde_json",
+ "slotmap",
  "stoat",
  "stoat_action",
  "stoat_config",

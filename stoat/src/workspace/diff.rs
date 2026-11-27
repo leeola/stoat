@@ -62,7 +62,7 @@ use tokio::sync::Notify;
 /// invalidates it, so a typing burst is worth one diff at the end rather than
 /// one per edit. Short enough that a reader pausing mid-thought still sees the
 /// gutter catch up.
-pub(crate) const DIFF_SETTLE: Duration = Duration::from_millis(250);
+pub const DIFF_SETTLE: Duration = Duration::from_millis(250);
 
 /// Per-file diff memo, keyed by graph [`FileId`], holding the base and buffer
 /// content hashes the ranges were measured from alongside the ranges.
@@ -1622,26 +1622,26 @@ pub(crate) fn short_sha(sha: &str) -> String {
 /// The counts are the tally's. `staged` and `unstaged` count the hunks of
 /// tracked files, and `untracked` counts the untracked files apart from them.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct RepoStatus {
+pub struct RepoStatus {
     /// The branch HEAD is on, or its short sha when detached. `None` on an
     /// unborn branch.
-    pub(crate) head: Option<String>,
+    pub head: Option<String>,
     /// Hunks the index carries over HEAD.
-    pub(crate) staged: usize,
+    pub staged: usize,
     /// Hunks the working tree carries over the index in tracked files.
-    pub(crate) unstaged: usize,
-    pub(crate) untracked: usize,
+    pub unstaged: usize,
+    pub untracked: usize,
     /// Commits HEAD's branch holds that its upstream lacks, zero without an
     /// upstream.
-    pub(crate) ahead: usize,
+    pub ahead: usize,
     /// Commits the upstream holds that HEAD's branch lacks.
-    pub(crate) behind: usize,
+    pub behind: usize,
     /// Whether a rebase is paused in the repository.
-    pub(crate) rebasing: bool,
+    pub rebasing: bool,
     /// The name of the branch a merge in progress brings in, or the merge
     /// head's short sha when no local branch points at it. `None` with no
     /// merge in progress.
-    pub(crate) merge_head: Option<String>,
+    pub merge_head: Option<String>,
 }
 
 /// Where a diff view stands in the repository's review, as the bar names it.
@@ -1651,7 +1651,7 @@ pub(crate) struct RepoStatus {
 /// shows it whether or not the tally lists it. `hunk_at` of `hunk_total`
 /// places the cursor among every hunk in the repository.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct HunkPosition {
+pub struct HunkPosition {
     pub(crate) file_at: usize,
     pub(crate) file_total: usize,
     /// `None` for a cursor above the focused file's first hunk, which is the

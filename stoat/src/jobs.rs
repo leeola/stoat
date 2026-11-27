@@ -55,17 +55,17 @@ impl JobState {
 
 /// The Glance of a Job, a modal under the Job's Tray Chip that reads the Job
 /// at a glance and takes the keys that act on it.
-pub(crate) struct Glance {
+pub struct Glance {
     /// The Cmd of the Job that the Glance shows.
-    pub(crate) cmd: CmdId,
+    pub cmd: CmdId,
 }
 
 /// Where the tab bar drew the Tray Chip of a Job, which a press on the bar and
 /// the Glance under the chip read.
-pub(crate) struct TraySpan {
+pub struct TraySpan {
     pub(crate) cmd: CmdId,
     /// The columns of the cells that the chip draws over on the bar's row.
-    pub(crate) cells: Range<u16>,
+    pub cells: Range<u16>,
     /// The physical px columns of the chip's box from the window's left edge,
     /// where the bar drew it at the board's pixels.
     ///

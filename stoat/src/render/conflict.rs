@@ -22,7 +22,7 @@ const MIN_DETAIL_COLUMNS: u16 = 20;
 ///
 /// Shared by the renderer and the pointer, so a clicked row is the row drawn
 /// under the pointer.
-pub(crate) fn conflict_list_rect(pane_area: Rect) -> Option<Rect> {
+pub fn conflict_list_rect(pane_area: Rect) -> Option<Rect> {
     let inner = pane_area;
     if inner.width < 20 || inner.height < 4 {
         return None;

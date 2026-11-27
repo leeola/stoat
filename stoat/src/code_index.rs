@@ -7,5 +7,5 @@
 
 pub mod build;
 pub(crate) mod files;
-pub(crate) mod nav;
+pub mod nav;
 pub(crate) mod store;

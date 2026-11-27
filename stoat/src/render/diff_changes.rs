@@ -892,7 +892,7 @@ pub(crate) fn kind_tag_text(kind: &FileKind) -> String {
 /// box. The tag's text then takes the foreground of the kind's diff mark,
 /// which is `diff.modified`, `diff.moved`, `diff.added` for an untracked or
 /// a new file, or `diff.deleted`.
-pub(crate) fn kind_tag_style(theme: &Theme, kind: &FileKind) -> Style {
+pub fn kind_tag_style(theme: &Theme, kind: &FileKind) -> Style {
     let (tag, mark) = match kind {
         FileKind::Modified => (scope::DIFF_KIND_MODIFIED, scope::DIFF_MODIFIED),
         FileKind::Moved { .. } => (scope::DIFF_KIND_MOVED, scope::DIFF_MOVED),

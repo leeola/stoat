@@ -120,7 +120,7 @@ pub(crate) fn execute_select_register(stoat: &mut Stoat, ch: char) {
 /// chord, the insert-mode `InsertRegister` chord, and the `ReplayMacro` chord
 /// share the table. `@`, the register that `Q` records into when no register
 /// is selected, falls under the `any` row.
-pub(crate) const REGISTER_HINTS: &[(&str, &str)] = &[
+pub const REGISTER_HINTS: &[(&str, &str)] = &[
     ("\"", "unnamed"),
     ("+", "system clipboard"),
     ("*", "primary clipboard"),

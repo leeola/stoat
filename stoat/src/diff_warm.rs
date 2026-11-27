@@ -47,7 +47,7 @@ pub(crate) struct PendingDiffWarm {
 /// session or scan is already active or a warm is already pending, and runs at
 /// most once per workspace via the `diff_warmed` flag, reset when the cwd
 /// changes.
-pub(crate) fn ensure_diff_warm(stoat: &mut Stoat) {
+pub fn ensure_diff_warm(stoat: &mut Stoat) {
     if !stoat.diff_warm_auto || !stoat.settings.review_precompute.unwrap_or(false) {
         return;
     }
@@ -84,7 +84,7 @@ pub(crate) fn ensure_diff_warm(stoat: &mut Stoat) {
 ///
 /// Called from [`Stoat::drive_background`]. The status bar's diff segment hides
 /// on the next frame once nothing is in flight.
-pub(crate) fn install_finished(stoat: &mut Stoat) {
+pub fn install_finished(stoat: &mut Stoat) {
     if stoat
         .pending_diff_warm
         .as_ref()

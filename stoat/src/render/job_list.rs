@@ -122,15 +122,15 @@ impl Columns {
 
 /// Where the Job List's box and its rows stand, as [`job_list_layout`] lays
 /// them out.
-pub(crate) struct JobListLayout {
+pub struct JobListLayout {
     /// The outer box.
     pub(crate) modal: Rect,
     /// The box less its border, which holds the filter header, the Island,
     /// and the key line.
-    pub(crate) inner: Rect,
+    pub inner: Rect,
     /// The cell rows under the column header that the rows draw in, which a
     /// press reads.
-    pub(crate) rows: Rect,
+    pub rows: Rect,
     /// How the rows stand at the board's pixels, or `None` for rows on whole
     /// cells.
     pub(crate) pixels: Option<JobListPixels>,
@@ -270,7 +270,7 @@ impl RowLayout {
 /// rows sizes the box to them, the Island ending 4 px under its last row, as
 /// [`chrome::island_fit`] fits it. A longer list keeps the box of the cells
 /// and shows the rows that its Island holds.
-pub(crate) fn job_list_layout(
+pub fn job_list_layout(
     area: Rect,
     rows: usize,
     pixels: Option<RowMetrics>,
@@ -320,7 +320,7 @@ pub(crate) fn job_list_layout(
 ///
 /// The paint and the pointer's hit test both read it, so a press lands on the
 /// row drawn under it.
-pub(crate) fn job_list_rows(inner: Rect) -> Rect {
+pub fn job_list_rows(inner: Rect) -> Rect {
     workspace_picker::workspace_picker_list(inner)
 }
 
