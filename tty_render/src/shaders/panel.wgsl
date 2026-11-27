@@ -171,19 +171,26 @@ fn vs_under(
         max(radius, panel.shadow_margin) + 2.0,
         casts_band(panel.shadow_mode)
     );
+    // While a scrim is set, a floating box's exterior shadow draws over it in
+    // fs_float_shadow, so this stage pads for no shadow there.
+    let lifted = globals.scrim.a > 0.0 && floats(panel.shadow_mode, panel.shadow_margin);
+    let shadow = select(exterior_reach(panel), 0.0, lifted);
     return panel_vertex(
         vertex_index,
         instance_index,
         panel,
         vec4<f32>(side, side, side, bottom),
-        panel.fill_flag > 0.5 && panel.fill_flag < 1.5
+        panel.fill_flag > 0.5 && panel.fill_flag < 1.5,
+        max(shadow, fillet_reach(panel))
     );
 }
 
 // The frame stroke.
 //
 // The widest frame band ends three logical pixels in, so past that band and
-// the corner arcs the stroke is alpha 0 and the interior never draws.
+// the corner arcs the stroke is alpha 0 and the interior never draws. The band
+// and a backdrop's ground lie inside the box's reach, so the quad pads for
+// none of a shadowed panel's shadow band.
 @vertex
 fn vs_stroke(
     @builtin(vertex_index) vertex_index: u32,
@@ -191,7 +198,45 @@ fn vs_stroke(
     panel: PanelIn,
 ) -> VsOut {
     let side = max(panel_radius(panel), 3.0 * globals.scale_factor) + 2.0;
-    return panel_vertex(vertex_index, instance_index, panel, vec4<f32>(side), false);
+    return panel_vertex(vertex_index, instance_index, panel, vec4<f32>(side), false, 0.0);
+}
+
+// The exterior shadow alone, for fs_shadow over a pane pool's composite and
+// fs_float_shadow over the scrim.
+//
+// The stroke's bands, padded by the shadow's reach, hold every pixel the
+// shadow darkens, since the shadow lies outside the box.
+@vertex
+fn vs_shadow(
+    @builtin(vertex_index) vertex_index: u32,
+    @builtin(instance_index) instance_index: u32,
+    panel: PanelIn,
+) -> VsOut {
+    let side = max(panel_radius(panel), 3.0 * globals.scale_factor) + 2.0;
+    return panel_vertex(
+        vertex_index,
+        instance_index,
+        panel,
+        vec4<f32>(side),
+        false,
+        exterior_reach(panel)
+    );
+}
+
+// How far past its box a drop, halo, or cast panel's exterior shadow reaches,
+// which is the blur's margin past the shadow rect that the offset moves. A
+// band cast inside the box reaches nothing, as no shadow does.
+fn exterior_reach(panel: PanelIn) -> f32 {
+    let exterior = panel.shadow_margin > 0.0 && !casts_band(panel.shadow_mode);
+    let offset = max(abs(panel.shadow_offset.x), abs(panel.shadow_offset.y));
+    return select(0.0, panel.shadow_margin + offset, exterior);
+}
+
+// How far a panel's fillets reach past the box's bottom corners, 0 for a
+// panel with none.
+fn fillet_reach(panel: PanelIn) -> f32 {
+    let filleted = (panel.shape & (FILLET_BOTTOM_LEFT | FILLET_BOTTOM_RIGHT)) != 0u;
+    return select(0.0, panel.fillet_radius, filleted);
 }
 
 // The corner radius the box draws with, held to its shorter half side, as
@@ -202,9 +247,12 @@ fn panel_radius(panel: PanelIn) -> f32 {
     return min(panel.corner_radius, min(half.x, half.y));
 }
 
-// Vertex `vertex_index` of the five regions that tile a panel's
-// shadow-padded quad, six vertices each: the top band, the bottom band, the
-// left band, the right band, and last the interior rectangle.
+// Vertex `vertex_index` of the five regions that tile a panel's padded quad,
+// six vertices each, which are the top band, the bottom band, the left band,
+// the right band, and last the interior rectangle.
+//
+// The quad pads past the box by `outer`, the px of shadow or fillet that the
+// stage paints there.
 //
 // `inset` shrinks the box to the interior on the left, top, right, and bottom.
 // A box too small for it leaves the interior empty, and the bands meet rather
@@ -223,6 +271,7 @@ fn panel_vertex(
     panel: PanelIn,
     inset: vec4<f32>,
     interior: bool,
+    outer: f32,
 ) -> VsOut {
     var corners = array<vec2<f32>, 6>(
         vec2<f32>(0.0, 0.0),
@@ -239,15 +288,12 @@ fn panel_vertex(
     let box_size_px = panel.size * globals.cell_size;
     let offsets = edge_offsets(panel.edge_px, panel.edge_modes, globals.cell_size);
 
-    // Expand the quad so the offset, blurred shadow is fully contained on every
-    // side. The down-right edge must reach box + offset + margin, so pad by the
-    // larger offset component plus the margin. A fillet reaches its radius past
-    // the box's side, so a panel with one pads at least that far. A box that
-    // reaches out across the cells beside it pads that much further.
-    let shadow_pad = panel.shadow_margin + max(abs(panel.shadow_offset.x), abs(panel.shadow_offset.y));
-    let filleted = (panel.shape & (FILLET_BOTTOM_LEFT | FILLET_BOTTOM_RIGHT)) != 0u;
+    // Expand the quad past the box's reach across the cells beside it by
+    // `outer`, what the stage paints past the box, and by one pixel at least.
+    // A box edge that falls between two pixels ramps half a pixel past itself,
+    // and that pixel holds the ramp of the fill and the frame.
     let reach = max(max(max(-offsets.x, -offsets.y), max(-offsets.z, -offsets.w)), 0.0);
-    let pad = reach + max(shadow_pad, select(0.0, panel.fillet_radius, filleted));
+    let pad = reach + max(outer, 1.0);
     let quad_min_px = box_min_px - vec2<f32>(pad, pad);
     let quad_size_px = box_size_px + vec2<f32>(2.0 * pad, 2.0 * pad);
 

@@ -358,12 +358,13 @@ impl PanelPass {
         };
         let pipeline_under = build("panel under", "vs_under", "fs_under", &instance);
         let pipeline_stroke = build("panel stroke", "vs_stroke", "fs_stroke", &instance);
-        // The stroke's vertex stage draws the four bands around the box, which
-        // hold every pixel an exterior shadow reaches.
-        let pipeline_shadow = build("panel shadow", "vs_stroke", "fs_shadow", &instance);
+        // The shadow's vertex stage pads the four bands around the box by the
+        // shadow's reach, so they hold every pixel an exterior shadow darkens.
+        // The stroke's bands pad for none of it.
+        let pipeline_shadow = build("panel shadow", "vs_shadow", "fs_shadow", &instance);
         let pipeline_float_shadow = build(
             "panel float shadow",
-            "vs_stroke",
+            "vs_shadow",
             "fs_float_shadow",
             &instance,
         );
@@ -1557,9 +1558,14 @@ mod tests {
             panel.fillet_radius = 5;
         };
         assert_eq!(
-            [pixel(wide_fillet, (11, 31)), pixel(filleted, (11, 31))],
-            [blue, GROUND],
-            "a fillet takes its own radius, so the wider one reaches further up the side",
+            [
+                pixel(wide_fillet, (11, 31)),
+                pixel(filleted, (11, 31)),
+                pixel(wide_fillet, (8, 35)),
+            ],
+            [blue, GROUND, blue],
+            "a fillet takes its own radius, so the wider one reaches further up the side \
+             and further out at its foot",
         );
 
         let hatched = |panel: &mut Panel| panel.hatch = Some(Rgb::new(255, 0, 0));
@@ -1867,6 +1873,61 @@ mod tests {
             (column(PanelShadow::None_), column(PanelShadow::Tucked)),
             ((0, 255, 0), (0, 255, 0)),
             "one full pixel inside the top edge, nothing on either side of it"
+        );
+    }
+
+    /// A frame whose box edge falls between two pixels ramps across both,
+    /// shadow or none, since every quad keeps a pixel past the box's reach.
+    ///
+    /// On 12.5 px cells the box over cells (1, 1) to (3, 3) ends at x 37.5 and
+    /// at y 37.5, so pixel 37 holds half the light band at the right edge and
+    /// at the bottom edge. A pixel whose center lies on a quad's right or
+    /// bottom edge falls outside the quad, so a quad that stopped at the box
+    /// would draw nothing there.
+    #[test]
+    fn a_frame_edge_between_pixels_keeps_its_ramp() {
+        let (device, queue) = require_headless_device();
+
+        let metrics = CellMetrics {
+            font_size: 10.0,
+            width: 12.5,
+            height: 12.5,
+            scale_factor: 1.0,
+        };
+        let ramp = |shadow| {
+            let mut grid = Grid::new(4, 4);
+            grid.set_panels(vec![Panel {
+                top: 1,
+                left: 1,
+                width: 2,
+                height: 2,
+                style: BorderStyle::Light,
+                border: Rgb::new(255, 0, 0),
+                corner_radius: 0,
+                fill: None,
+                shadow,
+                edges: Edge::symmetric(0, 0),
+                corners: 0,
+                fillets: 0,
+                fillet_radius: 2,
+                hatch: None,
+                above_pools: false,
+                backdrop: false,
+                anchor: None,
+                seq: 0,
+            }]);
+            let red = render_red(&device, &queue, &grid, metrics, Halves::Both);
+            [
+                red[(25 * TARGET + 37) as usize],
+                red[(37 * TARGET + 25) as usize],
+            ]
+        };
+
+        let ramps = [PanelShadow::None_, PanelShadow::Tucked, PanelShadow::Drop].map(ramp);
+        assert!(
+            ramps.iter().flatten().all(|red| (120..=135).contains(red)),
+            "half the band at the right and the bottom edge, with no shadow, a \
+             tucked band, and a drop shadow, got {ramps:?}",
         );
     }
 
