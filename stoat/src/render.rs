@@ -2238,15 +2238,13 @@ pub(crate) fn frame(
                 && let Some(cmd) = ws.cmds.get(glance.cmd)
             {
                 let cell_width = scene.pixel_rows().map(|(cell, _)| cell[0]);
-                let right = stoat
-                    .tray_spans
-                    .iter()
-                    .find(|span| span.cmd == glance.cmd)
-                    .map_or(full.right() - 1, |span| span.right_edge(cell_width));
+                let chip = stoat.tray_spans.iter().find(|span| span.cmd == glance.cmd);
+                let right = chip.map_or(full.right() - 1, |span| span.right_edge(cell_width));
                 if let Some(rect) = job_glance::glance_rect(full, tab_bar_rows, right) {
                     job_glance::render_job_glance(
                         cmd,
                         rect,
+                        chip,
                         chrome_bands,
                         &stoat.theme,
                         buf,

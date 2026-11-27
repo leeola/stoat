@@ -2874,17 +2874,17 @@ fn a_pushed_job_draws_its_tray_chip() {
     }
 }
 
-/// The Glance of a pushed Job hangs under its Tray Chip, 6 px under the tab
-/// bar's band, with its right edge on the chip's.
+/// The Glance of a pushed Job hangs under its Tray Chip at the board's size,
+/// 340 px wide with its right edge on the chip's, 6 px under the tab bar's
+/// band.
 ///
-/// The chip ends at column 159, so the box covers the 38 columns 121 to 158.
-/// It stands 2 px inside its first row 2 and 8 px past its last row 4, so it
-/// covers pixel rows 38 to 97. On a pixel column past the arc of its corners, its
-/// first and last pixel rows read the raised fill and the pixel rows beyond
-/// them do not. On its middle pixel row, its first and last pixel columns
-/// read the fill and the columns beyond them do not.
+/// The chip ends on the pixel 1431, so the box covers the pixel columns 1092
+/// to 1431. It stands 2 px inside its first row 2 and 8 px past its last row
+/// 4, so it covers the pixel rows 38 to 97, and its corner rounds off. Its
+/// lines start 10 px in, which keeps the pad on the fill, and the first line,
+/// 6 px under the box's top, reads in the text color.
 #[test]
-fn the_glance_hangs_six_pixels_under_the_tab_bar() {
+fn the_glance_hangs_under_its_chip_at_its_board_size() {
     let mut home = support::scratch_home();
     let shot = settled_frame(
         home.path(),
@@ -2893,28 +2893,44 @@ fn the_glance_hangs_six_pixels_under_the_tab_bar() {
         "<Space>t<Settle>sleep 30<Enter><Settle><C-j><Settle><Esc><Space>Jk<Settle>",
     );
 
-    let (left, top, width, height) = cell_rect(121, 2, 38, 3);
-    let right = left + width - 1;
-    let box_top = top + 2;
-    let box_bottom = top + height - 1 + 8;
-    let column = right - 15;
-    let middle = (box_top + box_bottom) / 2;
-    let down = [box_top - 1, box_top, box_bottom, box_bottom + 1].map(|y| pixel(&shot, column, y));
-    let across = [left - 1, left, right, right + 1].map(|x| pixel(&shot, x, middle));
+    let (left, right, top, bottom) = (1092, 1431, 38, 97);
+    let (row, column) = (60, 1200);
+    let across = [left - 1, left, right, right + 1].map(|x| pixel(&shot, x, row));
+    let down = [top - 1, top, bottom, bottom + 1].map(|y| pixel(&shot, column, y));
+    let corner = pixel(&shot, left, top);
     let raised = |colors: [[u8; 3]; 4]| colors.map(|color| color == RAISED);
     let edges = [false, true, true, false];
-    if raised(down) != edges || raised(across) != edges {
+    if raised(across) != edges || raised(down) != edges || corner == RAISED {
         let frame = keep_frame(&shot, &mut home, "job_glance");
         panic!(
-            "down pixel column {column} the box reads {:?} on pixel rows {} to {}, and across \
-             pixel row {middle} it reads {:?} on pixel columns {} to {}; want the raised fill \
-             on its first and last pixels and not past them; the frame is {}",
-            down.map(hex),
-            box_top - 1,
-            box_bottom + 1,
+            "across pixel row {row} the box reads {:?} on pixel columns {} to {}, down pixel \
+             column {column} it reads {:?} on pixel rows {} to {}, and its corner reads {}; \
+             want the raised fill on its first and last pixels and not past them, and a \
+             rounded corner; the frame is {}",
             across.map(hex),
             left - 1,
             right + 1,
+            down.map(hex),
+            top - 1,
+            bottom + 1,
+            hex(corner),
+            frame.display(),
+        );
+    }
+
+    expect_region(
+        &shot,
+        &mut home,
+        (left + 2, top + 8, 7, 46),
+        RAISED,
+        "job_glance_pad",
+    );
+    let first = brightest(&shot, (left + 10, top + 6, 200, 16));
+    if first <= 0x98 {
+        let frame = keep_frame(&shot, &mut home, "job_glance_first_line");
+        panic!(
+            "the first line's brightest channel reads {first:#04x}; want the text color, \
+             above 0x98; the frame is {}",
             frame.display(),
         );
     }
