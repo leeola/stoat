@@ -1,4 +1,17 @@
+//! The language-server host, the interface that every language feature
+//! speaks to a server through.
+//!
+//! [`LspHost`] carries the requests and the notifications of one server.
+//! [`LocalLsp`] speaks JSON-RPC to a spawned server process. The `fake`
+//! module answers from memory for tests, under the `test-support` feature.
+
 use async_trait::async_trait;
+#[cfg(any(test, feature = "test-support"))]
+pub use fake::{
+    change_params, completion_params, definition_params, document_highlight_params, hover_params,
+    inlay_hint_params, open_params, reference_params, workspace_symbol_params, FakeLsp,
+};
+pub use local::{LocalLsp, LspTranscript};
 use lsp_types::{
     ApplyWorkspaceEditParams, CallHierarchyIncomingCall, CallHierarchyIncomingCallsParams,
     CallHierarchyItem, CallHierarchyOutgoingCall, CallHierarchyOutgoingCallsParams,
@@ -30,6 +43,13 @@ use std::{
     io,
     sync::{Arc, LazyLock},
 };
+
+#[cfg(any(test, feature = "test-support"))]
+pub mod fake;
+// The local host layer is the syscall boundary itself, so its direct std::env /
+// std::fs calls are the intended implementation, not a bypass.
+#[allow(clippy::disallowed_methods)]
+pub mod local;
 
 #[derive(Debug, Clone)]
 pub enum LspNotification {
@@ -748,7 +768,7 @@ pub trait LspHost: Send + Sync {
 ///
 /// It answers every method with the trait's defaults, so an action handler
 /// calls into the host whether or not a real server is there. A spawned server
-/// replaces it, and the test harness installs [`crate::host::FakeLsp`] in its
+/// replaces it, and the test harness installs [`crate::FakeLsp`] in its
 /// place.
 pub struct NoopLsp;
 

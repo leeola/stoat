@@ -10,6 +10,7 @@ members = [
   "core",
   "host",
   "host_git",
+  "host_lsp",
   "language",
   "scheduler",
   "stoat",

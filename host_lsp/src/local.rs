@@ -1,14 +1,14 @@
 //! Production stdio [`LspHost`]: spawns a language server as a child process
 //! and speaks JSON-RPC over its stdin/stdout.
 //!
-//! The transport mirrors [`crate::host::local::terminal::PtyTerminalSession`]: a
+//! The transport mirrors the terminal host's `PtyTerminalSession`: a
 //! dedicated OS thread does blocking reads off the child's stdout, frames the
 //! JSON-RPC stream, and pushes decoded messages onto tokio channels the async
 //! trait methods drain. Responses to our own requests are matched back to the
 //! awaiting caller through a `pending` id-to-oneshot map. Server-pushed
 //! notifications and server-to-client requests fan out to their own channels.
 
-use crate::host::lsp::{IncomingRequest, LspHost, LspNotification, LspResponseError};
+use crate::{IncomingRequest, LspHost, LspNotification, LspResponseError};
 use async_trait::async_trait;
 use lsp_types::{
     CallHierarchyIncomingCall, CallHierarchyIncomingCallsParams, CallHierarchyItem,
@@ -1550,7 +1550,7 @@ mod tests {
         SemanticTokensResult, ServerCapabilities, Stdio, TextProtoLog, TokioMutex, REAP_TIMEOUT,
         SHUTDOWN_REQUEST_TIMEOUT, WRITE_STALL_THRESHOLD,
     };
-    use crate::host::lsp::{IncomingRequest, LspHost, LspNotification};
+    use crate::{IncomingRequest, LspHost, LspNotification};
     use serde_json::{json, Value};
     use std::{
         pin::Pin,

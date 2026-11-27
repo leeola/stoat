@@ -11,15 +11,19 @@ workspace = true
 # so a release build carries none of them, and enabled from a consumer's
 # [dev-dependencies] so its tests do.
 [features]
-test-support = ["stoat_host/test-support", "stoat_host_git/test-support"]
+test-support = [
+  "stoat_host/test-support",
+  "stoat_host_git/test-support",
+  "stoat_host_lsp/test-support",
+]
 
 [dependencies]
 stoat_action = { path = "../action" }
 stoat_config = { path = "../config" }
 stoat_host = { path = "../host" }
 stoat_host_git = { path = "../host_git" }
+stoat_host_lsp = { path = "../host_lsp" }
 stoat_language = { path = "../language" }
-stoat_log = { path = "../log" }
 stoat_scheduler = { path = "../scheduler" }
 stoat_text = { path = "../text" }
 stoatty_protocol = { path = "../tty_protocol" }
@@ -27,12 +31,10 @@ vscode_theme = { path = "../vscode_theme" }
 ratatui.workspace = true
 crossterm.workspace = true
 serde = { workspace = true, features = ["derive", "rc"] }
-serde_json.workspace = true
 tokio = { workspace = true, features = ["fs", "io-util", "net", "time"] }
 futures = { workspace = true, features = ["alloc"] }
 tracing.workspace = true
 compact_str.workspace = true
-lsp-types.workspace = true
 async-trait.workspace = true
 snafu = { workspace = true }
 portable-pty.workspace = true
@@ -46,4 +48,5 @@ tempfile.workspace = true
 ron.workspace = true
 stoat_host = { path = "../host", features = ["test-support"] }
 stoat_host_git = { path = "../host_git", features = ["test-support"] }
+stoat_host_lsp = { path = "../host_lsp", features = ["test-support"] }
 stoat_scheduler = { path = "../scheduler", features = ["test-support"] }

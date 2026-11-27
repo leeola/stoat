@@ -16,7 +16,7 @@ pub use stoat_host_git as git;
 // std::fs calls are the intended implementation, not a bypass.
 #[allow(clippy::disallowed_methods)]
 pub mod local;
-pub mod lsp;
+pub use stoat_host_lsp as lsp;
 pub mod terminal;
 
 pub use clipboard::{
@@ -35,8 +35,11 @@ pub use git::{
     CommitInfo, ConflictedFile, DiffStatus, FileBlame, GitApplyError, GitHost, GitRepo, LocalGit,
     RebaseError, RebaseTodo, RebaseTodoOp, RewriteResult, StagedKind,
 };
-pub use local::{LocalClipboard, LocalLsp, LocalTerminalHost, LspTranscript};
-pub use lsp::{LanguageServerFeature, LspHost, LspNotification, NoopLsp, OffsetEncoding};
+pub use local::{LocalClipboard, LocalTerminalHost};
+pub use lsp::{
+    LanguageServerFeature, LocalLsp, LspHost, LspNotification, LspTranscript, NoopLsp,
+    OffsetEncoding,
+};
 #[cfg(any(test, feature = "test-support"))]
 pub use stoat_host::FakeShell;
 pub use stoat_host::{

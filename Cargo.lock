@@ -4126,20 +4126,18 @@ dependencies = [
  "crossterm",
  "futures",
  "libc",
- "lsp-types",
  "portable-pty",
  "ratatui",
  "ron",
  "serde",
- "serde_json",
  "smallvec",
  "snafu",
  "stoat_action",
  "stoat_config",
  "stoat_host",
  "stoat_host_git",
+ "stoat_host_lsp",
  "stoat_language",
- "stoat_log",
  "stoat_scheduler",
  "stoat_text",
  "stoatty_protocol",
@@ -4171,6 +4169,23 @@ dependencies = [
  "stoat_language",
  "stoat_text",
  "tempfile",
+ "tracing",
+]
+
+[[package]]
+name = "stoat_host_lsp"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "futures",
+ "libc",
+ "lsp-types",
+ "serde",
+ "serde_json",
+ "stoat_log",
+ "stoat_scheduler",
+ "tempfile",
+ "tokio",
  "tracing",
 ]
 

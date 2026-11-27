@@ -1,6 +1,4 @@
-use crate::host::lsp::{
-    IncomingRequest, LspHost, LspNotification, LspResponseError, OffsetEncoding,
-};
+use crate::{IncomingRequest, LspHost, LspNotification, LspResponseError, OffsetEncoding};
 use async_trait::async_trait;
 #[cfg(test)]
 use lsp_types::{
@@ -4557,7 +4555,7 @@ mod tests {
 
     #[test]
     fn supports_feature_default_caps() {
-        use crate::host::LanguageServerFeature;
+        use crate::LanguageServerFeature;
         let lsp = FakeLsp::new();
         assert!(!lsp.supports_feature(LanguageServerFeature::Hover));
         assert!(!lsp.supports_feature(LanguageServerFeature::Completion));
@@ -4569,7 +4567,7 @@ mod tests {
 
     #[test]
     fn set_capabilities_drives_supports_feature() {
-        use crate::host::LanguageServerFeature;
+        use crate::LanguageServerFeature;
         use lsp_types::{CompletionOptions, HoverProviderCapability};
 
         let lsp = FakeLsp::new();
@@ -4588,7 +4586,7 @@ mod tests {
 
     #[test]
     fn supports_feature_goto_and_rename_one_of() {
-        use crate::host::LanguageServerFeature;
+        use crate::LanguageServerFeature;
         use lsp_types::OneOf;
 
         let lsp = FakeLsp::new();
@@ -4608,7 +4606,7 @@ mod tests {
 
     #[test]
     fn supports_feature_left_false_is_unsupported() {
-        use crate::host::LanguageServerFeature;
+        use crate::LanguageServerFeature;
         use lsp_types::OneOf;
 
         let lsp = FakeLsp::new();
