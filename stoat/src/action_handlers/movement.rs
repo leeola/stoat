@@ -37,7 +37,7 @@ use stoat_text::{
     SelectionGoal,
 };
 
-pub(crate) fn set_cursor_row(editor: &mut EditorState, row: u32) {
+pub fn set_cursor_row(editor: &mut EditorState, row: u32) {
     let snapshot = editor.display_map.snapshot();
     let buffer_snapshot = snapshot.buffer_snapshot();
     let point = Point::new(row, 0);
@@ -4578,7 +4578,7 @@ pub(super) fn stop_landing_cell(rope: &Rope, rows: Range<u32>, diff_walk: bool) 
 /// Held on [`Stoat`] between the keypress that armed it and the
 /// [`pump_changed_file_jump`] that applies it. The two halves the keypress
 /// knows and the scan does not travel here.
-pub(crate) struct PendingChangedFileJump {
+pub struct PendingChangedFileJump {
     rx: mpsc::Receiver<ChangedFileJump>,
     _task: Task<()>,
     /// Whether the buffer the hop left was in diff view, which the target

@@ -19,7 +19,7 @@ use stoat_scheduler::Task;
 use tokio::sync::Notify;
 
 /// The slot a feature's in-flight request occupies, empty while none is out.
-pub(crate) struct Pending<T>(Option<Task<T>>);
+pub struct Pending<T>(Option<Task<T>>);
 
 impl<T> Default for Pending<T> {
     fn default() -> Self {
@@ -42,7 +42,7 @@ impl<T> Pending<T> {
     }
 
     /// Whether a request is out.
-    pub(crate) fn is_pending(&self) -> bool {
+    pub fn is_pending(&self) -> bool {
         self.0.is_some()
     }
 

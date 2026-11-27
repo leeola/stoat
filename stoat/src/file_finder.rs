@@ -198,7 +198,7 @@ pub(crate) struct FinderPathCache {
 }
 
 pub struct FileFinder {
-    pub(crate) input: InputView,
+    pub input: InputView,
     /// What submit should do with the selected file.
     pub(crate) open_intent: OpenIntent,
     /// The scope on show, the lists that its scopes read, and the named scopes.
@@ -234,7 +234,7 @@ pub struct FileFinder {
     /// narrowing a query never moves the box out from under the user typing it.
     /// The base grows while the background walk streams in, so a large workspace
     /// settles at its full size over the first frames after opening.
-    pub(crate) content_rows: u16,
+    pub content_rows: u16,
     /// The list columns of the plate, measured when the rows of the list last
     /// changed, or `None` before the first measure.
     ///

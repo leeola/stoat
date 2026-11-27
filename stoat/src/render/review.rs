@@ -84,7 +84,7 @@ pub(crate) const DIFF_SOFTEN_MIN: i8 = -2;
 /// The largest level that still moves a context row. One step further scales
 /// past the cap, where the trim takes the excess back and the row paints
 /// exactly as it did a step earlier.
-pub(crate) const DIFF_SOFTEN_MAX: i8 = 3;
+pub const DIFF_SOFTEN_MAX: i8 = 3;
 
 /// Ceiling on a scaled soften fraction, leaving a twentieth of the syntax color.
 ///
@@ -113,7 +113,7 @@ pub(crate) fn diff_soften_scale(level: i8) -> f32 {
 /// Two steps of a half each. The top is where the syntax color is gone
 /// entirely, which is the readable flat form the theme already tunes its
 /// `diff.*` colors for, so nothing above it would say more.
-pub(crate) const DIFF_TINT_MAX: i8 = 2;
+pub const DIFF_TINT_MAX: i8 = 2;
 
 /// The sixteenths the base side's lanes stand in from its left edge, which
 /// draw the diff boards' `padding: 0 3px` on the base half.
@@ -197,7 +197,7 @@ pub(crate) fn diff_tint_amount(level: i8) -> f32 {
 /// value. A further dial is then one more field rather than one more argument
 /// on each painter.
 #[derive(Copy, Clone, Debug, PartialEq)]
-pub(crate) struct DiffDials {
+pub struct DiffDials {
     /// Multiplier on how far unchanged syntax recedes, per
     /// [`diff_soften_scale`]. `1.0` paints the shipped fractions and `0.0`
     /// turns softening off.
@@ -232,7 +232,7 @@ impl DiffDials {
     ///
     /// A modal preview and a plain pane paint with these too, because no dial
     /// turns there.
-    pub(crate) fn shipped() -> Self {
+    pub fn shipped() -> Self {
         Self {
             soften_scale: 1.0,
             tint_amount: diff_tint_amount(1),
@@ -808,7 +808,7 @@ pub(crate) fn diff_gutter_digits_for(editor: &mut EditorState) -> u16 {
 /// parts at its sixteenth offsets instead, and no rich paint reads its cell
 /// offsets.
 #[derive(Clone, Copy)]
-pub(crate) struct DiffLayout {
+pub struct DiffLayout {
     /// Cells one side's gutter spans, its rule included.
     gutter_w: u16,
     /// The number field's first cell, from the side's start.
@@ -858,7 +858,7 @@ impl DiffLayout {
     /// at, spans [`diff_gutter`]'s [`Gutter::cell_width`] and places its parts
     /// at that gutter's sixteenth offsets. The git and state bars
     /// [`draw_diff_status`] paints take the lanes left of the number.
-    pub(crate) fn diff_view(digits: u16, rich: Option<u16>) -> Self {
+    pub fn diff_view(digits: u16, rich: Option<u16>) -> Self {
         let rich = rich.map(|number_scale| {
             let gutter = diff_gutter(digits, number_scale);
             let offsets = RichGutterOffsets {
@@ -921,7 +921,7 @@ fn diff_gutter(digits: u16, number_scale: u16) -> Gutter<'static> {
 /// mid-divider, so Block and buffer rows land in the same place and read as a
 /// unified diff.
 #[derive(Debug, PartialEq, Eq)]
-pub(crate) struct DiffColumns {
+pub struct DiffColumns {
     /// The left side's first cell, where its gutter starts.
     pub(crate) left_x: u16,
     pub(crate) left_num_x: u16,
@@ -929,15 +929,15 @@ pub(crate) struct DiffColumns {
     /// Absolute x of the rule between the left gutter and its text, absent for
     /// a layout with no rule.
     pub(crate) left_sep_x: Option<u16>,
-    pub(crate) left_text_x: u16,
-    pub(crate) left_content_w: usize,
+    pub left_text_x: u16,
+    pub left_content_w: usize,
     /// The right side's first cell, the left side's in the unified layout.
     pub(crate) right_x: u16,
     pub(crate) right_num_x: u16,
     pub(crate) status_right_x: u16,
     pub(crate) right_sep_x: Option<u16>,
-    pub(crate) right_text_x: u16,
-    pub(crate) right_content_w: usize,
+    pub right_text_x: u16,
+    pub right_content_w: usize,
     /// Absolute x of the mid-divider, absent in the unified layout.
     pub(crate) sep_x: Option<u16>,
     /// Where a rich gutter places its parts on either side, absent for a cell
@@ -946,7 +946,7 @@ pub(crate) struct DiffColumns {
 }
 
 impl DiffColumns {
-    pub(crate) fn compute(inner: Rect, layout: DiffLayout) -> Self {
+    pub fn compute(inner: Rect, layout: DiffLayout) -> Self {
         let gutter_w = layout.gutter_w as usize;
         let (num_off, status_off, sep_off) = layout.offsets();
 
@@ -3829,7 +3829,7 @@ pub(crate) fn resolve_diff_rich_colors(
 /// [`resolve_diff_rich_colors`] runs. Its numbers draw at the theme's
 /// [`TypeRole::Small`] size. The layout and the paint ask the same question,
 /// so the text column and the gutter it sits past always agree.
-pub(crate) fn diff_rich_gutter_scale(
+pub fn diff_rich_gutter_scale(
     has_scene: bool,
     theme: &crate::theme::Theme,
     fallback_style: Style,

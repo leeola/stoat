@@ -1133,13 +1133,13 @@ const CHROME_ROWS: u16 = 4;
 /// their body the same way.
 pub struct PickerLayout {
     /// The bordered modal box.
-    pub(crate) modal: Rect,
+    pub modal: Rect,
     /// Inside the border, starting at the filter prompt.
     pub(crate) inner: Rect,
     /// The candidate rows.
     pub(crate) list: Rect,
     /// The selected candidate's file, when the box is wide enough to show one.
-    pub(crate) preview: Option<Rect>,
+    pub preview: Option<Rect>,
     /// The key line under the list and the preview, as [`footer_rect`] gives it.
     pub(crate) footer: Rect,
 }
@@ -1196,7 +1196,7 @@ pub mod test_support {
     use stoatty_protocol::command::{self, Command, Edge};
 
     /// One panel's fill, edges, and corner radius, as [`row_boxes`] reads it.
-    pub(crate) type RowBox = (Option<[u8; 3]>, [Edge; 4], u8);
+    pub type RowBox = (Option<[u8; 3]>, [Edge; 4], u8);
 
     /// The selection background [`rounded_row_theme`] sets.
     pub const ROW_SELECT: [u8; 3] = [4, 5, 6];
@@ -2597,7 +2597,7 @@ pub(crate) const SHARE_SCALE: u32 = 10_000;
 ///
 /// One value for the whole modal family, so an untouched finder, symbol list,
 /// code search, and commit picker all divide their body the same way.
-pub(crate) const DEFAULT_LIST_SHARE: u16 = 4_000;
+pub const DEFAULT_LIST_SHARE: u16 = 4_000;
 
 /// The cells that `share`, in [`SHARE_SCALE`] units, takes of `extent` cells,
 /// rounded down.
@@ -2615,7 +2615,7 @@ pub(crate) fn share_of(extent: u16, share: u16) -> u16 {
 /// A list narrower than this cannot show a path worth reading, and a preview
 /// narrower cannot show code, so the split refuses to squeeze either below it
 /// however the share is set or dragged.
-pub(crate) const MIN_PANE_COLUMNS: u16 = 24;
+pub const MIN_PANE_COLUMNS: u16 = 24;
 
 /// Split a picker body rect into a result list and an optional preview pane.
 ///

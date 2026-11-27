@@ -15,7 +15,7 @@ use stoat_text::BufferId;
 new_key_type! {
     pub struct PaneId;
     pub struct DockId;
-    pub(crate) struct NodeId;
+    pub struct NodeId;
 }
 
 /// Minimum cells a pane keeps on either side of a divider being dragged, so a
@@ -184,7 +184,7 @@ pub struct Pane {
     /// name insertions the compacted history does not hold. A file written
     /// before the field reads as an empty list.
     #[serde(default)]
-    pub(crate) jumplist: JumpList,
+    pub jumplist: JumpList,
     /// What the last change walk in this pane landed on, read by `DiffBack`
     /// and `DiffForward`.
     ///

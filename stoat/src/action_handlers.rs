@@ -1,7 +1,7 @@
 mod agent;
 mod amend;
 pub(crate) mod blame;
-pub(crate) mod code_search;
+pub mod code_search;
 mod comment_reflow;
 pub(crate) mod commits;
 pub(crate) mod completion;
@@ -19,7 +19,7 @@ mod git_status;
 pub(crate) mod help;
 pub(crate) mod jobs;
 pub(crate) mod jump;
-pub(crate) mod lsp;
+pub mod lsp;
 pub(crate) mod macro_recording;
 pub(crate) mod marks;
 pub(crate) mod move_nav;
@@ -43,7 +43,7 @@ pub(crate) mod textobject;
 pub(crate) mod textobject_nav;
 pub mod view;
 pub(crate) mod walkthrough;
-pub(crate) mod workspace;
+pub mod workspace;
 pub(crate) mod yank;
 
 use crate::{
@@ -66,15 +66,15 @@ use crate::{
     workspace::diff::WorktreeBase,
 };
 pub(crate) use commits::{pump_commits, respawn_commits_panes};
-pub(crate) use file_finder::{
-    close_file_finder, file_finder_move_selection, sync_file_finder_preview,
-};
+pub(crate) use file_finder::close_file_finder;
+pub use file_finder::{file_finder_move_selection, sync_file_finder_preview};
 pub(crate) use palette::{
     close_palette, open_run_block, run_block_width, sync_palette_picker, sync_pick_preview,
 };
+pub use pane::close_pane_by_id;
 pub(crate) use pane::{
-    close_pane_by_id, dispose_view, restore_covered_terminal, restore_pane_after_term_exit,
-    retire_parked_pane, scratch_editor_view, EditorDisposal,
+    dispose_view, restore_covered_terminal, restore_pane_after_term_exit, retire_parked_pane,
+    scratch_editor_view, EditorDisposal,
 };
 use std::{io::Read, path::Path, sync::Arc};
 use stoat_action::{
@@ -84,7 +84,7 @@ use stoat_action::{
     SetCwd, SetTheme, Ssh, WalkthroughOpen,
 };
 use stoat_text::{Anchor, BufferId, LineEnding, Rope, Selection};
-pub(crate) use terminal::respawn_terminal_panes;
+pub use terminal::respawn_terminal_panes;
 
 /// A motion `RepeatLastMotion` (Alt-.) plays back.
 ///
@@ -1599,7 +1599,7 @@ fn end_action_group(stoat: &mut Stoat, buffer_id: Option<BufferId>) {
 
 /// Selections of `editor_id` as a shared handle, empty when it is gone.
 fn editor_selection_snapshot(stoat: &Stoat, editor_id: EditorId) -> Arc<[Selection<Anchor>]> {
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     stoat
         .selection_snapshots
         .set(stoat.selection_snapshots.get() + 1);

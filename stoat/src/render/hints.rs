@@ -72,13 +72,13 @@ pub(crate) struct ChordHints {
 ///
 /// The row records which toggle it flips and never the state, so a flip
 /// repaints the row with no rebuild.
-pub(crate) struct HintRow {
-    pub(crate) keys: String,
-    pub(crate) action: String,
-    pub(crate) toggle: Option<Toggle>,
+pub struct HintRow {
+    pub keys: String,
+    pub action: String,
+    pub toggle: Option<Toggle>,
     /// Whether the row's keys open a submenu, which its label names as
     /// `+name` and the box paints in `ui.hints.submenu`.
-    pub(crate) submenu: bool,
+    pub submenu: bool,
 }
 
 /// A frame's grouped hint rows kept for reuse across frames.
@@ -87,9 +87,9 @@ pub(crate) struct HintRow {
 /// so an unchanged key means the same rows and the keymap walk plus regrouping
 /// can be skipped. A toggle's state is not part of the key, because each frame
 /// reads it into the [`ToggleStates`] the paint takes.
-pub(crate) struct HintsCache {
-    pub(crate) key: u64,
-    pub(crate) rows: Vec<HintRow>,
+pub struct HintsCache {
+    pub key: u64,
+    pub rows: Vec<HintRow>,
     /// The keys the footer names, which the same keymap state decides as
     /// [`Self::rows`].
     pub(crate) footer_keys: FooterKeys,

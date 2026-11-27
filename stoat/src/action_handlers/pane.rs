@@ -218,7 +218,7 @@ fn close_diff_screen(stoat: &mut Stoat) {
 /// A shell or a Run pane that the pane covered ends with it, unless another
 /// view shows it. A commits list or a changes view the pane covered ends with
 /// it too, since no other pane holds one.
-pub(crate) fn close_pane_by_id(stoat: &mut Stoat, id: PaneId) -> bool {
+pub fn close_pane_by_id(stoat: &mut Stoat, id: PaneId) -> bool {
     let executor = stoat.executor.clone();
     let ws = stoat.active_workspace_mut();
     let (view, covered) = {

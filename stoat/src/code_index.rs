@@ -5,7 +5,7 @@
 //! and written. The scheduling that builds and refreshes the index lands in
 //! sibling modules.
 
-pub(crate) mod build;
+pub mod build;
 pub(crate) mod files;
 pub(crate) mod nav;
 pub(crate) mod store;

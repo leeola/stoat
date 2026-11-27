@@ -143,7 +143,7 @@ impl BadgeTray {
         self.badges.remove(id)
     }
 
-    pub(crate) fn get(&self, id: BadgeId) -> Option<&Badge> {
+    pub fn get(&self, id: BadgeId) -> Option<&Badge> {
         self.badges.get(id)
     }
 
@@ -160,7 +160,7 @@ impl BadgeTray {
         &self.trays[anchor as usize]
     }
 
-    pub(crate) fn find_by_source(&self, source: BadgeSource) -> Option<BadgeId> {
+    pub fn find_by_source(&self, source: BadgeSource) -> Option<BadgeId> {
         self.badges
             .iter()
             .find(|(_, b)| b.source == source)

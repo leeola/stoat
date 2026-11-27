@@ -637,7 +637,7 @@ struct InlayHintRequest {
 /// server supports them, and the (buffer, version, visible rows) key changed
 /// since the last request. Buffer edits and scrolls change the key and
 /// re-request. The response is applied by [`pump_lsp_inlay_hints`].
-pub(crate) fn inlay_hints_trigger(stoat: &mut Stoat) {
+pub fn inlay_hints_trigger(stoat: &mut Stoat) {
     if !stoat.inlay_hints_enabled {
         return;
     }
@@ -1307,15 +1307,15 @@ pub(crate) struct RenamePrep {
 /// the symbol's URI and request position so submit can build the
 /// `RenameParams` without touching the editor again.
 #[derive(Debug)]
-pub(crate) struct RenameInputState {
-    pub(crate) input: InputView,
-    pub(crate) source_uri: Uri,
-    pub(crate) symbol_position: Position,
-    pub(crate) anchor_offset: usize,
+pub struct RenameInputState {
+    pub input: InputView,
+    pub source_uri: Uri,
+    pub symbol_position: Position,
+    pub anchor_offset: usize,
     /// The server that answered prepare, resolved again at submit so both halves
     /// of the rename hit the same one. `buffer_id` is the fallback route.
-    pub(crate) server: Option<String>,
-    pub(crate) buffer_id: BufferId,
+    pub server: Option<String>,
+    pub buffer_id: BufferId,
 }
 
 /// Issue a `textDocument/prepareRename` request for the symbol under
@@ -2426,10 +2426,7 @@ pub(crate) fn pump_lsp_format(stoat: &mut Stoat) -> bool {
 /// The editor under the picker resets to normal mode, as the file finder's
 /// does. The picker opens from the `space l` leader, and the editor keeps the
 /// mode it held when focus returns to it on close.
-pub(crate) fn open_location_picker(
-    stoat: &mut Stoat,
-    entries: Vec<LocationEntry>,
-) -> LocationPicker {
+pub fn open_location_picker(stoat: &mut Stoat, entries: Vec<LocationEntry>) -> LocationPicker {
     let haystacks = entries.iter().map(location_haystack).collect();
     let executor = stoat.executor.clone();
     let redraw = stoat.redraw_notify.clone();

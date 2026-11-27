@@ -199,7 +199,7 @@ impl DiagnosticSet {
     /// Replaces the whole diagnostic list for `path` from a single unnamed
     /// server, for tests whose subject is the store rather than where anything
     /// sits. Every span is unresolved, so nothing carries them anywhere.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn replace_for_path(&mut self, path: PathBuf, diagnostics: Vec<Diagnostic>) {
         let spans = vec![PublishedSpan::unresolved(); diagnostics.len()];
         self.replace_from_server(path, "lsp".to_string(), diagnostics, spans);

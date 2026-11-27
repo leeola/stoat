@@ -14,7 +14,7 @@ use stoat_config::WrapMode;
 /// The hints box marks a row on or off when its binding flips one of these.
 /// An action that only sets a state, or that cycles more than two, is no toggle.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Toggle {
+pub enum Toggle {
     FollowChanges,
     LiveReload,
     FollowReload,

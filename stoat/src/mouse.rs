@@ -1109,7 +1109,7 @@ pub(crate) fn open_palette_arg_layout(
 /// See also:
 /// - [`modal_zoom_range`], which walks this across the zoom ledger to find the levels that actually
 ///   move the box.
-pub(crate) fn open_modal_box(stoat: &Stoat, kind: ModalKind, zoom: i8) -> Option<Rect> {
+pub fn open_modal_box(stoat: &Stoat, kind: ModalKind, zoom: i8) -> Option<Rect> {
     let size = stoat.size();
     let split = modal_split_share(&stoat.modal_split, kind);
 
@@ -1232,7 +1232,7 @@ pub(crate) fn modal_zoom_range(stoat: &Stoat, kind: ModalKind) -> Option<(i8, i8
 ///
 /// `None` when no modal with a separator is open, or when the one that is
 /// shows no preview -- a modal too small for two panes has no line to grab.
-pub(crate) fn open_modal_separator(stoat: &Stoat) -> Option<(ModalKind, SplitSeparator)> {
+pub fn open_modal_separator(stoat: &Stoat) -> Option<(ModalKind, SplitSeparator)> {
     let size = stoat.size();
 
     // The picker stacks its diff under the table, so its separator runs
@@ -1635,7 +1635,7 @@ pub(crate) fn apply_focused_pane_mouse(
 /// The view a minimap scrub drives, from the press on its strip until the
 /// release.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum MinimapDrag {
+pub enum MinimapDrag {
     /// An editor, whose viewport eases to the line under the pointer.
     Editor(EditorId),
     /// A changes view, whose cursor lands on the row under the pointer.

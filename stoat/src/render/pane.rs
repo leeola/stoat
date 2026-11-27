@@ -1522,7 +1522,7 @@ pub(crate) fn paint_pane_status_cells(cells: &PaneStatusCells, area: Rect, buf: 
 /// Only the editor pane's bar has somewhere to keep one. The overlay bar and
 /// the tab bar are drawn from state no editor owns, so they encode every frame.
 #[derive(Default)]
-pub(crate) struct StatusSceneCache {
+pub struct StatusSceneCache {
     key: Option<u64>,
     bytes: Vec<u8>,
 }

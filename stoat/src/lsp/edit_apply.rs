@@ -231,7 +231,7 @@ fn uri_to_path(uri: &Uri) -> Result<PathBuf, WorkspaceEditError> {
 /// The whole set lands as one undo step. A server operation is one thing the
 /// reader asked for, and undoing part of it would leave a state neither they nor
 /// the server produced.
-pub(crate) fn apply_text_edits_to_buffer(
+pub fn apply_text_edits_to_buffer(
     stoat: &mut Stoat,
     path: &Path,
     edits: Vec<TextEdit>,

@@ -141,12 +141,12 @@ enum Installed {
 /// A flash lives on the workspace that holds its buffer, since a [`BufferId`]
 /// names a buffer only within one. The frame timer ages it and drops it once
 /// its fade ends, at [`FLASH_HOLD`] plus [`FLASH_FADE`].
-pub(crate) struct ReloadFlash {
-    pub(crate) buffer: BufferId,
+pub struct ReloadFlash {
+    pub buffer: BufferId,
     /// The new text's ranges, each as its start and end anchor.
-    pub(crate) spans: Vec<(Anchor, Anchor)>,
+    pub spans: Vec<(Anchor, Anchor)>,
     /// Seconds since the reload.
-    pub(crate) age: f32,
+    pub age: f32,
 }
 
 impl ReloadFlash {

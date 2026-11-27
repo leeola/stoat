@@ -444,7 +444,7 @@ impl Workspace {
     ///
     /// The write goes through [`Self::save_gate`] as the newest save, so it
     /// writes nothing once the workspace is retired.
-    pub(crate) fn save_state(&self, path: &Path, fs: &dyn FsHost) -> io::Result<()> {
+    pub fn save_state(&self, path: &Path, fs: &dyn FsHost) -> io::Result<()> {
         let seq = self.save_gate.issue();
         let mut state = self.to_state();
         state.resolve_reanchors();

@@ -120,7 +120,7 @@ pub struct RenderFrame {
     /// The UI thread waits for them, for at most [`FRAME_BATCH_WAIT`], before
     /// it ends the frame's synchronized update. The frame and its batches then
     /// leave in one write.
-    pub(crate) batches: FrameBatches,
+    pub batches: FrameBatches,
     /// When the frame's first event arrived, for measuring input-to-flush
     /// latency on the UI thread. `Some` only for input-driven frames; `None`
     /// for redraw-notify and PTY wakes, which carry no input to time.

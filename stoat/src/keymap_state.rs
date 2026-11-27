@@ -179,7 +179,7 @@ impl AppFlags {
     }
 }
 
-pub(crate) struct StoatKeymapState<'a> {
+pub struct StoatKeymapState<'a> {
     mode_value: StateValue,
     rebase_exec: StateValue,
     /// Whether the split panes hold two different files, which is what a pair
@@ -274,8 +274,8 @@ pub(crate) struct StoatKeymapState<'a> {
 }
 
 impl<'a> StoatKeymapState<'a> {
-    #[cfg(test)]
-    pub(crate) fn new(mode: &str) -> Self {
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn new(mode: &str) -> Self {
         Self::with_flags(mode, Flags::default())
     }
 
@@ -336,7 +336,7 @@ impl<'a> StoatKeymapState<'a> {
     /// Lets the hint-overlay renderer construct a state that targets a specific
     /// open modal (`modal == help`) without a full [`Self::from_stoat`], which
     /// it cannot call while holding a workspace borrow.
-    pub(crate) fn with_modal(mut self, modal: &str) -> Self {
+    pub fn with_modal(mut self, modal: &str) -> Self {
         self.modal = Some(StateValue::String(modal.into()));
         self
     }
@@ -405,7 +405,7 @@ impl<'a> StoatKeymapState<'a> {
         self
     }
 
-    pub(crate) fn from_stoat(stoat: &'a Stoat) -> Self {
+    pub fn from_stoat(stoat: &'a Stoat) -> Self {
         let ws = stoat.active_workspace();
         let flags = Flags::from_workspace(ws).with_app(AppFlags::from_stoat(stoat));
         Self {
@@ -713,7 +713,7 @@ pub(crate) fn view_predicate(ws: &Workspace) -> Option<&'static str> {
 /// predicate is the only thing distinguishing them from an ordinary buffer when
 /// resolving keybindings.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum ActiveModal {
+pub enum ActiveModal {
     QuitConfirm,
     CheckoutConfirm,
     CommitPreview,
@@ -1013,7 +1013,7 @@ pub(crate) fn close_topmost_modal(stoat: &mut Stoat) -> bool {
     true
 }
 
-pub(crate) fn active_modal(stoat: &Stoat) -> Option<ActiveModal> {
+pub fn active_modal(stoat: &Stoat) -> Option<ActiveModal> {
     if stoat.quit_all_confirm.is_some() {
         Some(ActiveModal::QuitConfirm)
     } else if stoat.checkout_confirm.is_some() {

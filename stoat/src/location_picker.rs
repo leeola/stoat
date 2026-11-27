@@ -27,17 +27,17 @@ pub(crate) const MAX_LOCATIONS: usize = 5_000;
 /// One resolved goto candidate. Carries the byte offset to jump to plus
 /// the 1-based line/column and the target line's text for display.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct LocationEntry {
-    pub(crate) path: PathBuf,
-    pub(crate) offset: usize,
-    pub(crate) line: u32,
-    pub(crate) column: u32,
-    pub(crate) text: String,
+pub struct LocationEntry {
+    pub path: PathBuf,
+    pub offset: usize,
+    pub line: u32,
+    pub column: u32,
+    pub text: String,
     /// The byte range of the whole declaration the server named for the
     /// target, docs included, which the jump frames in the pane.
     ///
     /// `None` when the server sent a bare location, which names no block.
-    pub(crate) block: Option<Range<usize>>,
+    pub block: Option<Range<usize>>,
 }
 
 /// One location that a line of tool output names, before its file resolves

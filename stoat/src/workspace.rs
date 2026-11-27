@@ -122,8 +122,8 @@ impl std::fmt::Display for WorkspaceUid {
 /// A parked tree's [`EditorId`]s and [`TermId`]s stay valid while parked,
 /// because editors, terms, runs, and buffers belong to the workspace rather
 /// than to a tree.
-pub(crate) struct Tab {
-    pub(crate) parked: Option<PaneTree>,
+pub struct Tab {
+    pub parked: Option<PaneTree>,
     /// A user-set title overriding the one derived from the tab's focused pane.
     /// `None` falls back to [`Workspace::tab_title`]'s derived name. Set and
     /// cleared by the `RenameTab` action and persisted with the workspace.
@@ -150,12 +150,12 @@ pub struct Workspace {
     /// Stable identifier for this workspace across restarts. Assigned once in
     /// [`Workspace::new`] and preserved by [`crate::workspace::persist`] on
     /// save/load. Doubles as the on-disk filename.
-    pub(crate) uid: WorkspaceUid,
+    pub uid: WorkspaceUid,
     /// User-facing display name. Defaults to a deterministic
     /// adjective+animal pair derived from [`Self::uid`] (see
     /// [`crate::workspace::name::default_workspace_name`]). Empty string opts
     /// the renderer into the `git_root.file_name()` fallback used by tests.
-    pub(crate) name: String,
+    pub name: String,
     /// The family root this session was created from, `None` for a session
     /// that a launch opened.
     ///
@@ -176,7 +176,7 @@ pub struct Workspace {
     /// than this. The diff view covers the whole repository, so the file watch
     /// and the follow of external writes read this root. The finder and the
     /// code index stay on `git_root`.
-    pub(crate) repo_root: Option<PathBuf>,
+    pub repo_root: Option<PathBuf>,
     /// The [`Self::git_root`] that [`Self::repo_root`] was resolved for, or
     /// `None` before the first resolution.
     ///
@@ -223,7 +223,7 @@ pub struct Workspace {
     /// A clean remote exit clears it, because the user closed that session on
     /// purpose. Every other ending keeps it, since a dropped link is exactly
     /// what a reconnect is for.
-    pub(crate) remote: Option<RemoteTarget>,
+    pub remote: Option<RemoteTarget>,
     /// Fish-style recall history of the command lines that the palette and
     /// each Run pane prompt ran, as palette lines. Persisted per workspace.
     ///
@@ -255,15 +255,15 @@ pub struct Workspace {
     pub panes: PaneTree,
     /// Ordered tabs, at least one. The entry at [`Self::active_tab`] parks
     /// nothing because its tree is in [`Self::panes`].
-    pub(crate) tabs: Vec<Tab>,
-    pub(crate) active_tab: usize,
+    pub tabs: Vec<Tab>,
+    pub active_tab: usize,
     /// The tab to return to on a toggle, a most-recently-used depth of one.
     /// `None` before the first switch, and cleared when the tab it names is
     /// closed. It persists with the workspace, so a toggle in a restored
     /// session returns to the tab the saved session last left.
     pub(crate) last_tab: Option<usize>,
     pub docks: SlotMap<DockId, DockPanel>,
-    pub(crate) focus: FocusTarget,
+    pub focus: FocusTarget,
     pub buffers: BufferRegistry,
     pub editors: SlotMap<EditorId, EditorState>,
     /// The reloads of this workspace's buffers whose wash still fades, at most
@@ -271,16 +271,16 @@ pub struct Workspace {
     ///
     /// The frame timer ages them and drops each one once its fade ends, and
     /// every editor of a buffer listed here paints the wash.
-    pub(crate) reload_flashes: Vec<ReloadFlash>,
-    pub(crate) runs: SlotMap<RunId, RunState>,
+    pub reload_flashes: Vec<ReloadFlash>,
+    pub runs: SlotMap<RunId, RunState>,
     /// Every Cmd of the workspace, whichever stack shows it.
-    pub(crate) cmds: SlotMap<CmdId, Cmd>,
+    pub cmds: SlotMap<CmdId, Cmd>,
     /// The Job Tray, the ids of the Cmds whose placement is the tray, oldest
     /// first.
     ///
     /// A stack keeps the id of each Cmd it moved here, and [`Cmd::in_jobs`]
     /// marks that block as a Stub of the stack.
-    pub(crate) jobs: Vec<CmdId>,
+    pub jobs: Vec<CmdId>,
     /// The Job of the last Glance that the workspace opened, from which a
     /// later `Space J k` steps to the Job before it.
     pub(crate) glanced: Option<CmdId>,
@@ -308,10 +308,10 @@ pub struct Workspace {
     pub(crate) redraw_notify: Arc<Notify>,
     /// In-RAM symbol-and-call graph for this workspace, merged from the
     /// per-file shards the cold build and incremental reindex produce.
-    pub(crate) code_graph: CodeGraph,
+    pub code_graph: CodeGraph,
     /// Bumped each time a shard is merged into [`Self::code_graph`], so a
     /// consumer can tell whether the graph changed since it last read it.
-    pub(crate) index_generation: u64,
+    pub index_generation: u64,
     /// Workspace-relative path for each indexed [`FileId`], so navigation can
     /// recover a symbol's file from its graph id. The graph keys files by a
     /// one-way hash, so this is the only way back to a path.
@@ -392,7 +392,7 @@ pub struct Workspace {
     /// Active commit-by-commit review walk (if any). Outlives the diff view
     /// it opens, so closing a diff leaves the walk in place and only
     /// `ReviewDone` ends it.
-    pub(crate) review_walk: Option<crate::review_walk::ReviewWalk>,
+    pub review_walk: Option<crate::review_walk::ReviewWalk>,
     /// The walk whose return checkout waits in the git queue.
     ///
     /// It leaves [`Self::review_walk`] at the press, so steps and step landings
@@ -472,7 +472,7 @@ pub struct Workspace {
     /// `None` until one is spawned. Owned here so the render process reads it
     /// on paint without touching the agent's IPC path. The per-session hook
     /// server drives it via [`AgentStatus::apply`].
-    pub(crate) agent: Option<AgentStatus>,
+    pub agent: Option<AgentStatus>,
     /// The commands parked on each buffer, in arrival order.
     ///
     /// When a command shells out to `$EDITOR`, the agent socket opens the file
@@ -480,11 +480,11 @@ pub struct Workspace {
     /// [`Self::release_bridge_waiters`] tells it how the buffer left, or until
     /// [`Self::drop_client_waiters`] drops it for a command that went away. It
     /// is not persisted, because a channel does not outlive the process.
-    pub(crate) editor_bridge_waiters: HashMap<BufferId, Vec<BridgeWaiter>>,
+    pub editor_bridge_waiters: HashMap<BufferId, Vec<BridgeWaiter>>,
 }
 
 /// One command parked on a buffer until the buffer closes.
-pub(crate) struct BridgeWaiter {
+pub struct BridgeWaiter {
     /// The connection that parked this waiter, which
     /// [`Workspace::drop_client_waiters`] matches when that command goes away.
     pub(crate) client: u64,
@@ -688,7 +688,7 @@ impl Workspace {
     /// A no-op for an out-of-range index or the already-active tab. Pane focus
     /// rides along inside each tree, and docks are workspace-level, so nothing
     /// outside the tree needs restoring.
-    pub(crate) fn switch_tab(&mut self, idx: usize) -> bool {
+    pub fn switch_tab(&mut self, idx: usize) -> bool {
         if idx == self.active_tab || idx >= self.tabs.len() {
             return false;
         }
@@ -711,7 +711,7 @@ impl Workspace {
     }
 
     /// Append a tab showing a fresh scratch buffer and switch to it.
-    pub(crate) fn new_tab(&mut self, executor: &Executor) {
+    pub fn new_tab(&mut self, executor: &Executor) {
         let redraw = self.redraw_notify.clone();
         let tree = scratch_tree(&mut self.buffers, &mut self.editors, executor, &redraw);
         self.tabs.push(Tab {
@@ -814,7 +814,7 @@ impl Workspace {
     }
 
     /// The state of the list the focused split pane shows.
-    pub(crate) fn focused_commits(&self) -> Option<&CommitListState> {
+    pub fn focused_commits(&self) -> Option<&CommitListState> {
         self.commit_lists.get(self.focused_commits_id()?)
     }
 
@@ -1280,7 +1280,7 @@ impl Workspace {
     /// An open transient input, such as a picker, the palette, or a prompt,
     /// does not count. It owns an editor and a scratch buffer outside the pane
     /// tree, so a quit while one is open writes no session file.
-    pub(crate) fn is_fresh(&self) -> bool {
+    pub fn is_fresh(&self) -> bool {
         let Some((_, pane)) = self.panes.split_panes().next() else {
             return false;
         };
@@ -1447,8 +1447,8 @@ impl Workspace {
     /// The buffer version of the extraction that `id`'s next reindex starts
     /// from, for a test outside this module that drives settles through the
     /// drain.
-    #[cfg(test)]
-    pub(crate) fn index_extraction_version(&self, id: BufferId) -> Option<u64> {
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn index_extraction_version(&self, id: BufferId) -> Option<u64> {
         self.index_extractions
             .get(&id)
             .map(|extraction| extraction.version)
@@ -1501,7 +1501,7 @@ impl Workspace {
     /// for its colors. Callers that need fresh hunks pair this with
     /// [`Self::hunks_installed`] and [`Self::want_diff_map`], since the
     /// presence of a map alone does not prove it is current.
-    pub(crate) fn diff_map_current(&self, id: BufferId) -> bool {
+    pub fn diff_map_current(&self, id: BufferId) -> bool {
         let Some(shared) = self.buffers.get(id) else {
             return false;
         };
@@ -1598,7 +1598,7 @@ impl Workspace {
     /// Re-diffs the whole workspace. Every cached blob, and every diff still
     /// running, was read against the base being replaced, so none of them
     /// survive the change.
-    pub(crate) fn set_diff_base(&mut self, base: Option<DiffBase>) {
+    pub fn set_diff_base(&mut self, base: Option<DiffBase>) {
         self.diff.base_override = base;
         self.diff.reset_for_new_base();
         self.diff_changes_epoch += 1;
@@ -1821,7 +1821,7 @@ impl Workspace {
     /// Install `diff_map` on `id` as if a job had produced it. See
     /// [`DiffState::install_test`].
     #[cfg(any(test, feature = "test-support"))]
-    pub(crate) fn install_test_diff_map(&mut self, id: BufferId, diff_map: DiffMap) {
+    pub fn install_test_diff_map(&mut self, id: BufferId, diff_map: DiffMap) {
         self.diff.install_test(&self.buffers, id, diff_map);
     }
 

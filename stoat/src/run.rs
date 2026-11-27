@@ -44,13 +44,13 @@ const WHEEL_STEP_ROWS: usize = 3;
 const MAX_RUN_ROWS: usize = vterm::MAX_SCROLLBACK_ROWS;
 
 pub struct RunState {
-    pub(crate) input: InputView,
+    pub input: InputView,
     /// The stack, oldest first. Each id names a Cmd in `Workspace::cmds`.
     pub blocks: Vec<CmdId>,
     pub scroll_offset: usize,
     /// What the prompt shows for the text it holds, which the frame resolves
     /// once for each change of the text.
-    pub(crate) prompt: PromptInfo,
+    pub prompt: PromptInfo,
     /// The line that a walk of the workspace's command history wrote into the
     /// prompt, while that walk lasts.
     ///
@@ -63,7 +63,7 @@ pub struct RunState {
     ///
     /// A press and the width of a new Cmd read the layout after the paint, so
     /// the paint keeps the measure here, as a modal painter keeps its metrics.
-    pub(crate) pixel_box: Option<RunBox>,
+    pub pixel_box: Option<RunBox>,
 }
 
 /// The command token and the tag at its right that the Run pane prompt shows
@@ -73,13 +73,13 @@ pub struct RunState {
 /// the workspace, which the painter does not hold. So the frame resolves the
 /// prompt once for each change of its text, and the painter reads this.
 #[derive(Default, Hash)]
-pub(crate) struct PromptInfo {
+pub struct PromptInfo {
     /// The text that the other fields were resolved for.
     pub(crate) text: String,
     /// The chars of the text, from its start, that the command token takes.
     pub(crate) token_len: usize,
     /// The Kind Chip that the text's Run Kind gives.
-    pub(crate) chip: Option<&'static str>,
+    pub chip: Option<&'static str>,
     /// The label and the scope of the Source Tag of the command that the
     /// text's head names.
     pub(crate) source: Option<(&'static str, &'static str)>,
@@ -371,7 +371,7 @@ impl RunState {
     /// with the pad and the rule of its block under it when it is the last line
     /// of its block. The walk stops at the first line whose text top lies over
     /// the area, because nothing clips the live scene at the Island's edge.
-    pub(crate) fn window_px(&self, cmds: &SlotMap<CmdId, Cmd>, b: &RunBox) -> Vec<StackLine> {
+    pub fn window_px(&self, cmds: &SlotMap<CmdId, Cmd>, b: &RunBox) -> Vec<StackLine> {
         let blocks: Vec<(CmdId, &Cmd)> = self
             .blocks
             .iter()
@@ -461,14 +461,14 @@ impl RunState {
 /// The content stands 12 px inside the pane's Island, which can reach past the
 /// pane's cells, and ends 6 px over the Island's bottom.
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub(crate) struct RunBox {
-    pub(crate) metrics: RowMetrics,
+pub struct RunBox {
+    pub metrics: RowMetrics,
     /// The text scale of a body line, which sets how far each of its chars
     /// advances.
     pub(crate) scale: u16,
     /// The pane's area that the stack drew in.
     pub(crate) area: Rect,
-    pub(crate) left: u32,
+    pub left: u32,
     pub(crate) width: u32,
     pub(crate) bottom: u32,
 }
@@ -557,14 +557,14 @@ impl RunBox {
 /// One line of a Run pane's stack on show at the board's pixels, as
 /// [`RunState::window_px`] places it.
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub(crate) struct StackLine {
+pub struct StackLine {
     pub(crate) cmd: CmdId,
     /// The line's place in its block, 0 for the header, as
     /// [`Cmd::rendered_line_span`] counts a block's lines and the hint after
     /// them.
-    pub(crate) line: usize,
+    pub line: usize,
     /// The physical px from the area's top to the top of the line's text.
-    pub(crate) top: u32,
+    pub top: u32,
     /// Whether the line ends its block, so the block's rule runs under it.
     pub(crate) last: bool,
 }

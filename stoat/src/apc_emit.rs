@@ -3991,7 +3991,7 @@ const OSC_RESET_DEFAULT_COLORS: &[u8] = b"\x1b]110\x1b\\\x1b]111\x1b\\";
 /// A channel the theme leaves undefined or non-RGB is skipped rather than
 /// guessed at, so a partial theme overrides only what it actually specifies and
 /// leaves the rest to the terminal. Both missing yields empty bytes.
-pub(crate) fn osc_default_colors(theme: &crate::theme::Theme) -> Vec<u8> {
+pub fn osc_default_colors(theme: &crate::theme::Theme) -> Vec<u8> {
     use crate::{render::paint::style_rgb, theme::scope};
 
     let mut out = Vec::new();
@@ -4025,7 +4025,7 @@ pub(crate) fn osc_default_colors(theme: &crate::theme::Theme) -> Vec<u8> {
 /// Acting on a match skips [`pool::emit_into`] altogether, and with it the
 /// region declaration that a resize or a move to another window otherwise
 /// emits.
-pub(crate) fn window_content_version(
+pub fn window_content_version(
     view: &View,
     region: PoolRegionCommand,
     is_focused: bool,
@@ -4130,7 +4130,7 @@ fn input_view_version(input: &InputView, ws: &Workspace, hasher: &mut DefaultHas
 /// text into different rows, and the paint version alone misses the edits that
 /// reach no layer. Together they answer what a page cache asks: whether this
 /// frame lays the rows out the way the held one did.
-pub(crate) fn display_map_stamp(buffer_version: u64, paint_version: PaintVersion) -> u64 {
+pub fn display_map_stamp(buffer_version: u64, paint_version: PaintVersion) -> u64 {
     let mut hasher = DefaultHasher::new();
     buffer_version.hash(&mut hasher);
     paint_version.hash(&mut hasher);
@@ -4169,7 +4169,7 @@ pub(crate) fn display_map_stamp(buffer_version: u64, paint_version: PaintVersion
 /// splits carries the selection in its decoration version instead and takes
 /// `None` here.
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn editor_page_content_version(
+pub fn editor_page_content_version(
     syntax_highlight: bool,
     gutter_width: u16,
     wrap_width: Option<u32>,

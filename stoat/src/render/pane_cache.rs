@@ -83,7 +83,7 @@ use stoat_widgets::ApcScene;
 /// Nothing here is ordered. A key is only ever compared for equality, and
 /// "later" would have no meaning across parts that count different things.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct PaneCacheKey {
+pub struct PaneCacheKey {
     /// Which buffer, and how far its text has moved. The paint version does not
     /// carry this, because a display map answers only for the mapping it
     /// applies to whatever text it was handed.
@@ -209,8 +209,8 @@ pub(crate) struct PaneCacheKey {
 /// whether this frame captures anything, which is why `key` is `None` while no
 /// capture fills it.
 #[derive(Default)]
-pub(crate) struct PaneCacheEntry {
-    pub(crate) key: Option<PaneCacheKey>,
+pub struct PaneCacheEntry {
+    pub key: Option<PaneCacheKey>,
     /// The content rect the pane painted, with its cells row-major.
     ///
     /// The cells sit behind an `Arc`, since a [`Hold`] shares them with the

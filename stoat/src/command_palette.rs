@@ -48,7 +48,7 @@ pub struct CommandPalette {
     /// The single command-line input, holding the raw text typed after `:`.
     /// Parsed each frame into an optional command plus a trailing argument
     /// by [`CommandPalette::refilter_from_input`].
-    pub(crate) input: InputView,
+    pub input: InputView,
     /// The commands matching the current filter text, in display order. The
     /// built-in commands come first, then the user commands, then the `action`
     /// row. Empty while [`Self::command`] is set, since arg mode replaces the
@@ -57,11 +57,11 @@ pub struct CommandPalette {
     /// Per-row matched character offsets into each entry's name, parallel to
     /// [`Self::filtered`], used by the renderer to highlight matched cells.
     pub(crate) match_indices: Vec<Vec<u32>>,
-    pub(crate) selected: usize,
+    pub selected: usize,
     /// `Some` once the input parses as a known command followed by a space:
     /// the palette is collecting that command's trailing argument inline. The
     /// argument text is the input tail after the command token.
-    pub(crate) command: Option<PaletteCommand>,
+    pub command: Option<PaletteCommand>,
     /// Which parameter of [`Self::command`] the token being typed fills, as
     /// [`arg_index`] counts it in the input tail, or [`user_arg_index`] for a
     /// user command.
@@ -159,7 +159,7 @@ pub struct CommandPalette {
     /// new filter start the doc at its first line again. The paint holds the
     /// scroll where the doc's last line stands on the island's last row, so a
     /// press past the end shows nothing new.
-    pub(crate) doc_scroll: u16,
+    pub doc_scroll: u16,
     /// The cells of each History entry that the last frame drew, with the
     /// index of the entry's line in the palette history, for the pointer.
     ///
@@ -229,7 +229,7 @@ pub(crate) struct PaletteBlock {
 /// A command that the palette's input names, a registered action or a user
 /// command of the config.
 #[derive(Clone)]
-pub(crate) enum PaletteCommand {
+pub enum PaletteCommand {
     Action(&'static registry::RegistryEntry),
     User(Arc<UserCommand>),
 }
@@ -586,7 +586,7 @@ pub struct ArgPicker {
     /// The shared walk / fuzzy-list / preview core. A file picker leaves its
     /// walk feeding `all_paths`. A buffer picker seeds `all_paths` with the
     /// fixed open-buffer set and has no walk.
-    pub(crate) core: PathPicker,
+    pub core: PathPicker,
     /// Active directory-browse mode for a `/` or `~/` directory argument, or
     /// `None` for the workspace-derived list. Mirrors
     /// [`crate::file_finder::FileFinder`]'s browse: a separate walk rooted at
@@ -723,7 +723,7 @@ impl ArgPicker {
         }
     }
 
-    pub(crate) fn active_core_ref(&self) -> &PathPicker {
+    pub fn active_core_ref(&self) -> &PathPicker {
         match (&self.browse, &self.ignored) {
             (Some(browse), _) => &browse.picker,
             (None, Some(ignored)) if self.fallback_active() => ignored,
@@ -1365,7 +1365,7 @@ impl CommandPalette {
     /// Returns the palette's [`InputView`]. Used by the focus-resolution path
     /// in `Stoat::focused_editor_ids` so keymap-routed typing hits the correct
     /// scratch buffer.
-    pub(crate) fn focused_input(&self) -> Option<&InputView> {
+    pub fn focused_input(&self) -> Option<&InputView> {
         Some(&self.input)
     }
 

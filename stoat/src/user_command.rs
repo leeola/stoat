@@ -21,14 +21,14 @@ pub(crate) mod run;
 /// is unique in the set, ASCII case ignored. No built-in command, action, or
 /// command group answers to it, so a user command never hides a built-in one.
 #[derive(Default)]
-pub(crate) struct CommandSet {
+pub struct CommandSet {
     commands: Vec<Arc<UserCommand>>,
 }
 
 /// A command that a `command NAME { ... }` item declares, after the loader
 /// checks it.
 #[derive(Debug, PartialEq)]
-pub(crate) struct UserCommand {
+pub struct UserCommand {
     pub(crate) name: String,
     /// The text of the `doc` statement, empty for a command with none.
     pub(crate) doc: String,
@@ -257,7 +257,7 @@ impl CommandSet {
     }
 
     /// The command named `name`, ASCII case ignored.
-    pub(crate) fn get(&self, name: &str) -> Option<&Arc<UserCommand>> {
+    pub fn get(&self, name: &str) -> Option<&Arc<UserCommand>> {
         self.commands
             .iter()
             .find(|command| command.name.eq_ignore_ascii_case(name))

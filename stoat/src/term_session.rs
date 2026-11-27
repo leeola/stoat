@@ -109,7 +109,7 @@ impl TermSession {
     /// A press marks no cell before a drag extends it, and the release that
     /// copies a drag clears it, as do the next keystroke, click, or wheel
     /// notch. See [`TermScreen::selection_range`].
-    pub(crate) fn painted_selection(&self) -> Option<SelectionRange> {
+    pub fn painted_selection(&self) -> Option<SelectionRange> {
         self.term.selection_range()
     }
 

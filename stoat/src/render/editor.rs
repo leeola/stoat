@@ -1283,7 +1283,7 @@ pub(crate) struct GutterSeverityCache {
 /// geometry and the whole of fallback mode, where nothing paints from them.
 /// `scene_key` is `None` under the same conditions, and on a dead scene, which
 /// drops every append and so records an empty frame.
-pub(crate) struct GutterGeometryCache {
+pub struct GutterGeometryCache {
     geometry_key: u64,
     folded: Vec<(u32, u16)>,
     width_digits: u16,

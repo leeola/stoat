@@ -252,7 +252,7 @@ pub struct PaletteFilterLayout {
     /// The bordered modal box.
     pub(crate) modal: Rect,
     /// Inside the border: prompt/input, separator, list, doc separator, doc.
-    pub(crate) inner: Rect,
+    pub inner: Rect,
     /// The scrolling result list, also the smooth-scroll pool region.
     pub list: Rect,
     /// The selected entry's documentation, below a separator under the list.
@@ -286,11 +286,11 @@ pub struct PaletteArgLayout {
     /// The bordered modal box.
     pub(crate) modal: Rect,
     /// Inside the border, the Cmd Line, the row under it, and the body.
-    pub(crate) inner: Rect,
+    pub inner: Rect,
     /// The result list, also the smooth-scroll pool region.
     pub list: Rect,
     /// The preview beside the list, present only when the body is wide enough.
-    pub(crate) preview: Option<Rect>,
+    pub preview: Option<Rect>,
     /// The key line under the body, as
     /// [`footer_rect`](crate::render::picker::footer_rect) gives it.
     pub(crate) footer: Rect,

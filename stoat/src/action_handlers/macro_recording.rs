@@ -8,9 +8,9 @@ use crossterm::event::{Event, KeyEvent};
 /// State for an in-progress macro recording. The `keys` vector grows
 /// every time `Stoat::handle_key` accepts a key while this is `Some`,
 /// excluding the `Q` keypress that toggles recording itself.
-pub(crate) struct MacroRecording {
+pub struct MacroRecording {
     pub(crate) register: Register,
-    pub(crate) keys: Vec<KeyEvent>,
+    pub keys: Vec<KeyEvent>,
 }
 
 /// Toggle recording. Off -> start recording into the most-recently

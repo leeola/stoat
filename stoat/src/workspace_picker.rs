@@ -57,7 +57,7 @@ enum PickerScope {
 /// [`Self::toggle_scope`] narrows the list to the active workspace's family and
 /// back.
 pub struct WorkspacePicker {
-    pub(crate) input: InputView,
+    pub input: InputView,
     entries: Vec<PickerEntry>,
     /// What a query is matched against, one per entry and parallel to them.
     ///

@@ -10,7 +10,7 @@ use crate::host::ClipboardKind;
 use std::collections::HashMap;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub(crate) enum Register {
+pub enum Register {
     Unnamed,
     Named(char),
     /// One of the display server's two selections, `+` for the clipboard and
@@ -72,7 +72,7 @@ impl Register {
 const CLIPBOARD_JOIN: &str = "\n";
 
 #[derive(Debug, Default)]
-pub(crate) struct RegisterStore {
+pub struct RegisterStore {
     unnamed: Option<Vec<String>>,
     named: HashMap<char, Vec<String>>,
     /// Fragments last written to each selection, kept so a multi-selection yank
@@ -169,7 +169,7 @@ impl RegisterStore {
     /// Special registers are routed through the action layer to their
     /// backing state and bypass this store. Reading one here always
     /// returns `None`.
-    pub(crate) fn read(&self, register: Register) -> Option<&[String]> {
+    pub fn read(&self, register: Register) -> Option<&[String]> {
         match register {
             Register::Unnamed => self.unnamed.as_deref(),
             Register::Named(c) => self.named.get(&c).map(Vec::as_slice),

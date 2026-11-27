@@ -15,7 +15,7 @@ pub mod commits;
 pub mod completion;
 pub(crate) mod conflict;
 pub mod conflict_view;
-pub(crate) mod cursor_popup;
+pub mod cursor_popup;
 pub(crate) mod diagnostics_picker;
 pub(crate) mod diff_changes;
 pub(crate) mod dock;
@@ -23,7 +23,7 @@ pub mod editor;
 pub mod file_finder;
 pub(crate) mod git_status;
 pub mod help;
-pub(crate) mod hints;
+pub mod hints;
 pub mod hover;
 pub(crate) mod job_glance;
 pub(crate) mod job_list;
@@ -35,12 +35,12 @@ pub mod pane;
 pub(crate) mod pane_cache;
 pub(crate) mod pane_finder;
 pub mod picker;
-pub(crate) mod pixel_rows;
+pub mod pixel_rows;
 pub(crate) mod popout;
 pub(crate) mod quit_all_confirm;
 pub(crate) mod rebase;
 pub(crate) mod rename_input;
-pub(crate) mod review;
+pub mod review;
 pub(crate) mod reword;
 pub(crate) mod run_pane;
 pub(crate) mod sanitize;
@@ -51,8 +51,8 @@ pub(crate) mod symbol_picker;
 pub(crate) mod table;
 pub mod term_pane;
 pub(crate) mod text;
-pub(crate) mod undercurl;
-pub(crate) mod walkthrough;
+pub mod undercurl;
+pub mod walkthrough;
 pub(crate) mod walkthrough_picker;
 pub(crate) mod workspace_picker;
 
@@ -700,11 +700,11 @@ pub(crate) fn pane_fade(is_focused: bool, inactive_dim: f32, modal_dim: f32) -> 
 
 /// A screen buffer whose every cell holds `blank` or a held capture, blanked
 /// off the run loop ahead of the paint that reuses it.
-pub(crate) struct BlankedBuffer {
-    pub(crate) buffer: Buffer,
-    pub(crate) blank: Cell,
+pub struct BlankedBuffer {
+    pub buffer: Buffer,
+    pub blank: Cell,
     /// The pane captures the blank put back into `buffer`, each in its rect.
-    pub(crate) holds: Vec<Hold>,
+    pub holds: Vec<Hold>,
 }
 
 /// A pane's capture that a frame buffer carries, so the paint that takes the
@@ -716,14 +716,14 @@ pub(crate) struct BlankedBuffer {
 /// hold's cells into its rect and blanks every other cell, so a held rect
 /// holds the capture whatever painted over it in the buffer's last frame.
 #[derive(Clone, Debug)]
-pub(crate) struct Hold {
+pub struct Hold {
     pub(crate) pane: (WorkspaceId, PaneId),
-    pub(crate) rect: Rect,
+    pub rect: Rect,
     /// Which capture of the pane's cache entry the cells are, as the render
     /// tick of the frame that took it.
-    pub(crate) capture: u64,
+    pub capture: u64,
     /// The capture's cells over `rect`, row-major.
-    pub(crate) cells: Arc<Vec<Cell>>,
+    pub cells: Arc<Vec<Cell>>,
 }
 
 /// A status-bar latency readout holding the most recent paint time and the
@@ -1085,7 +1085,7 @@ pub(crate) fn zoom_target_kind(stoat: &Stoat) -> Option<ModalKind> {
 ///
 /// A channel the theme does not define stays at Reset, since there is nothing
 /// truer to put there than the terminal's own default.
-pub(crate) fn themed_blank(theme: &crate::theme::Theme) -> Cell {
+pub fn themed_blank(theme: &crate::theme::Theme) -> Cell {
     let mut cell = Cell::EMPTY;
     cell.fg = themed_fg(theme);
     cell.bg = themed_bg(theme);
@@ -1103,7 +1103,7 @@ pub(crate) fn themed_blank(theme: &crate::theme::Theme) -> Cell {
 ///
 /// A hold whose rect leaves `buffer`, or whose cells do not fill the rect,
 /// drops out, so a returned hold always names cells the buffer holds.
-pub(crate) fn blank_buffer(mut buffer: Buffer, blank: Cell, mut holds: Vec<Hold>) -> BlankedBuffer {
+pub fn blank_buffer(mut buffer: Buffer, blank: Cell, mut holds: Vec<Hold>) -> BlankedBuffer {
     buffer.content.fill(blank.clone());
     holds.retain(|hold| {
         let (rect, width) = (hold.rect, hold.rect.width as usize);
@@ -3048,12 +3048,7 @@ fn single_band_rail(ws: &Workspace, chrome: MinimapChrome<'_>) -> Option<u32> {
 /// pane whose status row reaches past the `window`'s last row.
 ///
 /// [`Stoat::layout_size`]: crate::Stoat::layout_size
-pub(crate) fn pane_status_row(
-    area: Rect,
-    band: Option<Rect>,
-    window: Rect,
-    rows: u16,
-) -> Option<Rect> {
+pub fn pane_status_row(area: Rect, band: Option<Rect>, window: Rect, rows: u16) -> Option<Rect> {
     let y = area.bottom() + rows.saturating_sub(1);
     if area.is_empty() || y >= window.bottom() {
         return None;

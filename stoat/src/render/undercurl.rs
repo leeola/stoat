@@ -14,12 +14,12 @@ use std::fmt::{self, Display, Formatter, Write};
 /// drops any cell the final buffer no longer matches, meaning a cell a later
 /// layer repainted, and the squiggle never lands on an overlay covering the
 /// span. Populate it with [`snapshot_cells`] once editor painting is done.
-pub(crate) struct UndercurlSpan {
-    pub(crate) x: u16,
-    pub(crate) y: u16,
-    pub(crate) len: u16,
-    pub(crate) color: [u8; 3],
-    pub(crate) style: UnderlineKind,
+pub struct UndercurlSpan {
+    pub x: u16,
+    pub y: u16,
+    pub len: u16,
+    pub color: [u8; 3],
+    pub style: UnderlineKind,
     pub(crate) cells: Vec<ratatui::buffer::Cell>,
 }
 
@@ -28,7 +28,7 @@ pub(crate) struct UndercurlSpan {
 /// Errors, warnings, and information take the wavy line. Hints and unused code
 /// take the dotted one, which reads quieter beside it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum UnderlineKind {
+pub enum UnderlineKind {
     Curly,
     Dotted,
 }
@@ -54,7 +54,7 @@ impl UnderlineKind {
 /// left over from an earlier frame would re-stamp a squiggle over whatever now
 /// occupies its cells. Only the live prefix is handed out.
 #[derive(Default)]
-pub(crate) struct UndercurlBatch {
+pub struct UndercurlBatch {
     spans: Vec<UndercurlSpan>,
     live: usize,
 }
@@ -90,7 +90,7 @@ impl UndercurlBatch {
     }
 
     /// This frame's spans, without the retired tail.
-    pub(crate) fn spans(&self) -> &[UndercurlSpan] {
+    pub fn spans(&self) -> &[UndercurlSpan] {
         &self.spans[..self.live]
     }
 

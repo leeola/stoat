@@ -14,7 +14,7 @@ use std::collections::HashMap;
 /// recently touched entry surfaces in the status bar without a real
 /// clock dependency.
 #[derive(Debug, Clone)]
-pub(crate) struct LspProgressEntry {
+pub struct LspProgressEntry {
     pub(crate) server: String,
     pub(crate) title: String,
     pub(crate) message: Option<String>,
@@ -28,7 +28,7 @@ pub(crate) struct LspProgressEntry {
 /// servers from colliding when they reuse the same token, and lets the status
 /// bar name which server the freshest operation belongs to.
 #[derive(Debug, Default)]
-pub(crate) struct LspProgressMap {
+pub struct LspProgressMap {
     entries: HashMap<(String, ProgressToken), LspProgressEntry>,
     next_sequence: u64,
 }
@@ -97,7 +97,7 @@ impl LspProgressMap {
 
     /// Returns the most recently updated in-progress entry, or `None`
     /// when the map is empty.
-    pub(crate) fn current(&self) -> Option<&LspProgressEntry> {
+    pub fn current(&self) -> Option<&LspProgressEntry> {
         self.entries.values().max_by_key(|e| e.sequence)
     }
 

@@ -11,8 +11,11 @@ workspace = true
 # test-support feature on. Only the test targets here link the harness.
 [dev-dependencies]
 stoat = { path = "../stoat", features = ["test-support"] }
+codegraph = { path = "../codegraph" }
 stoat_action = { path = "../action" }
 stoat_config = { path = "../config" }
+stoat_language = { path = "../language" }
+stoat_scheduler = { path = "../scheduler", features = ["test-support"] }
 stoat_text = { path = "../text" }
 stoatty_protocol = { path = "../tty_protocol" }
 stoat_widgets = { path = "../widgets" }
@@ -21,3 +24,6 @@ crossterm.workspace = true
 tokio = { workspace = true, features = ["fs", "io-util", "net", "time"] }
 futures = { workspace = true, features = ["alloc"] }
 lsp-types.workspace = true
+serde_json.workspace = true
+image.workspace = true
+base64.workspace = true

@@ -489,7 +489,7 @@ impl FoldButtons {
 /// An excerpt's editor holds one per expand. The frame timer ages it and drops
 /// it once its fade ends, at [`REVEAL_HOLD`] plus [`REVEAL_FADE`].
 #[derive(Debug, PartialEq)]
-pub(crate) struct RevealFlash {
+pub struct RevealFlash {
     /// The buffer rows the expand opened.
     pub rows: Range<u32>,
     /// Seconds since the expand.
@@ -1060,7 +1060,7 @@ pub(crate) fn layout_stack(
 /// The excerpt of an [`Excerpt::empty`] file takes its note row here too, the
 /// one row it shows under its header. A [`Excerpt::collapsed`] file takes its
 /// header row alone.
-pub(crate) fn header_rows(excerpt: &Excerpt) -> usize {
+pub fn header_rows(excerpt: &Excerpt) -> usize {
     if excerpt.collapsed {
         return 1;
     }

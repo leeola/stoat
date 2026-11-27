@@ -40,7 +40,7 @@ use stoat_text::{patch::Patch, LineEnding, Rope};
 use tokio::sync::{mpsc::UnboundedSender, Notify};
 
 /// A unit of index progress delivered from the build job to the event loop.
-pub(crate) enum IndexUpdate {
+pub enum IndexUpdate {
     /// One file's shard, ready to merge into the graph.
     ///
     /// The build job has already written it to disk when it was freshly
@@ -318,7 +318,7 @@ pub(crate) struct ReindexTarget {
 /// structure. For example, a closing brace that completes an open block in one
 /// function ends the impl around it early. The items after the brace then move
 /// out of the impl, far from the edit.
-pub(crate) struct Extraction {
+pub struct Extraction {
     /// The buffer whose edit history `version` counts in. A version means
     /// nothing against the history of another buffer.
     pub(crate) buffer: BufferId,
@@ -533,7 +533,7 @@ pub(crate) fn relpath(git_root: &Path, path: &Path) -> Option<String> {
 /// Deriving from the path (rather than scan order) keeps a file's id
 /// constant across a cold build, a warm load, and a live re-extract, so a
 /// re-extract evicts and replaces exactly that file's symbols.
-pub(crate) fn file_id(rel_path: &str) -> FileId {
+pub fn file_id(rel_path: &str) -> FileId {
     let digest = blake3::hash(rel_path.as_bytes());
     let mut bytes = [0u8; 4];
     bytes.copy_from_slice(&digest.as_bytes()[..4]);

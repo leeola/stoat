@@ -60,14 +60,14 @@ pub struct HoverPopup {
     /// Only an LSP hover fills it. A walkthrough card leaves it empty and
     /// takes no footer row.
     pub footer: Vec<(String, &'static str)>,
-    pub(crate) anchor_offset: usize,
+    pub anchor_offset: usize,
     /// The editor that requested this hover. Set from the response's
     /// [`HoverResponse::editor_id`] once focus is confirmed unchanged.
     pub(crate) editor_id: EditorId,
     /// Half-page scroll offset applied by [`render_hover`],
     /// advanced by Ctrl-d/Ctrl-u while the popup is open. Clamped to the content
     /// height at render, so an over-scroll past the bottom does not accumulate.
-    pub(crate) scroll_half_pages: usize,
+    pub scroll_half_pages: usize,
     /// Screen rect the popup last painted over, stamped by
     /// [`render_hover`]. The mouse handler hit-tests it so
     /// a wheel over the popup scrolls it rather than the pane beneath. Empty
@@ -770,7 +770,7 @@ fn host_anchor(stoat: &Stoat, popup_area: Rect) -> Option<(u32, f32)> {
 /// cursor when its content fits there, and otherwise on the side with more
 /// room, shrinking to that side's free space so it never renders past the
 /// window.
-pub(crate) fn hover_popup_layout(stoat: &mut Stoat) -> Option<(Rect, Rect)> {
+pub fn hover_popup_layout(stoat: &mut Stoat) -> Option<(Rect, Rect)> {
     let anchor_offset = stoat.pending_hover.as_ref()?.anchor_offset;
 
     // The popup floats above panes, so placement is bounded by the whole

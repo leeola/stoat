@@ -65,7 +65,7 @@ impl InputHistory {
     }
 
     /// The retained entries, oldest-first, for persistence.
-    pub(crate) fn entries(&self) -> &[String] {
+    pub fn entries(&self) -> &[String] {
         &self.entries
     }
 
@@ -185,7 +185,7 @@ impl InputHistory {
     }
 
     /// Whether a recall walk is active, which the palette shows as History.
-    pub(crate) fn is_walking(&self) -> bool {
+    pub fn is_walking(&self) -> bool {
         self.cursor.is_some()
     }
 

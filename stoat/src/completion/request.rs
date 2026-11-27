@@ -54,7 +54,7 @@ use stoat_text::{Point, Rope};
 /// Quiet window from the most recent keystroke before a completion
 /// request is dispatched. Each new keystroke replaces the in-flight
 /// task and restarts the timer.
-pub(crate) const COMPLETION_DEBOUNCE: Duration = Duration::from_millis(150);
+pub const COMPLETION_DEBOUNCE: Duration = Duration::from_millis(150);
 
 /// Rows a narrow scores where it stands rather than on the blocking pool.
 ///
@@ -355,7 +355,7 @@ enum Refine {
 /// A re-ask is not a whole answer, so it cannot simply be installed. Keeping
 /// the two apart is what lets the popup's own items stay where they are for the
 /// whole debounce window instead of being copied out of it per keystroke.
-pub(crate) enum RequestOutcome {
+pub enum RequestOutcome {
     /// A full fetch, which stands alone and replaces whatever is open.
     Replace(CompletionPopup),
     /// Answers from the servers that stopped early last time, already merged
@@ -384,7 +384,7 @@ pub(crate) enum RequestOutcome {
 ///
 /// `generation` names the popup the survivors came from. A popup gone or
 /// replaced since means they describe a list that is no longer there.
-pub(crate) struct Refill {
+pub struct Refill {
     items: Vec<CompletionItem>,
     matches: Vec<(u32, u32)>,
     survivors: usize,

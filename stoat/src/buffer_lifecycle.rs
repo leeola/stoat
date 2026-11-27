@@ -112,7 +112,7 @@ impl PendingTarget {
 /// A file over `OPEN_SYNC_MAX_BYTES` reads in the background and installs
 /// later, so this answers `None` for it at once. A caller that moves the cursor
 /// into the file right after takes [`open_file_in_pane_now`] instead.
-pub(crate) fn open_file_in_pane(
+pub fn open_file_in_pane(
     stoat: &mut Stoat,
     target: PaneId,
     path: &Path,

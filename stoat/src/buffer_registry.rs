@@ -40,7 +40,7 @@ pub(crate) struct RetainedLspTokens {
 /// One entry surfaced by [`BufferRegistry::dirty_buffers`]. `path` is
 /// `Some` for file-backed buffers and `None` for scratch buffers.
 #[derive(Clone, Debug)]
-pub(crate) struct DirtyBuffer {
+pub struct DirtyBuffer {
     pub id: BufferId,
     pub path: Option<PathBuf>,
 }
@@ -81,7 +81,7 @@ pub(crate) enum AutoReloadMode {
 /// lists only the files the reader asked for, plus the ones still on screen or
 /// carrying edits.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum OpenOrigin {
+pub enum OpenOrigin {
     /// A command named the file, such as an open by path, a launch argument,
     /// `:logs`, the agent-edit review, or a session restore.
     ///
@@ -268,7 +268,7 @@ impl BufferRegistry {
     /// A surface that fills the buffer with its own content gets what it
     /// inserts and nothing else, the rope carrying no seeded terminator to
     /// prepend to it.
-    pub(crate) fn new_scratch(&mut self) -> (BufferId, SharedBuffer) {
+    pub fn new_scratch(&mut self) -> (BufferId, SharedBuffer) {
         self.new_scratch_inner(false)
     }
 
@@ -452,7 +452,7 @@ impl BufferRegistry {
         true
     }
 
-    pub(crate) fn path_for(&self, id: BufferId) -> Option<&Path> {
+    pub fn path_for(&self, id: BufferId) -> Option<&Path> {
         self.buffers.get(&id).and_then(|e| e.path.as_deref())
     }
 

@@ -21,7 +21,7 @@ thread_local! {
 }
 
 /// Ask the next run-loop turn to return freed memory to the kernel.
-pub(crate) fn request() {
+pub fn request() {
     PENDING.set(true);
 }
 
@@ -39,8 +39,8 @@ pub(crate) fn run_pending() -> bool {
 }
 
 /// Whether a request came since the last trim. The read leaves it in place.
-#[cfg(test)]
-pub(crate) fn pending() -> bool {
+#[cfg(any(test, feature = "test-support"))]
+pub fn pending() -> bool {
     PENDING.get()
 }
 

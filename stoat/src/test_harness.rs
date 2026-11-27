@@ -846,7 +846,7 @@ impl TestHarness {
     }
 
     /// Send output for the current run of the Cmd `cmd`.
-    pub(crate) fn inject_cmd_output(&mut self, cmd: crate::run::CmdId, data: &[u8]) {
+    pub fn inject_cmd_output(&mut self, cmd: crate::run::CmdId, data: &[u8]) {
         let notif = crate::run::PtyNotification::CmdOutput {
             workspace: self.stoat.active_workspace,
             cmd,
@@ -858,7 +858,7 @@ impl TestHarness {
     }
 
     /// End the current run of the Cmd `cmd` with `exit_code`.
-    pub(crate) fn inject_cmd_done(&mut self, cmd: crate::run::CmdId, exit_code: i32) {
+    pub fn inject_cmd_done(&mut self, cmd: crate::run::CmdId, exit_code: i32) {
         let notif = crate::run::PtyNotification::CmdExited {
             workspace: self.stoat.active_workspace,
             cmd,
@@ -1145,7 +1145,7 @@ impl TestHarness {
     /// Tests that scan for chrome (bars, badges, overlay boxes) must render
     /// through this rather than [`Stoat::render`], whose returned grid no longer
     /// carries the chrome the scene draws off-grid.
-    pub(crate) fn render_composited(&mut self) -> Buffer {
+    pub fn render_composited(&mut self) -> Buffer {
         let mut buf = self.stoat.render();
         let cmds = command::decode_stream(&self.stoat.apc_scene.all_bytes());
         apc::composite_scene(&mut buf, &cmds);

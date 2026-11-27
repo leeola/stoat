@@ -27,7 +27,7 @@ use stoat_text::Rope;
 /// re-issues the server request as the query changes, so its results also come
 /// from the server, not just a local filter.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum SymbolFinderScope {
+pub enum SymbolFinderScope {
     Document,
     /// The files of the focused changes view, filtered locally as
     /// [`Self::Document`] is.
@@ -149,7 +149,7 @@ pub struct SymbolFinder {
 }
 
 impl SymbolFinder {
-    pub(crate) fn new(
+    pub fn new(
         ws: &mut Workspace,
         executor: Executor,
         buffer_id: BufferId,

@@ -95,7 +95,7 @@ pub(crate) struct ChangedRangesScan {
 /// so they carry their base as text. A pair of files has no commit behind it
 /// either, so it carries the other file's text.
 #[derive(Clone)]
-pub(crate) enum DiffBase {
+pub enum DiffBase {
     /// The working tree against HEAD, with the index marking which hunks are
     /// staged, for a reader who wants every change since the commit in the
     /// right column.
@@ -128,7 +128,7 @@ pub(crate) enum DiffBase {
 
 impl DiffBase {
     /// The revision the reader named as `name`, which resolved to `sha`.
-    pub(crate) fn named(name: &str, sha: String) -> Self {
+    pub fn named(name: &str, sha: String) -> Self {
         Self::Rev {
             sha: Some(sha),
             origin: RevOrigin::Named(name.to_string()),
@@ -163,7 +163,7 @@ impl DiffBase {
 ///
 /// A diff view's status row names the two columns from it.
 #[derive(Clone)]
-pub(crate) enum RevOrigin {
+pub enum RevOrigin {
     /// The reader named the revision, spelled as typed.
     Named(String),
     /// The revision is the parent of this commit, which a review checked out

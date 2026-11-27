@@ -4297,13 +4297,19 @@ dependencies = [
 name = "stoat_tests"
 version = "0.1.0"
 dependencies = [
+ "base64 0.23.1",
+ "codegraph",
  "crossterm",
  "futures",
+ "image",
  "lsp-types",
  "ratatui",
+ "serde_json",
  "stoat",
  "stoat_action",
  "stoat_config",
+ "stoat_language",
+ "stoat_scheduler",
  "stoat_text",
  "stoat_widgets",
  "stoatty_protocol",

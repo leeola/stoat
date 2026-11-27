@@ -208,7 +208,7 @@ pub(crate) fn embedded_config() -> &'static stoat_config::Config {
 /// display rather than shipping targets that can never be presented.
 /// [`Stoat::run`] arms a timer at this cadence while a scroll glide is active,
 /// advancing the inertial scroll one step per fire.
-const SCROLL_FRAME: std::time::Duration = std::time::Duration::from_millis(16);
+pub const SCROLL_FRAME: std::time::Duration = std::time::Duration::from_millis(16);
 
 /// Terminal output bytes one run-loop turn parses before it returns to
 /// `select!`, about six milliseconds of parse.
@@ -227,7 +227,7 @@ const SCROLL_FRAME: std::time::Duration = std::time::Duration::from_millis(16);
 /// back for the timer to come due.
 /// Alacritty bounds the same loop the same way, releasing the terminal after a
 /// fixed read so the renderer gets a turn.
-const PTY_TURN_BUDGET_BYTES: usize = 1 << 20;
+pub const PTY_TURN_BUDGET_BYTES: usize = 1 << 20;
 
 /// The number of blank jobs that [`Stoat::run`] keeps in flight on the blocking
 /// pool.
@@ -582,7 +582,7 @@ pub(crate) const AUTO_RELOAD_POLL: std::time::Duration = std::time::Duration::fr
 /// How long a transient status message stays visible before it self-retires.
 /// [`Stoat::set_status`] stamps a deadline this far ahead and arms a timer that
 /// wakes the run loop so [`crate::render::frame`] can clear the expired message.
-const STATUS_MESSAGE_TTL: std::time::Duration = std::time::Duration::from_secs(4);
+pub const STATUS_MESSAGE_TTL: std::time::Duration = std::time::Duration::from_secs(4);
 
 /// The least wait of the tick that advances a running Cmd's elapsed seconds.
 ///
@@ -619,7 +619,7 @@ const SESSION_SNAPSHOT_MIN_GAP: std::time::Duration = std::time::Duration::from_
 /// makes under a running session's root therefore reaches the `git` keymap
 /// predicate only through a look. The wait bounds the ancestor walk of a look
 /// to one per interval while the reader types outside a repository.
-const REPO_RETRY: std::time::Duration = std::time::Duration::from_secs(1);
+pub const REPO_RETRY: std::time::Duration = std::time::Duration::from_secs(1);
 
 /// Shortest gap between two wheel notches that both run a keymap binding.
 ///
@@ -632,7 +632,7 @@ pub(crate) const WHEEL_BINDING_COOLDOWN: std::time::Duration = std::time::Durati
 /// Bounds the graph work per event-loop turn so a large reindex burst cannot
 /// stall input. On hitting the cap the drain reschedules itself to finish the
 /// remainder on the next turn.
-const INDEX_DRAIN_CAP: usize = 512;
+pub const INDEX_DRAIN_CAP: usize = 512;
 
 /// Time [`Stoat::drain_index_updates`] spends merging before it returns to the
 /// event loop, about half a frame.
@@ -742,7 +742,7 @@ pub(crate) struct PendingWorkspaceRestore {
 /// The socket connection lives on a background task. Connection state and each
 /// decoded [`WindowIpcEvent`] cross to the main thread as one of these, so the
 /// flag and pane routing only ever mutate on the loop.
-enum WindowIpc {
+pub enum WindowIpc {
     Connected,
     Disconnected,
     Event(WindowIpcEvent),
@@ -852,7 +852,7 @@ impl SeparatorAxis {
 /// The descriptor carries geometry alone. Where a drag's resulting share is
 /// stored is the caller's business, which is what lets a non-modal surface
 /// reuse it.
-pub(crate) struct SplitSeparator {
+pub struct SplitSeparator {
     pub(crate) axis: SeparatorAxis,
     /// The separator's own line, in the axis's units.
     pub(crate) line: u16,
@@ -904,11 +904,11 @@ impl SplitSeparator {
 ///
 /// Shallower than the grow limit because a modal shrinks toward a minimum size
 /// it reaches quickly, while growing has most of the screen to cross.
-pub(crate) const MODAL_ZOOM_MIN: i8 = -4;
+pub const MODAL_ZOOM_MIN: i8 = -4;
 
 /// Furthest a modal may be zoomed in, in steps of a tenth of the screen. Enough
 /// to reach the screen edge from any starting size.
-pub(crate) const MODAL_ZOOM_MAX: i8 = 8;
+pub const MODAL_ZOOM_MAX: i8 = 8;
 
 /// Zoom steps the user has applied to `kind`, zero for a kind they never zoomed.
 ///
@@ -991,17 +991,17 @@ struct FocusSnapshot {
 /// [`Stoat::notify_view_watchers`] sends the session's `focus` and `selection`
 /// reports to `tx` each time they differ from `last`, the view the watcher got
 /// last.
-struct ViewWatcher {
+pub struct ViewWatcher {
     uid: WorkspaceUid,
     /// The connection that asked, which an [`AgentControl::ClientGone`] names
     /// when it ends.
-    client: u64,
+    pub client: u64,
     tx: UnboundedSender<Value>,
     last: Value,
 }
 
 pub struct Stoat {
-    pub(crate) size: Rect,
+    pub size: Rect,
     /// Fallback mode store, read and written only when the focused target has
     /// no mode of its own -- no focused editor, run, or terminal pane, and no
     /// open input modal. The live mode for those targets lives on the target
@@ -1016,12 +1016,12 @@ pub struct Stoat {
     pub(crate) frame_mode: String,
     /// Config-defined session variables set by `SetVar`. Session-local and never
     /// persisted. The keymap reads them after its built-in predicate fields.
-    pub(crate) user_vars: std::collections::HashMap<String, StateValue>,
+    pub user_vars: std::collections::HashMap<String, StateValue>,
     pub executor: Executor,
-    pub(crate) keymap: Keymap,
+    pub keymap: Keymap,
     /// The user commands that the config declares, rebuilt with the keymap on
     /// each load. The palette runs them as it runs a built-in command.
-    pub(crate) commands: Arc<crate::user_command::CommandSet>,
+    pub commands: Arc<crate::user_command::CommandSet>,
     pub settings: Settings,
     /// The CLI and environment overrides that layered over the config at
     /// startup, retained so a mid-session config reload can re-apply them. A
@@ -1031,12 +1031,12 @@ pub struct Stoat {
     /// Every theme the session can switch to, the active one among them,
     /// retained so [`ActionKind::SetTheme`] can re-resolve a different theme at
     /// runtime without reparsing the config.
-    pub(crate) theme_pool: ThemePool,
+    pub theme_pool: ThemePool,
     /// The VSCode themes read at startup, both built-in and from the user's
     /// theme directory, held as their unconverted JSON. Retained so a config
     /// reload rebuilds the same pool without re-reading the theme files, and so
     /// a theme converted before the reload stays converted after it.
-    pub(crate) imported_themes: Vec<Arc<VscodeSource>>,
+    pub imported_themes: Vec<Arc<VscodeSource>>,
     /// How far the user has zoomed each modal past the size its content asks
     /// for, in steps of a tenth of the screen. An absent kind sits at zero.
     ///
@@ -1062,7 +1062,7 @@ pub struct Stoat {
     /// reason: the level answers what is on screen right now. One level for the
     /// whole session rather than one per editor, because how hard to recede is
     /// a reading preference rather than a property of any one file.
-    pub(crate) diff_soften: i8,
+    pub diff_soften: i8,
     /// How far the diff view shifts a changed row toward its status color, as
     /// a level [`crate::render::review::diff_tint_amount`] turns into a
     /// fraction. Level 0 is off, and [`stoat_action::DiffTintDown`] and
@@ -1178,7 +1178,7 @@ pub struct Stoat {
     /// [`action_handlers::lsp::pump_lsp_symbol_picker`] and refiltered on the
     /// render path.
     pub symbol_finder: Option<SymbolFinder>,
-    pub(crate) workspace_picker: Option<WorkspacePicker>,
+    pub workspace_picker: Option<WorkspacePicker>,
     /// The git status panel, or `None` while it is closed.
     pub(crate) git_status: Option<GitStatusPanel>,
     /// The Glance of a Job, or `None` while it is closed.
@@ -1198,11 +1198,11 @@ pub struct Stoat {
     /// with at least one dirty buffer in any workspace. `Some` while
     /// the user is being prompted to discard or cancel; cleared on
     /// cancel and stays `Some` on confirm (the app exits anyway).
-    pub(crate) quit_all_confirm: Option<QuitAllConfirm>,
+    pub quit_all_confirm: Option<QuitAllConfirm>,
     /// Modal listing the focused editor's jumplist entries; opened by
     /// [`stoat_action::OpenJumplistPicker`] and dismissed on jump or
     /// cancel.
-    pub(crate) jumplist_picker: Option<crate::jumplist_picker::JumplistPicker>,
+    pub jumplist_picker: Option<crate::jumplist_picker::JumplistPicker>,
     /// Modal listing the workspace's stored walkthroughs, opened by
     /// [`stoat_action::OpenWalkthroughPicker`] and dismissed when a tour plays or
     /// on cancel.
@@ -1214,7 +1214,7 @@ pub struct Stoat {
     /// Active diagnostics picker modal (`space l d`). `Some` while
     /// the modal is open; cleared on Esc, on selection (after
     /// jumping the focused editor's cursor), and on Ctrl-C.
-    pub(crate) diagnostics_picker: Option<crate::diagnostics_picker::DiagnosticsPicker>,
+    pub diagnostics_picker: Option<crate::diagnostics_picker::DiagnosticsPicker>,
     /// Active commit picker modal, opened by `:git review` to choose the
     /// commit a review walk starts from. `Some` while the modal is open;
     /// cleared on Esc, on selection, and on Ctrl-C.
@@ -1223,7 +1223,7 @@ pub struct Stoat {
     /// request that resolved to two or more locations is awaiting the
     /// user's choice. Cleared on Esc (restoring the prior mode), on
     /// selection (after jumping), and on Ctrl-C.
-    pub(crate) location_picker: Option<crate::location_picker::LocationPicker>,
+    pub location_picker: Option<crate::location_picker::LocationPicker>,
     /// Name of the action that most recently opened a picker
     /// successfully. Used by `OpenLastPicker` (`space '`) to
     /// re-fire the same action and rebuild the picker fresh.
@@ -1244,7 +1244,7 @@ pub struct Stoat {
     /// Active macro recording. `Some` between two `Q` presses;
     /// every key dispatched in the meantime is appended via
     /// [`action_handlers::macro_recording::capture`].
-    pub(crate) macro_recording: Option<action_handlers::macro_recording::MacroRecording>,
+    pub macro_recording: Option<action_handlers::macro_recording::MacroRecording>,
     /// How many times the armed replay chord runs its macro, `None` while no
     /// chord is armed.
     ///
@@ -1266,21 +1266,21 @@ pub struct Stoat {
     /// Opens owned agent (Claude) PTY sessions. Production wires
     /// [`crate::host::LocalTerminalHost`]. Tests can install
     /// [`crate::host::FakeTerminalHost`].
-    pub(crate) terminal_host: Arc<dyn crate::host::TerminalHost>,
+    pub terminal_host: Arc<dyn crate::host::TerminalHost>,
     /// When true, [`Self::save_workspace`] and the startup load path become
     /// no-ops. Set by the test harness so test runs can't read or write the
     /// real `$XDG_STATE_HOME/stoat/workspaces/` directory.
-    pub(crate) persistence_disabled: bool,
+    pub persistence_disabled: bool,
     pub(crate) language_registry: Arc<LanguageRegistry>,
     pub(crate) syntax_styles: SyntaxStyles,
-    pub(crate) workspaces: SlotMap<WorkspaceId, Workspace>,
-    pub(crate) active_workspace: WorkspaceId,
+    pub workspaces: SlotMap<WorkspaceId, Workspace>,
+    pub active_workspace: WorkspaceId,
     /// App-level badge tray for cross-workspace notifications. Badges here
     /// render regardless of which workspace is active, complementing each
     /// workspace's own [`Workspace::badges`]. The tray the badge lives in
     /// is the source of truth for its scope.
-    pub(crate) badges: BadgeTray,
-    pub(crate) pty_tx: Sender<PtyNotification>,
+    pub badges: BadgeTray,
+    pub pty_tx: Sender<PtyNotification>,
     pty_rx: Receiver<PtyNotification>,
     /// Hook events from the per-session agent IPC servers. Each
     /// [`crate::agent_ipc::serve_agent_hooks`] task holds a clone of the
@@ -1297,8 +1297,8 @@ pub struct Stoat {
     /// Per-file shards from the cold-build scan, drained each tick into the
     /// owning workspace's [`Workspace::code_graph`]. Unbounded so the
     /// streaming build never blocks on a full channel.
-    pub(crate) index_update_tx: UnboundedSender<IndexUpdate>,
-    index_update_rx: UnboundedReceiver<IndexUpdate>,
+    pub index_update_tx: UnboundedSender<IndexUpdate>,
+    pub index_update_rx: UnboundedReceiver<IndexUpdate>,
     /// Window focus, resize, and close events forwarded by the reader task that
     /// connects to stoatty's `STOATTY_WINDOW_SOCKET`. Drained each tick into
     /// [`Self::handle_window_ipc`].
@@ -1321,12 +1321,12 @@ pub struct Stoat {
     /// way. Distinct from [`Self::stoatty`], which says a stoatty answered:
     /// a plain terminal reports too, and a reconnect waits on the report
     /// rather than on the protocol.
-    pub(crate) terminal_reported: bool,
+    pub terminal_reported: bool,
     /// Whether an active workspace carries a remote target that has not been
     /// reconnected to yet. Set when a restore or a switch makes such a
     /// workspace active, cleared by [`crate::ssh::reconnect_when_ready`] once
     /// the terminal report lets the handoff run.
-    pub(crate) remote_pending: bool,
+    pub remote_pending: bool,
     /// Pixels per cell as the tty reports them, or `None` while it has not.
     ///
     /// An image is transmitted in pixels and placed in cells, so fitting one to
@@ -1351,11 +1351,11 @@ pub struct Stoat {
     /// The claim needs both a stoatty and a window socket reaching this process,
     /// which arrive independently and in either order, so this keeps whichever
     /// lands second from claiming twice and the release from going out unclaimed.
-    pub(crate) zoom_claimed: bool,
+    pub zoom_claimed: bool,
     /// Aux windows stoatty has been told to open, keyed by window id with the
     /// cell size last sent. [`Self::emit_windows`] diffs it against the detached
     /// panes each frame to emit the WindowOpen and WindowClose commands.
-    pub(crate) aux_windows: std::collections::BTreeMap<u32, (u16, u16)>,
+    pub aux_windows: std::collections::BTreeMap<u32, (u16, u16)>,
     /// The pool cursor last shipped for a focused detached pane, as `(pool, row,
     /// col)`, so [`Self::emit_smooth_scroll`] re-emits only when it moves and an
     /// idle frame ships nothing. `None` when no detached pane holds focus.
@@ -1404,7 +1404,7 @@ pub struct Stoat {
     /// (e.g. the file finder's workspace walk completing on the
     /// blocking pool). Multiple notifications collapse into one
     /// pending wake-up.
-    pub(crate) redraw_notify: Arc<tokio::sync::Notify>,
+    pub redraw_notify: Arc<tokio::sync::Notify>,
     /// The same wake-up for a task whose result is not on screen.
     ///
     /// [`Self::run`] drains the debounce channels on it and paints only when
@@ -1412,7 +1412,7 @@ pub struct Stoat {
     /// case in point. Its throttle expiring has a file to write and a grid that
     /// did not change, so waking through [`Self::redraw_notify`] repaints every
     /// pane and re-emits every decoration stream for nothing.
-    pub(crate) drain_notify: Arc<tokio::sync::Notify>,
+    pub drain_notify: Arc<tokio::sync::Notify>,
     /// The wake-up for a finished syntax parse.
     ///
     /// [`Self::run`] installs the landed tokens on it and paints only when they
@@ -1432,7 +1432,7 @@ pub struct Stoat {
     pub(crate) perf: crate::perf::PerfStats,
     /// A cross-file changed-file hop scanning off the UI thread, applied by
     /// [`action_handlers::movement::pump_changed_file_jump`] when it lands.
-    pub(crate) pending_changed_file_jump: Option<action_handlers::movement::PendingChangedFileJump>,
+    pub pending_changed_file_jump: Option<action_handlers::movement::PendingChangedFileJump>,
     /// The conflicted files an open reads and aligns off the UI thread, applied
     /// by [`action_handlers::conflict_view::pump_conflict_file`] when they land.
     ///
@@ -1450,7 +1450,7 @@ pub struct Stoat {
     /// lands.
     pub(crate) pending_diff_nav_jump: Option<crate::code_index::nav::PendingDiffNavJump>,
     /// In-flight code-search scan streaming match batches from the blocking pool.
-    pub(crate) pending_code_search: Option<action_handlers::code_search::PendingCodeSearch>,
+    pub pending_code_search: Option<action_handlers::code_search::PendingCodeSearch>,
     /// Timer that forwards the latest code-search query on
     /// [`Self::code_search_query_tx`] after [`debounce::CODE_SEARCH_DEBOUNCE`]. A new
     /// keystroke drops it, cancelling the pending scan trigger.
@@ -1506,7 +1506,7 @@ pub struct Stoat {
     pub(crate) lsp_badge_rect: Option<Rect>,
     /// Whether the detailed LSP status popout is pinned open, toggled by
     /// `ToggleLspStatus`. Off by default. A runtime session flag, not persisted.
-    pub(crate) lsp_status_pinned: bool,
+    pub lsp_status_pinned: bool,
     /// Whether the pointer currently rests on the LSP badge, which opens the
     /// status popout for as long as it does. Set from [`Self::lsp_badge_rect`] by
     /// the hover handler and cleared when no badge paints.
@@ -1526,7 +1526,7 @@ pub struct Stoat {
     pub screen_hints_hidden: bool,
     /// Grouped hint rows cached for the current keymap-state hash, letting an
     /// unchanged frame skip the full keybinding walk and regrouping.
-    pub(crate) hints_cache: Option<crate::render::hints::HintsCache>,
+    pub hints_cache: Option<crate::render::hints::HintsCache>,
     /// Whether LSP inlay hints are requested and rendered for the focused
     /// editor. Toggled by `ToggleInlayHints`, off by default. Not persisted.
     pub(crate) inlay_hints_enabled: bool,
@@ -1536,7 +1536,7 @@ pub struct Stoat {
     pub(crate) pending_inlay_hint_request: Pending<Option<action_handlers::lsp::InlayHintResponse>>,
     /// `(buffer, version, first row, last row)` the inlay-hint trigger last
     /// requested for, so an unchanged tick does not re-request.
-    pub(crate) last_inlay_hint_key: Option<(BufferId, u64, u32, u32)>,
+    pub last_inlay_hint_key: Option<(BufferId, u64, u32, u32)>,
     /// In-flight document-highlight request, armed by
     /// [`crate::lsp::document_highlight::document_highlight_trigger`] behind a
     /// debounce and applied by
@@ -1597,11 +1597,11 @@ pub struct Stoat {
     /// which stamps [`Self::pending_message_deadline`]. The message
     /// stays visible until that deadline passes or a newer message
     /// replaces it, and input no longer clears it.
-    pub(crate) pending_message: Option<String>,
+    pub pending_message: Option<String>,
     /// The kind of [`Self::pending_message`], which picks its color.
     /// [`Self::set_status`] sets [`MessageKind::Alert`], and
     /// [`Self::notify`] sets the kind it takes.
-    pub(crate) pending_message_kind: MessageKind,
+    pub pending_message_kind: MessageKind,
     /// When the current [`Self::pending_message`] expires, on the
     /// scheduler clock. [`crate::render::frame`] clears the message
     /// once [`Executor::now`] reaches this.
@@ -1662,7 +1662,7 @@ pub struct Stoat {
     /// hits an unbound key in normal or select mode, or in the held review
     /// and walkthrough modes. Consumed once via `take_pending_count` and
     /// cleared after every action dispatch.
-    pub(crate) pending_count: Option<u32>,
+    pub pending_count: Option<u32>,
     /// Pending Vim-style find-char prefix (`f`/`F`/`t`/`T`). When
     /// Some, the next printable char keypress runs the matching
     /// find on the focused editor and clears this field. The
@@ -1702,7 +1702,7 @@ pub struct Stoat {
     /// While true, the next printable char keypress in normal/select
     /// mode replaces every character in every non-empty selection
     /// with that char and clears the flag.
-    pub(crate) pending_replace: bool,
+    pub pending_replace: bool,
     /// Set after a `SurroundAdd` action arms the chord. While true,
     /// the next printable char keypress in normal/select mode wraps
     /// every non-empty selection with that char's surround pair via
@@ -1748,7 +1748,7 @@ pub struct Stoat {
     /// `/` (forward) or `?` (reverse) search query; cleared by
     /// [`action_handlers::search::search_submit`] or
     /// [`action_handlers::search::search_cancel`].
-    pub(crate) search_input: Option<action_handlers::search::SearchInputState>,
+    pub search_input: Option<action_handlers::search::SearchInputState>,
     /// The texts of the buffers a search last scanned, held across the
     /// prompt's keystrokes and each `n` and `N`. See
     /// [`SearchText`](action_handlers::search::SearchText).
@@ -1792,7 +1792,7 @@ pub struct Stoat {
     /// macros and `insert_register`. Unnamed and named registers
     /// live in-process; system / primary clipboard variants are
     /// stubbed until the `arboard` backend lands.
-    pub(crate) registers: register::RegisterStore,
+    pub registers: register::RegisterStore,
     /// Set after `SelectRegister` arms the chord. The next
     /// printable char in normal/select mode is captured as the
     /// register name and stored in [`Self::selected_register`].
@@ -1802,7 +1802,7 @@ pub struct Stoat {
     ///
     /// Moved into [`Self::command_register`] by the next dispatch, so whatever
     /// command ran next is what spent the selection.
-    pub(crate) selected_register: Option<register::Register>,
+    pub selected_register: Option<register::Register>,
     /// Register the command being dispatched right now reads, taken off
     /// [`Self::selected_register`] before its handler runs.
     ///
@@ -1826,12 +1826,12 @@ pub struct Stoat {
     /// copies the selection to the clipboard only when `moved`, then clears the
     /// field. The flag keeps a plain click, now a 1-wide block cursor, from
     /// copying a character.
-    pub(crate) editor_drag: Option<(EditorId, BufferId, bool)>,
+    pub editor_drag: Option<(EditorId, BufferId, bool)>,
     /// The in-flight terminal-pane selection drag, or `None` when no drag is
     /// active. Holds the dragged pane's [`TermId`] and whether the pointer has
     /// moved since the press, so `Up(Left)` copies the selection only for a real
     /// drag and a plain click leaves no selection behind.
-    pub(crate) terminal_drag: Option<(TermId, bool)>,
+    pub terminal_drag: Option<(TermId, bool)>,
     /// The pool id and the pool's own cell of the `pool_mouse` event being
     /// routed, or `None` outside one.
     ///
@@ -1847,7 +1847,7 @@ pub struct Stoat {
     /// to raise a hover popover. Motion events only arrive with mouse capture
     /// enabled, so with capture off this stays `None` and only the cursor
     /// trigger fires.
-    pub(crate) hover_cell: Option<(u16, u16)>,
+    pub hover_cell: Option<(u16, u16)>,
     /// Index of the diagnostic the mouse last resolved to, used to redraw only
     /// when the hovered diagnostic changes rather than on every motion event.
     pub(crate) hover_diag: Option<usize>,
@@ -1857,7 +1857,7 @@ pub struct Stoat {
     /// Set on `MouseEventKind::Down(Left)` over a split divider. While `Some`,
     /// `Drag(Left)` moves that boundary via `set_divider` and `Up(Left)` clears
     /// it. Takes over the pointer so pane handlers never see the drag.
-    pub(crate) divider_drag: Option<(NodeId, usize)>,
+    pub divider_drag: Option<(NodeId, usize)>,
     /// Which open modal's list/preview separator the pointer is moving, set on
     /// `MouseEventKind::Down(Left)` over that separator and cleared on
     /// `Up(Left)`. While `Some`, `Drag(Left)` writes the pointer's position back
@@ -1866,7 +1866,7 @@ pub struct Stoat {
     /// Named by kind rather than held as a bare flag because the share it writes
     /// is stored per kind, and the modal that armed the drag is the one it has to
     /// land on.
-    pub(crate) modal_separator_drag: Option<ModalKind>,
+    pub modal_separator_drag: Option<ModalKind>,
     /// Whether the pointer moves the commits screen's list/detail separator,
     /// set on `MouseEventKind::Down(Left)` over that line and cleared on
     /// `Up(Left)`. While set, `Drag(Left)` writes the pointer's position back
@@ -1874,13 +1874,13 @@ pub struct Stoat {
     ///
     /// A bare flag rather than a kind, because only one screen carries this
     /// separator and its share has one home.
-    pub(crate) commits_separator_drag: bool,
+    pub commits_separator_drag: bool,
     /// Set on `MouseEventKind::Down(Left)` over a pane's minimap strip. While
     /// `Some`, `Drag(Left)` scrubs the named editor's viewport or changes view
     /// to the pointer position and `Up(Left)` clears it. Takes over the pointer
     /// so the press never reaches the text-area cursor, the selection handling,
     /// or a changes view's rows.
-    pub(crate) minimap_drag: Option<MinimapDrag>,
+    pub minimap_drag: Option<MinimapDrag>,
     /// The workspace whose documents the language servers hold.
     ///
     /// Every workspace numbers its buffers from the same start, and the LSP
@@ -1899,7 +1899,7 @@ pub struct Stoat {
     /// returns the existing entry on second open, but the LSP
     /// notification must fire exactly once per buffer over its
     /// lifetime.
-    pub(crate) lsp_opened: std::collections::HashSet<BufferId>,
+    pub lsp_opened: std::collections::HashSet<BufferId>,
     /// Scratch the per-event LSP drains refill instead of allocating.
     ///
     /// Both drains need the whole `&mut Stoat` in their loop bodies, so neither
@@ -1967,7 +1967,7 @@ pub struct Stoat {
     /// `LspNotification::Diagnostics` arrives during
     /// [`Self::drain_lsp_notifications`]; surfaced by the status bar
     /// for the focused buffer.
-    pub(crate) diagnostics: crate::diagnostics::DiagnosticSet,
+    pub diagnostics: crate::diagnostics::DiagnosticSet,
     /// Most recent motion worth stepping through, recorded by the handler that
     /// ran it. `RepeatLastMotion` (Alt-.) replays it without reading another
     /// keypress.
@@ -1975,7 +1975,7 @@ pub struct Stoat {
     /// Filesystem the UI layer reads through. Swapped to
     /// [`crate::host::FakeFs`] in tests; all IO outside the host module
     /// itself must route through this field.
-    pub(crate) fs_host: Arc<dyn FsHost>,
+    pub fs_host: Arc<dyn FsHost>,
     /// Filesystem-change subscription host. Defaults to
     /// [`NoopFsWatcher`]; the bin layer installs
     /// [`crate::host::LocalFsWatcher`] and tests install
@@ -2026,7 +2026,7 @@ pub struct Stoat {
     /// A set covered by one timer rather than a task per path. A checkout or a
     /// formatter run names thousands of files at once, and the burst is what
     /// this has to survive.
-    pub(crate) index_pending_external_edits: std::collections::HashSet<PathBuf>,
+    pub index_pending_external_edits: std::collections::HashSet<PathBuf>,
     /// The one debounce timer covering whatever
     /// [`Self::index_pending_external_edits`] holds.
     ///
@@ -2102,7 +2102,7 @@ pub struct Stoat {
     /// never directly, and empty until a real `LocalLsp` is
     /// wired in. Tests install [`crate::host::FakeLsp`] as the sole client to
     /// drive end-to-end LSP scenarios.
-    pub(crate) lsp_registry: crate::lsp::registry::LspRegistry,
+    pub lsp_registry: crate::lsp::registry::LspRegistry,
     /// Whether opening a buffer whose language has a known server
     /// command may spawn a real language server, replacing the
     /// [`NoopLsp`] placeholder. Off by default so [`NoopLsp`] stays
@@ -2146,7 +2146,7 @@ pub struct Stoat {
     /// The `FollowChanges` and `FollowReload` actions are its only writers.
     /// Session-scoped and off at start, never persisted, because it answers
     /// what the reader watches now.
-    pub(crate) follow_changes: bool,
+    pub follow_changes: bool,
     /// Whether every open buffer re-reads its file when the file is written
     /// outside the editor.
     ///
@@ -2185,13 +2185,13 @@ pub struct Stoat {
     /// without stacking listeners on one path. A second bind of a live socket
     /// replaces the file and orphans the children already connected through it.
     /// Dropping a task stops its server, which removes its socket file.
-    pub(crate) agent_servers: std::collections::HashMap<WorkspaceUid, stoat_scheduler::Task<()>>,
+    pub agent_servers: std::collections::HashMap<WorkspaceUid, stoat_scheduler::Task<()>>,
     /// The live `stoat api watch` connections, in the order they registered.
     ///
     /// The run loop calls [`Self::notify_view_watchers`] after each turn that
     /// redraws. A watcher costs one `focus` and one `selection` report per
     /// redraw, and an empty list costs nothing.
-    view_watchers: Vec<ViewWatcher>,
+    pub view_watchers: Vec<ViewWatcher>,
     /// Finished direnv loads in the order they landed, drained by
     /// [`crate::project_env::install_pending`] in [`Self::drive_background`].
     ///
@@ -2224,8 +2224,7 @@ pub struct Stoat {
     /// Holding the task is what keeps the write scheduled. Keying by workspace
     /// makes a second save of the same workspace replace the first, so a run of
     /// switches leaves one write per workspace rather than a queue of them.
-    pub(crate) pending_workspace_saves:
-        std::collections::HashMap<WorkspaceId, stoat_scheduler::Task<()>>,
+    pub pending_workspace_saves: std::collections::HashMap<WorkspaceId, stoat_scheduler::Task<()>>,
     /// The open autosave window, armed by user input and cleared when its
     /// drain saves. `Some` means a save is already scheduled, which is what
     /// [`debounce::arm_workspace_autosave`] reads to leave the window alone
@@ -2261,7 +2260,7 @@ pub struct Stoat {
     /// the freshest in-progress operation. Drained from
     /// [`crate::host::LspHost::try_recv_notification`] inside
     /// [`Stoat::update`].
-    pub(crate) lsp_progress: crate::lsp::progress::LspProgressMap,
+    pub lsp_progress: crate::lsp::progress::LspProgressMap,
     /// The status bar's server list for the focused buffer, held across frames
     /// so a steady frame refreshes the busy flags rather than re-deriving the
     /// names. Transient render state, not persisted.
@@ -2289,7 +2288,7 @@ pub struct Stoat {
     /// [`action_handlers::pump_lsp_hover`] at the top of each render
     /// tick, which resolves the [`HoverOutcome`] into a popup or an
     /// honest status message.
-    pub(crate) pending_hover_request: Pending<crate::lsp::hover::HoverOutcome>,
+    pub pending_hover_request: Pending<crate::lsp::hover::HoverOutcome>,
 
     /// Hover popup content waiting to be painted. Set by
     /// [`action_handlers::pump_lsp_hover`] when a hover response lands.
@@ -2364,7 +2363,7 @@ pub struct Stoat {
     /// by the prepare-rename pump after a successful prepare response;
     /// consumed by `rename_input_submit` (Enter) which fires the
     /// rename request, or `rename_input_cancel` (Escape) which discards.
-    pub(crate) rename_input: Option<action_handlers::lsp::RenameInputState>,
+    pub rename_input: Option<action_handlers::lsp::RenameInputState>,
 
     /// In-flight `textDocument/rename` request issued after the user
     /// submits the rename input. Polled by
@@ -2453,7 +2452,7 @@ pub struct Stoat {
     /// debounce timer or downstream LSP request can land. Polled by
     /// [`crate::completion::request::pump`] each render tick, which resolves
     /// its outcome against [`Self::pending_completion`].
-    pub(crate) pending_completion_request: Pending<crate::completion::request::RequestOutcome>,
+    pub pending_completion_request: Pending<crate::completion::request::RequestOutcome>,
 
     /// The question an in-flight narrow was armed with.
     ///
@@ -2504,7 +2503,7 @@ pub struct Stoat {
     /// [`crate::completion::snippet::advance`] from the Tab
     /// arbitration arm in `handle_insert_key`. Cleared when insert
     /// mode exits so re-entering insert is not stuck mid-snippet.
-    pub(crate) active_snippet: Option<crate::completion::snippet::ActiveSnippet>,
+    pub active_snippet: Option<crate::completion::snippet::ActiveSnippet>,
 
     /// stoat's own `<semver> (<hash>[-dirty] <date>)` version string, shown by
     /// the `ShowVersion` action. Injected by the binary via
@@ -2534,7 +2533,7 @@ pub struct Stoat {
     /// while this process draws it. Set while the window belongs to a remote
     /// stoat, which is what holds back every frame, scene, image, window, pool,
     /// and minimap batch for the duration.
-    pub(crate) passthrough: Option<ssh::Passthrough>,
+    pub passthrough: Option<ssh::Passthrough>,
     /// The app's ends of the passthrough plumbing, installed by the bin layer
     /// after construction. `None` in a headless or embedded run, where `:ssh`
     /// and `:mosh` refuse because there is no terminal to hand over.
@@ -2578,7 +2577,7 @@ pub struct Stoat {
     /// [`Self::paint_into`] turns it into the curly-underline VT re-stamp carried
     /// on the frame. Reused across frames like [`Self::apc_scene`], down to each
     /// span's cell record, so a steady frame allocates nothing here.
-    pub(crate) pending_undercurls: UndercurlBatch,
+    pub pending_undercurls: UndercurlBatch,
     /// Counter bumped every time the active theme changes.
     ///
     /// Every pooled surface paints theme colors, so a page buffered in the
@@ -2610,45 +2609,45 @@ pub struct Stoat {
     /// pane id never returns, so an entry left behind would hold one pane's
     /// cells for the process. A switch back to another workspace repaints its
     /// panes once.
-    pub(crate) pane_cache: std::collections::HashMap<(WorkspaceId, PaneId), PaneCacheEntry>,
+    pub pane_cache: std::collections::HashMap<(WorkspaceId, PaneId), PaneCacheEntry>,
     /// How many panes this session has actually painted, as opposed to
     /// replayed.
     ///
     /// The whole point of the cache is a paint that does not happen, which
     /// leaves no trace in the frame it skipped. Counting is what lets a test
     /// say the skip occurred rather than that the output happened to match.
-    pub(crate) pane_paints: u64,
+    pub pane_paints: u64,
     /// How many pane paints this session captured for a later replay.
     ///
     /// A pane skips the capture through a run of frames that move its key, and
     /// a copy that does not happen leaves no trace either.
-    pub(crate) pane_captures: u64,
+    pub pane_captures: u64,
     /// How many pane replays this session left to the cells a held capture had
     /// already put back into the frame buffer.
     ///
     /// A copy that does not happen leaves no trace in the frame either, which
     /// is why a test counts it.
-    pub(crate) pane_replays_held: u64,
+    pub pane_replays_held: u64,
     /// How many key presses derived a keymap lookup.
     ///
     /// Whether a press consults the keymap is otherwise invisible, since the
     /// derivation only costs time. Counting it is what lets a test say the
     /// busiest keys still skip it.
-    #[cfg(test)]
-    pub(crate) keymap_lookups: std::cell::Cell<u64>,
+    #[cfg(any(test, feature = "test-support"))]
+    pub keymap_lookups: std::cell::Cell<u64>,
     /// How many times an editor's selection set was copied for an undo group.
     ///
     /// A copy nobody reads costs only time, so a test needs the count to say
     /// that an action which edits nothing stops paying for one.
-    #[cfg(test)]
-    pub(crate) selection_snapshots: std::cell::Cell<u64>,
+    #[cfg(any(test, feature = "test-support"))]
+    pub selection_snapshots: std::cell::Cell<u64>,
     /// How many times the focused mode was resolved.
     ///
     /// Resolving walks the modal stack and clones a pane-tree view, and costs
     /// nothing else, so a test needs the count to say the key guards ask once
     /// rather than once each.
-    #[cfg(test)]
-    pub(crate) focused_mode_reads: std::cell::Cell<u64>,
+    #[cfg(any(test, feature = "test-support"))]
+    pub focused_mode_reads: std::cell::Cell<u64>,
     /// How many times the completion popup's geometry was computed.
     ///
     /// Computing it locks the focused buffer to read the match prefix and
@@ -2715,12 +2714,12 @@ pub struct Stoat {
     /// Whether a visible run or terminal fed output since the last frame tick, so
     /// the tick repaints once rather than the output arm repainting per PTY chunk.
     /// A terminal that changed its title sets it too, visible or not.
-    pub(crate) pty_dirty: bool,
+    pub pty_dirty: bool,
     /// Wall-clock seconds an in-flight LSP work-done spinner has animated, mapped
     /// to a [`SPINNER_FRAMES`] glyph by [`spinner_phase`]. Advanced by the frame
     /// tick while progress is live and reset to zero when it ends, so each fresh
     /// progress starts at frame zero.
-    pub(crate) spinner_clock: f32,
+    pub spinner_clock: f32,
     /// Syntax-scope palette the minimap strips declare and their run summaries
     /// index, resolved from [`Self::theme`].
     pub(crate) minimap_class_table: crate::minimap::ClassTable,
@@ -3212,11 +3211,11 @@ impl Stoat {
             pane_paints: 0,
             pane_captures: 0,
             pane_replays_held: 0,
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-support"))]
             keymap_lookups: std::cell::Cell::new(0),
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-support"))]
             selection_snapshots: std::cell::Cell::new(0),
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-support"))]
             focused_mode_reads: std::cell::Cell::new(0),
             #[cfg(test)]
             completion_layouts: std::cell::Cell::new(0),
@@ -3437,7 +3436,7 @@ impl Stoat {
     /// for a stoatty already confirmed follows a change of the cell size, as a
     /// move to a display of another scale gives, and it repaints against that
     /// size and scale while the protocol of the first report stays.
-    fn handle_stoatty_present(&mut self, peer: Option<StoattyPeer>) -> UpdateEffect {
+    pub fn handle_stoatty_present(&mut self, peer: Option<StoattyPeer>) -> UpdateEffect {
         // Set before the check below, because a plain terminal reports `None`
         // and that answer still ends the wait a reconnect is gated on.
         self.terminal_reported = true;
@@ -3505,7 +3504,7 @@ impl Stoat {
     /// detached pane. `Focused{n}` focuses that window's pane, `Resized` re-sizes
     /// it, and `Closed` reattaches it. Every event is a no-op when no pane
     /// matches, absorbing a report that races a reattach.
-    fn handle_window_ipc(&mut self, message: WindowIpc) -> UpdateEffect {
+    pub fn handle_window_ipc(&mut self, message: WindowIpc) -> UpdateEffect {
         let event = match message {
             WindowIpc::Connected => {
                 self.window_ipc_connected = true;
@@ -4042,7 +4041,7 @@ impl Stoat {
     }
 
     /// Whether any minimap strip is currently shown.
-    pub(crate) fn minimap_enabled(&self) -> bool {
+    pub fn minimap_enabled(&self) -> bool {
         self.minimap_mode() != MinimapMode::Off
     }
 
@@ -4294,7 +4293,7 @@ impl Stoat {
     /// which a row set off the cell grid needs. The layout also needs the cell
     /// that [`Self::scaled_cell`] gives and the scale of the ident reply, since
     /// a nudge is in logical px.
-    pub(crate) fn pixel_rows(&self) -> Option<RowMetrics> {
+    pub fn pixel_rows(&self) -> Option<RowMetrics> {
         let cell = self
             .scaled_cell()
             .filter(|_| self.stoatty_protocol >= PAGE_NUDGE_PROTOCOL)?;
@@ -4420,12 +4419,12 @@ impl Stoat {
     /// A band takes two grid rows, and its elements draw off the cell grid at a
     /// nudge, which a terminal reads from [`NUDGE_PROTOCOL`] on. The bands
     /// stand on the window ground, so they need the islands too.
-    pub(crate) fn chrome_bands_on(&self) -> bool {
+    pub fn chrome_bands_on(&self) -> bool {
         self.islands_on() && self.stoatty_protocol >= NUDGE_PROTOCOL
     }
 
     /// The grid rows a status row takes, two for a band and one without.
-    pub(crate) fn status_rows(&self) -> u16 {
+    pub fn status_rows(&self) -> u16 {
         match self.chrome_bands_on() {
             true => 2,
             false => 1,
@@ -4436,7 +4435,7 @@ impl Stoat {
     ///
     /// A hidden bar takes none. A shown bar takes two as a band and one
     /// without, and its cells stay on the first of them.
-    pub(crate) fn tab_bar_rows(&self) -> u16 {
+    pub fn tab_bar_rows(&self) -> u16 {
         match (self.tab_bar_visible(), self.chrome_bands_on()) {
             (false, _) => 0,
             (true, true) => 2,
@@ -4462,7 +4461,7 @@ impl Stoat {
     ///
     /// A hidden banner takes none. A shown banner takes two as a band and one
     /// without, as the tab bar does, and its cells stay on the first of them.
-    pub(crate) fn banner_rows(&self) -> u16 {
+    pub fn banner_rows(&self) -> u16 {
         match (self.banner_shown(), self.chrome_bands_on()) {
             (false, _) => 0,
             (true, true) => 2,
@@ -4552,7 +4551,7 @@ impl Stoat {
     /// The window dims in one of two looks. Where [`Self::modal_scrim`] lays
     /// the theme's overlay over the window, this answers `0.0`, since the
     /// overlay dims the panes already. Elsewhere each pane fades by this.
-    pub(crate) fn modal_dim(&self) -> f32 {
+    pub fn modal_dim(&self) -> f32 {
         if !active_modal(self).is_some_and(ActiveModal::dims_window) || self.modal_scrim().is_some()
         {
             return 0.0;
@@ -4570,7 +4569,7 @@ impl Stoat {
     /// shadow is a drop or a halo. The terminal keeps the box of such a panel
     /// clear of the overlay, and every boxed modal frames with that role's
     /// shadow.
-    pub(crate) fn modal_scrim(&self) -> Option<([u8; 3], u8)> {
+    pub fn modal_scrim(&self) -> Option<([u8; 3], u8)> {
         let floats = matches!(
             self.theme.panel(PanelRole::Overlay).shadow,
             PanelShadow::Drop | PanelShadow::Halo
@@ -5054,7 +5053,7 @@ impl Stoat {
     /// True while any editor of the active workspace is mid scroll-glide, and
     /// while [`Self::is_flashing`] holds. OR each new animation source's
     /// condition in here, so that [`Self::run`]'s frame timer covers it.
-    fn is_animating(&self) -> bool {
+    pub fn is_animating(&self) -> bool {
         self.is_gliding() || self.is_flashing()
     }
 
@@ -5092,7 +5091,7 @@ impl Stoat {
     /// it fades out, so its wash or mark steps at frame rate. A stoatty glide
     /// takes that repaint too, because the wash paints on the live grid alone,
     /// and the flash resumes there once the glide settles.
-    fn frame_tick(&mut self, dt: f32) -> UpdateEffect {
+    pub fn frame_tick(&mut self, dt: f32) -> UpdateEffect {
         let gliding = self.is_gliding();
         let building = self.minimap_build_pending;
         let effect = if self.tick_scroll_anim(dt) {
@@ -5264,7 +5263,10 @@ impl Stoat {
     /// That bound decides how much work one turn does, and nothing more. The
     /// frame between two turns comes from the caller's select, where the pty
     /// arm sits behind every other one, and from the yield that turn ends on.
-    fn drain_pending(&mut self, events: &mut UnboundedReceiver<Event>) -> (UpdateEffect, usize) {
+    pub fn drain_pending(
+        &mut self,
+        events: &mut UnboundedReceiver<Event>,
+    ) -> (UpdateEffect, usize) {
         let mut effect = UpdateEffect::None;
         let mut coalesced = 0;
 
@@ -5396,7 +5398,7 @@ impl Stoat {
     /// inside a git repository. A non-repo root, such as stoat launched from a
     /// bare home directory, returns early without building or watching, so the
     /// index never spans an unbounded tree.
-    pub(crate) fn start_index_build(&mut self) {
+    pub fn start_index_build(&mut self) {
         let workspace = self.active_workspace;
         let git_root = self.active_workspace().git_root.clone();
         if !self.watch_active_root() {
@@ -5514,7 +5516,7 @@ impl Stoat {
     ///
     /// The re-resolution after the loop is outside both bounds. It runs once
     /// and has to see every update the loop merged.
-    pub(crate) fn drain_index_updates(&mut self) {
+    pub fn drain_index_updates(&mut self) {
         let started = self.executor.now();
         let mut resolve_pending: std::collections::HashSet<WorkspaceId> =
             std::collections::HashSet::new();
@@ -5762,7 +5764,7 @@ impl Stoat {
     /// the result on the next [`Self::drive_background`], or drops it if the
     /// workspace stopped being fresh while the restore ran. Keeping the read and
     /// op-log replay off the main thread lets the first frame paint immediately.
-    pub(crate) fn spawn_workspace_restore(&mut self, workspace: WorkspaceId, path: PathBuf) {
+    pub fn spawn_workspace_restore(&mut self, workspace: WorkspaceId, path: PathBuf) {
         self.show_restore_badge(workspace);
 
         let executor = self.executor.clone();
@@ -6392,7 +6394,7 @@ impl Stoat {
         memo: &'memo mut KeymapLookup,
     ) -> &'memo Option<BoundActions> {
         memo.0.get_or_insert_with(|| {
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-support"))]
             self.keymap_lookups.set(self.keymap_lookups.get() + 1);
 
             let state = StoatKeymapState::from_stoat(self);
@@ -6400,7 +6402,7 @@ impl Stoat {
         })
     }
 
-    fn handle_key(&mut self, key: KeyEvent) -> UpdateEffect {
+    pub fn handle_key(&mut self, key: KeyEvent) -> UpdateEffect {
         debug_assert_modal_exclusivity(self);
 
         // A version notice is a one-shot message. Any key press retires it.
@@ -7186,7 +7188,7 @@ impl Stoat {
     ///
     /// A binding that names the pane kind outranks passthrough for a key that
     /// types no character. See [`Self::passthrough_binding`].
-    fn term_input_target(&self) -> Option<TermId> {
+    pub fn term_input_target(&self) -> Option<TermId> {
         if self.focused_editor_ids().is_some() || active_modal(self).is_some() {
             return None;
         }
@@ -7212,7 +7214,7 @@ impl Stoat {
         }
         let pane = keymap_state::pane_predicate(self.active_workspace())?;
 
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         self.keymap_lookups.set(self.keymap_lookups.get() + 1);
 
         self.keymap
@@ -7354,7 +7356,7 @@ impl Stoat {
     ///
     /// Sampled before and after a key so the post-key view-follow can tell when
     /// the key moved the cursor and the view must follow it.
-    pub(crate) fn focused_cursor_pos(&mut self) -> Option<(BufferId, usize)> {
+    pub fn focused_cursor_pos(&mut self) -> Option<(BufferId, usize)> {
         let editor = action_handlers::focused_editor_mut(self)?;
         let snapshot = editor.display_map.snapshot();
         let buffer_snapshot = snapshot.buffer_snapshot();
@@ -7369,7 +7371,7 @@ impl Stoat {
 
     /// The Cmd that the palette's Run Block shows, or `None` while no Run Block
     /// shows.
-    pub(crate) fn run_block_cmd(&self) -> Option<CmdId> {
+    pub fn run_block_cmd(&self) -> Option<CmdId> {
         self.command_palette
             .as_ref()?
             .block
@@ -7768,8 +7770,8 @@ impl Stoat {
     /// its list's mode, and a focused terminal or agent pane its
     /// [`TermSession::mode`]. With no such target the mode falls back to
     /// [`Self::fallback_mode`].
-    pub(crate) fn focused_mode(&self) -> &str {
-        #[cfg(test)]
+    pub fn focused_mode(&self) -> &str {
+        #[cfg(any(test, feature = "test-support"))]
         self.focused_mode_reads
             .set(self.focused_mode_reads.get() + 1);
 
@@ -7889,15 +7891,15 @@ impl Stoat {
     /// The foreground app screen as the `view` predicate reports it, or `None`
     /// for a plain editor with nothing focused. Screens (review/commits/rebase/
     /// reword/conflict) are derived from session state rather than the mode.
-    #[cfg(test)]
-    pub(crate) fn current_view(&self) -> Option<&'static str> {
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn current_view(&self) -> Option<&'static str> {
         keymap_state::view_predicate(self.active_workspace())
     }
 
     /// The focused terminal or agent pane's [`TermId`], if the focused pane is
     /// one. Unlike [`Self::term_input_target`] this does not gate on the mode,
     /// so [`Self::focused_mode`] can consult it without recursing.
-    fn focused_term_id(&self) -> Option<TermId> {
+    pub fn focused_term_id(&self) -> Option<TermId> {
         let ws = self.active_workspace();
         let FocusTarget::SplitPane = ws.focus else {
             return None;
@@ -8063,7 +8065,7 @@ impl Stoat {
     /// insert-run buffer. Entering any insert-like mode (`insert`,
     /// `reword_insert`) starts a fresh run, and leaving discards it, having
     /// read whether it holds anything.
-    pub(crate) fn transition_mode(&mut self, next: String) {
+    pub fn transition_mode(&mut self, next: String) {
         let was_insert = is_insert_run_mode(self.focused_mode());
         let now_insert = is_insert_run_mode(&next);
         let leaving_insert = was_insert && !now_insert;
@@ -8527,7 +8529,7 @@ impl Stoat {
     ///
     /// One walk for every cursor's endpoints rather than a root descent per
     /// anchor, which a multi-cursor session pays on every typed character.
-    fn editor_cursor_offsets(&mut self, editor_id: EditorId) -> Vec<(usize, usize)> {
+    pub fn editor_cursor_offsets(&mut self, editor_id: EditorId) -> Vec<(usize, usize)> {
         let ws = self.active_workspace_mut();
         let Some(editor) = ws.editors.get_mut(editor_id) else {
             return Vec::new();
@@ -8813,7 +8815,7 @@ impl Stoat {
     }
 
     /// Byte offset of the focused editor's newest cursor.
-    pub(crate) fn newest_cursor_offset(&mut self, editor_id: EditorId) -> Option<usize> {
+    pub fn newest_cursor_offset(&mut self, editor_id: EditorId) -> Option<usize> {
         let ws = self.active_workspace_mut();
         let editor = ws.editors.get_mut(editor_id)?;
         let snapshot = editor.display_map.snapshot();
@@ -9303,7 +9305,7 @@ impl Stoat {
     /// trailing entry for the whole list. The caller builds it once for every
     /// selection it has to move, which is what keeps a delete over many cursors
     /// from walking the range list per cursor.
-    fn offset_after_deletions(
+    pub fn offset_after_deletions(
         target: usize,
         ranges: &[(usize, usize)],
         deleted_before: &[usize],
@@ -9322,7 +9324,7 @@ impl Stoat {
     /// `ev.uid`, creating the [`AgentStatus`] on first contact. Returns
     /// [`UpdateEffect::None`] when no live workspace owns that session, e.g.
     /// the workspace closed before its agent's events drained.
-    pub(crate) fn handle_agent_event(&mut self, ev: AgentEvent) -> UpdateEffect {
+    pub fn handle_agent_event(&mut self, ev: AgentEvent) -> UpdateEffect {
         let Some((_, ws)) = self.workspaces.iter_mut().find(|(_, ws)| ws.uid == ev.uid) else {
             return UpdateEffect::None;
         };
@@ -9372,7 +9374,7 @@ impl Stoat {
     /// redraws, the run loop sends the reports again to each watcher whose
     /// view changed. A watch for a session that no workspace holds replies an
     /// error and registers nothing.
-    pub(crate) fn handle_agent_control(&mut self, ctl: AgentControl) -> UpdateEffect {
+    pub fn handle_agent_control(&mut self, ctl: AgentControl) -> UpdateEffect {
         match ctl {
             AgentControl::Open {
                 uid,
@@ -9630,7 +9632,7 @@ impl Stoat {
     /// session when they differ from the view it got last.
     ///
     /// A watcher whose connection is gone fails its send and goes.
-    fn notify_view_watchers(&mut self) {
+    pub fn notify_view_watchers(&mut self) {
         // The reports borrow all of `self`, so the list leaves it for the pass.
         let mut watchers = std::mem::take(&mut self.view_watchers);
         watchers.retain_mut(|watcher| {
@@ -9719,7 +9721,7 @@ impl Stoat {
         handled
     }
 
-    pub(crate) fn handle_pty_notification(&mut self, notif: PtyNotification) -> UpdateEffect {
+    pub fn handle_pty_notification(&mut self, notif: PtyNotification) -> UpdateEffect {
         match notif {
             PtyNotification::SshOutput { data } => ssh::forward_output(self, data),
             PtyNotification::SshExited { exit_status } => ssh::finish(self, exit_status),
@@ -10042,7 +10044,7 @@ impl Stoat {
     /// Returns whether an installed parse earned a frame. It does when its
     /// tokens restyled a row an editor shows, or any row of a buffer with a
     /// minimap strip, since the strip shows the whole file.
-    fn drive_parse_jobs(&mut self) -> bool {
+    pub fn drive_parse_jobs(&mut self) -> bool {
         let retention = self
             .settings
             .highlight_retention
@@ -10149,7 +10151,7 @@ impl Stoat {
     /// Blanking to the theme rather than to Reset is what keeps the ambient
     /// screen following `:theme`. The terminal resolves a cell that reaches it
     /// at Reset against its own theme instead.
-    fn paint_into(
+    pub fn paint_into(
         &mut self,
         buf: &mut Buffer,
         blanked: Option<(&Cell, Vec<Hold>)>,
@@ -10322,7 +10324,7 @@ impl Stoat {
     /// [`Self::drive_background`] keeps the rest to itself. Loading the project
     /// environment, warming diffs, and driving parse jobs answer to a frame
     /// rather than to a request. A fixpoint has no reason to repeat them.
-    pub(crate) fn drive_pumps(&mut self) -> bool {
+    pub fn drive_pumps(&mut self) -> bool {
         let external = self.drain_external();
 
         let commits = action_handlers::pump_commits(self);
@@ -10795,4 +10797,642 @@ pub fn animating(stoat: &Stoat) -> bool {
 }
 
 #[cfg(test)]
-mod tests;
+mod tests {
+    use super::*;
+    use crate::{
+        apc_emit::{editor_page_content_version, osc_default_colors},
+        display_map::PaintVersion,
+        render::{review::DiffDials, walkthrough::Spotlight},
+    };
+    use crossterm::event::MouseButton;
+
+    /// A launch resolves the mouse capture policy before the UI thread starts,
+    /// then builds the settings, keymap and theme pool, and a config reload
+    /// builds them again. Each reads the 55 KB source, so each parsing it
+    /// separately puts milliseconds between the launch and its first frame.
+    #[test]
+    fn every_caller_of_the_embedded_config_reads_one_parse() {
+        assert!(
+            std::ptr::eq(embedded_config(), embedded_config()),
+            "the defaults are parsed once and shared from there on",
+        );
+    }
+
+    /// Kinds read their share independently, so one modal's dragged separator
+    /// must not move another's, and a kind never dragged keeps the layout's own
+    /// default.
+    /// A dragged separator lands on the column its pointer left at any body width.
+    /// The share of every column that a 134-column body lets the list take reads
+    /// back as that column, where a whole percent, 1.34 columns wide, skips a third
+    /// of them.
+    #[test]
+    fn every_dragged_column_of_a_wide_body_reads_back() {
+        let separator = SplitSeparator {
+            axis: SeparatorAxis::Columns,
+            line: 33,
+            span: 0..30,
+            body: 0..134,
+            min_list: crate::render::picker::MIN_PANE_COLUMNS,
+            min_preview: crate::render::picker::MIN_PANE_COLUMNS,
+        };
+        let landed: Vec<u16> = (24..=109)
+            .map(|column| {
+                let mouse = MouseEvent {
+                    kind: MouseEventKind::Drag(MouseButton::Left),
+                    column,
+                    row: 5,
+                    modifiers: KeyModifiers::NONE,
+                };
+                let share = separator.share_at(&mouse).expect("the body splits");
+                crate::render::picker::share_of(134, share)
+            })
+            .collect();
+
+        assert_eq!(landed, (24..=109).collect::<Vec<u16>>());
+    }
+
+    #[test]
+    fn the_repository_root_keeps_the_workspace_roots_spelling() {
+        let cases = [
+            ("/repo/sub", Some("/repo/"), "/repo"),
+            ("/repo", Some("/repo"), "/repo"),
+            ("/link/sub", Some("/real"), "/link/sub"),
+            ("/repo/sub", None, "/repo/sub"),
+        ];
+        let roots: Vec<PathBuf> = cases
+            .iter()
+            .map(|&(root, workdir, _)| repo_tree_root(Path::new(root), workdir.map(Path::new)))
+            .collect();
+        let expected: Vec<PathBuf> = cases
+            .iter()
+            .map(|&(_, _, tree)| PathBuf::from(tree))
+            .collect();
+        assert_eq!(roots, expected);
+    }
+
+    /// A cold build queues every shard at once, so the count never engages and
+    /// one turn merges the whole thing. The time bound is what ends that turn,
+    /// and it has to end it on its own rather than only alongside the count.
+    ///
+    /// The bound is read here rather than driven through a drain, since a wall
+    /// clock does not advance on command, and eight milliseconds of real
+    /// merging ties the answer to how fast the machine is.
+    #[test]
+    fn an_index_turn_ends_on_either_bound() {
+        let under = INDEX_DRAIN_BUDGET - std::time::Duration::from_millis(1);
+
+        assert!(
+            !index_turn_spent(INDEX_DRAIN_CAP - 1, under),
+            "inside both bounds the turn continues",
+        );
+        assert!(
+            index_turn_spent(INDEX_DRAIN_CAP, under),
+            "the count ends a turn of updates too cheap for the clock to see",
+        );
+        assert!(
+            index_turn_spent(1, INDEX_DRAIN_BUDGET),
+            "and the time ends a turn of one update the count would let run on",
+        );
+    }
+
+    /// Watches are registered per directory, so which directories get one is
+    /// the whole question. A recursive watch on the root covered `target/`,
+    /// `node_modules/`, and the object store, which on a built repo is most of
+    /// the tree and enough to exhaust the platform's watch limit.
+    ///
+    /// Stated as the watch set rather than as events, since whether a write
+    /// under an unwatched directory reports anything is the platform's
+    /// behavior rather than this code's.
+    #[test]
+    fn workspace_watches_cover_the_source_tree_and_the_git_refs() {
+        use crate::host::{FakeFs, FakeFsWatcher};
+
+        let fs = FakeFs::new();
+        fs.insert_files([
+            ("/repo/src/a.rs", "fn a() {}".as_bytes()),
+            ("/repo/src/deep/b.rs", "fn b() {}".as_bytes()),
+            ("/repo/target/debug/gen.rs", "gen".as_bytes()),
+            ("/repo/node_modules/pkg/i.js", "js".as_bytes()),
+            ("/repo/.git/refs/heads/main", "sha".as_bytes()),
+            ("/repo/.git/refs/heads/lee/topic", "sha".as_bytes()),
+            ("/repo/.git/objects/ab/cdef", "obj".as_bytes()),
+        ]);
+        let watcher = FakeFsWatcher::new();
+
+        watch_workspace_dirs(&fs, &watcher, Path::new("/repo"));
+
+        assert_eq!(
+            (watcher.watched_paths(), watcher.recursive_paths()),
+            (
+                vec![
+                    PathBuf::from("/repo"),
+                    PathBuf::from("/repo/.git"),
+                    PathBuf::from("/repo/.git/refs"),
+                    PathBuf::from("/repo/src"),
+                    PathBuf::from("/repo/src/deep"),
+                ],
+                vec![PathBuf::from("/repo/.git/refs")],
+            ),
+            "the source tree, .git flat for HEAD and the index, and the whole \
+                 refs tree for every branch tip, with nothing from a built tree or \
+                 the object store",
+        );
+    }
+
+    #[test]
+    fn a_landed_blank_job_behind_a_running_one_is_taken() {
+        let (_running, pending) = oneshot::channel();
+        let (ended, closed) = oneshot::channel();
+        drop(ended);
+        let (done, landed) = oneshot::channel();
+        let _ = done.send(BlankedBuffer {
+            buffer: Buffer::empty(Rect::new(0, 0, 3, 1)),
+            blank: Cell::EMPTY,
+            holds: Vec::new(),
+        });
+        let mut jobs = std::collections::VecDeque::from([pending, closed, landed]);
+
+        let taken = take_blanked(&mut jobs).map(|blanked| blanked.buffer.area.width);
+
+        assert_eq!(
+            (taken, jobs.len()),
+            (Some(3), 1),
+            "the landed buffer, with only the running job left",
+        );
+    }
+
+    #[test]
+    fn encode_paste_to_pty_normalizes_newlines_when_unbracketed() {
+        assert_eq!(encode_paste_to_pty("a\r\nb\nc", false), b"a\rb\rc".to_vec());
+    }
+
+    #[test]
+    fn encode_paste_to_pty_strips_a_nested_end_guard() {
+        assert_eq!(
+            encode_paste_to_pty("a\x1b[20\x1b[201~1~b", true),
+            b"\x1b[200~ab\x1b[201~".to_vec(),
+            "the guard that the first strip joins together goes too"
+        );
+    }
+
+    #[test]
+    fn hover_hit_test_inverts_the_stoatty_scale() {
+        use crate::render::hover::HoverPopup;
+        use ratatui::style::Style;
+
+        let mut popup = HoverPopup::new(
+            vec![vec![("x".repeat(60), Style::default())]],
+            0,
+            EditorId::default(),
+        );
+        popup.inner = Rect {
+            x: 0,
+            y: 0,
+            width: 50,
+            height: 3,
+        };
+        for cell in 0..40u16 {
+            let (line, col) = crate::render::hover::hover_hit_test(&popup, cell, 0, 232);
+            assert_eq!(line, 0);
+            assert_eq!(col, (cell as usize * 256 + 128) / 232);
+        }
+    }
+
+    #[test]
+    fn spinner_phase_advances_and_wraps() {
+        assert_eq!(spinner_phase(0.0), 0);
+        assert_eq!(spinner_phase(0.05), 0, "within the first frame window");
+        assert_eq!(spinner_phase(0.15), 1, "second frame");
+        assert_eq!(spinner_phase(0.95), 9, "last frame of the cycle");
+        assert_eq!(spinner_phase(1.05), 0, "wraps to the first frame");
+        assert_eq!(spinner_phase(1.15), 1);
+    }
+
+    /// The config error status names the error that starts first, by its line,
+    /// and counts the rest.
+    #[test]
+    fn the_config_error_status_names_the_earliest_error_and_counts_the_rest() {
+        let source = "line one\nline two\nline three";
+        let errors = [
+            stoat_config::ParseError::new(20..21, "later"),
+            stoat_config::ParseError::new(12..13, "earlier"),
+        ];
+        assert_eq!(
+            [
+                config_error_status(source, &errors),
+                config_error_status(source, &errors[..1]),
+            ],
+            ["config.stcfg:2: earlier (+1 more)", "config.stcfg:3: later"],
+        );
+    }
+
+    #[test]
+    fn update_effect_merge_keeps_most_urgent() {
+        let none = UpdateEffect::None;
+        let redraw = UpdateEffect::Redraw;
+        let quit = UpdateEffect::Quit;
+        assert_eq!(none.merge(redraw), redraw);
+        assert_eq!(redraw.merge(none), redraw);
+        assert_eq!(redraw.merge(quit), quit);
+        assert_eq!(quit.merge(redraw), quit);
+        assert_eq!(none.merge(none), none);
+    }
+
+    #[cfg(feature = "perf")]
+    #[test]
+    fn input_driven_frame_carries_an_input_timestamp() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        rt.block_on(async {
+            let mut h = Stoat::test();
+            h.stoat.persistence_disabled = true;
+
+            let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel::<Event>();
+            let (render_tx, render_rx) = watch::channel(None);
+            // Queue one input event and drop the sender. The loop drains the
+            // event (publishing its frame), then breaks on the closed channel
+            // before any background redraw can supersede it in the watch.
+            event_tx.send(Event::Resize(80, 24)).expect("send");
+            drop(event_tx);
+
+            tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                h.stoat.run(event_rx, render_tx),
+            )
+            .await
+            .expect("run should quit")
+            .expect("run ok");
+
+            let frame = render_rx.borrow();
+            let frame = frame.as_ref().expect("a frame was published");
+            assert!(
+                frame.input_time.is_some(),
+                "an events.recv()-driven frame carries the input timestamp"
+            );
+        });
+    }
+
+    #[cfg(feature = "perf")]
+    #[test]
+    fn notify_driven_frame_has_no_input_timestamp() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        rt.block_on(async {
+            let mut h = Stoat::test();
+            h.stoat.persistence_disabled = true;
+            // Give the frame a real size without routing through the event
+            // channel, so no input timestamp is captured.
+            h.stoat.update(Event::Resize(80, 24));
+            let shutdown = h.stoat.shutdown_handle();
+
+            let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel::<Event>();
+            let (render_tx, render_rx) = watch::channel(None);
+            // A redraw-notify wakes a frame with no input behind it. The biased
+            // loop takes the redraw arm, publishing a frame, then quits.
+            h.stoat.redraw_notify.notify_one();
+            shutdown.notify_one();
+            let _keep = event_tx;
+
+            tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                h.stoat.run(event_rx, render_tx),
+            )
+            .await
+            .expect("run should quit")
+            .expect("run ok");
+
+            let frame = render_rx.borrow();
+            let frame = frame.as_ref().expect("a frame was published");
+            assert!(
+                frame.input_time.is_none(),
+                "a redraw-notify frame carries no input timestamp"
+            );
+        });
+    }
+
+    #[test]
+    fn a_theme_defining_no_colors_pushes_nothing() {
+        assert!(
+            osc_default_colors(&crate::theme::Theme::empty()).is_empty(),
+            "with nothing to say, the terminal's own defaults stand",
+        );
+    }
+
+    #[test]
+    fn editor_page_content_version_tracks_the_cursor_line() {
+        let paint = PaintVersion::default();
+        let base = editor_page_content_version(
+            true,
+            3,
+            None,
+            Some(10),
+            0,
+            false,
+            0,
+            0.0,
+            DiffDials::shipped(),
+            0,
+            paint,
+            0,
+            None,
+            0,
+            None,
+            None,
+        );
+        assert_eq!(
+            base,
+            editor_page_content_version(
+                true,
+                3,
+                None,
+                Some(10),
+                0,
+                false,
+                0,
+                0.0,
+                DiffDials::shipped(),
+                0,
+                paint,
+                0,
+                None,
+                0,
+                None,
+                None,
+            ),
+            "identical inputs keep a buffered page cached"
+        );
+        assert_ne!(
+            base,
+            editor_page_content_version(
+                true,
+                3,
+                None,
+                Some(11),
+                0,
+                false,
+                0,
+                0.0,
+                DiffDials::shipped(),
+                0,
+                paint,
+                0,
+                None,
+                0,
+                None,
+                None,
+            ),
+            "a cursor-line move refills buffered pages"
+        );
+        assert_ne!(
+            base,
+            editor_page_content_version(
+                true,
+                3,
+                None,
+                None,
+                0,
+                false,
+                0,
+                0.0,
+                DiffDials::shipped(),
+                0,
+                paint,
+                0,
+                None,
+                0,
+                None,
+                None,
+            ),
+            "switching to absolute numbering refills"
+        );
+        assert_ne!(
+            base,
+            editor_page_content_version(
+                true,
+                3,
+                Some(72),
+                Some(10),
+                0,
+                false,
+                0,
+                0.0,
+                DiffDials::shipped(),
+                0,
+                paint,
+                0,
+                None,
+                0,
+                None,
+                None,
+            ),
+            "a wrap-width change refills buffered pages"
+        );
+        assert_ne!(
+            base,
+            editor_page_content_version(
+                true,
+                3,
+                None,
+                Some(10),
+                0,
+                true,
+                7,
+                0.0,
+                DiffDials::shipped(),
+                0,
+                paint,
+                0,
+                None,
+                0,
+                None,
+                None,
+            ),
+            "a diff-view hunk change refills buffered pages"
+        );
+        assert_ne!(
+            base,
+            editor_page_content_version(
+                true,
+                3,
+                None,
+                Some(10),
+                0,
+                false,
+                0,
+                0.0,
+                DiffDials {
+                    soften_scale: 1.5,
+                    ..DiffDials::shipped()
+                },
+                0,
+                paint,
+                0,
+                None,
+                0,
+                None,
+                None,
+            ),
+            "a soften step refills buffered pages rather than gliding stale colors"
+        );
+        assert_ne!(
+            base,
+            editor_page_content_version(
+                true,
+                3,
+                None,
+                Some(10),
+                0,
+                false,
+                0,
+                0.25,
+                DiffDials::shipped(),
+                0,
+                paint,
+                0,
+                None,
+                0,
+                None,
+                None,
+            ),
+            "a focus change to a dimmed pane refills buffered pages"
+        );
+        assert_ne!(
+            base,
+            editor_page_content_version(
+                true,
+                3,
+                None,
+                Some(10),
+                0,
+                false,
+                0,
+                0.0,
+                DiffDials::shipped(),
+                1,
+                paint,
+                0,
+                None,
+                0,
+                None,
+                None,
+            ),
+            "a buffer edit refills buffered pages"
+        );
+        assert_ne!(
+            base,
+            editor_page_content_version(
+                true,
+                3,
+                None,
+                Some(10),
+                0,
+                false,
+                0,
+                0.0,
+                DiffDials::shipped(),
+                0,
+                paint,
+                1,
+                None,
+                0,
+                None,
+                None,
+            ),
+            "a theme switch refills buffered pages"
+        );
+        assert_ne!(
+            base,
+            editor_page_content_version(
+                true,
+                3,
+                None,
+                Some(10),
+                0,
+                false,
+                0,
+                0.0,
+                DiffDials::shipped(),
+                0,
+                paint,
+                0,
+                None,
+                1,
+                None,
+                None,
+            ),
+            "a change of the printed diagnostic messages refills buffered pages"
+        );
+
+        let blamed = |blame| {
+            editor_page_content_version(
+                true,
+                3,
+                None,
+                Some(10),
+                0,
+                false,
+                0,
+                0.0,
+                DiffDials::shipped(),
+                0,
+                paint,
+                0,
+                None,
+                0,
+                blame,
+                None,
+            )
+        };
+        assert_ne!(
+            base,
+            blamed(Some(0)),
+            "the Blame Column turning on refills buffered pages"
+        );
+        assert_ne!(
+            blamed(Some(0)),
+            blamed(Some(1)),
+            "a landed blame refills buffered pages"
+        );
+
+        let lit = |start: usize| {
+            let spotlight = Spotlight {
+                range: start..=start + 4,
+                color: [1, 2, 3],
+                dim: 0.5,
+            };
+            editor_page_content_version(
+                true,
+                3,
+                None,
+                Some(10),
+                0,
+                false,
+                0,
+                0.0,
+                DiffDials::shipped(),
+                0,
+                paint,
+                0,
+                Some(&spotlight),
+                0,
+                None,
+                None,
+            )
+        };
+        assert_ne!(
+            base,
+            lit(6),
+            "a walkthrough spotlight coming on refills buffered pages"
+        );
+        assert_eq!(
+            lit(6),
+            lit(12),
+            "one moving to another annotation leaves the pool's version, since each \
+                 page carries where it lights in its own"
+        );
+    }
+}

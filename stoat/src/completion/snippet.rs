@@ -277,7 +277,7 @@ impl Snippet {
 /// then holds its ranges for every copy, so each tabstop puts a cursor in each
 /// copy.
 #[derive(Debug, Clone)]
-pub(crate) struct ActiveSnippet {
+pub struct ActiveSnippet {
     pub(crate) groups: std::collections::VecDeque<Vec<Range<Anchor>>>,
     /// Where each copy of the snippet ends the expansion, one anchor per copy.
     pub(crate) exit: Vec<Anchor>,

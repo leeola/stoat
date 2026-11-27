@@ -1,77 +1,101 @@
-use super::*;
-use crate::{
+use crossterm::event::{
+    Event, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+};
+use futures::FutureExt;
+use lsp_types::{NumberOrString, WorkDoneProgress, WorkDoneProgressBegin};
+use ratatui::{
+    buffer::{Buffer, Cell},
+    layout::Rect,
+    style::{Color, Modifier},
+};
+use serde_json::{json, Value};
+use std::{
+    io,
+    ops::Range,
+    path::{Path, PathBuf},
+    sync::Arc,
+};
+use stoat::{
+    action_handlers,
     action_handlers::lsp::RenameInputState,
-    agent_ipc::BridgeOutcome,
-    agent_status::AgentHookEvent,
+    agent_ipc::{AgentControl, AgentEvent, BridgeOutcome},
+    agent_status::{AgentHookEvent, AgentStatus},
+    alloc_trim,
     apc_emit::{
         display_map_stamp, editor_page_content_version, osc_default_colors, window_content_version,
     },
+    app::{
+        modal_split_share, modal_zoom_steps, MessageKind, ModalKind, Stoat, UpdateEffect,
+        WindowIpc, DEFAULT_KEYMAP, INDEX_DRAIN_CAP, MODAL_ZOOM_MAX, MODAL_ZOOM_MIN,
+        PTY_TURN_BUDGET_BYTES, REPO_RETRY, SCROLL_FRAME, STATUS_MESSAGE_TTL,
+    },
     auto_reload::ReloadFlash,
     badge::{Anchor as BadgeAnchor, Badge, BadgeSource, BadgeState},
+    buffer::BufferId,
+    buffer_registry::OpenOrigin,
+    code_index::build::IndexUpdate,
     commit_list::CommitListState,
+    debounce,
     debounce::{FS_WATCH_DEBOUNCE, INDEX_EDIT_DEBOUNCE},
     diff_changes::{DiffChangesState, Excerpt, RevealFlash},
-    display_map::{DisplayPoint, PaintVersion},
-    editor_state::EditorState,
-    host::{FsEventKind, LspNotification},
+    display_map::DisplayPoint,
+    editor_state::{EditorId, EditorState, ScrollGlide},
+    host::{FsEventKind, FsHost, LspNotification},
     input_parse::{self, InputStep},
     input_view::{InputView, SubmitTarget},
-    keymap::KeymapState,
+    keymap::{Keymap, KeymapState, StateValue},
+    keymap_state::{active_modal, ActiveModal, StoatKeymapState},
     minimap::density::{Density, Tier},
-    pane::{DockPanel, DockSide},
+    mouse,
+    mouse::MinimapDrag,
+    pane::{DockPanel, DockSide, DockVisibility, FocusTarget, PaneId, PaneTree, Placement, View},
+    quit_all_confirm::QuitAllConfirm,
     render::{
         content_lane,
         hints::HintRow,
         picker::test_support::{rounded_row_boxes, row_boxes, RowBox},
+        pixel_rows::RowMetrics,
         review::{DiffColumns, DiffDials, DiffLayout},
         undercurl::UnderlineKind,
-        walkthrough::Spotlight,
-        TypeScale, STATUS_LANE,
+        BlankedBuffer, Hold, TypeScale, STATUS_LANE,
     },
-    review_walk::ReturnRef,
-    run::{vterm::Handoff, GridSelection},
+    review_walk::{ReturnRef, ReviewWalk, WalkOrigin},
+    run::{vterm::Handoff, CmdId, GridSelection, PtyNotification, RunId},
+    ssh,
+    symbol_finder::SymbolFinder,
+    term_session::TermId,
     test_fixture::{
         fake_term_session, finder_layout, focused_editor_pane_area, mouse_event,
         open_indent_buffer, open_scratch_file, open_with_minimap_strip, palette_arg_layout,
         palette_sizing, picker_layout, seed, store_two_tours, target_picker_rows,
     },
     test_harness::{
+        draw_type_at_full_cell,
         keys::{ctrl, key},
         stoat_rooted,
     },
-    workspace::diff::DiffBase,
+    ui::StoattyPeer,
+    workspace::{diff::DiffBase, Workspace, WorkspaceId, WorkspaceUid},
 };
-use crossterm::event::{MouseButton, MouseEventKind};
-use lsp_types::{NumberOrString, WorkDoneProgress, WorkDoneProgressBegin};
-use ratatui::style::{Color, Modifier};
-use serde_json::Value;
-use std::{
-    ops::Range,
-    path::{Path, PathBuf},
+use stoat_action::OpenFile;
+use stoat_config::{LineNumbers, MinimapMode, Settings};
+use stoat_text::{Bias, Point, SelectionGoal};
+use stoatty_protocol::{
+    command::{self, PoolKind, PoolRegionCommand, ScrimCommand},
+    window_ipc::{MouseButton as IpcMouseButton, MouseKind, WindowIpcEvent},
+    BACKDROP_PANEL_PROTOCOL, NUDGE_PROTOCOL, PAGE_NUDGE_PROTOCOL, POOL_INSET_PROTOCOL,
 };
-use stoat_config::LineNumbers;
-use stoat_text::Point;
-use stoatty_protocol::command::{self, PoolKind, PoolRegionCommand, ScrimCommand};
-use tokio::sync::mpsc::{error::TryRecvError, UnboundedReceiver};
+use tokio::sync::{
+    mpsc::{error::TryRecvError, UnboundedReceiver},
+    oneshot, watch,
+};
 
 fn stoat_with_detached_pane(window: u32) -> (Stoat, PaneId) {
     let (mut stoat, _) = stoat_rooted("/repo");
     let ws = stoat.active_workspace_mut();
-    let detached = ws.panes.split(crate::pane::Axis::Vertical);
+    let detached = ws.panes.split(stoat::pane::Axis::Vertical);
     assert!(ws.panes.detach(detached, window));
     (stoat, detached)
-}
-
-/// A launch resolves the mouse capture policy before the UI thread starts,
-/// then builds the settings, keymap and theme pool, and a config reload
-/// builds them again. Each reads the 55 KB source, so each parsing it
-/// separately puts milliseconds between the launch and its first frame.
-#[test]
-fn every_caller_of_the_embedded_config_reads_one_parse() {
-    assert!(
-        std::ptr::eq(embedded_config(), embedded_config()),
-        "the defaults are parsed once and shared from there on",
-    );
 }
 
 #[test]
@@ -113,12 +137,12 @@ fn a_resize_lays_the_panes_out_above_the_status_row() {
 /// what lets the view rest between two rows.
 #[test]
 fn window_ipc_wheel_moves_the_editor_target_by_its_fraction() {
-    let mut h = crate::test_harness::TestHarness::with_size(40, 12);
+    let mut h = stoat::test_harness::TestHarness::with_size(40, 12);
     let body: String = (0..200).map(|i| format!("line {i}\n")).collect();
     let path = h.write_file("long.rs", &body);
     h.open_file(&path);
 
-    let target = |h: &mut crate::test_harness::TestHarness| {
+    let target = |h: &mut stoat::test_harness::TestHarness| {
         let editor = action_handlers::focused_editor_mut(&mut h.stoat).expect("editor");
         editor.scroll_row as f32 + editor.scroll_frac
     };
@@ -183,8 +207,8 @@ fn ctrl_colon_over_the_palette_keeps_its_query() {
 fn window_ipc_wheel_steps_a_picker_once_per_notch() {
     use stoat_action::OpenFileFinder;
 
-    let mut h = crate::test_harness::TestHarness::with_size(80, 24);
-    let root = std::path::PathBuf::from("/wheel-ipc-finder");
+    let mut h = stoat::test_harness::TestHarness::with_size(80, 24);
+    let root = PathBuf::from("/wheel-ipc-finder");
     for name in ["a.rs", "b.rs", "c.rs"] {
         h.fake_fs().insert_file(root.join(name), b"x\n");
     }
@@ -192,7 +216,7 @@ fn window_ipc_wheel_steps_a_picker_once_per_notch() {
     action_handlers::dispatch(&mut h.stoat, &OpenFileFinder);
     h.settle();
 
-    let selected = |h: &crate::test_harness::TestHarness| {
+    let selected = |h: &stoat::test_harness::TestHarness| {
         h.stoat
             .file_finder
             .as_ref()
@@ -224,7 +248,7 @@ fn window_ipc_wheel_steps_a_picker_once_per_notch() {
 #[test]
 fn window_ipc_wheel_lands_where_the_same_notches_land() {
     let landed = |precision: bool| {
-        let mut h = crate::test_harness::TestHarness::with_size(40, 12);
+        let mut h = stoat::test_harness::TestHarness::with_size(40, 12);
         let body: String = (0..200).map(|i| format!("line {i}\n")).collect();
         let path = h.write_file("long.rs", &body);
         h.open_file(&path);
@@ -269,6 +293,7 @@ fn window_ipc_closed_reattaches_pane() {
 /// since the rich protocol splatters raw payload over a foreign terminal.
 #[test]
 fn a_fresh_stoat_assumes_no_stoatty_is_listening() {
+    draw_type_at_full_cell();
     let scheduler = Arc::new(stoat_scheduler::TestScheduler::new());
     let stoat = Stoat::new(
         scheduler.executor(),
@@ -283,7 +308,7 @@ fn a_fresh_stoat_assumes_no_stoatty_is_listening() {
 /// listener has to repaint them rather than only affect later frames.
 #[test]
 fn a_confirmed_stoatty_sets_the_flag_and_repaints() {
-    let mut h = crate::test_harness::TestHarness::with_size(80, 24);
+    let mut h = stoat::test_harness::TestHarness::with_size(80, 24);
     h.stoat.stoatty = false;
 
     assert_eq!(
@@ -304,7 +329,7 @@ fn a_confirmed_stoatty_sets_the_flag_and_repaints() {
 /// would lose the distinction the version exists to carry.
 #[test]
 fn a_stoatty_predating_the_version_field_still_confirms_at_version_zero() {
-    let mut h = crate::test_harness::TestHarness::with_size(80, 24);
+    let mut h = stoat::test_harness::TestHarness::with_size(80, 24);
     h.stoat.stoatty = false;
 
     assert_eq!(
@@ -324,7 +349,7 @@ fn a_stoatty_predating_the_version_field_still_confirms_at_version_zero() {
 /// a path on the wrong machine.
 #[test]
 fn confirming_a_stoatty_sends_the_theme_defaults_and_claims_the_zoom() {
-    let mut h = crate::test_harness::TestHarness::with_size(80, 24);
+    let mut h = stoat::test_harness::TestHarness::with_size(80, 24);
     h.stoat.stoatty = false;
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
     h.stoat.set_apc_tx(tx);
@@ -365,7 +390,7 @@ fn the_zoom_claim_rides_the_handshake_alone() {
         out
     };
 
-    let mut h = crate::test_harness::TestHarness::with_size(80, 24);
+    let mut h = stoat::test_harness::TestHarness::with_size(80, 24);
     h.stoat.stoatty = false;
     h.stoat.window_ipc_connected = false;
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
@@ -398,7 +423,7 @@ fn the_zoom_claim_rides_the_handshake_alone() {
 
 #[test]
 fn an_unanswered_handshake_leaves_the_session_foreign() {
-    let mut h = crate::test_harness::TestHarness::with_size(80, 24);
+    let mut h = stoat::test_harness::TestHarness::with_size(80, 24);
     h.stoat.stoatty = false;
 
     assert_eq!(h.stoat.handle_stoatty_present(None), UpdateEffect::None);
@@ -418,7 +443,7 @@ fn peer(protocol: u32) -> StoattyPeer {
 /// new size, while the protocol of the first report stays.
 #[test]
 fn a_repeat_ident_report_repaints() {
-    let mut h = crate::test_harness::TestHarness::with_size(80, 24);
+    let mut h = stoat::test_harness::TestHarness::with_size(80, 24);
     h.stoat.stoatty = false;
     h.stoat
         .handle_stoatty_present(Some(peer(stoatty_protocol::PROTOCOL_VERSION)));
@@ -437,7 +462,7 @@ fn a_repeat_ident_report_repaints() {
 /// zero states none, and so does a report of no stoatty.
 #[test]
 fn an_ident_report_keeps_its_display_scale() {
-    let mut h = crate::test_harness::TestHarness::with_size(80, 24);
+    let mut h = stoat::test_harness::TestHarness::with_size(80, 24);
     h.stoat.stoatty = false;
     let mut report = |scale, protocol: Option<u32>| {
         let peer = protocol.map(|protocol| StoattyPeer { protocol, scale });
@@ -462,7 +487,7 @@ fn an_ident_report_keeps_its_display_scale() {
 /// under none short of any of the three.
 #[test]
 fn a_list_lays_out_by_pixels_from_the_page_nudge_protocol() {
-    let mut h = crate::test_harness::TestHarness::with_size(80, 24);
+    let mut h = stoat::test_harness::TestHarness::with_size(80, 24);
     h.stoat.cell_pixels = Some((9, 18));
     let mut rows = |protocol, scale| {
         h.stoat.stoatty_protocol = protocol;
@@ -489,7 +514,7 @@ fn a_list_lays_out_by_pixels_from_the_page_nudge_protocol() {
 /// state of `slot` after each. A repeat ident goes back to idle after each, as
 /// the input thread returns it once the answer is out.
 fn slot_after_cell_sizes(
-    h: &mut crate::test_harness::TestHarness,
+    h: &mut stoat::test_harness::TestHarness,
     slot: &ssh::PassthroughSlot,
     sizes: &[(u16, u16)],
 ) -> Vec<&'static str> {
@@ -564,8 +589,8 @@ fn wheel_ipc(lines: f32) -> WindowIpc {
 /// rendered in the diff view. The first line is unchanged, so it paints as
 /// a context row on both sides, and the removed line paints as a block row
 /// on the left.
-fn diff_syntax_harness() -> crate::test_harness::TestHarness {
-    let mut h = crate::test_harness::TestHarness::with_size(120, 20);
+fn diff_syntax_harness() -> stoat::test_harness::TestHarness {
+    let mut h = stoat::test_harness::TestHarness::with_size(120, 20);
     // The column scans below address fixed side-by-side columns, so the
     // pane must span the full width rather than share it with a minimap.
     h.stoat.minimap_override = Some(false);
@@ -578,7 +603,7 @@ fn diff_syntax_harness() -> crate::test_harness::TestHarness {
         )],
     );
     h.stoat.set_diff_warm_auto(true);
-    h.open_file(std::path::Path::new("/repo/a.rs"));
+    h.open_file(Path::new("/repo/a.rs"));
     h.settle_diff_jobs();
     action_handlers::focused_editor_mut(&mut h.stoat)
         .expect("editor")
@@ -588,7 +613,7 @@ fn diff_syntax_harness() -> crate::test_harness::TestHarness {
 }
 
 /// The foreground of the first `glyph` cell on the row holding `text`.
-fn glyph_fg(h: &crate::test_harness::TestHarness, text: &str, glyph: &str) -> String {
+fn glyph_fg(h: &stoat::test_harness::TestHarness, text: &str, glyph: &str) -> String {
     let buf = h.rendered_buffer();
     let line = |y: u16| -> String {
         (0..buf.area.width)
@@ -606,7 +631,7 @@ fn glyph_fg(h: &crate::test_harness::TestHarness, text: &str, glyph: &str) -> St
 
 /// The distinct foregrounds of the non-blank cells in `cols` on the row
 /// holding `text`, which is one color exactly where nothing colors tokens.
-fn row_colors(h: &crate::test_harness::TestHarness, cols: Range<u16>, text: &str) -> usize {
+fn row_colors(h: &stoat::test_harness::TestHarness, cols: Range<u16>, text: &str) -> usize {
     let buf = h.rendered_buffer();
     let row = row_holding(buf, cols.clone(), text);
     cols.filter(|&x| !buf[(x, row)].symbol().trim().is_empty())
@@ -618,7 +643,7 @@ fn row_colors(h: &crate::test_harness::TestHarness, cols: Range<u16>, text: &str
 /// The glyphs of the cells in `cols` that carry `modifier`, on the row holding
 /// `text`.
 fn glyphs_with(
-    h: &crate::test_harness::TestHarness,
+    h: &stoat::test_harness::TestHarness,
     cols: Range<u16>,
     text: &str,
     modifier: Modifier,
@@ -643,25 +668,25 @@ fn row_holding(buf: &Buffer, cols: Range<u16>, text: &str) -> u16 {
 }
 
 /// The left text cells of the diff view `h` paints, before the mid-divider.
-fn diff_left_text(h: &crate::test_harness::TestHarness) -> Range<u16> {
+fn diff_left_text(h: &stoat::test_harness::TestHarness) -> Range<u16> {
     let cols = diff_columns(h);
     cols.left_text_x..cols.left_text_x + cols.left_content_w as u16
 }
 
 /// The right text cells of the diff view `h` paints.
-fn diff_right_text(h: &crate::test_harness::TestHarness) -> Range<u16> {
+fn diff_right_text(h: &stoat::test_harness::TestHarness) -> Range<u16> {
     let cols = diff_columns(h);
     cols.right_text_x..cols.right_text_x + cols.right_content_w as u16
 }
 
 /// The columns `h`'s frame lays a diff view of files under a hundred lines
 /// out in, rich as its theme resolves under stoatty.
-fn diff_columns(h: &crate::test_harness::TestHarness) -> DiffColumns {
+fn diff_columns(h: &stoat::test_harness::TestHarness) -> DiffColumns {
     let theme = &h.stoat.theme;
-    let rich = crate::render::review::diff_rich_gutter_scale(
+    let rich = stoat::render::review::diff_rich_gutter_scale(
         h.stoat.stoatty,
         theme,
-        theme.get(crate::theme::scope::UI_TEXT),
+        theme.get(stoat::theme::scope::UI_TEXT),
     );
     DiffColumns::compute(h.rendered_buffer().area, DiffLayout::diff_view(2, rich))
 }
@@ -670,15 +695,15 @@ fn diff_columns(h: &crate::test_harness::TestHarness) -> DiffColumns {
 /// pane takes room from its neighbor.
 #[test]
 fn a_zoom_step_with_no_modal_open_resizes_the_focused_pane() {
-    let mut h = crate::test_harness::TestHarness::with_size(101, 40);
+    let mut h = stoat::test_harness::TestHarness::with_size(101, 40);
     let left = h.stoat.active_workspace().panes.focus();
     let right = h
         .stoat
         .active_workspace_mut()
         .panes
-        .split(crate::pane::Axis::Vertical);
+        .split(stoat::pane::Axis::Vertical);
     h.stoat.active_workspace_mut().panes.set_focus(left);
-    let width = |h: &crate::test_harness::TestHarness, id| {
+    let width = |h: &stoat::test_harness::TestHarness, id| {
         h.stoat.active_workspace().panes.pane(id).area.width
     };
     assert_eq!((width(&h, left), width(&h, right)), (50, 50));
@@ -698,15 +723,15 @@ fn a_zoom_step_with_no_modal_open_resizes_the_focused_pane() {
 /// context further and the grow key brings it back.
 #[test]
 fn a_zoom_step_in_the_diff_view_tunes_the_soften_and_leaves_the_panes_alone() {
-    let mut h = crate::test_harness::TestHarness::with_size(101, 40);
+    let mut h = stoat::test_harness::TestHarness::with_size(101, 40);
     let left = h.stoat.active_workspace().panes.focus();
     let right = h
         .stoat
         .active_workspace_mut()
         .panes
-        .split(crate::pane::Axis::Vertical);
+        .split(stoat::pane::Axis::Vertical);
     h.stoat.active_workspace_mut().panes.set_focus(left);
-    let widths = |h: &crate::test_harness::TestHarness| {
+    let widths = |h: &stoat::test_harness::TestHarness| {
         (
             h.stoat.active_workspace().panes.pane(left).area.width,
             h.stoat.active_workspace().panes.pane(right).area.width,
@@ -737,7 +762,7 @@ fn a_zoom_step_in_the_diff_view_tunes_the_soften_and_leaves_the_panes_alone() {
     }
     assert_eq!(
         h.stoat.diff_soften,
-        crate::render::review::DIFF_SOFTEN_MAX,
+        stoat::render::review::DIFF_SOFTEN_MAX,
         "and stops where the receding stops"
     );
 
@@ -759,15 +784,15 @@ fn a_zoom_step_in_the_diff_view_tunes_the_soften_and_leaves_the_panes_alone() {
 /// contrast the reader is actually looking at.
 #[test]
 fn a_zoom_step_on_the_commits_screen_tunes_the_soften() {
-    let mut h = crate::test_harness::TestHarness::with_size(101, 40);
+    let mut h = stoat::test_harness::TestHarness::with_size(101, 40);
     let left = h.stoat.active_workspace().panes.focus();
     let right = h
         .stoat
         .active_workspace_mut()
         .panes
-        .split(crate::pane::Axis::Vertical);
+        .split(stoat::pane::Axis::Vertical);
     h.stoat.active_workspace_mut().panes.set_focus(left);
-    let widths = |h: &crate::test_harness::TestHarness| {
+    let widths = |h: &stoat::test_harness::TestHarness| {
         (
             h.stoat.active_workspace().panes.pane(left).area.width,
             h.stoat.active_workspace().panes.pane(right).area.width,
@@ -843,7 +868,7 @@ fn the_nine_and_zero_chords_step_the_tint_dial() {
     }
     assert_eq!(
         h.stoat.diff_tint,
-        crate::render::review::DIFF_TINT_MAX,
+        stoat::render::review::DIFF_TINT_MAX,
         "a press reaches the top and the rest hold there",
     );
 
@@ -875,7 +900,7 @@ fn the_nine_and_zero_chords_step_the_tint_dial() {
 /// meaning, wherever a diff is in front of the reader.
 #[test]
 fn the_tint_and_syntax_chords_answer_on_the_commits_screen() {
-    let mut h = crate::test_harness::TestHarness::with_size(101, 40);
+    let mut h = stoat::test_harness::TestHarness::with_size(101, 40);
     h.seed_linear_history("/repo", &[("c1", "first", &[("a.rs", "fn a() {}\n")])]);
     h.open_commits("/repo");
 
@@ -1118,12 +1143,12 @@ fn an_unclaimed_digit_chord_is_a_no_op() {
 fn a_zoom_step_with_a_modal_open_zooms_it_and_leaves_the_panes_alone() {
     use stoat_action::OpenFileFinder;
 
-    let mut h = crate::test_harness::TestHarness::with_size(101, 40);
+    let mut h = stoat::test_harness::TestHarness::with_size(101, 40);
     let left = h.stoat.active_workspace().panes.focus();
     h.stoat
         .active_workspace_mut()
         .panes
-        .split(crate::pane::Axis::Vertical);
+        .split(stoat::pane::Axis::Vertical);
     h.stoat.active_workspace_mut().panes.set_focus(left);
     action_handlers::dispatch(&mut h.stoat, &OpenFileFinder);
     h.settle();
@@ -1180,15 +1205,15 @@ fn an_inband_zoom_press_steps_a_modal_like_the_socket_event_does() {
 /// keymap alone would type the character instead.
 #[test]
 fn an_inband_zoom_press_with_no_modal_open_resizes_the_focused_pane() {
-    let mut h = crate::test_harness::TestHarness::with_size(101, 40);
+    let mut h = stoat::test_harness::TestHarness::with_size(101, 40);
     let left = h.stoat.active_workspace().panes.focus();
     let right = h
         .stoat
         .active_workspace_mut()
         .panes
-        .split(crate::pane::Axis::Vertical);
+        .split(stoat::pane::Axis::Vertical);
     h.stoat.active_workspace_mut().panes.set_focus(left);
-    let width = |h: &crate::test_harness::TestHarness, id| {
+    let width = |h: &stoat::test_harness::TestHarness, id| {
         h.stoat.active_workspace().panes.pane(id).area.width
     };
     assert_eq!((width(&h, left), width(&h, right)), (50, 50));
@@ -1223,7 +1248,7 @@ fn an_inband_zoom_press_with_no_modal_open_resizes_the_focused_pane() {
 fn a_macro_recorded_around_an_inband_zoom_press_does_not_carry_it() {
     use stoat_action as action;
 
-    let mut h = crate::test_harness::TestHarness::with_size(101, 40);
+    let mut h = stoat::test_harness::TestHarness::with_size(101, 40);
     action_handlers::dispatch(&mut h.stoat, &action::RecordMacro);
 
     h.stoat.update(inband_zoom(1));
@@ -1251,10 +1276,10 @@ fn a_macro_recorded_around_an_inband_zoom_press_does_not_carry_it() {
 /// `(58 + 6z).clamp(40, 58)`, and `modal_box` gives it height
 /// `(32 + 7z).clamp(12, 68)`. The box stops growing at level 6 and stops
 /// shrinking at level -3, both well inside the ledger's own range.
-fn zoomable_finder() -> crate::test_harness::TestHarness {
+fn zoomable_finder() -> stoat::test_harness::TestHarness {
     use stoat_action::OpenFileFinder;
 
-    let mut h = crate::test_harness::TestHarness::with_size(60, 70);
+    let mut h = stoat::test_harness::TestHarness::with_size(60, 70);
     action_handlers::dispatch(&mut h.stoat, &OpenFileFinder);
     h.settle();
     h.stoat
@@ -1266,7 +1291,7 @@ fn zoomable_finder() -> crate::test_harness::TestHarness {
 }
 
 /// The box the finder draws at the level the ledger currently holds for it.
-fn finder_box(h: &crate::test_harness::TestHarness) -> Option<Rect> {
+fn finder_box(h: &stoat::test_harness::TestHarness) -> Option<Rect> {
     mouse::open_modal_box(
         &h.stoat,
         ModalKind::FileFinder,
@@ -1371,7 +1396,7 @@ fn a_stale_zoom_level_moves_the_modal_on_its_first_step() {
 fn modal_zoom_steps_clamp_at_both_ends() {
     use stoat_action::OpenFileFinder;
 
-    let mut h = crate::test_harness::TestHarness::with_size(30, 20);
+    let mut h = stoat::test_harness::TestHarness::with_size(30, 20);
     action_handlers::dispatch(&mut h.stoat, &OpenFileFinder);
     h.settle();
     assert_eq!(
@@ -1399,46 +1424,13 @@ fn modal_zoom_steps_clamp_at_both_ends() {
     );
 }
 
-/// Kinds read their share independently, so one modal's dragged separator
-/// must not move another's, and a kind never dragged keeps the layout's own
-/// default.
-/// A dragged separator lands on the column its pointer left at any body width.
-/// The share of every column that a 134-column body lets the list take reads
-/// back as that column, where a whole percent, 1.34 columns wide, skips a third
-/// of them.
-#[test]
-fn every_dragged_column_of_a_wide_body_reads_back() {
-    let separator = SplitSeparator {
-        axis: SeparatorAxis::Columns,
-        line: 33,
-        span: 0..30,
-        body: 0..134,
-        min_list: crate::render::picker::MIN_PANE_COLUMNS,
-        min_preview: crate::render::picker::MIN_PANE_COLUMNS,
-    };
-    let landed: Vec<u16> = (24..=109)
-        .map(|column| {
-            let mouse = MouseEvent {
-                kind: MouseEventKind::Drag(MouseButton::Left),
-                column,
-                row: 5,
-                modifiers: KeyModifiers::NONE,
-            };
-            let share = separator.share_at(&mouse).expect("the body splits");
-            crate::render::picker::share_of(134, share)
-        })
-        .collect();
-
-    assert_eq!(landed, (24..=109).collect::<Vec<u16>>());
-}
-
 #[test]
 fn a_dragged_share_is_read_back_per_kind() {
-    let mut h = crate::test_harness::TestHarness::with_size(101, 40);
+    let mut h = stoat::test_harness::TestHarness::with_size(101, 40);
 
     assert_eq!(
         modal_split_share(&h.stoat.modal_split, ModalKind::FileFinder),
-        crate::render::picker::DEFAULT_LIST_SHARE,
+        stoat::render::picker::DEFAULT_LIST_SHARE,
         "an untouched kind sits at the default"
     );
 
@@ -1451,7 +1443,7 @@ fn a_dragged_share_is_read_back_per_kind() {
     );
     assert_eq!(
         modal_split_share(&h.stoat.modal_split, ModalKind::CommitPicker),
-        crate::render::picker::DEFAULT_LIST_SHARE,
+        stoat::render::picker::DEFAULT_LIST_SHARE,
         "and its sibling kinds are untouched"
     );
 }
@@ -1460,14 +1452,14 @@ fn a_dragged_share_is_read_back_per_kind() {
 /// owns the combo, so the step must not fall through to the panes it hides.
 #[test]
 fn a_zoomless_modal_swallows_the_step() {
-    let mut h = crate::test_harness::TestHarness::with_size(101, 40);
+    let mut h = stoat::test_harness::TestHarness::with_size(101, 40);
     let left = h.stoat.active_workspace().panes.focus();
     h.stoat
         .active_workspace_mut()
         .panes
-        .split(crate::pane::Axis::Vertical);
+        .split(stoat::pane::Axis::Vertical);
     h.stoat.active_workspace_mut().panes.set_focus(left);
-    h.stoat.quit_all_confirm = Some(QuitAllConfirm::new(&[], std::path::Path::new("/")));
+    h.stoat.quit_all_confirm = Some(QuitAllConfirm::new(&[], Path::new("/")));
 
     assert_eq!(
         h.stoat.handle_window_ipc(zoom(1)),
@@ -1503,7 +1495,7 @@ fn window_ipc_focused_moves_focus_to_and_from_the_windowed_pane() {
 }
 
 /// The buffer shown in the focused editor.
-fn focused_buffer(h: &crate::test_harness::TestHarness) -> BufferId {
+fn focused_buffer(h: &stoat::test_harness::TestHarness) -> BufferId {
     let (editor_id, _) = h.stoat.focused_editor_ids().expect("focused editor");
     h.stoat
         .active_workspace()
@@ -1515,7 +1507,7 @@ fn focused_buffer(h: &crate::test_harness::TestHarness) -> BufferId {
 
 #[test]
 fn window_ipc_side_buttons_walk_the_jumplist() {
-    use crate::test_harness::TestHarness;
+    use stoat::test_harness::TestHarness;
     use stoatty_protocol::window_ipc::MouseButton as IpcMouseButton;
 
     let mut h = TestHarness::with_size(40, 6);
@@ -1570,11 +1562,11 @@ fn window_ipc_side_buttons_walk_the_jumplist() {
 /// case, where they walk hunks back as its n arm and forward as its p arm.
 #[test]
 fn window_ipc_side_buttons_walk_changes_in_a_pinned_goto_chord() {
-    use crate::test_harness::TestHarness;
+    use stoat::test_harness::TestHarness;
     use stoatty_protocol::window_ipc::MouseButton as IpcMouseButton;
 
     let mut h = TestHarness::with_size(40, 20);
-    let workdir = std::path::PathBuf::from("/repo");
+    let workdir = PathBuf::from("/repo");
     h.stage_review_scenario(&workdir, &[("a.rs", "a\nb\nc\nd\ne\n", "a\nX\nc\nd\nY\n")]);
     h.stoat.set_diff_warm_auto(true);
     h.open_file(&workdir.join("a.rs"));
@@ -1612,7 +1604,7 @@ fn window_ipc_side_buttons_walk_changes_in_a_pinned_goto_chord() {
 
 #[test]
 fn a_side_button_jump_glides_the_view_back_to_the_entry() {
-    use crate::{editor_state::ScrollGlide, test_harness::TestHarness};
+    use stoat::{editor_state::ScrollGlide, test_harness::TestHarness};
     use stoatty_protocol::window_ipc::MouseButton as IpcMouseButton;
 
     let mut h = TestHarness::with_size(40, 12);
@@ -1661,7 +1653,7 @@ fn a_side_button_jump_glides_the_view_back_to_the_entry() {
 
 #[test]
 fn scroll_anim_tick_eases_offset_then_settles() {
-    use crate::test_harness::TestHarness;
+    use stoat::test_harness::TestHarness;
 
     let mut h = TestHarness::with_size(40, 12);
     let body: String = (0..200).map(|i| format!("line {i}\n")).collect();
@@ -1705,7 +1697,7 @@ fn scroll_anim_tick_eases_offset_then_settles() {
 
 #[test]
 fn wheel_coast_drags_cursor_into_view_no_key_snapback() {
-    use crate::test_harness::TestHarness;
+    use stoat::test_harness::TestHarness;
 
     let mut h = TestHarness::with_size(40, 12);
     let body: String = (0..200).map(|i| format!("line {i:03}\n")).collect();
@@ -1759,7 +1751,7 @@ fn wheel_coast_drags_cursor_into_view_no_key_snapback() {
 
 #[test]
 fn wheel_glide_keeps_cursor_planted_then_a_mid_glide_key_clamps_it() {
-    use crate::test_harness::TestHarness;
+    use stoat::test_harness::TestHarness;
 
     let mut h = TestHarness::with_size(40, 12);
     let body: String = (0..200).map(|i| format!("line {i:03}\n")).collect();
@@ -1814,7 +1806,7 @@ fn wheel_glide_keeps_cursor_planted_then_a_mid_glide_key_clamps_it() {
 
 #[test]
 fn wheel_glide_rehomes_the_cursor_when_velocity_drops() {
-    use crate::test_harness::TestHarness;
+    use stoat::test_harness::TestHarness;
 
     let mut h = TestHarness::with_size(40, 12);
     let body: String = (0..200).map(|i| format!("line {i:03}\n")).collect();
@@ -1895,18 +1887,18 @@ fn wheel_glide_rehomes_the_cursor_when_velocity_drops() {
     );
 }
 
-fn pane_scroll_state(h: &mut crate::test_harness::TestHarness) -> (u32, f32) {
+fn pane_scroll_state(h: &mut stoat::test_harness::TestHarness) -> (u32, f32) {
     let editor = action_handlers::focused_editor_mut(&mut h.stoat).expect("focused editor");
     (editor.scroll_row, editor.scroll_offset)
 }
 
 #[test]
 fn wheel_moves_file_finder_selection_not_the_pane() {
-    use crate::test_harness::TestHarness;
+    use stoat::test_harness::TestHarness;
     use stoat_action::OpenFileFinder;
 
     let mut h = TestHarness::with_size(80, 24);
-    let root = std::path::PathBuf::from("/finder-wheel");
+    let root = PathBuf::from("/finder-wheel");
     for name in ["a.rs", "b.rs", "c.rs"] {
         h.fake_fs().insert_file(root.join(name), b"x\n");
     }
@@ -1938,7 +1930,7 @@ fn wheel_moves_file_finder_selection_not_the_pane() {
 
 #[test]
 fn wheel_moves_palette_command_selection_not_the_pane() {
-    use crate::test_harness::TestHarness;
+    use stoat::test_harness::TestHarness;
     use stoat_action::OpenCommandPalette;
 
     let mut h = TestHarness::with_size(80, 24);
@@ -1969,10 +1961,10 @@ fn wheel_moves_palette_command_selection_not_the_pane() {
 
 #[test]
 fn wheel_moves_palette_arg_picker_selection() {
-    use crate::test_harness::TestHarness;
+    use stoat::test_harness::TestHarness;
 
     let mut h = TestHarness::with_size(80, 24);
-    let root = std::path::PathBuf::from("/arg-wheel");
+    let root = PathBuf::from("/arg-wheel");
     for name in ["a.rs", "b.rs", "c.rs"] {
         h.fake_fs().insert_file(root.join(name), b"x\n");
     }
@@ -2006,7 +1998,7 @@ fn wheel_moves_palette_arg_picker_selection() {
 #[test]
 fn a_press_under_a_wrapped_header_selects_the_row_under_the_pointer() {
     let mut h = Stoat::test();
-    let root = std::path::PathBuf::from("/wrap-press");
+    let root = PathBuf::from("/wrap-press");
     for name in ["a.rs", "ab.rs", "abc.rs"] {
         h.fake_fs().insert_file(root.join(name), b"x\n");
     }
@@ -2044,7 +2036,7 @@ fn a_press_under_a_wrapped_query_selects_the_command_under_the_pointer() {
     h.snapshot();
 
     let (rows, zoom, header_rows, doc_rows) = palette_sizing(&h);
-    let inner = crate::render::command_palette::palette_filter_layout(
+    let inner = stoat::render::command_palette::palette_filter_layout(
         h.stoat.size(),
         rows,
         zoom,
@@ -2069,13 +2061,13 @@ fn a_press_under_a_wrapped_query_selects_the_command_under_the_pointer() {
 /// Open a 40-line document, then a file finder over a four-entry workspace,
 /// and return the finder's list rect. The document beneath stays focused so
 /// callers can assert a swallowed click never disturbs its cursor.
-fn open_finder_with_four(h: &mut crate::test_harness::TestHarness) -> Rect {
+fn open_finder_with_four(h: &mut stoat::test_harness::TestHarness) -> Rect {
     use stoat_action::OpenFileFinder;
 
     let doc = h.seed_long_file("under.rs", 40);
     h.open_file(&doc);
 
-    let root = std::path::PathBuf::from("/click-finder");
+    let root = PathBuf::from("/click-finder");
     // Each file previews long enough to scroll, so a wheel over the preview
     // has an observable effect whichever entry is selected.
     let long: String = (0..80).map(|i| format!("line {i}\n")).collect();
@@ -2089,7 +2081,7 @@ fn open_finder_with_four(h: &mut crate::test_harness::TestHarness) -> Rect {
     finder_layout(h).list
 }
 
-fn finder_selected(h: &crate::test_harness::TestHarness) -> usize {
+fn finder_selected(h: &stoat::test_harness::TestHarness) -> usize {
     h.stoat
         .file_finder
         .as_ref()
@@ -2105,8 +2097,8 @@ fn finder_selected(h: &crate::test_harness::TestHarness) -> usize {
 fn the_finder_box_sizes_to_its_base_list_and_holds_while_filtering() {
     use stoat_action::OpenFileFinder;
 
-    let mut h = crate::test_harness::TestHarness::with_size(140, 60);
-    let root = std::path::PathBuf::from("/sized-finder");
+    let mut h = stoat::test_harness::TestHarness::with_size(140, 60);
+    let root = PathBuf::from("/sized-finder");
     for i in 0..50 {
         h.fake_fs()
             .insert_file(root.join(format!("f{i}.rs")), b"fn main() {}");
@@ -2137,7 +2129,7 @@ fn the_finder_box_sizes_to_its_base_list_and_holds_while_filtering() {
     );
 }
 
-fn finder_filtered_len(h: &crate::test_harness::TestHarness) -> usize {
+fn finder_filtered_len(h: &stoat::test_harness::TestHarness) -> usize {
     h.stoat
         .file_finder
         .as_ref()
@@ -2152,7 +2144,7 @@ fn finder_filtered_len(h: &crate::test_harness::TestHarness) -> usize {
 fn click_finder_row_moves_selection_not_the_pane() {
     use crossterm::event::MouseButton;
 
-    let mut h = crate::test_harness::TestHarness::with_size(80, 24);
+    let mut h = stoat::test_harness::TestHarness::with_size(80, 24);
     let list = open_finder_with_four(&mut h);
     let before = h.stoat.focused_cursor_pos();
 
@@ -2175,7 +2167,7 @@ fn click_finder_row_moves_selection_not_the_pane() {
 fn click_outside_modal_is_swallowed() {
     use crossterm::event::MouseButton;
 
-    let mut h = crate::test_harness::TestHarness::with_size(80, 24);
+    let mut h = stoat::test_harness::TestHarness::with_size(80, 24);
     open_finder_with_four(&mut h);
     let before = h.stoat.focused_cursor_pos();
 
@@ -2199,7 +2191,7 @@ fn click_outside_modal_is_swallowed() {
 fn click_empty_row_below_last_item_is_swallowed() {
     use crossterm::event::MouseButton;
 
-    let mut h = crate::test_harness::TestHarness::with_size(80, 24);
+    let mut h = stoat::test_harness::TestHarness::with_size(80, 24);
     let list = open_finder_with_four(&mut h);
 
     // Only four items are listed, so the sixth row is empty.
@@ -2221,7 +2213,7 @@ fn click_empty_row_below_last_item_is_swallowed() {
     );
 }
 
-fn finder_preview_id(h: &crate::test_harness::TestHarness) -> EditorId {
+fn finder_preview_id(h: &stoat::test_harness::TestHarness) -> EditorId {
     h.stoat
         .file_finder
         .as_ref()
@@ -2233,7 +2225,7 @@ fn finder_preview_id(h: &crate::test_harness::TestHarness) -> EditorId {
 
 #[test]
 fn wheel_over_finder_preview_scrolls_it_not_the_list() {
-    let mut h = crate::test_harness::TestHarness::with_size(100, 30);
+    let mut h = stoat::test_harness::TestHarness::with_size(100, 30);
     open_finder_with_four(&mut h);
     action_handlers::sync_file_finder_preview(&mut h.stoat);
     h.settle();
@@ -2266,8 +2258,8 @@ fn wheel_over_finder_preview_scrolls_it_not_the_list() {
 
 #[test]
 fn wheel_over_palette_arg_preview_scrolls_it_not_the_list() {
-    let mut h = crate::test_harness::TestHarness::with_size(100, 30);
-    let root = std::path::PathBuf::from("/arg-preview");
+    let mut h = stoat::test_harness::TestHarness::with_size(100, 30);
+    let root = PathBuf::from("/arg-preview");
     let long: String = (0..80).map(|i| format!("line {i}\n")).collect();
     h.fake_fs().insert_file(root.join("a.rs"), long.as_bytes());
     for name in ["b.rs", "c.rs"] {
@@ -2327,8 +2319,8 @@ fn wheel_over_palette_arg_preview_scrolls_it_not_the_list() {
 /// The argument stage shows no doc island, so the doc scroll stays at 0.
 #[test]
 fn ctrl_d_still_scrolls_the_preview_of_an_argument_list() {
-    let mut h = crate::test_harness::TestHarness::with_size(100, 30);
-    let root = std::path::PathBuf::from("/arg-preview");
+    let mut h = stoat::test_harness::TestHarness::with_size(100, 30);
+    let root = PathBuf::from("/arg-preview");
     let long: String = (0..80).map(|i| format!("line {i}\n")).collect();
     h.fake_fs().insert_file(root.join("a.rs"), long.as_bytes());
     h.stoat.active_workspace_mut().git_root = root;
@@ -2364,7 +2356,7 @@ fn ctrl_d_still_scrolls_the_preview_of_an_argument_list() {
 #[test]
 fn a_press_on_a_history_row_recalls_it_and_a_press_on_the_recalled_row_runs_it() {
     let mut h = history_rows_harness();
-    let press = |h: &mut crate::test_harness::TestHarness| {
+    let press = |h: &mut stoat::test_harness::TestHarness| {
         h.stoat
             .update(mouse_event(MouseEventKind::Down(MouseButton::Left), 10, 8));
     };
@@ -2404,7 +2396,7 @@ fn a_press_on_a_later_cell_row_of_a_wrapped_history_line_recalls_that_line() {
 fn a_history_press_lands_on_the_entry_under_the_pointer_s_pixel() {
     let pressed = |pixel_row: u16| {
         let (mut h, body) = pixel_history_harness();
-        let pool = crate::smooth_scroll::non_pane_pool::PALETTE;
+        let pool = stoat::smooth_scroll::non_pane_pool::PALETTE;
         let kind = MouseKind::Press(IpcMouseButton::Left);
         let grid = (body.x + 10, body.y + 3);
         h.stoat
@@ -2450,7 +2442,7 @@ fn a_history_press_with_no_pixel_report_takes_the_middle_of_its_cell() {
 #[test]
 fn a_wheel_notch_over_history_steps_it_in_list_order() {
     let mut h = history_rows_harness();
-    let notch = |h: &mut crate::test_harness::TestHarness, kind| {
+    let notch = |h: &mut stoat::test_harness::TestHarness, kind| {
         h.stoat.update(mouse_event(kind, 10, 6));
         palette_input(h)
     };
@@ -2479,7 +2471,7 @@ fn a_wheel_notch_over_history_steps_it_in_list_order() {
 ///
 /// The header takes one row, so History starts on row 5. `cd /beta` stands on
 /// row 5, the long line on rows 6 and 7, and `pwd` on row 8.
-fn history_rows_harness() -> crate::test_harness::TestHarness {
+fn history_rows_harness() -> stoat::test_harness::TestHarness {
     walked_history(Stoat::test())
 }
 
@@ -2488,7 +2480,7 @@ fn history_rows_harness() -> crate::test_harness::TestHarness {
 ///
 /// `cd /beta` takes the pixel rows 0 to 21 of the list, the long line 21 to
 /// 60 on two lines, and `pwd` 60 to 81.
-fn pixel_history_harness() -> (crate::test_harness::TestHarness, Rect) {
+fn pixel_history_harness() -> (stoat::test_harness::TestHarness, Rect) {
     let mut h = Stoat::test();
     h.stoat.stoatty_protocol = stoatty_protocol::PROTOCOL_VERSION;
     h.stoat.cell_pixels = Some((9, 18));
@@ -2503,9 +2495,9 @@ fn pixel_history_harness() -> (crate::test_harness::TestHarness, Rect) {
 
 /// `h` with its palette showing History after `:` and Up, over the history
 /// `pwd`, then [`long_history_line`], then `cd /beta`.
-fn walked_history(mut h: crate::test_harness::TestHarness) -> crate::test_harness::TestHarness {
+fn walked_history(mut h: stoat::test_harness::TestHarness) -> stoat::test_harness::TestHarness {
     h.stoat.active_workspace_mut().palette_history =
-        crate::input_history::InputHistory::from_entries(vec![
+        stoat::input_history::InputHistory::from_entries(vec![
             "pwd".to_string(),
             long_history_line(),
             "cd /beta".to_string(),
@@ -2522,7 +2514,7 @@ fn long_history_line() -> String {
 }
 
 /// The text of the open palette's input.
-fn palette_input(h: &crate::test_harness::TestHarness) -> String {
+fn palette_input(h: &stoat::test_harness::TestHarness) -> String {
     h.stoat
         .command_palette
         .as_ref()
@@ -2533,7 +2525,7 @@ fn palette_input(h: &crate::test_harness::TestHarness) -> String {
 
 #[test]
 fn preview_scroll_resets_on_selection_change() {
-    let mut h = crate::test_harness::TestHarness::with_size(100, 30);
+    let mut h = stoat::test_harness::TestHarness::with_size(100, 30);
     open_finder_with_four(&mut h);
     action_handlers::sync_file_finder_preview(&mut h.stoat);
     let preview_id = finder_preview_id(&h);
@@ -2568,7 +2560,7 @@ fn preview_scroll_resets_on_selection_change() {
 
 #[test]
 fn glide_tick_eases_offset_to_target_and_clears_glide() {
-    use crate::test_harness::TestHarness;
+    use stoat::test_harness::TestHarness;
 
     let mut h = TestHarness::with_size(40, 12);
     let body: String = (0..200).map(|i| format!("line {i}\n")).collect();
@@ -2615,7 +2607,7 @@ fn glide_tick_eases_offset_to_target_and_clears_glide() {
 /// eases onto it and stops rather than rounding to the row grid.
 #[test]
 fn glide_tick_settles_on_a_fractional_target() {
-    use crate::test_harness::TestHarness;
+    use stoat::test_harness::TestHarness;
 
     let mut h = TestHarness::with_size(40, 12);
     let body: String = (0..200).map(|i| format!("line {i}\n")).collect();
@@ -2648,7 +2640,7 @@ fn glide_tick_settles_on_a_fractional_target() {
 
 #[test]
 fn glide_tick_snaps_a_gap_wider_than_three_viewports() {
-    use crate::test_harness::TestHarness;
+    use stoat::test_harness::TestHarness;
 
     let mut h = TestHarness::with_size(40, 12);
     let body: String = (0..500).map(|i| format!("line {i}\n")).collect();
@@ -2716,7 +2708,7 @@ fn cold_build_shard_merges_into_the_workspace_graph() {
 
 #[test]
 fn non_repo_root_skips_the_index_build() {
-    use crate::host::{FakeFs, FakeGit};
+    use stoat::host::{FakeFs, FakeGit};
 
     let (mut stoat, scheduler) = stoat_rooted("/scratch");
 
@@ -2736,7 +2728,7 @@ fn non_repo_root_skips_the_index_build() {
     );
     assert_eq!(
         ws.code_graph
-            .symbol_at(crate::code_index::build::file_id("a.rs"), 5),
+            .symbol_at(stoat::code_index::build::file_id("a.rs"), 5),
         None,
         "no symbol is indexed when the workspace root is not a repo",
     );
@@ -2744,7 +2736,8 @@ fn non_repo_root_skips_the_index_build() {
 
 #[test]
 fn index_build_watches_the_repo_root_off_the_render_thread() {
-    use crate::host::{FakeFs, FakeFsWatcher, FakeGit};
+    draw_type_at_full_cell();
+    use stoat::host::{FakeFs, FakeFsWatcher, FakeGit};
 
     let scheduler = Arc::new(stoat_scheduler::TestScheduler::new());
     let mut stoat = Stoat::new(
@@ -2774,7 +2767,7 @@ fn index_build_watches_the_repo_root_off_the_render_thread() {
 
 #[test]
 fn a_persistence_disabled_index_build_still_watches_the_repo_root() {
-    use crate::host::{FakeFs, FakeFsWatcher, FakeGit};
+    use stoat::host::{FakeFs, FakeFsWatcher, FakeGit};
 
     let (mut stoat, scheduler) = stoat_rooted("/repo");
 
@@ -2799,7 +2792,7 @@ fn a_persistence_disabled_index_build_still_watches_the_repo_root() {
 
 #[test]
 fn a_root_below_the_repository_watches_the_whole_working_tree() {
-    use crate::host::{FakeFs, FakeFsWatcher, FakeGit};
+    use stoat::host::{FakeFs, FakeFsWatcher, FakeGit};
 
     let (mut stoat, scheduler) = stoat_rooted("/repo/sub");
 
@@ -2826,28 +2819,9 @@ fn a_root_below_the_repository_watches_the_whole_working_tree() {
 }
 
 #[test]
-fn the_repository_root_keeps_the_workspace_roots_spelling() {
-    let cases = [
-        ("/repo/sub", Some("/repo/"), "/repo"),
-        ("/repo", Some("/repo"), "/repo"),
-        ("/link/sub", Some("/real"), "/link/sub"),
-        ("/repo/sub", None, "/repo/sub"),
-    ];
-    let roots: Vec<PathBuf> = cases
-        .iter()
-        .map(|&(root, workdir, _)| repo_tree_root(Path::new(root), workdir.map(Path::new)))
-        .collect();
-    let expected: Vec<PathBuf> = cases
-        .iter()
-        .map(|&(_, _, tree)| PathBuf::from(tree))
-        .collect();
-    assert_eq!(roots, expected);
-}
-
-#[test]
 fn a_repository_made_under_the_root_binds_git_after_the_retry() {
     let mut h = Stoat::test();
-    let git = |h: &crate::test_harness::TestHarness| {
+    let git = |h: &stoat::test_harness::TestHarness| {
         StoatKeymapState::from_stoat(&h.stoat).get("git").cloned()
     };
     let root = h.stoat.active_workspace().git_root.clone();
@@ -2950,31 +2924,6 @@ fn batched_reindex_drain_cross_links_like_sequential() {
     );
 }
 
-/// A cold build queues every shard at once, so the count never engages and
-/// one turn merges the whole thing. The time bound is what ends that turn,
-/// and it has to end it on its own rather than only alongside the count.
-///
-/// The bound is read here rather than driven through a drain, since a wall
-/// clock does not advance on command, and eight milliseconds of real
-/// merging ties the answer to how fast the machine is.
-#[test]
-fn an_index_turn_ends_on_either_bound() {
-    let under = INDEX_DRAIN_BUDGET - std::time::Duration::from_millis(1);
-
-    assert!(
-        !index_turn_spent(INDEX_DRAIN_CAP - 1, under),
-        "inside both bounds the turn continues",
-    );
-    assert!(
-        index_turn_spent(INDEX_DRAIN_CAP, under),
-        "the count ends a turn of updates too cheap for the clock to see",
-    );
-    assert!(
-        index_turn_spent(1, INDEX_DRAIN_BUDGET),
-        "and the time ends a turn of one update the count would let run on",
-    );
-}
-
 #[test]
 fn a_capped_drain_leaves_the_remainder_for_the_next_tick() {
     let (mut stoat, _) = stoat_rooted("/repo");
@@ -3074,7 +3023,7 @@ fn reindex_replaces_a_files_symbols_in_the_graph() {
 
 #[test]
 fn external_change_reindexes_and_remove_evicts() {
-    use crate::host::{FakeFs, FakeFsWatcher, FsEventKind};
+    use stoat::host::{FakeFs, FakeFsWatcher, FsEventKind};
 
     let (mut stoat, scheduler) = stoat_rooted("/repo");
 
@@ -3085,7 +3034,7 @@ fn external_change_reindexes_and_remove_evicts() {
     stoat.set_fs_watch_host(watcher.clone());
 
     let path = PathBuf::from("/repo/src/a.rs");
-    let file = crate::code_index::build::file_id("src/a.rs");
+    let file = stoat::code_index::build::file_id("src/a.rs");
 
     let drive = |stoat: &mut Stoat, kind: FsEventKind| {
         watcher.inject(&path, kind);
@@ -3115,56 +3064,12 @@ fn external_change_reindexes_and_remove_evicts() {
     );
 }
 
-/// Watches are registered per directory, so which directories get one is
-/// the whole question. A recursive watch on the root covered `target/`,
-/// `node_modules/`, and the object store, which on a built repo is most of
-/// the tree and enough to exhaust the platform's watch limit.
-///
-/// Stated as the watch set rather than as events, since whether a write
-/// under an unwatched directory reports anything is the platform's
-/// behavior rather than this code's.
-#[test]
-fn workspace_watches_cover_the_source_tree_and_the_git_refs() {
-    use crate::host::{FakeFs, FakeFsWatcher};
-
-    let fs = FakeFs::new();
-    fs.insert_files([
-        ("/repo/src/a.rs", "fn a() {}".as_bytes()),
-        ("/repo/src/deep/b.rs", "fn b() {}".as_bytes()),
-        ("/repo/target/debug/gen.rs", "gen".as_bytes()),
-        ("/repo/node_modules/pkg/i.js", "js".as_bytes()),
-        ("/repo/.git/refs/heads/main", "sha".as_bytes()),
-        ("/repo/.git/refs/heads/lee/topic", "sha".as_bytes()),
-        ("/repo/.git/objects/ab/cdef", "obj".as_bytes()),
-    ]);
-    let watcher = FakeFsWatcher::new();
-
-    watch_workspace_dirs(&fs, &watcher, Path::new("/repo"));
-
-    assert_eq!(
-        (watcher.watched_paths(), watcher.recursive_paths()),
-        (
-            vec![
-                PathBuf::from("/repo"),
-                PathBuf::from("/repo/.git"),
-                PathBuf::from("/repo/.git/refs"),
-                PathBuf::from("/repo/src"),
-                PathBuf::from("/repo/src/deep"),
-            ],
-            vec![PathBuf::from("/repo/.git/refs")],
-        ),
-        "the source tree, .git flat for HEAD and the index, and the whole \
-             refs tree for every branch tip, with nothing from a built tree or \
-             the object store",
-    );
-}
-
 /// A directory created after startup has no watch of its own, which leaves
 /// files written into it untracked for the rest of the session. Its create
 /// event is the only notice the editor gets.
 #[test]
 fn a_directory_created_after_startup_gets_its_own_watch() {
-    use crate::host::{FakeFs, FakeFsWatcher, FsEventKind};
+    use stoat::host::{FakeFs, FakeFsWatcher, FsEventKind};
 
     let (mut stoat, _) = stoat_rooted("/repo");
 
@@ -3202,7 +3107,7 @@ fn a_directory_created_after_startup_gets_its_own_watch() {
 /// what is observable here rather than which thread it happened on.
 #[test]
 fn an_external_change_reads_the_file_once() {
-    use crate::host::{FakeFs, FakeFsWatcher, FsEventKind};
+    use stoat::host::{FakeFs, FakeFsWatcher, FsEventKind};
 
     let (mut stoat, scheduler) = stoat_rooted("/repo");
 
@@ -3216,7 +3121,7 @@ fn an_external_change_reads_the_file_once() {
     let reads = || {
         fs.ops()
             .iter()
-            .filter(|op| matches!(op, crate::host::FakeFsOp::Read { path: p } if *p == path))
+            .filter(|op| matches!(op, stoat::host::FakeFsOp::Read { path: p } if *p == path))
             .count()
     };
     let drive = |stoat: &mut Stoat| {
@@ -3231,7 +3136,7 @@ fn an_external_change_reads_the_file_once() {
     // Index it once, so the rounds below have a recorded hash to differ
     // from and to match.
     drive(&mut stoat);
-    let file = crate::code_index::build::file_id("src/a.rs");
+    let file = stoat::code_index::build::file_id("src/a.rs");
     assert!(
         stoat
             .active_workspace()
@@ -3284,7 +3189,7 @@ fn an_external_change_reads_the_file_once() {
 /// window still open.
 #[test]
 fn a_burst_of_external_changes_shares_one_debounce_window() {
-    use crate::host::{FakeFs, FakeFsWatcher, FsEventKind};
+    use stoat::host::{FakeFs, FakeFsWatcher, FsEventKind};
 
     let (mut stoat, scheduler) = stoat_rooted("/repo");
 
@@ -3328,10 +3233,10 @@ fn a_burst_of_external_changes_shares_one_debounce_window() {
     let graph = &stoat.active_workspace().code_graph;
     assert!(
         graph
-            .content_hash(crate::code_index::build::file_id("src/a.rs"))
+            .content_hash(stoat::code_index::build::file_id("src/a.rs"))
             .is_some()
             && graph
-                .content_hash(crate::code_index::build::file_id("src/b.rs"))
+                .content_hash(stoat::code_index::build::file_id("src/b.rs"))
                 .is_some(),
         "both files of the burst reached the graph",
     );
@@ -3339,7 +3244,7 @@ fn a_burst_of_external_changes_shares_one_debounce_window() {
 
 #[test]
 fn editing_a_buffer_live_reindexes_a_new_calls_edge() {
-    use crate::host::FakeFs;
+    use stoat::host::FakeFs;
 
     let (mut stoat, scheduler) = stoat_rooted("/repo");
     let fs = Arc::new(FakeFs::new());
@@ -3347,7 +3252,7 @@ fn editing_a_buffer_live_reindexes_a_new_calls_edge() {
     stoat.set_fs_host(fs);
 
     let pane = stoat.active_workspace().panes.focus();
-    let buffer_id = crate::buffer_lifecycle::open_file_in_pane(
+    let buffer_id = stoat::buffer_lifecycle::open_file_in_pane(
         &mut stoat,
         pane,
         Path::new("/repo/src/a.rs"),
@@ -3373,7 +3278,7 @@ fn editing_a_buffer_live_reindexes_a_new_calls_edge() {
     };
 
     drive(&mut stoat);
-    let file = crate::code_index::build::file_id("src/a.rs");
+    let file = stoat::code_index::build::file_id("src/a.rs");
     let caller = stoat
         .active_workspace()
         .code_graph
@@ -3428,7 +3333,8 @@ fn editing_a_buffer_live_reindexes_a_new_calls_edge() {
 /// whose result turns on the environment resolving one is not repeatable.
 #[test]
 fn a_save_reindexes_with_persist_where_an_edit_does_not() {
-    use crate::host::FakeFs;
+    draw_type_at_full_cell();
+    use stoat::host::FakeFs;
     use stoat_action::SaveBuffer;
 
     let scheduler = Arc::new(stoat_scheduler::TestScheduler::new());
@@ -3442,7 +3348,7 @@ fn a_save_reindexes_with_persist_where_an_edit_does_not() {
     stoat.set_fs_host(fs);
 
     let pane = stoat.active_workspace().panes.focus();
-    let buffer_id = crate::buffer_lifecycle::open_file_in_pane(
+    let buffer_id = stoat::buffer_lifecycle::open_file_in_pane(
         &mut stoat,
         pane,
         Path::new("/repo/src/a.rs"),
@@ -3508,7 +3414,7 @@ fn a_save_reindexes_with_persist_where_an_edit_does_not() {
 
 #[test]
 fn two_parses_inside_the_debounce_window_extract_once() {
-    use crate::host::FakeFs;
+    use stoat::host::FakeFs;
 
     let (mut stoat, scheduler) = stoat_rooted("/repo");
     let fs = Arc::new(FakeFs::new());
@@ -3516,7 +3422,7 @@ fn two_parses_inside_the_debounce_window_extract_once() {
     stoat.set_fs_host(fs);
 
     let pane = stoat.active_workspace().panes.focus();
-    let buffer_id = crate::buffer_lifecycle::open_file_in_pane(
+    let buffer_id = stoat::buffer_lifecycle::open_file_in_pane(
         &mut stoat,
         pane,
         Path::new("/repo/src/a.rs"),
@@ -3563,7 +3469,7 @@ fn two_parses_inside_the_debounce_window_extract_once() {
         "the two parses collapse into a single extract",
     );
 
-    let file = crate::code_index::build::file_id("src/a.rs");
+    let file = stoat::code_index::build::file_id("src/a.rs");
     let ws = stoat.active_workspace();
     assert!(
         ws.code_graph.symbol_at(file, 19).is_some() && ws.code_graph.symbol_at(file, 31).is_some(),
@@ -3573,6 +3479,7 @@ fn two_parses_inside_the_debounce_window_extract_once() {
 
 #[test]
 fn agent_output_feeds_emulator() {
+    draw_type_at_full_cell();
     let scheduler = Arc::new(stoat_scheduler::TestScheduler::new());
     let mut stoat = Stoat::new(scheduler.executor(), Settings::default(), PathBuf::new());
 
@@ -3603,6 +3510,7 @@ fn agent_output_feeds_emulator() {
 /// repaints with no surface showing the terminal's cells.
 #[test]
 fn a_retitle_on_a_hidden_terminal_marks_the_frame_dirty() {
+    draw_type_at_full_cell();
     let scheduler = Arc::new(stoat_scheduler::TestScheduler::new());
     let mut stoat = Stoat::new(scheduler.executor(), Settings::default(), PathBuf::new());
     let (term, _) = fake_term_session(24, 80);
@@ -3833,7 +3741,7 @@ fn a_zero_day_retention_sweeps_nothing() {
 
 /// Saves the active workspace, with `restored.txt` open in it, as a session
 /// file, and returns the file's path and the session's.
-fn save_a_session(h: &mut crate::test_harness::TestHarness) -> (PathBuf, PathBuf) {
+fn save_a_session(h: &mut stoat::test_harness::TestHarness) -> (PathBuf, PathBuf) {
     let file = h.write_file("restored.txt", "alpha\nbeta\n");
     h.open_file(&file);
     h.settle();
@@ -3848,7 +3756,7 @@ fn save_a_session(h: &mut crate::test_harness::TestHarness) -> (PathBuf, PathBuf
 
 /// Restores `state_path` into a fresh workspace made active first, then lets
 /// the restore and the work it starts finish.
-fn restore_into_a_fresh_workspace(h: &mut crate::test_harness::TestHarness, state_path: PathBuf) {
+fn restore_into_a_fresh_workspace(h: &mut stoat::test_harness::TestHarness, state_path: PathBuf) {
     let target = h.create_workspace();
     h.set_active_workspace(target);
     h.stoat.spawn_workspace_restore(target, state_path);
@@ -3886,7 +3794,7 @@ fn a_restored_session_opens_its_files_with_the_language_server() {
 fn a_restored_session_starts_the_servers_its_buffers_call_for() {
     let mut h = Stoat::test();
     h.allow_host_swap();
-    h.stoat.set_lsp_host(Arc::new(crate::host::NoopLsp));
+    h.stoat.set_lsp_host(Arc::new(stoat::host::NoopLsp));
     let (_, state_path) = save_a_session(&mut h);
 
     // In-process, so the spawn this drives opens no process.
@@ -3965,7 +3873,7 @@ fn a_session_restored_in_the_background_respawns_its_commits_list_on_the_switch(
     let state_path = save_a_session_with_a_parked_list(&mut h);
     let target = restore_into_a_background_workspace(&mut h, state_path);
     let lists =
-        |h: &crate::test_harness::TestHarness| h.stoat.workspaces[target].commit_lists.len();
+        |h: &stoat::test_harness::TestHarness| h.stoat.workspaces[target].commit_lists.len();
     let before = lists(&h);
 
     h.set_active_workspace(target);
@@ -4030,7 +3938,7 @@ fn a_restored_list_keeps_the_readers_place() {
     h.type_keys("G");
     h.settle();
     h.type_keys("G k k k");
-    let place = |h: &crate::test_harness::TestHarness| {
+    let place = |h: &stoat::test_harness::TestHarness| {
         let list = h.stoat.active_workspace().focused_commits()?;
         Some((list.selected_sha()?.to_string(), list.scroll_top))
     };
@@ -4059,7 +3967,7 @@ fn a_restored_list_keeps_the_readers_place() {
 
 /// Saves a session whose parked tab 1 shows a commits list over `/repo`, and
 /// returns the session file.
-fn save_a_session_with_a_parked_list(h: &mut crate::test_harness::TestHarness) -> PathBuf {
+fn save_a_session_with_a_parked_list(h: &mut stoat::test_harness::TestHarness) -> PathBuf {
     h.seed_linear_history("/repo", &[("a1b2c3d4", "one", &[("a.rs", "1\n")])]);
     save_a_session_with_a_parked_tab(h, |h| h.open_commits("/repo"))
 }
@@ -4067,8 +3975,8 @@ fn save_a_session_with_a_parked_list(h: &mut crate::test_harness::TestHarness) -
 /// Saves a session whose parked tab 1 shows what `open` puts in its pane, and
 /// returns the session file.
 fn save_a_session_with_a_parked_tab(
-    h: &mut crate::test_harness::TestHarness,
-    open: impl FnOnce(&mut crate::test_harness::TestHarness),
+    h: &mut stoat::test_harness::TestHarness,
+    open: impl FnOnce(&mut stoat::test_harness::TestHarness),
 ) -> PathBuf {
     action_handlers::dispatch(&mut h.stoat, &stoat_action::NewTab);
     open(h);
@@ -4083,7 +3991,7 @@ fn save_a_session_with_a_parked_tab(
 }
 
 /// How many `did_open`s for `restored.txt` reached the server.
-fn restored_opens(h: &crate::test_harness::TestHarness) -> usize {
+fn restored_opens(h: &stoat::test_harness::TestHarness) -> usize {
     h.fake_lsp()
         .observed_opens()
         .iter()
@@ -4094,7 +4002,7 @@ fn restored_opens(h: &crate::test_harness::TestHarness) -> usize {
 /// Restores `state_path` into a fresh workspace that stays in the background,
 /// lets the restore land, and returns that workspace.
 fn restore_into_a_background_workspace(
-    h: &mut crate::test_harness::TestHarness,
+    h: &mut stoat::test_harness::TestHarness,
     state_path: PathBuf,
 ) -> WorkspaceId {
     let target = h.create_workspace();
@@ -4150,7 +4058,7 @@ fn a_session_restored_in_the_background_respawns_its_terminal_on_the_switch() {
         .save_state(&state_path, &*h.stoat.fs_host)
         .expect("save state");
     let target = restore_into_a_background_workspace(&mut h, state_path);
-    let terminal_live = |h: &crate::test_harness::TestHarness| {
+    let terminal_live = |h: &stoat::test_harness::TestHarness| {
         let ws = &h.stoat.workspaces[target];
         match ws.panes.pane(ws.panes.focus()).view {
             View::Terminal(id) => Some(ws.terms.contains_key(id)),
@@ -4221,7 +4129,7 @@ fn async_session_restore_drops_when_the_target_was_edited() {
 /// The test clock stands still, so every new uid reads the same instant. The
 /// clock moves on here so that a fork names a uid of its own.
 fn a_target_under_the_saved_uid(
-    h: &mut crate::test_harness::TestHarness,
+    h: &mut stoat::test_harness::TestHarness,
 ) -> (WorkspaceId, WorkspaceUid, PathBuf) {
     let uid = h.stoat.active_workspace().uid;
     let state_path = PathBuf::from(format!("/state/hash/{uid}.ron"));
@@ -4253,7 +4161,7 @@ fn a_dropped_session_restore_forks_the_target_identity() {
     assert_eq!(
         (
             h.stoat.workspaces[target].uid == uid,
-            crate::test_harness::editor::focused_buffer_path(&h.stoat)
+            stoat::test_harness::editor::focused_buffer_path(&h.stoat)
         ),
         (false, other),
         "the live workspace keeps its file under a uid of its own",
@@ -4286,6 +4194,7 @@ fn an_unreadable_session_forks_only_a_target_under_its_uid() {
 
 #[test]
 fn term_query_reply_writes_back_to_pty() {
+    draw_type_at_full_cell();
     let scheduler = Arc::new(stoat_scheduler::TestScheduler::new());
     let mut stoat = Stoat::new(scheduler.executor(), Settings::default(), PathBuf::new());
 
@@ -4307,7 +4216,7 @@ fn term_query_reply_writes_back_to_pty() {
 fn layout_fits_agent_emulator_and_pty_to_pane() {
     let mut h = Stoat::test();
     let ws = h.stoat.active_workspace_mut();
-    ws.panes.split(crate::pane::Axis::Vertical);
+    ws.panes.split(stoat::pane::Axis::Vertical);
     let focused = ws.panes.focus();
 
     let (term, fake) = fake_term_session(24, 80);
@@ -4336,7 +4245,7 @@ fn layout_fits_agent_emulator_and_pty_to_pane() {
 fn closing_term_pane_kills_pty_child() {
     let mut h = Stoat::test();
     let ws = h.stoat.active_workspace_mut();
-    ws.panes.split(crate::pane::Axis::Vertical);
+    ws.panes.split(stoat::pane::Axis::Vertical);
     let focused = ws.panes.focus();
 
     let (term, fake) = fake_term_session(24, 80);
@@ -4360,7 +4269,7 @@ fn closing_term_pane_kills_pty_child() {
 fn closing_terminal_pane_kills_pty_child() {
     let mut h = Stoat::test();
     let ws = h.stoat.active_workspace_mut();
-    ws.panes.split(crate::pane::Axis::Vertical);
+    ws.panes.split(stoat::pane::Axis::Vertical);
     let focused = ws.panes.focus();
 
     let (term, fake) = fake_term_session(24, 80);
@@ -4390,7 +4299,7 @@ fn terminal_pane_closes_when_shell_exits() {
     let mut h = Stoat::test();
     let ws = h.stoat.active_workspace_mut();
     let editor_pane = ws.panes.focus();
-    let term_pane = ws.panes.split(crate::pane::Axis::Vertical);
+    let term_pane = ws.panes.split(stoat::pane::Axis::Vertical);
     let term_id = insert_term_session(ws);
     ws.panes.pane_mut(term_pane).view = View::Terminal(term_id);
     h.stoat.transition_mode("insert".to_string());
@@ -4460,8 +4369,8 @@ fn last_terminal_pane_restores_scratch_when_no_prev_view() {
 #[test]
 fn last_terminal_pane_restores_previous_view_on_exit() {
     let mut h = Stoat::test();
-    let fake = Arc::new(crate::host::FakeTerminalSession::new());
-    h.stoat.terminal_host = Arc::new(crate::host::FakeTerminalHost::new(fake));
+    let fake = Arc::new(stoat::host::FakeTerminalSession::new());
+    h.stoat.terminal_host = Arc::new(stoat::host::FakeTerminalHost::new(fake));
     h.allow_host_swap();
 
     let pane = h.stoat.active_workspace().panes.focus();
@@ -4539,7 +4448,7 @@ fn terminal_exit_keeps_insert_mode_when_pane_not_focused() {
     let mut h = Stoat::test();
     let ws = h.stoat.active_workspace_mut();
     let editor_pane = ws.panes.focus();
-    let term_pane = ws.panes.split(crate::pane::Axis::Vertical);
+    let term_pane = ws.panes.split(stoat::pane::Axis::Vertical);
     let term_id = insert_term_session(ws);
     ws.panes.pane_mut(term_pane).view = View::Terminal(term_id);
     ws.panes.set_focus(editor_pane);
@@ -4586,7 +4495,7 @@ fn agent_pane_survives_shell_exit() {
 /// Park the tab whose focused pane shows `view` of a fresh session, then
 /// report that session's shell gone. Answers the session and the pane.
 fn exit_behind_a_new_tab(
-    h: &mut crate::test_harness::TestHarness,
+    h: &mut stoat::test_harness::TestHarness,
     view: fn(TermId) -> View,
 ) -> (TermId, PaneId) {
     let ws = h.stoat.active_workspace_mut();
@@ -4626,7 +4535,7 @@ fn a_parked_terminal_pane_beside_another_closes_when_its_shell_exits() {
     let mut h = Stoat::test();
     let ws = h.stoat.active_workspace_mut();
     let editor_pane = ws.panes.focus();
-    let term_pane = ws.panes.split(crate::pane::Axis::Vertical);
+    let term_pane = ws.panes.split(stoat::pane::Axis::Vertical);
     let covered = insert_term_session(ws);
     ws.panes.pane_mut(term_pane).prev_view = Some(View::Terminal(covered));
     exit_behind_a_new_tab(&mut h, View::Terminal);
@@ -4709,7 +4618,7 @@ fn a_workspaces_agent_socket_is_served_once() {
 
 #[test]
 fn a_dock_held_agent_survives_shell_exit() {
-    use crate::pane::{DockPanel, DockSide, DockVisibility};
+    use stoat::pane::{DockPanel, DockSide, DockVisibility};
 
     let mut h = Stoat::test();
     let ws = h.stoat.active_workspace_mut();
@@ -4875,7 +4784,7 @@ fn a_background_run_lands_in_its_own_workspace() {
 
 #[test]
 fn hidden_term_output_advances_state_without_a_repaint() {
-    use crate::pane::{DockPanel, DockSide, DockVisibility};
+    use stoat::pane::{DockPanel, DockSide, DockVisibility};
 
     let mut h = Stoat::test();
     let ws = h.stoat.active_workspace_mut();
@@ -5028,7 +4937,7 @@ fn a_glide_tick_repaints_only_outside_stoatty() {
 /// Arm a wheel glide in a 200-line file with the given `stoatty` flag and run
 /// one frame tick. Returns the tick's effect and whether the glide still eases.
 fn wheel_glide_tick(stoatty: bool) -> (UpdateEffect, bool) {
-    let mut h = crate::test_harness::TestHarness::with_size(40, 12);
+    let mut h = stoat::test_harness::TestHarness::with_size(40, 12);
     let body: String = (0..200).map(|i| format!("line {i:03}\n")).collect();
     let path = h.write_file("long.rs", &body);
     h.open_file(&path);
@@ -5046,7 +4955,8 @@ fn wheel_glide_tick(stoatty: bool) -> (UpdateEffect, bool) {
 
 fn stoat_with_focused_term(
     make_view: fn(TermId) -> View,
-) -> (Stoat, TermId, Arc<crate::host::FakeTerminalSession>) {
+) -> (Stoat, TermId, Arc<stoat::host::FakeTerminalSession>) {
+    draw_type_at_full_cell();
     let scheduler = Arc::new(stoat_scheduler::TestScheduler::new());
     let mut stoat = Stoat::new(scheduler.executor(), Settings::default(), PathBuf::new());
 
@@ -5058,7 +4968,7 @@ fn stoat_with_focused_term(
     (stoat, term_id, fake)
 }
 
-fn stoat_with_focused_agent() -> (Stoat, TermId, Arc<crate::host::FakeTerminalSession>) {
+fn stoat_with_focused_agent() -> (Stoat, TermId, Arc<stoat::host::FakeTerminalSession>) {
     stoat_with_focused_term(View::Agent)
 }
 
@@ -5134,7 +5044,7 @@ fn hints_cache_reuses_rows_across_unchanged_frames() {
 
 #[test]
 fn the_git_chord_marks_its_toggles() {
-    use crate::{render::paint::style_rgb, theme::scope};
+    use stoat::{render::paint::style_rgb, theme::scope};
     use stoatty_protocol::command::{decode_stream, Command};
 
     // The harness paints a stoatty frame, where the mark is a text run the
@@ -5332,7 +5242,7 @@ fn a_repaint_splices_the_scene_a_full_encode_writes() {
     let mut h = Stoat::test();
     h.stoat.stoatty = true;
 
-    let root = std::path::PathBuf::from("/scene-memo");
+    let root = PathBuf::from("/scene-memo");
     let path = root.join("a.txt");
     h.fake_fs().insert_file(&path, b"alpha\nbravo\ncharlie\n");
     h.stoat.active_workspace_mut().git_root = root;
@@ -5722,7 +5632,7 @@ fn editor_mode(stoat: &Stoat, pane: PaneId) -> String {
 
 /// A two-pane split with an editor on the left and a terminal on the right,
 /// focus left on the editor. Returns the two pane ids.
-fn split_editor_and_terminal(h: &mut crate::test_harness::TestHarness) -> (PaneId, PaneId) {
+fn split_editor_and_terminal(h: &mut stoat::test_harness::TestHarness) -> (PaneId, PaneId) {
     h.type_action("SplitRight()");
     action_handlers::dispatch(&mut h.stoat, &stoat_action::Terminal);
     let term_pane = h.stoat.active_workspace().panes.focus();
@@ -5737,7 +5647,7 @@ fn a_click_into_a_terminal_or_agent_pane_gives_it_the_keys() {
         let (term_pane, term_id) = {
             let ws = h.stoat.active_workspace_mut();
             let editor_pane = ws.panes.focus();
-            let term_pane = ws.panes.split(crate::pane::Axis::Vertical);
+            let term_pane = ws.panes.split(stoat::pane::Axis::Vertical);
             let term_id = insert_term_session(ws);
             ws.panes.pane_mut(term_pane).view = make_view(term_id);
             ws.panes.set_focus(editor_pane);
@@ -5796,7 +5706,7 @@ fn ctrl_a_ctrl_e_and_a_digit_pick_a_pane_from_a_terminal() {
 
 /// The scratch editor split in two, with click areas set and focus on the
 /// left. Returns the left and right pane ids.
-fn split_editor_pair(h: &mut crate::test_harness::TestHarness) -> (PaneId, PaneId) {
+fn split_editor_pair(h: &mut stoat::test_harness::TestHarness) -> (PaneId, PaneId) {
     h.type_action("SplitRight()");
     let right = h.stoat.active_workspace().panes.focus();
     h.type_action("FocusLeft()");
@@ -5807,7 +5717,7 @@ fn split_editor_pair(h: &mut crate::test_harness::TestHarness) -> (PaneId, PaneI
     (left, right)
 }
 
-fn click(h: &mut crate::test_harness::TestHarness, column: u16, row: u16) {
+fn click(h: &mut stoat::test_harness::TestHarness, column: u16, row: u16) {
     h.stoat.update(mouse_event(
         MouseEventKind::Down(MouseButton::Left),
         column,
@@ -5818,7 +5728,7 @@ fn click(h: &mut crate::test_harness::TestHarness, column: u16, row: u16) {
 /// Put the mode `mode_of` reaches into a chord, click into the right pane of
 /// a [`split_editor_pair`], and read the mode again.
 fn mode_after_click_away(
-    h: &mut crate::test_harness::TestHarness,
+    h: &mut stoat::test_harness::TestHarness,
     mode_of: impl Fn(&mut Workspace) -> &mut String,
 ) -> String {
     *mode_of(h.stoat.active_workspace_mut()) = "space_pane_display".into();
@@ -5902,7 +5812,7 @@ fn a_click_away_rests_a_run_commits_diff_changes_or_docked_view() {
     let run_editor = {
         let exec = run.stoat.executor.clone();
         let ws = run.stoat.active_workspace_mut();
-        let state = crate::run::RunState::new(ws, exec);
+        let state = stoat::run::RunState::new(ws, exec);
         let editor = state.input.editor_id;
         let id = ws.runs.insert(state);
         ws.panes.pane_mut(left).view = View::Run(id);
@@ -6124,7 +6034,7 @@ fn a_click_away_in_the_middle_of_a_chord_leaves_the_terminal_at_rest() {
     let (editor_pane, term_pane) = {
         let ws = h.stoat.active_workspace_mut();
         let editor_pane = ws.panes.focus();
-        let term_pane = ws.panes.split(crate::pane::Axis::Vertical);
+        let term_pane = ws.panes.split(stoat::pane::Axis::Vertical);
         let term_id = insert_term_session(ws);
         ws.panes.pane_mut(term_pane).view = View::Terminal(term_id);
         ws.panes.set_focus(term_pane);
@@ -6162,7 +6072,7 @@ fn a_paste_after_a_click_ended_the_chord_selects_the_pasted_text() {
     {
         let ws = h.stoat.active_workspace_mut();
         let editor_pane = ws.panes.focus();
-        let term_pane = ws.panes.split(crate::pane::Axis::Vertical);
+        let term_pane = ws.panes.split(stoat::pane::Axis::Vertical);
         let term_id = insert_term_session(ws);
         ws.panes.pane_mut(term_pane).view = View::Terminal(term_id);
         ws.panes.set_focus(editor_pane);
@@ -6185,7 +6095,7 @@ fn a_paste_after_a_click_ended_the_chord_selects_the_pasted_text() {
     assert_eq!(h.selection_spans(), vec![(1, 4, false)]);
 }
 
-fn focused_terminal_pane(h: &mut crate::test_harness::TestHarness, content: &[u8]) -> TermId {
+fn focused_terminal_pane(h: &mut stoat::test_harness::TestHarness, content: &[u8]) -> TermId {
     let term_id = {
         let ws = h.stoat.active_workspace_mut();
         let pane = ws.panes.focus();
@@ -6370,7 +6280,7 @@ fn a_pool_mouse_gesture_naming_another_pool_selects_nothing() {
     let (left_pool, right_term) = {
         let ws = h.stoat.active_workspace_mut();
         let left = ws.panes.focus();
-        let right = ws.panes.split(crate::pane::Axis::Vertical);
+        let right = ws.panes.split(stoat::pane::Axis::Vertical);
         let terms = [left, right].map(|pane| {
             let term_id = insert_term_session(ws);
             ws.panes.pane_mut(pane).view = View::Terminal(term_id);
@@ -6435,7 +6345,7 @@ fn a_grid_report_in_a_pooled_terminal_selects_nothing() {
 /// A harness whose focused split pane is a terminal holding `content`, drawn
 /// as a pool of 40 rows by 120 columns, with that terminal's id and its pool's
 /// id.
-fn pooled_terminal_pane(content: &[u8]) -> (crate::test_harness::TestHarness, TermId, u32) {
+fn pooled_terminal_pane(content: &[u8]) -> (stoat::test_harness::TestHarness, TermId, u32) {
     let mut h = Stoat::test();
     let term_id = focused_terminal_pane(&mut h, content);
     h.stoat
@@ -6467,7 +6377,7 @@ fn pool_gesture(pool: u32, kind: MouseKind, grid: (u16, u16), cell: (u16, u16)) 
 /// A harness whose lone pane is a Run pane at the board's pixels, on a 9 by 18
 /// px cell at a display scale of 1, over a block that printed `hello`, painted
 /// once so the pane holds its box.
-fn pixel_run_pane() -> crate::test_harness::TestHarness {
+fn pixel_run_pane() -> stoat::test_harness::TestHarness {
     let mut h = Stoat::test();
     h.stoat.stoatty_protocol = stoatty_protocol::PROTOCOL_VERSION;
     h.stoat.cell_pixels = Some((9, 18));
@@ -6483,7 +6393,7 @@ fn pixel_run_pane() -> crate::test_harness::TestHarness {
 /// The pool and the area of the focused Run pane of `h`, and the pixel from
 /// the area's corner where the text of its output row starts, as the box
 /// that its paint stored places it.
-fn run_output_origin(h: &crate::test_harness::TestHarness) -> (u32, Rect, (u32, u32)) {
+fn run_output_origin(h: &stoat::test_harness::TestHarness) -> (u32, Rect, (u32, u32)) {
     let ws = h.stoat.active_workspace();
     let pane = ws.panes.pane(ws.panes.focus());
     let View::Run(id) = pane.view else {
@@ -6504,7 +6414,7 @@ fn run_output_origin(h: &crate::test_harness::TestHarness) -> (u32, Rect, (u32, 
 }
 
 /// The selection of the newest block of the focused Run pane of `h`.
-fn run_selection(h: &crate::test_harness::TestHarness) -> Option<GridSelection> {
+fn run_selection(h: &stoat::test_harness::TestHarness) -> Option<GridSelection> {
     let ws = h.stoat.active_workspace();
     let View::Run(id) = ws.panes.pane(ws.panes.focus()).view else {
         return None;
@@ -6631,8 +6541,8 @@ fn a_click_without_drag_leaves_no_terminal_selection() {
 /// A fresh terminal and the fake shell behind it in the focused split pane,
 /// fit to that pane by a render, and the pane's index, which is its pool id.
 fn pooled_terminal(
-    h: &mut crate::test_harness::TestHarness,
-) -> (TermId, u32, Arc<crate::host::FakeTerminalSession>) {
+    h: &mut stoat::test_harness::TestHarness,
+) -> (TermId, u32, Arc<stoat::host::FakeTerminalSession>) {
     let (term, shell) = fake_term_session(24, 80);
     let (term_id, index) = {
         let ws = h.stoat.active_workspace_mut();
@@ -6988,7 +6898,7 @@ fn an_offset_moves_back_by_the_deletions_before_it() {
 /// The unfocused pane's buffer carries a diagnostic, so its paint reaches
 /// all three channels. Without one it produces no undercurl span at all,
 /// and a replay that dropped them would pass unnoticed.
-fn split_pair(h: &mut crate::test_harness::TestHarness) {
+fn split_pair(h: &mut stoat::test_harness::TestHarness) {
     h.stoat.stoatty = true;
     h.resize(120, 16);
     let a = h.write_file("a.txt", "alpha\nbravo\ncharlie\n");
@@ -7004,8 +6914,8 @@ fn split_pair(h: &mut crate::test_harness::TestHarness) {
 /// A diagnostic of `severity` over the first word of `path`'s first line,
 /// anchored against the buffer as it stands.
 fn publish_one_diagnostic(
-    h: &mut crate::test_harness::TestHarness,
-    path: &std::path::Path,
+    h: &mut stoat::test_harness::TestHarness,
+    path: &Path,
     severity: lsp_types::DiagnosticSeverity,
 ) {
     use lsp_types::{Diagnostic, Position, Range as LspRange};
@@ -7033,7 +6943,7 @@ fn publish_one_diagnostic(
 /// Paint one frame into `buf` as the run loop does with a buffer a blank job
 /// reported blanked to `blanked`, and return it.
 fn paint_blanked(
-    h: &mut crate::test_harness::TestHarness,
+    h: &mut stoat::test_harness::TestHarness,
     mut buf: Buffer,
     blanked: &Cell,
 ) -> Buffer {
@@ -7054,7 +6964,7 @@ fn poisoned(area: Rect) -> Buffer {
 #[test]
 fn a_buffer_blanked_off_the_loop_paints_a_fresh_frame() {
     let mut h = Stoat::test();
-    let blank = crate::render::themed_blank(&h.stoat.theme);
+    let blank = stoat::render::themed_blank(&h.stoat.theme);
     let blanked = Buffer::filled(h.stoat.size, blank.clone());
 
     assert_eq!(paint_blanked(&mut h, blanked, &blank), h.stoat.render());
@@ -7065,7 +6975,7 @@ fn a_buffer_blanked_off_the_loop_paints_a_fresh_frame() {
 #[test]
 fn a_buffer_blanked_to_another_theme_is_filled_again() {
     let mut h = Stoat::test();
-    let mut stale = crate::render::themed_blank(&h.stoat.theme);
+    let mut stale = stoat::render::themed_blank(&h.stoat.theme);
     stale.bg = Color::Blue;
     let area = h.stoat.size;
 
@@ -7080,7 +6990,7 @@ fn a_buffer_blanked_to_another_theme_is_filled_again() {
 #[test]
 fn a_buffer_blanked_at_another_size_is_filled_again() {
     let mut h = Stoat::test();
-    let blank = crate::render::themed_blank(&h.stoat.theme);
+    let blank = stoat::render::themed_blank(&h.stoat.theme);
     let wider = Rect {
         width: h.stoat.size.width + 1,
         ..h.stoat.size
@@ -7089,28 +6999,6 @@ fn a_buffer_blanked_at_another_size_is_filled_again() {
     assert_eq!(
         paint_blanked(&mut h, poisoned(wider), &blank),
         h.stoat.render()
-    );
-}
-
-#[test]
-fn a_landed_blank_job_behind_a_running_one_is_taken() {
-    let (_running, pending) = oneshot::channel();
-    let (ended, closed) = oneshot::channel();
-    drop(ended);
-    let (done, landed) = oneshot::channel();
-    let _ = done.send(BlankedBuffer {
-        buffer: Buffer::empty(Rect::new(0, 0, 3, 1)),
-        blank: Cell::EMPTY,
-        holds: Vec::new(),
-    });
-    let mut jobs = std::collections::VecDeque::from([pending, closed, landed]);
-
-    let taken = take_blanked(&mut jobs).map(|blanked| blanked.buffer.area.width);
-
-    assert_eq!(
-        (taken, jobs.len()),
-        (Some(3), 1),
-        "the landed buffer, with only the running job left",
     );
 }
 
@@ -7128,12 +7016,12 @@ type FrameOutput = (
 /// The harness paints the frame each key leaves, and a focused pane replays
 /// when nothing it reads moved. A test of a frame that mixes a painted pane
 /// with a replayed one moves the hover to get the painted one.
-fn repaint_focused_pane(h: &mut crate::test_harness::TestHarness) {
+fn repaint_focused_pane(h: &mut stoat::test_harness::TestHarness) {
     let next = h.stoat.hover_cell.map_or((1, 1), |(x, y)| (x + 1, y));
     h.stoat.hover_cell = Some(next);
 }
 
-fn frame_output(h: &mut crate::test_harness::TestHarness) -> FrameOutput {
+fn frame_output(h: &mut stoat::test_harness::TestHarness) -> FrameOutput {
     let buf = h.stoat.render();
     let scene = h.stoat.apc_scene.all_bytes();
     let spans = h
@@ -7194,7 +7082,7 @@ fn a_replayed_pane_keeps_a_dotted_undercurl() {
     split_pair(&mut h);
     publish_one_diagnostic(
         &mut h,
-        std::path::Path::new("/test/a.txt"),
+        Path::new("/test/a.txt"),
         lsp_types::DiagnosticSeverity::HINT,
     );
     let _ = h.stoat.render();
@@ -7217,7 +7105,7 @@ fn a_replayed_pane_keeps_a_dotted_undercurl() {
 
 /// Paint one frame into a fresh buffer, and answer it with the holds the
 /// frame ends with.
-fn paint_held(h: &mut crate::test_harness::TestHarness) -> (Buffer, Vec<Hold>) {
+fn paint_held(h: &mut stoat::test_harness::TestHarness) -> (Buffer, Vec<Hold>) {
     let mut buf = Buffer::empty(h.stoat.size);
     let (holds, _) = h.stoat.paint_into(&mut buf, None);
     (buf, holds)
@@ -7226,16 +7114,16 @@ fn paint_held(h: &mut crate::test_harness::TestHarness) -> (Buffer, Vec<Hold>) {
 /// Hand `buf` and its `holds` to a blank job as the run loop does, and paint
 /// one frame into the buffer the job hands back.
 fn paint_restored(
-    h: &mut crate::test_harness::TestHarness,
+    h: &mut stoat::test_harness::TestHarness,
     buf: Buffer,
     holds: Vec<Hold>,
 ) -> Buffer {
-    let blank = crate::render::themed_blank(&h.stoat.theme);
+    let blank = stoat::render::themed_blank(&h.stoat.theme);
     let BlankedBuffer {
         mut buffer,
         blank,
         holds,
-    } = crate::render::blank_buffer(buf, blank, holds);
+    } = stoat::render::blank_buffer(buf, blank, holds);
     h.stoat.paint_into(&mut buffer, Some((&blank, holds)));
     buffer
 }
@@ -7285,7 +7173,7 @@ fn a_hold_of_an_older_capture_copies_the_cells() {
 
 /// [`split_pair`] with its unfocused left pane turned into a terminal, fitted
 /// to the pane, fed `content`, and painted once.
-fn unfocused_terminal(h: &mut crate::test_harness::TestHarness, content: &[u8]) -> TermId {
+fn unfocused_terminal(h: &mut stoat::test_harness::TestHarness, content: &[u8]) -> TermId {
     split_pair(h);
     let term_id = {
         let ws = h.stoat.active_workspace_mut();
@@ -7365,7 +7253,7 @@ fn a_terminal_replay_paints_only_the_damaged_rows() {
 fn a_terminal_pane_paints_whole_after_a_scroll_a_selection_or_a_focus_move() {
     let mut h = Stoat::test();
     let term_id = unfocused_terminal(&mut h, &b"line\r\n".repeat(30));
-    let paints = |h: &mut crate::test_harness::TestHarness| {
+    let paints = |h: &mut stoat::test_harness::TestHarness| {
         repaint_focused_pane(h);
         let before = h.stoat.pane_paints;
         let _ = h.stoat.render();
@@ -7476,7 +7364,7 @@ fn close_finder_over_split(modal_dim: f64) -> (u64, Buffer, Buffer) {
 
 /// A harness on a stoatty at `protocol`, with the shipped modal fade and
 /// overlay alpha.
-fn dimming_harness(protocol: u32) -> crate::test_harness::TestHarness {
+fn dimming_harness(protocol: u32) -> stoat::test_harness::TestHarness {
     let mut h = Stoat::test();
     h.stoat.stoatty_protocol = protocol;
     h.stoat.settings.ui_modal_dim = Some(0.65);
@@ -7486,7 +7374,7 @@ fn dimming_harness(protocol: u32) -> crate::test_harness::TestHarness {
 
 /// The scrim frames of a fresh frame's scene, in lane 0 and then in every
 /// lane.
-fn frame_scrims(h: &mut crate::test_harness::TestHarness) -> [Vec<ScrimCommand>; 2] {
+fn frame_scrims(h: &mut stoat::test_harness::TestHarness) -> [Vec<ScrimCommand>; 2] {
     let _ = h.stoat.render();
     let scrims = |bytes: &[u8]| -> Vec<ScrimCommand> {
         command::decode_stream(bytes)
@@ -7504,7 +7392,7 @@ fn frame_scrims(h: &mut crate::test_harness::TestHarness) -> [Vec<ScrimCommand>;
 }
 
 /// The finder open over the window of `h`, settled.
-fn open_finder(h: &mut crate::test_harness::TestHarness) {
+fn open_finder(h: &mut stoat::test_harness::TestHarness) {
     action_handlers::dispatch(&mut h.stoat, &stoat_action::OpenFileFinder);
     h.settle();
 }
@@ -7593,7 +7481,7 @@ fn a_scrim_alpha_of_zero_keeps_the_fade() {
 fn a_tab_bar_with_no_band_starts_the_scrim_under_its_row() {
     let mut h = dimming_harness(stoatty_protocol::PROTOCOL_VERSION);
     let (config, _) = stoat_config::parse(r##"theme t { ui.modal.scrim.bg = "#08090b"; }"##);
-    let theme = crate::theme::Theme::from_config(&config.expect("the theme parses"), "t")
+    let theme = stoat::theme::Theme::from_config(&config.expect("the theme parses"), "t")
         .expect("the theme builds");
     h.stoat.theme = Arc::new(theme);
     action_handlers::dispatch(&mut h.stoat, &stoat_action::NewTab);
@@ -7621,7 +7509,7 @@ fn a_tab_bar_with_no_band_starts_the_scrim_under_its_row() {
 fn a_theme_with_no_scrim_scope_keeps_the_fade() {
     let mut h = dimming_harness(stoatty_protocol::PROTOCOL_VERSION);
     let (config, _) = stoat_config::parse(DEFAULT_KEYMAP);
-    let dark = crate::theme::Theme::from_config(
+    let dark = stoat::theme::Theme::from_config(
         &config.expect("the shipped config parses"),
         "default_dark",
     )
@@ -7725,7 +7613,7 @@ fn a_held_screen_row_leaves_no_capture_under_the_scroll_it_moved() {
     h.type_keys("3 0 G");
     let _ = h.stoat.render();
     let _ = h.stoat.render();
-    let scroll = |h: &mut crate::test_harness::TestHarness| {
+    let scroll = |h: &mut stoat::test_harness::TestHarness| {
         action_handlers::focused_editor_mut(&mut h.stoat).map_or(0, |editor| editor.scroll_row)
     };
     let before = scroll(&mut h);
@@ -7751,14 +7639,14 @@ fn a_held_screen_row_leaves_no_capture_under_the_scroll_it_moved() {
 
 /// Render one frame and return each split pane's content lane, in pane order,
 /// and then the status lane.
-fn pane_lanes(h: &mut crate::test_harness::TestHarness) -> Vec<Vec<u8>> {
+fn pane_lanes(h: &mut stoat::test_harness::TestHarness) -> Vec<Vec<u8>> {
     let _ = h.stoat.render();
     split_lanes(h)
 }
 
 /// Each split pane's content lane, in pane order, and then the status lane, as
 /// the last frame left them.
-fn split_lanes(h: &crate::test_harness::TestHarness) -> Vec<Vec<u8>> {
+fn split_lanes(h: &stoat::test_harness::TestHarness) -> Vec<Vec<u8>> {
     let indices: Vec<u32> = h
         .stoat
         .active_workspace()
@@ -7842,7 +7730,7 @@ fn the_status_lane_holds_the_status_rows_alone() {
         .active_workspace()
         .panes
         .split_panes()
-        .filter_map(|(_, pane)| crate::render::pane_status_row(pane.area, band, size, status_rows))
+        .filter_map(|(_, pane)| stoat::render::pane_status_row(pane.area, band, size, status_rows))
         .collect();
     let on = |row: &Rect, (col, y): (i16, i16)| {
         y == row.y as i16 && (row.x as i16..row.right() as i16).contains(&col)
@@ -7895,7 +7783,7 @@ fn a_focused_pane_replays_an_unchanged_frame() {
 /// unfocused pane beside it still replays.
 #[test]
 fn a_focused_pane_repaints_when_an_input_it_reads_moves() {
-    type Change = fn(&mut crate::test_harness::TestHarness);
+    type Change = fn(&mut stoat::test_harness::TestHarness);
     let changes: [(&str, Change); 5] = [
         ("a cursor move", |h| h.type_keys("l")),
         ("an insert flip", |h| h.type_keys("i")),
@@ -7933,7 +7821,7 @@ fn a_focused_pane_repaints_when_an_input_it_reads_moves() {
 }
 
 /// The bytes the status lane held in the last frame.
-fn status_lane_bytes(h: &crate::test_harness::TestHarness) -> Vec<u8> {
+fn status_lane_bytes(h: &stoat::test_harness::TestHarness) -> Vec<u8> {
     h.stoat.apc_scene.lane_bytes(STATUS_LANE).to_vec()
 }
 
@@ -7941,7 +7829,7 @@ fn status_lane_bytes(h: &crate::test_harness::TestHarness) -> Vec<u8> {
 /// pane's content replays under the row, and the frame matches a repaint.
 #[test]
 fn a_status_row_change_replays_the_focused_pane_content() {
-    type Change = fn(&mut crate::test_harness::TestHarness);
+    type Change = fn(&mut stoat::test_harness::TestHarness);
     let changes: [(&str, Change); 2] = [
         ("a pending count", |h| h.type_keys("3")),
         ("a status message", |h| {
@@ -8054,8 +7942,8 @@ fn a_collapsed_selection_repaints_the_focused_pane() {
 /// The view numbers its lines absolutely, so a bare cursor's step paints no
 /// cell. Relative numbers count from the cursor's line, and a step to another
 /// line moves every one of them.
-fn changes_view(count: usize, minimap: bool) -> crate::test_harness::TestHarness {
-    let mut h = crate::test_harness::TestHarness::with_size(100, 12);
+fn changes_view(count: usize, minimap: bool) -> stoat::test_harness::TestHarness {
+    let mut h = stoat::test_harness::TestHarness::with_size(100, 12);
     h.stoat.stoatty = true;
     h.stoat.minimap_override = Some(minimap);
     h.stoat.settings.editor_line_numbers = Some(LineNumbers::Absolute);
@@ -8086,7 +7974,7 @@ fn changes_view(count: usize, minimap: bool) -> crate::test_harness::TestHarness
 }
 
 /// The focused changes view's state.
-fn changes_state(h: &mut crate::test_harness::TestHarness) -> &mut DiffChangesState {
+fn changes_state(h: &mut stoat::test_harness::TestHarness) -> &mut DiffChangesState {
     let ws = h.stoat.active_workspace_mut();
     let id = ws
         .focused_diff_changes_id()
@@ -8095,7 +7983,7 @@ fn changes_state(h: &mut crate::test_harness::TestHarness) -> &mut DiffChangesSt
 }
 
 /// Move the tokens of excerpt `index`'s editor, as a landed parse does.
-fn restyle_excerpt(h: &mut crate::test_harness::TestHarness, index: usize) {
+fn restyle_excerpt(h: &mut stoat::test_harness::TestHarness, index: usize) {
     let (editor_id, buffer) = {
         let excerpt = &changes_state(h).excerpts[index];
         (excerpt.editor_id, excerpt.buffer_id)
@@ -8131,7 +8019,7 @@ fn a_replayed_changes_view_paints_what_repainting_it_would() {
 /// excerpt below the window paints nothing there, so the pane replays.
 #[test]
 fn a_changes_view_repaints_only_when_what_it_shows_moves() {
-    type Change = fn(&mut crate::test_harness::TestHarness);
+    type Change = fn(&mut stoat::test_harness::TestHarness);
     let changes: [(&str, Change, u64); 5] = [
         (
             "a move to the next file",
@@ -8165,7 +8053,7 @@ fn a_changes_view_repaints_only_when_what_it_shows_moves() {
 }
 
 /// The focused excerpt's editor.
-fn stack_editor(h: &mut crate::test_harness::TestHarness) -> &mut EditorState {
+fn stack_editor(h: &mut stoat::test_harness::TestHarness) -> &mut EditorState {
     let editor_id = {
         let state = changes_state(h);
         state.excerpts[state.focused].editor_id
@@ -8177,7 +8065,7 @@ fn stack_editor(h: &mut crate::test_harness::TestHarness) -> &mut EditorState {
 /// the screen rect of the excerpt's text, which cursor popups place against.
 type StackCursor = (Option<(u16, u16)>, Option<(EditorId, Point)>, Option<Rect>);
 
-fn stack_cursor(h: &mut crate::test_harness::TestHarness) -> StackCursor {
+fn stack_cursor(h: &mut stoat::test_harness::TestHarness) -> StackCursor {
     let followed = changes_state(h).followed_cursor;
     let editor = stack_editor(h);
     (editor.cursor_screen_cell, followed, editor.text_rect)
@@ -8207,7 +8095,7 @@ fn a_step_inside_the_window_replays_and_records_the_cursor() {
 /// Select the first four characters of the focused excerpt's file, with the
 /// cursor at the start of the selection when `reversed` is set and at its end
 /// otherwise.
-fn widen_stack_selection(h: &mut crate::test_harness::TestHarness, reversed: bool) {
+fn widen_stack_selection(h: &mut stoat::test_harness::TestHarness, reversed: bool) {
     let editor = stack_editor(h);
     let buffer = editor.display_map.buffer_snapshot();
     let (start, end) = (
@@ -8225,7 +8113,7 @@ fn widen_stack_selection(h: &mut crate::test_harness::TestHarness, reversed: boo
 /// scene, and under a modal that takes the terminal cursor.
 #[test]
 fn a_cursor_move_that_paints_a_cell_repaints_the_changes_view() {
-    type Change = fn(&mut crate::test_harness::TestHarness);
+    type Change = fn(&mut stoat::test_harness::TestHarness);
     let changes: [(&str, Change, Change); 5] = [
         (
             "a selection past its cursor",
@@ -8258,7 +8146,7 @@ fn a_cursor_move_that_paints_a_cell_repaints_the_changes_view() {
             |h| {
                 action_handlers::dispatch(&mut h.stoat, &stoat_action::OpenCommandPalette);
             },
-            |h| crate::diff_changes::place_cursor(stack_editor(h), Point::new(1, 0)),
+            |h| stoat::diff_changes::place_cursor(stack_editor(h), Point::new(1, 0)),
         ),
     ];
 
@@ -8303,7 +8191,7 @@ fn a_replay_with_the_focused_excerpt_scrolled_off_leaves_its_cursor() {
 /// scrolls the stack to show it, so that frame paints rather than replays.
 #[test]
 fn a_bare_cursor_placed_past_the_window_scrolls_the_stack_in_a_paint() {
-    let mut h = crate::test_harness::TestHarness::with_size(100, 12);
+    let mut h = stoat::test_harness::TestHarness::with_size(100, 12);
     h.stoat.stoatty = true;
     h.stoat.minimap_override = Some(false);
     h.stoat.set_diff_warm_auto(true);
@@ -8317,7 +8205,7 @@ fn a_bare_cursor_placed_past_the_window_scrolls_the_stack_in_a_paint() {
     }
     let (painted, before) = (h.stoat.pane_paints, changes_state(&mut h).scroll);
 
-    crate::diff_changes::place_cursor(stack_editor(&mut h), Point::new(30, 0));
+    stoat::diff_changes::place_cursor(stack_editor(&mut h), Point::new(30, 0));
     let _ = h.stoat.render();
     assert_eq!(
         (
@@ -8361,15 +8249,15 @@ fn a_cursor_under_the_pinned_header_leaves_no_capture_under_the_scroll() {
     let mut h = changes_view(8, false);
     let first = {
         let state = changes_state(&mut h);
-        state.excerpts[0].top + crate::diff_changes::header_rows(&state.excerpts[0])
+        state.excerpts[0].top + stoat::diff_changes::header_rows(&state.excerpts[0])
     };
-    crate::diff_changes::place_cursor(stack_editor(&mut h), Point::new(1, 0));
+    stoat::diff_changes::place_cursor(stack_editor(&mut h), Point::new(1, 0));
     let _ = h.stoat.render();
     changes_state(&mut h).scroll = first;
     let _ = h.stoat.render();
     let painted = h.stoat.pane_paints;
 
-    crate::diff_changes::place_cursor(stack_editor(&mut h), Point::new(0, 0));
+    stoat::diff_changes::place_cursor(stack_editor(&mut h), Point::new(0, 0));
     let _ = h.stoat.render();
     let (paints, uncovered) = (h.stoat.pane_paints - painted, changes_state(&mut h).scroll);
     changes_state(&mut h).scroll = first;
@@ -8673,7 +8561,7 @@ fn panes_on_one_buffer_both_repaint_when_a_parse_lands() {
 ///
 /// `minimap` false turns the minimap off before the first frame, so no strip
 /// shows the buffer.
-fn typed_into_comment(keys: &str, minimap: bool) -> crate::test_harness::TestHarness {
+fn typed_into_comment(keys: &str, minimap: bool) -> stoat::test_harness::TestHarness {
     let mut h = Stoat::test();
     h.stoat.minimap_override = Some(minimap);
     let text = format!("// alpha beta\n{}", "fn a() {}\n".repeat(60));
@@ -8691,14 +8579,14 @@ fn typed_into_comment(keys: &str, minimap: bool) -> crate::test_harness::TestHar
 
 /// Spawn the parse the `x` left behind and run it, so its landing waits to be
 /// installed.
-fn finish_parse(h: &mut crate::test_harness::TestHarness) {
+fn finish_parse(h: &mut stoat::test_harness::TestHarness) {
     h.stoat.drive_parse_jobs();
     h.settle();
 }
 
 /// The address of the endpoint list the focused editor's highlight cache
 /// holds.
-fn cached_endpoints(h: &mut crate::test_harness::TestHarness) -> Option<usize> {
+fn cached_endpoints(h: &mut stoat::test_harness::TestHarness) -> Option<usize> {
     action_handlers::focused_editor_mut(&mut h.stoat)
         .and_then(|editor| editor.highlight_endpoint_cache.as_ref())
         .map(|cache| cache.endpoints().as_ptr() as usize)
@@ -8779,7 +8667,7 @@ fn a_parse_wake_paints_only_an_earned_landing() {
 ///
 /// Wakes other work left are taken first, so the parse wake is the only one
 /// the loop sees before the quit.
-fn published_on_parse_wake(h: &mut crate::test_harness::TestHarness) -> bool {
+fn published_on_parse_wake(h: &mut stoat::test_harness::TestHarness) -> bool {
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -8853,7 +8741,7 @@ fn a_badge_over_the_status_row_replays_the_content_above_it() {
 /// A diff view of a changed file in the left pane, unfocused beside a plain
 /// file in the right pane. At width 240 each pane takes the two-column diff
 /// layout.
-fn diff_pair(h: &mut crate::test_harness::TestHarness) {
+fn diff_pair(h: &mut stoat::test_harness::TestHarness) {
     h.stoat.stoatty = true;
     h.resize(240, 16);
     h.stage_review_scenario(
@@ -8865,7 +8753,7 @@ fn diff_pair(h: &mut crate::test_harness::TestHarness) {
         )],
     );
     h.stoat.set_diff_warm_auto(true);
-    h.open_file(std::path::Path::new("/repo/a.rs"));
+    h.open_file(Path::new("/repo/a.rs"));
     let b = h.write_file("b.txt", "delta\necho\nfoxtrot\n");
     h.type_action("SplitRight()");
     h.open_file(&b);
@@ -9007,7 +8895,7 @@ fn a_renamed_side_shows_over_a_focused_diff_pane_that_replays() {
 }
 
 /// How many panes the next frame paints rather than replays.
-fn frame_paints(h: &mut crate::test_harness::TestHarness) -> u64 {
+fn frame_paints(h: &mut stoat::test_harness::TestHarness) -> u64 {
     let before = h.stoat.pane_paints;
     let _ = h.stoat.render();
     h.stoat.pane_paints - before
@@ -9023,7 +8911,7 @@ fn frame_paints(h: &mut crate::test_harness::TestHarness) -> u64 {
 /// went back to asking per guard.
 #[test]
 fn the_key_guards_resolve_the_mode_once_between_them() {
-    use crate::test_harness::TestHarness;
+    use stoat::test_harness::TestHarness;
 
     let mut h = TestHarness::with_size(40, 6);
     let file = h.write_file("a.rs", "hello world\nsecond line\n");
@@ -9055,7 +8943,7 @@ fn the_key_guards_resolve_the_mode_once_between_them() {
 /// is measuring something.
 #[test]
 fn a_non_editing_action_captures_no_post_selections() {
-    use crate::test_harness::TestHarness;
+    use stoat::test_harness::TestHarness;
 
     let mut h = TestHarness::with_size(40, 6);
     let file = h.write_file("a.rs", "hello world\nsecond line\n");
@@ -9098,7 +8986,7 @@ fn a_non_editing_action_captures_no_post_selections() {
 /// counter is measuring something.
 #[test]
 fn typing_a_printable_character_never_derives_a_keymap_lookup() {
-    use crate::test_harness::TestHarness;
+    use stoat::test_harness::TestHarness;
 
     let mut h = TestHarness::with_size(40, 6);
     let file = h.write_file("a.rs", "hello\n");
@@ -9175,7 +9063,7 @@ fn a_background_tick_paints_no_pane() {
 /// hands anything back.
 #[test]
 fn each_input_that_moves_reaches_the_key() {
-    type Case = (&'static str, fn(&mut crate::test_harness::TestHarness));
+    type Case = (&'static str, fn(&mut stoat::test_harness::TestHarness));
     let cases: [Case; 7] = [
         ("theme", |h| {
             action_handlers::dispatch(
@@ -9368,7 +9256,7 @@ fn snapshot_space_mode() {
     h.assert_snapshot("space_mode");
 }
 
-fn focused_buffer_version(h: &crate::test_harness::TestHarness) -> u64 {
+fn focused_buffer_version(h: &stoat::test_harness::TestHarness) -> u64 {
     let ws = h.stoat.active_workspace();
     let View::Editor(editor_id) = ws.panes.pane(ws.panes.focus()).view else {
         panic!("focused pane is not an editor");
@@ -9560,20 +9448,6 @@ fn a_paste_over_a_terminal_still_lands_in_an_open_modal() {
 }
 
 #[test]
-fn encode_paste_to_pty_normalizes_newlines_when_unbracketed() {
-    assert_eq!(encode_paste_to_pty("a\r\nb\nc", false), b"a\rb\rc".to_vec());
-}
-
-#[test]
-fn encode_paste_to_pty_strips_a_nested_end_guard() {
-    assert_eq!(
-        encode_paste_to_pty("a\x1b[20\x1b[201~1~b", true),
-        b"\x1b[200~ab\x1b[201~".to_vec(),
-        "the guard that the first strip joins together goes too"
-    );
-}
-
-#[test]
 fn enter_after_open_brace_auto_indents() {
     let mut h = Stoat::test();
     open_indent_buffer(&mut h, "a.rs", b"fn a() {\n}\n");
@@ -9717,11 +9591,11 @@ fn hover_layout_at(
     line_width: usize,
     anchor_line: usize,
 ) -> (Rect, Rect, (u16, u16)) {
-    use crate::{render::hover::HoverPopup, test_harness::TestHarness};
     use ratatui::style::Style;
+    use stoat::{render::hover::HoverPopup, test_harness::TestHarness};
 
     let mut h = TestHarness::with_size(width, height);
-    let root = std::path::PathBuf::from("/hover");
+    let root = PathBuf::from("/hover");
     let path = root.join("a.txt");
     let content: String = (0..60).map(|i| format!("line{i}\n")).collect();
     h.fake_fs().insert_file(&path, content.as_bytes());
@@ -9742,10 +9616,10 @@ fn hover_layout_at(
     let editor_id = h.stoat.focused_editor_ids().expect("focused editor").0;
     h.stoat.pending_hover = Some(HoverPopup::new(lines, offset, editor_id));
 
-    let (_, cursor) = crate::render::cursor_popup::focused_editor_popup_ctx(&mut h.stoat, offset)
+    let (_, cursor) = stoat::render::cursor_popup::focused_editor_popup_ctx(&mut h.stoat, offset)
         .expect("the anchor is on screen");
     let (popup, inner) =
-        crate::render::hover::hover_popup_layout(&mut h.stoat).expect("hover layout");
+        stoat::render::hover::hover_popup_layout(&mut h.stoat).expect("hover layout");
     (popup, inner, cursor)
 }
 
@@ -9808,9 +9682,9 @@ fn hover_popup_caps_at_helix_absolute_limits() {
 
 /// A hover popup at a fixed area (`9,1 22x7`) with interior (`10,2 20x5`),
 /// `lines` as single unstyled spans and the given scroll offset.
-fn hover_sel_popup(lines: &[&str], scroll_half_pages: usize) -> crate::render::hover::HoverPopup {
+fn hover_sel_popup(lines: &[&str], scroll_half_pages: usize) -> stoat::render::hover::HoverPopup {
     use ratatui::style::Style;
-    let mut popup = crate::render::hover::HoverPopup::new(
+    let mut popup = stoat::render::hover::HoverPopup::new(
         lines
             .iter()
             .map(|l| vec![(l.to_string(), Style::default())])
@@ -9842,7 +9716,7 @@ fn hover_drag_copies_and_leaves_the_editor_untouched() {
 
     // Down at inner (10,2) resolves to (line 0, col 0). The drag to (13,2) is
     // three cells in, which the body's Ui scale maps to the copied span's end.
-    let ui = h.stoat.theme.type_scale(crate::theme::TypeRole::Ui) as usize;
+    let ui = h.stoat.theme.type_scale(stoat::theme::TypeRole::Ui) as usize;
     let end = (3 * 256 + 128) / ui;
     h.stoat
         .update(mouse_event(MouseEventKind::Down(MouseButton::Left), 10, 2));
@@ -9891,8 +9765,8 @@ fn a_press_outside_the_hover_closes_it_and_still_lands() {
 
 #[test]
 fn unplaceable_hover_popup_stops_consuming_mouse_input() {
-    use crate::render::hover::HoverPopup;
     use ratatui::style::Style;
+    use stoat::render::hover::HoverPopup;
 
     let mut h = Stoat::test();
     let _ = open_scratch_file(&mut h, "alpha beta gamma\n");
@@ -9975,38 +9849,15 @@ fn hover_selection_maps_through_the_scroll_offset() {
 }
 
 #[test]
-fn hover_hit_test_inverts_the_stoatty_scale() {
-    use crate::render::hover::HoverPopup;
-    use ratatui::style::Style;
-
-    let mut popup = HoverPopup::new(
-        vec![vec![("x".repeat(60), Style::default())]],
-        0,
-        EditorId::default(),
-    );
-    popup.inner = Rect {
-        x: 0,
-        y: 0,
-        width: 50,
-        height: 3,
-    };
-    for cell in 0..40u16 {
-        let (line, col) = crate::render::hover::hover_hit_test(&popup, cell, 0, 232);
-        assert_eq!(line, 0);
-        assert_eq!(col, (cell as usize * 256 + 128) / 232);
-    }
-}
-
-#[test]
 fn hover_grid_highlight_paints_the_selection_bg() {
-    use crate::{
+    use ratatui::style::Style;
+    use stoat::{
         render::hover::{HoverPopup, HoverSelection},
         test_harness::TestHarness,
     };
-    use ratatui::style::Style;
 
     let mut h = TestHarness::with_size(60, 20);
-    let root = std::path::PathBuf::from("/hover");
+    let root = PathBuf::from("/hover");
     let path = root.join("a.txt");
     h.fake_fs().insert_file(&path, b"alpha\n");
     h.stoat.active_workspace_mut().git_root = root;
@@ -10033,7 +9884,7 @@ fn hover_grid_highlight_paints_the_selection_bg() {
     let sel_bg = h
         .stoat
         .theme
-        .get(crate::theme::scope::UI_SELECTION)
+        .get(stoat::theme::scope::UI_SELECTION)
         .bg
         .expect("theme has a selection background");
 
@@ -10053,7 +9904,7 @@ fn hover_grid_highlight_paints_the_selection_bg() {
 
 #[test]
 fn hover_y_yanks_the_live_selection() {
-    use crate::{register::Register, render::hover::HoverSelection};
+    use stoat::{register::Register, render::hover::HoverSelection};
 
     let mut h = Stoat::test();
     let _ = open_scratch_file(&mut h, "x\n");
@@ -10086,7 +9937,7 @@ fn hover_y_yanks_the_live_selection() {
 /// last command left behind.
 #[test]
 fn hover_y_does_not_reuse_a_spent_register() {
-    use crate::{register::Register, render::hover::HoverSelection};
+    use stoat::{register::Register, render::hover::HoverSelection};
 
     let mut h = Stoat::test();
     let _ = open_scratch_file(&mut h, "x\n");
@@ -10144,7 +9995,7 @@ fn hover_drag_under_stoatty_maps_through_the_apc_scale() {
     h.stoat
         .update(mouse_event(MouseEventKind::Drag(MouseButton::Left), 20, 2));
 
-    let ui = h.stoat.theme.type_scale(crate::theme::TypeRole::Ui) as usize;
+    let ui = h.stoat.theme.type_scale(stoat::theme::TypeRole::Ui) as usize;
     let sel = h.stoat.pending_hover.as_ref().unwrap().selection.unwrap();
     assert_eq!(sel.anchor, (0, 0));
     assert_eq!(
@@ -10207,7 +10058,7 @@ fn detached_focus_parks_no_primary_cursor() {
     let mut h = Stoat::test();
     h.stoat.window_ipc_connected = true;
 
-    let path = std::path::PathBuf::from("/w/a.txt");
+    let path = PathBuf::from("/w/a.txt");
     h.fake_fs().insert_file(&path, b"hello\n");
     action_handlers::dispatch(&mut h.stoat, &OpenFile { path });
     h.settle();
@@ -10332,7 +10183,7 @@ fn a_run_pane_versions_on_everything_its_render_reads() {
     let exec = h.stoat.executor.clone();
     let run_id = {
         let ws = h.stoat.active_workspace_mut();
-        let state = crate::run::RunState::new(ws, exec);
+        let state = stoat::run::RunState::new(ws, exec);
         ws.runs.insert(state)
     };
 
@@ -10350,7 +10201,7 @@ fn a_run_pane_versions_on_everything_its_render_reads() {
     );
 
     let ws = h.stoat.active_workspace_mut();
-    let cmd = ws.cmds.insert(crate::run::Cmd::new(
+    let cmd = ws.cmds.insert(stoat::run::Cmd::new(
         "ls".into(),
         PathBuf::from("/work"),
         80,
@@ -10436,7 +10287,7 @@ fn an_untracked_view_kind_reports_no_input_version() {
     );
 }
 
-fn stoat_with_detached_editor(lines: usize) -> (crate::test_harness::TestHarness, PaneId, u32) {
+fn stoat_with_detached_editor(lines: usize) -> (stoat::test_harness::TestHarness, PaneId, u32) {
     let mut h = Stoat::test();
     h.stoat.window_ipc_connected = true;
     let root = PathBuf::from("/aux-mouse");
@@ -10598,19 +10449,9 @@ fn a_wheel_glide_requests_inlay_hints_once_at_the_settle() {
 }
 
 #[test]
-fn spinner_phase_advances_and_wraps() {
-    assert_eq!(spinner_phase(0.0), 0);
-    assert_eq!(spinner_phase(0.05), 0, "within the first frame window");
-    assert_eq!(spinner_phase(0.15), 1, "second frame");
-    assert_eq!(spinner_phase(0.95), 9, "last frame of the cycle");
-    assert_eq!(spinner_phase(1.05), 0, "wraps to the first frame");
-    assert_eq!(spinner_phase(1.15), 1);
-}
-
-#[test]
 fn frame_tick_repaints_the_spinner_only_when_the_phase_advances() {
-    use crate::host::LspNotification;
     use lsp_types::{NumberOrString, WorkDoneProgress, WorkDoneProgressBegin};
+    use stoat::host::LspNotification;
     let mut h = Stoat::test();
     h.fake_lsp().push_notification(LspNotification::Progress {
         token: NumberOrString::Number(1),
@@ -10640,8 +10481,8 @@ fn frame_tick_repaints_the_spinner_only_when_the_phase_advances() {
 
 #[test]
 fn snapshot_lsp_progress_indexing() {
-    use crate::{action_handlers::dispatch, host::LspNotification};
     use lsp_types::{NumberOrString, WorkDoneProgress, WorkDoneProgressBegin};
+    use stoat::{action_handlers::dispatch, host::LspNotification};
     let mut h = Stoat::test();
     h.fake_lsp().push_notification(LspNotification::Progress {
         token: NumberOrString::Number(1),
@@ -10706,8 +10547,8 @@ fn warning_show_message_still_paints_in_the_bar() {
 
 #[test]
 fn snapshot_lsp_show_message_error() {
-    use crate::host::LspNotification;
     use lsp_types::MessageType;
+    use stoat::host::LspNotification;
     let mut h = Stoat::test();
     h.fake_lsp()
         .push_notification(LspNotification::ShowMessage {
@@ -10720,6 +10561,7 @@ fn snapshot_lsp_show_message_error() {
 
 #[test]
 fn user_config_overrides_embedded_setting() {
+    draw_type_at_full_cell();
     let scheduler = Arc::new(stoat_scheduler::TestScheduler::new());
     let stoat = Stoat::new_with_user_config(
         scheduler.executor(),
@@ -10738,6 +10580,7 @@ fn user_config_overrides_embedded_setting() {
 }
 
 fn stoat_with_user_config(source: &str) -> Stoat {
+    draw_type_at_full_cell();
     let scheduler = Arc::new(stoat_scheduler::TestScheduler::new());
     Stoat::new_with_user_config(
         scheduler.executor(),
@@ -10837,8 +10680,9 @@ fn a_stale_user_binding_falls_back_to_the_default() {
 
 #[test]
 fn user_theme_block_layers_over_embedded_base() {
-    use crate::theme::scope::{UI_MODAL_PALETTE, UI_TEXT};
+    draw_type_at_full_cell();
     use ratatui::style::Color;
+    use stoat::theme::scope::{UI_MODAL_PALETTE, UI_TEXT};
 
     let scheduler = Arc::new(stoat_scheduler::TestScheduler::new());
     let base = Stoat::new_with_user_config(
@@ -10878,8 +10722,9 @@ fn user_theme_block_layers_over_embedded_base() {
 
 #[test]
 fn user_only_theme_name_resolves() {
-    use crate::theme::scope::UI_TEXT;
+    draw_type_at_full_cell();
     use ratatui::style::Color;
+    use stoat::theme::scope::UI_TEXT;
 
     let scheduler = Arc::new(stoat_scheduler::TestScheduler::new());
     let stoat = Stoat::new_with_user_config(
@@ -10901,6 +10746,7 @@ fn user_only_theme_name_resolves() {
 
 #[test]
 fn broken_user_config_falls_back_to_embedded_with_status() {
+    draw_type_at_full_cell();
     let scheduler = Arc::new(stoat_scheduler::TestScheduler::new());
     let stoat = Stoat::new_with_user_config(
         scheduler.executor(),
@@ -10930,6 +10776,7 @@ const BROKEN_COMMAND_CONFIG: &str = "on init { editor.scrolloff = 7; }\ncommand 
 /// in force, and the status names the line of its error.
 #[test]
 fn a_broken_command_keeps_the_rest_of_the_user_config() {
+    draw_type_at_full_cell();
     let scheduler = Arc::new(stoat_scheduler::TestScheduler::new());
     let stoat = Stoat::new_with_user_config(
         scheduler.executor(),
@@ -10955,6 +10802,7 @@ fn a_broken_command_keeps_the_rest_of_the_user_config() {
 /// rest, and the status names the line of the error.
 #[test]
 fn a_reload_with_a_broken_command_applies_the_rest() {
+    draw_type_at_full_cell();
     let scheduler = Arc::new(stoat_scheduler::TestScheduler::new());
     let mut stoat = Stoat::new(
         scheduler.executor(),
@@ -10978,6 +10826,7 @@ fn a_reload_with_a_broken_command_applies_the_rest() {
 /// of the user config applies, and the status names the line of the error.
 #[test]
 fn an_invalid_command_is_reported_and_the_rest_of_the_config_loads() {
+    draw_type_at_full_cell();
     let scheduler = Arc::new(stoat_scheduler::TestScheduler::new());
     let stoat = Stoat::new_with_user_config(
         scheduler.executor(),
@@ -11015,6 +10864,7 @@ fn an_invalid_command_is_reported_and_the_rest_of_the_config_loads() {
 /// declares.
 #[test]
 fn a_reload_swaps_the_command_set() {
+    draw_type_at_full_cell();
     let scheduler = Arc::new(stoat_scheduler::TestScheduler::new());
     let mut stoat = Stoat::new(
         scheduler.executor(),
@@ -11036,28 +10886,11 @@ fn a_reload_swaps_the_command_set() {
     );
 }
 
-/// The config error status names the error that starts first, by its line,
-/// and counts the rest.
-#[test]
-fn the_config_error_status_names_the_earliest_error_and_counts_the_rest() {
-    let source = "line one\nline two\nline three";
-    let errors = [
-        stoat_config::ParseError::new(20..21, "later"),
-        stoat_config::ParseError::new(12..13, "earlier"),
-    ];
-    assert_eq!(
-        [
-            config_error_status(source, &errors),
-            config_error_status(source, &errors[..1]),
-        ],
-        ["config.stcfg:2: earlier (+1 more)", "config.stcfg:3: later"],
-    );
-}
-
 /// A config naming an action the registry dropped parses clean, so nothing
 /// but this badge tells the user why the key does nothing.
 #[test]
 fn a_startup_config_binding_an_unknown_action_raises_a_badge() {
+    draw_type_at_full_cell();
     let scheduler = Arc::new(stoat_scheduler::TestScheduler::new());
     let stoat = Stoat::new_with_user_config(
         scheduler.executor(),
@@ -11080,6 +10913,7 @@ fn a_startup_config_binding_an_unknown_action_raises_a_badge() {
 
 #[test]
 fn reloading_a_repaired_config_clears_the_unknown_action_badge() {
+    draw_type_at_full_cell();
     let scheduler = Arc::new(stoat_scheduler::TestScheduler::new());
     let mut stoat = Stoat::new(
         scheduler.executor(),
@@ -11116,6 +10950,7 @@ fn reloading_a_repaired_config_clears_the_unknown_action_badge() {
 /// three names.
 #[test]
 fn a_badge_past_three_unknown_actions_ends_its_list_in_an_ellipsis() {
+    draw_type_at_full_cell();
     let scheduler = Arc::new(stoat_scheduler::TestScheduler::new());
     let mut stoat = Stoat::new(
         scheduler.executor(),
@@ -11138,6 +10973,7 @@ fn a_badge_past_three_unknown_actions_ends_its_list_in_an_ellipsis() {
 
 #[test]
 fn user_vscode_theme_joins_the_pool() {
+    draw_type_at_full_cell();
     use ratatui::style::Color;
 
     let scheduler = Arc::new(stoat_scheduler::TestScheduler::new());
@@ -11176,6 +11012,7 @@ fn user_vscode_theme_joins_the_pool() {
 
 #[test]
 fn only_the_resolved_theme_converts() {
+    draw_type_at_full_cell();
     let scheduler = Arc::new(stoat_scheduler::TestScheduler::new());
     let user_themes = vec![(
         "unused".to_string(),
@@ -11220,6 +11057,7 @@ fn only_the_resolved_theme_converts() {
 
 #[test]
 fn broken_user_theme_surfaces_when_selected() {
+    draw_type_at_full_cell();
     let scheduler = Arc::new(stoat_scheduler::TestScheduler::new());
     let user_themes = vec![("bad".to_string(), "{ not json".to_string())];
     let mut stoat = Stoat::new_with_user_config(
@@ -11260,6 +11098,7 @@ fn broken_user_theme_surfaces_when_selected() {
 }
 
 fn stoat_with_env_theme(user_config: Option<&str>, cli: Settings, env: &str) -> Stoat {
+    draw_type_at_full_cell();
     let scheduler = Arc::new(stoat_scheduler::TestScheduler::new());
     Stoat::new_with_user_config(
         scheduler.executor(),
@@ -11339,8 +11178,8 @@ fn unknown_env_theme_keeps_the_embedded_default() {
 
 #[test]
 fn lsp_message_clears_on_key() {
-    use crate::host::LspNotification;
     use lsp_types::MessageType;
+    use stoat::host::LspNotification;
     let mut h = Stoat::test();
     h.fake_lsp()
         .push_notification(LspNotification::ShowMessage {
@@ -11359,7 +11198,7 @@ fn lsp_message_clears_on_key() {
 
 #[test]
 fn status_message_survives_a_later_keypress() {
-    let mut h = crate::test_harness::TestHarness::with_size(40, 12);
+    let mut h = stoat::test_harness::TestHarness::with_size(40, 12);
     h.stoat.set_status("saved");
     assert_eq!(h.stoat.pending_message.as_deref(), Some("saved"));
 
@@ -11374,7 +11213,7 @@ fn status_message_survives_a_later_keypress() {
 
 #[test]
 fn status_message_expires_after_its_ttl() {
-    let mut h = crate::test_harness::TestHarness::with_size(40, 12);
+    let mut h = stoat::test_harness::TestHarness::with_size(40, 12);
     h.stoat.set_status("saved");
 
     h.stoat.render();
@@ -11397,7 +11236,7 @@ fn status_message_expires_after_its_ttl() {
 /// [`Stoat::set_status`] message reads as an alert again.
 #[test]
 fn notify_shows_its_text_as_an_info_message() {
-    let mut h = crate::test_harness::TestHarness::with_size(40, 12);
+    let mut h = stoat::test_harness::TestHarness::with_size(40, 12);
     action_handlers::dispatch(
         &mut h.stoat,
         &stoat_action::Notify {
@@ -11421,7 +11260,7 @@ fn notify_shows_its_text_as_an_info_message() {
 
 #[test]
 fn a_notification_expires_as_a_status_message_does() {
-    let mut h = crate::test_harness::TestHarness::with_size(40, 12);
+    let mut h = stoat::test_harness::TestHarness::with_size(40, 12);
     h.stoat.notify(MessageKind::Info, "ok");
     h.stoat.render();
     let shown = h.stoat.pending_message.clone();
@@ -11526,7 +11365,7 @@ fn a_count_with_no_room_stays_off_an_overlay_bar() {
 ///
 /// The bar paints through the cell fallback, the path that started an uncut
 /// segment left of its bar.
-fn commits_in_the_right_half() -> crate::test_harness::TestHarness {
+fn commits_in_the_right_half() -> stoat::test_harness::TestHarness {
     let mut h = Stoat::test();
     h.stoat.stoatty = false;
     h.seed_linear_history("/repo", &[("c1", "first", &[("a.rs", "fn a() {}\n")])]);
@@ -11542,9 +11381,9 @@ fn commits_in_the_right_half() -> crate::test_harness::TestHarness {
 }
 
 /// The text of `pane`'s status row in `buf`.
-fn status_row_text(h: &crate::test_harness::TestHarness, buf: &Buffer, pane: PaneId) -> String {
+fn status_row_text(h: &stoat::test_harness::TestHarness, buf: &Buffer, pane: PaneId) -> String {
     let area = h.stoat.active_workspace().panes.pane(pane).area;
-    let row = crate::render::pane_status_row(
+    let row = stoat::render::pane_status_row(
         area,
         h.stoat.single_minimap_rect,
         h.stoat.size(),
@@ -11563,7 +11402,7 @@ fn status_row_text(h: &crate::test_harness::TestHarness, buf: &Buffer, pane: Pan
 /// own, so a row that read another pane's status names another file.
 #[test]
 fn each_split_pane_paints_its_status_row_under_itself() {
-    let mut h = crate::test_harness::TestHarness::with_size(80, 24);
+    let mut h = stoat::test_harness::TestHarness::with_size(80, 24);
     let [a, b, c] = ["a.txt", "b.txt", "c.txt"].map(|name| h.write_file(name, "alpha\n"));
     h.open_file(&a);
     h.type_action("SplitRight()");
@@ -11615,9 +11454,9 @@ fn each_split_pane_paints_its_status_row_under_itself() {
 
 #[test]
 fn diagnostics_notification_updates_store() {
-    use crate::host::LspNotification;
     use lsp_types::{Diagnostic, DiagnosticSeverity, Position, Range, Uri};
     use std::{path::PathBuf, str::FromStr};
+    use stoat::host::LspNotification;
     let mut h = Stoat::test();
     let path = PathBuf::from("/ws/a.rs");
     let uri = Uri::from_str(&format!("file://{}", path.display())).unwrap();
@@ -11642,18 +11481,6 @@ fn diagnostics_notification_updates_store() {
     let summary = h.stoat.diagnostics.summarize(&path);
     assert_eq!(summary.error, 1);
     assert_eq!(summary.worst, Some(DiagnosticSeverity::ERROR));
-}
-
-#[test]
-fn update_effect_merge_keeps_most_urgent() {
-    let none = UpdateEffect::None;
-    let redraw = UpdateEffect::Redraw;
-    let quit = UpdateEffect::Quit;
-    assert_eq!(none.merge(redraw), redraw);
-    assert_eq!(redraw.merge(none), redraw);
-    assert_eq!(redraw.merge(quit), quit);
-    assert_eq!(quit.merge(redraw), quit);
-    assert_eq!(none.merge(none), none);
 }
 
 #[test]
@@ -11706,9 +11533,9 @@ fn a_backlog_past_any_bound_queues_without_waiting() {
 
 #[test]
 fn snapshot_run_pane_prompt_blocks() {
-    let mut h = crate::test_harness::TestHarness::with_size(40, 12);
+    let mut h = stoat::test_harness::TestHarness::with_size(40, 12);
     let run_id = h.open_run();
-    h.stoat.active_workspace_mut().git_root = std::path::PathBuf::from("/work/proj");
+    h.stoat.active_workspace_mut().git_root = PathBuf::from("/work/proj");
 
     h.submit_run("true");
     h.inject_run_output(run_id, b"ok\n");
@@ -11726,7 +11553,7 @@ fn snapshot_run_pane_prompt_blocks() {
 #[test]
 fn run_pane_abbreviates_cwd_under_home() {
     let paint = |home: Option<&str>| {
-        let mut h = crate::test_harness::TestHarness::with_size(40, 12);
+        let mut h = stoat::test_harness::TestHarness::with_size(40, 12);
         if let Some(home) = home {
             h.fake_env().set("HOME", home);
             // The cached home is resolved when the env host is set, so
@@ -11734,7 +11561,7 @@ fn run_pane_abbreviates_cwd_under_home() {
             h.stoat.set_env_host(h.fake_env().clone());
         }
         h.open_run();
-        h.stoat.active_workspace_mut().git_root = std::path::PathBuf::from("/home/tester/proj");
+        h.stoat.active_workspace_mut().git_root = PathBuf::from("/home/tester/proj");
         h.submit_run("ls");
         h.rendered_text()
     };
@@ -11910,7 +11737,7 @@ fn ctrl_c_with_no_modal_open_still_quits() {
     assert!(matches!(h.stoat.handle_key(ctrl('c')), UpdateEffect::Quit));
 }
 
-fn resolves(h: &crate::test_harness::TestHarness, key: &KeyEvent) -> bool {
+fn resolves(h: &stoat::test_harness::TestHarness, key: &KeyEvent) -> bool {
     let state = StoatKeymapState::from_stoat(&h.stoat);
     h.stoat.keymap.lookup(&state, key).is_some()
 }
@@ -11921,7 +11748,7 @@ fn resolves(h: &crate::test_harness::TestHarness, key: &KeyEvent) -> bool {
 /// behind it, leaving render painting one modal while keys route to another.
 #[test]
 fn normal_mode_bindings_stop_at_the_location_picker() {
-    use crate::location_picker::LocationEntry;
+    use stoat::location_picker::LocationEntry;
 
     let mut h = Stoat::test();
     let ctrl_d = KeyEvent::new(KeyCode::Char('d'), KeyModifiers::CONTROL);
@@ -12129,7 +11956,7 @@ fn run_wheel_scrolls_output_and_clamps() {
         .flat_map(|i| format!("line{i}\n").into_bytes())
         .collect();
     let run_id = open_run_with_output(&mut h, &output);
-    let offset = |h: &crate::test_harness::TestHarness| {
+    let offset = |h: &stoat::test_harness::TestHarness| {
         h.stoat
             .active_workspace()
             .runs
@@ -12248,7 +12075,7 @@ fn a_run_pane_keeps_one_scrollback_across_its_blocks() {
 /// Each capture lays the panes out again over the whole terminal, so the pin
 /// comes after the last one, and a press or a wheel notch reads the pinned
 /// pane.
-fn open_run_with_output(h: &mut crate::test_harness::TestHarness, output: &[u8]) -> RunId {
+fn open_run_with_output(h: &mut stoat::test_harness::TestHarness, output: &[u8]) -> RunId {
     let run_id = h.open_run();
     h.submit_run("ls");
     h.inject_run_output(run_id, output);
@@ -12258,7 +12085,7 @@ fn open_run_with_output(h: &mut crate::test_harness::TestHarness, output: &[u8])
 }
 
 /// A scratch file whose diff map marks two changes, on rows 1 and 5.
-fn open_two_change_diff(h: &mut crate::test_harness::TestHarness) {
+fn open_two_change_diff(h: &mut stoat::test_harness::TestHarness) {
     open_scratch_file(h, "keep\nnew\nmid\nmid\nmid\nnew2\ntail\n");
     install_two_change_map(h);
 }
@@ -12268,7 +12095,7 @@ fn open_two_change_diff(h: &mut crate::test_harness::TestHarness) {
 /// Closing the diff view drops its base, which stales the map, and a scratch
 /// file has no repository to diff again, so a test that reopens the view puts
 /// the map back first.
-fn install_two_change_map(h: &mut crate::test_harness::TestHarness) {
+fn install_two_change_map(h: &mut stoat::test_harness::TestHarness) {
     h.seed_current_diff_map("keep\nold\nmid\nmid\nmid\nold2\ntail\n");
 }
 
@@ -12331,7 +12158,7 @@ fn opening_diff_view_keeps_a_cursor_that_sits_on_a_change() {
 
 /// Opens a scratch buffer with a small HEAD-vs-buffer diff installed, so
 /// `toggle_diff_view` finds a ready map and skips the on-demand compute.
-fn open_scratch_with_diff(h: &mut crate::test_harness::TestHarness) {
+fn open_scratch_with_diff(h: &mut stoat::test_harness::TestHarness) {
     open_scratch_file(h, "keep\nnew\ntail\n");
     h.seed_current_diff_map("keep\nold\ntail\n");
 }
@@ -12478,7 +12305,7 @@ fn opening_diff_view_scrolls_a_far_first_hunk_into_the_viewport() {
         }
     };
     {
-        let dm = crate::diff_map::DiffMap::from_structural_changes(
+        let dm = stoat::diff_map::DiffMap::from_structural_changes(
             stoat_language::structural_diff::diff(&base, &text),
             Arc::new(base.to_string()),
             &text,
@@ -13043,9 +12870,9 @@ fn islands_inset_the_pane_layout_one_column_from_each_edge() {
     let default_dark = {
         let (config, _) = stoat_config::parse(DEFAULT_KEYMAP);
         let config = config.expect("the shipped config parses");
-        Arc::new(crate::theme::Theme::from_config(&config, "default_dark").expect("theme loads"))
+        Arc::new(stoat::theme::Theme::from_config(&config, "default_dark").expect("theme loads"))
     };
-    let layout = |stoatty: bool, protocol: u32, theme: Option<&Arc<crate::theme::Theme>>| {
+    let layout = |stoatty: bool, protocol: u32, theme: Option<&Arc<stoat::theme::Theme>>| {
         let mut h = Stoat::test();
         h.stoat.stoatty = stoatty;
         h.stoat.stoatty_protocol = protocol;
@@ -13127,7 +12954,7 @@ fn divider_drag_resizes_the_split() {
     let mut h = Stoat::test();
     let ws = h.stoat.active_workspace_mut();
     let left = ws.panes.focus();
-    let right = ws.panes.split(crate::pane::Axis::Vertical);
+    let right = ws.panes.split(stoat::pane::Axis::Vertical);
     ws.panes.resize(Rect::new(0, 0, 101, 24));
 
     let la = h.stoat.active_workspace().panes.pane(left).area;
@@ -13176,14 +13003,14 @@ fn divider_drag_resizes_the_split() {
 
 /// A finder-family modal wide enough for two panes, with the list and preview
 /// rects the renderer would paint.
-fn side_by_side_layout(h: &crate::test_harness::TestHarness, kind: ModalKind) -> (Rect, Rect) {
+fn side_by_side_layout(h: &stoat::test_harness::TestHarness, kind: ModalKind) -> (Rect, Rect) {
     let (open_kind, _) =
         mouse::open_modal_separator(&h.stoat).expect("the modal shows a preview beside its list");
     assert_eq!(open_kind, kind, "the expected modal is the open one");
     let content = match kind {
         ModalKind::SymbolFinder => {
             let finder = h.stoat.symbol_finder.as_ref().expect("open");
-            let (_, _, list, preview) = crate::render::symbol_finder::symbol_finder_layout(
+            let (_, _, list, preview) = stoat::render::symbol_finder::symbol_finder_layout(
                 h.stoat.size(),
                 finder.content_rows,
                 modal_zoom_steps(&h.stoat.modal_zoom, kind),
@@ -13197,7 +13024,7 @@ fn side_by_side_layout(h: &crate::test_harness::TestHarness, kind: ModalKind) ->
             (layout.list, layout.preview)
         },
         _ => {
-            let layout = crate::render::file_finder::file_finder_layout(
+            let layout = stoat::render::file_finder::file_finder_layout(
                 h.stoat.size(),
                 (u16::MAX, u16::MAX),
                 modal_zoom_steps(&h.stoat.modal_zoom, kind),
@@ -13215,8 +13042,8 @@ fn side_by_side_layout(h: &crate::test_harness::TestHarness, kind: ModalKind) ->
 ///
 /// The workspace holds one file, because a finder that lists no row collapses
 /// to its header and shows neither pane.
-fn wide_finder_harness() -> crate::test_harness::TestHarness {
-    let mut h = crate::test_harness::TestHarness::with_size(140, 40);
+fn wide_finder_harness() -> stoat::test_harness::TestHarness {
+    let mut h = stoat::test_harness::TestHarness::with_size(140, 40);
     seed(&mut h, &[("a.rs", "fn a() {}\n")]);
     action_handlers::dispatch(&mut h.stoat, &stoat_action::OpenFileFinder);
     h.settle();
@@ -13298,9 +13125,9 @@ fn the_finder_vline_ends_above_the_footer() {
 /// pointer path. The share it writes holds for the session.
 #[test]
 fn dragging_the_commits_vline_widens_the_list() {
-    use crate::render::commits::{commits_list_rect, MIN_LIST_COLUMNS};
+    use stoat::render::commits::{commits_list_rect, MIN_LIST_COLUMNS};
 
-    let mut h = crate::test_harness::TestHarness::with_size(140, 40);
+    let mut h = stoat::test_harness::TestHarness::with_size(140, 40);
     h.seed_linear_history("/repo", &[("c1", "first", &[("a.rs", "fn a() {}\n")])]);
     h.open_commits("/repo");
 
@@ -13352,7 +13179,7 @@ fn dragging_the_commits_vline_widens_the_list() {
 
 #[test]
 fn a_vline_drag_clamps_at_both_edges() {
-    use crate::render::picker::MIN_PANE_COLUMNS;
+    use stoat::render::picker::MIN_PANE_COLUMNS;
 
     let mut h = wide_finder_harness();
     let (list, preview) = side_by_side_layout(&h, ModalKind::FileFinder);
@@ -13397,7 +13224,7 @@ fn a_vline_drag_clamps_at_both_edges() {
 /// move another's.
 #[test]
 fn each_finder_kind_drags_its_own_separator() {
-    let mut h = crate::test_harness::TestHarness::with_size(140, 40);
+    let mut h = stoat::test_harness::TestHarness::with_size(140, 40);
     action_handlers::dispatch(&mut h.stoat, &stoat_action::OpenCodeSearch);
     h.settle();
 
@@ -13428,14 +13255,14 @@ fn each_finder_kind_drags_its_own_separator() {
 
 #[test]
 fn the_symbol_finder_vline_drags_too() {
-    let mut h = crate::test_harness::TestHarness::with_size(140, 40);
+    let mut h = stoat::test_harness::TestHarness::with_size(140, 40);
     h.stoat.symbol_finder = {
         let executor = h.stoat.executor.clone();
         let mut finder = SymbolFinder::new(
             h.stoat.active_workspace_mut(),
             executor,
             BufferId::new(0),
-            crate::symbol_finder::SymbolFinderScope::Document,
+            stoat::symbol_finder::SymbolFinderScope::Document,
             Vec::new(),
         );
         finder.content_rows = 12;
@@ -13466,7 +13293,7 @@ fn the_symbol_finder_vline_drags_too() {
 /// not reach the editor beneath.
 #[test]
 fn a_press_over_code_search_never_reaches_the_buffer() {
-    let mut h = crate::test_harness::TestHarness::with_size(140, 40);
+    let mut h = stoat::test_harness::TestHarness::with_size(140, 40);
     h.seed_focused_buffer(&"line\n".repeat(200));
     action_handlers::dispatch(&mut h.stoat, &stoat_action::OpenCodeSearch);
     h.settle();
@@ -13693,7 +13520,7 @@ fn mouse_up_multi_row_drag_writes_joined_lines() {
     assert_eq!(h.fake_clipboard().writes(), vec!["oo\nba"]);
 }
 
-fn drag_select_ell_in_hello(h: &mut crate::test_harness::TestHarness) {
+fn drag_select_ell_in_hello(h: &mut stoat::test_harness::TestHarness) {
     h.stoat
         .update(mouse_event(MouseEventKind::Down(MouseButton::Left), 3, 8));
     h.stoat
@@ -13743,7 +13570,7 @@ fn osc52_emit_skipped_locally() {
     assert!(h.fake_clipboard().osc52_emits().is_empty());
 }
 
-fn select_forward(h: &mut crate::test_harness::TestHarness, start: usize, end: usize) {
+fn select_forward(h: &mut stoat::test_harness::TestHarness, start: usize, end: usize) {
     let editor = action_handlers::focused_editor_mut(&mut h.stoat).expect("editor");
     let (start, end) = {
         let snapshot = editor.display_map.snapshot();
@@ -13760,7 +13587,7 @@ fn select_forward(h: &mut crate::test_harness::TestHarness, start: usize, end: u
 
 /// Add a second 1-wide block cursor at `offset` in the focused editor,
 /// for building same-line multi-cursor states no keybinding produces.
-fn insert_cursor_at(h: &mut crate::test_harness::TestHarness, offset: usize) {
+fn insert_cursor_at(h: &mut stoat::test_harness::TestHarness, offset: usize) {
     let editor = action_handlers::focused_editor_mut(&mut h.stoat).expect("editor");
     let snapshot = editor.display_map.snapshot();
     let buf = snapshot.buffer_snapshot();
@@ -13918,7 +13745,7 @@ fn a_published_frame_releases_its_batches_within_its_turn() {
         let path = h.write_file("a.txt", "alpha\nbravo\n");
         h.open_file(&path);
         h.settle();
-        crate::test_fixture::drain_apc(&mut apc_rx);
+        stoat::test_fixture::drain_apc(&mut apc_rx);
 
         let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel::<Event>();
         let (render_tx, mut render_rx) = watch::channel(None);
@@ -13934,7 +13761,7 @@ fn a_published_frame_releases_its_batches_within_its_turn() {
                 Some(batches.sent().now_or_never().is_some())
             } => released,
         };
-        let regions: Vec<PoolKind> = crate::test_fixture::drain_apc(&mut apc_rx)
+        let regions: Vec<PoolKind> = stoat::test_fixture::drain_apc(&mut apc_rx)
             .into_iter()
             .filter_map(|cmd| match cmd {
                 command::Command::PoolRegion(region) => Some(region.kind),
@@ -13946,82 +13773,6 @@ fn a_published_frame_releases_its_batches_within_its_turn() {
             (released, regions),
             (Some(true), vec![PoolKind::Grid]),
             "the frame's batches are released with its pool region on the channel",
-        );
-    });
-}
-
-#[cfg(feature = "perf")]
-#[test]
-fn input_driven_frame_carries_an_input_timestamp() {
-    let rt = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .expect("runtime");
-    rt.block_on(async {
-        let mut h = Stoat::test();
-        h.stoat.persistence_disabled = true;
-
-        let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel::<Event>();
-        let (render_tx, render_rx) = watch::channel(None);
-        // Queue one input event and drop the sender. The loop drains the
-        // event (publishing its frame), then breaks on the closed channel
-        // before any background redraw can supersede it in the watch.
-        event_tx.send(Event::Resize(80, 24)).expect("send");
-        drop(event_tx);
-
-        tokio::time::timeout(
-            std::time::Duration::from_secs(5),
-            h.stoat.run(event_rx, render_tx),
-        )
-        .await
-        .expect("run should quit")
-        .expect("run ok");
-
-        let frame = render_rx.borrow();
-        let frame = frame.as_ref().expect("a frame was published");
-        assert!(
-            frame.input_time.is_some(),
-            "an events.recv()-driven frame carries the input timestamp"
-        );
-    });
-}
-
-#[cfg(feature = "perf")]
-#[test]
-fn notify_driven_frame_has_no_input_timestamp() {
-    let rt = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .expect("runtime");
-    rt.block_on(async {
-        let mut h = Stoat::test();
-        h.stoat.persistence_disabled = true;
-        // Give the frame a real size without routing through the event
-        // channel, so no input timestamp is captured.
-        h.stoat.update(Event::Resize(80, 24));
-        let shutdown = h.stoat.shutdown_handle();
-
-        let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel::<Event>();
-        let (render_tx, render_rx) = watch::channel(None);
-        // A redraw-notify wakes a frame with no input behind it. The biased
-        // loop takes the redraw arm, publishing a frame, then quits.
-        h.stoat.redraw_notify.notify_one();
-        shutdown.notify_one();
-        let _keep = event_tx;
-
-        tokio::time::timeout(
-            std::time::Duration::from_secs(5),
-            h.stoat.run(event_rx, render_tx),
-        )
-        .await
-        .expect("run should quit")
-        .expect("run ok");
-
-        let frame = render_rx.borrow();
-        let frame = frame.as_ref().expect("a frame was published");
-        assert!(
-            frame.input_time.is_none(),
-            "a redraw-notify frame carries no input timestamp"
         );
     });
 }
@@ -14153,7 +13904,7 @@ fn tab_in_a_burst_completes_the_command_the_query_selects() {
 
 /// Send `text` and then `last` with no frame between the keys, the way a macro
 /// replay or a burst of input delivers them.
-fn burst(h: &mut crate::test_harness::TestHarness, text: &str, last: KeyCode) {
+fn burst(h: &mut stoat::test_harness::TestHarness, text: &str, last: KeyCode) {
     for ch in text.chars() {
         h.stoat.update(Event::Key(KeyEvent::new(
             KeyCode::Char(ch),
@@ -14855,8 +14606,8 @@ fn change_selection_and_typing_undo_as_one_step() {
 /// deletes one character at a time for the rest of the session.
 #[test]
 fn a_server_edit_mid_session_leaves_the_typing_after_it_one_step() {
-    use crate::host::OffsetEncoding;
     use lsp_types::{Position, Range as LspRange, TextEdit};
+    use stoat::host::OffsetEncoding;
 
     let mut h = Stoat::test();
     let path = open_scratch_file(&mut h, "foo\n");
@@ -14864,7 +14615,7 @@ fn a_server_edit_mid_session_leaves_the_typing_after_it_one_step() {
     h.type_keys("i");
     h.type_text("A");
 
-    crate::lsp::edit_apply::apply_text_edits_to_buffer(
+    stoat::lsp::edit_apply::apply_text_edits_to_buffer(
         &mut h.stoat,
         &path,
         vec![TextEdit {
@@ -15742,7 +15493,7 @@ fn a_no_yank_change_of_whole_lines_opens_a_line_to_type_on() {
 /// Alt-c keeps the deleted text out of every register, the way Alt-d does.
 #[test]
 fn a_no_yank_change_leaves_the_register_alone() {
-    use crate::register::Register;
+    use stoat::register::Register;
 
     let mut h = Stoat::test();
     let _ = open_scratch_file(&mut h, "aaa\nbbb\n");
@@ -15964,7 +15715,7 @@ fn pending_completion_defaults_to_none() {
 
 #[test]
 fn esc_in_insert_with_open_popup_clears_popup_and_exits_to_normal() {
-    use crate::completion::{CompletionItem, CompletionPopup, CompletionSource};
+    use stoat::completion::{CompletionItem, CompletionPopup, CompletionSource};
     let mut h = Stoat::test();
     let _path = open_scratch_file(&mut h, "");
     h.type_keys("i");
@@ -15974,7 +15725,7 @@ fn esc_in_insert_with_open_popup_clears_popup_and_exits_to_normal() {
         source: CompletionSource::Lsp,
         kind: None,
         detail: None,
-        replace_range: crate::completion::unused_replace_range(),
+        replace_range: stoat::completion::unused_replace_range(),
         insert_text: "foo".into(),
         is_snippet: false,
         documentation: None,
@@ -16014,13 +15765,13 @@ fn tab_with_no_popup_smart_indents_after_whitespace() {
 
 #[test]
 fn enter_accepts_only_a_selected_row() {
-    use crate::completion::{CompletionItem, CompletionPopup, CompletionSource};
+    use stoat::completion::{CompletionItem, CompletionPopup, CompletionSource};
     let after_keys = |keys: &str| {
         let mut h = Stoat::test();
         let path = open_scratch_file(&mut h, "");
         h.type_keys("i");
         h.type_keys("f o o");
-        let replace_range = crate::completion::anchor_range_in_focused(&h.stoat, 0..3);
+        let replace_range = stoat::completion::anchor_range_in_focused(&h.stoat, 0..3);
         h.stoat.pending_completion = Some(CompletionPopup {
             prefix_range: 0..3,
             ..CompletionPopup::showing(vec![CompletionItem {
@@ -16126,12 +15877,12 @@ fn half_page_keys_step_the_popup_by_half_its_height() {
 /// Each selection previews its row over the `f`, so the popup closes with
 /// Ctrl-c at the end, which puts the `f` back.
 fn popup_selections(
-    h: &mut crate::test_harness::TestHarness,
+    h: &mut stoat::test_harness::TestHarness,
     rows: usize,
     keys: &[&str],
 ) -> Vec<Option<usize>> {
-    use crate::completion::{CompletionItem, CompletionPopup, CompletionSource};
-    let replace_range = crate::completion::anchor_range_in_focused(&h.stoat, 0..1);
+    use stoat::completion::{CompletionItem, CompletionPopup, CompletionSource};
+    let replace_range = stoat::completion::anchor_range_in_focused(&h.stoat, 0..1);
     let items = (0..rows)
         .map(|row| CompletionItem {
             label: format!("foo{row}"),
@@ -16151,7 +15902,7 @@ fn popup_selections(
         ..CompletionPopup::showing(items)
     });
 
-    let selected = |h: &crate::test_harness::TestHarness| {
+    let selected = |h: &stoat::test_harness::TestHarness| {
         h.stoat
             .pending_completion
             .as_ref()
@@ -16172,7 +15923,7 @@ fn popup_selections(
 /// the typing armed goes with it, so its answer does not reopen the popup.
 #[test]
 fn ctrl_c_closes_the_completion_popup_rather_than_quitting() {
-    use crate::completion::{
+    use stoat::completion::{
         request::COMPLETION_DEBOUNCE, CompletionItem, CompletionPopup, CompletionSource,
     };
     let mut h = Stoat::test();
@@ -16188,7 +15939,7 @@ fn ctrl_c_closes_the_completion_popup_rather_than_quitting() {
         source: CompletionSource::Word,
         kind: None,
         detail: None,
-        replace_range: crate::completion::unused_replace_range(),
+        replace_range: stoat::completion::unused_replace_range(),
         insert_text: label.into(),
         is_snippet: false,
         documentation: None,
@@ -16289,11 +16040,11 @@ fn an_unbound_key_that_accepts_a_row_repaints() {
 
 /// Opens `fo` in insert mode under a popup of the rows `foobar` and `foobaz`,
 /// which both replace the typed `fo`.
-fn open_popup_over_fo(h: &mut crate::test_harness::TestHarness) -> PathBuf {
-    use crate::completion::{CompletionItem, CompletionPopup, CompletionSource};
+fn open_popup_over_fo(h: &mut stoat::test_harness::TestHarness) -> PathBuf {
+    use stoat::completion::{CompletionItem, CompletionPopup, CompletionSource};
     let path = open_scratch_file(h, "");
     h.type_keys("i f o");
-    let replace_range = crate::completion::anchor_range_in_focused(&h.stoat, 0..2);
+    let replace_range = stoat::completion::anchor_range_in_focused(&h.stoat, 0..2);
     let row = |label: &str| CompletionItem {
         label: label.into(),
         source: CompletionSource::Word,
@@ -16328,12 +16079,12 @@ fn up_and_down_with_no_popup_move_cursor() {
 
 #[test]
 fn snippet_tabstop_wins_mid_line_only() {
-    use crate::completion::{CompletionItem, CompletionPopup, CompletionSource};
+    use stoat::completion::{CompletionItem, CompletionPopup, CompletionSource};
     let mut h = Stoat::test();
     let path = open_scratch_file(&mut h, "");
     h.type_keys("i");
     h.type_keys("p r i");
-    let replace_range = crate::completion::anchor_range_in_focused(&h.stoat, 0..3);
+    let replace_range = stoat::completion::anchor_range_in_focused(&h.stoat, 0..3);
     h.stoat.pending_completion = Some(CompletionPopup {
         prefix_range: 0..3,
         ..CompletionPopup::showing(vec![CompletionItem {
@@ -16376,12 +16127,12 @@ fn snippet_tabstop_wins_mid_line_only() {
 
 #[test]
 fn tab_advances_active_snippet_to_next_tabstop() {
-    use crate::completion::{CompletionItem, CompletionPopup, CompletionSource};
+    use stoat::completion::{CompletionItem, CompletionPopup, CompletionSource};
     let mut h = Stoat::test();
     let path = open_scratch_file(&mut h, "");
     h.type_keys("i");
     h.type_keys("p r i");
-    let replace_range = crate::completion::anchor_range_in_focused(&h.stoat, 0..3);
+    let replace_range = stoat::completion::anchor_range_in_focused(&h.stoat, 0..3);
     h.stoat.pending_completion = Some(CompletionPopup {
         prefix_range: 0..3,
         ..CompletionPopup::showing(vec![CompletionItem {
@@ -16419,12 +16170,12 @@ fn tab_advances_active_snippet_to_next_tabstop() {
 
 #[test]
 fn leaving_insert_mode_clears_active_snippet() {
-    use crate::completion::{CompletionItem, CompletionPopup, CompletionSource};
+    use stoat::completion::{CompletionItem, CompletionPopup, CompletionSource};
     let mut h = Stoat::test();
     let _path = open_scratch_file(&mut h, "");
     h.type_keys("i");
     h.type_keys("f");
-    let replace_range = crate::completion::anchor_range_in_focused(&h.stoat, 0..1);
+    let replace_range = stoat::completion::anchor_range_in_focused(&h.stoat, 0..1);
     h.stoat.pending_completion = Some(CompletionPopup {
         prefix_range: 0..1,
         ..CompletionPopup::showing(vec![CompletionItem {
@@ -16449,7 +16200,7 @@ fn leaving_insert_mode_clears_active_snippet() {
     assert!(h.stoat.active_snippet.is_none());
 }
 
-fn focused_primary_offsets(h: &mut crate::test_harness::TestHarness) -> (usize, usize) {
+fn focused_primary_offsets(h: &mut stoat::test_harness::TestHarness) -> (usize, usize) {
     let editor_id = h.stoat.focused_editor_ids().expect("focused editor").0;
     let ws = h.stoat.active_workspace_mut();
     let editor = ws.editors.get_mut(editor_id).expect("editor exists");
@@ -16462,7 +16213,7 @@ fn focused_primary_offsets(h: &mut crate::test_harness::TestHarness) -> (usize, 
     )
 }
 
-fn focused_gutter_width(h: &crate::test_harness::TestHarness) -> u16 {
+fn focused_gutter_width(h: &stoat::test_harness::TestHarness) -> u16 {
     let editor_id = h.stoat.focused_editor_ids().expect("focused editor").0;
     h.stoat
         .active_workspace()
@@ -16501,328 +16252,6 @@ fn line_numbers_setting_toggles_the_gutter() {
     );
 }
 
-#[test]
-fn a_theme_defining_no_colors_pushes_nothing() {
-    assert!(
-        osc_default_colors(&crate::theme::Theme::empty()).is_empty(),
-        "with nothing to say, the terminal's own defaults stand",
-    );
-}
-
-#[test]
-fn editor_page_content_version_tracks_the_cursor_line() {
-    let paint = PaintVersion::default();
-    let base = editor_page_content_version(
-        true,
-        3,
-        None,
-        Some(10),
-        0,
-        false,
-        0,
-        0.0,
-        DiffDials::shipped(),
-        0,
-        paint,
-        0,
-        None,
-        0,
-        None,
-        None,
-    );
-    assert_eq!(
-        base,
-        editor_page_content_version(
-            true,
-            3,
-            None,
-            Some(10),
-            0,
-            false,
-            0,
-            0.0,
-            DiffDials::shipped(),
-            0,
-            paint,
-            0,
-            None,
-            0,
-            None,
-            None,
-        ),
-        "identical inputs keep a buffered page cached"
-    );
-    assert_ne!(
-        base,
-        editor_page_content_version(
-            true,
-            3,
-            None,
-            Some(11),
-            0,
-            false,
-            0,
-            0.0,
-            DiffDials::shipped(),
-            0,
-            paint,
-            0,
-            None,
-            0,
-            None,
-            None,
-        ),
-        "a cursor-line move refills buffered pages"
-    );
-    assert_ne!(
-        base,
-        editor_page_content_version(
-            true,
-            3,
-            None,
-            None,
-            0,
-            false,
-            0,
-            0.0,
-            DiffDials::shipped(),
-            0,
-            paint,
-            0,
-            None,
-            0,
-            None,
-            None,
-        ),
-        "switching to absolute numbering refills"
-    );
-    assert_ne!(
-        base,
-        editor_page_content_version(
-            true,
-            3,
-            Some(72),
-            Some(10),
-            0,
-            false,
-            0,
-            0.0,
-            DiffDials::shipped(),
-            0,
-            paint,
-            0,
-            None,
-            0,
-            None,
-            None,
-        ),
-        "a wrap-width change refills buffered pages"
-    );
-    assert_ne!(
-        base,
-        editor_page_content_version(
-            true,
-            3,
-            None,
-            Some(10),
-            0,
-            true,
-            7,
-            0.0,
-            DiffDials::shipped(),
-            0,
-            paint,
-            0,
-            None,
-            0,
-            None,
-            None,
-        ),
-        "a diff-view hunk change refills buffered pages"
-    );
-    assert_ne!(
-        base,
-        editor_page_content_version(
-            true,
-            3,
-            None,
-            Some(10),
-            0,
-            false,
-            0,
-            0.0,
-            DiffDials {
-                soften_scale: 1.5,
-                ..DiffDials::shipped()
-            },
-            0,
-            paint,
-            0,
-            None,
-            0,
-            None,
-            None,
-        ),
-        "a soften step refills buffered pages rather than gliding stale colors"
-    );
-    assert_ne!(
-        base,
-        editor_page_content_version(
-            true,
-            3,
-            None,
-            Some(10),
-            0,
-            false,
-            0,
-            0.25,
-            DiffDials::shipped(),
-            0,
-            paint,
-            0,
-            None,
-            0,
-            None,
-            None,
-        ),
-        "a focus change to a dimmed pane refills buffered pages"
-    );
-    assert_ne!(
-        base,
-        editor_page_content_version(
-            true,
-            3,
-            None,
-            Some(10),
-            0,
-            false,
-            0,
-            0.0,
-            DiffDials::shipped(),
-            1,
-            paint,
-            0,
-            None,
-            0,
-            None,
-            None,
-        ),
-        "a buffer edit refills buffered pages"
-    );
-    assert_ne!(
-        base,
-        editor_page_content_version(
-            true,
-            3,
-            None,
-            Some(10),
-            0,
-            false,
-            0,
-            0.0,
-            DiffDials::shipped(),
-            0,
-            paint,
-            1,
-            None,
-            0,
-            None,
-            None,
-        ),
-        "a theme switch refills buffered pages"
-    );
-    assert_ne!(
-        base,
-        editor_page_content_version(
-            true,
-            3,
-            None,
-            Some(10),
-            0,
-            false,
-            0,
-            0.0,
-            DiffDials::shipped(),
-            0,
-            paint,
-            0,
-            None,
-            1,
-            None,
-            None,
-        ),
-        "a change of the printed diagnostic messages refills buffered pages"
-    );
-
-    let blamed = |blame| {
-        editor_page_content_version(
-            true,
-            3,
-            None,
-            Some(10),
-            0,
-            false,
-            0,
-            0.0,
-            DiffDials::shipped(),
-            0,
-            paint,
-            0,
-            None,
-            0,
-            blame,
-            None,
-        )
-    };
-    assert_ne!(
-        base,
-        blamed(Some(0)),
-        "the Blame Column turning on refills buffered pages"
-    );
-    assert_ne!(
-        blamed(Some(0)),
-        blamed(Some(1)),
-        "a landed blame refills buffered pages"
-    );
-
-    let lit = |start: usize| {
-        let spotlight = Spotlight {
-            range: start..=start + 4,
-            color: [1, 2, 3],
-            dim: 0.5,
-        };
-        editor_page_content_version(
-            true,
-            3,
-            None,
-            Some(10),
-            0,
-            false,
-            0,
-            0.0,
-            DiffDials::shipped(),
-            0,
-            paint,
-            0,
-            Some(&spotlight),
-            0,
-            None,
-            None,
-        )
-    };
-    assert_ne!(
-        base,
-        lit(6),
-        "a walkthrough spotlight coming on refills buffered pages"
-    );
-    assert_eq!(
-        lit(6),
-        lit(12),
-        "one moving to another annotation leaves the pool's version, since each \
-             page carries where it lights in its own"
-    );
-}
-
 /// A pooled page and the minimap thumb both hold cached work against the
 /// display map, so anything that relaid the rows has to move what they key
 /// on.
@@ -16833,7 +16262,7 @@ fn editor_page_content_version_tracks_the_cursor_line() {
 /// which is the case a glide over an edited file composited stale text in.
 #[test]
 fn an_edit_or_a_fold_refills_pooled_pages_and_the_minimap_window() {
-    use crate::{display_map::DisplayMap, test_harness::TestHarness};
+    use stoat::{display_map::DisplayMap, test_harness::TestHarness};
     use stoat_text::Point;
 
     fn focused_display_map(h: &mut TestHarness) -> &mut DisplayMap {
@@ -16948,8 +16377,8 @@ fn editor_mouse_down_inside_a_cluster_lands_on_the_whole_cluster() {
 
 /// Open a location picker over `count` candidates in a seeded file, each
 /// row's text naming its 1-based position, and return the file's path.
-fn open_location_picker(h: &mut crate::test_harness::TestHarness, count: usize) -> PathBuf {
-    use crate::location_picker::LocationEntry;
+fn open_location_picker(h: &mut stoat::test_harness::TestHarness, count: usize) -> PathBuf {
+    use stoat::location_picker::LocationEntry;
 
     let root = PathBuf::from("/loc-picker");
     let path = root.join("target.rs");
@@ -16980,7 +16409,7 @@ fn open_location_picker(h: &mut crate::test_harness::TestHarness, count: usize) 
 /// candidates rather than reaching the buffer behind it.
 #[test]
 fn typing_narrows_the_location_candidates() {
-    let mut h = crate::test_harness::TestHarness::with_size(160, 40);
+    let mut h = stoat::test_harness::TestHarness::with_size(160, 40);
     open_location_picker(&mut h, 12);
     let all = h
         .stoat
@@ -17011,7 +16440,7 @@ fn typing_narrows_the_location_candidates() {
 /// points at, so a reader sees the target before committing to the jump.
 #[test]
 fn the_location_preview_follows_the_selection() {
-    let mut h = crate::test_harness::TestHarness::with_size(160, 40);
+    let mut h = stoat::test_harness::TestHarness::with_size(160, 40);
     open_location_picker(&mut h, 40);
     h.stoat.drive_background();
     h.snapshot();
@@ -17023,7 +16452,7 @@ fn the_location_preview_follows_the_selection() {
         .expect("open")
         .preview
         .editor;
-    let scroll = |h: &crate::test_harness::TestHarness| {
+    let scroll = |h: &stoat::test_harness::TestHarness| {
         h.stoat
             .active_workspace()
             .editors
@@ -17051,7 +16480,7 @@ fn the_location_preview_follows_the_selection() {
 /// picker leaves no scratch buffers behind.
 #[test]
 fn escape_closes_the_location_picker_and_disposes_it() {
-    let mut h = crate::test_harness::TestHarness::with_size(160, 40);
+    let mut h = stoat::test_harness::TestHarness::with_size(160, 40);
     let before = h.stoat.active_workspace().editors.len();
     open_location_picker(&mut h, 4);
     assert!(
@@ -17176,7 +16605,7 @@ fn location_picker_renders_a_selection_past_the_visible_rows() {
     // Wider than the default terminal so the hints overlay, which is
     // right-aligned and sized by the bindings it lists, sits clear of the
     // centered modal. At 80 columns it covers the rows this reads.
-    let mut h = crate::test_harness::TestHarness::with_size(160, 40);
+    let mut h = stoat::test_harness::TestHarness::with_size(160, 40);
     // More candidates than the box shows, so the window has to scroll to
     // reach the last one.
     open_location_picker(&mut h, 60);
@@ -17212,7 +16641,7 @@ fn location_picker_renders_a_selection_past_the_visible_rows() {
     let selection = h
         .stoat
         .theme
-        .list_selected(crate::theme::scope::UI_SELECTION);
+        .list_selected(stoat::theme::scope::UI_SELECTION);
     assert_eq!(
         h.rendered_buffer()[(rows.x + 1, last_row)].style().bg,
         selection.bg,
@@ -17223,7 +16652,7 @@ fn location_picker_renders_a_selection_past_the_visible_rows() {
 /// Open a workspace-scope diagnostics picker over `count` diagnostics, one
 /// per line of a seeded file, each message naming its 1-based line so a
 /// painted row is identifiable. Returns the file's path.
-fn open_diagnostics_picker(h: &mut crate::test_harness::TestHarness, count: u32) -> PathBuf {
+fn open_diagnostics_picker(h: &mut stoat::test_harness::TestHarness, count: u32) -> PathBuf {
     use lsp_types::{Diagnostic, DiagnosticSeverity, Position, Range};
 
     let root = PathBuf::from("/diag-picker");
@@ -17263,7 +16692,7 @@ fn open_diagnostics_picker(h: &mut crate::test_harness::TestHarness, count: u32)
 /// diagnostics rather than reaching the buffer behind it.
 #[test]
 fn typing_narrows_the_diagnostics() {
-    let mut h = crate::test_harness::TestHarness::with_size(160, 40);
+    let mut h = stoat::test_harness::TestHarness::with_size(160, 40);
     open_diagnostics_picker(&mut h, 12);
     let all = h
         .stoat
@@ -17293,7 +16722,7 @@ fn typing_narrows_the_diagnostics() {
 /// A list of every path's diagnostics names its scope in the header's label.
 #[test]
 fn the_workspace_diagnostics_header_names_its_scope() {
-    let mut h = crate::test_harness::TestHarness::with_size(160, 40);
+    let mut h = stoat::test_harness::TestHarness::with_size(160, 40);
     open_diagnostics_picker(&mut h, 2);
     let text = h.rendered_text();
     assert!(
@@ -17306,7 +16735,7 @@ fn the_workspace_diagnostics_header_names_its_scope() {
 /// points at, so a reader sees the offending code before jumping to it.
 #[test]
 fn the_diagnostics_preview_follows_the_selection() {
-    let mut h = crate::test_harness::TestHarness::with_size(160, 40);
+    let mut h = stoat::test_harness::TestHarness::with_size(160, 40);
     open_diagnostics_picker(&mut h, 40);
     h.stoat.drive_background();
     h.snapshot();
@@ -17319,7 +16748,7 @@ fn the_diagnostics_preview_follows_the_selection() {
         .picker
         .preview
         .editor;
-    let scroll = |h: &crate::test_harness::TestHarness| {
+    let scroll = |h: &stoat::test_harness::TestHarness| {
         h.stoat
             .active_workspace()
             .editors
@@ -17348,7 +16777,7 @@ fn the_diagnostics_preview_follows_the_selection() {
 /// picker leaves no scratch buffers behind.
 #[test]
 fn escape_closes_the_diagnostics_picker_and_disposes_it() {
-    let mut h = crate::test_harness::TestHarness::with_size(160, 40);
+    let mut h = stoat::test_harness::TestHarness::with_size(160, 40);
     let before = h.stoat.active_workspace().editors.len();
     open_diagnostics_picker(&mut h, 4);
     assert!(
@@ -17373,7 +16802,7 @@ fn escape_closes_the_diagnostics_picker_and_disposes_it() {
 /// each end rather than wrapping.
 #[test]
 fn diagnostics_picker_pages_by_half_a_screen_and_stops_at_the_ends() {
-    let mut h = crate::test_harness::TestHarness::with_size(160, 40);
+    let mut h = stoat::test_harness::TestHarness::with_size(160, 40);
     open_diagnostics_picker(&mut h, 20);
 
     let half = h
@@ -17390,10 +16819,10 @@ fn diagnostics_picker_pages_by_half_a_screen_and_stops_at_the_ends() {
         "a meaningful page needs more than one row: {half}"
     );
 
-    let page = |h: &mut crate::test_harness::TestHarness, dir: i32| {
+    let page = |h: &mut stoat::test_harness::TestHarness, dir: i32| {
         h.stoat.diagnostics_picker.as_mut().expect("open").page(dir);
     };
-    let selected = |h: &crate::test_harness::TestHarness| {
+    let selected = |h: &stoat::test_harness::TestHarness| {
         h.stoat
             .diagnostics_picker
             .as_ref()
@@ -17420,7 +16849,7 @@ fn diagnostics_picker_pages_by_half_a_screen_and_stops_at_the_ends() {
 /// reach the last one, and the row it lands on paints as selected.
 #[test]
 fn diagnostics_picker_renders_a_selection_past_the_visible_rows() {
-    let mut h = crate::test_harness::TestHarness::with_size(160, 40);
+    let mut h = stoat::test_harness::TestHarness::with_size(160, 40);
     open_diagnostics_picker(&mut h, 60);
     h.stoat
         .diagnostics_picker
@@ -17455,7 +16884,7 @@ fn diagnostics_picker_renders_a_selection_past_the_visible_rows() {
     let selection = h
         .stoat
         .theme
-        .list_selected(crate::theme::scope::UI_SELECTION);
+        .list_selected(stoat::theme::scope::UI_SELECTION);
     assert_eq!(
         h.rendered_buffer()[(rows.x + 1, last_row)].style().bg,
         selection.bg,
@@ -17467,7 +16896,7 @@ fn diagnostics_picker_renders_a_selection_past_the_visible_rows() {
 /// row shows all three. The selected first row draws as the rounded row.
 #[test]
 fn the_walkthrough_picker_rows_show_slug_count_and_title() {
-    let mut h = crate::test_harness::TestHarness::with_size(160, 40);
+    let mut h = stoat::test_harness::TestHarness::with_size(160, 40);
     store_two_tours(&mut h);
     action_handlers::dispatch(&mut h.stoat, &stoat_action::OpenWalkthroughPicker);
     h.snapshot();
@@ -17489,7 +16918,7 @@ fn the_walkthrough_picker_rows_show_slug_count_and_title() {
 /// shows all three. The selected first row draws as the rounded row.
 #[test]
 fn the_pane_finder_rows_show_kind_title_and_place() {
-    let mut h = crate::test_harness::TestHarness::with_size(160, 40);
+    let mut h = stoat::test_harness::TestHarness::with_size(160, 40);
     open_scratch_file(&mut h, "");
     action_handlers::dispatch(&mut h.stoat, &stoat_action::NewTab);
     action_handlers::dispatch(&mut h.stoat, &stoat_action::Terminal);
@@ -17512,10 +16941,10 @@ fn the_pane_finder_rows_show_kind_title_and_place() {
 /// The boxes a fresh live frame draws over the first row of `rows`, and the
 /// box of a rounded selected row in the theme's select fill.
 fn first_row_boxes(
-    h: &mut crate::test_harness::TestHarness,
+    h: &mut stoat::test_harness::TestHarness,
     rows: Rect,
 ) -> (Vec<RowBox>, Vec<RowBox>) {
-    use crate::{render::paint::style_rgb, theme::scope};
+    use stoat::{render::paint::style_rgb, theme::scope};
 
     let select =
         style_rgb(h.stoat.theme.list_selected(scope::UI_SELECTION).bg).expect("an RGB select fill");
@@ -17530,7 +16959,7 @@ fn first_row_boxes(
 
 /// The words painted on `row` across the list `rows`, joined by single
 /// spaces, so a row reads the same at any column width.
-fn row_words(h: &crate::test_harness::TestHarness, rows: Rect, row: u16) -> String {
+fn row_words(h: &stoat::test_harness::TestHarness, rows: Rect, row: u16) -> String {
     let buf = h.rendered_buffer();
     let text: String = (rows.x..rows.x + rows.width)
         .map(|col| buf[(col, row)].symbol())
@@ -17543,7 +16972,7 @@ fn row_words(h: &crate::test_harness::TestHarness, rows: Rect, row: u16) -> Stri
 ///
 /// The list holds `count + 1` rows: opening the file records a jump out of
 /// the scratch buffer the harness starts on.
-fn open_jumplist_picker(h: &mut crate::test_harness::TestHarness, count: usize) -> PathBuf {
+fn open_jumplist_picker(h: &mut stoat::test_harness::TestHarness, count: usize) -> PathBuf {
     let root = PathBuf::from("/jump-picker");
     let path = root.join("target.rs");
     let text: String = (1..=count)
@@ -17568,7 +16997,7 @@ fn open_jumplist_picker(h: &mut crate::test_harness::TestHarness, count: usize) 
 /// jumps rather than reaching the buffer behind it.
 #[test]
 fn typing_narrows_the_jumps() {
-    let mut h = crate::test_harness::TestHarness::with_size(160, 40);
+    let mut h = stoat::test_harness::TestHarness::with_size(160, 40);
     let jumps = 12;
     open_jumplist_picker(&mut h, jumps);
     let all = h
@@ -17602,7 +17031,7 @@ fn typing_narrows_the_jumps() {
 /// query that every jump matches moves the selection to the best match.
 #[test]
 fn a_query_selects_the_best_match() {
-    let mut h = crate::test_harness::TestHarness::with_size(160, 40);
+    let mut h = stoat::test_harness::TestHarness::with_size(160, 40);
     open_jumplist_picker(&mut h, 12);
 
     h.type_text("lands");
@@ -17618,7 +17047,7 @@ fn a_query_selects_the_best_match() {
 /// ranks the query itself.
 #[test]
 fn enter_in_a_burst_jumps_to_the_entry_the_query_selects() {
-    let mut h = crate::test_harness::TestHarness::with_size(160, 40);
+    let mut h = stoat::test_harness::TestHarness::with_size(160, 40);
     open_jumplist_picker(&mut h, 12);
 
     burst(&mut h, "jump-7", KeyCode::Enter);
@@ -17636,7 +17065,7 @@ fn enter_in_a_burst_jumps_to_the_entry_the_query_selects() {
 /// picker opened, as a Helix pick does.
 #[test]
 fn picking_an_entry_records_the_position_it_leaves() {
-    let mut h = crate::test_harness::TestHarness::with_size(160, 40);
+    let mut h = stoat::test_harness::TestHarness::with_size(160, 40);
     open_jumplist_picker(&mut h, 12);
     let opened_at = focused_cursor_row(&mut h.stoat);
 
@@ -17649,7 +17078,7 @@ fn picking_an_entry_records_the_position_it_leaves() {
 /// points at, so a reader sees the target before committing to the jump.
 #[test]
 fn the_jumplist_preview_follows_the_selection() {
-    let mut h = crate::test_harness::TestHarness::with_size(160, 40);
+    let mut h = stoat::test_harness::TestHarness::with_size(160, 40);
     open_jumplist_picker(&mut h, 40);
     h.stoat
         .jumplist_picker
@@ -17668,7 +17097,7 @@ fn the_jumplist_preview_follows_the_selection() {
         .picker
         .preview
         .editor;
-    let scroll = |h: &crate::test_harness::TestHarness| {
+    let scroll = |h: &stoat::test_harness::TestHarness| {
         h.stoat
             .active_workspace()
             .editors
@@ -17697,7 +17126,7 @@ fn the_jumplist_preview_follows_the_selection() {
 /// picker leaves no scratch buffers behind.
 #[test]
 fn escape_closes_the_jumplist_picker_and_disposes_it() {
-    let mut h = crate::test_harness::TestHarness::with_size(160, 40);
+    let mut h = stoat::test_harness::TestHarness::with_size(160, 40);
     open_jumplist_picker(&mut h, 4);
     let before = h.stoat.active_workspace().editors.len();
     assert!(
@@ -17722,7 +17151,7 @@ fn escape_closes_the_jumplist_picker_and_disposes_it() {
 /// each end rather than wrapping.
 #[test]
 fn jumplist_picker_pages_by_half_a_screen_and_stops_at_the_ends() {
-    let mut h = crate::test_harness::TestHarness::with_size(160, 40);
+    let mut h = stoat::test_harness::TestHarness::with_size(160, 40);
     open_jumplist_picker(&mut h, 19);
 
     let half = h
@@ -17739,10 +17168,10 @@ fn jumplist_picker_pages_by_half_a_screen_and_stops_at_the_ends() {
         "a meaningful page needs more than one row: {half}"
     );
 
-    let page = |h: &mut crate::test_harness::TestHarness, dir: i32| {
+    let page = |h: &mut stoat::test_harness::TestHarness, dir: i32| {
         h.stoat.jumplist_picker.as_mut().expect("open").page(dir);
     };
-    let selected = |h: &crate::test_harness::TestHarness| {
+    let selected = |h: &stoat::test_harness::TestHarness| {
         h.stoat.jumplist_picker.as_ref().expect("open").selected()
     };
 
@@ -17784,11 +17213,11 @@ fn jumplist_picker_pages_by_half_a_screen_and_stops_at_the_ends() {
 /// the last one, and the row it lands on paints as selected.
 ///
 /// The terminal is short on purpose: the jumplist caps at
-/// [`JUMP_LIST_CAPACITY`](crate::jumplist) entries, so a full-height box
+/// [`JUMP_LIST_CAPACITY`](stoat::jumplist) entries, so a full-height box
 /// would hold every row it can ever have and never scroll.
 #[test]
 fn jumplist_picker_renders_a_selection_past_the_visible_rows() {
-    let mut h = crate::test_harness::TestHarness::with_size(120, 26);
+    let mut h = stoat::test_harness::TestHarness::with_size(120, 26);
     open_jumplist_picker(&mut h, 40);
 
     let rows = target_picker_rows(&h, ModalKind::JumplistPicker);
@@ -17837,7 +17266,7 @@ fn jumplist_picker_renders_a_selection_past_the_visible_rows() {
     let selection = h
         .stoat
         .theme
-        .list_selected(crate::theme::scope::UI_SELECTION);
+        .list_selected(stoat::theme::scope::UI_SELECTION);
     assert_eq!(
         h.rendered_buffer()[(rows.x + 1, last_row)].style().bg,
         selection.bg,
@@ -17852,7 +17281,7 @@ fn jumplist_picker_renders_a_selection_past_the_visible_rows() {
 /// above uses one: a full-height box never overflows a capped jumplist.
 #[test]
 fn the_jumplist_box_paints_nothing_outside_itself() {
-    let mut h = crate::test_harness::TestHarness::with_size(120, 26);
+    let mut h = stoat::test_harness::TestHarness::with_size(120, 26);
     open_jumplist_picker(&mut h, 40);
 
     let modal = picker_layout(&h, ModalKind::JumplistPicker).modal;
@@ -17880,7 +17309,7 @@ fn the_jumplist_box_paints_nothing_outside_itself() {
 }
 
 /// The preview editor behind the open location picker, and its scroll row.
-fn location_preview_scroll(h: &crate::test_harness::TestHarness) -> u32 {
+fn location_preview_scroll(h: &stoat::test_harness::TestHarness) -> u32 {
     let editor = h
         .stoat
         .location_picker
@@ -17901,7 +17330,7 @@ fn location_preview_scroll(h: &crate::test_harness::TestHarness) -> u32 {
 /// which editor backs their preview.
 #[test]
 fn ctrl_d_scrolls_the_location_preview() {
-    let mut h = crate::test_harness::TestHarness::with_size(160, 40);
+    let mut h = stoat::test_harness::TestHarness::with_size(160, 40);
     open_location_picker(&mut h, 200);
     h.stoat.drive_background();
     h.snapshot();
@@ -17919,7 +17348,7 @@ fn ctrl_d_scrolls_the_location_preview() {
 /// A wheel over the preview scrolls that pane, the same as over any editor.
 #[test]
 fn a_wheel_over_the_diagnostics_preview_scrolls_it() {
-    let mut h = crate::test_harness::TestHarness::with_size(160, 40);
+    let mut h = stoat::test_harness::TestHarness::with_size(160, 40);
     open_diagnostics_picker(&mut h, 200);
     h.stoat.drive_background();
     h.snapshot();
@@ -17928,7 +17357,7 @@ fn a_wheel_over_the_diagnostics_preview_scrolls_it() {
         .preview
         .expect("the terminal is wide enough for a preview");
 
-    let scroll = |h: &crate::test_harness::TestHarness| {
+    let scroll = |h: &stoat::test_harness::TestHarness| {
         let editor = h
             .stoat
             .diagnostics_picker
@@ -17960,7 +17389,7 @@ fn a_wheel_over_the_diagnostics_preview_scrolls_it() {
 }
 /// Seed a definition-capable fake server, open `main.rs` holding
 /// `abc\ndef\nghi\n`, and return its path.
-fn open_file_with_lsp(h: &mut crate::test_harness::TestHarness) -> PathBuf {
+fn open_file_with_lsp(h: &mut stoat::test_harness::TestHarness) -> PathBuf {
     use lsp_types::{OneOf, ServerCapabilities};
 
     h.fake_lsp().set_capabilities(ServerCapabilities {
@@ -18061,7 +17490,7 @@ fn middle_click_focuses_the_pane_it_lands_in() {
     let left_pane = {
         let ws = h.stoat.active_workspace_mut();
         let left_pane = ws.panes.focus();
-        let right_pane = ws.panes.split(crate::pane::Axis::Vertical);
+        let right_pane = ws.panes.split(stoat::pane::Axis::Vertical);
         ws.panes.set_focus(right_pane);
         ws.panes.pane_mut(left_pane).area = Rect::new(0, 0, 40, 24);
         ws.panes.pane_mut(right_pane).area = Rect::new(40, 0, 40, 24);
@@ -18410,7 +17839,7 @@ fn agent_event_for_unknown_session_is_ignored() {
 }
 
 /// Send `expr` as an `act` request, and return the effect and the reply.
-fn act(h: &mut crate::test_harness::TestHarness, expr: &str) -> (UpdateEffect, Value) {
+fn act(h: &mut stoat::test_harness::TestHarness, expr: &str) -> (UpdateEffect, Value) {
     let uid = h.stoat.active_workspace().uid;
     let (reply, mut replies) = oneshot::channel();
     let effect = h.stoat.handle_agent_control(AgentControl::Act {
@@ -18429,7 +17858,7 @@ fn act_runs_a_named_action() {
     let (effect, reply) = act(&mut h, "MoveDown");
 
     let uid = h.stoat.active_workspace().uid;
-    let report = crate::session_report::selection(&h.stoat, uid, false);
+    let report = stoat::session_report::selection(&h.stoat, uid, false);
     assert_eq!(
         (effect, reply, &report["selections"][0]["cursor"]),
         (
@@ -18496,7 +17925,7 @@ fn keys_type_into_the_focused_buffer() {
 
 /// Register a view watcher on the active session as connection `client`, and
 /// return the receiver its views arrive on.
-fn view_watcher(h: &mut crate::test_harness::TestHarness, client: u64) -> UnboundedReceiver<Value> {
+fn view_watcher(h: &mut stoat::test_harness::TestHarness, client: u64) -> UnboundedReceiver<Value> {
     let uid = h.stoat.active_workspace().uid;
     let (tx, views) = tokio::sync::mpsc::unbounded_channel();
     h.stoat
@@ -18551,14 +17980,14 @@ fn a_gone_client_is_no_longer_a_watcher() {
 }
 
 fn open_agent_editor(
-    h: &mut crate::test_harness::TestHarness,
+    h: &mut stoat::test_harness::TestHarness,
 ) -> (BufferId, UnboundedReceiver<BridgeOutcome>) {
     open_agent_editor_from(h, 0)
 }
 
 /// Open the bridge file the way connection `client` asks for it.
 fn open_agent_editor_from(
-    h: &mut crate::test_harness::TestHarness,
+    h: &mut stoat::test_harness::TestHarness,
     client: u64,
 ) -> (BufferId, UnboundedReceiver<BridgeOutcome>) {
     let root = PathBuf::from("/bridge");
@@ -18661,7 +18090,7 @@ fn agent_open_editor_waits_for_a_file_read_on_the_pool() {
     let opened = (effect, done_rx.try_recv());
 
     h.settle();
-    crate::buffer_lifecycle::install_pending_opens(&mut h.stoat);
+    stoat::buffer_lifecycle::install_pending_opens(&mut h.stoat);
     action_handlers::dispatch(&mut h.stoat, &stoat_action::CloseBuffer);
 
     assert_eq!(
@@ -18754,7 +18183,7 @@ fn an_agent_switch_moves_a_running_block_to_the_tray() {
     h.stoat
         .reload_user_config(r#"command hello { run = shell("echo hi"); }"#);
     let launch = h.stoat.active_workspace;
-    let session = Arc::new(crate::host::FakeTerminalSession::new());
+    let session = Arc::new(stoat::host::FakeTerminalSession::new());
     h.fake_terminal_host().push_session(session.clone());
     action_handlers::dispatch(&mut h.stoat, &stoat_action::OpenCommandPalette);
     h.type_text("hello");
@@ -18799,7 +18228,7 @@ fn an_agent_request_into_the_active_workspace_keeps_its_palette() {
 ///
 /// The request finds its workspace by uid, and workspaces made while the test
 /// clock stands still share one, so `ws` takes a uid of its own first.
-fn open_agent_editor_in(h: &mut crate::test_harness::TestHarness, ws: WorkspaceId) {
+fn open_agent_editor_in(h: &mut stoat::test_harness::TestHarness, ws: WorkspaceId) {
     let root = PathBuf::from("/bridge");
     let path = root.join("msg.txt");
     h.fake_fs().insert_file(&path, b"draft\n");
@@ -18938,7 +18367,7 @@ fn an_image_pane_transmits_its_file_and_places_it() {
         kitty::Action,
     };
 
-    let mut h = crate::test_harness::TestHarness::with_size(40, 12);
+    let mut h = stoat::test_harness::TestHarness::with_size(40, 12);
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
     h.stoat.set_apc_tx(tx);
     h.stoat.stoatty = true;
@@ -18964,9 +18393,9 @@ fn an_image_pane_transmits_its_file_and_places_it() {
     h.settle();
 
     // The first pass starts the read; the second finds it done and sends.
-    crate::image_emit::emit_images(&mut h.stoat);
+    stoat::image_emit::emit_images(&mut h.stoat);
     h.settle();
-    crate::image_emit::emit_images(&mut h.stoat);
+    stoat::image_emit::emit_images(&mut h.stoat);
 
     let sent: Vec<u8> = std::iter::from_fn(|| rx.try_recv().ok())
         .flatten()
@@ -18995,7 +18424,7 @@ fn an_image_larger_than_its_pane_transmits_at_the_pane_size() {
     use std::io::Cursor;
     use stoat_action::OpenFile;
 
-    let mut h = crate::test_harness::TestHarness::with_size(40, 12);
+    let mut h = stoat::test_harness::TestHarness::with_size(40, 12);
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
     h.stoat.set_apc_tx(tx);
     h.stoat.stoatty = true;
@@ -19020,9 +18449,9 @@ fn an_image_larger_than_its_pane_transmits_at_the_pane_size() {
     );
     h.settle();
 
-    crate::image_emit::emit_images(&mut h.stoat);
+    stoat::image_emit::emit_images(&mut h.stoat);
     h.settle();
-    crate::image_emit::emit_images(&mut h.stoat);
+    stoat::image_emit::emit_images(&mut h.stoat);
 
     let rect = image_pane_content(&h);
     let sent: Vec<u8> = std::iter::from_fn(|| rx.try_recv().ok())
@@ -19048,7 +18477,7 @@ fn a_grown_image_pane_transmits_again_and_frees_the_old_pixels() {
         kitty::Action,
     };
 
-    let mut h = crate::test_harness::TestHarness::with_size(20, 8);
+    let mut h = stoat::test_harness::TestHarness::with_size(20, 8);
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
     h.stoat.set_apc_tx(tx);
     h.stoat.stoatty = true;
@@ -19073,16 +18502,16 @@ fn a_grown_image_pane_transmits_again_and_frees_the_old_pixels() {
     );
     h.settle();
 
-    crate::image_emit::emit_images(&mut h.stoat);
+    stoat::image_emit::emit_images(&mut h.stoat);
     h.settle();
-    crate::image_emit::emit_images(&mut h.stoat);
+    stoat::image_emit::emit_images(&mut h.stoat);
     let small = image_pane_content(&h);
     while rx.try_recv().is_ok() {}
 
     h.resize(60, 30);
-    crate::image_emit::emit_images(&mut h.stoat);
+    stoat::image_emit::emit_images(&mut h.stoat);
     h.settle();
-    crate::image_emit::emit_images(&mut h.stoat);
+    stoat::image_emit::emit_images(&mut h.stoat);
 
     let grown = image_pane_content(&h);
     assert!(
@@ -19135,7 +18564,7 @@ fn an_image_reopened_after_its_pane_moved_on_transmits_again() {
         kitty::Action,
     };
 
-    let mut h = crate::test_harness::TestHarness::with_size(40, 12);
+    let mut h = stoat::test_harness::TestHarness::with_size(40, 12);
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
     h.stoat.set_apc_tx(tx);
     h.stoat.stoatty = true;
@@ -19154,7 +18583,7 @@ fn an_image_reopened_after_its_pane_moved_on_transmits_again() {
     h.fake_fs().insert_file("/repo/a.txt", b"text");
     h.stoat.active_workspace_mut().git_root = PathBuf::from("/repo");
 
-    let open = |h: &mut crate::test_harness::TestHarness, name: &str| {
+    let open = |h: &mut stoat::test_harness::TestHarness, name: &str| {
         action_handlers::dispatch(
             &mut h.stoat,
             &OpenFile {
@@ -19162,9 +18591,9 @@ fn an_image_reopened_after_its_pane_moved_on_transmits_again() {
             },
         );
         h.settle();
-        crate::image_emit::emit_images(&mut h.stoat);
+        stoat::image_emit::emit_images(&mut h.stoat);
         h.settle();
-        crate::image_emit::emit_images(&mut h.stoat);
+        stoat::image_emit::emit_images(&mut h.stoat);
     };
 
     open(&mut h, "pic.png");
@@ -19195,7 +18624,7 @@ fn an_image_reopened_after_its_pane_moved_on_transmits_again() {
 
 /// The content rectangle of the one image pane on screen, which is what an
 /// image is fitted into.
-fn image_pane_content(h: &crate::test_harness::TestHarness) -> Rect {
+fn image_pane_content(h: &stoat::test_harness::TestHarness) -> Rect {
     h.stoat
         .active_workspace()
         .panes
@@ -19269,7 +18698,7 @@ fn pool_region(pool: u32) -> PoolRegionCommand {
 fn connect_retires_the_terminal_state_and_arms_the_slot() {
     use stoatty_protocol::command::{Command, PoolDropCommand};
 
-    let mut h = crate::test_harness::TestHarness::with_size(80, 24);
+    let mut h = stoat::test_harness::TestHarness::with_size(80, 24);
     h.stoat.stoatty = true;
     h.stoat.zoom_claimed = true;
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
@@ -19293,7 +18722,7 @@ fn connect_retires_the_terminal_state_and_arms_the_slot() {
         UpdateEffect::None,
     );
 
-    let sent = crate::test_fixture::drain_apc(&mut rx);
+    let sent = stoat::test_fixture::drain_apc(&mut rx);
     assert!(
         sent.contains(&Command::PoolDrop(PoolDropCommand { pool: 7 })),
         "the declared pool is retired: {sent:?}",
@@ -19341,8 +18770,8 @@ fn connect_refuses_while_a_pane_is_detached() {
 #[test]
 fn a_remote_session_spawns_pipes_its_output_and_reports_its_exit() {
     let mut h = Stoat::test();
-    let fake = Arc::new(crate::host::FakeTerminalSession::new());
-    let host = Arc::new(crate::host::FakeTerminalHost::new(fake));
+    let fake = Arc::new(stoat::host::FakeTerminalSession::new());
+    let host = Arc::new(stoat::host::FakeTerminalHost::new(fake));
     h.stoat.terminal_host = host.clone();
     h.allow_host_swap();
     let (slot, mut ui_rx) = install_passthrough(&mut h.stoat);
@@ -19481,8 +18910,8 @@ fn a_failed_spawn_gives_the_screen_back() {
 #[test]
 fn a_clean_remote_exit_clears_the_workspace_target() {
     let mut h = Stoat::test();
-    let fake = Arc::new(crate::host::FakeTerminalSession::new());
-    let host = Arc::new(crate::host::FakeTerminalHost::new(fake));
+    let fake = Arc::new(stoat::host::FakeTerminalSession::new());
+    let host = Arc::new(stoat::host::FakeTerminalHost::new(fake));
     h.stoat.terminal_host = host;
     h.allow_host_swap();
     install_passthrough(&mut h.stoat);
@@ -19503,8 +18932,8 @@ fn a_clean_remote_exit_clears_the_workspace_target() {
 #[test]
 fn a_mosh_session_spawns_with_the_server_flag_and_the_escape_key_off() {
     let mut h = Stoat::test();
-    let fake = Arc::new(crate::host::FakeTerminalSession::new());
-    let host = Arc::new(crate::host::FakeTerminalHost::new(fake));
+    let fake = Arc::new(stoat::host::FakeTerminalSession::new());
+    let host = Arc::new(stoat::host::FakeTerminalHost::new(fake));
     h.stoat.terminal_host = host.clone();
     h.allow_host_swap();
     install_passthrough(&mut h.stoat);
@@ -19560,7 +18989,7 @@ fn a_mosh_session_spawns_with_the_server_flag_and_the_escape_key_off() {
 fn an_attach_retires_the_terminal_and_asks_who_it_is() {
     use stoatty_protocol::command::{Command, PoolDropCommand};
 
-    let mut h = crate::test_harness::TestHarness::with_size(80, 24);
+    let mut h = stoat::test_harness::TestHarness::with_size(80, 24);
     h.stoat.stoatty = true;
     h.stoat.stoatty_protocol = 7;
     h.stoat.zoom_claimed = true;
@@ -19583,7 +19012,7 @@ fn an_attach_retires_the_terminal_and_asks_who_it_is() {
 
     assert_eq!(ssh::terminal_replaced(&mut h.stoat), UpdateEffect::None);
 
-    let sent = crate::test_fixture::drain_apc(&mut rx);
+    let sent = stoat::test_fixture::drain_apc(&mut rx);
     assert!(
         sent.contains(&Command::PoolDrop(PoolDropCommand { pool: 4 })),
         "the declared pool is retired: {sent:?}",
@@ -19784,8 +19213,8 @@ fn the_tab_bar_paints_over_the_pane_hold_it_displaces() {
     assert!(!holds.is_empty(), "the one-tab frame holds its pane");
 
     action_handlers::dispatch(&mut h.stoat, &stoat_action::NewTab);
-    let blank = crate::render::themed_blank(&h.stoat.theme);
-    let blanked = crate::render::blank_buffer(buf, blank, holds);
+    let blank = stoat::render::themed_blank(&h.stoat.theme);
+    let blanked = stoat::render::blank_buffer(buf, blank, holds);
     let mut buf = blanked.buffer;
     h.stoat
         .paint_into(&mut buf, Some((&blanked.blank, blanked.holds)));
@@ -19793,7 +19222,7 @@ fn the_tab_bar_paints_over_the_pane_hold_it_displaces() {
     let bar_bg = h
         .stoat
         .theme
-        .get(crate::theme::scope::UI_TABBAR_INACTIVE)
+        .get(stoat::theme::scope::UI_TABBAR_INACTIVE)
         .bg
         .expect("the bar has a background");
     let off_bar: Vec<u16> = (0..buf.area.width)

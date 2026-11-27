@@ -350,7 +350,7 @@ impl CommitListState {
         }
     }
 
-    pub(crate) fn selected_sha(&self) -> Option<&str> {
+    pub fn selected_sha(&self) -> Option<&str> {
         self.commits.get(self.selected).map(|c| c.sha.as_str())
     }
 

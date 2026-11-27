@@ -46,7 +46,7 @@ pub enum PickerScope {
 /// the surviving diagnostic to jump to.
 pub struct DiagnosticsPicker {
     /// The filter, selection, and preview every target list shares.
-    pub(crate) picker: TargetPicker<DiagnosticsEntry>,
+    pub picker: TargetPicker<DiagnosticsEntry>,
     /// Which diagnostics the list was built from. Two open commands set this,
     /// and the title and the jump both read it.
     scope: PickerScope,
@@ -104,7 +104,7 @@ impl DiagnosticsPicker {
         self.picker.entries()
     }
 
-    pub(crate) fn filtered(&self) -> &[usize] {
+    pub fn filtered(&self) -> &[usize] {
         self.picker.filtered()
     }
 
@@ -116,11 +116,11 @@ impl DiagnosticsPicker {
 
     /// Cursor into the filtered rows, not into the entries. A caller wanting
     /// the entry itself takes [`Self::selected_entry`].
-    pub(crate) fn selected(&self) -> usize {
+    pub fn selected(&self) -> usize {
         self.picker.selected()
     }
 
-    pub(crate) fn page(&mut self, dir: i32) {
+    pub fn page(&mut self, dir: i32) {
         self.picker.page(dir);
     }
 

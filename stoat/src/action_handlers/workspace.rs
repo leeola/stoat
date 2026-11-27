@@ -127,7 +127,7 @@ pub(super) fn close_workspace(stoat: &mut Stoat) -> UpdateEffect {
 /// The language servers follow the switch. They close the documents of the
 /// workspace left and open the entered one's, through
 /// [`crate::lsp::session::mirror_workspace`].
-pub(crate) fn switch_active_workspace(stoat: &mut Stoat, next: WorkspaceId) {
+pub fn switch_active_workspace(stoat: &mut Stoat, next: WorkspaceId) {
     let from = stoat.active_workspace;
     // A close removes the workspace it leaves before it switches away.
     let from_uid = stoat.workspaces.get(from).map(|ws| ws.uid);

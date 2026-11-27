@@ -93,7 +93,7 @@ pub(crate) fn status_subject(state: &CommitListState) -> Option<ScreenSubject<'_
 /// Narrowest the commit list gets, however far the separator is dragged toward
 /// it. A sha, a relative date, and a few words of summary is the least that
 /// still identifies a row.
-pub(crate) const MIN_LIST_COLUMNS: u16 = 22;
+pub const MIN_LIST_COLUMNS: u16 = 22;
 
 /// Narrowest the detail pane gets, the counterpart floor on the other side of
 /// the one-column separator.

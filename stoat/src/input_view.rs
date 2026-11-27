@@ -21,9 +21,9 @@ use stoat_text::{Bias, SelectionGoal};
 /// `Enter` is routed to submission; in other modes the modeline is shown and
 /// submission requires an explicit action.
 #[derive(Debug, Clone)]
-pub(crate) struct InputView {
-    pub(crate) editor_id: EditorId,
-    pub(crate) buffer_id: BufferId,
+pub struct InputView {
+    pub editor_id: EditorId,
+    pub buffer_id: BufferId,
     pub(crate) target: SubmitTarget,
 }
 
@@ -46,7 +46,7 @@ impl InputView {
 /// pane focus at dispatch time, not stored here, so the [`InputView`] stays
 /// constructible before the owning consumer has its slotmap key.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum SubmitTarget {
+pub enum SubmitTarget {
     PaletteFilter,
     HelpSearch,
     Run,
@@ -70,7 +70,7 @@ pub(crate) enum SubmitTarget {
 }
 
 impl InputView {
-    pub(crate) fn create(
+    pub fn create(
         ws: &mut Workspace,
         executor: Executor,
         target: SubmitTarget,
@@ -118,7 +118,7 @@ impl InputView {
         ws.buffers.remove(self.buffer_id);
     }
 
-    pub(crate) fn text(&self, ws: &Workspace) -> String {
+    pub fn text(&self, ws: &Workspace) -> String {
         let Some(buffer) = ws.buffers.get(self.buffer_id) else {
             return String::new();
         };
@@ -159,7 +159,7 @@ impl InputView {
     /// Replace the entire buffer text and move the cursor to the end. Used by
     /// consumers like the run pane where history navigation swaps the whole
     /// line, or when the consumer needs to clear the input after submission.
-    pub(crate) fn replace_text(&self, ws: &mut Workspace, text: &str) {
+    pub fn replace_text(&self, ws: &mut Workspace, text: &str) {
         let Some(buffer) = ws.buffers.get(self.buffer_id) else {
             return;
         };

@@ -510,7 +510,7 @@ impl Scan {
 /// builds a `String`. The filter needs all of them on every keystroke while the
 /// renderer formats only the rows on screen, so a large repo would spend most
 /// of a keystroke rebuilding strings that did not change.
-pub(crate) struct DisplayCache {
+pub struct DisplayCache {
     /// Which candidate set these rows describe. Everything else here is what
     /// [`row_display`] reads, so a cache hit is equivalent to deriving the
     /// strings again.
@@ -1193,7 +1193,7 @@ pub struct PathPicker {
     /// Whether the pick list's base is [`Self::all_paths`], so a caller's base
     /// that replaces it knows the display it takes belongs to the walk.
     on_walk_base: bool,
-    pub(crate) preview: Preview,
+    pub preview: Preview,
 }
 
 impl PathPicker {
@@ -1812,8 +1812,8 @@ impl PreviewTextCache {
 /// A picker drives this by calling [`Preview::sync`] with the selected source.
 /// The scratch buffer's rope is replaced with that source's content and the
 /// source's language is assigned so the parse pipeline highlights it.
-pub(crate) struct Preview {
-    pub(crate) editor: EditorId,
+pub struct Preview {
+    pub editor: EditorId,
     pub(crate) buffer: BufferId,
     /// Source currently rendered into the scratch buffer, or `None` when empty.
     /// Lets [`Preview::sync`] skip a redundant reload when the selection is
@@ -2167,7 +2167,7 @@ fn replace_preview_text(ws: &mut Workspace, editor_id: EditorId, buffer_id: Buff
 ///
 /// `E` is the entry type. The caller supplies one haystack string per entry at
 /// construction, since haystacks derive from entries that are written once.
-pub(crate) struct TargetPicker<E> {
+pub struct TargetPicker<E> {
     pub(crate) input: InputView,
     entries: Vec<E>,
     /// What a query matches against, one per entry and parallel to them.
@@ -2189,9 +2189,9 @@ pub(crate) struct TargetPicker<E> {
     last_filter_query: Option<String>,
     /// Rows the last render painted, read by [`Self::page`]. `None` until the
     /// first frame lays the list out.
-    pub(crate) viewport_rows: Option<usize>,
+    pub viewport_rows: Option<usize>,
     /// The shared preview pane showing the selected entry's source.
-    pub(crate) preview: Preview,
+    pub preview: Preview,
     /// Rows the preview pane rendered last, placing the target line within it.
     pub(crate) preview_rows: Option<usize>,
     /// The entry the preview currently shows, so an unchanged selection costs
@@ -2266,16 +2266,16 @@ impl<E> TargetPicker<E> {
         picker
     }
 
-    pub(crate) fn entries(&self) -> &[E] {
+    pub fn entries(&self) -> &[E] {
         &self.entries
     }
 
-    pub(crate) fn filtered(&self) -> &[usize] {
+    pub fn filtered(&self) -> &[usize] {
         &self.filtered
     }
 
     /// Cursor into [`Self::filtered`], not into the entries.
-    pub(crate) fn selected(&self) -> usize {
+    pub fn selected(&self) -> usize {
         self.selected
     }
 
@@ -2469,7 +2469,7 @@ impl<E> TargetPicker<E> {
         )
     }
 
-    pub(crate) fn move_selection(&mut self, delta: i32) {
+    pub fn move_selection(&mut self, delta: i32) {
         nav_move(self.filtered.len(), &mut self.selected, delta);
     }
 

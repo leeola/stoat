@@ -25,7 +25,7 @@ const JUMP_LIST_CAPACITY: usize = 30;
 /// One recorded position, a buffer plus the selection set that was live there,
 /// held as anchors so it tracks edits until resolved at jump time.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub(crate) struct JumpEntry {
+pub struct JumpEntry {
     pub(crate) buffer_id: BufferId,
     pub(crate) selections: Vec<Selection<Anchor>>,
 }
@@ -43,7 +43,7 @@ pub(crate) struct ChangeLanding {
 
 /// Cross-buffer jump history over the shared [`NavList`] cursor primitive.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub(crate) struct JumpList {
+pub struct JumpList {
     list: NavList<JumpEntry>,
     /// The number of positions recorded since the list was made.
     ///
@@ -54,7 +54,7 @@ pub(crate) struct JumpList {
 }
 
 impl JumpList {
-    pub(crate) fn entries(&self) -> &[JumpEntry] {
+    pub fn entries(&self) -> &[JumpEntry] {
         self.list.entries()
     }
 

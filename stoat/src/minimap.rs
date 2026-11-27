@@ -32,7 +32,7 @@ use stoat_text::{
 };
 
 mod band;
-pub(crate) mod density;
+pub mod density;
 pub(crate) mod diff_changes;
 pub(crate) mod diff_view;
 pub(crate) mod emit;

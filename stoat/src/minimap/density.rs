@@ -19,7 +19,7 @@ pub(crate) const CODE_SHARE_MIN: f32 = 0.4;
 
 /// How a strip draws a row, by the lines the row stands for.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub(crate) enum Tier {
+pub enum Tier {
     /// One line per row, each row the summary of its line.
     Line,
     /// Up to [`FIT_MAX_LINES_PER_ROW`] lines per row, each row the summary of
@@ -31,7 +31,7 @@ pub(crate) enum Tier {
 
 /// The lines each row of a strip stands for and the tier that draws them.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub(crate) struct Density {
+pub struct Density {
     pub lines_per_row: u32,
     pub tier: Tier,
     /// Whether the whole file fits the strip at [`Self::lines_per_row`]. A file

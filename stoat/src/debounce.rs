@@ -33,7 +33,7 @@ use stoat_host::fs;
 /// an edited file is reindexed. Mirrors
 /// [`crate::lsp::sync::LSP_DID_CHANGE_DEBOUNCE`] so a formatter-on-save burst
 /// (or an agent edit chain) collapses into one pass rather than three.
-pub(crate) const FS_WATCH_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(50);
+pub const FS_WATCH_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(50);
 
 /// Quiet window after the last parse of a buffer before its symbols are
 /// extracted again.
@@ -43,7 +43,7 @@ pub(crate) const FS_WATCH_DEBOUNCE: std::time::Duration = std::time::Duration::f
 /// queue an extract each. Far longer than [`FS_WATCH_DEBOUNCE`], which is sized
 /// for a formatter-on-save burst. Typing pauses less often than that, and
 /// nothing reads the symbol index between keystrokes.
-pub(crate) const INDEX_EDIT_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(500);
+pub const INDEX_EDIT_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(500);
 
 /// How long a session's work stays unpersisted before the active workspace is
 /// written again.
@@ -209,7 +209,7 @@ impl<'a> DepartedPaths<'a> {
 /// The follow test, the ignore verdict, and the `.git` test read
 /// [`repo_root`](crate::workspace::Workspace::repo_root), and the finder and
 /// the index read the workspace root, which sits at or below it.
-pub(crate) fn drain_fs_watch_events(stoat: &mut Stoat) {
+pub fn drain_fs_watch_events(stoat: &mut Stoat) {
     let host = stoat.fs_watch_host.clone();
     let mut events: Vec<(PathBuf, FsEventKind)> = Vec::new();
     for _ in 0..FS_WATCH_DRAIN_CAP {
@@ -1051,7 +1051,7 @@ fn arm_index_external_edit_timer(stoat: &mut Stoat) {
 /// Takes at most [`INDEX_EXTERNAL_DRAIN_CAP`] paths per pass and re-arms
 /// the window on whatever is left, so a checkout's worth of files reaches
 /// the blocking pool in paced batches rather than all in one turn.
-pub(crate) fn drain_pending_index_edits(stoat: &mut Stoat) -> bool {
+pub fn drain_pending_index_edits(stoat: &mut Stoat) -> bool {
     if stoat.index_external_edit_rx.try_recv().is_err() {
         return false;
     }

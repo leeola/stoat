@@ -130,7 +130,7 @@ pub(super) fn show_terminal(
 /// restore or a workspace copy. Each dead pane and dock gets its own fresh
 /// shell. Runtime state (history, running processes) is intentionally lost, and
 /// a spawn failure leaves a `Terminal (closed)` label in place.
-pub(crate) fn respawn_terminal_panes(stoat: &mut Stoat) {
+pub fn respawn_terminal_panes(stoat: &mut Stoat) {
     let dead_panes = {
         let ws = stoat.active_workspace();
         let dead = |view: &View| matches!(view, View::Terminal(t) if !ws.terms.contains_key(*t));

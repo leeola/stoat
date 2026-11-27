@@ -34,7 +34,7 @@ use std::path::Path;
 /// captured when the request fired so the popup anchors at the symbol even if
 /// the cursor moves.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct HoverResponse {
+pub struct HoverResponse {
     pub(crate) text: String,
     pub(crate) plain: bool,
     pub(crate) anchor_offset: usize,
@@ -49,7 +49,7 @@ pub(crate) struct HoverResponse {
 /// Distinguishing an empty answer from a failed request lets the status bar
 /// report honest state. A server still indexing says so and a broken request
 /// says it failed, rather than collapsing both to a flat "no hover info".
-pub(crate) enum HoverOutcome {
+pub enum HoverOutcome {
     /// The server returned hover content to render.
     Content(HoverResponse),
     /// The server answered with no hover for the cursor position.

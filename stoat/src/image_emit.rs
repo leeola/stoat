@@ -133,7 +133,7 @@ impl ImageRuntime {
 /// A no-op unless the terminal is a stoatty new enough to draw images and the
 /// tty has said how large a cell is. Without the cell size there is no way to
 /// turn a pane's rectangle into the pixels an image should fill.
-pub(crate) fn emit_images(stoat: &mut Stoat) {
+pub fn emit_images(stoat: &mut Stoat) {
     let capable = stoat.stoatty && stoat.stoatty_protocol >= 2;
     let Some(cell_px) = stoat.cell_pixels.filter(|_| capable) else {
         return;

@@ -66,7 +66,7 @@ pub struct EditorState {
     /// back, rather than living in one global slot shared by every pane. An
     /// unpinned chord mode ends when focus leaves, because a pane without
     /// focus takes no keys.
-    pub(crate) mode: String,
+    pub mode: String,
     /// Whether [`Self::mode`] is held until a pure mode switch releases it.
     ///
     /// A chord such as goto or git binds keys that act and then return to
@@ -140,7 +140,7 @@ pub struct EditorState {
     ///
     /// A layout flip sets it, so the line under the cursor stays on the screen
     /// row it held in the layout the flip left. Transient, not persisted.
-    pub(crate) held_screen_row: Option<u32>,
+    pub held_screen_row: Option<u32>,
     /// The `scrolloff` padding that the next paint lands a jump with, once it
     /// fits the display to the width.
     ///
@@ -161,7 +161,7 @@ pub struct EditorState {
     /// diff map. The buffer stays the real editable buffer, so input handling
     /// is unchanged. Set through [`Self::set_diff_view`], which also flips the
     /// display map's deleted-block splicing.
-    pub(crate) diff_view: bool,
+    pub diff_view: bool,
     /// When set, this editor is the swapped-in center of the three-way conflict
     /// resolve view, carrying the render cache the three-column renderer paints
     /// from. The backing conflict session on the workspace holds the source of
@@ -174,7 +174,7 @@ pub struct EditorState {
     /// What the last frame handed the conflict view's painter, which the painter
     /// reads beside [`Self::conflict_view`].
     pub(crate) conflict_frame: ConflictFrame,
-    pub(crate) selections: SelectionsCollection,
+    pub selections: SelectionsCollection,
     /// Per-editor cursor for cycling through ambiguous move sources.
     /// `(hunk_line, source_index)` identifies which source the user is
     /// currently focused on; `None` means no active move navigation.
@@ -199,7 +199,7 @@ pub struct EditorState {
     /// highlight identity, and visible byte range. Lets `render_editor` reuse
     /// resolved endpoints across repaints that change none of those. Transient
     /// render state, not persisted.
-    pub(crate) highlight_endpoint_cache: Option<CachedHighlightEndpoints>,
+    pub highlight_endpoint_cache: Option<CachedHighlightEndpoints>,
     /// Cached per-row state for the diff and conflict bodies, keyed by the
     /// buffer, display-map and diff versions and the painted window. Spares
     /// those loops a block-tree descent and a hunk-tree seek per row per frame.
@@ -232,12 +232,12 @@ pub struct EditorState {
     /// reads. Lets an unchanged repaint reuse the collections instead of
     /// rebuilding them every frame, and a cursor move rebuild only the lines.
     /// Transient render state, not persisted.
-    pub(crate) gutter_geometry_cache: Option<crate::render::editor::GutterGeometryCache>,
+    pub gutter_geometry_cache: Option<crate::render::editor::GutterGeometryCache>,
     /// The APC frame the status row of this editor's pane last emitted, keyed
     /// by the segments and rect it was built from, so an unchanged
     /// repaint splices the frame instead of encoding it again. Transient render
     /// state, not persisted.
-    pub(crate) status_scene_cache: crate::render::pane::StatusSceneCache,
+    pub status_scene_cache: crate::render::pane::StatusSceneCache,
     /// Diagnostic spans resolved to byte offsets, keyed by the diagnostic-set
     /// and buffer versions, so the per-frame render paths reuse one resolution.
     /// Transient render state, not persisted.
@@ -260,7 +260,7 @@ pub struct EditorState {
     /// A picker preview records its number column here, so the pool that
     /// glides the preview pages the same column. Transient render state
     /// written by `render_editor` and the preview's paint, not persisted.
-    pub(crate) gutter_width: u16,
+    pub gutter_width: u16,
     /// The gutter digit count the changes view stack this editor is an excerpt
     /// of shares, so the text column lines up down the stack. `None` for an
     /// editor that sizes its diff gutter from its own buffer.
@@ -268,7 +268,7 @@ pub struct EditorState {
     /// The marks on the rows the expands of a changes view opened in this
     /// excerpt editor, each until its fade ends. Empty for any other editor.
     /// Transient render state, not persisted.
-    pub(crate) reveal_flashes: Vec<RevealFlash>,
+    pub reveal_flashes: Vec<RevealFlash>,
     /// Screen rect of the right-edge minimap strip the last render reserved,
     /// so pointer handlers can map a click inside it back to a buffer line.
     ///
@@ -281,7 +281,7 @@ pub struct EditorState {
     ///
     /// The thumb and a click on the strip read it, since under a fold the strip
     /// holds rows of bands and the terminal scrolls it in those rows.
-    pub(crate) minimap_density: Option<Density>,
+    pub minimap_density: Option<Density>,
     /// Cells the last render painted buffer text into, so a question about
     /// where an offset sits on screen reads the paint's own geometry instead
     /// of repeating its insets.
@@ -332,7 +332,7 @@ pub(crate) struct EditorStateSnapshot {
 }
 
 impl EditorState {
-    pub(crate) fn new(
+    pub fn new(
         buffer_id: BufferId,
         buffer: SharedBuffer,
         executor: Executor,

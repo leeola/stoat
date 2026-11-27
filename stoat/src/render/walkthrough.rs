@@ -251,7 +251,7 @@ fn spotlight(buf: &mut Buffer, input: &SlideInput, colors: &Colors, dim: Rect) {
 /// What [`spotlight`] paints on the live grid, carried to the focused editor's
 /// pooled pages so a glide composites the same colors.
 #[derive(Clone, PartialEq, Debug)]
-pub(crate) struct Spotlight {
+pub struct Spotlight {
     /// The buffer offsets of the current annotation's code, first and last
     /// character.
     pub(crate) range: RangeInclusive<usize>,

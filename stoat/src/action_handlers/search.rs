@@ -77,7 +77,7 @@ impl SearchDirection {
 /// origin selections and jumps again from them, so a preview never builds on
 /// the previous preview's landing. The view follows each landing from where it
 /// stands.
-pub(crate) struct SearchInputState {
+pub struct SearchInputState {
     pub(crate) input: InputView,
     pub(crate) direction: SearchDirection,
     /// Whether the submitted match joins the selection set rather than

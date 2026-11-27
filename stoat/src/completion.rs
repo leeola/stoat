@@ -14,7 +14,7 @@ mod e2e;
 pub mod lsp;
 pub mod path;
 pub(crate) mod preview;
-pub(crate) mod request;
+pub mod request;
 pub(crate) mod snippet;
 pub mod word;
 
@@ -339,11 +339,8 @@ pub(crate) fn replace_offsets(buffer: &TextBufferSnapshot, item: &CompletionItem
 ///
 /// Tests that install a popup directly skip the request pipeline, so they have
 /// no snapshot of their own to mint against.
-#[cfg(test)]
-pub(crate) fn anchor_range_in_focused(
-    stoat: &crate::app::Stoat,
-    range: Range<usize>,
-) -> Range<Anchor> {
+#[cfg(any(test, feature = "test-support"))]
+pub fn anchor_range_in_focused(stoat: &crate::app::Stoat, range: Range<usize>) -> Range<Anchor> {
     let (_, buffer_id) = stoat.focused_editor_ids().expect("focused editor");
     let ws = stoat.active_workspace();
     let buffer = ws.buffers.get(buffer_id).expect("buffer present");

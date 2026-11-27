@@ -47,7 +47,7 @@ const TAIL_BYTES: usize = 4096;
 /// key is disabled, not in how the window is handed over. One passthrough
 /// therefore serves both, and this is the only thing it branches on.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) enum Transport {
+pub enum Transport {
     Ssh,
     Mosh,
 }
@@ -59,7 +59,7 @@ pub(crate) enum Transport {
 /// [`connect`] needs to run again: which program carries the session, where it
 /// goes, and what the remote editor was told to open.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) struct RemoteTarget {
+pub struct RemoteTarget {
     pub transport: Transport,
     pub host: String,
     pub args: Vec<String>,
@@ -129,7 +129,7 @@ pub struct PassthroughLink {
 }
 
 /// A remote session, before and after its process exists.
-pub(crate) enum Passthrough {
+pub enum Passthrough {
     /// The terminal is torn down and the slot armed, waiting for the input
     /// thread to confirm it stopped parsing fd 0.
     Pending {
@@ -218,7 +218,7 @@ impl PassthroughSlot {
     ///
     /// A state the app moved the slot to meanwhile stays, since it is the
     /// newer ask.
-    pub(crate) fn finish_reidentify(&self) {
+    pub fn finish_reidentify(&self) {
         let mut state = self.state.lock().expect("passthrough slot lock");
         if matches!(*state, SlotState::Reidentify) {
             *state = SlotState::Idle;
@@ -346,7 +346,7 @@ pub fn retire_terminal_state(stoat: &mut Stoat) {
 /// component is dropped, and both emitters forget what they last sent. The
 /// remote drives the same terminal from here, and nothing tells it what is
 /// already on screen.
-pub(crate) fn connect(
+pub fn connect(
     stoat: &mut Stoat,
     transport: Transport,
     host: Option<&str>,
@@ -432,7 +432,7 @@ pub(crate) fn connect(
 /// Returns [`UpdateEffect::None`] because the frame that repaints comes from the
 /// input thread's size report after the handshake, against the new terminal's
 /// grid rather than the old one's.
-pub(crate) fn terminal_replaced(stoat: &mut Stoat) -> UpdateEffect {
+pub fn terminal_replaced(stoat: &mut Stoat) -> UpdateEffect {
     if stoat.passthrough.is_some() {
         return UpdateEffect::None;
     }
@@ -471,7 +471,7 @@ pub(crate) fn reidentify_terminal(stoat: &Stoat) {
 ///
 /// The terminal report is the gate because a handoff before it races the
 /// report's own zoom claim and theme colors onto the remote's screen.
-pub(crate) fn reconnect_when_ready(stoat: &mut Stoat) -> UpdateEffect {
+pub fn reconnect_when_ready(stoat: &mut Stoat) -> UpdateEffect {
     if !stoat.terminal_reported || !stoat.remote_pending {
         return UpdateEffect::None;
     }
@@ -495,7 +495,7 @@ pub(crate) async fn ack_recv(link: &mut Option<PassthroughLink>) -> Option<()> {
 }
 
 /// Spawn the armed session now that fd 0 is no longer parsed as input.
-pub(crate) fn spawn_armed(stoat: &mut Stoat) -> UpdateEffect {
+pub fn spawn_armed(stoat: &mut Stoat) -> UpdateEffect {
     let (transport, host, program, args) = match stoat.passthrough.take() {
         Some(Passthrough::Pending {
             transport,

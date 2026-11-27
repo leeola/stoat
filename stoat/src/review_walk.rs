@@ -8,14 +8,14 @@ use std::path::PathBuf;
 /// whether the user was on a branch or already detached, and reattaching
 /// someone who was detached would move a branch they never asked to move.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) enum ReturnRef {
+pub enum ReturnRef {
     Branch(String),
     Detached(String),
 }
 
 /// What a walk diffs its commits against.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum WalkSpan {
+pub enum WalkSpan {
     /// Each commit against its parent, so a step shows that commit alone.
     Commits,
     /// One commit, the tip of `from`, against `base`, the merge base of `from`
@@ -33,7 +33,7 @@ pub(crate) enum WalkSpan {
 
 /// Where a walk started, which decides what each of its landings shows.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) enum WalkOrigin {
+pub enum WalkOrigin {
     /// The commit list, a review, or a walkthrough. A landing shows the
     /// commit's first changed file, or the file the start names, in the
     /// per-file diff.
@@ -49,7 +49,7 @@ pub(crate) enum WalkOrigin {
 /// The stash that a blame checkout made of the working tree's changes, which
 /// the walk's return pops.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) struct WalkStash {
+pub struct WalkStash {
     /// The stash commit's sha.
     pub(crate) sha: String,
     /// How many files the stash took, untracked files among them.
@@ -66,23 +66,23 @@ pub(crate) struct WalkStash {
 /// stepping forward moves toward the tip the way reading history forward does.
 /// A range review is a walk of one commit, whose [`WalkSpan::Range`] names the
 /// base it reads against.
-pub(crate) struct ReviewWalk {
-    pub(crate) workdir: PathBuf,
-    pub(crate) commits: Vec<CommitInfo>,
-    pub(crate) cursor: usize,
-    pub(crate) return_ref: ReturnRef,
-    pub(crate) span: WalkSpan,
-    pub(crate) origin: WalkOrigin,
+pub struct ReviewWalk {
+    pub workdir: PathBuf,
+    pub commits: Vec<CommitInfo>,
+    pub cursor: usize,
+    pub return_ref: ReturnRef,
+    pub span: WalkSpan,
+    pub origin: WalkOrigin,
     /// The stash the walk's first landing made, which the return pops, or
     /// `None` for a walk that stashed nothing.
-    pub(crate) stash: Option<WalkStash>,
+    pub stash: Option<WalkStash>,
 }
 
 impl ReviewWalk {
     /// A blame checkout's walk at the one commit `short_sha`, back to
     /// `return_ref`, for a test that reads a walk without running a checkout.
-    #[cfg(test)]
-    pub(crate) fn blame_checkout(
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn blame_checkout(
         short_sha: &str,
         return_ref: ReturnRef,
         stash: Option<WalkStash>,

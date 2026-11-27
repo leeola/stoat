@@ -739,7 +739,7 @@ pub struct Cmd {
     lines: LineFeed,
     /// Whether a block that can show its report or its matches shows its
     /// output instead, as the `t` key flips it.
-    pub(crate) raw_view: bool,
+    pub raw_view: bool,
     /// The Source Tag of a config command's Cmd, as its label and its scope,
     /// or `None` for a typed line.
     pub(crate) source: Option<(&'static str, &'static str)>,
@@ -754,15 +754,15 @@ pub struct Cmd {
     /// The tab that the Cmd's text went on in after its output asked for the
     /// alternate screen, which makes the block a Stub, or `None` for a Cmd
     /// that runs in its block.
-    pub(crate) handoff: Option<Handoff>,
+    pub handoff: Option<Handoff>,
     /// Whether the Job Tray holds the Cmd, true while `Workspace::jobs` holds
     /// its id.
-    pub(crate) in_jobs: bool,
+    pub in_jobs: bool,
     /// Whether the user interrupted this run.
     ///
     /// The exit code of an interrupted process differs from program to
     /// program, so the code alone cannot tell a stopped run from a failed one.
-    pub(crate) stopped: bool,
+    pub stopped: bool,
 }
 
 /// Where a Stub's text went on running, a terminal tab of its own.
@@ -770,15 +770,15 @@ pub struct Cmd {
 /// A Run Block draws a program's output into its grid, which has no room for
 /// a full-screen program. Such a Cmd leaves its row as a Stub, and the Stub
 /// reads the state of the tab off this.
-pub(crate) struct Handoff {
+pub struct Handoff {
     /// The session of the tab, which leaves the workspace's terms when its
     /// program ends.
-    pub(crate) term: TermId,
+    pub term: TermId,
     /// The name of the tab until its program sets a title, the program word
     /// of the text.
-    pub(crate) label: String,
+    pub label: String,
     /// Whether the tab runs an agent, whose tab stays after its session ends.
-    pub(crate) agent: bool,
+    pub agent: bool,
 }
 
 impl Cmd {

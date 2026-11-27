@@ -28,7 +28,7 @@ use tokio::sync::mpsc::UnboundedReceiver;
 /// The sync also refits the finder's plate to the rows the refilter left, as
 /// [`render::file_finder::refit_finder_plate`] measures them, so the paint
 /// only reads the fit.
-pub(crate) fn sync_file_finder_preview(stoat: &mut Stoat) {
+pub fn sync_file_finder_preview(stoat: &mut Stoat) {
     if stoat.file_finder.is_none() {
         return;
     }
@@ -698,7 +698,7 @@ pub(super) fn file_finder_complete(stoat: &mut Stoat) -> UpdateEffect {
     UpdateEffect::Redraw
 }
 
-pub(crate) fn file_finder_move_selection(stoat: &mut Stoat, delta: i32) -> UpdateEffect {
+pub fn file_finder_move_selection(stoat: &mut Stoat, delta: i32) -> UpdateEffect {
     let Some(finder) = stoat.file_finder.as_mut() else {
         return UpdateEffect::None;
     };

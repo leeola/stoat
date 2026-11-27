@@ -25,7 +25,7 @@ use tokio::sync::Notify;
 /// which jumplist entry the surviving row names.
 pub struct JumplistPicker {
     /// The filter, selection, and preview every target list shares.
-    pub(crate) picker: TargetPicker<JumplistEntry>,
+    pub picker: TargetPicker<JumplistEntry>,
     cursor_idx: usize,
 }
 
@@ -83,7 +83,7 @@ impl JumplistPicker {
         self.picker.entries()
     }
 
-    pub(crate) fn filtered(&self) -> &[usize] {
+    pub fn filtered(&self) -> &[usize] {
         self.picker.filtered()
     }
 
@@ -109,7 +109,7 @@ impl JumplistPicker {
         self.cursor_idx
     }
 
-    pub(crate) fn page(&mut self, dir: i32) {
+    pub fn page(&mut self, dir: i32) {
         self.picker.page(dir);
     }
 

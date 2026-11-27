@@ -30,7 +30,7 @@ use tokio::sync::{
 ///
 /// Dropping this cancels the walk, since the streaming walker stops via
 /// [`ControlFlow::Break`] once its receiver is gone.
-pub(crate) struct PendingCodeSearch {
+pub struct PendingCodeSearch {
     rx: UnboundedReceiver<Vec<SearchMatch>>,
     _task: Task<()>,
 }
@@ -353,7 +353,7 @@ impl WalkRecorder {
 /// session scans the files that walk found, which is why refining a query is
 /// cheaper than the query before it and why a file created since then does not
 /// match. See [`CodeSearchFinder::walked`].
-pub(crate) fn spawn_code_search(
+pub fn spawn_code_search(
     stoat: &Stoat,
     git_root: PathBuf,
     query: &str,

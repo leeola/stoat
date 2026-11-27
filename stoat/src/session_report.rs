@@ -223,7 +223,7 @@ fn walkthrough_report(ws: &Workspace) -> Value {
 /// come in the editor's own order. With `with_text`, each one also carries the
 /// bytes it covers. An unknown `uid`, or a focused view that is no editor,
 /// reports an error object.
-pub(crate) fn selection(stoat: &Stoat, uid: WorkspaceUid, with_text: bool) -> Value {
+pub fn selection(stoat: &Stoat, uid: WorkspaceUid, with_text: bool) -> Value {
     let Some(ws) = workspace_id(stoat, uid).map(|id| &stoat.workspaces[id]) else {
         return json!({ "error": "unknown session" });
     };

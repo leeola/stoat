@@ -39,11 +39,11 @@ pub(crate) const ROW_GAP: u16 = 1;
 
 /// The cell and the display scale that a pixel list lays its rows out by.
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub(crate) struct RowMetrics {
+pub struct RowMetrics {
     /// The grid cell in physical px, width then height.
-    pub(crate) cell: [u16; 2],
+    pub cell: [u16; 2],
     /// The physical px of one logical px.
-    pub(crate) scale: f32,
+    pub scale: f32,
 }
 
 /// A bar of a pixel list, placed on the line that holds its top pixel row.
@@ -94,7 +94,7 @@ impl RowMetrics {
     }
 
     /// The physical px of `logical` board px, rounded.
-    pub(crate) fn px(&self, logical: u16) -> u32 {
+    pub fn px(&self, logical: u16) -> u32 {
         (f32::from(logical) * self.scale).round() as u32
     }
 

@@ -45,7 +45,7 @@ impl ServerSelector {
 /// used by tests and the legacy single-host path. It is kept in a slot separate
 /// from the per-language clients so the spawn gate can tell "one real host
 /// covers everything" from "one language happens to have a server up".
-pub(crate) struct LspRegistry {
+pub struct LspRegistry {
     clients: HashMap<String, Arc<dyn LspHost>>,
     languages: HashMap<String, Vec<ServerSelector>>,
     /// Servers that route every buffer whatever its language, consulted after
@@ -358,7 +358,7 @@ impl LspRegistry {
 
     /// Whether a spawn was attempted for server `name`, so it is not retried
     /// even after a failure.
-    pub(crate) fn spawn_attempted(&self, name: &str) -> bool {
+    pub fn spawn_attempted(&self, name: &str) -> bool {
         self.spawn_attempted.contains(name)
     }
 

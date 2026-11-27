@@ -30,7 +30,7 @@ use stoat_widgets::ApcScene;
 ///
 /// Returns owned values rather than borrows, so a caller that needs the editor
 /// afterwards can reach for it again.
-pub(crate) fn focused_editor_popup_ctx(
+pub fn focused_editor_popup_ctx(
     stoat: &mut Stoat,
     anchor_offset: usize,
 ) -> Option<(Rect, (u16, u16))> {
