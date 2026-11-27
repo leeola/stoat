@@ -18,6 +18,7 @@ fixture = []
 [dependencies]
 codegraph = { path = "../codegraph" }
 stoat_action = { path = "../action" }
+stoat_buffer = { path = "../buffer" }
 stoat_config = { path = "../config" }
 stoat_core = { path = "../core" }
 stoat_host = { path = "../host" }
@@ -68,6 +69,7 @@ flate2.workspace = true
 [dev-dependencies]
 insta = "1"
 portable-pty.workspace = true
+stoat_buffer = { path = "../buffer", features = ["test-support"] }
 stoat_core = { path = "../core", features = ["test-support"] }
 stoat_host = { path = "../host", features = ["test-support"] }
 stoat_scheduler = { path = "../scheduler", features = ["test-support"] }

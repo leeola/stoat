@@ -21,6 +21,7 @@ test-support = [
 
 [dependencies]
 stoat_action = { path = "../action" }
+stoat_buffer = { path = "../buffer" }
 stoat_config = { path = "../config" }
 stoat_host = { path = "../host" }
 stoat_host_clipboard = { path = "../host_clipboard" }
@@ -28,17 +29,11 @@ stoat_host_git = { path = "../host_git" }
 stoat_host_lsp = { path = "../host_lsp" }
 stoat_host_terminal = { path = "../host_terminal" }
 stoat_language = { path = "../language" }
-stoat_scheduler = { path = "../scheduler" }
 stoat_text = { path = "../text" }
-stoat_theme = { path = "../theme" }
-ratatui.workspace = true
 crossterm.workspace = true
 serde = { workspace = true, features = ["derive", "rc"] }
-tokio = { workspace = true, features = ["fs", "io-util", "net", "time"] }
-futures = { workspace = true, features = ["alloc"] }
 tracing.workspace = true
 compact_str.workspace = true
-smallvec.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
@@ -48,4 +43,4 @@ stoat_host_clipboard = { path = "../host_clipboard", features = ["test-support"]
 stoat_host_git = { path = "../host_git", features = ["test-support"] }
 stoat_host_lsp = { path = "../host_lsp", features = ["test-support"] }
 stoat_host_terminal = { path = "../host_terminal", features = ["test-support"] }
-stoat_scheduler = { path = "../scheduler", features = ["test-support"] }
+stoat_theme = { path = "../theme" }

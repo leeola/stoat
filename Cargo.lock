@@ -4036,6 +4036,7 @@ dependencies = [
  "smallvec",
  "snafu",
  "stoat_action",
+ "stoat_buffer",
  "stoat_config",
  "stoat_core",
  "stoat_host",
@@ -4095,6 +4096,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "stoat_buffer"
+version = "0.1.0"
+dependencies = [
+ "futures",
+ "ratatui",
+ "ron",
+ "serde",
+ "smallvec",
+ "stoat_config",
+ "stoat_language",
+ "stoat_scheduler",
+ "stoat_text",
+ "stoat_theme",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "stoat_build_stamp"
 version = "0.1.0"
 dependencies = [
@@ -4122,12 +4141,10 @@ version = "0.1.0"
 dependencies = [
  "compact_str 0.10.0",
  "crossterm",
- "futures",
- "ratatui",
  "ron",
  "serde",
- "smallvec",
  "stoat_action",
+ "stoat_buffer",
  "stoat_config",
  "stoat_host",
  "stoat_host_clipboard",
@@ -4135,11 +4152,9 @@ dependencies = [
  "stoat_host_lsp",
  "stoat_host_terminal",
  "stoat_language",
- "stoat_scheduler",
  "stoat_text",
  "stoat_theme",
  "tempfile",
- "tokio",
  "tracing",
 ]
 

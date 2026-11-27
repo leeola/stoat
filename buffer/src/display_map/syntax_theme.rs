@@ -1,7 +1,6 @@
 use crate::{
     diff_map::DiffStatus,
     display_map::highlights::{HighlightStyle, HighlightStyleId, HighlightStyleInterner},
-    theme::Theme,
 };
 use ratatui::style::{Color, Modifier, Style};
 use std::sync::{
@@ -9,6 +8,7 @@ use std::sync::{
     Arc,
 };
 use stoat_language::{HighlightId, HighlightMap, LanguageRegistry};
+use stoat_theme::Theme;
 
 /// Canonical list of syntax scope stems this build recognizes. Each entry
 /// is the tree-sitter capture-name suffix; the full theme scope is
@@ -251,10 +251,10 @@ impl DiffTheme {
 #[cfg(test)]
 mod tests {
     use super::{theme_scope_for_key, DiffTheme, SyntaxStyles, THEME_KEYS};
-    use crate::theme::Theme;
     use std::collections::HashSet;
     use stoat_config::parse;
     use stoat_language::{HighlightId, HighlightMap};
+    use stoat_theme::Theme;
 
     fn theme_from(src: &str) -> Theme {
         let (config, errors) = parse(src);
