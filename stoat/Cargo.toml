@@ -20,8 +20,11 @@ codegraph = { path = "../codegraph" }
 stoat_action = { path = "../action" }
 stoat_buffer = { path = "../buffer" }
 stoat_config = { path = "../config" }
-stoat_core = { path = "../core" }
 stoat_host = { path = "../host" }
+stoat_host_clipboard = { path = "../host_clipboard" }
+stoat_host_git = { path = "../host_git" }
+stoat_host_lsp = { path = "../host_lsp" }
+stoat_host_terminal = { path = "../host_terminal" }
 stoat_keymap = { path = "../keymap" }
 stoat_language = { path = "../language" }
 stoat_log = { path = "../log" }
@@ -73,8 +76,11 @@ flate2.workspace = true
 insta = "1"
 portable-pty.workspace = true
 stoat_buffer = { path = "../buffer", features = ["test-support"] }
-stoat_core = { path = "../core", features = ["test-support"] }
 stoat_host = { path = "../host", features = ["test-support"] }
+stoat_host_clipboard = { path = "../host_clipboard", features = ["test-support"] }
+stoat_host_git = { path = "../host_git", features = ["test-support"] }
+stoat_host_lsp = { path = "../host_lsp", features = ["test-support"] }
+stoat_host_terminal = { path = "../host_terminal", features = ["test-support"] }
 stoat_scheduler = { path = "../scheduler", features = ["test-support"] }
 stoat_selection = { path = "../selection", features = ["test-support"] }
 stoat_theme = { path = "../theme", features = ["test-support"] }

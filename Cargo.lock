@@ -4038,8 +4038,11 @@ dependencies = [
  "stoat_action",
  "stoat_buffer",
  "stoat_config",
- "stoat_core",
  "stoat_host",
+ "stoat_host_clipboard",
+ "stoat_host_git",
+ "stoat_host_lsp",
+ "stoat_host_terminal",
  "stoat_keymap",
  "stoat_language",
  "stoat_log",
@@ -4136,18 +4139,6 @@ version = "0.1.0"
 dependencies = [
  "ariadne",
  "chumsky",
-]
-
-[[package]]
-name = "stoat_core"
-version = "0.1.0"
-dependencies = [
- "stoat_host",
- "stoat_host_clipboard",
- "stoat_host_git",
- "stoat_host_lsp",
- "stoat_host_terminal",
- "tempfile",
 ]
 
 [[package]]

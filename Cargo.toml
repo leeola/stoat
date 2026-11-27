@@ -8,7 +8,6 @@ members = [
   "cli",
   "codegraph",
   "config",
-  "core",
   "host",
   "host_clipboard",
   "host_git",
