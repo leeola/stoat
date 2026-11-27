@@ -1160,15 +1160,17 @@ fn the_finder_plate_stops_one_cell_inside_each_side_of_the_window() {
     expect_islands_apart(&shot, &mut home, 98, 30, "capped_islands");
 }
 
-/// The finder keeps its widest plate while its results narrow.
+/// The finder's plate narrows with its results.
 ///
 /// The plate reaches the cap at open, as
 /// `the_finder_plate_stops_one_cell_inside_each_side_of_the_window` reads it.
-/// The query `q` keeps one 44-char path, which fits a list of 47 cells, cells
-/// 2 to 48. The plate holds its width, so the same four pixels of pixel row
-/// 455 hold, and the preview takes the rest past the separator column, cell 49.
+/// The query `q` keeps one 44-char path, which fits a list of 47 cells, so the
+/// plate refits to the 109 cells from cell 25. Its inner rect runs from cell 26
+/// to cell 132, so on pixel row 455 the plate's ground runs from pixel 223 to
+/// pixel 1207. The list is cells 26 to 72, and its Island and the preview's
+/// stand 8 px apart across the separator column, cell 73.
 #[test]
-fn the_finder_keeps_its_widest_plate_when_its_results_narrow() {
+fn the_finder_plate_narrows_with_its_results() {
     let mut home = support::scratch_home();
     let shot = settled_frame(
         home.path(),
@@ -1177,8 +1179,8 @@ fn the_finder_keeps_its_widest_plate_when_its_results_narrow() {
         "<Space>p<Settle>q<Settle>",
     );
 
-    expect_plate_sides(&shot, &mut home, (7, 1432), "kept_plate");
-    expect_islands_apart(&shot, &mut home, 49, 30, "kept_islands");
+    expect_plate_sides(&shot, &mut home, (223, 1207), "narrowed_plate");
+    expect_islands_apart(&shot, &mut home, 73, 30, "narrowed_islands");
 }
 
 /// The palette's argument picker opens at its smallest plate.

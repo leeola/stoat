@@ -3,7 +3,7 @@ use crate::{
     input_view::{InputView, SubmitTarget},
     paths,
     picker::{BaseId, DisplayCache, PathPicker, PendingScan, PreviewPolicy, Scan, ScanTarget},
-    render::pixel_rows::RowMetrics,
+    render::{picker::PlateFit, pixel_rows::RowMetrics},
     workspace::Workspace,
 };
 use globset::{Glob, GlobSet, GlobSetBuilder};
@@ -235,12 +235,16 @@ pub struct FileFinder {
     /// The base grows while the background walk streams in, so a large workspace
     /// settles at its full size over the first frames after opening.
     pub(crate) content_rows: u16,
-    /// The widest plate, in columns, that the finder has drawn since it opened.
+    /// The list columns of the plate, measured when the rows of the list last
+    /// changed, or `None` before the first measure.
     ///
-    /// The plate fits the widest label on show, and a query that narrows the
-    /// list does not pull the plate in under the user typing it. Each open
-    /// starts over at 0, so the plate fits the next list afresh.
-    pub(crate) plate_width: u16,
+    /// A filter change refits the plate wider or narrower, and a selection
+    /// move keeps it. Each open starts with no fit.
+    ///
+    /// See also:
+    /// - [`refit_finder_plate`](crate::render::file_finder::refit_finder_plate), which the
+    ///   background pump calls to measure it.
+    pub(crate) plate_fit: Option<PlateFit>,
     /// The cell and scale that the last frame laid the list out by, or `None`
     /// for a list on whole cell rows.
     ///
@@ -338,7 +342,7 @@ impl FileFinder {
             ignored: None,
             browse: None,
             content_rows: 0,
-            plate_width: 0,
+            plate_fit: None,
             row_metrics: None,
         };
         // Uniformly seed the initial (empty-query) list for whatever scope
@@ -2183,12 +2187,12 @@ mod tests {
         );
     }
 
-    /// The plate fits the widest label on show. The query `zz` shows the
-    /// 66-char path, so the list grows to 69 columns and the preview keeps its
-    /// 100. Clearing the query fits the list back to 33 columns, and the
-    /// preview takes the rest of the kept plate.
+    /// The plate refits to the widest label on show each time the rows change.
+    /// The query `zz` shows the 66-char path, so the list grows to 69 columns
+    /// and the preview keeps its 100. Clearing the query fits the list back to
+    /// 33 columns, and the plate narrows with it.
     #[test]
-    fn the_finder_plate_grows_with_its_widest_row_and_keeps_its_width() {
+    fn the_finder_plate_refits_when_its_rows_change() {
         let mut h = fitted_plate_harness();
         let open = plate_widths(&h);
         h.type_text("zz");
@@ -2204,26 +2208,27 @@ mod tests {
             [
                 (136, 33, Some(100)),
                 (172, 69, Some(100)),
-                (172, 33, Some(136)),
+                (136, 33, Some(100)),
             ],
         );
     }
 
-    /// The plate measures the labels in the list's window, so a selection that
-    /// scrolls the long path into view grows the plate to fit it.
+    /// A selection move leaves the list's rows as they are, so a selection
+    /// that scrolls the long path into view keeps the plate, and the path wraps
+    /// in the list.
     #[test]
-    fn a_selection_that_scrolls_a_long_label_into_view_grows_the_plate() {
+    fn a_selection_move_keeps_the_plate() {
         let mut h = fitted_plate_harness();
         let open = plate_widths(&h).0;
         for _ in 0..35 {
             h.type_keys("down");
         }
 
-        assert_eq!((open, plate_widths(&h)), (136, (172, 69, Some(100))));
+        assert_eq!((open, plate_widths(&h)), (136, (136, 33, Some(100))));
     }
 
-    /// The finder keeps its widest plate only while it stays open, so the next
-    /// open fits the plate to the labels on show again.
+    /// Each open fits the plate to the labels its list shows, whatever plate
+    /// the last open drew.
     #[test]
     fn the_finder_plate_starts_over_at_each_open() {
         let mut h = fitted_plate_harness();

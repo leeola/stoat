@@ -291,10 +291,6 @@ pub(crate) struct PaletteArgLayout {
     /// The key line under the body, as
     /// [`footer_rect`](crate::render::picker::footer_rect) gives it.
     pub(crate) footer: Rect,
-    /// The plate's width before zoom steps, in columns, which the palette
-    /// keeps as [`CommandPalette::arg_plate_width`] so the plate does not
-    /// narrow while the palette is open.
-    pub(crate) plate_base: u16,
 }
 
 /// The parts of the palette's key line in one stage, as
@@ -460,12 +456,13 @@ pub(crate) fn doc_rows(pixels: Option<RowMetrics>) -> u16 {
 /// its plate fitted to the widest label that its list shows, or `None` when
 /// `area` is too small to host it or no argument picker is open.
 ///
-/// The plate follows the rule of the finder's plate. The list takes the widest
-/// label among the rows on show, at least 30 columns, with its pad and mark
-/// cells. The preview takes `preview_min` columns. The plate does not narrow
-/// below [`CommandPalette::arg_plate_width`], the widest plate the picker has
-/// drawn since the palette opened, and it stops one column inside each side of
-/// `area`. `zoom` steps then move the width by a tenth of the area each.
+/// The plate follows the rule of the finder's plate. The list takes the columns
+/// of [`CommandPalette::arg_plate_fit`], measured when the list's rows last
+/// changed, so a selection move keeps the plate. With no fit the list measures
+/// the rows on show. Either way it takes the widest label, at least 30 columns,
+/// with its pad and mark cells. The preview takes `preview_min` columns. The
+/// plate stops one column inside each side of `area`. `zoom` steps then move
+/// the width by a tenth of the area each.
 ///
 /// The height is the height of [`palette_filter_layout`]. The palette's
 /// separator takes no drag, so the list keeps its fitted width.
@@ -481,24 +478,18 @@ pub(crate) fn palette_arg_layout(
     preview_min: u16,
 ) -> Option<PaletteArgLayout> {
     let picker = palette.arg_picker.as_ref()?;
-    let rows = palette_filter_layout(
-        area,
-        palette.list_rows_hint(),
-        zoom,
-        palette.header_rows,
-        palette.doc_rows(),
-    )?
-    .modal;
-    let list = {
-        let inner = Block::default().borders(Borders::ALL).inner(rows);
-        let (_, list_rows) = arg_body_rows(inner, 1)?;
-        let widest = crate::render::picker::widest_label(&arg_rows(picker, home), list_rows);
-        crate::render::picker::list_columns(widest)
+    let rows = arg_box(area, palette, zoom)?;
+    let list = match &palette.arg_plate_fit {
+        Some(fit) => fit.list,
+        None => {
+            let list_rows = arg_list_rows(rows)?;
+            let widest = crate::render::picker::widest_label(&arg_rows(picker, home), list_rows);
+            crate::render::picker::list_columns(widest)
+        },
     };
 
     let fitted = crate::render::picker::fitted_plate_width(list, preview_min);
-    let base =
-        crate::render::chrome::fitted_width(area.width, palette.arg_plate_width.max(fitted), 0, 0);
+    let base = crate::render::chrome::fitted_width(area.width, fitted, 0, 0);
     let width = crate::render::chrome::fitted_width(area.width, base, 20, zoom);
     let modal = Rect {
         x: area.x + (area.width - width) / 2,
@@ -523,8 +514,56 @@ pub(crate) fn palette_arg_layout(
         list,
         preview,
         footer: crate::render::picker::footer_rect(modal),
-        plate_base: base,
     })
+}
+
+/// Measure the argument picker's plate against the rows its list shows now, as
+/// [`palette_arg_layout`] lays it out within `area` at `zoom`.
+///
+/// The fit holds while the list's rows and its window hold, and measures again
+/// once either changes. A palette with no argument picker, or a box with no
+/// body row, keeps the fit it holds.
+pub(crate) fn refit_arg_plate(
+    palette: &mut CommandPalette,
+    area: Rect,
+    home: Option<&Path>,
+    zoom: i8,
+) {
+    let Some(picker) = &palette.arg_picker else {
+        return;
+    };
+    let Some(list_rows) = arg_box(area, palette, zoom).and_then(arg_list_rows) else {
+        return;
+    };
+    let held = palette.arg_plate_fit.take();
+    let fit = crate::render::picker::plate_fit(held, &arg_rows(picker, home), list_rows);
+    palette.arg_plate_fit = Some(fit);
+}
+
+/// The argument picker's box within `area` at `zoom` before the plate fits its
+/// width, or `None` when `area` is too small to host it.
+///
+/// [`palette_arg_layout`] and [`refit_arg_plate`] both size the box here, so a
+/// refit measures the window that the layout shows.
+fn arg_box(area: Rect, palette: &CommandPalette, zoom: i8) -> Option<Rect> {
+    let layout = palette_filter_layout(
+        area,
+        palette.list_rows_hint(),
+        zoom,
+        palette.header_rows,
+        palette.doc_rows(),
+    )?;
+    Some(layout.modal)
+}
+
+/// The results that the argument picker's list shows in `rows`, its box before
+/// the plate fits its width, or `None` when the box holds no body row.
+///
+/// The count comes from the body under a one-row Cmd Line, because the Cmd
+/// Line's rows follow the plate's width.
+fn arg_list_rows(rows: Rect) -> Option<u16> {
+    let inner = Block::default().borders(Borders::ALL).inner(rows);
+    arg_body_rows(inner, 1).map(|(_, list_rows)| list_rows)
 }
 
 /// The top row and the rows of the argument picker's body inside `inner`,
@@ -995,9 +1034,7 @@ pub(crate) fn run_block_plate_width(origin: Rect, area: Rect) -> u16 {
 /// Keeps the filter modal's height and its Cmd Line, then replaces the
 /// command list + doc body with a result list beside a live preview, mirroring
 /// the standalone file finder. The plate's width follows
-/// [`palette_arg_layout`], and the paint keeps it in
-/// [`CommandPalette::arg_plate_width`], so the next frame draws a plate at
-/// least as wide. State is synced before the frame by
+/// [`palette_arg_layout`]. State is synced before the frame by
 /// [`crate::action_handlers::sync_palette_picker`], so this only paints.
 #[allow(clippy::too_many_arguments)]
 fn render_palette_arg_picker(
@@ -1044,7 +1081,6 @@ fn render_palette_arg_picker(
         return;
     };
     palette.plate = Some(layout.modal);
-    palette.arg_plate_width = layout.plate_base;
     palette.header_rows = render_palette_prelude(
         &palette.input,
         palette.resolved.as_ref(),

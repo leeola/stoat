@@ -2712,6 +2712,38 @@ pub(crate) fn widest_label(rows: &PathRows<'_>, list_rows: u16) -> u16 {
     u16::try_from(widest).unwrap_or(u16::MAX)
 }
 
+/// The list columns of a fitted plate, measured when the rows of its list
+/// change.
+///
+/// A fit holds until the list refilters or its window holds another count of
+/// results, so a selection move never moves the plate. A label that a
+/// selection scrolls into view wider than the list wraps at `/`, as a label
+/// past the plate's cap does.
+pub(crate) struct PlateFit {
+    /// The [`PickList::filter_generation`] of the rows the fit measured.
+    generation: u64,
+    /// The results of the window the fit measured.
+    list_rows: u16,
+    /// The list's columns, as [`list_columns`] gives them.
+    pub(crate) list: u16,
+}
+
+/// The fit of a plate over `rows`, whose window shows `list_rows` results.
+///
+/// Answers `held` when it measured these rows in a window of the same height,
+/// and otherwise measures the widest label on show, as [`widest_label`] does.
+pub(crate) fn plate_fit(held: Option<PlateFit>, rows: &PathRows<'_>, list_rows: u16) -> PlateFit {
+    let generation = rows.picklist.filter_generation;
+    match held {
+        Some(held) if held.generation == generation && held.list_rows == list_rows => held,
+        _ => PlateFit {
+            generation,
+            list_rows,
+            list: list_columns(widest_label(rows, list_rows)),
+        },
+    }
+}
+
 /// Split a fitted finder body, the `width` by `height` cells from `(x, y)`,
 /// into its list and its preview.
 ///
@@ -3812,6 +3844,28 @@ mod tests {
             ),
             ([33, 78], [95, 109, 136], [100, 59]),
         );
+    }
+
+    /// A fit holds while its rows and its window hold, so a selection that
+    /// scrolls the 44-char label into view keeps the 33-column list. A bumped
+    /// filter generation and a taller window each measure the label again.
+    #[test]
+    fn a_plate_fit_holds_until_its_rows_or_its_window_change() {
+        let long = format!("{}.rs", "x".repeat(41));
+        let paths = ["a.rs", "b.rs", "c.rs", long.as_str()].map(|name| Path::new("/r").join(name));
+        let mut list = list_of(Vec::from(paths), Vec::new());
+        list.selected = 0;
+        let opened = |list: &PickList| plate_fit(None, &rows_of(list, None), 3);
+        let (held, bumped, resized) = (opened(&list), opened(&list), opened(&list));
+        let first = held.list;
+
+        list.selected = 3;
+        let moved = plate_fit(Some(held), &rows_of(&list, None), 3).list;
+        let taller = plate_fit(Some(resized), &rows_of(&list, None), 4).list;
+        list.filter_generation += 1;
+        let refiltered = plate_fit(Some(bumped), &rows_of(&list, None), 3).list;
+
+        assert_eq!([first, moved, refiltered, taller], [33, 33, 47, 47]);
     }
 
     /// With no share the list takes its fitted columns, up to the room that the

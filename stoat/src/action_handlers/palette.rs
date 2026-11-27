@@ -1,6 +1,6 @@
 use super::run;
 use crate::{
-    app::{Stoat, UpdateEffect},
+    app::{modal_zoom_steps, ModalKind, Stoat, UpdateEffect},
     cli_spec::CliSpec,
     command_palette::{
         self, ArgList, ArgPicker, ArgRow, Availability, CliListKind, CommandPalette, PaletteBlock,
@@ -216,8 +216,10 @@ pub(super) fn open_palette_seeded(stoat: &mut Stoat, seed: &str) -> UpdateEffect
 /// Refilters the command list from the input, and when the input parses as a
 /// command whose trailing argument sources files (e.g. `:o `), lazily spawns the
 /// workspace walk on first entry, then drains it, refilters the path list, and
-/// syncs the preview. A no-op when no palette is open or the input is not in
-/// file-argument mode.
+/// syncs the preview. It then refits the argument picker's plate to the rows
+/// the refilter left, as [`render::command_palette::refit_arg_plate`] measures
+/// them, so the paint only reads the fit. A no-op when no palette is open or
+/// the input is not in file-argument mode.
 ///
 /// While the history walks, the palette shows History and no argument list.
 /// The sync then drops an installed argument picker and the list of a `cli`
@@ -323,11 +325,17 @@ pub(crate) fn sync_palette_picker(stoat: &mut Stoat) {
     }
 
     let fs_host = stoat.fs_host.clone();
+    let area = stoat.size();
+    let zoom = modal_zoom_steps(&stoat.modal_zoom, ModalKind::Palette);
     let pending = {
         let ws = &mut stoat.workspaces[active_idx];
         match stoat.command_palette.as_mut() {
             Some(palette) => {
-                palette.sync_arg_picker(&tail, ws, &*fs_host, &stoat.language_registry)
+                let pending =
+                    palette.sync_arg_picker(&tail, ws, &*fs_host, &stoat.language_registry);
+                let home = stoat.home.as_deref();
+                render::command_palette::refit_arg_plate(palette, area, home, zoom);
+                pending
             },
             None => Vec::new(),
         }

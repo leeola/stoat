@@ -10,7 +10,7 @@ use crate::{
     paths,
     picker::{self, PathPicker, PendingScan, Preview, PreviewPolicy, ScanTarget},
     rebase::RebasePause,
-    render::pixel_rows::RowMetrics,
+    render::{picker::PlateFit, pixel_rows::RowMetrics},
     run::CmdId,
     user_command::{
         run, ArgKind, CommandArg, CommandSet, Output, PickSpec, RunSpec, TextDefault, UserCommand,
@@ -114,14 +114,17 @@ pub struct CommandPalette {
     /// Whether the input lists the commands or the internal actions, which a
     /// leading `action ` token opens.
     pub(crate) namespace: Namespace,
-    /// The widest plate, in columns, that the argument picker has drawn since
-    /// the palette opened.
+    /// The list columns of the argument picker's plate, measured when the rows
+    /// of its list last changed, or `None` before the first measure.
     ///
-    /// The plate fits the widest label on show, and a tail that narrows the
-    /// list does not pull the plate in under the user typing it. The width
-    /// outlasts a change of the argument's source, and each open starts over
-    /// at 0.
-    pub(crate) arg_plate_width: u16,
+    /// A change of the tail or of the argument's source refits the plate wider
+    /// or narrower, and a selection move keeps it. Each open starts with no
+    /// fit.
+    ///
+    /// See also:
+    /// - [`refit_arg_plate`](crate::render::command_palette::refit_arg_plate), which the
+    ///   background pump calls to measure it.
+    pub(crate) arg_plate_fit: Option<PlateFit>,
     /// The cell and scale that the last frame laid the command list or the
     /// argument list out by, or `None` for a list on whole cell rows.
     ///
@@ -1282,7 +1285,7 @@ impl CommandPalette {
             offering,
             action_offering,
             namespace: Namespace::Commands,
-            arg_plate_width: 0,
+            arg_plate_fit: None,
             row_metrics: None,
             header_rows: 1,
             resolved: None,
@@ -8736,12 +8739,12 @@ mod tests {
         h.assert_snapshot("command_palette_group_doc");
     }
 
-    /// The argument picker's plate fits the widest label on show. The tail
-    /// `zz` shows the 66-char path, so the plate grows from 136 to 172
-    /// columns. Clearing the tail fits the list back to 33 columns, and the
-    /// plate keeps its width.
+    /// The argument picker's plate refits to the widest label on show each
+    /// time the rows change. The tail `zz` shows the 66-char path, so the plate
+    /// grows from 136 to 172 columns. Clearing the tail fits the list back to
+    /// 33 columns, and the plate narrows back to 136.
     #[test]
-    fn the_argument_plate_grows_with_its_widest_row_and_keeps_its_width() {
+    fn the_argument_plate_refits_when_its_rows_change() {
         let mut h = argument_plate_harness();
         let open = palette_plate(&h);
         h.type_text("zz");
@@ -8754,12 +8757,12 @@ mod tests {
 
         assert_eq!(
             [open, grown, palette_plate(&h)],
-            [(136, 33), (172, 69), (172, 33)],
+            [(136, 33), (172, 69), (136, 33)],
         );
     }
 
-    /// The palette keeps its widest argument plate only while it stays open,
-    /// so the next open fits the plate to the labels on show again.
+    /// Each open of the palette fits the argument plate to the labels its list
+    /// shows, whatever plate the last open drew.
     #[test]
     fn the_argument_plate_starts_over_when_the_palette_opens() {
         let mut h = argument_plate_harness();

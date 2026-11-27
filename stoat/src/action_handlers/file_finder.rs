@@ -1,9 +1,10 @@
 use crate::{
-    app::{ModalKind, Stoat, UpdateEffect},
+    app::{modal_zoom_steps, ModalKind, Stoat, UpdateEffect},
     diff_changes,
     file_finder::{Browse, FileFinder, FinderPathCache, FinderScope, OpenIntent, BROWSE_PATH_CAP},
     pane::{FocusTarget, View},
     picker::{PathPicker, PendingScan},
+    render,
 };
 use std::{
     collections::HashSet,
@@ -23,12 +24,18 @@ use tokio::sync::mpsc::UnboundedReceiver;
 /// `drive_parse_jobs` runs, not during the paint pass. Synced later, the parse
 /// for the newly selected file is never driven while the modal sits idle, so
 /// the preview stays unhighlighted until the next unrelated event.
+///
+/// The sync also refits the finder's plate to the rows the refilter left, as
+/// [`render::file_finder::refit_finder_plate`] measures them, so the paint
+/// only reads the fit.
 pub(crate) fn sync_file_finder_preview(stoat: &mut Stoat) {
     if stoat.file_finder.is_none() {
         return;
     }
     sync_file_finder_browse(stoat);
     let active_idx = stoat.active_workspace;
+    let area = stoat.size();
+    let zoom = modal_zoom_steps(&stoat.modal_zoom, ModalKind::FileFinder);
     let (pending, fallback_root) = {
         let ws = &mut stoat.workspaces[active_idx];
         let fs_host = &*stoat.fs_host;
@@ -36,6 +43,7 @@ pub(crate) fn sync_file_finder_preview(stoat: &mut Stoat) {
         let finder = stoat.file_finder.as_mut().expect("file_finder present");
         let pending = finder.refilter_from_input(ws);
         finder.sync_preview(ws, fs_host, language_registry);
+        render::file_finder::refit_finder_plate(finder, area, stoat.home.as_deref(), zoom);
         (pending, finder.wants_ignored_fallback())
     };
 

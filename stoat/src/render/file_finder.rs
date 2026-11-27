@@ -47,12 +47,6 @@ pub(crate) struct FinderLayout {
     /// with the list and the preview ending above it. A body of one row keeps
     /// none.
     pub(crate) footer: Option<Rect>,
-    /// The plate's width before zoom steps, in columns.
-    ///
-    /// [`finder_layout`] answers the fitted width, which the finder keeps as
-    /// [`FileFinder::plate_width`] so its plate does not narrow while it is
-    /// open. [`file_finder_layout`] answers its modal's width.
-    pub(crate) plate_base: u16,
 }
 
 /// The inner rect of a box of the finder family, its body under the query row
@@ -140,7 +134,6 @@ pub(crate) fn file_finder_layout(
         preview,
         preview_header: None,
         footer: body.footer,
-        plate_base: modal.width,
     })
 }
 
@@ -148,16 +141,17 @@ pub(crate) fn file_finder_layout(
 /// fitted to the widest label that its list shows, or `None` when `area` is
 /// too small to host it.
 ///
-/// The list takes the widest label among the rows on show, at least 30
-/// columns, with its pad and mark cells, as [`list_columns`] gives them. The
-/// preview takes `preview_min` columns. The plate does not narrow below
-/// [`FileFinder::plate_width`], the widest plate the finder has drawn since it
-/// opened, and it stops one column inside each side of `area`. `zoom` steps
-/// then move the width by a tenth of the area each. The height follows the
-/// list's rows as the height of [`file_finder_layout`] does.
+/// The list takes the columns of [`FileFinder::plate_fit`], measured when the
+/// list's rows last changed, so a selection move keeps the plate. With no fit,
+/// as in a direct render, the list measures the rows on show. Either way it
+/// takes the widest label, at least 30 columns, with its pad and mark cells, as
+/// [`list_columns`] gives them. The preview takes `preview_min` columns. The
+/// plate stops one column inside each side of `area`. `zoom` steps then move
+/// the width by a tenth of the area each. The height follows the list's rows as
+/// the height of [`file_finder_layout`] does.
 ///
-/// A query that matches no file keeps this box, so the query row stays in
-/// place while a query loses and regains its matches.
+/// A query that matches no file keeps the box's rows, so the query row stays on
+/// its row while a query loses and regains its matches.
 ///
 /// A dragged `split` share replaces the list's fitted width, as
 /// [`fitted_split`] describes. The preview's top two rows hold its path
@@ -181,17 +175,18 @@ pub(crate) fn finder_layout(
     split: Option<u16>,
     preview_min: u16,
 ) -> Option<FinderLayout> {
-    let rows =
-        crate::render::chrome::modal_box(area, (0, finder.content_rows), (0, 32), (40, 12), zoom)?;
-    let list = {
-        let list_rows = body_rows(rows)?.height;
-        let widest = crate::render::picker::widest_label(&finder_rows(finder, home), list_rows);
-        crate::render::picker::list_columns(widest)
+    let rows = finder_box(area, finder, zoom)?;
+    let list = match &finder.plate_fit {
+        Some(fit) => fit.list,
+        None => {
+            let list_rows = body_rows(rows)?.height;
+            let widest = crate::render::picker::widest_label(&finder_rows(finder, home), list_rows);
+            crate::render::picker::list_columns(widest)
+        },
     };
 
     let fitted = crate::render::picker::fitted_plate_width(list, preview_min);
-    let base =
-        crate::render::chrome::fitted_width(area.width, finder.plate_width.max(fitted), 0, 0);
+    let base = crate::render::chrome::fitted_width(area.width, fitted, 0, 0);
     let width = crate::render::chrome::fitted_width(area.width, base, 40, zoom);
     let modal = Rect {
         x: area.x + (area.width - width) / 2,
@@ -235,8 +230,41 @@ pub(crate) fn finder_layout(
         preview,
         preview_header,
         footer: body.footer,
-        plate_base: base,
     })
+}
+
+/// Measure the plate of the open finder against the rows its list shows now,
+/// as [`finder_layout`] lays it out within `area` at `zoom`.
+///
+/// The fit holds while the list's rows and its window hold, and measures again
+/// once either changes. A box with no body row keeps the fit it holds.
+pub(crate) fn refit_finder_plate(
+    finder: &mut FileFinder,
+    area: Rect,
+    home: Option<&Path>,
+    zoom: i8,
+) {
+    let Some(list_rows) = finder_list_rows(area, finder, zoom) else {
+        return;
+    };
+    let held = finder.plate_fit.take();
+    let fit = crate::render::picker::plate_fit(held, &finder_rows(finder, home), list_rows);
+    finder.plate_fit = Some(fit);
+}
+
+/// The results the finder's list shows within `area` at `zoom`, or `None` when
+/// the box holds no body row.
+fn finder_list_rows(area: Rect, finder: &FileFinder, zoom: i8) -> Option<u16> {
+    Some(body_rows(finder_box(area, finder, zoom)?)?.height)
+}
+
+/// The finder's box within `area` at `zoom` before the plate fits its width,
+/// or `None` when `area` is too small to host it.
+///
+/// [`finder_layout`] and [`finder_list_rows`] both size the box here, so a refit
+/// measures the window that the layout shows.
+fn finder_box(area: Rect, finder: &FileFinder, zoom: i8) -> Option<Rect> {
+    crate::render::chrome::modal_box(area, (0, finder.content_rows), (0, 32), (40, 12), zoom)
 }
 
 /// The [`BodyRows`] of a finder-family box `modal`, or `None` when the box
@@ -267,10 +295,6 @@ fn body_rows(modal: Rect) -> Option<BodyRows> {
 /// Paint the File Finder or the Buffer Finder into `area`, laid out as
 /// [`finder_layout`] lays it out.
 ///
-/// The paint keeps the plate's width before zoom steps in
-/// [`FileFinder::plate_width`], so the next frame draws a plate at least as
-/// wide while the finder stays open.
-///
 /// Under a scene whose lists lay their rows out by pixels, `insets` says the
 /// terminal starts a pool's page at its region's inset. The paint then sets
 /// the preview's pad to [`PREVIEW_HEAD_INSET`] at the top, so the header takes
@@ -299,7 +323,6 @@ pub(crate) fn render_file_finder(
     let Some(layout) = finder_layout(area, finder, home, zoom, split, preview_min) else {
         return;
     };
-    finder.plate_width = layout.plate_base;
     let no_match = finder.shows_no_match();
 
     let modal_style = theme.get(crate::theme::scope::UI_MODAL_PALETTE);
