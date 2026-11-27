@@ -1,5 +1,4 @@
 mod clipboard;
-pub mod terminal;
 
 pub use self::clipboard::FakeClipboard;
 pub use stoat_host::{FakeEnv, FakeFs, FakeFsOp, FakeFsWatcher};

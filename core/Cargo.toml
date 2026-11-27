@@ -15,6 +15,7 @@ test-support = [
   "stoat_host/test-support",
   "stoat_host_git/test-support",
   "stoat_host_lsp/test-support",
+  "stoat_host_terminal/test-support",
 ]
 
 [dependencies]
@@ -23,6 +24,7 @@ stoat_config = { path = "../config" }
 stoat_host = { path = "../host" }
 stoat_host_git = { path = "../host_git" }
 stoat_host_lsp = { path = "../host_lsp" }
+stoat_host_terminal = { path = "../host_terminal" }
 stoat_language = { path = "../language" }
 stoat_scheduler = { path = "../scheduler" }
 stoat_text = { path = "../text" }
@@ -35,10 +37,7 @@ tokio = { workspace = true, features = ["fs", "io-util", "net", "time"] }
 futures = { workspace = true, features = ["alloc"] }
 tracing.workspace = true
 compact_str.workspace = true
-async-trait.workspace = true
 snafu = { workspace = true }
-portable-pty.workspace = true
-libc.workspace = true
 smallvec.workspace = true
 arboard.workspace = true
 base64.workspace = true
@@ -49,4 +48,5 @@ ron.workspace = true
 stoat_host = { path = "../host", features = ["test-support"] }
 stoat_host_git = { path = "../host_git", features = ["test-support"] }
 stoat_host_lsp = { path = "../host_lsp", features = ["test-support"] }
+stoat_host_terminal = { path = "../host_terminal", features = ["test-support"] }
 stoat_scheduler = { path = "../scheduler", features = ["test-support"] }

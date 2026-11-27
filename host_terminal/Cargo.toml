@@ -1,0 +1,21 @@
+[package]
+name = "stoat_host_terminal"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+# Compile the in-memory terminal fake. Off by default so a release build
+# carries none of it, and enabled from a consumer's [dev-dependencies] so its
+# tests do.
+[features]
+test-support = []
+
+[dependencies]
+portable-pty.workspace = true
+tokio = { workspace = true, features = ["fs", "io-util", "net", "time"] }
+async-trait.workspace = true
+libc.workspace = true
+tracing.workspace = true

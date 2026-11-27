@@ -1,4 +1,16 @@
+//! The terminal host, the interface that spawns a program on a
+//! pseudo-terminal for a terminal pane or a Cmd.
+//!
+//! [`TerminalHost`] spawns a program from its [`SpawnArgs`] as a
+//! [`TerminalSession`]. [`LocalTerminalHost`] opens an OS pseudo-terminal
+//! through portable-pty. The `fake` module scripts a session's output and
+//! records its input and its spawns for tests, under the `test-support`
+//! feature.
+
 use async_trait::async_trait;
+#[cfg(any(test, feature = "test-support"))]
+pub use fake::{FakeTerminalHost, FakeTerminalSession};
+pub use local::LocalTerminalHost;
 use portable_pty::CommandBuilder;
 use std::{
     io,
@@ -9,6 +21,13 @@ use std::{
     },
 };
 use tokio::sync::mpsc;
+
+#[cfg(any(test, feature = "test-support"))]
+pub mod fake;
+// The local host layer is the syscall boundary itself, so its direct std::env /
+// std::fs calls are the intended implementation, not a bypass.
+#[allow(clippy::disallowed_methods)]
+pub mod local;
 
 /// Queued-write count that trips the writer-stall warning.
 ///
@@ -66,8 +85,8 @@ pub trait TerminalSession: Send + Sync {
 }
 
 /// Factory that opens new PTY-backed terminal sessions. Production wires
-/// [`crate::host::local::LocalTerminalHost`]. Tests wire a fake that
-/// returns a pre-configured [`crate::host::fake::terminal::FakeTerminalSession`].
+/// [`crate::LocalTerminalHost`]. Tests wire a fake that
+/// returns a pre-configured [`crate::FakeTerminalSession`].
 #[async_trait]
 pub trait TerminalHost: Send + Sync {
     async fn spawn(&self, args: SpawnArgs) -> io::Result<Box<dyn TerminalSession>>;
@@ -179,7 +198,7 @@ impl TerminalSession for PtyTerminalSession {
 }
 
 /// Synchronous PTY-open helper behind the [`TerminalHost::spawn`] of
-/// [`crate::host::local::LocalTerminalHost`], which builds the PTY through
+/// [`crate::LocalTerminalHost`], which builds the PTY through
 /// the portable-pty boilerplate without an async detour.
 pub(crate) fn open_local_pty(args: SpawnArgs) -> io::Result<PtyTerminalSession> {
     let pty_system = portable_pty::native_pty_system();
@@ -310,7 +329,7 @@ fn blocking_read_loop(mut reader: Box<dyn io::Read + Send>, tx: mpsc::Sender<Vec
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::host::local::LocalTerminalHost;
+    use crate::LocalTerminalHost;
     use std::sync::Condvar;
 
     fn rt() -> tokio::runtime::Runtime {

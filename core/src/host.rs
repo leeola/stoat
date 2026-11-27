@@ -12,12 +12,12 @@ pub mod clipboard;
 #[cfg(any(test, feature = "test-support"))]
 pub mod fake;
 pub use stoat_host_git as git;
+pub use stoat_host_lsp as lsp;
+pub use stoat_host_terminal as terminal;
 // The local host layer is the syscall boundary itself, so its direct std::env /
 // std::fs calls are the intended implementation, not a bypass.
 #[allow(clippy::disallowed_methods)]
 pub mod local;
-pub use stoat_host_lsp as lsp;
-pub mod terminal;
 
 pub use clipboard::{
     clipboard_copy, osc52_should_emit, ClipboardHost, ClipboardKind, NoopClipboard,
@@ -25,17 +25,15 @@ pub use clipboard::{
 #[cfg(any(test, feature = "test-support"))]
 pub use fake::{
     change_params, completion_params, definition_params, document_highlight_params, hover_params,
-    inlay_hint_params, open_params, reference_params,
-    terminal::{FakeTerminalHost, FakeTerminalSession},
-    workspace_symbol_params, FakeClipboard, FakeEnv, FakeFs, FakeFsOp, FakeFsWatcher, FakeGit,
-    FakeLsp, FakeRepoBuilder,
+    inlay_hint_params, open_params, reference_params, workspace_symbol_params, FakeClipboard,
+    FakeEnv, FakeFs, FakeFsOp, FakeFsWatcher, FakeGit, FakeLsp, FakeRepoBuilder,
 };
 pub use git::{
     BlameCommit, BlameRun, ChangedFile, CherryPickOutcome, CommitFileChange, CommitFileChangeKind,
     CommitInfo, ConflictedFile, DiffStatus, FileBlame, GitApplyError, GitHost, GitRepo, LocalGit,
     RebaseError, RebaseTodo, RebaseTodoOp, RewriteResult, StagedKind,
 };
-pub use local::{LocalClipboard, LocalTerminalHost};
+pub use local::LocalClipboard;
 pub use lsp::{
     LanguageServerFeature, LocalLsp, LspHost, LspNotification, LspTranscript, NoopLsp,
     OffsetEncoding,
@@ -46,4 +44,6 @@ pub use stoat_host::{
     EnvHost, FsDirEntry, FsEventKind, FsHost, FsMetadata, FsWatchEvent, FsWatchHost, LocalEnv,
     LocalFs, LocalFsWatcher, LocalShell, NoopFsWatcher, ShellHost, ShellOutput, WatchToken,
 };
-pub use terminal::{SpawnArgs, TerminalHost, TerminalSession};
+#[cfg(any(test, feature = "test-support"))]
+pub use terminal::{FakeTerminalHost, FakeTerminalSession};
+pub use terminal::{LocalTerminalHost, SpawnArgs, TerminalHost, TerminalSession};

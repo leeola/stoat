@@ -1,4 +1,4 @@
-use crate::host::terminal::{open_local_pty, SpawnArgs, TerminalHost, TerminalSession};
+use crate::{open_local_pty, SpawnArgs, TerminalHost, TerminalSession};
 use async_trait::async_trait;
 use std::io;
 
