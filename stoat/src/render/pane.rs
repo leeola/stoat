@@ -1687,15 +1687,15 @@ fn status_scene_key(runs: &[StatusRun], separator: [u8; 3]) -> u64 {
 /// pixel inside the row. A chip on the bar's background reads as plain text.
 ///
 /// The bar ends in the Job Tray, a Tray Chip for each Job of `ws`, as
-/// [`job_tray::draw_tray`] draws them. The tray ends one pad cell before the
-/// bar's right edge, or one blank cell left of `cover`, the cells of the
-/// top-right badges on the bar's row. It takes the right half of the bar at
-/// most, and the tabs and the chips above lay out left of it.
+/// [`job_tray::place_tray`] places them left of `cover`, the cells of the
+/// top-right badges, and [`job_tray::draw_tray`] draws them. The tabs and the
+/// chips above lay out left of the tray.
 ///
 /// Leaves in `spans` the extent of each painted tab, in sixteenths of a cell
 /// from the left edge of `area`, so a pointer press resolves against the
-/// segments as painted. Answers the columns of each Tray Chip that it drew,
-/// with the Cmd of its Job, which a press on a chip and the Glance read.
+/// segments as painted. Answers the cells of each Tray Chip that it drew, and
+/// its pixels where it stands at the board's pixels, with the Cmd of its Job,
+/// which a press on a chip and the Glance read.
 pub(crate) fn render_tab_bar(
     ws: &Workspace,
     area: Rect,
@@ -1734,18 +1734,17 @@ pub(crate) fn render_tab_bar(
     };
 
     let views = jobs::views(ws);
-    let tray_right = match cover {
-        Some(cover) if cover.y == area.y => cover.x.saturating_sub(1),
-        _ => area.right() - 1,
-    };
     let tray_colors = scene.live().then(|| job_tray::tray_colors(theme)).flatten();
     let tray_scale = tray_colors
         .as_ref()
         .map(|_| theme.type_scale(TypeRole::Caption));
-    let placed = job_tray::tray_layout(&views, tray_right, area.x + area.width / 2, tray_scale);
+    let tray_pixels = scene
+        .pixel_rows()
+        .map(|(cell, scale)| RowMetrics { cell, scale });
+    let placed = job_tray::place_tray(&views, area, cover, tray_scale, tray_pixels);
     let lead = match placed.first() {
-        Some((_, cells)) => Rect {
-            width: cells.start - area.x,
+        Some(place) => Rect {
+            width: place.cells.start - area.x,
             ..area
         },
         None => area,
@@ -1830,9 +1829,10 @@ pub(crate) fn render_tab_bar(
 
     placed
         .into_iter()
-        .map(|(index, cells)| TraySpan {
-            cmd: views[index].id,
-            cells,
+        .map(|place| TraySpan {
+            cmd: views[place.index].id,
+            cells: place.cells,
+            px: place.px.map(|(px, _)| px),
         })
         .collect()
 }

@@ -2818,11 +2818,12 @@ fn a_block_pushed_to_jobs_draws_as_a_stub() {
 /// bar, the pill of the active tab on the raised fill with the run color's dot.
 ///
 /// The chip reads `sleep 30` and an elapsed time of four characters at the
-/// Caption scale, so it takes the 15 columns 144 to 158, before the pad cell
-/// 159. Its box covers the pixel columns of those cells and stands
-/// [`TAB_PILL_OUTSET`] px outside the bar's row, which draws [`TAB_BAR_PAD`]
-/// px down in its band, and its corner rounds off. The dot stands one cell in,
-/// on pixel rows 6 to 11 of the bar's row, and its corner rounds off too.
+/// Caption scale 216, so it is 8 + 6 + 6 + 61 + 6 + 30 + 8 = 125 px wide, and
+/// it ends 8 px inside the window, so its box covers the pixel columns 1307 to
+/// 1431. The box stands [`TAB_PILL_OUTSET`] px outside the bar's row, which
+/// draws [`TAB_BAR_PAD`] px down in its band, so it covers the pixel rows 5 to
+/// 26, and its corner rounds off. The dot stands 8 px in, on the pixel columns
+/// 1315 to 1320 and the pixel rows 13 to 18, and its corner rounds off too.
 #[test]
 fn a_pushed_job_draws_its_tray_chip() {
     let mut home = support::scratch_home();
@@ -2841,17 +2842,18 @@ fn a_pushed_job_draws_its_tray_chip() {
         "tab_bar_with_tray",
     );
 
-    let (left, row_top, width, height) = cell_rect(144, 0, 15, 1);
-    let right = left + width - 1;
+    let (left, right) = (1307, 1431);
+    let (_, row_top, _, height) = cell_rect(0, 0, 1, 1);
     let top = row_top + TAB_BAR_PAD - TAB_PILL_OUTSET;
     let bottom = row_top + TAB_BAR_PAD + height + TAB_PILL_OUTSET - 1;
     let middle = row_top + TAB_BAR_PAD + height / 2;
+    let column = 1360;
     let across = [left - 1, left, right, right + 1].map(|x| pixel(&shot, x, middle));
-    let down = [top - 1, top, bottom, bottom + 1].map(|y| pixel(&shot, left + 64, y));
+    let down = [top - 1, top, bottom, bottom + 1].map(|y| pixel(&shot, column, y));
     let corner = pixel(&shot, left, top);
-    let (dot_left, dot_top) = (left + width / 15, row_top + TAB_BAR_PAD + 6);
+    let (dot_left, dot_top) = (left + 8, row_top + TAB_BAR_PAD + 6);
     let dot = [
-        pixel(&shot, dot_left + 3, dot_top + 3),
+        pixel(&shot, dot_left + 2, dot_top + 3),
         pixel(&shot, dot_left, dot_top),
     ];
     let edges = [GROUND, RAISED, RAISED, GROUND];
@@ -2863,7 +2865,7 @@ fn a_pushed_job_draws_its_tray_chip() {
              ground, the raised fill twice, and the ground each way, a rounded corner, and \
              the run color in a rounded dot; the frame is {}",
             across.map(hex),
-            left + 64,
+            column,
             down.map(hex),
             hex(corner),
             dot.map(hex),

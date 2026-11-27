@@ -64,8 +64,33 @@ pub(crate) struct Glance {
 /// the Glance under the chip read.
 pub(crate) struct TraySpan {
     pub(crate) cmd: CmdId,
-    /// The columns of the chip on the bar's row.
+    /// The columns of the cells that the chip draws over on the bar's row.
     pub(crate) cells: Range<u16>,
+    /// The physical px columns of the chip's box from the window's left edge,
+    /// where the bar drew it at the board's pixels.
+    ///
+    /// Such a box ends inside a cell, and two chips can share the cell that
+    /// holds the 3 px between them, so a press there reads the pixel.
+    pub(crate) px: Option<Range<u32>>,
+}
+
+impl TraySpan {
+    /// The window column of the cell edge nearest the chip's right edge, with
+    /// `cell_width` the physical px of a cell where the bar laid out by
+    /// pixels.
+    ///
+    /// A Glance in cells ends there, under the chip's right edge. A chip in
+    /// cells ends on a cell edge, and a chip at the board's pixels ends at
+    /// most half a cell from the nearest one.
+    pub(crate) fn right_edge(&self, cell_width: Option<u16>) -> u16 {
+        match (&self.px, cell_width) {
+            (Some(px), Some(width)) => {
+                let width = u32::from(width);
+                ((px.end + width / 2) / width) as u16
+            },
+            _ => self.cells.end,
+        }
+    }
 }
 
 /// What a Job shows of its Cmd wherever the Job draws, such as its Tray Chip.
@@ -350,7 +375,7 @@ fn scroll_to_block(ws: &mut Workspace, run: RunId, id: CmdId) {
 
 #[cfg(test)]
 mod tests {
-    use super::JobState;
+    use super::{JobState, TraySpan};
     use crate::{
         action_handlers::{
             self,
@@ -367,6 +392,7 @@ mod tests {
     use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
     use ratatui::style::{Color, Style};
     use std::{
+        ops::Range,
         path::PathBuf,
         sync::Arc,
         time::{Duration, Instant},
@@ -1326,5 +1352,27 @@ mod tests {
         action_handlers::dispatch(&mut h.stoat, &JobRerunLast);
 
         assert_eq!(h.stoat.pending_message.as_deref(), Some("still running"));
+    }
+
+    /// A Glance in cells ends on the cell edge nearest its chip's right edge.
+    /// A chip at the board's pixels that ends 1 px into the cell 79 sets that
+    /// edge before the cell, one that ends 5 px into it after the cell, and a
+    /// chip in cells sets the edge after its last cell.
+    #[test]
+    fn a_glance_ends_on_the_cell_edge_nearest_its_chip() {
+        let span = |px: Option<Range<u32>>| TraySpan {
+            cmd: CmdId::default(),
+            cells: 63..80,
+            px,
+        };
+
+        assert_eq!(
+            [
+                span(Some(570..712)).right_edge(Some(9)),
+                span(Some(570..716)).right_edge(Some(9)),
+                span(None).right_edge(Some(9)),
+            ],
+            [79, 80, 80],
+        );
     }
 }

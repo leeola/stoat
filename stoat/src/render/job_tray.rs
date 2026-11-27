@@ -7,12 +7,17 @@
 //! mark and two runs of text, and a running Job with a total draws the
 //! Progress Edge along the bottom of the pill. A plain terminal draws the chip
 //! in cells.
+//!
+//! A host that lays rows out by pixels draws the chip at the board's px, as
+//! wide as its content and its pads. Such a chip ends inside a cell, so its
+//! pill covers the cells that hold its pixels and stands in from their edges.
 
 use crate::{
     jobs::{self, JobState, JobView},
     render::{
         paint::style_rgb,
         pane::{tab_pill_panel, CHIP_PAD},
+        pixel_rows::RowMetrics,
         text, FrameCtx, TypeScale,
     },
     theme::{scope, Theme, TypeRole},
@@ -55,6 +60,23 @@ const EDGE_TOP_BAND: i16 = 16;
 /// last 2 px of the box inside the row.
 const EDGE_TOP_ROW: i16 = 13;
 
+/// The logical px of a chip's pad at each side, the board's `padding: 1px
+/// 8px`.
+const PAD_PX: u16 = 8;
+
+/// The logical px between the parts of a chip, the board's `gap: 6px`.
+const GAP_PX: u16 = 6;
+
+/// The logical px across a running Job's dot, the board's 6 px.
+const DOT_PX: u16 = 6;
+
+/// The logical px between two chips, the board's `gap: 3px`.
+const SPACE_PX: u16 = 3;
+
+/// The logical px that the tray ends inside the right edge of the bar, the
+/// bar's `padding: 0 8px`.
+const END_PX: u16 = 8;
+
 /// The colors that the chips draw in under a live scene, each as RGB.
 pub(super) struct TrayColors {
     /// The box of a chip.
@@ -83,6 +105,18 @@ impl TrayColors {
     }
 }
 
+/// Where the tray places the chip of one Job, as [`place_tray`] lays it out.
+pub(super) struct ChipPlace {
+    /// The index of the Job's view.
+    pub(super) index: usize,
+    /// The columns of the cells that the chip draws over.
+    pub(super) cells: Range<u16>,
+    /// The physical px columns of the chip's box from the window's left edge,
+    /// and the metrics they lay out by, where the chip stands at the board's
+    /// pixels.
+    pub(super) px: Option<(Range<u32>, RowMetrics)>,
+}
+
 /// One chip of the tray, the Job it shows and the cells it takes.
 struct Chip<'a> {
     view: &'a JobView,
@@ -90,6 +124,9 @@ struct Chip<'a> {
     /// Whether a newer chip follows, so the chip keeps the space between the
     /// two at its right.
     spaced: bool,
+    /// The pixel columns of the chip's box and their metrics, as
+    /// [`ChipPlace::px`] holds them.
+    px: Option<&'a (Range<u32>, RowMetrics)>,
 }
 
 impl Chip<'_> {
@@ -97,7 +134,9 @@ impl Chip<'_> {
     /// Caption scale.
     ///
     /// The cells under the pill take the bar's style, so no glyph that the bar
-    /// left there shows through it.
+    /// left there shows through it. At the board's pixels the pill stands in
+    /// from the outer edges of its first and its last cell by the px that its
+    /// box leaves of them.
     fn draw_rich(
         &self,
         colors: &TrayColors,
@@ -109,45 +148,54 @@ impl Chip<'_> {
         for x in self.rect.x..self.rect.right() {
             text::write_cell(buf, x, self.rect.y, ' ', base);
         }
-        let mut panel = tab_pill_panel(colors.fill, frame.chrome_bands);
-        if self.spaced {
-            panel.edges[1] = Edge::Inset(3);
-        }
-        panel.draw_components(self.rect, scene);
-
         let scale = frame.theme.type_scale(TypeRole::Caption);
         let view = self.view;
+        let mut panel = tab_pill_panel(colors.fill, frame.chrome_bands);
+        let parts = match self.px {
+            Some((px, m)) => {
+                let width = u32::from(m.cell[0]);
+                let off = px.start - u32::from(self.rect.x) * width;
+                let rest = u32::from(self.rect.right()) * width - px.end;
+                let logical = |px: u32| (px as f32 / m.scale).round() as u8;
+                panel.edges[1] = Edge::Inset(logical(rest));
+                panel.edges[3] = Edge::Inset(logical(off));
+                Parts::at_px(view, px.end - px.start, off, *m, scale)
+            },
+            None => {
+                if self.spaced {
+                    panel.edges[1] = Edge::Inset(3);
+                }
+                Parts::in_cells(view, self.rect.width, self.spaced, scale)
+            },
+        };
+        panel.draw_components(self.rect, scene);
+
         let state = colors.state(view.state);
         let failed = view.state == JobState::Failed;
-        let mut col = CHIP_PAD;
         match view.state {
             JobState::Running => {
                 Bar {
-                    x: col as i16,
+                    x: parts.mark as i16,
                     y: DOT_TOP,
-                    width: DOT_SIZE.0,
+                    width: parts.dot,
                     height: DOT_SIZE.1,
                     color: state,
                     radius: 3,
                     corners: 0,
                 }
                 .render(self.rect, buf, scene);
-                col += DOT_SIZE.0;
             },
             ended => {
                 let mark = ended.mark().to_string();
-                caption_run(col, &mark, state, true, scale).render(self.rect, buf, scene);
-                col += text_run::advance_sixteenths(1, scale);
+                caption_run(parts.mark, &mark, state, true, scale).render(self.rect, buf, scene);
             },
         }
 
-        col += TRAY_GAP;
         let name = match failed {
             true => colors.strong,
             false => colors.name,
         };
-        caption_run(col, &view.name, name, failed, scale).render(self.rect, buf, scene);
-        col += text_run::advance_sixteenths(view.name.chars().count(), scale);
+        caption_run(parts.name, &view.name, name, failed, scale).render(self.rect, buf, scene);
 
         let meta = chip_meta(view);
         if !meta.is_empty() {
@@ -155,19 +203,17 @@ impl Chip<'_> {
                 true => state,
                 false => colors.meta,
             };
-            caption_run(col + TRAY_GAP, &meta, color, false, scale).render(self.rect, buf, scene);
+            caption_run(parts.meta, &meta, color, false, scale).render(self.rect, buf, scene);
         }
 
-        if let Some((done, total)) = view.progress.filter(|&(_, total)| total > 0) {
-            let span = u32::from(self.rect.width) * 16 - u32::from(trailing_space(self.spaced));
-            let width = done.min(total) * span / total;
+        if let Some((x, width)) = parts.edge {
             Bar {
-                x: 0,
+                x: x as i16,
                 y: match frame.chrome_bands {
                     true => EDGE_TOP_BAND,
                     false => EDGE_TOP_ROW,
                 },
-                width: width as u16,
+                width,
                 height: EDGE_HEIGHT,
                 color: state,
                 radius: 1,
@@ -215,6 +261,100 @@ impl Chip<'_> {
     }
 }
 
+/// Where the parts of a chip draw, in sixteenths from the left of its rect.
+struct Parts {
+    mark: u16,
+    /// The width of a running Job's dot.
+    dot: u16,
+    name: u16,
+    meta: u16,
+    /// The left and the width of the Progress Edge, for a running Job with a
+    /// total.
+    edge: Option<(u16, u16)>,
+}
+
+impl Parts {
+    /// The parts of the chip of `view` over `cells` whole cells, its text at
+    /// `scale`.
+    ///
+    /// The Progress Edge spans the cells less the space that a `spaced` chip
+    /// keeps before the newer chip.
+    fn in_cells(view: &JobView, cells: u16, spaced: bool, scale: u16) -> Parts {
+        let mark = CHIP_PAD;
+        let mark_width = match view.state {
+            JobState::Running => DOT_SIZE.0,
+            _ => text_run::advance_sixteenths(1, scale),
+        };
+        let name = mark + mark_width + TRAY_GAP;
+        let meta = name + text_run::advance_sixteenths(view.name.chars().count(), scale) + TRAY_GAP;
+        let span = u32::from(cells) * 16 - u32::from(trailing_space(spaced));
+        Parts {
+            mark,
+            dot: DOT_SIZE.0,
+            name,
+            meta,
+            edge: done_share(view, span).map(|width| (0, width as u16)),
+        }
+    }
+
+    /// The parts of the chip of `view` at the board's pixels under `m`, its
+    /// box `box_px` physical px wide from `off` px into its first cell, its
+    /// text at `scale`.
+    ///
+    /// The px of the parts add up from the first cell's left edge and convert
+    /// to sixteenths once each, so each part starts on the pixel nearest its
+    /// place. The Progress Edge spans the done share of the box's px.
+    fn at_px(view: &JobView, box_px: u32, off: u32, m: RowMetrics, scale: u16) -> Parts {
+        let sizes = ChipPx::of(view, m, scale);
+        let mark = off + m.px(PAD_PX);
+        let name = mark + sizes.mark + m.px(GAP_PX);
+        let meta = name + sizes.name + m.px(GAP_PX);
+        Parts {
+            mark: m.px_cols(mark),
+            dot: m.cols(DOT_PX),
+            name: m.px_cols(name),
+            meta: m.px_cols(meta),
+            edge: done_share(view, box_px).map(|px| (m.px_cols(off), m.px_cols(px))),
+        }
+    }
+}
+
+/// The physical px of the parts of a chip at the board's pixels.
+struct ChipPx {
+    /// The mark, a running Job's dot or one glyph.
+    mark: u32,
+    name: u32,
+    /// The meta, or `None` for an empty one, which drops its gap.
+    meta: Option<u32>,
+}
+
+impl ChipPx {
+    /// The parts of the chip of `view` under `m`, each run of its text at
+    /// `scale` as wide as its advance, to the nearest px.
+    fn of(view: &JobView, m: RowMetrics, scale: u16) -> ChipPx {
+        let run = |chars: usize| {
+            let sixteenths = u32::from(text_run::advance_sixteenths(chars, scale));
+            (sixteenths * u32::from(m.cell[0]) + 8) / 16
+        };
+        let meta = chip_meta(view).chars().count();
+        ChipPx {
+            mark: match view.state {
+                JobState::Running => m.px(DOT_PX),
+                _ => run(1),
+            },
+            name: run(view.name.chars().count()),
+            meta: (meta > 0).then(|| run(meta)),
+        }
+    }
+
+    /// The px of the whole chip, its pad at each side, its parts, and a gap
+    /// between each two of them.
+    fn width(&self, m: RowMetrics) -> u32 {
+        let meta = self.meta.map_or(0, |meta| m.px(GAP_PX) + meta);
+        2 * m.px(PAD_PX) + self.mark + m.px(GAP_PX) + self.name + meta
+    }
+}
+
 /// The colors of the chips under `theme`, or `None` when one of them has no
 /// RGB value, which leaves the chips to draw in cells.
 ///
@@ -235,6 +375,56 @@ pub(super) fn tray_colors(theme: &Theme) -> Option<TrayColors> {
     })
 }
 
+/// Where the chips of `views`, oldest first, stand on the tab bar `area`, from
+/// left to right.
+///
+/// The tray ends one pad cell before the bar's right edge, or one blank cell
+/// left of `cover`, the cells of the top-right badges, where those stand on
+/// the bar's row. It takes the right half of the bar at most. Its text
+/// measures at `scale`, or in cells with no scale.
+///
+/// With `pixels` and a scale, each chip takes the board's px. The tray then
+/// ends [`END_PX`] inside the bar's right edge, or on the left edge of the
+/// blank cell before `cover`, and each chip covers the cells that hold its
+/// pixels. Two chips share a cell where the px between them lie inside one.
+pub(super) fn place_tray(
+    views: &[JobView],
+    area: Rect,
+    cover: Option<Rect>,
+    scale: Option<u16>,
+    pixels: Option<RowMetrics>,
+) -> Vec<ChipPlace> {
+    let badge = cover.filter(|cover| cover.y == area.y);
+    let right = badge.map_or(area.right().saturating_sub(1), |cover| {
+        cover.x.saturating_sub(1)
+    });
+    let floor = area.x + area.width / 2;
+    let Some((scale, m)) = scale.zip(pixels) else {
+        return tray_layout(views, right, floor, scale)
+            .into_iter()
+            .map(|(index, cells)| ChipPlace {
+                index,
+                cells,
+                px: None,
+            })
+            .collect();
+    };
+
+    let width = u32::from(m.cell[0]);
+    let right = match badge {
+        Some(_) => u32::from(right) * width,
+        None => (u32::from(area.right()) * width).saturating_sub(m.px(END_PX)),
+    };
+    tray_layout_px(views, right, u32::from(floor) * width, m, scale)
+        .into_iter()
+        .map(|(index, px)| ChipPlace {
+            index,
+            cells: (px.start / width) as u16..((px.end - 1) / width + 1) as u16,
+            px: Some((px, m)),
+        })
+        .collect()
+}
+
 /// Where the chips of `views`, oldest first, stand on the bar, from left to
 /// right, each with the index of its view and its columns.
 ///
@@ -242,7 +432,7 @@ pub(super) fn tray_colors(theme: &Theme) -> Option<TrayColors> {
 /// after it starts. Its text measures at `scale`, or in cells with no scale.
 /// The walk from the newest stops at the first chip that would start left of
 /// `floor`, so that chip and each older one stay off the bar.
-pub(super) fn tray_layout(
+fn tray_layout(
     views: &[JobView],
     right: u16,
     floor: u16,
@@ -265,6 +455,37 @@ pub(super) fn tray_layout(
     placed
 }
 
+/// Where the chips of `views`, oldest first, stand on the bar at the board's
+/// pixels under `m`, from left to right, each with the index of its view and
+/// the physical px columns of its box.
+///
+/// The newest chip ends at the pixel column `right`, and each older chip ends
+/// [`SPACE_PX`] left of the chip after it. Its text measures at `scale`. The
+/// walk from the newest stops at the first chip that would start left of the
+/// pixel column `floor`, so that chip and each older one stay off the bar.
+fn tray_layout_px(
+    views: &[JobView],
+    right: u32,
+    floor: u32,
+    m: RowMetrics,
+    scale: u16,
+) -> Vec<(usize, Range<u32>)> {
+    let mut placed = Vec::new();
+    let mut end = right;
+    for (index, view) in views.iter().enumerate().rev() {
+        let Some(start) = end
+            .checked_sub(ChipPx::of(view, m, scale).width(m))
+            .filter(|&start| start >= floor)
+        else {
+            break;
+        };
+        placed.push((index, start..end));
+        end = start.saturating_sub(m.px(SPACE_PX));
+    }
+    placed.reverse();
+    placed
+}
+
 /// Draw each chip of `placed` on the tab bar's `row`, the Job of `views`
 /// that its index names.
 ///
@@ -272,18 +493,20 @@ pub(super) fn tray_layout(
 /// outside the row in a band as the tab's does. With none it draws in cells.
 pub(super) fn draw_tray(
     views: &[JobView],
-    placed: &[(usize, Range<u16>)],
+    placed: &[ChipPlace],
     colors: Option<&TrayColors>,
     row: Rect,
     frame: FrameCtx<'_>,
     buf: &mut Buffer,
     scene: &mut ApcScene,
 ) {
-    for (index, cells) in placed {
+    for place in placed {
+        let cells = &place.cells;
         let chip = Chip {
-            view: &views[*index],
+            view: &views[place.index],
             rect: Rect::new(cells.start, row.y, cells.end - cells.start, 1),
-            spaced: index + 1 < views.len(),
+            spaced: place.index + 1 < views.len(),
+            px: place.px.as_ref(),
         };
         match colors {
             Some(colors) => chip.draw_rich(colors, frame, buf, scene),
@@ -344,6 +567,16 @@ fn chip_cells(view: &JobView, scale: Option<u16>, spaced: bool) -> u16 {
     (2 * CHIP_PAD + mark + TRAY_GAP + name + meta + trailing_space(spaced)).div_ceil(16)
 }
 
+/// The share of `span` that the progress of `view` has done, or `None` for a
+/// Job with no total.
+///
+/// A run that counts more results than it announced fills the span and no
+/// more.
+fn done_share(view: &JobView, span: u32) -> Option<u32> {
+    let (done, total) = view.progress.filter(|&(_, total)| total > 0)?;
+    Some((u64::from(done.min(total)) * u64::from(span) / u64::from(total)) as u32)
+}
+
 /// The sixteenths that a chip keeps at its right before a newer chip, none
 /// for the newest.
 fn trailing_space(spaced: bool) -> u16 {
@@ -375,13 +608,13 @@ mod tests {
         app::Stoat,
         badge::{Anchor, Badge, BadgeSource, BadgeState},
         jobs::{JobState, JobView},
-        render::badges,
+        render::{badges, pixel_rows::RowMetrics},
         run::CmdId,
         test_harness::TestHarness,
         theme::Theme,
     };
     use ratatui::{layout::Rect, style::Color};
-    use std::time::Duration;
+    use std::{ops::Range, time::Duration};
     use stoat_config::TabBarMode;
     use stoatty_protocol::{
         command::{self, Command, Edge},
@@ -664,7 +897,7 @@ mod tests {
         h.push_job("sleep 30");
         h.snapshot();
 
-        let past = |spans: &[std::ops::Range<u16>]| spans.iter().any(|span| span.end > 992);
+        let past = |spans: &[Range<u16>]| spans.iter().any(|span| span.end > 992);
         assert_eq!((past(&free), past(&h.stoat.tab_bar_spans)), (true, false));
     }
 
@@ -829,6 +1062,235 @@ mod tests {
             (
                 "\u{25cf} sleep 30 0:00".to_owned(),
                 vec![Color::Rgb(r, g, b); 17]
+            ),
+        );
+    }
+
+    /// `h` under a stoatty that lays rows out by pixels, with a 9 by 18 px cell
+    /// at the scale 1, whose tab bar takes a band.
+    fn in_pixels(mut h: TestHarness) -> TestHarness {
+        h.stoat.stoatty_protocol = PROTOCOL_VERSION;
+        h.stoat.cell_pixels = Some((9, 18));
+        h.stoat.display_scale = Some(1.0);
+        h
+    }
+
+    /// The edges of a chip's pill in a band, standing in `right` and `left` px
+    /// from the outer edges of its last and its first cell.
+    fn pill(right: u8, left: u8) -> [Edge; 4] {
+        [
+            Edge::Outset(2),
+            Edge::Inset(right),
+            Edge::Outset(2),
+            Edge::Inset(left),
+        ]
+    }
+
+    /// The pixel columns of each chip that `h` last drew.
+    fn chip_px(h: &TestHarness) -> Vec<Option<Range<u32>>> {
+        h.stoat
+            .tray_spans
+            .iter()
+            .map(|span| span.px.clone())
+            .collect()
+    }
+
+    /// At the board's pixels a chip is as wide as its content and 8 px at
+    /// each side, and it ends 8 px inside the bar.
+    ///
+    /// `sleep 30` after 41 seconds is 8 + 6 + 6 + 72 + 6 + 36 + 8 = 142 px,
+    /// the pixels 570 to 711, so its pill covers the cells 63 to 79, 3 px in
+    /// from the left of the first and 8 px from the right of the last. The
+    /// dot, the name, and the meta start 8, 20, and 98 px into the box.
+    #[test]
+    fn the_chip_of_a_running_job_takes_its_pixel_width() {
+        let mut h = in_pixels(Stoat::test());
+        h.push_job("sleep 30");
+        h.advance_clock(Duration::from_secs(41));
+        let tray = tray(&mut h);
+
+        assert_eq!(
+            (chip_px(&h), tray.boxes, tray.dots, tray.runs),
+            (
+                vec![Some(570..712)],
+                vec![(63, 17, pill(8, 3))],
+                vec![(1028, 5, 11, 6, SPECIAL)],
+                vec![
+                    ("sleep 30".to_owned(), 1049, DIM, false),
+                    ("0:41".to_owned(), 1188, MUTED, false),
+                ],
+            ),
+        );
+    }
+
+    /// At the board's pixels an older chip ends 3 px left of the newer one, so
+    /// two chips of 142 px take the pixels 425 to 566 and 570 to 711. The older
+    /// pill covers the cells 47 to 62, 2 px in from the left of the first.
+    #[test]
+    fn chips_stand_three_pixels_apart_in_pixels() {
+        let mut h = in_pixels(Stoat::test());
+        h.push_job("sleep 30");
+        h.push_job("sleep 31");
+        let tray = tray(&mut h);
+
+        assert_eq!(
+            (chip_px(&h), tray.boxes),
+            (
+                vec![Some(425..567), Some(570..712)],
+                vec![(47, 16, pill(0, 2)), (63, 17, pill(8, 3))],
+            ),
+        );
+    }
+
+    /// At the board's pixels the Progress Edge spans the done share of the
+    /// box's px from its left edge. `cargo test` at 212 of 480 is 187 px from
+    /// pixel 525, 3 px into the cell 58, and 82 px of it are done.
+    #[test]
+    fn the_progress_edge_spans_the_done_share_of_the_pixel_box() {
+        let mut h = in_pixels(Stoat::test());
+        let job = h.push_job("cargo test -p stoat");
+        let results = "test a ... ok\r\n".repeat(212);
+        h.inject_cmd_output(
+            job.cmd,
+            format!("running 480 tests\r\n{results}").as_bytes(),
+        );
+        let tray = tray(&mut h);
+
+        assert_eq!(
+            (chip_px(&h), tray.edges),
+            (vec![Some(525..712)], vec![(933, 16, 146, 2, SPECIAL)]),
+        );
+    }
+
+    /// At the board's pixels the mark of an ended chip takes the advance of
+    /// its glyph, 9 px. `sleep 30` that failed with 101 is
+    /// 8 + 9 + 6 + 72 + 6 + 72 + 8 = 181 px from pixel 531, the left edge of
+    /// the cell 59, so its mark, its name, and its meta start 8, 23, and 101 px
+    /// into the box.
+    #[test]
+    fn an_ended_chip_takes_the_advance_of_its_mark_in_pixels() {
+        let mut h = in_pixels(Stoat::test());
+        let job = h.push_job("sleep 30");
+        h.inject_cmd_done(job.cmd, 101);
+        let tray = tray(&mut h);
+
+        let cols: Vec<(String, i16)> = tray.runs.into_iter().map(|run| (run.0, run.1)).collect();
+        assert_eq!(
+            (chip_px(&h), cols),
+            (
+                vec![Some(531..712)],
+                vec![
+                    ("\u{2717}".to_owned(), 59 * 16 + 14),
+                    ("sleep 30".to_owned(), 59 * 16 + 41),
+                    ("exit 101".to_owned(), 59 * 16 + 180),
+                ],
+            ),
+        );
+    }
+
+    /// At the board's pixels each run of a chip is as wide as its advance at
+    /// the Caption scale, to the nearest px, and an empty meta drops its gap.
+    /// At 216 `cargo test` advances 135 sixteenths, 76 px, and a mark 8 px.
+    #[test]
+    fn a_chip_counts_its_pixels_at_the_caption_scale() {
+        let m = RowMetrics {
+            cell: [9, 18],
+            scale: 1.0,
+        };
+        let width = |state, time: &str| {
+            let view = JobView {
+                id: CmdId::default(),
+                state,
+                name: "cargo test".to_owned(),
+                progress: None,
+                time: time.to_owned(),
+            };
+            super::ChipPx::of(&view, m, 216).width(m)
+        };
+
+        assert_eq!(
+            [width(JobState::Running, "0:41"), width(JobState::Ok, "")],
+            [8 + 6 + 6 + 76 + 6 + 30 + 8, 8 + 8 + 6 + 76 + 8],
+        );
+    }
+
+    /// The pixel tray takes the right half of the bar at most, so the oldest
+    /// of three chips of 142 px, which would start at pixel 280, left of the
+    /// middle pixel 360, drops.
+    #[test]
+    fn the_oldest_pixel_chip_drops_past_half_the_bar() {
+        let mut h = in_pixels(Stoat::test());
+        for line in ["sleep 30", "sleep 31", "sleep 32"] {
+            h.push_job(line);
+        }
+        h.snapshot();
+
+        assert_eq!(chip_px(&h), [Some(425..567), Some(570..712)]);
+    }
+
+    /// A top-right badge on the bar's row ends the pixel tray on the left edge
+    /// of the blank cell before the badge's chip. The badges lay out over the
+    /// panes' area stretched to the window's height, which the islands' margin
+    /// keeps a column in from the right, so the chip starts at the column 153
+    /// and the tray ends at the pixel 1368 of the cell 152.
+    #[test]
+    fn a_top_right_badge_ends_the_pixel_tray_on_its_blank_cell() {
+        let mut h = in_pixels(TestHarness::with_size(160, 50));
+        h.stoat.badges.insert(Badge {
+            source: BadgeSource::Agent,
+            anchor: Anchor::TopRight,
+            state: BadgeState::Complete,
+            label: "top".to_owned(),
+            detail: None,
+        });
+        h.push_job("sleep 30");
+        let tray = tray(&mut h);
+
+        let area = Rect {
+            y: 0,
+            height: 50,
+            ..h.stoat.layout_size()
+        };
+        let cover =
+            badges::top_right_cover(&h.stoat.active_workspace().badges, &h.stoat.badges, area);
+        assert_eq!(
+            (
+                cover.map(|cover| (cover.x, cover.y)),
+                chip_px(&h),
+                tray.boxes
+            ),
+            (
+                Some((153, 0)),
+                vec![Some(1226..1368)],
+                vec![(136, 16, pill(0, 2))],
+            ),
+        );
+    }
+
+    /// At the scale 2 the chip counts physical px and states its insets in
+    /// logical px. On a 20 by 40 px cell `sleep 30` after 41 seconds is
+    /// 16 + 12 + 12 + 160 + 12 + 80 + 16 = 308 px, the pixels 1276 to 1583, 16
+    /// px into the cell 63 and 16 px short of the bar's end. The dot is 12 px,
+    /// 10 sixteenths of the cell.
+    #[test]
+    fn a_chip_at_the_scale_two_counts_physical_pixels() {
+        let mut h = in_pixels(Stoat::test());
+        h.stoat.cell_pixels = Some((20, 40));
+        h.stoat.display_scale = Some(2.0);
+        h.push_job("sleep 30");
+        h.advance_clock(Duration::from_secs(41));
+        let tray = tray(&mut h);
+
+        assert_eq!(
+            (chip_px(&h), tray.boxes, tray.dots, tray.runs),
+            (
+                vec![Some(1276..1584)],
+                vec![(63, 17, pill(8, 8))],
+                vec![(1034, 5, 10, 6, SPECIAL)],
+                vec![
+                    ("sleep 30".to_owned(), 1053, DIM, false),
+                    ("0:41".to_owned(), 1190, MUTED, false),
+                ],
             ),
         );
     }

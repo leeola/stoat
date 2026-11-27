@@ -8038,6 +8038,79 @@ fn a_pixel_run_pane_declares_its_pointer_region() {
     );
 }
 
+/// A tray at the board's pixels declares a region with no page in the tray's
+/// pool, over the band's two rows from the first cell of its first chip to the
+/// last cell of its last, then asks for the pixel pointer, and the next frame
+/// sends nothing for the pool. A tray in cells declares none, and so do a
+/// terminal before the pool pointer and a session with no window socket.
+#[test]
+fn the_tray_declares_its_pointer_region() {
+    use stoatty_protocol::command::{Command, PoolKind, PoolPointerCommand, PoolRegionCommand};
+
+    let pool = crate::smooth_scroll::non_pane_pool::JOB_TRAY;
+    let emits = |protocol: u32, cell: Option<(u16, u16)>, socket: bool| {
+        let mut h = Stoat::test();
+        h.stoat.stoatty_protocol = protocol;
+        h.stoat.cell_pixels = cell;
+        h.stoat.display_scale = Some(1.0);
+        h.stoat.window_ipc_connected = socket;
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+        h.stoat.set_apc_tx(tx);
+        h.push_job("sleep 30");
+        h.push_job("sleep 31");
+        h.snapshot();
+
+        let tray_commands = |bytes: &[u8]| {
+            command::decode_stream(bytes)
+                .into_iter()
+                .filter(|command| match command {
+                    Command::PoolRegion(region) => region.pool == pool,
+                    Command::PoolPointer(pointer) => pointer.pool == pool,
+                    _ => false,
+                })
+                .collect::<Vec<_>>()
+        };
+        let first = tray_commands(&emit_raw(&mut h, &mut rx));
+        let second = tray_commands(&emit_raw(&mut h, &mut rx));
+        [first, second]
+    };
+
+    let version = stoatty_protocol::PROTOCOL_VERSION;
+    let before_pointer = POOL_POINTER_PROTOCOL - 1;
+    let region = PoolRegionCommand {
+        pool,
+        top: 0,
+        left: 47,
+        width: 33,
+        height: 2,
+        window: 0,
+        kind: PoolKind::Grid,
+        dim: 0,
+        resident: false,
+        inset: [0, 0],
+    };
+    assert_eq!(
+        [
+            emits(version, Some((9, 18)), true),
+            emits(version, None, true),
+            emits(before_pointer, Some((9, 18)), true),
+            emits(version, Some((9, 18)), false),
+        ],
+        [
+            [
+                vec![
+                    Command::PoolRegion(region),
+                    Command::PoolPointer(PoolPointerCommand { pool, pixels: true }),
+                ],
+                Vec::new(),
+            ],
+            [Vec::new(), Vec::new()],
+            [Vec::new(), Vec::new()],
+            [Vec::new(), Vec::new()],
+        ],
+    );
+}
+
 /// A pixel pick list draws on the live grid with no page, so the palette's
 /// pool declares a region with no page over the list and asks for the pixel
 /// pointer, which a press on the list reads.

@@ -108,6 +108,9 @@ pub(crate) mod non_pane_pool {
     /// It keys the thumb's change gate, so a strip that the changes view places
     /// a thumb on and an editor feeds after it gets the editor's thumb back.
     pub(crate) const DIFF_CHANGES_THUMB: u32 = BASE + 14;
+    /// The Job Tray of the tab bar at the board's pixels, a region with no
+    /// page where a press on a chip reports the pointer's pixel.
+    pub(crate) const JOB_TRAY: u32 = BASE + 15;
     /// First id of the per-window status-bar partition. A detached pane's status
     /// row pools at `WINDOW_STATUS + pane.index`, so the partition is offset far
     /// enough above the fixed non-pane ids that pane indices never collide.

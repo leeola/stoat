@@ -958,6 +958,13 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
         true => run_pointer_regions(stoat),
         false => Vec::new(),
     };
+    // A Tray Chip at the board's pixels ends inside a cell, and two chips can
+    // share the cell between them, so the tray's pool takes a region with no
+    // page over its cells, where a press reports its pixel over the socket.
+    let tray_pointer = (stoat.window_ipc_connected
+        && stoat.stoatty_protocol >= POOL_POINTER_PROTOCOL)
+        .then(|| tray_pointer_region(stoat))
+        .flatten();
     let palette_list = pools_palette
         .then_some(stoat.command_palette.as_ref())
         .flatten()
@@ -1126,7 +1133,12 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
     let mut active: Vec<u32> = panes.iter().map(|(pool, _, _)| *pool).collect();
     active.extend(terminal_panes.iter().map(|pane| pane.region.pool));
     active.extend(stack_panes.iter().map(|(pool, _, _)| *pool));
-    active.extend(run_pointers.iter().map(|region| region.pool));
+    active.extend(
+        run_pointers
+            .iter()
+            .chain(&tray_pointer)
+            .map(|region| region.pool),
+    );
     // Each detached pane also keeps a one-row status pool alive.
     for (pool, _, region) in &panes {
         if region.window != 0 {
@@ -1193,7 +1205,7 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
     stoat
         .terminal_pages
         .retain(|pool, _| terminal_panes.iter().any(|pane| pane.region.pool == *pool));
-    for region in run_pointers {
+    for region in run_pointers.into_iter().chain(tray_pointer) {
         stoat.smooth_scroll.declare_pointer_region(&mut out, region);
     }
 
@@ -3218,6 +3230,30 @@ fn run_pointer_regions(stoat: &Stoat) -> Vec<PoolRegionCommand> {
             })
         })
         .collect()
+}
+
+/// The pointer region of the Job Tray where the tab bar last drew its chips at
+/// the board's pixels, over the bar's rows from the first cell of the first
+/// chip to the last cell of the last.
+///
+/// The tray fills no page, so its pool gives a press the pixel from the left
+/// edge of the first chip's first cell.
+fn tray_pointer_region(stoat: &Stoat) -> Option<PoolRegionCommand> {
+    let spans = &stoat.tray_spans;
+    let first = spans.first().filter(|span| span.px.is_some())?;
+    let last = spans.last()?;
+    Some(PoolRegionCommand {
+        pool: crate::smooth_scroll::non_pane_pool::JOB_TRAY,
+        top: stoat.size().y,
+        left: first.cells.start,
+        width: last.cells.end - first.cells.start,
+        height: stoat.tab_bar_rows(),
+        window: 0,
+        kind: PoolKind::Grid,
+        dim: 0,
+        resident: false,
+        inset: [0, 0],
+    })
 }
 
 /// Retire every pane pool whose owner changed since the last pass, and record

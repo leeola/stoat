@@ -19,7 +19,7 @@ use crate::{
     display_map::DisplaySnapshot,
     editor_state::{EditorId, EditorState, ScrollGlide},
     host::ClipboardKind,
-    jobs::{self, TraySpan},
+    jobs,
     keymap::WheelDirection,
     keymap_state::{active_modal, ActiveModal, StoatKeymapState},
     merge_view::{ChunkState, Side},
@@ -922,7 +922,7 @@ fn press_git_status_row(stoat: &mut Stoat, mouse: MouseEvent) -> UpdateEffect {
 fn press_over_glance(stoat: &mut Stoat, mouse: MouseEvent) -> UpdateEffect {
     let bar = stoat.size();
     let on_bar = (bar.y..bar.y + stoat.tab_bar_rows()).contains(&mouse.row);
-    match chip_at(&stoat.tray_spans, mouse.column).filter(|_| on_bar) {
+    match chip_at(stoat, mouse.column).filter(|_| on_bar) {
         Some(cmd) => jobs::show_glance(stoat, cmd),
         None => stoat.job_glance = None,
     }
@@ -2028,7 +2028,7 @@ fn handle_tab_bar_mouse(stoat: &mut Stoat, mouse: MouseEvent) -> Option<UpdateEf
     }
 
     if button == MouseButton::Left
-        && let Some(cmd) = chip_at(&stoat.tray_spans, mouse.column)
+        && let Some(cmd) = chip_at(stoat, mouse.column)
     {
         jobs::show_glance(stoat, cmd);
         return Some(UpdateEffect::Redraw);
@@ -2049,11 +2049,35 @@ fn tab_at(spans: &[Range<u16>], column: u16) -> Option<usize> {
         .position(|span| (u32::from(span.start)..u32::from(span.end)).contains(&center))
 }
 
-/// The Cmd of the Job whose Tray Chip covers the window column `column`.
-fn chip_at(spans: &[TraySpan], column: u16) -> Option<CmdId> {
+/// The Cmd of the Job whose Tray Chip a press in the window column `column`
+/// names.
+///
+/// A chip that the bar drew at the board's pixels holds the pixel column of
+/// the press. That is the pixel that the tray's pool reports from the left
+/// edge of its region, or the middle pixel of `column` with no report. A press
+/// in the 3 px between two chips names none. A chip in cells holds `column`.
+fn chip_at(stoat: &Stoat, column: u16) -> Option<CmdId> {
+    let spans = &stoat.tray_spans;
+    let pixel = spans
+        .first()
+        .filter(|first| first.px.is_some())
+        .zip(stoat.pixel_rows())
+        .map(|(first, m)| {
+            let width = u32::from(m.cell[0]);
+            let reported = stoat
+                .pool_pointer
+                .filter(|&(pool, ..)| pool == crate::smooth_scroll::non_pane_pool::JOB_TRAY);
+            match reported {
+                Some((_, x, _)) => u32::from(first.cells.start) * width + u32::from(x),
+                None => u32::from(column) * width + width / 2,
+            }
+        });
     spans
         .iter()
-        .find(|span| span.cells.contains(&column))
+        .find(|span| match (&span.px, pixel) {
+            (Some(px), Some(pixel)) => px.contains(&pixel),
+            _ => span.cells.contains(&column),
+        })
         .map(|span| span.cmd)
 }
 
@@ -5460,6 +5484,61 @@ mod tests {
             named.push(h.stoat.job_glance.as_ref().map(|glance| glance.cmd));
         }
         assert_eq!(named, [Some(older.cmd), Some(newer.cmd)]);
+    }
+
+    /// A harness whose tray holds the chips of `sleep 30` and `sleep 31` at
+    /// the board's pixels, 425 to 566 and 570 to 711, with the Cmds of their
+    /// Jobs. The tray's region starts at pixel 423, the left edge of the cell
+    /// 47.
+    fn pixel_chips() -> (crate::test_harness::TestHarness, CmdId, CmdId) {
+        let mut h = crate::test_harness::TestHarness::default();
+        h.stoat.stoatty_protocol = stoatty_protocol::PROTOCOL_VERSION;
+        h.stoat.cell_pixels = Some((9, 18));
+        h.stoat.display_scale = Some(1.0);
+        let older = h.push_job("sleep 30").cmd;
+        let newer = h.push_job("sleep 31").cmd;
+        h.snapshot();
+        (h, older, newer)
+    }
+
+    /// A press on a chip at the board's pixels reads the pixel that the tray's
+    /// pool reports. The pixels 143, 147, and 145 of its region are the last
+    /// pixel of the older chip, the first pixel of the newer chip, and one of
+    /// the 3 px between the two, which names no chip and closes the Glance.
+    #[test]
+    fn a_press_on_a_chip_reads_the_pointer_s_pixel() {
+        let (mut h, older, newer) = pixel_chips();
+        let mut named = Vec::new();
+        for (col, x) in [(62, 143), (63, 147), (63, 145)] {
+            let press = WindowIpcEvent::PoolMouse {
+                pool: crate::smooth_scroll::non_pane_pool::JOB_TRAY,
+                kind: MouseKind::Press(IpcMouseButton::Left),
+                col,
+                row: 0,
+                cell_col: x,
+                cell_row: 9,
+                mods: 0,
+            };
+            crate::app::deliver_window_event(&mut h.stoat, press);
+            named.push(h.stoat.job_glance.as_ref().map(|glance| glance.cmd));
+        }
+
+        assert_eq!(named, [Some(older), Some(newer), None]);
+    }
+
+    /// With no pixel report, a press on a chip at the board's pixels reads the
+    /// middle pixel of its cell. The cell 63 holds the 3 px between the chips
+    /// and the first 6 px of the newer chip, and its middle pixel 571 is the
+    /// newer chip's.
+    #[test]
+    fn a_chip_press_with_no_pixel_report_takes_the_middle_of_its_cell() {
+        let (mut h, _, newer) = pixel_chips();
+        left_press(&mut h, 63, 0);
+
+        assert_eq!(
+            h.stoat.job_glance.as_ref().map(|glance| glance.cmd),
+            Some(newer),
+        );
     }
 
     /// A press on a row of the Job List selects it, and a second press on the

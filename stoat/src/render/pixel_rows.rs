@@ -171,8 +171,13 @@ impl RowMetrics {
 
     /// The sixteenths of a cell's width nearest `logical` board px.
     pub(crate) fn cols(&self, logical: u16) -> u16 {
+        self.px_cols(self.px(logical))
+    }
+
+    /// The sixteenths of a cell's width nearest `px` physical px.
+    pub(crate) fn px_cols(&self, px: u32) -> u16 {
         let width = u32::from(self.cell[0]);
-        ((self.px(logical) * 16 + width / 2) / width) as u16
+        ((px * 16 + width / 2) / width) as u16
     }
 
     /// The sixteenths of a cell's height nearest `logical` board px.
