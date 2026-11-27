@@ -150,12 +150,11 @@ pub(crate) fn file_finder_layout(
 ///
 /// The list takes the widest label among the rows on show, at least 30
 /// columns, with its pad and mark cells, as [`list_columns`] gives them. The
-/// preview takes one and a half times the list, and at least `preview_min`
-/// columns. The plate does not narrow below [`FileFinder::plate_width`], the
-/// widest plate the finder has drawn since it opened, and it stops one column
-/// inside each side of `area`. `zoom` steps then move the width by a tenth of
-/// the area each. The height follows the list's rows as the height of
-/// [`file_finder_layout`] does.
+/// preview takes `preview_min` columns. The plate does not narrow below
+/// [`FileFinder::plate_width`], the widest plate the finder has drawn since it
+/// opened, and it stops one column inside each side of `area`. `zoom` steps
+/// then move the width by a tenth of the area each. The height follows the
+/// list's rows as the height of [`file_finder_layout`] does.
 ///
 /// A query that matches no file keeps this box, so the query row stays in
 /// place while a query loses and regains its matches.

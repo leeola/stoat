@@ -2184,9 +2184,9 @@ mod tests {
     }
 
     /// The plate fits the widest label on show. The query `zz` shows the
-    /// 66-char path, so the list grows to 69 columns and the preview to one and
-    /// a half times it. Clearing the query fits the list back to 33 columns,
-    /// and the preview takes the rest of the kept plate.
+    /// 66-char path, so the list grows to 69 columns and the preview keeps its
+    /// 100. Clearing the query fits the list back to 33 columns, and the
+    /// preview takes the rest of the kept plate.
     #[test]
     fn the_finder_plate_grows_with_its_widest_row_and_keeps_its_width() {
         let mut h = fitted_plate_harness();
@@ -2203,8 +2203,8 @@ mod tests {
             [open, grown, plate_widths(&h)],
             [
                 (136, 33, Some(100)),
-                (176, 69, Some(104)),
-                (176, 33, Some(140)),
+                (172, 69, Some(100)),
+                (172, 33, Some(136)),
             ],
         );
     }
@@ -2219,7 +2219,7 @@ mod tests {
             h.type_keys("down");
         }
 
-        assert_eq!((open, plate_widths(&h)), (136, (176, 69, Some(104))));
+        assert_eq!((open, plate_widths(&h)), (136, (172, 69, Some(100))));
     }
 
     /// The finder keeps its widest plate only while it stays open, so the next
@@ -2236,7 +2236,7 @@ mod tests {
         h.settle();
         h.stoat.render();
 
-        assert_eq!((grown, plate_widths(&h).0), (176, 136));
+        assert_eq!((grown, plate_widths(&h).0), (172, 136));
     }
 
     /// A dragged share sets the list while the finder stays open, and the

@@ -462,10 +462,9 @@ pub(crate) fn doc_rows(pixels: Option<RowMetrics>) -> u16 {
 ///
 /// The plate follows the rule of the finder's plate. The list takes the widest
 /// label among the rows on show, at least 30 columns, with its pad and mark
-/// cells, and the preview takes one and a half times the list and at least
-/// `preview_min` columns. The plate does not narrow below
-/// [`CommandPalette::arg_plate_width`], the widest plate the picker has drawn
-/// since the palette opened, and it stops one column inside each side of
+/// cells. The preview takes `preview_min` columns. The plate does not narrow
+/// below [`CommandPalette::arg_plate_width`], the widest plate the picker has
+/// drawn since the palette opened, and it stops one column inside each side of
 /// `area`. `zoom` steps then move the width by a tenth of the area each.
 ///
 /// The height is the height of [`palette_filter_layout`]. The palette's

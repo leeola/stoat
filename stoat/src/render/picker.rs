@@ -2671,13 +2671,11 @@ pub(crate) fn list_columns(widest: u16) -> u16 {
 
 /// The width of a plate fitted to a list of `list` columns.
 ///
-/// The preview beside the list takes one and a half times the list, and at
-/// least `preview_min` columns. The plate holds the list, the separator column,
-/// the preview, and its two border columns.
+/// The plate holds the list, the separator column, a preview of `preview_min`
+/// columns, and its two border columns.
 pub(crate) fn fitted_plate_width(list: u16, preview_min: u16) -> u16 {
-    let list = u32::from(list);
-    let preview = (list * 3).div_ceil(2).max(u32::from(preview_min));
-    u16::try_from(list + 1 + preview + 2).unwrap_or(u16::MAX)
+    let plate = u32::from(list) + 1 + u32::from(preview_min) + 2;
+    u16::try_from(plate).unwrap_or(u16::MAX)
 }
 
 /// The fewest columns a fitted preview takes.
@@ -3800,19 +3798,19 @@ mod tests {
     }
 
     /// A fitted list holds its widest label, at least 30 columns, and its pad
-    /// and mark cells. The plate holds the list, the separator, the larger of
-    /// one and a half lists and the preview's minimum, and two borders. A
-    /// scaled preview's minimum fits 100 text cells and the ruled number column
-    /// of 5 px cells into 9 px grid columns.
+    /// and mark cells. The plate holds the list, the separator, the preview's
+    /// minimum, and two borders, so a wider list widens the plate by its own
+    /// columns only. A scaled preview's minimum fits 100 text cells and the
+    /// ruled number column of 5 px cells into 9 px grid columns.
     #[test]
-    fn a_fitted_plate_holds_its_list_and_the_larger_preview() {
+    fn a_fitted_plate_holds_its_list_and_its_preview() {
         assert_eq!(
             (
                 [list_columns(0), list_columns(75)],
                 [(33, 59), (47, 59), (33, 100)].map(|(list, min)| fitted_plate_width(list, min)),
                 [preview_min_columns(None), preview_min_columns(Some((5, 9)))],
             ),
-            ([33, 78], [95, 121, 136], [100, 59]),
+            ([33, 78], [95, 109, 136], [100, 59]),
         );
     }
 

@@ -8737,7 +8737,7 @@ mod tests {
     }
 
     /// The argument picker's plate fits the widest label on show. The tail
-    /// `zz` shows the 66-char path, so the plate grows from 136 to 176
+    /// `zz` shows the 66-char path, so the plate grows from 136 to 172
     /// columns. Clearing the tail fits the list back to 33 columns, and the
     /// plate keeps its width.
     #[test]
@@ -8754,7 +8754,7 @@ mod tests {
 
         assert_eq!(
             [open, grown, palette_plate(&h)],
-            [(136, 33), (176, 69), (176, 33)],
+            [(136, 33), (172, 69), (172, 33)],
         );
     }
 
@@ -8772,7 +8772,7 @@ mod tests {
         h.settle();
         h.stoat.render();
 
-        assert_eq!((grown, palette_plate(&h).0), (176, 136));
+        assert_eq!((grown, palette_plate(&h).0), (172, 136));
     }
 
     /// The zoom steps walk the box on show, so the argument picker's zoom box
