@@ -7,7 +7,7 @@ pub(crate) mod chrome;
 pub(crate) mod cmd_line;
 pub(crate) mod code_action;
 pub(crate) mod code_search;
-pub(crate) mod command_palette;
+pub mod command_palette;
 pub(crate) mod commit_patch;
 pub(crate) mod commit_picker;
 pub(crate) mod commit_preview;
@@ -20,9 +20,9 @@ pub(crate) mod diagnostics_picker;
 pub(crate) mod diff_changes;
 pub(crate) mod dock;
 pub(crate) mod editor;
-pub(crate) mod file_finder;
+pub mod file_finder;
 pub(crate) mod git_status;
-pub(crate) mod help;
+pub mod help;
 pub(crate) mod hints;
 pub(crate) mod hover;
 pub(crate) mod job_glance;
@@ -34,7 +34,7 @@ pub(crate) mod paint;
 pub(crate) mod pane;
 pub(crate) mod pane_cache;
 pub(crate) mod pane_finder;
-pub(crate) mod picker;
+pub mod picker;
 pub(crate) mod pixel_rows;
 pub(crate) mod popout;
 pub(crate) mod quit_all_confirm;
@@ -108,6 +108,8 @@ use ratatui::{
     widgets::StatefulWidget,
 };
 use slotmap::SlotMap;
+#[cfg(feature = "test-support")]
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::{
     borrow::Cow,
     collections::{hash_map::DefaultHasher, HashMap},
@@ -184,21 +186,47 @@ const BADGE_CHROME: PopoverChrome = PopoverChrome {
 
 /// The text_run scale, in 256ths of a cell, of chrome text in a role.
 ///
-/// The test build answers a full cell for every role. The test compositor
-/// draws one glyph per cell, so full-cell text keeps composited geometry
-/// exact against the fallback layout the harness scans and snapshots. Every
-/// other build answers the theme's scale.
+/// The test build answers a full cell for every role, and so does a build with
+/// the `test-support` feature once a harness calls `draw_type_at_full_cell`.
+/// The test compositor draws one glyph per cell, so full-cell text keeps
+/// composited geometry exact against the fallback layout the harness scans and
+/// snapshots. Every other build answers the theme's scale.
+///
+/// The feature's switch is a flag rather than the feature itself, because a
+/// workspace test run unifies the feature into the `stoat` binary it builds.
+/// The flag is process-wide, since every test of a test binary draws through
+/// the one-glyph-per-cell compositor, and only a harness sets it, so that
+/// binary draws the theme's scales.
 ///
 /// It is a trait here rather than a method of the theme because `cfg(test)`
-/// holds only in the crate under test, and the tests that draw through the
-/// harness are this crate's.
+/// holds only in the crate under test, and this crate's own tests draw through
+/// the harness.
 pub(crate) trait TypeScale {
     fn type_scale(&self, role: crate::theme::TypeRole) -> u16;
+}
+
+/// Whether every role draws at a full cell, as a harness outside this crate's
+/// test build asks through [`draw_type_at_full_cell`].
+#[cfg(feature = "test-support")]
+static FULL_CELL_TYPE: AtomicBool = AtomicBool::new(false);
+
+/// Draw every role at a full cell for the rest of the process, as this crate's
+/// test build draws it.
+///
+/// A harness calls this as it builds a `Stoat`, so the tests of a crate outside
+/// this one see the full-cell geometry that this crate's tests see.
+#[cfg(feature = "test-support")]
+pub fn draw_type_at_full_cell() {
+    FULL_CELL_TYPE.store(true, Ordering::Relaxed);
 }
 
 impl TypeScale for crate::theme::Theme {
     fn type_scale(&self, role: crate::theme::TypeRole) -> u16 {
         if cfg!(test) {
+            return crate::theme::FULL_CELL_SCALE;
+        }
+        #[cfg(feature = "test-support")]
+        if FULL_CELL_TYPE.load(Ordering::Relaxed) {
             return crate::theme::FULL_CELL_SCALE;
         }
 

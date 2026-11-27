@@ -282,7 +282,7 @@ impl PaletteFilterLayout {
 ///
 /// Shared by the renderer, the hit test, and the smooth-scroll emit, so the
 /// pooled list region matches the painted one exactly.
-pub(crate) struct PaletteArgLayout {
+pub struct PaletteArgLayout {
     /// The bordered modal box.
     pub(crate) modal: Rect,
     /// Inside the border, the Cmd Line, the row under it, and the body.

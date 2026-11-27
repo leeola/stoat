@@ -59,7 +59,7 @@ pub(crate) struct StatusFilename {
     pub(crate) rendered: String,
 }
 
-pub(crate) struct EditorState {
+pub struct EditorState {
     pub(crate) buffer_id: BufferId,
     /// This editor's input mode (`normal`, `insert`, `select`, ...). Held
     /// per-editor, so a primary mode survives focus moving to another pane and

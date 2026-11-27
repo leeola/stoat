@@ -1,7 +1,9 @@
 pub(crate) mod apc;
-pub(crate) mod editor;
-pub(crate) mod keys;
+pub mod editor;
+pub mod keys;
 
+#[cfg(feature = "test-support")]
+pub use crate::render::draw_type_at_full_cell;
 use crate::{
     app::{Stoat, UpdateEffect},
     buffer::BufferId,
@@ -46,7 +48,7 @@ const DEFAULT_HEIGHT: u16 = 24;
 
 /// `(sha, message, files)` triple consumed by [`TestHarness::seed_linear_history`].
 /// `files` is itself a slice of `(rel_path, content)` pairs.
-pub(crate) type CommitSpec<'a> = (&'a str, &'a str, &'a [(&'a str, &'a str)]);
+pub type CommitSpec<'a> = (&'a str, &'a str, &'a [(&'a str, &'a str)]);
 
 /// Passes [`TestHarness::settle`] allows before it calls the run loop stuck.
 ///
@@ -66,9 +68,9 @@ pub(crate) const COMMITS_NOW_EPOCH: i64 = 1_700_000_000 + 3 * 86_400 + 3_600;
 
 /// A Cmd that [`TestHarness::submit_run`] started, and the fake session its
 /// process runs on.
-pub(crate) struct CmdHandle {
-    pub(crate) cmd: crate::run::CmdId,
-    pub(crate) session: Arc<crate::host::FakeTerminalSession>,
+pub struct CmdHandle {
+    pub cmd: crate::run::CmdId,
+    pub session: Arc<crate::host::FakeTerminalSession>,
 }
 
 pub struct TestHarness {
@@ -97,7 +99,9 @@ pub struct TestHarness {
 /// The lighter counterpart to [`TestHarness`], for tests that only dispatch
 /// actions and read editor state, with no file, git, or LSP interaction to
 /// fake. The resize is what gives the panes an area to lay out in.
-pub(crate) fn stoat() -> Stoat {
+pub fn stoat() -> Stoat {
+    #[cfg(feature = "test-support")]
+    draw_type_at_full_cell();
     let scheduler = Arc::new(TestScheduler::new());
     let mut stoat = Stoat::new(
         scheduler.executor(),
@@ -114,7 +118,9 @@ pub(crate) fn stoat() -> Stoat {
 /// For the tests that drive background work such as an index build by hand,
 /// through `run_until_parked` and `advance_clock`. It sends no resize, unlike
 /// [`stoat`].
-pub(crate) fn stoat_rooted(git_root: &str) -> (Stoat, Arc<TestScheduler>) {
+pub fn stoat_rooted(git_root: &str) -> (Stoat, Arc<TestScheduler>) {
+    #[cfg(feature = "test-support")]
+    draw_type_at_full_cell();
     let scheduler = Arc::new(TestScheduler::new());
     let mut stoat = Stoat::new(
         scheduler.executor(),
@@ -126,7 +132,7 @@ pub(crate) fn stoat_rooted(git_root: &str) -> (Stoat, Arc<TestScheduler>) {
 }
 
 /// `bytes` as one gzip member, for a test that opens a compressed file.
-pub(crate) fn gzip(bytes: &[u8]) -> Vec<u8> {
+pub fn gzip(bytes: &[u8]) -> Vec<u8> {
     let mut out = Vec::new();
     GzEncoder::new(bytes, Compression::default())
         .read_to_end(&mut out)
@@ -140,6 +146,8 @@ impl TestHarness {
     }
 
     pub(crate) fn new_with_settings(width: u16, height: u16, mut settings: Settings) -> Self {
+        #[cfg(feature = "test-support")]
+        draw_type_at_full_cell();
         // The harness frames keep the top row for the panes until a second tab
         // opens, so their snapshots and row arithmetic hold under the shipped
         // `always`. A test that names a mode keeps it, since these settings
@@ -485,7 +493,7 @@ impl TestHarness {
     /// `covered_diff` records that the covered editor showed the diff view, so
     /// a close returns to it. The tally and the excerpts' diff maps are still
     /// on the pool, so a test settles when it wants the excerpts folded.
-    pub(crate) fn cover_with_diff_changes(
+    pub fn cover_with_diff_changes(
         &mut self,
         covered_diff: bool,
     ) -> crate::diff_changes::DiffChangesId {
@@ -522,7 +530,7 @@ impl TestHarness {
     /// `right` in a split to its right, which holds the focus.
     ///
     /// Each argument is a `(path, text)` pair.
-    pub(crate) fn open_side_by_side(&mut self, left: (&str, &str), right: (&str, &str)) {
+    pub fn open_side_by_side(&mut self, left: (&str, &str), right: (&str, &str)) {
         self.fake_fs.insert_file(left.0, left.1);
         self.fake_fs.insert_file(right.0, right.1);
         self.open_file(std::path::Path::new(left.0));
@@ -574,18 +582,18 @@ impl TestHarness {
     /// The scheduler runs them inline here, so a job's effects are the same as a
     /// spawned future's. This is the only way a test tells apart work that was
     /// kept off the run loop from work that was not.
-    pub(crate) fn blocking_calls(&self) -> usize {
+    pub fn blocking_calls(&self) -> usize {
         self.scheduler.blocking_calls()
     }
 
     /// Queue later blocking jobs instead of running them inline, until
     /// [`Self::run_held_blocking`] runs them.
-    pub(crate) fn hold_blocking(&self) {
+    pub fn hold_blocking(&self) {
         self.scheduler.hold_blocking();
     }
 
     /// Run the held blocking jobs, and run later ones inline again.
-    pub(crate) fn run_held_blocking(&self) {
+    pub fn run_held_blocking(&self) {
         self.scheduler.run_held_blocking();
     }
 
@@ -612,7 +620,7 @@ impl TestHarness {
     /// A wake from before the run is drained first, so only a task that lands
     /// during the run counts. A test polls a task before it lands and then
     /// asks this whether the landing asks for the pass that collects it.
-    pub(crate) fn wakes_when_parked(&mut self, notify: Arc<Notify>) -> bool {
+    pub fn wakes_when_parked(&mut self, notify: Arc<Notify>) -> bool {
         let _ = notify.notified().now_or_never();
         self.run_until_parked();
         notify.notified().now_or_never().is_some()
@@ -639,7 +647,7 @@ impl TestHarness {
 
     /// Want `buffer_id`'s hunks on the pool, as a diff open does, and settle
     /// until they land.
-    pub(crate) fn settle_diff_map(&mut self, buffer_id: BufferId) {
+    pub fn settle_diff_map(&mut self, buffer_id: BufferId) {
         crate::action_handlers::review::ensure_diff_map(&mut self.stoat, buffer_id, None);
         self.settle();
     }
@@ -648,7 +656,7 @@ impl TestHarness {
     ///
     /// One pass spawns the blocking jobs, [`Self::settle`] runs them, and the
     /// second pass installs the resulting diff maps. Requires `diff_warm_auto`.
-    pub(crate) fn settle_diff_jobs(&mut self) {
+    pub fn settle_diff_jobs(&mut self) {
         // A diff waits out a settle window before it is spawned, so the first
         // drive only opens that window. The clock has to clear it before the
         // drive that spawns the job.
@@ -669,13 +677,13 @@ impl TestHarness {
 
     /// The most recently rendered terminal buffer, styles included. Populated by
     /// [`Self::snapshot`] and the other capture paths, so call one first.
-    pub(crate) fn rendered_buffer(&self) -> &Buffer {
+    pub fn rendered_buffer(&self) -> &Buffer {
         self.last_buffer.as_ref().expect("no rendered buffer yet")
     }
 
     /// The last rendered frame as plain text, rows joined by newlines, for
     /// targeted assertions on painted content.
-    pub(crate) fn rendered_text(&self) -> String {
+    pub fn rendered_text(&self) -> String {
         buffer_to_text(self.rendered_buffer())
     }
 
@@ -779,7 +787,7 @@ impl TestHarness {
     /// Answers the Cmd that the submit pushed and its session. A submit that
     /// starts no process, such as a `cd`, takes the session back from the
     /// queue and answers the default id.
-    pub(crate) fn submit_run(&mut self, text: &str) -> CmdHandle {
+    pub fn submit_run(&mut self, text: &str) -> CmdHandle {
         use crate::pane::View;
         let ws = self.stoat.active_workspace();
         let View::Run(id) = ws.panes.pane(ws.panes.focus()).view else {
@@ -813,7 +821,7 @@ impl TestHarness {
     /// moves the Cmd that the submit started to the Job Tray.
     ///
     /// Opens a Run pane first when the focused pane shows none.
-    pub(crate) fn push_job(&mut self, line: &str) -> CmdHandle {
+    pub fn push_job(&mut self, line: &str) -> CmdHandle {
         use crate::pane::View;
         let ws = self.stoat.active_workspace();
         if !matches!(ws.panes.pane(ws.panes.focus()).view, View::Run(_)) {
@@ -863,7 +871,7 @@ impl TestHarness {
 
     /// The status of the Cmd `cmd` of the active workspace as its Run Block's
     /// header reads it, the texts of its parts one space apart.
-    pub(crate) fn cmd_status(&self, cmd: crate::run::CmdId) -> String {
+    pub fn cmd_status(&self, cmd: crate::run::CmdId) -> String {
         let ws = self.stoat.active_workspace();
         let parts =
             crate::render::run_pane::status_parts(&ws.cmds[cmd], &ws.terms, &self.stoat.theme);
@@ -985,7 +993,7 @@ impl TestHarness {
     /// Insert a fresh workspace into the app's slot map and return its id.
     /// The new workspace is not automatically made active; call
     /// [`Self::set_active_workspace`] to switch.
-    pub(crate) fn create_workspace(&mut self) -> crate::workspace::WorkspaceId {
+    pub fn create_workspace(&mut self) -> crate::workspace::WorkspaceId {
         let mut ws = crate::workspace::Workspace::new(
             std::path::PathBuf::new(),
             &self.stoat.executor,
@@ -997,14 +1005,14 @@ impl TestHarness {
         id
     }
 
-    pub(crate) fn set_active_workspace(&mut self, id: crate::workspace::WorkspaceId) {
+    pub fn set_active_workspace(&mut self, id: crate::workspace::WorkspaceId) {
         self.stoat.active_workspace = id;
     }
 
     /// Seed a file in the harness' fake filesystem under `/test/<name>`
     /// and return its absolute path. All open-file / read paths through
     /// [`Stoat`] route through [`crate::host::FakeFs`].
-    pub(crate) fn write_file(&self, name: &str, content: &str) -> std::path::PathBuf {
+    pub fn write_file(&self, name: &str, content: &str) -> std::path::PathBuf {
         let path = std::path::PathBuf::from("/test").join(name);
         self.fake_fs.insert_file(&path, content.as_bytes());
         path
@@ -1013,7 +1021,7 @@ impl TestHarness {
     /// Seed an N-line text file (`line 001`, `line 002`, ...) into the
     /// fake filesystem at `/test/<name>`. Convenient for scenarios that
     /// need a file long enough to scroll.
-    pub(crate) fn seed_long_file(&self, name: &str, lines: usize) -> std::path::PathBuf {
+    pub fn seed_long_file(&self, name: &str, lines: usize) -> std::path::PathBuf {
         let content: String = (1..=lines)
             .map(|i| format!("line {i:03}"))
             .collect::<Vec<_>>()
@@ -1024,7 +1032,7 @@ impl TestHarness {
     /// Seed a linear chain of commits into the fake git repo at `workdir`.
     /// Each entry is `(sha, message, files)` where `files` is a list of
     /// `(rel_path, content)`. Each commit's parent is the previous entry.
-    pub(crate) fn seed_linear_history(&self, workdir: &str, commits: &[CommitSpec<'_>]) {
+    pub fn seed_linear_history(&self, workdir: &str, commits: &[CommitSpec<'_>]) {
         let mut builder = self.fake_git.add_repo(workdir);
         let mut prev: Option<&str> = None;
         for (sha, message, files) in commits {
@@ -1038,7 +1046,7 @@ impl TestHarness {
 
     /// Append `text` at offset 0 in the focused editor's buffer. Panics
     /// if the focused pane is not an editor.
-    pub(crate) fn seed_focused_buffer(&mut self, text: &str) {
+    pub fn seed_focused_buffer(&mut self, text: &str) {
         editor::seed_focused_buffer(&mut self.stoat, text);
     }
 
@@ -1052,7 +1060,7 @@ impl TestHarness {
     /// genuinely incomplete and every reader is right to treat it as stale.
     ///
     /// Panics if the focused pane is not an editor.
-    pub(crate) fn seed_current_diff_map(&mut self, base: &str) {
+    pub fn seed_current_diff_map(&mut self, base: &str) {
         editor::seed_current_diff_map(&mut self.stoat, base);
     }
 
@@ -1062,7 +1070,7 @@ impl TestHarness {
     /// Spans are resolved when a publish lands, so a test seeding the store
     /// directly has to do the same or its diagnostics carry no position at all.
     /// Routing through the production resolution keeps the two in step.
-    pub(crate) fn seed_diagnostics(
+    pub fn seed_diagnostics(
         &mut self,
         path: impl AsRef<std::path::Path>,
         diagnostics: Vec<lsp_types::Diagnostic>,
@@ -1084,50 +1092,50 @@ impl TestHarness {
 
     /// Resolved byte offsets for each selection's head in the focused
     /// editor.
-    pub(crate) fn head_offsets(&mut self) -> Vec<usize> {
+    pub fn head_offsets(&mut self) -> Vec<usize> {
         editor::head_offsets(&mut self.stoat)
     }
 
     /// Resolved `(start, end, reversed)` byte offsets for each selection
     /// in the focused editor.
-    pub(crate) fn selection_spans(&mut self) -> Vec<(usize, usize, bool)> {
+    pub fn selection_spans(&mut self) -> Vec<(usize, usize, bool)> {
         editor::selection_spans(&mut self.stoat)
     }
 
     /// The number of entries on the focused pane's jumplist.
-    pub(crate) fn jumplist_len(&self) -> usize {
+    pub fn jumplist_len(&self) -> usize {
         let ws = self.stoat.active_workspace();
         ws.panes.pane(ws.panes.focus()).jumplist.entries().len()
     }
 
     /// Byte offset of the primary selection's head in the focused editor.
-    pub(crate) fn primary_head_offset(&mut self) -> usize {
+    pub fn primary_head_offset(&mut self) -> usize {
         editor::primary_head_offset(&mut self.stoat)
     }
 
     /// Text of buffer `id` in the active workspace.
-    pub(crate) fn buffer_text(&self, id: BufferId) -> String {
+    pub fn buffer_text(&self, id: BufferId) -> String {
         editor::buffer_text(&self.stoat, id)
     }
 
     /// Text of the buffer open at `path` in the active workspace.
-    pub(crate) fn buffer_text_at(&self, path: &std::path::Path) -> String {
+    pub fn buffer_text_at(&self, path: &std::path::Path) -> String {
         editor::buffer_text_at(&self.stoat, path)
     }
 
     /// Text of the focused editor's buffer.
-    pub(crate) fn focused_buffer_text(&mut self) -> String {
+    pub fn focused_buffer_text(&mut self) -> String {
         editor::focused_buffer_text(&mut self.stoat)
     }
 
     /// Display-grid `(row, column)` for each selection's head in the
     /// focused editor.
-    pub(crate) fn cursor_display_positions(&mut self) -> Vec<(u32, u32)> {
+    pub fn cursor_display_positions(&mut self) -> Vec<(u32, u32)> {
         editor::cursor_display_positions(&mut self.stoat)
     }
 
     /// `scroll_row` for every editor in the active workspace.
-    pub(crate) fn editor_scroll_rows(&self) -> Vec<u32> {
+    pub fn editor_scroll_rows(&self) -> Vec<u32> {
         editor::editor_scroll_rows(&self.stoat)
     }
 
@@ -1198,7 +1206,7 @@ impl Drop for TestHarness {
 /// to 22 in `greet` and 35 to 49 in `part`. A changes view folds the rows more
 /// than three rows from a change, so a fold row naming each method's Scope
 /// sits above each hunk.
-pub(crate) fn greeter_rust_file() -> (String, String) {
+pub fn greeter_rust_file() -> (String, String) {
     let file = |edit: bool| {
         let method = |name: &str| {
             let body: String = (1..=24)

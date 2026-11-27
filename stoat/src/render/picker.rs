@@ -1131,7 +1131,7 @@ const CHROME_ROWS: u16 = 4;
 ///
 /// One shape for every jump-target list, so they open the same size and split
 /// their body the same way.
-pub(crate) struct PickerLayout {
+pub struct PickerLayout {
     /// The bordered modal box.
     pub(crate) modal: Rect,
     /// Inside the border, starting at the filter prompt.

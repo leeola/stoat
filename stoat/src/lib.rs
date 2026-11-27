@@ -30,7 +30,7 @@ pub mod diagnostics;
 pub(crate) mod diagnostics_picker;
 pub(crate) mod diff_warm;
 pub mod dump;
-mod editor_state;
+pub mod editor_state;
 pub(crate) mod emoji_expand;
 pub mod file_finder;
 pub mod image_emit;
@@ -74,7 +74,7 @@ pub(crate) mod project_env;
 pub(crate) mod quit_all_confirm;
 mod rebase;
 mod register;
-pub(crate) mod render;
+pub mod render;
 pub mod run;
 mod session_log;
 pub(crate) mod session_report;
@@ -107,19 +107,19 @@ pub use stoat_theme as theme;
 pub(crate) use stoat_theme::pool as theme_pool;
 #[cfg(test)]
 mod display_map_e2e;
-#[cfg(test)]
-mod test_harness;
+#[cfg(any(test, feature = "test-support"))]
+pub mod test_harness;
 
-#[cfg(test)]
-pub(crate) mod test_fixture;
+#[cfg(any(test, feature = "test-support"))]
+pub mod test_fixture;
 
 /// A redraw handle for tests, where nothing listens for the wake.
 ///
 /// Constructors take one so no production site can be built without a live
 /// handle. A test that only inspects state has no run loop to wake, so it
 /// passes a fresh one rather than plumbing the app's.
-#[cfg(test)]
-pub(crate) fn test_notify() -> std::sync::Arc<tokio::sync::Notify> {
+#[cfg(any(test, feature = "test-support"))]
+pub fn test_notify() -> std::sync::Arc<tokio::sync::Notify> {
     std::sync::Arc::new(tokio::sync::Notify::new())
 }
 pub use badge::{Anchor, BadgeId, BadgeSource, BadgeState};

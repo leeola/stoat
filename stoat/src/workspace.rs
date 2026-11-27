@@ -3,7 +3,7 @@ mod name;
 pub(crate) mod persist;
 pub(crate) mod registry;
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 use crate::diff_map::DiffMap;
 use crate::{
     action_handlers::search::LastSearch,
@@ -1820,7 +1820,7 @@ impl Workspace {
 
     /// Install `diff_map` on `id` as if a job had produced it. See
     /// [`DiffState::install_test`].
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn install_test_diff_map(&mut self, id: BufferId, diff_map: DiffMap) {
         self.diff.install_test(&self.buffers, id, diff_map);
     }

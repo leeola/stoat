@@ -25,7 +25,7 @@ impl ServerSelector {
     }
 
     /// A selector for `name` with no feature filter, serving every feature.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn all(name: String) -> Self {
         Self {
             name,
@@ -133,7 +133,7 @@ impl LspRegistry {
     /// Unlike [`Self::set_selectors`], which replaces the whole list, this adds a
     /// single server so callers build a language's set incrementally. Install
     /// order is routing priority, so a later push ranks after earlier ones.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn push_selector(&mut self, language: &str, selector: ServerSelector) {
         self.languages
             .entry(language.to_string())

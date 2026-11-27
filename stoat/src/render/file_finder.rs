@@ -34,7 +34,7 @@ use unicode_width::UnicodeWidthStr;
 ///
 /// Shared by the renderer and the smooth-scroll emit so the pooled list region
 /// matches the painted one exactly.
-pub(crate) struct FinderLayout {
+pub struct FinderLayout {
     /// The bordered modal box.
     pub(crate) modal: Rect,
     /// Inside the border: prompt, input, separator, and body.

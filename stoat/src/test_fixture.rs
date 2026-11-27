@@ -40,7 +40,7 @@ use tokio::sync::mpsc::UnboundedReceiver;
 
 /// The open help modal's layout, sized from the same content and zoom the
 /// renderer would read, so a test rect matches the painted one.
-pub(crate) fn help_layout(h: &TestHarness) -> crate::render::help::HelpLayout {
+pub fn help_layout(h: &TestHarness) -> crate::render::help::HelpLayout {
     let help = h.stoat.help.as_ref().expect("the help modal is open");
     crate::render::help::help_layout(
         h.stoat.size(),
@@ -53,7 +53,7 @@ pub(crate) fn help_layout(h: &TestHarness) -> crate::render::help::HelpLayout {
 /// The open palette's sizing inputs, so a test lays its box out exactly as
 /// the renderer would, as the content rows, the zoom steps, the header rows
 /// that the last frame drew, and the doc's rows.
-pub(crate) fn palette_sizing(h: &TestHarness) -> (u16, i8, u16, u16) {
+pub fn palette_sizing(h: &TestHarness) -> (u16, i8, u16, u16) {
     let palette = h
         .stoat
         .command_palette
@@ -69,9 +69,7 @@ pub(crate) fn palette_sizing(h: &TestHarness) -> (u16, i8, u16, u16) {
 
 /// The open argument picker's layout, sized from the same inputs the renderer
 /// reads, so a test rect matches the painted one.
-pub(crate) fn palette_arg_layout(
-    h: &TestHarness,
-) -> crate::render::command_palette::PaletteArgLayout {
+pub fn palette_arg_layout(h: &TestHarness) -> crate::render::command_palette::PaletteArgLayout {
     crate::mouse::open_palette_arg_layout(
         &h.stoat,
         modal_zoom_steps(&h.stoat.modal_zoom, ModalKind::Palette),
@@ -81,7 +79,7 @@ pub(crate) fn palette_arg_layout(
 
 /// The open finder's layout, sized from the same content and zoom the
 /// renderer would read, so a test rect matches the painted one.
-pub(crate) fn finder_layout(h: &TestHarness) -> crate::render::file_finder::FinderLayout {
+pub fn finder_layout(h: &TestHarness) -> crate::render::file_finder::FinderLayout {
     crate::mouse::open_finder_layout(
         &h.stoat,
         modal_zoom_steps(&h.stoat.modal_zoom, ModalKind::FileFinder),
@@ -94,7 +92,7 @@ pub(crate) fn finder_layout(h: &TestHarness) -> crate::render::file_finder::Find
 ///
 /// The stoatty speaks the current protocol, with a 9 by 18 px cell and a
 /// display scale of 1, so a result row is 20 px high and 21 px from the next.
-pub(crate) fn pixel_finder(files: usize) -> TestHarness {
+pub fn pixel_finder(files: usize) -> TestHarness {
     let mut h = TestHarness::default();
     h.stoat.stoatty_protocol = stoatty_protocol::PROTOCOL_VERSION;
     h.stoat.cell_pixels = Some((9, 18));
@@ -114,10 +112,7 @@ pub(crate) fn pixel_finder(files: usize) -> TestHarness {
 
 /// The layout of the open target picker of `kind`, sized from the same zoom
 /// and split the renderer reads, so a test rect matches the painted one.
-pub(crate) fn picker_layout(
-    h: &TestHarness,
-    kind: ModalKind,
-) -> crate::render::picker::PickerLayout {
+pub fn picker_layout(h: &TestHarness, kind: ModalKind) -> crate::render::picker::PickerLayout {
     crate::render::picker::target_picker_layout(
         h.stoat.size(),
         modal_zoom_steps(&h.stoat.modal_zoom, kind),
@@ -127,7 +122,7 @@ pub(crate) fn picker_layout(
 }
 
 /// The list rows of the open target picker of `kind`.
-pub(crate) fn target_picker_rows(h: &TestHarness, kind: ModalKind) -> Rect {
+pub fn target_picker_rows(h: &TestHarness, kind: ModalKind) -> Rect {
     picker_layout(h, kind).list
 }
 
@@ -135,7 +130,7 @@ pub(crate) fn target_picker_rows(h: &TestHarness, kind: ModalKind) -> Rect {
 /// list. A plain editor pane fills its pages asynchronously, so one
 /// `emit_smooth_scroll` pushes the region/scroll batch plus a fill batch per
 /// page. Draining folds them together so a test reads the whole emit at once.
-pub(crate) fn drain_apc(rx: &mut UnboundedReceiver<Vec<u8>>) -> Vec<command::Command> {
+pub fn drain_apc(rx: &mut UnboundedReceiver<Vec<u8>>) -> Vec<command::Command> {
     let mut cmds = Vec::new();
     while let Ok(batch) = rx.try_recv() {
         cmds.extend(command::decode_stream(&batch));
@@ -145,11 +140,7 @@ pub(crate) fn drain_apc(rx: &mut UnboundedReceiver<Vec<u8>>) -> Vec<command::Com
 
 /// `store` with the lengths and the splices of `commands` to minimap content
 /// `content_id` applied, as the terminal applies them.
-pub(crate) fn apply_minimap(
-    store: &mut Vec<LineSummary>,
-    content_id: u32,
-    commands: &[command::Command],
-) {
+pub fn apply_minimap(store: &mut Vec<LineSummary>, content_id: u32, commands: &[command::Command]) {
     for cmd in commands {
         match cmd {
             command::Command::MinimapLen(len) if len.content_id == content_id => {
@@ -166,7 +157,7 @@ pub(crate) fn apply_minimap(
 
 /// The minimap strips `commands` declare, as their strip id, left column,
 /// width, and content id.
-pub(crate) fn minimap_declarations(commands: &[command::Command]) -> Vec<(u32, u16, u16, u32)> {
+pub fn minimap_declarations(commands: &[command::Command]) -> Vec<(u32, u16, u16, u32)> {
     commands
         .iter()
         .filter_map(|cmd| match cmd {
@@ -179,7 +170,7 @@ pub(crate) fn minimap_declarations(commands: &[command::Command]) -> Vec<(u32, u
 }
 
 /// The rows of a minimap `store` that carry runs, each beside its index.
-pub(crate) fn marked_rows(store: &[LineSummary]) -> Vec<(usize, Vec<MinimapRun>)> {
+pub fn marked_rows(store: &[LineSummary]) -> Vec<(usize, Vec<MinimapRun>)> {
     store
         .iter()
         .enumerate()
@@ -189,7 +180,7 @@ pub(crate) fn marked_rows(store: &[LineSummary]) -> Vec<(usize, Vec<MinimapRun>)
 }
 
 /// A Coverage Rail row's mark in `class`, two of the rail's three columns.
-pub(crate) fn rail_mark(class: u8) -> Vec<MinimapRun> {
+pub fn rail_mark(class: u8) -> Vec<MinimapRun> {
     vec![MinimapRun {
         start_col: 0,
         len: 2,
@@ -200,7 +191,7 @@ pub(crate) fn rail_mark(class: u8) -> Vec<MinimapRun> {
 
 /// Open a buffer long enough to fill a per-pane minimap strip, with the strip's
 /// rect already reserved as a paint leaves it.
-pub(crate) fn open_with_minimap_strip(h: &mut TestHarness) -> EditorId {
+pub fn open_with_minimap_strip(h: &mut TestHarness) -> EditorId {
     h.stoat.settings.editor_minimap = Some(MinimapMode::PerPane);
     let body: String = (0..60)
         .map(|i| format!("line {i}"))
@@ -216,7 +207,7 @@ pub(crate) fn open_with_minimap_strip(h: &mut TestHarness) -> EditorId {
 
 /// Open a buffer holding `contents`, for a test that needs a file on screen
 /// rather than a particular one. Returns the path it was written to.
-pub(crate) fn open_scratch_file(h: &mut TestHarness, contents: &str) -> PathBuf {
+pub fn open_scratch_file(h: &mut TestHarness, contents: &str) -> PathBuf {
     open_scratch_at(h, "/ws/buf.txt", contents)
 }
 
@@ -225,7 +216,7 @@ pub(crate) fn open_scratch_file(h: &mut TestHarness, contents: &str) -> PathBuf 
 ///
 /// For a test whose subject depends on the file's name, such as a language
 /// picked by its extension, or a snapshot that shows the path.
-pub(crate) fn open_scratch_at(h: &mut TestHarness, path: &str, contents: &str) -> PathBuf {
+pub fn open_scratch_at(h: &mut TestHarness, path: &str, contents: &str) -> PathBuf {
     let path = PathBuf::from(path);
     h.fake_fs()
         .insert_files(std::iter::once((path.clone(), contents.as_bytes())));
@@ -242,7 +233,7 @@ pub(crate) fn open_scratch_at(h: &mut TestHarness, path: &str, contents: &str) -
 ///
 /// Nothing is opened. The name of the root is arbitrary, and is kept as it is
 /// only so the LSP tests that grew this helper go on writing the same paths.
-pub(crate) fn seed(h: &mut TestHarness, files: &[(&str, &str)]) -> PathBuf {
+pub fn seed(h: &mut TestHarness, files: &[(&str, &str)]) -> PathBuf {
     let root = PathBuf::from("/lsp-did-open-test");
     h.fake_fs().insert_files(
         files
@@ -255,7 +246,7 @@ pub(crate) fn seed(h: &mut TestHarness, files: &[(&str, &str)]) -> PathBuf {
 
 /// Open `path` in the focused pane and settle, so whatever the open armed has
 /// resolved before the test asserts.
-pub(crate) fn open_buffer(h: &mut TestHarness, path: PathBuf) {
+pub fn open_buffer(h: &mut TestHarness, path: PathBuf) {
     action_handlers::dispatch(&mut h.stoat, &OpenFile { path });
     h.settle();
 }
@@ -265,7 +256,7 @@ pub(crate) fn open_buffer(h: &mut TestHarness, path: PathBuf) {
 /// Resets the registry so no injected sole host suppresses auto-spawn, opens
 /// the file (queuing the in-process spawn), then drives one `update` so the
 /// parked host installs. Returns the file path.
-pub(crate) fn open_stcfg_with_server(h: &mut TestHarness) -> PathBuf {
+pub fn open_stcfg_with_server(h: &mut TestHarness) -> PathBuf {
     h.stoat.lsp_registry = crate::lsp::registry::LspRegistry::new();
     h.stoat.set_lsp_auto_spawn(true);
 
@@ -282,7 +273,7 @@ pub(crate) fn open_stcfg_with_server(h: &mut TestHarness) -> PathBuf {
 
 /// Open `name` holding `contents` and drive the parse to completion, for a test
 /// whose subject reads the syntax tree rather than the text.
-pub(crate) fn open_indent_buffer(h: &mut TestHarness, name: &str, contents: &[u8]) {
+pub fn open_indent_buffer(h: &mut TestHarness, name: &str, contents: &[u8]) {
     let root = PathBuf::from("/indent");
     let path = root.join(name);
     h.fake_fs().insert_file(&path, contents);
@@ -300,7 +291,7 @@ pub(crate) fn open_indent_buffer(h: &mut TestHarness, name: &str, contents: &[u8
 
 /// An error diagnostic one column wide at `(line, col)`, for a test whose
 /// subject is what the editor does with a diagnostic rather than what is in it.
-pub(crate) fn diag(line: u32, col: u32, message: &str) -> Diagnostic {
+pub fn diag(line: u32, col: u32, message: &str) -> Diagnostic {
     Diagnostic {
         range: Range::new(Position::new(line, col), Position::new(line, col + 1)),
         severity: Some(DiagnosticSeverity::ERROR),
@@ -316,7 +307,7 @@ pub(crate) fn diag(line: u32, col: u32, message: &str) -> Diagnostic {
 
 /// The screen rect of whatever holds focus, split pane or dock, so a test aims
 /// a click at the same cells the paint used.
-pub(crate) fn focused_editor_pane_area(h: &TestHarness) -> Rect {
+pub fn focused_editor_pane_area(h: &TestHarness) -> Rect {
     let ws = h.stoat.active_workspace();
     match ws.focus {
         FocusTarget::SplitPane => ws.panes.pane(ws.panes.focus()).area,
@@ -326,7 +317,7 @@ pub(crate) fn focused_editor_pane_area(h: &TestHarness) -> Rect {
 
 /// A synthetic mouse event at a screen cell, for a test driving the router
 /// through the same entry the terminal uses.
-pub(crate) fn mouse_event(kind: MouseEventKind, column: u16, row: u16) -> Event {
+pub fn mouse_event(kind: MouseEventKind, column: u16, row: u16) -> Event {
     Event::Mouse(MouseEvent {
         kind,
         column,
@@ -337,7 +328,7 @@ pub(crate) fn mouse_event(kind: MouseEventKind, column: u16, row: u16) -> Event 
 
 /// Advertise document symbols on the fake server, for a test whose subject is
 /// what the symbol picker or finder does with them.
-pub(crate) fn enable_document_symbols(h: &TestHarness) {
+pub fn enable_document_symbols(h: &TestHarness) {
     use lsp_types::{OneOf, ServerCapabilities};
     h.fake_lsp().set_capabilities(ServerCapabilities {
         document_symbol_provider: Some(OneOf::Left(true)),
@@ -347,7 +338,7 @@ pub(crate) fn enable_document_symbols(h: &TestHarness) {
 
 /// [`enable_document_symbols`] with hover as well, for the finder tests that
 /// read a symbol's documentation beside it.
-pub(crate) fn enable_document_symbols_and_hover(h: &TestHarness) {
+pub fn enable_document_symbols_and_hover(h: &TestHarness) {
     use lsp_types::{HoverProviderCapability, OneOf, ServerCapabilities};
     h.fake_lsp().set_capabilities(ServerCapabilities {
         document_symbol_provider: Some(OneOf::Left(true)),
@@ -358,7 +349,7 @@ pub(crate) fn enable_document_symbols_and_hover(h: &TestHarness) {
 
 /// Advertise workspace symbols on the fake server, for a test whose subject is
 /// the workspace-scope finder.
-pub(crate) fn enable_workspace_symbols(h: &TestHarness) {
+pub fn enable_workspace_symbols(h: &TestHarness) {
     use lsp_types::{OneOf, ServerCapabilities};
     h.fake_lsp().set_capabilities(ServerCapabilities {
         workspace_symbol_provider: Some(OneOf::Left(true)),
@@ -368,7 +359,7 @@ pub(crate) fn enable_workspace_symbols(h: &TestHarness) {
 
 /// A one-character function symbol at `(line, col)` in `file`, in the flat
 /// shape a server that reports no nesting sends.
-pub(crate) fn flat_symbol(name: &str, file: &str, line: u32, col: u32) -> SymbolInformation {
+pub fn flat_symbol(name: &str, file: &str, line: u32, col: u32) -> SymbolInformation {
     use lsp_types::{Location, Uri};
     use std::str::FromStr;
     #[allow(deprecated)]
@@ -387,7 +378,7 @@ pub(crate) fn flat_symbol(name: &str, file: &str, line: u32, col: u32) -> Symbol
 
 /// Two fake servers registered under one language, both advertising `caps`, for
 /// a test whose subject is what happens when a buffer has more than one.
-pub(crate) fn install_two_servers(
+pub fn install_two_servers(
     h: &mut TestHarness,
     caps: ServerCapabilities,
 ) -> (Arc<crate::host::FakeLsp>, Arc<crate::host::FakeLsp>) {
@@ -414,7 +405,7 @@ pub(crate) fn install_two_servers(
 
 /// A `workspace/didChangeWatchedFiles` registration of one watcher, in the
 /// shape a server sends it.
-pub(crate) fn watched_files_registration(
+pub fn watched_files_registration(
     id: &str,
     glob_pattern: GlobPattern,
     kind: Option<WatchKind>,
@@ -431,7 +422,7 @@ pub(crate) fn watched_files_registration(
 
 /// Deliver `registration` from the harness's server, as its
 /// `client/registerCapability` request lands after startup.
-pub(crate) fn register_capability(h: &mut TestHarness, registration: Registration) {
+pub fn register_capability(h: &mut TestHarness, registration: Registration) {
     h.fake_lsp()
         .push_incoming_request(IncomingRequest::RegisterCapability {
             id: NumberOrString::Number(1),
@@ -446,7 +437,7 @@ pub(crate) fn register_capability(h: &mut TestHarness, registration: Registratio
 ///
 /// The fake comes back beside the session, for a test that reads what the
 /// session wrote to its PTY or scripts what the PTY reports.
-pub(crate) fn fake_term_session(rows: u16, cols: u16) -> (TermSession, Arc<FakeTerminalSession>) {
+pub fn fake_term_session(rows: u16, cols: u16) -> (TermSession, Arc<FakeTerminalSession>) {
     let fake = Arc::new(FakeTerminalSession::new());
     let session = TermSession::new(
         TermScreen::new(rows, cols),
@@ -461,7 +452,7 @@ pub(crate) fn fake_term_session(rows: u16, cols: u16) -> (TermSession, Arc<FakeT
 /// `alpha` has a description and one titled stop. `zebra` has two untitled
 /// stops and no description, so the pair covers both preview forms and two
 /// stop counts.
-pub(crate) fn store_two_tours(h: &mut TestHarness) {
+pub fn store_two_tours(h: &mut TestHarness) {
     h.stoat.active_workspace_mut().git_root = PathBuf::from("/repo");
     h.fake_fs()
         .insert_file("/repo/a.rs", "fn one() {}\nfn two() {}\n");
@@ -504,7 +495,7 @@ pub(crate) fn store_two_tours(h: &mut TestHarness) {
 ///
 /// An Island is a backdrop panel in the theme's editor surface, which sets it
 /// apart from the plate's own panels. Without the plate look there are none.
-pub(crate) fn plate_islands(theme: &Theme, scene: &ApcScene) -> Vec<(Rect, [command::Edge; 4])> {
+pub fn plate_islands(theme: &Theme, scene: &ApcScene) -> Vec<(Rect, [command::Edge; 4])> {
     let Some(plate) = crate::render::chrome::plate_colors(theme, scene) else {
         return Vec::new();
     };
@@ -520,7 +511,7 @@ pub(crate) fn plate_islands(theme: &Theme, scene: &ApcScene) -> Vec<(Rect, [comm
 
 /// The hairline bars that `scene` declares down the middle of column `x`, as a
 /// separator column's `chrome::vline` draws them.
-pub(crate) fn column_rules(scene: &ApcScene, x: u16) -> usize {
+pub fn column_rules(scene: &ApcScene, x: u16) -> usize {
     let middle = i16::try_from(x).expect("a column on screen") * 16 + 8;
     command::decode_stream(scene.bytes())
         .into_iter()
@@ -532,7 +523,7 @@ pub(crate) fn column_rules(scene: &ApcScene, x: u16) -> usize {
 
 /// The hairline bars that `scene` declares across the middle of row `y`, as a
 /// separator row's `chrome::hline` draws them.
-pub(crate) fn row_rules(scene: &ApcScene, y: u16) -> usize {
+pub fn row_rules(scene: &ApcScene, y: u16) -> usize {
     let middle = i16::try_from(y).expect("a row on screen") * 16 + 8;
     command::decode_stream(scene.bytes())
         .into_iter()

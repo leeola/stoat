@@ -14,6 +14,21 @@ perf = []
 # Compile in the deterministic git/rust fixture materializer. Off by default
 # so production builds carry no test-scaffolding code.
 fixture = []
+# Compile in the test harness and the fake hosts it installs, so a crate
+# outside this one drives a TestHarness. Off by default so production builds
+# carry no harness.
+test-support = [
+  "dep:insta",
+  "stoat_buffer/test-support",
+  "stoat_host/test-support",
+  "stoat_host_clipboard/test-support",
+  "stoat_host_git/test-support",
+  "stoat_host_lsp/test-support",
+  "stoat_host_terminal/test-support",
+  "stoat_scheduler/test-support",
+  "stoat_selection/test-support",
+  "stoat_theme/test-support",
+]
 
 [dependencies]
 codegraph = { path = "../codegraph" }
@@ -72,13 +87,16 @@ image.workspace = true
 base64.workspace = true
 regex.workspace = true
 flate2.workspace = true
+insta = { version = "1", optional = true }
 
 [dev-dependencies]
 insta = "1"
 portable-pty.workspace = true
 stoat_buffer = { path = "../buffer", features = ["test-support"] }
 stoat_host = { path = "../host", features = ["test-support"] }
-stoat_host_clipboard = { path = "../host_clipboard", features = ["test-support"] }
+stoat_host_clipboard = { path = "../host_clipboard", features = [
+  "test-support",
+] }
 stoat_host_git = { path = "../host_git", features = ["test-support"] }
 stoat_host_lsp = { path = "../host_lsp", features = ["test-support"] }
 stoat_host_terminal = { path = "../host_terminal", features = ["test-support"] }

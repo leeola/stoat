@@ -325,7 +325,7 @@ impl<'a> StoatKeymapState<'a> {
     /// and swaps only the mode. Every other predicate keeps its live value, so
     /// a gated binding is reachable exactly when the test's fixture satisfies
     /// the gate.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn with_mode(mut self, mode: &str) -> Self {
         self.mode_value = StateValue::String(mode.into());
         self

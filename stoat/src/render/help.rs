@@ -49,7 +49,7 @@ pub(crate) fn help_content_rows(help: &Help) -> u16 {
 ///
 /// Shared by the renderer and the smooth-scroll emit so the pooled list and
 /// detail regions match the painted ones exactly.
-pub(crate) struct HelpLayout {
+pub struct HelpLayout {
     /// The bordered modal box.
     pub(crate) modal: Rect,
     /// Inside the border, holding the header rows, the body split, and the

@@ -757,7 +757,7 @@ enum WindowIpc {
 ///
 /// Every kind here sizes its box against its own [`Stoat::modal_zoom`] entry.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
-pub(crate) enum ModalKind {
+pub enum ModalKind {
     FileFinder,
     CodeSearch,
     CommitPicker,
@@ -2730,12 +2730,12 @@ pub struct Stoat {
 }
 
 impl Stoat {
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn test() -> crate::test_harness::TestHarness {
         crate::test_harness::TestHarness::default()
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn active_keys_for_mode(
         &self,
         mode: &str,
@@ -9712,7 +9712,7 @@ impl Stoat {
     ///
     /// A test drives the readers through its scheduler rather than through
     /// the run loop, so it collects their notifications here.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn handle_queued_pty(&mut self) -> bool {
         let mut handled = false;
         while let Ok(notif) = self.pty_rx.try_recv() {
@@ -10128,7 +10128,7 @@ impl Stoat {
     /// which snapshots the returned buffer. The event loop instead recycles a
     /// buffer across frames via [`Self::paint_into`], so this is otherwise
     /// unused.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn render(&mut self) -> Buffer {
         let mut buf = Buffer::empty(self.size);
         self.paint_into(&mut buf, None);

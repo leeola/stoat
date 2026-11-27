@@ -20,7 +20,7 @@ use stoat_text::{cursor_offset, Point};
 /// The editor was constructed over an empty buffer, so its seed anchor slid to
 /// the end when `text` was inserted. Re-seeding restores the same
 /// start-of-buffer cursor a real content-open would produce.
-pub(crate) fn seed_focused_buffer(stoat: &mut Stoat, text: &str) {
+pub fn seed_focused_buffer(stoat: &mut Stoat, text: &str) {
     let ws = stoat.active_workspace_mut();
     let focused = ws.panes.focus();
     let editor_id = match ws.panes.pane(focused).view {
@@ -42,7 +42,7 @@ pub(crate) fn seed_focused_buffer(stoat: &mut Stoat, text: &str) {
 /// Install a diff map against `base` on the focused buffer, recorded as
 /// computed for that buffer's current version. See
 /// [`crate::test_harness::TestHarness::seed_current_diff_map`].
-pub(crate) fn seed_current_diff_map(stoat: &mut Stoat, base: &str) {
+pub fn seed_current_diff_map(stoat: &mut Stoat, base: &str) {
     let buffer_id = stoat.focused_editor_ids().expect("focused editor").1;
     let text = {
         let editor = action_handlers::focused_editor_mut(stoat).expect("focused editor");
@@ -70,7 +70,7 @@ pub(crate) fn seed_current_diff_map(stoat: &mut Stoat, base: &str) {
 /// Under the min-width-1 model a forward selection's head sits one cell past
 /// the block cursor, so this reports the cursor cell -- the position a test
 /// verifies -- rather than the raw head.
-pub(crate) fn head_offsets(stoat: &mut Stoat) -> Vec<usize> {
+pub fn head_offsets(stoat: &mut Stoat) -> Vec<usize> {
     let ws = stoat.active_workspace_mut();
     let focused = ws.panes.focus();
     let editor_id = match ws.panes.pane(focused).view {
@@ -97,7 +97,7 @@ pub(crate) fn head_offsets(stoat: &mut Stoat) -> Vec<usize> {
 
 /// Resolved `(start, end, reversed)` byte offsets for each selection in
 /// the focused editor.
-pub(crate) fn selection_spans(stoat: &mut Stoat) -> Vec<(usize, usize, bool)> {
+pub fn selection_spans(stoat: &mut Stoat) -> Vec<(usize, usize, bool)> {
     let ws = stoat.active_workspace_mut();
     let focused = ws.panes.focus();
     let editor_id = match ws.panes.pane(focused).view {
@@ -126,7 +126,7 @@ pub(crate) fn selection_spans(stoat: &mut Stoat) -> Vec<(usize, usize, bool)> {
 ///
 /// Reports the cursor cell rather than the raw head, which under the
 /// min-width-1 model sits one cell past it for a forward selection.
-pub(crate) fn primary_head_offset(stoat: &mut Stoat) -> usize {
+pub fn primary_head_offset(stoat: &mut Stoat) -> usize {
     let ws = stoat.active_workspace_mut();
     let focused = ws.panes.focus();
     let editor_id = match ws.panes.pane(focused).view {
@@ -146,7 +146,7 @@ pub(crate) fn primary_head_offset(stoat: &mut Stoat) -> usize {
 
 /// Text of buffer `id` in the active workspace. Panics if the workspace holds
 /// no such buffer.
-pub(crate) fn buffer_text(stoat: &Stoat, id: BufferId) -> String {
+pub fn buffer_text(stoat: &Stoat, id: BufferId) -> String {
     stoat
         .active_workspace()
         .buffers
@@ -160,7 +160,7 @@ pub(crate) fn buffer_text(stoat: &Stoat, id: BufferId) -> String {
 
 /// Text of the buffer open at `path` in the active workspace. Panics if no
 /// buffer holds that path.
-pub(crate) fn buffer_text_at(stoat: &Stoat, path: &Path) -> String {
+pub fn buffer_text_at(stoat: &Stoat, path: &Path) -> String {
     let id = stoat
         .active_workspace()
         .buffers
@@ -171,7 +171,7 @@ pub(crate) fn buffer_text_at(stoat: &Stoat, path: &Path) -> String {
 
 /// Text of the focused editor's buffer, read through its display map. Panics
 /// if focus is not on an editor.
-pub(crate) fn focused_buffer_text(stoat: &mut Stoat) -> String {
+pub fn focused_buffer_text(stoat: &mut Stoat) -> String {
     let editor = action_handlers::focused_editor_mut(stoat).expect("focused editor");
     editor
         .display_map
@@ -183,7 +183,7 @@ pub(crate) fn focused_buffer_text(stoat: &mut Stoat) -> String {
 
 /// `scroll_row` for every editor in the active workspace, in `editors`
 /// iteration order. Useful for asserting that no editor scrolled.
-pub(crate) fn editor_scroll_rows(stoat: &Stoat) -> Vec<u32> {
+pub fn editor_scroll_rows(stoat: &Stoat) -> Vec<u32> {
     stoat
         .active_workspace()
         .editors
@@ -193,7 +193,7 @@ pub(crate) fn editor_scroll_rows(stoat: &Stoat) -> Vec<u32> {
 }
 
 /// `EditorId` held by `pane`. Panics if the pane is not an editor.
-pub(crate) fn editor_id_in_pane(stoat: &Stoat, pane: PaneId) -> EditorId {
+pub fn editor_id_in_pane(stoat: &Stoat, pane: PaneId) -> EditorId {
     match stoat.active_workspace().panes.pane(pane).view {
         View::Editor(id) => id,
         _ => panic!("pane {pane:?} is not an editor"),
@@ -201,7 +201,7 @@ pub(crate) fn editor_id_in_pane(stoat: &Stoat, pane: PaneId) -> EditorId {
 }
 
 /// `scroll_row` for a specific editor in the active workspace.
-pub(crate) fn editor_scroll_row(stoat: &Stoat, editor_id: EditorId) -> u32 {
+pub fn editor_scroll_row(stoat: &Stoat, editor_id: EditorId) -> u32 {
     stoat
         .active_workspace()
         .editors
@@ -212,7 +212,7 @@ pub(crate) fn editor_scroll_row(stoat: &Stoat, editor_id: EditorId) -> u32 {
 
 /// Display-grid `(row, column)` for each selection's head in the focused
 /// editor.
-pub(crate) fn cursor_display_positions(stoat: &mut Stoat) -> Vec<(u32, u32)> {
+pub fn cursor_display_positions(stoat: &mut Stoat) -> Vec<(u32, u32)> {
     let ws = stoat.active_workspace_mut();
     let focused = ws.panes.focus();
     let editor_id = match ws.panes.pane(focused).view {
@@ -244,7 +244,7 @@ pub(crate) fn cursor_display_positions(stoat: &mut Stoat) -> Vec<(u32, u32)> {
 ///
 /// The buffer-line analogue of [`cursor_display_positions`], for asserting
 /// motions that must land by buffer line regardless of soft wrap.
-pub(crate) fn cursor_buffer_positions(stoat: &mut Stoat) -> Vec<(u32, u32)> {
+pub fn cursor_buffer_positions(stoat: &mut Stoat) -> Vec<(u32, u32)> {
     let ws = stoat.active_workspace_mut();
     let focused = ws.panes.focus();
     let editor_id = match ws.panes.pane(focused).view {
@@ -259,7 +259,7 @@ pub(crate) fn cursor_buffer_positions(stoat: &mut Stoat) -> Vec<(u32, u32)> {
 ///
 /// Reaches an editor the focused pane does not show, such as the one a commits
 /// list covers.
-pub(crate) fn editor_cursor_buffer_positions(editor: &mut EditorState) -> Vec<(u32, u32)> {
+pub fn editor_cursor_buffer_positions(editor: &mut EditorState) -> Vec<(u32, u32)> {
     let snapshot = editor.display_map.snapshot();
     let buffer_snapshot = snapshot.buffer_snapshot();
     let rope = buffer_snapshot.rope();
@@ -288,7 +288,7 @@ pub(crate) fn editor_cursor_buffer_positions(editor: &mut EditorState) -> Vec<(u
 /// The whole set is replaced. Adding to it instead leaves the collection's
 /// seeded cursor on the first character, and a motion then moves two cursors
 /// where the test asked for one.
-pub(crate) fn place_cursor(editor: &mut EditorState, row: u32, col: u32) {
+pub fn place_cursor(editor: &mut EditorState, row: u32, col: u32) {
     let snapshot = editor.display_map.snapshot();
     let buffer_snapshot = snapshot.buffer_snapshot();
     let offset = buffer_snapshot.rope().point_to_offset(Point::new(row, col));
@@ -300,7 +300,7 @@ pub(crate) fn place_cursor(editor: &mut EditorState, row: u32, col: u32) {
 ///
 /// Panics if the buffer has no path, so a test that expects a jump to have
 /// landed in a file fails on the jump rather than on a `None`.
-pub(crate) fn focused_buffer_path(stoat: &Stoat) -> PathBuf {
+pub fn focused_buffer_path(stoat: &Stoat) -> PathBuf {
     let ws = stoat.active_workspace();
     let focused = ws.panes.focus();
     let editor_id = match ws.panes.pane(focused).view {
@@ -318,7 +318,7 @@ pub(crate) fn focused_buffer_path(stoat: &Stoat) -> PathBuf {
 ///
 /// The raw head rather than the block-cursor cell, for tests asserting which
 /// line a jump or a scroll landed the selection on.
-pub(crate) fn focused_head_row(stoat: &mut Stoat) -> u32 {
+pub fn focused_head_row(stoat: &mut Stoat) -> u32 {
     let editor = action_handlers::focused_editor_mut(stoat).expect("focused editor");
     let snapshot = editor.display_map.snapshot();
     let buffer_snapshot = snapshot.buffer_snapshot();
@@ -331,7 +331,7 @@ pub(crate) fn focused_head_row(stoat: &mut Stoat) -> u32 {
 ///
 /// The single-cursor counterpart to [`cursor_buffer_positions`], for the common
 /// case of asserting where one cursor landed.
-pub(crate) fn focused_cursor_point(stoat: &mut Stoat) -> Point {
+pub fn focused_cursor_point(stoat: &mut Stoat) -> Point {
     let editor = action_handlers::focused_editor_mut(stoat).expect("focused editor");
     let snapshot = editor.display_map.snapshot();
     let buffer_snapshot = snapshot.buffer_snapshot();
@@ -343,7 +343,7 @@ pub(crate) fn focused_cursor_point(stoat: &mut Stoat) -> Point {
 }
 
 /// Whether the focused editor's buffer holds unsaved edits.
-pub(crate) fn focused_dirty(stoat: &Stoat) -> bool {
+pub fn focused_dirty(stoat: &Stoat) -> bool {
     let editor_id = match stoat
         .active_workspace()
         .panes

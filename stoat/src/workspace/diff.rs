@@ -871,7 +871,7 @@ impl DiffState {
     /// Lets a test stand up a diff map without a git fixture behind it. Writing
     /// the map alone would leave it version-less, which every caller correctly
     /// treats as stale.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub(super) fn install_test(
         &mut self,
         buffers: &BufferRegistry,
