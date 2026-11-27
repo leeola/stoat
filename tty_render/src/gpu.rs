@@ -4038,6 +4038,91 @@ mod tests {
         );
     }
 
+    /// The scrim dims the corners of a rounded floating box's rect that its
+    /// arcs leave outside the box.
+    ///
+    /// The box over the cells from (0, 0) to (36, 36) rounds its corners at 12
+    /// px, so the pixel (2, 2) lies outside its top-left arc and the pixel (18,
+    /// 18) inside the box. The scrim lays its color over the first, with the
+    /// box's shadow, and leaves the fill at the second.
+    #[test]
+    fn a_rounded_floating_box_takes_the_scrim_past_its_corner_arcs() {
+        let (device, queue) = require_headless_device();
+        let (target, mut renderer) = readback_renderer(&device, GROUND);
+        let (rows, cols) = renderer.grid_size();
+        let mut live = filled_grid(rows, cols, GROUND);
+        live.set_panels(vec![Panel {
+            corner_radius: 12,
+            ..corner_box(PanelShadow::Drop)
+        }]);
+        live.set_scrim(Some(board_scrim(0, 0)));
+
+        let fill = [BOX_FILL.r, BOX_FILL.g, BOX_FILL.b];
+        let pixels = scrim_pixels(
+            &device,
+            &queue,
+            &mut renderer,
+            &target,
+            &live,
+            &[[2, 2], [18, 18]],
+        );
+        let dimmed = |pixel: [u8; 3]| pixel.iter().zip(DIMMED).all(|(&got, want)| got <= want + 1);
+        assert!(
+            pixels
+                .iter()
+                .all(|pixels| dimmed(pixels[0]) && pixels[1] == fill),
+            "the corner past the arc reads the scrim, and the middle keeps the fill, got \
+             {pixels:?}",
+        );
+    }
+
+    /// The scrim leaves a floating box clear to the pixel at each edge mode, as
+    /// the panel draws the box.
+    ///
+    /// The box over the cells from (36, 36) to (90, 72) takes a margin of 10 px
+    /// at the top, a gap of 5 px at the right, an outset of 5 px at the bottom,
+    /// and an inset of 3 px at the left. So it runs from (39, 10) to (97, 77),
+    /// the gap's 6.5 px rounded up at the right. The pixel just inside each
+    /// edge reads the fill, and the pixel just outside reads the window under
+    /// the scrim and the shadow. The frame draws alone, since a pane pool's
+    /// composite paints the box's own edge pixel.
+    #[test]
+    fn the_scrim_leaves_each_edge_mode_of_a_floating_box_clear() {
+        let (device, queue) = require_headless_device();
+        let (target, mut renderer) = readback_renderer(&device, GROUND);
+        let (rows, cols) = renderer.grid_size();
+        let mut live = filled_grid(rows, cols, GROUND);
+        live.set_panels(vec![Panel {
+            top: 1,
+            left: 2,
+            width: 3,
+            height: 1,
+            edges: [
+                Edge::Margin(10),
+                Edge::Gap(5),
+                Edge::Outset(5),
+                Edge::Inset(3),
+            ],
+            ..corner_box(PanelShadow::Drop)
+        }]);
+        live.set_scrim(Some(board_scrim(0, 0)));
+
+        let shot = draw_covered(&device, &queue, &mut renderer, &target, &live, &[]);
+        let at = |[x, y]: [u32; 2]| pixel(&shot, TARGET_WIDTH, x, y);
+        let fill = [BOX_FILL.r, BOX_FILL.g, BOX_FILL.b];
+        let outside = [[68, 9], [97, 43], [68, 77], [38, 43]].map(at);
+
+        assert_eq!(
+            [[68, 10], [96, 43], [68, 76], [39, 43]].map(at),
+            [fill; 4],
+            "the pixel inside the top, right, bottom, and left edges keeps the fill",
+        );
+        assert!(
+            outside.iter().all(|&pixel| pixel != fill),
+            "the pixel outside each edge reads the scrim, got {outside:?}",
+        );
+    }
+
     /// A grid whose scrim clears draws each frame as it drew before the scrim
     /// was set, the floating box's shadow under the text included.
     #[test]

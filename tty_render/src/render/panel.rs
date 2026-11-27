@@ -14,7 +14,7 @@
 
 use crate::render::{rgb_f32, CellMetrics, HostRide, RowAnchor};
 use bytemuck::{Pod, Zeroable};
-use std::mem;
+use std::{array, mem};
 use stoatty_protocol::command;
 use stoatty_term::grid::{BorderStyle, Grid, Panel, PanelShadow};
 use wgpu::{
@@ -29,6 +29,22 @@ use wgpu::{
 /// Instance buffer capacity, in panels, allocated up front. Grows by doubling
 /// when a frame exceeds it.
 const INITIAL_CAPACITY: usize = 16;
+
+/// Float box buffer capacity, in boxes, allocated up front. A frame holds a
+/// modal and a docked card at most in practice, and the buffer grows by
+/// doubling past that.
+const INITIAL_FLOAT_CAPACITY: usize = 4;
+
+/// Scrim rect buffer capacity, in rects, allocated up front. One floating box
+/// cuts the scrim's region into four rects, and the buffer grows by doubling
+/// past that.
+const INITIAL_SCRIM_RECT_CAPACITY: usize = 4;
+
+/// The modes of a panel's edges other than an inset, which is mode 0, as
+/// [`command::edge_modes`] packs them two bits an edge.
+const EDGE_MARGIN: u32 = 1;
+const EDGE_GAP: u32 = 2;
+const EDGE_OUTSET: u32 = 3;
 
 /// Vertices each panel draws per pass, six for each of four edge bands around
 /// an interior rectangle and six for that rectangle.
@@ -138,9 +154,28 @@ struct Globals {
     scale_factor: f32,
     /// The scrim's top in physical pixels down from the surface's top.
     scrim_top: f32,
-    _pad: u32,
+    /// How many [`FloatBox`]es the floating buffer holds this frame.
+    float_count: u32,
     /// The scrim's color and alpha, all zero on a frame with no scrim.
     scrim: [f32; 4],
+}
+
+/// The box of a floating panel, which the scrim leaves clear, placed on the
+/// CPU.
+///
+/// The scrim's stage measures every fragment of the surface against each
+/// floating box. A box placed here from its cells and edges costs that walk
+/// one rounded box's distance, where placing it in the shader costs a dozen
+/// storage reads and the edge offsets for every fragment. The corners are
+/// physical px, the radius is held to the shorter half side, and `corners`
+/// holds the rounded corners in bits 0-3 from top-left clockwise.
+#[repr(C)]
+#[derive(Clone, Copy, PartialEq, Debug, Pod, Zeroable)]
+struct FloatBox {
+    min: [f32; 2],
+    max: [f32; 2],
+    radius: f32,
+    corners: u32,
 }
 
 /// The instanced panel pipeline and its per-frame buffers.
@@ -166,11 +201,31 @@ pub struct PanelPass {
     /// and the strokes compose under it as the shader's `under_scrim` mixes
     /// them.
     pub(crate) scrim: bool,
+    /// The instance slots of the floating panels while a scrim is set, whose
+    /// exterior shadows [`Self::draw_scrim`] draws over it.
+    floating_slots: Vec<u32>,
+    /// The boxes of those panels, in the same order, as this frame placed them.
+    float_boxes: Vec<FloatBox>,
+    /// The boxes last uploaded, so an unchanged frame skips the write.
+    last_float_boxes: Vec<FloatBox>,
     bind_group_layout: BindGroupLayout,
     globals: Buffer,
     bind_group: BindGroup,
     instances: Buffer,
     capacity: usize,
+    /// The storage buffer of [`FloatBox`]es the scrim's stages walk.
+    floating: Buffer,
+    /// The boxes [`Self::floating`] holds room for.
+    float_capacity: usize,
+    /// The rects the scrim draws this frame, its region less the inner rect of
+    /// each floating box, each as its corners in physical px.
+    scrim_rects: Vec<[f32; 4]>,
+    /// The rects last uploaded, so an unchanged frame skips the write.
+    last_scrim_rects: Vec<[f32; 4]>,
+    /// The vertex buffer of [`Self::scrim_rects`], one instance each.
+    scrim_rect_buffer: Buffer,
+    /// The rects [`Self::scrim_rect_buffer`] holds room for.
+    scrim_rect_capacity: usize,
     /// The instances last uploaded, so an unchanged frame skips the write.
     last_instances: Vec<PanelInstance>,
     /// Where each frame's instances are built, before being compared against
@@ -218,6 +273,16 @@ impl PanelPass {
                 },
                 BindGroupLayoutEntry {
                     binding: 1,
+                    visibility: ShaderStages::FRAGMENT,
+                    ty: BindingType::Buffer {
+                        ty: BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                BindGroupLayoutEntry {
+                    binding: 2,
                     visibility: ShaderStages::FRAGMENT,
                     ty: BindingType::Buffer {
                         ty: BufferBindingType::Storage { read_only: true },
@@ -302,7 +367,13 @@ impl PanelPass {
             "fs_float_shadow",
             &instance,
         );
-        let pipeline_scrim = build("panel scrim", "vs_scrim", "fs_scrim", &[]);
+        let scrim_attributes = vertex_attr_array![0 => Float32x4];
+        let scrim_rect = [Some(VertexBufferLayout {
+            array_stride: size_of::<[f32; 4]>() as u64,
+            step_mode: VertexStepMode::Instance,
+            attributes: &scrim_attributes,
+        })];
+        let pipeline_scrim = build("panel scrim", "vs_scrim", "fs_scrim", &scrim_rect);
 
         let globals = device.create_buffer(&BufferDescriptor {
             label: Some("panel globals"),
@@ -312,7 +383,9 @@ impl PanelPass {
         });
 
         let instances = alloc_instances(device, INITIAL_CAPACITY);
-        let bind_group = make_bind_group(device, &bind_group_layout, &globals, &instances);
+        let floating = alloc_float_boxes(device, INITIAL_FLOAT_CAPACITY);
+        let bind_group =
+            make_bind_group(device, &bind_group_layout, &globals, &instances, &floating);
 
         PanelPass {
             pipeline_under,
@@ -322,11 +395,20 @@ impl PanelPass {
             pipeline_float_shadow,
             casts: false,
             scrim: false,
+            floating_slots: Vec::new(),
+            float_boxes: Vec::new(),
+            last_float_boxes: Vec::new(),
             bind_group_layout,
             globals,
             bind_group,
             instances,
             capacity: INITIAL_CAPACITY,
+            floating,
+            float_capacity: INITIAL_FLOAT_CAPACITY,
+            scrim_rects: Vec::new(),
+            last_scrim_rects: Vec::new(),
+            scrim_rect_buffer: alloc_scrim_rects(device, INITIAL_SCRIM_RECT_CAPACITY),
+            scrim_rect_capacity: INITIAL_SCRIM_RECT_CAPACITY,
             count: 0,
             riding: Vec::new(),
             last_instances: Vec::new(),
@@ -405,17 +487,20 @@ impl PanelPass {
         });
 
         self.count = self.built.len() as u32;
+        self.place_float_boxes(device, queue, grid);
+        let scrim_top = scrim.map_or(0.0, |scrim| {
+            anchor.row_y(f32::from(scrim.top_row), self.metrics.height)
+                + f32::from(scrim.top_px) * self.metrics.scale_factor
+        });
+        self.cut_scrim(device, queue, resolution, scrim_top);
 
         let globals = Globals {
             resolution,
             cell_size: [self.metrics.width, self.metrics.height],
             count: self.count,
             scale_factor: self.metrics.scale_factor,
-            scrim_top: scrim.map_or(0.0, |scrim| {
-                anchor.row_y(f32::from(scrim.top_row), self.metrics.height)
-                    + f32::from(scrim.top_px) * self.metrics.scale_factor
-            }),
-            _pad: 0,
+            scrim_top,
+            float_count: self.float_boxes.len() as u32,
             scrim: scrim.map_or([0.0; 4], |scrim| {
                 let [r, g, b] = rgb_f32(scrim.color);
                 [r, g, b, f32::from(scrim.alpha) / 255.0]
@@ -439,10 +524,81 @@ impl PanelPass {
                 &self.bind_group_layout,
                 &self.globals,
                 &self.instances,
+                &self.floating,
             );
         }
         queue.write_buffer(&self.instances, 0, bytemuck::cast_slice(&self.built));
         mem::swap(&mut self.built, &mut self.last_instances);
+    }
+
+    /// List the floating panels while a scrim is set, place their boxes, and
+    /// upload the boxes when they moved.
+    ///
+    /// A floating panel casts a drop or a halo shadow. A frame with no scrim
+    /// lists none, so the scrim's walk ends at once.
+    fn place_float_boxes(&mut self, device: &Device, queue: &Queue, grid: &Grid) {
+        self.floating_slots.clear();
+        self.float_boxes.clear();
+        if self.scrim {
+            let cell = [self.metrics.width, self.metrics.height];
+            for (index, panel) in grid.panels().iter().enumerate() {
+                if matches!(panel.shadow, PanelShadow::Drop | PanelShadow::Halo) {
+                    self.floating_slots.push(index as u32);
+                    self.float_boxes.push(float_box(&self.built[index], cell));
+                }
+            }
+        }
+
+        if !crate::render::upload_needed(&self.float_boxes, &self.last_float_boxes) {
+            return;
+        }
+        if self.float_boxes.len() > self.float_capacity {
+            self.float_capacity = self.float_boxes.len().next_power_of_two();
+            self.floating = alloc_float_boxes(device, self.float_capacity);
+            self.bind_group = make_bind_group(
+                device,
+                &self.bind_group_layout,
+                &self.globals,
+                &self.instances,
+                &self.floating,
+            );
+        }
+        if !self.float_boxes.is_empty() {
+            queue.write_buffer(&self.floating, 0, bytemuck::cast_slice(&self.float_boxes));
+        }
+        self.last_float_boxes.clone_from(&self.float_boxes);
+    }
+
+    /// Cut the scrim's region, the `resolution` surface from `top` down, into
+    /// the rects outside the inner rect of each floating box, and upload them
+    /// when they moved.
+    ///
+    /// The scrim leaves a floating box clear, so a fragment inside one draws
+    /// nothing, and a large modal is most of the surface. A frame with no
+    /// scrim cuts no rect.
+    fn cut_scrim(&mut self, device: &Device, queue: &Queue, resolution: [f32; 2], top: f32) {
+        self.scrim_rects.clear();
+        if self.scrim {
+            let [width, height] = resolution;
+            let holes = self.float_boxes.iter().filter_map(inner_rect);
+            cut_rects([0.0, top, width, height], holes, &mut self.scrim_rects);
+        }
+
+        if !crate::render::upload_needed(&self.scrim_rects, &self.last_scrim_rects) {
+            return;
+        }
+        if self.scrim_rects.len() > self.scrim_rect_capacity {
+            self.scrim_rect_capacity = self.scrim_rects.len().next_power_of_two();
+            self.scrim_rect_buffer = alloc_scrim_rects(device, self.scrim_rect_capacity);
+        }
+        if !self.scrim_rects.is_empty() {
+            queue.write_buffer(
+                &self.scrim_rect_buffer,
+                0,
+                bytemuck::cast_slice(&self.scrim_rects),
+            );
+        }
+        self.last_scrim_rects.clone_from(&self.scrim_rects);
     }
 
     /// Record the shadow, fill, and overhang of every non-riding panel.
@@ -492,10 +648,36 @@ impl PanelPass {
 
         render_pass.set_pipeline(&self.pipeline_scrim);
         render_pass.set_bind_group(0, &self.bind_group, &[]);
-        render_pass.draw(0..6, 0..1);
+        render_pass.set_vertex_buffer(0, self.scrim_rect_buffer.slice(..));
+        render_pass.draw(0..6, 0..self.scrim_rects.len() as u32);
 
-        self.draw_slots(render_pass, &self.pipeline_float_shadow);
-        self.draw_riding_slots(render_pass, &self.pipeline_float_shadow);
+        // Only a floating slot draws the shadow stage. On the UHD 630 a
+        // fragment that discards still pays for the rest of the stage, so a
+        // stage that turned the others away would cost their whole shadow
+        // bands.
+        render_pass.set_pipeline(&self.pipeline_float_shadow);
+        render_pass.set_vertex_buffer(0, self.instances.slice(..));
+        let ride = |slot: u32| {
+            self.riding
+                .iter()
+                .find(|&&(index, _)| index == slot)
+                .map(|&(_, scissor)| scissor)
+        };
+        for &slot in &self.floating_slots {
+            if ride(slot).is_none() {
+                render_pass.draw(0..REGION_VERTICES, slot..slot + 1);
+            }
+        }
+        for &slot in &self.floating_slots {
+            let Some([x, y, width, height]) = ride(slot) else {
+                continue;
+            };
+            if width == 0 || height == 0 {
+                continue;
+            }
+            render_pass.set_scissor_rect(x, y, width, height);
+            render_pass.draw(0..REGION_VERTICES, slot..slot + 1);
+        }
     }
 
     fn draw_slots(&self, render_pass: &mut RenderPass<'_>, pipeline: &RenderPipeline) {
@@ -565,14 +747,34 @@ fn alloc_instances(device: &Device, capacity: usize) -> Buffer {
     })
 }
 
-/// Bind the globals uniform (binding 0) and the instance storage buffer
-/// (binding 1). Rebuilt whenever the instance buffer is reallocated, since the
-/// bind group holds a reference to the specific buffer.
+fn alloc_scrim_rects(device: &Device, capacity: usize) -> Buffer {
+    device.create_buffer(&BufferDescriptor {
+        label: Some("panel scrim rects"),
+        size: (capacity * size_of::<[f32; 4]>()) as u64,
+        usage: BufferUsages::VERTEX | BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    })
+}
+
+fn alloc_float_boxes(device: &Device, capacity: usize) -> Buffer {
+    device.create_buffer(&BufferDescriptor {
+        label: Some("panel float boxes"),
+        size: (capacity * size_of::<FloatBox>()) as u64,
+        usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    })
+}
+
+/// Bind the globals uniform (binding 0), the instance storage buffer
+/// (binding 1), and the float box storage buffer (binding 2). Rebuilt whenever
+/// either storage buffer is reallocated, since the bind group holds a
+/// reference to the specific buffer.
 fn make_bind_group(
     device: &Device,
     layout: &BindGroupLayout,
     globals: &Buffer,
     instances: &Buffer,
+    floating: &Buffer,
 ) -> BindGroup {
     device.create_bind_group(&BindGroupDescriptor {
         label: Some("panel globals"),
@@ -585,6 +787,10 @@ fn make_bind_group(
             BindGroupEntry {
                 binding: 1,
                 resource: instances.as_entire_binding(),
+            },
+            BindGroupEntry {
+                binding: 2,
+                resource: floating.as_entire_binding(),
             },
         ],
     })
@@ -678,10 +884,124 @@ fn style_code(style: BorderStyle) -> u32 {
     }
 }
 
+/// The box `instance` draws on cells of `cell` physical px, as the scrim
+/// leaves it clear.
+///
+/// Each edge moves from the instance's cell rect by [`edge_offsets`], and the
+/// radius holds to the shorter half side, as the shader's `occluder_sdf`
+/// places a box.
+fn float_box(instance: &PanelInstance, cell: [f32; 2]) -> FloatBox {
+    let [top, right, bottom, left] = edge_offsets(instance.edge_px, instance.edge_modes, cell);
+    let min = [
+        instance.cell[0] * cell[0] + left,
+        instance.cell[1] * cell[1] + top,
+    ];
+    let max = [
+        (instance.cell[0] + instance.size[0]) * cell[0] - right,
+        (instance.cell[1] + instance.size[1]) * cell[1] - bottom,
+    ];
+    let half = [(max[0] - min[0]) * 0.5, (max[1] - min[1]) * 0.5];
+    FloatBox {
+        min,
+        max,
+        radius: instance.corner_radius.min(half[0]).min(half[1]),
+        corners: instance.shape & 0b1111,
+    }
+}
+
+/// Each edge's offset into a box from its cell edge, in physical px, in the
+/// order top, right, bottom, left, for the edges `edge_px` and the packed
+/// `edge_modes` of an instance.
+///
+/// The shader's `edge_offsets` places a box by the same rule, and the scrim's
+/// hole has to land on the box the panel draws. An inset stands its px inside
+/// the cell edge. A margin crosses the neighbor cell and stops its px short of
+/// the far side, and a gap reaches half as far, its top and left halves
+/// rounded down and its right and bottom halves rounded up. An outset stands
+/// its px outside. A negative offset reaches out across the cell beside the
+/// box.
+fn edge_offsets(edge_px: [f32; 4], edge_modes: u32, cell: [f32; 2]) -> [f32; 4] {
+    let extent = [cell[1], cell[0], cell[1], cell[0]];
+    array::from_fn(|side| {
+        let reach = extent[side] - edge_px[side];
+        let half = reach * 0.5;
+        let gap = match side {
+            0 | 3 => half.floor(),
+            _ => half.ceil(),
+        };
+        match (edge_modes >> (2 * side)) & 0b11 {
+            EDGE_MARGIN => -reach,
+            EDGE_GAP => -gap,
+            EDGE_OUTSET => -edge_px[side],
+            _ => edge_px[side],
+        }
+    })
+}
+
+/// The rect that `float_box` covers whole, as corners in physical px, or
+/// `None` for a box too small to hold one.
+///
+/// The box less its corner radius and a pixel at each side, so the rounded
+/// corners and the edge's one pixel ramp stay out of it.
+fn inner_rect(float_box: &FloatBox) -> Option<[f32; 4]> {
+    let inset = float_box.radius + 1.0;
+    let [left, top] = float_box.min.map(|edge| edge + inset);
+    let [right, bottom] = float_box.max.map(|edge| edge - inset);
+    (left < right && top < bottom).then_some([left, top, right, bottom])
+}
+
+/// Cut `region` into rects that tile it outside each of `holes`, into `out`,
+/// each as corners `[left, top, right, bottom]`.
+///
+/// A hole splits each rect it meets into the strips above it, below it, left
+/// of it, and right of it, so no two rects overlap and a blend over them
+/// reaches each pixel once. An empty region gives no rect.
+fn cut_rects(region: [f32; 4], holes: impl Iterator<Item = [f32; 4]>, out: &mut Vec<[f32; 4]>) {
+    out.clear();
+    out.push(region);
+    for hole in holes {
+        for index in 0..out.len() {
+            let [first, rest @ ..] = strips(out[index], hole);
+            out[index] = first;
+            out.extend(rest);
+        }
+        out.retain(|&rect| !empty_rect(rect));
+    }
+    out.retain(|&rect| !empty_rect(rect));
+}
+
+/// The strips of `rect` above, below, left of, and right of `hole`, some of
+/// them empty, or `rect` whole where the two do not meet.
+fn strips(rect: [f32; 4], hole: [f32; 4]) -> [[f32; 4]; 4] {
+    let [left, top, right, bottom] = rect;
+    let cut = [
+        hole[0].max(left),
+        hole[1].max(top),
+        hole[2].min(right),
+        hole[3].min(bottom),
+    ];
+    if empty_rect(cut) {
+        return [rect, [0.0; 4], [0.0; 4], [0.0; 4]];
+    }
+
+    let [cut_left, cut_top, cut_right, cut_bottom] = cut;
+    [
+        [left, top, right, cut_top],
+        [left, cut_bottom, right, bottom],
+        [left, cut_top, cut_left, cut_bottom],
+        [cut_right, cut_top, right, cut_bottom],
+    ]
+}
+
+fn empty_rect([left, top, right, bottom]: [f32; 4]) -> bool {
+    left >= right || top >= bottom
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        build_panel_instances, build_panel_instances_into, style_code, PanelInstance, PanelPass,
+        build_panel_instances, build_panel_instances_into, cut_rects, edge_offsets, style_code,
+        PanelInstance, PanelPass,
     };
     use crate::{
         render::{CellMetrics, GridLayout, RowAnchor},
@@ -726,6 +1046,62 @@ mod tests {
         Validator::new(ValidationFlags::all(), Capabilities::all())
             .validate(&module)
             .expect("validate panel");
+    }
+
+    /// A hole cuts each rect it meets into the strips above, below, left of,
+    /// and right of it, which tile the rect outside the hole. A hole that
+    /// misses a rect leaves it whole, a second hole cuts the strips the first
+    /// left, and an empty region gives no rect.
+    #[test]
+    fn holes_cut_the_scrim_region_into_the_strips_around_them() {
+        let cut = |region, holes: &[[f32; 4]]| {
+            let mut rects = Vec::new();
+            cut_rects(region, holes.iter().copied(), &mut rects);
+            rects
+        };
+        let region = [0.0, 10.0, 100.0, 80.0];
+
+        assert_eq!(
+            cut(region, &[[20.0, 30.0, 60.0, 50.0]]),
+            [
+                [0.0, 10.0, 100.0, 30.0],
+                [0.0, 50.0, 100.0, 80.0],
+                [0.0, 30.0, 20.0, 50.0],
+                [60.0, 30.0, 100.0, 50.0],
+            ],
+        );
+        assert_eq!(
+            cut(
+                region,
+                &[[0.0, 0.0, 100.0, 20.0], [70.0, 60.0, 120.0, 90.0]]
+            ),
+            [[0.0, 20.0, 100.0, 60.0], [0.0, 60.0, 70.0, 80.0]],
+            "a hole over the top edge leaves the rest, and a second over the corner cuts it",
+        );
+        assert_eq!(cut(region, &[[200.0, 0.0, 300.0, 50.0]]), [region]);
+        assert_eq!(cut([0.0, 90.0, 100.0, 80.0], &[]), Vec::<[f32; 4]>::new());
+    }
+
+    /// An edge offset is the inset's px, a margin's reach across the neighbor
+    /// cell less its px, a gap's half of that rounded down at the top and the
+    /// left and up at the right and the bottom, or an outset's px outward.
+    #[test]
+    fn edge_offsets_reach_by_mode() {
+        let modes = |top: u32, right: u32, bottom: u32, left: u32| {
+            top | right << 2 | bottom << 4 | left << 6
+        };
+        assert_eq!(
+            [
+                edge_offsets([3.0, 3.0, 3.0, 3.0], modes(0, 0, 0, 0), [18.0, 36.0]),
+                edge_offsets([10.0, 5.0, 5.0, 5.0], modes(1, 2, 2, 2), [18.0, 36.0]),
+                edge_offsets([5.0, 5.0, 5.0, 5.0], modes(3, 3, 1, 1), [18.0, 36.0]),
+            ],
+            [
+                [3.0, 3.0, 3.0, 3.0],
+                [-26.0, -7.0, -16.0, -6.0],
+                [-5.0, -5.0, -31.0, -13.0],
+            ],
+        );
     }
 
     /// The color at pixel `(x, y)` once a `cells`-square panel at cell (1, 1) in

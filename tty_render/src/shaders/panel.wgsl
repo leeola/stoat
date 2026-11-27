@@ -16,7 +16,8 @@ struct Globals {
     scale_factor: f32,
     // The scrim's top in physical pixels down from the surface's top.
     scrim_top: f32,
-    pad0: u32,
+    // How many boxes `floating` holds this frame.
+    float_count: u32,
     // The scrim's color and alpha. A zero alpha is a frame with no scrim.
     scrim: vec4<f32>,
 }
@@ -31,6 +32,20 @@ var<uniform> globals: Globals;
 var<storage, read> instances: array<f32>;
 
 const INSTANCE_STRIDE: u32 = 28u;
+
+// The box of one floating panel, which the scrim leaves clear, placed on the
+// CPU: its corners in physical pixels, its corner radius held to its shorter
+// half side, and its rounded corners in bits 0-3 from top-left clockwise.
+struct FloatBox {
+    min: vec2<f32>,
+    max: vec2<f32>,
+    radius: f32,
+    corners: u32,
+}
+
+// The floating boxes while a scrim is set, `globals.float_count` of them.
+@group(0) @binding(2)
+var<storage, read> floating: array<FloatBox>;
 
 // Bits of a panel's shape word past its four corner bits, one per bottom
 // corner that a fillet joins to the surface below.
@@ -450,33 +465,18 @@ fn shadow_over_scrim(in: VsOut) -> bool {
 /// How much of the pixel at `frag` the boxes of the floating panels cover, by
 /// the ramp across half a pixel each side of the edge that a fill draws with.
 ///
-/// The walk covers every instance, as boxed does, since the scrim holds off
-/// each floating box whichever panel declared it.
+/// The walk reads the boxes the CPU placed, since every fragment of the
+/// surface takes it, and placing a box from its instance here costs each of
+/// them a dozen reads and the edge offsets.
 fn float_cover(frag: vec2<f32>) -> f32 {
     var cover = 0.0;
-    for (var j = 0u; j < globals.count; j = j + 1u) {
-        let base = j * INSTANCE_STRIDE;
-        if !floats(instances[base + 16u], instances[base + 12u]) {
-            continue;
-        }
-        let cell_j = vec2<f32>(instances[base], instances[base + 1u]);
-        let size_j = vec2<f32>(instances[base + 2u], instances[base + 3u]);
-        let edge_px_j = vec4<f32>(
-            instances[base + 22u],
-            instances[base + 23u],
-            instances[base + 24u],
-            instances[base + 25u]
-        );
-        let sdf = occluder_sdf(
-            frag,
-            cell_j,
-            size_j,
-            globals.cell_size,
-            instances[base + 13u],
-            edge_px_j,
-            bitcast<u32>(instances[base + 26u]),
-            bitcast<u32>(instances[base + 17u]) & 15u
-        );
+    for (var j = 0u; j < globals.float_count; j = j + 1u) {
+        let float_box = floating[j];
+        let p = frag - (float_box.min + float_box.max) * 0.5;
+        let corner = select(select(0u, 1u, p.x > 0.0), select(3u, 2u, p.x > 0.0), p.y > 0.0);
+        let rounded = ((float_box.corners >> corner) & 1u) == 1u;
+        let half = (float_box.max - float_box.min) * 0.5;
+        let sdf = rounded_box_sdf(p, half, select(0.0, float_box.radius, rounded));
         cover = max(cover, clamp(0.5 - sdf, 0.0, 1.0));
     }
     return cover;
@@ -611,9 +611,13 @@ fn dash_mask(in: VsOut) -> f32 {
     return select(0.0, 1.0, fract(along / period) < 0.6);
 }
 
-fn coverage_of(in: VsOut) -> Coverage {
+/// The coverages of the panel at the fragment.
+///
+/// The exterior shadow's blur is the most of what this costs, so it runs only
+/// where `blur` asks for the shadow, and the shadow reads 0 elsewhere. A stage
+/// that blends no exterior shadow passes false.
+fn coverage_of(in: VsOut, blur: bool) -> Coverage {
     let p = in.quad_px;
-    let radius = box_radius(in);
     let box_sdf = box_distance(in);
 
     // Frame band inside the box edge, weighted by the border style.
@@ -634,13 +638,46 @@ fn coverage_of(in: VsOut) -> Coverage {
     );
     let fill_alpha = fill_weight(in) * max(interior, fillet);
 
-    // The shadow rectangle is the box shifted by the offset, blurred by a
-    // gaussian that reaches zero at the margin. A zero margin means no shadow.
-    let offset = in.shadow.xy;
+    var shadow = 0.0;
+    if blur {
+        shadow = exterior_shadow(in);
+    }
+
+    // Tucked (mode 1) and overhang (mode 2): a band inside the box that rises
+    // from its bottom edge and fades out across the margin. Tucked shades a
+    // raised card with the gaussian edge an inset blur casts, and the fainter
+    // overhang reads as a panel tucked under whatever overhangs it above.
     let margin = in.shadow.z;
-    let sigma = margin / 3.0;
-    let shadow_min = in.box_min + offset;
-    let shadow_max = in.box_max + offset;
+    let rise = in.box_max.y - p.y;
+    let tucked = SHADOW_ALPHA_TUCKED * 0.5 * (1.0 - erf(vec2<f32>(rise * sqrt(0.5) / (margin / 3.0))).x);
+    let overhang = SHADOW_ALPHA_OVERHANG * (1.0 - smoothstep(0.0, margin, rise));
+    let band = select(
+        0.0,
+        select(overhang, tucked, in.shadow_mode < 1.5) * interior,
+        casts_band(in.shadow_mode)
+    );
+
+    return Coverage(stroke, fill_alpha, shadow, band);
+}
+
+/// The panel's exterior shadow at the fragment, for a drop (mode 0), a halo
+/// (mode 3), or a cast (mode 4), and 0 for any other.
+///
+/// The shadow rectangle is the box shifted by the offset, blurred by a
+/// gaussian that reaches zero at the margin. A zero margin means no shadow. The
+/// shadow is gated to the box exterior, so an unfilled panel's interior is not
+/// washed by its own shadow. The stages that draw the shadow alone take it here
+/// rather than from coverage_of, which pays for the box's other coverages too.
+fn exterior_shadow(in: VsOut) -> f32 {
+    let margin = in.shadow.z;
+    if margin <= 0.0 || casts_band(in.shadow_mode) {
+        return 0.0;
+    }
+
+    let p = in.quad_px;
+    let interior = clamp(0.5 - box_distance(in), 0.0, 1.0);
+    let shadow_min = in.box_min + in.shadow.xy;
+    let shadow_max = in.box_max + in.shadow.xy;
     // A halo (mode 3) paints nothing below the box's bottom edge or right of
     // its right edge, so a box docked in the window's bottom-right corner meets
     // what sits below and right of it with no shadow between them. A cast
@@ -657,29 +694,9 @@ fn coverage_of(in: VsOut) -> Coverage {
         select(clamp(p.y - in.box_max.y + 0.5, 0.0, 1.0), 0.0, beside),
         casts_down
     );
-    // Exterior shadow for drop (mode 0), halo (mode 3), and cast (mode 4), gated
-    // to the box exterior so an unfilled panel's interior is not washed by its
-    // own shadow. `interior` is 1 inside the box and 0 outside.
     let peak = select(select(SHADOW_ALPHA, SHADOW_ALPHA_HALO, halo), SHADOW_ALPHA_CAST, casts_down);
-    let shadow_base = select(
-        0.0,
-        peak * shadow_alpha(p, shadow_min, shadow_max, radius, sigma),
-        margin > 0.0 && !casts_band(in.shadow_mode)
-    ) * (1.0 - interior) * clip;
-    // Tucked (mode 1) and overhang (mode 2): a band inside the box that rises
-    // from its bottom edge and fades out across the margin. Tucked shades a
-    // raised card with the gaussian edge an inset blur casts, and the fainter
-    // overhang reads as a panel tucked under whatever overhangs it above.
-    let rise = in.box_max.y - p.y;
-    let tucked = SHADOW_ALPHA_TUCKED * 0.5 * (1.0 - erf(vec2<f32>(rise * sqrt(0.5) / sigma)).x);
-    let overhang = SHADOW_ALPHA_OVERHANG * (1.0 - smoothstep(0.0, margin, rise));
-    let band = select(
-        0.0,
-        select(overhang, tucked, in.shadow_mode < 1.5) * interior,
-        casts_band(in.shadow_mode)
-    );
-
-    return Coverage(stroke, fill_alpha, shadow_base, band);
+    let blurred = shadow_alpha(p, shadow_min, shadow_max, box_radius(in), margin / 3.0);
+    return peak * blurred * (1.0 - interior) * clip;
 }
 
 /// Hand an accumulated premultiplied color back as the unpremultiplied color the
@@ -716,11 +733,10 @@ fn fs_under(in: VsOut) -> @location(0) vec4<f32> {
         return unpremultiply(over(vec4<f32>(0.0), fill_color(in), fill));
     }
 
-    let c = coverage_of(in);
-    let shadow = select(c.shadow, 0.0, shadow_over_scrim(in));
+    let c = coverage_of(in, !shadow_over_scrim(in));
 
     var acc = vec4<f32>(0.0, 0.0, 0.0, 0.0);
-    acc = over(acc, SHADOW_COLOR, shadow);
+    acc = over(acc, SHADOW_COLOR, c.shadow);
     acc = over(acc, fill_color(in), c.fill);
     acc = over(acc, SHADOW_COLOR, c.band);
     return unpremultiply(acc);
@@ -739,7 +755,7 @@ fn fs_shadow(in: VsOut) -> @location(0) vec4<f32> {
     if shadow_over_scrim(in) || occluded(in.clip.xy, in.instance) || boxed(in.clip.xy) {
         discard;
     }
-    let shadow = coverage_of(in).shadow;
+    let shadow = exterior_shadow(in);
     if shadow <= 0.0 {
         discard;
     }
@@ -750,22 +766,27 @@ fn fs_shadow(in: VsOut) -> @location(0) vec4<f32> {
 ///
 /// CSS paints a `box-shadow` over all that lies beneath its box, text
 /// included, and the boards lay a dialog's shadow over the overlay. The
-/// shadow keeps off every floating box, as the scrim does.
+/// shadow keeps off every floating box, as the scrim does. The pass draws this
+/// stage for the floating slots alone.
 @fragment
 fn fs_float_shadow(in: VsOut) -> @location(0) vec4<f32> {
-    if !floats(in.shadow_mode, in.shadow.z) {
-        discard;
-    }
-    let shadow = coverage_of(in).shadow * (1.0 - float_cover(in.clip.xy));
+    let shadow = exterior_shadow(in) * (1.0 - float_cover(in.clip.xy));
     if shadow <= 0.0 {
         discard;
     }
     return vec4<f32>(SHADOW_COLOR, shadow);
 }
 
-/// One quad over the whole width of the surface from the scrim's top down.
+/// One quad over one rect of the scrim's region, its corners in physical
+/// pixels.
+///
+/// The CPU cuts the region around the inner rect of each floating box, where
+/// the scrim would draw nothing, so the rects tile what it dims.
 @vertex
-fn vs_scrim(@builtin(vertex_index) vertex_index: u32) -> @builtin(position) vec4<f32> {
+fn vs_scrim(
+    @builtin(vertex_index) vertex_index: u32,
+    @location(0) rect: vec4<f32>,
+) -> @builtin(position) vec4<f32> {
     var corners = array<vec2<f32>, 6>(
         vec2<f32>(0.0, 0.0),
         vec2<f32>(1.0, 0.0),
@@ -774,9 +795,13 @@ fn vs_scrim(@builtin(vertex_index) vertex_index: u32) -> @builtin(position) vec4
         vec2<f32>(1.0, 0.0),
         vec2<f32>(1.0, 1.0)
     );
-    let corner = corners[vertex_index % 6u];
-    let top = 1.0 - globals.scrim_top / globals.resolution.y * 2.0;
-    return vec4<f32>(corner.x * 2.0 - 1.0, mix(top, -1.0, corner.y), 0.0, 1.0);
+    let pixel = mix(rect.xy, rect.zw, corners[vertex_index % 6u]);
+    return vec4<f32>(
+        pixel.x / globals.resolution.x * 2.0 - 1.0,
+        1.0 - pixel.y / globals.resolution.y * 2.0,
+        0.0,
+        1.0
+    );
 }
 
 /// The scrim's color at the opacity that scrim_alpha gives the pixel.
@@ -804,7 +829,7 @@ fn fs_stroke(in: VsOut) -> @location(0) vec4<f32> {
     if occluded(in.clip.xy, in.instance) {
         discard;
     }
-    let c = coverage_of(in);
+    let c = coverage_of(in, false);
 
     var acc = vec4<f32>(0.0, 0.0, 0.0, 0.0);
     acc = over(acc, in.border, ground_weight(in));
