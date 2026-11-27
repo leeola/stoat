@@ -223,7 +223,7 @@ pub struct PreviewCache {
 }
 
 /// What [`PreviewCache`] knows about one commit's preview.
-pub(crate) enum Preview<'a> {
+pub enum Preview<'a> {
     /// No build has finished for this commit, so a caller paints "loading".
     Unbuilt,
     /// A build finished and the commit changed nothing.
@@ -257,7 +257,7 @@ impl PreviewCache {
     ///
     /// Render reads this per frame for the selected commit alone, which would
     /// say nothing [`Self::mark_used`] has not already said for that same sha.
-    pub(crate) fn get(&self, sha: &str) -> Preview<'_> {
+    pub fn get(&self, sha: &str) -> Preview<'_> {
         match self.sessions.get(sha) {
             None => Preview::Unbuilt,
             Some(None) => Preview::Empty,

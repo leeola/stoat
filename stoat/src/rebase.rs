@@ -192,7 +192,7 @@ pub enum ConflictResolution {
 }
 
 impl ActiveRebase {
-    pub(crate) fn new(state: RebaseState, branch: Option<String>) -> Self {
+    pub fn new(state: RebaseState, branch: Option<String>) -> Self {
         Self {
             workdir: state.workdir,
             onto: state.onto.clone(),

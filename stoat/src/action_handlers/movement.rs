@@ -3143,14 +3143,14 @@ fn trim_whitespace(rope: &Rope, start: usize, end: usize) -> Option<(usize, usiz
 }
 
 #[derive(Copy, Clone, Debug)]
-pub(crate) enum ChangeDir {
+pub enum ChangeDir {
     Next,
     Prev,
 }
 
 /// Which differ's stops a change walk reads.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
-pub(crate) enum ChangeUnit {
+pub enum ChangeUnit {
     /// The changes the tree pass marked. A refined hunk offers a stop per run,
     /// and a hunk the tree pass found nothing in offers none.
     Tree,
@@ -4038,7 +4038,7 @@ pub(crate) fn toggle_change_wrap(stoat: &mut Stoat) -> UpdateEffect {
 
 /// [`goto_change`] with its count supplied rather than read from the pending
 /// keypress, so a replay repeats the count the motion was made with.
-pub(crate) fn goto_change_impl(
+pub fn goto_change_impl(
     stoat: &mut Stoat,
     dir: ChangeDir,
     count: u32,

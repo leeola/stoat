@@ -1,0 +1,2626 @@
+use crossterm::event::Event;
+use ratatui::{
+    buffer::Buffer,
+    layout::Rect,
+    style::{Color, Modifier, Style},
+};
+use slotmap::SlotMap;
+use std::{
+    collections::HashMap,
+    mem,
+    path::{Path, PathBuf},
+    sync::LazyLock,
+};
+use stoat::{
+    action_handlers, apc_emit,
+    app::{MessageKind, Stoat},
+    buffer_registry::BufferRegistry,
+    diff_changes,
+    diff_changes::{DiffChangesState, ExcerptStats},
+    editor_state::{EditorId, EditorState},
+    host::{git::FileKind, FakeRepoBuilder, GitHost},
+    pane::{DockPanel, DockSide, DockVisibility, FocusTarget, View},
+    render::{
+        commits::PreviewDials,
+        content_lane,
+        diff_changes::{
+            header_counts, header_left, header_path, paint_header, paint_stack_page,
+            paint_stack_rows, PagePaint,
+        },
+        paint, review,
+        review::{DiffColumns, DiffDials, DiffLayout},
+        surface_blank,
+        undercurl::UndercurlBatch,
+        FrameCtx, TypeScale, SINGLE_MINIMAP_STRIP_ID,
+    },
+    test_fixture::drain_apc,
+    test_harness::TestHarness,
+    theme::{scope, TypeRole},
+    workspace::{diff::WorktreeBase, Workspace},
+};
+use stoat_config::{LineNumbers, MinimapMode, WrapMode};
+use stoat_text::Point;
+use stoat_widgets::{text_run, ApcScene};
+use stoatty_protocol::command::{decode_stream, Command};
+use tokio::sync::mpsc::UnboundedReceiver;
+
+/// The inactive border color of the shipped theme, which the header
+/// hairlines take.
+const HAIRLINE: [u8; 3] = [0x2e, 0x32, 0x3b];
+
+/// The strip id, content id, and palette of a minimap strip that a frame
+/// declares.
+type Declared = (u32, u32, Vec<[u8; 3]>);
+
+/// The first row the changes view paints, as text, from one render that
+/// runs no pool job.
+fn first_row(h: &mut TestHarness) -> String {
+    let buf = h.render_composited();
+    (0..buf.area.width)
+        .map(|x| buf[(x, 0)].symbol())
+        .collect::<String>()
+        .trim_end()
+        .to_string()
+}
+
+/// The focused changes view's state, with the editors its excerpts are.
+fn stack(h: &mut TestHarness) -> (&mut DiffChangesState, &mut SlotMap<EditorId, EditorState>) {
+    let ws = h.stoat.active_workspace_mut();
+    let id = ws
+        .focused_diff_changes_id()
+        .expect("the changes view is open");
+    let Workspace {
+        diff_changes_views,
+        editors,
+        ..
+    } = ws;
+    (&mut diff_changes_views[id], editors)
+}
+
+/// The text in columns `x` to `x + width` of row `y`, trimmed.
+fn cells(buf: &Buffer, x: u16, width: u16, y: u16) -> String {
+    (x..x + width)
+        .map(|x| buf[(x, y)].symbol())
+        .collect::<String>()
+        .trim()
+        .to_string()
+}
+
+/// The text in columns `x` to `x + width` of header row `y`, trimmed, and
+/// the column it starts on.
+///
+/// The composite draws the header's hairlines as rules over the row's
+/// blank cells, so the reader takes a rule cell as blank.
+fn header_text(buf: &Buffer, x: u16, width: u16, y: u16) -> (String, Option<u16>) {
+    let symbol = |x: u16| match buf[(x, y)].symbol() {
+        "─" => " ",
+        symbol => symbol,
+    };
+    let start = (x..x + width).find(|&x| symbol(x) != " ");
+    let text: String = (x..x + width).map(symbol).collect();
+    (text.trim().to_string(), start)
+}
+
+/// The columns the live frame lays an excerpt out in over `inner` when the
+/// stack's gutters take `digits`, rich as the harness's theme resolves it.
+fn excerpt_columns(h: &TestHarness, inner: Rect, digits: u16) -> DiffColumns {
+    let theme = &h.stoat.theme;
+    let rich = review::diff_rich_gutter_scale(true, theme, theme.get(scope::UI_TEXT));
+    DiffColumns::compute(inner, DiffLayout::diff_view(digits, rich))
+}
+
+/// The line number a diff side's gutter shows on row `y`, the digits in
+/// the cells from the side's first cell to its text.
+///
+/// A rich gutter's number composites at the cell its run starts in, which
+/// is not the cell gutter's number field, so the reader takes the digits
+/// wherever the gutter put them.
+fn gutter_number(buf: &Buffer, side_x: u16, text_x: u16, y: u16) -> String {
+    (side_x..text_x)
+        .map(|x| buf[(x, y)].symbol())
+        .collect::<String>()
+        .chars()
+        .filter(char::is_ascii_digit)
+        .collect()
+}
+
+/// Two changed files under a focused changes view with no minimap, at a
+/// width that pairs each modified line with its base line, settled.
+fn two_files(height: u16) -> TestHarness {
+    changes_view(
+        120,
+        height,
+        &[("a.txt", "a\nx\n", "A\nx\n"), ("b.txt", "b\n", "B\n")],
+    )
+}
+
+/// `files` changed under a focused changes view with no minimap, opened
+/// over the first file, settled.
+fn changes_view(width: u16, height: u16, files: &[(&str, &str, &str)]) -> TestHarness {
+    let mut h = TestHarness::with_size(width, height);
+    h.stoat.settings.editor_minimap = Some(MinimapMode::Off);
+    // The changes view keeps its hints box up over the lower right, across
+    // the rows the checks read.
+    h.stoat.screen_hints_hidden = true;
+    h.stage_review_scenario("/repo", files);
+    h.open_file(&Path::new("/repo").join(files[0].0));
+    h.cover_with_diff_changes(false);
+    h.settle();
+    h
+}
+
+/// Each excerpt paints under a header row that counts its diff left of the
+/// divider and names its file right of it, with its rows numbered in the
+/// per-file diff's gutters, and only the focused excerpt paints a cursor.
+///
+/// The numbers are absolute, so each pair names its own base and buffer
+/// line. The cell layout ends the counts one cell before the divider and
+/// starts the name two cells past it.
+#[test]
+fn a_changes_view_paints_its_excerpts_under_their_file_headers() {
+    let mut h = two_files(16);
+    h.stoat.settings.editor_line_numbers = Some(LineNumbers::Absolute);
+    let buf = h.render_composited();
+    let inner = {
+        let ws = h.stoat.active_workspace();
+        ws.panes.pane(ws.panes.focus()).area
+    };
+    let cols = excerpt_columns(&h, inner, 2);
+
+    let numbers: Vec<(String, String)> = [1, 2, 3, 5]
+        .into_iter()
+        .map(|row| {
+            (
+                gutter_number(&buf, cols.left_x, cols.left_text_x, inner.y + row),
+                gutter_number(&buf, cols.right_x, cols.right_text_x, inner.y + row),
+            )
+        })
+        .collect();
+    let (state, editors) = stack(&mut h);
+    let cursors: Vec<Option<(u16, u16)>> = state
+        .excerpts
+        .iter()
+        .map(|excerpt| editors[excerpt.editor_id].cursor_screen_cell)
+        .collect();
+    // a.txt's three rows sit under its header on row 0, and b.txt's first
+    // row under its header on row 4.
+    h.stoat.stoatty = false;
+    let cells = h.render_composited();
+    let divider = review::diff_divider_x(inner).expect("a split stack");
+    let headers = [inner.y, inner.y + 4].map(|y| {
+        [
+            header_text(&cells, inner.x, divider - inner.x, y),
+            header_text(&cells, divider + 1, inner.right() - divider - 1, y),
+        ]
+    });
+
+    let pair = |n: &str| (n.to_string(), n.to_string());
+    let counts = "modified +1 \u{2212}1 \u{b7} 1 hunk";
+    let left = (
+        counts.to_string(),
+        Some(divider - 1 - counts.chars().count() as u16),
+    );
+    let right = |name: &str| (name.to_string(), Some(divider + 2));
+    assert_eq!(
+        (headers, numbers, cursors),
+        (
+            [[left.clone(), right("a.txt")], [left, right("b.txt")]],
+            vec![pair("1"), pair("2"), pair("3"), pair("1")],
+            vec![Some((cols.right_text_x, inner.y + 1)), None],
+        ),
+    );
+}
+
+/// The deepest soften leaves an excerpt's changed base word readable, as
+/// it does in the per-file diff view.
+///
+/// `main` became `other`, so the `m` is a changed char and the `f` is an
+/// unchanged one on the same row.
+#[test]
+fn the_deepest_soften_keeps_an_excerpt_s_changed_base_word_readable() {
+    let mut h = changes_view(
+        120,
+        16,
+        &[(
+            "a.rs",
+            "fn keep() {}\nfn main() {}\n",
+            "fn keep() {}\nfn other() {}\n",
+        )],
+    );
+    h.stoat.diff_syntax = false;
+    h.stoat.diff_soften = review::DIFF_SOFTEN_MAX;
+    let buf = h.render_composited();
+    let inner = {
+        let ws = h.stoat.active_workspace();
+        ws.panes.pane(ws.panes.focus()).area
+    };
+    let cols = excerpt_columns(&h, inner, 2);
+
+    let bg = paint::style_rgb(h.stoat.theme.get(scope::UI_BACKGROUND).bg)
+        .expect("the test theme has an rgb background");
+    let row = (inner.y..inner.y + inner.height)
+        .find(|&y| cells(&buf, cols.left_text_x, 7, y) == "fn main")
+        .expect("the changed line's base row paints in the left column");
+    let distance = |x: u16| {
+        let fg = paint::style_rgb(buf[(x, row)].style().fg).expect("an rgb foreground");
+        (paint::luma(fg) - paint::luma(bg)).abs()
+    };
+    let (unchanged, changed) = (distance(cols.left_text_x), distance(cols.left_text_x + 3));
+
+    assert!(
+        changed >= paint::FAINT_CONTRAST_FLOOR,
+        "the changed `m` stands {changed} from the background, under the floor",
+    );
+    assert!(
+        changed > unchanged,
+        "the changed `m` stands further from the background than the unchanged `f`: \
+         {changed} against {unchanged}",
+    );
+}
+
+/// The excerpts share the widest gutter any of them needs, so a five-line
+/// file's text starts at the column a 1200-line file's text starts at, the
+/// column a four-digit gutter leaves, and both wrap at that gutter's width.
+#[test]
+fn excerpts_of_different_sizes_share_one_text_column() {
+    let long_base: String = (1..=1200).map(|n| format!("{n}\n")).collect();
+    let long_text = long_base.replacen("1\n", "ONE\n", 1);
+    let mut h = changes_view(
+        120,
+        24,
+        &[
+            ("a.txt", "a\nb\nc\nd\ne\n", "A\nb\nc\nd\ne\n"),
+            ("b.txt", &long_base, &long_text),
+        ],
+    );
+    h.stoat.settings.editor_wrap = Some(WrapMode::EditorWidth);
+    h.render_composited();
+    let inner = {
+        let ws = h.stoat.active_workspace();
+        ws.panes.pane(ws.panes.focus()).area
+    };
+    // The wrap stops one cell short of the narrower text column.
+    let cols = excerpt_columns(&h, inner, 4);
+    let wrap = (cols.left_content_w.min(cols.right_content_w) - 1) as u32;
+
+    let (state, editors) = stack(&mut h);
+    let layouts: Vec<(Option<u16>, Option<u32>)> = state
+        .excerpts
+        .iter()
+        .map(|excerpt| {
+            let editor = &editors[excerpt.editor_id];
+            (
+                editor.text_rect.map(|text| text.x),
+                editor.display_map.wrap_width(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        layouts,
+        [(Some(cols.right_text_x), Some(wrap)); 2],
+        "both excerpts paint and wrap for the four-digit gutter"
+    );
+}
+
+/// A file name wider than the half right of the divider starts two cells
+/// past the divider and clips at the row's right edge.
+#[test]
+fn a_path_wider_than_its_half_clips_at_the_row_s_right_edge() {
+    let name = format!("{}.txt", "n".repeat(70));
+    let mut h = changes_view(120, 16, &[(&name, "a\n", "A\n")]);
+    h.stoat.stoatty = false;
+    let buf = h.render_composited();
+    let inner = {
+        let ws = h.stoat.active_workspace();
+        ws.panes.pane(ws.panes.focus()).area
+    };
+    let start = review::diff_divider_x(inner).expect("a split stack") + 2;
+
+    assert_eq!(
+        cells(&buf, start, inner.right() - start, inner.y),
+        name[..usize::from(inner.right() - start)]
+    );
+}
+
+/// A header names the directory, the bold name, and the bold extension in
+/// the type's color right of the divider. Left of it, against the
+/// divider, it reads the file's kind in its tag and counts the lines in
+/// their diff colors and the hunks in muted text. With no structural hunk
+/// the count names the hunks alone, and a count of zero takes no run.
+///
+/// The cells of a 120-wide row end the left half at column 58, one before
+/// the divider's column 59, and start the path at column 61.
+#[test]
+fn a_header_counts_its_lines_and_hunks_left_of_the_divider() {
+    let h = TestHarness::with_size(40, 4);
+    let theme = &h.stoat.theme;
+    let stats = |added, removed, hunks, structural| ExcerptStats {
+        added,
+        removed,
+        hunks,
+        structural,
+    };
+    let painted = |path: &str, stats: ExcerptStats| {
+        let row = Rect::new(0, 0, 120, 1);
+        let mut buf = Buffer::empty(row);
+        let path = header_path(path, theme);
+        let left = header_left(&FileKind::Modified, stats, false, None, theme);
+        paint_header(&mut buf, row, &path, &left, None, theme, None, true);
+        [header_text(&buf, 0, 59, 0), header_text(&buf, 60, 60, 0)]
+    };
+    let run = |text: &str, style: Style| (text.to_string(), style);
+    let header = |counts: &str, path: &str| {
+        let left = format!("modified {counts}").trim_end().to_string();
+        let start = Some(58 - left.chars().count() as u16);
+        [(left, start), (path.to_string(), Some(61))]
+    };
+
+    assert_eq!(
+        (
+            header_path("stoat/src/render/chrome.rs", theme),
+            header_counts(stats(12, 15, 2, 2), theme),
+            [
+                painted("src/theme.rs", stats(6, 0, 1, 0)),
+                painted("notes.txt", stats(0, 4, 3, 0)),
+                painted("a.rs", stats(1, 1, 1, 1)),
+                painted("new.txt", ExcerptStats::default()),
+            ],
+        ),
+        (
+            vec![
+                run("stoat/src/render/", theme.get(scope::UI_TEXT_MUTED)),
+                run(
+                    "chrome",
+                    theme.get(scope::UI_TEXT).add_modifier(Modifier::BOLD)
+                ),
+                run(
+                    ".rs",
+                    theme.get(scope::UI_TAG_RUST).add_modifier(Modifier::BOLD)
+                ),
+            ],
+            vec![
+                run("+12", theme.get(scope::DIFF_ADDED)),
+                run("\u{2212}15", theme.get(scope::DIFF_DELETED)),
+                run(
+                    "\u{b7} 2 git hunks \u{b7} 2 structural",
+                    theme.get(scope::UI_TEXT_MUTED)
+                ),
+            ],
+            [
+                header("+6 \u{b7} 1 hunk", "src/theme.rs"),
+                header("\u{2212}4 \u{b7} 3 hunks", "notes.txt"),
+                header("+1 \u{2212}1 \u{b7} 1 git hunk \u{b7} 1 structural", "a.rs"),
+                header("", "new.txt"),
+            ],
+        ),
+    );
+}
+
+/// A header too narrow for the divide starts its path one cell in from the
+/// left and follows it with the tag and the counts, a cell apart. A tag or
+/// a count that does not fit before the row's last cell takes no place,
+/// so none shows cut.
+#[test]
+fn a_unified_header_follows_its_path_with_its_tag_and_counts() {
+    let h = TestHarness::with_size(40, 4);
+    let theme = &h.stoat.theme;
+    let stats = ExcerptStats {
+        added: 12,
+        removed: 3,
+        hunks: 2,
+        structural: 0,
+    };
+    let painted = |width: u16| {
+        let row = Rect::new(0, 0, width, 1);
+        let mut buf = Buffer::empty(row);
+        let path = header_path("src/lib.rs", theme);
+        let left = header_left(&FileKind::Modified, stats, false, None, theme);
+        paint_header(&mut buf, row, &path, &left, None, theme, None, true);
+        (cells(&buf, 0, width, 0), buf[(1, 0)].symbol().to_string())
+    };
+
+    assert_eq!(
+        [painted(40), painted(24), painted(16)],
+        [
+            "src/lib.rs modified +12 \u{2212}3 \u{b7} 2 hunks",
+            "src/lib.rs modified",
+            "src/lib.rs",
+        ]
+        .map(|text| (text.to_string(), "s".to_string())),
+    );
+}
+
+/// The left half of each header reads its file's kind in a File Kind Tag,
+/// in the tag's foreground, before its counts, and ends one cell before
+/// the divider. A moved file reads `from` and the path it left before its
+/// tag, and a move that also edits names how alike the two files are.
+#[test]
+fn a_header_tags_its_file_s_kind() {
+    let h = TestHarness::with_size(40, 4);
+    let theme = &h.stoat.theme;
+    let stats = ExcerptStats {
+        added: 1,
+        removed: 1,
+        hunks: 1,
+        structural: 0,
+    };
+    let painted = |kind: FileKind| {
+        let row = Rect::new(0, 0, 120, 1);
+        let mut buf = Buffer::empty(row);
+        let left = header_left(&kind, stats, false, None, theme);
+        let path = header_path("a.rs", theme);
+        paint_header(&mut buf, row, &path, &left, None, theme, None, true);
+        let (text, start) = header_text(&buf, 0, 59, 0);
+        let tag_x = start.expect("a left half") as usize + text.find(&left.tag.0).expect("the tag");
+        let tag_fg = buf[(tag_x as u16, 0)].fg;
+        ((text, start), Some(tag_fg) == left.tag.1.fg)
+    };
+    let moved = FileKind::Moved {
+        from: PathBuf::from("src/old.rs"),
+        similarity: 94,
+    };
+
+    let left = |text: &str| {
+        let start = 58 - text.chars().count() as u16;
+        ((text.to_string(), Some(start)), true)
+    };
+    assert_eq!(
+        [
+            FileKind::Modified,
+            moved,
+            FileKind::Untracked,
+            FileKind::New,
+            FileKind::Deleted
+        ]
+        .map(painted),
+        [
+            left("modified +1 \u{2212}1 \u{b7} 1 hunk"),
+            left("from src/old.rs moved \u{b7} 94% +1 \u{2212}1 \u{b7} 1 hunk"),
+            left("untracked +1 \u{2212}1 \u{b7} 1 hunk"),
+            left("new +1 \u{2212}1 \u{b7} 1 hunk"),
+            left("deleted +1 \u{2212}1 \u{b7} 1 hunk"),
+        ],
+    );
+}
+
+/// A stack's header reads the kind that the repository's tally names for
+/// its file. A tally that changes the kind and nothing else, as a new
+/// similarity for a move does, repaints the header.
+#[test]
+fn a_stack_header_reads_the_kind_its_repo_tally_names() {
+    let mut h = TestHarness::with_size(120, 16);
+    h.stoat.settings.editor_minimap = Some(MinimapMode::Off);
+    h.stoat.screen_hints_hidden = true;
+    h.stage_rename_scenario("/repo", "old.txt", "moved.txt", "one\n", "ONE\n");
+    h.fake_git().add_repo("/repo").similarity("moved.txt", 94);
+    h.stoat
+        .active_workspace_mut()
+        .set_worktree_base(WorktreeBase::Head);
+    h.open_file(Path::new("/repo/moved.txt"));
+    h.cover_with_diff_changes(false);
+    h.settle();
+    h.stoat.stoatty = false;
+    let left_half = |h: &mut TestHarness| {
+        let buf = h.render_composited();
+        let inner = {
+            let ws = h.stoat.active_workspace();
+            ws.panes.pane(ws.panes.focus()).area
+        };
+        let divider = review::diff_divider_x(inner).expect("a split stack");
+        header_text(&buf, inner.x, divider - inner.x, inner.y).0
+    };
+    // The first frame stores no pane cache key, so the frame after it is
+    // the one a replay matches.
+    left_half(&mut h);
+    let before = left_half(&mut h);
+
+    h.fake_git().add_repo("/repo").similarity("moved.txt", 80);
+    h.stoat.active_workspace_mut().stale_hunk_tally();
+    h.settle_diff_jobs();
+    let left = |similarity: u8| {
+        format!("from old.txt moved \u{b7} {similarity}% +1 \u{2212}1 \u{b7} 1 hunk")
+    };
+    assert_eq!((before, left_half(&mut h)), (left(94), left(80)));
+}
+
+/// During a merge, a conflicted file's header tags it `conflict` with the
+/// conflict blocks its text holds. A file the index changes with no
+/// working change reads as the merge's. A modified one tags `merged`, and
+/// it and a new one name the branch the merge brings in after their line
+/// counts, in place of the hunk count.
+#[test]
+fn a_merge_tags_its_conflicted_and_its_merged_files() {
+    let block = |n: u32| format!("<<<<<<< HEAD\nours {n}\n=======\ntheirs {n}\n>>>>>>> main\n");
+    let conflicted = format!("{}x\n{}", block(1), block(2));
+    let mut h = merge_stack(|repo| {
+        repo.modified("a.txt", "x\n", &conflicted)
+            .conflicted_file("a.txt", Some("x\n"), Some("x\nours\n"), Some("x\ntheirs\n"))
+            .head_file("b.txt", "b\n")
+            .staged_file("b.txt", "B\n")
+            .staged_file("c.txt", "c\n");
+    });
+
+    assert_eq!(
+        header_lefts(&mut h),
+        [
+            "conflict \u{b7} 2 +10 \u{b7} 2 hunks",
+            "merged +1 \u{2212}1 from main",
+            "new +1 from main",
+        ],
+    );
+}
+
+/// A conflicted file that one side deleted tags `conflict` alone. In place
+/// of the hunk count it notes what ours did to the file and then what
+/// theirs did.
+#[test]
+fn a_conflict_one_side_deleted_reads_modify_delete() {
+    let mut h = merge_stack(|repo| {
+        repo.modified("a.txt", "a\n", "A\n")
+            .conflicted_file("a.txt", Some("a\n"), Some("A\n"), None)
+            .unstaged_file("b.txt", "B\n")
+            .conflicted_file("b.txt", Some("b\n"), None, Some("B\n"));
+    });
+
+    assert_eq!(
+        header_lefts(&mut h),
+        [
+            "conflict +1 \u{2212}1 modify / delete",
+            "conflict +1 delete / modify",
+        ],
+    );
+}
+
+/// During a merge, a file that the working tree changes keeps its own File
+/// Kind Tag and hunk count, since the change is the reader's rather than
+/// the merge's.
+#[test]
+fn a_file_changed_in_the_working_tree_keeps_its_own_tag_during_a_merge() {
+    let mut h = merge_stack(|repo| {
+        repo.modified("a.txt", "a\n", "A\n");
+    });
+
+    assert_eq!(
+        header_lefts(&mut h),
+        ["modified +1 \u{2212}1 \u{b7} 1 hunk"]
+    );
+}
+
+/// A resolve stages the file and takes it off the tally's unmerged list,
+/// and its kind stays modified. Its header repaints from the conflict tag
+/// to the merged one.
+#[test]
+fn a_resolve_repaints_the_header_s_merge_tag() {
+    let mut h = merge_stack(|repo| {
+        repo.modified("a.txt", "a\n", "A\n").conflicted_file(
+            "a.txt",
+            Some("a\n"),
+            Some("A\n"),
+            Some("Z\n"),
+        );
+    });
+    // The first frame stores no pane cache key, so the frame after it is
+    // the one a replay matches.
+    header_lefts(&mut h);
+    let before = header_lefts(&mut h);
+
+    h.fake_git()
+        .discover(Path::new("/repo"))
+        .expect("the repo")
+        .mark_resolved(Path::new("a.txt"))
+        .expect("a resolve");
+    h.stoat.active_workspace_mut().stale_hunk_tally();
+    h.settle_diff_jobs();
+
+    assert_eq!(
+        (before, header_lefts(&mut h)),
+        (
+            vec!["conflict +1 \u{2212}1 \u{b7} 1 hunk".to_string()],
+            vec!["merged +1 \u{2212}1 from main".to_string()]
+        ),
+    );
+}
+
+/// A changes view in cell layout over the files `seed` registers in /repo,
+/// during a merge of `main`, under the HEAD base, opened over `a.txt`.
+fn merge_stack(seed: impl FnOnce(&mut FakeRepoBuilder<'_>)) -> TestHarness {
+    let mut h = TestHarness::with_size(120, 40);
+    h.stoat.settings.editor_minimap = Some(MinimapMode::Off);
+    h.stoat.screen_hints_hidden = true;
+    h.stoat.active_workspace_mut().git_root = PathBuf::from("/repo");
+    {
+        let mut repo = h.fake_git().add_repo("/repo").with_fs(h.fake_fs());
+        repo.merge_in_progress("f00dfeed", Some("main"), "Merge branch 'main'");
+        seed(&mut repo);
+    }
+    h.stoat
+        .active_workspace_mut()
+        .set_worktree_base(WorktreeBase::Head);
+    h.open_file(Path::new("/repo/a.txt"));
+    h.cover_with_diff_changes(false);
+    h.settle();
+    h.stoat.stoatty = false;
+    h
+}
+
+/// The left half of each File Header of the focused stack, in stack order.
+fn header_lefts(h: &mut TestHarness) -> Vec<String> {
+    let buf = h.render_composited();
+    let inner = {
+        let ws = h.stoat.active_workspace();
+        ws.panes.pane(ws.panes.focus()).area
+    };
+    let divider = review::diff_divider_x(inner).expect("a split stack");
+    let (state, _) = stack(h);
+    let rows: Vec<u16> = state
+        .excerpts
+        .iter()
+        .map(|excerpt| (excerpt.top - state.scroll) as u16)
+        .collect();
+    rows.into_iter()
+        .map(|row| header_text(&buf, inner.x, divider - inner.x, inner.y + row).0)
+        .collect()
+}
+
+/// A move with no edit reads `identical` in place of its counts, after
+/// `from` and the path it left, muted with the name bold. An empty file
+/// reads `empty file` there.
+#[test]
+fn a_move_with_no_edit_reads_identical() {
+    let h = TestHarness::with_size(40, 4);
+    let theme = &h.stoat.theme;
+    let muted = theme.get(scope::UI_TEXT_MUTED);
+    let moved = FileKind::Moved {
+        from: PathBuf::from("src/old.rs"),
+        similarity: 100,
+    };
+    let left = header_left(&moved, ExcerptStats::default(), false, None, theme);
+    let empty = header_left(
+        &FileKind::Untracked,
+        ExcerptStats::default(),
+        true,
+        None,
+        theme,
+    );
+
+    let run = |text: &str, style: Style| (text.to_string(), style);
+    assert_eq!(
+        (left.from, left.tag.0, left.counts, empty.counts),
+        (
+            vec![
+                run("from ", muted),
+                run("src/", muted),
+                run("old", muted.add_modifier(Modifier::BOLD)),
+                run(
+                    ".rs",
+                    theme.get(scope::UI_TAG_RUST).add_modifier(Modifier::BOLD)
+                ),
+            ],
+            "moved".to_string(),
+            vec![run("identical", muted)],
+            vec![run("empty file", muted)],
+        ),
+    );
+}
+
+/// Under a live scene the tag is a rounded bar 14 sixteenths tall in the
+/// tag's background, which ends a gap before the first count's run, under
+/// the tag's run at the Small scale ten sixteenths inside it.
+#[test]
+fn a_live_header_draws_its_tag_as_a_rounded_bar() {
+    let mut h = two_files(16);
+    h.stoat.render();
+    let width = {
+        let ws = h.stoat.active_workspace();
+        ws.panes.pane(ws.panes.focus()).area.width
+    };
+    let (bars, runs, small, tag) =
+        paint_directly(&mut h, |state, editors, buffers, frame, scene| {
+            let mut buf = Buffer::empty(Rect::new(0, 0, width, 6));
+            let area = buf.area;
+            paint_stack_rows(
+                state,
+                editors,
+                buffers,
+                true,
+                frame.theme.get(scope::UI_TEXT),
+                &mut UndercurlBatch::default(),
+                frame,
+                &mut buf,
+                scene,
+                0,
+                area,
+                PagePaint::Cells,
+            );
+            let commands = decode_stream(scene.bytes());
+            let bars: Vec<(i16, i16, u16, u16, [u8; 3], u8)> = commands
+                .iter()
+                .filter_map(|command| match command {
+                    Command::Bar(bar) if bar.y == 1 => {
+                        Some((bar.x, bar.y, bar.width, bar.height, bar.color, bar.radius))
+                    },
+                    _ => None,
+                })
+                .collect();
+            let mut runs: Vec<(i16, String, u16)> = commands
+                .iter()
+                .filter_map(|command| match command {
+                    Command::TextRun(run) if run.row == 0 && run.col < (width / 2 * 16) as i16 => {
+                        Some((run.col, run.text.clone(), run.scale))
+                    },
+                    _ => None,
+                })
+                .collect();
+            runs.sort();
+            (
+                bars,
+                runs,
+                frame.theme.type_scale(TypeRole::Small),
+                frame.theme.get(scope::DIFF_KIND_MODIFIED),
+            )
+        });
+
+    let first_count = runs
+        .iter()
+        .find(|run| run.1 != "modified")
+        .map_or(0, |run| run.0 as u16);
+    let tag_width = text_run::advance_sixteenths(8, small) + 20;
+    let start = first_count - 16 - tag_width;
+    assert_eq!(
+        (bars, runs.first().cloned()),
+        (
+            vec![(
+                start as i16,
+                1,
+                tag_width,
+                14,
+                paint::style_rgb(tag.bg).expect("an RGB tag box"),
+                4
+            )],
+            Some((start as i16 + 10, "modified".to_string(), small)),
+        ),
+    );
+}
+
+/// Under a live scene a header too narrow for the divide lays its tag's
+/// box a gap past the path's end and its counts a gap past the box, and
+/// leaves out the path a moved file left.
+///
+/// Every type scale advances a full cell under test, so the path takes 16
+/// sixteenths a character from its pad of 20, and the box is the tag's
+/// advance plus an inset of 10 each side.
+#[test]
+fn a_live_unified_header_follows_its_path_with_its_tag() {
+    let h = TestHarness::with_size(40, 4);
+    let theme = &h.stoat.theme;
+    let row = Rect::new(0, 0, 60, 1);
+    let mut buf = Buffer::empty(row);
+    let mut scene = ApcScene::new();
+    scene.set_live(true);
+    let moved = FileKind::Moved {
+        from: PathBuf::from("old.rs"),
+        similarity: 100,
+    };
+    let stats = ExcerptStats {
+        added: 1,
+        removed: 0,
+        hunks: 1,
+        structural: 0,
+    };
+    let left = header_left(&moved, stats, false, None, theme);
+    let path = header_path("a.rs", theme);
+    paint_header(
+        &mut buf,
+        row,
+        &path,
+        &left,
+        None,
+        theme,
+        Some(&mut scene),
+        true,
+    );
+
+    let commands = decode_stream(scene.bytes());
+    let runs: Vec<(i16, String)> = commands
+        .iter()
+        .filter_map(|command| match command {
+            Command::TextRun(run) => Some((run.col, run.text.clone())),
+            _ => None,
+        })
+        .collect();
+    let boxes: Vec<(i16, u16)> = frame_bars(commands)
+        .into_iter()
+        .map(|bar| (bar.0, bar.2))
+        .collect();
+    let run = |col: i16, text: &str| (col, text.to_string());
+    assert_eq!(
+        (runs, boxes),
+        (
+            vec![
+                run(20, "a"),
+                run(36, ".rs"),
+                run(110, "moved"),
+                run(216, "+1"),
+                run(264, "\u{b7} 1 hunk"),
+            ],
+            vec![(100, 100)],
+        ),
+    );
+}
+
+/// Under a live scene the path a moved file left starts a pad in from the
+/// row's left edge and loses the characters that pass a gap before the
+/// tag's box.
+///
+/// The row is 100 wide, so the divide sits 792 sixteenths in, the counts
+/// end at 772, and the box of `moved` ends a gap before `+1` at 596.
+#[test]
+fn a_live_header_clips_the_old_path_a_gap_before_its_tag() {
+    let h = TestHarness::with_size(40, 4);
+    let theme = &h.stoat.theme;
+    let row = Rect::new(0, 0, 100, 1);
+    let mut buf = Buffer::empty(row);
+    let mut scene = ApcScene::new();
+    scene.set_live(true);
+    let moved = FileKind::Moved {
+        from: PathBuf::from("a/very/long/directory/path/to/the/old/file.rs"),
+        similarity: 100,
+    };
+    let stats = ExcerptStats {
+        added: 1,
+        removed: 0,
+        hunks: 1,
+        structural: 0,
+    };
+    let left = header_left(&moved, stats, false, None, theme);
+    let path = header_path("a.rs", theme);
+    paint_header(
+        &mut buf,
+        row,
+        &path,
+        &left,
+        None,
+        theme,
+        Some(&mut scene),
+        true,
+    );
+
+    let commands = decode_stream(scene.bytes());
+    let mut runs: Vec<(i16, String)> = commands
+        .iter()
+        .filter_map(|command| match command {
+            Command::TextRun(run) => Some((run.col, run.text.clone())),
+            _ => None,
+        })
+        .collect();
+    runs.sort();
+    let boxes: Vec<(i16, u16)> = frame_bars(commands)
+        .into_iter()
+        .map(|bar| (bar.0, bar.2))
+        .collect();
+    let run = |col: i16, text: &str| (col, text.to_string());
+    assert_eq!(
+        (runs, boxes),
+        (
+            vec![
+                run(20, "from "),
+                run(100, "a/very/long/directory/"),
+                run(490, "moved"),
+                run(596, "+1"),
+                run(644, "\u{b7} 1 hunk"),
+                run(812, "a"),
+                run(828, ".rs"),
+            ],
+            vec![(480, 100)],
+        ),
+    );
+}
+
+/// A folded header counts its hidden lines at the row's right edge, ending
+/// one cell before it in the disabled text color. One line reads `1 line
+/// hidden`, and a path too long for its room clips one cell before the
+/// count.
+#[test]
+fn a_folded_header_counts_its_hidden_lines_at_its_right_edge() {
+    let h = TestHarness::with_size(40, 4);
+    let theme = &h.stoat.theme;
+    let right = |path: &str, hidden: u32| {
+        let row = Rect::new(0, 0, 120, 1);
+        let mut buf = Buffer::empty(row);
+        let left = header_left(
+            &FileKind::Deleted,
+            ExcerptStats::default(),
+            false,
+            None,
+            theme,
+        );
+        let path = header_path(path, theme);
+        paint_header(&mut buf, row, &path, &left, Some(hidden), theme, None, true);
+        (header_text(&buf, 60, 60, 0), Some(buf[(118, 0)].fg))
+    };
+    let long = "n".repeat(60);
+
+    let disabled = theme.get(scope::UI_TEXT_DISABLED).fg;
+    assert_eq!(
+        [right("a.txt", 148), right("a.txt", 1), right(&long, 148)],
+        [
+            (format!("{:<42}148 lines hidden", "a.txt"), Some(61)),
+            (format!("{:<45}1 line hidden", "a.txt"), Some(61)),
+            (format!("{} 148 lines hidden", &long[..41]), Some(61)),
+        ]
+        .map(|text| (text, disabled)),
+    );
+}
+
+/// Under a live scene a folded header's hidden count is a run that ends a
+/// pad before the row's right edge, in the disabled text color, and the
+/// path's run stops a gap before it.
+///
+/// The row is 100 wide, so the path starts at 812 sixteenths and the count
+/// of 16 characters starts 20 plus 256 sixteenths before the edge at 1600.
+#[test]
+fn a_live_folded_header_ends_its_hidden_count_a_pad_before_its_edge() {
+    let h = TestHarness::with_size(40, 4);
+    let theme = &h.stoat.theme;
+    let row = Rect::new(0, 0, 100, 1);
+    let mut buf = Buffer::empty(row);
+    let mut scene = ApcScene::new();
+    scene.set_live(true);
+    let left = header_left(
+        &FileKind::Deleted,
+        ExcerptStats::default(),
+        false,
+        None,
+        theme,
+    );
+    let path = header_path(&"n".repeat(60), theme);
+    paint_header(
+        &mut buf,
+        row,
+        &path,
+        &left,
+        Some(148),
+        theme,
+        Some(&mut scene),
+        true,
+    );
+
+    let mut runs: Vec<(i16, String, [u8; 3])> = decode_stream(scene.bytes())
+        .into_iter()
+        .filter_map(|command| match command {
+            Command::TextRun(run) if run.col > 792 => Some((run.col, run.text, run.color)),
+            _ => None,
+        })
+        .collect();
+    runs.sort();
+    let color = |name: &str| paint::style_rgb(theme.get(name).fg).expect("an RGB color");
+    assert_eq!(
+        runs,
+        vec![
+            (812, "n".repeat(31), color(scope::UI_TEXT)),
+            (
+                1324,
+                "148 lines hidden".to_string(),
+                color(scope::UI_TEXT_DISABLED)
+            ),
+        ],
+    );
+}
+
+/// A fold of a file through its header repaints the stack, though the pane
+/// cache held the frame before it. The folded header counts the file's two
+/// lines at its right edge, and the next file's header shows under it.
+#[test]
+fn a_fold_of_a_file_repaints_the_stack() {
+    let mut h = two_files(16);
+    h.stoat.stoatty = false;
+    let inner = {
+        let ws = h.stoat.active_workspace();
+        ws.panes.pane(ws.panes.focus()).area
+    };
+    let divider = review::diff_divider_x(inner).expect("a split stack");
+    let right_half = |h: &mut TestHarness| {
+        let buf = h.render_composited();
+        let width = inner.right() - divider - 1;
+        [inner.y, inner.y + 1].map(|y| header_text(&buf, divider + 1, width, y).0)
+    };
+    right_half(&mut h);
+    let open = right_half(&mut h);
+
+    let (state, editors) = stack(&mut h);
+    diff_changes::toggle_file(state, editors, 0);
+    let pad = usize::from(inner.right() - 1 - 14 - (divider + 2));
+    assert_eq!(
+        (open[0].clone(), right_half(&mut h)),
+        (
+            "a.txt".to_string(),
+            [
+                format!("{:<pad$}2 lines hidden", "a.txt"),
+                "b.txt".to_string()
+            ],
+        ),
+    );
+}
+
+/// A file folded to its header hides the row under the header with its
+/// rows, the bare Scope row of a Rust file and the note row of an empty
+/// file alike, so the stack holds the header alone.
+#[test]
+fn a_folded_file_hides_the_row_under_its_header() {
+    let folded = |mut h: TestHarness| {
+        h.stoat.stoatty = false;
+        let (state, editors) = stack(&mut h);
+        let open = diff_changes::header_rows(&state.excerpts[0]);
+        diff_changes::toggle_file(state, editors, 0);
+        let rows = state.rows;
+        let buf = h.render_composited();
+        let inner = {
+            let ws = h.stoat.active_workspace();
+            ws.panes.pane(ws.panes.focus()).area
+        };
+        (
+            open,
+            rows,
+            header_text(&buf, inner.x, inner.width, inner.y + 1).0,
+        )
+    };
+    let scoped = parsed_stack(&[(
+        "a.rs",
+        "fn greet() {\n    let x = 1;\n}\n",
+        "fn greet() {\n    let x = 2;\n}\n",
+    )]);
+
+    assert_eq!(
+        [folded(scoped), folded(untracked_stack(16, 0))],
+        [(2, 1, String::new()), (2, 1, String::new())],
+    );
+}
+
+/// A fold of a file that waits on its diff map repaints its header with
+/// the hidden count, though the pane cache held the frame before it. Such
+/// a file shows no row either way, so no row of the stack moves.
+#[test]
+fn a_fold_of_a_waiting_file_repaints_its_header() {
+    let mut h = two_files(16);
+    h.stoat.stoatty = false;
+    stack(&mut h).0.excerpts[1].folded_version = None;
+    let inner = {
+        let ws = h.stoat.active_workspace();
+        ws.panes.pane(ws.panes.focus()).area
+    };
+    let divider = review::diff_divider_x(inner).expect("a split stack");
+    let header = |h: &mut TestHarness| {
+        let buf = h.render_composited();
+        let top = stack(h).0.excerpts[1].top as u16;
+        let width = inner.right() - divider - 1;
+        header_text(&buf, divider + 1, width, inner.y + top).0
+    };
+    header(&mut h);
+    let open = header(&mut h);
+
+    let (state, editors) = stack(&mut h);
+    diff_changes::toggle_file(state, editors, 1);
+    let pad = usize::from(inner.right() - 1 - 13 - (divider + 2));
+    assert_eq!(
+        (open, header(&mut h)),
+        (
+            "b.txt".to_string(),
+            format!("{:<pad$}1 line hidden", "b.txt")
+        ),
+    );
+}
+
+/// A focused changes view at 120 by `height` over one untracked file of
+/// `lines` numbered lines, with no minimap, settled.
+fn untracked_stack(height: u16, lines: u32) -> TestHarness {
+    let mut h = TestHarness::with_size(120, height);
+    h.stoat.settings.editor_minimap = Some(MinimapMode::Off);
+    h.stoat.screen_hints_hidden = true;
+    h.stoat.active_workspace_mut().git_root = PathBuf::from("/repo");
+    h.fake_git()
+        .add_repo(PathBuf::from("/repo"))
+        .with_fs(h.fake_fs())
+        .untracked("new.txt");
+    let text: String = (1..=lines).map(|n| format!("{n}\n")).collect();
+    h.fake_fs()
+        .insert_file(Path::new("/repo/new.txt"), text.as_bytes());
+    h.open_file(Path::new("/repo/new.txt"));
+    h.cover_with_diff_changes(false);
+    h.settle();
+    h
+}
+
+/// The pane-relative column and row of each `no base` in `buf`'s cells.
+fn no_base_cells(h: &TestHarness, buf: &Buffer) -> Vec<(u16, u16)> {
+    let inner = {
+        let ws = h.stoat.active_workspace();
+        ws.panes.pane(ws.panes.focus()).area
+    };
+    (inner.y..inner.bottom())
+        .flat_map(|y| (inner.x..inner.right() - 6).map(move |x| (x, y)))
+        .filter(|&(x, y)| (x..x + 7).map(|x| buf[(x, y)].symbol()).collect::<String>() == "no base")
+        .map(|(x, y)| (x - inner.x, y - inner.y))
+        .collect()
+}
+
+/// In cells a file with no base reads `no base` on its excerpt's first
+/// row, centered in the base half left of the divider. A stack scrolled
+/// past that row reads the label nowhere.
+///
+/// The view is shorter than the stack's thirteen rows, so the scroll holds.
+#[test]
+fn a_file_with_no_base_reads_no_base_on_its_first_row() {
+    let mut h = untracked_stack(10, 30);
+    h.stoat.stoatty = false;
+    let top = h.render_composited();
+    stack(&mut h).0.scroll = 2;
+    let scrolled = h.render_composited();
+
+    let half = {
+        let ws = h.stoat.active_workspace();
+        let inner = ws.panes.pane(ws.panes.focus()).area;
+        review::diff_divider_x(inner).expect("a split stack") - inner.x
+    };
+    assert_eq!(
+        (no_base_cells(&h, &top), no_base_cells(&h, &scrolled)),
+        (vec![((half - 7) / 2, 1)], Vec::new()),
+    );
+}
+
+/// Under a live scene the label is one caption run in the muted color,
+/// centered between the excerpt's left edge and the divide's hairline,
+/// with no box of its own over the base half's hatch.
+#[test]
+fn a_live_stack_draws_no_base_as_a_centered_run() {
+    let mut h = untracked_stack(16, 30);
+    let width = {
+        let ws = h.stoat.active_workspace();
+        ws.panes.pane(ws.panes.focus()).area.width
+    };
+    let (runs, scale, muted) = paint_directly(&mut h, |state, editors, buffers, frame, scene| {
+        let mut buf = Buffer::empty(Rect::new(0, 0, width, 14));
+        let area = buf.area;
+        paint_stack_rows(
+            state,
+            editors,
+            buffers,
+            true,
+            frame.theme.get(scope::UI_TEXT),
+            &mut UndercurlBatch::default(),
+            frame,
+            &mut buf,
+            scene,
+            0,
+            area,
+            PagePaint::Cells,
+        );
+        let runs: Vec<_> = decode_stream(scene.bytes())
+            .into_iter()
+            .filter_map(|command| match command {
+                Command::TextRun(run) if run.text == "no base" => {
+                    Some((run.col, run.row, run.scale, run.color, run.bg))
+                },
+                _ => None,
+            })
+            .collect();
+        (
+            runs,
+            frame.theme.type_scale(TypeRole::Caption),
+            paint::style_rgb(frame.theme.get(scope::UI_TEXT_MUTED).fg),
+        )
+    });
+
+    let divide = (width - 1) / 2 * 16 + review::DIVIDER_RULE_X;
+    let advance = text_run::advance_sixteenths(7, scale);
+    assert_eq!(
+        runs,
+        vec![(
+            ((divide - advance) / 2) as i16,
+            16,
+            scale,
+            muted.expect("an RGB muted color"),
+            None
+        )],
+    );
+}
+
+/// In cells an empty file with no base reads `no base` and `empty U+00B7 0
+/// lines` on the row under its header, each centered in its half of the
+/// row.
+#[test]
+fn an_empty_file_reads_no_base_and_empty_on_its_note_row() {
+    let mut h = untracked_stack(16, 0);
+    h.stoat.stoatty = false;
+    let buf = h.render_composited();
+    let inner = {
+        let ws = h.stoat.active_workspace();
+        ws.panes.pane(ws.panes.focus()).area
+    };
+    let divider = review::diff_divider_x(inner).expect("a split stack");
+
+    let right = "empty \u{b7} 0 lines";
+    let (left_width, right_width) = (divider - inner.x, inner.right() - divider - 1);
+    assert_eq!(
+        [
+            header_text(&buf, inner.x, left_width, inner.y + 1),
+            header_text(&buf, divider + 1, right_width, inner.y + 1),
+        ],
+        [
+            ("no base".to_string(), Some(inner.x + (left_width - 7) / 2)),
+            (
+                right.to_string(),
+                Some(divider + 1 + (right_width - 15) / 2)
+            ),
+        ],
+    );
+}
+
+/// Under a live scene the note row's two texts are caption runs in the
+/// muted color, each centered in its half, and the divide's hairline runs
+/// between them as a bar.
+#[test]
+fn a_live_note_row_draws_two_centered_runs_and_the_divide() {
+    let mut h = untracked_stack(16, 0);
+    let width = {
+        let ws = h.stoat.active_workspace();
+        ws.panes.pane(ws.panes.focus()).area.width
+    };
+    let (runs, bars, scale) = paint_directly(&mut h, |state, editors, buffers, frame, scene| {
+        let mut buf = Buffer::empty(Rect::new(0, 0, width, 14));
+        let area = buf.area;
+        paint_stack_rows(
+            state,
+            editors,
+            buffers,
+            true,
+            frame.theme.get(scope::UI_TEXT),
+            &mut UndercurlBatch::default(),
+            frame,
+            &mut buf,
+            scene,
+            0,
+            area,
+            PagePaint::Cells,
+        );
+        let commands = decode_stream(scene.bytes());
+        let runs: Vec<(String, i16)> = commands
+            .iter()
+            .filter_map(|command| match command {
+                Command::TextRun(run) if run.row == 16 => Some((run.text.clone(), run.col)),
+                _ => None,
+            })
+            .collect();
+        let bars: Vec<_> = frame_bars(commands)
+            .into_iter()
+            .filter(|bar| bar.1 == 16 && bar.2 == 1)
+            .collect();
+        (runs, bars, frame.theme.type_scale(TypeRole::Caption))
+    });
+
+    let divide = (width - 1) / 2 * 16 + review::DIVIDER_RULE_X;
+    let right = "empty \u{b7} 0 lines";
+    let advance = |text: &str| text_run::advance_sixteenths(text.chars().count(), scale);
+    let right_col = divide + (width * 16 - divide - advance(right)) / 2;
+    assert_eq!(
+        (runs, bars),
+        (
+            vec![
+                (
+                    "no base".to_string(),
+                    ((divide - advance("no base")) / 2) as i16
+                ),
+                (right.to_string(), right_col as i16),
+            ],
+            vec![(divide as i16, 16, 1, 16, HAIRLINE)],
+        ),
+    );
+}
+
+/// Under a live scene each header lies between two hairlines in the
+/// inactive border color, along its top and bottom edges, the width of the
+/// stack. The divide's hairline runs through it in the same color. The
+/// diff's mid divider below takes that color too, so the check reads the
+/// bars inside the header rows alone.
+#[test]
+fn a_header_lies_between_two_hairlines() {
+    let mut h = two_files(16);
+    h.stoat.render();
+    let index = {
+        let ws = h.stoat.active_workspace();
+        ws.panes.pane(ws.panes.focus()).index
+    };
+    let in_header = |y: i16, height: u16| {
+        [0, 64]
+            .into_iter()
+            .any(|top| y >= top && y + height as i16 <= top + 16)
+    };
+    let hairlines: Vec<_> = frame_bars(decode_stream(
+        h.stoat.apc_scene.lane_bytes(content_lane(index)),
+    ))
+    .into_iter()
+    .filter(|bar| bar.4 == HAIRLINE && in_header(bar.1, bar.3))
+    .collect();
+
+    assert_eq!(hairlines, header_hairlines());
+}
+
+/// Under a live scene a header draws its path as runs at the Ui scale from
+/// a pad past the divide's hairline, and its counts as runs at the Caption
+/// scale, the last ending a pad before the hairline. The stack is 120
+/// wide, so the hairline sits 952 sixteenths in, and the pad is 20.
+#[test]
+fn a_live_header_draws_its_path_and_counts_as_runs() {
+    let mut h = two_files(16);
+    h.stoat.render();
+    let theme = &h.stoat.theme;
+    let (ui, caption) = (
+        theme.type_scale(TypeRole::Ui),
+        theme.type_scale(TypeRole::Caption),
+    );
+    let commands = paint_directly(&mut h, |state, editors, buffers, frame, scene| {
+        let mut page = Buffer::empty(Rect::new(0, 0, 120, 4));
+        let text_style = frame.theme.get(scope::UI_TEXT);
+        paint_stack_page(
+            state,
+            editors,
+            buffers,
+            true,
+            text_style,
+            &mut UndercurlBatch::default(),
+            frame,
+            &mut page,
+            scene,
+            0,
+            PagePaint::Cells,
+        );
+        decode_stream(scene.bytes())
+    });
+
+    // a.txt's header is row 0, and its rows' gutter runs start on row 1.
+    let runs: Vec<(i16, u16, String)> = commands
+        .into_iter()
+        .filter_map(|command| match command {
+            Command::TextRun(run) if run.row == 0 => Some((run.col, run.scale, run.text)),
+            _ => None,
+        })
+        .collect();
+    let hairline: i16 = 59 * 16 + 8;
+    let path = runs
+        .iter()
+        .filter(|run| run.0 > hairline)
+        .min_by_key(|run| run.0)
+        .map(|run| (run.0, run.1));
+    let last_count = runs
+        .iter()
+        .filter(|run| run.0 < hairline)
+        .max_by_key(|run| run.0)
+        .map(|(col, scale, text)| {
+            let advance = text_run::advance_sixteenths(text.chars().count(), *scale);
+            (*col + advance as i16, *scale)
+        });
+
+    assert_eq!(
+        (path, last_count),
+        (Some((hairline + 20, ui)), Some((hairline - 20, caption))),
+        "the header's runs: {runs:?}",
+    );
+}
+
+/// With no excerpt the changes view says that its list builds, or that the
+/// list holds no change.
+#[test]
+fn a_changes_view_with_no_excerpt_says_why() {
+    let mut building = TestHarness::with_size(100, 16);
+    building.stage_review_scenario("/repo", &[("a.txt", "a\n", "A\n")]);
+    building.cover_with_diff_changes(false);
+
+    let mut clean = TestHarness::with_size(100, 16);
+    clean.stoat.active_workspace_mut().git_root = PathBuf::from("/repo");
+    clean.fake_git().add_repo(PathBuf::from("/repo"));
+    clean.cover_with_diff_changes(false);
+    clean.settle();
+
+    assert_eq!(
+        (first_row(&mut building), first_row(&mut clean)),
+        ("building changes...".to_string(), "no changes".to_string()),
+    );
+}
+
+/// A cursor on the last excerpt's last row makes the paint scroll the stack
+/// so that row is the bottom of the view.
+#[test]
+fn the_last_excerpts_last_row_scrolls_the_stack_to_its_end() {
+    let mut h = two_files(4);
+    action_handlers::dispatch(&mut h.stoat, &stoat_action::DiffChangesLast);
+    h.render_composited();
+
+    let (state, editors) = stack(&mut h);
+    let total = diff_changes::layout_stack(state, editors);
+    let cursor = diff_changes::cursor_stack_row(state, editors);
+    assert_eq!(
+        (state.focused, cursor, state.scroll + state.viewport_rows),
+        (1, Some(total - 1), total),
+    );
+}
+
+/// An excerpt whose header scrolled above the view paints from its own
+/// scroll row, so the top row shows the excerpt's row under the scroll.
+/// The numbers are absolute, so that row's number names its line.
+#[test]
+fn an_excerpt_cut_at_the_top_paints_from_its_scroll_row() {
+    let mut h = TestHarness::with_size(120, 6);
+    h.stoat.settings.editor_minimap = Some(MinimapMode::Off);
+    h.stoat.settings.editor_line_numbers = Some(LineNumbers::Absolute);
+    let base: String = (1..=8).map(|n| format!("{n}\n")).collect();
+    let text: String = (1..=8).map(|n| format!("{n}!\n")).collect();
+    h.stage_review_scenario("/repo", &[("a.txt", &base, &text)]);
+    h.cover_with_diff_changes(false);
+    h.settle();
+    {
+        let (state, editors) = stack(&mut h);
+        let editor = &mut editors[state.excerpts[0].editor_id];
+        diff_changes::place_cursor(editor, Point::new(4, 0));
+        state.scroll = 3;
+    }
+
+    let buf = h.render_composited();
+    let inner = Rect::new(0, 0, 120, 5);
+    let cols = excerpt_columns(&h, inner, 2);
+    let (state, editors) = stack(&mut h);
+    let scroll_row = editors[state.excerpts[0].editor_id].scroll_row;
+    assert_eq!(
+        (
+            state.scroll,
+            scroll_row,
+            gutter_number(&buf, cols.right_x, cols.right_text_x, inner.y)
+        ),
+        (3, 2, "3".to_string()),
+    );
+}
+
+/// Two files of twelve changed lines each under a changes view `height`
+/// rows tall, numbered absolute and painted once.
+///
+/// The files end with no newline, so no empty row follows their last
+/// lines. a.txt takes stack rows 0 to 12 and b.txt rows 13 to 25, and the
+/// cursor stands on a.txt's first row.
+fn two_long_files(height: u16) -> TestHarness {
+    let base = (1..=12)
+        .map(|n| n.to_string())
+        .collect::<Vec<_>>()
+        .join("\n");
+    let text = (1..=12)
+        .map(|n| format!("{n}!"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let mut h = changes_view(
+        120,
+        height,
+        &[("a.txt", &base, &text), ("b.txt", &base, &text)],
+    );
+    h.stoat.settings.editor_line_numbers = Some(LineNumbers::Absolute);
+    h.render_composited();
+    h
+}
+
+/// A stack scrolled into a file's rows pins that file's header on the
+/// first row, over the stack row under it, and the rows below show the
+/// stack. A header row at the top, or a file's last row, shows in place,
+/// so two headers never stack.
+#[test]
+fn a_scrolled_stack_pins_the_header_of_the_file_under_its_top_edge() {
+    let mut h = two_long_files(12);
+    let cols = excerpt_columns(&h, Rect::new(0, 0, 120, 11), 2);
+    let frames = [0, 3, 12, 13, 15].map(|scroll| {
+        stack(&mut h).0.scroll = scroll;
+        let buf = h.render_composited();
+        let (state, editors) = stack(&mut h);
+        (
+            diff_changes::pinned_header(state, editors, scroll).file,
+            buf,
+        )
+    });
+    // The halves of the header row either side of the divider's column 59,
+    // which a pinned header's divide fills.
+    let header = |at: usize| {
+        let buf = &frames[at].1;
+        [header_text(buf, 0, 59, 0).0, header_text(buf, 60, 60, 0).0]
+    };
+    let number =
+        |at: usize, y: u16| gutter_number(&frames[at].1, cols.right_x, cols.right_text_x, y);
+    // The composite reads the live layout, where the tag's inset and the
+    // gap after it span two cells.
+    let named = |file: &str| {
+        [
+            "modified  +12 \u{2212}12 \u{b7} 1 hunk".to_string(),
+            file.to_string(),
+        ]
+    };
+
+    assert_eq!(
+        (
+            frames.each_ref().map(|(file, _)| *file),
+            [header(0), header(1), header(3), header(4)],
+            (number(2, 0), number(1, 1)),
+        ),
+        (
+            [None, Some(0), None, None, Some(1)],
+            [
+                named("a.txt"),
+                named("a.txt"),
+                named("b.txt"),
+                named("b.txt")
+            ],
+            ("12".to_string(), "4".to_string()),
+        ),
+    );
+}
+
+/// A pinned header covers its row with a panel whose body draws nothing, so
+/// a pool's composite leaves the row to the live grid, and lays its two
+/// hairlines and the divide over that panel. The panel casts its shadow on
+/// the rows under it. A header in place declares no panel on its row.
+#[test]
+fn a_pinned_header_covers_its_row_with_a_frameless_panel() {
+    let mut h = two_long_files(12);
+    let index = {
+        let ws = h.stoat.active_workspace();
+        ws.panes.pane(ws.panes.focus()).index
+    };
+    let mut first_row_lane = |scroll: usize| -> Vec<String> {
+        stack(&mut h).0.scroll = scroll;
+        h.stoat.render();
+        decode_stream(h.stoat.apc_scene.lane_bytes(content_lane(index)))
+            .into_iter()
+            .flat_map(|command| match command {
+                Command::Panel(panel) if panel.top > 0 => Vec::new(),
+                Command::Panel(panel) => vec![format!(
+                    "panel {},{} {}x{} {:?} {:?} {:?}",
+                    panel.left,
+                    panel.top,
+                    panel.width,
+                    panel.height,
+                    panel.style,
+                    panel.fill,
+                    panel.shadow
+                )],
+                command => frame_bars(vec![command])
+                    .into_iter()
+                    .filter(|bar| bar.4 == HAIRLINE && bar.1 < 16)
+                    .map(|bar| match bar.3 {
+                        1 => format!("hairline {}", bar.1),
+                        _ => format!("divide {}", bar.0),
+                    })
+                    .collect(),
+            })
+            .collect()
+    };
+
+    let rules = ["hairline 0", "hairline 15", "divide 952"].map(String::from);
+    assert_eq!(
+        (first_row_lane(3), first_row_lane(0)),
+        (
+            [
+                vec!["panel 0,0 120x1 None_ None Cast".to_string()],
+                rules.to_vec()
+            ]
+            .concat(),
+            rules.to_vec(),
+        ),
+    );
+}
+
+/// A view under eight rows pins nothing, so its first row shows the stack
+/// row under the scroll.
+#[test]
+fn a_viewport_under_eight_rows_pins_nothing() {
+    let mut h = two_long_files(8);
+    stack(&mut h).0.scroll = 3;
+    let buf = h.render_composited();
+    let cols = excerpt_columns(&h, Rect::new(0, 0, 120, 7), 2);
+
+    assert_eq!(
+        (
+            {
+                let (state, editors) = stack(&mut h);
+                diff_changes::pinned_header(state, editors, 3).file
+            },
+            gutter_number(&buf, cols.right_x, cols.right_text_x, 0),
+        ),
+        (None, "3".to_string()),
+    );
+}
+
+/// A cursor under the pinned header is off screen, so the paint records no
+/// cell for it. One row lower it records the cell under the pinned row.
+#[test]
+fn a_cursor_under_the_pinned_header_records_no_cell() {
+    let mut h = two_long_files(12);
+    {
+        let (state, editors) = stack(&mut h);
+        diff_changes::place_cursor(&mut editors[state.excerpts[0].editor_id], Point::new(4, 0));
+    }
+    h.render_composited();
+    let mut cell_at = |scroll: usize| {
+        stack(&mut h).0.scroll = scroll;
+        h.render_composited();
+        let (state, editors) = stack(&mut h);
+        editors[state.excerpts[0].editor_id]
+            .cursor_screen_cell
+            .map(|(_, y)| y)
+    };
+
+    assert_eq!((cell_at(5), cell_at(4)), (None, Some(1)));
+}
+
+/// A held screen row under the pinned header moves to the first row under
+/// it, so the cursor shows there.
+#[test]
+fn a_held_screen_row_keeps_the_cursor_clear_of_the_pinned_header() {
+    let mut h = two_long_files(12);
+    {
+        let (state, editors) = stack(&mut h);
+        diff_changes::place_cursor(&mut editors[state.excerpts[0].editor_id], Point::new(5, 0));
+        state.held_screen_row = Some(0);
+    }
+    h.render_composited();
+    let (state, editors) = stack(&mut h);
+    let cell = editors[state.excerpts[0].editor_id].cursor_screen_cell;
+
+    assert_eq!((state.scroll, cell.map(|(_, y)| y)), (5, Some(1)));
+}
+
+/// The Greeter fixture under a changes view 13 rows tall, parsed, so its
+/// fold rows carry their Scopes, and painted.
+///
+/// The stack reads the header on row 0, Fold Row A (`impl Greeter U+203A
+/// fn greet`) on row 1, buffer rows 5 to 25 on rows 2 to 22, Fold Row B
+/// (`impl Greeter U+203A fn part`) on row 23, buffer rows 32 to 52 on rows
+/// 24 to 44, and the trailing fold on row 45, in a view of twelve rows.
+fn greeter_stack() -> TestHarness {
+    let (base, text) = stoat::test_harness::greeter_rust_file();
+    parsed_stack(&[("a.rs", &base, &text)])
+}
+
+/// `files` under a changes view 13 rows tall, parsed, so their fold rows
+/// carry their Scopes, and painted.
+fn parsed_stack(files: &[(&str, &str, &str)]) -> TestHarness {
+    let mut h = changes_view(120, 13, files);
+    // The paint asks for the parse, and the refold after it lands reads
+    // the Scopes.
+    h.render_composited();
+    for _ in 0..2 {
+        h.stoat.drive_background();
+        h.settle();
+    }
+    h.render_composited();
+    h
+}
+
+/// An excerpt whose hunk opens under its header pins its bare Scope row's
+/// Scope. The pinned Scope gives way on the excerpt's last row, since no
+/// row of its section shows under that row.
+///
+/// The function's whole body changes, so the excerpt takes the header, the
+/// bare Scope row, and its 23 rows with the empty row after the final
+/// newline, and folds nothing.
+#[test]
+fn a_bare_scope_row_pins_until_the_excerpt_ends() {
+    let file = |edit: bool| {
+        let body: String = (1..=20)
+            .map(|n| match edit {
+                true => format!("    let x{n} = {n} + 1;\n"),
+                false => format!("    let x{n} = {n};\n"),
+            })
+            .collect();
+        format!("fn greet() {{\n{body}}}\n")
+    };
+    let mut h = parsed_stack(&[("a.rs", &file(false), &file(true))]);
+    let (state, editors) = stack(&mut h);
+    let rows = state.rows;
+    let pinned = [2, rows - 3, rows - 2].map(|scroll| {
+        let pinned = diff_changes::pinned_header(state, editors, scroll);
+        (pinned.file, pinned.scope.map(|scope| scope.row))
+    });
+
+    assert_eq!(
+        (rows, pinned),
+        (
+            25,
+            [(Some(0), Some(1)), (Some(0), Some(1)), (Some(0), None)]
+        ),
+    );
+}
+
+/// A fold row over a hunk outside every item names no Scope, so it pins
+/// nothing, and the stack rows under it show in place.
+///
+/// The function's whole body changes, and so does a `use` line with 12
+/// comment lines on each side. The bare Scope row names the function, and
+/// the fold row above the `use` line names no item.
+#[test]
+fn a_top_level_fold_row_pins_no_scope() {
+    let file = |edit: bool| {
+        let body: String = (1..=20)
+            .map(|n| match edit {
+                true => format!("    let x{n} = {n} + 1;\n"),
+                false => format!("    let x{n} = {n};\n"),
+            })
+            .collect();
+        let comments =
+            |from: u32| -> String { (from..from + 12).map(|n| format!("// {n}\n")).collect() };
+        let path = match edit {
+            true => "a::C",
+            false => "a::B",
+        };
+        format!(
+            "fn greet() {{\n{body}}}\n{}use {path};\n{}",
+            comments(1),
+            comments(13)
+        )
+    };
+    let mut h = parsed_stack(&[("a.rs", &file(false), &file(true))]);
+    let (state, editors) = stack(&mut h);
+    let mut pinned: Vec<Option<usize>> = (0..state.rows)
+        .map(|scroll| {
+            diff_changes::pinned_header(state, editors, scroll)
+                .scope
+                .map(|scope| scope.row)
+        })
+        .collect();
+    pinned.dedup();
+
+    assert_eq!(
+        pinned,
+        [None, Some(1), None],
+        "only the bare Scope row pins"
+    );
+}
+
+/// Under the pinned header the second row pins the nearest Scope row above
+/// the stack row it covers. A Scope row on that row, or one right under
+/// it, shows in place, so the pinned Scope gives way to it.
+#[test]
+fn a_scrolled_hunk_pins_its_scope_under_the_header() {
+    let mut h = greeter_stack();
+    let (state, editors) = stack(&mut h);
+    let pinned = [0, 1, 20, 21, 22, 23].map(|scroll| {
+        let pinned = diff_changes::pinned_header(state, editors, scroll);
+        (pinned.file, pinned.scope.map(|scope| scope.row))
+    });
+
+    assert_eq!(
+        pinned,
+        [
+            (None, None),
+            (Some(0), Some(1)),
+            (Some(0), Some(1)),
+            (Some(0), None),
+            (Some(0), None),
+            (Some(0), Some(23)),
+        ],
+    );
+}
+
+/// A pinned Scope draws a fold row's hatched surface under the pinned
+/// header, with the divide's hairline through it and the Scope 20
+/// sixteenths past the divide. It draws no Fold Button, count, or range.
+/// The cover spans both pinned rows.
+#[test]
+fn a_pinned_scope_draws_its_scope_past_the_divide() {
+    let mut h = greeter_stack();
+    let index = {
+        let ws = h.stoat.active_workspace();
+        ws.panes.pane(ws.panes.focus()).index
+    };
+    stack(&mut h).0.scroll = 20;
+    h.stoat.render();
+    let commands = decode_stream(h.stoat.apc_scene.lane_bytes(content_lane(index)));
+    let covers: Vec<(u16, u16, u16, u16)> = commands
+        .iter()
+        .filter_map(|command| match command {
+            Command::Panel(panel) => Some((panel.left, panel.top, panel.width, panel.height)),
+            _ => None,
+        })
+        .collect();
+    let bars: Vec<_> = frame_bars(commands.clone())
+        .into_iter()
+        .filter(|bar| (16..32).contains(&bar.1))
+        .collect();
+    let mut runs: Vec<(i16, String)> = commands
+        .iter()
+        .filter_map(|command| match command {
+            Command::TextRun(run) if (16..32).contains(&run.row) => {
+                Some((run.col, run.text.clone()))
+            },
+            _ => None,
+        })
+        .collect();
+    runs.sort();
+    let first = runs.first().map(|run| run.0);
+    let text: String = runs.into_iter().map(|(_, text)| text).collect();
+    let row_cells = cells(&h.render_composited(), 0, 120, 1);
+    let fold = paint::style_rgb(h.stoat.theme.get(scope::DIFF_FOLD).bg).expect("an RGB fold");
+
+    let divide = 59 * 16 + 8;
+    // The composite draws the hatched surface as rules across the row's
+    // blank cells, so the Scope's text is all the row reads past them.
+    assert_eq!(
+        (
+            covers,
+            bars,
+            first,
+            text,
+            row_cells.trim_matches(['└', '┘', '─'])
+        ),
+        (
+            vec![(0, 0, 120, 2)],
+            vec![(0, 16, 1920, 16, fold), (divide, 16, 1, 16, HAIRLINE)],
+            Some(divide + 20),
+            "impl Greeter \u{203a} fn greet".to_string(),
+            "impl Greeter \u{203a} fn greet",
+        ),
+    );
+}
+
+/// A cursor under the pinned Scope is off screen, and an uncover scrolls
+/// the stack up until its row shows under the pinned rows.
+#[test]
+fn a_cursor_under_the_pinned_scope_moves_the_stack() {
+    let mut h = greeter_stack();
+    {
+        let (state, editors) = stack(&mut h);
+        diff_changes::place_cursor(&mut editors[state.excerpts[0].editor_id], Point::new(24, 0));
+    }
+    h.render_composited();
+    stack(&mut h).0.scroll = 20;
+    h.render_composited();
+    let (state, editors) = stack(&mut h);
+    let cell = editors[state.excerpts[0].editor_id].cursor_screen_cell;
+    state.uncover_row(editors, 21);
+
+    assert_eq!((cell, state.scroll), (None, 19));
+}
+
+/// The pair names of a frame with no pair open.
+static NO_PAIRS: LazyLock<HashMap<PathBuf, (String, String)>> = LazyLock::new(HashMap::new);
+
+/// A frame context that paints the stack as the live frame of `stoat`
+/// paints it, under no prompt, popup, or search.
+fn live_frame(stoat: &Stoat) -> FrameCtx<'_> {
+    FrameCtx {
+        workspace_name: "",
+        tab_bar_shown: false,
+        banner_shown: false,
+        chrome_bands: false,
+        workspace_root: Path::new(""),
+        mode: "normal",
+        screen: None,
+        theme: &stoat.theme,
+        commits_split: None,
+        preview_dials: PreviewDials::from_stoat(stoat),
+        diff_changes_building: false,
+        chrome: &stoat
+            .chrome
+            .as_ref()
+            .expect("a render resolved the chrome")
+            .1,
+        pending_count: None,
+        recording_register: None,
+        held_buffers: &[],
+        reload_flashes: &stoat.active_workspace().reload_flashes,
+        lsp_status_open: false,
+        lsp_progress_entries: &[],
+        spinner_phase: 0,
+        lsp_servers: &[],
+        diff_warm_busy: false,
+        repo: None,
+        tallies: None,
+        repo_root: None,
+        hunk_position: None,
+        conflict_position: None,
+        diff_base: None,
+        diff_sides: ("", ""),
+        pair_sides: &NO_PAIRS,
+        lsp_pending: None,
+        lsp_message: None,
+        status_message: None,
+        status_kind: MessageKind::Alert,
+        goto_word_labels: None,
+        mode_label: ("", Color::Reset),
+        modal_label: None,
+        diagnostics: &stoat.diagnostics,
+        status_prompt: None,
+        terminal_cursor_editor: stoat.focused_editor_ids().map(|(id, _)| id),
+        composited_stacks: &[],
+        line_numbers: LineNumbers::Relative,
+        wrap_mode: WrapMode::EditorWidth,
+        wrap_column: 80,
+        scrolloff: stoat.settings.scrolloff.unwrap_or(3),
+        inactive_dim: 0.0,
+        modal_dim: 0.0,
+        diff_dials: DiffDials::from_stoat(stoat),
+        images_capable: false,
+        batch_decorations: false,
+        minimap_enabled: false,
+        minimap_chrome: None,
+        minimap_band: None,
+        islands: false,
+        backdrop_panels: false,
+        pane_root: Rect::default(),
+        dividers: &[],
+        badge_cover: None,
+        hover_cell: None,
+        home: None,
+        run_cwd: None,
+        run_cmds: None,
+        run_stubs: 0,
+        blame: &stoat.active_workspace().blame,
+        now_epoch: 0,
+        #[cfg(feature = "perf")]
+        perf: None,
+    }
+}
+
+/// Run `draw` over the focused changes view's stack beside a frame context
+/// that paints as the live frame does, with a live scene.
+///
+/// The context borrows the whole `Stoat`, so the editors leave the
+/// workspace for the paint and return after it.
+fn paint_directly<R>(
+    h: &mut TestHarness,
+    draw: impl FnOnce(
+        &DiffChangesState,
+        &mut SlotMap<EditorId, EditorState>,
+        &BufferRegistry,
+        FrameCtx<'_>,
+        &mut ApcScene,
+    ) -> R,
+) -> R {
+    let mut editors = mem::take(&mut h.stoat.active_workspace_mut().editors);
+    let mut scene = ApcScene::new();
+    scene.set_live(true);
+    let out = {
+        let ws = h.stoat.active_workspace();
+        let id = ws
+            .focused_diff_changes_id()
+            .expect("the changes view is open");
+        draw(
+            &ws.diff_changes_views[id],
+            &mut editors,
+            &ws.buffers,
+            live_frame(&h.stoat),
+            &mut scene,
+        )
+    };
+    h.stoat.active_workspace_mut().editors = editors;
+    out
+}
+
+/// A run of stack rows painted on its own shows what the live paint shows
+/// on those rows. The run starts inside a.txt, so that excerpt paints from
+/// its second row, and b.txt's header falls inside the run and draws its
+/// path there.
+#[test]
+fn a_run_of_stack_rows_paints_what_the_live_paint_shows() {
+    let mut h = two_files(16);
+    let live = h.stoat.render();
+    let inner = {
+        let ws = h.stoat.active_workspace();
+        ws.panes.pane(ws.panes.focus()).area
+    };
+    let (run, commands) = paint_directly(&mut h, |state, editors, buffers, frame, scene| {
+        let mut run = Buffer::empty(Rect::new(0, 0, inner.width, 4));
+        let area = run.area;
+        let text_style = frame.theme.get(scope::UI_TEXT);
+        let mut undercurls = UndercurlBatch::default();
+        paint_stack_rows(
+            state,
+            editors,
+            buffers,
+            true,
+            text_style,
+            &mut undercurls,
+            frame,
+            &mut run,
+            scene,
+            2,
+            area,
+            PagePaint::Cells,
+        );
+        (run, decode_stream(scene.bytes()))
+    });
+
+    // b.txt's header falls on the run's third row, and under a live scene
+    // its path draws as runs right of the divide's hairline.
+    let path: String = commands
+        .iter()
+        .filter_map(|command| match command {
+            Command::TextRun(run) if run.row == 32 && run.col > 59 * 16 + 8 => {
+                Some(run.text.as_str())
+            },
+            _ => None,
+        })
+        .collect();
+    let rows = |buf: &Buffer, x: u16, y: u16| -> Vec<String> {
+        (y..y + 4).map(|y| cells(buf, x, inner.width, y)).collect()
+    };
+    assert_eq!(
+        (rows(&run, 0, 0), path),
+        (rows(&live, inner.x, inner.y + 2), "b.txt".to_string()),
+    );
+}
+
+/// Every excerpt numbers its live column by the steps from the focused
+/// cursor, so the excerpt below counts on past the focused excerpt's last
+/// row. The frame before the keys leaves a capture that the frames after
+/// them do not replay.
+#[test]
+fn every_excerpt_counts_the_steps_from_the_focused_cursor() {
+    let mut h = numbered_files();
+    focus_at(&mut h, 0, Point::new(0, 0));
+    h.render_composited();
+    h.type_keys("j j");
+
+    let buf = h.render_composited();
+    assert_eq!(
+        excerpt_numbers(&mut h, &buf),
+        [["2", "1", "3", "1", "2"], ["3", "4", "5", "6", "7"]]
+    );
+}
+
+/// An excerpt above the focused one counts the steps up to the cursor.
+#[test]
+fn an_excerpt_above_the_cursor_counts_up_to_it() {
+    let mut h = numbered_files();
+    focus_at(&mut h, 1, Point::new(1, 0));
+    let buf = h.render_composited();
+    assert_eq!(
+        excerpt_numbers(&mut h, &buf),
+        [["6", "5", "4", "3", "2"], ["1", "2", "1", "2", "3"]]
+    );
+}
+
+/// Each number is the count that `j` or `k` takes to reach its row from
+/// the cursor, across fold rows, removed base rows, and excerpt headers.
+/// A fold row takes a step and shows no number.
+///
+/// a.txt changes its first line and folds the lines past its fourth into
+/// a fold row. b.txt changes line 15 and folds lines 1 to 11 into a fold
+/// row, where the cursor sits, and lines 19 and 20 into another. c.txt
+/// drops line 3, which leaves a removed base row and no fold.
+#[test]
+fn a_number_is_the_count_that_reaches_its_row() {
+    let twenty: String = (1..=20).map(|n| format!("{n}\n")).collect();
+    let six: String = (1..=6).map(|n| format!("{n}\n")).collect();
+    let mut h = changes_view(
+        120,
+        30,
+        &[
+            ("a.txt", &twenty, &twenty.replacen("1\n", "ONE\n", 1)),
+            ("b.txt", &twenty, &twenty.replace("\n15\n", "\nFIFTEEN\n")),
+            ("c.txt", &six, &six.replace("\n3\n", "\n")),
+        ],
+    );
+    // The stack row of the cursor, as of the last paint's layout.
+    let home = |h: &mut TestHarness| {
+        focus_at(h, 1, Point::new(0, 0));
+        let (state, editors) = stack(h);
+        diff_changes::cursor_stack_row(state, editors).expect("b.txt shows its rows")
+    };
+    home(&mut h);
+    let buf = h.render_composited();
+    let numbers = excerpt_numbers(&mut h, &buf);
+    assert_eq!(
+        numbers,
+        vec![
+            vec!["5", "4", "3", "2", ""],
+            vec!["", "1", "2", "3", "4", "5", "6", "7", ""],
+            vec!["9", "10", "", "11", "12", "13", "14"],
+        ]
+    );
+
+    let cursor = home(&mut h);
+    let firsts: Vec<usize> = stack(&mut h)
+        .0
+        .excerpts
+        .iter()
+        .map(|excerpt| excerpt.top + diff_changes::header_rows(excerpt))
+        .collect();
+    let (mut targets, mut reached) = (Vec::new(), Vec::new());
+    for (first, rows) in firsts.into_iter().zip(&numbers) {
+        for (offset, number) in rows.iter().enumerate() {
+            let row = first + offset;
+            if row == cursor || number.is_empty() {
+                continue;
+            }
+            let digits: Vec<String> = number.chars().map(String::from).collect();
+            let key = if row < cursor { "k" } else { "j" };
+            home(&mut h);
+            h.type_keys(&format!("{} {key}", digits.join(" ")));
+            let (state, editors) = stack(&mut h);
+            targets.push(Some(row));
+            reached.push(diff_changes::cursor_stack_row(state, editors));
+        }
+    }
+    assert_eq!(reached, targets, "the stack row each count's keys reach");
+}
+
+/// While the window is in the background every excerpt numbers its rows
+/// by their own lines, and the steps from the cursor come back with the
+/// focus.
+#[test]
+fn an_unfocused_window_numbers_each_excerpt_by_its_own_lines() {
+    let mut h = numbered_files();
+    focus_at(&mut h, 0, Point::new(2, 0));
+    h.stoat.update(Event::FocusLost);
+    let buf = h.render_composited();
+    let background = excerpt_numbers(&mut h, &buf);
+    h.stoat.update(Event::FocusGained);
+    let buf = h.render_composited();
+    assert_eq!(
+        [background, excerpt_numbers(&mut h, &buf)],
+        [
+            [["1", "2", "3", "4", "5"], ["1", "2", "3", "4", "5"]],
+            [["2", "1", "3", "1", "2"], ["3", "4", "5", "6", "7"]],
+        ],
+        "the numbers in the background, then with the focus back",
+    );
+}
+
+/// A changes view that a dock took focus from numbers each excerpt by its
+/// own lines, as an unfocused per-file diff does.
+#[test]
+fn an_unfocused_changes_view_numbers_each_excerpt_by_its_own_lines() {
+    let mut h = numbered_files();
+    focus_at(&mut h, 0, Point::new(2, 0));
+    focus_hidden_dock(&mut h);
+    let buf = h.render_composited();
+    h.stoat.active_workspace_mut().focus = FocusTarget::SplitPane;
+    assert_eq!(
+        excerpt_numbers(&mut h, &buf),
+        [["1", "2", "3", "4", "5"], ["1", "2", "3", "4", "5"]]
+    );
+}
+
+/// Give the focus to a hidden dock, so the changes view's pane keeps the
+/// window's focus and loses its own.
+fn focus_hidden_dock(h: &mut TestHarness) {
+    let ws = h.stoat.active_workspace_mut();
+    let dock = ws.docks.insert(DockPanel {
+        view: View::Label("dock".into()),
+        side: DockSide::Right,
+        visibility: DockVisibility::Hidden,
+        default_width: 30,
+        area: Default::default(),
+    });
+    ws.focus = FocusTarget::Dock(dock);
+}
+
+/// Two four-line files that each change their second line, under a
+/// focused changes view. The context rows cover each whole file, so no
+/// fold row joins the numbers, and each excerpt shows five rows.
+fn numbered_files() -> TestHarness {
+    let (base, text) = ("1\n2\n3\n4\n", "1\nTWO\n3\n4\n");
+    changes_view(120, 24, &[("a.txt", base, text), ("b.txt", base, text)])
+}
+
+/// Focus excerpt `index` of the changes view, with its cursor at `point`.
+fn focus_at(h: &mut TestHarness, index: usize, point: Point) {
+    let (state, editors) = stack(h);
+    state.focused = index;
+    diff_changes::place_cursor(&mut editors[state.excerpts[index].editor_id], point);
+}
+
+/// The buffer-column number on each row of each excerpt in `buf`, in stack
+/// order, for a stack that starts at the window's top.
+fn excerpt_numbers(h: &mut TestHarness, buf: &Buffer) -> Vec<Vec<String>> {
+    let inner = {
+        let ws = h.stoat.active_workspace();
+        ws.panes.pane(ws.panes.focus()).area
+    };
+    let cols = excerpt_columns(h, inner, 2);
+    let (state, editors) = stack(h);
+    state
+        .excerpts
+        .iter()
+        .map(|excerpt| {
+            let rows = diff_changes::excerpt_rows(excerpt, editors);
+            (1..=rows)
+                .map(|row| {
+                    let y = inner.y + (excerpt.top + row) as u16;
+                    gutter_number(buf, cols.right_x, cols.right_text_x, y)
+                })
+                .collect()
+        })
+        .collect()
+}
+
+/// A page painted after the live frame leaves each excerpt's editor laid
+/// out as the live paint left it, so the terminal cursor, the ghost beside
+/// it, and pointer hits stay on the live rows. The page starts at a.txt's
+/// second row, where the paint lays a.txt out from another scroll row and
+/// cuts its cursor's row.
+#[test]
+fn a_stack_page_leaves_the_live_layout() {
+    let mut h = two_files(16);
+    h.stoat.render();
+    let layouts = |h: &mut TestHarness| {
+        let (state, editors) = stack(h);
+        state
+            .excerpts
+            .iter()
+            .map(|excerpt| {
+                let editor = &editors[excerpt.editor_id];
+                (
+                    editor.scroll_row,
+                    editor.viewport_rows,
+                    editor.cursor_screen_cell,
+                    editor.ghost_cursor_cell,
+                    editor.text_rect,
+                    editor.minimap_rect,
+                )
+            })
+            .collect::<Vec<_>>()
+    };
+    let live = layouts(&mut h);
+
+    let header = paint_directly(&mut h, |state, editors, buffers, frame, scene| {
+        let mut page = Buffer::empty(Rect::new(0, 0, 120, 4));
+        let text_style = frame.theme.get(scope::UI_TEXT);
+        let mut undercurls = UndercurlBatch::default();
+        paint_stack_page(
+            state,
+            editors,
+            buffers,
+            true,
+            text_style,
+            &mut undercurls,
+            frame,
+            &mut page,
+            scene,
+            2,
+            PagePaint::Cells,
+        );
+        // The page's third row is b.txt's header, whose path draws as runs
+        // right of the divide's hairline.
+        decode_stream(scene.bytes())
+            .into_iter()
+            .filter_map(|command| match command {
+                Command::TextRun(run) if run.row == 32 && run.col > 59 * 16 + 8 => Some(run.text),
+                _ => None,
+            })
+            .collect::<String>()
+    });
+
+    assert_eq!(
+        (
+            live[0].2.is_some(),
+            live[0].3.is_some(),
+            header.as_str(),
+            layouts(&mut h)
+        ),
+        (true, true, "b.txt", live.clone()),
+        "the live cursor and ghost cells, the page's header path, and every layout field",
+    );
+}
+
+/// A decorations-only page paint lays the scene that a full paint of the
+/// page lays, and writes no cell. The numbers and bars of both columns
+/// therefore survive a refill that sends the decorations alone. The files
+/// give the page paired, mirrored, and block rows.
+#[test]
+fn a_decorations_only_page_lays_the_full_scene_and_no_cell() {
+    let mut h = changes_view(
+        120,
+        24,
+        &[
+            ("a.txt", "a\nx\n", "A\nx\n"),
+            ("b.txt", "b\nd\ne\n", "b\ne\n"),
+        ],
+    );
+    h.stoat.render();
+    let mut paint = |paint: PagePaint| {
+        paint_directly(&mut h, |state, editors, buffers, frame, scene| {
+            let mut page = Buffer::empty(Rect::new(0, 0, 120, 12));
+            let text_style = frame.theme.get(scope::UI_TEXT);
+            paint_stack_page(
+                state,
+                editors,
+                buffers,
+                true,
+                text_style,
+                &mut UndercurlBatch::default(),
+                frame,
+                &mut page,
+                scene,
+                0,
+                paint,
+            );
+            (page, scene.bytes().to_vec())
+        })
+    };
+    let (full_page, full_scene) = paint(PagePaint::Cells);
+    let (page, scene) = paint(PagePaint::DecorationsOnly);
+
+    assert_eq!(
+        (
+            full_scene.is_empty(),
+            scene == full_scene,
+            page == Buffer::empty(page.area),
+            page == full_page,
+        ),
+        (false, true, true, false),
+        "an empty full scene, equal scenes, a blank page, and a page like the full one",
+    );
+}
+
+/// A split changes view draws no frame around the base column. The header
+/// hairlines lead the content, and no bar marks the base half's edges.
+#[test]
+fn a_split_changes_view_draws_no_base_frame() {
+    let mut h = changes_view(
+        120,
+        24,
+        &[
+            ("a.txt", "a\nx\n", "A\nx\n"),
+            ("b.txt", "b\nd\ne\n", "b\ne\n"),
+        ],
+    );
+    h.stoat.render();
+    let index = {
+        let ws = h.stoat.active_workspace();
+        ws.panes.pane(ws.panes.focus()).index
+    };
+    let bars = frame_bars(decode_stream(
+        h.stoat.apc_scene.lane_bytes(content_lane(index)),
+    ));
+
+    assert_eq!(
+        (bars[..6].to_vec(), base_edge_bars(&bars)),
+        (header_hairlines(), Vec::new()),
+    );
+}
+
+/// A stack page draws no frame around the base column. The header
+/// hairlines lead its bars, and no bar marks the base half's edges.
+#[test]
+fn a_stack_page_draws_no_base_frame() {
+    let mut h = changes_view(
+        120,
+        24,
+        &[
+            ("a.txt", "a\nx\n", "A\nx\n"),
+            ("b.txt", "b\nd\ne\n", "b\ne\n"),
+        ],
+    );
+    h.stoat.render();
+    let commands = paint_directly(&mut h, |state, editors, buffers, frame, scene| {
+        let mut page = Buffer::empty(Rect::new(0, 0, 120, 12));
+        let text_style = frame.theme.get(scope::UI_TEXT);
+        paint_stack_page(
+            state,
+            editors,
+            buffers,
+            true,
+            text_style,
+            &mut UndercurlBatch::default(),
+            frame,
+            &mut page,
+            scene,
+            0,
+            PagePaint::Cells,
+        );
+        decode_stream(scene.bytes())
+    });
+    let bars = frame_bars(commands);
+
+    assert_eq!(
+        (bars[..6].to_vec(), base_edge_bars(&bars)),
+        (header_hairlines(), Vec::new()),
+    );
+}
+
+/// The hairlines along the top and bottom edges of the headers on rows 0
+/// and 4 of a stack 120 columns wide, and the divide through each header
+/// at the hairline of the stack's divider, column 59.
+fn header_hairlines() -> Vec<(i16, i16, u16, u16, [u8; 3])> {
+    [0, 64]
+        .into_iter()
+        .flat_map(|top| {
+            [
+                (0, top, 1920, 1, HAIRLINE),
+                (0, top + 15, 1920, 1, HAIRLINE),
+                (59 * 16 + 8, top, 1, 16, HAIRLINE),
+            ]
+        })
+        .collect()
+}
+
+/// The bars of `bars` that mark the edges of a 120-wide stack's base half.
+///
+/// A side is 6 sixteenths wide, at the half's left edge or a sixteenth
+/// short of the divider's hairline, which sits 952 sixteenths in. A top is
+/// 951 sixteenths wide from the left edge. The gutter's status bars, also
+/// 6 sixteenths wide, start at 5 and 14, past the half's pad.
+fn base_edge_bars(bars: &[(i16, i16, u16, u16, [u8; 3])]) -> Vec<(i16, i16, u16, u16, [u8; 3])> {
+    bars.iter()
+        .copied()
+        .filter(|bar| matches!((bar.0, bar.2), (0 | 945, 6) | (0, 951)))
+        .collect()
+}
+
+/// Every bar `commands` draws, in draw order, as `(x, y, width, height,
+/// color)` in sixteenths, whether the scene sends it alone or in a batch.
+fn frame_bars(commands: Vec<Command>) -> Vec<(i16, i16, u16, u16, [u8; 3])> {
+    commands
+        .into_iter()
+        .flat_map(|command| match command {
+            Command::Bar(bar) => vec![(bar.x, bar.y, bar.width, bar.height, bar.color)],
+            Command::Bars(group) => group
+                .bars
+                .into_iter()
+                .map(|(x, y, width, height)| (x, y, width, height, group.color))
+                .collect(),
+            _ => Vec::new(),
+        })
+        .collect()
+}
+
+/// Two staged files under a focused changes view at 120 by 24, with the
+/// minimap in `mode`, on a stoatty of protocol 13.
+fn strip_harness(mode: MinimapMode) -> (TestHarness, UnboundedReceiver<Vec<u8>>) {
+    let mut h = TestHarness::with_size(120, 24);
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    h.stoat.set_apc_tx(tx);
+    h.stoat.stoatty_protocol = 13;
+    h.stoat.settings.editor_minimap = Some(mode);
+    // The changes view keeps its hints box up over the lower right, across
+    // the strip's lower rows.
+    h.stoat.screen_hints_hidden = true;
+    h.stage_review_scenario("/repo", &[("a.txt", "a\n", "A\n"), ("b.txt", "b\n", "B\n")]);
+    h.open_file(Path::new("/repo/a.txt"));
+    h.cover_with_diff_changes(false);
+    h.settle();
+    (h, rx)
+}
+
+/// Paint one frame, and return its cells, the strip rect the focused
+/// changes view reserved, and every minimap strip the frame declared.
+fn paint_strips(
+    h: &mut TestHarness,
+    rx: &mut UnboundedReceiver<Vec<u8>>,
+) -> (Buffer, Option<Rect>, Vec<Declared>) {
+    let buf = h.stoat.render();
+    apc_emit::emit_apc_scene(&mut h.stoat);
+    let declared = drain_apc(rx)
+        .into_iter()
+        .filter_map(|command| match command {
+            Command::Minimap(strip) => Some((strip.strip_id, strip.content_id, strip.palette)),
+            _ => None,
+        })
+        .collect();
+    let reserved = h
+        .stoat
+        .active_workspace()
+        .focused_diff_changes()
+        .and_then(|state| state.minimap_rect);
+    (buf, reserved, declared)
+}
+
+/// The workspace's changes view strip as `strip_id` declares it, in the
+/// class table's palette blended toward the background by `dim`.
+fn diff_changes_strip(h: &TestHarness, strip_id: u32, dim: f32) -> Declared {
+    let bg = paint::style_rgb(h.stoat.theme.get(scope::UI_BACKGROUND).bg)
+        .expect("the test theme has an rgb background");
+    let palette: Vec<_> = h
+        .stoat
+        .minimap_class_table
+        .palette()
+        .iter()
+        .map(|&color| paint::dim_rgb(color, bg, dim))
+        .collect();
+    let content_id = h.stoat.diff_changes_strips[&h.stoat.active_workspace].content_id();
+    (strip_id, content_id, palette)
+}
+
+fn focused_pane_index(h: &TestHarness) -> u32 {
+    let ws = h.stoat.active_workspace();
+    ws.panes.pane(ws.panes.focus()).index
+}
+
+/// The width of the single band the last paint reserved, `None` with no
+/// band.
+fn band_width(h: &TestHarness) -> Option<u16> {
+    h.stoat.single_minimap_rect.map(|band| band.width)
+}
+
+/// A per-pane changes view gives the seven cells at its right edge to its
+/// minimap strip, leaves them blank, and declares the strip in the syntax
+/// palette.
+#[test]
+fn a_per_pane_changes_view_declares_a_seven_cell_strip() {
+    let (mut h, mut rx) = strip_harness(MinimapMode::PerPane);
+    let (buf, reserved, declared) = paint_strips(&mut h, &mut rx);
+    let strip = Rect::new(113, 0, 7, 23);
+    let blank = surface_blank(&h.stoat.theme);
+    let painted: Vec<_> = strip
+        .positions()
+        .filter(|&cell| buf[cell] != blank)
+        .collect();
+    assert_eq!(
+        (reserved, painted, declared),
+        (
+            Some(strip),
+            vec![],
+            vec![diff_changes_strip(&h, focused_pane_index(&h), 0.0)]
+        ),
+    );
+}
+
+/// A per-pane changes view that a dock took focus from declares its
+/// strip at the inactive dim.
+#[test]
+fn an_unfocused_per_pane_changes_view_dims_its_strip() {
+    let (mut h, mut rx) = strip_harness(MinimapMode::PerPane);
+    let index = focused_pane_index(&h);
+    focus_hidden_dock(&mut h);
+
+    let (_, _, declared) = paint_strips(&mut h, &mut rx);
+    let dim = h.stoat.painted_inactive_dim();
+    assert_eq!(declared, [diff_changes_strip(&h, index, dim)]);
+}
+
+/// The single band shows a focused changes view's strip at its seven
+/// cells, and the pane reserves no strip of its own.
+#[test]
+fn the_single_band_follows_a_focused_changes_view() {
+    let (mut h, mut rx) = strip_harness(MinimapMode::Single);
+    let (_, reserved, declared) = paint_strips(&mut h, &mut rx);
+    assert_eq!(
+        (reserved, band_width(&h), declared),
+        (
+            None,
+            Some(7),
+            vec![diff_changes_strip(&h, SINGLE_MINIMAP_STRIP_ID, 0.0)]
+        ),
+    );
+}
+
+/// The single band keeps its seven cells over a changes view whether the
+/// view is the widened pane or not, so a widen never reflows the panes.
+#[test]
+fn the_single_band_keeps_its_width_over_a_changes_view() {
+    let (mut h, mut rx) = strip_harness(MinimapMode::Single);
+    let (_, _, declared) = paint_strips(&mut h, &mut rx);
+    let widened = band_width(&h);
+    h.stoat.active_workspace_mut().panes.unwiden();
+    paint_strips(&mut h, &mut rx);
+    assert_eq!(
+        (declared, [widened, band_width(&h)]),
+        (
+            vec![diff_changes_strip(&h, SINGLE_MINIMAP_STRIP_ID, 0.0)],
+            [Some(7), Some(7)]
+        ),
+    );
+}
+
+/// A dial step sends no band over a changes view and leaves the band at
+/// its seven cells. The strip takes the syntax palette, which no dial
+/// moves.
+#[test]
+fn a_dial_step_leaves_the_single_band_over_a_changes_view() {
+    let (mut h, mut rx) = strip_harness(MinimapMode::Single);
+    let (_, _, before) = paint_strips(&mut h, &mut rx);
+    let before_width = band_width(&h);
+    h.stoat.diff_tint = 2;
+    let (_, _, stepped) = paint_strips(&mut h, &mut rx);
+    assert_eq!(
+        (before, [before_width, band_width(&h)], stepped),
+        (
+            vec![diff_changes_strip(&h, SINGLE_MINIMAP_STRIP_ID, 0.0)],
+            [Some(7), Some(7)],
+            vec![]
+        ),
+    );
+}

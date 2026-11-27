@@ -169,7 +169,7 @@ pub(crate) struct CommitScope {
 }
 
 /// The first pick of a range review, held while the picker asks for the second.
-pub(crate) struct RangeFrom {
+pub struct RangeFrom {
     pub(crate) commit: CommitInfo,
     /// How many scopes stood on the stack at the first pick.
     ///
@@ -184,7 +184,7 @@ pub(crate) struct RangeFrom {
 /// The two differ in what has to be installed alongside the commits, and both
 /// sets of extras are known when the walk is spawned, so they travel with it
 /// rather than being parked separately and paired up on arrival.
-pub(crate) enum LoadedCommits {
+pub enum LoadedCommits {
     /// The list the picker opened over, with the branch names to label its tips.
     Root {
         commits: Vec<CommitInfo>,
@@ -210,7 +210,7 @@ pub(crate) enum LoadedCommits {
 /// Previews are lazy, one background [`DiffDocument`] build per sha, so
 /// scrolling a long history does not diff every commit in it.
 pub struct CommitPicker {
-    pub(crate) role: CommitPickerRole,
+    pub role: CommitPickerRole,
     pub(crate) workdir: PathBuf,
     /// The repository the picker walks, held rather than rediscovered on every
     /// selection change.
@@ -219,13 +219,13 @@ pub struct CommitPicker {
     /// [`Self::default_selection`], which looks for a branch other than the one
     /// the user is already looking at.
     pub(crate) ref_sha: String,
-    pub(crate) input: InputView,
+    pub input: InputView,
     /// Walked history, newest first.
-    pub(crate) commits: Vec<CommitInfo>,
+    pub commits: Vec<CommitInfo>,
     /// Full sha to the local branch names pointing at it.
     pub(crate) branch_tips: HashMap<String, Vec<String>>,
     /// Indices into `commits`, in display order.
-    pub(crate) filtered: Vec<usize>,
+    pub filtered: Vec<usize>,
     /// Matched character offsets per filtered row, parallel to `filtered`.
     pub(crate) match_indices: Vec<Vec<u32>>,
     /// The parse behind the current ranking, so a painted row past the indexed
@@ -235,14 +235,14 @@ pub struct CommitPicker {
     /// Rendered list height, refreshed each frame so [`Self::page`] can size
     /// its step. `None` before the first render.
     pub(crate) viewport_rows: Option<usize>,
-    pub(crate) preview_sessions: PreviewCache,
-    pub(crate) pending_preview: Option<PendingPreview>,
+    pub preview_sessions: PreviewCache,
+    pub pending_preview: Option<PendingPreview>,
     /// History walk running on a worker, waiting to be installed.
     ///
     /// Walking a thousand commits reads and decodes each one under the repo
     /// lock, which is too long to spend in the keystroke that asked for it, so
     /// the picker opens on nothing and fills in when the walk lands.
-    pub(crate) pending_commits: Option<Task<LoadedCommits>>,
+    pub pending_commits: Option<Task<LoadedCommits>>,
     /// Sha the in-flight or most recent preview was requested for, so a build
     /// that lands after the selection moved on is discarded.
     pub(crate) requested_preview: Option<String>,
@@ -270,10 +270,10 @@ pub struct CommitPicker {
     pub(crate) scope_stack: Vec<CommitScope>,
     /// What the current scope is called, or `None` at the root scope, where the
     /// title comes from the picker's role instead.
-    pub(crate) scope_label: Option<String>,
+    pub scope_label: Option<String>,
     /// The first pick under [`CommitPickerRole::PickRange`], `None` while the
     /// picker still asks for it and under every other role.
-    pub(crate) range_from: Option<RangeFrom>,
+    pub range_from: Option<RangeFrom>,
     /// Lane layout over [`Self::commits`], with the lane count the widest row
     /// needs, computed once per scope.
     ///
@@ -682,7 +682,7 @@ impl CommitPicker {
     }
 
     /// The commit under the selection cursor, or `None` for an empty list.
-    pub(crate) fn selected_commit(&self) -> Option<&CommitInfo> {
+    pub fn selected_commit(&self) -> Option<&CommitInfo> {
         let idx = *self.filtered.get(self.selected)?;
         self.commits.get(idx)
     }

@@ -154,7 +154,7 @@ pub(crate) struct LastSearch {
 /// carries the caret position as well as the text. A snapshot rather than a
 /// borrow of the input state, because the caret resolves through a mutable
 /// workspace and the frame holds that borrow for the whole paint.
-pub(crate) struct StatusPrompt {
+pub struct StatusPrompt {
     /// What the prompt is for, painted ahead of the text. A search shows `/`
     /// or `?` for its direction, and the regex modal shows `select:` or
     /// `split:` for its kind.

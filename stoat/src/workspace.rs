@@ -196,7 +196,7 @@ pub struct Workspace {
     /// Whether the background diff-cache warm has run for this workspace's
     /// current root. Set once by [`crate::diff_warm::ensure_diff_warm`], reset
     /// when the cwd changes so the new root warms afresh.
-    pub(crate) diff_warmed: bool,
+    pub diff_warmed: bool,
     /// Whether a session restore installed into this workspace while another
     /// one was active, so its restored buffers and terminal panes still wait to
     /// start.
@@ -320,7 +320,7 @@ pub struct Workspace {
     /// diff, in the working-tree text's byte space. Rebuilt by
     /// [`scan_changed_ranges`] so diff-filtered navigation asks whether a
     /// symbol's definition overlaps a change.
-    pub(crate) changed_ranges: HashMap<FileId, Vec<Range<usize>>>,
+    pub changed_ranges: HashMap<FileId, Vec<Range<usize>>>,
     /// Per-file diff memo, so repeated diff-filtered navigation over an
     /// unchanged tree recomputes nothing. The memo persists across refreshes,
     /// while [`Self::changed_ranges`] is replaced by each scan.
@@ -328,8 +328,8 @@ pub struct Workspace {
     /// Count of memo misses (actual diffs run) landed by
     /// [`Self::install_changed_ranges`], so a test proves the memo spares the
     /// recompute on an unchanged tree.
-    #[cfg(test)]
-    changed_ranges_recomputes: u64,
+    #[cfg(any(test, feature = "test-support"))]
+    pub changed_ranges_recomputes: u64,
     /// The active call-graph trail, if the user has marked a start. Holds
     /// the marked anchors and, once both ends are set, the cached path that
     /// [`crate::code_index::nav`]'s trail actions step along.
@@ -354,7 +354,7 @@ pub struct Workspace {
     /// The index records only that the file is staged, so the panel learns
     /// how it was resolved here. A tally that finds no merge clears it, so a
     /// later merge starts with no notes.
-    pub(crate) resolved_conflicts: HashMap<PathBuf, Note>,
+    pub resolved_conflicts: HashMap<PathBuf, Note>,
     /// Every open commits list in the workspace, keyed from the
     /// [`View::Commits`] pane that shows it.
     ///
@@ -378,7 +378,7 @@ pub struct Workspace {
     /// The flip back takes it, so its excerpts keep their editors and buffers
     /// and no file reopens. While parked it covers no view and no pane shows
     /// it, so its buffers count as hidden.
-    pub(crate) parked_diff_changes: Option<DiffChangesState>,
+    pub parked_diff_changes: Option<DiffChangesState>,
     /// The buffers a disposed changes view opened, which the stack's pump
     /// closes when nothing else needs them.
     ///
@@ -401,7 +401,7 @@ pub struct Workspace {
     pub(crate) ending_walk: Option<crate::review_walk::ReviewWalk>,
     /// Whether [`Self::review_walk`] came back from a restore, and no git job
     /// has yet checked that HEAD still stands on its commit.
-    pub(crate) walk_unchecked: bool,
+    pub walk_unchecked: bool,
     /// Walkthrough being played (if any). Opened by `WalkthroughOpen` and
     /// dropped only by `WalkthroughDone`, so moving away from a stop's file
     /// leaves the tour where it was.
@@ -440,7 +440,7 @@ pub struct Workspace {
     parse_snapshot_clones: std::cell::Cell<u64>,
     /// Everything the git-diff pipeline remembers between passes, which
     /// [`Self::drive_diff_jobs`] reads to decide what is owed a recompute.
-    diff: DiffState,
+    pub diff: DiffState,
     /// The commit of each line of every buffer that a blamed pane shows.
     pub blame: BlameState,
     /// The buffer ids [`Self::collect_visible_buffer_ids`] last collected.
@@ -621,7 +621,7 @@ impl Workspace {
             file_paths: IndexedFiles::default(),
             changed_ranges: HashMap::new(),
             changed_ranges_memo: HashMap::new(),
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-support"))]
             changed_ranges_recomputes: 0,
             trail: None,
             walkthrough_exit: None,
@@ -918,7 +918,7 @@ impl Workspace {
     ///
     /// A `RenameTab` override wins over the derived name, so a renamed tab keeps
     /// its title no matter what its focused pane shows.
-    pub(crate) fn tab_title(&self, idx: usize) -> String {
+    pub fn tab_title(&self, idx: usize) -> String {
         if let Some(name) = self.tabs.get(idx).and_then(|tab| tab.name.as_ref()) {
             return name.clone();
         }
@@ -1456,14 +1456,14 @@ impl Workspace {
 
     /// Force the next [`Self::drive_diff_jobs`] pass to recompute `id`'s diff
     /// map against `path`'s fresh blobs. See [`DiffState::invalidate`].
-    pub(crate) fn invalidate_diff(&mut self, id: BufferId, path: &Path) {
+    pub fn invalidate_diff(&mut self, id: BufferId, path: &Path) {
         self.diff.invalidate(id, Some(path));
         self.diff_changes_epoch += 1;
     }
 
     /// The rows the range review approved in `path`, `None` before its first
     /// approval.
-    pub(crate) fn approved_rows(&self, path: &Path) -> Option<Arc<ApprovedRows>> {
+    pub fn approved_rows(&self, path: &Path) -> Option<Arc<ApprovedRows>> {
         self.diff.approved.get(path).cloned()
     }
 
@@ -1487,7 +1487,7 @@ impl Workspace {
 
     /// Stale every buffer's diff map and blame. See [`DiffState::invalidate_all`]
     /// and [`BlameState::invalidate_all`].
-    pub(crate) fn invalidate_all_diffs(&mut self) {
+    pub fn invalidate_all_diffs(&mut self) {
         self.diff.invalidate_all();
         self.blame.invalidate_all();
         self.diff_changes_epoch += 1;
@@ -1523,7 +1523,7 @@ impl Workspace {
 
     /// Whether `id`'s installed map holds the hunks for the buffer's current
     /// content, with its colors still owed. See [`DiffState::hunks_installed`].
-    pub(crate) fn hunks_installed(&self, id: BufferId) -> bool {
+    pub fn hunks_installed(&self, id: BufferId) -> bool {
         let Some(shared) = self.buffers.get(id) else {
             return false;
         };
@@ -1533,8 +1533,8 @@ impl Workspace {
 
     /// Whether `id`'s hunks are on the blocking pool. See
     /// [`DiffState::want_pending`].
-    #[cfg(test)]
-    pub(crate) fn diff_map_pending(&self, id: BufferId) -> bool {
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn diff_map_pending(&self, id: BufferId) -> bool {
         self.diff.want_pending(id)
     }
 
@@ -1618,7 +1618,7 @@ impl Workspace {
     ///
     /// An amend rewrites the reviewed commit over the same parent. The base text
     /// does not change, so every diff map stays valid.
-    pub(crate) fn follow_amended_commit(&mut self, old_sha: &str, new_sha: &str) {
+    pub fn follow_amended_commit(&mut self, old_sha: &str, new_sha: &str) {
         if let Some(DiffBase::Rev {
             origin: RevOrigin::ParentOf(commit),
             ..
@@ -1640,7 +1640,7 @@ impl Workspace {
 
     /// The other file that `path` measures against, `None` while it diffs
     /// against [`Self::diff_base`].
-    pub(crate) fn pair_for(&self, path: &Path) -> Option<&PairBase> {
+    pub fn pair_for(&self, path: &Path) -> Option<&PairBase> {
         self.diff.pairs.get(path)
     }
 
@@ -1683,7 +1683,7 @@ impl Workspace {
     }
 
     /// The working tree's own base that [`Self::set_worktree_base`] picked.
-    pub(crate) fn worktree_base(&self) -> WorktreeBase {
+    pub fn worktree_base(&self) -> WorktreeBase {
         self.diff.worktree_base
     }
 
@@ -1694,7 +1694,7 @@ impl Workspace {
     /// Refreshed by the diff pipeline rather than read on demand, since the
     /// counts cost a walk of every diff in the repository and the status bar
     /// asks every frame.
-    pub(crate) fn repo_status(&self) -> Option<RepoStatus> {
+    pub fn repo_status(&self) -> Option<RepoStatus> {
         let tallies = self.diff.repo_hunk_tallies.as_ref()?;
         // The tally counts each untracked file as one unstaged hunk, and the
         // bar names the untracked files apart.
@@ -1729,7 +1729,7 @@ impl Workspace {
     /// The same tally [`Self::repo_status`] reads its totals from, so a
     /// list showing per-file counts and the bar showing the totals never
     /// disagree.
-    pub(crate) fn repo_hunk_totals(&self) -> Option<&[(PathBuf, usize)]> {
+    pub fn repo_hunk_totals(&self) -> Option<&[(PathBuf, usize)]> {
         self.diff
             .repo_hunk_tallies
             .as_ref()
@@ -2490,7 +2490,7 @@ impl Workspace {
     /// The scan decides per file whether the ranges it already has still hold.
     /// It runs with no borrow on the workspace, so it carries its own copy of
     /// what the memo knew when it started.
-    pub(crate) fn changed_ranges_memo_snapshot(&self) -> ChangedRangesMemo {
+    pub fn changed_ranges_memo_snapshot(&self) -> ChangedRangesMemo {
         self.changed_ranges_memo.clone()
     }
 
@@ -2501,10 +2501,10 @@ impl Workspace {
     /// against text the tree has moved past. The next scan corrects them, which
     /// is the same staleness the synchronous path had against any change made
     /// during the scan itself.
-    pub(crate) fn install_changed_ranges(&mut self, scan: ChangedRangesScan) {
+    pub fn install_changed_ranges(&mut self, scan: ChangedRangesScan) {
         self.changed_ranges = scan.ranges;
         for (fid, base_hash, buffer_hash, ranges) in scan.computed {
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-support"))]
             {
                 self.changed_ranges_recomputes += 1;
             }

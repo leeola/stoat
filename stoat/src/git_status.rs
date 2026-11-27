@@ -140,7 +140,7 @@ pub(crate) enum RowKind {
 
 /// The note at the right end of a file row.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Note {
+pub enum Note {
     /// A conflicted file's chunks that still need a pick, of all its chunks.
     Open {
         open: usize,

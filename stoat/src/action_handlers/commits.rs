@@ -195,7 +195,7 @@ pub(super) fn close_commits(stoat: &mut Stoat) -> UpdateEffect {
 
 /// The live list pane `pane` covers, where a diff opened from the list stands
 /// in front of it.
-pub(crate) fn covered_commits(ws: &Workspace, pane: PaneId) -> Option<CommitListId> {
+pub fn covered_commits(ws: &Workspace, pane: PaneId) -> Option<CommitListId> {
     match ws.panes.pane(pane).prev_view {
         Some(View::Commits(id)) if ws.commit_lists.contains_key(id) => Some(id),
         _ => None,

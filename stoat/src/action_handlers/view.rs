@@ -309,7 +309,7 @@ fn max_scroll_row(display_line_count: u32, viewport: u32) -> u32 {
 /// Largest top-row position that keeps the last display row in view, as a
 /// float so the integer scroll path and the momentum path clamp to one shared
 /// bound.
-pub(crate) fn max_scroll_offset(editor: &mut EditorState) -> f32 {
+pub fn max_scroll_offset(editor: &mut EditorState) -> f32 {
     let viewport = editor.viewport_rows.unwrap_or(DEFAULT_VIEWPORT_ROWS).max(1);
     let display_snapshot = editor.display_map.snapshot();
     max_scroll_row(display_snapshot.line_count(), viewport) as f32

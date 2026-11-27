@@ -947,7 +947,7 @@ pub(crate) fn arm_pool_settle(stoat: &mut Stoat) {
 ///
 /// Returns `false` always: the work here stales state for the next render
 /// rather than producing anything a settle loop waits on.
-pub(crate) fn drain_pending_diff_refresh(stoat: &mut Stoat) -> bool {
+pub fn drain_pending_diff_refresh(stoat: &mut Stoat) -> bool {
     for _ in 0..256 {
         let Ok(()) = stoat.diff_refresh_rx.try_recv() else {
             break;

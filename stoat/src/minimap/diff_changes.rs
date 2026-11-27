@@ -66,7 +66,7 @@ use stoatty_protocol::command::{self, MinimapLinesCommand};
 /// The terminal holds the lines already sent, which `held` mirrors excerpt by
 /// excerpt. A sync splices the lines that changed since the last one and
 /// leaves the rest, since the lines above an excerpt place it.
-pub(crate) struct DiffChangesStrip {
+pub struct DiffChangesStrip {
     content_id: u32,
     /// Time one sync spends sending slices before it leaves the rest for the
     /// next frame.
@@ -257,7 +257,7 @@ impl DiffChangesStrip {
     }
 
     /// The id naming the strip's content store on the terminal.
-    pub(crate) fn content_id(&self) -> u32 {
+    pub fn content_id(&self) -> u32 {
         self.content_id
     }
 

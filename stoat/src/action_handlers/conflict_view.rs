@@ -225,7 +225,7 @@ struct ConflictLoad {
 ///
 /// Held on [`Stoat`] between the press that armed it and the
 /// [`pump_conflict_file`] that applies it.
-pub(crate) struct PendingConflictFile {
+pub struct PendingConflictFile {
     rx: mpsc::Receiver<Result<ConflictLoad, &'static str>>,
     _task: Task<()>,
     intent: ConflictIntent,
@@ -882,7 +882,7 @@ pub(crate) fn pick_chunk_side(stoat: &mut Stoat, chunk_idx: usize, kind: ActionK
 /// toggle, since only its center maps back to rows. Any other chunk keeps its
 /// text, and the status says to reset it first. A row outside the chunk
 /// changes nothing.
-pub(crate) fn pick_chunk_row(stoat: &mut Stoat, chunk_idx: usize, merge_row: usize, side: Side) {
+pub fn pick_chunk_row(stoat: &mut Stoat, chunk_idx: usize, merge_row: usize, side: Side) {
     let Some((region, region_text)) = chunk_region(stoat, chunk_idx) else {
         return;
     };

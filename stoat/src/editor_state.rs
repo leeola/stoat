@@ -147,7 +147,7 @@ pub struct EditorState {
     /// A jump into an editor with no painted view sets it, so the center is
     /// measured against the rows the editor paints rather than a default
     /// height. Transient, not persisted.
-    pub(crate) pending_center: Option<u32>,
+    pub pending_center: Option<u32>,
     /// The text a reload keeps on a row of the text area until the reader
     /// next acts. Transient, not persisted.
     pub(crate) view_hold: Option<ViewHold>,
@@ -173,7 +173,7 @@ pub struct EditorState {
     pub conflict_view: Option<Arc<ConflictViewState>>,
     /// What the last frame handed the conflict view's painter, which the painter
     /// reads beside [`Self::conflict_view`].
-    pub(crate) conflict_frame: ConflictFrame,
+    pub conflict_frame: ConflictFrame,
     pub selections: SelectionsCollection,
     /// Per-editor cursor for cycling through ambiguous move sources.
     /// `(hunk_line, source_index)` identifies which source the user is

@@ -27,7 +27,7 @@ use std::fmt::Write;
 ///
 /// Set above the muted range it exists to catch and below the ordinary syntax
 /// colors, which sit past it and so paint exactly as the theme wrote them.
-pub(crate) const FAINT_CONTRAST_FLOOR: f32 = 0.30;
+pub const FAINT_CONTRAST_FLOOR: f32 = 0.30;
 
 /// Fill `cols` content cells from `start_x` with a background wash, leaving each
 /// symbol untouched so text painted afterward keeps the wash. Ratatui's
@@ -116,7 +116,7 @@ pub fn dim_rgb(fg: [u8; 3], bg: [u8; 3], amount: f32) -> [u8; 3] {
 /// least. The distance between two of these answers how far apart a foreground
 /// and a background read, which a channel-wise difference does not: a saturated
 /// blue and the background can differ in every channel and still both look dark.
-pub(crate) fn luma(rgb: [u8; 3]) -> f32 {
+pub fn luma(rgb: [u8; 3]) -> f32 {
     (0.299 * rgb[0] as f32 + 0.587 * rgb[1] as f32 + 0.114 * rgb[2] as f32) / 255.0
 }
 

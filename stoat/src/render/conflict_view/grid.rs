@@ -43,7 +43,7 @@ use stoatty_protocol::command::{BorderStyle, Edge, PanelShadow};
 
 /// Rows the header takes above the grid's rows, the column header and then the
 /// File Header.
-pub(super) const HEADER_ROWS: u16 = 2;
+pub const HEADER_ROWS: u16 = 2;
 
 /// The File Header tag's `padding: 0 5px`, in sixteenths.
 const TAG_PAD: u16 = 10;
@@ -166,10 +166,10 @@ impl Grid {
 /// 100 / 312 of the width and the merged column the rest. Its two 1 px rules
 /// are hairlines on the merged column's edges rather than cells of their own.
 #[derive(Debug, PartialEq, Eq)]
-pub(super) struct GridColumns {
-    pub(super) ours: Column,
-    pub(super) merged: Column,
-    pub(super) theirs: Column,
+pub struct GridColumns {
+    pub ours: Column,
+    pub merged: Column,
+    pub theirs: Column,
     /// The right edge of the number field, in sixteenths from a column's left
     /// edge. The numbers right-align against it.
     number_right: u16,
@@ -185,7 +185,7 @@ impl GridColumns {
     /// long for it moves the field's edge out. The text starts on the first
     /// whole cell past the divider's margin, so it stays on the cell grid the
     /// buffer's text paints on.
-    pub(super) fn compute(area: Rect, digits: u16, number_scale: u16) -> Self {
+    pub fn compute(area: Rect, digits: u16, number_scale: u16) -> Self {
         let side = (u32::from(area.width) * 100 / 312) as u16;
         let merged = area.width.saturating_sub(2 * side);
         let number_right = NUMBER_RIGHT
@@ -222,15 +222,15 @@ impl GridColumns {
 
 /// One MergeGrid column, in cells.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) struct Column {
-    pub(super) x: u16,
+pub struct Column {
+    pub x: u16,
     pub(super) width: u16,
     /// The first cell of the column's text, past its bar, number, and divider.
-    pub(super) text_x: u16,
+    pub text_x: u16,
 }
 
 impl Column {
-    pub(super) fn right(self) -> u16 {
+    pub fn right(self) -> u16 {
         self.x + self.width
     }
 
@@ -620,7 +620,7 @@ impl RowPainter<'_> {
 }
 
 /// The scale the grid's numbers and chips draw at, the board's 10 px text.
-pub(super) fn number_scale(theme: &Theme) -> u16 {
+pub fn number_scale(theme: &Theme) -> u16 {
     theme.type_scale(TypeRole::Small)
 }
 
@@ -1507,4 +1507,476 @@ fn buttons_width(scale: u16) -> u16 {
 }
 
 #[cfg(test)]
-mod tests;
+mod tests {
+    use super::{
+        paint_file_header, paint_header, row_kind, FileFacts, Grid, GridColors, GridColumns,
+        MergeRowKind, RowLook, Tone,
+    };
+    use crate::{
+        app::DEFAULT_KEYMAP,
+        conflict_session::{ConflictLabels, ConflictPosition},
+        host::git::MergeState,
+        merge_view::{ChunkState, MergeDoc},
+        render::paint::style_rgb,
+        test_fixture::render_conflict_view_grid::{
+            rgb, AREA, CHIP_CONFLICT, CHIP_OURS, CHIP_THEIRS, DANGER, DIVIDER, MUTED, SPECIAL,
+            SUCCESS, TEXT,
+        },
+        theme::Theme,
+    };
+    use ratatui::{
+        buffer::Buffer,
+        layout::Rect,
+        style::{Modifier, Style},
+    };
+    use stoat_widgets::ApcScene;
+    use stoatty_protocol::command::{decode_stream, Command};
+
+    const MERGED_HEAD: [u8; 3] = [0x1b, 0x1d, 0x22];
+
+    const CONFLICT: [u8; 3] = [0xf5, 0x9a, 0xa0];
+
+    const TAG_CONFLICT: [u8; 3] = [0x3a, 0x20, 0x26];
+
+    const DISABLED: [u8; 3] = [0x5b, 0x61, 0x6d];
+
+    #[test]
+    fn the_columns_split_the_width_one_to_one_point_one_two_to_one() {
+        let layout = |width, digits, scale| {
+            let cols = GridColumns::compute(Rect::new(1, 0, width, 10), digits, scale);
+            [cols.ours, cols.merged, cols.theirs].map(|col| (col.x, col.width, col.text_x))
+        };
+
+        assert_eq!(
+            [
+                layout(158, 2, 208),
+                layout(151, 2, 208),
+                layout(158, 4, 256)
+            ],
+            [
+                [(1, 50, 6), (51, 58, 56), (109, 50, 114)],
+                [(1, 48, 6), (49, 55, 54), (104, 48, 109)],
+                [(1, 50, 8), (51, 58, 58), (109, 50, 116)],
+            ],
+            "the sides take 100 / 312 each, the text starts on the cell past the bar, \
+             the number field, and the divider's margins, and a number too long for \
+             the field moves the text out",
+        );
+    }
+
+    #[test]
+    fn rows_classify_by_the_side_the_merge_takes() {
+        let doc = MergeDoc::build(
+            "keep\nmine\nyours\nboth\ntail\n",
+            "keep\nMINE\nyours\nOURS\ntail\n",
+            "keep\nmine\nYOURS\nTHEIRS\ntail\n",
+            None,
+        );
+        let plan = doc.align(&[]);
+        let kinds = |state| {
+            plan.iter()
+                .map(|row| row_kind(row, &doc, &[state]))
+                .collect::<Vec<_>>()
+        };
+
+        use MergeRowKind::{Conflict, Context, Ours, Settled, Theirs, TookOurs, TookTheirs};
+        assert_eq!(
+            kinds(ChunkState::Unresolved),
+            [Context, Ours, Theirs, Conflict, Conflict, Conflict, Conflict, Conflict, Context],
+            "a one-sided edit takes its side, and the marker block is the conflict",
+        );
+        assert_eq!(
+            [
+                ChunkState::Ours,
+                ChunkState::Theirs,
+                ChunkState::Both,
+                ChunkState::Picked,
+                ChunkState::AutoIndent,
+                ChunkState::Manual,
+            ]
+            .map(|state| kinds(state)[3]),
+            [
+                TookOurs,
+                TookTheirs,
+                Settled("both"),
+                Settled("picked"),
+                Settled("auto \u{b7} indent"),
+                Settled("edited"),
+            ],
+            "a settled chunk's rows take the kind of its resolution",
+        );
+    }
+
+    #[test]
+    fn inserted_lines_classify_by_the_side_that_added_them() {
+        let doc = MergeDoc::build("keep\n", "keep\nmine\n", "theirs\nkeep\n", None);
+        let kinds: Vec<_> = doc
+            .align(&[])
+            .iter()
+            .map(|row| row_kind(row, &doc, &[]))
+            .collect();
+
+        assert_eq!(
+            kinds,
+            [
+                MergeRowKind::Theirs,
+                MergeRowKind::Context,
+                MergeRowKind::Ours
+            ]
+        );
+    }
+
+    /// The header names each side's commit and the merged column's working tree,
+    /// each name and label at the Ui scale and the keys at the Caption scale, all
+    /// 20 sixteenths in from their column's edges. The merged cell fills with the
+    /// head color, and a rule in the divider's color underlines the row.
+    ///
+    /// At the Ui scale of 232 a character advances 14.5 sixteenths, and at the
+    /// Caption scale of 216 it advances 13.5. So the ours label starts after the
+    /// name's 58 and a gap of 16, and the 18 characters of its keys end 20 short
+    /// of the column's 800.
+    #[test]
+    fn the_header_names_each_side_and_the_merged_column() {
+        let (config, errors) = stoat_config::parse(DEFAULT_KEYMAP);
+        assert!(errors.is_empty(), "parse errors: {errors:?}");
+        let theme = Theme::from_config(&config.expect("the shipped config parses"), "ermine_night")
+            .expect("ermine_night loads");
+        let grid = Grid {
+            cols: GridColumns::compute(AREA, 2, 208),
+            colors: GridColors::resolve(&theme).expect("ermine_night gives RGB colors"),
+        };
+        let merge = MergeState {
+            head_sha: "f00dfeed".to_string(),
+            head_name: Some("feature".to_string()),
+            message: String::new(),
+            conflicted: 1,
+        };
+        let labels = ConflictLabels::new(Some("main".to_string()), Some(&merge));
+        let mut buf = Buffer::empty(AREA);
+        let mut scene = ApcScene::new();
+        paint_header(
+            Rect { height: 1, ..AREA },
+            &grid,
+            &labels,
+            232,
+            216,
+            &mut buf,
+            &mut scene,
+        );
+
+        let commands = decode_stream(scene.buffer());
+        let runs: Vec<_> = commands
+            .iter()
+            .filter_map(|command| match command {
+                Command::TextRun(run) => Some((run.col, run.text.clone(), run.scale, run.color)),
+                _ => None,
+            })
+            .collect();
+        let rule = commands.iter().find_map(|command| match command {
+            Command::Bar(bar) if bar.y == 15 => Some((bar.x, bar.width, bar.height, bar.color)),
+            _ => None,
+        });
+        let bg = |x: u16| style_rgb(Some(buf[(x, 0)].bg));
+
+        assert_eq!(
+            (runs, bg(grid.cols.merged.x), bg(grid.cols.ours.x), rule),
+            (
+                [
+                    (20, "ours", 232, SUCCESS),
+                    (94, "HEAD \u{b7} main", 232, MUTED),
+                    (537, "click \u{b7} o \u{b7} O line", 216, MUTED),
+                    (820, "merged", 232, TEXT),
+                    (923, "working tree \u{b7} you edit here", 232, MUTED),
+                    (1748, "theirs", 232, SPECIAL),
+                    (1851, "feature \u{b7} f00dfee", 232, MUTED),
+                    (2265, "click \u{b7} t \u{b7} T line", 216, MUTED),
+                ]
+                .map(|(col, text, scale, color)| (col, text.to_string(), scale, color))
+                .to_vec(),
+                Some(MERGED_HEAD),
+                None,
+                Some((0, AREA.width * 16, 1, DIVIDER)),
+            ),
+        );
+    }
+
+    /// A column too narrow for its label cuts the label's tail at the label's own
+    /// scale. At 84 cells a side column is 26 cells. The ours column leaves 43
+    /// sixteenths between its name and its keys, so two characters of 14.5 fit
+    /// and a third does not. The longer name of the theirs column leaves 14, too
+    /// few for one character, so its label draws no run. The merged column's 32
+    /// cells leave room for 25 characters.
+    #[test]
+    fn a_narrow_column_cuts_its_label_at_the_label_scale() {
+        let (config, errors) = stoat_config::parse(DEFAULT_KEYMAP);
+        assert!(errors.is_empty(), "parse errors: {errors:?}");
+        let theme = Theme::from_config(&config.expect("the shipped config parses"), "ermine_night")
+            .expect("ermine_night loads");
+        let area = Rect::new(0, 0, 84, 1);
+        let grid = Grid {
+            cols: GridColumns::compute(area, 2, 208),
+            colors: GridColors::resolve(&theme).expect("ermine_night gives RGB colors"),
+        };
+        let merge = MergeState {
+            head_sha: "f00dfeed".to_string(),
+            head_name: Some("feature".to_string()),
+            message: String::new(),
+            conflicted: 1,
+        };
+        let labels = ConflictLabels::new(Some("main".to_string()), Some(&merge));
+        let mut scene = ApcScene::new();
+        paint_header(
+            area,
+            &grid,
+            &labels,
+            232,
+            216,
+            &mut Buffer::empty(area),
+            &mut scene,
+        );
+
+        let cut: Vec<String> = decode_stream(scene.buffer())
+            .into_iter()
+            .filter_map(|command| match command {
+                Command::TextRun(run) if run.color == MUTED && run.scale == 232 => Some(run.text),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(cut, ["HE", "working tree \u{b7} you edit h"]);
+    }
+
+    /// The File Header runs a rule along its top and its bottom on the head color.
+    /// It tags the shown file's open conflicts and counts what theirs changes,
+    /// both against the merged column, names the file from the merged column's
+    /// pad, and ends in the file's place in the session against the theirs
+    /// column's right edge. The tag reads every open chunk as the total, some as
+    /// how many of the total stay left, and none as resolved, in the resolved
+    /// tag's colors. A zero count takes no run.
+    ///
+    /// At the test scale every character advances 16 sixteenths. So the tag of
+    /// `conflict U+00B7 2` is 192 wide with 10 of pad each side, and the tag and
+    /// its two counts, 16 apart, end 20 short of the merged column's 800.
+    #[test]
+    fn the_file_header_tags_the_open_conflicts_and_counts_the_file() {
+        let tags = [2, 1, 0].map(|open| {
+            let (commands, _) = file_header(AREA, open, (9, 4));
+            let tag = commands.iter().find_map(|command| match command {
+                Command::Bar(bar) if bar.radius > 0 => {
+                    Some((bar.x, bar.y, bar.width, bar.height, bar.color))
+                },
+                _ => None,
+            });
+            let text = commands.iter().find_map(|command| match command {
+                Command::TextRun(run) if run.bg.is_none() => {
+                    Some((run.col, run.text.clone(), run.color))
+                },
+                _ => None,
+            });
+            (tag, text)
+        });
+        let (commands, buf) = file_header(AREA, 2, (9, 4));
+        let rules: Vec<_> = commands
+            .iter()
+            .filter_map(|command| match command {
+                Command::Bar(bar) if bar.width == AREA.width * 16 => Some((bar.y, bar.color)),
+                _ => None,
+            })
+            .collect();
+        let runs: Vec<_> = commands
+            .into_iter()
+            .filter_map(|command| match command {
+                Command::TextRun(run) if run.bg.is_some() => {
+                    Some((run.col, run.text, run.color, run.bold))
+                },
+                _ => None,
+            })
+            .collect();
+        let one_count: Vec<_> = file_header(AREA, 2, (0, 3))
+            .0
+            .into_iter()
+            .filter_map(|command| match command {
+                Command::TextRun(run) if run.text.starts_with(['+', '\u{2212}']) => {
+                    Some((run.col, run.text))
+                },
+                _ => None,
+            })
+            .collect();
+
+        assert_eq!(
+            (
+                tags,
+                rules,
+                runs,
+                style_rgb(Some(buf[(0, 0)].bg)),
+                one_count
+            ),
+            (
+                [
+                    (
+                        Some((472, 1, 212, 14, TAG_CONFLICT)),
+                        Some((482, "conflict \u{b7} 2".to_string(), CONFLICT)),
+                    ),
+                    (
+                        Some((312, 1, 372, 14, TAG_CONFLICT)),
+                        Some((322, "conflict \u{b7} 1 of 2 left".to_string(), CONFLICT)),
+                    ),
+                    (
+                        Some((504, 1, 180, 14, CHIP_OURS)),
+                        Some((514, "\u{2713} resolved".to_string(), SUCCESS)),
+                    ),
+                ],
+                vec![(0, DIVIDER), (15, DIVIDER)],
+                vec![
+                    (820, "src/".to_string(), MUTED, false),
+                    (884, "notes".to_string(), TEXT, true),
+                    (700, "+9".to_string(), SUCCESS, false),
+                    (748, "\u{2212}4".to_string(), DANGER, false),
+                    (2348, "file 1 / 1".to_string(), DISABLED, false),
+                ],
+                Some(MERGED_HEAD),
+                vec![(748, "\u{2212}3".to_string())],
+            ),
+        );
+    }
+
+    /// A column too narrow for its part of the File Header drops that part whole.
+    /// At 66 cells the ours column has too little room for the tag and its counts,
+    /// and at 30 cells the theirs column has too little room for the place.
+    #[test]
+    fn a_narrow_column_drops_its_part_of_the_file_header() {
+        let parts = [66, 30].map(|width| {
+            let (commands, _) = file_header(Rect::new(0, 0, width, 13), 2, (9, 4));
+            let tag = commands
+                .iter()
+                .any(|command| matches!(command, Command::Bar(bar) if bar.radius > 0));
+            let place = commands.iter().any(
+                |command| matches!(command, Command::TextRun(run) if run.text.starts_with("file")),
+            );
+            (tag, place)
+        });
+
+        assert_eq!(parts, [(false, true), (false, false)]);
+    }
+
+    /// Paint the File Header in `ermine_night` over the first row of `area` for
+    /// `src/notes` with `open` of its two chunks open and `counts` lines theirs
+    /// adds and removes, and answer the scene's commands and the cells.
+    fn file_header(area: Rect, open: usize, counts: (u32, u32)) -> (Vec<Command>, Buffer) {
+        let (config, errors) = stoat_config::parse(DEFAULT_KEYMAP);
+        assert!(errors.is_empty(), "parse errors: {errors:?}");
+        let theme = Theme::from_config(&config.expect("the shipped config parses"), "ermine_night")
+            .expect("ermine_night loads");
+        let grid = Grid {
+            cols: GridColumns::compute(area, 2, 256),
+            colors: GridColors::resolve(&theme).expect("ermine_night gives RGB colors"),
+        };
+        let position = ConflictPosition {
+            operation: "merge",
+            chunk_at: None,
+            chunk_total: 2,
+            file_at: 1,
+            file_total: 1,
+            file_open: open,
+            chunks_open: open,
+            files_open: usize::from(open > 0),
+        };
+        let facts = FileFacts {
+            path: "src/notes",
+            position: Some(position),
+            counts,
+        };
+        let mut buf = Buffer::empty(area);
+        let mut scene = ApcScene::new();
+        paint_file_header(
+            Rect { height: 1, ..area },
+            &grid,
+            facts,
+            &theme,
+            &mut buf,
+            &mut scene,
+        );
+        (decode_stream(scene.buffer()), buf)
+    }
+
+    /// Each chip takes the tone of its kind. A run or a chunk the merge takes from
+    /// ours takes the ours chip, one from theirs the theirs chip, and an unsettled
+    /// chunk the conflict chip.
+    #[test]
+    fn each_chip_takes_the_tone_of_its_kind() {
+        let (config, errors) = stoat_config::parse(DEFAULT_KEYMAP);
+        assert!(errors.is_empty(), "parse errors: {errors:?}");
+        let theme = Theme::from_config(&config.expect("the shipped config parses"), "ermine_night")
+            .expect("ermine_night loads");
+        let colors = GridColors::resolve(&theme).expect("ermine_night gives RGB colors");
+        let tint = |kind| {
+            RowLook::of(kind, [false, false], &colors)
+                .chip
+                .map(|(_, tone)| tone.tint)
+        };
+
+        assert_eq!(
+            [
+                MergeRowKind::Ours,
+                MergeRowKind::TookOurs,
+                MergeRowKind::Theirs,
+                MergeRowKind::TookTheirs,
+                MergeRowKind::Conflict,
+            ]
+            .map(tint),
+            [
+                CHIP_OURS,
+                CHIP_OURS,
+                CHIP_THEIRS,
+                CHIP_THEIRS,
+                CHIP_CONFLICT
+            ]
+            .map(Some),
+        );
+    }
+
+    #[test]
+    fn a_theme_without_the_board_scopes_falls_back_to_their_neighbors() {
+        let (config, errors) = stoat_config::parse(DEFAULT_KEYMAP);
+        assert!(errors.is_empty(), "parse errors: {errors:?}");
+        let theme = Theme::from_config(&config.expect("the shipped config parses"), "default_dark")
+            .expect("default_dark loads");
+        // default_dark's danger, #e06c75, washed 85% toward its surface, #282c34.
+        let band = Tone {
+            fg: [0xe0, 0x6c, 0x75],
+            tint: [0x44, 0x36, 0x3e],
+        };
+        let colors = GridColors::resolve(&theme).expect("default_dark gives RGB colors");
+
+        assert_eq!(
+            (
+                colors.band,
+                colors.chip,
+                [colors.chip_ours, colors.chip_theirs],
+                colors.chip_both,
+                [colors.tag, colors.tag_resolved],
+                colors.ghost,
+                colors.head,
+                colors.chrome
+            ),
+            (
+                band,
+                band,
+                [colors.ours, colors.theirs],
+                Tone {
+                    fg: [0x56, 0xb6, 0xc2],
+                    tint: [0x33, 0x38, 0x42],
+                },
+                [band, colors.ours],
+                Style::default()
+                    .fg(rgb([0x63, 0x6d, 0x83]))
+                    .add_modifier(Modifier::ITALIC),
+                None,
+                colors.bg,
+            ),
+            "the band takes the conflict header's color, the chip the band, each \
+             side's chip its side, the both button the Fold Buttons' cyan on gray, \
+             the tag the chip, the resolved tag the ours chip, the ghost muted \
+             italic text, and the hover pill the surface",
+        );
+    }
+}

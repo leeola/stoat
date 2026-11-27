@@ -53,7 +53,7 @@ pub(super) enum AmendRoute {
 /// transport over a commit that is not safe to rewrite, or over an agent
 /// proposal, which has no commit. Both funnels that read the route share it,
 /// so their wording stays in step.
-pub(super) const REFUSED_BADGE: &str =
+pub const REFUSED_BADGE: &str =
     "amend needs HEAD on the reviewed commit; use :rebase edit for older commits";
 
 /// What every staging key says under a pair base. A hunk measured against

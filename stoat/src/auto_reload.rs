@@ -177,7 +177,7 @@ impl ReloadFlash {
 /// [`pump_auto_reload`] drops it once no buffer is flagged. Called when a buffer
 /// opts into file-following, such as the session log buffer and the
 /// `:auto-reload` command.
-pub(crate) fn ensure_auto_reload_poll(stoat: &mut Stoat) {
+pub fn ensure_auto_reload_poll(stoat: &mut Stoat) {
     if stoat.auto_reload_poll.is_some() {
         return;
     }
@@ -211,7 +211,7 @@ pub(crate) fn ensure_auto_reload_poll(stoat: &mut Stoat) {
 ///
 /// Returns whether a read was started, so the run loop knows work is out. What
 /// the reader sees moving is the install's answer, not this one.
-pub(crate) fn pump_auto_reload(stoat: &mut Stoat) -> bool {
+pub fn pump_auto_reload(stoat: &mut Stoat) -> bool {
     if stoat.auto_reload_poll.is_none() {
         return false;
     }
@@ -413,7 +413,7 @@ fn read_and_compare(
 /// anchors for the log-tail case. Otherwise the changed span is replaced. A
 /// cursor resting on what was the last line follows to the new end, while any
 /// other cursor stays put.
-pub(crate) fn pump_auto_reload_install(stoat: &mut Stoat) -> bool {
+pub fn pump_auto_reload_install(stoat: &mut Stoat) -> bool {
     let mut ready = Vec::new();
     stoat.pending_auto_reloads.retain(|pending| {
         match pending.result.lock().expect("pending reload mutex").take() {
@@ -746,7 +746,7 @@ pub fn reload_all(stoat: &mut Stoat, force: bool) -> UpdateEffect {
 ///
 /// Sets no status, because the re-read is part of the checkout the reader asked
 /// for rather than a command of its own.
-pub(crate) fn reload_clean_buffers(stoat: &mut Stoat) {
+pub fn reload_clean_buffers(stoat: &mut Stoat) {
     let paths = stoat.active_workspace().buffers.open_paths();
     reload_each(stoat, paths, false, true);
 }

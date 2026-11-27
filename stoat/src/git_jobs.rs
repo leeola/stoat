@@ -69,14 +69,14 @@ pub enum GitJobKey {
 
 /// The git writes the loop started, held in press order until each one lands.
 #[derive(Default)]
-pub(crate) struct GitJobs {
+pub struct GitJobs {
     queue: VecDeque<QueuedGitJob>,
     running: Option<RunningGitJob>,
 }
 
 impl GitJobs {
     /// Whether a job with `key` runs or waits in the queue.
-    pub(crate) fn holds(&self, key: GitJobKey) -> bool {
+    pub fn holds(&self, key: GitJobKey) -> bool {
         self.running
             .as_ref()
             .is_some_and(|job| job.key == Some(key))

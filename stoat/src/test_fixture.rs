@@ -577,3 +577,304 @@ pub fn action(name: &str) -> ResolvedAction {
         args: Vec::new(),
     }
 }
+
+/// The diff editors, cell readers, and RGB diff themes that the tests of `render::review` in
+/// The diff editors, cell readers, and RGB diff themes that the tests of `render::review` in
+/// `stoat` and in `stoat_tests` share.
+pub mod render_review {
+    use crate::{
+        buffer::{BufferId, TextBuffer},
+        diff_map::{DiffHunk, DiffHunkStatus, DiffMap, TokenDetail},
+        editor_state::EditorState,
+        render::review::{
+            fold_row_placeholder, render_diff_view, BufferNumbering, DiffColumns, DiffDials,
+            DiffLayout,
+        },
+        theme::Theme,
+    };
+    use ratatui::{buffer::Buffer, layout::Rect, style::Style};
+    use std::sync::{Arc, RwLock};
+    use stoat_language::structural_diff;
+    use stoat_scheduler::{Executor, TestScheduler};
+    use stoat_text::Point;
+
+    pub fn buffer_text(buf: &Buffer, y: u16) -> String {
+        (buf.area.x..buf.area.x + buf.area.width)
+            .map(|x| buf[(x, y)].symbol().chars().next().unwrap_or(' '))
+            .collect()
+    }
+
+    /// The cell columns a diff view paints over `area` for files under a
+    /// hundred lines, whose gutters take two digits.
+    pub fn two_digit_columns(area: Rect) -> DiffColumns {
+        DiffColumns::compute(area, DiffLayout::diff_view(2, None))
+    }
+
+    /// The cell columns of a 120-wide diff view of files under a hundred
+    /// lines, as the 120-wide renders with no scene lay it out.
+    pub fn wide_columns() -> DiffColumns {
+        two_digit_columns(Rect::new(0, 0, 120, 8))
+    }
+
+    /// The left text cells, up to the mid-divider in the two-column layout.
+    pub fn left_text(cols: &DiffColumns) -> std::ops::Range<u16> {
+        cols.left_text_x..cols.left_text_x + cols.left_content_w as u16
+    }
+
+    /// The right text cells.
+    pub fn right_text(cols: &DiffColumns) -> std::ops::Range<u16> {
+        cols.right_text_x..cols.right_text_x + cols.right_content_w as u16
+    }
+
+    /// The cells the left line number shows in.
+    pub fn left_num(cols: &DiffColumns) -> std::ops::Range<u16> {
+        number_cells(cols, cols.left_x, cols.left_num_x)
+    }
+
+    /// The cells a line number shows in on the side that starts at `side_x`.
+    ///
+    /// A cell gutter writes the number into its field at `num_x`. A rich
+    /// gutter's run ends at its sixteenth offset and composites from the cell
+    /// it starts in, so a number of up to two digits lands in the cells before
+    /// the offset's own cell. The first of those cells also holds the lanes.
+    pub fn number_cells(cols: &DiffColumns, side_x: u16, num_x: u16) -> std::ops::Range<u16> {
+        match cols.rich {
+            Some(rich) => side_x..side_x + rich.number_right / 16,
+            None => num_x..num_x + (cols.status_left_x - cols.left_num_x),
+        }
+    }
+
+    /// A diff-view editor over `text`, diffed against `base`, with the view and
+    /// its deleted-block splicing enabled.
+    pub fn diff_editor(base: &str, text: &str) -> EditorState {
+        let executor = Executor::new(Arc::new(TestScheduler::new()));
+        let mut tb = TextBuffer::with_text(BufferId::new(0), text);
+        tb.diff_map = Some(DiffMap::from_structural_changes(
+            structural_diff::diff(base, text),
+            Arc::new(base.to_string()),
+            text,
+        ));
+        let shared = Arc::new(RwLock::new(tb));
+        let mut editor = EditorState::new(BufferId::new(0), shared, executor, crate::test_notify());
+        editor.set_diff_view(true);
+        editor
+    }
+
+    /// A diff-view editor over `text` with a hand-built diff map, for hunk shapes
+    /// the structural differ will not synthesize from plain text (e.g. moves).
+    pub fn diff_editor_with_map(text: &str, dm: DiffMap) -> EditorState {
+        let executor = Executor::new(Arc::new(TestScheduler::new()));
+        let mut tb = TextBuffer::with_text(BufferId::new(0), text);
+        tb.diff_map = Some(dm);
+        let shared = Arc::new(RwLock::new(tb));
+        let mut editor = EditorState::new(BufferId::new(0), shared, executor, crate::test_notify());
+        editor.set_diff_view(true);
+        editor
+    }
+
+    /// A diff-view editor over the lines `1` to `20`, with one refined
+    /// `Modified` hunk over the rows `live`.
+    ///
+    /// The hunk's base holds `removed` lines named `b<n>` from the hunk's first
+    /// line on, and its first and last rows are the marked runs. The rows above
+    /// and below the hunk match the base.
+    pub fn hunk_editor(live: std::ops::Range<u32>, removed: u32) -> EditorState {
+        let text: String = (1..=20).map(|n| format!("{n}\n")).collect();
+        let head: String = (1..=live.start).map(|n| format!("{n}\n")).collect();
+        let lines: String = (live.start + 1..=live.start + removed)
+            .map(|n| format!("b{n}\n"))
+            .collect();
+        let tail: String = (live.end + 1..=20).map(|n| format!("{n}\n")).collect();
+        let dm = DiffMap::from_hunks(
+            [DiffHunk {
+                status: DiffHunkStatus::Modified,
+                unstaged_lines: std::iter::once(live.clone()).collect(),
+                marked_rows: vec![live.start..live.start + 1, live.end - 1..live.end],
+                relocated_rows: Vec::new(),
+                buffer_start_line: live.start,
+                buffer_line_range: live,
+                base_byte_range: head.len()..head.len() + lines.len() - 1,
+                anchor_range: None,
+                token_detail: Some(Arc::new(TokenDetail {
+                    buffer_spans: Vec::new(),
+                    base_spans: Vec::new(),
+                    tree: false,
+                })),
+            }],
+            Some(Arc::new(format!("{head}{lines}{tail}"))),
+        );
+        diff_editor_with_map(&text, dm)
+    }
+
+    /// A [`hunk_editor`] whose hunk over rows 4 to 15 has ten base lines, with
+    /// a fold row over its rows 6 to 13.
+    pub fn hunk_fold_row_editor() -> EditorState {
+        let mut editor = hunk_editor(4..16, 10);
+        editor.display_map.fold_with(vec![(
+            Point::new(6, 0)..Point::new(13, 2),
+            fold_row_placeholder(8),
+        )]);
+        editor
+    }
+
+    /// `editor` painted in cells as a diff view over `area`, from its scroll row.
+    pub fn paint_cells(editor: &mut EditorState, area: Rect) -> Buffer {
+        let mut buf = Buffer::empty(area);
+        render_diff_view(
+            editor,
+            area,
+            Style::default(),
+            &rgb_diff_theme(),
+            &mut buf,
+            false,
+            None,
+            None,
+            false,
+            DiffDials::shipped(),
+            BufferNumbering::Absolute,
+            &[],
+            false,
+        );
+        buf
+    }
+
+    /// A minimal theme whose diff colors resolve to RGB, so the change washes
+    /// engage when rendering a hand-built diff editor off the harness.
+    pub fn rgb_diff_theme() -> Theme {
+        rgb_diff_theme_with("")
+    }
+
+    /// [`rgb_diff_theme`] with the settings in `extra` added to its block.
+    pub fn rgb_diff_theme_with(extra: &str) -> Theme {
+        let src = format!(
+            r##"theme rgbtest {{
+            diff.context.fg  = "#808080";
+            diff.added.fg    = "#00ff00";
+            diff.modified.fg = "#ffff00";
+            diff.deleted.fg  = "#ff0000";
+            diff.moved.fg    = "#0000ff";
+            diff.staged.fg   = "#00ffff";
+            diff.unstaged.fg = "#ff00ff";
+            diff.approved.fg = "#ff8000";
+            diff.unapproved.fg = "#8000ff";
+            ui.background.bg = "#282c34";
+            {extra}
+        }}"##
+        );
+        let (config, _) = stoat_config::parse(&src);
+        Theme::from_config(&config.expect("theme config parses"), "rgbtest")
+            .expect("rgb theme builds")
+    }
+
+    /// The glyphs of row `y` across `cols`, for locating a rendered line.
+    pub fn line_text(buf: &Buffer, y: u16, cols: std::ops::Range<u16>) -> String {
+        cols.map(|x| buf[(x, y)].symbol().chars().next().unwrap_or(' '))
+            .collect()
+    }
+
+    /// The first row whose glyphs across `cols` start with `needle`.
+    pub fn row_holding(buf: &Buffer, cols: std::ops::Range<u16>, needle: &str) -> u16 {
+        (0..buf.area.height)
+            .find(|&y| line_text(buf, y, cols.clone()).starts_with(needle))
+            .unwrap_or_else(|| panic!("no row across {cols:?} starts with {needle:?}"))
+    }
+
+    /// `a` a's, a space, then `b` b's: a line that wraps after the space when
+    /// the a's and the space fit the width and the whole line does not.
+    pub fn long_line(a: usize, b: usize) -> String {
+        format!("{} {}", "a".repeat(a), "b".repeat(b))
+    }
+
+    /// The trimmed glyphs of a continuation row whose text is `text`, which
+    /// open with the Wrap Mark and the space after it.
+    pub fn continued(text: String) -> String {
+        format!("\u{21b3} {text}")
+    }
+}
+
+/// The span prose that the tests of `workspace::diff` in `stoat` and in `stoat_tests` share.
+pub mod workspace_diff {
+    use crate::diff_map::{DiffMap, ProseChange};
+
+    /// The prose marks of every span in `dm`, buffer side then base side, with
+    /// each run of equal marks merged into one.
+    pub fn span_prose(dm: &DiffMap) -> Vec<ProseChange> {
+        let mut prose: Vec<ProseChange> = dm
+            .hunks()
+            .filter_map(|hunk| hunk.token_detail.as_deref())
+            .flat_map(|detail| detail.buffer_spans.iter().chain(&detail.base_spans))
+            .map(|span| span.prose)
+            .collect();
+        prose.dedup();
+        prose
+    }
+}
+
+/// The diff maps and scope text that the tests of `diff_changes` in `stoat` and in `stoat_tests`
+/// The diff maps and scope text that the tests of `diff_changes` in `stoat` and in `stoat_tests`
+/// The diff maps and scope text that the tests of `diff_changes` in `stoat` and in `stoat_tests`
+/// share.
+pub mod diff_changes {
+    use crate::{
+        diff_changes::scope_parts, diff_map::DiffMap, display_map::FoldScope,
+        theme::FULL_CELL_SCALE,
+    };
+    use std::sync::Arc;
+    use stoat_language::structural_diff;
+
+    /// The map a structural diff of `base` against `text` gives.
+    pub fn map_of(base: &str, text: &str) -> DiffMap {
+        DiffMap::from_structural_changes(
+            structural_diff::diff(base, text),
+            Arc::new(base.to_string()),
+            text,
+        )
+    }
+
+    /// Lines `1` to `n`, one per line.
+    pub fn numbered(n: u32) -> String {
+        (1..=n).map(|line| format!("{line}\n")).collect()
+    }
+
+    /// The text of every run of `scope`, with room for all of it.
+    pub fn scope_text(scope: &FoldScope) -> String {
+        scope_parts(scope, u16::MAX, FULL_CELL_SCALE)
+            .iter()
+            .map(|part| part.text.as_str())
+            .collect()
+    }
+}
+
+/// The palette, area, and bar shape that the tests of `render::conflict_view::grid` in `stoat` and
+/// The palette and area that the tests of `render::conflict_view::grid` in `stoat` and in
+/// `stoat_tests` draw with.
+pub mod render_conflict_view_grid {
+    use ratatui::{layout::Rect, style::Color};
+
+    pub const SUCCESS: [u8; 3] = [0x8f, 0xd1, 0x8a];
+
+    pub const SPECIAL: [u8; 3] = [0xc5, 0x9a, 0xf0];
+
+    pub const DANGER: [u8; 3] = [0xf2, 0x77, 0x7f];
+
+    pub const MUTED: [u8; 3] = [0x83, 0x8a, 0x98];
+
+    pub const TEXT: [u8; 3] = [0xdf, 0xe2, 0xe8];
+
+    pub const DIVIDER: [u8; 3] = [0x22, 0x25, 0x2b];
+
+    pub const CHIP_CONFLICT: [u8; 3] = [0x33, 0x20, 0x1f];
+
+    pub const CHIP_OURS: [u8; 3] = [0x1d, 0x2a, 0x1f];
+
+    pub const CHIP_THEIRS: [u8; 3] = [0x2a, 0x22, 0x36];
+
+    /// The paint area, wide enough that the merged column ends past its chip, and
+    /// tall enough to hold the eleven rows of the one-sided edits test under the
+    /// two header rows.
+    pub const AREA: Rect = Rect::new(0, 0, 158, 13);
+
+    pub fn rgb([r, g, b]: [u8; 3]) -> Color {
+        Color::Rgb(r, g, b)
+    }
+}

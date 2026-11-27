@@ -130,7 +130,7 @@ use unicode_width::UnicodeWidthStr;
 /// Strip id for the single-mode minimap, reserved above every pane index (which
 /// are small and dense from zero). stoatty keys minimap strips in a namespace
 /// separate from scroll pools, so `u32::MAX` never collides.
-pub(crate) const SINGLE_MINIMAP_STRIP_ID: u32 = u32::MAX;
+pub const SINGLE_MINIMAP_STRIP_ID: u32 = u32::MAX;
 
 /// The bit that sets a Coverage Rail's strip id apart from its strip's.
 ///
@@ -255,7 +255,7 @@ pub(crate) struct PaneCtx<'a> {
 /// `(workspace, buffer)`) and the palette and thumb color stoatty paints it in,
 /// without the render path reaching back into [`Stoat`].
 #[derive(Clone, Copy)]
-pub(crate) struct MinimapChrome<'a> {
+pub struct MinimapChrome<'a> {
     /// Active workspace, the first half of the [`Stoat::minimap_content`] key.
     pub(crate) workspace: WorkspaceId,
     /// Content stores this session declared, read for each strip's `content_id`.
@@ -327,7 +327,7 @@ impl MinimapChrome<'_> {
 }
 
 /// One language server as the status bar shows it.
-pub(crate) struct StatusServer {
+pub struct StatusServer {
     /// The abbreviation the server status popout paints, from
     /// [`pane::lsp_short_name`].
     pub(crate) short: String,
@@ -402,92 +402,92 @@ impl LspServerList {
 /// so individual render functions stay under the `clippy::too_many_arguments`
 /// threshold; every field is a cheap borrow or `Copy`.
 #[derive(Clone, Copy)]
-pub(crate) struct FrameCtx<'a> {
-    pub(crate) workspace_name: &'a str,
+pub struct FrameCtx<'a> {
+    pub workspace_name: &'a str,
     /// Whether the tab bar takes the frame's top rows. The bar then leads with
     /// the workspace name, so a status row leaves the name out.
-    pub(crate) tab_bar_shown: bool,
+    pub tab_bar_shown: bool,
     /// Whether the checkout banner takes the rows under the tab bar, from
     /// [`Stoat::banner_shown`].
-    pub(crate) banner_shown: bool,
+    pub banner_shown: bool,
     /// Whether the chrome rows draw as bands, from [`Stoat::chrome_bands_on`].
     ///
     /// A band's island then reaches into the spare row the band takes.
-    pub(crate) chrome_bands: bool,
-    pub(crate) workspace_root: &'a Path,
-    pub(crate) mode: &'a str,
+    pub chrome_bands: bool,
+    pub workspace_root: &'a Path,
+    pub mode: &'a str,
     /// The app screen in the foreground, from [`crate::keymap_state::view_predicate`].
     /// Drives the status-bar screen label. `None` or `Some("file")` for a plain
     /// editor with no screen over it.
-    pub(crate) screen: Option<&'static str>,
-    pub(crate) theme: &'a crate::theme::Theme,
+    pub screen: Option<&'static str>,
+    pub theme: &'a crate::theme::Theme,
     /// The commits screen's dragged list share of the pane body, in
     /// [`crate::render::picker::SHARE_SCALE`] units. `None` until the reader
     /// drags that screen's separator, which leaves the width to the renderer's
     /// own formula.
-    pub(crate) commits_split: Option<u16>,
+    pub commits_split: Option<u16>,
     /// The diff view's styling dials, resolved for the commit previews. Those
     /// previews paint through `:diff-files`'s own painter, so they answer the
     /// same session dials rather than carrying a second set.
-    pub(crate) preview_dials: commits::PreviewDials,
+    pub preview_dials: commits::PreviewDials,
     /// Whether the repository tally is owed or on the pool, so a changes view
     /// with no excerpt shows that its list builds rather than that nothing
     /// changed.
-    pub(crate) diff_changes_building: bool,
+    pub diff_changes_building: bool,
     /// The gutter, severity, and diff-mark colors already resolved from
     /// [`Self::theme`], so each pane paints from them rather than re-walking
     /// the scope table for every one.
-    pub(crate) chrome: &'a editor::ResolvedChrome,
+    pub chrome: &'a editor::ResolvedChrome,
     /// Mid-typing count prefix waiting on a motion (e.g. `4` between
     /// keypresses on the way to `4j`). The status bar shows it so the
     /// user knows a partial count is in flight; cleared after every
     /// action dispatch.
-    pub(crate) pending_count: Option<u32>,
+    pub pending_count: Option<u32>,
     /// Register an in-progress macro recording captures into, `None` when no
     /// recording runs.
     ///
     /// Recording is modal state that takes every keypress until it is toggled
     /// off, so the status bar shows it. Without the sign, a user who looks away
     /// has nothing to tell them their next edits go into a macro.
-    pub(crate) recording_register: Option<char>,
+    pub recording_register: Option<char>,
     /// The buffers a command waits on, each with the name of what waits, which
     /// the status line of every pane that shows one names.
     ///
     /// A quit over such a buffer returns to the shell and ends the command, so
     /// the reader has to see the tie before the quit, not after it.
-    pub(crate) held_buffers: &'a [(BufferId, String)],
+    pub held_buffers: &'a [(BufferId, String)],
     /// The active workspace's reload flashes, which every editor of a listed
     /// buffer washes over its changed text.
     ///
     /// Empty for a pooled page, since the wash paints on the live grid alone.
-    pub(crate) reload_flashes: &'a [ReloadFlash],
+    pub reload_flashes: &'a [ReloadFlash],
     /// Whether the detailed LSP status popout is open (pinned) above the focused
     /// pane's status bar. Drives whether the multi-row status card paints.
-    pub(crate) lsp_status_open: bool,
+    pub lsp_status_open: bool,
     /// Every in-flight LSP work-done entry across servers, freshest first, painted
     /// as rows of the detailed status card when it is open.
-    pub(crate) lsp_progress_entries: &'a [&'a crate::lsp::progress::LspProgressEntry],
+    pub lsp_progress_entries: &'a [&'a crate::lsp::progress::LspProgressEntry],
     /// Braille spinner glyph index for the [`lsp_progress`](Self::lsp_progress)
     /// popout, advanced by the frame tick so the spinner animates.
-    pub(crate) spinner_phase: u8,
+    pub spinner_phase: u8,
     /// The focused buffer's running language servers, painted as compact badges
     /// at the focused pane's bar right edge. Empty for an unfocused pane or a
     /// buffer with no named server.
-    pub(crate) lsp_servers: &'a [StatusServer],
+    pub lsp_servers: &'a [StatusServer],
     /// True while a background diff warm runs, driving the focused pane's
     /// transient ` <spinner> diff ` status-bar segment. False when idle.
-    pub(crate) diff_warm_busy: bool,
+    pub diff_warm_busy: bool,
     /// The repository's head, counts, and rebase state, which the focused
     /// pane's bar leads its staged segment with. `None` before the first diff
     /// lands and outside a repo, which drops the segment back to the focused
     /// file's own hunk counts.
-    pub(crate) repo: Option<&'a RepoStatus>,
+    pub repo: Option<&'a RepoStatus>,
     /// The repository's tally, which names each changed file's kind. It is
     /// `None` before the first tally lands and outside a repo.
-    pub(crate) tallies: Option<&'a HunkTallies>,
+    pub tallies: Option<&'a HunkTallies>,
     /// The repository's working directory, which the tally's paths are
     /// relative to. It is `None` outside a repo.
-    pub(crate) repo_root: Option<&'a Path>,
+    pub repo_root: Option<&'a Path>,
     /// Where the focused diff view stands among the repo's changed files and
     /// hunks, which the focused pane's bar names in its staged segment. `None`
     /// when the focused pane shows no diff view, which is what keeps the
@@ -495,44 +495,44 @@ pub(crate) struct FrameCtx<'a> {
     ///
     /// The bar prints `-` for a cursor above the focused file's first hunk, the
     /// one place the walk has nothing behind it.
-    pub(crate) hunk_position: Option<HunkPosition>,
+    pub hunk_position: Option<HunkPosition>,
     /// Where the focused conflict view's cursor stands among the file's chunks,
     /// which the focused pane's bar names on the conflict screen. `None` when
     /// the focused pane shows no conflict view.
-    pub(crate) conflict_position: Option<ConflictPosition>,
+    pub conflict_position: Option<ConflictPosition>,
     /// What the bar names the workspace's diff base, when that is not the
     /// working tree. It replaces [`Self::repo`], which describes
     /// a working tree the pane is then not showing.
-    pub(crate) diff_base: Option<&'a str>,
+    pub diff_base: Option<&'a str>,
     /// The names of the diff's left and right sides. A diff view's status row
     /// names the left one, the base, in its metrics.
-    pub(crate) diff_sides: (&'a str, &'a str),
+    pub diff_sides: (&'a str, &'a str),
     /// The sides a paired file's diff view names, keyed by the measured path.
     ///
     /// A pane reads its file's entry ahead of [`Self::diff_sides`], since a
     /// pair holds for its own file alone and the workspace base names every
     /// other pane.
-    pub(crate) pair_sides: &'a HashMap<PathBuf, (String, String)>,
+    pub pair_sides: &'a HashMap<PathBuf, (String, String)>,
     /// Label of the explicit LSP request still in flight, so the status bar
     /// shows a "lsp: {label}..." segment until the response lands. `None` when no
     /// such request is pending. See [`crate::lsp::lsp_pending_label`].
-    pub(crate) lsp_pending: Option<&'static str>,
+    pub lsp_pending: Option<&'static str>,
     /// Freshest `window/showMessage` text. `MessageType::ERROR` paints as a
     /// wrapped popout card above the status bar. Other levels paint in the bar's
     /// right side.
-    pub(crate) lsp_message: Option<(lsp_types::MessageType, &'a str)>,
+    pub lsp_message: Option<(lsp_types::MessageType, &'a str)>,
     /// The transient status message ([`Stoat::pending_message`]), already
     /// checked against its TTL deadline. Painted in the focused pane's status
     /// bar just left of the diagnostics badge, in the color of
     /// [`Self::status_kind`].
-    pub(crate) status_message: Option<&'a str>,
+    pub status_message: Option<&'a str>,
     /// The kind of [`Self::status_message`], from
     /// [`Stoat::pending_message_kind`].
-    pub(crate) status_kind: MessageKind,
+    pub status_kind: MessageKind,
     /// Active labels for an in-progress `GotoWord` jump, keyed by label
     /// string with byte-offset values. Painted by the focused editor's
     /// render path; non-focused panes ignore this field.
-    pub(crate) goto_word_labels: Option<&'a std::collections::BTreeMap<String, (usize, usize)>>,
+    pub goto_word_labels: Option<&'a std::collections::BTreeMap<String, (usize, usize)>>,
     /// The status-line mode chip's label and color, resolved once for the
     /// frame by [`pane::mode_segment`].
     ///
@@ -545,25 +545,25 @@ pub(crate) struct FrameCtx<'a> {
     /// same for all of them. The label is a per-mode override from
     /// `Settings` when one exists, so a user-defined mode shows something more
     /// meaningful than `---`.
-    pub(crate) mode_label: (&'a str, Color),
+    pub mode_label: (&'a str, Color),
     /// The name of the picker modal open over the frame, from
     /// [`ActiveModal::label`], which the focused status row shows in place of
     /// its screen label.
     ///
     /// `None` while no modal is open, and while the open modal has no name.
-    pub(crate) modal_label: Option<&'static str>,
+    pub modal_label: Option<&'static str>,
     /// Workspace-wide LSP diagnostic store. The status bar reads the
     /// focused buffer's path and paints a compact severity badge when
     /// any diagnostics are present.
-    pub(crate) diagnostics: &'a crate::diagnostics::DiagnosticSet,
+    pub diagnostics: &'a crate::diagnostics::DiagnosticSet,
     /// The open search or regex prompt, painted over the focused pane's
     /// status-bar left segments so the user reads the pattern as they type it.
     /// `None` whenever neither input is open.
-    pub(crate) status_prompt: Option<&'a StatusPrompt>,
+    pub status_prompt: Option<&'a StatusPrompt>,
     /// The editor the terminal draws the primary cursor over this frame, which
     /// is the focused editor while no modal input holds focus. A pane whose
     /// editor is any other paints its own primary block.
-    pub(crate) terminal_cursor_editor: Option<EditorId>,
+    pub terminal_cursor_editor: Option<EditorId>,
     /// The rects where the terminal composites a resident grid pool over the
     /// live grid, by pool id, from [`apc_emit::composited_stacks`].
     ///
@@ -571,28 +571,28 @@ pub(crate) struct FrameCtx<'a> {
     /// runs and bars out of the scene, since the pool's pages carry their own
     /// and the composite covers the live ones. Empty for every paint but the
     /// live frame's.
-    pub(crate) composited_stacks: &'a [(u32, Rect)],
+    pub composited_stacks: &'a [(u32, Rect)],
     /// How document editor panes number the gutter, resolved from
     /// `editor.line_numbers` (default [`LineNumbers::Relative`]).
     /// [`LineNumbers::Off`] keeps the diagnostic-only gutter column.
-    pub(crate) line_numbers: LineNumbers,
+    pub line_numbers: LineNumbers,
     /// How document editor panes soft-wrap long lines, resolved from
     /// `editor.wrap` (default [`WrapMode::EditorWidth`]). Applied only to pane
     /// editors. Non-pane inputs and pickers never wrap.
-    pub(crate) wrap_mode: WrapMode,
+    pub wrap_mode: WrapMode,
     /// The wrap column [`WrapMode::Bounded`] caps against, resolved from
     /// `editor.wrap_column` (default 80, at least 1). Ignored by the other wrap
     /// modes.
-    pub(crate) wrap_column: u32,
+    pub wrap_column: u32,
     /// The `editor.scrolloff` padding (default 3), which a diff view keeps as
     /// blank rows past its last row when a jump lands at its end.
-    pub(crate) scrolloff: u32,
+    pub scrolloff: u32,
     /// Fraction an unfocused pane's colors blend toward the theme background,
     /// resolved from `ui.inactive_dim` (default 0.25, clamped to `0.0..=1.0`)
     /// and the `:pane-fade` session override by [`Stoat::inactive_dim`].
     /// `0.0` disables dimming. Applied by [`crate::render::pane::render_pane`]
     /// to unfocused panes only.
-    pub(crate) inactive_dim: f32,
+    pub inactive_dim: f32,
     /// Fraction every pane's colors blend toward the theme background while a
     /// modal dims the window behind its box, resolved by [`Stoat::modal_dim`].
     /// `0.0` while no such modal is open, and while the frame lays the modal's
@@ -600,85 +600,85 @@ pub(crate) struct FrameCtx<'a> {
     ///
     /// See also:
     /// - [`Self::pane_dim`] for the fade one pane takes from this and [`Self::inactive_dim`].
-    pub(crate) modal_dim: f32,
+    pub modal_dim: f32,
     /// The diff view's paint dials, resolved from the session per
     /// [`DiffDials::from_stoat`]. Read only by diff-view panes.
-    pub(crate) diff_dials: DiffDials,
+    pub diff_dials: DiffDials,
     /// Whether the terminal can draw an image, which is a stoatty new enough to
     /// have the pass for it. An image pane says what is missing when it cannot.
-    pub(crate) images_capable: bool,
+    pub images_capable: bool,
     /// Whether the terminal reads `text_runs` and `bars` batches, which a
     /// stoatty at [`BATCHED_DECORATIONS_PROTOCOL`] or later does.
     ///
     /// The frame's own scene takes this before the panes paint. A page paints
     /// into a scene of its own, which takes it from here through
     /// [`ApcScene::set_batch_protocol`].
-    pub(crate) batch_decorations: bool,
+    pub batch_decorations: bool,
     /// Whether editor and changes view panes reserve their own per-pane
     /// right-edge minimap strip. `true` only in [`MinimapMode::PerPane`] under
     /// stoatty. Single mode gates this off and declares one shared strip over
     /// the reserved band instead.
-    pub(crate) minimap_enabled: bool,
+    pub minimap_enabled: bool,
     /// The lookup and colors a pane needs to declare its minimap strip, `Some`
     /// only when the strip is active (under stoatty with the minimap enabled).
-    pub(crate) minimap_chrome: Option<MinimapChrome<'a>>,
+    pub minimap_chrome: Option<MinimapChrome<'a>>,
     /// The reserved single-minimap band, `Some` only when [`MinimapMode::Single`]
     /// stamped one this frame. It stops one row above the bottom, so a pane whose
     /// status bar sits on that freed row flush against the band reclaims its
     /// width and runs edge to edge.
-    pub(crate) minimap_band: Option<Rect>,
+    pub minimap_band: Option<Rect>,
     /// Whether the panes lay out as islands this frame, as
     /// [`Stoat::islands_on`] answers. Each pane then declares its island halo,
     /// and the gaps draw no divider hairline.
-    pub(crate) islands: bool,
+    pub islands: bool,
     /// Whether the terminal reads a backdrop panel, which a stoatty at
     /// [`BACKDROP_PANEL_PROTOCOL`] or later does. An older one takes the flag
     /// as above every pool, so a backdrop it draws hides the pane's own glide.
-    pub(crate) backdrop_panels: bool,
+    pub backdrop_panels: bool,
     /// The rect the pane tree lays its panes out in. An island whose side meets
     /// it reaches out into the window's chrome margin there.
-    pub(crate) pane_root: Rect,
+    pub pane_root: Rect,
     /// The gaps between sibling panes, as
     /// [`PaneTree::dividers`](crate::pane::PaneTree::dividers) lays them out.
     /// An island whose side meets one reaches out into that gap.
-    pub(crate) dividers: &'a [Divider],
+    pub dividers: &'a [Divider],
     /// The span of the window's bottom row under a bottom-right badge's chip,
     /// from [`badges::bottom_right_cover`]. A status bar on that row keeps its
     /// segments left of it, since the chip paints over the bar.
-    pub(crate) badge_cover: Option<Rect>,
+    pub badge_cover: Option<Rect>,
     /// Terminal cell the mouse last rested over, or `None` when it has not
     /// moved over a pane. The focused editor resolves the diagnostic under it
     /// to raise a hover popover.
-    pub(crate) hover_cell: Option<(u16, u16)>,
+    pub hover_cell: Option<(u16, u16)>,
     /// The user home directory, for `~`-abbreviating run-pane prompt cwds.
     /// Resolved through [`crate::host::EnvHost`] so tests control it instead of
     /// the paint reading the real environment. `None` when `$HOME` is unset.
-    pub(crate) home: Option<&'a Path>,
+    pub home: Option<&'a Path>,
     /// The working directory of the run the focused pane shows, or `None` when
     /// no run pane holds focus.
     ///
     /// A run pane has no cursor to place, so its status row names this
     /// directory at its right end, and its mode chip reads `RUN` whatever mode
     /// its input is in. See [`pane::focused_run_cwd`].
-    pub(crate) run_cwd: Option<&'a Path>,
+    pub run_cwd: Option<&'a Path>,
     /// The Cmds in the stack of the Run pane that holds the focus, which its
     /// status row counts after its name, or `None` when no Run pane holds
     /// focus. See [`pane::focused_run_cmds`].
-    pub(crate) run_cmds: Option<usize>,
+    pub run_cmds: Option<usize>,
     /// The Stubs of Jobs in the stack of the Run pane that holds the focus,
     /// which its status row counts after its Cmds, or 0 when no Run pane
     /// holds focus. See [`pane::focused_run_stubs`].
-    pub(crate) run_stubs: usize,
+    pub run_stubs: usize,
     /// The commit of each line of every blamed buffer, which a blamed pane's
     /// status row names for the cursor line.
-    pub(crate) blame: &'a BlameState,
+    pub blame: &'a BlameState,
     /// The moment the frame paints, in unix epoch seconds, which a blame date
     /// measures its age against.
-    pub(crate) now_epoch: i64,
+    pub now_epoch: i64,
     /// Latency readout for the status bar, or `None` before any frame has
     /// been painted. Present only under the `perf` feature.
     #[cfg(feature = "perf")]
-    pub(crate) perf: Option<PerfSegment>,
+    pub perf: Option<PerfSegment>,
 }
 
 impl FrameCtx<'_> {
@@ -730,7 +730,7 @@ pub struct Hold {
 /// p95 input-to-publish latency, both in microseconds.
 #[cfg(feature = "perf")]
 #[derive(Clone, Copy)]
-pub(crate) struct PerfSegment {
+pub struct PerfSegment {
     pub(crate) last_paint_us: u64,
     pub(crate) p95_input_us: u64,
 }

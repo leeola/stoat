@@ -7,6 +7,9 @@ publish.workspace = true
 [lints]
 workspace = true
 
+[features]
+perf = ["stoat/perf"]
+
 # `stoat` is a dev-dependency so that a workspace build never turns its
 # test-support feature on. Only the test targets here link the harness.
 [dev-dependencies]

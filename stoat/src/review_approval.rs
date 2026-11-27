@@ -13,7 +13,7 @@ use std::ops::Range;
 /// A zero-width hunk, a deletion anchored at row `a`, has no row of its own and
 /// is stored as `a..a + 1`.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub(crate) struct ApprovedRows(Vec<Range<u32>>);
+pub struct ApprovedRows(Vec<Range<u32>>);
 
 impl ApprovedRows {
     /// Add `rows` to the approved set.
@@ -58,7 +58,7 @@ impl ApprovedRows {
     }
 
     /// Whether every row of `rows` is approved.
-    pub(crate) fn covers(&self, rows: &Range<u32>) -> bool {
+    pub fn covers(&self, rows: &Range<u32>) -> bool {
         self.0
             .iter()
             .any(|range| range.start <= rows.start && rows.end <= range.end)

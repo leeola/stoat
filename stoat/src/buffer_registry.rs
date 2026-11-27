@@ -62,7 +62,7 @@ pub(crate) struct BufferSummary {
 /// [`BufferRegistry::auto_reload_paths`] reports any non-[`Off`](Self::Off)
 /// buffer to the auto-reload pump.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum AutoReloadMode {
+pub enum AutoReloadMode {
     /// The buffer is not auto-reloaded.
     Off,
     /// Reload on change, carrying a cursor that sits on the last line to the new
@@ -228,8 +228,12 @@ impl BufferRegistry {
         }
     }
 
-    pub(crate) fn len(&self) -> usize {
+    pub fn len(&self) -> usize {
         self.buffers.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.buffers.is_empty()
     }
 
     /// True when buffer `id` is an empty scratch and the registry holds no file
@@ -427,7 +431,7 @@ impl BufferRegistry {
     /// when the entry was path-bound and returns that path so the
     /// caller can build an LSP URI for `did_close`. Returns `None`
     /// when the buffer was scratch (or unknown).
-    pub(crate) fn remove(&mut self, id: BufferId) -> Option<PathBuf> {
+    pub fn remove(&mut self, id: BufferId) -> Option<PathBuf> {
         let mut entry = self.buffers.remove(&id)?;
         drop_syntax_in_background(entry.syntax.take(), entry.syntax_map.take());
         let path = entry.path?;
@@ -528,7 +532,7 @@ impl BufferRegistry {
     ///
     /// Called when a buffer opts into file-following, such as the session log
     /// buffer and the `:auto-reload` command.
-    pub(crate) fn set_auto_reload(&mut self, id: BufferId, mode: AutoReloadMode) {
+    pub fn set_auto_reload(&mut self, id: BufferId, mode: AutoReloadMode) {
         if let Some(entry) = self.buffers.get_mut(&id) {
             entry.auto_reload = mode;
         }

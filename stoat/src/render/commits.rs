@@ -1559,13 +1559,13 @@ pub(crate) fn preview_row_count(doc: &DiffDocument) -> usize {
 /// both screens, which is what keeps a step on either of them meaning the same
 /// thing.
 #[derive(Copy, Clone)]
-pub(crate) struct PreviewDials {
+pub struct PreviewDials {
     pub(crate) paint: DiffDials,
     pub(crate) syntax: bool,
 }
 
 impl PreviewDials {
-    pub(crate) fn from_stoat(stoat: &crate::app::Stoat) -> Self {
+    pub fn from_stoat(stoat: &crate::app::Stoat) -> Self {
         Self {
             paint: DiffDials::from_stoat(stoat),
             syntax: stoat.diff_syntax,

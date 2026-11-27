@@ -579,7 +579,7 @@ pub(crate) fn scratch_editor_view(ws: &mut Workspace, executor: Executor) -> Vie
     )))
 }
 
-pub(super) fn split_pane(stoat: &mut Stoat, axis: Axis) -> UpdateEffect {
+pub fn split_pane(stoat: &mut Stoat, axis: Axis) -> UpdateEffect {
     let executor = stoat.executor.clone();
     let ws = stoat.active_workspace_mut();
     let new_pane_id = ws.panes.split(axis);

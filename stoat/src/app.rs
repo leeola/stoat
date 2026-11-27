@@ -1271,7 +1271,7 @@ pub struct Stoat {
     /// no-ops. Set by the test harness so test runs can't read or write the
     /// real `$XDG_STATE_HOME/stoat/workspaces/` directory.
     pub persistence_disabled: bool,
-    pub(crate) language_registry: Arc<LanguageRegistry>,
+    pub language_registry: Arc<LanguageRegistry>,
     pub syntax_styles: SyntaxStyles,
     pub workspaces: SlotMap<WorkspaceId, Workspace>,
     pub active_workspace: WorkspaceId,
@@ -1439,12 +1439,12 @@ pub struct Stoat {
     /// An open discovers the repository and lists its conflicts, which loads
     /// the whole index. Each file then reads its three stages, and its
     /// alignment runs two structural diffs against the ancestor.
-    pub(crate) pending_conflict_file: Option<action_handlers::conflict_view::PendingConflictFile>,
+    pub pending_conflict_file: Option<action_handlers::conflict_view::PendingConflictFile>,
     /// The git writes the loop started, run one at a time in press order.
     ///
     /// Two writes on the pool race, so every write the loop starts waits here
     /// for the one before it to land. See [`git_jobs`].
-    pub(crate) git_jobs: GitJobs,
+    pub git_jobs: GitJobs,
     /// A diff-filtered call-graph hop whose working-tree scan runs off the UI
     /// thread, applied by [`crate::code_index::nav::pump_diff_nav_jump`] when it
     /// lands.
@@ -1459,7 +1459,7 @@ pub struct Stoat {
     pub(crate) code_search_query_rx: Receiver<String>,
     /// An in-flight background diff-cache warm pass, drained by
     /// [`crate::diff_warm::install_finished`] in [`Self::drive_background`].
-    pub(crate) pending_diff_warm: Option<crate::diff_warm::PendingDiffWarm>,
+    pub pending_diff_warm: Option<crate::diff_warm::PendingDiffWarm>,
     /// Session-wide toggle for tree-sitter syntax coloring, applied to every
     /// editor at paint time. Not a [`crate::config::Settings`] field:
     /// persistence can come later. Defaults to on.
@@ -2699,7 +2699,7 @@ pub struct Stoat {
     /// Every changes view of a workspace shows the one document, so the
     /// workspace holds one strip. It exists while the workspace holds a changes
     /// view or a parked stack.
-    pub(crate) diff_changes_strips:
+    pub diff_changes_strips:
         std::collections::HashMap<WorkspaceId, crate::minimap::diff_changes::DiffChangesStrip>,
     /// The minimap strip of each diff view editor, which shows the editor's
     /// display rows in place of its buffer's lines.
@@ -3846,7 +3846,7 @@ impl Stoat {
     /// answers there. The level is clamped rather than saturated, so a press
     /// past either end is remembered as the end itself and the next press the
     /// other way moves the paint immediately.
-    pub(crate) fn handle_diff_tint_step(&mut self, delta: i32) -> UpdateEffect {
+    pub fn handle_diff_tint_step(&mut self, delta: i32) -> UpdateEffect {
         if !self.on_a_diff_surface() {
             return UpdateEffect::None;
         }
@@ -4054,7 +4054,7 @@ impl Stoat {
     /// A first toggle overrides the configured `editor.wrap` mode with its
     /// opposite (wrapping the other way); a second clears the override so the
     /// editor follows the setting again.
-    pub(crate) fn toggle_wrap(&mut self) {
+    pub fn toggle_wrap(&mut self) {
         let flipped = match self.settings.editor_wrap.unwrap_or(WrapMode::EditorWidth) {
             WrapMode::None => WrapMode::EditorWidth,
             _ => WrapMode::None,
@@ -4531,7 +4531,7 @@ impl Stoat {
     /// while it is in the background with `ui.inactive_dim_follows_focus` on.
     /// [`Self::pane_fade_enabled`] and `:pane-fade` read the configured fade, so
     /// a toggle in the background still flips it.
-    pub(crate) fn painted_inactive_dim(&self) -> f32 {
+    pub fn painted_inactive_dim(&self) -> f32 {
         let follows_focus = self.settings.ui_inactive_dim_follows_focus.unwrap_or(true);
         if !self.window_focused && follows_focus {
             return 0.0;
@@ -5327,7 +5327,7 @@ impl Stoat {
     /// Records that tree's root as [`Workspace::repo_root`]. A tree already
     /// watched costs nothing. A root outside a repository gets no watch, for
     /// the reason [`Self::start_index_build`] gives.
-    pub(crate) fn watch_active_root(&mut self) -> bool {
+    pub fn watch_active_root(&mut self) -> bool {
         let Some(tree) = self.resolve_repo_root() else {
             return false;
         };
@@ -5353,7 +5353,7 @@ impl Stoat {
     /// [`Self::update`] runs it for each event. A reader that also runs outside
     /// an event, as the changes view's pump does, runs it before it reads the
     /// root. An unchanged root inside a repository costs one path comparison.
-    pub(crate) fn sync_repo_root(&mut self) {
+    pub fn sync_repo_root(&mut self) {
         let ws = self.active_workspace();
         let resolved = ws.repo_root_for.as_deref() == Some(ws.git_root.as_path());
         let fresh = ws.repo_root.is_some()
@@ -6377,7 +6377,7 @@ impl Stoat {
     /// Whether any background diff warm is in flight, driving the status bar's
     /// transient diff spinner segment and keeping the frame clock ticking so it
     /// animates.
-    pub(crate) fn diff_warm_busy(&self) -> bool {
+    pub fn diff_warm_busy(&self) -> bool {
         self.pending_diff_warm.is_some()
     }
 

@@ -29,7 +29,7 @@ pub(crate) fn live_entry(editor: &mut EditorState) -> JumpEntry {
 ///
 /// A no-op when focus is on a dock. Every jump-shaped motion routes its origin
 /// through here, and the jumplist's resolved-shape dedup absorbs doubled pushes.
-pub(crate) fn push_jump(stoat: &mut Stoat) {
+pub fn push_jump(stoat: &mut Stoat) {
     if let Some(entry) = super::focused_editor_mut(stoat).map(live_entry) {
         push_entry(stoat, entry);
     }
