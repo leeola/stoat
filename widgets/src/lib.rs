@@ -100,6 +100,8 @@ pub struct ApcScene {
     /// Whether the host reads `nudge` frames, as [`Self::set_nudge_protocol`]
     /// set.
     nudges: bool,
+    /// Whether the host reads `ink` frames, as [`Self::set_ink_protocol`] set.
+    inks: bool,
     /// The grid cell's pixel size `[width, height]` while the host draws scaled
     /// pools, as [`Self::set_scaled_cell`] set.
     scaled_cell: Option<[u16; 2]>,
@@ -131,6 +133,7 @@ impl ApcScene {
             lanes_enabled: false,
             batches: false,
             nudges: false,
+            inks: false,
             scaled_cell: None,
             pixel_rows: None,
             resync: false,
@@ -195,6 +198,21 @@ impl ApcScene {
     /// declared.
     pub fn nudges(&self) -> bool {
         self.nudges
+    }
+
+    /// Declare whether the host reads `ink` frames, which a stoatty at
+    /// [`INK_PROTOCOL`](stoatty_protocol::INK_PROTOCOL) or later does.
+    ///
+    /// Expected once per frame like [`Self::set_live`]. A widget that draws a
+    /// palette color as a run reads it through [`Self::inks`] before it paints.
+    pub fn set_ink_protocol(&mut self, enabled: bool) {
+        self.inks = enabled;
+    }
+
+    /// Whether the host reads `ink` frames, as [`Self::set_ink_protocol`]
+    /// declared.
+    pub fn inks(&self) -> bool {
+        self.inks
     }
 
     /// Declare the grid cell's pixel size `[width, height]` while the host draws
@@ -272,6 +290,21 @@ impl ApcScene {
     /// and a dead scene drops it as it drops every append.
     pub fn nudge(&mut self, offset: [i16; 2]) {
         command::encode_nudge_into(self.buffer(), offset);
+    }
+
+    /// Draw the text runs and the bars that follow in the open lane in the color
+    /// of entry `index` of the host's palette, or in the RGB each one states for
+    /// `None`.
+    ///
+    /// The ink holds until the next ink or the end of the lane. It sends nothing
+    /// while [`Self::inks`] is off, as a host before
+    /// [`INK_PROTOCOL`](stoatty_protocol::INK_PROTOCOL) ignores the frame and
+    /// draws each run in the RGB it states. A dead scene drops it as it drops
+    /// every append.
+    pub fn ink(&mut self, index: Option<u8>) {
+        if self.inks {
+            command::encode_ink_into(self.buffer(), index);
+        }
     }
 
     /// Dim the window behind the floating boxes by `scrim`, as a decoration of
@@ -776,9 +809,9 @@ fn install_panic_hook() {
 mod tests {
     use super::{restore_bytes, ApcScene};
     use stoatty_protocol::command::{
-        self, encode_border, encode_lane_begin, encode_lane_end, encode_line_layout, encode_reset,
-        encode_scroll_region, BorderCommand, BorderStyle, Edge, LineLayoutCommand, PanelCommand,
-        PanelShadow, ScrollRegionCommand,
+        self, encode_border, encode_ink, encode_lane_begin, encode_lane_end, encode_line_layout,
+        encode_reset, encode_scroll_region, BorderCommand, BorderStyle, Edge, LineLayoutCommand,
+        PanelCommand, PanelShadow, ScrollRegionCommand,
     };
 
     fn border() -> BorderCommand {
@@ -1333,5 +1366,21 @@ mod tests {
         let mut expected = encode_reset();
         expected.extend(encode_border(&changed));
         assert_eq!(out, expected);
+    }
+
+    #[test]
+    fn a_scene_before_the_ink_protocol_sends_no_ink_frame() {
+        let inked = |enabled| {
+            let mut scene = ApcScene::new();
+            scene.set_ink_protocol(enabled);
+            scene.ink(Some(9));
+            scene.ink(None);
+            scene.bytes().to_vec()
+        };
+        assert_eq!(
+            [inked(false), inked(true)],
+            [Vec::new(), [encode_ink(Some(9)), encode_ink(None)].concat()],
+            "nothing before the protocol, then each ink in order",
+        );
     }
 }

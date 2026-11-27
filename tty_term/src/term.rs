@@ -376,6 +376,10 @@ pub struct Terminal {
     /// The offset in logical px that the last `nudge` set for the text runs,
     /// bars, and panels that land after it. A lane marker and a reset zero it.
     nudge: [i16; 2],
+    /// The palette entry that the last `ink` set for the text runs and the bars
+    /// that land after it, or `None` while each draws in the RGB it states. A
+    /// lane marker and a reset end it, as they zero [`Self::nudge`].
+    ink: Option<u8>,
     /// Whether a lane changed since [`Self::flatten_lanes`] last rebuilt the
     /// flat lists.
     lanes_changed: bool,
@@ -1191,6 +1195,12 @@ struct FillTarget {
     /// It starts at `[0, 0]` with each page and ends with it, so a nudge inside
     /// a fill never reaches the live lane.
     nudge: [i16; 2],
+    /// The palette entry that the `ink` frames of this page set for the runs
+    /// and the bars after them.
+    ///
+    /// It starts at `None` with each page and ends with it, as [`Self::nudge`]
+    /// does.
+    ink: Option<u8>,
 }
 
 impl FillTarget {
@@ -1222,6 +1232,7 @@ impl FillTarget {
             polylines: Vec::new(),
             icons: Vec::new(),
             nudge: [0, 0],
+            ink: None,
         }
     }
 
@@ -1338,6 +1349,7 @@ impl Terminal {
             lanes: BTreeMap::new(),
             lane: 0,
             nudge: [0, 0],
+            ink: None,
             lanes_changed: false,
             decorations_dirty: DecorationDirty::default(),
             output_since_project: false,
@@ -1606,13 +1618,15 @@ impl Terminal {
                         | Command::FillEnd
                         | Command::Reset
                         // A dropped lane marker files every decoration after it
-                        // under the wrong lane, and a dropped nudge draws every
-                        // one after it at the wrong offset. A scrim belongs to
+                        // under the wrong lane, a dropped nudge draws every one
+                        // after it at the wrong offset, and a dropped ink in the
+                        // wrong color. A scrim belongs to
                         // the window rather than to a page, so it lands in the
                         // open lane even while a page paints.
                         | Command::LaneBegin(_)
                         | Command::LaneEnd
                         | Command::Nudge(_)
+                        | Command::Ink(_)
                         | Command::Scrim(_)
                         | Command::Popover(_)
                         | Command::PopoverEnd
@@ -1919,6 +1933,21 @@ impl Terminal {
         })
     }
 
+    /// The channels that a text run or a bar stating `color` draws in under
+    /// `ink`, which are those of the palette entry for an ink and `color` for
+    /// none.
+    ///
+    /// The entry resolves as the indexed color of a cell does, the program's
+    /// OSC 4 override first, so a run of program output draws in the color its
+    /// cells would.
+    fn inked(&self, ink: Option<u8>, color: [u8; 3]) -> [u8; 3] {
+        let Some(index) = ink else {
+            return color;
+        };
+        let rgb = indexed(usize::from(index), self.term.colors(), &self.palette);
+        [rgb.r, rgb.g, rgb.b]
+    }
+
     /// Drain the decoration row-damage accumulated since the last drain.
     ///
     /// Marks the rows where an APC border or scale changed across the projections
@@ -1995,14 +2024,20 @@ impl Terminal {
                     });
                 }
             },
-            // A page-targeted bar rides the open fill's slot at feed time. A live
-            // bar accumulates onto the grid and stages like the other decorations.
-            Command::Bar(bar) => match &mut self.fill {
-                Some(fill) => {
-                    let nudged = (bar, fill.nudge);
-                    push_capped(&mut fill.bars, nudged, &mut self.warned_decoration_cap);
-                },
-                None => self.stage_or_apply(Command::Bar(bar)),
+            // A page-targeted bar rides the open fill's slot at feed time, in the
+            // color of the page's ink. A live bar accumulates onto the grid and
+            // stages like the other decorations.
+            Command::Bar(mut bar) => {
+                if let Some(fill) = &self.fill {
+                    bar.color = self.inked(fill.ink, bar.color);
+                }
+                match &mut self.fill {
+                    Some(fill) => {
+                        let nudged = (bar, fill.nudge);
+                        push_capped(&mut fill.bars, nudged, &mut self.warned_decoration_cap);
+                    },
+                    None => self.stage_or_apply(Command::Bar(bar)),
+                }
             },
             Command::Bars(batch) => {
                 for (x, y, width, height) in batch.bars {
@@ -2199,6 +2234,16 @@ impl Terminal {
                 match &mut self.fill {
                     Some(fill) => fill.nudge = offset,
                     None => self.stage_or_apply(Command::Nudge(offset)),
+                }
+            },
+            // An ink takes the nudge's fork, so a run whose text streamed in
+            // before it keeps the color it opened under, and an ink inside a
+            // page colors that page's runs and bars alone.
+            Command::Ink(ink) => {
+                self.commit_capture();
+                match &mut self.fill {
+                    Some(fill) => fill.ink = ink,
+                    None => self.stage_or_apply(Command::Ink(ink)),
                 }
             },
             // Hello identifies the program behind the terminal and touches no
@@ -2474,14 +2519,14 @@ impl Terminal {
     }
 
     /// Apply a decoration command to the open lane, or act on a lane marker, a
-    /// reset, or a minimap view.
+    /// nudge, an ink, a reset, or a minimap view.
     ///
     /// The completed `Popover` and `TextRun` commands arrive here already carrying
     /// their captured text from [`Self::commit_capture`], so they push directly
     /// rather than reopening a capture. Only the accumulating decoration commands,
-    /// the minimap views, the lane markers, and `Reset` reach this method. A view
-    /// comes here so it applies in stream order against the reset. The
-    /// stream-routing and pool commands act at feed time in
+    /// the minimap views, the lane markers, the live nudges and inks, and `Reset`
+    /// reach this method. A view comes here so it applies in stream order against
+    /// the reset. The stream-routing and pool commands act at feed time in
     /// [`Self::apply_command`] and never route here.
     ///
     /// A decoration waits in its lane until [`Self::flatten_lanes`] rebuilds the
@@ -2533,6 +2578,10 @@ impl Terminal {
                 self.decorations_dirty.line_layout = true;
             },
             Command::Bar(bar) => {
+                let bar = BarCommand {
+                    color: self.inked(self.ink, bar.color),
+                    ..bar
+                };
                 let lane = self.lanes.entry(self.lane).or_default();
                 if push_capped(&mut lane.bars, bar, &mut self.warned_decoration_cap) {
                     lane.bar_seq.push(lane.decoration_seq);
@@ -2568,6 +2617,10 @@ impl Terminal {
                 }
             },
             Command::TextRun(text_run) => {
+                let text_run = TextRunCommand {
+                    color: self.inked(self.ink, text_run.color),
+                    ..text_run
+                };
                 let lane = self.lanes.entry(self.lane).or_default();
                 if push_capped(
                     &mut lane.text_runs,
@@ -2614,8 +2667,10 @@ impl Terminal {
             Command::LaneEnd => {
                 self.lane = 0;
                 self.nudge = [0, 0];
+                self.ink = None;
             },
             Command::Nudge(offset) => self.nudge = offset,
+            Command::Ink(ink) => self.ink = ink,
             Command::Reset => self.clear_decorations(),
             // None of these reach here. apply_command routes them at feed time:
             // the stream and pool controls, the immediate minimap content,
@@ -2660,6 +2715,7 @@ impl Terminal {
     /// there anyway.
     fn begin_lane(&mut self, id: u32) {
         self.nudge = [0, 0];
+        self.ink = None;
         if id != 0 && !self.lanes.contains_key(&id) && self.lanes.len() >= MAX_LANES {
             self.warn_lane_cap(id);
             self.lane = 0;
@@ -3194,6 +3250,7 @@ impl Terminal {
         fill.cells = cells;
         fill.rows = None;
         fill.nudge = [0, 0];
+        fill.ink = None;
         self.fill = Some(fill);
     }
 
@@ -3359,9 +3416,12 @@ impl Terminal {
         self.capture_scratch = capture.content;
     }
 
-    /// Store a whole text run on the open fill's slot, or stage it onto the live
-    /// grid when no page paints.
-    fn store_text_run(&mut self, command: TextRunCommand) {
+    /// Store a whole text run on the open fill's slot in the color of the
+    /// page's ink, or stage it onto the live grid when no page paints.
+    fn store_text_run(&mut self, mut command: TextRunCommand) {
+        if let Some(fill) = &self.fill {
+            command.color = self.inked(fill.ink, command.color);
+        }
         match &mut self.fill {
             Some(fill) => {
                 push_capped(
@@ -3555,6 +3615,7 @@ impl Terminal {
         });
         self.lane = 0;
         self.nudge = [0, 0];
+        self.ink = None;
         self.lanes_changed = true;
         self.scroll_region = None;
         self.line_layout = None;

@@ -274,9 +274,16 @@
 /// predates it ignores the frame and draws the window undimmed, so a program
 /// sends a scrim only to a terminal at [`SCRIM_PROTOCOL`] or later.
 ///
+/// Version 44 reads `ink`, which draws the text runs and the bars after it in
+/// the color of an entry of the terminal's palette, in place of the RGB they
+/// state. The terminal resolves the entry as it resolves the indexed color of a
+/// cell, through the program's OSC 4 override first. A terminal that predates
+/// it ignores the frame and draws each run and bar in its own RGB, so a program
+/// sends an ink only to a terminal at [`INK_PROTOCOL`] or later.
+///
 /// Zero is reserved for a peer whose handshake carries no version at all, which
 /// is every build from before the field existed.
-pub const PROTOCOL_VERSION: u32 = 43;
+pub const PROTOCOL_VERSION: u32 = 44;
 
 /// The first [`PROTOCOL_VERSION`] whose terminal reads the `text_runs` and
 /// `bars` batches.
@@ -402,6 +409,14 @@ pub const POOL_INSET_PROTOCOL: u32 = 42;
 /// An earlier terminal ignores the frame, so a program that dims the window
 /// for a modal on such a terminal shows the window undimmed.
 pub const SCRIM_PROTOCOL: u32 = 43;
+
+/// The first [`PROTOCOL_VERSION`] whose terminal draws the text runs and the
+/// bars after an `ink` in a color of its palette.
+///
+/// An earlier terminal ignores the frame and draws each run and bar in the RGB
+/// it states, so a program sends an ink only to a terminal at this version or
+/// later.
+pub const INK_PROTOCOL: u32 = 44;
 
 pub mod command;
 pub mod detect;

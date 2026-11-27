@@ -99,8 +99,8 @@ use stoat_widgets::{pool::SmoothScrollState, ApcScene};
 use stoatty_protocol::{
     command::{self, PanelShadow},
     window_ipc::{MouseButton as IpcMouseButton, MouseKind, WindowIpcEvent},
-    BACKDROP_PANEL_PROTOCOL, BATCHED_DECORATIONS_PROTOCOL, NUDGE_PROTOCOL, PAGE_NUDGE_PROTOCOL,
-    POOL_INSET_PROTOCOL, POOL_SCALE_PROTOCOL, SCRIM_PROTOCOL,
+    BACKDROP_PANEL_PROTOCOL, BATCHED_DECORATIONS_PROTOCOL, INK_PROTOCOL, NUDGE_PROTOCOL,
+    PAGE_NUDGE_PROTOCOL, POOL_INSET_PROTOCOL, POOL_SCALE_PROTOCOL, SCRIM_PROTOCOL,
 };
 use tokio::{
     io::AsyncBufReadExt,
@@ -10192,6 +10192,7 @@ impl Stoat {
         scene.set_live(self.stoatty);
         scene.set_batch_protocol(self.stoatty_protocol >= BATCHED_DECORATIONS_PROTOCOL);
         scene.set_nudge_protocol(self.stoatty_protocol >= NUDGE_PROTOCOL);
+        scene.set_ink_protocol(self.stoatty_protocol >= INK_PROTOCOL);
         scene.set_scaled_cell(self.scaled_cell());
         scene.set_pixel_rows(self.pixel_rows().map(|rows| (rows.cell, rows.scale)));
         let mut undercurls = std::mem::take(&mut self.pending_undercurls);

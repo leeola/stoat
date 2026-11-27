@@ -24,6 +24,7 @@ use crate::{
 use bar::{decode_bar, decode_bars};
 use border::decode_border;
 use icon::decode_icon;
+use ink::decode_ink;
 use lane::decode_lane_begin;
 use line_layout::decode_line_layout;
 use minimap::{
@@ -50,6 +51,7 @@ use window::{decode_window_close, decode_window_focus, decode_window_open};
 pub mod bar;
 pub mod border;
 pub mod icon;
+pub mod ink;
 pub mod lane;
 pub mod line_layout;
 pub mod minimap;
@@ -71,6 +73,7 @@ pub use bar::{
 };
 pub use border::{encode_border, encode_border_into, BorderCommand, BorderStyle};
 pub use icon::{encode_icon, encode_icon_into, IconCommand, IconKind};
+pub use ink::{encode_ink, encode_ink_into};
 pub use lane::{encode_lane_begin, encode_lane_begin_into, encode_lane_end, encode_lane_end_into};
 pub use line_layout::{encode_line_layout, encode_line_layout_into, LineLayoutCommand};
 pub use minimap::{
@@ -297,6 +300,12 @@ pub enum Command {
     ///
     /// [`nudge`] has the full rules.
     Nudge([i16; 2]),
+    /// Draw the text runs and the bars that follow in the color of entry
+    /// `index` of the terminal's palette, or in the RGB each one states for
+    /// `None`.
+    ///
+    /// [`ink`] has the full rules.
+    Ink(Option<u8>),
     /// Dim the surface from a row down, leaving the box of each floating panel
     /// clear.
     ///
@@ -492,6 +501,7 @@ pub fn encode_into(out: &mut Vec<u8>, command: &Command) {
         Command::LaneBegin(id) => encode_lane_begin_into(out, *id),
         Command::LaneEnd => encode_lane_end_into(out),
         Command::Nudge(offset) => encode_nudge_into(out, *offset),
+        Command::Ink(ink) => encode_ink_into(out, *ink),
         Command::Scrim(c) => encode_scrim_into(out, c),
         Command::ConfigReload => encode_config_reload_into(out),
         Command::ZoomCapture { on, inband } => encode_zoom_capture_into(out, *on, *inband),
@@ -555,6 +565,7 @@ fn dispatch(sub: &str, args: &[Vec<u8>]) -> Option<Command> {
         "lane_begin" => decode_lane_begin(args).map(Command::LaneBegin),
         "lane_end" => Some(Command::LaneEnd),
         "nudge" => decode_nudge(args).map(Command::Nudge),
+        "ink" => decode_ink(args).map(Command::Ink),
         "scrim" => decode_scrim(args).map(Command::Scrim),
         "config_reload" => Some(Command::ConfigReload),
         "zoom_capture" => decode_zoom_capture(args),
@@ -751,6 +762,7 @@ mod tests {
                 encode_minimap_drop(&MinimapDropCommand { content_id: 1 }),
             ),
             ("lane_begin", encode_lane_begin(1)),
+            ("ink", encode_ink(Some(1))),
             // A popover's encoding is an open marker, its streamed content, and
             // a close marker, so only the opening frame is a decodable one.
             (
@@ -1327,6 +1339,8 @@ mod tests {
             Command::LaneBegin(7),
             Command::LaneEnd,
             Command::Nudge([3, -7]),
+            Command::Ink(Some(9)),
+            Command::Ink(None),
             Command::Scrim(ScrimCommand {
                 color: [8, 9, 11],
                 alpha: 115,

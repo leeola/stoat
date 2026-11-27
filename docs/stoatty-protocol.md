@@ -166,6 +166,7 @@ session control. "Head" is the fixed prefix of the first argument.
 | `lane_begin` | C | 4 B | Opens a numbered lane and clears its decorations |
 | `lane_end` | C | -- | Closes the open lane |
 | `nudge` | C | 4 B | Offsets the text runs, bars, and panels after it by logical px, or inside a fill those of its page |
+| `ink` | C | 2 B | Draws the text runs and bars after it in a palette color, or inside a fill those of its page |
 | `config_reload` | C | -- | The terminal re-reads its own config file |
 | `zoom_capture` | C | 1 B | Claim or release the platform zoom combo |
 | `font_step` | C | 4 B | Step the terminal's font size |
@@ -300,6 +301,20 @@ of a floating box draws after the scrim and over the text beneath it, as a
 CSS `box-shadow` lies over all that a box stands on. The tucked, overhang,
 and cast shadows keep their places. A terminal below version 43 ignores the
 frame, so send a scrim only to a terminal at version 43 or later.
+
+From protocol version 44, an `ink` frame carries a 2-byte argument: a 1 and a
+palette index, or two zeros for no entry. Every `text_run`, `text_runs` entry,
+`bar`, and `bars` entry after it draws in the color of that entry of the
+terminal's palette in place of the RGB it states, until the next `ink`,
+`lane_begin`, `lane_end`, or `reset`. The terminal resolves the entry as it
+resolves the indexed color of a cell, through the program's OSC 4 override
+first, when it stores the run or the bar, so a later change of the palette
+reaches the run with its next declaration. The ink colors the glyphs of a run
+and the fill of a bar, and a run keeps the `bg` it states. Inside a `fill` or
+a `fill_decorations` scope, an `ink` colors the text runs and the bars of that
+page alone, and it ends with the scope. A terminal below version 44 ignores
+the frame and draws each run and bar in its own RGB, so send an ink only to a
+terminal at version 44 or later.
 
 `ident` travels the other way, terminal to program, and arrives as input bytes
 on stdin. `decode` never yields it; use `decode_ident_reply`.

@@ -21,7 +21,7 @@ use alacritty_terminal::{
 use stoatty_protocol::command::{
     encode_bar, encode_bars, encode_border, encode_config_reload, encode_fill,
     encode_fill_decorations_scope, encode_fill_end, encode_fill_rows_scope, encode_font_step,
-    encode_hello, encode_icon, encode_ident_reply, encode_lane_begin, encode_lane_end,
+    encode_hello, encode_icon, encode_ident_reply, encode_ink, encode_lane_begin, encode_lane_end,
     encode_line_layout, encode_minimap, encode_minimap_drop, encode_minimap_len,
     encode_minimap_lines, encode_minimap_view, encode_nudge, encode_panel, encode_polyline,
     encode_pool_anchor, encode_pool_cursor, encode_pool_cursor_release, encode_pool_drop,
@@ -3777,6 +3777,165 @@ fn a_redeclare_that_moves_only_a_nudge_projects_again() {
         (grid.text_runs()[0].nudge, grid.bars()[0].nudge),
         ([0, 2], [0, 2]),
         "the second declaration's nudge reaches the grid",
+    );
+}
+
+/// Palette entry 1 of the default theme, the color an ink of 1 draws in.
+const PALETTE_RED: Rgb = Rgb::new(205, 0, 0);
+
+/// The color that [`text_run_frame`] states for its run.
+const RUN_RGB: Rgb = Rgb::new(200, 200, 200);
+
+/// The grid that `stream` projects from a fresh 8 by 8 terminal.
+fn projected_grid(stream: &[u8]) -> Grid {
+    let mut terminal = Terminal::new(8, 8, Theme::default());
+    let mut grid = Grid::new(8, 8);
+    terminal.advance(stream);
+    terminal.project(&mut grid);
+    grid
+}
+
+/// The text and the color of each run on `grid`, in lane order.
+fn run_colors(grid: &Grid) -> Vec<(&str, Rgb)> {
+    grid.text_runs()
+        .iter()
+        .map(|run| (&*run.text, run.color))
+        .collect()
+}
+
+/// An ink draws the runs and the bars after it in the color of its palette
+/// entry, and a run keeps the background it states. An ink of no entry gives
+/// the runs after it their own color again, and the run an ink cuts off keeps
+/// the color it opened under.
+#[test]
+fn an_ink_gives_the_runs_and_the_bars_after_it_a_palette_color() {
+    let grid = projected_grid(
+        &[
+            encode_ink(Some(1)),
+            text_run_frame("a"),
+            bar_frames(1),
+            encode_ink(None),
+            text_run_frame("b"),
+        ]
+        .concat(),
+    );
+    let bars: Vec<Rgb> = grid.bars().iter().map(|bar| bar.color).collect();
+    let backgrounds: Vec<Option<Rgb>> = grid.text_runs().iter().map(|run| run.bg).collect();
+    assert_eq!(
+        (run_colors(&grid), bars, backgrounds),
+        (
+            vec![("a", PALETTE_RED), ("b", RUN_RGB)],
+            vec![PALETTE_RED],
+            vec![Some(Rgb::new(0, 0, 0)); 2],
+        ),
+        "palette entry 1 under the ink, the frame's own color after an ink of none, and each \
+         run's own background",
+    );
+
+    let mut open_run = text_run_frame("f");
+    open_run.truncate(open_run.len() - encode_text_run_end().len());
+    let grid = projected_grid(&[open_run, encode_ink(Some(1)), text_run_frame("g")].concat());
+    assert_eq!(
+        run_colors(&grid),
+        [("f", RUN_RGB), ("g", PALETTE_RED)],
+        "the run the ink cuts off keeps the color it opened under",
+    );
+}
+
+/// An ink reads its entry through the program's OSC 4 override, as a cell of
+/// that indexed color does.
+#[test]
+fn an_ink_reads_the_override_of_its_entry() {
+    let grid = projected_grid(
+        &[
+            b"\x1b]4;1;#010203\x07".to_vec(),
+            encode_ink(Some(1)),
+            text_run_frame("a"),
+        ]
+        .concat(),
+    );
+    assert_eq!(run_colors(&grid), [("a", Rgb::new(1, 2, 3))]);
+}
+
+/// An ink inside a fill colors the runs and the bars of that page alone. The
+/// live lane, and the next page through the recycled context, keep the colors
+/// their frames state.
+#[test]
+fn an_ink_inside_a_fill_colors_the_decorations_of_its_page_alone() {
+    let mut terminal = Terminal::new(2, 4, Theme::default());
+    let mut grid = Grid::new(2, 4);
+    declare_pool(&mut terminal, 0, 2, 4);
+    let page = |index, ink: Vec<u8>| {
+        [
+            encode_fill(&FillCommand { pool: 0, index }),
+            ink,
+            text_run_frame("page"),
+            bar_frames(1),
+            encode_fill_end(),
+        ]
+        .concat()
+    };
+    terminal.advance(
+        &[
+            page(0, encode_ink(Some(1))),
+            page(1, Vec::new()),
+            text_run_frame("live"),
+        ]
+        .concat(),
+    );
+    terminal.project(&mut grid);
+
+    let page_colors = |index| {
+        let (runs, bars, _, _) = terminal.pools[&0]
+            .page_pool
+            .page_decorations(index)
+            .expect("page buffered");
+        let runs: Vec<Rgb> = runs.iter().map(|run| run.color).collect();
+        let bars: Vec<Rgb> = bars.iter().map(|bar| bar.color).collect();
+        (runs, bars)
+    };
+    assert_eq!(
+        [page_colors(0), page_colors(1)],
+        [
+            (vec![PALETTE_RED], vec![PALETTE_RED]),
+            (vec![RUN_RGB], vec![Rgb::new(1, 2, 3)]),
+        ],
+        "the inked page's run and bar, then the next page's in their frames' colors",
+    );
+    assert_eq!(run_colors(&grid), [("live", RUN_RGB)]);
+}
+
+/// An ink ends at a lane marker and at a reset, as a nudge does, so the runs
+/// after either draw in their own color.
+#[test]
+fn an_ink_ends_with_its_lane() {
+    let ink = || encode_ink(Some(1));
+    let lanes = projected_grid(
+        &[
+            ink(),
+            text_run_frame("a"),
+            encode_lane_begin(1),
+            text_run_frame("b"),
+            ink(),
+            text_run_frame("c"),
+            encode_lane_end(),
+            text_run_frame("d"),
+        ]
+        .concat(),
+    );
+    let reset = projected_grid(&[ink(), encode_reset(), text_run_frame("e")].concat());
+    assert_eq!(
+        [run_colors(&lanes), run_colors(&reset)],
+        [
+            vec![
+                ("a", PALETTE_RED),
+                ("d", RUN_RGB),
+                ("b", RUN_RGB),
+                ("c", PALETTE_RED),
+            ],
+            vec![("e", RUN_RGB)],
+        ],
+        "a lane_begin, a lane_end, and a reset each end the ink",
     );
 }
 
