@@ -31,7 +31,7 @@ pub(crate) struct GraphEdge {
 /// row's edges describe lines leaving the bottom of the list. That happens
 /// whenever the walk was truncated or a parent lies off it.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct GraphRow {
+pub struct GraphRow {
     pub(crate) node_lane: u16,
     pub(crate) edges: Vec<GraphEdge>,
 }

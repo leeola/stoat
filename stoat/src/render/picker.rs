@@ -1189,8 +1189,8 @@ pub(crate) fn target_picker_layout(area: Rect, zoom: i8, list_share: u16) -> Opt
 /// `ui.selection` and nothing else, so a scan for that background finds the
 /// selected row and can find no other, and a picker that scrolls its selection
 /// off-screen highlights nothing at all.
-#[cfg(test)]
-pub(crate) mod test_support {
+#[cfg(any(test, feature = "test-support"))]
+pub mod test_support {
     use crate::theme::Theme;
     use ratatui::{buffer::Buffer, layout::Rect, style::Color};
     use stoatty_protocol::command::{self, Command, Edge};
@@ -1199,12 +1199,12 @@ pub(crate) mod test_support {
     pub(crate) type RowBox = (Option<[u8; 3]>, [Edge; 4], u8);
 
     /// The selection background [`rounded_row_theme`] sets.
-    pub(crate) const ROW_SELECT: [u8; 3] = [4, 5, 6];
+    pub const ROW_SELECT: [u8; 3] = [4, 5, 6];
 
     /// A theme whose selection and accent are RGB, so a live scene draws a
     /// selected row as its rounded box. The accent lets a row test show that
     /// the box draws no accent.
-    pub(crate) fn rounded_row_theme() -> Theme {
+    pub fn rounded_row_theme() -> Theme {
         let src = r##"theme t {
             ui.selection.bg = "#040506";
             ui.border.focused.fg = "#070809";
@@ -1215,7 +1215,7 @@ pub(crate) mod test_support {
 
     /// Each panel in `bytes` that spans exactly `rect`, in the order the panels
     /// go out.
-    pub(crate) fn row_boxes(bytes: &[u8], rect: Rect) -> Vec<RowBox> {
+    pub fn row_boxes(bytes: &[u8], rect: Rect) -> Vec<RowBox> {
         command::decode_stream(bytes)
             .into_iter()
             .filter_map(|cmd| match cmd {
@@ -1233,7 +1233,7 @@ pub(crate) mod test_support {
     /// What [`row_boxes`] reads at a rounded selected row in `select`, one box
     /// with 4 px corners, 1 px inside the row's left side and 3 px inside its
     /// right.
-    pub(crate) fn rounded_row_boxes(select: [u8; 3]) -> Vec<RowBox> {
+    pub fn rounded_row_boxes(select: [u8; 3]) -> Vec<RowBox> {
         let edges = [
             Edge::Inset(0),
             Edge::Inset(3),
@@ -1244,24 +1244,24 @@ pub(crate) mod test_support {
     }
 
     /// The background [`selection_theme`] gives the selection.
-    pub(crate) const SELECTION_BG: Color = Color::Rgb(255, 0, 0);
+    pub const SELECTION_BG: Color = Color::Rgb(255, 0, 0);
 
-    pub(crate) fn selection_theme() -> Theme {
+    pub fn selection_theme() -> Theme {
         let src = r##"theme t { ui.selection.bg = "#ff0000"; }"##;
         let (config, _) = stoat_config::parse(src);
         Theme::from_config(&config.expect("theme parses"), "t").expect("theme loads")
     }
 
     /// The foreground [`match_theme`] gives a fuzzy-match character.
-    pub(crate) const MATCH_FG: Color = Color::Rgb(255, 0, 0);
+    pub const MATCH_FG: Color = Color::Rgb(255, 0, 0);
 
-    pub(crate) fn match_theme() -> Theme {
+    pub fn match_theme() -> Theme {
         let src = r##"theme t { ui.search.match.fg = "#ff0000"; }"##;
         let (config, _) = stoat_config::parse(src);
         Theme::from_config(&config.expect("theme parses"), "t").expect("theme loads")
     }
 
-    pub(crate) fn row_text(buf: &Buffer, row: u16) -> String {
+    pub fn row_text(buf: &Buffer, row: u16) -> String {
         let area = buf.area;
         (area.x..area.x + area.width)
             .map(|col| buf[(col, row)].symbol().chars().next().unwrap_or(' '))
@@ -1287,7 +1287,7 @@ const WRAP_INDENT: u16 = 4;
 ///
 /// A label takes all of a row but the [`LABEL_PAD`] before it and the
 /// [`MARK_COLUMNS`] after it.
-pub(crate) fn label_columns(list_width: u16) -> usize {
+pub fn label_columns(list_width: u16) -> usize {
     usize::from(list_width.saturating_sub(LABEL_PAD + MARK_COLUMNS)).max(1)
 }
 
@@ -2239,11 +2239,7 @@ pub(crate) const PREVIEW_SCALE: u16 = 154;
 /// top, the right, and the bottom of `area`, as [`Preview::pad`] states them
 /// at the display scale. They come off the rect's pixels before the pixels
 /// divide into scaled cells.
-pub(crate) fn preview_grid(
-    area: Rect,
-    cell: Option<[u16; 2]>,
-    pad_px: [u16; 4],
-) -> Option<(u16, u16)> {
+pub fn preview_grid(area: Rect, cell: Option<[u16; 2]>, pad_px: [u16; 4]) -> Option<(u16, u16)> {
     let [left, top, right, bottom] = pad_px.map(u32::from);
     let pad = [left + right, top + bottom];
     cell.map(|cell| pool::padded_scaled_grid(area.width, area.height, cell, PREVIEW_SCALE, pad))

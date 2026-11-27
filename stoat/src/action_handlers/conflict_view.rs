@@ -655,7 +655,7 @@ fn show_file(stoat: &mut Stoat, target: usize, target_state: FileResolveState) {
 /// The session holds the menu, and the shown file's view state mirrors it, so
 /// the painter and a pool page draw what the session holds. A value the view
 /// state already holds leaves it as it is, so a shared state takes no copy.
-pub(crate) fn set_chip_menu(stoat: &mut Stoat, menu: Option<usize>) {
+pub fn set_chip_menu(stoat: &mut Stoat, menu: Option<usize>) {
     let ws = stoat.active_workspace_mut();
     let Some(session) = ws.conflict.as_mut() else {
         return;

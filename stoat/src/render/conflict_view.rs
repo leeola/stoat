@@ -35,21 +35,21 @@ const CONFLICT_SIDE_NUM_MIN: u16 = 120;
 const BAND_TINT: f32 = 0.85;
 
 /// A MergeGrid paint's scene, with what its rows draw beyond the document.
-pub(crate) struct GridPaint<'a> {
-    pub(crate) scene: &'a mut ApcScene,
+pub struct GridPaint<'a> {
+    pub scene: &'a mut ApcScene,
     /// The display row the cursor sits on, whose merged number the grid lifts.
     /// `None` for a pool page, which never carries the cursor.
-    pub(crate) cursor_row: Option<u32>,
+    pub cursor_row: Option<u32>,
     /// The chunk whose chip shows its pick buttons, as the view state holds
     /// it.
-    pub(crate) chip_menu: Option<usize>,
+    pub chip_menu: Option<usize>,
     /// Where the paint records the cells of the chips and the pick buttons it
     /// draws, so a press finds them. `None` for a pool page, which no press
     /// reads.
-    pub(crate) layout: Option<&'a mut ConflictLayout>,
+    pub layout: Option<&'a mut ConflictLayout>,
     /// The side the pointer rests over, which the rows ring. `None` for a
     /// pool page, since a glide shows no hover.
-    pub(crate) hover: Option<ConflictHover>,
+    pub hover: Option<ConflictHover>,
 }
 
 /// Where the MergeGrid's columns, rows, and chips fell in the frame that
@@ -60,7 +60,7 @@ pub(crate) struct GridPaint<'a> {
 /// of its own. The status row splits its runs at the merged column's edges,
 /// and a press finds the chip or the pick button under it.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct ConflictLayout {
+pub struct ConflictLayout {
     pub(crate) ours: Range<u16>,
     pub(crate) merged: Range<u16>,
     pub(crate) theirs: Range<u16>,
@@ -94,7 +94,7 @@ pub(crate) enum ConflictTarget {
 /// The open chunk's side the pointer rests over, which the MergeGrid rings and
 /// names the pick of.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct ConflictHover {
+pub struct ConflictHover {
     pub(crate) chunk: usize,
     pub(crate) side: Side,
     /// The merge row of the one line an Alt press takes, set while Alt is
@@ -447,7 +447,7 @@ fn render_conflict_cursor(
 /// its scene. With no `paint`, or a theme that gives the grid no RGB surface,
 /// they keep the cell layout.
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn render_conflict_rows(
+pub fn render_conflict_rows(
     snapshot: &DisplaySnapshot,
     doc: &MergeDoc,
     derived: &ConflictDerived,

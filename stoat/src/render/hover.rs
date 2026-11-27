@@ -21,10 +21,10 @@ use stoatty_protocol::command::{
 /// tuple ordering sorts them into a range. `dragging` is true between the mouse
 /// down and its release, so a drag past the popup rect keeps extending the head.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct HoverSelection {
-    pub(crate) anchor: (usize, usize),
-    pub(crate) head: (usize, usize),
-    pub(crate) dragging: bool,
+pub struct HoverSelection {
+    pub anchor: (usize, usize),
+    pub head: (usize, usize),
+    pub dragging: bool,
 }
 
 /// The border a hover popup draws.
@@ -33,7 +33,7 @@ pub(crate) struct HoverSelection {
 /// box has. A walkthrough's narration card is the subject of the screen while
 /// it is up, so it draws itself on with the same pen as the marks around it.
 #[derive(Clone, Copy, PartialEq, Debug)]
-pub(crate) enum HoverFrame {
+pub enum HoverFrame {
     Modal,
     /// A hand-drawn box, which needs a terminal that draws one.
     Sketch {
@@ -51,7 +51,7 @@ pub(crate) enum HoverFrame {
 // `Eq` is absent because [`Self::anchor`] carries a fractional row offset and
 // `f32` is only `PartialEq`.
 #[derive(Debug, Clone, PartialEq)]
-pub(crate) struct HoverPopup {
+pub struct HoverPopup {
     /// Rendered content, one line per entry, each a list of styled spans.
     pub(crate) lines: Vec<Vec<(String, Style)>>,
     /// The goto keys the popup's last row names, as `(key, word)` pairs such
@@ -59,7 +59,7 @@ pub(crate) struct HoverPopup {
     ///
     /// Only an LSP hover fills it. A walkthrough card leaves it empty and
     /// takes no footer row.
-    pub(crate) footer: Vec<(String, &'static str)>,
+    pub footer: Vec<(String, &'static str)>,
     pub(crate) anchor_offset: usize,
     /// The editor that requested this hover. Set from the response's
     /// [`HoverResponse::editor_id`] once focus is confirmed unchanged.
@@ -72,11 +72,11 @@ pub(crate) struct HoverPopup {
     /// [`render_hover`]. The mouse handler hit-tests it so
     /// a wheel over the popup scrolls it rather than the pane beneath. Empty
     /// ([`Rect::default`]) until the first render.
-    pub(crate) area: Rect,
+    pub area: Rect,
     /// Rect the body last painted over, inside the border and above any footer
     /// row, stamped by [`render_hover`]. The selection hit-test maps a
     /// pointer through this. Empty until the first render.
-    pub(crate) inner: Rect,
+    pub inner: Rect,
     /// The pane pool this popup rides and the document top row its layout was
     /// laid against, stamped by [`render_hover`] alongside the rects.
     ///
@@ -84,9 +84,9 @@ pub(crate) struct HoverPopup {
     /// of an overflowing popup leaves a stale copy over the neighbour or the
     /// status bar, which no composite repaints mid-glide, so that case keeps the
     /// unanchored behavior of holding still until the scroll settles.
-    pub(crate) anchor: Option<(u32, f32)>,
+    pub anchor: Option<(u32, f32)>,
     /// The live mouse selection over the body, if any.
-    pub(crate) selection: Option<HoverSelection>,
+    pub selection: Option<HoverSelection>,
     /// Content-version stamp for the hover pool, from the shared generation
     /// counter, set once at construction. A popup's body is immutable once
     /// built, so a new hover gets a new stamp and the per-frame version is O(1)
@@ -115,7 +115,7 @@ pub(crate) struct HoverPopup {
     /// put it, which is a different question, so the layout takes this when set
     /// and clamps it the same way.
     pub(crate) placement: Option<Rect>,
-    pub(crate) frame: HoverFrame,
+    pub frame: HoverFrame,
 }
 
 impl HoverPopup {
@@ -126,7 +126,7 @@ impl HoverPopup {
     /// [`Self::max_line_width`] has to agree with [`Self::lines`], and a caller
     /// free to set both can silently disagree, which mis-sizes the box without
     /// failing anything. The fields a render stamps later start empty.
-    pub(crate) fn new(
+    pub fn new(
         lines: Vec<Vec<(String, Style)>>,
         anchor_offset: usize,
         editor_id: EditorId,

@@ -1,4 +1,4 @@
-pub(crate) mod diff;
+pub mod diff;
 mod name;
 pub(crate) mod persist;
 pub(crate) mod registry;
@@ -231,7 +231,7 @@ pub struct Workspace {
     /// Run pane prompt by Up/Down. A shell line from a Run pane is stored
     /// behind the head of the `run` command, so the palette runs it the same,
     /// and a Run pane prompt recalls it as the bare line.
-    pub(crate) palette_history: InputHistory,
+    pub palette_history: InputHistory,
     /// Fish-style recall history of submitted search patterns, walked by
     /// Alt-Up/Alt-Down in the `/` and `?` prompts. Persisted per workspace.
     ///
@@ -262,10 +262,10 @@ pub struct Workspace {
     /// closed. It persists with the workspace, so a toggle in a restored
     /// session returns to the tab the saved session last left.
     pub(crate) last_tab: Option<usize>,
-    pub(crate) docks: SlotMap<DockId, DockPanel>,
+    pub docks: SlotMap<DockId, DockPanel>,
     pub(crate) focus: FocusTarget,
-    pub(crate) buffers: BufferRegistry,
-    pub(crate) editors: SlotMap<EditorId, EditorState>,
+    pub buffers: BufferRegistry,
+    pub editors: SlotMap<EditorId, EditorState>,
     /// The reloads of this workspace's buffers whose wash still fades, at most
     /// one per buffer.
     ///
@@ -284,14 +284,14 @@ pub struct Workspace {
     /// The Job of the last Glance that the workspace opened, from which a
     /// later `Space J k` steps to the Job before it.
     pub(crate) glanced: Option<CmdId>,
-    pub(crate) terms: SlotMap<TermId, TermSession>,
+    pub terms: SlotMap<TermId, TermSession>,
     /// The grid stoatty reported for each terminal pane it draws as a pool at
     /// the terminal font size, as `(rows, cols)` of that font.
     ///
     /// Only the terminal knows how many cells of its own font a pane holds, so
     /// a term listed here is sized to this grid rather than to its pane's
     /// content area, and its pane leaves the live grid blank beneath the pool.
-    pub(crate) term_pool_grids: HashMap<TermId, (u16, u16)>,
+    pub term_pool_grids: HashMap<TermId, (u16, u16)>,
     /// The split pane whose strip the single minimap band shows.
     ///
     /// Each paint stamps it through [`Self::refresh_band_pane`], and every
@@ -360,7 +360,7 @@ pub struct Workspace {
     ///
     /// Held here rather than by the pane, as [`Self::terms`] holds a terminal,
     /// so each tab's list keeps its pages while the tab is parked.
-    pub(crate) commit_lists: SlotMap<CommitListId, CommitListState>,
+    pub commit_lists: SlotMap<CommitListId, CommitListState>,
     /// The saved place of each commits list a restore brought back, keyed by
     /// the dead id its pane names, until
     /// [`respawn_commits_panes`](crate::action_handlers::respawn_commits_panes)
@@ -371,7 +371,7 @@ pub struct Workspace {
     ///
     /// Held here rather than by the pane, as [`Self::commit_lists`] holds a
     /// list, so a parked tab's changes view keeps its cursor.
-    pub(crate) diff_changes_views: SlotMap<DiffChangesId, DiffChangesState>,
+    pub diff_changes_views: SlotMap<DiffChangesId, DiffChangesState>,
     /// The stack of the changes view the reader last flipped away from with
     /// `Ctrl-t`, or `None`.
     ///
@@ -409,7 +409,7 @@ pub struct Workspace {
     /// Active rebase plan (if any). Populated when the user enters
     /// `"rebase"` mode from the commit list; dropped on abort or after
     /// successful execution.
-    pub(crate) rebase: Option<RebaseState>,
+    pub rebase: Option<RebaseState>,
     /// In-flight rebase execution state. Present while the stepper is
     /// paused on reword/edit/conflict and during final execution;
     /// dropped when the plan completes, aborts, or fails a step, and when a
@@ -442,7 +442,7 @@ pub struct Workspace {
     /// [`Self::drive_diff_jobs`] reads to decide what is owed a recompute.
     diff: DiffState,
     /// The commit of each line of every buffer that a blamed pane shows.
-    pub(crate) blame: BlameState,
+    pub blame: BlameState,
     /// The buffer ids [`Self::collect_visible_buffer_ids`] last collected.
     ///
     /// Held rather than returned because both the parse and the diff driver
@@ -467,7 +467,7 @@ pub struct Workspace {
     /// [`Self::drive_parse_jobs`] to extract them.
     index_fire_tx: UnboundedSender<BufferId>,
     index_fire_rx: UnboundedReceiver<BufferId>,
-    pub(crate) badges: BadgeTray,
+    pub badges: BadgeTray,
     /// Status of the owned Claude subshell for this workspace's session, or
     /// `None` until one is spawned. Owned here so the render process reads it
     /// on paint without touching the agent's IPC path. The per-session hook
@@ -819,14 +819,14 @@ impl Workspace {
     }
 
     /// The state of the list the focused split pane shows, to change.
-    pub(crate) fn focused_commits_mut(&mut self) -> Option<&mut CommitListState> {
+    pub fn focused_commits_mut(&mut self) -> Option<&mut CommitListState> {
         let id = self.focused_commits_id()?;
         self.commit_lists.get_mut(id)
     }
 
     /// The changes view the focused split pane shows, or `None` when focus sits
     /// on a dock or the focused pane shows something else.
-    pub(crate) fn focused_diff_changes_id(&self) -> Option<DiffChangesId> {
+    pub fn focused_diff_changes_id(&self) -> Option<DiffChangesId> {
         let FocusTarget::SplitPane = self.focus else {
             return None;
         };
@@ -837,12 +837,12 @@ impl Workspace {
     }
 
     /// The state of the changes view the focused split pane shows.
-    pub(crate) fn focused_diff_changes(&self) -> Option<&DiffChangesState> {
+    pub fn focused_diff_changes(&self) -> Option<&DiffChangesState> {
         self.diff_changes_views.get(self.focused_diff_changes_id()?)
     }
 
     /// The state of the changes view the focused split pane shows, to change.
-    pub(crate) fn focused_diff_changes_mut(&mut self) -> Option<&mut DiffChangesState> {
+    pub fn focused_diff_changes_mut(&mut self) -> Option<&mut DiffChangesState> {
         let id = self.focused_diff_changes_id()?;
         self.diff_changes_views.get_mut(id)
     }
@@ -1112,7 +1112,7 @@ impl Workspace {
     /// its focused excerpt, so an empty stack has none. A modal or a paused
     /// rebase takes input ahead of the pane but is not part of it, so
     /// [`crate::app::Stoat::focused_editor_ids`] checks those first.
-    pub(crate) fn focused_editor(&self) -> Option<(EditorId, BufferId)> {
+    pub fn focused_editor(&self) -> Option<(EditorId, BufferId)> {
         let view = match self.focus {
             FocusTarget::SplitPane => &self.panes.pane(self.panes.focus()).view,
             FocusTarget::Dock(dock_id) => &self.docks.get(dock_id)?.view,
@@ -1481,7 +1481,7 @@ impl Workspace {
     }
 
     /// Mark the repo-wide hunk tally as owed. See [`DiffState::stale_tally`].
-    pub(crate) fn stale_hunk_tally(&mut self) {
+    pub fn stale_hunk_tally(&mut self) {
         self.diff.stale_tally();
     }
 
@@ -1609,7 +1609,7 @@ impl Workspace {
     /// Installs the pick at once, so any revision, review, or proposal base
     /// gives way to it. The pick then holds through every later
     /// [`Self::set_diff_base`] with `None`.
-    pub(crate) fn set_worktree_base(&mut self, base: WorktreeBase) {
+    pub fn set_worktree_base(&mut self, base: WorktreeBase) {
         self.diff.worktree_base = base;
         self.set_diff_base(None);
     }
@@ -2513,7 +2513,7 @@ impl Workspace {
         }
     }
 
-    pub(crate) fn layout(&mut self, total_area: Rect) {
+    pub fn layout(&mut self, total_area: Rect) {
         self.panes.resize(total_area);
 
         // Inset the dock vertically so it reads as an edge-attached popover rather

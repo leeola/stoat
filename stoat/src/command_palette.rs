@@ -89,7 +89,7 @@ pub struct CommandPalette {
     /// candidate source has been spawned, and held until the palette closes,
     /// where it is disposed. `None` while listing commands or collecting a
     /// free-typed argument.
-    pub(crate) arg_picker: Option<ArgPicker>,
+    pub arg_picker: Option<ArgPicker>,
     /// Content-version stamp for the command-list pool, from the shared
     /// generation counter. Bumped when [`Self::last_filter_key`] shows the
     /// filter inputs changed, so the per-frame version is O(1) instead of a
@@ -139,7 +139,7 @@ pub struct CommandPalette {
     /// them starts lower. The renderer measures the rows as it paints them,
     /// and the hit test and the smooth-scroll emit read the body after the
     /// paint, so they find the rects the frame drew.
-    pub(crate) header_rows: u16,
+    pub header_rows: u16,
     /// The command token at the input's start and its ghost, as the Cmd Line
     /// draws them, or `None` for an input that names no command.
     ///
@@ -175,7 +175,7 @@ pub struct CommandPalette {
     pub(crate) history_spans: HistorySpans,
     /// The list rect of the last frame's pixel History, which a press reads its
     /// pixel row against, or `None` after a frame with no pixel History.
-    pub(crate) history_body: Option<Rect>,
+    pub history_body: Option<Rect>,
     /// The user commands of the config when the palette opened, which a head
     /// names after the built-in commands.
     pub(crate) commands: Arc<CommandSet>,
@@ -578,7 +578,7 @@ pub(crate) fn is_action_row(entry: &registry::RegistryEntry) -> bool {
 /// [`crate::file_finder::FileFinder`] does. The palette parses the command's
 /// trailing argument and drives the core's fuzzy list with it, so `:o src/ma`
 /// filters the same way the standalone finder does.
-pub(crate) struct ArgPicker {
+pub struct ArgPicker {
     /// What this picker lists, such as workspace files or an argument's
     /// accepted values. Selects the preview policy and whether a streaming
     /// walk feeds the list.
@@ -714,7 +714,7 @@ impl ArgPicker {
     /// argument) swaps in its own directory-walk picker; every other argument
     /// drives the workspace `core`, or its fallback of ignored files while
     /// [`Self::fallback_active`] holds.
-    pub(crate) fn active_core(&mut self) -> &mut PathPicker {
+    pub fn active_core(&mut self) -> &mut PathPicker {
         let fallback_active = self.fallback_active();
         match (&mut self.browse, &mut self.ignored) {
             (Some(browse), _) => &mut browse.picker,
@@ -1317,7 +1317,7 @@ impl CommandPalette {
     /// sources are unfiltered bases, so the answer holds while the user types.
     /// A pick list counts its rows, none while its command runs, and so does
     /// the list of a `cli` command.
-    pub(crate) fn list_rows_hint(&self) -> u16 {
+    pub fn list_rows_hint(&self) -> u16 {
         if let Some(pick) = &self.pick {
             return rows_of(pick.list.rows.len());
         }
@@ -1335,7 +1335,7 @@ impl CommandPalette {
     ///
     /// The paint, the pool, and the hit test each lay the box out, so each
     /// reads the doc's rows here and all three split the body alike.
-    pub(crate) fn doc_rows(&self) -> u16 {
+    pub fn doc_rows(&self) -> u16 {
         crate::render::command_palette::doc_rows(self.row_metrics)
     }
 

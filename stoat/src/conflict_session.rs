@@ -100,7 +100,7 @@ pub(crate) struct FileResolveState {
 /// from `doc` each frame. Refreshed alongside the session when a pick
 /// reassembles a region.
 #[derive(Clone)]
-pub(crate) struct ConflictViewState {
+pub struct ConflictViewState {
     pub(crate) doc: MergeDoc,
     /// Start/end anchors of each chunk's center region, so the renderer can
     /// resolve the current row span of a chunk (which shrinks when a pick
@@ -140,7 +140,7 @@ pub(crate) struct ConflictViewState {
 /// it, so an edit or undo cannot leave a gutter glyph disagreeing with the
 /// lines beside it.
 #[derive(Clone)]
-pub(crate) struct ConflictDerived {
+pub struct ConflictDerived {
     buffer_version: u64,
     pub(crate) states: Vec<ChunkState>,
     pub(crate) plan: Vec<AlignRow>,
@@ -182,7 +182,7 @@ impl ConflictViewState {
     /// A pick can rewrite a region to the same text it already held, leaving the
     /// version untouched, so the pick site clears the cache outright rather than
     /// relying on the version to notice.
-    pub(crate) fn derived(&mut self, snapshot: &DisplaySnapshot) -> (&MergeDoc, &ConflictDerived) {
+    pub fn derived(&mut self, snapshot: &DisplaySnapshot) -> (&MergeDoc, &ConflictDerived) {
         let version = snapshot.buffer_snapshot().version();
         if self
             .derived

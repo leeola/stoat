@@ -76,7 +76,7 @@ pub(crate) struct SymbolFinderEntry {
 /// `entries` in display order and `match_indices` carries the matched character
 /// offsets per filtered row for highlighting. An empty query lists every symbol
 /// in document order, since symbol order is meaningful (unlike a path list).
-pub(crate) struct SymbolFinder {
+pub struct SymbolFinder {
     pub(crate) input: InputView,
     pub(crate) scope: SymbolFinderScope,
     pub(crate) entries: Vec<SymbolFinderEntry>,
@@ -129,7 +129,7 @@ pub(crate) struct SymbolFinder {
     /// re-issues the server request per keystroke and replaces them with
     /// query-specific hits, so reading the live count would resize the box under
     /// the user as they type.
-    pub(crate) content_rows: u16,
+    pub content_rows: u16,
     /// Bumped wherever [`Self::set_entries`] replaces the symbol list, so a
     /// ranking memoized against the old list is never reused for the new one.
     entries_generation: u64,

@@ -3293,7 +3293,7 @@ pub(crate) fn visible_byte_range(
 /// what row an offset is on are buffer facts, so the fold, wrap, and block
 /// mapping a display snapshot would sync are all beside the point. That matters
 /// because this runs per pane per frame from the status bar.
-pub(crate) fn editor_cursor_position(editor: &EditorState) -> Option<(u32, u32)> {
+pub fn editor_cursor_position(editor: &EditorState) -> Option<(u32, u32)> {
     let buffer = editor.display_map.buffer_snapshot();
     let sel = editor.selections.newest_anchor();
     let rope = buffer.rope();

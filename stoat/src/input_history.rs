@@ -17,7 +17,7 @@ use std::ops::Range;
 /// no clock, so a caller that keeps ages passes each line's time to
 /// [`Self::push_at`].
 #[derive(Debug, Default)]
-pub(crate) struct InputHistory {
+pub struct InputHistory {
     entries: Vec<String>,
     /// The time each line of [`Self::entries`] last ran at, in unix seconds,
     /// at the same index, or `None` for a line with no known time.
@@ -42,7 +42,7 @@ const MAX_ENTRIES: usize = 100;
 impl InputHistory {
     /// Restore a history from persisted entries, oldest-first, with no known
     /// times and no active recall walk.
-    pub(crate) fn from_entries(entries: Vec<String>) -> Self {
+    pub fn from_entries(entries: Vec<String>) -> Self {
         let times = vec![None; entries.len()];
         Self::from_timed(entries, times)
     }

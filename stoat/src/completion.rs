@@ -324,8 +324,8 @@ pub(crate) fn anchor_range(buffer: &TextBufferSnapshot, range: Range<usize>) -> 
 }
 
 /// A replace range for fixtures that never accept the item they build.
-#[cfg(test)]
-pub(crate) fn unused_replace_range() -> Range<Anchor> {
+#[cfg(any(test, feature = "test-support"))]
+pub fn unused_replace_range() -> Range<Anchor> {
     Anchor::min()..Anchor::min()
 }
 

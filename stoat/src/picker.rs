@@ -61,7 +61,7 @@ const INLINE_RANK_MAX: usize = 2_000;
 static NEXT_GENERATION: AtomicU64 = AtomicU64::new(0);
 
 /// Next process-unique generation, bumped past every prior stamp.
-pub(crate) fn next_generation() -> u64 {
+pub fn next_generation() -> u64 {
     NEXT_GENERATION.fetch_add(1, Ordering::Relaxed)
 }
 
@@ -198,7 +198,7 @@ pub(crate) fn row_indices<'a>(
 /// The file finder and the palette's inline pickers drive the same list from a
 /// query string. The owner sets `base`, calls [`PickList::refilter`] with the
 /// query, and reads `filtered`/`match_indices`/`selected` to render.
-pub(crate) struct PickList {
+pub struct PickList {
     /// Candidate paths the query filters over.
     ///
     /// Owned rather than shared so a streaming walk can append to it, which is
@@ -206,7 +206,7 @@ pub(crate) struct PickList {
     /// Move it through [`Self::set_base`] or [`Self::extend_base`]. Replacing it
     /// by hand leaves [`Self::base_generation`] behind, and the display cache
     /// would then read stale rows as a prefix of the new set.
-    pub(crate) base: Vec<PathBuf>,
+    pub base: Vec<PathBuf>,
     /// Bumped whenever [`Self::base`] is replaced, and deliberately not when it
     /// is extended.
     ///
@@ -214,7 +214,7 @@ pub(crate) struct PickList {
     /// a longer base rather than as something built from other paths entirely.
     pub(crate) base_generation: u64,
     /// Indices into `base`, after filtering, in display order.
-    pub(crate) filtered: Vec<usize>,
+    pub filtered: Vec<usize>,
     /// Per-row matched character offsets into the row's display string, for the
     /// leading [`Self::indexed`] rows of `filtered`. A listing's row holds only
     /// the offsets of its `./` anchor, and is empty with no anchor. The offsets
@@ -239,7 +239,7 @@ pub(crate) struct PickList {
     /// A listing ranks nothing, so its rows past here keep listing order, and
     /// each derives the offsets of its `./` anchor on demand.
     pub(crate) indexed: usize,
-    pub(crate) selected: usize,
+    pub selected: usize,
     /// The count of results that the rendered list shows whole, refreshed each
     /// frame by the owner's render so [`PickList::page`] steps by results.
     ///
@@ -1128,7 +1128,7 @@ pub(crate) enum PreviewPolicy {
 /// Drives both the file finder and the palette's inline argument picker, so a
 /// fix to walk draining, the refilter text-cache, or preview syncing reaches
 /// both instead of only the copy it was written against.
-pub(crate) struct PathPicker {
+pub struct PathPicker {
     pub(crate) git_root: PathBuf,
     /// Every candidate path. Grows as walk batches arrive via
     /// [`PathPicker::pump_walk`] for a walked source. A caller-fed source leaves
@@ -1136,7 +1136,7 @@ pub(crate) struct PathPicker {
     pub(crate) all_paths: Vec<PathBuf>,
     walk_rx: Option<UnboundedReceiver<Vec<PathBuf>>>,
     _walk_task: Option<Task<()>>,
-    pub(crate) picklist: PickList,
+    pub picklist: PickList,
     /// Last query run through the matcher, so a render tick with no typing
     /// short-circuits. Cleared by [`PathPicker::invalidate`] when the base set
     /// changes under a stable query.

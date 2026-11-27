@@ -591,7 +591,7 @@ pub(crate) struct DiffRowState {
 /// conflict bodies asked for all of that per row per frame. None of it moves
 /// while the buffer, the display map, the diff and the painted window stand
 /// still, which is the ordinary case between two frames.
-pub(crate) struct DiffRowCache {
+pub struct DiffRowCache {
     key: u64,
     rows: Vec<DiffRowState>,
 }

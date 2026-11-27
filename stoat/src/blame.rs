@@ -39,7 +39,7 @@ const DETAILS_CAPACITY: usize = 64;
 /// until the next run. That run waits out [`DIFF_SETTLE`] after the typing
 /// stops, as a diff does.
 #[derive(Default)]
-pub(crate) struct BlameState {
+pub struct BlameState {
     files: HashMap<BufferId, BufferBlame>,
     jobs: HashMap<BufferId, BlameJob>,
     /// HEAD's blame of each path a job resolved, so a re-map after typing reads
@@ -337,7 +337,7 @@ impl BlameState {
     /// The index of the commit of row `row` of buffer `id`, which every run of
     /// that commit shares, or `None` for an uncommitted row and before a blame
     /// lands.
-    pub(crate) fn commit_index(&self, id: BufferId, row: u32) -> Option<u32> {
+    pub fn commit_index(&self, id: BufferId, row: u32) -> Option<u32> {
         match self.line(id, row)? {
             LineBlame::Commit { index, .. } => Some(index),
             LineBlame::Uncommitted => None,

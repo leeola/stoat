@@ -74,17 +74,17 @@ pub struct CmdHandle {
 }
 
 pub struct TestHarness {
-    pub(crate) stoat: Stoat,
+    pub stoat: Stoat,
     scheduler: Arc<TestScheduler>,
     pub(crate) fake_fs: Arc<crate::host::FakeFs>,
     pub(crate) fake_fs_watcher: Arc<crate::host::FakeFsWatcher>,
-    pub(crate) fake_git: Arc<crate::host::FakeGit>,
+    pub fake_git: Arc<crate::host::FakeGit>,
     pub(crate) fake_env: Arc<crate::host::FakeEnv>,
     pub(crate) fake_lsp: Arc<crate::host::FakeLsp>,
     pub(crate) fake_clipboard: Arc<crate::host::FakeClipboard>,
     pub(crate) fake_terminal: Arc<crate::host::FakeTerminalSession>,
     pub(crate) fake_terminal_host: Arc<crate::host::FakeTerminalHost>,
-    pub(crate) fake_shell: Arc<crate::host::FakeShell>,
+    pub fake_shell: Arc<crate::host::FakeShell>,
     frames: Vec<Frame>,
     last_buffer: Option<Buffer>,
     step: usize,

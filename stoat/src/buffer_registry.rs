@@ -95,7 +95,7 @@ pub(crate) enum OpenOrigin {
 /// Why a buffer is read-only, which is the reason its text must not write back
 /// to its file.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) enum ReadOnly {
+pub enum ReadOnly {
     /// The process lacks write access to the file. Each save probes the file
     /// again, so a `chmod` that grants access lifts the tag.
     Permission,
@@ -206,7 +206,7 @@ struct BufferEntry {
     line_ending: LineEnding,
 }
 
-pub(crate) struct BufferRegistry {
+pub struct BufferRegistry {
     buffers: HashMap<BufferId, BufferEntry>,
     path_to_id: HashMap<PathBuf, BufferId>,
     next_id: u64,
@@ -415,11 +415,11 @@ impl BufferRegistry {
         (id, buffer)
     }
 
-    pub(crate) fn get(&self, id: BufferId) -> Option<SharedBuffer> {
+    pub fn get(&self, id: BufferId) -> Option<SharedBuffer> {
         self.buffers.get(&id).map(|e| e.buffer.clone())
     }
 
-    pub(crate) fn id_for_path(&self, path: &Path) -> Option<BufferId> {
+    pub fn id_for_path(&self, path: &Path) -> Option<BufferId> {
         self.path_to_id.get(path).copied()
     }
 
@@ -487,7 +487,7 @@ impl BufferRegistry {
 
     /// Record why `id` must not write back to its file, or `None` to let it.
     /// No-op for an unknown id.
-    pub(crate) fn set_read_only(&mut self, id: BufferId, read_only: Option<ReadOnly>) {
+    pub fn set_read_only(&mut self, id: BufferId, read_only: Option<ReadOnly>) {
         if let Some(entry) = self.buffers.get_mut(&id) {
             entry.read_only = read_only;
         }

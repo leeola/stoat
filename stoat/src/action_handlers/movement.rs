@@ -5821,7 +5821,7 @@ pub(super) fn goto_last_line(stoat: &mut Stoat, extend: bool) -> UpdateEffect {
 /// `offset`, for a caller that holds no editor.
 ///
 /// Returns [`UpdateEffect::None`] when no editor has focus.
-pub(crate) fn jump_to_offset(stoat: &mut Stoat, offset: usize) -> UpdateEffect {
+pub fn jump_to_offset(stoat: &mut Stoat, offset: usize) -> UpdateEffect {
     with_focused_editor(stoat, |editor| jump_editor_to_offset(editor, offset))
 }
 

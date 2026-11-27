@@ -6,8 +6,8 @@ mod comment_reflow;
 pub(crate) mod commits;
 pub(crate) mod completion;
 pub(crate) mod conflict;
-pub(crate) mod conflict_view;
-pub(crate) mod diff_changes;
+pub mod conflict_view;
+pub mod diff_changes;
 pub(crate) mod diff_nav;
 pub(crate) mod file;
 mod file_finder;
@@ -23,7 +23,7 @@ pub(crate) mod lsp;
 pub(crate) mod macro_recording;
 pub(crate) mod marks;
 pub(crate) mod move_nav;
-pub(crate) mod movement;
+pub mod movement;
 mod palette;
 pub(crate) mod pane;
 pub(crate) mod picker;
@@ -41,7 +41,7 @@ pub(crate) mod tab;
 mod terminal;
 pub(crate) mod textobject;
 pub(crate) mod textobject_nav;
-pub(crate) mod view;
+pub mod view;
 pub(crate) mod walkthrough;
 pub(crate) mod workspace;
 pub(crate) mod yank;
@@ -1731,7 +1731,7 @@ fn set_theme(stoat: &mut Stoat, name: &str) -> UpdateEffect {
 /// Return a mutable reference to the effective focused editor, respecting
 /// the reword-pause override. Shared by every movement handler plus the
 /// move-navigation summary lookup.
-pub(crate) fn focused_editor_mut(stoat: &mut Stoat) -> Option<&mut EditorState> {
+pub fn focused_editor_mut(stoat: &mut Stoat) -> Option<&mut EditorState> {
     use crate::rebase::RebasePause;
     let ws = stoat.active_workspace_mut();
 

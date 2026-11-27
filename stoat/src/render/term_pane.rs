@@ -31,7 +31,7 @@ use ratatui::{
 ///
 /// See also:
 /// - [`render_term_rows`] to paint some rows over an earlier paint.
-pub(crate) fn render_term_pane(
+pub fn render_term_pane(
     agent: &TermSession,
     theme: &crate::theme::Theme,
     area: Rect,

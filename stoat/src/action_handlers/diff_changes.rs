@@ -599,7 +599,7 @@ pub(crate) fn diff_changes_press(stoat: &mut Stoat, row: usize, column: u16) -> 
 /// The scroll stays between the stack's top and its last page. The cursor
 /// stays off screen until it moves, since only a moved cursor pulls the stack
 /// back.
-pub(crate) fn diff_changes_scroll(stoat: &mut Stoat, delta: i32) -> UpdateEffect {
+pub fn diff_changes_scroll(stoat: &mut Stoat, delta: i32) -> UpdateEffect {
     let ws = stoat.active_workspace_mut();
     let Some(id) = ws.focused_diff_changes_id() else {
         return UpdateEffect::None;

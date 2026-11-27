@@ -639,7 +639,7 @@ fn show_followed_buffer(
 /// replaces the buffer content in one undoable edit, marks it clean, records the
 /// new disk mtime, and notifies the language server. Returns [`UpdateEffect::None`]
 /// only when no editor is focused. Every other path redraws.
-pub(crate) fn reload_focused(stoat: &mut Stoat, force: bool) -> UpdateEffect {
+pub fn reload_focused(stoat: &mut Stoat, force: bool) -> UpdateEffect {
     let Some(id) = focused_editor_mut(stoat).map(|e| e.buffer_id) else {
         return UpdateEffect::None;
     };
@@ -694,7 +694,7 @@ pub(crate) fn reload_focused(stoat: &mut Stoat, force: bool) -> UpdateEffect {
 /// every diff map and the repository tally. Without that, a commit that no
 /// watcher event reported leaves the gutters and the changes view on the tree
 /// before it.
-pub(crate) fn reload_all(stoat: &mut Stoat, force: bool) -> UpdateEffect {
+pub fn reload_all(stoat: &mut Stoat, force: bool) -> UpdateEffect {
     let ws = stoat.active_workspace_mut();
     ws.invalidate_all_diffs();
     ws.diff_warmed = false;

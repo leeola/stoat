@@ -23,7 +23,7 @@ use stoat_scheduler::{Executor, Task};
 /// used for, so a future commit-listing surface adds a variant here and a
 /// select semantic rather than a second picker.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum CommitPickerRole {
+pub enum CommitPickerRole {
     /// Choose the commit a review walk starts from.
     PickBase,
     /// Read-only listing. Selecting a row dismisses the picker without
@@ -209,7 +209,7 @@ pub(crate) enum LoadedCommits {
 ///
 /// Previews are lazy, one background [`DiffDocument`] build per sha, so
 /// scrolling a long history does not diff every commit in it.
-pub(crate) struct CommitPicker {
+pub struct CommitPicker {
     pub(crate) role: CommitPickerRole,
     pub(crate) workdir: PathBuf,
     /// The repository the picker walks, held rather than rediscovered on every
@@ -231,7 +231,7 @@ pub(crate) struct CommitPicker {
     /// The parse behind the current ranking, so a painted row past the indexed
     /// block derives its offsets rather than going unhighlighted.
     last_pattern: Option<fuzzy::Pattern>,
-    pub(crate) selected: usize,
+    pub selected: usize,
     /// Rendered list height, refreshed each frame so [`Self::page`] can size
     /// its step. `None` before the first render.
     pub(crate) viewport_rows: Option<usize>,
@@ -331,7 +331,7 @@ impl CommitPicker {
     /// list here rather than only on arrival means the picker is a consistent
     /// one from the moment it exists, so it renders and takes input while the
     /// walk is still running.
-    pub(crate) fn new(
+    pub fn new(
         ws: &mut Workspace,
         executor: Executor,
         role: CommitPickerRole,
@@ -386,7 +386,7 @@ impl CommitPicker {
     /// the input's text lives in the workspace rather than on the picker. Losing
     /// it here would discard what the user typed against a list that had not
     /// arrived yet.
-    pub(crate) fn set_commits(
+    pub fn set_commits(
         &mut self,
         commits: Vec<CommitInfo>,
         branch_tips: HashMap<String, Vec<String>>,

@@ -36,16 +36,16 @@ use unicode_width::UnicodeWidthStr;
 /// matches the painted one exactly.
 pub struct FinderLayout {
     /// The bordered modal box.
-    pub(crate) modal: Rect,
+    pub modal: Rect,
     /// Inside the border: prompt, input, separator, and body.
     pub(crate) inner: Rect,
     /// The result list, also the smooth-scroll pool region.
-    pub(crate) list: Rect,
+    pub list: Rect,
     /// The preview pane's editor, present only when the body is wide enough.
-    pub(crate) preview: Option<Rect>,
+    pub preview: Option<Rect>,
     /// The path header over the preview and the rule under it, which only
     /// [`finder_layout`] sets. The preview starts below it.
-    pub(crate) preview_header: Option<Rect>,
+    pub preview_header: Option<Rect>,
     /// The key line, on the inner rect's last row and the box's bottom row,
     /// with the list and the preview ending above it. A body of one row keeps
     /// none.
@@ -105,7 +105,7 @@ const BUFFER_FINDER_HINTS: [(&str, &str); 3] =
 ///
 /// Code search and the commit picker share this layout, so all three modals
 /// keep one box rule, one key line, and one list/preview split.
-pub(crate) fn file_finder_layout(
+pub fn file_finder_layout(
     area: Rect,
     content: (u16, u16),
     zoom: i8,

@@ -1,0 +1,23 @@
+[package]
+name = "stoat_tests"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+# `stoat` is a dev-dependency so that a workspace build never turns its
+# test-support feature on. Only the test targets here link the harness.
+[dev-dependencies]
+stoat = { path = "../stoat", features = ["test-support"] }
+stoat_action = { path = "../action" }
+stoat_config = { path = "../config" }
+stoat_text = { path = "../text" }
+stoatty_protocol = { path = "../tty_protocol" }
+stoat_widgets = { path = "../widgets" }
+ratatui.workspace = true
+crossterm.workspace = true
+tokio = { workspace = true, features = ["fs", "io-util", "net", "time"] }
+futures = { workspace = true, features = ["alloc"] }
+lsp-types.workspace = true

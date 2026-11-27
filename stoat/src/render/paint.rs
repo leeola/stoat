@@ -44,7 +44,7 @@ pub(crate) fn fill_line_tint(buf: &mut Buffer, start_x: u16, y: u16, cols: usize
     }
 }
 
-pub(crate) fn style_rgb(color: Option<Color>) -> Option<[u8; 3]> {
+pub fn style_rgb(color: Option<Color>) -> Option<[u8; 3]> {
     match color {
         Some(Color::Rgb(r, g, b)) => Some([r, g, b]),
         _ => None,

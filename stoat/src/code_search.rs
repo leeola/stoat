@@ -57,8 +57,8 @@ pub struct SearchMatch {
 /// opens the file at the match, Escape closes.
 pub struct CodeSearchFinder {
     pub(crate) input: InputView,
-    pub(crate) matches: Vec<SearchMatch>,
-    pub(crate) selected: usize,
+    pub matches: Vec<SearchMatch>,
+    pub selected: usize,
     pub(crate) preview: Preview,
     /// The query the current match set was scanned for. A render tick re-arms the
     /// scan only when the typed text differs from this, so a stable query never

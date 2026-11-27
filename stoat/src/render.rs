@@ -3,7 +3,7 @@ pub(crate) mod banner;
 pub(crate) mod blame;
 pub(crate) mod blame_card;
 pub(crate) mod checkout_confirm;
-pub(crate) mod chrome;
+pub mod chrome;
 pub(crate) mod cmd_line;
 pub(crate) mod code_action;
 pub(crate) mod code_search;
@@ -11,27 +11,27 @@ pub mod command_palette;
 pub(crate) mod commit_patch;
 pub(crate) mod commit_picker;
 pub(crate) mod commit_preview;
-pub(crate) mod commits;
-pub(crate) mod completion;
+pub mod commits;
+pub mod completion;
 pub(crate) mod conflict;
-pub(crate) mod conflict_view;
+pub mod conflict_view;
 pub(crate) mod cursor_popup;
 pub(crate) mod diagnostics_picker;
 pub(crate) mod diff_changes;
 pub(crate) mod dock;
-pub(crate) mod editor;
+pub mod editor;
 pub mod file_finder;
 pub(crate) mod git_status;
 pub mod help;
 pub(crate) mod hints;
-pub(crate) mod hover;
+pub mod hover;
 pub(crate) mod job_glance;
 pub(crate) mod job_list;
 pub(crate) mod job_tray;
 pub(crate) mod jumplist_picker;
 pub(crate) mod location_picker;
-pub(crate) mod paint;
-pub(crate) mod pane;
+pub mod paint;
+pub mod pane;
 pub(crate) mod pane_cache;
 pub(crate) mod pane_finder;
 pub mod picker;
@@ -46,10 +46,10 @@ pub(crate) mod run_pane;
 pub(crate) mod sanitize;
 pub(crate) mod screen;
 pub(crate) mod signature_help;
-pub(crate) mod symbol_finder;
+pub mod symbol_finder;
 pub(crate) mod symbol_picker;
 pub(crate) mod table;
-pub(crate) mod term_pane;
+pub mod term_pane;
 pub(crate) mod text;
 pub(crate) mod undercurl;
 pub(crate) mod walkthrough;
@@ -150,14 +150,14 @@ pub(crate) fn rail_strip_id(strip_id: u32) -> u32 {
 /// stoatty composes lanes in ascending id order, and a panel occludes only what
 /// was declared before it. An overlay therefore has to sit in a lane above
 /// every pane's to cover them, and the highest id stays above any pane index.
-pub(crate) const OVERLAY_LANE: u32 = u32::MAX;
+pub const OVERLAY_LANE: u32 = u32::MAX;
 
 /// The scene lane of every split pane's status row, which changes with every
 /// cursor move while the panes stand.
 ///
 /// Each row sits under its pane and covers none, so the lane only has to stay
 /// under [`OVERLAY_LANE`], where a card docked above a row draws.
-pub(crate) const STATUS_LANE: u32 = u32::MAX - 1;
+pub const STATUS_LANE: u32 = u32::MAX - 1;
 
 /// The opacity of the minimap's viewport thumb, eighteen percent of 255.
 ///
@@ -201,7 +201,7 @@ const BADGE_CHROME: PopoverChrome = PopoverChrome {
 /// It is a trait here rather than a method of the theme because `cfg(test)`
 /// holds only in the crate under test, and this crate's own tests draw through
 /// the harness.
-pub(crate) trait TypeScale {
+pub trait TypeScale {
     fn type_scale(&self, role: crate::theme::TypeRole) -> u16;
 }
 
@@ -1251,7 +1251,7 @@ fn fill_cells(area: Rect, buf: &mut Buffer, blank: &Cell) {
 
 /// Serialize every row of `buf` to a self-contained VT byte stream, as
 /// [`serialize_rows`] serializes them.
-pub(crate) fn serialize_buffer(buf: &Buffer) -> Vec<u8> {
+pub fn serialize_buffer(buf: &Buffer) -> Vec<u8> {
     serialize_rows(buf, buf.area.top()..buf.area.bottom())
 }
 
@@ -3135,7 +3135,7 @@ fn render_split_status(
 /// Lane 0 stays below every pane for the tab bar, and [`STATUS_LANE`] and
 /// [`OVERLAY_LANE`] above them, so a cursor move that redraws only the status
 /// rows sends only those rows.
-pub(crate) fn content_lane(pane_index: u32) -> u32 {
+pub fn content_lane(pane_index: u32) -> u32 {
     1 + pane_index
 }
 

@@ -248,13 +248,13 @@ const HISTORY_PIXEL_LINE: u16 = HISTORY_PIXEL_MARK + 2 * 16 + PIXEL_COLUMN_GAP;
 /// never the filtered rows, so the modal stays put as the selection and filter
 /// change. Shared by the renderer and the smooth-scroll emit so the pooled list
 /// region matches the painted one exactly.
-pub(crate) struct PaletteFilterLayout {
+pub struct PaletteFilterLayout {
     /// The bordered modal box.
     pub(crate) modal: Rect,
     /// Inside the border: prompt/input, separator, list, doc separator, doc.
     pub(crate) inner: Rect,
     /// The scrolling result list, also the smooth-scroll pool region.
-    pub(crate) list: Rect,
+    pub list: Rect,
     /// The selected entry's documentation, below a separator under the list.
     pub(crate) doc: Rect,
     /// The key line under the doc, as
@@ -288,7 +288,7 @@ pub struct PaletteArgLayout {
     /// Inside the border, the Cmd Line, the row under it, and the body.
     pub(crate) inner: Rect,
     /// The result list, also the smooth-scroll pool region.
-    pub(crate) list: Rect,
+    pub list: Rect,
     /// The preview beside the list, present only when the body is wide enough.
     pub(crate) preview: Option<Rect>,
     /// The key line under the body, as
@@ -403,7 +403,7 @@ struct HistoryEntry<'a> {
 /// The doc takes `doc_rows` rows, as [`doc_rows`] answers them, and the list
 /// the rest of the body. The box's height counts [`DOC_ROWS`] whatever the doc
 /// takes, so a doc of more rows takes them from the list.
-pub(crate) fn palette_filter_layout(
+pub fn palette_filter_layout(
     area: Rect,
     content_rows: u16,
     zoom: i8,

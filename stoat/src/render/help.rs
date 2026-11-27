@@ -51,14 +51,14 @@ pub(crate) fn help_content_rows(help: &Help) -> u16 {
 /// detail regions match the painted ones exactly.
 pub struct HelpLayout {
     /// The bordered modal box.
-    pub(crate) modal: Rect,
+    pub modal: Rect,
     /// Inside the border, holding the header rows, the body split, and the
     /// footer.
     pub(crate) inner: Rect,
     /// The entry list, also a smooth-scroll pool region.
-    pub(crate) list: Rect,
+    pub list: Rect,
     /// The selected entry's detail, also a smooth-scroll pool region.
-    pub(crate) detail: Rect,
+    pub detail: Rect,
     /// The key line under the list and the detail, as
     /// [`footer_rect`](crate::render::picker::footer_rect) gives it.
     pub(crate) footer: Rect,

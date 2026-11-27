@@ -202,7 +202,7 @@ pub struct FileFinder {
     /// What submit should do with the selected file.
     pub(crate) open_intent: OpenIntent,
     /// The scope on show, the lists that its scopes read, and the named scopes.
-    pub(crate) scopes: FileScopes,
+    pub scopes: FileScopes,
     /// The [`crate::app::Stoat::finder_path_epoch`] this finder's walk started
     /// under, carried into [`FinderPathCache`] on close.
     ///
@@ -359,7 +359,7 @@ impl FileFinder {
     /// query) swaps in its own directory-walk picker; every other query drives
     /// the workspace `core`. Either gives way to its fallback of ignored files
     /// while [`Self::fallback_active`] holds.
-    pub(crate) fn active_core(&mut self) -> &mut PathPicker {
+    pub fn active_core(&mut self) -> &mut PathPicker {
         let fallback_active = self.fallback_active();
         match self.list_and_fallback_mut() {
             (_, Some(fallback)) if fallback_active => fallback,
@@ -367,7 +367,7 @@ impl FileFinder {
         }
     }
 
-    pub(crate) fn active_core_ref(&self) -> &PathPicker {
+    pub fn active_core_ref(&self) -> &PathPicker {
         match self.list_and_fallback() {
             (_, Some(fallback)) if self.fallback_active() => fallback,
             (list, _) => list,
@@ -650,14 +650,14 @@ impl FileFinder {
 /// config's named scopes with their cache. [`FileFinder`] owns one over its
 /// workspace list. Each method that filters takes the [`PathPicker`] that it
 /// filters, so another owner of a file list passes its own picker.
-pub(crate) struct FileScopes {
+pub struct FileScopes {
     pub(crate) scope: FinderScope,
     /// Absolute paths of currently-modified files. Re-queried on scope toggle.
     ///
     /// Empty until the first background query lands, and thereafter the
     /// previous answer while a re-query is in flight, so a refresh never blinks
     /// the rows empty.
-    pub(crate) modified_paths: Vec<PathBuf>,
+    pub modified_paths: Vec<PathBuf>,
     /// The in-flight git-status query feeding [`Self::modified_paths`], and the
     /// task running it.
     ///
@@ -680,7 +680,7 @@ pub(crate) struct FileScopes {
     /// A row's mark reads these lists too, so the pool that pages the list
     /// feeds this into its content version, and a list that lands after a
     /// page filled refills that page.
-    pub(crate) base_generation: u64,
+    pub base_generation: u64,
     /// Absolute paths of currently-open buffers. Captured once at open time;
     /// not re-queried on scope toggle.
     pub(crate) buffer_paths: Vec<PathBuf>,

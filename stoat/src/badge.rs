@@ -79,11 +79,11 @@ pub enum BadgeSource {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Badge {
-    pub(crate) source: BadgeSource,
-    pub(crate) anchor: Anchor,
-    pub(crate) state: BadgeState,
-    pub(crate) label: String,
-    pub(crate) detail: Option<String>,
+    pub source: BadgeSource,
+    pub anchor: Anchor,
+    pub state: BadgeState,
+    pub label: String,
+    pub detail: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -98,7 +98,7 @@ pub(crate) struct Tray {
     pub(crate) max_visible: u8,
 }
 
-pub(crate) struct BadgeTray {
+pub struct BadgeTray {
     badges: SlotMap<BadgeId, Badge>,
     trays: [Tray; 8],
 }
@@ -126,7 +126,7 @@ impl BadgeTray {
     /// An error badge logs one `warn` line on `stoat::status`. A caller that
     /// derives its badge again on each frame inserts it only when it changes,
     /// or the line repeats on each frame.
-    pub(crate) fn insert(&mut self, badge: Badge) -> BadgeId {
+    pub fn insert(&mut self, badge: Badge) -> BadgeId {
         if badge.state == BadgeState::Error {
             tracing::warn!(
                 target: "stoat::status",

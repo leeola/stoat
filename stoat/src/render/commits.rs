@@ -193,7 +193,7 @@ const LANE_BAR_WIDTH: u16 = 6;
 /// `split` is the dragged share of the body, in
 /// [`SHARE_SCALE`](crate::render::picker::SHARE_SCALE) units, `None` until the
 /// reader drags the separator.
-pub(crate) fn commits_list_rect(pane_area: Rect, split: Option<u16>) -> Option<Rect> {
+pub fn commits_list_rect(pane_area: Rect, split: Option<u16>) -> Option<Rect> {
     let inner = pane_area;
     if inner.width < 10 || inner.height <= GRAPH_HEADER_ROWS {
         return None;

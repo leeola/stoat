@@ -736,12 +736,7 @@ fn ring_reach(edge: Edge, cell_px: u8) -> u16 {
 /// Every pane pool's composite leaves a panel's rect to the live grid, so the
 /// cells show through a glide, a terminal pool, and a resident pool alike.
 /// The panel casts `shadow` outside its rect.
-pub(crate) fn cover_cells(
-    area: Rect,
-    above_pools: bool,
-    shadow: PanelShadow,
-    scene: &mut ApcScene,
-) {
+pub fn cover_cells(area: Rect, above_pools: bool, shadow: PanelShadow, scene: &mut ApcScene) {
     Panel {
         style: BorderStyle::None_,
         border: [0, 0, 0],

@@ -91,7 +91,7 @@ const IGNORED_DIR_CACHE_MAX: usize = 8192;
 /// Quiet window after the last code-search keystroke before the blocking
 /// workspace scan spawns, so a burst of typing re-scans once rather than per
 /// character.
-pub(crate) const CODE_SEARCH_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(150);
+pub const CODE_SEARCH_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(150);
 
 /// Longer debounce for AST search, whose scan parses every same-language file
 /// per query and so costs more than a regex sweep.
@@ -105,7 +105,7 @@ pub(crate) const CODE_SEARCH_AST_DEBOUNCE: std::time::Duration =
 /// that invalidates the slots of the one before, so the fills wait the burst
 /// out rather than rendering a page per event. The window outlasts the gap
 /// between a drag's events and still reads as immediate once the drag stops.
-pub(crate) const POOL_SETTLE_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(100);
+pub const POOL_SETTLE_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(100);
 
 /// One drain turn's edit of the cached finder paths.
 struct PathEdit {

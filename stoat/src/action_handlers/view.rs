@@ -252,7 +252,7 @@ pub(crate) fn scroll_editor(editor: &mut EditorState, down: bool, count: u32) ->
 ///
 /// One report is one line of travel, which [`wheel_scroll_by`] turns into the
 /// three rows a notch moves.
-pub(crate) fn wheel_scroll(editor: &mut EditorState, down: bool) {
+pub fn wheel_scroll(editor: &mut EditorState, down: bool) {
     wheel_scroll_by(editor, if down { 1.0 } else { -1.0 });
 }
 
@@ -410,7 +410,7 @@ pub(super) fn align_view(editor: &mut EditorState, align: ViewAlign) -> UpdateEf
 /// capped to half the viewport so it cannot exceed the space available, and the
 /// bottom branch clamps to `max_scroll` so the last document row pins to the
 /// bottom rather than scrolling blank space into view.
-pub(crate) fn ensure_cursor_in_view(editor: &mut EditorState, scrolloff: u32) -> bool {
+pub fn ensure_cursor_in_view(editor: &mut EditorState, scrolloff: u32) -> bool {
     let viewport = editor.viewport_rows.unwrap_or(DEFAULT_VIEWPORT_ROWS).max(1);
 
     let snapshot = editor.display_map.snapshot();
@@ -455,7 +455,7 @@ pub(crate) fn ensure_cursor_in_view(editor: &mut EditorState, scrolloff: u32) ->
 /// A single-row follow stays a snap, so plain motion at the viewport margin
 /// keeps its immediate feel. The snap is the editor's own view state. A
 /// stoatty pool eases every target move by itself.
-pub(crate) fn follow_jump(editor: &mut EditorState, scrolloff: u32) -> bool {
+pub fn follow_jump(editor: &mut EditorState, scrolloff: u32) -> bool {
     let prev = editor.scroll_row;
     let rest = prev as f32 + editor.scroll_frac;
     let scrolled = ensure_cursor_in_view(editor, scrolloff);
@@ -852,7 +852,7 @@ pub(crate) fn clamp_scroll_to_display(editor: &mut EditorState, scrolloff: u32) 
 /// Resolves the newest selection's caret to a buffer offset and maps it through
 /// the display map, so folds and soft wraps are accounted for rather than the raw
 /// buffer line.
-pub(crate) fn cursor_display_row(editor: &mut EditorState) -> u32 {
+pub fn cursor_display_row(editor: &mut EditorState) -> u32 {
     cursor_display_cell(editor).0
 }
 

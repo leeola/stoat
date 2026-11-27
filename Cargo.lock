@@ -4294,6 +4294,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "stoat_tests"
+version = "0.1.0"
+dependencies = [
+ "crossterm",
+ "futures",
+ "lsp-types",
+ "ratatui",
+ "stoat",
+ "stoat_action",
+ "stoat_config",
+ "stoat_text",
+ "stoat_widgets",
+ "stoatty_protocol",
+ "tokio",
+]
+
+[[package]]
 name = "stoat_text"
 version = "0.1.0"
 dependencies = [

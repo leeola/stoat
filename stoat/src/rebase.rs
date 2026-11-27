@@ -10,7 +10,7 @@ use std::{
 /// when the user presses `i` to enter the mode, mutated by todo-list
 /// edits (op changes, reorders), and consumed by `ExecuteRebase`.
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub(crate) struct RebaseState {
+pub struct RebaseState {
     pub workdir: PathBuf,
     pub todo: Vec<RebaseEntry>,
     pub selected: usize,
@@ -31,13 +31,13 @@ pub(crate) struct RebaseState {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub(crate) struct RebaseEntry {
+pub struct RebaseEntry {
     pub op: RebaseTodoOp,
     pub commit: CommitInfo,
 }
 
 impl RebaseState {
-    pub(crate) fn new(workdir: PathBuf, onto: String, entries: Vec<RebaseEntry>) -> Self {
+    pub fn new(workdir: PathBuf, onto: String, entries: Vec<RebaseEntry>) -> Self {
         Self {
             workdir,
             todo: entries,

@@ -74,7 +74,7 @@ use stoatty_protocol::command::{encode_fill_decorations_scope, encode_fill_scope
 /// ascending-id z-order, so these higher ids always composite above the
 /// split-pane editors beneath them. Each surface's emit consumes its id from
 /// here as it lands.
-pub(crate) mod non_pane_pool {
+pub mod non_pane_pool {
     use stoatty_protocol::command::NON_PANE_POOL_BASE;
 
     /// First id reserved for non-pane surfaces. Panes occupy `[1, BASE)`.
@@ -84,25 +84,25 @@ pub(crate) mod non_pane_pool {
     /// decide which pools a modal box occludes, so both sides share that
     /// constant.
     pub(crate) const BASE: u32 = NON_PANE_POOL_BASE;
-    pub(crate) const COMMITS: u32 = BASE;
-    pub(crate) const FINDER: u32 = BASE + 1;
-    pub(crate) const PALETTE: u32 = BASE + 2;
-    pub(crate) const COMPLETION: u32 = BASE + 3;
-    pub(crate) const HELP_LIST: u32 = BASE + 4;
-    pub(crate) const HELP_DETAIL: u32 = BASE + 5;
+    pub const COMMITS: u32 = BASE;
+    pub const FINDER: u32 = BASE + 1;
+    pub const PALETTE: u32 = BASE + 2;
+    pub const COMPLETION: u32 = BASE + 3;
+    pub const HELP_LIST: u32 = BASE + 4;
+    pub const HELP_DETAIL: u32 = BASE + 5;
     // No surface emit reads these two reserved ids.
     #[allow(dead_code)]
     pub(crate) const SYMBOL: u32 = BASE + 6;
     #[allow(dead_code)]
     pub(crate) const WORKSPACE_SYMBOL: u32 = BASE + 7;
-    pub(crate) const HOVER: u32 = BASE + 8;
-    pub(crate) const COMMIT_PICKER_LIST: u32 = BASE + 9;
+    pub const HOVER: u32 = BASE + 8;
+    pub const COMMIT_PICKER_LIST: u32 = BASE + 9;
     pub(crate) const COMMIT_PICKER_PREVIEW: u32 = BASE + 10;
-    pub(crate) const CODE_SEARCH_LIST: u32 = BASE + 11;
-    pub(crate) const SYMBOL_FINDER_LIST: u32 = BASE + 12;
+    pub const CODE_SEARCH_LIST: u32 = BASE + 11;
+    pub const SYMBOL_FINDER_LIST: u32 = BASE + 12;
     /// The open modal's preview pane. Modals are mutually exclusive, so one id
     /// serves every preview rather than one per modal.
-    pub(crate) const MODAL_PREVIEW: u32 = BASE + 13;
+    pub const MODAL_PREVIEW: u32 = BASE + 13;
     /// The changes view's minimap thumb, which no pool carries.
     ///
     /// It keys the thumb's change gate, so a strip that the changes view places
@@ -110,14 +110,14 @@ pub(crate) mod non_pane_pool {
     pub(crate) const DIFF_CHANGES_THUMB: u32 = BASE + 14;
     /// The Job Tray of the tab bar at the board's pixels, a region with no
     /// page where a press on a chip reports the pointer's pixel.
-    pub(crate) const JOB_TRAY: u32 = BASE + 15;
+    pub const JOB_TRAY: u32 = BASE + 15;
     /// The Job List's rows at the board's pixels, a region with no page where
     /// a press on a row reports the pointer's pixel.
-    pub(crate) const JOB_LIST: u32 = BASE + 16;
+    pub const JOB_LIST: u32 = BASE + 16;
     /// First id of the per-window status-bar partition. A detached pane's status
     /// row pools at `WINDOW_STATUS + pane.index`, so the partition is offset far
     /// enough above the fixed non-pane ids that pane indices never collide.
-    pub(crate) const WINDOW_STATUS: u32 = BASE + 0x100;
+    pub const WINDOW_STATUS: u32 = BASE + 0x100;
 }
 
 /// Display row page `index` starts at, for a pool whose regions are
@@ -1542,7 +1542,7 @@ pub(crate) fn render_commit_picker_preview_page(
 /// A page is composited beside the live grid, whose panes clear their content to
 /// the same blank. A page left at Reset paints the hosting terminal's background
 /// next to stoat's, and the two disagree for as long as the glide runs.
-pub(crate) fn page_buffer(area: Rect, theme: &crate::theme::Theme) -> Buffer {
+pub fn page_buffer(area: Rect, theme: &crate::theme::Theme) -> Buffer {
     Buffer::filled(area, crate::render::surface_blank(theme))
 }
 

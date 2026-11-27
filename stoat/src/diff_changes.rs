@@ -98,7 +98,7 @@ new_key_type! {
 
 /// One changes view pane's stack of excerpts, its scroll, and the view the
 /// changes view replaced in that pane.
-pub(crate) struct DiffChangesState {
+pub struct DiffChangesState {
     /// One excerpt per changed file, in path order. The focused excerpt stays
     /// though its file left the list while its editor is in insert mode,
     /// because a drop then sends the keys typed after it to another file. An
@@ -190,7 +190,7 @@ pub(crate) struct DiffChangesState {
 
 /// The Scope of the cursor's row in one excerpt, with the row and the parse
 /// it was read from.
-pub(crate) struct CursorScope {
+pub struct CursorScope {
     editor: EditorId,
     row: u32,
     /// The syntax version of the parse the chain was read from.
@@ -206,7 +206,7 @@ pub(crate) struct CursorScope {
 /// follows a landed diff map each move that row, and the paint after each one
 /// scrolls to match. The hold ends at the reader's next input, and when
 /// another writer moved the scroll from where the last paint left it.
-pub(crate) struct StackHold {
+pub struct StackHold {
     pub(crate) seat: StackSeat,
     pub(crate) screen_row: usize,
     /// The scroll the last paint left, `None` before the first one.
@@ -254,7 +254,7 @@ impl PinnedHeader {
 }
 
 /// One changed file in a changes view's stack.
-pub(crate) struct Excerpt {
+pub struct Excerpt {
     pub buffer_id: BufferId,
     /// The editor that shows the file in the diff view, which no pane shows.
     pub editor_id: EditorId,
@@ -353,7 +353,7 @@ impl Excerpt {
 /// An undo there acts on the file the edit changed, though the focus moved to
 /// another excerpt, and the undo that brings the change back brings the
 /// excerpt back.
-pub(crate) struct DroppedExcerpt {
+pub struct DroppedExcerpt {
     pub excerpt: Excerpt,
     /// The text version of each buffer of the stack at the drop. An edit to one
     /// of them ends the target, since the history keys then act on the focused
@@ -405,7 +405,7 @@ impl ExcerptStats {
 
 /// The editor position a changes view lands its cursor on.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct Landing {
+pub struct Landing {
     /// The buffer the position is in, whose diff map decides whether the file
     /// is still to join the list.
     pub buffer_id: BufferId,
@@ -428,7 +428,7 @@ pub(crate) struct Landing {
 ///
 /// Each part is a counter its owner moves, so a read walks no buffer.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct StackStamp {
+pub struct StackStamp {
     epoch: u64,
     maps: u64,
     paths: u64,
@@ -1016,7 +1016,7 @@ fn settle_focus(state: &mut DiffChangesState) -> bool {
 /// A fold of the focused excerpt moves the focus as [`settle_focus`] does. A
 /// header above the view's top, as under a pinned header, scrolls back into
 /// the view's first row, and the scroll stays within the stack's last page.
-pub(crate) fn toggle_file(
+pub fn toggle_file(
     state: &mut DiffChangesState,
     editors: &mut SlotMap<EditorId, EditorState>,
     index: usize,
@@ -2059,7 +2059,7 @@ pub(crate) fn dispose_excerpts(ws: &mut Workspace, excerpts: Vec<Excerpt>) {
 }
 
 /// Put `editor`'s one cursor on `point`, held inside the buffer.
-pub(crate) fn place_cursor(editor: &mut EditorState, point: Point) {
+pub fn place_cursor(editor: &mut EditorState, point: Point) {
     let snapshot = editor.display_map.snapshot();
     let buffer = snapshot.buffer_snapshot();
     let rope = buffer.rope();

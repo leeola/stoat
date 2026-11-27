@@ -105,7 +105,7 @@ const ISLAND_SPACING: u8 = 8;
 
 /// The corner radius of a read-only editor's dashed ring, which the ReadOnly
 /// board draws as a 2 px curve whatever radius the islands take.
-pub(crate) const READ_ONLY_RING_RADIUS: u8 = 2;
+pub const READ_ONLY_RING_RADIUS: u8 = 2;
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn render_pane(
@@ -891,7 +891,7 @@ fn card_anchor(pane_area: Rect, minimap_band: Option<Rect>) -> Rect {
 /// pane's live grid. A cell with a non-RGB color (an indexed-color terminal) is
 /// left unchanged, so such terminals simply do not dim. `amount` is expected in
 /// `0.0..=1.0`.
-pub(crate) fn dim_pane_content(buf: &mut Buffer, area: Rect, bg: [u8; 3], amount: f32) {
+pub fn dim_pane_content(buf: &mut Buffer, area: Rect, bg: [u8; 3], amount: f32) {
     // With `bg` and `amount` fixed for the pass, the blend is a function of the
     // cell's own color, and themed text runs long stretches of one. A channel
     // keeps its own last answer, since a run of one foreground is not a run of

@@ -89,9 +89,9 @@ pub(crate) fn mouse_button(button: IpcMouseButton) -> Option<MouseButton> {
 /// pointer contract covers every one of them. The rects come from the same
 /// layout functions the paint uses, so a clicked row always names the row
 /// drawn there.
-pub(crate) struct ModalSurfaces {
+pub struct ModalSurfaces {
     /// Rows the list occupies. A press here resolves to a row index.
-    pub(crate) list: Rect,
+    pub list: Rect,
     /// The preview or detail pane, when the modal shows one. A wheel here
     /// scrolls that pane instead of stepping the list, and the pooled page
     /// covers exactly this rect.
@@ -446,7 +446,7 @@ fn handle_screen_mouse(stoat: &mut Stoat, mouse: MouseEvent) -> Option<UpdateEff
 /// Preview Scale lays out the scaled rows its last render recorded. The commit
 /// picker's diff records no layout, and it lays out the scaled grid of its rect
 /// whenever the terminal draws scaled pools.
-pub(crate) fn modal_preview_rows(stoat: &Stoat) -> Option<usize> {
+pub fn modal_preview_rows(stoat: &Stoat) -> Option<usize> {
     let rect = boxed_modal_surfaces(stoat).and_then(|surfaces| surfaces.preview)?;
     let scaled_rows = match active_modal(stoat) {
         Some(ActiveModal::CommitPicker) => {
@@ -510,7 +510,7 @@ pub(crate) fn modal_preview_editor(stoat: &Stoat) -> Option<EditorId> {
 ///
 /// `quit_confirm` reports no list. It owns the pointer all the same, since
 /// the gate reads "some modal is open" from this returning `Some`.
-pub(crate) fn boxed_modal_surfaces(stoat: &Stoat) -> Option<ModalSurfaces> {
+pub fn boxed_modal_surfaces(stoat: &Stoat) -> Option<ModalSurfaces> {
     let size = stoat.size();
     let zoom = |kind| modal_zoom_steps(&stoat.modal_zoom, kind);
     let split = |kind| modal_split_share(&stoat.modal_split, kind);

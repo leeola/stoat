@@ -61,7 +61,7 @@ use stoatty_protocol::{
 /// The protocol version that reads a decorations-only page fill. An older
 /// terminal ignores the marker and lays the runs after it on the live grid, so
 /// a cursor line change refills its pages whole.
-const FILL_DECORATIONS_PROTOCOL: u32 = 5;
+pub const FILL_DECORATIONS_PROTOCOL: u32 = 5;
 
 /// The protocol version that composites a terminal-kind pool at the terminal
 /// font size and reports its grid. Under an older terminal a terminal pane
@@ -81,11 +81,11 @@ const POOL_DIM_PROTOCOL: u32 = 11;
 /// The protocol version that reads lane markers, so a frame sends only the
 /// scene lanes that changed. Under an older terminal any change sends the
 /// whole scene behind a reset.
-const LANE_PROTOCOL: u32 = 12;
+pub const LANE_PROTOCOL: u32 = 12;
 
 /// The protocol version that keeps a resident pool composited at rest. Under
 /// an older terminal a changes view paints its stack on the live grid.
-const RESIDENT_POOL_PROTOCOL: u32 = 14;
+pub const RESIDENT_POOL_PROTOCOL: u32 = 14;
 
 /// A split pane showing a terminal or an agent, as the terminal-kind pool that
 /// draws it at the terminal font size.
@@ -94,10 +94,10 @@ const RESIDENT_POOL_PROTOCOL: u32 = 14;
 /// as the live grid does. The fade an unfocused pane takes rides the region's
 /// dim under a terminal that fades a pool, so a focus move changes the cursor
 /// rows alone. Under an older terminal the page paints the fade too.
-struct TerminalPoolPane {
-    term_id: TermId,
-    region: PoolRegionCommand,
-    is_focused: bool,
+pub struct TerminalPoolPane {
+    pub term_id: TermId,
+    pub region: PoolRegionCommand,
+    pub is_focused: bool,
     /// How far the page itself blends toward the background. Zero for the
     /// focused pane, and for every pane whose region carries the fade.
     dim: f32,
@@ -110,12 +110,12 @@ struct TerminalPoolPane {
 /// included, so the pool's version moves more often than its page does. The
 /// rendered cells are exact for every input the page depends on, so a render
 /// equal to the held page sends nothing.
-pub(crate) struct TerminalPage {
+pub struct TerminalPage {
     /// The terminal the held page shows. A pool that passes to another one
     /// sends a whole page, whatever its cells.
     term: TermId,
     /// The page stoatty holds, at the grid it reported.
-    page: Buffer,
+    pub page: Buffer,
     /// The buffer the next render draws into, swapped with `page` when that
     /// render goes out, so that a compare allocates nothing.
     spare: Buffer,
@@ -163,9 +163,9 @@ pub(crate) struct WindowPage {
 /// which decides the numbers of every excerpt. A gutter that numbers its rows
 /// in cells repaints the page on a step to another row. A gutter that lays its
 /// numbers as runs paints them alone, and the held cells stay.
-pub(crate) struct HeldStackPage {
+pub struct HeldStackPage {
     /// The page stoatty holds.
-    page: Buffer,
+    pub page: Buffer,
     /// The selections and the cursor row the page numbers from, as
     /// [`painted_selection`] stamps them.
     selection: PaintedSelection,
@@ -257,7 +257,7 @@ pub(crate) enum PoolOwner {
 /// [`LANE_PROTOCOL`] or later, a change sends only the scene lanes it touched.
 /// Runs at the frame seam after the live frame is published, beside
 /// [`emit_smooth_scroll`].
-pub(crate) fn emit_apc_scene(stoat: &mut Stoat) {
+pub fn emit_apc_scene(stoat: &mut Stoat) {
     let Some(apc_tx) = stoat.apc_tx.clone().filter(|_| stoat.stoatty) else {
         return;
     };
@@ -303,7 +303,7 @@ pub(crate) fn emit_theme_default_colors(stoat: &Stoat) {
 ///
 /// A no-op until [`Stoat::stoatty`] confirms a listener, which is what keeps
 /// it paired with [`emit_theme_default_colors`].
-pub(crate) fn emit_reset_default_colors(stoat: &Stoat) {
+pub fn emit_reset_default_colors(stoat: &Stoat) {
     let Some(apc_tx) = stoat.apc_tx.clone().filter(|_| stoat.stoatty) else {
         return;
     };
@@ -377,7 +377,7 @@ pub(crate) fn emit_font_step(stoat: &Stoat, delta: i32) {
 /// pane has reattached or closed emits a WindowClose. Runs at the frame seam
 /// before [`emit_smooth_scroll`], so a window exists before its pool
 /// content ships. An unchanged set sends nothing.
-pub(crate) fn emit_windows(stoat: &mut Stoat) {
+pub fn emit_windows(stoat: &mut Stoat) {
     let Some(apc_tx) = stoat.apc_tx.clone() else {
         return;
     };
@@ -820,7 +820,7 @@ fn emit_window_content(stoat: &mut Stoat, out: &mut Vec<u8>) -> Vec<Vec<u8>> {
 /// Runs at the frame seam after the live frame is published, so the pane
 /// layout (and thus each editor rectangle) reflects the frame just drawn and
 /// the APC bytes are written to stdout right after the grid frame.
-pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
+pub fn emit_smooth_scroll(stoat: &mut Stoat) {
     let Some(apc_tx) = stoat.apc_tx.clone().filter(|_| stoat.stoatty) else {
         return;
     };
@@ -3386,7 +3386,7 @@ fn drop_pane_pool(
 /// content area the editor is painted into. A conflict view's region also
 /// leaves out the MergeGrid's header row. The caller pools nothing while a
 /// full-screen overlay mode is active.
-pub(crate) fn editor_pool_panes(stoat: &Stoat) -> Vec<(u32, EditorId, PoolRegionCommand)> {
+pub fn editor_pool_panes(stoat: &Stoat) -> Vec<(u32, EditorId, PoolRegionCommand)> {
     let ws = stoat.active_workspace();
     ws.panes
         .split_panes()
@@ -3451,7 +3451,7 @@ pub(crate) fn editor_pool_panes(stoat: &Stoat) -> Vec<(u32, EditorId, PoolRegion
 /// composited at rest. A view with no excerpts pools nothing, since the line of
 /// text it paints is no stack row. Neither does the pane that `covered` names,
 /// which an overlay screen paints over.
-pub(crate) fn diff_changes_pool_panes(
+pub fn diff_changes_pool_panes(
     stoat: &Stoat,
     covered: Option<PaneId>,
 ) -> Vec<(u32, DiffChangesId, PoolRegionCommand)> {
@@ -3505,7 +3505,7 @@ pub(crate) fn diff_changes_pool_panes(
 /// every panel the frame declares is cut out, since a pane pool's composite
 /// shows the live grid under a panel. Empty under a terminal that keeps no pool
 /// composited at rest.
-pub(crate) fn resident_pool_rects(stoat: &Stoat) -> Vec<Rect> {
+pub fn resident_pool_rects(stoat: &Stoat) -> Vec<Rect> {
     let composited = composited_stacks(stoat);
     if composited.is_empty() {
         return Vec::new();
@@ -3537,7 +3537,7 @@ pub(crate) fn resident_pool_rects(stoat: &Stoat) -> Vec<Rect> {
 ///
 /// The rects are the bands above and below the overlap, then the parts left
 /// and right of it.
-fn subtract_rect(rect: Rect, hole: Rect) -> impl Iterator<Item = Rect> {
+pub fn subtract_rect(rect: Rect, hole: Rect) -> impl Iterator<Item = Rect> {
     let cut = rect.intersection(hole);
     let parts = match cut.is_empty() {
         true => [rect, Rect::ZERO, Rect::ZERO, Rect::ZERO],
@@ -3566,7 +3566,7 @@ fn subtract_rect(rect: Rect, hole: Rect) -> impl Iterator<Item = Rect> {
 /// whose moved region waits out a resize burst holds no page, so the terminal
 /// shows the live grid there and the list leaves it out. Empty under a
 /// terminal that keeps no pool composited at rest.
-pub(crate) fn composited_stacks(stoat: &Stoat) -> Vec<(u32, Rect)> {
+pub fn composited_stacks(stoat: &Stoat) -> Vec<(u32, Rect)> {
     if !stoat.stoatty || stoat.stoatty_protocol < RESIDENT_POOL_PROTOCOL {
         return Vec::new();
     }
@@ -3591,7 +3591,7 @@ pub(crate) fn composited_stacks(stoat: &Stoat) -> Vec<(u32, Rect)> {
 ///
 /// `covered` names the pane a rebase screen paints over. Its terminal pools
 /// nothing, since a pool there composites its page over the screen.
-fn terminal_pool_panes(
+pub fn terminal_pool_panes(
     stoat: &Stoat,
     inactive_dim: f32,
     modal_dim: f32,
@@ -3862,7 +3862,7 @@ fn patch_runs(pool: u32, index: u64, page: &Buffer, differs: impl Fn(u16) -> boo
 ///
 /// `buf` takes the page's size, so a buffer held across renders allocates only
 /// when a page outgrows it.
-fn render_terminal_page(
+pub fn render_terminal_page(
     term: &TermSession,
     theme: &crate::theme::Theme,
     rows: u16,
@@ -4445,7 +4445,7 @@ fn eol_page_stamp(eol: Option<EolCursor>, spans: &[ResolvedDiag]) -> u64 {
 ///
 /// A composite reads one row more than the region holds, from the floored top
 /// row, so past a page edge it reads into the page after the one on top.
-fn composited_pages(offset: f32, height: u16) -> RangeInclusive<u64> {
+pub fn composited_pages(offset: f32, height: u16) -> RangeInclusive<u64> {
     let top = offset.max(0.0).floor() as u64;
     let height = u64::from(height.max(1));
     top / height..=(top + height) / height
@@ -4537,4 +4537,149 @@ fn ask_pixel_pointer(out: &mut Vec<u8>, held: bool, pool: u32, protocol: u32) {
 }
 
 #[cfg(test)]
-mod tests;
+mod tests {
+    use super::*;
+
+    /// The messages' stamp moves only where the cursor changes what a page prints:
+    /// whether the messages print, the popover's diagnostic, and a cursor line
+    /// whose readout differs from the diagnostic the line starts.
+    #[test]
+    fn the_message_stamp_moves_only_where_the_cursor_changes_a_line() {
+        let span = |start_line: u32, end_line: u32, severity, index| ResolvedDiag {
+            start: start_line as usize * 10,
+            end: end_line as usize * 10 + 5,
+            severity,
+            unnecessary: false,
+            start_line,
+            end_line,
+            index,
+        };
+        let spans = [
+            span(0, 2, lsp_types::DiagnosticSeverity::WARNING, 0),
+            span(5, 5, lsp_types::DiagnosticSeverity::ERROR, 1),
+        ];
+        let at = |line, readout: Option<usize>, suppress| {
+            let readout = readout.map(|index| spans[index]);
+            eol_page_stamp(
+                Some(EolCursor {
+                    line,
+                    readout,
+                    suppress,
+                }),
+                &spans,
+            )
+        };
+
+        let base = at(3, None, None);
+        assert_eq!(
+            [
+                eol_page_stamp(None, &spans) == base,
+                at(4, None, None) == base,
+                at(1, Some(0), None) == base,
+                at(0, Some(0), None) == base,
+                at(3, None, Some(1)) == base,
+            ],
+            [false, true, false, true, false],
+            "a record, a readout its line does not start, and the popover's pick move the stamp",
+        );
+        let anywhere = EolCursor {
+            line: 0,
+            readout: None,
+            suppress: None,
+        };
+        assert_eq!(
+            [
+                eol_page_stamp(None, &[]),
+                eol_page_stamp(Some(anywhere), &[])
+            ],
+            [0, 0],
+            "a buffer with no diagnostic stamps 0",
+        );
+    }
+
+    /// A selected result that wraps across a page edge stamps each page that its
+    /// rows meet, and no other.
+    ///
+    /// With pages 4 rows tall, result 1 starts on document row 3 and takes 3 rows,
+    /// so its rows meet pages 0 and 1 and miss page 2. A result past the measured
+    /// ones takes the one row after the last entry.
+    #[test]
+    fn a_wrapped_selection_stamps_each_page_its_rows_meet() {
+        let tops = [0, 3, 6, 7];
+        let rows = selected_result_rows(&tops, 1);
+        let stamps = [0, 1, 2].map(|page| rows_page_stamp(1, rows.clone(), page, 4));
+
+        assert_eq!(
+            (rows, stamps, selected_result_rows(&tops, 5)),
+            (3..6, [2, 2, 0], 7..8),
+        );
+    }
+
+    /// A pixel list's pool scrolls to its first result's pixel top in cell rows,
+    /// and stamps its pages by the px of the selected result's box and of a page.
+    /// A selection past the measured results takes a one-line box after them.
+    #[test]
+    fn a_pixel_list_scroll_counts_the_selected_box_and_a_page_in_pixels() {
+        let pixels = RowMetrics {
+            cell: [9, 18],
+            scale: 1.0,
+        };
+        let tops = [0, 1, 3, 4];
+        let of = |first, selected| {
+            let scroll = PathListScroll::of(&tops, first, selected, Some(pixels), 5);
+            (scroll.offset, scroll.selected, scroll.page_height)
+        };
+
+        assert_eq!(
+            [of(1, 1), of(1, 7)],
+            [(21.0 / 18.0, 21..59, 90), (21.0 / 18.0, 81..101, 90)]
+        );
+    }
+
+    /// A page's spotlight version covers only the part of the span on its own
+    /// rows. A move refills only the pages whose lit cells change, also when a
+    /// column moves on the first or last row of a page.
+    #[test]
+    fn a_spotlight_page_version_covers_only_its_own_rows() {
+        // Spans run [start row, start column, end row, end column] over 20-row
+        // pages, so row 19 ends page 0 and row 20 starts page 1.
+        let version = |span: [u32; 4], page: u64| {
+            let [start_row, start_column, end_row, end_column] = span;
+            let points = (
+                DisplayPoint::new(start_row, start_column),
+                DisplayPoint::new(end_row, end_column),
+            );
+            spotlight_page_version(Some(([1, 2, 3], points)), page, 20)
+        };
+        let refilled = |from: [u32; 4], to: [u32; 4]| -> Vec<u64> {
+            (0..3)
+                .filter(|&page| version(from, page) != version(to, page))
+                .collect()
+        };
+
+        for (from, to, pages, label) in [
+            ([5, 2, 30, 7], [5, 2, 35, 7], vec![1], "end in page 1"),
+            ([5, 2, 30, 7], [8, 2, 30, 7], vec![0], "start in page 0"),
+            ([20, 2, 30, 7], [20, 5, 30, 7], vec![1], "start on row 20"),
+            ([5, 2, 20, 7], [5, 2, 20, 9], vec![1], "end on row 20"),
+            ([5, 2, 19, 7], [5, 2, 19, 9], vec![0], "end on row 19"),
+            ([1, 0, 1, 9], [50, 0, 50, 9], vec![0, 2], "span on row 1"),
+        ] {
+            assert_eq!(refilled(from, to), pages, "the {label} moves");
+        }
+        let span = (DisplayPoint::new(5, 2), DisplayPoint::new(30, 7));
+        assert_ne!(
+            spotlight_page_version(Some(([1, 2, 3], span)), 0, 20),
+            spotlight_page_version(Some(([4, 5, 6], span)), 0, 20),
+            "the same span in another color refills its page",
+        );
+        assert_eq!(
+            (
+                version([5, 2, 30, 7], 2),
+                spotlight_page_version(None, 0, 20)
+            ),
+            (0, 0),
+            "(a page the span misses, a page with no spotlight)",
+        );
+    }
+}

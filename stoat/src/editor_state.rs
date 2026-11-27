@@ -27,7 +27,7 @@ new_key_type! { pub struct EditorId; }
 /// rows and eases slower, so a stream of reports at wheel rates overlaps into
 /// continuous motion instead of pulsing.
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
-pub(crate) enum ScrollGlide {
+pub enum ScrollGlide {
     None,
     Page,
     Wheel,
@@ -60,7 +60,7 @@ pub(crate) struct StatusFilename {
 }
 
 pub struct EditorState {
-    pub(crate) buffer_id: BufferId,
+    pub buffer_id: BufferId,
     /// This editor's input mode (`normal`, `insert`, `select`, ...). Held
     /// per-editor, so a primary mode survives focus moving to another pane and
     /// back, rather than living in one global slot shared by every pane. An
@@ -84,8 +84,8 @@ pub struct EditorState {
     /// instead. A direct write of a primary mode to [`Self::mode`] leaves it
     /// stale, so a reader checks that the mode is a chord first.
     pub(crate) chord_origin: Option<&'static str>,
-    pub(crate) display_map: DisplayMap,
-    pub(crate) scroll_row: u32,
+    pub display_map: DisplayMap,
+    pub scroll_row: u32,
     /// Sub-row part of the wheel scroll target, which the glide eases
     /// [`Self::scroll_offset`] toward as `scroll_row as f32 + scroll_frac`.
     ///
@@ -94,17 +94,17 @@ pub struct EditorState {
     /// and a session restore all land on the row grid. A nonzero value is what
     /// makes the rest unaligned, which the terminal holds as a composite rather
     /// than handing back to its cell grid.
-    pub(crate) scroll_frac: f32,
+    pub scroll_frac: f32,
     /// Fractional top row for inertial scroll. [`Self::scroll_row`] stays
     /// equal to `scroll_offset.floor()` and drives the integer-row render and
     /// pool paths. The fraction carries sub-row glide between animation frames.
-    pub(crate) scroll_offset: f32,
+    pub scroll_offset: f32,
     /// Which glide, if any, is easing `scroll_offset` toward the `scroll_row`
     /// target. The animation tick eases the offset up and clears this to
     /// [`ScrollGlide::None`] on settle, and the pool emit trusts the fractional
     /// offset while a glide is active so it reaches the terminal. Transient, not
     /// persisted.
-    pub(crate) scroll_glide: ScrollGlide,
+    pub scroll_glide: ScrollGlide,
     /// Cursor buffer line last baked into pooled relative-number gutters.
     ///
     /// Under relative numbering the pooled pages' content version folds in the
@@ -134,7 +134,7 @@ pub struct EditorState {
     /// this to compute scroll distance without taking a dependency on
     /// the render pipeline's layout `Rect`. `None` until the editor has
     /// been rendered at least once; handlers fall back to a default.
-    pub(crate) viewport_rows: Option<u32>,
+    pub viewport_rows: Option<u32>,
     /// The row of the text area that the next paint puts the primary cursor's
     /// row on, once it fits the display to the width.
     ///
@@ -170,7 +170,7 @@ pub struct EditorState {
     ///
     /// Behind an [`Arc`] so every pooled page fill takes a handle rather than
     /// a copy of the aligned rows.
-    pub(crate) conflict_view: Option<Arc<ConflictViewState>>,
+    pub conflict_view: Option<Arc<ConflictViewState>>,
     /// What the last frame handed the conflict view's painter, which the painter
     /// reads beside [`Self::conflict_view`].
     pub(crate) conflict_frame: ConflictFrame,
@@ -275,7 +275,7 @@ pub struct EditorState {
     /// `None` whenever the strip is absent, meaning the minimap is disabled or
     /// the pane is too narrow to inset. Transient render state written by
     /// `render_editor`, not persisted.
-    pub(crate) minimap_rect: Option<Rect>,
+    pub minimap_rect: Option<Rect>,
     /// The fold of the strip that the last minimap sync built, `None` while each
     /// strip row is one buffer line.
     ///
@@ -291,7 +291,7 @@ pub struct EditorState {
     /// conflict view records its center text column. `None` before the first
     /// render and after a render that painted no rows. Transient render state
     /// written by `render_editor`, not persisted.
-    pub(crate) text_rect: Option<Rect>,
+    pub text_rect: Option<Rect>,
     /// Where a conflict view's MergeGrid placed its columns in the last
     /// render, which the status row splits its runs under.
     ///
@@ -299,7 +299,7 @@ pub struct EditorState {
     /// such as a plain editor's or the cell layout a terminal with no live
     /// scene gets. Transient render state written by `render_editor`, not
     /// persisted.
-    pub(crate) conflict_layout: Option<ConflictLayout>,
+    pub conflict_layout: Option<ConflictLayout>,
     /// Absolute terminal cell `(col, row)` the last render reserved for this
     /// editor's primary cursor, so the terminal can position its own cursor
     /// there instead of the render painting a styled grid cell.
@@ -308,14 +308,14 @@ pub struct EditorState {
     /// `None` when not focused, off-screen, or rendered without one, as an
     /// input view or dock is, where the cursor is painted into the buffer
     /// instead. Transient render state, not persisted.
-    pub(crate) cursor_screen_cell: Option<(u16, u16)>,
+    pub cursor_screen_cell: Option<(u16, u16)>,
     /// The base column's cell beside the primary cursor in a two-column diff
     /// view, which the pane outlines as the ghost cursor.
     ///
     /// `None` when the paint was not focused, or when the cursor's row shows
     /// no base line, as an added row does. Transient render state, not
     /// persisted.
-    pub(crate) ghost_cursor_cell: Option<(u16, u16)>,
+    pub ghost_cursor_cell: Option<(u16, u16)>,
 }
 
 /// Snapshot of an [`EditorState`] suitable for workspace save/load.
@@ -393,7 +393,7 @@ impl EditorState {
     /// map's deleted-block splicing, so the base text of removed and modified
     /// hunks aligns as block rows in the left column. Disabling it turns the
     /// splicing back off.
-    pub(crate) fn set_diff_view(&mut self, on: bool) {
+    pub fn set_diff_view(&mut self, on: bool) {
         self.diff_view = on;
         self.display_map.set_show_deleted_blocks(on);
     }

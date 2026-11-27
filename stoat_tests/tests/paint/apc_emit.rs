@@ -1,16 +1,34 @@
-use super::*;
-use crate::{
-    action_handlers::movement,
+use ratatui::{buffer::Buffer, layout::Rect, style::Color};
+use std::sync::Arc;
+use stoat::{
+    action_handlers::{movement, view},
+    apc_emit::{
+        composited_pages, composited_stacks, diff_changes_pool_panes, editor_pool_panes,
+        emit_apc_scene, emit_reset_default_colors, emit_smooth_scroll, emit_windows,
+        render_terminal_page, resident_pool_rects, subtract_rect, terminal_pool_panes,
+        FILL_DECORATIONS_PROTOCOL, LANE_PROTOCOL, RESIDENT_POOL_PROTOCOL,
+    },
+    app::{modal_split_share, modal_zoom_steps, MessageKind, ModalKind, Stoat},
     badge::{Anchor as BadgeAnchor, Badge, BadgeSource, BadgeState},
-    debounce,
-    render::TypeScale,
+    debounce, diff_changes,
+    editor_state::{EditorId, ScrollGlide},
+    pane::{Placement, View},
+    render::{hover::HoverFrame, TypeScale},
+    term_session::TermId,
     test_fixture::fake_term_session,
+    workspace::{diff, Workspace},
 };
+use stoat_config::{LineNumbers, WrapMode};
 use stoat_text::Point;
+use stoat_widgets::{pool, ApcScene};
+use stoatty_protocol::{
+    command::{PoolKind, PoolRegionCommand},
+    BATCHED_DECORATIONS_PROTOCOL, PAGE_ICONS_PROTOCOL, POOL_POINTER_PROTOCOL,
+};
 
 /// The rich review gutter engages only when every color resolves to RGB, so
 /// tests need a hex theme. The default theme uses named colors.
-fn rgb_review_theme() -> crate::theme::Theme {
+fn rgb_review_theme() -> stoat::theme::Theme {
     let src = r##"theme rgbtest {
             diff.context.fg = "#808080";
             diff.added.fg = "#00ff00";
@@ -20,11 +38,11 @@ fn rgb_review_theme() -> crate::theme::Theme {
             ui.background.bg = "#282c34";
         }"##;
     let (config, _) = stoat_config::parse(src);
-    crate::theme::Theme::from_config(&config.expect("theme config parses"), "rgbtest")
+    stoat::theme::Theme::from_config(&config.expect("theme config parses"), "rgbtest")
         .expect("rgb theme builds")
 }
 
-fn rgb_diagnostic_theme() -> crate::theme::Theme {
+fn rgb_diagnostic_theme() -> stoat::theme::Theme {
     let src = r##"theme rgbdiag {
             ui.diagnostic.error.fg = "#ff0000";
             ui.diagnostic.warning.fg = "#ffff00";
@@ -34,14 +52,14 @@ fn rgb_diagnostic_theme() -> crate::theme::Theme {
             ui.background.bg = "#282c34";
         }"##;
     let (config, _) = stoat_config::parse(src);
-    crate::theme::Theme::from_config(&config.expect("theme config parses"), "rgbdiag")
+    stoat::theme::Theme::from_config(&config.expect("theme config parses"), "rgbdiag")
         .expect("rgb theme builds")
 }
 
 /// [`rgb_diagnostic_theme`] with the diff scopes, so both the page gutter colors
 /// and the diff gutter colors resolve and a diff page lays its numbers out as
 /// runs.
-fn rgb_relative_diff_theme() -> crate::theme::Theme {
+fn rgb_relative_diff_theme() -> stoat::theme::Theme {
     let src = r##"theme rgbreldiff {
             ui.diagnostic.error.fg = "#ff0000";
             ui.diagnostic.warning.fg = "#ffff00";
@@ -60,14 +78,14 @@ fn rgb_relative_diff_theme() -> crate::theme::Theme {
             diff.unapproved.fg = "#8000ff";
         }"##;
     let (config, _) = stoat_config::parse(src);
-    crate::theme::Theme::from_config(&config.expect("theme config parses"), "rgbreldiff")
+    stoat::theme::Theme::from_config(&config.expect("theme config parses"), "rgbreldiff")
         .expect("rgb theme builds")
 }
 
 /// modal_frame's rich arm engages only when the border fg and the mask bg
 /// both resolve to RGB, so the modal APC tests need a hex theme. The default
 /// theme uses named colors and would fall back to glyphs.
-fn rgb_modal_theme() -> crate::theme::Theme {
+fn rgb_modal_theme() -> stoat::theme::Theme {
     let src = r##"theme rgbmodal {
             ui.modal.help.fg = "#8899aa";
             ui.modal.hints.fg = "#8899aa";
@@ -78,23 +96,25 @@ fn rgb_modal_theme() -> crate::theme::Theme {
             ui.background.bg = "#282c34";
         }"##;
     let (config, _) = stoat_config::parse(src);
-    crate::theme::Theme::from_config(&config.expect("theme config parses"), "rgbmodal")
+    stoat::theme::Theme::from_config(&config.expect("theme config parses"), "rgbmodal")
         .expect("rgb theme builds")
 }
 
 /// A hex theme for the pane-divider APC test, so the border colors resolve
 /// to RGB and the stoatty arm emits bars instead of glyphs.
-fn rgb_border_theme() -> crate::theme::Theme {
+fn rgb_border_theme() -> stoat::theme::Theme {
     let src = r##"theme rgbborder {
             ui.border.focused.fg = "#aabbcc";
             ui.border.inactive.fg = "#556677";
         }"##;
     let (config, _) = stoat_config::parse(src);
-    crate::theme::Theme::from_config(&config.expect("theme config parses"), "rgbborder")
+    stoat::theme::Theme::from_config(&config.expect("theme config parses"), "rgbborder")
         .expect("rgb theme builds")
 }
 
-use crate::{
+use futures::FutureExt;
+use std::path::PathBuf;
+use stoat::{
     action_handlers, app, auto_reload,
     test_fixture::{
         drain_apc, finder_layout, help_layout, open_with_minimap_strip, palette_arg_layout,
@@ -102,8 +122,6 @@ use crate::{
     },
     ui::FrameBatches,
 };
-use futures::FutureExt;
-use std::path::PathBuf;
 use stoat_action::{Conflict, DetachPane, OpenFile};
 use stoat_config::MinimapMode;
 use stoatty_protocol::{command, window_ipc::WindowIpcEvent};
@@ -266,7 +284,7 @@ fn emit_smooth_scroll_retires_pools_in_overlay_mode() {
     );
 
     // Entering a rebase screen retires the editor pool.
-    h.stoat.active_workspace_mut().rebase = Some(crate::rebase::RebaseState::new(
+    h.stoat.active_workspace_mut().rebase = Some(stoat::rebase::RebaseState::new(
         PathBuf::from("/pool"),
         "onto".into(),
         vec![],
@@ -281,8 +299,8 @@ fn emit_smooth_scroll_retires_pools_in_overlay_mode() {
 
 #[test]
 fn emit_smooth_scroll_pools_the_hover_and_retires_it_on_close() {
-    use crate::render::hover::HoverPopup;
     use ratatui::style::Style;
+    use stoat::render::hover::HoverPopup;
     use stoatty_protocol::command::Command;
 
     let mut h = Stoat::test();
@@ -308,7 +326,7 @@ fn emit_smooth_scroll_pools_the_hover_and_retires_it_on_close() {
     assert!(
         opened.iter().any(|cmd| matches!(
             cmd,
-            Command::PoolRegion(r) if r.pool == crate::smooth_scroll::non_pane_pool::HOVER
+            Command::PoolRegion(r) if r.pool == stoat::smooth_scroll::non_pane_pool::HOVER
         )),
         "an open hover emits its pool region, got {opened:?}"
     );
@@ -319,7 +337,7 @@ fn emit_smooth_scroll_pools_the_hover_and_retires_it_on_close() {
     assert!(
         closed.iter().any(|cmd| matches!(
             cmd,
-            Command::PoolDrop(d) if d.pool == crate::smooth_scroll::non_pane_pool::HOVER
+            Command::PoolDrop(d) if d.pool == stoat::smooth_scroll::non_pane_pool::HOVER
         )),
         "closing the hover retires its pool, got {closed:?}"
     );
@@ -327,8 +345,8 @@ fn emit_smooth_scroll_pools_the_hover_and_retires_it_on_close() {
 
 #[test]
 fn a_live_hover_selection_retires_the_pool() {
-    use crate::render::hover::{HoverPopup, HoverSelection};
     use ratatui::style::Style;
+    use stoat::render::hover::{HoverPopup, HoverSelection};
     use stoatty_protocol::command::Command;
 
     let mut h = Stoat::test();
@@ -353,7 +371,7 @@ fn a_live_hover_selection_retires_the_pool() {
     assert!(
         opened.iter().any(|cmd| matches!(
             cmd,
-            Command::PoolRegion(r) if r.pool == crate::smooth_scroll::non_pane_pool::HOVER
+            Command::PoolRegion(r) if r.pool == stoat::smooth_scroll::non_pane_pool::HOVER
         )),
         "an unselected hover pools its body, got {opened:?}",
     );
@@ -370,7 +388,7 @@ fn a_live_hover_selection_retires_the_pool() {
     assert!(
         dropped.iter().any(|cmd| matches!(
             cmd,
-            Command::PoolDrop(d) if d.pool == crate::smooth_scroll::non_pane_pool::HOVER
+            Command::PoolDrop(d) if d.pool == stoat::smooth_scroll::non_pane_pool::HOVER
         )),
         "a live selection retires the pool so the live frame owns it, got {dropped:?}",
     );
@@ -379,12 +397,12 @@ fn a_live_hover_selection_retires_the_pool() {
 /// A hover harness with the popup open and rendered once, so the stamped
 /// rects and anchor are what a live frame left behind.
 fn hover_harness() -> (
-    crate::test_harness::TestHarness,
+    stoat::test_harness::TestHarness,
     tokio::sync::mpsc::UnboundedReceiver<Vec<u8>>,
     EditorId,
 ) {
-    use crate::render::hover::HoverPopup;
     use ratatui::style::Style;
+    use stoat::render::hover::HoverPopup;
 
     let mut h = Stoat::test();
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
@@ -427,7 +445,7 @@ fn a_hover_inside_its_pane_ships_the_pool_anchor() {
         batch.iter().any(|cmd| matches!(
             cmd,
             Command::PoolAnchor(a)
-                if a.pool == crate::smooth_scroll::non_pane_pool::HOVER
+                if a.pool == stoat::smooth_scroll::non_pane_pool::HOVER
                     && (a.host, a.top_rows) == stamped
         )),
         "the hover pool names the pane it rides, got {batch:?}"
@@ -448,7 +466,7 @@ fn a_modal_hover_fills_with_its_modal_background() {
         }"##;
     let (config, _) = stoat_config::parse(src);
     h.stoat.theme = Arc::new(
-        crate::theme::Theme::from_config(&config.expect("theme parses"), "t").expect("theme loads"),
+        stoat::theme::Theme::from_config(&config.expect("theme parses"), "t").expect("theme loads"),
     );
 
     let size = h.stoat.size();
@@ -495,7 +513,7 @@ fn a_sketch_card_pools_its_body_without_riding_the_pane() {
     let hover_pool: Vec<&str> = batch
         .iter()
         .filter_map(|cmd| match cmd {
-            Command::PoolRegion(r) if r.pool == crate::smooth_scroll::non_pane_pool::HOVER => {
+            Command::PoolRegion(r) if r.pool == stoat::smooth_scroll::non_pane_pool::HOVER => {
                 Some("region")
             },
             Command::PoolAnchor(_) => Some("anchor"),
@@ -512,8 +530,8 @@ fn a_sketch_card_pools_its_body_without_riding_the_pane() {
 
 #[test]
 fn a_hover_overflowing_its_pane_ships_no_anchor() {
-    use crate::render::hover::HoverPopup;
     use ratatui::style::Style;
+    use stoat::render::hover::HoverPopup;
     use stoatty_protocol::command::Command;
 
     let (mut h, mut rx, _) = hover_harness();
@@ -571,7 +589,7 @@ fn a_gliding_pane_freezes_the_hover_region_at_the_stamped_rect() {
     let region = batch
         .iter()
         .find_map(|cmd| match cmd {
-            Command::PoolRegion(r) if r.pool == crate::smooth_scroll::non_pane_pool::HOVER => {
+            Command::PoolRegion(r) if r.pool == stoat::smooth_scroll::non_pane_pool::HOVER => {
                 Some(*r)
             },
             _ => None,
@@ -586,7 +604,7 @@ fn a_gliding_pane_freezes_the_hover_region_at_the_stamped_rect() {
     assert!(
         !batch.iter().any(|cmd| matches!(
             cmd,
-            Command::PoolDrop(d) if d.pool == crate::smooth_scroll::non_pane_pool::HOVER
+            Command::PoolDrop(d) if d.pool == stoat::smooth_scroll::non_pane_pool::HOVER
         )),
         "and the pool stays in the active set, got {batch:?}"
     );
@@ -607,7 +625,7 @@ fn the_hover_pool_leaves_out_the_footer_row() {
     let region = drain_apc(&mut rx)
         .iter()
         .find_map(|cmd| match cmd {
-            Command::PoolRegion(r) if r.pool == crate::smooth_scroll::non_pane_pool::HOVER => {
+            Command::PoolRegion(r) if r.pool == stoat::smooth_scroll::non_pane_pool::HOVER => {
                 Some(*r)
             },
             _ => None,
@@ -729,7 +747,7 @@ fn status_bar_emits_sub_cell_components_inside_stoatty() {
 fn lane_harness(
     dir: &str,
 ) -> (
-    crate::test_harness::TestHarness,
+    stoat::test_harness::TestHarness,
     tokio::sync::mpsc::UnboundedReceiver<Vec<u8>>,
 ) {
     let mut h = Stoat::test();
@@ -748,7 +766,7 @@ fn lane_harness(
 
 /// The commands of one painted and flushed frame.
 fn flushed_frame(
-    h: &mut crate::test_harness::TestHarness,
+    h: &mut stoat::test_harness::TestHarness,
     rx: &mut tokio::sync::mpsc::UnboundedReceiver<Vec<u8>>,
 ) -> Vec<command::Command> {
     let mut buf = Buffer::empty(h.stoat.size());
@@ -775,7 +793,7 @@ fn a_status_only_change_flushes_its_lane_alone() {
     assert_eq!(
         structure,
         [
-            Command::LaneBegin(crate::render::STATUS_LANE),
+            Command::LaneBegin(stoat::render::STATUS_LANE),
             Command::LaneEnd
         ],
         "the status row's lane alone, with no reset"
@@ -803,14 +821,14 @@ fn a_modal_flushes_in_the_lane_after_every_pane() {
         .collect();
     let overlay = cmds
         .iter()
-        .position(|c| *c == Command::LaneBegin(crate::render::OVERLAY_LANE));
+        .position(|c| *c == Command::LaneBegin(stoat::render::OVERLAY_LANE));
     let panel = cmds
         .iter()
         .position(|c| matches!(c, Command::Panel(p) if p.top == modal.y && p.left == modal.x));
 
     assert_eq!(
         lanes.last(),
-        Some(&crate::render::OVERLAY_LANE),
+        Some(&stoat::render::OVERLAY_LANE),
         "the overlay lane goes out after every pane lane, got {lanes:?}"
     );
     assert!(
@@ -879,7 +897,7 @@ fn overlay_status_message_ends_where_a_corner_badge_starts() {
     let mut h = Stoat::test();
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
     h.stoat.set_apc_tx(tx);
-    h.stoat.active_workspace_mut().rebase = Some(crate::rebase::RebaseState::new(
+    h.stoat.active_workspace_mut().rebase = Some(stoat::rebase::RebaseState::new(
         PathBuf::from("/overlay"),
         "onto".into(),
         vec![],
@@ -919,7 +937,7 @@ fn overlay_status_bar_emits_sub_cell_components_inside_stoatty() {
     h.stoat.set_apc_tx(tx);
 
     // A rebase overlay routes its status row through render_overlay_status.
-    h.stoat.active_workspace_mut().rebase = Some(crate::rebase::RebaseState::new(
+    h.stoat.active_workspace_mut().rebase = Some(stoat::rebase::RebaseState::new(
         PathBuf::from("/overlay"),
         "onto".into(),
         vec![],
@@ -1053,7 +1071,7 @@ fn a_pooled_page_marks_its_diagnostic_by_the_terminal_protocol() {
 /// severity color, so a glide over the page keeps the line the live grid draws.
 #[test]
 fn a_glide_page_carries_the_undercurl_of_its_diagnostic() {
-    let mut h = crate::test_harness::TestHarness::with_size(80, 24);
+    let mut h = stoat::test_harness::TestHarness::with_size(80, 24);
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
     h.stoat.set_apc_tx(tx);
     h.stoat.theme = Arc::new(rgb_diagnostic_theme());
@@ -1096,7 +1114,7 @@ fn a_glide_page_carries_the_undercurl_of_its_diagnostic() {
 fn a_blamed_pane_page_carries_the_blame_column() {
     use stoatty_protocol::command::Command;
 
-    let mut h = crate::test_harness::TestHarness::with_size(120, 24);
+    let mut h = stoat::test_harness::TestHarness::with_size(120, 24);
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
     h.stoat.set_apc_tx(tx);
     let text = "fn alpha() {}\nfn beta() {}\n";
@@ -1232,7 +1250,7 @@ fn a_move_onto_another_commit_redecorates_the_blamed_window() {
 #[test]
 fn a_cursor_step_redecorates_the_held_pages_and_refills_none() {
     let text: String = (0..40).map(|i| format!("line {i}\n")).collect();
-    let mut h = crate::test_harness::TestHarness::with_size(120, 24);
+    let mut h = stoat::test_harness::TestHarness::with_size(120, 24);
     h.stoat.stoatty_protocol = stoatty_protocol::PROTOCOL_VERSION;
     h.stoat.settings.editor_line_numbers = Some(LineNumbers::Absolute);
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
@@ -1280,9 +1298,9 @@ fn a_wheel_glide_holds_the_blame_selection_until_it_settles() {
         .replace("line ", "LINE ")
         .replacen("LINE 0\n", "line 0\n", 1);
     let (mut h, mut rx) = buffered_blamed_pool(stoatty_protocol::PROTOCOL_VERSION, &base, &text);
-    let cursor_commit = |h: &mut crate::test_harness::TestHarness| {
+    let cursor_commit = |h: &mut stoat::test_harness::TestHarness| {
         let editor = action_handlers::focused_editor_mut(&mut h.stoat).expect("focused editor");
-        let (line, _) = crate::render::editor::editor_cursor_position(editor)?;
+        let (line, _) = stoat::render::editor::editor_cursor_position(editor)?;
         let id = editor.buffer_id;
         h.stoat.active_workspace().blame.commit_index(id, line - 1)
     };
@@ -1358,10 +1376,10 @@ fn buffered_blamed_pool(
     base: &str,
     text: &str,
 ) -> (
-    crate::test_harness::TestHarness,
+    stoat::test_harness::TestHarness,
     tokio::sync::mpsc::UnboundedReceiver<Vec<u8>>,
 ) {
-    let mut h = crate::test_harness::TestHarness::with_size(120, 24);
+    let mut h = stoat::test_harness::TestHarness::with_size(120, 24);
     h.stoat.theme = Arc::new(ermine_without_cursor_line());
     h.stoat.stoatty_protocol = protocol;
     h.stoat.settings.editor_line_numbers = Some(LineNumbers::Absolute);
@@ -1387,7 +1405,7 @@ fn buffered_blamed_pool(
 
 /// The shipped ermine_night with no cursor line fill, for a test of the
 /// decorations that a moving fill also redecorates.
-fn ermine_without_cursor_line() -> crate::theme::Theme {
+fn ermine_without_cursor_line() -> stoat::theme::Theme {
     let line = "    ui.cursorline.bg       = cursor_line;\n";
     let src = app::DEFAULT_KEYMAP.replacen(line, "", 1);
     assert_ne!(
@@ -1396,7 +1414,7 @@ fn ermine_without_cursor_line() -> crate::theme::Theme {
         "the shipped config fills the cursor line"
     );
     let (config, _) = stoat_config::parse(&src);
-    crate::theme::Theme::from_config(&config.expect("the config parses"), "ermine_night")
+    stoat::theme::Theme::from_config(&config.expect("the config parses"), "ermine_night")
         .expect("the theme builds")
 }
 
@@ -1414,63 +1432,6 @@ fn fill_pages(commands: Vec<command::Command>) -> (Vec<u64>, Vec<u64>) {
         }
     }
     (fills, decorations)
-}
-
-/// The messages' stamp moves only where the cursor changes what a page prints:
-/// whether the messages print, the popover's diagnostic, and a cursor line
-/// whose readout differs from the diagnostic the line starts.
-#[test]
-fn the_message_stamp_moves_only_where_the_cursor_changes_a_line() {
-    let span = |start_line: u32, end_line: u32, severity, index| ResolvedDiag {
-        start: start_line as usize * 10,
-        end: end_line as usize * 10 + 5,
-        severity,
-        unnecessary: false,
-        start_line,
-        end_line,
-        index,
-    };
-    let spans = [
-        span(0, 2, lsp_types::DiagnosticSeverity::WARNING, 0),
-        span(5, 5, lsp_types::DiagnosticSeverity::ERROR, 1),
-    ];
-    let at = |line, readout: Option<usize>, suppress| {
-        let readout = readout.map(|index| spans[index]);
-        eol_page_stamp(
-            Some(EolCursor {
-                line,
-                readout,
-                suppress,
-            }),
-            &spans,
-        )
-    };
-
-    let base = at(3, None, None);
-    assert_eq!(
-        [
-            eol_page_stamp(None, &spans) == base,
-            at(4, None, None) == base,
-            at(1, Some(0), None) == base,
-            at(0, Some(0), None) == base,
-            at(3, None, Some(1)) == base,
-        ],
-        [false, true, false, true, false],
-        "a record, a readout its line does not start, and the popover's pick move the stamp",
-    );
-    let anywhere = EolCursor {
-        line: 0,
-        readout: None,
-        suppress: None,
-    };
-    assert_eq!(
-        [
-            eol_page_stamp(None, &[]),
-            eol_page_stamp(Some(anywhere), &[])
-        ],
-        [0, 0],
-        "a buffer with no diagnostic stamps 0",
-    );
 }
 
 /// A pooled page of the focused editor prints each line's diagnostic message
@@ -1540,12 +1501,12 @@ fn an_unfocused_pane_s_page_prints_no_message() {
 /// message prints on no line, while line 6 prints the warning's. The inactive
 /// fade is 0, so a focus move changes no page input but the messages.
 fn message_page_harness() -> (
-    crate::test_harness::TestHarness,
+    stoat::test_harness::TestHarness,
     tokio::sync::mpsc::UnboundedReceiver<Vec<u8>>,
     EditorId,
     PoolRegionCommand,
 ) {
-    let mut h = crate::test_harness::TestHarness::with_size(80, 24);
+    let mut h = stoat::test_harness::TestHarness::with_size(80, 24);
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
     h.stoat.set_apc_tx(tx);
     h.stoat.theme = Arc::new(rgb_diagnostic_theme());
@@ -1650,9 +1611,9 @@ fn diagnostic_popover_emits_a_popover_frame_inside_stoatty() {
 
 /// The popover a warning under the cursor emits, painted under `theme`.
 fn warning_popover(
-    theme: Option<crate::theme::Theme>,
+    theme: Option<stoat::theme::Theme>,
     diagnostic: lsp_types::Diagnostic,
-) -> (command::PopoverCommand, Arc<crate::theme::Theme>) {
+) -> (command::PopoverCommand, Arc<stoat::theme::Theme>) {
     use stoatty_protocol::command::Command;
 
     let mut h = Stoat::test();
@@ -1707,7 +1668,7 @@ fn warning_popover(
 /// the `ui.popover` box.
 #[test]
 fn the_diagnostic_popover_heads_its_message_with_its_name_and_severity() {
-    use crate::{render::paint::style_rgb as rgb, theme::scope as s};
+    use stoat::{render::paint::style_rgb as rgb, theme::scope as s};
     use stoatty_protocol::command::PopoverSpan;
 
     let (popover, theme) = warning_popover(
@@ -2040,7 +2001,7 @@ fn help_separator_emits_a_hairline_bar_inside_stoatty() {
 /// The text runs on the interior rows of the hints box, the one panel drawn
 /// above the pools.
 ///
-/// Every type role draws at a full cell under `cfg(test)`, so the box's rect,
+/// Every type role draws at a full cell under the harness, so the box's rect,
 /// not a scale, picks its runs out.
 fn hints_box_runs(cmds: &[command::Command]) -> Vec<&command::TextRunCommand> {
     let Some(panel) = cmds.iter().find_map(|cmd| match cmd {
@@ -2082,7 +2043,7 @@ fn hints_overlay_emits_scaled_text_runs_inside_stoatty() {
 
     let cmds = drain_apc(&mut rx);
     let scales: Vec<u16> = hints_box_runs(&cmds).iter().map(|t| t.scale).collect();
-    let ui = h.stoat.theme.type_scale(crate::theme::TypeRole::Ui);
+    let ui = h.stoat.theme.type_scale(stoat::theme::TypeRole::Ui);
     assert!(
         !scales.is_empty(),
         "the hints overlay emits hint-row text runs"
@@ -2108,7 +2069,7 @@ fn the_hint_rows_back_their_runs_with_the_modal_fill() {
         }"##;
     let (config, _) = stoat_config::parse(src);
     h.stoat.theme = Arc::new(
-        crate::theme::Theme::from_config(&config.expect("theme parses"), "t").expect("theme loads"),
+        stoat::theme::Theme::from_config(&config.expect("theme parses"), "t").expect("theme loads"),
     );
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
     h.stoat.set_apc_tx(tx);
@@ -2130,13 +2091,13 @@ fn the_hint_rows_back_their_runs_with_the_modal_fill() {
 
 /// A theme whose window ground, `#010203`, differs from its editor surface,
 /// `#102030`.
-fn chrome_ground_theme() -> crate::theme::Theme {
+fn chrome_ground_theme() -> stoat::theme::Theme {
     let src = r##"theme chromeground {
             ui.background.bg = "#102030";
             ui.surface.chrome.bg = "#010203";
         }"##;
     let (config, _) = stoat_config::parse(src);
-    crate::theme::Theme::from_config(&config.expect("theme parses"), "chromeground")
+    stoat::theme::Theme::from_config(&config.expect("theme parses"), "chromeground")
         .expect("theme loads")
 }
 
@@ -2179,7 +2140,7 @@ fn split_panes_clear_to_the_surface_over_a_chrome_ground() {
 /// over the chrome ground, as a pane's content does.
 #[test]
 fn an_open_dock_clears_to_the_surface_over_a_chrome_ground() {
-    use crate::pane::{DockPanel, DockSide, DockVisibility, View};
+    use stoat::pane::{DockPanel, DockSide, DockVisibility, View};
 
     let mut h = Stoat::test();
     h.stoat.theme = Arc::new(chrome_ground_theme());
@@ -2237,7 +2198,7 @@ fn split_panes_declare_island_halos_in_place_of_the_gap_hairline() {
         let (config, _) = stoat_config::parse(&src);
         let mut h = Stoat::test();
         h.stoat.theme = Arc::new(
-            crate::theme::Theme::from_config(&config.expect("theme parses"), "t")
+            stoat::theme::Theme::from_config(&config.expect("theme parses"), "t")
                 .expect("theme loads"),
         );
         h.stoat.stoatty_protocol = BACKDROP_PANEL_PROTOCOL;
@@ -2372,7 +2333,7 @@ fn the_minimap_band_is_an_island_beside_the_panes() {
 #[test]
 fn a_rebase_screen_keeps_its_pane_island() {
     let (mut h, mut rx) = islands_harness();
-    h.stoat.active_workspace_mut().rebase = Some(crate::rebase::RebaseState::new(
+    h.stoat.active_workspace_mut().rebase = Some(stoat::rebase::RebaseState::new(
         PathBuf::from("/islands"),
         "onto".into(),
         vec![],
@@ -2392,7 +2353,7 @@ fn a_rebase_screen_keeps_its_pane_island() {
 /// A harness at the protocol that turns islands on under the shipped theme,
 /// with its APC channel open.
 fn islands_harness() -> (
-    crate::test_harness::TestHarness,
+    stoat::test_harness::TestHarness,
     tokio::sync::mpsc::UnboundedReceiver<Vec<u8>>,
 ) {
     let mut h = Stoat::test();
@@ -2404,7 +2365,7 @@ fn islands_harness() -> (
 
 /// The rects of the backdrop panels that one painted frame of `h` declares.
 fn island_halos(
-    h: &mut crate::test_harness::TestHarness,
+    h: &mut stoat::test_harness::TestHarness,
     rx: &mut tokio::sync::mpsc::UnboundedReceiver<Vec<u8>>,
 ) -> Vec<Rect> {
     use stoatty_protocol::command::Command;
@@ -2428,25 +2389,25 @@ const READ_ONLY_LABEL: [u8; 3] = [0xc9, 0xb3, 0x83];
 const READ_ONLY_BASE: [u8; 3] = [0x17, 0x19, 0x1e];
 
 /// The shipped dark theme's ring and label colors over an RGB editor surface.
-fn read_only_theme() -> crate::theme::Theme {
+fn read_only_theme() -> stoat::theme::Theme {
     let src = r##"theme readonly {
             ui.background.bg = "#17191e";
             ui.readonly.label.fg = "#c9b383";
             ui.readonly.frame.fg = "#8a7650";
         }"##;
     let (config, _) = stoat_config::parse(src);
-    crate::theme::Theme::from_config(&config.expect("theme parses"), "readonly")
+    stoat::theme::Theme::from_config(&config.expect("theme parses"), "readonly")
         .expect("theme loads")
 }
 
 /// A harness at the backdrop protocol under `theme`, focused on the file
 /// `name`, which holds `bytes`. A file that is not `writable` opens read-only.
 fn read_only_harness(
-    theme: crate::theme::Theme,
+    theme: stoat::theme::Theme,
     name: &str,
     bytes: &[u8],
     writable: bool,
-) -> crate::test_harness::TestHarness {
+) -> stoat::test_harness::TestHarness {
     let mut h = Stoat::test();
     h.stoat.theme = Arc::new(theme);
     h.stoat.stoatty_protocol = stoatty_protocol::BACKDROP_PANEL_PROTOCOL;
@@ -2458,14 +2419,14 @@ fn read_only_harness(
     action_handlers::dispatch(&mut h.stoat, &OpenFile { path });
     h.settle();
     // A gzip file reads on the blocking pool, and the read installs here.
-    crate::buffer_lifecycle::install_pending_opens(&mut h.stoat);
+    stoat::buffer_lifecycle::install_pending_opens(&mut h.stoat);
     h.settle();
     h
 }
 
 /// The ring, the label's chip, and the label's run that one painted frame of
 /// `h` holds in its scene, in scene order, and the frame's cells.
-fn read_only_paint(h: &mut crate::test_harness::TestHarness) -> (Vec<command::Command>, Buffer) {
+fn read_only_paint(h: &mut stoat::test_harness::TestHarness) -> (Vec<command::Command>, Buffer) {
     use stoatty_protocol::command::{self, BorderStyle, Command};
 
     let mut buf = Buffer::empty(h.stoat.size());
@@ -2487,8 +2448,8 @@ fn read_only_paint(h: &mut crate::test_harness::TestHarness) -> (Vec<command::Co
 /// `label`. The ring is one cell narrower than the text, the chip ends one
 /// cell inside the ring's right end, and the run starts one cell into the
 /// chip.
-fn ring_and_label(text: Rect, label: &str, theme: &crate::theme::Theme) -> Vec<command::Command> {
-    use crate::{render::pane::READ_ONLY_RING_RADIUS, theme::TypeRole};
+fn ring_and_label(text: Rect, label: &str, theme: &stoat::theme::Theme) -> Vec<command::Command> {
+    use stoat::{render::pane::READ_ONLY_RING_RADIUS, theme::TypeRole};
     use stoatty_protocol::command::{
         BorderStyle, Command, Edge, PanelCommand, PanelShadow, TextRunCommand,
     };
@@ -2560,7 +2521,7 @@ fn ring_and_label(text: Rect, label: &str, theme: &crate::theme::Theme) -> Vec<c
 #[test]
 fn a_read_only_pane_rings_its_text_and_names_why() {
     let line = format!("{}\n", "notes ".repeat(20));
-    let gz = crate::test_harness::gzip(line.as_bytes());
+    let gz = stoat::test_harness::gzip(line.as_bytes());
     for (name, bytes, writable, label) in [
         ("a.md.gz", &gz[..], true, "read only \u{b7} gzip"),
         (
@@ -2599,7 +2560,7 @@ fn a_read_only_pane_rings_its_text_and_names_why() {
 fn a_revision_pane_rings_its_text_and_names_it_a_revision() {
     let mut h = read_only_harness(read_only_theme(), "a.txt", b"notes\n", true);
     let path = PathBuf::from("/ro/a.txt");
-    crate::buffer_lifecycle::show_revision(&mut h.stoat, &path, "a1b2c3d4e5", "notes\n");
+    stoat::buffer_lifecycle::show_revision(&mut h.stoat, &path, "a1b2c3d4e5", "notes\n");
 
     let (marks, _) = read_only_paint(&mut h);
     let text = action_handlers::focused_editor_mut(&mut h.stoat)
@@ -2762,7 +2723,7 @@ fn hover_body_emits_scaled_text_runs_inside_stoatty() {
     emit_apc_scene(&mut h.stoat);
 
     let cmds = drain_apc(&mut rx);
-    let ui = h.stoat.theme.type_scale(crate::theme::TypeRole::Ui);
+    let ui = h.stoat.theme.type_scale(stoat::theme::TypeRole::Ui);
     assert!(
         cmds.iter().any(|c| matches!(
             c,
@@ -2774,7 +2735,7 @@ fn hover_body_emits_scaled_text_runs_inside_stoatty() {
 
 #[test]
 fn pane_divider_emits_a_hairline_bar_inside_stoatty() {
-    use crate::pane::DividerOrientation;
+    use stoat::pane::DividerOrientation;
     use stoatty_protocol::command::{BarCommand, Command};
 
     let mut h = Stoat::test();
@@ -2819,7 +2780,7 @@ fn pane_divider_emits_a_hairline_bar_inside_stoatty() {
 
 #[test]
 fn completion_popup_emits_a_panel_inside_stoatty() {
-    use crate::completion::{CompletionItem, CompletionPopup, CompletionSource};
+    use stoat::completion::{CompletionItem, CompletionPopup, CompletionSource};
     use stoatty_protocol::command::Command;
 
     let mut h = Stoat::test();
@@ -2840,7 +2801,7 @@ fn completion_popup_emits_a_panel_inside_stoatty() {
         source: CompletionSource::Lsp,
         kind: None,
         detail: None,
-        replace_range: crate::completion::unused_replace_range(),
+        replace_range: stoat::completion::unused_replace_range(),
         insert_text: "println".into(),
         is_snippet: false,
         documentation: None,
@@ -2852,7 +2813,7 @@ fn completion_popup_emits_a_panel_inside_stoatty() {
     app::paint_frame(&mut h.stoat, &mut buf);
     emit_apc_scene(&mut h.stoat);
 
-    let popup_area = crate::render::completion::completion_popup_layout(&mut h.stoat)
+    let popup_area = stoat::render::completion::completion_popup_layout(&mut h.stoat)
         .expect("completion popup lays out")
         .1
         .popup_area;
@@ -3041,7 +3002,7 @@ fn detached_focus_ships_a_pool_cursor_that_goes_quiet_when_idle() {
 fn a_moved_status_row_redeclares_its_region_though_its_segments_match() {
     use stoatty_protocol::command::Command;
 
-    let status_base = crate::smooth_scroll::non_pane_pool::WINDOW_STATUS;
+    let status_base = stoat::smooth_scroll::non_pane_pool::WINDOW_STATUS;
     let mut h = Stoat::test();
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
     h.stoat.set_apc_tx(tx);
@@ -3105,7 +3066,7 @@ fn a_moved_status_row_redeclares_its_region_though_its_segments_match() {
 fn detached_pane_ships_a_window_status_row_that_goes_quiet_when_idle() {
     use stoatty_protocol::command::Command;
 
-    let status_base = crate::smooth_scroll::non_pane_pool::WINDOW_STATUS;
+    let status_base = stoat::smooth_scroll::non_pane_pool::WINDOW_STATUS;
     let mut h = Stoat::test();
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
     h.stoat.set_apc_tx(tx);
@@ -3208,11 +3169,11 @@ fn a_detached_run_pane_s_row_counts_its_cmds_in_jobs() {
 fn a_window_status_row_paints_a_message_in_the_color_of_its_kind() {
     let (config, _) = stoat_config::parse(app::DEFAULT_KEYMAP);
     let theme = Arc::new(
-        crate::theme::Theme::from_config(&config.expect("the config parses"), "ermine_night")
+        stoat::theme::Theme::from_config(&config.expect("the config parses"), "ermine_night")
             .expect("the theme loads"),
     );
     let ink = |kind: MessageKind| {
-        let mut h = crate::test_harness::TestHarness::with_size(120, 24);
+        let mut h = stoat::test_harness::TestHarness::with_size(120, 24);
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
         h.stoat.set_apc_tx(tx);
         h.stoat.window_ipc_connected = true;
@@ -3259,7 +3220,7 @@ fn a_window_status_row_paints_a_message_in_the_color_of_its_kind() {
 
 /// The window that the focused pane detached into, and the pool of that
 /// window's status row.
-fn focused_window_status_pool(h: &crate::test_harness::TestHarness) -> (u32, u32) {
+fn focused_window_status_pool(h: &stoat::test_harness::TestHarness) -> (u32, u32) {
     let panes = &h.stoat.active_workspace().panes;
     let pane = panes.pane(panes.focus());
     let window = match &pane.placement {
@@ -3268,7 +3229,7 @@ fn focused_window_status_pool(h: &crate::test_harness::TestHarness) -> (u32, u32
     };
     (
         window,
-        crate::smooth_scroll::non_pane_pool::WINDOW_STATUS + pane.index,
+        stoat::smooth_scroll::non_pane_pool::WINDOW_STATUS + pane.index,
     )
 }
 
@@ -3313,9 +3274,9 @@ fn a_detached_diff_view_s_row_splits_at_the_divider() {
 /// The halves lie either side of column 59, the divider of a 120-column diff
 /// body.
 fn detached_diff_row(
-    show: impl FnOnce(&mut crate::test_harness::TestHarness),
+    show: impl FnOnce(&mut stoat::test_harness::TestHarness),
 ) -> (Vec<(Option<Color>, usize)>, [String; 2]) {
-    let mut h = crate::test_harness::TestHarness::with_size(120, 24);
+    let mut h = stoat::test_harness::TestHarness::with_size(120, 24);
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
     h.stoat.set_apc_tx(tx);
     h.stoat.window_ipc_connected = true;
@@ -3516,7 +3477,7 @@ fn a_detached_pane_view_change_ships_a_whole_page() {
 fn detached_terminal_sent(
     output: &[u8],
 ) -> (
-    crate::test_harness::TestHarness,
+    stoat::test_harness::TestHarness,
     tokio::sync::mpsc::UnboundedReceiver<Vec<u8>>,
     TermId,
     u32,
@@ -3549,7 +3510,7 @@ fn detached_terminal_sent(
 /// A fresh terminal in the focused split pane, fit to that pane by a render and
 /// then fed `output`, and the pane's index, which is its pool id.
 fn terminal_in_focused_pane(
-    h: &mut crate::test_harness::TestHarness,
+    h: &mut stoat::test_harness::TestHarness,
     output: &[u8],
 ) -> (TermId, u32) {
     let (term, _) = fake_term_session(24, 80);
@@ -3570,7 +3531,7 @@ fn terminal_in_focused_pane(
 /// Everything one [`emit_smooth_scroll`] sends, raw, with what came before it
 /// thrown away.
 fn emit_raw(
-    h: &mut crate::test_harness::TestHarness,
+    h: &mut stoat::test_harness::TestHarness,
     rx: &mut tokio::sync::mpsc::UnboundedReceiver<Vec<u8>>,
 ) -> Vec<u8> {
     while rx.try_recv().is_ok() {}
@@ -3585,7 +3546,7 @@ fn emit_raw(
 /// The batches one [`emit_smooth_scroll`] sends, apart and in order, with what
 /// came before them thrown away.
 fn emit_batches(
-    h: &mut crate::test_harness::TestHarness,
+    h: &mut stoat::test_harness::TestHarness,
     rx: &mut tokio::sync::mpsc::UnboundedReceiver<Vec<u8>>,
 ) -> Vec<Vec<u8>> {
     while rx.try_recv().is_ok() {}
@@ -3723,10 +3684,10 @@ fn a_terminal_pool_fills_its_page_once_its_grid_is_reported() {
 
     let page = {
         let area = Rect::new(0, 0, 30, 6);
-        let mut page = crate::smooth_scroll::page_buffer(area, &h.stoat.theme);
+        let mut page = stoat::smooth_scroll::page_buffer(area, &h.stoat.theme);
         let term = &h.stoat.active_workspace().terms[term_id];
-        crate::render::term_pane::render_term_pane(term, &h.stoat.theme, area, true, &mut page);
-        crate::render::serialize_buffer(&page)
+        stoat::render::term_pane::render_term_pane(term, &h.stoat.theme, area, true, &mut page);
+        stoat::render::serialize_buffer(&page)
     };
     assert_eq!(
         (
@@ -3767,10 +3728,10 @@ fn a_terminal_page_rides_its_own_batch() {
 
     let page = {
         let area = Rect::new(0, 0, 30, 6);
-        let mut page = crate::smooth_scroll::page_buffer(area, &h.stoat.theme);
+        let mut page = stoat::smooth_scroll::page_buffer(area, &h.stoat.theme);
         let term = &h.stoat.active_workspace().terms[term_id];
-        crate::render::term_pane::render_term_pane(term, &h.stoat.theme, area, true, &mut page);
-        crate::render::serialize_buffer(&page)
+        stoat::render::term_pane::render_term_pane(term, &h.stoat.theme, area, true, &mut page);
+        stoat::render::serialize_buffer(&page)
     };
     let mut page_batch = Vec::new();
     command::encode_fill_scope(&mut page_batch, index, 0, |out| {
@@ -3797,7 +3758,7 @@ fn a_terminal_page_rides_its_own_batch() {
 #[test]
 fn a_feed_that_paints_nothing_sends_nothing() {
     let (mut h, mut rx, term_id, index) = pooled_terminal_sent(b"hello");
-    let mut feed = |h: &mut crate::test_harness::TestHarness, bytes: &[u8]| {
+    let mut feed = |h: &mut stoat::test_harness::TestHarness, bytes: &[u8]| {
         h.stoat.active_workspace_mut().terms[term_id]
             .term
             .feed(bytes);
@@ -3877,7 +3838,7 @@ fn a_moved_pane_declares_its_pool_again() {
 #[test]
 fn a_click_on_a_focused_terminal_pane_sends_nothing() {
     let (mut h, mut rx, term_id, index) = pooled_terminal_sent(b"hello");
-    let mut select = |h: &mut crate::test_harness::TestHarness, head: (usize, usize)| {
+    let mut select = |h: &mut stoat::test_harness::TestHarness, head: (usize, usize)| {
         let term = &mut h.stoat.active_workspace_mut().terms[term_id].term;
         term.start_selection(0, 0);
         term.extend_selection(head.0, head.1);
@@ -3986,7 +3947,7 @@ fn a_region_change_ships_a_whole_page() {
 fn separate_changed_rows_ship_separate_patches() {
     let (mut h, mut rx, term_id, index) = pooled_terminal_sent(b"a\r\nb\r\nc");
     h.stoat.stoatty_protocol = 10;
-    let mut feed = |h: &mut crate::test_harness::TestHarness, bytes: &[u8]| {
+    let mut feed = |h: &mut stoat::test_harness::TestHarness, bytes: &[u8]| {
         h.stoat.active_workspace_mut().terms[term_id]
             .term
             .feed(bytes);
@@ -4007,7 +3968,7 @@ fn separate_changed_rows_ship_separate_patches() {
 /// The `(rows, cols)` grid page of `term_id`'s pooled pane as a fresh render
 /// draws it.
 fn fresh_terminal_page(
-    h: &crate::test_harness::TestHarness,
+    h: &stoat::test_harness::TestHarness,
     term_id: TermId,
     (rows, cols): (u16, u16),
 ) -> Buffer {
@@ -4066,7 +4027,7 @@ fn a_view_scroll_or_a_selection_compares_the_whole_page() {
     let output: String = (0..12).map(|line| format!("{line}\r\n")).collect();
     let (mut h, mut rx, term_id, index) = pooled_terminal_sent(output.as_bytes());
     h.stoat.stoatty_protocol = 10;
-    let mut patches = |h: &mut crate::test_harness::TestHarness| {
+    let mut patches = |h: &mut stoat::test_harness::TestHarness| {
         let bytes = emit_raw(h, &mut rx);
         pool_patches(&bytes, index)
     };
@@ -4095,7 +4056,7 @@ fn a_view_scroll_or_a_selection_compares_the_whole_page() {
 fn pooled_terminal_sent(
     output: &[u8],
 ) -> (
-    crate::test_harness::TestHarness,
+    stoat::test_harness::TestHarness,
     tokio::sync::mpsc::UnboundedReceiver<Vec<u8>>,
     TermId,
     u32,
@@ -4132,7 +4093,7 @@ fn a_terminal_page_draws_its_pane_as_the_live_grid_does_and_the_region_carries_i
         let (term_id, _) =
             terminal_in_focused_pane(&mut h, b"\x1b[38;2;200;180;40mhi\x1b[0m there");
 
-        let pages_and_live = |h: &mut crate::test_harness::TestHarness| {
+        let pages_and_live = |h: &mut stoat::test_harness::TestHarness| {
             let live = h.stoat.render();
             let inactive_dim = h.stoat.settings.ui_inactive_dim.unwrap_or(0.25) as f32;
             let pane = terminal_pool_panes(&h.stoat, inactive_dim, 0.0, None)
@@ -4154,15 +4115,15 @@ fn a_terminal_page_draws_its_pane_as_the_live_grid_does_and_the_region_carries_i
             // stoatty composites the page faded by the region's dim.
             let area = Rect::new(0, 0, region.width, region.height);
             if region.dim > 0 {
-                let bg = crate::render::paint::style_rgb(
+                let bg = stoat::render::paint::style_rgb(
                     h.stoat
                         .theme
-                        .try_get(crate::theme::scope::UI_BACKGROUND)
+                        .try_get(stoat::theme::scope::UI_BACKGROUND)
                         .and_then(|style| style.bg),
                 )
                 .expect("the theme's background is rgb");
                 let amount = f32::from(region.dim) / 255.0;
-                crate::render::pane::dim_pane_content(&mut page, area, bg, amount);
+                stoat::render::pane::dim_pane_content(&mut page, area, bg, amount);
             }
 
             let mut live_page = Buffer::empty(area);
@@ -4174,8 +4135,8 @@ fn a_terminal_page_draws_its_pane_as_the_live_grid_does_and_the_region_carries_i
             (
                 pane.is_focused,
                 region.dim,
-                crate::render::serialize_buffer(&page)
-                    == crate::render::serialize_buffer(&live_page),
+                stoat::render::serialize_buffer(&page)
+                    == stoat::render::serialize_buffer(&live_page),
             )
         };
 
@@ -4248,7 +4209,7 @@ fn a_boxed_modal_declares_its_fade_on_a_terminal_region() {
 /// The dims an unfocused terminal pane's region declares under a fade of 0.2,
 /// before and after `change`.
 fn unfocused_region_dims(
-    change: impl FnOnce(&mut crate::test_harness::TestHarness),
+    change: impl FnOnce(&mut stoat::test_harness::TestHarness),
 ) -> (Vec<u8>, Vec<u8>) {
     use stoatty_protocol::command::Command;
 
@@ -4268,7 +4229,7 @@ fn unfocused_region_dims(
         .insert(term, (6, 30));
     action_handlers::dispatch(&mut h.stoat, &stoat_action::FocusLeft);
 
-    let mut dims = |h: &mut crate::test_harness::TestHarness| -> Vec<u8> {
+    let mut dims = |h: &mut stoat::test_harness::TestHarness| -> Vec<u8> {
         let _ = h.stoat.render();
         command::decode_stream(&emit_raw(h, &mut rx))
             .into_iter()
@@ -4365,7 +4326,7 @@ fn a_pane_pool_starts_over_for_another_editor() {
             .insert_file(root.join(name), b"alpha\nbravo\ncharlie\n");
     }
     h.stoat.active_workspace_mut().git_root = root.clone();
-    let open = |h: &mut crate::test_harness::TestHarness, name: &str| {
+    let open = |h: &mut stoat::test_harness::TestHarness, name: &str| {
         let path = root.join(name);
         action_handlers::dispatch(&mut h.stoat, &OpenFile { path });
         h.settle();
@@ -4457,11 +4418,11 @@ fn resident_stack(
     files: &[(&str, &str, &str)],
     minimap: MinimapMode,
 ) -> (
-    crate::test_harness::TestHarness,
+    stoat::test_harness::TestHarness,
     tokio::sync::mpsc::UnboundedReceiver<Vec<u8>>,
     u32,
 ) {
-    let mut h = crate::test_harness::TestHarness::with_size(120, 24);
+    let mut h = stoat::test_harness::TestHarness::with_size(120, 24);
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
     h.stoat.set_apc_tx(tx);
     h.stoat.stoatty_protocol = RESIDENT_POOL_PROTOCOL;
@@ -4481,7 +4442,7 @@ fn resident_stack(
 }
 
 /// The content area of the focused pane.
-fn focused_content(h: &crate::test_harness::TestHarness) -> Rect {
+fn focused_content(h: &stoat::test_harness::TestHarness) -> Rect {
     let ws = h.stoat.active_workspace();
     ws.panes.pane(ws.panes.focus()).area
 }
@@ -4491,7 +4452,7 @@ fn focused_content(h: &crate::test_harness::TestHarness) -> Rect {
 /// The ghost is a panel, and the terminal shows the live grid under every
 /// panel, so the mask leaves its cell out. The stack fixtures put the cursor
 /// on a paired row, whose base line takes the ghost.
-fn less_ghost(h: &crate::test_harness::TestHarness, rects: Vec<Rect>) -> Vec<Rect> {
+fn less_ghost(h: &stoat::test_harness::TestHarness, rects: Vec<Rect>) -> Vec<Rect> {
     let ws = h.stoat.active_workspace();
     let (editor, _) = ws.focused_editor().expect("the focused excerpt");
     let (x, y) = ws.editors[editor]
@@ -4612,7 +4573,7 @@ fn a_landing_refills_the_composited_page() {
     let (mut h, mut rx, pool) = resident_stack(&[("a.txt", &base, &text)], MinimapMode::Off);
     h.stoat.set_diff_warm_auto(true);
     let held = pool_fills(&emit_raw(&mut h, &mut rx), pool);
-    let folds = |h: &crate::test_harness::TestHarness| {
+    let folds = |h: &stoat::test_harness::TestHarness| {
         let state = h.stoat.active_workspace().focused_diff_changes();
         state.expect("the changes view").excerpts[0].folded_version
     };
@@ -4648,7 +4609,7 @@ fn a_landing_refills_the_composited_page() {
 /// view covers trades its editor pool for the stack's.
 #[test]
 fn an_editor_beside_a_changes_view_keeps_its_pool() {
-    let mut h = crate::test_harness::TestHarness::with_size(120, 24);
+    let mut h = stoat::test_harness::TestHarness::with_size(120, 24);
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
     h.stoat.set_apc_tx(tx);
     h.stoat.stoatty_protocol = RESIDENT_POOL_PROTOCOL;
@@ -4835,7 +4796,7 @@ fn a_panel_over_a_stack_pool_leaves_the_mask() {
 
 /// A theme whose modal borders, the file finder's and the key hints', are
 /// `color`.
-fn modal_border_theme(color: &str) -> crate::theme::Theme {
+fn modal_border_theme(color: &str) -> stoat::theme::Theme {
     let src = format!(
         r#"theme modalborder {{
             ui.modal.palette.fg = "{color}";
@@ -4843,7 +4804,7 @@ fn modal_border_theme(color: &str) -> crate::theme::Theme {
         }}"#
     );
     let (config, _) = stoat_config::parse(&src);
-    crate::theme::Theme::from_config(&config.expect("theme config parses"), "modalborder")
+    stoat::theme::Theme::from_config(&config.expect("theme config parses"), "modalborder")
         .expect("modal theme builds")
 }
 
@@ -4905,7 +4866,7 @@ fn a_stack_a_resize_burst_moves_waits_for_the_settle() {
 /// rest.
 #[test]
 fn a_changes_view_over_a_held_editor_pool_leaves_the_mask() {
-    let mut h = crate::test_harness::TestHarness::with_size(120, 24);
+    let mut h = stoat::test_harness::TestHarness::with_size(120, 24);
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
     h.stoat.set_apc_tx(tx);
     h.stoat.stoatty_protocol = RESIDENT_POOL_PROTOCOL;
@@ -4968,7 +4929,7 @@ fn the_stack_pool_holds_the_cursor_anchor_while_focused() {
 /// so it pools nothing.
 #[test]
 fn a_changes_view_with_no_excerpts_pools_nothing() {
-    let mut h = crate::test_harness::TestHarness::with_size(120, 24);
+    let mut h = stoat::test_harness::TestHarness::with_size(120, 24);
     h.stoat.stoatty_protocol = RESIDENT_POOL_PROTOCOL;
     h.cover_with_diff_changes(false);
     h.settle();
@@ -4983,7 +4944,7 @@ fn a_rebase_screen_retires_the_stack_pool_it_covers() {
     let (mut h, mut rx, pool) = resident_stack(TWO_FILES, MinimapMode::Off);
     emit_raw(&mut h, &mut rx);
 
-    h.stoat.active_workspace_mut().rebase = Some(crate::rebase::RebaseState::new(
+    h.stoat.active_workspace_mut().rebase = Some(stoat::rebase::RebaseState::new(
         PathBuf::from("/repo"),
         "onto".into(),
         vec![],
@@ -5024,7 +4985,7 @@ fn a_pane_that_swaps_its_changes_view_starts_its_pool_over() {
 fn a_returned_terminal_takes_the_stack_anchor_again() {
     let (mut h, mut rx, pool) = resident_stack(TWO_FILES, MinimapMode::Off);
     let first = emit_raw(&mut h, &mut rx);
-    crate::ssh::retire_terminal_state(&mut h.stoat);
+    stoat::ssh::retire_terminal_state(&mut h.stoat);
     let again = emit_raw(&mut h, &mut rx);
     assert_eq!(
         (pool_cursors(&again, pool), pool_cursors(&first, pool).len()),
@@ -5066,7 +5027,7 @@ fn page_cells(payload: &[u8], width: u16, height: u16) -> CellRows {
         .windows(2)
         .position(|pair| pair == b"\x1b_")
         .map_or(payload, |end| &payload[..end]);
-    let mut screen = crate::term_screen::TermScreen::new(height, width);
+    let mut screen = stoat::term_screen::TermScreen::new(height, width);
     screen.feed(cells);
     (0..usize::from(height))
         .map(|row| {
@@ -5095,7 +5056,7 @@ fn buffer_cells(buf: &Buffer, rect: Rect) -> CellRows {
 
 /// A hex theme under which the diff view's gutter draws as sub-cell runs, which
 /// takes every diff color and the background in RGB.
-fn rgb_diff_gutter_theme() -> crate::theme::Theme {
+fn rgb_diff_gutter_theme() -> stoat::theme::Theme {
     let src = r##"theme rgbgutter {
             diff.context.fg = "#808080";
             diff.added.fg = "#00ff00";
@@ -5107,13 +5068,13 @@ fn rgb_diff_gutter_theme() -> crate::theme::Theme {
             ui.background.bg = "#282c34";
         }"##;
     let (config, _) = stoat_config::parse(src);
-    crate::theme::Theme::from_config(&config.expect("theme config parses"), "rgbgutter")
+    stoat::theme::Theme::from_config(&config.expect("theme config parses"), "rgbgutter")
         .expect("rgb theme builds")
 }
 
 /// [`rgb_diff_gutter_theme`] with a selection color, so a selection washes the
 /// cells it covers past its cursor's character.
-fn rgb_selecting_gutter_theme() -> crate::theme::Theme {
+fn rgb_selecting_gutter_theme() -> stoat::theme::Theme {
     let src = r##"theme rgbselgutter {
             diff.context.fg = "#808080";
             diff.added.fg = "#00ff00";
@@ -5126,7 +5087,7 @@ fn rgb_selecting_gutter_theme() -> crate::theme::Theme {
             ui.selection.bg = "#3e4451";
         }"##;
     let (config, _) = stoat_config::parse(src);
-    crate::theme::Theme::from_config(&config.expect("theme config parses"), "rgbselgutter")
+    stoat::theme::Theme::from_config(&config.expect("theme config parses"), "rgbselgutter")
         .expect("rgb theme builds")
 }
 
@@ -5137,7 +5098,7 @@ fn rgb_selecting_gutter_theme() -> crate::theme::Theme {
 fn an_unfocused_stack_page_shows_what_the_live_paint_shows() {
     use stoatty_protocol::command::Command;
 
-    let mut h = crate::test_harness::TestHarness::with_size(120, 24);
+    let mut h = stoat::test_harness::TestHarness::with_size(120, 24);
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
     h.stoat.set_apc_tx(tx);
     h.stoat.stoatty_protocol = RESIDENT_POOL_PROTOCOL;
@@ -5159,7 +5120,7 @@ fn an_unfocused_stack_page_shows_what_the_live_paint_shows() {
     let lane = h
         .stoat
         .apc_scene
-        .lane_bytes(crate::render::content_lane(pool))
+        .lane_bytes(stoat::render::content_lane(pool))
         .to_vec();
     let bytes = emit_raw(&mut h, &mut rx);
     let page = fill_payload(&bytes, pool, 0);
@@ -5192,7 +5153,7 @@ fn an_unfocused_stack_page_shows_what_the_live_paint_shows() {
 fn a_stack_page_tags_the_kind_its_tally_names_and_refills_when_it_changes() {
     use stoatty_protocol::command::Command;
 
-    let mut h = crate::test_harness::TestHarness::with_size(120, 24);
+    let mut h = stoat::test_harness::TestHarness::with_size(120, 24);
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
     h.stoat.set_apc_tx(tx);
     h.stoat.stoatty_protocol = RESIDENT_POOL_PROTOCOL;
@@ -5242,11 +5203,11 @@ fn a_stack_page_tags_the_kind_its_tally_names_and_refills_when_it_changes() {
 /// its kind refills the page that holds the file's header with the merged tag.
 #[test]
 fn a_stack_page_tags_a_merge_and_refills_when_a_resolve_lands() {
-    use crate::host::git::GitHost;
     use std::path::Path;
+    use stoat::host::git::GitHost;
     use stoatty_protocol::command::Command;
 
-    let mut h = crate::test_harness::TestHarness::with_size(120, 24);
+    let mut h = stoat::test_harness::TestHarness::with_size(120, 24);
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
     h.stoat.set_apc_tx(tx);
     h.stoat.stoatty_protocol = RESIDENT_POOL_PROTOCOL;
@@ -5326,7 +5287,7 @@ fn a_fold_of_the_last_file_refills_its_page() {
 /// are what the terminal shows behind the modal.
 #[test]
 fn a_stack_page_under_a_boxed_modal_shows_its_fade() {
-    let mut h = crate::test_harness::TestHarness::with_size(120, 24);
+    let mut h = stoat::test_harness::TestHarness::with_size(120, 24);
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
     h.stoat.set_apc_tx(tx);
     h.stoat.stoatty_protocol = RESIDENT_POOL_PROTOCOL;
@@ -5381,9 +5342,9 @@ fn an_editor_page_carries_its_pane_fade() {
 /// file with no fade, then again once `fade` gives the pane a fade and its
 /// target moves, since the emit holds a refill while the target rests.
 fn editor_page_around(
-    fade: impl FnOnce(&mut crate::test_harness::TestHarness),
+    fade: impl FnOnce(&mut stoat::test_harness::TestHarness),
 ) -> (CellRows, CellRows) {
-    let mut h = crate::test_harness::TestHarness::with_size(80, 24);
+    let mut h = stoat::test_harness::TestHarness::with_size(80, 24);
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
     h.stoat.set_apc_tx(tx);
     h.stoat.theme = Arc::new(rgb_review_theme());
@@ -5411,7 +5372,7 @@ fn editor_page_around(
             .expect("the focused editor pools");
         (pane.index, editor_id, region)
     };
-    let mut page = |h: &mut crate::test_harness::TestHarness| {
+    let mut page = |h: &mut stoat::test_harness::TestHarness| {
         let bytes = emit_raw(h, &mut rx);
         page_cells(fill_payload(&bytes, pool, 0), region.width, region.height)
     };
@@ -5425,8 +5386,8 @@ fn editor_page_around(
 }
 
 /// `rows` with each RGB color blended `dim` of the way toward `theme`'s
-/// background, as [`crate::render::pane::dim_pane_content`] fades a pane.
-fn faded(rows: &CellRows, theme: &crate::theme::Theme, dim: f32) -> CellRows {
+/// background, as [`stoat::render::pane::dim_pane_content`] fades a pane.
+fn faded(rows: &CellRows, theme: &stoat::theme::Theme, dim: f32) -> CellRows {
     let width = rows.first().map_or(0, Vec::len) as u16;
     let area = Rect::new(0, 0, width, rows.len() as u16);
     let mut buf = Buffer::empty(area);
@@ -5438,13 +5399,13 @@ fn faded(rows: &CellRows, theme: &crate::theme::Theme, dim: f32) -> CellRows {
                 .set_bg(bg.unwrap_or(Color::Reset));
         }
     }
-    let bg = crate::render::paint::style_rgb(
+    let bg = stoat::render::paint::style_rgb(
         theme
-            .try_get(crate::theme::scope::UI_BACKGROUND)
+            .try_get(stoat::theme::scope::UI_BACKGROUND)
             .and_then(|style| style.bg),
     )
     .expect("the theme background is RGB");
-    crate::render::pane::dim_pane_content(&mut buf, area, bg, dim);
+    stoat::render::pane::dim_pane_content(&mut buf, area, bg, dim);
     buffer_cells(&buf, area)
 }
 
@@ -5454,7 +5415,7 @@ fn gutter_stack(
     files: &[(&str, &str, &str)],
     minimap: MinimapMode,
 ) -> (
-    crate::test_harness::TestHarness,
+    stoat::test_harness::TestHarness,
     tokio::sync::mpsc::UnboundedReceiver<Vec<u8>>,
     u32,
 ) {
@@ -5466,8 +5427,8 @@ fn gutter_stack(
 }
 
 /// What the last paint put in the content lane of pool `pool`'s pane.
-fn content_lane_bytes(h: &crate::test_harness::TestHarness, pool: u32) -> Vec<u8> {
-    let lane = crate::render::content_lane(pool);
+fn content_lane_bytes(h: &stoat::test_harness::TestHarness, pool: u32) -> Vec<u8> {
+    let lane = stoat::render::content_lane(pool);
     h.stoat.apc_scene.lane_bytes(lane).to_vec()
 }
 
@@ -5508,7 +5469,7 @@ fn a_scrolling_step_over_a_held_stack_keeps_its_runs_out_of_its_lane() {
         let state = h.stoat.active_workspace().focused_diff_changes();
         let content = state.expect("the changes view").content_rect;
         let mut scene = ApcScene::new();
-        crate::render::chrome::cover_cells(
+        stoat::render::chrome::cover_cells(
             Rect {
                 height: 1,
                 ..content.expect("a painted stack")
@@ -5540,7 +5501,7 @@ fn a_stack_the_terminal_lets_go_paints_its_runs_again() {
     h.stoat.render();
     let held = content_lane_bytes(&h, pool);
 
-    crate::ssh::retire_terminal_state(&mut h.stoat);
+    stoat::ssh::retire_terminal_state(&mut h.stoat);
     h.stoat.render();
     assert_eq!(
         (first.is_empty(), held, content_lane_bytes(&h, pool)),
@@ -5561,7 +5522,7 @@ fn changed_lines(lines: usize) -> (String, String) {
 fn selecting_stack(
     lines: usize,
 ) -> (
-    crate::test_harness::TestHarness,
+    stoat::test_harness::TestHarness,
     tokio::sync::mpsc::UnboundedReceiver<Vec<u8>>,
     u32,
 ) {
@@ -5583,9 +5544,9 @@ fn selecting_stack(
 /// leaves them out, so it numbers its rows in cells.
 fn relative_stack(
     lines: usize,
-    theme: crate::theme::Theme,
+    theme: stoat::theme::Theme,
 ) -> (
-    crate::test_harness::TestHarness,
+    stoat::test_harness::TestHarness,
     tokio::sync::mpsc::UnboundedReceiver<Vec<u8>>,
     u32,
 ) {
@@ -5719,7 +5680,7 @@ fn decoration_texts(commands: &[command::Command], pool: u32, index: u64) -> Vec
 }
 
 /// The cells of each page of `pool` that the changes view holds, by index.
-fn held_stack_cells(h: &crate::test_harness::TestHarness, pool: u32) -> Vec<(u64, Buffer)> {
+fn held_stack_cells(h: &stoat::test_harness::TestHarness, pool: u32) -> Vec<(u64, Buffer)> {
     let mut pages: Vec<(u64, Buffer)> = h
         .stoat
         .diff_changes_pages
@@ -5964,7 +5925,7 @@ fn a_rebase_screen_retires_only_the_terminal_pool_it_covers() {
     action_handlers::dispatch(&mut h.stoat, &stoat_action::FocusRight);
     emit_raw(&mut h, &mut rx);
 
-    h.stoat.active_workspace_mut().rebase = Some(crate::rebase::RebaseState::new(
+    h.stoat.active_workspace_mut().rebase = Some(stoat::rebase::RebaseState::new(
         PathBuf::from("/work"),
         "onto".into(),
         vec![],
@@ -6023,7 +5984,7 @@ fn detached_pane_status_badge_continues_the_split_count() {
     h.settle();
     h.type_action("DetachPane()");
     h.settle();
-    let mut shows_two = |h: &mut crate::test_harness::TestHarness| {
+    let mut shows_two = |h: &mut stoat::test_harness::TestHarness| {
         h.stoat.set_focused_mode("space_pane_display".to_string());
         while rx.try_recv().is_ok() {}
         emit_smooth_scroll(&mut h.stoat);
@@ -6059,7 +6020,7 @@ fn the_modal_preview_is_pooled_and_retired() {
     use stoat_action::OpenFileFinder;
     use stoatty_protocol::command::{Command, PoolDropCommand, PoolKind, PoolRegionCommand};
 
-    let mut h = crate::test_harness::TestHarness::with_size(160, 40);
+    let mut h = stoat::test_harness::TestHarness::with_size(160, 40);
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
     h.stoat.set_apc_tx(tx);
 
@@ -6079,7 +6040,7 @@ fn the_modal_preview_is_pooled_and_retired() {
         .preview
         .expect("the test terminal is wide enough for a preview");
     let expected = PoolRegionCommand {
-        pool: crate::smooth_scroll::non_pane_pool::MODAL_PREVIEW,
+        pool: stoat::smooth_scroll::non_pane_pool::MODAL_PREVIEW,
         top: preview.y,
         left: preview.x,
         width: preview.width,
@@ -6100,7 +6061,7 @@ fn the_modal_preview_is_pooled_and_retired() {
     emit_smooth_scroll(&mut h.stoat);
     assert!(
         !drain_apc(&mut rx).contains(&Command::PoolDrop(PoolDropCommand {
-            pool: crate::smooth_scroll::non_pane_pool::MODAL_PREVIEW,
+            pool: stoat::smooth_scroll::non_pane_pool::MODAL_PREVIEW,
         })),
         "and keeps it across a frame the modal stays open for"
     );
@@ -6109,7 +6070,7 @@ fn the_modal_preview_is_pooled_and_retired() {
     emit_smooth_scroll(&mut h.stoat);
     assert!(
         drain_apc(&mut rx).contains(&Command::PoolDrop(PoolDropCommand {
-            pool: crate::smooth_scroll::non_pane_pool::MODAL_PREVIEW,
+            pool: stoat::smooth_scroll::non_pane_pool::MODAL_PREVIEW,
         })),
         "closing the finder retires its preview pool"
     );
@@ -6130,7 +6091,7 @@ fn a_wheel_over_the_preview_moves_the_pool_scroll_target() {
         cmds.iter()
             .filter_map(|cmd| match cmd {
                 Command::Scroll(scroll)
-                    if scroll.pool == crate::smooth_scroll::non_pane_pool::MODAL_PREVIEW =>
+                    if scroll.pool == stoat::smooth_scroll::non_pane_pool::MODAL_PREVIEW =>
                 {
                     Some((scroll.page, scroll.fraction))
                 },
@@ -6139,7 +6100,7 @@ fn a_wheel_over_the_preview_moves_the_pool_scroll_target() {
             .collect()
     }
 
-    let mut h = crate::test_harness::TestHarness::with_size(160, 40);
+    let mut h = stoat::test_harness::TestHarness::with_size(160, 40);
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
     h.stoat.set_apc_tx(tx);
 
@@ -6190,7 +6151,7 @@ fn a_wheel_over_the_preview_moves_the_pool_scroll_target() {
 fn a_preview_page_numbers_a_file_s_lines_with_the_pane_numbers_off() {
     use stoatty_protocol::command::{decode_stream, Command};
 
-    let mut h = crate::test_harness::TestHarness::with_size(160, 40);
+    let mut h = stoat::test_harness::TestHarness::with_size(160, 40);
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
     h.stoat.set_apc_tx(tx);
     h.stoat.settings.editor_line_numbers = Some(LineNumbers::Off);
@@ -6208,7 +6169,7 @@ fn a_preview_page_numbers_a_file_s_lines_with_the_pane_numbers_off() {
     let bytes = emit_raw(&mut h, &mut rx);
     let payload = fill_payload(
         &bytes,
-        crate::smooth_scroll::non_pane_pool::MODAL_PREVIEW,
+        stoat::smooth_scroll::non_pane_pool::MODAL_PREVIEW,
         0,
     );
     let numbers: Vec<String> = decode_stream(payload)
@@ -6253,7 +6214,7 @@ fn file_finder_list_is_pooled_and_retired() {
     emit_smooth_scroll(&mut h.stoat);
     let list = finder_layout(&h).list;
     let expected = PoolRegionCommand {
-        pool: crate::smooth_scroll::non_pane_pool::FINDER,
+        pool: stoat::smooth_scroll::non_pane_pool::FINDER,
         top: list.y,
         left: list.x,
         width: list.width,
@@ -6273,27 +6234,9 @@ fn file_finder_list_is_pooled_and_retired() {
     emit_smooth_scroll(&mut h.stoat);
     assert!(
         drain_apc(&mut rx).contains(&Command::PoolDrop(PoolDropCommand {
-            pool: crate::smooth_scroll::non_pane_pool::FINDER,
+            pool: stoat::smooth_scroll::non_pane_pool::FINDER,
         })),
         "closing the finder retires its pool"
-    );
-}
-
-/// A selected result that wraps across a page edge stamps each page that its
-/// rows meet, and no other.
-///
-/// With pages 4 rows tall, result 1 starts on document row 3 and takes 3 rows,
-/// so its rows meet pages 0 and 1 and miss page 2. A result past the measured
-/// ones takes the one row after the last entry.
-#[test]
-fn a_wrapped_selection_stamps_each_page_its_rows_meet() {
-    let tops = [0, 3, 6, 7];
-    let rows = selected_result_rows(&tops, 1);
-    let stamps = [0, 1, 2].map(|page| rows_page_stamp(1, rows.clone(), page, 4));
-
-    assert_eq!(
-        (rows, stamps, selected_result_rows(&tops, 5)),
-        (3..6, [2, 2, 0], 7..8),
     );
 }
 
@@ -6325,9 +6268,9 @@ fn a_wrapped_finder_list_scrolls_its_pool_by_document_rows() {
     emit_smooth_scroll(&mut h.stoat);
 
     let list = finder_layout(&h).list;
-    let rows = 1 + 305usize.div_ceil(crate::render::picker::label_columns(list.width) - 4);
+    let rows = 1 + 305usize.div_ceil(stoat::render::picker::label_columns(list.width) - 4);
     let first = 11 - (usize::from(list.height) / rows).max(1);
-    let pool = crate::smooth_scroll::non_pane_pool::FINDER;
+    let pool = stoat::smooth_scroll::non_pane_pool::FINDER;
     let scroll = drain_apc(&mut rx)
         .into_iter()
         .find_map(|command| match command {
@@ -6369,9 +6312,9 @@ fn a_wrapped_argument_list_scrolls_its_pool_by_document_rows() {
     emit_smooth_scroll(&mut h.stoat);
 
     let list = palette_arg_layout(&h).list;
-    let rows = 1 + 305usize.div_ceil(crate::render::picker::label_columns(list.width) - 4);
+    let rows = 1 + 305usize.div_ceil(stoat::render::picker::label_columns(list.width) - 4);
     let first = 11 - (usize::from(list.height) / rows).max(1);
-    let pool = crate::smooth_scroll::non_pane_pool::PALETTE;
+    let pool = stoat::smooth_scroll::non_pane_pool::PALETTE;
     let scroll = drain_apc(&mut rx)
         .into_iter()
         .find_map(|command| match command {
@@ -6391,14 +6334,14 @@ fn a_wrapped_argument_list_scrolls_its_pool_by_document_rows() {
 fn a_pixel_finder_list_fills_a_resident_pool_with_nudged_runs() {
     use stoatty_protocol::command::{Command, PoolKind, PoolRegionCommand};
 
-    let mut h = crate::test_fixture::pixel_finder(40);
+    let mut h = stoat::test_fixture::pixel_finder(40);
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
     h.stoat.set_apc_tx(tx);
     h.stoat.render();
     let pooled = emit_raw(&mut h, &mut rx);
 
     let list = finder_layout(&h).list;
-    let pool = crate::smooth_scroll::non_pane_pool::FINDER;
+    let pool = stoat::smooth_scroll::non_pane_pool::FINDER;
     let region = command::decode_stream(&pooled)
         .into_iter()
         .find_map(|command| match command {
@@ -6476,7 +6419,7 @@ fn a_pixel_palette_list_fills_a_resident_pool() {
             .command_palette
             .as_ref()
             .expect("the palette is open");
-        crate::render::command_palette::palette_filter_layout(
+        stoat::render::command_palette::palette_filter_layout(
             h.stoat.size(),
             palette.list_rows_hint(),
             modal_zoom_steps(&h.stoat.modal_zoom, ModalKind::Palette),
@@ -6486,7 +6429,7 @@ fn a_pixel_palette_list_fills_a_resident_pool() {
         .expect("the palette lays out")
         .list
     };
-    let pool = crate::smooth_scroll::non_pane_pool::PALETTE;
+    let pool = stoat::smooth_scroll::non_pane_pool::PALETTE;
     let region = command::decode_stream(&pooled)
         .into_iter()
         .find_map(|command| match command {
@@ -6546,7 +6489,7 @@ fn a_pixel_palette_list_fills_a_resident_pool() {
 fn a_pixel_finder_list_refills_when_its_marks_land() {
     use stoatty_protocol::command::Command;
 
-    let mut h = crate::test_fixture::pixel_finder(3);
+    let mut h = stoat::test_fixture::pixel_finder(3);
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
     h.stoat.set_apc_tx(tx);
     h.stoat.render();
@@ -6558,12 +6501,12 @@ fn a_pixel_finder_list_refills_when_its_marks_land() {
         picklist.base[picklist.filtered[0]].clone()
     };
     finder.scopes.modified_paths = vec![first];
-    finder.scopes.base_generation = crate::picker::next_generation();
+    finder.scopes.base_generation = stoat::picker::next_generation();
     h.stoat.render();
     let pooled = emit_raw(&mut h, &mut rx);
 
     let list = finder_layout(&h).list;
-    let pool = crate::smooth_scroll::non_pane_pool::FINDER;
+    let pool = stoat::smooth_scroll::non_pane_pool::FINDER;
     let marks: Vec<(i16, i16)> = command::decode_stream(fill_payload(&pooled, pool, 0))
         .into_iter()
         .filter_map(|command| match command {
@@ -6585,9 +6528,9 @@ fn a_pixel_finder_list_refills_when_its_marks_land() {
 fn a_pixel_list_asks_for_the_pixel_pointer_one_time() {
     use stoatty_protocol::command::Command;
 
-    let pool = crate::smooth_scroll::non_pane_pool::FINDER;
+    let pool = stoat::smooth_scroll::non_pane_pool::FINDER;
     let emits = |protocol: u32, socket: bool| {
-        let mut h = crate::test_fixture::pixel_finder(3);
+        let mut h = stoat::test_fixture::pixel_finder(3);
         h.stoat.stoatty_protocol = protocol;
         h.stoat.window_ipc_connected = socket;
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
@@ -6652,7 +6595,7 @@ fn a_pixel_argument_list_asks_for_the_pixel_pointer() {
     assert_eq!(
         asks,
         [PoolPointerCommand {
-            pool: crate::smooth_scroll::non_pane_pool::PALETTE,
+            pool: stoat::smooth_scroll::non_pane_pool::PALETTE,
             pixels: true,
         }]
     );
@@ -6666,7 +6609,7 @@ fn a_pixel_argument_list_asks_for_the_pixel_pointer() {
 fn a_pixel_finder_list_refills_at_another_scale() {
     use stoatty_protocol::command::Command;
 
-    let mut h = crate::test_fixture::pixel_finder(5);
+    let mut h = stoat::test_fixture::pixel_finder(5);
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
     h.stoat.set_apc_tx(tx);
     h.stoat.render();
@@ -6676,7 +6619,7 @@ fn a_pixel_finder_list_refills_at_another_scale() {
     h.stoat.render();
     let pooled = emit_raw(&mut h, &mut rx);
 
-    let pool = crate::smooth_scroll::non_pane_pool::FINDER;
+    let pool = stoat::smooth_scroll::non_pane_pool::FINDER;
     let nudges: Vec<[i16; 2]> = command::decode_stream(fill_payload(&pooled, pool, 0))
         .into_iter()
         .filter_map(|command| match command {
@@ -6688,33 +6631,12 @@ fn a_pixel_finder_list_refills_at_another_scale() {
     assert_eq!(nudges, [[0, 1], [0, 4], [0, 7], [0, 1], [0, 4]]);
 }
 
-/// A pixel list's pool scrolls to its first result's pixel top in cell rows,
-/// and stamps its pages by the px of the selected result's box and of a page.
-/// A selection past the measured results takes a one-line box after them.
-#[test]
-fn a_pixel_list_scroll_counts_the_selected_box_and_a_page_in_pixels() {
-    let pixels = RowMetrics {
-        cell: [9, 18],
-        scale: 1.0,
-    };
-    let tops = [0, 1, 3, 4];
-    let of = |first, selected| {
-        let scroll = PathListScroll::of(&tops, first, selected, Some(pixels), 5);
-        (scroll.offset, scroll.selected, scroll.page_height)
-    };
-
-    assert_eq!(
-        [of(1, 1), of(1, 7)],
-        [(21.0 / 18.0, 21..59, 90), (21.0 / 18.0, 81..101, 90)]
-    );
-}
-
 /// A pixel finder list scrolls its pool to the pixel top of its window's
 /// first result, in cell rows. With result 30 selected, the window ends on it
 /// and holds the `fit` results whose 21 px rows fit the list's px and one gap.
 #[test]
 fn a_pixel_finder_list_scrolls_by_pixels() {
-    let mut h = crate::test_fixture::pixel_finder(40);
+    let mut h = stoat::test_fixture::pixel_finder(40);
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
     h.stoat.set_apc_tx(tx);
     let finder = h.stoat.file_finder.as_mut().expect("the finder is open");
@@ -6724,7 +6646,7 @@ fn a_pixel_finder_list_scrolls_by_pixels() {
 
     let list = finder_layout(&h).list;
     let fit = (u32::from(list.height) * 18 + 1) / 21;
-    let pool = crate::smooth_scroll::non_pane_pool::FINDER;
+    let pool = stoat::smooth_scroll::non_pane_pool::FINDER;
     assert_eq!(
         h.stoat.smooth_scroll.last_target(pool),
         Some(((31 - fit) * 21) as f32 / 18.0)
@@ -6757,10 +6679,10 @@ fn a_finder_with_no_match_retires_its_list_pool() {
         .into_iter()
         .filter(|command| match command {
             Command::PoolRegion(region) => {
-                region.pool == crate::smooth_scroll::non_pane_pool::FINDER
+                region.pool == stoat::smooth_scroll::non_pane_pool::FINDER
             },
             Command::PoolDrop(retired) => {
-                retired.pool == crate::smooth_scroll::non_pane_pool::FINDER
+                retired.pool == stoat::smooth_scroll::non_pane_pool::FINDER
             },
             _ => false,
         })
@@ -6768,7 +6690,7 @@ fn a_finder_with_no_match_retires_its_list_pool() {
     assert_eq!(
         finder_pool,
         [Command::PoolDrop(PoolDropCommand {
-            pool: crate::smooth_scroll::non_pane_pool::FINDER,
+            pool: stoat::smooth_scroll::non_pane_pool::FINDER,
         })],
         "the finder pool's only command is its drop",
     );
@@ -6781,7 +6703,7 @@ fn a_finder_with_no_match_retires_its_list_pool() {
 fn a_finder_with_no_match_retires_its_preview_pool() {
     use stoatty_protocol::command::Command;
 
-    let mut h = crate::test_harness::TestHarness::with_size(200, 50);
+    let mut h = stoat::test_harness::TestHarness::with_size(200, 50);
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
     h.stoat.set_apc_tx(tx);
 
@@ -6795,12 +6717,12 @@ fn a_finder_with_no_match_retires_its_preview_pool() {
             .into_iter()
             .filter_map(|command| match command {
                 Command::PoolRegion(region)
-                    if region.pool == crate::smooth_scroll::non_pane_pool::MODAL_PREVIEW =>
+                    if region.pool == stoat::smooth_scroll::non_pane_pool::MODAL_PREVIEW =>
                 {
                     Some("region")
                 },
                 Command::PoolDrop(retired)
-                    if retired.pool == crate::smooth_scroll::non_pane_pool::MODAL_PREVIEW =>
+                    if retired.pool == stoat::smooth_scroll::non_pane_pool::MODAL_PREVIEW =>
                 {
                     Some("drop")
                 },
@@ -6834,7 +6756,7 @@ fn a_modal_preview_declares_a_scaled_resident_pool() {
         .preview
         .expect("the test terminal is wide enough for a preview");
     let (rows, cols) = pool::scaled_grid(preview.width, preview.height, [9, 18], 154);
-    let pool = crate::smooth_scroll::non_pane_pool::MODAL_PREVIEW;
+    let pool = stoat::smooth_scroll::non_pane_pool::MODAL_PREVIEW;
     let batches = emit_batches(&mut h, &mut rx);
 
     let region = PoolRegionCommand {
@@ -6870,7 +6792,7 @@ fn an_older_terminal_keeps_the_grid_preview_pool() {
     let preview = finder_layout(&h)
         .preview
         .expect("the test terminal is wide enough for a preview");
-    let pool = crate::smooth_scroll::non_pane_pool::MODAL_PREVIEW;
+    let pool = stoat::smooth_scroll::non_pane_pool::MODAL_PREVIEW;
 
     let regions: Vec<Command> = pool_commands(&emit_raw(&mut h, &mut rx), pool)
         .into_iter()
@@ -6908,7 +6830,7 @@ fn a_selection_step_refills_the_scaled_preview_in_the_same_emit() {
     h.stoat.render();
     let batches = emit_batches(&mut h, &mut rx);
 
-    let pool = crate::smooth_scroll::non_pane_pool::MODAL_PREVIEW;
+    let pool = stoat::smooth_scroll::non_pane_pool::MODAL_PREVIEW;
     assert_eq!(
         batches.first().map(|batch| pool_fills(batch, pool)),
         Some(vec![0]),
@@ -6929,7 +6851,7 @@ fn a_scaled_preview_page_rules_off_its_numbers() {
     let (rows, _) = pool::scaled_grid(preview.width, preview.height, [9, 18], 154);
     let bytes = emit_raw(&mut h, &mut rx);
 
-    let pool = crate::smooth_scroll::non_pane_pool::MODAL_PREVIEW;
+    let pool = stoat::smooth_scroll::non_pane_pool::MODAL_PREVIEW;
     let bars: Vec<_> = command::decode_stream(fill_payload(&bytes, pool, 0))
         .into_iter()
         .filter_map(|command| match command {
@@ -6951,7 +6873,7 @@ fn a_step_between_matches_in_one_file_moves_the_preview_mark() {
     use stoat_action::OpenCodeSearch;
     use stoatty_protocol::command::Command;
 
-    let mut h = crate::test_harness::TestHarness::with_size(160, 40);
+    let mut h = stoat::test_harness::TestHarness::with_size(160, 40);
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
     h.stoat.set_apc_tx(tx);
     h.stoat.stoatty = true;
@@ -6973,7 +6895,7 @@ fn a_step_between_matches_in_one_file_moves_the_preview_mark() {
     h.stoat.render();
     let second = emit_raw(&mut h, &mut rx);
 
-    let pool = crate::smooth_scroll::non_pane_pool::MODAL_PREVIEW;
+    let pool = stoat::smooth_scroll::non_pane_pool::MODAL_PREVIEW;
     let marks = |bytes: &[u8]| {
         command::decode_stream(fill_payload(bytes, pool, 0))
             .into_iter()
@@ -6997,7 +6919,7 @@ fn the_preview_keys_page_by_the_scaled_rows() {
     let (rows, _) = pool::scaled_grid(preview.width, preview.height, [9, 18], 154);
 
     assert_eq!(
-        crate::mouse::modal_preview_rows(&h.stoat),
+        stoat::mouse::modal_preview_rows(&h.stoat),
         Some(rows as usize)
     );
 }
@@ -7010,10 +6932,10 @@ fn the_preview_keys_page_by_the_scaled_rows() {
 /// cell rows, under a terminal that states no display scale.
 #[test]
 fn the_finder_preview_region_states_its_top_inset() {
-    use crate::render::picker::preview_grid;
+    use stoat::render::picker::preview_grid;
     use stoatty_protocol::command::{Command, PoolKind};
 
-    let pool = crate::smooth_scroll::non_pane_pool::MODAL_PREVIEW;
+    let pool = stoat::smooth_scroll::non_pane_pool::MODAL_PREVIEW;
     let declared = |protocol: u32, scale: Option<f32>| {
         let (mut h, mut rx) = scaled_preview_harness(protocol);
         h.stoat.display_scale = scale;
@@ -7056,9 +6978,9 @@ fn the_finder_preview_region_states_its_top_inset() {
 fn the_pick_preview_region_states_its_pad() {
     use stoatty_protocol::command::Command;
 
-    let pool = crate::smooth_scroll::non_pane_pool::MODAL_PREVIEW;
+    let pool = stoat::smooth_scroll::non_pane_pool::MODAL_PREVIEW;
     let inset = |protocol: u32| {
-        let mut h = crate::test_harness::TestHarness::with_size(120, 30);
+        let mut h = stoat::test_harness::TestHarness::with_size(120, 30);
         h.stoat.stoatty = true;
         h.stoat.stoatty_protocol = protocol;
         h.stoat.cell_pixels = Some((9, 18));
@@ -7069,7 +6991,7 @@ fn the_pick_preview_region_states_its_pad() {
         ));
         h.fake_shell.set_response(
             "ls",
-            crate::host::ShellOutput {
+            stoat::host::ShellOutput {
                 stdout: b"a\nb\n".to_vec(),
                 stderr: Vec::new(),
                 exit_code: 0,
@@ -7104,10 +7026,10 @@ fn the_pick_preview_region_states_its_pad() {
 fn scaled_preview_harness(
     protocol: u32,
 ) -> (
-    crate::test_harness::TestHarness,
+    stoat::test_harness::TestHarness,
     tokio::sync::mpsc::UnboundedReceiver<Vec<u8>>,
 ) {
-    let mut h = crate::test_harness::TestHarness::with_size(160, 40);
+    let mut h = stoat::test_harness::TestHarness::with_size(160, 40);
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
     h.stoat.set_apc_tx(tx);
     h.stoat.stoatty = true;
@@ -7144,7 +7066,7 @@ fn code_search_list_is_pooled_and_retired() {
     h.stoat.active_workspace_mut().layout(size);
 
     emit_smooth_scroll(&mut h.stoat);
-    let list = crate::render::file_finder::file_finder_layout(
+    let list = stoat::render::file_finder::file_finder_layout(
         size,
         (u16::MAX, u16::MAX),
         modal_zoom_steps(&h.stoat.modal_zoom, ModalKind::CodeSearch),
@@ -7153,7 +7075,7 @@ fn code_search_list_is_pooled_and_retired() {
     .expect("code search fits the test terminal")
     .list;
     let expected = PoolRegionCommand {
-        pool: crate::smooth_scroll::non_pane_pool::CODE_SEARCH_LIST,
+        pool: stoat::smooth_scroll::non_pane_pool::CODE_SEARCH_LIST,
         top: list.y,
         left: list.x,
         width: list.width,
@@ -7174,7 +7096,7 @@ fn code_search_list_is_pooled_and_retired() {
     emit_smooth_scroll(&mut h.stoat);
     assert!(
         !drain_apc(&mut rx).contains(&Command::PoolDrop(PoolDropCommand {
-            pool: crate::smooth_scroll::non_pane_pool::CODE_SEARCH_LIST,
+            pool: stoat::smooth_scroll::non_pane_pool::CODE_SEARCH_LIST,
         })),
         "and keeps it across a frame the modal stays open for"
     );
@@ -7183,7 +7105,7 @@ fn code_search_list_is_pooled_and_retired() {
     emit_smooth_scroll(&mut h.stoat);
     assert!(
         drain_apc(&mut rx).contains(&Command::PoolDrop(PoolDropCommand {
-            pool: crate::smooth_scroll::non_pane_pool::CODE_SEARCH_LIST,
+            pool: stoat::smooth_scroll::non_pane_pool::CODE_SEARCH_LIST,
         })),
         "closing code search retires its pool"
     );
@@ -7204,7 +7126,7 @@ fn a_scrolled_code_search_list_refills_its_pool() {
         cmds.iter()
             .filter_map(|cmd| match cmd {
                 Command::Fill(fill)
-                    if fill.pool == crate::smooth_scroll::non_pane_pool::CODE_SEARCH_LIST =>
+                    if fill.pool == stoat::smooth_scroll::non_pane_pool::CODE_SEARCH_LIST =>
                 {
                     Some(fill.index)
                 },
@@ -7257,15 +7179,15 @@ fn symbol_finder_list_is_pooled_and_retired() {
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
     h.stoat.set_apc_tx(tx);
 
-    crate::test_fixture::enable_document_symbols(&h);
-    let root = crate::test_fixture::seed(&mut h, &[("main.rs", "fn one() {}\nfn two() {}\n")]);
+    stoat::test_fixture::enable_document_symbols(&h);
+    let root = stoat::test_fixture::seed(&mut h, &[("main.rs", "fn one() {}\nfn two() {}\n")]);
     let path = root.join("main.rs");
-    crate::test_fixture::open_buffer(&mut h, path.clone());
+    stoat::test_fixture::open_buffer(&mut h, path.clone());
     h.fake_lsp().set_document_symbols(
         path.to_str().unwrap(),
         lsp_types::DocumentSymbolResponse::Flat(vec![
-            crate::test_fixture::flat_symbol("one", path.to_str().unwrap(), 0, 3),
-            crate::test_fixture::flat_symbol("two", path.to_str().unwrap(), 1, 3),
+            stoat::test_fixture::flat_symbol("one", path.to_str().unwrap(), 0, 3),
+            stoat::test_fixture::flat_symbol("two", path.to_str().unwrap(), 1, 3),
         ]),
     );
     action_handlers::dispatch(&mut h.stoat, &stoat_action::OpenSymbolPicker);
@@ -7276,7 +7198,7 @@ fn symbol_finder_list_is_pooled_and_retired() {
     emit_smooth_scroll(&mut h.stoat);
     let list = {
         let finder = h.stoat.symbol_finder.as_ref().expect("the finder is open");
-        crate::render::symbol_finder::symbol_finder_layout(
+        stoat::render::symbol_finder::symbol_finder_layout(
             size,
             finder.content_rows,
             modal_zoom_steps(&h.stoat.modal_zoom, ModalKind::SymbolFinder),
@@ -7286,7 +7208,7 @@ fn symbol_finder_list_is_pooled_and_retired() {
         .2
     };
     let expected = PoolRegionCommand {
-        pool: crate::smooth_scroll::non_pane_pool::SYMBOL_FINDER_LIST,
+        pool: stoat::smooth_scroll::non_pane_pool::SYMBOL_FINDER_LIST,
         top: list.y,
         left: list.x,
         width: list.width,
@@ -7307,7 +7229,7 @@ fn symbol_finder_list_is_pooled_and_retired() {
     emit_smooth_scroll(&mut h.stoat);
     assert!(
         !drain_apc(&mut rx).contains(&Command::PoolDrop(PoolDropCommand {
-            pool: crate::smooth_scroll::non_pane_pool::SYMBOL_FINDER_LIST,
+            pool: stoat::smooth_scroll::non_pane_pool::SYMBOL_FINDER_LIST,
         })),
         "and keeps it across a frame the modal stays open for"
     );
@@ -7316,7 +7238,7 @@ fn symbol_finder_list_is_pooled_and_retired() {
     emit_smooth_scroll(&mut h.stoat);
     assert!(
         drain_apc(&mut rx).contains(&Command::PoolDrop(PoolDropCommand {
-            pool: crate::smooth_scroll::non_pane_pool::SYMBOL_FINDER_LIST,
+            pool: stoat::smooth_scroll::non_pane_pool::SYMBOL_FINDER_LIST,
         })),
         "closing the symbol finder retires its pool"
     );
@@ -7335,7 +7257,7 @@ fn typing_in_the_finder_defers_its_pool_refill_until_the_list_scrolls() {
     fn finder_fills(cmds: &[Command]) -> Vec<u64> {
         cmds.iter()
             .filter_map(|cmd| match cmd {
-                Command::Fill(fill) if fill.pool == crate::smooth_scroll::non_pane_pool::FINDER => {
+                Command::Fill(fill) if fill.pool == stoat::smooth_scroll::non_pane_pool::FINDER => {
                     Some(fill.index)
                 },
                 _ => None,
@@ -7394,7 +7316,7 @@ fn typing_in_the_finder_defers_its_pool_refill_until_the_list_scrolls() {
 /// no panel, so it keeps the accent bar at the row's first cell.
 #[test]
 fn the_finder_rounds_its_live_selected_row_and_keeps_the_bar_on_its_page() {
-    use crate::{
+    use stoat::{
         render::picker::test_support::{rounded_row_boxes, row_boxes},
         theme::scope,
     };
@@ -7443,13 +7365,13 @@ fn the_finder_rounds_its_live_selected_row_and_keeps_the_bar_on_its_page() {
     };
 
     let select =
-        crate::render::paint::style_rgb(h.stoat.theme.list_selected(scope::UI_SELECTION).bg)
+        stoat::render::paint::style_rgb(h.stoat.theme.list_selected(scope::UI_SELECTION).bg)
             .expect("an RGB select fill");
 
     h.stoat.render();
     let live = h.stoat.apc_scene.all_bytes();
     let pooled = emit_raw(&mut h, &mut rx);
-    let page = fill_payload(&pooled, crate::smooth_scroll::non_pane_pool::FINDER, 0);
+    let page = fill_payload(&pooled, stoat::smooth_scroll::non_pane_pool::FINDER, 0);
 
     assert_eq!(
         (
@@ -7492,7 +7414,7 @@ fn finder_pool_region_spans_the_full_window_over_the_band() {
     emit_smooth_scroll(&mut h.stoat);
     let list = finder_layout(&h).list;
     let expected = PoolRegionCommand {
-        pool: crate::smooth_scroll::non_pane_pool::FINDER,
+        pool: stoat::smooth_scroll::non_pane_pool::FINDER,
         top: list.y,
         left: list.x,
         width: list.width,
@@ -7525,7 +7447,7 @@ fn palette_list_is_pooled_and_retired() {
 
     emit_smooth_scroll(&mut h.stoat);
     let (rows, zoom, header_rows, doc_rows) = palette_sizing(&h);
-    let list = crate::render::command_palette::palette_filter_layout(
+    let list = stoat::render::command_palette::palette_filter_layout(
         h.stoat.size(),
         rows,
         zoom,
@@ -7535,7 +7457,7 @@ fn palette_list_is_pooled_and_retired() {
     .expect("the palette fits the test terminal")
     .list;
     let expected = PoolRegionCommand {
-        pool: crate::smooth_scroll::non_pane_pool::PALETTE,
+        pool: stoat::smooth_scroll::non_pane_pool::PALETTE,
         top: list.y,
         left: list.x,
         width: list.width,
@@ -7555,7 +7477,7 @@ fn palette_list_is_pooled_and_retired() {
     emit_smooth_scroll(&mut h.stoat);
     assert!(
         drain_apc(&mut rx).contains(&Command::PoolDrop(PoolDropCommand {
-            pool: crate::smooth_scroll::non_pane_pool::PALETTE,
+            pool: stoat::smooth_scroll::non_pane_pool::PALETTE,
         })),
         "closing the palette retires its pool"
     );
@@ -7585,7 +7507,7 @@ fn palette_arg_list_is_pooled_and_retired() {
     emit_smooth_scroll(&mut h.stoat);
     let list = palette_arg_layout(&h).list;
     let expected = PoolRegionCommand {
-        pool: crate::smooth_scroll::non_pane_pool::PALETTE,
+        pool: stoat::smooth_scroll::non_pane_pool::PALETTE,
         top: list.y,
         left: list.x,
         width: list.width,
@@ -7605,7 +7527,7 @@ fn palette_arg_list_is_pooled_and_retired() {
     emit_smooth_scroll(&mut h.stoat);
     assert!(
         drain_apc(&mut rx).contains(&Command::PoolDrop(PoolDropCommand {
-            pool: crate::smooth_scroll::non_pane_pool::PALETTE,
+            pool: stoat::smooth_scroll::non_pane_pool::PALETTE,
         })),
         "closing the palette retires its pool"
     );
@@ -7636,7 +7558,7 @@ fn a_file_argument_page_marks_its_modified_rows() {
 
     let list = palette_arg_layout(&h).list;
     let bytes = emit_raw(&mut h, &mut rx);
-    let page = fill_payload(&bytes, crate::smooth_scroll::non_pane_pool::PALETTE, 0);
+    let page = fill_payload(&bytes, stoat::smooth_scroll::non_pane_pool::PALETTE, 0);
     let rows: Vec<(String, char)> = page_cells(page, list.width, list.height)
         .into_iter()
         .filter_map(|row| {
@@ -7702,7 +7624,7 @@ fn the_command_list_pool_follows_a_wrapped_header() {
 /// The rows of the palette's header and the pool region that the palette's
 /// list declares, after `text` types into `h` and a frame paints.
 fn typed_palette_region(
-    h: &mut crate::test_harness::TestHarness,
+    h: &mut stoat::test_harness::TestHarness,
     rx: &mut tokio::sync::mpsc::UnboundedReceiver<Vec<u8>>,
     text: &str,
 ) -> (u16, PoolRegionCommand) {
@@ -7720,7 +7642,7 @@ fn typed_palette_region(
         .into_iter()
         .find_map(|command| match command {
             Command::PoolRegion(region)
-                if region.pool == crate::smooth_scroll::non_pane_pool::PALETTE =>
+                if region.pool == stoat::smooth_scroll::non_pane_pool::PALETTE =>
             {
                 Some(region)
             },
@@ -7766,7 +7688,7 @@ fn palette_filter_to_arg_flip_repools() {
 
     let arg_list = palette_arg_layout(&h).list;
     let expected = PoolRegionCommand {
-        pool: crate::smooth_scroll::non_pane_pool::PALETTE,
+        pool: stoat::smooth_scroll::non_pane_pool::PALETTE,
         top: arg_list.y,
         left: arg_list.x,
         width: arg_list.width,
@@ -7788,7 +7710,7 @@ fn palette_filter_to_arg_flip_repools() {
 /// Active scope lists the git group only inside one.
 #[test]
 fn a_grouped_palette_pool_prints_subcommand_tokens() {
-    let mut h = crate::test_harness::TestHarness::with_size(160, 40);
+    let mut h = stoat::test_harness::TestHarness::with_size(160, 40);
     h.fake_git().add_repo("/repo");
     h.stoat.active_workspace_mut().git_root = "/repo".into();
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
@@ -7818,7 +7740,7 @@ fn a_grouped_palette_pool_prints_subcommand_tokens() {
 /// bound to it beside its description, as the live list does.
 #[test]
 fn the_action_list_pool_prints_pascal_case_names_and_keys() {
-    let mut h = crate::test_harness::TestHarness::with_size(160, 40);
+    let mut h = stoat::test_harness::TestHarness::with_size(160, 40);
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
     h.stoat.set_apc_tx(tx);
 
@@ -7852,8 +7774,8 @@ fn history_retires_the_palette_pool() {
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
     h.stoat.set_apc_tx(tx);
     h.stoat.active_workspace_mut().palette_history =
-        crate::input_history::InputHistory::from_entries(vec!["pwd".to_string()]);
-    let mut emitted = |h: &mut crate::test_harness::TestHarness, keys: &str| {
+        stoat::input_history::InputHistory::from_entries(vec!["pwd".to_string()]);
+    let mut emitted = |h: &mut stoat::test_harness::TestHarness, keys: &str| {
         h.type_text(keys);
         h.snapshot();
         let size = h.stoat.size();
@@ -7866,7 +7788,7 @@ fn history_retires_the_palette_pool() {
     h.type_keys("up");
     let walked = emitted(&mut h, "");
 
-    let palette = crate::smooth_scroll::non_pane_pool::PALETTE;
+    let palette = stoat::smooth_scroll::non_pane_pool::PALETTE;
     let declares = |commands: &[Command]| {
         commands
             .iter()
@@ -7890,7 +7812,7 @@ fn a_pixel_history_declares_a_pointer_region_with_no_page() {
         Command, PoolDropCommand, PoolKind, PoolPointerCommand, PoolRegionCommand,
     };
 
-    let pool = crate::smooth_scroll::non_pane_pool::PALETTE;
+    let pool = stoat::smooth_scroll::non_pane_pool::PALETTE;
     let walked = |protocol: u32, socket: bool| {
         let mut h = Stoat::test();
         h.stoat.stoatty_protocol = protocol;
@@ -7898,7 +7820,7 @@ fn a_pixel_history_declares_a_pointer_region_with_no_page() {
         h.stoat.display_scale = Some(1.0);
         h.stoat.window_ipc_connected = socket;
         h.stoat.active_workspace_mut().palette_history =
-            crate::input_history::InputHistory::from_entries(vec!["pwd".to_string()]);
+            stoat::input_history::InputHistory::from_entries(vec!["pwd".to_string()]);
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
         h.stoat.set_apc_tx(tx);
         h.type_text(":");
@@ -8047,7 +7969,7 @@ fn a_pixel_run_pane_declares_its_pointer_region() {
 fn the_tray_declares_its_pointer_region() {
     use stoatty_protocol::command::{Command, PoolKind, PoolPointerCommand, PoolRegionCommand};
 
-    let pool = crate::smooth_scroll::non_pane_pool::JOB_TRAY;
+    let pool = stoat::smooth_scroll::non_pane_pool::JOB_TRAY;
     let emits = |protocol: u32, cell: Option<(u16, u16)>, socket: bool| {
         let mut h = Stoat::test();
         h.stoat.stoatty_protocol = protocol;
@@ -8121,7 +8043,7 @@ fn the_tray_declares_its_pointer_region() {
 fn the_job_list_declares_its_pointer_region() {
     use stoatty_protocol::command::{Command, PoolKind, PoolPointerCommand, PoolRegionCommand};
 
-    let pool = crate::smooth_scroll::non_pane_pool::JOB_LIST;
+    let pool = stoat::smooth_scroll::non_pane_pool::JOB_LIST;
     let emits = |protocol: u32, cell: Option<(u16, u16)>, socket: bool| {
         let mut h = Stoat::test();
         h.stoat.stoatty_protocol = protocol;
@@ -8203,7 +8125,7 @@ fn a_pixel_pick_list_declares_its_pointer_region() {
 fn a_pixel_cli_list_declares_its_pointer_region() {
     let (commands, expected) = arg_list_pointer(
         r#"command rg = cli("rg", output: notify);"#,
-        ("rg --help", crate::cli_spec::RG_HELP.as_bytes()),
+        ("rg --help", stoat::cli_spec::RG_HELP.as_bytes()),
         ":rg -",
     );
     assert_eq!(commands, expected);
@@ -8220,7 +8142,7 @@ fn arg_list_pointer(
 ) -> (Vec<command::Command>, [command::Command; 2]) {
     use stoatty_protocol::command::{Command, PoolKind, PoolPointerCommand, PoolRegionCommand};
 
-    let mut h = crate::test_harness::TestHarness::with_size(120, 30);
+    let mut h = stoat::test_harness::TestHarness::with_size(120, 30);
     h.stoat.stoatty_protocol = stoatty_protocol::PROTOCOL_VERSION;
     h.stoat.cell_pixels = Some((9, 18));
     h.stoat.display_scale = Some(1.0);
@@ -8228,7 +8150,7 @@ fn arg_list_pointer(
     h.stoat.reload_user_config(source);
     h.fake_shell.set_response(
         line,
-        crate::host::ShellOutput {
+        stoat::host::ShellOutput {
             stdout: stdout.to_vec(),
             stderr: Vec::new(),
             exit_code: 0,
@@ -8241,8 +8163,8 @@ fn arg_list_pointer(
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
     h.stoat.set_apc_tx(tx);
 
-    let pool = crate::smooth_scroll::non_pane_pool::PALETTE;
-    let list = crate::mouse::boxed_modal_surfaces(&h.stoat)
+    let pool = stoat::smooth_scroll::non_pane_pool::PALETTE;
+    let list = stoat::mouse::boxed_modal_surfaces(&h.stoat)
         .expect("the palette is open")
         .list;
     let commands: Vec<Command> = command::decode_stream(&emit_raw(&mut h, &mut rx))
@@ -8276,7 +8198,7 @@ fn arg_list_pointer(
 
 #[test]
 fn completion_popup_is_pooled_and_retired() {
-    use crate::completion::{CompletionItem, CompletionPopup, CompletionSource};
+    use stoat::completion::{CompletionItem, CompletionPopup, CompletionSource};
     use stoatty_protocol::command::{Command, PoolDropCommand, PoolKind, PoolRegionCommand};
 
     let mut h = Stoat::test();
@@ -8291,7 +8213,7 @@ fn completion_popup_is_pooled_and_retired() {
         source: CompletionSource::Lsp,
         kind: None,
         detail: None,
-        replace_range: crate::completion::unused_replace_range(),
+        replace_range: stoat::completion::unused_replace_range(),
         insert_text: label.into(),
         is_snippet: false,
         documentation: None,
@@ -8305,10 +8227,10 @@ fn completion_popup_is_pooled_and_retired() {
     ]));
 
     emit_smooth_scroll(&mut h.stoat);
-    let (_, layout) = crate::render::completion::completion_popup_layout(&mut h.stoat)
+    let (_, layout) = stoat::render::completion::completion_popup_layout(&mut h.stoat)
         .expect("the popup anchors in the test terminal");
     let expected = PoolRegionCommand {
-        pool: crate::smooth_scroll::non_pane_pool::COMPLETION,
+        pool: stoat::smooth_scroll::non_pane_pool::COMPLETION,
         top: layout.inner.y,
         left: layout.inner.x,
         width: layout.inner.width,
@@ -8328,7 +8250,7 @@ fn completion_popup_is_pooled_and_retired() {
     emit_smooth_scroll(&mut h.stoat);
     assert!(
         drain_apc(&mut rx).contains(&Command::PoolDrop(PoolDropCommand {
-            pool: crate::smooth_scroll::non_pane_pool::COMPLETION,
+            pool: stoat::smooth_scroll::non_pane_pool::COMPLETION,
         })),
         "closing the popup retires its pool"
     );
@@ -8351,7 +8273,7 @@ fn help_list_and_detail_are_pooled_and_retired() {
     emit_smooth_scroll(&mut h.stoat);
     let layout = help_layout(&h);
     let list = PoolRegionCommand {
-        pool: crate::smooth_scroll::non_pane_pool::HELP_LIST,
+        pool: stoat::smooth_scroll::non_pane_pool::HELP_LIST,
         top: layout.list.y,
         left: layout.list.x,
         width: layout.list.width,
@@ -8363,7 +8285,7 @@ fn help_list_and_detail_are_pooled_and_retired() {
         inset: [0, 0],
     };
     let detail = PoolRegionCommand {
-        pool: crate::smooth_scroll::non_pane_pool::HELP_DETAIL,
+        pool: stoat::smooth_scroll::non_pane_pool::HELP_DETAIL,
         top: layout.detail.y,
         left: layout.detail.x,
         width: layout.detail.width,
@@ -8389,20 +8311,20 @@ fn help_list_and_detail_are_pooled_and_retired() {
     let cmds = drain_apc(&mut rx);
     assert!(
         cmds.contains(&Command::PoolDrop(PoolDropCommand {
-            pool: crate::smooth_scroll::non_pane_pool::HELP_LIST,
+            pool: stoat::smooth_scroll::non_pane_pool::HELP_LIST,
         })),
         "closing help retires the list pool"
     );
     assert!(
         cmds.contains(&Command::PoolDrop(PoolDropCommand {
-            pool: crate::smooth_scroll::non_pane_pool::HELP_DETAIL,
+            pool: stoat::smooth_scroll::non_pane_pool::HELP_DETAIL,
         })),
         "closing help retires the detail pool"
     );
 }
 
 /// The fake `/work` repo, added on first use.
-fn work_repo(h: &mut crate::test_harness::TestHarness) -> Arc<dyn crate::host::GitRepo> {
+fn work_repo(h: &mut stoat::test_harness::TestHarness) -> Arc<dyn stoat::host::GitRepo> {
     let path = std::path::Path::new("/work");
     h.stoat.git_host.discover(path).unwrap_or_else(|| {
         h.fake_git.add_repo("/work");
@@ -8414,8 +8336,8 @@ fn work_repo(h: &mut crate::test_harness::TestHarness) -> Arc<dyn crate::host::G
 }
 
 /// Show a commits list over the `/work` repo in the focused pane.
-fn open_commits_list(h: &mut crate::test_harness::TestHarness) {
-    use crate::commit_list::CommitListState;
+fn open_commits_list(h: &mut stoat::test_harness::TestHarness) {
+    use stoat::commit_list::CommitListState;
 
     let repo = work_repo(h);
     let ws = h.stoat.active_workspace_mut();
@@ -8427,10 +8349,10 @@ fn open_commits_list(h: &mut crate::test_harness::TestHarness) {
 }
 
 /// `count` commits of one linear history, newest first.
-fn numbered_commits(count: usize) -> Vec<crate::host::CommitInfo> {
+fn numbered_commits(count: usize) -> Vec<stoat::host::CommitInfo> {
     let sha = |i: usize| format!("{i:040x}");
     (0..count)
-        .map(|i| crate::host::CommitInfo {
+        .map(|i| stoat::host::CommitInfo {
             sha: sha(i),
             short_sha: sha(i)[33..].to_string(),
             summary: format!("commit {i}"),
@@ -8459,10 +8381,10 @@ fn commits_list_is_pooled_and_retired() {
         let ws = h.stoat.active_workspace();
         ws.panes.pane(ws.panes.focus()).area
     };
-    let list = crate::render::commits::commits_list_rect(focused, h.stoat.commits_split)
+    let list = stoat::render::commits::commits_list_rect(focused, h.stoat.commits_split)
         .expect("the commits list fits the test terminal");
     let expected = PoolRegionCommand {
-        pool: crate::smooth_scroll::non_pane_pool::COMMITS,
+        pool: stoat::smooth_scroll::non_pane_pool::COMMITS,
         top: list.y,
         left: list.x,
         width: list.width,
@@ -8486,7 +8408,7 @@ fn commits_list_is_pooled_and_retired() {
     let bytes = rx.try_recv().expect("leaving commits emits a drop");
     assert!(
         command::decode_stream(&bytes).contains(&Command::PoolDrop(PoolDropCommand {
-            pool: crate::smooth_scroll::non_pane_pool::COMMITS,
+            pool: stoat::smooth_scroll::non_pane_pool::COMMITS,
         })),
         "leaving commits mode retires its pool"
     );
@@ -8524,7 +8446,7 @@ fn a_one_row_scroll_of_the_finder_refills_its_pool() {
     assert_eq!(
         pool_fills(
             &emit_raw(&mut h, &mut rx),
-            crate::smooth_scroll::non_pane_pool::FINDER
+            stoat::smooth_scroll::non_pane_pool::FINDER
         ),
         [0, 1],
         "the step refills the page the selection leaves and the page it enters"
@@ -8554,7 +8476,7 @@ fn a_help_selection_step_refills_the_list_pool() {
     assert_eq!(
         pool_fills(
             &emit_raw(&mut h, &mut rx),
-            crate::smooth_scroll::non_pane_pool::HELP_LIST
+            stoat::smooth_scroll::non_pane_pool::HELP_LIST
         ),
         [0],
         "a step inside the first page refills that page alone"
@@ -8565,7 +8487,7 @@ fn a_help_selection_step_refills_the_list_pool() {
 /// page alone, not the whole buffered window.
 #[test]
 fn a_commits_selection_step_refills_one_page() {
-    fn list(h: &mut crate::test_harness::TestHarness) -> &mut crate::commit_list::CommitListState {
+    fn list(h: &mut stoat::test_harness::TestHarness) -> &mut stoat::commit_list::CommitListState {
         h.stoat
             .active_workspace_mut()
             .focused_commits_mut()
@@ -8586,7 +8508,7 @@ fn a_commits_selection_step_refills_one_page() {
     assert_eq!(
         pool_fills(
             &emit_raw(&mut h, &mut rx),
-            crate::smooth_scroll::non_pane_pool::COMMITS
+            stoat::smooth_scroll::non_pane_pool::COMMITS
         ),
         [0],
         "a step inside the first page refills that page alone"
@@ -8597,7 +8519,7 @@ fn a_commits_selection_step_refills_one_page() {
 /// page alone, not the whole buffered window.
 #[test]
 fn a_commit_picker_step_refills_one_page() {
-    use crate::commit_picker::{CommitPicker, CommitPickerRole};
+    use stoat::commit_picker::{CommitPicker, CommitPickerRole};
 
     let mut h = Stoat::test();
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
@@ -8626,7 +8548,7 @@ fn a_commit_picker_step_refills_one_page() {
     assert_eq!(
         pool_fills(
             &emit_raw(&mut h, &mut rx),
-            crate::smooth_scroll::non_pane_pool::COMMIT_PICKER_LIST
+            stoat::smooth_scroll::non_pane_pool::COMMIT_PICKER_LIST
         ),
         [0],
         "a step inside the first page refills that page alone"
@@ -8639,8 +8561,8 @@ fn a_commit_picker_step_refills_one_page() {
 /// covers the region. Pins the routing rather than the page renderer.
 #[test]
 fn a_conflict_pane_fills_with_the_three_column_body() {
-    use crate::render::conflict_view::{render_conflict_rows, GridPaint};
     use ratatui::layout::Rect;
+    use stoat::render::conflict_view::{render_conflict_rows, GridPaint};
 
     let (mut h, mut rx) = conflict_pane();
     emit_smooth_scroll(&mut h.stoat);
@@ -8652,7 +8574,7 @@ fn a_conflict_pane_fills_with_the_three_column_body() {
         .next()
         .expect("the conflict pane declares a pool region");
     let theme = Arc::new(h.stoat.theme.clone());
-    let fallback = theme.get(crate::theme::scope::UI_TEXT);
+    let fallback = theme.get(stoat::theme::scope::UI_TEXT);
     let (snapshot, mut state) = {
         let editor = action_handlers::focused_editor_mut(&mut h.stoat).expect("center editor");
         (
@@ -8662,7 +8584,7 @@ fn a_conflict_pane_fills_with_the_three_column_body() {
     };
 
     let area = Rect::new(0, 0, region.width, region.height);
-    let mut cells = crate::smooth_scroll::page_buffer(area, &theme);
+    let mut cells = stoat::smooth_scroll::page_buffer(area, &theme);
     let mut scene = ApcScene::new();
     let (doc, derived) = Arc::make_mut(&mut state).derived(&snapshot);
     render_conflict_rows(
@@ -8684,7 +8606,7 @@ fn a_conflict_pane_fills_with_the_three_column_body() {
             hover: None,
         }),
     );
-    let mut expected = crate::render::serialize_buffer(&cells);
+    let mut expected = stoat::render::serialize_buffer(&cells);
     expected.extend_from_slice(scene.buffer());
 
     let mut fills = Vec::new();
@@ -8707,8 +8629,8 @@ fn a_conflict_pane_fills_with_the_three_column_body() {
 /// The chunk sits at line 30, on the second page of the region.
 #[test]
 fn a_move_after_a_chip_menu_opens_refills_its_page() {
-    use crate::render::conflict_view::{render_conflict_rows, GridPaint};
     use ratatui::layout::Rect;
+    use stoat::render::conflict_view::{render_conflict_rows, GridPaint};
 
     let stage = |middle: &str| -> String {
         (0..60)
@@ -8745,7 +8667,7 @@ fn a_move_after_a_chip_menu_opens_refills_its_page() {
         )
     };
     let area = Rect::new(0, 0, region.width, region.height);
-    let mut cells = crate::smooth_scroll::page_buffer(area, &theme);
+    let mut cells = stoat::smooth_scroll::page_buffer(area, &theme);
     let mut scene = ApcScene::new();
     let (doc, derived) = Arc::make_mut(&mut state).derived(&snapshot);
     render_conflict_rows(
@@ -8754,7 +8676,7 @@ fn a_move_after_a_chip_menu_opens_refills_its_page() {
         derived,
         u32::from(region.height),
         area,
-        theme.get(crate::theme::scope::UI_TEXT),
+        theme.get(stoat::theme::scope::UI_TEXT),
         &theme,
         &mut cells,
         None,
@@ -8767,7 +8689,7 @@ fn a_move_after_a_chip_menu_opens_refills_its_page() {
             hover: None,
         }),
     );
-    let mut page = crate::render::serialize_buffer(&cells);
+    let mut page = stoat::render::serialize_buffer(&cells);
     page.extend_from_slice(scene.buffer());
 
     let mut sent = Vec::new();
@@ -8812,7 +8734,7 @@ fn a_conflict_pane_pools_the_rows_below_its_header() {
 /// view's rows alone, and its row counts cells from its own edge.
 #[test]
 fn a_detached_conflict_pane_s_row_runs_whole() {
-    let mut h = crate::test_harness::TestHarness::with_size(160, 24);
+    let mut h = stoat::test_harness::TestHarness::with_size(160, 24);
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
     h.stoat.set_apc_tx(tx);
     h.stoat.window_ipc_connected = true;
@@ -8844,7 +8766,7 @@ fn a_detached_conflict_pane_s_row_runs_whole() {
         };
         (
             window,
-            crate::smooth_scroll::non_pane_pool::WINDOW_STATUS + pane.index,
+            stoat::smooth_scroll::non_pane_pool::WINDOW_STATUS + pane.index,
         )
     };
     app::deliver_window_event(
@@ -8869,7 +8791,7 @@ fn a_detached_conflict_pane_s_row_runs_whole() {
 /// A 150x24 harness with a conflicted file in the conflict view, before its
 /// first emit, and the receiver of that emit's batches.
 fn conflict_pane() -> (
-    crate::test_harness::TestHarness,
+    stoat::test_harness::TestHarness,
     tokio::sync::mpsc::UnboundedReceiver<Vec<u8>>,
 ) {
     conflict_pane_of(["a\nbase\nz\n", "a\nOURS\nz\n", "a\nTHEIRS\nz\n"])
@@ -8880,11 +8802,11 @@ fn conflict_pane() -> (
 fn conflict_pane_of(
     stages: [&str; 3],
 ) -> (
-    crate::test_harness::TestHarness,
+    stoat::test_harness::TestHarness,
     tokio::sync::mpsc::UnboundedReceiver<Vec<u8>>,
 ) {
     let [ancestor, ours, theirs] = stages;
-    let mut h = crate::test_harness::TestHarness::with_size(150, 24);
+    let mut h = stoat::test_harness::TestHarness::with_size(150, 24);
     h.stoat.active_workspace_mut().git_root = PathBuf::from("/repo");
     h.fake_git()
         .add_repo("/repo")
@@ -8928,9 +8850,9 @@ fn a_frame_waits_for_the_pool_jobs_its_emits_start() {
 /// Reports whether the frame's batches count as sent and how many page fills
 /// are on the channel, once while the jobs wait and once after they run.
 fn frame_through_held_jobs(
-    h: &mut crate::test_harness::TestHarness,
+    h: &mut stoat::test_harness::TestHarness,
     rx: &mut tokio::sync::mpsc::UnboundedReceiver<Vec<u8>>,
-    emit: impl FnOnce(&mut crate::test_harness::TestHarness),
+    emit: impl FnOnce(&mut stoat::test_harness::TestHarness),
 ) -> [(bool, usize); 2] {
     use stoatty_protocol::command::Command;
 
@@ -9463,7 +9385,7 @@ fn a_focused_pane_keeps_its_anchor_when_its_glide_ends() {
 
 /// A 200-line file in two side-by-side panes, with the APC channel drained.
 fn split_pool_harness() -> (
-    crate::test_harness::TestHarness,
+    stoat::test_harness::TestHarness,
     tokio::sync::mpsc::UnboundedReceiver<Vec<u8>>,
 ) {
     let mut h = Stoat::test();
@@ -9488,7 +9410,7 @@ fn split_pool_harness() -> (
 
 /// Arm a wheel glide on the focused editor with its cursor on screen, the
 /// state in which the emit ships a cursor anchor.
-fn arm_focused_glide(h: &mut crate::test_harness::TestHarness) {
+fn arm_focused_glide(h: &mut stoat::test_harness::TestHarness) {
     let editor = action_handlers::focused_editor_mut(&mut h.stoat).expect("focused editor");
     editor.scroll_glide = ScrollGlide::Wheel;
     editor.cursor_screen_cell = Some((7, 3));
@@ -9650,7 +9572,7 @@ fn wheel_glide_defers_the_relative_line_refill_to_settle() {
 fn relative_line_scroll_fills(
     protocol: u32,
     diff_view: bool,
-    theme: crate::theme::Theme,
+    theme: stoat::theme::Theme,
 ) -> (Vec<u64>, Vec<u64>) {
     use stoatty_protocol::command::{Command, FillCommand};
 
@@ -9680,9 +9602,9 @@ fn relative_line_scroll_fills(
 fn buffered_relative_pool(
     protocol: u32,
     diff_view: bool,
-    theme: crate::theme::Theme,
+    theme: stoat::theme::Theme,
 ) -> (
-    crate::test_harness::TestHarness,
+    stoat::test_harness::TestHarness,
     tokio::sync::mpsc::UnboundedReceiver<Vec<u8>>,
 ) {
     let mut h = Stoat::test();
@@ -9712,7 +9634,7 @@ fn buffered_relative_pool(
 
 /// Move the cursor and the scroll row of [`buffered_relative_pool`]'s file one
 /// line down, then emit.
-fn move_one_line_down(h: &mut crate::test_harness::TestHarness) {
+fn move_one_line_down(h: &mut stoat::test_harness::TestHarness) {
     // Moved without a glide, since a glide holds the numbered line still.
     h.stoat.collapse_focused_cursor_to("line 0\n".len());
     {
@@ -9959,53 +9881,6 @@ fn a_relative_line_scroll_in_the_conflict_view_refills_no_page() {
     );
 }
 
-/// A page's spotlight version covers only the part of the span on its own
-/// rows. A move refills only the pages whose lit cells change, also when a
-/// column moves on the first or last row of a page.
-#[test]
-fn a_spotlight_page_version_covers_only_its_own_rows() {
-    // Spans run [start row, start column, end row, end column] over 20-row
-    // pages, so row 19 ends page 0 and row 20 starts page 1.
-    let version = |span: [u32; 4], page: u64| {
-        let [start_row, start_column, end_row, end_column] = span;
-        let points = (
-            DisplayPoint::new(start_row, start_column),
-            DisplayPoint::new(end_row, end_column),
-        );
-        spotlight_page_version(Some(([1, 2, 3], points)), page, 20)
-    };
-    let refilled = |from: [u32; 4], to: [u32; 4]| -> Vec<u64> {
-        (0..3)
-            .filter(|&page| version(from, page) != version(to, page))
-            .collect()
-    };
-
-    for (from, to, pages, label) in [
-        ([5, 2, 30, 7], [5, 2, 35, 7], vec![1], "end in page 1"),
-        ([5, 2, 30, 7], [8, 2, 30, 7], vec![0], "start in page 0"),
-        ([20, 2, 30, 7], [20, 5, 30, 7], vec![1], "start on row 20"),
-        ([5, 2, 20, 7], [5, 2, 20, 9], vec![1], "end on row 20"),
-        ([5, 2, 19, 7], [5, 2, 19, 9], vec![0], "end on row 19"),
-        ([1, 0, 1, 9], [50, 0, 50, 9], vec![0, 2], "span on row 1"),
-    ] {
-        assert_eq!(refilled(from, to), pages, "the {label} moves");
-    }
-    let span = (DisplayPoint::new(5, 2), DisplayPoint::new(30, 7));
-    assert_ne!(
-        spotlight_page_version(Some(([1, 2, 3], span)), 0, 20),
-        spotlight_page_version(Some(([4, 5, 6], span)), 0, 20),
-        "the same span in another color refills its page",
-    );
-    assert_eq!(
-        (
-            version([5, 2, 30, 7], 2),
-            spotlight_page_version(None, 0, 20)
-        ),
-        (0, 0),
-        "(a page the span misses, a page with no spotlight)",
-    );
-}
-
 /// Rest the focused editor of a 400-line file with its top row on `start`,
 /// then jump the cursor to `landing` and run the page glide frame by frame.
 ///
@@ -10220,8 +10095,8 @@ fn a_margin_follow_refills_the_pages_its_move_composites() {
 
 #[test]
 fn error_popout_emits_scaled_runs_under_stoatty() {
-    use crate::theme::TypeRole;
     use lsp_types::MessageType;
+    use stoat::theme::TypeRole;
     use stoatty_protocol::command::Command;
 
     let mut h = Stoat::test();
@@ -10273,10 +10148,10 @@ fn error_popout_emits_scaled_runs_under_stoatty() {
 
 #[test]
 fn diff_status_halves_emit_ui_scale_runs_under_stoatty() {
-    use crate::theme::TypeRole;
+    use stoat::theme::TypeRole;
     use stoatty_protocol::command::Command;
 
-    let mut h = crate::test_harness::TestHarness::with_size(120, 10);
+    let mut h = stoat::test_harness::TestHarness::with_size(120, 10);
     h.stoat.minimap_override = Some(false);
     h.stage_review_scenario("/repo", &[("a.rs", "a\nb\nc\nold\n", "a\nb\nc\nnew\n")]);
     h.stoat.set_diff_warm_auto(true);
@@ -10373,7 +10248,7 @@ fn quitting_hands_the_terminal_its_own_defaults_back() {
 /// settled emit, with the cursor above the view on row 0, and the file's
 /// path.
 fn rested_reload_view() -> (
-    crate::test_harness::TestHarness,
+    stoat::test_harness::TestHarness,
     tokio::sync::mpsc::UnboundedReceiver<Vec<u8>>,
     PathBuf,
 ) {
@@ -10460,7 +10335,7 @@ fn a_reload_that_moves_the_view_redeclares_the_pool() {
 /// down with its text in one scroll.
 #[test]
 fn a_reload_that_moves_the_stack_redeclares_its_pool() {
-    let mut h = crate::test_harness::TestHarness::with_size(120, 24);
+    let mut h = stoat::test_harness::TestHarness::with_size(120, 24);
     h.stoat.stoatty_protocol = stoatty_protocol::PROTOCOL_VERSION;
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
     h.stoat.set_apc_tx(tx);

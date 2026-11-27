@@ -141,11 +141,11 @@ pub struct RenderFrame {
 /// go before it drains the channel, so the frame and its batches go out in one
 /// synchronized update.
 #[derive(Clone)]
-pub(crate) struct FrameBatches(watch::Receiver<()>);
+pub struct FrameBatches(watch::Receiver<()>);
 
 impl FrameBatches {
     /// Starts the batches of a frame, with the first hold on them.
-    pub(crate) fn start() -> (FrameBatchesHold, Self) {
+    pub fn start() -> (FrameBatchesHold, Self) {
         let (sender, receiver) = watch::channel(());
         let hold = FrameBatchesHold {
             _sender: Arc::new(sender),
@@ -154,7 +154,7 @@ impl FrameBatches {
     }
 
     /// Waits until every hold on the frame's batches is gone.
-    pub(crate) async fn sent(mut self) {
+    pub async fn sent(mut self) {
         // Nothing is ever sent on the channel. The last hold to go drops the
         // sender, which closes the channel and ends the wait.
         let _ = self.0.changed().await;
@@ -166,7 +166,7 @@ impl FrameBatches {
 ///
 /// Drop it after the last batch that it covers is on the APC channel.
 #[derive(Clone)]
-pub(crate) struct FrameBatchesHold {
+pub struct FrameBatchesHold {
     _sender: Arc<watch::Sender<()>>,
 }
 

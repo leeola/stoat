@@ -278,7 +278,7 @@ impl Help {
         self.dispatch_selected_inner()
     }
 
-    pub(crate) fn move_selection(&mut self, delta: i32) {
+    pub fn move_selection(&mut self, delta: i32) {
         self.move_selection_inner(delta);
     }
 

@@ -45,7 +45,7 @@ new_key_type! {
 ///
 /// A saved session keeps a list as a [`CommitListSnap`], the reader's place
 /// without the pages, which reload.
-pub(crate) struct CommitListState {
+pub struct CommitListState {
     pub workdir: PathBuf,
     /// The repository the list walks, held rather than rediscovered.
     ///
@@ -113,7 +113,7 @@ pub(crate) struct CommitListState {
     pub pending_selection: Option<SavedSelection>,
 }
 
-pub(crate) struct PendingPreview {
+pub struct PendingPreview {
     pub sha: String,
     pub task: Task<PreviewLoad>,
 }
@@ -123,7 +123,7 @@ pub(crate) struct PendingPreview {
 /// The commit is a sha rather than an index, because new commits on top shift
 /// the indices, and a restored list loads its pages in the background.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) struct SavedSelection {
+pub struct SavedSelection {
     pub sha: String,
     /// The selection's row below the top of the list, so the commit comes
     /// back where it stood on screen.
@@ -148,7 +148,7 @@ pub(crate) struct CommitListSnap {
 ///
 /// Both halves come from the same task because both read the same commit, and
 /// a caller that reads one on the run loop pays for the tree walk there.
-pub(crate) struct PreviewLoad {
+pub struct PreviewLoad {
     /// The commit's file-change summary, or `None` from a surface that paints
     /// none. Distinct from an empty list, which is a commit that changed
     /// nothing.
@@ -162,7 +162,7 @@ pub(crate) struct PreviewLoad {
 }
 
 /// What one background load of a list's history produces.
-pub(crate) struct PageLoad {
+pub struct PageLoad {
     /// The commits to append to the list, newest first.
     pub commits: Vec<CommitInfo>,
     /// Whether the walk ended inside this load, so no later page exists.
@@ -180,7 +180,7 @@ pub(crate) struct PageLoad {
 /// Each map takes a full sha to the names pointing at it, sorted. A local
 /// branch is also a tip in the lane graph.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub(crate) struct CommitRefs {
+pub struct CommitRefs {
     /// The commit HEAD resolves to.
     pub head: Option<String>,
     /// The branch HEAD is attached to, `None` when HEAD is detached.
@@ -192,7 +192,7 @@ pub(crate) struct CommitRefs {
 }
 
 /// What a load learned of a restored selection's commit.
-pub(crate) enum SelectionSearch {
+pub enum SelectionSearch {
     /// The load read one page and did not look for the commit.
     NotAsked,
     /// The commit sits at this index of the load's own commits.
@@ -216,7 +216,7 @@ pub(crate) enum SelectionSearch {
 /// Shared by the commits view and the commit picker, which both build previews
 /// the same way. [`PendingPreview`] is the in-flight half of it.
 #[derive(Default)]
-pub(crate) struct PreviewCache {
+pub struct PreviewCache {
     sessions: HashMap<String, Option<Arc<DiffDocument>>>,
     /// Cached shas, least recently used first, so eviction takes the front.
     recent: VecDeque<String>,
@@ -307,7 +307,7 @@ impl PreviewCache {
 }
 
 impl CommitListState {
-    pub(crate) fn new(workdir: PathBuf, repo: Arc<dyn GitRepo>, now_epoch: i64) -> Self {
+    pub fn new(workdir: PathBuf, repo: Arc<dyn GitRepo>, now_epoch: i64) -> Self {
         Self {
             workdir,
             repo,

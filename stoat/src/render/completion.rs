@@ -44,13 +44,13 @@ const SELECTED_ROW_RADIUS: u8 = 4;
 /// The popup is cursor-anchored, so the rects move with the cursor each frame.
 /// Shared by the renderer and the smooth-scroll emit so the pooled list region
 /// matches the painted one exactly.
-pub(crate) struct CompletionLayout {
+pub struct CompletionLayout {
     /// The bordered popup rect.
-    pub(crate) popup_area: Rect,
+    pub popup_area: Rect,
     /// The scrolling row region inside the border, which is also the pool
     /// region. It leaves out the footer's hairline and detail rows when a
     /// detail shows.
-    pub(crate) inner: Rect,
+    pub inner: Rect,
     /// Index of the first visible item, the list's scroll offset.
     pub(crate) viewport_top: usize,
     /// The detail and documentation line of the selected row, painted on the
@@ -139,7 +139,7 @@ fn layout_key(stoat: &Stoat) -> LayoutKey {
 /// here. `None` mirrors every [`render_completion`] bail: no pending completion
 /// or empty items, the focused pane is not an editor, the cursor is off-screen,
 /// or the interior width collapses to zero.
-pub(crate) fn completion_popup_layout(stoat: &mut Stoat) -> Option<(String, CompletionLayout)> {
+pub fn completion_popup_layout(stoat: &mut Stoat) -> Option<(String, CompletionLayout)> {
     #[cfg(test)]
     stoat
         .completion_layouts

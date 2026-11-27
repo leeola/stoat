@@ -530,7 +530,7 @@ pub(crate) fn drop_pending_waiters(stoat: &mut Stoat, workspace: WorkspaceId, cl
 /// changes view vanished while it read, and clears the
 /// [`BadgeSource::FileOpen`] badge once none remain. The commands parked on an
 /// open then wait on the buffer it installs as.
-pub(crate) fn install_pending_opens(stoat: &mut Stoat) {
+pub fn install_pending_opens(stoat: &mut Stoat) {
     let mut ready = Vec::new();
     let mut i = 0;
     while i < stoat.pending_file_opens.len() {
@@ -764,7 +764,7 @@ fn register_open(
 /// no reload, and no diff. It takes the language of `path`. One buffer serves
 /// one file at one commit, so a later show of the same pair shows the same
 /// buffer. The pane records a jump first, so the jump back returns from it.
-pub(crate) fn show_revision(stoat: &mut Stoat, path: &Path, sha: &str, text: &str) -> BufferId {
+pub fn show_revision(stoat: &mut Stoat, path: &Path, sha: &str, text: &str) -> BufferId {
     let workspace = stoat.active_workspace;
     let source = RevisionSource {
         path: path.to_path_buf(),

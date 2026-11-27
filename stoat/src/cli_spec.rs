@@ -594,8 +594,8 @@ fn text_of(line: &str) -> &str {
 }
 
 /// The help of ripgrep 13, in its usage and option-section shape.
-#[cfg(test)]
-pub(crate) const RG_HELP: &str = concat!(
+#[cfg(any(test, feature = "test-support"))]
+pub const RG_HELP: &str = concat!(
     "USAGE:\n",
     "    rg [OPTIONS] PATTERN [PATH ...]\n",
     "    rg [OPTIONS] -e PATTERN ... [PATH ...]\n",

@@ -199,7 +199,7 @@ pub(crate) struct PairBase {
 /// pick while that base holds. The diff returns to the pick when that base
 /// gives way.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub(crate) enum WorktreeBase {
+pub enum WorktreeBase {
     /// The index, with the changes it holds over HEAD as staged marks, for a
     /// reader who picks only the changes not yet staged.
     Index,

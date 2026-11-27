@@ -290,7 +290,7 @@ impl Passthrough {
 /// nothing of what is on it, and an attach brings a terminal that holds nothing
 /// this session sent. Every drop is a no-op against a terminal that was never
 /// declared to, so an attach calls this without checking.
-pub(crate) fn retire_terminal_state(stoat: &mut Stoat) {
+pub fn retire_terminal_state(stoat: &mut Stoat) {
     crate::image_emit::emit_drop_all_images(stoat);
     stoat.images.forget();
 
