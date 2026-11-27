@@ -1825,6 +1825,9 @@ fn the_file_argument_marks_modified_rows_and_cycles_to_them() {
 /// The frame the basic-diff scene settles on after `keys` play, where the
 /// child's home is `home` and its temporary files go under `home/t`.
 ///
+/// Every caller's keys open a palette, so the frame is the first settled one
+/// that differs from the frame before the keys.
+///
 /// The fixture then lives at `<home>/t/stoat-fixture-` and six more chars, so a
 /// Cmd Line's cwd reads `~/t/stoat-fixture-` and those six chars, 24 chars on
 /// every host. The home is canonical, as the fixture's own path is. The
@@ -1841,8 +1844,33 @@ fn palette_frame(home: &Path, keys: &str) -> Snapshot {
     ]);
     let mut session = spawn_scene(scene);
     wait_for_diff(&mut session);
+
+    let before = session.snapshot().expect("a snapshot").rgba;
     play(&mut session, keys);
+    wait_for_change(&mut session, &before);
     session.snapshot().expect("a snapshot")
+}
+
+/// Wait until the frame's pixels differ from `before`, and then until the
+/// frame settles.
+///
+/// A script's own `<Settle>` reads a starved child as at rest, since a child
+/// that waits for the CPU draws nothing. Under load it can end before the
+/// child answers the keys ahead of it, and the shot shows the frame from
+/// before them.
+fn wait_for_change(session: &mut HeadlessSession, before: &[u8]) {
+    let deadline = Instant::now() + support::STARTUP_TIMEOUT;
+    while session.snapshot().expect("a snapshot").rgba == before {
+        assert!(
+            Instant::now() < deadline,
+            "the keys left the frame unchanged"
+        );
+        play(session, "<Wait:100>");
+    }
+
+    session
+        .wait_settled(support::SETTLE, support::STARTUP_TIMEOUT)
+        .expect("the frame after the keys settles");
 }
 
 /// Panics unless a plate's ground on pixel row 455 runs from pixel `left` to
