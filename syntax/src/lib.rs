@@ -9,7 +9,15 @@
 //! Nothing here reads the app, so the subsystem stays testable against a rope
 //! and a language registry alone.
 
-use crate::{
+use std::{
+    borrow::Cow,
+    ops::Range,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
+};
+use stoat_buffer::{
     buffer::{BufferId, TextBufferSnapshot},
     display_map::{
         highlights::{
@@ -17,14 +25,6 @@ use crate::{
             SemanticTokenSpans, TokenRun,
         },
         syntax_theme::SyntaxStyles,
-    },
-};
-use std::{
-    borrow::Cow,
-    ops::Range,
-    sync::{
-        atomic::{AtomicBool, Ordering},
-        Arc,
     },
 };
 use stoat_language::{
@@ -939,8 +939,8 @@ fn span_rows(span: Range<usize>, rope: &Rope) -> Range<u32> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{buffer::TextBuffer, display_map::syntax_theme};
     use std::path::Path;
+    use stoat_buffer::{buffer::TextBuffer, display_map::syntax_theme};
     use stoat_language::LanguageRegistry;
     use stoat_text::Anchor;
 
@@ -1021,7 +1021,7 @@ mod tests {
         let lang = LanguageRegistry::standard()
             .for_path(Path::new("a.rs"))
             .unwrap();
-        let styles = SyntaxStyles::from_theme(&crate::theme::Theme::empty());
+        let styles = SyntaxStyles::from_theme(&stoat_theme::Theme::empty());
         let buffer_id = BufferId::new(1);
 
         let text = "fn a() {}\n".repeat(10_000);
@@ -1081,7 +1081,7 @@ mod tests {
         Vec<(usize, usize, HighlightStyleId)>,
         Vec<(usize, usize, HighlightStyleId)>,
     ) {
-        let styles = SyntaxStyles::from_theme(&crate::theme::Theme::empty());
+        let styles = SyntaxStyles::from_theme(&stoat_theme::Theme::empty());
         let registry = LanguageRegistry::standard();
         // Without this every capture resolves to HighlightId::DEFAULT and both
         // token lists come back empty, comparing equal for the wrong reason.
@@ -1301,7 +1301,7 @@ mod tests {
     /// `HighlightId::DEFAULT` and both token lists come back empty, comparing
     /// equal for the wrong reason.
     fn carried_parse_fixture(path: &str) -> (SyntaxStyles, Arc<Language>) {
-        let styles = SyntaxStyles::from_theme(&crate::theme::Theme::empty());
+        let styles = SyntaxStyles::from_theme(&stoat_theme::Theme::empty());
         let registry = LanguageRegistry::standard();
         syntax_theme::install_highlight_maps(&registry, &styles);
         let lang = registry.for_path(Path::new(path)).unwrap();
@@ -1669,7 +1669,7 @@ mod tests {
     /// ones.
     #[test]
     fn only_an_unchanged_cover_keeps_its_captures() {
-        use crate::display_map::highlights::{HighlightStyle, HighlightStyleInterner};
+        use stoat_buffer::display_map::highlights::{HighlightStyle, HighlightStyleInterner};
         let style = HighlightStyleInterner::default().intern(HighlightStyle::default());
         let spans = |tag: usize| Some(vec![(tag..tag + 1, style)]);
 
@@ -1759,7 +1759,7 @@ mod tests {
         edit_at: usize,
         inserted: &str,
     ) -> ParseJobOutput {
-        let styles = SyntaxStyles::from_theme(&crate::theme::Theme::empty());
+        let styles = SyntaxStyles::from_theme(&stoat_theme::Theme::empty());
         let registry = LanguageRegistry::standard();
         syntax_theme::install_highlight_maps(&registry, &styles);
         let lang = registry.for_path(Path::new(path)).unwrap();
@@ -1887,7 +1887,7 @@ mod tests {
     /// the strip has to fall back to recoloring everything.
     #[test]
     fn a_first_parse_reports_no_rows_at_all() {
-        let styles = SyntaxStyles::from_theme(&crate::theme::Theme::empty());
+        let styles = SyntaxStyles::from_theme(&stoat_theme::Theme::empty());
         let registry = LanguageRegistry::standard();
         syntax_theme::install_highlight_maps(&registry, &styles);
         let lang = registry.for_path(Path::new("a.rs")).unwrap();
@@ -1922,7 +1922,7 @@ mod tests {
     /// bracket a different set of tokens than the highlights they paint.
     #[test]
     fn batched_parse_channel_matches_per_anchor_construction() {
-        let styles = SyntaxStyles::from_theme(&crate::theme::Theme::empty());
+        let styles = SyntaxStyles::from_theme(&stoat_theme::Theme::empty());
         let registry = LanguageRegistry::standard();
         syntax_theme::install_highlight_maps(&registry, &styles);
         let lang = registry.for_path(Path::new("a.rs")).unwrap();

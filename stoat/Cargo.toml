@@ -27,6 +27,7 @@ stoat_language = { path = "../language" }
 stoat_log = { path = "../log" }
 stoat_scheduler = { path = "../scheduler" }
 stoat_selection = { path = "../selection" }
+stoat_syntax = { path = "../syntax" }
 stoat_text = { path = "../text" }
 stoat_theme = { path = "../theme" }
 regex-cursor.workspace = true

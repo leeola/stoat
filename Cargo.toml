@@ -19,6 +19,7 @@ members = [
   "scheduler",
   "selection",
   "stoat",
+  "syntax",
   "log",
   "text",
   "theme",

@@ -1,0 +1,16 @@
+[package]
+name = "stoat_syntax"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+stoat_buffer = { path = "../buffer" }
+stoat_language = { path = "../language" }
+stoat_text = { path = "../text" }
+
+[dev-dependencies]
+stoat_theme = { path = "../theme" }
