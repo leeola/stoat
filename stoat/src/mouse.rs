@@ -125,6 +125,10 @@ enum ListRows {
     /// a pixel list lays out one row pitch apart in the window that
     /// `window_start` derives from the rows that fit.
     ArgRows,
+    /// The Job List's rows, one per result, which a pixel list lays out one
+    /// row pitch apart under the rule of its column header, in the window
+    /// that `window_start` derives from the rows on show.
+    JobRows,
 }
 
 impl ModalSurfaces {
@@ -170,6 +174,18 @@ impl ModalSurfaces {
                 let start = crate::render::picker::window_start(self.selected, fit);
                 let pixel = pointer_pixel_row(stoat, self.pool, row, metrics);
                 let shown = (pixel / metrics.pitch(1)) as usize;
+                let index = start + shown;
+                return (shown < fit && index < self.len).then_some(index);
+            },
+            ListRows::JobRows => {
+                let list = stoat.job_list.as_ref()?;
+                let Some(metrics) = list.row_metrics else {
+                    return self.one_per_result(row);
+                };
+                let fit = list.viewport_rows.unwrap_or(1);
+                let start = crate::render::picker::window_start(self.selected, fit);
+                let pixel = pointer_pixel_row(stoat, self.pool, row, metrics);
+                let shown = crate::render::job_list::pixel_row_at(metrics, pixel)?;
                 let index = start + shown;
                 return (shown < fit && index < self.len).then_some(index);
             },
@@ -765,14 +781,20 @@ pub(crate) fn boxed_modal_surfaces(stoat: &Stoat) -> Option<ModalSurfaces> {
         },
         ActiveModal::JobList => {
             let list = stoat.job_list.as_ref()?;
-            let (_, inner) = crate::render::job_list::job_list_layout(size, list.entries().len())?;
+            let layout = crate::render::job_list::job_list_layout(
+                size,
+                list.entries().len(),
+                list.row_metrics,
+            )?;
             Some(ModalSurfaces {
-                list: crate::render::job_list::job_list_rows(inner),
+                list: layout.rows,
                 preview: None,
                 len: list.filtered().len(),
                 selected: list.selected(),
-                rows: ListRows::OnePerResult,
-                pool: None,
+                rows: ListRows::JobRows,
+                pool: layout
+                    .pixels
+                    .map(|_| crate::smooth_scroll::non_pane_pool::JOB_LIST),
             })
         },
         // The panel's rows interleave its section heads, so no list of one
@@ -5553,14 +5575,97 @@ mod tests {
         h.push_job("sleep 30");
         h.type_keys("escape space J j");
         h.snapshot();
-        let (_, inner) =
-            crate::render::job_list::job_list_layout(h.stoat.size(), 2).expect("the list fits");
+        let inner = crate::render::job_list::job_list_layout(h.stoat.size(), 2, None)
+            .expect("the list fits")
+            .inner;
         let row = crate::render::job_list::job_list_rows(inner).y + 1;
 
         left_press(&mut h, inner.x + 5, row);
         let selected = h.stoat.job_list.as_ref().map(|list| list.selected());
         left_press(&mut h, inner.x + 5, row);
         assert_eq!((selected, h.stoat.job_list.is_none()), (Some(1), true));
+    }
+
+    /// A press on a pixel Job List reads the pointer's pixel down the rows
+    /// under its column header. The first row's box stands 5 px down and each
+    /// row 21 px under the one before it, so the pixel 26 is the second row's,
+    /// the pixel 3 over the first row's box is no row's and keeps the
+    /// selection, and the pixel 25, the gap under the first row, is the first
+    /// row's.
+    #[test]
+    fn a_press_on_a_pixel_job_row_selects_the_row_under_the_pointer() {
+        let mut h = crate::test_harness::TestHarness::default();
+        h.stoat.stoatty_protocol = stoatty_protocol::PROTOCOL_VERSION;
+        h.stoat.cell_pixels = Some((9, 18));
+        h.stoat.display_scale = Some(1.0);
+        h.push_job("sleep 30");
+        h.push_job("sleep 31");
+        h.type_keys("escape space J j");
+        h.snapshot();
+        let metrics = h.stoat.job_list.as_ref().and_then(|list| list.row_metrics);
+        let rows = crate::render::job_list::job_list_layout(h.stoat.size(), 2, metrics)
+            .expect("the list fits")
+            .rows;
+
+        let mut selected = Vec::new();
+        for pixel in [26, 3, 25] {
+            let press = WindowIpcEvent::PoolMouse {
+                pool: crate::smooth_scroll::non_pane_pool::JOB_LIST,
+                kind: MouseKind::Press(IpcMouseButton::Left),
+                col: rows.x + 5,
+                row: rows.y + pixel / 18,
+                cell_col: 45,
+                cell_row: pixel,
+                mods: 0,
+            };
+            crate::app::deliver_window_event(&mut h.stoat, press);
+            selected.push(h.stoat.job_list.as_ref().map(|list| list.selected()));
+        }
+
+        assert_eq!(
+            (metrics.is_some(), selected),
+            (true, vec![Some(1), Some(1), Some(0)]),
+        );
+    }
+
+    /// A pixel Job List of six Jobs on 24 rows shows 4 rows, so a press on
+    /// the pixel 95 of its rows, where a fifth row's box would stand, names no
+    /// row and keeps the selection.
+    #[test]
+    fn a_press_under_the_last_pixel_job_row_on_show_names_none() {
+        let mut h = crate::test_harness::TestHarness::default();
+        h.stoat.stoatty_protocol = stoatty_protocol::PROTOCOL_VERSION;
+        h.stoat.cell_pixels = Some((9, 18));
+        h.stoat.display_scale = Some(1.0);
+        for n in 0..6 {
+            h.push_job(&format!("sleep {n}"));
+        }
+        h.type_keys("escape space J j");
+        h.snapshot();
+        let metrics = h.stoat.job_list.as_ref().and_then(|list| list.row_metrics);
+        let rows = crate::render::job_list::job_list_layout(h.stoat.size(), 6, metrics)
+            .expect("the list fits")
+            .rows;
+
+        let press = WindowIpcEvent::PoolMouse {
+            pool: crate::smooth_scroll::non_pane_pool::JOB_LIST,
+            kind: MouseKind::Press(IpcMouseButton::Left),
+            col: rows.x + 5,
+            row: rows.y + 5,
+            cell_col: 45,
+            cell_row: 95,
+            mods: 0,
+        };
+        crate::app::deliver_window_event(&mut h.stoat, press);
+
+        let list = h.stoat.job_list.as_ref();
+        assert_eq!(
+            (
+                list.and_then(|list| list.viewport_rows),
+                list.map(|list| list.selected())
+            ),
+            (Some(4), Some(0)),
+        );
     }
 
     /// While the Glance shows, a left press off the chips closes it.

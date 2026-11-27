@@ -111,6 +111,9 @@ pub(crate) mod non_pane_pool {
     /// The Job Tray of the tab bar at the board's pixels, a region with no
     /// page where a press on a chip reports the pointer's pixel.
     pub(crate) const JOB_TRAY: u32 = BASE + 15;
+    /// The Job List's rows at the board's pixels, a region with no page where
+    /// a press on a row reports the pointer's pixel.
+    pub(crate) const JOB_LIST: u32 = BASE + 16;
     /// First id of the per-window status-bar partition. A detached pane's status
     /// row pools at `WINDOW_STATUS + pane.index`, so the partition is offset far
     /// enough above the fixed non-pane ids that pane indices never collide.

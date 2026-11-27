@@ -14,6 +14,7 @@ use crate::{
     fuzzy,
     input_view::InputView,
     picker,
+    render::pixel_rows::RowMetrics,
     run::{CmdId, RunId},
     workspace::Workspace,
 };
@@ -64,6 +65,12 @@ pub(crate) struct JobList {
     /// Rows the last render painted, stamped by the renderer and read by
     /// [`Self::page`].
     pub(crate) viewport_rows: Option<usize>,
+    /// The cell and the scale that the last render laid the rows out by at
+    /// the board's pixels, or `None` for rows on whole cells.
+    ///
+    /// A press and the pointer region read it, because the rows stand off the
+    /// cell grid and the paint's layout follows the metrics.
+    pub(crate) row_metrics: Option<RowMetrics>,
     scope: JobScope,
     /// The query that the ranking came from, `None` until the first ranking.
     /// With unchanged rows, a pass of the same query ranks nothing, and
@@ -85,6 +92,7 @@ impl JobList {
             last_pattern: None,
             selected: 0,
             viewport_rows: None,
+            row_metrics: None,
             scope: JobScope::All,
             last_query: None,
         }
@@ -575,7 +583,9 @@ mod tests {
         action_handlers::dispatch(&mut h.stoat, &Jobs);
         h.snapshot();
 
-        let (_, inner) = job_list_layout(h.stoat.size(), 0).expect("the list fits");
+        let inner = job_list_layout(h.stoat.size(), 0, None)
+            .expect("the list fits")
+            .inner;
         let row = job_list_rows(inner);
         let buf = h.rendered_buffer();
         let cells = (row.x + 3..row.x + 10).map(|x| &buf[(x, row.y)]);

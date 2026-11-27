@@ -3736,7 +3736,7 @@ fn row_parts<'a>(
 ///
 /// A row leaves out a name's first `offset` chars, and `indices` index the
 /// whole name, so the text's char `i` sits at position `offset + i`.
-fn match_spans<'a>(
+pub(super) fn match_spans<'a>(
     text: &'a str,
     offset: usize,
     indices: &[u32],

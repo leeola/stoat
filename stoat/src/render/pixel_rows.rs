@@ -182,8 +182,13 @@ impl RowMetrics {
 
     /// The sixteenths of a cell's height nearest `logical` board px.
     pub(crate) fn rows16(&self, logical: u16) -> u16 {
+        self.px_rows16(self.px(logical))
+    }
+
+    /// The sixteenths of a cell's height nearest `px` physical px.
+    pub(crate) fn px_rows16(&self, px: u32) -> u16 {
         let height = self.line_height();
-        ((self.px(logical) * 16 + height / 2) / height) as u16
+        ((px * 16 + height / 2) / height) as u16
     }
 
     /// The sixteenths of a cell's height that the box of a row of `lines`

@@ -965,6 +965,13 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
         && stoat.stoatty_protocol >= POOL_POINTER_PROTOCOL)
         .then(|| tray_pointer_region(stoat))
         .flatten();
+    // A Job List at the board's pixels draws its rows on the live grid off the
+    // cell grid, so its pool takes a region with no page over them, as the
+    // palette's pixel lists do.
+    let job_list_pointer =
+        (!overlay && stoat.window_ipc_connected && stoat.stoatty_protocol >= POOL_POINTER_PROTOCOL)
+            .then(|| job_list_pointer_region(stoat))
+            .flatten();
     let palette_list = pools_palette
         .then_some(stoat.command_palette.as_ref())
         .flatten()
@@ -1137,6 +1144,7 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
         run_pointers
             .iter()
             .chain(&tray_pointer)
+            .chain(&job_list_pointer)
             .map(|region| region.pool),
     );
     // Each detached pane also keeps a one-row status pool alive.
@@ -1205,7 +1213,11 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
     stoat
         .terminal_pages
         .retain(|pool, _| terminal_panes.iter().any(|pane| pane.region.pool == *pool));
-    for region in run_pointers.into_iter().chain(tray_pointer) {
+    let pointers = run_pointers
+        .into_iter()
+        .chain(tray_pointer)
+        .chain(job_list_pointer);
+    for region in pointers {
         stoat.smooth_scroll.declare_pointer_region(&mut out, region);
     }
 
@@ -3248,6 +3260,35 @@ fn tray_pointer_region(stoat: &Stoat) -> Option<PoolRegionCommand> {
         left: first.cells.start,
         width: last.cells.end - first.cells.start,
         height: stoat.tab_bar_rows(),
+        window: 0,
+        kind: PoolKind::Grid,
+        dim: 0,
+        resident: false,
+        inset: [0, 0],
+    })
+}
+
+/// The pointer region of the open Job List where its last paint laid its rows
+/// out at the board's pixels, over the cell rows that the rows draw in.
+///
+/// The list fills no page, so its pool gives a press the pixel from the
+/// corner of those rows, as
+/// [`pixel_row_at`](crate::render::job_list::pixel_row_at) reads it.
+fn job_list_pointer_region(stoat: &Stoat) -> Option<PoolRegionCommand> {
+    let list = stoat.job_list.as_ref()?;
+    let metrics = list.row_metrics?;
+    let rows = crate::render::job_list::job_list_layout(
+        stoat.size(),
+        list.entries().len(),
+        Some(metrics),
+    )?
+    .rows;
+    (!rows.is_empty()).then_some(PoolRegionCommand {
+        pool: crate::smooth_scroll::non_pane_pool::JOB_LIST,
+        top: rows.y,
+        left: rows.x,
+        width: rows.width,
+        height: rows.height,
         window: 0,
         kind: PoolKind::Grid,
         dim: 0,

@@ -60,11 +60,26 @@ pub(crate) fn workspace_picker_layout(area: Rect, entries_len: usize) -> Option<
     if entries_len == 0 {
         return None;
     }
-    let max_rows = (area.height / 2)
+    let entry_rows = u16::try_from(entries_len)
+        .unwrap_or(u16::MAX)
+        .min(max_list_rows(area));
+    picker_box(area, 1 + HEADER_ROWS + entry_rows + FOOTER_ROWS)
+}
+
+/// The most list rows that the box over `area` shows, half `area`'s height
+/// less the box's other rows, past which the list scrolls.
+pub(crate) fn max_list_rows(area: Rect) -> u16 {
+    (area.height / 2)
         .saturating_sub(HEADER_ROWS + FOOTER_ROWS + 1)
-        .max(1);
-    let entry_rows = u16::try_from(entries_len).unwrap_or(u16::MAX).min(max_rows);
-    let content_height = 1 + HEADER_ROWS + entry_rows + FOOTER_ROWS;
+        .max(1)
+}
+
+/// The boards' S box of `content_height` rows over `area`, and the inner rect
+/// inside its border, or `None` when `area` is too small to host it.
+///
+/// The box takes [`RECOMMENDED_COLUMNS`], and its top sits a third of the way
+/// down the room `area` leaves around it.
+pub(crate) fn picker_box(area: Rect, content_height: u16) -> Option<(Rect, Rect)> {
     let mut modal = crate::render::chrome::modal_box(
         area,
         (0, content_height),
