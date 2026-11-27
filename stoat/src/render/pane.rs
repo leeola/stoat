@@ -3026,7 +3026,7 @@ fn diff_metrics(
             let (lead, tail) = kind_metrics(kind, base, lines, hunk);
             let tag = (
                 diff_changes::kind_tag_text(kind),
-                frame.theme.kind_tag_style(kind),
+                diff_changes::kind_tag_style(frame.theme, kind),
             );
             (lead, Some(tag), tail)
         },
@@ -4232,7 +4232,7 @@ mod tests {
         lsp::drain,
         pane::{DockPanel, DockSide, DockVisibility, FocusTarget, View},
         rebase::RebaseState,
-        render::{conflict_view::ConflictLayout, TypeScale},
+        render::{conflict_view::ConflictLayout, diff_changes, TypeScale},
         term_session::TermId,
         workspace::{
             diff::{DiffBase, HunkPosition, RepoStatus, WorktreeBase, DIFF_SETTLE},
@@ -5669,7 +5669,8 @@ mod tests {
                 h.settle_diff_jobs();
                 h.type_keys("] g");
                 let row: Vec<char> = bar_row(&h.render_composited()).chars().collect();
-                let fill = style_rgb(h.stoat.theme.kind_tag_style(&kind).bg).expect("an RGB tag");
+                let fill = style_rgb(diff_changes::kind_tag_style(&h.stoat.theme, &kind).bg)
+                    .expect("an RGB tag");
                 let tags: Vec<(String, [Edge; 4])> = decode_stream(&h.stoat.apc_scene.all_bytes())
                     .into_iter()
                     .filter_map(|command| match command {

@@ -854,7 +854,7 @@ fn header_left(
         Some(MergeNote::FromBranch(_)) if *kind == FileKind::Modified => {
             ("merged".to_string(), theme.merged_tag_style())
         },
-        _ => (kind_tag_text(kind), theme.kind_tag_style(kind)),
+        _ => (kind_tag_text(kind), kind_tag_style(theme, kind)),
     };
     HeaderLeft { from, tag, counts }
 }
@@ -883,6 +883,24 @@ pub(crate) fn kind_tag_text(kind: &FileKind) -> String {
         FileKind::New => "new".to_string(),
         FileKind::Deleted => "deleted".to_string(),
     }
+}
+
+/// The style of the File Kind Tag that names `kind` in a File Header, its
+/// text (foreground) on its box (background).
+///
+/// A theme that leaves the kind's `diff.kind` scope unset gives the tag no
+/// box. The tag's text then takes the foreground of the kind's diff mark,
+/// which is `diff.modified`, `diff.moved`, `diff.added` for an untracked or
+/// a new file, or `diff.deleted`.
+pub(crate) fn kind_tag_style(theme: &Theme, kind: &FileKind) -> Style {
+    let (tag, mark) = match kind {
+        FileKind::Modified => (scope::DIFF_KIND_MODIFIED, scope::DIFF_MODIFIED),
+        FileKind::Moved { .. } => (scope::DIFF_KIND_MOVED, scope::DIFF_MOVED),
+        FileKind::Untracked => (scope::DIFF_KIND_UNTRACKED, scope::DIFF_ADDED),
+        FileKind::New => (scope::DIFF_KIND_NEW, scope::DIFF_ADDED),
+        FileKind::Deleted => (scope::DIFF_KIND_DELETED, scope::DIFF_DELETED),
+    };
+    theme.tag_style(tag, mark)
 }
 
 /// The left half of `excerpt`'s File Header and the lines its file hides, with
@@ -1377,12 +1395,12 @@ pub(crate) fn replay_cursor(
 #[cfg(test)]
 mod tests {
     use super::{
-        header_counts, header_left, header_path, paint_header, paint_stack_page, paint_stack_rows,
-        PagePaint,
+        header_counts, header_left, header_path, kind_tag_style, paint_header, paint_stack_page,
+        paint_stack_rows, PagePaint,
     };
     use crate::{
         action_handlers, apc_emit,
-        app::{MessageKind, Stoat},
+        app::{MessageKind, Stoat, DEFAULT_KEYMAP},
         buffer_registry::BufferRegistry,
         diff_changes::{self, DiffChangesState, ExcerptStats},
         editor_state::{EditorId, EditorState},
@@ -1401,7 +1419,7 @@ mod tests {
         },
         test_fixture::drain_apc,
         test_harness::TestHarness,
-        theme::{scope, TypeRole},
+        theme::{scope, Theme, TypeRole},
         workspace::{diff::WorktreeBase, Workspace},
     };
     use crossterm::event::Event;
@@ -1860,6 +1878,61 @@ mod tests {
                 left("new +1 \u{2212}1 \u{b7} 1 hunk"),
                 left("deleted +1 \u{2212}1 \u{b7} 1 hunk"),
             ],
+        );
+    }
+
+    /// The ermine File Kind Tags take the DiffKindsSpec board's colors. A
+    /// theme that sets no `diff.kind` scope, as default_dark does, tags each
+    /// kind with its text alone, in the foreground of the kind's diff mark.
+    #[test]
+    fn a_kind_tag_without_its_scope_takes_its_diff_mark_s_text_color() {
+        let [ermine, dark] = ["ermine_night", "default_dark"].map(|name| {
+            let (config, errors) = stoat_config::parse(DEFAULT_KEYMAP);
+            assert!(errors.is_empty(), "parse errors: {errors:?}");
+            let config = config.expect("expected successful parse");
+            Theme::from_config(&config, name).expect("theme load failed")
+        });
+        let kinds = [
+            FileKind::Modified,
+            FileKind::Moved {
+                from: PathBuf::from("a"),
+                similarity: 100,
+            },
+            FileKind::Untracked,
+            FileKind::New,
+            FileKind::Deleted,
+        ];
+        let rgb = |hex: u32| {
+            let [_, r, g, b] = hex.to_be_bytes();
+            Color::Rgb(r, g, b)
+        };
+        let tag = |fg: u32, bg: u32| Style::new().fg(rgb(fg)).bg(rgb(bg));
+        let mark = |scope: &str| Style {
+            fg: dark.get(scope).fg,
+            ..Style::default()
+        };
+
+        assert_eq!(
+            (
+                kinds.each_ref().map(|kind| kind_tag_style(&ermine, kind)),
+                kinds.each_ref().map(|kind| kind_tag_style(&dark, kind)),
+            ),
+            (
+                [
+                    tag(0x7fb0ff, 0x1f2a3d),
+                    tag(0x6cc7d6, 0x1e3237),
+                    tag(0xe8bd6a, 0x2e2a1e),
+                    tag(0x8fd18a, 0x1d2a1f),
+                    tag(0xf2777f, 0x33201f),
+                ],
+                [
+                    mark(scope::DIFF_MODIFIED),
+                    mark(scope::DIFF_MOVED),
+                    mark(scope::DIFF_ADDED),
+                    mark(scope::DIFF_ADDED),
+                    mark(scope::DIFF_DELETED),
+                ],
+            ),
         );
     }
 
