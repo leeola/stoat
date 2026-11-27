@@ -2464,10 +2464,10 @@ fn the_pane_picker_badge_draws_the_accent_box() {
 /// A line typed at a Run pane runs in a bash of its own, and the pane shows
 /// the line's output under its header and nothing past it.
 ///
-/// `<Space>t` turns the lone pane into a Run pane, whose prompt takes row 47.
-/// The stack sits on the prompt, so the line's header takes row 45 and its
-/// output `ok` row 46 from column 3, in the dim text color. The row over the
-/// header stays blank.
+/// `<Space>t` turns the lone pane into a Run pane. The stack sits on the
+/// prompt, so the line's block starts at pixel row 793 and its output `ok`
+/// takes the pixel rows 819 to 835 from 10 px into the content, in the dim
+/// text color. The pane over the block stays blank.
 #[test]
 fn a_run_pane_line_runs_in_its_own_bash() {
     let mut home = support::scratch_home();
@@ -2478,15 +2478,15 @@ fn a_run_pane_line_runs_in_its_own_bash() {
         "<Space>t<Settle>echo ok<Enter><Settle:500>",
     );
 
-    let output = pixels_of(&shot, cell_rect(3, 46, 2, 1), TEXT_DIM);
-    let above = brightest(&shot, cell_rect(1, 44, 100, 1));
+    let output = pixels_of(&shot, (30, 819, 200, 17), TEXT_DIM);
+    let above = brightest(&shot, (20, 760, 1400, 30));
     let base = BASE.into_iter().max().unwrap_or_default();
     if output == 0 || above > base {
         let frame = keep_frame(&shot, &mut home, "run_pane_own_bash");
         panic!(
-            "the output row reads {output} dim text pixels in cells 3 and 4, and the row over \
-             the header peaks at {above}; want dim text on the output row and a blank row over \
-             the header; the frame is {}",
+            "the output row reads {output} dim text pixels, and the pane over the block peaks \
+             at {above}; want dim text on the output row and a blank pane over the block; the \
+             frame is {}",
             frame.display(),
         );
     }
@@ -2496,10 +2496,11 @@ fn a_run_pane_line_runs_in_its_own_bash() {
 /// prompt carries no exit flag.
 ///
 /// `echo ok` and `false` run in the lone Run pane, and the stack sits on the
-/// prompt, so the headers take rows 44 and 46. The right end of the first holds the green success
-/// mark and the second the red failure mark, each beside its runtime in gray ink. The
-/// prompt row, the pane's last, holds no red pixel, because the status carries
-/// the exit.
+/// prompt, so the header of the first is the pixel rows 769 to 786 and that of
+/// the second 817 to 834. The right end of the first holds the green success
+/// mark and the second the red failure mark, each beside its runtime in gray
+/// ink. The prompt, the pixel rows 849 to 866, holds no red pixel, because the
+/// status carries the exit.
 ///
 /// The marks draw at the caption size, where a pixel that a stroke covers in
 /// part blends with the pane, so each check reads a pixel's hue rather than
@@ -2523,7 +2524,7 @@ fn the_run_block_header_ends_in_its_status() {
         let (low, high) = (r.min(g).min(b), r.max(g).max(b));
         high > 70 && high - low < 24
     };
-    let [ok, failed] = [44, 46].map(|row| cell_rect(128, row, 30, 1));
+    let [ok, failed] = [769, 817].map(|y| (1150, y, 270, 18));
     let marks = [
         pixels_where(&shot, ok, green),
         pixels_where(&shot, failed, red),
@@ -2532,7 +2533,7 @@ fn the_run_block_header_ends_in_its_status() {
         pixels_where(&shot, ok, gray),
         pixels_where(&shot, failed, gray),
     ];
-    let flag = pixels_where(&shot, cell_rect(2, 47, 40, 1), red);
+    let flag = pixels_where(&shot, (20, 849, 360, 18), red);
     if marks.contains(&0) || runtimes.contains(&0) || flag > 0 {
         let frame = keep_frame(&shot, &mut home, "run_block_status");
         panic!(
@@ -2544,16 +2545,16 @@ fn the_run_block_header_ends_in_its_status() {
     }
 }
 
-/// A Run pane's stack sits on its prompt one column inside the pane, between
-/// the rule that ends its block and the rule over the prompt.
+/// A Run pane's stack sits on its prompt 12 px inside the pane's Island,
+/// between the rule that ends its block and the rule over the prompt.
 ///
-/// `echo ok` runs in the lone Run pane, columns 1 to 158 and rows 2 to 47, so
-/// the header takes row 45, the output row 46, and the prompt row 47. The
-/// block's rule is the last pixel row of row 46 and the prompt's rule the
-/// first pixel row of row 47, both across the inset from x 18. The column left
-/// of the inset keeps the base there, as do the empty pane over the stack and
-/// the left edge of a passed block's body. The output starts at column 3 in
-/// the dim text color.
+/// `echo ok` runs in the lone Run pane, columns 1 to 158 and rows 2 to 47,
+/// whose Island is x 8 to 1431 and y 32 to 875, so the content is x 20 to
+/// 1419. The prompt's rule is pixel row 841 and the block's rule pixel row
+/// 840, both across the content. The Island's pad beside the content keeps
+/// the base on those rows, as do the empty pane over the stack and the left
+/// edge of a passed block's body. The output row is the pixel rows 819 to
+/// 835, and its text starts 10 px into the content in the dim text color.
 #[test]
 fn the_run_stack_sits_on_the_prompt_between_two_rules() {
     let mut home = support::scratch_home();
@@ -2567,18 +2568,33 @@ fn the_run_stack_sits_on_the_prompt_between_two_rules() {
     expect_region(
         &shot,
         &mut home,
-        (18, 846, 1404, 1),
+        (20, 841, 1400, 1),
         HAIRLINE,
         "run_prompt_rule",
     );
     expect_region(
         &shot,
         &mut home,
-        (18, 845, 1404, 1),
+        (20, 840, 1400, 1),
         RAISED,
         "run_block_rule",
     );
-    expect_region(&shot, &mut home, (9, 845, 9, 2), BASE, "run_rule_inset");
+    expect_region(&shot, &mut home, (9, 840, 11, 2), BASE, "run_rule_inset");
+    expect_region(
+        &shot,
+        &mut home,
+        (1420, 840, 11, 2),
+        BASE,
+        "run_rule_inset_right",
+    );
+    for (x, want, what) in [
+        (19, BASE, "run_rule_before_left"),
+        (20, RAISED, "run_rule_left"),
+        (1419, RAISED, "run_rule_right"),
+        (1421, BASE, "run_rule_after_right"),
+    ] {
+        expect_region(&shot, &mut home, (x, 840, 1, 1), want, what);
+    }
     expect_region(
         &shot,
         &mut home,
@@ -2586,15 +2602,15 @@ fn the_run_stack_sits_on_the_prompt_between_two_rules() {
         BASE,
         "run_empty_pane",
     );
-    expect_region(&shot, &mut home, (18, 829, 2, 15), BASE, "run_passed_body");
+    expect_region(&shot, &mut home, (20, 819, 2, 17), BASE, "run_passed_body");
 
-    let output = pixels_of(&shot, cell_rect(3, 46, 2, 1), TEXT_DIM);
-    let gutter = pixels_of(&shot, cell_rect(2, 46, 1, 1), TEXT_DIM);
+    let output = pixels_of(&shot, (30, 819, 18, 17), TEXT_DIM);
+    let gutter = pixels_of(&shot, (22, 819, 8, 17), TEXT_DIM);
     if output == 0 || gutter > 0 {
         let frame = keep_frame(&shot, &mut home, "run_stack_output");
         panic!(
-            "the output reads {output} dim text pixels in cells 3 and 4 and {gutter} in cell 2; \
-             want the output to start at cell 3; the frame is {}",
+            "the output reads {output} dim text pixels from x 30 and {gutter} from x 22 to x \
+             29; want the output to start 10 px into the content; the frame is {}",
             frame.display(),
         );
     }
@@ -2603,10 +2619,10 @@ fn the_run_stack_sits_on_the_prompt_between_two_rules() {
 /// The Run pane prompt colors a cargo line's first word and shows its Kind
 /// Chip at its right, as the line is typed.
 ///
-/// `cargo test` sits at the prompt of the lone Run pane, row 47, with no Enter.
-/// `cargo` draws in the command color, so the row's left end holds pixels of
-/// the special color, and the chip's box at the row's right end covers at
-/// least 14 pixel rows of 40 pixels in its tint.
+/// `cargo test` sits at the prompt of the lone Run pane, the pixel rows 848 to
+/// 867, with no Enter. `cargo` draws in the command color, so the prompt's
+/// left end holds pixels of the special color, and the chip's box at its
+/// right end covers at least 14 pixel rows of 40 pixels in its tint.
 #[test]
 fn the_run_prompt_shows_its_kind_chip() {
     let mut home = support::scratch_home();
@@ -2618,8 +2634,8 @@ fn the_run_prompt_shows_its_kind_chip() {
     );
 
     let (token, tint) = (
-        pixels_of(&shot, cell_rect(2, 47, 30, 1), SPECIAL),
-        pixels_of(&shot, cell_rect(108, 47, 50, 1), KIND_TINT),
+        pixels_of(&shot, (20, 848, 270, 20), SPECIAL),
+        pixels_of(&shot, (972, 848, 448, 20), KIND_TINT),
     );
     if token == 0 || tint < 14 * 40 {
         let frame = keep_frame(&shot, &mut home, "run_prompt_chip");
@@ -2632,11 +2648,11 @@ fn the_run_prompt_shows_its_kind_chip() {
     }
 }
 
-/// A failed block's body carries the danger bar at the inset's left edge.
+/// A failed block's body carries the danger bar at the content's left edge.
 ///
-/// `echo boom; false` prints `boom` on row 46 and exits 1. The bar covers the
-/// two pixels from x 18 on that row, and the two pixels right of it keep the
-/// base.
+/// `echo boom; false` prints `boom` on the output row, the pixel rows 819 to
+/// 835, and exits 1. The bar covers the two pixels from x 20 on that row, and
+/// the two pixels right of it keep the base.
 #[test]
 fn a_failed_body_carries_the_danger_bar_in_pixels() {
     let mut home = support::scratch_home();
@@ -2650,14 +2666,14 @@ fn a_failed_body_carries_the_danger_bar_in_pixels() {
     expect_region(
         &shot,
         &mut home,
-        (18, 829, 2, 15),
+        (20, 819, 2, 17),
         DANGER,
         "run_failure_bar",
     );
     expect_region(
         &shot,
         &mut home,
-        (20, 829, 2, 15),
+        (22, 819, 2, 17),
         BASE,
         "run_failure_bar_edge",
     );
@@ -2670,11 +2686,11 @@ fn a_failed_body_carries_the_danger_bar_in_pixels() {
 /// new tab, where it ends at once and the tab closes. The line names `[` by
 /// its octal code, because the prompt pairs a typed bracket with its closer.
 ///
-/// The block is then the header on row 44, the Stub row 45, and the hint row
-/// 46. The bar covers the two pixels from x 18 beside the Stub row and the
-/// hint row, and the two pixels right of it keep the base. The header's
-/// status reads `tab closed` in the muted color, with no pixel of the run
-/// color.
+/// The block is then the header on the pixel rows 775 to 792, the 18 px Stub
+/// row 796 to 813, and the hint 814 to 835. The bar covers the two pixels from
+/// x 20 beside the Stub row and the hint, and the two pixels right of it keep
+/// the base. The header's status reads `tab closed` in the muted color, with
+/// no pixel of the run color.
 #[test]
 fn a_handed_off_cmd_leaves_a_stub_with_its_bar() {
     let mut home = support::scratch_home();
@@ -2685,10 +2701,12 @@ fn a_handed_off_cmd_leaves_a_stub_with_its_bar() {
         "<Space>t<Settle>printf '\\033\\133?1049h'<Enter><Settle:800>",
     );
 
-    expect_region(&shot, &mut home, (18, 812, 2, 30), SPECIAL, "stub_bar");
-    expect_region(&shot, &mut home, (20, 812, 2, 30), BASE, "stub_bar_edge");
+    expect_region(&shot, &mut home, (20, 796, 2, 40), SPECIAL, "stub_bar");
+    expect_region(&shot, &mut home, (22, 796, 2, 40), BASE, "stub_bar_edge");
+    expect_region(&shot, &mut home, (20, 795, 2, 1), BASE, "stub_bar_over");
+    expect_region(&shot, &mut home, (20, 796, 2, 1), SPECIAL, "stub_bar_top");
 
-    let status = cell_rect(128, 44, 30, 1);
+    let status = (1150, 775, 270, 18);
     let (muted, run) = (
         pixels_of(&shot, status, MUTED),
         pixels_of(&shot, status, SPECIAL),
@@ -2707,10 +2725,11 @@ fn a_handed_off_cmd_leaves_a_stub_with_its_bar() {
 /// its Stub stays with no first run of the program under `TERM=dumb`.
 ///
 /// A fake `htop` exits at once, so its tab closes. The block is then the header
-/// on row 44, the Stub row 45, and the hint row 46, with the run color's bar
-/// beside the Stub row and the hint row. The header's status reads in the
-/// muted color. A first run of this program in the block would end in the
-/// success mark, so the header's right end holds no pixel of that color.
+/// on the pixel rows 775 to 792, the 18 px Stub row 796 to 813, and the hint
+/// 814 to 835, with the run color's bar beside the Stub row and the hint. The
+/// header's status reads in the muted color. A first run of this program in
+/// the block would end in the success mark, so the header's right end holds no
+/// pixel of that color.
 #[test]
 fn a_listed_program_leaves_a_stub_at_submit() {
     let mut home = support::scratch_home();
@@ -2727,19 +2746,19 @@ fn a_listed_program_leaves_a_stub_at_submit() {
     expect_region(
         &shot,
         &mut home,
-        (18, 812, 2, 30),
+        (20, 796, 2, 40),
         SPECIAL,
         "listed_stub_bar",
     );
     expect_region(
         &shot,
         &mut home,
-        (20, 812, 2, 30),
+        (22, 796, 2, 40),
         BASE,
         "listed_stub_bar_edge",
     );
 
-    let status = cell_rect(128, 44, 30, 1);
+    let status = (1150, 775, 270, 18);
     let (muted, success) = (
         pixels_of(&shot, status, MUTED),
         pixels_of(&shot, status, SUCCESS),
@@ -2757,11 +2776,11 @@ fn a_listed_program_leaves_a_stub_at_submit() {
 /// A running block that `<C-j>` moves to Jobs draws as a Stub, with the bar
 /// of the Job's state beside its rows.
 ///
-/// `sleep 30` runs on in the tray, so the block is the header on row 44, the
-/// Stub row 45, and the hint row 46. The bar covers the two pixels from x 18
-/// beside the Stub row and the hint row, and the two pixels right of it keep
-/// the base. The header's status reads in the run color, and the key that
-/// leads the hint row in the info color.
+/// `sleep 30` runs on in the tray, so the block is the header on the pixel
+/// rows 775 to 792, the 18 px Stub row 796 to 813, and the hint 814 to 835.
+/// The bar covers the two pixels from x 20 beside the Stub row and the hint,
+/// and the two pixels right of it keep the base. The header's status reads in
+/// the run color, and the key that leads the hint in the info color.
 #[test]
 fn a_block_pushed_to_jobs_draws_as_a_stub() {
     let mut home = support::scratch_home();
@@ -2772,18 +2791,18 @@ fn a_block_pushed_to_jobs_draws_as_a_stub() {
         "<Space>t<Settle>sleep 30<Enter><Settle><C-j><Settle>",
     );
 
-    expect_region(&shot, &mut home, (18, 812, 2, 30), SPECIAL, "job_stub_bar");
+    expect_region(&shot, &mut home, (20, 796, 2, 40), SPECIAL, "job_stub_bar");
     expect_region(
         &shot,
         &mut home,
-        (20, 812, 2, 30),
+        (22, 796, 2, 40),
         BASE,
         "job_stub_bar_edge",
     );
 
     let (status, key) = (
-        pixels_of(&shot, cell_rect(128, 44, 30, 1), SPECIAL),
-        pixels_of(&shot, cell_rect(3, 46, 3, 1), INFO),
+        pixels_of(&shot, (1150, 775, 270, 18), SPECIAL),
+        pixels_of(&shot, (30, 816, 27, 18), INFO),
     );
     if status == 0 || key == 0 {
         let frame = keep_frame(&shot, &mut home, "job_stub_status");
@@ -2903,12 +2922,14 @@ fn the_glance_hangs_six_pixels_under_the_tab_bar() {
 /// groups its matches by file.
 ///
 /// A fake `rg` prints three matches in two files and exits 0. The header is
-/// row 40, the body rows 41 to 45 hold a path, its two matches, a path, and
-/// its match, and the hint row is 46. A path draws in the text color from
-/// cell 3, a match's place in the muted color from cell 5 and its text in the
-/// dim color from cell 12, and the hint's first key in the info color. The
-/// header's right end holds the success mark, the muted count of matches, and
-/// the `cli` tag on its tint. A block that exits 0 draws no bar.
+/// the pixel rows 708 to 725, the five body rows 729 to 813 hold a path, its
+/// two matches, a path, and its match, and the hint is 814 to 835. A path
+/// draws in the text color from x 30, 10 px into the content. A char at the Ui
+/// scale advances 8.16 px, so a match's place draws in the muted color from x
+/// 46 to x 87 and its text in the dim color from x 103, and the hint's first
+/// key draws in the info color. The header's right end holds the success
+/// mark, the muted count of matches, and the `cli` tag on its tint. A block
+/// that exits 0 draws no bar.
 #[test]
 // The scratch config and the fake program are this test's own disk state, set
 // up before the child runs.
@@ -2943,16 +2964,16 @@ fn a_locations_block_groups_its_matches() {
     play(&mut session, "<Space>t<Settle>rg zoomed<Enter><Settle:500>");
     let shot = session.snapshot().expect("a snapshot");
 
-    let status = cell_rect(128, 40, 30, 1);
+    let status = (1150, 708, 270, 18);
     let counts = [
-        ("path", pixels_of(&shot, cell_rect(3, 41, 26, 1), TEXT)),
-        ("place", pixels_of(&shot, cell_rect(5, 42, 5, 1), MUTED)),
-        ("text", pixels_of(&shot, cell_rect(12, 42, 30, 1), TEXT_DIM)),
-        ("key", pixels_of(&shot, cell_rect(3, 46, 5, 1), INFO)),
+        ("path", pixels_of(&shot, (30, 729, 234, 17), TEXT)),
+        ("place", pixels_of(&shot, (40, 746, 50, 17), MUTED)),
+        ("text", pixels_of(&shot, (100, 746, 270, 17), TEXT_DIM)),
+        ("key", pixels_of(&shot, (30, 816, 45, 18), INFO)),
         ("mark", pixels_of(&shot, status, SUCCESS)),
         ("count", pixels_of(&shot, status, MUTED)),
     ];
-    let tint = pixels_of(&shot, cell_rect(108, 40, 50, 1), TINT_SUCCESS);
+    let tint = pixels_of(&shot, (972, 707, 448, 20), TINT_SUCCESS);
     if counts.iter().any(|(_, count)| *count == 0) || tint <= 200 {
         let frame = keep_frame(&shot, &mut home, "locations_block");
         panic!(
@@ -2964,7 +2985,7 @@ fn a_locations_block_groups_its_matches() {
     expect_region(
         &shot,
         &mut home,
-        (18, 742, 2, 100),
+        (20, 729, 2, 107),
         BASE,
         "locations_no_bar",
     );
@@ -2974,9 +2995,9 @@ fn a_locations_block_groups_its_matches() {
 /// on the chip's tint.
 ///
 /// A fake `cargo` that exits at once runs `cargo test` in the lone Run pane,
-/// so the block is its header alone, on row 46 over the prompt. The chip's box
-/// covers at least 14 pixel rows of 40 pixels in the tint, and its label draws
-/// in the info color over it.
+/// so the block is its header alone, the pixel rows 816 to 835 over the
+/// prompt. The chip's box covers at least 14 pixel rows of 40 pixels in the
+/// tint, and its label draws in the info color over it.
 ///
 /// The label draws at the small size, where few pixels take the info color
 /// whole, so the check reads the label's hue rather than its exact color.
@@ -3000,10 +3021,10 @@ fn the_kind_chip_stands_on_its_tint() {
         i32::from(a) - i32::from(b)
     }
     let info = |[r, g, b]: [u8; 3]| gap(g, r) > 40 && gap(b, r) > 40;
-    let cells = cell_rect(108, 46, 50, 1);
+    let header = (972, 816, 448, 20);
     let (tint, ink) = (
-        pixels_of(&shot, cells, KIND_TINT),
-        pixels_where(&shot, cells, info),
+        pixels_of(&shot, header, KIND_TINT),
+        pixels_where(&shot, header, info),
     );
     if tint < 14 * 40 || ink == 0 {
         let frame = keep_frame(&shot, &mut home, "kind_chip");
@@ -3019,9 +3040,9 @@ fn the_kind_chip_stands_on_its_tint() {
 /// filled to the share of its tests that finished.
 ///
 /// A fake `cargo` prints `running 4 tests` and two `ok` lines and then
-/// sleeps, so the block is rows 43 to 46 and its first body row is row 44. The
-/// bar is that row's top two pixel rows, 792 and 793, from x 27 to x 1422, and
-/// half of it is filled. The pixel rows under the bar keep the base.
+/// sleeps, so the block's three output rows are the pixel rows 785 to 835. The
+/// bar is the first row's top two pixel rows, 785 and 786, from x 30 to x
+/// 1419, and half of it is filled. The pixel rows under the bar keep the base.
 #[test]
 fn a_running_cargo_test_draws_its_progress_bar() {
     let mut home = support::scratch_home();
@@ -3045,25 +3066,26 @@ fn a_running_cargo_test_draws_its_progress_bar() {
     expect_region(
         &shot,
         &mut home,
-        (40, 792, 600, 2),
+        (40, 785, 600, 2),
         SPECIAL,
         "progress_fill",
     );
     expect_region(
         &shot,
         &mut home,
-        (800, 792, 600, 2),
+        (800, 785, 600, 2),
         DIVIDER,
         "progress_track",
     );
-    expect_region(&shot, &mut home, (300, 795, 300, 2), BASE, "progress_under");
+    expect_region(&shot, &mut home, (300, 788, 300, 2), BASE, "progress_under");
 }
 
 /// A finished `cargo test` Cmd draws its report in place of its output, and
 /// the hint row follows it as the newest block's last row.
 ///
 /// A fake `cargo` prints the output of a run with one failure and exits 101,
-/// so the header is row 41, the report rows 42 to 45, and the hint row 46. The
+/// so the header is the pixel rows 725 to 742, the four report rows 746 to
+/// 813, and the hint 814 to 835. The
 /// summary row reads its passed count in the success color and its failed
 /// count in the danger color, the failure bar runs beside the body through
 /// the hint row, and the header's status reads the failed count in the danger
@@ -3121,11 +3143,11 @@ fn a_finished_cargo_test_draws_its_report() {
     }
     let green = |[r, g, b]: [u8; 3]| gap(g, r) > 30 && gap(g, b) > 30;
     let red = |[r, g, b]: [u8; 3]| gap(r, g) > 60 && gap(r, b) > 60;
-    let summary = cell_rect(3, 42, 40, 1);
+    let summary = (30, 746, 360, 17);
     let inks = [
         pixels_where(&shot, summary, green),
         pixels_where(&shot, summary, red),
-        pixels_where(&shot, cell_rect(128, 41, 30, 1), red),
+        pixels_where(&shot, (1150, 725, 270, 18), red),
     ];
     if inks.contains(&0) {
         let frame = keep_frame(&shot, &mut home, "cargo_report");
@@ -3141,7 +3163,7 @@ fn a_finished_cargo_test_draws_its_report() {
     expect_region(
         &shot,
         &mut home,
-        (18, 760, 2, 80),
+        (20, 746, 2, 90),
         DANGER,
         "cargo_report_bar",
     );

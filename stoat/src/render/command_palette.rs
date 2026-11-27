@@ -762,7 +762,9 @@ fn render_palette_run_block(
     if !cmd.finished
         && let Some((done, total)) = cmd.report.as_ref().and_then(CmdReport::progress)
     {
-        run_pane::paint_progress(row_rect(body.y), done, total, theme, buf, scene);
+        let row = row_rect(body.y);
+        let width = row.width.saturating_mul(16);
+        run_pane::paint_progress(row, 0, width, done, total, theme, buf, scene);
     }
 
     let located = cmd

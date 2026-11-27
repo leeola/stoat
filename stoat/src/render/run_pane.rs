@@ -1,25 +1,33 @@
 use crate::{
     jobs,
     render::{
+        chrome,
         cmd_line::{self, CmdLine, CmdStatus},
-        paint::style_rgb,
+        paint::{palette_index, style_rgb},
+        pixel_rows::{self, RowMetrics, ROW_PAD},
         text::{write_str, write_str_clipped},
+        TypeScale,
     },
     run::{
         cargo::CmdReport,
         vterm::{self, BodyRow},
-        Cmd, CmdId, GridSelection, RunState, StyledCell, VtermGrid,
+        BlockShape, Cmd, CmdId, GridSelection, RunBox, RunState, StyledCell, VtermGrid,
     },
     term_session::{TermId, TermSession},
+    theme::TypeRole,
 };
 use ratatui::{
     buffer::Buffer,
     layout::Rect,
-    style::{Modifier, Style},
+    style::{Color, Modifier, Style},
     widgets::StatefulWidget,
 };
 use std::{ops::Range, path::Path};
-use stoat_widgets::bar::Bar;
+use stoat_widgets::{
+    bar::Bar,
+    text_run::{self, TextRun},
+};
+use unicode_width::UnicodeWidthChar;
 
 /// The note at the right of a Run pane prompt that shows a line a walk of the
 /// command history recalled, which names the keys and the rule of the walk.
@@ -33,6 +41,227 @@ pub(crate) struct StatusPart {
     /// Whether the part draws as a tag, its text in a box, rather than as
     /// words.
     pub(crate) chip: bool,
+}
+
+/// What a pixel stack reads besides the run itself, for [`paint_pixel_stack`].
+#[derive(Clone, Copy)]
+struct StackSources<'a> {
+    cmds: &'a slotmap::SlotMap<CmdId, Cmd>,
+    terms: &'a slotmap::SlotMap<TermId, TermSession>,
+    editors: &'a slotmap::SlotMap<crate::editor_state::EditorId, crate::editor_state::EditorState>,
+    theme: &'a crate::theme::Theme,
+    /// The workspace root, which the prompt names as its cwd.
+    root: &'a Path,
+    home: Option<&'a Path>,
+}
+
+/// The owned text of a Cmd Line that a Run pane draws, a block's header or the
+/// prompt, which [`Self::line`] lends as a [`CmdLine`].
+struct LineParts {
+    cwd: String,
+    input: Vec<(String, Style)>,
+    caret: Option<usize>,
+    parts: Vec<StatusPart>,
+}
+
+impl LineParts {
+    /// The header of `block`, whose line ran `command` in `cwd`.
+    fn header(
+        block: &Cmd,
+        (cwd, command): (&Path, &str),
+        home: Option<&Path>,
+        terms: &slotmap::SlotMap<TermId, TermSession>,
+        theme: &crate::theme::Theme,
+    ) -> LineParts {
+        let token = command.chars().take_while(|ch| !ch.is_whitespace()).count();
+        LineParts {
+            cwd: crate::run::abbreviate_path(cwd, home),
+            input: cmd_line::token_spans(command, token, theme),
+            caret: None,
+            parts: status_parts(block, terms, theme),
+        }
+    }
+
+    /// The prompt of `run_state`, with the workspace `root` as its cwd and its
+    /// caret while the pane holds the focus.
+    ///
+    /// The command token and the tag at the right are the ones that
+    /// [`RunState::prompt`] holds. A line that a walk of the command history
+    /// recalled ends in [`RECALL_NOTE`] in `ui.text.muted`.
+    fn prompt(
+        run_state: &RunState,
+        (root, home): (&Path, Option<&Path>),
+        editors: &slotmap::SlotMap<crate::editor_state::EditorId, crate::editor_state::EditorState>,
+        theme: &crate::theme::Theme,
+        is_focused: bool,
+    ) -> LineParts {
+        let (text, caret) = run_state.input.caret_in(editors);
+        let mut parts: Vec<StatusPart> =
+            lead_part(run_state.prompt.chip, run_state.prompt.source, theme)
+                .into_iter()
+                .collect();
+        if run_state.prompt.recalled {
+            parts.push(StatusPart {
+                text: RECALL_NOTE.to_owned(),
+                style: theme.get(crate::theme::scope::UI_TEXT_MUTED),
+                chip: false,
+            });
+        }
+        LineParts {
+            cwd: crate::run::abbreviate_path(root, home),
+            input: cmd_line::token_spans(&text, run_state.prompt.token_len, theme),
+            caret: is_focused.then_some(caret),
+            parts,
+        }
+    }
+
+    /// The line these parts read as, with no status where they hold no part.
+    fn line(&self) -> CmdLine<'_> {
+        CmdLine {
+            cwd: &self.cwd,
+            input: &self.input,
+            caret: self.caret,
+            status: match self.parts.is_empty() {
+                true => CmdStatus::None,
+                false => CmdStatus::Parts(&self.parts),
+            },
+        }
+    }
+}
+
+/// The nudge and the ink that a pixel stack last sent, so a line sends each
+/// only where it differs from the one in force.
+struct Pen {
+    /// The content's left in logical px, which every line is nudged right by.
+    dx: i16,
+    nudge: Option<[i16; 2]>,
+    ink: Option<u8>,
+}
+
+impl Pen {
+    fn new(b: &RunBox) -> Pen {
+        Pen {
+            dx: (b.left as f32 / b.metrics.scale).round() as i16,
+            nudge: None,
+            ink: None,
+        }
+    }
+
+    /// The cell row of `b`'s area that holds the physical px row `y`, after the
+    /// nudge that sets a line's top on `y` and its left on the content's.
+    fn line(&mut self, b: &RunBox, y: u32, scene: &mut stoat_widgets::ApcScene) -> Rect {
+        let (row, dy) = b.metrics.place(y);
+        let nudge = [self.dx, dy];
+        if self.nudge != Some(nudge) {
+            scene.nudge(nudge);
+            self.nudge = Some(nudge);
+        }
+        Rect::new(b.area.x, b.area.y.saturating_add(row), b.area.width, 1)
+    }
+
+    /// Put `ink` in force for the runs and the bars after it.
+    fn ink(&mut self, ink: Option<u8>, scene: &mut stoat_widgets::ApcScene) {
+        if self.ink != ink {
+            scene.ink(ink);
+            self.ink = ink;
+        }
+    }
+
+    /// Draw a bar in `color` from the content's left, its top on the pixel row
+    /// `y`, `size` sixteenths wide and high.
+    fn bar(
+        &mut self,
+        b: &RunBox,
+        y: u32,
+        [width, height]: [u16; 2],
+        color: [u8; 3],
+        buf: &mut Buffer,
+        scene: &mut stoat_widgets::ApcScene,
+    ) {
+        self.ink(None, scene);
+        let row = self.line(b, y, scene);
+        Bar {
+            x: 0,
+            y: 0,
+            width,
+            height,
+            color,
+            radius: 0,
+            corners: 0,
+        }
+        .render(row, buf, scene);
+    }
+}
+
+/// How a color of an output cell draws at the board's pixels.
+#[derive(Clone, Copy, PartialEq)]
+enum CellInk {
+    /// An RGB color, which the run or the bar states.
+    Rgb([u8; 3]),
+    /// An entry of the terminal's palette, which an ink names.
+    Palette(u8),
+}
+
+impl CellInk {
+    /// The ink of the cell color `color`, or `fallback` for a cell with none.
+    fn of(color: Option<Color>, fallback: [u8; 3]) -> CellInk {
+        match color {
+            Some(Color::Rgb(r, g, b)) => CellInk::Rgb([r, g, b]),
+            Some(color) => palette_index(color).map_or(CellInk::Rgb(fallback), CellInk::Palette),
+            None => CellInk::Rgb(fallback),
+        }
+    }
+
+    /// The ink of the cell background `color`, or `None` for a cell with none.
+    fn under(color: Option<Color>) -> Option<CellInk> {
+        match color? {
+            Color::Rgb(r, g, b) => Some(CellInk::Rgb([r, g, b])),
+            color => palette_index(color).map(CellInk::Palette),
+        }
+    }
+
+    /// Put this ink in force with `pen`, and answer the RGB that a run or a bar
+    /// in it states, which is `placeholder` for a palette entry, since the ink
+    /// draws over it.
+    fn apply(
+        self,
+        placeholder: [u8; 3],
+        pen: &mut Pen,
+        scene: &mut stoat_widgets::ApcScene,
+    ) -> [u8; 3] {
+        match self {
+            CellInk::Rgb(rgb) => {
+                pen.ink(None, scene);
+                rgb
+            },
+            CellInk::Palette(index) => {
+                pen.ink(Some(index), scene);
+                placeholder
+            },
+        }
+    }
+}
+
+/// The colors that a grid row draws in where its cells name none.
+#[derive(Clone, Copy)]
+struct CellColors {
+    /// The color of output that the program left uncolored, `ui.text.dim`.
+    dim: [u8; 3],
+    /// The Island's surface, which the text of a selected cell draws in.
+    surface: [u8; 3],
+}
+
+/// Where the runs and the bars of a grid row draw.
+struct RowAt {
+    /// The one-row rect the runs anchor on.
+    anchor: Rect,
+    /// The sixteenths from the anchor's left to where the row's first cell
+    /// draws.
+    col: u16,
+    /// The text scale, which sets how far each cell advances.
+    scale: u16,
+    /// The height of a bar under a run, in sixteenths of a cell.
+    height: u16,
 }
 
 /// Paint a Run pane's stack and its prompt row into `area`.
@@ -59,9 +288,14 @@ pub(crate) struct StatusPart {
 ///
 /// `terms` holds the sessions of the workspace, which tell whether a Stub's
 /// tab still runs.
+///
+/// With `pixels`, the metrics of a host that draws nudged runs in the colors
+/// of its palette and the reach of the pane's Island, the stack draws at the
+/// board's pixels instead, as [`paint_pixel_stack`] lays it out. The measure it
+/// drew with stays on [`RunState::pixel_box`], which a cell paint clears.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn render_run_pane(
-    run_state: &RunState,
+    run_state: &mut RunState,
     cmds: &slotmap::SlotMap<CmdId, Cmd>,
     terms: &slotmap::SlotMap<TermId, TermSession>,
     editors: &slotmap::SlotMap<crate::editor_state::EditorId, crate::editor_state::EditorState>,
@@ -70,10 +304,26 @@ pub(crate) fn render_run_pane(
     home: Option<&Path>,
     area: Rect,
     is_focused: bool,
+    pixels: Option<(RowMetrics, [i32; 4])>,
     buf: &mut Buffer,
     scene: &mut stoat_widgets::ApcScene,
 ) {
+    run_state.pixel_box = None;
     if area.height < 2 || area.width < 4 {
+        return;
+    }
+    if let Some((metrics, reach)) = pixels {
+        let b = RunBox::of(metrics, theme.type_scale(TypeRole::Ui), area, reach);
+        run_state.pixel_box = Some(b);
+        let sources = StackSources {
+            cmds,
+            terms,
+            editors,
+            theme,
+            root,
+            home,
+        };
+        paint_pixel_stack(run_state, &b, &sources, is_focused, buf, scene);
         return;
     }
 
@@ -119,18 +369,9 @@ pub(crate) fn render_run_pane(
             let body = Rect::new(inner.x + 1, y, inner.width.saturating_sub(1), 1);
             match &line {
                 OutputLine::Prompt { cwd, command } => {
-                    let cwd = crate::run::abbreviate_path(cwd, home);
-                    let token = command.chars().take_while(|ch| !ch.is_whitespace()).count();
-                    let input = cmd_line::token_spans(command, token, theme);
-                    let parts = status_parts(block, terms, theme);
-                    let header = CmdLine {
-                        cwd: &cwd,
-                        input: &input,
-                        caret: None,
-                        status: CmdStatus::Parts(&parts),
-                    };
+                    let header = LineParts::header(block, (cwd, command), home, terms, theme);
                     let row = Rect::new(inner.x, y, inner.width, 1);
-                    cmd_line::cmd_line_row(buf, row, &header, theme, scene);
+                    cmd_line::cmd_line_row(buf, row, &header.line(), theme, scene);
                 },
                 OutputLine::GridRow(grid, row_idx, selection) => {
                     paint_grid_row(buf, body, y, grid, *row_idx, *selection, dim);
@@ -154,21 +395,14 @@ pub(crate) fn render_run_pane(
             && offsets.contains(&1)
         {
             let row = Rect::new(inner.x + 1, row_of(1), inner.width.saturating_sub(1), 1);
-            paint_progress(row, done, total, theme, buf, scene);
+            let width = row.width.saturating_mul(16);
+            paint_progress(row, 0, width, done, total, theme, buf, scene);
         }
         if offsets.contains(&(span - 1)) {
             rule_rows.push(row_of(span - 1));
         }
         let body = offsets.start.max(1)..offsets.end;
-        let bar = if block.in_jobs {
-            Some(jobs::state_style(theme, jobs::state_of(block)))
-        } else if block.handoff.is_some() {
-            Some(theme.get(crate::theme::scope::UI_STATUSLINE_RUN))
-        } else {
-            (block.finished && block.exit_status != Some(0))
-                .then(|| theme.get(crate::theme::scope::UI_ERROR))
-        };
-        if let Some(style) = bar
+        if let Some(style) = body_bar_style(block, theme)
             && !body.is_empty()
         {
             body_bars.push((row_of(body.start), body.len() as u16, style));
@@ -176,37 +410,327 @@ pub(crate) fn render_run_pane(
         base += span;
     }
 
-    let cwd = crate::run::abbreviate_path(root, home);
-    let (text, caret) = run_state.input.caret_in(editors);
-    let input = cmd_line::token_spans(&text, run_state.prompt.token_len, theme);
-    let mut parts: Vec<StatusPart> =
-        lead_part(run_state.prompt.chip, run_state.prompt.source, theme)
-            .into_iter()
-            .collect();
-    if run_state.prompt.recalled {
-        parts.push(StatusPart {
-            text: RECALL_NOTE.to_owned(),
-            style: theme.get(crate::theme::scope::UI_TEXT_MUTED),
-            chip: false,
-        });
-    }
-    let prompt = CmdLine {
-        cwd: &cwd,
-        input: &input,
-        caret: is_focused.then_some(caret),
-        status: match parts.is_empty() {
-            true => CmdStatus::None,
-            false => CmdStatus::Parts(&parts),
-        },
-    };
+    let prompt = LineParts::prompt(run_state, (root, home), editors, theme, is_focused);
     let row = Rect::new(inner.x, input_row, inner.width, 1);
-    cmd_line::cmd_line_row(buf, row, &prompt, theme, scene);
+    cmd_line::cmd_line_row(buf, row, &prompt.line(), theme, scene);
 
     // The plain terminal has no room for a rule between the rows, so the
     // stack and the prompt stay flush there.
     if scene.live() {
         paint_stack_rules(buf, inner, &rule_rows, &body_bars, input_row, theme, scene);
     }
+}
+
+/// Paint `run_state`'s stack and its prompt as runs and bars at the board's
+/// pixels, as `b` measures them, for [`render_run_pane`].
+///
+/// Each line on show, as [`RunState::window_px`] places it, draws under the
+/// nudge that sets its text top on its pixel row and its left on the content's
+/// left, and no cell is written. A header and the prompt draw as
+/// [`cmd_line::cmd_line_runs`] draws a Cmd Line, and a grid row as
+/// [`paint_pixel_grid_row`] draws one, 10 px in. A report row, a Stub's row,
+/// and the error line draw as spans 10 px in, and the hint does too at the
+/// [`TypeRole::Caption`] size.
+///
+/// After the lines come the bar beside each body that carries one, 2 px wide at
+/// the content's left from the top of its first line on show to the bottom of
+/// its last, the rule of each block whose last line is on show, 4 px under that
+/// line, and the rule of the prompt. The progress bar of a running Cmd comes
+/// last, on the top of its first body line from 10 px in to the content's
+/// right. The paint ends with no ink and no nudge in force.
+fn paint_pixel_stack(
+    run_state: &RunState,
+    b: &RunBox,
+    sources: &StackSources<'_>,
+    is_focused: bool,
+    buf: &mut Buffer,
+    scene: &mut stoat_widgets::ApcScene,
+) {
+    let StackSources {
+        cmds,
+        terms,
+        editors,
+        theme,
+        root,
+        home,
+    } = *sources;
+    let m = b.metrics;
+    let cell_width = u32::from(m.cell[0].max(1));
+    let width16 = u16::try_from((b.width * 16 + cell_width / 2) / cell_width).unwrap_or(u16::MAX);
+    let (gap16, body16) = (m.cols(6), m.cols(10));
+    let caption = theme.type_scale(TypeRole::Caption);
+    let dim = style_rgb(theme.get(crate::theme::scope::UI_TEXT_DIM).fg).unwrap_or_default();
+    let colors = CellColors {
+        dim,
+        surface: chrome::plate_colors(theme, scene).map_or(dim, |plate| plate.surface),
+    };
+    let mut pen = Pen::new(b);
+
+    let hint = run_state.hint(cmds, terms);
+    let (mut bodies, mut rules, mut progress) = (Vec::new(), Vec::new(), Vec::new());
+    let lines = run_state.window_px(cmds, b);
+    for group in lines.chunk_by(|one, next| one.cmd == next.cmd) {
+        let (first, last) = (group[0], group[group.len() - 1]);
+        let Some(block) = cmds.get(first.cmd) else {
+            continue;
+        };
+        let hint = hint
+            .as_ref()
+            .filter(|_| run_state.blocks.last() == Some(&first.cmd));
+        let shape = BlockShape::of(block, hint.is_some());
+        let report = block.report_rows();
+        let content = match &report {
+            Some(rows) => Body::Report(rows),
+            None => Body::Grid(block.grid.rendered_line_count()),
+        };
+        let top = i64::from(first.top)
+            - i64::from(shape.slot_top(b, first.line) + shape.text_inset(b, first.line));
+        let slot = |line: usize| {
+            let start = top + i64::from(shape.slot_top(b, line));
+            (start, start + i64::from(shape.slot_height(b, line)))
+        };
+
+        for line in group {
+            let Some(out) = block_line(block, content, hint, line.line) else {
+                continue;
+            };
+            let row = pen.line(b, line.top, scene);
+            match out {
+                OutputLine::Prompt { cwd, command } => {
+                    pen.ink(None, scene);
+                    let header = LineParts::header(block, (cwd, command), home, terms, theme);
+                    cmd_line::cmd_line_runs(buf, row, width16, gap16, &header.line(), theme, scene);
+                },
+                OutputLine::GridRow(grid, row_idx, selection) => {
+                    let at = RowAt {
+                        anchor: row,
+                        col: body16,
+                        scale: b.scale,
+                        height: high16(&m, b.body_line()),
+                    };
+                    paint_pixel_grid_row(
+                        grid, row_idx, selection, &at, colors, &mut pen, buf, scene,
+                    );
+                },
+                OutputLine::Row(body_row) => {
+                    let scale = match shape.is_hint(line.line) {
+                        true => caption,
+                        false => b.scale,
+                    };
+                    let spans: Vec<(&str, Style)> = body_row
+                        .spans
+                        .iter()
+                        .map(|(text, tone)| {
+                            let fg = theme.get(tone.scope()).fg;
+                            (text.as_str(), Style::default().fg(fg.unwrap_or_default()))
+                        })
+                        .collect();
+                    pen.ink(None, scene);
+                    pixel_rows::emit_spans(&spans, body16, scale, row, dim, buf, scene);
+                },
+                OutputLine::Error(msg) => {
+                    pen.ink(None, scene);
+                    let error = theme.get(crate::theme::scope::UI_ERROR);
+                    pixel_rows::emit_spans(&[(msg, error)], body16, b.scale, row, dim, buf, scene);
+                },
+            }
+        }
+
+        if last.last {
+            rules.push(slot(last.line).1 + i64::from(m.px(4)));
+        }
+        let bar = body_bar_style(block, theme).and_then(|style| style_rgb(style.fg));
+        if let (Some(body), Some(color)) = (group.iter().find(|line| line.line > 0), bar) {
+            bodies.push((slot(body.line).0, slot(last.line).1, color));
+        }
+        if !block.in_jobs
+            && let Some((done, total)) = block.progress()
+            && let Some(body) = group.iter().find(|line| line.line == 1)
+        {
+            progress.push((body.top, done, total));
+        }
+    }
+
+    let prompt = LineParts::prompt(run_state, (root, home), editors, theme, is_focused);
+    let row = pen.line(b, b.rule_y() + m.px(1) + m.px(6) + m.px(ROW_PAD), scene);
+    pen.ink(None, scene);
+    cmd_line::cmd_line_runs(buf, row, width16, gap16, &prompt.line(), theme, scene);
+
+    let px = |y: i64| u32::try_from(y.max(0)).unwrap_or(u32::MAX);
+    for (top, bottom, color) in bodies {
+        let height = high16(&m, px(bottom).saturating_sub(px(top)));
+        pen.bar(b, px(top), [m.cols(2), height], color, buf, scene);
+    }
+    let rule = theme
+        .try_get(crate::theme::scope::UI_RUN_RULE)
+        .and_then(|style| style_rgb(style.fg));
+    for y in rules.into_iter().filter(|_| rule.is_some()) {
+        let color = rule.unwrap_or_default();
+        pen.bar(b, px(y), [width16, 1], color, buf, scene);
+    }
+    let prompt_rule = theme
+        .try_get(crate::theme::scope::UI_RUN_PROMPT_RULE)
+        .unwrap_or_else(|| theme.get(crate::theme::scope::UI_DIVIDER));
+    if let Some(color) = style_rgb(prompt_rule.fg) {
+        pen.bar(b, b.rule_y(), [width16, 1], color, buf, scene);
+    }
+    pen.ink(None, scene);
+    for (top, done, total) in progress {
+        let row = pen.line(b, top, scene);
+        let width = width16.saturating_sub(body16);
+        paint_progress(row, body16, width, done, total, theme, buf, scene);
+    }
+
+    scene.ink(None);
+    scene.nudge([0, 0]);
+}
+
+/// Draw row `row_idx` of `grid` as runs and bars where `at` places them.
+///
+/// Each longest stretch of cells with one color, weight, and slant draws as one
+/// run with no background, and each stretch of cells with one background, or
+/// in the selection, as a bar under its runs. A color draws as the RGB it names
+/// or under an ink of the palette entry it names, and a cell with no color
+/// draws in `colors.dim`. A selected cell draws its bar in its text color and
+/// its run in `colors.surface`, as a reversed cell draws in cells.
+///
+/// A row holds only the cells written to it, and a selection also covers the
+/// columns past them. A cell advances as one char at `at.scale`, so a row's
+/// runs stand on its grid columns. A wide char ends its run, so the blank cell
+/// after it, its covered half, starts no run of its own.
+#[allow(clippy::too_many_arguments)]
+fn paint_pixel_grid_row(
+    grid: &VtermGrid,
+    row_idx: usize,
+    selection: Option<&GridSelection>,
+    at: &RowAt,
+    colors: CellColors,
+    pen: &mut Pen,
+    buf: &mut Buffer,
+    scene: &mut stoat_widgets::ApcScene,
+) {
+    let row = grid.row(row_idx);
+    let width = usize::from(grid.width());
+    let cols = match selection {
+        Some(_) => width,
+        None => row.len().min(width),
+    };
+    let unwritten = StyledCell::default();
+    let cell = |col: usize| row.get(col).unwrap_or(&unwritten);
+    let row_u16 = u16::try_from(row_idx).unwrap_or(u16::MAX);
+    let selected = |col: usize| {
+        let col = u16::try_from(col).unwrap_or(u16::MAX);
+        selection.is_some_and(|sel| sel.contains(col, row_u16))
+    };
+    let x16 = |col: usize| {
+        let x = at
+            .col
+            .saturating_add(text_run::advance_sixteenths(col, at.scale));
+        i16::try_from(x).unwrap_or(i16::MAX)
+    };
+
+    let bar_of = |col: usize| match selected(col) {
+        true => Some(CellInk::of(cell(col).fg, colors.dim)),
+        false => CellInk::under(cell(col).bg),
+    };
+    let mut col = 0;
+    while col < cols {
+        let Some(ink) = bar_of(col) else {
+            col += 1;
+            continue;
+        };
+        let start = col;
+        while col < cols && bar_of(col) == Some(ink) {
+            col += 1;
+        }
+        let color = ink.apply(colors.dim, pen, scene);
+        Bar {
+            x: x16(start),
+            y: 0,
+            width: x16(col).abs_diff(x16(start)),
+            height: at.height,
+            color,
+            radius: 0,
+            corners: 0,
+        }
+        .render(at.anchor, buf, scene);
+    }
+
+    let face = |col: usize| {
+        let modifiers = cell(col).modifiers;
+        let text = match selected(col) {
+            true => CellInk::Rgb(colors.surface),
+            false => CellInk::of(cell(col).fg, colors.dim),
+        };
+        let bold = modifiers.contains(Modifier::BOLD);
+        (text, bold, modifiers.contains(Modifier::ITALIC))
+    };
+    let mut text = String::new();
+    let mut col = 0;
+    while col < cols {
+        let style = face(col);
+        let mut first = None;
+        let mut kept = 0;
+        text.clear();
+        while col < cols && face(col) == style {
+            let ch = cell(col).ch;
+            col += 1;
+            if ch == ' ' && first.is_none() {
+                continue;
+            }
+            first.get_or_insert(col - 1);
+            text.push(ch);
+            if ch != ' ' {
+                kept = text.len();
+            }
+            if UnicodeWidthChar::width(ch) == Some(2) {
+                break;
+            }
+        }
+        text.truncate(kept);
+        let Some(first) = first.filter(|_| !text.is_empty()) else {
+            continue;
+        };
+
+        let (ink, bold, italic) = style;
+        let color = ink.apply(colors.dim, pen, scene);
+        TextRun {
+            col: x16(first),
+            row: 0,
+            scale: at.scale,
+            color,
+            bg: None,
+            bold,
+            italic,
+            follow: 0,
+            anchor: None,
+            text: &text,
+        }
+        .render(at.anchor, buf, scene);
+    }
+}
+
+/// The style of the bar beside `block`'s body, or `None` for a block that
+/// carries none.
+///
+/// The Stub of a Job takes the color of the Job's state, as
+/// [`jobs::state_style`] gives it, a Stub takes `ui.statusline.run`, and a
+/// failed block takes `ui.error`.
+fn body_bar_style(block: &Cmd, theme: &crate::theme::Theme) -> Option<Style> {
+    if block.in_jobs {
+        return Some(jobs::state_style(theme, jobs::state_of(block)));
+    }
+    if block.handoff.is_some() {
+        return Some(theme.get(crate::theme::scope::UI_STATUSLINE_RUN));
+    }
+    (block.finished && block.exit_status != Some(0))
+        .then(|| theme.get(crate::theme::scope::UI_ERROR))
+}
+
+/// The sixteenths of `m`'s cell height nearest `px` physical px.
+fn high16(m: &RowMetrics, px: u32) -> u16 {
+    let height = u32::from(m.cell[1].max(1));
+    u16::try_from((px * 16 + height / 2) / height).unwrap_or(u16::MAX)
 }
 
 /// Draw the bar beside each body that carries one, the rule under each block,
@@ -271,14 +795,18 @@ fn paint_stack_rules(
     }
 }
 
-/// Draw a running Cmd's progress bar on the top two pixel rows of `row`, the
-/// first row of its body, where no glyph reaches.
+/// Draw a running Cmd's progress bar on the top two pixel rows of
+/// `first_body_row`, the first row of its body, where no glyph reaches.
 ///
-/// The track spans `row` in the `ui.divider` foreground, the color of a
-/// meter's track, and the fill covers `done` of `total` of it in the
-/// `ui.statusline.run` foreground. A plain terminal draws neither.
+/// The track starts `x` sixteenths into the row and is `width` sixteenths wide,
+/// in the `ui.divider` foreground, the color of a meter's track. The fill covers
+/// `done` of `total` of it in the `ui.statusline.run` foreground. A plain
+/// terminal draws neither.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn paint_progress(
-    row: Rect,
+    first_body_row: Rect,
+    x: u16,
+    width: u16,
     done: u32,
     total: u32,
     theme: &crate::theme::Theme,
@@ -288,7 +816,6 @@ pub(super) fn paint_progress(
     if !scene.live() || total == 0 {
         return;
     }
-    let width = row.width.saturating_mul(16);
     let fill = u16::try_from(u32::from(width) * done.min(total) / total).unwrap_or(width);
     let bars = [
         (width, crate::theme::scope::UI_DIVIDER),
@@ -299,7 +826,7 @@ pub(super) fn paint_progress(
             continue;
         };
         Bar {
-            x: 0,
+            x: i16::try_from(x).unwrap_or(i16::MAX),
             y: 0,
             width,
             height: 2,
@@ -307,7 +834,7 @@ pub(super) fn paint_progress(
             radius: 0,
             corners: 0,
         }
-        .render(row, buf, scene);
+        .render(first_body_row, buf, scene);
     }
 }
 
@@ -643,8 +1170,9 @@ impl Body<'_> {
 #[cfg(test)]
 mod tests {
     use super::{
-        block_line, paint_grid_row, render_run_pane, status_parts, window_offsets, Body, BodyRow,
-        Buffer, Cmd, CmdId, GridSelection, Modifier, OutputLine, Rect, StatusPart, Style,
+        block_line, paint_grid_row, render_run_pane, status_parts, text_run, window_offsets, Body,
+        BodyRow, Buffer, Cmd, CmdId, GridSelection, Modifier, OutputLine, Rect, RowMetrics, RunBox,
+        StatusPart, Style,
     };
     use crate::{
         app::Stoat,
@@ -652,7 +1180,7 @@ mod tests {
         render::paint::style_rgb,
         run::{cargo::ONE_FAILURE, kind},
         test_harness::TestHarness,
-        theme::{scope, Theme},
+        theme::{scope, Theme, FULL_CELL_SCALE},
         workspace::Workspace,
     };
     use ratatui::style::Color;
@@ -662,7 +1190,10 @@ mod tests {
         time::{Duration, Instant},
     };
     use stoat_widgets::ApcScene;
-    use stoatty_protocol::command::{self, Command};
+    use stoatty_protocol::{
+        command::{self, Command, TextRunCommand},
+        INK_PROTOCOL,
+    };
 
     /// The `(block, offset)` pairs the pane draws, built the obvious way: lay
     /// every block's rows out flat, then take the window out of the middle.
@@ -1057,11 +1588,12 @@ mod tests {
             git_root,
             ..
         } = h.stoat.active_workspace_mut();
-        let run = runs.values().next().expect("an open run");
+        let run = runs.values_mut().next().expect("an open run");
         let mut buf = Buffer::empty(Rect::new(0, 0, area.right(), area.bottom()));
         let mut scene = ApcScene::new();
         render_run_pane(
-            run, cmds, terms, editors, theme, git_root, None, area, false, &mut buf, &mut scene,
+            run, cmds, terms, editors, theme, git_root, None, area, false, None, &mut buf,
+            &mut scene,
         );
         (buf, scene)
     }
@@ -1447,5 +1979,356 @@ mod tests {
             .map(|(_, pane)| pane.view.clone())
             .collect();
         (views, panes.focus())
+    }
+
+    const M1: RowMetrics = RowMetrics {
+        cell: [9, 18],
+        scale: 1.0,
+    };
+    const PIXEL_DIM: [u8; 3] = [4, 4, 4];
+    const PIXEL_ERROR: [u8; 3] = [6, 6, 6];
+    const PIXEL_RULE: [u8; 3] = [8, 8, 8];
+    const PIXEL_PROMPT_RULE: [u8; 3] = [9, 9, 9];
+
+    /// The area of the first box, 60 cells by 12 under an Island flush with it.
+    const PIXEL_AREA: Rect = Rect::new(0, 0, 60, 12);
+
+    /// A theme with the plate's two surfaces, the run scopes, and the colors of
+    /// a block's lines, for a stack at the board's pixels.
+    fn pixel_theme() -> Theme {
+        let (config, _) = stoat_config::parse(
+            r##"theme t {
+                ui.surface.ground.bg = "#010101";
+                ui.background.bg = "#020202";
+                ui.text.fg = "#030303";
+                ui.text.dim.fg = "#040404";
+                ui.text.muted.fg = "#050505";
+                ui.error.fg = "#060606";
+                ui.badge.complete.fg = "#070707";
+                ui.run.rule.fg = "#080808";
+                ui.run.prompt.rule.fg = "#090909";
+                ui.cmd.cwd.fg = "#0b0b0b";
+                ui.divider.fg = "#0c0c0c";
+                ui.statusline.run.fg = "#0d0d0d";
+            }"##,
+        );
+        Theme::from_config(&config.expect("theme parses"), "t").expect("theme loads")
+    }
+
+    /// Paint the Run pane of `h` into [`PIXEL_AREA`] at the board's pixels of
+    /// `M1` under [`pixel_theme`], through a scene that reads nudges and inks,
+    /// with the pane holding the focus where `focused` holds.
+    fn pixel_painted(h: &mut TestHarness, focused: bool) -> (Buffer, ApcScene) {
+        let Workspace {
+            runs,
+            cmds,
+            terms,
+            editors,
+            git_root,
+            ..
+        } = h.stoat.active_workspace_mut();
+        let run = runs.values_mut().next().expect("an open run");
+        let area = PIXEL_AREA;
+        let mut buf = Buffer::empty(area);
+        let mut scene = ApcScene::new();
+        scene.set_nudge_protocol(true);
+        scene.set_ink_protocol(true);
+        let pixels = Some((M1, [0; 4]));
+        let theme = pixel_theme();
+        render_run_pane(
+            run, cmds, terms, editors, &theme, git_root, None, area, focused, pixels, &mut buf,
+            &mut scene,
+        );
+        (buf, scene)
+    }
+
+    /// Each command of `scene` but the nudges, with the nudge in force where it
+    /// stands.
+    fn placed(scene: &ApcScene) -> Vec<([i16; 2], Command)> {
+        let mut nudge = [0, 0];
+        command::decode_stream(scene.bytes())
+            .into_iter()
+            .filter_map(|cmd| match cmd {
+                Command::Nudge(offset) => {
+                    nudge = offset;
+                    None
+                },
+                cmd => Some((nudge, cmd)),
+            })
+            .collect()
+    }
+
+    /// The bars of `placed` under `nudge`.
+    fn bars_under(placed: &[([i16; 2], Command)], nudge: [i16; 2]) -> Vec<BarSpec> {
+        placed
+            .iter()
+            .filter_map(|(at, cmd)| match cmd {
+                Command::Bar(bar) if *at == nudge => {
+                    Some((bar.x, bar.y, bar.width, bar.height, bar.color))
+                },
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The runs of `placed` under `nudge`.
+    fn runs_under(placed: &[([i16; 2], Command)], nudge: [i16; 2]) -> Vec<&TextRunCommand> {
+        placed
+            .iter()
+            .filter_map(|(at, cmd)| match cmd {
+                Command::TextRun(run) if *at == nudge => Some(run),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The inks, the runs as their text, col, and color, and the bars as their
+    /// x, width, height, and color, that `placed` draws after the header and
+    /// before the prompt, which stands under the nudge `[12, 9]` in
+    /// [`PIXEL_AREA`].
+    fn body_paint(placed: &[([i16; 2], Command)]) -> Vec<String> {
+        let header = placed.first().map(|(at, _)| *at);
+        placed
+            .iter()
+            .skip_while(|(at, _)| Some(*at) == header)
+            .take_while(|(at, _)| *at != [12, 9])
+            .filter_map(|(_, cmd)| match cmd {
+                Command::Ink(ink) => Some(format!("ink {ink:?}")),
+                Command::TextRun(run) => {
+                    Some(format!("run {} {} {:?}", run.text, run.col, run.color))
+                },
+                Command::Bar(bar) => Some(format!(
+                    "bar {} {} {} {:?}",
+                    bar.x, bar.width, bar.height, bar.color
+                )),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// A block of `echo ok` that printed `ok` draws its header on the pixel row
+    /// 138, its output on 159, its rule on 180, and the prompt's rule on 181,
+    /// as runs and bars that write no cell.
+    #[test]
+    fn a_pixel_stack_draws_its_header_its_body_and_its_two_rules() {
+        let mut h = stacked(&[("echo ok", b"ok\r\n", Some(0))]);
+        let (buf, scene) = pixel_painted(&mut h, false);
+        let placed = placed(&scene);
+
+        let glyphs = (0..PIXEL_AREA.height)
+            .flat_map(|y| (0..PIXEL_AREA.width).map(move |x| (x, y)))
+            .filter(|&(x, y)| buf[(x, y)].symbol() != " ")
+            .count();
+        let header = runs_under(&placed, [12, 12]);
+        let end = |run: &&TextRunCommand| {
+            let advance = text_run::advance_sixteenths(run.text.chars().count(), FULL_CELL_SCALE);
+            run.col + advance as i16
+        };
+        let output: Vec<(&str, i16, i16, [u8; 3])> = runs_under(&placed, [12, 15])
+            .into_iter()
+            .map(|run| (run.text.as_str(), run.col, run.row, run.color))
+            .collect();
+        let lead: Vec<(&str, i16, i16)> = header
+            .iter()
+            .take(4)
+            .map(|run| (run.text.as_str(), run.col, run.row))
+            .collect();
+        assert_eq!(
+            (glyphs, lead, header.last().map(end), output),
+            (
+                0,
+                vec![
+                    ("/w", 0, 112),
+                    ("\u{276f}", 43, 112),
+                    ("echo", 70, 112),
+                    (" ok", 134, 112),
+                ],
+                Some(917),
+                vec![("ok", 18, 128, PIXEL_DIM)]
+            ),
+            "no glyph in a cell, the cwd, the glyph, and the input 6 px apart from the row's \
+             left, the status ending at the content's right, and the output 10 px in",
+        );
+
+        let prompt_rows: Vec<i16> = runs_under(&placed, [12, 9])
+            .into_iter()
+            .map(|run| run.row)
+            .collect();
+        let last = command::decode_stream(scene.bytes()).pop();
+        assert_eq!(
+            (
+                bars_under(&placed, [12, 0]),
+                bars_under(&placed, [12, 1]),
+                prompt_rows,
+                last,
+            ),
+            (
+                vec![(0, 160, 917, 1, PIXEL_RULE)],
+                vec![(0, 160, 917, 1, PIXEL_PROMPT_RULE)],
+                vec![160, 160],
+                Some(Command::Nudge([0, 0])),
+            ),
+            "the block's rule, the prompt's rule, the prompt's cwd and glyph, and no nudge after",
+        );
+    }
+
+    /// A cell's RGB color draws in its run, a named color under an ink of its
+    /// palette entry, and a cell with no color in `ui.text.dim`.
+    #[test]
+    fn output_draws_the_colors_of_its_cells() {
+        let output: &[u8] = b"plain\r\n\x1b[31mred\x1b[0m\r\n\x1b[38;2;1;2;3mrgb";
+        let mut h = stacked(&[("ls", output, Some(0))]);
+        let (_, scene) = pixel_painted(&mut h, false);
+
+        assert_eq!(
+            body_paint(&placed(&scene)),
+            [
+                "run plain 18 [4, 4, 4]",
+                "ink Some(1)",
+                "run red 18 [4, 4, 4]",
+                "ink None",
+                "run rgb 18 [1, 2, 3]",
+            ],
+        );
+    }
+
+    /// A cell's background draws as a bar one body line high under its run,
+    /// and a selected cell draws that bar in its text color and its run in the
+    /// surface's color.
+    #[test]
+    fn a_cell_background_and_a_selection_draw_a_bar_one_body_line_high() {
+        let mut h = stacked(&[("ls", b"\x1b[41mX", Some(0))]);
+        let (_, scene) = pixel_painted(&mut h, false);
+        let unselected = body_paint(&placed(&scene));
+
+        let block = h
+            .stoat
+            .active_workspace()
+            .runs
+            .values()
+            .next()
+            .expect("a run")
+            .blocks[0];
+        h.stoat.active_workspace_mut().cmds[block].selection = Some(GridSelection {
+            anchor: (0, 0),
+            head: (1, 0),
+        });
+        let (_, scene) = pixel_painted(&mut h, false);
+        assert_eq!(
+            [unselected, body_paint(&placed(&scene))],
+            [
+                vec![
+                    "ink Some(1)",
+                    "bar 18 16 15 [4, 4, 4]",
+                    "ink None",
+                    "run X 18 [4, 4, 4]",
+                ],
+                vec!["bar 18 32 15 [4, 4, 4]", "run X 18 [2, 2, 2]"],
+            ],
+        );
+    }
+
+    /// A failed block draws a bar 2 px wide beside its body, from the top of
+    /// its first line to the bottom of its last, and a passed block draws none.
+    #[test]
+    fn a_failed_body_carries_a_two_pixel_bar_over_its_lines() {
+        let marks = |exit: i32| {
+            let mut h = stacked(&[("ls", b"one\r\ntwo\r\n", Some(exit))]);
+            let (_, scene) = pixel_painted(&mut h, false);
+            bars_under(&placed(&scene), [12, 16])
+                .into_iter()
+                .filter(|&(.., width, _, _)| width == 4)
+                .collect::<Vec<BarSpec>>()
+        };
+        assert_eq!(
+            [marks(1), marks(0)],
+            [vec![(0, 112, 4, 30, PIXEL_ERROR)], Vec::new()],
+        );
+    }
+
+    /// The frame draws the stack at the board's pixels only for a stoatty that
+    /// reads `ink` frames. One before that keeps the cells of the header row.
+    #[test]
+    fn a_pane_before_the_ink_protocol_keeps_its_cells() {
+        let header_cells = |protocol: u32| {
+            let mut h = stacked(&[("echo ok", b"ok\r\n", Some(0))]);
+            h.stoat.stoatty = true;
+            h.stoat.stoatty_protocol = protocol;
+            h.stoat.cell_pixels = Some((9, 18));
+            h.stoat.display_scale = Some(1.0);
+            let buf = h.stoat.render();
+            let area = pane_area(&h);
+            let row = area.bottom() - 3;
+            (area.x..area.right())
+                .filter(|&x| buf[(x, row)].symbol() != " ")
+                .count()
+                > 0
+        };
+        assert_eq!(
+            [header_cells(INK_PROTOCOL - 1), header_cells(INK_PROTOCOL)],
+            [true, false],
+        );
+    }
+
+    /// A pixel paint keeps the box it drew with, and a cell paint clears it.
+    #[test]
+    fn the_paint_stores_its_box() {
+        let mut h = stacked(&[("ls", b"x\r\n", Some(0))]);
+        let stored = |h: &TestHarness| {
+            h.stoat
+                .active_workspace()
+                .runs
+                .values()
+                .next()
+                .and_then(|run| run.pixel_box)
+        };
+        pixel_painted(&mut h, false);
+        let pixel = stored(&h);
+        let theme = h.stoat.theme.clone();
+        painted(&mut h, &theme, PIXEL_AREA);
+        assert_eq!(
+            [pixel, stored(&h)],
+            [
+                Some(RunBox::of(M1, FULL_CELL_SCALE, PIXEL_AREA, [0; 4])),
+                None
+            ],
+        );
+    }
+
+    /// A running test's progress bar draws on the top of its first body line,
+    /// the pixel row 142, from 10 px in to the content's right, and its fill
+    /// covers the share of the tests that finished.
+    #[test]
+    fn a_running_test_draws_its_progress_bar_from_the_body_start() {
+        let output: &[u8] = b"running 4 tests\r\ntest a ... ok\r\n";
+        let mut h = stacked(&[("cargo test", output, None)]);
+        let (_, scene) = pixel_painted(&mut h, false);
+
+        let progress: Vec<BarSpec> = bars_under(&placed(&scene), [12, 16])
+            .into_iter()
+            .filter(|&(.., height, _)| height == 2)
+            .collect();
+        assert_eq!(
+            progress,
+            [
+                (18, 112, 899, 2, [12, 12, 12]),
+                (18, 112, 224, 2, [13, 13, 13])
+            ],
+        );
+    }
+
+    /// A focused pane's prompt draws its caret where its input starts, as a bar
+    /// one char wide in the text color, and an unfocused one draws none.
+    #[test]
+    fn a_focused_prompt_draws_its_caret_where_its_input_starts() {
+        let carets = |focused| {
+            let mut h = stacked(&[]);
+            let (_, scene) = pixel_painted(&mut h, focused);
+            bars_under(&placed(&scene), [12, 9])
+        };
+        assert_eq!(
+            [carets(true), carets(false)],
+            [vec![(70, 161, 16, 13, [3, 3, 3])], Vec::new()],
+        );
     }
 }

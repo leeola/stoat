@@ -21,6 +21,7 @@ use crate::{
         editor::{editor_cursor_position, render_editor_with_overlay, split_minimap_strip},
         job_tray,
         paint::{dim_rgb, floor_rgb, luma, style_rgb, FAINT_CONTRAST_FLOOR},
+        pixel_rows::RowMetrics,
         popout::{
             paint_popout_card, popout_area, popout_card_bg, popout_inset, scaled_char_capacity,
             wrap_popout_lines,
@@ -50,6 +51,7 @@ use ratatui::{
 };
 use slotmap::SlotMap;
 use std::{
+    array,
     hash::{DefaultHasher, Hash, Hasher},
     ops::Range,
     path::Path,
@@ -248,7 +250,10 @@ pub(crate) fn render_pane(
             }
         },
         View::Run(run_id) => {
-            if let Some(run_state) = runs.get(*run_id) {
+            if let Some(run_state) = runs.get_mut(*run_id) {
+                let pixels = RowMetrics::of(theme, scene)
+                    .filter(|_| scene.inks())
+                    .map(|m| (m, island_reach(content_area, frame, m)));
                 render_run_pane(
                     run_state,
                     cmds,
@@ -259,6 +264,7 @@ pub(crate) fn render_pane(
                     frame.home,
                     content_area,
                     is_focused,
+                    pixels,
                     buf,
                     scene,
                 );
@@ -513,6 +519,40 @@ fn island_edges(area: Rect, frame: FrameCtx<'_>, inset_x: u8) -> [Edge; 4] {
             Edge::Inset(inset_x),
         ),
     ]
+}
+
+/// The physical px that each side of the Island over `area` stands outside
+/// `area` at the cell and the scale of `m`, top, right, bottom, then left, or
+/// four zeros for a frame that draws no Island.
+///
+/// A side inset into the area reaches a negative distance. A margin side
+/// crosses the cell beside the area and stops its px short of the far side,
+/// and a gap side crosses half of that, rounded down at the top and the left
+/// and up at the bottom and the right, as the terminal resolves the edges of
+/// the Island that [`island_edges`] sets.
+pub(crate) fn island_reach(area: Rect, frame: FrameCtx<'_>, m: RowMetrics) -> [i32; 4] {
+    let theme = frame.theme;
+    let edges = island_edges(area, frame, theme.panel(PanelRole::Island).inset_x);
+    if !frame.islands || island_panel(edges, theme).is_none() {
+        return [0; 4];
+    }
+
+    let [width, height] = m.cell.map(i32::from);
+    array::from_fn(|side| {
+        let edge = edges[side];
+        let px = i32::try_from(m.px(u16::from(edge.px()))).unwrap_or(i32::MAX);
+        let across = match side % 2 {
+            0 => height - px,
+            _ => width - px,
+        };
+        match edge {
+            Edge::Inset(_) => -px,
+            Edge::Outset(_) => px,
+            Edge::Margin(_) => across,
+            Edge::Gap(_) if side == 0 || side == 3 => across.div_euclid(2),
+            Edge::Gap(_) => (across + 1).div_euclid(2),
+        }
+    })
 }
 
 /// Declare the island halo of the single minimap `band`.

@@ -209,7 +209,7 @@ impl TypeScale for crate::theme::Theme {
 pub(crate) struct PaneCtx<'a> {
     pub(crate) editors: &'a mut SlotMap<EditorId, EditorState>,
     pub(crate) buffers: &'a BufferRegistry,
-    pub(crate) runs: &'a SlotMap<RunId, RunState>,
+    pub(crate) runs: &'a mut SlotMap<RunId, RunState>,
     pub(crate) cmds: &'a SlotMap<CmdId, Cmd>,
     pub(crate) terms: &'a SlotMap<TermId, TermSession>,
     /// The terms stoatty draws as pools at the terminal font size, see
@@ -1814,7 +1814,7 @@ pub(crate) fn frame(
             PaneCtx {
                 editors: &mut ws.editors,
                 buffers: &ws.buffers,
-                runs: &ws.runs,
+                runs: &mut ws.runs,
                 cmds: &ws.cmds,
                 terms: &ws.terms,
                 term_pool_grids: &ws.term_pool_grids,
@@ -1977,7 +1977,7 @@ pub(crate) fn frame(
             PaneCtx {
                 editors: &mut ws.editors,
                 buffers: &ws.buffers,
-                runs: &ws.runs,
+                runs: &mut ws.runs,
                 cmds: &ws.cmds,
                 terms: &ws.terms,
                 term_pool_grids: &ws.term_pool_grids,
@@ -2014,7 +2014,7 @@ pub(crate) fn frame(
                 PaneCtx {
                     editors: &mut ws.editors,
                     buffers: &ws.buffers,
-                    runs: &ws.runs,
+                    runs: &mut ws.runs,
                     cmds: &ws.cmds,
                     terms: &ws.terms,
                     term_pool_grids: &ws.term_pool_grids,

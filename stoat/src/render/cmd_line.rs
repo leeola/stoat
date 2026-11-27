@@ -199,6 +199,113 @@ pub(crate) fn cmd_line_row(
     write_input_row(buf, (input_x, row.y), input_end, line, chars, theme);
 }
 
+/// Draw `line` as runs on the one row `row` of a stack at the board's pixels,
+/// such as a Run Block's header, with its status ending `width16` sixteenths
+/// from the row's left.
+///
+/// It writes no cell, so the Island's surface shows under the line. The cwd
+/// starts at the row's left, and the glyph and the input follow `gap16`
+/// sixteenths apart, each a [`TypeRole::Ui`] run over no background. A parts
+/// status ends at `width16` as [`cmd_line_row`] draws one in a live scene, and
+/// the input ends [`PLATE_HEADER_GAP`] before its first part. Any other status
+/// draws nothing here. A row too narrow for the cwd, the glyph,
+/// [`MIN_QUERY_COLUMNS`] of input, and the status drops the status first and
+/// the cwd second.
+///
+/// The input shows the row of it that holds its caret, as [`cmd_line_row`]
+/// shows one, and [`plate_caret`] draws the caret in the `ui.text` color over
+/// the plate's surface.
+pub(crate) fn cmd_line_runs(
+    buf: &mut Buffer,
+    row: Rect,
+    width16: u16,
+    gap16: u16,
+    line: &CmdLine<'_>,
+    theme: &Theme,
+    scene: &mut ApcScene,
+) {
+    let ui = theme.type_scale(TypeRole::Ui);
+    let advance = |text: &str| text_run::advance_sixteenths(text.chars().count(), ui);
+    let parts = match line.status {
+        CmdStatus::Parts(parts) => parts,
+        _ => &[],
+    };
+    let trail = match parts.is_empty() {
+        true => 0,
+        false => parts_span(parts, theme).saturating_add(PLATE_HEADER_GAP),
+    };
+
+    let glyph_at = |cwd: bool| match cwd && !line.cwd.is_empty() {
+        true => advance(line.cwd).saturating_add(gap16),
+        false => 0,
+    };
+    let input_at = |cwd: bool| {
+        glyph_at(cwd)
+            .saturating_add(advance(PROMPT_GLYPH))
+            .saturating_add(gap16)
+    };
+    let fits = |cwd: bool, status: bool| {
+        let trail = match status {
+            true => trail,
+            false => 0,
+        };
+        let least = u32::from(input_at(cwd)) + u32::from(MIN_QUERY_COLUMNS) * 16;
+        least + u32::from(trail) <= u32::from(width16)
+    };
+    let (show_cwd, show_status) = parts_kept(fits);
+    let show_status = show_status && !parts.is_empty();
+    let input_x = input_at(show_cwd);
+    let input_end = match show_status {
+        true => width16.saturating_sub(trail),
+        false => width16,
+    };
+    let room = usize::from(input_end.saturating_sub(input_x)) * 16 / usize::from(ui.max(1));
+
+    let row = Rect { height: 1, ..row };
+    let mut run = |col: u16, text: &str, style: Style| {
+        let Some(color) = style_rgb(style.fg).filter(|_| !text.is_empty()) else {
+            return;
+        };
+        TextRun {
+            col: i16::try_from(col).unwrap_or(i16::MAX),
+            row: 0,
+            scale: ui,
+            color,
+            bg: None,
+            bold: style.add_modifier.contains(Modifier::BOLD),
+            italic: false,
+            follow: 0,
+            anchor: None,
+            text,
+        }
+        .render(row, buf, scene);
+    };
+    if show_cwd {
+        run(0, line.cwd, cwd_style(theme));
+    }
+    run(glyph_at(show_cwd), PROMPT_GLYPH, prompt_style(theme));
+
+    let mut caret = None;
+    let mut index = 0;
+    for piece in row_pieces(line, caret_row(line, room)) {
+        let col = input_x.saturating_add(text_run::advance_sixteenths(index, ui));
+        match piece.caret {
+            true => caret = Some((col, piece.text)),
+            false => run(col, piece.text, piece.style),
+        }
+        index += piece.text.chars().count();
+    }
+
+    if show_status {
+        paint_part_runs(buf, row, width16, parts, theme, scene);
+    }
+    let text = style_rgb(theme.get(scope::UI_TEXT).fg);
+    let surface = chrome::plate_colors(theme, scene).map(|plate| plate.surface);
+    if let (Some((col, at_caret)), Some(text), Some(surface)) = (caret, text, surface) {
+        plate_caret(col, at_caret, ui, (text, surface), row, buf, scene);
+    }
+}
+
 /// The input of `line` as Cmd Line spans, its first `token_chars` chars as
 /// the command token.
 ///
@@ -485,12 +592,25 @@ fn paint_parts(
         }
         return;
     }
+    paint_part_runs(buf, row, row.width.saturating_mul(16), parts, theme, scene);
+}
 
+/// Draw `parts` as runs that end `end` sixteenths from `row`'s left, in order
+/// and [`PLATE_HEADER_GAP`] apart, for [`paint_parts`] and [`cmd_line_runs`].
+///
+/// A part with `chip` set draws as a Source Tag, and any other part as a
+/// [`TypeRole::Caption`] run in its foreground over no background, or as no
+/// run where that color has no RGB value.
+fn paint_part_runs(
+    buf: &mut Buffer,
+    row: Rect,
+    end: u16,
+    parts: &[StatusPart],
+    theme: &Theme,
+    scene: &mut ApcScene,
+) {
     let caption = theme.type_scale(TypeRole::Caption);
-    let mut col = row
-        .width
-        .saturating_mul(16)
-        .saturating_sub(parts_span(parts, theme));
+    let mut col = end.saturating_sub(parts_span(parts, theme));
     for part in parts {
         if part.chip {
             command_palette::paint_source_tag(buf, row, col, &part.text, part.style, theme, scene);

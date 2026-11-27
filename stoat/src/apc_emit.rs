@@ -637,7 +637,7 @@ fn emit_window_content(stoat: &mut Stoat, out: &mut Vec<u8>) -> Vec<Vec<u8>> {
                     crate::render::PaneCtx {
                         editors: &mut ws.editors,
                         buffers: &ws.buffers,
-                        runs: &ws.runs,
+                        runs: &mut ws.runs,
                         cmds: &ws.cmds,
                         terms: &ws.terms,
                         term_pool_grids: &ws.term_pool_grids,

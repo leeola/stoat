@@ -51,6 +51,36 @@ pub(crate) fn style_rgb(color: Option<Color>) -> Option<[u8; 3]> {
     }
 }
 
+/// The entry of the terminal's palette that `color` names, or `None` for an
+/// RGB color and the default.
+///
+/// The 8 named colors are entries 0 to 7 and their light forms 8 to 15, as
+/// SGR 30 to 37 and 90 to 97 name them, and an indexed color is its index. A
+/// program's output names its colors so, and only the terminal holds the RGB
+/// of each entry.
+pub(crate) fn palette_index(color: Color) -> Option<u8> {
+    Some(match color {
+        Color::Black => 0,
+        Color::Red => 1,
+        Color::Green => 2,
+        Color::Yellow => 3,
+        Color::Blue => 4,
+        Color::Magenta => 5,
+        Color::Cyan => 6,
+        Color::Gray => 7,
+        Color::DarkGray => 8,
+        Color::LightRed => 9,
+        Color::LightGreen => 10,
+        Color::LightYellow => 11,
+        Color::LightBlue => 12,
+        Color::LightMagenta => 13,
+        Color::LightCyan => 14,
+        Color::White => 15,
+        Color::Indexed(index) => index,
+        Color::Reset | Color::Rgb(..) => return None,
+    })
+}
+
 /// Mix `percent` of `toward` into `color`.
 pub(crate) fn blend(color: [u8; 3], toward: [u8; 3], percent: u16) -> [u8; 3] {
     let mix = |a: u8, b: u8| {

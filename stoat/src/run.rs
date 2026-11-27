@@ -5,6 +5,7 @@ pub mod vterm;
 
 use crate::{
     input_view::{InputView, SubmitTarget},
+    render::pixel_rows::{RowMetrics, ROW_PAD},
     term_session::{TermId, TermSession},
     workspace::Workspace,
 };
@@ -57,6 +58,12 @@ pub struct RunState {
     /// this line, so an edit drops the name and starts a fresh walk. A walk
     /// from another prompt clears it, because one walk runs at a time.
     pub(crate) recalled: Option<String>,
+    /// The measure the pane last drew its stack at the board's pixels with, or
+    /// `None` while it draws on whole cell rows.
+    ///
+    /// A press and the width of a new Cmd read the layout after the paint, so
+    /// the paint keeps the measure here, as a modal painter keeps its metrics.
+    pub(crate) pixel_box: Option<RunBox>,
 }
 
 /// The command token and the tag at its right that the Run pane prompt shows
@@ -93,6 +100,7 @@ impl RunState {
             scroll_offset: 0,
             prompt: PromptInfo::default(),
             recalled: None,
+            pixel_box: None,
         }
     }
 
@@ -298,6 +306,10 @@ impl RunState {
     /// position over it answers `None`, and so does every position over a
     /// Stub, which draws its one row in place of its grid. Mirrors the layout
     /// that [`crate::render::run_pane::render_run_pane`] builds.
+    ///
+    /// A stack that last drew at the board's pixels, as [`Self::pixel_box`]
+    /// records it, maps the middle of the cell through that layout, as
+    /// [`Self::active_block_grid_px`] reads it.
     pub fn active_block_grid_pos(
         &self,
         cmds: &SlotMap<CmdId, Cmd>,
@@ -310,6 +322,11 @@ impl RunState {
         }
         if col >= area.width || row >= area.height {
             return None;
+        }
+        if let Some(b) = &self.pixel_box {
+            let [width, height] = b.metrics.cell.map(u32::from);
+            let (x, y) = (u32::from(col) * width, u32::from(row) * height);
+            return self.active_block_grid_px(cmds, b, x + width / 2, y + height / 2);
         }
         let output_height = area.height.saturating_sub(1) as usize;
         if (row as usize) >= output_height {
@@ -345,6 +362,255 @@ impl RunState {
             return None;
         }
         Some((grid_col, (line_idx - active_grid_start) as u16))
+    }
+
+    /// The lines of the stack on show in `b`, oldest first.
+    ///
+    /// The stack ends at the prompt's rule and grows up. The line that ends the
+    /// window, [`Self::scroll_offset`] lines up from the last, ends at the rule,
+    /// with the pad and the rule of its block under it when it is the last line
+    /// of its block. The walk stops at the first line whose text top lies over
+    /// the area, because nothing clips the live scene at the Island's edge.
+    pub(crate) fn window_px(&self, cmds: &SlotMap<CmdId, Cmd>, b: &RunBox) -> Vec<StackLine> {
+        let blocks: Vec<(CmdId, &Cmd)> = self
+            .blocks
+            .iter()
+            .filter_map(|id| cmds.get(*id).map(|cmd| (*id, cmd)))
+            .collect();
+        let hint = self.has_hint(cmds);
+        let newest = blocks.len().saturating_sub(1);
+
+        let mut lines = Vec::new();
+        let mut after = self.output_line_total(cmds);
+        let mut end = after.saturating_sub(self.scroll_offset);
+        let mut bottom = i64::from(b.rule_y());
+        for (index, &(id, cmd)) in blocks.iter().enumerate().rev() {
+            let shape = BlockShape::of(cmd, hint && index == newest);
+            let start = after - shape.span;
+            after = start;
+            if start >= end {
+                continue;
+            }
+
+            let shown = (end - start).min(shape.span);
+            let top = match shown == shape.span {
+                true => bottom - i64::from(b.block_height(shape.rows, shape.tall, shape.hint)),
+                false => {
+                    let last = shown - 1;
+                    bottom - i64::from(shape.slot_top(b, last) + shape.slot_height(b, last))
+                },
+            };
+            for line in (0..shown).rev() {
+                let text = top + i64::from(shape.slot_top(b, line) + shape.text_inset(b, line));
+                let Ok(text) = u32::try_from(text) else {
+                    lines.reverse();
+                    return lines;
+                };
+                lines.push(StackLine {
+                    cmd: id,
+                    line,
+                    top: text,
+                    last: line + 1 == shape.span,
+                });
+            }
+            bottom = top;
+            end = start;
+        }
+        lines.reverse();
+        lines
+    }
+
+    /// The active block's `(grid_col, grid_row)` under the physical px `(x, y)`
+    /// of a stack that `b` measures, or `None` off its grid rows.
+    ///
+    /// The line is the active block's grid row whose box holds `y`, and the
+    /// column counts the chars that a body line advances from its start 10 px
+    /// into the content, up to the grid's width.
+    pub(crate) fn active_block_grid_px(
+        &self,
+        cmds: &SlotMap<CmdId, Cmd>,
+        b: &RunBox,
+        x: u32,
+        y: u32,
+    ) -> Option<(u16, u16)> {
+        let id = *self.blocks.last()?;
+        let active = cmds.get(id)?;
+        if active.report_rows().is_some() {
+            return None;
+        }
+
+        let rows = active.grid.rendered_line_count();
+        let line = self.window_px(cmds, b).into_iter().find(|line| {
+            line.cmd == id
+                && (1..=rows).contains(&line.line)
+                && (line.top..line.top + b.body_line()).contains(&y)
+        })?;
+
+        let start = b.left + b.metrics.px(10);
+        let advance = u32::from(b.metrics.cell[0]) * u32::from(b.scale);
+        let col = x.checked_sub(start)? * 256 / advance.max(1);
+        let col = u16::try_from(col)
+            .ok()
+            .filter(|&col| col < active.grid.width())?;
+        Some((col, (line.line - 1) as u16))
+    }
+}
+
+/// Where a Run pane's stack stood when it last drew at the board's pixels, in
+/// physical px from the top-left of the area it drew in.
+///
+/// The content stands 12 px inside the pane's Island, which can reach past the
+/// pane's cells, and ends 6 px over the Island's bottom.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct RunBox {
+    pub(crate) metrics: RowMetrics,
+    /// The text scale of a body line, which sets how far each of its chars
+    /// advances.
+    pub(crate) scale: u16,
+    /// The pane's area that the stack drew in.
+    pub(crate) area: Rect,
+    pub(crate) left: u32,
+    pub(crate) width: u32,
+    pub(crate) bottom: u32,
+}
+
+impl RunBox {
+    /// The box of a stack drawn into `area` at `scale`, under an Island whose
+    /// sides stand `reach` physical px outside `area`, top, right, bottom, and
+    /// left.
+    pub(crate) fn of(metrics: RowMetrics, scale: u16, area: Rect, reach: [i32; 4]) -> RunBox {
+        let pad = i64::from(metrics.px(12));
+        let [cell_width, cell_height] = metrics.cell.map(i64::from);
+        let [_, right, under, left] = reach.map(i64::from);
+        let px = |value: i64| u32::try_from(value.max(0)).unwrap_or(u32::MAX);
+        RunBox {
+            metrics,
+            scale,
+            area,
+            left: px(pad - left),
+            width: px(i64::from(area.width) * cell_width + right + left - 2 * pad),
+            bottom: px(i64::from(area.height) * cell_height + under - i64::from(metrics.px(6))),
+        }
+    }
+
+    /// The height of an output row, a report row, a location row, and the
+    /// error line, the cell height less 1 px, which is the board's 17 px line
+    /// at its 18 px cell.
+    pub(crate) fn body_line(&self) -> u32 {
+        u32::from(self.metrics.cell[1]).saturating_sub(self.metrics.px(1))
+    }
+
+    /// The height of a block whose body holds `rows` rows, and a hint row
+    /// where `hint` holds, from its top pad to its rule.
+    ///
+    /// The block pads 4 px over its header and 4 px under its last line, then
+    /// draws its 1 px rule. A body stands 2 px under the header. A row of a
+    /// Stub, `tall`, is one cell high, because the board gives it no line
+    /// height. A hint is the cell height with 2 px over and under it.
+    pub(crate) fn block_height(&self, rows: usize, tall: bool, hint: bool) -> u32 {
+        let m = &self.metrics;
+        let lines = rows as u32 * self.row_height(tall) + u32::from(hint) * self.hint_height();
+        let body = match rows > 0 || hint {
+            true => m.px(2) + lines,
+            false => 0,
+        };
+        m.px(4) + m.box_height(1) + body + m.px(4) + m.px(1)
+    }
+
+    /// The pixel row of the rule over the prompt, which the stack ends on.
+    ///
+    /// Under the rule the prompt pads 6 px, draws its Cmd Line, and pads 2 px
+    /// down to the content's bottom.
+    pub(crate) fn rule_y(&self) -> u32 {
+        let m = &self.metrics;
+        let prompt = m.px(1) + m.px(6) + m.box_height(1) + m.px(2);
+        self.bottom.saturating_sub(prompt)
+    }
+
+    /// The height of a body row, a cell for a Stub's row.
+    fn row_height(&self, tall: bool) -> u32 {
+        match tall {
+            true => u32::from(self.metrics.cell[1]),
+            false => self.body_line(),
+        }
+    }
+
+    fn hint_height(&self) -> u32 {
+        u32::from(self.metrics.cell[1]) + 2 * self.metrics.px(2)
+    }
+}
+
+/// One line of a Run pane's stack on show at the board's pixels, as
+/// [`RunState::window_px`] places it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct StackLine {
+    pub(crate) cmd: CmdId,
+    /// The line's place in its block, 0 for the header, as
+    /// [`Cmd::rendered_line_span`] counts a block's lines and the hint after
+    /// them.
+    pub(crate) line: usize,
+    /// The physical px from the area's top to the top of the line's text.
+    pub(crate) top: u32,
+    /// Whether the line ends its block, so the block's rule runs under it.
+    pub(crate) last: bool,
+}
+
+/// The lines of one block at the board's pixels, which are its header, its
+/// body rows, its error line, and the hint of the newest block.
+pub(crate) struct BlockShape {
+    /// The block's lines.
+    pub(crate) span: usize,
+    /// The lines between the header and the hint.
+    pub(crate) rows: usize,
+    /// Whether the block is a Stub, whose row is a cell high.
+    pub(crate) tall: bool,
+    /// Whether the block's last line is the hint.
+    pub(crate) hint: bool,
+}
+
+impl BlockShape {
+    /// The shape of `cmd`'s block, with the hint as its last line where `hint`
+    /// holds.
+    pub(crate) fn of(cmd: &Cmd, hint: bool) -> BlockShape {
+        let span = cmd.rendered_line_span() + usize::from(hint);
+        BlockShape {
+            span,
+            rows: span - 1 - usize::from(hint),
+            tall: cmd.handoff.is_some() || cmd.in_jobs,
+            hint,
+        }
+    }
+
+    /// The px from the block's top to the top of the box of line `line`.
+    pub(crate) fn slot_top(&self, b: &RunBox, line: usize) -> u32 {
+        let m = &b.metrics;
+        match line.checked_sub(1) {
+            None => m.px(4),
+            Some(row) => m.px(4) + m.box_height(1) + m.px(2) + row as u32 * b.row_height(self.tall),
+        }
+    }
+
+    /// The height of the box of line `line`.
+    pub(crate) fn slot_height(&self, b: &RunBox, line: usize) -> u32 {
+        match line {
+            0 => b.metrics.box_height(1),
+            _ if self.is_hint(line) => b.hint_height(),
+            _ => b.row_height(self.tall),
+        }
+    }
+
+    /// The px from the top of line `line`'s box to the top of its text.
+    pub(crate) fn text_inset(&self, b: &RunBox, line: usize) -> u32 {
+        match line {
+            0 => b.metrics.px(ROW_PAD),
+            _ if self.is_hint(line) => b.metrics.px(2),
+            _ => 0,
+        }
+    }
+
+    /// Whether line `line` is the hint.
+    pub(crate) fn is_hint(&self, line: usize) -> bool {
+        self.hint && line + 1 == self.span
     }
 }
 
@@ -453,7 +719,9 @@ pub(crate) fn stack_rect(area: Rect) -> Rect {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{buffer::BufferId, editor_state::EditorId, run::cargo::ONE_FAILURE};
+    use crate::{
+        buffer::BufferId, editor_state::EditorId, run::cargo::ONE_FAILURE, theme::FULL_CELL_SCALE,
+    };
     use ratatui::style::Color;
     use std::{collections::BTreeSet, path::PathBuf};
 
@@ -979,6 +1247,7 @@ mod tests {
             scroll_offset,
             prompt: PromptInfo::default(),
             recalled: None,
+            pixel_box: None,
         };
         let mut cmds = SlotMap::with_key();
         for n in 0..blocks {
@@ -1155,6 +1424,94 @@ mod tests {
         let report = mapped(&cmds);
         cmds[id].raw_view = true;
         assert_eq!((report, mapped(&cmds) > 0), (0, true));
+    }
+
+    const M1: RowMetrics = RowMetrics {
+        cell: [9, 18],
+        scale: 1.0,
+    };
+
+    /// The box of a pane 60 cells by 12 under an Island flush with its cells.
+    fn first_box() -> RunBox {
+        RunBox::of(M1, FULL_CELL_SCALE, Rect::new(0, 0, 60, 12), [0; 4])
+    }
+
+    /// The content stands 12 px inside the Island, which a reach moves, and the
+    /// prompt's rule stands its 29 px over the content's bottom.
+    #[test]
+    fn a_run_box_stands_twelve_pixels_inside_its_island() {
+        let reached = RunBox::of(M1, FULL_CELL_SCALE, Rect::new(0, 0, 158, 46), [4, 1, 12, 1]);
+        let measure = |b: RunBox| (b.left, b.width, b.bottom, b.rule_y());
+        assert_eq!(
+            [first_box(), reached].map(measure),
+            [(12, 516, 210, 181), (11, 1400, 834, 805)],
+        );
+    }
+
+    #[test]
+    fn a_block_is_its_pads_its_cmd_line_its_body_and_its_rule() {
+        let b = first_box();
+        let shapes = [
+            (0, false, false),
+            (1, false, false),
+            (2, false, false),
+            (1, false, true),
+            (1, true, true),
+        ];
+        assert_eq!(
+            shapes.map(|(rows, tall, hint)| b.block_height(rows, tall, hint)),
+            [29, 48, 65, 70, 71],
+        );
+    }
+
+    /// A block whose last line ends the window sits with its pad and its rule
+    /// on the prompt's rule, and a line scrolled to the window's end stands on
+    /// the rule itself.
+    #[test]
+    fn the_stack_ends_at_the_rule_of_the_prompt() {
+        let (mut run, mut cmds) = scrollable(0, 0);
+        let mut block = Cmd::new("echo ok".to_owned(), PathBuf::from("/repo"), 10);
+        block.feed(b"ok");
+        block.finished = true;
+        block.exit_status = Some(0);
+        let id = cmds.insert(block);
+        run.blocks.push(id);
+        let line = |line, top, last| StackLine {
+            cmd: id,
+            line,
+            top,
+            last,
+        };
+
+        let shown = run.window_px(&cmds, &first_box());
+        run.scroll_offset = 1;
+        assert_eq!(
+            [shown, run.window_px(&cmds, &first_box())],
+            [
+                vec![line(0, 138, false), line(1, 159, true)],
+                vec![line(0, 162, false)],
+            ],
+        );
+    }
+
+    /// Under a stored pixel box, a press maps by the middle of its cell through
+    /// the stack's pixel layout. The output row stands on the pixel rows 159 to
+    /// 175, so cell row 9 maps into it and cell row 8, over the header, maps
+    /// nowhere. Its chars start 10 px into the content, at x 22.
+    #[test]
+    fn a_press_maps_through_the_pixel_box() {
+        let (mut run, mut cmds) = scrollable(0, 0);
+        let mut block = Cmd::new("echo ok".to_owned(), PathBuf::from("/repo"), 10);
+        block.feed(b"ok");
+        run.blocks.push(cmds.insert(block));
+        run.pixel_box = Some(first_box());
+
+        let area = first_box().area;
+        let press = |(col, row)| run.active_block_grid_pos(&cmds, area, col, row);
+        assert_eq!(
+            [(3, 9), (2, 9), (1, 9), (3, 8)].map(press),
+            [Some((1, 0)), Some((0, 0)), None, None],
+        );
     }
 }
 
