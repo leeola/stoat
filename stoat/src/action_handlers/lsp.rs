@@ -21,7 +21,6 @@ use crate::{
     lsp::stamp::DocumentStamp,
     render::editor,
     symbol_finder::{SymbolFinder, SymbolFinderEntry, SymbolFinderScope, SymbolTarget},
-    wake,
 };
 pub(crate) use lsp_types::Uri;
 use lsp_types::{
@@ -1945,7 +1944,7 @@ pub(crate) fn pump_symbol_finder_doc(stoat: &mut Stoat) -> bool {
     let Some(mut task) = finder.pending_doc.take() else {
         return false;
     };
-    let waker = wake::notify_waker(&stoat.redraw_notify);
+    let waker = stoat_scheduler::notify_waker(&stoat.redraw_notify);
     let mut cx = Context::from_waker(&waker);
     match Pin::new(&mut task).poll(&mut cx) {
         Poll::Ready(doc) => {

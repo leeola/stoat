@@ -33,7 +33,7 @@ use crate::{
     jumplist::JumpEntry,
     multi_buffer::MultiBuffer,
     review_approval::ApprovedRows,
-    syntax_parse, wake,
+    syntax_parse,
 };
 use codegraph::FileId;
 use std::{
@@ -813,7 +813,7 @@ impl DiffState {
         language_registry: &LanguageRegistry,
         redraw_notify: &Arc<Notify>,
     ) -> Vec<(BufferId, Vec<DiffLanding>)> {
-        let waker = wake::notify_waker(redraw_notify);
+        let waker = stoat_scheduler::notify_waker(redraw_notify);
         let mut landed = Vec::new();
         self.wants.retain(|_, want| {
             let mut cx = Context::from_waker(&waker);
@@ -985,7 +985,7 @@ impl DiffState {
 
         let mut completed: Vec<(DiffJobOutput, bool, bool, Instant)> = Vec::new();
         if !self.jobs.is_empty() {
-            let waker = wake::notify_waker(redraw_notify);
+            let waker = stoat_scheduler::notify_waker(redraw_notify);
             self.jobs.retain(|_, job| {
                 let mut cx = Context::from_waker(&waker);
                 match Pin::new(&mut job.task).poll(&mut cx) {
@@ -1139,7 +1139,7 @@ impl DiffState {
     ) -> bool {
         let mut landed = false;
         if let Some(job) = &mut self.tally_job {
-            let waker = wake::notify_waker(redraw_notify);
+            let waker = stoat_scheduler::notify_waker(redraw_notify);
             let mut cx = Context::from_waker(&waker);
             if let Poll::Ready(tally) = Pin::new(job).poll(&mut cx) {
                 // A `None` answer means the root is outside a repo now, which

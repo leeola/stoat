@@ -102,9 +102,9 @@ pub mod workspace;
 pub mod workspace_picker;
 
 pub use app::{Stoat, UpdateEffect};
+use stoat_core::selection;
 pub(crate) use stoat_core::syntax_parse;
 pub use stoat_core::{buffer, diff_map, display_map, host, keymap, multi_buffer};
-use stoat_core::{selection, wake};
 pub use stoat_theme as theme;
 pub(crate) use stoat_theme::pool as theme_pool;
 #[cfg(test)]

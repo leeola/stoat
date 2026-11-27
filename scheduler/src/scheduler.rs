@@ -6,6 +6,7 @@ mod test_scheduler;
 #[cfg(test)]
 mod tests;
 mod tokio_scheduler;
+mod wake;
 
 #[cfg(any(test, feature = "test-support"))]
 pub use clock::TestClock;
@@ -23,6 +24,7 @@ use std::{
 #[cfg(any(test, feature = "test-support"))]
 pub use test_scheduler::TestScheduler;
 pub use tokio_scheduler::TokioScheduler;
+pub use wake::notify_waker;
 
 pub type Runnable = async_task::Runnable;
 

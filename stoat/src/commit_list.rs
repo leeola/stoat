@@ -3,7 +3,6 @@ use crate::{
     host::{CommitFileChange, CommitInfo, GitRepo},
     pane::View,
     review_session::DiffDocument,
-    wake,
 };
 use serde::{Deserialize, Serialize};
 use slotmap::new_key_type;
@@ -428,7 +427,7 @@ impl CommitListState {
         let Some(mut task) = self.pending_load.take() else {
             return false;
         };
-        let waker = wake::notify_waker(redraw_notify);
+        let waker = stoat_scheduler::notify_waker(redraw_notify);
         let mut cx = Context::from_waker(&waker);
         match Pin::new(&mut task).poll(&mut cx) {
             Poll::Ready(load) => {
@@ -464,7 +463,7 @@ impl CommitListState {
         let Some(mut pending) = self.pending_preview.take() else {
             return false;
         };
-        let waker = wake::notify_waker(redraw_notify);
+        let waker = stoat_scheduler::notify_waker(redraw_notify);
         let mut cx = Context::from_waker(&waker);
         match Pin::new(&mut pending.task).poll(&mut cx) {
             Poll::Ready(load) => {

@@ -14,7 +14,7 @@
 //! collects the replies, both of them background work the user never asks for.
 
 use crate::{
-    action_handlers, app::Stoat, buffer::BufferId, host::LanguageServerFeature, lsp::util, wake,
+    action_handlers, app::Stoat, buffer::BufferId, host::LanguageServerFeature, lsp::util,
 };
 use lsp_types::{
     Diagnostic, DocumentDiagnosticParams, DocumentDiagnosticReport, DocumentDiagnosticReportResult,
@@ -168,7 +168,7 @@ pub(crate) fn pump_lsp_pull_diagnostics(stoat: &mut Stoat) -> bool {
         return false;
     }
 
-    let waker = wake::notify_waker(&stoat.redraw_notify);
+    let waker = stoat_scheduler::notify_waker(&stoat.redraw_notify);
     let mut cx = Context::from_waker(&waker);
     let ready: Vec<(BufferId, Option<PullDiagnosticsOutcome>)> = {
         let mut ready = Vec::new();

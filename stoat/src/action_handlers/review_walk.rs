@@ -8,7 +8,6 @@ use crate::{
     git_jobs::{self, GitJob, GitJobKey, GitLanding, GitWork},
     host::CommitInfo,
     review_walk::{ReturnRef, ReviewWalk, WalkOrigin, WalkSpan, WalkStash},
-    wake,
     workspace::diff::DiffBase,
 };
 use std::{
@@ -1274,7 +1273,7 @@ fn install_pending_commits(stoat: &mut Stoat) -> bool {
         return false;
     };
 
-    let waker = wake::notify_waker(&stoat.redraw_notify);
+    let waker = stoat_scheduler::notify_waker(&stoat.redraw_notify);
     let mut cx = Context::from_waker(&waker);
     let loaded = match Pin::new(&mut task).poll(&mut cx) {
         Poll::Ready(loaded) => loaded,
@@ -1400,7 +1399,7 @@ fn poll_pending_preview(
     let Some(mut pending) = picker.pending_preview.take() else {
         return false;
     };
-    let waker = wake::notify_waker(redraw_notify);
+    let waker = stoat_scheduler::notify_waker(redraw_notify);
     let mut cx = Context::from_waker(&waker);
     match Pin::new(&mut pending.task).poll(&mut cx) {
         Poll::Ready(load) => {

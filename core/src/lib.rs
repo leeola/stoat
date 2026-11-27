@@ -17,7 +17,6 @@ pub mod keymap;
 pub mod multi_buffer;
 pub mod selection;
 pub mod syntax_parse;
-pub mod wake;
 
 /// A redraw handle for tests, where nothing listens for the wake.
 ///

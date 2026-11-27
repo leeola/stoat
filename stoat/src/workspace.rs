@@ -41,7 +41,6 @@ use crate::{
     ssh::RemoteTarget,
     syntax_parse::{parse_buffer_step, ParseJobOutput},
     term_session::{TermId, TermSession, ViewLocation},
-    wake,
     workspace::diff::{
         BaseHighlightCache, ChangedRangesMemo, ChangedRangesScan, DiffBase, DiffLanding, DiffState,
         PairBase, RepoStatus, RevOrigin, WorktreeBase,
@@ -1971,7 +1970,7 @@ impl Workspace {
         self.drain_index_debounce(executor, index_update_tx, redraw_notify);
 
         let mut installed: Vec<ParseLanding> = Vec::new();
-        let waker = wake::notify_waker(parse_notify);
+        let waker = stoat_scheduler::notify_waker(parse_notify);
         let mut completed: Vec<ParseJobOutput> = Vec::new();
         self.parse_jobs.retain(|_, job| {
             let mut cx = Context::from_waker(&waker);

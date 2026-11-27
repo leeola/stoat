@@ -5,7 +5,6 @@ use crate::{
     buffer_registry::{OpenOrigin, ReadOnly},
     host::LanguageServerFeature,
     lsp::sync,
-    wake,
     workspace::{diff, WorkspaceId},
 };
 use lsp_types::{
@@ -458,7 +457,7 @@ pub(crate) fn pump_format_on_save(stoat: &mut Stoat) -> bool {
     if stoat.pending_format_on_save.is_empty() {
         return false;
     }
-    let waker = wake::notify_waker(&stoat.redraw_notify);
+    let waker = stoat_scheduler::notify_waker(&stoat.redraw_notify);
     let mut cx = Context::from_waker(&waker);
     let mut landed_any = false;
     for mut pending in std::mem::take(&mut stoat.pending_format_on_save) {

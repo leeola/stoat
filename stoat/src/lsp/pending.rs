@@ -8,7 +8,7 @@
 //! per feature that is six lines of ceremony around one question, repeated for
 //! every request kind the editor makes.
 
-use crate::{lsp::stamp::DocumentStamp, wake};
+use crate::lsp::stamp::DocumentStamp;
 use std::{
     future::Future,
     pin::Pin,
@@ -63,7 +63,7 @@ impl<T> Pending<T> {
     {
         let mut task = self.0.take()?;
 
-        let waker = wake::notify_waker(redraw_notify);
+        let waker = stoat_scheduler::notify_waker(redraw_notify);
         let mut cx = Context::from_waker(&waker);
         match Pin::new(&mut task).poll(&mut cx) {
             Poll::Ready(value) => Some(value),
@@ -114,7 +114,7 @@ impl<T> StampedPending<T> {
     {
         let (stamp, mut task) = self.0.take()?;
 
-        let waker = wake::notify_waker(redraw_notify);
+        let waker = stoat_scheduler::notify_waker(redraw_notify);
         let mut cx = Context::from_waker(&waker);
         match Pin::new(&mut task).poll(&mut cx) {
             Poll::Ready(value) => Some((stamp, value)),

@@ -3,7 +3,6 @@ use super::{
     highlights::{Chunk, HighlightCursor, HighlightEndpoints},
     tab_map::{self, TabChunks, TabPoint, TabSnapshot},
 };
-use crate::wake;
 use std::{
     borrow::Cow,
     cmp::Ordering,
@@ -582,7 +581,7 @@ impl WrapMap {
 
     fn poll_background_task(&mut self) {
         if let Some(ref mut task) = self.background_task {
-            let waker = wake::notify_waker(&self.redraw);
+            let waker = stoat_scheduler::notify_waker(&self.redraw);
             let mut cx = Context::from_waker(&waker);
             if let Poll::Ready((snapshot, edits)) = Pin::new(task).poll(&mut cx) {
                 let mut inverted = mem::take(&mut self.interpolated_edits);

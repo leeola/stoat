@@ -6325,7 +6325,7 @@ impl Stoat {
     /// [`Self::redraw_notify`]. The wake fires inside the returned task's
     /// final poll, before the task holds its value, so the pass it starts
     /// sometimes finds the task still pending. A pump that polls the task with
-    /// [`crate::wake::notify_waker`] of the same notify gets another pass when
+    /// [`stoat_scheduler::notify_waker`] of the same notify gets another pass when
     /// the value lands.
     pub(crate) fn spawn_woken<F>(&self, future: F) -> stoat_scheduler::Task<F::Output>
     where

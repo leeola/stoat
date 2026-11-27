@@ -3,7 +3,6 @@ use crate::{
     buffer_registry::{BufferRegistry, RevisionSource},
     editor_state::EditorId,
     host::{BlameCommit, FileBlame, GitHost, GitRepo},
-    wake,
     workspace::diff::{self, DIFF_SETTLE},
 };
 use std::{
@@ -424,7 +423,7 @@ impl BlameState {
             return false;
         }
 
-        let waker = wake::notify_waker(redraw);
+        let waker = stoat_scheduler::notify_waker(redraw);
         let mut cx = Context::from_waker(&waker);
         let mut landed = Vec::new();
         self.jobs
@@ -508,7 +507,7 @@ impl BlameCard {
     /// when it lands.
     pub(crate) fn poll_details(&mut self, redraw: &Arc<Notify>) -> Option<CommitDetails> {
         let task = self.load.as_mut()?;
-        let waker = wake::notify_waker(redraw);
+        let waker = stoat_scheduler::notify_waker(redraw);
         let landed = match Pin::new(task).poll(&mut Context::from_waker(&waker)) {
             Poll::Ready(details) => details,
             Poll::Pending => return None,
