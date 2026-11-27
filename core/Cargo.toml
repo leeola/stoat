@@ -28,11 +28,9 @@ stoat_host_lsp = { path = "../host_lsp" }
 stoat_host_terminal = { path = "../host_terminal" }
 stoat_language = { path = "../language" }
 stoat_text = { path = "../text" }
-serde = { workspace = true, features = ["derive", "rc"] }
 
 [dev-dependencies]
 tempfile.workspace = true
-ron.workspace = true
 stoat_host = { path = "../host", features = ["test-support"] }
 stoat_host_clipboard = { path = "../host_clipboard", features = ["test-support"] }
 stoat_host_git = { path = "../host_git", features = ["test-support"] }

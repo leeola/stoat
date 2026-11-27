@@ -1,9 +1,16 @@
-use crate::multi_buffer::MultiBufferSnapshot;
+//! The selections of an editor, and the operations that move and reshape them.
+//!
+//! [`SelectionsCollection`] holds an editor's disjoint selections in anchors,
+//! so they follow the text through edits, with the newest as the primary.
+//! Free functions such as [`land_block_cursor`] build the block-cursor
+//! selections that the motions land.
+
 use serde::{Deserialize, Serialize};
 use std::sync::{
     atomic::{AtomicU64, Ordering},
     Arc,
 };
+use stoat_buffer::multi_buffer::MultiBufferSnapshot;
 use stoat_text::{
     next_char_boundaries_batch, next_char_boundary, Anchor, Bias, Rope, Selection, SelectionGoal,
 };
@@ -1438,11 +1445,11 @@ pub fn anchor_selection(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{
+    use std::sync::{Arc, RwLock};
+    use stoat_buffer::{
         buffer::{BufferId, TextBuffer},
         multi_buffer::MultiBuffer,
     };
-    use std::sync::{Arc, RwLock};
     use stoat_text::{next_char_boundary, Bias};
 
     /// The recorded primary is only right while every path that changes the set

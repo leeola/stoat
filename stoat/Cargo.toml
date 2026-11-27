@@ -26,6 +26,7 @@ stoat_keymap = { path = "../keymap" }
 stoat_language = { path = "../language" }
 stoat_log = { path = "../log" }
 stoat_scheduler = { path = "../scheduler" }
+stoat_selection = { path = "../selection" }
 stoat_text = { path = "../text" }
 stoat_theme = { path = "../theme" }
 regex-cursor.workspace = true
@@ -74,6 +75,7 @@ stoat_buffer = { path = "../buffer", features = ["test-support"] }
 stoat_core = { path = "../core", features = ["test-support"] }
 stoat_host = { path = "../host", features = ["test-support"] }
 stoat_scheduler = { path = "../scheduler", features = ["test-support"] }
+stoat_selection = { path = "../selection", features = ["test-support"] }
 stoat_theme = { path = "../theme", features = ["test-support"] }
 tracing-subscriber.workspace = true
 

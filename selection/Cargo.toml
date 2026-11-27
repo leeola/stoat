@@ -1,0 +1,22 @@
+[package]
+name = "stoat_selection"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+# Compile the test-only cursor builder. Off by default so a release build
+# carries none of it, and enabled from a consumer's [dev-dependencies] so its
+# tests do.
+[features]
+test-support = []
+
+[dependencies]
+stoat_buffer = { path = "../buffer" }
+stoat_text = { path = "../text" }
+serde = { workspace = true, features = ["derive", "rc"] }
+
+[dev-dependencies]
+ron.workspace = true

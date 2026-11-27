@@ -4044,6 +4044,7 @@ dependencies = [
  "stoat_language",
  "stoat_log",
  "stoat_scheduler",
+ "stoat_selection",
  "stoat_text",
  "stoat_theme",
  "stoat_widgets",
@@ -4140,8 +4141,6 @@ dependencies = [
 name = "stoat_core"
 version = "0.1.0"
 dependencies = [
- "ron",
- "serde",
  "stoat_buffer",
  "stoat_host",
  "stoat_host_clipboard",
@@ -4266,6 +4265,16 @@ dependencies = [
  "futures",
  "parking_lot 0.13.0",
  "tokio",
+]
+
+[[package]]
+name = "stoat_selection"
+version = "0.1.0"
+dependencies = [
+ "ron",
+ "serde",
+ "stoat_buffer",
+ "stoat_text",
 ]
 
 [[package]]

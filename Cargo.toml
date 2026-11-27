@@ -17,6 +17,7 @@ members = [
   "keymap",
   "language",
   "scheduler",
+  "selection",
   "stoat",
   "log",
   "text",
