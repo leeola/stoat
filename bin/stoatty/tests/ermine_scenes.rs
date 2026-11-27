@@ -1750,15 +1750,12 @@ fn keywords_narrow_history_under_a_wider_chip() {
 /// `src/main.rs` in the danger color, whose red stands more than 60 over its
 /// blue. Under Modified, the second result, from y + 21, holds the `M` of
 /// `src/util.rs`, and the 20 pixel rows from y + 42 are blank.
+///
+/// Both lists take their marks from a background git status pass, which can
+/// answer after the frame has stood still for a settle's 250 ms, so each frame
+/// waits for its marks before it is read.
 #[test]
 fn the_file_argument_marks_modified_rows_and_cycles_to_them() {
-    let mut home = support::scratch_home();
-    let mut session = spawn_settled(home.path(), "rust-diff", "Cargo.toml");
-    play(&mut session, ":o<Space><Settle>");
-    let all = session.snapshot().expect("a snapshot");
-    play(&mut session, "<S-Tab><Settle>");
-    let modified = session.snapshot().expect("a snapshot");
-
     let selected_top = |shot: &Snapshot| {
         (10..40u32)
             .find(|&row| pixel(shot, 560, row * 18 + 9) == TAB_WASH)
@@ -1768,6 +1765,19 @@ fn the_file_argument_marks_modified_rows_and_cycles_to_them() {
         let danger = |[r, _, b]: [u8; 3]| i32::from(r) - i32::from(b) > 60;
         pixels_where(shot, (575, y, 9, 20), danger) > 0
     };
+
+    let mut home = support::scratch_home();
+    let mut session = spawn_settled(home.path(), "rust-diff", "Cargo.toml");
+    play(&mut session, ":o<Space>");
+    wait_for(&mut session, "the All list's marks", |shot| {
+        selected_top(shot).is_some_and(|y| marked(shot, y + 42))
+    });
+    let all = session.snapshot().expect("a snapshot");
+    play(&mut session, "<S-Tab>");
+    wait_for(&mut session, "the Modified list", |shot| {
+        selected_top(shot).is_some_and(|y| marked(shot, y + 21))
+    });
+    let modified = session.snapshot().expect("a snapshot");
     let checks = match (selected_top(&all), selected_top(&modified)) {
         (Some(all_y), Some(modified_y)) => [
             (
@@ -4417,6 +4427,20 @@ fn wait_for_blame(session: &mut HeadlessSession) {
 fn wait_for_color(session: &mut HeadlessSession, rect: PixelRect, color: [u8; 3], what: &str) {
     let deadline = Instant::now() + support::STARTUP_TIMEOUT;
     while dominant_color(&session.snapshot().expect("a snapshot"), rect) != color {
+        assert!(Instant::now() < deadline, "{what} did not show");
+        play(session, "<Wait:100>");
+    }
+
+    session
+        .wait_settled(support::SETTLE, support::STARTUP_TIMEOUT)
+        .expect("the frame settles");
+}
+
+/// Wait until `landed` holds of the frame, where `what` shows, and then until
+/// the frame settles.
+fn wait_for(session: &mut HeadlessSession, what: &str, landed: impl Fn(&Snapshot) -> bool) {
+    let deadline = Instant::now() + support::STARTUP_TIMEOUT;
+    while !landed(&session.snapshot().expect("a snapshot")) {
         assert!(Instant::now() < deadline, "{what} did not show");
         play(session, "<Wait:100>");
     }
