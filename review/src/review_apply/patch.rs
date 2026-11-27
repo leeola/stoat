@@ -6,17 +6,15 @@
 //! `--- a/<rel>` / `+++ b/<rel>` headers so callers can apply a subset
 //! of a file's chunks independently.
 
-use crate::{
-    diff_map::{hunk_base_lines, line_starts, DiffHunk},
-    review::{line_count, ReviewRow, ReviewSide},
-};
+use crate::review::{line_count, ReviewRow, ReviewSide};
 use std::{ops::Range, path::Path};
+use stoat_buffer::diff_map::{hunk_base_lines, line_starts, DiffHunk};
 
 /// Unchanged rows a staged patch carries on each side of its hunk.
 ///
 /// Three is what git emits by default, and enough for the index apply to place
 /// the hunk when the file has moved under it.
-pub(crate) const HUNK_CONTEXT: u32 = 3;
+pub const HUNK_CONTEXT: u32 = 3;
 
 const NO_NEWLINE_MARKER: &str = "\\ No newline at end of file\n";
 
@@ -43,7 +41,7 @@ fn base_line_start(base_text: &str, starts: &[usize], hunks: &[DiffHunk], k: usi
 /// Empty for an `Added` hunk, which replaces no base line. A caller resolving
 /// a hunk by index row reads this the way the gutter reads
 /// [`DiffHunk::buffer_line_range`].
-pub(crate) fn base_line_range(base_text: &str, hunks: &[DiffHunk], k: usize) -> Range<u32> {
+pub fn base_line_range(base_text: &str, hunks: &[DiffHunk], k: usize) -> Range<u32> {
     let starts = line_starts(base_text);
     let start = base_line_start(base_text, &starts, hunks, k);
     let len = hunks.get(k).map_or(0, |hunk| {
@@ -58,7 +56,7 @@ pub(crate) fn base_line_range(base_text: &str, hunks: &[DiffHunk], k: usize) -> 
 /// A caller that tests rows against every hunk calls this once. A call of
 /// [`base_line_range`] per hunk rescans the text and walks the prior hunks
 /// each time. Its cost grows with the hunks times the bytes.
-pub(crate) fn base_line_ranges(base_text: &str, hunks: &[DiffHunk]) -> Vec<Range<u32>> {
+pub fn base_line_ranges(base_text: &str, hunks: &[DiffHunk]) -> Vec<Range<u32>> {
     let starts = line_starts(base_text);
     let mut delta: i64 = 0;
     hunks
@@ -97,7 +95,7 @@ pub(crate) fn base_line_ranges(base_text: &str, hunks: &[DiffHunk]) -> Vec<Range
 /// inserts the rest.
 ///
 /// Returns [`None`] when `k` is out of range.
-pub(crate) fn hunk_rows(
+pub fn hunk_rows(
     base_text: &str,
     buffer_text: &str,
     hunks: &[DiffHunk],
@@ -183,7 +181,7 @@ fn hunk_lines<'a>(lines: &[&'a str], start: u32, len: u32) -> Vec<&'a str> {
 ///
 /// See also:
 /// - [`rows_to_unified_diff`] for what `removes_file` and `creates_file` do to the patch.
-pub(crate) fn hunk_to_patch(
+pub fn hunk_to_patch(
     rel: &Path,
     base_text: &str,
     buffer_text: &str,
@@ -225,7 +223,7 @@ fn split_lines(text: &str) -> Vec<&str> {
 ///
 /// Returns [`None`] when no `Changed` row matched, letting the caller report
 /// that the cursor sits on no change.
-pub(crate) fn line_restricted_rows(
+pub fn line_restricted_rows(
     rows: &[ReviewRow],
     side_lines: Range<u32>,
     right_side: bool,
@@ -275,7 +273,7 @@ pub(crate) fn line_restricted_rows(
 /// alone in the index. Without it, a patch for a path the index does not hold
 /// fails to apply, rather than giving the index a partial copy of a file the
 /// index tracked.
-pub(crate) fn rows_to_unified_diff(
+pub fn rows_to_unified_diff(
     rel: &Path,
     base_text: &str,
     buffer_text: &str,
@@ -485,9 +483,9 @@ fn touches_buffer_eof(side: &ReviewSide, buffer_total: u32) -> bool {
 #[allow(clippy::disallowed_methods)]
 mod tests {
     use super::*;
-    use crate::host::{GitHost, GitRepo, LocalGit};
     use git2::{Repository, Signature};
     use std::sync::Arc;
+    use stoat_host_git::{GitHost, GitRepo, LocalGit};
     use tempfile::TempDir;
 
     /// A real repository whose HEAD and index hold `base` for `a.rs` and whose
@@ -526,7 +524,7 @@ mod tests {
     /// The line hunks between `base` and `buffer`, as the staging keys read them.
     fn hunks(base: &str, buffer: &str) -> Vec<DiffHunk> {
         let result = stoat_language::structural_diff::diff(base, buffer);
-        crate::diff_map::changes_to_hunks(&result.changes, base, buffer)
+        stoat_buffer::diff_map::changes_to_hunks(&result.changes, base, buffer)
     }
 
     #[test]

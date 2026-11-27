@@ -1,16 +1,13 @@
-use crate::{
-    diff_map::BaseHighlights,
-    display_map::FoldScope,
-    review::{
-        extract_review_hunks_changeset, line_byte_offsets, split_lines, ReviewFileInput,
-        ReviewHunk, ReviewRow,
-    },
+use crate::review::{
+    extract_review_hunks_changeset, line_byte_offsets, split_lines, ReviewFileInput, ReviewHunk,
+    ReviewRow,
 };
 use std::{collections::HashMap, ops::Range, sync::Arc};
+use stoat_buffer::{diff_map::BaseHighlights, display_map::FoldScope};
 use stoat_language::{structural_diff::TreeCache, Language};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub(crate) struct ReviewChunkId(u32);
+pub struct ReviewChunkId(u32);
 
 /// One hunk of a diffed file, with where it sits recorded on both sides.
 ///
@@ -20,7 +17,7 @@ pub(crate) struct ReviewChunkId(u32);
 /// byte. They stay because a chunk that cannot say where it came from is not a
 /// chunk, and the extraction that fills them is what the tests pin.
 #[derive(Clone, Debug)]
-pub(crate) struct ReviewChunk {
+pub struct ReviewChunk {
     #[allow(dead_code)]
     pub id: ReviewChunkId,
     #[allow(dead_code)]
@@ -49,7 +46,7 @@ pub(crate) struct ReviewChunk {
 }
 
 #[derive(Clone)]
-pub(crate) struct ReviewFile {
+pub struct ReviewFile {
     pub rel_path: String,
     pub language: Option<Arc<Language>>,
     pub base_text: Arc<String>,
@@ -74,7 +71,7 @@ pub(crate) struct ReviewFile {
 /// staging anything in it, so a document carries no cursor, no per-chunk
 /// status, and no editor.
 #[derive(Default)]
-pub(crate) struct DiffDocument {
+pub struct DiffDocument {
     pub files: Vec<ReviewFile>,
     pub chunks: HashMap<ReviewChunkId, ReviewChunk>,
     /// Every chunk id in visit order, files in the order they were added.
@@ -91,7 +88,7 @@ impl DiffDocument {
     /// input order. Files that produce no hunks are still recorded
     /// (with an empty chunk list) so that subsequent file indices
     /// stay stable.
-    pub(crate) fn add_files(&mut self, files: Vec<ReviewFileInput>) -> Vec<Vec<ReviewChunkId>> {
+    pub fn add_files(&mut self, files: Vec<ReviewFileInput>) -> Vec<Vec<ReviewChunkId>> {
         let hunks_per_file = {
             let memo = self.tree_cache.clone();
             extract_review_hunks_changeset(&files, 3, Some(&memo))
@@ -103,7 +100,7 @@ impl DiffDocument {
     /// changeset diff [`add_files`] runs. The streaming review scan uses
     /// this to reuse hunks it produced from prepared diffs, so a scanned
     /// file is never diffed a second time.
-    pub(crate) fn add_files_with_hunks(
+    pub fn add_files_with_hunks(
         &mut self,
         files: Vec<ReviewFileInput>,
         hunks_per_file: Vec<Vec<ReviewHunk>>,

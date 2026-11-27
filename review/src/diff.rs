@@ -5,7 +5,6 @@
 //! per-file hunks the review pane renders without depending on the
 //! TUI rendering path.
 
-use crate::host::{FsHost, GitHost};
 pub use crate::review::{
     extract_review_hunks_changeset, MoveProvenance, ReviewFileInput, ReviewHunk, ReviewRow,
     ReviewSide,
@@ -14,6 +13,8 @@ use std::{
     path::{Path, PathBuf},
     sync::Arc,
 };
+use stoat_host::FsHost;
+use stoat_host_git::GitHost;
 use stoat_language::LanguageRegistry;
 use stoat_text::LineEnding;
 
@@ -102,8 +103,9 @@ pub(crate) fn read_utf8(fs: &dyn FsHost, path: &Path) -> std::io::Result<String>
 #[cfg(test)]
 mod tests {
     use super::{extract_review_hunks_changeset, scan_working_tree};
-    use crate::host::{FakeFs, FakeGit};
     use std::path::Path;
+    use stoat_host::FakeFs;
+    use stoat_host_git::FakeGit;
     use stoat_language::LanguageRegistry;
 
     #[test]

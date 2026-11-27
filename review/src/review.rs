@@ -57,7 +57,7 @@ pub struct ReviewSide {
     pub change_spans: Vec<Range<usize>>,
     /// Byte ranges (within `text`) that are tagged as part of a move:
     /// byte-for-byte equal to content elsewhere, just relocated.
-    /// Rendered with the central [`crate::display_map::syntax_theme::DiffTheme`]
+    /// Rendered with the central [`stoat_buffer::display_map::syntax_theme::DiffTheme`]
     /// move color (cyan by default), not red/green, so users see at
     /// a glance that the change is a relocation rather than a gain or
     /// loss.

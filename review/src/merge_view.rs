@@ -1,9 +1,9 @@
 use crate::{
-    host::ConflictedFile,
     review,
     review::{ReviewRow, ReviewSide},
 };
 use std::{ops::Range, sync::Arc};
+use stoat_host_git::ConflictedFile;
 use stoat_language::{structural_diff::TreeCache, Language};
 use stoat_text::LineEnding;
 
@@ -15,7 +15,7 @@ use stoat_text::LineEnding;
 /// ancestor line (`base` None). `conflict` is set when both sides changed the
 /// ancestor line the row covers.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct MergeRow {
+pub struct MergeRow {
     pub base: Option<ReviewSide>,
     pub ours: Option<ReviewSide>,
     pub theirs: Option<ReviewSide>,
@@ -29,7 +29,7 @@ pub(crate) struct MergeRow {
 /// into one [`MergeRow`], and side-only insertions interleave after their
 /// preceding ancestor line with ours before theirs. A row is a conflict when
 /// both sides changed the ancestor line it covers.
-pub(crate) fn build_merge_rows(
+pub fn build_merge_rows(
     ancestor: &str,
     ours: &str,
     theirs: &str,
@@ -103,15 +103,15 @@ fn row_parts(row: &ReviewRow) -> (Option<&ReviewSide>, Option<&ReviewSide>, bool
 /// from the center text with [`ConflictChunk::classify`] rather than stored, so
 /// buffer edits and undo can never desync it.
 #[derive(Clone, Debug)]
-pub(crate) struct MergeDoc {
-    pub(crate) rows: Vec<MergeRow>,
-    pub(crate) chunks: Vec<ConflictChunk>,
+pub struct MergeDoc {
+    pub rows: Vec<MergeRow>,
+    pub chunks: Vec<ConflictChunk>,
 }
 
 impl MergeDoc {
     /// Align the three stages into merge rows and carve the conflict chunks out
     /// of them.
-    pub(crate) fn build(
+    pub fn build(
         ancestor: &str,
         ours: &str,
         theirs: &str,
@@ -155,7 +155,7 @@ impl MergeDoc {
     /// The stages carry the file's own line endings. Each one is normalized
     /// first, or the carriage returns align as content and the chunks differ
     /// from the ones the conflict view shows.
-    pub(crate) fn from_stages(stages: &ConflictedFile, language: Option<&Arc<Language>>) -> Self {
+    pub fn from_stages(stages: &ConflictedFile, language: Option<&Arc<Language>>) -> Self {
         let normalized = |side: Option<&String>| {
             LineEnding::normalize(side.map(String::as_str).unwrap_or("")).into_owned()
         };
@@ -173,7 +173,7 @@ impl MergeDoc {
     /// adds one. A row whose ours line differs from its theirs line, or has no
     /// theirs line, removes one. So a line both sides changed alike counts
     /// nothing, and a conflicting line counts once each way.
-    pub(crate) fn line_counts(&self) -> (u32, u32) {
+    pub fn line_counts(&self) -> (u32, u32) {
         self.rows.iter().fold((0, 0), |(added, removed), row| {
             let ours = row.ours.as_ref().map(|side| side.text.as_str());
             let theirs = row.theirs.as_ref().map(|side| side.text.as_str());
@@ -191,7 +191,7 @@ impl MergeDoc {
     /// Non-conflict rows contribute their auto-merged line, and each conflict
     /// chunk contributes one git-style marker block. The returned ranges pin
     /// each chunk's region so a later pick can reassemble just that span.
-    pub(crate) fn initial_center_text(&self) -> (String, Vec<Range<usize>>) {
+    pub fn initial_center_text(&self) -> (String, Vec<Range<usize>>) {
         let mut text = String::new();
         let mut ranges = Vec::new();
 
@@ -240,7 +240,7 @@ impl MergeDoc {
     /// taller side still emits a row per side line. The rows past the center
     /// span line up with the padding blocks the view installs to make room. A
     /// missing entry falls back to the marker or auto-resolution height.
-    pub(crate) fn align(&self, chunk_center_rows: &[usize]) -> Vec<AlignRow> {
+    pub fn align(&self, chunk_center_rows: &[usize]) -> Vec<AlignRow> {
         let mut plan = Vec::new();
         let mut chunk_idx = 0;
         let mut i = 0;
@@ -302,21 +302,21 @@ impl MergeDoc {
 /// instead of borrowing from it. Resolve one with
 /// `doc.rows[i].ours.as_ref()`.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct AlignRow {
-    pub(crate) ours: Option<usize>,
-    pub(crate) theirs: Option<usize>,
+pub struct AlignRow {
+    pub ours: Option<usize>,
+    pub theirs: Option<usize>,
     /// Index into [`MergeDoc::chunks`] when this line sits in a conflict band.
-    pub(crate) chunk: Option<usize>,
+    pub chunk: Option<usize>,
 }
 
 /// A maximal run of adjacent conflict rows within a [`MergeDoc`]. A non-conflict
 /// row between conflicts separates one chunk from the next.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct ConflictChunk {
-    pub(crate) row_range: Range<usize>,
+pub struct ConflictChunk {
+    pub row_range: Range<usize>,
     /// Set when the chunk is an indentation-only conflict that resolves
     /// automatically (one side re-indented, the other edited content).
-    pub(crate) auto: Option<AutoResolution>,
+    pub auto: Option<AutoResolution>,
 }
 
 /// An automatic resolution of an indentation-only conflict chunk.
@@ -325,14 +325,14 @@ pub(crate) struct ConflictChunk {
 /// the chunk's first row and may extend past it to absorb trailing content-side
 /// insertions re-indented by the same delta.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct AutoResolution {
+pub struct AutoResolution {
     pub(crate) lines: Vec<String>,
     pub(crate) covered: Range<usize>,
 }
 
 impl ConflictChunk {
     /// The ours-side lines this chunk covers, skipping rows ours deleted.
-    pub(crate) fn ours_lines<'a>(&self, rows: &'a [MergeRow]) -> Vec<&'a str> {
+    pub fn ours_lines<'a>(&self, rows: &'a [MergeRow]) -> Vec<&'a str> {
         rows[self.row_range.clone()]
             .iter()
             .filter_map(|r| r.ours.as_ref())
@@ -341,7 +341,7 @@ impl ConflictChunk {
     }
 
     /// The theirs-side lines this chunk covers, skipping rows theirs deleted.
-    pub(crate) fn theirs_lines<'a>(&self, rows: &'a [MergeRow]) -> Vec<&'a str> {
+    pub fn theirs_lines<'a>(&self, rows: &'a [MergeRow]) -> Vec<&'a str> {
         rows[self.row_range.clone()]
             .iter()
             .filter_map(|r| r.theirs.as_ref())
@@ -353,7 +353,7 @@ impl ConflictChunk {
     /// `<<<<<<< ours` and `=======`, then the theirs lines up to
     /// `>>>>>>> theirs`. A side that deleted its lines yields an empty section.
     /// There is no ancestor section, since the flanking columns show it.
-    pub(crate) fn marker_text(&self, rows: &[MergeRow]) -> String {
+    pub fn marker_text(&self, rows: &[MergeRow]) -> String {
         let mut out = String::from("<<<<<<< ours\n");
         for line in self.ours_lines(rows) {
             out.push_str(line);
@@ -371,7 +371,7 @@ impl ConflictChunk {
     /// Assemble the resolved lines for a per-row [`RowPick`], in merge-row order
     /// with the ours line before the theirs line on a row that takes both.
     /// `picks` has one entry per row in [`Self::row_range`].
-    pub(crate) fn assembly_text(&self, rows: &[MergeRow], picks: &[RowPick]) -> String {
+    pub fn assembly_text(&self, rows: &[MergeRow], picks: &[RowPick]) -> String {
         let mut out = String::new();
         for (row, pick) in rows[self.row_range.clone()].iter().zip(picks) {
             if pick.ours
@@ -402,7 +402,7 @@ impl ConflictChunk {
     /// With every row decided this equals [`Self::assembly_text`]. With every
     /// row undecided it equals [`Self::marker_text`], so classify still reads
     /// an all-undecided region as [`ChunkState::Unresolved`].
-    pub(crate) fn partial_text(&self, rows: &[MergeRow], picks: &[RowPick]) -> String {
+    pub fn partial_text(&self, rows: &[MergeRow], picks: &[RowPick]) -> String {
         let mut out = String::new();
         for line in self.resolution_plan(rows, picks) {
             match line {
@@ -429,7 +429,7 @@ impl ConflictChunk {
     /// chunk's center region. `picks` must be the picks the region currently
     /// renders, so the caller derives them from the classified state rather
     /// than a possibly-stale stored vector.
-    pub(crate) fn center_row_to_merge_row(
+    pub fn center_row_to_merge_row(
         &self,
         rows: &[MergeRow],
         picks: &[RowPick],
@@ -497,7 +497,7 @@ impl ConflictChunk {
     }
 
     /// A whole-side pick taking every ours line and no theirs line.
-    pub(crate) fn all_ours(&self) -> Vec<RowPick> {
+    pub fn all_ours(&self) -> Vec<RowPick> {
         vec![
             RowPick {
                 ours: true,
@@ -508,7 +508,7 @@ impl ConflictChunk {
     }
 
     /// A whole-side pick taking every theirs line and no ours line.
-    pub(crate) fn all_theirs(&self) -> Vec<RowPick> {
+    pub fn all_theirs(&self) -> Vec<RowPick> {
         vec![
             RowPick {
                 ours: false,
@@ -519,7 +519,7 @@ impl ConflictChunk {
     }
 
     /// A whole-side pick taking both sides on every row.
-    pub(crate) fn all_both(&self) -> Vec<RowPick> {
+    pub fn all_both(&self) -> Vec<RowPick> {
         vec![
             RowPick {
                 ours: true,
@@ -534,12 +534,7 @@ impl ConflictChunk {
     /// auto-resolution matches first, then the marker block, the
     /// ours/theirs/both whole-side assemblies, and the assembly for `picks`.
     /// Anything else is [`ChunkState::Manual`].
-    pub(crate) fn classify(
-        &self,
-        rows: &[MergeRow],
-        picks: &[RowPick],
-        region_text: &str,
-    ) -> ChunkState {
+    pub fn classify(&self, rows: &[MergeRow], picks: &[RowPick], region_text: &str) -> ChunkState {
         let target = region_text.trim_end_matches('\n');
         let matches = |candidate: &str| candidate.trim_end_matches('\n') == target;
 
@@ -569,14 +564,14 @@ impl ConflictChunk {
 
 /// Which sides a single conflict row contributes to the assembled resolution.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct RowPick {
-    pub(crate) ours: bool,
-    pub(crate) theirs: bool,
+pub struct RowPick {
+    pub ours: bool,
+    pub theirs: bool,
 }
 
 /// One side of a conflict row, naming which candidate a rendered line came from.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Side {
+pub enum Side {
     Ours,
     Theirs,
 }
@@ -591,7 +586,7 @@ enum PlanLine {
 /// The resolution state of a conflict chunk's center region, derived from its
 /// text against the candidate renderings.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum ChunkState {
+pub enum ChunkState {
     /// Still the raw marker block.
     Unresolved,
     /// The whole ours side.

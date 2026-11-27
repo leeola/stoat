@@ -28,6 +28,7 @@ stoat_host_terminal = { path = "../host_terminal" }
 stoat_keymap = { path = "../keymap" }
 stoat_language = { path = "../language" }
 stoat_log = { path = "../log" }
+stoat_review = { path = "../review" }
 stoat_scheduler = { path = "../scheduler" }
 stoat_selection = { path = "../selection" }
 stoat_syntax = { path = "../syntax" }

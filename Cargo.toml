@@ -15,6 +15,7 @@ members = [
   "host_terminal",
   "keymap",
   "language",
+  "review",
   "scheduler",
   "selection",
   "stoat",
