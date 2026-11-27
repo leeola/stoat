@@ -334,7 +334,7 @@ pub(crate) fn sync_palette_picker(stoat: &mut Stoat) {
                 let pending =
                     palette.sync_arg_picker(&tail, ws, &*fs_host, &stoat.language_registry);
                 let home = stoat.home.as_deref();
-                render::command_palette::refit_arg_plate(palette, area, home, zoom);
+                render::command_palette::refit_arg_plate(palette, area, home, zoom, &*fs_host);
                 pending
             },
             None => Vec::new(),

@@ -2,10 +2,13 @@ use crate::{
     display_map::DisplayPoint,
     editor_state::EditorState,
     file_finder::{FileFinder, FinderScope},
+    host::FsHost,
     picker::{write_row_display, PreviewSource},
     render::{
         paint::style_rgb,
-        picker::{FilterHeader, Footer, PathRows, RowMarks, RowStart, FILTER_PROMPT},
+        picker::{
+            FilterHeader, Footer, PathRows, RowMarks, RowStart, FILTER_PROMPT, PREVIEW_TEXT_COLUMNS,
+        },
         pixel_rows::RowMetrics,
         text::{clip_to_width, write_str_clipped},
         TypeScale,
@@ -145,10 +148,14 @@ pub(crate) fn file_finder_layout(
 /// list's rows last changed, so a selection move keeps the plate. With no fit,
 /// as in a direct render, the list measures the rows on show. Either way it
 /// takes the widest label, at least 30 columns, with its pad and mark cells, as
-/// [`list_columns`] gives them. The preview takes `preview_min` columns. The
-/// plate stops one column inside each side of `area`. `zoom` steps then move
-/// the width by a tenth of the area each. The height follows the list's rows as
-/// the height of [`file_finder_layout`] does.
+/// [`list_columns`] gives them. The preview takes the fit's columns of text,
+/// the typical line of the files on show, or [`PREVIEW_TEXT_COLUMNS`] with no
+/// fit, in the grid columns that [`preview_columns`] fits them into by
+/// `preview_scale`. The plate takes at least the columns of a body that shows
+/// a preview, as [`fitted_plate_width`] gives it, and stops one column inside
+/// each side of `area`. `zoom` steps then move the width by a tenth of the area
+/// each. The height follows the list's rows as the height of
+/// [`file_finder_layout`] does.
 ///
 /// A query that matches no file keeps the box's rows, so the query row stays on
 /// its row while a query loses and regains its matches.
@@ -166,6 +173,8 @@ pub(crate) fn file_finder_layout(
 /// [`Preview::pad`]: crate::picker::Preview::pad
 ///
 /// [`list_columns`]: crate::render::picker::list_columns
+/// [`preview_columns`]: crate::render::picker::preview_columns
+/// [`fitted_plate_width`]: crate::render::picker::fitted_plate_width
 /// [`fitted_split`]: crate::render::picker::fitted_split
 pub(crate) fn finder_layout(
     area: Rect,
@@ -173,19 +182,23 @@ pub(crate) fn finder_layout(
     home: Option<&Path>,
     zoom: i8,
     split: Option<u16>,
-    preview_min: u16,
+    preview_scale: Option<(u16, u16)>,
 ) -> Option<FinderLayout> {
     let rows = finder_box(area, finder, zoom)?;
-    let list = match &finder.plate_fit {
-        Some(fit) => fit.list,
+    let (list, text) = match &finder.plate_fit {
+        Some(fit) => (fit.list, fit.preview_text),
         None => {
             let list_rows = body_rows(rows)?.height;
             let widest = crate::render::picker::widest_label(&finder_rows(finder, home), list_rows);
-            crate::render::picker::list_columns(widest)
+            (
+                crate::render::picker::list_columns(widest),
+                PREVIEW_TEXT_COLUMNS,
+            )
         },
     };
+    let preview = crate::render::picker::preview_columns(text, preview_scale);
 
-    let fitted = crate::render::picker::fitted_plate_width(list, preview_min);
+    let fitted = crate::render::picker::fitted_plate_width(list, preview);
     let base = crate::render::chrome::fitted_width(area.width, fitted, 0, 0);
     let width = crate::render::chrome::fitted_width(area.width, base, 40, zoom);
     let modal = Rect {
@@ -201,7 +214,7 @@ pub(crate) fn finder_layout(
         body.inner.width,
         body.height,
         list,
-        preview_min,
+        preview,
         split,
     );
     let header_rows = match finder.active_core_ref().preview.pad[1] {
@@ -237,18 +250,23 @@ pub(crate) fn finder_layout(
 /// as [`finder_layout`] lays it out within `area` at `zoom`.
 ///
 /// The fit holds while the list's rows and its window hold, and measures again
-/// once either changes. A box with no body row keeps the fit it holds.
+/// once either changes. A box with no body row keeps the fit it holds. A
+/// measure reads, through `fs_host`, the start of each file on show that no
+/// earlier fit of the list read, as
+/// [`plate_fit`](crate::render::picker::plate_fit) samples them.
 pub(crate) fn refit_finder_plate(
     finder: &mut FileFinder,
     area: Rect,
     home: Option<&Path>,
     zoom: i8,
+    fs_host: &dyn FsHost,
 ) {
     let Some(list_rows) = finder_list_rows(area, finder, zoom) else {
         return;
     };
     let held = finder.plate_fit.take();
-    let fit = crate::render::picker::plate_fit(held, &finder_rows(finder, home), list_rows);
+    let rows = finder_rows(finder, home);
+    let fit = crate::render::picker::plate_fit(held, &rows, list_rows, fs_host);
     finder.plate_fit = Some(fit);
 }
 
@@ -310,7 +328,7 @@ pub(crate) fn render_file_finder(
     area: Rect,
     zoom: i8,
     split: Option<u16>,
-    preview_min: u16,
+    preview_scale: Option<(u16, u16)>,
     insets: bool,
     buf: &mut Buffer,
     scene: &mut stoat_widgets::ApcScene,
@@ -320,7 +338,7 @@ pub(crate) fn render_file_finder(
         true => [0, PREVIEW_HEAD_INSET, 0, 0],
         false => [0; 4],
     };
-    let Some(layout) = finder_layout(area, finder, home, zoom, split, preview_min) else {
+    let Some(layout) = finder_layout(area, finder, home, zoom, split, preview_scale) else {
         return;
     };
     let no_match = finder.shows_no_match();
@@ -898,7 +916,7 @@ mod tests {
         render::{
             chrome::{ISLAND_BOTTOM, ISLAND_GAP, ISLAND_SIDE, ISLAND_TOP},
             editor::ResolvedChrome,
-            picker::{preview_min_columns, DEFAULT_LIST_SHARE},
+            picker::DEFAULT_LIST_SHARE,
         },
         test_fixture::{column_rules, plate_islands},
         theme::{scope, Theme},
@@ -969,14 +987,13 @@ mod tests {
             area,
             0,
             None,
-            preview_min_columns(None),
+            None,
             false,
             &mut buf,
             &mut ApcScene::new(),
         );
 
-        let layout = finder_layout(area, &finder, None, 0, None, preview_min_columns(None))
-            .expect("the finder fits");
+        let layout = finder_layout(area, &finder, None, 0, None, None).expect("the finder fits");
         let preview = layout.preview.expect("a preview beside the list");
         let pane = layout
             .preview_header
@@ -1023,8 +1040,8 @@ mod tests {
         let area = Rect::new(0, 0, 200, 40);
         let mut rows = |pad: [u8; 4]| {
             finder.active_core().preview.pad = pad;
-            let layout = finder_layout(area, &finder, None, 0, None, preview_min_columns(None))
-                .expect("the finder fits");
+            let layout =
+                finder_layout(area, &finder, None, 0, None, None).expect("the finder fits");
             let header = layout.preview_header.expect("a preview header");
             let preview = layout.preview.expect("a preview beside the list");
             (header.height, preview.y - header.y)
@@ -1173,21 +1190,9 @@ mod tests {
         let mut scene = ApcScene::new();
         scene.set_live(false);
         render_file_finder(
-            finder,
-            ws,
-            None,
-            theme,
-            &chrome,
-            area,
-            0,
-            None,
-            preview_min_columns(None),
-            false,
-            &mut buf,
-            &mut scene,
+            finder, ws, None, theme, &chrome, area, 0, None, None, false, &mut buf, &mut scene,
         );
-        let layout = finder_layout(area, finder, None, 0, None, preview_min_columns(None))
-            .expect("the finder fits");
+        let layout = finder_layout(area, finder, None, 0, None, None).expect("the finder fits");
         (buf, layout)
     }
 
@@ -1244,14 +1249,13 @@ mod tests {
             area,
             0,
             None,
-            preview_min_columns(None),
+            None,
             false,
             &mut buf,
             &mut scene,
         );
 
-        let layout = finder_layout(area, &finder, None, 0, None, preview_min_columns(None))
-            .expect("the finder fits");
+        let layout = finder_layout(area, &finder, None, 0, None, None).expect("the finder fits");
         let preview = layout.preview.expect("a preview beside the list");
         let pane = layout
             .preview_header

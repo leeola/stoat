@@ -9,6 +9,7 @@ use crate::{
     display_map::DisplaySnapshot,
     editor_state::EditorState,
     fuzzy,
+    host::FsHost,
     input_view::InputView,
     picker::{write_row_display, PickList, Preview, RowTops, ScaledPreview},
     render::{
@@ -29,9 +30,10 @@ use ratatui::{
     widgets::{Block, Borders, StatefulWidget},
 };
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, HashMap},
     fmt::Write,
     path::{Path, PathBuf},
+    str,
 };
 use stoat_text::Point;
 use stoat_widgets::{
@@ -2650,9 +2652,20 @@ pub(crate) fn split_list_preview(
 /// are.
 const LIST_MIN_COLUMNS: u16 = 30;
 
-/// Columns of text a fitted preview keeps, so a line of code reads whole beside
-/// a list of short labels.
-const PREVIEW_TEXT_COLUMNS: u16 = 100;
+/// The most columns of text a fitted preview takes, which hold a line of code
+/// whole beside a list of short labels.
+pub(crate) const PREVIEW_TEXT_COLUMNS: u16 = 100;
+
+/// The fewest columns of text a fitted preview takes, so a wider file that a
+/// selection scrolls into view after the fit still reads.
+const PREVIEW_TEXT_MIN: u16 = 60;
+
+/// The bytes from the start of each file on show that a fit reads to find the
+/// file's typical line.
+///
+/// Each sample is small beside the 128 KiB that a preview reads, so a refit at
+/// a filter change costs one window of small reads.
+const PREVIEW_SAMPLE_BYTES: usize = 4096;
 
 /// Body columns under which a fitted finder shows its list alone, with no
 /// preview beside it.
@@ -2669,28 +2682,32 @@ pub(crate) fn list_columns(widest: u16) -> u16 {
         .saturating_add(LABEL_PAD + MARK_COLUMNS)
 }
 
-/// The width of a plate fitted to a list of `list` columns.
+/// The width of a plate fitted to a list of `list` columns beside a preview of
+/// `preview` columns.
 ///
-/// The plate holds the list, the separator column, a preview of `preview_min`
-/// columns, and its two border columns.
-pub(crate) fn fitted_plate_width(list: u16, preview_min: u16) -> u16 {
-    let plate = u32::from(list) + 1 + u32::from(preview_min) + 2;
-    u16::try_from(plate).unwrap_or(u16::MAX)
+/// The plate holds the list, the separator column, the preview, and its two
+/// border columns. It never takes under the columns of a body that shows a
+/// preview beside its list, so beside a short preview the preview takes what
+/// the list leaves of that floor.
+pub(crate) fn fitted_plate_width(list: u16, preview: u16) -> u16 {
+    let plate = u32::from(list) + 1 + u32::from(preview) + 2;
+    let floor = u32::from(FITTED_SPLIT_MIN_COLUMNS) + 2;
+    u16::try_from(plate.max(floor)).unwrap_or(u16::MAX)
 }
 
-/// The fewest columns a fitted preview takes.
+/// The grid columns a fitted preview of `text` columns of text takes.
 ///
 /// `scaled` is the pixel width of a Preview Scale cell and of a grid cell where
 /// the preview draws at Preview Scale, or `None` where it draws at the grid
-/// size. A grid preview keeps [`PREVIEW_TEXT_COLUMNS`]. A scaled preview keeps
-/// that many scaled cells of text and the scaled cells of its ruled number
-/// column, and fits them into grid columns.
-pub(crate) fn preview_min_columns(scaled: Option<(u16, u16)>) -> u16 {
+/// size. A grid preview takes `text` columns. A scaled preview takes `text`
+/// scaled cells of text and the scaled cells of its ruled number column, and
+/// fits them into grid columns.
+pub(crate) fn preview_columns(text: u16, scaled: Option<(u16, u16)>) -> u16 {
     let Some((scaled_width, grid_width)) = scaled else {
-        return PREVIEW_TEXT_COLUMNS;
+        return text;
     };
-    let cells = PREVIEW_TEXT_COLUMNS + PREVIEW_NUMBER_DIGITS + PREVIEW_RULE_CELLS;
-    let pixels = u32::from(cells) * u32::from(scaled_width);
+    let cells = u32::from(text) + u32::from(PREVIEW_NUMBER_DIGITS + PREVIEW_RULE_CELLS);
+    let pixels = cells * u32::from(scaled_width);
     u16::try_from(pixels.div_ceil(u32::from(grid_width.max(1)))).unwrap_or(u16::MAX)
 }
 
@@ -2712,8 +2729,8 @@ pub(crate) fn widest_label(rows: &PathRows<'_>, list_rows: u16) -> u16 {
     u16::try_from(widest).unwrap_or(u16::MAX)
 }
 
-/// The list columns of a fitted plate, measured when the rows of its list
-/// change.
+/// The list columns and the preview text of a fitted plate, measured when the
+/// rows of its list change.
 ///
 /// A fit holds until the list refilters or its window holds another count of
 /// results, so a selection move never moves the plate. A label that a
@@ -2726,22 +2743,111 @@ pub(crate) struct PlateFit {
     list_rows: u16,
     /// The list's columns, as [`list_columns`] gives them.
     pub(crate) list: u16,
+    /// The columns of text the preview takes, the typical line of the widest
+    /// file in the window, from [`PREVIEW_TEXT_MIN`] to
+    /// [`PREVIEW_TEXT_COLUMNS`].
+    pub(crate) preview_text: u16,
+    /// The typical line of each file the fits of this list have sampled, by
+    /// path.
+    ///
+    /// A refit keeps these, so a filter change reads only the files that no
+    /// earlier window showed.
+    samples: HashMap<PathBuf, u16>,
 }
 
 /// The fit of a plate over `rows`, whose window shows `list_rows` results.
 ///
-/// Answers `held` when it measured these rows in a window of the same height,
-/// and otherwise measures the widest label on show, as [`widest_label`] does.
-pub(crate) fn plate_fit(held: Option<PlateFit>, rows: &PathRows<'_>, list_rows: u16) -> PlateFit {
+/// Answers `held` when it measured these rows in a window of the same height.
+/// Otherwise it measures the widest label on show, as [`widest_label`] does,
+/// and the typical line of each file on show, as [`typical_line_columns`] reads
+/// it from the first [`PREVIEW_SAMPLE_BYTES`] of the file. A file the fits of
+/// `held` sampled is not read again, and a file that does not read counts no
+/// columns.
+pub(crate) fn plate_fit(
+    held: Option<PlateFit>,
+    rows: &PathRows<'_>,
+    list_rows: u16,
+    fs_host: &dyn FsHost,
+) -> PlateFit {
     let generation = rows.picklist.filter_generation;
-    match held {
-        Some(held) if held.generation == generation && held.list_rows == list_rows => held,
-        _ => PlateFit {
-            generation,
-            list_rows,
-            list: list_columns(widest_label(rows, list_rows)),
-        },
+    let mut samples = match held {
+        Some(held) if held.generation == generation && held.list_rows == list_rows => return held,
+        Some(held) => held.samples,
+        None => HashMap::new(),
+    };
+
+    let first = window_start(rows.picklist.selected, usize::from(list_rows));
+    let mut buf = Vec::new();
+    let typical = (first..first.saturating_add(usize::from(list_rows)))
+        .map_while(|result| rows.path(result))
+        .map(|path| match samples.get(path) {
+            Some(&columns) => columns,
+            None => {
+                let columns = sample_columns(fs_host, path, &mut buf);
+                samples.insert(path.clone(), columns);
+                columns
+            },
+        })
+        .max()
+        .unwrap_or(0);
+
+    PlateFit {
+        generation,
+        list_rows,
+        list: list_columns(widest_label(rows, list_rows)),
+        preview_text: typical.clamp(PREVIEW_TEXT_MIN, PREVIEW_TEXT_COLUMNS),
+        samples,
     }
+}
+
+/// The typical line of the file at `path`, read from its first
+/// [`PREVIEW_SAMPLE_BYTES`] into `buf`, or 0 for a file with no sample.
+///
+/// A relative entry, such as a theme or a branch name, names no file. A path
+/// that does not read, a directory among them, has no sample, and nor does one
+/// whose bytes are not UTF-8. A char that the read cuts at its end leaves the
+/// text before it, and a last line that the read cuts is dropped, since its
+/// width is not the line's.
+fn sample_columns(fs_host: &dyn FsHost, path: &Path, buf: &mut Vec<u8>) -> u16 {
+    if !path.is_absolute()
+        || fs_host
+            .read_prefix(path, PREVIEW_SAMPLE_BYTES, buf)
+            .is_err()
+    {
+        return 0;
+    }
+    let text = match str::from_utf8(buf) {
+        Ok(text) => text,
+        Err(error) if error.error_len().is_none() => {
+            str::from_utf8(&buf[..error.valid_up_to()]).unwrap_or_default()
+        },
+        Err(_) => return 0,
+    };
+    let text = match buf.len() == PREVIEW_SAMPLE_BYTES {
+        true => text.rfind('\n').map_or("", |end| &text[..end]),
+        false => text,
+    };
+    typical_line_columns(text)
+}
+
+/// The columns that nine in ten of the lines of `sample` fit, or 0 for a sample
+/// with no line.
+///
+/// A blank line is not counted, and a tab counts 4 columns. The answer is the
+/// width at the ninth tenth rather than the widest line, so one long string
+/// does not widen the preview.
+fn typical_line_columns(sample: &str) -> u16 {
+    let mut widths: Vec<usize> = sample
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| line.chars().map(|c| if c == '\t' { 4 } else { 1 }).sum())
+        .collect();
+    if widths.is_empty() {
+        return 0;
+    }
+    widths.sort_unstable();
+    let index = (widths.len() * 9).div_ceil(10) - 1;
+    u16::try_from(widths[index]).unwrap_or(u16::MAX)
 }
 
 /// Split a fitted finder body, the `width` by `height` cells from `(x, y)`,
@@ -2787,6 +2893,7 @@ mod tests {
         *,
     };
     use crate::{
+        host::FakeFs,
         input_view::SubmitTarget,
         picker::{PreviewSource, INDEXED_ROWS},
         test_fixture,
@@ -3830,20 +3937,74 @@ mod tests {
     }
 
     /// A fitted list holds its widest label, at least 30 columns, and its pad
-    /// and mark cells. The plate holds the list, the separator, the preview's
-    /// minimum, and two borders, so a wider list widens the plate by its own
-    /// columns only. A scaled preview's minimum fits 100 text cells and the
-    /// ruled number column of 5 px cells into 9 px grid columns.
+    /// and mark cells. The plate holds the list, the separator, the preview,
+    /// and two borders, and never takes under the 82 columns of a body that
+    /// shows a preview. A scaled preview fits its text cells and the ruled
+    /// number column of 5 px cells into 9 px grid columns.
     #[test]
     fn a_fitted_plate_holds_its_list_and_its_preview() {
         assert_eq!(
             (
                 [list_columns(0), list_columns(75)],
-                [(33, 59), (47, 59), (33, 100)].map(|(list, min)| fitted_plate_width(list, min)),
-                [preview_min_columns(None), preview_min_columns(Some((5, 9)))],
+                [(33, 59), (47, 59), (33, 100), (33, 26)]
+                    .map(|(list, preview)| fitted_plate_width(list, preview)),
+                [(100, None), (100, Some((5, 9))), (60, Some((5, 9)))]
+                    .map(|(text, scaled)| preview_columns(text, scaled)),
             ),
-            ([33, 78], [95, 109, 136], [100, 59]),
+            ([33, 78], [95, 109, 136, 82], [100, 59, 37]),
         );
+    }
+
+    /// The typical line is the width that nine in ten lines fit, so one long
+    /// line among short ones leaves it short. A blank line is not counted, and
+    /// a tab counts 4 columns.
+    #[test]
+    fn a_typical_line_is_the_width_nine_in_ten_lines_fit() {
+        let lines = |widths: &[usize]| -> String {
+            widths
+                .iter()
+                .map(|&width| format!("{}\n", "x".repeat(width)))
+                .collect()
+        };
+        let tenths: Vec<usize> = (1..=10).map(|n| n * 10).collect();
+        let one_long: Vec<usize> = [20; 19].into_iter().chain([300]).collect();
+
+        assert_eq!(
+            [
+                typical_line_columns(&lines(&tenths)),
+                typical_line_columns(&lines(&one_long)),
+                typical_line_columns(""),
+                typical_line_columns(&format!("abcd{}", "\n".repeat(10))),
+                typical_line_columns("\ta"),
+            ],
+            [90, 20, 0, 4, 5],
+        );
+    }
+
+    /// A sample drops the line its read cuts at 4096 bytes. A path that does
+    /// not read, a directory, a sample that is not UTF-8, and a relative entry
+    /// each count no columns.
+    #[test]
+    fn a_sample_drops_its_cut_line_and_counts_no_file_as_zero() {
+        let fs = FakeFs::new();
+        fs.insert_file(
+            "/r/cut.rs",
+            format!("{}\n{}", "x".repeat(70), "y".repeat(PREVIEW_SAMPLE_BYTES)),
+        );
+        fs.insert_dir("/r/dir");
+        fs.insert_file("/r/binary", [0xff, 0xfe, b'a', b'\n']);
+        fs.insert_file("relative.rs", "x\n");
+
+        let mut buf = Vec::new();
+        let columns = [
+            "/r/cut.rs",
+            "/r/missing.rs",
+            "/r/dir",
+            "/r/binary",
+            "relative.rs",
+        ]
+        .map(|path| sample_columns(&fs, Path::new(path), &mut buf));
+        assert_eq!(columns, [70, 0, 0, 0, 0]);
     }
 
     /// A fit holds while its rows and its window hold, so a selection that
@@ -3855,15 +4016,16 @@ mod tests {
         let paths = ["a.rs", "b.rs", "c.rs", long.as_str()].map(|name| Path::new("/r").join(name));
         let mut list = list_of(Vec::from(paths), Vec::new());
         list.selected = 0;
-        let opened = |list: &PickList| plate_fit(None, &rows_of(list, None), 3);
+        let fs = FakeFs::new();
+        let opened = |list: &PickList| plate_fit(None, &rows_of(list, None), 3, &fs);
         let (held, bumped, resized) = (opened(&list), opened(&list), opened(&list));
         let first = held.list;
 
         list.selected = 3;
-        let moved = plate_fit(Some(held), &rows_of(&list, None), 3).list;
-        let taller = plate_fit(Some(resized), &rows_of(&list, None), 4).list;
+        let moved = plate_fit(Some(held), &rows_of(&list, None), 3, &fs).list;
+        let taller = plate_fit(Some(resized), &rows_of(&list, None), 4, &fs).list;
         list.filter_generation += 1;
-        let refiltered = plate_fit(Some(bumped), &rows_of(&list, None), 3).list;
+        let refiltered = plate_fit(Some(bumped), &rows_of(&list, None), 3, &fs).list;
 
         assert_eq!([first, moved, refiltered, taller], [33, 33, 47, 47]);
     }

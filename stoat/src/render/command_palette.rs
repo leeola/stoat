@@ -5,6 +5,7 @@ use crate::{
         ResolvedCommand, ACTION_TOKEN,
     },
     file_finder::FinderScope,
+    host::FsHost,
     input_history,
     input_view::InputView,
     keymap::ActionKeys,
@@ -16,7 +17,9 @@ use crate::{
         },
         cmd_line::{self, CmdLine, CmdStatus},
         paint::style_rgb,
-        picker::{Footer, ListWindow, PathRows, RowMarks, RowStart, FOOTER_ROWS},
+        picker::{
+            Footer, ListWindow, PathRows, RowMarks, RowStart, FOOTER_ROWS, PREVIEW_TEXT_COLUMNS,
+        },
         pixel_rows::{self, PixelBar, Placer, RowMetrics, ROW_PAD},
         run_pane,
         text::{clip_to_width, pre_wrap_rows, wrap_text, write_str, write_str_clipped},
@@ -460,9 +463,12 @@ pub(crate) fn doc_rows(pixels: Option<RowMetrics>) -> u16 {
 /// of [`CommandPalette::arg_plate_fit`], measured when the list's rows last
 /// changed, so a selection move keeps the plate. With no fit the list measures
 /// the rows on show. Either way it takes the widest label, at least 30 columns,
-/// with its pad and mark cells. The preview takes `preview_min` columns. The
-/// plate stops one column inside each side of `area`. `zoom` steps then move
-/// the width by a tenth of the area each.
+/// with its pad and mark cells. The preview takes the fit's columns of text,
+/// the typical line of the files on show, or [`PREVIEW_TEXT_COLUMNS`] with no
+/// fit, fitted into grid columns by `preview_scale`. The plate takes at least
+/// the columns of a body that shows a preview, and stops one column inside each
+/// side of `area`. `zoom` steps then move the width by a tenth of the area
+/// each.
 ///
 /// The height is the height of [`palette_filter_layout`]. The palette's
 /// separator takes no drag, so the list keeps its fitted width.
@@ -475,20 +481,24 @@ pub(crate) fn palette_arg_layout(
     palette: &CommandPalette,
     home: Option<&Path>,
     zoom: i8,
-    preview_min: u16,
+    preview_scale: Option<(u16, u16)>,
 ) -> Option<PaletteArgLayout> {
     let picker = palette.arg_picker.as_ref()?;
     let rows = arg_box(area, palette, zoom)?;
-    let list = match &palette.arg_plate_fit {
-        Some(fit) => fit.list,
+    let (list, text) = match &palette.arg_plate_fit {
+        Some(fit) => (fit.list, fit.preview_text),
         None => {
             let list_rows = arg_list_rows(rows)?;
             let widest = crate::render::picker::widest_label(&arg_rows(picker, home), list_rows);
-            crate::render::picker::list_columns(widest)
+            (
+                crate::render::picker::list_columns(widest),
+                PREVIEW_TEXT_COLUMNS,
+            )
         },
     };
+    let preview = crate::render::picker::preview_columns(text, preview_scale);
 
-    let fitted = crate::render::picker::fitted_plate_width(list, preview_min);
+    let fitted = crate::render::picker::fitted_plate_width(list, preview);
     let base = crate::render::chrome::fitted_width(area.width, fitted, 0, 0);
     let width = crate::render::chrome::fitted_width(area.width, base, 20, zoom);
     let modal = Rect {
@@ -499,15 +509,8 @@ pub(crate) fn palette_arg_layout(
     let inner = Block::default().borders(Borders::ALL).inner(modal);
 
     let (top, height) = arg_body_rows(inner, palette.header_rows)?;
-    let (list, preview) = crate::render::picker::fitted_split(
-        inner.x,
-        top,
-        inner.width,
-        height,
-        list,
-        preview_min,
-        None,
-    );
+    let (list, preview) =
+        crate::render::picker::fitted_split(inner.x, top, inner.width, height, list, preview, None);
     Some(PaletteArgLayout {
         modal,
         inner,
@@ -522,12 +525,15 @@ pub(crate) fn palette_arg_layout(
 ///
 /// The fit holds while the list's rows and its window hold, and measures again
 /// once either changes. A palette with no argument picker, or a box with no
-/// body row, keeps the fit it holds.
+/// body row, keeps the fit it holds. A measure reads, through `fs_host`, the
+/// start of each file on show that no earlier fit of the list read, as
+/// [`plate_fit`](crate::render::picker::plate_fit) samples them.
 pub(crate) fn refit_arg_plate(
     palette: &mut CommandPalette,
     area: Rect,
     home: Option<&Path>,
     zoom: i8,
+    fs_host: &dyn FsHost,
 ) {
     let Some(picker) = &palette.arg_picker else {
         return;
@@ -536,7 +542,8 @@ pub(crate) fn refit_arg_plate(
         return;
     };
     let held = palette.arg_plate_fit.take();
-    let fit = crate::render::picker::plate_fit(held, &arg_rows(picker, home), list_rows);
+    let rows = arg_rows(picker, home);
+    let fit = crate::render::picker::plate_fit(held, &rows, list_rows, fs_host);
     palette.arg_plate_fit = Some(fit);
 }
 
@@ -599,7 +606,7 @@ pub(crate) fn render_command_palette(
     chrome: &crate::render::editor::ResolvedChrome,
     area: Rect,
     zoom: i8,
-    preview_min: u16,
+    preview_scale: Option<(u16, u16)>,
     now: i64,
     specs: &HashMap<String, CliSpecState>,
     insets: bool,
@@ -639,7 +646,7 @@ pub(crate) fn render_command_palette(
             chrome,
             area,
             zoom,
-            preview_min,
+            preview_scale,
             buf,
             scene,
         );
@@ -1045,7 +1052,7 @@ fn render_palette_arg_picker(
     chrome: &crate::render::editor::ResolvedChrome,
     area: Rect,
     zoom: i8,
-    preview_min: u16,
+    preview_scale: Option<(u16, u16)>,
     buf: &mut Buffer,
     scene: &mut stoat_widgets::ApcScene,
 ) {
@@ -1077,7 +1084,7 @@ fn render_palette_arg_picker(
             spans
         })
         .unwrap_or_default();
-    let Some(layout) = palette_arg_layout(area, palette, home, zoom, preview_min) else {
+    let Some(layout) = palette_arg_layout(area, palette, home, zoom, preview_scale) else {
         return;
     };
     palette.plate = Some(layout.modal);
@@ -1095,7 +1102,7 @@ fn render_palette_arg_picker(
         buf,
         &mut *scene,
     );
-    let Some(layout) = palette_arg_layout(area, palette, home, zoom, preview_min) else {
+    let Some(layout) = palette_arg_layout(area, palette, home, zoom, preview_scale) else {
         return;
     };
     let separator_style = theme.get(crate::theme::scope::UI_BORDER_INACTIVE);
@@ -6405,7 +6412,6 @@ mod tests {
         let theme = h.stoat.theme.clone();
         let chrome = ResolvedChrome::resolve(&theme);
         let area = Rect::new(0, 0, 200, 40);
-        let preview_min = crate::render::picker::preview_min_columns(None);
         let mut buf = Buffer::empty(area);
         let mut scene = stoat_widgets::ApcScene::new();
         scene.set_live(false);
@@ -6417,7 +6423,7 @@ mod tests {
             &chrome,
             area,
             0,
-            preview_min,
+            None,
             0,
             &HashMap::new(),
             false,
@@ -6425,7 +6431,7 @@ mod tests {
             &mut scene,
         );
 
-        let footer = palette_arg_layout(area, &palette, None, 0, preview_min)
+        let footer = palette_arg_layout(area, &palette, None, 0, None)
             .expect("the palette fits")
             .footer;
         let text: String = (footer.left()..footer.right())
@@ -6455,7 +6461,7 @@ mod tests {
             &chrome,
             area,
             0,
-            crate::render::picker::preview_min_columns(None),
+            None,
             0,
             &HashMap::new(),
             false,
@@ -7316,7 +7322,7 @@ mod tests {
             &chrome,
             area,
             0,
-            0,
+            None,
             0,
             &specs,
             true,

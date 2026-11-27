@@ -2048,7 +2048,7 @@ pub(crate) fn frame(
     let mode = stoat.frame_mode.as_str();
     let toggles = ToggleStates::read(stoat);
     let app = AppFlags::from_stoat(stoat);
-    let preview_min = stoat.preview_min_columns();
+    let preview_scale = stoat.preview_scale();
     let pool_insets = stoat.pool_insets();
     // An armed one-char chord waits on its char in a primary mode. The hints
     // box below lists the chars it takes, and a pinned pane shows that box too,
@@ -2522,7 +2522,7 @@ pub(crate) fn frame(
                     full,
                     zoom,
                     split,
-                    preview_min,
+                    preview_scale,
                     pool_insets,
                     buf,
                     &mut *scene,
@@ -2630,7 +2630,7 @@ pub(crate) fn frame(
                     chrome,
                     full,
                     zoom,
-                    preview_min,
+                    preview_scale,
                     now,
                     &stoat.cli_specs,
                     pool_insets,

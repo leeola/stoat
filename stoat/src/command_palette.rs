@@ -8740,9 +8740,10 @@ mod tests {
     }
 
     /// The argument picker's plate refits to the widest label on show each
-    /// time the rows change. The tail `zz` shows the 66-char path, so the plate
-    /// grows from 136 to 172 columns. Clearing the tail fits the list back to
-    /// 33 columns, and the plate narrows back to 136.
+    /// time the rows change. The files hold no line, so the preview takes the
+    /// 60 columns of its floor. The tail `zz` shows the 66-char path, so the
+    /// plate grows from 96 to 132 columns. Clearing the tail fits the list back
+    /// to 33 columns, and the plate narrows back to 96.
     #[test]
     fn the_argument_plate_refits_when_its_rows_change() {
         let mut h = argument_plate_harness();
@@ -8757,7 +8758,7 @@ mod tests {
 
         assert_eq!(
             [open, grown, palette_plate(&h)],
-            [(136, 33), (172, 69), (136, 33)],
+            [(96, 33), (132, 69), (96, 33)],
         );
     }
 
@@ -8775,7 +8776,7 @@ mod tests {
         h.settle();
         h.stoat.render();
 
-        assert_eq!((grown, palette_plate(&h).0), (172, 136));
+        assert_eq!((grown, palette_plate(&h).0), (132, 96));
     }
 
     /// The zoom steps walk the box on show, so the argument picker's zoom box
@@ -8793,7 +8794,7 @@ mod tests {
 
     /// Zoom steps shrink the argument picker's box down to the palette's
     /// 20-column minimum. On a 300-column window four steps out take the
-    /// 136-column plate past it.
+    /// 96-column plate past it.
     #[test]
     fn zooming_out_stops_the_argument_box_at_twenty_columns() {
         let mut h = TestHarness::with_size(300, 40);

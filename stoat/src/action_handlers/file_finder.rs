@@ -43,7 +43,8 @@ pub(crate) fn sync_file_finder_preview(stoat: &mut Stoat) {
         let finder = stoat.file_finder.as_mut().expect("file_finder present");
         let pending = finder.refilter_from_input(ws);
         finder.sync_preview(ws, fs_host, language_registry);
-        render::file_finder::refit_finder_plate(finder, area, stoat.home.as_deref(), zoom);
+        let home = stoat.home.as_deref();
+        render::file_finder::refit_finder_plate(finder, area, home, zoom, fs_host);
         (pending, finder.wants_ignored_fallback())
     };
 

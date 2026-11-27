@@ -2188,9 +2188,10 @@ mod tests {
     }
 
     /// The plate refits to the widest label on show each time the rows change.
-    /// The query `zz` shows the 66-char path, so the list grows to 69 columns
-    /// and the preview keeps its 100. Clearing the query fits the list back to
-    /// 33 columns, and the plate narrows with it.
+    /// The files hold no line, so the preview takes the 60 columns of its floor.
+    /// The query `zz` shows the 66-char path, so the list grows to 69 columns.
+    /// Clearing the query fits the list back to 33 columns, and the plate
+    /// narrows with it.
     #[test]
     fn the_finder_plate_refits_when_its_rows_change() {
         let mut h = fitted_plate_harness();
@@ -2205,11 +2206,7 @@ mod tests {
 
         assert_eq!(
             [open, grown, plate_widths(&h)],
-            [
-                (136, 33, Some(100)),
-                (172, 69, Some(100)),
-                (136, 33, Some(100)),
-            ],
+            [(96, 33, Some(60)), (132, 69, Some(60)), (96, 33, Some(60)),],
         );
     }
 
@@ -2224,7 +2221,7 @@ mod tests {
             h.type_keys("down");
         }
 
-        assert_eq!((open, plate_widths(&h)), (136, (136, 33, Some(100))));
+        assert_eq!((open, plate_widths(&h)), (96, (96, 33, Some(60))));
     }
 
     /// Each open fits the plate to the labels its list shows, whatever plate
@@ -2241,7 +2238,7 @@ mod tests {
         h.settle();
         h.stoat.render();
 
-        assert_eq!((grown, plate_widths(&h).0), (172, 136));
+        assert_eq!((grown, plate_widths(&h).0), (132, 96));
     }
 
     /// A dragged share sets the list while the finder stays open, and the
@@ -2258,21 +2255,50 @@ mod tests {
 
         assert_eq!(
             (dragged, share, plate_widths(&h)),
-            ((136, 67, Some(66)), None, (136, 33, Some(100))),
+            ((96, 47, Some(46)), None, (96, 33, Some(60))),
         );
     }
 
-    /// A window too narrow for a preview of 100 columns beside a list of 33
-    /// keeps the list at its minimum. The plate stops one column inside each
-    /// side of the window, and the preview takes the rest of it.
+    /// A file of 100-column lines asks for a preview of 100 columns, and a
+    /// window too narrow for it beside a list of 33 keeps the list at its
+    /// minimum. The plate stops one column inside each side of the window, and
+    /// the preview takes the rest of it.
     #[test]
     fn a_window_too_narrow_for_both_minimums_keeps_the_list_at_thirty_columns() {
         let mut h = TestHarness::with_size(120, 30);
-        seed_finder_workspace(&mut h, &[("a.rs", "")]);
+        let lines = format!("{}\n", "x".repeat(100)).repeat(10);
+        seed_finder_workspace(&mut h, &[("a.rs", &lines)]);
         h.type_keys("space p");
         h.settle();
 
         assert_eq!(plate_widths(&h), (118, 33, Some(82)));
+    }
+
+    /// The preview takes the typical line of the files on show, so a file of
+    /// 80-column lines gets a preview of 80 columns beside the 33-column list.
+    #[test]
+    fn the_finder_preview_fits_the_typical_line_of_its_files() {
+        let lines = format!("{}\n", "x".repeat(80)).repeat(10);
+        assert_eq!(widths_over_one_file(&lines), (116, 33, Some(80)));
+    }
+
+    /// One long line among short ones leaves the preview at the 60 columns of
+    /// its floor.
+    #[test]
+    fn one_long_line_does_not_widen_the_preview() {
+        let short = format!("{}\n", "x".repeat(20)).repeat(19);
+        let text = format!("{short}{}\n", "y".repeat(300));
+        assert_eq!(widths_over_one_file(&text), (96, 33, Some(60)));
+    }
+
+    /// The plate widths of the finder that a 200 by 40 harness opens over one
+    /// file `a.rs` holding `text`.
+    fn widths_over_one_file(text: &str) -> (u16, u16, Option<u16>) {
+        let mut h = TestHarness::with_size(200, 40);
+        seed_finder_workspace(&mut h, &[("a.rs", text)]);
+        h.type_keys("space p");
+        h.settle();
+        plate_widths(&h)
     }
 
     /// A 200 by 40 harness with the finder open over 35 short paths and one

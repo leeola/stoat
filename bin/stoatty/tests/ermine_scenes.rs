@@ -1126,8 +1126,8 @@ fn the_tab_bar_boxes_the_focused_layout_s_chip_inside_its_row() {
 
 /// The finder's list and preview Islands stand 8 px apart.
 ///
-/// The list ends before cell 66, the separator column, and the preview starts
-/// at cell 67. Cell row 25 is blank in both panes, and on its middle pixel row
+/// The list ends before cell 73, the separator column, and the preview starts
+/// at cell 74. Cell row 25 is blank in both panes, and on its middle pixel row
 /// the two Islands stand 8 px apart across the separator.
 #[test]
 fn the_finder_islands_stand_eight_pixels_apart() {
@@ -1139,7 +1139,7 @@ fn the_finder_islands_stand_eight_pixels_apart() {
         "<Space>p<Settle>",
     );
 
-    expect_islands_apart(&shot, &mut home, 66, 25, "finder_islands");
+    expect_islands_apart(&shot, &mut home, 73, 25, "finder_islands");
 }
 
 /// The finder's plate stops one cell inside each side of the window.
@@ -1149,26 +1149,29 @@ fn the_finder_islands_stand_eight_pixels_apart() {
 /// cells from cell (1, 9), and the plate's sides stand 11 px outside its inner
 /// rect, which runs from cell 2 to cell 157. So on pixel row 455 the plate's
 /// ground runs from pixel 7 to pixel 1432, and the pixels 6 and 1433 outside it
-/// read the shadowed panes. The list is cells 2 to 97, and its Island and the
-/// preview's stand 8 px apart across the separator column, cell 98.
+/// read the shadowed panes. The files hold one short line each, so the preview
+/// takes the 37 cells of 60 columns of text at Preview Scale. The list is cells
+/// 2 to 119, and its Island and the preview's stand 8 px apart across the
+/// separator column, cell 120.
 #[test]
 fn the_finder_plate_stops_one_cell_inside_each_side_of_the_window() {
     let mut home = support::scratch_home();
     let shot = settled_frame(home.path(), "deep-paths", "src/main.rs", "<Space>p<Settle>");
 
     expect_plate_sides(&shot, &mut home, (7, 1432), "capped_plate");
-    expect_islands_apart(&shot, &mut home, 98, 30, "capped_islands");
+    expect_islands_apart(&shot, &mut home, 120, 30, "capped_islands");
 }
 
 /// The finder's plate narrows with its results.
 ///
 /// The plate reaches the cap at open, as
 /// `the_finder_plate_stops_one_cell_inside_each_side_of_the_window` reads it.
-/// The query `q` keeps one 44-char path, which fits a list of 47 cells, so the
-/// plate refits to the 109 cells from cell 25. Its inner rect runs from cell 26
-/// to cell 132, so on pixel row 455 the plate's ground runs from pixel 223 to
-/// pixel 1207. The list is cells 26 to 72, and its Island and the preview's
-/// stand 8 px apart across the separator column, cell 73.
+/// The query `q` keeps one 44-char path, which fits a list of 47 cells, and
+/// the preview keeps its 37 cells, so the plate refits to the 87 cells from
+/// cell 36. Its inner rect runs from cell 37 to cell 121, so on pixel row 455
+/// the plate's ground runs from pixel 322 to pixel 1108. The list is cells 37
+/// to 83, and its Island and the preview's stand 8 px apart across the
+/// separator column, cell 84.
 #[test]
 fn the_finder_plate_narrows_with_its_results() {
     let mut home = support::scratch_home();
@@ -1179,18 +1182,19 @@ fn the_finder_plate_narrows_with_its_results() {
         "<Space>p<Settle>q<Settle>",
     );
 
-    expect_plate_sides(&shot, &mut home, (223, 1207), "narrowed_plate");
-    expect_islands_apart(&shot, &mut home, 73, 30, "narrowed_islands");
+    expect_plate_sides(&shot, &mut home, (322, 1108), "narrowed_plate");
+    expect_islands_apart(&shot, &mut home, 84, 30, "narrowed_islands");
 }
 
 /// The palette's argument picker opens at its smallest plate.
 ///
-/// The labels of `many-files` are all shorter than 30 chars, so the plate
-/// holds a 33-cell list and the 59-cell minimum of a preview at Preview Scale.
-/// The modal rect is the 95 cells from cell 32, and the box is 24 rows from
-/// cell row 13. So on pixel row 455, in the box's body, the plate's ground runs
-/// from pixel 286 to pixel 1144, and the list's Island and the preview's stand
-/// 8 px apart across the separator column, cell 66.
+/// The labels of `many-files` are all shorter than 30 chars and its lines are
+/// short, so the plate holds a 33-cell list and takes the 82 cells of its
+/// floor, which leave the preview 46 cells. The modal rect is the 82 cells from
+/// cell 39, and the box is 24 rows from cell row 13. So on pixel row 455, in
+/// the box's body, the plate's ground runs from pixel 349 to pixel 1090, and
+/// the list's Island and the preview's stand 8 px apart across the separator
+/// column, cell 73.
 #[test]
 fn the_argument_picker_opens_at_its_smallest_plate() {
     let mut home = support::scratch_home();
@@ -1201,8 +1205,8 @@ fn the_argument_picker_opens_at_its_smallest_plate() {
         ":o<Space><Settle>",
     );
 
-    expect_plate_sides(&shot, &mut home, (286, 1144), "argument_plate");
-    expect_islands_apart(&shot, &mut home, 66, 30, "argument_islands");
+    expect_plate_sides(&shot, &mut home, (349, 1090), "argument_plate");
+    expect_islands_apart(&shot, &mut home, 73, 30, "argument_islands");
 }
 
 /// The palette's argument picker stops its plate one cell inside each side of
@@ -1210,8 +1214,8 @@ fn the_argument_picker_opens_at_its_smallest_plate() {
 ///
 /// The `deep-paths` list holds a 161-char path, so the plate reaches the cap,
 /// as the finder's plate does there. The box is 22 rows from cell row 14, so
-/// pixel row 455 lies in its body, and the list is cells 2 to 97, before the
-/// separator column, cell 98.
+/// pixel row 455 lies in its body, and the list is cells 2 to 119, before the
+/// separator column, cell 120.
 #[test]
 fn the_argument_picker_plate_stops_one_cell_inside_each_side_of_the_window() {
     let mut home = support::scratch_home();
@@ -1223,7 +1227,7 @@ fn the_argument_picker_plate_stops_one_cell_inside_each_side_of_the_window() {
     );
 
     expect_plate_sides(&shot, &mut home, (7, 1432), "capped_argument_plate");
-    expect_islands_apart(&shot, &mut home, 98, 30, "capped_argument_islands");
+    expect_islands_apart(&shot, &mut home, 120, 30, "capped_argument_islands");
 }
 
 /// The palette's header is the Cmd Line on the plate's ground, with no title.
@@ -1336,13 +1340,13 @@ fn a_long_palette_line_adds_a_header_row() {
 /// `:o x` opens the argument picker on a plate of its own. `list_rows_hint`
 /// answers the 2 files of `basic-diff`, so the box is the recommended 22 rows
 /// from cell row 14. No label is over 30 chars, so the plate is the smallest
-/// argument plate, the 95 cells from cell 32. The inner rect starts at cell
-/// (33, 15), 16 cells right of and 2 rows under the inner rect of the root box,
-/// so the header text stands 144 px right of and 36 px under its place there.
+/// argument plate, the 82 cells from cell 39. The inner rect starts at cell
+/// (40, 15), 23 cells right of and 2 rows under the inner rect of the root box,
+/// so the header text stands 207 px right of and 36 px under its place there.
 ///
-/// The token `o` stands in the pixel columns 518 to 525 and the ghost `pen` in
-/// 526 to 550, on the pixel rows 277 to 294. The caret block stands in 567 to
-/// 574 on 15 of those rows, 278 to 292, so the text color holds most of the
+/// The token `o` stands in the pixel columns 581 to 588 and the ghost `pen` in
+/// 589 to 613, on the pixel rows 277 to 294. The caret block stands in 630 to
+/// 637 on 15 of those rows, 278 to 292, so the text color holds most of the
 /// rect read there. The token peaks at the 0xf0 of `#c59af0`, and the ghost
 /// peaks at the 0x81 of `#695481`.
 #[test]
@@ -1350,8 +1354,8 @@ fn the_cmd_line_draws_an_alias_with_its_ghost() {
     let mut home = support::scratch_home();
     let shot = palette_frame(home.path(), ":o x<Settle>");
 
-    let token = brightest(&shot, (518, 277, 8, 18));
-    let ghost = brightest(&shot, (528, 277, 20, 18));
+    let token = brightest(&shot, (581, 277, 8, 18));
+    let ghost = brightest(&shot, (591, 277, 20, 18));
     if token <= 0x81 || !(0x12..=0x81).contains(&ghost) {
         let frame = keep_frame(&shot, &mut home, "cmd_line_ghost");
         panic!(
@@ -1363,7 +1367,7 @@ fn the_cmd_line_draws_an_alias_with_its_ghost() {
     expect_region(
         &shot,
         &mut home,
-        (567, 277, 8, 18),
+        (630, 277, 8, 18),
         TEXT,
         "cmd_line_ghost_caret",
     );
@@ -1741,11 +1745,11 @@ fn keywords_narrow_history_under_a_wider_chip() {
 /// The rows of modified files in the `:o` list end in the `M` mark, and
 /// S-Tab steps the list to those files alone.
 ///
-/// The smallest argument plate holds its list in cells 33 to 65, each label
-/// from cell 34, pixel column 306, and a mark in the pixel columns 575 to 583,
+/// The smallest argument plate holds its list in cells 40 to 72, each label
+/// from cell 41, pixel column 369, and a mark in the pixel columns 638 to 646,
 /// 11 px inside the list's right edge. The selected result is the first, whose
 /// box starts on the top pixel row of the first cell row from 10 whose pixel
-/// (560, row * 18 + 9) reads the tab wash, and the results after it stand
+/// (623, row * 18 + 9) reads the tab wash, and the results after it stand
 /// 21 px apart from that pixel row y.
 /// Under All the list reads `.gitignore`, `Cargo.toml`, `src/main.rs`, and
 /// `src/util.rs`, so the third result, from y + 42, holds text and the `M` of
@@ -1760,12 +1764,12 @@ fn keywords_narrow_history_under_a_wider_chip() {
 fn the_file_argument_marks_modified_rows_and_cycles_to_them() {
     let selected_top = |shot: &Snapshot| {
         (10..40u32)
-            .find(|&row| pixel(shot, 560, row * 18 + 9) == TAB_WASH)
+            .find(|&row| pixel(shot, 623, row * 18 + 9) == TAB_WASH)
             .map(|row| row * 18)
     };
     let marked = |shot: &Snapshot, y: u32| {
         let danger = |[r, _, b]: [u8; 3]| i32::from(r) - i32::from(b) > 60;
-        pixels_where(shot, (575, y, 9, 20), danger) > 0
+        pixels_where(shot, (638, y, 9, 20), danger) > 0
     };
 
     let mut home = support::scratch_home();
@@ -1788,7 +1792,7 @@ fn the_file_argument_marks_modified_rows_and_cycles_to_them() {
             ),
             (
                 "the third result holds text",
-                distinct_colors(&all, (306, all_y + 42, 9, 20)) > 1,
+                distinct_colors(&all, (369, all_y + 42, 9, 20)) > 1,
             ),
             (
                 "the second result holds the M of src/util.rs",
@@ -1796,7 +1800,7 @@ fn the_file_argument_marks_modified_rows_and_cycles_to_them() {
             ),
             (
                 "the Modified list holds two results",
-                distinct_colors(&modified, (306, modified_y + 42, 279, 20)) == 1,
+                distinct_colors(&modified, (369, modified_y + 42, 279, 20)) == 1,
             ),
         ],
         _ => [("each frame holds a selected row", false); 4],
@@ -1864,7 +1868,7 @@ fn expect_plate_sides(shot: &Snapshot, home: &mut TempDir, (left, right): (u32, 
 /// The finder plate casts the boards' modal shadow, `0 18px 40px
 /// rgba(0,0,0,0.6)`, which reaches past 60 px under the plate.
 ///
-/// The box's modal rect is the 95 by 32 cells from cell (32, 9), and the
+/// The box's modal rect is the 82 by 32 cells from cell (39, 9), and the
 /// plate's bottom edge stands 10 px into its last row, cell row 40. The pixel
 /// 30 px under that edge at the plate's middle column lies 12 px past the
 /// shadow rect's bottom, where the blur still lays about a sixth of black over
@@ -1880,8 +1884,8 @@ fn the_file_finder_box_casts_the_modal_shadow() {
         "<Space>p<Settle>",
     );
 
-    let (x, _, width, _) = cell_rect(32, 9, 95, 32);
-    let (_, last_row, _, _) = cell_rect(32, 40, 1, 1);
+    let (x, _, width, _) = cell_rect(39, 9, 82, 32);
+    let (_, last_row, _, _) = cell_rect(39, 40, 1, 1);
     let plate_bottom = last_row + 10;
     let under = dominant_color(&shot, (x + width / 2, plate_bottom + 30, 1, 1));
     if under
@@ -1903,8 +1907,8 @@ fn the_file_finder_box_casts_the_modal_shadow() {
 /// The file finder's box is the boards' ground plate, `background: #0c0e11`,
 /// with no hairline, and its preview pane sits on the base surface.
 ///
-/// The box's modal rect is the 95 by 32 cells from cell (32, 9), so its inner
-/// rect runs from cell (33, 10) up to cell (126, 40). The plate's top is the top
+/// The box's modal rect is the 82 by 32 cells from cell (39, 9), so its inner
+/// rect runs from cell (40, 10) up to cell (120, 40). The plate's top is the top
 /// of the header row, cell row 10. Its sides stand 11 px outside the inner
 /// rect, and its bottom stands 10 px into the modal rect's last row, cell row
 /// 40. Each edge reads one pixel on each side, the ground inside and the
@@ -1918,9 +1922,9 @@ fn the_file_finder_box_casts_the_modal_shadow() {
 /// top, in the divider color, as a rule on the editor surface draws. The pixel
 /// row above it reads the base surface.
 ///
-/// The preview draws at Preview Scale from pixel (603, 239), 5 px into cell
-/// (67, 13), and numbers its lines in four 5 px digit cells, pixels 603 to
-/// 622, before its rule. Source row r takes the 11 pixel rows from 239 + 11r,
+/// The preview draws at Preview Scale from pixel (666, 239), 5 px into cell
+/// (74, 13), and numbers its lines in four 5 px digit cells, pixels 666 to
+/// 685, before its rule. Source row r takes the 11 pixel rows from 239 + 11r,
 /// so the pixel rows 252 to 262 hold the numbers of rows 1 and 2 in the muted
 /// color and no text, and peak above the base surface and at most at the
 /// muted color. The pixel rows 329 to 339 lie past the file's seven lines,
@@ -1935,8 +1939,8 @@ fn the_file_finder_box_draws_as_the_ground_plate() {
         "<Space>p<Settle>",
     );
 
-    let (left, top, _, _) = cell_rect(33, 10, 1, 1);
-    let (right, last_row, _, _) = cell_rect(126, 40, 1, 1);
+    let (left, top, _, _) = cell_rect(40, 10, 1, 1);
+    let (right, last_row, _, _) = cell_rect(120, 40, 1, 1);
     let (left, right, bottom) = (left - 11, right + 11, last_row + 10);
     let (middle_x, middle_y) = ((left + right) / 2, (top + bottom) / 2);
     let edges = [
@@ -2010,8 +2014,8 @@ fn the_file_finder_box_draws_as_the_ground_plate() {
     );
 
     let peak = |color: [u8; 3]| color.into_iter().max().expect("a color has channels");
-    let first = brightest(&shot, (603, 252, 20, 11));
-    let past_end = brightest(&shot, (603, 329, 20, 11));
+    let first = brightest(&shot, (666, 252, 20, 11));
+    let past_end = brightest(&shot, (666, 329, 20, 11));
     if !(peak(BASE) + 1..=peak(MUTED)).contains(&first) || past_end != peak(BASE) {
         let frame = keep_frame(&shot, &mut home, "preview_numbers");
         panic!(
@@ -2024,19 +2028,19 @@ fn the_file_finder_box_draws_as_the_ground_plate() {
 
 /// The finder preview's path header is the boards' 24 px band over a 1 px rule.
 ///
-/// On the smallest plate the preview is cells 67 to 125, its header is cell
-/// row 12, and its Island's top is pixel row 212. The rule fills the 534 px of
-/// pixel row 236 from pixel column 603, 24 px under that top, and pixel row
+/// On the smallest plate the preview is cells 74 to 119, its header is cell
+/// row 12, and its Island's top is pixel row 212. The rule fills the 417 px of
+/// pixel row 236 from pixel column 666, 24 px under that top, and pixel row
 /// 233, where the rule stood on whole cells, reads the base. The shown lines
 /// of a one-line file draw at the Caption size in the muted color, 1 px over
 /// the header's first row, and end 10 px inside the Island, so the pixels from
-/// (1058, 215) peak above the base and at most at the muted color, and the 6 px
+/// (1004, 215) peak above the base and at most at the muted color, and the 6 px
 /// right of them read the base.
 ///
 /// The preview's pool starts on cell row 13, the rule's row, 5 px into it.
 /// The 2 px under the rule, pixel rows 237 and 238, show the live Island in
 /// the base, and the number of the first source line lights the pixels from
-/// (603, 239).
+/// (666, 239).
 #[test]
 fn the_preview_header_is_a_twenty_four_pixel_band() {
     let mut home = support::scratch_home();
@@ -2047,20 +2051,20 @@ fn the_preview_header_is_a_twenty_four_pixel_band() {
         "<Space>p<Settle>",
     );
 
-    let rule = longest_run(&shot, (603, 236, 534), DIVIDER);
-    let label = brightest(&shot, (1058, 215, 69, 18));
-    if rule != 534 || pixel(&shot, 900, 233) != BASE || !(0x1f..=0x98).contains(&label) {
+    let rule = longest_run(&shot, (666, 236, 417), DIVIDER);
+    let label = brightest(&shot, (1004, 215, 69, 18));
+    if rule != 417 || pixel(&shot, 900, 233) != BASE || !(0x1f..=0x98).contains(&label) {
         let frame = keep_frame(&shot, &mut home, "preview_header_band");
         panic!(
-            "the rule's longest run on pixel row 236 is {rule} px where it is 534, pixel \
+            "the rule's longest run on pixel row 236 is {rule} px where it is 417, pixel \
              (900, 233) reads {}, and the label peaks at {label:#04x}; the frame is {}",
             hex(pixel(&shot, 900, 233)),
             frame.display(),
         );
     }
     let base = BASE.into_iter().max().expect("a color has channels");
-    let under_rule = brightest(&shot, (603, 237, 534, 2));
-    let number = brightest(&shot, (603, 239, 60, 11));
+    let under_rule = brightest(&shot, (666, 237, 417, 2));
+    let number = brightest(&shot, (666, 239, 60, 11));
     if under_rule != base || number <= 0x40 {
         let frame = keep_frame(&shot, &mut home, "preview_first_line");
         panic!(
@@ -2073,7 +2077,7 @@ fn the_preview_header_is_a_twenty_four_pixel_band() {
     expect_region(
         &shot,
         &mut home,
-        (1128, 215, 6, 18),
+        (1074, 215, 6, 18),
         BASE,
         "preview_header_label_end",
     );
@@ -2083,8 +2087,8 @@ fn the_preview_header_is_a_twenty_four_pixel_band() {
 /// 11 px pitch of a 5 by 11 px cell, where the grid's 9 by 18 px cell stands
 /// them 18 px apart.
 ///
-/// The preview starts at pixel (603, 239), 5 px into cell (67, 13), and its
-/// digits take its first four scaled cells, pixels 603 to 622, which hold no
+/// The preview starts at pixel (666, 239), 5 px into cell (74, 13), and its
+/// digits take its first four scaled cells, pixels 666 to 685, which hold no
 /// rule and no text. The pixel rows there that hold a digit form one band per
 /// line, and the first five bands start at pixel rows 241, 252, 263, 274, and
 /// 285.
@@ -2099,7 +2103,7 @@ fn the_finder_preview_draws_at_preview_scale() {
     );
 
     let base = BASE.into_iter().max().expect("a color has channels");
-    let lit = |y: u32| brightest(&shot, (603, y, 20, 1)) > base;
+    let lit = |y: u32| brightest(&shot, (666, y, 20, 1)) > base;
     let tops: Vec<u32> = (239..400)
         .filter(|&y| lit(y) && !lit(y - 1))
         .take(5)
@@ -2118,8 +2122,8 @@ fn the_finder_preview_draws_at_preview_scale() {
 /// PreviewZoom board does, with a 1 px rule in the divider color 24 px right of
 /// the preview's left edge.
 ///
-/// The preview starts at pixel (603, 239), so the rule stands in pixel column
-/// 627. On the first line's row, pixel row 244, that pixel reads the divider,
+/// The preview starts at pixel (666, 239), so the rule stands in pixel column
+/// 690. On the first line's row, pixel row 244, that pixel reads the divider,
 /// and the pixel on each side of it reads the base surface.
 #[test]
 fn the_finder_preview_rules_off_its_numbers() {
@@ -2131,11 +2135,11 @@ fn the_finder_preview_rules_off_its_numbers() {
         "<Space>p<Settle>",
     );
 
-    let row = [626, 627, 628].map(|x| pixel(&shot, x, 244));
+    let row = [689, 690, 691].map(|x| pixel(&shot, x, 244));
     if row != [BASE, DIVIDER, BASE] {
         let frame = keep_frame(&shot, &mut home, "preview_rule");
         panic!(
-            "pixels 626 to 628 of pixel row 244 read {}, {}, and {}, where the divider {} \
+            "pixels 689 to 691 of pixel row 244 read {}, {}, and {}, where the divider {} \
              stands between two pixels of the base {}; the frame is {}",
             hex(row[0]),
             hex(row[1]),
@@ -2152,16 +2156,16 @@ fn the_finder_preview_rules_off_its_numbers() {
 /// its extension bold in the tag color of the file type, as FinderShared draws
 /// a row.
 ///
-/// The list is cells 33 to 65 from pixel row 216, a label starts at cell 34,
-/// pixel column 306, and the `M` of a modified file stands in the pixel
-/// columns 575 to 583, 11 px inside the list's right edge, in the danger color.
+/// The list is cells 40 to 72 from pixel row 216, a label starts at cell 41,
+/// pixel column 369, and the `M` of a modified file stands in the pixel
+/// columns 638 to 646, 11 px inside the list's right edge, in the danger color.
 /// Result k takes the pixel rows from 216 + 21k, 20 of them. The first result
 /// from result 1 with a pixel there whose red stands more than 60 over its blue
-/// is `src/main.rs`. Its pixel columns 306 to 341, `src/`, hold muted ink
-/// and no pixel of the text or warm colors. The columns 342 to 377, `main`,
-/// hold a pixel of the near-white text. The columns 378 to 404, `.rs`, hold a
+/// is `src/main.rs`. Its pixel columns 369 to 404, `src/`, hold muted ink
+/// and no pixel of the text or warm colors. The columns 405 to 440, `main`,
+/// hold a pixel of the near-white text. The columns 441 to 467, `.rs`, hold a
 /// pixel of the warm Rust tag color. In the result above it, `Cargo.toml`, the
-/// columns 351 to 395, `.toml`, hold a pixel of the violet config tag color.
+/// columns 414 to 458, `.toml`, hold a pixel of the violet config tag color.
 #[test]
 fn the_finder_row_colors_its_directory_name_and_extension() {
     let mut home = support::scratch_home();
@@ -2171,39 +2175,39 @@ fn the_finder_row_colors_its_directory_name_and_extension() {
     fn gap(a: u8, b: u8) -> i32 {
         i32::from(a) - i32::from(b)
     }
-    let marked = |y| count((575, y, 9, 20), |[r, _, b]| gap(r, b) > 60) > 0;
+    let marked = |y| count((638, y, 9, 20), |[r, _, b]| gap(r, b) > 60) > 0;
     let Some(y) = (1..23).map(|k| 216 + 21 * k).find(|&y| marked(y)) else {
         let frame = keep_frame(&shot, &mut home, "finder_row_colors");
         panic!(
-            "no result from result 1 holds a danger mark in the pixel columns 575 to 583; the \
+            "no result from result 1 holds a danger mark in the pixel columns 638 to 646; the \
              frame is {}",
             frame.display(),
         );
     };
 
     let checks = [
-        ("src/ holds ink", brightest(&shot, (306, y, 36, 20)) > 0x40),
+        ("src/ holds ink", brightest(&shot, (369, y, 36, 20)) > 0x40),
         (
             "src/ holds no text-bright pixel",
-            count((306, y, 36, 20), |[r, _, _]| r > 0xa0) == 0,
+            count((369, y, 36, 20), |[r, _, _]| r > 0xa0) == 0,
         ),
         (
             "src/ holds no warm pixel",
-            count((306, y, 36, 20), |[r, _, b]| gap(r, b) > 40) == 0,
+            count((369, y, 36, 20), |[r, _, b]| gap(r, b) > 40) == 0,
         ),
         (
             "main holds the near-white text",
-            count((342, y, 36, 20), |[r, _, b]| {
+            count((405, y, 36, 20), |[r, _, b]| {
                 r > 0xa0 && gap(r, b).abs() <= 24
             }) > 0,
         ),
         (
             ".rs holds the warm Rust tag color",
-            count((378, y, 27, 20), |[r, _, b]| gap(r, b) > 40) > 0,
+            count((441, y, 27, 20), |[r, _, b]| gap(r, b) > 40) > 0,
         ),
         (
             ".toml holds the violet config tag color",
-            count((351, y - 21, 45, 20), |[r, g, b]| {
+            count((414, y - 21, 45, 20), |[r, g, b]| {
                 gap(b, g) > 30 && gap(r, g) > 20
             }) > 0,
         ),
@@ -2226,12 +2230,12 @@ fn the_finder_row_colors_its_directory_name_and_extension() {
 /// A selected finder result that wraps draws one box over both of its lines,
 /// and its continuation line starts with the Wrap Mark two cells in.
 ///
-/// The plate reaches the cap, so the list is cells 2 to 97 and its labels take
-/// 93 cells from cell 3. The query `z` keeps only the 161-char path, whose lines
-/// of 92 and 69 chars stand 1 px and 19 px under the list's top at pixel row
-/// 216. Its box is those 36 px and 1 px over and under them, so the tab wash
-/// fills the pixels from (19, 216) to (878, 253) and no other pixel of the
-/// pixel rows 212 to 257, and the pixel (860, 254) under the box reads the
+/// The plate reaches the cap, so the list is cells 2 to 119 and its labels take
+/// 115 cells from cell 3. The query `z` keeps only the 161-char path, whose
+/// lines of 110 and 51 chars stand 1 px and 19 px under the list's top at pixel
+/// row 216. Its box is those 36 px and 1 px over and under them, so the tab
+/// wash fills the pixels from (19, 216) to (1076, 253) and no other pixel of
+/// the pixel rows 212 to 257, and the pixel (860, 254) under the box reads the
 /// base. On the continuation line, from pixel row 235, cell 3 holds one color,
 /// and cell 5 holds the mark, brighter than the wash's 0x52 and at most 2 above
 /// the 0x6d of the mark's color. The 18 pixel rows under the box hold the base
@@ -2251,7 +2255,7 @@ fn the_finder_boxes_every_row_of_a_wrapped_selection() {
         &mut home,
         TAB_WASH,
         212..258,
-        (19, 216, 878, 253),
+        (19, 216, 1076, 253),
         "wrapped_selection_box",
     );
 
@@ -2265,7 +2269,7 @@ fn the_finder_boxes_every_row_of_a_wrapped_selection() {
     if !(0x53..=0x6f).contains(&brightest(&shot, (45, 235, 9, 18))) {
         failed.push("the Wrap Mark in cell 5 of the continuation line".to_owned());
     }
-    let under = (18, 254, 864, 18);
+    let under = (18, 254, 1062, 18);
     if distinct_colors(&shot, under) != 1 || pixel(&shot, under.0, under.1) != BASE {
         failed.push("the base alone under the box".to_owned());
     }
@@ -2282,8 +2286,8 @@ fn the_finder_boxes_every_row_of_a_wrapped_selection() {
 /// ermine_night.
 ///
 /// The query `z` keeps only the 161-char path, which ends in `.c`. Its second
-/// line, from pixel row 235, holds 69 chars from cell 7, so `.c` stands in
-/// cells 74 and 75, from pixel column 666. Those 18 by 18 px hold a pixel whose
+/// line, from pixel row 235, holds 51 chars from cell 7, so `.c` stands in
+/// cells 56 and 57, from pixel column 504. Those 18 by 18 px hold a pixel whose
 /// blue stands more than 60 over its red, as the accent's does and the tab wash
 /// under it does not.
 #[test]
@@ -2297,7 +2301,7 @@ fn the_finder_colors_a_c_extension() {
     );
 
     let accent = |[r, _, b]: [u8; 3]| i32::from(b) - i32::from(r) > 60;
-    if pixels_where(&shot, (666, 235, 18, 18), accent) == 0 {
+    if pixels_where(&shot, (504, 235, 18, 18), accent) == 0 {
         let frame = keep_frame(&shot, &mut home, "c_extension");
         panic!(
             "the cells of .c hold no pixel of the accent; the frame is {}",
@@ -2309,33 +2313,37 @@ fn the_finder_colors_a_c_extension() {
 /// A finder result that wraps grows by one 18 px line, and each neighbour keeps
 /// a 20 px row of its own.
 ///
-/// The plate reaches the cap, so the labels take 93 cells from cell 3, pixel
-/// column 27. The query `v` keeps the three long paths, which take 1, 1, and 2
-/// lines. Each line's text is one band of the pixel rows that hold a pixel
-/// above 0x70 in some channel, in the pixel columns 27 to 205, and the pixel
-/// rows 216 to 330 hold four bands. Two results stand 21 px apart and the two
-/// lines of the wrapped one 18 px apart, so the gaps between the tops of the
-/// bands are 21, 21, and 18 px in some order.
+/// The plate reaches the cap, so the labels take 115 cells from cell 3. The
+/// query `v` keeps the three long paths, and the second, the 161-char path,
+/// takes two lines. The selected result's box in the tab wash covers its lines
+/// and 1 px over and under them, as
+/// `the_finder_boxes_every_row_of_a_wrapped_selection` reads it. With each
+/// result selected in turn, the box spans the pixel rows 216 to 235, 237 to
+/// 274, and 276 to 295, so the results stand 21 px apart and the wrapped one
+/// is 18 px taller than its neighbours.
+///
+/// The box reads the rows of the wash rather than the rows of the text, whose
+/// top moves by a pixel with the glyphs a line holds, as a `/` stands taller
+/// than a letter.
 #[test]
 fn a_wrapped_finder_row_grows_by_one_line_and_its_neighbours_keep_one_row() {
     let mut home = support::scratch_home();
-    let shot = settled_frame(
-        home.path(),
-        "deep-paths",
-        "src/main.rs",
-        "<Space>pv<Settle>",
-    );
-
-    let inked = |y: u32| (27..206).any(|x| pixel(&shot, x, y).iter().any(|&c| c > 0x70));
-    let tops: Vec<u32> = (216..331).filter(|&y| inked(y) && !inked(y - 1)).collect();
-    let mut gaps: Vec<u32> = tops.windows(2).map(|pair| pair[1] - pair[0]).collect();
-    gaps.sort_unstable();
-    if gaps != [18, 21, 21] {
-        let frame = keep_frame(&shot, &mut home, "wrapped_neighbours");
-        panic!(
-            "the bands of label text start on the pixel rows {tops:?}, where four bands stand \
-             21, 21, and 18 px apart in some order; the frame is {}",
-            frame.display(),
+    let mut session = spawn_settled(home.path(), "deep-paths", "src/main.rs");
+    let steps = [
+        ("<Space>pv<Settle>", 216, 235, "first_result_box"),
+        ("<Down><Settle>", 237, 274, "wrapped_result_box"),
+        ("<Down><Settle>", 276, 295, "third_result_box"),
+    ];
+    for (keys, top, bottom, what) in steps {
+        play(&mut session, keys);
+        let shot = session.snapshot().expect("a snapshot");
+        expect_color_box(
+            &shot,
+            &mut home,
+            TAB_WASH,
+            212..300,
+            (19, top, 1076, bottom),
+            what,
         );
     }
 }
@@ -3411,9 +3419,9 @@ fn the_diff_view_keeps_its_box_docked_on_the_raised_surface() {
 /// no accent edge runs inside it.
 ///
 /// The selected row is the list's first, from pixel row 216, the top of cell
-/// row 12, and its first cell is cell 33, from pixel column 297. The box stands
+/// row 12, and its first cell is cell 40, from pixel column 360. The box stands
 /// 1 px inside that cell, so the row's first pixel column keeps the list's
-/// Island, on the base surface. The box spans pixel columns 298 to 590, 3 px
+/// Island, on the base surface. The box spans pixel columns 361 to 653, 3 px
 /// inside the row's last cell, and pixel rows 216 to 235, and its 4 px arcs
 /// leave the base at the four corner pixels. A blank pixel in the row's middle
 /// reads the tab wash, and no pixel of the row's first cell takes the accent.
@@ -3430,23 +3438,23 @@ fn the_finder_marks_its_selected_row_with_a_rounded_wash() {
     expect_region(
         &shot,
         &mut home,
-        (500, 225, 1, 1),
+        (563, 225, 1, 1),
         TAB_WASH,
         "selected_row_middle",
     );
     expect_region(
         &shot,
         &mut home,
-        (297, 216, 1, 20),
+        (360, 216, 1, 20),
         BASE,
         "selected_row_first_column",
     );
-    for (x, y) in [(298, 216), (590, 216), (298, 235), (590, 235)] {
+    for (x, y) in [(361, 216), (653, 216), (361, 235), (653, 235)] {
         let what = format!("selected_row_corner_{x}_{y}");
         expect_region(&shot, &mut home, (x, y, 1, 1), BASE, &what);
     }
 
-    let accent = (297..306)
+    let accent = (360..369)
         .flat_map(|x| (216..236).map(move |y| (x, y)))
         .filter(|&(x, y)| pixel(&shot, x, y) == ACCENT)
         .count();
@@ -3462,7 +3470,7 @@ fn the_finder_marks_its_selected_row_with_a_rounded_wash() {
 /// The finder's selected row is a box 20 px high, its 18 px line with 1 px
 /// over and under it, as FinderShared sets a row's height.
 ///
-/// The box fills the pixels from (298, 216) to (590, 235), so no other pixel of
+/// The box fills the pixels from (361, 216) to (653, 235), so no other pixel of
 /// the pixel rows 212 to 239 takes the tab wash, and the pixel row 236 under
 /// the box reads the base.
 #[test]
@@ -3480,13 +3488,13 @@ fn the_finder_selected_row_is_twenty_pixels_high() {
         &mut home,
         TAB_WASH,
         212..240,
-        (298, 216, 590, 235),
+        (361, 216, 653, 235),
         "selected_row_box",
     );
     expect_region(
         &shot,
         &mut home,
-        (500, 236, 1, 1),
+        (563, 236, 1, 1),
         BASE,
         "selected_row_under",
     );
@@ -3495,7 +3503,7 @@ fn the_finder_selected_row_is_twenty_pixels_high() {
 /// The finder's rows stand 21 px apart, each 20 px row with 1 px under it.
 ///
 /// A result's text is one band of the pixel rows that hold a pixel above 0x70
-/// in some channel, in the pixel columns 306 to 439 of the labels. The tops of
+/// in some channel, in the pixel columns 369 to 502 of the labels. The tops of
 /// the first five bands from pixel row 216 stand 21 px apart.
 #[test]
 fn the_finder_rows_stand_twenty_one_pixels_apart() {
@@ -3507,7 +3515,7 @@ fn the_finder_rows_stand_twenty_one_pixels_apart() {
         "<Space>p<Settle>",
     );
 
-    let inked = |y: u32| (306..440).any(|x| pixel(&shot, x, y).iter().any(|&c| c > 0x70));
+    let inked = |y: u32| (369..503).any(|x| pixel(&shot, x, y).iter().any(|&c| c > 0x70));
     let tops: Vec<u32> = (216..331)
         .filter(|&y| inked(y) && !inked(y - 1))
         .take(5)
@@ -3527,14 +3535,14 @@ fn the_finder_rows_stand_twenty_one_pixels_apart() {
 /// is the one box on the tab wash.
 ///
 /// The header row is cell row 10, and its pills `all`, `modified`, and
-/// `workspaces` end 4 sixteenths inside the row's end at cell 126. Each pill is
+/// `workspaces` end 4 sixteenths inside the row's end at cell 120. Each pill is
 /// its text with 11 sixteenths at each side, 4 sixteenths from the next. A box
 /// draws 1 px right and 7 px down of its sixteenths, each edge on the nearest
-/// pixel. With `all` active, its box runs from 1654 to 1717 sixteenths across
-/// the screen, so the tab wash fills the pixels from (931, 187) to (966, 204)
+/// pixel. With `all` active, its box runs from 1558 to 1621 sixteenths across
+/// the screen, so the tab wash fills the pixels from (877, 187) to (912, 204)
 /// and no other pixel of the header's 32 px band, pixel rows 180 to 211. After
-/// Shift-Tab the box moves to `modified`, from 1721 to 1851 sixteenths, which
-/// fills the pixels from (969, 187) to (1041, 204).
+/// Shift-Tab the box moves to `modified`, from 1625 to 1755 sixteenths, which
+/// fills the pixels from (915, 187) to (987, 204).
 #[test]
 fn the_finder_header_boxes_its_active_scope_pill() {
     let mut home = support::scratch_home();
@@ -3547,7 +3555,7 @@ fn the_finder_header_boxes_its_active_scope_pill() {
         &mut home,
         TAB_WASH,
         180..212,
-        (931, 187, 966, 204),
+        (877, 187, 912, 204),
         "header_pill_all",
     );
 
@@ -3558,7 +3566,7 @@ fn the_finder_header_boxes_its_active_scope_pill() {
         &mut home,
         TAB_WASH,
         180..212,
-        (969, 187, 1041, 204),
+        (915, 187, 987, 204),
         "header_pill_modified",
     );
 }
@@ -3567,15 +3575,15 @@ fn the_finder_header_boxes_its_active_scope_pill() {
 /// warning color, and its header boxes the `buffers` pill.
 ///
 /// The one row is the selected row from pixel row 216, and the list's right
-/// edge is pixel column 594. The dot is 6 px across and ends 11 px inside that
+/// edge is pixel column 657. The dot is 6 px across and ends 11 px inside that
 /// edge, 8 px inside the box of the row, and stands 6 px under the box's top,
-/// so it covers the pixels 577 to 582 by 222 to 227. Its pixels (579, 224) and
-/// (580, 225) read the warning color, and the pixels (576, 224) and (583, 224)
-/// at its sides read the tab wash. Its round corner leaves the pixel (577, 222)
+/// so it covers the pixels 640 to 645 by 222 to 227. Its pixels (642, 224) and
+/// (643, 225) read the warning color, and the pixels (639, 224) and (646, 224)
+/// at its sides read the tab wash. Its round corner leaves the pixel (640, 222)
 /// clear of the warning color. The `buffers` pill stands 4 sixteenths before
-/// `modified`, which ends 4 sixteenths inside the header's end at cell 126. So
-/// its box runs from 1761 to 1878 sixteenths across cell row 10 and fills the
-/// pixels from (992, 187) to (1056, 204).
+/// `modified`, which ends 4 sixteenths inside the header's end at cell 120. So
+/// its box runs from 1665 to 1782 sixteenths across cell row 10 and fills the
+/// pixels from (938, 187) to (1002, 204).
 #[test]
 fn the_buffer_finder_marks_an_unsaved_buffer_with_a_dot() {
     let mut home = support::scratch_home();
@@ -3586,14 +3594,14 @@ fn the_buffer_finder_marks_an_unsaved_buffer_with_a_dot() {
         "ix<Esc><Space>bb<Settle>",
     );
 
-    let dot = [(579, 224), (580, 225), (576, 224), (583, 224)].map(|(x, y)| pixel(&shot, x, y));
-    let corner = pixel(&shot, 577, 222);
+    let dot = [(642, 224), (643, 225), (639, 224), (646, 224)].map(|(x, y)| pixel(&shot, x, y));
+    let corner = pixel(&shot, 640, 222);
     if dot != [WARNING, WARNING, TAB_WASH, TAB_WASH] || corner == WARNING {
         let frame = keep_frame(&shot, &mut home, "buffer_dot");
         panic!(
-            "the pixels (579, 224), (580, 225), (576, 224), and (583, 224) read {}, where the \
+            "the pixels (642, 224), (643, 225), (639, 224), and (646, 224) read {}, where the \
              dot is two pixels of the warning {} between two of the tab wash {}; the corner \
-             pixel (577, 222) reads {}, which the round dot leaves clear of the warning; the \
+             pixel (640, 222) reads {}, which the round dot leaves clear of the warning; the \
              frame is {}",
             dot.map(hex).join(", "),
             hex(WARNING),
@@ -3608,7 +3616,7 @@ fn the_buffer_finder_marks_an_unsaved_buffer_with_a_dot() {
         &mut home,
         TAB_WASH,
         180..212,
-        (992, 187, 1056, 204),
+        (938, 187, 1002, 204),
         "buffers_pill",
     );
 }
@@ -3658,8 +3666,8 @@ fn the_window_behind_the_finder_takes_the_overlay() {
 /// The finder ends in its key line on the plate's ground, in the inner rect's
 /// last row, with no raised fill and no rule above it.
 ///
-/// The box's modal rect is the 95 by 32 cells from cell (32, 9), so the inner
-/// rect runs from cell 33 to cell 125 and its last row is cell row 39. The
+/// The box's modal rect is the 82 by 32 cells from cell (39, 9), so the inner
+/// rect runs from cell 40 to cell 119 and its last row is cell row 39. The
 /// line's keys end well short of pixel column 1000. No cell of the frame is
 /// raised, and the docked key hints box waits for its toggle under the finder.
 #[test]
@@ -3680,7 +3688,7 @@ fn the_finder_ends_in_a_key_line_on_the_ground() {
             frame.display(),
         );
     }
-    expect_key_line(&shot, &mut home, 39, (33, 126), 1000, "finder_key_line");
+    expect_key_line(&shot, &mut home, 39, (40, 120), 1000, "finder_key_line");
 }
 
 /// The session picker's ground plate runs from the top of its header row to

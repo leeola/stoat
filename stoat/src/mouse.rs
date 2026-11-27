@@ -1073,7 +1073,7 @@ pub(crate) fn open_finder_layout(
         stoat.home.as_deref(),
         zoom,
         stoat.modal_split.get(&ModalKind::FileFinder).copied(),
-        stoat.preview_min_columns(),
+        stoat.preview_scale(),
     )
 }
 
@@ -1093,7 +1093,7 @@ pub(crate) fn open_palette_arg_layout(
         palette,
         stoat.home.as_deref(),
         zoom,
-        stoat.preview_min_columns(),
+        stoat.preview_scale(),
     )
 }
 

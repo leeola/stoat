@@ -4315,18 +4315,20 @@ impl Stoat {
         self.stoatty && self.stoatty_protocol >= POOL_INSET_PROTOCOL
     }
 
-    /// The fewest columns the finder's preview takes, which hold 100 columns
-    /// of its text at the size the terminal draws the preview.
+    /// The pixel widths of a Preview Scale cell and of a grid cell while the
+    /// terminal draws the finder's preview at Preview Scale, or `None` while it
+    /// draws the preview at the grid size.
     ///
     /// A terminal that draws scaled pools draws the preview at Preview Scale,
-    /// so the minimum fits that many scaled cells into grid columns.
-    pub(crate) fn preview_min_columns(&self) -> u16 {
-        let scaled = self.scaled_cell().map(|[width, _]| {
+    /// so a fitted preview fits its scaled cells of text into grid columns by
+    /// this pair, as [`preview_columns`](crate::render::picker::preview_columns)
+    /// does.
+    pub(crate) fn preview_scale(&self) -> Option<(u16, u16)> {
+        self.scaled_cell().map(|[width, _]| {
             let scaled_width =
                 command::scaled_cell_side(width, crate::render::picker::PREVIEW_SCALE);
             (scaled_width, width)
-        });
-        crate::render::picker::preview_min_columns(scaled)
+        })
     }
 
     /// The area the last paint laid the workspace split panes out in.
