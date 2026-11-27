@@ -11,7 +11,7 @@
 //! Only one theme is ever active, so the pool holds VSCode themes as their
 //! unconverted source and converts one when something resolves it.
 
-use crate::theme::{Theme, ThemeError};
+use crate::{Theme, ThemeError};
 use std::{
     collections::HashSet,
     sync::{Arc, OnceLock},
@@ -153,12 +153,12 @@ impl VscodeSource {
     fn block(&self) -> Result<&Spanned<ThemeBlock>, ThemeError> {
         let converted = self.converted.get_or_init(|| {
             let theme = vscode_theme::parse(&self.source).map_err(|error| error.to_string())?;
-            Ok(crate::theme_vscode::theme_block(&self.name, &theme))
+            Ok(crate::vscode::theme_block(&self.name, &theme))
         });
 
         match converted {
             Ok(block) => Ok(block),
-            Err(message) => crate::theme::ImportFailedSnafu {
+            Err(message) => crate::ImportFailedSnafu {
                 name: self.name.clone(),
                 message: message.clone(),
             }

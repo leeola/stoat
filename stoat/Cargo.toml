@@ -25,6 +25,7 @@ stoat_language = { path = "../language" }
 stoat_log = { path = "../log" }
 stoat_scheduler = { path = "../scheduler" }
 stoat_text = { path = "../text" }
+stoat_theme = { path = "../theme" }
 regex-cursor.workspace = true
 stoatty_protocol = { path = "../tty_protocol" }
 vscode_theme = { path = "../vscode_theme" }
@@ -70,6 +71,7 @@ portable-pty.workspace = true
 stoat_core = { path = "../core", features = ["test-support"] }
 stoat_host = { path = "../host", features = ["test-support"] }
 stoat_scheduler = { path = "../scheduler", features = ["test-support"] }
+stoat_theme = { path = "../theme", features = ["test-support"] }
 tracing-subscriber.workspace = true
 
 # Live integration tests that drive a real headless Stoat against a

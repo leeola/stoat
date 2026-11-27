@@ -30,8 +30,7 @@ stoat_host_terminal = { path = "../host_terminal" }
 stoat_language = { path = "../language" }
 stoat_scheduler = { path = "../scheduler" }
 stoat_text = { path = "../text" }
-stoatty_protocol = { path = "../tty_protocol" }
-vscode_theme = { path = "../vscode_theme" }
+stoat_theme = { path = "../theme" }
 ratatui.workspace = true
 crossterm.workspace = true
 serde = { workspace = true, features = ["derive", "rc"] }
@@ -39,7 +38,6 @@ tokio = { workspace = true, features = ["fs", "io-util", "net", "time"] }
 futures = { workspace = true, features = ["alloc"] }
 tracing.workspace = true
 compact_str.workspace = true
-snafu = { workspace = true }
 smallvec.workspace = true
 
 [dev-dependencies]

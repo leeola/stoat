@@ -4043,6 +4043,7 @@ dependencies = [
  "stoat_log",
  "stoat_scheduler",
  "stoat_text",
+ "stoat_theme",
  "stoat_widgets",
  "stoatty_protocol",
  "tempfile",
@@ -4126,7 +4127,6 @@ dependencies = [
  "ron",
  "serde",
  "smallvec",
- "snafu",
  "stoat_action",
  "stoat_config",
  "stoat_host",
@@ -4137,11 +4137,10 @@ dependencies = [
  "stoat_language",
  "stoat_scheduler",
  "stoat_text",
- "stoatty_protocol",
+ "stoat_theme",
  "tempfile",
  "tokio",
  "tracing",
- "vscode_theme",
 ]
 
 [[package]]
@@ -4259,6 +4258,17 @@ dependencies = [
  "unicode-general-category",
  "unicode-segmentation",
  "unicode-width",
+]
+
+[[package]]
+name = "stoat_theme"
+version = "0.1.0"
+dependencies = [
+ "ratatui",
+ "snafu",
+ "stoat_config",
+ "stoatty_protocol",
+ "vscode_theme",
 ]
 
 [[package]]

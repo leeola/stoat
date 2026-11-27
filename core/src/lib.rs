@@ -1,11 +1,13 @@
 //! The lower layer of the editor, which the app layer in `stoat` builds on.
 //!
 //! It holds the hosts over the file system, git, language servers, and
-//! terminals, the text buffers with their diff and display maps, the themes,
-//! and the keymap. Nothing here reaches up into the app layer, and it is its
-//! own crate so that an edit to the app layer leaves it compiled. `stoat`
-//! names each of its modules through an alias of the same name, so `stoat`
-//! code reaches a module here at `crate::<module>`.
+//! terminals, the text buffers with their diff and display maps, and the
+//! keymap. Nothing here reaches up into the app layer, and it is its own
+//! crate so that an edit to the app layer leaves it compiled. `stoat` names
+//! each of its modules through an alias of the same name, so `stoat` code
+//! reaches a module here at `crate::<module>`.
+
+use stoat_theme as theme;
 
 pub mod buffer;
 pub mod diff_map;
@@ -15,9 +17,6 @@ pub mod keymap;
 pub mod multi_buffer;
 pub mod selection;
 pub mod syntax_parse;
-pub mod theme;
-pub mod theme_pool;
-mod theme_vscode;
 pub mod wake;
 
 /// A redraw handle for tests, where nothing listens for the wake.

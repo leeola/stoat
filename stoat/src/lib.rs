@@ -102,9 +102,11 @@ pub mod workspace;
 pub mod workspace_picker;
 
 pub use app::{Stoat, UpdateEffect};
-pub use stoat_core::{buffer, diff_map, display_map, host, keymap, multi_buffer, theme};
+pub(crate) use stoat_core::syntax_parse;
+pub use stoat_core::{buffer, diff_map, display_map, host, keymap, multi_buffer};
 use stoat_core::{selection, wake};
-pub(crate) use stoat_core::{syntax_parse, theme_pool};
+pub use stoat_theme as theme;
+pub(crate) use stoat_theme::pool as theme_pool;
 #[cfg(test)]
 mod display_map_e2e;
 #[cfg(test)]

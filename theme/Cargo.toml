@@ -1,0 +1,21 @@
+[package]
+name = "stoat_theme"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+# Compile the theme pool's test accessors. Off by default so a release build
+# carries none of them, and enabled from a consumer's [dev-dependencies] so its
+# tests do.
+[features]
+test-support = []
+
+[dependencies]
+stoat_config = { path = "../config" }
+stoatty_protocol = { path = "../tty_protocol" }
+vscode_theme = { path = "../vscode_theme" }
+ratatui.workspace = true
+snafu = { workspace = true }

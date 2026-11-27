@@ -278,7 +278,7 @@ fn spanned<T>(node: T) -> Spanned<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::theme::Theme;
+    use crate::Theme;
     use ratatui::style::{Color, Modifier};
     use vscode_theme::parse;
 
@@ -341,7 +341,7 @@ mod tests {
         // recolored let rather than from the dark theme's own green.
         let theme = resolve("recolor", &vt);
         assert_eq!(
-            theme.get(crate::theme::scope::UI_WALKTHROUGH_MARKERS[1]).fg,
+            theme.get(crate::scope::UI_WALKTHROUGH_MARKERS[1]).fg,
             Some(Color::Rgb(0x00, 0xaa, 0x00)),
         );
     }

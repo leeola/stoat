@@ -4,12 +4,19 @@
 //! scales of the chrome's [`PanelRole`]s and [`TypeRole`]s. Style lookups
 //! use progressive-broadening fallback so tree-sitter captures like
 //! `syntax.keyword.control` inherit from `syntax.keyword` when unspecified.
+//!
+//! [`pool::ThemePool`] holds the themes the editor can switch between, and
+//! converts a VS Code color theme into a theme block when something first
+//! resolves it.
 
 use ratatui::style::{Color, Modifier, Style};
 use snafu::{OptionExt, Snafu};
 use std::{collections::HashMap, ops::RangeInclusive};
 use stoat_config::{Config, Expr, Setting, Spanned, Statement, ThemeBlock, Value};
 use stoatty_protocol::command::PanelShadow;
+
+pub mod pool;
+mod vscode;
 
 /// The text_run scale of full-size text, which fills one cell.
 ///
