@@ -1997,7 +1997,7 @@ fn a_wheel_over_the_conflict_screen_steps_the_file_selection() {
         (conflict_state(&h), hidden_scroll_row(&h)),
         ((2, 1, 0), before),
         "the notch steps the file list, resolves nothing, and never \
-             reaches the editor beneath"
+         reaches the editor beneath"
     );
 }
 
@@ -2171,7 +2171,7 @@ fn a_press_on_either_row_of_a_tab_bar_band_switches_tabs() {
         ],
         [0, 0, 1],
         "the active tab after a press on row 0 and row 1 of a band, then on row 1 under a \
-             one-row bar",
+         one-row bar",
     );
 }
 

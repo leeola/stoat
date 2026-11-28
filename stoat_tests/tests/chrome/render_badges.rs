@@ -97,7 +97,7 @@ fn a_chip_on_a_chrome_band_takes_the_band_nudge() {
             ((true, [0, 0]), (true, [0, 0]), [0, 0]),
         ],
         "whether a panel leads each chip's text and the nudge on it, top then bottom, and the \
-             nudge the lane ends on",
+         nudge the lane ends on",
     );
 }
 

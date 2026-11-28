@@ -40,7 +40,7 @@ fn the_cell_banner_names_the_commit_and_the_return() {
     let want = [
         format!(
             " detached at b2c3d4e checked out from blame \u{b7} 2 changes stashed from \
-                 main{:22}Space h c return to main ",
+             main{:22}Space h c return to main ",
             ""
         ),
         format!(

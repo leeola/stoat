@@ -60,7 +60,7 @@ fn a_held_side_button_repeats_after_the_delay_and_then_each_interval() {
         rows,
         [1, 1, 2, 3, 3],
         "row after the press, before the delay, at the delay, one interval on, \
-             and one interval after the release"
+         and one interval after the release"
     );
 }
 

@@ -1422,7 +1422,7 @@ fn copying_a_workspace_replays_on_the_pool() {
             ),
         ],
         "the copy waits under its badge and its source's name until one pool hop \
-             replays its buffers",
+         replays its buffers",
     );
 }
 

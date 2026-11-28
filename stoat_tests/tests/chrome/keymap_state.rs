@@ -355,7 +355,7 @@ fn jump_back_and_jump_forward_read_the_focused_jumplist() {
             [flag(false), flag(true)],
         ],
         "an empty list, a saved jump to go back to, then the oldest entry \
-             with the jump just left ahead",
+         with the jump just left ahead",
     );
 }
 

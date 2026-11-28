@@ -1152,7 +1152,7 @@ fn wrap_none_still_breaks_a_line_past_the_bound() {
     assert_eq!(
         display_rows, 4,
         "a line three times the bound spans four display rows, since each \
-             continuation row holds four cells less than the bound",
+         continuation row holds four cells less than the bound",
     );
 }
 
@@ -1242,7 +1242,7 @@ fn a_wrapped_continuation_row_paints_its_indent() {
         row_text(1).trim_end(),
         format!("{}\u{21b3} {}", " ".repeat(6), ["word"; 6].join(" ")),
         "the Wrap Mark and a space close the indent, and the text starts 4 cells \
-             past the line's 4-space indent",
+         past the line's 4-space indent",
     );
     assert_eq!(
         Some(buf[(6, 1)].fg),
@@ -2684,7 +2684,7 @@ fn severity_colors_resolve_under_the_shipped_theme() {
     assert!(
         stoat::render::editor::severity_colors(&h.stoat.theme).is_some(),
         "the shipped default theme must resolve every diagnostic severity \
-             to RGB so the sub-cell gutter engages under stoatty",
+         to RGB so the sub-cell gutter engages under stoatty",
     );
 }
 

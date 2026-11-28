@@ -1310,7 +1310,7 @@ fn a_status_row_is_a_band_from_the_nudge_protocol_on() {
             ),
         ],
         "the pane rows, the status rows, the lane's first and last nudge, and the island \
-             bottoms",
+         bottoms",
     );
 }
 
@@ -1404,7 +1404,7 @@ fn the_tab_bar_is_a_band_from_the_nudge_protocol_on() {
             (vec![0, 25], vec![], vec![], vec![Edge::Inset(0); 3]),
         ],
         "the pane tops, lane 0's nudges around its text runs, the pill's edges, and the \
-             island tops",
+         island tops",
     );
 }
 
@@ -1735,7 +1735,7 @@ fn a_changes_view_s_status_row_names_the_merge() {
 fn the_changes_view_bar_names_the_scope_under_the_cursor() {
     let base =
         "mod outer {\n    impl Theme {\n        fn panel() -> u32 {\n            1\n        \
-                    }\n    }\n}\n";
+                }\n    }\n}\n";
     let open = |width: u16| {
         let mut h = stoat::test_harness::TestHarness::with_size(width, 12);
         h.stage_review_scenario("/repo", &[("a.rs", base, &base.replacen('1', "2", 1))]);
@@ -1878,7 +1878,7 @@ fn the_band_island_spans_the_pane_rows_and_no_status_row_reaches_it() {
             islands.first().map(rows),
         ),
         "each status row ends with its pane, short of the gap column, the islands beside the \
-             band reach into that column, and the band's island spans the left island's rows",
+         band reach into that column, and the band's island spans the left island's rows",
     );
 }
 
@@ -2863,7 +2863,7 @@ fn the_live_tab_bar_boxes_the_focused_layout_s_chip() {
         (diff, changes),
         ((vec![(103, 7, inset)], 0), (vec![(110, 9, inset)], 0)),
         "the files chip's panel over the diff and the changes chip's over the changes view, \
-             and no bar in the chip's fill",
+         and no bar in the chip's fill",
     );
 }
 
@@ -2913,7 +2913,7 @@ fn the_layout_chips_end_left_of_the_tray() {
         (roomy, crowded),
         (vec![(85, 7), (102, 17)], vec![(102, 17)]),
         "the files chip packs from the tray's start, and drops once the tabs reach 95 \
-             columns",
+         columns",
     );
 }
 
@@ -2966,7 +2966,7 @@ fn the_tab_bar_leads_with_the_workspace_and_tags_each_file() {
             Color::Rgb(md[0], md[1], md[2]),
         ),
         "the bar text, the workspace name in its color, then the active gzip tab's suffix \
-             in the markdown color",
+         in the markdown color",
     );
     assert_eq!(
         h.stoat.tab_bar_spans,
@@ -3163,7 +3163,7 @@ fn the_tab_bar_marks_a_conflicted_file_and_ends_in_the_conflict_chip() {
             Some((56 * 16 + 16, text.to_string(), [0xf2, 0x77, 0x7f])),
         ),
         "the active tab's chip in the accent wash, then the conflict chip one cell before \
-             the bar's edge, its text a whole cell in",
+         the bar's edge, its text a whole cell in",
     );
 }
 
